@@ -43,6 +43,7 @@ import {
   inboxPageChars,
   classifyTurnError,
   providerErrorPost,
+  normalizeProviderError,
   jobPageNote,
   type JobStdoutPage,
   CAP_STEER,
@@ -1251,15 +1252,18 @@ export default function (pi: ExtensionAPI) {
    * the runner itself could not answer; the verdict then proceeds unchecked.
    */
   /**
-   * The provider error this session last said on the board, so a seat that
-   * keeps failing on the same words says them once; and the failed message
-   * last put on the trace, so each failed turn is recorded once. Each one
-   * is recorded: a limit that persists across a retry is read off the
-   * trace (scripts/provider-limit.ts), and a retry that failed on the same
-   * words used to leave no row.
+   * The failed message last put on the trace, so each failed turn is
+   * recorded once, whole: a limit that persists across a retry is read off
+   * the trace (scripts/provider-limit.ts), and a retry refused on the same
+   * words used to leave no row. The board is told less: once per spell of
+   * failed turns (from the first to the next turn that ends well), and not
+   * again for an error it was last told, its numbers and times masked
+   * (normalizeProviderError). A countdown ("Try again in ~6904 min", then
+   * "~6874 min" at the next try) put one post on the board per seat per try.
    */
-  let providerErrorTold = "";
   let providerErrorEntry = "";
+  let providerErrorTold = "";
+  let providerErrorSpell = false;
   /** Set when the harness itself stops this agent, so the abort that follows is not blamed on the provider. */
   let stoppedByHarness: string | null = null;
 
@@ -1346,7 +1350,12 @@ export default function (pi: ExtensionAPI) {
       const message = entry?.message as Record<string, unknown> | undefined;
       if (message && message.role === "assistant") { last = message; lastEntry = entry; break; }
     }
-    if (!last || last.stopReason !== "error") return;
+    if (!last) return;
+    if (last.stopReason !== "error") {
+      // A turn that ended well ends the seat's spell of failed turns.
+      providerErrorSpell = false;
+      return;
+    }
     // Whole: a provider's error text is the evidence of why a turn died.
     const reason = String(last.errorMessage ?? "") || "the provider returned an error with no message";
     const model = [last.provider, last.model].filter(Boolean).join("/") || "its model";
@@ -1362,8 +1371,11 @@ export default function (pi: ExtensionAPI) {
     if (providerErrorEntry === entryKey) return;
     providerErrorEntry = entryKey;
     await logEvent(ctx.cwd, agentId, "agent_error", { model }, { ok: false, reason }).catch(() => undefined);
-    if (providerErrorTold === reason) return;
-    providerErrorTold = reason;
+    const said = normalizeProviderError(reason);
+    const tell = !providerErrorSpell && providerErrorTold !== said;
+    providerErrorSpell = true;
+    if (!tell) return;
+    providerErrorTold = said;
     await systemPost(ctx.cwd, { tag: "veto", body: providerErrorPost(agentId, model, reason) }).catch(() => undefined);
   }
 

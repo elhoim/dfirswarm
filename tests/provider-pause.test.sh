@@ -6,7 +6,11 @@
 # and nobody is nudged; at the named end the harness lifts it and wakes every
 # seat with words that say so. swarm.sh pause holds a run and unpause lifts
 # it, both on the operator's record; unpause refuses a cap's pause still over
-# its cap. No model, no VM; Herdr is a stand-in that records what it is told.
+# its cap, and a run that is not going. A pause a resume folded into the
+# history wakes nobody. Under cap-pause a refused seat is retried, and every
+# seat refused again with no time named pauses the run; an extension leaves
+# that pause. No model, no VM; Herdr is a stand-in that records what it is
+# told.
 set -euo pipefail
 unset SWARM_VM_IMAGE SWARM_IMAGES_LOCK DFIRSWARM_HOME
 export SWARM_ISOLATION=host
@@ -132,3 +136,57 @@ set -e
 bash "$ROOT/scripts/swarm.sh" help | grep -q 'pause|unpause <id> holds it and lifts a pause' || fail "help does not list pause and unpause"
 bash "$ROOT/scripts/swarm.sh" help unpause | grep -q 'Lift a pause whose cause is gone' || fail "help unpause has no page"
 pass "unpause refuses a cap's pause still over its cap and names extend; help lists both"
+
+echo "# a resume's fold of a pause wakes nobody"
+: > "$PROMPT_LOG"
+wakes_before="$(grep -c '"tool":"resume_wake"' "$SB/traces/events.jsonl" || true)"
+budget_set "$SB" ".pauses += [{at: \"$(iso_ago 3600)\", reason: \"provider_limit\", detail: \"d\", by: \"harness\", resumed_at: \"$(iso_ago 0)\", resumed_by: \"operator (resume)\"}]"
+watch_once
+if grep -q 'lifted the pause' "$PROMPT_LOG"; then fail "a resume's fold woke the seats with words about a lift: $(cat "$PROMPT_LOG")"; fi
+[[ "$(grep -c '"tool":"resume_wake"' "$SB/traces/events.jsonl" || true)" -eq "$wakes_before" ]] || fail "a resume's fold is on the trace as a wake"
+pass "a pause swarm.sh resume folded into the history wakes nobody: the resume starts the seats itself"
+
+echo "# a cap-pause run whose every seat is refused with no time named"
+out="$(kick --cap-usd 5 --wall-clock 600 --label c2)" || fail "a cap-pause kickoff was refused: $out"
+S2="$(sandbox_of c2)"
+I2="$(id_of c2)"
+running "$I2"
+ids2="$(jq -r '.agents[].id' "$S2/team.json" | tr '\n' ' ')"
+for a in $ids2; do
+  mkdir -p "$S2/.pi-sessions/$a"
+  : > "$S2/.pi-sessions/$a/s.jsonl"
+  touch -t "$old" "$S2/.pi-sessions/$a/s.jsonl"
+  printf '{"ts":"%s","agent":"%s","tool":"agent_error","args":{"model":"openai-codex/gpt-6-sol"},"result":{"ok":false,"reason":"Codex error: The usage limit has been reached"}}\n' "$(iso_ago 900)" "$a" >> "$S2/traces/events.jsonl"
+done
+: > "$PROMPT_LOG"
+watch_c2() { HERDR_BIN="$TMP/bin/herdr" bash "$ROOT/scripts/idle-nudge.sh" --sandbox "$S2" --once --idle-sec 60 >>"$TMP/watch.log" 2>&1 || true; }
+watch_c2
+for a in $ids2; do
+  grep -q "^$a	Your last turn ended in a provider error. The harness tries you again up to 3 times" "$PROMPT_LOG" || fail "$a was not retried under cap-pause: $(cat "$PROMPT_LOG")"
+done
+jq -e 'has("paused") | not' "$S2/budget.json" >/dev/null || fail "refused once, with no time named, the run was paused"
+sleep 1
+for a in $ids2; do
+  printf '{"ts":"%s","agent":"%s","tool":"agent_error","args":{"model":"openai-codex/gpt-6-sol"},"result":{"ok":false,"reason":"Codex error: The usage limit has been reached"}}\n' "$(iso_ago 0)" "$a" >> "$S2/traces/events.jsonl"
+done
+watch_c2
+jq -e '.paused.reason == "provider_limit" and (.paused | has("until") | not)' "$S2/budget.json" >/dev/null \
+  || fail "every seat refused again after a retry did not pause the cap-pause run: $(jq -c '.paused' "$S2/budget.json"); $(tail -5 "$TMP/watch.log")"
+out="$(bash "$ROOT/scripts/swarm.sh" extend "$I2" --minutes 5 2>&1)" || fail "an extension under the provider's pause was refused: $out"
+grep -q "the run stays paused: its pause is not a cap's (swarm.sh unpause lifts it)." <<<"$out" || fail "extend does not say the pause stays: $out"
+jq -e '.paused.reason == "provider_limit" and .wall_clock_minutes == 605' "$S2/budget.json" >/dev/null || fail "the extension did not add its minutes under the pause"
+pass "under cap-pause a refused seat is retried, and every seat refused again with no time named pauses the run; an extension leaves that pause"
+
+echo "# pause and unpause on a run that is not going"
+out="$(kick --cap-usd 5 --label c3)" || fail "a kickoff was refused: $out"
+set +e
+out="$(bash "$ROOT/scripts/swarm.sh" pause "$(id_of c3)" 2>&1)"; rc=$?
+set -e
+[[ $rc -eq 2 ]] && grep -q 'a pause holds a run that is going' <<<"$out" || fail "a pause of a prepared run was not refused (rc $rc): $out"
+out="$(bash "$ROOT/scripts/swarm.sh" stop "$I2" --no-custody 2>&1)" || fail "stop failed: $out"
+set +e
+out="$(bash "$ROOT/scripts/swarm.sh" unpause "$I2" 2>&1)"; rc=$?
+set -e
+[[ $rc -eq 2 ]] && grep -q "is stopped; only a going run is paused. A run that ended is continued with swarm.sh resume" <<<"$out" || fail "an unpause of a stopped run was not refused (rc $rc): $out"
+jq -e '.paused.reason == "provider_limit"' "$S2/budget.json" >/dev/null || fail "a refused unpause of a stopped run changed its pause"
+pass "pause refuses a run that is not going, and unpause a stopped one, pointing to resume"

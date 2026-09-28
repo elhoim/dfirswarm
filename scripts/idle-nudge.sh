@@ -42,10 +42,10 @@
 # A model provider's usage limit refuses every seat at once, and an
 # until-solved run used to prompt each seat again, half an hour apart, for
 # days, with every VM up and the operator never told. When every live seat's
-# last turn ended in a provider error and the limit is plainly not a passing
-# one (a stated wait of half an hour or more, or every seat refused again
-# after a prompt), the run pauses for the provider's limit, under any stop
-# policy (scripts/provider-limit.ts); the harness tries again at the end the
+# last turn ended in a provider error and each seat's limit is plainly not a
+# passing one (a stated wait of half an hour or more, or refused again after
+# a retry), the run pauses for the provider's limit, under any stop policy
+# (scripts/provider-limit.ts); the harness tries again at the end the
 # provider named, or every half hour, and the operator is told once.
 #
 # A seat whose compaction is running takes no prompt at all (Pi refuses it),
@@ -133,6 +133,19 @@ is_local_model() { # <agent id>
 has_worked() { # <agent id>
   grep -q "\"agent\":\"$1\",\"tool\":\"\(bash\|read\|post\|name\|inbox\|wait\|thinking\)\"" \
     "$SANDBOX/traces/events.jsonl" 2>/dev/null
+}
+
+# Rows a seat's harness writes under the seat's id without its model having
+# answered (scripts/provider-limit.ts SEAT_HARNESS_ROWS; a test holds the two
+# lists the same). A seat's last turn is its last row that is none of these.
+SEAT_HARNESS_ROWS='agent_start agent_stop hub_prompt hub_lost hub_lost_stop context thinking tool_loaded toolchain inputs_guard budget_precall_stop pause_hold run_paused harness_stop extension_error watch_truncated agent_cap_steer agent_cap_stop sentinel_nudge repeat_hint job_hint forge_hint publish_needed self_compact compact_config compact_notice compact_warning compact_forced compact_hold compact_note compact_start compact_done compact_failed compact_stalled compact_held'
+
+# The tool of the agent's own last turn on the trace: its own rows only (a
+# watchdog's row about it is the system's), the harness's rows passed over.
+last_turn() { # <agent id>
+  grep "\"agent\":\"$1\",\"tool\":" "$SANDBOX/traces/events.jsonl" 2>/dev/null \
+    | sed -n 's/.*"agent":"'"$1"'","tool":"\([A-Za-z0-9_.-]*\)".*/\1/p' \
+    | awk -v skip="$SEAT_HARNESS_ROWS" 'BEGIN { n = split(skip, s, " "); for (i = 1; i <= n; i++) h[s[i]] = 1 } !($0 in h) { last = $0 } END { print last }'
 }
 
 # Each agent's clocks, one line each, from one read of the trace:
@@ -468,7 +481,8 @@ paused_now() {
 # through counts: traces/idle-nudge.resumed holds "<resumed_at> <seat>" for
 # each one reached, and a seat not reached is tried again on the next pass
 # (its first failure is on the trace, not every retry). A lift that a new
-# pause has already followed wakes nobody. The words say who lifted it and
+# pause has already followed wakes nobody, and neither does a pause a resume
+# folded into the history. The words say who lifted it and
 # why (pauseLiftedText): the operator's extension, the operator's unpause, or
 # the harness's try under the provider's limit.
 resume_wake() {
@@ -476,6 +490,10 @@ resume_wake() {
   paused_now && return 0
   last="$(jq -r '(.pauses // []) | last | .resumed_at // empty' "$SANDBOX/budget.json" 2>/dev/null || true)"
   [[ -n "$last" ]] || return 0
+  # A pause swarm.sh resume folded into the history ("<by> (resume)") was
+  # ended by a stop and a resume: the resume's kickoff starts every seat from
+  # its hand-off, and a wake here would tell them a pause was lifted.
+  [[ "$(jq -r '(.pauses // []) | last | (.resumed_by // "") | endswith("(resume)")' "$SANDBOX/budget.json" 2>/dev/null)" == true ]] && return 0
   for id in $(jq -r '.agents[].id' "$SANDBOX/team.json" 2>/dev/null); do
     [[ -e "$SANDBOX/done/agents/$id.done" || -e "$SANDBOX/done/agents/$id.dead" ]] && continue
     grep -qxF "$last $id" "$mark" 2>/dev/null && continue
@@ -723,29 +741,30 @@ while :; do
       fi
       [[ "$status" == "working" ]] && continue
     fi
-    # An agent whose last turn ended in a provider error is not idle, it is
-    # finished: every nudge buys another identical failure. Both DeepSeek
-    # agents on the BelkaCTF #6 run spent all three that way against a 402.
-    # In an until-solved run a provider error never ends the run: the agent
-    # is prompted again, with backoff (below), and a rate limit that lifts
-    # finds it working. A limit on every seat at once pauses the run instead
-    # (provider_limit_check), and a paused run's seats are not nudged.
+    # An agent whose last turn ended in a provider error is not idle in the
+    # usual sense: a nudge buys another identical failure while the error
+    # holds (both DeepSeek agents on the BelkaCTF #6 run spent all three
+    # nudges against a 402). So it is tried again with backoff, each wait
+    # twice the last, up to half an hour: under a cap policy MAX_NUDGES
+    # times per run of errors, within the wall clock; until solved, for as
+    # long as the run goes, and a rate limit that lifts finds it working. A
+    # retry refused again is also what tells a limit on every seat from a
+    # passing error (provider_limit_check), and a paused run's seats are not
+    # nudged.
     provider_error=0
     if grep -q "\"agent\":\"$id\",\"tool\":\"agent_error\"" "$SANDBOX/traces/events.jsonl" 2>/dev/null; then
-      last_tool="$(grep "\"agent\":\"$id\"" "$SANDBOX/traces/events.jsonl" 2>/dev/null | tail -1 | jq -r '.tool // empty' 2>/dev/null || true)"
-      if [[ "$last_tool" == "agent_error" ]]; then
-        [[ "$US" -eq 1 ]] || continue
-        provider_error=1
-      fi
+      [[ "$(last_turn "$id")" == "agent_error" ]] && provider_error=1
     fi
     if [[ "$provider_error" -eq 1 ]]; then
       read -r ek elast <<<"$(awk -v id="$id" '$1 == id { print $2, $3 }' "$ERRSTATE")"
       ek="${ek:-0}"
       elast="${elast:-0}"
+      [[ "$US" -eq 1 || "$ek" -lt "$MAX_NUDGES" ]] || continue
       eback=$(( IDLE_SEC * (1 << (ek > 4 ? 4 : ek)) ))
       [[ "$eback" -gt 1800 ]] && eback=1800
       [[ $(( $(date +%s) - elast )) -ge "$eback" ]] || continue
       set_err "$id" $((ek + 1)) "$(date +%s)"
+      etry=$((ek + 1))
     elif grep -q "^$id " "$ERRSTATE" 2>/dev/null; then
       # It worked since: the next error starts the backoff again.
       set_err "$id" 0 0
@@ -786,9 +805,12 @@ while :; do
     [[ -n "$leads_line" ]] && leads_line=" ${leads_line}"
     budget_words="Nudge ${n} of ${MAX_NUDGES}."
     if [[ "$US" -eq 1 && "$n" -gt "$MAX_NUDGES" ]]; then budget_words="Nudge ${n}: this run is until solved, and the nudges go on."; fi
-    if [[ "$provider_error" -eq 1 ]]; then
+    if [[ "$provider_error" -eq 1 && "$US" -eq 1 ]]; then
       why="provider_error"
       text="Your last turn ended in a provider error, and this run is until solved: an error or a rate limit is waited out and retried, and never ends the run. Pick up where you left off: read inbox, go on with what you hold, or take the next thing nobody holds.${held:+ You still hold: ${held}.}${leads_line} ${budget_words}"
+    elif [[ "$provider_error" -eq 1 ]]; then
+      why="provider_error"
+      text="Your last turn ended in a provider error. The harness tries you again up to ${MAX_NUDGES} times, each wait longer than the last, in case it has passed; if the provider refuses every seat, the run pauses instead. Pick up where you left off: read inbox, go on with what you hold, or take the next thing nobody holds.${held:+ You still hold: ${held}.}${leads_line} Try ${etry} of ${MAX_NUDGES}."
     elif [[ "$why" == waiting ]]; then
       text="For ${minutes} minutes you have called only wait and inbox: no post, no record, no command. Waiting is right while an answer you asked for is coming; past that it is idle. ${news_line}If a peer owes you an answer, ask them again by name. Otherwise read inbox, see what your peers have taken, take the next piece of the goal nobody holds and say so on the board; when nothing is left for you, keep waiting. Only done ends your part.${held:+ You still hold: ${held} — release_file what you are not working on, or a peer will take it when the lease runs out.}${leads_line} Nudge ${n} of ${MAX_NUDGES}."
     else

@@ -972,7 +972,7 @@ export type TracePage = {
 
 export type Job = {
   id: string;
-  kind: "start" | "stop" | "reap" | "hold" | "release" | "export" | "package" | "verify" | "purge" | "review" | "lead" | "question" | "extend" | "resume" | "net";
+  kind: "start" | "stop" | "reap" | "hold" | "release" | "export" | "package" | "verify" | "purge" | "review" | "lead" | "question" | "extend" | "unpause" | "resume" | "net";
   argv: string[];
   status: "running" | "ok" | "failed";
   exit_code: number | null;

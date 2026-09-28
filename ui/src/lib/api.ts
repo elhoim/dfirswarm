@@ -263,6 +263,8 @@ export const api = {
   reap: (id: string, payload: { stall_sec?: number; stop?: boolean }) => postJson<Job>(`/api/swarms/${encodeURIComponent(id)}/reap`, payload),
   /** More room for a going or paused run: swarm.sh extend. */
   extend: (id: string, payload: { minutes?: number; tokens?: number; usd?: number }) => postJson<Job>(`/api/swarms/${encodeURIComponent(id)}/extend`, payload),
+  /** Lift a pause whose cause is gone: swarm.sh unpause. */
+  unpause: (id: string) => postJson<Job>(`/api/swarms/${encodeURIComponent(id)}/unpause`, {}),
   /** "Continue this run": swarm.sh resume, with the questions asked for the continuation. */
   resume: (id: string, payload: { questions?: string[]; why?: string; minutes?: number; tokens?: number; usd?: number; as?: string }) => postJson<Job>(`/api/swarms/${encodeURIComponent(id)}/resume`, payload),
   /** A job's whole output, as plain text. */

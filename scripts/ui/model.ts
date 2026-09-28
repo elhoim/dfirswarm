@@ -33,7 +33,7 @@ import {
   type SwarmDetail,
   type SwarmSummary,
 } from "../../extensions/observe.ts";
-import { agentDeadPath, agentDonePath, hostTime, readEventLog, readEventLogChecked, runOutcome, stopPolicyOf, type PostRecord, type SwarmEvent } from "../../extensions/protocol.ts";
+import { agentDeadPath, agentDonePath, hostTime, readEventLog, readEventLogChecked, runOutcome, stopPolicyOf, wallElapsedMs, type PostRecord, type SwarmEvent } from "../../extensions/protocol.ts";
 import { networkBrief, type NetworkBrief } from "./network.ts";
 import { requestsBrief } from "./requests.ts";
 import type { RequestsBrief } from "../../extensions/requests.ts";
@@ -842,9 +842,13 @@ async function enrichSummary(
   let stopPolicy: SwarmRow["stop_policy"] = "cap-stop";
   let paused: SwarmRow["paused"] = null;
   let resumes = 0;
+  // The wall clock as the run counts it: the stretches it went, with no pause in them.
+  let clock: { started_at: string; wall_used_ms?: number; wall_base_at?: string; paused?: { at: string } } | null = null;
   try {
     const budget = JSON.parse(budgetRaw) as {
       started_at?: string;
+      wall_used_ms?: number;
+      wall_base_at?: string;
       wall_clock_minutes?: number;
       metered?: boolean;
       cap_tokens?: number;
@@ -860,6 +864,14 @@ async function enrichSummary(
     }
     if (Array.isArray(budget.resumes)) resumes = budget.resumes.length;
     if (!started && budget.started_at) started = budget.started_at;
+    if (typeof budget.started_at === "string" && budget.started_at) {
+      clock = {
+        started_at: budget.started_at,
+        ...(Number(budget.wall_used_ms) > 0 ? { wall_used_ms: Number(budget.wall_used_ms) } : {}),
+        ...(typeof budget.wall_base_at === "string" ? { wall_base_at: budget.wall_base_at } : {}),
+        ...(budget.paused && typeof budget.paused.at === "string" ? { paused: { at: budget.paused.at } } : {}),
+      };
+    }
     if (!wall && budget.wall_clock_minutes) wall = Number(budget.wall_clock_minutes) || 0;
     if (budget.metered === false) metered = false;
     if (!capTokens && budget.cap_tokens) capTokens = Number(budget.cap_tokens) || 0;
@@ -868,9 +880,12 @@ async function enrichSummary(
     // budget missing or torn
   }
   const finishedAt = summary.done ? await mtimeIso(join(sandbox, "done", "SWARM_DONE")) : null;
+  const outcome = (await runOutcome(sandbox).catch(() => null))?.outcome ?? null;
   const startMs = Date.parse(started);
   const endMs = finishedAt ? Date.parse(finishedAt) : now;
-  const elapsed = Number.isFinite(startMs) ? Math.max(0, endMs - startMs) : 0;
+  // A pause, which can last days, is not elapsed time: the budget's clock
+  // when it reads (wallElapsedMs), else the time since the start.
+  const elapsed = clock && Number.isFinite(endMs) ? wallElapsedMs(clock, endMs) : Number.isFinite(startMs) ? Math.max(0, endMs - startMs) : 0;
   const ids = Array.isArray(run?.agents) ? run!.agents! : [];
   const markers = await countMarkers(sandbox, ids);
   const events = await readEvents(sandbox);
@@ -934,8 +949,10 @@ async function enrichSummary(
     sentinel_by: sentinelBy,
     stop_reason: stopReason,
     stop_policy: stopPolicy,
-    paused,
-    outcome: (await runOutcome(sandbox).catch(() => null))?.outcome ?? null,
+    // A pause is shown while the run stands paused: one stopped, or whose
+    // seats all died, in a pause is not waiting for anything.
+    paused: outcome === "paused" ? paused : null,
+    outcome,
     resumes,
     tools_forged: toolsForged,
     inputs_source: inputsSource,

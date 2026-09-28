@@ -1255,6 +1255,14 @@ export function createUiApp(options: UiAppOptions): UiApp {
         json(res, 202, sub === "extend" ? runner.extend(id, argv) : runner.resume(id, argv));
         return;
       }
+      // Lift a pause whose cause is gone (swarm.sh unpause): the CLI decides
+      // whether it may (a cap's pause still over its cap is refused there).
+      case "unpause": {
+        if (method !== "POST") throw new HttpError(405, "method not allowed");
+        requireToken(req, url);
+        json(res, 202, runner.unpause(id));
+        return;
+      }
       case "reap": {
         if (method !== "POST") throw new HttpError(405, "method not allowed");
         requireToken(req, url);

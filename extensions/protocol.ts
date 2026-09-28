@@ -428,7 +428,7 @@ export function stopPolicyOf(b: { until_solved?: boolean; stop_policy?: string }
 }
 
 /** How much wall clock the run has used: the stretches before, and the current one up to now, or up to the pause in force. */
-export function wallElapsedMs(b: Pick<BudgetRecord, "started_at" | "wall_used_ms" | "wall_base_at" | "paused">, now = Date.now()): number {
+export function wallElapsedMs(b: Pick<BudgetRecord, "started_at" | "wall_used_ms" | "wall_base_at"> & { paused?: { at: string } }, now = Date.now()): number {
   const base = Date.parse(b.wall_base_at ?? b.started_at);
   const end = b.paused ? Date.parse(b.paused.at) : now;
   const stretch = Number.isFinite(base) && Number.isFinite(end) ? Math.max(0, end - base) : 0;
@@ -4912,8 +4912,9 @@ export async function extendRun(
  * operator's hold are not caps: they pause a run under every stop policy, a
  * stopped run excepted, and the provider's limit is read again under the lock
  * (`recheck`, given the budget as it stands there), so a seat that came back
- * since the verdict leaves the run going. Idempotent: a paused run is not
- * paused again.
+ * since the verdict leaves the run going. A pause that continues a spell of
+ * the provider's limit (`since`) charges nothing for the try before it.
+ * Idempotent: a paused run is not paused again.
  */
 export async function pauseRun(
   sandboxRoot: string,
@@ -4942,6 +4943,10 @@ export async function pauseRun(
       ...(opts.until ? { until: opts.until } : {}),
       ...(opts.since ? { since: opts.since } : {}),
     };
+    // A pause that continues a spell of the provider's limit follows the
+    // harness's own try, in which no seat worked: that try is not charged to
+    // the wall clock, which stands where the spell's first pause froze it.
+    if (reason === "provider_limit" && opts.since) budget.wall_base_at = budget.paused.at;
     await held.assertOwned();
     await writeBudget(sandboxRoot, budget);
     return { paused: true, at: budget.paused.at };
@@ -5001,7 +5006,10 @@ export function providerLimitRetryAt(p: Pick<PauseRecord, "at" | "until">): numb
  */
 export async function liftProviderLimit(sandboxRoot: string, now = Date.now()): Promise<PauseRecord | null> {
   return withTableLock(sandboxRoot, async (held) => {
+    // Read under the lock every stop writes it under: a run the operator
+    // stopped while it was paused keeps the pause it was stopped in.
     if (await swarmDoneExists(sandboxRoot)) return null;
+    if (await lstat(join(sandboxRoot, STOPPED_REL)).then(() => true).catch(() => false)) return null;
     const budget = await readBudget(sandboxRoot).catch(() => null);
     if (!budget?.paused || budget.paused.reason !== "provider_limit") return null;
     if (now < providerLimitRetryAt(budget.paused)) return null;
@@ -11390,6 +11398,20 @@ export function jobPageNote(job: string, page: JobStdoutPage): string | null {
 }
 
 /**
+ * A provider's error text with its numbers and times masked, so the same
+ * error said with a countdown ("Try again in ~6904 min.", then "~6874
+ * min.") reads as one. For telling the board once; the trace keeps every
+ * text whole.
+ */
+export function normalizeProviderError(reason: string): string {
+  return reason
+    .replace(/\d{4}-\d{2}-\d{2}(?:[T ]\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?)?\s*(?:Z|UTC|GMT|[+-]\d{2}:?\d{2})?/gi, "<time>")
+    .replace(/\d+(?:[.,:]\d+)*/g, "#")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
  * What the board is told when a seat's turn ends in the provider's error.
  * It used to say the seat's work was "free", and on the Belka run s306463
  * a peer began taking over an agent that had only lost one turn: the agent
@@ -11645,7 +11667,8 @@ export const STOPPED_REL = "done/STOPPED";
  * How a run stands, from its own files: stopped (the operator's STOPPED, or
  * the harness's sentinel at a cap), the outcome a done wrote in the
  * sentinel, paused (a cap, the provider's limit or the operator's hold,
- * the run not finished), or null while it runs.
+ * the run not finished), or null while it runs and when every seat died
+ * with no sentinel (done/ALL_AGENTS_DEAD, paused or not).
  */
 export async function runOutcome(sandboxRoot: string): Promise<{ outcome: RunOutcome | null; by: string | null; at: string | null; why: string | null }> {
   const front = (text: string) => Object.fromEntries([...text.matchAll(/^([a-z_]+):[ \t]*(.*)$/gm)].map((m) => [m[1], m[2].trim()])) as Record<string, string>;
@@ -11665,6 +11688,10 @@ export async function runOutcome(sandboxRoot: string): Promise<{ outcome: RunOut
     const byCap = f.by === "harness" && (f.reason === "cap" || f.reason === "wall_clock");
     return { outcome: byCap ? "stopped" : said, by: f.by ?? null, at: f.at ?? null, why: f.reason ?? null };
   }
+  // Every seat dead and no sentinel (the reaper's done/ALL_AGENTS_DEAD): the
+  // run has no outcome of its own, paused or not; nothing will lift a pause
+  // it died in. Its readers name it from that file.
+  if (await lstat(join(sandboxRoot, ALL_DEAD_REL)).then(() => true).catch(() => false)) return { outcome: null, by: null, at: null, why: null };
   const budget = await readBudget(sandboxRoot).catch(() => null);
   if (budget?.paused) return { outcome: "paused", by: budget.paused.by ?? "harness", at: budget.paused.at, why: budget.paused.detail };
   return { outcome: null, by: null, at: null, why: null };

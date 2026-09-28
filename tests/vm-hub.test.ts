@@ -1745,6 +1745,51 @@ test("the operator's notify hook hears a seat's cap stop and the run's finish, d
   await until(() => readFileSync(heard, "utf8").includes("\tfinished\t"), "the hook heard the finish", 10_000);
 });
 
+test("a pause for the provider's limit holds the seats in the hub: only a wake goes through, and the operator hears it once per spell, across a restart of the hub", async () => {
+  const pre = await mkdtemp(join(tmpdir(), "dfh-limit-"));
+  cleanups.push(() => rm(pre, { recursive: true, force: true }));
+  const probe = await setup();
+  const fake = await fakeVmCli(pre, probe.sandbox);
+  await probe.hub.stop();
+  const heard = join(pre, "notify.log");
+  await writeFile(join(dirname(fake.cli), "notify.sh"), `printf '%s\\t%s\\n' "$2" "$3" >> ${JSON.stringify(heard)}\n`);
+  const { hub, sandbox, dir, agents, base } = await setup({ extra: { run: "t1", vmCli: fake.cli } });
+  (hub.cfg as { registry?: string }).registry = join(base, "runs", "registry.json");
+  await mkdir(join(base, "runs", "notify"), { recursive: true });
+  await writeFile(join(base, "runs", "notify", "t1.cmd"), "cat > /dev/null\n", { mode: 0o600 });
+  const prompts: Array<{ text: string; kind?: string }> = [];
+  const link = board.openHubLink(hub.socketFor("a0"), (p) => prompts.push(p), { retryMs: 50 });
+  cleanups.push(async () => link.close());
+  await until(() => hub.statusSnapshot().a0?.connected === true, "a0's link comes up");
+  const budgetFile = join(sandbox, "budget.json");
+  const first = new Date(Date.now() - 60_000).toISOString();
+  const setPause = async (paused: Record<string, unknown>) => {
+    const budget = JSON.parse(await readFile(budgetFile, "utf8")) as Record<string, unknown>;
+    await writeFile(budgetFile, JSON.stringify({ ...budget, paused }));
+  };
+  await setPause({ at: first, reason: "provider_limit", detail: "Codex error: The usage limit has been reached", by: "harness", models: ["openai-codex/gpt-6-sol"] });
+  await hub.backstop();
+  assert.equal(hub.pausedAt, first, "the hub holds the seats of a run paused for the provider's limit");
+  assert.equal((await exchange(hub.adminSocket(), { op: "prompt", agent: "a0", text: "you are idle", kind: "idle_nudge" })).delivered, false, "a nudge is held");
+  assert.equal((await exchange(hub.adminSocket(), { op: "prompt", agent: "a0", text: "the pause is lifted", kind: "resume" })).delivered, true, "the wake after a lift goes through");
+  await until(() => prompts.length >= 1, "the wake arrives");
+  assert.deepEqual(prompts.map((p) => p.text), ["the pause is lifted"]);
+  await until(() => existsSync(heard) && readFileSync(heard, "utf8").includes("provider_limit"), "the operator heard the pause");
+  const told = () => readFileSync(heard, "utf8").trim().split("\n").filter((l) => l.startsWith("paused\t"));
+  assert.equal(told().length, 1);
+  assert.equal(JSON.parse(told()[0].split("\t")[1]).reason, "provider_limit");
+  // The harness's try, refused again: the same spell, not told again; nor by a hub restarted over it.
+  await setPause({ at: new Date().toISOString(), reason: "provider_limit", detail: "Codex error: The usage limit has been reached", by: "harness", since: first });
+  await hub.backstop();
+  await hub.stop();
+  const again = new Hub({ ...hub.cfg, sandbox, dir, agents });
+  await again.start();
+  cleanups.push(async () => again.stop().catch(() => undefined));
+  await again.backstop();
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(told().length, 1, "told once per spell, whichever hub looks");
+});
+
 test("with the model gateway a seat's spend is the host's measure: folded into budget.json, raised by a higher report, never lowered by a smaller one, and the caps read it", async () => {
   const { hub, sandbox, lines } = await setup();
   const budgetFile = join(sandbox, "budget.json");
