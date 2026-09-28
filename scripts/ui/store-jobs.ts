@@ -81,6 +81,8 @@ export type StoreJobRow = {
   cancel_requested: string | null;
   parent: string | null;
   note: string | null;
+  /** A program its image did not hold (exit 127, or "command not found"): the program, and the profile and image it ran in, for the images' upkeep. */
+  program_missing: { program: string | null; profile: string | null; image: string | null } | null;
 };
 
 export type StoreJournalState = {
@@ -343,6 +345,7 @@ function fold(lines: Array<Record<string, unknown>>): { rows: Map<string, StoreJ
         kept_attempts: [],
         generation: null,
         generation_status: null,
+        program_missing: null,
         notified: [],
         deduplicated: 0,
         cancel_requested: null,
@@ -396,6 +399,9 @@ function fold(lines: Array<Record<string, unknown>>): { rows: Map<string, StoreJ
         break;
       case "job_cancel_requested":
         j.cancel_requested = str(l.by);
+        break;
+      case "job_program_missing":
+        j.program_missing = { program: str(l.program), profile: str(l.profile), image: str(l.image) };
         break;
       case "generation_committed":
         j.generation = str(l.generation);

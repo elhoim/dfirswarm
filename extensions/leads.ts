@@ -2864,6 +2864,15 @@ export async function leadsDigest(ctx: P.SwarmContext, o: { mark?: boolean } = {
   lines.push(`Blocked on you: ${blockedOnMe.length ? blockedOnMe.map((x) => `${x.id} (${x.holder ?? "unheld"}) needs ${x.needs.filter((n) => !n.met).map((n) => n.need).join(", ")}`).join("; ") : "none"}.`);
   lines.push(`Awaiting your interpretation: ${awaiting.length ? awaiting.map((a) => `${a.job}${a.lead ? ` (${a.lead})` : ""}${a.reinterpret ? `: its interpretation no longer stands, interpret it again (${a.why})` : ""}${a.unread_bytes ? `: ${a.unread_bytes} of ${a.total_bytes} stdout bytes unread, job_status offset ${a.next_offset}` : ""}`).join("; ") : "none"}.`);
   lines.push(`Questions nobody holds a lead for, with no answer yet: ${cov.uncovered.length ? cov.uncovered.map((q) => `question:${q}${cov.open_leads_for[q] ? ` (open: ${cov.open_leads_for[q].join(", ")})` : ""}`).join(", ") : "none"}.`);
+  // This seat's running jobs that look stuck (B11): all three signals still, not near their timeout. A hint, never a cancel.
+  const T = await import("../scripts/job-telemetry.ts");
+  const stuck: string[] = [];
+  for (const j of snap.jobs) {
+    if (j.agent !== me || j.state !== "running") continue;
+    const p = await T.jobProgressOnDisk(ctx.sandboxRoot, j.id).catch(() => null);
+    if (p?.state === "suspected_stall") stuck.push(T.progressWords(j.id, p));
+  }
+  if (stuck.length) lines.push(`Your running jobs that look stuck: ${stuck.join("; ")}.`);
   // Parked leads (A2) and closures waiting for confirmation (A3): everyone sees them.
   const parked = await parkedLeads(ctx.sandboxRoot, snap).catch(() => [] as ParkedLead[]);
   if (parked.length) lines.push(`Parked (held, no job and no act on it for ${Math.round(parkMs() / 60_000)}+ min while the holder works elsewhere; offered to an idle seat unless the holder acts): ${parked.map((p) => `${p.lead} (${p.holder}, ${Math.round(p.idle_ms / 60_000)} min)`).join("; ")}.`);
@@ -3276,7 +3285,7 @@ export function questionStanding(snap: LeadsSnapshot): Array<{ id: string; why: 
 }
 
 /** The regroup post: what is open, what is blocked, what waits on the operator, and what nobody has cited. */
-export async function regroupMessage(sandboxRoot: string, snap: LeadsSnapshot, o: { minutes: number; since: { at: number; what: string }; count: number; nextMinutes: number }): Promise<string> {
+export async function regroupMessage(sandboxRoot: string, snap: LeadsSnapshot, o: { minutes: number; since: { at: number; what: string }; count: number; nextMinutes: number; running?: string[] }): Promise<string> {
   const ranked = rankedLeads(snap);
   const qs = questionStanding(snap);
   const open = ranked.filter((v) => v.status === "open");
@@ -3297,6 +3306,10 @@ export async function regroupMessage(sandboxRoot: string, snap: LeadsSnapshot, o
   lines.push("", `Waiting on the operator (${operator.length}):`);
   for (const v of operator) lines.push(`- ${v.id} "${v.title}": ${v.ref}`);
   if (!operator.length) lines.push("- none");
+  if (o.running?.length) {
+    lines.push("", `Jobs running under leads (${o.running.length}): each was nudged to its holder a window ago; a running job does not hold this off for ever:`);
+    for (const r of o.running) lines.push(`- ${r}`);
+  }
   lines.push("", `Evidence no standing entry cites (${uncited.length}):`);
   for (const u of uncited) lines.push(`- ${u}`);
   if (!uncited.length) lines.push("- none");

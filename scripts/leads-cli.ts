@@ -80,7 +80,7 @@ export const REGROUP_STATE = "traces/regroup.json";
 /** The longest wait between two regroups while nothing moves. */
 export const REGROUP_MAX_MINUTES = 240;
 
-type RegroupState = { progress_at: number; count: number; last_at: number };
+type RegroupState = { progress_at: number; count: number; last_at: number; nudged_at?: number; nudged?: string[] };
 
 /**
  * An until-solved run's regroup, when one is due: nothing has moved (no new
@@ -89,7 +89,7 @@ type RegroupState = { progress_at: number; count: number; last_at: number };
  * the last one, up to REGROUP_MAX_MINUTES. It never stops. The post goes to
  * everyone; the answer is null when none is due.
  */
-export async function regroup(sandbox: string, now = Date.now()): Promise<{ posted: false; why: string } | { posted: true; count: number; post: number; since: string; next_minutes: number }> {
+export async function regroup(sandbox: string, now = Date.now()): Promise<{ posted: false; why: string } | { posted: true; kind: "nudge" | "all_hands"; count: number; post: number; since: string; next_minutes: number; to?: string[] }> {
   const budget = await P.readBudget(sandbox).catch(() => null);
   if (!budget?.until_solved) return { posted: false, why: "not an until-solved run" };
   if (await P.swarmDoneExists(sandbox)) return { posted: false, why: "the run is over" };
@@ -105,16 +105,45 @@ export async function regroup(sandbox: string, now = Date.now()): Promise<{ post
     // none yet: the first
   }
   if (now - since.at < stall) return { posted: false, why: `the run moved ${Math.round((now - since.at) / 60_000)} min ago` };
+  // A job running under a lead is movement for one window (B12): the first
+  // regroup nudges that lead's holder, with what the job is doing; if
+  // nothing changes in the next window everyone is asked, job or not, so a
+  // running job never holds the regroup off for ever.
+  const T = await import("./job-telemetry.ts");
+  const running: Array<{ job: string; lead: string; holder: string; words: string }> = [];
+  for (const j of snap.jobs) {
+    if (!L.jobOpen(j)) continue;
+    const lead = snap.state.jobLead.get(j.id);
+    const holder = lead ? snap.state.leads.get(lead)?.holder : null;
+    if (!lead || !holder) continue;
+    const p = await T.jobProgressOnDisk(sandbox, j.id, now).catch(() => null);
+    running.push({ job: j.id, lead, holder, words: p ? T.progressWords(j.id, p) : `${j.id} ${j.state} (no sample of it yet)` });
+  }
+  if (running.length && state.count === 0 && !state.nudged_at) {
+    const holders = [...new Set(running.map((r) => r.holder))];
+    let first = 0;
+    for (const h of holders) {
+      const mine = running.filter((r) => r.holder === h);
+      const body = `REGROUP NUDGE for ${h}: nothing has moved for ${Math.round((now - since.at) / 60_000)} minutes (no new standing entry, no lead closed, no job committed since ${new Date(since.at).toISOString()}), and your job${mine.length === 1 ? " runs" : "s run"} under ${[...new Set(mine.map((r) => r.lead))].join(", ")}: ${mine.map((r) => r.words).join("; ")}. Is it the route? Say so on the board; if it is not, cancel it (cancel keeps what it wrote) and take another. If nothing moves in ${Math.round(stall / 60_000)} minutes, everyone is asked to regroup.`;
+      const post = await P.systemPost(sandbox, { tag: "ask", to: h, body });
+      if (!first) first = post.id;
+    }
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(`${path}.tmp`, `${JSON.stringify({ ...state, progress_at: since.at, nudged_at: now, nudged: holders })}\n`, "utf8");
+    await rename(`${path}.tmp`, path);
+    return { posted: true, kind: "nudge", count: 0, post: first, since: new Date(since.at).toISOString(), next_minutes: Math.round(stall / 60_000), to: holders };
+  }
+  if (state.nudged_at && state.count === 0 && now - state.nudged_at < stall) return { posted: false, why: `the holders of the running jobs were nudged ${Math.round((now - state.nudged_at) / 60_000)} min ago` };
   const wait = state.count === 0 ? 0 : Math.min(stall * 2 ** state.count, REGROUP_MAX_MINUTES * 60_000);
   if (state.count > 0 && now - state.last_at < wait) return { posted: false, why: `regroup ${state.count} was ${Math.round((now - state.last_at) / 60_000)} min ago` };
   const count = state.count + 1;
   const nextMinutes = Math.round(Math.min(stall * 2 ** count, REGROUP_MAX_MINUTES * 60_000) / 60_000);
-  const body = await L.regroupMessage(sandbox, snap, { minutes: Math.round((now - since.at) / 60_000), since, count, nextMinutes });
+  const body = await L.regroupMessage(sandbox, snap, { minutes: Math.round((now - since.at) / 60_000), since, count, nextMinutes, running: running.map((r) => `${r.words} (under ${r.lead}, ${r.holder})`) });
   const post = await P.systemPost(sandbox, { tag: "ask", body });
   await mkdir(dirname(path), { recursive: true });
-  await writeFile(`${path}.tmp`, `${JSON.stringify({ progress_at: since.at, count, last_at: now })}\n`, "utf8");
+  await writeFile(`${path}.tmp`, `${JSON.stringify({ progress_at: since.at, count, last_at: now, ...(state.nudged_at ? { nudged_at: state.nudged_at, nudged: state.nudged } : {}) })}\n`, "utf8");
   await rename(`${path}.tmp`, path);
-  return { posted: true, count, post: post.id, since: new Date(since.at).toISOString(), next_minutes: nextMinutes };
+  return { posted: true, kind: "all_hands", count, post: post.id, since: new Date(since.at).toISOString(), next_minutes: nextMinutes };
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

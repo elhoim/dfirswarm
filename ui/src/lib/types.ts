@@ -1218,6 +1218,8 @@ export type StoreJobRow = {
   cancel_requested: string | null;
   parent: string | null;
   note: string | null;
+  /** A program its image did not hold (exit 127, or "command not found"): shown for the images' upkeep. */
+  program_missing?: { program: string | null; profile: string | null; image: string | null } | null;
 };
 
 /** GET /api/swarms/:id/jobs: a page of the run's tool jobs, totals over all of them, the run's own journal lines and custody's store line. */

@@ -140,7 +140,7 @@ export async function sealCitedRefs(svc: JobService | undefined, who: string, in
   }
   return { ok: true, input: mapLedgerRefs(input, (r) => replaced.get(r) ?? r), notes };
 }
-import { destroyWorker, roomForWorker, runWorker } from "./vm.ts";
+import { destroyWorker, roomForWorker, runWorker, workerMetrics } from "./vm.ts";
 
 /**
  * One line from a VM: a trace line keeps a tool's whole input and output
@@ -874,7 +874,7 @@ export function boardTable(hub: {
         ...(typeof raw.wait === "number" ? { wait: raw.wait } : {}),
       });
       if (!r.ok) return r;
-      return { ok: true, job: await jobView(S, r.job), ...(r.stdout ? { stdout: r.stdout } : {}) };
+      return { ok: true, job: await jobView(S, r.job), ...(r.stdout ? { stdout: r.stdout } : {}), ...(r.progress ? { progress: r.progress } : {}) };
     },
     catalogRequest: async (who, a) => {
       const svc = hub.jobs?.();
@@ -1233,6 +1233,8 @@ export class Hub {
       ...(jobs.derived ? { derived: true } : {}),
       runWorker,
       destroyWorker,
+      // A running worker's CPU and I/O for the job's progress (B11); its heartbeat when msb cannot say.
+      metrics: (worker) => workerMetrics(worker),
       hostRoom: async (mib) => roomForWorker(mib),
       notify: async (to, body) => {
         await P.systemPost(S, { tag: "result", to, body });

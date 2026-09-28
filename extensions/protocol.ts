@@ -5839,6 +5839,8 @@ export const TOOL_RESERVED_NAMES = new Set([
   // The coordination of the work and of the finish (docs/adr/0015): a lead
   // reopened by an agent, a limiting route reviewed.
   "lead_reopen", "route_review", "lead_handoff", "lead_confirm", "offer", "finish", "done_deferred",
+  // The runtime (docs/adr/0015): the seats' tokens renewed on the host.
+  "secrets_renewed",
   // The stop policy (docs/adr/0013): a run paused at a cap, a seat's call held
   // by the pause, the seats woken after an extension, a stop proposed to the
   // operator, and a run resumed after a stop or a seal.

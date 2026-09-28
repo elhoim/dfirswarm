@@ -428,6 +428,13 @@ function JobDetail({ view, jobId, version, onBack }: { view: SwarmView; jobId: s
           </Fact>
           <Fact label="Outcome" bad={r.outcome !== "ok" && r.outcome !== "queued" && r.outcome !== "running" && r.outcome !== "cancelled"}>
             {outcomeText}
+            {r.program_missing ? (
+              <span className="text-brick-ink">
+                program missing in its image: {r.program_missing.program && r.program_missing.program !== "?" ? r.program_missing.program : "a program (exit 127)"}
+                {r.program_missing.profile ? ` · profile ${r.program_missing.profile}` : ""}
+                {r.program_missing.image ? ` · ${r.program_missing.image}` : ""} · for the images' upkeep
+              </span>
+            ) : null}
           </Fact>
           <Fact label="Record" bad={r.fenced === false}>
             <span>

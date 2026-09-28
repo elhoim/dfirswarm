@@ -377,9 +377,34 @@ regroup_check() {
   out="$(node --experimental-strip-types --no-warnings "$ROOT/scripts/leads-cli.ts" regroup "$SANDBOX" 2>/dev/null || true)"
   [[ "$(jq -r '.posted // false' <<<"$out" 2>/dev/null)" == true ]] || return 0
   ts="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
-  line="$(jq -cn --arg ts "$ts" --argjson r "$out" '{ts: $ts, agent: "system", tool: "regroup", args: {since: $r.since}, result: {ok: true, count: $r.count, post: $r.post, next_minutes: $r.next_minutes}}')"
+  line="$(jq -cn --arg ts "$ts" --argjson r "$out" '{ts: $ts, agent: "system", tool: "regroup", args: {since: $r.since}, result: {ok: true, kind: ($r.kind // "all_hands"), count: $r.count, post: $r.post, next_minutes: $r.next_minutes, to: ($r.to // null)}}')"
   trace_emit "$ROOT" "$SANDBOX" "$line"
-  echo "idle-nudge: regroup $(jq -r '.count' <<<"$out") posted (#$(jq -r '.post' <<<"$out")); nothing had moved since $(jq -r '.since' <<<"$out")" >&2
+  if [[ "$(jq -r '.kind // "all_hands"' <<<"$out")" == nudge ]]; then
+    echo "idle-nudge: nothing had moved since $(jq -r '.since' <<<"$out"), but jobs run under leads: their holders are nudged ($(jq -r '.to | join(", ")' <<<"$out"), #$(jq -r '.post' <<<"$out"))" >&2
+  else
+    echo "idle-nudge: regroup $(jq -r '.count' <<<"$out") posted (#$(jq -r '.post' <<<"$out")); nothing had moved since $(jq -r '.since' <<<"$out")" >&2
+  fi
+}
+
+# The seats' subscription tokens in a microVM run, renewed on the host at
+# half their validity (scripts/vm.ts renew-secrets: msb rotates a VM's
+# secret live, and the guest keeps its placeholder). Checked every ten
+# minutes; a run with no VM spec, or none of whose seats holds a token, does
+# nothing. Never a value on the trace or in the log.
+secret_renewal_check() {
+  local spec="$HUB_DIR/vm-spec.json" mark="$SANDBOX/traces/idle-nudge.secrets" now last out ts line
+  [[ -n "$HUB_DIR" && -f "$spec" ]] || return 0
+  now="$(date +%s)"
+  last="$(cat "$mark" 2>/dev/null || echo 0)"
+  [[ "$last" =~ ^[0-9]+$ ]] || last=0
+  [[ $((now - last)) -ge 600 ]] || return 0
+  echo "$now" > "$mark"
+  out="$(node --experimental-strip-types --no-warnings "$ROOT/scripts/vm.ts" renew-secrets --spec "$spec" --state "$HUB_DIR/secret-renewal.json" 2>/dev/null || true)"
+  [[ "$(jq -r '.due // false' <<<"$out" 2>/dev/null)" == true ]] || return 0
+  ts="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  line="$(jq -cn --arg ts "$ts" --argjson r "$out" '{ts: $ts, agent: "system", tool: "secrets_renewed", args: {next_at: $r.next_at}, result: {ok: $r.ok, seats: [$r.seats[] | {agent, outcome, rotated, why}]}}')"
+  trace_emit "$ROOT" "$SANDBOX" "$line"
+  echo "idle-nudge: the seats' tokens renewed on the host: $(jq -r '[.seats[] | "\(.agent) \(.outcome)"] | join(", ")' <<<"$out"); next at $(jq -r '.next_at' <<<"$out")" >&2
 }
 
 # The stop policy (docs/adr/0013). A paused run's seats are held: none is
@@ -560,14 +585,16 @@ while :; do
   pause_notify
   resume_wake
   if paused_now; then
-    # Paused: the seats are held, nobody is nudged; the operator's requests are still said.
+    # Paused: the seats are held, nobody is nudged; the operator's requests are still said, and the tokens kept valid.
     operator_requests_check
+    secret_renewal_check
     [[ "$ONCE" -eq 1 ]] && exit 0
     sleep "$INTERVAL"
     continue
   fi
   coverage_hint
   regroup_check
+  secret_renewal_check
   yield_check
   operator_requests_check
   # --idle-sec 0: nobody is nudged; the stop policy above (the backstop, the

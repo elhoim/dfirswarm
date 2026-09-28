@@ -40,6 +40,7 @@ import { Journal, maybeCrash, publishGeneration, publishRevision, readManifest, 
 import { chooseImage, readImageRecords, type ImageChoice, type ImageRecord } from "./image-choice.ts";
 import { buildView, declaredScope, dropProjected, freeMb, PROJECTED_DIR, resolveScope, ScopeError, scopeKindOf, scopeManifestText, VIEW_DIR, type ScopeKind, type ScopeObject, type ViewEntry } from "./job-scope.ts";
 import { CANARY_NAME, OBSERVE_GUEST, observedRun, observeWanted, readObservation } from "./job-observe.ts";
+import { assessJob, HEARTBEAT_LINES, HEARTBEAT_STOP, keepSample, readSamples, sampleJob, type JobProgress } from "./job-telemetry.ts";
 import type { Mount, WorkerSpec } from "./vm.ts";
 import { operatorHostsSync } from "../extensions/leads.ts";
 
@@ -211,6 +212,12 @@ export type JobRecord = {
   cancel_requested?: string;
   lane?: Lane;
   image_choice?: ImageChoice;
+  /**
+   * A program the job ran is not in its image (B17): exit 127, or the
+   * shell's "command not found" on its stderr. The profile and image it ran
+   * in, for the images' upkeep; generic, never a tool's own message.
+   */
+  program_missing?: { program: string | null; profile: string | null; image: string };
 };
 
 /**
@@ -279,6 +286,12 @@ export type JobServiceOptions = {
    */
   hostRoom?: (memoryMib: number) => Promise<{ ok: boolean; available_mib: number | null; needed_mib: number }>;
   destroyWorker: (name: string) => Promise<{ ok: boolean; error?: string }>;
+  /**
+   * A running worker's CPU and I/O counters (msb's metrics for its VM),
+   * when the host has them; absent or null, the worker's own heartbeat is
+   * read instead (job-telemetry.ts).
+   */
+  metrics?: (worker: string) => Promise<{ cpu_ns: number; io_bytes: number } | null>;
   notify: (to: string, body: string) => Promise<void>;
   identity: (agent: string) => Promise<{ name?: string; doing?: string }>;
   log?: (line: string) => void;
@@ -413,6 +426,8 @@ export class JobService {
       ticks += 1;
       void this.pump();
       if (ticks % 15 === 0) void this.sweep();
+      // Each running job sampled every half minute (B11): how long each signal has been still is read from these.
+      if (ticks % 15 === 7) void this.sampleRunning().catch(() => undefined);
     }, 2000);
     this.timer.unref?.();
     void this.pump();
@@ -1105,10 +1120,11 @@ export class JobService {
     const pip = job.spec.network === "allowlist" ? ["python3 -m pip list --format=freeze > /job/pip-before.txt 2>/dev/null || true"] : [];
     const pipAfter = job.spec.network === "allowlist" ? ["python3 -m pip list --format=freeze > /job/pip-after.txt 2>/dev/null || true"] : [];
     // EXPERIMENTAL (SWARM_JOB_OBSERVE=fanotify-experimental, a declared scope only): the command as an unprivileged user, a collector watching the view's mounts.
+    // A heartbeat beside the command (job-telemetry.ts): the VM's CPU and I/O counters every 15 s, for the host to read while it runs.
     const run = (cmd: string) =>
       observe
-        ? [...pip, ...observedRun({ mounts: observe.mounts, canary: observe.canary, cmd: `timeout --kill-after=10 ${box} ${cmd} > /job/stdout.log 2> /job/stderr.log` }), ...pipAfter]
-        : [...pip, `timeout --kill-after=10 ${box} ${cmd} > /job/stdout.log 2> /job/stderr.log`, "echo $? > /job/exit", ...pipAfter];
+        ? [...pip, ...HEARTBEAT_LINES, ...observedRun({ mounts: observe.mounts, canary: observe.canary, cmd: `timeout --kill-after=10 ${box} ${cmd} > /job/stdout.log 2> /job/stderr.log` }), HEARTBEAT_STOP, ...pipAfter]
+        : [...pip, ...HEARTBEAT_LINES, `timeout --kill-after=10 ${box} ${cmd} > /job/stdout.log 2> /job/stderr.log`, "echo $? > /job/exit", HEARTBEAT_STOP, ...pipAfter];
     const head = ["#!/bin/bash", "set -u", `cd ${q(this.S)} 2>/dev/null || cd /`, `export OUT=${q(out)}`];
     if (job.spec.kind === "tool") {
       const checked = await this.toolCheck(job.spec.tool ?? "", job.spec.args ?? {});
@@ -1327,6 +1343,12 @@ export class JobService {
     }
     const cancelled = job.cancel_requested ? `cancelled by ${job.cancel_requested}` : undefined;
     const stopped = (job as JobRecord & { stopped?: string }).stopped;
+    // A program its image does not hold (B17): exit 127, or the shell's own words for it.
+    const missing = !cancelled && !stopped && exit !== 0 ? await programMissing(st.ctl, exit) : null;
+    if (missing) {
+      job.program_missing = { program: missing, profile: chosen.profile ?? job.spec.profile ?? null, image: chosen.ref };
+      await this.journal.append({ type: "job_program_missing", job: job.id, attempt: job.attempt, exit, ...job.program_missing });
+    }
     const status: NonNullable<JobRecord["status"]> = cancelled ? "cancelled" : stopped ? "stopped" : exit === 124 || exit === 137 ? "timed_out" : exit === 0 ? "ok" : "failed";
     const reason =
       cancelled ??
@@ -1337,9 +1359,11 @@ export class JobService {
           ? result.error ?? "the worker did not report an exit status"
           : job.spec.kind === "import" && exit === 3
             ? "the source changed while it was copied (stdout.log names each file): import it again once it is still"
-            : exit !== 0
-              ? `exit ${exit}`
-              : undefined);
+            : missing
+              ? `exit ${exit}: a program it runs is not in its image${job.program_missing?.profile ? ` (profile ${job.program_missing.profile})` : ""}: ${missing === "?" ? "exit 127" : missing}`
+              : exit !== 0
+                ? `exit ${exit}`
+                : undefined);
     if (job.requester.agent === DERIVED) this.derivedSpent.push({ at: Date.now(), s: (Date.now() - started) / 1000 });
     await this.journal.append({ type: "job_finished", job: job.id, attempt: job.attempt, exit, status, ...(reason ? { reason } : {}), duration_ms: Date.now() - started, ...(result.digest ? { image_digest: result.digest } : {}), ...(result.boot_retry ? { boot_retry: result.boot_retry } : {}), ...(result.create_ms !== undefined ? { create_ms: result.create_ms } : {}) });
     Object.assign(job, { state: "finished", exit, status, reason, finished_at: new Date().toISOString(), ...(result.digest ? { image_digest: result.digest } : {}) });
@@ -1961,8 +1985,30 @@ export class JobService {
 
   // --- what agents see ---------------------------------------------------------------------------
 
+  /**
+   * What a running job is doing, from the host (B11): a sample now (its
+   * output directory's metadata, its logs' sizes, its CPU and I/O from
+   * msb's metrics or its heartbeat), kept beside its staging, and the
+   * verdict over the samples kept. Null when it is not running.
+   */
+  async progress(id: string): Promise<JobProgress | null> {
+    const job = this.jobs.get(id);
+    if (!job || job.state !== "running") return null;
+    const st = this.staging(job);
+    const worker = job.worker;
+    const metrics = worker && this.o.metrics ? () => this.o.metrics!(worker) : undefined;
+    const s = await sampleJob({ out: st.out, ctl: st.ctl }, { ...(metrics ? { metrics } : {}) }).catch(() => null);
+    if (s) await keepSample(st.base, s);
+    return assessJob(await readSamples(st.base), { started_at: job.started_at, timeout_seconds: job.spec.timeout_seconds });
+  }
+
+  /** Every running job sampled (the service's own clock), so the samples say how long each signal has been still. */
+  async sampleRunning(): Promise<void> {
+    for (const j of this.jobs.values()) if (j.state === "running") await this.progress(j.id).catch(() => null);
+  }
+
   /** A job's state for its requester (or anyone: jobs are the run's, not private), with a page of its stdout. */
-  async status(agent: string, id: string, o: { offset?: number; limit?: number; cancel?: boolean; wait?: number } = {}): Promise<{ ok: true; job: JobRecord; stdout?: { offset: number; bytes: number; total: number; text: string; next: number | null; path: string } } | { ok: false; reason: string }> {
+  async status(agent: string, id: string, o: { offset?: number; limit?: number; cancel?: boolean; wait?: number } = {}): Promise<{ ok: true; job: JobRecord; stdout?: { offset: number; bytes: number; total: number; text: string; next: number | null; path: string }; progress?: JobProgress } | { ok: false; reason: string }> {
     if (!JOB_ID.test(id)) return { ok: false, reason: `${id} is not a job id` };
     const job = this.jobs.get(id);
     if (!job) return { ok: false, reason: `no job ${id}` };
@@ -2012,7 +2058,8 @@ export class JobService {
         await this.journal.append({ type: "job_notified", job: id, to: agent, how: "status" });
       }
     }
-    return { ok: true, job, ...(stdout ? { stdout } : {}) };
+    const progress = job.state === "running" ? await this.progress(id).catch(() => null) : null;
+    return { ok: true, job, ...(stdout ? { stdout } : {}), ...(progress ? { progress } : {}) };
   }
 
   private async requesterOf(agent: string): Promise<Requester> {
@@ -2108,6 +2155,19 @@ export class JobService {
   }
 }
 
+/**
+ * The program a failed job's image did not hold (B17), from the generic
+ * signs only: the shell's "X: command not found" on its stderr (the name
+ * sanitised), or exit 127 with no name ("?"). Null when neither.
+ */
+export async function programMissing(ctl: string, exit: number | null): Promise<string | null> {
+  const err = await readFile(join(ctl, "stderr.log")).catch(() => Buffer.alloc(0));
+  const text = err.subarray(Math.max(0, err.length - 65536)).toString("utf8");
+  const m = /(?:^|\n)(?:[^\n]*?: )?(?:line \d+: )?([A-Za-z0-9_.+-]{1,64}): (?:command )?not found/.exec(text);
+  if (m) return m[1]!;
+  return exit === 127 ? "?" : null;
+}
+
 /** One post, for the agent that asked. */
 export function describe(job: JobRecord): string {
   const what = job.spec.kind === "tool" ? `tool ${job.spec.tool}` : job.spec.kind === "command" ? "command" : job.spec.kind === "recipe" ? `recipe ${job.spec.recipe}` : job.spec.seal ? `the seal of ${job.spec.seal.ref}` : job.spec.kind === "import" ? `import of ${job.spec.source}${scopeKindOf(job.spec) === "declared" ? ", from the snapshot the hub took at its start" : ", copied live from where it was"}` : "detect pass";
@@ -2147,6 +2207,7 @@ export async function jobView(S: string, job: JobRecord, o: { files?: number } =
     ...(scopeKindOf(job.spec) === "declared" ? { declared: job.spec.inputs } : {}),
     ...(job.scope?.manifest ? { scope_manifest: job.scope.manifest } : {}),
     ...(job.generation ? { generation: job.generation, revision: job.revision } : {}),
+    ...(job.program_missing ? { program_missing: { ...job.program_missing, note: "the image of its profile does not hold it: run it in a profile that does, install it if the job may, or tell the operator (the console lists these for the images' upkeep)" } } : {}),
   };
   if (job.state !== "committed" || !job.outputs) return view;
   const dir = join(storePaths(S).jobs, job.id);
