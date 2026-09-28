@@ -149,6 +149,36 @@ register ([ADR 0011](0011-questions-are-a-register-with-their-askers.md)).
     The kickoff keeps its own options outside the run (0600), so the resume
     restarts the same team; a run started before that gives them after `--`.
 
+## After review
+
+An independent review (Astra, of the commits that built the above) found
+seventeen ways around it; each has a test that failed before its fix.
+
+- A coverage record binds its results by hash: a result superseded,
+  disputed or changed takes the record, and a review of the negative
+  resting on it, out of standing (`coverage_stale`).
+- `premise_not_supported` rests on a finding. "It did not happen" is held
+  whatever the result. The report states a negative's conclusion from the
+  coverage record's proposition and scope, never from the agents' words.
+- An acceptance is of the answer that stood (its hash), and an accepted
+  question's negative is held to the bar all the same.
+- The hub names objects as the job scopes do (a digest, a store path, a
+  catalogue directory), and a coverage record may name a directory.
+- A release's chains are verified with their own verifiers; only a resume
+  anchored at a boundary those chains hold relaxes a release to a prefix;
+  the report bytes a release binds are kept at `release/bound/<sha256>` when
+  the run is resumed; a gone gateway log breaks an earlier seal; the resume
+  is anchored before anything moves.
+- A compaction is held while the run is paused, and so is the model call
+  whose check wrote the pause. An extension reads the run's end under the
+  lock a stop takes. The operator is told of a pause once, whoever wrote it.
+  The watchdog runs at `--idle-nudge-sec 0` too, for the stop policy, and a
+  wake that did not land is tried again.
+- The start options kept for a resume never hold the notify command, and
+  hold an `--env` value only where no pane can read it; the stores are
+  denied to a host run's panes where the guard can. A resumed run's
+  evidence image is attached again and held to its manifest.
+
 ## Consequences
 
 - Every existing goal and run keeps working: an answer without `result`
