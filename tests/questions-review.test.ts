@@ -527,3 +527,17 @@ test("release verification holds the question register to the custody verdict th
   assert.match(rewritten.lines.join("\n"), /the question register's chain here is broken/);
 });
 
+// --- (a): the console's last post -------------------------------------------------------------------
+
+test("the console's list carries the newest post whole, however long", async () => {
+  const base = await mkdtemp(join(tmpdir(), "ui-lastpost-"));
+  dirs.push(base);
+  const sandbox = join(base, "slp1");
+  await P.initSandbox(sandbox, { swarmId: "slp1", agentIds: ["a0"], capUsd: 5, wallClockMinutes: 30 });
+  const body = `The finding, whole: ${"a line of what was found and where it was found. ".repeat(12)}END`;
+  await P.postMessage({ sandboxRoot: sandbox, agentId: "a0" }, { tag: "result", body });
+  await writeFile(join(base, "registry.json"), JSON.stringify({ runs: [{ id: "slp1", sandbox, state: "running", agents: ["a0"] }] }));
+  const row = (await listSwarmRows(base)).find((r) => r.id === "slp1")!;
+  assert.ok(body.length > 240);
+  assert.equal(row.last_post?.body, body);
+});

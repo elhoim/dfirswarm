@@ -1,8 +1,10 @@
 /**
  * The question register (extensions/questions.ts): what the examination is
  * asked, by the goal, by an agent or by a person, and how each question
- * stands. What waits on the operator comes first (the triage queue and the
- * clarifications agents asked), then the add form, then every question with
+ * stands. What waits on the operator comes first (the triage queue, each
+ * proposed question on a full card so a clarification on it is answered
+ * before it is admitted, and the clarifications agents asked), then the add
+ * form, then every question with
  * its origin badge, its author (claimed or signed, enrolled or not), scope,
  * work state, answer, leads, revisions and clarification thread. Every act is
  * run as `swarm.sh question`, so it is checked, written to the chain, and
@@ -23,6 +25,7 @@ import { api, ApiError } from "@/lib/api";
 import { clock } from "@/lib/format";
 import { useLive, useResource } from "@/lib/live";
 import type { QuestionOrigin, QuestionView, QuestionsPanelView, SwarmView } from "@/lib/types";
+import { acceptPayload, amendPayload, baseMoved, formBase, questionGroups, type FormBase } from "@/lib/question-forms";
 import { cn } from "@/lib/utils";
 
 const ORIGIN_TONE: Record<QuestionOrigin["kind"], Tone> = { goal: "slate", agent: "neutral", analyst: "kelp", reviewer: "saffron", observer: "band" };
@@ -73,36 +76,66 @@ function Row({ label, children }: { label: string; children: ReactNode }) {
 
 type Act = (payload: Record<string, unknown> & { action: string }) => Promise<void>;
 
-/** The small forms a question card opens: amend, priority, withdraw, accept. */
+/**
+ * The small forms a question card opens: amend, priority, withdraw, accept.
+ * An amend or accept form keeps the revision it was opened on (its base)
+ * until the operator refreshes it: another person's amendment arriving live
+ * is named, never folded into what the form sends (question-forms.ts).
+ */
 function CardActions({ q, act, busy }: { q: QuestionView; act: Act; busy: boolean }) {
   const [open, setOpen] = useState<null | "amend" | "priority" | "withdraw" | "accept">(null);
+  const [base, setBase] = useState<FormBase | null>(null);
   const [text, setText] = useState(q.text);
   const [why, setWhy] = useState("");
   const [neutral, setNeutral] = useState(q.neutral?.text ?? "");
   const [reason, setReason] = useState(q.priority_reason ?? "");
   const [acceptAs, setAcceptAs] = useState("bounded");
   if (q.withdrawn || q.after_done) return null;
+  const load = () => {
+    const b = formBase(q);
+    setBase(b);
+    setText(b.text);
+    setNeutral(b.neutral);
+  };
+  const toggle = (k: "amend" | "priority" | "withdraw" | "accept") => {
+    if (open === k) return setOpen(null);
+    if (k === "amend" || k === "accept") load();
+    setOpen(k);
+  };
+  const moved = baseMoved(base, q);
   const submit = async (payload: Record<string, unknown> & { action: string }) => {
     await act(payload);
     setOpen(null);
+    setBase(null);
     setWhy("");
   };
+  const movedNote =
+    moved !== null && base ? (
+      <InlineNote tone="danger">
+        {q.id} is at revision {moved} now: this form was opened on revision {base.rev}, and sending it is refused as stale.{" "}
+        <Button size="sm" variant="secondary" onClick={load}>
+          Refresh to revision {moved}
+        </Button>{" "}
+        (your draft is replaced by revision {moved}'s words)
+      </InlineNote>
+    ) : null;
   return (
     <div className="space-y-2">
       <div className="flex flex-wrap gap-1.5">
         {(["amend", "priority", "withdraw", ...(q.scope === "in_scope" ? (["accept"] as const) : [])] as const).map((k) => (
-          <Button key={k} size="sm" variant={open === k ? "default" : "secondary"} onClick={() => setOpen(open === k ? null : k)}>
+          <Button key={k} size="sm" variant={open === k ? "default" : "secondary"} onClick={() => toggle(k)}>
             {k === "amend" ? "Amend" : k === "priority" ? (q.priority === "urgent" ? "Priority" : "Mark urgent") : k === "withdraw" ? "Withdraw" : "Accept its limits"}
           </Button>
         ))}
       </div>
-      {open === "amend" ? (
+      {open === "amend" && base ? (
         <div className="grid gap-1.5">
-          <Label className="text-[12px] text-ink-2">A new verbatim revision against revision {q.rev} (refused if someone amended it since)</Label>
+          <Label className="text-[12px] text-ink-2">A new verbatim revision against revision {base.rev} (refused if someone amended it since)</Label>
+          {movedNote}
           <Textarea value={text} onChange={(e) => setText(e.target.value)} />
           <Input value={why} onChange={(e) => setWhy(e.target.value)} placeholder="why it is amended" />
           <Input value={neutral} onChange={(e) => setNeutral(e.target.value)} placeholder="a neutral formulation (optional, attributed to you)" />
-          <Button size="sm" disabled={busy || (!text.trim() && !neutral.trim())} onClick={() => void submit({ action: "amend", q: q.id, expected_rev: q.rev, ...(text.trim() !== q.text ? { text } : {}), ...(why.trim() ? { why } : {}), ...(neutral.trim() && neutral.trim() !== (q.neutral?.text ?? "") ? { neutral } : {}) })}>
+          <Button size="sm" disabled={busy || (!text.trim() && !neutral.trim())} onClick={() => void submit(amendPayload(q.id, base, { text, why, neutral }))}>
             Record revision
           </Button>
         </div>
@@ -130,12 +163,13 @@ function CardActions({ q, act, busy }: { q: QuestionView; act: Act; busy: boolea
           </Button>
         </div>
       ) : null}
-      {open === "accept" ? (
+      {open === "accept" && base ? (
         <div className="grid gap-1.5">
-          <Label className="text-[12px] text-ink-2">Accepting a question's limits ends the run examination-limited; it is refused while a lead on it is open, and holds for revision {q.rev} only.</Label>
+          <Label className="text-[12px] text-ink-2">Accepting a question's limits ends the run examination-limited; it is refused while a lead on it is open, and holds for revision {base.rev} only.</Label>
+          {movedNote}
           <Select value={acceptAs} onChange={setAcceptAs} aria-label="Accept as" options={[{ value: "bounded", label: "Bounded", hint: "the examination as far as it went" }, { value: "not_determinable", label: "Not determinable", hint: "the evidence cannot settle it" }]} />
           <Input value={why} onChange={(e) => setWhy(e.target.value)} placeholder="why" />
-          <Button size="sm" disabled={busy || !why.trim()} onClick={() => void submit({ action: "accept", q: q.id, accept_as: acceptAs, why, expected_rev: q.rev })}>
+          <Button size="sm" disabled={busy || !why.trim()} onClick={() => void submit(acceptPayload(q.id, base, acceptAs, why))}>
             Accept
           </Button>
         </div>
@@ -144,7 +178,7 @@ function CardActions({ q, act, busy }: { q: QuestionView; act: Act; busy: boolea
   );
 }
 
-function QuestionCard({ q, sigs, act, busy }: { q: QuestionView; sigs: QuestionsPanelView["signatures"]; act: Act; busy: boolean }) {
+function QuestionCard({ q, sigs, act, busy, children }: { q: QuestionView; sigs: QuestionsPanelView["signatures"]; act: Act; busy: boolean; children?: ReactNode }) {
   const [reply, setReply] = useState<Record<string, string>>({});
   const mySigs = sigs.filter((s) => s.q === q.id);
   return (
@@ -183,7 +217,7 @@ function QuestionCard({ q, sigs, act, busy }: { q: QuestionView; sigs: Questions
               E-{q.answer.seq}
               {q.answer.result ? ` (${q.answer.result.replace(/_/g, " ")})` : ""}
               {q.answer.inconclusive ? " (inconclusive)" : ""}
-              {q.answer.stale ? `: recorded before revision ${q.rev}, stale` : ""}
+              {q.answer.stale ? `: answers revision ${q.answer.question_rev ?? 1} of ${q.rev}, stale` : q.rev > 1 ? ` (revision ${q.answer.question_rev ?? 1})` : ""}
             </span>
           ) : (
             "none yet"
@@ -194,8 +228,8 @@ function QuestionCard({ q, sigs, act, busy }: { q: QuestionView; sigs: Questions
         {q.accepted ? <Row label="Accepted">{`${q.accepted.as.replace("_", " ")} by ${q.accepted.origin.name ?? q.accepted.origin.person ?? "?"}${q.accepted.stands ? "" : " (no longer stands: amended since)"}: ${q.accepted.why}`}</Row> : null}
         {q.withdrawn ? <Row label="Withdrawn">{`${clock(q.withdrawn.at)} by ${q.withdrawn.origin.name ?? q.withdrawn.origin.person ?? "?"}: ${q.withdrawn.why}`}</Row> : null}
         {mySigs.map((s) => (
-          <Row key={s.sign_seq} label="Signature">
-            <span className={s.state === "bad" ? "text-brick-ink" : "text-moss-ink"}>
+          <Row key={`${s.act_seq}-${s.sign_seq ?? "none"}`} label="Signature">
+            <span className={s.state === "bad" || s.state === "wrong-principal" ? "text-brick-ink" : "text-moss-ink"}>
               event {s.act_seq} by {s.person} ({s.key_kind}): {s.state}
             </span>
           </Row>
@@ -241,6 +275,7 @@ function QuestionCard({ q, sigs, act, busy }: { q: QuestionView; sigs: Questions
           ))}
         </div>
       ) : null}
+      {children}
       <CardActions q={q} act={act} busy={busy} />
     </li>
   );
@@ -387,16 +422,13 @@ export function QuestionsPanel({ view, version }: { view: SwarmView; version: nu
     { value: "", label: "Myself, not enrolled", hint: "the operator: this host's OS account, with the operator's authority" },
     ...(people.data?.people ?? []).map((p) => ({ value: p.id, label: `${p.name} (${p.role})`, hint: `${p.organisation}: a claim; signing is the command line's (--sign)` })),
   ];
-  const proposed = d.questions.filter((q) => q.scope === "proposed" && !q.withdrawn);
+  const grouped = questionGroups(d.questions);
+  const proposed = grouped.find((g) => g.key === "proposed")?.questions ?? [];
   const triage = d.triage.filter((t) => !t.resolved);
   const clarifications = d.questions.filter((q) => q.pending_clarifications.length);
-  const groups: Array<[string, QuestionView[], ReactNode]> = [
-    ["Asked by people", d.questions.filter((q) => ["analyst", "reviewer", "observer"].includes(q.origin.kind) && q.scope === "in_scope" && !q.withdrawn), <HelpCircle key="p" className="size-3.5" />],
-    ["The goal's", d.questions.filter((q) => q.origin.kind === "goal" && !q.withdrawn), <ListChecks key="g" className="size-3.5" />],
-    ["Opened by agents", d.questions.filter((q) => q.origin.kind === "agent" && q.scope === "in_scope" && !q.withdrawn), <PenLine key="a" className="size-3.5" />],
-    ["Excluded", d.questions.filter((q) => q.scope === "excluded" && !q.withdrawn), null],
-    ["Withdrawn", d.questions.filter((q) => q.withdrawn), null],
-  ];
+  const ICONS: Record<string, ReactNode> = { people: <HelpCircle key="p" className="size-3.5" />, goal: <ListChecks key="g" className="size-3.5" />, agents: <PenLine key="a" className="size-3.5" /> };
+  // The proposed ones are cards in the triage section, above.
+  const groups: Array<[string, QuestionView[], ReactNode]> = grouped.filter((g) => g.key !== "proposed").map((g) => [g.label, g.questions, ICONS[g.key] ?? null]);
   return (
     <div className="space-y-5">
       <p className="m-0 text-[12.5px] text-ink-2">
@@ -430,18 +462,12 @@ export function QuestionsPanel({ view, version }: { view: SwarmView; version: nu
         {proposed.length + triage.length === 0 ? <p className="m-0 text-[12.5px] text-ink-3">Nothing: every question is in scope or excluded, and no lead waits after a withdrawal.</p> : null}
         <ul className="m-0 list-none space-y-2 p-0">
           {proposed.map((q) => (
-            <li key={q.id} className="rounded-md border border-saffron bg-saffron-soft/30 px-3 py-2 text-[12.5px]">
-              <div className="flex flex-wrap items-center gap-2">
-                <code className="font-mono font-semibold">{q.id}</code>
-                <OriginBadge o={q.origin} />
-                <span className="text-ink-3">{q.author}</span>
-              </div>
-              <p className="m-0 mt-1 whitespace-pre-wrap text-ink">{q.text}</p>
-              <p className="m-0 text-ink-2">
-                {q.scope_why}
-                {q.objective_text ? ` Would add the objective: ${q.objective_text}.` : ""}
-              </p>
-              <div className="mt-1.5 flex flex-wrap items-center gap-2">
+            // A proposed question whole: its details, its clarifications (answered here before it is admitted), and the triage.
+            <QuestionCard key={q.id} q={q} sigs={d.signatures} act={act} busy={busy}>
+              <div className="flex flex-wrap items-center gap-2 rounded-md border border-saffron bg-saffron-soft/30 px-2 py-1.5">
+                <span className="text-ink-2">
+                  Triage{q.objective_text ? `; admitting it adds the objective: ${q.objective_text}` : ""}:
+                </span>
                 <Input className="h-8 max-w-[420px]" value={triageWhy[q.id] ?? ""} onChange={(e) => setTriageWhy({ ...triageWhy, [q.id]: e.target.value })} placeholder="why" />
                 <Button size="sm" disabled={busy || !(triageWhy[q.id] ?? "").trim()} onClick={() => void act({ action: "scope", target: q.id, scope: "in_scope", why: triageWhy[q.id] })}>
                   Admit
@@ -450,7 +476,7 @@ export function QuestionsPanel({ view, version }: { view: SwarmView; version: nu
                   Exclude
                 </Button>
               </div>
-            </li>
+            </QuestionCard>
           ))}
           {triage.map((t) => {
             const target = t.lead ?? t.q ?? "";
