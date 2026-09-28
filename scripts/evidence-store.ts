@@ -1230,12 +1230,13 @@ export async function checkStore(sandbox: string, before = Infinity): Promise<St
     scopes: { declared: started.filter((l) => kindOf(l) === "declared").length, all: started.filter((l) => kindOf(l) === "all").length, default_all: started.filter((l) => kindOf(l) === "default-all").length },
     manifests,
   };
-  // A brain's own outputs sealed as imports: the manifest by its hash, each file by its manifest.
-  const sealedLines = checked.lines.filter((l) => l.type === "brain_output_sealed");
+  // A brain's own outputs sealed as imports, and evidence and material added
+  // from outside (docs/adr/0014): the manifest by its hash, each file by its manifest.
+  const sealedLines = checked.lines.filter((l) => l.type === "brain_output_sealed" || l.type === "evidence_added" || l.type === "material_added");
   if (sealedLines.length) {
     out.imports = { sealed: sealedLines.length, verified: 0, mismatched: [] };
     for (const l of sealedLines) {
-      const dir = join(P.imports, String(l.job));
+      const dir = join(P.imports, String(l.type === "brain_output_sealed" ? l.job : l.import));
       const m = await readManifest(join(dir, "manifest.json"));
       let good = Boolean(m) && m!.sha256 === l.manifest_sha256;
       for (const f of m?.manifest.files ?? []) {
@@ -1243,8 +1244,12 @@ export async function checkStore(sandbox: string, before = Infinity): Promise<St
         const got = await sha256File(Buffer.concat([Buffer.from(join(dir, "out")), Buffer.from("/"), Buffer.from(f.path_b64, "base64")])).catch(() => null);
         if (got !== f.sha256) good = false;
       }
+      if (good && l.type !== "brain_output_sealed" && typeof l.material_json_sha256 === "string") {
+        const rec = await readFile(join(dir, "material.json")).catch(() => null);
+        if (!rec || sha256Hex(rec) !== l.material_json_sha256) good = false;
+      }
       if (good) out.imports.verified += 1;
-      else out.imports.mismatched.push(`${l.import} (store/imports/${l.job})`);
+      else out.imports.mismatched.push(l.type === "brain_output_sealed" ? `${l.import} (store/imports/${l.job})` : `import:${l.import} (store/imports/${l.import}, ${l.type === "evidence_added" ? "evidence added" : "material supplied"})`);
     }
   }
   let ledgerText: string | null = null;

@@ -124,6 +124,17 @@ export async function inventoryRevision(sandboxRoot: string): Promise<string> {
     const rec = await readFile(join(sandboxRoot, "catalog", "gen", g, "generation.json")).catch(() => null);
     if (rec) h.update(`gen ${g} ${createHash("sha256").update(rec).digest("hex")}\n`);
   }
+  // Evidence added after the kickoff (swarm.sh evidence add, docs/adr/0014): each addition is an inventory revision.
+  const journal = await readFile(join(sandboxRoot, "store", "journal.jsonl"), "utf8").catch(() => "");
+  for (const line of journal.split("\n")) {
+    if (!line.includes('"evidence_added"')) continue;
+    try {
+      const l = JSON.parse(line) as { type?: string; import?: string; manifest_sha256?: string; inventory_rev?: number };
+      if (l.type === "evidence_added") h.update(`evidence ${l.inventory_rev ?? "?"} ${l.import ?? ""} ${l.manifest_sha256 ?? ""}\n`);
+    } catch {
+      // a torn line: the journal's own check names it
+    }
+  }
   return h.digest("hex");
 }
 

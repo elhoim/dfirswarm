@@ -1862,6 +1862,11 @@ export async function claimName(
 ): Promise<NameResult> {
   const name = tidyName(rawName);
   if (!name) return { ok: false, error: "A name is one line of text; this one was empty." };
+  // A name and what an agent says it is doing sit on every board, header
+  // and report: neither may carry a value the run marks sensitive (B9),
+  // whatever its origin, the goal's own words included.
+  const leak = await sensitiveRefusalOf(sandboxRoot, [["the name", String(rawName ?? "")], ["doing", doing ? String(doing) : ""]]);
+  if (leak) return { ok: false, error: `${leak}. Nothing was recorded.` };
   return withTableLock(sandboxRoot, async () => {
     const names = await readNames(sandboxRoot);
     // "dump5 hunter" and "dump5-hunter" are one name to a reader, and two
@@ -5794,6 +5799,8 @@ export const TOOL_RESERVED_NAMES = new Set([
   // by the pause, the seats woken after an extension, a stop proposed to the
   // operator, and a run resumed after a stop or a seal.
   "run_paused", "pause_hold", "resume_wake", "stop_proposed", "run_resumed",
+  // The operator requests' outbox (extensions/requests.ts, docs/adr/0014): a request handed to the operator's notification targets.
+  "request_notified",
   // The dynamic network (scripts/net-broker.ts, scripts/net-fetch.ts): its
   // tools, and the fetch service's own lines and its keeper's restart.
   "net_request", "net_fetch", "network", "net_fetch_started", "net_fetch_refused", "net_fetch_restarted",
@@ -8349,6 +8356,8 @@ export async function recordEntry(ctx: SwarmContext, input: LedgerInput): Promis
     const checked = await checkRefs(ctx.sandboxRoot, refs);
     if (!checked.ok) return checked;
     for (const r of checked.resolved) if (r.kind === "job" && r.status && r.status !== "ok") failed.push({ ref: r.ref, status: r.status });
+    const use = await materialUseRefusal(ctx.sandboxRoot, refs);
+    if (use) return { ok: false, reason: use };
   }
   // A finding with no ref is taken, and told what would let a reader check
   // it: the ask rides in the answer, never as an error.
@@ -8479,6 +8488,42 @@ async function appendLedgerEntry(ctx: SwarmContext, held: { assertOwned(): Promi
   entries.push(entry);
   await renderLedger(ctx.sandboxRoot, await withAttestations(ctx.sandboxRoot, entries));
   return { ok: true, entry, merged: false, total: entries.length, ...(notes.length ? { note: notes.join("; ") } : {}) };
+}
+
+/**
+ * The case policy's material use, held at the record (docs/adr/0014): a ref
+ * to material whose class the policy says may not be used (`none`) is
+ * refused, naming the class and the policy; `reference` and `evidence` are
+ * taken, and what rests on them is flagged where the answers are weighed.
+ * Read from network/policy.json and the ledger's external entries; a run
+ * with neither refuses nothing.
+ */
+export async function materialUseRefusal(sandboxRoot: string, refs: string[]): Promise<string | null> {
+  let use: Record<string, string> = {};
+  let preset = "standard";
+  try {
+    const p = JSON.parse(await readFile(join(sandboxRoot, "network", "policy.json"), "utf8")) as { policy?: string; material_use?: unknown };
+    preset = String(p.policy ?? "standard");
+    if (p.material_use && typeof p.material_use === "object") use = Object.fromEntries(Object.entries(p.material_use as Record<string, unknown>).map(([k, v]) => [k, String(v)]));
+  } catch {
+    return null;
+  }
+  if (!Object.values(use).includes("none")) return null;
+  const classOf = new Map<string, string>();
+  for (const e of await readLedger(sandboxRoot, { raw: true }).catch(() => [] as LedgerEntry[])) {
+    if (e.kind !== "external" || !e.source_class) continue;
+    for (const r of e.refs ?? []) {
+      const imp = /^import:([a-z0-9-]{1,64})/.exec(r.trim());
+      classOf.set(imp ? `import:${imp[1]}` : r.trim(), e.source_class);
+    }
+  }
+  for (const r of refs) {
+    const t = r.trim();
+    const key = /^import:([a-z0-9-]{1,64})/.exec(t) ? `import:${/^import:([a-z0-9-]{1,64})/.exec(t)![1]}` : /^net:\d+\/\d+/.exec(t) ? /^net:\d+\/\d+/.exec(t)![0] : t;
+    const cls = classOf.get(key) ?? (key.startsWith("net:") ? "external_capture" : undefined);
+    if (cls && use[cls] === "none") return `${t} is ${cls.replace(/_/g, " ")}, which case policy ${preset} does not let a record cite (material_use ${cls}=none): it is kept on the record, and the examination does not rest on it`;
+  }
+  return null;
 }
 
 /**
@@ -9374,6 +9419,41 @@ export function sensitiveTokens(entries: LedgerEntry[]): SensitiveToken[] {
     }
   }
   return [...out].map(([token, seq]) => ({ token, seq })).sort((a, b) => b.token.length - a.token.length || a.token.localeCompare(b.token));
+}
+
+/**
+ * Every value the run marks sensitive, whatever its origin (B9, docs/adr/0014):
+ * what each ledger entry recorded sensitive says, of any kind and by anyone
+ * (an agent's finding or answer, external material the operator supplied as
+ * sensitive), standing or superseded, since a value once marked sensitive
+ * stays so. There is no "answer value" concept and no exemption for words
+ * the goal itself uses: a value is sensitive wherever it first appeared.
+ */
+export async function runSensitiveTokens(sandboxRoot: string): Promise<SensitiveToken[]> {
+  const entries = await readLedger(sandboxRoot, { raw: true }).catch(() => [] as LedgerEntry[]);
+  return entries.some((e) => e.sensitive) ? sensitiveTokens(entries) : [];
+}
+
+/** The first sensitive value a text holds, compared without regard to case, or null. */
+export function sensitiveHit(text: string, tokens: SensitiveToken[]): SensitiveToken | null {
+  if (!text || !tokens.length) return null;
+  const lower = text.toLowerCase();
+  return tokens.find((t) => lower.includes(t.token.toLowerCase())) ?? null;
+}
+
+/**
+ * The refusal for words that would carry a value the run marks sensitive
+ * (a name, a `doing` label, a question's text, its reasons and hints),
+ * naming the field and the entry, never the value; null when none does.
+ */
+export async function sensitiveRefusalOf(sandboxRoot: string, texts: Array<[string, string | undefined | null]>): Promise<string | null> {
+  const tokens = await runSensitiveTokens(sandboxRoot);
+  if (!tokens.length) return null;
+  for (const [name, text] of texts) {
+    const hit = text ? sensitiveHit(text, tokens) : null;
+    if (hit) return `${name} holds a value the run marks sensitive (E-${hit.seq}): say it without the value; the entry can be cited by its number`;
+  }
+  return null;
 }
 
 /** Who asked a question section, when a person did (the question register): their words for the refusal, or null. */

@@ -143,6 +143,22 @@ export type ReleaseRecord = {
   };
   /** The technical-review policy in force when it was sealed. */
   policy?: { require_technical_review: boolean; source: string | null };
+  /**
+   * The case policy the kickoff recorded (network/policy.json, docs/adr/0014),
+   * by its sha256, and whether custody held it to the kickoff's anchor.
+   * Absent from a release made before it was bound.
+   */
+  case_policy?: { sha256: string; policy: string; network: string; more_evidence: string; material_use: Record<string, string>; anchored: boolean | null } | null;
+  /**
+   * The standing answers that rest on external material (a capture, evidence
+   * added after the kickoff, material the operator supplied, a question's
+   * attachment, and what was derived from them), each with its entry's hash
+   * and the source classes it rests on: named, never failed. Absent from a
+   * release made before it was bound.
+   */
+  external?: { answers: Array<{ section: string; seq: number; hash: string | null; classes: string[]; via: string[] }>; note: string };
+  /** The acquisition requests of the run as they stood (docs/adr/0014): what was asked for, and how each ended. */
+  acquisitions?: Array<{ id: string; state: string; stage: string | null; source: string; questions: string[]; import: string | null }>;
 };
 
 /** What the examiner confirms, word for word, before a release is sealed. */

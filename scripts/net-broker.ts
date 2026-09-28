@@ -24,7 +24,7 @@ import { request as httpRequest } from "node:http";
 import { join, resolve } from "node:path";
 import * as L from "../extensions/leads.ts";
 import * as P from "../extensions/protocol.ts";
-import { POLICY_REL, readCasePolicy, type CasePolicy } from "./case-policy.ts";
+import { permittedUse, POLICY_REL, readCasePolicy, type CasePolicy } from "./case-policy.ts";
 import { resolveRef } from "./evidence-store.ts";
 import { loadCatalogue, loadDeny, type Catalogue, type DenyList } from "./net-adapters.ts";
 import { principalToken, type FetchAnswer, type NetFetchConfig } from "./net-fetch.ts";
@@ -333,7 +333,13 @@ export async function requestAccess(sandbox: string, who: string, input: NetRequ
         : `${NOTE_DENIED} ${decision.overridable ? "" : "No operator item: this refusal is not one the operator overrides by a grant."}`,
     };
   });
-  if (newItem) await openOperatorItem(S, newItem, who, answer.request ?? "", o).catch(() => undefined);
+  // Assigned inside the lock's closure, which the compiler does not follow.
+  const opened = newItem as { id: string; host: string; lead: string | null } | null;
+  if (opened) {
+    // The item is committed on the grants chain; its request is derived from it, now or at the hub's next round.
+    const failed = await openOperatorItem(S, opened, who, answer.request ?? "", o).then(() => null, (err: Error) => err.message);
+    if (failed) return { ...answer, note: `${answer.note ?? ""} The operator's request for ${opened.id} is committed and could not be written yet (${failed}); the hub's next round writes it.`.trim() };
+  }
   return answer;
 }
 
@@ -360,12 +366,17 @@ function grantedAnswer(g: GrantRecord, request: string, sameAs?: string): Reques
   };
 }
 
-/** A new operator item: on operator-requests.jsonl (the operator's lane, the console and the watchdog read it) and the board. */
+/**
+ * A new operator item: its `item` event on the grants chain is the commit;
+ * the operator request (the outbox, extensions/requests.ts, with a durable
+ * R-<n>) is derived from it and written once, and the board is told. A
+ * request that cannot be written now is written at the hub's next round.
+ */
 async function openOperatorItem(S: string, item: { id: string; host: string; lead: string | null }, by: string, request: string, o: { run?: string; post?: (args: { tag: string; body: string; to?: string }) => Promise<unknown> }): Promise<void> {
   const run = o.run ?? (await P.readTeam(S).catch(() => null))?.swarm_id ?? "<run>";
   const answer = `swarm.sh net ${run} grant ${request} --why TEXT | swarm.sh net ${run} deny ${item.id} --why TEXT`;
-  const line = { at: new Date().toISOString(), run, kind: "network", item: item.id, lead: item.lead ?? "", by, title: `network: ${item.host}`, request: `${by} asks to reach ${item.host} for ${item.lead ?? "no lead"} (${request}); refused automatically, overridable`, answer };
-  await appendFile(join(S, L.OPERATOR_REQUESTS), `${JSON.stringify(line)}\n`, "utf8");
+  const R = await import("../extensions/requests.ts");
+  await R.reconcileRequests(S);
   await o.post?.({ tag: "ask", body: `NETWORK ITEM ${item.id} for the operator: ${by} asked to reach ${item.host} for ${item.lead ?? "no lead"} (${request}), refused automatically by the case policy; the operator decides with ${answer}. Nobody need ask again: a repeat joins ${item.id}.` });
 }
 
@@ -488,7 +499,7 @@ export async function recordCaptures(sandbox: string, only?: string): Promise<Ar
           at: r.at,
           from: f.url,
           ...(r.sha256 ? { sha256: r.sha256 } : {}),
-          permitted_use: policy.material_use,
+          permitted_use: permittedUse(policy, "external_capture"),
           grant: gid,
           ...(g.request ? { request: g.request } : {}),
           ...(g.lead ? { lead: g.lead } : {}),
@@ -836,25 +847,47 @@ export function jobOfPrincipal(principal: string): string | null {
 }
 
 /**
- * External lineage: every capture, every job that could read one or its
- * derivations, and every ledger entry that rests on any of them,
- * transitively. What a job could read is taken from what it resolved (its
- * scope manifest: each object's path and digest), never from how it spelled
- * it: `store/net/1/1/body` is `net:1/1`, and a copy of a capture's bytes is
- * that capture by its digest. A job whose scope was broad (inputs left out
- * or all) could read every capture sealed before it started, and is marked
- * so. A job that fetched under a grant is external by what it fetched.
+ * External lineage: every capture and every piece of material recorded as
+ * external (evidence added after the kickoff, material the operator
+ * supplied, a question's attachment: docs/adr/0014), every job that could
+ * read one or its derivations, and every ledger entry that rests on any of
+ * them, transitively, with the source classes each rests on. What a job
+ * could read is taken from what it resolved (its scope manifest: each
+ * object's path and digest), never from how it spelled it:
+ * `store/net/1/1/body` is `net:1/1`, `store/imports/ev-0001/out/x` is
+ * `import:ev-0001`, and a copy of external bytes is that material by its
+ * digest. A job whose scope was broad (inputs left out or all) could read
+ * every capture and every import sealed before it started, and is marked so.
+ * A job that fetched under a grant is external by what it fetched.
  */
-export async function externalLineage(sandbox: string): Promise<{ captures: Set<string>; jobs: Map<string, string[]>; entries: Map<number, string[]> }> {
+export async function externalLineage(sandbox: string): Promise<{ captures: Set<string>; jobs: Map<string, string[]>; entries: Map<number, string[]>; classes: Map<number, string[]>; material: Map<string, string> }> {
   const S = resolve(sandbox);
   const state = await readNetState(S);
+  const ledger = await P.readLedger(S, { raw: true }).catch(() => [] as P.LedgerEntry[]);
   const captures = new Set<string>();
   const jobs = new Map<string, string[]>();
+  /** A job's or an entry's source classes. */
+  const jobClasses = new Map<string, Set<string>>();
+  const entryClasses = new Map<number, Set<string>>();
+  /** Each external source (net:k/n, import:<id>) and its class. */
+  const material = new Map<string, string>();
   /** A digest of external bytes, and what it came from. */
   const digests = new Map<string, string>();
   const published: Array<{ ref: string; at: number }> = [];
+  const classOf = (via: string): string[] => {
+    const src = /^(net:\d+\/\d+|import:[a-z0-9-]+)/.exec(via)?.[1];
+    if (src && material.has(src)) return [material.get(src) as string];
+    const job = /^job:(j\d{6})/.exec(via)?.[1];
+    if (job) return [...(jobClasses.get(job) ?? [])];
+    const e = /^E-(\d+)/.exec(via)?.[1];
+    if (e) return [...(entryClasses.get(Number(e)) ?? [])];
+    return [];
+  };
   const taint = (job: string, via: string[]) => {
     if (!via.length) return false;
+    const cls = jobClasses.get(job) ?? new Set<string>();
+    for (const v of via) for (const c of classOf(v)) cls.add(c);
+    jobClasses.set(job, cls);
     const was = jobs.get(job);
     if (was) {
       const more = via.filter((v) => !was.includes(v));
@@ -875,6 +908,7 @@ export async function externalLineage(sandbox: string): Promise<{ captures: Set<
   for (const list of state.fetches.values()) {
     for (const f of list) {
       captures.add(f.capture);
+      material.set(f.capture, "external_capture");
       const c = parseCaptureRef(f.capture);
       if (c && f.result?.published) {
         published.push({ ref: f.capture, at: Date.parse(f.result.at) });
@@ -884,6 +918,22 @@ export async function externalLineage(sandbox: string): Promise<{ captures: Set<
       if (j) taint(j, [f.capture]);
     }
   }
+  // Material recorded as external on the ledger (swarm.sh evidence add, material add, a question's attachment).
+  for (const e of ledger) {
+    if (e.kind !== "external" || e.source_class === "external_capture") continue;
+    for (const r of e.refs ?? []) {
+      const imp = /^import:([a-z0-9-]{1,64})/.exec(r.trim());
+      const key = imp ? `import:${imp[1]}` : r.trim();
+      if (!material.has(key)) material.set(key, String(e.source_class ?? "operator_supplied"));
+      if (imp) {
+        published.push({ ref: key, at: Date.parse(String(e.provenance?.at ?? e.at)) || 0 });
+        for (const d of await manifestDigests(join(S, "store", "imports", imp[1], "manifest.json"))) if (!digests.has(d)) digests.set(d, key);
+      } else {
+        const sh = /^sha256:([0-9a-f]{64})$/.exec(r.trim());
+        if (sh && !digests.has(sh[1])) digests.set(sh[1], key);
+      }
+    }
+  }
   /** What a path or a reference names, as the lineage reads it. */
   const named = (x: string): string | null => {
     const t = x.trim();
@@ -891,13 +941,15 @@ export async function externalLineage(sandbox: string): Promise<{ captures: Set<
     if (net) return `net:${net[1]}/${net[2]}`;
     const job = /^(?:job:|store\/jobs\/)(j\d{6})/.exec(t);
     if (job) return `job:${job[1]}`;
+    const imp = /^(?:import:|store\/imports\/)([a-z0-9-]{1,64})/.exec(t);
+    if (imp) return `import:${imp[1]}`;
     return null;
   };
   const viaOf = (paths: string[], shas: string[]): string[] => {
     const via: string[] = [];
     for (const p of paths) {
       const n = named(p);
-      if (n?.startsWith("net:")) via.push(n);
+      if (n?.startsWith("net:") || (n?.startsWith("import:") && material.has(n))) via.push(n);
       else if (n?.startsWith("job:") && jobs.has(n.slice(4))) via.push(n);
     }
     for (const d of shas) if (digests.has(d)) via.push(`${digests.get(d)} (by its bytes)`);
@@ -946,7 +998,6 @@ export async function externalLineage(sandbox: string): Promise<{ captures: Set<
       }
     }
   }
-  const ledger = await P.readLedger(S, { raw: true }).catch(() => [] as P.LedgerEntry[]);
   const importDigests = new Map<string, string[]>();
   const entries = new Map<number, string[]>();
   for (let changed = true; changed; ) {
@@ -957,11 +1008,11 @@ export async function externalLineage(sandbox: string): Promise<{ captures: Set<
       if (e.kind === "external") via.push(...(e.refs ?? []));
       for (const r of e.refs ?? []) {
         const n = named(r);
-        if (n?.startsWith("net:") || (n?.startsWith("job:") && jobs.has(n.slice(4)))) via.push(r);
+        if (n?.startsWith("net:") || (n?.startsWith("import:") && material.has(n)) || (n?.startsWith("job:") && jobs.has(n.slice(4)))) via.push(r);
         const sh = /^sha256:([0-9a-f]{64})$/.exec(r.trim());
         if (sh && digests.has(sh[1])) via.push(`${r} (${digests.get(sh[1])}, by its bytes)`);
         const imp = /^import:([a-z0-9-]{1,64})/.exec(r.trim());
-        if (imp) {
+        if (imp && !material.has(`import:${imp[1]}`)) {
           if (!importDigests.has(imp[1])) importDigests.set(imp[1], await manifestDigests(join(S, "store", "imports", imp[1], "manifest.json")));
           const hit = (importDigests.get(imp[1]) ?? []).find((d) => digests.has(d));
           if (hit) via.push(`${r} (${digests.get(hit)}, by its bytes)`);
@@ -970,10 +1021,21 @@ export async function externalLineage(sandbox: string): Promise<{ captures: Set<
       for (const edge of [...(e.support ?? []), ...(e.limitations ?? [])]) if (entries.has(edge.seq)) via.push(`E-${edge.seq}`);
       for (const rel of e.rel ?? []) if (rel.kind === "derived_from" && entries.has(rel.to)) via.push(`E-${rel.to}`);
       if (via.length) {
-        entries.set(e.seq, [...new Set(via)]);
+        const uniq = [...new Set(via)];
+        entries.set(e.seq, uniq);
+        const cls = new Set<string>(e.kind === "external" && e.source_class ? [e.source_class] : []);
+        for (const v of uniq) {
+          const src = named(v.replace(/ \(.*$/, ""));
+          if (src && material.has(src)) cls.add(material.get(src) as string);
+          const by = / \(([^,)]+)(?:, by its bytes)?\)$/.exec(v)?.[1];
+          if (by && material.has(by)) cls.add(material.get(by) as string);
+          for (const c of classOf(v)) cls.add(c);
+        }
+        entryClasses.set(e.seq, cls);
         changed = true;
       }
     }
   }
-  return { captures, jobs, entries };
+  const classes = new Map<number, string[]>([...entryClasses].map(([k, v]) => [k, [...v].sort()]));
+  return { captures, jobs, entries, classes, material };
 }

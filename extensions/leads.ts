@@ -45,7 +45,12 @@ import * as P from "./protocol.ts";
 export const LEADS_DIR = "leads";
 export const LEADS_LOG = "leads/leads.jsonl";
 export const LEADS_MD = "leads/leads.md";
-/** Every request an agent made of the operator (a lead closed needs_operator), one JSON line each. */
+/**
+ * Every request made of the operator (a lead closed needs_operator, an
+ * acquisition, a clarification, a network item, a stop proposed), one JSON
+ * line each as it stands: rendered from requests/requests.jsonl, the outbox's
+ * chain (extensions/requests.ts).
+ */
 export const OPERATOR_REQUESTS = "operator-requests.jsonl";
 /** Hosts the operator allowed while the run went on, for jobs run with network=allowlist. */
 export const OPERATOR_HOSTS = "operator-hosts.jsonl";
@@ -123,6 +128,13 @@ export type LeadEvent = {
   from?: string;
   disposition?: LeadDisposition;
   ref?: string;
+  /**
+   * A close needs_operator that asks for evidence the run does not have: the
+   * acquisition (extensions/requests.ts), committed on the close itself, so
+   * the operator request it makes is derived from this line and written once
+   * (the transactional outbox, docs/adr/0014).
+   */
+  ask?: import("./requests.ts").AcquisitionAsk;
   add?: string[];
   remove?: string[];
   /** A reopen's cause: superseded, disputed, operator, agent. */
@@ -1446,9 +1458,12 @@ function checkRef(disposition: LeadDisposition, raw: string, l: Lead, snap: Lead
  * Close a lead with its disposition and what it cites. The holder closes its
  * own; an unheld lead can be closed by anyone (a duplicate found, a search
  * already recorded), and the record says who. A lead closed needs_operator
- * also writes its request to operator-requests.jsonl.
+ * is a request of the operator: committed on the close (with its `ask` when
+ * it asks for evidence), then written to the outbox (extensions/requests.ts)
+ * with a durable id. A write that fails is not swallowed: the answer says the
+ * request is pending, and the next reconciliation writes it.
  */
-export async function closeLead(ctx: P.SwarmContext, rawId: unknown, input: { disposition?: string; ref?: string; why?: string; generation?: number }): Promise<LeadResult<{ lead: LeadView; operator_request?: string }>> {
+export async function closeLead(ctx: P.SwarmContext, rawId: unknown, input: { disposition?: string; ref?: string; why?: string; generation?: number; ask?: unknown }): Promise<LeadResult<{ lead: LeadView; operator_request?: string; request?: { id: string; kind: string; state: string; stage: string | null; answer: string | null }; request_pending?: string }>> {
   const ref = leadRef(rawId);
   if (!ref.ok) return ref;
   const disposition = String(input.disposition ?? "").trim().toLowerCase() as LeadDisposition;
@@ -1458,11 +1473,15 @@ export async function closeLead(ctx: P.SwarmContext, rawId: unknown, input: { di
   if (!refText.ok) return refText;
   const why = bounded("why", input.why, LEAD_WHY_MAX, false);
   if (!why.ok) return why;
+  if (input.ask !== undefined && input.ask !== null && disposition !== "needs_operator") return { ok: false, reason: "ask goes with needs_operator: an acquisition is a request of the operator" };
+  const R = await import("./requests.ts");
   try {
     const r = await transact<Fail | { ok: true }>(ctx.sandboxRoot, async (snap) => {
       const l = snap.state.leads.get(ref.id);
       if (!l) return { append: [], result: { ok: false as const, reason: `${ref.id} does not exist` } };
       if (l.closed) return { append: [], result: { ok: false as const, reason: `${l.id} is already closed (${l.closed.disposition}, by ${l.closed.by})` } };
+      const asked = R.checkAsk(input.ask, l.answers.map((a) => (/^\d+$/.test(a) ? `Q-${a}` : a)));
+      if (!asked.ok) return { append: [], result: { ok: false as const, reason: asked.reason } };
       if (l.holder) {
         const refused = holderOnly(l, ctx, input.generation, "close");
         if (refused) return { append: [], result: { ok: false as const, reason: refused } };
@@ -1475,14 +1494,30 @@ export async function closeLead(ctx: P.SwarmContext, rawId: unknown, input: { di
       const negative = disposition === "negative" ? await negativeClose(ctx.sandboxRoot, l, snap) : null;
       if (negative && !negative.ok) return { append: [], result: { ok: false as const, reason: negative.reason } };
       const extra = negative?.ok ? { ...(negative.not_examined.length ? { not_examined: negative.not_examined } : {}), ...(negative.quick ? { quick_negative: negative.quick } : {}) } : {};
-      return { append: [{ by: ctx.agentId, ev: "close", lead: l.id, generation: l.generation, disposition, ref: checked.ref, ...(why.value ? { why: why.value } : {}), ...extra }], result: { ok: true as const } };
+      return { append: [{ by: ctx.agentId, ev: "close", lead: l.id, generation: l.generation, disposition, ref: checked.ref, ...(why.value ? { why: why.value } : {}), ...(asked.ask ? { ask: asked.ask } : {}), ...extra }], result: { ok: true as const } };
     });
     if (!r.ok) return r;
     const snap = await leadsSnapshot(ctx.sandboxRoot);
     const view = viewLead(snap.state.leads.get(ref.id)!, snap);
-    let request: string | undefined;
-    if (disposition === "needs_operator") request = await writeOperatorRequest(ctx.sandboxRoot, view, ctx.agentId).catch(() => undefined);
-    return { ok: true, lead: view, ...(request ? { operator_request: request } : {}) };
+    if (disposition !== "needs_operator") return { ok: true, lead: view };
+    // The close is the commit; the request is written from it, once, by its key.
+    const closeSeq = r.events.find((e) => e.ev === "close")?.seq;
+    try {
+      await R.reconcileRequests(ctx.sandboxRoot);
+      const rs = await R.requestsSnapshot(ctx.sandboxRoot);
+      const rid = closeSeq ? rs.byKey.get(`lead:${ref.id}:${closeSeq}`) : undefined;
+      const req = rid ? rs.requests.get(rid) : undefined;
+      if (!req) return { ok: true, lead: view, request_pending: `the request is committed on ${ref.id}'s close and is written to the operator's requests at the next reconciliation` };
+      return {
+        ok: true,
+        lead: view,
+        operator_request: String(req.line.answer ?? ""),
+        request: { id: req.rid, kind: req.kind, state: req.state, stage: req.stage, answer: req.closed ? req.closed.text : null },
+      };
+    } catch (err) {
+      // Not swallowed: said to the agent, on the trace with its answer, and made good at the next reconciliation.
+      return { ok: true, lead: view, request_pending: `the request is committed on ${ref.id}'s close and could not be written to the operator's requests yet (${(err as Error).message}); the next reconciliation writes it` };
+    }
   } catch (err) {
     return { ok: false, reason: (err as Error).message };
   }
@@ -1530,15 +1565,6 @@ async function negativeClose(sandboxRoot: string, l: Lead, snap: LeadsSnapshot):
   }
   const quick = heldMs <= NB.QUICK_NEGATIVE_HELD_MS && l.jobs.length <= 1 && objects.size <= 1 && !everything ? { held_ms: heldMs, jobs: l.jobs.length, objects: objects.size } : null;
   return { ok: true, not_examined: notExamined, quick };
-}
-
-/** One line in operator-requests.jsonl, for the console and the CLI; the command that answers it. */
-async function writeOperatorRequest(sandboxRoot: string, lead: LeadView, by: string): Promise<string> {
-  const run = (await P.readTeam(sandboxRoot).catch(() => null))?.swarm_id ?? "";
-  const answer = `swarm.sh lead ${run || "<run>"} note ${lead.id} "<your answer>" [--allow-host HOST]`;
-  const line = { at: new Date().toISOString(), run, lead: lead.id, by, title: lead.title, request: lead.ref ?? "", answer };
-  await appendFile(join(sandboxRoot, OPERATOR_REQUESTS), `${JSON.stringify(line)}\n`, "utf8");
-  return answer;
 }
 
 /**
@@ -1889,6 +1915,9 @@ export async function leadsDigest(ctx: P.SwarmContext, o: { mark?: boolean } = {
   const Q = await import("./questions.ts");
   await Q.reconcile(ctx.sandboxRoot).catch(() => undefined);
   await Q.deliverPending(ctx.sandboxRoot).catch(() => undefined);
+  // An operator request committed on a lead's close, a clarification or a network item, and not yet written (docs/adr/0014).
+  const R = await import("./requests.ts");
+  await R.reconcileRequests(ctx.sandboxRoot).catch(() => undefined);
   // How each question stands, on the register's chain when it changed (an answer, a review, an acceptance).
   await Q.syncDispositions(ctx.sandboxRoot).catch(() => undefined);
   const snap = await leadsSnapshot(ctx.sandboxRoot);

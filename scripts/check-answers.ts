@@ -302,7 +302,10 @@ export async function sectionBars(S: string, existence: readonly string[] = []):
  * limitation excuses. An answer recorded before results reads as it always
  * did (a limitation limits, a search answers only an existence question).
  */
-export async function checkLedgerAnswers(sandbox: string, wanted: string[], existence: readonly string[] = []): Promise<{ ok: boolean; lines: string[]; outcomes: Record<string, LedgerOutcome>; results: Record<string, string>; defects: LedgerDefect[]; withdrawn: Record<string, string> }> {
+/** An answer that rests on external material (docs/adr/0012, 0014): the entry, what it rests on, and the source classes. */
+export type ExternalFlag = { seq: number; via: string[]; classes: string[] };
+
+export async function checkLedgerAnswers(sandbox: string, wanted: string[], existence: readonly string[] = []): Promise<{ ok: boolean; lines: string[]; outcomes: Record<string, LedgerOutcome>; results: Record<string, string>; defects: LedgerDefect[]; withdrawn: Record<string, string>; external: Record<string, ExternalFlag> }> {
   const S = resolve(sandbox);
   const outcomes: Record<string, LedgerOutcome> = {};
   const results: Record<string, string> = {};
@@ -312,12 +315,12 @@ export async function checkLedgerAnswers(sandbox: string, wanted: string[], exis
   const withdrawn: Record<string, string> = {};
   const text = await readFile(join(S, "ledger", "entries.jsonl"), "utf8").catch(() => "");
   const chain = verifyLedgerChain(text);
-  if (!chain.ok) return { ok: false, lines: [`the ledger's chain is broken at line ${chain.broken_at} (${chain.reason}): no answer can rest on it`], outcomes, results, defects: [], withdrawn };
+  if (!chain.ok) return { ok: false, lines: [`the ledger's chain is broken at line ${chain.broken_at} (${chain.reason}): no answer can rest on it`], outcomes, results, defects: [], withdrawn, external: {} };
   // The acts are chains of their own: a broken one cannot say who checked what.
   for (const [rel, verify] of [[LEDGER_ATTESTATIONS, verifyAttestationChain], [LEDGER_DISPUTES, verifyDisputeChain]] as const) {
     const t = await readFile(join(S, rel), "utf8").catch(() => "");
     const v = verify(t);
-    if (!v.ok) return { ok: false, lines: [`${rel}'s chain is broken at line ${v.broken_at} (${v.reason}): the acts on the answers cannot be read`], outcomes, results, defects: [], withdrawn };
+    if (!v.ok) return { ok: false, lines: [`${rel}'s chain is broken at line ${v.broken_at} (${v.reason}): the acts on the answers cannot be read`], outcomes, results, defects: [], withdrawn, external: {} };
   }
   const entries = await readLedger(S);
   const attestations = await readAttestations(S);
@@ -325,7 +328,7 @@ export async function checkLedgerAnswers(sandbox: string, wanted: string[], exis
   const sections: string[] = [];
   for (const w of wanted) {
     const sec = answerSection(w);
-    if (!sec.ok) return { ok: false, lines: [`--sections: ${sec.reason}`], outcomes, results, defects: [], withdrawn };
+    if (!sec.ok) return { ok: false, lines: [`--sections: ${sec.reason}`], outcomes, results, defects: [], withdrawn, external: {} };
     if (!sections.includes(sec.section)) sections.push(sec.section);
   }
   const lines: string[] = [];
@@ -455,19 +458,23 @@ export async function checkLedgerAnswers(sandbox: string, wanted: string[], exis
   for (const d of defects) lines.push(`${d.named_by.length ? `defect, named by ${d.named_by.map((n) => `#${n}`).join(", ")}` : "DEFECT"}: ${d.what}${d.named_by.length ? "" : `. Fix: ${d.fix}`}`);
   const unsupported = Object.entries(gate.unsupported);
   if (unsupported.length) lines.push(`tokens in no cited entry (counted, not failed; the release weighs them): ${unsupported.map(([seq, t]) => `#${seq}: ${t.join(", ")}`).join("; ")}`);
-  // What rests on external material (a capture the fetch service sealed, and
-  // whatever was derived from it: docs/adr/0012): named, never failed. A
-  // capture's hash proves its bytes, not their truth or their fit to the time
-  // of the events; an examiner weighs it.
+  // What rests on external material (a capture the fetch service sealed,
+  // evidence added after the kickoff, material the operator supplied, and
+  // whatever was derived from them: docs/adr/0012, 0014): named with its
+  // source classes, never failed. A capture's hash proves its bytes, not
+  // their truth or their fit to the time of the events; supplied material
+  // proves nothing by itself; an examiner weighs each.
   const lineage = await externalLineage(S).catch(() => null);
+  const externalFlags: Record<string, ExternalFlag> = {};
   if (lineage?.entries.size) {
     const external = entries.filter((e) => e.kind === "answer" && !replaced.has(e.seq) && e.section && sections.includes(e.section) && lineage.entries.has(e.seq));
-    if (external.length) lines.push(`rests on external material (named, not failed; an external capture proves its bytes, not their truth): ${external.map((e) => `${e.section} #${e.seq} through ${(lineage.entries.get(e.seq) ?? []).join(", ")}`).join("; ")}`);
+    for (const e of external) externalFlags[e.section as string] = { seq: e.seq, via: lineage.entries.get(e.seq) ?? [], classes: lineage.classes.get(e.seq) ?? [] };
+    if (external.length) lines.push(`rests on external material (named, not failed; a capture proves its bytes and supplied material proves nothing by itself: an examiner weighs each): ${external.map((e) => `${e.section} #${e.seq} (${(lineage.classes.get(e.seq) ?? []).join(", ") || "external"}) through ${(lineage.entries.get(e.seq) ?? []).join(", ")}`).join("; ")}`);
   }
   const count = (o: LedgerOutcome) => Object.values(outcomes).filter((x) => x === o).length;
   lines.push(`sections: ${count("answered")} answered, ${count("limited")} examination-limited, ${count("inconclusive")} inconclusive, ${count("unanswered")} unanswered; ${defects.length} defect${defects.length === 1 ? "" : "s"}, ${defects.length - open.length} named by a limitation, ${open.length} open`);
   if (open.length) lines.push("The run ends once each open defect is fixed, or named by a standing limitation (citing E-<seq> of the answer, or with answers=[<section>] for a missing one); a named defect is still a defect, and the release counts it. The negative bar's defects (coverage_missing, negative_unreviewed, wording) are fixed, never named.");
-  return { ok: open.length === 0, lines, outcomes, results, defects, withdrawn };
+  return { ok: open.length === 0, lines, outcomes, results, defects, withdrawn, external: externalFlags };
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
@@ -505,6 +512,6 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   // can still be told apart as examination-limited (await-done.sh hands it
   // back with the check's row, passing or not).
   const named = "defects" in r ? r.defects.filter((d) => d.named_by.length).map((d) => `${d.what} (named by ${d.named_by.map((n) => `#${n}`).join(", ")})`) : [];
-  process.stdout.write(`${ANSWERS_MARK} ${JSON.stringify({ outcomes: r.outcomes, ...("results" in r ? { results: r.results } : {}), ...("withdrawn" in r && Object.keys(r.withdrawn).length ? { withdrawn: r.withdrawn } : {}), named, existence, mode: report ? "report" : "ledger" })}\n`);
+  process.stdout.write(`${ANSWERS_MARK} ${JSON.stringify({ outcomes: r.outcomes, ...("results" in r ? { results: r.results } : {}), ...("withdrawn" in r && Object.keys(r.withdrawn).length ? { withdrawn: r.withdrawn } : {}), ...("external" in r && Object.keys(r.external).length ? { external: r.external } : {}), named, existence, mode: report ? "report" : "ledger" })}\n`);
   process.exit(r.ok ? 0 : 1);
 }

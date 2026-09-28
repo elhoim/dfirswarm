@@ -561,7 +561,7 @@ function reviewChain(text: string): { ok: boolean; lines: number; redacted: numb
  * of them; `since` parts were first packaged then, so a package from before
  * it carries none and says so.
  */
-export const PACKAGE_COMPONENTS: ReadonlyArray<{ path: string; source: string; what: string; absent: string; core?: true; sealed?: "trace" | "ledger" | "attestations" | "disputes" | "leads" | "questions" | "journal" | "artifacts"; since?: string }> = [
+export const PACKAGE_COMPONENTS: ReadonlyArray<{ path: string; source: string; what: string; absent: string; core?: true; sealed?: "trace" | "ledger" | "attestations" | "disputes" | "leads" | "questions" | "requests" | "journal" | "artifacts"; since?: string }> = [
   { path: "custody.json", source: "custody.json", what: "the custody verdict", absent: "no custody was taken for this run (swarm.sh stop takes it)", core: true },
   { path: "trace/custody-anchor.json", source: "<sandbox>.custody-anchor.json", what: "the verdict's anchor, kept outside the run", absent: "the kickoff wrote no custody anchor for this run", core: true },
   { path: "custody.json.sig", source: "custody.json.sig", what: "the verdict's signature", absent: "custody.json was not signed (--custody-sign-key)" },
@@ -576,7 +576,10 @@ export const PACKAGE_COMPONENTS: ReadonlyArray<{ path: string; source: string; w
   { path: "leads.md", source: "leads/leads.md", what: "the lead register, rendered", absent: "no lead was opened", since: "2026-09-28" },
   { path: "questions.jsonl", source: "questions/questions.jsonl", what: "the question register: what the examination was asked, by whom (the goal, an agent, a person, claimed or signed), and how each question stood (unsigned as a whole, sealed by custody)", absent: "the run wrote no question event", sealed: "questions", since: "2026-09-28" },
   { path: "questions.md", source: "questions/questions.md", what: "the question register, rendered", absent: "the run wrote no question event", since: "2026-09-28" },
-  { path: "operator-requests.jsonl", source: "operator-requests.jsonl", what: "what the agents asked of the operator", absent: "no lead was closed needs_operator", since: "2026-09-28" },
+  { path: "operator-requests.jsonl", source: "operator-requests.jsonl", what: "what the run asked of the operator, one line per request as it stood", absent: "nothing was asked of the operator", since: "2026-09-28" },
+  { path: "requests.jsonl", source: "requests/requests.jsonl", what: "the operator requests' chain: every request (a lead's needs, an acquisition, a clarification, a network item, a stop proposed) with its id and lifecycle (unsigned, sealed by custody)", absent: "nothing was asked of the operator, or the run is from before the chain", sealed: "requests", since: "2026-09-28" },
+  { path: "requests.md", source: "requests/requests.md", what: "the operator requests, rendered", absent: "nothing was asked of the operator", since: "2026-09-28" },
+  { path: "material", source: "store/imports/", what: "what entered the run after its kickoff (evidence add, material add): each addition's provenance record and manifest; the bytes stay with the evidence", absent: "no evidence or material was added after the kickoff", since: "2026-09-28" },
   { path: "operator-hosts.jsonl", source: "operator-hosts.jsonl", what: "the hosts the operator allowed while the run went on", absent: "the operator allowed no host during the run", since: "2026-09-28" },
   { path: "store/journal.jsonl", source: "store/journal.jsonl", what: "the store's journal", absent: "the run had no job service", sealed: "journal" },
   { path: "trace/journal-anchor.json", source: "<sandbox>.journal-anchor.json", what: "the journal's anchor", absent: "the run had no job service" },
@@ -633,7 +636,7 @@ function packagedFiles(dir: string, under: string): string[] {
   return walk(root).map((abs) => relative(dir, abs).split("\\").join("/")).sort();
 }
 
-type SealShape = { trace?: { lines?: number; last_line_sha256?: string | null }; ledger?: { entries?: number; head?: string | null }; attestations?: { lines?: number; head?: string | null }; disputes?: { lines?: number; head?: string | null }; leads?: { lines?: number; head?: string | null }; questions?: { lines?: number; head?: string | null }; journal?: { lines?: number; head?: string | null } | null };
+type SealShape = { trace?: { lines?: number; last_line_sha256?: string | null }; ledger?: { entries?: number; head?: string | null }; attestations?: { lines?: number; head?: string | null }; disputes?: { lines?: number; head?: string | null }; leads?: { lines?: number; head?: string | null }; questions?: { lines?: number; head?: string | null }; requests?: { lines?: number; head?: string | null }; journal?: { lines?: number; head?: string | null } | null };
 
 export function verifyPackage(dir: string): { ok: boolean; lines: string[] } {
   const out: string[] = [];
@@ -698,6 +701,8 @@ export function verifyPackage(dir: string): { ok: boolean; lines: string[] } {
         return (seal?.leads?.lines ?? 0) > 0 ? `the verdict sealed ${seal?.leads?.lines} lead events` : null;
       case "questions":
         return (seal?.questions?.lines ?? 0) > 0 ? `the verdict sealed ${seal?.questions?.lines} question events` : null;
+      case "requests":
+        return (seal?.requests?.lines ?? 0) > 0 ? `the verdict sealed ${seal?.requests?.lines} operator request events` : null;
       case "journal":
         return seal?.journal ? `the verdict sealed a journal of ${seal.journal.lines} lines` : null;
       case "artifacts":

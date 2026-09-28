@@ -436,7 +436,49 @@ async function buildRelease(ctx: RunCtx, input: ReleaseInput, dir: string, o: { 
     missing,
     host,
     ...(input.policy ? { policy: input.policy } : {}),
+    ...(await caseContract(S, ledger)),
   };
+}
+
+/**
+ * What the case contract adds to a release (docs/adr/0014): the case policy
+ * as the kickoff recorded it and custody held it, the standing answers that
+ * rest on external material with their classes, and the acquisitions as
+ * they stood.
+ */
+async function caseContract(S: string, ledger: LedgerEntry[]): Promise<Pick<ReleaseRecord, "case_policy" | "external" | "acquisitions">> {
+  const out: Pick<ReleaseRecord, "case_policy" | "external" | "acquisitions"> = {};
+  const policyText = existsSync(join(S, "network", "policy.json")) ? readFileSync(join(S, "network", "policy.json"), "utf8") : null;
+  if (policyText !== null) {
+    let anchored: boolean | null = null;
+    try {
+      const anchor = JSON.parse(readFileSync(custodyAnchorPath(S), "utf8")) as { case_policy_sha256?: string };
+      anchored = anchor.case_policy_sha256 ? anchor.case_policy_sha256 === sha256(policyText) : null;
+    } catch {
+      anchored = null;
+    }
+    try {
+      const p = JSON.parse(policyText) as { policy?: string; network?: string; more_evidence?: string; material_use?: unknown };
+      const mu = p.material_use && typeof p.material_use === "object" ? Object.fromEntries(Object.entries(p.material_use as Record<string, unknown>).map(([k, v]) => [k, String(v)])) : typeof p.material_use === "string" ? { text: p.material_use } : {};
+      out.case_policy = { sha256: sha256(policyText), policy: String(p.policy ?? ""), network: String(p.network ?? ""), more_evidence: String(p.more_evidence ?? ""), material_use: mu, anchored };
+    } catch {
+      out.case_policy = null;
+    }
+  }
+  const { externalLineage } = await import("./net-broker.ts");
+  const lineage = await externalLineage(S).catch(() => null);
+  if (lineage) {
+    const replaced = supersededBy(ledger);
+    const answers = ledger
+      .filter((e) => e.kind === "answer" && !replaced.has(e.seq) && lineage.entries.has(e.seq))
+      .map((e) => ({ section: e.section ?? "", seq: e.seq, hash: e.hash ?? null, classes: lineage.classes.get(e.seq) ?? [], via: lineage.entries.get(e.seq) ?? [] }));
+    out.external = { answers, note: "Each answer listed rests on material from outside the original evidence: a capture proves its bytes, not their truth or their fit to the time of the events; supplied material proves nothing by itself; evidence added after the kickoff is named with its acquisition. An examiner weighs each." };
+  }
+  const R = await import("../extensions/requests.ts");
+  const rs = await R.requestsSnapshot(S).catch(() => null);
+  const acq = rs ? [...rs.requests.values()].filter((r) => r.kind === "acquisition") : [];
+  if (acq.length) out.acquisitions = acq.map((r) => ({ id: r.rid, state: r.state, stage: r.stage, source: r.ask?.source ?? String(r.line.request ?? ""), questions: r.questions, import: r.stages.find((x) => x.import)?.import ?? null }));
+  return out;
 }
 
 /**

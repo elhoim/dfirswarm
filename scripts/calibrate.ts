@@ -332,9 +332,23 @@ async function filesUnder(dir: string, depth = 4): Promise<string[]> {
   return out;
 }
 
-/** Whether the run holds each late item, by its digest in the manifest or an inventory record. */
+/**
+ * Whether the run holds each late item, by its digest: first as evidence
+ * added after the kickoff (the store journal's evidence_added lines, which
+ * `swarm.sh evidence add` writes with every file's sha256, its import and
+ * its acquisition request), then in the manifest (a second set given at
+ * kickoff) or any other inventory record.
+ */
 async function lateAdded(runDir: string, truth: Truth, mode: "auto" | "added" | "absent"): Promise<Array<{ id: string; added: boolean; how: string }>> {
   if (mode !== "auto") return truth.late.map((l) => ({ id: l.id, added: mode === "added", how: `--late ${mode}` }));
+  const added = new Map<string, string>();
+  for (const l of await jsonl(join(runDir, "store", "journal.jsonl"))) {
+    if (l.type !== "evidence_added" || !Array.isArray(l.files)) continue;
+    for (const f of l.files as Rec[]) {
+      const sha = str(f.sha256);
+      if (/^[0-9a-f]{64}$/.test(sha) && !added.has(sha)) added.set(sha, `evidence added as import:${str(l.import)}/${str(f.path)} (inventory revision ${str(l.inventory_rev) || "?"}${l.request ? `, for ${str(l.request)}` : ""})`);
+    }
+  }
   const places = [join(runDir, "inputs.json"), join(runDir, "store", "journal.jsonl")];
   for (const d of ["inventory", "evidence", "acquisitions", "requests"]) places.push(...(await filesUnder(join(runDir, d))));
   const texts: Array<{ where: string; text: string }> = [];
@@ -343,6 +357,8 @@ async function lateAdded(runDir: string, truth: Truth, mode: "auto" | "added" | 
     if (t !== null) texts.push({ where: relative(runDir, p), text: t });
   }
   return truth.late.map((l) => {
+    const by = added.get(l.sha256);
+    if (by) return { id: l.id, added: true, how: `its sha256 is ${by}` };
     const hit = texts.find((t) => t.text.includes(l.sha256));
     return { id: l.id, added: Boolean(hit), how: hit ? `its sha256 is in ${hit.where}` : "its sha256 is in no manifest or inventory record of the run" };
   });
@@ -364,7 +380,8 @@ async function operatorRequests(runDir: string): Promise<Request[]> {
       out.push({ text: `${str(ev.title)}\n${str(ev.ref)}`, questions: answersOf.get(str(ev.lead)) ?? [], where: `leads ${str(ev.lead)}` });
     }
   }
-  const files = [join(runDir, "operator-requests.jsonl"), ...(await filesUnder(join(runDir, "requests"))), ...(await filesUnder(join(runDir, "operator")))];
+  // The requests' chain (requests/requests.jsonl) is rendered into operator-requests.jsonl, one line per request: read once.
+  const files = [join(runDir, "operator-requests.jsonl"), ...(await filesUnder(join(runDir, "requests"))).filter((f) => !f.endsWith(join("requests", "requests.jsonl"))), ...(await filesUnder(join(runDir, "operator")))];
   for (const f of files) {
     for (const r of await jsonl(f)) {
       const ask = r.ask && typeof r.ask === "object" ? (r.ask as Rec) : {};

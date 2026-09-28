@@ -110,7 +110,7 @@ export async function finishGate(sandbox: string, run: FinishLineRun | null): Pr
         questions.push({ id, outcome: "withdrawn", blocks: [] });
         continue;
       }
-      const outcome = said !== "answered" && reg?.accepted && reg.accepted.rev === reg.rev ? "accepted" : said;
+      const outcome = said !== "answered" && reg && Q.acceptanceStands(reg) ? "accepted" : said;
       const blocks: string[] = [];
       if (outcome !== "answered" && outcome !== "accepted") {
         for (const l of snap.state.leads.values()) {
@@ -162,11 +162,17 @@ async function registerGate(sandbox: string, snap: L.LeadsSnapshot, qs: Q.Questi
   const inScope = views.filter((v) => v.scope === "in_scope" && !v.withdrawn && !v.after_done);
   for (const v of inScope) {
     if (v.answer?.stale) {
+      const byEvidence = v.answer.stale_why === "evidence";
+      const arrived = v.evidence.at(-1);
       defects.push({
         code: "stale_answer",
         question: v.id,
-        what: `${v.id} (question:${v.section}) was amended to revision ${v.rev} after its answer E-${v.answer.seq} was recorded`,
-        fix: `hold the answer to revision ${v.rev} (questions show ${v.id}) and record it again with supersedes=${v.answer.seq}`,
+        what: byEvidence
+          ? `new evidence for ${v.id} (question:${v.section}) arrived after its answer E-${v.answer.seq} was recorded (${arrived?.import ?? "an addition"}${arrived?.request ? ` for ${arrived.request}` : ""})`
+          : `${v.id} (question:${v.section}) was amended to revision ${v.rev} after its answer E-${v.answer.seq} was recorded`,
+        fix: byEvidence
+          ? `examine the new evidence through a job (it is ${arrived?.import ?? "in store/imports"}), then record the answer again with supersedes=${v.answer.seq}, unchanged if the new evidence changes nothing`
+          : `hold the answer to revision ${v.rev} (questions show ${v.id}) and record it again with supersedes=${v.answer.seq}`,
       });
     }
     if (v.accepted?.stands) {
@@ -175,7 +181,7 @@ async function registerGate(sandbox: string, snap: L.LeadsSnapshot, qs: Q.Questi
       accepted.push(line);
     }
   }
-  const extra = Q.registerQuestions(qs).filter((q) => q.materiality === "material" && !(q.accepted && q.accepted.rev === q.rev));
+  const extra = Q.registerQuestions(qs).filter((q) => q.materiality === "material" && !Q.acceptanceStands(q));
   if (extra.length) {
     const sections = extra.map((q) => `question:${q.section}`);
     const r = await checkLedgerAnswers(sandbox, sections, extra.filter((q) => q.expects === "existence").map((q) => q.section));

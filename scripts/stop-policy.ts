@@ -20,7 +20,7 @@
  *
  * Each prints one JSON line.
  */
-import { appendFile, readFile, writeFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import * as P from "../extensions/protocol.ts";
@@ -89,8 +89,9 @@ export async function yieldCheck(sandbox: string, o: { now?: number; jobs?: numb
   const snap = await L.leadsSnapshot(sandbox).catch(() => null);
   const open = snap ? [...snap.state.leads.values()].filter((l) => !l.closed).map((l) => `${l.id} ${l.holder ? `(${l.holder})` : "(unheld)"}`) : [];
   const unanswered = snap ? L.questionCoverage(snap).unanswered.map((q) => `question:${q}`) : [];
-  const requests = await readFile(join(sandbox, L.OPERATOR_REQUESTS), "utf8").catch(() => "");
-  const n = requests.split("\n").filter((l) => /"kind":"decision"/.test(l)).length + 1;
+  // A request of the operator's, with a durable id, through the outbox (extensions/requests.ts).
+  const R = await import("../extensions/requests.ts");
+  const n = (await R.countKind(sandbox, "decision")) + 1;
   const id = `D-${n}`;
   const run = (await P.readTeam(sandbox).catch(() => null))?.swarm_id ?? "";
   const sinceIso = new Date(y.at).toISOString();
@@ -110,10 +111,10 @@ export async function yieldCheck(sandbox: string, o: { now?: number; jobs?: numb
     minutes,
     open: { leads: open, unanswered },
   };
-  await appendFile(join(sandbox, L.OPERATOR_REQUESTS), `${JSON.stringify(line)}\n`, "utf8");
+  const opened = await R.openHarnessRequest(sandbox, { kind: "decision", key: `decision:${id}`, by: "harness", line });
   state.proposals.push({ id, at: line.at, since: sinceIso });
   await writeFile(join(sandbox, YIELD_STATE_REL), `${JSON.stringify(state)}\n`, "utf8");
-  return { proposed: true, id, since: sinceIso, what: y.what, jobs, minutes, window: w };
+  return { proposed: true, id, request: opened.rid, since: sinceIso, what: y.what, jobs, minutes, window: w };
 }
 
 function opt(args: string[], name: string): string | undefined {

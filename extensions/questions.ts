@@ -140,7 +140,8 @@ export type QuestionEventKind =
   | "deliver"
   | "offer"
   | "triage"
-  | "continue";
+  | "continue"
+  | "evidence";
 
 /**
  * Who acted, as the record keeps it. A person is an enrolled id (`--as ID`,
@@ -287,7 +288,13 @@ export type Question = {
   /** A follow-up (after_done) the run took up when it was resumed: when, and in which segment. */
   continued: { at: string; segment: number | null; seq: number } | null;
   withdrawn: { at: string; why: string; origin: QuestionOrigin } | null;
-  accepted: { at: string; as: AcceptAs; why: string; rev: number; origin: QuestionOrigin } | null;
+  accepted: { at: string; as: AcceptAs; why: string; rev: number; origin: QuestionOrigin; seq?: number } | null;
+  /**
+   * Evidence that arrived for this question after the kickoff (swarm.sh
+   * evidence add, docs/adr/0014): each arrival makes an answer recorded
+   * before it stale, and lifts an acceptance made before it.
+   */
+  evidence: Array<{ seq: number; at: string; import: string; request: string | null; ledger_seq: number; inventory_rev: number | null }>;
   /** The negative bar's disposition (a later phase writes `dispose`); null until one is recorded. */
   disposition: Record<string, unknown> | null;
   clarifications: Clarification[];
@@ -553,6 +560,7 @@ function blankQuestion(e: QuestionEvent): Question {
     continued: null,
     withdrawn: null,
     accepted: null,
+    evidence: [],
     disposition: null,
     clarifications: [],
     delivered: new Map(),
@@ -655,7 +663,7 @@ export function foldQuestions(events: QuestionEvent[], chain: QuestionsState["ch
         break;
       case "accept":
         if (!q || !act.as) break;
-        q.accepted = { at: e.at, as: act.as, why: act.why ?? "", rev: Number(d.rev ?? e.rev ?? q.rev), origin: origin ?? q.origin };
+        q.accepted = { at: e.at, as: act.as, why: act.why ?? "", rev: Number(d.rev ?? e.rev ?? q.rev), origin: origin ?? q.origin, seq: e.seq };
         q.last_seq = e.seq;
         break;
       case "sign": {
@@ -676,6 +684,12 @@ export function foldQuestions(events: QuestionEvent[], chain: QuestionsState["ch
         break;
       case "triage":
         triage.push({ seq: e.seq, at: e.at, q: e.q ?? null, lead: e.lead ?? null, cause: e.cause ?? "", entries: e.entries ?? [], resolved: null });
+        break;
+      case "evidence":
+        // New evidence for this question (the acquisition lane): what was concluded or accepted before it is reopened.
+        if (!q) break;
+        q.evidence.push({ seq: e.seq, at: e.at, import: String(d.import ?? ""), request: typeof d.request === "string" ? d.request : null, ledger_seq: Number(d.ledger_seq ?? 0), inventory_rev: typeof d.inventory_rev === "number" ? d.inventory_rev : null });
+        q.last_seq = e.seq;
         break;
       case "continue":
         // A resume takes up the follow-ups recorded after the run's done: this run's work again.
@@ -796,7 +810,9 @@ export type QuestionView = {
    * inconclusive), and for a negative whether another seat reviewed it and
    * what coverage it rests on (the negative bar).
    */
-  answer: { seq: number; at: string; inconclusive: boolean; result?: string; question_rev: number; stale: boolean; negative?: { reviewed: boolean; by: string[]; coverage: Array<{ seq: number; coverage: string | null }> } } | null;
+  answer: { seq: number; at: string; inconclusive: boolean; result?: string; question_rev: number; stale: boolean; stale_why?: "revision" | "evidence"; negative?: { reviewed: boolean; by: string[]; coverage: Array<{ seq: number; coverage: string | null }> } } | null;
+  /** Evidence that arrived for it after the kickoff (the acquisition lane). */
+  evidence: Question["evidence"];
   leads: Array<{ id: string; status: L.LeadStatus; holder: string | null; disposition?: string; opened_by: string }>;
   clarifications: Clarification[];
   pending_clarifications: string[];
@@ -843,7 +859,9 @@ export function viewQuestion(q: Question, ctx: ViewContext): QuestionView {
         // Bound to the revision it answers (recorded under the register's
         // lock), never to when it was written: absent is revision 1.
         question_rev: a.question_rev ?? 1,
-        stale: (a.question_rev ?? 1) !== q.rev,
+        // An answer is also stale when evidence for the question arrived after it was recorded.
+        stale: (a.question_rev ?? 1) !== q.rev || q.evidence.some((x) => a.seq <= x.ledger_seq),
+        ...((a.question_rev ?? 1) !== q.rev ? { stale_why: "revision" as const } : q.evidence.some((x) => a.seq <= x.ledger_seq) ? { stale_why: "evidence" as const } : {}),
         ...(negative ? { negative } : {}),
       }
     : null;
@@ -875,7 +893,8 @@ export function viewQuestion(q: Question, ctx: ViewContext): QuestionView {
     leading_forms: q.leading_forms,
     after_done: q.after_done,
     withdrawn: q.withdrawn,
-    accepted: q.accepted ? { ...q.accepted, stands: q.accepted.rev === q.rev } : null,
+    accepted: q.accepted ? { ...q.accepted, stands: acceptanceStands(q) } : null,
+    evidence: q.evidence,
     disposition: q.disposition,
     work,
     answer,
@@ -907,6 +926,17 @@ export async function viewContext(sandboxRoot: string): Promise<ViewContext> {
 }
 
 /** The questions a finish line holds the run to beyond the goal's own check: in scope, not withdrawn, not a follow-up, asked by a person or an agent. */
+/**
+ * Whether an operator's acceptance of a question still stands: it is bound
+ * to the revision it accepted, and evidence that arrived for the question
+ * after it lifts it (the acquisition lane reopens what was accepted).
+ */
+export function acceptanceStands(q: Pick<Question, "accepted" | "rev" | "evidence">): boolean {
+  if (!q.accepted || q.accepted.rev !== q.rev) return false;
+  const at = q.accepted.seq ?? 0;
+  return !q.evidence.some((x) => x.seq > at);
+}
+
 export function registerQuestions(snap: QuestionsSnapshot): Question[] {
   return [...snap.state.questions.values()].filter((q) => q.origin.kind !== "goal" && q.scope === "in_scope" && !q.withdrawn && !q.after_done);
 }
@@ -995,20 +1025,13 @@ function qRef(raw: unknown): { ok: true; id: string } | Fail {
 
 /**
  * The run's own sensitive values, as a question's words are held to them: a
- * question, its reasons and its hints may not carry a value the run marks
- * sensitive (a ledger entry recorded sensitive), whoever writes it. The hook
- * a later phase widens to every sensitive value the run knows of.
+ * question, its reasons and its hints may not carry any value the run marks
+ * sensitive, whatever its origin and whoever writes it (B9: every entry
+ * recorded sensitive, standing or not; no answer-value concept, no
+ * exemption for the goal's own words; protocol.ts runSensitiveTokens).
  */
 export async function sensitiveRefusal(sandboxRoot: string, texts: Array<[string, string | undefined]>): Promise<string | null> {
-  const entries = await P.readLedger(sandboxRoot).catch(() => [] as P.LedgerEntry[]);
-  if (!entries.some((e) => e.sensitive)) return null;
-  const tokens = P.sensitiveTokens(entries);
-  for (const [name, text] of texts) {
-    if (!text) continue;
-    const hit = tokens.find((t) => text.includes(t.token));
-    if (hit) return `${name} holds a value the run marks sensitive (E-${hit.seq}): say it without the value; the entry can be cited by its number`;
-  }
-  return null;
+  return P.sensitiveRefusalOf(sandboxRoot, texts);
 }
 
 /** A hint or an attachment names an object of the run (a ref that resolves) or a path under it. */
@@ -1968,41 +1991,53 @@ export async function syncDispositions(sandboxRoot: string): Promise<string[]> {
 
 // --- clarification ------------------------------------------------------------------------------
 
-/** The operator requests already written, by kind and id: what a clarification's publication checks before it writes. */
-async function writtenRequests(sandboxRoot: string): Promise<Set<string>> {
-  const out = new Set<string>();
-  for (const line of (await readFile(join(sandboxRoot, L.OPERATOR_REQUESTS), "utf8").catch(() => "")).split("\n")) {
-    if (!line.trim()) continue;
-    try {
-      const o = JSON.parse(line) as { kind?: string; id?: string; q?: string };
-      if (o.kind === "clarification" && o.id) out.add(`${o.q ?? ""}#${o.id}`);
-    } catch {
-      // a torn line: not a request
-    }
-  }
-  return out;
+/**
+ * The operator's request a clarification makes: derived from the committed
+ * clarify_ask and written once to the operator requests' outbox
+ * (extensions/requests.ts), keyed by its question and C-n, with a durable
+ * R-<n>. A crash between the ask and the request is made good at the next
+ * header. The command that answers it is returned.
+ */
+export async function writeClarificationRequest(sandboxRoot: string, q: string, clarify: string, _by: string): Promise<string> {
+  const run = (await P.readTeam(sandboxRoot).catch(() => null))?.swarm_id ?? "";
+  const R = await import("./requests.ts");
+  await R.reconcileRequests(sandboxRoot);
+  return `swarm.sh question ${run || "<run>"} clarify-reply ${q} ${clarify} "<your answer>"`;
 }
 
 /**
- * The operator's request a clarification makes (operator-requests.jsonl, as
- * a lead's needs_operator does), with the command that answers it: derived
- * from the committed clarify_ask and written once, keyed by its C-n, under
- * the registers' lock. A crash between the ask and this line is made good
- * at the next header.
+ * New evidence for questions (swarm.sh evidence add, docs/adr/0014): one
+ * `evidence` event per question, under the registers' lock, naming the
+ * import, the acquisition request and the ledger's last entry at that
+ * moment. An answer recorded before it is stale until recorded again; an
+ * acceptance made before it no longer stands. Questions the register does
+ * not know are returned apart, never guessed.
  */
-export async function writeClarificationRequest(sandboxRoot: string, q: string, clarify: string, by: string): Promise<string> {
-  const run = (await P.readTeam(sandboxRoot).catch(() => null))?.swarm_id ?? "";
-  const answer = `swarm.sh question ${run || "<run>"} clarify-reply ${q} ${clarify} "<your answer>"`;
-  await L.withRegisters(sandboxRoot, async () => {
-    if ((await writtenRequests(sandboxRoot)).has(`${q}#${clarify}`)) return;
+export async function recordEvidenceArrival(sandboxRoot: string, questions: string[], info: { import: string; request?: string | null; inventory_rev?: number | null; why?: string }): Promise<{ recorded: string[]; unknown: string[] }> {
+  return L.withRegisters(sandboxRoot, async (held) => {
+    await ensureSeededHeld(sandboxRoot, held);
     const snap = await questionsSnapshot(sandboxRoot);
-    const question = snap.state.questions.get(q);
-    const c = question?.clarifications.find((x) => x.id === clarify);
-    if (!c) return;
-    const line = { at: new Date().toISOString(), run, kind: "clarification", id: clarify, q, rev: question?.rev ?? null, by: c.by || by, to: c.to || "operator", title: `${q}: clarification ${clarify}`, request: c.what, answer };
-    await appendFile(join(sandboxRoot, L.OPERATOR_REQUESTS), `${JSON.stringify(line)}\n`, "utf8");
+    const entries = await P.readLedger(sandboxRoot, { raw: true }).catch(() => [] as P.LedgerEntry[]);
+    const ledgerSeq = entries.at(-1)?.seq ?? 0;
+    const drafts: QuestionDraft[] = [];
+    const recorded: string[] = [];
+    const unknown: string[] = [];
+    for (const raw of [...new Set(questions)]) {
+      const q = findQuestion(snap, raw);
+      if (!q) {
+        unknown.push(raw);
+        continue;
+      }
+      if (recorded.includes(q.id)) continue;
+      recorded.push(q.id);
+      drafts.push({ by: "system", ev: "evidence", q: q.id, rev: q.rev, decided: { import: info.import, ...(info.request ? { request: info.request } : {}), ledger_seq: ledgerSeq, ...(info.inventory_rev !== undefined && info.inventory_rev !== null ? { inventory_rev: info.inventory_rev } : {}), ...(info.why ? { why: info.why } : {}) } });
+    }
+    if (drafts.length) {
+      await appendQuestionEvents(sandboxRoot, drafts, held);
+      await writeQuestionsMd(sandboxRoot).catch(() => undefined);
+    }
+    return { recorded, unknown };
   });
-  return answer;
 }
 
 /** The structured id a clarification's answer post carries: one post per clarification, found again by it. */
@@ -2038,11 +2073,14 @@ export async function publishClarification(sandboxRoot: string, q: string, clari
  */
 export async function publishClarifications(sandboxRoot: string, snap?: QuestionsSnapshot): Promise<void> {
   const qs = snap ?? (await questionsSnapshot(sandboxRoot));
-  const written = await writtenRequests(sandboxRoot);
+  const R = await import("./requests.ts");
+  const written = (await R.requestsSnapshot(sandboxRoot).catch(() => null))?.byKey;
+  const missing = [...qs.state.questions.values()].some((q) => q.clarifications.some((c) => !written?.has(`clarification:${q.id}#${c.id}`)));
+  // Each request once, by its key, in one reconciliation; a failure here is retried at the next header.
+  if (missing) await R.reconcileRequests(sandboxRoot);
   const done = await P.swarmDoneExists(sandboxRoot);
   for (const q of qs.state.questions.values()) {
     for (const c of q.clarifications) {
-      if (!written.has(`${q.id}#${c.id}`)) await writeClarificationRequest(sandboxRoot, q.id, c.id, c.by).catch(() => undefined);
       if (c.answer && !done) await publishClarification(sandboxRoot, q.id, c.id).catch(() => undefined);
     }
   }
@@ -2292,11 +2330,18 @@ export async function questionOpen(ctx: P.SwarmContext, input: ActInput): Promis
 }
 
 /** An agent asks the question's author what is unclear (question_ask): an operator request of kind clarification, with a durable id. */
-export async function questionAsk(ctx: P.SwarmContext, id: unknown, what: unknown): Promise<(ActResult & { request?: string }) | Fail> {
+export async function questionAsk(ctx: P.SwarmContext, id: unknown, what: unknown): Promise<(ActResult & { request?: string; request_id?: string; request_pending?: string }) | Fail> {
   const r = await act(ctx.sandboxRoot, { kind: "agent", agent: ctx.agentId }, "clarify_ask", { q: String(id ?? ""), what: String(what ?? "") });
   if (!r.ok || !r.clarify || !r.q) return r;
-  const request = await writeClarificationRequest(ctx.sandboxRoot, r.q, r.clarify, ctx.agentId).catch(() => undefined);
-  return { ...r, ...(request ? { request } : {}) };
+  // Committed: the request is derived from the ask. A failure is said, never swallowed; the next header writes it.
+  try {
+    const request = await writeClarificationRequest(ctx.sandboxRoot, r.q, r.clarify, ctx.agentId);
+    const R = await import("./requests.ts");
+    const rid = (await R.requestsSnapshot(ctx.sandboxRoot)).byKey.get(`clarification:${r.q}#${r.clarify}`);
+    return { ...r, request, ...(rid ? { request_id: rid } : {}) };
+  } catch (err) {
+    return { ...r, request_pending: `the clarification is committed as ${r.clarify} and could not be written to the operator's requests yet (${(err as Error).message}); the next header writes it` };
+  }
 }
 
 // --- the rendered register ----------------------------------------------------------------------
@@ -2345,7 +2390,8 @@ export function renderQuestionsMd(ctx: ViewContext): string {
       lines.push(`- Answer: ${v.answer ? `E-${v.answer.seq}${v.answer.inconclusive ? " (inconclusive)" : ""}${v.answer.result ? ` (${NB.resultWords(v.answer.result)})` : ""}${v.answer.negative ? (v.answer.negative.reviewed ? `; negative, reviewed by ${v.answer.negative.by.join(", ")}` : "; negative (unreviewed)") : ""}${v.answer.negative?.coverage.length ? `; coverage ${v.answer.negative.coverage.map((c) => `E-${c.seq} ${c.coverage ?? "not computed"}`).join(", ")}` : ""}; answers revision ${v.answer.question_rev}${v.answer.stale ? ` of ${v.rev}: stale` : ""}` : "none yet"}`);
       for (const c of v.clarifications) lines.push(`- Clarification ${c.id} (${c.by}, ${c.at}): ${c.what}${c.answer ? ` — answered by ${originWords(c.answer.origin)} at ${c.answer.at}: ${c.answer.text}` : " — not answered yet"}`);
       for (const o of v.offers) lines.push(`- Offered to ${o.to} at ${o.at}${o.first ? ` first, until ${o.until}` : ""} (${o.why})`);
-      if (v.accepted) lines.push(`- Accepted as ${v.accepted.as} by ${originWords(v.accepted.origin)} at ${v.accepted.at} for revision ${v.accepted.rev}${v.accepted.stands ? "" : " (no longer stands: amended since)"}: ${v.accepted.why}`);
+      if (v.accepted) lines.push(`- Accepted as ${v.accepted.as} by ${originWords(v.accepted.origin)} at ${v.accepted.at} for revision ${v.accepted.rev}${v.accepted.stands ? "" : " (no longer stands: amended, or new evidence arrived, since)"}: ${v.accepted.why}`);
+      for (const x of v.evidence) lines.push(`- New evidence ${x.import}${x.request ? ` for ${x.request}` : ""} at ${x.at}${x.inventory_rev !== null ? ` (inventory revision ${x.inventory_rev})` : ""}: what was concluded or accepted before it is open again`);
       if (v.withdrawn) lines.push(`- Withdrawn by ${originWords(v.withdrawn.origin)} at ${v.withdrawn.at}: ${v.withdrawn.why}`);
       for (const g of v.signed) lines.push(`- Event ${g.act_seq} signed by ${g.person} (${g.fingerprint}), sign event ${g.sign_seq}`);
       lines.push("");

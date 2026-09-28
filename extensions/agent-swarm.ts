@@ -3444,11 +3444,12 @@ export default function (pi: ExtensionAPI) {
     name: "lead_close",
     label: "Close a lead",
     description:
-      "Close a lead with how it ended and what that cites: resolved (ref E-<seq>, the entry that settles it), negative (ref E-<seq> of the absence, the search that found nothing), duplicate (ref L-<n>, the lead it repeats), deferred (ref E-<seq> of the limitation saying why it waits), infeasible (ref E-<seq> of the limitation naming the methods tried and why none worked), needs_operator (ref: in words, what only the operator can do: the host to allow, the file to add, the question to answer; the operator sees it and can answer and reopen it). The holder closes its own lead; an unheld one anyone may close. A lead closed on an entry that is later superseded or disputed reopens by itself.",
+      "Close a lead with how it ended and what that cites: resolved (ref E-<seq>, the entry that settles it), negative (ref E-<seq> of the absence, the search that found nothing), duplicate (ref L-<n>, the lead it repeats), deferred (ref E-<seq> of the limitation saying why it waits), infeasible (ref E-<seq> of the limitation naming the methods tried and why none worked), needs_operator (ref: in words, what only the operator can do: the host to allow, the file to add, the question to answer; the operator sees it and can answer and reopen it). A needs_operator close that asks for evidence the run does not have carries ask: {kind: acquisition, source, where, expected_value, urgency, questions?, owner?, authority_needed?}: an acquisition request with a durable id (R-<n>), answered by the case policy at once when it admits no more evidence. The holder closes its own lead; an unheld one anyone may close. A lead closed on an entry that is later superseded or disputed reopens by itself.",
     promptSnippet: "Close a lead with its disposition",
     promptGuidelines: [
       "Close every lead you hold with a disposition; a material lead left open holds the finish line.",
       "Use needs_operator for anything outside the evidence and the allowlist (a host to reach, a file the run does not have, a question only a person can answer); never fetch it yourself.",
+      "Ask for missing evidence as an acquisition (needs_operator with ask.kind acquisition): the source, where it is, what it would establish, how urgent. \"No additional input under this case policy\" is a constraint of the case, never a finding that something is absent.",
     ],
     parameters: Type.Object({
       id: Type.String({ description: "L-<n>" }),
@@ -3456,14 +3457,32 @@ export default function (pi: ExtensionAPI) {
       ref: Type.String({ description: "E-<seq>, L-<n>, or for needs_operator what the operator must do" }),
       why: Type.Optional(Type.String({ description: "Anything a reader should know about how it ended" })),
       generation: Type.Optional(Type.Integer({ description: "The generation you hold it at" })),
+      ask: Type.Optional(
+        Type.Object(
+          {
+            kind: Type.Literal("acquisition"),
+            source: Type.String({ description: "The missing source: what it is (a system's logs, a device, an export)" }),
+            where: Type.String({ description: "Where it is, and who would have it" }),
+            expected_value: Type.String({ description: "What it would establish, for which question" }),
+            urgency: Type.Optional(Type.Union([Type.Literal("normal"), Type.Literal("urgent"), Type.Literal("volatile")], { description: "volatile: it may be lost if it is not collected soon" })),
+            questions: Type.Optional(Type.Array(Type.String(), { description: "Q-<n> it bears on (default: the lead's)" })),
+            owner: Type.Optional(Type.String({ description: "Who holds or controls it" })),
+            authority_needed: Type.Optional(Type.String({ description: "The authority collecting it needs (consent, a warrant, the client's approval)" })),
+          },
+          { description: "With needs_operator: an acquisition request for evidence the run does not have" },
+        ),
+      ),
     }),
     async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
       const started = Date.now();
-      const r = await leadClose(ctxFrom(toolCtx.cwd, agentId), params.id, { disposition: params.disposition, ref: params.ref, ...(params.why ? { why: params.why } : {}), ...(params.generation !== undefined ? { generation: params.generation } : {}) });
+      const r = await leadClose(ctxFrom(toolCtx.cwd, agentId), params.id, { disposition: params.disposition, ref: params.ref, ...(params.why ? { why: params.why } : {}), ...(params.generation !== undefined ? { generation: params.generation } : {}), ...(params.ask ? { ask: params.ask } : {}) });
       if (r.ok && params.disposition === "needs_operator") {
-        // The operator reads the board too: the request is said there once, with the command that answers it.
-        const answer = (r as { operator_request?: string }).operator_request;
-        await systemPost(toolCtx.cwd, { tag: "ask", via: agentId, body: `OPERATOR REQUEST on ${params.id} from ${agentId}: ${params.ref}${answer ? ` The operator answers with: ${answer}` : ""}` }).catch(() => undefined);
+        // The operator reads the board too: the request is said there once, by its id, with the command that answers it.
+        const x = r as { operator_request?: string; request?: { id: string; kind: string; state: string; answer: string | null } };
+        const req = x.request;
+        const said = req ? `${req.kind === "acquisition" ? "ACQUISITION REQUEST" : "OPERATOR REQUEST"} ${req.id} on ${params.id} from ${agentId}: ${params.ref}` : `OPERATOR REQUEST on ${params.id} from ${agentId}: ${params.ref}`;
+        const tail = req?.state === "declined" && req.answer ? ` Answered at once by the case policy: ${req.answer}. That is a constraint of this case, not a finding that the evidence or the fact is absent.` : x.operator_request ? ` The operator answers with: ${x.operator_request}` : "";
+        await systemPost(toolCtx.cwd, { tag: "ask", via: agentId, body: `${said}${tail}` }).catch(() => undefined);
       }
       return leadAnswer(toolCtx.cwd, "lead_close", params as Record<string, unknown>, started, r as never);
     },

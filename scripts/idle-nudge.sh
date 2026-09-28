@@ -417,24 +417,29 @@ yield_check() {
   echo "idle-nudge: nothing has yielded since $(jq -r '.since' <<<"$out") ($(jq -r '.jobs' <<<"$out") jobs, $(jq -r '.minutes' <<<"$out") minutes): a stop is proposed to the operator ($(jq -r '.id' <<<"$out"))" >&2
 }
 
-# What the agents asked of the operator (a lead closed needs_operator, or a
-# clarification of a question: one line each in operator-requests.jsonl): the
-# operator's notify command runs
-# once for each new one, with the command that answers it.
+# What the run asked of the operator (the operator requests' outbox,
+# extensions/requests.ts, docs/adr/0014): the hub writes and delivers each
+# request itself, as it is committed and on every round. This is the
+# fallback: in a host run (no hub) it is the delivery, every round; with a
+# hub, once every five minutes, and it delivers only what the hub has not (a
+# request is notified once, by its `notified` event on the chain).
 operator_requests_check() {
-  local file="$SANDBOX/operator-requests.jsonl" mark="$SANDBOX/traces/idle-nudge.requests" seen total line
-  [[ -f "$file" ]] || return 0
-  total="$(grep -c . "$file" 2>/dev/null || echo 0)"
-  seen="$(cat "$mark" 2>/dev/null || echo 0)"
-  [[ "$seen" =~ ^[0-9]+$ ]] || seen=0
-  [[ "$total" -gt "$seen" ]] || return 0
-  tail -n +"$((seen + 1))" "$file" | while IFS= read -r line; do
-    [[ -n "$line" ]] || continue
-    bash "$ROOT/scripts/notify.sh" "$SANDBOX" operator_request "$line" >/dev/null 2>&1 </dev/null || true
-    # A lead closed needs_operator, or a clarification an agent asked of a question's asker (kind clarification).
-    echo "idle-nudge: an agent asks the operator: $(jq -r '"\(.lead // .q // .id) \(if .kind == "clarification" then "clarification \(.id): " elif .kind == "decision" then "decision: " else "" end)\(.request)"' <<<"$line" 2>/dev/null). Answer: $(jq -r '.answer' <<<"$line" 2>/dev/null)" >&2
-  done
-  echo "$total" > "$mark"
+  local mark="$SANDBOX/traces/idle-nudge.requests" now last out
+  if [[ -n "$HUB_ADMIN" && -S "$HUB_ADMIN" ]]; then
+    now="$(date +%s)"
+    last="$(cat "$mark" 2>/dev/null || echo 0)"
+    [[ "$last" =~ ^[0-9]+$ ]] || last=0
+    [[ $((now - last)) -ge 300 ]] || return 0
+    echo "$now" > "$mark"
+  fi
+  out="$(node --experimental-strip-types --no-warnings "$ROOT/scripts/requests-cli.ts" fire "$SANDBOX" ${SWARM_RUNS_DIR:+--runs "$SWARM_RUNS_DIR"} 2>/dev/null || true)"
+  [[ -n "$out" ]] || return 0
+  local opened notified
+  opened="$(jq -r '(.opened // []) | join(", ")' <<<"$out" 2>/dev/null)"
+  notified="$(jq -r '(.notified // []) | join(", ")' <<<"$out" 2>/dev/null)"
+  [[ -n "$opened" ]] && echo "idle-nudge: operator request(s) written from what was committed: $opened (swarm.sh requests <run> list)" >&2
+  [[ -n "$notified" ]] && echo "idle-nudge: the operator's notify targets were handed $notified, by id" >&2
+  return 0
 }
 
 # A compaction open this long is past the bound the seat's own harness holds

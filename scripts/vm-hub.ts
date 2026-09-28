@@ -709,7 +709,7 @@ export function boardTable(hub: {
     leadOpen: (who, a) => L.openLead(as(who), (isObject(a[1]) ? a[1] : {}) as L.LeadOpenInput),
     leadClaim: (who, a) => L.claimLead(as(who), a[1], (isObject(a[2]) ? a[2] : {}) as L.LeadClaimInput),
     leadRelease: (who, a) => L.releaseLead(as(who), a[1], (isObject(a[2]) ? a[2] : {}) as { why?: string; generation?: number }),
-    leadClose: (who, a) => L.closeLead(as(who), a[1], (isObject(a[2]) ? a[2] : {}) as { disposition?: string; ref?: string; why?: string; generation?: number }),
+    leadClose: (who, a) => L.closeLead(as(who), a[1], (isObject(a[2]) ? a[2] : {}) as { disposition?: string; ref?: string; why?: string; generation?: number; ask?: unknown }),
     leadLink: (who, a) => L.linkLead(as(who), a[1], (isObject(a[2]) ? a[2] : {}) as { add?: string[]; remove?: string[]; routes?: unknown }),
     leadsView: (who, a) => {
       const o = isObject(a[1]) ? a[1] : {};
@@ -917,6 +917,10 @@ export class Hub {
   readonly roster: string[];
   /** Tool jobs in worker VMs, and the catalogue they update (job-service.ts). */
   jobService?: JobService;
+  /** Whether the job service offers new objects to the derived catalogue (the kickoff's --no-derived-catalog says no). */
+  private jobsDerived = false;
+  /** The operator requests' outbox, reconciled and delivered one round at a time. */
+  private requestsFiring: Promise<unknown> = Promise.resolve();
   private servers: Server[] = [];
   /** Every open connection, so stopping does not wait on a held one. */
   private sockets = new Set<Socket>();
@@ -1054,8 +1058,57 @@ export class Hub {
    */
   private notifyConfigured(): boolean {
     // The run's own registry first: its directory is where the kickoff kept the hook.
-    const runsDir = this.cfg.registry ? dirname(resolve(this.cfg.registry)) : process.env.SWARM_RUNS_DIR || "";
-    return Boolean(this.cfg.run && runsDir && existsSync(join(runsDir, "notify", `${this.cfg.run}.cmd`)));
+    const runsDir = this.runsDir();
+    return Boolean(this.cfg.run && runsDir && (existsSync(join(runsDir, "notify", `${this.cfg.run}.cmd`)) || existsSync(join(runsDir, "notify", `${this.cfg.run}.targets`))));
+  }
+
+  /** The operator's runs directory: the registry's, else SWARM_RUNS_DIR. */
+  private runsDir(): string {
+    return this.cfg.registry ? dirname(resolve(this.cfg.registry)) : process.env.SWARM_RUNS_DIR || "";
+  }
+
+  /**
+   * The operator requests' outbox (extensions/requests.ts), fired by the hub
+   * itself: after every act that may open one (a lead closed needs_operator,
+   * a clarification, a network refusal), on every round, and at start, the
+   * committed records are reconciled into requests and each new one is
+   * handed, by its ids only, to the operator's notification targets. One
+   * round at a time; a failure is logged and the next round tries again.
+   */
+  fireRequests(): Promise<unknown> {
+    const next = this.requestsFiring
+      .then(async () => {
+        const R = await import("../extensions/requests.ts");
+        const dir = this.runsDir();
+        const r = await R.fireRequests(this.cfg.sandbox, dir ? { runsDir: dir } : {});
+        for (const rid of r.notified) await this.event("request_notified", { request: rid }, { ok: true });
+      })
+      .catch((err: Error) => this.log(`requests: ${err.message}`));
+    this.requestsFiring = next;
+    return next;
+  }
+
+  /**
+   * Evidence added while no hub ran, or before its catalogue could take it:
+   * a detect pass over each file, once (the store journal's
+   * evidence_catalogue_queued line says it was queued).
+   */
+  private async catalogueAddedEvidence(): Promise<void> {
+    const svc = this.jobService;
+    if (!svc || !(this.jobsDerived || existsSync(join(this.cfg.sandbox, "catalog")))) return;
+    const queued = new Set(svc.journal.of("evidence_catalogue_queued").map((l) => String(l.import)));
+    for (const l of svc.journal.of("evidence_added")) {
+      const id = String(l.import ?? "");
+      if (!id || queued.has(id)) continue;
+      const jobs: string[] = [];
+      const refused: string[] = [];
+      for (const f of (l.files as Array<{ path: string }> | undefined) ?? []) {
+        const r = await svc.catalogRequest("system", `import:${id}/${f.path}`, undefined, `evidence added: import:${id}`).catch((err: Error) => ({ ok: false as const, reason: err.message }));
+        if (r.ok) jobs.push(r.job.id);
+        else refused.push(`${f.path}: ${r.reason}`);
+      }
+      await svc.journal.append({ type: "evidence_catalogue_queued", import: id, jobs, ...(refused.length ? { refused } : {}) });
+    }
   }
 
   private historyQuota(): number {
@@ -1096,7 +1149,8 @@ export class Hub {
     if (!existsSync(script) || !this.notifyConfigured()) return;
     let started = false;
     try {
-      const child = spawn("bash", [script, this.cfg.sandbox, what, JSON.stringify(detail)], { detached: true, stdio: "ignore", timeout: NOTIFY_TIMEOUT_MS });
+      const dir = this.runsDir();
+      const child = spawn("bash", [script, this.cfg.sandbox, what, JSON.stringify(detail)], { detached: true, stdio: "ignore", timeout: NOTIFY_TIMEOUT_MS, env: { ...process.env, ...(dir ? { SWARM_RUNS_DIR: dir } : {}) } });
       child.on("error", () => undefined);
       child.unref();
       started = true;
@@ -1131,6 +1185,8 @@ export class Hub {
     }
     await this.listen(this.adminSocket(), (socket) => this.serveAdmin(socket));
     if (this.cfg.jobs && this.cfg.run) await this.startJobs(this.cfg.jobs, this.cfg.run);
+    // What a crash left committed and not yet delivered to the operator: now.
+    void this.fireRequests();
     this.writeStatus();
     if (this.cfg.backstop !== false) {
       this.backstopTimer = setInterval(() => void this.backstop().catch(() => undefined), BACKSTOP_INTERVAL_MS);
@@ -1222,6 +1278,7 @@ export class Hub {
    */
   private async startJobs(jobs: JobsConfig, run: string): Promise<void> {
     const S = this.cfg.sandbox;
+    this.jobsDerived = jobs.derived === true;
     this.jobService = new JobService({
       sandbox: S,
       run,
@@ -1876,6 +1933,8 @@ export class Hub {
     try {
       const result = await handler(who, revive(args), signal);
       if (AUDITED.has(fn)) void this.audit(who, fn, { ok: true, ...summarize(fn, result) });
+      // An act that may have opened an operator request: the hub delivers it now.
+      if (fn === "leadClose" || fn === "questionAsk" || fn === "netRequest") void this.fireRequests();
       return { ok: true, result: result === undefined ? null : result };
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);
@@ -2196,6 +2255,38 @@ export class Hub {
           this.reply(socket, result, true);
           return false;
         }
+        case "material": {
+          // Evidence or material added by the operator: the hub is the store
+          // journal's one writer while it runs (scripts/material.ts).
+          const real = (x: string) => {
+            try {
+              return realpathSync(x);
+            } catch {
+              return resolve(x);
+            }
+          };
+          if (typeof msg.sandbox === "string" && real(msg.sandbox) !== real(this.cfg.sandbox)) {
+            this.reply(socket, { ok: false, reason: "this hub serves another run" }, true);
+            return false;
+          }
+          const M = await import("./material.ts");
+          const svc = this.jobService;
+          const request = (isObject(msg.request) ? msg.request : {}) as never;
+          const result = await M.admitMaterial(this.cfg.sandbox, request, {
+            ...(svc ? { journal: svc.journal, catalogueOn: this.jobsDerived || existsSync(join(this.cfg.sandbox, "catalog")), catalogue: async (target: string, note: string) => {
+              const r = await svc.catalogRequest("system", target, undefined, note);
+              return r.ok ? { ok: true, job: r.job.id } : { ok: false, reason: r.reason };
+            } } : {}),
+          }).catch((err: Error) => ({ ok: false, reason: err.message }));
+          this.reply(socket, result, true);
+          void this.fireRequests();
+          return false;
+        }
+        case "requests_fire": {
+          await this.fireRequests();
+          this.reply(socket, { ok: true }, true);
+          return false;
+        }
         case "question":
         case "question_direct":
         case "question_deliver": {
@@ -2250,6 +2341,9 @@ export class Hub {
       await this.stop();
       process.exit(0);
     }
+    // The operator requests' round: what is committed and not yet written or delivered.
+    await this.fireRequests();
+    await this.catalogueAddedEvidence().catch((err: Error) => this.log(`catalogue of added evidence: ${err.message}`));
     // The dynamic network's round: grants whose lead closed or whose job
     // ended revoked, captures put on the ledger, contamination recorded.
     if (readCasePolicy(S).network !== "closed") {

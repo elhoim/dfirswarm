@@ -128,7 +128,24 @@ for c in usb-departure web-intrusion invoice-fraud; do
   pass "$c: the goal launches, and the prepared run scores against the truth by digest"
 done
 
-# The held-back item as a second set: the interim way until `swarm.sh evidence add`.
+# The held-back item added while the run is prepared, the way a case gets it:
+# `swarm.sh evidence add`, an inventory revision in the store, found by the
+# scorer by its digest on the journal's evidence_added line.
+c=invoice-fraud
+out="$(start --model solo/model --n 2 --cap-usd 1 --no-start --goal-file "$TMP/cases/$c/goal.md" \
+  --inputs "$TMP/cases/$c/inputs" --label "cal-add")"
+sb="$(sandbox_of "$out")"
+id="$(jq -r '.runs[] | select(.label == "cal-add") | .id' "$TMP/runs/registry.json")"
+[[ -n "$sb" && -n "$id" ]] || fail "the kickoff for evidence add failed: $out"
+late="$(jq -r '.late[0].path' "$TMP/cases/$c/case.json")"
+out="$(SWARM_RUNS_DIR="$TMP/runs" bash "$ROOT/scripts/swarm.sh" evidence "$id" add "$TMP/cases/$c/$late" --why "finance supplied the payment run export on request" 2>&1)" || fail "evidence add of the late item failed: $out"
+grep -q '^Added ev-0001 (acquired_evidence; 1 file(s)' <<<"$out" || fail "evidence add did not say what it added: $out"
+score="$(node --experimental-strip-types --no-warnings "$ROOT/scripts/calibrate.ts" "$sb" --truth "$TMP/truth/$c.truth.json" --json)"
+[[ "$(jq '.late[0].added' <<<"$score")" == "true" ]] || fail "the late item added with evidence add should count as added: $(jq -c '.late' <<<"$score")"
+jq -e '.late[0].how | test("evidence added as import:ev-0001/")' <<<"$score" >/dev/null || fail "the scorer did not tell the late item by its evidence_added digest: $(jq -c '.late' <<<"$score")"
+pass "the late item added with swarm.sh evidence add is found by its digest on the journal's evidence_added line"
+
+# The held-back item as a second set at kickoff: the older way, still read.
 c=web-intrusion
 out="$(start --model solo/model --n 2 --cap-usd 1 --no-start --goal-file "$TMP/cases/$c/goal.md" \
   --inputs "$TMP/cases/$c/inputs" --inputs "$TMP/cases/$c/late" --label "cal-late")"

@@ -149,6 +149,8 @@ export async function admitOperatorAct(sandbox: string, req: AdmissionRequest, o
   if (!r.ok) return r;
   // Committed: the acknowledgement may be given. What it publishes follows.
   const out: Record<string, unknown> = { ...r, by: Q.originWords(p.origin) };
+  // A question's attachments are supplied material: each on the ledger as external (docs/adr/0014).
+  if ((req.ev === "open" || req.ev === "amend") && p.act.attachments?.length && r.q) out.attachments = await recordAttachments(sandbox, r.q, p.act.attachments, Q.originWords(p.origin)).catch((err: Error) => ({ pending: err.message }));
   if (req.ev === "clarify_answer" && r.q && r.clarify) out.post = await Q.publishClarification(sandbox, r.q, r.clarify).catch((err: Error) => ({ pending: err.message }));
   const delivered = await Q.deliverPending(sandbox).catch((err: Error) => ({ error: err.message }));
   out.delivered = delivered;
@@ -159,6 +161,91 @@ export async function admitOperatorAct(sandbox: string, req: AdmissionRequest, o
     out.outcome = "an acceptance makes the run examination-limited: the report says what was accepted, by whom, for which revision";
   }
   return out;
+}
+
+/**
+ * A question's attachments on the ledger as external material (class
+ * operator_supplied, docs/adr/0014), each with its provenance: who supplied
+ * it, when, for which question, its sha256 and what the case policy lets it
+ * be used for. The original evidence (input:, member:) is evidence, not
+ * supplied material, and is left; an attachment already recorded as
+ * external (material add) is not recorded twice.
+ */
+export async function recordAttachments(sandbox: string, q: string, attachments: string[], suppliedBy: string): Promise<Array<{ ref: string; entry?: number; skipped?: string; pending?: string }>> {
+  const { permittedUse, readCasePolicy } = await import("./case-policy.ts");
+  const { resolveRef } = await import("./evidence-store.ts");
+  const policy = readCasePolicy(sandbox);
+  const ledger = await P.readLedger(sandbox, { raw: true }).catch(() => [] as P.LedgerEntry[]);
+  const known = new Set<string>();
+  for (const e of ledger) {
+    if (e.kind !== "external") continue;
+    for (const r of e.refs ?? []) {
+      known.add(r.trim());
+      const imp = /^import:([a-z0-9-]{1,64})/.exec(r.trim());
+      if (imp) known.add(`import:${imp[1]}`);
+    }
+  }
+  const out: Array<{ ref: string; entry?: number; skipped?: string; pending?: string }> = [];
+  for (const raw of attachments) {
+    const ref = raw.trim();
+    if (/^(input|member):/.test(ref)) {
+      out.push({ ref, skipped: "the original evidence, not supplied material" });
+      continue;
+    }
+    const imp = /^import:([a-z0-9-]{1,64})/.exec(ref);
+    if (known.has(ref) || (imp && known.has(`import:${imp[1]}`))) {
+      out.push({ ref, skipped: "recorded as external material already" });
+      continue;
+    }
+    if (!/^[a-z0-9]+:/.test(ref)) {
+      out.push({ ref, skipped: "a path in the run, not an object: supply it as a file (question add --attach FILE) to seal it" });
+      continue;
+    }
+    const resolved = await resolveRef(sandbox, ref).catch(() => null);
+    const sha = resolved && resolved.ok ? resolved.sha256 : undefined;
+    const rec = await P.recordExternal(sandbox, {
+      value: `Supplied with ${q} as an attachment: ${ref}`,
+      source: `an attachment to ${q}, by ${suppliedBy}`,
+      evidence: `questions/questions.jsonl (${q}); ${ref}`,
+      refs: [ref],
+      source_class: "operator_supplied",
+      provenance: { supplied_by: suppliedBy, at: new Date().toISOString(), from: `an attachment to ${q}`, ...(sha ? { sha256: sha } : {}), permitted_use: permittedUse(policy, "operator_supplied"), question: q },
+    });
+    out.push(rec.ok ? { ref, entry: rec.entry.seq } : { ref, pending: rec.reason });
+  }
+  return out;
+}
+
+/**
+ * A question's --attach given as a file on this host, outside the run: the
+ * file is supplied as material first (scripts/material.ts, class
+ * operator_supplied, through the hub when one runs), and the act carries the
+ * import it became. A ref or a path in the run is left as it is.
+ */
+export async function supplyAttachments(sandbox: string, attachments: string[] | undefined, suppliedBy: string, via: string, hubAdmin?: string): Promise<{ ok: true; attachments: string[] | undefined; supplied: string[] } | { ok: false; reason: string }> {
+  if (!attachments?.length) return { ok: true, attachments, supplied: [] };
+  const { existsSync, statSync } = await import("node:fs");
+  const { isAbsolute, relative, resolve: res } = await import("node:path");
+  const out: string[] = [];
+  const supplied: string[] = [];
+  for (const a of attachments) {
+    const t = a.trim();
+    const abs = res(t);
+    const inRun = !relative(res(sandbox), abs).startsWith("..") && !isAbsolute(relative(res(sandbox), abs));
+    if (/^[a-z0-9]+:/.test(t) || !existsSync(abs) || inRun || (!isAbsolute(t) && existsSync(res(sandbox, t)))) {
+      out.push(t);
+      continue;
+    }
+    const M = await import("./material.ts");
+    const req = { mode: "material" as const, path: abs, why: `an attachment to a question, supplied by ${suppliedBy}`, supplied_by: suppliedBy, via };
+    const r = await admit(sandbox, hubAdmin, { op: "material", request: req }, () => M.admitMaterial(sandbox, req));
+    if (r.ok === false) return { ok: false, reason: `the attachment ${t} could not be supplied: ${String(r.reason ?? "refused")}` };
+    const files = (r.files as Array<{ path: string }> | undefined) ?? [];
+    const ref = files.length === 1 && statSync(abs).isFile() ? `import:${String(r.import)}/${files[0].path}` : `import:${String(r.import)}`;
+    out.push(ref);
+    supplied.push(ref);
+  }
+  return { ok: true, attachments: out, supplied };
 }
 
 /**
@@ -255,6 +342,16 @@ export async function admit(sandbox: string, hubAdmin: string | undefined, body:
 export async function operatorAct(sandbox: string, ev: Q.ActKind, input: Q.ActInput, flags: Flags, home?: string, o: { hubAdmin?: string } = {}): Promise<Record<string, unknown>> {
   const who = actorFor(flags, home);
   if ("why" in who) return { ok: false, reason: who.why };
+  // An attachment given as a file on this host is supplied as material first; the act carries its import.
+  if ((ev === "open" || ev === "amend") && Array.isArray(input.attachments) && input.attachments.length) {
+    // The act's other words are checked first: nothing is supplied for an act that would be refused.
+    const { attachments: _a, ...rest } = input;
+    const first = await Q.prepareAct(sandbox, who.actor, ev, rest);
+    if (!first.ok && !(ev === "amend" && /changes something/.test(first.reason))) return first;
+    const s = await supplyAttachments(sandbox, input.attachments.map(String), Q.originWords(Q.originOf(who.actor)), who.actor.kind === "human" ? (who.actor.via ?? "cli") : "cli", o.hubAdmin);
+    if (!s.ok) return { ok: false, reason: s.reason };
+    input = { ...input, attachments: s.attachments };
+  }
   const prepared = await Q.prepareAct(sandbox, who.actor, ev, input);
   if (!prepared.ok) return prepared;
   let signature: Q.ActSignature | undefined;
@@ -454,7 +551,7 @@ export async function showText(sandbox: string, id: string): Promise<string | nu
   for (const c of v.clarifications) out.push(`    clarification ${c.id} from ${c.by}: ${c.what}${c.answer ? `\n      answered by ${Q.originWords(c.answer.origin)}: ${c.answer.text}` : "\n      not answered yet"}`);
   for (const o of v.offers) out.push(`    offered to ${o.to} at ${o.at}${o.first ? ` first, until ${o.until}` : ""} (${o.why})`);
   for (const d of v.delivered) out.push(`    delivered revision ${d.rev} at ${d.at}${d.post ? ` (post ${d.post.thread}#${d.post.id})` : ""}${d.hypotheses.length ? `; hypotheses ${d.hypotheses.map((n) => `E-${n}`).join(", ")}` : ""}`);
-  if (v.accepted) out.push(`    accepted as ${v.accepted.as} by ${Q.originWords(v.accepted.origin)} for revision ${v.accepted.rev}${v.accepted.stands ? "" : " (NO LONGER STANDS: amended since)"}: ${v.accepted.why}`);
+  if (v.accepted) out.push(`    accepted as ${v.accepted.as} by ${Q.originWords(v.accepted.origin)} for revision ${v.accepted.rev}${v.accepted.stands ? "" : " (NO LONGER STANDS: amended, or new evidence arrived, since)"}: ${v.accepted.why}`);
   if (v.withdrawn) out.push(`    withdrawn by ${Q.originWords(v.withdrawn.origin)} at ${v.withdrawn.at}: ${v.withdrawn.why}`);
   for (const g of signed) out.push(`    event ${g.act_seq} signed by ${g.person} (${g.key_kind} ${g.fingerprint}): ${g.state} (${g.detail})`);
   return `${out.join("\n")}\n`;

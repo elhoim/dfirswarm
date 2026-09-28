@@ -44,6 +44,7 @@ import { createHash } from "node:crypto";
 import { readdir, readFile, stat } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { OperatorRequest } from "../extensions/requests.ts";
 import {
   answerProblems,
   attestationAct,
@@ -375,6 +376,18 @@ type Run = {
   leads: { views: LeadView[]; chain: { ok: boolean; broken_at: number | null; reason: string | null }; events: number } | null;
   /** What the negative bar holds each question to: material, and whether it asks whether something exists (the registers'). */
   bar: (id: string) => { material: boolean; existence: boolean };
+  /**
+   * The case contract (docs/adr/0014): which entries rest on material from
+   * outside the original evidence and its classes (net-broker.ts
+   * externalLineage), the operator requests, the material added, and what
+   * the case policy says of more evidence. Empty for a run before it.
+   */
+  contract: {
+    external: { entries: Map<number, string[]>; classes: Map<number, string[]>; jobs: Map<string, string[]> } | null;
+    requests: OperatorRequest[];
+    material: Array<Record<string, unknown>>;
+    more_evidence: string | null;
+  };
 };
 
 async function readJson<T>(file: string): Promise<T | null> {
@@ -513,6 +526,22 @@ async function loadRun(sandboxArg: string, opts: ReportBodyOptions): Promise<Run
 
   const caseId = /Case\s+`([^`]+)`/.exec(goal?.caseLine ?? "")?.[1] ?? "";
   const release = opts.release ?? null;
+  // The case contract: external lineage, the operator requests, the material added, the policy's word on more evidence.
+  const contract: Run["contract"] = await (async () => {
+    const { externalLineage } = await import("./net-broker.ts");
+    const lin = await externalLineage(sandbox).catch(() => null);
+    const R = await import("../extensions/requests.ts");
+    const rs = await R.requestsSnapshot(sandbox).catch(() => null);
+    const { listMaterial } = await import("./material.ts");
+    const material = await listMaterial(sandbox).catch(() => [] as Array<Record<string, unknown>>);
+    const policy = await readJson<{ more_evidence?: string }>(join(sandbox, "network", "policy.json"));
+    return {
+      external: lin && (lin.entries.size || lin.jobs.size) ? { entries: lin.entries, classes: lin.classes, jobs: lin.jobs } : null,
+      requests: rs ? R.requestList(rs) : [],
+      material,
+      more_evidence: typeof policy?.more_evidence === "string" ? policy.more_evidence : null,
+    };
+  })();
   return {
     sandbox,
     runId: teamRaw?.swarm_id ?? basename(sandbox),
@@ -551,6 +580,7 @@ async function loadRun(sandboxArg: string, opts: ReportBodyOptions): Promise<Run
       const snap = await leadsSnapshot(sandbox).catch(() => null);
       return snap && snap.state.events.length ? { views: rankedLeads(snap), chain: snap.state.chain, events: snap.state.events.length } : null;
     })(),
+    contract,
   };
 }
 
@@ -613,8 +643,13 @@ function refOrigin(ref: string, run: Run): Origin {
       return { keys: [inputKey(value)], unknown: [] };
     case "job":
       return jobOrigin(value.split("/")[0], run, new Set());
-    case "import":
-      return { keys: [`import:${value.split("/")[0]}`], unknown: [{ kind: "origin", text: `import ${value.split("/")[0]} was brought into the store: what it was made from is not recorded` }] };
+    case "import": {
+      const id = value.split("/")[0];
+      // Evidence or material added from outside, with its provenance on record (docs/adr/0014).
+      const m = run.contract.material.find((x) => x.import === id);
+      if (m) return { keys: [`import:${id}`], unknown: [] };
+      return { keys: [`import:${id}`], unknown: [{ kind: "origin", text: `import ${id} was brought into the store: what it was made from is not recorded` }] };
+    }
     case "member": {
       const gen = /^([a-z0-9-]+)#\d+$/.exec(value)?.[1] ?? value;
       const job = run.generations.get(gen);
@@ -774,6 +809,8 @@ type EntryState = {
   grounding: string | undefined;
   /** Why the examiner's review could not be read, when it could not. */
   reviewUnreadable: string | undefined;
+  /** The classes of material from outside the original evidence the entry rests on, when it rests on any (docs/adr/0014). */
+  external: string[] | null;
 };
 
 function stateOf(e: LedgerEntry, run: Run, memo: Map<number, EntryState>): EntryState {
@@ -805,6 +842,7 @@ function stateOf(e: LedgerEntry, run: Run, memo: Map<number, EntryState>): Entry
     review: run.review?.entries?.get(e.seq) ?? null,
     grounding: run.grounding[String(e.seq)],
     reviewUnreadable: run.review?.unreadable,
+    external: run.contract.external?.entries.has(e.seq) ? (run.contract.external.classes.get(e.seq) ?? []) : null,
   };
   memo.set(e.seq, s);
   return s;
@@ -840,6 +878,7 @@ function chipsOf(e: LedgerEntry, s: EntryState): Chip[] {
   }
   if (s.failed.length) out.push(s.failed.every((f) => (e.qualifies ?? []).some((q) => q.ref === f.ref)) ? { text: "qualified (failed job)", tone: "saffron" } : { text: "from a failed job, not qualified", tone: "brick" });
   if (s.grounding === "not in the trace") out.push({ text: "not grounded in the trace", tone: "saffron" });
+  if (s.external && e.kind !== "external") out.push({ text: `rests on external material${s.external.length ? ` (${s.external.map((c) => c.replace(/_/g, " ")).join(", ")})` : ""}`, tone: "saffron" });
   if (s.disputes.length) out.push({ text: "disputed", tone: "brick" });
   if (s.supersededBy !== undefined) out.push({ text: `superseded by E-${s.supersededBy}`, tone: "brick" });
   if (s.problems.length) out.push({ text: "no longer stands on its support", tone: "brick" });
@@ -1236,6 +1275,29 @@ function evidenceSection(run: Run): BodySection {
   }
   blocks.push({ k: "h", level: 3, text: "Acquisition" });
   blocks.push({ k: "p", s: [acquisitionSentence(run)] });
+  // What entered the run after its kickoff (docs/adr/0014): each addition sealed in the store with its provenance.
+  const added = run.contract.material.filter((m) => m.mode === "evidence");
+  const supplied = run.contract.material.filter((m) => m.mode === "material");
+  if (added.length) {
+    blocks.push({ k: "h", level: 3, text: "Evidence added during the run" });
+    blocks.push({ k: "p", s: ["Each addition is an inventory revision: copied, held to the sha256 its source had, sealed in the store and recorded on the ledger as external material (acquired evidence). The agents' own VMs kept the view of the run they booted with; the addition was read through jobs."] });
+    blocks.push({
+      k: "table",
+      cls: "evidence",
+      head: ["Import", "Revision", "File", "Size", "sha256", "For", "Supplied by", "Why"],
+      rows: added.flatMap((m) => ((m.files as Array<{ path: string; bytes: number; sha256: string }> | undefined) ?? []).map((f): Span[][] => [[{ code: `import:${String(m.import)}` }], [String(m.inventory_rev ?? "")], [{ code: f.path }], [bytesHuman(f.bytes)], [{ code: f.sha256 }], [String(m.request ?? "")], [String(m.supplied_by ?? "")], [String(m.why ?? "")]])),
+    });
+  }
+  if (supplied.length) {
+    blocks.push({ k: "h", level: 3, text: "Material supplied by the operator" });
+    blocks.push({ k: "p", s: ["Supplied material is not evidence of the events: it proves nothing by itself, and what rests on it is marked in §5."] });
+    blocks.push({
+      k: "table",
+      cls: "evidence",
+      head: ["Import", "Class", "File", "sha256", "Use", "Supplied by", "Why"],
+      rows: supplied.flatMap((m) => ((m.files as Array<{ path: string; bytes: number; sha256: string }> | undefined) ?? []).map((f): Span[][] => [[{ code: `import:${String(m.import)}` }], [String(m.class ?? "").replace(/_/g, " ")], [{ code: f.path }], [{ code: f.sha256 }], [String(m.permitted_use ?? "")], [String(m.supplied_by ?? "")], [String(m.why ?? "")]])),
+    });
+  }
   blocks.push({ k: "h", level: 3, text: "At the end of the run" });
   blocks.push({ k: "p", s: [custodySentence(run.custody)] });
   if (run.custody?.summary) blocks.push({ k: "p", s: [{ b: "The host's custody check, in its own words (custody.json): " }, run.custody.summary] });
@@ -1859,6 +1921,86 @@ function conclusionsSection(run: Run, memo: Map<number, EntryState>): BodySectio
   return { id: "s7", n: "7", title: "Conclusions and opinions", desc: "the swarm's conclusions, marked as opinion, with their basis", blocks };
 }
 
+/** The five kinds of evidence gap a reader is told apart (docs/adr/0014). */
+export type GapClass = "never collected" | "unavailable" | "inaccessible" | "unexamined" | "inconclusive";
+
+/** One evidence gap, generated from the records: what, why, which questions, what it bounds, and what would close it. */
+export type EvidenceGap = { cls: GapClass; what: string; source: string; questions: string[]; record: string; consequence: string; next: string };
+
+/**
+ * The evidence gaps, generated from the records and never written by hand:
+ * acquisition requests that were declined, are still open, or found the
+ * source unavailable; evidence that arrived and that no job read;
+ * limitations by their reason (unavailable; failed: inaccessible;
+ * not_examined, excluded, partial: unexamined); coverage records that are
+ * partial or name planned routes nothing examined; answers that are not
+ * determinable. A gap bounds what an answer can say; it is never a finding
+ * that the thing is absent.
+ */
+export function gapsOf(run: Run, limits: LedgerEntry[]): EvidenceGap[] {
+  const out: EvidenceGap[] = [];
+  const qs = (list: string[] | undefined) => [...new Set((list ?? []).map((x) => sectionKey(x)).filter(Boolean))].map((x) => (/^\d+$/.test(x) ? `Q-${x}` : x));
+  for (const r of run.contract.requests.filter((x) => x.kind === "acquisition")) {
+    const what = r.ask ? `${r.ask.source} (${r.ask.where})` : String(r.line.request ?? "");
+    const would = r.ask?.expected_value ?? "";
+    const questions = r.questions;
+    const base = { what, source: r.rid, questions };
+    if (r.stage === "declined") out.push({ ...base, cls: "never collected", record: `${r.rid}, declined by ${r.closed?.by ?? r.stages.at(-1)?.by ?? "the operator"}${r.closed?.cause === "case_policy" ? " (the case policy admits no further evidence)" : ""}`, consequence: `the answers to ${questions.join(", ") || "the questions it bears on"} rest on the evidence the run had; what it would have established (${would || "not said"}) is not known`, next: r.ask?.authority_needed ? `collect it with ${r.ask.authority_needed}, in a run whose policy admits it` : "collect it, in a run whose policy admits it" });
+    else if (r.stage === "unavailable") out.push({ ...base, cls: "unavailable", record: `${r.rid}: ${r.closed?.text ?? "unavailable"}`, consequence: `what it would have established (${would || "not said"}) cannot be established from it`, next: "look for a secondary source of the same facts" });
+    else if (r.stage === "requested" || r.stage === "authorised" || r.stage === "collecting") out.push({ ...base, cls: "never collected", record: `${r.rid}, still ${r.stage} when this was rendered`, consequence: `the answers to ${questions.join(", ") || "the questions it bears on"} were given without it`, next: `supply it (swarm.sh evidence <run> add PATH --for ${r.rid}) or say it is unavailable` });
+    else if (r.stage === "received" || r.stage === "validated") {
+      const imp = r.stages.find((x) => x.import)?.import;
+      const read = imp ? [...(run.contract.external?.jobs.entries() ?? [])].some(([, via]) => via.some((v) => v.startsWith(`import:${imp}`) && !v.includes("broad scope"))) : false;
+      if (imp && !read) out.push({ ...base, cls: "unexamined", record: `${r.rid}, received as import:${imp}; no job declared it as an input`, consequence: "it arrived and nothing shows it was read", next: `run a job over import:${imp}` });
+    }
+  }
+  // Evidence added without a request, and not read by any job.
+  for (const m of run.contract.material.filter((x) => x.mode === "evidence" && !x.request)) {
+    const imp = String(m.import);
+    const read = [...(run.contract.external?.jobs.entries() ?? [])].some(([, via]) => via.some((v) => v.startsWith(`import:${imp}`) && !v.includes("broad scope")));
+    if (!read) out.push({ cls: "unexamined", what: `import:${imp} (${String(m.why ?? "")})`, source: `import:${imp}`, questions: (m.questions as string[] | undefined) ?? [], record: `added by ${String(m.supplied_by ?? "the operator")} at ${String(m.at ?? "")}; no job declared it as an input`, consequence: "it arrived and nothing shows it was read", next: `run a job over import:${imp}` });
+  }
+  const byReason: Record<string, GapClass> = { unavailable: "unavailable", failed: "inaccessible", not_examined: "unexamined", excluded: "unexamined", partial: "unexamined" };
+  for (const l of limits) {
+    const cls = byReason[l.reason ?? ""];
+    if (!cls) continue;
+    const names = /\bR-\d+\b/.exec(`${l.value}\n${l.source ?? ""}\n${l.evidence ?? ""}`)?.[0];
+    out.push({ cls, what: l.value, source: `E-${l.seq}`, questions: qs(l.answers), record: `limitation E-${l.seq} (${(l.reason ?? "").replace(/_/g, " ")})${names ? `, naming ${names}` : ""}`, consequence: l.reason === "partial" ? "the part not examined bounds what was found" : "what it would have shown is not known", next: l.reason === "failed" ? "another method or tool to read it" : l.reason === "unavailable" ? "a secondary source" : "examine it" });
+  }
+  for (const c of run.entries.filter((e) => e.kind === "coverage" && !run.replaced.has(e.seq))) {
+    if (c.coverage === "partial") out.push({ cls: "unexamined", what: `objects the search of E-${c.seq} named and its jobs were not given${c.coverage_detail?.why?.length ? `: ${c.coverage_detail.why.join("; ")}` : ""}`, source: `E-${c.seq}`, questions: qs(c.answers), record: `coverage record E-${c.seq}, coverage partial (computed by the hub)`, consequence: "the negative holds over the part searched only", next: "give a job every object the record names" });
+    for (const r of c.not_examined ?? []) out.push({ cls: "unexamined", what: `${r.source} (${r.method})`, source: `E-${c.seq}`, questions: qs(c.answers), record: `a planned route of coverage record E-${c.seq} nothing examined: ${r.why}`, consequence: "the route planned before the search was not taken", next: "examine the route, or say why it no longer matters" });
+  }
+  for (const a of run.entries.filter((e) => e.kind === "answer" && !run.replaced.has(e.seq) && (e.result === "not_determinable" || (e.inconclusive && !e.result)))) {
+    out.push({ cls: "inconclusive", what: a.value, source: `E-${a.seq}`, questions: qs([sectionAnswersId(a.section ?? "")]), record: `answer E-${a.seq}, not determinable`, consequence: "the question stays open", next: a.would_change ? a.would_change : "what would settle it is not recorded" });
+  }
+  return out;
+}
+
+function evidenceGaps(run: Run, limits: LedgerEntry[]): Block[] {
+  const gaps = gapsOf(run, limits);
+  const blocks: Block[] = [{ k: "h", level: 3, text: "Evidence gaps and acquisition requests" }];
+  blocks.push({ k: "p", s: [`Generated from the records (acquisition requests, limitations, coverage records and answers), never written by hand. A gap bounds what an answer can say; it is never a finding that something is absent. ${run.contract.more_evidence ? `The case policy said of more evidence: ${run.contract.more_evidence}${run.contract.more_evidence === "no" ? " (an acquisition was answered at once, \"no additional input under this case policy\")" : ""}.` : ""}`] });
+  const acq = run.contract.requests.filter((r) => r.kind === "acquisition");
+  if (acq.length) {
+    blocks.push({
+      k: "table",
+      cls: "gaps",
+      head: ["Request", "Source", "Questions", "Would establish", "Urgency", "Stage", "Outcome"],
+      rows: acq.map((r): Span[][] => [[r.rid], [r.ask ? `${r.ask.source} (${r.ask.where})` : String(r.line.request ?? "")], [r.questions.join(", ")], [r.ask?.expected_value ?? ""], [r.ask?.urgency ?? ""], [r.stage ?? ""], [r.closed ? `${r.closed.ev} by ${r.closed.by}: ${r.closed.text}` : r.state]]),
+    });
+  } else blocks.push({ k: "p", s: ["No acquisition was requested."] });
+  if (gaps.length) {
+    for (const cls of ["never collected", "unavailable", "inaccessible", "unexamined", "inconclusive"] as GapClass[]) {
+      const list = gaps.filter((g) => g.cls === cls);
+      if (!list.length) continue;
+      blocks.push({ k: "h", level: 4, text: `${cls[0].toUpperCase()}${cls.slice(1)} (${list.length})` });
+      blocks.push({ k: "list", items: list.map((g): Span[] => [{ b: `${g.what}.` }, ` Record: ${g.record}.${g.questions.length ? ` Questions: ${g.questions.join(", ")}.` : ""} Consequence: ${g.consequence}. Next step: ${g.next}.`]) });
+    }
+  } else blocks.push({ k: "p", s: ["No gap is recorded: no acquisition was declined or left open, no limitation names an unavailable, inaccessible or unexamined source, and no answer is not determinable. That is what the records say, not a statement that the examination had no limits."] });
+  return blocks;
+}
+
 function limitsSection(run: Run, memo: Map<number, EntryState>): BodySection {
   const blocks: Block[] = [];
   const out = (e: LedgerEntry, extra: Row[]) => blocks.push(citeBlock(e, run, memo, extra));
@@ -1903,6 +2045,8 @@ function limitsSection(run: Run, memo: Map<number, EntryState>): BodySection {
   }
   if (open.length) blocks.push({ k: "list", items: open });
   else blocks.push({ k: "p", s: [run.questions.length ? "Every question has a standing answer." : "No question was named."] });
+
+  blocks.push(...evidenceGaps(run, limits));
 
   // Contradictions that stand, whether or not the run has answers to weigh them.
   const contradictions = standingContradictions(run.entries);

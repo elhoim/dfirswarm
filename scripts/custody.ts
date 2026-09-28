@@ -658,6 +658,10 @@ export type Custody = {
     questions?: { lines: number; head: string | null };
     /** The dynamic network's two chains (network/grants.jsonl, network/fetches.jsonl): absent from a verdict taken before they were sealed. */
     network?: { grants: { lines: number; head: string | null }; fetches: { lines: number; head: string | null } };
+    /** The operator requests' chain (requests/requests.jsonl, docs/adr/0014): absent from a verdict taken before it was sealed. */
+    requests?: { lines: number; head: string | null };
+    /** The case policy's record (network/policy.json) by its sha256: absent from a verdict taken before it was sealed. */
+    case_policy?: { sha256: string };
     journal: { lines: number; head: string | null } | null;
     model_gateway: { lines: number; sha256: string | null } | null;
   };
@@ -671,6 +675,15 @@ export type Custody = {
   questions?: { lines: number; intact: boolean; detail: string } | null;
   /** The dynamic network's records: both chains, and every sealed capture re-hashed; null when the run made no request (docs/adr/0012). */
   network?: NetworkCheck | null;
+  /** The operator requests (requests/requests.jsonl): their own chain, sealed unsigned; null when nothing was asked of the operator. */
+  requests?: { lines: number; intact: boolean; detail: string } | null;
+  /**
+   * The case policy the kickoff recorded (network/policy.json), by its
+   * sha256, against the one the kickoff anchored beside the run: a policy
+   * rewritten inside the run is named. Null for a run from before the case
+   * policy was recorded.
+   */
+  case_policy?: { path: string; sha256: string; anchored: boolean | null; policy: string; network: string; more_evidence: string; material_use: Record<string, string> } | { path: string; unreadable: string; anchored: boolean | null } | null;
   /** The operator's audit beside the registry, and each operator line on the trace matched to it. */
   operator: OperatorAudit;
   /** The acquisition hashes given at kickoff (--inputs-hashes), against the evidence as re-hashed now. */
@@ -726,6 +739,8 @@ export type CustodyState = {
   leads?: Custody["leads"];
   questions?: Custody["questions"];
   network?: Custody["network"];
+  requests?: Custody["requests"];
+  case_policy?: Custody["case_policy"];
   operator?: Custody["operator"];
   acquisition?: Custody["acquisition"];
   models?: Custody["models"];
@@ -1041,7 +1056,7 @@ export async function takeCustody(sandboxInput: string, options: CustodyOptions 
     return deadline.over;
   };
   const say = options.progress ?? (() => undefined);
-  let anchor: { inputs_manifest_sha256?: string; run?: string; isolation?: string } | null = null;
+  let anchor: { inputs_manifest_sha256?: string; case_policy_sha256?: string; run?: string; isolation?: string } | null = null;
   const anchorFile = await anchorPathFor(sandbox);
   try {
     anchor = JSON.parse(await readRegularTextOutside(anchorFile));
@@ -1579,6 +1594,31 @@ export async function takeCustody(sandboxInput: string, options: CustodyOptions 
   const net = await checkNetwork(sandbox).catch(() => null);
   state.network = net?.check ?? null;
   if (state.seal && net) state.seal.network = net.seal;
+  // What was asked of the operator and how each request stood: a chain of its own (the outbox, docs/adr/0014).
+  const requestsRead = await readRegularText(join(sandbox, "requests", "requests.jsonl"));
+  if ("text" in requestsRead && requestsRead.text.trim()) {
+    const v = verifyLeadChain(requestsRead.text);
+    state.requests = { lines: v.total, intact: v.ok, detail: v.ok ? `${v.total} events, chain intact` : `broken at line ${v.broken_at} (${v.reason})` };
+    if (state.seal) state.seal.requests = { lines: v.total, head: v.head };
+  } else if ("why" in requestsRead && requestsRead.why !== "missing") {
+    state.requests = { lines: 0, intact: false, detail: `the operator requests are ${requestsRead.why}` };
+  } else state.requests = null;
+  // The case policy, by its bytes, against the sha256 the kickoff anchored outside the run.
+  const policyRead = await readRegularText(join(sandbox, "network", "policy.json"));
+  if ("text" in policyRead) {
+    const sha = createHash("sha256").update(policyRead.text).digest("hex");
+    const anchored = anchor?.case_policy_sha256 ? anchor.case_policy_sha256 === sha : null;
+    try {
+      const p = JSON.parse(policyRead.text) as { policy?: string; network?: string; more_evidence?: string; material_use?: unknown };
+      const mu = p.material_use && typeof p.material_use === "object" ? Object.fromEntries(Object.entries(p.material_use as Record<string, unknown>).map(([k, v]) => [k, String(v)])) : typeof p.material_use === "string" ? { text: p.material_use } : {};
+      state.case_policy = { path: "network/policy.json", sha256: sha, anchored, policy: String(p.policy ?? ""), network: String(p.network ?? ""), more_evidence: String(p.more_evidence ?? ""), material_use: mu };
+    } catch {
+      state.case_policy = { path: "network/policy.json", unreadable: "not JSON", anchored };
+    }
+    if (state.seal) state.seal.case_policy = { sha256: sha };
+  } else if (policyRead.why !== "missing" || anchor?.case_policy_sha256) {
+    state.case_policy = { path: "network/policy.json", unreadable: policyRead.why === "missing" ? "gone, though the kickoff anchored it" : policyRead.why, anchored: anchor?.case_policy_sha256 ? false : null };
+  } else state.case_policy = null;
   state.ledgerDone = true;
 
   // --- the model gateway's log -----------------------------------------------
@@ -1909,6 +1949,8 @@ export function verdictOf(state: CustodyState, incomplete: string | null): Custo
     leads: state.leads ?? null,
     questions: state.questions ?? null,
     network: state.network ?? null,
+    requests: state.requests ?? null,
+    case_policy: state.case_policy ?? null,
     operator: state.operator ?? null,
     acquisition: state.acquisition ?? null,
     checks: [],
@@ -2017,6 +2059,13 @@ function summaryOf(c: Omit<Custody, "summary">, t: { traceProblem: string | null
     const open = n.fetches.unresolved ?? [];
     parts.push(n.grants.intact && n.fetches.intact && !bad.length && !open.length ? `network records: ${plural(n.grants.lines, "grant event")}, ${plural(n.fetches.lines, "fetch line")}, ${plural(n.captures.verified, "capture")} verified${n.captures.unpublished ? `, ${plural(n.captures.unpublished, "attempt")} recorded as not published` : ""}` : `NETWORK RECORDS DO NOT HOLD (${[...(n.grants.intact ? [] : [`grants: ${n.grants.detail}`]), ...(n.fetches.intact ? [] : [`fetches: ${n.fetches.detail}`]), ...(open.length ? [`attempts with no outcome: ${open.join(", ")}`] : []), ...(bad.length ? [`captures: ${bad.join(", ")}`] : [])].join("; ")})`);
   }
+  if (c.requests) parts.push(c.requests.intact ? `${plural(c.requests.lines, "operator request event")}, chain intact` : `OPERATOR REQUESTS CHAIN BROKEN (${c.requests.detail})`);
+  if (c.case_policy) {
+    const cp = c.case_policy;
+    if ("unreadable" in cp) parts.push(`CASE POLICY UNREADABLE (${cp.path} is ${cp.unreadable})`);
+    else if (cp.anchored === false) parts.push(`CASE POLICY REWRITTEN: ${cp.path} is not the policy the kickoff anchored (sha256 ${cp.sha256})`);
+    else parts.push(`case policy ${cp.policy}, network ${cp.network}, more evidence ${cp.more_evidence}, sealed${cp.anchored === true ? " and held to the kickoff's anchor" : " (not anchored: a run from before the anchor held it)"}`);
+  }
   if (c.operator && !c.operator.intact) parts.push(`OPERATOR AUDIT CHAIN BROKEN (${c.operator.detail})`);
   if (c.model_gateway) {
     const g = c.model_gateway;
@@ -2101,7 +2150,7 @@ function summaryOf(c: Omit<Custody, "summary">, t: { traceProblem: string | null
           : `what each job read is not observed by the harness (${st.access.observed_unknown} of ${st.access.jobs} jobs: declared inputs and accessible mounts are recorded)`,
       );
     }
-    if (st.imports) bits.push(`${plural(st.imports.sealed, "brain-side output")} a finding cited sealed as imports, ${st.imports.verified} verified against the journal${st.imports.mismatched.length ? `, ${st.imports.mismatched.length} NOT MATCHING (${some(st.imports.mismatched, 5, "store.imports.mismatched")})` : ""}`);
+    if (st.imports) bits.push(`${plural(st.imports.sealed, "import")} (brain-side outputs a finding cited, and evidence and material added from outside) sealed, ${st.imports.verified} verified against the journal${st.imports.mismatched.length ? `, ${st.imports.mismatched.length} NOT MATCHING (${some(st.imports.mismatched, 5, "store.imports.mismatched")})` : ""}`);
     if (st.catalogue) {
       const c = st.catalogue;
       const bad = [...c.revisions_mismatched, ...c.generations_mismatched];
