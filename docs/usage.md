@@ -462,6 +462,41 @@ scripts/netguard.sh [--allow h1,h2] [--only LIST] [--allow-file F] [--port N]
 
 Default allowlist `api.openai.com,api.deepseek.com,api.x.ai,generativelanguage.googleapis.com` (+ `NETGUARD_ALLOW`). `swarm.sh start` adds the model's host (`anthropic/` → `api.anthropic.com`, `openrouter/` → `openrouter.ai`, others already listed). `--only` replaces the list. Port `NETGUARD_PORT` (3128; `swarm.sh` gives each swarm's sidecar the first free port at or above `SWARM_NETGUARD_PORT`, default 43178, so concurrent swarms never share a proxy). Mode `auto` picks `netns` when `unshare -rn` works and `lo` can be brought up, else `proxy-only` with a WARNING. `--dry-run` prints mode, allowlist, proxy and command. Exit 3 if the proxy fails to start or `--mode netns` was forced where unavailable.
 
+### Calibration: `calibration/generate.py`, `scripts/calibrate.ts`
+
+```
+python3 calibration/generate.py --out DIR --truth-dir DIR [--seed SEED] [--cases LIST] [--force]
+node --experimental-strip-types scripts/calibrate.ts <run-dir> --truth FILE [--out FILE] [--late auto|added|absent] [--json]
+```
+
+Synthetic cases whose answers are known, to measure how often a run says
+"not found" about a fact the evidence holds (a deleted file, slack,
+unallocated space, a rotated compressed log, two artefacts read together) and
+how often it answers a question the evidence cannot answer (a near miss that
+invites a guess, a false premise, evidence that was never collected). Three
+cases: a USB drive image and a workstation's logs, a web server's logs, a
+mailbox export and a browser history database. Each has a held-back evidence
+item under `late/` that settles its missing question, for the operator to add
+while the run goes on. Python 3.8 and its standard library are all the
+generator needs; the same seed gives the same bytes on any host (the history
+database's page layout follows the host's SQLite version).
+
+**The truth must stay outside the repository and outside every run.** The
+generator writes it only to `--truth-dir`, and refuses a directory inside a
+dfirswarm checkout, inside `--out`, or inside a run, before anything is
+written. Without `--seed` a fresh seed is drawn and kept in the truth files
+only. `calibrate.ts` refuses a truth file or an output inside the run it
+scores or inside a checkout; its JSON goes beside the truth by default. It
+reads the run's register (the ledger's answers, what they cite, the
+attestations, the leads, the operator requests, and the question register and
+the `result` and coverage fields where they exist), never a tool's output,
+and reports the miss rate on present facts (the hard ones apart), false
+negatives, the forced-answer rate, decoy adoption, unsupported negatives,
+acquisition requests, the late item, and the calibration of the stated
+confidence. Exit 0 when scored, 1 when a generated case's bytes do not hold
+what its truth says, 2 on a usage error or a refusal. See
+[calibration/README.md](../calibration/README.md).
+
 ### `npm` scripts
 
 | Script | Runs |

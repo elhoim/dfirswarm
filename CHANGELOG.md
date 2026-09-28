@@ -6,6 +6,30 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Added: calibration cases with a truth kept apart, and a scorer for a run's answers
+
+- **`calibration/generate.py`** writes three synthetic cases (a USB drive
+  image with a workstation's logs, a web server's logs, a mailbox export
+  with a browser history database), each with a goal, its evidence, one
+  held-back item for the operator to add mid-run, and a truth file written
+  only where `--truth-dir` says: never inside a checkout, the cases
+  directory or a run. The facts are planted where examinations miss them
+  (deleted, unallocated, slack, rotated compressed logs, two artefacts read
+  together, base64) or are absent with a near miss beside them, and the
+  generator holds each to the bytes before it writes. Standard library
+  only; the same seed gives the same bytes on macOS and Linux.
+- **`scripts/calibrate.ts <run-dir> --truth FILE`** scores a finished run's
+  ledger answers against the truth: the miss rate on present facts, false
+  "not found", forced answers, decoy adoption, unsupported negatives,
+  acquisition requests, the late item and the calibration of the stated
+  confidence. It reads today's ledger and Plan 3's fields (`result`,
+  coverage records, the question register) when they appear, prints a table
+  and writes its JSON beside the truth, never into the run.
+- `tests/calibration.test.ts` and `tests/calibration-cases.test.sh`: the
+  generator's determinism and refusals, every kind of fact, goals that name
+  none of them, the facts read again with The Sleuth Kit, gzip and sqlite3,
+  each goal launched with `--no-start`, and the scorer on hand-made ledgers.
+
 ### Added: three tools from later runs in the library, made general first
 
 - **`ledger_timeline`** (from run `se5fdcd`) writes a run's dated ledger
