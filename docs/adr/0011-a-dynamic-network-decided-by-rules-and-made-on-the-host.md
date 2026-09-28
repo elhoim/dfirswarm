@@ -54,7 +54,11 @@ the decision.
    evidence). The goal's metadata block and the kickoff's flags override one
    field at a time (`--network`, `--policy`, `--lookups`, `--contact`,
    `--disclosure`); a combination that contradicts its preset is refused at
-   kickoff, never resolved by guessing. The policy is recorded in
+   kickoff, never resolved by guessing. So is a run whose **effective direct
+   egress** does not fit it: under `ctf`, `internal` and `live_adversary` no
+   host is reached without a grant, so `--allow-host`, the package index that
+   `--allow-install` would open (unless `--no-pypi`) and a pack's secret hosts
+   are each refused, naming where they came from. The policy is recorded in
    `network/policy.json` (read on every decision, read-only to every VM),
    SWARM.md and the registry. An agent can weaken neither control.
    `scripts/case-policy.ts` holds it, as the seed of Plan 3's case contract.
@@ -65,8 +69,16 @@ the decision.
    the case policy, the hard denials (search engines, write-up and CTF sites,
    paste sites, social platforms, proxies and caches, logins, uploads:
    `network/deny.json`), credential patterns and the run's sensitive values in
-   what would leave, the evidence link (what leaves must be found, as sent, in
-   the bytes the request cites, read on the host), enforceability, quotas. The
+   what would leave (each URL component, as sent and percent-decoded; a
+   sensitive value anywhere inside one, not only a component equal to it),
+   the evidence link (what leaves must be found, as sent, in the source bytes
+   the request cites, read on the host: the evidence, the catalogue, a
+   capture, or the output of a job that declared the sources it read and
+   whose own command does not hold the value; an agent's sealed file, a bare
+   digest and a ledger entry's own words are not evidence, and an entry counts
+   only through the objects it cites), enforceability, quotas (counted again
+   under the lock that issues the grant, so a burst cannot pass them
+   together). The
    first step that refuses decides, with machine-readable reasons (step,
    rule, code, detail, whether the operator may override it). A request no
    rule can place, one with no adapter, is **uncertain and refused**: nothing
@@ -125,14 +137,28 @@ the decision.
    provider key, seat token or cookie can leave with it. It resolves the name
    once, refuses it when any address is loopback, private, link-local (the
    metadata address with it), carrier-grade NAT, multicast, reserved or an
-   IPv6 form of those, connects to the address it checked with TLS verified
+   IPv6 form of those (an IPv6 address is classified by its parsed bytes: only
+   global unicast outside the special and embedding ranges is public, however
+   it is written), connects to the address it checked with TLS verified
    against the name, and never asks DNS again for that hop: a changed answer
    is never used. It is no proxy: CONNECT and absolute-form requests are
    refused. The use is written to `network/fetches.jsonl` and fsynced before
-   a byte leaves; a log that cannot be written stops the fetch. A body over
-   the limit is refused whole and its size recorded, never kept in part; a
-   revocation or expiry during a transfer stops it, and what came is sealed
-   as incomplete and delivered to nobody.
+   a byte leaves; a log that cannot be written stops the fetch. The grant is
+   held to again at every point where time has passed: under the log's lock
+   before the attempt is written (after any wait for the adapter's rate, whose
+   per-host slot is reserved at once so two fetches cannot share it), after
+   each DNS answer, during the transfer and before anything is published. A
+   body over the limit is refused whole and its size recorded, never kept in
+   part; a revocation or expiry during a transfer stops it, and what came is
+   kept as incomplete and delivered to nobody. An oversize, broken or stopped
+   answer ends the fetch where it is: only a whole, in-limit redirect is
+   followed. The result line is written, durably, **before** a capture is
+   published: a capture no seat can read until the log says what it is, and
+   one whose line cannot be written is not published at all. Every attempt
+   gets an outcome: an attempt with no result (the service stopped
+   mid-fetch) is given one when the service starts again and then
+   periodically, saying nothing of it was published, and custody reports any
+   attempt still without one as incomplete.
 
 7. **Captures are sealed store objects, and external material.**
    `store/net/<k>/<n>/` holds the request (the line, the headers sent, a key
@@ -146,11 +172,18 @@ the decision.
    time of the events: an examiner records what it establishes. What is
    derived from a capture stays external (a job that read it or fetched it,
    an entry citing that job, an answer resting on that entry), and
-   `check-answers` names every answer that rests on it. An adapter that
-   delivers only some fields (the title) delivers those; the whole response
-   is kept beside the run, outside every VM (`<run>.netraw/`). A response
-   that exposed what the policy prohibits (a redirect to a denied host, a
-   grant the operator made over a category denial) is recorded as
+   `check-answers` names every answer that rests on it. The lineage is read
+   from what a job resolved, never from how it spelled it: its scope manifest's
+   paths and digests (`store/net/1/1/body` is `net:1/1`, a copy of a
+   capture's bytes is that capture), and a job whose scope was broad could
+   read every capture sealed before it started. An adapter that
+   delivers only some fields (the title) delivers those; whatever was
+   received and not delivered (the whole response and its headers, a partial
+   body, an answer withheld because its grant ended) is kept beside the run,
+   outside every VM (`<run>.netraw/<k>/<n>/`), recorded in the capture by
+   size and hash, verified by custody and packaged under `network/raw/`. A
+   response that exposed what the policy prohibits (a redirect to a denied
+   host, a grant the operator made over a category denial) is recorded as
    contamination: revoking access cannot make a seat forget it.
 
 8. **A socket grant is its own type (tier 2)**: a host and a port for a job's
@@ -158,9 +191,12 @@ the decision.
    control and no content capture; its connection log is the worker's policy,
    not a capture. It is the operator's alone, needs a case policy that
    permits it (`standard`), and is refused under `ctf`, `internal` and
-   `live_adversary`. `swarm.sh lead note --allow-host` now makes one and says
-   so; the kickoff's `--allow-host` says it is a static socket allowance for
-   the whole run.
+   `live_adversary`. The grants chain is its authority: a host is written
+   one canonical way (lower case, the default port dropped), and an operator
+   host that a socket grant covers is in force only while the grant is,
+   however it was spelled. `swarm.sh lead note --allow-host` now makes one
+   and says so; the kickoff's `--allow-host` says it is a static socket
+   allowance for the whole run.
 
 9. **The operator sees and acts**: `swarm.sh net <run> list|grant|deny|revoke`
    and the console's **Network** tab (the policy, what waits on the operator,
@@ -168,7 +204,9 @@ the decision.
    reasons, every capture and what the fetch service refused). Every act
    needs a reason, writes the grants chain, lands on the trace and the
    operator's record, and is posted to whoever asked. Custody seals both
-   chains and re-hashes every capture; a package carries them.
+   chains, re-hashes every capture and every file kept beside the run, and
+   names every attempt with no recorded outcome; a package carries them.
+   `swarm.sh purge` removes `<run>.netraw/` with the run.
 
 ## Consequences and limits
 

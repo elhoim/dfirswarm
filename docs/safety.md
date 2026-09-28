@@ -285,8 +285,19 @@ back to a host run on its own.
   connection made to the address it checked with TLS verified against the
   name, no redirect followed beyond an adapter's declared referral hosts, no
   CONNECT and no absolute-form request. A use is written to the fetch log
-  before a byte leaves, or it is not made; a body over its limit is refused
-  whole. A job reaches the service over the one host port its worker is
+  before a byte leaves, or it is not made; the grant is held to again after
+  every wait and DNS answer and before anything is published, so a grant
+  that ended while a fetch waited sends nothing; a body over its limit is
+  refused whole, and an oversize or stopped answer ends the fetch where it
+  is (no redirect past it). Its result is written before a capture is
+  published, and custody names any attempt with no recorded outcome. What
+  a seat is not given (a filtered adapter's whole response, a partial or
+  withheld body) is kept beside the run in `<sandbox>.netraw/`, in no VM's
+  reach. The evidence link counts only source bytes: an agent's own words,
+  in a ledger entry or a job's command, never authorise what it sends. A
+  case policy that permits no direct host also refuses the run's other
+  direct egress at kickoff (`--allow-host`, the package index of
+  `--allow-install` without `--no-pypi`, a pack's secret hosts). A job reaches the service over the one host port its worker is
   booted with, with its own job's token. Every answer is sealed and enters
   the ledger as `external` material. What it does not cover: a model
   provider's own retrieval, which the harness does not see; the literal

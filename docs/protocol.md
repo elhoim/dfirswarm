@@ -270,9 +270,11 @@ seats have three tools, each a call on the seat's own socket (`netRequest`,
   max_requests?)` asks for one bounded lookup: an adapter of
   `network/adapters.json` with its typed params (or, without one, one exact
   `url` and `method`, which is decided as uncertain). `lead` is one the seat
-  holds; `evidence` names what holds the values sent (`E-<seq>`, `input:`,
-  `job:<id>/<path>`, `import:`, `net:<k>/<n>`, `sha256:`); `purpose` is text
-  no rule reads. The hub decides it by `scripts/net-policy.ts` in eight steps
+  holds; `evidence` names what holds the values sent (`input:`, `member:`,
+  `net:<k>/<n>`, `job:<id>/<path>` of a job that declared the sources it read
+  and whose command does not hold the value, or `E-<seq>` through the objects
+  it cites; an `import:`, a bare `sha256:` and an entry's own words are not
+  evidence); `purpose` is text no rule reads. The hub decides it by `scripts/net-policy.ts` in eight steps
   (authentication, schema, case policy, hard denials, credentials and
   sensitive values, the evidence link, enforceability, quotas); the first
   step that refuses decides. Granted: `{grant: "N-<k>", method, url,
@@ -316,19 +318,31 @@ The records, beside the run's other chains:
   code. Written by the hub and the operator's CLI, under `locks/.network.lock`.
 - `network/fetches.jsonl`: the fetch service's `attempt` (written and fsynced
   before a byte leaves), `result` (status, bytes, sha256, complete,
-  delivered, the manifest's sha256, what the response exposed) and `refused`
-  lines; the same chain, its own lock.
+  delivered, `published`, `stopped`, `kept` (each file kept beside the run,
+  by name, size and sha256), the manifest's sha256, what the response
+  exposed; written durably before the capture is published) and `refused`
+  lines; the same chain, its own lock. An attempt left without a result (the
+  service stopped mid-fetch, or its result could not be written) is given one
+  with `published: false, reconciled: true` when the service starts and then
+  every minute; custody names any attempt still without one.
 - `network/service.json`: the fetch service's port and the adapters whose key
   is configured (names only). The secret that makes each principal's token is
   in the hub's directory (`net-fetch.json`, 0600), in no VM.
 - `store/net/<k>/<n>/`: capture `n` of grant `k`: `request.json` (the line,
   the headers sent with a key named and not recorded, the address, TLS
   identity, each hop), `response.json` (status, headers, completeness, an
-  oversize refusal, a redirect not followed), `body` (the delivered bytes;
-  `body.partial` for a transfer stopped or broken off, delivered to nobody),
-  `capture.json` and `manifest.json`, each file 0444. `net:<k>/<n>[/<file>]`
-  resolves like `job:`. An adapter that delivers only some fields keeps the
-  whole response in `<sandbox>.netraw/<k>/<n>/body`, outside every VM.
+  oversize refusal, a redirect not followed), `body` (the delivered bytes,
+  only for a whole answer), `capture.json` and `manifest.json`, each file
+  0444, built in `<sandbox>.netraw/.staging/` and moved here once the result
+  line is written. `net:<k>/<n>[/<file>]` resolves like `job:`.
+- `<sandbox>.netraw/<k>/<n>/`: beside the run, outside every VM, what was
+  received and delivered to nobody: a filtered adapter's whole response
+  (`body`) and headers (`headers.json`), a transfer stopped or broken off
+  (`body.partial`), an answer withheld because its grant ended before it was
+  published (`body.withheld`), and a capture whose result could not be
+  written (`unpublished/`). `capture.json`'s `kept` names each by size and
+  sha256; custody re-hashes them, the package copies them to `network/raw/`,
+  and `swarm.sh purge` removes the directory with the run.
 
 Each capture becomes a ledger entry of kind `external`, written by the
 harness (`recordExternal`; an agent's `record kind=external` is refused):
@@ -339,7 +353,11 @@ fetched, a job's on the hub's next round (every fifteen seconds), which also
 revokes the grants whose lead closed or whose job ended, and records
 contamination. What is derived from a capture stays external
 (`externalLineage` in `scripts/net-broker.ts`), and `check-answers` names each
-answer that rests on it. Custody seals both chains and re-hashes every capture.
+answer that rests on it, read from what each job resolved (its scope
+manifest's paths and digests, or every capture sealed before it started when
+its scope was broad), never from how it spelled its inputs. Custody seals both
+chains, re-hashes every capture and every file kept beside the run, and names
+every attempt with no recorded outcome.
 
 ### Names and the per-agent cap (`names.json`, `budget.json` `cap_per_agent_usd`)
 

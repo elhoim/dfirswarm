@@ -74,7 +74,13 @@ models.
 - **Beside the run directory:** `<sandbox>.custody-anchor.json`, and under
   `--isolation microvm` each VM's kept disk and logs in
   `<sandbox>.vm-snapshots/` (a link to `--vm-snapshot-dir` when that is
-  given). A kept disk holds whatever the agent left in its VM.
+  given). A kept disk holds whatever the agent left in its VM. Under
+  `--network dynamic`, `<sandbox>.netraw/` holds what the fetch service
+  received and delivered to no seat: a filtered adapter's whole response and
+  headers (a video's author, say, when only its title was delivered), a
+  transfer stopped or broken off, an answer withheld because its grant
+  ended. It is in no VM's reach, is packaged under `network/raw/`, and can
+  hold personal data.
 - **The package** (`swarm.sh package <id>` → `<sandbox>/package/`): the
   report, the summary, everything under `work/` except `work/extracted/` and
   `work/quarantine/`, the ledger, the trace and the board, `court-set.json`
@@ -105,8 +111,8 @@ models.
   ([SECURITY.md](../SECURITY.md)).
 
 The harness deletes none of this on its own. `swarm.sh purge <id> --yes`
-deletes a finished run's directory, its kept VM disks and its hub
-directory when the operator asks, keeps the anchor and the review (hashes,
+deletes a finished run's directory, its kept VM disks, its hub directory and
+its `<sandbox>.netraw/` when the operator asks, keeps the anchor and the review (hashes,
 verdicts and notes, not material), and leaves a destruction record on the
 operator's record; a held run (`swarm.sh hold`) is refused. Purge removes
 files the ordinary way and knows nothing of copies elsewhere: a package
