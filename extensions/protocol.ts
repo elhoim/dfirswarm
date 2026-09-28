@@ -73,6 +73,14 @@ export const DEFAULT_STALL_MS = 90_000;
 
 /** The harness writes on the board under this name. No worker may take it. */
 export const SYSTEM_AGENT = "system";
+/**
+ * The named lock the lead register and the question register are written
+ * under (extensions/leads.ts, extensions/questions.ts). A done's sentinel is
+ * written under it too (markDone), so a question admitted while the finish
+ * line runs is either in the state that line was judged against, or it sees
+ * the sentinel and is recorded as a follow-up.
+ */
+export const REGISTER_LOCK = ".leads.lock";
 export const PRIMARY_THREAD = "main";
 export const THREAD_META = "meta.json";
 export const CURSORS_REL = "cursors.json";
@@ -113,6 +121,9 @@ export const PROTECTED_PREFIXES = [
   // The lead register (extensions/leads.ts): written through the lead tools
   // and by the hub, read by everyone.
   "leads/",
+  // The question register (extensions/questions.ts), the same way: its
+  // tools, the hub and the operator's CLI write it.
+  "questions/",
   // The whole output of every tool call whose result reached the model as
   // a prefix (Pi's `bash` past its 50 KB, a forged tool past its 64 KB, a
   // page's text past what browser_check delivers). Written by the harness,
@@ -199,6 +210,9 @@ const POST_TAGS = [
   "hold",
   "veto",
   "stop",
+  // A person's question, posted by the question register (registerPost);
+  // never an agent's tag.
+  "question",
 ] as const;
 
 export type PostTag = (typeof POST_TAGS)[number];
@@ -1960,7 +1974,10 @@ export async function postMessage(
   args: { thread?: string; to?: string; tag: string; body: string; via?: string },
 ): Promise<PostRecord> {
   if (!isPostTag(args.tag)) {
-    throw new Error(`Unknown tag "${args.tag}". Use: ${POST_TAGS.join(", ")}`);
+    throw new Error(`Unknown tag "${args.tag}". Use: ${POST_TAGS.filter((t) => t !== "question").join(", ")}`);
+  }
+  if (args.tag === "question") {
+    throw new Error('The "question" tag is the question register\'s: a person\'s question reaches the board through it. Open a question with question_open, or post with tag ask.');
   }
   const tag: PostTag = args.tag;
   const thread = normalizeThreadName(args.thread);
@@ -2003,6 +2020,55 @@ ${body}
       ...(name ? { name } : {}),
       ...(via ? { via } : {}),
     };
+  });
+}
+
+/**
+ * A post in a person's name from the question register (from:
+ * analyst:<person>, tag question): never an agent's, so it joins no thread
+ * and names no seat. With a marker, a post already on the thread whose body
+ * carries it is returned instead of a second one, taken under the same lock
+ * a post id is, so a delivery that runs again after a crash posts once.
+ */
+export async function registerPost(
+  sandboxRoot: string,
+  args: { from: string; to?: string; tag: string; body: string; thread?: string; marker?: string },
+): Promise<PostRecord & { existing?: true }> {
+  if (!isPostTag(args.tag)) throw new Error(`Unknown tag "${args.tag}"`);
+  const from = yamlOneLine(args.from);
+  if (!/^(analyst|reviewer|observer):[A-Za-z0-9._@-]{1,160}$/.test(from)) throw new Error(`a register post is from analyst:, reviewer: or observer:<person> (got ${JSON.stringify(args.from)})`);
+  const thread = normalizeThreadName(args.thread);
+  const to = yamlOneLine(args.to ?? "all") || "all";
+  const body = args.body.trim();
+  if (!body) throw new Error("Post body is empty");
+  const tag = args.tag as PostTag;
+  return withTableLock(sandboxRoot, async () => {
+    const dir = join(sandboxRoot, "threads", thread);
+    await mkdir(dir, { recursive: true });
+    const kind = from.slice(0, from.indexOf(":"));
+    if (args.marker) {
+      for (const name of (await readdir(dir).catch(() => [] as string[])).filter((n) => /^\d{6}-.+\.md$/.test(n) && n.includes(`-${kind}-`)).sort()) {
+        const post = await readPost(join(dir, name)).catch(() => null);
+        if (post && post.from === from && post.body.includes(args.marker)) return { ...post, existing: true as const };
+      }
+    }
+    const id = await nextPostId(sandboxRoot, thread);
+    const filename = `${String(id).padStart(6, "0")}-${from.replace(/[^A-Za-z0-9_-]/g, "-")}.md`;
+    const path = join(dir, filename);
+    const text = `---
+id: ${id}
+thread: ${thread}
+from: ${from}
+to: ${to}
+tag: ${tag}
+---
+
+${body}
+`;
+    const staging = join(dir, `.${filename}.tmp`);
+    await writeFile(staging, text, "utf8");
+    await rename(staging, path);
+    return { id, thread, from, to, tag, body, path };
   });
 }
 
@@ -2861,7 +2927,7 @@ export function extractWritePath(input: Record<string, unknown> | undefined): st
 
 export async function markDone(
   ctx: SwarmContext,
-  args: { reason: string; outputFile: string; createSentinel?: boolean; outcome?: FinishOutcome },
+  args: { reason: string; outputFile: string; createSentinel?: boolean; outcome?: FinishOutcome; revision?: string },
 ): Promise<DoneResult | DoneRefused> {
   const reason = yamlOneLine(args.reason);
   const outputFile = yamlOneLine(args.outputFile);
@@ -2917,11 +2983,7 @@ Worker ${by} is exiting.
 `;
   await writeFile(agentFile, agentBody, "utf8");
 
-  const created = seatOnly
-    ? false
-    : await createSentinel(
-        ctx.sandboxRoot,
-        `---
+  const sentinelText = `---
 by: ${by}
 output: ${outputFile}
 reason: ${reason}
@@ -2929,8 +2991,23 @@ ${outcomeLine}at: ${stamp}
 ---
 
 Collective finished. Presence of this file is the clock. Call done and stop.
-`,
-      );
+`;
+  // The sentinel is written under the registers' lock, against the state the
+  // finish line was judged on (`revision`, when the caller ran it): a question
+  // admitted or a lead opened after that line either moved the state, and the
+  // done is refused to be run again, or finds the sentinel and is recorded as
+  // a follow-up. Admission and a terminal done are never interleaved.
+  const created = seatOnly
+    ? false
+    : args.revision
+      ? await withNamedLock(ctx.sandboxRoot, REGISTER_LOCK, async () => {
+          if (!(await swarmDoneExists(ctx.sandboxRoot)) && (await stateRevision(ctx.sandboxRoot).catch(() => ({ revision: "" }))).revision !== args.revision) {
+            await rm(agentFile, { force: true }).catch(() => undefined);
+            throw new Error(FINISH_LINE_UNSETTLED);
+          }
+          return createSentinel(ctx.sandboxRoot, sentinelText);
+        })
+      : await createSentinel(ctx.sandboxRoot, sentinelText);
 
   await releaseAllOwned(ctx);
 
@@ -4923,7 +5000,7 @@ const BASH_WATCH_FILES = ["SWARM.md", "team.json", "layout.json", SENTINEL_REL, 
  */
 // The host's spill of trace lines the collector did not take is the record
 // too: a shell that rewrote it would unsay what the harness kept.
-const APPEND_ONLY_WATCH = ["ledger/entries.jsonl", "traces/events.jsonl", TRACE_SPILL_REL, "leads/leads.jsonl"] as const;
+const APPEND_ONLY_WATCH = ["ledger/entries.jsonl", "traces/events.jsonl", TRACE_SPILL_REL, "leads/leads.jsonl", "questions/questions.jsonl"] as const;
 
 /**
  * Size and full digest of an append-only record, taken before a shell call.
@@ -5511,6 +5588,8 @@ export const TOOL_RESERVED_NAMES = new Set([
   // and interpreted, the watchdog's regroup in an until-solved run, and the
   // operator's answer to a lead.
   "lead_open", "lead_claim", "lead_release", "lead_close", "lead_link", "leads", "record_leads", "regroup", "operator_note",
+  // The question register (extensions/questions.ts): its tools.
+  "question_open", "questions", "question_ask",
 ]);
 
 const RUNTIME_EXT: Record<ToolRuntime, string> = { python3: "py", node: "mjs", bash: "sh" };
@@ -7091,6 +7170,13 @@ export const LEDGER_ALTERNATIVE_STATUS = ["rejected", "open"] as const;
 /** A finding's interpretation: one to three sentences each; over these it is refused with the reason, never cut. */
 export const LEDGER_INDICATES_MAX_CHARS = 1500;
 export const LEDGER_WHY_MAX_CHARS = 1500;
+/**
+ * An answer's result, when it says one. premise_not_supported answers a
+ * question whose premise the evidence does not bear out ("when did X delete
+ * the file" when nothing shows X deleted it): a valid answer to a person's
+ * question, which is a proposition to test, never a conclusion to confirm.
+ */
+export const LEDGER_ANSWER_RESULTS = ["premise_not_supported"] as const;
 export const LEDGER_MAX_ALTERNATIVES = 10;
 export const LEDGER_MAX_QUALIFIES = 20;
 /** An answer's reasoning holds a narrative: room for one, still bounded. */
@@ -7197,6 +7283,10 @@ export type LedgerEntry = {
   would_change?: string;
   /** Version 4, an answer: expressly inconclusive. */
   inconclusive?: boolean;
+  /** Version 4, an answer: its result, when it is one of LEDGER_ANSWER_RESULTS (premise_not_supported: the question's premise does not hold). */
+  result?: (typeof LEDGER_ANSWER_RESULTS)[number];
+  /** Version 4, an answer to a person's question: why no entry says otherwise, in place of an empty contrary. */
+  contrary_none_why?: string;
   by: string;
   authors: string[];
   at: string;
@@ -7274,6 +7364,8 @@ function ledgerV4Fields(e: LedgerEntry): Record<string, unknown> {
     ...(e.alternatives_open ? { alternatives_open: e.alternatives_open } : {}),
     ...(e.would_change ? { would_change: e.would_change } : {}),
     ...(e.inconclusive ? { inconclusive: true } : {}),
+    ...(e.result ? { result: e.result } : {}),
+    ...(e.contrary_none_why ? { contrary_none_why: e.contrary_none_why } : {}),
     ...(e.unsupported_tokens?.length ? { unsupported_tokens: e.unsupported_tokens } : {}),
   };
 }
@@ -7411,6 +7503,10 @@ export type LedgerInput = {
   alternatives_open?: string;
   would_change?: string;
   inconclusive?: boolean;
+  /** An answer's result (premise_not_supported: the premise the question asks about does not hold). */
+  result?: string;
+  /** An answer to a person's question: why no entry says otherwise. */
+  contrary_none_why?: string;
 };
 
 function listOf(v: string[] | string | undefined): string[] {
@@ -7523,7 +7619,7 @@ async function ledgerV3Input(
 }
 
 /** The fields only an answer takes, and only a finding takes: named in a refusal when they come with another kind. */
-const ANSWER_ONLY_FIELDS = ["section", "reasoning", "contrary", "limitations", "alternatives_open", "would_change", "inconclusive"] as const;
+const ANSWER_ONLY_FIELDS = ["section", "reasoning", "contrary", "limitations", "alternatives_open", "would_change", "inconclusive", "result", "contrary_none_why"] as const;
 const FINDING_ONLY_FIELDS = ["indicates", "alternatives", "alternatives_none_why", "significance"] as const;
 
 function given(v: unknown): boolean {
@@ -7761,7 +7857,7 @@ function nearestNames(want: string, names: string[], n = 5): string[] {
  * with the names nearest to it: a typo costs one turn, where a wrong ref on
  * the chain would stand for good.
  */
-async function checkRefs(sandboxRoot: string, refs: string[]): Promise<{ ok: true; resolved: Array<{ ref: string; kind: string; status?: string }> } | { ok: false; reason: string }> {
+export async function checkRefs(sandboxRoot: string, refs: string[]): Promise<{ ok: true; resolved: Array<{ ref: string; kind: string; status?: string }> } | { ok: false; reason: string }> {
   // Loaded when a ref is checked, not with the extension: a VM that mounts
   // only extensions/ still loads it, and in a VM the hub checks refs anyway.
   const { readManifest, resolveRef, storePaths } = await import("../scripts/evidence-store.ts");
@@ -7853,6 +7949,13 @@ export async function readLedger(sandboxRoot: string, opts: { raw?: boolean } = 
 
 /** Append one entry, merging with an equal one, and re-render ledger.md. */
 export async function recordEntry(ctx: SwarmContext, input: LedgerInput): Promise<LedgerResult> {
+  // Q-<n> names a question of the register: its section, which is n unless
+  // the goal gave it its own id.
+  if (typeof input.section === "string" && /^(question:)?Q-\d/i.test(input.section.trim())) input = { ...input, section: await registerSection(ctx.sandboxRoot, input.section) };
+  if (input.answers !== undefined && (Array.isArray(input.answers) ? input.answers : String(input.answers).split(/[\s,]+/)).some((a) => /^Q-\d/i.test(String(a).trim()))) {
+    const list = Array.isArray(input.answers) ? input.answers.map(String) : String(input.answers).split(/[\s,]+/);
+    input = { ...input, answers: await Promise.all(list.map((a) => registerSection(ctx.sandboxRoot, a.trim()))) };
+  }
   const kind = String(input.kind ?? "").trim().toLowerCase();
   if (!(LEDGER_KINDS as readonly string[]).includes(kind)) {
     return { ok: false, reason: `kind must be one of ${LEDGER_KINDS.join(", ")}` };
@@ -8233,7 +8336,7 @@ export async function renderLedger(sandboxRoot: string, entries?: LedgerEntry[])
       const cites = (label: string, edges?: LedgerEdge[]) => (edges?.length ? ` — ${label}: ${edges.map((x) => `E-${x.seq}`).join(", ")}` : "");
       const p = problems.get(e.seq);
       lines.push(
-        `- **#${e.seq}** ${e.section}${e.inconclusive ? " (inconclusive)" : ""}: ${e.value}${mark(e)}${e.confidence ? ` _(${e.confidence}${e.confidence_why ? `: ${e.confidence_why}` : ""})_` : ""}${cites("rests on", e.support)}${cites("contrary", e.contrary)}${cites("limitations", e.limitations)}${e.qualifies?.length ? ` — qualifies: ${e.qualifies.map((q) => `${q.ref} (${q.why})`).join("; ")}` : ""}${e.alternatives_open ? ` — still open: ${e.alternatives_open}` : ""}${e.would_change ? ` — would change it: ${e.would_change}` : ""}${e.unsupported_tokens?.length ? ` — in none of the cited entries: ${e.unsupported_tokens.join(", ")}` : ""}${p?.length ? ` — **no longer stands on its support: ${p.join("; ")}**` : ""} — reasoning: ${e.reasoning ?? ""} — by ${e.authors.join(", ")}`,
+        `- **#${e.seq}** ${e.section}${e.inconclusive ? " (inconclusive)" : ""}${e.result ? ` (${e.result})` : ""}: ${e.value}${mark(e)}${e.confidence ? ` _(${e.confidence}${e.confidence_why ? `: ${e.confidence_why}` : ""})_` : ""}${cites("rests on", e.support)}${cites("contrary", e.contrary)}${e.contrary_none_why ? ` — nothing says otherwise: ${e.contrary_none_why}` : ""}${cites("limitations", e.limitations)}${e.qualifies?.length ? ` — qualifies: ${e.qualifies.map((q) => `${q.ref} (${q.why})`).join("; ")}` : ""}${e.alternatives_open ? ` — still open: ${e.alternatives_open}` : ""}${e.would_change ? ` — would change it: ${e.would_change}` : ""}${e.unsupported_tokens?.length ? ` — in none of the cited entries: ${e.unsupported_tokens.join(", ")}` : ""}${p?.length ? ` — **no longer stands on its support: ${p.join("; ")}**` : ""} — reasoning: ${e.reasoning ?? ""} — by ${e.authors.join(", ")}`,
       );
     }
   }
@@ -8382,7 +8485,8 @@ export function briefQuestions(text: string): string[] {
 
 /** A section id as the goal numbers it: "3", "Q3" and "q3" are section 3. */
 export function sectionKey(id: string): string {
-  return String(id ?? "").trim().replace(/^q(?=\d)/i, "");
+  // Q-19, the question register's id, is question:19 too.
+  return String(id ?? "").trim().replace(/^q-?(?=\d)/i, "");
 }
 
 /** The goal id a section's entries name in `answers`: 3 for question:3, summary, narrative. */
@@ -8803,6 +8907,64 @@ export function answerProblems(entries: LedgerEntry[], disputes: LedgerDispute[]
   return result;
 }
 
+/** The fields of an entry, of any version, that can hold what it says. */
+const ENTRY_TEXT_FIELDS = ["value", "evidence", "source", "indicates", "confidence_why", "reasoning", "would_change", "alternatives_open", "alternatives_none_why", "because"] as const;
+
+/** One of a sensitive entry's words, with the entry it came from. */
+export type SensitiveToken = { token: string; seq: number };
+
+/**
+ * What a sensitive entry says, as the words redaction looks for: each text
+ * field whole (six characters or more, or four with a digit in it), and
+ * each identifier-like run inside one (eight characters or more with a
+ * digit, an @, a dot, a slash, a backslash or a colon in it: a key, a
+ * token, an address, a path, an account), longest first, each with the
+ * entry it came from.
+ */
+export function sensitiveTokens(entries: LedgerEntry[]): SensitiveToken[] {
+  const out = new Map<string, number>();
+  const add = (t: string, seq: number) => {
+    if (!out.has(t)) out.set(t, seq);
+  };
+  for (const e of entries) {
+    if (!e.sensitive) continue;
+    const raw = e as unknown as Record<string, unknown>;
+    const texts: string[] = [];
+    for (const f of ENTRY_TEXT_FIELDS) if (typeof raw[f] === "string") texts.push(raw[f] as string);
+    if (e.attribution?.subject) texts.push(e.attribution.subject);
+    for (const l of e.locators ?? []) texts.push(l.at);
+    for (const a of (raw.alternatives as Array<{ explanation?: string; why?: string }> | undefined) ?? []) texts.push(a.explanation ?? "", a.why ?? "");
+    for (const q of (raw.qualifies as Array<{ why?: string }> | undefined) ?? []) texts.push(q.why ?? "");
+    for (const w of texts) {
+      const whole = (w ?? "").trim();
+      if (whole.length >= 6 || (whole.length >= 4 && /\d/.test(whole))) add(whole, e.seq);
+      for (const t of whole.match(/[^\s"'`,;()<>[\]{}]{8,}/g) ?? []) if (/[\d@./\\:]/.test(t)) add(t.replace(/[.:]+$/, ""), e.seq);
+    }
+  }
+  return [...out].map(([token, seq]) => ({ token, seq })).sort((a, b) => b.token.length - a.token.length || a.token.localeCompare(b.token));
+}
+
+/** Who asked a question section, when a person did (the question register): their words for the refusal, or null. */
+async function personsQuestion(sandboxRoot: string, sectionId: string): Promise<string | null> {
+  const Q = await import("./questions.ts");
+  const snap = await Q.questionsSnapshot(sandboxRoot);
+  const q = snap.bySection.get(sectionId);
+  if (!q || !Q.HUMAN_ORIGINS.has(q.origin.kind)) return null;
+  return `${q.id}, asked by ${Q.originWords(q.origin)}`;
+}
+
+/**
+ * A register id (Q-9) as the section it answers: its number, or the goal's
+ * own id when the goal numbers it otherwise ("bonus"). Other ids pass.
+ */
+async function registerSection(sandboxRoot: string, raw: string): Promise<string> {
+  const m = /^(question:)?Q-([1-9]\d{0,5})$/i.exec(String(raw ?? "").trim());
+  if (!m) return raw;
+  const Q = await import("./questions.ts");
+  const q = (await Q.questionsSnapshot(sandboxRoot)).state.questions.get(`Q-${Number(m[2])}`);
+  return q ? `${m[1] ?? ""}${q.section}` : raw;
+}
+
 /** Record an answer (recordEntry with kind=answer): its checks need the ledger, so they run under the lock. */
 async function recordAnswer(ctx: SwarmContext, input: LedgerInput): Promise<LedgerResult> {
   const raw = input as Record<string, unknown>;
@@ -8837,6 +8999,18 @@ async function recordAnswer(ctx: SwarmContext, input: LedgerInput): Promise<Ledg
   if (!contrary.ok) return contrary;
   const limits = seqList("limitations", input.limitations);
   if (!limits.ok) return limits;
+  const resultText = String(input.result ?? "").trim().toLowerCase();
+  if (resultText && !(LEDGER_ANSWER_RESULTS as readonly string[]).includes(resultText)) return { ok: false, reason: `result is one of ${LEDGER_ANSWER_RESULTS.join(", ")} (got ${JSON.stringify(input.result)})` };
+  const noneWhy = boundedText("contrary_none_why", input.contrary_none_why, LEDGER_WHY_MAX_CHARS);
+  if (!noneWhy.ok) return noneWhy;
+  if (!question && (resultText || noneWhy.value)) return { ok: false, reason: "result and contrary_none_why are a question's answer's" };
+  if (noneWhy.value && contrary.seqs.length) return { ok: false, reason: "contrary_none_why says no entry says otherwise: give contrary or contrary_none_why, not both" };
+  // A person's question is a hypothesis to test: its answer names what says
+  // otherwise, or says why nothing does (extensions/questions.ts).
+  if (question && !contrary.seqs.length && !noneWhy.value) {
+    const asker = await personsQuestion(ctx.sandboxRoot, sec.id).catch(() => null);
+    if (asker) return { ok: false, reason: `${sec.section} is ${asker}: a person's question is a proposition to test, never a conclusion to confirm. Name the entries that say otherwise (contrary), or say why none does (contrary_none_why); result premise_not_supported is an answer` };
+  }
   const quals: Array<{ seq: number; why: string }> = [];
   for (const q of Array.isArray(input.qualifies) ? input.qualifies : []) {
     const n = Number(String(q?.ref ?? "").trim().replace(/^(?:#|E-)/i, ""));
@@ -8949,6 +9123,8 @@ async function recordAnswer(ctx: SwarmContext, input: LedgerInput): Promise<Ledg
       ...(openAlt.value ? { alternatives_open: openAlt.value } : {}),
       ...(change.value ? { would_change: change.value } : {}),
       ...(input.inconclusive === true ? { inconclusive: true } : {}),
+      ...(resultText ? { result: resultText as LedgerEntry["result"] } : {}),
+      ...(noneWhy.value ? { contrary_none_why: noneWhy.value } : {}),
       ...(tokens.length ? { unsupported_tokens: tokens } : {}),
       by: ctx.agentId,
       authors: [ctx.agentId],
@@ -9193,7 +9369,7 @@ export async function runFinishLine(sandbox: string): Promise<FinishLineRun | nu
 }
 
 /** The record a finish line reads that is not the goal's own files: where each lives. */
-export const REVISION_FILES = { ledger: LEDGER_ENTRIES, attestations: "ledger/attestations.jsonl", disputes: "ledger/disputes.jsonl", leads: "leads/leads.jsonl" } as const;
+export const REVISION_FILES = { ledger: LEDGER_ENTRIES, attestations: "ledger/attestations.jsonl", disputes: "ledger/disputes.jsonl", leads: "leads/leads.jsonl", questions: "questions/questions.jsonl" } as const;
 
 /** Tags of a post that can change a verdict: a result, a veto, a hold, a stop. */
 const VERDICT_TAGS = new Set<string>(["result", "veto", "hold", "stop"]);
@@ -9289,7 +9465,7 @@ export type FinishLineRun = {
 
 /** What the harness's gate says (scripts/finish-gate.ts's FinishGate, as the verdict reads it). */
 export type FinishGateView = {
-  defects: Array<{ code: string; lead?: string; job?: string; what: string; fix: string }>;
+  defects: Array<{ code: string; lead?: string; job?: string; question?: string; what: string; fix: string }>;
   limited: string[];
   questions?: Array<{ id: string; outcome: string; blocks: string[] }>;
   until_solved?: boolean;
@@ -9375,10 +9551,10 @@ export function finishLineVerdict(run: FinishLineRun | null, abandon: boolean, o
       const each = gate.defects.map((d) => `- ${d.what}. Fix: ${d.fix}`).join("\n");
       return {
         proceed: false,
-        failing: `${gate.defects[0].code}${gate.defects[0].lead ? ` ${gate.defects[0].lead}` : ""}${gate.defects[0].job ? ` ${gate.defects[0].job}` : ""}`,
+        failing: `${gate.defects[0].code}${gate.defects[0].lead ? ` ${gate.defects[0].lead}` : ""}${gate.defects[0].job ? ` ${gate.defects[0].job}` : ""}${gate.defects[0].question ? ` ${gate.defects[0].question}` : ""}`,
         reason:
-          `The goal's checks pass, but material work is still open: ${gate.defects.length} item${gate.defects.length === 1 ? "" : "s"} the lead register holds against done:\n${each}\n` +
-          "A lead is disposed of with lead_close; a lead's job is interpreted by recording what its output shows with interprets naming it. Then call done again.",
+          `The goal's checks pass, but material work is still open: ${gate.defects.length} item${gate.defects.length === 1 ? "" : "s"} the lead and question registers hold against done:\n${each}\n` +
+          "A lead is disposed of with lead_close; a lead's job is interpreted by recording what its output shows with interprets naming it; a question in scope is answered in the ledger in its section. Then call done again.",
       };
     }
     if (until && (gate.limited.length || (gate.questions ?? []).some((q) => q.outcome !== "answered"))) {

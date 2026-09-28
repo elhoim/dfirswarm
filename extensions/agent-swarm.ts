@@ -86,6 +86,7 @@ import {
   LEDGER_KINDS,
   LEDGER_CONFIDENCE,
   LEDGER_REL_KINDS,
+  LEDGER_ANSWER_RESULTS,
   LEDGER_HYPOTHESIS_STATUS,
   LEDGER_LIMITATION_REASONS,
   LEDGER_PRECISION,
@@ -171,6 +172,9 @@ import {
   leadsView,
   leadsDigest,
   leadInterpret,
+  questionOpen,
+  questionAsk,
+  questionsView,
 } from "./board.ts";
 // The lead register's host-side pieces: a host run's wait checks it itself (a VM's hub does it there).
 import { LEAD_DISPOSITIONS, leadsWaitCheck, reopenOnLedger } from "./leads.ts";
@@ -238,6 +242,9 @@ export const SWARM_TOOLS = new Set([
   "lead_close",
   "lead_link",
   "leads",
+  "question_open",
+  "questions",
+  "question_ask",
 ]);
 
 /** A bash command run this many times by one agent earns a hint to forge a tool. */
@@ -3040,16 +3047,18 @@ export default function (pi: ExtensionAPI) {
           description: "Why the kept output of a job that did not succeed still supports this entry: {ref: that ref, why}. Required on a finding for each such ref. On an answer, ref is a cited entry (E-<seq>) that is disputed or rests on a failed job.",
         }),
       ),
-      section: Type.Optional(Type.String({ description: "An answer's: question:<id> (the goal's question: question:3), summary or narrative." })),
+      section: Type.Optional(Type.String({ description: "An answer's: question:<id> (the goal's question: question:3; a register question Q-19 is question:19), summary or narrative." })),
       reasoning: Type.Optional(Type.String({ description: "An answer's: how the cited entries lead to the answer, citing E-<seq> for every claim. For the narrative, the narrative." })),
-      contrary: Type.Optional(Type.Array(Type.Union([Type.Number(), Type.String()]), { description: "An answer's: the entries that say otherwise, by seq." })),
+      contrary: Type.Optional(Type.Array(Type.Union([Type.Number(), Type.String()]), { description: "An answer's: the entries that say otherwise, by seq. An answer to a person's question (the question register's analyst questions) names them, or says why there are none in contrary_none_why." })),
+      contrary_none_why: Type.Optional(Type.String({ description: "An answer's, in place of contrary: why no entry says otherwise (what was looked at that could have)." })),
+      result: Type.Optional(Type.Union(LEDGER_ANSWER_RESULTS.map((k) => Type.Literal(k)), { description: "An answer's result: premise_not_supported when the evidence does not bear out what the question takes for granted; it is an answer." })),
       limitations: Type.Optional(Type.Array(Type.Union([Type.Number(), Type.String()]), { description: "An answer's: the limitation entries that bound it, by seq." })),
       alternatives_open: Type.Optional(Type.String({ description: "An answer's: what else could still explain it, or that nothing remains open and why. Required on a question's answer." })),
       would_change: Type.Optional(Type.String({ description: "An answer's: what evidence would change it. Required on a question's answer." })),
       inconclusive: Type.Optional(Type.Boolean({ description: "An answer's: the ledger cannot answer the question; say why in reasoning and cite the limitations." })),
       supersedes: Type.Optional(Type.Number({ description: "The seq of an entry this one corrects. The older entry stays, marked superseded." })),
       refs: Type.Optional(Type.Array(Type.String(), { description: "The run's objects it rests on: input:<path>, job:<id>/<path>, import:<id>/<path>, member:<gen>#<n>, sha256:<hex>, or unresolved:<why>. Each is checked; one that does not resolve is refused with the nearest names. Not on an answer." })),
-      answers: Type.Optional(Type.Array(Type.String(), { description: "The goal sections it answers: \"3\", \"Q3\", summary, narrative." })),
+      answers: Type.Optional(Type.Array(Type.String(), { description: "The sections it answers: the goal's \"3\" or \"Q3\", a register question \"Q-19\", summary, narrative." })),
       rel: Type.Optional(Type.Array(Type.Object({ to: Type.Number(), kind: Type.Union(LEDGER_REL_KINDS.map((k) => Type.Literal(k))) }), { description: "Links to other entries by seq: supports, contradicts, duplicates, derived_from." })),
       sensitive: Type.Optional(Type.Boolean({ description: "It, or what it cites, holds a credential, a key or personal data: a package redacts it." })),
       status: Type.Optional(Type.Union(LEDGER_HYPOTHESIS_STATUS.map((k) => Type.Literal(k)), { description: "A hypothesis's status." })),
@@ -3070,8 +3079,10 @@ export default function (pi: ExtensionAPI) {
             answers: Type.Optional(Type.Array(Type.String())),
             material: Type.Optional(Type.Boolean()),
             take: Type.Optional(Type.Boolean()),
+            proposition: Type.Optional(Type.String()),
+            negation: Type.Optional(Type.String()),
           }),
-          { description: "The leads this entry opens: work it shows has to be followed, each {title, why, needs?, answers?, material?, take?} as lead_open takes it; each lead's origin is this entry. take: true keeps the follow-up yours." },
+          { description: "The leads this entry opens: work it shows has to be followed, each {title, why, needs?, answers?, material?, take?, proposition?, negation?} as lead_open takes it (answers takes Q-19 as well as question:3); each lead's origin is this entry. take: true keeps the follow-up yours." },
         ),
       ),
       interprets: Type.Optional(
@@ -3214,10 +3225,12 @@ export default function (pi: ExtensionAPI) {
       title: Type.String({ description: "What has to be done, in one line" }),
       why: Type.String({ description: "Why it matters: what it would settle, what it rests on" }),
       needs: Type.Optional(Type.Array(Type.String(), { description: "What it waits for: L-<n> (resolved), L-<n>:<disposition>, or E-<seq>" })),
-      answers: Type.Optional(Type.Array(Type.String(), { description: "The goal's questions it serves: \"3\", \"Q3\"" })),
+      answers: Type.Optional(Type.Array(Type.String(), { description: "The questions it serves: Q-19 from the question register (questions), or the goal's \"3\" / \"question:3\" (the same as Q-3)" })),
       material: Type.Optional(Type.Boolean({ description: "false: the finish line may leave it open (default true)" })),
       take: Type.Optional(Type.Boolean({ description: "Hold it yourself at once" })),
       origin: Type.Optional(Type.String({ description: "Where it came from: E-<seq>, a post (main#52), another lead" })),
+      proposition: Type.Optional(Type.String({ description: "Under a person's question: the proposition this lead tests. Required, with negation, on the first lead under one." })),
+      negation: Type.Optional(Type.String({ description: "The proposition's negation: what would hold if it is false. Plan a route that could show it." })),
     }),
     async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
       const started = Date.now();
@@ -3270,7 +3283,7 @@ export default function (pi: ExtensionAPI) {
     ],
     parameters: Type.Object({
       id: Type.String({ description: "L-<n>" }),
-      disposition: Type.Union(LEAD_DISPOSITIONS.map((d) => Type.Literal(d)), { description: LEAD_DISPOSITIONS.join(" | ") }),
+      disposition: Type.Union(LEAD_DISPOSITIONS.filter((d) => d !== "withdrawn").map((d) => Type.Literal(d)), { description: LEAD_DISPOSITIONS.filter((d) => d !== "withdrawn").join(" | ") }),
       ref: Type.String({ description: "E-<seq>, L-<n>, or for needs_operator what the operator must do" }),
       why: Type.Optional(Type.String({ description: "Anything a reader should know about how it ended" })),
       generation: Type.Optional(Type.Integer({ description: "The generation you hold it at" })),
@@ -3320,6 +3333,81 @@ export default function (pi: ExtensionAPI) {
       await logEvent(toolCtx.cwd, agentId, "leads", params as Record<string, unknown>, { ok: r.ok !== false, view: params.view ?? "summary", ...(Array.isArray(r.leads) ? { n: (r.leads as unknown[]).length, remaining: r.remaining } : {}) }, Date.now() - started).catch(() => undefined);
       if (r.ok === false) return { content: [{ type: "text" as const, text: `leads refused: ${String(r.reason)}` }], details: r, isError: true };
       return okResult(r);
+    },
+  });
+
+  // The question register (extensions/questions.ts): what the examination is
+  // asked, by the goal, by a person or by an agent. An agent opens a question
+  // it finds in the evidence, reads the register, and asks the asker what is
+  // unclear; a person's question is never an agent's to amend, re-scope or
+  // withdraw.
+  async function questionAnswer(cwd: string, tool: string, params: Record<string, unknown>, started: number, r: { ok: boolean; reason?: string } & Record<string, unknown>) {
+    await logEvent(cwd, agentId, tool, params, r.ok ? { ok: true, q: r.q, rev: r.rev, ...(r.scope ? { scope: r.scope } : {}), ...(r.clarify ? { clarify: r.clarify } : {}), ...(r.duplicate ? { duplicate: true } : {}) } : { ok: false, reason: r.reason }, Date.now() - started).catch(() => undefined);
+    if (!r.ok) return { content: [{ type: "text" as const, text: `${tool} refused: ${String(r.reason)}` }], details: r, isError: true };
+    return okResult(r);
+  }
+
+  pi.registerTool({
+    name: "question_open",
+    label: "Open a question",
+    description:
+      "Put a question the evidence raised in the question register (Q-<n>): text says what is to be established, why says why the case needs it. Name the objective it serves (objective: O-1) or the question it follows (parent: Q-3): inside either it is in scope at once; with neither it is proposed and waits for the operator's triage. materiality: material (the finish line waits for its answer) or background. source_entry: the entry that raised it (E-<seq>). expects: existence, value, narrative, timeline or list (a hint). hints: where to look ({ref, value?}). Work it with lead_open(answers: [\"Q-<n>\"]) and answer it in section question:<n>.",
+    promptSnippet: "Open a question the evidence raised",
+    promptGuidelines: [
+      "When the goal names objectives and no questions, propose the initial questions from the objectives and the inventory with question_open (objective: O-1).",
+      "A question you open inside an objective or under a question in scope is the case's at once: open only what the case needs answered.",
+    ],
+    parameters: Type.Object({
+      text: Type.String({ description: "The question, whole" }),
+      why: Type.String({ description: "Why the case needs its answer" }),
+      objective: Type.Optional(Type.String({ description: "The objective it serves (O-1)" })),
+      parent: Type.Optional(Type.String({ description: "The question it follows (Q-3)" })),
+      materiality: Type.Union(["material", "background"].map((k) => Type.Literal(k)), { description: "material: the finish line waits for its answer; background: worth knowing" }),
+      source_entry: Type.Optional(Type.String({ description: "The entry that raised it: E-<seq>" })),
+      expects: Type.Optional(Type.Union(["existence", "value", "narrative", "timeline", "list"].map((k) => Type.Literal(k)), { description: "What kind of answer it asks for (a hint, never a format)" })),
+      hints: Type.Optional(Type.Array(Type.Object({ ref: Type.String(), value: Type.Optional(Type.String()) }), { description: "Where to look: a ref (input:<path>, job:<id>/<path>) or a path in the run" })),
+    }),
+    async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
+      const started = Date.now();
+      const r = await questionOpen(ctxFrom(toolCtx.cwd, agentId), params as never);
+      return questionAnswer(toolCtx.cwd, "question_open", params as Record<string, unknown>, started, r as never);
+    },
+  });
+
+  pi.registerTool({
+    name: "questions",
+    label: "Questions",
+    description:
+      "Read the question register: list (default: every question, whole, with its origin (goal, agent, or a person: analyst, reviewer, observer, claimed or signed), scope, work state, answer and leads, a page at a time; from: next for the rest), show (one question with id: every verbatim revision, the neutral formulation, hints, clarifications, offers, leads and its answer), triage (what waits for the operator), objectives, or mine. The rendered register is questions/questions.md.",
+    promptSnippet: "Read the question register",
+    parameters: Type.Object({
+      view: Type.Optional(Type.Union(["list", "show", "triage", "objectives", "mine"].map((k) => Type.Literal(k)))),
+      id: Type.Optional(Type.String({ description: "Q-<n>, for show" })),
+      from: Type.Optional(Type.String({ description: "The question id a previous page named as next" })),
+    }),
+    async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
+      const started = Date.now();
+      const r = await questionsView(ctxFrom(toolCtx.cwd, agentId), { ...(params.view ? { view: params.view } : {}), ...(params.id ? { id: params.id } : {}), ...(params.from ? { from: params.from } : {}), pageChars: inboxPageChars() });
+      await logEvent(toolCtx.cwd, agentId, "questions", params as Record<string, unknown>, { ok: r.ok !== false, view: params.view ?? (params.id ? "show" : "list"), ...(Array.isArray(r.questions) ? { n: (r.questions as unknown[]).length, remaining: r.remaining } : {}) }, Date.now() - started).catch(() => undefined);
+      if (r.ok === false) return { content: [{ type: "text" as const, text: `questions refused: ${String(r.reason)}` }], details: r, isError: true };
+      return okResult(r);
+    },
+  });
+
+  pi.registerTool({
+    name: "question_ask",
+    label: "Ask what a question means",
+    description:
+      "Ask the person who asked a question (or the operator, for the goal's) what is unclear in it: an operator request of kind clarification with a durable id (C-<n>), recorded on the question. The answer comes back to you as a notice and a post, and goes on the question's record. The rest of the work goes on meanwhile: ask about what is unclear, and work what is not.",
+    promptSnippet: "Ask the asker what a question means",
+    parameters: Type.Object({
+      id: Type.String({ description: "Q-<n>" }),
+      what_is_unclear: Type.String({ description: "What is unclear, and what you would do under each reading" }),
+    }),
+    async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
+      const started = Date.now();
+      const r = await questionAsk(ctxFrom(toolCtx.cwd, agentId), params.id, params.what_is_unclear);
+      return questionAnswer(toolCtx.cwd, "question_ask", params as Record<string, unknown>, started, r as never);
     },
   });
 
@@ -3421,6 +3509,10 @@ export default function (pi: ExtensionAPI) {
       // fails; an abandoned run says so in its reason.
       let reasonPrefix = "";
       let outcome: FinishOutcome | undefined;
+      // The revision the finish line was judged against: the sentinel is
+      // written only while it holds (markDone checks it under the registers'
+      // lock, so a question admitted meanwhile refuses this done).
+      let revision: string | undefined;
       if (!(await swarmDoneExists(toolCtx.cwd))) {
         // On the host the finish line is bound to the state it was run
         // against (stateRevision: the board, the ledger, the review, the
@@ -3456,12 +3548,21 @@ export default function (pi: ExtensionAPI) {
         reasonPrefix = verdict.reasonPrefix ?? "";
         outcome = verdict.outcome;
         if (onHost && (await stateRevision(toolCtx.cwd).catch(() => ({ revision: "" }))).revision !== bound.revision) return unsettled();
+        if (onHost && bound.revision) revision = bound.revision;
       }
-      const result = await markDone(ctxFrom(toolCtx.cwd, agentId), {
-        reason: reasonPrefix + params.reason,
-        outputFile: params.output_file,
-        ...(outcome ? { outcome } : {}),
-      });
+      let result: Awaited<ReturnType<typeof markDone>>;
+      try {
+        result = await markDone(ctxFrom(toolCtx.cwd, agentId), {
+          reason: reasonPrefix + params.reason,
+          outputFile: params.output_file,
+          ...(outcome ? { outcome } : {}),
+          ...(revision ? { revision } : {}),
+        });
+      } catch (err) {
+        if ((err as Error).message !== FINISH_LINE_UNSETTLED) throw err;
+        await logEvent(toolCtx.cwd, agentId, "done", params, { ok: false, reason: FINISH_LINE_UNSETTLED }).catch(() => undefined);
+        return { content: [{ type: "text" as const, text: FINISH_LINE_UNSETTLED }], details: { ok: false, reason: FINISH_LINE_UNSETTLED }, isError: true };
+      }
       if (!result.terminate) {
         // One agent's abandon while others work is a vote, not the end.
         await logEvent(toolCtx.cwd, agentId, "done", params, { ok: false, reason: result.refused, abandon: result.abandon }).catch(() => undefined);

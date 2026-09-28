@@ -48,7 +48,14 @@ export const LEADS_MD = "leads/leads.md";
 export const OPERATOR_REQUESTS = "operator-requests.jsonl";
 /** Hosts the operator allowed while the run went on, for jobs run with network=allowlist. */
 export const OPERATOR_HOSTS = "operator-hosts.jsonl";
-const LOCK = ".leads.lock";
+/**
+ * The one lock both registers are written under: the leads and the questions
+ * (extensions/questions.ts). A withdrawn question closes its leads in the
+ * same act, and a done's sentinel is written under it too (protocol.ts
+ * markDone), so an admission and a terminal done are never interleaved.
+ */
+export const REGISTER_LOCK = P.REGISTER_LOCK;
+const LOCK = REGISTER_LOCK;
 
 // --- the vocabulary ---------------------------------------------------------------------------
 
@@ -59,8 +66,10 @@ const LOCK = ".leads.lock";
  * that says why it waits (E-<seq>). infeasible: the limitation naming the
  * methods tried and why none worked (E-<seq>). needs_operator: what only the
  * operator can do (allow a host, add a file, answer a question), in words.
+ * withdrawn: the harness's alone, when every question the lead served was
+ * withdrawn (extensions/questions.ts); it cites the question.
  */
-export const LEAD_DISPOSITIONS = ["resolved", "negative", "duplicate", "deferred", "infeasible", "needs_operator"] as const;
+export const LEAD_DISPOSITIONS = ["resolved", "negative", "duplicate", "deferred", "infeasible", "needs_operator", "withdrawn"] as const;
 export type LeadDisposition = (typeof LEAD_DISPOSITIONS)[number];
 /** The dispositions that leave the question behind them open: an examination-limited outcome, never an answered one. */
 export const LIMITING_DISPOSITIONS: ReadonlySet<LeadDisposition> = new Set(["deferred", "infeasible", "needs_operator"]);
@@ -130,6 +139,16 @@ export type LeadEvent = {
   allow_host?: string;
   last_activity?: string | null;
   idle_seconds?: number;
+  /**
+   * An open under an analyst's question (extensions/questions.ts): the
+   * proposition the lead tests and its negation, so the question is worked as
+   * a hypothesis, never as a conclusion to confirm.
+   */
+  proposition?: string;
+  negation?: string;
+  /** A directive (the operator's lead under a question): what it is to produce, and what makes that product acceptable. */
+  product?: string;
+  acceptance?: string;
   prev: string;
   hash: string;
 };
@@ -158,6 +177,10 @@ export type Lead = {
   /** How many times it went back to open (released or reopened): one wake per open spell. */
   cycle: number;
   last_seq: number;
+  proposition?: string;
+  negation?: string;
+  product?: string;
+  acceptance?: string;
 };
 
 export type LeadsState = {
@@ -252,6 +275,10 @@ export function foldLeads(events: LeadEvent[], chain: LeadsState["chain"] = { ok
           notes: [],
           cycle: 0,
           last_seq: e.seq,
+          ...(e.proposition ? { proposition: e.proposition } : {}),
+          ...(e.negation ? { negation: e.negation } : {}),
+          ...(e.product ? { product: e.product } : {}),
+          ...(e.acceptance ? { acceptance: e.acceptance } : {}),
         });
         break;
       }
@@ -332,7 +359,7 @@ export function parseNeed(raw: string): { ok: true; need: string; lead?: string;
   if (m) {
     const disposition = (m[2] ?? "resolved").toLowerCase() as LeadDisposition;
     if (!(LEAD_DISPOSITIONS as readonly string[]).includes(disposition)) return { ok: false, reason: `a need's disposition is one of ${LEAD_DISPOSITIONS.join(", ")} (got ${JSON.stringify(m[2])})` };
-    if (disposition === "duplicate" || disposition === "needs_operator") return { ok: false, reason: `${text}: a lead closed ${disposition} produced nothing a lead can use; need the lead it duplicates, or the answer the operator gives, instead` };
+    if (disposition === "duplicate" || disposition === "needs_operator" || disposition === "withdrawn") return { ok: false, reason: `${text}: a lead closed ${disposition} produced nothing a lead can use; need the lead it duplicates, or the answer the operator gives, instead` };
     const lead = `L-${Number(m[1].slice(2))}`;
     return { ok: true, need: `${lead}:${disposition}`, lead, disposition };
   }
@@ -432,7 +459,7 @@ export function wouldCycle(id: string, need: string, s: LeadsState): boolean {
 export type GoalQuestions = { questions: string[]; existence: string[]; source: string | null };
 
 /** Split a shell line into words: enough for a goal's check line (quotes, no expansion). */
-function shellWords(line: string): string[] {
+export function shellWords(line: string): string[] {
   const out: string[] = [];
   let cur = "";
   let quote: string | null = null;
@@ -799,6 +826,8 @@ export type LeadsSnapshot = {
   answered: Set<string>;
   jobs: JobFacts[];
   at: number;
+  /** The question register (extensions/questions.ts), read beside the leads; null when it could not be read. */
+  questions: import("./questions.ts").QuestionsSnapshot | null;
 };
 
 export async function leadsSnapshot(sandboxRoot: string): Promise<LeadsSnapshot> {
@@ -815,7 +844,8 @@ export async function leadsSnapshot(sandboxRoot: string): Promise<LeadsSnapshot>
     answered.add(P.sectionKey(e.section.slice("question:".length)));
   }
   const jobs = await readJobs(sandboxRoot);
-  return { state, ledger, goal, answered, jobs, at: Date.now() };
+  const questions = await import("./questions.ts").then((Q) => Q.questionsSnapshot(sandboxRoot, { goal })).catch(() => null);
+  return { state, ledger, goal, answered, jobs, at: Date.now(), questions };
 }
 
 /** A lead as a reader is shown it: its record, with everything derived beside it. */
@@ -844,6 +874,10 @@ export type LeadView = {
   jobs: string[];
   notes: Lead["notes"];
   reopened: Lead["reopened"];
+  proposition?: string;
+  negation?: string;
+  product?: string;
+  acceptance?: string;
 };
 
 export function viewLead(l: Lead, snap: LeadsSnapshot): LeadView {
@@ -873,6 +907,10 @@ export function viewLead(l: Lead, snap: LeadsSnapshot): LeadView {
     jobs: l.jobs,
     notes: l.notes,
     reopened: l.reopened,
+    ...(l.proposition ? { proposition: l.proposition } : {}),
+    ...(l.negation ? { negation: l.negation } : {}),
+    ...(l.product ? { product: l.product } : {}),
+    ...(l.acceptance ? { acceptance: l.acceptance } : {}),
   };
 }
 
@@ -884,9 +922,22 @@ export function rankedLeads(snap: LeadsSnapshot): LeadView[] {
   return [...live, ...closed];
 }
 
-/** Goal questions with no standing answer, and of those, the ones no held lead covers. */
+/**
+ * The questions the run is to answer: the goal's, then every other question
+ * the register holds in scope (a person's, an agent's), by their sections.
+ */
+export function caseQuestions(snap: LeadsSnapshot): string[] {
+  const out = [...snap.goal.questions];
+  for (const q of snap.questions?.state.questions.values() ?? []) {
+    if (q.origin.kind === "goal" || q.scope !== "in_scope" || q.withdrawn || q.after_done) continue;
+    if (!out.includes(q.section)) out.push(q.section);
+  }
+  return out;
+}
+
+/** The case's questions with no standing answer, and of those, the ones no held lead covers. */
 export function questionCoverage(snap: LeadsSnapshot): { unanswered: string[]; uncovered: string[]; open_leads_for: Record<string, string[]> } {
-  const unanswered = snap.goal.questions.filter((q) => !snap.answered.has(P.sectionKey(q)));
+  const unanswered = caseQuestions(snap).filter((q) => !snap.answered.has(P.sectionKey(q)));
   const uncovered: string[] = [];
   const openFor: Record<string, string[]> = {};
   for (const q of unanswered) {
@@ -921,6 +972,21 @@ async function appendLeadEvents(sandboxRoot: string, events: Array<Omit<LeadEven
   return out;
 }
 
+/** A lead event as a writer drafts it: the chain fields are the append's. */
+export type LeadDraft = Omit<LeadEvent, "v" | "seq" | "at" | "prev" | "hash">;
+
+/** Run `fn` under the lock both registers share (the question register's writes take it through here). */
+export async function withRegisters<T>(sandboxRoot: string, fn: (held: P.HeldLock) => Promise<T>): Promise<T> {
+  return P.withNamedLock(sandboxRoot, LOCK, fn);
+}
+
+/** Append lead events under a lock the caller holds (withRegisters), and render leads.md. */
+export async function appendLeadEventsHeld(sandboxRoot: string, events: LeadDraft[], held: P.HeldLock): Promise<LeadEvent[]> {
+  const out = events.length ? await appendLeadEvents(sandboxRoot, events, held) : [];
+  if (out.length) await writeLeadsMd(sandboxRoot).catch(() => undefined);
+  return out;
+}
+
 /** Run `fn` under the register's lock, with its state read inside the lock; what it returns to append is appended, and leads.md rendered. */
 async function transact<T>(sandboxRoot: string, fn: (snap: LeadsSnapshot) => Promise<{ append: Array<Omit<LeadEvent, "v" | "seq" | "at" | "prev" | "hash">>; result: T }>): Promise<T & { events: LeadEvent[] }> {
   return P.withNamedLock(sandboxRoot, LOCK, async (held) => {
@@ -947,7 +1013,21 @@ function listOf(v: unknown): string[] {
 export type LeadResult<T = Record<string, unknown>> = ({ ok: true } & T) | { ok: false; reason: string };
 type Fail = { ok: false; reason: string };
 
-export type LeadOpenInput = { title?: string; why?: string; needs?: string[] | string; answers?: string[] | string; material?: boolean; take?: boolean; origin?: string };
+export type LeadOpenInput = {
+  title?: string;
+  why?: string;
+  needs?: string[] | string;
+  answers?: string[] | string;
+  material?: boolean;
+  take?: boolean;
+  origin?: string;
+  /** Under an analyst's question: the proposition this lead tests, and its negation (required on the first agent lead under one). */
+  proposition?: string;
+  negation?: string;
+  /** A directive's product and acceptance (the operator's lead under a question). */
+  product?: string;
+  acceptance?: string;
+};
 
 function checkNeeds(raw: unknown, s: LeadsState, v: LedgerView, self?: string): { ok: true; needs: string[] } | { ok: false; reason: string } {
   const needs: string[] = [];
@@ -963,12 +1043,54 @@ function checkNeeds(raw: unknown, s: LeadsState, v: LedgerView, self?: string): 
   return { ok: true, needs };
 }
 
-function checkAnswers(raw: unknown): { ok: true; answers: string[] } | { ok: false; reason: string } {
-  const answers = listOf(raw).map((a) => P.sectionKey(a.replace(/^question:/i, "")));
-  if (answers.length > LEAD_MAX_ANSWERS) return { ok: false, reason: `a lead names at most ${LEAD_MAX_ANSWERS} questions` };
+function checkAnswers(raw: unknown): { ok: true; answers: string[]; registered: string[] } | { ok: false; reason: string } {
+  const answers: string[] = [];
+  // A register id (Q-19) is resolved against the question register inside the
+  // lock (resolveAnswers); the goal's own forms (3, Q3, question:3) are the
+  // section they always were.
+  const registered: string[] = [];
+  for (const a of listOf(raw)) {
+    const reg = /^Q-([1-9]\d{0,5})$/i.exec(a);
+    if (reg) {
+      const id = `Q-${Number(reg[1])}`;
+      if (!registered.includes(id)) registered.push(id);
+      continue;
+    }
+    const key = P.sectionKey(a.replace(/^question:/i, ""));
+    if (!answers.includes(key)) answers.push(key);
+  }
+  if (answers.length + registered.length > LEAD_MAX_ANSWERS) return { ok: false, reason: `a lead names at most ${LEAD_MAX_ANSWERS} questions` };
   const bad = answers.find((a) => !P.LEDGER_ANSWER_ID.test(a));
-  if (bad) return { ok: false, reason: `answers takes the goal's question ids ("3", "Q3"; got ${JSON.stringify(bad)})` };
-  return { ok: true, answers };
+  if (bad) return { ok: false, reason: `answers takes question ids: Q-19 from the question register, or the goal's own ("3", "Q3", "question:3"; got ${JSON.stringify(bad)})` };
+  return { ok: true, answers, registered };
+}
+
+/**
+ * The questions a lead names, as the ledger's sections: a register id (Q-19)
+ * must name a question in scope, and becomes its section (19, or a goal's own
+ * id such as "bonus"); the goal's forms pass as they are. Also says which of
+ * them an analyst, a reviewer or an observer asked (a human's question is a
+ * hypothesis to test: its first agent lead states the proposition and its
+ * negation). Read inside the register's lock.
+ */
+async function resolveAnswers(sandboxRoot: string, checked: { answers: string[]; registered: string[] }): Promise<{ ok: true; answers: string[]; human: Array<{ id: string; section: string }> } | { ok: false; reason: string }> {
+  const Q = await import("./questions.ts");
+  const qs = await Q.questionsSnapshot(sandboxRoot);
+  const out = [...checked.answers];
+  const human: Array<{ id: string; section: string }> = [];
+  for (const id of checked.registered) {
+    const q = qs.state.questions.get(id);
+    if (!q) return { ok: false, reason: `${id} is not in the question register (questions view=list names every question)` };
+    if (q.withdrawn) return { ok: false, reason: `${id} was withdrawn by ${Q.originWords(q.withdrawn.origin)}: ${q.withdrawn.why}` };
+    if (q.scope === "excluded") return { ok: false, reason: `${id} is excluded from the case (${q.scope_why}); it is no lead's work` };
+    if (q.scope === "proposed") return { ok: false, reason: `${id} is proposed and waits for the operator's triage: it is not the case's work until it is admitted` };
+    if (!out.includes(q.section)) out.push(q.section);
+  }
+  for (const section of out) {
+    const q = qs.bySection.get(section);
+    if (q && Q.HUMAN_ORIGINS.has(q.origin.kind)) human.push({ id: q.id, section });
+  }
+  return { ok: true, answers: out, human };
 }
 
 /**
@@ -986,12 +1108,40 @@ export async function openLead(ctx: P.SwarmContext, input: LeadOpenInput): Promi
   if (!origin.ok) return origin;
   if (input.material !== undefined && typeof input.material !== "boolean") return { ok: false, reason: "material is true or false" };
   if (input.take !== undefined && typeof input.take !== "boolean") return { ok: false, reason: "take is true or false" };
-  const answers = checkAnswers(input.answers);
-  if (!answers.ok) return answers;
+  const checked = checkAnswers(input.answers);
+  if (!checked.ok) return checked;
+  const proposition = bounded("proposition", input.proposition, LEAD_WHY_MAX, false);
+  if (!proposition.ok) return proposition;
+  const negation = bounded("negation", input.negation, LEAD_WHY_MAX, false);
+  if (!negation.ok) return negation;
+  if (Boolean(proposition.value) !== Boolean(negation.value)) return { ok: false, reason: "proposition and negation come together: the proposition this lead tests, and what would hold if it is false" };
+  const product = bounded("product", input.product, LEAD_WHY_MAX, false);
+  if (!product.ok) return product;
+  const acceptance = bounded("acceptance", input.acceptance, LEAD_WHY_MAX, false);
+  if (!acceptance.ok) return acceptance;
   try {
     const r = await transact<Fail | { ok: true; id: string; woke: string | undefined }>(ctx.sandboxRoot, async (snap) => {
       const needs = checkNeeds(input.needs, snap.state, snap.ledger);
       if (!needs.ok) return { append: [], result: { ok: false as const, reason: needs.reason } };
+      const answers = checked.registered.length || checked.answers.length ? await resolveAnswers(ctx.sandboxRoot, checked) : { ok: true as const, answers: [] as string[], human: [] as Array<{ id: string; section: string }> };
+      if (!answers.ok) return { append: [], result: { ok: false as const, reason: answers.reason } };
+      // The first agent lead under a human's question tests it: the
+      // proposition and its negation, stated before the search (a directive
+      // is the operator's own, and carries its product instead).
+      if (ctx.agentId !== "operator" && !proposition.value) {
+        for (const h of answers.human) {
+          const earlier = [...snap.state.leads.values()].some((l) => l.opened_by !== "operator" && l.answers.includes(h.section));
+          if (!earlier) {
+            return {
+              append: [],
+              result: {
+                ok: false as const,
+                reason: `${h.id} is a person's question and this is the first lead under it: it is a proposition to test, never a conclusion to confirm. Give proposition (what this lead tests) and negation (what would hold if it is false), and plan a route that could disconfirm it`,
+              },
+            };
+          }
+        }
+      }
       const id = `L-${snap.state.leads.size + 1}`;
       const take = input.take === true;
       const open = {
@@ -1005,6 +1155,9 @@ export async function openLead(ctx: P.SwarmContext, input: LeadOpenInput): Promi
         answers: answers.answers,
         material: input.material !== false,
         ...(take ? { holder: ctx.agentId, generation: 1 } : { generation: 0 }),
+        ...(proposition.value ? { proposition: proposition.value, negation: negation.value } : {}),
+        ...(product.value ? { product: product.value } : {}),
+        ...(acceptance.value ? { acceptance: acceptance.value } : {}),
       };
       const append: Array<Omit<LeadEvent, "v" | "seq" | "at" | "prev" | "hash">> = [open];
       // Ready and unheld: the seat idle longest is woken for it, once.
@@ -1141,7 +1294,8 @@ export async function closeLead(ctx: P.SwarmContext, rawId: unknown, input: { di
   const ref = leadRef(rawId);
   if (!ref.ok) return ref;
   const disposition = String(input.disposition ?? "").trim().toLowerCase() as LeadDisposition;
-  if (!(LEAD_DISPOSITIONS as readonly string[]).includes(disposition)) return { ok: false, reason: `disposition is one of ${LEAD_DISPOSITIONS.join(", ")}` };
+  if (!(LEAD_DISPOSITIONS as readonly string[]).includes(disposition)) return { ok: false, reason: `disposition is one of ${LEAD_DISPOSITIONS.filter((d) => d !== "withdrawn").join(", ")}` };
+  if (disposition === "withdrawn") return { ok: false, reason: "withdrawn is the harness's: a lead closes withdrawn when every question it serves is withdrawn by whoever asked it" };
   const refText = bounded("ref", input.ref, LEAD_REF_MAX, true);
   if (!refText.ok) return refText;
   const why = bounded("why", input.why, LEAD_WHY_MAX, false);
@@ -1443,7 +1597,13 @@ function toldNow(agent: string, snap: LeadsSnapshot, previouslyHeld: string[]): 
   return { seq: s.events.length, held, deps, wakes };
 }
 
-export type LeadNotice = { kind: "lead_ready" | "lead_blocked" | "need_dead" | "dependency_changed" | "stale_marked" | "reclaimed" | "reopened" | "operator_note" | "wake"; lead: string; text: string; wakes: boolean };
+export type LeadNotice = {
+  kind: "lead_ready" | "lead_blocked" | "need_dead" | "dependency_changed" | "stale_marked" | "reclaimed" | "reopened" | "operator_note" | "wake" | `question_${import("./questions.ts").QuestionNotice["kind"]}`;
+  /** The lead the notice is about, or the question (Q-<n>) for the register's. */
+  lead: string;
+  text: string;
+  wakes: boolean;
+};
 
 /** What changed for this agent since it was last told: derived from the state, never stored, so none is lost to a restart. */
 export function noticesFor(agent: string, before: Told, snap: LeadsSnapshot): LeadNotice[] {
@@ -1494,7 +1654,7 @@ export function noticesFor(agent: string, before: Told, snap: LeadsSnapshot): Le
 export type LeadsDigest = {
   text: string;
   notices: LeadNotice[];
-  counts: { open: number; active: number; blocked: number; closed: number; mine: number; awaiting: number; uncovered: number };
+  counts: { open: number; active: number; blocked: number; closed: number; mine: number; awaiting: number; uncovered: number; questions?: { analyst: number; proposed: number; clarifications: number; triage: number } };
 };
 
 function lineOf(x: LeadView): string {
@@ -1507,6 +1667,10 @@ function lineOf(x: LeadView): string {
  */
 export async function leadsDigest(ctx: P.SwarmContext, o: { mark?: boolean } = {}): Promise<LeadsDigest> {
   await reopenOnLedger(ctx.sandboxRoot).catch(() => undefined);
+  // What the question register committed and has not yet published goes out
+  // first (a crash between an act and its post is made good here).
+  const Q = await import("./questions.ts");
+  await Q.deliverPending(ctx.sandboxRoot).catch(() => undefined);
   const snap = await leadsSnapshot(ctx.sandboxRoot);
   const me = ctx.agentId;
   const ranked = rankedLeads(snap);
@@ -1517,7 +1681,10 @@ export async function leadsDigest(ctx: P.SwarmContext, o: { mark?: boolean } = {
   const cov = questionCoverage(snap);
   const before = await readTold(ctx.sandboxRoot, me);
   const notices = noticesFor(me, before, snap);
-  const lines: string[] = [];
+  // The register's part comes first: a person's question outranks the rest.
+  const qTold = await Q.readTold(ctx.sandboxRoot, me);
+  const qd = snap.questions ? Q.questionsDigest(me, { questions: snap.questions, leads: snap.state, ledger: snap.ledger }, qTold) : null;
+  const lines: string[] = [...(qd?.lines ?? [])];
   const counts = {
     open: open.length,
     active: ranked.filter((x) => x.status === "active").length,
@@ -1528,14 +1695,18 @@ export async function leadsDigest(ctx: P.SwarmContext, o: { mark?: boolean } = {
     uncovered: cov.uncovered.length,
   };
   lines.push(`Leads: ${counts.open} open, ${counts.active} active, ${counts.blocked} blocked, ${counts.closed} closed (leads for the whole register).`);
+  for (const n of qd?.notices ?? []) lines.push(`NOTICE ${n.text}`);
   for (const n of notices) lines.push(`NOTICE ${n.text}`);
   lines.push(`Open, unheld, by priority: ${open.length ? open.map(lineOf).join("; ") : "none"}.`);
   lines.push(`Yours: ${mine.length ? mine.map((x) => `${x.id} ${x.status}${x.status === "blocked" ? ` on ${x.needs.filter((n) => !n.met).map((n) => n.need).join(", ")}` : ""}${x.stale ? " (MARKED STALE: act on it)" : ""}`).join("; ") : "none"}.`);
   lines.push(`Blocked on you: ${blockedOnMe.length ? blockedOnMe.map((x) => `${x.id} (${x.holder ?? "unheld"}) needs ${x.needs.filter((n) => !n.met).map((n) => n.need).join(", ")}`).join("; ") : "none"}.`);
   lines.push(`Awaiting your interpretation: ${awaiting.length ? awaiting.map((a) => `${a.job}${a.lead ? ` (${a.lead})` : ""}${a.unread_bytes ? `: ${a.unread_bytes} of ${a.total_bytes} stdout bytes unread, job_status offset ${a.next_offset}` : ""}`).join("; ") : "none"}.`);
   lines.push(`Questions nobody holds a lead for, with no answer yet: ${cov.uncovered.length ? cov.uncovered.map((q) => `question:${q}${cov.open_leads_for[q] ? ` (open: ${cov.open_leads_for[q].join(", ")})` : ""}`).join(", ") : "none"}.`);
-  if (o.mark) await writeTold(ctx.sandboxRoot, me, toldNow(me, snap, Object.keys(before.held)));
-  return { text: lines.join("\n"), notices, counts };
+  if (o.mark) {
+    await writeTold(ctx.sandboxRoot, me, toldNow(me, snap, Object.keys(before.held)));
+    if (snap.questions) await Q.markTold(ctx.sandboxRoot, me, snap.questions);
+  }
+  return { text: lines.join("\n"), notices: [...notices, ...(qd?.notices ?? []).map((n) => ({ kind: `question_${n.kind}` as LeadNotice["kind"], lead: n.q, text: n.text, wakes: n.wakes }))], counts: { ...counts, ...(qd ? { questions: qd.counts } : {}) } };
 }
 
 async function writeTold(sandboxRoot: string, agent: string, told: Told): Promise<void> {
@@ -1549,7 +1720,7 @@ async function writeTold(sandboxRoot: string, agent: string, told: Told): Promis
 /** Cheap signature of the files the register's derived views read, so a waiting poll recomputes only when one changed. */
 async function filesSignature(sandboxRoot: string): Promise<string> {
   const parts: string[] = [];
-  for (const rel of [LEADS_LOG, P.LEDGER_ENTRIES, P.LEDGER_DISPUTES, "store/journal.jsonl"]) {
+  for (const rel of [LEADS_LOG, P.LEDGER_ENTRIES, P.LEDGER_DISPUTES, "store/journal.jsonl", "questions/questions.jsonl"]) {
     const st = await stat(join(sandboxRoot, rel)).catch(() => null);
     parts.push(st ? `${st.size}:${st.mtimeMs}` : "-");
   }
@@ -1576,9 +1747,16 @@ export function leadsWaitCheck(ctx: P.SwarmContext): () => Promise<string | null
     const snap = await leadsSnapshot(ctx.sandboxRoot);
     const before = await readTold(ctx.sandboxRoot, ctx.agentId);
     const waking = noticesFor(ctx.agentId, before, snap).filter((n) => n.wakes);
-    if (waking.length) return waking.map((n) => n.text).join(" ");
+    // The question register's news for this seat: an offer, a clarification answered, its question amended or withdrawn.
+    const Q = await import("./questions.ts");
+    const qWaking = snap.questions ? Q.questionNotices(ctx.agentId, await Q.readTold(ctx.sandboxRoot, ctx.agentId), { questions: snap.questions, leads: snap.state, ledger: snap.ledger }).filter((n) => n.wakes) : [];
+    if (waking.length || qWaking.length) return [...qWaking, ...waking].map((n) => n.text).join(" ");
     if (!due) return null;
     lastElection = now;
+    // A person's question nobody has taken, past its suggested seat's minute, goes to the most suited idle seat.
+    await Q.deliverPending(ctx.sandboxRoot).catch(() => undefined);
+    const offered = await Q.electQuestionOffer(ctx, now, snap.questions ? { questions: snap.questions, leads: snap.state, ledger: snap.ledger } : undefined).catch(() => null);
+    if (offered) return `${offered.id} is offered to you (you are idle and the most suited): "${offered.text}" (${Q.originWords(offered.origin)}). Take it with lead_open(answers: ["${offered.id}"], take: true, proposition, negation), or say on the board why not; nobody owns it.`;
     const woke = await electWake(ctx, snap);
     return woke ? `${woke} is open, ready and nobody holds it, and you have been idle: lead_claim ${woke} if you can take it (leads ${woke} for the whole of it).` : null;
   };
@@ -1634,7 +1812,24 @@ export async function leadsView(ctx: P.SwarmContext, o: { view?: string; from?: 
   }
   if (view === "questions") {
     const cov = questionCoverage(snap);
-    return { ok: true, view, questions: snap.goal.questions, existence: snap.goal.existence, answered: [...snap.answered].sort(), unanswered: cov.unanswered, uncovered: cov.uncovered, open_leads_for: cov.open_leads_for, source: snap.goal.source };
+    // The register beside the goal's list: every question with its origin (a person's first), scope and state.
+    const Q = await import("./questions.ts");
+    const register = snap.questions
+      ? Q.questionViews({ questions: snap.questions, leads: snap.state, ledger: snap.ledger }).map((v) => ({
+          id: v.id,
+          section: `question:${v.section}`,
+          origin: v.origin.kind,
+          author: v.author,
+          text: v.text,
+          rev: v.rev,
+          scope: v.scope,
+          work: v.work,
+          answered: v.answer ? `E-${v.answer.seq}${v.answer.stale ? " (stale)" : ""}` : null,
+          leads: v.leads.map((l) => l.id),
+          ...(v.withdrawn ? { withdrawn: true } : {}),
+        }))
+      : [];
+    return { ok: true, view, questions: caseQuestions(snap), existence: snap.goal.existence, answered: [...snap.answered].sort(), unanswered: cov.unanswered, uncovered: cov.uncovered, open_leads_for: cov.open_leads_for, source: snap.goal.source, register };
   }
   const ranked = rankedLeads(snap);
   const pick = ranked.filter((x) =>
@@ -1720,6 +1915,8 @@ export function renderLeadsMd(snap: LeadsSnapshot): string {
       if (x.holder) lines.push(`- Held by ${x.holder}, generation ${x.generation}, since ${x.held_since}${x.stale ? `; MARKED STALE at ${x.stale.at}` : ""}`);
       if (x.needs.length) lines.push(`- Needs: ${x.needs.map((n) => `${n.need} (${n.met ? "met" : `unmet: ${n.why}`})`).join("; ")}`);
       if (x.answers.length) lines.push(`- Answers: ${x.answers.map((a) => `question:${a}`).join(", ")}`);
+      if (x.proposition) lines.push(`- Tests: ${x.proposition}; against: ${x.negation ?? ""}`);
+      if (x.product) lines.push(`- Directive's product: ${x.product}; accepted when: ${x.acceptance ?? ""}`);
       if (x.priority) lines.push(`- Waiting on it: ${x.waiting_on_it.leads.length} lead(s)${x.waiting_on_it.leads.length ? ` (${x.waiting_on_it.leads.join(", ")})` : ""}, ${x.waiting_on_it.questions.length} unanswered question(s)${x.waiting_on_it.questions.length ? ` (${x.waiting_on_it.questions.map((q) => `question:${q}`).join(", ")})` : ""}`);
       if (x.jobs.length) lines.push(`- Jobs: ${x.jobs.join(", ")}`);
       if (x.disposition) lines.push(`- Closed ${x.disposition} by ${x.closed_by} at ${x.closed_at}: ${x.ref}${x.close_why ? ` (${x.close_why})` : ""}`);

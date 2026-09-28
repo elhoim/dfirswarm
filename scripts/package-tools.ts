@@ -42,7 +42,7 @@ import { createHash } from "node:crypto";
 import { closeSync, existsSync, lstatSync, openSync, readFileSync, readSync, readdirSync, writeFileSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { attestationHash, disputeHash, ledgerHash, readLedger, type LedgerAttestation, type LedgerDispute, type LedgerEntry } from "../extensions/protocol.ts";
+import { attestationHash, disputeHash, ledgerHash, readLedger, sensitiveTokens, type LedgerAttestation, type LedgerDispute, type LedgerEntry, type SensitiveToken } from "../extensions/protocol.ts";
 import { leadEventHash, type LeadEvent } from "../extensions/leads.ts";
 import { REVIEW_ACTIONS } from "./review.ts";
 import { packageLayout, verifyReleases } from "./release-record.ts";
@@ -60,42 +60,8 @@ function walk(dir: string): string[] {
   return out;
 }
 
-/** The fields of an entry, of any version, that can hold what it says. */
-const ENTRY_TEXT_FIELDS = ["value", "evidence", "source", "indicates", "confidence_why", "reasoning", "would_change", "alternatives_open", "alternatives_none_why", "because"] as const;
-
-/** One of a sensitive entry's words, with the entry it came from. */
-export type SensitiveToken = { token: string; seq: number };
-
-/**
- * What a sensitive entry says, as the words redaction looks for: each text
- * field whole (six characters or more, or four with a digit in it), and
- * each identifier-like run inside one (eight characters or more with a
- * digit, an @, a dot, a slash, a backslash or a colon in it: a key, a
- * token, an address, a path, an account), longest first, each with the
- * entry it came from.
- */
-export function sensitiveTokens(entries: LedgerEntry[]): SensitiveToken[] {
-  const out = new Map<string, number>();
-  const add = (t: string, seq: number) => {
-    if (!out.has(t)) out.set(t, seq);
-  };
-  for (const e of entries) {
-    if (!e.sensitive) continue;
-    const raw = e as unknown as Record<string, unknown>;
-    const texts: string[] = [];
-    for (const f of ENTRY_TEXT_FIELDS) if (typeof raw[f] === "string") texts.push(raw[f] as string);
-    if (e.attribution?.subject) texts.push(e.attribution.subject);
-    for (const l of e.locators ?? []) texts.push(l.at);
-    for (const a of (raw.alternatives as Array<{ explanation?: string; why?: string }> | undefined) ?? []) texts.push(a.explanation ?? "", a.why ?? "");
-    for (const q of (raw.qualifies as Array<{ why?: string }> | undefined) ?? []) texts.push(q.why ?? "");
-    for (const w of texts) {
-      const whole = (w ?? "").trim();
-      if (whole.length >= 6 || (whole.length >= 4 && /\d/.test(whole))) add(whole, e.seq);
-      for (const t of whole.match(/[^\s"'`,;()<>[\]{}]{8,}/g) ?? []) if (/[\d@./\\:]/.test(t)) add(t.replace(/[.:]+$/, ""), e.seq);
-    }
-  }
-  return [...out].map(([token, seq]) => ({ token, seq })).sort((a, b) => b.token.length - a.token.length || a.token.localeCompare(b.token));
-}
+// What a sensitive entry says, as the words redaction looks for (protocol.ts, where the question register reads them too).
+export { sensitiveTokens, type SensitiveToken };
 
 /** Package paths a sensitive entry's refs name, as the package lays them out, with the entry. */
 function citedPaths(entries: LedgerEntry[]): Array<{ path: string; seq: number }> {

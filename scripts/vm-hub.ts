@@ -80,6 +80,7 @@ import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import * as P from "../extensions/protocol.ts";
 import * as L from "../extensions/leads.ts";
+import * as Q from "../extensions/questions.ts";
 import * as T from "../extensions/toolchain.ts";
 import { claimHolds, messageFor, resolvePeer } from "./nudge-broker.mjs";
 import { GATEWAY_STATE_REL } from "./model-gateway.ts";
@@ -201,6 +202,9 @@ const RATE_LIMITS: Record<string, { bucket: string; capacity: number; perSecond:
   leadClose: { bucket: "ledger", capacity: 200, perSecond: 5 },
   leadLink: { bucket: "ledger", capacity: 200, perSecond: 5 },
   leadInterpret: { bucket: "ledger", capacity: 200, perSecond: 5 },
+  // The question register grows as the leads do.
+  questionOpen: { bucket: "ledger", capacity: 200, perSecond: 5 },
+  questionAsk: { bucket: "ledger", capacity: 200, perSecond: 5 },
   attestEntry: { bucket: "ledger", capacity: 200, perSecond: 5 },
   disputeEntry: { bucket: "ledger", capacity: 200, perSecond: 5 },
   // Each done that would end the swarm runs the operator's finish line on
@@ -251,7 +255,7 @@ const QUEUE_MAX = 192;
 export const SETTLE_MS_DEFAULT = 6_000;
 
 /** Calls the hub records on the trace when they succeed; every refusal is recorded. */
-const AUDITED = new Set(["markDone", "runFinishLine", "forgeTool", "restoreFileVersion", "claimName", "threadOpen", "publishFile", "recordEntry", "attestEntry", "disputeEntry", "jobSubmit", "catalogRequest", "leadOpen", "leadClaim", "leadRelease", "leadClose", "leadLink", "leadInterpret"]);
+const AUDITED = new Set(["markDone", "runFinishLine", "forgeTool", "restoreFileVersion", "claimName", "threadOpen", "publishFile", "recordEntry", "attestEntry", "disputeEntry", "jobSubmit", "catalogRequest", "leadOpen", "leadClaim", "leadRelease", "leadClose", "leadLink", "leadInterpret", "questionOpen", "questionAsk"]);
 
 /**
  * The job service's settings, from the kickoff: the image workers boot, how
@@ -672,6 +676,9 @@ export function boardTable(hub: {
         args.outcome = verdict.outcome;
         if (verdict.outcome === "verification_unavailable" && !reason.startsWith(P.VERIFICATION_UNAVAILABLE_PREFIX)) reason = P.VERIFICATION_UNAVAILABLE_PREFIX + reason;
         args.reason = reason;
+        // Written only while the state that line was judged on holds, under
+        // the registers' lock: a question admitted since refuses it.
+        (args as { revision?: string }).revision = line.revision;
       }
       // An abandon one seat asks for while others work is a vote: the seat
       // stays, and markDone says so.
@@ -699,6 +706,13 @@ export function boardTable(hub: {
     },
     leadsDigest: (who, a) => L.leadsDigest(as(who), { mark: isObject(a[1]) && a[1].mark === true }),
     leadInterpret: (who, a) => L.recordInterpretations(S, who, Number(a[1]), Array.isArray(a[2]) ? (a[2] as L.InterpretInput[]) : []),
+    // The question register (extensions/questions.ts): the seat is the channel's.
+    questionOpen: (who, a) => Q.questionOpen(as(who), (isObject(a[1]) ? a[1] : {}) as Q.ActInput),
+    questionAsk: (who, a) => Q.questionAsk(as(who), a[1], a[2]),
+    questionsView: (who, a) => {
+      const o = isObject(a[1]) ? a[1] : {};
+      return Q.questionsView(as(who), { ...(typeof o.view === "string" ? { view: o.view } : {}), ...(typeof o.id === "string" ? { id: o.id } : {}), ...(typeof o.from === "string" ? { from: o.from } : {}), ...(typeof o.pageChars === "number" && Number.isFinite(o.pageChars) ? { pageChars: o.pageChars } : {}) });
+    },
     postMessage: (who, a) => {
       // An agent's post is its own; `via` is the hub's to set.
       const { via: _via, ...args } = (a[1] as Record<string, unknown>) ?? {};
@@ -2524,6 +2538,10 @@ function summarize(fn: string, result: unknown): Record<string, unknown> {
     }
     case "leadInterpret":
       return { ok: result.ok, interprets: result.interprets };
+    case "questionOpen":
+    case "questionAsk":
+      // The question's id, revision and scope, and the register event's hash, beside the chained event.
+      return { ok: result.ok, q: result.q, rev: result.rev, ...(result.scope ? { scope: result.scope } : {}), ...(result.clarify ? { clarify: result.clarify } : {}), ...(typeof result.hash === "string" ? { hash: result.hash } : {}), ...(result.duplicate ? { duplicate: true } : {}) };
     default:
       return {};
   }

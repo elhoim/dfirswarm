@@ -26,6 +26,7 @@ import { readFile } from "node:fs/promises";
 import { connect, type Socket } from "node:net";
 import * as L from "./leads.ts";
 import * as P from "./protocol.ts";
+import * as Q from "./questions.ts";
 import * as T from "./toolchain.ts";
 
 /** Where the hub listens, as the VM sees it; unset on the host. */
@@ -60,7 +61,7 @@ function refused(err: unknown): boolean {
 type Pending = { fn: string; socket: Socket; answered: () => void; resolve: (value: unknown) => void; reject: (err: Error) => void };
 
 /** Calls that change the board, sent once more with the same request id when a link drops. */
-const RETRIED = new Set(["postMessage", "systemPost", "recordEntry", "attestEntry", "disputeEntry", "threadOpen", "claimName", "markDone", "publishFile", "forgeTool", "recordFileVersion", "jobSubmit", "catalogRequest", "jobStatus", "leadOpen", "leadClaim", "leadRelease", "leadClose", "leadLink", "leadInterpret"]);
+const RETRIED = new Set(["postMessage", "systemPost", "recordEntry", "attestEntry", "disputeEntry", "threadOpen", "claimName", "markDone", "publishFile", "forgeTool", "recordFileVersion", "jobSubmit", "catalogRequest", "jobStatus", "leadOpen", "leadClaim", "leadRelease", "leadClose", "leadLink", "leadInterpret", "questionOpen", "questionAsk"]);
 
 /** Timings a test shortens; the defaults are the run's. */
 export type HubClientTimings = { partTimeoutMs?: number; writeStallMs?: number };
@@ -372,6 +373,9 @@ export const REMOTE_FUNCTIONS = [
   "nameOf",
   "postMessage",
   "publishFile",
+  "questionAsk",
+  "questionOpen",
+  "questionsView",
   "readBudget",
   "readBudgetStatus",
   "readInbox",
@@ -402,6 +406,14 @@ export const leadLink = remote("leadLink", L.linkLead);
 export const leadsView = remote("leadsView", L.leadsView);
 export const leadsDigest = remote("leadsDigest", L.leadsDigest);
 export const leadInterpret = remote("leadInterpret", (ctx: P.SwarmContext, entry: number, items: L.InterpretInput[]) => L.recordInterpretations(ctx.sandboxRoot, ctx.agentId, entry, items));
+/**
+ * The question register (questions.ts): an agent opens a question, reads the
+ * register, and asks what is unclear. Who asks is the channel's seat; the
+ * rest of the register's acts are the operator's, on the host.
+ */
+export const questionOpen = remote("questionOpen", Q.questionOpen);
+export const questionAsk = remote("questionAsk", Q.questionAsk);
+export const questionsView = remote("questionsView", Q.questionsView);
 /** What each peer is doing and found (list_team), from the host's board, store and ledger. */
 export const teamView = remote("teamView", P.teamView);
 

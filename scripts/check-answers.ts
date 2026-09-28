@@ -82,9 +82,9 @@ import { committedLogHashes, resolveRef } from "./evidence-store.ts";
 
 type Entry = { seq: number; kind: string; refs?: string[]; supersedes?: number; answers?: string[]; completion?: string; reason?: string; status?: string };
 
-/** A section id as the goal numbers it: "3", "Q3" and "q3" are section 3. */
+/** A section id as the goal numbers it: "3", "Q3", "q3" and the question register's "Q-3" are section 3. */
 export function sectionId(id: string): string {
-  return id.trim().replace(/^q(?=\d)/i, "");
+  return id.trim().replace(/^q-?(?=\d)/i, "");
 }
 
 /** The seqs a text cites: #12, E-12, and every seq of a range #12–#15 (at most 50 a range). */
