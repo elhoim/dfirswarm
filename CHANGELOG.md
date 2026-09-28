@@ -21,6 +21,10 @@ All notable changes to this project. The format follows
   record and view, its post).
 - **`independent: true`** on `job_run` records an intended reproduction; the
   similar jobs are still named.
+- **Hints never hold a job up.** `similar` is sought once the job is
+  registered and queued; `same_as` is looked up in an index built in the
+  background, off the store's commit path. The console's Jobs tab shows both
+  for a job, every entry.
 - **The shadow merge is retired.** The whole-spec key matched none of 393,
   127 and 190 keyed jobs on the last CTF round; nothing writes
   `job_would_merge` now, and old lines are ignored. Typed recipes are still
@@ -32,9 +36,11 @@ All notable changes to this project. The format follows
   interpretations still valid, reversals by new evidence or discoverable,
   tokens per question apportioned by lead, duplicates and reproductions, and
   the network's requests, grants and captures; each a count of named
-  records, defined in `docs/usage.md`. `--compare <run-A> <run-B>` sets two
-  runs of one goal side by side and flags a negative the other established
-  and a shared negative on partial coverage. ADR 0017.
+  records by id and code (no free text a record carries), over the
+  questions in scope at the run's end, with a missing register said as "not
+  recorded", defined in `docs/usage.md`. `--compare <run-A> <run-B>` sets two
+  runs of one goal side by side and flags a negative the other asserts and a
+  shared negative without complete, current coverage. ADR 0017.
 
 ### Added: the case contract: what may come in, what was asked of whom, and where the evidence ends
 

@@ -648,46 +648,62 @@ node --experimental-strip-types scripts/metrics.ts --compare <run-dir-A> <run-di
 How a run worked, read from its own registers, for cases with no ground truth
 (the calibration cases above have one). Nothing is judged and nothing is
 written: every figure is a count of named records, the JSON lists them (lead
-ids, `E-n`, `Q-n`, `R-n`, job ids, seats, times) so each can be checked
-against the register it came from, and no answer's value, finding's text or
-command is printed. A register the run does not have is said to be absent,
-never read as zero: a run from before offers has no offer events, one from
-before the reuse hints no `job_similar` lines, one from before the finish
-register no readiness. Exit 0, 1 for an unknown id, 2 on a usage error.
+ids, `E-n`, `Q-n`, `R-n`, job ids, seats, times, reason codes) so each can be
+checked against the register it came from, and no free text a record carries
+is copied into the table or the JSON: no answer's value, finding or command,
+no dispute's why, no done's or stop's reason (the outcome is its class, who
+and when). A register the run does not have is said to be absent, never read
+as zero: each metric whose register is missing says "not recorded (no
+<file>)", and its JSON object carries `recorded: false`; a run from before
+offers has no offer events, one from before the reuse hints no `job_similar`
+lines, one from before the finish register no readiness. Exit 0, 1 for an
+unknown id, 2 on a usage error.
 
-"The questions in scope" are, at the end of the run, the register's questions
-in scope and not withdrawn (a proposed or excluded question is not), else the
-goal's, else the sections the ledger answers. A question is material unless
-the register says background. "Standing" is at the end of the run: not
-superseded by a later entry.
+"The questions in scope" are, at the end of the run, the register's live
+questions: in scope, not withdrawn, and not a follow-up admitted after the
+run's done (`after_done`: a resume's work, not this run's; `Q.liveInScope`);
+else the goal's, else the sections the ledger answers. A proposed or excluded
+question is not in scope. The answer metrics count only questions in scope;
+an answer still standing for a question since withdrawn, excluded or deferred
+is listed apart as history (`negatives.out_of_scope`). A question is material
+unless the register says background. "Standing" is at the end of the run: not
+superseded by a later entry. A grant's status is read at the run's end, so a
+finished run measures the same whenever it is read.
 
 | Metric | What is counted, exactly |
 | --- | --- |
 | Quick negatives | Lead `close` events with disposition `negative` that the hub flagged `quick_negative` when it wrote them: the lead was held two minutes or less from its holder's take to the close, had at most one job, and that job's declared scope held at most one object (a job over everything is never quick). Each close counts, so a lead reopened and closed negative again counts twice; the flag is a review cue, not a defect. Out of every negative close. |
-| Negative answers, reviewed | Standing answers of a question whose `result` is `bounded_negative` or `not_determinable` (the negative bar's two). Reviewed: an `attest` carrying its review (detection, reproduction, another route), by a seat that wrote neither the answer nor a coverage record it cites, on the answer or on a standing coverage record it cites whose results still stand (protocol.ts `negativeReview`, the gate's own test). |
+| Negative answers, reviewed | Standing answers of a question in scope that the finish gate holds as negatives (protocol.ts `negativeByResult`, the gate's own test): `bounded_negative`, `not_determinable`, and a `premise_not_supported` resting on a search alone (no standing finding it cites for its question shows the premise false). Reviewed: an `attest` carrying its review (detection, reproduction, another route), by a seat that wrote neither the answer nor a coverage record it cites, on the answer or on a standing coverage record it cites whose results still stand (protocol.ts `negativeReview`, the gate's own test). |
 | Unreviewed negatives | The negative answers above that are not reviewed, split into material (these hold the finish) and background. Measured at the end, not at any moment during the run. |
-| Coverage records | Standing `coverage` records by the hub's computed field: `complete`, `partial`, or not computed (a record from before the field). Complete means the jobs behind it were given, by digest, every object it names; it never means the objects were the relevant ones. Reviewed: an `attest` with its review on the record, by a seat that did not write it, while its results stand. Stale: a result it names is missing, superseded or disputed. |
-| Negatives on partial coverage | Negative answers every standing coverage record of which is partial (or not computed), and, apart, those that cite no coverage record at all. |
+| Coverage records | Standing `coverage` records, each counted once: stale when a result it names no longer stands (by code: `missing`, `rebound`, `superseded` with the entry that replaced it, `disputed` with the seats that dispute it, never their words), else by the hub's computed field: `complete`, `partial`, or not computed (a record from before the field). A stale record is never complete, whatever its field says. Complete means the jobs behind it were given, by digest, every object it names; it never means the objects were the relevant ones. Reviewed: an `attest` with its review on the record, by a seat that did not write it, while its results stand. |
+| Negatives on partial coverage | Negative answers none of whose standing coverage records is complete and current (each is shown as partial, not computed or stale), and, apart, those that cite no coverage record at all. |
 | Offers | Lead offers (`offer` events) by what became of each while it stood (from the offer to the lead's next claim, release, close or reopen), one outcome each, the first that applies in this order: accepted (a `claim` or `confirm` that names the offer), declined (`offer_decline`), taken by another seat (that next claim was another seat's, lapsed or not), lapsed (`offer_lapse`), else no outcome. By reason too (wake, hand-off, parked, reopen, confirm). Question offers: made, accepted (`offer_accept`), declined, and not taken up. A run from before offers has none; its `wake` events are counted apart: taken by the woken seat (its first claim of the lead in that open spell), by another seat, or not taken. A woken seat's claim is not the same measure as an accepted offer: a wake reserved nothing. |
 | `done` calls | Every `done` line on the trace, and every `done_deferred` line (a seat's done that was not its finish: another seat coordinates it). Accepted: a done line with no refusal (and, of those, the one that wrote the sentinel); refused by the seat's checks, by why (the finish line not met, posts that landed after the report, the finish line unsettled, an abandon vote that did not end the run); refused by the hub (a `markDone` the hub refused: the seat saw a thrown error and wrote no done line; a refusal the hub counted and wrote once is that many calls); not the seat's finish. A done after the sentinel (a seat leaving) is an accepted call that wrote nothing. |
 | Tail | From when the run was ready to its end (the sentinel's time, or the operator's stop). Ready is, where the finish register records readiness, the last turn to ready before the end that was not undone before it; otherwise the moment every question in scope had its first answer. Two more tails are given apart, because they are not the same: from every question's first answer (any result, supported or not), and from every question's final answer (the one standing at the end). None while a question in scope has no answer; the unanswered are named. |
 | Acquisition | Operator requests of kind `acquisition`, by the stage each ended at (requested, authorised, collecting, received, validated, declined, unavailable), and those the case policy declined at once. A gap is a request that did not end validated (declined, unavailable, or still waiting), with the questions it named. Evidence added: the store journal's `evidence_added` lines, and how many answered a request. |
 | Interpretations | The lead register's `interpret` events, each bound to the entry it names: valid while that entry stands, otherwise on a superseded or on a disputed entry, or on none the ledger holds (the job needs interpreting again). Lead jobs never interpreted at all, and those with no valid interpretation left, are named. |
 | Reversals | A standing result that changed: an answer superseded by one of the same question with another `result` (a correction that keeps the result is counted apart, as a correction), and a lead closed negative that was reopened. The cause is new evidence when an `evidence_added` line came between the two (or the reopen's cause is `evidence_added`), and discoverable in the original evidence otherwise. A heuristic: evidence that came between is not proof it caused the change. |
-| Cost per question | Each call's tokens (input, output and cache, as `budget.json` counts them) and dollars, from the model gateway's log where the run has one, else the seats' Pi sessions, given to the leads its seat held when the call was made, in equal parts, and each lead's part to the questions it answers, in equal parts. A lead is held from its take to its release, close, reopen, hand-off or another seat's claim. Calls made while the seat held no lead, and parts of leads that answer no question, are counted apart; a call whose usage the provider did not report counts nothing. An apportionment, not a meter: a seat thinking about one lead while holding two is split evenly. |
+| Cost per question | Each call's tokens (input, output and cache, as `budget.json` counts them) and dollars, from the model gateway's log where the run has one, else the seats' Pi sessions, given to the leads its seat held when the call was made, in equal parts, and each lead's part to the questions it answers, in equal parts. A lead is held from its take to its release, close, reopen, hand-off or another seat's claim. Calls made while the seat held no lead, and parts of leads that answer no question, are counted apart; a call whose usage the provider did not report counts nothing. An apportionment, not a meter: a seat thinking about one lead while holding two is split evenly. The parts are kept exact until the end, then rounded to whole tokens and millionths of a dollar by the largest remainder, so they add up to the run's totals. |
 | Duplicates | From the store journal: jobs whose `job_similar` line names another seat's similar job (not counting declared reproductions), and of those the exact repeats (the same command or the same tool and arguments over the same objects); `independent: true` jobs, and those of them that had similar work to compare with; `job_same_as` lines (files, bytes, and jobs every non-empty output of which is an earlier job's); typed recipe requests answered with an earlier job (`job_deduplicated`); and, from older runs, the retired shadow merge's `job_would_merge` lines. |
 | Network | Requests and how the rules decided them (granted, denied, by each denial's code), operator items (and those still open), grants by status (granted, active, exhausted, expired, revoked), fetches, captures delivered (and complete), uses the fetch service refused, and contamination records. |
 
 `--compare` reads two runs of the same goal after both ended, question by
-question by section: each run's standing result, whether a negative was
-reviewed, the coverage it cites and any operator acceptance. The verdict is
-`agree` (the same result), `class_differs` (the same kind: both assert, or
-both negative, in another class), `disagree`, or answered in one run only. A
-negative one run established in the other is flagged, and so is a negative
-both runs reached with no complete coverage: two runs of one harness can
-share a blind spot, and their agreement is not confirmation. When the two
-runs' questions differ in number or text, it says so and still compares by
-section.
+question by section, each run over its own scope: its standing result and
+the result's kind (it asserts: established or partial; a negative, as the
+gate holds one; a premise a finding shows false; out of scope; or unknown, an
+answer recorded before results, which is not guessed at), whether a negative
+was reviewed, the coverage it cites (complete, partial, not computed, or
+stale) and the operator's acceptance while it stands (`Q.acceptanceStands`;
+one the question's amendment, new evidence or a replaced answer lifted is
+shown as lapsed, and flagged). A question outside a run's scope is compared
+as unanswered there, its old answer shown as history. The verdict is `agree`
+(the same result), `class_differs` (the same kind in another class),
+`disagree`, `unknown` (a side has no result class), or answered in one run
+only. A negative the other run asserts is flagged, and so is a negative both
+runs reached with no complete coverage that still stands: two runs of one
+harness can share a blind spot, and their agreement is not confirmation.
+When the two runs' questions in scope differ in number or text, it says so
+and still compares by section.
 
 ### `npm` scripts
 
