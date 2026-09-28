@@ -748,7 +748,7 @@ export function boardTable(hub: {
     leadsDigest: (who, a) => L.leadsDigest(as(who), { mark: isObject(a[1]) && a[1].mark === true }),
     leadInterpret: (who, a) => L.recordInterpretations(S, who, Number(a[1]), Array.isArray(a[2]) ? (a[2] as L.InterpretInput[]) : []),
     leadReopen: (who, a) => L.agentReopenLead(as(who), a[1], (isObject(a[2]) ? a[2] : {}) as { expected_revision?: unknown; why?: string; take?: boolean }),
-    routeReview: (who, a) => L.routeReview(as(who), a[1], (isObject(a[2]) ? a[2] : {}) as { material?: unknown; why?: string }),
+    routeReview: (who, a) => L.routeReview(as(who), a[1], (isObject(a[2]) ? a[2] : {}) as { material?: unknown; why?: string; second_review_why?: string }),
     leadHandoff: (who, a) => L.handoffLead(as(who), a[1], (isObject(a[2]) ? a[2] : {}) as { why?: string; to?: string; generation?: number }),
     leadConfirm: (who, a) => L.confirmLead(as(who), a[1], (isObject(a[2]) ? a[2] : {}) as { expected_revision?: unknown; ref?: string; why?: string }),
     offerAnswer: (who, a) => L.answerOffer(as(who), a[1], (isObject(a[2]) ? a[2] : {}) as { action?: string; why?: string }),

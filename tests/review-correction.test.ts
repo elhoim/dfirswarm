@@ -226,7 +226,11 @@ test("B3/A4: a limiting route stops holding the finish line only once its questi
   refused(await L.routeReview(c.a2, lid, { why: "x" }), /material is true or false/);
   okq(await L.routeReview(c.a2, lid, { material: true, why: "carving could still find a third file" }));
   assert.match((await finishGate(c.S, run3 as never)).limited.find((l) => l.startsWith(`${lid} `)) ?? "", /a2 holds its limitation still material/);
-  okq(await L.routeReview(c.a3, lid, { material: false, why: `E-${a.seq} settles question 3 from the file system; carving adds nothing it asks` }));
+  // Reviewed for these answers already (the c10 pilot's stampede): another seat's review is answered quietly, nothing recorded;
+  // a second, independent review says why it adds something.
+  const quiet = okq(await L.routeReview(c.a3, lid, { material: false, why: `E-${a.seq} settles question 3` }));
+  assert.deepEqual(quiet.deferred?.by, ["a2"]);
+  okq(await L.routeReview(c.a3, lid, { material: false, why: `E-${a.seq} settles question 3 from the file system; carving adds nothing it asks`, second_review_why: `a2 did not weigh E-${a.seq}, which answers question 3 without the carve` }));
   assert.equal((await finishGate(c.S, run3 as never)).limited.filter((l) => l.startsWith(`${lid} `)).length, 0, "no longer limiting");
   // Reopened and closed again: the review was of the earlier close.
   const view = (await L.leadsSnapshot(c.S)).state.leads.get(lid)!;

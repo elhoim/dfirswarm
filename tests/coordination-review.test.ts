@@ -190,8 +190,12 @@ test("a lead is parked only on positive evidence that its holder works elsewhere
   });
 });
 
-test("a closure offered to its closer to confirm reopens at once when the closer can no longer take it: compacting or dead after the offer", async () => {
-  for (const how of ["compacting", "dead"] as const) {
+// Astra's WP4 finding 11 made a compacting closer reopen at once; the c10
+// pilot (L-17, reopened three times) made compaction a temporary absence the
+// confirmation waits for, bounded (tests/review-offers.test.ts): here, done
+// and dead after the offer, and compacting past the bound.
+test("a closure offered to its closer to confirm reopens at once when the closer can no longer take it: dead or done after the offer, or compacting past the bound", async () => {
+  for (const how of ["compacting", "dead", "done"] as const) {
     const { S, a0, a1 } = await run();
     await traceRow(S, "a1", "bash");
     const l = ok(await L.openLead(a1, { title: "Which account ran it", why: "q1", take: true })).lead;
@@ -201,16 +205,36 @@ test("a closure offered to its closer to confirm reopens at once when the closer
     assert.deepEqual(await L.reopenOnLedger(S), []);
     assert.ok((await L.leadsSnapshot(S)).state.leads.get(l.id)!.confirm, "offered to a1 to confirm");
     // After the offer, the closer can no longer take it.
-    if (how === "compacting") await traceRow(S, "a1", "compact_start");
+    if (how === "compacting") await traceRow(S, "a1", "compact_start", new Date(Date.now() - L.confirmCompactionHoldMs() - 1_000));
     else {
       await mkdir(join(S, "done", "agents"), { recursive: true });
-      await writeFile(join(S, "done", "agents", "a1.dead"), "x");
+      await writeFile(join(S, "done", "agents", `a1.${how}`), "x");
     }
     assert.deepEqual(await L.reopenOnLedger(S), [l.id], `${how}: reopened at once, not after the offer's window`);
     const lv = (await L.leadsSnapshot(S)).state.leads.get(l.id)!;
     assert.equal(lv.closed, null);
     assert.ok(lv.offers.find((o) => o.reason === "confirm")?.lapsed_at, "the confirmation offer is ended on the record");
     const text = await readFile(join(S, L.LEADS_LOG), "utf8");
-    assert.match(text, new RegExp(`"ev":"reopen".*a1 ${how === "compacting" ? "is compacting its context" : "is marked dead"}`));
+    assert.match(text, new RegExp(`"ev":"reopen".*a1 ${how === "compacting" ? "is compacting its context for more than" : how === "dead" ? "is marked dead" : "is done"}`));
   }
+});
+
+test("a person's question admitted while no seat is idle is offered once a seat becomes idle, while it is still uncovered (the c10 pilot's Q-7)", async () => {
+  const { S, a1, a2 } = await run();
+  // Nobody idle when it is admitted: delivered, offered to nobody.
+  const q = await ask(S, "Where was the meeting moved to?");
+  let cur = (await Q.questionsSnapshot(S)).state.questions.get(q)!;
+  assert.ok(cur.delivered.has(cur.rev), "delivered");
+  assert.equal(cur.offers.length, 0, "no idle seat: no offer at delivery");
+  // a2 becomes idle (waiting for two minutes): its wait offers the question to it.
+  await idleFor(S, "a2", 2);
+  const text = await L.leadsWaitCheck(a2)();
+  assert.match(text ?? "", new RegExp(`${q} is offered to you`));
+  cur = (await Q.questionsSnapshot(S)).state.questions.get(q)!;
+  assert.deepEqual(cur.offers.map((o) => [o.to, Boolean(o.seen_at)]), [["a2", true]]);
+  // Covered meanwhile by a lead under it, another idle seat is offered nothing.
+  ok(await L.openLead(a2, { title: "Read the calendar", why: q, answers: [q], take: true, ...FRAME }));
+  await idleFor(S, "a1", 3);
+  assert.equal(await L.leadsWaitCheck(a1)(), null);
+  assert.equal((await Q.questionsSnapshot(S)).state.questions.get(q)!.offers.length, 1);
 });

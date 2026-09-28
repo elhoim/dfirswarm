@@ -17,6 +17,17 @@ All notable changes to this project. The format follows
   revision of each. `record` now turns such a citation into the symbolic
   `question:N` (bound to the answer's conclusion, not its seq) and says so;
   a reworded correction keeps the summary standing.
+- **Reviews are offered to one seat.** The pilot had six seats review one
+  deferred lead's route within minutes. A limiting route's review (once its
+  questions are answered, bound to those answers) and a material negative's
+  review are offered to one eligible seat, the relevant first; another
+  seat's review of an item reviewed or offered to another returns quietly
+  with who has it and records nothing, and a second review says why.
+- **A confirmation waits for a compacting closer.** The pilot's L-17 was
+  reopened three times because its closer began compacting as each
+  confirm-or-reopen offer arrived. Compaction is now a temporary absence:
+  the offer waits up to five minutes past the compaction's start; done or
+  dead still reopens at once.
 - **A call made holding no lead is given to what it named.** The pilot's
   metrics put 136.3M of 240.0M tokens under "holding no lead". Reviews,
   records, route reviews and lead acts made so named a lead, a question or

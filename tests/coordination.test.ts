@@ -478,7 +478,7 @@ test("what coordination adds is shown whole: leads.md and the operator's list na
   assert.match(text, new RegExp(`^  holds it: ${l.id} "Carve the pagefile" is open`, "m"));
 });
 
-test("compaction: a compacting seat is offered nothing: a reopen after the operator's note is not held for it, a closure of its superseded reopens at once, and a question suggested to it goes to an idle seat", async () => {
+test("compaction: a compacting seat is offered nothing: a reopen after the operator's note is not held for it, a question suggested to it goes to an idle seat; a closure of its superseded waits for it, bounded (the c10 pilot)", async () => {
   const { S, a0, a1, a2, ctx } = await run();
   const operator: Q.Actor = { kind: "human", role: "operator", person: "ops@lab", enrolled: false, os_user: "ops", host: "lab", via: "cli", identity: "claimed" };
   await traceRow(S, "a1", "bash");
@@ -494,7 +494,10 @@ test("compaction: a compacting seat is offered nothing: a reopen after the opera
   assert.deepEqual([noted.reopened, noted.lead.offered], [true, undefined], "not held for a compacting previous holder");
   ok(await L.claimLead(a2, asked.id));
   ok(await P.recordEntry(a0, { kind: "finding", ...F, value: "Account bob ran it, from the console", source: "prefetch", evidence: "row 1 and the session", refs: ["unresolved:fixture"], supersedes: f.entry.seq, because: "the session says where" }) as never);
-  assert.deepEqual(await L.reopenOnLedger(S), [closed.id], "nobody to confirm it: reopened at once, never re-pointed");
+  // Compacting is away for a while, not gone (the c10 pilot's L-17): the confirmation is offered and waits for it, never re-pointed.
+  assert.deepEqual(await L.reopenOnLedger(S), [], "held for its compacting closer");
+  const held = (await L.leadsSnapshot(S)).state.leads.get(closed.id)!;
+  assert.deepEqual([Boolean(held.closed), held.confirm ? held.offers.find((x) => x.seq === held.confirm!.offer)?.to : null], [true, "a1"]);
   await idleFor(S, "a3", 7);
   const q = ok(await Q.act(S, operator, "open", { text: "Was the archive mailed?", why: "the client says so", suggested_to: "a1" })).q!;
   await Q.deliverPending(S);

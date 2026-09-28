@@ -5863,7 +5863,7 @@ export const TOOL_RESERVED_NAMES = new Set([
   "question_open", "questions", "question_ask",
   // The coordination of the work and of the finish (docs/adr/0015): a lead
   // reopened by an agent, a limiting route reviewed.
-  "lead_reopen", "route_review", "lead_handoff", "lead_confirm", "offer", "finish", "done_deferred",
+  "lead_reopen", "route_review", "lead_handoff", "lead_confirm", "offer", "finish", "done_deferred", "review_deferred",
   // The runtime (docs/adr/0015): the seats' tokens renewed on the host.
   "secrets_renewed",
   // The stop policy (docs/adr/0013): a run paused at a cap, a seat's call held
@@ -8716,6 +8716,8 @@ export type LedgerAttestation = {
   answer_review?: AnswerReview;
   /** Written by the hub: why only a best candidate could be attested (a medium or low confidence, a part not established, a route not taken). */
   capped?: string[];
+  /** A second, independent review of a negative already reviewed or offered to another seat: why it adds something. */
+  second_review_why?: string;
   prev?: string;
   hash?: string;
 };
@@ -8797,7 +8799,7 @@ export function attestationAct(a: LedgerAttestation): "same_content" | "attest" 
 export function attestationHash(a: LedgerAttestation, prev: string): string {
   const core =
     a.v === 2
-      ? JSON.stringify({ v: 2, act: a.act, seq: a.seq, target: a.target, by: a.by, at: a.at, ...(a.how ? { how: a.how } : {}), ...(a.refs?.length ? { refs: a.refs } : {}), ...(a.review ? { review: canonicalValue(a.review) } : {}), ...(a.strength ? { strength: a.strength } : {}), ...(a.answer_review ? { answer_review: canonicalValue(a.answer_review) } : {}), ...(a.capped?.length ? { capped: a.capped } : {}) })
+      ? JSON.stringify({ v: 2, act: a.act, seq: a.seq, target: a.target, by: a.by, at: a.at, ...(a.how ? { how: a.how } : {}), ...(a.refs?.length ? { refs: a.refs } : {}), ...(a.review ? { review: canonicalValue(a.review) } : {}), ...(a.strength ? { strength: a.strength } : {}), ...(a.answer_review ? { answer_review: canonicalValue(a.answer_review) } : {}), ...(a.capped?.length ? { capped: a.capped } : {}), ...(a.second_review_why ? { second_review_why: a.second_review_why } : {}) })
       : JSON.stringify({ seq: a.seq, by: a.by, at: a.at });
   return createHash("sha256").update(`${prev}\n${core}`).digest("hex");
 }
@@ -9404,7 +9406,7 @@ export function disputeWords(d: DisputeInForce): string {
 
 // --- attest and dispute ---------------------------------------------------------------------
 
-export type LedgerActInput = { seq?: number | string; how?: string; why?: string; refs?: string[] | string; withdraw?: boolean; review?: unknown; strength?: unknown; answer_review?: unknown };
+export type LedgerActInput = { seq?: number | string; how?: string; why?: string; refs?: string[] | string; withdraw?: boolean; review?: unknown; strength?: unknown; answer_review?: unknown; second_review_why?: string };
 
 /** The standing entries an answer cites that were recorded for its own question (`id`, its section key). */
 export function citedForQuestion(a: LedgerEntry, bySeq: Map<number, LedgerEntry>, replaced: Map<number, number>, id: string): LedgerEntry[] {
@@ -9489,7 +9491,14 @@ export async function strengthCaps(sandboxRoot: string, answer: LedgerEntry, rev
  * Hub-written into ledger/attestations.jsonl (version 2, the how inside the
  * hashed record). The same agent attesting the same entry again is told so.
  */
-export async function attestEntry(ctx: SwarmContext, input: LedgerActInput): Promise<LedgerActResult<LedgerAttestation>> {
+/**
+ * An attest's result: a line recorded (or found), or a negative's review
+ * answered quietly because another seat reviewed it already or has it
+ * offered (`deferred`, nothing recorded, no refusal).
+ */
+export type AttestResult = LedgerActResult<LedgerAttestation> | { ok: true; line: null; appended: false; note: string; deferred: import("./leads.ts").ReviewDeferral };
+
+export async function attestEntry(ctx: SwarmContext, input: LedgerActInput): Promise<AttestResult> {
   const how = boundedText("how", input.how, LEDGER_ACT_MAX_CHARS);
   if (!how.ok) return how;
   if (!how.value) return { ok: false, reason: "how is required: what you re-derived, from which sealed object (job:<id>/<path>, input:<path>, …), and what you only read" };
@@ -9501,6 +9510,8 @@ export async function attestEntry(ctx: SwarmContext, input: LedgerActInput): Pro
     const use = await materialUseRefusal(ctx.sandboxRoot, refs);
     if (use) return { ok: false, reason: use };
   }
+  const secondWhy = boundedText("second_review_why", input.second_review_why, LEDGER_ACT_MAX_CHARS);
+  if (!secondWhy.ok) return secondWhy;
   let review: NB.NegativeReview | null = null;
   if (input.review !== undefined && input.review !== null) {
     const r = NB.checkReview(input.review);
@@ -9522,7 +9533,9 @@ export async function attestEntry(ctx: SwarmContext, input: LedgerActInput): Pro
   const pre = await readLedger(ctx.sandboxRoot);
   const preTarget = actTarget(pre, input.seq, ctx.agentId, "attest");
   const caps = preTarget.ok && preTarget.entry.kind === "answer" && preTarget.entry.section?.startsWith("question:") && !isNegativeEntry(preTarget.entry) ? await strengthCaps(ctx.sandboxRoot, preTarget.entry, answerReview) : [];
-  return withTableLock(ctx.sandboxRoot, async (held) => {
+  // The negatives a review recorded here answers (the answer itself, or those resting on the coverage record): their offers are taken up after the lock.
+  const reviewed: string[] = [];
+  const result = await withTableLock(ctx.sandboxRoot, async (held): Promise<AttestResult> => {
     const entries = await readLedger(ctx.sandboxRoot);
     const t = actTarget(entries, input.seq, ctx.agentId, "attest");
     if (!t.ok) return t;
@@ -9562,18 +9575,49 @@ export async function attestEntry(ctx: SwarmContext, input: LedgerActInput): Pro
       return { ok: false, reason: mineAgainst.inherited_from !== undefined ? `you disputed #${mineAgainst.inherited_from}, which #${t.entry.seq} corrects, and the dispute stands on the correction until you answer it: withdraw it (dispute withdraw=true on #${t.entry.seq}, with why the correction answers it) before attesting` : `you dispute #${t.entry.seq}: withdraw the dispute (dispute withdraw=true, with why) before attesting it` };
     }
     const attested = await readAttestations(ctx.sandboxRoot);
+    // One review of a negative (the c10 pilot's stampede): offered to one
+    // seat; another seat's review of a negative reviewed already, or
+    // offered to another now, is answered quietly with who has it and
+    // records nothing. A second, independent review says why it adds
+    // something (second_review_why).
+    if (negative && review && !secondWhy.value) {
+      const replaced = supersededBy(entries);
+      const answers = t.entry.kind === "answer" ? [t.entry] : entries.filter((e) => e.kind === "answer" && !replaced.has(e.seq) && isNegativeEntry(e) && (e.support ?? []).some((x) => x.seq === t.entry.seq));
+      const L = await import("./leads.ts");
+      let deferral: import("./leads.ts").ReviewDeferral | null = null;
+      for (const a of answers) {
+        const nr = negativeReview(a, entries, attested);
+        const d = await L.negativeReviewDeferral(ctx.sandboxRoot, `E-${a.seq}`, ctx.agentId, nr.reviewed ? nr.by : []);
+        if (!d) {
+          deferral = null;
+          break;
+        }
+        deferral ??= d;
+      }
+      if (deferral) return { ok: true as const, line: null, appended: false as const, note: deferral.why, deferred: deferral };
+    }
     const mine = attested.find((a) => attestationAct(a) === "attest" && a.target === target && a.by === ctx.agentId);
     if (mine) return { ok: true, line: mine, appended: false, note: `you attested #${t.entry.seq} already` };
     await held.assertOwned();
-    const line = await appendAttestation(ctx.sandboxRoot, attested, { v: 2, act: "attest", seq: t.entry.seq, target, by: ctx.agentId, at: new Date().toISOString(), how: how.value, ...(refs.length ? { refs } : {}), ...(review ? { review } : {}), ...(strength ? { strength } : {}), ...(answerReview ? { answer_review: answerReview } : {}), ...(questionAnswer && caps.length ? { capped: caps } : {}) });
+    const line = await appendAttestation(ctx.sandboxRoot, attested, { v: 2, act: "attest", seq: t.entry.seq, target, by: ctx.agentId, at: new Date().toISOString(), how: how.value, ...(refs.length ? { refs } : {}), ...(review ? { review } : {}), ...(strength ? { strength } : {}), ...(answerReview ? { answer_review: answerReview } : {}), ...(questionAnswer && caps.length ? { capped: caps } : {}), ...(secondWhy.value ? { second_review_why: secondWhy.value } : {}) });
     await renderLedger(ctx.sandboxRoot);
     const note = review
       ? `recorded as the review of a negative: ${NB.reviewWords(review)}`
       : strength === "best_candidate"
         ? `recorded as a best candidate${caps.length ? ` (${caps.join("; ")})` : ""}: ${t.entry.section} is not established by it, and the finish line says so; the way out is the route that would settle it, or the operator's acceptance of its limits`
         : undefined;
+    if (review) {
+      const replaced = supersededBy(entries);
+      for (const a of t.entry.kind === "answer" ? [t.entry] : entries.filter((e) => e.kind === "answer" && !replaced.has(e.seq) && isNegativeEntry(e) && (e.support ?? []).some((x) => x.seq === t.entry.seq))) reviewed.push(`E-${a.seq}`);
+    }
     return { ok: true, line, appended: true, ...(note ? { note } : {}) };
   });
+  // Outside the ledger's lock (the registers' is taken after it, never inside): the review's offer, when it was this seat's, is taken up.
+  if (result.ok && result.appended && reviewed.length) {
+    const L = await import("./leads.ts");
+    for (const key of reviewed) await L.reviewOfferTaken(ctx.sandboxRoot, key, ctx.agentId).catch(() => undefined);
+  }
+  return result;
 }
 
 /**

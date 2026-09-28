@@ -3348,6 +3348,7 @@ export default function (pi: ExtensionAPI) {
           { description: "Required when the entry is a negative (a coverage record, or an answer bounded_negative or not_determinable): whether you challenged the detection assumptions, reproduced a decisive check, tried a materially different route, each {done, text}: what you did, or why not. You recorded neither the answer nor its coverage record." },
         ),
       ),
+      second_review_why: Type.Optional(Type.String({ description: "A negative's review is offered to one seat; another seat's review of a negative reviewed already or offered to another is answered quietly with who has it, and nothing is recorded. A second, independent review says here why it adds something (another route, a check the first review did not make)." })),
       strength: Type.Optional(
         Type.Union([Type.Literal("established"), Type.Literal("best_candidate")], {
           description: "Required on an answer to a question: established (the review shows the answer), or best_candidate (what the evidence best supports, not shown to be the answer; it does not satisfy the finish line). A medium or low confidence, a part you hold not established, or a route its would_change names that nothing took allows only best_candidate.",
@@ -3369,10 +3370,15 @@ export default function (pi: ExtensionAPI) {
     }),
     async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
       const started = Date.now();
-      const result = await attestEntry(ctxFrom(toolCtx.cwd, agentId), { seq: params.seq, how: params.how, ...(params.refs?.length ? { refs: params.refs } : {}), ...(params.review ? { review: params.review } : {}), ...(params.strength ? { strength: params.strength } : {}), ...(params.answer_review ? { answer_review: params.answer_review } : {}) });
+      const result = await attestEntry(ctxFrom(toolCtx.cwd, agentId), { seq: params.seq, how: params.how, ...(params.refs?.length ? { refs: params.refs } : {}), ...(params.review ? { review: params.review } : {}), ...(params.strength ? { strength: params.strength } : {}), ...(params.answer_review ? { answer_review: params.answer_review } : {}), ...(params.second_review_why ? { second_review_why: params.second_review_why } : {}) });
       if (!result.ok) {
         await logEvent(toolCtx.cwd, agentId, "attest", params as Record<string, unknown>, { ok: false, reason: result.reason }, Date.now() - started);
         return { content: [{ type: "text" as const, text: `attest refused: ${result.reason}` }], details: { ok: false, reason: result.reason }, isError: true };
+      }
+      // A review another seat did or has on offer: answered quietly, nothing recorded, not a refusal.
+      if (result.line === null) {
+        await logEvent(toolCtx.cwd, agentId, "review_deferred", { seq: params.seq }, { ok: true, deferred: result.deferred }, Date.now() - started);
+        return okResult({ ok: true, seq: params.seq, appended: false, deferred: result.deferred, note: result.note });
       }
       await logEvent(toolCtx.cwd, agentId, "attest", params as Record<string, unknown>, { ok: true, seq: result.line.seq, appended: result.appended, ...(result.line.hash ? { hash: result.line.hash } : {}), ...(result.note ? { note: result.note } : {}) }, Date.now() - started);
       return okResult({ ok: true, seq: result.line.seq, appended: result.appended, ...(result.note ? { note: result.note } : {}), rendered: LEDGER_MD });
@@ -3632,7 +3638,7 @@ export default function (pi: ExtensionAPI) {
       "Answer an offer made to you: a lead (L-<n>: woken for it, handed over, parked in a peer's hands, reopened for you) or a person's question (Q-<n>). accept takes a lead (the claim it reserves), or holds a question for you for another minute while you open its lead; decline, with why, passes it to the next seat at once. An offer you do not answer lapses a minute after it reached you.",
     promptSnippet: "Accept or decline an offer",
     parameters: Type.Object({
-      id: Type.String({ description: "L-<n> or Q-<n>" }),
+      id: Type.String({ description: "L-<n> (a lead, or its route review), Q-<n> (a question) or E-<seq> (a negative's review)" }),
       action: Type.Union([Type.Literal("accept"), Type.Literal("decline")]),
       why: Type.Optional(Type.String({ description: "Required with decline: why you do not take it" })),
     }),
@@ -3673,16 +3679,22 @@ export default function (pi: ExtensionAPI) {
     name: "route_review",
     label: "Review a limiting route",
     description:
-      "Say whether a route that could not be taken still matters: a lead closed deferred, infeasible or needs_operator limits the run until its questions are answered under the bar and another seat (not its closer or holder) holds its limitation no longer material, or the operator accepts the questions' limits. material: false says the route's limitation no longer changes what the case concludes (say why: which answer settles its question without it); material: true says it still does. A failed route stays failed in the record either way.",
+      "Say whether a route that could not be taken still matters: a lead closed deferred, infeasible or needs_operator limits the run until its questions are answered under the bar and another seat (not its closer or holder) holds its limitation no longer material, or the operator accepts the questions' limits. material: false says the route's limitation no longer changes what the case concludes (say why: which answer settles its question without it); material: true says it still does. A failed route stays failed in the record either way. The review is offered to one seat once its questions are answered: another seat's review of a route reviewed already for those answers, or offered to another seat now, is answered quietly with who has it and records nothing; a second, independent review says why it adds something (second_review_why).",
     promptSnippet: "Review whether a limiting route still matters",
     parameters: Type.Object({
       id: Type.String({ description: "L-<n>, closed deferred, infeasible or needs_operator" }),
       material: Type.Boolean({ description: "Whether its limitation still matters to what the case concludes" }),
       why: Type.String({ description: "Why: the answer that settles its question without it, or what it could still change" }),
+      second_review_why: Type.Optional(Type.String({ description: "Only for a second, independent review of a route reviewed already or offered to another seat: why it adds something" })),
     }),
     async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
       const started = Date.now();
-      const r = await routeReview(ctxFrom(toolCtx.cwd, agentId), params.id, { material: params.material, why: params.why });
+      const r = await routeReview(ctxFrom(toolCtx.cwd, agentId), params.id, { material: params.material, why: params.why, ...(params.second_review_why ? { second_review_why: params.second_review_why } : {}) });
+      // Another seat has it, or had it: answered quietly, nothing recorded, not a refusal.
+      if (r.ok && r.deferred) {
+        await logEvent(toolCtx.cwd, agentId, "review_deferred", { id: params.id }, { ok: true, deferred: r.deferred }, Date.now() - started).catch(() => undefined);
+        return okResult({ ok: true, id: params.id, deferred: r.deferred, note: r.deferred.why });
+      }
       return leadAnswer(toolCtx.cwd, "route_review", params as Record<string, unknown>, started, r as never);
     },
   });

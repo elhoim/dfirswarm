@@ -126,6 +126,8 @@ export type LeadEventKind =
   | "offer_seen"
   | "offer_decline"
   | "offer_lapse"
+  // A review's offer taken up by the review it offered (an attest of a negative is on the ledger, not here).
+  | "offer_accept"
   // The holder keeps a parked lead; a hand-off to another seat; a closure confirmed on the entry that stands now.
   | "keep"
   | "handoff"
@@ -232,6 +234,10 @@ export type LeadEvent = {
   result_refs?: string[];
   /** An open made as a prerequisite of another lead, linked to it in the same act. */
   consumer?: string;
+  /** A route review and its offer: the answers of its questions it was made against (routeBasis). */
+  basis?: string;
+  /** A second, independent route review: why it adds something to the one that stands. */
+  second_review_why?: string;
   prev: string;
   hash: string;
 };
@@ -275,7 +281,7 @@ export type Lead = {
   /** Its revision: how many acts changed it (lead_reopen and lead_confirm name the one they read). */
   rev: number;
   /** Route reviews of its limiting closes, in order (B3). */
-  route_reviews: Array<{ at: string; by: string; material: boolean; why: string; cycle: number; ref: string }>;
+  route_reviews: Array<{ at: string; by: string; material: boolean; why: string; cycle: number; ref: string; basis?: string; second?: string }>;
   /** Every offer of it, in order (extensions/offers.ts). */
   offers: O.Offer[];
   /** A closure whose entry was superseded, waiting for its closer to confirm it or reopen it (lead_confirm): never re-pointed by itself. */
@@ -302,8 +308,17 @@ export type LeadsState = {
   interpretations: Map<string, Array<{ by: string; at: string; entry: number; kind: string; rest?: string; hash?: string }>>;
   /** Wakes, by lead and open spell. */
   wakes: Map<string, string>;
+  /**
+   * The reviews' offers, by item: a limiting lead's route review (its id,
+   * L-<n>), a material negative's review (E-<seq> of the answer). One seat
+   * at a time, as any offer.
+   */
+  reviewOffers: Map<string, O.Offer[]>;
   chain: { ok: boolean; broken_at: number | null; reason: string | null; head: string | null };
 };
+
+/** The reasons of a review's offer. */
+export const REVIEW_REASONS: ReadonlySet<string> = new Set(["route_review", "negative_review"]);
 
 // --- the chain ----------------------------------------------------------------------------------
 
@@ -362,6 +377,9 @@ export function foldLeads(events: LeadEvent[], chain: LeadsState["chain"] = { ok
   const jobLead = new Map<string, string>();
   const interpretations: LeadsState["interpretations"] = new Map();
   const wakes = new Map<string, string>();
+  const reviewOffers = new Map<string, O.Offer[]>();
+  // Every offer by its seq, whichever register item it offers: its delivery, decline, lapse and acceptance name it so.
+  const offerBySeq = new Map<number, O.Offer>();
   for (const e of events) {
     const l = e.lead ? leads.get(e.lead) : undefined;
     switch (e.ev) {
@@ -490,24 +508,42 @@ export function foldLeads(events: LeadEvent[], chain: LeadsState["chain"] = { ok
         // A wake from before offers: read as an offer of the lead as it stood.
         if (!e.lead || !e.to) break;
         wakes.set(`${e.lead}#${e.cycle ?? 0}`, e.to);
-        if (l) l.offers.push({ seq: e.seq, at: e.at, to: e.to, rev: l.rev, reason: "wake", seen_at: null, declined: null, accepted: null, lapsed_at: null });
+        if (l) {
+          const o: O.Offer = { seq: e.seq, at: e.at, to: e.to, rev: l.rev, reason: "wake", seen_at: null, declined: null, accepted: null, lapsed_at: null };
+          l.offers.push(o);
+          offerBySeq.set(e.seq, o);
+        }
         break;
       case "offer": {
-        if (!l || !e.to) break;
+        if (!e.to) break;
         const reason = ((O.OFFER_REASONS as readonly string[]).includes(e.reason ?? "") ? e.reason : "wake") as O.OfferReason;
-        l.offers.push({ seq: e.seq, at: e.at, to: e.to, rev: e.rev ?? l.rev, reason, seen_at: null, declined: null, accepted: null, lapsed_at: null, ...(e.from ? { from: e.from } : {}) });
+        // A review's offer: of a limiting lead's route review, or of a negative's review (by its answer's seq).
+        if (REVIEW_REASONS.has(reason)) {
+          const key = reason === "route_review" ? e.lead : typeof e.entry === "number" ? `E-${e.entry}` : undefined;
+          if (!key) break;
+          const o: O.Offer = { seq: e.seq, at: e.at, to: e.to, rev: e.rev ?? 1, reason, seen_at: null, declined: null, accepted: null, lapsed_at: null, ...(e.basis ? { basis: e.basis } : {}) };
+          reviewOffers.set(key, [...(reviewOffers.get(key) ?? []), o]);
+          offerBySeq.set(e.seq, o);
+          break;
+        }
+        if (!l) break;
+        const lo: O.Offer = { seq: e.seq, at: e.at, to: e.to, rev: e.rev ?? l.rev, reason, seen_at: null, declined: null, accepted: null, lapsed_at: null, ...(e.from ? { from: e.from } : {}) };
+        l.offers.push(lo);
+        offerBySeq.set(e.seq, lo);
         wakes.set(`${l.id}#${e.cycle ?? l.cycle}`, e.to);
         if (reason === "confirm" && l.closed) l.confirm = { at: e.at, offer: e.seq, ref_was: e.ref ?? l.closed.ref, head: e.head ?? null };
         break;
       }
       case "offer_seen":
       case "offer_decline":
-      case "offer_lapse": {
-        const o = l?.offers.find((x) => x.seq === e.offer);
+      case "offer_lapse":
+      case "offer_accept": {
+        const o = typeof e.offer === "number" ? offerBySeq.get(e.offer) : undefined;
         if (!o) break;
         if (e.ev === "offer_seen" && !o.seen_at) o.seen_at = e.at;
         if (e.ev === "offer_decline" && !o.declined) o.declined = { at: e.at, why: e.why ?? "" };
         if (e.ev === "offer_lapse" && !o.lapsed_at) o.lapsed_at = e.at;
+        if (e.ev === "offer_accept" && !o.accepted) o.accepted = { at: e.at };
         break;
       }
       case "keep":
@@ -533,14 +569,18 @@ export function foldLeads(events: LeadEvent[], chain: LeadsState["chain"] = { ok
         break;
       case "route_review":
         if (!l || typeof e.material_now !== "boolean") break;
-        l.route_reviews.push({ at: e.at, by: e.by, material: e.material_now, why: e.why ?? "", cycle: e.cycle ?? l.cycle, ref: e.ref ?? "" });
+        l.route_reviews.push({ at: e.at, by: e.by, material: e.material_now, why: e.why ?? "", cycle: e.cycle ?? l.cycle, ref: e.ref ?? "", ...(e.basis ? { basis: e.basis } : {}), ...(e.second_review_why ? { second: e.second_review_why } : {}) });
+        if (typeof e.offer === "number") {
+          const o = offerBySeq.get(e.offer);
+          if (o && !o.accepted) o.accepted = { at: e.at };
+        }
         l.last_seq = e.seq;
         break;
     }
     // Its revision: every act that changes what the lead is or who has it.
     if (l && e.ev !== "open" && REVISING.has(e.ev)) l.rev += 1;
   }
-  return { events, leads, jobLead, interpretations, wakes, chain };
+  return { events, leads, jobLead, interpretations, wakes, reviewOffers, chain };
 }
 
 // --- needs --------------------------------------------------------------------------------------
@@ -1051,6 +1091,7 @@ export async function holderLiveness(sandboxRoot: string, holder: string, jobs: 
 export async function offeredSeats(sandboxRoot: string, s: LeadsState, now = Date.now(), questions?: import("./questions.ts").QuestionsSnapshot | null): Promise<Set<string>> {
   const out = new Set<string>();
   for (const l of s.leads.values()) for (const o of l.offers) if (O.reserving(o, now, l.rev)) out.add(o.to);
+  for (const [key, list] of s.reviewOffers) for (const o of list) if (O.reserving(o, now, reviewRev(key, s))) out.add(o.to);
   const Q = await import("./questions.ts");
   const qs = questions !== undefined ? questions : await Q.questionsSnapshot(sandboxRoot).catch(() => null);
   for (const q of qs?.state.questions.values() ?? []) {
@@ -2415,27 +2456,235 @@ export async function agentReopenLead(ctx: P.SwarmContext, rawId: unknown, input
  * needs a new review. The seat that closed it, or held it, does not review
  * it.
  */
-export async function routeReview(ctx: P.SwarmContext, rawId: unknown, input: { material?: unknown; why?: string }): Promise<LeadResult<{ lead: LeadView }>> {
+export async function routeReview(ctx: P.SwarmContext, rawId: unknown, input: { material?: unknown; why?: string; second_review_why?: string }): Promise<LeadResult<{ lead: LeadView; deferred?: ReviewDeferral }>> {
   const ref = leadRef(rawId);
   if (!ref.ok) return ref;
   if (typeof input.material !== "boolean") return { ok: false, reason: "material is true or false: whether the route's limitation still matters to what the case concludes" };
   const why = bounded("why", input.why, LEAD_WHY_MAX, true);
   if (!why.ok) return why;
+  const second = bounded("second_review_why", input.second_review_why, LEAD_WHY_MAX, false);
+  if (!second.ok) return second;
+  const now = Date.now();
   try {
-    const r = await transact<Fail | { ok: true }>(ctx.sandboxRoot, async (snap) => {
+    const r = await transact<Fail | { ok: true; deferred?: ReviewDeferral }>(ctx.sandboxRoot, async (snap) => {
       const l = snap.state.leads.get(ref.id);
       if (!l) return { append: [], result: { ok: false as const, reason: `${ref.id} does not exist` } };
       if (!l.closed || !LIMITING_DISPOSITIONS.has(l.closed.disposition)) return { append: [], result: { ok: false as const, reason: `${l.id} is ${l.closed ? `closed ${l.closed.disposition}` : "not closed"}: a route review is of a lead closed deferred, infeasible or needs_operator` } };
-      const holders = new Set(snap.state.events.filter((e) => e.lead === l.id && (e.ev === "claim" || (e.ev === "open" && e.holder))).map((e) => e.holder ?? e.by));
-      if (l.closed.by === ctx.agentId || holders.has(ctx.agentId)) return { append: [], result: { ok: false as const, reason: `you ${l.closed.by === ctx.agentId ? "closed" : "held"} ${l.id}: its route is reviewed by another seat` } };
-      return { append: [{ by: ctx.agentId, ev: "route_review", lead: l.id, material_now: input.material as boolean, why: why.value, cycle: l.cycle, ref: l.closed.ref }], result: { ok: true as const } };
+      if (l.closed.by === ctx.agentId || leadHolders(l, snap.state).has(ctx.agentId)) return { append: [], result: { ok: false as const, reason: `you ${l.closed.by === ctx.agentId ? "closed" : "held"} ${l.id}: its route is reviewed by another seat` } };
+      // One review of a close and the answers it saw (the c10 pilot: six
+      // seats reviewed L-27 within minutes): a review that stands, or an
+      // offer of it to another seat, answers this one quietly; a second,
+      // independent review says why it adds something.
+      const basis = routeBasis(l, snap).basis;
+      const offer = O.reservingOffer(snap.state.reviewOffers.get(l.id) ?? [], now, l.rev);
+      if (!second.value) {
+        const settled = settledRouteReviews(l, basis);
+        if (settled.length) return { append: [], result: { ok: true as const, deferred: { item: l.id, by: [...new Set(settled.map((x) => x.by))], why: `${l.id}'s close (${l.closed.ref}) was reviewed already for its questions' answers as they stand (${settled.map((x) => `${x.by} at ${x.at}: ${x.material ? "still material" : "no longer material"}`).join("; ")}); nothing recorded. A second, independent review says why it adds something (second_review_why)` } } };
+        if (offer && offer.to !== ctx.agentId) return { append: [], result: { ok: true as const, deferred: { item: l.id, to: offer.to, until: new Date(O.offerStatus(offer, now, l.rev).until).toISOString(), why: `${l.id}'s route review is offered to ${offer.to} ${O.untilWords(offer, now, l.rev)}; nothing recorded. A second, independent review says why it adds something (second_review_why)` } } };
+      }
+      const byOffer = offer && offer.to === ctx.agentId ? { offer: offer.seq } : {};
+      return { append: [{ by: ctx.agentId, ev: "route_review", lead: l.id, material_now: input.material as boolean, why: why.value, cycle: l.cycle, ref: l.closed.ref, basis, ...byOffer, ...(second.value ? { second_review_why: second.value } : {}) }], result: { ok: true as const } };
     });
     if (!r.ok) return r;
     const snap = await leadsSnapshot(ctx.sandboxRoot);
-    return { ok: true, lead: viewLead(snap.state.leads.get(ref.id)!, snap) };
+    return { ok: true, lead: viewLead(snap.state.leads.get(ref.id)!, snap), ...(r.deferred ? { deferred: r.deferred } : {}) };
   } catch (err) {
     return { ok: false, reason: (err as Error).message };
   }
+}
+
+/** A review another seat has or is offered, answered quietly (nothing recorded, no refusal): the item, who reviewed it or who has it, and until when. */
+export type ReviewDeferral = { item: string; by?: string[]; to?: string; until?: string; why: string };
+
+/** The seats that held a lead (at its open or by a claim). */
+function leadHolders(l: Lead, s: LeadsState): Set<string> {
+  return new Set(s.events.filter((e) => e.lead === l.id && (e.ev === "claim" || (e.ev === "open" && e.holder))).map((e) => e.holder ?? e.by));
+}
+
+/** A review offer's revision: a route review's is its lead's (a reopen or a new close ends it); a negative's is its answer's own (1). */
+function reviewRev(key: string, s: LeadsState): number {
+  return key.startsWith("L-") ? (s.leads.get(key)?.rev ?? 0) : 1;
+}
+
+/**
+ * What a limiting lead's route review is made against: each question it
+ * names with the answer standing for it, or its acceptance, or nothing yet.
+ * A review stands for the answers it saw; an answer recorded again (or an
+ * acceptance) since asks for a new one. `disposed` when every question has
+ * an answer or an acceptance (or the lead names none).
+ */
+export function routeBasis(l: Lead, snap: LeadsSnapshot): { basis: string; disposed: boolean } {
+  const parts: string[] = [];
+  let disposed = true;
+  for (const a of [...new Set(l.answers.map((x) => P.sectionKey(x)))].sort()) {
+    const standing = snap.ledger.entries.find((e) => e.kind === "answer" && e.section === `question:${a}` && !snap.ledger.replaced.has(e.seq));
+    const q = snap.questions?.bySection.get(a);
+    if (standing) parts.push(`${a}:E-${standing.seq}`);
+    else if (q?.accepted) parts.push(`${a}:accepted:r${q.accepted.rev}`);
+    else {
+      parts.push(`${a}:open`);
+      disposed = false;
+    }
+  }
+  return { basis: P.sha256Hex(parts.join("\n")).slice(0, 16), disposed };
+}
+
+/** The route reviews of a lead's current close, by another seat, made for these answers (a review from before bases counts for any). */
+function settledRouteReviews(l: Lead, basis: string): Lead["route_reviews"] {
+  if (!l.closed) return [];
+  return l.route_reviews.filter((r) => r.cycle === l.cycle && r.ref === l.closed!.ref && r.by !== l.closed!.by && (r.basis === undefined || r.basis === basis));
+}
+
+/** A review item due now: a limiting lead's route review, or a material negative's review. */
+type ReviewItem = { key: string; reason: "route_review" | "negative_review"; questions: string[]; exclude: Set<string>; offered: Set<string>; draft: (to: string, now: number) => LeadDraft; words: string };
+
+/** The review items due in a snapshot (a limiting material lead whose questions are disposed and no review saw these answers; a material negative no seat has reviewed), with no offer holding them. */
+function reviewsDue(snap: LeadsSnapshot, attestations: P.LedgerAttestation[], now: number): ReviewItem[] {
+  const out: ReviewItem[] = [];
+  for (const l of snap.state.leads.values()) {
+    if (!l.material || !l.closed || !LIMITING_DISPOSITIONS.has(l.closed.disposition)) continue;
+    const { basis, disposed } = routeBasis(l, snap);
+    if (!disposed || settledRouteReviews(l, basis).length) continue;
+    const offers = snap.state.reviewOffers.get(l.id) ?? [];
+    if (O.reservingOffer(offers, now, l.rev)) continue;
+    const exclude = new Set([l.closed.by, ...leadHolders(l, snap.state)]);
+    const closed = l.closed;
+    out.push({
+      key: l.id,
+      reason: "route_review",
+      questions: l.answers.map((a) => P.sectionKey(a)),
+      exclude,
+      offered: new Set(offers.filter((o) => o.basis === basis && o.rev === l.rev).map((o) => o.to)),
+      draft: (to, at) => offerDraft(l.id, to, "route_review", l.rev, l.cycle, at, { basis, why: `${l.id} was closed ${closed.disposition} (${closed.ref}) and its questions are answered: whether its limitation still matters` }),
+      words: `${l.id} "${l.title}", closed ${closed.disposition} (${closed.ref})`,
+    });
+  }
+  for (const a of snap.ledger.entries) {
+    if (a.kind !== "answer" || snap.ledger.replaced.has(a.seq) || !a.section?.startsWith("question:")) continue;
+    const res = NB.answerResult(a);
+    if (!res || !NB.NEGATIVE_RESULTS.has(res)) continue;
+    const id = P.sectionKey(a.section.slice("question:".length));
+    const q = snap.questions?.bySection.get(id);
+    if (!(snap.goal.questions.includes(id) || !q || q.materiality === "material")) continue;
+    if (P.negativeReview(a, snap.ledger.entries, attestations).reviewed) continue;
+    const key = `E-${a.seq}`;
+    const offers = snap.state.reviewOffers.get(key) ?? [];
+    if (O.reservingOffer(offers, now, 1)) continue;
+    const covAuthors = (a.support ?? []).map((x) => snap.ledger.bySeq.get(x.seq)).filter((e): e is P.LedgerEntry => e?.kind === "coverage").flatMap((e) => [e.by, ...e.authors]);
+    out.push({
+      key,
+      reason: "negative_review",
+      questions: [id],
+      exclude: new Set([a.by, ...a.authors, ...covAuthors]),
+      offered: new Set(offers.map((o) => o.to)),
+      draft: (to, at) => ({ by: "system", ev: "offer", entry: a.seq, to, reason: "negative_review", rev: 1, max_until: new Date(at + O.offerMaxAgeMs()).toISOString(), why: `E-${a.seq} (${a.section}, ${NB.resultWords(res)}) is a material negative no seat has reviewed` }),
+      words: `E-${a.seq} (${a.section}, ${NB.resultWords(res)})`,
+    });
+  }
+  return out;
+}
+
+/**
+ * Offer each review item due to one eligible seat (A3's offers, the c10
+ * pilot's stampede): never the closer, a holder or an author, never a seat
+ * done, dead or compacting, never one with an offer standing or offered
+ * this item already; the relevant first (it held a lead under the item's
+ * questions, then it recorded an entry answering them), then a waiting
+ * seat, idle longest. Made under the registers' lock, one seat per item,
+ * each seat counted busy once offered. Returns how many were made.
+ */
+export async function offerReviews(sandboxRoot: string, now = Date.now()): Promise<number> {
+  const outer = await leadsSnapshot(sandboxRoot);
+  const attestations = await P.readAttestations(sandboxRoot).catch(() => [] as P.LedgerAttestation[]);
+  if (!reviewsDue(outer, attestations, now).length) return 0;
+  const activity = await recentActivity(sandboxRoot, LEAD_COMPACTION_BOUND_MS, now).catch(() => new Map<string, { last: number; compacting: number | null }>());
+  const ids = await P.teamIds(sandboxRoot).catch(() => [] as string[]);
+  const r = await transact<{ ok: true }>(sandboxRoot, async (snap) => {
+    const atts = await P.readAttestations(sandboxRoot).catch(() => [] as P.LedgerAttestation[]);
+    const due = reviewsDue(snap, atts, now);
+    if (!due.length) return { append: [], result: { ok: true as const } };
+    const busy = await offeredSeats(sandboxRoot, snap.state, now, snap.questions);
+    const append: LeadDraft[] = [];
+    for (const item of due) {
+      const candidates: string[] = [];
+      for (const a of ids) {
+        if (item.exclude.has(a) || busy.has(a) || item.offered.has(a)) continue;
+        if (!(await seatAvailable(sandboxRoot, a, activity, now)).available) continue;
+        candidates.push(a);
+      }
+      const pick = await rankReviewers(sandboxRoot, snap, candidates, item.questions, now);
+      if (!pick) continue;
+      busy.add(pick);
+      append.push(item.draft(pick, now));
+    }
+    return { append, result: { ok: true as const } };
+  }).catch(() => null);
+  return r?.events.length ?? 0;
+}
+
+/** The most relevant of the candidates for a review of work under these questions: held a lead under them, then recorded an entry answering them, then waiting, idle longest. */
+async function rankReviewers(sandboxRoot: string, snap: LeadsSnapshot, candidates: string[], questions: string[], now: number): Promise<string | null> {
+  if (!candidates.length) return null;
+  const qs = new Set(questions);
+  const scored: Array<{ agent: string; score: number; since: number }> = [];
+  for (const agent of candidates) {
+    let score = 0;
+    if ([...snap.state.leads.values()].some((l) => l.answers.some((a) => qs.has(P.sectionKey(a))) && leadHolders(l, snap.state).has(agent))) score = 2;
+    else if (snap.ledger.entries.some((e) => (e.by === agent || e.authors.includes(agent)) && ((e.answers ?? []).some((a) => qs.has(P.sectionKey(a))) || (e.section?.startsWith("question:") && qs.has(P.sectionKey(e.section.slice("question:".length))))))) score = 1;
+    const since = P.waitingSince(await P.readWaiting(sandboxRoot, agent), now);
+    scored.push({ agent, score, since: since ?? Number.POSITIVE_INFINITY });
+  }
+  scored.sort((a, b) => b.score - a.score || a.since - b.since || a.agent.localeCompare(b.agent));
+  return scored[0]!.agent;
+}
+
+/** What a review's offer asks, for the seat it is made to. */
+export function reviewOfferText(key: string, o: O.Offer, snap: LeadsSnapshot): string {
+  const until = O.untilWords(o, snap.at, reviewRev(key, snap.state));
+  if (o.reason === "route_review") {
+    const l = snap.state.leads.get(key);
+    return `${key}${l ? ` ("${l.title}", closed ${l.closed?.disposition ?? "?"} on ${l.closed?.ref ?? "?"})` : ""} is offered to you for its route review, first claim ${until}: its questions are answered now; say whether the route's limitation still matters with route_review(${key}, material, why), or offer decline ${key} with why. Other seats' reviews of it wait for yours.`;
+  }
+  const e = snap.ledger.bySeq.get(Number(key.slice(2)));
+  return `${key}${e ? ` (${e.section}, ${NB.resultWords(NB.answerResult(e) ?? "")})` : ""} is offered to you for its review, first claim ${until}: attest it (or its coverage record) with review {detection, reproduced, other_route}, or offer decline ${key} with why. Other seats' reviews of it wait for yours.`;
+}
+
+/** Answer a review's offer: decline passes it on at once (with why); accept says you take it up (the review itself records it). */
+export async function answerReviewOffer(ctx: P.SwarmContext, key: string, input: { action?: string; why?: string }, now = Date.now()): Promise<Record<string, unknown>> {
+  const action = String(input.action ?? "").trim();
+  if (action !== "accept" && action !== "decline") return { ok: false, reason: "action is accept or decline" };
+  const why = bounded("why", input.why, LEAD_WHY_MAX, action === "decline");
+  if (!why.ok) return { ok: false, reason: `${why.reason}: why you do not take it (the next seat reads it)` };
+  try {
+    return await transact<Record<string, unknown>>(ctx.sandboxRoot, async (snap) => {
+      const o = O.reservingOffer(snap.state.reviewOffers.get(key) ?? [], now, reviewRev(key, snap.state));
+      if (!o || o.to !== ctx.agentId) return { append: [], result: { ok: false, reason: `no review offer of ${key} stands for you${o ? ` (it is offered to ${o.to})` : ""}` } };
+      const where = key.startsWith("L-") ? { lead: key } : { entry: Number(key.slice(2)) };
+      if (action === "accept") return { append: o.seen_at ? [] : [{ by: ctx.agentId, ev: "offer_seen", ...where, offer: o.seq }], result: { ok: true, id: key, action, note: o.reason === "route_review" ? `review it: route_review(${key}, material, why)` : `review it: attest ${key.slice(2)} (or its coverage record) with review {detection, reproduced, other_route}` } };
+      return { append: [{ by: ctx.agentId, ev: "offer_decline", ...where, offer: o.seq, why: why.value }], result: { ok: true, id: key, action } };
+    });
+  } catch (err) {
+    return { ok: false, reason: (err as Error).message };
+  }
+}
+
+/** A negative's review recorded by the seat its offer was made to: the offer is taken up (called by the ledger after the attest, outside its lock). */
+export async function reviewOfferTaken(sandboxRoot: string, key: string, agent: string, now = Date.now()): Promise<void> {
+  await transact<{ ok: true }>(sandboxRoot, async (snap) => {
+    const o = O.reservingOffer(snap.state.reviewOffers.get(key) ?? [], now, reviewRev(key, snap.state));
+    const where = key.startsWith("L-") ? { lead: key } : { entry: Number(key.slice(2)) };
+    return { append: o && o.to === agent && !o.accepted ? [{ by: agent, ev: "offer_accept", ...where, offer: o.seq }] : [], result: { ok: true as const } };
+  }).catch(() => undefined);
+}
+
+/** Whether a negative's review is answered quietly for this seat: reviewed already by another, or offered to another now (the attest's check, read-only). */
+export async function negativeReviewDeferral(sandboxRoot: string, key: string, agent: string, reviewedBy: string[], now = Date.now()): Promise<ReviewDeferral | null> {
+  if (reviewedBy.length) return { item: key, by: reviewedBy, why: `${key} was reviewed already by ${reviewedBy.join(", ")}; nothing recorded. A second, independent review says why it adds something (second_review_why)` };
+  const { events } = await readLeadEvents(sandboxRoot);
+  const s = foldLeads(events);
+  const o = O.reservingOffer(s.reviewOffers.get(key) ?? [], now, 1);
+  if (o && o.to !== agent) return { item: key, to: o.to, until: new Date(O.offerStatus(o, now, 1).until).toISOString(), why: `${key}'s review is offered to ${o.to} ${O.untilWords(o, now, 1)}; nothing recorded. A second, independent review says why it adds something (second_review_why)` };
+  return null;
 }
 
 /** The standing route review of a lead's current close: the latest by another seat, for this open spell and this ref. */
@@ -2622,10 +2871,21 @@ export async function reopenOnLedger(sandboxRoot: string, now = Date.now()): Pro
     return m ? !entryStands(snap.ledger, Number(m[1])).ok : false;
   });
   if (!due.length) return [];
-  // Who could confirm a superseded closure: its closer, available (not done, dead or compacting).
+  // Who could confirm a superseded closure: its closer, available, or
+  // compacting (away for a while, not gone: the c10 pilot's L-17 was
+  // reopened three times because its closer began compacting as the offer
+  // arrived); a closer done or dead is gone.
   const activity = await recentActivity(sandboxRoot, LEAD_COMPACTION_BOUND_MS, now).catch(() => new Map<string, { last: number; compacting: number | null }>());
-  const closers = new Map<string, { available: boolean; why: string }>();
-  for (const l of due) if (l.closed && !closers.has(l.closed.by)) closers.set(l.closed.by, await seatAvailable(sandboxRoot, l.closed.by, activity, now));
+  const closers = new Map<string, CloserState>();
+  for (const l of due) {
+    if (!l.closed || closers.has(l.closed.by)) continue;
+    const seat = await seatAvailable(sandboxRoot, l.closed.by, activity, now);
+    const since = activity.get(l.closed.by)?.compacting ?? null;
+    closers.set(l.closed.by, seat.available ? { state: "available", why: seat.why } : since !== null && now - since < LEAD_COMPACTION_BOUND_MS ? { state: "compacting", why: seat.why, since } : { state: "gone", why: seat.why });
+  }
+  // A compacting closer's confirmation waits for it, up to this long past the compaction's start.
+  const holdMs = confirmCompactionHoldMs();
+  const heldFor = (c: CloserState | undefined) => c?.state === "compacting" && now - c.since! <= holdMs;
   const r = await transact<{ ok: true }>(sandboxRoot, async (inner) => {
     const append: LeadDraft[] = [];
     for (const l of inner.state.leads.values()) {
@@ -2639,9 +2899,19 @@ export async function reopenOnLedger(sandboxRoot: string, now = Date.now()): Pro
       // lead, it reopens.
       if (l.confirm) {
         const o = l.offers.find((x) => x.seq === l.confirm!.offer);
-        // A closer that became unavailable after the offer (done, dead, compacting) cannot confirm it: reopened now, not after the window.
         const closer = closers.get(l.closed!.by);
-        const gone = closer && !closer.available ? closer.why : null;
+        // A closer compacting after the offer: the confirmation waits for it,
+        // bounded; an offer whose window ran out meanwhile is made again (it is
+        // delivered when the closer is back). Done, dead, or compacting past
+        // the bound: reopened now, not after the window.
+        if (superseded && heldFor(closer) && !o?.declined) {
+          if (o && !O.reserving(o, now, l.rev)) {
+            if (!o.lapsed_at && !o.accepted) append.push({ by: "system", ev: "offer_lapse", lead: l.id, offer: o.seq, to: o.to, why: `its window ran out while its closer compacted: made again, held for it` });
+            append.push(offerDraft(l.id, l.closed!.by, "confirm", l.rev, l.cycle, now, { ref: l.confirm.ref_was, ...(l.confirm.head ? { head: l.confirm.head } : {}), why: `${l.confirm.ref_was} was superseded${l.confirm.head ? ` by ${l.confirm.head}` : ""}: confirm the closure on what stands, or reopen it (held while ${closer!.why})` }));
+          }
+          continue;
+        }
+        const gone = closer?.state === "gone" ? closer.why : closer?.state === "compacting" ? `${closer.why} for more than ${Math.round(holdMs / 60_000)} min` : null;
         if (o && O.reserving(o, now, l.rev) && superseded && !gone) continue;
         const lapsedNow = o && !o.lapsed_at && !o.declined && !o.accepted && (O.offerStatus(o, now, l.rev).state === "lapsed" || (gone && O.reserving(o, now, l.rev)));
         if (o && lapsedNow) append.push({ by: "system", ev: "offer_lapse", lead: l.id, offer: o.seq, to: o.to, why: gone ? `its closer can no longer take it: ${gone}` : "not confirmed within its window" });
@@ -2653,7 +2923,7 @@ export async function reopenOnLedger(sandboxRoot: string, now = Date.now()): Pro
       // offered to confirm it on what stands now or reopen it (lead_confirm,
       // lead_reopen); nothing re-points it by itself (A3). Disputed, or with
       // nobody to confirm it: reopened.
-      if (superseded && closers.get(l.closed!.by)?.available) {
+      if (superseded && (closers.get(l.closed!.by)?.state === "available" || heldFor(closers.get(l.closed!.by)))) {
         const head = inner.ledger.replaced.has(Number(m[1])) ? `E-${P.standingSeq(Number(m[1]), inner.ledger.replaced)}` : null;
         append.push(offerDraft(l.id, l.closed!.by, "confirm", l.rev, l.cycle, now, { ref: l.closed!.ref, ...(head ? { head } : {}), why: `${l.closed!.ref} was superseded${head ? ` by ${head}` : ""}: confirm the closure on what stands, or reopen it` }));
         continue;
@@ -2663,6 +2933,18 @@ export async function reopenOnLedger(sandboxRoot: string, now = Date.now()): Pro
     return { append, result: { ok: true as const } };
   });
   return r.events.filter((e) => e.ev === "reopen").map((e) => e.lead!).filter(Boolean);
+}
+
+/** A closure's closer, for its confirmation: able to take it, compacting (since when), or gone (done, dead). */
+type CloserState = { state: "available" | "compacting" | "gone"; why: string; since?: number };
+
+/**
+ * How long a confirmation waits for a closer that is compacting, from the
+ * compaction's start (SWARM_CONFIRM_COMPACTION_HOLD_SEC, 300): compaction
+ * is temporary unavailability; a closer done or dead is gone at once.
+ */
+export function confirmCompactionHoldMs(): number {
+  return envMs("SWARM_CONFIRM_COMPACTION_HOLD_SEC", 300);
 }
 
 /**
@@ -2781,8 +3063,18 @@ export async function answerLeadOffer(ctx: P.SwarmContext, rawId: unknown, input
 export async function answerOffer(ctx: P.SwarmContext, subject: unknown, input: { action?: string; why?: string }): Promise<Record<string, unknown>> {
   const id = String(subject ?? "").trim();
   if (/^Q-\d+$/i.test(id)) return (await import("./questions.ts")).answerQuestionOffer(ctx, id, input ?? {});
-  if (/^L-\d+$/i.test(id)) return answerLeadOffer(ctx, id, input ?? {});
-  return { ok: false, reason: `an offer is of a lead (L-<n>) or a question (Q-<n>); got ${JSON.stringify(subject)}` };
+  // A review's offer: a negative's by its answer (E-<seq>); a route review's by its lead, when that is what is offered to this seat.
+  if (/^E-\d+$/i.test(id)) return answerReviewOffer(ctx, `E-${Number(id.slice(2))}`, input ?? {});
+  if (/^L-\d+$/i.test(id)) {
+    const key = `L-${Number(id.slice(2))}`;
+    const s = foldLeads((await readLeadEvents(ctx.sandboxRoot)).events);
+    const review = O.reservingOffer(s.reviewOffers.get(key) ?? [], Date.now(), reviewRev(key, s));
+    const lead = s.leads.get(key);
+    const leadOffer = lead ? O.reservingOffer(lead.offers, Date.now(), lead.rev) : null;
+    if (review?.to === ctx.agentId && leadOffer?.to !== ctx.agentId) return answerReviewOffer(ctx, key, input ?? {});
+    return answerLeadOffer(ctx, id, input ?? {});
+  }
+  return { ok: false, reason: `an offer is of a lead (L-<n>), a question (Q-<n>) or a negative's review (E-<seq>); got ${JSON.stringify(subject)}` };
 }
 
 /** Record that offers reached their seat (its wait or its header delivered them): an offer's first claim is counted from here. */
@@ -2791,8 +3083,9 @@ export async function markOffersSeen(sandboxRoot: string, agent: string, seqs: A
   await transact<{ ok: true }>(sandboxRoot, async (snap) => {
     const append: LeadDraft[] = [];
     for (const x of seqs) {
-      const o = snap.state.leads.get(x.lead)?.offers.find((y) => y.seq === x.offer);
-      if (o && o.to === agent && !o.seen_at) append.push({ by: agent, ev: "offer_seen", lead: x.lead, offer: x.offer });
+      const o = snap.state.leads.get(x.lead)?.offers.find((y) => y.seq === x.offer) ?? snap.state.reviewOffers.get(x.lead)?.find((y) => y.seq === x.offer);
+      const where = x.lead.startsWith("E-") ? { entry: Number(x.lead.slice(2)) } : { lead: x.lead };
+      if (o && o.to === agent && !o.seen_at) append.push({ by: agent, ev: "offer_seen", ...where, offer: x.offer });
     }
     return { append, result: { ok: true as const } };
   }).catch(() => undefined);
@@ -2833,7 +3126,7 @@ function toldNow(agent: string, snap: LeadsSnapshot, previouslyHeld: string[]): 
     }
   }
   const wakes = [...s.wakes.entries()].filter(([, to]) => to === agent).map(([k]) => k);
-  return { seq: s.events.length, held, deps, wakes, offers: offersFor(agent, snap).map((x) => x.offer.seq) };
+  return { seq: s.events.length, held, deps, wakes, offers: [...offersFor(agent, snap).map((x) => x.offer.seq), ...reviewOffersFor(agent, snap).map((x) => x.offer.seq)] };
 }
 
 /** The offers that concern a seat now: made to it, or of a lead parked in its hands; each still holding its lead. */
@@ -2868,7 +3161,7 @@ export function offerText(l: Lead, o: O.Offer, agent: string, snap: LeadsSnapsho
 }
 
 export type LeadNotice = {
-  kind: "lead_ready" | "lead_blocked" | "need_dead" | "dependency_changed" | "stale_marked" | "reclaimed" | "reopened" | "operator_note" | "wake" | "offer" | "confirm" | "parked" | `question_${import("./questions.ts").QuestionNotice["kind"]}`;
+  kind: "lead_ready" | "lead_blocked" | "need_dead" | "dependency_changed" | "stale_marked" | "reclaimed" | "reopened" | "operator_note" | "wake" | "offer" | "confirm" | "parked" | "review_offer" | `question_${import("./questions.ts").QuestionNotice["kind"]}`;
   /** The lead the notice is about, or the question (Q-<n>) for the register's. */
   lead: string;
   /** An offer notice: the offer it delivers (its first claim counts from this delivery). */
@@ -2922,6 +3215,21 @@ export function noticesFor(agent: string, before: Told, snap: LeadsSnapshot): Le
     if (told.has(o.seq)) continue;
     out.push({ kind: o.reason === "confirm" ? "confirm" : o.reason === "parked" && o.from === agent ? "parked" : "offer", lead: l.id, offer: o.seq, text: offerText(l, o, agent, snap), wakes: true });
   }
+  // A review offered to this seat (a route review, a negative's review).
+  for (const { key, offer: o } of reviewOffersFor(agent, snap)) {
+    if (told.has(o.seq)) continue;
+    out.push({ kind: "review_offer", lead: key, offer: o.seq, text: reviewOfferText(key, o, snap), wakes: true });
+  }
+  return out;
+}
+
+/** The reviews offered to a seat now, each still held for it. */
+export function reviewOffersFor(agent: string, snap: LeadsSnapshot): Array<{ key: string; offer: O.Offer }> {
+  const out: Array<{ key: string; offer: O.Offer }> = [];
+  for (const [key, list] of snap.state.reviewOffers) {
+    const o = O.reservingOffer(list, snap.at, reviewRev(key, snap.state));
+    if (o && o.to === agent) out.push({ key, offer: o });
+  }
   return out;
 }
 
@@ -2941,6 +3249,8 @@ function lineOf(x: LeadView): string {
  */
 export async function leadsDigest(ctx: P.SwarmContext, o: { mark?: boolean } = {}): Promise<LeadsDigest> {
   await reopenOnLedger(ctx.sandboxRoot).catch(() => undefined);
+  // A review due goes to one seat (a route review, a negative's review): offered before the header is made, so it is delivered in it.
+  await offerReviews(ctx.sandboxRoot).catch(() => 0);
   // What the question register committed and has not yet made good goes
   // first: what an act implies on the lead register (a withdrawal's leads
   // closed or sent to triage), then what it publishes (a crash between an
@@ -3035,7 +3345,8 @@ export async function negativeLines(sandboxRoot: string, snap: LeadsSnapshot): P
     const rev = P.negativeReview(a, snap.ledger.entries, attestations);
     if (rev.reviewed) continue;
     const cov = (a.support ?? []).map((x) => snap.ledger.bySeq.get(x.seq)).filter((e): e is P.LedgerEntry => e?.kind === "coverage");
-    unreviewed.push(`${a.section} (E-${a.seq} ${NB.resultWords(r)}, by ${a.authors.join(", ")}${cov.length ? `; coverage ${cov.map((c) => `E-${c.seq} ${c.coverage ?? "?"}`).join(", ")}` : "; no coverage record"})`);
+    const offered = O.reservingOffer(snap.state.reviewOffers.get(`E-${a.seq}`) ?? [], snap.at, 1);
+    unreviewed.push(`${a.section} (E-${a.seq} ${NB.resultWords(r)}, by ${a.authors.join(", ")}${cov.length ? `; coverage ${cov.map((c) => `E-${c.seq} ${c.coverage ?? "?"}`).join(", ")}` : "; no coverage record"}${offered ? `; its review is offered to ${offered.to}` : ""})`);
   }
   if (unreviewed.length) out.push(`Negatives awaiting review by another seat (the finish line waits for each; attest the answer or its coverage record with review {detection, reproduced, other_route}): ${unreviewed.join("; ")}.`);
   const quick: string[] = [];
@@ -3088,6 +3399,7 @@ export function leadsWaitCheck(ctx: P.SwarmContext): () => Promise<string | null
     sig = next;
     // A confirmation window that lapsed reopens its lead here too, so a waiting seat sees it.
     if (due) await reopenOnLedger(ctx.sandboxRoot, now).catch(() => undefined);
+    if (due) await offerReviews(ctx.sandboxRoot, now).catch(() => 0);
     const snap = await leadsSnapshot(ctx.sandboxRoot);
     const before = await readTold(ctx.sandboxRoot, ctx.agentId);
     const waking = noticesFor(ctx.agentId, before, snap).filter((n) => n.wakes);

@@ -149,8 +149,9 @@ status settles nothing. A need dropped is withdrawn with why, never met.
 **Offer**:
 First claim on a piece of work for one seat, for a minute from when it
 reached the seat: a lead nobody holds, a hand-off, a parked lead, a reopen
-after the operator's note, a closure to confirm, or a person's question.
-Accepted, declined, invalidated by a change to the work, or lapsed.
+after the operator's note, a closure to confirm, a person's question, or a
+review (a limiting route's, a material negative's). Accepted, declined,
+invalidated by a change to the work, or lapsed.
 _Avoid_: wake, assignment
 
 **Parked lead**:

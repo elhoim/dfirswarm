@@ -128,6 +128,8 @@ export type RunMetrics = {
     recorded: boolean;
     leads: OfferCounts & { by_reason: Record<string, OfferCounts> };
     questions: { made: number; accepted: number; declined: number; not_taken_up: number };
+    /** Reviews offered to one seat (a limiting route's review, a material negative's review): taken up by the review, declined, lapsed, or still open. */
+    reviews: { made: number; accepted: number; declined: number; lapsed: number; open: number; by_reason: Record<string, number> };
     wakes_before_offers: { recorded: boolean; made: number; taken_by_woken: number; taken_by_another: number; not_taken: number };
   };
   done: {
@@ -425,9 +427,19 @@ function offers(c: Context): RunMetrics["offers"] {
   // Read by name: a register from before offers has none of these kinds, and one from after has more.
   const ev = c.leadEvents as unknown as Array<Rec & { seq: number; ev: string; lead?: string; to?: string; holder?: string; by: string }>;
   const recorded = ev.some((e) => e.ev.startsWith("offer"));
+  const reviews = { made: 0, accepted: 0, declined: 0, lapsed: 0, open: 0, by_reason: {} as Record<string, number> };
   for (let i = 0; i < ev.length; i += 1) {
     const e = ev[i];
     if (e.ev !== "offer" && e.ev !== "wake") continue;
+    // A review's offer is answered by what names it (the review that took it up, a decline, a lapse), never by a claim.
+    if (e.ev === "offer" && (e.reason === "route_review" || e.reason === "negative_review")) {
+      const after = ev.slice(i + 1).filter((x) => x.offer === e.seq);
+      const how = after.some((x) => x.ev === "offer_accept" || x.ev === "route_review") ? "accepted" : after.some((x) => x.ev === "offer_decline") ? "declined" : after.some((x) => x.ev === "offer_lapse") ? "lapsed" : "open";
+      reviews.made += 1;
+      reviews[how] += 1;
+      reviews.by_reason[str(e.reason)] = (reviews.by_reason[str(e.reason)] ?? 0) + 1;
+      continue;
+    }
     const lead = str(e.lead);
     const to = str(e.to);
     // What happened to it while it stood: until the lead's next claim (or a confirm), release, close or reopen.
@@ -465,7 +477,7 @@ function offers(c: Context): RunMetrics["offers"] {
   const answeredQ = (seq: number, what: string) => qev.some((x) => x.ev === what && (x as Rec).offer === seq);
   const questions = { made: qOffers.length, accepted: qOffers.filter((o) => answeredQ(o.seq, "offer_accept")).length, declined: qOffers.filter((o) => answeredQ(o.seq, "offer_decline")).length, not_taken_up: 0 };
   questions.not_taken_up = questions.made - questions.accepted - questions.declined;
-  return { recorded: recorded || qOffers.length > 0, leads, questions, wakes_before_offers: { recorded: c.have.leads, ...wakes } };
+  return { recorded: recorded || qOffers.length > 0, leads, questions, reviews, wakes_before_offers: { recorded: c.have.leads, ...wakes } };
 }
 
 /** done calls, from the trace: each seat's own line, the hub's refusals of markDone, and a finish that was not the seat's (done_deferred). */
@@ -960,6 +972,7 @@ export function metricsText(m: RunMetrics): string {
     ["Negatives on partial coverage", cov.recorded ? `${cov.negatives_on_partial.length} (${list(cov.negatives_on_partial.map((x) => `${qname(x)} ${x.answer}`))}); ${cov.negatives_without_coverage.length} cite no coverage record` : absent(LEDGER)],
     ["Offers (leads)", o.recorded ? `${o.leads.made} made: ${o.leads.accepted} accepted, ${o.leads.declined} declined, ${o.leads.taken_by_another} taken by another seat, ${o.leads.lapsed} lapsed, ${o.leads.open} with no outcome` : o.wakes_before_offers.recorded ? "not recorded (no offer events: a run from before offers)" : absent(LEADS)],
     ["Offers (questions)", o.recorded ? `${o.questions.made} made: ${o.questions.accepted} accepted, ${o.questions.declined} declined, ${o.questions.not_taken_up} not taken up` : o.wakes_before_offers.recorded ? "not recorded (no offer events: a run from before offers)" : absent(LEADS)],
+    ["Offers (reviews)", o.recorded ? `${o.reviews.made} made (${Object.entries(o.reviews.by_reason).map(([k, n]) => `${k} ${n}`).join(", ") || "none"}): ${o.reviews.accepted} taken up, ${o.reviews.declined} declined, ${o.reviews.lapsed} lapsed, ${o.reviews.open} with no outcome` : o.wakes_before_offers.recorded ? "not recorded (no offer events: a run from before offers)" : absent(LEADS)],
     ["Wakes (before offers)", o.wakes_before_offers.recorded ? `${o.wakes_before_offers.made}: ${o.wakes_before_offers.taken_by_woken} taken by the woken seat, ${o.wakes_before_offers.taken_by_another} by another, ${o.wakes_before_offers.not_taken} not taken` : absent(LEADS)],
     ["done calls", d.recorded ? `${d.calls}: ${d.accepted} accepted (${d.created_sentinel} wrote the sentinel), ${d.refused} refused by the seat's checks (${counts(d.refused_by)}), ${d.hub_refused} refused by the hub, ${d.not_yours} not the seat's finish` : absent("readable traces/events.jsonl")],
     ["Tail to the end", !t.end_at ? "not measured (the run has not ended)" : `${mins(t.minutes_from_ready)} from ready (${t.ready_source ?? "never ready"}); ${t.recorded ? `${mins(t.minutes_from_first_answers)} from the first answers, ${mins(t.minutes_from_final_answers)} from the final ones${t.unanswered.length ? `; unanswered: ${list(t.unanswered)}` : ""}` : `the answer tails ${absent(LEDGER)}`}`],

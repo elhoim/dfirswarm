@@ -41,8 +41,8 @@ export function offerMaxAgeMs(): number {
   return Math.max(offerTtlMs(), envMs("SWARM_OFFER_MAX_SEC", 300));
 }
 
-/** What an offer is for: work nobody holds (wake), a hand-off, a parked lead, a reopen after the operator's note, a closure to confirm, a question. */
-export const OFFER_REASONS = ["wake", "handoff", "parked", "reopen", "confirm", "question"] as const;
+/** What an offer is for: work nobody holds (wake), a hand-off, a parked lead, a reopen after the operator's note, a closure to confirm, a question, a limiting route's review, a material negative's review. */
+export const OFFER_REASONS = ["wake", "handoff", "parked", "reopen", "confirm", "question", "route_review", "negative_review"] as const;
 export type OfferReason = (typeof OFFER_REASONS)[number];
 
 /** An offer as a register folds it from its events. */
@@ -64,6 +64,8 @@ export type Offer = {
   until?: string | null;
   /** The seat that held the work when it was offered (a parked lead, a hand-off). */
   from?: string;
+  /** A review's offer: the answers its item was offered for (a route review is bound to them). */
+  basis?: string;
 };
 
 export type OfferState = "pending" | "live" | "accepted" | "declined" | "lapsed" | "invalidated";

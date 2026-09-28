@@ -239,11 +239,29 @@ have lost its provider.
     superseded (not disputed) and its closer can take it, the closer is
     offered to confirm the closure on what stands now (`lead_confirm`, by
     revision, with the ref and why); declined or unconfirmed it reopens, and
-    a dead or compacting closer's lead reopens at once, whether the closer
-    was so before the offer or became so after it. A same-author
+    a dead or done closer's lead reopens at once, whether the closer was so
+    before the offer or became so after it. A compacting closer is away, not
+    gone: the confirmation waits for it, bounded (five minutes past the
+    compaction's start, `SWARM_CONFIRM_COMPACTION_HOLD_SEC`), the offer made
+    again when its window ran out meanwhile, and reopens past the bound. The
+    review of WP4 had a compacting closer reopen at once (finding 11); on
+    the c10 pilot (s6be12f) L-17 was reopened three times so, each time its
+    closer began compacting as the offer arrived, and the seats woken for it
+    declined it ("its author should confirm"). A same-author
     correction can reverse what a closure rested on, so nothing re-points it
     by itself. A closure waiting for confirmation meets no need and holds
     the finish.
+
+17a. **Reviews are offered** (the c10 pilot, s6be12f: six seats did a
+    route review of one deferred lead within minutes, one of them twice).
+    A limiting lead's route review, once its questions are answered or
+    accepted, and a material negative's review are offered to one eligible
+    seat (never its closer, holders or authors, never one compacting or
+    with an offer standing; the relevant first). A route review is bound to
+    the answers it saw: an answer recorded again asks for a new one.
+    Another seat's review of an item reviewed or offered to another is
+    answered quietly with who has it and records nothing; a second,
+    independent review says why it adds something.
 
 ### Runtime
 
