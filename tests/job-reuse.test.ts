@@ -182,7 +182,15 @@ test("at commit, files that are an earlier job's output byte for byte are named 
   const view = await jobView(S, done);
   assert.deepEqual(view.same_as, [{ path: "y.txt", bytes: 14, same_as: `job:${first.job.id}/x.txt` }]);
   assert.match(describe(done), /1 of its files are an earlier job's output byte for byte/);
-  const line = journal(S).find((l) => l.type === "job_same_as" && l.job === second.job.id)!;
+  // The hint is written after the commit, outside the store's one-at-a-time
+  // section (it never holds a commit up): the committed state can be seen
+  // a moment before its line is on the journal.
+  let line: Record<string, unknown> | undefined;
+  for (let i = 0; i < 100 && !line; i += 1) {
+    line = journal(S).find((l) => l.type === "job_same_as" && l.job === second.job.id);
+    if (!line) await new Promise((r) => setTimeout(r, 50));
+  }
+  assert.ok(line, "the job_same_as line is on the journal");
   assert.deepEqual(line.same_as, done.same_as);
   assert.equal(journal(S).filter((l) => l.type === "job_same_as").length, 1, "the first job and the empty files say nothing");
   await svc.stop("over");
