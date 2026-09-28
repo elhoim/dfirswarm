@@ -2504,7 +2504,10 @@ function lineHashField(text: string): string[] {
 
 /**
  * Whether every chain a verdict sealed is a prefix of the run now: the line
- * it sealed as the last one is still at its place, with the hash it had.
+ * it sealed as the last one is still at its place, with the hash it had,
+ * every chain recomputed over its first lines with its own code (the
+ * ledger, the attestations, the disputes, the registers, the journal), so a
+ * sealed line rewritten with its hash fields kept is broken.
  * What the run appended after it (the continuation of a resumed run, the
  * closing lines of a stop) is allowed; a line it sealed that changed or went
  * is not. Pure over the texts read.
@@ -2545,9 +2548,23 @@ export function sealPrefix(sealed: Partial<Seal> | undefined, now: { trace: stri
     else if (n > 0 && createHash("sha256").update(line ?? "").digest("hex") !== sealed.trace.last_line_sha256) broken.push(`the trace: line ${n} is not the one it sealed`);
     else held.push(`the trace (${n})`);
   }
+  // The attestations and the disputes the same way, each with its own
+  // chain's code: the first n lines recomputed, never their hash fields read.
+  const checkActs = (what: string, n: number | undefined, head: string | null | undefined, text: string, verify: (t: string) => { ok: boolean; reason: string | null; head: string | null }) => {
+    if (n === undefined) return;
+    const lines = text.split("\n").filter((l) => l.trim());
+    if (n > lines.length) {
+      broken.push(`${what}: it sealed ${n} line(s), and ${lines.length} are here`);
+      return;
+    }
+    const v = n > 0 ? verify(`${lines.slice(0, n).join("\n")}\n`) : { ok: true, reason: null, head: null as string | null };
+    if (!v.ok) broken.push(`${what}: its first ${n} line(s) do not chain (${v.reason})`);
+    else if ((v.head ?? null) !== (head ?? null)) broken.push(`${what}: line ${n} is not the one it sealed`);
+    else held.push(`${what} (${n})`);
+  };
   if (sealed.ledger) check("the ledger", sealed.ledger.entries, sealed.ledger.head, verifyLedgerChain(now.ledger).hashes);
-  check("the attestations", sealed.attestations?.lines, sealed.attestations?.head, lineHashField(now.attestations));
-  check("the disputes", sealed.disputes?.lines, sealed.disputes?.head, lineHashField(now.disputes));
+  checkActs("the attestations", sealed.attestations?.lines, sealed.attestations?.head, now.attestations, verifyAttestationChain);
+  checkActs("the disputes", sealed.disputes?.lines, sealed.disputes?.head, now.disputes, verifyDisputeChain);
   checkChain("the lead register", sealed.leads?.lines, sealed.leads?.head, now.leads);
   checkChain("the question register", sealed.questions?.lines, sealed.questions?.head, now.questions);
   checkChain("the network grants", sealed.network?.grants.lines, sealed.network?.grants.head, now.grants);

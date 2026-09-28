@@ -6,6 +6,13 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Fixed: what the first pilot on the new flow showed (c10, run s6be12f)
+
+- **An earlier seal recomputes the attestations and the disputes.** Like the
+  lead, question, network and request chains, their first sealed lines are
+  now chained again with their own code; a sealed line rewritten with its
+  hash fields kept no longer passes as a prefix.
+
 ### Fixed: `--stop operator` no longer forces answers; B16 warns on services, not on English words
 
 - **The operator's stop policy adds no stricter answer requirement.** Under

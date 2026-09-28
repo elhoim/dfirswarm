@@ -117,6 +117,53 @@ test("an earlier seal of the model gateway's log is broken when the log is gone,
   assert.equal(sealPrefix({ model_gateway: { lines: 0, sha256: null } } as never, empty).ok, true, "a log it sealed empty is not missed");
 });
 
+test("an earlier seal holds the attestations and disputes by recomputing their chains: a sealed line rewritten with its hash fields kept is broken", () => {
+  const empty = { trace: "", ledger: "", attestations: "", disputes: "", leads: "", questions: "", grants: "", fetches: "", journal: null, gateway: null };
+  // Two attestations and two disputes, chained as the harness writes them.
+  const att = (lines: P.LedgerAttestation[]) => {
+    let prev = "genesis";
+    return lines.map((a) => {
+      const line = { ...a, prev, hash: P.attestationHash(a, prev) };
+      prev = line.hash;
+      return line;
+    });
+  };
+  const dis = (lines: P.LedgerDispute[]) => {
+    let prev = "genesis";
+    return lines.map((d) => {
+      const line = { ...d, prev, hash: P.disputeHash(d, prev) };
+      prev = line.hash;
+      return line;
+    });
+  };
+  const a = att([
+    { v: 2, act: "attest", seq: 1, target: "a".repeat(64), by: "a1", at: "2026-09-28T10:00:00Z", how: "re-derived it from job:j000001/hits.txt" },
+    { v: 2, act: "attest", seq: 2, target: "b".repeat(64), by: "a2", at: "2026-09-28T10:01:00Z", how: "re-derived it from job:j000002/hits.txt" },
+  ]);
+  const d = dis([
+    { v: 1, act: "dispute", seq: 3, target: "c".repeat(64), by: "a1", at: "2026-09-28T10:02:00Z", why: "line 4 is another host's" },
+    { v: 1, act: "withdraw", seq: 3, target: "c".repeat(64), by: "a1", at: "2026-09-28T10:03:00Z", why: "the host field settles it" },
+  ]);
+  const text = (xs: unknown[]) => `${xs.map((x) => JSON.stringify(x)).join("\n")}\n`;
+  const sealed = { attestations: { lines: 2, head: a[1]!.hash }, disputes: { lines: 2, head: d[1]!.hash } } as never;
+  const intact = sealPrefix(sealed, { ...empty, attestations: text(a), disputes: text(d) });
+  assert.equal(intact.ok, true, intact.broken.join("; "));
+  assert.deepEqual(intact.held, ["the attestations (2)", "the disputes (2)"]);
+  // A sealed attestation's body changed, every hash field left as it was.
+  const forgedA = [{ ...a[0]!, how: "only read it" }, a[1]!];
+  const p1 = sealPrefix(sealed, { ...empty, attestations: text(forgedA), disputes: text(d) });
+  assert.equal(p1.ok, false);
+  assert.match(p1.broken.join("; "), /the attestations: its first 2 line\(s\) do not chain/);
+  // A sealed dispute's withdrawal turned back into a dispute, its hash fields kept.
+  const forgedD = [d[0]!, { ...d[1]!, act: "dispute" as const }];
+  const p2 = sealPrefix(sealed, { ...empty, attestations: text(a), disputes: text(forgedD) });
+  assert.equal(p2.ok, false);
+  assert.match(p2.broken.join("; "), /the disputes: its first 2 line\(s\) do not chain/);
+  // Lines after the sealed ones (a continuation) are allowed.
+  const more = att([...a.map(({ prev: _p, hash: _h, ...x }) => x as P.LedgerAttestation), { v: 2, act: "attest", seq: 4, target: "d".repeat(64), by: "a3", at: "2026-09-28T11:00:00Z", how: "re-derived it" }]);
+  assert.equal(sealPrefix(sealed, { ...empty, attestations: text(more), disputes: text(d) }).ok, true);
+});
+
 test("a resume that cannot be anchored changes nothing", async () => {
   const r = await stoppedRun({ id: "srv5" });
   await asEnded(r);
