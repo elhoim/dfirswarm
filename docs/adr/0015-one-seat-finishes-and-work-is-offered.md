@@ -164,7 +164,11 @@ have lost its provider.
     question revision, the hashes of its support, contrary evidence and
     limitations); a reworded correction keeps it standing, a changed support
     takes it down, and a question withdrawn or re-scoped since is a gate
-    defect. The answer it names this way is not also held by its seq.
+    defect. The answer's contrary evidence is held to its current standing
+    as its support is: an entry it weighed that was corrected (and the
+    correction not weighed) or disputed since takes the answer down, and
+    the summary with it. The answer it names this way is not also held by
+    its seq.
 
 ### Coordination (A1–A3)
 

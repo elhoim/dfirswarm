@@ -9537,7 +9537,8 @@ export function symbolicQuestions(text: string): string[] {
  * an entry it cites was superseded and its correction is not cited with it,
  * or was disputed (or rests on a failed job) and the answer does not qualify
  * it, or is an answer that itself no longer stands; or the cited hash is not
- * the entry's. `failed` names, by seq, the entries resting on a failed job's
+ * the entry's. Its contrary evidence is held to the same: corrected or
+ * disputed since it was weighed, the answer is weighed again. `failed` names, by seq, the entries resting on a failed job's
  * output that they do not qualify themselves.
  */
 export function answerProblems(entries: LedgerEntry[], disputes: LedgerDispute[], failed: Map<number, string[]> = new Map()): Map<number, string[]> {
@@ -9554,7 +9555,7 @@ export function answerProblems(entries: LedgerEntry[], disputes: LedgerDispute[]
     visiting.add(a.seq);
     const out: string[] = [];
     const qualified = (seq: number) => (a.qualifies ?? []).some((q) => q.ref === `E-${seq}`);
-    const cited = new Set([...(a.support ?? []), ...(a.limitations ?? [])].map((x) => x.seq));
+    const cited = new Set([...(a.support ?? []), ...(a.contrary ?? []), ...(a.limitations ?? [])].map((x) => x.seq));
     // A summary's symbolic citations (A4): each question's standing answer,
     // held to the fingerprint it had when cited, never to its seq alone.
     for (const r of a.question_refs ?? []) {
@@ -9595,6 +9596,29 @@ export function answerProblems(entries: LedgerEntry[], disputes: LedgerDispute[]
           if (sub.length) out.push(`it ${role} E-${t.seq}, an answer that no longer stands on its own support`);
         }
       }
+    }
+    // The contrary evidence it weighed (A4): the weighing was of the entry
+    // as it stood. Corrected since (and the correction not weighed with it)
+    // or disputed (and not qualified), what the answer concludes against it
+    // is to be weighed again; its fingerprint holds the hashes it cited, so
+    // only its current standing shows the change.
+    for (const edge of a.contrary ?? []) {
+      const t = bySeq.get(edge.seq);
+      if (!t) {
+        out.push(`it weighs E-${edge.seq} as contrary evidence, which is not in the ledger`);
+        continue;
+      }
+      if ((t.hash ?? ledgerHash(t, "genesis")) !== edge.hash) {
+        out.push(`it weighs E-${edge.seq} as contrary evidence by a hash that is not that entry's`);
+        continue;
+      }
+      if (replaced.has(t.seq)) {
+        const now = standingSeq(t.seq, replaced);
+        if (!cited.has(now)) out.push(`it weighs E-${t.seq} as contrary evidence, superseded by #${now}, and does not weigh the correction`);
+        continue;
+      }
+      const against = disputed.get(edge.hash);
+      if (against?.length && !qualified(t.seq)) out.push(`it weighs E-${t.seq} as contrary evidence, disputed by ${against.map(disputeWords).join("; ")}`);
     }
     visiting.delete(a.seq);
     memo.set(a.seq, out);

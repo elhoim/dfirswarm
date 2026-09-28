@@ -250,3 +250,29 @@ test("the negative's review is unchanged by strengths: a reviewed negative answe
   refused(await P.attestEntry(c.a2, { seq: ans.seq, how: "x", strength: "established", answer_review: review() }), /answer_review is for an answer to a question; #\d+ is a negative/);
   assert.ok((await P.attestEntry(c.a2, { seq: ans.seq, how: "ran it again", review: REVIEW })).ok);
 });
+
+test("A4/B18: a contrary entry corrected or disputed after an answer weighed it takes the answer down, and a summary citing its question with it, though the answer was never recorded again", async () => {
+  const c = await run();
+  await planned(c.a0, "1");
+  const f = ok(await rec(c.a0, { kind: "finding", ...F, value: "Bob logged on", source: "the log", evidence: "line 1", refs: ["job:j000002/hits.txt"], answers: ["1"] })).entry;
+  const x = ok(await rec(c.a2, { kind: "finding", ...F, value: "The session on line 1 was a service account", source: "the log", evidence: "line 1's logon type", refs: ["job:j000002/hits.txt"], answers: ["1"] })).entry;
+  const a = ok(await rec(c.a1, { kind: "answer", section: "question:1", value: "Bob", reasoning: `E-${f.seq} shows it; E-${x.seq} says a service account, but the logon type is interactive`, contrary: [x.seq], result: "established", ...HIGH })).entry;
+  const sum = ok(await rec(c.a3, { kind: "answer", section: "summary", value: "Bob logged on (Q-1).", reasoning: "Q-1 says who." })).entry;
+  const problems = async () => P.answerProblems(await P.readLedger(c.S), await P.readDisputes(c.S));
+  assert.equal((await problems()).size, 0);
+  // The contrary entry is corrected materially: the weighing no longer stands.
+  const x2 = ok(await rec(c.a2, { kind: "finding", ...F, value: "The session on line 1 was Bob's, by his own password, remotely", source: "the log", evidence: "line 1's logon type and source address", refs: ["job:j000002/hits.txt"], answers: ["1"], supersedes: x.seq, because: "the logon type was read from the wrong column" })).entry;
+  let p = await problems();
+  assert.ok(p.get(a.seq)?.some((m) => new RegExp(`weighs E-${x.seq} as contrary evidence, superseded by #${x2.seq}, and does not weigh the correction`).test(m)), JSON.stringify([...p]));
+  assert.ok(p.get(sum.seq)?.some((m) => new RegExp(`it cites Q-1 \\(question:1\\), whose answer E-${a.seq} no longer stands on its own support`).test(m)), JSON.stringify([...p]));
+  const gate = P.ledgerGate({ entries: await P.readLedger(c.S), attestations: await P.readAttestations(c.S), disputes: await P.readDisputes(c.S), sections: ["question:1", "summary"] });
+  assert.ok(gate.open.some((d) => d.section === "question:1"), JSON.stringify(gate.open));
+  // Re-weighed: the answer recorded again with the correction as its contrary evidence stands.
+  const a2 = ok(await rec(c.a1, { kind: "answer", section: "question:1", value: "Bob, remotely", reasoning: `E-${f.seq} shows it; E-${x2.seq} places it remotely`, contrary: [x2.seq], result: "established", ...HIGH, supersedes: a.seq })).entry;
+  p = await problems();
+  assert.equal(p.has(a2.seq), false, JSON.stringify([...p]));
+  // A dispute of the contrary entry is a change of it too, until the answer qualifies it.
+  assert.ok((await P.disputeEntry(c.a0, { seq: x2.seq, why: "the source address is the jump host" })).ok);
+  p = await problems();
+  assert.ok(p.get(a2.seq)?.some((m) => new RegExp(`weighs E-${x2.seq} as contrary evidence, disputed by a0`).test(m)), JSON.stringify([...p]));
+});

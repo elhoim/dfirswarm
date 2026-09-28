@@ -39,7 +39,9 @@ All notable changes to this project. The format follows
   the answers check holds examination-limited. A dispute stays in force on
   the correction of the entry it named until its disputer withdraws it. An
   interpretation is bound to its entry. Agents reopen with `lead_reopen`,
-  within the operator's restrictions.
+  within the operator's restrictions. An answer's contrary evidence is held
+  to its standing as its support is: corrected or disputed since it was
+  weighed, it takes the answer down, and a summary citing its question.
 - **Work is offered.** Wakes, hand-offs (`lead_handoff`), parked leads, a
   reopen after the operator's note and a closure to confirm are offers: first
   claim for a minute from delivery, bounded, accepted or declined (`offer`),
