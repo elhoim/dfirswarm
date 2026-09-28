@@ -20,8 +20,10 @@
  * custody checks it with the same code); `operator-requests.jsonl`, which the
  * console, the CLI, the calibration scorer and the package have always read,
  * is rendered from it after every write, one line per request as it stands,
- * and `requests/requests.md` beside it. A run from before the chain keeps its
- * lines: the first write imports each one whole.
+ * and `requests/requests.md` beside it, never over a line the chain does not
+ * hold: a run from before the chain, a first write cut off, or a line an
+ * older harness appended since, each imported whole by its sha256 before
+ * anything else is written (the first import published at once, by rename).
  *
  * The lifecycle: pending (committed, nobody told yet) → notified (the
  * operator's notification targets were handed its id) → acknowledged → one
@@ -33,10 +35,14 @@
  * absent. Under `yes` the policy authorises it, and the operator collects.
  *
  * Notifications carry ids only (the request's, its kind, the lead's or
- * question's id), never what was asked: a notification leaves the host.
+ * question's id), never what was asked: a notification leaves the host. A
+ * delivery is claimed on the chain before it is sent, so two dispatchers
+ * (the hub, the watchdog's fallback) never both send one. The operator's
+ * acts are said on the board from their events, once each, by key.
  * Nothing here knows a case or a tool.
  */
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { mkdir, open, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
@@ -85,7 +91,7 @@ export type AcquisitionAsk = {
   authority_needed: string;
 };
 
-export type RequestEventKind = "open" | "notified" | "acknowledged" | "answered" | "declined" | "withdrawn" | "stage";
+export type RequestEventKind = "open" | "notified" | "acknowledged" | "answered" | "declined" | "withdrawn" | "stage" | "claimed" | "delivery_failed";
 
 export type RequestEvent = {
   v: 1;
@@ -106,6 +112,14 @@ export type RequestEvent = {
   lead?: string;
   /** A line of a run from before the chain, kept whole. */
   imported?: boolean;
+  /** An imported line: the sha256 of the line as the view held it, by which it is imported once. */
+  line_sha256?: string;
+  /** An imported line the watchdog of a run from before the chain had notified already (its traces/idle-nudge.requests count covered it). */
+  legacy_notified?: boolean;
+  /** claimed, notified, delivery_failed: the dispatch that claimed the delivery, so two dispatchers never both send. */
+  claim?: string;
+  /** An operator's act made through requests-cli or the console: said on the board, once, derived from this event. */
+  announce?: boolean;
   // notified
   targets?: string[];
   notice?: Record<string, unknown>;
@@ -136,6 +150,13 @@ export type OperatorRequest = {
   questions: string[];
   lead: string | null;
   imported: boolean;
+  /** Imported, and notified already by the watchdog of the run from before the chain. */
+  legacy_notified: boolean;
+  /** A delivery claimed and not yet settled (notified, or failed): no other dispatch sends it while the claim is fresh. */
+  claim: { at: string; token: string } | null;
+  /** Deliveries that failed since the last success, and when the last did: the next is tried after a backoff. */
+  failures: number;
+  last_failure_at: string | null;
   state: RequestState;
   stage: AcquisitionStage | null;
   notified: Array<{ at: string; targets: string[] }>;
@@ -217,6 +238,10 @@ export function foldRequests(events: RequestEvent[], chain: RequestsState["chain
         questions: [...(e.questions ?? e.ask?.questions ?? [])],
         lead: e.lead ?? null,
         imported: e.imported === true,
+        legacy_notified: e.legacy_notified === true,
+        claim: null,
+        failures: 0,
+        last_failure_at: null,
         state: "pending",
         stage: e.kind === "acquisition" ? "requested" : null,
         notified: [],
@@ -231,11 +256,28 @@ export function foldRequests(events: RequestEvent[], chain: RequestsState["chain
     }
     const r = requests.get(e.rid);
     if (!r) continue;
+    if (e.ev === "claimed") {
+      r.claim = { at: e.at, token: e.claim ?? "" };
+      continue;
+    }
+    if (e.ev === "delivery_failed") {
+      if (!r.claim || r.claim.token === e.claim) r.claim = null;
+      // No target took it (none configured for this notifier): released, never a failure to back off from.
+      if (e.cause !== "no_target") {
+        r.failures += 1;
+        r.last_failure_at = e.at;
+      }
+      r.history.push({ seq: e.seq, at: e.at, ev: e.ev, by: e.by, ...(e.why ? { why: e.why } : {}) });
+      r.last_seq = e.seq;
+      continue;
+    }
     r.history.push({ seq: e.seq, at: e.at, ev: e.ev, by: e.by, ...(e.text ? { text: e.text } : {}), ...(e.why ? { why: e.why } : {}), ...(e.cause ? { cause: e.cause } : {}), ...(e.stage ? { stage: e.stage } : {}), ...(e.targets ? { targets: e.targets } : {}) });
     r.last_seq = e.seq;
     switch (e.ev) {
       case "notified":
         r.notified.push({ at: e.at, targets: e.targets ?? [] });
+        r.claim = null;
+        r.failures = 0;
         break;
       case "acknowledged":
         if (!r.acknowledged) r.acknowledged = { at: e.at, by: e.by };
@@ -307,11 +349,11 @@ async function appendHeld(sandboxRoot: string, drafts: RequestDraft[], held: P.H
 /** Run fn under the requests' lock with the state read inside it; what it returns is appended and the views rendered. */
 async function transact<T>(sandboxRoot: string, fn: (s: RequestsState) => Promise<{ append: RequestDraft[]; result: T }>): Promise<T & { events: RequestEvent[] }> {
   return P.withNamedLock(sandboxRoot, LOCK, async (held) => {
-    await importLegacy(sandboxRoot, held);
+    const imported = await importLegacy(sandboxRoot, held);
     const s = await requestsSnapshot(sandboxRoot);
     const { append, result } = await fn(s);
     const events = append.length ? await appendHeld(sandboxRoot, append, held) : [];
-    if (events.length) await renderViews(sandboxRoot).catch(() => undefined);
+    if (events.length || imported) await renderViews(sandboxRoot).catch(() => undefined);
     return { ...result, events };
   });
 }
@@ -328,30 +370,102 @@ function legacyKey(o: Record<string, unknown>, i: number): { kind: RequestKind; 
 }
 
 /**
- * The first write in a run whose operator-requests.jsonl predates the chain
- * (a resumed run): each of its lines becomes a request, kept whole, before
- * anything else is written, so the rendered view never loses one.
+ * How far the watchdog of a run from before the chain had notified its
+ * lines: traces/idle-nudge.requests held the count of view lines it had
+ * handed to notify.sh. A value that is not such a count (none, or the new
+ * watchdog's time mark) says nothing, and nothing is taken as notified.
  */
-async function importLegacy(sandboxRoot: string, held: P.HeldLock): Promise<void> {
-  if (existsSync(join(sandboxRoot, REQUESTS_LOG))) return;
-  const text = await readFile(join(sandboxRoot, REQUESTS_VIEW), "utf8").catch(() => "");
-  if (!text.trim()) return;
-  const drafts: RequestDraft[] = [];
-  let i = 0;
-  for (const raw of text.split("\n")) {
+async function legacyNotifiedCount(sandboxRoot: string): Promise<number> {
+  const raw = (await readFile(join(sandboxRoot, "traces", "idle-nudge.requests"), "utf8").catch(() => "")).trim();
+  const n = /^\d{1,6}$/.test(raw) ? Number(raw) : 0;
+  return n;
+}
+
+/** A line of the view no chain event holds: one from before the chain, or written by an older harness since. */
+function unimported(viewText: string, s: RequestsState): Array<{ raw: string; o: Record<string, unknown>; sha: string; index: number }> {
+  const heldSha = new Set<string>();
+  const heldLine = new Set<string>();
+  for (const e of s.events) {
+    if (e.ev !== "open") continue;
+    if (e.line_sha256) heldSha.add(e.line_sha256);
+    if (e.imported && e.line) heldLine.add(JSON.stringify(P.canonicalValue(e.line)));
+  }
+  const out: Array<{ raw: string; o: Record<string, unknown>; sha: string; index: number }> = [];
+  let index = 0;
+  for (const raw of viewText.split("\n")) {
     if (!raw.trim()) continue;
-    i += 1;
+    index += 1;
     let o: Record<string, unknown>;
     try {
       o = JSON.parse(raw) as Record<string, unknown>;
     } catch {
       o = { unreadable: raw };
     }
-    if (typeof o.rid === "string") continue;
-    const { kind, key } = legacyKey(o, i);
-    drafts.push({ at: typeof o.at === "string" ? o.at : undefined, by: String(o.by ?? "harness"), ev: "open", rid: `R-${drafts.length + 1}`, kind, key, line: o, imported: true, ...(typeof o.lead === "string" ? { lead: o.lead } : {}) });
+    // A line rendered from the chain names a request the chain holds.
+    if (typeof o.rid === "string" && s.requests.has(o.rid)) continue;
+    const sha = P.sha256Hex(raw.trim());
+    if (heldSha.has(sha) || heldLine.has(JSON.stringify(P.canonicalValue(o)))) continue;
+    out.push({ raw, o, sha, index });
   }
-  if (drafts.length) await appendHeld(sandboxRoot, drafts, held);
+  return out;
+}
+
+/**
+ * Every line of operator-requests.jsonl that the chain does not hold,
+ * imported whole before anything else is written, so the rendered view
+ * never loses one: a run from before the chain (its first write), a chain
+ * whose first write was cut off (an empty or absent requests.jsonl beside a
+ * view with lines is an initialisation not finished, never a finished one),
+ * and a line an older harness appended since. Each is found again by its
+ * sha256, and imported once. The first import is published whole: written
+ * beside the chain, flushed, and renamed onto it, so a crash leaves either
+ * no chain (and the view untouched) or all of it.
+ */
+async function importLegacy(sandboxRoot: string, held: P.HeldLock): Promise<boolean> {
+  const text = await readFile(join(sandboxRoot, REQUESTS_VIEW), "utf8").catch(() => "");
+  if (!text.trim()) return false;
+  const s = await requestsSnapshot(sandboxRoot);
+  if (!s.chain.ok) return false;
+  const lines = unimported(text, s);
+  if (!lines.length) return false;
+  const notifiedBefore = s.events.length ? 0 : await legacyNotifiedCount(sandboxRoot);
+  let next = Math.max(0, ...[...s.requests.values()].map((x) => x.n));
+  const drafts: RequestDraft[] = [];
+  for (const { o, sha, index } of lines) {
+    const legacy = legacyKey(o, index);
+    const key = s.byKey.has(legacy.key) || drafts.some((d) => d.key === legacy.key) ? `legacy:${sha}` : legacy.key;
+    next += 1;
+    drafts.push({ at: typeof o.at === "string" ? o.at : undefined, by: String(o.by ?? "harness"), ev: "open", rid: `R-${next}`, kind: legacy.kind, key, line: o, imported: true, line_sha256: sha, ...(index <= notifiedBefore ? { legacy_notified: true } : {}), ...(typeof o.lead === "string" ? { lead: o.lead } : {}) });
+  }
+  if (s.events.length) {
+    await appendHeld(sandboxRoot, drafts, held);
+    return true;
+  }
+  // The first write: the whole import at once, never an empty or partial chain.
+  let prev = "genesis";
+  const out: string[] = [];
+  let seq = 0;
+  for (const raw of drafts) {
+    seq += 1;
+    const draft = { v: 1 as const, seq, at: raw.at ?? new Date().toISOString(), ...Object.fromEntries(Object.entries(raw).filter(([k, x]) => k !== "at" && x !== undefined)) } as Omit<RequestEvent, "prev" | "hash">;
+    const withPrev = { ...draft, prev } as Omit<RequestEvent, "hash">;
+    const e = { ...withPrev, hash: requestEventHash(withPrev, prev) } as RequestEvent;
+    out.push(`${JSON.stringify(e)}\n`);
+    prev = e.hash;
+  }
+  await mkdir(join(sandboxRoot, REQUESTS_DIR), { recursive: true });
+  await held.assertOwned();
+  const path = join(sandboxRoot, REQUESTS_LOG);
+  const tmp = `${path}.import-${process.pid}-${Math.random().toString(36).slice(2)}`;
+  const fh = await open(tmp, "w");
+  try {
+    await fh.write(out.join(""));
+    await fh.sync();
+  } finally {
+    await fh.close();
+  }
+  await rename(tmp, path);
+  return true;
 }
 
 // --- the views -------------------------------------------------------------------------------
@@ -383,6 +497,9 @@ async function writeAtomic(path: string, text: string): Promise<void> {
 /** operator-requests.jsonl and requests/requests.md, rendered from the chain. */
 export async function renderViews(sandboxRoot: string, snap?: RequestsState): Promise<void> {
   const s = snap ?? (await requestsSnapshot(sandboxRoot));
+  // A view that holds a line the chain does not (a run from before the chain, an older harness's line) is never rewritten from the chain: the next write imports it first.
+  const current = await readFile(join(sandboxRoot, REQUESTS_VIEW), "utf8").catch(() => "");
+  if (current.trim() && unimported(current, s).length) return;
   const list = [...s.requests.values()].sort((a, b) => a.n - b.n);
   await writeAtomic(join(sandboxRoot, REQUESTS_VIEW), list.map((r) => `${JSON.stringify(viewLine(r))}\n`).join(""));
   const md: string[] = ["# Operator requests", "", "What the run asked of a person, and how each request stands. Rendered by the harness from `requests/requests.jsonl` after every change; do not edit.", ""];
@@ -632,7 +749,8 @@ export async function reconcileRequests(sandboxRoot: string): Promise<{ opened: 
   // Read first, without the lock: a header or a round that finds nothing to write takes no lock.
   if (existsSync(join(S, REQUESTS_LOG)) || !existsSync(join(S, REQUESTS_VIEW))) {
     const now = await requestsSnapshot(S);
-    if (now.chain.ok && !plan(now).append.length) return { opened: [], closed: [] };
+    const view = await readFile(join(S, REQUESTS_VIEW), "utf8").catch(() => "");
+    if (now.chain.ok && !plan(now).append.length && !unimported(view, now).length) return { opened: [], closed: [] };
   }
   const r = await transact(S, async (s) => {
     const p = plan(s);
@@ -666,8 +784,9 @@ export async function countKind(sandboxRoot: string, kind: RequestKind): Promise
   const s = await requestsSnapshot(sandboxRoot);
   let n = 0;
   for (const r of s.requests.values()) if (r.kind === kind) n += 1;
-  if (s.events.length) return n;
-  for (const l of await readRequestLines(sandboxRoot)) if ((l.kind ?? "lead") === kind) n += 1;
+  // And the view's lines the chain does not hold yet (a run from before the chain, not imported yet).
+  const view = await readFile(join(sandboxRoot, REQUESTS_VIEW), "utf8").catch(() => "");
+  for (const l of unimported(view, s)) if ((l.o.kind ?? "lead") === kind) n += 1;
   return n;
 }
 
@@ -698,7 +817,7 @@ const STAGE_NEXT: Record<AcquisitionStage, AcquisitionStage[]> = {
  * lifecycle ends; an act on a closed request, or a stage out of order, is
  * refused with why.
  */
-export async function requestAct(sandboxRoot: string, rawId: unknown, act: { ev: "acknowledged" | "answered" | "declined" | "withdrawn" | "stage"; by: string; text?: string; why?: string; stage?: AcquisitionStage; import?: string; inventory_rev?: number; sha256?: string[]; cause?: string }): Promise<RequestActResult> {
+export async function requestAct(sandboxRoot: string, rawId: unknown, act: { ev: "acknowledged" | "answered" | "declined" | "withdrawn" | "stage"; by: string; text?: string; why?: string; stage?: AcquisitionStage; import?: string; inventory_rev?: number; sha256?: string[]; cause?: string; announce?: boolean }): Promise<RequestActResult> {
   const ref = requestRef(rawId);
   if (!ref.ok) return ref;
   const text = String(act.text ?? "").trim();
@@ -742,6 +861,8 @@ export async function requestAct(sandboxRoot: string, rawId: unknown, act: { ev:
           break;
         }
       }
+      // The operator's act is said on the board, once, derived from its event (publishRequestActs).
+      if (act.announce && drafts.length) drafts[0] = { ...drafts[0], announce: true };
       return { append: drafts, result: { ok: true } };
     });
     if (!r.ok) return r;
@@ -819,43 +940,115 @@ export function scriptNotifier(runsDir?: string): Notifier {
       child.on("error", () => done(null));
       child.on("close", (code) => done(code));
     });
-    return status === 0 ? { targets } : { targets: [] };
+    if (status !== 0) throw new Error(`notify.sh ${status === null ? "could not be run" : `exited ${status}`}`);
+    return { targets };
   };
+}
+
+/** How long a claimed delivery is held before another dispatch may take it over (its dispatcher died between the claim and the outcome). */
+export const DELIVERY_CLAIM_TTL_MS = 10 * 60_000;
+
+/** The wait after the n-th failed delivery in a row before the next is tried: one minute, doubling, at most an hour. */
+export function deliveryBackoffMs(failures: number): number {
+  return failures <= 0 ? 0 : Math.min(60_000 * 2 ** (failures - 1), 3_600_000);
 }
 
 /**
  * The outbox's delivery: every request committed and not yet notified is
- * handed to the notifier with its ids, and `notified` goes on the chain
- * after the hand-over. A crash between the commit and the hand-over leaves
- * it pending, and the next dispatch sends it; a crash between the hand-over
- * and the `notified` line sends it once more (at least once, by its id).
- * A closed request is not notified. With no target configured nothing is
- * sent and the request stays pending.
+ * claimed on the chain first (a `claimed` event, under the requests' lock),
+ * then handed to the notifier with its ids, and `notified` (or
+ * `delivery_failed`) goes on the chain after. Two dispatchers (the hub and
+ * the watchdog's fallback) never both send one: the second finds it claimed.
+ * A crash between the commit and the hand-over leaves it unclaimed or its
+ * claim going stale, and the next dispatch sends it; a crash between the
+ * hand-over and the `notified` line sends it once more once the claim is
+ * stale (at least once, by its id). A failed delivery is tried again after
+ * a backoff. A closed request is not notified; an imported one is, unless
+ * the watchdog of its run from before the chain had notified it. With no
+ * target configured nothing is claimed, sent or written: the request stays
+ * pending.
  */
-export async function dispatchRequests(sandboxRoot: string, o: { notifier?: Notifier; runsDir?: string } = {}): Promise<Array<{ rid: string; targets: string[] }>> {
-  const notifier = o.notifier ?? scriptNotifier(o.runsDir);
+export async function dispatchRequests(sandboxRoot: string, o: { notifier?: Notifier; runsDir?: string; now?: number } = {}): Promise<Array<{ rid: string; targets: string[] }>> {
   const run = await runId(sandboxRoot);
-  const s = await requestsSnapshot(sandboxRoot);
+  if (!o.notifier && !notifyTargetsOf(runsDirOf(o.runsDir), run).length) return [];
+  const notifier = o.notifier ?? scriptNotifier(o.runsDir);
+  const now = o.now ?? Date.now();
+  const due = (r: OperatorRequest): boolean =>
+    !r.closed &&
+    !r.notified.length &&
+    !(r.imported && r.legacy_notified) &&
+    !(r.claim && now - Date.parse(r.claim.at) < DELIVERY_CLAIM_TTL_MS) &&
+    !(r.failures && r.last_failure_at && now - Date.parse(r.last_failure_at) < deliveryBackoffMs(r.failures));
+  const before = await requestsSnapshot(sandboxRoot);
+  if (!before.chain.ok || ![...before.requests.values()].some(due)) return [];
+  // The claim, on the chain, before anything is sent.
+  const token = randomUUID();
+  const claimed = await transact(sandboxRoot, async (s) => {
+    const mine = [...s.requests.values()].filter(due).sort((a, b) => a.n - b.n);
+    return { append: mine.map((r) => ({ by: "harness", ev: "claimed" as const, rid: r.rid, claim: token })), result: { rids: mine.map((r) => r.rid) } };
+  });
+  const snap = await requestsSnapshot(sandboxRoot);
   const out: Array<{ rid: string; targets: string[] }> = [];
-  for (const r of [...s.requests.values()].sort((a, b) => a.n - b.n)) {
-    if (r.closed || r.notified.length || r.imported) continue;
+  for (const rid of claimed.rids) {
+    const r = snap.requests.get(rid);
+    if (!r) continue;
     const notice = noticeOf(r, run);
-    const sent = await notifier(sandboxRoot, "operator_request", notice).catch(() => ({ targets: [] as string[] }));
-    if (!sent.targets.length) continue;
-    // Recorded once: a concurrent dispatch that notified it first is not recorded again.
-    await transact(sandboxRoot, async (now) => {
-      const cur = now.requests.get(r.rid);
-      if (!cur || cur.notified.length) return { append: [], result: {} };
-      return { append: [{ by: "harness", ev: "notified" as const, rid: r.rid, targets: sent.targets, notice }], result: {} };
+    let why = "";
+    const sent = await notifier(sandboxRoot, "operator_request", notice).catch((err: Error) => {
+      why = err.message;
+      return { targets: [] as string[] };
     });
-    out.push({ rid: r.rid, targets: sent.targets });
+    await transact(sandboxRoot, async (cur) => {
+      const c = cur.requests.get(rid);
+      if (!c || c.notified.length) return { append: [], result: {} };
+      if (!sent.targets.length) return { append: [{ by: "harness", ev: "delivery_failed" as const, rid, claim: token, ...(why ? { why: `the notifier failed: ${why}` } : { why: "no notification target took it", cause: "no_target" }) }], result: {} };
+      return { append: [{ by: "harness", ev: "notified" as const, rid, targets: sent.targets, notice, claim: token }], result: {} };
+    });
+    if (sent.targets.length) out.push({ rid, targets: sent.targets });
+  }
+  return out;
+}
+
+/** Where the operator's acts already said on the board are noted: a cache of the keyed posts, which are the truth. */
+const ANNOUNCED_REL = "requests/announced.txt";
+
+/**
+ * Each operator's act on a request (acknowledged, answered, declined,
+ * withdrawn, an acquisition's stage) said on the board, once, derived from
+ * its event on the chain and found again by its key (request:<rid>:<seq>):
+ * an act whose post failed, or whose process died after the commit, is said
+ * at the next round. Addressed to the agent that asked, or to all.
+ */
+export async function publishRequestActs(sandboxRoot: string): Promise<Array<{ rid: string; seq: number; post: number }>> {
+  const s = await requestsSnapshot(sandboxRoot);
+  const acts = s.events.filter((e) => e.announce === true);
+  if (!acts.length) return [];
+  const done = new Set((await readFile(join(sandboxRoot, ANNOUNCED_REL), "utf8").catch(() => "")).split("\n").map((x) => x.trim()).filter(Boolean));
+  const out: Array<{ rid: string; seq: number; post: number }> = [];
+  for (const e of acts) {
+    if (done.has(String(e.seq))) continue;
+    const r = s.requests.get(e.rid);
+    if (!r) continue;
+    const what = e.ev === "stage" ? String(e.stage ?? "") : e.ev;
+    const said = e.ev === "answered" ? e.text : e.why;
+    const closed = s.events.filter((x) => x.rid === e.rid && x.seq >= e.seq && (x.ev === "declined" || x.ev === "answered" || x.ev === "withdrawn")).at(0);
+    let words = `OPERATOR on ${r.rid} (${r.kind}${r.lead ? `, ${r.lead}` : ""}): ${what}${said ? `: ${said}` : ""}.`;
+    if (r.kind === "acquisition" && (what === "declined" || closed?.ev === "declined")) words += ` The evidence will not come: record the gap as a limitation (reason unavailable) naming ${r.rid}, and answer on what the evidence holds. That is a limit of this examination, never a finding that the fact is absent.`;
+    if (what === "unavailable") words += ` The source is unavailable: record it as a limitation (reason unavailable) naming ${r.rid}.`;
+    const to = /^[A-Za-z0-9_-]+$/.test(r.by) && !["harness", "operator", "system"].includes(r.by) ? r.by : "all";
+    const post = await P.systemPost(sandboxRoot, { tag: "ask", to, key: `request:${r.rid}:${e.seq}`, body: words });
+    await mkdir(join(sandboxRoot, REQUESTS_DIR), { recursive: true });
+    await writeFile(join(sandboxRoot, ANNOUNCED_REL), `${e.seq}\n`, { flag: "a" });
+    out.push({ rid: r.rid, seq: e.seq, post: post.id });
   }
   return out;
 }
 
 /** Reconcile, then deliver: what the hub runs after every act that may open a request, and on its round. */
-export async function fireRequests(sandboxRoot: string, o: { notifier?: Notifier; runsDir?: string } = {}): Promise<{ opened: string[]; closed: string[]; notified: string[] }> {
+export async function fireRequests(sandboxRoot: string, o: { notifier?: Notifier; runsDir?: string; now?: number } = {}): Promise<{ opened: string[]; closed: string[]; notified: string[] }> {
   const r = await reconcileRequests(sandboxRoot);
+  // The operator's acts not said on the board yet (a post that failed after its commit), said now.
+  await publishRequestActs(sandboxRoot).catch(() => undefined);
   const d = await dispatchRequests(sandboxRoot, o);
   return { opened: r.opened.map((x) => x.rid), closed: r.closed, notified: d.map((x) => x.rid) };
 }

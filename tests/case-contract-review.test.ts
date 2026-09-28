@@ -238,6 +238,35 @@ test("7: B9 holds the name as it is published, a short value marked sensitive, a
   refused(await Q.act(S, operator, "open", { text: "What did alice send?", why: "w" }), /holds a value the run marks sensitive/);
 });
 
+// --- 8 ---------------------------------------------------------------------------------------------
+
+test("8: a migration cut off after the chain file appeared, and a line an older harness wrote since, keep every request line", async () => {
+  const { S, a0 } = await run();
+  const legacy = [
+    { at: "2026-09-27T21:00:10.198Z", run: "cr1", lead: "L-9", by: "a1", title: "Derive the venue", request: "old words", answer: "swarm.sh lead cr1 note L-9 ..." },
+    { at: "2026-09-27T22:00:00.000Z", run: "cr1", kind: "decision", id: "D-1", by: "harness", title: "A stop is proposed", request: "nothing yielded", answer: "swarm.sh stop cr1" },
+  ];
+  await writeFile(join(S, L.OPERATOR_REQUESTS), legacy.map((l) => JSON.stringify(l)).join("\n") + "\n");
+  // The first write died after it made requests.jsonl and before it wrote a line.
+  await mkdir(join(S, R.REQUESTS_DIR), { recursive: true });
+  await writeFile(join(S, R.REQUESTS_LOG), "");
+  // Rendering alone never overwrites lines the chain does not hold.
+  await R.renderViews(S);
+  assert.equal((await readFile(join(S, L.OPERATOR_REQUESTS), "utf8")).trim().split("\n").length, 2);
+  ok(await L.openLead(a0, { title: "t", why: "w", take: true }));
+  ok(await L.closeLead(a0, "L-1", { disposition: "needs_operator", ref: "allow the host example.org for a job" }));
+  const view = () => readFile(join(S, L.OPERATOR_REQUESTS), "utf8").then((t) => t.trim().split("\n").map((l) => JSON.parse(l) as Record<string, unknown>));
+  assert.deepEqual((await view()).map((v) => [v.rid, v.request]), [["R-1", "old words"], ["R-2", "nothing yielded"], ["R-3", "allow the host example.org for a job"]]);
+  // An older harness appends a line of its own to the view: the next write keeps it.
+  const late = { at: "2026-09-28T10:00:00.000Z", run: "cr1", lead: "L-7", by: "a2", title: "An older harness", request: "late words", answer: "swarm.sh lead cr1 note L-7 ..." };
+  await writeFile(join(S, L.OPERATOR_REQUESTS), `${(await readFile(join(S, L.OPERATOR_REQUESTS), "utf8"))}${JSON.stringify(late)}\n`);
+  await R.reconcileRequests(S);
+  assert.deepEqual((await view()).map((v) => v.request), ["old words", "nothing yielded", "allow the host example.org for a job", "late words"]);
+  await R.reconcileRequests(S);
+  assert.equal((await R.requestsSnapshot(S)).requests.size, 4, "imported once");
+  assert.equal(R.verifyRequestChain(await readFile(join(S, R.REQUESTS_LOG), "utf8")).ok, true);
+});
+
 // --- 9 ---------------------------------------------------------------------------------------------
 
 test("9: what the agents are told of added evidence matches the mounts: readable at once, read-only, and cited by its import however it was read", async () => {
@@ -290,6 +319,109 @@ test("11: a job's output attached as material keeps its lineage: a finding citin
   assert.deepEqual(lin.classes.get(answer.entry.seq), ["operator_supplied"]);
   const check = await checkLedgerAnswers(S, ["question:1"]);
   assert.deepEqual(check.external["question:1"]?.classes, ["operator_supplied"]);
+});
+
+// --- 12 --------------------------------------------------------------------------------------------
+
+test("12: the hub and the fallback dispatching at once send a request once", async () => {
+  const { S, a0 } = await run();
+  ok(await L.openLead(a0, { title: "t", why: "w", take: true }));
+  ok(await L.closeLead(a0, "L-1", { disposition: "needs_operator", ref: "allow the host example.org for a job" }));
+  let sends = 0;
+  const slow: R.Notifier = async () => {
+    sends += 1;
+    await new Promise((r) => setTimeout(r, 150));
+    return { targets: ["command"] };
+  };
+  const [x, y] = await Promise.all([R.dispatchRequests(S, { notifier: slow }), R.dispatchRequests(S, { notifier: slow })]);
+  assert.equal(sends, 1, "two notifications escaped");
+  assert.deepEqual([...x, ...y].map((d) => d.rid), ["R-1"]);
+  const r = (await R.requestsSnapshot(S)).requests.get("R-1")!;
+  assert.equal(r.notified.length, 1);
+  assert.equal(r.claim, null);
+  // A claim whose dispatcher died is taken over once it is stale: at least once.
+  ok(await L.openLead(a0, { title: "t2", why: "w", take: true }));
+  ok(await L.closeLead(a0, "L-2", { disposition: "needs_operator", ref: "allow the host example.net for a job" }));
+  await R.reconcileRequests(S);
+  const died: R.Notifier = async () => new Promise(() => undefined);
+  void R.dispatchRequests(S, { notifier: died });
+  await new Promise((r) => setTimeout(r, 100));
+  assert.ok((await R.requestsSnapshot(S)).requests.get("R-2")?.claim);
+  let later = 0;
+  await R.dispatchRequests(S, { notifier: async () => ((later += 1), { targets: ["command"] }) });
+  assert.equal(later, 0, "a fresh claim is not taken over");
+  await R.dispatchRequests(S, { notifier: async () => ((later += 1), { targets: ["command"] }), now: Date.now() + R.DELIVERY_CLAIM_TTL_MS + 1000 });
+  assert.equal(later, 1);
+});
+
+// --- 13 --------------------------------------------------------------------------------------------
+
+test("13: a request imported from a run before the chain is notified unless the old watchdog had notified it", async () => {
+  const { S, a0 } = await run();
+  const legacy = [
+    { at: "2026-09-27T21:00:10.198Z", run: "cr1", lead: "L-9", by: "a1", title: "Derive the venue", request: "old words", answer: "swarm.sh lead cr1 note L-9 ..." },
+    { at: "2026-09-27T22:00:00.000Z", run: "cr1", kind: "decision", id: "D-1", by: "harness", title: "A stop is proposed", request: "nothing yielded", answer: "swarm.sh stop cr1" },
+  ];
+  await writeFile(join(S, L.OPERATOR_REQUESTS), legacy.map((l) => JSON.stringify(l)).join("\n") + "\n");
+  // The old watchdog handed the first line to notify.sh; the second was appended just before the upgrade.
+  await writeFile(join(S, "traces", "idle-nudge.requests"), "1\n");
+  ok(await L.openLead(a0, { title: "t", why: "w", take: true }));
+  ok(await L.closeLead(a0, "L-1", { disposition: "needs_operator", ref: "allow the host example.org for a job" }));
+  const got: string[] = [];
+  await R.dispatchRequests(S, { notifier: async (_s, _e, n) => (got.push(String(n.request)), { targets: ["command"] }) });
+  assert.deepEqual(got, ["R-2", "R-3"]);
+});
+
+// --- 14 --------------------------------------------------------------------------------------------
+
+test("14: a request act goes to the hub while it runs, and its board post is made from its event, once, even after a failure", async () => {
+  const { S, a0 } = await run();
+  ok(await L.openLead(a0, { title: "t", why: "w", take: true }));
+  ok(await L.closeLead(a0, "L-1", { disposition: "needs_operator", ref: "allow the host example.org for a job" }));
+  await R.reconcileRequests(S);
+  // The CLI hands the act to the hub's admin socket and writes nothing itself.
+  const sock = join(await mkdtemp(join(tmpdir(), "hub-")), "admin.sock");
+  dirs.push(resolve(sock, ".."));
+  const seen: Array<Record<string, unknown>> = [];
+  const server = createServer((c) => {
+    c.setEncoding("utf8");
+    let buf = "";
+    c.on("data", (d: string) => {
+      buf += d;
+      if (!buf.includes("\n")) return;
+      seen.push(JSON.parse(buf.slice(0, buf.indexOf("\n"))) as Record<string, unknown>);
+      c.end(`${JSON.stringify({ ok: true, request: { rid: "R-1", state: "declined" }, post: 7 })}\n`);
+    });
+  });
+  await new Promise<void>((r) => server.listen(sock, () => r()));
+  const out = await new Promise<string>((done) => {
+    const child = spawn(process.execPath, ["--experimental-strip-types", "--no-warnings", join(ROOT, "scripts", "requests-cli.ts"), "decline", S, "R-1", "--why", "no host in this case", "--hub-admin", sock], { stdio: ["ignore", "pipe", "inherit"] });
+    let text = "";
+    child.stdout.on("data", (d) => (text += d));
+    child.on("close", () => done(text));
+  });
+  server.close();
+  assert.equal(seen.length, 1, out);
+  assert.equal(seen[0].op, "request_act");
+  assert.equal(seen[0].rid, "R-1");
+  assert.deepEqual({ ev: (seen[0].act as Record<string, unknown>).ev, announce: (seen[0].act as Record<string, unknown>).announce }, { ev: "declined", announce: true });
+  assert.equal(JSON.parse(out).admitted_by, "hub");
+  assert.equal((await R.requestsSnapshot(S)).requests.get("R-1")?.closed, null, "the CLI wrote the chain beside the hub");
+  // Where the chain is written: the act commits; a board that cannot take the post is named, and the post is made at the next round, once.
+  const board = join(S, "threads", "main");
+  await mkdir(board, { recursive: true });
+  await chmod(board, 0o555);
+  const r = await RC.admitRequestAct(S, "R-1", { ev: "declined", by: "t", why: "no host in this case", announce: true });
+  await chmod(board, 0o755);
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.match(String(r.post_pending), /the board post failed .*next round/);
+  assert.equal((await R.requestsSnapshot(S)).requests.get("R-1")?.state, "declined");
+  await R.fireRequests(S, { notifier: async () => ({ targets: [] }) });
+  await R.fireRequests(S, { notifier: async () => ({ targets: [] }) });
+  await rm(join(S, "requests", "announced.txt"), { force: true });
+  await R.fireRequests(S, { notifier: async () => ({ targets: [] }) });
+  const posts = await Promise.all((await readdir(board)).filter((n) => n.endsWith("-system.md")).map((n) => readFile(join(board, n), "utf8")));
+  assert.equal(posts.filter((p) => /OPERATOR on R-1 \(lead, L-1\): declined: no host in this case/.test(p)).length, 1, "said once");
 });
 
 // --- 16 --------------------------------------------------------------------------------------------

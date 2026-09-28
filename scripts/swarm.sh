@@ -9566,7 +9566,7 @@ cmd_requests() {
   rec="$(json_get "$id")"
   sandbox="$(jq -r '.sandbox // empty' <<<"$rec")"
   [[ -n "$sandbox" && -d "$sandbox" ]] || { echo "Unknown swarm id or missing sandbox: $id" >&2; exit 1; }
-  local cli="$ROOT/scripts/requests-cli.ts" out status=0
+  local cli="$ROOT/scripts/requests-cli.ts" out status=0 admission=() a
   case "$sub" in
     list|show)
       SWARM_RUNS_DIR="$RUNS_DIR" node --experimental-strip-types --no-warnings "$cli" "$sub" "$sandbox" "$@" ;;
@@ -9589,25 +9589,27 @@ cmd_requests() {
           cmd_lead "$id" note "$(jq -r '.lead' <<<"$route")" ${keep[@]+"${keep[@]}"}; return ;;
         clarification) cmd_question "$id" clarify-reply "$(jq -r '.q' <<<"$route")" "$(jq -r '.id' <<<"$route")" "$@"; return ;;
       esac
-      out="$(SWARM_RUNS_DIR="$RUNS_DIR" node --experimental-strip-types --no-warnings "$cli" answer "$sandbox" "$rid" "$@")" || status=$?
+      while IFS= read -r a; do admission+=("$a"); done < <(question_admission_args "$sandbox")
+      out="$(SWARM_RUNS_DIR="$RUNS_DIR" node --experimental-strip-types --no-warnings "$cli" answer "$sandbox" "$rid" ${admission[@]+"${admission[@]}"} "$@")" || status=$?
+      OPERATOR_AUDIT_DETAIL="$(jq -c '{request: {ok: (.ok != false), rid: (.request.rid // null), state: (.request.state // null), events: (.events // []), reason: (.reason // null), admitted_by: (.admitted_by // null)}}' <<<"$out" 2>/dev/null || echo null)" \
+        operator_audit requests_outcome "$id" answer "$rid"
       [[ "$status" -eq 0 ]] || { echo "BLOCKER: $(jq -r '.reason // "not recorded"' <<<"$out" 2>/dev/null || printf '%s' "$out")" >&2; exit 2; }
       operator_trace "$sandbox" requests "$id" answer "$rid" "$@"
-      echo "Answered $rid ($(jq -r '.request.kind' <<<"$out")): on the record."
+      echo "Answered $rid ($(jq -r '.request.kind' <<<"$out")): on the record$(jq -r 'if .post then ", said on the board (#\(.post))" else "; the board post follows at the next round" end' <<<"$out")."
       ;;
     ack|decline|withdraw|authorise|authorize|collecting|unavailable)
-      out="$(SWARM_RUNS_DIR="$RUNS_DIR" node --experimental-strip-types --no-warnings "$cli" "$sub" "$sandbox" "$@")" || status=$?
+      # The hub admits the act while it runs (it writes the chain); the board post is derived from the act's event, once.
+      while IFS= read -r a; do admission+=("$a"); done < <(question_admission_args "$sandbox")
+      out="$(SWARM_RUNS_DIR="$RUNS_DIR" node --experimental-strip-types --no-warnings "$cli" "$sub" "$sandbox" ${admission[@]+"${admission[@]}"} "$@")" || status=$?
+      OPERATOR_AUDIT_DETAIL="$(jq -c '{request: {ok: (.ok != false), rid: (.request.rid // null), state: (.request.state // null), stage: (.request.stage // null), events: (.events // []), reason: (.reason // null), admitted_by: (.admitted_by // null)}}' <<<"$out" 2>/dev/null || echo null)" \
+        operator_audit requests_outcome "$id" "$sub"
       [[ "$status" -eq 0 ]] || { echo "BLOCKER: $(jq -r '.reason // "not recorded"' <<<"$out" 2>/dev/null || printf '%s' "$out")" >&2; exit 2; }
       operator_trace "$sandbox" requests "$id" "$sub" "$@"
-      local rid state stage by words post
+      local rid state stage
       rid="$(jq -r '.request.rid' <<<"$out")"
       state="$(jq -r '.request.state' <<<"$out")"
       stage="$(jq -r '.request.stage // empty' <<<"$out")"
-      by="$(jq -r '.request.by // "all"' <<<"$out")"
-      words="OPERATOR on $rid ($(jq -r '.request.kind' <<<"$out")$(jq -r 'if .request.lead then ", \(.request.lead)" else "" end' <<<"$out")): $sub$(jq -r 'if .request.closed then ": \(.request.closed.text)" else "" end' <<<"$out")."
-      [[ "$state" == declined && -n "$stage" ]] && words+=" The evidence will not come: record the gap as a limitation (reason unavailable) naming $rid, and answer on what the evidence holds. That is a limit of this examination, never a finding that the fact is absent."
-      [[ "$stage" == unavailable ]] && words+=" The source is unavailable: record it as a limitation (reason unavailable) naming $rid."
-      post="$(examiner_post "$sandbox" "$([[ "$by" =~ ^[A-Za-z0-9_-]+$ ]] && echo "$by" || echo all)" "$words")" || exit 1
-      echo "$rid: $sub recorded; it is $state${stage:+ (stage $stage)}. Said on the board as the examiner (#$post)."
+      echo "$rid: $sub recorded; it is $state${stage:+ (stage $stage)}.$(jq -r 'if .post then " Said on the board (#\(.post))." else " The board post follows at the next round (\(.post_pending // "pending"))." end' <<<"$out")"
       ;;
     *) echo "BLOCKER: requests takes list, show, ack, answer, decline, withdraw, authorise, collecting or unavailable (got $sub)." >&2; exit 2 ;;
   esac

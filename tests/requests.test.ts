@@ -199,8 +199,12 @@ test("the outbox: a crash between the commit and the notification loses nothing 
   ok(await L.closeLead(a0, "L-2", { disposition: "needs_operator", ref: "allow the host example.org for a job" }));
   await R.dispatchRequests(S, { notifier: async () => { throw new Error("the hook is down"); } });
   assert.equal((await R.requestsSnapshot(S)).requests.get("R-2")?.state, "pending");
+  // Tried again after a backoff (a minute after the first failure), not on every round.
+  const soon = recorder();
+  await R.dispatchRequests(S, { notifier: soon.notifier });
+  assert.deepEqual(soon.got, [], "a failed delivery was tried again at once");
   const again = recorder();
-  await R.dispatchRequests(S, { notifier: again.notifier });
+  await R.dispatchRequests(S, { notifier: again.notifier, now: Date.now() + R.deliveryBackoffMs(1) + 1000 });
   assert.deepEqual(again.got.map((g) => g.notice.request), ["R-2"]);
 });
 
@@ -247,6 +251,8 @@ test("a run from before the chain keeps its request lines: the first write impor
     { at: "2026-09-27T22:00:00.000Z", run: "r1", kind: "decision", id: "D-1", by: "harness", title: "A stop is proposed", request: "nothing yielded", answer: "swarm.sh stop r1" },
   ];
   await writeFile(join(S, L.OPERATOR_REQUESTS), legacy.map((l) => JSON.stringify(l)).join("\n") + "\n");
+  // The watchdog of the run from before the chain had handed both lines to notify.sh (its count mark).
+  await writeFile(join(S, "traces", "idle-nudge.requests"), "2\n");
   assert.equal(await R.countKind(S, "decision"), 1, "before the chain, the view's lines are counted");
   ok(await L.openLead(a0, { title: "t", why: "w", take: true }));
   ok(await L.closeLead(a0, "L-1", { disposition: "needs_operator", ref: "allow the host example.org for a job" }));
@@ -256,7 +262,7 @@ test("a run from before the chain keeps its request lines: the first write impor
   assert.ok(s.requests.get("R-1")?.imported);
   // A stop proposed before the first write counts the decisions the run's lines hold: D-2, not D-1 again.
   assert.equal(await R.countKind(S, "decision"), 1);
-  // An imported request is not notified again.
+  // An imported request the old watchdog notified is not notified again.
   const rec = recorder();
   await R.dispatchRequests(S, { notifier: rec.notifier });
   assert.deepEqual(rec.got.map((g) => g.notice.request), ["R-3"]);

@@ -17,7 +17,13 @@
  *                                                   an acquisition's stages (evidence add makes it received and validated)
  *   requests-cli.ts fire <sandbox> [--runs DIR]     reconcile and deliver: the watchdog's fallback where no hub runs
  *
- * An act prints one JSON line once the chain holds it.
+ * An act takes `--hub-admin SOCKET` when the run's hub runs: the hub admits
+ * it (it writes the chain while it runs), as it admits the question
+ * register's acts; with no hub it is made here. Either way the act is its
+ * event on the chain, and what it says on the board is derived from that
+ * event, once (publishRequestActs), so a post that fails after the commit is
+ * made at the next round. An act prints one JSON line once the chain holds
+ * it.
  */
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -25,7 +31,7 @@ import * as Q from "../extensions/questions.ts";
 import * as R from "../extensions/requests.ts";
 
 function parse(rest: string[]): { pos: string[]; opts: Map<string, string>; flags: Set<string> } {
-  const valued = new Set(["--why", "--as", "--runs", "--via"]);
+  const valued = new Set(["--why", "--as", "--runs", "--via", "--hub-admin"]);
   const pos: string[] = [];
   const opts = new Map<string, string>();
   const flags = new Set<string>();
@@ -72,6 +78,19 @@ export function listText(s: R.RequestsState, openOnly = false): string {
   return `${head}\n${open.length ? `\nWAITING ON THE OPERATOR:\n${open.map(requestText).join("\n")}\n` : ""}${closed.length ? `\nCLOSED:\n${closed.map(requestText).join("\n")}\n` : ""}`;
 }
 
+/**
+ * An operator's act on a request, where the chain is written (the hub while
+ * it runs, else here): the act committed, then said on the board from its
+ * event; a post that fails is named, and made at the next round.
+ */
+export async function admitRequestAct(sandbox: string, rid: unknown, a: Parameters<typeof R.requestAct>[2]): Promise<Record<string, unknown>> {
+  const r = await R.requestAct(sandbox, rid, a);
+  if (!r.ok) return r;
+  const posted = await R.publishRequestActs(sandbox).catch((err: Error) => ({ error: err.message }));
+  const mine = Array.isArray(posted) ? posted.find((p) => r.events.includes(p.seq)) : undefined;
+  return { ...r, ...(mine ? { post: mine.post } : { post_pending: Array.isArray(posted) ? "said on the board already" : `the board post failed (${(posted as { error: string }).error}); it is made at the next round` }) };
+}
+
 async function main(argv: string[]): Promise<void> {
   const [cmd, sandboxArg, ...rest] = argv;
   if (!cmd || !sandboxArg) {
@@ -88,6 +107,11 @@ async function main(argv: string[]): Promise<void> {
   };
   // Every read reconciles first: what is committed elsewhere and not written yet is written now.
   if (cmd !== "fire") await R.reconcileRequests(S).catch(() => undefined);
+  // An act: admitted by the hub when it runs, else here; its board post derived from its event.
+  const act = async (rid: string | undefined, a: Parameters<typeof R.requestAct>[2]): Promise<never> => {
+    const QC = await import("./questions-cli.ts");
+    emit(await QC.admit(S, opts.get("--hub-admin"), { op: "request_act", rid, act: { ...a, announce: true } }, () => admitRequestAct(S, rid, { ...a, announce: true })));
+  };
   switch (cmd) {
     case "list": {
       const s = await R.requestsSnapshot(S);
@@ -110,7 +134,7 @@ async function main(argv: string[]): Promise<void> {
       return;
     }
     case "ack":
-      emit(await R.requestAct(S, pos[0], { ev: "acknowledged", by: await who(), ...(opts.get("--why") ? { why: opts.get("--why") } : {}) }));
+      await act(pos[0], { ev: "acknowledged", by: await who(), ...(opts.get("--why") ? { why: opts.get("--why") } : {}) });
       return;
     case "answer": {
       const text = pos.slice(1).join(" ");
@@ -118,12 +142,12 @@ async function main(argv: string[]): Promise<void> {
       const m = /^R-?([1-9]\d{0,6})$/i.exec(String(pos[0] ?? "").trim());
       const r = m ? s.requests.get(`R-${Number(m[1])}`) : undefined;
       if (r && r.kind !== "decision") emit({ ok: false, reason: `${r.rid} is a ${r.kind} request: ${r.kind === "lead" ? `answer it on its lead (swarm.sh lead <run> note ${r.lead} TEXT), which reopens the lead` : r.kind === "clarification" ? `answer it on its question (swarm.sh question <run> clarify-reply ${String(r.line.q)} ${String(r.line.id)} TEXT)` : r.kind === "network" ? `grant or deny it (swarm.sh net <run> grant|deny)` : "supply the evidence (swarm.sh evidence <run> add PATH --for " + r.rid + " --why TEXT), or say it is unavailable or declined"}` });
-      emit(await R.requestAct(S, pos[0], { ev: "answered", by: await who(), text }));
+      await act(pos[0], { ev: "answered", by: await who(), text });
       return;
     }
     case "decline":
     case "withdraw":
-      emit(await R.requestAct(S, pos[0], { ev: cmd === "decline" ? "declined" : "withdrawn", by: await who(), why: opts.get("--why") ?? "" }));
+      await act(pos[0], { ev: cmd === "decline" ? "declined" : "withdrawn", by: await who(), why: opts.get("--why") ?? "" });
       return;
     case "authorise":
     case "authorize":
@@ -131,7 +155,7 @@ async function main(argv: string[]): Promise<void> {
     case "unavailable":
     {
       const stage: R.AcquisitionStage = cmd === "collecting" ? "collecting" : cmd === "unavailable" ? "unavailable" : "authorised";
-      emit(await R.requestAct(S, pos[0], { ev: "stage", by: await who(), stage, why: opts.get("--why") ?? "" }));
+      await act(pos[0], { ev: "stage", by: await who(), stage, why: opts.get("--why") ?? "" });
       return;
     }
     case "fire": {

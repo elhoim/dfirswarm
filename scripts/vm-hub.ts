@@ -2297,14 +2297,44 @@ export class Hub {
             return false;
           }
           const M = await import("./material.ts");
-          const svc = this.jobService;
           const request = (isObject(msg.request) ? msg.request : {}) as never;
-          const result = await M.admitMaterial(this.cfg.sandbox, request, {
-            ...(svc ? { journal: svc.journal, catalogueOn: this.jobsDerived || existsSync(join(this.cfg.sandbox, "catalog")), catalogue: async (target: string, note: string) => {
-              const r = await svc.catalogRequest("system", target, undefined, note);
-              return r.ok ? { ok: true, job: r.job.id } : { ok: false, reason: r.reason };
-            } } : {}),
-          }).catch((err: Error) => ({ ok: false, reason: err.message }));
+          const result = await M.admitMaterial(this.cfg.sandbox, request, this.additionOptions()).catch((err: Error) => ({ ok: false, reason: err.message }));
+          this.reply(socket, result, true);
+          void this.fireRequests();
+          return false;
+        }
+        case "material_reconcile": {
+          // What a crash left committed and not applied (swarm.sh evidence <run> list asks): applied by the journal's one writer.
+          const real = (x: string) => {
+            try {
+              return realpathSync(x);
+            } catch {
+              return resolve(x);
+            }
+          };
+          if (typeof msg.sandbox === "string" && real(msg.sandbox) !== real(this.cfg.sandbox)) {
+            this.reply(socket, { ok: false, reason: "this hub serves another run" }, true);
+            return false;
+          }
+          const applied = await this.reconcileAdditions();
+          this.reply(socket, { ok: true, applied }, true);
+          return false;
+        }
+        case "request_act": {
+          // The operator's act on a request, from the host's CLI and console: the hub admits it while it runs, as it admits the question register's acts.
+          const real = (x: string) => {
+            try {
+              return realpathSync(x);
+            } catch {
+              return resolve(x);
+            }
+          };
+          if (typeof msg.sandbox === "string" && real(msg.sandbox) !== real(this.cfg.sandbox)) {
+            this.reply(socket, { ok: false, reason: "this hub serves another run" }, true);
+            return false;
+          }
+          const RC = await import("./requests-cli.ts");
+          const result = await RC.admitRequestAct(this.cfg.sandbox, msg.rid, (isObject(msg.act) ? msg.act : {}) as never).catch((err: Error) => ({ ok: false, reason: err.message }));
           this.reply(socket, result, true);
           void this.fireRequests();
           return false;
