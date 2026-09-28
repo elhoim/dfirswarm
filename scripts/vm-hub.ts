@@ -89,8 +89,21 @@ import { GATEWAY_STATE_REL } from "./model-gateway.ts";
 import { JobService, jobView, type JobSpec } from "./job-service.ts";
 import { bindJobGrants, checkJobGrants, fetchForSeat, netTick, netViewFor, requestAccess } from "./net-broker.ts";
 import { readCasePolicy } from "./case-policy.ts";
+import { resolveScope, scopeKindOf } from "./job-scope.ts";
+import { commandNames, libraryHint } from "./library-hint.ts";
 
 /** What a job tool is told in a run with no job service. */
+/**
+ * The library hint for a command job at its admission: the tools of the
+ * run's library whose manifest `use` (or description) matches the files the
+ * job declared, the ones its command already runs left out (library-hint.ts).
+ */
+async function admissionHint(S: string, spec: JobSpec): Promise<Awaited<ReturnType<typeof libraryHint>>> {
+  const r = await resolveScope(S, spec.inputs, {});
+  if (!r.ok) return null;
+  return libraryHint(S, r.objects, { skip: (tool) => commandNames(spec.command ?? "", tool) });
+}
+
 const NO_JOBS = "this run has no job service (a host run, or --no-jobs): run the work in your own shell";
 
 /** How long a record waits for the seal of a brain-side output it cites (an import job on the short lane). */
@@ -853,7 +866,10 @@ export function boardTable(hub: {
       const r = await svc.submit(who, spec, { watch: typeof raw.wait === "number" ? raw.wait : 0 });
       if (!r.ok) return r;
       const attached = r.job.requester.agent === who ? await L.attachJob(S, who, r.job.id, raw.lead).catch(() => null) : null;
-      return { ok: true, job: await jobView(S, r.job), ...(attached?.ok && attached.lead ? { lead: attached.lead } : {}) };
+      // Library visibility (docs/adr/0016): a command job that declared what it
+      // reads is told which library tools say they read that kind of file. A hint.
+      const library = r.job.spec.kind === "command" && scopeKindOf(r.job.spec) === "declared" ? await admissionHint(S, r.job.spec).catch(() => null) : null;
+      return { ok: true, job: await jobView(S, r.job), ...(attached?.ok && attached.lead ? { lead: attached.lead } : {}), ...(library ? { library } : {}) };
     },
     jobStatus: async (who, a) => {
       const svc = hub.jobs?.();

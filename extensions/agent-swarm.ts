@@ -2457,11 +2457,14 @@ export default function (pi: ExtensionAPI) {
       if (st?.ok) last = st;
     }
     const leadNote = underLead ? { lead: underLead, lead_note: `run under ${underLead}: record what its output shows with interprets: ["${id}"] before the run can end` } : {};
+    // The library tools whose manifest says they read what this job declared (a hint from its admission).
+    const library = (sub as { library?: unknown }).library;
+    const hint = library ? { library } : {};
     if (jobDone(last.job?.state)) {
       const job = (last.job ?? {}) as Record<string, unknown>;
-      return { ok: job.state === "committed" && (job.status === undefined || job.status === "ok"), job: id, result: { ...job, ...(last.stdout ? stdoutWithNote(id, last.stdout) : {}), ...leadNote } };
+      return { ok: job.state === "committed" && (job.status === undefined || job.status === "ok"), job: id, result: { ...job, ...(last.stdout ? stdoutWithNote(id, last.stdout) : {}), ...leadNote, ...hint } };
     }
-    return { ok: true, job: id, result: { job: id, state: last.job?.state, note: `still ${last.job?.state === "accepted" ? "queued" : "running"}; a post tagged result will say when it is done (your wait wakes on it)`, ...leadNote } };
+    return { ok: true, job: id, result: { job: id, state: last.job?.state, note: `still ${last.job?.state === "accepted" ? "queued" : "running"}; a post tagged result will say when it is done (your wait wakes on it)`, ...leadNote, ...hint } };
   }
   pi.registerTool({
     name: "job_run",

@@ -1,6 +1,33 @@
 {
   "name": "contact_sheet",
   "description": "Tile many images into labelled contact sheets to look at: a directory, a list of paths or a tar read in place. Duplicates by sha256 (or look-alikes by average hash) are listed, not tiled twice. out_dir keeps every tile, the sheets, a manifest row per file and an index of tile to file. Resumes over calls when large. Needs Pillow (pillow_heif for HEIC).",
+  "use": {
+    "extensions": [
+      ".jpg",
+      ".jpeg",
+      ".png",
+      ".heic",
+      ".gif",
+      ".webp",
+      ".bmp",
+      ".tif",
+      ".tiff"
+    ],
+    "magic": [
+      {
+        "offset": 0,
+        "hex": "ffd8ff"
+      },
+      {
+        "offset": 0,
+        "hex": "89504e470d0a1a0a"
+      },
+      {
+        "offset": 4,
+        "hex": "6674797068656963"
+      }
+    ]
+  },
   "params": {
     "out_dir": {
       "type": "string",

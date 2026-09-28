@@ -5865,6 +5865,12 @@ export type ForgedToolManifest = {
   optional_python?: string[];
   /** The image the tool was forged against, by digest, in a VM run. */
   image_digest?: string;
+  /**
+   * What the tool reads, for the hint at a job's admission (scripts/library-hint.ts,
+   * docs/adr/0016): extensions, magic bytes at an offset (hex), and file names
+   * (`*` for any run of characters). Matched, never enforced.
+   */
+  use?: { extensions?: string[]; magic?: Array<{ offset: number; hex: string }>; names?: string[] };
 };
 
 export type ForgeToolSpec = {

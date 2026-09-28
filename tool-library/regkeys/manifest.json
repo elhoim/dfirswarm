@@ -1,6 +1,25 @@
 {
   "name": "regkeys",
   "description": "Dump a registry key's values and subkeys from a hive with regipy. Text values are decoded, REG_BINARY comes back as hex, and each value says which.",
+  "use": {
+    "extensions": [
+      ".hve"
+    ],
+    "magic": [
+      {
+        "offset": 0,
+        "hex": "72656766"
+      }
+    ],
+    "names": [
+      "NTUSER.DAT",
+      "UsrClass.dat",
+      "SAM",
+      "SYSTEM",
+      "SOFTWARE",
+      "SECURITY"
+    ]
+  },
   "params": {
     "hive": {
       "type": "string",
