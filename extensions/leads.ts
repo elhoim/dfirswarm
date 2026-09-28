@@ -2499,7 +2499,8 @@ export async function routeReview(ctx: P.SwarmContext, rawId: unknown, input: { 
       if (!second.value) {
         const settled = settledRouteReviews(l, basis);
         if (settled.length) return { append: [], result: { ok: true as const, deferred: { item: l.id, by: [...new Set(settled.map((x) => x.by))], why: `${l.id}'s close (${l.closed.ref}) was reviewed already for its questions' answers as they stand (${settled.map((x) => `${x.by} at ${x.at}: ${x.material ? "still material" : "no longer material"}`).join("; ")}); nothing recorded. A second, independent review says why it adds something (second_review_why)` } } };
-        if (offer && offer.to !== ctx.agentId) return { append: [], result: { ok: true as const, deferred: { item: l.id, to: offer.to, until: new Date(O.offerStatus(offer, now, l.rev).until).toISOString(), why: `${l.id}'s route review is ${reviewHolderWords(offer, now, l.rev)}; nothing recorded. A second, independent review says why it adds something (second_review_why)` } } };
+        // A seat that was offered this review (at any state but declined or withdrawn: its offer may have run out while it reviewed) was asked: its review is recorded, never deferred.
+        if (offer && offer.to !== ctx.agentId && !wasAsked(snap.state.reviewOffers.get(l.id) ?? [], ctx.agentId, l.rev)) return { append: [], result: { ok: true as const, deferred: { item: l.id, to: offer.to, until: new Date(O.offerStatus(offer, now, l.rev).until).toISOString(), why: `${l.id}'s route review is ${reviewHolderWords(offer, now, l.rev)}; nothing recorded. A second, independent review says why it adds something (second_review_why)` } } };
       }
       // The review takes up this seat's own offer of it, even one that ran out while it reviewed; another seat's standing offer is withdrawn.
       const offers = snap.state.reviewOffers.get(l.id) ?? [];
@@ -2514,6 +2515,11 @@ export async function routeReview(ctx: P.SwarmContext, rawId: unknown, input: { 
   } catch (err) {
     return { ok: false, reason: (err as Error).message };
   }
+}
+
+/** Whether a seat was offered a review at this revision and neither declined it nor had it withdrawn: pending, live, taken or run out, it was asked. */
+function wasAsked(offers: readonly O.Offer[], agent: string, rev: number): boolean {
+  return offers.some((o) => o.to === agent && o.rev === rev && !o.declined && !o.withdrawn);
 }
 
 /** A review another seat has or is offered, answered quietly (nothing recorded, no refusal): the item, who reviewed it or who has it, and until when. */
@@ -2644,11 +2650,6 @@ function reviewItems(snap: LeadsSnapshot, attestations: P.LedgerAttestation[]): 
   return out;
 }
 
-/** The review items due and not held by an offer now. */
-function reviewsDue(snap: LeadsSnapshot, attestations: P.LedgerAttestation[], now: number): ReviewItem[] {
-  return reviewItems(snap, attestations).filter((item) => !O.reservingOffer(snap.state.reviewOffers.get(item.key) ?? [], now, reviewRev(item.key, snap.state)));
-}
-
 /** Why a review item needs no review any more: what the register says when it withdraws its offer. */
 function reviewSettledWhy(key: string, snap: LeadsSnapshot, attestations: P.LedgerAttestation[]): string {
   if (key.startsWith("L-")) {
@@ -2674,7 +2675,7 @@ function reviewSettledWhy(key: string, snap: LeadsSnapshot, attestations: P.Ledg
  * one whose first claim or hold ran out is recorded lapsed, so the
  * register says what became of it.
  */
-function settleReviewOffers(snap: LeadsSnapshot, attestations: P.LedgerAttestation[], items: ReviewItem[], now: number): LeadDraft[] {
+function settleReviewOffers(snap: LeadsSnapshot, attestations: P.LedgerAttestation[], items: ReviewItem[], now: number, gone: ReadonlyMap<string, string> = new Map()): LeadDraft[] {
   const due = new Set(items.map((i) => i.key));
   const out: LeadDraft[] = [];
   for (const [key, list] of snap.state.reviewOffers) {
@@ -2683,11 +2684,27 @@ function settleReviewOffers(snap: LeadsSnapshot, attestations: P.LedgerAttestati
     for (const o of list) {
       if (o.accepted || o.declined || o.withdrawn || o.lapsed_at) continue;
       const st = O.offerStatus(o, now, rev).state;
-      if ((st === "pending" || st === "live") && !due.has(key)) out.push({ by: "system", ev: "offer_withdraw", ...where, offer: o.seq, to: o.to, why: reviewSettledWhy(key, snap, attestations) });
-      else if (st === "lapsed") out.push({ by: "system", ev: "offer_lapse", ...where, offer: o.seq, to: o.to, why: o.held_until ? "taken, and the review was not recorded before its hold ran out" : "its first claim ran out" });
+      if ((st === "pending" || st === "live") && !due.has(key)) {
+        // Reviewed by the seat it was offered to (between the ledger's lock and the registers'): taken up, not withdrawn "reviewed by" itself.
+        if (reviewersOf(key, snap, attestations).includes(o.to)) out.push({ by: o.to, ev: "offer_accept", ...where, offer: o.seq });
+        else out.push({ by: "system", ev: "offer_withdraw", ...where, offer: o.seq, to: o.to, why: reviewSettledWhy(key, snap, attestations) });
+      } else if (st === "lapsed") out.push({ by: "system", ev: "offer_lapse", ...where, offer: o.seq, to: o.to, why: o.held_until ? "taken, and the review was not recorded before its hold ran out" : "its first claim ran out" });
+      // Its seat done or dead: it can no longer review, and the item passes on now, not at the end of its hold. A compacting seat is away, not gone, and keeps it.
+      else if ((st === "pending" || st === "live") && gone.has(o.to)) out.push({ by: "system", ev: "offer_lapse", ...where, offer: o.seq, to: o.to, why: `its seat can no longer review it: ${gone.get(o.to)}` });
     }
   }
   return out;
+}
+
+/** Who reviewed an item as the gate counts it: a negative's reviewers, or the route review's seat. */
+function reviewersOf(key: string, snap: LeadsSnapshot, attestations: P.LedgerAttestation[]): string[] {
+  if (key.startsWith("L-")) {
+    const l = snap.state.leads.get(key);
+    const r = l ? standingRouteReview(l) : null;
+    return r ? [r.by] : [];
+  }
+  const e = snap.ledger.bySeq.get(Number(key.slice(2)));
+  return e ? P.negativeReview(e, snap.ledger.entries, attestations, snap.ledger.disputes ?? []).by : [];
 }
 
 /** Whether the register has review offers to settle or items to offer: read outside the lock, so an idle round writes nothing. */
@@ -2711,14 +2728,27 @@ function reviewWorkDue(snap: LeadsSnapshot, attestations: P.LedgerAttestation[],
 export async function offerReviews(sandboxRoot: string, now = Date.now()): Promise<number> {
   const outer = await leadsSnapshot(sandboxRoot);
   const attestations = await P.readAttestations(sandboxRoot).catch(() => [] as P.LedgerAttestation[]);
-  if (!reviewWorkDue(outer, attestations, now)) return 0;
   const activity = await recentActivity(sandboxRoot, LEAD_COMPACTION_BOUND_MS, now).catch(() => new Map<string, { last: number; compacting: number | null }>());
+  // The seats holding a standing review offer that are done or dead: their offers lapse now. A compacting seat is away, not gone.
+  const gone = new Map<string, string>();
+  for (const list of outer.state.reviewOffers.values()) {
+    for (const o of list) {
+      if (gone.has(o.to) || o.accepted || o.declined || o.withdrawn || o.lapsed_at) continue;
+      for (const m of ["done", "dead"] as const) if (existsSync(join(sandboxRoot, "done", "agents", `${o.to}.${m}`))) gone.set(o.to, `${o.to} is ${m === "done" ? "done" : "marked dead"}`);
+    }
+  }
+  if (!gone.size && !reviewWorkDue(outer, attestations, now)) return 0;
   const ids = await P.teamIds(sandboxRoot).catch(() => [] as string[]);
   const r = await transact<{ ok: true; offered: number }>(sandboxRoot, async (snap) => {
     const atts = await P.readAttestations(sandboxRoot).catch(() => [] as P.LedgerAttestation[]);
     const items = reviewItems(snap, atts);
-    const append: LeadDraft[] = settleReviewOffers(snap, atts, items, now);
-    const due = reviewsDue(snap, atts, now);
+    const append: LeadDraft[] = settleReviewOffers(snap, atts, items, now, gone);
+    // An offer settled just now (lapsed with its seat gone, withdrawn) no longer holds its item.
+    const settled = new Set(append.filter((d) => d.ev === "offer_lapse" || d.ev === "offer_withdraw").map((d) => d.offer));
+    const due = items.filter((item) => {
+      const r = O.reservingOffer(snap.state.reviewOffers.get(item.key) ?? [], now, reviewRev(item.key, snap.state));
+      return !r || settled.has(r.seq);
+    });
     const busy = await offeredSeats(sandboxRoot, snap.state, now, snap.questions);
     let offered = 0;
     for (const item of due) {
@@ -2849,7 +2879,8 @@ export async function negativeReviewDeferral(sandboxRoot: string, key: string, a
   const { events } = await readLeadEvents(sandboxRoot);
   const s = foldLeads(events);
   const o = O.reservingOffer(s.reviewOffers.get(key) ?? [], now, 1);
-  if (o && o.to !== agent) return { item: key, to: o.to, until: new Date(O.offerStatus(o, now, 1).until).toISOString(), why: `${key}'s review is ${reviewHolderWords(o, now, 1)}; nothing recorded. A second, independent review says why it adds something (second_review_why)` };
+  // A seat that was offered this review was asked, even if its offer ran out while it reviewed and moved on (the Fable review: E-266's s05 again).
+  if (o && o.to !== agent && !wasAsked(s.reviewOffers.get(key) ?? [], agent, 1)) return { item: key, to: o.to, until: new Date(O.offerStatus(o, now, 1).until).toISOString(), why: `${key}'s review is ${reviewHolderWords(o, now, 1)}; nothing recorded. A second, independent review says why it adds something (second_review_why)` };
   return null;
 }
 
@@ -3073,7 +3104,8 @@ export async function reopenOnLedger(sandboxRoot: string, now = Date.now()): Pro
         if (superseded && heldFor(closer) && !o?.declined) {
           if (o && !O.reserving(o, now, l.rev)) {
             if (!o.lapsed_at && !o.accepted) append.push({ by: "system", ev: "offer_lapse", lead: l.id, offer: o.seq, to: o.to, why: `its window ran out while its closer compacted: made again, held for it` });
-            append.push(offerDraft(l.id, l.closed!.by, "confirm", l.rev, l.cycle, now, { ref: l.confirm.ref_was, ...(l.confirm.head ? { head: l.confirm.head } : {}), why: `${l.confirm.ref_was} was superseded${l.confirm.head ? ` by ${l.confirm.head}` : ""}: confirm the closure on what stands, or reopen it (held while ${closer!.why})` }));
+            // Made again in the batch it was in: the closer confirms its siblings and it in one act still.
+            append.push(offerDraft(l.id, l.closed!.by, "confirm", l.rev, l.cycle, now, { ref: l.confirm.ref_was, ...(l.confirm.head ? { head: l.confirm.head, batch: o?.batch ?? l.confirm.head } : {}), why: `${l.confirm.ref_was} was superseded${l.confirm.head ? ` by ${l.confirm.head}` : ""}: confirm the closure on what stands, or reopen it (held while ${closer!.why})` }));
           }
           continue;
         }
@@ -3116,6 +3148,14 @@ export async function reopenOnLedger(sandboxRoot: string, now = Date.now()): Pro
   return r.events.filter((e) => e.ev === "reopen").map((e) => e.lead!).filter(Boolean);
 }
 
+/** A correction chain's head as it stands now: E-<seq> of the entry that stands at the end of the chain (a later correction moved it), or the head as given. */
+function standingHead(head: string | null | undefined, snap: LeadsSnapshot): string | null {
+  const m = head ? /^E-(\d+)$/.exec(head) : null;
+  if (!m) return head ?? null;
+  const n = Number(m[1]);
+  return snap.ledger.replaced.has(n) ? `E-${P.standingSeq(n, snap.ledger.replaced)}` : head!;
+}
+
 /** A closure's closer, for its confirmation: able to take it, compacting (since when), or gone (done, dead). */
 type CloserState = { state: "available" | "compacting" | "gone"; why: string; since?: number };
 
@@ -3152,7 +3192,7 @@ export async function confirmLead(ctx: P.SwarmContext, rawId: unknown, input: { 
       const o = l.offers.find((x) => x.seq === l.confirm!.offer);
       if (!o || !O.reserving(o, now, l.rev)) return { append: [], result: { ok: false as const, reason: `the confirmation of ${l.id} is no longer offered (${o ? O.offerStatus(o, now, l.rev).state : "none"}): it reopens; reopen or claim it` } };
       if (o.to !== ctx.agentId) return { append: [], result: { ok: false as const, reason: `${l.id}'s closure is ${o.to}'s to confirm (its closer)` } };
-      const target = String(input.ref ?? l.confirm.head ?? "").trim();
+      const target = String(input.ref ?? standingHead(l.confirm.head, snap) ?? "").trim();
       if (!target) return { append: [], result: { ok: false as const, reason: "ref is the standing entry the closure rests on now" } };
       const checked = checkRef(l.closed.disposition, target, l, snap);
       if (!checked.ok) return { append: [], result: { ok: false as const, reason: checked.reason } };
@@ -3192,7 +3232,8 @@ export async function confirmBatch(ctx: P.SwarmContext, rawBatch: unknown, input
           skipped.push({ lead: l.id, why: `its confirmation is no longer offered (${O.offerStatus(o, now, l.rev).state})` });
           continue;
         }
-        const target = String(input.ref ?? l.confirm.head ?? batch).trim();
+        // The chain may have moved since the offer (a second correction): the closer confirms what stands now.
+        const target = String(input.ref ?? standingHead(l.confirm.head ?? batch, snap) ?? batch).trim();
         const checked = checkRef(l.closed.disposition, target, l, snap);
         if (!checked.ok) {
           skipped.push({ lead: l.id, why: checked.reason });

@@ -384,3 +384,118 @@ test("a review offer whose item needs no review any more is withdrawn: its answe
   const m = await measureRun(c.S);
   assert.deepEqual([m.offers.reviews.made, m.offers.reviews.withdrawn, m.offers.reviews.open], [2, 2, 0]);
 });
+
+// --- the Fable review of batches 1-3 ---------------------------------------------------------------
+
+test("a seat offered a review is asked: its review is recorded after its offer ran out and moved to another seat, the other seat's offer withdrawn and its own taken up (the Fable review, P2 2)", async () => {
+  await withEnv({ SWARM_OFFER_SEC: "1", SWARM_OFFER_MAX_SEC: "1" }, async () => {
+    const c = await run();
+    const { ans, key } = await negativeDue(c);
+    assert.equal(await L.offerReviews(c.S), 1);
+    const first = (await L.leadsSnapshot(c.S)).state.reviewOffers.get(key)!.at(-1)!;
+    // It reads the offer and reviews without accepting it; the minute runs out and the item moves on.
+    await sleep(1_200);
+    assert.equal(await L.offerReviews(c.S), 1);
+    const second = (await L.leadsSnapshot(c.S)).state.reviewOffers.get(key)!.at(-1)!;
+    assert.notEqual(second.to, first.to);
+    assert.ok(O.reservingOffer((await L.leadsSnapshot(c.S)).state.reviewOffers.get(key)!, Date.now(), 1), "the other seat's offer is live");
+    // The first seat's review arrives: recorded, never deferred to the seat the offer moved to.
+    const done = await P.attestEntry(seat(c, first.to), { seq: ans.seq, how: "ran the decisive query again", review: REVIEW });
+    assert.ok(done.ok && (done as { appended: boolean }).appended, JSON.stringify(done));
+    const offers = (await L.leadsSnapshot(c.S)).state.reviewOffers.get(key)!;
+    assert.ok(offers.find((o) => o.seq === first.seq)!.accepted, "its own offer is taken up");
+    assert.match(offers.find((o) => o.seq === second.seq)!.withdrawn?.why ?? "", new RegExp(`${key} was reviewed by ${first.to}`));
+  });
+});
+
+test("a route review by the seat offered it is recorded after its offer moved on (the Fable review, P2 2)", async () => {
+  await withEnv({ SWARM_OFFER_SEC: "1", SWARM_OFFER_MAX_SEC: "1" }, async () => {
+    const c = await run();
+    const { lead } = await deferredRoute(c);
+    const f = ok(await rec(c.a1, { kind: "finding", ...F, value: "Bob logged on", source: "the log", evidence: "line 1", refs: ["job:j000002/hits.txt"], answers: ["1"] })).entry;
+    ok(await rec(c.a2, { kind: "answer", section: "question:1", value: "Bob", reasoning: `E-${f.seq}`, result: "established", ...A, confidence: "high" }));
+    assert.equal(await L.offerReviews(c.S), 1);
+    const first = (await L.leadsSnapshot(c.S)).state.reviewOffers.get(lead)!.at(-1)!;
+    await sleep(1_200);
+    assert.equal(await L.offerReviews(c.S), 1);
+    const second = (await L.leadsSnapshot(c.S)).state.reviewOffers.get(lead)!.at(-1)!;
+    assert.notEqual(second.to, first.to);
+    const r = okq(await L.routeReview(seat(c, first.to), lead, { material: true, why: "the answer rests on one line" }));
+    assert.equal(r.deferred, undefined);
+    const offers = (await L.leadsSnapshot(c.S)).state.reviewOffers.get(lead)!;
+    assert.match(offers.find((o) => o.seq === second.seq)!.withdrawn?.why ?? "", new RegExp(`${lead}'s route review was recorded by ${first.to}`));
+  });
+});
+
+test("a review recorded by the seat offered it, seen by the register before the offer is taken up, is accepted, not withdrawn 'reviewed by' itself (the Fable review, P3 6)", async () => {
+  const c = await run();
+  const { cov, ans, key } = await negativeDue(c);
+  assert.equal(await L.offerReviews(c.S), 1);
+  const o = (await L.leadsSnapshot(c.S)).state.reviewOffers.get(key)!.at(-1)!;
+  // The review lands on the ledger, and another seat's header settles the offers before the attest takes it up.
+  const attests = await P.readAttestations(c.S);
+  const line: P.LedgerAttestation = { v: 2, act: "attest", seq: cov.seq, target: cov.hash!, by: o.to, at: new Date().toISOString(), how: "ran it again", review: REVIEW };
+  const prev = attests.at(-1)?.hash ?? "genesis";
+  await appendFile(join(c.S, P.LEDGER_ATTESTATIONS), `${JSON.stringify({ ...line, prev, hash: P.attestationHash(line, prev) })}\n`);
+  assert.equal(await L.offerReviews(c.S), 0);
+  await L.reviewOfferTaken(c.S, key, o.to);
+  const after = (await L.leadsSnapshot(c.S)).state.reviewOffers.get(key)!.at(-1)!;
+  assert.ok(after.accepted, "taken up");
+  assert.ok(!after.withdrawn, "not withdrawn 'reviewed by' its own seat");
+  void ans;
+});
+
+test("a taken review whose seat is done or dead lapses at once and passes on; a compacting seat keeps it (the Fable review, P3 13)", async () => {
+  await withEnv({ SWARM_REVIEW_HOLD_SEC: "600" }, async () => {
+    const c = await run();
+    const { key } = await negativeDue(c);
+    assert.equal(await L.offerReviews(c.S), 1);
+    const o = (await L.leadsSnapshot(c.S)).state.reviewOffers.get(key)!.at(-1)!;
+    okq((await L.answerOffer(seat(c, o.to), key, { action: "accept" })) as { ok: boolean });
+    // Compacting: away, not gone.
+    await traceRow(c.S, o.to, "compact_start");
+    assert.equal(await L.offerReviews(c.S), 0);
+    assert.equal((await L.leadsSnapshot(c.S)).state.reviewOffers.get(key)!.at(-1)!.lapsed_at ?? null, null);
+    // Dead: its offer lapses now, and the item goes to another seat.
+    await mkdir(join(c.S, "done", "agents"), { recursive: true });
+    await writeFile(join(c.S, "done", "agents", `${o.to}.dead`), "x");
+    assert.equal(await L.offerReviews(c.S), 1);
+    const snap = await L.leadsSnapshot(c.S);
+    assert.match(snap.state.events.find((e) => e.ev === "offer_lapse" && e.offer === o.seq)?.why ?? "", new RegExp(`its seat can no longer review it: ${o.to} is marked dead`));
+    assert.notEqual(snap.state.reviewOffers.get(key)!.at(-1)!.to, o.to);
+  });
+});
+
+test("a confirmation made again after its closer's compaction keeps its batch, and the batch is confirmed in one act; after a second correction the batch confirms what stands now (the Fable review, P3 5 and 14)", async () => {
+  await withEnv({ SWARM_OFFER_SEC: "1", SWARM_OFFER_MAX_SEC: "1" }, async () => {
+    const c = await run();
+    await traceRow(c.S, "a1", "bash");
+    const f = ok(await rec(c.a1, { kind: "finding", ...F, value: "Account bob ran it", source: "prefetch", evidence: "row 1", refs: ["job:j000001/hits.txt"] })).entry;
+    const leads: string[] = [];
+    for (const title of ["Which account ran it", "Who was at the console"]) {
+      const l = okq(await L.openLead(c.a1, { title, why: "q1", take: true })).lead;
+      okq(await L.closeLead(c.a1, l.id, { disposition: "resolved", ref: `E-${f.seq}` }));
+      leads.push(l.id);
+    }
+    const f2 = ok(await rec(c.a0, { kind: "finding", ...F, value: "Account alice ran it", source: "prefetch", evidence: "row 1, the SID", refs: ["job:j000001/hits.txt"], supersedes: f.seq, because: "the SID is alice's" })).entry;
+    assert.deepEqual(await L.reopenOnLedger(c.S), []);
+    // The closer compacts; the offers' window runs out; they are made again, held for it, in the batch they were in.
+    await traceRow(c.S, "a1", "compact_start");
+    await sleep(1_200);
+    assert.deepEqual(await L.reopenOnLedger(c.S), []);
+    let snap = await L.leadsSnapshot(c.S);
+    for (const id of leads) {
+      const l = snap.state.leads.get(id)!;
+      const o = l.offers.find((x) => x.seq === l.confirm!.offer)!;
+      assert.equal(o.batch, `E-${f2.seq}`, `${id}'s offer made again keeps its batch`);
+    }
+    // A second correction moves the chain while the offers stand; the closer, through its compaction, confirms the batch on what stands now.
+    await traceRow(c.S, "a1", "compact_done");
+    await traceRow(c.S, "a1", "bash");
+    const f3 = ok(await rec(c.a0, { kind: "finding", ...F, value: "Account alice ran it, from the console", source: "prefetch", evidence: "row 1, the SID, the session", refs: ["job:j000001/hits.txt"], supersedes: f2.seq, because: "the session says where" })).entry;
+    const done = okq(await L.confirmBatch(c.a1, `E-${f2.seq}`, { why: "they asked which account and where: the chain answers both" }));
+    assert.deepEqual([done.confirmed, done.skipped], [leads, []]);
+    snap = await L.leadsSnapshot(c.S);
+    for (const id of leads) assert.equal(snap.state.leads.get(id)!.closed?.ref, `E-${f3.seq}`, "confirmed on the entry that stands now");
+  });
+});
