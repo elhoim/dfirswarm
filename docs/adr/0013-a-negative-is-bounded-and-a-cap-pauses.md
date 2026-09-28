@@ -304,6 +304,50 @@ evidence that settled it was added late. Five rules follow, each generic
   a `WARN:` line and its machine line carries `warnings`, which the finish
   line's note repeats.
 
+## After the round-13 scoring
+
+A later scoring round found the negatives passing their bar and still wrong.
+On one case five questions were answered not determinable, all false
+negatives; for two of them the answer's row sat in a parser export the run
+itself had made half an hour before the answer, and each had passed a review
+or rested on a reviewed coverage record. The records named two or three
+sources, and the reviews checked each answer against that narrow coverage,
+never against what the run's store already held. On another, a correct
+established answer was walked down to not determinable by a dispute that
+cited nothing against it.
+
+- **The store sweep.** A coverage record names `looked_for`, the literal
+  strings a hit would contain were the answer in the evidence, or
+  `looked_for_none_why`. When the record is written the hub searches every
+  output the run holds for them (job outputs and logs, imports with the
+  evidence added late among them, captures, the whole outputs kept under
+  `tool-output/`; not the input images, which the record's own search
+  covers): bytes and strings only, ASCII case folded, UTF-8 and UTF-16LE,
+  every file streamed whole, no parser and no per-tool code. The record is
+  immutable and the sweep takes time, so its result is a chained line of its
+  own (`ledger/sweeps.jsonl`), bound to the record's hash; no line is
+  pending. A negative waits for its sweep as for a review (`sweep_pending`);
+  a hit in an object the record does not name holds it until the record is
+  revised to name that object, with what it showed, or the answer is revised
+  (`sweep_hits`); a sweep its budget left partial names what it did not
+  search and holds until the operator accepts the question's limits
+  (`sweep_partial`). A hit in an object the record names (its refs, or the
+  outputs among its result_refs, since a search's own output echoes what it
+  looked for) is said and does not hold: the review is where an answer that
+  misreads the objects it names is caught, and the review offer now carries
+  the sweep, named hits included, and asks for the answer to be checked
+  against the whole store. The calibration run's late false negative was
+  this case: its revised coverage named the new evidence, so a sweep's hit
+  there would be a named one, shown to the reviewer rather than holding.
+- **A downgrade needs counter-evidence.** A revision from established or
+  partial to not determinable or a bounded negative carries `downgrade:
+  {evidence, why}`: the entries or objects that undermine the earlier chain.
+  Without it the revision is refused, and the refusal points to the
+  alternative: dispute the answer, and if the doubt stands lower its
+  strength to best_candidate or its confidence to medium; the answer stays.
+  The report's chain for the question shows the earlier answer, the disputes
+  on it and the downgrade's evidence.
+
 ## Consequences
 
 - Every existing goal and run keeps working: an answer without `result`

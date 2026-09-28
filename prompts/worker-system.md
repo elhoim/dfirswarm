@@ -371,7 +371,15 @@ Ledger (only when `record` is in your tool list)
   shows it) is answered established or partial only on a coverage record for it that names its
   areas: without one the finish line holds the answer (`completeness_uncovered`). Behind a
   not_determinable, `acquisition_ask` (R-<n>) or `acquisition_none_why` says whether a source the
-  evidence does not hold was asked for.
+  evidence does not hold was asked for. `looked_for` is required (or `looked_for_none_why`, when
+  no literal form exists): the literal strings a hit would contain were the answer in the evidence
+  (the name, the identifier, the address, the keyword). The hub then searches every output the
+  run already holds for them (every job's output and logs, every import, the evidence added late
+  included, the captures, tool-output/), case-insensitive, in UTF-8 and UTF-16LE: an export or a
+  listing made an hour ago often holds the row a narrow search missed. A negative waits for the
+  sweep; a hit in an object the record does not name holds it until you examine that object and
+  record the coverage again naming it (with what it showed), or revise the answer; a sweep its
+  budget left partial holds it too, unless the operator accepts the question's limits.
 - `kind=hypothesis` is a proposition you are still testing (status open, supported, refuted);
   `kind=limitation` is what you could not examine or only partly, with its reason. Neither is a
   finding: a report weighs its conclusions against them.
@@ -418,6 +426,10 @@ Ledger (only when `record` is in your tool list)
   `qualifies [{ref: "E-<seq>", why}]`. One answer stands per section: revise it with `supersedes`.
   The harness marks the hashes, paths, times, inodes, addresses and accounts in an answer that no
   cited entry holds: cite the entry that holds each, or record how it was derived.
+  Moving an answer from established or partial to not_determinable or bounded_negative is a
+  downgrade, and it names what undermines the earlier chain: `downgrade: {evidence: [E-<seq> or
+  objects], why}`. A doubt with no counter-evidence is not one: dispute the answer, and if the
+  doubt stands attest it best_candidate or record it with confidence medium; the answer stays.
 - `attest(seq, how, refs)` says you re-derived somebody else's entry: what you re-derived from which
   sealed object, and what you only read. An answer to a question is attested with `strength` and
   `answer_review`: established, or best_candidate (what the evidence best supports, not shown to be
@@ -435,7 +447,9 @@ Ledger (only when `record` is in your tool list)
   with `attest(..., review: {detection, reproduced, other_route})`, each {done, text}: whether you
   challenged the detection assumptions (would the event have left a trace here, given collection
   and retention), reproduced a decisive check, and tried a materially different route, and what you
-  did, or why not. Whoever recorded the coverage cannot review it. The run does not finish, and the
+  did, or why not; check the answer against everything the run holds, not only its coverage's
+  sources: the review offer and ledger.md carry the store sweep, and other_route says what you did
+  with its hits. Whoever recorded the coverage cannot review it. The run does not finish, and the
   operator cannot accept the question's limits, while such a negative is unreviewed. `dispute(seq, why, refs)` says why it does not hold;
   `withdraw: true` takes your own dispute back. A correction of a disputed entry does not answer
   the dispute: it stands on the correction until its disputer reads it and withdraws it (naming

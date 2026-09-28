@@ -42,6 +42,29 @@ first calibration run").
   (`acquisition_none_why`); the answers check warns (`WARN:`, `warnings`)
   when it does neither, and holds nothing.
 
+### Fixed: what the round-13 scoring showed
+
+- **The store sweep: a negative is checked against everything the run
+  holds.** Two not-determinable answers had their row in an export the run
+  itself had made half an hour before, and passed review against their
+  coverage's two or three sources. A coverage record now names
+  `looked_for` (or `looked_for_none_why`), and the hub searches every job
+  output and log, import, capture and kept tool output for those strings,
+  in UTF-8 and UTF-16LE, streamed whole (`ledger/sweeps.jsonl`). A pending
+  sweep holds a negative like an unreviewed one; a hit outside the record's
+  objects holds it until the record is revised to name that object or the
+  answer is; a partial sweep names what it did not search and holds unless
+  the operator accepts the question. The review offer, `ledger.md`, the
+  report and the metrics (`sweeps`) show each sweep.
+- **A downgrade needs counter-evidence.** A revision from established or
+  partial to not determinable or a bounded negative carries `downgrade:
+  {evidence, why}`, or it is refused and pointed to a dispute and a lower
+  strength or confidence; the report shows the earlier answer, its disputes
+  and the downgrade's evidence.
+- **calibrate.ts counts a missing-evidence question by its state at the
+  start**: one a late item made present still counts in "Acquisition: k of n
+  missing-evidence questions requested the evidence".
+
 ### Fixed: what the first pilot on the new flow showed (c10, run s6be12f)
 
 - **A review offer is held for the review, and withdrawn when it is not

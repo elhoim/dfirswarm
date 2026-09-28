@@ -654,6 +654,33 @@ wrote before it stopped; until a correction does, the answers check reports a
 search recorded partial or failed, and a coverage record carry their own
 disposition.
 
+**The store sweep.** A coverage record names `looked_for`, the literal strings
+a hit would contain were the answer in the evidence (or `looked_for_none_why`
+when no literal form exists), and the hub then searches every output the run
+holds for them: every sealed job output and job log, every import (evidence
+added late included), every capture, every whole output kept under
+`tool-output/`; not the input images. Case-insensitive for ASCII, in UTF-8 and
+UTF-16LE, each file streamed whole, bytes and strings only. The result is a
+line of `ledger/sweeps.jsonl` (chained, bound to the record's hash): clean,
+hits (in objects neither the record's refs nor the outputs among its
+result_refs name), or partial (what the budget did not reach, each named;
+`SWARM_SWEEP_MAX_BYTES`, 16 GiB, and `SWARM_SWEEP_MAX_SEC`, 1800, set it). A
+negative resting on the record waits for its sweep (`sweep_pending`); a hit
+outside it holds the negative until the record is recorded again naming that
+object, with what it showed, or the answer is revised (`sweep_hits`); a partial
+sweep holds until the operator accepts the question's limits
+(`sweep_partial`). A sweep lost with the process that began it is run again by
+the finish gate and the answers check once its record is older than
+`SWARM_SWEEP_ORPHAN_SEC` (120). The review offer, `ledger.md`, the report and
+the metrics show each sweep.
+
+**A downgrade.** A revision that moves an answer from established or partial
+to not_determinable or bounded_negative carries `downgrade: {evidence:
+[E-<seq> or objects], why}`, what undermines the earlier chain; without it the
+revision is refused, and the refusal points to a dispute and a lower strength
+or confidence instead. The report shows the earlier answer, the disputes on it
+and the downgrade's evidence.
+
 **Tool candidates.** `tools <id> --candidates [--out DIR] [--min-lines N]
 [--library DIR]...` takes the code out of every agent's command job (each
 heredoc, each inline `-c`/`-e` script, the command itself, each script of the
@@ -840,6 +867,7 @@ finished run measures the same whenever it is read.
 | Quick negatives | Lead `close` events with disposition `negative` that the hub flagged `quick_negative` when it wrote them: the lead was held two minutes or less from its holder's take to the close, had at most one job, and that job's declared scope held at most one object (a job over everything is never quick). Each close counts, so a lead reopened and closed negative again counts twice; the flag is a review cue, not a defect. Out of every negative close. |
 | Negative answers, reviewed | Standing answers of a question in scope that the finish gate holds as negatives (protocol.ts `negativeByResult`, the gate's own test): `bounded_negative`, `not_determinable`, and a `premise_not_supported` resting on a search alone (no standing finding it cites for its question shows the premise false). Reviewed: an `attest` carrying its review (detection, reproduction, another route), by a seat that wrote neither the answer nor a coverage record it cites, on the answer or on a standing coverage record it cites whose results still stand (protocol.ts `negativeReview`, the gate's own test). |
 | Unreviewed negatives | The negative answers above that are not reviewed, split into material (these hold the finish) and background. Measured at the end, not at any moment during the run. |
+| Store sweeps | Coverage records that name `looked_for`, by how their sweep (`ledger/sweeps.jsonl`) ended: clean, with hits in objects the record does not name (and how many hit objects), partial, or pending (no line yet); the standing negatives in scope a sweep holds now (`sweep_pending`, `sweep_hits`, `sweep_partial`, with the coverage record); and the records with hits that a revision naming what the sweep found released (the revision's own sweep clean). |
 | Confidence | Each standing answer of a question in scope, by the confidence its author stated and the one the run records (protocol.ts `recordedConfidence`): a high stands only on an established answer another seat attested established, naming the alternatives it weighed and why the evidence rules each out; any other high is recorded medium. The answers recorded lower than stated are named, with the harness's reason. |
 | Coverage records | Standing `coverage` records, each counted once: stale when a result it names no longer stands (by code: `missing`, `rebound`, `superseded` with the entry that replaced it, `disputed` with the seats that dispute it, never their words), else by the hub's computed field: `complete`, `partial`, or not computed (a record from before the field). A stale record is never complete, whatever its field says. Complete means the jobs behind it were given, by digest, every object it names; it never means the objects were the relevant ones. Reviewed, as the finish gate counts it: an `attest` with its review on the record, by a seat that did not write it, while its results stand; or an `attest` with its review on a negative answer resting on the record that the gate holds reviewed (the review of the negative is the review of its search). Both are given apart. |
 | Negatives on partial coverage | Negative answers none of whose standing coverage records is complete and current (each is shown as partial, not computed or stale), and, apart, those that cite no coverage record at all. |
