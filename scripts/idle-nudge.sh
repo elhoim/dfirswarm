@@ -294,6 +294,7 @@ host_backstop() {
         await P.systemPost(S, { tag: "stop", body: `The run is paused (${pressure.reason === "cap" ? "its cap" : "its wall clock"}): no model call goes out until the operator extends it (swarm.sh extend) or stops it (swarm.sh stop). What the run holds stays as it is.` }).catch(() => undefined);
         console.log(`paused ${pressure.reason}`);
       }
+      // The operator is told of it by pause_notify, whoever wrote it.
       if (acted.kind === "stopped" && acted.created) console.log(`stopped ${pressure.reason}`);
     }).catch(() => undefined);
   ' "$ROOT/extensions/protocol.ts" "$SANDBOX" 2>/dev/null || true)"
@@ -309,11 +310,23 @@ host_backstop() {
     if [[ "$what" == steered && "$reason" == cap ]]; then
       bash "$ROOT/scripts/notify.sh" "$SANDBOX" budget_cap "$(jq -c '{spent_usd: (.spent_usd // null), cap_usd: (.cap_usd // null)}' "$SANDBOX/budget.json" 2>/dev/null || echo '{}')" >/dev/null 2>&1 </dev/null || true
     fi
-    # And when the run is paused: the operator extends it or stops it.
-    if [[ "$what" == paused ]]; then
-      bash "$ROOT/scripts/notify.sh" "$SANDBOX" paused "$(jq -c --arg r "$reason" '{reason: $r, paused: (.paused // null), extend: "swarm.sh extend <run> --minutes N | --tokens N | --usd N", stop: "swarm.sh stop <run>"}' "$SANDBOX/budget.json" 2>/dev/null || echo '{}')" >/dev/null 2>&1 </dev/null || true
-    fi
   done <<< "$said"
+}
+
+# The operator is told of a pause once, whichever process wrote it: this
+# watchdog, the hub, or a pane's own extension. The claim is a mark on disk
+# (traces/pause-notices/), so a pause whose writer never said so, or a
+# watchdog that restarts, still tells it, and no two processes tell it twice.
+pause_notify() {
+  local at
+  at="$(jq -r 'if (.paused | type) == "object" then (.paused.at // empty) else empty end' "$SANDBOX/budget.json" 2>/dev/null || true)"
+  [[ -n "$at" ]] || return 0
+  node --experimental-strip-types --no-warnings -e '
+    const [protocol, S, at] = process.argv.slice(1);
+    import(protocol).then(async (P) => process.exit((await P.claimPauseNotice(S, at)) ? 0 : 1)).catch(() => process.exit(1));
+  ' "$ROOT/extensions/protocol.ts" "$SANDBOX" "$at" >/dev/null 2>&1 || return 0
+  bash "$ROOT/scripts/notify.sh" "$SANDBOX" paused "$(jq -c '{reason: (.paused.reason // null), paused: (.paused // null), extend: "swarm.sh extend <run> --minutes N | --tokens N | --usd N", stop: "swarm.sh stop <run>"}' "$SANDBOX/budget.json" 2>/dev/null || echo '{}')" >/dev/null 2>&1 </dev/null || true
+  echo "idle-nudge: the operator was told the run is paused (since $at)" >&2
 }
 
 # Where nobody has looked, three times a run: at a quarter, a half and three
@@ -376,27 +389,39 @@ regroup_check() {
 paused_now() {
   [[ "$(jq -r 'if (.paused | type) == "object" then "yes" else "no" end' "$SANDBOX/budget.json" 2>/dev/null)" == yes ]]
 }
+# Each seat is woken once per lifted pause, and only a delivery that went
+# through counts: traces/idle-nudge.resumed holds "<resumed_at> <seat>" for
+# each one reached, and a seat not reached is tried again on the next pass
+# (its first failure is on the trace, not every retry).
 resume_wake() {
-  local mark="$SANDBOX/traces/idle-nudge.resumed" last seen id text ts line ok
+  local mark="$SANDBOX/traces/idle-nudge.resumed" tried="$SANDBOX/traces/idle-nudge.resume-tried" last id text ts line ok woken=0 pending=0
   last="$(jq -r '(.pauses // []) | last | .resumed_at // empty' "$SANDBOX/budget.json" 2>/dev/null || true)"
   [[ -n "$last" ]] || return 0
-  seen="$(cat "$mark" 2>/dev/null || true)"
-  [[ "$last" != "$seen" ]] || return 0
-  printf '%s\n' "$last" > "$mark"
   text="$(jq -r '(.pauses // []) | last | "The operator extended the run at \(.resumed_at) (\(.set // {} | to_entries | map("\(.key) \(.value)") | join(", "))): the pause for \(.reason) is lifted. Pick up where you were: read inbox, go on with what you hold, and record what you find."' "$SANDBOX/budget.json" 2>/dev/null || echo "The operator extended the run: the pause is lifted. Pick up where you were.")"
   for id in $(jq -r '.agents[].id' "$SANDBOX/team.json" 2>/dev/null); do
     [[ -e "$SANDBOX/done/agents/$id.done" || -e "$SANDBOX/done/agents/$id.dead" ]] && continue
+    grep -qxF "$last $id" "$mark" 2>/dev/null && continue
     ok=false
     if [[ -n "$HUB_ADMIN" ]]; then
       node "$ROOT/scripts/vm-hub-send.mjs" "$HUB_ADMIN" "$(jq -nc --arg a "$id" --arg t "$text" '{op: "prompt", agent: $a, text: $t, kind: "resume", deliver: "followUp"}')" >/dev/null 2>&1 && ok=true
     else
       "$HERDR" agent prompt "$id" "$text" >/dev/null 2>&1 && ok=true
     fi
+    if [[ "$ok" == true ]]; then
+      printf '%s %s\n' "$last" "$id" >> "$mark"
+      woken=$((woken + 1))
+    else
+      pending=$((pending + 1))
+      grep -qxF "$last $id" "$tried" 2>/dev/null && continue
+      printf '%s %s\n' "$last" "$id" >> "$tried"
+    fi
     ts="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
     line="$(jq -cn --arg ts "$ts" --arg a "$id" --argjson ok "$ok" --arg at "$last" '{ts: $ts, agent: "system", tool: "resume_wake", args: {agent: $a, resumed_at: $at}, result: {ok: $ok}}')"
     trace_emit "$ROOT" "$SANDBOX" "$line"
   done
-  echo "idle-nudge: the pause was lifted at $last; the seats were woken" >&2
+  [[ "$woken" -gt 0 ]] && echo "idle-nudge: the pause was lifted at $last; $woken seat(s) woken" >&2
+  [[ "$pending" -gt 0 ]] && echo "idle-nudge: the pause was lifted at $last; $pending seat(s) not reached, tried again on the next pass" >&2
+  return 0
 }
 # Diminishing returns: when nothing has yielded (no new finding, question
 # disposition or coverage record) across a window of jobs or minutes, the
@@ -532,6 +557,7 @@ while :; do
   [[ -f "$SANDBOX/done/SWARM_DONE" || -f "$SANDBOX/done/ALL_AGENTS_DEAD" ]] && exit 0
   ensure_hub
   host_backstop
+  pause_notify
   resume_wake
   if paused_now; then
     # Paused: the seats are held, nobody is nudged; the operator's requests are still said.
@@ -544,6 +570,14 @@ while :; do
   regroup_check
   yield_check
   operator_requests_check
+  # --idle-sec 0: nobody is nudged; the stop policy above (the backstop, the
+  # pause's notice, the wake after an extension, the proposal of a stop) and
+  # the operator's requests are this watchdog's all the same.
+  if [[ "$IDLE_SEC" -eq 0 ]]; then
+    [[ "$ONCE" -eq 1 ]] && exit 0
+    sleep "$INTERVAL"
+    continue
+  fi
   US=0
   until_solved && US=1
   ids="$(jq -r '.agents[].id' "$SANDBOX/team.json" 2>/dev/null | tr '\n' ' ')"

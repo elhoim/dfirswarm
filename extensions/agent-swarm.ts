@@ -1267,8 +1267,11 @@ export default function (pi: ExtensionAPI) {
     if (boardSocket() && hubLost.since) return;
     const cwd = ctx.cwd;
     // The short deadline: a dead link is replaced, not waited on for two minutes before every model call.
-    const budget = await readBudgetLive(cwd).catch(() => null);
-    if (budget) await enforceAllCaps(cwd, budget, ctx).catch(() => undefined);
+    const before = await readBudgetLive(cwd).catch(() => null);
+    if (before) await enforceAllCaps(cwd, before, ctx).catch(() => undefined);
+    // Read again after the caps were enforced: the check that writes the
+    // pause holds the call it was made for too.
+    const budget = before ? await readBudgetLive(cwd).catch(() => before) : null;
     // A paused run (the stop policy): this call does not go out. The turn
     // ends here and the seat stays, idle, with everything it held; the
     // operator's extension wakes it (the watchdog's prompt). In a VM this is
@@ -3736,6 +3739,11 @@ export default function (pi: ExtensionAPI) {
       specs,
       fromDefaults,
       keepText: (cwd, text) => keepToolOutput(cwd, toolOutputRel(agentId, "compact_summary", "text"), text),
+      // A compaction calls the provider itself: while the run is paused it is held, like any model call.
+      paused: async (cwd) => {
+        const b = await readBudgetLive(cwd).catch(() => null);
+        return b?.paused ? { reason: b.paused.reason, since: b.paused.at } : null;
+      },
       bounds: { summaryAttemptMs: secondsFromEnv("SWARM_COMPACT_SUMMARY_SEC"), compactionMs: secondsFromEnv("SWARM_COMPACT_TIMEOUT_SEC") },
     });
   }

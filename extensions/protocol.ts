@@ -4749,8 +4749,12 @@ export async function extendRun(
   const given = Object.entries(add).filter(([, v]) => v !== undefined && v !== null) as Array<[keyof typeof add, number]>;
   if (!given.length) throw new Error("nothing to extend by: give --minutes N, --tokens N or --usd N");
   for (const [k, v] of given) if (!Number.isFinite(v) || v <= 0) throw new Error(`--${k} takes a number above zero (got ${v})`);
-  if (await swarmDoneExists(sandboxRoot)) throw new Error("the run is finished (done/SWARM_DONE exists): an extension does not bring it back; swarm.sh resume continues it");
   return withTableLock(sandboxRoot, async (held) => {
+    // The run's end is read under the lock every stop writes it under: a
+    // stop, the harness's or the operator's, that took the lock first is
+    // not undone by an extension that was waiting for it.
+    if (await swarmDoneExists(sandboxRoot)) throw new Error("the run is finished (done/SWARM_DONE exists): an extension does not bring it back; swarm.sh resume continues it");
+    if (await lstat(join(sandboxRoot, STOPPED_REL)).then(() => true).catch(() => false)) throw new Error("the run was stopped (done/STOPPED exists): an extension does not bring it back; swarm.sh resume continues it");
     const budget = await readBudget(sandboxRoot);
     if (stopPolicyOf(budget) === "operator") throw new Error("this run's stop is the operator's (--stop operator): it has no wall clock and its caps are advisory, so there is nothing to extend; swarm.sh stop ends it");
     const set: Partial<Record<CapField, number>> = {};
@@ -5765,7 +5769,7 @@ export const TOOL_RESERVED_NAMES = new Set([
   "extension_error", "watch_truncated", "agent_error", "toolchain",
   // self-compaction: the tool, the per-turn context row and the hand-off events
   "self_compact", "context", "compact_notice", "compact_warning", "compact_forced", "compact_hold",
-  "compact_note", "compact_start", "compact_done", "compact_failed", "compact_stalled", "compact_config",
+  "compact_note", "compact_start", "compact_done", "compact_failed", "compact_stalled", "compact_config", "compact_held",
   // microVM runs: the tool that writes a shared file, the hub's own lines,
   // and what an agent's extension says about the hub (tests/reserved-names)
   "publish_file", "publish_needed", "skill", "finish_line", "hub_call", "hub_link", "hub_prompt",
@@ -10233,14 +10237,35 @@ export async function runOutcome(sandboxRoot: string): Promise<{ outcome: RunOut
   return { outcome: null, by: null, at: null, why: null };
 }
 
+/**
+ * The notice of a pause, claimed once: whichever process sees an
+ * unnotified pause first (the watchdog, the hub) creates its mark under
+ * traces/pause-notices/ and tells the operator; every other sees the mark.
+ * Durable, so a pause written by a pane, or one whose creator died before
+ * it said so, is still told. True when this call claimed it.
+ */
+export async function claimPauseNotice(sandboxRoot: string, pausedAt: string): Promise<boolean> {
+  const dir = join(sandboxRoot, "traces", "pause-notices");
+  await mkdir(dir, { recursive: true });
+  const name = createHash("sha256").update(pausedAt).digest("hex").slice(0, 32);
+  return writeFile(join(dir, name), `${pausedAt}\n`, { encoding: "utf8", flag: "wx" }).then(
+    () => true,
+    () => false,
+  );
+}
+
 /** Record the operator's stop of a run that has no sentinel: done/STOPPED, once. */
 export async function markStopped(sandboxRoot: string, by: string, why: string): Promise<{ written: boolean }> {
-  if (await swarmDoneExists(sandboxRoot)) return { written: false };
-  const file = join(sandboxRoot, STOPPED_REL);
-  if (await lstat(file).then(() => true).catch(() => false)) return { written: false };
-  await mkdir(dirname(file), { recursive: true });
-  await writeFile(file, `${JSON.stringify({ outcome: "stopped", by, at: new Date().toISOString(), why })}\n`, { encoding: "utf8", flag: "wx" }).catch(() => undefined);
-  return { written: true };
+  // Under the lock an extension takes, so the two are ordered: one that
+  // came first is in the caps the stop leaves, one that comes after is refused.
+  return withTableLock(sandboxRoot, async () => {
+    if (await swarmDoneExists(sandboxRoot)) return { written: false };
+    const file = join(sandboxRoot, STOPPED_REL);
+    if (await lstat(file).then(() => true).catch(() => false)) return { written: false };
+    await mkdir(dirname(file), { recursive: true });
+    await writeFile(file, `${JSON.stringify({ outcome: "stopped", by, at: new Date().toISOString(), why })}\n`, { encoding: "utf8", flag: "wx" }).catch(() => undefined);
+    return { written: true };
+  });
 }
 
 /** The reason prefix of a done the harness could not check. */

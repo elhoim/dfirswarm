@@ -6155,6 +6155,8 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
   fi
   if [[ "$idle_nudge_sec" -gt 0 ]]; then
     echo "Idle nudge:   an agent silent for ${idle_nudge_sec}s is prompted to continue ($([[ "${until_solved:-0}" -eq 1 ]] && echo "3 times, then on with backoff: the run is until solved; a provider error is retried the same way" || echo "up to 3 times"))"
+  else
+    echo "Idle nudge:   off (--idle-nudge-sec 0): no agent is prompted; the watchdog still runs the stop policy (the pause and its notice, the wake after an extension, a stop proposed when nothing yields)"
   fi
   if [[ -n "$cap_per_agent" && "$metered" -eq 1 ]]; then
     echo "Per-agent cap: \$$cap_per_agent (an agent over it is steered, then stopped on its own)"
@@ -6508,45 +6510,46 @@ EOF
      | .write_guard_measured = $measured' <<<"$rec")"
   registry_upsert "$rec"
 
-  if [[ "$idle_nudge_sec" -gt 0 ]]; then
-    # The watchdog's own token, in its environment. Without it every line it
-    # wrote came back `agent_unverified: true` — a run with the watchdog on
-    # by default reported its own bookkeeping as unattributable for the whole
-    # run, which buries the count that is supposed to mean something.
-    #
-    # `swarm.sh reap` is a separate invocation and the tokens live only in the
-    # kickoff's memory, so its lines stay unverified. That is the honest
-    # answer rather than a wrong one: a token on disk would be readable by
-    # every pane, since the guard denies writes and leaves reads open.
-    local hub_env=() hub_dir_now="" nudge_script
-    if [[ "$isolation" == "microvm" ]] && hub_dir_now="$(hub_dir_of "$sandbox")"; then
-      hub_env=(SWARM_HUB_ADMIN="$hub_dir_now/admin.sock" SWARM_HUB_STATUS="$hub_dir_now/status.json" SWARM_HUB_DIR="$hub_dir_now")
-    fi
-    # The run's frozen copy when it has one, as the hub and its keeper.
-    nudge_script="$(run_script "$hub_dir_now" scripts/idle-nudge.sh)"
+  # The watchdog runs whatever --idle-nudge-sec says: with 0 it prompts
+  # nobody, and still holds the stop policy (the backstop, the pause's
+  # notice, the wake after an extension, the proposal of a stop).
+  # The watchdog's own token, in its environment. Without it every line it
+  # wrote came back `agent_unverified: true` — a run with the watchdog on
+  # by default reported its own bookkeeping as unattributable for the whole
+  # run, which buries the count that is supposed to mean something.
+  #
+  # `swarm.sh reap` is a separate invocation and the tokens live only in the
+  # kickoff's memory, so its lines stay unverified. That is the honest
+  # answer rather than a wrong one: a token on disk would be readable by
+  # every pane, since the guard denies writes and leaves reads open.
+  local hub_env=() hub_dir_now="" nudge_script
+  if [[ "$isolation" == "microvm" ]] && hub_dir_now="$(hub_dir_of "$sandbox")"; then
+    hub_env=(SWARM_HUB_ADMIN="$hub_dir_now/admin.sock" SWARM_HUB_STATUS="$hub_dir_now/status.json" SWARM_HUB_DIR="$hub_dir_now")
+  fi
+  # The run's frozen copy when it has one, as the hub and its keeper.
+  nudge_script="$(run_script "$hub_dir_now" scripts/idle-nudge.sh)"
+  detach_exec env SWARM_TRACE_TOKEN="$(trace_token_for system)" SWARM_TRACE_SOCKET="${trace_gate:-}" SWARM_RUNS_DIR="$RUNS_DIR" ${hub_env[@]+"${hub_env[@]}"} \
+    bash "$nudge_script" --sandbox "$sandbox" --idle-sec "$idle_nudge_sec" \
+    >"$sandbox/traces/idle-nudge.log" 2>&1 &
+  echo $! > "$sandbox/idle-nudge.pid"
+  # On the Linux runs 5 and 6 (2026-09-22) the watchdog started here was
+  # found dead a minute later: an empty log, no state file, nothing in the
+  # journal, while the same detach from the same tmux session survives a
+  # probe. The cause is not established. Until it is, the kickoff looks two
+  # seconds later, starts the watchdog once more with stdin closed when it
+  # is gone, and says which it was; an agent that ends its turn with no
+  # watchdog sits idle until the wall clock, which is what run 6 showed.
+  sleep 2
+  if ! kill -0 "$(cat "$sandbox/idle-nudge.pid" 2>/dev/null || echo 0)" 2>/dev/null; then
     detach_exec env SWARM_TRACE_TOKEN="$(trace_token_for system)" SWARM_TRACE_SOCKET="${trace_gate:-}" SWARM_RUNS_DIR="$RUNS_DIR" ${hub_env[@]+"${hub_env[@]}"} \
       bash "$nudge_script" --sandbox "$sandbox" --idle-sec "$idle_nudge_sec" \
-      >"$sandbox/traces/idle-nudge.log" 2>&1 &
+      >>"$sandbox/traces/idle-nudge.log" 2>&1 </dev/null &
     echo $! > "$sandbox/idle-nudge.pid"
-    # On the Linux runs 5 and 6 (2026-09-22) the watchdog started here was
-    # found dead a minute later: an empty log, no state file, nothing in the
-    # journal, while the same detach from the same tmux session survives a
-    # probe. The cause is not established. Until it is, the kickoff looks two
-    # seconds later, starts the watchdog once more with stdin closed when it
-    # is gone, and says which it was; an agent that ends its turn with no
-    # watchdog sits idle until the wall clock, which is what run 6 showed.
     sleep 2
-    if ! kill -0 "$(cat "$sandbox/idle-nudge.pid" 2>/dev/null || echo 0)" 2>/dev/null; then
-      detach_exec env SWARM_TRACE_TOKEN="$(trace_token_for system)" SWARM_TRACE_SOCKET="${trace_gate:-}" SWARM_RUNS_DIR="$RUNS_DIR" ${hub_env[@]+"${hub_env[@]}"} \
-        bash "$nudge_script" --sandbox "$sandbox" --idle-sec "$idle_nudge_sec" \
-        >>"$sandbox/traces/idle-nudge.log" 2>&1 </dev/null &
-      echo $! > "$sandbox/idle-nudge.pid"
-      sleep 2
-      if kill -0 "$(cat "$sandbox/idle-nudge.pid" 2>/dev/null || echo 0)" 2>/dev/null; then
-        echo "Idle nudge:   the watchdog exited right after it started and was started again; it is running now (traces/idle-nudge.log)"
-      else
-        echo "WARN: the idle watchdog exited right after it started, twice. Agents that end their turns will not be prompted; run it by hand: scripts/idle-nudge.sh --sandbox $sandbox" >&2
-      fi
+    if kill -0 "$(cat "$sandbox/idle-nudge.pid" 2>/dev/null || echo 0)" 2>/dev/null; then
+      echo "Idle nudge:   the watchdog exited right after it started and was started again; it is running now (traces/idle-nudge.log)"
+    else
+      echo "WARN: the idle watchdog exited right after it started, twice. Agents that end their turns will not be prompted; run it by hand: scripts/idle-nudge.sh --sandbox $sandbox" >&2
     fi
   fi
 
