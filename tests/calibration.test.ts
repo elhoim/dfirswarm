@@ -285,13 +285,11 @@ test("the scorer reads today's ledger: misses, false negatives, forced answers, 
     assert.deepEqual([s.negatives.total, s.negatives.without_coverage, s.negatives.without_review, s.negatives.unsupported], [3, 1, 2, 2]);
     assert.deepEqual([s.acquisition.questions, s.acquisition.requested], [1, 1]);
     assert.equal(s.unanswered, 0);
-    // The recorded confidence (protocol.ts recordedConfidence): none of these answers states its result and none is attested established naming an alternative, so each stated high is recorded medium, and nothing is wrong at high.
-    assert.equal(s.calibration.overconfident, 0);
-    assert.equal(s.calibration.levels.high, undefined);
-    assert.equal(s.calibration.stated_high_lowered, 3);
-    assert.equal(q("3").answer?.stated_confidence, "high");
-    assert.equal(q("3").answer?.confidence, "medium");
-    assert.match(q("3").answer?.confidence_why ?? "", /high is kept only by an established answer/);
+    // These hand-written answers carry no confidence_rule: recorded before the run recorded confidence, they keep what their authors declared (recordedConfidence, legacy).
+    assert.equal(s.calibration.overconfident, 1);
+    assert.equal(s.calibration.levels.high.n, 3);
+    assert.equal(s.calibration.stated_high_lowered, 0);
+    assert.deepEqual([q("3").answer?.stated_confidence, q("3").answer?.confidence], ["high", "high"]);
     assert.equal(r.ledger.coverage_model, "absence");
     assert.equal(r.ledger.entries, 10);
     assert.equal(r.ledger.chain_ok, true, "hand-written lines carry no hash, as a version 1 ledger's do");
@@ -432,7 +430,8 @@ async function faithfulRun(truth: Truth, withLate: boolean): Promise<string> {
     const negative = ["bounded_negative", "not_determinable", "premise_not_supported"].includes(expected.result);
     lines.push(E(basis, negative ? "coverage" : "finding", expected.summary ?? "", { proposition: q.text, coverage: "complete" }));
     const answer = ++seq;
-    const line = E(answer, "answer", expected.summary ?? "", { section: `question:${q.id}`, result: expected.result, confidence: "high", reasoning: `E-${basis}.`, by: "author", authors: ["author"] });
+    // Recorded under the recorded-confidence rule (confidence_rule 1): its high stands only as recordedConfidence says.
+    const line = E(answer, "answer", expected.summary ?? "", { section: `question:${q.id}`, result: expected.result, confidence: "high", confidence_rule: 1, reasoning: `E-${basis}.`, by: "author", authors: ["author"] });
     lines.push(line);
     if (negative) attests.push(JSON.stringify({ v: 2, act: "attest", seq: answer, target: "h", by: "critic", at: "t", how: "re-derived" }));
     // An established answer attested established by another seat, naming the alternative it weighed: its high is recorded high.

@@ -165,6 +165,8 @@ export type RunMetrics = {
     stated: Record<"high" | "medium" | "low" | "none", number>;
     recorded_levels: Record<"high" | "medium" | "low" | "none", number>;
     lowered: Array<{ section: string; id: string | null; answer: string; why: string }>;
+    /** Highs kept as declared: answers recorded before the run recorded confidence (no confidence_rule). */
+    legacy: number;
   };
   offers: {
     /** Whether the registers hold offer events at all (a run from before offers has none). */
@@ -439,15 +441,17 @@ function confidenceOf(c: Context, scope: RunMetrics["questions"]): RunMetrics["c
   const recorded = blank();
   const lowered: RunMetrics["confidence"]["lowered"] = [];
   let answers = 0;
+  let legacy = 0;
   for (const [section, e] of standingAnswers(c)) {
     if (!live.has(section)) continue;
     answers += 1;
     const r = P.recordedConfidence(e, c.attestations);
+    if (r.legacy) legacy += 1;
     stated[r.stated ?? "none"] += 1;
     recorded[r.recorded ?? "none"] += 1;
     if (r.stated !== r.recorded) lowered.push({ section, id: c.qs?.bySection.get(section)?.id ?? null, answer: `E-${e.seq}`, why: r.why ?? "" });
   }
-  return { recorded: c.have.ledger, answers, stated, recorded_levels: recorded, lowered };
+  return { recorded: c.have.ledger, answers, stated, recorded_levels: recorded, lowered, legacy };
 }
 
 function negativesAndCoverage(c: Context, scope: RunMetrics["questions"]): Pick<RunMetrics, "negatives" | "coverage"> {
@@ -1093,7 +1097,7 @@ export function metricsText(m: RunMetrics): string {
     ["Coverage records", cov.recorded ? `${cov.records} standing: ${cov.complete} complete, ${cov.partial} partial, ${cov.not_computed} not computed, ${cov.stale.length} stale (a result no longer stands: ${list(cov.stale.map((x) => `${x.record} ${x.results.map((y) => `${y.result} ${y.code}`).join(" ")}`))}); ${cov.reviewed} reviewed by another seat as the gate counts it (${cov.reviewed_on_record} on the record, ${cov.reviewed_through_answer} through the negative answer resting on it)` : absent(LEDGER)],
     ["Negatives on partial coverage", cov.recorded ? `${cov.negatives_on_partial.length} (${list(cov.negatives_on_partial.map((x) => `${qname(x)} ${x.answer}`))}); ${cov.negatives_without_coverage.length} cite no coverage record` : absent(LEDGER)],
     ["Store sweeps", m.sweeps.recorded ? `${m.sweeps.records} coverage record(s) named what a hit would contain: ${m.sweeps.clean} clean, ${m.sweeps.with_hits} with hits outside the record (${m.sweeps.hit_objects} hit(s)), ${m.sweeps.partial} partial, ${m.sweeps.pending} pending; ${m.sweeps.held.length} negative hold(s) now (${list(m.sweeps.held.map((x) => `${qname(x)} ${x.answer} ${x.code} on ${x.coverage}`))}); ${m.sweeps.released} record(s) with hits released by a revision whose sweep is clean` : absent(LEDGER)],
-    ["Confidence", m.confidence.recorded ? `${m.confidence.answers} standing answer(s) in scope, recorded: high ${m.confidence.recorded_levels.high}, medium ${m.confidence.recorded_levels.medium}, low ${m.confidence.recorded_levels.low}, none ${m.confidence.recorded_levels.none}; stated high ${m.confidence.stated.high}; ${m.confidence.lowered.length} recorded lower than stated${m.confidence.lowered.length ? ` (${list(m.confidence.lowered.map((x) => `${qname(x)} ${x.answer}: ${x.why}`))})` : ""}` : absent(LEDGER)],
+    ["Confidence", m.confidence.recorded ? `${m.confidence.answers} standing answer(s) in scope, recorded: high ${m.confidence.recorded_levels.high}, medium ${m.confidence.recorded_levels.medium}, low ${m.confidence.recorded_levels.low}, none ${m.confidence.recorded_levels.none}; stated high ${m.confidence.stated.high}; ${m.confidence.lowered.length} recorded lower than stated${m.confidence.lowered.length ? ` (${list(m.confidence.lowered.map((x) => `${qname(x)} ${x.answer}: ${x.why}`))})` : ""}${m.confidence.legacy ? `; ${m.confidence.legacy} high(s) kept as declared (recorded before the run recorded confidence)` : ""}` : absent(LEDGER)],
     ["Offers (leads)", o.recorded ? `${o.leads.made} made: ${o.leads.accepted} accepted, ${o.leads.declined} declined, ${o.leads.taken_by_another} taken by another seat, ${o.leads.lapsed} lapsed, ${o.leads.open} with no outcome` : o.wakes_before_offers.recorded ? "not recorded (no offer events: a run from before offers)" : absent(LEADS)],
     ["Offers (questions)", o.recorded ? `${o.questions.made} made: ${o.questions.accepted} accepted, ${o.questions.declined} declined, ${o.questions.not_taken_up} not taken up` : o.wakes_before_offers.recorded ? "not recorded (no offer events: a run from before offers)" : absent(LEADS)],
     ["Offers (reviews)", o.recorded ? `${o.reviews.made} made (${Object.entries(o.reviews.by_reason).map(([k, n]) => `${k} ${n}`).join(", ") || "none"}): ${o.reviews.accepted} taken up, ${o.reviews.declined} declined, ${o.reviews.withdrawn} withdrawn (reviewed by another route, or superseded), ${o.reviews.lapsed} lapsed, ${o.reviews.open} with no outcome; ${o.reviews.taken} taken by their seat first (offer accept)` : o.wakes_before_offers.recorded ? "not recorded (no offer events: a run from before offers)" : absent(LEADS)],

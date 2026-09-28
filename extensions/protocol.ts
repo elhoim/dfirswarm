@@ -7664,6 +7664,13 @@ export type LedgerEntry = {
   looked_for?: string[];
   /** A coverage record, in place of looked_for: why no literal form exists. */
   looked_for_none_why?: string;
+  /**
+   * Version 4, an answer to a question, written by the hub: the
+   * recorded-confidence rule it was recorded under (1: recordedConfidence).
+   * An answer without it was recorded before the rule, and keeps the
+   * confidence its author declared wherever it is read.
+   */
+  confidence_rule?: number;
   /** An answer that moves its question from a positive result (established, partial) to a negative one: what undermines the earlier chain (entries E-<seq> or objects) and why. */
   downgrade?: { evidence: string[]; why: string };
   /** A coverage record, written by the hub: whether the jobs behind it were given every object it names (negative-bar.ts). */
@@ -7759,6 +7766,7 @@ function ledgerV4Fields(e: LedgerEntry): Record<string, unknown> {
     ...(e.finish_material ? { finish_material: e.finish_material } : {}),
     ...(e.unsupported_tokens?.length ? { unsupported_tokens: e.unsupported_tokens } : {}),
     ...(e.downgrade ? { downgrade: { evidence: e.downgrade.evidence, why: e.downgrade.why } } : {}),
+    ...(e.confidence_rule ? { confidence_rule: e.confidence_rule } : {}),
     ...coverageFields(e),
     ...(e.source_class ? { source_class: e.source_class } : {}),
     ...(e.provenance ? { provenance: canonicalValue(e.provenance) } : {}),
@@ -8902,10 +8910,18 @@ export function attestEstablishes(a: LedgerAttestation): boolean {
  * comes after the answer (the calibration run sabfd76: every answer high,
  * four of them wrong).
  */
-export type RecordedConfidence = { stated: (typeof LEDGER_CONFIDENCE)[number] | null; recorded: (typeof LEDGER_CONFIDENCE)[number] | null; why: string | null };
-export function recordedConfidence(answer: Pick<LedgerEntry, "kind" | "section" | "confidence" | "result" | "inconclusive" | "hash" | "by" | "authors">, attestations: LedgerAttestation[]): RecordedConfidence {
+export type RecordedConfidence = {
+  stated: (typeof LEDGER_CONFIDENCE)[number] | null;
+  recorded: (typeof LEDGER_CONFIDENCE)[number] | null;
+  why: string | null;
+  /** A high recorded before the rule (the answer carries no confidence_rule): kept as declared, and said so where it is shown. */
+  legacy?: boolean;
+};
+export function recordedConfidence(answer: Pick<LedgerEntry, "kind" | "section" | "confidence" | "result" | "inconclusive" | "hash" | "by" | "authors" | "confidence_rule">, attestations: LedgerAttestation[]): RecordedConfidence {
   const stated = answer.confidence && (LEDGER_CONFIDENCE as readonly string[]).includes(answer.confidence) ? answer.confidence : null;
   if (stated !== "high" || answer.kind !== "answer" || !answer.section?.startsWith("question:")) return { stated, recorded: stated, why: null };
+  // An answer recorded before the rule keeps what its author declared (a finished run reads as it did).
+  if (answer.confidence_rule !== 1) return { stated, recorded: stated, why: null, legacy: true };
   const result = NB.answerResult(answer);
   if (result !== "established") return { stated, recorded: "medium", why: `high is kept only by an established answer, and this one ${result ? `is ${NB.resultWords(result)}` : "states no result"}` };
   const target = answer.hash ?? ledgerHash(answer as LedgerEntry, "genesis");
@@ -8914,9 +8930,13 @@ export function recordedConfidence(answer: Pick<LedgerEntry, "kind" | "section" 
   return held ? { stated, recorded: "high", why: null } : { stated, recorded: "medium", why: "high is kept only once another seat attests it established, naming the alternatives it weighed and why the evidence rules each out; none has" };
 }
 
-/** A recorded confidence in words: the recorded one, and the stated one when it differs, with why. */
+/** The words that say a high was kept as declared because its answer predates the rule. */
+export const LEGACY_CONFIDENCE_WORDS = "as declared: recorded before the run recorded confidence";
+
+/** A recorded confidence in words: the recorded one, and the stated one when it differs, with why; a high from before the rule, as declared. */
 export function confidenceWords(c: RecordedConfidence): string {
   if (!c.recorded) return "no confidence stated";
+  if (c.legacy) return `${c.recorded} (${LEGACY_CONFIDENCE_WORDS})`;
   return c.recorded === c.stated ? c.recorded : `${c.recorded} (stated ${c.stated}; ${c.why})`;
 }
 
@@ -10906,6 +10926,8 @@ async function recordAnswer(ctx: SwarmContext, input: LedgerInput): Promise<Ledg
         ...(input.asserts_absence === true ? { asserts_absence: true } : {}),
         ...(tokens.length ? { unsupported_tokens: tokens } : {}),
         ...(downgrade ? { downgrade } : {}),
+        // Recorded under the recorded-confidence rule: its high is kept only as recordedConfidence says.
+        ...(question && confidence ? { confidence_rule: 1 } : {}),
         by: ctx.agentId,
         authors: [ctx.agentId],
         at: new Date().toISOString(),

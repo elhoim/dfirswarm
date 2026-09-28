@@ -349,8 +349,16 @@ test("the run records a high confidence only on an established answer another se
   // The report and the metrics show the recorded confidence, the stated one beside it.
   const md = await renderReportBodyMarkdown(S);
   assert.match(md, /Confidence medium \(stated high; high is kept only by an established answer, and this one is not determinable\)/);
+  // An answer recorded before the rule (no confidence_rule) keeps the high its author declared, whatever its attests (a text alternatives review, as every review was before the rule).
+  const legacy = { ...est.entry, confidence_rule: undefined } as unknown as P.LedgerEntry;
+  const textReview = [{ v: 2, act: "attest", seq: est.entry.seq, target: est.entry.hash!, by: "a3", at: new Date().toISOString(), how: "re-read it", strength: "established", answer_review: { ...ESTABLISHED.answer_review, alternatives: "none the evidence allows" } }] as unknown as P.LedgerAttestation[];
+  assert.deepEqual(P.recordedConfidence(legacy, textReview), { stated: "high", recorded: "high", why: null, legacy: true });
+  assert.equal(P.confidenceWords(P.recordedConfidence(legacy, textReview)), "high (as declared: recorded before the run recorded confidence)");
+  assert.equal(P.recordedConfidence(est.entry, textReview).recorded, "medium", "the same attest on an answer recorded under the rule keeps nothing");
+  assert.equal(est.entry.confidence_rule, 1, "the hub marks an answer recorded under the rule");
   const m = await measureRun(S);
   assert.equal(m.confidence.recorded, true);
+  assert.equal(m.confidence.legacy, 0);
   assert.deepEqual([m.confidence.stated.high, m.confidence.recorded_levels.high, m.confidence.recorded_levels.medium], [2, 1, 2]);
   assert.deepEqual(m.confidence.lowered.map((x) => [x.section, x.answer]), [["4", `E-${nd.entry.seq}`]]);
 });

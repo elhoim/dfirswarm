@@ -310,6 +310,15 @@ evidence that settled it was added late. Five rules follow, each generic
   it is read (`recordedConfidence`), because the attest that keeps a high
   comes after the answer. The report, the metrics (`confidence`) and the
   calibration score show the recorded confidence, the stated one beside it.
+  The rule reads only answers recorded under it: the hub writes
+  `confidence_rule: 1` into the chained core of every answer to a question
+  that states a confidence. An answer without it was recorded before the
+  rule and keeps the confidence its author declared, and the report and the
+  metrics say "as declared: recorded before the run recorded confidence"
+  (the Fable review of the batches found every high of every finished run
+  lowered). The ledger version could not tell the two apart (both are 4),
+  and the harness commit is the registry's, not the run's, and commits are
+  not ordered.
 - **A missing source is asked for.** When a question needs a source the
   evidence does not hold, the agents open an acquisition ask
   (`lead_close needs_operator` with `ask.kind: acquisition`) before
