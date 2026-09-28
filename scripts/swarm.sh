@@ -102,7 +102,7 @@ Commands:
   list               Every run, with spend and state
   status <id>        One run: its agents, markers and spend
   summary <id>       A Markdown report of a run, from its own files
-  context <id>       Each agent's context history from the trace: peaks, lines crossed, hand-offs, summary cost
+  context <id>       Each agent's context history from the trace: peaks, lines crossed, hand-offs, summary cost; metrics <id> the process, from its registers
   report <id>        One self-contained report.html; --pdf prints it, --lint checks its citations
   package <id>       Hand a run over: report, board, trace, hashes (--sign signs it)
   examiner machine review releases timestamp rerun verify certify export hold release purge image-for   After a run: adoption and releases, checks, reruns, export, retention; the image packs boot (help <command>)
@@ -9172,6 +9172,38 @@ cmd_context() {
   node --experimental-strip-types "$ROOT/scripts/context-audit.ts" "$sandbox" "$@"
 }
 
+# Process metrics from a run's own registers (scripts/metrics.ts, docs/usage.md
+# "Metrics"), or two runs of one goal compared question by question. Read
+# only: nothing is written into either run.
+cmd_metrics() {
+  local compare=0 json=() ids=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --compare) compare=1; shift ;;
+      --json) json=(--json); shift ;;
+      -*) die_usage "metrics: unknown option $1" ;;
+      *) ids+=("$1"); shift ;;
+    esac
+  done
+  if [[ "$compare" -eq 1 ]]; then
+    [[ ${#ids[@]} -eq 2 ]] || die_usage "metrics --compare takes two run ids"
+  else
+    [[ ${#ids[@]} -eq 1 ]] || die_usage "metrics takes one run id (or --compare <id-A> <id-B>)"
+  fi
+  ensure_registry
+  local id sandbox dirs=()
+  for id in "${ids[@]}"; do
+    sandbox="$(json_get "$id" | jq -r '.sandbox // empty')"
+    [[ -n "$sandbox" && -d "$sandbox" ]] || { echo "Unknown swarm id or missing sandbox: $id" >&2; exit 1; }
+    dirs+=("$sandbox")
+  done
+  if [[ "$compare" -eq 1 ]]; then
+    node --experimental-strip-types --no-warnings "$ROOT/scripts/metrics.ts" --compare "${dirs[@]}" ${json[@]+"${json[@]}"}
+  else
+    node --experimental-strip-types --no-warnings "$ROOT/scripts/metrics.ts" "${dirs[0]}" ${json[@]+"${json[@]}"}
+  fi
+}
+
 # PDF printing lives in scripts/print-pdf.sh. Chrome and its relatives are
 # the only engines that get the page breaks in the report's print stylesheet
 # right, and none of them is a dependency: without one, `report` still writes
@@ -11134,6 +11166,16 @@ cmd_help() {
     list|status|summary|report|package|tools|say|stop|reap|ui|netcheck)
       usage | awk -v c="$topic" '$1 == c { print }'
       echo "docs/usage.md has the detail; start is the only command with a long page." ;;
+    metrics) cat <<'EOF'
+  metrics <id> [--json]                    a run's process metrics, read from its own registers (nothing written):
+                                           quick and unreviewed negatives, coverage, offers, done calls and refusals,
+                                           the tail to the end, acquisition gaps, interpretations, reversals by cause,
+                                           tokens per question, duplicates, the network
+  metrics --compare <id-A> <id-B> [--json] two runs of one goal side by side, question by question; a negative the
+                                           other run established, and a shared negative on partial coverage, flagged
+Every metric's definition is in docs/usage.md (Metrics).
+EOF
+      ;;
     extend) cat <<'EOF'
   extend <id> [--minutes N] [--tokens N] [--usd N]
       Give a run more wall clock, tokens or dollars, each added to the cap it extends
@@ -11479,6 +11521,7 @@ main() {
     reap) cmd_reap "$@" ;;
     summary) cmd_summary "$@" ;;
     context) cmd_context "$@" ;;
+    metrics) cmd_metrics "$@" ;;
     report) cmd_report "$@" ;;
     package) cmd_package "$@" ;;
     tools) cmd_tools "$@" ;;
