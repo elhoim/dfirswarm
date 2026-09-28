@@ -221,6 +221,62 @@ same `swarm.sh start` underneath. In the order the form asks, on a first case:
 | ![The network card and the switches](screenshots/kickoff-07-network.png) | ![The label, the command the form built, and the Start button](screenshots/kickoff-08-command.png) |
 | **7. The network and the switches.** Guarded by default; hosts a case needs; local-only; browser tools, hard kill, tool writing, prepare only. | **8. The command, then Start.** The form shows the exact `swarm.sh start` line it will run. Starting needs the token from the server's startup line; watching never does. |
 
+### 3c. While the case runs, and after it stops
+
+The run is yours to steer while it runs; each command below acts through the
+hub, lands on the trace and on the operator's record, and has its detail in
+[usage.md](usage.md) (and `swarm.sh help <command>`).
+
+```bash
+# ask the running swarm a question (Q-n); list and follow them
+scripts/swarm.sh question <id> add --text "Was the archive mailed?" --why "the client says so"
+scripts/swarm.sh question <id> list
+
+# what the run asked of you (R-n): a lead only you can unblock, evidence it
+# lacks, a clarification, a stop proposal; answer, decline or ack each
+scripts/swarm.sh requests <id> list --open
+scripts/swarm.sh requests <id> answer R-3 "the key is in the second envelope"
+
+# evidence acquired after the kickoff, for an acquisition request, and
+# material you supply (a statement, a policy): both sealed and on the ledger
+scripts/swarm.sh evidence <id> add /evidence/phone.tar --why "the phone" --for R-4
+scripts/swarm.sh material <id> add memo.pdf --why "the client's timeline"
+
+# the dynamic network: what was asked, decided and granted; grant or deny
+scripts/swarm.sh net <id> list
+scripts/swarm.sh net <id> grant NR-2 --why "the geocoder is needed for Q5"
+
+# a run paused at a cap: more time (or --tokens, --usd) lifts the pause
+scripts/swarm.sh extend <id> --minutes 30
+
+# a run that ended: continue it on its own chains, with a new question
+scripts/swarm.sh resume <id> --question "When was the stick first attached?"
+
+# after it stops: its process metrics, and the code the agents wrote that
+# could become library tools
+scripts/swarm.sh metrics <id>
+scripts/swarm.sh tools <id> --candidates
+```
+
+- **Questions** ([usage.md](usage.md#questions-swarmsh-question-and-directives)):
+  a person's question is a proposition to test, offered to one seat; `--as ID`
+  names an enrolled person, `--sign` signs the act.
+- **Requests, evidence and material**
+  ([usage.md](usage.md#the-case-contract-requests-evidence-material)):
+  under `--more-evidence no` an acquisition is answered at once with "no
+  additional input under this case policy", never "the fact is absent".
+- **The network** ([usage.md](usage.md#the-dynamic-network-net)): a refusal
+  stops that avenue, never the lead; one item per host and lead waits for
+  you.
+- **The stop policy and resume**
+  ([usage.md](usage.md#the-stop-policy-extend-stop-resume)): a cap pauses the
+  run by default; `stop` ends it as stopped, never completed; `resume`
+  continues the same run, and an earlier seal still verifies as a prefix.
+- **Metrics and tool candidates**
+  ([usage.md](usage.md#metrics-swarmsh-metrics-scriptsmetricsts),
+  [usage.md](usage.md#the-report-the-outputs-and-the-code-left-behind)): read
+  from the run's own registers, nothing written.
+
 ### 4. Your first case
 
 A case differs from the hello goal in three ways: evidence, a real goal

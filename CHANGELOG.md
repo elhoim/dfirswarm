@@ -45,6 +45,10 @@ All notable changes to this project. The format follows
   part is real: the header's "Yours: none" and the worker prompt now ask a
   seat to hold a lead for sustained work and to take what is offered
   before it waits.
+- **The quick start has the running case's commands.** `question add`,
+  `requests`, `evidence add`, `material add`, `net`, `extend`, `resume`,
+  `metrics` and `tools --candidates`, each with one example and a link to
+  usage.md.
 - **The kickoff checks the Herdr server first.** `herdr status server` is
   asked with the other host programs, before any pane or VM is made; a
   stopped server refuses the start (and a `--check`) and says how to start
