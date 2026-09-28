@@ -60,7 +60,7 @@ function refused(err: unknown): boolean {
 type Pending = { fn: string; socket: Socket; answered: () => void; resolve: (value: unknown) => void; reject: (err: Error) => void };
 
 /** Calls that change the board, sent once more with the same request id when a link drops. */
-const RETRIED = new Set(["postMessage", "systemPost", "recordEntry", "attestEntry", "disputeEntry", "threadOpen", "claimName", "markDone", "publishFile", "forgeTool", "recordFileVersion", "jobSubmit", "catalogRequest", "jobStatus", "leadOpen", "leadClaim", "leadRelease", "leadClose", "leadLink", "leadInterpret"]);
+const RETRIED = new Set(["postMessage", "systemPost", "recordEntry", "attestEntry", "disputeEntry", "threadOpen", "claimName", "markDone", "publishFile", "forgeTool", "recordFileVersion", "jobSubmit", "catalogRequest", "jobStatus", "leadOpen", "leadClaim", "leadRelease", "leadClose", "leadLink", "leadInterpret", "netRequest", "netFetch"]);
 
 /** Timings a test shortens; the defaults are the run's. */
 export type HubClientTimings = { partTimeoutMs?: number; writeStallMs?: number };
@@ -370,6 +370,9 @@ export const REMOTE_FUNCTIONS = [
   "markDone",
   "runFinishLine",
   "nameOf",
+  "netFetch",
+  "netRequest",
+  "netView",
   "postMessage",
   "publishFile",
   "readBudget",
@@ -429,6 +432,16 @@ export async function runFinishLine(sandbox: string): Promise<P.FinishLineRun | 
 type JobAnswer = { ok: boolean; reason?: string; job?: Record<string, unknown>; stdout?: { offset: number; bytes: number; total: number; text: string; next: number | null; path: string } };
 const noJobService = async (): Promise<JobAnswer> => ({ ok: false, reason: "this run has no job service (a host run): run the work in your own shell" });
 export const jobSubmit = remote("jobSubmit", noJobService as (sandboxRoot: string, spec: Record<string, unknown>) => Promise<JobAnswer>);
+/**
+ * The dynamic network (scripts/net-broker.ts, docs/adr/0011): decided and
+ * carried out on the host, by the hub and the fetch service. A host run has
+ * neither: the local answer says so.
+ */
+type NetAnswer = { ok: boolean; reason?: string } & Record<string, unknown>;
+const noNet = async (): Promise<NetAnswer> => ({ ok: false, reason: "this run has no dynamic network (a host run, or network closed): what the evidence does not hold, ask the operator for (lead_close needs_operator)" });
+export const netRequest = remote("netRequest", noNet as (sandboxRoot: string, input: Record<string, unknown>) => Promise<NetAnswer>);
+export const netFetch = remote("netFetch", noNet as (sandboxRoot: string, input: Record<string, unknown>) => Promise<NetAnswer>);
+export const netView = remote("netView", noNet as (sandboxRoot: string, input: Record<string, unknown>) => Promise<NetAnswer>);
 export const jobStatus = remote("jobStatus", noJobService as (sandboxRoot: string, o: Record<string, unknown>) => Promise<JobAnswer>);
 export const catalogRequest = remote("catalogRequest", noJobService as (sandboxRoot: string, o: Record<string, unknown>) => Promise<JobAnswer>);
 export const claimFile = remote("claimFile", P.claimFile);

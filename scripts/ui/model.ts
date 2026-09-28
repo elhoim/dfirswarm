@@ -34,6 +34,7 @@ import {
   type SwarmSummary,
 } from "../../extensions/observe.ts";
 import { agentDeadPath, agentDonePath, hostTime, readEventLog, readEventLogChecked, type PostRecord, type SwarmEvent } from "../../extensions/protocol.ts";
+import { networkBrief, type NetworkBrief } from "./network.ts";
 import { awaitingInterpretation, leadsSnapshot, OPERATOR_REQUESTS, operatorHosts, questionCoverage, rankedLeads, type AwaitingJob, type LeadView } from "../../extensions/leads.ts";
 import { claimSequences, type ClaimSequence } from "../../ui/src/lib/claim-sequences.ts";
 import { isFailureEvent } from "../../ui/src/lib/event-taxonomy.ts";
@@ -555,6 +556,8 @@ export type SwarmView = Omit<SwarmDetail, "summary" | "agents" | "threads"> & {
   leads: LeadsBrief | null;
   /** Whether the run was started until solved: no wall clock, caps advisory, only the operator ends it. */
   until_solved: boolean;
+  /** The dynamic network in brief, for the header: its mode and what waits on the operator. Null when the network is closed and nothing was asked. */
+  network: NetworkBrief | null;
 };
 
 /** The register in numbers, for the header and the tab strip. */
@@ -1106,6 +1109,7 @@ export async function readSwarmView(runsDir: string, id: string, traceLimit = 40
     custody: await readCustody(sandbox),
     leads: await leadsBrief(sandbox),
     until_solved: detail.budget.until_solved === true,
+    network: await networkBrief(sandbox).catch(() => null),
   };
 }
 

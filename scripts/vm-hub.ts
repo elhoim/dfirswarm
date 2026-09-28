@@ -84,6 +84,8 @@ import * as T from "../extensions/toolchain.ts";
 import { claimHolds, messageFor, resolvePeer } from "./nudge-broker.mjs";
 import { GATEWAY_STATE_REL } from "./model-gateway.ts";
 import { JobService, jobView, type JobSpec } from "./job-service.ts";
+import { bindJobGrants, checkJobGrants, fetchForSeat, netTick, netViewFor, requestAccess } from "./net-broker.ts";
+import { readCasePolicy } from "./case-policy.ts";
 
 /** What a job tool is told in a run with no job service. */
 const NO_JOBS = "this run has no job service (a host run, or --no-jobs): run the work in your own shell";
@@ -211,6 +213,11 @@ const RATE_LIMITS: Record<string, { bucket: string; capacity: number; perSecond:
   // per-agent limits hold what is accepted.
   jobSubmit: { bucket: "job", capacity: 20, perSecond: 0.2 },
   catalogRequest: { bucket: "job", capacity: 20, perSecond: 0.2 },
+  // The dynamic network: a request is decided and recorded, a fetch leaves
+  // the host; a few at once, then one every few seconds (the engine's own
+  // quotas hold the rest).
+  netRequest: { bucket: "net", capacity: 20, perSecond: 0.2 },
+  netFetch: { bucket: "net", capacity: 20, perSecond: 0.2 },
 };
 /**
  * How recent a finish-line run markDone takes as its own: the seat's `done`
@@ -251,7 +258,7 @@ const QUEUE_MAX = 192;
 export const SETTLE_MS_DEFAULT = 6_000;
 
 /** Calls the hub records on the trace when they succeed; every refusal is recorded. */
-const AUDITED = new Set(["markDone", "runFinishLine", "forgeTool", "restoreFileVersion", "claimName", "threadOpen", "publishFile", "recordEntry", "attestEntry", "disputeEntry", "jobSubmit", "catalogRequest", "leadOpen", "leadClaim", "leadRelease", "leadClose", "leadLink", "leadInterpret"]);
+const AUDITED = new Set(["markDone", "runFinishLine", "forgeTool", "restoreFileVersion", "claimName", "threadOpen", "publishFile", "recordEntry", "attestEntry", "disputeEntry", "jobSubmit", "catalogRequest", "leadOpen", "leadClaim", "leadRelease", "leadClose", "leadLink", "leadInterpret", "netRequest", "netFetch"]);
 
 /**
  * The job service's settings, from the kickoff: the image workers boot, how
@@ -509,6 +516,8 @@ export function boardTable(hub: {
   gatewaySeat?: (who: string) => boolean;
   /** The run's job service, when it has one. */
   jobs?: () => JobService | undefined;
+  /** The hub's own directory (the fetch service's config and secret are there, in no VM). */
+  dir?: string;
 }) {
   const S = hub.sandbox;
   const ids = hub.ids ?? [];
@@ -812,11 +821,17 @@ export function boardTable(hub: {
         network: raw.network === "allowlist" ? "allowlist" : "off",
         ...(typeof raw.note === "string" ? { note: raw.note } : {}),
         ...(typeof raw.profile === "string" && raw.profile ? { profile: raw.profile } : {}),
+        ...(Array.isArray(raw.net_grants) && raw.net_grants.length ? { net_grants: raw.net_grants.map(String) } : {}),
       };
       // A job run under a lead: the lead must be the seat's own, checked
       // before the job is accepted, and the job goes on the lead's record.
       const refusedLead = await L.jobLeadAllowed(S, who, raw.lead);
       if (refusedLead) return { ok: false, reason: refusedLead };
+      // Network grants a seat gives its job: each its own, asked for a job, not yet bound.
+      if (spec.net_grants?.length) {
+        const refusedGrants = await checkJobGrants(S, who, spec.net_grants);
+        if (refusedGrants) return { ok: false, reason: refusedGrants };
+      }
       const r = await svc.submit(who, spec, { watch: typeof raw.wait === "number" ? raw.wait : 0 });
       if (!r.ok) return r;
       const attached = r.job.requester.agent === who ? await L.attachJob(S, who, r.job.id, raw.lead).catch(() => null) : null;
@@ -841,6 +856,22 @@ export function boardTable(hub: {
       const raw = isObject(a[1]) ? (a[1] as Record<string, unknown>) : {};
       const r = await svc.catalogRequest(who, String(raw.target ?? ""), typeof raw.recipe === "string" && raw.recipe ? raw.recipe : undefined, typeof raw.reason === "string" ? raw.reason : undefined);
       return r.ok ? { ok: true, job: await jobView(S, r.job) } : r;
+    },
+    // The dynamic network (net-broker.ts, docs/adr/0011): who asks is the
+    // socket's seat; a request is decided on the host and recorded before it
+    // is answered; a fetch goes to the fetch service as this seat.
+    netRequest: async (who, a) => {
+      const raw = isObject(a[1]) ? (a[1] as Record<string, unknown>) : {};
+      return requestAccess(S, who, raw, { jobs: Boolean(hub.jobs?.()), post: (args) => P.systemPost(S, args) });
+    },
+    netFetch: async (who, a) => {
+      if (!hub.dir) return { ok: false, grant: null, reason: "this hub has no directory for the fetch service", note: "" };
+      const raw = isObject(a[1]) ? (a[1] as Record<string, unknown>) : {};
+      return fetchForSeat(S, hub.dir, who, raw);
+    },
+    netView: async (who, a) => {
+      const raw = isObject(a[1]) ? (a[1] as Record<string, unknown>) : {};
+      return netViewFor(S, who, typeof raw.view === "string" ? raw.view : "summary");
     },
     systemPost: (who, a) => {
       // The harness's voice, sent from inside a VM: said by the harness code
@@ -951,6 +982,7 @@ export class Hub {
       },
       gatewaySeat: (who) => this.gatewaySeats.has(who),
       jobs: () => this.jobService,
+      dir: this.cfg.dir,
     });
     this.collector = new CollectorLink(this.cfg.collector);
   }
@@ -1199,6 +1231,8 @@ export class Hub {
         return { ...(r?.name ? { name: r.name } : {}), ...(r?.doing ? { doing: r.doing } : {}) };
       },
       log: (line) => this.log(line),
+      // A job's network grants, bound to it when its worker is made (net-broker.ts).
+      netAccess: (job) => bindJobGrants(S, this.cfg.dir, job.id, job.requester.agent, job.spec.net_grants ?? []),
     });
     try {
       await this.jobService.start();
@@ -2163,6 +2197,15 @@ export class Hub {
     if (!existsSync(S)) {
       await this.stop();
       process.exit(0);
+    }
+    // The dynamic network's round: grants whose lead closed or whose job
+    // ended revoked, captures put on the ledger, contamination recorded.
+    if (readCasePolicy(S).network !== "closed") {
+      const svc = this.jobService;
+      await netTick(S, (job) => {
+        const j = svc?.jobs.get(job);
+        return !j || j.state === "committed" || j.state === "failed" || j.state === "cancelled";
+      }).catch((err: Error) => this.log(`net: ${err.message}`));
     }
     const done = await P.swarmDoneExists(S);
     if (!done) {

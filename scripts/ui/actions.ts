@@ -10,7 +10,7 @@ import { readdir, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-export type JobKind = "start" | "stop" | "reap" | "hold" | "release" | "export" | "package" | "verify" | "purge" | "review" | "lead";
+export type JobKind = "start" | "stop" | "reap" | "hold" | "release" | "export" | "package" | "verify" | "purge" | "review" | "lead" | "net";
 export type JobStatus = "running" | "ok" | "failed";
 
 export type Job = {
@@ -1090,6 +1090,19 @@ export class ActionRunner {
   lead(swarmId: string, p: { action: "note" | "reopen"; lead: string; text?: string; allowHost?: string }): Job {
     const args = p.action === "note" ? ["lead", swarmId, "note", p.lead, p.text ?? "", ...(p.allowHost ? ["--allow-host", p.allowHost] : [])] : ["lead", swarmId, "reopen", p.lead, ...(p.text ? [p.text] : [])];
     return this.run("lead", args, swarmId);
+  }
+
+  /**
+   * The operator's act on the dynamic network (swarm.sh net <id> grant|deny|revoke,
+   * docs/adr/0011): a reason always; on the trace and the operator's record,
+   * and posted to whoever asked, like the CLI's.
+   */
+  net(swarmId: string, p: { action: "grant" | "deny" | "revoke" | "socket"; target?: string; why: string; host?: string; lead?: string }): Job {
+    const args =
+      p.action === "socket"
+        ? ["net", swarmId, "grant", "--socket", p.host ?? "", ...(p.lead ? ["--lead", p.lead] : []), "--why", p.why]
+        : ["net", swarmId, p.action, p.target ?? "", "--why", p.why];
+    return this.run("net", args, swarmId);
   }
 
   /** The ledger as CSV or a Timesketch import, written to `out` (a file of the console's own). */

@@ -64,6 +64,7 @@ import { pathToFileURL } from "node:url";
 import { execFile } from "node:child_process";
 import { eventChainVerifier, specialKind, verifyAttestationChain, verifyDisputeChain, verifyLedgerChain } from "../extensions/protocol.ts";
 import { verifyLeadChain } from "../extensions/leads.ts";
+import { checkNetwork, type NetworkCheck } from "./net-grants.ts";
 import { hashArtifacts, type ArtifactIndex } from "./artifacts.ts";
 import { checkStore, verifyJournalText, type StoreCheck } from "./evidence-store.ts";
 import {
@@ -653,6 +654,8 @@ export type Custody = {
     disputes?: { lines: number; head: string | null };
     /** The lead register (leads/leads.jsonl): absent from a verdict taken before it was sealed. */
     leads?: { lines: number; head: string | null };
+    /** The dynamic network's two chains (network/grants.jsonl, network/fetches.jsonl): absent from a verdict taken before they were sealed. */
+    network?: { grants: { lines: number; head: string | null }; fetches: { lines: number; head: string | null } };
     journal: { lines: number; head: string | null } | null;
     model_gateway: { lines: number; sha256: string | null } | null;
   };
@@ -662,6 +665,8 @@ export type Custody = {
   disputes?: { lines: number; intact: boolean; detail: string } | null;
   /** The lead register's events (leads/leads.jsonl): their own chain, sealed unsigned; null when the run opened no lead. */
   leads?: { lines: number; intact: boolean; detail: string } | null;
+  /** The dynamic network's records: both chains, and every sealed capture re-hashed; null when the run made no request (docs/adr/0011). */
+  network?: NetworkCheck | null;
   /** The operator's audit beside the registry, and each operator line on the trace matched to it. */
   operator: OperatorAudit;
   /** The acquisition hashes given at kickoff (--inputs-hashes), against the evidence as re-hashed now. */
@@ -715,6 +720,7 @@ export type CustodyState = {
   attestations?: Custody["attestations"];
   disputes?: Custody["disputes"];
   leads?: Custody["leads"];
+  network?: Custody["network"];
   operator?: Custody["operator"];
   acquisition?: Custody["acquisition"];
   models?: Custody["models"];
@@ -1555,6 +1561,10 @@ export async function takeCustody(sandboxInput: string, options: CustodyOptions 
   } else if ("why" in leadsRead && leadsRead.why !== "missing") {
     state.leads = { lines: 0, intact: false, detail: `the lead register is ${leadsRead.why}` };
   } else state.leads = null;
+  // The dynamic network: requests, decisions and grants, and every fetch, each a chain of its own; each capture against its manifest.
+  const net = await checkNetwork(sandbox).catch(() => null);
+  state.network = net?.check ?? null;
+  if (state.seal && net) state.seal.network = net.seal;
   state.ledgerDone = true;
 
   // --- the model gateway's log -----------------------------------------------
@@ -1883,6 +1893,7 @@ export function verdictOf(state: CustodyState, incomplete: string | null): Custo
     attestations: state.attestations ?? null,
     disputes: state.disputes ?? null,
     leads: state.leads ?? null,
+    network: state.network ?? null,
     operator: state.operator ?? null,
     acquisition: state.acquisition ?? null,
     checks: [],
@@ -1984,6 +1995,11 @@ function summaryOf(c: Omit<Custody, "summary">, t: { traceProblem: string | null
   if (c.attestations) parts.push(c.attestations.intact ? `${plural(c.attestations.lines, "ledger attestation")}, chain intact` : `LEDGER ATTESTATIONS CHAIN BROKEN (${c.attestations.detail})`);
   if (c.disputes) parts.push(c.disputes.intact ? `${plural(c.disputes.lines, "ledger dispute line")}, chain intact` : `LEDGER DISPUTES CHAIN BROKEN (${c.disputes.detail})`);
   if (c.leads) parts.push(c.leads.intact ? `${plural(c.leads.lines, "lead event")}, chain intact` : `LEAD REGISTER CHAIN BROKEN (${c.leads.detail})`);
+  if (c.network) {
+    const n = c.network;
+    const bad = [...n.captures.mismatched, ...n.captures.missing];
+    parts.push(n.grants.intact && n.fetches.intact && !bad.length ? `network records: ${plural(n.grants.lines, "grant event")}, ${plural(n.fetches.lines, "fetch line")}, ${plural(n.captures.verified, "capture")} verified` : `NETWORK RECORDS DO NOT HOLD (${[...(n.grants.intact ? [] : [`grants: ${n.grants.detail}`]), ...(n.fetches.intact ? [] : [`fetches: ${n.fetches.detail}`]), ...(bad.length ? [`captures: ${bad.join(", ")}`] : [])].join("; ")})`);
+  }
   if (c.operator && !c.operator.intact) parts.push(`OPERATOR AUDIT CHAIN BROKEN (${c.operator.detail})`);
   if (c.model_gateway) {
     const g = c.model_gateway;
@@ -2304,7 +2320,7 @@ export function sealDrift(sealed: Partial<Seal> | undefined, now: Seal, journal:
   const drift: Array<{ what: string; sealed: string; now: string }> = [];
   const after: string[] = [];
   const notSealed: string[] = [];
-  if (!sealed) return { drift, after, not_sealed: ["the ledger", "the attestations", "the disputes", "the lead register", "the store journal", "the model gateway log"] };
+  if (!sealed) return { drift, after, not_sealed: ["the ledger", "the attestations", "the disputes", "the lead register", "the network records", "the store journal", "the model gateway log"] };
   const chain = (n: number, head: string | null, unit: string) => `${n} ${unit}, head ${head ?? "none"}`;
   if (!sealed.ledger) notSealed.push("the ledger");
   else if (sealed.ledger.entries !== now.ledger.entries || sealed.ledger.head !== now.ledger.head) {
@@ -2326,6 +2342,15 @@ export function sealDrift(sealed: Partial<Seal> | undefined, now: Seal, journal:
     if (nowLeads.lines) notSealed.push("the lead register");
   } else if (sealed.leads.lines !== nowLeads.lines || sealed.leads.head !== nowLeads.head) {
     drift.push({ what: "lead register", sealed: chain(sealed.leads.lines, sealed.leads.head, "events"), now: chain(nowLeads.lines, nowLeads.head, "events") });
+  }
+  // The network records, the same way (docs/adr/0011).
+  const nowNet = now.network ?? { grants: { lines: 0, head: null }, fetches: { lines: 0, head: null } };
+  if (!sealed.network) {
+    if (nowNet.grants.lines || nowNet.fetches.lines) notSealed.push("the network records");
+  } else {
+    for (const k of ["grants", "fetches"] as const) {
+      if (sealed.network[k].lines !== nowNet[k].lines || sealed.network[k].head !== nowNet[k].head) drift.push({ what: `network ${k}`, sealed: chain(sealed.network[k].lines, sealed.network[k].head, "lines"), now: chain(nowNet[k].lines, nowNet[k].head, "lines") });
+    }
   }
   if (sealed.journal === undefined) notSealed.push("the store journal");
   else if (sealed.journal === null && now.journal) drift.push({ what: "store journal", sealed: "none", now: chain(now.journal.lines, now.journal.head, "lines") });

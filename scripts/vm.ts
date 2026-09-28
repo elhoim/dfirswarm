@@ -2044,6 +2044,12 @@ export type WorkerSpec = {
   env: Record<string, string>;
   /** off: no network at all; hosts: the run's own allowlist; public: every public host (a run with --no-netguard). */
   network: { mode: "off" } | { mode: "hosts"; hosts: string[] } | { mode: "public" };
+  /**
+   * Ports of this host the worker may reach through msb's host gateway, and
+   * nothing else of the host: the fetch service's, for a job given network
+   * grants (docs/adr/0011), whatever its network mode says of the outside.
+   */
+  hostPorts?: number[];
   /** The argv run in the guest; the job's own stdout and stderr go to files the command names, not through here. */
   command: string[];
 };
@@ -2359,12 +2365,15 @@ async function runWorkerOnce(spec: WorkerSpec, hooks: { onCreated?: () => void }
         [LABEL_JOB]: `${spec.job}.${spec.attempt}`,
         ...(spec.registry ? { [LABEL_REGISTRY]: registryLabel(spec.registry) } : {}),
       });
+    const hostPorts = [...new Set(spec.hostPorts ?? [])].filter((p) => Number.isInteger(p) && p > 0 && p < 65536);
     if (spec.network.mode === "public") {
       const policy = new M.NetworkPolicyBuilder().defaultDeny();
       policy.egress((r) => r.allowPublic());
+      for (const port of hostPorts) policy.egress((r) => r.tcp().port(port).allowHost());
       builder = builder.network((n) => n.policyFromBuilder(policy));
-    } else if (spec.network.mode === "hosts" && spec.network.hosts.length) {
-      const policy = allowEgress(new M.NetworkPolicyBuilder().defaultDeny(), spec.network.hosts);
+    } else if ((spec.network.mode === "hosts" && spec.network.hosts.length) || hostPorts.length) {
+      const policy = allowEgress(new M.NetworkPolicyBuilder().defaultDeny(), spec.network.mode === "hosts" ? spec.network.hosts : []);
+      for (const port of hostPorts) policy.egress((r) => r.tcp().port(port).allowHost());
       builder = builder.network((n) => n.policyFromBuilder(policy));
     } else {
       builder = builder.disableNetwork();

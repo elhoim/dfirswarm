@@ -42,6 +42,7 @@ import { ReleasePanel } from "./detail/release-panel";
 import { ReviewerPanel } from "./detail/reviewer-panel";
 import { JobsPanel } from "./detail/jobs-panel";
 import { LeadsPanel } from "./detail/leads-panel";
+import { NetworkPanel } from "./detail/network-panel";
 import { RecordActions } from "./detail/record-actions";
 import { isolationChip } from "@/components/swarm-bits";
 
@@ -53,7 +54,7 @@ import { isolationChip } from "@/components/swarm-bits";
  */
 const TAB_GROUPS = [
   { label: "The run", tabs: ["story", "threads", "traces", "agents"] },
-  { label: "Evidence", tabs: ["leads", "files", "artifacts", "jobs", "ledger"] },
+  { label: "Evidence", tabs: ["leads", "network", "files", "artifacts", "jobs", "ledger"] },
   { label: "The frame", tabs: ["goal", "packs", "tools", "claims", "budget"] },
   { label: "Output", tabs: ["report", "release", "review", "custody"] },
 ] as const;
@@ -67,6 +68,7 @@ const TAB_LABEL: Record<Tab, string> = {
   tools: "Tools",
   ledger: "Ledger",
   leads: "Leads",
+  network: "Network",
   claims: "Claims",
   budget: "Budget",
   files: "Files",
@@ -323,6 +325,8 @@ export function SwarmDetailScreen() {
   // The register reads its own files, the ledger (a need on an entry, a
   // closure resting on one) and the store (a lead's jobs).
   const leadsVersion = useSwarmVersion(id, ["leads", "ledger", "store"]);
+  // The network's records, and the ledger its captures are recorded on.
+  const networkVersion = useSwarmVersion(id, ["network", "ledger", "store"]);
   const checksVersion = useSwarmVersion(id, CHECKS_CHANGE_KINDS);
   const loader = useCallback(() => api.swarm(id), [id]);
   const view = useResource(loader, version, [id]);
@@ -475,6 +479,22 @@ export function SwarmDetailScreen() {
                   </button>
                 </div>
               ) : null}
+              {d.network && d.network.waiting > 0 ? (
+                <div className="flex flex-wrap items-center gap-2">
+                  <button type="button" onClick={() => setTab("network")} title="Network requests the case policy refused and the operator may grant: one item per host and lead">
+                    <Chip tone="brick" className="bg-brick text-white">
+                      {d.network.waiting} network item{d.network.waiting === 1 ? "" : "s"} waiting on you
+                    </Chip>
+                  </button>
+                </div>
+              ) : null}
+              {d.network && d.network.contamination > 0 ? (
+                <div className="flex flex-wrap items-center gap-2">
+                  <button type="button" onClick={() => setTab("network")} title="A response exposed material the case policy prohibits">
+                    <Chip tone="brick">contamination recorded</Chip>
+                  </button>
+                </div>
+              ) : null}
               {d.until_solved ? (
                 <div className="flex flex-wrap items-center gap-2">
                   <span title="No wall clock, caps advisory, no abandon: it ends when every question is answered, or when you stop it">
@@ -589,6 +609,7 @@ export function SwarmDetailScreen() {
                       {t === "tools" && d.tools.length ? d.tools.length : ""}
                       {t === "ledger" && d.ledger?.entries.length ? d.ledger.entries.length : ""}
                       {t === "leads" && d.leads ? d.leads.open + d.leads.active + d.leads.blocked : ""}
+                      {t === "network" && d.network ? d.network.requests : ""}
                     </span>
                   </button>
                 ))}
@@ -657,6 +678,7 @@ export function SwarmDetailScreen() {
           {tab === "jobs" ? <JobsPanel view={d} selected={sub ? decodeURIComponent(sub) : null} onSelect={(j) => setSub("jobs", j)} version={storeVersion} /> : null}
           {tab === "ledger" ? <LedgerPanel view={d} /> : null}
           {tab === "leads" ? <LeadsPanel view={d} version={leadsVersion} /> : null}
+          {tab === "network" ? <NetworkPanel view={d} version={networkVersion} /> : null}
           {tab === "report" ? <ReportPanel view={d} /> : null}
           {tab === "release" ? <ReleasePanel view={d} /> : null}
           {tab === "review" ? <ReviewerPanel view={d} /> : null}

@@ -30,6 +30,7 @@ import { listLibrary, readLibraryEntry } from "./library.ts";
 import { describeRoots, InputsError, listInputSets, parseInputsRoots, resolveInputImage, resolveInputSet, RootStore } from "./inputs.ts";
 import { countForgedTools, findRun, listSwarmRows, listWorkFiles, liveHubDirs, operatorAudit, queryTraces, readAllPosts, readLeads, readRunEvents, readSwarmView, readTimedPosts, resolveToolOutputFile, resolveWorkFile } from "./model.ts";
 import { readReviews } from "./reviews.ts";
+import { readNetwork } from "./network.ts";
 import { createSigning, SigningError } from "./signing.ts";
 import { readStoreJob, readStoreJobLog, readStoreJobs, storeJobLogFile } from "./store-jobs.ts";
 import { userInfo } from "node:os";
@@ -1256,6 +1257,37 @@ export function createUiApp(options: UiAppOptions): UiApp {
         const host = typeof body.allow_host === "string" ? body.allow_host.trim() : "";
         if (host && !/^(\*\.)?[A-Za-z0-9.-]{1,253}(:\d{1,5})?$/.test(host)) throw new HttpError(400, "allow_host is a host name (example.org, *.example.org, example.org:8443)");
         json(res, 202, runner.lead(id, { action, lead, ...(text ? { text } : {}), ...(host ? { allowHost: host } : {}) }));
+        return;
+      }
+      /**
+       * The dynamic network (docs/adr/0011): the case policy, what waits on
+       * the operator, requests, grants, captures. A POST is the operator's
+       * act, run as swarm.sh net so it lands on the trace and the operator's
+       * record like the CLI's: grant a request, decline an item or a request,
+       * revoke a grant, make a socket grant; always with a reason.
+       */
+      case "network": {
+        if (method === "GET") {
+          json(res, 200, await readNetwork(sandbox));
+          return;
+        }
+        if (method !== "POST") throw new HttpError(405, "method not allowed");
+        requireToken(req, url);
+        const body = (await readBody(req)) as { action?: unknown; target?: unknown; why?: unknown; host?: unknown; lead?: unknown };
+        const action = body.action === "grant" || body.action === "deny" || body.action === "revoke" || body.action === "socket" ? body.action : null;
+        if (!action) throw new HttpError(400, "action is grant, deny, revoke or socket");
+        const why = typeof body.why === "string" ? body.why.trim() : "";
+        if (!why) throw new HttpError(400, "an operator's act on the network needs its reason");
+        if (why.length > 2000) throw new HttpError(400, "the reason is at most 2000 characters: nothing is cut, so a longer one is refused");
+        const target = String(body.target ?? "").trim().toUpperCase();
+        if (action === "grant" && !/^NR-[1-9]\d{0,6}$/.test(target)) throw new HttpError(400, "grant names a request, NR-<n>");
+        if (action === "deny" && !/^N[RI]-[1-9]\d{0,6}$/.test(target)) throw new HttpError(400, "deny names an item (NI-<m>) or a request (NR-<n>)");
+        if (action === "revoke" && !/^N-[1-9]\d{0,6}$/.test(target)) throw new HttpError(400, "revoke names a grant, N-<k>");
+        const host = typeof body.host === "string" ? body.host.trim() : "";
+        if (action === "socket" && !/^[A-Za-z0-9.-]{1,253}(:\d{1,5})?$/.test(host)) throw new HttpError(400, "a socket grant names a host (example.org, example.org:8443)");
+        const lead = typeof body.lead === "string" ? body.lead.trim().toUpperCase() : "";
+        if (lead && !/^L-[1-9]\d{0,5}$/.test(lead)) throw new HttpError(400, "lead is L-<n>");
+        json(res, 202, runner.net(id, { action, ...(action === "socket" ? { host, ...(lead ? { lead } : {}) } : { target }), why }));
         return;
       }
       // Who did what to this run: its lines in runs/operator-audit.jsonl
