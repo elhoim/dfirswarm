@@ -262,7 +262,9 @@ test("every metric of a run, from its registers", async () => {
   assert.equal(m.cost.source, "model-gateway");
   assert.equal(m.cost.tokens, 2500, "the refused call carried no usage");
   assert.deepEqual(m.cost.per_question.map((q) => [q.id, q.tokens, q.leads]), [["Q-1", 1000, ["L-1"]], ["Q-2", 400, ["L-2"]], ["Q-3", 300, ["L-4"]], ["Q-4", 300, ["L-6"]]]);
-  assert.deepEqual(m.cost.unheld, { tokens: 200, usd: 0.002 });
+  // The fixture's gateway calls have no trace row to name what they did: nothing is named, and they are "other".
+  assert.deepEqual(m.cost.unheld, { tokens: 200, usd: 0.002, by_kind: { other: 200 } });
+  assert.deepEqual([m.cost.named.tokens, m.cost.finish_and_report.tokens], [0, 0]);
   assert.deepEqual(m.cost.leads_without_question, { tokens: 300, usd: 0.003, leads: ["L-9"] });
   // Duplicates.
   const d = m.duplicates;

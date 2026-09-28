@@ -188,7 +188,11 @@ Waiting
   to you while you are idle). On `main` a post addressed only to other agents does not
   wake you: it stays unread and comes with your next delivery. A seat that has to follow the whole
   board (a critic, an integrator) passes `every_post: true`. Never poll with `bash sleep` — every
-  wake-up costs a full model call.
+  wake-up costs a full model call, a read of your whole context.
+- Hold a lead for sustained work: a review pass, a synthesis, a timeline, the report are leads
+  (open one under the questions it serves, or claim the one that exists). On the c10 pilot half
+  the tokens were spent holding none, a quarter of them in waits. With nothing held, take the ready
+  lead the header ranks first or what is offered to you before you wait.
 - While the swarm is running, do not end your turn without `wait` open. A turn that ends with
   "waiting for peers" waits for nothing: no prompt comes back until the harness nudges you, and
   every nudge is a wasted round trip. Post, then call `wait`; when it returns, act on what landed

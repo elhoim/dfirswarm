@@ -160,7 +160,7 @@ test("the report's first layer: one screen of every question, then each question
   assert.doesNotMatch(unresolved, /Q-8:|Q-10:|Q-11:/, "only questions in scope are unresolved");
 
   // How the cost is counted, and it adds up.
-  assert.match(s2, /\*\*How the cost is counted\.\*\* Each model call the gateway recorded .* Of the run's 2,000 tokens, 1,700 tokens went to questions, 0 tokens to leads that name no question, 300 tokens to calls made while the seat held no lead \(a2 300 tokens\)/);
+  assert.match(s2, /\*\*How the cost is counted\.\*\* Each model call the gateway recorded .* Of the run's 2,000 tokens, 1,700 tokens went to questions \(0 tokens of it given to what a call made holding no lead named: a review, a record, an act on a lead\), 0 tokens to leads that name no question, 0 tokens to the finish and the report's writing, 300 tokens to calls made while the seat held no lead and named nothing \(other 300 tokens; by seat: a2 300 tokens\)/);
 
   // §4 counts the negative and footnotes the duplicate; Appendix F has every event, every lead whole.
   const s4 = mdSlice(md, "### How the investigation proceeded");

@@ -17,6 +17,15 @@ All notable changes to this project. The format follows
   revision of each. `record` now turns such a citation into the symbolic
   `question:N` (bound to the answer's conclusion, not its seq) and says so;
   a reworded correction keeps the summary standing.
+- **A call made holding no lead is given to what it named.** The pilot's
+  metrics put 136.3M of 240.0M tokens under "holding no lead". Reviews,
+  records, route reviews and lead acts made so named a lead, a question or
+  an entry: 16.5M are now given to those questions, 0.6M to the finish and
+  the report, and the 119.3M left are split by kind (waiting 61.9M,
+  coordination 23.1M, reading 23.8M, compaction 7.3M, other 3.1M). That
+  part is real: the header's "Yours: none" and the worker prompt now ask a
+  seat to hold a lead for sustained work and to take what is offered
+  before it waits.
 - **The kickoff checks the Herdr server first.** `herdr status server` is
   asked with the other host programs, before any pane or VM is made; a
   stopped server refuses the start (and a `--check`) and says how to start

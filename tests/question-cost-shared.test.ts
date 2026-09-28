@@ -109,3 +109,69 @@ test("a host run's seat with a budget and no trace row: its tokens are in the no
   assert.deepEqual(m.cost.no_trace, { tokens: 900, seats: ["a2"] });
   assert.equal(m.cost.per_question.reduce((a, q) => a + q.tokens, 0) + m.cost.unheld.tokens + m.cost.leads_without_question.tokens + m.cost.no_trace.tokens, m.cost.tokens, "every part, the no-trace bucket too, adds up to the total");
 });
+
+test("a call made holding no lead is given to what it named: an attest to its entry's question, a route review to its lead, a record to its questions, a job's status to its lead; the finish to its own line; the rest by kind (the c10 pilot)", async () => {
+  const base = await mkdtemp(join(tmpdir(), "qcost-named-"));
+  dirs.push(base);
+  const S = join(base, "run");
+  await P.initSandbox(S, { swarmId: "qc3", agentIds: ["a0", "a1"], capUsd: 5, wallClockMinutes: 30, goal: GOAL });
+  await Q.seedRegister(S);
+  const a0 = { sandboxRoot: S, agentId: "a0" };
+  // L-1 under question 1 (held by a0), L-2 under question 2, closed; a finding answering question 3; a job under L-1.
+  const l1 = await L.openLead(a0, { title: "Read the rules", why: "q1", answers: ["1"], take: true });
+  assert.ok(l1.ok);
+  const l2 = await L.openLead(a0, { title: "Trace the sender", why: "q2", answers: ["2"] });
+  assert.ok(l2.ok);
+  const f = await P.recordEntry(a0, { kind: "finding", basis: "observed", confidence: "high", indicates: "shows it", confidence_why: "direct", value: "Read at ten", source: "the store", evidence: "flag", answers: ["3"] } as P.LedgerInput);
+  assert.ok(f.ok);
+  if (!f.ok) return;
+  assert.ok((await L.attachJob(S, "a0", "j000001", "L-1")).ok);
+  assert.ok((await L.releaseLead(a0, "L-1", { why: "done with it" })).ok);
+  const later = Date.now() + 60_000;
+  // a1 holds nothing all along; a0 holds nothing after its release.
+  const at = (s: number) => new Date(later + s * 1000).toISOString();
+  const line = (seat: string, s: number, name: string, args: Record<string, unknown>, usage = 100) => JSON.stringify({ type: "message", timestamp: at(s), message: { role: "assistant", usage: { input: usage, output: 0, cacheRead: 0, cacheWrite: 0, cost: { total: 0 } }, content: [{ type: "toolCall", name, arguments: args }] } });
+  await mkdir(join(S, ".pi-sessions", "a1"), { recursive: true });
+  await writeFile(join(S, ".pi-sessions", "a1", "s.jsonl"), [
+    line("a1", 1, "attest", { seq: f.entry.seq, how: "re-derived it" }),
+    line("a1", 2, "route_review", { id: "L-2", material: false, why: "answered" }),
+    line("a1", 3, "record", { kind: "answer", section: "question:2", value: "x" }),
+    line("a1", 4, "job_status", { job_id: "j000001" }),
+    line("a1", 5, "finish", { action: "status" }),
+    line("a1", 6, "write", { path: "work/report.md", content: "x" }),
+    line("a1", 7, "wait", { seconds: 60 }),
+    line("a1", 8, "post", { body: "hello" }),
+    line("a1", 9, "bash", { command: "ls" }),
+    JSON.stringify({ type: "compaction", timestamp: at(10), usage: { input: 100, output: 0, cacheRead: 0, cacheWrite: 0 } }),
+  ].join("\n") + "\n");
+  const ls = await L.leadsSnapshot(S);
+  const cost = await questionCost(S, ls.state.events, (lead) => (ls.state.leads.get(lead)?.answers ?? []).map((a) => `question:${P.sectionKey(a)}`), { questionKey: (raw) => `question:${P.sectionKey(raw.replace(/^question:/, ""))}` });
+  assert.equal(cost.source, "sessions");
+  // attest -> question 3 (its entry's), route review -> L-2 -> question 2, record -> question 2, job status -> L-1 -> question 1.
+  assert.deepEqual([...cost.shown.byQuestion].sort(), [["question:1", 100], ["question:2", 200], ["question:3", 100]]);
+  assert.equal(cost.shown.named, 400);
+  assert.equal(cost.shown.run, 200, "the finish and the report's writing, on their own line");
+  assert.deepEqual([...cost.shown.unheldByKind], [["waiting", 100], ["compaction", 100], ["coordination", 100], ["reading", 100]]);
+  assert.equal(cost.shown.total, 1000, "the parts still add up");
+  assert.equal([...cost.shown.byQuestion.values()].reduce((a, b) => a + b, 0) + cost.shown.noQuestion + cost.shown.run + [...cost.shown.unheld.values()].reduce((a, b) => a + b, 0), 1000);
+});
+
+test("a gateway's calls are told what they did by the trace: each tool row belongs to its seat's last call before it", async () => {
+  const { attachTraceTools } = await import("../scripts/question-cost.ts");
+  const calls = [{ seat: "a1", at: 1000, tokens: 10 }, { seat: "a1", at: 2000, tokens: 10 }, { seat: "a2", at: 1500, tokens: 10 }] as Array<{ seat: string; at: number; tokens: number; tools?: Array<{ name: string }> }>;
+  const row = (agent: string, ms: number, tool: string) => JSON.stringify({ ts: new Date(ms).toISOString(), agent, tool, args: {} });
+  attachTraceTools(calls, [row("a1", 1040, "attest"), row("a1", 2030, "wait"), row("a2", 1510, "route_review"), row("a1", 500, "read")].join("\n"));
+  assert.deepEqual(calls.map((c) => (c.tools ?? []).map((t) => t.name)), [["attest"], ["wait"], ["route_review"]], "a row before a seat's first call belongs to none");
+});
+
+test("a seat holding no lead is told, in its header, to hold one for sustained work before it waits", async () => {
+  const base = await mkdtemp(join(tmpdir(), "qcost-nudge-"));
+  dirs.push(base);
+  const S = join(base, "run");
+  await P.initSandbox(S, { swarmId: "qc4", agentIds: ["a0", "a1"], capUsd: 5, wallClockMinutes: 30, goal: GOAL });
+  const text = (await L.leadsDigest({ sandboxRoot: S, agentId: "a1" }, { mark: false })).text;
+  assert.match(text, /Yours: none\. Sustained work \(a review pass, a synthesis, a timeline, the report\) is held: open or claim a lead for it/);
+  const held = await L.openLead({ sandboxRoot: S, agentId: "a1" }, { title: "Review the answers", why: "the critic's pass", answers: ["1"], take: true });
+  assert.ok(held.ok);
+  assert.doesNotMatch((await L.leadsDigest({ sandboxRoot: S, agentId: "a1" }, { mark: false })).text, /Sustained work/);
+});

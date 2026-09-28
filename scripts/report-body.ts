@@ -571,7 +571,15 @@ async function loadRun(sandboxArg: string, opts: ReportBodyOptions): Promise<Run
   })();
 
   const cost = ls
-    ? await questionCost(sandbox, ls.state.events, (lead) => (ls.state.leads.get(lead)?.answers ?? []).map((a) => register?.bySection.get(sectionKey(a))?.id ?? `question:${sectionKey(a)}`)).catch(() => null)
+    ? await questionCost(sandbox, ls.state.events, (lead) => (ls.state.leads.get(lead)?.answers ?? []).map((a) => register?.bySection.get(sectionKey(a))?.id ?? `question:${sectionKey(a)}`), {
+        // What a call made holding no lead named, keyed as the leads' questions are.
+        questionKey: (raw) => {
+          const t = raw.trim();
+          if (/^Q-\d+$/i.test(t)) return register?.byId.get(`Q-${Number(t.slice(2))}`)?.id ?? null;
+          const sec = sectionKey(t.replace(/^question:/i, ""));
+          return sec ? (register?.bySection.get(sec)?.id ?? `question:${sec}`) : null;
+        },
+      }).catch(() => null)
     : null;
   const caseId = /Case\s+`([^`]+)`/.exec(goal?.caseLine ?? "")?.[1] ?? "";
   const release = opts.release ?? null;
@@ -1602,7 +1610,7 @@ function chainBlocks(run: Run, memo: Map<number, EntryState>): Block[] {
       "Each chain runs from who asked to what it cost: the asker, why, every verbatim revision, what came with it, the proposition tested, the leads that worked it (a negative lead counted here and listed whole in Appendix F), the result and what speaks against it, the operator's acceptance, the gaps that bound it, and its tokens.",
     ],
   });
-  blocks.push({ k: "p", s: [{ b: "How the cost is counted. " }, run.cost?.method ?? "No token record could be read.", ...(run.cost && run.cost.source !== "none" ? [` Of the run's ${tokensWords(run.cost.shown.total)}, ${tokensWords([...run.cost.shown.byQuestion.values()].reduce((x, y) => x + y, 0))} went to questions, ${tokensWords(run.cost.shown.noQuestion)} to leads that name no question, ${tokensWords([...run.cost.shown.unheld.values()].reduce((x, y) => x + y, 0))} to calls made while the seat held no lead (${[...run.cost.shown.unheld].map(([seat, n]) => `${seat} ${tokensWords(n)}`).join(", ") || "none"})${run.cost.shown.noTrace.size ? `, and ${tokensWords([...run.cost.shown.noTrace.values()].reduce((x, y) => x + y, 0))} a seat spent that the trace could not place (${[...run.cost.shown.noTrace].map(([seat, n]) => `${seat} ${tokensWords(n)}`).join(", ")})` : ""}.`] : [])] });
+  blocks.push({ k: "p", s: [{ b: "How the cost is counted. " }, run.cost?.method ?? "No token record could be read.", ...(run.cost && run.cost.source !== "none" ? [` Of the run's ${tokensWords(run.cost.shown.total)}, ${tokensWords([...run.cost.shown.byQuestion.values()].reduce((x, y) => x + y, 0))} went to questions (${tokensWords(run.cost.shown.named)} of it given to what a call made holding no lead named: a review, a record, an act on a lead), ${tokensWords(run.cost.shown.noQuestion)} to leads that name no question, ${tokensWords(run.cost.shown.run)} to the finish and the report's writing, ${tokensWords([...run.cost.shown.unheld.values()].reduce((x, y) => x + y, 0))} to calls made while the seat held no lead and named nothing (${[...run.cost.shown.unheldByKind].map(([k, n]) => `${k} ${tokensWords(n)}`).join(", ") || "none"}; by seat: ${[...run.cost.shown.unheld].map(([seat, n]) => `${seat} ${tokensWords(n)}`).join(", ") || "none"})${run.cost.shown.noTrace.size ? `, and ${tokensWords([...run.cost.shown.noTrace.values()].reduce((x, y) => x + y, 0))} a seat spent that the trace could not place (${[...run.cost.shown.noTrace].map(([seat, n]) => `${seat} ${tokensWords(n)}`).join(", ")})` : ""}.`] : [])] });
   const limits = run.entries.filter((e) => e.kind === "limitation" && !run.replaced.has(e.seq));
   for (const g of ["original", "asked", "emergent", "proposed", "excluded", "withdrawn"] as ChainGroup[]) {
     const list = all.filter((c) => groupOf(c) === g);
