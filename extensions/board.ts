@@ -399,7 +399,7 @@ export const applySessionUsage = remote("applySessionUsage", P.applySessionUsage
  * lock; in a VM the hub is its only writer, and who asks is the channel.
  */
 export const leadOpen = remote("leadOpen", L.openLead);
-export const leadClaim = remote("leadClaim", (ctx: P.SwarmContext, id: unknown) => L.claimLead(ctx, id));
+export const leadClaim = remote("leadClaim", (ctx: P.SwarmContext, id: unknown, input?: L.LeadClaimInput) => L.claimLead(ctx, id, input ?? {}));
 export const leadRelease = remote("leadRelease", L.releaseLead);
 export const leadClose = remote("leadClose", L.closeLead);
 export const leadLink = remote("leadLink", L.linkLead);

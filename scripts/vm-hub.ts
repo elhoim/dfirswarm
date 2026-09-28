@@ -696,7 +696,7 @@ export function boardTable(hub: {
     },
     // The lead register (extensions/leads.ts): who acts is the channel's seat.
     leadOpen: (who, a) => L.openLead(as(who), (isObject(a[1]) ? a[1] : {}) as L.LeadOpenInput),
-    leadClaim: (who, a) => L.claimLead(as(who), a[1]),
+    leadClaim: (who, a) => L.claimLead(as(who), a[1], (isObject(a[2]) ? a[2] : {}) as L.LeadClaimInput),
     leadRelease: (who, a) => L.releaseLead(as(who), a[1], (isObject(a[2]) ? a[2] : {}) as { why?: string; generation?: number }),
     leadClose: (who, a) => L.closeLead(as(who), a[1], (isObject(a[2]) ? a[2] : {}) as { disposition?: string; ref?: string; why?: string; generation?: number }),
     leadLink: (who, a) => L.linkLead(as(who), a[1], (isObject(a[2]) ? a[2] : {}) as { add?: string[]; remove?: string[]; routes?: unknown }),

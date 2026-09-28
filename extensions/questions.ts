@@ -139,7 +139,8 @@ export type QuestionEventKind =
   | "sign"
   | "deliver"
   | "offer"
-  | "triage";
+  | "triage"
+  | "continue";
 
 /**
  * Who acted, as the record keeps it. A person is an enrolled id (`--as ID`,
@@ -283,6 +284,8 @@ export type Question = {
   review_query: boolean;
   leading_forms: string[];
   after_done: boolean;
+  /** A follow-up (after_done) the run took up when it was resumed: when, and in which segment. */
+  continued: { at: string; segment: number | null; seq: number } | null;
   withdrawn: { at: string; why: string; origin: QuestionOrigin } | null;
   accepted: { at: string; as: AcceptAs; why: string; rev: number; origin: QuestionOrigin } | null;
   /** The negative bar's disposition (a later phase writes `dispose`); null until one is recorded. */
@@ -409,27 +412,36 @@ const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 /**
  * A goal question's words, as the goal (or its brief) numbers it: the line
- * that opens with its id, and the lines that continue it, verbatim. Null when
- * the document does not number it at the start of a line.
+ * that opens with its id and its whole body after it, verbatim, through
+ * blank lines, paragraphs, bullets and indented lists, up to the next of
+ * the goal's questions (a later number, or another id such as "Bonus:") or
+ * the next heading, which ends the section. Nothing of a question is left
+ * out of its first revision. Null when the document does not number it at
+ * the start of a line.
  */
 export function goalQuestionText(doc: string, id: string, others: string[] = []): string | null {
   const lines = doc.split("\n");
   const numeric = /^\d+$/.test(id);
-  // A line that opens another of the goal's questions ends this one ("Bonus: …" after "2. …").
-  const other = others.filter((o) => o !== id && !/^\d+$/.test(o)).map((o) => new RegExp(`^(?:#+ *)?(?:\\*\\* *)?${escapeRe(o)}(?![A-Za-z0-9])`, "i"));
+  // A line that opens another of the goal's questions ends this one ("Bonus: …" after "2. …", "3." after "2.").
+  const aliases = others.filter((o) => o !== id && !/^\d+$/.test(o)).map((o) => new RegExp(`^(?:#+ *)?(?:\\*\\* *)?${escapeRe(o)}(?![A-Za-z0-9])`, "i"));
+  const later = new Set(others.filter((o) => /^\d+$/.test(o) && (!numeric || Number(o) > Number(id))).map(Number));
+  const peer = /^(?:\*\* *)?(?:[Qq](?:uestion)?[ -]*)?0*(\d+)(?![0-9])(?:\*\*)?[.):](?:\*\*)?\s/;
+  const heading = /^#{1,6}\s/;
   const start = numeric
     ? new RegExp(`^(?:#+ *)?(?:\\*\\* *)?(?:[Qq](?:uestion)?[ -]*)?0*${id}(?![0-9])(?:\\*\\*)?[.):]?(?:\\*\\*)?\\s+(\\S.*)$`)
     : new RegExp(`^(?:#+ *)?(?:\\*\\* *)?${escapeRe(id)}(?![A-Za-z0-9])(?:\\*\\*)?\\s*[.):]?\\s*(?:\\*\\*)?\\s*(\\S.*)$`, "i");
-  const opens = /^\s*(?:#|[-*]\s|\d+[.):]\s|[Qq](?:uestion)? *\d|\*\*\s*\d)/;
   for (let i = 0; i < lines.length; i++) {
     const m = start.exec(lines[i]);
     if (!m) continue;
     const out = [m[1].trimEnd()];
     for (let j = i + 1; j < lines.length; j++) {
       const next = lines[j];
-      if (!next.trim() || opens.test(next) || other.some((re) => re.test(next))) break;
+      if (heading.test(next) || aliases.some((re) => re.test(next))) break;
+      const p = peer.exec(next);
+      if (p && later.has(Number(p[1]))) break;
       out.push(next.trimEnd());
     }
+    while (out.length > 1 && !out[out.length - 1].trim()) out.pop();
     return out.join("\n");
   }
   return null;
@@ -538,6 +550,7 @@ function blankQuestion(e: QuestionEvent): Question {
     review_query: d.review_query === true,
     leading_forms: d.leading_forms ?? [],
     after_done: d.after_done === true,
+    continued: null,
     withdrawn: null,
     accepted: null,
     disposition: null,
@@ -588,6 +601,7 @@ export function foldQuestions(events: QuestionEvent[], chain: QuestionsState["ch
         if (act.attachments) q.attachments = act.attachments;
         if (act.deadline !== undefined) q.deadline = act.deadline || null;
         if (act.suggested_to !== undefined) q.suggested_to = act.suggested_to || null;
+        if (typeof d.after_done === "boolean") q.after_done = d.after_done;
         q.last_seq = e.seq;
         break;
       }
@@ -611,6 +625,8 @@ export function foldQuestions(events: QuestionEvent[], chain: QuestionsState["ch
           q.objective = d.objective_created;
           q.objective_text = null;
         }
+        // An admission after the run's done is a follow-up; a resume makes it the run's work again.
+        if (typeof d.after_done === "boolean") q.after_done = d.after_done;
         for (const t of triage) if (t.q === q.id && !t.resolved) t.resolved = { at: e.at, decision: act.scope, why: act.why ?? "", origin };
         q.last_seq = e.seq;
         break;
@@ -643,10 +659,11 @@ export function foldQuestions(events: QuestionEvent[], chain: QuestionsState["ch
         q.last_seq = e.seq;
         break;
       case "sign": {
+        // A signature made after its act: attributed to the person the signed act names, never to the envelope's word.
         const target = e.target_seq !== undefined ? bySeq.get(e.target_seq) : undefined;
         if (!target || target.hash !== e.target_hash || !e.signature) break;
         const tq = target.q ? questions.get(target.q) : undefined;
-        if (tq) tq.signed.push({ act_seq: target.seq, sign_seq: e.seq, person: e.signature.person, fingerprint: e.signature.fingerprint });
+        if (tq) tq.signed.push({ act_seq: target.seq, sign_seq: e.seq, person: target.origin?.person ?? "?", fingerprint: target.origin?.fingerprint ?? "?" });
         break;
       }
       case "deliver":
@@ -660,6 +677,20 @@ export function foldQuestions(events: QuestionEvent[], chain: QuestionsState["ch
       case "triage":
         triage.push({ seq: e.seq, at: e.at, q: e.q ?? null, lead: e.lead ?? null, cause: e.cause ?? "", entries: e.entries ?? [], resolved: null });
         break;
+      case "continue":
+        // A resume takes up the follow-ups recorded after the run's done: this run's work again.
+        for (const id of e.questions ?? []) {
+          const fq = questions.get(id);
+          if (!fq || !fq.after_done) continue;
+          fq.after_done = false;
+          fq.continued = { at: e.at, segment: typeof d.segment === "number" ? d.segment : null, seq: e.seq };
+        }
+        break;
+    }
+    // An act that carries its own signature (every signed act since the register was made atomic): named by the person it says acted.
+    if (e.signature && e.ev !== "sign" && e.q) {
+      const sq = questions.get(e.q);
+      if (sq) sq.signed.push({ act_seq: e.seq, sign_seq: e.seq, person: e.origin?.person ?? "?", fingerprint: e.origin?.fingerprint ?? "?" });
     }
   }
   return { events, questions, objectives, triage, seeded, chain };
@@ -760,12 +791,12 @@ export type QuestionView = {
   disposition: Question["disposition"];
   work: WorkState | null;
   /**
-   * The standing answer entry in the question's section, and whether an
-   * amendment came after it; its result (an older answer's read from
+   * The standing answer entry in the question's section, the revision it
+   * answers and whether that is an earlier one than the question's (stale); its result (an older answer's read from
    * inconclusive), and for a negative whether another seat reviewed it and
    * what coverage it rests on (the negative bar).
    */
-  answer: { seq: number; at: string; inconclusive: boolean; result?: string; stale: boolean; negative?: { reviewed: boolean; by: string[]; coverage: Array<{ seq: number; coverage: string | null }> } } | null;
+  answer: { seq: number; at: string; inconclusive: boolean; result?: string; question_rev: number; stale: boolean; negative?: { reviewed: boolean; by: string[]; coverage: Array<{ seq: number; coverage: string | null }> } } | null;
   leads: Array<{ id: string; status: L.LeadStatus; holder: string | null; disposition?: string; opened_by: string }>;
   clarifications: Clarification[];
   pending_clarifications: string[];
@@ -794,7 +825,6 @@ export function viewQuestion(q: Question, ctx: ViewContext): QuestionView {
   const working = leadViews.some((l) => l.status !== "closed" && l.holder);
   const work: WorkState | null = !inScope ? null : ctx.paused ? "paused" : pending.length ? "clarification_needed" : working ? "working" : "admitted";
   const a = standingAnswer(ctx.ledger, q.section);
-  const lastText = q.revisions.at(-1);
   const result = a ? NB.answerResult(a) : null;
   const negative =
     a && result && NB.NEGATIVE_RESULTS.has(result)
@@ -810,7 +840,10 @@ export function viewQuestion(q: Question, ctx: ViewContext): QuestionView {
         at: a.at,
         inconclusive: a.inconclusive === true,
         ...(result ? { result } : {}),
-        stale: q.rev > 1 && Boolean(lastText) && Date.parse(lastText!.at) > Date.parse(a.at),
+        // Bound to the revision it answers (recorded under the register's
+        // lock), never to when it was written: absent is revision 1.
+        question_rev: a.question_rev ?? 1,
+        stale: (a.question_rev ?? 1) !== q.rev,
         ...(negative ? { negative } : {}),
       }
     : null;
@@ -1282,13 +1315,31 @@ export type ActResult = {
   triaged?: string[];
   signed?: { seq: number };
   leading_forms?: string[];
+  /** What the act implies could not be made in its hold of the lock: made at the next act or header. */
+  effects_pending?: string;
 };
 
 type Commit = { append: QuestionDraft[]; leads?: L.LeadDraft[]; result: Omit<ActResult, "seq" | "hash" | "signed"> | Fail };
 
-/** A lead's standing findings: its jobs' interpretations that are findings, and the finding it was closed resolved on. */
-function leadFindings(l: L.Lead, leads: L.LeadsState, ledger: L.LedgerView): number[] {
+/**
+ * A lead's standing findings: its jobs' interpretations that are findings,
+ * the finding it was opened from (record(kind=finding, opens), origin E-n),
+ * the findings it needs, and the finding it was closed resolved on. Any of
+ * them makes the lead one that found or rests on something, which a
+ * withdrawal sends to triage instead of closing.
+ */
+export function leadFindings(l: L.Lead, leads: L.LeadsState, ledger: L.LedgerView): number[] {
   const out = new Set<number>();
+  const standingFinding = (seq: number) => {
+    const e = ledger.bySeq.get(seq);
+    if (e?.kind === "finding" && !ledger.replaced.has(e.seq)) out.add(e.seq);
+  };
+  const origin = /^E-(\d+)$/i.exec(l.origin.trim());
+  if (origin) standingFinding(Number(origin[1]));
+  for (const n of l.needs) {
+    const m = /^E-(\d+)$/.exec(n);
+    if (m) standingFinding(Number(m[1]));
+  }
   for (const j of l.jobs) {
     for (const i of leads.interpretations.get(j) ?? []) {
       const e = ledger.bySeq.get(i.entry);
@@ -1395,8 +1446,13 @@ async function commitUnderLock(sandboxRoot: string, p: PreparedAct, snap: Questi
       }
       const rev = bump ? q!.rev + 1 : q!.rev;
       const lead = bump ? leadingForms(p.act.text ?? "") : undefined;
-      const act = bump ? p.act : (({ text: _t, ...rest }) => rest)(p.act);
-      return { append: [{ ...base, ev: "amend", q: q!.id, rev, act, decided: { ...(lead ? { leading_forms: lead } : {}), revision: bump } }], result: { ok: true, q: q!.id, rev, ...(lead?.length ? { leading_forms: lead } : {}) } };
+      // A new revision after the run's done is new work, and the run is over: a follow-up for its continuation.
+      const afterDone = bump && !q!.after_done && (await P.swarmDoneExists(sandboxRoot));
+      // The act exactly as it was said (and signed): whether it makes a new revision is the harness's, in decided.
+      return {
+        append: [{ ...base, ev: "amend", q: q!.id, rev, act: p.act, decided: { ...(lead ? { leading_forms: lead } : {}), revision: bump, ...(afterDone ? { after_done: true } : {}) } }],
+        result: { ok: true, q: q!.id, rev, ...(lead?.length ? { leading_forms: lead } : {}), ...(afterDone ? { after_done: true as const } : {}) },
+      };
     }
     case "priority": {
       if (q!.priority === p.act.priority && (q!.priority_reason ?? "") === (p.act.reason ?? "")) return fail(`${q!.id} is ${q!.priority} already`);
@@ -1408,13 +1464,8 @@ async function commitUnderLock(sandboxRoot: string, p: PreparedAct, snap: Questi
         if (refused) return fail(refused);
         const item = [...snap.state.triage].reverse().find((t) => t.lead === p.act.lead && !t.resolved);
         if (!item) return fail(`${p.act.lead} is not in the triage queue`);
-        const leads: L.LeadDraft[] = [];
-        if (p.act.scope === "excluded") {
-          const ls = await L.leadsSnapshot(sandboxRoot);
-          const l = ls.state.leads.get(p.act.lead);
-          if (l && !l.closed) leads.push({ by: "system", ev: "close", lead: l.id, generation: l.generation, disposition: "withdrawn", ref: item.q ?? "", why: `the ${o.role}'s triage (${who}): ${p.act.why}` });
-        }
-        return { append: [{ ...base, ev: "scope", act: p.act }], leads, result: { ok: true, ...(leads.length ? { closed_leads: [p.act.lead] } : {}) } };
+        // Closing an excluded lead is the reconciliation's, in the same hold of the lock (and again after a crash).
+        return { append: [{ ...base, ev: "scope", act: p.act, decided: { q: item.q } }], result: { ok: true } };
       }
       if (q!.scope === p.act.scope && !snap.state.triage.some((t) => t.q === q!.id && !t.resolved)) return fail(`${q!.id} is ${q!.scope} already`);
       if (q!.origin.kind === "goal" && p.act.scope === "excluded") return fail(`${q!.id} is a question of the goal: the goal's questions are the case's; withdraw it (with why) to take it off`);
@@ -1427,37 +1478,16 @@ async function commitUnderLock(sandboxRoot: string, p: PreparedAct, snap: Questi
         append.push({ ...base, ev: "objective", objective: created, text: q!.objective_text, why: `scope expanded by ${o.name ?? o.person}, admitting ${q!.id}` });
         why = `admitted by ${who}, scope expanded: new objective ${created}: ${p.act.why}`;
       }
-      append.push({ ...base, ev: "scope", q: q!.id, rev: q!.rev, act: p.act, decided: { scope_why: why, from: q!.scope, ...(created ? { objective_created: created } : {}) } });
-      return { append, result: { ok: true, q: q!.id, rev: q!.rev, scope: p.act.scope, scope_why: why, ...(created ? { objective_created: created } : {}) } };
+      // An admission after the run's done makes no work of this run: it is a follow-up for its continuation.
+      const afterDone = p.act.scope === "in_scope" && !q!.after_done && (await P.swarmDoneExists(sandboxRoot));
+      append.push({ ...base, ev: "scope", q: q!.id, rev: q!.rev, act: p.act, decided: { scope_why: why, from: q!.scope, ...(created ? { objective_created: created } : {}), ...(afterDone ? { after_done: true } : {}) } });
+      return { append, result: { ok: true, q: q!.id, rev: q!.rev, scope: p.act.scope, scope_why: why, ...(created ? { objective_created: created } : {}), ...(afterDone ? { after_done: true as const } : {}) } };
     }
     case "withdraw": {
-      const ls = await L.leadsSnapshot(sandboxRoot);
-      const leads: L.LeadDraft[] = [];
-      const closed: string[] = [];
-      const triaged: string[] = [];
-      const triage: QuestionDraft[] = [];
-      const live = (s: string) => {
-        const other = snap.bySection.get(s);
-        return !other || (!other.withdrawn && other.id !== q!.id);
-      };
-      for (const l of ls.state.leads.values()) {
-        if (!l.answers.includes(q!.section)) continue;
-        if (l.answers.some((s) => s !== q!.section && live(s))) continue;
-        const found = leadFindings(l, ls.state, ls.ledger);
-        if (l.material && found.length) {
-          triage.push({ by: "system", ev: "triage", q: q!.id, lead: l.id, cause: `${q!.id} was withdrawn, and ${l.id} holds ${found.map((n) => `E-${n}`).join(", ")}: keep it (in_scope) or close it (excluded)`, entries: found });
-          triaged.push(l.id);
-        } else if (!l.closed) {
-          leads.push({ by: "system", ev: "close", lead: l.id, generation: l.generation, disposition: "withdrawn", ref: q!.id, why: `${q!.id} was withdrawn by ${who}: ${p.act.why}` });
-          closed.push(l.id);
-        }
-      }
-      for (const child of snap.state.questions.values()) {
-        if (child.parent !== q!.id || child.withdrawn || child.scope === "excluded") continue;
-        triage.push({ by: "system", ev: "triage", q: child.id, cause: `its parent ${q!.id} was withdrawn: keep it in the case (in_scope) or exclude it` });
-        triaged.push(child.id);
-      }
-      return { append: [{ ...base, ev: "withdraw", q: q!.id, rev: q!.rev, act: p.act }, ...triage], leads, result: { ok: true, q: q!.id, rev: q!.rev, closed_leads: closed, triaged } };
+      // Its leads closed withdrawn, a lead that found something and its
+      // follow-ups sent to triage: the reconciliation's, in the same hold of
+      // the lock, and again at the next act or header if this one dies first.
+      return { append: [{ ...base, ev: "withdraw", q: q!.id, rev: q!.rev, act: p.act }], result: { ok: true, q: q!.id, rev: q!.rev } };
     }
     case "clarify_ask": {
       if (q!.origin.kind === "agent") return fail(`${q!.id} was asked by ${q!.origin.agent}: ask on the board`);
@@ -1493,18 +1523,106 @@ async function commitUnderLock(sandboxRoot: string, p: PreparedAct, snap: Questi
 }
 
 /**
+ * What the register's acts imply on both registers, derived and made good
+ * under a lock the caller holds: every open lead that serves only withdrawn
+ * questions closed `withdrawn`, unless it found or rests on a finding and is
+ * material, when it goes to triage instead (a closed one that found
+ * something too); a lead the triage excluded closed; and every follow-up of
+ * a withdrawn question sent to triage. Idempotent: what was made already is
+ * not made again. Run in the same hold as the act that implies it, and at
+ * every later act and header, so a crash between the act and its effects
+ * leaves them undone only until the next read.
+ */
+async function reconcileHeld(sandboxRoot: string, held: P.HeldLock): Promise<{ closed: string[]; triaged: string[] }> {
+  const qs = await questionsSnapshot(sandboxRoot);
+  const withdrawn = new Map<string, Question>();
+  for (const q of qs.state.questions.values()) if (q.withdrawn) withdrawn.set(q.section, q);
+  const excludedLeads = qs.state.triage.filter((t) => t.lead && t.resolved?.decision === "excluded");
+  if (!withdrawn.size && !excludedLeads.length) return { closed: [], triaged: [] };
+  const ls = await L.leadsSnapshot(sandboxRoot);
+  const drafts: QuestionDraft[] = [];
+  const leads: L.LeadDraft[] = [];
+  const closed: string[] = [];
+  const triaged: string[] = [];
+  for (const l of ls.state.leads.values()) {
+    const items = qs.state.triage.filter((t) => t.lead === l.id);
+    const excluded = items.find((t) => t.resolved?.decision === "excluded");
+    if (excluded) {
+      if (!l.closed) {
+        leads.push({ by: "system", ev: "close", lead: l.id, generation: l.generation, disposition: "withdrawn", ref: excluded.q ?? "", why: `excluded in the triage by ${originWords(excluded.resolved!.origin)}: ${excluded.resolved!.why}` });
+        closed.push(l.id);
+      }
+      continue;
+    }
+    if (items.length || !l.answers.length || !l.answers.every((s) => withdrawn.has(s))) continue;
+    const wq = withdrawn.get(l.answers[0])!;
+    const found = leadFindings(l, ls.state, ls.ledger);
+    if (l.material && found.length) {
+      drafts.push({ by: "system", ev: "triage", q: wq.id, lead: l.id, cause: `${wq.id} was withdrawn, and ${l.id} holds ${found.map((n) => `E-${n}`).join(", ")}: keep it (in_scope) or close it (excluded)`, entries: found });
+      triaged.push(l.id);
+    } else if (!l.closed) {
+      leads.push({ by: "system", ev: "close", lead: l.id, generation: l.generation, disposition: "withdrawn", ref: wq.id, why: `${wq.id} was withdrawn by ${originWords(wq.withdrawn!.origin)}: ${wq.withdrawn!.why}` });
+      closed.push(l.id);
+    }
+  }
+  for (const child of qs.state.questions.values()) {
+    if (!child.parent || child.withdrawn || child.scope === "excluded") continue;
+    const parent = qs.state.questions.get(child.parent);
+    if (!parent?.withdrawn || qs.state.triage.some((t) => t.q === child.id && !t.lead)) continue;
+    drafts.push({ by: "system", ev: "triage", q: child.id, cause: `its parent ${parent.id} was withdrawn: keep it in the case (in_scope) or exclude it` });
+    triaged.push(child.id);
+  }
+  if (drafts.length) await appendQuestionEvents(sandboxRoot, drafts, held);
+  if (leads.length) await L.appendLeadEventsHeld(sandboxRoot, leads, held);
+  if (drafts.length || leads.length) await writeQuestionsMd(sandboxRoot).catch(() => undefined);
+  return { closed, triaged };
+}
+
+/** Make good what the register's acts imply and is not done yet (reconcileHeld), taking the lock only when something could be due. */
+export async function reconcile(sandboxRoot: string): Promise<{ closed: string[]; triaged: string[] }> {
+  const qs = await questionsSnapshot(sandboxRoot);
+  if (![...qs.state.questions.values()].some((q) => q.withdrawn) && !qs.state.triage.some((t) => t.lead && t.resolved?.decision === "excluded")) return { closed: [], triaged: [] };
+  return L.withRegisters(sandboxRoot, (held) => reconcileHeld(sandboxRoot, held)).catch(() => ({ closed: [], triaged: [] }));
+}
+
+/**
+ * A resume takes up the follow-ups: every question admitted, opened or
+ * amended into new work after the run's done (after_done), and not
+ * withdrawn, is this run's work again from the resumed segment on. One
+ * `continue` event names them, the durable receipt; the follow-up marks stay
+ * on the events that made them. Nothing to take up writes nothing.
+ */
+export async function continueFollowUps(sandboxRoot: string, o: { segment: number; by: string }): Promise<string[]> {
+  return L.withRegisters(sandboxRoot, async (held) => {
+    if (await P.swarmDoneExists(sandboxRoot)) throw new Error("the run is still marked done: the follow-ups are taken up once the resume has moved its done aside");
+    const snap = await questionsSnapshot(sandboxRoot);
+    if (!snap.state.chain.ok) throw new Error(`questions/questions.jsonl's chain is broken at line ${snap.state.chain.broken_at} (${snap.state.chain.reason})`);
+    const ids = [...snap.state.questions.values()].filter((q) => q.after_done && !q.withdrawn).map((q) => q.id);
+    if (!ids.length) return [];
+    await appendQuestionEvents(sandboxRoot, [{ by: "system", ev: "continue", questions: ids, why: `the run was resumed by ${o.by} (segment ${o.segment}): the follow-ups recorded after its done are its work now`, decided: { segment: o.segment } }], held);
+    await writeQuestionsMd(sandboxRoot).catch(() => undefined);
+    return ids;
+  });
+}
+
+/**
  * Commit a prepared act under the registers' lock, with the register read
- * inside it; a signature, when given, is appended as a `sign` event naming
- * the act's hash. What the act changes on the lead register (leads a
- * withdrawal closes) is appended in the same hold of the lock. Nothing is
+ * inside it. A signature, when given, is carried on the act's own event, so
+ * no act on the chain says it is signed without its signature beside it.
+ * What the act implies on the lead register (leads a withdrawal closes, a
+ * triage) is made in the same hold (reconcileHeld), and completed at the
+ * next act or header if the process dies between the two. Nothing is
  * published here: the caller acknowledges after this returns, and delivers
  * (deliverPending), so a crash between the two loses no question.
  */
 export async function commitAct(sandboxRoot: string, p: PreparedAct, o: { signature?: ActSignature } = {}): Promise<ActResult | Fail> {
-  if (o.signature && (p.origin.identity !== "signed" || !p.origin.person || o.signature.person !== p.origin.person)) return { ok: false, reason: "a signature is the acting person's own, on an act that says it is signed" };
+  if (o.signature && (p.origin.identity !== "signed" || !p.origin.person || o.signature.person !== p.origin.person || o.signature.fingerprint !== p.origin.fingerprint)) return { ok: false, reason: "a signature is the acting person's own, with the key their act names, on an act that says it is signed" };
+  if (!o.signature && p.origin.identity === "signed") return { ok: false, reason: "an act that says it is signed carries its signature" };
   try {
     return await L.withRegisters(sandboxRoot, async (held) => {
       await ensureSeededHeld(sandboxRoot, held);
+      // What an earlier act implied and a crash left undone, first.
+      await reconcileHeld(sandboxRoot, held).catch(() => undefined);
       const snap = await questionsSnapshot(sandboxRoot);
       if (!snap.state.chain.ok) return { ok: false as const, reason: `questions/questions.jsonl's chain is broken at line ${snap.state.chain.broken_at} (${snap.state.chain.reason}): the register takes no act until the operator looks` };
       const c = await commitUnderLock(sandboxRoot, p, snap);
@@ -1513,16 +1631,21 @@ export async function commitAct(sandboxRoot: string, p: PreparedAct, o: { signat
         const last = snap.state.events.at(-1);
         return { ...c.result, seq: last?.seq ?? 0, hash: last?.hash ?? "" } as ActResult;
       }
-      const events = await appendQuestionEvents(sandboxRoot, c.append, held);
+      // The act's own event carries its signature: one line, written whole or not at all.
+      const at = c.append.map((d) => d.ev).lastIndexOf(p.ev);
+      const drafts = o.signature ? c.append.map((d, i) => (i === at ? { ...d, signature: o.signature } : d)) : c.append;
+      const events = await appendQuestionEvents(sandboxRoot, drafts, held);
       const act = [...events].reverse().find((e) => e.ev === p.ev) ?? events.at(-1)!;
-      let signed: { seq: number } | undefined;
-      if (o.signature) {
-        const [s] = await appendQuestionEvents(sandboxRoot, [{ by: p.by, ev: "sign", ...(act.q ? { q: act.q } : {}), target_seq: act.seq, target_hash: act.hash, signature: o.signature, origin: { kind: p.origin.kind, person: p.origin.person, role: p.origin.role, identity: "signed", fingerprint: o.signature.fingerprint } }], held);
-        signed = { seq: s.seq };
+      // What it implies on both registers, now; a failure here leaves the act committed and the effects to the next read.
+      let effects: { closed: string[]; triaged: string[] } | { error: string };
+      try {
+        effects = await reconcileHeld(sandboxRoot, held);
+      } catch (err) {
+        effects = { error: (err as Error).message };
       }
-      if (c.leads?.length) await L.appendLeadEventsHeld(sandboxRoot, c.leads, held);
       await writeQuestionsMd(sandboxRoot).catch(() => undefined);
-      return { ...c.result, seq: act.seq, hash: act.hash, ...(signed ? { signed } : {}) } as ActResult;
+      const reported = "error" in effects ? { effects_pending: `${effects.error}: what the act implies is made at the next act or header` } : p.ev === "withdraw" || p.ev === "scope" ? { closed_leads: effects.closed, triaged: effects.triaged } : {};
+      return { ...c.result, seq: act.seq, hash: act.hash, ...(o.signature ? { signed: { seq: act.seq } } : {}), ...reported } as ActResult;
     });
   } catch (err) {
     return { ok: false, reason: (err as Error).message };
@@ -1642,11 +1765,12 @@ export function questionPostBody(q: Question, qs: QuestionsSnapshot, o: { offerT
 }
 
 /** A hint that says something becomes a hypothesis in the ledger, recorded once, in the asker's name. */
-async function hintHypotheses(sandboxRoot: string, q: Question): Promise<number[]> {
+async function hintHypotheses(sandboxRoot: string, q: Question): Promise<{ seqs: number[]; failed: string[] }> {
   const said = q.hints.filter((h) => h.value);
-  if (!said.length) return [];
+  if (!said.length) return { seqs: [], failed: [] };
   const poster = posterOf(q.origin);
   const out: number[] = [];
+  const failed: string[] = [];
   for (const h of said) {
     const source = `${poster}'s hint on ${q.id}: ${h.ref}`;
     const entries = await P.readLedger(sandboxRoot).catch(() => [] as P.LedgerEntry[]);
@@ -1667,26 +1791,38 @@ async function hintHypotheses(sandboxRoot: string, q: Question): Promise<number[
         answers: [q.section],
         status: "open",
       } as P.LedgerInput,
-    ).catch(() => null);
-    if (r?.ok) out.push(r.entry.seq);
+    ).catch((err: Error) => ({ ok: false as const, reason: err.message }));
+    if (r.ok) out.push(r.entry.seq);
+    else failed.push(`${h.ref}: ${r.reason}`);
   }
-  return out;
+  return { seqs: out, failed };
 }
 
-export type Delivery = { q: string; rev: number; post: { thread: string; id: number } | null; offer_to: string | null; first: boolean; hypotheses: number[] };
+/** The structured id a question's post carries in its front matter: a delivery that finds it records that post, and posts nothing twice. */
+export function postKey(q: string, rev: number): string {
+  return `question:${q}:r${rev}`;
+}
+
+export type Delivery = { q: string; rev: number; post: { thread: string; id: number } | null; offer_to: string | null; first: boolean; hypotheses: number[]; pending?: string };
 
 /**
  * Publish what was committed and not yet published: each person's question
- * in scope, at each revision, once. The board post (to the seat it is
- * offered to, so no other seat is woken; every seat reads it at its next
- * delivery), the hints' hypotheses, then a `deliver` event, and an `offer`
- * to the asker's suggested seat for its first minute or to the most suited
- * idle seat. Run after every act and on every header, so a crash between the
- * chain write and the post leaves it undelivered only until the next read.
+ * in scope, at each revision, once. The hints' hypotheses first, then the
+ * board post (keyed by the question and its revision in its front matter, so
+ * a retry finds it; to the seat it is offered to, so no other seat is woken),
+ * then a `deliver` event and an `offer` to the asker's suggested seat for its
+ * first minute or to the most suited idle seat. A revision whose post or
+ * hypotheses could not be made stays pending, with no `deliver` event, and
+ * is tried again at the next header or act. Clarifications are published
+ * the same way: each request as an operator request, each answer as a post
+ * to the seat that asked. Run after every act and on every header, so a
+ * crash between the chain write and a publication leaves it undone only
+ * until the next read.
  */
 export async function deliverPending(sandboxRoot: string, o: { now?: number } = {}): Promise<Delivery[]> {
   const now = o.now ?? Date.now();
   const first = await questionsSnapshot(sandboxRoot);
+  if ([...first.state.questions.values()].some((q) => q.clarifications.length)) await publishClarifications(sandboxRoot, first).catch(() => undefined);
   const due = (q: Question) => HUMAN_ORIGINS.has(q.origin.kind) && q.scope === "in_scope" && !q.withdrawn && !q.after_done && !q.delivered.has(q.rev);
   if (![...first.state.questions.values()].some(due)) return [];
   if (await P.swarmDoneExists(sandboxRoot)) return [];
@@ -1704,18 +1840,33 @@ export async function deliverPending(sandboxRoot: string, o: { now?: number } = 
     }
     // Nobody idle: the post goes to the seat most suited to it, so it wakes one seat, not all.
     const to = offer?.to ?? (seats.length ? rankSeats(q, seats.map((s) => ({ agent: s, since: 0 })), ctx)[0]?.agent : null) ?? "all";
-    const hypotheses = await hintHypotheses(sandboxRoot, q);
-    const post = await P.registerPost(sandboxRoot, { from: posterOf(q.origin), to, tag: "question", body: questionPostBody(q, ctx.questions, { offerTo: offer?.to ?? null, first: offer?.first === true, hypotheses }), marker: postMarker(q.id, q.rev) }).catch(() => null);
+    const hyp = await hintHypotheses(sandboxRoot, q);
+    const base = { q: q.id, rev: q.rev, offer_to: offer?.to ?? null, first: offer?.first === true, hypotheses: hyp.seqs };
+    if (hyp.failed.length) {
+      out.push({ ...base, post: null, pending: `a hint's hypothesis was not recorded (${hyp.failed.join("; ")}): tried again at the next header` });
+      continue;
+    }
+    let post: P.PostRecord | null = null;
+    let postError = "";
+    try {
+      post = await P.registerPost(sandboxRoot, { from: posterOf(q.origin), to, tag: "question", body: questionPostBody(q, ctx.questions, { offerTo: offer?.to ?? null, first: offer?.first === true, hypotheses: hyp.seqs }), key: postKey(q.id, q.rev) });
+    } catch (err) {
+      postError = (err as Error).message;
+    }
+    if (!post) {
+      out.push({ ...base, post: null, pending: `the board post was not made (${postError}): tried again at the next header` });
+      continue;
+    }
     await L.withRegisters(sandboxRoot, async (held) => {
       const snap = await questionsSnapshot(sandboxRoot);
       const cur = snap.state.questions.get(q.id);
       if (!cur || cur.rev !== q.rev || cur.delivered.has(q.rev)) return;
-      const drafts: QuestionDraft[] = [{ by: "system", ev: "deliver", q: q.id, rev: q.rev, post: post ? { thread: post.thread, id: post.id } : null, to, hypotheses }];
+      const drafts: QuestionDraft[] = [{ by: "system", ev: "deliver", q: q.id, rev: q.rev, post: { thread: post!.thread, id: post!.id }, to, hypotheses: hyp.seqs }];
       if (offer && !cur.offers.some((x) => x.rev === q.rev)) drafts.push({ by: "system", ev: "offer", q: q.id, rev: q.rev, to: offer.to, first: offer.first, ...(offer.until ? { until: offer.until } : {}), why: offer.why });
       await appendQuestionEvents(sandboxRoot, drafts, held);
       await writeQuestionsMd(sandboxRoot).catch(() => undefined);
     }).catch(() => undefined);
-    out.push({ q: q.id, rev: q.rev, post: post ? { thread: post.thread, id: post.id } : null, offer_to: offer?.to ?? null, first: offer?.first === true, hypotheses });
+    out.push({ ...base, post: { thread: post.thread, id: post.id } });
   }
   return out;
 }
@@ -1817,19 +1968,49 @@ export async function syncDispositions(sandboxRoot: string): Promise<string[]> {
 
 // --- clarification ------------------------------------------------------------------------------
 
-/** The operator's request a clarification makes (operator-requests.jsonl, as a lead's needs_operator does), with the command that answers it. */
+/** The operator requests already written, by kind and id: what a clarification's publication checks before it writes. */
+async function writtenRequests(sandboxRoot: string): Promise<Set<string>> {
+  const out = new Set<string>();
+  for (const line of (await readFile(join(sandboxRoot, L.OPERATOR_REQUESTS), "utf8").catch(() => "")).split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      const o = JSON.parse(line) as { kind?: string; id?: string; q?: string };
+      if (o.kind === "clarification" && o.id) out.add(`${o.q ?? ""}#${o.id}`);
+    } catch {
+      // a torn line: not a request
+    }
+  }
+  return out;
+}
+
+/**
+ * The operator's request a clarification makes (operator-requests.jsonl, as
+ * a lead's needs_operator does), with the command that answers it: derived
+ * from the committed clarify_ask and written once, keyed by its C-n, under
+ * the registers' lock. A crash between the ask and this line is made good
+ * at the next header.
+ */
 export async function writeClarificationRequest(sandboxRoot: string, q: string, clarify: string, by: string): Promise<string> {
-  const snap = await questionsSnapshot(sandboxRoot);
-  const question = snap.state.questions.get(q);
-  const c = question?.clarifications.find((x) => x.id === clarify);
   const run = (await P.readTeam(sandboxRoot).catch(() => null))?.swarm_id ?? "";
   const answer = `swarm.sh question ${run || "<run>"} clarify-reply ${q} ${clarify} "<your answer>"`;
-  const line = { at: new Date().toISOString(), run, kind: "clarification", id: clarify, q, rev: question?.rev ?? null, by, to: c?.to ?? "operator", title: `${q}: clarification ${clarify}`, request: c?.what ?? "", answer };
-  await appendFile(join(sandboxRoot, L.OPERATOR_REQUESTS), `${JSON.stringify(line)}\n`, "utf8");
+  await L.withRegisters(sandboxRoot, async () => {
+    if ((await writtenRequests(sandboxRoot)).has(`${q}#${clarify}`)) return;
+    const snap = await questionsSnapshot(sandboxRoot);
+    const question = snap.state.questions.get(q);
+    const c = question?.clarifications.find((x) => x.id === clarify);
+    if (!c) return;
+    const line = { at: new Date().toISOString(), run, kind: "clarification", id: clarify, q, rev: question?.rev ?? null, by: c.by || by, to: c.to || "operator", title: `${q}: clarification ${clarify}`, request: c.what, answer };
+    await appendFile(join(sandboxRoot, L.OPERATOR_REQUESTS), `${JSON.stringify(line)}\n`, "utf8");
+  });
   return answer;
 }
 
-/** The answer to a clarification, posted to the seat that asked it (once). */
+/** The structured id a clarification's answer post carries: one post per clarification, found again by it. */
+export function clarificationKey(q: string, clarify: string): string {
+  return `clarification:${q}:${clarify}`;
+}
+
+/** The answer to a clarification, posted to the seat that asked it, once (by its key). */
 export async function publishClarification(sandboxRoot: string, q: string, clarify: string): Promise<{ thread: string; id: number } | null> {
   const snap = await questionsSnapshot(sandboxRoot);
   const question = snap.state.questions.get(q);
@@ -1844,8 +2025,27 @@ export async function publishClarification(sandboxRoot: string, q: string, clari
     `The question: ${question.text}`,
     "A clarification says what the asker meant; it is not evidence.",
   ].join("\n");
-  const post = await P.registerPost(sandboxRoot, { from, to: c.by, tag: "question", body, marker: `CLARIFICATION ${clarify} on ${q} ` }).catch(() => null);
-  return post ? { thread: post.thread, id: post.id } : null;
+  const post = await P.registerPost(sandboxRoot, { from, to: c.by, tag: "question", body, key: clarificationKey(q, clarify) });
+  return { thread: post.thread, id: post.id };
+}
+
+/**
+ * Every clarification as the chain holds it, published: each request as an
+ * operator request, each answer as a post to the asker; what was published
+ * already is found by its id and not published again. A finished run's
+ * answers are not posted (nobody reads the board), and its requests still
+ * are.
+ */
+export async function publishClarifications(sandboxRoot: string, snap?: QuestionsSnapshot): Promise<void> {
+  const qs = snap ?? (await questionsSnapshot(sandboxRoot));
+  const written = await writtenRequests(sandboxRoot);
+  const done = await P.swarmDoneExists(sandboxRoot);
+  for (const q of qs.state.questions.values()) {
+    for (const c of q.clarifications) {
+      if (!written.has(`${q.id}#${c.id}`)) await writeClarificationRequest(sandboxRoot, q.id, c.id, c.by).catch(() => undefined);
+      if (c.answer && !done) await publishClarification(sandboxRoot, q.id, c.id).catch(() => undefined);
+    }
+  }
 }
 
 // --- what each agent is told --------------------------------------------------------------------
@@ -1918,7 +2118,7 @@ export function questionNotices(agent: string, told: Told, ctx: ViewContext): Qu
       }
       case "amend":
         if ((e.decided as { revision?: boolean } | undefined)?.revision !== true || !mine.has(q.section)) break;
-        out.push({ kind: "amended", q: q.id, wakes: true, text: `${q.id}, which your lead serves, was amended to revision ${e.rev} by ${originWords(e.origin)}: "${e.act?.text ?? ""}". Hold what you concluded against the earlier revision to this one; an answer recorded before it is stale until recorded again.` });
+        out.push({ kind: "amended", q: q.id, wakes: true, text: `${q.id}, which your lead serves, was amended to revision ${e.rev} by ${originWords(e.origin)}: "${e.act?.text ?? ""}". Hold what you concluded against the earlier revision to this one; an answer to an earlier revision is stale until recorded again with question_rev: ${e.rev} (supersedes the standing one, even unchanged).` });
         break;
       case "withdraw": {
         const mineHere = [...ctx.leads.leads.values()].filter((l) => l.answers.includes(q.section) && (l.holder === agent || l.closed?.by === agent || (l.closed?.disposition === "withdrawn" && ctx.leads.events.some((x) => x.lead === l.id && (x.holder === agent || x.by === agent)))));
@@ -2030,7 +2230,7 @@ function brief(v: QuestionView): Record<string, unknown> {
     ...(v.parent ? { parent: v.parent } : {}),
     ...(v.expects ? { expects: v.expects } : {}),
     ...(v.leading_forms.length ? { leading_forms: v.leading_forms } : {}),
-    answer: v.answer ? `E-${v.answer.seq}${v.answer.stale ? " (stale: amended after it)" : ""}` : null,
+    answer: v.answer ? `E-${v.answer.seq}${v.answer.stale ? ` (stale: answers revision ${v.answer.question_rev} of ${v.rev})` : ""}` : null,
     leads: v.leads.map((l) => `${l.id} ${l.status}${l.holder ? ` (${l.holder})` : ""}`),
     ...(v.withdrawn ? { withdrawn: v.withdrawn } : {}),
     ...(v.pending_clarifications.length ? { pending_clarifications: v.pending_clarifications } : {}),
@@ -2142,7 +2342,7 @@ export function renderQuestionsMd(ctx: ViewContext): string {
       if (v.attachments.length) lines.push(`- Attachments: ${v.attachments.join(", ")}`);
       if (v.leading_forms.length) lines.push(`- Leading form: ${v.leading_forms.map((f) => `"${f}"`).join(", ")} (flagged for the critic)`);
       if (v.leads.length) lines.push(`- Leads: ${v.leads.map((l) => `${l.id} ${l.status}${l.holder ? ` (${l.holder})` : ""}${l.disposition ? ` ${l.disposition}` : ""}`).join(", ")}`);
-      lines.push(`- Answer: ${v.answer ? `E-${v.answer.seq}${v.answer.inconclusive ? " (inconclusive)" : ""}${v.answer.result ? ` (${NB.resultWords(v.answer.result)})` : ""}${v.answer.negative ? (v.answer.negative.reviewed ? `; negative, reviewed by ${v.answer.negative.by.join(", ")}` : "; negative (unreviewed)") : ""}${v.answer.negative?.coverage.length ? `; coverage ${v.answer.negative.coverage.map((c) => `E-${c.seq} ${c.coverage ?? "not computed"}`).join(", ")}` : ""}${v.answer.stale ? `; recorded before revision ${v.rev}: stale` : ""}` : "none yet"}`);
+      lines.push(`- Answer: ${v.answer ? `E-${v.answer.seq}${v.answer.inconclusive ? " (inconclusive)" : ""}${v.answer.result ? ` (${NB.resultWords(v.answer.result)})` : ""}${v.answer.negative ? (v.answer.negative.reviewed ? `; negative, reviewed by ${v.answer.negative.by.join(", ")}` : "; negative (unreviewed)") : ""}${v.answer.negative?.coverage.length ? `; coverage ${v.answer.negative.coverage.map((c) => `E-${c.seq} ${c.coverage ?? "not computed"}`).join(", ")}` : ""}; answers revision ${v.answer.question_rev}${v.answer.stale ? ` of ${v.rev}: stale` : ""}` : "none yet"}`);
       for (const c of v.clarifications) lines.push(`- Clarification ${c.id} (${c.by}, ${c.at}): ${c.what}${c.answer ? ` — answered by ${originWords(c.answer.origin)} at ${c.answer.at}: ${c.answer.text}` : " — not answered yet"}`);
       for (const o of v.offers) lines.push(`- Offered to ${o.to} at ${o.at}${o.first ? ` first, until ${o.until}` : ""} (${o.why})`);
       if (v.accepted) lines.push(`- Accepted as ${v.accepted.as} by ${originWords(v.accepted.origin)} at ${v.accepted.at} for revision ${v.accepted.rev}${v.accepted.stands ? "" : " (no longer stands: amended since)"}: ${v.accepted.why}`);

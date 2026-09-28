@@ -105,6 +105,11 @@ export async function finishGate(sandbox: string, run: FinishLineRun | null): Pr
       const said = outcomes.get(key) ?? (sawAnswers ? "unanswered" : snap.answered.has(id) ? "has an answer (not checked)" : "unanswered");
       // A goal question the operator accepted (bounded, or not determinable) for its current revision is disposed: it limits the run and holds nothing.
       const reg = qs?.bySection.get(id);
+      // A goal question the register holds as withdrawn is off what the run must answer: named, holding nothing.
+      if (reg?.withdrawn) {
+        questions.push({ id, outcome: "withdrawn", blocks: [] });
+        continue;
+      }
       const outcome = said !== "answered" && reg?.accepted && reg.accepted.rev === reg.rev ? "accepted" : said;
       const blocks: string[] = [];
       if (outcome !== "answered" && outcome !== "accepted") {

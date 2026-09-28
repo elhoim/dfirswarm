@@ -16,7 +16,9 @@
  *                                                           (the person, when named, is a second --as ID)
  *   questions-cli.ts direct <sandbox> (--question Q-n | --new-question T --new-why W) --title T --why W --product P --acceptance A
  *   questions-cli.ts deliver <sandbox>                      publish what was committed and not yet published
- *   questions-cli.ts verify <sandbox> [--json]              every signed act, its signature checked
+ *   questions-cli.ts verify <sandbox> [--json] [--allowed-signers FILE] [--ca FILE]
+ *                                                           every signed act, its signature checked; fails on
+ *                                                           bad, wrong-principal, or a signed act with none
  *
  * Every act takes [--as ID] (an enrolled person: a claim), [--sign] (the act
  * signed with that person's enrolled key, namespace dfirswarm-question; the
@@ -37,7 +39,7 @@ import * as L from "../extensions/leads.ts";
 import * as P from "../extensions/protocol.ts";
 import * as Q from "../extensions/questions.ts";
 import { hasTty, readFromTty, readSecretFromFd, wipe } from "./secret-io.ts";
-import { keyNeeds, loadPerson, signAs, verifyAs, type Person, type PersonKey } from "./signers.ts";
+import { fingerprintOf, keyNeeds, loadPerson, signAs, verifyAs, type Person, type PersonKey, type SignatureState } from "./signers.ts";
 
 const sha256 = (b: string | Buffer) => createHash("sha256").update(b).digest("hex");
 
@@ -141,44 +143,104 @@ export async function operatorAct(sandbox: string, ev: Q.ActKind, input: Q.ActIn
 
 // --- signatures --------------------------------------------------------------------------------
 
-export type SignedAct = { q: string | null; act_seq: number; sign_seq: number; person: string; fingerprint: string; key_kind: string; state: string; detail: string };
+export type SignedAct = { q: string | null; act_seq: number; sign_seq: number | null; person: string; fingerprint: string; key_kind: string; state: SignatureState; detail: string };
 
-/** Every signed act, its statement rebuilt from the chain and its signature checked against the key the sign event names. */
-export async function verifySignedActs(sandbox: string, o: { allowedSigners?: string; ca?: string } = {}): Promise<SignedAct[]> {
+/** What fails a check of the question register's signatures: a signature that does not verify, or a key a register names for someone else. */
+export const FAILED_SIGNATURE: ReadonlySet<string> = new Set(["bad", "wrong-principal"]);
+
+/**
+ * One signature over an act on the chain, checked: the act says it is
+ * signed; the envelope names the person and key fingerprint the signed act
+ * names (the act's origin is inside the statement; the envelope is not); the
+ * key it carries has that fingerprint; the person enrolled on this install
+ * under that id, when they are, has that key and principal; the statement
+ * rebuilt from the chain is the one signed; and the signature verifies.
+ */
+export function checkActSignature(act: Q.QuestionEvent, s: Q.ActSignature, statement: string, o: { allowedSigners?: string; ca?: string; home?: string } = {}): { state: SignatureState; detail: string } {
+  const origin = act.origin ?? { kind: "analyst" as const };
+  if (origin.identity !== "signed") return { state: "bad", detail: `the act (event ${act.seq}) does not say it is signed: a signature is carried by the act it signs` };
+  if (s.person !== origin.person || s.fingerprint !== origin.fingerprint) {
+    return { state: "bad", detail: `the signature names ${s.person} (${s.fingerprint}), the signed act ${origin.person ?? "nobody"} (${origin.fingerprint ?? "no key"}): a signature is attributed to the person the signed act names, with that key` };
+  }
+  if (sha256(statement) !== s.statement_sha256) return { state: "bad", detail: "the act on the chain is not the statement that was signed" };
+  if (s.key_kind !== "pkcs11") {
+    const derived = s.public_key ? fingerprintOf(s.public_key) : null;
+    if (derived !== s.fingerprint) return { state: "bad", detail: `the key the signature carries has fingerprint ${derived ?? "unread"}, not ${s.fingerprint}, the one the signed act names` };
+  }
+  // Who that person is on this install: their enrolled key and principal, or none.
+  const enrolled = loadPerson(s.person, o.home);
+  let key: PersonKey;
+  let principal = s.principal;
+  let who: string;
+  if (!("why" in enrolled)) {
+    const p = enrolled.person;
+    if (p.key.fingerprint !== s.fingerprint) return { state: "wrong-principal", detail: `${s.person} is enrolled on this install with key ${p.key.fingerprint}, not ${s.fingerprint}, the key this signature carries` };
+    if (p.principal !== s.principal) return { state: "wrong-principal", detail: `${s.person} is enrolled on this install as principal ${p.principal}, not ${s.principal}, the one this signature names` };
+    key = p.key;
+    principal = p.principal;
+    who = `the key ${s.person} is enrolled with on this install`;
+  } else {
+    key = (s.key_kind === "pkcs11"
+      ? { kind: "pkcs11", certificate: { sha256: s.fingerprint.replace(/^X509-SHA256:/, "") } }
+      : { kind: s.key_kind, public: s.public_key ?? "", path: "", fingerprint: s.fingerprint }) as unknown as PersonKey;
+    who = `${s.person} is not enrolled on this install: checked against the key the signature carries`;
+  }
+  const dir = mkdtempSync(join(tmpdir(), "dfs-question-verify-"));
+  try {
+    const file = join(dir, "statement.json");
+    writeFileSync(file, statement);
+    const sig = join(dir, s.format === "cms" ? "statement.json.p7s" : "statement.json.sig");
+    writeFileSync(sig, Buffer.from(s.sig_b64, "base64"));
+    const v = verifyAs({ key, principal }, file, sig, Q.QUESTION_NAMESPACE, { ...(o.allowedSigners ? { allowedSigners: o.allowedSigners } : {}), ...(o.ca ? { ca: o.ca } : {}) });
+    return { state: v.state, detail: `${v.detail}; ${who}` };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Every signed act on the chain, checked (checkActSignature): each act that
+ * carries its signature, each separate sign event (the register's first
+ * form), and every act that says it is signed and carries none, which fails.
+ */
+export async function verifySignedActs(sandbox: string, o: { allowedSigners?: string; ca?: string; home?: string } = {}): Promise<SignedAct[]> {
   const { events } = await Q.readQuestionEvents(sandbox);
   const run = await runId(sandbox);
   const bySeq = new Map(events.map((e) => [e.seq, e]));
   const out: SignedAct[] = [];
+  const carried = new Set<number>();
+  const row = (act: Q.QuestionEvent | undefined, s: Q.ActSignature | undefined, actSeq: number, signSeq: number | null) => ({
+    q: act?.q ?? act?.act?.lead ?? null,
+    act_seq: actSeq,
+    sign_seq: signSeq,
+    // The person the signed act names: never the envelope's word.
+    person: act?.origin?.person ?? s?.person ?? "?",
+    fingerprint: act?.origin?.fingerprint ?? s?.fingerprint ?? "?",
+    key_kind: s?.key_kind ?? "none",
+  });
   for (const e of events) {
-    if (e.ev !== "sign" || !e.signature) continue;
-    const s = e.signature;
-    const target = e.target_seq !== undefined ? bySeq.get(e.target_seq) : undefined;
-    const row = { q: target?.q ?? null, act_seq: e.target_seq ?? 0, sign_seq: e.seq, person: s.person, fingerprint: s.fingerprint, key_kind: s.key_kind };
-    if (!target || target.hash !== e.target_hash) {
-      out.push({ ...row, state: "bad", detail: "the act it names is not on the chain with that hash" });
-      continue;
-    }
-    const statement = Q.statementOfEvent(target, run);
-    if (sha256(statement) !== s.statement_sha256) {
-      out.push({ ...row, state: "bad", detail: "the act on the chain is not the statement that was signed" });
-      continue;
-    }
-    const dir = mkdtempSync(join(tmpdir(), "dfs-question-verify-"));
-    try {
-      const file = join(dir, "statement.json");
-      writeFileSync(file, statement);
-      const sig = join(dir, s.format === "cms" ? "statement.json.p7s" : "statement.json.sig");
-      writeFileSync(sig, Buffer.from(s.sig_b64, "base64"));
-      const key = (s.key_kind === "pkcs11"
-        ? { kind: "pkcs11", certificate: { sha256: s.fingerprint.replace(/^X509-SHA256:/, "") } }
-        : { kind: s.key_kind, public: s.public_key ?? "", path: "", fingerprint: s.fingerprint }) as unknown as PersonKey;
-      const v = verifyAs({ key, principal: s.principal }, file, sig, Q.QUESTION_NAMESPACE, { ...(o.allowedSigners ? { allowedSigners: o.allowedSigners } : {}), ...(o.ca ? { ca: o.ca } : {}) });
-      out.push({ ...row, state: v.state, detail: v.detail });
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
+    if (e.ev === "sign") {
+      const target = e.target_seq !== undefined ? bySeq.get(e.target_seq) : undefined;
+      if (target && target.hash === e.target_hash) carried.add(target.seq);
+      if (!e.signature) {
+        out.push({ ...row(target, undefined, e.target_seq ?? 0, e.seq), state: "bad", detail: "a sign event with no signature" });
+        continue;
+      }
+      if (!target || target.hash !== e.target_hash) {
+        out.push({ ...row(target, e.signature, e.target_seq ?? 0, e.seq), state: "bad", detail: "the act it names is not on the chain with that hash" });
+        continue;
+      }
+      out.push({ ...row(target, e.signature, target.seq, e.seq), ...checkActSignature(target, e.signature, Q.statementOfEvent(target, run), o) });
+    } else if (e.signature) {
+      carried.add(e.seq);
+      out.push({ ...row(e, e.signature, e.seq, e.seq), ...checkActSignature(e, e.signature, Q.statementOfEvent(e, run), o) });
     }
   }
-  return out;
+  for (const e of events) {
+    if (e.ev === "sign" || e.origin?.identity !== "signed" || carried.has(e.seq)) continue;
+    out.push({ ...row(e, undefined, e.seq, null), state: "bad", detail: "the act says it is signed and carries no signature" });
+  }
+  return out.sort((a, b) => a.act_seq - b.act_seq || (a.sign_seq ?? 0) - (b.sign_seq ?? 0));
 }
 
 // --- reading ----------------------------------------------------------------------------------
@@ -420,10 +482,11 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
       break;
     case "verify": {
       const r = await verifySignedActs(sandbox, { ...(one("--allowed-signers") ? { allowedSigners: one("--allowed-signers") } : {}), ...(one("--ca") ? { ca: one("--ca") } : {}) });
-      if (flags.has("--json")) emit({ ok: r.every((x) => x.state !== "bad"), signed: r });
+      const failed = r.some((x) => FAILED_SIGNATURE.has(x.state));
+      if (flags.has("--json")) emit({ ok: !failed, signed: r });
       for (const x of r) process.stdout.write(`${x.q ?? "?"} event ${x.act_seq}: signed by ${x.person} (${x.key_kind} ${x.fingerprint}): ${x.state}: ${x.detail}\n`);
       if (!r.length) process.stdout.write("No act in the question register is signed.\n");
-      process.exit(r.some((x) => x.state === "bad") ? 1 : 0);
+      process.exit(failed ? 1 : 0);
       break;
     }
     default:
