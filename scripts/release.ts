@@ -741,7 +741,7 @@ export async function prepareRelease(ctx: RunCtx, o: { examiner?: string; pdf?: 
   if (!fileSha(join(ctx.sandbox, reportPath))) throw new Error(`there is no ${reportPath} in run ${ctx.run} to sign over: a sign-off is over the report the examiner read (--report PATH names another)`);
   let releases = readReleases(ctx.sandbox);
   const adopted = [...releases].reverse().find((r) => r.record?.state === "adopted");
-  if (adopted && !o.amendReason?.trim()) throw new Error(`release v${adopted.version} is adopted already: a later adoption is an amendment and says why (--amend-reason TEXT). A new examination is a new run.`);
+  if (adopted && !o.amendReason?.trim()) throw new Error(`release v${adopted.version} is adopted already: a later adoption is an amendment and says why (--amend-reason TEXT). Further examination is the run resumed (swarm.sh resume) or a new run.`);
   if (!adopted && o.amendReason) throw new Error("there is no adopted release to amend: sign without --amend-reason");
   const gate = await adoptionGate(ctx);
   const policy = technicalReviewPolicy(ctx);

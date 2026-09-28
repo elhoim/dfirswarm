@@ -47,8 +47,26 @@ The swarm-wide spend limit in USD.
 The swarm-wide time limit in minutes.
 
 **Grace**:
-How long the harness waits after steering agents to stop before it writes the
-sentinel itself.
+How long the harness waits after steering agents at a cap before it pauses
+the run, or, under `cap-stop`, writes the sentinel itself.
+
+**Stop policy**:
+What a cap or the wall clock does: `cap-pause` (the default: the run pauses
+for the operator), `cap-stop` (the harness stops it, for an unattended run)
+or `operator` (until solved).
+
+**Pause**:
+A run held at a cap: every seat idle, no model call sent, nothing lost, until
+the operator extends it or stops it. Never lifted by itself.
+
+**Resume**:
+The operator continuing a run that ended: the same run, in the same sandbox,
+on the same chains; each seat from its last hand-off. Not a new run.
+_Avoid_: restart, rerun (a rerun is one job run again)
+
+**Outcome**:
+How a run ended: completed, examination limited, paused, stopped, abandoned,
+or verification unavailable. Stopped is never completed.
 
 ### The board
 
@@ -135,6 +153,14 @@ was withdrawn (the harness's alone).
 A ledger entry recorded with `interprets` naming a job: what its output
 shows. A citation alone is not one.
 
+**Route**:
+A source a question's lead plans to examine, and how. At a negative close,
+the planned routes nobody examined are listed as not examined.
+
+**Quick negative**:
+A lead closed negative after one job over one object within two minutes: a
+cue for review, not a refusal.
+
 ### Questions
 
 **Question**:
@@ -161,6 +187,30 @@ exclude it.
 The operator's unheld lead under a question, with the product it is to make
 and what makes that acceptable. Never a held lead: nobody is assigned one.
 
+**Result**:
+What an answer to a question is: established, partial, bounded negative, not
+determinable, out of scope, or premise not supported.
+
+**Bounded negative**:
+"No evidence of X was found in <scope>": nothing found, within what was
+searched. Not "X did not happen", which needs an existence question,
+complete coverage and a stated detection opportunity.
+_Avoid_: "absent", "never happened" (unless that bar is met)
+
+**Coverage record**:
+The ledger entry (`kind=coverage`) that says what a negative was searched
+over, and whether the event would have left a trace there. The hub adds
+whether every object it names was given to a job: complete or partial.
+
+**Negative review**:
+Another seat's attest of a material negative, saying whether it challenged
+the detection assumptions, reproduced a decisive check and tried another
+route. Until then the negative is unreviewed, and the run does not finish.
+
+**Acceptance**:
+The operator taking a question's limits as they stand (bounded, or not
+determinable) for one revision. It makes the run examination limited.
+
 ### Stopping
 
 **Sentinel**:
@@ -181,7 +231,8 @@ exists when the operator started the swarm with forging on.
 _Avoid_: plugin, extension (those are the harness's own), custom tool
 
 **Until solved**:
-A run with no wall clock and advisory caps, where `done` is refused until
+The `operator` stop policy (`--until-solved` or `--stop operator`): a run with
+no wall clock and advisory caps, where `done` is refused until
 every question of the goal is answered and nobody but the operator can end it.
 When nothing moves the watchdog posts a **regroup**: what is open, blocked,
 waiting on the operator and uncited.

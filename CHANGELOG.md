@@ -6,6 +6,69 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Added: results and the negative bar; caps pause the run; a run that ended can be resumed
+
+- **Results.** A question's answer carries `result`: `established`,
+  `partial`, `bounded_negative`, `not_determinable`, `out_of_scope` or
+  `premise_not_supported` (required on new answers; `inconclusive` reads as
+  `not_determinable`). The answers check maps them onto its outcomes and
+  names them in its machine line. Run outcomes are `completed`,
+  `examination_limited`, `paused`, `stopped`, `abandoned` and
+  `verification_unavailable`; an operator's stop writes `done/STOPPED`, and
+  stopped is never completed.
+- **Coverage records** (`kind=coverage`): the proposition, the objects, the
+  time range, the method and settings, what was covered, skipped and failed,
+  the results, what is still open, and the detection opportunity. The hub
+  stamps the inventory revision and computes `coverage: complete|partial`
+  from the inputs the jobs behind it declared, by digest; it never judges
+  relevance. Required for every material bounded negative and not
+  determinable answer.
+- **Routes and quick negatives.** A question's leads carry `routes`; the
+  first lead under a question without them is warned, a person's question's
+  must carry them, and a material negative close is refused without them. A
+  negative close lists the routes nobody examined; one closed after one job
+  over one object within two minutes is flagged `quick_negative`.
+- **Peer review of material negatives.** `attest(..., review: {detection,
+  reproduced, other_route})` by a seat that recorded neither the answer nor
+  its coverage; the finish line refuses while one is unreviewed, and the
+  ledger, the header and the report say "negative (unreviewed)".
+- **Wording.** The report renders a bounded negative as "No evidence that …
+  was found in <scope>"; "did not happen" (`asserts_absence`) needs an
+  existence question, complete coverage and a detection opportunity, and the
+  answers check names an answer worded so without it.
+- **Acceptance** (`question accept`) is refused while a lead under the
+  question is open or its negative is unreviewed, and makes the run
+  examination-limited. A question's disposition follows its answer
+  (`dispose` events).
+- **Stop policy.** `--stop cap-pause|cap-stop|operator` (default
+  `cap-pause`; `--until-solved` is `operator`; a goal's `stop:`). At a cap
+  the run pauses: no model call goes out (the extension, the model gateway,
+  the hub and the watchdog each hold it), the operator is notified, and
+  `swarm.sh extend <run> [--minutes N] [--tokens N] [--usd N]` goes on (the
+  watchdog wakes each seat once) or `swarm.sh stop` ends it. The paused time
+  does not count against the wall clock. A metered team gets a default token
+  cap of 100,000,000. When nothing has yielded for 20 jobs or 30 minutes, a
+  stop is proposed to the operator (an operator request of kind
+  `decision`), never decided.
+- **Resume.** `swarm.sh resume <run> [--question TEXT]... [--questions FILE]
+  [--as ID] [--minutes N] [--tokens N] [--usd N] [--no-start]`, and
+  "Continue this run" in the console: the same sandbox and chains; what
+  marked the end moved whole to `done/history/<k>/`; each seat starts from
+  its last hand-off note or compaction summary; new questions are analyst
+  questions; refused before anything moves when it would still be over a
+  cap. The resume is anchored beside the run; the next stop seals the
+  continuation anew; `custody-verify` holds every earlier verdict to the run
+  as a prefix and shows each; a release's chains verify as a prefix only
+  after an anchored resume; a signed v1 stays valid, and the continuation is
+  adopted through a later version. The kickoff keeps its options outside the
+  run (0600) for it.
+- **Console.** Extend, Continue this run, and a paused run's notice on the
+  run page; the list carries the stop policy, the pause, the outcome and the
+  resumes. The jobs drawer shows every argument whole (it cut each at 40
+  characters), and a job's output is kept whole on disk and served whole
+  (`/api/jobs/<id>/output`) where the list carries its last 64 KiB.
+- [ADR 0013](docs/adr/0013-a-negative-is-bounded-and-a-cap-pauses.md).
+
 ### Added: the question register: what a run is asked, by the goal, an agent or a person, on one chain; analyst questions while it runs; the analyst and observer roles
 
 - **One register.** `questions/questions.jsonl` (rendered as

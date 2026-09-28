@@ -6001,7 +6001,7 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
 
   echo "Swarm id:     $swarm_id"
   echo "Label:        $label"
-  [[ -n "$notify_cmd" ]] && echo "Notify:       your command runs on finished, finish_failed, stop_incomplete, budget_cap, wall_clock, evidence_changed, chain_broken, agent_dead, collector_unreachable, hub_down (kept in $RUNS_DIR/notify/, 0600)"
+  [[ -n "$notify_cmd" ]] && echo "Notify:       your command runs on finished, finish_failed, stop_incomplete, budget_cap, wall_clock, paused, extended, operator_request, evidence_changed, chain_broken, agent_dead, collector_unreachable, hub_down (kept in $RUNS_DIR/notify/, 0600)"
   local disk_words="of unknown encryption (the host did not say)"
   [[ "$disk_encryption" == on ]] && disk_words="encrypted at rest"
   [[ "$disk_encryption" == off ]] && disk_words="NOT encrypted at rest"
@@ -10504,6 +10504,29 @@ cmd_help() {
       was. An extension that leaves the run still over a cap is refused, and nothing
       changes. On the board, the trace and the operator's record. A run that has ended is
       continued with swarm.sh resume.
+EOF
+      ;;
+    resume) cat <<'EOF'
+  resume <id> [--question TEXT]... [--questions FILE] [--why TEXT] [--as ID]
+              [--minutes N] [--tokens N] [--usd N] [--no-start] [-- START OPTIONS]
+      Continue a run that ended (stopped, done, failed): the same run, in the same
+      sandbox, on the same ledger, registers, board and trace. What marked its end
+      (the sentinel, done/STOPPED, the seats' done files) moves whole to
+      done/history/<k>/, and the first segment's VM records and kept disks beside
+      it; each seat starts from its last hand-off note or compaction summary
+      (inbox/<seat>/resume.md) and the registers as they stand. The wall clock counts
+      on from where the run stopped: a resume that would still be over a cap is
+      refused with nothing changed (give --minutes, --tokens or --usd). Questions
+      given (--question, or a file of them, one a line or a JSON list) are asked as
+      analyst questions, with --why (default: asked when the run was resumed) and
+      --as. The run starts with the options it was started with (kept at kickoff
+      outside the run, 0600); a run from before that gives them after --. The next
+      stop seals the continuation anew (a new custody verdict and draft release);
+      every earlier verdict still verifies as a prefix (custody-verify shows each),
+      and a signed release stays valid for what it bound: the continuation's answers
+      are adopted through a later version. On the trace, the operator's record, the
+      registry, budget.json and the custody anchor. --no-start prepares it only; a
+      later swarm.sh resume <id> starts it as prepared.
 EOF
       ;;
     review) cat <<'EOF'

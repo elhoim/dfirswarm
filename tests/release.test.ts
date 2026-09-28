@@ -187,7 +187,7 @@ test("after an adoption, another is an amendment: refused without a reason, then
   const v1 = await signRelease(ctxOf(r), { home: r.home, say: quiet });
   assert.equal(v1.version, 1, "a run with no release gets the machine's draft first, then the adoption");
   assert.equal(readReleases(r.root)[0].record?.reason, "the machine's draft, written before the first adoption: none was written when custody was taken");
-  await assert.rejects(signRelease(ctxOf(r), { home: r.home, say: quiet }), /release v1 is adopted already: a later adoption is an amendment and says why \(--amend-reason TEXT\)\. A new examination is a new run\./);
+  await assert.rejects(signRelease(ctxOf(r), { home: r.home, say: quiet }), /release v1 is adopted already: a later adoption is an amendment and says why \(--amend-reason TEXT\)\. Further examination is the run resumed \(swarm\.sh resume\) or a new run\./);
   await appendReview(r.runs, r.id, r.root, { examiner: "Ada Examiner", examinerId: "ada-examiner", action: "adopt", entry_seq: 20 });
   const v2 = await signRelease(ctxOf(r), { home: r.home, amendReason: "the narrative adopted after re-reading E-6", say: quiet });
   assert.equal(v2.version, 2);

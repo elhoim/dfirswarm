@@ -125,11 +125,14 @@ back to a host run on its own.
   [ADR 0003](adr/0003-the-provider-key-comes-from-pis-own-store.md) and
   [Credentials](credentials-and-teams.md).
 - **Cost and time caps.** `--cap-usd` is mandatory. Spend is measured from Pi's
-  own session usage, not estimated. At either cap the agents are steered to
-  `done cannot_complete`, and if the swarm is still over one grace period later
-  the harness writes the sentinel itself: each pane's own extension, and
-  from outside every pane the idle watchdog on the host (for a microVM run,
-  the hub), so a swarm whose every pane is wedged is still stopped. With
+  own session usage, not estimated. At either cap, or the wall clock, the
+  agents are steered, and if the swarm is still over one grace period later
+  the run pauses (the default, `--stop cap-pause`: no model call goes out
+  until the operator extends or stops it) or, under `--stop cap-stop`, the
+  harness writes the sentinel itself: each pane's own extension, and from
+  outside every pane the idle watchdog on the host (for a microVM run, the
+  hub, and the model gateway when there is one), so a swarm whose every pane
+  is wedged is still held. With
   `--idle-nudge-sec 0` a host run has no watchdog and only its panes.
   `--hard-kill` additionally shuts the steered session down. Kickoff allows
   N=1–30 and warns above 10.

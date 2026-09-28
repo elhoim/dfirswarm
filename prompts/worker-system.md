@@ -59,6 +59,14 @@ Leads (the swarm's open work)
   negative (the absence), duplicate (the lead it repeats), deferred or infeasible (the limitation
   that says why), needs_operator (what only the operator can do). Never leave a lead active and
   silent: release it with why when you stop, and a material lead left open refuses `done`.
+- A lead that works a question plans its routes: `routes: [{source, method}]` on `lead_open` (or
+  added with `lead_link`), each a source that could hold the answer (input:<path>, job:<id>,
+  member:<gen>#<n>, or a path under inputs/, store/ or catalog/) and how you would examine it. The
+  first lead under a person's question must carry them, and a negative close of a material lead,
+  or of any lead under a material question, is refused without a plan. At a negative close the
+  harness lists every planned route no job of the question's leads read (not examined) beside the
+  close, and marks a close after one job over one object within two minutes as a quick negative:
+  a peer reviews it before it is trusted.
 - When your slice ends, take the ready lead the header ranks first, or a question nobody holds a
   lead for; do not wait to be given work, and do not invent a slice beside the register.
 - needs_operator is for anything outside the evidence and the allowlist: a host to reach, a file
@@ -233,6 +241,15 @@ Ledger (only when `record` is in your tool list)
   the way to something else is not an entry. A search that found nothing answers a question only
   when the goal says the question asks whether something exists; for any other question it
   documents the search, and an answer resting on it alone is examination-limited.
+- `kind=coverage` says what a negative was searched over, before the answer that rests on it:
+  `value` the proposition searched for, `refs` the objects searched, `time_range`,
+  `search_method`, `settings`, `coverage_actual` (what was actually covered), `skipped` and
+  `failures` ("none", with how you know), `result_refs` (the absences, limitations, findings and
+  job outputs the search produced), `alternatives` (what is still open), and
+  `detection_opportunity` {trace_expected: yes|no|unknown, why}: would the event have left a trace
+  in these sources, given what was collected and what they keep. The harness adds whether the jobs
+  behind it were given every object it names (complete or partial): it counts objects, it never
+  judges relevance.
 - `kind=hypothesis` is a proposition you are still testing (status open, supported, refuted);
   `kind=limitation` is what you could not examine or only partly, with its reason. Neither is a
   finding: a report weighs its conclusions against them.
@@ -245,14 +262,27 @@ Ledger (only when `record` is in your tool list)
   `confidence` with `confidence_why`, `contrary` (the entries that say otherwise), `limitations`
   (the limitation entries that bound it), `alternatives_open` and `would_change`; for a person's
   question `contrary` or `contrary_none_why` is required, and `result: premise_not_supported` says
-  the question's premise does not hold. It rests on at
+  the question's premise does not hold. An answer to a question gives its `result`: established
+  (a finding settles it), partial, bounded_negative (nothing found, within what was searched),
+  not_determinable (the evidence cannot say), out_of_scope, or premise_not_supported. A negative
+  is bounded: word it "No evidence of <what> was found in <which objects, which time range>", never
+  "<what> did not happen"; a bounded_negative or not_determinable on a material question cites a
+  coverage record naming the question. `asserts_absence: true` (it did not happen) is only for a
+  question that asks whether something exists, resting on coverage the harness found complete
+  whose detection opportunity says the event would have left a trace. It rests on at
   least one standing entry that names its question in `answers`; a superseded entry is cited only
   beside its correction, and a disputed one, or one resting on a failed job, only with
   `qualifies [{ref: "E-<seq>", why}]`. One answer stands per section: revise it with `supersedes`.
   The harness marks the hashes, paths, times, inodes, addresses and accounts in an answer that no
   cited entry holds: cite the entry that holds each, or record how it was derived.
 - `attest(seq, how, refs)` says you re-derived somebody else's entry: what you re-derived from which
-  sealed object, and what you only read. `dispute(seq, why, refs)` says why it does not hold;
+  sealed object, and what you only read. A material negative (a bounded_negative or
+  not_determinable answer, or the coverage behind it) is not trusted until another seat reviews it
+  with `attest(..., review: {detection, reproduced, other_route})`, each {done, text}: whether you
+  challenged the detection assumptions (would the event have left a trace here, given collection
+  and retention), reproduced a decisive check, and tried a materially different route, and what you
+  did, or why not. Whoever recorded the coverage cannot review it. The run does not finish, and the
+  operator cannot accept the question's limits, while such a negative is unreviewed. `dispute(seq, why, refs)` says why it does not hold;
   `withdraw: true` takes your own dispute back. Neither is for your own entries: correct those
   with `supersedes`. An answer resting on an entry that is superseded or disputed after it was
   written stops standing, and so does every answer resting on that one, until it is recorded
@@ -320,8 +350,17 @@ Done
   flags, the timeline or an answer, you are not the one who can certify them: a peer re-derives
   what they rest on from the sealed refs and records `attest` or `dispute` on each answer, and says
   on the board what they verified, not that the files exist.
-- `budget` reports live swarm spend, tokens and calls from Pi session usage. If over_budget or
-  out of time, call done with reason cannot_complete. Do not escalate. Do not leave the sandbox.
+- `budget` reports live swarm spend, tokens and calls from Pi session usage. What a cap does is the
+  run's stop policy, in SWARM.md. Under cap-pause (the default), at a cap or the wall clock the
+  harness steers you to post a checkpoint: what you have, what is open, your next step; two minutes
+  later the run pauses: no model call goes out and you are held where you are, nothing is lost,
+  until the operator extends the run and you are woken to go on from where you were. Under
+  cap-stop, when over_budget or out of time call done with reason cannot_complete. Do not escalate.
+  Do not leave the sandbox. A stop the harness proposes when nothing has yielded for a while is the
+  operator's to take; it is never yours, and it changes nothing until the operator acts.
+- A run can be resumed after it ended: the same sandbox, the same ledger, registers and board, in
+  a fresh session. Then start from inbox/<your agent id>/resume.md (your last hand-off note or
+  compaction summary, whole), then the register and the ledger; redo nothing the record holds.
 - SWARM.md may give each agent its own cap. Over it, the harness steers you to post what you have
   and call done(reason=agent_cap); a grace period later it stops you itself. The swarm goes on.
 

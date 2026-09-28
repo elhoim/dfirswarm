@@ -244,6 +244,10 @@ shell write to a file the watch left out is not detected or snapshotted.
 
 `attest(seq, how, refs?)` says an agent other than the entry's authors re-derived it: `how` is what was re-derived from which sealed object and what was only read, `refs` the objects (resolved). It is a version 2 line of `ledger/attestations.jsonl` (`{v: 2, act: "attest", seq, target: <the entry's hash>, by, at, how, refs}`, the `how` inside the hashed record); a second author recording an entry word for word is now `act: "same_content"`, the only act folded into `authors`. A version 1 line after a version 2 one, or a version or act the harness does not know, breaks that chain. `dispute(seq, why, refs?, withdraw?)` says why an entry does not hold, or with `withdraw: true` takes the agent's own dispute back; it is a line of its own chain, `ledger/disputes.jsonl` (`{v: 1, act: "dispute" | "withdraw", seq, target, by, at, why, refs}`). Neither is written for the agent's own entry (a wrong entry of one's own is corrected with `supersedes`) nor for a superseded one; an agent that disputes an entry withdraws before attesting it. Both are hub-written in a VM run, the line's hash on the hub's trace line, and re-render `ledger.md`. An answer resting on an entry that is superseded (its correction not cited) or disputed (and not qualified) after it was written no longer stands, and neither does any answer resting on that one: the mark is transitive, recomputed from the ledger and the acts whenever they are read (`answerProblems`).
 
+**Results and the negative bar** ([ADR 0013](adr/0013-a-negative-is-bounded-and-a-cap-pauses.md)). An answer to a question carries `result`: `established` (a standing finding settles it), `partial`, `bounded_negative` (nothing found within what was searched), `not_determinable` (the evidence cannot say), `out_of_scope` or `premise_not_supported`. It is required on a new question answer; one recorded before it reads as it always did, and `inconclusive: true` is taken as `not_determinable`. `established` and `partial` rest on a standing finding. The answers check maps the results to its outcomes: `established` and `premise_not_supported` answer the question; `bounded_negative` answers it only on a question that asks whether something exists, over coverage the hub found complete, reviewed, and is examination-limited otherwise; `not_determinable` is inconclusive; `partial` and `out_of_scope` are limited; its machine line names each result. A negative is bounded and says so: its value is refused when it says flatly that something did not happen ("did not happen", "never occurred", "did not take place", "is proven absent" and their like) unless it carries `asserts_absence: true`, which is taken only with `bounded_negative`, on an existence question, resting on a coverage record whose computed coverage is complete and whose `detection_opportunity.trace_expected` is `yes`. The report renders a bounded negative as "No evidence that … was found in <objects, time range>. This is a bounded negative …", with its coverage rows beside it.
+
+`kind=coverage` is what a negative was searched over, a ledger kind of its own rather than fields on `absence`: a `not_determinable` answer often has no absence, one negative spans several searches, and the review is of the whole. `value` is the proposition searched for, `refs` the objects (resolved like any refs), `answers` the question; `time_range`, `search_method`, `settings`, `coverage_actual`, `skipped`, `failures` (each bounded at 2000 characters and refused past it, never cut), `result_refs` (the entries and job outputs the search produced), `alternatives` (what is still open), and `detection_opportunity` `{trace_expected: yes | no | unknown, why}`. The hub adds `inventory_rev` (the sha256 of `inputs.json` and the catalogue's generation records) and computes `coverage` (`complete` or `partial`) with `coverage_detail`: every object the record names, by digest where it has one, against what the jobs behind `result_refs` (and the jobs its interpretations name) declared as their inputs; a job over everything covers each object and is said to. It counts objects and never judges relevance. These fields are refused on any other kind, and they are in the chained core when present. A `bounded_negative` or `not_determinable` answer on a material question cites a coverage record that names its question. A material negative (such an answer, or its coverage record) stands unreviewed until a seat that recorded neither attests it with `review` `{detection, reproduced, other_route}`, each `{done, text}`: whether it challenged the detection assumptions, reproduced a decisive check, and tried a materially different route, and what it did or why not; `review` is required on a negative and refused on anything else, and it counts as the critic's act. The ledger gate names `coverage_missing`, `negative_unreviewed` and `wording` defects, `ledger.md` and the report show "negative (unreviewed)" until then, and the finish line refuses `done` while one stands.
+
 The gate at done is the goal's (`scripts/check-answers.ts` without `--report`, the ledger gate `ledgerGate`): each named section (`--sections 1,2,summary,narrative`, a brief's questions with `--sections-in inputs/CASE.md`) has its standing answer, and a question's answer rests on a standing finding whose refs resolve now (bytes checked where the run sealed them), a complete search when the goal says the question asks whether something exists (`--existence`; for any other question a search documents the search and the section is examination-limited), or a limitation (examination-limited). A mechanical defect is a section with no answer, an answer that no longer stands on its support, an answer disputed, an answer no agent other than its author attested or disputed, or an open contradiction: two standing entries linked `contradicts`, weighed by no standing answer (one holding both, one of them as `contrary`) and named by no standing limitation (which names an entry by `rel` or by `E-<seq>` in what it says). Each is printed with what fixes it; the check fails while any is not named by a standing limitation (citing `E-<seq>` of the answer, or with `answers` naming a section left unanswered), so the first `done` is refused with the fix and the next passes once each defect left is named. A named defect is still reported, and the release counts it; a limitation permits shutdown, never makes an unsupported answer supported. The chains of the ledger, the attestations and the disputes must all verify. `--report` keeps the check goals used before version 4 (each section of the report rests on the ledger).
 
 ### Catalog, toolbox, quarantine (`catalog/`, `toolbox.json`, `work/extracted/`)
@@ -302,6 +306,8 @@ The swarm's open investigative work (`extensions/leads.ts`), kept beside the led
 
 A lead has an id (`L-<n>`), a title, why it matters, its origin (the entry that opened it, `record(..., opens)`, or the agent), its needs, the questions it serves, whether it is material (the creator says; default true), its holder and generation, its state and, once closed, its disposition and ref. A need is another lead's outcome (`L-3`, which is `L-3:resolved`, or `L-3:negative`) or a standing ledger entry (`E-12`); never a job. Needs are revised with `lead_link`, and a loop is refused. The states are open, active and closed; blocked is derived (a need not met). A disposition cites what it rests on: resolved an entry that stands, negative an absence, duplicate another lead, deferred and infeasible a limitation, needs_operator the words of the request (also a line in `operator-requests.jsonl`); withdrawn, the harness's alone, the question whose withdrawal closed it. A lead closed on an entry later superseded or disputed reopens. A lead names the questions it serves as `Q-<n>` (it must be in scope) or by the goal's own id.
 
+A lead under a question plans its routes: `routes: [{source, method}]` on `lead_open`, or added with `lead_link` (a `route` event), at most 20, each a source (an object ref or a path under `inputs/`, `store/` or `catalog/`, which the hub can follow; words alone are kept and said to be untrackable) and how it would be examined. The first lead under a question with none is warned; the first under a person's question must carry them; a negative close of a material lead, or of any lead under a material question, is refused without a plan. A negative close records `not_examined`: every planned route of the question's leads that no job of theirs declared (a job over everything examines each, and says so) and no coverage record names. A close held two minutes or less, after one job over one object, with no job that read everything, is a `quick_negative` `{held_ms, jobs, objects}`: a review cue, shown in `leads.md`, in the header until a peer attests the negative, and in the report.
+
 A claim is atomic and takes a new generation; `lead_open(take: true)` creates and claims in one event. A lead held by a peer is theirs until released, or until its holder shows as stale: silent past `SWARM_LEAD_STALE_SEC` (600) on the trace, with no job of its own still to finish and no compaction under way within twenty minutes, or marked done or dead. The first claim of a stale lead appends a `stale` event and tells the holder; a claim after `SWARM_LEAD_RECLAIM_GRACE_SEC` (60) takes it over with a new generation, and the old holder's close or release is refused. A turn that ended in a provider error frees nothing.
 
 Priority is a hint: how many leads and unanswered questions wait on a lead, transitively, then its age. What each agent is told is derived from the files, never stored as a message: `lead_ready` when every need of a lead it holds is met, a need that will not come, its lead marked stale, taken over or reopened, the operator's note, a change to a lead its lead needs, and, for the seat idle longest (in a `wait` for at least 60 s, holding no lead and no job), one wake per ready lead nobody holds. A `wait` wakes on the ones that matter; every `inbox` and `wait` delivery carries the header (open by priority, the agent's own, what is blocked on it, its jobs awaiting interpretation, the questions nobody holds a lead for, each notice), and the idle nudge and the compaction hand-off carry it too. Uncovered questions are derived: the goal's questions (its answers check's `--sections`) with no standing answer and no held lead.
@@ -328,13 +334,15 @@ A person's question is a hypothesis to test. The first agent lead under it carri
 
 `question_ask(id, what_is_unclear)` records a `clarify_ask` with a durable id (`C-<n>`) and writes an operator request of kind `clarification` to `operator-requests.jsonl`; the work state is `clarification_needed` until `swarm.sh question <run> clarify-reply Q-n C-n TEXT` (the asker, an examiner or the operator) answers it, which is posted to the asking seat and wakes it. A withdrawal needs a reason: the leads that served only that question close `withdrawn` (the harness's disposition, never an agent's), a material lead holding a standing finding goes to the triage queue instead (`scope L-n in_scope|excluded` keeps it or closes it), its follow-ups go to triage, and nothing in the ledger is touched. An amendment makes an answer recorded before it stale. An acceptance (`accept Q-n --as bounded|not_determinable --why W --expect-rev N`) is the operator's or an examiner's, is refused while a lead on the question is open, holds for that revision only, and limits the run.
 
+A question's evidential disposition follows its answer: whenever the header is built or the register acted on, a standing answer whose result differs from the last recorded is written as a `dispose` event (`result`, the answer's seq and hash), so the register says how each question stands without anyone copying it. `accept Q-n --as bounded|not_determinable` takes a question's limits for one revision; it is refused while a lead under the question is still open, and while its answer is a negative no other seat has reviewed (an acceptance never stands in for the review), and any acceptance makes the run `examination_limited`.
+
 The finish line reads the register in the same snapshot as the leads, and `stateRevision` includes its file: every material question in scope beyond the goal's own is held to an answer as the goal's answers check holds its questions (`open_question`, and the answer's own defects), a stale answer refuses `done` (`stale_answer`), an accepted question is examination-limited, and a proposed one holds nothing. The sentinel is written under the registers' lock against the revision the finish line was judged on: a question admitted after that line refuses the done (run it again), and one admitted after the sentinel is recorded `after_done`, a durable follow-up receipt for a later run.
 
 A person's act may be signed (`--sign`): the act's statement (`{namespace: dfirswarm-question, run, ev, target, act, origin}`, canonical) is signed with the enrolled key (ssh, FIDO or PKCS#11, the secret on fd 3 or the terminal) before anything is written, and a `sign` event follows the act naming its seq and hash; `swarm.sh question <run> verify` rebuilds each statement from the chain and checks it. An act with `--as` and no signature is a claim, and says so; an act with no `--as` is the OS account's, `enrolled: false`, never promoted. The operator's record carries each act twice: the attempt, and the outcome naming the event's seq and hash. Custody seals the chain beside the leads', unsigned as a whole; the package carries `questions.jsonl` and `questions.md`, verified and redacted like the leads.
 
 ### Until solved (`--until-solved`, `budget.json` `until_solved`)
 
-A run started `--until-solved` (or whose goal's metadata block says `until_solved: true`) has no wall clock (`wall_clock_minutes: 0`, and its VMs no maximum duration) and every cap advisory: `overCap`, `budgetPressure`, `agentPressure`, `modelPressure` and the model gateway read nothing as over, so spend is recorded and shown and nothing is stopped for it. `done` is refused until every goal question has a standing answer that is not inconclusive and does not rest on a limitation or a deferral, no material lead is open, no lead's job is uninterpreted and every answer has its critic's act: an examination-limited finish, a finish line that could not be run and an abandon (a vote or not; `markDone` refuses it too) are refusals, each naming the questions not answered and what blocks them. Only `swarm.sh stop` ends it. The idle watchdog posts a regroup to everyone when nothing has moved for `stall_minutes` (15; no new standing entry, no lead closed, no job committed): the questions not answered, the leads open and blocked, what waits on the operator and the evidence no standing entry cites, and again with backoff (twice the wait each time, at most four hours) while nothing moves (`regroup` on the trace, `traces/regroup.json`). It keeps nudging an idle agent past its three nudges, with backoff, and prompts one whose turn ended in a provider error again with backoff up to half an hour; each new operator request runs the `--notify` command.
+A run started `--until-solved` or `--stop operator` (or whose goal's metadata block says `until_solved: true` or `stop: operator`) has no wall clock (`wall_clock_minutes: 0`, and its VMs no maximum duration) and every cap advisory: `overCap`, `budgetPressure`, `agentPressure`, `modelPressure` and the model gateway read nothing as over, so spend is recorded and shown and nothing is stopped for it. `done` is refused until every goal question has a standing answer that is not inconclusive and does not rest on a limitation or a deferral, no material lead is open, no lead's job is uninterpreted and every answer has its critic's act: an examination-limited finish, a finish line that could not be run and an abandon (a vote or not; `markDone` refuses it too) are refusals, each naming the questions not answered and what blocks them. Only `swarm.sh stop` ends it. The idle watchdog posts a regroup to everyone when nothing has moved for `stall_minutes` (15; no new standing entry, no lead closed, no job committed): the questions not answered, the leads open and blocked, what waits on the operator and the evidence no standing entry cites, and again with backoff (twice the wait each time, at most four hours) while nothing moves (`regroup` on the trace, `traces/regroup.json`). It keeps nudging an idle agent past its three nudges, with backoff, and prompts one whose turn ended in a provider error again with backoff up to half an hour; each new operator request runs the `--notify` command.
 
 ### Budget (`budget`, `budget.json`)
 
@@ -360,16 +368,71 @@ Both caps are enforced the same way, and the clock is swarm-wide
 notices first):
 
 1. **Steer.** The agent over the line gets
-   `pi.sendUserMessage(…, {deliverAs: "steer"})` telling it to call
-   `done(reason=cannot_complete)`, and `system` announces it on the board once
+   `pi.sendUserMessage(…, {deliverAs: "steer"})` telling it to post a
+   checkpoint (`cap-pause`) or to call `done(reason=cannot_complete)`
+   (`cap-stop`), and `system` announces it on the board once
    for the whole swarm. With `--hard-kill` that session also gets
    `ctx.shutdown()`.
 2. **Grace.** Two minutes, measured from that one shared instant, so a restart
    or a slow agent does not restart the countdown.
-3. **Harness stop.** Still over? The harness writes `done/SWARM_DONE` itself
-   with `reason: cap` or `reason: wall_clock`, re-checking under the lock so a
-   raised cap cannot be overridden by a stale reading. A kill switch that lives
-   only in the prompt is not one.
+3. **Harness stop, or the pause.** Still over? Under `cap-stop` the harness
+   writes `done/SWARM_DONE` itself with `reason: cap` or `reason: wall_clock`
+   (outcome `stopped`), re-checking under the lock so a raised cap cannot be
+   overridden by a stale reading. Under `cap-pause` (the default) it writes
+   `paused` `{at, reason, detail}` into `budget.json` instead (`run_paused` on
+   the trace, a `stop` post, the notify command's `paused`): the extension's
+   `context` hook holds every model call while it stands (`pause_hold`, the
+   turn aborted without shutting the session), the model gateway refuses the
+   call (`run_paused`), the hub prompts no seat but with a stop steer, and the
+   watchdog nudges nobody. A kill switch that lives only in the prompt is not
+   one.
+
+The stop policy is `stop_policy` in `budget.json` (`cap-pause`, `cap-stop` or
+`operator`; a budget without it reads as `cap-stop`, or `operator` when it says
+`until_solved`). The steer's words follow it (`capSteerText`): under
+`cap-pause` a seat is asked to post a checkpoint, under `cap-stop` to call
+done. An extension (`swarm.sh extend`, or `cap`) that leaves room lifts the
+pause: `paused` moves to `pauses` with `resumed_at` and `resumed_by`, and the
+watchdog prompts each seat once (`resume_wake`). The wall clock counts only
+the time the run went: `wall_used_ms` holds what earlier stretches used and
+`wall_base_at` when the current one began, so a pause and the time a stopped
+run stood do not count. `resumes` lists each `swarm.sh resume` (`{at, by,
+from}`).
+
+A run's outcome (`runOutcome`) is read from its files: `done/STOPPED`
+(`{outcome: "stopped", by, at, why}`, written by `swarm.sh stop` on a run with
+no sentinel) is `stopped`; a sentinel says its own `outcome:`, and one the
+harness wrote at a cap or the wall clock is `stopped`; a `paused` budget is
+`paused`; otherwise the run has none yet. `stopped` is never `completed`.
+
+When nothing yields (no new finding, question disposition, acceptance or
+coverage record since the later of the stretch's start and the last one)
+across `SWARM_YIELD_JOBS` (20) committed jobs or `SWARM_YIELD_MINUTES` (30)
+minutes, the watchdog writes an operator request of kind `decision` (`D-<n>`,
+with the leads open and the questions unanswered) and `stop_proposed` on the
+trace (`traces/stop-policy.yield.json` keeps the proposals). It stops nothing.
+
+### Resume (`swarm.sh resume`, `done/history/`, the anchor's `resumes`)
+
+A run that ended goes on in the same sandbox, on the same chains
+(`scripts/resume.ts`, ADR 0013). What marked its end (`done/SWARM_DONE`,
+`done/STOPPED`, `done/ALL_AGENTS_DEAD`, `done/agents/`, `done/abandon/`) is
+moved whole to `done/history/<k>/`; the first segment's VM records to
+`vm/earlier-<k>/` and its kept disks to `earlier-<k>/` in the snapshots
+directory. Each seat's last hand-off note (`custom_message`
+`self-compact-handoff`) or compaction summary in its Pi sessions, whichever is
+later, is written whole to `inbox/<seat>/resume.md`. The custody anchor beside
+the run gets a `resumes` entry `{at, by, from, segment, heads}` with each
+chain's length and head (ledger, attestations, disputes, leads, questions,
+trace). Nothing recorded is rewritten: the ledger, the registers, the trace and
+the store journal are appended to. Custody's next verdict is a new one (the
+earlier kept beside it); `custody-verify` holds every earlier verdict the anchor
+names to the run as a prefix (`sealPrefix`: the line each chain's seal names is
+still at its place with its hash) and says whether a resume came after it. A
+release binds its chains as they were: `releases --verify` accepts the ledger,
+attestations and disputes it binds as a prefix of the run's only when the
+anchor records a resume after the release, and a changed line is never a
+prefix.
 
 Caps are checked at `turn_end`, again after each tool result (throttled), and
 on a timer — an agent that was steered and then sat in a long shell command
@@ -430,7 +493,12 @@ anywhere; the model's own trailer names the same file.
 | `done` | `done` tool | `{reason, output_file, created_sentinel}`, or `{ok:false, reason}` when the finish line refused it |
 | `cap_steer`, `wall_steer` | budget fold | `{reason:"cannot_complete", delivered}`, `args.hard_kill` |
 | `budget_unreadable` | budget fold, once per process | `{error}`: `budget.json` could not be parsed twice in a row, so the fold was refused and the file left alone; a `veto` post says the same on the board |
-| `harness_stop` | budget fold, past the grace period | `{created_sentinel:true}`, `args.reason` = `cap` / `wall_clock` |
+| `harness_stop` | budget fold, past the grace period | `{created_sentinel:true}`, `args.reason` = `cap` / `wall_clock` (`cap-stop`) |
+| `run_paused` | budget fold, the hub or the watchdog, past the grace period (`cap-pause`) | `{ok}`, `args.reason`, `args.via`: the pause written into `budget.json` |
+| `pause_hold` | the extension's `context` hook, while the run is paused | a model call held: the turn aborted without shutting the session |
+| `resume_wake` | the watchdog, once per lifted pause | `{ok}`, `args` = `{agent, resumed_at}`: the seat prompted to go on |
+| `stop_proposed` | the watchdog, when nothing has yielded for a window | `{ok, request}`, `args` = `{since, jobs, minutes}`: the operator request of kind `decision` it wrote |
+| `operator_action` with `command: "resume"` | `swarm.sh resume` | the resume, with the operator's own arguments, as the operator's audit holds it |
 | `playwright`, `browser_check` | Playwright tool | `{ok, title, errors, screenshot, text_chars, full_text?, blocked_requests, blocked_downloads}` or `{ok:false, error}`; `full_text` names the whole page text under `tool-output/` when the model received the first 8,000 characters; the two blocked counts are how many requests (navigation, redirect, subresource, fetch or WebSocket) the policy refused and how many downloads were cancelled, whose whole lists the tool returns to the agent. The screenshot is under `work/<agent>/.browser/`. |
 | `reap` | `scripts/reap.sh` | `{reaped:true, idle_seconds, last_activity, locks_released}` |
 | `reaped` | `protocol.ts reapStalledAgents` (fixture/in-process path) | `{ok, released[], dead_file}` |

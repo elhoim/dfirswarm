@@ -10,8 +10,11 @@
 #   {"event": "...", "run": "<id>", "at": "<UTC>", "detail": {...}}
 #
 # Events: finished, finish_failed, stop_incomplete, budget_cap, wall_clock,
-# evidence_changed, chain_broken, agent_dead, collector_unreachable,
-# hub_down. CMD gets 30 seconds. What it
+# paused (a cap-pause run held at a cap), extended (the operator gave it
+# room), operator_request (a lead needs the operator, a clarification, or a
+# stop proposed when nothing yields: kind decision), evidence_changed,
+# chain_broken, agent_dead, collector_unreachable, hub_down. CMD gets 30
+# seconds. What it
 # said on failure goes to <sandbox>/traces/notify.log. This script never
 # blocks its caller and never fails it: a notification is a courtesy, not a
 # step of the run.
