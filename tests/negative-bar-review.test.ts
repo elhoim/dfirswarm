@@ -25,7 +25,7 @@ import * as Q from "../extensions/questions.ts";
 import { checkLedgerAnswers } from "../scripts/check-answers.ts";
 import { finishGate } from "../scripts/finish-gate.ts";
 import { renderReportBodyMarkdown } from "../scripts/report-body.ts";
-import { A, coverage, F, job, ok, okq, planned, rec, refused, REVIEW, run, sha } from "./negative-bar-fixture.ts";
+import { A, coverage, ESTABLISHED, F, job, ok, okq, planned, rec, refused, REVIEW, run, sha } from "./negative-bar-fixture.ts";
 
 const operator: Q.Actor = { kind: "human", role: "operator", person: "tester@lab", enrolled: false, os_user: "tester", host: "lab", via: "cli", identity: "claimed" };
 
@@ -66,14 +66,14 @@ test("premise_not_supported rests on a finding; on a search alone it meets the n
   const { S, a0, a1, a2 } = await run();
   await planned(a0, "2");
   const absence = ok(await rec(a0, { kind: "absence", value: "an intrusion", source: "inputs/disk.E01", evidence: "a search", refs: ["job:j000001/hits.txt"], answers: ["2"] })).entry;
-  const base = { kind: "answer", section: "question:2", reasoning: `E-${absence.seq}`, ...A, result: "premise_not_supported" };
+  const base = { kind: "answer", section: "question:2", reasoning: `E-${absence.seq}`, ...A, confidence: "high", result: "premise_not_supported" };
   refused(await rec(a1, { ...base, value: "The question's premise does not hold" }), /premise_not_supported rests on a standing finding/);
   refused(await rec(a1, { ...base, value: "The intrusion did not happen" }), /worded as the event's absence \("did not happen"\)/);
   // With a finding that shows the premise false, the answer stands; "did not happen" is still the bar's.
   const finding = ok(await rec(a0, { kind: "finding", ...F, value: "The alert came from another host's log", source: "a log", evidence: "line 9", refs: ["job:j000002/hits.txt"], answers: ["2"] })).entry;
   refused(await rec(a1, { ...base, reasoning: `E-${finding.seq}`, value: "The intrusion did not happen: the alert was another host's" }), /worded as the event's absence/);
   const ans = ok(await rec(a1, { ...base, reasoning: `E-${finding.seq}`, value: "The premise does not hold: the alert came from another host's log" })).entry;
-  assert.ok((await P.attestEntry(a2, { seq: ans.seq, how: "read E-" + finding.seq + " again" })).ok);
+  assert.ok((await P.attestEntry(a2, { seq: ans.seq, how: "read E-" + finding.seq + " again", ...ESTABLISHED })).ok);
   const r = await checkLedgerAnswers(S, ["2"], ["2"]);
   assert.equal(r.outcomes["question:2"], "answered", r.lines.join("\n"));
   // A ledger written without these checks (an older harness) is held to the bar by the gate.

@@ -679,7 +679,7 @@ export async function readLeads(sandbox: string): Promise<LeadsPanelView> {
     requests,
     hosts: await operatorHosts(sandbox),
     coverage: { questions: snap.goal.questions, existence: snap.goal.existence, ...cov },
-    awaiting: await awaitingInterpretation(sandbox, snap.state, snap.jobs),
+    awaiting: await awaitingInterpretation(sandbox, snap.state, snap.jobs, snap.ledger),
   };
 }
 

@@ -101,7 +101,7 @@ export const LEAD_COMPACTION_BOUND_MS = 20 * 60_000;
 /** An idle seat is one that has waited at least this long, holding no active lead and no job. */
 export const IDLE_SEAT_MS = 60_000;
 
-export type LeadEventKind = "open" | "claim" | "release" | "close" | "link" | "reopen" | "stale" | "job" | "interpret" | "wake" | "note" | "route";
+export type LeadEventKind = "open" | "claim" | "release" | "close" | "link" | "reopen" | "stale" | "job" | "interpret" | "wake" | "note" | "route" | "route_review";
 
 export type LeadEvent = {
   v: 1;
@@ -128,9 +128,10 @@ export type LeadEvent = {
   /** A reopen's cause: superseded, disputed, operator, agent. */
   cause?: string;
   job?: string;
-  /** An interpretation: the ledger entry that is it, and that entry's kind. */
+  /** An interpretation: the ledger entry that is it, that entry's kind, and its hash (the interpretation is bound to that entry, never to its seq alone). */
   entry?: number;
   kind?: string;
+  entry_hash?: string;
   /** An interpretation: how the rest of a job's output was read, or why it was not. */
   rest?: string;
   /** A wake: the seat woken, and which open spell of the lead it was for. */
@@ -160,6 +161,15 @@ export type LeadEvent = {
   not_examined?: Array<{ source: string; method: string; why: string }>;
   /** A close negative: held this long or less, one job, one object (a review cue, hub-computed). */
   quick_negative?: { held_ms: number; jobs: number; objects: number };
+  /**
+   * A route review (B3): another seat's word on a lead closed deferred,
+   * infeasible or needs_operator, whether the route's limitation is still
+   * material now that its questions are disposed; bound to the close it
+   * reviews (its open spell and its ref).
+   */
+  material_now?: boolean;
+  /** A reopen by an agent: the lead's revision the reopener read (lead_reopen's expected_revision). */
+  expected_revision?: number;
   prev: string;
   hash: string;
 };
@@ -197,6 +207,10 @@ export type Lead = {
   /** When it closed negative: the planned routes nothing examined, and whether it was a quick negative. */
   not_examined?: Array<{ source: string; method: string; why: string }>;
   quick_negative?: { held_ms: number; jobs: number; objects: number };
+  /** Its revision: how many acts changed it (lead_reopen and lead_confirm name the one they read). */
+  rev: number;
+  /** Route reviews of its limiting closes, in order (B3). */
+  route_reviews: Array<{ at: string; by: string; material: boolean; why: string; cycle: number; ref: string }>;
 };
 
 export type LeadsState = {
@@ -204,8 +218,8 @@ export type LeadsState = {
   leads: Map<string, Lead>;
   /** The lead each job was run under. */
   jobLead: Map<string, string>;
-  /** Each job's interpretations, in order. */
-  interpretations: Map<string, Array<{ by: string; at: string; entry: number; kind: string; rest?: string }>>;
+  /** Each job's interpretations, in order, each bound to its entry's hash when the register recorded one. */
+  interpretations: Map<string, Array<{ by: string; at: string; entry: number; kind: string; rest?: string; hash?: string }>>;
   /** Wakes, by lead and open spell. */
   wakes: Map<string, string>;
   chain: { ok: boolean; broken_at: number | null; reason: string | null; head: string | null };
@@ -259,6 +273,9 @@ export async function readLeadEvents(sandboxRoot: string): Promise<{ events: Lea
   return { events, text };
 }
 
+/** The events that change a lead (its revision): not a wake, a stale mark, an interpretation or an offer's delivery. */
+const REVISING: ReadonlySet<string> = new Set(["open", "claim", "release", "close", "link", "reopen", "route", "job", "note", "route_review", "keep", "confirm", "handoff"]);
+
 /** The register's state, folded from its events in order. */
 export function foldLeads(events: LeadEvent[], chain: LeadsState["chain"] = { ok: true, broken_at: null, reason: null, head: events.at(-1)?.hash ?? null }): LeadsState {
   const leads = new Map<string, Lead>();
@@ -296,6 +313,8 @@ export function foldLeads(events: LeadEvent[], chain: LeadsState["chain"] = { ok
           ...(e.product ? { product: e.product } : {}),
           ...(e.acceptance ? { acceptance: e.acceptance } : {}),
           routes: [...(e.routes ?? [])],
+          rev: 1,
+          route_reviews: [],
         });
         break;
       }
@@ -366,7 +385,7 @@ export function foldLeads(events: LeadEvent[], chain: LeadsState["chain"] = { ok
         break;
       case "interpret":
         if (!e.job || typeof e.entry !== "number") break;
-        interpretations.set(e.job, [...(interpretations.get(e.job) ?? []), { by: e.by, at: e.at, entry: e.entry, kind: e.kind ?? "", ...(e.rest ? { rest: e.rest } : {}) }]);
+        interpretations.set(e.job, [...(interpretations.get(e.job) ?? []), { by: e.by, at: e.at, entry: e.entry, kind: e.kind ?? "", ...(e.rest ? { rest: e.rest } : {}), ...(e.entry_hash ? { hash: e.entry_hash } : {}) }]);
         break;
       case "wake":
         if (!e.lead || !e.to) break;
@@ -377,7 +396,14 @@ export function foldLeads(events: LeadEvent[], chain: LeadsState["chain"] = { ok
         l.notes.push({ at: e.at, by: e.by, text: e.text ?? "", ...(e.allow_host ? { allow_host: e.allow_host } : {}) });
         l.last_seq = e.seq;
         break;
+      case "route_review":
+        if (!l || typeof e.material_now !== "boolean") break;
+        l.route_reviews.push({ at: e.at, by: e.by, material: e.material_now, why: e.why ?? "", cycle: e.cycle ?? l.cycle, ref: e.ref ?? "" });
+        l.last_seq = e.seq;
+        break;
     }
+    // Its revision: every act that changes what the lead is or who has it.
+    if (l && e.ev !== "open" && REVISING.has(e.ev)) l.rev += 1;
   }
   return { events, leads, jobLead, interpretations, wakes, chain };
 }
@@ -413,7 +439,8 @@ export function ledgerView(entries: P.LedgerEntry[], disputes: P.LedgerDispute[]
     entries,
     bySeq: new Map(entries.map((e) => [e.seq, e])),
     replaced: P.supersededBy(entries),
-    disputed: new Set(P.standingDisputes(disputes).map((d) => d.target)),
+    // A correction of a disputed entry is disputed too until the dispute is answered (B18).
+    disputed: new Set(P.disputesInForce(entries, disputes).map((d) => d.target)),
   };
 }
 
@@ -703,7 +730,7 @@ export function unreadBytes(spans: Array<[number, number]> | undefined, total: n
   return Math.max(0, total - covered);
 }
 
-export type AwaitingJob = { job: string; agent: string; lead: string | null; why: string; unread_bytes?: number; total_bytes?: number; next_offset?: number };
+export type AwaitingJob = { job: string; agent: string; lead: string | null; why: string; unread_bytes?: number; total_bytes?: number; next_offset?: number; reinterpret?: true };
 
 /**
  * The jobs whose output waits for an interpretation: a command or tool job,
@@ -712,14 +739,25 @@ export type AwaitingJob = { job: string; agent: string; lead: string | null; why
  * how it was read or why not. A bare ledger citation does not count: an
  * interpretation is an entry recorded with `interprets` naming the job.
  */
-export async function awaitingInterpretation(sandboxRoot: string, s: LeadsState, jobs?: JobFacts[]): Promise<AwaitingJob[]> {
+export async function awaitingInterpretation(sandboxRoot: string, s: LeadsState, jobs?: JobFacts[], ledger?: LedgerView): Promise<AwaitingJob[]> {
   const all = jobs ?? (await readJobs(sandboxRoot));
   const reads = await stdoutReads(sandboxRoot);
   const out: AwaitingJob[] = [];
   for (const j of all) {
     if (!needsInterpretation(j) || !j.agent || j.agent === "system" || j.agent === "derived") continue;
     const lead = s.jobLead.get(j.id) ?? null;
-    const interps = s.interpretations.get(j.id) ?? [];
+    const recorded = s.interpretations.get(j.id) ?? [];
+    // An interpretation is bound to its entry (B13): it holds while that
+    // entry stands, as the entry it was recorded on. A correction carries it
+    // only when the correction interprets the job again; a superseded or
+    // disputed interpretation needs re-interpretation.
+    const valid = ledger ? recorded.filter((i) => interpretationStands(i, ledger).ok) : recorded;
+    if (recorded.length && !valid.length && ledger) {
+      const why = recorded.map((i) => { const st = interpretationStands(i, ledger); return `E-${i.entry}: ${st.ok ? "stands" : st.why}`; }).join("; ");
+      out.push({ job: j.id, agent: j.agent, lead, why: `its interpretation no longer stands (${why}): record what its output shows again, with interprets naming it (a correction that still holds says so by interpreting it too)`, reinterpret: true });
+      continue;
+    }
+    const interps = valid;
     const spans = reads.get(j.id)?.get(j.agent);
     let unread: { unread: number; total: number; next: number } | null = null;
     if (spans?.length) {
@@ -738,6 +776,16 @@ export async function awaitingInterpretation(sandboxRoot: string, s: LeadsState,
     }
   }
   return out;
+}
+
+/** Whether one interpretation of a job stands: its entry stands (not superseded, not disputed) and is the entry it was recorded on. */
+export function interpretationStands(i: { entry: number; hash?: string }, v: LedgerView): { ok: true } | { ok: false; why: string } {
+  const e = v.bySeq.get(i.entry);
+  if (!e) return { ok: false, why: `E-${i.entry} is not in the ledger` };
+  if (i.hash && (e.hash ?? P.ledgerHash(e, "genesis")) !== i.hash) return { ok: false, why: `E-${i.entry} is not the entry it was recorded on (another hash)` };
+  const st = entryStands(v, i.entry);
+  if (!st.ok) return { ok: false, why: `${st.why}, which does not interpret it` };
+  return { ok: true };
 }
 
 // --- liveness -----------------------------------------------------------------------------------
@@ -915,6 +963,9 @@ export type LeadView = {
   routes: NB.Route[];
   not_examined?: Array<{ source: string; method: string; why: string }>;
   quick_negative?: { held_ms: number; jobs: number; objects: number };
+  /** Its revision: lead_reopen and lead_confirm name the one they read. */
+  rev: number;
+  route_reviews?: Lead["route_reviews"];
 };
 
 export function viewLead(l: Lead, snap: LeadsSnapshot): LeadView {
@@ -951,6 +1002,8 @@ export function viewLead(l: Lead, snap: LeadsSnapshot): LeadView {
     routes: l.routes,
     ...(l.not_examined?.length ? { not_examined: l.not_examined } : {}),
     ...(l.quick_negative ? { quick_negative: l.quick_negative } : {}),
+    rev: l.rev,
+    ...(l.route_reviews.length ? { route_reviews: l.route_reviews } : {}),
   };
 }
 
@@ -1610,6 +1663,144 @@ export async function reopenLead(sandboxRoot: string, rawId: unknown, by: string
 }
 
 /**
+ * What keeps an agent from reopening a closed lead: the operator's
+ * restrictions (a lead the operator closed, one closed withdrawn with its
+ * question, one under a question withdrawn, excluded or waiting for triage,
+ * one in the operator's triage, one closed needs_operator the operator has
+ * not answered yet) and a duplicate of a lead that still carries the work.
+ * Null when it may be reopened.
+ */
+async function reopenRefusal(sandboxRoot: string, l: Lead, snap: LeadsSnapshot): Promise<string | null> {
+  if (!l.closed) return `${l.id} is not closed: claim it (lead_claim) to work it`;
+  if (l.closed.by === "operator") return `${l.id} was closed by the operator: only the operator reopens it (swarm.sh lead <run> reopen)`;
+  if (l.closed.disposition === "withdrawn") return `${l.id} was closed withdrawn with the question it served: a withdrawn question is the asker's, and only the operator brings it back`;
+  if (l.closed.disposition === "needs_operator") {
+    const answered = l.notes.some((n) => Date.parse(n.at) >= Date.parse(l.closed!.at));
+    if (!answered) return `${l.id} waits for the operator (${l.closed.ref}): the operator answers it and reopens it (swarm.sh lead <run> note); a reopen would not give what it asked for`;
+  }
+  if (l.closed.disposition === "duplicate") {
+    const other = snap.state.leads.get(l.closed.ref);
+    if (other && !other.closed) return `${l.id} is a duplicate of ${other.id}, which is still open${other.holder ? ` (held by ${other.holder})` : ""}: the work goes on there; claim ${other.id}, or post to its holder`;
+  }
+  const qs = snap.questions ?? (await import("./questions.ts").then((Q) => Q.questionsSnapshot(sandboxRoot)).catch(() => null));
+  for (const section of l.answers) {
+    const q = qs?.bySection.get(section);
+    if (!q) continue;
+    if (q.withdrawn) return `${l.id} serves ${q.id}, withdrawn by its asker: it is no lead's work`;
+    if (q.scope === "excluded") return `${l.id} serves ${q.id}, excluded from the case by the operator (${q.scope_why})`;
+    if (q.scope === "proposed") return `${l.id} serves ${q.id}, which waits for the operator's triage`;
+  }
+  if (qs?.state.triage.some((t) => t.lead === l.id && !t.resolved)) return `${l.id} is in the operator's triage: the operator decides whether it is the case's work`;
+  return null;
+}
+
+/**
+ * An agent reopens a closed lead (B4): with the revision it read, a reason,
+ * and optionally taking it in the same step. History is kept (a reopen
+ * event, cause agent); the previous holder and the leads that need it are
+ * told as on any reopen. It never overrides an operator's restriction
+ * (reopenRefusal) and never answers a dispute: a dispute in force stays in
+ * force, and the reopen says so.
+ */
+export async function agentReopenLead(ctx: P.SwarmContext, rawId: unknown, input: { expected_revision?: unknown; why?: string; take?: boolean }): Promise<LeadResult<{ lead: LeadView; disputes?: string[] }>> {
+  const ref = leadRef(rawId);
+  if (!ref.ok) return ref;
+  const why = bounded("why", input.why, LEAD_WHY_MAX, true);
+  if (!why.ok) return why;
+  if (input.take !== undefined && typeof input.take !== "boolean") return { ok: false, reason: "take is true or false" };
+  const expected = Number(input.expected_revision);
+  if (input.expected_revision === undefined || input.expected_revision === null || !Number.isInteger(expected) || expected < 1) return { ok: false, reason: "expected_revision is the lead's revision as you read it (leads L-<n> shows rev): a reopen names the state it saw" };
+  try {
+    const r = await transact<Fail | { ok: true; disputes: string[] }>(ctx.sandboxRoot, async (snap) => {
+      const l = snap.state.leads.get(ref.id);
+      if (!l) return { append: [], result: { ok: false as const, reason: `${ref.id} does not exist` } };
+      if (l.rev !== expected) return { append: [], result: { ok: false as const, reason: `${l.id} is at revision ${l.rev}, not ${expected}: it changed since you read it (${l.closed ? `closed ${l.closed.disposition} by ${l.closed.by}` : l.holder ? `held by ${l.holder}` : "open"}); read it again (leads ${l.id})` } };
+      const refused = await reopenRefusal(ctx.sandboxRoot, l, snap);
+      if (refused) return { append: [], result: { ok: false as const, reason: refused } };
+      // A reopen answers no dispute: the ones in force on what the lead cites, or on its questions' answers, stay.
+      const disputes = P.disputesInForce(snap.ledger.entries, await P.readDisputes(ctx.sandboxRoot).catch(() => [] as P.LedgerDispute[]));
+      const cited = new Set<string>();
+      const m = /^E-(\d+)$/.exec(l.closed!.ref);
+      if (m) {
+        const e = snap.ledger.bySeq.get(Number(m[1]));
+        if (e) cited.add(e.hash ?? P.ledgerHash(e, "genesis"));
+      }
+      for (const a of snap.ledger.entries) if (a.kind === "answer" && !snap.ledger.replaced.has(a.seq) && l.answers.some((x) => a.section === `question:${x}`)) cited.add(a.hash ?? P.ledgerHash(a, "genesis"));
+      const open = disputes.filter((d) => cited.has(d.target)).map((d) => `E-${snap.ledger.entries.find((e) => (e.hash ?? P.ledgerHash(e, "genesis")) === d.target)?.seq ?? "?"} disputed by ${P.disputeWords(d)}`);
+      const append: LeadDraft[] = [{ by: ctx.agentId, ev: "reopen", lead: l.id, why: why.value, cause: "agent", expected_revision: expected }];
+      if (input.take === true) append.push({ by: ctx.agentId, ev: "claim", lead: l.id, holder: ctx.agentId, generation: l.generation + 1 });
+      return { append, result: { ok: true as const, disputes: open } };
+    });
+    if (!r.ok) return r;
+    const snap = await leadsSnapshot(ctx.sandboxRoot);
+    return { ok: true, lead: viewLead(snap.state.leads.get(ref.id)!, snap), ...(r.disputes.length ? { disputes: r.disputes.map((d) => `${d}: a reopen does not answer it; it stays in force until the disputer withdraws it`) } : {}) };
+  } catch (err) {
+    return { ok: false, reason: (err as Error).message };
+  }
+}
+
+/**
+ * Another seat's review of a limiting route (B3): a lead closed deferred,
+ * infeasible or needs_operator, and whether its limitation is still
+ * material now. A route lead stops holding the finish line only when its
+ * questions are disposed under the bar and such a review says its
+ * limitation is no longer material (or the operator accepted the
+ * questions): never by itself, and never vacuously for a lead that names
+ * no question. Bound to the close it reviews; a reopen or a new close
+ * needs a new review. The seat that closed it, or held it, does not review
+ * it.
+ */
+export async function routeReview(ctx: P.SwarmContext, rawId: unknown, input: { material?: unknown; why?: string }): Promise<LeadResult<{ lead: LeadView }>> {
+  const ref = leadRef(rawId);
+  if (!ref.ok) return ref;
+  if (typeof input.material !== "boolean") return { ok: false, reason: "material is true or false: whether the route's limitation still matters to what the case concludes" };
+  const why = bounded("why", input.why, LEAD_WHY_MAX, true);
+  if (!why.ok) return why;
+  try {
+    const r = await transact<Fail | { ok: true }>(ctx.sandboxRoot, async (snap) => {
+      const l = snap.state.leads.get(ref.id);
+      if (!l) return { append: [], result: { ok: false as const, reason: `${ref.id} does not exist` } };
+      if (!l.closed || !LIMITING_DISPOSITIONS.has(l.closed.disposition)) return { append: [], result: { ok: false as const, reason: `${l.id} is ${l.closed ? `closed ${l.closed.disposition}` : "not closed"}: a route review is of a lead closed deferred, infeasible or needs_operator` } };
+      const holders = new Set(snap.state.events.filter((e) => e.lead === l.id && (e.ev === "claim" || (e.ev === "open" && e.holder))).map((e) => e.holder ?? e.by));
+      if (l.closed.by === ctx.agentId || holders.has(ctx.agentId)) return { append: [], result: { ok: false as const, reason: `you ${l.closed.by === ctx.agentId ? "closed" : "held"} ${l.id}: its route is reviewed by another seat` } };
+      return { append: [{ by: ctx.agentId, ev: "route_review", lead: l.id, material_now: input.material as boolean, why: why.value, cycle: l.cycle, ref: l.closed.ref }], result: { ok: true as const } };
+    });
+    if (!r.ok) return r;
+    const snap = await leadsSnapshot(ctx.sandboxRoot);
+    return { ok: true, lead: viewLead(snap.state.leads.get(ref.id)!, snap) };
+  } catch (err) {
+    return { ok: false, reason: (err as Error).message };
+  }
+}
+
+/** The standing route review of a lead's current close: the latest by another seat, for this open spell and this ref. */
+export function standingRouteReview(l: Lead): Lead["route_reviews"][number] | null {
+  if (!l.closed) return null;
+  const mine = l.route_reviews.filter((r) => r.cycle === l.cycle && r.ref === l.closed!.ref && r.by !== l.closed!.by);
+  return mine.at(-1) ?? null;
+}
+
+/**
+ * Whether a material lead closed deferred, infeasible or needs_operator
+ * still limits the run (A4, B3). It stops once every question it names is
+ * disposed under the bar (`disposed` says answered, or accepted by the
+ * operator) and either another seat's review holds its limitation no
+ * longer material, or the operator accepted every question it names (the
+ * acceptance is then the limit the run carries). A lead that names no
+ * question needs the review.
+ */
+export function routeLimitation(l: Lead, disposed: (section: string) => "answered" | "accepted" | null): { limiting: boolean; why: string } {
+  const review = standingRouteReview(l);
+  const states = l.answers.map((q) => ({ q, d: disposed(q) }));
+  const open = states.filter((x) => !x.d);
+  if (open.length) return { limiting: true, why: `its question${open.length === 1 ? "" : "s"} ${open.map((x) => `question:${x.q}`).join(", ")} ${open.length === 1 ? "is" : "are"} not disposed under the bar` };
+  if (states.length && states.every((x) => x.d === "accepted")) return { limiting: false, why: "the operator accepted the limits of every question it names" };
+  if (!review) return { limiting: true, why: states.length ? "its questions are disposed, and no other seat has reviewed whether its limitation is still material (route_review)" : "it names no question, and no other seat has reviewed whether its limitation is material (route_review)" };
+  if (review.material) return { limiting: true, why: `${review.by} holds its limitation still material: ${review.why}` };
+  return { limiting: false, why: `${review.by} holds its limitation no longer material: ${review.why}` };
+}
+
+/**
  * The operator's answer to a lead: recorded on it, and the lead reopened when
  * it was closed, so the work goes on with what the operator gave. A host the
  * operator allows goes into operator-hosts.jsonl, which the job service reads
@@ -1739,7 +1930,7 @@ export async function recordInterpretations(sandboxRoot: string, agent: string, 
         if (!j) return { append: [], result: { ok: false as const, reason: `${x.job} is not a job of this run` } };
         if (j.state !== "committed") return { append: [], result: { ok: false as const, reason: `${x.job} is ${j.state}: interpret it once it is committed` } };
       }
-      return { append: list.map((x) => ({ by: agent, ev: "interpret" as const, job: x.job, entry: entrySeq, kind: e.kind, ...(x.rest ? { rest: x.rest } : {}) })), result: { ok: true as const } };
+      return { append: list.map((x) => ({ by: agent, ev: "interpret" as const, job: x.job, entry: entrySeq, kind: e.kind, entry_hash: e.hash ?? P.ledgerHash(e, "genesis"), ...(x.rest ? { rest: x.rest } : {}) })), result: { ok: true as const } };
     });
     return r.ok ? { ok: true, interprets: list.map((x) => x.job) } : r;
   } catch (err) {
@@ -1897,7 +2088,7 @@ export async function leadsDigest(ctx: P.SwarmContext, o: { mark?: boolean } = {
   const open = ranked.filter((x) => x.status === "open");
   const mine = ranked.filter((x) => x.holder === me && x.status !== "closed");
   const blockedOnMe = ranked.filter((x) => x.status === "blocked" && x.holder !== me && x.needs.some((n) => !n.met && mine.some((m) => m.id === n.need.split(":")[0])));
-  const awaiting = (await awaitingInterpretation(ctx.sandboxRoot, snap.state, snap.jobs)).filter((a) => a.agent === me);
+  const awaiting = (await awaitingInterpretation(ctx.sandboxRoot, snap.state, snap.jobs, snap.ledger)).filter((a) => a.agent === me);
   const cov = questionCoverage(snap);
   const before = await readTold(ctx.sandboxRoot, me);
   const notices = noticesFor(me, before, snap);
@@ -1921,7 +2112,7 @@ export async function leadsDigest(ctx: P.SwarmContext, o: { mark?: boolean } = {
   lines.push(`Open, unheld, by priority: ${open.length ? open.map(lineOf).join("; ") : "none"}.`);
   lines.push(`Yours: ${mine.length ? mine.map((x) => `${x.id} ${x.status}${x.status === "blocked" ? ` on ${x.needs.filter((n) => !n.met).map((n) => n.need).join(", ")}` : ""}${x.stale ? " (MARKED STALE: act on it)" : ""}`).join("; ") : "none"}.`);
   lines.push(`Blocked on you: ${blockedOnMe.length ? blockedOnMe.map((x) => `${x.id} (${x.holder ?? "unheld"}) needs ${x.needs.filter((n) => !n.met).map((n) => n.need).join(", ")}`).join("; ") : "none"}.`);
-  lines.push(`Awaiting your interpretation: ${awaiting.length ? awaiting.map((a) => `${a.job}${a.lead ? ` (${a.lead})` : ""}${a.unread_bytes ? `: ${a.unread_bytes} of ${a.total_bytes} stdout bytes unread, job_status offset ${a.next_offset}` : ""}`).join("; ") : "none"}.`);
+  lines.push(`Awaiting your interpretation: ${awaiting.length ? awaiting.map((a) => `${a.job}${a.lead ? ` (${a.lead})` : ""}${a.reinterpret ? `: its interpretation no longer stands, interpret it again (${a.why})` : ""}${a.unread_bytes ? `: ${a.unread_bytes} of ${a.total_bytes} stdout bytes unread, job_status offset ${a.next_offset}` : ""}`).join("; ") : "none"}.`);
   lines.push(`Questions nobody holds a lead for, with no answer yet: ${cov.uncovered.length ? cov.uncovered.map((q) => `question:${q}${cov.open_leads_for[q] ? ` (open: ${cov.open_leads_for[q].join(", ")})` : ""}`).join(", ") : "none"}.`);
   if (o.mark) {
     await writeTold(ctx.sandboxRoot, me, toldNow(me, snap, Object.keys(before.held)));
@@ -2056,7 +2247,7 @@ export async function leadsView(ctx: P.SwarmContext, o: { view?: string; from?: 
     const l = snap.state.leads.get(one.id);
     if (!l) return { ok: false, reason: `${one.id} does not exist` };
     const history = snap.state.events.filter((e) => e.lead === one.id || (e.job && l.jobs.includes(e.job) && e.ev === "interpret")).map(({ prev: _p, hash: _h, v: _v, ...e }) => e);
-    const awaiting = (await awaitingInterpretation(ctx.sandboxRoot, snap.state, snap.jobs)).filter((a) => a.lead === one.id);
+    const awaiting = (await awaitingInterpretation(ctx.sandboxRoot, snap.state, snap.jobs, snap.ledger)).filter((a) => a.lead === one.id);
     return { ok: true, lead: viewLead(l, snap), history, awaiting_interpretation: awaiting };
   }
   if (!(LEADS_VIEWS as readonly string[]).includes(view)) return { ok: false, reason: `view is one of ${LEADS_VIEWS.join(", ")}, or a lead's id (L-3)` };
@@ -2065,7 +2256,7 @@ export async function leadsView(ctx: P.SwarmContext, o: { view?: string; from?: 
     return { ok: true, view, summary: digest.text, counts: digest.counts, chain: snap.state.chain.ok ? "intact" : `BROKEN at line ${snap.state.chain.broken_at} (${snap.state.chain.reason})` };
   }
   if (view === "jobs") {
-    const awaiting = await awaitingInterpretation(ctx.sandboxRoot, snap.state, snap.jobs);
+    const awaiting = await awaitingInterpretation(ctx.sandboxRoot, snap.state, snap.jobs, snap.ledger);
     return { ok: true, view, awaiting_interpretation: awaiting, note: "A job waits for an interpretation until an entry is recorded with interprets naming it (and, when its stdout was handed over in part, rest saying how the rest was read or why not). A lead's jobs hold the finish line; an agent's others are only shown." };
   }
   if (view === "questions") {
@@ -2130,7 +2321,7 @@ export async function leadDefects(sandboxRoot: string, snap?: LeadsSnapshot): Pr
       fix: `close it with lead_close ${l.id}: resolved citing the entry that settles it (E-<seq>), negative citing the absence, duplicate citing the lead it repeats, deferred or infeasible citing the limitation, or needs_operator saying what the operator must do`,
     });
   }
-  const awaiting = await awaitingInterpretation(sandboxRoot, s.state, s.jobs);
+  const awaiting = await awaitingInterpretation(sandboxRoot, s.state, s.jobs, s.ledger);
   for (const a of awaiting) {
     if (!a.lead) continue;
     const l = s.state.leads.get(a.lead);
@@ -2182,6 +2373,7 @@ export function renderLeadsMd(snap: LeadsSnapshot): string {
       if (x.quick_negative) lines.push(`- Quick negative (a review cue): held ${Math.round(x.quick_negative.held_ms / 1000)} s, ${x.quick_negative.jobs} job(s), ${x.quick_negative.objects} object(s)`);
       if (x.not_examined?.length) lines.push(`- Planned routes not examined: ${x.not_examined.map((r) => `${r.source} (${r.method}): ${r.why}`).join("; ")}`);
       for (const r of x.reopened) lines.push(`- Reopened at ${r.at} by ${r.by} (${r.cause}): ${r.why}`);
+      for (const r of x.route_reviews ?? []) lines.push(`- Route reviewed at ${r.at} by ${r.by}: limitation ${r.material ? "still material" : "no longer material"} (${r.why})`);
       for (const n of x.notes) lines.push(`- Operator note at ${n.at}: ${n.text}${n.allow_host ? ` (allowed host: ${n.allow_host})` : ""}`);
       lines.push("");
     }

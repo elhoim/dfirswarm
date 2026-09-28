@@ -6249,7 +6249,7 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
 
   # The tools each Pi is given, known before a prepared run returns: a
   # prepared VM run writes them into vm-spec.json.
-  local PI_TOOLS="read,bash,edit,write,post,inbox,wait,claim_file,release_file,claims,list_team,budget,file_history,file_restore,file_diff,publish_file,thread_open,thread_join,inputs,name,record,ledger,attest,dispute,lead_open,lead_claim,lead_release,lead_close,lead_link,leads,question_open,questions,question_ask,done"
+  local PI_TOOLS="read,bash,edit,write,post,inbox,wait,claim_file,release_file,claims,list_team,budget,file_history,file_restore,file_diff,publish_file,thread_open,thread_join,inputs,name,record,ledger,attest,dispute,lead_open,lead_claim,lead_release,lead_close,lead_link,leads,lead_reopen,route_review,question_open,questions,question_ask,done"
   # Pi's --tools is an allowlist by name, so a tool the extension registers is
   # invisible until it is named here. The skill tool exists only when the run
   # carries packs.

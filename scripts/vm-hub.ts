@@ -204,6 +204,8 @@ const RATE_LIMITS: Record<string, { bucket: string; capacity: number; perSecond:
   leadClose: { bucket: "ledger", capacity: 200, perSecond: 5 },
   leadLink: { bucket: "ledger", capacity: 200, perSecond: 5 },
   leadInterpret: { bucket: "ledger", capacity: 200, perSecond: 5 },
+  leadReopen: { bucket: "ledger", capacity: 200, perSecond: 5 },
+  routeReview: { bucket: "ledger", capacity: 200, perSecond: 5 },
   // The question register grows as the leads do.
   questionOpen: { bucket: "ledger", capacity: 200, perSecond: 5 },
   questionAsk: { bucket: "ledger", capacity: 200, perSecond: 5 },
@@ -257,7 +259,7 @@ const QUEUE_MAX = 192;
 export const SETTLE_MS_DEFAULT = 6_000;
 
 /** Calls the hub records on the trace when they succeed; every refusal is recorded. */
-const AUDITED = new Set(["markDone", "runFinishLine", "forgeTool", "restoreFileVersion", "claimName", "threadOpen", "publishFile", "recordEntry", "attestEntry", "disputeEntry", "jobSubmit", "catalogRequest", "leadOpen", "leadClaim", "leadRelease", "leadClose", "leadLink", "leadInterpret", "questionOpen", "questionAsk"]);
+const AUDITED = new Set(["markDone", "runFinishLine", "forgeTool", "restoreFileVersion", "claimName", "threadOpen", "publishFile", "recordEntry", "attestEntry", "disputeEntry", "jobSubmit", "catalogRequest", "leadOpen", "leadClaim", "leadRelease", "leadClose", "leadLink", "leadInterpret", "leadReopen", "routeReview", "questionOpen", "questionAsk"]);
 
 /**
  * The job service's settings, from the kickoff: the image workers boot, how
@@ -708,6 +710,8 @@ export function boardTable(hub: {
     },
     leadsDigest: (who, a) => L.leadsDigest(as(who), { mark: isObject(a[1]) && a[1].mark === true }),
     leadInterpret: (who, a) => L.recordInterpretations(S, who, Number(a[1]), Array.isArray(a[2]) ? (a[2] as L.InterpretInput[]) : []),
+    leadReopen: (who, a) => L.agentReopenLead(as(who), a[1], (isObject(a[2]) ? a[2] : {}) as { expected_revision?: unknown; why?: string; take?: boolean }),
+    routeReview: (who, a) => L.routeReview(as(who), a[1], (isObject(a[2]) ? a[2] : {}) as { material?: unknown; why?: string }),
     // The question register (extensions/questions.ts): the seat is the channel's.
     questionOpen: (who, a) => Q.questionOpen(as(who), (isObject(a[1]) ? a[1] : {}) as Q.ActInput),
     questionAsk: (who, a) => Q.questionAsk(as(who), a[1], a[2]),
@@ -2582,7 +2586,9 @@ function summarize(fn: string, result: unknown): Record<string, unknown> {
     case "leadClaim":
     case "leadRelease":
     case "leadClose":
-    case "leadLink": {
+    case "leadLink":
+    case "leadReopen":
+    case "routeReview": {
       // The lead's id, state and holder as the call left them, on the
       // harness's own line beside the register's chained event.
       const lead = isObject(result.lead) ? result.lead : {};

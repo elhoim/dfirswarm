@@ -70,7 +70,7 @@ export async function nudgeLine(sandbox: string, agent: string): Promise<string>
   const ready = ranked.find((v) => v.status === "open");
   if (ready) parts.push(`The ready lead the register ranks first is ${ready.id} "${ready.title}"${ready.priority ? ` (${ready.priority} waiting on it)` : ""}: lead_claim ${ready.id}.`);
   if (cov.uncovered.length) parts.push(`Question${cov.uncovered.length === 1 ? "" : "s"} nobody holds a lead for: ${cov.uncovered.map((q) => `question:${q}${cov.open_leads_for[q] ? ` (open: ${cov.open_leads_for[q].join(", ")})` : ""}`).join(", ")}.`);
-  const awaiting = (await L.awaitingInterpretation(sandbox, snap.state, snap.jobs)).filter((a) => a.agent === agent);
+  const awaiting = (await L.awaitingInterpretation(sandbox, snap.state, snap.jobs, snap.ledger)).filter((a) => a.agent === agent);
   if (awaiting.length) parts.push(`Jobs of yours awaiting interpretation: ${awaiting.map((a) => `${a.job}${a.unread_bytes ? ` (${a.unread_bytes} bytes unread)` : ""}`).join(", ")}: record what each shows with interprets.`);
   return parts.join(" ");
 }

@@ -27,6 +27,8 @@ after(async () => {
 
 export const sha = (s: string) => createHash("sha256").update(s).digest("hex");
 export const F = { basis: "observed", confidence: "high", indicates: "What the observation shows, and the step to it.", confidence_why: "Read directly from the object it cites." } as const;
+/** How a critic attests an answer to a question since B2: established, with the review part by part. */
+export const ESTABLISHED = { strength: "established", answer_review: { reproduced: "re-derived the cited finding from its sealed ref", read: "nothing beyond the cited entries", parts: [{ part: "the question as asked", established: true, why: "the cited finding shows it" }], inference: "the finding is the answer", alternatives: "none the evidence allows", other_family: { checked: false, text: "no other source family holds it in this fixture" } } } as const;
 export const A = { confidence: "medium", confidence_why: "The cited entries are direct.", alternatives_open: "none open", would_change: "a second source that disagrees" } as const;
 export const REVIEW = {
   detection: { done: true, text: "a logon on this host writes an event the log keeps for its whole range" },

@@ -61,7 +61,7 @@ function refused(err: unknown): boolean {
 type Pending = { fn: string; socket: Socket; answered: () => void; resolve: (value: unknown) => void; reject: (err: Error) => void };
 
 /** Calls that change the board, sent once more with the same request id when a link drops. */
-const RETRIED = new Set(["postMessage", "systemPost", "recordEntry", "attestEntry", "disputeEntry", "threadOpen", "claimName", "markDone", "publishFile", "forgeTool", "recordFileVersion", "jobSubmit", "catalogRequest", "jobStatus", "leadOpen", "leadClaim", "leadRelease", "leadClose", "leadLink", "leadInterpret", "questionOpen", "questionAsk"]);
+const RETRIED = new Set(["postMessage", "systemPost", "recordEntry", "attestEntry", "disputeEntry", "threadOpen", "claimName", "markDone", "publishFile", "forgeTool", "recordFileVersion", "jobSubmit", "catalogRequest", "jobStatus", "leadOpen", "leadClaim", "leadRelease", "leadClose", "leadLink", "leadInterpret", "leadReopen", "routeReview", "questionOpen", "questionAsk"]);
 
 /** Timings a test shortens; the defaults are the run's. */
 export type HubClientTimings = { partTimeoutMs?: number; writeStallMs?: number };
@@ -360,6 +360,7 @@ export const REMOTE_FUNCTIONS = [
   "leadLink",
   "leadOpen",
   "leadRelease",
+  "leadReopen",
   "leadsDigest",
   "leadsView",
   "listClaims",
@@ -385,6 +386,7 @@ export const REMOTE_FUNCTIONS = [
   "releaseAllOwned",
   "releaseFile",
   "restoreFileVersion",
+  "routeReview",
   "swarmDoneExists",
   "systemPost",
   "threadJoin",
@@ -406,6 +408,9 @@ export const leadLink = remote("leadLink", L.linkLead);
 export const leadsView = remote("leadsView", L.leadsView);
 export const leadsDigest = remote("leadsDigest", L.leadsDigest);
 export const leadInterpret = remote("leadInterpret", (ctx: P.SwarmContext, entry: number, items: L.InterpretInput[]) => L.recordInterpretations(ctx.sandboxRoot, ctx.agentId, entry, items));
+/** An agent reopens a closed lead (B4), and another seat reviews a limiting route (B3). */
+export const leadReopen = remote("leadReopen", L.agentReopenLead);
+export const routeReview = remote("routeReview", L.routeReview);
 /**
  * The question register (questions.ts): an agent opens a question, reads the
  * register, and asks what is unclear. Who asks is the channel's seat; the

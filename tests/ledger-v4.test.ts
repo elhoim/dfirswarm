@@ -65,10 +65,12 @@ after(async () => {
 });
 
 const sha = (s: string) => createHash("sha256").update(s).digest("hex");
+/** How a critic attests an answer to a question since B2: established, with the review part by part. */
+const EST = { strength: "established", answer_review: { reproduced: "re-derived the cited finding from its sealed ref", read: "nothing beyond the cited entries", parts: [{ part: "the question as asked", established: true, why: "the cited finding shows it" }], inference: "the finding is the answer", alternatives: "none the evidence allows", other_family: { checked: false, text: "no other source family holds it in this fixture" } } } as const;
 /** A finding's version 4 fields, observed. */
 const F = { basis: "observed", confidence: "high", indicates: "What the observation shows, and the step to it.", confidence_why: "Read directly from the object it cites." } as const;
 /** A question's answer's required fields: an established result (the negative bar says what a negative needs). */
-const Q = { result: "established", confidence: "medium", confidence_why: "The cited entries are direct.", alternatives_open: "none open", would_change: "a second source that disagrees" } as const;
+const Q = { result: "established", confidence: "high", confidence_why: "The cited entries are direct.", alternatives_open: "none open", would_change: "a second source that disagrees" } as const;
 
 async function job(root: string, id: string, file: string, text: string, record: Record<string, unknown>): Promise<void> {
   const staging = join(root, "..", `staging-${id}-${Math.random().toString(16).slice(2)}`);
@@ -486,7 +488,7 @@ test("the gate at done: the first done is refused and told each defect and its f
   assert.match(reason, /DEFECT: narrative has no answer/);
   assert.match(reason, /0 named by a limitation, 4 open/);
   // The critic acts, the author writes the narrative; two defects stay, and a limitation names each.
-  assert.ok((await attestEntry(a2, { seq: q1.seq, how: "re-derived row 1 of job:j000001/rows.txt" })).ok);
+  assert.ok((await attestEntry(a2, { seq: q1.seq, how: "re-derived row 1 of job:j000001/rows.txt", ...EST })).ok);
   const nar = ok(await rec(a3, { kind: "answer", section: "narrative", value: "It ran at 10:15.", reasoning: `E-${f.seq}` })).entry;
   assert.ok((await attestEntry(a2, { seq: nar.seq, how: "re-read E-1 against its ref" })).ok);
   ok(await rec(a1, { kind: "limitation", value: "Question 2 could not be answered: the second volume was not opened", source: "p2", evidence: "no key", reason: "unavailable", answers: ["2"] }));
@@ -554,7 +556,8 @@ test("the brief's questions are counted as the goals' awk counts them, and the c
   const f = ok(await rec(a0, { kind: "finding", ...F, value: "Powder.exe ran", source: "prefetch", evidence: "row 1", refs: ["job:j000001/rows.txt"], answers: ["1"] })).entry;
   const q = ok(await rec(a3, { kind: "answer", section: "question:1", value: "Powder.exe", reasoning: `E-${f.seq}`, ...Q })).entry;
   const s = ok(await rec(a3, { kind: "answer", section: "summary", value: "Powder.exe ran.", reasoning: `E-${q.seq}` })).entry;
-  for (const seq of [q.seq, s.seq]) assert.ok((await attestEntry(a2, { seq, how: "re-derived from job:j000001/rows.txt" })).ok);
+  assert.ok((await attestEntry(a2, { seq: q.seq, how: "re-derived from job:j000001/rows.txt", ...EST })).ok);
+  assert.ok((await attestEntry(a2, { seq: s.seq, how: "re-derived from job:j000001/rows.txt" })).ok);
   r = cli();
   assert.equal(r.status, 0, r.stdout);
   const usage = spawnSync("node", ["--experimental-strip-types", "--no-warnings", join(ROOT, "scripts", "check-answers.ts")], { cwd: root, encoding: "utf8" });

@@ -176,6 +176,8 @@ import {
   leadsView,
   leadsDigest,
   leadInterpret,
+  leadReopen,
+  routeReview,
   questionOpen,
   questionAsk,
   questionsView,
@@ -246,6 +248,8 @@ export const SWARM_TOOLS = new Set([
   "lead_close",
   "lead_link",
   "leads",
+  "lead_reopen",
+  "route_review",
   "question_open",
   "questions",
   "question_ask",
@@ -3217,6 +3221,7 @@ export default function (pi: ExtensionAPI) {
       "attest only what you re-derived from the sealed refs yourself, and say in how what you re-derived and what you only read.",
       "A critic attests or disputes every answer before the run ends; the author of an entry never attests it.",
       "A negative (a coverage record, or an answer bounded_negative or not_determinable) is attested with review: say whether you challenged the detection assumptions, reproduced a decisive check and tried a materially different route, and what you did or why not.",
+      "An answer to a question is attested with strength (established or best_candidate) and answer_review: what you reproduced and what you only read, each part the question asks and whether it is established, the inference, the alternatives still open, and whether another source family was checked. A best candidate you cannot break is still a best candidate: say so, and open the lead for the route would_change names.",
     ],
     parameters: Type.Object({
       seq: Type.Number({ description: "The entry's seq (standing, not your own)." }),
@@ -3232,10 +3237,28 @@ export default function (pi: ExtensionAPI) {
           { description: "Required when the entry is a negative (a coverage record, or an answer bounded_negative or not_determinable): whether you challenged the detection assumptions, reproduced a decisive check, tried a materially different route, each {done, text}: what you did, or why not. You recorded neither the answer nor its coverage record." },
         ),
       ),
+      strength: Type.Optional(
+        Type.Union([Type.Literal("established"), Type.Literal("best_candidate")], {
+          description: "Required on an answer to a question: established (the review shows the answer), or best_candidate (what the evidence best supports, not shown to be the answer; it does not satisfy the finish line). A medium or low confidence, a part you hold not established, or a route its would_change names that nothing took allows only best_candidate.",
+        }),
+      ),
+      answer_review: Type.Optional(
+        Type.Object(
+          {
+            reproduced: Type.String({ description: "What you re-derived yourself, from which sealed objects" }),
+            read: Type.String({ description: "What you only read (a peer's entry, a summary) without re-deriving it" }),
+            parts: Type.Array(Type.Object({ part: Type.String(), established: Type.Boolean(), why: Type.String() }), { description: "Each part the question asks, whether it is established, and why" }),
+            inference: Type.String({ description: "The step that connects the observations to the answer" }),
+            alternatives: Type.String({ description: "What the evidence still allows besides the answer, or none and why" }),
+            other_family: Type.Object({ checked: Type.Boolean(), text: Type.String() }, { description: "Whether a materially different source family was checked, which, or why not" }),
+          },
+          { description: "Required with strength on an answer to a question: the review part by part." },
+        ),
+      ),
     }),
     async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
       const started = Date.now();
-      const result = await attestEntry(ctxFrom(toolCtx.cwd, agentId), { seq: params.seq, how: params.how, ...(params.refs?.length ? { refs: params.refs } : {}), ...(params.review ? { review: params.review } : {}) });
+      const result = await attestEntry(ctxFrom(toolCtx.cwd, agentId), { seq: params.seq, how: params.how, ...(params.refs?.length ? { refs: params.refs } : {}), ...(params.review ? { review: params.review } : {}), ...(params.strength ? { strength: params.strength } : {}), ...(params.answer_review ? { answer_review: params.answer_review } : {}) });
       if (!result.ok) {
         await logEvent(toolCtx.cwd, agentId, "attest", params as Record<string, unknown>, { ok: false, reason: result.reason }, Date.now() - started);
         return { content: [{ type: "text" as const, text: `attest refused: ${result.reason}` }], details: { ok: false, reason: result.reason }, isError: true };
@@ -3399,6 +3422,43 @@ export default function (pi: ExtensionAPI) {
       const started = Date.now();
       const r = await leadLink(ctxFrom(toolCtx.cwd, agentId), params.id, { ...(params.add ? { add: params.add } : {}), ...(params.remove ? { remove: params.remove } : {}), ...(params.routes ? { routes: params.routes } : {}) });
       return leadAnswer(toolCtx.cwd, "lead_link", params as Record<string, unknown>, started, r as never);
+    },
+  });
+
+  pi.registerTool({
+    name: "lead_reopen",
+    label: "Reopen a lead",
+    description:
+      "Reopen a closed lead when the work it stood for is not done after all: with the revision you read (leads L-<n> shows rev), why, and take: true to hold it at once. Its history is kept and whoever held it is told. A lead the operator closed or restricted (a withdrawn, excluded or triaged question, a needs_operator the operator has not answered) is the operator's to reopen, and a duplicate of a lead still open is worked there. A reopen answers no dispute: one in force stays in force until the disputer withdraws it.",
+    promptSnippet: "Reopen a closed lead, with why",
+    parameters: Type.Object({
+      id: Type.String({ description: "L-<n>" }),
+      expected_revision: Type.Integer({ description: "The lead's revision as you read it (rev)" }),
+      why: Type.String({ description: "Why the work is not done: what is new, what the close missed" }),
+      take: Type.Optional(Type.Boolean({ description: "Hold it yourself at once" })),
+    }),
+    async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
+      const started = Date.now();
+      const r = await leadReopen(ctxFrom(toolCtx.cwd, agentId), params.id, { expected_revision: params.expected_revision, why: params.why, ...(params.take !== undefined ? { take: params.take } : {}) });
+      return leadAnswer(toolCtx.cwd, "lead_reopen", params as Record<string, unknown>, started, r as never);
+    },
+  });
+
+  pi.registerTool({
+    name: "route_review",
+    label: "Review a limiting route",
+    description:
+      "Say whether a route that could not be taken still matters: a lead closed deferred, infeasible or needs_operator limits the run until its questions are answered under the bar and another seat (not its closer or holder) holds its limitation no longer material, or the operator accepts the questions' limits. material: false says the route's limitation no longer changes what the case concludes (say why: which answer settles its question without it); material: true says it still does. A failed route stays failed in the record either way.",
+    promptSnippet: "Review whether a limiting route still matters",
+    parameters: Type.Object({
+      id: Type.String({ description: "L-<n>, closed deferred, infeasible or needs_operator" }),
+      material: Type.Boolean({ description: "Whether its limitation still matters to what the case concludes" }),
+      why: Type.String({ description: "Why: the answer that settles its question without it, or what it could still change" }),
+    }),
+    async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
+      const started = Date.now();
+      const r = await routeReview(ctxFrom(toolCtx.cwd, agentId), params.id, { material: params.material, why: params.why });
+      return leadAnswer(toolCtx.cwd, "route_review", params as Record<string, unknown>, started, r as never);
     },
   });
 

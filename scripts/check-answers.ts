@@ -62,6 +62,7 @@ import { fileURLToPath } from "node:url";
 import {
   answerSection,
   attestationAct,
+  attestEstablishes,
   briefQuestions,
   ledgerGate,
   negativeReview,
@@ -302,22 +303,24 @@ export async function sectionBars(S: string, existence: readonly string[] = []):
  * limitation excuses. An answer recorded before results reads as it always
  * did (a limitation limits, a search answers only an existence question).
  */
-export async function checkLedgerAnswers(sandbox: string, wanted: string[], existence: readonly string[] = []): Promise<{ ok: boolean; lines: string[]; outcomes: Record<string, LedgerOutcome>; results: Record<string, string>; defects: LedgerDefect[]; withdrawn: Record<string, string> }> {
+export async function checkLedgerAnswers(sandbox: string, wanted: string[], existence: readonly string[] = []): Promise<{ ok: boolean; lines: string[]; outcomes: Record<string, LedgerOutcome>; results: Record<string, string>; defects: LedgerDefect[]; withdrawn: Record<string, string>; best_candidate: string[] }> {
   const S = resolve(sandbox);
   const outcomes: Record<string, LedgerOutcome> = {};
   const results: Record<string, string> = {};
+  // The sections whose answer every review holds a best candidate only (B2): limited, never answered.
+  const bestCandidate: string[] = [];
   // A goal question the question register holds as withdrawn is no longer
   // one the run must answer: the goal keeps it, the register says who took
   // it off and why, and this check names it instead of requiring it.
   const withdrawn: Record<string, string> = {};
   const text = await readFile(join(S, "ledger", "entries.jsonl"), "utf8").catch(() => "");
   const chain = verifyLedgerChain(text);
-  if (!chain.ok) return { ok: false, lines: [`the ledger's chain is broken at line ${chain.broken_at} (${chain.reason}): no answer can rest on it`], outcomes, results, defects: [], withdrawn };
+  if (!chain.ok) return { ok: false, lines: [`the ledger's chain is broken at line ${chain.broken_at} (${chain.reason}): no answer can rest on it`], outcomes, results, defects: [], withdrawn, best_candidate: bestCandidate };
   // The acts are chains of their own: a broken one cannot say who checked what.
   for (const [rel, verify] of [[LEDGER_ATTESTATIONS, verifyAttestationChain], [LEDGER_DISPUTES, verifyDisputeChain]] as const) {
     const t = await readFile(join(S, rel), "utf8").catch(() => "");
     const v = verify(t);
-    if (!v.ok) return { ok: false, lines: [`${rel}'s chain is broken at line ${v.broken_at} (${v.reason}): the acts on the answers cannot be read`], outcomes, results, defects: [], withdrawn };
+    if (!v.ok) return { ok: false, lines: [`${rel}'s chain is broken at line ${v.broken_at} (${v.reason}): the acts on the answers cannot be read`], outcomes, results, defects: [], withdrawn, best_candidate: bestCandidate };
   }
   const entries = await readLedger(S);
   const attestations = await readAttestations(S);
@@ -325,7 +328,7 @@ export async function checkLedgerAnswers(sandbox: string, wanted: string[], exis
   const sections: string[] = [];
   for (const w of wanted) {
     const sec = answerSection(w);
-    if (!sec.ok) return { ok: false, lines: [`--sections: ${sec.reason}`], outcomes, results, defects: [], withdrawn };
+    if (!sec.ok) return { ok: false, lines: [`--sections: ${sec.reason}`], outcomes, results, defects: [], withdrawn, best_candidate: bestCandidate };
     if (!sections.includes(sec.section)) sections.push(sec.section);
   }
   const lines: string[] = [];
@@ -355,8 +358,9 @@ export async function checkLedgerAnswers(sandbox: string, wanted: string[], exis
       lines.push(`${section}: no answer${named.length ? `; examination-limited by ${named.map((l) => `#${l.seq} (${l.reason ?? "no reason"})`).join(", ")}` : ""}`);
       continue;
     }
+    const reviews = attestations.filter((x) => attestationAct(x) === "attest" && x.target === a.hash && !a.authors.includes(x.by));
     const acts = [
-      ...attestations.filter((x) => attestationAct(x) === "attest" && x.target === a.hash && !a.authors.includes(x.by)).map((x) => `attested by ${x.by}`),
+      ...reviews.map((x) => `attested by ${x.by}${x.strength === "best_candidate" ? " (best candidate)" : x.strength === "established" ? " (established)" : ""}`),
       ...disputes.filter((d) => d.act === "dispute" && d.target === a.hash).map((d) => `disputed by ${d.by}`),
     ];
     const actsText = acts.length ? `; ${[...new Set(acts)].join(", ")}` : "";
@@ -443,6 +447,15 @@ export async function checkLedgerAnswers(sandbox: string, wanted: string[], exis
       else if ((result === "established" || result === "premise_not_supported") && limited) [outcome, said] = ["limited", `examination-limited, #${a.seq} (${resultWords(result)}) resting only on ${limited}`];
     } else if (rests && !a.inconclusive) [outcome, said] = ["answered", `answered by #${a.seq}, resting on ${rests}`];
     else if (rests || limited) [outcome, said] = [a.inconclusive ? "inconclusive" : "limited", `${a.inconclusive ? "inconclusive" : "examination-limited"}, #${a.seq} resting on ${rests ?? limited}`];
+    // A review that holds the answer a best candidate only does not make it
+    // answered (B2): with no review that holds it established, it limits
+    // the run, and an operator-stopped run waits for the route or for the
+    // operator's acceptance.
+    if (outcome === "answered" && reviews.length && !reviews.some(attestEstablishes) && !NEGATIVE_RESULTS.has(result ?? "")) {
+      bestCandidate.push(section);
+      outcome = "limited";
+      said = `examination-limited: a best candidate, not established (every review holds #${a.seq} a best candidate: ${[...new Set(reviews.map((x) => x.by))].join(", ")}${reviews.some((x) => x.capped?.length) ? `; ${[...new Set(reviews.flatMap((x) => x.capped ?? []))].join("; ")}` : ""}); ${said}`;
+    }
     if (outcome !== "unanswered") {
       outcomes[section] = outcome;
       lines.push(`${section}: ${said}${actsText}`);
@@ -466,7 +479,7 @@ export async function checkLedgerAnswers(sandbox: string, wanted: string[], exis
   const count = (o: LedgerOutcome) => Object.values(outcomes).filter((x) => x === o).length;
   lines.push(`sections: ${count("answered")} answered, ${count("limited")} examination-limited, ${count("inconclusive")} inconclusive, ${count("unanswered")} unanswered; ${defects.length} defect${defects.length === 1 ? "" : "s"}, ${defects.length - open.length} named by a limitation, ${open.length} open`);
   if (open.length) lines.push("The run ends once each open defect is fixed, or named by a standing limitation (citing E-<seq> of the answer, or with answers=[<section>] for a missing one); a named defect is still a defect, and the release counts it. The negative bar's defects (coverage_missing, coverage_stale, negative_unreviewed, wording) are fixed, never named.");
-  return { ok: open.length === 0, lines, outcomes, results, defects, withdrawn };
+  return { ok: open.length === 0, lines, outcomes, results, defects, withdrawn, best_candidate: bestCandidate };
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
@@ -504,6 +517,6 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   // can still be told apart as examination-limited (await-done.sh hands it
   // back with the check's row, passing or not).
   const named = "defects" in r ? r.defects.filter((d) => d.named_by.length).map((d) => `${d.what} (named by ${d.named_by.map((n) => `#${n}`).join(", ")})`) : [];
-  process.stdout.write(`${ANSWERS_MARK} ${JSON.stringify({ outcomes: r.outcomes, ...("results" in r ? { results: r.results } : {}), ...("withdrawn" in r && Object.keys(r.withdrawn).length ? { withdrawn: r.withdrawn } : {}), named, existence, mode: report ? "report" : "ledger" })}\n`);
+  process.stdout.write(`${ANSWERS_MARK} ${JSON.stringify({ outcomes: r.outcomes, ...("results" in r ? { results: r.results } : {}), ...("withdrawn" in r && Object.keys(r.withdrawn).length ? { withdrawn: r.withdrawn } : {}), ...("best_candidate" in r && r.best_candidate.length ? { best_candidate: r.best_candidate } : {}), named, existence, mode: report ? "report" : "ledger" })}\n`);
   process.exit(r.ok ? 0 : 1);
 }
