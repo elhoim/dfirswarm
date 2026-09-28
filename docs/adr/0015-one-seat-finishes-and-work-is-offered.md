@@ -131,7 +131,15 @@ have lost its provider.
    with no word on it included, ADR 0016's partial_output), no stale answer,
    no addition committed and not yet applied; under the operator's stop
    policy also
-   no best candidate and no route limitation. It is in every header, with the
+   no best candidate and no route limitation. A disposition that only
+   limits the run (partial, not determinable, a bounded negative, an
+   acceptance) never holds it, under any policy: the done ends the run
+   examination-limited on it (the finished c10 pilot's readiness held on
+   "question:5 is not determinable" to the end, and its register read
+   "never ready" while the coordinator's done passed). A done that passes
+   while readiness has not turned ready records the ready state itself,
+   in the transaction that writes the sentinel (`at_done`), so the tail
+   from readiness is measured and the disagreement is on the record. It is in every header, with the
    coordinator and what this seat does, and posted once each time it turns
    ready or back (`readiness` events). It is cheap and generic; the goal's
    own checks run only at the coordinator's done.

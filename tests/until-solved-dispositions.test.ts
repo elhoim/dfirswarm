@@ -14,6 +14,7 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import * as FIN from "../extensions/finish.ts";
 import * as P from "../extensions/protocol.ts";
 import * as L from "../extensions/leads.ts";
 import { checkLedgerAnswers } from "../scripts/check-answers.ts";
@@ -105,6 +106,28 @@ test("under --stop operator, a not_determinable answer on a coverage record anot
   await P.writeBudget(r.S, { ...b, stop_policy: "cap-pause", until_solved: false });
   const capped = await finish(r.S);
   assert.equal(capped.verdict.proceed && capped.verdict.outcome, "examination_limited");
+});
+
+test("under --stop operator, readiness turns ready on the dispositions the done ends on: a reviewed not_determinable limits the run and holds nothing; a best candidate still holds it (the finished c10 pilot's readiness never turned ready)", async () => {
+  const r = await operatorRun();
+  await answerOne(r);
+  const q2 = await notDeterminable(r);
+  assert.ok((await P.attestEntry(r.a2, { seq: q2.cov.seq, how: "ran the search again from job:j000006", review: REVIEW })).ok);
+  const f = await finish(r.S);
+  assert.equal(f.verdict.proceed && f.verdict.outcome, "examination_limited", JSON.stringify(f.verdict));
+  const ready = await FIN.readiness(r.S);
+  assert.deepEqual([ready.ready, ready.items], [true, []], "the done passes here, so readiness is ready");
+  assert.ok(ready.limited.some((l) => /question:2 is not determinable/.test(l)), JSON.stringify(ready.limited));
+  // A best candidate is no disposition: it holds readiness under the operator's stop, as it holds the done.
+  const best = await operatorRun();
+  await answerOne(best, "best_candidate");
+  const b2 = await notDeterminable(best);
+  assert.ok((await P.attestEntry(best.a2, { seq: b2.cov.seq, how: "ran the search again from job:j000006", review: REVIEW })).ok);
+  assert.equal((await finish(best.S)).verdict.proceed, false);
+  const held = await FIN.readiness(best.S);
+  assert.equal(held.ready, false);
+  assert.ok(held.items.some((i) => /question:1 is a best candidate, not established/.test(i)), JSON.stringify(held.items));
+  assert.ok(!held.items.some((i) => /question:2 is not determinable/.test(i)), "the disposition itself holds nothing");
 });
 
 test("under --stop operator, an unreviewed negative, a quick negative nobody attested, a coverage record that no longer stands and a best candidate each hold the done", async () => {

@@ -3143,7 +3143,7 @@ Collective finished. Presence of this file is the clock. Call done and stop.
       return createSentinel(ctx.sandboxRoot, sentinelText);
     });
   };
-  const created = ending ? await (await import("./finish.ts")).finishTransaction(ctx.sandboxRoot, ctx.agentId, args.finish, writeDone) : await writeDone();
+  const created = ending ? await (await import("./finish.ts")).finishTransaction(ctx.sandboxRoot, ctx.agentId, args.finish, writeDone, Date.now(), { ...(args.revision ? { revision: args.revision } : {}), ...(outcome ? { outcome } : {}) }) : await writeDone();
 
   await releaseAllOwned(ctx);
 

@@ -277,6 +277,47 @@ test("a result post that only restates an answer's own revision is covered by th
   assert.deepEqual(late.map((x) => x.id), [adding.id], `the restating post #${restating.id} is covered by its revision`);
 });
 
+test("a done that passes while readiness had not turned ready records the ready state in the transaction that writes the sentinel; the metrics measure the tail from it and say it was the done's (the finished c10 pilot: never ready)", async () => {
+  const { S, a0, a2 } = await run();
+  // Readiness not ready, and recorded so: a lead is open.
+  assert.ok((await L.openLead(a2, { title: "A late avenue", why: "found", take: true })).ok);
+  await F.finishHeader(S, "a0");
+  assert.deepEqual((await F.readFinish(S)).events.filter((e) => e.ev === "readiness").map((e) => e.ready), [false]);
+  await publish(S, "a0", "# report\n");
+  await F.finishTurn(a0, { output_file: "work/report.md" });
+  // The coordinator's done passes its finish line (the caller ran it) and writes the sentinel.
+  const revision = (await P.stateRevision(S)).revision;
+  const r = await P.markDone(a0, { reason: "finished", outputFile: "work/report.md", finish: { holder: "a0", generation: 1 }, revision, outcome: "examination_limited" });
+  assert.equal("created_sentinel" in r && r.created_sentinel, true);
+  const st = await F.readFinish(S);
+  const last = st.events.filter((e) => e.ev === "readiness").at(-1)!;
+  assert.deepEqual([last.ready, last.at_done, last.revision, last.by], [true, true, revision, "system"]);
+  assert.match(last.why ?? "", /a0's done passed the finish line \(examination_limited\) while readiness had not turned ready/);
+  assert.equal(st.readiness?.ready, true);
+  assert.equal(st.chain.ok, true);
+  const { measureRun } = await import("../scripts/metrics.ts");
+  const m = await measureRun(S);
+  assert.equal(m.tail.ready_source, "done", JSON.stringify(m.tail));
+  assert.equal(m.tail.minutes_from_ready, 0);
+  const { metricsText } = await import("../scripts/metrics.ts");
+  assert.match(metricsText(m), /from ready \(recorded by the done: readiness had not turned ready before it passed\)/);
+  // A later done (the sentinel stands) writes nothing more.
+  await P.markDone(a2, { reason: "finished", outputFile: "work/report.md" });
+  assert.equal((await F.readFinish(S)).events.filter((e) => e.ev === "readiness").length, 2);
+});
+
+test("a done whose readiness had turned ready records nothing more at the sentinel", async () => {
+  const { S, a0 } = await run();
+  await publish(S, "a0", "# report\n");
+  await F.finishHeader(S, "a0");
+  assert.equal((await F.readFinish(S)).readiness?.ready, true, "nothing holds it");
+  await F.finishTurn(a0, { output_file: "work/report.md" });
+  const r = await P.markDone(a0, { reason: "finished", outputFile: "work/report.md", finish: { holder: "a0", generation: 1 } });
+  assert.equal("created_sentinel" in r && r.created_sentinel, true);
+  const ready = (await F.readFinish(S)).events.filter((e) => e.ev === "readiness");
+  assert.deepEqual(ready.map((e) => [e.ready, e.at_done ?? false]), [[true, false]]);
+});
+
 test("an answer's fingerprint is computed as an earlier harness recorded it: the same keys in the same order, so a summary's symbolic citation recorded before still stands (a reordering took down every summary of the finished c10 pilot)", () => {
   const e = {
     v: 4,

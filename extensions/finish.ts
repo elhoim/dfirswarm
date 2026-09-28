@@ -86,6 +86,8 @@ export type FinishEvent = {
   how?: "folded" | "not_material";
   /** readiness: whether the registers say the finish line is met, at which revision, and what holds it. */
   ready?: boolean;
+  /** readiness: recorded by the done that wrote the sentinel, readiness not having turned ready before it (finishTransaction). */
+  at_done?: boolean;
   revision?: string;
   items?: string[];
   /** phase: the finish being assembled by its coordinator (another seat's answer revision needs material), or open again. */
@@ -104,7 +106,7 @@ export type FinishState = {
   lease: { holder: string; generation: number; at: string; why: string; report: string | null; since: number | null; from?: string } | null;
   acks: Array<{ seq: number; at: string; by: string; digest: string; verdict: "no_objection" | "objection"; why: string; report?: string }>;
   resolutions: Array<{ seq: number; at: string; by: string; post?: number; ack?: number; how: "folded" | "not_material"; why: string; digest: string | null }>;
-  readiness: { ready: boolean; revision: string; items: string[]; at: string } | null;
+  readiness: { ready: boolean; revision: string; items: string[]; at: string; at_done?: boolean } | null;
   /** The finish phase as last recorded: assembling (by whom, since when) or open. */
   phase: { phase: "assembling" | "open"; at: string; holder: string | null } | null;
   checks: Array<{ seq: number; at: string; by: string; revision: string; proceed: boolean; outcome?: string; reason?: string; run?: unknown }>;
@@ -140,7 +142,7 @@ export async function readFinish(sandboxRoot: string): Promise<FinishState> {
         if (e.how) st.resolutions.push({ seq: e.seq, at: e.at, by: e.by, ...(e.post !== undefined ? { post: e.post } : {}), ...(e.ack !== undefined ? { ack: e.ack } : {}), how: e.how, why: e.why ?? "", digest: e.digest ?? null });
         break;
       case "readiness":
-        st.readiness = { ready: e.ready === true, revision: e.revision ?? "", items: e.items ?? [], at: e.at };
+        st.readiness = { ready: e.ready === true, revision: e.revision ?? "", items: e.items ?? [], at: e.at, ...(e.at_done ? { at_done: true } : {}) };
         break;
       case "phase":
         if (e.phase === "assembling" || e.phase === "open") st.phase = { phase: e.phase, at: e.at, holder: e.holder ?? null };
@@ -325,8 +327,8 @@ export function lateWords(x: LateItem): string {
  * `write` too: it makes the seat unavailable, and a takeover waits for the
  * lock until the sentinel is written or the marker gone.
  */
-export async function finishTransaction<T>(sandboxRoot: string, agent: string, expected: { holder: string; generation: number } | undefined, write: () => Promise<T>, now = Date.now()): Promise<T> {
-  return withFinish(sandboxRoot, async () => {
+export async function finishTransaction<T>(sandboxRoot: string, agent: string, expected: { holder: string; generation: number } | undefined, write: () => Promise<T>, now = Date.now(), at?: { revision?: string; outcome?: string }): Promise<T> {
+  return withFinish(sandboxRoot, async (held) => {
     const lease = (await readFinish(sandboxRoot)).lease;
     if (expected) {
       if (!lease || expected.holder !== agent || lease.holder !== expected.holder || lease.generation !== expected.generation) {
@@ -339,7 +341,17 @@ export async function finishTransaction<T>(sandboxRoot: string, agent: string, e
       const late = await lateItems(sandboxRoot, lease.holder, lease.report);
       if (late.length) throw new Error(`${LATE_PENDING}${late.map(lateWords).join("; ")}. Each needs the coordinator's typed resolution (finish resolve: folded, saying where the report says it now, or not_material, with why) before the sentinel is written`);
     }
-    return write();
+    const written = await write();
+    // The sentinel written: the finish line passed at this revision, so the
+    // registers were met by the done's own rule. When readiness had not
+    // turned ready before it (the c10 pilot's register held only "not
+    // ready" to the end), the ready state is recorded here, marked as the
+    // done's, so the tail from readiness is measured and the disagreement
+    // is on the record.
+    if (written === true && (await readFinish(sandboxRoot)).readiness?.ready !== true) {
+      await appendFinish(sandboxRoot, [{ by: "system", ev: "readiness", ready: true, revision: at?.revision ?? "", items: [], at_done: true, why: `${agent}'s done passed the finish line${at?.outcome ? ` (${at.outcome})` : ""} while readiness had not turned ready` }], held).catch(() => undefined);
+    }
+    return written;
   });
 }
 
@@ -624,6 +636,13 @@ async function computeReadiness(sandboxRoot: string, s: L.LeadsSnapshot, revisio
     items.push(d.what);
   }
   // Best candidates, stale answers, and what else would limit the run.
+  // Under the operator's stop policy a best candidate and a route
+  // limitation hold readiness too (ADR 0015, 8); a disposition that only
+  // limits the run (partial, not determinable, a bounded negative, an
+  // acceptance) never does: the done ends the run examination-limited on
+  // it, and readiness held on it would never turn ready before a done that
+  // passes (the c10 pilot: "never ready").
+  const holdsUnderOperator: string[] = [];
   const disposed = new Map<string, "answered" | "accepted">();
   for (const sec of sections) {
     if (!sec.startsWith("question:")) continue;
@@ -639,6 +658,7 @@ async function computeReadiness(sandboxRoot: string, s: L.LeadsSnapshot, revisio
     // A negative, by the gate's own test (a premise rejected on a search alone is one), is held to the negative review, never to a strength.
     if (reviews.length && !reviews.some(P.attestEstablishes) && !P.negativeByResult(result, P.citedForQuestion(a, s.ledger.bySeq, s.ledger.replaced, sec.slice("question:".length)))) {
       limited.push(`${sec} is a best candidate, not established (E-${a.seq})`);
+      holdsUnderOperator.push(`${sec} is a best candidate, not established (E-${a.seq})`);
       continue;
     }
     const q = s.questions?.bySection.get(sec.slice("question:".length));
@@ -658,11 +678,15 @@ async function computeReadiness(sandboxRoot: string, s: L.LeadsSnapshot, revisio
   for (const l of lead.limiting) {
     const lv = s.state.leads.get(l.lead);
     const v = lv ? L.routeLimitation(lv, (q) => disposed.get(q) ?? null) : { limiting: true, why: "" };
-    if (v.limiting) limited.push(`${l.lead} was closed ${l.disposition} (${l.ref})${v.why ? `: ${v.why}` : ""}`);
+    if (v.limiting) {
+      const line = `${l.lead} was closed ${l.disposition} (${l.ref})${v.why ? `: ${v.why}` : ""}`;
+      limited.push(line);
+      holdsUnderOperator.push(line);
+    }
   }
   const budget = await P.readBudget(sandboxRoot).catch(() => null);
   const operatorStop = P.stopPolicyOf(budget) === "operator";
-  const blocking = operatorStop ? [...items, ...limited.filter((x) => !/accepted by the operator/.test(x))] : items;
+  const blocking = operatorStop ? [...items, ...holdsUnderOperator] : items;
   return { ready: !blocking.length, revision, items: blocking, limited, confirming: confirming.filter((c) => blocking.includes(c)) };
 }
 

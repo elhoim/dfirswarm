@@ -165,7 +165,8 @@ export type RunMetrics = {
     end_at: string | null;
     end: "sentinel" | "stopped" | "paused" | null;
     ready_at: string | null;
-    ready_source: "readiness" | "first answers" | null;
+    /** Where the ready time came from: readiness turning ready, the done that recorded it (readiness had not turned ready before the done passed), or the first answers (a run from before readiness). */
+    ready_source: "readiness" | "done" | "first answers" | null;
     all_first_answered_at: string | null;
     all_final_answered_at: string | null;
     minutes_from_ready: number | null;
@@ -552,13 +553,22 @@ async function tail(c: Context, scope: RunMetrics["questions"], outcome: RunMetr
   const endAt = ms(outcome.at);
   const end: RunMetrics["tail"]["end"] = outcome.outcome === "stopped" && existsSync(join(c.S, P.STOPPED_REL)) ? "stopped" : outcome.outcome === "paused" ? "paused" : existsSync(join(c.S, P.SENTINEL_REL)) ? "sentinel" : null;
   // Readiness where the finish register records it (docs/adr/0015): the last turn to ready before the end, not undone before it.
+  // The done that wrote the sentinel records ready itself when readiness had not turned ready before it (finish.ts finishTransaction): at the end, a moment after the sentinel's stamp.
   let readyAt: number | null = null;
+  let readyAtDone = false;
   const finish = await jsonl(join(c.S, "leads", "finish.jsonl"));
   for (const f of finish) {
     if (f.ev !== "readiness") continue;
-    const t = ms(f.at);
-    if (t === null || (endAt !== null && t > endAt)) continue;
-    if (f.ready === true && readyAt === null) readyAt = t;
+    let t = ms(f.at);
+    if (t === null) continue;
+    if (endAt !== null && t > endAt) {
+      if (!(f.at_done === true && f.ready === true)) continue;
+      t = endAt;
+    }
+    if (f.ready === true && readyAt === null) {
+      readyAt = t;
+      readyAtDone = f.at_done === true;
+    }
     if (f.ready === false) readyAt = null;
   }
   const first = new Map<string, number>();
@@ -580,7 +590,7 @@ async function tail(c: Context, scope: RunMetrics["questions"], outcome: RunMetr
     end_at: iso(endAt),
     end,
     ready_at: iso(ready),
-    ready_source: hasReadiness ? (readyAt !== null ? "readiness" : null) : allFirst !== null ? "first answers" : null,
+    ready_source: hasReadiness ? (readyAt !== null ? (readyAtDone ? "done" : "readiness") : null) : allFirst !== null ? "first answers" : null,
     all_first_answered_at: iso(allFirst),
     all_final_answered_at: iso(allFinal),
     minutes_from_ready: minutes(ready, endAt),
@@ -1000,7 +1010,7 @@ export function metricsText(m: RunMetrics): string {
     ["Offers (reviews)", o.recorded ? `${o.reviews.made} made (${Object.entries(o.reviews.by_reason).map(([k, n]) => `${k} ${n}`).join(", ") || "none"}): ${o.reviews.accepted} taken up, ${o.reviews.declined} declined, ${o.reviews.withdrawn} withdrawn (reviewed by another route, or superseded), ${o.reviews.lapsed} lapsed, ${o.reviews.open} with no outcome; ${o.reviews.taken} taken by their seat first (offer accept)` : o.wakes_before_offers.recorded ? "not recorded (no offer events: a run from before offers)" : absent(LEADS)],
     ["Wakes (before offers)", o.wakes_before_offers.recorded ? `${o.wakes_before_offers.made}: ${o.wakes_before_offers.taken_by_woken} taken by the woken seat, ${o.wakes_before_offers.taken_by_another} by another, ${o.wakes_before_offers.not_taken} not taken` : absent(LEADS)],
     ["done calls", d.recorded ? `${d.calls}: ${d.accepted} accepted (${d.created_sentinel} wrote the sentinel), ${d.refused} refused by the seat's checks (${counts(d.refused_by)}), ${d.hub_refused} refused by the hub, ${d.not_yours} not the seat's finish` : absent("readable traces/events.jsonl")],
-    ["Tail to the end", !t.end_at ? "not measured (the run has not ended)" : `${mins(t.minutes_from_ready)} from ready (${t.ready_source ?? "never ready"}); ${t.recorded ? `${mins(t.minutes_from_first_answers)} from the first answers, ${mins(t.minutes_from_final_answers)} from the final ones${t.unanswered.length ? `; unanswered: ${list(t.unanswered)}` : ""}` : `the answer tails ${absent(LEDGER)}`}`],
+    ["Tail to the end", !t.end_at ? "not measured (the run has not ended)" : `${mins(t.minutes_from_ready)} from ready (${t.ready_source === "done" ? "recorded by the done: readiness had not turned ready before it passed" : (t.ready_source ?? "never ready")}); ${t.recorded ? `${mins(t.minutes_from_first_answers)} from the first answers, ${mins(t.minutes_from_final_answers)} from the final ones${t.unanswered.length ? `; unanswered: ${list(t.unanswered)}` : ""}` : `the answer tails ${absent(LEDGER)}`}`],
     ["Acquisition", a.recorded ? `${a.requests} request(s) (${counts(a.by_stage)}; ${a.declined_by_policy} declined by the case policy); ${a.gaps.length} gap(s)${a.questions_with_gap.length ? ` on ${list(a.questions_with_gap)}` : ""}` : absent("requests/requests.jsonl")],
     ["Evidence added", a.evidence_recorded ? `${a.evidence_added} time(s), ${a.evidence_added_for_request} for a request` : absent("store/journal.jsonl")],
     ["Interpretations", i.recorded ? `${i.total}: ${i.valid} valid, ${i.superseded} on a superseded entry, ${i.disputed} on a disputed one${i.missing ? `, ${i.missing} on no entry` : ""}; ${i.jobs_uninterpreted.length} of ${i.jobs_under_leads} lead jobs uninterpreted, ${i.jobs_without_valid.length} with no valid interpretation` : absent(LEADS)],

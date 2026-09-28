@@ -28,6 +28,14 @@ All notable changes to this project. The format follows
   attested the answers, which the gate counts for the records they rest on.
   A record now counts reviewed on itself or through the negative answer
   resting on it, both given apart; review offers count withdrawn and taken.
+- **Readiness turns ready on the dispositions the done ends on.** Under the
+  operator's stop, readiness held on "question:5 is not determinable" to
+  the end, and the metrics read "never ready" while the coordinator's done
+  passed examination-limited. A disposition that only limits the run no
+  longer holds readiness (a best candidate and a route limitation still do,
+  as the ADR says), and a done that passes while readiness had not turned
+  ready records the ready state in the sentinel's transaction, marked as the
+  done's, so the tail is measured.
 - **A summary's symbolic citation recorded before still stands.** Reading
   the finished pilot with the new code took down its summary and narrative:
   the answer fingerprint's fields had been reordered, and every recorded
