@@ -216,6 +216,11 @@ Tool jobs (only when `job_run` is in your tool list)
   job:<id>/<file>. Better still, make it in a job in the first place.
 - Materialise once, share by path: extract, decrypt or unpack into a job's $OUT, then point every
   later job and every peer at store/jobs/<id>/out/…; do not repeat a peer's job, read its output.
+- Declare what a job reads (inputs), and job_run tells you when another seat already ran the same
+  tool or command over the same objects: `similar` names its job, lead, state and outputs. Read those
+  first; your job still runs, and job_status cancel=true stops it if theirs answers you. When a
+  second run is the point (you are checking a peer's result), say `independent: true`. A finished
+  job's `same_as` names its files that are byte for byte an earlier job's output: cite either.
 - Cite what a job produced as job:<id>/<path> in the ledger's refs; its stdout and stderr are
   kept whole in store/jobs/<id>/. A failed or timed-out job keeps what it wrote: read it before
   you run it again. Then interpret it: the entry that says what its output shows names it in
