@@ -2869,6 +2869,10 @@ export async function leadsDigest(ctx: P.SwarmContext, o: { mark?: boolean } = {
   if (parked.length) lines.push(`Parked (held, no job and no act on it for ${Math.round(parkMs() / 60_000)}+ min while the holder works elsewhere; offered to an idle seat unless the holder acts): ${parked.map((p) => `${p.lead} (${p.holder}, ${Math.round(p.idle_ms / 60_000)} min)`).join("; ")}.`);
   const confirming = ranked.filter((x) => x.confirm);
   if (confirming.length) lines.push(`Closures to confirm or reopen (their entry was superseded; nothing re-points them): ${confirming.map((x) => `${x.id} closed ${x.disposition} on ${x.confirm!.ref_was}${x.confirm!.head ? `, now ${x.confirm!.head}` : ""} (${x.confirm!.to ?? "nobody"} confirms)`).join("; ")}.`);
+  // The finish (A4): whether the registers say it is ready, who coordinates it, and what this seat does about it.
+  const F = await import("./finish.ts");
+  const finish = await F.finishHeader(ctx.sandboxRoot, me, snap).catch(() => null);
+  if (finish) lines.push(finish);
   if (o.mark) {
     await writeTold(ctx.sandboxRoot, me, toldNow(me, snap, Object.keys(before.held)));
     if (snap.questions) await Q.markTold(ctx.sandboxRoot, me, snap.questions);
@@ -3105,6 +3109,16 @@ export async function leadDefects(sandboxRoot: string, snap?: LeadsSnapshot): Pr
   const s = snap ?? (await leadsSnapshot(sandboxRoot));
   const defects: LeadDefect[] = [];
   for (const l of s.state.leads.values()) {
+    // A closure whose entry was superseded stands only once its closer confirms it (A3).
+    if (l.material && l.closed && l.confirm) {
+      defects.push({
+        code: "open_lead",
+        lead: l.id,
+        what: `${l.id} "${l.title}" was closed ${l.closed.disposition} on ${l.confirm.ref_was}, since superseded${l.confirm.head ? ` by ${l.confirm.head}` : ""}: its closure waits for its closer's confirmation`,
+        fix: `its closer confirms it on what stands (lead_confirm ${l.id} with ref and why) or reopens it (lead_reopen); unconfirmed, it reopens by itself`,
+      });
+      continue;
+    }
     if (!l.material || l.closed) continue;
     const st = leadStatus(l, s.state, s.ledger);
     defects.push({

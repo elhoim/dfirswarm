@@ -24,6 +24,7 @@
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { connect, type Socket } from "node:net";
+import * as F from "./finish.ts";
 import * as L from "./leads.ts";
 import * as P from "./protocol.ts";
 import * as Q from "./questions.ts";
@@ -61,7 +62,7 @@ function refused(err: unknown): boolean {
 type Pending = { fn: string; socket: Socket; answered: () => void; resolve: (value: unknown) => void; reject: (err: Error) => void };
 
 /** Calls that change the board, sent once more with the same request id when a link drops. */
-const RETRIED = new Set(["postMessage", "systemPost", "recordEntry", "attestEntry", "disputeEntry", "threadOpen", "claimName", "markDone", "publishFile", "forgeTool", "recordFileVersion", "jobSubmit", "catalogRequest", "jobStatus", "leadOpen", "leadClaim", "leadRelease", "leadClose", "leadLink", "leadInterpret", "leadReopen", "routeReview", "leadHandoff", "leadConfirm", "offerAnswer", "questionOpen", "questionAsk"]);
+const RETRIED = new Set(["postMessage", "systemPost", "recordEntry", "attestEntry", "disputeEntry", "threadOpen", "claimName", "markDone", "publishFile", "forgeTool", "recordFileVersion", "jobSubmit", "catalogRequest", "jobStatus", "leadOpen", "leadClaim", "leadRelease", "leadClose", "leadLink", "leadInterpret", "leadReopen", "routeReview", "leadHandoff", "leadConfirm", "offerAnswer", "finishTurnFor", "finishAct", "questionOpen", "questionAsk"]);
 
 /** Timings a test shortens; the defaults are the run's. */
 export type HubClientTimings = { partTimeoutMs?: number; writeStallMs?: number };
@@ -348,6 +349,8 @@ export const REMOTE_FUNCTIONS = [
   "correctionsAfter",
   "disputeEntry",
   "fileDiff",
+  "finishAct",
+  "finishTurnFor",
   "forgeTool",
   "forgedToolSeal",
   "guardWrite",
@@ -418,6 +421,9 @@ export const routeReview = remote("routeReview", L.routeReview);
 export const leadHandoff = remote("leadHandoff", L.handoffLead);
 export const leadConfirm = remote("leadConfirm", (ctx: P.SwarmContext, id: unknown, input: { expected_revision?: unknown; ref?: string; why?: string }) => L.confirmLead(ctx, id, input ?? {}));
 export const offerAnswer = remote("offerAnswer", L.answerOffer);
+/** The finish (finish.ts): whose done it is, and the typed acts around the report. */
+export const finishTurnFor = remote("finishTurnFor", F.finishTurnFor);
+export const finishAct = remote("finishAct", F.finishAct);
 /**
  * The question register (questions.ts): an agent opens a question, reads the
  * register, and asks what is unclear. Who asks is the channel's seat; the

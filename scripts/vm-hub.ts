@@ -81,6 +81,7 @@ import { connect, createServer, type Server, type Socket } from "node:net";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import * as P from "../extensions/protocol.ts";
+import * as F from "../extensions/finish.ts";
 import * as L from "../extensions/leads.ts";
 import * as Q from "../extensions/questions.ts";
 import * as T from "../extensions/toolchain.ts";
@@ -209,6 +210,9 @@ const RATE_LIMITS: Record<string, { bucket: string; capacity: number; perSecond:
   leadHandoff: { bucket: "ledger", capacity: 200, perSecond: 5 },
   leadConfirm: { bucket: "ledger", capacity: 200, perSecond: 5 },
   offerAnswer: { bucket: "ledger", capacity: 200, perSecond: 5 },
+  // A done that is not the coordinator's is answered at once; the finish's acts are few.
+  finishTurnFor: { bucket: "ledger", capacity: 200, perSecond: 5 },
+  finishAct: { bucket: "ledger", capacity: 200, perSecond: 5 },
   // The question register grows as the leads do.
   questionOpen: { bucket: "ledger", capacity: 200, perSecond: 5 },
   questionAsk: { bucket: "ledger", capacity: 200, perSecond: 5 },
@@ -262,7 +266,7 @@ const QUEUE_MAX = 192;
 export const SETTLE_MS_DEFAULT = 6_000;
 
 /** Calls the hub records on the trace when they succeed; every refusal is recorded. */
-const AUDITED = new Set(["markDone", "runFinishLine", "forgeTool", "restoreFileVersion", "claimName", "threadOpen", "publishFile", "recordEntry", "attestEntry", "disputeEntry", "jobSubmit", "catalogRequest", "leadOpen", "leadClaim", "leadRelease", "leadClose", "leadLink", "leadInterpret", "leadReopen", "routeReview", "leadHandoff", "leadConfirm", "offerAnswer", "questionOpen", "questionAsk"]);
+const AUDITED = new Set(["markDone", "runFinishLine", "forgeTool", "restoreFileVersion", "claimName", "threadOpen", "publishFile", "recordEntry", "attestEntry", "disputeEntry", "jobSubmit", "catalogRequest", "leadOpen", "leadClaim", "leadRelease", "leadClose", "leadLink", "leadInterpret", "leadReopen", "routeReview", "leadHandoff", "leadConfirm", "offerAnswer", "finishTurnFor", "finishAct", "questionOpen", "questionAsk"]);
 
 /**
  * The job service's settings, from the kickoff: the image workers boot, how
@@ -545,10 +549,17 @@ export function boardTable(hub: {
   let finishLine: Promise<FinishLine> | null = null;
   const askedBy = new Map<string, FinishLine & { at: number }>();
   const revisionNow = async () => (await P.stateRevision(S).catch(() => ({ revision: "" }))).revision;
+  // One check result per revision (A4): a run recorded against the
+  // revision that still holds is taken, not run again, by whichever seat asks.
   const sharedFinishLine = (): Promise<FinishLine> =>
     (finishLine ??= (async () => {
       const revision = await revisionNow();
+      const stored = await F.checkAt(S, revision).catch(() => null);
+      if (stored?.run) return { run: stored.run as FinishLine["run"], revision };
       const run = await P.runFinishLine(S).catch(() => null);
+      const untilSolved = (await P.readBudget(S).catch(() => null))?.until_solved === true;
+      const v = P.finishLineVerdict(run, false, { untilSolved });
+      if (run && !run.error) await F.recordCheck(S, "system", revision, v.proceed ? { proceed: true, outcome: v.outcome } : { proceed: false, reason: v.reason }, run).catch(() => undefined);
       return { run, revision };
     })().finally(() => {
       finishLine = null;
@@ -718,6 +729,8 @@ export function boardTable(hub: {
     leadHandoff: (who, a) => L.handoffLead(as(who), a[1], (isObject(a[2]) ? a[2] : {}) as { why?: string; to?: string; generation?: number }),
     leadConfirm: (who, a) => L.confirmLead(as(who), a[1], (isObject(a[2]) ? a[2] : {}) as { expected_revision?: unknown; ref?: string; why?: string }),
     offerAnswer: (who, a) => L.answerOffer(as(who), a[1], (isObject(a[2]) ? a[2] : {}) as { action?: string; why?: string }),
+    finishTurnFor: (who, a) => F.finishTurnFor(as(who), (isObject(a[1]) ? a[1] : {}) as { output_file?: string }),
+    finishAct: (who, a) => F.finishAct(as(who), (isObject(a[1]) ? a[1] : {}) as Parameters<typeof F.finishAct>[1]),
     // The question register (extensions/questions.ts): the seat is the channel's.
     questionOpen: (who, a) => Q.questionOpen(as(who), (isObject(a[1]) ? a[1] : {}) as Q.ActInput),
     questionAsk: (who, a) => Q.questionAsk(as(who), a[1], a[2]),

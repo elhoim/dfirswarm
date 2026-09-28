@@ -201,6 +201,18 @@ async function registerGate(sandbox: string, snap: L.LeadsSnapshot, qs: Q.Questi
       accepted.push(line);
     }
   }
+  // A summary or a narrative that cites a question symbolically (A4) is
+  // revalidated when that question's scope changes: withdrawn, excluded or
+  // sent back to triage since, it is recorded again.
+  for (const e of snap.ledger.entries) {
+    if (e.kind !== "answer" || snap.ledger.replaced.has(e.seq) || !e.question_refs?.length) continue;
+    for (const r of e.question_refs) {
+      const q = qs.bySection.get(r.section.replace(/^question:/, ""));
+      if (!q) continue;
+      const gone = q.withdrawn ? `withdrawn by ${Q.originWords(q.withdrawn.origin)}` : q.scope !== "in_scope" ? `now ${q.scope}` : null;
+      if (gone) defects.push({ code: "question_answer", question: q.id, what: `the ${e.section} E-${e.seq} cites ${r.q} (${r.section}), ${gone} since`, fix: `record the ${e.section} again with supersedes=${e.seq}, without ${r.q} or saying what its change means for the conclusion` });
+    }
+  }
   const material = Q.registerQuestions(qs).filter((q) => q.materiality === "material");
   const extra = material.filter((q) => !Q.acceptanceStands(q, snap.ledger));
   // An accepted question is excused its answer, never the negative bar: a

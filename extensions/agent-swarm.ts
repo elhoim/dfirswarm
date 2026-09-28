@@ -157,7 +157,6 @@ import {
   disputeEntry,
   heldBy,
   claimName,
-  correctionsAfter,
   nameOf,
   readNames,
   updateToolchainRecord,
@@ -181,12 +180,16 @@ import {
   leadHandoff,
   leadConfirm,
   offerAnswer,
+  finishTurnFor,
+  finishAct,
   questionOpen,
   questionAsk,
   questionsView,
 } from "./board.ts";
 // The lead register's host-side pieces: a host run's wait checks it itself (a VM's hub does it there).
 import { LEAD_DISPOSITIONS, leadsWaitCheck, reopenOnLedger } from "./leads.ts";
+// The finish's host-side pieces: one check result per revision, recorded where the finish line runs.
+import { checkAt, NOT_YOURS, recordCheck } from "./finish.ts";
 import { registerPlaywrightTool, runBrowserCheck } from "./playwright-tool.ts";
 import { readToolchainAt, TOOLCHAIN_DIR } from "./toolchain.ts";
 import { installChunkedEgress } from "./vm-egress.ts";
@@ -256,6 +259,7 @@ export const SWARM_TOOLS = new Set([
   "lead_handoff",
   "lead_confirm",
   "offer",
+  "finish",
   "question_open",
   "questions",
   "question_ask",
@@ -1602,8 +1606,6 @@ export default function (pi: ExtensionAPI) {
    * harness could not snapshot is still a change worth naming once; naming it
    * on every call afterwards is noise the swarm pays to read.
    */
-  /** `done` says "there are newer corrections" once; the second call is the agent's answer. */
-  let doneRefusedOnce = false;
   const unrecordableReportedAt = new Map<string, number>();
   const UNRECORDABLE_QUIET_MS = 60_000;
   /** Metadata drift under inputs/, said once per path per quiet window. */
@@ -3526,6 +3528,30 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerTool({
+    name: "finish",
+    label: "The finish",
+    description:
+      "The run's finish, one seat's to call (the coordinator's, named in every header). status: where it stands (ready by the registers or what holds it, the coordinator, the last check at which revision, the report's reviews, what is late against it). ack (any other seat): your review of the report's current digest, verdict no_objection, or objection with why; an ack is not a late post, and an objection holds the finish until the coordinator resolves it. resolve (the coordinator): answer a result or veto posted after the report, or an objection, how: folded (the report says it now, and where) or not_material (with why it changes nothing the report concludes). Reading a late post is not answering it.",
+    promptSnippet: "See or act on the run's finish",
+    parameters: Type.Object({
+      action: Type.Union([Type.Literal("status"), Type.Literal("ack"), Type.Literal("resolve")]),
+      digest: Type.Optional(Type.String({ description: "ack: the report's digest you read (its current one when left out)" })),
+      verdict: Type.Optional(Type.Union([Type.Literal("no_objection"), Type.Literal("objection")], { description: "ack: your verdict on the report" })),
+      why: Type.Optional(Type.String({ description: "ack objection: what does not hold; resolve: where it was folded, or why it is not material" })),
+      post: Type.Optional(Type.Union([Type.Number(), Type.String()], { description: "resolve: the late post's id (#123)" })),
+      ack: Type.Optional(Type.Number({ description: "resolve: the objection's ack seq" })),
+      how: Type.Optional(Type.Union([Type.Literal("folded"), Type.Literal("not_material")], { description: "resolve: folded into the report, or not material" })),
+    }),
+    async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
+      const started = Date.now();
+      const r = (await finishAct(ctxFrom(toolCtx.cwd, agentId), params as never)) as { ok: boolean; reason?: string } & Record<string, unknown>;
+      await logEvent(toolCtx.cwd, agentId, "finish", params as Record<string, unknown>, r.ok ? { ok: true, action: params.action, ...(params.action === "status" ? { ready: r.ready } : {}), ...(typeof r.seq === "number" ? { seq: r.seq } : {}) } : { ok: false, reason: r.reason }, Date.now() - started).catch(() => undefined);
+      if (!r.ok) return { content: [{ type: "text" as const, text: `finish refused: ${r.reason}` }], details: r, isError: true };
+      return okResult(r);
+    },
+  });
+
+  pi.registerTool({
     name: "route_review",
     label: "Review a limiting route",
     description:
@@ -3669,10 +3695,10 @@ export default function (pi: ExtensionAPI) {
     name: "done",
     label: "Done",
     description:
-      "Write done/agents/<id>.done, create done/SWARM_DONE if missing (idempotent), drop this worker's locks, and terminate the session. Before the sentinel the harness runs the goal's checks itself (in a microVM run on the host, where the trace they read is): while any fails, done is refused, and the refusal names each check that fails and what makes it pass.",
-    promptSnippet: "Stop this worker and signal the swarm sentinel",
+      "End the run: the coordinator's call. One seat coordinates the finish (normally the one that published the report last; the header names it, and a coordinator that is done, dead, compacting or silent is taken over by the next seat's done). Any other seat's done is answered \"not yours\" and changes nothing. The coordinator's done first needs every result or veto posted after the report, and every objection to it, answered with a typed resolution (finish resolve); then the harness runs the goal's checks and its own gate once per state revision (in a microVM run on the host): while any fails, done is refused with each check and its fix; when they pass it writes done/agents/<id>.done and done/SWARM_DONE while that revision still holds, drops this worker's locks and ends the session. Once done/SWARM_DONE exists every seat calls done and stops.",
+    promptSnippet: "End the run (the coordinator's call), or stop once the sentinel exists",
     promptGuidelines: [
-      "Use done when the definition of done is met and its checks pass, or when done/SWARM_DONE already exists. done ends the whole swarm, not your slice: a finished slice is posted to the board, not done. When the task is impossible or unsafe, call done with abandon: true and say why.",
+      "done is the coordinator's call, when the header says the finish is ready; a finished slice is posted to the board, never done. Once done/SWARM_DONE exists, call done and stop. When the task is impossible or unsafe, call done with abandon: true and say why (a vote while others work).",
     ],
     parameters: Type.Object({
       reason: Type.String({ description: "Why this worker is stopping" }),
@@ -3687,21 +3713,24 @@ export default function (pi: ExtensionAPI) {
       ),
     }),
     async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
-      // A peer's correction that landed after the report was last written has
-      // not reached it. Say so once and let the agent decide: fold it in, or
-      // call done again and say on the board why it does not change anything.
-      if (!doneRefusedOnce && !(await swarmDoneExists(toolCtx.cwd))) {
-        const late = await correctionsAfter(toolCtx.cwd, params.output_file, agentId).catch(() => []);
-        if (late.length) {
-          doneRefusedOnce = true;
-          const who = late.map((p) => `#${p.id} by ${p.from}`).join(", ");
-          const reason = `${late.length} post(s) landed after \`${params.output_file}\` was last written: ${who}. Read them. Fold what belongs in, or call done again and say on the board why they do not change it.`;
-          await logEvent(toolCtx.cwd, agentId, "done", params, { ok: false, reason, late: late.length });
-          return {
-            content: [{ type: "text" as const, text: reason }],
-            details: { ok: false, reason, late },
-            isError: true,
-          };
+      // The finish is one seat's (A4, extensions/finish.ts). A seat leaving on
+      // its own cap, an abandon vote, and every done once the sentinel exists
+      // are not the finish.
+      if (params.reason !== "agent_cap" && params.abandon !== true && !(await swarmDoneExists(toolCtx.cwd))) {
+        const turn = await finishTurnFor(ctxFrom(toolCtx.cwd, agentId), { output_file: params.output_file }).catch(() => null);
+        if (turn && !turn.mine) {
+          // Quietly: no finish line, no board post, and not a refusal.
+          const text = `Not yours: ${turn.holder} coordinates the finish (generation ${turn.generation}: ${turn.why}). The finish is ${turn.readiness.ready ? "ready by the registers" : `not ready: ${turn.readiness.items.join("; ")}`}. Your done does not end the run: post what your slice found, review the report (finish ack) if you can, or wait.`;
+          await logEvent(toolCtx.cwd, agentId, "done_deferred", { output_file: params.output_file }, { ok: true, coordinator: turn.holder, generation: turn.generation, ready: turn.readiness.ready }).catch(() => undefined);
+          return okResult({ ok: true, finished: false, not_yours: true, coordinator: turn.holder, generation: turn.generation, readiness: turn.readiness, note: text });
+        }
+        if (turn?.took_over) await systemPost(toolCtx.cwd, { tag: "hold", via: agentId, body: `${agentId} coordinates the finish now (generation ${turn.generation}): ${turn.why}.` }).catch(() => undefined);
+        // What landed against the report since it was written: each answered with a typed resolution, never by reading it alone.
+        if (turn?.late.length) {
+          const each = turn.late.map((x) => (x.kind === "post" ? `- post #${x.id} (${x.tag}) by ${x.by}` : `- objection ${x.id} by ${x.by}: ${x.why}`)).join("\n");
+          const reason = `${turn.late.length} item(s) landed against \`${params.output_file}\` since it was written, each for your typed resolution before the finish:\n${each}\nFor each: fold it into the report and publish it again (then finish resolve with how: folded, saying where), or finish resolve with how: not_material and why it changes nothing the report concludes. Typed acks of no objection are not among them.`;
+          await logEvent(toolCtx.cwd, agentId, "done", params, { ok: false, reason, late: turn.late.length });
+          return { content: [{ type: "text" as const, text: reason }], details: { ok: false, reason, late: turn.late }, isError: true };
         }
       }
       // Put inputs/ right and vouch for it: anything a background process
@@ -3749,7 +3778,12 @@ export default function (pi: ExtensionAPI) {
         // An until-solved run ends only on every question answered; even a
         // finish line that could not be run is a refusal there.
         const untilSolved = (await readBudget(toolCtx.cwd).catch(() => null))?.until_solved === true;
-        const bound = onHost ? await runFinishLineBound(toolCtx.cwd, runFinishLine) : { run: await runFinishLine(toolCtx.cwd).catch(() => null), revision: "", settled: true, runs: 1 };
+        // One check result per revision (A4): a run recorded against the revision that still holds is taken, not run again.
+        const shared = async (S: string) => {
+          const c = await checkAt(S, (await stateRevision(S).catch(() => ({ revision: "" }))).revision).catch(() => null);
+          return c?.run ? (c.run as Awaited<ReturnType<typeof runFinishLine>>) : runFinishLine(S);
+        };
+        const bound = onHost ? await runFinishLineBound(toolCtx.cwd, shared) : { run: await runFinishLine(toolCtx.cwd).catch(() => null), revision: "", settled: true, runs: 1 };
         const unsettled = async () => {
           await logEvent(toolCtx.cwd, agentId, "done", params, { ok: false, reason: FINISH_LINE_UNSETTLED, runs: bound.runs }).catch(() => undefined);
           return { content: [{ type: "text" as const, text: FINISH_LINE_UNSETTLED }], details: { ok: false, reason: FINISH_LINE_UNSETTLED }, isError: true };
@@ -3757,6 +3791,7 @@ export default function (pi: ExtensionAPI) {
         if (!bound.settled) return unsettled();
         const run = bound.run;
         const verdict = finishLineVerdict(run, params.abandon === true, { untilSolved });
+        if (onHost && bound.revision && run && !run.error && params.abandon !== true) await recordCheck(toolCtx.cwd, agentId, bound.revision, verdict.proceed ? { proceed: true, outcome: verdict.outcome } : { proceed: false, reason: verdict.reason }, run).catch(() => undefined);
         await logEvent(toolCtx.cwd, agentId, "finish_line", { abandon: params.abandon === true }, {
           ok: verdict.proceed,
           total: run?.total ?? 0,
@@ -3785,7 +3820,13 @@ export default function (pi: ExtensionAPI) {
           ...(revision ? { revision } : {}),
         });
       } catch (err) {
-        if ((err as Error).message !== FINISH_LINE_UNSETTLED) throw err;
+        const message = (err as Error).message;
+        // The coordinator took the finish meanwhile: quietly, as any other seat's done is answered.
+        if (message.includes(NOT_YOURS)) {
+          await logEvent(toolCtx.cwd, agentId, "done_deferred", { output_file: params.output_file }, { ok: true, reason: message }).catch(() => undefined);
+          return okResult({ ok: true, finished: false, not_yours: true, note: message.slice(message.indexOf(NOT_YOURS)) });
+        }
+        if (message !== FINISH_LINE_UNSETTLED) throw err;
         await logEvent(toolCtx.cwd, agentId, "done", params, { ok: false, reason: FINISH_LINE_UNSETTLED }).catch(() => undefined);
         return { content: [{ type: "text" as const, text: FINISH_LINE_UNSETTLED }], details: { ok: false, reason: FINISH_LINE_UNSETTLED }, isError: true };
       }

@@ -3065,6 +3065,14 @@ export async function markDone(
     }
   }
 
+  // The finish is one seat's (A4, extensions/finish.ts): a done that would
+  // end the swarm from any other seat, while the coordinator can still take
+  // it, is not this seat's to make.
+  if (!seatOnly && !reason.startsWith(ABANDON_PREFIX) && !(await swarmDoneExists(ctx.sandboxRoot))) {
+    const may = await (await import("./finish.ts")).mayFinish(ctx.sandboxRoot, ctx.agentId);
+    if (!may.ok) throw new Error(may.reason);
+  }
+
   const by = ctx.agentId;
   const stamp = new Date().toISOString();
   const agentFile = agentDonePath(ctx.sandboxRoot, ctx.agentId);
@@ -5830,7 +5838,7 @@ export const TOOL_RESERVED_NAMES = new Set([
   "question_open", "questions", "question_ask",
   // The coordination of the work and of the finish (docs/adr/0015): a lead
   // reopened by an agent, a limiting route reviewed.
-  "lead_reopen", "route_review", "lead_handoff", "lead_confirm", "offer",
+  "lead_reopen", "route_review", "lead_handoff", "lead_confirm", "offer", "finish", "done_deferred",
   // The stop policy (docs/adr/0013): a run paused at a cap, a seat's call held
   // by the pause, the seats woken after an extension, a stop proposed to the
   // operator, and a run resumed after a stop or a seal.
@@ -7552,6 +7560,16 @@ export type LedgerEntry = {
   question_rev?: number;
   /** Version 4, an answer: it says the event did not happen, not only that no evidence of it was found; the negative bar says when it may. */
   asserts_absence?: boolean;
+  /**
+   * A summary's or a narrative's symbolic citations (A4): each question it
+   * cites as Q-<n>, the answer that stood then, and that answer's
+   * fingerprint (its result, the revision it answers, and the hashes of what
+   * it rests on, what says otherwise and what bounds it). A correction of
+   * the answer that keeps the fingerprint (a wording change) leaves the
+   * summary standing; one that changes its support, scope or contrary
+   * evidence makes it be recorded again.
+   */
+  question_refs?: Array<{ q: string; section: string; answer: number; fp: string }>;
   /** A coverage record: the inventory revision its search saw (negative-bar.ts inventoryRevision). */
   inventory_rev?: string;
   /** A coverage record: the time range the search covered, or why it has none. */
@@ -7658,6 +7676,7 @@ function ledgerV4Fields(e: LedgerEntry): Record<string, unknown> {
     ...(e.result ? { result: e.result } : {}),
     ...(e.contrary_none_why ? { contrary_none_why: e.contrary_none_why } : {}),
     ...(e.question_rev !== undefined ? { question_rev: e.question_rev } : {}),
+    ...(e.question_refs?.length ? { question_refs: e.question_refs.map((r) => ({ q: r.q, section: r.section, answer: r.answer, fp: r.fp })) } : {}),
     ...(e.unsupported_tokens?.length ? { unsupported_tokens: e.unsupported_tokens } : {}),
     ...coverageFields(e),
   };
@@ -9491,6 +9510,25 @@ async function unqualifiedFailedRefs(sandboxRoot: string, e: LedgerEntry): Promi
 }
 
 /**
+ * What an answer concludes and rests on, as a summary's symbolic citation
+ * binds it (A4): its result, the question revision it answers, and the
+ * hashes of its support, its contrary evidence and its limitations. Its
+ * words are not in it: a correction that only rewords keeps it.
+ */
+export function answerFingerprint(a: LedgerEntry): string {
+  const hashes = (edges: LedgerEdge[] | undefined) => (edges ?? []).map((x) => x.hash).sort();
+  return sha256Hex(JSON.stringify({ result: NB.answerResult(a), question_rev: a.question_rev ?? 1, support: hashes(a.support), contrary: hashes(a.contrary), limitations: hashes(a.limitations), inconclusive: a.inconclusive === true, asserts_absence: a.asserts_absence === true }));
+}
+
+/** The questions a summary or a narrative names symbolically: Q-<n>, and question:<id>. */
+export function symbolicQuestions(text: string): string[] {
+  const out: string[] = [];
+  for (const m of text.matchAll(/\bQ-([1-9]\d{0,5})\b/g)) if (!out.includes(`Q-${Number(m[1])}`)) out.push(`Q-${Number(m[1])}`);
+  for (const m of text.matchAll(/\bquestion:([A-Za-z0-9._-]{1,16})\b/g)) if (!out.includes(`question:${m[1]}`)) out.push(`question:${m[1]}`);
+  return out;
+}
+
+/**
  * Why each standing answer no longer stands on its own support, transitively:
  * an entry it cites was superseded and its correction is not cited with it,
  * or was disputed (or rests on a failed job) and the answer does not qualify
@@ -9513,6 +9551,21 @@ export function answerProblems(entries: LedgerEntry[], disputes: LedgerDispute[]
     const out: string[] = [];
     const qualified = (seq: number) => (a.qualifies ?? []).some((q) => q.ref === `E-${seq}`);
     const cited = new Set([...(a.support ?? []), ...(a.limitations ?? [])].map((x) => x.seq));
+    // A summary's symbolic citations (A4): each question's standing answer,
+    // held to the fingerprint it had when cited, never to its seq alone.
+    for (const r of a.question_refs ?? []) {
+      const now = entries.find((e) => e.kind === "answer" && e.section === r.section && !replaced.has(e.seq));
+      if (!now) {
+        out.push(`it cites ${r.q} (${r.section}), which has no standing answer now`);
+        continue;
+      }
+      if (answerFingerprint(now) !== r.fp) {
+        out.push(`it cites ${r.q} (${r.section}), whose answer changed its support, scope or contrary evidence since it was cited (E-${r.answer}${now.seq !== r.answer ? ` → E-${now.seq}` : ""})`);
+        continue;
+      }
+      const sub = problemsOf(now);
+      if (sub.length) out.push(`it cites ${r.q} (${r.section}), whose answer E-${now.seq} no longer stands on its own support`);
+    }
     for (const [edges, role] of [[a.support ?? [], "rests on"], [a.limitations ?? [], "is bounded by"]] as const) {
       for (const edge of edges) {
         const t = bySeq.get(edge.seq);
@@ -9896,6 +9949,16 @@ async function recordAnswer(ctx: SwarmContext, input: LedgerInput): Promise<Ledg
   if (!evidence.ok) return evidence;
   const cited = answerCitations(`${value}\n${reasoning.value}`);
   const support = cited.filter((n) => !contrary.seqs.includes(n) && !limits.seqs.includes(n));
+  // A summary or a narrative cites the questions it sums up symbolically
+  // (Q-<n>): bound to each answer's conclusion, not to its seq (A4).
+  const symbolic: Array<{ q: string; section: string }> = [];
+  if (!question) {
+    for (const name of symbolicQuestions(`${value}\n${reasoning.value}`)) {
+      const id = name.startsWith("question:") ? sectionKey(name.slice("question:".length)) : sectionKey(await registerSection(ctx.sandboxRoot, name));
+      if (!LEDGER_ANSWER_ID.test(id)) return { ok: false, reason: `${name} is not a question this run has (questions list names them)` };
+      if (!symbolic.some((x) => x.section === `question:${id}`)) symbolic.push({ q: name, section: `question:${id}` });
+    }
+  }
   if (support.length + contrary.seqs.length + limits.seqs.length > LEDGER_MAX_CITATIONS) return { ok: false, reason: `the answer cites more than ${LEDGER_MAX_CITATIONS} entries: cite the ones it rests on` };
   // The negative bar (extensions/negative-bar.ts): what the question is, as the registers say.
   const bar = question ? await questionBar(ctx.sandboxRoot, sec.id) : null;
@@ -9933,6 +9996,22 @@ async function recordAnswer(ctx: SwarmContext, input: LedgerInput): Promise<Ledg
         if (target.section !== sec.section) return { ok: false, reason: `#${supersedes} answers ${target.section}: an answer corrects the answer to its own section` };
         const already = replaced.get(supersedes);
         if (already !== undefined) return { ok: false, reason: `#${supersedes} is already superseded by #${already}: correct #${already} instead, so the corrections stay one line` };
+      }
+      // A question's answer cited symbolically is not cited by seq as well:
+      // its correction would take the summary down with it.
+      for (let i = support.length - 1; i >= 0; i--) {
+        const e = bySeq.get(support[i]!);
+        if (e?.kind === "answer" && symbolic.some((x) => x.section === e.section)) support.splice(i, 1);
+      }
+      const questionRefs: NonNullable<LedgerEntry["question_refs"]> = [];
+      if (symbolic.length) {
+        const fallen = answerProblems(entries, disputes);
+        for (const x of symbolic) {
+          const a = entries.find((e) => e.kind === "answer" && e.section === x.section && !replaced.has(e.seq));
+          if (!a) return { ok: false, reason: `${x.q} (${x.section}) has no standing answer yet: a ${sec.section} cites an answer that stands` };
+          if (fallen.has(a.seq)) return { ok: false, reason: `${x.q}'s answer E-${a.seq} no longer stands on its own support (${(fallen.get(a.seq) as string[]).join("; ")}): it is to be recorded again first` };
+          questionRefs.push({ q: x.q, section: x.section, answer: a.seq, fp: answerFingerprint(a) });
+        }
       }
       for (const n of [...support, ...contrary.seqs, ...limits.seqs]) {
         if (!bySeq.has(n)) return { ok: false, reason: `E-${n}: there is no entry #${n} in the ledger (list them with ledger)` };
@@ -10001,11 +10080,11 @@ async function recordAnswer(ctx: SwarmContext, input: LedgerInput): Promise<Ledg
           if (!bar?.existence) return { ok: false, reason: `asserts_absence says the event did not happen: only an answer to a question that asks whether something exists may say that (the goal's --existence, or the register's expects existence); ${sec.section} does not. Say "No evidence of … was found in …"` };
           if (!complete.length) return { ok: false, reason: `asserts_absence says the event did not happen: it rests on a coverage record the hub found complete and that says the event would have left a trace (detection_opportunity.trace_expected yes); ${coverage.length ? coverage.map((c) => `E-${c.seq} is coverage ${c.coverage ?? "unknown"}, trace expected ${c.detection_opportunity?.trace_expected ?? "?"}`).join("; ") : "it cites no coverage record"}. Say "No evidence of … was found in …" instead` };
         }
-      } else if (!standingCites.length) {
-        return { ok: false, reason: `a ${sec.section} cites at least one standing entry as E-<seq>` };
+      } else if (!standingCites.length && !questionRefs.length) {
+        return { ok: false, reason: `a ${sec.section} cites at least one standing entry as E-<seq>, or the questions it sums up as Q-<n>` };
       }
       const edge = (n: number): LedgerEdge => ({ seq: n, hash: hashOf(bySeq.get(n) as LedgerEntry) });
-      const citedEntries = [...support, ...contrary.seqs, ...limits.seqs].map((n) => bySeq.get(n) as LedgerEntry);
+      const citedEntries = [...support, ...contrary.seqs, ...limits.seqs, ...questionRefs.map((r) => r.answer)].map((n) => bySeq.get(n) as LedgerEntry);
       const tokens = unsupportedTokens(`${value}\n${reasoning.value}`, citedEntries, bySeq);
       const candidate: LedgerEntry = {
         v: LEDGER_VERSION,
@@ -10030,6 +10109,7 @@ async function recordAnswer(ctx: SwarmContext, input: LedgerInput): Promise<Ledg
         ...(resultText ? { result: resultText as LedgerEntry["result"] } : {}),
         ...(noneWhy.value ? { contrary_none_why: noneWhy.value } : {}),
         ...(questionRev !== undefined ? { question_rev: questionRev } : {}),
+        ...(questionRefs.length ? { question_refs: questionRefs } : {}),
         ...(input.asserts_absence === true ? { asserts_absence: true } : {}),
         ...(tokens.length ? { unsupported_tokens: tokens } : {}),
         by: ctx.agentId,
@@ -10343,6 +10423,19 @@ const postTagCache = new Map<string, { tag: string; from: string }>();
  * dispute recorded in that window did not stop the sentinel.
  */
 export async function stateRevision(sandboxRoot: string): Promise<{ revision: string; parts: Record<string, string> }> {
+  const parts = await stateParts(sandboxRoot);
+  // What the finish rests on beyond the registers (A4): the report the
+  // coordinator's done names (by its digest), every job's state, the run's
+  // policy and the operator's decisions. A job committed, a report
+  // rewritten, a pause, a host allowed or a request answered between the
+  // finish line and the sentinel moves the revision, and the done is run
+  // again.
+  const { finishParts } = await import("./finish.ts");
+  Object.assign(parts, await finishParts(sandboxRoot));
+  return { revision: sha256Hex(JSON.stringify(parts)), parts };
+}
+
+async function stateParts(sandboxRoot: string): Promise<Record<string, string>> {
   const parts: Record<string, string> = {};
   const board: Record<string, number> = {};
   for (const thread of await listThreadNames(sandboxRoot)) {
@@ -10365,7 +10458,7 @@ export async function stateRevision(sandboxRoot: string): Promise<{ revision: st
     const bytes = await readFile(join(sandboxRoot, rel)).catch(() => null);
     parts[name] = bytes ? `${bytes.length}:${sha256Hex(bytes)}` : "none";
   }
-  return { revision: sha256Hex(JSON.stringify(parts)), parts };
+  return parts;
 }
 
 /** How many times a finish line is run again when the state moved under it, before done is refused. */
