@@ -39,6 +39,8 @@ export type ChangeKind =
   | "leads"
   /** questions/: the question register. */
   | "questions"
+  /** network/: the dynamic network's requests, grants and fetches. */
+  | "network"
   /** A live VM run's hub wrote its status (the seats' states): outside the runs directory, watched on its own. */
   | "hub"
   | "other"
@@ -112,6 +114,8 @@ function kindOf(second: string, third: string): ChangeKind {
       return "leads";
     case "questions":
       return "questions";
+    case "network":
+      return "network";
     case ".pi-sessions":
     case ".pi":
       return "sessions";

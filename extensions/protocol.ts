@@ -5785,6 +5785,9 @@ export const TOOL_RESERVED_NAMES = new Set([
   // by the pause, the seats woken after an extension, a stop proposed to the
   // operator, and a run resumed after a stop or a seal.
   "run_paused", "pause_hold", "resume_wake", "stop_proposed", "run_resumed",
+  // The dynamic network (scripts/net-broker.ts, scripts/net-fetch.ts): its
+  // tools, and the fetch service's own lines and its keeper's restart.
+  "net_request", "net_fetch", "network", "net_fetch_started", "net_fetch_refused", "net_fetch_restarted",
 ]);
 
 const RUNTIME_EXT: Record<ToolRuntime, string> = { python3: "py", node: "mjs", bash: "sh" };
@@ -7314,7 +7317,16 @@ export const LEDGER_MD = "ledger/ledger.md";
  * results, the alternatives left open and the detection opportunity. The hub
  * adds whether the jobs behind it were given every object it names.
  */
-export const LEDGER_KINDS = ["event", "ioc", "finding", "absence", "hypothesis", "limitation", "answer", "coverage"] as const;
+export const LEDGER_KINDS = ["event", "ioc", "finding", "absence", "hypothesis", "limitation", "answer", "coverage", "external"] as const;
+/**
+ * The kinds an agent records. `external` is material that entered the run
+ * from outside the evidence (a capture the fetch service sealed, material
+ * the operator supplied): the harness writes it with its provenance
+ * (recordExternal), and an examiner records what it establishes.
+ */
+export const LEDGER_AGENT_KINDS = ["event", "ioc", "finding", "absence", "hypothesis", "limitation", "answer", "coverage"] as const;
+/** Where external material came from (Plan 3 WP3 and WP6; docs/adr/0012). */
+export const LEDGER_SOURCE_CLASSES = ["acquired_evidence", "case_material", "operator_supplied", "external_capture"] as const;
 export const LEDGER_CONFIDENCE = ["high", "medium", "low"] as const;
 /**
  * Version 3 (2026-09-26, after Fable and Codex read 1,040 entries of 14 runs):
@@ -7515,6 +7527,10 @@ export type LedgerEntry = {
   coverage_detail?: { units: NB.CoverageUnit[]; jobs: string[]; why: string[] };
   /** A coverage record, written by the hub: the planned routes of its questions that nothing under them examined. */
   not_examined?: Array<{ source: string; method: string; why: string }>;
+  /** An external entry: where the material came from (LEDGER_SOURCE_CLASSES), written by the harness. */
+  source_class?: (typeof LEDGER_SOURCE_CLASSES)[number];
+  /** An external entry: who supplied it, when, from where, its sha256, what it may be used for (and, for a capture, its grant and request). */
+  provenance?: { supplied_by: string; at: string; from: string; sha256?: string; permitted_use: string } & Record<string, unknown>;
   by: string;
   authors: string[];
   at: string;
@@ -7596,6 +7612,8 @@ function ledgerV4Fields(e: LedgerEntry): Record<string, unknown> {
     ...(e.contrary_none_why ? { contrary_none_why: e.contrary_none_why } : {}),
     ...(e.unsupported_tokens?.length ? { unsupported_tokens: e.unsupported_tokens } : {}),
     ...coverageFields(e),
+    ...(e.source_class ? { source_class: e.source_class } : {}),
+    ...(e.provenance ? { provenance: canonicalValue(e.provenance) } : {}),
   };
 }
 
@@ -8235,6 +8253,7 @@ export async function recordEntry(ctx: SwarmContext, input: LedgerInput): Promis
   if (!(LEDGER_KINDS as readonly string[]).includes(kind)) {
     return { ok: false, reason: `kind must be one of ${LEDGER_KINDS.join(", ")}` };
   }
+  if (kind === "external") return { ok: false, reason: "external material is recorded by the harness when it enters the run (a capture the fetch service sealed, material the operator supplied), with its provenance: cite it (net:<k>/<n>, E-<seq>) and record what it establishes as a finding of yours" };
   if (kind === "answer") return recordAnswer(ctx, input);
   if (kind === "coverage") return recordCoverage(ctx, input);
   const absence = kind === "absence";
@@ -8432,6 +8451,44 @@ async function appendLedgerEntry(ctx: SwarmContext, held: { assertOwned(): Promi
   entries.push(entry);
   await renderLedger(ctx.sandboxRoot, await withAttestations(ctx.sandboxRoot, entries));
   return { ok: true, entry, merged: false, total: entries.length, ...(notes.length ? { note: notes.join("; ") } : {}) };
+}
+
+/**
+ * External material, recorded by the harness as it enters the run: a
+ * capture the fetch service sealed (source_class external_capture), material
+ * the operator supplied. Its refs resolve now; its provenance is part of the
+ * chained core. It is never an agent's: an agent cites it and records what
+ * it establishes. The same material again (the same refs and class) is the
+ * entry that stands.
+ */
+export async function recordExternal(sandboxRoot: string, input: { value: string; source: string; evidence: string; refs: string[]; source_class: (typeof LEDGER_SOURCE_CLASSES)[number]; provenance: NonNullable<LedgerEntry["provenance"]>; sensitive?: boolean }): Promise<LedgerResult> {
+  const value = String(input.value ?? "").trim();
+  if (!value || value.length > LEDGER_VALUE_MAX_CHARS) return { ok: false, reason: `an external entry says what the material is in 1 to ${LEDGER_VALUE_MAX_CHARS} characters` };
+  if (!(LEDGER_SOURCE_CLASSES as readonly string[]).includes(input.source_class)) return { ok: false, reason: `source_class is one of ${LEDGER_SOURCE_CLASSES.join(", ")}` };
+  if (!input.refs.length || input.refs.length > LEDGER_MAX_REFS) return { ok: false, reason: "an external entry cites the material it records" };
+  const checked = await checkRefs(sandboxRoot, input.refs);
+  if (!checked.ok) return checked;
+  return withTableLock(sandboxRoot, async (held) => {
+    const entries = await readLedger(sandboxRoot);
+    const same = entries.find((e) => e.kind === "external" && e.source_class === input.source_class && JSON.stringify(e.refs ?? []) === JSON.stringify(input.refs));
+    if (same) return { ok: true, entry: same, merged: true, total: entries.length, note: `#${same.seq} records it already` };
+    const entry: LedgerEntry = {
+      v: LEDGER_VERSION,
+      seq: (entries.at(-1)?.seq ?? 0) + 1,
+      kind: "external",
+      value,
+      source: input.source,
+      evidence: input.evidence,
+      refs: input.refs,
+      ...(input.sensitive ? { sensitive: true } : {}),
+      source_class: input.source_class,
+      provenance: input.provenance,
+      by: "system",
+      authors: ["system"],
+      at: new Date().toISOString(),
+    };
+    return appendLedgerEntry({ sandboxRoot, agentId: "system" }, held, entries, entry, []);
+  });
 }
 
 /**
@@ -8636,6 +8693,12 @@ export async function renderLedger(sandboxRoot: string, entries?: LedgerEntry[])
   // query and that scope only.
   lines.push("", "## Searched, not found", "", "| # | Looked for | Searched | Query, tool, scope | By |", "| --- | --- | --- | --- | --- |");
   for (const e of absences) lines.push(`| ${e.seq} | ${mdCell(e.value)}${mark(e)} | ${mdCell(e.source)} | ${ev(e)} | ${e.authors.join(", ")} |`);
+  const externals = all.filter((e) => e.kind === "external");
+  if (externals.length) {
+    // What entered from outside the evidence, with where from: a capture's hash proves its bytes, not their truth.
+    lines.push("", "## External material", "", "| # | What | Class | From | Provenance | By |", "| --- | --- | --- | --- | --- | --- |");
+    for (const e of externals) lines.push(`| ${e.seq} | ${mdCell(e.value)}${mark(e)} | ${e.source_class ?? ""} | ${mdCell(e.provenance?.from ?? e.source)} | ${ev(e)}${e.provenance?.sha256 ? ` · sha256 ${e.provenance.sha256}` : ""} | ${e.authors.join(", ")} |`);
+  }
   if (limitations.length) {
     lines.push("", "## Limitations", "", "| # | Not established | Reason | Scope | What was tried | By |", "| --- | --- | --- | --- | --- | --- |");
     for (const e of limitations) lines.push(`| ${e.seq} | ${mdCell(e.value)}${mark(e)} | ${e.reason ?? ""} | ${mdCell(e.source)} | ${ev(e)} | ${e.authors.join(", ")} |`);

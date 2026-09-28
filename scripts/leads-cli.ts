@@ -21,6 +21,8 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import * as L from "../extensions/leads.ts";
 import * as P from "../extensions/protocol.ts";
+import { readCasePolicy } from "./case-policy.ts";
+import { operatorSocket } from "./net-broker.ts";
 
 function words(v: L.LeadView): string {
   const needs = v.needs.length ? ` needs ${v.needs.map((n) => `${n.need}${n.met ? " (met)" : ` (unmet: ${n.why})`}`).join(", ")}` : "";
@@ -147,8 +149,17 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
       // Who had the lead last, for the board post: the holder, or the agent that closed it.
       const before = (await L.leadsSnapshot(sandbox)).state.leads.get(String(lead).toUpperCase());
       const to = before?.holder ?? before?.closed?.by ?? "all";
+      // A host allowed while the run goes on is a socket grant (tier 2,
+      // docs/adr/0012): refused before anything is written where the case
+      // policy permits none, and recorded as one, with what it is.
+      if (host && readCasePolicy(sandbox).sockets === "none") {
+        const policy = readCasePolicy(sandbox).policy;
+        process.stdout.write(`${JSON.stringify({ ok: false, reason: `--allow-host would make a socket grant (host and port, no method or path control, no content capture), which policy ${policy} does not permit; answer without it${policy === "ctf" || policy === "live_adversary" ? ", and grant the agent's network request instead (swarm.sh net <run> list)" : ""}` })}\n`);
+        process.exit(1);
+      }
       const r = await L.noteLead(sandbox, lead, text.join(" "), { ...(host ? { allowHost: host } : {}) });
-      process.stdout.write(`${JSON.stringify({ ...r, to })}\n`);
+      const socket = r.ok && host ? await operatorSocket(sandbox, { host, lead: r.lead.id, why: text.join(" ") }, { jobs: true }) : null;
+      process.stdout.write(`${JSON.stringify({ ...r, to, ...(socket?.ok ? { grant: socket.grant, socket: socket.text } : socket ? { socket_error: socket.reason } : {}) })}\n`);
       process.exit(r.ok ? 0 : 1);
       break;
     }

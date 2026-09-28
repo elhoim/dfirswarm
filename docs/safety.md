@@ -271,6 +271,46 @@ back to a host run on its own.
   refresh a token, so one revoked at the provider mid-run ends every seat
   that uses it.
   [ADR 0009](adr/0009-agents-live-in-microvms.md).
+- **The dynamic network (`--network dynamic`) is mediated, and says where it
+  stops.** ([ADR 0012](adr/0012-a-dynamic-network-decided-by-rules-and-made-on-the-host.md).)
+  No seat's VM gains a host: its msb policy is the one it booted with. A
+  lookup is a request the hub decides by rules alone, in a fixed order, under
+  the case policy the kickoff recorded (`network/policy.json`, read-only to
+  every VM); a request no rule can place is refused, never guessed at, and
+  the free text in it is read by no rule, so words in a request or in a
+  response change no decision. A grant is one exact method and URL, for one
+  principal (a seat, or one job), for minutes and a counted number of uses.
+  The fetch service on the host, which holds no evidence and no provider
+  key, makes that request and no other: its own headers only (no guest
+  header, token or cookie is forwarded), no body, the name resolved once and
+  refused when any address is private, loopback, link-local (the metadata
+  address), carrier-grade NAT, multicast or reserved (IPv6 forms too), the
+  connection made to the address it checked with TLS verified against the
+  name, no redirect followed beyond an adapter's declared referral hosts, no
+  CONNECT and no absolute-form request. A use is written to the fetch log
+  before a byte leaves, or it is not made; the grant is held to again after
+  every wait and DNS answer and before anything is published, so a grant
+  that ended while a fetch waited sends nothing; a body over its limit is
+  refused whole, and an oversize or stopped answer ends the fetch where it
+  is (no redirect past it). Its result is written before a capture is
+  published, and custody names any attempt with no recorded outcome. What
+  a seat is not given (a filtered adapter's whole response, a partial or
+  withheld body) is kept beside the run in `<sandbox>.netraw/`, in no VM's
+  reach. The evidence link counts only source bytes: an agent's own words,
+  in a ledger entry or a job's command, never authorise what it sends. A
+  case policy that permits no direct host also refuses the run's other
+  direct egress at kickoff (`--allow-host`, the package index of
+  `--allow-install` without `--no-pypi`, a pack's secret hosts). A job reaches the service over the one host port its worker is
+  booted with, with its own job's token. Every answer is sealed and enters
+  the ledger as `external` material. What it does not cover: a model
+  provider's own retrieval, which the harness does not see; the literal
+  evidence-link check, which a value converted by hand does not pass (it is
+  cited from the job that converted it); a socket grant (tier 2), which is
+  host and port only, with no method or path control and no content capture,
+  and says so, and is refused under `ctf`, `internal` and `live_adversary`;
+  and what a seat has already read, which a revocation cannot take back
+  (recorded as contamination when it was prohibited material). Host runs have
+  no dynamic network.
 - **What leaves with the package, and how a recipient checks it.**
   `swarm.sh package <id> --sign` signs the package's `MANIFEST.txt` with the
   examiner's ssh key (namespace `dfirswarm-package`) and puts the signature,

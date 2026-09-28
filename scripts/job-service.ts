@@ -41,7 +41,7 @@ import { chooseImage, readImageRecords, type ImageChoice, type ImageRecord } fro
 import { buildView, declaredScope, dropProjected, freeMb, PROJECTED_DIR, resolveScope, ScopeError, scopeKindOf, scopeManifestText, VIEW_DIR, type ScopeKind, type ScopeObject, type ViewEntry } from "./job-scope.ts";
 import { CANARY_NAME, OBSERVE_GUEST, observedRun, observeWanted, readObservation } from "./job-observe.ts";
 import type { Mount, WorkerSpec } from "./vm.ts";
-import { operatorHostsSync } from "../extensions/leads.ts";
+import { jobNetworkHosts } from "./net-grants.ts";
 
 export type JobKind = "tool" | "command" | "recipe" | "detect" | "import";
 
@@ -128,6 +128,42 @@ print(json.dumps({"import": rel, "copied_live": mode == "live", **({"copied_from
 sys.exit(3 if changed else 0)
 `;
 
+/**
+ * What a job with network grants runs to use one (docs/adr/0012): one call
+ * to the fetch service on the host, as this job, for one grant. The request
+ * is the grant's own; the body comes back and is written where the job says
+ * (the capture is sealed in the store either way), the answer's other
+ * fields to stderr. Exit 0 when the body was delivered.
+ *
+ *   python3 /job/net_fetch.py N-<k> [--out FILE]
+ */
+export const NET_FETCH_SCRIPT = `import base64, json, os, sys, urllib.request, urllib.error
+args = sys.argv[1:]
+if not args:
+    sys.exit("usage: net_fetch.py N-<k> [--out FILE]")
+grant, out = args[0], None
+if "--out" in args:
+    out = args[args.index("--out") + 1]
+req = urllib.request.Request(os.environ["SWARM_NET_URL"], data=json.dumps({"grant": grant}).encode(), method="POST",
+    headers={"content-type": "application/json", "authorization": "Bearer " + os.environ["SWARM_NET_TOKEN"], "x-dfirswarm-principal": os.environ["SWARM_NET_PRINCIPAL"]})
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+try:
+    raw = opener.open(req, timeout=180).read()
+except urllib.error.HTTPError as e:
+    raw = e.read()
+answer = json.loads(raw.decode("utf-8"))
+body = answer.pop("body_b64", None)
+sys.stderr.write(json.dumps(answer, indent=1) + "\\n")
+if body is not None:
+    data = base64.b64decode(body)
+    if out:
+        with open(out, "wb") as f:
+            f.write(data)
+    else:
+        sys.stdout.buffer.write(data)
+sys.exit(0 if answer.get("delivered") else 1)
+`;
+
 /** sha256: the object's content, when it is one file of the store (a derived or requested target). */
 export type Target = { paths: string[]; name?: string; ref?: string; sha256?: string };
 
@@ -164,6 +200,12 @@ export type JobSpec = {
   experimental?: boolean;
   /** The job image to run in, by profile (disk, memory, mobile, …), when the run declares job images; else the run's worker image. */
   profile?: string;
+  /**
+   * The network grants its requester gave it (N-<k>, each asked for a job:
+   * docs/adr/0012): bound to this job when its worker is made, which then
+   * reaches the fetch service on the host and nothing else of it.
+   */
+  net_grants?: string[];
 };
 
 export type Requester = { agent: string; name?: string; doing?: string };
@@ -282,6 +324,13 @@ export type JobServiceOptions = {
   notify: (to: string, body: string) => Promise<void>;
   identity: (agent: string) => Promise<{ name?: string; doing?: string }>;
   log?: (line: string) => void;
+  /**
+   * A job's network grants bound to it, and how its worker reaches the fetch
+   * service: the host port and the job's own token in its environment
+   * (net-broker.ts bindJobGrants). Absent, the run has no fetch service and
+   * a job given grants is not run.
+   */
+  netAccess?: (job: JobRecord) => Promise<{ ok: true; port: number; env: Record<string, string> } | { ok: false; reason: string }>;
 };
 
 const JOB_ID = /^j\d{6}$/;
@@ -524,7 +573,7 @@ export class JobService {
           // VM (a job with network may already have done what it does); its
           // output so far is kept, as that attempt's or as the job's result.
           const interrupted = { status: "interrupted" as const, exit: null, reason: "the hub stopped while it ran" };
-          if (j.attempt < 2 && !j.cancel_requested && j.spec.network === "off") {
+          if (j.attempt < 2 && !j.cancel_requested && j.spec.network === "off" && !j.spec.net_grants?.length) {
             await this.commit(j, interrupted, `attempt-${j.attempt}-interrupted`);
             await this.journal.append({ type: "job_retried", job: j.id, attempt: j.attempt + 1, why: "interrupted by the hub's restart" });
             Object.assign(j, { state: "accepted", attempt: j.attempt + 1 });
@@ -833,7 +882,11 @@ export class JobService {
       const listing = have.map((p) => (packsOf(p).length ? `${p} (the packs ${packsOf(p).join(", ")})` : p)).join("; ");
       return { reason: have.length ? `no job image "${profile}" in this run: ${listing}; a pack's name also picks its image (or leave profile out for the run's worker image)` : `this run declared no job images: leave profile out (every job runs in ${this.o.image})` };
     }
-    const base = { kind, inputs, scope: declared.kind, timeout_seconds: timeout, network, ...(raw.scratch ? { scratch: true } : {}), ...(raw.note ? { note: String(raw.note) } : {}), ...(raw.parent ? { parent: String(raw.parent) } : {}), ...(profile ? { profile } : {}) } as JobSpec;
+    // Network grants go with a command or a tool (a job whose code makes the request); at most eight.
+    const grants = Array.isArray(raw.net_grants) ? [...new Set(raw.net_grants.map((g) => String(g).trim().toUpperCase()))].filter(Boolean) : [];
+    if (grants.length && kind !== "command" && kind !== "tool") return { reason: "network grants go with a command or a tool job" };
+    if (grants.some((g) => !/^N-[1-9]\d{0,6}$/.test(g)) || grants.length > 8) return { reason: "net_grants names up to 8 grants, N-<k>" };
+    const base = { kind, inputs, scope: declared.kind, timeout_seconds: timeout, network, ...(raw.scratch ? { scratch: true } : {}), ...(raw.note ? { note: String(raw.note) } : {}), ...(raw.parent ? { parent: String(raw.parent) } : {}), ...(profile ? { profile } : {}), ...(grants.length ? { net_grants: grants } : {}) } as JobSpec;
     if (kind === "tool") {
       const args = raw.args && typeof raw.args === "object" && !Array.isArray(raw.args) ? raw.args : {};
       const checked = await this.toolCheck(String(raw.tool ?? ""), args);
@@ -1174,7 +1227,11 @@ export class JobService {
     // (swarm.sh lead <run> note L-n TEXT --allow-host HOST): an agent's own
     // VM keeps the network it booted with, and a job's worker is made new,
     // so this is where a host allowed while the run goes on is reached.
-    const hosts = [...new Set([...this.o.allowHosts, ...operatorHostsSync(this.S)])];
+    // The operator's socket grants (tier 2) for this job's requester decide
+    // (net-grants.ts jobNetworkHosts): a host the operator took back is not
+    // given to a new worker in any spelling, and a note's host line counts
+    // only where no grant was ever made for that host.
+    const hosts = jobNetworkHosts(this.S, this.o.allowHosts, job.requester.agent);
     return hosts.length ? { mode: "hosts", hosts } : { mode: "off" };
   }
 
@@ -1208,6 +1265,16 @@ export class JobService {
     // A job that ran keeps its image (a retry, a rerun); a new one is placed by its spec.
     const chosen = job.image ? { profile: null, ref: job.image, choice: job.image_choice ?? { how: "default" as const, why: "the image it is recorded to have run in" } } : await this.imageFor(job.spec);
     const network = this.network(job);
+    // Its network grants: bound to it, and the fetch service's port and the
+    // job's own token given to its worker. A job that cannot have them is not run.
+    let net: { port: number; env: Record<string, string> } | null = null;
+    if (job.spec.net_grants?.length) {
+      if (!this.o.netAccess) throw new Error(`not run: this run has no fetch service for its network grants (${job.spec.net_grants.join(", ")})`);
+      const acc = await this.o.netAccess(job);
+      if (!acc.ok) throw new Error(`not run: its network grants: ${acc.reason}`);
+      net = { port: acc.port, env: acc.env };
+      await writeFile(join(st.ctl, "net_fetch.py"), NET_FETCH_SCRIPT);
+    }
     const spec: WorkerSpec = {
       name: `dfs-${this.o.run}-job-${job.id}-${job.attempt}`,
       image: chosen.ref,
@@ -1220,8 +1287,9 @@ export class JobService {
       maxDurationSec: job.spec.timeout_seconds + 120,
       workdir: this.S,
       mounts: placed.mounts,
-      env: { JOB_ID: job.id, OUT: this.outPath(job), AGENT_ID: job.requester.agent, SWARM_SANDBOX: this.S, TZ: "UTC", LANG: "C.UTF-8", PYTHONDONTWRITEBYTECODE: "1", NO_COLOR: "1" },
+      env: { JOB_ID: job.id, OUT: this.outPath(job), AGENT_ID: job.requester.agent, SWARM_SANDBOX: this.S, TZ: "UTC", LANG: "C.UTF-8", PYTHONDONTWRITEBYTECODE: "1", NO_COLOR: "1", ...(net?.env ?? {}) },
       network,
+      ...(net ? { hostPorts: [net.port] } : {}),
       command: ["bash", "/job/run.sh"],
     };
     return { spec, accessible: placed.accessible, manifest: placed.manifest, view: placed.view, chosen, script };
@@ -1286,7 +1354,7 @@ export class JobService {
     const { spec: workerSpec, accessible, chosen, script } = plan;
     const worker = workerSpec.name;
     const network = workerSpec.network;
-    const netText = network.mode === "off" ? "none" : network.mode === "public" ? "every public host" : `the run's allowlist (${network.hosts.join(", ")})`;
+    const netText = `${network.mode === "off" ? "none" : network.mode === "public" ? "every public host" : `the run's allowlist (${network.hosts.join(", ")})`}${workerSpec.hostPorts?.length ? `; the fetch service on this host for its grants ${job.spec.net_grants?.join(", ")}, each request exactly as granted` : ""}`;
     // The declared scope's manifest beside the job's record, its sha256 on job_started.
     const scope: JobScope = { kind: scopeKindOf(job.spec) };
     if (plan.manifest) {

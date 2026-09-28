@@ -1,6 +1,6 @@
 import type { ArtifactIndex, Coverage, Dossier, ImagePreview, Job, OperatorAudit, PackageInfo, StartCheck, PackRow, EntryReviewAction, ReviewState, ExaminersView, EnrolledPerson, ReleaseStateView, PreparedRelease, VmReadiness, ModelList, SwarmRow, SwarmView, TimedPost, TracePage, WorkFile, FileVersion, Health, GoalSummary, StoreJobDetail, StoreJobsView, StoreLogPage,
   LibraryDocument,
-  LibraryEntry, GoalDocument, SwarmContract, ChecksReport, ReadinessReport, ForgedToolSource, InputsLibrary, LeadsPanelView, QuestionsPanelView } from "./types";
+  LibraryEntry, GoalDocument, SwarmContract, ChecksReport, ReadinessReport, ForgedToolSource, InputsLibrary, LeadsPanelView, QuestionsPanelView, NetworkPanelView } from "./types";
 
 /**
  * The token that lets this browser start, stop, reap and restore. The server
@@ -196,6 +196,10 @@ export const api = {
   questions: (id: string) => request<QuestionsPanelView>(`/api/swarms/${encodeURIComponent(id)}/questions`),
   /** An act on the question register (add, amend, priority, scope, withdraw, clarify_reply, accept), run as swarm.sh question. Needs the token. */
   questionAct: (id: string, payload: Record<string, unknown> & { action: string }) => postJson<Job>(`/api/swarms/${encodeURIComponent(id)}/questions`, payload),
+  /** The dynamic network: the case policy, what waits on the operator, requests, grants and captures. */
+  network: (id: string) => request<NetworkPanelView>(`/api/swarms/${encodeURIComponent(id)}/network`),
+  /** The operator's act on the network, with its reason: run as swarm.sh net. Needs the token. */
+  netAct: (id: string, payload: { action: "grant" | "deny" | "revoke" | "socket"; target?: string; why: string; host?: string; lead?: string }) => postJson<Job>(`/api/swarms/${encodeURIComponent(id)}/network`, payload),
   /** The run's tool jobs from the job service's journal: a page, with the totals over all of them. */
   storeJobs: (id: string, q: { offset: number; limit: number }) =>
     request<StoreJobsView>(`/api/swarms/${encodeURIComponent(id)}/jobs?offset=${q.offset}&limit=${q.limit}`),

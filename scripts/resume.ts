@@ -34,6 +34,7 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import * as P from "../extensions/protocol.ts";
 import { anchorResume, custodyAnchorPath } from "./custody.ts";
+import { FETCH_LOG, GRANTS_LOG } from "./net-grants.ts";
 
 const sha256 = (b: string | Buffer) => createHash("sha256").update(b).digest("hex");
 
@@ -225,6 +226,8 @@ async function chainHeads(sandbox: string): Promise<Record<string, { lines: numb
     disputes: lastHash(text(P.LEDGER_DISPUTES)),
     leads: lastHash(text("leads/leads.jsonl")),
     questions: lastHash(text("questions/questions.jsonl")),
+    grants: lastHash(text(GRANTS_LOG)),
+    fetches: lastHash(text(FETCH_LOG)),
     trace: { lines: trace.length, head: trace.length ? sha256(trace.at(-1)!) : null },
   };
 }

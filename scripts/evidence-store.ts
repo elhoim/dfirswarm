@@ -434,7 +434,7 @@ export type Resolved =
   | {
       ok: true;
       ref: string;
-      kind: "input" | "job" | "import" | "member" | "sha256" | "unresolved" | "tool" | "trace";
+      kind: "input" | "job" | "import" | "member" | "sha256" | "unresolved" | "tool" | "trace" | "net";
       sha256?: string;
       bytes?: number;
       path?: string;
@@ -483,13 +483,15 @@ async function jobStatus(dir: string): Promise<string | undefined> {
  * tool-output/<seat>/, by the trace line that recorded it) and
  * `trace:<sha256>` (one line of the trace, by its hash). Those two resolve
  * once sealed (the hub seals them when a record cites them; see
- * traceOrigin): to the import they were sealed as.
+ * traceOrigin): to the import they were sealed as. `net:<k>/<n>[/<file>]` is
+ * a capture the fetch service sealed (docs/adr/0012): external material,
+ * by its own manifest.
  */
 export async function resolveRef(sandbox: string, ref: string, opts: ResolveOptions = {}): Promise<Resolved> {
   const S = resolve(sandbox);
   const P = storePaths(S);
   const m = /^([a-z0-9]+):(.*)$/s.exec(ref.trim());
-  if (!m) return { ok: false, ref, reason: "a reference is kind:value (input:, job:, import:, member:, sha256:, tool:, trace:, unresolved:)" };
+  if (!m) return { ok: false, ref, reason: "a reference is kind:value (input:, job:, import:, member:, sha256:, net:, tool:, trace:, unresolved:)" };
   const [, kind, value] = m;
   if (kind === "tool" || kind === "trace") {
     const sealed = await sealedBrainOutput(S, ref.trim());
@@ -543,6 +545,21 @@ export async function resolveRef(sandbox: string, ref: string, opts: ResolveOpti
     const want = rel.startsWith("out/") ? [rel, rel.slice(4)] : [rel];
     const f = found.manifest.files.find((x) => want.some((w) => x.path === w || Buffer.from(x.path_b64, "base64").toString("utf8") === w));
     return f ? { ok: true, ref, kind, sha256: f.sha256, bytes: f.bytes, path: `${base}/out/${f.path}`, ...st0 } : { ok: false, ref, reason: `${rel} is not in ${kind} ${id}'s manifest` };
+  }
+  if (kind === "net") {
+    const nm = /^([1-9]\d{0,6})\/([1-9]\d{0,6})(?:\/(.+))?$/.exec(value);
+    if (!nm) return { ok: false, ref, reason: "net:<k>/<n>, or net:<k>/<n>/<file> (body, request.json, response.json, capture.json)" };
+    const base = `${STORE_REL}/net/${nm[1]}/${nm[2]}`;
+    const found = await readManifest(join(S, base, "manifest.json"));
+    if (!found) return { ok: false, ref, reason: `no capture ${nm[1]}/${nm[2]} is sealed (store/net/${nm[1]}/${nm[2]})` };
+    if (!nm[3]) return { ok: true, ref, kind: "net", path: base, bytes: found.manifest.totals.bytes };
+    const f = found.manifest.files.find((x) => x.path === nm[3]);
+    if (!f) return { ok: false, ref, reason: `capture ${nm[1]}/${nm[2]} has no ${nm[3]} (it has ${found.manifest.files.map((x) => x.path).join(", ")})` };
+    if (opts.verify) {
+      const sha = await sha256File(join(S, base, f.path)).catch(() => null);
+      if (sha !== f.sha256) return { ok: false, ref, reason: `${base}/${f.path} is not what was sealed` };
+    }
+    return { ok: true, ref, kind: "net", sha256: f.sha256, bytes: f.bytes, path: `${base}/${f.path}` };
   }
   if (kind === "member") {
     const mm = /^([a-z0-9-]+)#(\d+)$/.exec(value);

@@ -57,6 +57,7 @@
  * it rests on, why none of it counts and what fixes it); 2 on a usage error.
  */
 import { readFile } from "node:fs/promises";
+import { externalLineage } from "./net-broker.ts";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -440,6 +441,15 @@ export async function checkLedgerAnswers(sandbox: string, wanted: string[], exis
   for (const d of defects) lines.push(`${d.named_by.length ? `defect, named by ${d.named_by.map((n) => `#${n}`).join(", ")}` : "DEFECT"}: ${d.what}${d.named_by.length ? "" : `. Fix: ${d.fix}`}`);
   const unsupported = Object.entries(gate.unsupported);
   if (unsupported.length) lines.push(`tokens in no cited entry (counted, not failed; the release weighs them): ${unsupported.map(([seq, t]) => `#${seq}: ${t.join(", ")}`).join("; ")}`);
+  // What rests on external material (a capture the fetch service sealed, and
+  // whatever was derived from it: docs/adr/0012): named, never failed. A
+  // capture's hash proves its bytes, not their truth or their fit to the time
+  // of the events; an examiner weighs it.
+  const lineage = await externalLineage(S).catch(() => null);
+  if (lineage?.entries.size) {
+    const external = entries.filter((e) => e.kind === "answer" && !replaced.has(e.seq) && e.section && sections.includes(e.section) && lineage.entries.has(e.seq));
+    if (external.length) lines.push(`rests on external material (named, not failed; an external capture proves its bytes, not their truth): ${external.map((e) => `${e.section} #${e.seq} through ${(lineage.entries.get(e.seq) ?? []).join(", ")}`).join("; ")}`);
+  }
   const count = (o: LedgerOutcome) => Object.values(outcomes).filter((x) => x === o).length;
   lines.push(`sections: ${count("answered")} answered, ${count("limited")} examination-limited, ${count("inconclusive")} inconclusive, ${count("unanswered")} unanswered; ${defects.length} defect${defects.length === 1 ? "" : "s"}, ${defects.length - open.length} named by a limitation, ${open.length} open`);
   if (open.length) lines.push("The run ends once each open defect is fixed, or named by a standing limitation (citing E-<seq> of the answer, or with answers=[<section>] for a missing one); a named defect is still a defect, and the release counts it. The negative bar's defects (coverage_missing, negative_unreviewed, wording) are fixed, never named.");

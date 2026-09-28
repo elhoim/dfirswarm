@@ -69,6 +69,52 @@ All notable changes to this project. The format follows
   (`/api/jobs/<id>/output`) where the list carries its last 64 KiB.
 - [ADR 0013](docs/adr/0013-a-negative-is-bounded-and-a-cap-pauses.md).
 
+### Added: a dynamic network, decided by rules and made on the host
+
+- **`--network closed|dynamic|open` and a case policy** (`--policy
+  standard|live_adversary|internal|ctf`, with `--lookups`, `--contact`,
+  `--disclosure` overrides, or the same keys in the goal's metadata block).
+  `closed` stays the default and changes nothing; a contradictory policy is
+  refused at kickoff, and so is direct egress it does not permit
+  (`--allow-host`, `--allow-install` without `--no-pypi`, a pack's secret
+  hosts under `ctf`, `internal` or `live_adversary`). The policy is recorded in `network/policy.json`,
+  SWARM.md and the registry (`scripts/case-policy.ts`).
+- **`net_request`, `net_fetch`, `network`.** An agent asks for one bounded
+  lookup from the adapter catalogue (`network/adapters.json`: RDAP, crt.sh,
+  NVD, CISA KEV, CIRCL hashlookup, RIPEstat, Nominatim, Overpass, YouTube
+  oEmbed title, an evidence-linked HEAD, VirusTotal with a host-managed key).
+  The hub decides it in eight fixed steps with machine-readable reasons
+  (`scripts/net-policy.ts`); a refusal closes the avenue, never the lead,
+  and opens one operator item per host and lead. Credentials are looked for
+  in each URL component as sent and decoded, sensitive values anywhere
+  inside one; the evidence link counts only source bytes (never an agent's
+  own words); quotas are counted again under the issuing lock. Grants are
+  capabilities in `network/grants.jsonl`.
+- **The fetch service** (`scripts/net-fetch.ts`) makes exactly a grant's
+  request: its own headers only, DNS once with every address checked
+  public (IPv6 by its parsed bytes), TLS against the name, no redirect
+  beyond an adapter's referral hosts and none past an oversize or stopped
+  answer, no CONNECT, the use logged before it leaves, the grant held to
+  again after every wait and DNS answer and before publishing, an adapter's
+  rate slot reserved per host, an oversize body refused whole. The result is
+  written before the capture is published; an attempt left without one is
+  reconciled, and custody names any that remains. What no seat is given (a
+  filtered response, a partial or withheld body) is kept in
+  `<run>.netraw/`, outside every VM, verified by custody, packaged under
+  `network/raw/` and purged with the run. Jobs use it through `job_run net_grants`, on the one host
+  port their worker is booted with. Each answer is sealed as `net:<k>/<n>`
+  and recorded as a ledger entry of the new kind `external`
+  (`source_class: external_capture`); what derives from it stays external,
+  by what each job resolved (its scope manifest, digests, a broad scope),
+  never by how it spelled its inputs.
+- **Socket grants (tier 2)** say what they are; `lead note --allow-host`
+  makes one, and `--allow-host` names itself a static socket allowance. A
+  host is written one canonical way, and the grant, not the legacy host
+  line, decides whether it is in force.
+- **`swarm.sh net <run> list|grant|deny|revoke`** and the console's
+  **Network** tab; every act needs a reason. Custody seals both network
+  chains and re-hashes every capture. [ADR 0012](docs/adr/0012-a-dynamic-network-decided-by-rules-and-made-on-the-host.md).
+
 ### Added: the question register: what a run is asked, by the goal, an agent or a person, on one chain; analyst questions while it runs; the analyst and observer roles
 
 - **One register.** `questions/questions.jsonl` (rendered as

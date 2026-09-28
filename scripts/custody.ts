@@ -64,6 +64,7 @@ import { pathToFileURL } from "node:url";
 import { execFile } from "node:child_process";
 import { eventChainVerifier, specialKind, verifyAttestationChain, verifyDisputeChain, verifyLedgerChain } from "../extensions/protocol.ts";
 import { verifyLeadChain } from "../extensions/leads.ts";
+import { checkNetwork, FETCH_LOG, GRANTS_LOG, type NetworkCheck } from "./net-grants.ts";
 import { hashArtifacts, type ArtifactIndex } from "./artifacts.ts";
 import { checkStore, verifyJournalText, type StoreCheck } from "./evidence-store.ts";
 import {
@@ -655,6 +656,8 @@ export type Custody = {
     leads?: { lines: number; head: string | null };
     /** The question register (questions/questions.jsonl): absent from a verdict taken before it was sealed. */
     questions?: { lines: number; head: string | null };
+    /** The dynamic network's two chains (network/grants.jsonl, network/fetches.jsonl): absent from a verdict taken before they were sealed. */
+    network?: { grants: { lines: number; head: string | null }; fetches: { lines: number; head: string | null } };
     journal: { lines: number; head: string | null } | null;
     model_gateway: { lines: number; sha256: string | null } | null;
   };
@@ -666,6 +669,8 @@ export type Custody = {
   leads?: { lines: number; intact: boolean; detail: string } | null;
   /** The question register's events (questions/questions.jsonl): their own chain, sealed unsigned (a signed act carries its own signature); null when the run wrote none. */
   questions?: { lines: number; intact: boolean; detail: string } | null;
+  /** The dynamic network's records: both chains, and every sealed capture re-hashed; null when the run made no request (docs/adr/0012). */
+  network?: NetworkCheck | null;
   /** The operator's audit beside the registry, and each operator line on the trace matched to it. */
   operator: OperatorAudit;
   /** The acquisition hashes given at kickoff (--inputs-hashes), against the evidence as re-hashed now. */
@@ -720,6 +725,7 @@ export type CustodyState = {
   disputes?: Custody["disputes"];
   leads?: Custody["leads"];
   questions?: Custody["questions"];
+  network?: Custody["network"];
   operator?: Custody["operator"];
   acquisition?: Custody["acquisition"];
   models?: Custody["models"];
@@ -1569,6 +1575,10 @@ export async function takeCustody(sandboxInput: string, options: CustodyOptions 
   } else if ("why" in questionsRead && questionsRead.why !== "missing") {
     state.questions = { lines: 0, intact: false, detail: `the question register is ${questionsRead.why}` };
   } else state.questions = null;
+  // The dynamic network: requests, decisions and grants, and every fetch, each a chain of its own; each capture against its manifest.
+  const net = await checkNetwork(sandbox).catch(() => null);
+  state.network = net?.check ?? null;
+  if (state.seal && net) state.seal.network = net.seal;
   state.ledgerDone = true;
 
   // --- the model gateway's log -----------------------------------------------
@@ -1898,6 +1908,7 @@ export function verdictOf(state: CustodyState, incomplete: string | null): Custo
     disputes: state.disputes ?? null,
     leads: state.leads ?? null,
     questions: state.questions ?? null,
+    network: state.network ?? null,
     operator: state.operator ?? null,
     acquisition: state.acquisition ?? null,
     checks: [],
@@ -2000,6 +2011,12 @@ function summaryOf(c: Omit<Custody, "summary">, t: { traceProblem: string | null
   if (c.disputes) parts.push(c.disputes.intact ? `${plural(c.disputes.lines, "ledger dispute line")}, chain intact` : `LEDGER DISPUTES CHAIN BROKEN (${c.disputes.detail})`);
   if (c.leads) parts.push(c.leads.intact ? `${plural(c.leads.lines, "lead event")}, chain intact` : `LEAD REGISTER CHAIN BROKEN (${c.leads.detail})`);
   if (c.questions) parts.push(c.questions.intact ? `${plural(c.questions.lines, "question event")}, chain intact` : `QUESTION REGISTER CHAIN BROKEN (${c.questions.detail})`);
+  if (c.network) {
+    const n = c.network;
+    const bad = [...n.captures.mismatched, ...n.captures.missing];
+    const open = n.fetches.unresolved ?? [];
+    parts.push(n.grants.intact && n.fetches.intact && !bad.length && !open.length ? `network records: ${plural(n.grants.lines, "grant event")}, ${plural(n.fetches.lines, "fetch line")}, ${plural(n.captures.verified, "capture")} verified${n.captures.unpublished ? `, ${plural(n.captures.unpublished, "attempt")} recorded as not published` : ""}` : `NETWORK RECORDS DO NOT HOLD (${[...(n.grants.intact ? [] : [`grants: ${n.grants.detail}`]), ...(n.fetches.intact ? [] : [`fetches: ${n.fetches.detail}`]), ...(open.length ? [`attempts with no outcome: ${open.join(", ")}`] : []), ...(bad.length ? [`captures: ${bad.join(", ")}`] : [])].join("; ")})`);
+  }
   if (c.operator && !c.operator.intact) parts.push(`OPERATOR AUDIT CHAIN BROKEN (${c.operator.detail})`);
   if (c.model_gateway) {
     const g = c.model_gateway;
@@ -2349,7 +2366,7 @@ export function sealDrift(sealed: Partial<Seal> | undefined, now: Seal, journal:
   const drift: Array<{ what: string; sealed: string; now: string }> = [];
   const after: string[] = [];
   const notSealed: string[] = [];
-  if (!sealed) return { drift, after, not_sealed: ["the ledger", "the attestations", "the disputes", "the lead register", "the question register", "the store journal", "the model gateway log"] };
+  if (!sealed) return { drift, after, not_sealed: ["the ledger", "the attestations", "the disputes", "the lead register", "the question register", "the network records", "the store journal", "the model gateway log"] };
   const chain = (n: number, head: string | null, unit: string) => `${n} ${unit}, head ${head ?? "none"}`;
   if (!sealed.ledger) notSealed.push("the ledger");
   else if (sealed.ledger.entries !== now.ledger.entries || sealed.ledger.head !== now.ledger.head) {
@@ -2378,6 +2395,15 @@ export function sealDrift(sealed: Partial<Seal> | undefined, now: Seal, journal:
     if (nowQuestions.lines) notSealed.push("the question register");
   } else if (sealed.questions.lines !== nowQuestions.lines || sealed.questions.head !== nowQuestions.head) {
     drift.push({ what: "question register", sealed: chain(sealed.questions.lines, sealed.questions.head, "events"), now: chain(nowQuestions.lines, nowQuestions.head, "events") });
+  }
+  // The network records, the same way (docs/adr/0012).
+  const nowNet = now.network ?? { grants: { lines: 0, head: null }, fetches: { lines: 0, head: null } };
+  if (!sealed.network) {
+    if (nowNet.grants.lines || nowNet.fetches.lines) notSealed.push("the network records");
+  } else {
+    for (const k of ["grants", "fetches"] as const) {
+      if (sealed.network[k].lines !== nowNet[k].lines || sealed.network[k].head !== nowNet[k].head) drift.push({ what: `network ${k}`, sealed: chain(sealed.network[k].lines, sealed.network[k].head, "lines"), now: chain(nowNet[k].lines, nowNet[k].head, "lines") });
+    }
   }
   if (sealed.journal === undefined) notSealed.push("the store journal");
   else if (sealed.journal === null && now.journal) drift.push({ what: "store journal", sealed: "none", now: chain(now.journal.lines, now.journal.head, "lines") });
@@ -2422,7 +2448,7 @@ function lineHashField(text: string): string[] {
  * closing lines of a stop) is allowed; a line it sealed that changed or went
  * is not. Pure over the texts read.
  */
-export function sealPrefix(sealed: Partial<Seal> | undefined, now: { trace: string; ledger: string; attestations: string; disputes: string; leads: string; questions: string; journal: string | null; gateway: string | null }): { ok: boolean; held: string[]; broken: string[] } {
+export function sealPrefix(sealed: Partial<Seal> | undefined, now: { trace: string; ledger: string; attestations: string; disputes: string; leads: string; questions: string; grants: string; fetches: string; journal: string | null; gateway: string | null }): { ok: boolean; held: string[]; broken: string[] } {
   const held: string[] = [];
   const broken: string[] = [];
   if (!sealed) return { ok: false, held, broken: ["the verdict seals no chain (a custody from before the seal)"] };
@@ -2446,6 +2472,8 @@ export function sealPrefix(sealed: Partial<Seal> | undefined, now: { trace: stri
   check("the disputes", sealed.disputes?.lines, sealed.disputes?.head, lineHashField(now.disputes));
   check("the lead register", sealed.leads?.lines, sealed.leads?.head, lineHashField(now.leads));
   check("the question register", sealed.questions?.lines, sealed.questions?.head, lineHashField(now.questions));
+  check("the network grants", sealed.network?.grants.lines, sealed.network?.grants.head, lineHashField(now.grants));
+  check("the network fetches", sealed.network?.fetches.lines, sealed.network?.fetches.head, lineHashField(now.fetches));
   if (sealed.journal) check("the store journal", sealed.journal.lines, sealed.journal.head, now.journal === null ? [] : verifyJournalText(now.journal).hashes);
   if (sealed.model_gateway && now.gateway !== null) {
     const lines = now.gateway.split("\n").filter((l) => l.trim());
@@ -2485,6 +2513,8 @@ export async function earlierSeals(sandbox: string): Promise<EarlierSeal[]> {
     disputes: await read(join("ledger", "disputes.jsonl")),
     leads: await read(join("leads", "leads.jsonl")),
     questions: await read(join("questions", "questions.jsonl")),
+    grants: await read(GRANTS_LOG),
+    fetches: await read(FETCH_LOG),
     journal: "text" in journal ? journal.text : null,
     gateway: "text" in gateway ? gateway.text : null,
   };

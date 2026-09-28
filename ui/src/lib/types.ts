@@ -485,6 +485,8 @@ export type SwarmView = {
   questions?: QuestionsBrief | null;
   /** The run was started until solved: no wall clock, caps advisory, only the operator ends it. */
   until_solved?: boolean;
+  /** The dynamic network in brief; null when the network is closed and nothing was asked. Absent from a server that predates it. */
+  network?: NetworkBrief | null;
 };
 
 /** Mirrors `QuestionsBrief` in `scripts/ui/model.ts`. */
@@ -563,6 +565,28 @@ export type QuestionsPanelView = {
 
 /** Mirrors `LeadsBrief` in `scripts/ui/model.ts`. */
 export type LeadsBrief = { open: number; active: number; blocked: number; closed: number; waiting_on_operator: number; uncovered: number; chain_ok: boolean };
+
+/** The dynamic network in brief; mirrors `NetworkBrief` in `scripts/ui/network.ts`. */
+export type NetworkBrief = { mode: string; policy: string; waiting: number; grants_in_force: number; requests: number; chain_ok: boolean; contamination: number };
+
+/** One machine-readable reason of the network's policy engine (scripts/net-policy.ts). */
+export type NetReason = { step: number; rule: string; code: string; detail: string; overridable: boolean };
+
+/** The Network tab; mirrors `NetworkPanelView` in `scripts/ui/network.ts` (net-broker.ts NetListing). */
+export type NetworkPanelView = {
+  policy: { policy: string; network: string; lookups: string; contact: string; disclosure: Record<string, string>; evidence_link: string; sockets: string; category_override: boolean; legal: string; provider_retention: string };
+  lines: string[];
+  now: string;
+  service: { port: number | null; keyed: string[] };
+  chain: { ok: boolean; broken_at: number | null; reason: string | null; events: number };
+  fetch_chain: { ok: boolean; broken_at: number | null; reason: string | null; events: number };
+  items: Array<{ id: string; host: string; lead: string | null; requests: string[]; reasons: NetReason[]; opened_at: string; opened_by: string; closed: { how: string; by: string; at: string; why: string } | null }>;
+  requests: Array<{ id: string; at: string; by: string; principal: string; lead: string | null; type: string; host: string | null; adapter: string | null; url: string | null; purpose: string; evidence: string[]; decision: string | null; decided_by: string | null; reasons: NetReason[]; grant: string | null; item: string | null; why: string | null }>;
+  grants: Array<{ id: string; type: string; request: string | null; principal: string; lead: string | null; adapter: string | null; method: string | null; url: string | null; host: string; port: number; granted_by: string; why: string | null; granted_at: string; expires_at: string | null; status: string; status_why: string | null; uses: number; left: number | null; max_requests: number | null; max_bytes: number | null; bound: string | null; waived: string[] }>;
+  captures: Array<{ capture: string; grant: string; principal: string; method: string; url: string; at: string; status: number | null; bytes: number | null; sha256: string | null; complete: boolean; delivered: boolean; error: string | null; refused: string | null }>;
+  refusals: Array<{ at: string; grant: string | null; principal: string; code: string; detail: string }>;
+  contamination: Array<{ at: string; by: string; grant?: string; capture?: string; what: string; why: string; category?: string }>;
+};
 
 /** A lead as the register shows it; mirrors `LeadView` in `extensions/leads.ts`. */
 export type LeadView = {
@@ -878,7 +902,7 @@ export type TracePage = {
 
 export type Job = {
   id: string;
-  kind: "start" | "stop" | "reap" | "hold" | "release" | "export" | "package" | "verify" | "purge" | "review" | "lead" | "question" | "extend" | "resume";
+  kind: "start" | "stop" | "reap" | "hold" | "release" | "export" | "package" | "verify" | "purge" | "review" | "lead" | "question" | "extend" | "resume" | "net";
   argv: string[];
   status: "running" | "ok" | "failed";
   exit_code: number | null;
@@ -932,6 +956,8 @@ export type ChangeKind =
   | "leads"
   /** questions/: the question register. */
   | "questions"
+  /** network/: the dynamic network's requests, grants and fetches. */
+  | "network"
   /** A live VM run's hub wrote its status: the seats' states moved. */
   | "hub"
   | "other";

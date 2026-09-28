@@ -195,6 +195,7 @@ type CustodyLike = {
   disputes?: { lines: number; intact: boolean; detail: string } | null;
   leads?: { lines: number; intact: boolean; detail: string } | null;
   questions?: { lines: number; intact: boolean; detail: string } | null;
+  network?: { grants: { lines: number; intact: boolean; detail: string }; fetches: { lines: number; intact: boolean; detail: string; unresolved?: string[] }; captures: { sealed: number; verified: number; mismatched: string[]; missing: string[] } } | null;
   model_gateway: { intact: boolean; detail: string; refused?: string } | null;
   vms: Array<{ snapshot: unknown; stopped: boolean; kept: string | null }> | null;
   artifacts: { files: number; skipped: number } | null;
@@ -266,6 +267,12 @@ export function checksOf(c: CustodyLike, errors: Record<string, string> = {}): C
   if (c.disputes) add("ledger disputes", c.disputes.intact ? "passed" : "failed", c.disputes.intact ? undefined : c.disputes.detail, { checked: c.disputes.lines });
   if (c.leads) add("lead register", c.leads.intact ? "passed" : "failed", c.leads.intact ? undefined : c.leads.detail, { checked: c.leads.lines });
   if (c.questions) add("question register", c.questions.intact ? "passed" : "failed", c.questions.intact ? undefined : c.questions.detail, { checked: c.questions.lines });
+  // The dynamic network's records (docs/adr/0012): both chains, and each sealed capture re-hashed.
+  if (c.network) {
+    const n = c.network;
+    const bad = [...(n.grants.intact ? [] : [`grants: ${n.grants.detail}`]), ...(n.fetches.intact ? [] : [`fetches: ${n.fetches.detail}`]), ...(n.fetches.unresolved ?? []).map((x) => `${x} was attempted and has no recorded outcome`), ...n.captures.mismatched.map((x) => `${x} differs from its seal`), ...n.captures.missing.map((x) => `${x} is missing`)];
+    add("network records", bad.length ? "failed" : "passed", bad.length ? bad.join("; ") : undefined, { checked: n.grants.lines + n.fetches.lines + n.captures.sealed });
+  }
   // The model gateway log.
   if (c.model_gateway) add("model gateway log", c.model_gateway.refused ? "unavailable" : c.model_gateway.intact ? "passed" : "failed", c.model_gateway.intact ? undefined : c.model_gateway.detail);
   else add("model gateway log", "not_applicable", "the run's model calls did not go through the host's gateway");

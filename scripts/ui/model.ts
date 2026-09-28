@@ -34,6 +34,7 @@ import {
   type SwarmSummary,
 } from "../../extensions/observe.ts";
 import { agentDeadPath, agentDonePath, hostTime, readEventLog, readEventLogChecked, runOutcome, stopPolicyOf, type PostRecord, type SwarmEvent } from "../../extensions/protocol.ts";
+import { networkBrief, type NetworkBrief } from "./network.ts";
 import { awaitingInterpretation, leadsSnapshot, OPERATOR_REQUESTS, operatorHosts, questionCoverage, rankedLeads, type AwaitingJob, type LeadView } from "../../extensions/leads.ts";
 import { HUMAN_ORIGINS, originWords, questionViews, viewContext, type QuestionView, type TriageItem } from "../../extensions/questions.ts";
 import { verifySignedActs, type SignedAct } from "../questions-cli.ts";
@@ -567,6 +568,8 @@ export type SwarmView = Omit<SwarmDetail, "summary" | "agents" | "threads"> & {
   questions: QuestionsBrief | null;
   /** Whether the run was started until solved: no wall clock, caps advisory, only the operator ends it. */
   until_solved: boolean;
+  /** The dynamic network in brief, for the header: its mode and what waits on the operator. Null when the network is closed and nothing was asked. */
+  network: NetworkBrief | null;
 };
 
 /** The question register in numbers: in scope, asked by people, waiting for triage, clarifications not answered. */
@@ -1207,6 +1210,7 @@ export async function readSwarmView(runsDir: string, id: string, traceLimit = 40
     leads: await leadsBrief(sandbox),
     questions: await questionsBrief(sandbox),
     until_solved: detail.budget.until_solved === true,
+    network: await networkBrief(sandbox).catch(() => null),
   };
 }
 
