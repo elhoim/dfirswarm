@@ -269,7 +269,7 @@ export function createSigning(d: SigningDeps) {
     async enroll(body: Record<string, unknown>) {
       const kind = body.kind === "fido" || body.kind === "pkcs11" ? body.kind : body.kind === "ssh" ? "ssh" : null;
       if (!kind) throw new SigningError(400, "kind is ssh, fido or pkcs11");
-      const role = body.role === "reviewer" ? "reviewer" : "examiner";
+      const role = (["reviewer", "analyst", "observer"] as const).find((r) => r === body.role) ?? "examiner";
       const args = ["enroll", "--name", str(body.name, "name", 200), "--organisation", str(body.organisation, "organisation", 200), "--competence", str(body.competence, "competence"), "--role", role, "--json"];
       if (body.id !== undefined && body.id !== "") args.push("--id", idOf(body.id, "id"));
       let secret: Buffer | null = null;

@@ -66,7 +66,7 @@ out="$(swarm review srv1 --sign --yes)"; rc=$?
 set -e
 [[ $rc -ne 0 ]] && grep -q 'no examiner is enrolled on this install' <<<"$out" || fail "a sign-off with no enrolled examiner was taken (rc $rc): $out"
 out="$(swarm examiner enroll --name "H. Examiner" --organisation "Case Lab" --competence "Ten years of casework" --generate-key --no-passphrase </dev/null)" || fail "enrolment failed: $out"
-grep -q "For the organisation's signer register" <<<"$out" && grep -q 'SHA256:' <<<"$out" && grep -q 'h-examiner namespaces="dfirswarm-release,dfirswarm-package" ssh-ed25519 ' <<<"$out" || fail "enrolment printed no fingerprint or register line: $out"
+grep -q "For the organisation's signer register" <<<"$out" && grep -q 'SHA256:' <<<"$out" && grep -q 'h-examiner namespaces="dfirswarm-release,dfirswarm-package,dfirswarm-question" ssh-ed25519 ' <<<"$out" || fail "enrolment printed no fingerprint or register line: $out"
 grep -q 'PRIVATE KEY' <<<"$out" && fail "enrolment printed a private key"
 # A sign-off is over the report the examiner read: with none there, it is refused.
 set +e

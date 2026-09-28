@@ -41,7 +41,7 @@ function ctxOf(r: StoppedRun) {
 function layout(r: StoppedRun) {
   return runLayout(r.root, reviewsPath(r.runs, r.id), custodyAnchorPath(r.root));
 }
-function enrolSsh(r: StoppedRun, o: { name?: string; id?: string; role?: "examiner" | "reviewer"; noPassphrase?: boolean } = {}): Person {
+function enrolSsh(r: StoppedRun, o: { name?: string; id?: string; role?: "examiner" | "reviewer" | "analyst" | "observer"; noPassphrase?: boolean } = {}): Person {
   const e = enrollPerson({ name: o.name ?? "Ada Examiner", organisation: "Lab One", competence: "GCFA; ten years of casework", generateKey: true, noPassphrase: o.noPassphrase, role: o.role, id: o.id }, r.home, o.noPassphrase ? null : secret());
   assert.ok(!("why" in e), JSON.stringify(e));
   return (e as { person: Person }).person;
@@ -127,12 +127,18 @@ test("roles: a reviewer's register line is in the review namespace, a reviewer n
   const r = await stoppedRun();
   const rev = enrolSsh(r, { name: "Bo Reviewer", role: "reviewer" });
   assert.equal(rev.role, "reviewer");
-  assert.match(allowedSignersLine(rev), /^bo-reviewer namespaces="dfirswarm-review" ssh-ed25519 /);
+  assert.match(allowedSignersLine(rev), /^bo-reviewer namespaces="dfirswarm-review,dfirswarm-question" ssh-ed25519 /);
   const ex = enrolSsh(r);
-  assert.match(allowedSignersLine(ex), /namespaces="dfirswarm-release,dfirswarm-package"/);
+  assert.match(allowedSignersLine(ex), /namespaces="dfirswarm-release,dfirswarm-package,dfirswarm-question"/);
   assert.deepEqual(listPeople(r.home, "reviewer").map((p) => p.id), ["bo-reviewer"]);
   await dispose(r);
   await assert.rejects(prepareRelease(ctxOf(r), { examiner: "bo-reviewer", home: r.home }), /enrolled as a technical reviewer, not an examiner/);
+  // An analyst adds questions to a case and never signs a release; neither does an observer.
+  const ana = enrolSsh(r, { name: "Ana Lyst", role: "analyst" });
+  assert.match(allowedSignersLine(ana), /^ana-lyst namespaces="dfirswarm-question" ssh-ed25519 /);
+  await assert.rejects(prepareRelease(ctxOf(r), { examiner: "ana-lyst", home: r.home }), /enrolled as an analyst, not an examiner: an analyst adds questions to a case, and never signs a release/);
+  enrolSsh(r, { name: "Oli Server", role: "observer" });
+  await assert.rejects(prepareRelease(ctxOf(r), { examiner: "oli-server", home: r.home }), /enrolled as an observer, not an examiner/);
   // An enrolment written before kinds and roles.
   const legacy = { kind: "examiner", v: 1, id: "old-one", name: "Old One", organisation: "Lab", competence: "x", principal: "old-one", key: { path: "/nowhere/key", public: ex.key.kind === "ssh" ? ex.key.public : "", fingerprint: ex.key.fingerprint, generated: true }, tsa: null, enrolled_at: "2026-09-01T00:00:00Z", enrolled_by: { os_user: "u", host: "h" } };
   writeFileSync(join(r.home, "examiners", "old-one.json"), JSON.stringify(legacy));

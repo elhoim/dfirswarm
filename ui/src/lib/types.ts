@@ -995,7 +995,7 @@ export type EnrolledPerson = {
   name: string;
   organisation: string;
   competence: string;
-  role: "examiner" | "reviewer";
+  role: "examiner" | "reviewer" | "analyst" | "observer";
   principal: string;
   key: {
     kind: "ssh" | "fido" | "pkcs11";

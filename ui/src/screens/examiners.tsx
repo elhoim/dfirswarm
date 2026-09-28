@@ -134,7 +134,12 @@ function EnrolForm({ signing, onDone }: { signing: ExaminersView["signing"]; onD
       <div className="grid gap-3 sm:grid-cols-2">
         <div className="space-y-1">
           <Label>Role</Label>
-          <Select value={role} onChange={setRole} aria-label="Role" options={[{ value: "examiner", label: "Examiner", hint: "adopts a report and signs its release" }, { value: "reviewer", label: "Technical reviewer", hint: "signs their own review of the methods" }]} />
+          <Select value={role} onChange={setRole} aria-label="Role" options={[
+              { value: "examiner", label: "Examiner", hint: "adopts a report and signs its release" },
+              { value: "reviewer", label: "Technical reviewer", hint: "signs their own review of the methods" },
+              { value: "analyst", label: "Analyst", hint: "adds questions to a running case; signs no release" },
+              { value: "observer", label: "Observer", hint: "proposes questions for the examiner's triage" },
+            ]} />
         </div>
         <div className="space-y-1">
           <Label>Key</Label>
@@ -187,7 +192,7 @@ function EnrolForm({ signing, onDone }: { signing: ExaminersView["signing"]; onD
       {done ? (
         <InlineNote tone="ok">
           <div>
-            Enrolled {done.person.name} ({done.person.id}) as {done.person.role === "examiner" ? "an examiner" : "a technical reviewer"}: {done.person.words}.
+            Enrolled {done.person.name} ({done.person.id}) as {done.person.role === "examiner" ? "an examiner" : done.person.role === "reviewer" ? "a technical reviewer" : done.person.role === "analyst" ? "an analyst" : "an observer"}: {done.person.words}.
           </div>
           {done.register ? (
             <div className="mt-1">

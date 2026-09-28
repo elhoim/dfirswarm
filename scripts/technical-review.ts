@@ -62,7 +62,7 @@ import {
   type ReviewLine,
   type ReviewOutcome,
 } from "./review.ts";
-import { checkSshSignature, consoleRefusal, dfirswarmHome, keyNeeds, keyWords, loadExaminer, loadPerson, signAs, REVIEW_NAMESPACE, type Person } from "./signers.ts";
+import { checkSshSignature, consoleRefusal, dfirswarmHome, keyNeeds, keyWords, loadExaminer, loadPerson, roleWords, signAs, REVIEW_NAMESPACE, type Person } from "./signers.ts";
 import { confirmOnTty, hasTty, readFromTty, readSecretFromFd, wipe } from "./secret-io.ts";
 
 const sha256 = (b: string | Buffer) => createHash("sha256").update(b).digest("hex");
@@ -300,7 +300,7 @@ export async function recordSigned(runsDir: string, run: string, sandbox: string
   const home = o.home ?? dfirswarmHome();
   const r = loadPerson(reviewerId, home, "reviewer");
   if ("why" in r) throw new Error(r.why);
-  if (r.person.role !== "reviewer") throw new Error(`${r.person.name} is enrolled as an examiner: a technical review is signed by an enrolled reviewer`);
+  if (r.person.role !== "reviewer") throw new Error(`${r.person.name} is enrolled as ${roleWords(r.person.role)}: a technical review is signed by an enrolled reviewer`);
   if (o.via === "console") {
     const refused = consoleRefusal(r.person);
     if (refused) throw new Error(refused);
@@ -316,7 +316,7 @@ export async function countersignRecord(runsDir: string, run: string, sandbox: s
   const r = loadPerson(reviewerId, home, "reviewer");
   if ("why" in r) throw new Error(r.why);
   const reviewer = r.person;
-  if (reviewer.role !== "reviewer") throw new Error(`${reviewer.name} is enrolled as an examiner: a countersign is a technical reviewer's`);
+  if (reviewer.role !== "reviewer") throw new Error(`${reviewer.name} is enrolled as ${roleWords(reviewer.role)}: a countersign is a technical reviewer's`);
   if (o.via === "console") {
     const refused = consoleRefusal(reviewer);
     if (refused) throw new Error(refused);
@@ -450,7 +450,7 @@ async function main(argv: string[]): Promise<number> {
         const enrolled = loadPerson(opt(args, "--reviewer") ?? "", home, "reviewer");
         if ("why" in enrolled) throw new Error(enrolled.why);
         const reviewer = enrolled.person;
-        if (reviewer.role !== "reviewer") throw new Error(`${reviewer.name} is enrolled as an examiner: a countersign is a technical reviewer's`);
+        if (reviewer.role !== "reviewer") throw new Error(`${reviewer.name} is enrolled as ${roleWords(reviewer.role)}: a countersign is a technical reviewer's`);
         if (via === "console") {
           const refused = consoleRefusal(reviewer);
           if (refused) throw new Error(refused);
@@ -480,7 +480,7 @@ async function main(argv: string[]): Promise<number> {
         const enrolled = loadPerson(opt(args, "--reviewer") ?? "", home, "reviewer");
         if ("why" in enrolled) throw new Error(enrolled.why);
         const reviewer = enrolled.person;
-        if (reviewer.role !== "reviewer") throw new Error(`${reviewer.name} is enrolled as an examiner: a technical review is a reviewer's`);
+        if (reviewer.role !== "reviewer") throw new Error(`${reviewer.name} is enrolled as ${roleWords(reviewer.role)}: a technical review is a reviewer's`);
         const place = packagePlace(pkg);
         const input = recordInput(args);
         const lines = reviewLinesAt(place);

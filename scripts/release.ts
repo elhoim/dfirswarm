@@ -85,7 +85,7 @@ import {
 } from "./release-record.ts";
 import { mirrorRelease, timestampRelease } from "./release-witness.ts";
 import { otsRelease, transparencyRelease } from "./release-adapters.ts";
-import { checkSshSignature, consoleRefusal, dfirswarmHome, keyNeeds, keyWords, listExaminers, loadExaminer, machineSigner, signAs, sshKeygen, sshSign, verifyAs, RELEASE_NAMESPACE, type Examiner, type MachineSigner, type Person } from "./signers.ts";
+import { checkSshSignature, consoleRefusal, dfirswarmHome, keyNeeds, keyWords, listExaminers, loadExaminer, machineSigner, roleWords, signAs, sshKeygen, sshSign, verifyAs, RELEASE_NAMESPACE, type Examiner, type MachineSigner, type Person } from "./signers.ts";
 import { opensslBinary } from "./pkcs11.ts";
 import { confirmOnTty, hasTty, readFromTty, readSecretFromFd, wipe } from "./secret-io.ts";
 import { readLedger, supersededBy, verifyAttestationChain, verifyDisputeChain, verifyLedgerChain, type LedgerEntry } from "../extensions/protocol.ts";
@@ -623,7 +623,13 @@ function pickExaminer(o: { examiner?: string; home: string }): { examiner: Perso
     ex = all.length === 1 ? loadExaminer(all[0].id, o.home) : { why: all.length ? `${all.length} examiners are enrolled (${all.map((e) => e.id).join(", ")}): name one (--examiner ID)` : "no examiner is enrolled on this install: swarm.sh examiner enroll" };
   }
   if ("why" in ex) throw new Error(`a release is signed by an enrolled examiner: ${ex.why}`);
-  if (ex.examiner.role !== "examiner") throw new Error(`${ex.examiner.name} (${ex.examiner.id}) is enrolled as a technical reviewer, not an examiner: a reviewer signs their own review, never a release`);
+  if (ex.examiner.role !== "examiner") {
+    throw new Error(
+      ex.examiner.role === "reviewer"
+        ? `${ex.examiner.name} (${ex.examiner.id}) is enrolled as a technical reviewer, not an examiner: a reviewer signs their own review, never a release`
+        : `${ex.examiner.name} (${ex.examiner.id}) is enrolled as ${roleWords(ex.examiner.role)}, not an examiner: ${ex.examiner.role === "analyst" ? "an analyst adds questions to a case" : "an observer proposes questions"}, and never signs a release`,
+    );
+  }
   const k = ex.examiner.key;
   if (k.kind !== "pkcs11" && !existsSync(k.path)) throw new Error(`the examiner's key is not at ${k.path}`);
   if (k.kind === "pkcs11" && !existsSync(k.module)) throw new Error(`the examiner's PKCS#11 module is not at ${k.module}`);

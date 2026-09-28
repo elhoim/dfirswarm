@@ -82,7 +82,7 @@ test("an examiner is enrolled with a name, an organisation, a competence stateme
   assert.equal(r.examiner.role, "examiner");
   assert.ok(existsSync(key.path) && key.path.startsWith(join(home, "examiners", "keys")));
   assert.equal(statSync(r.file).mode & 0o777, 0o600);
-  assert.equal(r.register, `ada-examiner namespaces="dfirswarm-release,dfirswarm-package" ${key.public.split(" ").slice(0, 2).join(" ")}`);
+  assert.equal(r.register, `ada-examiner namespaces="dfirswarm-release,dfirswarm-package,dfirswarm-question" ${key.public.split(" ").slice(0, 2).join(" ")}`);
   assert.equal(allowedSignersLine(r.examiner), r.register);
   assert.doesNotMatch(readFileSync(r.file, "utf8"), /PRIVATE KEY/, "the record names the key's path, never its bytes");
   // Enrolled once under an id: a new key is a new enrolment.

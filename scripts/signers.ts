@@ -10,7 +10,12 @@
  *   seals is adopted by no one;
  * - a person enrolled on this install on purpose (`swarm.sh examiner
  *   enroll`), in one role: an examiner, who adopts a report and signs its
- *   release, or a technical reviewer, who signs their own review record.
+ *   release; a technical reviewer, who signs their own review record; an
+ *   analyst, who adds questions to a running case and signs nothing else; or
+ *   an observer, who proposes questions for the examiner's triage. Any of
+ *   them may sign their own acts on the question register
+ *   (extensions/questions.ts, namespace dfirswarm-question); only an
+ *   examiner signs a release.
  *   Name, organisation, a competence statement, and one key of one kind:
  *   - ssh: an ed25519 key file with a passphrase (made here with
  *     --generate-key, or given with --key and checked to be encrypted;
@@ -34,7 +39,7 @@
  * their fd 3 (scripts/secret-io.ts), never in argv, the environment or a
  * file.
  *
- *   node scripts/signers.ts enroll --name NAME --organisation ORG --competence TEXT [--role examiner|reviewer]
+ *   node scripts/signers.ts enroll --name NAME --organisation ORG --competence TEXT [--role examiner|reviewer|analyst|observer]
  *        (--generate-key [--no-passphrase] | --key FILE [--no-passphrase]
  *         | --fido [--fido-verify-required] [--fido-resident]
  *         | --pkcs11-module PATH (--pkcs11-id HEX | --pkcs11-uri URI) [--pkcs11-chain FILE])
@@ -54,6 +59,8 @@ import { hasTty, readFromTty, readSecretFromFd, runDetachedWithInput, runWithSec
 export const RELEASE_NAMESPACE = "dfirswarm-release";
 /** The namespace a technical reviewer's countersignature is made in. */
 export const REVIEW_NAMESPACE = "dfirswarm-review";
+/** The namespace a person's act on the question register is signed in (extensions/questions.ts QUESTION_NAMESPACE). */
+export const QUESTION_NAMESPACE = "dfirswarm-question";
 
 const sha256 = (b: string | Buffer) => createHash("sha256").update(b).digest("hex");
 
@@ -302,7 +309,13 @@ export function machineSigner(home = dfirswarmHome(), o: { create?: boolean } = 
 
 // --- people: examiners and technical reviewers ------------------------------------------------------
 
-export type Role = "examiner" | "reviewer";
+export const ROLES = ["examiner", "reviewer", "analyst", "observer"] as const;
+export type Role = (typeof ROLES)[number];
+
+/** A role as a sentence names it. */
+export function roleWords(role: Role): string {
+  return role === "examiner" ? "an examiner" : role === "reviewer" ? "a technical reviewer" : role === "analyst" ? "an analyst" : "an observer";
+}
 export type KeyKind = "ssh" | "fido" | "pkcs11";
 
 export type SshKey = {
@@ -367,7 +380,13 @@ export type Person = {
   organisation: string;
   competence: string;
   principal: string;
-  /** examiner: adopts a report and signs its release; reviewer: signs their own technical review. One person who is both enrols twice, and is refused on one run in both roles. */
+  /**
+   * examiner: adopts a report and signs its release; reviewer: signs their own
+   * technical review; analyst: adds questions to a running case (in scope
+   * inside an objective), signs no release; observer: proposes questions for
+   * triage. One person in two roles enrols twice, and is refused on one run
+   * as examiner and reviewer both.
+   */
   role: Role;
   key: PersonKey;
   /** The RFC 3161 authority the examiner's releases are timestamped by, and its CA certificates. */
@@ -388,7 +407,8 @@ export function examinersDir(home = dfirswarmHome()): string {
 /** The allowed-signers line an organisation's register carries for this person (a certificate has none: its issuer vouches for it). */
 export function allowedSignersLine(e: Pick<Person, "principal" | "key"> & { role?: Role }): string {
   if (e.key.kind === "pkcs11") return "";
-  const ns = e.role === "reviewer" ? REVIEW_NAMESPACE : `${RELEASE_NAMESPACE},dfirswarm-package`;
+  // Everyone enrolled may sign their own acts on the question register.
+  const ns = e.role === "reviewer" ? `${REVIEW_NAMESPACE},${QUESTION_NAMESPACE}` : e.role === "analyst" || e.role === "observer" ? QUESTION_NAMESPACE : `${RELEASE_NAMESPACE},dfirswarm-package,${QUESTION_NAMESPACE}`;
   return `${e.principal} namespaces="${ns}" ${publicKeyCore(e.key.public)}`;
 }
 
@@ -536,8 +556,8 @@ export function enrollPerson(input: EnrollInput, home = dfirswarmHome(), secret:
   const role: Role = input.role ?? "examiner";
   if (!name) return { why: "a name is required (--name)" };
   if (!organisation) return { why: `the organisation the ${role} signs for is required (--organisation)` };
-  if (!competence) return { why: `a competence statement is required (--competence): what qualifies this person to ${role === "reviewer" ? "review a forensic examination's methods" : "adopt a forensic report"}` };
-  if (role !== "examiner" && role !== "reviewer") return { why: `--role is examiner or reviewer, not ${JSON.stringify(role)}` };
+  if (!competence) return { why: `a competence statement is required (--competence): what qualifies this person to ${role === "reviewer" ? "review a forensic examination's methods" : role === "examiner" ? "adopt a forensic report" : role === "analyst" ? "ask the examination questions" : "observe the examination"}` };
+  if (!(ROLES as readonly string[]).includes(role)) return { why: `--role is ${ROLES.join(", ")}, not ${JSON.stringify(role)}` };
   const kind = kindOf(input);
   if (typeof kind !== "string") return kind;
   if (kind === "ssh" && !input.key === !input.generateKey) return { why: "give the key (--key FILE) or ask for one to be made (--generate-key), one of the two; or --fido, or --pkcs11-module" };
@@ -555,7 +575,7 @@ export function enrollPerson(input: EnrollInput, home = dfirswarmHome(), secret:
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   chmodSync(dir, 0o700);
   const keys = join(dir, "keys");
-  const ns = role === "reviewer" ? REVIEW_NAMESPACE : RELEASE_NAMESPACE;
+  const ns = role === "reviewer" ? REVIEW_NAMESPACE : role === "examiner" ? RELEASE_NAMESPACE : QUESTION_NAMESPACE;
   let key: PersonKey;
   if (kind === "pkcs11") {
     const uri = tokenUri({ uri: input.pkcs11Uri, id: input.pkcs11Id });
@@ -756,7 +776,7 @@ function opt(args: string[], name: string): string | undefined {
 
 function describe(e: Person): string[] {
   const lines = [
-    `${e.role === "reviewer" ? "Reviewer:    " : "Examiner:    "} ${e.name} (${e.id}), ${e.organisation}`,
+    `${e.role === "reviewer" ? "Reviewer:    " : e.role === "analyst" ? "Analyst:     " : e.role === "observer" ? "Observer:    " : "Examiner:    "} ${e.name} (${e.id}), ${e.organisation}`,
     `Competence:   ${e.competence}`,
     `Key:          ${keyWords(e.key)}`,
     `Principal:    ${e.principal}`,
