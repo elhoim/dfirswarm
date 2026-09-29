@@ -68,9 +68,12 @@
  * The source-first review rule (docs/adr/0015): where the checkout has it,
  * the projection counts the recorded established attests of answers that
  * claim established and names each the rule would cap, with its codes
- * (no_discriminator, locator_unverified, derivation_unverified,
- * no_locator_or_derivation). The recorded strengths are the run's and stay
- * as they were: this says what the rule would have done at each attest.
+ * (no_discriminator, locator_unverified, derivation_unverified; a checkout
+ * before the Fable review of the limits branch capped
+ * no_locator_or_derivation too), and each it would warn and not cap
+ * (no_locator_or_derivation, `warned`). The recorded strengths are the
+ * run's and stay as they were: this says what the rule would have done at
+ * each attest.
  * Each evidence addition's reverse sweep (docs/adr/0013), counted per
  * question; `--reverse-sweep` gives an addition that has none (a run from
  * before it) the line this checkout's store sweep computes over the copy's
@@ -199,7 +202,7 @@ export type Projection = {
    * and are not changed: this says what the rule would have done at each
    * attest. Null for a checkout without the rule.
    */
-  review_caps?: { established: number; capped: Array<{ section: string; answer: number; by: string; standing: boolean; material: boolean; codes: string[] }> } | null;
+  review_caps?: { established: number; capped: Array<{ section: string; answer: number; by: string; standing: boolean; material: boolean; codes: string[] }>; warned?: Array<{ section: string; answer: number; by: string; standing: boolean; material: boolean; codes: string[] }> } | null;
   /**
    * Each evidence addition's reverse sweep, as the checkout reads the
    * copy's sweeps (store-sweep.ts readImportSweeps, docs/adr/0013): the
@@ -348,6 +351,7 @@ const WARNING_CODES: ReadonlyArray<[string, RegExp]> = [
   ["premise_withdrawn", /\) cites P-\d+, withdrawn at /],
   ["premise_inconsistent", /\) (?:assumes|contradicts) P-\d+ \(revision \d+\), which #\d+ .*over scopes that overlap \(a question not material: warned, never held\)/],
   ["part_omitted", /\) leaves out (?:a part|parts) of the question its reviews? names?:/],
+  ["no_locator_or_derivation", /\) is held established by .* on a review that vouches for no value by bytes or by derivation/],
 ];
 
 /** A warning line's code and section, by the harness's own words for it. */
@@ -704,9 +708,12 @@ async function reviewCapsOf(Pm: Mod | null, S: string): Promise<Projection["revi
       const bar = fn(Pm, "questionBar") ? ((await Promise.resolve(fn(Pm, "questionBar")!(S, id)).catch(() => null)) as { material: boolean } | null) : null;
       material.set(e.section, bar?.material ?? true);
     }
-    const r = (await rule(S, e, a.answer_review, { material: material.get(e.section)! })) as { caps: Array<{ code: string }> };
+    const r = (await rule(S, e, a.answer_review, { material: material.get(e.section)! })) as { caps: Array<{ code: string }>; unlocated?: { code: string } | null };
     const codes = [...new Set(r.caps.map((c) => c.code))].sort();
-    if (codes.length) out.capped.push({ section: e.section, answer: e.seq, by: a.by, standing: !replaced.has(e.seq), material: material.get(e.section)!, codes });
+    const row = { section: e.section, answer: e.seq, by: a.by, standing: !replaced.has(e.seq), material: material.get(e.section)! };
+    if (codes.length) out.capped.push({ ...row, codes });
+    // What the checkout warns of and does not cap (a review with neither a locator nor a derivation): a checkout whose rule capped it has no `unlocated`.
+    if (r.unlocated) (out.warned ??= []).push({ ...row, codes: [r.unlocated.code] });
   }
   return out;
 }
@@ -1447,8 +1454,9 @@ function preparationWords(p: PreparationProjection): string[] {
 
 /** The source-first review rule over the recorded established attests, values-free: how many, and each it would cap, with its codes. */
 function reviewCapWords(r: NonNullable<Projection["review_caps"]>): string[] {
-  const out = [`  review rule (source-first): ${r.established} established attest(s) of answers that claim established; ${r.capped.length} would be capped`];
+  const out = [`  review rule (source-first): ${r.established} established attest(s) of answers that claim established; ${r.capped.length} would be capped${r.warned ? `; ${r.warned.length} would be warned and not capped` : ""}`];
   for (const c of r.capped) out.push(`    ${c.section} E-${c.answer} by ${c.by}${c.standing ? "" : " (superseded since)"}${c.material ? "" : " (not material)"}: ${c.codes.join(", ")}`);
+  for (const c of r.warned ?? []) out.push(`    ${c.section} E-${c.answer} by ${c.by}${c.standing ? "" : " (superseded since)"}${c.material ? "" : " (not material)"}: warned ${c.codes.join(", ")}`);
   return out;
 }
 

@@ -272,6 +272,14 @@ export type RunMetrics = {
     answer_supersessions: number;
     corrections: number;
     result_changes: Array<{ section: string; from: string; to: string; from_result: string | null; to_result: string | null; cause: "new_evidence" | "discoverable" }>;
+    /**
+     * An answer that claimed established recorded again partial after an
+     * attest of it was capped (recorded best_candidate with its reasons in
+     * `capped`, docs/adr/0015): what the review rule's caps cost, measured
+     * rather than assumed (the Fable review of the limits branch, P2-3).
+     * Each with the seats whose capped attests came before the revision.
+     */
+    partial_after_cap: Array<{ section: string; from: string; to: string; capped_by: string[] }>;
     negative_reopens: Array<{ lead: string; closed_seq: number; reopened_at: string; reopen_cause: string; cause: "new_evidence" | "discoverable" }>;
     new_evidence: number;
     discoverable: number;
@@ -851,6 +859,7 @@ function reversals(c: Context): RunMetrics["reversals"] {
   let supersessions = 0;
   let corrections = 0;
   const changes: RunMetrics["reversals"]["result_changes"] = [];
+  const partialAfterCap: RunMetrics["reversals"]["partial_after_cap"] = [];
   for (const e of c.entries) {
     if (e.kind !== "answer" || e.supersedes === undefined) continue;
     const old = bySeq.get(e.supersedes);
@@ -863,6 +872,12 @@ function reversals(c: Context): RunMetrics["reversals"] {
       continue;
     }
     changes.push({ section: sectionOf(str(e.section), c.qs), from: `E-${old.seq}`, to: `E-${e.seq}`, from_result: a, to_result: b, cause: evidenceBetween(c, ms(old.at), ms(e.at)) ? "new_evidence" : "discoverable" });
+    if (b === "partial" && P.claimsEstablished(old)) {
+      const target = old.hash ?? P.ledgerHash(old, "genesis");
+      const at = ms(e.at);
+      const capped = c.attestations.filter((x) => P.attestationAct(x) === "attest" && x.target === target && !old.authors.includes(x.by) && (x.capped?.length ?? 0) > 0 && (at === null || (ms(x.at) ?? 0) <= at));
+      if (capped.length) partialAfterCap.push({ section: sectionOf(str(e.section), c.qs), from: `E-${old.seq}`, to: `E-${e.seq}`, capped_by: [...new Set(capped.map((x) => x.by))] });
+    }
   }
   const reopens: RunMetrics["reversals"]["negative_reopens"] = [];
   const lastNegative = new Map<string, { seq: number; at: number | null }>();
@@ -885,6 +900,7 @@ function reversals(c: Context): RunMetrics["reversals"] {
     answer_supersessions: supersessions,
     corrections,
     result_changes: changes,
+    partial_after_cap: partialAfterCap,
     negative_reopens: reopens,
     new_evidence: all.filter((x) => x === "new_evidence").length,
     discoverable: all.filter((x) => x === "discoverable").length,
@@ -1198,7 +1214,7 @@ export function metricsText(m: RunMetrics): string {
     ["Acquisition", a.recorded ? `${a.requests} request(s) (${counts(a.by_stage)}; ${a.declined_by_policy} declined by the case policy); ${a.gaps.length} gap(s)${a.questions_with_gap.length ? ` on ${list(a.questions_with_gap)}` : ""}` : absent("requests/requests.jsonl")],
     ["Evidence added", a.evidence_recorded ? `${a.evidence_added} time(s), ${a.evidence_added_for_request} for a request` : absent("store/journal.jsonl")],
     ["Interpretations", i.recorded ? `${i.total}: ${i.valid} valid, ${i.superseded} on a superseded entry, ${i.disputed} on a disputed one${i.missing ? `, ${i.missing} on no entry` : ""}; ${i.jobs_uninterpreted.length} of ${i.jobs_under_leads} lead jobs uninterpreted, ${i.jobs_without_valid.length} with no valid interpretation` : absent(LEADS)],
-    ["Reversals", r.recorded ? `${r.result_changes.length + r.negative_reopens.length}: ${r.new_evidence} after new evidence, ${r.discoverable} discoverable in the original evidence (${r.result_changes.length} answer result changes, ${r.leads_recorded ? `${r.negative_reopens.length} negative leads reopened` : `negative reopens ${absent(LEADS)}`}); ${r.corrections} corrections kept the result` : absent(LEDGER)],
+    ["Reversals", r.recorded ? `${r.result_changes.length + r.negative_reopens.length}: ${r.new_evidence} after new evidence, ${r.discoverable} discoverable in the original evidence (${r.result_changes.length} answer result changes, ${r.leads_recorded ? `${r.negative_reopens.length} negative leads reopened` : `negative reopens ${absent(LEADS)}`}); ${r.corrections} corrections kept the result; ${r.partial_after_cap.length} established answer(s) recorded partial after a capped attest${r.partial_after_cap.length ? ` (${list(r.partial_after_cap.map((x) => `question:${x.section} ${x.from} to ${x.to}, capped by ${x.capped_by.join(" ")}`))})` : ""}` : absent(LEDGER)],
     ["Cost", m.cost.source ? `${m.cost.tokens} tokens, $${m.cost.usd} (from ${m.cost.source === "model-gateway" ? "the model gateway's log" : m.cost.source === "pi-sessions" ? "the seats' Pi sessions" : "each seat's total spread over its calls on the trace, an estimate"}); ${m.cost.named.tokens} given to the questions and leads a call made holding no lead named (reviews, records, lead acts), ${m.cost.finish_and_report.tokens} on the finish and the report, ${m.cost.unheld.tokens} spent holding no lead and naming nothing (${Object.entries(m.cost.unheld.by_kind).map(([k, n]) => `${k} ${n}`).join(", ") || "none"}), ${m.cost.leads_without_question.tokens} on leads that answer no question${m.cost.no_trace.tokens ? `, ${m.cost.no_trace.tokens} a seat spent that the trace could not place (${m.cost.no_trace.seats.join(", ")})` : ""}` : "not measured (no per-call token record)"],
     ["Duplicates", m.duplicates.recorded ? `${m.duplicates.jobs_with_similar.length} jobs with similar work by another seat (${m.duplicates.exact_repeats.length} exact repeats); ${m.duplicates.independent.length} independent reproductions; same_as ${m.duplicates.same_as.files} file(s), ${m.duplicates.same_as.bytes} bytes in ${m.duplicates.same_as.jobs.length} job(s), ${m.duplicates.same_as.whole.length} wholly; recipes merged ${m.duplicates.recipe_merged}` : `not recorded${m.duplicates.shadow_would_merge ? ` (the retired shadow merge said ${m.duplicates.shadow_would_merge})` : " (no reuse hints on the store's journal)"}`],
     ["Network", n.recorded ? `${n.requests} request(s): ${n.granted} granted, ${n.denied} denied (${counts(n.denied_by_code)}); ${n.operator_items} operator item(s), ${n.operator_items_open} open; ${n.grants} grant(s) (${counts(n.grants_by_status)}); ${n.fetches} fetch(es), ${n.captures} capture(s), ${n.fetch_refusals} refused by the fetch service${n.contamination ? `; contamination ${n.contamination}` : ""}` : "not used (no network/ records)"],

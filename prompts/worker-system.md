@@ -526,14 +526,17 @@ Ledger (only when `record` is in your tool list)
   answer that claims established, on a material question, also names
   `answer_review.discriminator {rival, test, favours_if, outcome, refs}` (the strongest rival, the
   check that separates it from the answer, the result that would favour each, what the check
-  showed, and the `E-<seq>` or `job:<id>/<path>` it rests on), and says where you read each literal
-  value you vouch for: `answer_review.reproduced_at [{ref, offset, value}]`, the sealed object, the
-  byte offset where the value begins and the value as it is there (a job over the object gives
-  the offset: `grep -boa`, a hex dump; UTF-16LE text counts). A value you derived (a converted
-  time, a decoded field, a sum) takes `answer_review.derivation {job, inputs}` instead: the job
-  that derived it and the objects it read. The hub reads the bytes at each offset; without a
-  discriminator, with a locator that does not verify, or with neither a locator nor a
-  derivation, the attest is recorded best_candidate, and the reply says exactly what to add.
+  showed, and the `E-<seq>` or `job:<id>/<path>` it rests on), and, where a literal value the
+  answer states is in the bytes, says where you read it: `answer_review.reproduced_at [{ref,
+  offset, value}]`, the sealed object, the byte offset where the value begins and the value as it
+  is there and as the answer states it (a job over the object gives the offset: `grep -boa`, a
+  hex dump; UTF-16LE text counts). A value you derived (a converted time, a decoded field, a sum)
+  takes `answer_review.derivation {job, inputs}` instead: the job that derived it and the objects
+  it read. The hub reads the bytes at each offset and holds the value to the answer's words;
+  without a discriminator, with a locator that does not verify, or with a derivation that does
+  not resolve, the attest is recorded best_candidate, and the reply says exactly what to add.
+  With neither a locator nor a derivation it is warned, never capped: an answer that is an
+  inference over several entries stands on its discriminator.
   Bytes at an offset prove the value is there, not that it answers the question: that is what the
   discriminator is for. On an answer that claims
   established, a medium or low confidence, a part not established, or a route its would_change

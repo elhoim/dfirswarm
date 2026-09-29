@@ -17,6 +17,8 @@ import { test } from "node:test";
 import * as L from "../extensions/leads.ts";
 import * as O from "../extensions/offers.ts";
 import * as P from "../extensions/protocol.ts";
+import { checkLedgerAnswers } from "../scripts/check-answers.ts";
+import { measureRun, metricsText } from "../scripts/metrics.ts";
 import { sealTree, storePaths } from "../scripts/evidence-store.ts";
 import { A, coverage, ESTABLISHED, F, ok, planned, rec, refused, REVIEW, run, SOURCE_FIRST } from "./negative-bar-fixture.ts";
 
@@ -114,17 +116,27 @@ test("a derived value is vouched for by its derivation: a job that ran to its en
   assert.deepEqual(good.line.answer_review?.derivation, { job: "j000001", inputs: ["input:disk.E01"] });
 });
 
-test("an established review with no discriminator, or one that says nothing, or with neither a locator nor a derivation, is recorded a best candidate with each reason and how to fix it; its refs must be in the run", async () => {
+test("an established review with no discriminator, or one that says nothing, is recorded a best candidate with each reason and how to fix it; one with neither a locator nor a derivation is warned, never capped; its refs must be in the run", async () => {
   const c = await run();
   const ans = await established(c, "job:j000001/hits.txt", "alice");
   const none = await attest(c.a2, { seq: ans.seq, how: "read the row", strength: "established", answer_review: BARE });
   assert.equal(none.line.strength, "best_candidate");
-  assert.equal(none.line.capped!.length, 2, none.line.capped!.join("\n"));
+  assert.equal(none.line.capped!.length, 1, none.line.capped!.join("\n"));
   assert.match(none.line.capped![0]!, /^the review names no discriminator: the strongest rival and a test that separates it from the answer/);
-  assert.match(none.line.capped![1]!, /^the review vouches for no value by bytes or by derivation/);
   assert.ok(none.note?.includes(P.REVIEW_CAP_FIX.no_discriminator), none.note);
-  assert.ok(none.note?.includes(P.REVIEW_CAP_FIX.no_locator_or_derivation), none.note);
+  assert.ok(none.note?.includes(`Warned, not capped: the review vouches for no value by bytes or by derivation`), none.note);
+  assert.ok(none.note?.includes(P.REVIEW_UNLOCATED_FIX), none.note);
   assert.match(none.note ?? "", /Until then question:1 is not established by it, and the finish line says so/);
+  // A discriminator and neither a locator nor a derivation (an inference over several entries): recorded established, and warned where the decision is made (the Fable review of the limits branch, P2-3).
+  const unlocated = await attest(c.a0, { seq: ans.seq, how: "weighed the rows against the rival", strength: "established", answer_review: { ...BARE, discriminator: SOURCE_FIRST.discriminator } });
+  assert.equal(unlocated.line.strength, "established", unlocated.note);
+  assert.equal(unlocated.line.capped, undefined);
+  assert.deepEqual((unlocated as { warned?: string[] }).warned, ["no_locator_or_derivation"]);
+  const checked = await checkLedgerAnswers(c.S, ["1"]);
+  assert.equal(checked.dispositions["question:1"], "established", checked.lines.join("\n"));
+  const w = checked.warnings.filter((x) => /is held established by a0 on a review that vouches for no value by bytes or by derivation/.test(x));
+  assert.equal(w.length, 1, checked.warnings.join("\n"));
+  assert.ok(w[0]!.includes(P.REVIEW_UNLOCATED_FIX), w[0]);
   // A placeholder is none.
   const filler = await attest(c.a3, { seq: ans.seq, how: "read the row", strength: "established", answer_review: { ...BARE, discriminator: { rival: "none", test: "n/a", favours_if: "n/a", outcome: "none", refs: ["E-1"] }, derivation: SOURCE_FIRST.derivation } });
   assert.equal(filler.line.strength, "best_candidate");
@@ -157,6 +169,19 @@ test("the rule is an established claim's on a material question: a best candidat
   assert.equal(pr.line.strength, "established", "partial is a disposition: nothing capped");
   assert.equal(pr.line.capped, undefined);
   assert.match(pr.note ?? "", /Not verified \(said: it caps only an established review of an answer that claims established\): job:j000001\/hits\.txt at 3: the value is not at offset 3/);
+});
+
+test("what a cap costs is measured: an answer that claimed established, recorded partial after a capped attest of it, is counted in the metrics with the seats that capped it", async () => {
+  const c = await run();
+  const ans = await established(c, "job:j000001/hits.txt", "alice");
+  const capped = await attest(c.a2, { seq: ans.seq, how: "read the row", strength: "established", answer_review: BARE });
+  assert.equal(capped.line.strength, "best_candidate");
+  const lim = ok(await rec(c.a0, { kind: "limitation", value: "The export keeps no second source for the account", source: "the export", evidence: "its fields", reason: "unavailable", answers: ["1"] })).entry;
+  const f = (ans.support ?? [])[0]!.seq;
+  ok(await rec(c.a1, { kind: "answer", section: "question:1", value: "alice; the account's owner is not established", reasoning: `E-${f}; the owner is open (E-${lim.seq})`, ...A, limitations: [lim.seq], result: "partial", parts: [{ id: "who", part: "which account", status: "established", refs: [`E-${f}`] }, { id: "owner", part: "whose account", status: "open", open_by: `E-${lim.seq}` }], supersedes: ans.seq }));
+  const m = await measureRun(c.S);
+  assert.deepEqual(m.reversals.partial_after_cap, [{ section: "1", from: `E-${ans.seq}`, to: `E-${ans.seq + 2}`, capped_by: ["a2"] }]);
+  assert.match(metricsText(m), /1 established answer\(s\) recorded partial after a capped attest \(question:1 E-\d+ to E-\d+, capped by a2\)/);
 });
 
 test("the review offer leads with the question, its scope and its original sources, the answer linked by its seq and never quoted; it goes first to a seat of another model family, a preference only", async () => {

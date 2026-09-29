@@ -9590,43 +9590,63 @@ export async function checkDerivation(sandboxRoot: string, d: AnswerReviewDeriva
 }
 
 /** Why an established attest is recorded a best candidate for want of source-first evidence: a code, and the words `capped` keeps. */
-export type ReviewEvidenceCap = { code: "no_discriminator" | "locator_unverified" | "no_locator_or_derivation" | "derivation_unverified"; why: string };
+export type ReviewEvidenceCap = { code: "no_discriminator" | "locator_unverified" | "derivation_unverified"; why: string };
+/**
+ * What a source-first review is warned of and not capped for: it vouches
+ * for no value by bytes or by derivation (no_locator_or_derivation). The
+ * approved rule capped only a missing discriminator and a locator that does
+ * not verify; requiring one of the two capped a correct established answer
+ * that no single literal in the bytes and no job states (an inference over
+ * several entries), and the way to end the run was then to record it
+ * partial (the Fable review of the limits branch, P2-3). It is a warning
+ * until the paired runs show the cap catches more than it costs; the
+ * metrics count the established answers recorded partial after a capped
+ * attest.
+ */
+export type ReviewEvidenceWarning = { code: "no_locator_or_derivation"; why: string };
 
 /** How each cap is fixed, in the words the attest's reply gives. */
 export const REVIEW_CAP_FIX: Readonly<Record<ReviewEvidenceCap["code"], string>> = {
-  no_discriminator: "name the strongest rival and the test that separates it from the answer: answer_review.discriminator {rival (another reading the evidence allows: another time, entity, mechanism or activity, or the premise not holding), test (what you checked), favours_if (the result that would favour the answer, and the one that would favour the rival), outcome (what the check showed), refs (the E-<seq> of the observation, or the job:<id>/<path> it rests on)}",
-  locator_unverified: "give each locator's byte offset where the value begins in the sealed object and the value as it is there (a job over the object gives the offset: grep -boa, a hex dump; UTF-16LE text counts), or drop the locator; a value you derived (a converted time, a decoded field) takes derivation {job, inputs} instead",
-  no_locator_or_derivation: "say where you read the values you vouch for: answer_review.reproduced_at [{ref, offset, value}] (the sealed object, the byte offset where the value begins, the value as it is there, in UTF-8 or UTF-16LE); or, for a derived value, answer_review.derivation {job (the job that derived it), inputs (the objects it read)}",
+  no_discriminator: "name the strongest rival and the test that separates it from the answer: answer_review.discriminator {rival (another reading the evidence allows: another time, entity, mechanism or activity, or the premise not holding), test (what you checked), favours_if (the result that would favour the answer, and the one that would favour the rival), outcome (what the check showed), refs (the E-<seq> of the observation, or the job:<id>/<path> it rests on: not the answer, nor only entries it cites)}",
+  locator_unverified: "give each locator's byte offset where the value begins in the sealed object and the value as it is there and as the answer states it (a job over the object gives the offset: grep -boa, a hex dump; UTF-16LE text counts), or drop the locator; a value you derived (a converted time, a decoded field) takes derivation {job, inputs} instead",
   derivation_unverified: "name a sealed job that ran to its end and the objects it declared it would read: answer_review.derivation {job: j<id>, inputs: [input:<path>, job:<id>/<path>, …]}",
 };
 
+/** How the warning no_locator_or_derivation is answered, where a value can be located. */
+export const REVIEW_UNLOCATED_FIX =
+  "where a value the answer states is in the bytes, say where you read it: answer_review.reproduced_at [{ref, offset, value}] (the sealed object, the byte offset where the value begins, the value as it is there and as the answer states it, in UTF-8 or UTF-16LE); for a derived value, answer_review.derivation {job (the job that derived it), inputs (the objects it read)}. An answer that is an inference over several entries, with no single value in the bytes, stands on its discriminator: a warning, never a hold";
+
 /**
- * The source-first evidence an established review must carry (docs/adr/0015,
+ * The source-first evidence an established review carries (docs/adr/0015,
  * "A source-first review"), on an answer that claims established to a
- * material question: a discriminator that counts; every locator verifying
- * against the sealed bytes; and at least one of a verified locator or a
- * derivation that resolves. Each missing or failing one is a cap: the
- * attest is recorded best_candidate with the reason in `capped`, and the
- * reply says how to fix it. Nothing else is judged: byte presence proves
- * presence, not attribution. `locators` is every locator's verdict, for the
- * reply of any review that gave them (a partial answer's too, which none of
- * this caps).
+ * material question: a discriminator that counts, and every locator
+ * verifying against the sealed bytes and the answer's words, every
+ * derivation resolving. Each missing or failing one is a cap: the attest is
+ * recorded best_candidate with the reason in `capped`, and the reply says
+ * how to fix it. A review with neither a locator nor a derivation is warned
+ * (`unlocated`, no_locator_or_derivation), not capped. Nothing else is
+ * judged: byte presence proves presence, not attribution. `locators` is
+ * every locator's verdict, for the reply of any review that gave them (a
+ * partial answer's too, which none of this caps).
  */
-export async function reviewEvidenceCaps(sandboxRoot: string, answer: LedgerEntry, review: AnswerReview | null, o: { material: boolean }): Promise<{ caps: ReviewEvidenceCap[]; locators: LocatorVerdict[]; derivation: { ok: true } | { ok: false; why: string } | null }> {
+export async function reviewEvidenceCaps(sandboxRoot: string, answer: LedgerEntry, review: AnswerReview | null, o: { material: boolean }): Promise<{ caps: ReviewEvidenceCap[]; unlocated: ReviewEvidenceWarning | null; locators: LocatorVerdict[]; derivation: { ok: true } | { ok: false; why: string } | null }> {
   const text = `${answer.value ?? ""}\n${answer.reasoning ?? ""}`;
   const locators: LocatorVerdict[] = [];
   for (const l of review?.reproduced_at ?? []) locators.push(await checkLocator(sandboxRoot, l, text).catch((err: Error) => ({ ok: false as const, ref: l.ref, offset: l.offset, why: `it could not be read (${err.message})` })));
   const derivation = review?.derivation ? await checkDerivation(sandboxRoot, review.derivation).catch((err: Error) => ({ ok: false as const, why: `it could not be checked (${err.message})` })) : null;
   const caps: ReviewEvidenceCap[] = [];
-  if (!claimsEstablished(answer) || !o.material || !review) return { caps, locators, derivation };
+  if (!claimsEstablished(answer) || !o.material || !review) return { caps, unlocated: null, locators, derivation };
   if (!review.discriminator) caps.push({ code: "no_discriminator", why: "the review names no discriminator: the strongest rival and a test that separates it from the answer (answer_review.discriminator {rival, test, favours_if, outcome, refs})" });
   else if (!discriminatorCounts(review.discriminator)) caps.push({ code: "no_discriminator", why: "the review's discriminator says nothing a reader can weigh (a placeholder, or the rival in the test's words): a real rival and the test that separates it" });
   for (const [i, v] of locators.entries()) if (!v.ok) caps.push({ code: "locator_unverified", why: `reproduced_at[${i}] (${v.ref} at ${v.offset}) does not verify: ${v.why}` });
   if (derivation && !derivation.ok) caps.push({ code: "derivation_unverified", why: `the derivation does not resolve: ${derivation.why}` });
-  // Neither given: said once. One given and failing is capped by its own code above.
-  if (!review.reproduced_at?.length && !review.derivation) caps.push({ code: "no_locator_or_derivation", why: "the review vouches for no value by bytes or by derivation: no locator (answer_review.reproduced_at) and no derivation (answer_review.derivation)" });
-  return { caps, locators, derivation };
+  // Neither given: warned, never capped. One given and failing is capped by its own code above.
+  const unlocated: ReviewEvidenceWarning | null = !review.reproduced_at?.length && !review.derivation ? { code: "no_locator_or_derivation", why: UNLOCATED_WHY } : null;
+  return { caps, unlocated, locators, derivation };
 }
+
+/** What a review that locates no value is warned of, in its words. */
+const UNLOCATED_WHY = "the review vouches for no value by bytes or by derivation: no locator (answer_review.reproduced_at) and no derivation (answer_review.derivation)";
 
 /** An answer review in words, for the ledger's rendering and the report. */
 export function answerReviewWords(r: AnswerReview): string {
@@ -10655,7 +10675,7 @@ export async function attestEntry(ctx: SwarmContext, input: LedgerActInput): Pro
     const note = review
       ? `recorded as the review of a negative: ${NB.reviewWords(review)}`
       : downgraded.length
-        ? `you attested it established, and it is recorded as a best candidate: ${downgraded.join("; ")}. ${[...(noAlternative ? ["An established review names at least one alternative explanation you considered and why the evidence rules it out; attest again with answer_review.alternatives [{explanation, why}] once you have weighed one"] : []), ...(downgradeFixes.length ? [`A source-first review ${noAlternative ? "also " : ""}says what separates the answer from its strongest rival and where each value it vouches for is: ${downgradeFixes.join("; ")}. Attest again with them: your later attest is then your review`] : [])].join(". ")}. ${claim ? `Until then ${t.entry.section} is not established by it, and the finish line says so` : holdsNothing}`
+        ? `you attested it established, and it is recorded as a best candidate: ${downgraded.join("; ")}. ${[...(noAlternative ? ["An established review names at least one alternative explanation you considered and why the evidence rules it out; attest again with answer_review.alternatives [{explanation, why}] once you have weighed one"] : []), ...(downgradeFixes.length ? [`A source-first review ${noAlternative ? "also " : ""}says what separates the answer from its strongest rival and where each value it vouches for is: ${downgradeFixes.join("; ")}. Attest again with them: your later attest is then your review`] : []), ...(evidence?.unlocated ? [`Warned, not capped: ${evidence.unlocated.why}; ${REVIEW_UNLOCATED_FIX}`] : [])].join(". ")}. ${claim ? `Until then ${t.entry.section} is not established by it, and the finish line says so` : holdsNothing}`
         : recorded === "best_candidate"
           ? claim
             ? `recorded as a best candidate${caps.length ? ` (${caps.join("; ")})` : ""}: ${t.entry.section} is not established by it, and the finish line says so; the way out is the route that would settle it, or the operator's acceptance of its limits`
@@ -12403,10 +12423,12 @@ export function noMoreEvidenceAskFix(coverage: number[], answer: number): string
  * revised since, or a premise withdrawn. premise_inconsistent: the premise
  * conflict that holds a material question, on a question the operator
  * marked not material. part_omitted: a part of the question a review says
- * the answer leaves out.
+ * the answer leaves out. no_locator_or_derivation: an answer held
+ * established on source-first reviews none of which vouches for a value by
+ * bytes or by derivation.
  * `seqs` opens with the answer's.
  */
-export type LedgerWarning = { code: "no_acquisition_ask" | "partial_all_parts_established" | "lead_findings_uncited" | "preparation_missing" | "late_evidence_hits" | "premise_disputed" | "premise_revised" | "premise_withdrawn" | "premise_inconsistent" | "part_omitted"; section: string; seqs: number[]; what: string; fix: string };
+export type LedgerWarning = { code: "no_acquisition_ask" | "partial_all_parts_established" | "lead_findings_uncited" | "preparation_missing" | "late_evidence_hits" | "premise_disputed" | "premise_revised" | "premise_withdrawn" | "premise_inconsistent" | "part_omitted" | "no_locator_or_derivation"; section: string; seqs: number[]; what: string; fix: string };
 
 /** A warning in the words every point says it with: what, then the fix. */
 export function warningWords(w: Pick<LedgerWarning, "what" | "fix">): string {
@@ -12913,6 +12935,25 @@ export function ledgerGate(o: { entries: LedgerEntry[]; attestations: LedgerAtte
         });
       }
     }
+    // A source-first review that holds the answer established and vouches
+    // for no value by bytes or by derivation (docs/adr/0015, "A source-first
+    // review"): warned, never held (no_locator_or_derivation, the Fable
+    // review of the limits branch, P2-3). Only reviews made under the
+    // source-first rule (a discriminator) are read: an established review
+    // from before it names neither and is not this rule's to warn.
+    if (bar?.material && claimsEstablished(a)) {
+      const establishing = answerReviews(a, o.attestations).filter((x) => attestEstablishes(x) && x.answer_review);
+      const sourceFirst = establishing.filter((x) => x.answer_review!.discriminator);
+      if (sourceFirst.length && !establishing.some((x) => x.answer_review!.reproduced_at?.length || x.answer_review!.derivation)) {
+        warnings.push({
+          code: "no_locator_or_derivation",
+          section: sec.section,
+          seqs: [a.seq],
+          what: `answer #${a.seq} (${sec.section}) is held established by ${[...new Set(sourceFirst.map((x) => x.by))].join(", ")} on a review that vouches for no value by bytes or by derivation (no locator, no derivation)`,
+          fix: `the reviewer attests it again ${REVIEW_UNLOCATED_FIX}`,
+        });
+      }
+    }
     // A requested part a review says the answer omits (docs/adr/0013, "Claim and open-part rows"): it stays visible until the answer is recorded again with it, or says why the question does not ask it.
     const omitted = answerReviews(a, o.attestations).flatMap((x) => (x.answer_review?.parts ?? []).filter((p) => p.missing).map((p) => ({ by: x.by, part: p.part, why: p.why })));
     if (omitted.length) {
@@ -12927,7 +12968,7 @@ export function ledgerGate(o: { entries: LedgerEntry[]; attestations: LedgerAtte
     }
     const acted = o.attestations.some((x) => attestationAct(x) === "attest" && x.target === target && !a.authors.includes(x.by) && x.by !== a.by) || against.some((d) => !a.authors.includes(d.by)) || Boolean(review?.reviewed);
     if (!acted) {
-      defects.push({ code: "no_critic_act", section: sec.section, seqs: [a.seq], what: `answer #${a.seq} (${sec.section}) has no critic act`, fix: `an agent other than its author re-derives what it rests on from the sealed refs${sec.section.startsWith("question:") ? ", reading the question against its sources before the answer's conclusion," : ""} and records attest (how) or dispute (why) on #${a.seq}${claimsEstablished(a) ? `; an established attest names the strongest rival and the test that separates it (answer_review.discriminator) and where it read each value it vouches for (answer_review.reproduced_at, checked against the bytes) or how it was derived (answer_review.derivation)` : ""}`, named_by: namedFor(a.seq) });
+      defects.push({ code: "no_critic_act", section: sec.section, seqs: [a.seq], what: `answer #${a.seq} (${sec.section}) has no critic act`, fix: `an agent other than its author re-derives what it rests on from the sealed refs${sec.section.startsWith("question:") ? ", reading the question against its sources before the answer's conclusion," : ""} and records attest (how) or dispute (why) on #${a.seq}${claimsEstablished(a) ? `; an established attest names the strongest rival and the test that separates it (answer_review.discriminator) and, where a value the answer states is in the bytes, where it read it (answer_review.reproduced_at, checked against the bytes) or how it was derived (answer_review.derivation)` : ""}`, named_by: namedFor(a.seq) });
     }
   }
   for (const c of openContradictions(entries)) {
