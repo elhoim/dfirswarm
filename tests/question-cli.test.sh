@@ -22,6 +22,20 @@ mkdir -p "$SWARM_RUNS_DIR"
 swarm() { bash "$ROOT/scripts/swarm.sh" "$@" 2>&1; }
 sandbox_of() { printf '%s\n' "$1" | sed -n 's/^SANDBOX=//p' | tail -1; }
 id_of() { printf '%s\n' "$1" | sed -n 's/^Swarm id: *//p' | tail -1; }
+# A harness line is on the run's trace in one of two files (scripts/lib/trace.sh):
+# the kickoff's line, taken by its collector, chains the record, and --no-start
+# then stops the collector, so a later line is kept in traces/system-spill.jsonl
+# rather than put unchained into a chained record. Where the collector's socket
+# could not be reached (a path past the 104 bytes macOS allows) the record stays
+# unchained and the line is appended. Each file on its own: BSD grep exits 2
+# when one of several files is missing, whatever it matched in the others.
+trace_has() { # <sandbox> <pattern>
+  local f
+  for f in "$1/traces/events.jsonl" "$1/traces/system-spill.jsonl"; do
+    [[ -f "$f" ]] && grep -q -- "$2" "$f" && return 0
+  done
+  return 1
+}
 
 # A goal with numbered questions, an answers check, and its objectives in front matter.
 cat > "$TMP/goal.md" <<'EOF'
@@ -87,7 +101,7 @@ grep -q 'QUESTION Q-3 (revision 1)' "$post" || fail "the post does not carry the
 grep -q 'Was the archive mailed to an outside address?' "$post" || fail "the post does not carry the question whole"
 grep -q '"command":"question"' "$SWARM_RUNS_DIR/operator-audit.jsonl" || fail "the attempt is not on the operator's record"
 grep '"command":"question_outcome"' "$SWARM_RUNS_DIR/operator-audit.jsonl" | grep -q "\"hash\":\"$hash\"" || fail "the outcome on the operator's record does not name the event"
-grep -q '"tool":"operator_action"' "$SB/traces/events.jsonl" && grep -q '"command":"question"' "$SB/traces/events.jsonl" || fail "the act is not on the trace"
+trace_has "$SB" '"tool":"operator_action","args":{"command":"question"' || fail "the act is not on the trace"
 pass "an operator's question is in scope by authority, acknowledged after the chain write, posted from analyst:<person>, on the trace and the record (attempt and outcome)"
 
 # An enrolled analyst: a claim outside an objective is proposed; a signed one inside it verifies.

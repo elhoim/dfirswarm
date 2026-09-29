@@ -305,7 +305,7 @@ HERDR_BIN="$TMP/bin/herdr-broken" SWARM_HUB_ADMIN="$HUB_DIR/admin.sock" SWARM_HU
 for _ in $(seq 100); do grep -q '1 post(s) you have not read' "$TMP/vm-prompts.txt" 2>/dev/null && break; sleep 0.05; done
 grep -q '1 post(s) you have not read' "$TMP/vm-prompts.txt" 2>/dev/null || fail "a VM agent's nudge did not arrive through the hub: $(cat "$TMP/vm-prompts.txt" 2>/dev/null)"
 [[ ! -s "$TMP/herdr-used.txt" ]] || fail "the watchdog asked Herdr about a VM agent: $(cat "$TMP/herdr-used.txt")"
-grep -q '"tool":"idle_nudge"' "$VM_SB/traces/events.jsonl" "$VM_SB/traces/system-spill.jsonl" 2>/dev/null || fail "the VM nudge is not recorded"
+{ cat "$VM_SB/traces/events.jsonl" "$VM_SB/traces/system-spill.jsonl" 2>/dev/null || true; } | grep -q '"tool":"idle_nudge"' || fail "the VM nudge is not recorded"
 pass "an agent in a microVM is nudged through the hub, and Herdr is never asked"
 
 printf '{"agents":{"v0":{"state":"working","connected":true}}}\n' > "$TMP/working.json"
@@ -347,7 +347,7 @@ HUB_PID="$(cat "$VM_SB/hub.pid")"
 kill -0 "$HUB_PID" 2>/dev/null || fail "hub.pid does not name the resumed hub"
 answer="$(node "$ROOT/scripts/vm-hub-send.mjs" "$HUB_DIR/admin.sock" '{"op":"status"}')"
 printf '%s' "$answer" | jq -e '.ok == true and (.agents | has("v0"))' >/dev/null || fail "the resumed hub does not know the run's agents: $answer"
-grep -q 'hub_restarted' "$VM_SB/traces/events.jsonl" "$HUB_DIR/hub-spill.jsonl" 2>/dev/null || fail "the restart is not on the record"
+{ cat "$VM_SB/traces/events.jsonl" "$HUB_DIR/hub-spill.jsonl" 2>/dev/null || true; } | grep -q 'hub_restarted' || fail "the restart is not on the record"
 pass "a hub that died is brought back by the watchdog with the run's agents, and the restart is on the record"
 
 # --- a host run's stop from outside the panes ---------------------------------
@@ -365,7 +365,7 @@ jq --arg t "$long_ago" '.stop_steer_at = $t' "$BS/budget.json" > "$BS/b.tmp" && 
 HERDR_BIN="$TMP/bin/herdr-broken" bash "$ROOT/scripts/idle-nudge.sh" --sandbox "$BS" --once >"$TMP/bs2.log" 2>&1
 [[ -f "$BS/done/SWARM_DONE" ]] || fail "past the grace period the watchdog did not stop the swarm: $(cat "$TMP/bs2.log")"
 grep -q '^by: harness' "$BS/done/SWARM_DONE" || fail "the sentinel is not the harness's"
-grep -q '"tool":"harness_stop"' "$BS/traces/events.jsonl" "$BS/traces/system-spill.jsonl" 2>/dev/null || fail "the stop is not on the record"
+{ cat "$BS/traces/events.jsonl" "$BS/traces/system-spill.jsonl" 2>/dev/null || true; } | grep -q '"tool":"harness_stop"' || fail "the stop is not on the record"
 pass "a host run past its wall clock is steered from outside the panes, and stopped by the harness after the grace period"
 
 # --- the operator hears the swarm's cap --------------------------------------------
