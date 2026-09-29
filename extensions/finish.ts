@@ -1109,17 +1109,17 @@ async function resolveBatch(ctx: P.SwarmContext, input: { items?: unknown; gener
     // What is late against the report, as finish status shows it to any seat: said with every answer, so nothing is hidden.
     const open = lease ? await lateItems(ctx.sandboxRoot, lease.holder, lease.report) : [];
     const unresolved = open.map((x) => ({ kind: x.kind, id: x.id }));
-    const stillLate = open.length ? ` Still late: ${open.map(itemWords).join(", ")}.` : "";
+    const stillLateWords = open.length ? ` Still late: ${open.map(itemWords).join(", ")}.` : "";
     if (needs.length || problems.length) {
       const parts = [...(needs.length ? [`a batch carries ${needs.join(", and ")}`] : []), ...problems.map((p) => `${p.item} (item ${p.index}) ${p.problem}`)];
-      return { ok: false as const, reason: `${parts.join("; ")}. Nothing was recorded.${stillLate}`, ...(problems.length ? { problems } : {}), unresolved };
+      return { ok: false as const, reason: `${parts.join("; ")}. Nothing was recorded.${stillLateWords}`, ...(problems.length ? { problems } : {}), unresolved };
     }
     const key = keyIn || batchKey(ctx.agentId, generation!, digestIn, items);
     // A batch recorded already under this key by this seat: a retry after an interruption, answered with what was recorded.
     const prior = st.resolutions.filter((x) => x.batch === key && x.by === ctx.agentId);
     if (prior.length) {
       const same = prior.length === items.length && prior.every((p) => items.some((x) => (x.kind === "post" ? p.post === x.id : p.ack === x.id) && p.how === x.how && p.why === x.words));
-      if (!same) return { ok: false as const, reason: `key ${key} was recorded already for another batch (seqs ${prior.map((p) => p.seq).join(", ")}): a new batch takes a new key. Nothing was recorded.${stillLate}`, key, unresolved };
+      if (!same) return { ok: false as const, reason: `key ${key} was recorded already for another batch (seqs ${prior.map((p) => p.seq).join(", ")}): a new batch takes a new key. Nothing was recorded.${stillLateWords}`, key, unresolved };
       return { ok: true as const, replayed: true, key, seqs: prior.map((p) => p.seq), resolved: prior.length, late: open, note: `this batch was recorded already under key ${key} (seqs ${prior.map((p) => p.seq).join(", ")}): nothing was recorded twice.${open.length ? ` Still late: ${open.map(itemWords).join(", ")}.` : " Nothing is late against the report now."}` };
     }
     if (!lease || lease.holder !== ctx.agentId) return { ok: false as const, reason: `resolutions are the coordinator's${lease ? ` (${lease.holder})` : ""}` };
@@ -1127,10 +1127,16 @@ async function resolveBatch(ctx: P.SwarmContext, input: { items?: unknown; gener
     const stale: { generation?: { expected: number; current: number; holder: string }; digest?: { expected: string; current: string | null; report: string | null } } = {};
     if (generation !== lease.generation) stale.generation = { expected: generation!, current: lease.generation, holder: lease.holder };
     if (!current || !current.startsWith(digestIn)) stale.digest = { expected: digestIn, current, report: lease.report };
+    const resolvedAlready: Array<{ item: string; seq: number }> = [];
     for (const x of items) {
       if (open.some((o) => o.kind === x.kind && o.id === x.id)) continue;
       const done = st.resolutions.find((r) => (x.kind === "post" ? r.post === x.id : r.ack === x.id));
+      if (done) resolvedAlready.push({ item: itemWords(x), seq: done.seq });
       problems.push({ index: x.index, item: itemWords(x), problem: done ? `was resolved already (seq ${done.seq}, ${done.how}${done.batch ? `, batch ${done.batch}` : ""})` : "is not late against the report" });
+    }
+    // Every item of the batch resolved already (a retry under another key, a longer digest prefix): nothing to record, and nothing to send again (the Fable review of the limits branch, P3-8).
+    if (items.length && resolvedAlready.length === items.length) {
+      return { ok: true as const, key, seqs: [], resolved: 0, generation: lease.generation, digest: current, late: open, note: `every item of this batch was resolved already (${resolvedAlready.map((x) => `${x.item}, seq ${x.seq}`).join("; ")}): nothing was recorded.${open.length ? ` Still late: ${open.map(itemWords).join(", ")}: resolve those, then call done.` : " Nothing is late against the report: call done."}` };
     }
     if (stale.generation || stale.digest || problems.length) {
       const words = [
@@ -1139,7 +1145,7 @@ async function resolveBatch(ctx: P.SwarmContext, input: { items?: unknown; gener
         ...problems.map((p) => `${p.item} (item ${p.index}) ${p.problem}`),
       ];
       const fix = stale.generation || stale.digest ? " Read the report again (finish prepare or finish status gives its generation and digest), then send the batch with them." : " Leave those items out and send the batch again.";
-      return { ok: false as const, reason: `${words.join("; ")}.${fix} Nothing was recorded.${stillLate}`, ...(stale.generation || stale.digest ? { stale } : {}), ...(problems.length ? { problems } : {}), unresolved };
+      return { ok: false as const, reason: `${words.join("; ")}.${fix} Nothing was recorded.${stillLateWords}`, ...(stale.generation || stale.digest ? { stale } : {}), ...(problems.length ? { problems } : {}), unresolved };
     }
     const written = await appendFinish(ctx.sandboxRoot, items.map((x) => ({ by: ctx.agentId, ev: "resolve" as const, ...(x.kind === "post" ? { post: x.id } : { ack: x.id }), how: x.how, why: x.words, ...(current ? { digest: current } : {}), generation: lease.generation, batch: key })), held);
     const after = await lateItems(ctx.sandboxRoot, ctx.agentId, lease.report);

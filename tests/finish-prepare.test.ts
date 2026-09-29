@@ -271,7 +271,7 @@ test("resume: the first prepare after it opens the new segment, carries what was
   assert.equal((await F.readFinish(r.S)).chain.ok, true);
 });
 
-test("an interrupted batch retried: the same key records nothing twice and says what is still late; a new key finds each item resolved already; another batch under a used key is refused", async () => {
+test("an interrupted batch retried: the same key records nothing twice and says what is still late; a new key finds each item resolved already, says so and records nothing; another batch under a used key is refused", async () => {
   const r = await run();
   await publish(r.S, "a0", "# Report\n");
   await tick();
@@ -291,10 +291,13 @@ test("an interrupted batch retried: the same key records nothing twice and says 
   assert.deepEqual(retry.seqs, first.seqs);
   assert.deepEqual(ids(retry.late), [`post:${p3.id}`], "nothing hidden: what is still late is said");
   assert.equal(await events(r.S), n, "nothing recorded twice");
-  // The same items under a new key: each resolved already, named with its seq; nothing recorded.
+  // The same items under a new key: each resolved already, named with its seq; nothing recorded, and nothing to send again (the Fable review of the limits branch, P3-8).
   const again = await F.resolveLate(r.a0, { ...batch, key: "k2" });
-  refused(again, new RegExp(`post #${p1.id} \\(item 1\\) was resolved already \\(seq \\d+, not_material, batch k1\\)`));
-  assert.deepEqual(again.unresolved, [{ kind: "post", id: p3.id }]);
+  assert.deepEqual([again.ok, again.resolved, again.seqs], [true, 0, []], JSON.stringify(again));
+  assert.match(String(again.note), new RegExp(`^every item of this batch was resolved already \\(post #${p1.id}, seq \\d+; post #${p2.id}, seq \\d+\\): nothing was recorded\\. Still late: post #${p3.id}[^:]*: resolve those, then call done\\.$`));
+  assert.deepEqual(ids(again.late), [`post:${p3.id}`]);
+  // One item resolved already beside one that is not: the batch is refused, and says to leave it out.
+  refused(await F.resolveLate(r.a0, { items: [batch.items[0]!, { post: p3.id, how: "not_material", why: "x" }], generation: own.generation, digest: own.digest, key: "k3" }), new RegExp(`post #${p1.id} \\(item 1\\) was resolved already \\(seq \\d+, not_material, batch k1\\).*Leave those items out and send the batch again`));
   // Another batch under k1: refused.
   refused(await F.resolveLate(r.a0, { items: [{ post: p3.id, how: "not_material", why: "x" }], generation: own.generation, digest: own.digest, key: "k1" }), /key k1 was recorded already for another batch/);
   assert.equal(await events(r.S), n);
@@ -305,6 +308,11 @@ test("an interrupted batch retried: the same key records nothing twice and says 
   assert.match(String(a1.key), /^auto-[0-9a-f]{24}$/);
   const a2 = await F.resolveLate(r.a0, auto);
   assert.deepEqual([a2.ok, a2.replayed, a2.key], [true, true, a1.key]);
+  assert.equal(await events(r.S), n + 1);
+  // The same item under a digest prefix of another length (another auto key): resolved already, and nothing is late now.
+  const longer = await F.resolveLate(r.a0, { ...auto, digest: String(own.digest).slice(0, 20) });
+  assert.equal(longer.ok, true, JSON.stringify(longer));
+  assert.match(String(longer.note), /: nothing was recorded\. Nothing is late against the report: call done\.$/);
   assert.equal(await events(r.S), n + 1);
 });
 
