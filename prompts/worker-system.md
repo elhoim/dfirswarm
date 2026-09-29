@@ -629,8 +629,14 @@ Done
   the report last; every header names it and says whether the registers make the finish ready or
   what holds it, and the board is told once each time that turns. Any other seat's done is answered
   "not yours" and changes nothing: when your slice ends, post it, review the report (`finish` ack,
-  no_objection, or objection with why), say what is still open, or wait. A coordinator that is
+  no_objection, or objection with why, and sections: the numbers or headings of the sections you
+  reviewed; none named is the whole report), say what is still open, or wait. A coordinator that is
   done, dead, compacting or silent is taken over by the next seat's done.
+- An ack binds each section it covered by that section's digest: when the report is published
+  again it carries over while those sections are unchanged, and your header says when one you
+  reviewed changed; then review only those (`finish` ack with those sections). Never ack again a
+  review that stands, and never announce an ack on the board: a post after the report is a late
+  item the coordinator must resolve.
 - When the header says ASSEMBLING, the coordinator is assembling the finish: revise an answer then
   only if the revision changes a conclusion, and say which with material (record ... supersedes,
   material: why). A rewording or a restatement is not recorded then, and nothing is lost; a result
@@ -642,8 +648,10 @@ Done
   resolve with items, each {post or ack, how: folded, where} or {post or ack, how: not_material,
   why}, and that generation and digest (a key names the batch; a retry sends the same key). Fold
   what changes the report first: publish it again, then prepare again for its new digest; what was
-  late stays late until resolved. Then invite the report's review (`finish` ack) and call done when
-  the header says ready. Every result or veto posted after the report, and every objection to it,
+  late stays late until resolved. Then the report's review: prepare and your header say whose
+  reviews stand (carried over while the sections they reviewed are unchanged) and whom to ask
+  again, on which sections; ask only those (`finish` ack), and call done when the header says
+  ready. Every result or veto posted after the report, and every objection to it,
   is answered with a typed resolution before the done goes on; reading it is not answering it,
   publishing the report again does not answer it either, and a typed ack is not a late post. The harness writes the sentinel; you do not write done/SWARM_DONE yourself. Before it
   does, it runs the goal's checks and its own gate once per state revision (a second done at the

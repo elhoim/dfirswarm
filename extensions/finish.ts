@@ -67,10 +67,19 @@ export const NOT_YOURS = "not yours: ";
 /** The finish register's own lock: a lease is taken and a check recorded under it, never under the registers' (a done's sentinel is). */
 const FINISH_LOCK = ".finish.lock";
 
-export type FinishEventKind = "lease" | "ack" | "resolve" | "readiness" | "check" | "phase" | "prepare";
+export type FinishEventKind = "lease" | "ack" | "resolve" | "readiness" | "check" | "phase" | "prepare" | "carry";
 
 /** A late post kept by name across a resume (FinishEvent.carried): its id, who posted it, and its tag. */
 export type CarriedPost = { id: number; by: string; tag: string };
+
+/**
+ * A seat's review as a carry event records it for a version of the report
+ * (docs/adr/0015, "A review carries over"): the acks it rests on, and the
+ * sections it still covers unchanged (kept), or those to review again
+ * (reasked: changed since, added to a review of the whole report, or
+ * removed from one).
+ */
+export type ReviewCarry = { by: string; acks: number[]; sections?: string[]; changed?: string[]; removed?: string[] };
 
 export type FinishEvent = {
   v: 1;
@@ -102,9 +111,21 @@ export type FinishEvent = {
   segment?: number;
   /** lease opening a segment: each post of the segments before that was late against the report and that no resolution answered, kept as an obligation by name. */
   carried?: CarriedPost[];
-  /** ack: the report it reviewed (named by the reviewer before a coordinator's done named one), the report's digest the review is of, and its verdict; prepare: the report's digest the coordinator prepared on. */
+  /** ack: the report it reviewed (named by the reviewer before a coordinator's done named one), the report's digest the review is of, and its verdict; prepare: the report's digest the coordinator prepared on; carry: the version the reviews are weighed for. */
   digest?: string;
   verdict?: "no_objection" | "objection";
+  /**
+   * ack (versioned: present on acks recorded since 2026-09-29): each section
+   * of the report the review covered, by its key, with the section's digest
+   * in the version reviewed (reportSections); `whole` when the reviewer
+   * named none, so it covered every section there was. An ack without them
+   * is of the whole report at its digest, as before.
+   */
+  sections?: Record<string, string>;
+  whole?: boolean;
+  /** carry: the reviews of earlier versions that still stand for this one, their sections unchanged, and those asked again on what changed. */
+  kept?: ReviewCarry[];
+  reasked?: ReviewCarry[];
   /** resolve: the late post (its id) or the objection (its ack's seq) it resolves, and how; ack and resolve: the report's digest (a folded resolution names the version it was folded into). */
   post?: number;
   ack?: number;
@@ -134,7 +155,7 @@ export type FinishState = {
   events: FinishEvent[];
   /** The lease: its holder and generation, the report, the boundary (`since`), the resume segment it belongs to (0: the first) and the posts it carries from the segments before. */
   lease: { holder: string; generation: number; at: string; why: string; report: string | null; since: number | null; segment: number; carried: CarriedPost[]; from?: string } | null;
-  acks: Array<{ seq: number; at: string; by: string; digest: string; verdict: "no_objection" | "objection"; why: string; report?: string }>;
+  acks: FinishAck[];
   resolutions: Array<{ seq: number; at: string; by: string; post?: number; ack?: number; how: "folded" | "not_material"; why: string; digest: string | null; batch?: string; generation?: number }>;
   /** Each time the coordinator prepared the finish (finish prepare): at which generation, on which report and digest, the boundary, readiness, and what it was given as late. */
   prepares: Array<{ seq: number; at: string; by: string; generation: number; report: string | null; digest: string | null; since: number | null; segment: number; ready: boolean; revision: string; late: Array<{ kind: "post" | "objection"; id: number }> }>;
@@ -142,8 +163,13 @@ export type FinishState = {
   /** The finish phase as last recorded: assembling (by whom, since when) or open. */
   phase: { phase: "assembling" | "open"; at: string; holder: string | null } | null;
   checks: Array<{ seq: number; at: string; by: string; revision: string; proceed: boolean; outcome?: string; reason?: string; run?: unknown }>;
+  /** Each time the reviews of earlier versions were weighed for a new version of the report: which stand, carried over, and which were asked again. */
+  carries: Array<{ seq: number; at: string; report: string; digest: string; kept: ReviewCarry[]; reasked: ReviewCarry[] }>;
   chain: { ok: boolean; broken_at: number | null; reason: string | null; head: string | null };
 };
+
+/** A review of the report (finish ack): the digest it read, its verdict, the sections it covered (by key, each with its digest then) and whether it covered the whole report. */
+export type FinishAck = { seq: number; at: string; by: string; digest: string; verdict: "no_objection" | "objection"; why: string; report?: string; sections?: Record<string, string>; whole?: boolean };
 
 export async function readFinish(sandboxRoot: string): Promise<FinishState> {
   const text = await readFile(join(sandboxRoot, FINISH_LOG), "utf8").catch(() => "");
@@ -157,7 +183,7 @@ export async function readFinish(sandboxRoot: string): Promise<FinishState> {
       // The chain check names it.
     }
   }
-  const st: FinishState = { events, lease: null, acks: [], resolutions: [], prepares: [], readiness: null, phase: null, checks: [], chain };
+  const st: FinishState = { events, lease: null, acks: [], resolutions: [], prepares: [], readiness: null, phase: null, checks: [], carries: [], chain };
   for (const e of events) {
     switch (e.ev) {
       case "lease":
@@ -174,7 +200,10 @@ export async function readFinish(sandboxRoot: string): Promise<FinishState> {
         }
         break;
       case "ack":
-        if (e.digest && e.verdict) st.acks.push({ seq: e.seq, at: e.at, by: e.by, digest: e.digest, verdict: e.verdict, why: e.why ?? "", ...(e.report ? { report: e.report } : {}) });
+        if (e.digest && e.verdict) st.acks.push({ seq: e.seq, at: e.at, by: e.by, digest: e.digest, verdict: e.verdict, why: e.why ?? "", ...(e.report ? { report: e.report } : {}), ...(e.sections && typeof e.sections === "object" ? { sections: e.sections } : {}), ...(e.whole ? { whole: true } : {}) });
+        break;
+      case "carry":
+        if (e.report && e.digest) st.carries.push({ seq: e.seq, at: e.at, report: e.report, digest: e.digest, kept: e.kept ?? [], reasked: e.reasked ?? [] });
         break;
       case "resolve":
         if (e.how) st.resolutions.push({ seq: e.seq, at: e.at, by: e.by, ...(e.post !== undefined ? { post: e.post } : {}), ...(e.ack !== undefined ? { ack: e.ack } : {}), how: e.how, why: e.why ?? "", digest: e.digest ?? null, ...(e.batch ? { batch: e.batch } : {}), ...(typeof e.generation === "number" ? { generation: e.generation } : {}) });
@@ -269,7 +298,12 @@ export type FinishTurn = {
  */
 export async function finishTurn(ctx: P.SwarmContext, input: { output_file?: string } = {}, now = Date.now()): Promise<FinishTurn> {
   const report = String(input.output_file ?? "").trim() || null;
-  return withFinish(ctx.sandboxRoot, (held) => takeLease(ctx, report, now, held));
+  return withFinish(ctx.sandboxRoot, async (held) => {
+    const turn = await takeLease(ctx, report, now, held);
+    // What the reviews of earlier versions still cover, on the chain before the done goes on.
+    if (turn.mine) await appendCarry(ctx.sandboxRoot, held);
+    return turn;
+  });
 }
 
 /** The resume segment the run is in (budget.json `resumes`: 0 before any resume) and when it began (ms; null before any resume). */
@@ -384,7 +418,7 @@ export async function finishTurnFor(ctx: P.SwarmContext, input: { output_file?: 
 }
 
 /** The finish tool's acts: status for anyone, prepare for the seat that drafted the report, ack for a reviewer, resolve for the coordinator. */
-export async function finishAct(ctx: P.SwarmContext, input: { action?: string; digest?: string; verdict?: string; why?: string; where?: string; post?: unknown; ack?: unknown; how?: string; report?: string; items?: unknown; generation?: unknown; key?: string }): Promise<Record<string, unknown>> {
+export async function finishAct(ctx: P.SwarmContext, input: { action?: string; digest?: string; verdict?: string; why?: string; where?: string; post?: unknown; ack?: unknown; how?: string; report?: string; items?: unknown; generation?: unknown; key?: string; sections?: unknown }): Promise<Record<string, unknown>> {
   const action = String(input.action ?? "status").trim();
   if (action === "status") return finishStatus(ctx);
   if (action === "prepare") return prepareFinish(ctx, input);
@@ -631,8 +665,12 @@ export async function lateItems(sandboxRoot: string, coordinator: string, report
   for (const a of st.acks) {
     if (a.verdict !== "objection") continue;
     if (st.resolutions.some((r) => r.ack === a.seq)) continue;
-    // A later ack by the same seat, of any version, answers its own objection.
-    if (st.acks.some((b) => b.by === a.by && b.seq > a.seq)) continue;
+    // A later ack by the same seat, of any version, answers its own objection
+    // when it reviews what the objection was about: the whole report, or
+    // every section the objection named. An objection to section 3 stands
+    // through its objector's review of section 2 alone (the review a changed
+    // section 2 asks it for).
+    if (st.acks.some((b) => b.by === a.by && b.seq > a.seq && answersObjection(b, a))) continue;
     // An objection to another file than the finish's report (made before any
     // done named it) is late too, and says so: it was lost quietly (the
     // Fable review of batches 1-3). The coordinator resolves it, or says it
@@ -646,13 +684,269 @@ export async function lateItems(sandboxRoot: string, coordinator: string, report
   return out;
 }
 
+// --- the report's sections, and the reviews that stand ------------------------------------------
+
+/** The key of the text before the report's first `## ` heading. */
+export const PREAMBLE = "preamble";
+
+/** One section of the report: its key, its heading's words (none for the preamble), and the sha256 of its lines, the heading's among them. */
+export type ReportSection = { key: string; title: string; digest: string };
+
+/**
+ * The report's sections, as the report body reads a Markdown document's
+ * (scripts/report-body.ts, h2Sections: `## ` headings, fenced blocks
+ * skipped) and the answers check numbers them (scripts/check-answers.ts,
+ * sections: `## <n>.`): the text before the first heading (`preamble`),
+ * then each `## ` heading with every line under it up to the next. A
+ * numbered heading is keyed by its number ("3" for `## 3. …`), any other by
+ * its words, and a key met again is numbered (`Notes (2)`): no line is
+ * outside a section, so a change anywhere changes some section's digest.
+ * The digest covers the heading line too, so a renamed section is a changed
+ * one, and leaves out only the blank lines that end a section (layout before
+ * the next heading, or the file's last newline). Nothing here reads what a
+ * section says.
+ */
+export function reportSections(text: string): ReportSection[] {
+  const out: Array<{ key: string; title: string; lines: string[] }> = [{ key: PREAMBLE, title: "", lines: [] }];
+  let fenced = false;
+  for (const line of text.split("\n")) {
+    const h = fenced ? null : /^##\s+(.+?)\s*$/.exec(line);
+    if (/^\s*(```|~~~)/.test(line)) fenced = !fenced;
+    if (h) {
+      const base = /^(\d+)\./.exec(h[1])?.[1] ?? h[1];
+      let key = base;
+      for (let n = 2; out.some((x) => x.key === key); n++) key = `${base} (${n})`;
+      out.push({ key, title: h[1], lines: [line] });
+      continue;
+    }
+    out[out.length - 1].lines.push(line);
+  }
+  // The blank lines that end a section are layout between it and the next (the report's last one ends with its newline): a section is its lines up to its last that says something.
+  const trimmed = (lines: string[]) => {
+    let n = lines.length;
+    while (n > 0 && !lines[n - 1].trim()) n -= 1;
+    return lines.slice(0, n);
+  };
+  return out.map((x) => ({ key: x.key, title: x.title, digest: P.sha256Hex(trimmed(x.lines).join("\n")) }));
+}
+
+/**
+ * The sections a reviewer names (finish ack `sections`): each by its key, its
+ * number (3, §3, Q-3, section 3) or its heading's words, as a list or one
+ * comma-separated text. None named is the whole report (an empty list).
+ * A name that is no section of the report is refused with the report's
+ * sections, so the reviewer can name them again.
+ */
+export function namedSections(sections: readonly ReportSection[], raw: unknown, report = "the report"): { ok: true; keys: string[] } | { ok: false; reason: string } {
+  const list = raw === undefined || raw === null || raw === "" ? [] : Array.isArray(raw) ? raw.map(String) : String(raw).split(",");
+  const keys: string[] = [];
+  const all = sections.map((x) => x.key);
+  for (const name of list) {
+    const t = name.trim();
+    if (!t) continue;
+    const bare = t.replace(/^(?:§\s*|section\s+|q-?(?=\d))/i, "").replace(/\.$/, "");
+    const hit = sections.find((x) => x.key === t) ?? sections.find((x) => x.key === bare) ?? sections.find((x) => x.title.toLowerCase() === t.toLowerCase() || x.key.toLowerCase() === t.toLowerCase());
+    if (!hit) return { ok: false, reason: `sections: "${t}" is not a section of ${report}; its sections are ${all.join(", ")} (name them by key or number, or name none for the whole report)` };
+    if (!keys.includes(hit.key)) keys.push(hit.key);
+  }
+  return { ok: true, keys };
+}
+
+/**
+ * Whether a seat's later ack answers its own earlier objection: it reviewed
+ * what the objection was about, the whole report or every section the
+ * objection named. An ack or an objection from before per-section reviews
+ * (no sections) is of the whole report, as it always was.
+ */
+export function answersObjection(later: Pick<FinishAck, "sections" | "whole">, objection: Pick<FinishAck, "sections">): boolean {
+  if (!objection.sections || !later.sections || later.whole) return true;
+  return Object.keys(objection.sections).every((k) => k in later.sections!);
+}
+
+/** A seat's review of the report as it stands now (reviewStanding). */
+export type SeatReview = {
+  by: string;
+  /** direct: every section it covers rests on a review of this very version; carried: some rest on an earlier version's, their sections unchanged; reasked: something it covered changed since. */
+  standing: "direct" | "carried" | "reasked";
+  /** The acks its covered sections rest on. */
+  acks: number[];
+  /** The sections its review still covers, unchanged since it reviewed them. */
+  covered: string[];
+  /** The sections to review again: changed since, or (a review of the whole report) added since. */
+  changed: string[];
+  /** Sections a review of the whole report covered that the report no longer has. */
+  removed: string[];
+  /** Whether its review is of the whole report. */
+  whole: boolean;
+};
+
+/** The reviews of the report as it stands: its sections (keys, in order), each seat's review, and the sections no standing review covers. */
+export type ReviewStanding = { report: string; digest: string; sections: string[]; seats: SeatReview[]; uncovered: string[] };
+
+/**
+ * Which reviews of the report still stand for its current version
+ * (docs/adr/0015, "A review carries over"). Each seat's acks are read in
+ * order, section by section: a no objection vouches for each section it
+ * covered at the digest that section had then (a review of the whole
+ * report vouches for every section there was, and for nothing it had
+ * vouched before); an objection withdraws the vouching of the sections it
+ * names. A section it vouches for whose digest is unchanged is covered, and
+ * the review carries over; one that changed is asked again; a review of the
+ * whole report is asked about a section added since, and about one removed
+ * (answered by a review of the whole report as it is). An ack from before
+ * per-section reviews (no sections) is of the whole report at its digest:
+ * it stands for that digest and is asked again on any other, as before.
+ * A seat whose acks vouch for nothing (an objection only) is left out: its
+ * objection is a late item until it is resolved.
+ */
+export function reviewStanding(acks: readonly FinishAck[], report: string, current: { digest: string; sections: readonly ReportSection[] }): ReviewStanding {
+  const order = current.sections.map((x) => x.key);
+  const now = new Map(current.sections.map((x) => [x.key, x.digest]));
+  const bySeat = new Map<string, FinishAck[]>();
+  for (const a of [...acks].sort((x, y) => x.seq - y.seq)) {
+    if (a.report && a.report !== report) continue;
+    bySeat.set(a.by, [...(bySeat.get(a.by) ?? []), a]);
+  }
+  const seats: SeatReview[] = [];
+  for (const [by, list] of bySeat) {
+    let vouched = new Map<string, { digest: string; ack: number }>();
+    let whole = false;
+    let legacy: { digest: string; ack: number } | null = null;
+    for (const a of list) {
+      if (!a.sections) {
+        vouched = new Map();
+        whole = a.verdict === "no_objection";
+        legacy = whole ? { digest: a.digest, ack: a.seq } : null;
+        continue;
+      }
+      legacy = null;
+      if (a.verdict === "objection") {
+        if (a.whole) {
+          vouched = new Map();
+          whole = false;
+        } else for (const k of Object.keys(a.sections)) vouched.delete(k);
+        continue;
+      }
+      if (a.whole) {
+        vouched = new Map();
+        whole = true;
+      }
+      for (const [k, d] of Object.entries(a.sections)) vouched.set(k, { digest: d, ack: a.seq });
+    }
+    if (legacy) {
+      const same = legacy.digest === current.digest;
+      seats.push({ by, standing: same ? "direct" : "reasked", acks: [legacy.ack], covered: same ? [...order] : [], changed: same ? [] : [...order], removed: [], whole: true });
+      continue;
+    }
+    if (!vouched.size) continue;
+    const covered: string[] = [];
+    const changed: string[] = [];
+    const removed: string[] = [];
+    const rests = new Set<number>();
+    for (const [k, v] of vouched) {
+      if (now.get(k) === v.digest) {
+        covered.push(k);
+        rests.add(v.ack);
+      } else if (now.has(k)) changed.push(k);
+      else if (whole) removed.push(k);
+    }
+    if (whole) for (const k of order) if (!vouched.has(k)) changed.push(k);
+    // A review of sections the report no longer has, and of nothing else, covers nothing now.
+    if (!covered.length && !changed.length && !removed.length) continue;
+    const inOrder = (xs: string[]) => [...xs].sort((a, b) => order.indexOf(a) - order.indexOf(b));
+    const onThis = [...rests].every((seq) => list.find((a) => a.seq === seq)?.digest === current.digest);
+    const standing = changed.length || removed.length ? "reasked" : onThis ? "direct" : "carried";
+    seats.push({ by, standing, acks: [...rests].sort((a, b) => a - b), covered: inOrder(covered), changed: inOrder(changed), removed: removed.sort(), whole });
+  }
+  const covering = new Set(seats.flatMap((x) => x.covered));
+  return { report, digest: current.digest, sections: order, seats, uncovered: order.filter((k) => !covering.has(k)) };
+}
+
+/** The reviews of the finish's report as it stands now, or null while no lease names a report that exists. */
+export async function reportReview(sandboxRoot: string, st?: FinishState): Promise<ReviewStanding | null> {
+  const fin = st ?? (await readFinish(sandboxRoot));
+  const report = fin.lease?.report ?? null;
+  if (!report) return null;
+  const read = await P.readSandboxFile(sandboxRoot, report).catch(() => null);
+  if (!read) return null;
+  return reviewStanding(fin.acks, report, { digest: P.sha256Hex(read.bytes), sections: reportSections(read.bytes.toString("utf8")) });
+}
+
+/**
+ * The carry event a new version of the report needs, or null: when an ack
+ * made on another version since this version was last weighed (a no
+ * objection) has not been weighed for it, the reviews that still stand,
+ * carried over, and those asked again, by seat, with the acks each rests on.
+ * One per version and what was weighed: the chain shows why an ack of an
+ * earlier version still counts.
+ */
+async function carryDraft(sandboxRoot: string, st: FinishState): Promise<Omit<FinishEvent, "v" | "seq" | "at" | "prev" | "hash"> | null> {
+  const review = await reportReview(sandboxRoot, st);
+  if (!review) return null;
+  const last = st.carries.filter((c) => c.report === review.report && c.digest === review.digest).at(-1)?.seq ?? 0;
+  if (!st.acks.some((a) => a.seq > last && a.verdict === "no_objection" && a.digest !== review.digest && (!a.report || a.report === review.report))) return null;
+  const kept = review.seats.filter((x) => x.standing === "carried").map((x): ReviewCarry => ({ by: x.by, acks: x.acks, sections: x.covered }));
+  const reasked = review.seats.filter((x) => x.standing === "reasked").map((x): ReviewCarry => ({ by: x.by, acks: x.acks, ...(x.changed.length ? { changed: x.changed } : {}), ...(x.removed.length ? { removed: x.removed } : {}) }));
+  if (!kept.length && !reasked.length) return null;
+  return { by: "system", ev: "carry", report: review.report, digest: review.digest, ...(kept.length ? { kept } : {}), ...(reasked.length ? { reasked } : {}) };
+}
+
+/** Record the carry event the report's current version needs, under the finish lock the caller holds. */
+async function appendCarry(sandboxRoot: string, held: P.HeldLock): Promise<void> {
+  const d = await carryDraft(sandboxRoot, await readFinish(sandboxRoot));
+  if (d) await appendFinish(sandboxRoot, [d], held);
+}
+
+/** Record the carry event the report's current version needs, if any (from the header: a report published again is weighed at the next turn). */
+export async function syncCarry(sandboxRoot: string): Promise<boolean> {
+  if (!(await carryDraft(sandboxRoot, await readFinish(sandboxRoot)))) return false;
+  return withFinish(sandboxRoot, async (held) => {
+    const d = await carryDraft(sandboxRoot, await readFinish(sandboxRoot));
+    if (!d) return false;
+    await appendFinish(sandboxRoot, [d], held);
+    return true;
+  }).catch(() => false);
+}
+
+/** A seat's review in words: which sections it is asked again, and why. */
+function reaskedWords(x: Pick<SeatReview, "changed" | "removed">): string {
+  return [...(x.changed.length ? [x.changed.join(", ")] : []), ...(x.removed.length ? [`removed: ${x.removed.join(", ")}`] : [])].join("; ");
+}
+
+/** What the coordinator does about the report's review now: who stands (carried over or not), and whom to ask again, on what. */
+export function reviewInvite(r: ReviewStanding | null): string {
+  if (!r || !r.seats.length) return "invite the report's review (finish ack)";
+  const again = r.seats.filter((x) => x.standing === "reasked");
+  const carried = r.seats.filter((x) => x.standing === "carried");
+  const stand = r.seats.filter((x) => x.standing !== "reasked");
+  const parts: string[] = [];
+  if (stand.length) parts.push(`the reviews of ${stand.map((x) => x.by).join(", ")} stand${carried.length ? ` (${carried.map((x) => x.by).join(", ")} carried over: the sections they reviewed are unchanged)` : ""}`);
+  parts.push(again.length ? `ask again only on what changed: ${again.map((x) => `${x.by} (${reaskedWords(x)})`).join("; ")}` : "ask nobody to review it again");
+  if (r.uncovered.length) parts.push(`no standing review covers ${r.uncovered.join(", ")}`);
+  return parts.join("; ");
+}
+
+/** What a seat's own review of the report is now, for its header, or null when it has none. */
+function ownReviewWords(r: ReviewStanding | null, me: string): string | null {
+  const mine = r?.seats.find((x) => x.by === me);
+  if (!mine) return null;
+  if (mine.standing !== "reasked") return ` Your review of the report stands${mine.standing === "carried" ? " (carried over: the sections you reviewed are unchanged)" : ""}: do not ack it again, and do not post it on the board.`;
+  const fix = mine.removed.length && !mine.changed.length ? "finish ack with no sections, the whole report as it is" : `finish ack with sections [${mine.changed.map((k) => JSON.stringify(k)).join(", ")}]${mine.removed.length ? ", or with none for the whole report as it is" : ""}`;
+  return ` The report changed since your review in ${reaskedWords(mine)}: review only that (${fix}); the rest of your review carries over.`;
+}
+
 /**
  * A seat's review of the report (A4): the digest it read (the report's
- * current one when left out) and its verdict. No objection is a typed ack,
- * never a late post; an objection says why and holds the coordinator's done
- * until the coordinator resolves it.
+ * current one when left out), its verdict, and the sections it covered
+ * (`sections`, by key or number; none named is the whole report). No
+ * objection is a typed ack, never a late post; an objection says why and
+ * holds the coordinator's done until the coordinator resolves it. The ack
+ * binds each section it covered by that section's digest, so a later
+ * version that leaves them unchanged keeps it standing (reviewStanding),
+ * and what an earlier version's reviews still cover is recorded first
+ * (a carry event) when this is a new version.
  */
-export async function ackReport(ctx: P.SwarmContext, input: { digest?: string; verdict?: string; why?: string; report?: string }): Promise<{ ok: true; seq: number; digest: string; report: string } | { ok: false; reason: string }> {
+export async function ackReport(ctx: P.SwarmContext, input: { digest?: string; verdict?: string; why?: string; report?: string; sections?: unknown }): Promise<{ ok: true; seq: number; digest: string; report: string; sections: string[]; whole: boolean } | { ok: false; reason: string }> {
   const verdict = String(input.verdict ?? "").trim();
   if (verdict !== "no_objection" && verdict !== "objection") return { ok: false, reason: "verdict is no_objection or objection" };
   const why = String(input.why ?? "").trim();
@@ -668,13 +962,21 @@ export async function ackReport(ctx: P.SwarmContext, input: { digest?: string; v
     if (leased && named && named !== leased) return { ok: false as const, reason: `the finish's report is ${leased}: ack that one (a review of another file is a post)` };
     const report = leased ?? named;
     if (!report) return { ok: false as const, reason: "no coordinator's done has named the report yet: name the report you reviewed (report, e.g. work/report.md)" };
-    const current = await reportDigest(ctx.sandboxRoot, report);
-    if (!current) return { ok: false as const, reason: `${report} does not exist yet` };
+    const read = await P.readSandboxFile(ctx.sandboxRoot, report).catch(() => null);
+    if (!read) return { ok: false as const, reason: `${report} does not exist yet` };
+    const current = P.sha256Hex(read.bytes);
     const digest = String(input.digest ?? "").trim() || current;
     if (digest !== current) return { ok: false as const, reason: `${report} is at digest ${current} now, not ${digest}: read it again, then ack what you read` };
     if (st.lease?.holder === ctx.agentId) return { ok: false as const, reason: "you coordinate the finish: an ack is another seat's review of your report" };
-    const [e] = await appendFinish(ctx.sandboxRoot, [{ by: ctx.agentId, ev: "ack", digest, verdict, ...(why ? { why } : {}), ...(leased ? {} : { report }) }], held);
-    return { ok: true as const, seq: e.seq, digest, report };
+    const secs = reportSections(read.bytes.toString("utf8"));
+    const chosen = namedSections(secs, input.sections, report);
+    if (!chosen.ok) return { ok: false as const, reason: chosen.reason };
+    const keys = chosen.keys.length ? chosen.keys : secs.map((x) => x.key);
+    const sections = Object.fromEntries(keys.map((k) => [k, secs.find((x) => x.key === k)!.digest]));
+    // A new version: what the reviews of earlier ones still cover goes on the chain before this review does.
+    await appendCarry(ctx.sandboxRoot, held);
+    const [e] = await appendFinish(ctx.sandboxRoot, [{ by: ctx.agentId, ev: "ack", digest, verdict, ...(why ? { why } : {}), ...(leased ? {} : { report }), sections, ...(chosen.keys.length ? {} : { whole: true }) }], held);
+    return { ok: true as const, seq: e.seq, digest, report, sections: keys, whole: !chosen.keys.length };
   });
 }
 
@@ -872,6 +1174,8 @@ export async function prepareFinish(ctx: P.SwarmContext, input: { report?: strin
   const got = await withFinish(S, async (held) => {
     const turn = await takeLease(ctx, report, now, held);
     if (!turn.mine) return { turn, mine: false as const };
+    // A report published again: which reviews of the earlier version still stand, and which are asked again, before the prepare.
+    await appendCarry(S, held);
     const lease = (await readFinish(S)).lease!;
     const late = await lateItems(S, ctx.agentId, turn.report);
     const digest = await reportDigest(S, turn.report);
@@ -886,11 +1190,13 @@ export async function prepareFinish(ctx: P.SwarmContext, input: { report?: strin
   if (turn.took_over) await P.systemPost(S, { tag: "hold", via: ctx.agentId, body: `${ctx.agentId} coordinates the finish now (generation ${turn.generation}): ${turn.why}.` }).catch(() => undefined);
   const { lease, late, digest } = got;
   const d = digest ?? "";
+  const review = await reportReview(S);
+  const invite = reviewInvite(review);
   const next = late.length
-    ? `Resolve these ${late.length} in one call: finish resolve with items [{post: <id> or ack: <seq>, how: "folded", where: "<where the report says it now>"} or {…, how: "not_material", why: "<why it changes nothing the report concludes>"}], generation ${turn.generation} and digest ${d}. Fold first what changes the report: publish it again, then prepare again for its new digest. Then invite the report's review (finish ack), and call done when the header says ready.`
+    ? `Resolve these ${late.length} in one call: finish resolve with items [{post: <id> or ack: <seq>, how: "folded", where: "<where the report says it now>"} or {…, how: "not_material", why: "<why it changes nothing the report concludes>"}], generation ${turn.generation} and digest ${d}. Fold first what changes the report: publish it again, then prepare again for its new digest. Then the review: ${invite}. Call done when the header says ready.`
     : r.ready
-      ? "Nothing is late against the report. Invite its review (finish ack), then call done."
-      : `Nothing is late against the report. The registers still hold the finish (${r.items.length}): call done once the header says ready.`;
+      ? `Nothing is late against the report. The review: ${invite}. Then call done.`
+      : `Nothing is late against the report. The registers still hold the finish (${r.items.length}): call done once the header says ready. The review: ${invite}.`;
   return {
     ok: true,
     action: "prepare",
@@ -904,8 +1210,18 @@ export async function prepareFinish(ctx: P.SwarmContext, input: { report?: strin
     boundary: { since: typeof lease.since === "number" ? new Date(lease.since).toISOString() : null, ...(lease.segment ? { segment: lease.segment } : {}), ...(lease.carried.length ? { carried: lease.carried.map((c) => c.id) } : {}) },
     readiness: readinessOut,
     late,
+    ...(review ? { reviews: reviewSummary(review) } : {}),
     seq: got.seq,
     next,
+  };
+}
+
+/** The report's reviews in a reply (finish prepare and status): its sections, each seat's standing, and what no standing review covers. */
+function reviewSummary(r: ReviewStanding): Record<string, unknown> {
+  return {
+    sections: r.sections,
+    seats: r.seats.map((x) => ({ by: x.by, standing: x.standing, acks: x.acks, ...(x.standing === "reasked" ? { changed: x.changed, ...(x.removed.length ? { removed: x.removed } : {}) } : {}), ...(x.whole ? {} : { covered: x.covered }) })),
+    ...(r.uncovered.length ? { uncovered: r.uncovered } : {}),
   };
 }
 
@@ -1251,9 +1567,15 @@ export async function finishHeader(sandboxRoot: string, me: string): Promise<str
     const late = await lateItems(sandboxRoot, me, lease.report);
     const digest = await reportDigest(sandboxRoot, lease.report);
     act += late.length ? ` Late against the report, each for your typed resolution, all in one call (finish resolve with items, generation ${lease.generation}, digest ${(digest ?? "").slice(0, 12)}): ${late.map((x) => (x.kind === "post" ? `post #${x.id} (${x.tag}) by ${x.by}` : `objection ${x.id} by ${x.by}: ${x.why}`)).join("; ")}.` : r.ready ? " Call done." : "";
-    const acks = st.acks.filter((a) => a.digest === digest && a.verdict === "no_objection").map((a) => a.by);
-    if (acks.length) act += ` Reviewed with no objection: ${[...new Set(acks)].join(", ")}.`;
-  } else if (lease) act += " Your done is not the finish: when your slice ends, review the report (finish ack) or say on the board what is open, and wait.";
+    // The report's review: who stands (carried over where the sections they reviewed are unchanged), and whom to ask again, on what.
+    await syncCarry(sandboxRoot).catch(() => false);
+    const review = await reportReview(sandboxRoot).catch(() => null);
+    if (review?.seats.length) act += ` Review: ${reviewInvite(review)}.`;
+  } else if (lease) {
+    await syncCarry(sandboxRoot).catch(() => false);
+    const own = ownReviewWords(await reportReview(sandboxRoot).catch(() => null), me);
+    act += own ?? " Your done is not the finish: when your slice ends, review the report (finish ack) or say on the board what is open, and wait.";
+  }
   return `Finish: ${state}; ${who}.${act}`;
 }
 
@@ -1284,6 +1606,7 @@ export async function finishStatus(ctx: P.SwarmContext): Promise<Record<string, 
   const r = await readiness(ctx.sandboxRoot);
   const st = await readFinish(ctx.sandboxRoot);
   const digest = await reportDigest(ctx.sandboxRoot, st.lease?.report);
+  const review = await reportReview(ctx.sandboxRoot, st).catch(() => null);
   const last = st.checks.at(-1);
   const prepared = st.prepares.at(-1);
   return {
@@ -1299,7 +1622,9 @@ export async function finishStatus(ctx: P.SwarmContext): Promise<Record<string, 
     // The coordinator's last prepare: when, at which generation and digest, and how many items it was given as late.
     ...(prepared ? { prepared: { by: prepared.by, at: prepared.at, generation: prepared.generation, digest: prepared.digest, late: prepared.late.length, current: prepared.generation === st.lease?.generation && prepared.digest === digest } } : {}),
     ...(last ? { last_check: { revision: last.revision, current: last.revision === r.revision, proceed: last.proceed, outcome: last.outcome ?? null, reason: last.reason ?? null, by: last.by, at: last.at } } : {}),
-    acks: st.acks.filter((a) => a.digest === digest).map((a) => ({ seq: a.seq, by: a.by, verdict: a.verdict, why: a.why })),
+    acks: st.acks.filter((a) => a.digest === digest).map((a) => ({ seq: a.seq, by: a.by, verdict: a.verdict, why: a.why, ...(a.sections && !a.whole ? { sections: Object.keys(a.sections) } : {}) })),
+    // Every review that stands for this version (on it, or carried over from an earlier one whose sections it covered are unchanged), and those asked again on what changed.
+    ...(review ? { reviews: { ...reviewSummary(review), invite: reviewInvite(review), ...(st.carries.some((c) => c.digest === review.digest && c.report === review.report) ? { carry: st.carries.filter((c) => c.digest === review.digest && c.report === review.report).at(-1)!.seq } : {}) } } : {}),
     late: st.lease ? await lateItems(ctx.sandboxRoot, st.lease.holder, st.lease.report) : [],
     chain: st.chain.ok ? "intact" : `BROKEN at line ${st.chain.broken_at} (${st.chain.reason})`,
     ...(existsSync(join(ctx.sandboxRoot, FINISH_LOG)) ? {} : { note: "no finish act yet" }),

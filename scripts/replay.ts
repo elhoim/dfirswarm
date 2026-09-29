@@ -210,6 +210,8 @@ export type Projection = {
    * a checkout that reads none.
    */
   late_evidence?: Array<{ addition: number; import: string; synthetic: boolean; state: string; records: number; terms: number; objects: number; questions: Array<{ section: string; objects: number; occurrences: number }> }> | null;
+  /** The report's reviews replayed under the checkout's carry rule (reviewsOf): null for a checkout without it, or a run with no review of a report in history. */
+  reviews?: ReviewReplay | null;
   /** What could not be evaluated, in the harness's or node's words. */
   errors: string[];
   /** The harness's lines whole (they quote records): only with --show-text. */
@@ -227,6 +229,29 @@ export type Projection = {
  */
 export type Delivery = { point: "record" | "review_offer" | "attest" | "lead_close" | "finish_status"; entry: number | null; lead?: string; on: string | null; by: string | null; at: string | null; sections: string[]; warnings: string[] };
 export type Deliveries = { acts: { record: number; review_offer: number; attest: number; lead_close: number }; delivered: Delivery[]; error: string | null };
+
+/**
+ * The report's reviews under the carry rule (docs/adr/0015, "A review
+ * carries over"), counts and seats only. `whole`: each recorded ack read as
+ * the review a seat gives by naming no sections (the whole report at its
+ * version); `scoped`: the what-if in which each seat's ack named only the
+ * sections numbered by the questions it answered (a seat that answered
+ * none reviews the whole report).
+ */
+export type ReviewReplay = {
+  /** The report's versions in history/, and how many of them were reviewed (an ack of their digest). */
+  versions: number;
+  reviewed: number;
+  acks: { total: number; no_objection: number; objection: number; unmapped: number };
+  /** No-objection acks by a seat that had given one on an earlier version, and of those, the ones the rule finds standing already (their sections unchanged: not asked again). */
+  reacks: { recorded: number; standing_whole: number; standing_scoped: number };
+  /** Sections the recorded re-reviews covered (the whole report each time) against those the rule asks for (only what changed). */
+  section_reviews: { recorded: number; asked_whole: number };
+  /** Each reviewed version after the first: its sections, how many changed from the version reviewed before it, the re-reviews recorded on it, and the seats the rule asks again. */
+  rounds: Array<{ version: number; sections: number; changed: number; reacks: number; asked_whole: number; asked_scoped: number }>;
+  /** Result posts resolved as late items that their author made within two minutes after its own ack: an ack announced on the board. */
+  echoes: number;
+};
 
 /** The sources' broad extractions, per source and capability, and the questions held or warned on them (ids and states only). */
 export type PreparationProjection = {
@@ -563,6 +588,7 @@ export async function project(harness: string, S: string, o: { showText?: boolea
   const preparation = await guard("the preparations", () => preparationOf(harness, S));
   const reviewCaps = await guard("the review rule", () => reviewCapsOf(P, S));
   const lateEvidence = await guard("the reverse sweeps", () => lateEvidenceOf(SW, S));
+  const reviews = await guard("the report's reviews", () => reviewsOf(FIN, P, S));
   const projection: Projection = {
     harness: { path: harness, commit: harnessCommit(harness) },
     goal: { source: doc?.source ?? (goalText ? "sandbox contract" : null), checks: checks.length, answers_checks: rows.length, not_replayed: others },
@@ -589,6 +615,7 @@ export async function project(harness: string, S: string, o: { showText?: boolea
     preparation,
     review_caps: reviewCaps,
     late_evidence: lateEvidence,
+    reviews,
     errors,
   };
   if (o.showText) {
@@ -676,6 +703,122 @@ async function reviewCapsOf(Pm: Mod | null, S: string): Promise<Projection["revi
     const codes = [...new Set(r.caps.map((c) => c.code))].sort();
     if (codes.length) out.capped.push({ section: e.section, answer: e.seq, by: a.by, standing: !replaced.has(e.seq), material: material.get(e.section)!, codes });
   }
+  return out;
+}
+
+/**
+ * The report's reviews replayed under the checkout's carry rule
+ * (docs/adr/0015, "A review carries over"; its reportSections and
+ * reviewStanding): the run's acks in order, each mapped by its digest to a
+ * version of the report in history/ and read as the rule reads it, an ack
+ * from before per-section reviews as the whole report at its version (and,
+ * as the scoped what-if, as the sections numbered by the questions its seat
+ * answered). Before each no-objection ack by a seat that had given one on an
+ * earlier version, the rule is asked whether that seat's review stood
+ * already (it would not have been asked again) and, when it did not, on how
+ * many sections it is asked again. Each reviewed version after the first is
+ * a review round the rule needs when it asks anyone again over the acks
+ * before it. A late post resolved that its author made within two minutes
+ * after its own ack is an echo. Counts and seats only, never a section's
+ * words. Null for a checkout without the rule, or a run with no ack of a
+ * report version in history.
+ */
+export async function reviewsOf(FIN: Mod | null, Pm: Mod | null, S: string): Promise<ReviewReplay | null> {
+  const sectionsOf = fn(FIN, "reportSections");
+  const standing = fn(FIN, "reviewStanding");
+  if (!sectionsOf || !standing || !fn(FIN, "readFinish") || !fn(Pm, "listFileHistory") || !fn(Pm, "readFileVersion")) return null;
+  type Ack = { seq: number; at: string; by: string; digest: string; verdict: string; why: string; report?: string; sections?: Record<string, string>; whole?: boolean };
+  type Sec = { key: string; title: string; digest: string };
+  type Seat = { by: string; standing: string; changed: string[]; removed: string[] };
+  const st = (await fn(FIN, "readFinish")!(S)) as { lease: { report: string | null } | null; acks: Ack[]; resolutions: Array<{ post?: number }> };
+  const report = st.lease?.report ?? st.acks.find((a) => a.report)?.report ?? null;
+  if (!report || !st.acks.length) return null;
+  const history = (await fn(Pm, "listFileHistory")!(S, report)) as Array<{ rev: number; sha256?: string; stored?: boolean }>;
+  const versions: Array<{ i: number; digest: string; sections: Sec[] }> = [];
+  for (const v of history) {
+    if (v.stored === false || !v.sha256) continue;
+    const got = (await Promise.resolve(fn(Pm, "readFileVersion")!(S, report, v.rev)).catch(() => null)) as { text: string } | null;
+    if (got) versions.push({ i: versions.length, digest: v.sha256, sections: sectionsOf(got.text) as Sec[] });
+  }
+  const byDigest = new Map(versions.map((v) => [v.digest, v]));
+  // The what-if's scope: the sections numbered by the questions each seat answered.
+  const scope = new Map<string, Set<string>>();
+  for (const e of fn(Pm, "readLedger") ? ((await fn(Pm, "readLedger")!(S)) as Array<{ kind: string; by: string; section?: string }>) : []) {
+    const n = e.kind === "answer" ? /^question:(\d+)$/.exec(e.section ?? "")?.[1] : undefined;
+    if (n) scope.set(e.by, new Set([...(scope.get(e.by) ?? []), n]));
+  }
+  const acks = [...st.acks].filter((a) => !a.report || a.report === report).sort((a, b) => a.seq - b.seq);
+  const out: ReviewReplay = { versions: versions.length, reviewed: 0, acks: { total: acks.length, no_objection: 0, objection: 0, unmapped: 0 }, reacks: { recorded: 0, standing_whole: 0, standing_scoped: 0 }, section_reviews: { recorded: 0, asked_whole: 0 }, rounds: [], echoes: 0 };
+  const whole: Array<Ack & { v: number }> = [];
+  const scoped: Array<Ack & { v: number }> = [];
+  const reviewedBefore = new Set<string>();
+  const seatOf = (list: Ack[], v: { digest: string; sections: Sec[] }, by: string) => ((standing(list, report, { digest: v.digest, sections: v.sections }) as { seats: Seat[] }).seats.find((x) => x.by === by) ?? null);
+  const acked = new Set<number>();
+  for (const a of acks) {
+    if (a.verdict === "objection") out.acks.objection += 1;
+    else out.acks.no_objection += 1;
+    const v = byDigest.get(a.digest);
+    if (!v) {
+      out.acks.unmapped += 1;
+      continue;
+    }
+    // A reviewed version after the first: the round the rule needs, over the acks before it.
+    if (!acked.has(v.i) && acked.size) {
+      const before = (xs: Array<Ack & { v: number }>) => xs.filter((x) => x.v < v.i);
+      const prev = versions[Math.max(...[...acked].filter((i) => i < v.i), -1)];
+      const reasked = (xs: Array<Ack & { v: number }>) => (standing(before(xs), report, { digest: v.digest, sections: v.sections }) as { seats: Seat[] }).seats.filter((x) => x.standing === "reasked").length;
+      const was = new Map((prev?.sections ?? []).map((x) => [x.key, x.digest]));
+      out.rounds.push({ version: v.i + 1, sections: v.sections.length, changed: v.sections.filter((x) => was.get(x.key) !== x.digest).length + [...was.keys()].filter((k) => !v.sections.some((x) => x.key === k)).length, reacks: 0, asked_whole: reasked(whole), asked_scoped: reasked(scoped) });
+    }
+    acked.add(v.i);
+    const all = Object.fromEntries(v.sections.map((x) => [x.key, x.digest]));
+    const asWhole = a.sections ? a : { ...a, sections: all, whole: true };
+    const keys = [...(scope.get(a.by) ?? [])].filter((k) => k in all);
+    const asScoped = a.sections ? a : keys.length ? { ...a, sections: Object.fromEntries(keys.map((k) => [k, all[k]])) } : asWhole;
+    if (a.verdict === "no_objection" && reviewedBefore.has(a.by)) {
+      out.reacks.recorded += 1;
+      const w = seatOf(whole, v, a.by);
+      if (w && w.standing !== "reasked") out.reacks.standing_whole += 1;
+      const sc = seatOf(scoped, v, a.by);
+      if (sc && sc.standing !== "reasked") out.reacks.standing_scoped += 1;
+      out.section_reviews.recorded += Object.keys(asWhole.sections!).length;
+      out.section_reviews.asked_whole += !w ? v.sections.length : w.standing === "reasked" ? w.changed.length + w.removed.length : 0;
+      const round = out.rounds.find((r) => r.version === v.i + 1);
+      if (round) round.reacks += 1;
+    }
+    if (a.verdict === "no_objection") reviewedBefore.add(a.by);
+    whole.push({ ...asWhole, v: v.i });
+    scoped.push({ ...asScoped, v: v.i });
+  }
+  out.reviewed = acked.size;
+  // Echoes: a resolved late post its author made within two minutes after its own ack (the trace's post rows give each post's time).
+  const resolved = new Set(st.resolutions.map((r) => r.post).filter((x): x is number => typeof x === "number"));
+  if (resolved.size) {
+    const trace = await readFile(join(S, "traces", "events.jsonl"), "utf8").catch(() => "");
+    for (const line of trace.split("\n")) {
+      if (!line.includes('"tool":"post"')) continue;
+      let row: { ts?: string; agent?: string; tool?: string; result?: { ok?: boolean; id?: unknown } };
+      try {
+        row = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      const id = Number(row.result?.id);
+      if (row.tool !== "post" || row.result?.ok !== true || !resolved.has(id)) continue;
+      const t = Date.parse(row.ts ?? "");
+      if (acks.some((a) => a.by === row.agent && t - Date.parse(a.at) >= 0 && t - Date.parse(a.at) <= 120_000)) {
+        out.echoes += 1;
+        resolved.delete(id);
+      }
+    }
+  }
+  return out;
+}
+
+/** The report's reviews under the carry rule, values-free: counts and seats. */
+function reviewWords(r: ReviewReplay): string[] {
+  const out = [`  reviews (the carry rule over the recorded acks): ${r.acks.total} ack(s) (${r.acks.no_objection} no objection, ${r.acks.objection} objection${r.acks.unmapped ? `, ${r.acks.unmapped} of a version not in history` : ""}) over ${r.reviewed} reviewed version(s) of ${r.versions}; ${r.reacks.recorded} re-review(s) of a later version, of which the rule finds ${r.reacks.standing_whole} standing already as recorded (whole report) and ${r.reacks.standing_scoped} had each seat named its own questions' sections; ${r.section_reviews.recorded} section review(s) in the re-reviews, ${r.section_reviews.asked_whole} asked again by the rule; ${r.echoes} resolved late post(s) announcing their author's ack`];
+  for (const x of r.rounds) out.push(`    version ${x.version}: ${x.changed} of ${x.sections} section(s) changed since the version reviewed before; ${x.reacks} re-review(s) recorded; the rule asks ${x.asked_whole} seat(s) again (${x.asked_scoped} scoped)`);
   return out;
 }
 
@@ -1262,6 +1405,8 @@ export function diffProjections(a: Projection, b: Projection): Array<Omit<Differ
   if (a.review_caps && b.review_caps) put(null, "established attests the review rule caps", `${a.review_caps.capped.length} of ${a.review_caps.established}`, `${b.review_caps.capped.length} of ${b.review_caps.established}`);
   // Only where both read the prepares: a checkout from before them reads the register without them, which is no rule's difference.
   if (a.finish?.prepared && b.finish?.prepared) put(null, "prepared", preparedWords(a), preparedWords(b));
+  // Only where both have the carry rule: one from before it reads no review as standing past its version.
+  if (a.reviews && b.reviews) put(null, "re-reviews the rule finds standing", `${a.reviews.reacks.standing_whole} of ${a.reviews.reacks.recorded}`, `${b.reviews.reacks.standing_whole} of ${b.reviews.reacks.recorded}`);
   put(null, "done", a.finish ? `${a.finish.done}${a.finish.held_by.length ? ` (${a.finish.held_by.join(", ")})` : ""}` : "none", b.finish ? `${b.finish.done}${b.finish.held_by.length ? ` (${b.finish.held_by.join(", ")})` : ""}` : "none");
   put(null, "disagreements", listWords(a.agreement.map((g) => `${g.section} ${g.kind}`)), listWords(b.agreement.map((g) => `${g.section} ${g.kind}`)));
   put(null, "seals", `${a.seals.hold} of ${a.seals.verdicts} hold`, `${b.seals.hold} of ${b.seals.verdicts} hold`);
@@ -1365,6 +1510,7 @@ export function replayWords(r: Replay): string {
     if (p.preparation) out.push(...preparationWords(p.preparation));
     if (p.review_caps) out.push(...reviewCapWords(p.review_caps));
     if (p.late_evidence) out.push(...lateEvidenceWords(p.late_evidence));
+    if (p.reviews) out.push(...reviewWords(p.reviews));
     if (p.deliveries) out.push(...deliveryWords(p.deliveries));
     for (const x of p.errors) out.push(`  not evaluated: ${x}`);
     if (p.text) {
