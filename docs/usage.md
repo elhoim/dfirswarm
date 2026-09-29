@@ -349,13 +349,23 @@ watchdog had notified it.
   makes stale every standing `bounded_negative`, `not_determinable` and
   `partial` answer whose coverage was recorded before it, whatever question
   it was added for (the reply and the board post name each; the finish line
-  holds each, `evidence_stale`, until the new evidence is examined for it
-  and another seat reviews that: a coverage record naming the import among
-  its objects, attested by another seat, or an entry resting on the import,
-  attested likewise, cited by the answer recorded again; a review made
-  before the evidence came does not count for it; an established answer is
-  not staled; `question accept` after the evidence came excuses it, and its
-  reply names what the finish line still holds), and, when the
+  holds each, `evidence_stale`, until the new evidence is examined for it,
+  another seat reviews that, and the examination says how the evidence
+  bears on the answer: a coverage record naming the import among its
+  objects, attested by another seat, or an entry resting on the import,
+  attested likewise, cited by the answer recorded again, with an entry
+  whose refs name the import's files and that carries a delta, a `rel` to
+  the answer of kind supports, contradicts, adds_part, irrelevant or
+  inconclusive, cited by the answer or among that coverage record's
+  results; a review made before the evidence came does not count for it;
+  an established answer is not staled; `question accept` after the
+  evidence came excuses it, and its reply names what the finish line still
+  holds), searches the new files at once for every standing coverage
+  record's `looked_for` strings (the reverse sweep: the reply's
+  `reverse_sweep` counts it, the board post names each hit by question, the
+  stale answers say theirs, and on an answer it does not stale a hit its
+  answer does not reach is warned of, `late_evidence_hits`; a hit never
+  holds by itself), and, when the
   run's catalogue is on, runs a detect pass over each file (at
   once when the hub runs, else at its next round). While the hub runs the act
   is handed to it: it is the store journal's writer. **Every seat's VM mounts
@@ -1001,7 +1011,7 @@ and still compares by section.
 ### Replay: `swarm.sh replay`, `scripts/replay.ts`
 
 ```
-swarm.sh replay <id> [--checkout PATH] [--compare [A [B]]] [--stop-policy P[,P...]] [--deliveries] [--prepare-as STATE] [--json] [--show-text]
+swarm.sh replay <id> [--checkout PATH] [--compare [A [B]]] [--stop-policy P[,P...]] [--deliveries] [--prepare-as STATE] [--reverse-sweep] [--json] [--show-text]
 node --experimental-strip-types scripts/replay.ts <run-dir | id --registry FILE> [the same options]
 ```
 
@@ -1049,7 +1059,19 @@ measure a rule change on recorded histories before paying for new runs
   finish line through the check, and counted held. Where the checkout reads
   the store journal's preparation receipts, each source's broad extraction,
   capability by capability, and the questions held (`preparation_pending`)
-  or warned (`preparation_missing`) on it, with their sources.
+  or warned (`preparation_missing`) on it, with their sources. Where the
+  checkout has the source-first review rule (ADR 0015, "A source-first
+  review"), how many established attests of answers that claim established
+  the run recorded, and each the rule would cap, by question, answer, seat
+  and codes (`no_discriminator`, `locator_unverified`,
+  `derivation_unverified`, `no_locator_or_derivation`): the recorded
+  strengths stand, this says what the rule would have done at each attest
+  (a locator into an input cannot be read in the copy, which leaves the
+  evidence out, and says so). Where it reads the reverse sweeps (ADR 0013,
+  "Late evidence: the reverse sweep and the delta"), each evidence
+  addition's: its state, how many standing coverage records and strings it
+  searched for, how many objects it read, and per question the hit objects
+  and occurrences, never a string.
 - **Values-free by default**: codes, ids, counts and the harness's own words,
   never a record's text (no answer, finding, lead title, reason or post).
   `--show-text` adds the harness's lines whole, which quote records; it is
@@ -1092,6 +1114,13 @@ measure a rule change on recorded histories before paying for new runs
   pack says the images cannot run is declined), and is evaluated as usual.
   It prints what applied, and what could not be asked (a pack this checkout
   does not ship, an input with no digest, a run whose evidence is not here).
+- **`--reverse-sweep`** asks what a run from before the reverse sweep would
+  have been told at each evidence addition: each addition in a copy that has
+  no reverse sweep line gets the one this checkout's store sweep computes
+  over the copy's import, from the coverage records standing at the
+  addition, marked synthetic, on the copy's chain. Only for a checkout that
+  reads version 2 sweep lines (one from before would read the chain as
+  broken): its copy is left as it is, and the output says so.
 
 Exit 0 when replayed and the run's registers are unchanged; 1 when a
 checkout could not be evaluated, the run changed under it, or it was
@@ -1106,7 +1135,12 @@ acts, each with an `expect.json` written by hand from the ADRs. The tests
 (`tests/contract-fixtures.test.ts`) replay each and hold it to that, and to
 three invariants under every fixture and stop policy: readiness, the answers
 check and the gate never disagree on a disposition; a warning never holds;
-every custody verdict verifies as a prefix. A fixture that names its
+every custody verdict verifies as a prefix. A fixture recorded before a
+rule may keep its history and name, in `rules`, what the harness before the
+rule reads in it (`evidence-stale-without-delta`, under c34c6cb), and the
+test runs that harness, extracted with `git archive`, beside this one; every
+history recorded before the source-first review and the delta is replayed
+under both, and reads the same but where the delta applies. A fixture that names its
 `deliveries` is replayed with `--deliveries` and held to each act's warnings
 too, and finish status to the answers check's. A rule change that moves a
 fixture's projection changes its `expect.json` in the same commit, with the

@@ -815,6 +815,97 @@ receipts, offers and the hold are the hub's. The recipes' calls to iLEAPP,
 ALEAPP and Plaso are held to the recipe protocol by stand-ins in the
 tests; they have not yet run against the programs in the images.
 
+## Late evidence: the reverse sweep and the delta
+
+On the calibration run sb1b3c8 the evidence that settled a question came
+late, and the answers stood without it: every stale answer was examined
+again on a coverage record that named the import, another seat reviewed
+each, and the late fact was still missed, with the import cited 28 times.
+The rule above checked that the new evidence was looked at, never what the
+look concluded. The brainstorm of 2026-09-29 (L5) agreed on two things: the
+addition is the moment to run the store sweep the other way, and the
+re-examination says how the new evidence bears on the answer, not only that
+it was cited. A blanket hold on every hit in new bytes was rejected (an
+echoing query or a broad string would multiply work, and the failure had
+the citations already): the hits are delivered, and the delta is what
+clears.
+
+- **The reverse sweep.** When evidence is added (`scripts/material.ts`,
+  after the addition's external entry), the hub searches the import's files,
+  and only they, for the `looked_for` strings of every coverage record
+  standing at the addition (recorded before its entry, not corrected by
+  then: `recordsStandingAt`, by seqs alone, so a reconciliation long after
+  finds the same records). The search is the store sweep's: bytes and
+  strings, in UTF-8 and UTF-16LE, ASCII case folded, each file streamed
+  whole, the same budget, and what it did not reach named (partial). Each
+  hit is bound to the records whose strings it holds (`bears_on`). The line
+  is on the sweeps' chain, version 2 with `of: "import"`, bound to the
+  addition's external entry by its hash, with the records (seq, hash,
+  questions, strings); a version 1 line is a coverage record's sweep, read
+  as before (`readSweeps`), and the chain, custody, the release and the
+  package carry both. Once per addition: applied again (the addition's
+  reconciliation), nothing more is written. A failure is a step pending,
+  applied at the next reconciliation.
+- **Where the hits go.** To the re-examination of the questions they bear
+  on, and nowhere as a hold: the addition's board post says them by
+  question (each with the records whose strings it holds); a stale answer's
+  `evidence_stale` says those on its question, first among what to
+  examine; and on a question whose answer the addition does not stale (an
+  established one, or one examined since), a hit in an object no entry the
+  answer reaches names is a warning, `late_evidence_hits`, delivered where
+  every warning is (the reply to the record of the answer, its review offer,
+  the reply to an attest on it, a lead's close that changes it, finish
+  status). A hit is a string a record looked for, found in the new files:
+  the entry that names the object says what it is.
+- **The delta.** `evidence_stale` clears as before (the new evidence
+  examined for the question on a coverage record naming the import, or an
+  entry resting on it, reviewed by another seat) and only when the answer,
+  or a coverage record it cites for its question recorded after the
+  addition (its results), cites an entry that interprets the import: a
+  standing entry recorded after the addition whose refs name the import's
+  objects (the import, or a file of it) and that carries a delta, a `rel`
+  to the question's answer (the one standing when it was written, or its
+  correction) of kind `supports`, `contradicts`, `adds_part`, `irrelevant`
+  (within the question's scope) or `inconclusive` (`deltasFor`). The rel
+  kinds `adds_part`, `irrelevant` and `inconclusive` are new and name an
+  answer (refused otherwise, with why); an entry is recorded with them as
+  with any rel, in the chained core only when present, so an old entry
+  hashes as it did. A `contradicts` delta on a standing answer is an open
+  contradiction until the answer is recorded again; the answer may cite it
+  as contrary evidence. The defect says what it lacks: the records before
+  the addition, those after it that do not name the import, those not yet
+  reviewed, an examination with no delta, and the entries that interpret
+  the import with none. The operator's acceptance after the addition still
+  excuses it (`acceptanceExcuses`, unchanged).
+- **Old runs.** The rule reads the registers as they are, so a run from
+  before it replays with its examined-and-reviewed answers stale again
+  where nothing carried a delta; replay says so (ADR 0017). A run resumed
+  under it meets the same defect, with its fix. The reverse sweep is the
+  hub's at an addition: a run from before it has none, and
+  `swarm.sh replay --reverse-sweep` computes, in the copy, what this
+  checkout's sweep would have found at each addition.
+
+Replayed values-free (`swarm.sh replay --compare <c34c6cb> --reverse-sweep`),
+the harness before these rules against this checkout. sb1b3c8's evidence
+came at E-20, before the run's first coverage record (E-31): at the
+addition no record stood with `looked_for`, so the reverse sweep would have
+searched for nothing and delivered nothing, 0 hits on every question. The
+coverage records recorded after it swept the import themselves (the store
+sweep reads every import): records for questions 2, 3, 4 and 6 found their
+strings there, one object each, most of them in the object the record
+already named. Under the delta rule the six answers the addition staled
+(questions 2, 3, 4, 6, 7 and 8) are stale again, none of their examinations
+carrying a delta; questions 7 and 8 lose the partial disposition they had.
+s5764c4 and sa2f2f2 hold no evidence addition, and read the same under both
+harnesses. Whether the delta and the delivered hits make fewer missed late
+corrections is for paired runs (the usb-departure calibration with late
+evidence, `late.reflected`), with wrong reversals counted beside it.
+
+Not built: a complete occurrence index of each hit (the sweep keeps the
+count and the first offset, as the store sweep does); a hold on hits in new
+objects; the delta on a question the addition does not stale (a hit there
+is warned of, and an entry that names the object answers the warning).
+
 ## Consequences
 
 - Every existing goal and run keeps working: an answer without `result`
@@ -832,6 +923,10 @@ tests; they have not yet run against the programs in the images.
   that parse is under way, and only when it claims absence or complete
   coverage; every other says it was weighed without it. A pack that
   declares nothing changes nothing.
+- Evidence added late is searched at once for what the standing coverage
+  looked for, and an answer it stales stands again only on an entry that
+  says how the evidence bears on it. A citation of the import no longer
+  clears it; a hit never holds by itself.
 - Not decided here: the acquisition lane and notifications as sealed
   material (Phase 1b), the full offer protocol and the reviewer's query
   (Phase 2), the report's per-question chains (Phase 3), and the mediated

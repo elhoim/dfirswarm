@@ -552,6 +552,87 @@ paired runs measure that, with the finish tail's tokens and wall time
 6 resolve calls and 2 dones; the other two turned ready only at their
 done).
 
+## A source-first review
+
+On Belka a wrong value was attested established by three seats, each
+naming an alternative with its evidence: the rule was met and the answer
+was wrong. What nothing but words had checked was that the value sits in
+the bytes the review read, and that the review weighed the reading that
+would make it wrong. The brainstorm of 2026-09-29 (L2) agreed: the review
+starts from the question and its sources, not from the candidate; it names
+the strongest rival and a test that separates it; it says where a literal
+value was read (a locator the hub checks against the sealed bytes) or how
+a derived one was derived; and byte presence proves presence, never
+attribution or truth. Another model family is a routing preference, never
+a second source.
+
+- **The packet.** A material negative's review offer (the answers reviews
+  are offered for) leads with the question as it is asked now (its
+  register id, revision and words, whole), its scope (material, whether it
+  asks whether something exists or for a complete set) and the original
+  sources its answer's coverage records and cited entries lead back to (an
+  input, an import or a capture as named, a job's output by its declared
+  inputs, followed back); then the answer under review, linked by its seq
+  with the entries it corrects and its coverage records, never quoted;
+  then each source's broad extraction (ADR 0013), the task, the store
+  sweep and the warnings. Established and partial answers are reviewed
+  through attests the finish line asks for: the attest tool, its guidance,
+  the prompt and the critic's fix say the same, source first. Reduced
+  priming, not blindness: a seat may have read the board.
+- **The review's evidence** (`answer_review`, each in the hashed record only
+  when given, so an older review hashes as it did):
+  `discriminator {rival, test, favours_if, outcome, refs}`, the strongest
+  rival (another time, entity, mechanism or activity, or the premise not
+  holding), the test, the result that would favour each, what it showed,
+  and the observation or job it rests on (an E-<seq> the ledger holds or an
+  object that resolves; refused otherwise); `reproduced_at [{ref, offset,
+  length?, value?}]`, where each literal value it vouches for was read; and
+  `derivation {job, inputs}`, how a derived value was derived.
+- **The hub's checks.** A locator's ref resolves to a sealed object of the
+  run (an input, a job's output or log, an import, a capture, a sealed brain
+  output; never a directory or a catalogue row), and its value is at its
+  offset, in UTF-8 or UTF-16LE, ASCII letters in either case; with a
+  length and no value, the bytes there are read back and must be words of
+  the answer. A bounded read at the offset, and 256 bytes either side to
+  say where the value is when it is not there: never a scan, never the
+  object's whole hash (resolving it against its manifest is the seal). A
+  derivation's job is sealed and ran to its end, and each input resolves
+  and is among what the job declared it would read.
+- **The cap.** An established attest of an answer that claims established,
+  on a material question, is recorded `best_candidate` when it names no
+  discriminator that counts (a placeholder, or the rival in the test's
+  words, is none), when a locator does not verify, when a derivation does
+  not resolve, or when it names neither a locator nor a derivation. Each
+  reason is in `capped` (codes `no_discriminator`, `locator_unverified`,
+  `derivation_unverified`, `no_locator_or_derivation`), and the reply says
+  how to fix each; the seat's later review that meets them is its review,
+  as with the alternatives. The rule affects only claims of established: a
+  partial answer's review checks its claimed parts as before, its locators
+  are checked and one that does not verify is said, and nothing is capped
+  for it; partial stays a disposition. A best candidate asked for is not
+  capped again. The hub judges refs, bytes and sequence, never whether the
+  test is good: a decoy in the evidence is in the bytes, and the
+  discriminator is what weighs it.
+- **Routing.** A review offer goes first to an eligible seat of another
+  model family than every seat that did the work (team.json's model per
+  seat, its provider's route and release tag dropped), then by relevance
+  and idleness as before. A team of one family is offered as before, and
+  nothing requires another family.
+
+Replayed values-free (`swarm.sh replay`, the review rule over each recorded
+established attest; the recorded strengths stand): on s5764c4 (Belka) six
+established attests of answers that claim established (questions 1, 2, 3,
+5, 8, 11), on sa2f2f2 two (questions 3, 6), and on sb1b3c8 three (two on
+question 1, one on question 5), and the rule would cap every one of them,
+for the same two reasons: no discriminator, and neither a locator nor a
+derivation. The established attests of partial answers (three on s5764c4,
+eight on sa2f2f2) are not capped. Had the rule held at those attests, each
+of those answers would have been held a best candidate until a review
+named its rival, its test and where its values were read; replay cannot
+show what the reviewers would then have done. That is for paired runs:
+wrong-at-established and decoy headlines against false negatives and
+unsupported downgrades, with the reviewers' tokens.
+
 ## Consequences
 
 - A run has one closer, and a finish that waits on a compacting or dead seat
@@ -563,6 +644,12 @@ done).
   a result, a veto or an objection really raced the finish.
 - A best candidate is said to be one, in the ledger, the check and the
   finish; a run that ends on one is examination-limited, never completed.
+- An established review of an established claim says what separates the
+  answer from its strongest rival and where its values are, and the hub
+  reads those bytes; a review that does not is a best candidate, and says
+  how to become one that is. Every recorded established attest of the runs
+  replayed would have been capped: reviews get longer, and the paired runs
+  weigh that against what they catch.
 - Offers make "the woken seat got first claim" a native measure (offer,
   offer_seen, the claim that names it, decline, lapse), as are hand-offs,
   parked leads, confirmations and `done_deferred` (WP7's metrics read them).

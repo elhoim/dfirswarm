@@ -6,6 +6,67 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Added: a source-first review with checked locators, and late evidence weighed with a delta
+
+On Belka a wrong value was attested established by three seats, each
+naming an alternative: the rule was met and the answer was wrong. On the
+calibration run sb1b3c8 the evidence that settled a question came late,
+every stale answer was examined again on a record that named it and
+reviewed, and the late fact was still missed. Now (ADR 0015, "A
+source-first review"; ADR 0013, "Late evidence: the reverse sweep and the
+delta"):
+
+- **Review source-first.** A material negative's review offer leads with
+  the question as asked (its revision, its words whole), its scope and the
+  original sources its answer's coverage and cited entries lead back to;
+  the answer under review is linked by its seq, never quoted first. The
+  attest tool, its guidance, the prompt and the critic's fix say the same
+  for the attests the finish line asks for. A review goes first to a seat
+  of another model family than the work's (team.json's model per seat): a
+  preference, never a requirement.
+- **`answer_review` gains** `discriminator {rival, test, favours_if,
+  outcome, refs}`, `reproduced_at [{ref, offset, length?, value?}]` and
+  `derivation {job, inputs}`, each in the hashed record only when given (an
+  older review hashes as it did). The hub reads each locator's bytes at its
+  offset, in UTF-8 and UTF-16LE (bounded reads, never a scan; it says where
+  the value is when it is near), and holds a derivation to a sealed job
+  that ran to its end over what it declared.
+- **The cap.** An established attest of an answer that claims established,
+  on a material question, with no discriminator that counts, a locator
+  that does not verify, a derivation that does not resolve, or neither a
+  locator nor a derivation, is recorded best_candidate, each reason in
+  `capped`, and the reply says how to fix each; the seat's later review
+  that meets them is its review. A partial answer's review is checked and
+  never capped for it: partial stays a disposition.
+- **The reverse sweep.** At `evidence add` the import's files, and only
+  they, are searched for the `looked_for` strings of every coverage record
+  standing at the addition, each hit bound to the records it bears on, on
+  `ledger/sweeps.jsonl` (a version 2 line, `of: "import"`, on the same
+  chain). The hits go to the board post by question, to the words of each
+  stale answer they bear on, and, on an answer the addition does not stale,
+  to the warning `late_evidence_hits` at every point warnings are
+  delivered. A hit never holds by itself.
+- **The delta.** `evidence_stale` clears only when the answer, or the
+  coverage it cites recorded since, cites an entry whose refs name the
+  import's objects and that carries a delta: a `rel` to the question's
+  answer of kind supports, contradicts, adds_part, irrelevant or
+  inconclusive (the last three new, present-only in the core). The
+  operator's acceptance after the addition still clears it.
+- **Replay** counts, per run, the established attests the review rule would
+  cap and why (codes only), and each addition's reverse sweep per question;
+  `--reverse-sweep` gives an addition from before it the line this
+  checkout's sweep would have written. Four contract fixtures: the delta
+  clearing, the history from before it (held now, cleared under c34c6cb,
+  replayed under both), the reverse sweep's hits delivered and not holding,
+  and the review's caps; every older fixture reads the same under both
+  harnesses but where the delta applies.
+
+Replayed values-free: every established attest of an established answer
+in s5764c4 (6), sa2f2f2 (2) and sb1b3c8 (3) would have been capped (no
+discriminator; no locator or derivation); sb1b3c8's evidence came before
+any coverage record, so its reverse sweep would have delivered nothing, and
+under the delta its six examined answers are stale again.
+
 ### Added: a source's broad extraction, offered and on the record, before a negative on it
 
 On the Belka runs four of five false negatives rested on a row no job had
