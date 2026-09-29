@@ -1,6 +1,13 @@
 {
   "name": "usn_journal",
   "description": "Parse an NTFS change journal ($UsnJrnl:$J) into records: name, USN, timestamp, reason bits and file reference, from v2, v3 and v4 records. Skips the sparse front, says where the first record was, and says how many records it read whatever the name filter kept.",
+  "use": {
+    "names": [
+      "$J",
+      "$UsnJrnl*",
+      "*$J"
+    ]
+  },
   "params": {
     "path": {
       "type": "string",

@@ -1,6 +1,20 @@
 {
   "name": "sqlite_query",
   "description": "Run a read-only sqlite3 query against a database file and return stdout/stderr plus exit code.",
+  "use": {
+    "extensions": [
+      ".db",
+      ".sqlite",
+      ".sqlite3",
+      ".sqlitedb"
+    ],
+    "magic": [
+      {
+        "offset": 0,
+        "hex": "53514c69746520666f726d6174203300"
+      }
+    ]
+  },
   "params": {
     "db_path": {
       "type": "string",

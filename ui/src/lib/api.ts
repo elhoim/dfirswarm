@@ -1,6 +1,6 @@
 import type { ArtifactIndex, Coverage, Dossier, ImagePreview, Job, OperatorAudit, PackageInfo, StartCheck, PackRow, EntryReviewAction, ReviewState, ExaminersView, EnrolledPerson, ReleaseStateView, PreparedRelease, VmReadiness, ModelList, SwarmRow, SwarmView, TimedPost, TracePage, WorkFile, FileVersion, Health, GoalSummary, StoreJobDetail, StoreJobsView, StoreLogPage,
   LibraryDocument,
-  LibraryEntry, GoalDocument, SwarmContract, ChecksReport, ReadinessReport, ForgedToolSource, InputsLibrary, LeadsPanelView } from "./types";
+  LibraryEntry, GoalDocument, SwarmContract, ChecksReport, ReadinessReport, ForgedToolSource, InputsLibrary, LeadsPanelView, QuestionsPanelView, NetworkPanelView, RequestsPanelView } from "./types";
 
 /**
  * The token that lets this browser start, stop, reap and restore. The server
@@ -189,6 +189,22 @@ export const api = {
   leads: (id: string) => request<LeadsPanelView>(`/api/swarms/${encodeURIComponent(id)}/leads`),
   /** The operator's answer to a lead (note, with a host to allow for the run's jobs), or a reopen: run as swarm.sh lead. Needs the token. */
   leadAct: (id: string, payload: { action: "note" | "reopen"; lead: string; text?: string; allow_host?: string }) => postJson<Job>(`/api/swarms/${encodeURIComponent(id)}/leads`, payload),
+  /** A directive: an unheld lead under a question (or under one asked with it), with its product and acceptance; run as swarm.sh lead direct. Needs the token. */
+  leadDirect: (id: string, payload: { q?: string; new_question?: string; new_why?: string; title: string; why: string; product: string; acceptance: string; as?: string }) =>
+    postJson<Job>(`/api/swarms/${encodeURIComponent(id)}/leads`, { action: "direct", ...payload }),
+  /** The question register: every question, who asked it, its scope, work and answer; the triage and the clarifications. */
+  questions: (id: string) => request<QuestionsPanelView>(`/api/swarms/${encodeURIComponent(id)}/questions`),
+  /** An act on the question register (add, amend, priority, scope, withdraw, clarify_reply, accept), run as swarm.sh question. Needs the token. */
+  questionAct: (id: string, payload: Record<string, unknown> & { action: string }) => postJson<Job>(`/api/swarms/${encodeURIComponent(id)}/questions`, payload),
+  /** The dynamic network: the case policy, what waits on the operator, requests, grants and captures. */
+  network: (id: string) => request<NetworkPanelView>(`/api/swarms/${encodeURIComponent(id)}/network`),
+  /** The operator's act on the network, with its reason: run as swarm.sh net. Needs the token. */
+  netAct: (id: string, payload: { action: "grant" | "deny" | "revoke" | "socket"; target?: string; why: string; host?: string; lead?: string }) => postJson<Job>(`/api/swarms/${encodeURIComponent(id)}/network`, payload),
+  /** The operator requests: everything the run asked of a person, with its id and how it stands; the evidence and material added. */
+  requests: (id: string) => request<RequestsPanelView>(`/api/swarms/${encodeURIComponent(id)}/requests`),
+  /** An act on an operator request (ack, answer, decline, withdraw, an acquisition's stage), run as swarm.sh requests. Needs the token. */
+  requestAct: (id: string, payload: { action: "ack" | "answer" | "decline" | "withdraw" | "authorise" | "collecting" | "unavailable"; request: string; text?: string; why?: string; as?: string }) =>
+    postJson<Job>(`/api/swarms/${encodeURIComponent(id)}/requests`, payload),
   /** The run's tool jobs from the job service's journal: a page, with the totals over all of them. */
   storeJobs: (id: string, q: { offset: number; limit: number }) =>
     request<StoreJobsView>(`/api/swarms/${encodeURIComponent(id)}/jobs?offset=${q.offset}&limit=${q.limit}`),
@@ -245,4 +261,12 @@ export const api = {
   checkStart: (payload: Record<string, unknown>) => postJson<StartCheck>("/api/start/check", payload),
   stop: (id: string, opts: { no_custody?: boolean; custody_timeout?: number } = {}) => postJson<Job>(`/api/swarms/${encodeURIComponent(id)}/stop`, opts),
   reap: (id: string, payload: { stall_sec?: number; stop?: boolean }) => postJson<Job>(`/api/swarms/${encodeURIComponent(id)}/reap`, payload),
+  /** More room for a going or paused run: swarm.sh extend. */
+  extend: (id: string, payload: { minutes?: number; tokens?: number; usd?: number }) => postJson<Job>(`/api/swarms/${encodeURIComponent(id)}/extend`, payload),
+  /** Lift a pause whose cause is gone: swarm.sh unpause. */
+  unpause: (id: string) => postJson<Job>(`/api/swarms/${encodeURIComponent(id)}/unpause`, {}),
+  /** "Continue this run": swarm.sh resume, with the questions asked for the continuation. */
+  resume: (id: string, payload: { questions?: string[]; why?: string; minutes?: number; tokens?: number; usd?: number; as?: string }) => postJson<Job>(`/api/swarms/${encodeURIComponent(id)}/resume`, payload),
+  /** A job's whole output, as plain text. */
+  jobOutputUrl: (id: string, stream: "stdout" | "stderr") => `/api/jobs/${encodeURIComponent(id)}/output?stream=${stream}`,
 };

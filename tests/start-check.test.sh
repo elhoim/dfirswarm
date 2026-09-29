@@ -94,6 +94,47 @@ else
   pass "--check runs the checks a start makes after its sandbox exists (a missing program: exit 2, nothing written)"
 fi
 
+echo "# a Herdr server that is not running: refused before anything is made (no pane, no VM), with how to start it"
+hbin="$TMP/herdr-bin"
+mkdir -p "$hbin"
+cat > "$hbin/herdr" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$HERDR_LOG"
+case "$*" in
+  "status server --json") if [[ "${HERDR_STUB_RUNNING:-0}" == 1 ]]; then echo '{"status":"running","running":true}'; else echo '{"status":"not running","running":false}'; fi ;;
+  "status server") if [[ "${HERDR_STUB_RUNNING:-0}" == 1 ]]; then echo "status: running"; else echo "status: not running"; fi ;;
+  "agent list") echo '{"result":{"agents":[]}}' ;;
+  *) exit 1 ;;
+esac
+EOF
+chmod +x "$hbin/herdr"
+export HERDR_LOG="$TMP/herdr.log"
+: > "$HERDR_LOG"
+set +e
+out="$(PATH="$hbin:$PATH" SWARM_RUNS_DIR="$TMP/runs-check" bash "$ROOT/scripts/swarm.sh" start --check --isolation host "${base[@]}" --no-write-guard --accept-signer-exposure 2>&1)"
+rc=$?
+set -e
+[[ $rc -eq 2 ]] || fail "a check with the Herdr server stopped exited $rc, wanted 2: $out"
+grep -q 'BLOCKER: the Herdr server is not running' <<<"$out" || fail "the stopped server is not named: $out"
+grep -q 'herdr server' <<<"$out" && grep -q 'run `herdr`' <<<"$out" || fail "the refusal does not say how to start it: $out"
+nothing_written "$TMP/runs-check" "a check refused for a stopped Herdr server"
+# A real start: refused at the same point, before any pane or VM is made.
+set +e
+out="$(PATH="$hbin:$PATH" SWARM_HUBS_DIR="$TMP/real-hubs" SWARM_RUNS_DIR="$TMP/runs-herdr" bash "$ROOT/scripts/swarm.sh" start --isolation host "${base[@]}" --no-write-guard --accept-signer-exposure 2>&1)"
+rc=$?
+set -e
+[[ $rc -ne 0 ]] || fail "a start with the Herdr server stopped went ahead: $out"
+grep -q 'BLOCKER: the Herdr server is not running' <<<"$out" || fail "the real start does not name the stopped server: $out"
+if grep -Eq '^(workspace|pane|tab) ' "$HERDR_LOG"; then fail "a pane was asked for with the server stopped: $(cat "$HERDR_LOG")"; fi
+if grep -q 'VMs:          creating' <<<"$out"; then fail "VMs were created before the server was checked: $out"; fi
+# Running, the same check says nothing about it.
+set +e
+out="$(HERDR_STUB_RUNNING=1 PATH="$hbin:$PATH" SWARM_RUNS_DIR="$TMP/runs-check" bash "$ROOT/scripts/swarm.sh" start --check --isolation host "${base[@]}" --no-write-guard --accept-signer-exposure 2>&1)"
+set -e
+if grep -q 'Herdr server is not running' <<<"$out"; then fail "a running server was reported stopped: $out"; fi
+unset HERDR_LOG
+pass "a stopped Herdr server refuses --check (exit 2) and a start before any pane or VM, naming how to start it; a running one passes"
+
 echo "# a VM run: the host's VM check is run, and a refusal of it is 2"
 cat > "$TMP/msb" <<'EOF'
 #!/usr/bin/env bash

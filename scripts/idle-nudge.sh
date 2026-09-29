@@ -39,6 +39,15 @@
 # running is never counted, and a peer's answer has the whole ten minutes
 # from the ask to come in.
 #
+# A model provider's usage limit refuses every seat at once, and an
+# until-solved run used to prompt each seat again, half an hour apart, for
+# days, with every VM up and the operator never told. When every live seat's
+# last turn ended in a provider error and each seat's limit is plainly not a
+# passing one (a stated wait of half an hour or more, or refused again after
+# a retry), the run pauses for the provider's limit, under any stop policy
+# (scripts/provider-limit.ts); the harness tries again at the end the
+# provider named, or every half hour, and the operator is told once.
+#
 # A seat whose compaction is running takes no prompt at all (Pi refuses it),
 # so it is not nudged; one open past --compact-stall-sec (1200 by default,
 # past the fifteen minutes after which the seat's own harness stops one) has
@@ -124,6 +133,19 @@ is_local_model() { # <agent id>
 has_worked() { # <agent id>
   grep -q "\"agent\":\"$1\",\"tool\":\"\(bash\|read\|post\|name\|inbox\|wait\|thinking\)\"" \
     "$SANDBOX/traces/events.jsonl" 2>/dev/null
+}
+
+# Rows a seat's harness writes under the seat's id without its model having
+# answered (scripts/provider-limit.ts SEAT_HARNESS_ROWS; a test holds the two
+# lists the same). A seat's last turn is its last row that is none of these.
+SEAT_HARNESS_ROWS='agent_start agent_stop hub_prompt hub_lost hub_lost_stop context thinking tool_loaded toolchain inputs_guard budget_precall_stop pause_hold run_paused harness_stop extension_error watch_truncated agent_cap_steer agent_cap_stop sentinel_nudge repeat_hint job_hint forge_hint publish_needed self_compact compact_config compact_notice compact_warning compact_forced compact_hold compact_note compact_start compact_done compact_failed compact_stalled compact_held harness_record'
+
+# The tool of the agent's own last turn on the trace: its own rows only (a
+# watchdog's row about it is the system's), the harness's rows passed over.
+last_turn() { # <agent id>
+  grep "\"agent\":\"$1\",\"tool\":" "$SANDBOX/traces/events.jsonl" 2>/dev/null \
+    | sed -n 's/.*"agent":"'"$1"'","tool":"\([A-Za-z0-9_.-]*\)".*/\1/p' \
+    | awk -v skip="$SEAT_HARNESS_ROWS" 'BEGIN { n = split(skip, s, " "); for (i = 1; i <= n; i++) h[s[i]] = 1 } !($0 in h) { last = $0 } END { print last }'
 }
 
 # Each agent's clocks, one line each, from one read of the trace:
@@ -281,23 +303,28 @@ host_backstop() {
       const budget = await P.readBudget(S).catch(() => null);
       if (!budget) return;
       const pressure = P.budgetPressure(budget);
-      if (!pressure.reason) return;
+      if (!pressure.reason || P.isPaused(budget)) return;
       const mark = await P.markStopSteer(S, pressure.reason);
       if (mark.claimed) {
-        const text = pressure.reason === "cap" ? P.CAP_STEER : `Swarm wall clock hit (${pressure.elapsed_minutes} of ${budget.wall_clock_minutes} minutes). Call done with reason cannot_complete and stop. Do not start new work.`;
-        await P.systemPost(S, { tag: "stop", body: text }).catch(() => undefined);
+        // The words follow the stop policy: a pause is announced as a pause, a stop as a stop.
+        await P.systemPost(S, { tag: "stop", body: P.capSteerText(budget, pressure) }).catch(() => undefined);
         console.log(`steered ${pressure.reason}`);
       }
       if (Date.now() - Date.parse(mark.at) < P.STOP_GRACE_MS) return;
-      const stop = await P.harnessStop(S, pressure.reason, `The harness watchdog stopped the swarm: ${pressure.reason} passed and the agents did not stop within the grace period.`, { verify: true });
-      if (stop.created) console.log(`stopped ${pressure.reason}`);
+      const acted = await P.capAct(S, pressure.reason, `The harness watchdog ${P.stopPolicyOf(budget) === "cap-pause" ? "paused" : "stopped"} the swarm: ${pressure.reason} passed and the grace period ended.`);
+      if (acted.kind === "paused" && acted.created) {
+        await P.systemPost(S, { tag: "stop", body: `The run is paused (${pressure.reason === "cap" ? "its cap" : "its wall clock"}): no model call goes out until the operator extends it (swarm.sh extend) or stops it (swarm.sh stop). What the run holds stays as it is.` }).catch(() => undefined);
+        console.log(`paused ${pressure.reason}`);
+      }
+      // The operator is told of it by pause_notify, whoever wrote it.
+      if (acted.kind === "stopped" && acted.created) console.log(`stopped ${pressure.reason}`);
     }).catch(() => undefined);
   ' "$ROOT/extensions/protocol.ts" "$SANDBOX" 2>/dev/null || true)"
   local what reason ts line
   while read -r what reason; do
     [[ -n "$what" ]] || continue
     ts="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
-    line="$(jq -cn --arg ts "$ts" --arg t "$(if [[ "$what" == stopped ]]; then echo harness_stop; elif [[ "$reason" == cap ]]; then echo cap_steer; else echo wall_steer; fi)" --arg r "$reason" \
+    line="$(jq -cn --arg ts "$ts" --arg t "$(if [[ "$what" == stopped ]]; then echo harness_stop; elif [[ "$what" == paused ]]; then echo run_paused; elif [[ "$reason" == cap ]]; then echo cap_steer; else echo wall_steer; fi)" --arg r "$reason" \
       '{ts: $ts, agent: "system", tool: $t, args: {via: "idle-nudge", reason: $r}, result: {ok: true}}')"
     trace_emit "$ROOT" "$SANDBOX" "$line"
     echo "idle-nudge: $what the swarm ($reason)" >&2
@@ -306,6 +333,61 @@ host_backstop() {
       bash "$ROOT/scripts/notify.sh" "$SANDBOX" budget_cap "$(jq -c '{spent_usd: (.spent_usd // null), cap_usd: (.cap_usd // null)}' "$SANDBOX/budget.json" 2>/dev/null || echo '{}')" >/dev/null 2>&1 </dev/null || true
     fi
   done <<< "$said"
+}
+
+# The operator is told of a pause once, whichever process wrote it: this
+# watchdog, the hub, or a pane's own extension. The claim is a mark on disk
+# (traces/pause-notices/), so a pause whose writer never said so, or a
+# watchdog that restarts, still tells it, and no two processes tell it twice.
+# A spell of the provider's limit is told once, whatever the harness's tries
+# within it (pauseNoticeKey); the operator's own hold is not told back.
+pause_notify() {
+  local notice
+  paused_now || return 0
+  notice="$(node --experimental-strip-types --no-warnings -e '
+    const [protocol, S] = process.argv.slice(1);
+    import(protocol).then(async (P) => {
+      const paused = (await P.readBudget(S)).paused;
+      if (!paused || !(await P.claimPauseNotice(S, P.pauseNoticeKey(paused)))) process.exit(1);
+      const notice = P.pauseNotice(paused);
+      if (!notice) process.exit(1);
+      process.stdout.write(JSON.stringify(notice));
+    }).catch(() => process.exit(1));
+  ' "$ROOT/extensions/protocol.ts" "$SANDBOX" 2>/dev/null)" || return 0
+  bash "$ROOT/scripts/notify.sh" "$SANDBOX" paused "$notice" >/dev/null 2>&1 </dev/null || true
+  echo "idle-nudge: the operator was told the run is paused ($(jq -r '.reason // "?"' <<<"$notice" 2>/dev/null), since $(jq -r '.paused.since // .paused.at // "?"' <<<"$notice" 2>/dev/null))" >&2
+}
+
+# The provider's limit (scripts/provider-limit.ts): under a pause for it, the
+# harness's try once it is due (the pause lifted, by the harness, and the
+# seats woken below as after any lift); otherwise the rule, read off the
+# trace, and the pause when it holds. Both under the table lock, so a second
+# watchdog cannot act twice. Nothing is read until some seat has ended a turn
+# in a provider error, or while the run is paused for anything else.
+provider_limit_check() {
+  local reason out action ts line
+  reason="$(jq -r 'if (.paused | type) == "object" then (.paused.reason // "") else "-" end' "$SANDBOX/budget.json" 2>/dev/null || true)"
+  if [[ "$reason" == "-" ]]; then
+    grep -q '"tool":"agent_error"' "$SANDBOX/traces/events.jsonl" 2>/dev/null || return 0
+  elif [[ "$reason" != provider_limit ]]; then
+    return 0
+  fi
+  out="$(node --experimental-strip-types --no-warnings "$ROOT/scripts/provider-limit.ts" tick "$SANDBOX" 2>/dev/null || true)"
+  action="$(jq -r '.action // empty' <<<"$out" 2>/dev/null || true)"
+  ts="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  case "$action" in
+    paused)
+      line="$(jq -cn --arg ts "$ts" --argjson r "$out" '{ts: $ts, agent: "system", tool: "run_paused", args: {via: "idle-nudge", reason: "provider_limit", until: ($r.pause.until // null), retry_at: $r.retry_at, models: ($r.pause.models // []), spell: $r.spell, since: ($r.pause.since // $r.pause.at)}, result: {ok: true, why: $r.why, seats: $r.seats}}')"
+      trace_emit "$ROOT" "$SANDBOX" "$line"
+      echo "idle-nudge: paused the run for the model provider's limit ($(jq -r '.why' <<<"$out")); the harness tries again at $(jq -r '.retry_at' <<<"$out")" >&2
+      ;;
+    lifted)
+      line="$(jq -cn --arg ts "$ts" --argjson r "$out" '{ts: $ts, agent: "system", tool: "run_unpaused", args: {via: "idle-nudge", reason: "provider_limit", by: "harness", paused_at: $r.pause.at, until: ($r.pause.until // null)}, result: {ok: true, resumed_at: $r.pause.resumed_at}}')"
+      trace_emit "$ROOT" "$SANDBOX" "$line"
+      echo "idle-nudge: lifted the pause for the model provider's limit (since $(jq -r '.pause.at' <<<"$out")) to try again; every seat is woken" >&2
+      ;;
+  esac
+  return 0
 }
 
 # Where nobody has looked, three times a run: at a quarter, a half and three
@@ -356,27 +438,144 @@ regroup_check() {
   out="$(node --experimental-strip-types --no-warnings "$ROOT/scripts/leads-cli.ts" regroup "$SANDBOX" 2>/dev/null || true)"
   [[ "$(jq -r '.posted // false' <<<"$out" 2>/dev/null)" == true ]] || return 0
   ts="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
-  line="$(jq -cn --arg ts "$ts" --argjson r "$out" '{ts: $ts, agent: "system", tool: "regroup", args: {since: $r.since}, result: {ok: true, count: $r.count, post: $r.post, next_minutes: $r.next_minutes}}')"
+  line="$(jq -cn --arg ts "$ts" --argjson r "$out" '{ts: $ts, agent: "system", tool: "regroup", args: {since: $r.since}, result: {ok: true, kind: ($r.kind // "all_hands"), count: $r.count, post: $r.post, next_minutes: $r.next_minutes, to: ($r.to // null)}}')"
   trace_emit "$ROOT" "$SANDBOX" "$line"
-  echo "idle-nudge: regroup $(jq -r '.count' <<<"$out") posted (#$(jq -r '.post' <<<"$out")); nothing had moved since $(jq -r '.since' <<<"$out")" >&2
+  if [[ "$(jq -r '.kind // "all_hands"' <<<"$out")" == nudge ]]; then
+    echo "idle-nudge: nothing had moved since $(jq -r '.since' <<<"$out"), but jobs run under leads: their holders are nudged ($(jq -r '.to | join(", ")' <<<"$out"), #$(jq -r '.post' <<<"$out"))" >&2
+  else
+    echo "idle-nudge: regroup $(jq -r '.count' <<<"$out") posted (#$(jq -r '.post' <<<"$out")); nothing had moved since $(jq -r '.since' <<<"$out")" >&2
+  fi
 }
 
-# What the agents asked of the operator (a lead closed needs_operator, one
-# line each in operator-requests.jsonl): the operator's notify command runs
-# once for each new one, with the command that answers it.
-operator_requests_check() {
-  local file="$SANDBOX/operator-requests.jsonl" mark="$SANDBOX/traces/idle-nudge.requests" seen total line
-  [[ -f "$file" ]] || return 0
-  total="$(grep -c . "$file" 2>/dev/null || echo 0)"
-  seen="$(cat "$mark" 2>/dev/null || echo 0)"
-  [[ "$seen" =~ ^[0-9]+$ ]] || seen=0
-  [[ "$total" -gt "$seen" ]] || return 0
-  tail -n +"$((seen + 1))" "$file" | while IFS= read -r line; do
-    [[ -n "$line" ]] || continue
-    bash "$ROOT/scripts/notify.sh" "$SANDBOX" operator_request "$line" >/dev/null 2>&1 </dev/null || true
-    echo "idle-nudge: an agent asks the operator: $(jq -r '"\(.lead) \(.request)"' <<<"$line" 2>/dev/null). Answer: $(jq -r '.answer' <<<"$line" 2>/dev/null)" >&2
+# The seats' subscription tokens in a microVM run, renewed on the host at
+# half their validity (scripts/vm.ts renew-secrets: msb rotates a VM's
+# secret live, and the guest keeps its placeholder). Checked every ten
+# minutes; a run with no VM spec, or none of whose seats holds a token, does
+# nothing. Never a value on the trace or in the log.
+secret_renewal_check() {
+  local spec="$HUB_DIR/vm-spec.json" mark="$SANDBOX/traces/idle-nudge.secrets" now last out ts line
+  [[ -n "$HUB_DIR" && -f "$spec" ]] || return 0
+  now="$(date +%s)"
+  last="$(cat "$mark" 2>/dev/null || echo 0)"
+  [[ "$last" =~ ^[0-9]+$ ]] || last=0
+  [[ $((now - last)) -ge 600 ]] || return 0
+  echo "$now" > "$mark"
+  out="$(node --experimental-strip-types --no-warnings "$ROOT/scripts/vm.ts" renew-secrets --spec "$spec" --state "$HUB_DIR/secret-renewal.json" 2>/dev/null || true)"
+  [[ "$(jq -r '.due // false' <<<"$out" 2>/dev/null)" == true ]] || return 0
+  ts="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  line="$(jq -cn --arg ts "$ts" --argjson r "$out" '{ts: $ts, agent: "system", tool: "secrets_renewed", args: {next_at: $r.next_at}, result: {ok: $r.ok, seats: [$r.seats[] | {agent, outcome, rotated, why}]}}')"
+  trace_emit "$ROOT" "$SANDBOX" "$line"
+  echo "idle-nudge: the seats' tokens renewed on the host: $(jq -r '[.seats[] | "\(.agent) \(.outcome)"] | join(", ")' <<<"$out"); next at $(jq -r '.next_at' <<<"$out")" >&2
+}
+
+# The stop policy (docs/adr/0013). A paused run's seats are held, whatever
+# paused it (a cap, the provider's limit, the operator): none is nudged,
+# since a nudge would start a turn whose model call the pause refuses. When
+# the pause is lifted (the operator's extension or unpause, the harness's
+# try under the provider's limit), every live seat is woken once, with the
+# words that say so.
+paused_now() {
+  [[ "$(jq -r 'if (.paused | type) == "object" then "yes" else "no" end' "$SANDBOX/budget.json" 2>/dev/null)" == yes ]]
+}
+# Each seat is woken once per lifted pause, and only a delivery that went
+# through counts: traces/idle-nudge.resumed holds "<resumed_at> <seat>" for
+# each one reached, and a seat not reached is tried again on the next pass
+# (its first failure is on the trace, not every retry). A lift that a new
+# pause has already followed wakes nobody, and neither does a pause a resume
+# folded into the history. The words say who lifted it and
+# why (pauseLiftedText): the operator's extension, the operator's unpause, or
+# the harness's try under the provider's limit.
+resume_wake() {
+  local mark="$SANDBOX/traces/idle-nudge.resumed" tried="$SANDBOX/traces/idle-nudge.resume-tried" last id text ts line ok woken=0 pending=0 due=""
+  paused_now && return 0
+  last="$(jq -r '(.pauses // []) | last | .resumed_at // empty' "$SANDBOX/budget.json" 2>/dev/null || true)"
+  [[ -n "$last" ]] || return 0
+  # A pause swarm.sh resume folded into the history ("<by> (resume)") was
+  # ended by a stop and a resume: the resume's kickoff starts every seat from
+  # its hand-off, and a wake here would tell them a pause was lifted.
+  [[ "$(jq -r '(.pauses // []) | last | (.resumed_by // "") | endswith("(resume)")' "$SANDBOX/budget.json" 2>/dev/null)" == true ]] && return 0
+  for id in $(jq -r '.agents[].id' "$SANDBOX/team.json" 2>/dev/null); do
+    [[ -e "$SANDBOX/done/agents/$id.done" || -e "$SANDBOX/done/agents/$id.dead" ]] && continue
+    grep -qxF "$last $id" "$mark" 2>/dev/null && continue
+    due="$due $id"
   done
-  echo "$total" > "$mark"
+  [[ -n "$due" ]] || return 0
+  text="$(node --experimental-strip-types --no-warnings -e '
+    const [protocol, S] = process.argv.slice(1);
+    import(protocol).then(async (P) => {
+      const p = (await P.readBudget(S)).pauses?.at(-1);
+      if (!p) process.exit(1);
+      process.stdout.write(P.pauseLiftedText(p));
+    }).catch(() => process.exit(1));
+  ' "$ROOT/extensions/protocol.ts" "$SANDBOX" 2>/dev/null)" || text="The pause is lifted. Pick up where you were: read inbox, go on with what you hold, and record what you find."
+  for id in $due; do
+    ok=false
+    if [[ -n "$HUB_ADMIN" ]]; then
+      node "$ROOT/scripts/vm-hub-send.mjs" "$HUB_ADMIN" "$(jq -nc --arg a "$id" --arg t "$text" '{op: "prompt", agent: $a, text: $t, kind: "resume", deliver: "followUp"}')" >/dev/null 2>&1 && ok=true
+    else
+      "$HERDR" agent prompt "$id" "$text" >/dev/null 2>&1 && ok=true
+    fi
+    if [[ "$ok" == true ]]; then
+      printf '%s %s\n' "$last" "$id" >> "$mark"
+      woken=$((woken + 1))
+      # The wake is the retry of a seat whose last turn failed: the next
+      # provider-error prompt waits its backoff from here, not in this pass.
+      set_err "$id" "$(awk -v id="$id" '$1 == id { print $2; found = 1 } END { if (!found) print 0 }' "$ERRSTATE")" "$(date +%s)"
+    else
+      pending=$((pending + 1))
+      grep -qxF "$last $id" "$tried" 2>/dev/null && continue
+      printf '%s %s\n' "$last" "$id" >> "$tried"
+    fi
+    ts="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+    line="$(jq -cn --arg ts "$ts" --arg a "$id" --argjson ok "$ok" --arg at "$last" '{ts: $ts, agent: "system", tool: "resume_wake", args: {agent: $a, resumed_at: $at}, result: {ok: $ok}}')"
+    trace_emit "$ROOT" "$SANDBOX" "$line"
+  done
+  [[ "$woken" -gt 0 ]] && echo "idle-nudge: the pause was lifted at $last; $woken seat(s) woken" >&2
+  [[ "$pending" -gt 0 ]] && echo "idle-nudge: the pause was lifted at $last; $pending seat(s) not reached, tried again on the next pass" >&2
+  return 0
+}
+# Diminishing returns: when nothing has yielded (no new finding, question
+# disposition or coverage record) across a window of jobs or minutes, the
+# operator is asked, once per window, whether to stop (an operator request of
+# kind decision). Never an agent's vote; nothing is stopped here.
+yield_check() {
+  local mark="$SANDBOX/traces/idle-nudge.yield" last now out ts line
+  now="$(date +%s)"
+  last="$(cat "$mark" 2>/dev/null || echo 0)"
+  [[ "$last" =~ ^[0-9]+$ ]] || last=0
+  [[ $((now - last)) -ge 120 ]] || return 0
+  echo "$now" > "$mark"
+  out="$(node --experimental-strip-types --no-warnings "$ROOT/scripts/stop-policy.ts" yield "$SANDBOX" 2>/dev/null || true)"
+  [[ "$(jq -r '.proposed // false' <<<"$out" 2>/dev/null)" == true ]] || return 0
+  ts="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  line="$(jq -cn --arg ts "$ts" --argjson r "$out" '{ts: $ts, agent: "system", tool: "stop_proposed", args: {since: $r.since, jobs: $r.jobs, minutes: $r.minutes}, result: {ok: true, request: $r.id}}')"
+  trace_emit "$ROOT" "$SANDBOX" "$line"
+  echo "idle-nudge: nothing has yielded since $(jq -r '.since' <<<"$out") ($(jq -r '.jobs' <<<"$out") jobs, $(jq -r '.minutes' <<<"$out") minutes): a stop is proposed to the operator ($(jq -r '.id' <<<"$out"))" >&2
+}
+
+# What the run asked of the operator (the operator requests' outbox,
+# extensions/requests.ts, docs/adr/0014): the hub writes and delivers each
+# request itself, as it is committed and on every round. This is the
+# fallback: in a host run (no hub) it is the delivery, every round; with a
+# hub, once every five minutes, and it delivers only what the hub has not (a
+# request is notified once, by its `notified` event on the chain).
+operator_requests_check() {
+  local mark="$SANDBOX/traces/idle-nudge.requests" now last out
+  if [[ -n "$HUB_ADMIN" && -S "$HUB_ADMIN" ]]; then
+    now="$(date +%s)"
+    last="$(cat "$mark" 2>/dev/null || echo 0)"
+    [[ "$last" =~ ^[0-9]+$ ]] || last=0
+    [[ $((now - last)) -ge 300 ]] || return 0
+    echo "$now" > "$mark"
+  fi
+  out="$(node --experimental-strip-types --no-warnings "$ROOT/scripts/requests-cli.ts" fire "$SANDBOX" ${SWARM_RUNS_DIR:+--runs "$SWARM_RUNS_DIR"} 2>/dev/null || true)"
+  [[ -n "$out" ]] || return 0
+  local opened notified
+  opened="$(jq -r '(.opened // []) | join(", ")' <<<"$out" 2>/dev/null)"
+  notified="$(jq -r '(.notified // []) | join(", ")' <<<"$out" 2>/dev/null)"
+  [[ -n "$opened" ]] && echo "idle-nudge: operator request(s) written from what was committed: $opened (swarm.sh requests <run> list)" >&2
+  [[ -n "$notified" ]] && echo "idle-nudge: the operator's notify targets were handed $notified, by id" >&2
+  return 0
 }
 
 # A compaction open this long is past the bound the seat's own harness holds
@@ -474,9 +673,30 @@ while :; do
   [[ -f "$SANDBOX/done/SWARM_DONE" || -f "$SANDBOX/done/ALL_AGENTS_DEAD" ]] && exit 0
   ensure_hub
   host_backstop
+  provider_limit_check
+  pause_notify
+  resume_wake
+  if paused_now; then
+    # Paused: the seats are held, nobody is nudged; the operator's requests are still said, and the tokens kept valid.
+    operator_requests_check
+    secret_renewal_check
+    [[ "$ONCE" -eq 1 ]] && exit 0
+    sleep "$INTERVAL"
+    continue
+  fi
   coverage_hint
   regroup_check
+  secret_renewal_check
+  yield_check
   operator_requests_check
+  # --idle-sec 0: nobody is nudged; the stop policy above (the backstop, the
+  # pause's notice, the wake after an extension, the proposal of a stop) and
+  # the operator's requests are this watchdog's all the same.
+  if [[ "$IDLE_SEC" -eq 0 ]]; then
+    [[ "$ONCE" -eq 1 ]] && exit 0
+    sleep "$INTERVAL"
+    continue
+  fi
   US=0
   until_solved && US=1
   ids="$(jq -r '.agents[].id' "$SANDBOX/team.json" 2>/dev/null | tr '\n' ' ')"
@@ -521,28 +741,30 @@ while :; do
       fi
       [[ "$status" == "working" ]] && continue
     fi
-    # An agent whose last turn ended in a provider error is not idle, it is
-    # finished: every nudge buys another identical failure. Both DeepSeek
-    # agents on the BelkaCTF #6 run spent all three that way against a 402.
-    # In an until-solved run a provider error never ends the run: the agent
-    # is prompted again, with backoff (below), and a rate limit that lifts
-    # finds it working.
+    # An agent whose last turn ended in a provider error is not idle in the
+    # usual sense: a nudge buys another identical failure while the error
+    # holds (both DeepSeek agents on the BelkaCTF #6 run spent all three
+    # nudges against a 402). So it is tried again with backoff, each wait
+    # twice the last, up to half an hour: under a cap policy MAX_NUDGES
+    # times per run of errors, within the wall clock; until solved, for as
+    # long as the run goes, and a rate limit that lifts finds it working. A
+    # retry refused again is also what tells a limit on every seat from a
+    # passing error (provider_limit_check), and a paused run's seats are not
+    # nudged.
     provider_error=0
     if grep -q "\"agent\":\"$id\",\"tool\":\"agent_error\"" "$SANDBOX/traces/events.jsonl" 2>/dev/null; then
-      last_tool="$(grep "\"agent\":\"$id\"" "$SANDBOX/traces/events.jsonl" 2>/dev/null | tail -1 | jq -r '.tool // empty' 2>/dev/null || true)"
-      if [[ "$last_tool" == "agent_error" ]]; then
-        [[ "$US" -eq 1 ]] || continue
-        provider_error=1
-      fi
+      [[ "$(last_turn "$id")" == "agent_error" ]] && provider_error=1
     fi
     if [[ "$provider_error" -eq 1 ]]; then
       read -r ek elast <<<"$(awk -v id="$id" '$1 == id { print $2, $3 }' "$ERRSTATE")"
       ek="${ek:-0}"
       elast="${elast:-0}"
+      [[ "$US" -eq 1 || "$ek" -lt "$MAX_NUDGES" ]] || continue
       eback=$(( IDLE_SEC * (1 << (ek > 4 ? 4 : ek)) ))
       [[ "$eback" -gt 1800 ]] && eback=1800
       [[ $(( $(date +%s) - elast )) -ge "$eback" ]] || continue
       set_err "$id" $((ek + 1)) "$(date +%s)"
+      etry=$((ek + 1))
     elif grep -q "^$id " "$ERRSTATE" 2>/dev/null; then
       # It worked since: the next error starts the backoff again.
       set_err "$id" 0 0
@@ -583,9 +805,12 @@ while :; do
     [[ -n "$leads_line" ]] && leads_line=" ${leads_line}"
     budget_words="Nudge ${n} of ${MAX_NUDGES}."
     if [[ "$US" -eq 1 && "$n" -gt "$MAX_NUDGES" ]]; then budget_words="Nudge ${n}: this run is until solved, and the nudges go on."; fi
-    if [[ "$provider_error" -eq 1 ]]; then
+    if [[ "$provider_error" -eq 1 && "$US" -eq 1 ]]; then
       why="provider_error"
       text="Your last turn ended in a provider error, and this run is until solved: an error or a rate limit is waited out and retried, and never ends the run. Pick up where you left off: read inbox, go on with what you hold, or take the next thing nobody holds.${held:+ You still hold: ${held}.}${leads_line} ${budget_words}"
+    elif [[ "$provider_error" -eq 1 ]]; then
+      why="provider_error"
+      text="Your last turn ended in a provider error. The harness tries you again up to ${MAX_NUDGES} times, each wait longer than the last, in case it has passed; if the provider refuses every seat, the run pauses instead. Pick up where you left off: read inbox, go on with what you hold, or take the next thing nobody holds.${held:+ You still hold: ${held}.}${leads_line} Try ${etry} of ${MAX_NUDGES}."
     elif [[ "$why" == waiting ]]; then
       text="For ${minutes} minutes you have called only wait and inbox: no post, no record, no command. Waiting is right while an answer you asked for is coming; past that it is idle. ${news_line}If a peer owes you an answer, ask them again by name. Otherwise read inbox, see what your peers have taken, take the next piece of the goal nobody holds and say so on the board; when nothing is left for you, keep waiting. Only done ends your part.${held:+ You still hold: ${held} — release_file what you are not working on, or a peer will take it when the lease runs out.}${leads_line} Nudge ${n} of ${MAX_NUDGES}."
     else

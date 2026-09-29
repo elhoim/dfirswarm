@@ -194,10 +194,16 @@ type CustodyLike = {
   attestations?: { lines: number; intact: boolean; detail: string } | null;
   disputes?: { lines: number; intact: boolean; detail: string } | null;
   leads?: { lines: number; intact: boolean; detail: string } | null;
+  questions?: { lines: number; intact: boolean; detail: string } | null;
+  network?: { grants: { lines: number; intact: boolean; detail: string }; fetches: { lines: number; intact: boolean; detail: string; unresolved?: string[] }; captures: { sealed: number; verified: number; mismatched: string[]; missing: string[] } } | null;
+  requests?: { lines: number; intact: boolean; detail: string } | null;
+  sweeps?: { lines: number; intact: boolean; detail: string } | null;
+  finish?: { lines: number; intact: boolean; detail: string } | null;
+  case_policy?: { sha256?: string; anchored: boolean | null; unreadable?: string } | null;
   model_gateway: { intact: boolean; detail: string; refused?: string } | null;
   vms: Array<{ snapshot: unknown; stopped: boolean; kept: string | null }> | null;
   artifacts: { files: number; skipped: number } | null;
-  store: { journal: { intact: boolean; detail: string; anchor: string }; outputs: { files: number; verified: number; mismatched: string[]; missing: string[] }; manifests_missing: string[]; logs?: { checked: number; mismatched: string[] }; catalogue?: { revisions_mismatched: string[]; generations_mismatched: string[] } | null; ledger_unreadable?: string | null; images?: { undeclared: string[]; digests: Record<string, string[]> } } | null;
+  store: { journal: { intact: boolean; detail: string; anchor: string }; outputs: { files: number; verified: number; mismatched: string[]; missing: string[] }; manifests_missing: string[]; logs?: { checked: number; mismatched: string[] }; catalogue?: { revisions_mismatched: string[]; generations_mismatched: string[] } | null; ledger_unreadable?: string | null; images?: { undeclared: string[]; digests: Record<string, string[]> }; imports?: { sealed: number; verified: number; mismatched: string[] } } | null;
   operator?: OperatorAudit;
   acquisition?: Acquisition;
   not_reached: string[];
@@ -264,6 +270,26 @@ export function checksOf(c: CustodyLike, errors: Record<string, string> = {}): C
   if (c.attestations) add("ledger attestations", c.attestations.intact ? "passed" : "failed", c.attestations.intact ? undefined : c.attestations.detail, { checked: c.attestations.lines });
   if (c.disputes) add("ledger disputes", c.disputes.intact ? "passed" : "failed", c.disputes.intact ? undefined : c.disputes.detail, { checked: c.disputes.lines });
   if (c.leads) add("lead register", c.leads.intact ? "passed" : "failed", c.leads.intact ? undefined : c.leads.detail, { checked: c.leads.lines });
+  if (c.questions) add("question register", c.questions.intact ? "passed" : "failed", c.questions.intact ? undefined : c.questions.detail, { checked: c.questions.lines });
+  // The dynamic network's records (docs/adr/0012): both chains, and each sealed capture re-hashed.
+  if (c.network) {
+    const n = c.network;
+    const bad = [...(n.grants.intact ? [] : [`grants: ${n.grants.detail}`]), ...(n.fetches.intact ? [] : [`fetches: ${n.fetches.detail}`]), ...(n.fetches.unresolved ?? []).map((x) => `${x} was attempted and has no recorded outcome`), ...n.captures.mismatched.map((x) => `${x} differs from its seal`), ...n.captures.missing.map((x) => `${x} is missing`)];
+    add("network records", bad.length ? "failed" : "passed", bad.length ? bad.join("; ") : undefined, { checked: n.grants.lines + n.fetches.lines + n.captures.sealed });
+  }
+  // The operator requests' chain (docs/adr/0014).
+  if (c.requests) add("operator requests", c.requests.intact ? "passed" : "failed", c.requests.intact ? undefined : c.requests.detail, { checked: c.requests.lines });
+  // The store sweeps (docs/adr/0013) and the finish register (docs/adr/0015), each its own chain.
+  if (c.sweeps) add("store sweeps", c.sweeps.intact ? "passed" : "failed", c.sweeps.intact ? undefined : c.sweeps.detail, { checked: c.sweeps.lines });
+  if (c.finish) add("finish register", c.finish.intact ? "passed" : "failed", c.finish.intact ? undefined : c.finish.detail, { checked: c.finish.lines });
+  // The case policy, against the sha256 the kickoff anchored beside the run.
+  if (c.case_policy) {
+    const cp = c.case_policy;
+    if (cp.unreadable) add("case policy", "failed", `network/policy.json is ${cp.unreadable}`);
+    else if (cp.anchored === false) add("case policy", "failed", "network/policy.json is not the policy the kickoff anchored");
+    else if (cp.anchored === null) add("case policy", "passed", "sealed by its sha256; the kickoff anchored none (a run from before the anchor held it)");
+    else add("case policy", "passed");
+  }
   // The model gateway log.
   if (c.model_gateway) add("model gateway log", c.model_gateway.refused ? "unavailable" : c.model_gateway.intact ? "passed" : "failed", c.model_gateway.intact ? undefined : c.model_gateway.detail);
   else add("model gateway log", "not_applicable", "the run's model calls did not go through the host's gateway");
@@ -297,6 +323,7 @@ export function checksOf(c: CustodyLike, errors: Record<string, string> = {}): C
       ...(s.catalogue && (s.catalogue.revisions_mismatched.length || s.catalogue.generations_mismatched.length) ? ["catalogue records differ from the journal"] : []),
       ...(s.ledger_unreadable ? [`the ledger could not be read for the findings count: ${s.ledger_unreadable}`] : []),
       ...(s.images?.undeclared.length ? [`${s.images.undeclared.length} job(s) in an image the run did not declare`] : []),
+      ...(s.imports?.mismatched.length ? [`${s.imports.mismatched.length} import(s) differ from their journal line`] : []),
       ...(s.images && Object.values(s.images.digests).some((d) => d.length > 1) ? ["an image name booted more than one digest"] : []),
     ];
     const short = s.outputs.verified + s.outputs.mismatched.length + s.outputs.missing.length < s.outputs.files;

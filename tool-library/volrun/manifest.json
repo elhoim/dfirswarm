@@ -1,6 +1,29 @@
 {
   "name": "volrun",
   "description": "Run a Volatility 3 plugin against a memory image with typed arguments. Returns stdout/stderr.",
+  "use": {
+    "extensions": [
+      ".raw",
+      ".mem",
+      ".vmem",
+      ".lime",
+      ".dmp"
+    ],
+    "magic": [
+      {
+        "offset": 0,
+        "hex": "454d694c"
+      },
+      {
+        "offset": 0,
+        "hex": "5041474544553634"
+      },
+      {
+        "offset": 0,
+        "hex": "5041474544554d50"
+      }
+    ]
+  },
   "params": {
     "image": {
       "type": "string",

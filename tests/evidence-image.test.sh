@@ -118,7 +118,31 @@ fi
 # Teardown detaches, so the sandbox can be reused.
 SWARM_RUNS_DIR="$TMP/runs" bash "$ROOT/scripts/swarm.sh" stop "$(basename "$SANDBOX")" >/dev/null 2>&1 || true
 if mount | grep -q "$SANDBOX/inputs"; then fail "the image is still attached after stop"; fi
-SANDBOX=""
 ok "stop detaches the image"
+
+# A resume goes on with the evidence the run was given: the image is attached
+# again, read-only, and held to the manifest before anything of the run moves.
+RUN_ID="$(basename "$SANDBOX")"
+out="$(SWARM_RUNS_DIR="$TMP/runs" bash "$ROOT/scripts/swarm.sh" resume "$RUN_ID" --no-start 2>&1)" || fail "the resume was refused: $out"
+grep -q "^Inputs:       the image $TMP/case.dmg attached again, read-only; it holds every file inputs.json names" <<<"$out" || fail "the resume does not say the image was attached again: $out"
+[[ -f "$SANDBOX/inputs.device" && "$(cat "$SANDBOX/inputs/case.raw")" == "PRISTINE" ]] || fail "the evidence is not there after the resume"
+if touch "$SANDBOX/inputs/probe" 2>/dev/null; then fail "the image attached again is writable"; fi
+ok "a resume attaches the image again, read-only, and the evidence is there"
+SWARM_RUNS_DIR="$TMP/runs" bash "$ROOT/scripts/swarm.sh" stop "$RUN_ID" >/dev/null 2>&1 || true
+if mount | grep -q "$SANDBOX/inputs"; then fail "the image is still attached after the second stop"; fi
+# An image that does not hold the files the run was given: refused, detached again, nothing moved.
+hdiutil create -quiet -size 10m -fs APFS -volname CASE -o "$TMP/other.dmg" || fail "could not build the second image"
+mp="$(hdiutil attach -nobrowse "$TMP/other.dmg" | awk '/\/Volumes\// {print $NF; exit}')"
+printf 'SOMETHING ELSE\n' > "$mp/other.raw"
+hdiutil detach "$mp" -quiet || fail "could not detach the second image"
+mv "$TMP/other.dmg" "$TMP/case.dmg"
+set +e
+out="$(SWARM_RUNS_DIR="$TMP/runs" bash "$ROOT/scripts/swarm.sh" resume "$RUN_ID" --no-start 2>&1)"; rc=$?
+set -e
+[[ $rc -eq 2 ]] && grep -q "does not hold the evidence the run was given (inputs/case.raw is not there)" <<<"$out" || fail "a resume on another image was not refused (rc $rc): $out"
+if mount | grep -q "$SANDBOX/inputs"; then fail "the wrong image was left attached"; fi
+[[ -f "$SANDBOX/done/STOPPED" ]] || fail "a refused resume moved the stop"
+SANDBOX=""
+ok "a resume on an image that does not hold the run's evidence is refused, with the image detached and nothing moved"
 
 echo "evidence-image.test.sh: all $pass checks passed"

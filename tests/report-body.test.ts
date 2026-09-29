@@ -88,7 +88,7 @@ const STEPS = ["How it was obtained", "What it indicates", "Why this confidence"
 
 test("every section is there, in order, in the HTML and the Markdown", async () => {
   const body = await renderReportBody(FIXTURE);
-  const ids = ["s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "sA", "sB", "sC"];
+  const ids = ["s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "sA", "sB", "sC", "sF"];
   assert.deepEqual(body.sections.map((s) => s.id), ids);
   let at = -1;
   for (const id of ids) {
@@ -96,7 +96,7 @@ test("every section is there, in order, in the HTML and the Markdown", async () 
     assert.ok(i > at, `section ${id} out of order`);
     at = i;
   }
-  const titles = ["1. Summary for decision makers", "2. Request, scope and questions", "3. Evidence and its handling", "4. Method and roles", "5. Answers", "6. What happened", "7. Conclusions and opinions", "8. Limitations, negative findings and open questions", "9. Recommendations", "10. Review and adoption", "Appendix A: Exhibits", "Appendix B: Jobs and their method records", "Appendix C: The swarm's working report"];
+  const titles = ["1. Summary for decision makers", "2. Request, scope and questions", "3. Evidence and its handling", "4. Method and roles", "5. Answers", "6. What happened", "7. Conclusions and opinions", "8. Limitations, negative findings and open questions", "9. Recommendations", "10. Review and adoption", "Appendix A: Exhibits", "Appendix B: Jobs and their method records", "Appendix C: The swarm's working report", "Appendix F: The question and lead registers"];
   const md = await renderReportBodyMarkdown(FIXTURE);
   at = -1;
   for (const t of titles) {
@@ -106,7 +106,7 @@ test("every section is there, in order, in the HTML and the Markdown", async () 
   }
   // Every exhibit a section links to exists: no dangling E-<seq>.
   for (const m of body.html.matchAll(/href="#e-(\d+)"/g)) assert.ok(body.html.includes(`id="e-${m[1]}"`), `a link to E-${m[1]}, which has no exhibit`);
-  for (const m of body.html.matchAll(/href="#(q-[^"]+|job-[^"]+)"/g)) assert.ok(body.html.includes(`id="${m[1]}"`), `a link to #${m[1]}, which is not there`);
+  for (const m of body.html.matchAll(/href="#(q-[^"]+|qc-[^"]+|job-[^"]+|reg-[^"]+|chains|unresolved)"/g)) assert.ok(body.html.includes(`id="${m[1]}"`), `a link to #${m[1]}, which is not there`);
 });
 
 test("each answer block leads with the answer and runs its steps in the fixed order", async () => {
@@ -286,7 +286,8 @@ test("the Markdown carries the body: sections, answers, chips as code spans, exh
   assert.match(md, /`superseded by E-19`/);
   assert.match(md, /#### E-16 `answer`/);
   assert.match(md, /`0123456789abcdef0123456789abcdef`/);
-  assert.match(md, /- \*\*Confidence:\*\* high: Two independent authoritative records/);
+  // The fixture's answers were recorded before the run recorded confidence: a high is shown as declared, and says so (recordedConfidence, legacy).
+  assert.match(md, /- \*\*Confidence:\*\* high \(as declared: recorded before the run recorded confidence\): Two independent authoritative records/);
   // Emphasis closes before its trailing space, or a renderer leaves the stars.
   assert.doesNotMatch(md, /\*\*[^*\n]*\s\*\*\S/);
   const c = md.slice(md.indexOf("\n## Appendix C: The swarm's working report"));
@@ -478,6 +479,7 @@ test("the caller's trace grounding reaches the exhibit; the cover's facts are co
   const body = await renderReportBody(FIXTURE, { grounding: { "5": "grounded", "6": "not in the trace" } });
   const { questionStatus, summary, ...counts } = body.facts;
   assert.deepEqual(counts, { questions: 3, answered: 3, hasAnswers: true, entries: 21, era: "answers", draft: true, adopted: 0, signoff: "none" });
+  // The fixture's answers predate the recorded-confidence rule: question 1's high stands as declared.
   assert.deepEqual(questionStatus.map((q) => [q.id, q.status, q.answer, q.confidence, q.adopted]), [["1", "answered", 14, "high", false], ["2", "answered", 19, "medium", false], ["3", "answered", 16, "medium", false]]);
   assert.deepEqual(summary, { seq: 17, value: "An intruder uploaded a web shell, ran commands through it and archived the web root; no transfer out is recorded in the hour examined.", stands: false });
   assert.match(slice(body.html, "e-6", "e-7"), /chip-saffron">not grounded in the trace</);

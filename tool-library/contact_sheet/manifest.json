@@ -1,0 +1,99 @@
+{
+  "name": "contact_sheet",
+  "description": "Tile many images into labelled contact sheets to look at: a directory, a list of paths or a tar read in place. Duplicates by sha256 (or look-alikes by average hash) are listed, not tiled twice. out_dir keeps every tile, the sheets, a manifest row per file and an index of tile to file. Resumes over calls when large. Needs Pillow (pillow_heif for HEIC).",
+  "use": {
+    "extensions": [
+      ".jpg",
+      ".jpeg",
+      ".png",
+      ".heic",
+      ".gif",
+      ".webp",
+      ".bmp",
+      ".tif",
+      ".tiff"
+    ],
+    "magic": [
+      {
+        "offset": 0,
+        "hex": "ffd8ff"
+      },
+      {
+        "offset": 0,
+        "hex": "89504e470d0a1a0a"
+      },
+      {
+        "offset": 4,
+        "hex": "6674797068656963"
+      }
+    ]
+  },
+  "params": {
+    "out_dir": {
+      "type": "string",
+      "description": "A new directory under your work directory for sheets/, tiles/, manifest.jsonl, index.jsonl and summary.json",
+      "required": true
+    },
+    "input": {
+      "type": "string",
+      "description": "A directory (walked, in name order) or one image file"
+    },
+    "files": {
+      "type": "array",
+      "description": "Image paths, in the order to tile them"
+    },
+    "list_file": {
+      "type": "string",
+      "description": "A text file with one image path per line"
+    },
+    "archive": {
+      "type": "string",
+      "description": "A tar archive (plain or compressed) whose members are read in place, nothing unpacked"
+    },
+    "pattern": {
+      "type": "string",
+      "description": "Case-insensitive regex a path must match (default: image extensions for input and archive; a list is taken as given unless this is set)"
+    },
+    "tile": {
+      "type": "integer",
+      "description": "Tile size in pixels, the image fitted inside it (default 160)"
+    },
+    "columns": {
+      "type": "integer",
+      "description": "Tiles per row (default 10)"
+    },
+    "rows": {
+      "type": "integer",
+      "description": "Rows per sheet (default 10)"
+    },
+    "label": {
+      "type": "string",
+      "description": "Label under each tile, a format with {n} {i} {name} {path} {sha8} {sha256} {w} {h} {size} {format} {mtime} (default \"{n:04d} {name}\")"
+    },
+    "dedup": {
+      "type": "string",
+      "enum": [
+        "sha256",
+        "ahash",
+        "none"
+      ],
+      "description": "sha256: exact copies tiled once (default); ahash: images that look the same too; none: every file tiled"
+    },
+    "budget_seconds": {
+      "type": "integer",
+      "description": "Work this long, then keep what is done and answer complete=false; the same call again carries on. Each call does at least one file (default 90)"
+    }
+  },
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 120,
+  "optional_python": [
+    "PIL",
+    "pillow_heif"
+  ],
+  "example": "{\"input\": \"work/extracted/s01/DCIM\", \"out_dir\": \"work/s01/sheets-dcim\", \"label\": \"{n:04d} {name} {w}x{h}\"}",
+  "by": "s10d40e",
+  "at": "2026-09-28T07:48:41.000Z",
+  "version": 1,
+  "sha256": "82691123af595ba8be3ea72b1cb75cafb86c5f3d3c2f871ff1a116137679dcd1"
+}

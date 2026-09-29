@@ -184,7 +184,7 @@ test("a reviewer elsewhere works from the package: review-import.jsonl is checke
   await assert.rejects(importReview(r.runs, r.id, r.root, file, { home: r.home }), /the reviewer's key is not checked against anything/);
   const register = join(r.home, "register");
   writeFileSync(register, `${allowedSignersLine(rev.person)}\n`);
-  assert.match(readFileSync(register, "utf8"), /namespaces="dfirswarm-review"/);
+  assert.match(readFileSync(register, "utf8"), /namespaces="dfirswarm-review,dfirswarm-question"/);
   // A register for the release namespace only does not vouch for a review.
   writeFileSync(join(r.home, "wrong-register"), `${allowedSignersLine({ ...rev.person, role: "examiner" })}\n`);
   await assert.rejects(importReview(r.runs, r.id, r.root, file, { allowedSigners: join(r.home, "wrong-register"), home: r.home }), /does not vouch for the reviewer's key/);

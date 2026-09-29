@@ -22,14 +22,17 @@ import {
   restoreFileVersion,
 } from "../../extensions/protocol.ts";
 import { readHistory } from "../../extensions/observe.ts";
-import { ActionRunner, checkReadiness, listModels, listPacks, validateReview, validateStart, type ImagePreview, type ImagePreviewQuery, type Job, type ModelList, type ReadinessReport, type StartParams } from "./actions.ts";
+import { ActionRunner, checkReadiness, extendArgv, listModels, listPacks, resumeArgv, RunRequestError, validateReview, validateStart, type ImagePreview, type ImagePreviewQuery, type Job, type ModelList, type ReadinessReport, type StartParams } from "./actions.ts";
 import { checkVmReadiness, startFlags, type VmReadiness, type VmReadinessQuery } from "./vm-readiness.ts";
 import { coverageOf } from "../coverage.ts";
 import { deleteGoal, GoalError, listGoals, readGoal, saveGoal } from "./goals.ts";
 import { listLibrary, readLibraryEntry } from "./library.ts";
 import { describeRoots, InputsError, listInputSets, parseInputsRoots, resolveInputImage, resolveInputSet, RootStore } from "./inputs.ts";
-import { countForgedTools, findRun, listSwarmRows, listWorkFiles, liveHubDirs, operatorAudit, queryTraces, readAllPosts, readLeads, readRunEvents, readSwarmView, readTimedPosts, resolveToolOutputFile, resolveWorkFile } from "./model.ts";
+import { countForgedTools, findRun, listSwarmRows, listWorkFiles, liveHubDirs, operatorAudit, queryTraces, readAllPosts, readLeads, readQuestions, readRunEvents, readSwarmView, readTimedPosts, resolveToolOutputFile, resolveWorkFile } from "./model.ts";
+import { directiveArgv, questionArgv, QuestionRequestError } from "./questions.ts";
 import { readReviews } from "./reviews.ts";
+import { readNetwork } from "./network.ts";
+import { readRequests, requestArgv, RequestActionError } from "./requests.ts";
 import { createSigning, SigningError } from "./signing.ts";
 import { readStoreJob, readStoreJobLog, readStoreJobs, storeJobLogFile } from "./store-jobs.ts";
 import { userInfo } from "node:os";
@@ -762,6 +765,18 @@ export function createUiApp(options: UiAppOptions): UiApp {
       json(res, 200, job);
       return;
     }
+    // A job's whole output, as it came (the job list carries the last part
+    // of it and names this): plain text, never rendered.
+    const outputMatch = path.match(/^\/api\/jobs\/([^/]+)\/output$/);
+    if (outputMatch) {
+      if (method !== "GET") throw new HttpError(405, "method not allowed");
+      const stream = url.searchParams.get("stream") === "stderr" ? "stderr" : "stdout";
+      const text = await runner.output(outputMatch[1], stream);
+      if (text === null) throw new HttpError(404, "no job with that id, or its output was not kept");
+      res.writeHead(200, { "content-type": "text/plain; charset=utf-8", "content-security-policy": "sandbox; default-src 'none'", "x-content-type-options": "nosniff", "cache-control": "no-store" });
+      res.end(text);
+      return;
+    }
     // An export job's file, once it is done: the ledger as CSV or a
     // Timesketch import, written by swarm.sh into the console's own temp
     // directory, never a path a caller names.
@@ -1222,6 +1237,32 @@ export function createUiApp(options: UiAppOptions): UiApp {
         json(res, 202, runner.stop(id, { no_custody: body.no_custody === true, custody_timeout: timeout }));
         return;
       }
+      // More room for a going or paused run (swarm.sh extend), and "Continue
+      // this run" for one that ended (swarm.sh resume): the CLI's own checks
+      // decide; the server checks the shape.
+      case "extend":
+      case "resume": {
+        if (method !== "POST") throw new HttpError(405, "method not allowed");
+        requireToken(req, url);
+        const body = (await readBody(req)) as Record<string, unknown>;
+        let argv: string[];
+        try {
+          argv = sub === "extend" ? extendArgv(id, body) : resumeArgv(id, body);
+        } catch (err) {
+          if (err instanceof RunRequestError) throw new HttpError(400, err.message);
+          throw err;
+        }
+        json(res, 202, sub === "extend" ? runner.extend(id, argv) : runner.resume(id, argv));
+        return;
+      }
+      // Lift a pause whose cause is gone (swarm.sh unpause): the CLI decides
+      // whether it may (a cap's pause still over its cap is refused there).
+      case "unpause": {
+        if (method !== "POST") throw new HttpError(405, "method not allowed");
+        requireToken(req, url);
+        json(res, 202, runner.unpause(id));
+        return;
+      }
       case "reap": {
         if (method !== "POST") throw new HttpError(405, "method not allowed");
         requireToken(req, url);
@@ -1246,8 +1287,20 @@ export function createUiApp(options: UiAppOptions): UiApp {
         if (method !== "POST") throw new HttpError(405, "method not allowed");
         requireToken(req, url);
         const body = (await readBody(req)) as { action?: unknown; lead?: unknown; text?: unknown; allow_host?: unknown };
+        // "Add directive": an unheld lead under a question, run as swarm.sh lead <id> direct.
+        if (body.action === "direct") {
+          let argv: string[];
+          try {
+            argv = directiveArgv(body as Record<string, unknown>);
+          } catch (err) {
+            if (err instanceof QuestionRequestError) throw new HttpError(400, err.message);
+            throw err;
+          }
+          json(res, 202, runner.direct(id, argv));
+          return;
+        }
         const action = body.action === "reopen" ? "reopen" : body.action === "note" ? "note" : null;
-        if (!action) throw new HttpError(400, "action is note or reopen");
+        if (!action) throw new HttpError(400, "action is note, reopen or direct");
         const lead = String(body.lead ?? "").trim().toUpperCase();
         if (!/^L-[1-9]\d{0,5}$/.test(lead)) throw new HttpError(400, "lead is L-<n>");
         const text = typeof body.text === "string" ? body.text.trim() : "";
@@ -1256,6 +1309,84 @@ export function createUiApp(options: UiAppOptions): UiApp {
         const host = typeof body.allow_host === "string" ? body.allow_host.trim() : "";
         if (host && !/^(\*\.)?[A-Za-z0-9.-]{1,253}(:\d{1,5})?$/.test(host)) throw new HttpError(400, "allow_host is a host name (example.org, *.example.org, example.org:8443)");
         json(res, 202, runner.lead(id, { action, lead, ...(text ? { text } : {}), ...(host ? { allowHost: host } : {}) }));
+        return;
+      }
+      /**
+       * The question register (extensions/questions.ts): every question with
+       * who asked it, its scope, work and answer, the triage and the
+       * clarifications. A POST is an act on it (add, amend, priority, scope,
+       * withdraw, clarify_reply, accept), run as swarm.sh question so it is
+       * checked, chained, acknowledged after the write and on the record.
+       */
+      case "questions": {
+        if (method === "GET") {
+          json(res, 200, await readQuestions(sandbox));
+          return;
+        }
+        if (method !== "POST") throw new HttpError(405, "method not allowed");
+        requireToken(req, url);
+        let q: { sub: string; argv: string[] };
+        try {
+          q = questionArgv((await readBody(req)) as Record<string, unknown>);
+        } catch (err) {
+          if (err instanceof QuestionRequestError) throw new HttpError(400, err.message);
+          throw err;
+        }
+        json(res, 202, runner.question(id, q.sub, q.argv));
+        return;
+      }
+      /**
+       * The dynamic network (docs/adr/0012): the case policy, what waits on
+       * the operator, requests, grants, captures. A POST is the operator's
+       * act, run as swarm.sh net so it lands on the trace and the operator's
+       * record like the CLI's: grant a request, decline an item or a request,
+       * revoke a grant, make a socket grant; always with a reason.
+       */
+      case "network": {
+        if (method === "GET") {
+          json(res, 200, await readNetwork(sandbox));
+          return;
+        }
+        if (method !== "POST") throw new HttpError(405, "method not allowed");
+        requireToken(req, url);
+        const body = (await readBody(req)) as { action?: unknown; target?: unknown; why?: unknown; host?: unknown; lead?: unknown };
+        const action = body.action === "grant" || body.action === "deny" || body.action === "revoke" || body.action === "socket" ? body.action : null;
+        if (!action) throw new HttpError(400, "action is grant, deny, revoke or socket");
+        const why = typeof body.why === "string" ? body.why.trim() : "";
+        if (!why) throw new HttpError(400, "an operator's act on the network needs its reason");
+        if (why.length > 2000) throw new HttpError(400, "the reason is at most 2000 characters: nothing is cut, so a longer one is refused");
+        const target = String(body.target ?? "").trim().toUpperCase();
+        if (action === "grant" && !/^NR-[1-9]\d{0,6}$/.test(target)) throw new HttpError(400, "grant names a request, NR-<n>");
+        if (action === "deny" && !/^N[RI]-[1-9]\d{0,6}$/.test(target)) throw new HttpError(400, "deny names an item (NI-<m>) or a request (NR-<n>)");
+        if (action === "revoke" && !/^N-[1-9]\d{0,6}$/.test(target)) throw new HttpError(400, "revoke names a grant, N-<k>");
+        const host = typeof body.host === "string" ? body.host.trim() : "";
+        if (action === "socket" && !/^[A-Za-z0-9.-]{1,253}(:\d{1,5})?$/.test(host)) throw new HttpError(400, "a socket grant names a host (example.org, example.org:8443)");
+        const lead = typeof body.lead === "string" ? body.lead.trim().toUpperCase() : "";
+        if (lead && !/^L-[1-9]\d{0,5}$/.test(lead)) throw new HttpError(400, "lead is L-<n>");
+        json(res, 202, runner.net(id, { action, ...(action === "socket" ? { host, ...(lead ? { lead } : {}) } : { target }), why }));
+        return;
+      }
+      /**
+       * The operator requests (extensions/requests.ts, docs/adr/0014): every
+       * request with its id, kind, state and history, open first; the case
+       * policy's word on more evidence; the evidence and material added. A
+       * POST is an act on one, run as swarm.sh requests.
+       */
+      case "requests": {
+        if (method === "GET") {
+          json(res, 200, await readRequests(sandbox));
+          return;
+        }
+        if (method !== "POST") throw new HttpError(405, "method not allowed");
+        requireToken(req, url);
+        let r: { sub: string; argv: string[] };
+        try {
+          r = requestArgv((await readBody(req)) as Record<string, unknown>);
+        } catch (err) {
+          if (err instanceof RequestActionError) throw new HttpError(400, err.message);
+          throw err;
+        }
+        json(res, 202, runner.requests(id, r.sub, r.argv));
         return;
       }
       // Who did what to this run: its lines in runs/operator-audit.jsonl

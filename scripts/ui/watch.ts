@@ -37,6 +37,10 @@ export type ChangeKind =
   | "store"
   /** leads/: the lead register, and what the agents asked of the operator. */
   | "leads"
+  /** questions/: the question register. */
+  | "questions"
+  /** network/: the dynamic network's requests, grants and fetches. */
+  | "network"
   /** A live VM run's hub wrote its status (the seats' states): outside the runs directory, watched on its own. */
   | "hub"
   | "other"
@@ -105,9 +109,14 @@ function kindOf(second: string, third: string): ChangeKind {
     case "store":
       return "store";
     case "leads":
+    case "requests":
     case "operator-requests.jsonl":
     case "operator-hosts.jsonl":
       return "leads";
+    case "questions":
+      return "questions";
+    case "network":
+      return "network";
     case ".pi-sessions":
     case ".pi":
       return "sessions";

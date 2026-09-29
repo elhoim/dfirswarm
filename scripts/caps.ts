@@ -60,16 +60,17 @@ for (let i = 0; i < rest.length; i += 2) {
 }
 
 try {
-  const { budget, before, withdrawn } = await P.setCaps(sandbox, set, by);
+  const { budget, before, withdrawn, resumed } = await P.setCaps(sandbox, set, by);
   const changes = (Object.keys(set) as P.CapField[]).map(
     (k) => `${NAMES[k]} from ${LABELS[k](before[k])} to ${LABELS[k](budget[k] as number | undefined)}`,
   );
   const body =
     `The ${by} changed ${changes.join(", ")}.` +
-    (withdrawn ? " The stop is withdrawn: the run goes on, so carry on with what you were doing." : "");
+    (withdrawn ? " The stop is withdrawn: the run goes on, so carry on with what you were doing." : "") +
+    (resumed ? ` The pause (${resumed.reason}, since ${resumed.at}) is lifted: the run goes on.` : "");
   await P.systemPost(sandbox, { tag: "ask", to: "all", body }).catch(() => undefined);
   const after = Object.fromEntries((Object.keys(set) as P.CapField[]).map((k) => [k, budget[k] ?? null]));
-  process.stdout.write(`${JSON.stringify({ ok: true, by, before, after, withdrawn, said: body })}\n`);
+  process.stdout.write(`${JSON.stringify({ ok: true, by, before, after, withdrawn, ...(resumed ? { resumed } : {}), said: body })}\n`);
 } catch (err) {
   fail(err instanceof Error ? err.message : String(err));
 }

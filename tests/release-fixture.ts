@@ -28,7 +28,7 @@ export async function cleanUp(): Promise<void> {
 export type StoppedRun = { runs: string; root: string; home: string; id: string };
 
 /** A stopped run of the v4 fixture, custody taken; `report` is work/report.md's text. */
-export async function stoppedRun(o: { id?: string; report?: string; registry?: Record<string, unknown> } = {}): Promise<StoppedRun> {
+export async function stoppedRun(o: { id?: string; report?: string; registry?: Record<string, unknown>; before?: (root: string) => Promise<void> } = {}): Promise<StoppedRun> {
   const base = await mkdtemp(join(tmpdir(), "release-run-"));
   made.push(base);
   const id = o.id ?? "s4v4";
@@ -57,6 +57,8 @@ export async function stoppedRun(o: { id?: string; report?: string; registry?: R
   await writeFile(join(root, "SWARM.md"), "# Goal\n\n1. How did the intruder get in?\n2. What did they run?\n3. What did they take?\n");
   await writeFile(custodyAnchorPath(root), JSON.stringify({ run: id, started_at: "2026-09-27T10:00:00Z" }));
   await writeFile(join(runs, "registry.json"), JSON.stringify({ runs: [{ id, sandbox: root, state: "done", examiner: "Claude (CTF round 5, macOS)", provenance: { harness_commit: "0123abcd" }, ...(o.registry ?? {}) }] }));
+  // What a test adds to the run before custody is taken (a register, a VM run's directory).
+  await o.before?.(root);
   await takeCustody(root, { runsDir: runs });
   return { runs, root, home, id };
 }

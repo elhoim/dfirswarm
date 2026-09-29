@@ -43,6 +43,8 @@ import { constants as fsConstants } from "node:fs";
 import { basename, dirname, join, posix, relative, resolve, sep } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
+import * as NB from "./negative-bar.ts";
+import { unexaminedHits, type SweepRecord, type UnexaminedHit } from "./store-sweep.ts";
 
 /**
  * Claims are short leases, renewed by re-claiming: make the edit, release,
@@ -73,6 +75,14 @@ export const DEFAULT_STALL_MS = 90_000;
 
 /** The harness writes on the board under this name. No worker may take it. */
 export const SYSTEM_AGENT = "system";
+/**
+ * The named lock the lead register and the question register are written
+ * under (extensions/leads.ts, extensions/questions.ts). A done's sentinel is
+ * written under it too (markDone), so a question admitted while the finish
+ * line runs is either in the state that line was judged against, or it sees
+ * the sentinel and is recorded as a follow-up.
+ */
+export const REGISTER_LOCK = ".leads.lock";
 export const PRIMARY_THREAD = "main";
 export const THREAD_META = "meta.json";
 export const CURSORS_REL = "cursors.json";
@@ -113,6 +123,9 @@ export const PROTECTED_PREFIXES = [
   // The lead register (extensions/leads.ts): written through the lead tools
   // and by the hub, read by everyone.
   "leads/",
+  // The question register (extensions/questions.ts), the same way: its
+  // tools, the hub and the operator's CLI write it.
+  "questions/",
   // The whole output of every tool call whose result reached the model as
   // a prefix (Pi's `bash` past its 50 KB, a forged tool past its 64 KB, a
   // page's text past what browser_check delivers). Written by the harness,
@@ -199,6 +212,9 @@ const POST_TAGS = [
   "hold",
   "veto",
   "stop",
+  // A person's question, posted by the question register (registerPost);
+  // never an agent's tag.
+  "question",
 ] as const;
 
 export type PostTag = (typeof POST_TAGS)[number];
@@ -316,13 +332,109 @@ export type BudgetRecord = {
    * The run was started until solved (--until-solved, or the goal's
    * `until_solved: true`): no wall clock, every cap advisory (spend is
    * recorded and shown, nothing is stopped for it), no abandon, and done
-   * only when every question is answered. Only the operator ends it.
+   * when every question in scope has a disposition under the bar, as any
+   * run's; otherwise only the operator ends it.
    */
   until_solved?: boolean;
   /** Until solved: minutes without progress before the watchdog posts a regroup (default 15). */
   stall_minutes?: number;
+  /**
+   * How the seats coordinate (docs/adr/0015), from the kickoff: the seconds
+   * each seat's first choice waits for the seat before it, and the bound
+   * over all of them (leads.ts admitFirstChoice). Absent: no stagger.
+   */
+  coordination?: { first_choice_stagger_sec?: number; first_choice_bound_sec?: number };
+  /**
+   * What reaching a cap does (the stop policy, docs/adr/0013): cap-pause
+   * (the default) pauses the run for the operator to extend or stop it,
+   * cap-stop stops it (an unattended run), operator is --until-solved (no
+   * wall clock, caps advisory, only the operator ends it). Absent on a run
+   * from before the policy, which stopped at its caps (stopPolicyOf).
+   */
+  stop_policy?: StopPolicy;
+  /**
+   * The pause in force: seats idle, no model call goes out. A cap's pause
+   * holds until the operator extends or stops the run; the provider's limit
+   * (provider_limit) until the harness tries again or the operator lifts or
+   * stops it; the operator's own (swarm.sh pause) until swarm.sh unpause.
+   */
+  paused?: PauseRecord;
+  /** Every pause that was lifted, in order, with who lifted it and what they gave. */
+  pauses?: PauseRecord[];
+  /**
+   * The wall clock across pauses and resumes: the minutes already used
+   * (wall_used_ms) and when the current stretch began (wall_base_at, the
+   * run's start when absent). A pause freezes it at the pause.
+   */
+  wall_used_ms?: number;
+  wall_base_at?: string;
+  /** Every resume of the run after a stop or a seal (swarm.sh resume), by whom and when. */
+  resumes?: Array<{ at: string; by: string; from: string }>;
   agents: Record<string, AgentBudget>;
 };
+
+/** What a cap does to the run: pause it (the default), stop it, or nothing (the operator's). */
+export const STOP_POLICIES = ["cap-pause", "cap-stop", "operator"] as const;
+export type StopPolicy = (typeof STOP_POLICIES)[number];
+export const DEFAULT_STOP_POLICY: StopPolicy = "cap-pause";
+/**
+ * The token cap a kickoff sets when none is given, on a team whose dollars
+ * are charged (a second brake beside the dollar cap; a team whose dollars
+ * are not names its own, since tokens are its only brake). A hundred
+ * million: the ten-agent BelkaCTF #6 run on a subscription used 277M, a
+ * small goal on two agents a few million.
+ */
+export const DEFAULT_CAP_TOKENS = 100_000_000;
+
+/**
+ * Why a run is paused: a cap or the wall clock (the stop policy), the model
+ * provider refusing every live seat (provider_limit), or the operator's own
+ * hold (swarm.sh pause). The last two are not caps, and pause a run under
+ * every stop policy.
+ */
+export type PauseReason = StopReason | "provider_limit" | "operator";
+
+/** A pause: when, for what, in words; and once lifted, when, by whom, with what. */
+export type PauseRecord = {
+  at: string;
+  reason: PauseReason;
+  detail: string;
+  /** Who paused it, where it was not a cap: the harness (provider_limit) or the operator. */
+  by?: string;
+  /** provider_limit: the models of the seats the provider refused. */
+  models?: string[];
+  /** provider_limit: when the provider said its limit lifts, where every refused seat was told a time (the earliest). */
+  until?: string;
+  /**
+   * provider_limit: when this spell of the provider's limit began. A pause
+   * that follows the harness's own try, with every seat refused again and
+   * none having worked since, is the same spell: the first pause's `at`.
+   */
+  since?: string;
+  resumed_at?: string;
+  resumed_by?: string;
+  set?: Partial<Record<CapField, number>>;
+};
+
+/** A pause at a cap or the wall clock, which only room under the caps lifts. */
+export function isCapPause(p: { reason?: string } | null | undefined): boolean {
+  return p?.reason === "cap" || p?.reason === "wall_clock";
+}
+
+/** The run's stop policy: its own, the operator's when it runs until solved, and cap-stop for a run from before the policy. */
+export function stopPolicyOf(b: { until_solved?: boolean; stop_policy?: string } | null | undefined): StopPolicy {
+  if (b?.until_solved === true || b?.stop_policy === "operator") return "operator";
+  if (b?.stop_policy === "cap-pause") return "cap-pause";
+  return "cap-stop";
+}
+
+/** How much wall clock the run has used: the stretches before, and the current one up to now, or up to the pause in force. */
+export function wallElapsedMs(b: Pick<BudgetRecord, "started_at" | "wall_used_ms" | "wall_base_at"> & { paused?: { at: string } }, now = Date.now()): number {
+  const base = Date.parse(b.wall_base_at ?? b.started_at);
+  const end = b.paused ? Date.parse(b.paused.at) : now;
+  const stretch = Number.isFinite(base) && Number.isFinite(end) ? Math.max(0, end - base) : 0;
+  return Math.max(0, Number(b.wall_used_ms) || 0) + stretch;
+}
 
 /** One change of the caps made while the run went on (setCaps). */
 export type CapChange = {
@@ -1240,6 +1352,15 @@ export function normalizeBudget(raw: Partial<BudgetRecord> | null | undefined): 
     ...(raw?.stop_reason ? { stop_reason: raw.stop_reason } : {}),
     ...(raw?.until_solved === true ? { until_solved: true } : {}),
     ...(Number(raw?.stall_minutes) > 0 ? { stall_minutes: Number(raw?.stall_minutes) } : {}),
+    // How the seats coordinate: kept by every fold, as the stop policy is.
+    ...(raw?.coordination && typeof raw.coordination === "object" ? { coordination: { ...(Number(raw.coordination.first_choice_stagger_sec) > 0 ? { first_choice_stagger_sec: Number(raw.coordination.first_choice_stagger_sec) } : {}), ...(Number(raw.coordination.first_choice_bound_sec) > 0 ? { first_choice_bound_sec: Number(raw.coordination.first_choice_bound_sec) } : {}) } } : {}),
+    // The stop policy and its pauses: kept by every fold, or a pause would lift itself on the next model call's usage.
+    ...((STOP_POLICIES as readonly string[]).includes(String(raw?.stop_policy)) ? { stop_policy: raw!.stop_policy as StopPolicy } : {}),
+    ...(raw?.paused && typeof raw.paused === "object" && typeof raw.paused.at === "string" ? { paused: raw.paused } : {}),
+    ...(Array.isArray(raw?.pauses) && raw.pauses.length ? { pauses: raw.pauses } : {}),
+    ...(Number(raw?.wall_used_ms) > 0 ? { wall_used_ms: Number(raw?.wall_used_ms) } : {}),
+    ...(typeof raw?.wall_base_at === "string" && raw.wall_base_at ? { wall_base_at: raw.wall_base_at } : {}),
+    ...(Array.isArray(raw?.resumes) && raw.resumes.length ? { resumes: raw.resumes } : {}),
     agents,
   };
 }
@@ -1677,7 +1798,7 @@ async function nextPostId(sandboxRoot: string, thread: string): Promise<number> 
  * correction — and only posts by somebody other than the agent calling `done`,
  * because an agent quoting itself is not news.
  */
-async function outputWrittenAt(sandboxRoot: string, outputFile: string): Promise<number> {
+export async function outputWrittenAt(sandboxRoot: string, outputFile: string): Promise<number> {
   let pathKey: string;
   try {
     pathKey = claimKey(sandboxRoot, outputFile);
@@ -1702,12 +1823,15 @@ export async function correctionsAfter(
   sandboxRoot: string,
   outputFile: string,
   agentId: string,
-): Promise<Array<{ id: number; from: string; tag: PostTag }>> {
+  since?: number,
+): Promise<Array<{ id: number; from: string; tag: PostTag; body: string }>> {
   // A missing output is not "no corrections": it has never answered the board.
-  const writtenAt = await outputWrittenAt(sandboxRoot, outputFile);
+  // `since` (the finish's anchor, extensions/finish.ts) keeps what was late
+  // against an earlier version of the output late through the later ones.
+  const writtenAt = typeof since === "number" && Number.isFinite(since) ? since : await outputWrittenAt(sandboxRoot, outputFile);
   const dir = join(sandboxRoot, "threads", PRIMARY_THREAD);
   const files = await readdir(dir).catch(() => [] as string[]);
-  const out: Array<{ id: number; from: string; tag: PostTag }> = [];
+  const out: Array<{ id: number; from: string; tag: PostTag; body: string }> = [];
   for (const name of files) {
     if (!name.endsWith(".md")) continue;
     const file = join(dir, name);
@@ -1717,7 +1841,7 @@ export async function correctionsAfter(
     if (!post) continue;
     if (post.from === agentId || post.from === SYSTEM_AGENT) continue;
     if (post.tag !== "result" && post.tag !== "veto") continue;
-    out.push({ id: post.id, from: post.from, tag: post.tag });
+    out.push({ id: post.id, from: post.from, tag: post.tag, body: post.body });
   }
   return out.sort((a, b) => a.id - b.id);
 }
@@ -1731,6 +1855,8 @@ export type NameRecord = {
   /** What it said it was taking on when it chose the name. */
   doing?: string;
   at: string;
+  /** When it first named itself: its first choice (A1), kept whatever it says since. */
+  first_at?: string;
 };
 
 export const NAMES_REL = "names.json";
@@ -1765,13 +1891,20 @@ export async function nameOf(sandboxRoot: string, agentId: string): Promise<stri
 
 /**
  * Take a name. Two agents may not answer to the same one, because the board
- * has to stay readable, and that is the only rule: an agent may rename itself
- * whenever what it is doing changes.
+ * has to stay readable. A seat's name is stable once given (A1): on ctf12
+ * Belka's seats renamed themselves 19 times in the first three minutes, and
+ * a rename was read as a claim on work. What a seat works on shows from the
+ * lead it holds (its label, leads.ts seatLabel); a later call updates what
+ * it says it is doing, and keeps the name.
  */
 export type NameResult =
   | {
       ok: true;
       name: string;
+      /** The name asked for, when the stable one was kept instead. */
+      asked?: string;
+      /** A first choice made in turn (leads.ts admitFirstChoice): the order, the wait and the register's coverage then. */
+      admission?: unknown;
       previous?: string;
       /** Everyone else who has said what they are doing. */
       peers: Array<{ id: string; name: string; doing?: string }>;
@@ -1786,10 +1919,20 @@ export async function claimName(
   rawName: string,
   doing?: string,
 ): Promise<NameResult> {
-  const name = tidyName(rawName);
-  if (!name) return { ok: false, error: "A name is one line of text; this one was empty." };
+  const asked = tidyName(rawName);
+  if (!asked) return { ok: false, error: "A name is one line of text; this one was empty." };
+  // A name and what an agent says it is doing sit on every board, header
+  // and report: neither may carry a value the run marks sensitive (B9),
+  // whatever its origin, the goal's own words included.
+  const leak = await sensitiveRefusalOf(sandboxRoot, [["the name", String(rawName ?? "")], ["the name", asked], ["doing", doing ? String(doing) : ""]]);
+  if (leak) return { ok: false, error: `${leak}. Nothing was recorded.` };
+  // A seat's first choice waits for its turn when the kickoff staggers them (leads.ts).
+  const admission = await import("./leads.ts").then((L) => L.admitFirstChoice(sandboxRoot, agentId)).catch(() => null);
   return withTableLock(sandboxRoot, async () => {
     const names = await readNames(sandboxRoot);
+    const had = names.find((n) => n.id === agentId);
+    // Stable once given: a later call keeps the name and updates what the seat is doing.
+    const name = had?.name ?? asked;
     // "dump5 hunter" and "dump5-hunter" are one name to a reader, and two
     // agents took exactly that pair on the memory case. Compare what a reader
     // sees: letters and digits, nothing else.
@@ -1798,12 +1941,13 @@ export async function claimName(
     if (clash) {
       return { ok: false as const, error: `${clash.id} already answers to "${name}". Pick another.`, taken_by: clash.id };
     }
-    const previous = names.find((n) => n.id === agentId)?.name;
+    const previous = had?.name;
     const next = names.filter((n) => n.id !== agentId);
     // Whole: what an agent says it is doing is part of the record, and a
     // sentence cut at 280 characters read as one the agent never wrote.
     const doingText = doing ? String(doing).trim() : "";
-    const mine = { id: agentId, name, ...(doingText ? { doing: doingText } : {}), at: new Date().toISOString() };
+    const at = new Date().toISOString();
+    const mine = { id: agentId, name, ...(doingText ? { doing: doingText } : had?.doing ? { doing: had.doing } : {}), at, first_at: had?.first_at ?? had?.at ?? at };
     next.push(mine);
     next.sort((a, b) => a.id.localeCompare(b.id));
     await writeFile(join(sandboxRoot, NAMES_REL), `${JSON.stringify({ names: next }, null, 2)}\n`, "utf8");
@@ -1817,6 +1961,8 @@ export async function claimName(
     return {
       ok: true as const,
       name,
+      ...(had && key(asked) !== key(had.name) ? { asked } : {}),
+      ...(admission ? { admission } : {}),
       ...(previous ? { previous } : {}),
       peers: peers.map((n) => ({ id: n.id, name: n.name, ...(n.doing ? { doing: n.doing } : {}) })),
       ...(close.length
@@ -1957,10 +2103,13 @@ export async function listThreadNames(sandboxRoot: string): Promise<string[]> {
 
 export async function postMessage(
   ctx: SwarmContext,
-  args: { thread?: string; to?: string; tag: string; body: string; via?: string },
-): Promise<PostRecord> {
+  args: { thread?: string; to?: string; tag: string; body: string; via?: string; key?: string },
+): Promise<PostRecord & { existing?: true }> {
   if (!isPostTag(args.tag)) {
-    throw new Error(`Unknown tag "${args.tag}". Use: ${POST_TAGS.join(", ")}`);
+    throw new Error(`Unknown tag "${args.tag}". Use: ${POST_TAGS.filter((t) => t !== "question").join(", ")}`);
+  }
+  if (args.tag === "question") {
+    throw new Error('The "question" tag is the question register\'s: a person\'s question reaches the board through it. Open a question with question_open, or post with tag ask.');
   }
   const tag: PostTag = args.tag;
   const thread = normalizeThreadName(args.thread);
@@ -1968,9 +2117,26 @@ export async function postMessage(
   const body = args.body.trim();
   if (!body) throw new Error("Post body is empty");
 
+  // A key is the harness's alone (a system post): a structured id in the
+  // front matter, where no body text can imitate it, by which a post already
+  // made is found again and not made twice (an addition replayed after a
+  // crash, a request's outcome published again).
+  const key = ctx.agentId === "system" && args.key ? yamlOneLine(args.key) : "";
+  if (key && !/^[A-Za-z0-9:._-]{1,200}$/.test(key)) throw new Error(`a system post's key is a structured id (got ${JSON.stringify(args.key)})`);
   return withTableLock(ctx.sandboxRoot, async () => {
     const dir = join(ctx.sandboxRoot, "threads", thread);
     await mkdir(dir, { recursive: true });
+    if (key) {
+      for (const n of (await readdir(dir).catch(() => [] as string[])).filter((x) => /^\d{6}-system\.md$/.test(x)).sort()) {
+        const t = await readFile(join(dir, n), "utf8").catch(() => null);
+        if (t === null) continue;
+        const { attrs } = parseFrontMatter(t);
+        if (attrs.key === key && attrs.from === "system") {
+          const post = await readPost(join(dir, n)).catch(() => null);
+          if (post) return { ...post, existing: true as const };
+        }
+      }
+    }
     await ensureThreadMember(ctx.sandboxRoot, thread, ctx.agentId);
     const id = await nextPostId(ctx.sandboxRoot, thread);
     const filename = `${String(id).padStart(6, "0")}-${ctx.agentId}.md`;
@@ -1983,7 +2149,7 @@ thread: ${thread}
 from: ${ctx.agentId}
 to: ${to}
 tag: ${tag}
-${name ? `name: ${name}\n` : ""}${via ? `via: ${via}\n` : ""}---
+${name ? `name: ${name}\n` : ""}${via ? `via: ${via}\n` : ""}${key ? `key: ${key}\n` : ""}---
 
 ${body}
 `;
@@ -2006,11 +2172,69 @@ ${body}
   });
 }
 
+/**
+ * A post in a person's name from the question register (from:
+ * analyst:<person>, tag question): never an agent's, so it joins no thread
+ * and names no seat. With a key (a structured id such as
+ * question:Q-4:r1), written in the post's front matter where no body text
+ * can imitate it, a post already on the thread with that exact key is
+ * returned instead of a second one, taken under the same lock a post id is,
+ * so a delivery that runs again after a crash posts once.
+ */
+export async function registerPost(
+  sandboxRoot: string,
+  args: { from: string; to?: string; tag: string; body: string; thread?: string; key?: string },
+): Promise<PostRecord & { existing?: true }> {
+  if (!isPostTag(args.tag)) throw new Error(`Unknown tag "${args.tag}"`);
+  const from = yamlOneLine(args.from);
+  if (!/^(analyst|reviewer|observer):[A-Za-z0-9._@-]{1,160}$/.test(from)) throw new Error(`a register post is from analyst:, reviewer: or observer:<person> (got ${JSON.stringify(args.from)})`);
+  const thread = normalizeThreadName(args.thread);
+  const to = yamlOneLine(args.to ?? "all") || "all";
+  const body = args.body.trim();
+  if (!body) throw new Error("Post body is empty");
+  const tag = args.tag as PostTag;
+  return withTableLock(sandboxRoot, async () => {
+    const dir = join(sandboxRoot, "threads", thread);
+    await mkdir(dir, { recursive: true });
+    const kind = from.slice(0, from.indexOf(":"));
+    const key = args.key ? yamlOneLine(args.key) : "";
+    if (key && !/^[A-Za-z0-9:._-]{1,200}$/.test(key)) throw new Error(`a register post's key is a structured id (got ${JSON.stringify(args.key)})`);
+    if (key) {
+      for (const name of (await readdir(dir).catch(() => [] as string[])).filter((n) => /^\d{6}-.+\.md$/.test(n) && n.includes(`-${kind}-`)).sort()) {
+        const text = await readFile(join(dir, name), "utf8").catch(() => null);
+        if (text === null) continue;
+        const { attrs } = parseFrontMatter(text);
+        if (attrs.key === key && attrs.from === from) {
+          const post = await readPost(join(dir, name)).catch(() => null);
+          if (post) return { ...post, existing: true as const };
+        }
+      }
+    }
+    const id = await nextPostId(sandboxRoot, thread);
+    const filename = `${String(id).padStart(6, "0")}-${from.replace(/[^A-Za-z0-9_-]/g, "-")}.md`;
+    const path = join(dir, filename);
+    const text = `---
+id: ${id}
+thread: ${thread}
+from: ${from}
+to: ${to}
+tag: ${tag}
+${key ? `key: ${key}\n` : ""}---
+
+${body}
+`;
+    const staging = join(dir, `.${filename}.tmp`);
+    await writeFile(staging, text, "utf8");
+    await rename(staging, path);
+    return { id, thread, from, to, tag, body, path };
+  });
+}
+
 /** Harness announcement on the board. Never joins a thread, never claims. */
 export async function systemPost(
   sandboxRoot: string,
-  args: { tag: string; body: string; thread?: string; to?: string; via?: string },
-): Promise<PostRecord> {
+  args: { tag: string; body: string; thread?: string; to?: string; via?: string; key?: string },
+): Promise<PostRecord & { existing?: true }> {
   return postMessage(systemContext(sandboxRoot), args);
 }
 
@@ -2235,6 +2459,10 @@ export type PeerView = {
   open_jobs: PeerJob[];
   /** How many ledger entries it recorded, and its last few: the whole of each is `ledger` by seq. */
   ledger: { total: number; last: Array<{ seq: number; kind: string; value_first_line: string; superseded_by?: number }> };
+  /** The leads it holds (A1): what it works on shows from these, not from its name. */
+  holds?: Array<{ id: string; title: string; status: string }>;
+  /** Its visible label: its stable name, and the leads it holds. */
+  label?: string;
 };
 
 export type TeamView = TeamRecord & {
@@ -2306,10 +2534,14 @@ export async function teamView(ctx: SwarmContext, opts: { from?: string; pageCha
   }
   const ledger = await readLedger(S);
   const replaced = supersededBy(ledger);
+  // What each seat works on, from the lead register (A1: the label follows the held lead, the name stays).
+  const L = await import("./leads.ts");
+  const leadSnap = await L.leadsSnapshot(S).catch(() => null);
   const peers: PeerView[] = [];
   for (const a of team.agents) {
     if (a.id === ctx.agentId) continue;
     const named = names.find((n) => n.id === a.id);
+    const holds = leadSnap ? L.heldLeads(leadSnap, a.id) : [];
     const post = latest.get(a.id);
     const record = post ? await readPost(post.file).catch(() => null) : null;
     const theirs = ledger.filter((e) => e.by === a.id);
@@ -2326,6 +2558,7 @@ export async function teamView(ctx: SwarmContext, opts: { from?: string; pageCha
       last_post: post && record ? { id: record.id, thread: record.thread, tag: record.tag, to: record.to, at: post.at.toISOString() } : null,
       posts: post?.count ?? 0,
       open_jobs: jobsByAgent.get(a.id) ?? [],
+      ...(leadSnap ? { holds, label: L.seatLabel(a.id, named?.name ?? null, holds) } : {}),
       ledger: {
         total: theirs.length,
         last: theirs.slice(-TEAM_VIEW_LEDGER_LAST).map((e) => ({
@@ -2861,7 +3094,7 @@ export function extractWritePath(input: Record<string, unknown> | undefined): st
 
 export async function markDone(
   ctx: SwarmContext,
-  args: { reason: string; outputFile: string; createSentinel?: boolean; outcome?: FinishOutcome },
+  args: { reason: string; outputFile: string; createSentinel?: boolean; outcome?: FinishOutcome; revision?: string; finish?: { holder: string; generation: number } },
 ): Promise<DoneResult | DoneRefused> {
   const reason = yamlOneLine(args.reason);
   const outputFile = yamlOneLine(args.outputFile);
@@ -2874,7 +3107,7 @@ export async function markDone(
   // done/SWARM_DONE; writing it here would shut every other pane.
   const seatOnly = args.createSentinel === false || reason === "agent_cap";
   // An until-solved run takes no abandon, a vote or not: only the operator
-  // ends it (swarm.sh stop), and only every question answered finishes it.
+  // ends it (swarm.sh stop), or every question disposed under the bar.
   if (!seatOnly && reason.startsWith(ABANDON_PREFIX) && (await readBudget(ctx.sandboxRoot).catch(() => null))?.until_solved === true) {
     throw new Error(UNTIL_SOLVED_NO_ABANDON);
   }
@@ -2896,12 +3129,18 @@ export async function markDone(
     }
   }
 
+  // The finish is one seat's (A4, extensions/finish.ts): a done that would
+  // end the swarm is checked against the coordinator's lease (the holder and
+  // generation its done began with, `finish`) and what is late against the
+  // report, in the same transaction that writes this seat's marker and the
+  // sentinel (finishTransaction), never only before.
+  const ending = !seatOnly && !reason.startsWith(ABANDON_PREFIX) && !(await swarmDoneExists(ctx.sandboxRoot));
+
   const by = ctx.agentId;
   const stamp = new Date().toISOString();
   const agentFile = agentDonePath(ctx.sandboxRoot, ctx.agentId);
   const sentinel = sentinelPath(ctx.sandboxRoot);
 
-  await mkdir(dirname(agentFile), { recursive: true });
   // How the run ended, when the finish line said (FinishOutcome): an
   // abandon is abandoned whatever the caller passed.
   const outcome: FinishOutcome | undefined = reason.startsWith(ABANDON_PREFIX) ? "abandoned" : args.outcome && (FINISH_OUTCOMES as readonly string[]).includes(args.outcome) ? args.outcome : undefined;
@@ -2915,13 +3154,7 @@ ${outcomeLine}at: ${stamp}
 
 Worker ${by} is exiting.
 `;
-  await writeFile(agentFile, agentBody, "utf8");
-
-  const created = seatOnly
-    ? false
-    : await createSentinel(
-        ctx.sandboxRoot,
-        `---
+  const sentinelText = `---
 by: ${by}
 output: ${outputFile}
 reason: ${reason}
@@ -2929,8 +3162,26 @@ ${outcomeLine}at: ${stamp}
 ---
 
 Collective finished. Presence of this file is the clock. Call done and stop.
-`,
-      );
+`;
+  // The sentinel is written under the registers' lock, against the state the
+  // finish line was judged on (`revision`, when the caller ran it): a question
+  // admitted or a lead opened after that line either moved the state, and the
+  // done is refused to be run again, or finds the sentinel and is recorded as
+  // a follow-up. Admission and a terminal done are never interleaved.
+  const writeDone = async (): Promise<boolean> => {
+    await mkdir(dirname(agentFile), { recursive: true });
+    await writeFile(agentFile, agentBody, "utf8");
+    if (seatOnly) return false;
+    if (!args.revision) return createSentinel(ctx.sandboxRoot, sentinelText);
+    return withNamedLock(ctx.sandboxRoot, REGISTER_LOCK, async () => {
+      if (!(await swarmDoneExists(ctx.sandboxRoot)) && (await stateRevision(ctx.sandboxRoot).catch(() => ({ revision: "" }))).revision !== args.revision) {
+        await rm(agentFile, { force: true }).catch(() => undefined);
+        throw new Error(FINISH_LINE_UNSETTLED);
+      }
+      return createSentinel(ctx.sandboxRoot, sentinelText);
+    });
+  };
+  const created = ending ? await (await import("./finish.ts")).finishTransaction(ctx.sandboxRoot, ctx.agentId, args.finish, writeDone, Date.now(), { ...(args.revision ? { revision: args.revision } : {}), ...(outcome ? { outcome } : {}) }) : await writeDone();
 
   await releaseAllOwned(ctx);
 
@@ -3626,13 +3877,19 @@ async function sendToCollector(sandboxRoot: string, line: string): Promise<boole
     if (Date.now() - collectorGaveUpAt < COLLECTOR_RETRY_AFTER_MS) return false;
     collectorFailures = 0;
   }
+  const ok = await collectorExchange(socketPath, line);
+  collectorFailures = ok ? 0 : collectorFailures + 1;
+  if (!ok && collectorFailures === COLLECTOR_GIVE_UP_AFTER) collectorGaveUpAt = Date.now();
+  return ok;
+}
+
+/** One line to the collector at `socketPath`: true only when it answers that it wrote it. */
+function collectorExchange(socketPath: string, line: string): Promise<boolean> {
   return new Promise<boolean>((resolvePromise) => {
     let settled = false;
     const finish = (ok: boolean) => {
       if (settled) return;
       settled = true;
-      collectorFailures = ok ? 0 : collectorFailures + 1;
-      if (!ok && collectorFailures === COLLECTOR_GIVE_UP_AFTER) collectorGaveUpAt = Date.now();
       resolvePromise(ok);
     };
     try {
@@ -3731,6 +3988,8 @@ const COLLECTOR_TIMEOUT_MS = 2000;
 const NUDGE_TIMEOUT_MS = 8000;
 /** Below the ~104-byte `sun_path` limit with room for a prefix. */
 const SOCKET_PATH_SAFE = 96;
+/** The longest Unix socket path every platform the harness runs on takes, in bytes (macOS: 104 with the NUL; Linux 108). */
+const SOCKET_PATH_MAX = 103;
 
 /**
  * The first line a VM's process writes on every connection it opens to its
@@ -3950,6 +4209,129 @@ export async function appendEvent(
     throw err;
   }
   return record;
+}
+
+/**
+ * Where the harness's own trace lines go when the collector does not take
+ * them and the trace is chained (scripts/lib/trace.sh trace_emit): under
+ * traces/, which no pane and no VM writes. Custody reads it as the harness's.
+ */
+export const SYSTEM_SPILL_REL = "traces/system-spill.jsonl";
+
+/**
+ * The line a ledger entry the harness itself authors puts on the trace:
+ * material that entered the run (the operator's evidence or material, a
+ * question's attachment, a capture the fetch service sealed: recordExternal)
+ * and a person's hint recorded as a hypothesis in the asker's name. No seat's
+ * `record` and no hub `recordEntry` call wrote them, so no line carried
+ * their hash, and custody named every one "in the ledger and never on the
+ * trace": the ledger check failed every run that had one (s26f142, s7f90eb,
+ * sabfd76, sb177a7). The line carries the entry's seq and hash as the hub's
+ * record line does, and custody holds the ledger to it (scripts/custody.ts).
+ */
+export const HARNESS_RECORD_TOOL = "harness_record";
+
+/** A line of the harness's own, as the process that writes it puts it on the trace. */
+export type HarnessTraceLine = { tool: string; args: Record<string, unknown>; result: Record<string, unknown> };
+
+/**
+ * How a process writes the harness's own lines: the hub as it writes its
+ * hub_call lines (the harness's token, its own spill when the collector does
+ * not answer), a pane on the host as it writes its own (logEvent). A process
+ * that registers nothing, the operator's CLI, writes them as the shell's
+ * trace_emit does (emitHarnessLine).
+ */
+export type HarnessTraceSink = (sandboxRoot: string, line: HarnessTraceLine) => Promise<void>;
+const harnessSinks = new Map<string, HarnessTraceSink>();
+
+function harnessSinkKey(sandboxRoot: string): string {
+  try {
+    return realpathSync(sandboxRoot);
+  } catch {
+    return resolve(sandboxRoot);
+  }
+}
+
+/** This process's way of writing the harness's lines, for one run (its sandbox) or for any run it touches; returns what takes it back. */
+export function useHarnessTrace(sink: HarnessTraceSink, sandboxRoot?: string): () => void {
+  const key = sandboxRoot === undefined ? "" : harnessSinkKey(sandboxRoot);
+  harnessSinks.set(key, sink);
+  return () => {
+    if (harnessSinks.get(key) === sink) harnessSinks.delete(key);
+  };
+}
+
+/**
+ * Put a ledger entry the harness authored on the trace, after it is written:
+ * a `harness_record` line with its seq and hash, by the writing process's
+ * own way (useHarnessTrace). A merged duplicate wrote nothing and has no
+ * line. A line that reaches nowhere leaves the entry named as never on the
+ * trace, which is then what happened; the entry stands either way, so this
+ * never throws.
+ */
+export async function traceHarnessEntry(sandboxRoot: string, entry: Pick<LedgerEntry, "seq" | "kind" | "by" | "hash" | "source_class">, about: Record<string, unknown> = {}): Promise<void> {
+  if (!entry.hash) return;
+  const line: HarnessTraceLine = {
+    tool: HARNESS_RECORD_TOOL,
+    args: { kind: entry.kind, by: entry.by, ...(entry.source_class ? { source_class: entry.source_class } : {}), ...about },
+    result: { ok: true, seq: entry.seq, merged: false, hash: entry.hash },
+  };
+  const sink = harnessSinks.get(harnessSinkKey(sandboxRoot)) ?? harnessSinks.get("");
+  try {
+    await (sink ? sink(sandboxRoot, line) : emitHarnessLine(sandboxRoot, line));
+  } catch (err) {
+    try {
+      process.stderr.write(`dfirswarm: the trace line for ledger entry #${entry.seq} reached neither the collector nor a spill: ${err instanceof Error ? err.message : String(err)}\n`);
+    } catch {
+      // no stderr either
+    }
+  }
+}
+
+/**
+ * The harness's line from a process with no way of its own (the operator's
+ * CLI), as scripts/lib/trace.sh trace_emit writes one: to the collector
+ * (SWARM_TRACE_SOCKET, or the run's own socket), with the harness's token
+ * when this shell holds it (a kickoff's; from any other shell the collector
+ * marks the line unverified, as it does an operator action); failing that,
+ * for any reason, into traces/system-spill.jsonl. Never appended to
+ * events.jsonl, where only the collector writes: a line it did not write is
+ * one nobody can vouch for, and the collector can chain the file between a
+ * look at its tail and the append.
+ */
+async function emitHarnessLine(sandboxRoot: string, line: HarnessTraceLine): Promise<void> {
+  const record = { ts: new Date().toISOString(), agent: "system", ...line };
+  const token = process.env.SWARM_TRACE_TOKEN || "";
+  const configured = process.env.SWARM_TRACE_SOCKET || join(sandboxRoot, COLLECTOR_SOCKET_REL);
+  const socketPath = configured.length > SOCKET_PATH_SAFE ? shortSocketPath(configured) : configured;
+  // A path the kernel would refuse even relative to this process (a deep
+  // runs directory seen from a directory far from it): scripts/trace-emit.mjs
+  // dials it from inside its own directory, which this process cannot move to.
+  const taken =
+    Buffer.byteLength(socketPath) > SOCKET_PATH_MAX
+      ? await emitFromSocketDir(sandboxRoot, configured, record, token)
+      : await collectorExchange(socketPath, `${JSON.stringify(token ? { ...record, token } : record)}\n`);
+  if (taken) return;
+  await mkdir(join(sandboxRoot, "traces"), { recursive: true });
+  await appendFile(join(sandboxRoot, SYSTEM_SPILL_REL), `${JSON.stringify(record)}\n`, "utf8");
+}
+
+/** One line through scripts/trace-emit.mjs, which dials the socket from its own directory: true when the collector wrote it. */
+function emitFromSocketDir(sandboxRoot: string, socket: string, record: Record<string, unknown>, token: string): Promise<boolean> {
+  return new Promise<boolean>((resolvePromise) => {
+    try {
+      const child = spawn(process.execPath, [resolve(dirname(fileURLToPath(import.meta.url)), "..", "scripts", "trace-emit.mjs"), sandboxRoot], {
+        env: { ...process.env, SWARM_TRACE_SOCKET: socket, SWARM_TRACE_TOKEN: token },
+        stdio: ["pipe", "ignore", "ignore"],
+      });
+      child.on("error", () => resolvePromise(false));
+      child.on("close", (code) => resolvePromise(code === 0));
+      child.stdin.on("error", () => undefined);
+      child.stdin.end(JSON.stringify(record));
+    } catch {
+      resolvePromise(false);
+    }
+  });
 }
 
 export function formatEventLine(event: SwarmEvent): string {
@@ -4494,8 +4876,8 @@ export type BudgetPressure = {
 
 /** Where the swarm stands against its two caps. Pure, so it is easy to test. */
 export function budgetPressure(budget: BudgetRecord, now = Date.now()): BudgetPressure {
-  const started = Date.parse(budget.started_at);
-  const elapsedMs = Number.isFinite(started) ? Math.max(0, now - started) : 0;
+  // The wall clock across pauses and resumes: a paused run's is frozen at its pause.
+  const elapsedMs = wallElapsedMs(budget, now);
   // An until-solved run has no wall clock, and its caps are advisory.
   const wallMs = budget.until_solved === true ? 0 : budget.wall_clock_minutes * 60_000;
   const overBudget = overCap(budget).over;
@@ -4523,7 +4905,7 @@ export async function setCaps(
   sandboxRoot: string,
   set: Partial<Record<CapField, number>>,
   by: string,
-): Promise<{ budget: BudgetRecord; before: Partial<Record<CapField, number | null>>; withdrawn: boolean }> {
+): Promise<{ budget: BudgetRecord; before: Partial<Record<CapField, number | null>>; withdrawn: boolean; resumed?: PauseRecord }> {
   const fields = Object.entries(set).filter(([k, v]) => (CAP_FIELDS as readonly string[]).includes(k) && v !== undefined) as Array<[CapField, number]>;
   if (!fields.length) throw new Error("no cap to set: give --usd, --tokens, --per-agent-usd, --per-agent-tokens or --wall-clock");
   for (const [k, v] of fields) {
@@ -4552,14 +4934,335 @@ export async function setCaps(
       delete budget.stop_reason;
       withdrawn = true;
     }
+    // A paused run whose caps now leave room goes on.
+    const resumed = liftPause(budget, by, Object.fromEntries(fields));
     budget.cap_changes = [
       ...(budget.cap_changes ?? []),
       { at: new Date().toISOString(), by, set: Object.fromEntries(fields), caps: capFingerprint(normalizeBudget(budget)) },
     ];
     await held.assertOwned();
     await writeBudget(sandboxRoot, budget);
-    return { budget: normalizeBudget(budget), before, withdrawn };
+    return { budget: normalizeBudget(budget), before, withdrawn, ...(resumed ? { resumed } : {}) };
   });
+}
+
+/**
+ * End the pause in force, whatever its cause: the wall clock's stretch up to
+ * the pause is kept, a new one starts now, and the pause goes to the history
+ * with who lifted it and what they gave. Mutates `budget`; the caller holds
+ * the table lock and writes it.
+ */
+function endPause(budget: BudgetRecord, by: string, set: Partial<Record<CapField, number>>, now: number): PauseRecord | null {
+  if (!budget.paused) return null;
+  const done: PauseRecord = { ...budget.paused, resumed_at: new Date(now).toISOString(), resumed_by: by, ...(Object.keys(set).length ? { set } : {}) };
+  budget.wall_used_ms = wallElapsedMs(budget, now);
+  budget.wall_base_at = new Date(now).toISOString();
+  delete budget.paused;
+  budget.pauses = [...(budget.pauses ?? []), done];
+  return done;
+}
+
+/**
+ * Lift a cap's pause, when the run is no longer over a cap (endPause). The
+ * steer that announced it is withdrawn. A pause that is not a cap's (the
+ * provider's limit, the operator's hold) is not lifted by room under the
+ * caps. Mutates `budget`; the caller holds the table lock and writes it.
+ */
+function liftPause(budget: BudgetRecord, by: string, set: Partial<Record<CapField, number>>, now = Date.now()): PauseRecord | null {
+  if (!budget.paused || !isCapPause(budget.paused)) return null;
+  const hypothetical = { ...budget, paused: undefined, wall_used_ms: wallElapsedMs(budget, now), wall_base_at: new Date(now).toISOString() } as BudgetRecord;
+  if (budgetPressure(hypothetical, now).reason) return null;
+  const done = endPause(budget, by, set, now);
+  budget.cap_steer_sent = false;
+  delete budget.stop_steer_at;
+  delete budget.stop_reason;
+  return done;
+}
+
+/** Which cap a paused run would still be over were its pause lifted now, in words; null when none. */
+function stillOver(budget: BudgetRecord, now: number): string | null {
+  const hypothetical = { ...budget, paused: undefined, wall_used_ms: wallElapsedMs(budget, now), wall_base_at: new Date(now).toISOString() } as BudgetRecord;
+  const p = budgetPressure(hypothetical, now);
+  if (!p.reason) return null;
+  return p.reason === "wall_clock" ? `the wall clock (${Math.round(wallElapsedMs(budget, now) / 60_000)} of ${budget.wall_clock_minutes} minutes used)` : overCap(hypothetical).by === "tokens" ? `the token cap (${budget.tokens} of ${budget.cap_tokens})` : `the dollar cap ($${budget.spent_usd} of $${budget.cap_usd})`;
+}
+
+/**
+ * The operator's extension of a run (swarm.sh extend): more wall clock
+ * (minutes), more tokens, more dollars, each added to the cap it extends,
+ * under the table lock as every cap change is. A run paused at a cap whose
+ * caps then leave room goes on (the watchdog wakes its seats); one still over
+ * a cap is refused, saying which and by how much, and nothing is changed. A
+ * pause that is not a cap's stays: the caps are extended under it. A
+ * finished run is not brought back: that is resume.
+ */
+export async function extendRun(
+  sandboxRoot: string,
+  add: { minutes?: number; tokens?: number; usd?: number },
+  by: string,
+  now = Date.now(),
+): Promise<{ budget: BudgetRecord; set: Partial<Record<CapField, number>>; resumed: PauseRecord | null }> {
+  const given = Object.entries(add).filter(([, v]) => v !== undefined && v !== null) as Array<[keyof typeof add, number]>;
+  if (!given.length) throw new Error("nothing to extend by: give --minutes N, --tokens N or --usd N");
+  for (const [k, v] of given) if (!Number.isFinite(v) || v <= 0) throw new Error(`--${k} takes a number above zero (got ${v})`);
+  return withTableLock(sandboxRoot, async (held) => {
+    // The run's end is read under the lock every stop writes it under: a
+    // stop, the harness's or the operator's, that took the lock first is
+    // not undone by an extension that was waiting for it.
+    if (await swarmDoneExists(sandboxRoot)) throw new Error("the run is finished (done/SWARM_DONE exists): an extension does not bring it back; swarm.sh resume continues it");
+    if (await lstat(join(sandboxRoot, STOPPED_REL)).then(() => true).catch(() => false)) throw new Error("the run was stopped (done/STOPPED exists): an extension does not bring it back; swarm.sh resume continues it");
+    const budget = await readBudget(sandboxRoot);
+    if (stopPolicyOf(budget) === "operator") throw new Error("this run's stop is the operator's (--stop operator): it has no wall clock and its caps are advisory, so there is nothing to extend; swarm.sh stop ends it");
+    const set: Partial<Record<CapField, number>> = {};
+    if (add.minutes) set.wall_clock_minutes = budget.wall_clock_minutes + add.minutes;
+    if (add.tokens) {
+      if (!(Number(budget.cap_tokens) > 0)) throw new Error("--tokens: this run has no token cap to extend (swarm.sh cap --tokens N sets one)");
+      set.cap_tokens = Math.max(Number(budget.cap_tokens), budget.tokens) + add.tokens;
+    }
+    if (add.usd) {
+      if (budget.metered === false) throw new Error("--usd: this team's dollars are not charged, so the dollar cap brakes nothing; extend --tokens instead");
+      set.cap_usd = Number((Math.max(budget.cap_usd, budget.spent_usd) + add.usd).toFixed(6));
+    }
+    for (const [k, v] of Object.entries(set) as Array<[CapField, number]>) (budget as Record<CapField, number | undefined>)[k] = v;
+    const resumed = liftPause(budget, by, set, now);
+    if (budget.paused && isCapPause(budget.paused)) {
+      throw new Error(`the run would still be over ${stillOver(budget, now)}: extend it by more, or by that cap too; nothing was changed`);
+    }
+    budget.cap_changes = [...(budget.cap_changes ?? []), { at: new Date(now).toISOString(), by, set, caps: capFingerprint(normalizeBudget(budget)) }];
+    await held.assertOwned();
+    await writeBudget(sandboxRoot, budget);
+    return { budget: normalizeBudget(budget), set, resumed };
+  });
+}
+
+/**
+ * Pause the run: the seats finish their step and go idle, no model call goes
+ * out (the extension refuses it on the host, the model gateway in a VM, and
+ * neither the hub nor the watchdog prompts a paused seat), and what the run
+ * holds stays as it is. At a cap (the cap-pause policy) the cap is re-checked
+ * under the lock, like the harness's stop. The provider's limit and the
+ * operator's hold are not caps: they pause a run under every stop policy, a
+ * stopped run excepted, and the provider's limit is read again under the lock
+ * (`recheck`, given the budget as it stands there), so a seat that came back
+ * since the verdict leaves the run going. A pause that continues a spell of
+ * the provider's limit (`since`) charges nothing for the try before it.
+ * Idempotent: a paused run is not paused again.
+ */
+export async function pauseRun(
+  sandboxRoot: string,
+  reason: PauseReason,
+  detail: string,
+  now = Date.now(),
+  opts: { by?: string; models?: string[]; until?: string; since?: string; recheck?: (budget: BudgetRecord) => Promise<boolean> } = {},
+): Promise<{ paused: boolean; at: string; already?: true; stale?: true }> {
+  return withTableLock(sandboxRoot, async (held) => {
+    if (await swarmDoneExists(sandboxRoot)) return { paused: false, at: new Date(now).toISOString(), stale: true as const };
+    const budget = await readBudget(sandboxRoot).catch(() => null);
+    if (!budget) return { paused: false, at: new Date(now).toISOString(), stale: true as const };
+    if (budget.paused) return { paused: false, at: budget.paused.at, already: true as const };
+    if (isCapPause({ reason })) {
+      if (!budgetPressure(budget, now).reason) return { paused: false, at: new Date(now).toISOString(), stale: true as const };
+    } else {
+      if (await lstat(join(sandboxRoot, STOPPED_REL)).then(() => true).catch(() => false)) return { paused: false, at: new Date(now).toISOString(), stale: true as const };
+      if (opts.recheck && !(await opts.recheck(budget).catch(() => false))) return { paused: false, at: new Date(now).toISOString(), stale: true as const };
+    }
+    budget.paused = {
+      at: new Date(now).toISOString(),
+      reason,
+      detail,
+      ...(opts.by ? { by: opts.by } : {}),
+      ...(opts.models?.length ? { models: opts.models } : {}),
+      ...(opts.until ? { until: opts.until } : {}),
+      ...(opts.since ? { since: opts.since } : {}),
+    };
+    // A pause that continues a spell of the provider's limit follows the
+    // harness's own try, in which no seat worked: that try is not charged to
+    // the wall clock, which stands where the spell's first pause froze it.
+    if (reason === "provider_limit" && opts.since) budget.wall_base_at = budget.paused.at;
+    await held.assertOwned();
+    await writeBudget(sandboxRoot, budget);
+    return { paused: true, at: budget.paused.at };
+  });
+}
+
+/**
+ * The operator's lift of a pause whose cause is gone (swarm.sh unpause): the
+ * provider's limit and the operator's own hold are lifted always; a cap's
+ * pause only when the caps now leave room, and otherwise it is refused,
+ * naming the cap, with nothing changed (swarm.sh extend gives room). The
+ * watchdog then wakes every seat once, as after an extension. Under the
+ * table lock; a finished or stopped run is not brought back.
+ */
+export async function unpauseRun(sandboxRoot: string, by: string, now = Date.now()): Promise<{ budget: BudgetRecord; resumed: PauseRecord }> {
+  return withTableLock(sandboxRoot, async (held) => {
+    if (await swarmDoneExists(sandboxRoot)) throw new Error("the run is finished (done/SWARM_DONE exists): there is no pause to lift; swarm.sh resume continues it");
+    if (await lstat(join(sandboxRoot, STOPPED_REL)).then(() => true).catch(() => false)) throw new Error("the run was stopped (done/STOPPED exists): there is no pause to lift; swarm.sh resume continues it");
+    const budget = await readBudget(sandboxRoot);
+    if (!budget.paused) throw new Error("the run is not paused");
+    let resumed: PauseRecord | null;
+    if (isCapPause(budget.paused)) {
+      resumed = liftPause(budget, by, {}, now);
+      if (!resumed) throw new Error(`the run is paused at a cap and is still over ${stillOver(budget, now)}: swarm.sh extend gives it room, swarm.sh stop ends it; nothing was changed`);
+    } else {
+      resumed = endPause(budget, by, {}, now);
+    }
+    await held.assertOwned();
+    await writeBudget(sandboxRoot, budget);
+    return { budget: normalizeBudget(budget), resumed: resumed! };
+  });
+}
+
+/**
+ * The provider's limit (provider_limit): a stated wait of this length or
+ * more, on any seat, pauses the run at once when every live seat is refused;
+ * with no stated end the harness tries again this often; and past a stated
+ * end it waits this margin more before it tries (docs/adr/0013).
+ */
+export const PROVIDER_LIMIT_LONG_MS = 30 * 60_000;
+export const PROVIDER_LIMIT_RETRY_MS = 30 * 60_000;
+export const PROVIDER_LIMIT_MARGIN_MS = 60_000;
+
+/** When the harness tries again under a pause for the provider's limit: its stated end and the margin, or half an hour after the pause. */
+export function providerLimitRetryAt(p: Pick<PauseRecord, "at" | "until">): number {
+  const until = p.until ? Date.parse(p.until) : NaN;
+  return Number.isFinite(until) ? until + PROVIDER_LIMIT_MARGIN_MS : Date.parse(p.at) + PROVIDER_LIMIT_RETRY_MS;
+}
+
+/**
+ * The harness's own try under a pause for the provider's limit: once its
+ * time has come (providerLimitRetryAt), the pause is lifted, by "harness",
+ * and the watchdog wakes the seats as after any lift; a run whose seats are
+ * all refused again is paused again by the same rule that paused it. Under
+ * the table lock, so two watchdogs do not both lift it. Null when the run
+ * is not paused for the provider's limit or its time has not come.
+ */
+export async function liftProviderLimit(sandboxRoot: string, now = Date.now()): Promise<PauseRecord | null> {
+  return withTableLock(sandboxRoot, async (held) => {
+    // Read under the lock every stop writes it under: a run the operator
+    // stopped while it was paused keeps the pause it was stopped in.
+    if (await swarmDoneExists(sandboxRoot)) return null;
+    if (await lstat(join(sandboxRoot, STOPPED_REL)).then(() => true).catch(() => false)) return null;
+    const budget = await readBudget(sandboxRoot).catch(() => null);
+    if (!budget?.paused || budget.paused.reason !== "provider_limit") return null;
+    if (now < providerLimitRetryAt(budget.paused)) return null;
+    const resumed = endPause(budget, "harness", {}, now);
+    await held.assertOwned();
+    await writeBudget(sandboxRoot, budget);
+    return resumed;
+  });
+}
+
+/** Whether the run is paused now. */
+export function isPaused(b: { paused?: unknown } | null | undefined): boolean {
+  return Boolean(b?.paused);
+}
+
+/**
+ * The key a pause's notice is claimed under (claimPauseNotice): the spell of
+ * the provider's limit it belongs to, or the pause itself. The operator is
+ * told once per spell, not at every try the harness makes within it.
+ */
+export function pauseNoticeKey(p: Pick<PauseRecord, "at" | "since">): string {
+  return p.since ?? p.at;
+}
+
+/** What a pause's reason is, in the words the operator and the seats read. */
+export function pauseReasonWords(p: Pick<PauseRecord, "reason">): string {
+  return p.reason === "wall_clock" ? "its wall clock" : p.reason === "cap" ? "its cap" : p.reason === "provider_limit" ? "the model provider's limit" : "the operator's hold";
+}
+
+/** What lifts a pause, in words: the operator's extension at a cap, the harness's try under the provider's limit, the operator's unpause; or the operator's stop. */
+export function pauseWayOn(p: PauseRecord): string {
+  if (isCapPause(p)) return "the operator extends it (swarm.sh extend) or stops it (swarm.sh stop)";
+  if (p.reason === "provider_limit") return `the harness tries again at ${new Date(providerLimitRetryAt(p)).toISOString()}, or the operator lifts it (swarm.sh unpause) or stops it (swarm.sh stop)`;
+  return "the operator lifts it (swarm.sh unpause) or stops it (swarm.sh stop)";
+}
+
+/** The advice a pause for the provider's limit gives the operator: who waits, until when, and how to free the machine. */
+export function providerLimitAdvice(p: PauseRecord): string {
+  const retry = new Date(providerLimitRetryAt(p)).toISOString();
+  return (
+    `The model provider refused every live seat${p.models?.length ? ` (${p.models.join(", ")})` : ""}` +
+    (p.until ? `, and said its limit lifts at ${p.until}. ` : "; it named no time the limit lifts. ") +
+    `The harness tries again at ${retry}${p.until ? "" : ", and every half hour after while the limit holds"}; until then no model call goes out, no seat is prompted, and the wall clock does not run. ` +
+    "A long wait holds every VM: to free the machine, stop the run now (swarm.sh stop <run>; custody seals it) and continue it after the limit lifts (swarm.sh resume <run>). " +
+    "swarm.sh unpause <run> tries again at once."
+  );
+}
+
+/**
+ * What the operator's notify command is told of a pause (the event
+ * `paused`), whichever process tells it: the reason, the ways on, and for
+ * the provider's limit the time the provider named and the advice. Null for
+ * the operator's own hold: the operator made it.
+ */
+export function pauseNotice(p: PauseRecord): Record<string, unknown> | null {
+  if (p.reason === "operator") return null;
+  const base = { scope: "run", reason: p.reason, paused: p, stop: "swarm.sh stop <run>" };
+  if (p.reason !== "provider_limit") return { ...base, extend: "swarm.sh extend <run> --minutes N | --tokens N | --usd N" };
+  return {
+    ...base,
+    ...(p.until ? { until: p.until } : {}),
+    models: p.models ?? [],
+    retry_at: new Date(providerLimitRetryAt(p)).toISOString(),
+    unpause: "swarm.sh unpause <run>",
+    resume: "swarm.sh resume <run>",
+    advice: providerLimitAdvice(p),
+  };
+}
+
+/** The board's one line when the run pauses for the provider's limit. */
+export function providerLimitPost(p: PauseRecord): string {
+  const retry = new Date(providerLimitRetryAt(p)).toISOString();
+  return (
+    `The run is paused: the model provider refused every live seat${p.models?.length ? ` (${p.models.join(", ")})` : ""}${p.until ? ` and said its limit lifts at ${p.until}` : ""}. ` +
+    `No model call goes out and nobody is prompted; the harness tries again at ${retry}, and pauses the run again if every seat is refused again. ` +
+    "The operator is told, and may stop the run to free the machine and resume it after the limit lifts, which starts you from your hand-off. What you hold stays as it is."
+  );
+}
+
+/** What each seat is told when a pause is lifted (the watchdog's resume_wake). */
+export function pauseLiftedText(p: PauseRecord): string {
+  const go = "Pick up where you were: read inbox, go on with what you hold, and record what you find.";
+  const set = Object.entries(p.set ?? {});
+  if (isCapPause(p) && set.length) return `The operator extended the run at ${p.resumed_at} (${set.map(([k, v]) => `${k} ${v}`).join(", ")}): the pause for ${p.reason} is lifted. ${go}`;
+  if (p.reason === "provider_limit" && p.resumed_by === "harness") {
+    return `The harness lifted the pause for the model provider's limit at ${p.resumed_at}, to try again. ${go} If the provider refuses every seat again, the run pauses again by itself.`;
+  }
+  return `The ${p.resumed_by === "harness" ? "harness" : "operator"} lifted the pause for ${pauseReasonWords(p)} at ${p.resumed_at}. ${go}`;
+}
+
+/** What the agents are told when a cap is reached, by the run's stop policy. */
+export function capSteerText(budget: BudgetRecord, pressure: BudgetPressure): string {
+  const byTokens = pressure.reason === "cap" && overCap(budget).by === "tokens";
+  const what = pressure.reason === "wall_clock" ? `wall clock (${pressure.elapsed_minutes} of ${budget.wall_clock_minutes} minutes)` : byTokens ? `token cap (${budget.tokens.toLocaleString("en-US")} of ${Number(budget.cap_tokens).toLocaleString("en-US")})` : `spend cap ($${budget.spent_usd} of $${budget.cap_usd})`;
+  if (stopPolicyOf(budget) === "cap-pause") {
+    return (
+      `The run's ${what} is reached: it pauses in ${Math.round(STOP_GRACE_MS / 60_000)} minutes, for the operator to extend it or stop it. ` +
+      "Record what you hold now: each finding, a limitation for what you could not finish, a coverage record for a search you finished; release the leads you will not finish, with why. " +
+      "Start nothing new, and do not call done unless the finish line is met. While the run is paused no model call goes out; the operator's extension wakes you where you were."
+    );
+  }
+  if (pressure.reason === "wall_clock") return `Swarm wall clock hit (${pressure.elapsed_minutes} of ${budget.wall_clock_minutes} minutes). Call done with reason cannot_complete and stop. Do not start new work.`;
+  return byTokens ? TOKEN_CAP_STEER : CAP_STEER;
+}
+
+/**
+ * What the harness does once a cap's grace period has passed, by the stop
+ * policy: pause the run (cap-pause) or write the sentinel as the harness,
+ * the run stopped (cap-stop). Under the operator's policy a cap is advisory
+ * and nothing is done. Both re-check the cap under the lock.
+ */
+export async function capAct(sandboxRoot: string, reason: StopReason, detail: string): Promise<{ kind: "paused" | "stopped" | "none"; created: boolean }> {
+  const budget = await readBudget(sandboxRoot).catch(() => null);
+  const policy = stopPolicyOf(budget);
+  if (policy === "operator") return { kind: "none", created: false };
+  if (policy === "cap-pause") {
+    const p = await pauseRun(sandboxRoot, reason, detail);
+    return { kind: "paused", created: p.paused };
+  }
+  const stop = await harnessStop(sandboxRoot, reason, detail, { verify: true });
+  return { kind: "stopped", created: stop.created };
 }
 
 /**
@@ -4665,12 +5368,14 @@ export async function harnessStop(
         return { created: false, sentinel, stale: true as const };
       }
     }
+    // A run the harness stopped at a cap is stopped, never completed.
     const created = await createSentinel(
       sandboxRoot,
       `---
 by: harness
 output: ""
 reason: ${reason}
+outcome: stopped
 at: ${new Date().toISOString()}
 ---
 
@@ -4923,7 +5628,7 @@ const BASH_WATCH_FILES = ["SWARM.md", "team.json", "layout.json", SENTINEL_REL, 
  */
 // The host's spill of trace lines the collector did not take is the record
 // too: a shell that rewrote it would unsay what the harness kept.
-const APPEND_ONLY_WATCH = ["ledger/entries.jsonl", "traces/events.jsonl", TRACE_SPILL_REL, "leads/leads.jsonl"] as const;
+const APPEND_ONLY_WATCH = ["ledger/entries.jsonl", "traces/events.jsonl", TRACE_SPILL_REL, "leads/leads.jsonl", "questions/questions.jsonl"] as const;
 
 /**
  * Size and full digest of an append-only record, taken before a shell call.
@@ -5488,7 +6193,7 @@ export const TOOL_RESERVED_NAMES = new Set([
   "extension_error", "watch_truncated", "agent_error", "toolchain",
   // self-compaction: the tool, the per-turn context row and the hand-off events
   "self_compact", "context", "compact_notice", "compact_warning", "compact_forced", "compact_hold",
-  "compact_note", "compact_start", "compact_done", "compact_failed", "compact_stalled", "compact_config",
+  "compact_note", "compact_start", "compact_done", "compact_failed", "compact_stalled", "compact_config", "compact_held",
   // microVM runs: the tool that writes a shared file, the hub's own lines,
   // and what an agent's extension says about the hub (tests/reserved-names)
   "publish_file", "publish_needed", "skill", "finish_line", "hub_call", "hub_link", "hub_prompt",
@@ -5500,6 +6205,9 @@ export const TOOL_RESERVED_NAMES = new Set([
   // before a model call, a ledger correction, the operator's --notify hook,
   // the hub's history quota and a connection refused its seat token.
   "repeat_hint", "job_hint", "budget_precall_stop", "ledger_superseded", "notify", "history_quota", "seat_auth",
+  // A ledger entry the harness authored (external material, a hint's
+  // hypothesis), its hash on the trace (HARNESS_RECORD_TOOL).
+  "harness_record",
   // Tool jobs in worker VMs and the catalogue they grow (scripts/job-service.ts).
   "job_run", "job_status", "catalog_request",
   // The host-side model gateway (scripts/model-gateway.ts).
@@ -5511,6 +6219,24 @@ export const TOOL_RESERVED_NAMES = new Set([
   // and interpreted, the watchdog's regroup in an until-solved run, and the
   // operator's answer to a lead.
   "lead_open", "lead_claim", "lead_release", "lead_close", "lead_link", "leads", "record_leads", "regroup", "operator_note",
+  // The question register (extensions/questions.ts): its tools.
+  "question_open", "questions", "question_ask",
+  // The coordination of the work and of the finish (docs/adr/0015): a lead
+  // reopened by an agent, a limiting route reviewed.
+  "lead_reopen", "route_review", "lead_handoff", "lead_confirm", "offer", "finish", "done_deferred", "review_deferred", "record_deferred",
+  // The runtime (docs/adr/0015): the seats' tokens renewed on the host.
+  "secrets_renewed",
+  // The stop policy (docs/adr/0013): a run paused at a cap, a seat's call held
+  // by the pause, the seats woken after an extension, a stop proposed to the
+  // operator, and a run resumed after a stop or a seal.
+  "run_paused", "pause_hold", "resume_wake", "stop_proposed", "run_resumed",
+  // A pause lifted: the harness's try under the provider's limit, or the operator's swarm.sh unpause.
+  "run_unpaused",
+  // The operator requests' outbox (extensions/requests.ts, docs/adr/0014): a request handed to the operator's notification targets.
+  "request_notified",
+  // The dynamic network (scripts/net-broker.ts, scripts/net-fetch.ts): its
+  // tools, and the fetch service's own lines and its keeper's restart.
+  "net_request", "net_fetch", "network", "net_fetch_started", "net_fetch_refused", "net_fetch_restarted",
 ]);
 
 const RUNTIME_EXT: Record<ToolRuntime, string> = { python3: "py", node: "mjs", bash: "sh" };
@@ -5541,8 +6267,22 @@ export type ForgedToolManifest = {
   /** Programs the script calls, as its author named them: what a later case
    *  (or `tools --save` into a library) needs its image to hold. */
   requires?: string[];
+  /**
+   * Python modules the script imports only when it is called, under a try
+   * that catches ImportError, because only some images carry them (Pillow,
+   * pytsk3, pyewf): the tool says one is missing rather than failing on an
+   * import line. The library's check (tests/recipe.test.sh) holds every
+   * other import to images/library-python.txt and these to their guard.
+   */
+  optional_python?: string[];
   /** The image the tool was forged against, by digest, in a VM run. */
   image_digest?: string;
+  /**
+   * What the tool reads, for the hint at a job's admission (scripts/library-hint.ts,
+   * docs/adr/0016): extensions, magic bytes at an offset (hex), and file names
+   * (`*` for any run of characters). Matched, never enforced.
+   */
+  use?: { extensions?: string[]; magic?: Array<{ offset: number; hex: string }>; names?: string[] };
 };
 
 export type ForgeToolSpec = {
@@ -5696,6 +6436,7 @@ function parseManifest(raw: string): ForgedToolManifest | null {
       sha256: m.sha256,
       ...(typeof m.pack === "string" && m.pack ? { pack: m.pack } : {}),
       ...(Array.isArray(m.requires) && m.requires.every((r: unknown) => typeof r === "string") ? { requires: m.requires as string[] } : {}),
+      ...(Array.isArray(m.optional_python) && m.optional_python.every((r: unknown) => typeof r === "string") ? { optional_python: m.optional_python as string[] } : {}),
       ...(typeof m.image_digest === "string" && m.image_digest ? { image_digest: m.image_digest } : {}),
     };
   } catch {
@@ -7032,8 +7773,24 @@ export const LEDGER_MD = "ledger/ledger.md";
  * `absence`: a search that found nothing, when that matters to the case. It
  * holds only for what was searched, with what and how far, so all of it is
  * required (recordEntry).
+ *
+ * `coverage`: what a negative, or a "not determinable", was searched over
+ * (the negative bar, extensions/negative-bar.ts): the proposition searched
+ * (value), the inventory revision, the objects (refs), the time range, the
+ * method and its settings, what was covered, skipped and failed, the
+ * results, the alternatives left open and the detection opportunity. The hub
+ * adds whether the jobs behind it were given every object it names.
  */
-export const LEDGER_KINDS = ["event", "ioc", "finding", "absence", "hypothesis", "limitation", "answer"] as const;
+export const LEDGER_KINDS = ["event", "ioc", "finding", "absence", "hypothesis", "limitation", "answer", "coverage", "external"] as const;
+/**
+ * The kinds an agent records. `external` is material that entered the run
+ * from outside the evidence (a capture the fetch service sealed, material
+ * the operator supplied): the harness writes it with its provenance
+ * (recordExternal), and an examiner records what it establishes.
+ */
+export const LEDGER_AGENT_KINDS = ["event", "ioc", "finding", "absence", "hypothesis", "limitation", "answer", "coverage"] as const;
+/** Where external material came from (Plan 3 WP3 and WP6; docs/adr/0012). */
+export const LEDGER_SOURCE_CLASSES = ["acquired_evidence", "case_material", "operator_supplied", "external_capture"] as const;
 export const LEDGER_CONFIDENCE = ["high", "medium", "low"] as const;
 /**
  * Version 3 (2026-09-26, after Fable and Codex read 1,040 entries of 14 runs):
@@ -7091,6 +7848,17 @@ export const LEDGER_ALTERNATIVE_STATUS = ["rejected", "open"] as const;
 /** A finding's interpretation: one to three sentences each; over these it is refused with the reason, never cut. */
 export const LEDGER_INDICATES_MAX_CHARS = 1500;
 export const LEDGER_WHY_MAX_CHARS = 1500;
+/**
+ * An answer's result (extensions/negative-bar.ts): established, partial,
+ * bounded_negative (no evidence found in a named scope), not_determinable
+ * (the old `inconclusive`, which is still taken and read as it), out_of_scope
+ * and premise_not_supported, which answers a question whose premise the
+ * evidence does not bear out ("when did X delete the file" when nothing
+ * shows X deleted it): a valid answer to a person's question, which is a
+ * proposition to test, never a conclusion to confirm. An answer without one
+ * (recorded before results) reads as it always did.
+ */
+export const LEDGER_ANSWER_RESULTS = NB.ANSWER_RESULTS;
 export const LEDGER_MAX_ALTERNATIVES = 10;
 export const LEDGER_MAX_QUALIFIES = 20;
 /** An answer's reasoning holds a narrative: room for one, still bounded. */
@@ -7197,6 +7965,84 @@ export type LedgerEntry = {
   would_change?: string;
   /** Version 4, an answer: expressly inconclusive. */
   inconclusive?: boolean;
+  /** Version 4, an answer: its result, when it is one of LEDGER_ANSWER_RESULTS (premise_not_supported: the question's premise does not hold). */
+  result?: (typeof LEDGER_ANSWER_RESULTS)[number];
+  /** Version 4, an answer to a person's question: why no entry says otherwise, in place of an empty contrary. */
+  contrary_none_why?: string;
+  /**
+   * Version 4, an answer to a question of the register: the revision of the
+   * question it answers, checked against the register under its lock when it
+   * is recorded. Absent is revision 1; an answer to an earlier revision than
+   * the question's is stale.
+   */
+  question_rev?: number;
+  /**
+   * An answer revised by another seat while the coordinator assembles the
+   * finish (the finish phase, extensions/finish.ts): why it changes a
+   * conclusion. A revision without it is not recorded in that phase.
+   */
+  finish_material?: string;
+  /** Version 4, an answer: it says the event did not happen, not only that no evidence of it was found; the negative bar says when it may. */
+  asserts_absence?: boolean;
+  /**
+   * A summary's or a narrative's symbolic citations (A4): each question it
+   * cites as Q-<n>, the answer that stood then, and that answer's
+   * fingerprint (its result, the revision it answers, and the hashes of what
+   * it rests on, what says otherwise and what bounds it). A correction of
+   * the answer that keeps the fingerprint (a wording change) leaves the
+   * summary standing; one that changes its support, scope or contrary
+   * evidence makes it be recorded again.
+   */
+  question_refs?: Array<{ q: string; section: string; answer: number; fp: string }>;
+  /** A coverage record: the inventory revision its search saw (negative-bar.ts inventoryRevision). */
+  inventory_rev?: string;
+  /** A coverage record: the time range the search covered, or why it has none. */
+  time_range?: string;
+  /** A coverage record: how the search was made (the method), and with what settings. */
+  search_method?: string;
+  settings?: string;
+  /** A coverage record: what the search actually covered, what it skipped or did not read, and what failed. */
+  coverage_actual?: string;
+  skipped?: string;
+  failures?: string;
+  /** A coverage record: the results the search produced: entries (E-<seq>) and job outputs (job:<id>[/<path>]). */
+  result_refs?: string[];
+  /**
+   * A coverage record: each entry among its results (E-<seq>) by the hash it
+   * had when the record was made. A result corrected, disputed or changed
+   * after the record takes the record out of standing (coverageProblems).
+   */
+  result_bound?: LedgerEdge[];
+  /** A coverage record: whether the event would have left a trace in these sources, given collection and retention, and why. */
+  detection_opportunity?: { trace_expected: NB.TraceExpected; why: string };
+  /** A coverage record: which areas of the stored data the search reached (negative-bar.ts COVERAGE_AREAS); a completeness claim rests on a record that names them. */
+  areas?: NB.CoverageAreas;
+  /** A coverage record behind a not-determinable answer: the acquisition ask (R-<n>) opened for the source the evidence does not hold. */
+  acquisition_ask?: string;
+  /** A coverage record behind a not-determinable answer: why no acquisition ask was opened (no source outside the evidence would settle it, say). */
+  acquisition_none_why?: string;
+  /** A coverage record: the literal strings a hit would contain were the answer in the evidence; the hub sweeps every output the run holds for them (store-sweep.ts). */
+  looked_for?: string[];
+  /** A coverage record, in place of looked_for: why no literal form exists. */
+  looked_for_none_why?: string;
+  /**
+   * Version 4, an answer to a question, written by the hub: the
+   * recorded-confidence rule it was recorded under (1: recordedConfidence).
+   * An answer without it was recorded before the rule, and keeps the
+   * confidence its author declared wherever it is read.
+   */
+  confidence_rule?: number;
+  /** An answer that moves its question from a positive result (established, partial) to a negative one: what undermines the earlier chain (entries E-<seq> or objects) and why. */
+  downgrade?: { evidence: string[]; why: string };
+  /** A coverage record, written by the hub: whether the jobs behind it were given every object it names (negative-bar.ts). */
+  coverage?: "complete" | "partial";
+  coverage_detail?: { units: NB.CoverageUnit[]; jobs: string[]; why: string[] };
+  /** A coverage record, written by the hub: the planned routes of its questions that nothing under them examined. */
+  not_examined?: Array<{ source: string; method: string; why: string }>;
+  /** An external entry: where the material came from (LEDGER_SOURCE_CLASSES), written by the harness. */
+  source_class?: (typeof LEDGER_SOURCE_CLASSES)[number];
+  /** An external entry: who supplied it, when, from where, its sha256, what it may be used for (and, for a capture, its grant and request). */
+  provenance?: { supplied_by: string; at: string; from: string; sha256?: string; permitted_use: string } & Record<string, unknown>;
   by: string;
   authors: string[];
   at: string;
@@ -7274,7 +8120,47 @@ function ledgerV4Fields(e: LedgerEntry): Record<string, unknown> {
     ...(e.alternatives_open ? { alternatives_open: e.alternatives_open } : {}),
     ...(e.would_change ? { would_change: e.would_change } : {}),
     ...(e.inconclusive ? { inconclusive: true } : {}),
+    ...(e.result ? { result: e.result } : {}),
+    ...(e.contrary_none_why ? { contrary_none_why: e.contrary_none_why } : {}),
+    ...(e.question_rev !== undefined ? { question_rev: e.question_rev } : {}),
+    ...(e.question_refs?.length ? { question_refs: e.question_refs.map((r) => ({ q: r.q, section: r.section, answer: r.answer, fp: r.fp })) } : {}),
+    ...(e.finish_material ? { finish_material: e.finish_material } : {}),
     ...(e.unsupported_tokens?.length ? { unsupported_tokens: e.unsupported_tokens } : {}),
+    ...(e.downgrade ? { downgrade: { evidence: e.downgrade.evidence, why: e.downgrade.why } } : {}),
+    ...(e.confidence_rule ? { confidence_rule: e.confidence_rule } : {}),
+    ...coverageFields(e),
+    ...(e.source_class ? { source_class: e.source_class } : {}),
+    ...(e.provenance ? { provenance: canonicalValue(e.provenance) } : {}),
+  };
+}
+
+/**
+ * The negative bar's fields in the core, each only when present: an
+ * answer's assertion of absence, and a coverage record's own fields with
+ * what the hub computed for it, canonical. An entry from before them gives
+ * the core it always did.
+ */
+function coverageFields(e: LedgerEntry): Record<string, unknown> {
+  return {
+    ...(e.asserts_absence ? { asserts_absence: true } : {}),
+    ...(e.inventory_rev ? { inventory_rev: e.inventory_rev } : {}),
+    ...(e.time_range ? { time_range: e.time_range } : {}),
+    ...(e.search_method ? { search_method: e.search_method } : {}),
+    ...(e.settings ? { settings: e.settings } : {}),
+    ...(e.coverage_actual ? { coverage_actual: e.coverage_actual } : {}),
+    ...(e.skipped ? { skipped: e.skipped } : {}),
+    ...(e.failures ? { failures: e.failures } : {}),
+    ...(e.result_refs?.length ? { result_refs: e.result_refs } : {}),
+    ...(e.result_bound?.length ? { result_bound: e.result_bound.map((x) => ({ seq: x.seq, hash: x.hash })) } : {}),
+    ...(e.detection_opportunity ? { detection_opportunity: { trace_expected: e.detection_opportunity.trace_expected, why: e.detection_opportunity.why } } : {}),
+    ...(e.areas ? { areas: canonicalValue(e.areas) } : {}),
+    ...(e.acquisition_ask ? { acquisition_ask: e.acquisition_ask } : {}),
+    ...(e.acquisition_none_why ? { acquisition_none_why: e.acquisition_none_why } : {}),
+    ...(e.looked_for?.length ? { looked_for: e.looked_for } : {}),
+    ...(e.looked_for_none_why ? { looked_for_none_why: e.looked_for_none_why } : {}),
+    ...(e.coverage ? { coverage: e.coverage } : {}),
+    ...(e.coverage_detail ? { coverage_detail: canonicalValue(e.coverage_detail) } : {}),
+    ...(e.not_examined?.length ? { not_examined: e.not_examined.map((r) => ({ source: r.source, method: r.method, why: r.why })) } : {}),
   };
 }
 
@@ -7289,7 +8175,12 @@ function ledgerV4Fields(e: LedgerEntry): Record<string, unknown> {
  */
 export function ledgerContent(e: LedgerEntry): string {
   const { because: _because, ...v3 } = ledgerV3Fields(e);
-  const v4 = e.kind === "answer" ? (({ unsupported_tokens: _tokens, ...rest }) => rest)(ledgerV4Fields(e)) : { ...(e.indicates ? { indicates: e.indicates } : {}), ...(e.qualifies?.length ? { qualifies: e.qualifies.map((q) => ({ ref: q.ref, why: q.why })) } : {}) };
+  const v4 =
+    e.kind === "answer"
+      ? (({ unsupported_tokens: _tokens, ...rest }) => rest)(ledgerV4Fields(e))
+      : e.kind === "coverage"
+        ? (({ coverage: _c, coverage_detail: _d, not_examined: _n, ...rest }) => ({ ...rest, ...(e.alternatives_open ? { alternatives_open: e.alternatives_open } : {}) }))(coverageFields(e))
+        : { ...(e.indicates ? { indicates: e.indicates } : {}), ...(e.qualifies?.length ? { qualifies: e.qualifies.map((q) => ({ ref: q.ref, why: q.why })) } : {}) };
   return JSON.stringify({ kind: e.kind, ts: e.ts ?? "", value: e.value, source: e.source ?? "", evidence: e.evidence ?? "", confidence: e.confidence ?? "", refs: e.refs ?? [], ...v3, ...v4 });
 }
 
@@ -7395,6 +8286,8 @@ export type LedgerInput = {
   attribution?: { subject?: string; subject_type?: string; basis_refs?: string[] | string };
   locators?: Array<{ ref?: string; at?: string }>;
   because?: string;
+  /** An answer revised while the finish is assembled (extensions/finish.ts finishPhase): why it changes a conclusion. */
+  material?: string;
   indicates?: string;
   confidence_why?: string;
   alternatives?: Array<{ explanation?: string; status?: string; why?: string; test_refs?: string[] | string }>;
@@ -7411,6 +8304,37 @@ export type LedgerInput = {
   alternatives_open?: string;
   would_change?: string;
   inconclusive?: boolean;
+  /** An answer's result (LEDGER_ANSWER_RESULTS; premise_not_supported: the premise the question asks about does not hold). */
+  result?: string;
+  /** An answer to a person's question: why no entry says otherwise. */
+  contrary_none_why?: string;
+  /** An answer to a register question: the revision it answers (required once the question is amended past revision 1). */
+  question_rev?: number | string;
+  /** An answer: it says the event did not happen (only on an existence question whose coverage is complete and would have shown it). */
+  asserts_absence?: boolean;
+  /** A coverage record's own fields (kind coverage); its value is the proposition searched, its refs the objects. */
+  proposition?: string;
+  inventory_rev?: string;
+  time_range?: string;
+  search_method?: string;
+  settings?: string;
+  coverage_actual?: string;
+  skipped?: string;
+  failures?: string;
+  result_refs?: string[] | string;
+  detection_opportunity?: { trace_expected?: string; why?: string };
+  /** A coverage record: {allocated, deleted, unallocated, slack, secondary}, each searched, skipped or not_applicable. */
+  areas?: unknown;
+  /** A coverage record behind a not-determinable answer: the acquisition ask opened for the missing source (R-<n>). */
+  acquisition_ask?: string;
+  /** A coverage record behind a not-determinable answer: why no acquisition ask was opened. */
+  acquisition_none_why?: string;
+  /** A coverage record: the literal strings a hit would contain (names, identifiers, addresses, keywords), at least one. */
+  looked_for?: string[] | string;
+  /** A coverage record, in place of looked_for: why no literal form exists. */
+  looked_for_none_why?: string;
+  /** An answer from a positive result to a negative one: {evidence: [E-<seq> or refs], why}. */
+  downgrade?: unknown;
 };
 
 function listOf(v: string[] | string | undefined): string[] {
@@ -7523,8 +8447,10 @@ async function ledgerV3Input(
 }
 
 /** The fields only an answer takes, and only a finding takes: named in a refusal when they come with another kind. */
-const ANSWER_ONLY_FIELDS = ["section", "reasoning", "contrary", "limitations", "alternatives_open", "would_change", "inconclusive"] as const;
+const ANSWER_ONLY_FIELDS = ["section", "reasoning", "contrary", "limitations", "alternatives_open", "would_change", "inconclusive", "result", "contrary_none_why", "asserts_absence", "question_rev", "material", "downgrade"] as const;
 const FINDING_ONLY_FIELDS = ["indicates", "alternatives", "alternatives_none_why", "significance"] as const;
+/** The fields only a coverage record takes. */
+const COVERAGE_ONLY_FIELDS = ["proposition", "inventory_rev", "time_range", "search_method", "settings", "coverage_actual", "skipped", "failures", "result_refs", "result_bound", "detection_opportunity", "areas", "acquisition_ask", "acquisition_none_why", "looked_for", "looked_for_none_why"] as const;
 
 function given(v: unknown): boolean {
   if (v === undefined || v === null) return false;
@@ -7562,6 +8488,8 @@ async function ledgerV4Input(
   const raw = input as Record<string, unknown>;
   const answerOnly = ANSWER_ONLY_FIELDS.find((f) => given(raw[f]));
   if (answerOnly) return { ok: false, reason: `${answerOnly} is an answer's: record kind=answer with its section to answer a question` };
+  const coverageOnly = COVERAGE_ONLY_FIELDS.find((f) => given(raw[f]));
+  if (coverageOnly) return { ok: false, reason: `${coverageOnly} is a coverage record's: record kind=coverage for what a negative was searched over` };
   if (kind !== "finding") {
     const findingOnly = FINDING_ONLY_FIELDS.find((f) => given(raw[f]));
     if (findingOnly) return { ok: false, reason: `${findingOnly} is a finding's: what an observation indicates and what else could explain it are recorded on kind=finding` };
@@ -7733,7 +8661,7 @@ export function supersededBy(entries: LedgerEntry[]): Map<number, number> {
 
 export type LedgerResult =
   | { ok: true; entry: LedgerEntry; merged: boolean; total: number; note?: string }
-  | { ok: false; reason: string };
+  | { ok: false; reason: string; quiet?: true; deferred?: { coordinator: string; generation: number } };
 
 /** The names closest to `want`: the same base name first, then by edit distance. */
 function nearestNames(want: string, names: string[], n = 5): string[] {
@@ -7761,7 +8689,7 @@ function nearestNames(want: string, names: string[], n = 5): string[] {
  * with the names nearest to it: a typo costs one turn, where a wrong ref on
  * the chain would stand for good.
  */
-async function checkRefs(sandboxRoot: string, refs: string[]): Promise<{ ok: true; resolved: Array<{ ref: string; kind: string; status?: string }> } | { ok: false; reason: string }> {
+export async function checkRefs(sandboxRoot: string, refs: string[]): Promise<{ ok: true; resolved: Array<{ ref: string; kind: string; status?: string }> } | { ok: false; reason: string }> {
   // Loaded when a ref is checked, not with the extension: a VM that mounts
   // only extensions/ still loads it, and in a VM the hub checks refs anyway.
   const { readManifest, resolveRef, storePaths } = await import("../scripts/evidence-store.ts");
@@ -7853,11 +8781,20 @@ export async function readLedger(sandboxRoot: string, opts: { raw?: boolean } = 
 
 /** Append one entry, merging with an equal one, and re-render ledger.md. */
 export async function recordEntry(ctx: SwarmContext, input: LedgerInput): Promise<LedgerResult> {
+  // Q-<n> names a question of the register: its section, which is n unless
+  // the goal gave it its own id.
+  if (typeof input.section === "string" && /^(question:)?Q-\d/i.test(input.section.trim())) input = { ...input, section: await registerSection(ctx.sandboxRoot, input.section) };
+  if (input.answers !== undefined && (Array.isArray(input.answers) ? input.answers : String(input.answers).split(/[\s,]+/)).some((a) => /^Q-\d/i.test(String(a).trim()))) {
+    const list = Array.isArray(input.answers) ? input.answers.map(String) : String(input.answers).split(/[\s,]+/);
+    input = { ...input, answers: await Promise.all(list.map((a) => registerSection(ctx.sandboxRoot, a.trim()))) };
+  }
   const kind = String(input.kind ?? "").trim().toLowerCase();
   if (!(LEDGER_KINDS as readonly string[]).includes(kind)) {
     return { ok: false, reason: `kind must be one of ${LEDGER_KINDS.join(", ")}` };
   }
+  if (kind === "external") return { ok: false, reason: "external material is recorded by the harness when it enters the run (a capture the fetch service sealed, material the operator supplied), with its provenance: cite it (net:<k>/<n>, E-<seq>) and record what it establishes as a finding of yours" };
   if (kind === "answer") return recordAnswer(ctx, input);
+  if (kind === "coverage") return recordCoverage(ctx, input);
   const absence = kind === "absence";
   const limitation = kind === "limitation";
   const value = String(input.value ?? "").trim();
@@ -8042,6 +8979,25 @@ async function mergeSameContent(ctx: SwarmContext, held: { assertOwned(): Promis
 /** Chain and append one entry, and render ledger.md again. */
 async function appendLedgerEntry(ctx: SwarmContext, held: { assertOwned(): Promise<void> }, entries: LedgerEntry[], entry: LedgerEntry, notes: string[]): Promise<LedgerResult> {
   if (entries.length >= LEDGER_MAX_ENTRIES) return { ok: false, reason: `the ledger holds ${LEDGER_MAX_ENTRIES} entries already` };
+  // Every record an agent makes, of every kind, held to the case policy's
+  // material use on what it rests on, transitively: the one place every
+  // entry passes through. The harness's own external entries record the
+  // material; they do not rest on it.
+  if (entry.kind !== "external") {
+    const use = await materialUseRefusal(ctx.sandboxRoot, entry as unknown as Record<string, unknown>);
+    if (use) return { ok: false, reason: use };
+  }
+  // An entry whose refs reach a sensitive output (a job run with
+  // secret_output, or one made from such an output) is recorded sensitive
+  // (docs/adr/0016): its words are held to the run's sensitivity from now on.
+  if (entry.refs?.length && !entry.sensitive) {
+    const { sensitiveRefs } = await import("../scripts/output-hygiene.ts");
+    const hits = await sensitiveRefs(ctx.sandboxRoot, entry.refs).catch(() => []);
+    if (hits.length) {
+      entry.sensitive = true;
+      notes.push(`recorded sensitive: it cites sensitive output (${hits.map((h) => `${h.ref}, job ${h.job}${h.why === "secret_output" ? " ran with secret_output" : ", made from a sensitive output"}`).join("; ")}); no name, doing label or question may carry what it says, and a redacted package takes its words out`);
+    }
+  }
   // Keys in a stable order: the core is computed from the fields, not the line.
   // Chained like the trace: each entry names the one before it.
   const previous = entries.at(-1);
@@ -8053,6 +9009,85 @@ async function appendLedgerEntry(ctx: SwarmContext, held: { assertOwned(): Promi
   entries.push(entry);
   await renderLedger(ctx.sandboxRoot, await withAttestations(ctx.sandboxRoot, entries));
   return { ok: true, entry, merged: false, total: entries.length, ...(notes.length ? { note: notes.join("; ") } : {}) };
+}
+
+/** The classes of material the case policy says may not be used (material_use none), and the preset; null when none is forbidden. */
+export async function forbiddenMaterialClasses(sandboxRoot: string): Promise<{ classes: Set<string>; preset: string } | null> {
+  try {
+    const p = JSON.parse(await readFile(join(sandboxRoot, "network", "policy.json"), "utf8")) as { policy?: string; material_use?: unknown };
+    if (!p.material_use || typeof p.material_use !== "object") return null;
+    const none = Object.entries(p.material_use as Record<string, unknown>).filter(([, v]) => String(v) === "none").map(([k]) => k);
+    return none.length ? { classes: new Set(none), preset: String(p.policy ?? "standard") } : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The case policy's material use, held at the record (docs/adr/0014): a
+ * record that rests on material whose class the policy says may not be used
+ * (`none`) is refused, whatever it cites: the material's own ref, the same
+ * bytes by their digest (`sha256:`), a job's output made from it, a
+ * catalogue member of such a job, or an entry that rests on it (support,
+ * limitations, derived_from, a coverage record's results). The lineage is
+ * the external lineage's (scripts/net-broker.ts), read over what each ref
+ * resolves to, transitively; `reference` and `evidence` are taken, and what
+ * rests on them is flagged where the answers are weighed. A run whose policy
+ * forbids no class refuses nothing, and reads nothing.
+ */
+export async function materialUseRefusal(sandboxRoot: string, cand: string[] | (Partial<LedgerEntry> & Record<string, unknown>)): Promise<string | null> {
+  const forbidden = await forbiddenMaterialClasses(sandboxRoot);
+  if (!forbidden) return null;
+  const record = Array.isArray(cand) ? { refs: cand } : cand;
+  const { externalLineage } = await import("../scripts/net-broker.ts");
+  const lineage = await externalLineage(sandboxRoot);
+  for (const hit of await lineage.probe(record)) {
+    const cls = hit.classes.find((c) => forbidden.classes.has(c));
+    if (!cls) continue;
+    return `${hit.cite} rests on ${cls.replace(/_/g, " ")} (${hit.via.join(", ")}), which case policy ${forbidden.preset} does not let a record cite or rest on (material_use ${cls}=none): it is kept on the record, and the examination does not rest on it`;
+  }
+  return null;
+}
+
+/**
+ * External material, recorded by the harness as it enters the run: a
+ * capture the fetch service sealed (source_class external_capture), material
+ * the operator supplied. Its refs resolve now; its provenance is part of the
+ * chained core. It is never an agent's: an agent cites it and records what
+ * it establishes. The same material again (the same refs and class) is the
+ * entry that stands.
+ */
+export async function recordExternal(sandboxRoot: string, input: { value: string; source: string; evidence: string; refs: string[]; source_class: (typeof LEDGER_SOURCE_CLASSES)[number]; provenance: NonNullable<LedgerEntry["provenance"]>; sensitive?: boolean }): Promise<LedgerResult> {
+  const value = String(input.value ?? "").trim();
+  if (!value || value.length > LEDGER_VALUE_MAX_CHARS) return { ok: false, reason: `an external entry says what the material is in 1 to ${LEDGER_VALUE_MAX_CHARS} characters` };
+  if (!(LEDGER_SOURCE_CLASSES as readonly string[]).includes(input.source_class)) return { ok: false, reason: `source_class is one of ${LEDGER_SOURCE_CLASSES.join(", ")}` };
+  if (!input.refs.length || input.refs.length > LEDGER_MAX_REFS) return { ok: false, reason: "an external entry cites the material it records" };
+  const checked = await checkRefs(sandboxRoot, input.refs);
+  if (!checked.ok) return checked;
+  const r = await withTableLock(sandboxRoot, async (held): Promise<LedgerResult> => {
+    const entries = await readLedger(sandboxRoot);
+    const same = entries.find((e) => e.kind === "external" && e.source_class === input.source_class && JSON.stringify(e.refs ?? []) === JSON.stringify(input.refs));
+    if (same) return { ok: true, entry: same, merged: true, total: entries.length, note: `#${same.seq} records it already` };
+    const entry: LedgerEntry = {
+      v: LEDGER_VERSION,
+      seq: (entries.at(-1)?.seq ?? 0) + 1,
+      kind: "external",
+      value,
+      source: input.source,
+      evidence: input.evidence,
+      refs: input.refs,
+      ...(input.sensitive ? { sensitive: true } : {}),
+      source_class: input.source_class,
+      provenance: input.provenance,
+      by: "system",
+      authors: ["system"],
+      at: new Date().toISOString(),
+    };
+    return appendLedgerEntry({ sandboxRoot, agentId: "system" }, held, entries, entry, []);
+  });
+  // No seat's record and no hub recordEntry wrote it: its own line carries its hash.
+  if (r.ok && !r.merged) await traceHarnessEntry(sandboxRoot, r.entry, { fn: "recordExternal" });
+  return r;
 }
 
 /**
@@ -8075,9 +9110,259 @@ export type LedgerAttestation = {
   how?: string;
   /** An attest's: the sealed objects it re-derived from, each resolved. */
   refs?: string[];
+  /**
+   * An attest of a negative (a coverage record, or an answer bounded_negative
+   * or not_determinable): whether the reviewer challenged the detection
+   * assumptions, reproduced a decisive check, tried a materially different
+   * route, each with what was done or why not. Inside the hashed record.
+   */
+  review?: NB.NegativeReview;
+  /**
+   * An attest of an answer to a question: whether the reviewer holds it
+   * established, or a best candidate (what the evidence best supports, not
+   * shown to be the answer). A best candidate does not satisfy the finish
+   * line. Absent on a line from before strengths (read as it always was).
+   */
+  strength?: AttestStrength;
+  /** An attest of an answer to a question: what the review of the answer found, part by part. */
+  answer_review?: AnswerReview;
+  /** Written by the hub: why only a best candidate could be attested (a medium or low confidence, a part not established, a route not taken). */
+  capped?: string[];
+  /** A second, independent review of a negative already reviewed or offered to another seat: why it adds something. */
+  second_review_why?: string;
   prev?: string;
   hash?: string;
 };
+
+/** How strongly a review holds an answer: established, or a best candidate. */
+export const ATTEST_STRENGTHS = ["established", "best_candidate"] as const;
+export type AttestStrength = (typeof ATTEST_STRENGTHS)[number];
+
+/**
+ * A review of an answer to a question (B2): what the reviewer reproduced
+ * and what it only read, whether each part the question asks is
+ * established, the inference that connects the observations to the answer,
+ * the alternatives it weighed, and whether another source family was
+ * checked (or why not: never a compulsory box, but its absence is said).
+ * `alternatives` is each alternative explanation considered and why the
+ * evidence rules it out ([{explanation, why}]); a text is what an older
+ * review said, and what a best candidate may still say. A review that holds
+ * an answer established names at least one (the calibration run sabfd76: a
+ * decoy adopted and attested established, "none the evidence allows").
+ * A part of a partial answer that the answer itself declares open names
+ * the entry that declares it (`declared_open`: E-<seq>, a limitation or a
+ * coverage record the answer cites): the review attests that it is open, as
+ * the answer says, and it does not cap the review (strengthCaps).
+ */
+/** An alternative weighed: what else could explain the answer, why the evidence rules it out, and the entries that show it (E-<seq>). */
+export type AnswerReviewAlternative = { explanation: string; why: string; evidence?: string[] };
+/** A part the review weighed: whether it is established, why, and for a partial answer the entry by which the answer declares it open. */
+export type AnswerReviewPart = { part: string; established: boolean; why: string; declared_open?: string };
+export type AnswerReview = {
+  reproduced: string;
+  read: string;
+  parts: AnswerReviewPart[];
+  inference: string;
+  alternatives: string | AnswerReviewAlternative[];
+  other_family: { checked: boolean; text: string };
+};
+export const ANSWER_REVIEW_MAX_PARTS = 20;
+export const ANSWER_REVIEW_MAX_ALTERNATIVES = 10;
+
+/** Words that say nothing was weighed: an alternative written so is none. */
+const PLACEHOLDER_WORDS: ReadonlySet<string> = new Set(["none", "na", "n a", "no alternative", "no alternatives", "nothing", "not applicable", "no other", "nothing else", "unknown", "tbd", "null", "nil", "no", "same", "see above", "none found", "no other explanation"]);
+
+/** Whether a text is a placeholder: empty once its punctuation goes, a stock "none", or shorter than a real explanation (under 8 letters or digits). */
+export function placeholderText(t: string | undefined | null): boolean {
+  const norm = String(t ?? "").normalize("NFKC").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+  return !norm || PLACEHOLDER_WORDS.has(norm) || norm.replace(/\s+/g, "").length < 8;
+}
+
+/**
+ * Whether an alternative counts as one weighed (structural, not a word list
+ * alone): it names the evidence that rules it out (at least one E-<seq>,
+ * which the attest checks against the ledger), its explanation and its why
+ * are neither empty nor a placeholder, and they are not the same words (the
+ * Fable review of batches 1-3: [{explanation: "none", why: "n/a"}] passed).
+ */
+export function alternativeCounts(a: AnswerReviewAlternative): boolean {
+  const same = (x: string, y: string) => x.normalize("NFKC").toLowerCase().replace(/\s+/g, " ").trim() === y.normalize("NFKC").toLowerCase().replace(/\s+/g, " ").trim();
+  return (a.evidence ?? []).some((r) => /^E-\d+$/.test(r)) && !placeholderText(a.explanation) && !placeholderText(a.why) && !same(a.explanation, a.why);
+}
+
+/** Whether a review names an alternative explanation it weighed, why the evidence rules it out, and the entries that show it (alternativeCounts). */
+export function reviewNamesAlternative(r: AnswerReview | undefined | null): boolean {
+  return Boolean(r && Array.isArray(r.alternatives) && r.alternatives.some(alternativeCounts));
+}
+
+/** Why an established attest is recorded a best candidate when its review names no alternative that counts. */
+export const NO_ALTERNATIVE_CAP = "the review names no alternative explanation it weighed with the evidence that rules it out (answer_review.alternatives [{explanation, why, evidence: [E-<seq>]}], each a real explanation, not a placeholder)";
+
+/** An answer review as given: every field said, each bounded (refused past it, never cut). */
+export function checkAnswerReview(raw: unknown): { ok: true; review: AnswerReview } | { ok: false; reason: string } {
+  const r = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+  const shape = "answer_review is {reproduced, read, parts: [{part, established, why}], inference, alternatives: [{explanation, why}], other_family: {checked, text}}";
+  const text = (name: string, v: unknown): { ok: true; value: string } | { ok: false; reason: string } => {
+    const t = String(v ?? "").trim();
+    if (!t) return { ok: false, reason: `answer_review.${name} is required (${shape}): say it, or "none" and why` };
+    if (t.length > LEDGER_ACT_MAX_CHARS) return { ok: false, reason: `answer_review.${name} is over ${LEDGER_ACT_MAX_CHARS} characters: say it in fewer; nothing is cut, so a longer text is refused` };
+    return { ok: true, value: t };
+  };
+  const reproduced = text("reproduced", r.reproduced);
+  if (!reproduced.ok) return reproduced;
+  const read = text("read", r.read);
+  if (!read.ok) return read;
+  const inference = text("inference", r.inference);
+  if (!inference.ok) return inference;
+  // Each alternative weighed, and why the evidence rules it out; a text is still read (an older review, a best candidate's "what else it allows").
+  let alternatives: AnswerReview["alternatives"];
+  if (Array.isArray(r.alternatives)) {
+    if (!r.alternatives.length) return { ok: false, reason: `answer_review.alternatives lists each alternative explanation you considered and why the evidence rules it out, [{explanation, why}], at least one; if you weighed none, say so in a text and attest best_candidate (${shape})` };
+    if (r.alternatives.length > ANSWER_REVIEW_MAX_ALTERNATIVES) return { ok: false, reason: `answer_review.alternatives lists at most ${ANSWER_REVIEW_MAX_ALTERNATIVES}: keep the ones a reader must weigh` };
+    const list: AnswerReviewAlternative[] = [];
+    for (const x of r.alternatives) {
+      const o = (x && typeof x === "object" ? x : {}) as Record<string, unknown>;
+      const explanation = text("alternatives[].explanation", o.explanation);
+      if (!explanation.ok) return explanation;
+      const why = text("alternatives[].why", o.why);
+      if (!why.ok) return why;
+      // The entries that rule it out, by seq (the attest checks each is in the ledger).
+      const ev = (Array.isArray(o.evidence) ? o.evidence : o.evidence === undefined || o.evidence === null ? [] : String(o.evidence).split(/[\s,]+/)).map((v) => String(v).trim()).filter(Boolean).map((v) => (/^#\d+$/.test(v) ? `E-${v.slice(1)}` : /^e-\d+$/i.test(v) ? v.toUpperCase() : v));
+      const bad = ev.find((v) => !/^E-[1-9]\d{0,6}$/.test(v));
+      if (bad) return { ok: false, reason: `answer_review.alternatives[].evidence names entries as E-<seq> (got ${JSON.stringify(bad)}): the entries that rule the alternative out` };
+      if (ev.length > LEDGER_MAX_CITATIONS) return { ok: false, reason: `answer_review.alternatives[].evidence names more than ${LEDGER_MAX_CITATIONS} entries` };
+      list.push({ explanation: explanation.value, why: why.value, ...(ev.length ? { evidence: [...new Set(ev)] } : {}) });
+    }
+    alternatives = list;
+  } else {
+    const t = text("alternatives", r.alternatives);
+    if (!t.ok) return t;
+    alternatives = t.value;
+  }
+  if (!Array.isArray(r.parts) || !r.parts.length) return { ok: false, reason: `answer_review.parts names each part the question asks, [{part, established: true|false, why}], at least one (${shape})` };
+  if (r.parts.length > ANSWER_REVIEW_MAX_PARTS) return { ok: false, reason: `answer_review.parts names at most ${ANSWER_REVIEW_MAX_PARTS} parts` };
+  const parts: AnswerReview["parts"] = [];
+  for (const p of r.parts) {
+    const o = (p && typeof p === "object" ? p : {}) as Record<string, unknown>;
+    const part = text("parts[].part", o.part);
+    if (!part.ok) return part;
+    if (typeof o.established !== "boolean") return { ok: false, reason: `answer_review.parts[].established is true or false: whether "${part.value}" is established` };
+    const why = text("parts[].why", o.why);
+    if (!why.ok) return why;
+    // The entry by which a partial answer declares this part open, by seq.
+    let declaredOpen: string | undefined;
+    if (o.declared_open !== undefined && o.declared_open !== null && String(o.declared_open).trim() !== "") {
+      const v = String(o.declared_open).trim();
+      const m = /^(?:#|E-)?([1-9]\d{0,6})$/i.exec(v);
+      if (!m) return { ok: false, reason: `answer_review.parts[].declared_open names the entry by which the answer declares "${part.value}" open, as E-<seq> (a limitation or a coverage record the answer cites; got ${JSON.stringify(o.declared_open)})` };
+      declaredOpen = `E-${Number(m[1])}`;
+    }
+    parts.push({ part: part.value, established: o.established, why: why.value, ...(declaredOpen ? { declared_open: declaredOpen } : {}) });
+  }
+  const f = (r.other_family && typeof r.other_family === "object" ? r.other_family : null) as Record<string, unknown> | null;
+  if (!f || typeof f.checked !== "boolean") return { ok: false, reason: "answer_review.other_family is {checked: true|false, text}: whether a materially different source family was checked, and which, or why not" };
+  const ft = text("other_family.text", f.text);
+  if (!ft.ok) return ft;
+  return { ok: true, review: { reproduced: reproduced.value, read: read.value, parts, inference: inference.value, alternatives, other_family: { checked: f.checked, text: ft.value } } };
+}
+
+/** An answer review in words, for the ledger's rendering and the report. */
+export function answerReviewWords(r: AnswerReview): string {
+  const alternatives = Array.isArray(r.alternatives) ? `alternatives weighed: ${r.alternatives.map((a) => `${a.explanation} (ruled out: ${a.why}${a.evidence?.length ? `; ${a.evidence.join(", ")}` : "; no entry named"})`).join("; ")}` : `alternatives still open: ${r.alternatives}`;
+  return `reproduced: ${r.reproduced}; only read: ${r.read}; parts: ${r.parts.map((p) => `${p.part} ${p.established ? "established" : p.declared_open ? `open, as the answer declares it (${p.declared_open})` : "NOT established"} (${p.why})`).join("; ")}; inference: ${r.inference}; ${alternatives}; another source family ${r.other_family.checked ? "checked" : "not checked"}: ${r.other_family.text}`;
+}
+
+/** Whether an attestation holds its answer established: a best candidate does not; a line from before strengths reads as it always did. */
+export function attestEstablishes(a: LedgerAttestation): boolean {
+  return a.strength !== "best_candidate";
+}
+
+/**
+ * Whether an answer to a question claims established: its result is
+ * established, or it was recorded before results and is not inconclusive
+ * (it read as established). "A best candidate" concerns only such an
+ * answer (B2). A disposition that only limits the run (partial, not
+ * determinable, a bounded negative, out of scope) and a premise shown not
+ * to hold are each held to their own bar, never to a strength: the run
+ * s9722fa held six partial answers as best candidates, and its seats
+ * walked every one of them down to not determinable.
+ */
+export function claimsEstablished(a: Pick<LedgerEntry, "kind" | "section" | "result" | "inconclusive">): boolean {
+  if (a.kind !== "answer" || !a.section?.startsWith("question:")) return false;
+  const r = NB.answerResult(a);
+  return r === "established" || r === null;
+}
+
+/** The reviews of an answer: attests on it by seats other than its authors. */
+export function answerReviews(a: LedgerEntry, attestations: readonly LedgerAttestation[]): LedgerAttestation[] {
+  const h = a.hash ?? ledgerHash(a, "genesis");
+  return attestations.filter((x) => attestationAct(x) === "attest" && x.target === h && !a.authors.includes(x.by));
+}
+
+/**
+ * Whether an answer is held as a best candidate (B2): it claims
+ * established (claimsEstablished), another seat reviewed it, and every
+ * review holds it a best candidate only. The one test readiness
+ * (extensions/finish.ts), the answers check (scripts/check-answers.ts), and
+ * through it the finish gate, and the report read, so they cannot drift.
+ */
+export function heldAsBestCandidate(a: LedgerEntry, reviews: readonly LedgerAttestation[]): boolean {
+  return claimsEstablished(a) && reviews.length > 0 && !reviews.some(attestEstablishes);
+}
+
+/**
+ * The entries by which an answer declares a part of it open: the
+ * limitations it cites, and the coverage records it rests on. A partial
+ * answer's review names one of them for each part it holds open as the
+ * answer says (AnswerReviewPart.declared_open).
+ */
+export function declaredOpenBy(a: LedgerEntry, bySeq: ReadonlyMap<number, LedgerEntry>): Set<string> {
+  const out = new Set<string>();
+  for (const x of a.limitations ?? []) out.add(`E-${x.seq}`);
+  for (const x of a.support ?? []) if (bySeq.get(x.seq)?.kind === "coverage") out.add(`E-${x.seq}`);
+  return out;
+}
+
+/**
+ * The confidence the run records for an answer to a question, beside the
+ * one its author stated. High stands only on an established answer that
+ * another seat attested established, naming the alternatives it weighed
+ * and why the evidence rules each out (reviewNamesAlternative); any other
+ * high is recorded medium, and `why` says what it lacks. Medium and low
+ * stand as stated; nothing is refused. Derived where it is read (the report,
+ * the metrics, the calibration score), because the attest that keeps a high
+ * comes after the answer (the calibration run sabfd76: every answer high,
+ * four of them wrong).
+ */
+export type RecordedConfidence = {
+  stated: (typeof LEDGER_CONFIDENCE)[number] | null;
+  recorded: (typeof LEDGER_CONFIDENCE)[number] | null;
+  why: string | null;
+  /** A high recorded before the rule (the answer carries no confidence_rule): kept as declared, and said so where it is shown. */
+  legacy?: boolean;
+};
+export function recordedConfidence(answer: Pick<LedgerEntry, "kind" | "section" | "confidence" | "result" | "inconclusive" | "hash" | "by" | "authors" | "confidence_rule">, attestations: LedgerAttestation[]): RecordedConfidence {
+  const stated = answer.confidence && (LEDGER_CONFIDENCE as readonly string[]).includes(answer.confidence) ? answer.confidence : null;
+  if (stated !== "high" || answer.kind !== "answer" || !answer.section?.startsWith("question:")) return { stated, recorded: stated, why: null };
+  // An answer recorded before the rule keeps what its author declared (a finished run reads as it did).
+  if (answer.confidence_rule !== 1) return { stated, recorded: stated, why: null, legacy: true };
+  const result = NB.answerResult(answer);
+  if (result !== "established") return { stated, recorded: "medium", why: `high is kept only by an established answer, and this one ${result ? `is ${NB.resultWords(result)}` : "states no result"}` };
+  const target = answer.hash ?? ledgerHash(answer as LedgerEntry, "genesis");
+  const authors = new Set([answer.by, ...(answer.authors ?? [])]);
+  const held = attestations.some((a) => attestationAct(a) === "attest" && a.target === target && !authors.has(a.by) && a.strength === "established" && reviewNamesAlternative(a.answer_review));
+  return held ? { stated, recorded: "high", why: null } : { stated, recorded: "medium", why: "high is kept only once another seat attests it established, naming the alternatives it weighed and why the evidence rules each out; none has" };
+}
+
+/** The words that say a high was kept as declared because its answer predates the rule. */
+export const LEGACY_CONFIDENCE_WORDS = "as declared: recorded before the run recorded confidence";
+
+/** A recorded confidence in words: the recorded one, and the stated one when it differs, with why; a high from before the rule, as declared. */
+export function confidenceWords(c: RecordedConfidence): string {
+  if (!c.recorded) return "no confidence stated";
+  if (c.legacy) return `${c.recorded} (${LEGACY_CONFIDENCE_WORDS})`;
+  return c.recorded === c.stated ? c.recorded : `${c.recorded} (stated ${c.stated}; ${c.why})`;
+}
 
 /** The act of an attestation line: a version 1 line is a second author. */
 export function attestationAct(a: LedgerAttestation): "same_content" | "attest" {
@@ -8087,7 +9372,7 @@ export function attestationAct(a: LedgerAttestation): "same_content" | "attest" 
 export function attestationHash(a: LedgerAttestation, prev: string): string {
   const core =
     a.v === 2
-      ? JSON.stringify({ v: 2, act: a.act, seq: a.seq, target: a.target, by: a.by, at: a.at, ...(a.how ? { how: a.how } : {}), ...(a.refs?.length ? { refs: a.refs } : {}) })
+      ? JSON.stringify({ v: 2, act: a.act, seq: a.seq, target: a.target, by: a.by, at: a.at, ...(a.how ? { how: a.how } : {}), ...(a.refs?.length ? { refs: a.refs } : {}), ...(a.review ? { review: canonicalValue(a.review) } : {}), ...(a.strength ? { strength: a.strength } : {}), ...(a.answer_review ? { answer_review: canonicalValue(a.answer_review) } : {}), ...(a.capped?.length ? { capped: a.capped } : {}), ...(a.second_review_why ? { second_review_why: a.second_review_why } : {}) })
       : JSON.stringify({ seq: a.seq, by: a.by, at: a.at });
   return createHash("sha256").update(`${prev}\n${core}`).digest("hex");
 }
@@ -8191,23 +9476,25 @@ export async function renderLedger(sandboxRoot: string, entries?: LedgerEntry[])
   const hypotheses = all.filter((e) => e.kind === "hypothesis");
   const limitations = all.filter((e) => e.kind === "limitation");
   const answers = all.filter((e) => e.kind === "answer");
+  const coverages = all.filter((e) => e.kind === "coverage");
   const replaced = supersededBy(all);
   const contradictions = standingContradictions(all);
   // Who re-derived an entry, and who disputes it: read beside the ledger, never written into it.
-  const attests = (await readAttestations(sandboxRoot)).filter((a) => attestationAct(a) === "attest");
-  const disputes = standingDisputes(await readDisputes(sandboxRoot));
+  const allAttestations = await readAttestations(sandboxRoot);
+  const attests = allAttestations.filter((a) => attestationAct(a) === "attest");
+  const disputes = disputesInForce(all, await readDisputes(sandboxRoot));
   const problems = answers.length ? answerProblems(all, await readDisputes(sandboxRoot)) : new Map<number, string[]>();
   const lines: string[] = [
     "# Ledger",
     "",
-    `${all.length} entries: ${events.length} events, ${iocs.length} indicators, ${findings.length} findings, ${absences.length} searches that found nothing${hypotheses.length ? `, ${hypotheses.length} hypotheses` : ""}${limitations.length ? `, ${limitations.length} limitations` : ""}${answers.length ? `, ${answers.length} answers` : ""}${replaced.size ? `; ${replaced.size} corrected by a later entry, which stands` : ""}${contradictions.length ? `; ${contradictions.length} standing contradiction${contradictions.length === 1 ? "" : "s"}` : ""}. Written by the harness from \`record\`, \`attest\` and \`dispute\`; cite it as \`ledger/ledger.md\`.`,
+    `${all.length} entries: ${events.length} events, ${iocs.length} indicators, ${findings.length} findings, ${absences.length} searches that found nothing${hypotheses.length ? `, ${hypotheses.length} hypotheses` : ""}${limitations.length ? `, ${limitations.length} limitations` : ""}${coverages.length ? `, ${coverages.length} coverage records` : ""}${answers.length ? `, ${answers.length} answers` : ""}${replaced.size ? `; ${replaced.size} corrected by a later entry, which stands` : ""}${contradictions.length ? `; ${contradictions.length} standing contradiction${contradictions.length === 1 ? "" : "s"}` : ""}. Written by the harness from \`record\`, \`attest\` and \`dispute\`; cite it as \`ledger/ledger.md\`.`,
     "",
   ];
   const acts = (e: LedgerEntry) => {
     const h = e.hash ?? ledgerHash(e, "genesis");
-    const by = attests.filter((a) => a.target === h).map((a) => a.by);
+    const by = attests.filter((a) => a.target === h).map((a) => `${a.by}${a.strength === "best_candidate" ? " (best candidate)" : ""}`);
     const against = disputes.filter((d) => d.target === h);
-    return `${by.length ? ` [attested by ${[...new Set(by)].join(", ")}]` : ""}${against.length ? ` **[disputed by ${against.map((d) => `${d.by}: ${mdCell(d.why)}`).join("; ")}]**` : ""}`;
+    return `${by.length ? ` [attested by ${[...new Set(by)].join(", ")}]` : ""}${against.length ? ` **[disputed by ${against.map((d) => `${d.by}: ${mdCell(d.why)}${d.inherited_from !== undefined ? ` (raised on #${d.inherited_from}, which it corrects; open until answered)` : ""}`).join("; ")}]**` : ""}`;
   };
   // A corrected entry stays where it was, marked; its correction says what it corrects.
   const mark = (e: LedgerEntry) =>
@@ -8232,8 +9519,11 @@ export async function renderLedger(sandboxRoot: string, entries?: LedgerEntry[])
     for (const e of answers) {
       const cites = (label: string, edges?: LedgerEdge[]) => (edges?.length ? ` — ${label}: ${edges.map((x) => `E-${x.seq}`).join(", ")}` : "");
       const p = problems.get(e.seq);
+      const r = NB.answerResult(e);
+      const neg = r && NB.NEGATIVE_RESULTS.has(r) && e.section?.startsWith("question:") ? negativeReview(e, all, allAttestations) : null;
+      const negText = neg ? (neg.reviewed ? ` (negative, reviewed by ${neg.by.join(", ")})` : " **(negative, unreviewed)**") : "";
       lines.push(
-        `- **#${e.seq}** ${e.section}${e.inconclusive ? " (inconclusive)" : ""}: ${e.value}${mark(e)}${e.confidence ? ` _(${e.confidence}${e.confidence_why ? `: ${e.confidence_why}` : ""})_` : ""}${cites("rests on", e.support)}${cites("contrary", e.contrary)}${cites("limitations", e.limitations)}${e.qualifies?.length ? ` — qualifies: ${e.qualifies.map((q) => `${q.ref} (${q.why})`).join("; ")}` : ""}${e.alternatives_open ? ` — still open: ${e.alternatives_open}` : ""}${e.would_change ? ` — would change it: ${e.would_change}` : ""}${e.unsupported_tokens?.length ? ` — in none of the cited entries: ${e.unsupported_tokens.join(", ")}` : ""}${p?.length ? ` — **no longer stands on its support: ${p.join("; ")}**` : ""} — reasoning: ${e.reasoning ?? ""} — by ${e.authors.join(", ")}`,
+        `- **#${e.seq}** ${e.section}${e.question_rev ? ` (revision ${e.question_rev})` : ""}${e.inconclusive ? " (inconclusive)" : ""}${e.result ? ` (${e.result})` : ""}${e.asserts_absence ? " (asserts absence)" : ""}${negText}: ${e.value}${mark(e)}${e.confidence ? ` _(${e.confidence}${e.confidence_why ? `: ${e.confidence_why}` : ""})_` : ""}${cites("rests on", e.support)}${cites("contrary", e.contrary)}${e.contrary_none_why ? ` — nothing says otherwise: ${e.contrary_none_why}` : ""}${cites("limitations", e.limitations)}${e.qualifies?.length ? ` — qualifies: ${e.qualifies.map((q) => `${q.ref} (${q.why})`).join("; ")}` : ""}${e.alternatives_open ? ` — still open: ${e.alternatives_open}` : ""}${e.would_change ? ` — would change it: ${e.would_change}` : ""}${e.unsupported_tokens?.length ? ` — in none of the cited entries: ${e.unsupported_tokens.join(", ")}` : ""}${p?.length ? ` — **no longer stands on its support: ${p.join("; ")}**` : ""} — reasoning: ${e.reasoning ?? ""} — by ${e.authors.join(", ")}`,
       );
     }
   }
@@ -8245,9 +9535,28 @@ export async function renderLedger(sandboxRoot: string, entries?: LedgerEntry[])
   // query and that scope only.
   lines.push("", "## Searched, not found", "", "| # | Looked for | Searched | Query, tool, scope | By |", "| --- | --- | --- | --- | --- |");
   for (const e of absences) lines.push(`| ${e.seq} | ${mdCell(e.value)}${mark(e)} | ${mdCell(e.source)} | ${ev(e)} | ${e.authors.join(", ")} |`);
+  const externals = all.filter((e) => e.kind === "external");
+  if (externals.length) {
+    // What entered from outside the evidence, with where from: a capture's hash proves its bytes, not their truth.
+    lines.push("", "## External material", "", "| # | What | Class | From | Provenance | By |", "| --- | --- | --- | --- | --- | --- |");
+    for (const e of externals) lines.push(`| ${e.seq} | ${mdCell(e.value)}${mark(e)} | ${e.source_class ?? ""} | ${mdCell(e.provenance?.from ?? e.source)} | ${ev(e)}${e.provenance?.sha256 ? ` · sha256 ${e.provenance.sha256}` : ""} | ${e.authors.join(", ")} |`);
+  }
   if (limitations.length) {
     lines.push("", "## Limitations", "", "| # | Not established | Reason | Scope | What was tried | By |", "| --- | --- | --- | --- | --- | --- |");
     for (const e of limitations) lines.push(`| ${e.seq} | ${mdCell(e.value)}${mark(e)} | ${e.reason ?? ""} | ${mdCell(e.source)} | ${ev(e)} | ${e.authors.join(", ")} |`);
+  }
+  if (coverages.length) {
+    // What each negative was searched over, what the hub found the jobs were given, and who reviewed it.
+    lines.push("", "## Coverage records", "");
+    const SW = await import("./store-sweep.ts");
+    const sweeps = await SW.readSweeps(sandboxRoot).catch(() => [] as SweepRecord[]);
+    for (const e of coverages) {
+      const neg = negativeReview(e, all, allAttestations);
+      const looked = e.looked_for?.length ? ` — looked for: ${e.looked_for.map((t) => `"${mdCell(t)}"`).join(", ")}; ${mdCell(SW.sweepWords(SW.sweepOf({ hash: e.hash ?? ledgerHash(e, "genesis") }, sweeps), e))}` : e.looked_for_none_why ? ` — no literal form to look for: ${e.looked_for_none_why}` : "";
+      lines.push(
+        `- **#${e.seq}** for ${(e.answers ?? []).map((a) => `question:${a}`).join(", ")}: proposition: ${e.value}${mark(e)} — objects: ${(e.refs ?? []).map((r) => `\`${r}\``).join(", ")} — time range: ${e.time_range ?? ""} — method: ${e.search_method ?? ""} (settings: ${e.settings ?? ""}) — covered: ${e.coverage_actual ?? ""} — skipped: ${e.skipped ?? ""} — failures: ${e.failures ?? ""} — results: ${(e.result_refs ?? []).join(", ")} — alternatives: ${e.alternatives_open ?? ""} — detection opportunity: trace expected ${e.detection_opportunity?.trace_expected ?? "?"}, ${e.detection_opportunity?.why ?? ""} — inventory ${e.inventory_rev ?? "?"} — **coverage ${e.coverage ?? "not computed"}**${e.coverage_detail?.why.length ? ` (${e.coverage_detail.why.join("; ")})` : ""}${e.not_examined?.length ? ` — planned routes not examined: ${e.not_examined.map((r) => `${r.source} (${r.method}): ${r.why}`).join("; ")}` : ""}${looked} — ${neg.reviewed ? `reviewed by ${neg.by.join(", ")}: ${neg.reviews.map((x) => NB.reviewWords(x.review)).join(" / ")}` : "**unreviewed**"} — by ${e.authors.join(", ")}`,
+      );
+    }
   }
   if (contradictions.length) {
     // Weighed: an answer holds both, one as contrary evidence, or a limitation names both.
@@ -8321,12 +9630,12 @@ export async function listLedger(sandboxRoot: string, filter: { kind?: string; l
   const replaced = supersededBy(all);
   const attests = (await readAttestations(sandboxRoot)).filter((a) => attestationAct(a) === "attest");
   const allDisputes = await readDisputes(sandboxRoot);
-  const disputes = standingDisputes(allDisputes);
+  const disputes = disputesInForce(all, allDisputes);
   const problems = all.some((e) => e.kind === "answer") ? answerProblems(all, allDisputes) : new Map<number, string[]>();
   return picked.slice(-limit).map((e) => {
     const h = e.hash ?? ledgerHash(e, "genesis");
     const by = [...new Set(attests.filter((a) => a.target === h).map((a) => a.by))];
-    const against = disputes.filter((d) => d.target === h).map((d) => ({ by: d.by, why: d.why }));
+    const against = disputes.filter((d) => d.target === h).map((d) => ({ by: d.by, why: d.why, ...(d.inherited_from !== undefined ? { inherited_from: d.inherited_from } : {}) }));
     return {
       ...e,
       ...(replaced.has(e.seq) ? { superseded_by: replaced.get(e.seq) } : {}),
@@ -8382,7 +9691,8 @@ export function briefQuestions(text: string): string[] {
 
 /** A section id as the goal numbers it: "3", "Q3" and "q3" are section 3. */
 export function sectionKey(id: string): string {
-  return String(id ?? "").trim().replace(/^q(?=\d)/i, "");
+  // Q-19, the question register's id, is question:19 too.
+  return String(id ?? "").trim().replace(/^q-?(?=\d)/i, "");
 }
 
 /** The goal id a section's entries name in `answers`: 3 for question:3, summary, narrative. */
@@ -8634,9 +9944,68 @@ export function standingDisputes(disputes: LedgerDispute[]): LedgerDispute[] {
   return [...open.values()];
 }
 
+/** A dispute in force: one that stands, on the entry it names or, when that entry was corrected, on the correction that stands in its place (inherited_from names the entry it was raised on). */
+export type DisputeInForce = LedgerDispute & { inherited_from?: number };
+
+/**
+ * The disputes in force. A correction may fix a disputed entry, but the
+ * dispute stays open until it is answered: the disputer withdraws it once
+ * the correction answers what it said. Until then it stands on the
+ * correction that stands in the entry's place (on Belka two limitations
+ * were superseded over a standing objection, and the answer and summary
+ * that rested on them fell with nobody told why). Each standing dispute on
+ * the entry it names, and each whose entry was superseded again on the
+ * head of its chain of corrections, marked inherited_from.
+ */
+export function disputesInForce(entries: LedgerEntry[], disputes: LedgerDispute[]): DisputeInForce[] {
+  const standing = standingDisputes(disputes);
+  if (!standing.length) return [];
+  const replaced = supersededBy(entries);
+  if (!replaced.size) return standing;
+  const bySeq = new Map(entries.map((e) => [e.seq, e]));
+  const byHash = new Map(entries.map((e) => [e.hash ?? ledgerHash(e, "genesis"), e]));
+  const out: DisputeInForce[] = [...standing];
+  for (const d of standing) {
+    const e = byHash.get(d.target);
+    if (!e || !replaced.has(e.seq)) continue;
+    const head = bySeq.get(standingSeq(e.seq, replaced));
+    if (!head || head.seq === e.seq) continue;
+    out.push({ ...d, target: head.hash ?? ledgerHash(head, "genesis"), inherited_from: e.seq });
+  }
+  return out;
+}
+
+/** A dispute in force, in words: who, why, and the entry it was raised on when it is inherited. */
+export function disputeWords(d: DisputeInForce): string {
+  return `${d.by} (${d.why})${d.inherited_from !== undefined ? ` raised on E-${d.inherited_from}, which it corrects, and not yet answered` : ""}`;
+}
+
 // --- attest and dispute ---------------------------------------------------------------------
 
-export type LedgerActInput = { seq?: number | string; how?: string; why?: string; refs?: string[] | string; withdraw?: boolean };
+export type LedgerActInput = { seq?: number | string; how?: string; why?: string; refs?: string[] | string; withdraw?: boolean; review?: unknown; strength?: unknown; answer_review?: unknown; second_review_why?: string };
+
+/** The standing entries an answer cites that were recorded for its own question (`id`, its section key). */
+export function citedForQuestion(a: LedgerEntry, bySeq: Map<number, LedgerEntry>, replaced: Map<number, number>, id: string): LedgerEntry[] {
+  return (a.support ?? []).map((x) => bySeq.get(x.seq)).filter((e): e is LedgerEntry => Boolean(e) && !replaced.has((e as LedgerEntry).seq) && ((e as LedgerEntry).answers ?? []).some((x) => sectionKey(x) === id));
+}
+
+/**
+ * Whether an answer's result makes it a negative the bar holds (the finish
+ * gate's own test): a bounded negative, not determinable, or a premise
+ * rejected on a search alone, where none of the standing entries it cites
+ * for its question (`cited`, citedForQuestion) is a finding that shows the
+ * premise false.
+ */
+export function negativeByResult(result: string | null, cited: LedgerEntry[]): boolean {
+  return Boolean(result && (NB.NEGATIVE_RESULTS.has(result) || (result === "premise_not_supported" && !cited.some((e) => e.kind === "finding"))));
+}
+
+/** Whether an entry is a negative the review bar holds: a coverage record, or an answer bounded_negative or not_determinable. */
+export function isNegativeEntry(e: LedgerEntry): boolean {
+  if (e.kind === "coverage") return true;
+  const r = NB.answerResult(e);
+  return r !== null && NB.NEGATIVE_RESULTS.has(r) && Boolean(e.section?.startsWith("question:"));
+}
 export type LedgerActResult<T> = { ok: true; line: T; appended: boolean; note?: string } | { ok: false; reason: string };
 
 /** The entry an act names, standing, and not the actor's own. */
@@ -8654,12 +10023,77 @@ function actTarget(entries: LedgerEntry[], raw: number | string | undefined, age
 }
 
 /**
+ * Why a review can hold an answer to a question only as a best candidate
+ * (B2), each in words: its confidence is medium or low; the review says a
+ * part the question asks is not established; or its would_change names a
+ * route nothing took: a planned route of the question (lead_open routes)
+ * that no job under it examined, named by its source, or a lead (L-<n>)
+ * that is not closed resolved, negative or duplicate. Read from the
+ * registers and the refs; the answer's words are only searched for the
+ * route sources and lead ids themselves. Empty when nothing caps it.
+ *
+ * A partial answer claims part of the question established and declares
+ * the rest open, so its review attests those claims: a part the review
+ * holds not established caps it only when the answer does not declare that
+ * part open (the part names, in declared_open, a limitation or a coverage
+ * record the answer cites: declaredOpenBy). Its confidence does not cap it,
+ * nor do the routes its would_change names, which are how its open parts
+ * would be settled: the answer already says they are open. The cap stays
+ * whole for an answer that claims established (claimsEstablished), and for
+ * any other that is not a negative.
+ */
+export async function strengthCaps(sandboxRoot: string, answer: LedgerEntry, review: AnswerReview | null, entries?: LedgerEntry[]): Promise<string[]> {
+  const out: string[] = [];
+  if (NB.answerResult(answer) === "partial") {
+    const all = entries ?? (await readLedger(sandboxRoot));
+    const open = declaredOpenBy(answer, new Map(all.map((e) => [e.seq, e])));
+    for (const p of review?.parts ?? []) {
+      if (p.established || (p.declared_open && open.has(p.declared_open))) continue;
+      out.push(`the review holds "${p.part}" not established (${p.why}), and the answer does not declare it open${p.declared_open ? ` (${p.declared_open} is not a limitation or a coverage record it cites)` : ""}`);
+    }
+    return out;
+  }
+  if (answer.confidence === "medium" || answer.confidence === "low") out.push(`its confidence is ${answer.confidence}`);
+  for (const p of review?.parts ?? []) if (!p.established) out.push(`the review holds "${p.part}" not established (${p.why})`);
+  const change = String(answer.would_change ?? "");
+  if (!change || !answer.section?.startsWith("question:")) return out;
+  const id = sectionAnswersId(answer.section);
+  const bar = await questionBar(sandboxRoot, id).catch(() => null);
+  const lower = change.toLowerCase();
+  for (const r of bar?.routes ?? []) {
+    const src = r.source.trim();
+    if (src.length < 3 || !lower.includes(src.toLowerCase())) continue;
+    const ex = await NB.routeExamined(sandboxRoot, r, { jobs: bar?.jobs ?? [], objects: [] }).catch(() => ({ examined: false, how: "it could not be checked" }));
+    if (!ex.examined) out.push(`would_change names ${src} (${r.method}), a planned route nothing examined (${ex.how})`);
+  }
+  const named = [...new Set([...change.matchAll(/\bL-([1-9]\d{0,5})\b/g)].map((m) => `L-${Number(m[1])}`))];
+  if (named.length) {
+    const L = await import("./leads.ts");
+    const snap = await L.leadsSnapshot(sandboxRoot).catch(() => null);
+    for (const lid of named) {
+      const l = snap?.state.leads.get(lid);
+      if (!l) continue;
+      if (l.closed && ["resolved", "negative", "duplicate"].includes(l.closed.disposition)) continue;
+      out.push(`would_change names ${lid}, a route not taken (${l.closed ? `closed ${l.closed.disposition}` : l.holder ? `held by ${l.holder}, open` : "open, unheld"})`);
+    }
+  }
+  return out;
+}
+
+/**
  * Attest an entry: an agent other than its authors re-derived it and says
  * how — what it re-derived from which sealed objects, and what it only read.
  * Hub-written into ledger/attestations.jsonl (version 2, the how inside the
  * hashed record). The same agent attesting the same entry again is told so.
  */
-export async function attestEntry(ctx: SwarmContext, input: LedgerActInput): Promise<LedgerActResult<LedgerAttestation>> {
+/**
+ * An attest's result: a line recorded (or found), or a negative's review
+ * answered quietly because another seat reviewed it already or has it
+ * offered (`deferred`, nothing recorded, no refusal).
+ */
+export type AttestResult = LedgerActResult<LedgerAttestation> | { ok: true; line: null; appended: false; note: string; deferred: import("./leads.ts").ReviewDeferral };
+
+export async function attestEntry(ctx: SwarmContext, input: LedgerActInput): Promise<AttestResult> {
   const how = boundedText("how", input.how, LEDGER_ACT_MAX_CHARS);
   if (!how.ok) return how;
   if (!how.value) return { ok: false, reason: "how is required: what you re-derived, from which sealed object (job:<id>/<path>, input:<path>, …), and what you only read" };
@@ -8668,22 +10102,276 @@ export async function attestEntry(ctx: SwarmContext, input: LedgerActInput): Pro
   if (refs.length) {
     const checked = await checkRefs(ctx.sandboxRoot, refs);
     if (!checked.ok) return checked;
+    const use = await materialUseRefusal(ctx.sandboxRoot, refs);
+    if (use) return { ok: false, reason: use };
   }
-  return withTableLock(ctx.sandboxRoot, async (held) => {
+  const secondWhy = boundedText("second_review_why", input.second_review_why, LEDGER_ACT_MAX_CHARS);
+  if (!secondWhy.ok) return secondWhy;
+  let review: NB.NegativeReview | null = null;
+  if (input.review !== undefined && input.review !== null) {
+    const r = NB.checkReview(input.review);
+    if (!r.ok) return r;
+    review = r.review;
+  }
+  const strengthText = String(input.strength ?? "").trim().toLowerCase().replace(/-/g, "_");
+  if (strengthText && !(ATTEST_STRENGTHS as readonly string[]).includes(strengthText)) return { ok: false, reason: `strength is established or best_candidate (got ${JSON.stringify(input.strength)})` };
+  const strength = (strengthText || undefined) as AttestStrength | undefined;
+  let answerReview: AnswerReview | null = null;
+  if (input.answer_review !== undefined && input.answer_review !== null) {
+    const r = checkAnswerReview(input.answer_review);
+    if (!r.ok) return r;
+    answerReview = r.review;
+  }
+  // What caps a review at best_candidate is read before the lock: the route
+  // plan and the jobs under the question (the lead register), never the
+  // answer's words beyond the refs and lead ids its would_change names.
+  const pre = await readLedger(ctx.sandboxRoot);
+  const preTarget = actTarget(pre, input.seq, ctx.agentId, "attest");
+  const caps = preTarget.ok && preTarget.entry.kind === "answer" && preTarget.entry.section?.startsWith("question:") && !isNegativeEntry(preTarget.entry) ? await strengthCaps(ctx.sandboxRoot, preTarget.entry, answerReview, pre) : [];
+  // The negatives a review recorded here answers (the answer itself, or those resting on the coverage record): their offers are taken up after the lock.
+  const reviewed: string[] = [];
+  const result = await withTableLock(ctx.sandboxRoot, async (held): Promise<AttestResult> => {
     const entries = await readLedger(ctx.sandboxRoot);
     const t = actTarget(entries, input.seq, ctx.agentId, "attest");
     if (!t.ok) return t;
     const target = t.entry.hash ?? ledgerHash(t.entry, "genesis");
-    if (standingDisputes(await readDisputes(ctx.sandboxRoot)).some((d) => d.target === target && d.by === ctx.agentId)) {
-      return { ok: false, reason: `you dispute #${t.entry.seq}: withdraw the dispute (dispute withdraw=true, with why) before attesting it` };
+    // An answer to a question is attested with how strongly the review holds
+    // it, and the review part by part (B2): a best candidate you cannot break
+    // is still a best candidate. A medium or low confidence, a part not
+    // established, or a route its would_change names that nothing took
+    // allows only best_candidate, which does not satisfy the finish line on
+    // an answer that claims established. A partial answer's review attests
+    // its own claims: a part it declares open does not cap it (strengthCaps).
+    const questionAnswer = t.entry.kind === "answer" && Boolean(t.entry.section?.startsWith("question:")) && !isNegativeEntry(t.entry);
+    // The entries an alternative is ruled out by are in the ledger.
+    if (answerReview && Array.isArray(answerReview.alternatives)) {
+      const seqs = new Set(entries.map((e) => e.seq));
+      for (const a of answerReview.alternatives) {
+        const missing = (a.evidence ?? []).find((r) => !seqs.has(Number(r.slice(2))));
+        if (missing) return { ok: false, reason: `answer_review.alternatives[].evidence names ${missing}: there is no entry #${missing.slice(2)} in the ledger` };
+      }
+    }
+    // An established review names the alternatives it weighed and why the
+    // evidence rules each out; one that names none is recorded a best
+    // candidate, and the reply says so (nothing is refused).
+    let recorded = strength;
+    const downgraded: string[] = [];
+    // "A best candidate" concerns only an answer that claims established
+    // (claimsEstablished); on a disposition that only limits the run it
+    // holds nothing, and the replies say so.
+    const claim = claimsEstablished(t.entry);
+    const resultNow = NB.answerResult(t.entry);
+    const holdsNothing = `#${t.entry.seq} is ${NB.resultWords(resultNow)}, a disposition held to its own bar, so a best candidate holds nothing on it ("best candidate" concerns only an answer that claims established)`;
+    if (questionAnswer) {
+      if (!strength) return { ok: false, reason: `#${t.entry.seq} answers ${t.entry.section}: its attest says how strongly you hold it, strength established or best_candidate, with answer_review {reproduced, read, parts: [{part, established, why}], inference, alternatives, other_family: {checked, text}}` };
+      if (!answerReview) return { ok: false, reason: `#${t.entry.seq} answers ${t.entry.section}: give answer_review {reproduced (what you re-derived yourself), read (what you only read), parts (each part the question asks, established or not, and why), inference (what connects the observations to the answer), alternatives (what the evidence still allows), other_family {checked, text} (whether another source family was checked, or why not)}` };
+      // A part a partial answer declares open names the entry that declares it: a limitation it cites, or a coverage record it rests on.
+      const declared = answerReview.parts.filter((p) => p.declared_open);
+      if (declared.length && resultNow !== "partial") {
+        return { ok: false, reason: `answer_review.parts[].declared_open is for a partial answer's part the answer itself declares open; #${t.entry.seq} is ${NB.resultWords(resultNow)}${claim ? ": it claims every part established, and a part you do not hold established caps the review" : ""}` };
+      }
+      if (declared.length) {
+        const open = declaredOpenBy(t.entry, new Map(entries.map((e) => [e.seq, e])));
+        const bad = declared.find((p) => !open.has(p.declared_open as string));
+        if (bad) return { ok: false, reason: `answer_review.parts[].declared_open names ${bad.declared_open} for "${bad.part}": #${t.entry.seq} declares a part open by a limitation it cites or a coverage record it rests on, and it cites ${open.size ? [...open].join(", ") : "none"}. Name the one that declares that part open, or hold the part not established without it (a part the answer claims established that you do not hold so caps the review)` };
+      }
+      if (strength === "established" && caps.length) {
+        return {
+          ok: false,
+          reason:
+            resultNow === "partial"
+              ? `#${t.entry.seq} is partial: its review attests the answer's own claims, the parts it holds established and the parts it declares open, and ${caps.join("; ")}. A part the answer declares open names, in declared_open, the limitation or coverage record by which it does; a part it claims established that you do not hold so is a dispute (dispute #${t.entry.seq}, why, refs) or a best_candidate attest. ${holdsNothing}`
+              : `#${t.entry.seq} can be attested best_candidate only: ${caps.join("; ")}. Attest it best_candidate (${claim ? "it does not satisfy the finish line" : `on it that holds nothing: ${holdsNothing}`}), or take the route and record what it shows`,
+        };
+      }
+      if (strength === "established" && !reviewNamesAlternative(answerReview)) {
+        recorded = "best_candidate";
+        downgraded.push(NO_ALTERNATIVE_CAP);
+      }
+    } else if (answerReview) {
+      return { ok: false, reason: `answer_review is for an answer to a question; #${t.entry.seq} is ${isNegativeEntry(t.entry) ? "a negative: its attest is a review {detection, reproduced, other_route}" : t.entry.kind === "answer" ? `the ${t.entry.section} (say in how what you re-derived)` : `a ${t.entry.kind}: say in how what you re-derived`}` };
+    } else if (strength && !(t.entry.kind === "answer" && t.entry.section?.startsWith("question:"))) {
+      return { ok: false, reason: `strength is for an answer to a question; #${t.entry.seq} is ${t.entry.kind === "answer" ? `the ${t.entry.section}` : `a ${t.entry.kind}`}` };
+    }
+    // A negative is attested with its review: what was challenged, reproduced or tried, or why not.
+    const negative = isNegativeEntry(t.entry);
+    if (negative && !review) {
+      return {
+        ok: false,
+        reason: `#${t.entry.seq} is a ${t.entry.kind === "coverage" ? "coverage record" : `negative answer (${NB.resultWords(NB.answerResult(t.entry))})`}: its attest is a review. Give review {detection: {done, text}, reproduced: {done, text}, other_route: {done, text}}: whether you challenged the detection assumptions, reproduced a decisive check, tried a materially different route, each with what you did or why not`,
+      };
+    }
+    if (!negative && review) return { ok: false, reason: `review is for a negative (a coverage record, or an answer bounded_negative or not_determinable); #${t.entry.seq} is a ${t.entry.kind}: say in how what you re-derived` };
+    if (negative && t.entry.kind === "answer") {
+      // Whoever recorded a coverage record the answer rests on is not its reviewer either.
+      const bySeq = new Map(entries.map((e) => [e.seq, e]));
+      const covAuthors = (t.entry.support ?? []).map((x) => bySeq.get(x.seq)).filter((e): e is LedgerEntry => e?.kind === "coverage").flatMap((e) => e.authors);
+      if (covAuthors.includes(ctx.agentId)) return { ok: false, reason: `you recorded the coverage record #${t.entry.seq} rests on: a review of a negative is another seat's` };
+    }
+    const mineAgainst = disputesInForce(entries, await readDisputes(ctx.sandboxRoot)).find((d) => d.target === target && d.by === ctx.agentId);
+    if (mineAgainst) {
+      return { ok: false, reason: mineAgainst.inherited_from !== undefined ? `you disputed #${mineAgainst.inherited_from}, which #${t.entry.seq} corrects, and the dispute stands on the correction until you answer it: withdraw it (dispute withdraw=true on #${t.entry.seq}, with why the correction answers it) before attesting` : `you dispute #${t.entry.seq}: withdraw the dispute (dispute withdraw=true, with why) before attesting it` };
     }
     const attested = await readAttestations(ctx.sandboxRoot);
-    const mine = attested.find((a) => attestationAct(a) === "attest" && a.target === target && a.by === ctx.agentId);
-    if (mine) return { ok: true, line: mine, appended: false, note: `you attested #${t.entry.seq} already` };
+    // One review of a negative (the c10 pilot's stampede): offered to one
+    // seat; another seat's review of a negative reviewed already, or
+    // offered to another now, is answered quietly with who has it and
+    // records nothing. A second, independent review says why it adds
+    // something (second_review_why).
+    if (negative && review && !secondWhy.value) {
+      const answers = t.entry.kind === "answer" ? [t.entry] : negativesResting(t.entry, entries);
+      const L = await import("./leads.ts");
+      const disputes = await readDisputes(ctx.sandboxRoot);
+      let deferral: import("./leads.ts").ReviewDeferral | null = null;
+      for (const a of answers) {
+        const nr = negativeReview(a, entries, attested, disputes);
+        const d = await L.negativeReviewDeferral(ctx.sandboxRoot, `E-${a.seq}`, ctx.agentId, nr.reviewed ? nr.by : []);
+        if (!d) {
+          deferral = null;
+          break;
+        }
+        deferral ??= d;
+      }
+      if (deferral) return { ok: true as const, line: null, appended: false as const, note: deferral.why, deferred: deferral };
+    }
+    // Once per seat, except a review that now holds established what this
+    // seat's earlier one held a best candidate only (a route taken since,
+    // the alternatives weighed): the later line is its review now.
+    const mine = attested.filter((a) => attestationAct(a) === "attest" && a.target === target && a.by === ctx.agentId);
+    const upgrade = questionAnswer && recorded === "established" && mine.length > 0 && !mine.some(attestEstablishes);
+    if (mine.length && !upgrade) return { ok: true, line: mine.at(-1)!, appended: false, note: `you attested #${t.entry.seq} already` };
     await held.assertOwned();
-    const line = await appendAttestation(ctx.sandboxRoot, attested, { v: 2, act: "attest", seq: t.entry.seq, target, by: ctx.agentId, at: new Date().toISOString(), how: how.value, ...(refs.length ? { refs } : {}) });
+    const line = await appendAttestation(ctx.sandboxRoot, attested, { v: 2, act: "attest", seq: t.entry.seq, target, by: ctx.agentId, at: new Date().toISOString(), how: how.value, ...(refs.length ? { refs } : {}), ...(review ? { review } : {}), ...(recorded ? { strength: recorded } : {}), ...(answerReview ? { answer_review: answerReview } : {}), ...(questionAnswer && (caps.length || downgraded.length) ? { capped: [...caps, ...downgraded] } : {}), ...(secondWhy.value ? { second_review_why: secondWhy.value } : {}) });
     await renderLedger(ctx.sandboxRoot);
-    return { ok: true, line, appended: true };
+    const note = review
+      ? `recorded as the review of a negative: ${NB.reviewWords(review)}`
+      : downgraded.length
+        ? `you attested it established, and it is recorded as a best candidate: ${downgraded.join("; ")}. An established review names at least one alternative explanation you considered and why the evidence rules it out; attest again with answer_review.alternatives [{explanation, why}] once you have weighed one. ${claim ? `Until then ${t.entry.section} is not established by it, and the finish line says so` : holdsNothing}`
+        : recorded === "best_candidate"
+          ? claim
+            ? `recorded as a best candidate${caps.length ? ` (${caps.join("; ")})` : ""}: ${t.entry.section} is not established by it, and the finish line says so; the way out is the route that would settle it, or the operator's acceptance of its limits`
+            : `recorded as a best candidate${caps.length ? ` (${caps.join("; ")})` : ""}: ${holdsNothing}`
+          : undefined;
+    if (review) for (const a of t.entry.kind === "answer" ? [t.entry] : negativesResting(t.entry, entries)) reviewed.push(`E-${a.seq}`);
+    return { ok: true, line, appended: true, ...(note ? { note } : {}) };
+  });
+  // Outside the ledger's lock (the registers' is taken after it, never inside): the review's offer, when it was this seat's, is taken up.
+  if (result.ok && result.appended && reviewed.length) {
+    const L = await import("./leads.ts");
+    for (const key of reviewed) await L.reviewOfferTaken(ctx.sandboxRoot, key, ctx.agentId).catch(() => undefined);
+  }
+  return result;
+}
+
+/**
+ * Why a coverage record no longer says what its search found: an entry
+ * among its results that is not in the ledger, is not the entry it bound
+ * (another hash), was superseded, or is disputed. A record from before
+ * results were bound is held to its results as they stand. Empty when it
+ * stands.
+ */
+export function coverageProblems(c: LedgerEntry, entries: LedgerEntry[], disputes: LedgerDispute[] = []): string[] {
+  return coverageStaleness(c, entries, disputes).map((x) =>
+    x.code === "missing"
+      ? `its result E-${x.result} is not in the ledger`
+      : x.code === "rebound"
+        ? `its result E-${x.result} is not the entry it bound (the hash differs)`
+        : x.code === "superseded"
+          ? `its result E-${x.result} is superseded by #${x.by_seq}`
+          : `its result E-${x.result} is disputed by ${x.disputes!.map(disputeWords).join("; ")}`,
+  );
+}
+
+/**
+ * coverageProblems as data: each result of the record that no longer stands,
+ * by code (missing, rebound: another entry than the one bound, superseded,
+ * disputed), with the entry that superseded it or the disputes against it.
+ */
+export function coverageStaleness(c: LedgerEntry, entries: LedgerEntry[], disputes: LedgerDispute[] = []): Array<{ result: number; code: "missing" | "rebound" | "superseded" | "disputed"; by_seq?: number; disputes?: DisputeInForce[] }> {
+  if (c.kind !== "coverage") return [];
+  const bySeq = new Map(entries.map((e) => [e.seq, e]));
+  const replaced = supersededBy(entries);
+  // A dispute stays in force on the correction of the entry it named (B18, disputesInForce).
+  const against = disputesInForce(entries, disputes);
+  const out: Array<{ result: number; code: "missing" | "rebound" | "superseded" | "disputed"; by_seq?: number; disputes?: DisputeInForce[] }> = [];
+  for (const r of c.result_refs ?? []) {
+    const m = /^E-(\d+)$/.exec(r);
+    if (!m) continue;
+    const seq = Number(m[1]);
+    const e = bySeq.get(seq);
+    if (!e) {
+      out.push({ result: seq, code: "missing" });
+      continue;
+    }
+    const hash = e.hash ?? ledgerHash(e, "genesis");
+    const bound = c.result_bound?.find((x) => x.seq === seq);
+    if (bound && bound.hash !== hash) out.push({ result: seq, code: "rebound" });
+    if (replaced.has(seq)) out.push({ result: seq, code: "superseded", by_seq: standingSeq(seq, replaced) });
+    const d = against.filter((x) => x.target === hash);
+    if (d.length) out.push({ result: seq, code: "disputed", disputes: d });
+  }
+  return out;
+}
+
+/**
+ * Whether a negative stands reviewed: an attest with its review, by a seat
+ * that recorded neither the answer nor a coverage record it rests on, on the
+ * answer or on one of those records. Who reviewed, and what they said. A
+ * review is of what stood when it was made: one on a coverage record whose
+ * results no longer stand counts for nothing, and neither does one on the
+ * answer while any coverage record it rests on is so.
+ */
+export function negativeReview(
+  answer: LedgerEntry,
+  entries: LedgerEntry[],
+  attestations: LedgerAttestation[],
+  disputes: LedgerDispute[] = [],
+): { reviewed: boolean; by: string[]; reviews: Array<{ by: string; seq: number; review: NB.NegativeReview }>; stale: Array<{ seq: number; problems: string[] }> } {
+  const t = negativeReviewTargets(answer, entries, disputes);
+  const targets = new Map<string, number>(t.targets.map((e): [string, number] => [e.hash ?? ledgerHash(e, "genesis"), e.seq]));
+  // A review made before evidence was added counts for nothing on an answer
+  // recorded after that evidence: it reviewed an examination that had not
+  // seen it (the Fable review of batches 1-3).
+  const added = evidenceAdditions(entries).filter((x) => x.seq < answer.seq).map((x) => Date.parse(x.at)).filter((n) => Number.isFinite(n));
+  const since = added.length ? Math.max(...added) : null;
+  const reviews = attestations.filter((a) => attestationAct(a) === "attest" && a.review && a.target && targets.has(a.target) && !t.authors.has(a.by) && (since === null || Date.parse(a.at) >= since)).map((a) => ({ by: a.by, seq: targets.get(a.target!)!, review: a.review! }));
+  return { reviewed: reviews.length > 0, by: [...new Set(reviews.map((r) => r.by))], reviews, stale: t.stale };
+}
+
+/**
+ * Where a negative's review counts, as the finish gate reads it
+ * (negativeReview): the answer, unless a coverage record it rests on no
+ * longer stands, and each standing coverage record it rests on whose
+ * results still stand; who may not review it (whoever recorded the answer
+ * or one of those records); and the records that no longer stand. A
+ * review's offer names these, so the review it asks for is the one the
+ * gate counts (the c10 pilot's reviewers went to a coverage record, or to
+ * an answer already corrected). An answer resting only on records that no
+ * longer stand has no target: its coverage is recorded again first.
+ */
+export function negativeReviewTargets(answer: LedgerEntry, entries: LedgerEntry[], disputes: LedgerDispute[] = []): { targets: LedgerEntry[]; authors: Set<string>; stale: Array<{ seq: number; problems: string[] }> } {
+  const bySeq = new Map(entries.map((e) => [e.seq, e]));
+  const replaced = supersededBy(entries);
+  const cov = answer.kind === "coverage" ? [answer] : (answer.support ?? []).map((x) => bySeq.get(x.seq)).filter((e): e is LedgerEntry => e?.kind === "coverage" && !replaced.has(e.seq));
+  const stale = cov.map((c) => ({ seq: c.seq, problems: coverageProblems(c, entries, disputes) })).filter((x) => x.problems.length);
+  const standingCov = cov.filter((c) => !stale.some((x) => x.seq === c.seq));
+  const authors = new Set([answer.by, ...answer.authors, ...cov.flatMap((c) => [c.by, ...c.authors])]);
+  const targets = [...(stale.length && answer.kind !== "coverage" ? [] : [answer]), ...standingCov.filter((c) => c.seq !== answer.seq)];
+  return { targets, authors, stale };
+}
+
+/**
+ * The standing answers a coverage record's review is the review of: each
+ * that rests on it and is a negative by the finish gate's own test
+ * (negativeByResult: a bounded negative, not determinable, or a premise
+ * rejected on a search alone).
+ */
+export function negativesResting(cov: LedgerEntry, entries: LedgerEntry[]): LedgerEntry[] {
+  const bySeq = new Map(entries.map((e) => [e.seq, e]));
+  const replaced = supersededBy(entries);
+  return entries.filter((e) => {
+    if (e.kind !== "answer" || replaced.has(e.seq) || !e.section?.startsWith("question:") || !(e.support ?? []).some((x) => x.seq === cov.seq)) return false;
+    return negativeByResult(NB.answerResult(e), citedForQuestion(e, bySeq, replaced, sectionKey(e.section.slice("question:".length))));
   });
 }
 
@@ -8702,6 +10390,10 @@ export async function disputeEntry(ctx: SwarmContext, input: LedgerActInput): Pr
   if (refs.length) {
     const checked = await checkRefs(ctx.sandboxRoot, refs);
     if (!checked.ok) return checked;
+    if (!input.withdraw) {
+      const use = await materialUseRefusal(ctx.sandboxRoot, refs);
+      if (use) return { ok: false, reason: use };
+    }
   }
   return withTableLock(ctx.sandboxRoot, async (held) => {
     const entries = await readLedger(ctx.sandboxRoot);
@@ -8709,10 +10401,14 @@ export async function disputeEntry(ctx: SwarmContext, input: LedgerActInput): Pr
     if (!t.ok) return t;
     const target = t.entry.hash ?? ledgerHash(t.entry, "genesis");
     const all = await readDisputes(ctx.sandboxRoot);
-    const standing = standingDisputes(all).find((d) => d.target === target && d.by === ctx.agentId);
+    // A dispute stands on the correction of the entry it named until the
+    // disputer answers it (B18): withdrawn by naming either entry.
+    const standing = disputesInForce(entries, all).find((d) => d.target === target && d.by === ctx.agentId);
     if (input.withdraw && !standing) return { ok: false, reason: `you have no standing dispute of #${t.entry.seq} to withdraw` };
-    if (!input.withdraw && standing) return { ok: true, line: standing, appended: false, note: `you dispute #${t.entry.seq} already: ${standing.why}` };
-    const d: LedgerDispute = { v: 1, act: input.withdraw ? "withdraw" : "dispute", seq: t.entry.seq, target, by: ctx.agentId, at: new Date().toISOString(), why: why.value, ...(refs.length ? { refs } : {}) };
+    if (!input.withdraw && standing) return { ok: true, line: standing, appended: false, note: standing.inherited_from !== undefined ? `you disputed #${standing.inherited_from}, which #${t.entry.seq} corrects, and that dispute stands on it until you withdraw it: ${standing.why}` : `you dispute #${t.entry.seq} already: ${standing.why}` };
+    // A withdrawal names the dispute it ends: the entry that dispute was raised on.
+    const named = standing?.inherited_from !== undefined ? entries.find((e) => e.seq === standing.inherited_from) : undefined;
+    const d: LedgerDispute = { v: 1, act: input.withdraw ? "withdraw" : "dispute", seq: named ? named.seq : t.entry.seq, target: named ? (named.hash ?? ledgerHash(named, "genesis")) : target, by: ctx.agentId, at: new Date().toISOString(), why: why.value, ...(refs.length ? { refs } : {}) };
     const prev = all.at(-1)?.hash ?? "genesis";
     const line: LedgerDispute = { ...d, prev, hash: disputeHash(d, prev) };
     await held.assertOwned();
@@ -8726,7 +10422,7 @@ export async function disputeEntry(ctx: SwarmContext, input: LedgerActInput): Pr
 // --- answers --------------------------------------------------------------------------------
 
 /** The fields an answer never takes: it rests on entries, not objects, and states no event. */
-const NOT_ANSWER_FIELDS = ["ts", "refs", "answers", "rel", "clock", "precision", "basis", "status", "reason", "completion", "attribution", "locators", "indicates", "alternatives", "alternatives_none_why", "significance"] as const;
+const NOT_ANSWER_FIELDS = ["ts", "refs", "answers", "rel", "clock", "precision", "basis", "status", "reason", "completion", "attribution", "locators", "indicates", "alternatives", "alternatives_none_why", "significance", ...COVERAGE_ONLY_FIELDS] as const;
 
 /** Each ref of an entry whose job did not succeed and that the entry does not qualify itself. */
 async function unqualifiedFailedRefs(sandboxRoot: string, e: LedgerEntry): Promise<string[]> {
@@ -8742,18 +10438,90 @@ async function unqualifiedFailedRefs(sandboxRoot: string, e: LedgerEntry): Promi
 }
 
 /**
+ * What an answer concludes and rests on, as a summary's symbolic citation
+ * binds it (A4): its result, the question revision it answers, and the
+ * hashes of its support, its contrary evidence and its limitations. Its
+ * words are not in it: a correction that only rewords keeps it.
+ */
+export function answerFingerprint(a: LedgerEntry): string {
+  const hashes = (edges: LedgerEdge[] | undefined) => (edges ?? []).map((x) => x.hash).sort();
+  const c = conclusionFields(a);
+  // The keys in this order, always: a fingerprint recorded by an earlier harness is compared with this one.
+  return sha256Hex(JSON.stringify({ result: c.result, question_rev: c.question_rev, support: hashes(a.support), contrary: hashes(a.contrary), limitations: hashes(a.limitations), inconclusive: c.inconclusive, asserts_absence: c.asserts_absence }));
+}
+
+/**
+ * The conclusion fields of an entry that a rewording or a citation refresh
+ * leaves alone: its result, the question revision it answers, whether it
+ * is inconclusive and whether it asserts an absence (answerFingerprint
+ * holds a summary's symbolic citation to these and to what the answer rests
+ * on). Its words are not among them.
+ */
+export function conclusionFields(e: LedgerEntry): { result: string | null; question_rev: number; inconclusive: boolean; asserts_absence: boolean } {
+  return { result: NB.answerResult(e) ?? null, question_rev: e.question_rev ?? 1, inconclusive: e.inconclusive === true, asserts_absence: e.asserts_absence === true };
+}
+
+/**
+ * The fields a correction of an entry other than an answer may change and
+ * still conclude what it concluded: what it cites and how a reader checks
+ * it (refs, evidence, source, locators, qualifies, the hub's method), why
+ * it was corrected, and the record's own bookkeeping. Anything else (the
+ * value, exactly; the time and its clock and precision; what a finding
+ * indicates and how sure it is; an attribution; a hypothesis's status; a
+ * search's completion; whether it is sensitive) is its conclusion.
+ */
+export const REFRESH_FIELDS: ReadonlySet<string> = new Set(["refs", "evidence", "source", "reasoning", "because", "locators", "method", "qualifies", "seq", "at", "by", "authors", "supersedes", "prev", "hash", "ts_raw", "v"]);
+
+/**
+ * Whether a correction leaves what an entry concludes as it was, so a
+ * closure resting on it still holds (leads.ts reopenOnLedger re-points it
+ * and says so). An answer: the same conclusion fields (conclusionFields)
+ * and the same value up to case, spacing and closing punctuation. Any other
+ * kind: every field outside REFRESH_FIELDS as it was, the value exactly (a
+ * case can be the conclusion: an account name). A change of the kind is a
+ * change of conclusion. Everything else is for the closer to confirm or
+ * reopen (the Fable review of batches 1-3: a finding's indicates, an
+ * event's time, a hypothesis's status re-pointed unasked).
+ */
+export function sameConclusion(a: LedgerEntry, b: LedgerEntry): boolean {
+  if (a.kind !== b.kind) return false;
+  if (a.kind === "answer") {
+    const words = (v: unknown) => String(v ?? "").normalize("NFKC").toLowerCase().replace(/\s+/g, " ").trim().replace(/[.;:!]+$/, "").trim();
+    return JSON.stringify(conclusionFields(a)) === JSON.stringify(conclusionFields(b)) && words(a.value) === words(b.value);
+  }
+  const ra = a as unknown as Record<string, unknown>;
+  const rb = b as unknown as Record<string, unknown>;
+  // Absent, empty and false say the same thing.
+  const norm = (v: unknown) => JSON.stringify(v === undefined || v === null || v === "" || v === false || (Array.isArray(v) && !v.length) ? null : canonicalValue(v));
+  for (const k of new Set([...Object.keys(ra), ...Object.keys(rb)])) {
+    if (REFRESH_FIELDS.has(k)) continue;
+    if (norm(ra[k]) !== norm(rb[k])) return false;
+  }
+  return true;
+}
+
+/** The questions a summary or a narrative names symbolically: Q-<n>, and question:<id>. */
+export function symbolicQuestions(text: string): string[] {
+  const out: string[] = [];
+  for (const m of text.matchAll(/\bQ-([1-9]\d{0,5})\b/g)) if (!out.includes(`Q-${Number(m[1])}`)) out.push(`Q-${Number(m[1])}`);
+  for (const m of text.matchAll(/\bquestion:([A-Za-z0-9._-]{1,16})\b/g)) if (!out.includes(`question:${m[1]}`)) out.push(`question:${m[1]}`);
+  return out;
+}
+
+/**
  * Why each standing answer no longer stands on its own support, transitively:
  * an entry it cites was superseded and its correction is not cited with it,
  * or was disputed (or rests on a failed job) and the answer does not qualify
  * it, or is an answer that itself no longer stands; or the cited hash is not
- * the entry's. `failed` names, by seq, the entries resting on a failed job's
+ * the entry's. Its contrary evidence is held to the same: corrected or
+ * disputed since it was weighed, the answer is weighed again. `failed` names, by seq, the entries resting on a failed job's
  * output that they do not qualify themselves.
  */
 export function answerProblems(entries: LedgerEntry[], disputes: LedgerDispute[], failed: Map<number, string[]> = new Map()): Map<number, string[]> {
   const bySeq = new Map(entries.map((e) => [e.seq, e]));
   const replaced = supersededBy(entries);
-  const disputed = new Map<string, LedgerDispute[]>();
-  for (const d of standingDisputes(disputes)) disputed.set(d.target, [...(disputed.get(d.target) ?? []), d]);
+  const disputed = new Map<string, DisputeInForce[]>();
+  for (const d of disputesInForce(entries, disputes)) disputed.set(d.target, [...(disputed.get(d.target) ?? []), d]);
   const memo = new Map<number, string[]>();
   const visiting = new Set<number>();
   const problemsOf = (a: LedgerEntry): string[] => {
@@ -8763,7 +10531,22 @@ export function answerProblems(entries: LedgerEntry[], disputes: LedgerDispute[]
     visiting.add(a.seq);
     const out: string[] = [];
     const qualified = (seq: number) => (a.qualifies ?? []).some((q) => q.ref === `E-${seq}`);
-    const cited = new Set([...(a.support ?? []), ...(a.limitations ?? [])].map((x) => x.seq));
+    const cited = new Set([...(a.support ?? []), ...(a.contrary ?? []), ...(a.limitations ?? [])].map((x) => x.seq));
+    // A summary's symbolic citations (A4): each question's standing answer,
+    // held to the fingerprint it had when cited, never to its seq alone.
+    for (const r of a.question_refs ?? []) {
+      const now = entries.find((e) => e.kind === "answer" && e.section === r.section && !replaced.has(e.seq));
+      if (!now) {
+        out.push(`it cites ${r.q} (${r.section}), which has no standing answer now`);
+        continue;
+      }
+      if (answerFingerprint(now) !== r.fp) {
+        out.push(`it cites ${r.q} (${r.section}), whose answer changed its support, scope or contrary evidence since it was cited (E-${r.answer}${now.seq !== r.answer ? ` → E-${now.seq}` : ""})`);
+        continue;
+      }
+      const sub = problemsOf(now);
+      if (sub.length) out.push(`it cites ${r.q} (${r.section}), whose answer E-${now.seq} no longer stands on its own support`);
+    }
     for (const [edges, role] of [[a.support ?? [], "rests on"], [a.limitations ?? [], "is bounded by"]] as const) {
       for (const edge of edges) {
         const t = bySeq.get(edge.seq);
@@ -8781,7 +10564,7 @@ export function answerProblems(entries: LedgerEntry[], disputes: LedgerDispute[]
           continue;
         }
         const against = disputed.get(edge.hash);
-        if (against?.length && !qualified(t.seq)) out.push(`it ${role} E-${t.seq}, disputed by ${against.map((d) => `${d.by} (${d.why})`).join("; ")}`);
+        if (against?.length && !qualified(t.seq)) out.push(`it ${role} E-${t.seq}, disputed by ${against.map(disputeWords).join("; ")}`);
         const bad = failed.get(t.seq);
         if (bad?.length && !qualified(t.seq)) out.push(`it ${role} E-${t.seq}, which rests on the kept output of a job that did not succeed (${bad.join(", ")}) and says nothing of it`);
         if (t.kind === "answer") {
@@ -8789,6 +10572,29 @@ export function answerProblems(entries: LedgerEntry[], disputes: LedgerDispute[]
           if (sub.length) out.push(`it ${role} E-${t.seq}, an answer that no longer stands on its own support`);
         }
       }
+    }
+    // The contrary evidence it weighed (A4): the weighing was of the entry
+    // as it stood. Corrected since (and the correction not weighed with it)
+    // or disputed (and not qualified), what the answer concludes against it
+    // is to be weighed again; its fingerprint holds the hashes it cited, so
+    // only its current standing shows the change.
+    for (const edge of a.contrary ?? []) {
+      const t = bySeq.get(edge.seq);
+      if (!t) {
+        out.push(`it weighs E-${edge.seq} as contrary evidence, which is not in the ledger`);
+        continue;
+      }
+      if ((t.hash ?? ledgerHash(t, "genesis")) !== edge.hash) {
+        out.push(`it weighs E-${edge.seq} as contrary evidence by a hash that is not that entry's`);
+        continue;
+      }
+      if (replaced.has(t.seq)) {
+        const now = standingSeq(t.seq, replaced);
+        if (!cited.has(now)) out.push(`it weighs E-${t.seq} as contrary evidence, superseded by #${now}, and does not weigh the correction`);
+        continue;
+      }
+      const against = disputed.get(edge.hash);
+      if (against?.length && !qualified(t.seq)) out.push(`it weighs E-${t.seq} as contrary evidence, disputed by ${against.map(disputeWords).join("; ")}`);
     }
     visiting.delete(a.seq);
     memo.set(a.seq, out);
@@ -8801,6 +10607,558 @@ export function answerProblems(entries: LedgerEntry[], disputes: LedgerDispute[]
     if (p.length) result.set(e.seq, p);
   }
   return result;
+}
+
+/** The fields of an entry, of any version, that can hold what it says. */
+const ENTRY_TEXT_FIELDS = ["value", "evidence", "source", "indicates", "confidence_why", "reasoning", "would_change", "alternatives_open", "alternatives_none_why", "because", "time_range", "search_method", "settings", "coverage_actual", "skipped", "failures"] as const;
+
+/** One of a sensitive entry's words, with the entry it came from; `exact` when it is a value B9 matches as a whole phrase, never inside another word. */
+export type SensitiveToken = { token: string; seq: number; exact?: boolean };
+
+/**
+ * What a sensitive entry says, as the words redaction looks for: each text
+ * field whole (six characters or more, or four with a digit in it), and
+ * each identifier-like run inside one (eight characters or more with a
+ * digit, an @, a dot, a slash, a backslash or a colon in it: a key, a
+ * token, an address, a path, an account), longest first, each with the
+ * entry it came from. This is what a redacted package takes out and its
+ * leak scan looks for, broad on purpose; B9 reads the narrower
+ * b9SensitiveValues.
+ */
+export function sensitiveTokens(entries: LedgerEntry[]): SensitiveToken[] {
+  const out = new Map<string, number>();
+  const add = (t: string, seq: number) => {
+    if (!out.has(t)) out.set(t, seq);
+  };
+  for (const e of entries) {
+    if (!e.sensitive) continue;
+    const raw = e as unknown as Record<string, unknown>;
+    const texts: string[] = [];
+    for (const f of ENTRY_TEXT_FIELDS) if (typeof raw[f] === "string") texts.push(raw[f] as string);
+    if (e.attribution?.subject) texts.push(e.attribution.subject);
+    for (const l of e.locators ?? []) texts.push(l.at);
+    for (const a of (raw.alternatives as Array<{ explanation?: string; why?: string }> | undefined) ?? []) texts.push(a.explanation ?? "", a.why ?? "");
+    for (const q of (raw.qualifies as Array<{ why?: string }> | undefined) ?? []) texts.push(q.why ?? "");
+    // A sensitive coverage record's looked_for strings are what its sweep searched for: sensitive words too.
+    for (const t of e.looked_for ?? []) texts.push(t);
+    for (const w of texts) {
+      const whole = (w ?? "").trim();
+      if (whole.length >= 6 || (whole.length >= 4 && /\d/.test(whole))) add(whole, e.seq);
+      for (const t of whole.match(/[^\s"'`,;()<>[\]{}]{8,}/g) ?? []) if (/[\d@./\\:]/.test(t)) add(t.replace(/[.:]+$/, ""), e.seq);
+    }
+  }
+  return [...out].map(([token, seq]) => ({ token, seq })).sort((a, b) => b.token.length - a.token.length || a.token.localeCompare(b.token));
+}
+
+/**
+ * Whether a word taken out of a sensitive entry's value is a value on its own
+ * (B9): distinctive by its shape, never because it happens to stand in a
+ * sensitive sentence. Generic, with no dictionary: at least eight
+ * characters (a short technical word such as SHA-256 or python3 is not a
+ * value), and a digit in it, or a symbol (anything but a letter, a digit, a
+ * hyphen or an apostrophe: a path, an address, a key, `Qx7!pass`), or a
+ * capital inside it (`PurpleElephant`), or twelve letters or more that do
+ * not read as a word (under a fifth of them vowels, or five consonants in a
+ * row: a random string). Never the run's own ids (E-12, L-3, j000129, ev-0001, and their
+ * possessives), a number or a date, a time or a timestamp (a question asks
+ * about times), and never an ordinary word, whatever sentence it came from
+ * ("activity", "entries"). A short value is caught whole, as its entry's
+ * recorded value (b9SensitiveValues).
+ */
+export function distinctiveValue(word: string): boolean {
+  const w = String(word ?? "").replace(/^[(["'`<{]+/, "").replace(/[)\]"'`>},.;:!?]+$/, "").replace(/['’]s$/i, "");
+  const letters = w.replace(/[^\p{L}]/gu, "");
+  if (sensitiveFold(w).length < 8) return false;
+  // The run's own ids, alone, in a list (E-157/E-158) or as a bare reference (job:j000115).
+  const ID = "(?:[A-Z]{1,2}-\\d+|#\\d+|j\\d{6}|(?:ev|mat)-\\d{4,}|(?:job|import):[a-z0-9-]+)";
+  if (new RegExp(`^${ID}(?:[/,]${ID})*$`, "i").test(w)) return false;
+  // A time or a timestamp, however written: what a question asks about.
+  if (/^\d{4}-\d{2}-\d{2}(?:[T ][\d:.]+(?:Z|[+-]\d{2}:?\d{2})?)?$/i.test(w)) return false;
+  if (/^\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?$/i.test(w)) return false;
+  if (!letters) {
+    // A number, an amount, a date, a version: only a long run of digits (an account, a card, a phone) is a value.
+    return (w.match(/\d/g) ?? []).length >= 9;
+  }
+  if (/\d/.test(w)) return true;
+  // Plain words joined by a slash or a dash (and/or, added/visited, channel—and) are words.
+  const joined = /^[\p{L}'’\p{Pd}]+(?:\/[\p{L}'’\p{Pd}]+)*$/u.test(w);
+  if (!joined && /[^\p{L}\p{N}'’\p{Pd}]/u.test(w)) return true;
+  if (/\p{Ll}\p{Lu}/u.test(w)) return true;
+  if (letters.length >= 12) {
+    const vowels = (letters.match(/[aeiouy]/gi) ?? []).length / letters.length;
+    const run = Math.max(0, ...(letters.toLowerCase().match(/[^aeiouy]+/g) ?? []).map((x) => x.length));
+    return vowels < 0.2 || run >= 5;
+  }
+  return false;
+}
+
+/**
+ * The values B9 holds a name, a `doing` label and a question's words to,
+ * from every entry recorded sensitive: an entry marks sensitivity as a
+ * whole (`sensitive: true`), and its `value` is what it records, so that
+ * value is held whole, as a phrase matched word for word (a short value
+ * such as "Alice", a multi-word one such as "Secret Word", or the whole
+ * sentence), never as its words one by one; and from the fields that hold
+ * what it records (its value, and the subject an attribution names), the
+ * words that are values on their own (distinctiveValue: a key, a password,
+ * an address, a path, an account). Never from its evidence, its source,
+ * its method, what it indicates or any other note: those say how the value
+ * was found, and name tools and files an analyst's question names too (the
+ * c10 pilot refused "PowerShell" and "meeting.txt" so). The redaction
+ * scanner reads the broader sensitiveTokens.
+ */
+export function b9SensitiveValues(entries: LedgerEntry[]): SensitiveToken[] {
+  const out = new Map<string, SensitiveToken>();
+  for (const e of entries) {
+    if (!e.sensitive) continue;
+    const value = String(e.value ?? "").trim();
+    if (sensitiveFold(value).length >= 3 && !out.has(value)) out.set(value, { token: value, seq: e.seq, exact: true });
+    for (const text of [value, e.attribution?.subject ?? ""]) {
+      for (const raw of String(text ?? "").split(/\s+/)) {
+        const w = raw.replace(/^[(["'`<{]+/, "").replace(/[)\]"'`>},.;:!?]+$/, "").replace(/['’]s$/i, "");
+        if (w && !out.has(w) && distinctiveValue(w)) out.set(w, { token: w, seq: e.seq });
+      }
+    }
+  }
+  return [...out.values()].sort((a, b) => b.token.length - a.token.length || a.token.localeCompare(b.token));
+}
+
+/**
+ * A text as B9 compares it: Unicode folded to its compatibility form (NFKC:
+ * a full-width or composed letter is the letter), invisible format and
+ * default-ignorable characters removed, case folded, and the markup a name
+ * loses when it is tidied (backquote, asterisk, underscore, brackets)
+ * dropped and whitespace collapsed, so what is compared is what a board
+ * would show.
+ */
+export function sensitiveFold(text: string): string {
+  return String(text ?? "")
+    .normalize("NFKC")
+    .replace(/[\p{Cf}\p{Default_Ignorable_Code_Point}]/gu, "")
+    .toLowerCase()
+    .normalize("NFKC")
+    .replace(/[`*_\[\]]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
+ * Every value the run marks sensitive, whatever its origin (B9, docs/adr/0014):
+ * what each ledger entry recorded sensitive says, of any kind and by anyone
+ * (an agent's finding or answer, external material the operator supplied as
+ * sensitive), standing or superseded, since a value once marked sensitive
+ * stays so. There is no "answer value" concept and no exemption for words
+ * the goal itself uses: a value is sensitive wherever it first appeared.
+ */
+export async function runSensitiveTokens(sandboxRoot: string): Promise<SensitiveToken[]> {
+  const entries = await readLedger(sandboxRoot, { raw: true }).catch(() => [] as LedgerEntry[]);
+  return entries.some((e) => e.sensitive) ? b9SensitiveValues(entries) : [];
+}
+
+/**
+ * The first sensitive value a text holds, or null: both folded the same way
+ * (sensitiveFold). An entry's recorded value (`exact`) is found as a whole
+ * phrase, word for word, never inside another word; a distinctive value is
+ * found inside the text, or with the spaces a line break or a tidy put in
+ * it taken out.
+ */
+export function sensitiveHit(text: string, tokens: SensitiveToken[]): SensitiveToken | null {
+  if (!text || !tokens.length) return null;
+  const folded = sensitiveFold(text);
+  const squeezed = folded.replace(/ /g, "");
+  for (const t of tokens) {
+    const f = sensitiveFold(t.token);
+    if (!f) continue;
+    if (t.exact) {
+      if (new RegExp(`(?<![\\p{L}\\p{N}])${f.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\p{L}\\p{N}])`, "u").test(folded)) return t;
+      continue;
+    }
+    if (folded.includes(f) || (f.length >= 8 && squeezed.includes(f.replace(/ /g, "")))) return t;
+  }
+  return null;
+}
+
+/**
+ * The refusal for words that would carry a value the run marks sensitive
+ * (a name, a `doing` label, a question's text, its reasons and hints),
+ * naming the field and the entry, never the value; null when none does.
+ */
+export async function sensitiveRefusalOf(sandboxRoot: string, texts: Array<[string, string | undefined | null]>): Promise<string | null> {
+  const tokens = await runSensitiveTokens(sandboxRoot);
+  if (!tokens.length) return null;
+  for (const [name, text] of texts) {
+    const hit = text ? sensitiveHit(text, tokens) : null;
+    if (hit) return `${name} holds a value the run marks sensitive (E-${hit.seq}): say it without the value; the entry can be cited by its number`;
+  }
+  return null;
+}
+
+/** Who asked a question section, when a person did (the question register): their words for the refusal, or null. */
+async function personsQuestion(sandboxRoot: string, sectionId: string): Promise<string | null> {
+  const Q = await import("./questions.ts");
+  const snap = await Q.questionsSnapshot(sandboxRoot);
+  const q = snap.bySection.get(sectionId);
+  if (!q || !Q.HUMAN_ORIGINS.has(q.origin.kind)) return null;
+  return `${q.id}, asked by ${Q.originWords(q.origin)}`;
+}
+
+/** A question section's register id and current revision, or null when the register has no question for it. */
+async function registerRevision(sandboxRoot: string, sectionId: string): Promise<{ id: string; rev: number } | null> {
+  const Q = await import("./questions.ts");
+  const q = (await Q.questionsSnapshot(sandboxRoot)).bySection.get(sectionId);
+  return q ? { id: q.id, rev: q.rev } : null;
+}
+
+/**
+ * A register id (Q-9) as the section it answers: its number, or the goal's
+ * own id when the goal numbers it otherwise ("bonus"). Other ids pass.
+ */
+async function registerSection(sandboxRoot: string, raw: string): Promise<string> {
+  const m = /^(question:)?Q-([1-9]\d{0,5})$/i.exec(String(raw ?? "").trim());
+  if (!m) return raw;
+  const Q = await import("./questions.ts");
+  const q = (await Q.questionsSnapshot(sandboxRoot)).state.questions.get(`Q-${Number(m[2])}`);
+  return q ? `${m[1] ?? ""}${q.section}` : raw;
+}
+
+/**
+ * What the negative bar needs to know of a question section: whether it is
+ * material (the goal's always are; a register question says), whether it
+ * asks whether something exists (the goal's --existence, or the register's
+ * expects), whether it asks for a complete set (the register's completeness:
+ * the asker's, or its words, "every", "all", "each", "complete list"), its
+ * route plan (every route the leads under it planned), and the jobs run under
+ * those leads. Read from the registers.
+ */
+export async function questionBar(sandboxRoot: string, sectionId: string): Promise<{ material: boolean; existence: boolean; completeness: boolean; routes: NB.Route[]; jobs: string[]; question: string | null }> {
+  const L = await import("./leads.ts");
+  const snap = await L.leadsSnapshot(sandboxRoot);
+  const id = sectionKey(sectionId);
+  const q = snap.questions?.bySection.get(id) ?? null;
+  const goal = snap.goal.questions.map(sectionKey).includes(id);
+  const material = goal || !q ? true : q.materiality === "material";
+  const existence = snap.goal.existence.map(sectionKey).includes(id) || q?.expects === "existence";
+  const routes: NB.Route[] = [];
+  const jobs: string[] = [];
+  for (const l of snap.state.leads.values()) {
+    if (!l.answers.some((a) => sectionKey(a) === id)) continue;
+    for (const r of l.routes ?? []) if (!routes.some((x) => x.source === r.source && x.method === r.method)) routes.push(r);
+    for (const j of l.jobs) if (!jobs.includes(j)) jobs.push(j);
+  }
+  return { material, existence, completeness: q?.completeness === true, routes, jobs, question: q?.id ?? null };
+}
+
+/**
+ * Record a coverage record (recordEntry with kind=coverage): what a negative,
+ * or a "not determinable", was searched over. Every field is required, each
+ * may say "none" with why; the hub adds the inventory revision, whether the
+ * jobs behind it were given every object it names (coverage complete or
+ * partial, with each unit and how), and the planned routes of its questions
+ * that nothing examined. A record is about questions: it names them in
+ * answers, and an answer cites it.
+ */
+async function recordCoverage(ctx: SwarmContext, input: LedgerInput): Promise<LedgerResult> {
+  const raw = input as Record<string, unknown>;
+  const notHere = [...ANSWER_ONLY_FIELDS.filter((f) => f !== "alternatives_open"), "indicates", "alternatives_none_why", "significance", "status", "reason", "completion", "ts", "clock", "precision", "basis", "attribution", "locators"].find((f) => given(raw[f]) && !(f === "alternatives" && typeof raw[f] === "string"));
+  if (notHere) return { ok: false, reason: `${notHere} is not a coverage record's: it says what a search covered, and the entries it rests on say what was found` };
+  const proposition = String(input.proposition ?? "").trim();
+  const said = String(input.value ?? "").trim();
+  if (proposition && said && proposition !== said) return { ok: false, reason: "value and proposition are the same field on a coverage record (the proposition searched): give one" };
+  const value = proposition || said;
+  if (!value) return { ok: false, reason: "proposition (or value) is required: the proposition the search tested, in one sentence (\"the account signed in from outside the office network\")" };
+  if (value.length > LEDGER_VALUE_MAX_CHARS) return { ok: false, reason: `the proposition is over ${LEDGER_VALUE_MAX_CHARS} characters` };
+  const text = (name: string, v: unknown, required = true): { ok: true; value: string } | { ok: false; reason: string } => {
+    const t = boundedText(name, v, NB.COVERAGE_TEXT_MAX);
+    if (!t.ok) return t;
+    if (required && !t.value) return { ok: false, reason: `${name} is required on a coverage record${name === "skipped" || name === "failures" ? ' ("none" when nothing was, with how that is known)' : ""}` };
+    return t;
+  };
+  const timeRange = text("time_range", input.time_range);
+  if (!timeRange.ok) return timeRange;
+  const method = text("search_method", input.search_method);
+  if (!method.ok) return method;
+  const settings = text("settings", input.settings);
+  if (!settings.ok) return settings;
+  const actual = text("coverage_actual", input.coverage_actual);
+  if (!actual.ok) return actual;
+  const skipped = text("skipped", input.skipped);
+  if (!skipped.ok) return skipped;
+  const failures = text("failures", input.failures);
+  if (!failures.ok) return failures;
+  const alternatives = text("alternatives", typeof raw.alternatives === "string" ? raw.alternatives : input.alternatives_open);
+  if (!alternatives.ok) return { ok: false, reason: alternatives.reason.replace("alternatives is required", "alternatives is required: the explanations or routes still open, or none and why") };
+  const d = (input.detection_opportunity ?? {}) as { trace_expected?: unknown; why?: unknown };
+  const expected = String(d.trace_expected ?? "").trim().toLowerCase();
+  if (!(NB.TRACE_EXPECTED as readonly string[]).includes(expected)) return { ok: false, reason: "detection_opportunity is {trace_expected: yes | no | unknown, why}: would the event have left a trace in these sources, given what was collected and what they keep, and why" };
+  const dWhy = text("detection_opportunity.why", d.why);
+  if (!dWhy.ok) return dWhy;
+  // The areas the search reached, when it names them: a completeness claim
+  // ("every file", "all connections") rests on a record that does.
+  let areas: NB.CoverageAreas | undefined;
+  if (given(raw.areas)) {
+    const a = NB.checkAreas(raw.areas);
+    if (!a.ok) return a;
+    areas = a.areas;
+    if (Object.values(areas).includes("skipped") && /^none\b/i.test(skipped.value)) return { ok: false, reason: `areas says ${NB.COVERAGE_AREAS.filter((k) => areas![k] === "skipped").join(", ")} skipped, and skipped says none: say in skipped what was not searched and why` };
+  }
+  // The ask for a source the evidence does not hold, or why none was opened.
+  const askRaw = String(input.acquisition_ask ?? "").trim();
+  const noAsk = text("acquisition_none_why", input.acquisition_none_why, false);
+  if (!noAsk.ok) return noAsk;
+  if (askRaw && noAsk.value) return { ok: false, reason: "acquisition_ask names the ask opened, acquisition_none_why says why none was: give one" };
+  let acquisitionAsk: string | undefined;
+  if (askRaw) {
+    const m = /^R-?([1-9]\d{0,6})$/i.exec(askRaw);
+    if (!m) return { ok: false, reason: `acquisition_ask names an acquisition request, R-<n> (got ${JSON.stringify(askRaw)}): open one with lead_close needs_operator and ask {kind: acquisition, …}` };
+    acquisitionAsk = `R-${Number(m[1])}`;
+    const R = await import("./requests.ts");
+    const req = (await R.requestsSnapshot(ctx.sandboxRoot).catch(() => null))?.requests.get(acquisitionAsk) ?? null;
+    if (!req) return { ok: false, reason: `acquisition_ask ${acquisitionAsk} is not a request of this run: open it with lead_close needs_operator and ask {kind: acquisition, source, where, expected_value, urgency}` };
+    if (req.kind !== "acquisition") return { ok: false, reason: `acquisition_ask ${acquisitionAsk} is a ${req.kind} request, not an acquisition` };
+  }
+  // What a hit would contain, were the answer in the evidence: the hub
+  // sweeps every output the run holds for it (store-sweep.ts). Or why no
+  // literal form exists.
+  const SW = await import("./store-sweep.ts");
+  const lookedRaw = raw.looked_for;
+  const lookedList = (Array.isArray(lookedRaw) ? lookedRaw : given(lookedRaw) ? [lookedRaw] : []).map((t) => String(t ?? "").trim());
+  const lookedNone = text("looked_for_none_why", input.looked_for_none_why, false);
+  if (!lookedNone.ok) return lookedNone;
+  if (lookedList.length && lookedNone.value) return { ok: false, reason: "looked_for names the strings a hit would contain, looked_for_none_why says why there are none: give one" };
+  if (!lookedList.length && !lookedNone.value) {
+    return { ok: false, reason: `looked_for is required on a coverage record: the literal strings a hit would contain if the answer were in the evidence (names, identifiers, addresses, keywords), at least one, each ${SW.SWEEP_TERM_MIN} to ${SW.SWEEP_TERM_MAX} characters; the hub searches every output the run already holds for them (job outputs, imports, tool-output/), not only the objects named here. When no literal form exists, say why in looked_for_none_why` };
+  }
+  const lookedFor: string[] = [];
+  for (const t of lookedList) {
+    if (t.length < SW.SWEEP_TERM_MIN) return { ok: false, reason: `looked_for ${JSON.stringify(t)} is shorter than ${SW.SWEEP_TERM_MIN} characters: a string that short matches everything; name what a hit would contain` };
+    if (t.length > SW.SWEEP_TERM_MAX) return { ok: false, reason: `a looked_for string is over ${SW.SWEEP_TERM_MAX} characters: name the distinctive part a hit would contain; nothing is cut, so a longer one is refused` };
+    if (!lookedFor.some((x) => x.toLowerCase() === t.toLowerCase())) lookedFor.push(t);
+  }
+  if (lookedFor.length > SW.SWEEP_MAX_TERMS) return { ok: false, reason: `looked_for names more than ${SW.SWEEP_MAX_TERMS} strings: keep the ones a hit would contain` };
+  const source = boundedText("source", input.source, LEDGER_SOURCE_MAX_CHARS);
+  if (!source.ok) return source;
+  const evidence = boundedText("evidence", input.evidence, LEDGER_EVIDENCE_MAX_CHARS);
+  if (!evidence.ok) return evidence;
+  const answers = listOf(input.answers);
+  if (!answers.length) return { ok: false, reason: 'answers is required on a coverage record: the questions its search was for ("3", "Q-19")' };
+  if (answers.length > LEDGER_MAX_ANSWERS) return { ok: false, reason: `answers names more than ${LEDGER_MAX_ANSWERS} sections` };
+  const badAnswer = answers.find((a) => !LEDGER_ANSWER_ID.test(a));
+  if (badAnswer) return { ok: false, reason: `answers takes the questions' section ids (got ${JSON.stringify(badAnswer)})` };
+  const objects = [...new Set((Array.isArray(input.refs) ? input.refs.map(String) : String(input.refs ?? "").split(/[\s,]+/)).map((r) => r.trim()).filter(Boolean))];
+  if (!objects.length) return { ok: false, reason: "refs is required on a coverage record: the objects the search was over (input:<path>, member:<gen>#<n>, job:<id>/<path>, …); the hub holds the jobs behind it to them" };
+  if (objects.length > LEDGER_MAX_REFS) return { ok: false, reason: `refs names more than ${LEDGER_MAX_REFS} objects: name the directory or the container that holds them` };
+  // Each object resolves, or is a directory of the run's objects (the evidence
+  // directory, a job's whole output, a generation) as the job scopes take it.
+  for (const obj of objects) {
+    const checked = await checkRefs(ctx.sandboxRoot, [obj]);
+    if (checked.ok) continue;
+    const dir = await NB.coverageDirectory(ctx.sandboxRoot, obj);
+    if (!dir.ok) return checked;
+  }
+  const results = [...new Set((Array.isArray(input.result_refs) ? input.result_refs.map(String) : String(input.result_refs ?? "").split(/[\s,]+/)).map((r) => r.trim()).filter(Boolean))].map((r) => (/^#\d+$/.test(r) ? `E-${r.slice(1)}` : /^e-\d+$/i.test(r) ? r.toUpperCase() : r));
+  if (!results.length) return { ok: false, reason: "result_refs is required: what the search produced, the entries (E-<seq>: an absence, a limitation, a finding) and the job outputs (job:<id>[/<path>])" };
+  if (results.length > LEDGER_MAX_CITATIONS) return { ok: false, reason: `result_refs names more than ${LEDGER_MAX_CITATIONS}` };
+  const jobRefs = results.filter((r) => !/^E-\d+$/.test(r));
+  const badResult = jobRefs.find((r) => !/^(job|import|member|sha256|input):/.test(r));
+  if (badResult) return { ok: false, reason: `result_refs names entries as E-<seq> and objects as job:<id>[/<path>] (got ${JSON.stringify(badResult)})` };
+  if (jobRefs.length) {
+    const c = await checkRefs(ctx.sandboxRoot, jobRefs);
+    if (!c.ok) return { ok: false, reason: `result_refs: ${c.reason}` };
+  }
+  const inventory = await NB.inventoryRevision(ctx.sandboxRoot);
+  const givenRev = String(input.inventory_rev ?? "").trim();
+  if (givenRev && givenRev !== inventory) return { ok: false, reason: `inventory_rev ${givenRev} is not the run's inventory now (${inventory}): the evidence changed since the search; leave it out, and the hub writes the one the record is made against` };
+  let supersedes: number | undefined;
+  if (input.supersedes !== undefined && input.supersedes !== null && String(input.supersedes).trim() !== "") {
+    const n = Number(String(input.supersedes).trim().replace(/^#/, ""));
+    if (!Number.isInteger(n) || n < 1) return { ok: false, reason: `supersedes names an entry by its seq, a whole number (got ${JSON.stringify(input.supersedes)})` };
+    supersedes = n;
+  }
+  const because = boundedText("because", input.because, LEDGER_BECAUSE_MAX_CHARS);
+  if (!because.ok) return because;
+  if (because.value && supersedes === undefined) return { ok: false, reason: "because says why a correction corrects: give supersedes too" };
+  if (input.sensitive !== undefined && input.sensitive !== null && typeof input.sensitive !== "boolean") return { ok: false, reason: "sensitive is true or false" };
+  // The planned routes of the questions it is for, and the jobs under them.
+  const bars = await Promise.all(answers.map((a) => questionBar(ctx.sandboxRoot, a)));
+  const L = await import("./leads.ts");
+  const leads = await L.leadsSnapshot(ctx.sandboxRoot);
+  const method2 = await ledgerMethods(ctx.sandboxRoot, objects);
+  const recorded = await withTableLock(ctx.sandboxRoot, async (held): Promise<LedgerResult> => {
+    const entries = await readLedger(ctx.sandboxRoot);
+    const bySeq = new Map(entries.map((e) => [e.seq, e]));
+    const replaced = supersededBy(entries);
+    for (const r of results.filter((x) => /^E-\d+$/.test(x))) {
+      const n = Number(r.slice(2));
+      const e = bySeq.get(n);
+      if (!e) return { ok: false, reason: `result_refs names ${r}: there is no entry #${n} in the ledger` };
+      if (replaced.has(n)) return { ok: false, reason: `result_refs names ${r}, superseded by #${standingSeq(n, replaced)}: name the entry that stands` };
+      if (e.kind === "answer" || e.kind === "coverage") return { ok: false, reason: `result_refs names ${r}, a ${e.kind}: a search's results are what it found or failed to (absences, limitations, findings, events)` };
+    }
+    if (supersedes !== undefined) {
+      const target = bySeq.get(supersedes);
+      if (!target) return { ok: false, reason: `supersedes #${supersedes}: there is no entry #${supersedes} in the ledger` };
+      if (target.kind !== "coverage") return { ok: false, reason: `#${supersedes} is a ${target.kind}: a coverage record corrects a coverage record` };
+      const already = replaced.get(supersedes);
+      if (already !== undefined) return { ok: false, reason: `#${supersedes} is already superseded by #${already}: correct #${already} instead` };
+    }
+    const cov = await NB.computeObjectCoverage(ctx.sandboxRoot, { objects, resultRefs: results, entries, interpretations: leads.state.interpretations });
+    // The planned routes nothing examined: said on the record, whatever the search found.
+    const notExamined: Array<{ source: string; method: string; why: string }> = [];
+    for (const b of bars) {
+      for (const r of b.routes) {
+        if (notExamined.some((x) => x.source === r.source && x.method === r.method)) continue;
+        const ex = await NB.routeExamined(ctx.sandboxRoot, r, { jobs: [...new Set([...b.jobs, ...cov.jobs])], objects });
+        if (!ex.examined) notExamined.push({ source: r.source, method: r.method, why: ex.how });
+      }
+    }
+    const candidate: LedgerEntry = {
+      v: LEDGER_VERSION,
+      seq: (entries.at(-1)?.seq ?? 0) + 1,
+      kind: "coverage",
+      value,
+      ...(source.value ? { source: source.value } : {}),
+      ...(evidence.value ? { evidence: evidence.value } : {}),
+      refs: objects,
+      answers,
+      ...(input.sensitive === true ? { sensitive: true } : {}),
+      ...(because.value ? { because: because.value } : {}),
+      ...(method2.length ? { method: method2 } : {}),
+      alternatives_open: alternatives.value,
+      inventory_rev: inventory,
+      time_range: timeRange.value,
+      search_method: method.value,
+      settings: settings.value,
+      coverage_actual: actual.value,
+      skipped: skipped.value,
+      failures: failures.value,
+      result_refs: results,
+      // Its entries among its results, bound by the hash each has now.
+      ...(results.some((x) => /^E-\d+$/.test(x)) ? { result_bound: results.filter((x) => /^E-\d+$/.test(x)).map((x) => { const e = bySeq.get(Number(x.slice(2))) as LedgerEntry; return { seq: e.seq, hash: e.hash ?? ledgerHash(e, "genesis") }; }) } : {}),
+      detection_opportunity: { trace_expected: expected as NB.TraceExpected, why: dWhy.value },
+      ...(areas ? { areas } : {}),
+      ...(acquisitionAsk ? { acquisition_ask: acquisitionAsk } : {}),
+      ...(noAsk.value ? { acquisition_none_why: noAsk.value } : {}),
+      ...(lookedFor.length ? { looked_for: lookedFor } : {}),
+      ...(lookedNone.value ? { looked_for_none_why: lookedNone.value } : {}),
+      coverage: cov.coverage,
+      coverage_detail: { units: cov.units, jobs: cov.jobs, why: cov.why },
+      ...(notExamined.length ? { not_examined: notExamined } : {}),
+      by: ctx.agentId,
+      authors: [ctx.agentId],
+      at: new Date().toISOString(),
+    };
+    const notes: string[] = [];
+    notes.push(cov.coverage === "complete" ? "the hub finds the jobs behind it were given every object it names: coverage complete" : `the hub marks it coverage partial: ${cov.why.join("; ")}`);
+    if (notExamined.length) notes.push(`planned routes not examined: ${notExamined.map((r) => `${r.source} (${r.method}): ${r.why}`).join("; ")}`);
+    if (bars.some((b) => b.material && !b.routes.length)) notes.push("a question it is for has no route plan: a negative on a material question closes against one (lead_link routes)");
+    const complete = bars.filter((b) => b.completeness).map((b) => b.question ?? "a question");
+    if (complete.length && !areas) notes.push(`${complete.join(", ")} ask${complete.length === 1 ? "s" : ""} for a complete set: an established or partial answer rests on a coverage record that names its areas {${NB.COVERAGE_AREAS.join(", ")}} (each searched, skipped or not_applicable, a skipped one said in skipped); this one names none, so it does not carry a completeness claim`);
+    if (areas) notes.push(`areas: ${NB.areasWords(areas)}`);
+    notes.push("a material negative resting on it needs another seat's review: attest this record, or the answer, with review {detection, reproduced, other_route}");
+    if (supersedes === undefined) {
+      const same = entries.find((e) => !replaced.has(e.seq) && e.kind === "coverage" && ledgerContent(e) === ledgerContent(candidate));
+      if (same) return mergeSameContent(ctx, held, same);
+    }
+    return appendLedgerEntry(ctx, held, entries, { ...candidate, ...(supersedes !== undefined ? { supersedes } : {}) }, notes);
+  });
+  // The store sweep, begun now and recorded when it ends (ledger/sweeps.jsonl):
+  // the record stands at once, and a negative resting on it waits for the
+  // sweep as it waits for a review.
+  if (!recorded.ok || recorded.merged) return recorded;
+  const notes: string[] = [];
+  // An object an earlier sweep found a hit in, named here with nothing among the results saying what it showed: said now, held by the gate.
+  const now = await readLedger(ctx.sandboxRoot);
+  const unexamined = SW.unexaminedHits(recorded.entry, now, await SW.readSweeps(ctx.sandboxRoot), supersededBy(now));
+  if (unexamined.length) {
+    notes.push(`it names ${unexamined.length === 1 ? "an object" : `${unexamined.length} objects`} an earlier sweep found hits in, and no entry among its result_refs says what ${unexamined.length === 1 ? "it" : "each"} showed: ${unexamined.map((u) => u.ref).join(", ")}. Naming a hit is not examining it: a negative resting on this record is held (sweep_hits) until you record what each showed (a finding, an event or a limitation whose refs name the object, or one absence whose refs list several, written after the sweep) and record the coverage again citing them in result_refs`);
+  }
+  if (recorded.entry.looked_for?.length) {
+    void SW.startSweep(ctx.sandboxRoot, recorded.entry);
+    notes.push(`the hub now searches every output the run holds (job outputs and logs, imports, captures, tool-output/) for ${recorded.entry.looked_for.map((t) => `"${t}"`).join(", ")}, in UTF-8 and UTF-16LE: a negative resting on this record waits for the sweep, and a hit in an object it does not name holds it until you examine that object, record what it showed, and record the coverage again naming it with that entry in result_refs, or the answer is revised`);
+  }
+  return notes.length ? { ...recorded, note: [recorded.note, ...notes].filter(Boolean).join("; ") } : recorded;
+}
+
+/**
+ * What a downgrade's evidence says against the earlier answer's chain
+ * (docs/adr/0013, "After the run s9722fa"): the earlier answer and the
+ * entries it rests on (its support). An entry of the evidence bears against
+ * it when it is a finding or an event that contradicts the answer or an
+ * entry it rests on (rel contradicts), a hypothesis refuted that names one
+ * of them (rel) or corrects one, an entry it rests on that a dispute in
+ * force or a standing finding or event contradicts, or a correction
+ * (supersedes, at any depth) of an entry it rests on. A limitation says a
+ * route could not be examined and a coverage record what a search covered:
+ * neither undermines a finding that stands (the run s9722fa walked six
+ * partial answers down to not determinable on its limitations and its own
+ * coverage records).
+ *
+ * `standing` is each positive finding the earlier answer rested on (a
+ * finding or an event it cites, recorded for its question) that still
+ * stands: not corrected, under no dispute in force, and contradicted by no
+ * standing finding or event. While one does, a revision to not determinable
+ * or a bounded negative would discard it; the answer is partial. Refs and
+ * links only: nothing here reads what an entry says.
+ */
+export function downgradeCheck(earlier: LedgerEntry, evidence: readonly string[], entries: LedgerEntry[], disputes: LedgerDispute[]): { bearing: Array<{ seq: number; how: string }>; not_bearing: Array<{ seq: number; why: string }>; standing: LedgerEntry[] } {
+  const bySeq = new Map(entries.map((e) => [e.seq, e]));
+  const replaced = supersededBy(entries);
+  const hashOf = (e: LedgerEntry) => e.hash ?? ledgerHash(e, "genesis");
+  const support = (earlier.support ?? []).map((x) => x.seq);
+  const chain = new Set([earlier.seq, ...support]);
+  const inForce = disputesInForce(entries, disputes);
+  const disputed = (e: LedgerEntry) => inForce.some((d) => d.target === hashOf(e));
+  const positive = (e: LedgerEntry | undefined): boolean => e?.kind === "finding" || e?.kind === "event";
+  const contradictedBy = (seq: number) => entries.filter((c) => !replaced.has(c.seq) && positive(c) && (c.rel ?? []).some((x) => x.kind === "contradicts" && Number(x.to) === seq));
+  // The entry of the chain an entry corrects, walking its supersedes back.
+  const corrects = (e: LedgerEntry): number | null => {
+    const seen = new Set<number>();
+    let cur: LedgerEntry | undefined = e;
+    while (cur && typeof cur.supersedes === "number" && !seen.has(cur.seq)) {
+      seen.add(cur.seq);
+      if (support.includes(cur.supersedes)) return cur.supersedes;
+      cur = bySeq.get(cur.supersedes);
+    }
+    return null;
+  };
+  const bearing: Array<{ seq: number; how: string }> = [];
+  const notBearing: Array<{ seq: number; why: string }> = [];
+  const list = (xs: number[]) => xs.map((n) => `E-${n}`).join(", ");
+  for (const r of evidence) {
+    if (!/^E-\d+$/.test(r)) continue;
+    const n = Number(r.slice(2));
+    const e = bySeq.get(n);
+    if (!e) continue;
+    const against = (e.rel ?? []).filter((x) => x.kind === "contradicts" && chain.has(Number(x.to))).map((x) => Number(x.to));
+    const fixed = corrects(e);
+    if (positive(e) && against.length) bearing.push({ seq: n, how: `a ${e.kind} that contradicts ${list(against)}` });
+    else if (e.kind === "hypothesis" && e.status === "refuted" && ((e.rel ?? []).some((x) => chain.has(Number(x.to))) || fixed !== null)) bearing.push({ seq: n, how: `a hypothesis refuted, tied to ${fixed !== null ? `E-${fixed}` : list((e.rel ?? []).filter((x) => chain.has(Number(x.to))).map((x) => Number(x.to)))}` });
+    else if (fixed !== null) bearing.push({ seq: n, how: `a correction of E-${fixed}, which the earlier answer rests on` });
+    else if (support.includes(n) && (disputed(e) || contradictedBy(n).length)) bearing.push({ seq: n, how: disputed(e) ? "an entry the earlier answer rests on, under a dispute in force" : `an entry the earlier answer rests on, contradicted by ${list(contradictedBy(n).map((c) => c.seq))}` });
+    else
+      notBearing.push({
+        seq: n,
+        why: support.includes(n)
+          ? "an entry the earlier answer rests on, under no dispute and contradicted by nothing"
+          : e.kind === "limitation"
+            ? "a limitation: it says a route could not be examined, not that a finding is wrong"
+            : e.kind === "coverage"
+              ? "a coverage record: it says what a search covered, not that a finding is wrong"
+              : e.kind === "absence"
+                ? "a search that found nothing: it does not undermine a finding that stands"
+                : positive(e)
+                  ? `a ${e.kind} that contradicts nothing the earlier answer rests on (no rel contradicts to ${list([...chain])})`
+                  : e.kind === "hypothesis"
+                    ? "a hypothesis not refuted, or tied to nothing the earlier answer rests on"
+                    : `a ${e.kind}: it does not bear against the earlier answer's chain`,
+      });
+  }
+  const id = sectionKey(sectionAnswersId(earlier.section ?? ""));
+  const standing = support
+    .map((s) => bySeq.get(s))
+    .filter((e): e is LedgerEntry => positive(e))
+    .filter((e) => (e.answers ?? []).some((a) => sectionKey(a) === id) && !replaced.has(e.seq) && !disputed(e) && !contradictedBy(e.seq).length);
+  return { bearing, not_bearing: notBearing, standing };
 }
 
 /** Record an answer (recordEntry with kind=answer): its checks need the ledger, so they run under the lock. */
@@ -8837,6 +11195,39 @@ async function recordAnswer(ctx: SwarmContext, input: LedgerInput): Promise<Ledg
   if (!contrary.ok) return contrary;
   const limits = seqList("limitations", input.limitations);
   if (!limits.ok) return limits;
+  let resultText = String(input.result ?? "").trim().toLowerCase().replace(/-/g, "_");
+  if (resultText && !(LEDGER_ANSWER_RESULTS as readonly string[]).includes(resultText)) return { ok: false, reason: `result is one of ${LEDGER_ANSWER_RESULTS.join(", ")} (got ${JSON.stringify(input.result)})` };
+  // The old way of saying it: inconclusive is not_determinable, and is recorded as both.
+  if (input.inconclusive === true) {
+    if (resultText && resultText !== "not_determinable") return { ok: false, reason: `inconclusive is the old word for result not_determinable: it cannot come with result ${resultText}` };
+    if (question) resultText = "not_determinable";
+  }
+  if (question && !resultText) {
+    return {
+      ok: false,
+      reason:
+        "an answer to a question states its result: established (answered on findings), partial (part of it), bounded_negative (no evidence of it found in a named scope: rests on a coverage record), not_determinable (the evidence cannot settle it: rests on a coverage record too), out_of_scope (the case's evidence cannot bear on it) or premise_not_supported (what it takes for granted does not hold)",
+    };
+  }
+  if (input.asserts_absence !== undefined && input.asserts_absence !== null && typeof input.asserts_absence !== "boolean") return { ok: false, reason: "asserts_absence is true or false" };
+  if (input.asserts_absence === true && resultText !== "bounded_negative") return { ok: false, reason: "asserts_absence says the event did not happen: it comes with result bounded_negative, on an existence question whose coverage record is complete and says the event would have left a trace" };
+  const noneWhy = boundedText("contrary_none_why", input.contrary_none_why, LEDGER_WHY_MAX_CHARS);
+  if (!noneWhy.ok) return noneWhy;
+  if (!question && (resultText || noneWhy.value || input.asserts_absence === true)) return { ok: false, reason: "result, asserts_absence and contrary_none_why are a question's answer's" };
+  let questionRev: number | undefined;
+  if (input.question_rev !== undefined && input.question_rev !== null && String(input.question_rev).trim() !== "") {
+    const n = Number(input.question_rev);
+    if (!Number.isInteger(n) || n < 1) return { ok: false, reason: `question_rev is the revision of the question this answers, a whole number (got ${JSON.stringify(input.question_rev)})` };
+    if (!question) return { ok: false, reason: "question_rev is a question's answer's" };
+    questionRev = n;
+  }
+  if (noneWhy.value && contrary.seqs.length) return { ok: false, reason: "contrary_none_why says no entry says otherwise: give contrary or contrary_none_why, not both" };
+  // A person's question is a hypothesis to test: its answer names what says
+  // otherwise, or says why nothing does (extensions/questions.ts).
+  if (question && !contrary.seqs.length && !noneWhy.value) {
+    const asker = await personsQuestion(ctx.sandboxRoot, sec.id).catch(() => null);
+    if (asker) return { ok: false, reason: `${sec.section} is ${asker}: a person's question is a proposition to test, never a conclusion to confirm. Name the entries that say otherwise (contrary), or say why none does (contrary_none_why); result premise_not_supported is an answer` };
+  }
   const quals: Array<{ seq: number; why: string }> = [];
   for (const q of Array.isArray(input.qualifies) ? input.qualifies : []) {
     const n = Number(String(q?.ref ?? "").trim().replace(/^(?:#|E-)/i, ""));
@@ -8854,137 +11245,341 @@ async function recordAnswer(ctx: SwarmContext, input: LedgerInput): Promise<Ledg
   const because = boundedText("because", input.because, LEDGER_BECAUSE_MAX_CHARS);
   if (!because.ok) return because;
   if (because.value && supersedes === undefined) return { ok: false, reason: "because says why a correction corrects: give supersedes too" };
+  // A downgrade names its counter-evidence (docs/adr/0013, round 13: a
+  // correct established answer was walked down to not determinable by a
+  // dispute that cited nothing against it).
+  let downgrade: { evidence: string[]; why: string } | undefined;
+  if (input.downgrade !== undefined && input.downgrade !== null) {
+    const shape = "downgrade is {evidence: [E-<seq> or objects], why}: what undermines the earlier answer's chain, and why";
+    if (typeof input.downgrade !== "object" || Array.isArray(input.downgrade)) return { ok: false, reason: shape };
+    const d = input.downgrade as Record<string, unknown>;
+    const dWhy = boundedText("downgrade.why", d.why, LEDGER_WHY_MAX_CHARS);
+    if (!dWhy.ok) return dWhy;
+    const ev = listOf(d.evidence as string[] | string | undefined).map((r) => (/^#\d+$/.test(r) ? `E-${r.slice(1)}` : /^e-\d+$/i.test(r) ? r.toUpperCase() : r));
+    if (!ev.length || !dWhy.value) return { ok: false, reason: shape };
+    if (ev.length > LEDGER_MAX_CITATIONS) return { ok: false, reason: `downgrade.evidence names more than ${LEDGER_MAX_CITATIONS}` };
+    const objects = ev.filter((r) => !/^E-\d+$/.test(r));
+    if (objects.length) {
+      const c = await checkRefs(ctx.sandboxRoot, objects);
+      if (!c.ok) return { ok: false, reason: `downgrade.evidence: ${c.reason}` };
+    }
+    downgrade = { evidence: ev, why: dWhy.value };
+  }
+  // The finish phase (extensions/finish.ts): while the coordinator
+  // assembles the finish (it holds the lease and the registers are met but
+  // for what is late, a confirmation or a resolution), another seat's
+  // revision of an answer is recorded only when it says why it changes a
+  // conclusion (material). A rewording or a restatement is refused
+  // quietly: on the c10 pilot's tail, answers revised again and again kept
+  // re-offering confirmations and making late results, and the finish never
+  // closed. The coordinator's own folding is free.
+  const materialWhy = boundedText("material", input.material, LEDGER_WHY_MAX_CHARS);
+  if (!materialWhy.ok) return materialWhy;
+  if (supersedes !== undefined && !materialWhy.value) {
+    const F = await import("./finish.ts");
+    const lease = (await F.readFinish(ctx.sandboxRoot).catch(() => null))?.lease ?? null;
+    if (lease && lease.holder !== ctx.agentId && (await F.finishPhase(ctx.sandboxRoot).catch(() => null))?.assembling) {
+      return { ok: false, quiet: true, deferred: { coordinator: lease.holder, generation: lease.generation }, reason: `the finish is being assembled by ${lease.holder}; revise only with material: why (what conclusion this revision changes: its result, its value, what it rests on). A rewording or a restatement is not recorded now, and nothing is lost: ${lease.holder} folds what stands into the report` };
+    }
+  }
   const source = boundedText("source", input.source, LEDGER_SOURCE_MAX_CHARS);
   if (!source.ok) return source;
   const evidence = boundedText("evidence", input.evidence, LEDGER_EVIDENCE_MAX_CHARS);
   if (!evidence.ok) return evidence;
   const cited = answerCitations(`${value}\n${reasoning.value}`);
   const support = cited.filter((n) => !contrary.seqs.includes(n) && !limits.seqs.includes(n));
+  // A summary or a narrative cites the questions it sums up symbolically
+  // (Q-<n>): bound to each answer's conclusion, not to its seq (A4).
+  const symbolic: Array<{ q: string; section: string }> = [];
+  if (!question) {
+    for (const name of symbolicQuestions(`${value}\n${reasoning.value}`)) {
+      const id = name.startsWith("question:") ? sectionKey(name.slice("question:".length)) : sectionKey(await registerSection(ctx.sandboxRoot, name));
+      if (!LEDGER_ANSWER_ID.test(id)) return { ok: false, reason: `${name} is not a question this run has (questions list names them)` };
+      if (!symbolic.some((x) => x.section === `question:${id}`)) symbolic.push({ q: name, section: `question:${id}` });
+    }
+  }
   if (support.length + contrary.seqs.length + limits.seqs.length > LEDGER_MAX_CITATIONS) return { ok: false, reason: `the answer cites more than ${LEDGER_MAX_CITATIONS} entries: cite the ones it rests on` };
-  return withTableLock(ctx.sandboxRoot, async (held) => {
-    const entries = await readLedger(ctx.sandboxRoot);
-    const disputes = await readDisputes(ctx.sandboxRoot);
-    const bySeq = new Map(entries.map((e) => [e.seq, e]));
-    const replaced = supersededBy(entries);
-    const hashOf = (e: LedgerEntry) => e.hash ?? ledgerHash(e, "genesis");
-    const standing = entries.find((e) => e.kind === "answer" && e.section === sec.section && !replaced.has(e.seq));
-    if (supersedes !== undefined) {
-      const target = bySeq.get(supersedes);
-      if (!target) return { ok: false, reason: `supersedes #${supersedes}: there is no entry #${supersedes} in the ledger (list them with ledger)` };
-      if (target.kind !== "answer") return { ok: false, reason: `#${supersedes} is a ${target.kind}: an answer corrects an answer; correct the ${target.kind} with a ${target.kind}` };
-      if (target.section !== sec.section) return { ok: false, reason: `#${supersedes} answers ${target.section}: an answer corrects the answer to its own section` };
-      const already = replaced.get(supersedes);
-      if (already !== undefined) return { ok: false, reason: `#${supersedes} is already superseded by #${already}: correct #${already} instead, so the corrections stay one line` };
-    }
-    for (const n of [...support, ...contrary.seqs, ...limits.seqs]) {
-      if (!bySeq.has(n)) return { ok: false, reason: `E-${n}: there is no entry #${n} in the ledger (list them with ledger)` };
-      if (n === supersedes) return { ok: false, reason: `E-${n} is the answer this one replaces: an answer does not rest on the answer it corrects` };
-    }
-    for (const n of limits.seqs) {
-      const l = bySeq.get(n) as LedgerEntry;
-      if (l.kind !== "limitation") return { ok: false, reason: `limitations names #${n}, a ${l.kind}: it takes limitation entries` };
-      if (replaced.has(n)) return { ok: false, reason: `limitations names #${n}, superseded by #${standingSeq(n, replaced)}: name the limitation that stands` };
-    }
-    // Every claimed support is checked, not one matching citation.
-    const disputedBy = new Map<string, LedgerDispute[]>();
-    for (const d of standingDisputes(disputes)) disputedBy.set(d.target, [...(disputedBy.get(d.target) ?? []), d]);
-    const problems = answerProblems(entries, disputes);
-    const needs = new Set<number>();
-    for (const n of support) {
-      const e = bySeq.get(n) as LedgerEntry;
-      if (replaced.has(n)) {
-        const now = standingSeq(n, replaced);
-        if (!cited.includes(now)) return { ok: false, reason: `E-${n} is superseded by #${now}: cite E-${now}, the correction, with it or instead (a superseded entry explains history; it supports nothing)` };
-        continue;
+  // The negative bar (extensions/negative-bar.ts): what the question is, as the registers say.
+  const bar = question ? await questionBar(ctx.sandboxRoot, sec.id) : null;
+  // What the case policy says of more evidence: under no, an acquisition ask is declined at once, and acquisition_none_why names the policy instead.
+  const moreEvidence = question && resultText === "not_determinable" ? await import("./requests.ts").then((R) => R.casePolicyMoreEvidence(ctx.sandboxRoot)).catch(() => "ask" as const) : "ask";
+  const negative = NB.NEGATIVE_RESULTS.has(resultText);
+  const absolute = question ? NB.absoluteAbsenceForms(`${value}\n${reasoning.value}`) : [];
+  if (absolute.length && !input.asserts_absence) {
+    return { ok: false, reason: `it is worded as the event's absence (${absolute.map((f) => `"${f}"`).join(", ")}): a negative says "No evidence of <what> was found in <scope>". "It did not happen" is for an existence question whose coverage record is complete and says the event would have left a trace there, recorded with asserts_absence: true` };
+  }
+  if (negative && bar?.material && !bar.routes.length) {
+    return { ok: false, reason: `${sec.section} is a material question with no route plan: a ${NB.resultWords(resultText)} closes against the sources and methods planned before the search. Give the lead under it its routes (lead_link with routes [{source, method}]), then record this again` };
+  }
+  // Which revision of the question it answers, held still while the answer
+  // is written: the register's lock (the questions' amendments take it too),
+  // then the ledger's. A question amended since the agent read it refuses
+  // the answer; one amended past revision 1 needs its revision said.
+  return withNamedLock(ctx.sandboxRoot, REGISTER_LOCK, async () => {
+    if (question) {
+      const reg = await registerRevision(ctx.sandboxRoot, sec.id).catch(() => null);
+      if (reg) {
+        if (questionRev !== undefined && questionRev !== reg.rev) return { ok: false as const, reason: `${reg.id} (${sec.section}) is at revision ${reg.rev}, amended since the revision ${questionRev} this answers: read it again (questions show ${reg.id}) and answer revision ${reg.rev}, with question_rev: ${reg.rev}` };
+        if (questionRev === undefined && reg.rev > 1) return { ok: false as const, reason: `${reg.id} (${sec.section}) was amended to revision ${reg.rev}: say which revision this answers (question_rev: ${reg.rev}, after reading it with questions show ${reg.id}); an answer to an earlier revision is stale` };
       }
-      if (e.kind === "answer" && problems.has(n)) return { ok: false, reason: `E-${n} is an answer that no longer stands on its own support (${(problems.get(n) as string[]).join("; ")}): it is to be recorded again first` };
-      const against = disputedBy.get(hashOf(e));
-      const failed = await unqualifiedFailedRefs(ctx.sandboxRoot, e);
-      if (against?.length || failed.length) {
-        if (!quals.some((q) => q.seq === n)) {
+    }
+    return withTableLock(ctx.sandboxRoot, async (held) => {
+      const entries = await readLedger(ctx.sandboxRoot);
+      const disputes = await readDisputes(ctx.sandboxRoot);
+      const bySeq = new Map(entries.map((e) => [e.seq, e]));
+      const replaced = supersededBy(entries);
+      const hashOf = (e: LedgerEntry) => e.hash ?? ledgerHash(e, "genesis");
+      const standing = entries.find((e) => e.kind === "answer" && e.section === sec.section && !replaced.has(e.seq));
+      if (supersedes !== undefined) {
+        const target = bySeq.get(supersedes);
+        if (!target) return { ok: false, reason: `supersedes #${supersedes}: there is no entry #${supersedes} in the ledger (list them with ledger)` };
+        if (target.kind !== "answer") return { ok: false, reason: `#${supersedes} is a ${target.kind}: an answer corrects an answer; correct the ${target.kind} with a ${target.kind}` };
+        if (target.section !== sec.section) return { ok: false, reason: `#${supersedes} answers ${target.section}: an answer corrects the answer to its own section` };
+        const already = replaced.get(supersedes);
+        if (already !== undefined) return { ok: false, reason: `#${supersedes} is already superseded by #${already}: correct #${already} instead, so the corrections stay one line` };
+      }
+      // From a positive result to a negative one: a downgrade, which names what undermines the earlier chain.
+      const earlier = supersedes !== undefined ? (bySeq.get(supersedes) as LedgerEntry) : undefined;
+      const earlierResult = earlier ? NB.answerResult(earlier) : null;
+      const downgrading = Boolean(earlier) && (earlierResult === "established" || earlierResult === "partial") && (resultText === "not_determinable" || resultText === "bounded_negative");
+      if (downgrading && !downgrade) {
+        return {
+          ok: false,
+          reason: `#${supersedes} answered ${sec.section} ${NB.resultWords(earlierResult)}; recording it ${NB.resultWords(resultText)} is a downgrade, and a downgrade names what undermines the earlier chain: downgrade {evidence: [E-<seq> of an entry that bears against it: a finding that contradicts it, a correction of what it rests on, …], why}. A doubt with no counter-evidence is not one: dispute #${supersedes} (why, refs), and if the doubt stands attest it best_candidate or record it again with confidence medium; the answer stays. A part the evidence cannot settle makes an answer partial, never not determinable while the findings it rests on stand`,
+        };
+      }
+      if (downgrade && !downgrading) return { ok: false, reason: `downgrade is for a revision that moves an answer from established or partial to not_determinable or bounded_negative${earlier ? `; #${supersedes} is ${NB.resultWords(earlierResult)} and this is ${NB.resultWords(resultText)}` : "; give supersedes"}` };
+      for (const r of downgrade?.evidence ?? []) {
+        if (!/^E-\d+$/.test(r)) continue;
+        const n = Number(r.slice(2));
+        if (!bySeq.has(n)) return { ok: false, reason: `downgrade.evidence names ${r}: there is no entry #${n} in the ledger` };
+        if (n === supersedes) return { ok: false, reason: `downgrade.evidence names ${r}, the answer being downgraded: name what undermines it` };
+        if (replaced.has(n)) return { ok: false, reason: `downgrade.evidence names ${r}, superseded by #${standingSeq(n, replaced)}: name the entry that stands` };
+      }
+      // The evidence bears against the earlier chain, and no positive finding
+      // it rested on still stands (downgradeCheck): a limitation, or the
+      // downgrader's own coverage, undermines nothing, and a standing finding
+      // is never discarded to make an answer not determinable.
+      if (downgrading && downgrade && earlier) {
+        const chk = downgradeCheck(earlier, downgrade.evidence, entries, disputes);
+        const rests = [earlier.seq, ...(earlier.support ?? []).map((x) => x.seq)].map((n) => `E-${n}`).join(", ");
+        const why: string[] = [];
+        if (!chk.bearing.length) {
+          why.push(
+            `downgrade.evidence names nothing that bears against #${supersedes}'s chain (${rests}): ${[...chk.not_bearing.map((x) => `E-${x.seq} is ${x.why}`), ...(downgrade.evidence.some((r) => !/^E-\d+$/.test(r)) ? ["an object says nothing until an entry says what it shows"] : [])].join("; ")}. A downgrade names at least one entry that does: a finding or an event that contradicts #${supersedes} or an entry it rests on (recorded with rel [{to: <seq>, kind: "contradicts"}]), a hypothesis refuted that names one, an entry it rests on under a dispute in force, or a correction (supersedes) of one`,
+          );
+        }
+        if (chk.standing.length) {
+          const s = chk.standing.map((e) => `E-${e.seq}`).join(", ");
+          const one = chk.standing.length === 1;
+          why.push(
+            `#${supersedes} rests on ${s}, recorded for ${sec.section}, which ${one ? "still stands" : "still stand"}: not corrected, under no dispute, contradicted by nothing. Recording ${sec.section} ${NB.resultWords(resultText)} would discard ${one ? "it" : "them"}. Answer partial instead (record it with supersedes=${supersedes}, result partial): state what ${s} establish${one ? "es" : ""}, and name the parts still open with their coverage (limitations: [E-<seq>], and the coverage record for each open part). If ${one ? "it does" : "one of them does"} not hold, say so first: dispute it (why, refs), correct it (supersedes), or record the finding that contradicts it (rel contradicts), and name that in downgrade.evidence`,
+          );
+        }
+        if (why.length) return { ok: false, reason: why.join(". ") };
+      }
+      // A summary or a narrative that cites a question's answer by its seq
+      // (E-n) is bound to that question instead (question:N): the pilot's
+      // summary and narrative cited three answers by seq and fell with every
+      // revision of each. Its binding is then to the answer's conclusion (the
+      // fingerprint below), whichever answer stands for the question now,
+      // and the reply says so.
+      const bound: Array<{ seq: number; section: string; standing: number | null }> = [];
+      if (!question) {
+        for (let i = support.length - 1; i >= 0; i--) {
+          const e = bySeq.get(support[i]!);
+          if (e?.kind !== "answer" || !e.section?.startsWith("question:")) continue;
+          const standingNow = entries.find((x) => x.kind === "answer" && x.section === e.section && !replaced.has(x.seq));
+          bound.unshift({ seq: e.seq, section: e.section, standing: standingNow?.seq ?? null });
+          if (!symbolic.some((x) => x.section === e.section)) symbolic.push({ q: e.section, section: e.section });
+          support.splice(i, 1);
+        }
+      }
+      // A question's answer cited symbolically is not cited by seq as well:
+      // its correction would take the summary down with it.
+      for (let i = support.length - 1; i >= 0; i--) {
+        const e = bySeq.get(support[i]!);
+        if (e?.kind === "answer" && symbolic.some((x) => x.section === e.section)) support.splice(i, 1);
+      }
+      const questionRefs: NonNullable<LedgerEntry["question_refs"]> = [];
+      if (symbolic.length) {
+        const fallen = answerProblems(entries, disputes);
+        for (const x of symbolic) {
+          const a = entries.find((e) => e.kind === "answer" && e.section === x.section && !replaced.has(e.seq));
+          if (!a) return { ok: false, reason: `${x.q} (${x.section}) has no standing answer yet: a ${sec.section} cites an answer that stands` };
+          if (fallen.has(a.seq)) return { ok: false, reason: `${x.q}'s answer E-${a.seq} no longer stands on its own support (${(fallen.get(a.seq) as string[]).join("; ")}): it is to be recorded again first` };
+          questionRefs.push({ q: x.q, section: x.section, answer: a.seq, fp: answerFingerprint(a) });
+        }
+      }
+      for (const n of [...support, ...contrary.seqs, ...limits.seqs]) {
+        if (!bySeq.has(n)) return { ok: false, reason: `E-${n}: there is no entry #${n} in the ledger (list them with ledger)` };
+        if (n === supersedes) return { ok: false, reason: `E-${n} is the answer this one replaces: an answer does not rest on the answer it corrects` };
+      }
+      for (const n of limits.seqs) {
+        const l = bySeq.get(n) as LedgerEntry;
+        if (l.kind !== "limitation") return { ok: false, reason: `limitations names #${n}, a ${l.kind}: it takes limitation entries` };
+        if (replaced.has(n)) return { ok: false, reason: `limitations names #${n}, superseded by #${standingSeq(n, replaced)}: name the limitation that stands` };
+      }
+      // Every claimed support is checked, not one matching citation.
+      const disputedBy = new Map<string, DisputeInForce[]>();
+      for (const d of disputesInForce(entries, disputes)) disputedBy.set(d.target, [...(disputedBy.get(d.target) ?? []), d]);
+      const problems = answerProblems(entries, disputes);
+      const needs = new Set<number>();
+      for (const n of support) {
+        const e = bySeq.get(n) as LedgerEntry;
+        if (replaced.has(n)) {
+          const now = standingSeq(n, replaced);
+          if (!cited.includes(now)) return { ok: false, reason: `E-${n} is superseded by #${now}: cite E-${now}, the correction, with it or instead (a superseded entry explains history; it supports nothing)` };
+          continue;
+        }
+        if (e.kind === "answer" && problems.has(n)) return { ok: false, reason: `E-${n} is an answer that no longer stands on its own support (${(problems.get(n) as string[]).join("; ")}): it is to be recorded again first` };
+        const against = disputedBy.get(hashOf(e));
+        const failed = await unqualifiedFailedRefs(ctx.sandboxRoot, e);
+        if (against?.length || failed.length) {
+          if (!quals.some((q) => q.seq === n)) {
+            return {
+              ok: false,
+              reason: against?.length
+                ? `E-${n} is disputed by ${against.map((d) => `${d.by}: ${d.why}${d.inherited_from !== undefined ? ` (raised on E-${d.inherited_from}, which it corrects: the dispute is open until ${d.by} withdraws it)` : ""}`).join("; ")}; cite its correction, drop it, or say in qualifies [{ref: "E-${n}", why}] why it still supports this answer`
+                : `E-${n} rests on the kept output of a job that did not succeed (${failed.join(", ")}) and does not say why it still holds: say so in qualifies [{ref: "E-${n}", why}], or cite an entry resting on a job that worked`,
+            };
+          }
+          needs.add(n);
+        }
+      }
+      const extra = quals.find((q) => !needs.has(q.seq));
+      if (extra) return { ok: false, reason: `qualifies names E-${extra.seq}, which ${support.includes(extra.seq) ? "is neither disputed nor resting on a failed job" : "the answer does not cite as support"}: it qualifies only a cited entry that needs it` };
+      // What the answer stands on: an entry that names its question, or for a
+      // summary or a narrative any entry that stands.
+      const standingCites = [...support, ...limits.seqs].filter((n) => !replaced.has(n)).map((n) => bySeq.get(n) as LedgerEntry);
+      if (question) {
+        const id = sectionAnswersId(sec.section);
+        const naming = (kinds: string[]) => standingCites.filter((e) => kinds.includes(e.kind) && (e.answers ?? []).some((a) => sectionKey(a) === id));
+        if (!naming(["finding", "absence", "limitation", "coverage"]).length) {
+          return { ok: false, reason: `an answer to ${sec.section} rests on at least one standing finding, search, limitation or coverage record recorded with answers=["${id}"] and cited as E-<seq>${standingCites.length ? ` (none of ${standingCites.map((e) => `E-${e.seq}`).join(", ")} names it)` : " (the answer cites no standing entry)"}` };
+        }
+        // The result says what the answer rests on: findings for what is established, a coverage record for a material negative.
+        if ((resultText === "established" || resultText === "partial") && !naming(["finding"]).length) {
+          return { ok: false, reason: `a result ${resultText} rests on a standing finding recorded with answers=["${id}"] and cited as E-<seq>; if nothing was found, the result is bounded_negative or not_determinable, resting on a coverage record` };
+        }
+        // A premise is shown not to hold by what was found, never by a search that found nothing.
+        if (resultText === "premise_not_supported" && !naming(["finding"]).length) {
+          return { ok: false, reason: `premise_not_supported rests on a standing finding recorded with answers=["${id}"] that shows the premise does not hold, cited as E-<seq>; a search that found nothing is a bounded_negative (or not_determinable), resting on a coverage record and reviewed by another seat` };
+        }
+        const coverage = naming(["coverage"]);
+        if (negative && bar?.material && !coverage.length) {
           return {
             ok: false,
-            reason: against?.length
-              ? `E-${n} is disputed by ${against.map((d) => `${d.by}: ${d.why}`).join("; ")}; cite its correction, drop it, or say in qualifies [{ref: "E-${n}", why}] why it still supports this answer`
-              : `E-${n} rests on the kept output of a job that did not succeed (${failed.join(", ")}) and does not say why it still holds: say so in qualifies [{ref: "E-${n}", why}], or cite an entry resting on a job that worked`,
+            reason: `a ${NB.resultWords(resultText)} on a material question rests on a coverage record: record kind=coverage with answers=["${id}"] (the proposition searched, the objects in refs, time_range, search_method, settings, coverage_actual, skipped, failures, result_refs, alternatives and detection_opportunity), and cite it as E-<seq>`,
           };
         }
-        needs.add(n);
+        if (input.asserts_absence === true) {
+          const complete = coverage.filter((c) => c.coverage === "complete" && c.detection_opportunity?.trace_expected === "yes" && !coverageProblems(c, entries, disputes).length);
+          if (!bar?.existence) return { ok: false, reason: `asserts_absence says the event did not happen: only an answer to a question that asks whether something exists may say that (the goal's --existence, or the register's expects existence); ${sec.section} does not. Say "No evidence of … was found in …"` };
+          if (!complete.length) return { ok: false, reason: `asserts_absence says the event did not happen: it rests on a coverage record the hub found complete and that says the event would have left a trace (detection_opportunity.trace_expected yes); ${coverage.length ? coverage.map((c) => `E-${c.seq} is coverage ${c.coverage ?? "unknown"}, trace expected ${c.detection_opportunity?.trace_expected ?? "?"}`).join("; ") : "it cites no coverage record"}. Say "No evidence of … was found in …" instead` };
+        }
+      } else if (!standingCites.length && !questionRefs.length) {
+        return { ok: false, reason: `a ${sec.section} cites at least one standing entry as E-<seq>, or the questions it sums up as Q-<n>` };
       }
-    }
-    const extra = quals.find((q) => !needs.has(q.seq));
-    if (extra) return { ok: false, reason: `qualifies names E-${extra.seq}, which ${support.includes(extra.seq) ? "is neither disputed nor resting on a failed job" : "the answer does not cite as support"}: it qualifies only a cited entry that needs it` };
-    // What the answer stands on: an entry that names its question, or for a
-    // summary or a narrative any entry that stands.
-    const standingCites = [...support, ...limits.seqs].filter((n) => !replaced.has(n)).map((n) => bySeq.get(n) as LedgerEntry);
-    if (question) {
-      const id = sectionAnswersId(sec.section);
-      const names = standingCites.some((e) => (e.kind === "finding" || e.kind === "absence" || e.kind === "limitation") && (e.answers ?? []).some((a) => sectionKey(a) === id));
-      if (!names) {
-        return { ok: false, reason: `an answer to ${sec.section} rests on at least one standing finding, search or limitation recorded with answers=["${id}"] and cited as E-<seq>${standingCites.length ? ` (none of ${standingCites.map((e) => `E-${e.seq}`).join(", ")} names it)` : " (the answer cites no standing entry)"}` };
+      const edge = (n: number): LedgerEdge => ({ seq: n, hash: hashOf(bySeq.get(n) as LedgerEntry) });
+      const citedEntries = [...support, ...contrary.seqs, ...limits.seqs, ...questionRefs.map((r) => r.answer)].map((n) => bySeq.get(n) as LedgerEntry);
+      const tokens = unsupportedTokens(`${value}\n${reasoning.value}`, citedEntries, bySeq);
+      const candidate: LedgerEntry = {
+        v: LEDGER_VERSION,
+        seq: (entries.at(-1)?.seq ?? 0) + 1,
+        kind: "answer",
+        value,
+        ...(source.value ? { source: source.value } : {}),
+        ...(evidence.value ? { evidence: evidence.value } : {}),
+        ...(confidence ? { confidence: confidence as LedgerEntry["confidence"] } : {}),
+        ...(input.sensitive === true ? { sensitive: true } : {}),
+        ...(because.value ? { because: because.value } : {}),
+        ...(why.value ? { confidence_why: why.value } : {}),
+        ...(quals.length ? { qualifies: quals.map((q) => ({ ref: `E-${q.seq}`, why: q.why })) } : {}),
+        section: sec.section,
+        reasoning: reasoning.value,
+        ...(support.length ? { support: support.map(edge) } : {}),
+        ...(contrary.seqs.length ? { contrary: contrary.seqs.map(edge) } : {}),
+        ...(limits.seqs.length ? { limitations: limits.seqs.map(edge) } : {}),
+        ...(openAlt.value ? { alternatives_open: openAlt.value } : {}),
+        ...(change.value ? { would_change: change.value } : {}),
+        ...(input.inconclusive === true ? { inconclusive: true } : {}),
+        ...(resultText ? { result: resultText as LedgerEntry["result"] } : {}),
+        ...(noneWhy.value ? { contrary_none_why: noneWhy.value } : {}),
+        ...(questionRev !== undefined ? { question_rev: questionRev } : {}),
+        ...(questionRefs.length ? { question_refs: questionRefs } : {}),
+        ...(materialWhy.value ? { finish_material: materialWhy.value } : {}),
+        ...(input.asserts_absence === true ? { asserts_absence: true } : {}),
+        ...(tokens.length ? { unsupported_tokens: tokens } : {}),
+        ...(downgrade ? { downgrade } : {}),
+        // Recorded under the recorded-confidence rule: its high is kept only as recordedConfidence says.
+        ...(question && confidence ? { confidence_rule: 1 } : {}),
+        by: ctx.agentId,
+        authors: [ctx.agentId],
+        at: new Date().toISOString(),
+      };
+      const content = ledgerContent(candidate);
+      if (supersedes !== undefined && ledgerContent(bySeq.get(supersedes) as LedgerEntry) === content) {
+        return { ok: false, reason: `the correction repeats #${supersedes} word for word: a correction says what is right now` };
       }
-    } else if (!standingCites.length) {
-      return { ok: false, reason: `a ${sec.section} cites at least one standing entry as E-<seq>` };
-    }
-    const edge = (n: number): LedgerEdge => ({ seq: n, hash: hashOf(bySeq.get(n) as LedgerEntry) });
-    const citedEntries = [...support, ...contrary.seqs, ...limits.seqs].map((n) => bySeq.get(n) as LedgerEntry);
-    const tokens = unsupportedTokens(`${value}\n${reasoning.value}`, citedEntries, bySeq);
-    const candidate: LedgerEntry = {
-      v: LEDGER_VERSION,
-      seq: (entries.at(-1)?.seq ?? 0) + 1,
-      kind: "answer",
-      value,
-      ...(source.value ? { source: source.value } : {}),
-      ...(evidence.value ? { evidence: evidence.value } : {}),
-      ...(confidence ? { confidence: confidence as LedgerEntry["confidence"] } : {}),
-      ...(input.sensitive === true ? { sensitive: true } : {}),
-      ...(because.value ? { because: because.value } : {}),
-      ...(why.value ? { confidence_why: why.value } : {}),
-      ...(quals.length ? { qualifies: quals.map((q) => ({ ref: `E-${q.seq}`, why: q.why })) } : {}),
-      section: sec.section,
-      reasoning: reasoning.value,
-      ...(support.length ? { support: support.map(edge) } : {}),
-      ...(contrary.seqs.length ? { contrary: contrary.seqs.map(edge) } : {}),
-      ...(limits.seqs.length ? { limitations: limits.seqs.map(edge) } : {}),
-      ...(openAlt.value ? { alternatives_open: openAlt.value } : {}),
-      ...(change.value ? { would_change: change.value } : {}),
-      ...(input.inconclusive === true ? { inconclusive: true } : {}),
-      ...(tokens.length ? { unsupported_tokens: tokens } : {}),
-      by: ctx.agentId,
-      authors: [ctx.agentId],
-      at: new Date().toISOString(),
-    };
-    const content = ledgerContent(candidate);
-    if (supersedes !== undefined && ledgerContent(bySeq.get(supersedes) as LedgerEntry) === content) {
-      return { ok: false, reason: `the correction repeats #${supersedes} word for word: a correction says what is right now` };
-    }
-    if (supersedes === undefined && standing && ledgerContent(standing) === content) return mergeSameContent(ctx, held, standing);
-    if (standing && supersedes !== standing.seq) {
-      return { ok: false, reason: `${sec.section} is answered by #${standing.seq} already: one answer stands for a section; to revise it, record this with supersedes=${standing.seq}` };
-    }
-    const notes: string[] = [];
-    if (tokens.length) notes.push(`in none of the cited entries: ${tokens.join(", ")}; cite the entry that holds each, or record how it was derived as its own entry and cite that (marked on the answer; the release counts them)`);
-    if (question && !candidate.inconclusive && standingCites.every((e) => e.kind === "limitation")) notes.push("it rests on limitations only: if the ledger cannot answer it, say so with inconclusive=true");
-    return appendLedgerEntry(ctx, held, entries, { ...candidate, ...(supersedes !== undefined ? { supersedes } : {}) }, notes);
+      if (supersedes === undefined && standing && ledgerContent(standing) === content) return mergeSameContent(ctx, held, standing);
+      if (standing && supersedes !== standing.seq) {
+        return { ok: false, reason: `${sec.section} is answered by #${standing.seq} already: one answer stands for a section; to revise it, record this with supersedes=${standing.seq}` };
+      }
+      const notes: string[] = [];
+      if (bound.length) notes.push(`${bound.map((b) => `E-${b.seq} (the answer to ${b.section}${b.standing !== null && b.standing !== b.seq ? `, now E-${b.standing}` : ""})`).join(", ")} ${bound.length === 1 ? "is" : "are"} cited as ${[...new Set(bound.map((b) => b.section))].join(", ")}: a ${sec.section} is bound to the questions it sums up, to each answer's conclusion (its result, the revision it answers, its support and contrary evidence), not to its seq, so a reworded correction of an answer keeps it standing. Cite Q-<n> or question:<n> for an answer in a ${sec.section}`);
+      if (tokens.length) notes.push(`in none of the cited entries: ${tokens.join(", ")}; cite the entry that holds each, or record how it was derived as its own entry and cite that (marked on the answer; the release counts them)`);
+      if (question && resultText !== "not_determinable" && standingCites.every((e) => e.kind === "limitation")) notes.push("it rests on limitations only: if the ledger cannot answer it, say so with result not_determinable, resting on a coverage record");
+      if (question && negative && bar?.material) {
+        const cov = standingCites.filter((e) => e.kind === "coverage");
+        if (cov.some((c) => c.coverage === "partial")) notes.push(`its coverage record${cov.length > 1 ? "s are" : " is"} partial (${cov.filter((c) => c.coverage === "partial").map((c) => `E-${c.seq}`).join(", ")}): the report says what was not covered`);
+        notes.push(`a material negative is reviewed by another seat before the run may end: an attest on this answer or on ${cov.map((c) => `E-${c.seq}`).join(", ")} with review {detection, reproduced, other_route}; until then it shows as negative (unreviewed)`);
+      }
+      if (question) {
+        const qid = sectionAnswersId(sec.section);
+        const covFor = standingCites.filter((e) => e.kind === "coverage" && (e.answers ?? []).some((x) => sectionKey(x) === qid));
+        // A completeness claim rests on a coverage record that names what was searched, area by area.
+        if (bar?.completeness && (resultText === "established" || resultText === "partial") && !covFor.some((c) => c.areas)) {
+          notes.push(`${bar.question ?? sec.section} asks for a complete set ("every", "all", "each", a complete list): a ${NB.resultWords(resultText)} answer to it rests on a coverage record for it that says what was searched, over which objects, and its areas {${NB.COVERAGE_AREAS.join(", ")}} (each searched, skipped or not_applicable, what was skipped said in skipped). It cites none, so the finish line holds it (completeness_uncovered) until it does: record the coverage, then this answer again with supersedes=<this seq> citing it`);
+        }
+        // A question the evidence cannot settle for want of a source: the ask comes first.
+        if (resultText === "not_determinable" && !covFor.some((c) => c.acquisition_ask || c.acquisition_none_why)) {
+          notes.push(
+            moreEvidence === "no"
+              ? `this case admits no further evidence (more_evidence: no), so open no acquisition ask: the coverage record behind this answer says so in acquisition_none_why ("${NO_MORE_EVIDENCE_NONE_WHY}"); the finish line warns until it does`
+              : "not determinable for want of a source the evidence does not hold? Ask for it first: lead_close needs_operator with ask {kind: acquisition, source, where, expected_value, urgency} opens R-<n>. The coverage record behind this answer names the ask (acquisition_ask: R-<n>) or says why none would settle it (acquisition_none_why); the finish line warns until it does",
+          );
+        }
+      }
+      // The confidence the run records: high only on an established answer another seat attested established, naming the alternatives it weighed.
+      if (question && confidence === "high") {
+        notes.push(resultText === "established" ? "confidence high is recorded as medium until another seat attests this answer established, naming the alternatives it weighed and why the evidence rules each out; the report and the metrics show the recorded confidence" : `confidence high is recorded as medium: high is kept only by an established answer, and this one is ${NB.resultWords(resultText)}; the report and the metrics show the recorded confidence`);
+      }
+      return appendLedgerEntry(ctx, held, entries, { ...candidate, ...(supersedes !== undefined ? { supersedes } : {}) }, notes);
+    });
   });
 }
+
 
 // --- the gate at done -----------------------------------------------------------------------
 
 /**
  * A mechanical defect the finish line names before the run may end, with
- * what fixes it. `named_by` lists the standing limitations that name it:
- * the gate lets a run end once each defect is fixed or named, and a named
- * defect stays one (a limitation permits shutdown; it does not make an
- * unsupported answer supported, and the release still counts it).
+ * what fixes it. `named_by` lists the standing limitations that name it: the
+ * answers check passes once each defect is fixed or named, and a named
+ * defect stays one. The finish line holds done on it under every stop
+ * policy (finish-gate.ts holding): a question ends on a disposition under
+ * the bar, never on a limitation that names it; the release counts it.
  */
 export type LedgerDefect = {
-  code: "no_answer" | "answer_support" | "answer_disputed" | "no_critic_act" | "open_contradiction";
+  code: "no_answer" | "answer_support" | "answer_disputed" | "no_critic_act" | "open_contradiction" | "coverage_missing" | "negative_unreviewed" | "wording" | "coverage_stale" | "material_use" | "partial_output" | "evidence_stale" | "completeness_uncovered" | "sweep_pending" | "sweep_hits" | "sweep_partial";
   section?: string;
   seqs: number[];
   what: string;
   fix: string;
   named_by: number[];
+  /** evidence_stale: the ledger seqs of the additions that stale the answer (acceptanceExcuses reads them). */
+  additions?: number[];
 };
 
 export type LedgerGate = {
@@ -8995,7 +11590,39 @@ export type LedgerGate = {
   open: LedgerDefect[];
   /** Every standing answer's unsupported tokens, by seq (the release counts them). */
   unsupported: Record<number, string[]>;
+  /** What the gate says and does not hold on (LedgerWarning). */
+  warnings: LedgerWarning[];
 };
+
+/** The job statuses whose kept output is partial by an act, not by its own failure: cancelled by an agent or the harness, or stopped (docs/adr/0016). */
+export const PARTIAL_STATUSES: ReadonlySet<string> = new Set(["cancelled", "stopped"]);
+
+/**
+ * The standing entries that cite the kept output of a cancelled or stopped
+ * job without saying how they treat it (qualifies {ref, why}): by seq, each
+ * such ref with the producing job and its status. A limitation says what
+ * could not be done and is its own disposition; so is a search recorded
+ * partial or failed, and a coverage record, whose coverage_actual, skipped
+ * and failures say it. Pure: `producerOf(ref)` resolves a citation to the
+ * job whose output it names and that job's status, following a digest or a
+ * copy to the job that wrote those bytes (scripts/output-hygiene.ts builds
+ * it from the store); a citation that names no job's output is null.
+ */
+export function partialOutputCites(entries: LedgerEntry[], producerOf: (ref: string) => { job: string; status: string } | null | undefined): Map<number, Array<{ ref: string; job: string; status: string }>> {
+  const replaced = supersededBy(entries);
+  const out = new Map<number, Array<{ ref: string; job: string; status: string }>>();
+  for (const e of entries) {
+    if (replaced.has(e.seq) || e.kind === "limitation" || e.kind === "coverage" || e.kind === "answer") continue;
+    if (e.kind === "absence" && e.completion && e.completion !== "complete") continue;
+    for (const ref of e.refs ?? []) {
+      const p = producerOf(ref);
+      if (!p || !PARTIAL_STATUSES.has(p.status)) continue;
+      if ((e.qualifies ?? []).some((q) => q.ref === ref)) continue;
+      out.set(e.seq, [...(out.get(e.seq) ?? []), { ref, job: p.job, status: p.status }]);
+    }
+  }
+  return out;
+}
 
 /** Contradictions that stand and that nothing has weighed: no answer holds both with one as contrary evidence, no limitation names both. */
 export function openContradictions(entries: LedgerEntry[]): Array<{ from: number; to: number }> {
@@ -9016,21 +11643,248 @@ export function openContradictions(entries: LedgerEntry[]): Array<{ from: number
   });
 }
 
+/** Evidence added after the kickoff, as the ledger holds it (scripts/material.ts applyAddition): its external entry, its import, its inventory revision. */
+export type EvidenceAddition = { seq: number; import: string; inventory_rev: number | null; at: string };
+
+/** Each standing external entry of class acquired_evidence, in ledger order. */
+export function evidenceAdditions(entries: LedgerEntry[]): EvidenceAddition[] {
+  const replaced = supersededBy(entries);
+  const out: EvidenceAddition[] = [];
+  for (const e of entries) {
+    if (e.kind !== "external" || e.source_class !== "acquired_evidence" || replaced.has(e.seq)) continue;
+    const imp = typeof e.provenance?.import === "string" ? e.provenance.import : (/^import:([^/]+)/.exec((e.refs ?? [])[0] ?? "")?.[1] ?? "");
+    if (!imp) continue;
+    out.push({ seq: e.seq, import: imp, inventory_rev: typeof e.provenance?.inventory_rev === "number" ? e.provenance.inventory_rev : null, at: e.at });
+  }
+  return out;
+}
+
+/** The results evidence added later leaves stale until they are examined against it: a negative, a not determinable, a partial answer. An established answer is not. */
+export const EVIDENCE_STALE_RESULTS: ReadonlySet<string> = new Set(["bounded_negative", "not_determinable", "partial"]);
+
+/** Whether an entry rests on an import: its refs, its results or the declared scope of the jobs behind them name import:<id>. */
+function namesImport(e: LedgerEntry, id: string): boolean {
+  const re = new RegExp(`import:${id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![A-Za-z0-9_-])`);
+  return re.test(JSON.stringify([e.refs ?? [], e.result_refs ?? [], e.method ?? []]));
+}
+
+/**
+ * Whether evidence added after an answer's coverage leaves the answer
+ * stale (the calibration run sabfd76: the evidence that settled a question
+ * came late, and its not-determinable answer stood). A standing answer to
+ * a question whose result is bounded_negative, not_determinable or partial
+ * (or a premise rejected on a search alone) is stale for each addition in
+ * the ledger, whether or not the addition named the question, until the new
+ * evidence was examined for it and another seat reviewed that examination:
+ * the answer cites a coverage record for the question recorded after the
+ * addition that names the import among its objects and that another seat
+ * attested (its review), or cites an entry other than a coverage record
+ * that rests on the import (its refs, results or jobs name it) and that
+ * another seat attested. A one-line finding nobody else looked at clears
+ * nothing (the Fable review of batches 1-3). `coverage` lists the records
+ * it cites recorded before the addition's entry; `unnamed` those recorded
+ * after it that do not name the import; `unreviewed` those that name it
+ * and entries resting on it that nobody else has attested yet. Null when
+ * nothing stales it.
+ */
+export function evidenceStale(answer: LedgerEntry, entries: LedgerEntry[], attestations: LedgerAttestation[]): { additions: EvidenceAddition[]; coverage: number[]; unnamed: number[]; unreviewed: number[] } | null {
+  if (answer.kind !== "answer" || !answer.section?.startsWith("question:")) return null;
+  const additions = evidenceAdditions(entries);
+  if (!additions.length) return null;
+  const bySeq = new Map(entries.map((e) => [e.seq, e]));
+  const replaced = supersededBy(entries);
+  if (replaced.has(answer.seq)) return null;
+  const id = sectionAnswersId(answer.section);
+  const result = NB.answerResult(answer);
+  const cited = citedForQuestion(answer, bySeq, replaced, id);
+  if (!result || !(EVIDENCE_STALE_RESULTS.has(result) || negativeByResult(result, cited))) return null;
+  const cov = cited.filter((c) => c.kind === "coverage");
+  const citedAll = [...(answer.support ?? []), ...(answer.limitations ?? [])].map((x) => bySeq.get(x.seq)).filter((e): e is LedgerEntry => Boolean(e) && !replaced.has((e as LedgerEntry).seq));
+  // Attested by a seat that recorded neither it nor the answer.
+  const reviewed = (e: LedgerEntry): boolean => {
+    const authors = new Set([e.by, ...e.authors, answer.by, ...answer.authors]);
+    const h = e.hash ?? ledgerHash(e, "genesis");
+    return attestations.some((x) => attestationAct(x) === "attest" && x.target === h && !authors.has(x.by));
+  };
+  const namesAmongObjects = (c: LedgerEntry, imp: string) => (c.refs ?? []).some((r) => r === `import:${imp}` || r.startsWith(`import:${imp}/`));
+  const stale: EvidenceAddition[] = [];
+  const older = new Set<number>();
+  const unnamed = new Set<number>();
+  const unreviewed = new Set<number>();
+  for (const x of additions) {
+    const covAfter = cov.filter((c) => c.seq > x.seq);
+    if (covAfter.some((c) => namesAmongObjects(c, x.import) && reviewed(c))) continue;
+    const resting = answer.seq > x.seq ? citedAll.filter((e) => e.kind !== "coverage" && e.seq !== x.seq && namesImport(e, x.import)) : [];
+    if (resting.some(reviewed)) continue;
+    stale.push(x);
+    for (const c of cov) {
+      if (c.seq < x.seq) older.add(c.seq);
+      else if (!namesAmongObjects(c, x.import)) unnamed.add(c.seq);
+      else unreviewed.add(c.seq);
+    }
+    for (const e of resting) unreviewed.add(e.seq);
+  }
+  const sorted = (xs: Set<number>) => [...xs].sort((a, b) => a - b);
+  return stale.length ? { additions: stale, coverage: sorted(older), unnamed: sorted(unnamed), unreviewed: sorted(unreviewed) } : null;
+}
+
+/**
+ * The defects an operator's acceptance of a question excuses on it: a
+ * partial store sweep, and evidence_stale for evidence added at or before
+ * the ledger's head when the acceptance was made (`acceptedAt`, the
+ * acceptance's ledger_seq): the operator took the question's limits
+ * knowing that evidence. Evidence added after it, and every other defect of
+ * the negative bar (ACCEPTANCE_NEVER_EXCUSES), is not excused.
+ */
+export function acceptanceExcuses(d: Pick<LedgerDefect, "code" | "additions">, acceptedAt: number | null | undefined): boolean {
+  if (d.code === "sweep_partial") return true;
+  if (d.code === "evidence_stale") return typeof acceptedAt === "number" && (d.additions ?? []).length > 0 && (d.additions ?? []).every((n) => n <= acceptedAt);
+  return !ACCEPTANCE_NEVER_EXCUSES.has(d.code);
+}
+
+/** The defects an acceptance never excuses (but evidence_stale, as acceptanceExcuses says): the negative bar's, and material the case policy forbids. */
+export const ACCEPTANCE_NEVER_EXCUSES: ReadonlySet<string> = new Set(["coverage_missing", "coverage_stale", "negative_unreviewed", "wording", "material_use", "evidence_stale", "completeness_uncovered", "sweep_pending", "sweep_hits"]);
+
+/** Whether a coverage record says what a completeness claim needs: the areas it reached, each named. */
+export function coverageNamesAreas(c: LedgerEntry): boolean {
+  return Boolean(c.areas && NB.COVERAGE_AREAS.every((a) => c.areas?.[a]));
+}
+
+/**
+ * What a negative's store sweeps hold (store-sweep.ts): each standing
+ * coverage record it cites for its question that names looked_for, whose
+ * sweep is pending (no line yet), found its strings in objects the record
+ * does not name (hits), or was left partial by its budget (unsearched).
+ * For a negative the bar holds, a partial answer on a material question,
+ * and an answer that says the event did not happen; empty for any other.
+ */
+export type SweepHold = { code: "sweep_pending" | "sweep_hits" | "sweep_partial"; coverage: LedgerEntry; sweep: SweepRecord | null; unexamined?: UnexaminedHit[] };
+export function sweepHolds(answer: LedgerEntry, entries: LedgerEntry[], sweeps: readonly SweepRecord[], disputes: LedgerDispute[] = [], material = true): SweepHold[] {
+  if (answer.kind !== "answer" || !answer.section?.startsWith("question:")) return [];
+  const bySeq = new Map(entries.map((e) => [e.seq, e]));
+  const replaced = supersededBy(entries);
+  const id = sectionAnswersId(answer.section);
+  const result = NB.answerResult(answer);
+  const cited = citedForQuestion(answer, bySeq, replaced, id);
+  if (!result || !(negativeByResult(result, cited) || (result === "partial" && material) || answer.asserts_absence === true)) return [];
+  const out: SweepHold[] = [];
+  for (const c of cited) {
+    if (c.kind !== "coverage" || coverageProblems(c, entries, disputes).length) continue;
+    // An object an earlier sweep for its question found a hit in, named
+    // here with no entry among its results saying what it showed, holds as
+    // a hit does (store-sweep.ts unexaminedHits): naming is not examining.
+    const unexamined = unexaminedHits(c, entries, sweeps, replaced);
+    const h = c.hash ?? ledgerHash(c, "genesis");
+    const sw = c.looked_for?.length ? (sweeps.filter((x) => x.target === h).at(-1) ?? null) : null;
+    if (c.looked_for?.length && !sw) out.push({ code: "sweep_pending", coverage: c, sweep: null });
+    if (sw?.hits.length || unexamined.length) out.push({ code: "sweep_hits", coverage: c, sweep: sw, ...(unexamined.length ? { unexamined } : {}) });
+    if (sw?.unsearched.length) out.push({ code: "sweep_partial", coverage: c, sweep: sw });
+  }
+  return out;
+}
+
+/**
+ * The acquisition_none_why a case under more_evidence: no gives (the ctf
+ * preset): the case admits no further evidence, so an ask would be declined
+ * at once, and naming the policy says why none was opened. Seats opened
+ * asks in the finish tail only to satisfy the rule, each declined at once.
+ */
+export const NO_MORE_EVIDENCE_NONE_WHY = "the case policy admits no further evidence (more_evidence: no): an acquisition ask would be declined at once, so none was opened";
+/** The fix the no_acquisition_ask warning gives under more_evidence: no: the policy as the reason, never an ask. */
+export function noMoreEvidenceAskFix(coverage: number[], answer: number): string {
+  return `this case admits no further evidence (more_evidence: no), so open no acquisition ask: record the coverage again${coverage.length ? ` with supersedes=${coverage[0]}` : ""} with acquisition_none_why: "${NO_MORE_EVIDENCE_NONE_WHY}", and the answer again with supersedes=${answer} citing it`;
+}
+
+/**
+ * A warning the gate says and does not hold on: shown with the answers
+ * check, counted in the finish line's note, and listed by readiness (finish
+ * status). no_acquisition_ask: a not-determinable answer names no ask, nor
+ * why none. partial_all_parts_established: a partial answer every review of
+ * which holds every part it weighed established. lead_findings_uncited:
+ * findings and events two seats hold, recorded under the question's leads,
+ * that its answer does not reach.
+ */
+export type LedgerWarning = { code: "no_acquisition_ask" | "partial_all_parts_established" | "lead_findings_uncited"; section: string; seqs: number[]; what: string; fix: string };
+
+/** A question's section as the register names it: Q-<n> for a numbered one, the section otherwise. */
+function questionName(id: string, section: string): string {
+  return /^\d+$/.test(id) ? `Q-${Number(id)}` : section;
+}
+
+/**
+ * Every entry an answer reaches: those it cites (support, contrary,
+ * limitations, a downgrade's evidence), and through them each entry they
+ * name in turn (rel, a coverage record's result_refs and result_bound, a
+ * cited answer's own citations), with the correction that stands in the
+ * place of each. Refs only: nothing is read of what an entry says.
+ */
+export function answerReach(a: LedgerEntry, bySeq: ReadonlyMap<number, LedgerEntry>, replaced: Map<number, number>): Set<number> {
+  const eseq = (r: string): number | null => {
+    const m = /^E-(\d+)$/i.exec(String(r).trim());
+    return m ? Number(m[1]) : null;
+  };
+  const stack: number[] = [...(a.support ?? []), ...(a.contrary ?? []), ...(a.limitations ?? [])].map((x) => x.seq);
+  for (const r of a.downgrade?.evidence ?? []) {
+    const n = eseq(r);
+    if (n !== null) stack.push(n);
+  }
+  const seen = new Set<number>();
+  while (stack.length) {
+    const seq = stack.pop() as number;
+    if (seen.has(seq)) continue;
+    seen.add(seq);
+    const head = standingSeq(seq, replaced);
+    if (head !== seq) stack.push(head);
+    const e = bySeq.get(seq);
+    if (!e) continue;
+    for (const r of e.rel ?? []) stack.push(r.to);
+    for (const r of e.result_refs ?? []) {
+      const n = eseq(r);
+      if (n !== null) stack.push(n);
+    }
+    for (const x of [...(e.result_bound ?? []), ...(e.support ?? []), ...(e.contrary ?? []), ...(e.limitations ?? [])]) stack.push(x.seq);
+  }
+  return seen;
+}
+
+/** Whether two seats hold an entry: two recorded it (a second author), or a seat other than its authors attested it. */
+export function heldByTwoSeats(e: LedgerEntry, attestations: readonly LedgerAttestation[]): boolean {
+  const authors = new Set([e.by, ...(e.authors ?? [])]);
+  if (authors.size >= 2) return true;
+  const h = e.hash ?? ledgerHash(e, "genesis");
+  // A line from before version 2 names its entry by seq; either act by another seat counts (a same_content one is a second author).
+  return attestations.some((x) => (x.target ? x.target === h : x.seq === e.seq) && !authors.has(x.by));
+}
+
+/**
+ * What a partial answer's warning says of a case premise: what the case
+ * brief or the goal states as given is a premise, named, never a part held
+ * open (the run s993d40: two complete answers stood partial on whether the
+ * person the brief names did it).
+ */
+export const CASE_PREMISE_WORDS = 'what the case brief or the goal states as given (who the subject is, whose device it is, the scenario\'s facts) is a premise of the examination, not a part to prove again: name it ("rests on the case premise that …") and answer on the evidence for the rest';
+
 /**
  * The ledger gate: each wanted section's answer (question:<id>, summary,
  * narrative), what keeps it from standing, whether a critic acted on it, and
  * the contradictions left open. Pure over what was read: the caller reads
  * the files (and which entries rest on a failed job) and verifies the chains.
+ * `underLeads` is what the lead register recorded under each question's
+ * leads (leads.ts questionLeadEntries): by question id, each entry with the
+ * leads it was recorded under; without it the lead_findings_uncited warning
+ * is not looked for.
  */
-export function ledgerGate(o: { entries: LedgerEntry[]; attestations: LedgerAttestation[]; disputes: LedgerDispute[]; sections: string[]; failed?: Map<number, string[]> }): LedgerGate {
+export function ledgerGate(o: { entries: LedgerEntry[]; attestations: LedgerAttestation[]; disputes: LedgerDispute[]; sections: string[]; failed?: Map<number, string[]>; bar?: (sectionId: string) => { material: boolean; existence: boolean; completeness?: boolean }; partial?: Map<number, Array<{ ref: string; job: string; status: string }>>; sweeps?: readonly SweepRecord[]; moreEvidence?: "no" | "ask" | "yes"; underLeads?: ReadonlyMap<string, ReadonlyMap<number, readonly string[]>> }): LedgerGate {
   const { entries } = o;
+  const bySeq = new Map(entries.map((e) => [e.seq, e]));
   const replaced = supersededBy(entries);
   const limits = entries.filter((e) => e.kind === "limitation" && !replaced.has(e.seq));
   const problems = answerProblems(entries, o.disputes, o.failed);
-  const standingD = standingDisputes(o.disputes);
+  const standingD = disputesInForce(entries, o.disputes);
   const defects: LedgerDefect[] = [];
   const answers: Record<string, LedgerEntry | null> = {};
   const unsupported: Record<number, string[]> = {};
+  const warnings: LedgerWarning[] = [];
   const namedFor = (seq: number) => limits.filter((l) => limitationCites(l).has(seq)).map((l) => l.seq);
   for (const raw of o.sections) {
     const sec = answerSection(raw);
@@ -9057,9 +11911,196 @@ export function ledgerGate(o: { entries: LedgerEntry[]; attestations: LedgerAtte
     const target = a.hash ?? ledgerHash(a, "genesis");
     const against = standingD.filter((d) => d.target === target);
     if (against.length) {
-      defects.push({ code: "answer_disputed", section: sec.section, seqs: [a.seq], what: `answer #${a.seq} (${sec.section}) is disputed by ${against.map((d) => `${d.by}: ${d.why}`).join("; ")}`, fix: `answer the dispute: record the answer again with supersedes=${a.seq}, or the disputer withdraws it (dispute withdraw=true, with why), or record a limitation citing E-${a.seq}`, named_by: namedFor(a.seq) });
+      const inherited = against.filter((d) => d.inherited_from !== undefined);
+      defects.push({
+        code: "answer_disputed",
+        section: sec.section,
+        seqs: [a.seq],
+        what: `answer #${a.seq} (${sec.section}) is disputed by ${against.map((d) => `${d.by}: ${d.why}${d.inherited_from !== undefined ? ` (raised on #${d.inherited_from}, which it corrects: a correction does not answer a dispute)` : ""}`).join("; ")}`,
+        fix: inherited.length
+          ? `the disputer reads the correction and withdraws the dispute when it answers it (dispute withdraw=true on #${a.seq}, with why), or disputes it again; or record a limitation citing E-${a.seq}`
+          : `answer the dispute: correct the answer (record it again with supersedes=${a.seq}) and have the disputer withdraw it (dispute withdraw=true, with why) once the correction answers it, or record a limitation citing E-${a.seq}`,
+        named_by: namedFor(a.seq),
+      });
     }
-    const acted = o.attestations.some((x) => attestationAct(x) === "attest" && x.target === target && !a.authors.includes(x.by) && x.by !== a.by) || against.some((d) => !a.authors.includes(d.by));
+    // The negative bar, on an answer that states its result (one recorded
+    // before results reads as it always did): a material negative rests on
+    // a standing coverage record whose results still stand and is reviewed
+    // by another seat, and an answer is worded as what was not found where,
+    // whatever its result, unless the bar for "it did not happen" is met.
+    // A premise rejected on a search alone is a negative too. None of these
+    // is excused by a limitation.
+    const result = NB.answerResult(a);
+    const bar = sec.section.startsWith("question:") ? (o.bar?.(id) ?? { material: true, existence: false }) : null;
+    const cited = citedForQuestion(a, bySeq, replaced, id);
+    const negativeLike = negativeByResult(result, cited);
+    const review = negativeLike ? negativeReview(a, entries, o.attestations, o.disputes) : null;
+    const cov = cited.filter((c) => c.kind === "coverage" && !review?.stale.some((x) => x.seq === c.seq));
+    if (bar && result && negativeLike) {
+      for (const st of review?.stale ?? []) {
+        defects.push({ code: "coverage_stale", section: sec.section, seqs: [a.seq, st.seq], what: `answer #${a.seq} (${sec.section}) rests on coverage record E-${st.seq}, which no longer says what its search found: ${st.problems.join("; ")}`, fix: `record the coverage again with supersedes=${st.seq} over the results that stand now, and the answer again with supersedes=${a.seq} citing it; another seat reviews it again`, named_by: [] });
+      }
+      const what = result === "premise_not_supported" ? "a premise rejected on a search alone (no finding shows it false)" : NB.resultWords(result);
+      if (bar.material && !cov.length) {
+        defects.push({ code: "coverage_missing", section: sec.section, seqs: [a.seq], what: `answer #${a.seq} (${sec.section}) is ${what} on a material question and rests on no standing coverage record`, fix: `record kind=coverage with answers=["${id}"] (what was searched, over which objects, how, what was covered, skipped and failed, the results, the alternatives, the detection opportunity) and record the answer again with supersedes=${a.seq} citing it`, named_by: [] });
+      }
+      if (bar.material && !review?.reviewed) {
+        defects.push({ code: "negative_unreviewed", section: sec.section, seqs: [a.seq, ...cov.map((c) => c.seq)], what: `answer #${a.seq} (${sec.section}) is a negative (unreviewed): ${what} on a material question, and no other seat has reviewed it`, fix: `a seat that recorded neither it nor its coverage record attests #${a.seq}${cov.length ? ` or ${cov.map((c) => `#${c.seq}`).join(", ")}` : ""} with review {detection, reproduced, other_route}: whether it challenged the detection assumptions, reproduced a decisive check, tried a materially different route, each with what it did or why not`, named_by: [] });
+      }
+    }
+    // Evidence added since the answer's coverage (whether or not the
+    // addition named the question): a negative, a not determinable or a
+    // partial answer is examined against it before it stands again. Fixed,
+    // never named.
+    if (bar && result) {
+      const st = evidenceStale(a, entries, o.attestations);
+      if (st) {
+        const imports = [...new Set(st.additions.map((x) => x.import))];
+        const first = st.additions[0]!;
+        const list = (xs: number[]) => xs.map((n) => `E-${n}`).join(", ");
+        defects.push({
+          code: "evidence_stale",
+          section: sec.section,
+          seqs: [a.seq, ...st.coverage, ...st.unnamed, ...st.unreviewed],
+          additions: st.additions.map((x) => x.seq),
+          what: `answer #${a.seq} (${sec.section}) is ${NB.resultWords(result)}: new evidence since its coverage (${st.additions.map((x) => `${x.import}, E-${x.seq}${x.inventory_rev !== null ? `, inventory revision ${x.inventory_rev}` : ""}`).join("; ")}); re-examine against it${st.coverage.length ? `. Its coverage record${st.coverage.length === 1 ? "" : "s"} ${list(st.coverage)} ${st.coverage.length === 1 ? "was" : "were"} recorded before the addition's entry E-${first.seq}` : ""}${st.unnamed.length ? `; ${list(st.unnamed)}, recorded after it, ${st.unnamed.length === 1 ? "does" : "do"} not name ${imports.map((i) => `import:${i}`).join(", ")} among its objects` : ""}${st.unreviewed.length ? `; ${list(st.unreviewed)} ${st.unreviewed.length === 1 ? "examines" : "examine"} it and no other seat has reviewed ${st.unreviewed.length === 1 ? "it" : "them"} yet` : ""}`,
+          fix: `examine ${imports.map((i) => `import:${i}`).join(", ")} for ${sec.section}: record kind=coverage with answers=["${id}"] naming the import (or its files) among its objects, with what the search found there or why it cannot bear on the question; have another seat review it (attest it with review); and record the answer again with supersedes=${a.seq} citing it. An entry resting on the new evidence, cited by the answer, clears it too once another seat has attested it. Or the operator accepts the question's limits after the evidence came (question accept)`,
+          named_by: [],
+        });
+      }
+    }
+    // A completeness claim ("every file", "all connections"): an established
+    // or partial answer rests on a coverage record for the question that
+    // says what was searched, area by area. Without one it holds the gate as
+    // an uncovered negative does. Fixed, never named.
+    if (bar && result && (result === "established" || result === "partial") && bar.completeness) {
+      const standingCov = cited.filter((c) => c.kind === "coverage" && !coverageProblems(c, entries, o.disputes).length);
+      if (!standingCov.some(coverageNamesAreas)) {
+        defects.push({
+          code: "completeness_uncovered",
+          section: sec.section,
+          seqs: [a.seq, ...standingCov.map((c) => c.seq)],
+          what: `answer #${a.seq} (${sec.section}) is ${NB.resultWords(result)} on a question that asks for a complete set, and ${standingCov.length ? `its coverage record${standingCov.length === 1 ? "" : "s"} ${standingCov.map((c) => `E-${c.seq}`).join(", ")} ${standingCov.length === 1 ? "does" : "do"} not say which areas the search reached` : "it rests on no standing coverage record that says what was searched"}`,
+          fix: `record kind=coverage with answers=["${id}"]: the objects searched, how, and areas {${NB.COVERAGE_AREAS.join(", ")}} (each searched, skipped or not_applicable; what was skipped, and why, in skipped), then record the answer again with supersedes=${a.seq} citing it`,
+          named_by: [],
+        });
+      }
+    }
+    // The store sweep (store-sweep.ts): a negative is checked against every
+    // output the run holds, not only its coverage's sources. Read only where
+    // the caller read the sweeps. Pending holds as an unreviewed negative
+    // does; a hit in an object the record does not name holds until the
+    // record is revised to name it, or the answer is; a partial sweep holds
+    // until the operator accepts the question's limits.
+    if (bar && result && o.sweeps) {
+      for (const hold of sweepHolds(a, entries, o.sweeps, o.disputes, bar.material)) {
+        const c = hold.coverage;
+        const sw = hold.sweep;
+        if (hold.code === "sweep_pending") {
+          defects.push({ code: "sweep_pending", section: sec.section, seqs: [a.seq, c.seq], what: `answer #${a.seq} (${sec.section}) rests on coverage record E-${c.seq}, whose store sweep for ${c.looked_for!.map((t) => `"${t}"`).join(", ")} has not finished (pending)`, fix: "wait for the sweep: the hub runs it when the record is written and records it in ledger/sweeps.jsonl (the finish line runs one lost with its process); then examine what it found", named_by: [] });
+        } else if (hold.code === "sweep_hits") {
+          const words = (sw?.hits ?? []).map((h) => `"${h.term}" in ${h.ref}${h.also?.length ? ` (also ${h.also.join(", ")})` : ""} (${h.count} time${h.count === 1 ? "" : "s"}, first at byte ${h.first_offset}${h.encodings.includes("utf-16le") ? `, ${h.encodings.join(" and ")}` : ""})`);
+          const unexamined = hold.unexamined ?? [];
+          const named = unexamined.map((u) => `${u.ref}${u.also.length ? ` (also ${u.also.join(", ")})` : ""} (${u.terms.map((t) => `"${t}"`).join(", ")}, found by the sweep of E-${u.found_by})`);
+          const said = [
+            ...(words.length ? [`the store sweep for coverage record E-${c.seq} found what it looked for in objects the record does not name: ${words.join("; ")}`] : []),
+            ...(named.length ? [`coverage record E-${c.seq} names ${unexamined.length === 1 ? "an object" : `${unexamined.length} objects`} an earlier sweep found hits in with no entry among its results that says what ${unexamined.length === 1 ? "it" : "each"} showed: ${named.join("; ")}. Naming a hit is not examining it`] : []),
+          ];
+          defects.push({
+            code: "sweep_hits",
+            section: sec.section,
+            seqs: [a.seq, c.seq],
+            what: `answer #${a.seq} (${sec.section}) is ${NB.resultWords(result)}, and ${said.join("; and ")}`,
+            fix: `examine each object the sweep names and record what it showed: one entry per object (a finding, an event or a limitation whose refs name the object itself), or one absence whose refs list several (a search that found nothing that bears on the question in them), written after the sweep; then record the coverage again with supersedes=${c.seq} naming each in refs, with what it showed: those entries in result_refs (and coverage_actual), and the answer again with supersedes=${a.seq} citing it; or record the answer again on what those objects show`,
+            named_by: [],
+          });
+        } else {
+          defects.push({
+            code: "sweep_partial",
+            section: sec.section,
+            seqs: [a.seq, c.seq],
+            what: `answer #${a.seq} (${sec.section}) rests on coverage record E-${c.seq}, whose store sweep is partial: ${sw!.searched.objects} object(s) searched, not searched: ${sw!.unsearched.map((u) => `${u.ref} (${u.why})`).join("; ")}`,
+            fix: `a partial sweep is not a clean one: record the coverage again with supersedes=${c.seq} (its sweep runs again; SWARM_SWEEP_MAX_BYTES and SWARM_SWEEP_MAX_SEC set its budget), or the operator accepts the question's limits`,
+            named_by: [],
+          });
+        }
+      }
+    }
+    // A question not determinable for want of a source: its coverage names
+    // the acquisition ask opened for it, or says why none was. A warning.
+    if (bar && result === "not_determinable") {
+      const covNow = cited.filter((c) => c.kind === "coverage");
+      if (!covNow.some((c) => c.acquisition_ask || c.acquisition_none_why)) {
+        warnings.push({
+          code: "no_acquisition_ask",
+          section: sec.section,
+          seqs: [a.seq, ...covNow.map((c) => c.seq)],
+          what: `answer #${a.seq} (${sec.section}) is not determinable, and ${covNow.length ? `its coverage record${covNow.length === 1 ? "" : "s"} ${covNow.map((c) => `E-${c.seq}`).join(", ")} name${covNow.length === 1 ? "s" : ""}` : "it rests on no coverage record that names"} no acquisition ask and no reason for none`,
+          fix: o.moreEvidence === "no" ? noMoreEvidenceAskFix(covNow.map((c) => c.seq), a.seq) : `when the question needs a source the evidence does not hold, open an acquisition ask (lead_close needs_operator with ask {kind: acquisition, source, where, expected_value, urgency}) and record the coverage again with acquisition_ask: "R-<n>"; otherwise say why none would settle it in acquisition_none_why`,
+        });
+      }
+    }
+    // A partial answer whose every review holds every part it weighed
+    // established, at least one of them attesting it established: the
+    // partial label is then most often a hedge (on s993d40, whether the
+    // person the case brief names did it). A warning: partial is for a part
+    // the evidence could not establish, and the recorder says which.
+    if (bar && result === "partial") {
+      const reviews = answerReviews(a, o.attestations);
+      const weighed = reviews.filter((x) => x.answer_review?.parts?.length);
+      const established = reviews.filter((x) => x.strength === "established");
+      if (weighed.length && established.length && weighed.every((x) => x.answer_review!.parts.every((p) => p.established === true))) {
+        warnings.push({
+          code: "partial_all_parts_established",
+          section: sec.section,
+          seqs: [a.seq],
+          what: `answer #${a.seq} (${sec.section}) is partial, and every review holds every part it weighed established (${[...new Set(weighed.map((x) => x.by))].join(", ")}; attested established by ${[...new Set(established.map((x) => x.by))].join(", ")})`,
+          fix: `an answer is partial only for a part of the question the evidence could not establish: say which part is open (in its reasoning or limitations, citing what bounds it), or record the answer again with supersedes=${a.seq} and result established; ${CASE_PREMISE_WORDS}`,
+        });
+      }
+    }
+    // What the run established under the question's own leads and the
+    // answer leaves out (on s993d40 an answer left out two methods the
+    // ledger held as findings under that question's leads): a standing
+    // finding or event, not disputed, that another seat attested or two
+    // seats recorded, which the lead register recorded under a lead linked
+    // to the question (it interprets a lead's job, or a lead's close or
+    // confirmation names it), and which the answer does not reach, directly
+    // or through the entries it cites. Registers and refs only: nothing is
+    // read of what an entry says. A warning: every such entry is listed.
+    const under = bar ? o.underLeads?.get(id) : undefined;
+    if (under?.size) {
+      const reach = answerReach(a, bySeq, replaced);
+      const left: Array<{ seq: number; kind: string; leads: readonly string[] }> = [];
+      for (const [seq, leads] of [...under].sort((x, y) => x[0] - y[0])) {
+        if (reach.has(seq) || replaced.has(seq)) continue;
+        const e = bySeq.get(seq);
+        if (!e || (e.kind !== "finding" && e.kind !== "event")) continue;
+        const h = e.hash ?? ledgerHash(e, "genesis");
+        if (standingD.some((d) => d.target === h)) continue;
+        if (!heldByTwoSeats(e, o.attestations)) continue;
+        left.push({ seq, kind: e.kind, leads });
+      }
+      if (left.length) {
+        const q = questionName(id, sec.section);
+        const one = left.length === 1;
+        warnings.push({
+          code: "lead_findings_uncited",
+          section: sec.section,
+          seqs: [a.seq, ...left.map((x) => x.seq)],
+          what: `answer #${a.seq} (${sec.section}): ${left.map((x) => `E-${x.seq} (${x.kind === "event" ? "an event" : "a finding"} under ${x.leads.join(", ")})`).join(", ")} established under ${q}'s leads and not in its answer: ${one ? "cite it or say why it does not bear on it" : "cite them or say why they do not bear on it"}`,
+          fix: `record the answer again with supersedes=${a.seq}, citing ${one ? "it" : "each"} as E-<seq> in its reasoning (or among its contrary or limitations), or saying there why ${one ? "it does" : "each does"} not bear on ${q}; an entry the answer cites that names ${one ? "it" : "one"} (rel, a coverage record's result_refs) counts`,
+        });
+      }
+    }
+    if (bar && result) {
+      const forms = NB.absoluteAbsenceForms(`${a.value}\n${a.reasoning ?? ""}`);
+      const earned = a.asserts_absence === true && result === "bounded_negative" && bar.existence && cov.some((c) => c.coverage === "complete" && c.detection_opportunity?.trace_expected === "yes");
+      if ((forms.length || a.asserts_absence) && !earned) {
+        defects.push({ code: "wording", section: sec.section, seqs: [a.seq], what: `answer #${a.seq} (${sec.section}) says the event did not happen${forms.length ? ` (${forms.map((f) => `"${f}"`).join(", ")})` : ""}, and the bar for saying so is not met: ${result !== "bounded_negative" ? `its result is ${NB.resultWords(result)}, and only a bounded negative may say it` : !bar.existence ? "the question does not ask whether something exists" : !cov.some((c) => c.coverage === "complete") ? "no coverage record it rests on is complete" : "no coverage record it rests on says the event would have left a trace"}`, fix: `record the answer again with supersedes=${a.seq}, worded "No evidence of … was found in …" (the coverage record's scope)`, named_by: [] });
+      }
+    }
+    const acted = o.attestations.some((x) => attestationAct(x) === "attest" && x.target === target && !a.authors.includes(x.by) && x.by !== a.by) || against.some((d) => !a.authors.includes(d.by)) || Boolean(review?.reviewed);
     if (!acted) {
       defects.push({ code: "no_critic_act", section: sec.section, seqs: [a.seq], what: `answer #${a.seq} (${sec.section}) has no critic act`, fix: `an agent other than its author re-derives what it rests on from the sealed refs and records attest (how) or dispute (why) on #${a.seq}`, named_by: namedFor(a.seq) });
     }
@@ -9067,7 +12108,21 @@ export function ledgerGate(o: { entries: LedgerEntry[]; attestations: LedgerAtte
   for (const c of openContradictions(entries)) {
     defects.push({ code: "open_contradiction", seqs: [c.from, c.to], what: `#${c.from} contradicts #${c.to} and both stand`, fix: `supersede the one that is wrong, weigh both in an answer (one as support, the other in contrary), or record a limitation citing E-${c.from} and E-${c.to}`, named_by: [] });
   }
-  return { answers, defects, open: defects.filter((d) => !d.named_by.length), unsupported };
+  // The kept output of a job that was cancelled or stopped, cited later: the
+  // entry says how it treats what the job wrote before it was stopped, or it
+  // stands as a defect (docs/adr/0016). Fixed by the entry, never named.
+  for (const [seq, refs] of o.partial ?? []) {
+    const e = bySeq.get(seq);
+    if (!e || replaced.has(seq)) continue;
+    defects.push({
+      code: "partial_output",
+      seqs: [seq],
+      what: `#${seq} cites the kept output of ${refs.map((r) => `job ${r.job} (${r.status})`).filter((x, i, a) => a.indexOf(x) === i).join(", ")} (${refs.map((r) => r.ref).join(", ")}) and does not say how it treats a partial output`,
+      fix: `record it again with supersedes=${seq} and qualifies [{ref, why}] for each such ref (what the job wrote before it was stopped, and why that part still holds), or cite the output of a job that ran to its end`,
+      named_by: [],
+    });
+  }
+  return { answers, defects, open: defects.filter((d) => !d.named_by.length), unsupported, warnings };
 }
 
 /**
@@ -9118,6 +12173,20 @@ export function jobPageNote(job: string, page: JobStdoutPage): string | null {
     `Read the next page with job_status(job_id: "${job}", offset: ${end}), or read ${page.path} whole, before you draw a conclusion from this page. ` +
     `Until the rest is read, or an entry you record with interprets: [{job: "${job}", rest: "how you read the rest, or why not"}] says why not, ${job} stays on your list of jobs awaiting interpretation.`
   );
+}
+
+/**
+ * A provider's error text with its numbers and times masked, so the same
+ * error said with a countdown ("Try again in ~6904 min.", then "~6874
+ * min.") reads as one. For telling the board once; the trace keeps every
+ * text whole.
+ */
+export function normalizeProviderError(reason: string): string {
+  return reason
+    .replace(/\d{4}-\d{2}-\d{2}(?:[T ]\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?)?\s*(?:Z|UTC|GMT|[+-]\d{2}:?\d{2})?/gi, "<time>")
+    .replace(/\d+(?:[.,:]\d+)*/g, "#")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 /**
@@ -9193,7 +12262,39 @@ export async function runFinishLine(sandbox: string): Promise<FinishLineRun | nu
 }
 
 /** The record a finish line reads that is not the goal's own files: where each lives. */
-export const REVISION_FILES = { ledger: LEDGER_ENTRIES, attestations: "ledger/attestations.jsonl", disputes: "ledger/disputes.jsonl", leads: "leads/leads.jsonl" } as const;
+export const REVISION_FILES = { ledger: LEDGER_ENTRIES, attestations: "ledger/attestations.jsonl", disputes: "ledger/disputes.jsonl", leads: "leads/leads.jsonl", questions: "questions/questions.jsonl" } as const;
+
+/**
+ * Whether a line of the lead or the question register is an offer's
+ * bookkeeping (docs/adr/0015): an offer made, delivered, declined, accepted
+ * or lapsed, or a wake from before offers. Those say who may take a piece of
+ * work first, never what the finish rests on, and idle seats write them all
+ * the time: were they in the revision, a waiting seat's delivered offer would
+ * make the coordinator's finish line run again, and one check result per
+ * revision would not hold. A closure offered to its closer to confirm is not
+ * bookkeeping: until it is confirmed it holds the finish. The lines are the
+ * registers' own compact JSON, where `"ev":"…"` can only be the event's key
+ * (a quote inside a value is escaped).
+ */
+export function offerBookkeeping(line: string): boolean {
+  if (line.includes('"ev":"wake"')) return true;
+  if (!line.includes('"ev":"offer')) return false;
+  return !(line.includes('"ev":"offer"') && line.includes('"reason":"confirm"'));
+}
+
+/** A register's part of the revision: its bytes, less its offers' bookkeeping for the lead and question registers. */
+function revisionPart(name: string, bytes: Buffer): string {
+  if (name !== "leads" && name !== "questions") return `${bytes.length}:${sha256Hex(bytes)}`;
+  const kept = Buffer.from(
+    bytes
+      .toString("utf8")
+      .split("\n")
+      .filter((line) => !offerBookkeeping(line))
+      .join("\n"),
+    "utf8",
+  );
+  return `${kept.length}:${sha256Hex(kept)}`;
+}
 
 /** Tags of a post that can change a verdict: a result, a veto, a hold, a stop. */
 const VERDICT_TAGS = new Set<string>(["result", "veto", "hold", "stop"]);
@@ -9205,12 +12306,27 @@ const postTagCache = new Map<string, { tag: string; from: string }>();
  * thread, the newest agent post that can change a verdict: a result, a veto,
  * a hold or a stop; an intro or a claim cannot), the ledger (every byte: a
  * merge rewrites an entry's authors, and an author may not attest), the
- * review (the attestations and the disputes) and the leads. A finish line run
+ * review (the attestations and the disputes), the leads and the questions
+ * (less their offers' bookkeeping: offerBookkeeping). A finish line run
  * against one revision holds only while the revision does: on the VM hub a
  * passing run was reused for 30 s whatever had changed in between, and a
  * dispute recorded in that window did not stop the sentinel.
  */
 export async function stateRevision(sandboxRoot: string): Promise<{ revision: string; parts: Record<string, string> }> {
+  const parts = await stateParts(sandboxRoot);
+  // What the finish rests on beyond the registers (A4): the report the
+  // coordinator's done names (by its digest), every job's state, the run's
+  // policy (the case policy too), the operator's decisions (the requests'
+  // chain, less its delivery bookkeeping) and what was added after the
+  // kickoff (docs/adr/0014). A job committed, a report rewritten, a pause, a
+  // host allowed, a request answered or evidence added between the finish
+  // line and the sentinel moves the revision, and the done is run again.
+  const { finishParts } = await import("./finish.ts");
+  Object.assign(parts, await finishParts(sandboxRoot));
+  return { revision: sha256Hex(JSON.stringify(parts)), parts };
+}
+
+async function stateParts(sandboxRoot: string): Promise<Record<string, string>> {
   const parts: Record<string, string> = {};
   const board: Record<string, number> = {};
   for (const thread of await listThreadNames(sandboxRoot)) {
@@ -9231,9 +12347,9 @@ export async function stateRevision(sandboxRoot: string): Promise<{ revision: st
   parts.board = JSON.stringify(board);
   for (const [name, rel] of Object.entries(REVISION_FILES)) {
     const bytes = await readFile(join(sandboxRoot, rel)).catch(() => null);
-    parts[name] = bytes ? `${bytes.length}:${sha256Hex(bytes)}` : "none";
+    parts[name] = bytes ? revisionPart(name, bytes) : "none";
   }
-  return { revision: sha256Hex(JSON.stringify(parts)), parts };
+  return parts;
 }
 
 /** How many times a finish line is run again when the state moved under it, before done is refused. */
@@ -9289,10 +12405,17 @@ export type FinishLineRun = {
 
 /** What the harness's gate says (scripts/finish-gate.ts's FinishGate, as the verdict reads it). */
 export type FinishGateView = {
-  defects: Array<{ code: string; lead?: string; job?: string; what: string; fix: string }>;
+  defects: Array<{ code: string; lead?: string; job?: string; question?: string; what: string; fix: string }>;
   limited: string[];
-  questions?: Array<{ id: string; outcome: string; blocks: string[] }>;
+  /** Each question, how it stands, what blocks it, and its disposition under the bar when it has one (established, partial, bounded_negative, not_determinable, premise_not_supported, out_of_scope). */
+  questions?: Array<{ id: string; outcome: string; blocks: string[]; disposition?: string }>;
   until_solved?: boolean;
+  /** The lines of `limited` that are the operator's acceptances. */
+  accepted?: string[];
+  /** What holds a run under the operator's stop policy beside its questions: a defect a limitation only names. */
+  holding?: string[];
+  /** What the answers check warns of and does not hold on (LedgerWarning: a not-determinable answer that names no acquisition ask, a partial answer every review holds whole, findings under a question's leads its answer leaves out): said in the verdict's note. */
+  warnings?: string[];
   error?: string;
 };
 
@@ -9306,13 +12429,102 @@ export type FinishGateView = {
  */
 export const FINISH_OUTCOMES = ["completed", "examination_limited", "abandoned", "verification_unavailable"] as const;
 export type FinishOutcome = (typeof FINISH_OUTCOMES)[number];
+/**
+ * How a run stands or ended, beyond what a done can say: `paused` (a cap,
+ * the model provider's limit or the operator paused it; it goes on once the
+ * cause is gone, or the operator stops it) and `stopped` (the operator
+ * stopped it, or a cap did under cap-stop): never `completed`, whatever its
+ * answers say.
+ */
+export const RUN_OUTCOMES = ["completed", "examination_limited", "paused", "stopped", "abandoned", "verification_unavailable"] as const;
+export type RunOutcome = (typeof RUN_OUTCOMES)[number];
+/** The operator's stop of a run with no sentinel (swarm.sh stop): the outcome stopped, by whom, when, why. */
+export const STOPPED_REL = "done/STOPPED";
+
+/**
+ * How a run stands, from its own files: stopped (the operator's STOPPED, or
+ * the harness's sentinel at a cap), the outcome a done wrote in the
+ * sentinel, paused (a cap, the provider's limit or the operator's hold,
+ * the run not finished), or null while it runs and when every seat died
+ * with no sentinel (done/ALL_AGENTS_DEAD, paused or not).
+ */
+export async function runOutcome(sandboxRoot: string): Promise<{ outcome: RunOutcome | null; by: string | null; at: string | null; why: string | null }> {
+  const front = (text: string) => Object.fromEntries([...text.matchAll(/^([a-z_]+):[ \t]*(.*)$/gm)].map((m) => [m[1], m[2].trim()])) as Record<string, string>;
+  const stopped = await readFile(join(sandboxRoot, STOPPED_REL), "utf8").catch(() => null);
+  if (stopped !== null) {
+    try {
+      const j = JSON.parse(stopped) as { by?: string; at?: string; why?: string };
+      return { outcome: "stopped", by: j.by ?? null, at: j.at ?? null, why: j.why ?? null };
+    } catch {
+      return { outcome: "stopped", by: null, at: null, why: null };
+    }
+  }
+  const sentinel = await readFile(sentinelPath(sandboxRoot), "utf8").catch(() => null);
+  if (sentinel !== null) {
+    const f = front(sentinel);
+    const said = (RUN_OUTCOMES as readonly string[]).includes(f.outcome ?? "") ? (f.outcome as RunOutcome) : null;
+    const byCap = f.by === "harness" && (f.reason === "cap" || f.reason === "wall_clock");
+    return { outcome: byCap ? "stopped" : said, by: f.by ?? null, at: f.at ?? null, why: f.reason ?? null };
+  }
+  // Every seat dead and no sentinel (the reaper's done/ALL_AGENTS_DEAD): the
+  // run has no outcome of its own, paused or not; nothing will lift a pause
+  // it died in. Its readers name it from that file.
+  if (await lstat(join(sandboxRoot, ALL_DEAD_REL)).then(() => true).catch(() => false)) return { outcome: null, by: null, at: null, why: null };
+  const budget = await readBudget(sandboxRoot).catch(() => null);
+  if (budget?.paused) return { outcome: "paused", by: budget.paused.by ?? "harness", at: budget.paused.at, why: budget.paused.detail };
+  return { outcome: null, by: null, at: null, why: null };
+}
+
+/**
+ * The notice of a pause, claimed once: whichever process sees an
+ * unnotified pause first (the watchdog, the hub) creates its mark under
+ * traces/pause-notices/ and tells the operator; every other sees the mark.
+ * Durable, so a pause written by a pane, or one whose creator died before
+ * it said so, is still told. Claimed under pauseNoticeKey: a spell of the
+ * provider's limit is told once, whatever the harness's tries within it.
+ * True when this call claimed it.
+ */
+export async function claimPauseNotice(sandboxRoot: string, pausedAt: string): Promise<boolean> {
+  const dir = join(sandboxRoot, "traces", "pause-notices");
+  await mkdir(dir, { recursive: true });
+  const name = createHash("sha256").update(pausedAt).digest("hex").slice(0, 32);
+  return writeFile(join(dir, name), `${pausedAt}\n`, { encoding: "utf8", flag: "wx" }).then(
+    () => true,
+    () => false,
+  );
+}
+
+/** Record the operator's stop of a run that has no sentinel: done/STOPPED, once. */
+export async function markStopped(sandboxRoot: string, by: string, why: string): Promise<{ written: boolean }> {
+  // Under the lock an extension takes, so the two are ordered: one that
+  // came first is in the caps the stop leaves, one that comes after is refused.
+  return withTableLock(sandboxRoot, async () => {
+    if (await swarmDoneExists(sandboxRoot)) return { written: false };
+    const file = join(sandboxRoot, STOPPED_REL);
+    if (await lstat(file).then(() => true).catch(() => false)) return { written: false };
+    await mkdir(dirname(file), { recursive: true });
+    await writeFile(file, `${JSON.stringify({ outcome: "stopped", by, at: new Date().toISOString(), why })}\n`, { encoding: "utf8", flag: "wx" }).catch(() => undefined);
+    return { written: true };
+  });
+}
+
 /** The reason prefix of a done the harness could not check. */
 export const VERIFICATION_UNAVAILABLE_PREFIX = "VERIFICATION UNAVAILABLE: ";
 
+/**
+ * What a question may end on under the bar, said to the agents of a run
+ * under the operator's stop policy: every disposition, and the way to one
+ * when the evidence cannot answer it (docs/adr/0013).
+ */
+export const DISPOSITION_WORDS =
+  "every question in scope has a disposition under the bar: established; partial; a bounded negative or not determinable, each resting on a coverage record another seat has reviewed; a premise shown not to hold; out of scope; accepted by the operator; or withdrawn";
+export const NEGATIVE_PATH_WORDS =
+  "When the evidence cannot answer a question, that is an answer too: plan its routes (lead_open or lead_link with routes); when it needs a source the evidence does not hold, ask for it first (lead_close needs_operator with ask {kind: acquisition, source, where, expected_value, urgency}); record a coverage record (kind=coverage: what was searched, over which objects, how, what was covered, skipped and failed, the results, what is still open, whether the event would have left a trace, and the acquisition ask as acquisition_ask R-<n>, or why none in acquisition_none_why), have another seat review it (attest with review {detection, reproduced, other_route}), then answer not_determinable, or bounded_negative when nothing was found in that scope";
+
 /** The refusal of an abandon in an until-solved run: only the operator ends it. */
 export const UNTIL_SOLVED_NO_ABANDON =
-  "This run was started until solved: it ends when every question is answered, or when the operator stops it (swarm.sh stop). The agents cannot abandon it. " +
-  "Post what blocks you, open a lead for another route, or close a lead needs_operator for what only the operator can give, and keep working.";
+  `This run was started until solved (--stop operator): no caps, no wall clock, and it ends when ${DISPOSITION_WORDS}, or when the operator stops it (swarm.sh stop). The agents cannot abandon it. ` +
+  `${NEGATIVE_PATH_WORDS}. Post what blocks you, open a lead for another route, or close a lead needs_operator for what only the operator can give, and keep working.`;
 
 export type FinishVerdict =
   | { proceed: true; outcome: FinishOutcome; note?: string; reasonPrefix?: string }
@@ -9333,12 +12545,14 @@ export type FinishVerdict =
  * sentinel's reason says so, and the trace records why.
  */
 export function finishLineVerdict(run: FinishLineRun | null, abandon: boolean, opts: { untilSolved?: boolean } = {}): FinishVerdict {
-  // An until-solved run has one end the agents can reach: every question
-  // answered. Giving up is the operator's (swarm.sh stop), never a vote.
+  // A run under the operator's stop policy (--stop operator, --until-solved)
+  // has no caps and no wall clock, and one end the agents can reach: every
+  // question in scope with a disposition under the bar, the same end any run
+  // takes. Giving up is the operator's (swarm.sh stop), never a vote.
   const until = opts.untilSolved === true || run?.gate?.until_solved === true;
   if (!run || run.error) {
     const why = run?.error ? ` (${run.error})` : "";
-    if (until) return { proceed: false, failing: "(finish line unavailable)", reason: `The finish line could not be run${why}, so nothing can show that every question is answered, and this run ends only then. Say so on the board and keep working; the operator sees the same.` };
+    if (until) return { proceed: false, failing: "(finish line unavailable)", reason: `The finish line could not be run${why}, so nothing can show that every question has a disposition under the bar, and this run ends only then. Say so on the board and keep working; the operator sees the same.` };
     if (abandon) return { proceed: true, outcome: "abandoned", reasonPrefix: ABANDON_PREFIX, note: `the finish line could not be run${why}; abandoned on purpose` };
     return { proceed: true, outcome: "verification_unavailable", reasonPrefix: VERIFICATION_UNAVAILABLE_PREFIX, note: `the finish line could not be run${why}; done proceeds as verification_unavailable, never as completed` };
   }
@@ -9362,40 +12576,64 @@ export function finishLineVerdict(run: FinishLineRun | null, abandon: boolean, o
     };
   }
   if (run.total === 0 || run.passed >= run.total) {
-    // The goal's checks are met: an abandon asked for now is moot, as it
-    // always was; what the harness's gate says decides.
+    // The goal's checks are met: what the harness's gate says decides, and an
+    // abandon counts only while a question has no disposition under the bar.
     const noChecks = run.total === 0 ? "the goal has no checks" : undefined;
     const gate = run.gate;
     if (!gate) return { proceed: true, outcome: "completed", ...(noChecks ? { note: noChecks } : {}) };
     if (gate.error) {
-      if (until) return { proceed: false, failing: "(gate unavailable)", reason: `The goal's checks pass, but ${gate.error}; this run ends only when every question is shown answered. Say so on the board; the operator sees the same.` };
+      if (until) return { proceed: false, failing: "(gate unavailable)", reason: `The goal's checks pass, but ${gate.error}; this run ends only when every question is shown to have a disposition under the bar. Say so on the board; the operator sees the same.` };
       return { proceed: true, outcome: "verification_unavailable", reasonPrefix: VERIFICATION_UNAVAILABLE_PREFIX, note: gate.error };
     }
     if (gate.defects.length) {
       const each = gate.defects.map((d) => `- ${d.what}. Fix: ${d.fix}`).join("\n");
       return {
         proceed: false,
-        failing: `${gate.defects[0].code}${gate.defects[0].lead ? ` ${gate.defects[0].lead}` : ""}${gate.defects[0].job ? ` ${gate.defects[0].job}` : ""}`,
+        failing: `${gate.defects[0].code}${gate.defects[0].lead ? ` ${gate.defects[0].lead}` : ""}${gate.defects[0].job ? ` ${gate.defects[0].job}` : ""}${gate.defects[0].question ? ` ${gate.defects[0].question}` : ""}`,
         reason:
-          `The goal's checks pass, but material work is still open: ${gate.defects.length} item${gate.defects.length === 1 ? "" : "s"} the lead register holds against done:\n${each}\n` +
-          "A lead is disposed of with lead_close; a lead's job is interpreted by recording what its output shows with interprets naming it. Then call done again.",
+          `The goal's checks pass, but material work is still open: ${gate.defects.length} item${gate.defects.length === 1 ? "" : "s"} the lead and question registers hold against done:\n${each}\n` +
+          "A lead is disposed of with lead_close; a lead's job is interpreted by recording what its output shows with interprets naming it; a question in scope is answered in the ledger in its section. Then call done again.",
       };
     }
-    if (until && (gate.limited.length || (gate.questions ?? []).some((q) => q.outcome !== "answered"))) {
-      const open = (gate.questions ?? []).filter((q) => q.outcome !== "answered");
-      const qs = open.map((q) => `- question:${q.id} is ${q.outcome}: ${q.blocks.join("; ")}`).join("\n");
-      const other = gate.limited.filter((l) => !open.some((q) => l.startsWith(`question:${q.id} `)));
-      return {
-        proceed: false,
-        failing: open[0] ? `question:${open[0].id}` : "(examination-limited)",
-        reason:
-          "This run ends only when every question is answered: no answer that is inconclusive, rests on a limitation or a deferral, and no examination-limited finish. " +
-          `${open.length ? `Not answered yet:\n${qs}\n` : ""}${other.length ? `Also limiting the run:\n${other.map((l) => `- ${l}`).join("\n")}\n` : ""}` +
-          "Take the next of these: find another route, open a lead for it (lead_open), or close a lead needs_operator when only the operator can unblock it. Only the operator can stop this run.",
-      };
+    // One rule under every stop policy (docs/adr/0013, joint-r3 Phase 1a):
+    // done finishes a run only when every question in scope has a
+    // disposition under the bar (answered; partial; a bounded negative or not
+    // determinable on a coverage record another seat reviewed; a premise
+    // shown not to hold; out of scope; accepted; withdrawn). What holds it: a
+    // question with none (a best candidate, an unreviewed or stale negative,
+    // an answer resting on a limitation, a quick negative nobody attested),
+    // and a defect a limitation only names: "looked, not found" is no end.
+    // The stop policy decides only who else ends the run: a cap pauses or
+    // stops it, and the operator stops it, whatever the questions' state
+    // (paused, stopped; never completed). Under --stop operator nothing else
+    // does, and nobody abandons.
+    {
+      const acceptedIds = (gate.questions ?? []).filter((q) => q.outcome === "accepted").map((q) => q.id);
+      const byOperator = (l: string) => (gate.accepted ?? []).includes(l) || acceptedIds.some((id) => l.startsWith(`question:${id} `));
+      const open = (gate.questions ?? []).filter((q) => q.outcome !== "answered" && q.outcome !== "accepted" && q.outcome !== "withdrawn" && !q.disposition);
+      // A gate from before dispositions says nothing of what holds beside its questions: every line an operator did not take holds.
+      const holding = gate.holding ?? gate.limited.filter((l: string) => !byOperator(l) && !open.some((q) => l.startsWith(`question:${q.id} `)));
+      if (open.length || holding.length) {
+        // Giving up is still a way out where the operator is not the only one who ends the run.
+        if (abandon && !until) return { proceed: true, outcome: "abandoned", reasonPrefix: ABANDON_PREFIX, note: `the goal's checks pass, and ${open.length ? `${open.length} question(s) have no disposition under the bar` : "a defect a limitation only names stands"}; abandoned on purpose` };
+        const qs = open.map((q) => `- question:${q.id} is ${q.outcome}, with no disposition under the bar: ${q.blocks.join("; ")}`).join("\n");
+        return {
+          proceed: false,
+          failing: open[0] ? `question:${open[0].id}` : "(a defect a limitation names)",
+          reason:
+            (until
+              ? `This run's stop is the operator's (--stop operator): no caps, no wall clock, and it ends when ${DISPOSITION_WORDS}; with no material lead open and no defect. `
+              : `done finishes a run, whatever its stop policy, only when ${DISPOSITION_WORDS}; with no material lead open and no defect. A cap pauses or stops the run whatever the questions' state, and the operator may stop it: that end is stopped, never completed. `) +
+            `${open.length ? `No disposition yet:\n${qs}\n` : ""}${holding.length ? `A defect is fixed, never only named:\n${holding.map((l) => `- ${l}`).join("\n")}\n` : ""}` +
+            `${NEGATIVE_PATH_WORDS}. Otherwise take another route (lead_open), or close a lead needs_operator when only the operator can unblock it. ` +
+            (until ? "Only the operator can stop this run." : "If the goal cannot be met at all, call done again with abandon: true and say why on the board."),
+        };
+      }
     }
-    if (gate.limited.length) return { proceed: true, outcome: "examination_limited", note: `examination-limited: ${gate.limited.join("; ")}` };
-    return { proceed: true, outcome: "completed", ...(noChecks ? { note: noChecks } : {}) };
+    const warned = gate.warnings?.length ? `warnings (not held on): ${gate.warnings.join("; ")}` : "";
+    if (gate.limited.length) return { proceed: true, outcome: "examination_limited", note: [`examination-limited: ${gate.limited.join("; ")}`, warned].filter(Boolean).join("; ") };
+    const note = [noChecks, warned].filter(Boolean).join("; ");
+    return { proceed: true, outcome: "completed", ...(note ? { note } : {}) };
   }
   if (until && abandon) return { proceed: false, failing: "(until solved)", reason: UNTIL_SOLVED_NO_ABANDON };
   if (abandon) return { proceed: true, outcome: "abandoned", reasonPrefix: ABANDON_PREFIX, note: `${run.passed} of ${run.total} checks pass; abandoned on purpose` };

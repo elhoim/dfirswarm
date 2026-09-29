@@ -9,7 +9,7 @@ import type { VmTimeline } from "./vm-timeline.ts";
  */
 export type SwarmPhase = "running" | "done" | "stopped" | "prepared" | "failed" | "finish_failed" | "stop_incomplete" | "unknown";
 export type AgentMarker = "done" | "dead" | "stalled" | "active";
-export type PostTag = "intro" | "ask" | "claim" | "result" | "hold" | "veto" | "stop";
+export type PostTag = "intro" | "ask" | "claim" | "result" | "hold" | "veto" | "stop" | "question";
 
 export type SwarmRow = {
   id: string;
@@ -52,6 +52,14 @@ export type SwarmRow = {
   sentinel_by: string | null;
   /** budget.json stop_reason (cap / wall_clock), when the harness steered or stopped. */
   stop_reason: string | null;
+  /** What the run does at a cap (docs/adr/0013). Absent from an older server. */
+  stop_policy?: "cap-pause" | "cap-stop" | "operator";
+  /** The pause in force: seats idle, no model call. reason cap, wall_clock, provider_limit (until: the end the provider named) or operator. */
+  paused?: { at: string; reason: string; detail: string; until?: string } | null;
+  /** completed, examination_limited, paused, stopped, abandoned, verification_unavailable, or null while it runs. */
+  outcome?: string | null;
+  /** How many times the run was resumed (swarm.sh resume). */
+  resumes?: number;
   /** Tools the run forged and kept a manifest for: what a next swarm can start with. */
   tools_forged: number;
   /** The evidence directory the run was given, or null: what a clean room is about. */
@@ -473,12 +481,153 @@ export type SwarmView = {
   custody?: CustodyView | null;
   /** The lead register in numbers; null when the run opened no lead. Absent from a server that predates it. */
   leads?: LeadsBrief | null;
+  /** The question register in numbers; null when the run has no question and no objective. Absent from a server that predates it. */
+  questions?: QuestionsBrief | null;
   /** The run was started until solved: no wall clock, caps advisory, only the operator ends it. */
   until_solved?: boolean;
+  /** The dynamic network in brief; null when the network is closed and nothing was asked. Absent from a server that predates it. */
+  network?: NetworkBrief | null;
+  /** The operator requests in numbers (the header's badge); null when nothing was asked of the operator. Absent from a server that predates it. */
+  requests?: RequestsBrief | null;
+};
+
+/** Mirrors `RequestsBrief` in `extensions/requests.ts`. */
+export type RequestsBrief = { total: number; open: number; by_kind: Record<string, number>; pending: number; acquisitions_open: number; chain_ok: boolean };
+
+/** What an acquisition asks for; mirrors `AcquisitionAsk` in `extensions/requests.ts`. */
+export type AcquisitionAsk = { kind: "acquisition"; source: string; where: string; questions: string[]; expected_value: string; urgency: "normal" | "urgent" | "volatile"; owner: string; authority_needed: string };
+
+/** One operator request; mirrors `OperatorRequest` in `extensions/requests.ts`. */
+export type OperatorRequest = {
+  rid: string;
+  n: number;
+  kind: "lead" | "acquisition" | "clarification" | "decision" | "network";
+  key: string;
+  at: string;
+  by: string;
+  line: Record<string, unknown>;
+  ask: AcquisitionAsk | null;
+  questions: string[];
+  lead: string | null;
+  imported: boolean;
+  state: "pending" | "notified" | "acknowledged" | "answered" | "declined" | "withdrawn";
+  stage: "requested" | "authorised" | "declined" | "collecting" | "received" | "validated" | "unavailable" | null;
+  notified: Array<{ at: string; targets: string[] }>;
+  acknowledged: { at: string; by: string } | null;
+  closed: { ev: "answered" | "declined" | "withdrawn"; at: string; by: string; text: string; cause: string } | null;
+  stages: Array<{ stage: string; at: string; by: string; why: string; import?: string; inventory_rev?: number; sha256?: string[] }>;
+  history: Array<{ seq: number; at: string; ev: string; by: string; text?: string; why?: string; cause?: string; stage?: string; targets?: string[] }>;
+  last_seq: number;
+};
+
+/** The Requests tab; mirrors `RequestsPanelView` in `scripts/ui/requests.ts`. */
+export type RequestsPanelView = {
+  brief: RequestsBrief;
+  chain: { ok: boolean; broken_at: number | null; reason: string | null; head: string | null };
+  requests: OperatorRequest[];
+  more_evidence: string;
+  material: Array<Record<string, unknown>>;
+  now: string;
+};
+
+/** Mirrors `QuestionsBrief` in `scripts/ui/model.ts`. */
+export type QuestionsBrief = { in_scope: number; persons: number; unanswered: number; proposed: number; triage: number; clarifications: number; chain_ok: boolean };
+
+/** Who acted on a question; mirrors `QuestionOrigin` in `extensions/questions.ts`. */
+export type QuestionOrigin = {
+  kind: "goal" | "agent" | "analyst" | "reviewer" | "observer";
+  person?: string;
+  name?: string;
+  role?: "operator" | "examiner" | "analyst" | "reviewer" | "observer";
+  agent?: string;
+  os_user?: string;
+  host?: string;
+  via?: string;
+  enrolled?: boolean;
+  identity?: "claimed" | "signed";
+  fingerprint?: string;
+  source_entry?: string;
+};
+
+/** A question as the register shows it; mirrors `QuestionView` in `extensions/questions.ts`. */
+export type QuestionView = {
+  id: string;
+  section: string;
+  origin: QuestionOrigin;
+  author: string;
+  text: string;
+  rev: number;
+  revisions: Array<{ rev: number; text: string; at: string; by: string; origin: QuestionOrigin; why?: string; seq: number }>;
+  neutral: { text: string; at: string; origin: QuestionOrigin; rev: number } | null;
+  why: string;
+  objective: string | null;
+  objective_text: string | null;
+  parent: string | null;
+  materiality: "material" | "background";
+  priority: "normal" | "urgent";
+  priority_reason: string | null;
+  expects: string | null;
+  hints: Array<{ ref: string; value?: string }>;
+  attachments: string[];
+  suggested_to: string | null;
+  deadline: string | null;
+  scope: "in_scope" | "proposed" | "excluded";
+  scope_why: string;
+  scope_history: Array<{ at: string; scope: string; why: string; origin: QuestionOrigin | null }>;
+  review_query: boolean;
+  leading_forms: string[];
+  after_done: boolean;
+  withdrawn: { at: string; why: string; origin: QuestionOrigin } | null;
+  accepted: { at: string; as: string; why: string; rev: number; origin: QuestionOrigin; stands: boolean } | null;
+  disposition: Record<string, unknown> | null;
+  work: "admitted" | "working" | "clarification_needed" | "paused" | null;
+  answer: { seq: number; at: string; inconclusive: boolean; result?: string; question_rev?: number; stale: boolean } | null;
+  leads: Array<{ id: string; status: string; holder: string | null; disposition?: string; opened_by: string }>;
+  clarifications: Array<{ id: string; at: string; by: string; what: string; to: string; answer: { at: string; by: string; text: string; origin: QuestionOrigin | null } | null }>;
+  pending_clarifications: string[];
+  offers: Array<{ at: string; to: string; rev: number; first: boolean; until: string | null; why: string; seq: number; seen_at?: string | null; declined?: { at: string; why: string } | null; accepted?: { at: string } | null }>;
+  delivered: Array<{ rev: number; at: string; post: { thread: string; id: number } | null; hypotheses: number[] }>;
+  signed: Array<{ act_seq: number; sign_seq: number; person: string; fingerprint: string }>;
+  opened_at: string;
+  opened_by: string;
+};
+
+/** The Questions tab; mirrors `QuestionsPanelView` in `scripts/ui/model.ts`. */
+export type QuestionsPanelView = {
+  questions: QuestionView[];
+  objectives: Array<{ id: string; text: string; why: string; added_by: string | null }>;
+  triage: Array<{ seq: number; at: string; q: string | null; lead: string | null; cause: string; entries: number[]; resolved: { at: string; decision: string; why: string; origin: QuestionOrigin | null } | null }>;
+  chain: { ok: boolean; broken_at: number | null; reason: string | null; head: string | null; events: number };
+  seeded: boolean;
+  signatures: Array<{ q: string | null; act_seq: number; sign_seq: number | null; person: string; fingerprint: string; key_kind: string; state: string; detail: string }>;
+  seats: string[];
+  budget: { cap_usd: number; spent_usd: number; tokens: number; cap_tokens: number | null; until_solved: boolean } | null;
 };
 
 /** Mirrors `LeadsBrief` in `scripts/ui/model.ts`. */
 export type LeadsBrief = { open: number; active: number; blocked: number; closed: number; waiting_on_operator: number; uncovered: number; chain_ok: boolean };
+
+/** The dynamic network in brief; mirrors `NetworkBrief` in `scripts/ui/network.ts`. */
+export type NetworkBrief = { mode: string; policy: string; waiting: number; grants_in_force: number; requests: number; chain_ok: boolean; contamination: number };
+
+/** One machine-readable reason of the network's policy engine (scripts/net-policy.ts). */
+export type NetReason = { step: number; rule: string; code: string; detail: string; overridable: boolean };
+
+/** The Network tab; mirrors `NetworkPanelView` in `scripts/ui/network.ts` (net-broker.ts NetListing). */
+export type NetworkPanelView = {
+  policy: { policy: string; network: string; lookups: string; contact: string; disclosure: Record<string, string>; evidence_link: string; sockets: string; category_override: boolean; legal: string; provider_retention: string };
+  lines: string[];
+  now: string;
+  service: { port: number | null; keyed: string[] };
+  chain: { ok: boolean; broken_at: number | null; reason: string | null; events: number };
+  fetch_chain: { ok: boolean; broken_at: number | null; reason: string | null; events: number };
+  items: Array<{ id: string; host: string; lead: string | null; requests: string[]; reasons: NetReason[]; opened_at: string; opened_by: string; closed: { how: string; by: string; at: string; why: string } | null }>;
+  requests: Array<{ id: string; at: string; by: string; principal: string; lead: string | null; type: string; host: string | null; adapter: string | null; url: string | null; purpose: string; evidence: string[]; decision: string | null; decided_by: string | null; reasons: NetReason[]; grant: string | null; item: string | null; why: string | null }>;
+  grants: Array<{ id: string; type: string; request: string | null; principal: string; lead: string | null; adapter: string | null; method: string | null; url: string | null; host: string; port: number; granted_by: string; why: string | null; granted_at: string; expires_at: string | null; status: string; status_why: string | null; uses: number; left: number | null; max_requests: number | null; max_bytes: number | null; bound: string | null; waived: string[] }>;
+  captures: Array<{ capture: string; grant: string; principal: string; method: string; url: string; at: string; status: number | null; bytes: number | null; sha256: string | null; complete: boolean; delivered: boolean; error: string | null; refused: string | null }>;
+  refusals: Array<{ at: string; grant: string | null; principal: string; code: string; detail: string }>;
+  contamination: Array<{ at: string; by: string; grant?: string; capture?: string; what: string; why: string; category?: string }>;
+};
 
 /** A lead as the register shows it; mirrors `LeadView` in `extensions/leads.ts`. */
 export type LeadView = {
@@ -490,9 +639,9 @@ export type LeadView = {
   material: boolean;
   holder: string | null;
   generation: number;
-  needs: Array<{ need: string; met: boolean; why?: string }>;
+  needs: Array<{ need: string; met: boolean; why?: string; outcome?: "satisfied" | "pending" | "failed" | "invalidated" }>;
   answers: string[];
-  disposition?: "resolved" | "negative" | "duplicate" | "deferred" | "infeasible" | "needs_operator";
+  disposition?: "resolved" | "negative" | "duplicate" | "deferred" | "infeasible" | "needs_operator" | "withdrawn";
   ref?: string;
   closed_by?: string;
   closed_at?: string;
@@ -506,6 +655,35 @@ export type LeadView = {
   jobs: string[];
   notes: Array<{ at: string; by: string; text: string; allow_host?: string }>;
   reopened: Array<{ at: string; by: string; why: string; cause: string }>;
+  proposition?: string;
+  negation?: string;
+  product?: string;
+  acceptance?: string;
+  /** Its revision (lead_reopen and lead_confirm name it). */
+  rev?: number;
+  /** The offer that holds it for one seat now (docs/adr/0015). */
+  offered?: { to: string; reason: string; until: string; state: string; from?: string };
+  /** A closure whose entry was superseded, waiting for its closer to confirm it or reopen it. */
+  confirm?: { ref_was: string; head: string | null; since: string; to: string | null };
+  overlap?: { kind: string; why: string; by: string };
+  covered_by?: string[];
+  next_action?: string;
+  result_refs?: string[];
+  dropped?: Array<{ need: string; why: string; at: string; by: string }>;
+  route_reviews?: Array<{ at: string; by: string; material: boolean; why: string; cycle: number; ref: string }>;
+  inputs?: string[];
+  /** A closure confirmed on the entry that stands after its first was superseded. */
+  confirmed?: Array<{ at: string; by: string; from: string; to: string; why: string }>;
+};
+
+/** The finish on the Leads tab; mirrors `FinishPanel` in `scripts/ui/model.ts` (docs/adr/0015). */
+export type FinishPanel = {
+  ready: boolean;
+  items: string[];
+  limited: string[];
+  coordinator: { holder: string; generation: number; why: string; report: string | null } | null;
+  last_check: { at: string; by: string; proceed: boolean; outcome: string | null; reason: string | null; current: boolean } | null;
+  late: Array<{ kind: "post" | "objection"; id: number; by: string; tag?: string; why?: string }>;
 };
 
 /** The Leads tab; mirrors `LeadsPanelView` in `scripts/ui/model.ts`. */
@@ -516,7 +694,11 @@ export type LeadsPanelView = {
   requests: Array<Record<string, unknown>>;
   hosts: string[];
   coverage: { questions: string[]; existence: string[]; unanswered: string[]; uncovered: string[]; open_leads_for: Record<string, string[]> };
-  awaiting: Array<{ job: string; agent: string; lead: string | null; why: string; unread_bytes?: number; total_bytes?: number; next_offset?: number }>;
+  awaiting: Array<{ job: string; agent: string; lead: string | null; why: string; unread_bytes?: number; total_bytes?: number; next_offset?: number; reinterpret?: true }>;
+  /** Held leads with nothing done on them while their holders work elsewhere, offered on. */
+  parked?: Array<{ lead: string; holder: string; idle_ms: number; since: string; elsewhere?: string }>;
+  /** The finish: null once the run is finished. */
+  finish?: FinishPanel | null;
 };
 
 /** What produced the run, as the kickoff recorded it. */
@@ -790,7 +972,7 @@ export type TracePage = {
 
 export type Job = {
   id: string;
-  kind: "start" | "stop" | "reap" | "hold" | "release" | "export" | "package" | "verify" | "purge" | "review";
+  kind: "start" | "stop" | "reap" | "hold" | "release" | "export" | "package" | "verify" | "purge" | "review" | "lead" | "question" | "extend" | "unpause" | "resume" | "net";
   argv: string[];
   status: "running" | "ok" | "failed";
   exit_code: number | null;
@@ -801,6 +983,8 @@ export type Job = {
   swarm_id: string | null;
   /** An export's file, downloadable from /api/jobs/:id/download once the job is done. */
   output_file?: string;
+  /** The whole output, kept on disk; stdout and stderr carry its last part and say so. Served whole at /api/jobs/:id/output?stream=… */
+  output?: { stdout: { file: string; bytes: number }; stderr: { file: string; bytes: number } };
 };
 
 export type LocalModel = { model: string; provider: string; base_url: string; has_key: boolean; metered: boolean };
@@ -840,6 +1024,10 @@ export type ChangeKind =
   | "store"
   /** leads/: the lead register, and what the agents asked of the operator. */
   | "leads"
+  /** questions/: the question register. */
+  | "questions"
+  /** network/: the dynamic network's requests, grants and fetches. */
+  | "network"
   /** A live VM run's hub wrote its status: the seats' states moved. */
   | "hub"
   | "other";
@@ -995,7 +1183,7 @@ export type EnrolledPerson = {
   name: string;
   organisation: string;
   competence: string;
-  role: "examiner" | "reviewer";
+  role: "examiner" | "reviewer" | "analyst" | "observer";
   principal: string;
   key: {
     kind: "ssh" | "fido" | "pkcs11";
@@ -1123,10 +1311,37 @@ export type StoreJobRow = {
   generation_status: string | null;
   notified: Array<{ to: string; how: string; at: string }>;
   deduplicated: number;
+  /** Asked as an intended reproduction of another seat's work. */
+  independent: boolean;
+  /** Its job_similar line's entries, whole: other seats' jobs doing the same over the same objects when it was accepted. */
+  similar: StoreSimilar[];
+  /** Its job_same_as line's entries, whole: its files that are an earlier job's output byte for byte. */
+  same_as: StoreSameAs[];
   cancel_requested: string | null;
   parent: string | null;
   note: string | null;
+  /** A program its image did not hold (exit 127, or "command not found"): shown for the images' upkeep. */
+  program_missing?: { program: string | null; profile: string | null; image: string | null } | null;
 };
+
+/** A similar job as the journal names it (scripts/job-reuse.ts Similar). */
+export type StoreSimilar = {
+  job: string;
+  seat: string;
+  name?: string;
+  state: string;
+  status?: string;
+  outputs?: { files: number; bytes: number; path: string };
+  lead: string | null;
+  objects: "same" | "overlap";
+  shared: number;
+  match: string;
+  op: string | null;
+  independent?: boolean;
+};
+
+/** A file the same as an earlier job's output (scripts/job-reuse.ts SameAs). */
+export type StoreSameAs = { path: string; sha256: string; bytes: number; job: string; file: string };
 
 /** GET /api/swarms/:id/jobs: a page of the run's tool jobs, totals over all of them, the run's own journal lines and custody's store line. */
 export type StoreJobsView = {

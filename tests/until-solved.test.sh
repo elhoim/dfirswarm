@@ -24,7 +24,8 @@ sandbox_of() { jq -r --arg l "$1" '.runs[] | select(.label == $l) | .sandbox' "$
 
 out="$(kick --until-solved --label us1)" || fail "an until-solved kickoff with no cap was refused: $out"
 grep -q 'Cap:          none: until solved' <<<"$out" || fail "the kickoff does not say there is no cap: $out"
-grep -q 'Until solved: done only when every question is answered; no abandon; a regroup after 15 minutes' <<<"$out" || fail "the kickoff does not say how the run ends: $out"
+# How the run ends: every question with a disposition under the bar, as any run (before 2026-09-28 it said "done only when every question is answered").
+grep -q 'Until solved: no caps and no wall clock; done when every question in scope has a disposition under the bar (a reviewed not_determinable included: examination-limited); no abandon; a regroup after 15 minutes' <<<"$out" || fail "the kickoff does not say how the run ends: $out"
 sb="$(sandbox_of us1)"
 [[ "$(jq -r '.until_solved' "$sb/budget.json")" == true ]] || fail "budget.json does not say until_solved"
 [[ "$(jq -r '.wall_clock_minutes' "$sb/budget.json")" == 0 ]] || fail "an until-solved run has a wall clock: $(jq -c . "$sb/budget.json")"
@@ -34,6 +35,11 @@ grep -q '^## Until solved$' "$sb/SWARM.md" || fail "the contract has no Until so
 grep -q 'There is none for the agents: only the operator stops this run' "$sb/SWARM.md" || fail "the contract still offers the agents a bail-out"
 grep -q 'Wall clock:' "$sb/SWARM.md" && fail "the contract still names a wall clock"
 grep -q 'nothing is stopped for it' "$sb/SWARM.md" || fail "the contract does not say the caps are advisory"
+# The contract says the negative bar's path to an end, and no longer that an examination-limited end is refused.
+grep -q 'it asks nothing more of an answer than any run does' "$sb/SWARM.md" || fail "the contract does not say the policy adds no answer requirement"
+grep -q 'then answer not_determinable (or bounded_negative' "$sb/SWARM.md" || fail "the contract does not say the not_determinable path"
+grep -q 'examination-limited, which is a proper end' "$sb/SWARM.md" || fail "the contract does not say examination-limited is an end"
+grep -q 'examination-limited finish is not accepted' "$sb/SWARM.md" && fail "the contract still refuses an examination-limited end"
 pass "--until-solved: no wall clock, no cap required, the mode in budget.json, the registry and the contract"
 
 out="$(kick --until-solved --cap-usd 50 --stall-minutes 20 --label us2)" || fail "an until-solved kickoff with an advisory cap was refused: $out"

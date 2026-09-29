@@ -104,7 +104,7 @@ fi
 out="$(swarm review s9 --sign --pdf --yes)" || fail "the sign-off failed: $out"
 grep -q 'Consent:      presented; its confirmation was skipped (--yes)' <<<"$out" || fail "the sign-off does not say the consent was only presented: $out"
 grep -q 'Release:      v1 ADOPTED by Ada Examiner (Lab One), signed with SHA256:.* (with report.pdf)' <<<"$out" || fail "no adopted release: $out"
-grep -q 'a new examination is a new run' <<<"$out" || fail "the evidence cutoff is not said: $out"
+grep -q 'further examination is the run resumed (a later release binds it) or a new run' <<<"$out" || fail "the evidence cutoff is not said: $out"
 [[ -f "$SB/release/v1/report.pdf" ]] || fail "no report.pdf in release v1"
 grep -q 'class="watermark"' "$SB/release/v1/report.html" && fail "the adopted release's HTML carries the DRAFT mark"
 grep -q 'class="watermark"' "$SB/release/v0/report.html" || fail "the draft's HTML has no DRAFT mark"

@@ -299,3 +299,27 @@ test("a link in a job's directory is not read, whatever it points at", async () 
   assert.deepEqual([linked.service, linked.jobs, linked.journal], [true, [], null]);
   assert.match(linked.note ?? "", /store\/journal\.jsonl was not read: a link/);
 });
+
+test("the reuse hints on a job's row, whole: every similar job its job_similar line names, every same_as file, and a reproduction said", async () => {
+  const { S, journal } = await scratchRun("reuse");
+  await journal.append({ type: "job_accepted", job: "j000001", spec: spec("strings inputs/disk.img"), requester: { agent: "a2" } });
+  await journal.append({ type: "job_accepted", job: "j000002", spec: { ...spec("strings -a inputs/disk.img"), independent: true }, requester: { agent: "a1" } });
+  const similar = Array.from({ length: 14 }, (_, i) => ({ job: `j0000${String(i + 10)}`, seat: "a2", name: "Comet", state: "committed", status: "ok", outputs: { files: 1, bytes: 9, path: `store/jobs/j0000${i + 10}/out` }, lead: "L-4", objects: "same", shared: 1, match: "same leading command", op: "command:strings" }));
+  await journal.append({ type: "job_similar", job: "j000002", by: { agent: "a1" }, independent: true, similar });
+  const sameAs = Array.from({ length: 25 }, (_, i) => ({ path: `f${i}.txt`, sha256: "c".repeat(64), bytes: 9, job: "j000001", file: `f${i}.txt` }));
+  await journal.append({ type: "job_same_as", job: "j000002", same_as: sameAs });
+  const view = await readStoreJobs(S);
+  const [plain, hinted] = view.jobs;
+  assert.deepEqual([plain.independent, plain.similar, plain.same_as], [false, [], []]);
+  assert.equal(hinted.independent, true);
+  assert.deepEqual(hinted.similar, similar, "every entry of the line, as written");
+  assert.deepEqual(hinted.same_as, sameAs, "every file, as written");
+  const detail = (await readStoreJob(S, "j000002")) as StoreJobDetail;
+  assert.deepEqual(detail.row.similar.length, 14);
+  assert.ok(detail.lines.some((l) => l.type === "job_similar") && detail.lines.some((l) => l.type === "job_same_as"), "the lines themselves are among the job's");
+  // The console renders every one: the first ten at once, the rest a click away on the same page.
+  const panel = await readFile(join(ROOT, "ui", "src", "screens", "detail", "jobs-panel.tsx"), "utf8");
+  assert.match(panel, /<ShownWhole items=\{r\.similar\}/);
+  assert.match(panel, /<ShownWhole items=\{r\.same_as\}/);
+  assert.match(panel, /the other \$\{plural\(rest\.length, unit\)\}/);
+});

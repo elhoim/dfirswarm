@@ -1,6 +1,14 @@
 {
   "name": "browser_history",
   "description": "Query a browser history database, copying it and any -wal beside it first so the write-ahead log is replayed rather than ignored. Named queries for Chrome, Edge and Firefox, or your own SELECT.",
+  "use": {
+    "names": [
+      "History",
+      "History.db",
+      "places.sqlite",
+      "WebHistory.db"
+    ]
+  },
   "params": {
     "path": {
       "type": "string",

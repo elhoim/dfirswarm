@@ -154,7 +154,7 @@ test("a part the verdict sealed, or one the package lists as present, cannot be 
 });
 
 /** A run with custody taken and an examiner's sign-off, packaged as swarm.sh package lays it out. */
-async function sealedPackage(o: { dispute?: boolean; leads?: boolean } = {}): Promise<{ root: string; runs: string; pkg: string }> {
+async function sealedPackage(o: { dispute?: boolean; leads?: boolean; questions?: boolean } = {}): Promise<{ root: string; runs: string; pkg: string }> {
   const runs = await mkdtemp(join(tmpdir(), "pkg-sealed-"));
   dirs.push(runs);
   const root = join(runs, "sp001");
@@ -177,6 +177,11 @@ async function sealedPackage(o: { dispute?: boolean; leads?: boolean } = {}): Pr
     const closed = await L.closeLead({ sandboxRoot: root, agentId: "a0" }, "L-1", { disposition: "resolved", ref: "E-1" });
     assert.equal(closed.ok, true, JSON.stringify(closed));
   }
+  if (o.questions) {
+    const Q = await import("../extensions/questions.ts");
+    const asked = await Q.act(root, { kind: "human", role: "operator", person: "tester@lab", enrolled: false, os_user: "tester", host: "lab", via: "cli", identity: "claimed" }, "open", { text: "Was the imager's clock checked against a reference?", why: "The date rests on it" });
+    assert.equal(asked.ok, true, JSON.stringify(asked));
+  }
   await takeCustody(root, { runsDir: runs });
   await appendReview(runs, "sp001", root, { action: "sign", examiner: "H. Examiner" });
   const pkg = join(root, "package");
@@ -195,6 +200,10 @@ async function sealedPackage(o: { dispute?: boolean; leads?: boolean } = {}): Pr
   if (o.leads) {
     await cp(join(root, "leads", "leads.jsonl"), join(pkg, "leads.jsonl"));
     await cp(join(root, "leads", "leads.md"), join(pkg, "leads.md"));
+  }
+  if (o.questions) {
+    await cp(join(root, "questions", "questions.jsonl"), join(pkg, "questions.jsonl"));
+    await cp(join(root, "questions", "questions.md"), join(pkg, "questions.md"));
   }
   writeComponents(root, pkg);
   return { root, runs, pkg };
@@ -273,4 +282,23 @@ test("the lead register travels with the package, unsigned: its chain is walked 
   v = verifyPackage(pkg);
   assert.equal(v.ok, false);
   assert.match(v.lines.join("\n"), /leads\.jsonl \(declared present\)/);
+});
+
+test("the question register travels with the package: its chain is walked and held to the head the verdict sealed", async () => {
+  const { pkg } = await sealedPackage({ questions: true });
+  let v = verifyPackage(pkg);
+  assert.equal(v.ok, true, v.lines.join("\n"));
+  assert.match(v.lines.join("\n"), /Questions:    \d+ events, chain intact; head sealed/);
+  const components = JSON.parse(await readFile(join(pkg, "COMPONENTS.json"), "utf8")) as { components: Array<{ path: string; present: boolean }> };
+  assert.equal(components.components.find((c) => c.path === "questions.jsonl")?.present, true);
+  assert.equal(components.components.find((c) => c.path === "questions.md")?.present, true);
+  const text = await readFile(join(pkg, "questions.jsonl"), "utf8");
+  await writeFile(join(pkg, "questions.jsonl"), text.replace("against a reference", "against the wall clock"));
+  v = verifyPackage(pkg);
+  assert.equal(v.ok, false);
+  assert.match(v.lines.join("\n"), /Questions:    CHAIN BROKEN at line \d+ \(the line was rewritten\)/);
+  await rm(join(pkg, "questions.jsonl"));
+  v = verifyPackage(pkg);
+  assert.equal(v.ok, false);
+  assert.match(v.lines.join("\n"), /questions\.jsonl \(declared present\)/);
 });

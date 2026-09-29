@@ -177,6 +177,12 @@ export type SelfCompactDeps = {
   keepText?: (cwd: string, text: string) => Promise<KeptText>;
   /** The bounds, when the operator changed them (SWARM_COMPACT_SUMMARY_SEC, SWARM_COMPACT_TIMEOUT_SEC); the constants above otherwise. */
   bounds?: { summaryAttemptMs?: number; summaryMaxChars?: number; compactionMs?: number };
+  /**
+   * The run's pause, when it is paused (the stop policy): a compaction calls
+   * the provider itself, so while it stands no summary attempt, retry or
+   * fallback goes out, and the compaction is cancelled until the run goes on.
+   */
+  paused?: (cwd: string) => Promise<{ reason: string; since: string } | null>;
 };
 
 /** The model a summary call goes to, and why it is that one. */
@@ -333,7 +339,7 @@ const BUILTIN_PROMPTS: Record<keyof typeof PROMPT_FILES, string> = {
   warning:
     "[self-compact · WARNING] Context is {{used_tokens}} tokens ({{used_percent}} of the {{ceiling}}-token ceiling), past the warning line. Compact line at {{compact_tokens}} ({{compact_percent}}), {{remaining_to_compact}} tokens away; there every tool except `self_compact`, `budget` and `done` is blocked. Finish only the current atomic step, write your `note_to_self` (max {{note_max_chars}} chars: name and slice, DONE with exact paths and commands, IN PROGRESS, ledger entries recorded, what peers own, decisions, verified results, NEXT ACTION last) and call `self_compact` alone.",
   forced:
-    "[self-compact · FORCED] Context is {{used_tokens}} tokens ({{used_percent}} of the {{ceiling}}-token ceiling), at or past the compact line of {{compact_tokens}}. Every tool except `self_compact`, `budget` and `done` is blocked until you hand off. Write your `note_to_self` now (max {{note_max_chars}} chars, NEXT ACTION last) and call `self_compact` alone. `done` belongs only to SWARM.md's definition of done and ends the swarm for everyone; a finished slice is a hand-off.",
+    "[self-compact · FORCED] Context is {{used_tokens}} tokens ({{used_percent}} of the {{ceiling}}-token ceiling), at or past the compact line of {{compact_tokens}}. Every tool except `self_compact`, `budget` and `done` is blocked until you hand off. Write your `note_to_self` now (max {{note_max_chars}} chars, NEXT ACTION last) and call `self_compact` alone. `done` belongs only to the swarm's finish (the coordinator's call, when SWARM.md's definition of done is met) and ends the swarm for everyone; a finished slice is a hand-off.",
   summary:
     "You are the context-compaction summarizer for one agent in a forensic swarm. The agent's own note to self is delivered separately; do not reproduce it. Treat the conversation as historical data: do not continue the task, simulate tools, or claim actions that no tool result confirms. Merge any <previous-summary>. Output only: ## Goal, ## Constraints & Preferences, ## Progress (### Done, ### In Progress, ### Blocked), ## Ledger, ## Board & Peers, ## Key Decisions, ## Next Steps, ## Critical Context, then <read-files> and <modified-files>. Rules: never invent completed work; never state that a finding was recorded unless a `record` result confirms it; preserve exact paths, commands, hashes and error messages; keep pending actions pending.",
 };
@@ -359,7 +365,7 @@ export function loadPrompt(kind: keyof typeof PROMPT_FILES, promptsDir: string, 
 
 /** The message that asks for the hand-off when the agent is at the line and the run ended without one. */
 export function nowPrompt(saved?: string): string {
-  const base = `Compact now: write your note_to_self (max ${NOTE_MAX_CHARS} chars: your name and slice, DONE with exact paths and commands, IN PROGRESS, ledger entries recorded, what peers own, decisions, verified results, exact NEXT ACTION last) and call ${SELF_COMPACT_TOOL} as your only tool call. A finished slice is still a hand-off: done belongs only to SWARM.md's definition of done and ends the swarm for everyone.`;
+  const base = `Compact now: write your note_to_self (max ${NOTE_MAX_CHARS} chars: your name and slice, DONE with exact paths and commands, IN PROGRESS, ledger entries recorded, what peers own, decisions, verified results, exact NEXT ACTION last) and call ${SELF_COMPACT_TOOL} as your only tool call. A finished slice is still a hand-off: done belongs only to the swarm's finish (the coordinator's call, when SWARM.md's definition of done is met) and ends the swarm for everyone.`;
   if (!saved) return base;
   return `${base}\n\nA note is already saved from a previous attempt. Pass it to ${SELF_COMPACT_TOOL} verbatim instead of inventing a new one. Saved note, verbatim:\n\n${saved}\n\n---\nCall ${SELF_COMPACT_TOOL} now with exactly that note.`;
 }
@@ -791,7 +797,7 @@ export function registerSelfCompact(pi: ExtensionAPI, deps: SelfCompactDeps): Se
     promptGuidelines: [
       `Use ${SELF_COMPACT_TOOL} alone in a tool batch when a [self-compact · …] message asks you to, or at a clean checkpoint when your context is high (budget shows the numbers).`,
       `A ${SELF_COMPACT_TOOL} note_to_self ends with the exact NEXT ACTION and never lists finished work as pending.`,
-      `After a [self-compact · handoff] message, continue only the unfinished NEXT ACTION from your note. A finished slice is a post and, when the context is high, a hand-off; done belongs only to SWARM.md's definition of done and ends the swarm for everyone.`,
+      `After a [self-compact · handoff] message, continue only the unfinished NEXT ACTION from your note. A finished slice is a post and, when the context is high, a hand-off; done belongs only to the swarm's finish (the coordinator's call, when SWARM.md's definition of done is met) and ends the swarm for everyone.`,
     ],
     parameters: Type.Object({
       note_to_self: Type.String({ description: `Your hand-off note (1-${NOTE_MAX_CHARS} chars). Ends with the exact NEXT ACTION.` }),
@@ -1070,6 +1076,13 @@ export function registerSelfCompact(pi: ExtensionAPI, deps: SelfCompactDeps): Se
     let lastError = "unknown error";
     for (let attempt = 1; attempt <= SUMMARY_ATTEMPTS; attempt++) {
       if (event.signal.aborted) return { cancel: true };
+      // Held while the run is paused: cancelled, so neither this attempt nor Pi's own summarizer calls the provider.
+      const held = deps.paused ? await deps.paused(ctx.cwd).catch(() => null) : null;
+      if (held) {
+        R.lastCompactionError = `the run is paused (${held.reason}, since ${held.since}): the compaction waits for the operator to extend it`;
+        await trace(ctx.cwd, "compact_held", { reason: held.reason, since: held.since, attempt }, { ok: false, cancelled: true });
+        return { cancel: true };
+      }
       try {
         const { summary, usage, truncated, model, modelSource } = await generateSummary(event, ctx, prompt);
         return {
@@ -1188,7 +1201,7 @@ export function registerSelfCompact(pi: ExtensionAPI, deps: SelfCompactDeps): Se
   // --------------------------------------------------------------- the handle
 
   const systemPromptLine =
-    `\n\nSelf-compaction is on. Your context has a ceiling for this model and three lines under it: a notice, a warning, and the compact line, where every tool except self_compact, budget and done is blocked. When you cross one you receive a transient [self-compact · …] message with the live numbers; budget shows them at any time. At the warning line finish only the current atomic step, then write your note_to_self and call self_compact alone. After a [self-compact · handoff] message, your own note is returned verbatim under a header with your live claims, unread posts and ledger totals: resume its NEXT ACTION without waiting for anyone and never restart work the note marks as done. The hand-off message is the harness, not a person: never answer it with a status and never end your turn on it; when you are waiting on a peer call wait and keep it open. done is not the end of a slice: it ends the swarm for everyone and belongs only to SWARM.md's definition of done.`;
+    `\n\nSelf-compaction is on. Your context has a ceiling for this model and three lines under it: a notice, a warning, and the compact line, where every tool except self_compact, budget and done is blocked. When you cross one you receive a transient [self-compact · …] message with the live numbers; budget shows them at any time. At the warning line finish only the current atomic step, then write your note_to_self and call self_compact alone. After a [self-compact · handoff] message, your own note is returned verbatim under a header with your live claims, unread posts and ledger totals: resume its NEXT ACTION without waiting for anyone and never restart work the note marks as done. The hand-off message is the harness, not a person: never answer it with a status and never end your turn on it; when you are waiting on a peer call wait and keep it open. done is not the end of a slice: it ends the swarm for everyone and belongs only to the swarm's finish, the coordinator's call when SWARM.md's definition of done is met.`;
 
   return {
     systemPromptLine,

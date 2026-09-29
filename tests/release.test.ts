@@ -79,7 +79,7 @@ test("the machine's draft binds the report, a rendering of it at the release's o
   assert.deepEqual(rec.chains.ledger_versions, [3, 4]);
   assert.equal(rec.versions.harness_commit_at_kickoff, "0123abcd");
   assert.match(rec.versions.renderer_sha256, /^[0-9a-f]{64}$/);
-  assert.match(rec.evidence_cutoff.note, /A new examination .* reopens the cutoff: it is a new run/);
+  assert.match(rec.evidence_cutoff.note, /Further examination reopens the cutoff: the run resumed \(swarm\.sh resume\).*or a new run/);
   // The rendering says DRAFT, and whose seal it is.
   const html = readFileSync(join(dir, "report.html"), "utf8");
   assert.match(html, /<div class="watermark" aria-hidden="true">DRAFT<\/div>/);
@@ -187,7 +187,7 @@ test("after an adoption, another is an amendment: refused without a reason, then
   const v1 = await signRelease(ctxOf(r), { home: r.home, say: quiet });
   assert.equal(v1.version, 1, "a run with no release gets the machine's draft first, then the adoption");
   assert.equal(readReleases(r.root)[0].record?.reason, "the machine's draft, written before the first adoption: none was written when custody was taken");
-  await assert.rejects(signRelease(ctxOf(r), { home: r.home, say: quiet }), /release v1 is adopted already: a later adoption is an amendment and says why \(--amend-reason TEXT\)\. A new examination is a new run\./);
+  await assert.rejects(signRelease(ctxOf(r), { home: r.home, say: quiet }), /release v1 is adopted already: a later adoption is an amendment and says why \(--amend-reason TEXT\)\. Further examination is the run resumed \(swarm\.sh resume\) or a new run\./);
   await appendReview(r.runs, r.id, r.root, { examiner: "Ada Examiner", examinerId: "ada-examiner", action: "adopt", entry_seq: 20 });
   const v2 = await signRelease(ctxOf(r), { home: r.home, amendReason: "the narrative adopted after re-reading E-6", say: quiet });
   assert.equal(v2.version, 2);

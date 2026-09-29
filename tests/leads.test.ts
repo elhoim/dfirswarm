@@ -115,7 +115,7 @@ test("needs: a blocked lead becomes ready when its producer closes with the outc
   ok(await L.openLead(a1, { title: "Find the recovery key", why: "The container is locked", take: true }));
   const inside = ok(await L.openLead(a2, { title: "Read the files inside the container", why: "Questions 5 to 9", needs: ["L-1"], answers: ["5"], take: true })).lead;
   assert.equal(inside.status, "blocked");
-  assert.deepEqual(inside.needs, [{ need: "L-1:resolved", met: false, why: "L-1 is held by a1" }]);
+  assert.deepEqual(inside.needs, [{ need: "L-1:resolved", met: false, why: "L-1 is held by a1", outcome: "pending" }]);
   refused(await L.linkLead(a1, "L-1", { add: ["L-2"] }), /closes a loop/);
   refused(await L.openLead(a0, { title: "x", why: "y", needs: ["job:j000001"] }), /a job's exit is never one/);
   // What a2 has been told so far.
@@ -160,8 +160,12 @@ test("a failed producer: the lead it feeds stays blocked, its holder is told the
   // Needs can be revised: an alternative route keeps the lead open.
   const f = await P.recordEntry(a2, { kind: "finding", ...F, value: "A decrypted copy of the volume's files sits in the backup", source: "backup", evidence: "listing" });
   assert.ok(f.ok);
-  const revised = ok(await L.linkLead(a2, "L-2", { remove: ["L-1"], add: ["E-2"] })).lead;
+  // An entry that stands is not a need (it is where the lead comes from); a need dropped says why and is withdrawn, never met.
+  refused(await L.linkLead(a2, "L-2", { add: ["E-2"] }), /E-2 stands: it is not a need/);
+  refused(await L.linkLead(a2, "L-2", { remove: ["L-1"] }), /why is required with remove/);
+  const revised = ok(await L.linkLead(a2, "L-2", { remove: ["L-1"], why: "E-2 holds a decrypted copy: the lead goes on without the unlock" })).lead;
   assert.equal(revised.status, "active");
+  assert.deepEqual(revised.dropped?.map((d) => [d.need, d.by]), [["L-1:resolved", "a2"]]);
 });
 
 test("a job that succeeds but misses what the lead needed: interpreted as an absence, the lead closes negative, and a lead needing it resolved is not unblocked", async () => {
@@ -278,13 +282,14 @@ test("a hub restarting between a transition and its notice loses neither: notice
   const draft = { v: 1 as const, seq: last.seq + 1, at: new Date().toISOString(), by: "a1", ev: "open" as const, lead: "L-3", title: "Read the cached page", why: "part 1", origin: "lead_open by a1", needs: [], answers: [], material: true, generation: 0, prev: last.hash };
   await appendFile(join(S, L.LEADS_LOG), `${JSON.stringify({ ...draft, hash: L.leadEventHash(draft as unknown as L.LeadEvent, last.hash) })}\n`);
   const woke = await L.leadsWaitCheck(a3)();
-  assert.match(woke ?? "", /L-3 is open, ready and nobody holds it/);
-  const wakes = (await L.leadsSnapshot(S)).state.events.filter((e) => e.ev === "wake");
-  assert.deepEqual(wakes.map((w) => [w.lead, w.to]), [["L-3", "a3"]]);
-  // The wait's delivery tells a3 (the header marks what it was shown): no second wake for the same lead.
+  assert.match(woke ?? "", /L-3 \("Read the cached page"\) is open, ready and nobody holds it, and it is offered to you/);
+  const offers = (await L.leadsSnapshot(S)).state.events.filter((e) => e.ev === "offer");
+  assert.deepEqual(offers.map((w) => [w.lead, w.to, w.reason]), [["L-3", "a3", "wake"]]);
+  assert.equal((await L.leadsSnapshot(S)).state.events.filter((e) => e.ev === "offer_seen").length, 1, "delivered as it was made: its minute runs from now");
+  // The wait's delivery tells a3 (the header marks what it was shown): no second offer for the same lead.
   await L.leadsDigest(a3, { mark: true });
-  assert.equal(await L.leadsWaitCheck(a3)(), null, "one wake per lead: a second check does not wake it again");
-  assert.equal((await L.leadsSnapshot(S)).state.events.filter((e) => e.ev === "wake").length, 1);
+  assert.equal(await L.leadsWaitCheck(a3)(), null, "one offer at a time: a second check does not offer it again");
+  assert.equal((await L.leadsSnapshot(S)).state.events.filter((e) => e.ev === "offer").length, 1);
 });
 
 test("lead_open wakes the seat idle longest, one wake per lead; a seat holding a lead or a job is not idle", async () => {
@@ -297,7 +302,7 @@ test("lead_open wakes the seat idle longest, one wake per lead; a seat holding a
   await job(S, "j000009", "a3", { state: "running" });
   const opened = ok(await L.openLead(a0, { title: "Walk the second browser profile", why: "Nobody has looked at it" }));
   assert.equal(opened.woke, "a2");
-  assert.match((await L.leadsWaitCheck(a2)()) ?? "", /L-1 is open, ready and nobody holds it, and you have been idle/);
+  assert.match((await L.leadsWaitCheck(a2)()) ?? "", /L-1 \("Walk the second browser profile"\) is open, ready and nobody holds it, and it is offered to you \(idle\)/);
   assert.equal(await L.leadsWaitCheck(a1)(), null);
   // A blocked lead wakes nobody until it is ready.
   const blocked = ok(await L.openLead(a0, { title: "Read what the profile's cache holds", why: "after L-1", needs: ["L-1"] }));
@@ -324,7 +329,7 @@ test("a lead that appears while the finish line runs: the run is taken again, an
   }
 });
 
-test("supersession reopens a lead closed on the corrected entry, and a dispute does too; the holder is told", async () => {
+test("supersession offers the closer to confirm or reopen (never a re-point), and reopens when unconfirmed; a dispute reopens at once; the holder is told", async () => {
   const { S, a1, a2 } = await run();
   await traceRow(S, "a1", "bash", new Date());
   ok(await L.openLead(a1, { title: "Which container holds the originals", why: "decoy or original", take: true }));
@@ -334,14 +339,24 @@ test("supersession reopens a lead closed on the corrected entry, and a dispute d
   await L.leadsDigest(a1, { mark: true });
   const fix = await P.recordEntry(a2, { kind: "finding", ...F, value: "The encrypted original holds them, not the decoy", source: "s", evidence: "e", supersedes: 1, because: "the provenance of the decoy was confused" });
   assert.ok(fix.ok);
-  assert.deepEqual(await L.reopenOnLedger(S), ["L-1"]);
-  const snap = await L.leadsSnapshot(S);
-  const l = snap.state.leads.get("L-1")!;
+  // Its closer, available, is offered to confirm the closure on what stands now: nothing re-points it, and it is not yet reopened.
+  assert.deepEqual(await L.reopenOnLedger(S), []);
+  let snap = await L.leadsSnapshot(S);
+  let l = snap.state.leads.get("L-1")!;
+  assert.equal(l.closed?.ref, "E-1", "the closure is not re-pointed");
+  assert.deepEqual([l.confirm?.ref_was, l.confirm?.head], ["E-1", "E-2"]);
+  assert.equal(L.needState("L-1", snap.state, snap.ledger).met, false, "a closure awaiting confirmation meets no need");
+  const told = await L.leadsDigest(a1, { mark: false });
+  // One notice per correction (the c10 pilot's batches): it names the closure and the act that confirms the batch.
+  assert.ok(told.notices.some((n) => n.kind === "confirm" && n.lead === "L-1" && /L-1 \("Which container holds the originals"/.test(n.text) && /lead_confirm\(batch: "E-2", why\)/.test(n.text)), JSON.stringify(told.notices));
+  // Unconfirmed within its window: reopened.
+  assert.deepEqual(await L.reopenOnLedger(S, Date.now() + 10 * 60_000), ["L-1"]);
+  snap = await L.leadsSnapshot(S);
+  l = snap.state.leads.get("L-1")!;
   assert.equal(l.closed, null);
   assert.equal(l.reopened[0].cause, "superseded");
-  assert.match(l.reopened[0].why, /E-1 was superseded by E-2/);
-  const told = await L.leadsDigest(a1, { mark: false });
-  assert.ok(told.notices.some((n) => n.kind === "reopened" && n.lead === "L-1"), JSON.stringify(told.notices));
+  assert.match(l.reopened[0].why, /E-1 was superseded by E-2, and its closer did not confirm it within its window/);
+  assert.ok(snap.state.events.some((e) => e.ev === "offer_lapse" && e.lead === "L-1"), "the lapse is on the record");
   // Closed again on the correction, then disputed: reopened again.
   ok(await L.claimLead(a1, "L-1"));
   ok(await L.closeLead(a1, "L-1", { disposition: "resolved", ref: "E-2" }));
@@ -440,6 +455,23 @@ test("priority is how much waits on a lead, transitively, then its age; uncovere
   assert.deepEqual(cov.open_leads_for, { "1": ["L-3"] });
 });
 
+test("a needs_operator close asking the operator to accept dispositions stands, and is told done asks the finish line first; once a done was refused on a question the operator may accept, it is not", async () => {
+  const { S, a1 } = await run();
+  const F_ = await import("../extensions/finish.ts");
+  ok(await L.openLead(a1, { title: "Have the limits ruled on", why: "two answers rest on what could not be examined", take: true }));
+  const asked = ok(await L.closeLead(a1, "L-1", { disposition: "needs_operator", ref: "Operator: accept or reject the examination-limited dispositions of Q-1 and Q-2 before we finish" }));
+  assert.ok(asked.request?.id, "the close stands, with its request");
+  assert.match(asked.hint ?? "", /no done has been refused on anything only the operator can release: whether examination-limited dispositions suffice is what done asks the finish line/);
+  assert.match(asked.hint ?? "", /swarm\.sh question <run> accept Q-n/);
+  // An ask of what only the operator can do is not hinted.
+  ok(await L.openLead(a1, { title: "Reach the paste site", why: "the key is there", take: true }));
+  assert.equal(ok(await L.closeLead(a1, "L-2", { disposition: "needs_operator", ref: "allow the host paste.example.org so a job can fetch the key" })).hint, undefined);
+  // A done refused on a question with no disposition names what the operator may accept: the ask may be the operator's now.
+  await F_.recordCheck(S, "a1", "r1", { proceed: false, reason: `done finishes a run only when ${P.DISPOSITION_WORDS}. No disposition yet: question:2 is limited` }, {});
+  ok(await L.openLead(a1, { title: "Have Q-2 accepted", why: "the finish line holds it", take: true }));
+  assert.equal(ok(await L.closeLead(a1, "L-3", { disposition: "needs_operator", ref: "The finish line holds Q-2: accept its examination-limited disposition (swarm.sh question accept Q-2)" })).hint, undefined);
+});
+
 test("needs_operator writes the request for the operator; the operator's note reopens the lead, allows a host for jobs, and its holder is told", async () => {
   const { S, a1 } = await run();
   await traceRow(S, "a1", "bash", new Date());
@@ -456,6 +488,7 @@ test("needs_operator writes the request for the operator; the operator's note re
   assert.equal(noted.lead.status, "open");
   assert.deepEqual(await L.operatorHosts(S), ["paste.example.org"]);
   const told = await L.leadsDigest(a1, { mark: false });
-  assert.ok(told.notices.some((n) => n.kind === "reopened"), JSON.stringify(told.notices));
+  // Reopened after the operator's note, it is offered to its previous holder first.
+  assert.ok(told.notices.some((n) => n.kind === "offer" && /was reopened after the operator's note and is offered to you first, its previous holder/.test(n.text)), JSON.stringify(told.notices));
   assert.ok(told.notices.some((n) => n.kind === "operator_note" && /paste\.example\.org/.test(n.text)), JSON.stringify(told.notices));
 });

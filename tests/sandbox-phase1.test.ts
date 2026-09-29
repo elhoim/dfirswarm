@@ -476,7 +476,7 @@ test("a line the collector refuses is reported as refused, not as written", asyn
 
   assert.equal(await emit({ ts: "t1", agent: "a0", tool: "bash", args: {}, result: { ok: true } }), 0);
   // No `tool`, so the collector refuses it.
-  assert.equal(await emit({ ts: "t2", agent: "a0", args: {} }), 1, "a refused line must not report success");
+  assert.equal(await emit({ ts: "t2", agent: "a0", args: {} }), 3, "a refused line must not report success, and is told apart from a collector not reached (1)");
   assert.equal((await lines(root)).length, 1, "and it is not in the record");
   // Past the old 1 MB line limit: recorded now. The trace keeps every result
   // whole, a 60,000-character bash output is ordinary, and the collector's

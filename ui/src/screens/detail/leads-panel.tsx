@@ -5,12 +5,21 @@
  * answers it: a note (recorded on the lead, posted to the board, the lead
  * reopened) and, in a microVM run, a host the run's jobs may reach from now
  * on. The answer is run as `swarm.sh lead`, so it lands on the trace and the
- * operator's record like the CLI's. Every lead is listed whole; nothing is cut.
+ * operator's record like the CLI's. "Add directive" opens an unheld lead under
+ * a question (or under a question asked in the same act), with the product it
+ * is to make and what makes that product acceptable: a directive says what to
+ * look at, never who does it (a held one would be an assignment). The finish
+ * (ready by the registers or what holds it, its coordinator, the last check,
+ * what is late against the report), the parked leads, and on each lead its
+ * standing offer, a closure to confirm, a second route and its product
+ * contract are shown as the registers hold them (docs/adr/0015). Every lead
+ * is listed whole; nothing is cut.
  */
 import { useCallback, useState, type ReactNode } from "react";
-import { AlertTriangle, CircleDot, Hourglass, ListChecks, PlayCircle } from "lucide-react";
+import { AlertTriangle, CircleDot, Compass, Flag, Hourglass, ListChecks, PlayCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
+import { Input, Textarea } from "@/components/ui/input";
+import { Select } from "@/components/ui/select";
 import { Label } from "@/components/ui/label";
 import { Chip } from "@/components/console";
 import { JobCard } from "@/components/jobs-drawer";
@@ -19,7 +28,7 @@ import { api, ApiError } from "@/lib/api";
 import { clock } from "@/lib/format";
 import { useAgentNames } from "@/lib/hooks";
 import { useLive, useResource } from "@/lib/live";
-import type { LeadView, SwarmView } from "@/lib/types";
+import type { FinishPanel, LeadView, SwarmView } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 const STATUS_TONE: Record<LeadView["status"], "kelp" | "saffron" | "slate" | "moss"> = { active: "kelp", blocked: "saffron", open: "slate", closed: "moss" };
@@ -34,6 +43,10 @@ function LeadCard({ lead, names }: { lead: LeadView; names: (id: string) => stri
         {!lead.material ? <Chip tone="slate">not material</Chip> : null}
         {lead.priority ? <Chip tone="slate">{lead.priority} waiting on it</Chip> : null}
         {lead.stale ? <Chip tone="brick">holder stale since {clock(lead.stale.at)}</Chip> : null}
+        {lead.offered ? <Chip tone="saffron">offered to {names(lead.offered.to)} ({lead.offered.reason}) until {clock(lead.offered.until)}</Chip> : null}
+        {lead.confirm ? <Chip tone="brick">closure to confirm: {lead.confirm.ref_was} superseded{lead.confirm.head ? ` by ${lead.confirm.head}` : ""}</Chip> : null}
+        {lead.overlap ? <Chip tone="slate">{lead.overlap.kind === "verification" ? "a verification" : "a second route"}: {lead.overlap.why}</Chip> : null}
+        {lead.covered_by?.length ? <Chip tone="slate">unheld: its questions covered by {lead.covered_by.join(", ")}</Chip> : null}
       </div>
       <p className="m-0 text-ink-2">{lead.why}</p>
       <dl className="m-0 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-ink-2">
@@ -54,19 +67,45 @@ function LeadCard({ lead, names }: { lead: LeadView; names: (id: string) => stri
             <dt className="text-ink-3">Needs</dt>
             <dd className="m-0">
               {lead.needs.map((n) => (
-                <span key={n.need} className={cn("mr-2", n.met ? "text-moss-ink" : "text-saffron-ink")}>
-                  {n.need} {n.met ? "(met)" : `(unmet: ${n.why ?? "not yet"})`}
+                <span key={n.need} className={cn("mr-2", n.met ? "text-moss-ink" : n.outcome === "failed" || n.outcome === "invalidated" ? "text-brick-ink" : "text-saffron-ink")}>
+                  {n.need} {n.met ? "(met" : `(unmet: ${n.why ?? "not yet"}`}
+                  {n.outcome && n.outcome !== "satisfied" && n.outcome !== "pending" ? `; ${n.outcome})` : ")"}
                 </span>
               ))}
             </dd>
           </>
         ) : null}
+        {(lead.dropped ?? []).map((d) => (
+          <FragmentRow key={`d${d.at}${d.need}`} label="Need dropped" text={`${d.need} by ${names(d.by)} at ${clock(d.at)} (withdrawn, never met): ${d.why}`} />
+        ))}
         {lead.answers.length ? (
           <>
             <dt className="text-ink-3">Questions</dt>
             <dd className="m-0">{lead.answers.map((a) => `question:${a}`).join(", ")}</dd>
           </>
         ) : null}
+        {lead.proposition ? (
+          <>
+            <dt className="text-ink-3">Tests</dt>
+            <dd className="m-0">
+              {lead.proposition}; <span className="text-ink-3">against:</span> {lead.negation}
+            </dd>
+          </>
+        ) : null}
+        {lead.product ? (
+          <>
+            <dt className="text-ink-3">Product</dt>
+            <dd className="m-0">
+              {lead.product}; <span className="text-ink-3">accepted when:</span> {lead.acceptance}
+              {lead.next_action ? (
+                <>
+                  ; <span className="text-ink-3">then:</span> {lead.next_action}
+                </>
+              ) : null}
+            </dd>
+          </>
+        ) : null}
+        {lead.inputs?.length ? <FragmentRow label="Starts from" text={lead.inputs.join(", ")} /> : null}
         {lead.jobs.length ? (
           <>
             <dt className="text-ink-3">Jobs</dt>
@@ -82,6 +121,13 @@ function LeadCard({ lead, names }: { lead: LeadView; names: (id: string) => stri
             </dd>
           </>
         ) : null}
+        {lead.result_refs?.length ? <FragmentRow label="Delivered" text={lead.result_refs.join(", ")} /> : null}
+        {(lead.confirmed ?? []).map((c) => (
+          <FragmentRow key={`c${c.at}`} label="Confirmed" text={`${clock(c.at)} by ${names(c.by)}: ${c.from} → ${c.to} (${c.why})`} />
+        ))}
+        {(lead.route_reviews ?? []).map((r) => (
+          <FragmentRow key={`rr${r.at}`} label="Route review" text={`${clock(r.at)} by ${names(r.by)}: ${r.material ? "still material" : "no longer material"} (${r.why})`} />
+        ))}
         {lead.reopened.map((r) => (
           <FragmentRow key={`r${r.at}`} label="Reopened" text={`${clock(r.at)} by ${r.by} (${r.cause}): ${r.why}`} />
         ))}
@@ -90,6 +136,45 @@ function LeadCard({ lead, names }: { lead: LeadView; names: (id: string) => stri
         ))}
       </dl>
     </li>
+  );
+}
+
+/**
+ * The finish (extensions/finish.ts, docs/adr/0015): whether the registers say
+ * it is ready or what holds it, who coordinates it, the last check and what
+ * is late against the report. Read only: one seat's done ends the run.
+ */
+function FinishSection({ finish, names }: { finish: FinishPanel; names: (id: string) => string }) {
+  return (
+    <section className="space-y-1" aria-label="The finish">
+      <h3 className="label-caps m-0 flex items-center gap-1.5">
+        <Flag className="size-3.5" /> The finish
+      </h3>
+      <div className="flex flex-wrap items-center gap-2 text-[12.5px]">
+        <Chip tone={finish.ready ? "moss" : "saffron"}>{finish.ready ? "ready by the registers" : `not ready (${finish.items.length})`}</Chip>
+        <span className="text-ink-2">
+          {finish.coordinator ? `${names(finish.coordinator.holder)} coordinates it (generation ${finish.coordinator.generation}: ${finish.coordinator.why})` : "nobody coordinates it yet: the first done takes it, normally the report's publisher"}
+        </span>
+      </div>
+      {finish.items.length ? (
+        <ul className="m-0 list-disc space-y-0.5 pl-5 text-[12.5px] text-ink-2">
+          {finish.items.map((i) => (
+            <li key={`i${i}`}>{i}</li>
+          ))}
+        </ul>
+      ) : null}
+      {finish.limited.length ? <p className="m-0 text-[12.5px] text-ink-3">Limited: {finish.limited.join("; ")}.</p> : null}
+      {finish.last_check ? (
+        <p className="m-0 text-[12.5px] text-ink-3">
+          Last check {clock(finish.last_check.at)} by {names(finish.last_check.by)}: {finish.last_check.proceed ? `passed (${finish.last_check.outcome ?? "?"})` : `refused (${finish.last_check.reason ?? "?"})`}, {finish.last_check.current ? "at the current revision" : "at an earlier revision"}.
+        </p>
+      ) : null}
+      {finish.late.length ? (
+        <p className="m-0 text-[12.5px] text-saffron-ink">
+          Late against the report, for the coordinator's typed resolution: {finish.late.map((x) => (x.kind === "post" ? `post #${x.id} (${x.tag}) by ${names(x.by)}` : `objection ${x.id} by ${names(x.by)}: ${x.why}`)).join("; ")}.
+        </p>
+      ) : null}
+    </section>
   );
 }
 
@@ -157,6 +242,77 @@ function OperatorRequest({ lead, runId, vmRun, onJob }: { lead: LeadView; runId:
   );
 }
 
+/** "Add directive": an unheld lead under a question, with its product and acceptance, run as swarm.sh lead direct. */
+function DirectiveForm({ runId, onJob }: { runId: string; onJob: (id: string) => void }) {
+  const loader = useCallback(() => api.questions(runId), [runId]);
+  const questions = useResource(loader, 0, [runId]);
+  const [q, setQ] = useState("");
+  const [newQuestion, setNewQuestion] = useState("");
+  const [newWhy, setNewWhy] = useState("");
+  const [title, setTitle] = useState("");
+  const [why, setWhy] = useState("");
+  const [product, setProduct] = useState("");
+  const [acceptance, setAcceptance] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const options = [
+    { value: "", label: "A new question", hint: "asked in the same act, as yourself" },
+    ...(questions.data?.questions ?? []).filter((x) => x.scope === "in_scope" && !x.withdrawn).map((x) => ({ value: x.id, label: x.id, hint: x.text })),
+  ];
+  let as = "";
+  try {
+    as = sessionStorage.getItem("dfirswarm.questions.as") ?? "";
+  } catch {
+    as = "";
+  }
+  async function submit() {
+    setError(null);
+    setBusy(true);
+    try {
+      const job = await api.leadDirect(runId, { ...(q ? { q } : { new_question: newQuestion, new_why: newWhy }), title, why, product, acceptance, ...(as ? { as } : {}) });
+      onJob(job.id);
+      setTitle("");
+      setWhy("");
+      setProduct("");
+      setAcceptance("");
+      setNewQuestion("");
+      setNewWhy("");
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : (err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+  const ready = title.trim() && why.trim() && product.trim() && acceptance.trim() && (q || (newQuestion.trim() && newWhy.trim()));
+  return (
+    <details className="card px-3 py-2.5 text-[12.5px]">
+      <summary className="label-caps flex cursor-pointer items-center gap-1.5">
+        <Compass className="size-3.5" /> Add directive
+      </summary>
+      <div className="mt-2 grid gap-2">
+        <p className="m-0 text-[12px] text-ink-3">A directive says what to look at and what to produce; nobody is assigned it. It opens unheld under a question, and the seat idle longest is woken for it.</p>
+        <Select value={q} onChange={setQ} options={options} aria-label="Under the question" />
+        {!q ? (
+          <>
+            <Textarea value={newQuestion} onChange={(e) => setNewQuestion(e.target.value)} placeholder="the question it serves, whole" />
+            <Input value={newWhy} onChange={(e) => setNewWhy(e.target.value)} placeholder="why the case needs that question" />
+          </>
+        ) : null}
+        <Input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="what to look at (the lead's title)" />
+        <Input value={why} onChange={(e) => setWhy(e.target.value)} placeholder="why" />
+        <Input value={product} onChange={(e) => setProduct(e.target.value)} placeholder="the product: what it is to produce" />
+        <Input value={acceptance} onChange={(e) => setAcceptance(e.target.value)} placeholder="acceptance: what makes the product acceptable" />
+        <div>
+          <Button size="sm" disabled={busy || !ready} onClick={() => void submit()}>
+            Open the directive
+          </Button>
+        </div>
+        {error ? <InlineNote tone="danger">{error}</InlineNote> : null}
+      </div>
+    </details>
+  );
+}
+
 export function LeadsPanel({ view, version }: { view: SwarmView; version: number }) {
   const id = view.summary.id;
   const live = useLive();
@@ -202,6 +358,8 @@ export function LeadsPanel({ view, version }: { view: SwarmView; version: number
         {d.hosts.length ? <p className="m-0 text-[12px] text-ink-2">Hosts allowed for the run's jobs while it ran: {d.hosts.join(", ")}.</p> : null}
       </section>
 
+      <DirectiveForm runId={id} onJob={setJobId} />
+
       {d.coverage.questions.length ? (
         <section className="space-y-1">
           <h3 className="label-caps m-0">Questions</h3>
@@ -213,6 +371,18 @@ export function LeadsPanel({ view, version }: { view: SwarmView; version: number
               "none"
             )}
             .
+          </p>
+        </section>
+      ) : null}
+
+      {d.finish ? <FinishSection finish={d.finish} names={names} /> : null}
+
+      {d.parked?.length ? (
+        <section className="space-y-1">
+          <h3 className="label-caps m-0">Parked ({d.parked.length})</h3>
+          <p className="m-0 text-[12.5px] text-ink-2">
+            Held, with no job and no act on them while their holders work elsewhere; each is offered to an idle seat unless its holder acts:{" "}
+            {d.parked.map((p) => `${p.lead} (${names(p.holder)}, ${Math.round(p.idle_ms / 60_000)} min${p.elsewhere ? `; ${p.elsewhere}` : ""})`).join("; ")}.
           </p>
         </section>
       ) : null}

@@ -33,8 +33,14 @@ import {
   type SwarmDetail,
   type SwarmSummary,
 } from "../../extensions/observe.ts";
-import { agentDeadPath, agentDonePath, hostTime, readEventLog, readEventLogChecked, type PostRecord, type SwarmEvent } from "../../extensions/protocol.ts";
-import { awaitingInterpretation, leadsSnapshot, OPERATOR_REQUESTS, operatorHosts, questionCoverage, rankedLeads, type AwaitingJob, type LeadView } from "../../extensions/leads.ts";
+import { agentDeadPath, agentDonePath, hostTime, readEventLog, readEventLogChecked, runOutcome, stopPolicyOf, wallElapsedMs, type PostRecord, type SwarmEvent } from "../../extensions/protocol.ts";
+import { networkBrief, type NetworkBrief } from "./network.ts";
+import { requestsBrief } from "./requests.ts";
+import type { RequestsBrief } from "../../extensions/requests.ts";
+import { awaitingInterpretation, leadsSnapshot, OPERATOR_REQUESTS, operatorHosts, parkedLeads, questionCoverage, rankedLeads, type AwaitingJob, type LeadView, type ParkedLead } from "../../extensions/leads.ts";
+import { lateItems, readFinish, readiness, type LateItem } from "../../extensions/finish.ts";
+import { HUMAN_ORIGINS, originWords, questionViews, viewContext, type QuestionView, type TriageItem } from "../../extensions/questions.ts";
+import { verifySignedActs, type SignedAct } from "../questions-cli.ts";
 import { claimSequences, type ClaimSequence } from "../../ui/src/lib/claim-sequences.ts";
 import { isFailureEvent } from "../../ui/src/lib/event-taxonomy.ts";
 import { vmTimeline, type VmTimeline } from "../../ui/src/lib/vm-timeline.ts";
@@ -172,6 +178,20 @@ export type SwarmRow = SwarmSummary & {
   sentinel_by: string | null;
   /** budget.json stop_reason (cap / wall_clock), when the harness steered or stopped. */
   stop_reason: string | null;
+  /** What the run does at a cap (docs/adr/0013): cap-pause, cap-stop, or operator (until solved). */
+  stop_policy: "cap-pause" | "cap-stop" | "operator";
+  /**
+   * The pause in force: seats idle, no model call. Its reason: cap or
+   * wall_clock (until the operator extends or stops the run),
+   * provider_limit (the model provider refused every seat; `until` is the
+   * end it named, and the harness tries again then or every half hour), or
+   * operator (swarm.sh pause, until swarm.sh unpause).
+   */
+  paused: { at: string; reason: string; detail: string; until?: string } | null;
+  /** How the run stands: completed, examination_limited, paused, stopped, abandoned, verification_unavailable, or null while it runs. */
+  outcome: string | null;
+  /** How many times the run was resumed (swarm.sh resume). */
+  resumes: number;
   /** How many tools the run forged (directories under tools/ with a manifest): what --tools-from can seed. */
   tools_forged: number;
   /** The inputs directory the run was given, from inputs.json, or null: what a clean room is about. */
@@ -213,6 +233,7 @@ export const LIFECYCLE_TOOLS = new Set([
   "agent_start", "agent_stop", "harness_stop", "cap_steer", "wall_steer", "claim_violation", "reap", "reaped", "thinking",
   "hub_call", "hub_link", "hub_clear_up", "hub_restarted", "collector_restarted", "agent_cap_steer", "agent_cap_stop",
   "vm_finish", "custody", "idle_nudge", "notify", "repeat_hint", "budget_precall_stop", "operator_action", "artifact_scripts",
+  "harness_record",
 ]);
 
 export function activitySeries(events: readonly SwarmEvent[], from: string | null, to: string | null, buckets = 96, now = Date.now()): ActivitySeries {
@@ -553,9 +574,89 @@ export type SwarmView = Omit<SwarmDetail, "summary" | "agents" | "threads"> & {
   custody: CustodyView | null;
   /** The lead register in brief, for the header: what waits on the operator above all. Null when the run opened no lead. */
   leads: LeadsBrief | null;
+  /** The operator requests in numbers (the header's badge); null when the run asked nothing of the operator. */
+  requests: RequestsBrief | null;
+  /** The question register in brief, for the header and the tab strip: what waits for the operator's triage and answers. */
+  questions: QuestionsBrief | null;
   /** Whether the run was started until solved: no wall clock, caps advisory, only the operator ends it. */
   until_solved: boolean;
+  /** The dynamic network in brief, for the header: its mode and what waits on the operator. Null when the network is closed and nothing was asked. */
+  network: NetworkBrief | null;
 };
+
+/** The question register in numbers: in scope, asked by people, waiting for triage, clarifications not answered. */
+export type QuestionsBrief = { in_scope: number; persons: number; unanswered: number; proposed: number; triage: number; clarifications: number; chain_ok: boolean };
+
+/**
+ * The Questions tab (extensions/questions.ts): every question with who asked
+ * it (claimed or signed, each signature checked), its scope, work state,
+ * answer and leads; what waits for the operator's triage; the clarifications
+ * agents asked; and what the add form picks from: the objectives, the seats,
+ * and the budget left.
+ */
+export type QuestionsPanelView = {
+  questions: QuestionView[];
+  objectives: Array<{ id: string; text: string; why: string; added_by: string | null }>;
+  triage: TriageItem[];
+  chain: { ok: boolean; broken_at: number | null; reason: string | null; head: string | null; events: number };
+  seeded: boolean;
+  signatures: SignedAct[];
+  seats: string[];
+  budget: { cap_usd: number; spent_usd: number; tokens: number; cap_tokens: number | null; until_solved: boolean } | null;
+};
+
+/** The question register as the console shows it, read from the files. */
+export async function readQuestions(sandbox: string): Promise<QuestionsPanelView> {
+  const ctx = await viewContext(sandbox);
+  const s = ctx.questions.state;
+  const budget = await readBudgetFile(sandbox);
+  const team = await readTeamIds(sandbox);
+  return {
+    questions: questionViews(ctx),
+    objectives: [...s.objectives.values()].map((o) => ({ id: o.id, text: o.text, why: o.why, added_by: o.origin && o.origin.kind !== "goal" ? originWords(o.origin) : null })),
+    triage: s.triage,
+    chain: { ...s.chain, events: s.events.length },
+    seeded: ctx.questions.seeded,
+    signatures: await verifySignedActs(sandbox).catch(() => []),
+    seats: team,
+    budget,
+  };
+}
+
+async function readBudgetFile(sandbox: string): Promise<QuestionsPanelView["budget"]> {
+  try {
+    const b = JSON.parse(await readFile(join(sandbox, "budget.json"), "utf8")) as { cap_usd?: number; spent_usd?: number; tokens?: number; cap_tokens?: number | null; until_solved?: boolean };
+    return { cap_usd: Number(b.cap_usd ?? 0), spent_usd: Number(b.spent_usd ?? 0), tokens: Number(b.tokens ?? 0), cap_tokens: b.cap_tokens ?? null, until_solved: b.until_solved === true };
+  } catch {
+    return null;
+  }
+}
+
+async function readTeamIds(sandbox: string): Promise<string[]> {
+  try {
+    const t = JSON.parse(await readFile(join(sandbox, "team.json"), "utf8")) as { agents?: Array<{ id?: string }> };
+    return (t.agents ?? []).map((a) => String(a.id ?? "")).filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+async function questionsBrief(sandbox: string): Promise<QuestionsBrief | null> {
+  const ctx = await viewContext(sandbox).catch(() => null);
+  if (!ctx) return null;
+  const views = questionViews(ctx);
+  if (!views.length && !ctx.questions.state.objectives.size) return null;
+  const live = views.filter((v) => v.scope === "in_scope" && !v.withdrawn && !v.after_done);
+  return {
+    in_scope: live.length,
+    persons: live.filter((v) => HUMAN_ORIGINS.has(v.origin.kind)).length,
+    unanswered: live.filter((v) => !v.answer || v.answer.stale).length,
+    proposed: views.filter((v) => v.scope === "proposed" && !v.withdrawn).length,
+    triage: ctx.questions.state.triage.filter((t) => !t.resolved).length,
+    clarifications: views.reduce((n, v) => n + v.pending_clarifications.length, 0),
+    chain_ok: ctx.questions.state.chain.ok,
+  };
+}
 
 /** The register in numbers, for the header and the tab strip. */
 export type LeadsBrief = { open: number; active: number; blocked: number; closed: number; waiting_on_operator: number; uncovered: number; chain_ok: boolean };
@@ -570,7 +671,36 @@ export type LeadsPanelView = {
   hosts: string[];
   coverage: { questions: string[]; existence: string[]; unanswered: string[]; uncovered: string[]; open_leads_for: Record<string, string[]> };
   awaiting: AwaitingJob[];
+  /** Held leads with nothing done on them while their holders work elsewhere, offered on (docs/adr/0015). */
+  parked: ParkedLead[];
+  /** The finish (extensions/finish.ts): readiness by the registers, the coordinator, the last check, what is late against the report; null once the run is finished. */
+  finish: FinishPanel | null;
 };
+
+export type FinishPanel = {
+  ready: boolean;
+  items: string[];
+  limited: string[];
+  coordinator: { holder: string; generation: number; why: string; report: string | null } | null;
+  last_check: { at: string; by: string; proceed: boolean; outcome: string | null; reason: string | null; current: boolean } | null;
+  late: LateItem[];
+};
+
+/** The finish as the console shows it: read only (the readiness post is the agents' headers' to make). */
+async function finishPanel(sandbox: string): Promise<FinishPanel | null> {
+  if (existsSync(join(sandbox, "done", "SWARM_DONE"))) return null;
+  const r = await readiness(sandbox);
+  const st = await readFinish(sandbox);
+  const last = st.checks.at(-1);
+  return {
+    ready: r.ready,
+    items: r.items,
+    limited: r.limited,
+    coordinator: st.lease ? { holder: st.lease.holder, generation: st.lease.generation, why: st.lease.why, report: st.lease.report } : null,
+    last_check: last ? { at: last.at, by: last.by, proceed: last.proceed, outcome: last.outcome ?? null, reason: last.reason ?? null, current: last.revision === r.revision } : null,
+    late: st.lease ? await lateItems(sandbox, st.lease.holder, st.lease.report) : [],
+  };
+}
 
 /** The lead register as the console shows it (extensions/leads.ts), read from the files. */
 export async function readLeads(sandbox: string): Promise<LeadsPanelView> {
@@ -593,7 +723,9 @@ export async function readLeads(sandbox: string): Promise<LeadsPanelView> {
     requests,
     hosts: await operatorHosts(sandbox),
     coverage: { questions: snap.goal.questions, existence: snap.goal.existence, ...cov },
-    awaiting: await awaitingInterpretation(sandbox, snap.state, snap.jobs),
+    awaiting: await awaitingInterpretation(sandbox, snap.state, snap.jobs, snap.ledger),
+    parked: await parkedLeads(sandbox, snap).catch(() => [] as ParkedLead[]),
+    finish: await finishPanel(sandbox).catch(() => null),
   };
 }
 
@@ -708,15 +840,39 @@ async function enrichSummary(
   let metered = run?.metered !== false;
   let capTokens = Number(run?.cap_tokens) || 0;
   let stopReason: string | null = null;
+  let stopPolicy: SwarmRow["stop_policy"] = "cap-stop";
+  let paused: SwarmRow["paused"] = null;
+  let resumes = 0;
+  // The wall clock as the run counts it: the stretches it went, with no pause in them.
+  let clock: { started_at: string; wall_used_ms?: number; wall_base_at?: string; paused?: { at: string } } | null = null;
   try {
     const budget = JSON.parse(budgetRaw) as {
       started_at?: string;
+      wall_used_ms?: number;
+      wall_base_at?: string;
       wall_clock_minutes?: number;
       metered?: boolean;
       cap_tokens?: number;
       stop_reason?: string;
+      stop_policy?: string;
+      until_solved?: boolean;
+      paused?: { at?: string; reason?: string; detail?: string; until?: string };
+      resumes?: unknown[];
     };
+    stopPolicy = stopPolicyOf(budget);
+    if (budget.paused && typeof budget.paused === "object") {
+      paused = { at: String(budget.paused.at ?? ""), reason: String(budget.paused.reason ?? ""), detail: String(budget.paused.detail ?? ""), ...(typeof budget.paused.until === "string" ? { until: budget.paused.until } : {}) };
+    }
+    if (Array.isArray(budget.resumes)) resumes = budget.resumes.length;
     if (!started && budget.started_at) started = budget.started_at;
+    if (typeof budget.started_at === "string" && budget.started_at) {
+      clock = {
+        started_at: budget.started_at,
+        ...(Number(budget.wall_used_ms) > 0 ? { wall_used_ms: Number(budget.wall_used_ms) } : {}),
+        ...(typeof budget.wall_base_at === "string" ? { wall_base_at: budget.wall_base_at } : {}),
+        ...(budget.paused && typeof budget.paused.at === "string" ? { paused: { at: budget.paused.at } } : {}),
+      };
+    }
     if (!wall && budget.wall_clock_minutes) wall = Number(budget.wall_clock_minutes) || 0;
     if (budget.metered === false) metered = false;
     if (!capTokens && budget.cap_tokens) capTokens = Number(budget.cap_tokens) || 0;
@@ -725,9 +881,12 @@ async function enrichSummary(
     // budget missing or torn
   }
   const finishedAt = summary.done ? await mtimeIso(join(sandbox, "done", "SWARM_DONE")) : null;
+  const outcome = (await runOutcome(sandbox).catch(() => null))?.outcome ?? null;
   const startMs = Date.parse(started);
   const endMs = finishedAt ? Date.parse(finishedAt) : now;
-  const elapsed = Number.isFinite(startMs) ? Math.max(0, endMs - startMs) : 0;
+  // A pause, which can last days, is not elapsed time: the budget's clock
+  // when it reads (wallElapsedMs), else the time since the start.
+  const elapsed = clock && Number.isFinite(endMs) ? wallElapsedMs(clock, endMs) : Number.isFinite(startMs) ? Math.max(0, endMs - startMs) : 0;
   const ids = Array.isArray(run?.agents) ? run!.agents! : [];
   const markers = await countMarkers(sandbox, ids);
   const events = await readEvents(sandbox);
@@ -745,7 +904,8 @@ async function enrichSummary(
     ? {
         from: newest.from,
         tag: newest.tag,
-        body: newest.body.length > 240 ? `${newest.body.slice(0, 239)}…` : newest.body,
+        // Whole: the console bounds it on screen (a clamped line, the whole in its title), never here.
+        body: newest.body,
         at: await mtimeIso(newest.path),
       }
     : null;
@@ -789,6 +949,12 @@ async function enrichSummary(
     finishing,
     sentinel_by: sentinelBy,
     stop_reason: stopReason,
+    stop_policy: stopPolicy,
+    // A pause is shown while the run stands paused: one stopped, or whose
+    // seats all died, in a pause is not waiting for anything.
+    paused: outcome === "paused" ? paused : null,
+    outcome,
+    resumes,
     tools_forged: toolsForged,
     inputs_source: inputsSource,
     inputs_sources: inputsSources,
@@ -1105,7 +1271,10 @@ export async function readSwarmView(runsDir: string, id: string, traceLimit = 40
     vm_timeline: vmTimeline({ started_at: summary.started_at || null, finished_at: summary.finished_at, now: Date.now(), vms, events: events.map((e) => ({ ...e, ts: hostTime(e) })) }),
     custody: await readCustody(sandbox),
     leads: await leadsBrief(sandbox),
+    questions: await questionsBrief(sandbox),
     until_solved: detail.budget.until_solved === true,
+    network: await networkBrief(sandbox).catch(() => null),
+    requests: await requestsBrief(sandbox).catch(() => null),
   };
 }
 

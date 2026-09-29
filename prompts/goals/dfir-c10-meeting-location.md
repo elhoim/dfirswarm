@@ -74,19 +74,24 @@ assigned.
 
 **Leads.** The work you find along the way goes in the lead register. Before
 you start work a peer could also be doing, read `leads` and claim the lead
-that covers it (`lead_claim`), or open one (`lead_open`); keep the follow-up of
-your own finding with `take: true`, or give it with `record(..., opens: [...])`.
-Say in `needs` what a lead waits for (a lead's outcome, or an entry), and its
-holder is woken when it comes. Interpret every job you run: the entry that
-says what its output shows names it in `interprets`, and a page that left
-bytes unread is read to its end or its `rest` explained. When your slice ends,
-take the ready lead the header ranks first, or a question nobody holds a lead
-for. Close every lead you hold with its disposition, and never leave one
-active and silent. Anything outside the evidence and the allowlist (a host to
-reach, a file the run does not have, a question only a person can answer) is
-`needs_operator`: close the lead so, saying what the operator must do, and the
-operator answers on it. The critic also reviews each lead dropped or deferred,
-by attesting or disputing the entry it cites.
+that covers it (`lead_claim`), or open one (`lead_open`); open the follow-up
+of your own finding unheld unless you start it in your next turn (`take: true`
+is for that; `record(..., opens: [...])` opens unheld and offers it to an idle
+seat). Say in `needs` what a lead waits for (another lead's outcome, never an
+entry that already stands), and its holder is woken when it comes. Interpret
+every job you run: the entry that says what its output shows names it in
+`interprets`, and a page that left bytes unread is read to its end or its
+`rest` explained. When your slice ends, take the ready lead the header ranks
+first, or a question nobody holds a lead for; work offered to you is yours
+first for a minute: take it, or decline it with why. Ending the run is the
+coordinator's done, never a slice's. Close every lead you hold with its
+disposition, and never leave one active and silent. Anything outside the
+evidence and the allowlist (a host to reach, a file the run does not have, a
+question only a person can answer) is `needs_operator`: close the lead so,
+saying what the operator must do, and the operator answers on it. The critic
+also reviews each lead dropped or deferred, by attesting or disputing the
+entry it cites, and once its questions are answered says whether its
+limitation still matters (`route_review`).
 
 ## Definition of done
 

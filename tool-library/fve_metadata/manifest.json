@@ -1,6 +1,14 @@
 {
   "name": "fve_metadata",
   "description": "Parse a BitLocker -FVE-FS- volume (raw image or VHD partition) and return metadata: GUID, encryption method, recovery key needed. Pass raw_offset to specify where the FVE partition starts.",
+  "use": {
+    "magic": [
+      {
+        "offset": 3,
+        "hex": "2d4656452d46532d"
+      }
+    ]
+  },
   "params": {
     "path": {
       "type": "string",

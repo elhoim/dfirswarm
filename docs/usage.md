@@ -12,7 +12,8 @@ scripts/swarm.sh start --model <provider/id> --cap-usd <n> --n <N>
     [--compact-model P/ID] [--inbox-page-chars N]
     [--goal-file FILE | --goal "<markdown>"]
     [--sandbox DIR] [--allow-synced-folder] [--custody-timeout SEC]
-    [--label NAME] [--wall-clock MIN] [--hard-kill] [--playwright]
+    [--label NAME] [--wall-clock MIN] [--stop cap-pause|cap-stop|operator]
+    [--until-solved [--stall-minutes N]] [--hard-kill] [--playwright]
     [--cap-per-agent USD] [--cap-per-agent-tokens N] [--cap-tokens N] [--idle-nudge-sec N]
     [--allow-tool-forging] [--allow-install] [--no-pypi] [--tools-from DIR]
     [--no-read DIR]... [--accept-signer-exposure]
@@ -20,12 +21,24 @@ scripts/swarm.sh start --model <provider/id> --cap-usd <n> --n <N>
     [--catalog] [--toolbox <sets>|auto|off] [--toolbox-required] [--quarantine]
     [--allow-host HOST]... [--provider-host P=HOST]... [--case-id ID] [--examiner NAME]
     [--probe-violation] [--no-netguard] [--open-net] [--net-allow] [--local-only] [--no-start]
+    [--network closed|dynamic|open] [--policy standard|live_adversary|internal|ctf]
+    [--lookups none|reference|evidence_linked|any] [--contact passive|active] [--disclosure CLASSES]
+    [--more-evidence no|ask|yes] [--material-use CLASS=USE,...] [--legal TEXT] [--provider-retention TEXT]
     [--key-from-env] [--env KEY=VALUE]...
-    [--notify CMD] [--ledger-from RUN] [--no-verify-copy] [--allow-root] [--model-gateway] [--check]
+    [--notify TARGET]... [--ledger-from RUN] [--no-verify-copy] [--allow-root] [--model-gateway] [--check]
 scripts/swarm.sh image-for [--pack ID]... [--tools-from DIR] [--playwright] [--no-jobs] [--brains-with-packs]
 scripts/swarm.sh list
 scripts/swarm.sh status <id>
 scripts/swarm.sh stop <id> [--no-custody] [--custody-timeout SEC]
+scripts/swarm.sh extend <id> [--minutes N] [--tokens N] [--usd N]
+scripts/swarm.sh pause <id> [--why TEXT]
+scripts/swarm.sh unpause <id>
+scripts/swarm.sh resume <id> [--question TEXT]... [--questions FILE] [--why TEXT] [--as ID]
+    [--minutes N] [--tokens N] [--usd N] [--env KEY=VALUE]... [--no-start] [-- START OPTIONS]
+scripts/swarm.sh requests <id> list [--open] [--json] | show R-n [--json]
+scripts/swarm.sh requests <id> ack|answer|decline|withdraw|authorise|collecting|unavailable R-n [TEXT | --why TEXT] [--as ID]
+scripts/swarm.sh evidence <id> add PATH --why TEXT [--for R-n] [--question Q-n]... [--sha256 HEX] [--as ID] | list [--json]
+scripts/swarm.sh material <id> add PATH --why TEXT [--class operator_supplied|case_material] [--sensitive] [--as ID] | list [--json]
 scripts/swarm.sh summary <id>
 scripts/swarm.sh context <id> [--json]
 scripts/swarm.sh package <id> [--sign [--key FILE]] [--redact [--redact-leaks list]] [--with-outputs]
@@ -52,7 +65,7 @@ scripts/swarm.sh export <id> --format csv|timesketch [--out FILE]
 scripts/swarm.sh hold <id> [--reason TEXT]
 scripts/swarm.sh release <id>
 scripts/swarm.sh purge <id> [--yes]
-scripts/swarm.sh tools <id> [--save DIR]
+scripts/swarm.sh tools <id> [--save DIR | --candidates [--out DIR] [--min-lines N] [--library DIR]...]
 scripts/swarm.sh say <id> "<message>"
 scripts/swarm.sh ui [--port N] [--host H] [--no-build] [--inputs-root DIR]... [--allow-inputs-root-from-ui]
 scripts/swarm.sh reap [id] [--stall-sec N] [--stop]
@@ -87,14 +100,15 @@ it. A wrong command line prints the mistake and where to read, not the manual.
 | `--time-reference URL` | no | — | Record this https server's clock offset from the host's (its `Date` header, a second's precision) in the anchor at kickoff and in the verdict at custody. |
 | `--anchor-mirror TARGET` | no | — | Copy each release's digest line somewhere this account does not keep: `cmd:COMMAND` (the line on its stdin; its output kept whole as the receipt, `mirror-<k>.json` beside the release), `dir:PATH` (a directory that exists: a file per release, never written over), or `print` (the line and a QR-ready string in `case-file.txt`, and printed). An object-locked bucket's mount or a records custodian's separately administered archive is the independent copy; a folder of the same account is not, and a signed git remote is a witness of when a line was pushed, not a write-once store. Recorded as `anchor_mirror`; `SWARM_ANCHOR_MIRROR` for a run without one. |
 | `--custody-timeout SEC` | no | 14400 (`SWARM_CUSTODY_TIMEOUT`) | How long custody may take at the run's end, whoever takes it: the hub at a microVM run's finish, or `stop`. Recorded as `custody_timeout_sec`; `stop --custody-timeout` overrides it for that stop. |
-| `--notify CMD` | no | none | A command of yours to run when something happens to the run: `finished`, `finish_failed`, `stop_incomplete`, `budget_cap`, `wall_clock`, `evidence_changed`, `chain_broken`, `agent_dead`, `collector_unreachable`, `hub_down`. It gets one JSON line on stdin (`{event, run, at, detail}`), runs detached, and has 30 seconds; a failure or a timeout goes to `traces/notify.log` and never stops the run. The command is kept outside the run (`runs/notify/<id>.cmd`, 0600, run only when it is a regular file of yours); the registry records only that there is one (`notify: true`), and the operator's record shows its length, not its text. |
+| `--notify TARGET` | no | none | Who is told when something happens to the run; repeatable. `desktop:` (a desktop notification: `osascript` on macOS, `notify-send` elsewhere), `ntfy:<topic>` (a push through ntfy.sh, or `ntfy:https://host/topic` for a server of your own), `mailto:<address>` (this host's `mail` or `sendmail`), or a command of yours. The events: `finished`, `finish_failed`, `stop_incomplete`, `budget_cap`, `wall_clock`, `paused` (a `cap-pause` run held at a cap, or any run paused because the model provider refused every seat, with the time the provider named when it named one; the operator is told of a pause once per spell, whichever process wrote it; your own `swarm.sh pause` is not announced back to you), `extended` (a cap pause lifted by `extend`), `operator_request` (an operator request committed: a lead that needs you, an acquisition, a clarification, a network item, a stop proposed when nothing yields; fired by the hub, [ADR 0014](adr/0014-the-case-contract-says-what-comes-in-and-what-is-asked.md)), `evidence_changed`, `chain_broken`, `agent_dead`, `collector_unreachable`, `hub_down`. A command gets one JSON line on stdin (`{event, run, at, event_id, detail, details}`), where `detail` holds only identifiers (a request's `R-n`, its kind, a lead's or question's id, an urgency, a state), numbers and yes/no values, and every list as its count; the event's whole details stay in the run, in `traces/notify-events.jsonl` under `event_id` (`details` says where). A typed target gets the event and the run's id. Nothing a notification carries is case content: it leaves the host. `mailto:` takes one mailbox (`local@domain`, never beginning with `-`), given to `mail` or `sendmail` after `--`. Each target runs detached and has 30 seconds; a failure or a timeout goes to `traces/notify.log` and never stops the run. The targets are kept outside the run (`runs/notify/<id>.cmd` and `<id>.targets`, 0600, in a directory denied to a host run's panes wherever the guard can deny, read only when they are regular files of yours; an ntfy topic is its secret), never in the start options kept for a resume: `swarm.sh resume` gives the command and each target to the kickoff again from that store. The registry records only that there is one (`notify: true`), and the operator's record shows their length, not their text. |
 | `--ledger-from RUN` | no | none | An earlier, finished run's ledger handed in as hypotheses to re-derive or refute: `prior/ledger.md`, read-only (on a VM run it is on the read-only floor), never copied into the new ledger. When the earlier run has an examiner review whose chain verifies, only the entries whose latest review accepted or amended them (and whose entry hash still matches) come in; otherwise every entry, each marked unreviewed. Refused for a run that is running, purged, or held for another case. Recorded as `ledger_from`. |
 | `--no-verify-copy` | no | content check on | By default the evidence copy is checked against its source by content: each copied file's source is read again and its SHA-256 compared with the manifest's (progress every 2 GiB on large sets), and a mismatch is a BLOCKER. This keeps only the check by name, kind and size. Recorded in `inputs.json` as `source_checked`. |
 | `--allow-root` | no | refused | Start a host run (`--isolation host`) as root. Without it that is a BLOCKER: root is not bound by the read-only modes a host run relies on. A microVM run started as root is warned about, not refused. Recorded as `allow_root`. |
 | `--check` | no | off | Run every refusal and preflight of this start, the same code a start runs, and write nothing: no sandbox, no registry entry, no hook, no daemon, no VM, no pull, and no line on the operator's record. It prints what the start would print, and ends with `Check: the start would go ahead (…); nothing was written`. Exit 0 when the start would go ahead, 2 when it would be refused, whatever the refusal. An image that is not on the host is a WARN, since a start would pull it first. The console's New swarm form runs it with the form's options and keeps Start off while it says the start would be refused. |
 | `--model-gateway` | no | off | microVM runs: every model call a VM makes goes through one process on the host that holds the provider key, meters the call from the provider's own answer and refuses a stopped seat's call, or a call past a cap or the wall clock once the harness's grace has passed. The VM holds a seat token, never a key. Providers it cannot front keep msb's placeholder path, and the kickoff names each (`Gateway:` lines). Refused with `--isolation host`. Recorded as `isolation.model_gateway`. See [model-gateway.md](model-gateway.md). |
 | `--label NAME` | no | `swarm-<id>` | Herdr workspace label and UI label. |
-| `--wall-clock MIN` | no | 8 (N<10), 15 (N≥10), 20 (N≥20) | Written to `SWARM.md` and `budget.json`. **Enforced**, the same way the spend cap is: agents are steered to `done cannot_complete`, and if the swarm is still over one grace period later the harness writes the sentinel itself. |
+| `--wall-clock MIN` | no | 8 (N<10), 15 (N≥10), 20 (N≥20) | Written to `SWARM.md` and `budget.json`. **Enforced**, the same way the spend cap is, under the run's stop policy (`--stop`): the agents are steered, and one grace period later the run pauses (`cap-pause`) or the harness writes the sentinel itself (`cap-stop`). The time a run spends paused does not count. |
+| `--stop POLICY` | no | `cap-pause` | What reaching a cap or the wall clock does ([ADR 0013](adr/0013-a-negative-is-bounded-and-a-cap-pauses.md)). `cap-pause`: every agent is steered to post a checkpoint, and two minutes later the run pauses: no model call goes out (the extension's own brake, the model gateway, the hub's prompt gate and the watchdog each hold it), every seat stays where it is, the partial result is kept, and the notify command hears `paused`; `swarm.sh extend` goes on, `swarm.sh stop` ends it as `stopped`. The run never goes on by itself, and your silence approves nothing. `cap-stop`: the harness stops the run after the grace period, for an unattended run; it ends `stopped`, never `completed`. `operator`: `--until-solved` (no wall clock, caps advisory, only you end it). A goal can name it in its metadata block (`stop: cap-stop`); a goal or flag that says `--until-solved` and another policy is refused. Written to `budget.json` as `stop_policy`, and to the registry. A run from before it reads as `cap-stop`. |
 | `--hard-kill` | no | off | After the cap steer, also call Pi `ctx.shutdown()` on that agent. |
 | `--playwright` | no | off | Adds `playwright` and `browser_check` to the agents' `--tools`. |
 | `--allow-tool-forging` | no | off | Agents may write tools with `make_tool` and share them: a script under `tools/<name>/` becomes a real tool for every agent on its next `inbox` / `wait`. Runs as a subprocess with the same limits as `bash`. Recorded as `tool_forging` in the registry. See [forged-tools.md](forged-tools.md). |
@@ -113,20 +127,26 @@ it. A wrong command line prints the mistake and where to read, not the manual.
 | `--toolbox-required` | no | off | A missing tool is a `BLOCKER` (exit 3) instead of a `WARN`. |
 | `--quarantine` | no | off | `work/extracted/` and `work/quarantine/` cannot execute: no-exec at the kernel where the host can (`fsguard.sh --noexec`), and the harness strips execute bits from anything written there. Evidence pulled out of an image is for reading, never for running. |
 | `--tools-from DIR` | no | — | Seed `tools/` from a library of tools forged in earlier runs: one directory per tool, each with its `manifest.json` and script. They are in every agent's list from the first turn, author and version kept, so a swarm does not rewrite what the last one wrote. `swarm.sh tools <id> --save DIR` puts a finished run's tools into such a library. |
-| `--allow-install` | no | off | Agents may install the Python packages a case needs: `pypi.org` and `files.pythonhosted.org` join netguard's allowlist, `PYTHONUSERBASE` points at `work/.toolchain/` inside the sandbox, `PIP_BREAK_SYSTEM_PACKAGES=1` lets pip install there on a system that marks its Python as externally managed (PEP 668), which also means PEP 668 no longer stops a pip run without `--user`: the write guard is what keeps that out of the system, and the contract tells the agents the rule and asks them to record what they installed. There is still no root, nothing mounts, and Homebrew and the system package managers stay out — they write outside the sandbox. Under `--isolation microvm` each agent installs into its own VM's disk (`/opt/dfir/agent`), never a shared prefix, and a program a pack requires that the image lacks is a warning instead of a refusal. Recorded as `allow_install` in the registry. See [safety.md](safety.md) and [credentials-and-teams.md](credentials-and-teams.md#what-a-run-may-install). |
+| `--allow-install` | no | off | Agents may install the Python packages a case needs: `pypi.org` and `files.pythonhosted.org` join netguard's allowlist, `PYTHONUSERBASE` points at `work/.toolchain/` inside the sandbox, `PIP_BREAK_SYSTEM_PACKAGES=1` lets pip install there on a system that marks its Python as externally managed (PEP 668), which also means PEP 668 no longer stops a pip run without `--user`: the write guard is what keeps that out of the system, and the contract tells the agents the rule and asks them to record what they installed. There is still no root, nothing mounts, and Homebrew and the system package managers stay out — they write outside the sandbox. Under `--isolation microvm` each agent installs into its own VM's disk (`/opt/dfir/agent`), never a shared prefix, and a program a pack requires that the image lacks is a warning instead of a refusal. Under a case policy that permits no direct host (`--policy ctf`, `internal`, `live_adversary`) it is refused without `--no-pypi`: the index would be reached with no grant, no check and no capture. Recorded as `allow_install` in the registry. See [safety.md](safety.md) and [credentials-and-teams.md](credentials-and-teams.md#what-a-run-may-install). |
 | `--allow-pack-secrets` | no | off | Hand a pack's stored secrets (`pack.sh install` keeps them in `~/.dfirswarm/secrets/<pack>.env`, never in the pack) to that pack's own tools on the host. A pane can read whatever its extension can, so the agents can read them too; without the flag a pack that requires a secret is refused on the host. Under `--isolation microvm` it is needed too: the value never enters the VM (msb swaps its placeholder in only on the way to the hosts the pack names), but the placeholder is in the whole VM's environment, so any process there, an agent's shell included, can use the operator's account against those hosts. A secret bound to a suffix is refused (msb would send the value to any host under it); `--local-only` withholds every pack secret and opens none of its hosts. Recorded as `pack_secrets`, with what happened to each secret by name. |
 | `--no-pypi` | no | off | With `--allow-install`: `pypi.org` and `files.pythonhosted.org` stay off netguard's allowlist. pip is still pointed into `work/.toolchain/` and what comes through is still inventoried, but the network refuses the index, and the contract tells the agents that instead of inviting them to try; on one published run the invitation was what an agent walked around. Recorded as `install_hosts: false`. |
 | `--no-read DIR` | no | none | A directory the panes may not read, denied at the kernel; repeatable. Reads are open by design, so this is narrow on purpose: a previous run's findings on the same evidence, above all, so a re-run cannot read the back of the book. Recorded as `no_read` and `no_read_applied` (whether the host could apply it). Without it a host run's panes are already denied every earlier run's sandbox in the registry and the examiners' reviews (`runs/reviews/`), where the guard can mask a directory (seatbelt, a mount namespace; not Landlock alone, which would freeze `runs/` for them): recorded as `earlier_runs_hidden`. |
 | `--accept-signer-exposure` | no | off | Host runs. Start although no kernel guard holds the panes (`--no-write-guard`, or a host without one) and a signing key of this install exists: the machine key (current or retired), an enrolled examiner's key file, the custody key, or an ssh-agent that holds an examiner's key. Without it that run is refused, in `--check` too. With it the run records `signer_keys_hidden: false` and what was exposed (`signer_isolation`), and the kickoff says to rotate them afterwards (`swarm.sh machine rotate`; an examiner's new key is a new enrolment). With a guard nothing needs accepting: the panes are denied each home's `machine/` and `examiners/` (made 0700 first), `SWARM_SIGNERS_HOME`, each examiner's key file as its record names it (never read), the custody key, and the ssh-agent (`SSH_AUTH_SOCK` dropped from the panes and its socket denied; launchd's on macOS by its directory); a guard that cannot deny one of them (Landlock alone and an agent's socket, a key inside the run, a signers' home holding what the panes need) refuses the run. Refused under `--isolation microvm`, where no VM mounts any of it (a signers' home inside something every VM mounts is refused there). `--env SSH_AUTH_SOCK=...` is refused. |
 | `--cap-per-agent USD` | no | — | A cap per seat on top of `--cap-usd`: an agent over its own cap is steered to post what it has and call `done(reason=agent_cap)`, and a grace period later its own harness stops it. The swarm goes on. Written to `budget.json` as `cap_per_agent_usd`. Only where the team's dollars are charged; on a subscription or local team it is said to brake nothing. |
 | `--cap-per-agent-tokens N` | no | — | The same per seat in tokens: the per-agent brake of a team on a subscription or local models. Written to `budget.json` and the registry as `cap_per_agent_tokens`. |
-| `--cap-tokens N` | required when nothing on the team bills | — | A swarm-wide cap in tokens: Pi's own totals (`input + output + cacheRead + cacheWrite`) summed over every turn of every agent. The brake for a team whose dollars are not charged: local models, which bill nothing, and a subscription, whose dollars are Pi's estimate. Required for such a team, an optional second brake for any other. Over it, the same steer and grace period as the USD cap. The context is re-sent every turn, so a small goal on two agents is a few million and a seven-agent case runs to tens of millions. Written to `budget.json` as `cap_tokens`, next to `metered`. See [credentials-and-teams.md](credentials-and-teams.md#local-models-ollama-lm-studio-vllm-llamacpp). |
+| `--cap-tokens N` | required when nothing on the team bills | 100000000 for a metered team (not under `--stop operator`) | A swarm-wide cap in tokens: Pi's own totals (`input + output + cacheRead + cacheWrite`) summed over every turn of every agent. The brake for a team whose dollars are not charged: local models, which bill nothing, and a subscription, whose dollars are Pi's estimate. Required for such a team; a metered team without it gets 100,000,000 as a second brake, which the kickoff says is the default (a seven-agent case runs to tens of millions, so the default stops a runaway, not a case). Over it, the same steer and grace period as the USD cap. The context is re-sent every turn, so a small goal on two agents is a few million and a seven-agent case runs to tens of millions. Written to `budget.json` as `cap_tokens`, next to `metered`. See [credentials-and-teams.md](credentials-and-teams.md#local-models-ollama-lm-studio-vllm-llamacpp). |
 | `--allow-host HOST` | no | — | Add a host to the netguard allowlist for this run (repeatable): the provider hosts plus, say, a symbol server. A bare host means port 443 and nothing else, so anything on another port is named as `host:port` — a bare `127.0.0.1` would open every port on the machine, the console's included. `*.suffix` or `.suffix` allows the names under a domain. Whether it also allows the domain itself (the apex) depends on the mode: netguard does not (`*.example.com` does not allow `example.com` on a host run), msb does (under `--isolation microvm` it does). A suffix lets an agent send data to any host under it, not only the one the case needs: `*.blob.core.windows.net` reaches anyone's storage account there. A suffix of one label (`*.com`) is refused under `--isolation microvm` and by the console; a host run's command line does not check it. Under `--isolation microvm` every entry is checked before anything is written, as the VM's policy will read it: an IPv6 address is `[addr]:port` with a port, a CIDR block (`10.0.0.0/8`, `10.0.0.0/8:8080`) is an address range, a loopback entry (`127.0.0.1:8080`, `[::1]:11434`, `localhost:1234`) is this machine's port reached through msb's host gateway, which the guest calls `host.microsandbox.internal:<port>` (a local model's base URL is rewritten to it; the guest's own `127.0.0.1` is the VM itself), and an entry with a scheme, a path or a wildcard anywhere but in front is refused with the reason. Volatility 3 fetches a Windows kernel's symbols over plain HTTP from Microsoft, which redirects to a numbered blob host: `--allow-host msdl.microsoft.com:80 --allow-host '*.blob.core.windows.net'`. The same syntax holds under `--isolation microvm`. Recorded as `allow_hosts` in the registry. |
 | `--case-id ID`, `--examiner NAME` | no | — | Chain of custody: both go into the registry, the contract's title block and the run summary. |
-| `--idle-nudge-sec N` | no | 180 | The idle watchdog (`scripts/idle-nudge.sh`, started next to netguard): an agent with no tool call for N seconds and no marker is prompted through Herdr to continue its seat or call done, at most three times, each an `idle_nudge` event on the trace. An agent that has called only `wait` and `inbox` for 600 s (`SWARM_WAIT_IDLE_SEC`) is steered the same way, unless a job of its own is running. `0` turns it off. |
+| `--idle-nudge-sec N` | no | 180 | The idle watchdog (`scripts/idle-nudge.sh`, started next to netguard): an agent with no tool call for N seconds and no marker is prompted through Herdr to continue its seat or call done, at most three times, each an `idle_nudge` event on the trace. An agent that has called only `wait` and `inbox` for 600 s (`SWARM_WAIT_IDLE_SEC`) is steered the same way, unless a job of its own is running. One whose last turn ended in a provider error is retried with backoff instead: three times under a cap policy, without end until solved. `0` turns the prompts off; the watchdog still runs the stop policy. |
 | `--probe-violation` | no | off | Dev only. Starts one extra agent `<id>pv` (not in `team.json`) without `claim_file`, told to do both: a `write` (which the guard must block) and a shell write (which the harness must detect and announce). |
 | `--provider-host P=HOST` | no | — | The host provider `P` is called on, when the harness cannot know it: a gateway, a region, an account (repeatable). The harness knows a provider's host from `models.json` (its `baseUrl`, which Pi takes over its own for a built-in provider too), from its own table, and otherwise from Pi's model list, which names the host of every provider Pi ships (Groq, Mistral, Fireworks, …). Under `--isolation microvm` a provider with no known host is refused before anything is written, with or without `--no-netguard`: its key is bound to its hosts and swapped in nowhere else. Providers that sign each request with their secret on the client (`amazon-bedrock`, `google-vertex`) are refused under microvm, since the secret itself would have to be in the VM. On the host a provider with no known host is a warning. |
-| `--no-netguard` / `--open-net` | no | netguard on | Skip the netguard sidecar and PATH shim: open egress. Under `--isolation microvm` each VM may reach every public host, and its credentials still go only to their own hosts; recorded as `netguard_mode: "microvm-open"`, and the report's egress row says OPEN. |
+| `--no-netguard` / `--open-net` | no | netguard on | Skip the netguard sidecar and PATH shim: open egress. Under `--isolation microvm` each VM may reach every public host, and its credentials still go only to their own hosts; recorded as `netguard_mode: "microvm-open"`, and the report's egress row says OPEN. It is the network mode `open`, and contradicts `--network closed` or `dynamic`. |
+| `--network MODE` | no | `closed` | The run's network mode ([ADR 0012](adr/0012-a-dynamic-network-decided-by-rules-and-made-on-the-host.md)). `closed`: the models' hosts, the package index with `--allow-install`, `--allow-host`, and what the operator allows later with `lead note --allow-host` (a socket grant). `dynamic` (microVM runs): an agent asks for one bounded lookup with `net_request`; the hub decides it by rules under the case policy and records the decision; a fetch service on this host (`scripts/net-fetch.ts`, started with the hub and kept by its keeper) makes exactly the granted request and seals the answer as a capture (`store/net/<k>/<n>/`), recorded on the ledger as external material; the agents get `net_request`, `net_fetch` and `network`. Refused with `--isolation host`. `open`: every public host (`--no-netguard`), with the tools too. The goal's metadata block may say `network: MODE`. Recorded in `network/policy.json`, SWARM.md and the registry's `case_policy`. |
+| `--policy PRESET` | no | `standard` | The case policy: what the examination permits to leave the run and to reach outside it, whatever the mode. `standard`: hashes and public indicators, to approved passive adapters; active contact (an evidence URL's HEAD) is the operator's. `live_adversary`: stricter; nothing the evidence names is ever contacted, no socket grant. `internal`: nothing leaves (with `--network open` or any lookup it is refused). `ctf`: a published case; no search, no write-up site, only reference or evidence-linked adapters, and every value sent must be found in the evidence the request cites; no socket grant (so no `--allow-host`). The goal's metadata block may say `policy: PRESET`, and `legal:`, `provider_retention:`, `more_evidence:`, `material_use:` as text; a flag overrides the goal's value and the kickoff says so. A combination that contradicts its preset is refused before anything is written, and so is a run whose direct egress does not fit it: under `ctf`, `internal` and `live_adversary` no host is reached without a grant, so `--allow-host`, the package index `--allow-install` would open (add `--no-pypi` to keep the install machinery without it) and a pack's secret hosts (`--allow-pack-secrets`) are each refused, naming where they came from. |
+| `--lookups L`, `--contact C`, `--disclosure LIST` | no | the preset's | Override one field of the preset: what the hub grants by itself (`none`, `reference`, `evidence_linked`, `any`), whether what the evidence names may be contacted (`passive`, `active`), and which classes of case data may leave (`hash`, `public_indicator`, `coordinate`, `internal_name`, `personal`, `file_upload`, or `none`). |
+| `--more-evidence M` | no | the preset's (`ask`; `ctf`: `no`) | Whether evidence may arrive while the run goes on ([ADR 0014](adr/0014-the-case-contract-says-what-comes-in-and-what-is-asked.md)). `no`: a closed collection or a published case; an agent's acquisition is answered at once, "no additional input under this case policy", a constraint of the case and never a finding that something is absent, and `evidence add` is refused; a not_determinable's coverage says so in `acquisition_none_why` (the policy is the reason no ask was opened), which the `no_acquisition_ask` warning suggests instead of an ask. `ask`: the operator authorises or declines each acquisition. `yes`: further collection is expected; an acquisition is authorised by the policy, and the operator collects it. Also `more_evidence:` in the goal's metadata block. `ctf` with `yes` is refused. |
+| `--material-use SPEC` | no | the preset's | What each class of material from outside the original evidence may be used for: `CLASS=USE` pairs (`,` between them), the classes `acquired_evidence`, `case_material`, `operator_supplied`, `external_capture`, the uses `evidence` (a finding may rest on it as on the original evidence), `reference` (it may be cited; what rests on it is flagged) and `none` (kept on the record, never citable: a record citing it is refused). A class left out keeps the preset's use (`acquired_evidence=evidence`, the rest `reference`; `internal`: `external_capture=none`). A capture is never evidence of the events: `external_capture=evidence` is refused. Also `material_use:` in the goal's metadata block. |
+| `--legal TEXT`, `--provider-retention TEXT` | no | none | The case's legal text (jurisdiction, warrant or engagement scope, "GDPR or similar laws") and what you know of how the model and lookup providers keep what they are sent: recorded in the policy, SWARM.md and the registry, never inferred. Also `legal:` and `provider_retention:` in the goal's metadata block; at most 2,000 characters each, nothing cut. |
 | `--local-only` | no | off | Every model on the team must be served from this machine or this network — a `models.json` `baseUrl` on loopback, a private range, link-local or `.local`, or Pi's built-in `llama.cpp` provider — and the netguard allowlist becomes those endpoints and nothing else (`netguard --only`): the eight cloud hosts of the default list drop out. Panes also get `PI_OFFLINE=1`, so Pi makes no catalog-refresh calls at startup. Refused with a cloud model on the team, with a cloud `--compact-model`, and with `--no-netguard`. Recorded as `net: "local"` in the registry. |
 | `--net-allow` | no | — | Alias of the default (kept for older scripts). |
 | `--no-start` | no | — | Prepare the sandbox, `SWARM.md`, `team.json`, `budget.json` and the registry entry, but start no Herdr/Pi. Used by the web API test and the UI's "Prepare only". Under `--isolation microvm` it boots no VM of any kind: the host is not probed and the image is not pulled, `--toolbox` and `--catalog` are not run, neither in a VM nor on the host (the kickoff says so), and `vm-spec.json` in the sandbox records what each VM would have been given. The checks that need no VM still run: the providers' hosts, the `--allow-host` entries, the capacity. |
@@ -164,20 +184,21 @@ Per-pane environment (a host run; a microVM run's pane gets only a quiet shell, 
 
 - `cap <id> [--usd N] [--tokens N] [--per-agent-usd N] [--per-agent-tokens N] [--wall-clock MIN]` changes a running swarm's caps. The change is made under the lock every fold of usage takes, kept in `budget.json` as `cap_changes` (with the caps it left, so the shell watch does not report it as an agent's write), put on the trace as the operator's, merged into the run record and said on the board; a swarm-wide stop the run is no longer over is withdrawn, and a seat's own cap steer lifts by itself on its next check. The run keeps its brake (a dollar cap above zero where dollars are charged, a token cap where they are not), and a finished run is not brought back.
 - `say <id> "<message>"` posts to a running swarm's board as the examiner: what an operator notices, or a tool that has just appeared on the host. Agents see it on their next `inbox` or `wait`.
-- `tools <id>` lists the tools a run forged, with author, version and runtime; `tools <id> --save DIR` copies them into a library for `--tools-from`.
+- `tools <id>` lists the tools a run forged, with author, version and runtime; `tools <id> --save DIR` copies them into a library for `--tools-from`. `tools <id> --candidates` ranks the code the agents wrote into command jobs as candidates for the library ([below](#the-report-the-outputs-and-the-code-left-behind)).
 - `summary <id>` prints a Markdown run summary from the sandbox's files (`scripts/summary.ts`): outcome and markers, the team with what each agent called itself and its spend, by agent and by model, activity counts from the trace (tool calls, implicit claims, violations, forge hints, nudges, per-agent cap events, forged tools, the commands typed most), the ledger, the work files, and the chain of custody (case id, examiner, input hashes, the inputs checks, the toolbox, the catalog).
 - `context <id>` prints the context history of every agent from the trace (`scripts/context-audit.ts`; `--json` for the same as data): per agent the model, the ceiling and the three lines it ran under, the turns, the peak, the lines it crossed, the holds, the hand-offs and Pi's own fallbacks with what each summary cost and which model wrote it, the largest climb in one turn, how many tool calls had more output than the model received (whole under `tool-output/`) and how many `inbox`/`wait` deliveries held posts back; then one sentence per thing the record says about the lines (a provider refusal, a hold at the compact line, a seat that handed off early, a run that never reached a line). A run with no `context` rows says it is not measured rather than guessing. The same record the console's Context chart draws.
-- `report <id>` writes `<sandbox>/package/report.html`: one self-contained document — cover (which says an AI agent swarm prepared it and that its findings are the agents' conclusions until an examiner reviews them), summary of findings, scope and evidence with a sha256 per file (and sha1 and md5 when the kickoff took them, with how the copy was checked against its source: by content, with the counts, or by names, kinds and sizes under `--no-verify-copy`), the timeline, indicators and findings as numbered exhibits taken from the ledger's own `seq`, the method, the artifacts with their hashes, the limitations (the tools the agents forged, not independently validated, among them), the chain of custody (whether `custody.json` matches the verdict anchored outside the run, operator actions on the trace, and any removed VM whose secrets msb's database may still hold), a reproducibility row from the run's `provenance` and `host_clock`, the examiner's review (each exhibit's standing, the counts, whether the review's chain verifies and whether the sign-off covers the ledger's current head), coverage and grounding (a "Named by" column, the evidence no command named, exhibits not grounded in the trace), corrections and absences marked, rows for disk encryption, a legal hold or a purge, a notify hook (never its command), a synced folder allowed by flag or marker, an earlier run's ledger handed in as hypotheses and a root start, the source of the spend figure (with `--model-gateway`, which providers were metered on the host), the files handed over with the report, and the swarm's own `work/report.md` reproduced verbatim. It fetches no stylesheet, script, font or image, so it reads the same on a machine with no network. `--pdf` prints it through Chrome, Chromium or Edge if one is installed (`SWARM_CHROME` names another); the browser numbers the pages, because `@page` margin boxes are unimplemented there and a number this document computed itself would be wrong in every other engine. `--lint` warns when a numbered section cites nothing checkable — a code span, an exhibit number, an inode, a record id or a registry key — and never fails. `--out PATH` writes somewhere else.
-- `package <id>` writes `<sandbox>/package/`: `report.html`, `summary.md`, `artifacts.json` (every file under `work/` with its sha256, including the extracted material the package deliberately leaves behind), everything the run wrote under `work/` whatever its extension, the run's `tools/` with their manifests, the ledger (`ledger.md`, `ledger.jsonl`), `inputs.json`, `toolbox.json`, `team.json`, `budget.json`, `layout.json`, `netguard.allow`, `SWARM.md`, the catalog index, the trace, one file per board thread, and `MANIFEST.txt` with a sha256 per file, `court-set.json` and this run's lines of `runs/operator-audit.jsonl`; with `--model-gateway`, the gateway's log. `--sign` signs the manifest (see "After a run" below). One walk of `work/` produces the report, the summary and `artifacts.json` together, so the hashes on the report's artifact table are the hashes in `artifacts.json`. What you hand over, with the hashes to prove it is what the swarm produced. `work/extracted/` and `work/quarantine/` stay in the sandbox — they came out of the evidence and may be live — and the command says how many files it left behind. `--redact` takes out what a sensitive ledger entry says and the files it cites before the manifest is made. A sensitive entry's words are every text field of it, whole when six characters or more (four with a digit in them, a PIN), and each identifier-like run inside one (a key, a token, an address, a path, an account). A redacted line of the trace, the ledger, its attestations and disputes, the store journal or the review keeps its own sha256 (a ledger entry its seq, kind, prev and hash; an attestation or a dispute of a sensitive entry its act, target, prev and hash; a journal line its seq and prev), so every chain still walks; a JSON file is redacted field by field and keeps its shape; other text files have the words replaced; a PDF a release printed is withheld; a release's signed record, a signature and a token are left as they are. `REDACTIONS.txt` lists each change with the sha256 before and after, and `REDACTIONS.json` what each replaced: the sha256 of the original (never the original), why, and which entry's words it held. Then every packaged file is scanned for each sensitive entry's words, normalised (case, path separators, JSON escapes) in text and as UTF-8 and UTF-16 bytes in any file: a hit refuses the package, naming the file, the entry and the word's sha256, never the word; `--redact-leaks list` hands it over with the hits listed in `REDACTIONS.json`, and `verify` says them. `--with-outputs` includes the jobs' sealed outputs, which a record-only package names by their hashes; `PACKAGE-KIND.txt` says which it is. A package carries the ledger's attestations and disputes (`ledger-disputes.jsonl`), every release of the report as it was sealed (`release/`, never rendered again), and the verdict's signature and timestamp token; `artifacts.sealed.json`, the index of `work/` custody wrote at stop byte for byte (the package's `artifacts.json` is generated when it is packaged); `review.jsonl`, the examiner's review; and `COMPONENTS.json`, which lists each part a recipient holds the record to (the verdict, its anchor, signature and token, the sealed index, the trace and its anchor, the ledger, its attestations, the journal and its anchor, the review) as present or absent with why. All three are under `MANIFEST.txt`.
+- `metrics <id> [--json]` prints the run's process metrics from its own registers (`scripts/metrics.ts`), and `metrics --compare <id-A> <id-B> [--json]` sets two runs of one goal side by side, question by question. Read only. Each metric's definition is under [Metrics](#metrics-swarmsh-metrics-scriptsmetricsts).
+- `report <id>` writes `<sandbox>/package/report.html`: one self-contained document — cover (which says an AI agent swarm prepared it and that its findings are the agents' conclusions until an examiner reviews them), summary of findings, scope and evidence with a sha256 per file (and sha1 and md5 when the kickoff took them, with how the copy was checked against its source: by content, with the counts, or by names, kinds and sizes under `--no-verify-copy`), the timeline, indicators and findings as numbered exhibits taken from the ledger's own `seq`, the method, the artifacts with their hashes, the limitations (the tools the agents forged, not independently validated, among them), the chain of custody (whether `custody.json` matches the verdict anchored outside the run, operator actions on the trace, and any removed VM whose secrets msb's database may still hold), a reproducibility row from the run's `provenance` and `host_clock`, the examiner's review (each exhibit's standing, the counts, whether the review's chain verifies and whether the sign-off covers the ledger's current head), coverage and grounding (a "Named by" column, the evidence no command named, exhibits not grounded in the trace), corrections and absences marked, rows for disk encryption, a legal hold or a purge, a notify hook (never its command), a synced folder allowed by flag or marker, an earlier run's ledger handed in as hypotheses and a root start, the source of the spend figure (with `--model-gateway`, which providers were metered on the host), the files handed over with the report, and the swarm's own `work/report.md` reproduced verbatim. Its first section is one screen of every question, and its second follows each question from who asked it to what it cost; Appendix F holds the whole question and lead registers ([below](#the-report-the-outputs-and-the-code-left-behind)). It fetches no stylesheet, script, font or image, so it reads the same on a machine with no network. `--pdf` prints it through Chrome, Chromium or Edge if one is installed (`SWARM_CHROME` names another); the browser numbers the pages, because `@page` margin boxes are unimplemented there and a number this document computed itself would be wrong in every other engine. `--lint` warns when a numbered section cites nothing checkable — a code span, an exhibit number, an inode, a record id or a registry key — and never fails. `--out PATH` writes somewhere else.
+- `package <id>` writes `<sandbox>/package/`: `report.html`, `summary.md`, `artifacts.json` (every file under `work/` with its sha256, including the extracted material the package deliberately leaves behind), everything the run wrote under `work/` whatever its extension, the run's `tools/` with their manifests, the ledger (`ledger.md`, `ledger.jsonl`), `inputs.json`, `toolbox.json`, `team.json`, `budget.json`, `layout.json`, `netguard.allow`, `SWARM.md`, the catalog index, the trace, one file per board thread, and `MANIFEST.txt` with a sha256 per file, `court-set.json` and this run's lines of `runs/operator-audit.jsonl`; with `--model-gateway`, the gateway's log. `--sign` signs the manifest (see "After a run" below). One walk of `work/` produces the report, the summary and `artifacts.json` together, so the hashes on the report's artifact table are the hashes in `artifacts.json`. What you hand over, with the hashes to prove it is what the swarm produced. `work/extracted/` and `work/quarantine/` stay in the sandbox — they came out of the evidence and may be live — and the command says how many files it left behind. `--redact` takes out what a sensitive ledger entry says and the files it cites before the manifest is made. A sensitive entry's words are every text field of it, whole when six characters or more (four with a digit in them, a PIN), and each identifier-like run inside one (a key, a token, an address, a path, an account). A word under eight characters (a PIN) counts wherever it stands, a letter touching it included (`PIN4821`), except inside a longer run that makes it something else: its digits running on into a bigger number (`12.482145Z`), a run of sixteen hex characters or more with digits of its own (a sha256, a keyed id), or a run of twenty base64 or base64url characters or more with letters and digits of its own and few separators (an encoded blob; a path is not one). The redaction and the scan below hold to that one rule, in text, bytes and file names. A redacted line of the trace, the ledger, its attestations and disputes, the store journal or the review keeps its own sha256 (a ledger entry its seq, kind, prev and hash; an attestation or a dispute of a sensitive entry its act, target, prev and hash; a journal line its seq and prev), so every chain still walks; a JSON file is redacted field by field and keeps its shape; other text files have the words replaced; a PDF a release printed is withheld; a release's signed record, a signature and a token are left as they are. `REDACTIONS.txt` lists each change, and `REDACTIONS.json` what each replaced. Sensitive content the package withholds or matches is named by a **keyed id** (`hidden-<hex>`, an HMAC under a per-package key), never by an unsalted sha256, so a low-entropy value (a PIN, a dictionary word) cannot be brute-forced from the record; the key and each id's real digest, path and word are written to a **private sidecar** (`<dir>.private.json`, mode 0600) beside the package, outside the hand-over, which the owner keeps to match the original. Then every packaged file is scanned — including the generated records and the filenames — for each sensitive entry's words, normalised (case, path separators, JSON escapes) in text and as UTF-8 and UTF-16 bytes in any file, for each sensitive output's digest, and for a filename that holds a sensitive word: a hit refuses the package, naming the file and a keyed commitment, never the word; `--redact-leaks list` hands it over with the hits listed in `REDACTIONS.json`, and `verify` says them. A sensitive output (a job run with `secret_output`, or one made from such an output) is withheld whole under `--redact` wherever its bytes sit in the package, not only its canonical store path, with its job's stdout and stderr: each file is replaced by a line naming its keyed id and why, listed under "Withheld whole" in `REDACTIONS.txt` and in `REDACTIONS.json` (`withheld`, `sensitive_outputs`); an entry citing a sensitive output is redacted as a sensitive one whether or not it was recorded so; and the scan looks for the whole text of each small sensitive output as well (at most 256 bytes, one line, shaped like a secret rather than a status word), which the redaction takes out where it stands. A package made without `--redact` takes nothing out: when the run has sensitive entries or outputs it writes `HYGIENE.json`, naming them (with the same keyed ids and sidecar), how many sensitive files it carries and what the same scan found, and says to hand it over with `--redact`. `--with-outputs` includes the jobs' sealed outputs, which a record-only package names by their hashes; `PACKAGE-KIND.txt` says which it is. A package carries the ledger's attestations, disputes (`ledger-disputes.jsonl`) and store sweeps (`ledger-sweeps.jsonl`), the finish register (`finish.jsonl`), the network's two chains (`network/grants.jsonl`, `network/fetches.jsonl`) and the model gateway's log (`trace/model-gateway.jsonl`), each a declared component `verify` walks against the verdict's seal, every release of the report as it was sealed (`release/`, never rendered again), and the verdict's signature and timestamp token; `artifacts.sealed.json`, the index of `work/` custody wrote at stop byte for byte (the package's `artifacts.json` is generated when it is packaged); `review.jsonl`, the examiner's review; and `COMPONENTS.json`, which lists each part a recipient holds the record to (the verdict, its anchor, signature and token, the sealed index, the trace and its anchor, the ledger, its attestations, the journal and its anchor, the review) as present or absent with why. All three are under `MANIFEST.txt`.
 
 #### After a run: `examiner`, `machine`, `review`, `releases`, `timestamp`, `rerun`, `package --sign`, `verify`, `certify`, `export`, `hold`, `release`, `purge`
 
 Each of these but `certify` (which only reads) goes on the operator's record (`runs/operator-audit.jsonl`: who, from which host, the command, chained line to line). On a live run, `review`, `export`, `hold` and `release` also go on the trace as `operator_action`. `swarm.sh help <command>` prints each one's page.
 
-- `examiner enroll --name NAME --organisation ORG --competence TEXT [--role examiner|reviewer] (KEY) [--id ID] [--principal P] [--tsa-url URL --tsa-ca FILE]` enrols a person on this install, outside every run (`$DFIRSWARM_HOME/examiners/<id>.json`, 0600, in a 0700 directory; `SWARM_SIGNERS_HOME` keeps the signers apart from the packs): a name, the organisation they sign for, a competence statement, and a role. An examiner (`--role examiner`, the default) adopts a report and signs its release; a technical reviewer (`--role reviewer`) signs their own review of it, never a release. One person who is both enrols twice, under two ids, and is refused on one run in both roles. The key is one of three kinds (KEY): an ssh key made here (`--generate-key`: ed25519, the passphrase asked twice on the terminal with echo off, at least 8 characters) or given (`--key FILE`, which must be encrypted: `ssh-keygen -y -P ""` must fail on it; its passphrase is asked to prove it signs; a `.pub` names a key held in ssh-agent, for the command line only); `--no-passphrase` takes a key without one, a documented trade the console refuses. A FIDO key (`--fido`): an ed25519-sk key made on the authenticator plugged into this computer, by an `ssh-keygen` with FIDO support (below), with `--fido-verify-required` (every signature needs the PIN as well as a touch) and `--fido-resident`; the key-handle file stays in the examiners' directory. An e-signature certificate (`--pkcs11-module PATH` with `--pkcs11-id HEX` or `--pkcs11-uri URI`): an X.509 certificate on a token, read without the PIN; the record keeps its PEM, its sha256 fingerprint (`X509-SHA256:…`), CN, issuer, validity, key usage and whether it carries a qualified-certificate statement, and refuses one without digitalSignature and nonRepudiation or out of its validity; `--pkcs11-chain FILE` names the issuing CA's certificates, which then travel inside every signature so a verifier needs only the root. An ssh key is checked by signing a challenge and verifying it; a FIDO key made just now and a certificate are not (a touch and the PIN are what signing asks for). Enrolment prints the fingerprint and, for an ssh or FIDO key, the line for the organisation's signer register (an ssh allowed-signers file: namespaces `dfirswarm-release,dfirswarm-package` for an examiner, `dfirswarm-review` for a reviewer): the register, checked with the person, is what ties the key to them; a certificate's issuer does that for an e-signature. `--tsa-url` and `--tsa-ca` are the RFC 3161 authority the examiner's releases are timestamped by. `examiner list` (id, name, organisation, fingerprint, role, kind), `examiner show ID` (the register line, and whether the console signs with the key) and `examiner machine` read them. No private key is ever printed or copied, and a certificate's subject is shown by its CN alone: a qualified certificate's subject can carry a national identity number.
+- `examiner enroll --name NAME --organisation ORG --competence TEXT [--role examiner|reviewer|analyst|observer] (KEY) [--id ID] [--principal P] [--tsa-url URL --tsa-ca FILE]` enrols a person on this install, outside every run (`$DFIRSWARM_HOME/examiners/<id>.json`, 0600, in a 0700 directory; `SWARM_SIGNERS_HOME` keeps the signers apart from the packs): a name, the organisation they sign for, a competence statement, and a role. An examiner (`--role examiner`, the default) adopts a report and signs its release; a technical reviewer (`--role reviewer`) signs their own review of it, never a release; an analyst (`--role analyst`) adds questions to a running case and an observer (`--role observer`) proposes them, and neither signs a release (every enrolled person may sign their own acts on the question register: `swarm.sh question … --sign`). One person who is both enrols twice, under two ids, and is refused on one run in both roles. The key is one of three kinds (KEY): an ssh key made here (`--generate-key`: ed25519, the passphrase asked twice on the terminal with echo off, at least 8 characters) or given (`--key FILE`, which must be encrypted: `ssh-keygen -y -P ""` must fail on it; its passphrase is asked to prove it signs; a `.pub` names a key held in ssh-agent, for the command line only); `--no-passphrase` takes a key without one, a documented trade the console refuses. A FIDO key (`--fido`): an ed25519-sk key made on the authenticator plugged into this computer, by an `ssh-keygen` with FIDO support (below), with `--fido-verify-required` (every signature needs the PIN as well as a touch) and `--fido-resident`; the key-handle file stays in the examiners' directory. An e-signature certificate (`--pkcs11-module PATH` with `--pkcs11-id HEX` or `--pkcs11-uri URI`): an X.509 certificate on a token, read without the PIN; the record keeps its PEM, its sha256 fingerprint (`X509-SHA256:…`), CN, issuer, validity, key usage and whether it carries a qualified-certificate statement, and refuses one without digitalSignature and nonRepudiation or out of its validity; `--pkcs11-chain FILE` names the issuing CA's certificates, which then travel inside every signature so a verifier needs only the root. An ssh key is checked by signing a challenge and verifying it; a FIDO key made just now and a certificate are not (a touch and the PIN are what signing asks for). Enrolment prints the fingerprint and, for an ssh or FIDO key, the line for the organisation's signer register (an ssh allowed-signers file: namespaces `dfirswarm-release,dfirswarm-package` for an examiner, `dfirswarm-review` for a reviewer): the register, checked with the person, is what ties the key to them; a certificate's issuer does that for an e-signature. `--tsa-url` and `--tsa-ca` are the RFC 3161 authority the examiner's releases are timestamped by. `examiner list` (id, name, organisation, fingerprint, role, kind), `examiner show ID` (the register line, and whether the console signs with the key) and `examiner machine` read them. No private key is ever printed or copied, and a certificate's subject is shown by its CN alone: a qualified certificate's subject can carry a national identity number.
 - `machine` shows the install's machine key (as `examiner machine`); `machine rotate` retires it and makes the next one. The machine key seals the draft release at stop, unattended, so it has no passphrase: rotate it when a pane may have read it (a host run started with `--accept-signer-exposure` records that it could). The old key, its public half and its record are moved to `machine/retired/<id>/` (0700, the key 0600) with `retired.json` (when, by whom, its fingerprint), never deleted: every draft it sealed carries its public key and is still checked against it, and a retired key still counts as a signing key for the host-run refusal above. The new key is made at once, where and as a seal would make it, and both fingerprints are printed; the next draft is sealed with the new one. Half a key (the key or its record without the other) is refused and nothing is moved. `machineSigner` puts the machine directory back to 0700 and the key and its record to 0600 each time the key is used.
-- `review <id>` is the examiner's review. `--adopt N`, `--qualify N --note T` (adopt with a stated qualification), `--reject N --note T` (for an answer: withdraw it) and `--inconclusive N --note T` are the examiner's disposition of a conclusion, an `answer` entry (ledger version 4) or any entry, by seq and hash. An answer whose support is defective (what the ledger gate names: support that names no entry or another hash, superseded without its correction cited, disputed or resting on a failed job's output without `qualifies`, an answer resting on one that no longer stands; no support at all; the tokens the hub found in no cited entry) cannot be adopted or qualified: an unsupported conclusion is not waived, it is withdrawn or rendered inconclusive, and repairing its support is a new examination, a new run. A superseded answer is refused: its correction is what stands. `--technical-review --reviewer ID|NAME --outcome agreed|issues-resolved|disagreement --checked TEXT [--entries 4,10 | --all-answers] [--disagreement TEXT]... [--reviewed-at ISO]` records a second person who checked the methods: who, on what competence, what was checked (entries by seq and hash, or every answer), the outcome (a disagreement says each one and how it stands), when, and what it was over (report.md's sha256, the ledger's head, custody's sha256, the head of the dispositions); two-stage signing, below, says who writes and signs it. These, and the sign-off, are an enrolled examiner's: `--examiner ID`, or the one enrolled when there is one; `--accept N`, `--amend N --note T` and `--reject N` of a finding may still name someone who is not enrolled, and the line says so by carrying no id. What the kickoff recorded as the run's `examiner` is never taken for the examiner: the report shows it as who ran the run. `--sign`, once the run has ended, is the adoption, in two halves: prepare, then seal. It is refused while a defective answer has no withdrawal or inconclusive disposition, with no report at `work/report.md` (`--report PATH` names another under the run), when the run is not as custody sealed it, when a technical reviewer is the examiner, or when the run requires a signed technical review there is not; otherwise it renders the report's final bytes once (no DRAFT mark, a fixed time, printed with `--pdf`) into `release/.pending-<nonce>/` (0700, files 0600) and prints what will be signed: the report's and the release's sha256 with the path to read it at, the gate's counts and the rejections standing, the technical reviews, and the key (with "touch your key" for a FIDO key). It asks on the terminal for the examiner's confirmation of "I have read the report and the answers I adopt", then for the key's passphrase or PIN with echo off, and seals exactly the prepared bytes: `release.json` records how it was signed (`signing`: `via: cli`, the consent confirmed, the statement, the sha256 shown, when it was prepared and confirmed, the key's kind and fingerprint, the `ssh-keygen` or `openssl` that signed) and is signed with the key's kind (`release.json.sig`, or `release.json.p7s` and `report.pdf.p7s` for an e-signature); the signature is timestamped when the examiner's enrolment names an authority (`--no-timestamp` skips it), and the review's sign-off line names the release. A seal is refused when the prepared bytes, the review, custody, the report or the releases moved since, or after fifteen minutes; a wrong secret leaves the prepared release for another try (three at the terminal). `--yes` skips only the confirmation: the release then records the consent as `presented`, not confirmed. With no terminal and no `--yes` the sign-off is refused. A run with no release yet gets the machine's draft first. After an adoption, another is an amendment and says why (`--amend-reason TEXT`); it examines nothing again. An answer the examiner made no disposition on is the agents' conclusion, not adopted, and the release lists it so. `--show` prints what has been reviewed (each disposition, whether the examiner is enrolled, the technical reviews, the release the sign-off names), and exits 4 when the ledger's head or the report's hash has moved since the sign-off (1 when the review's chain is broken). The review lives beside the registry, where no agent reaches (`runs/reviews/<id>.jsonl`, 0600): each line is chained to the one before, appended and never rewritten, and a review whose chain is broken takes no more lines. The report, the summary and the console show each entry's review; `adoptionState()` (scripts/review.ts) gives the report body each answer's disposition, its defects and what it shows (adopted, qualified, withdrawn, inconclusive, or the agents' conclusion, not adopted). A sign-off from before releases is a chained record, not a key's signature, and is said so.
-- `releases <id>` shows the report's releases: each version, a machine's draft or an examiner's adoption, who sealed it with which key, why it was made, the bytes it binds, and what is beside it (a token, a mirror's receipt, a print). A release is `release/v<N>/`: `release.json` (the record), `release.json.sig` (its ssh signature, namespace `dfirswarm-release`: the machine's, an ssh key's or a FIDO key's) or `release.json.p7s` (a CAdES-BES CMS made on an e-signature token, with `report.pdf.p7s` beside a PDF), `report.html` (the report's bytes, rendered for that release at its own time with no other wall clock in them), `report.pdf` when printed for it. v0 is the machine's draft when custody is taken at stop, sealed by this install's machine key (made once, outside every run, with no passphrase, labelled as the machine's): it binds the swarm's report as custody sealed it, the rendering with the DRAFT mark, the custody verdict and its anchor, the index of `work/` custody sealed, the head and length of the ledger, its attestations and disputes, the store journal, the trace and the review, the harness commit at kickoff and now, the renderer's and the run contract's sha256, and the models; it is adopted by no one. v1 is an enrolled examiner's adoption (`review --sign`): the examiner's key, each disposition, the answers not adopted, the defective ones and how each was resolved, the technical reviews, the final bytes. Each later version names the one before it by its sha256 and says why it was made; nothing in a release is written over, and every release's line goes into the anchor beside the run. Each release says its evidence cutoff: the evidence as custody sealed it; a new examination reopens it, and is a new run. `--draft [--reason TEXT]` writes the machine's draft for a run that has a verdict and none (or another, with a reason); it is refused when the run is not as custody sealed it. `--verify [--allowed-signers FILE] [--ca FILE [--ca-intermediate FILE]] [--tsa-ca FILE]` walks the chain: each record, its place (prev), its signature (the machine's seal only against the machine key it names, said as "machine seal, self-checked" and never "verified"; an examiner's ssh or FIDO signature against the organisation's register when given: verified, a key the register does not list, or a key it lists for another principal, which fails; without one, sound under the key the record names; an e-signature with `openssl cms -verify`, its certificate held to the fingerprint the record names, and its chain against the trust anchors in `--ca FILE` with the intermediates in the CMS or in `--ca-intermediate FILE`, naming each anchor's sha256; without a CA, "signature valid; certificate chain not checked"), how it was signed (from the console or the command line, the consent confirmed or presented, over the report.html shown), the technical reviews it binds as signed (still signed, over the state it binds), the host it ran on when its agents could reach the signers' keys, the bytes it binds (the HTML, the PDF, the swarm's report, a print), the verdict and the index it names (the current ones or ones custody kept aside), the ledger, its attestations and disputes as they are, the trace, the journal and the review as prefixes whose chain still holds (lines may follow a release; the ones it bound may not change), its line in the anchor, its token; exit 0 when it all holds and every adoption's key is one the register allows (an e-signature's chain one the CA verifies), 3 when it holds and nothing was given to check an adopting examiner's key against, 4 when something does not. A run no examiner has adopted says "RELEASES HOLD: the machine's seal, self-checked". `--print [N]` prints release vN's HTML to PDF beside it (`print-<k>.pdf`, `print-<k>.json`): made after the release was sealed, it is not in it, and the next release binds the record. `--mirror cmd:COMMAND|dir:PATH|print [--version N]` copies a release's digest line to an independent copy (the run's `--anchor-mirror` does it at every release). `--ots [--upgrade]` stamps the signature with the OpenTimestamps client when it is installed (`release.json.sig.ots`, pending until a Bitcoin block commits it; `--upgrade` completes it later) and says "unavailable" when it is not. `--transparency COMMAND` hands the digest line to a transparency log's client on stdin, with the release's files in its environment (`DFS_RELEASE_JSON`, `DFS_RELEASE_SIG`, `DFS_RELEASE_SHA256`), and keeps what it prints whole as the receipt (`transparency-<k>.json`).
+- `review <id>` is the examiner's review. `--adopt N`, `--qualify N --note T` (adopt with a stated qualification), `--reject N --note T` (for an answer: withdraw it) and `--inconclusive N --note T` are the examiner's disposition of a conclusion, an `answer` entry (ledger version 4) or any entry, by seq and hash. An answer whose support is defective (what the ledger gate names: support that names no entry or another hash, superseded without its correction cited, disputed or resting on a failed job's output without `qualifies`, an answer resting on one that no longer stands; no support at all; the tokens the hub found in no cited entry) cannot be adopted or qualified: an unsupported conclusion is not waived, it is withdrawn or rendered inconclusive, and repairing its support is further examination: the run resumed (`resume`, below), or a new run. A superseded answer is refused: its correction is what stands. `--technical-review --reviewer ID|NAME --outcome agreed|issues-resolved|disagreement --checked TEXT [--entries 4,10 | --all-answers] [--disagreement TEXT]... [--reviewed-at ISO]` records a second person who checked the methods: who, on what competence, what was checked (entries by seq and hash, or every answer), the outcome (a disagreement says each one and how it stands), when, and what it was over (report.md's sha256, the ledger's head, custody's sha256, the head of the dispositions); two-stage signing, below, says who writes and signs it. These, and the sign-off, are an enrolled examiner's: `--examiner ID`, or the one enrolled when there is one; `--accept N`, `--amend N --note T` and `--reject N` of a finding may still name someone who is not enrolled, and the line says so by carrying no id. What the kickoff recorded as the run's `examiner` is never taken for the examiner: the report shows it as who ran the run. `--sign`, once the run has ended, is the adoption, in two halves: prepare, then seal. It is refused while a defective answer has no withdrawal or inconclusive disposition, with no report at `work/report.md` (`--report PATH` names another under the run), when the run is not as custody sealed it, when a technical reviewer is the examiner, or when the run requires a signed technical review there is not; otherwise it renders the report's final bytes once (no DRAFT mark, a fixed time, printed with `--pdf`) into `release/.pending-<nonce>/` (0700, files 0600) and prints what will be signed: the report's and the release's sha256 with the path to read it at, the gate's counts and the rejections standing, the technical reviews, and the key (with "touch your key" for a FIDO key). It asks on the terminal for the examiner's confirmation of "I have read the report and the answers I adopt", then for the key's passphrase or PIN with echo off, and seals exactly the prepared bytes: `release.json` records how it was signed (`signing`: `via: cli`, the consent confirmed, the statement, the sha256 shown, when it was prepared and confirmed, the key's kind and fingerprint, the `ssh-keygen` or `openssl` that signed) and is signed with the key's kind (`release.json.sig`, or `release.json.p7s` and `report.pdf.p7s` for an e-signature); the signature is timestamped when the examiner's enrolment names an authority (`--no-timestamp` skips it), and the review's sign-off line names the release. A seal is refused when the prepared bytes, the review, custody, the report or the releases moved since, or after fifteen minutes; a wrong secret leaves the prepared release for another try (three at the terminal). `--yes` skips only the confirmation: the release then records the consent as `presented`, not confirmed. With no terminal and no `--yes` the sign-off is refused. A run with no release yet gets the machine's draft first. After an adoption, another is an amendment and says why (`--amend-reason TEXT`); it examines nothing again. An answer the examiner made no disposition on is the agents' conclusion, not adopted, and the release lists it so. `--show` prints what has been reviewed (each disposition, whether the examiner is enrolled, the technical reviews, the release the sign-off names), and exits 4 when the ledger's head or the report's hash has moved since the sign-off (1 when the review's chain is broken). The review lives beside the registry, where no agent reaches (`runs/reviews/<id>.jsonl`, 0600): each line is chained to the one before, appended and never rewritten, and a review whose chain is broken takes no more lines. The report, the summary and the console show each entry's review; `adoptionState()` (scripts/review.ts) gives the report body each answer's disposition, its defects and what it shows (adopted, qualified, withdrawn, inconclusive, or the agents' conclusion, not adopted). A sign-off from before releases is a chained record, not a key's signature, and is said so.
+- `releases <id>` shows the report's releases: each version, a machine's draft or an examiner's adoption, who sealed it with which key, why it was made, the bytes it binds, and what is beside it (a token, a mirror's receipt, a print). A release is `release/v<N>/`: `release.json` (the record), `release.json.sig` (its ssh signature, namespace `dfirswarm-release`: the machine's, an ssh key's or a FIDO key's) or `release.json.p7s` (a CAdES-BES CMS made on an e-signature token, with `report.pdf.p7s` beside a PDF), `report.html` (the report's bytes, rendered for that release at its own time with no other wall clock in them), `report.pdf` when printed for it. v0 is the machine's draft when custody is taken at stop, sealed by this install's machine key (made once, outside every run, with no passphrase, labelled as the machine's): it binds the swarm's report as custody sealed it, the rendering with the DRAFT mark, the custody verdict and its anchor, the index of `work/` custody sealed, the head and length of the ledger, its attestations and disputes, the store journal, the trace and the review, the harness commit at kickoff and now, the renderer's and the run contract's sha256, and the models; it is adopted by no one. v1 is an enrolled examiner's adoption (`review --sign`): the examiner's key, each disposition, the answers not adopted, the defective ones and how each was resolved, the technical reviews, the final bytes. Each later version names the one before it by its sha256 and says why it was made; nothing in a release is written over, and every release's line goes into the anchor beside the run. Each release says its evidence cutoff: the evidence as custody sealed it; further examination reopens it, as the run resumed (`resume`: a later release binds the continuation, and this one stays valid for what it bound, a prefix of the same chains) or as a new run. `--draft [--reason TEXT]` writes the machine's draft for a run that has a verdict and none (or another, with a reason); it is refused when the run is not as custody sealed it. `--verify [--allowed-signers FILE] [--ca FILE [--ca-intermediate FILE]] [--tsa-ca FILE]` walks the chain: each record, its place (prev), its signature (the machine's seal only against the machine key it names, said as "machine seal, self-checked" and never "verified"; an examiner's ssh or FIDO signature against the organisation's register when given: verified, a key the register does not list, or a key it lists for another principal, which fails; without one, sound under the key the record names; an e-signature with `openssl cms -verify`, its certificate held to the fingerprint the record names, and its chain against the trust anchors in `--ca FILE` with the intermediates in the CMS or in `--ca-intermediate FILE`, naming each anchor's sha256; without a CA, "signature valid; certificate chain not checked"), how it was signed (from the console or the command line, the consent confirmed or presented, over the report.html shown), the technical reviews it binds as signed (still signed, over the state it binds), the host it ran on when its agents could reach the signers' keys, the bytes it binds (the HTML, the PDF, the swarm's report, a print), the verdict and the index it names (the current ones or ones custody kept aside), the ledger, its attestations and disputes as they are, the trace, the journal and the review as prefixes whose chain still holds (lines may follow a release; the ones it bound may not change), its line in the anchor, its token; exit 0 when it all holds and every adoption's key is one the register allows (an e-signature's chain one the CA verifies), 3 when it holds and nothing was given to check an adopting examiner's key against, 4 when something does not. A run no examiner has adopted says "RELEASES HOLD: the machine's seal, self-checked". `--print [N]` prints release vN's HTML to PDF beside it (`print-<k>.pdf`, `print-<k>.json`): made after the release was sealed, it is not in it, and the next release binds the record. `--mirror cmd:COMMAND|dir:PATH|print [--version N]` copies a release's digest line to an independent copy (the run's `--anchor-mirror` does it at every release). `--ots [--upgrade]` stamps the signature with the OpenTimestamps client when it is installed (`release.json.sig.ots`, pending until a Bitcoin block commits it; `--upgrade` completes it later) and says "unavailable" when it is not. `--transparency COMMAND` hands the digest line to a transparency log's client on stdin, with the release's files in its environment (`DFS_RELEASE_JSON`, `DFS_RELEASE_SIG`, `DFS_RELEASE_SHA256`), and keeps what it prints whole as the receipt (`transparency-<k>.json`).
 - `timestamp <id> [--version N] [--tsa-url URL] [--tsa-ca FILE]` obtains an RFC 3161 token over the latest release's signature now (another version with `--version`): an air-gapped lab's later step. The authority is `--tsa-url`, else the adopting examiner's enrolment, else the run's custody set-up. `timestamp.json` beside the token says when it was obtained and that the release's proof of existence dates from the token's time, not the release's own; `--tsa-ca` checks the authority's signature (exit 0 verified, 3 imprint only, 4 does not verify). One token per release: a second is refused.
 - `rerun <id> <job> [--normalise timestamps@1] [--network] [--json]` runs a sealed job again, once the run has ended: its recorded spec through the job service's own worker path, in the image it ran in, held to the image digest the journal recorded (another digest here is refused, never substituted), the tool's or recipe's sha256 and the run's packs' manifests. The outputs go to `<sandbox>.reruns/<job>/<n>/` (with `rerun.json`), never into the store, and each is compared by its bytes with the sealed manifest: the same, different (both hashes), not made, added; stdout and stderr too. A byte mismatch is a mismatch (exit 4). `--normalise NAME@VERSION`, only when asked, says which differing files are equal once a named, versioned normalisation is applied to both, apart from the verdict and never as a reproduction; `timestamps@1` replaces ISO 8601 and RFC 2822 date-times in text files, and its exact definition is in the record. The rerun has no network unless `--network` gives it the job's own. An import (a copy of a live file) and a job whose image digest was not recorded are refused. What a rerun does not reproduce is said: the bytes the job read (not measured), what it fetched, the reasoning that asked for it.
 - `certify <package dir|zip> [--allowed-signers FILE] [--tsa-ca FILE] [--out FILE]` writes a certification template of the kind FRE 902(13) and 902(14) contemplate: what the package says of itself (the manifest's sha256, who signed it, the custody verdict, every release of the report and who sealed each, the redactions), `verify` run on it with its output and exit verbatim, the statements for the certifier to confirm or strike, what the checks do not establish, and blank fields for the qualified person who completes and signs it. It is not legal advice, and says so. A report's PDF carries no signature of its own (no PAdES): its release binds the PDF's sha256, and the release's detached ssh signature is the examiner's; a certifier signs the template the same way (`ssh-keygen -Y sign -n dfirswarm-certification`).
@@ -235,23 +256,526 @@ Three decisions about a VM's network, said so nobody assumes otherwise:
 - **DNS.** msb's DNS rebinding protection is left at the SDK's default (on), and its strict mode is not enabled: a host-name rule admits the addresses that name resolves to, and msb does not require the connection's own TLS server name or HTTP `Host` to be that name. A local model reached by a host name that resolves to a private address may be refused by the rebinding protection (UNKNOWN, not measured); name it by address.
 - **No TLS-inspecting corporate proxy.** A network that reaches the internet only through a proxy that decrypts TLS is not supported in VM mode: the VMs do not trust the host's certificate store (msb's `trustHostCAs` is off), and no upstream proxy is configured for them.
 
+#### The dynamic network: `net`
+
+`swarm.sh net <run> list` prints the run's case policy, what waits on the
+operator (one item per host and lead, with the reasons it was refused and the
+command that answers it), every grant with its state and what is left of it,
+every request with its decision and machine-readable reasons, every capture,
+every use the fetch service refused, and contamination. `net <run> grant
+NR-<n> --why TEXT` grants a refused request: the same rules run with the
+overridable reasons waived and recorded (a login, an upload, a credential, a
+sensitive value, an internal case stay refused). `net <run> deny NI-<m>|NR-<n>
+--why TEXT` declines an item or a request: the avenue closes, the lead does
+not. `net <run> revoke N-<k> --why TEXT` ends a grant: its next use is
+refused, a transfer under way stops. `net <run> grant --socket HOST[:PORT]
+[--lead L-<n>] --why TEXT` makes a socket grant (tier 2) for the run's jobs run
+with `network=allowlist`: host and port only, no method or path control, no
+content capture; refused under `ctf`, `internal` and `live_adversary`. Every
+act is on the trace and the operator's record, and posted to the board to
+whoever asked. The console's **Network** tab shows the same and runs the same
+commands. A host-managed adapter key (VirusTotal: `DFIRSWARM_VT_API_KEY` in the
+shell that starts the run) is read by the fetch service alone and given to no
+VM; `network view=adapters` tells the agents whether it is configured.
+
+#### The case contract: `requests`, `evidence`, `material`
+
+The case policy is fixed at kickoff ([ADR 0014](adr/0014-the-case-contract-says-what-comes-in-and-what-is-asked.md)):
+written to `network/policy.json` before the custody anchor, which holds its
+sha256, and carried in SWARM.md and the registry's `case_policy`. Custody
+seals it by its sha256 and names a rewrite (`CASE POLICY REWRITTEN`, the
+`case policy` check failed); a release binds it (`release.json` `case_policy`).
+A resume keeps the policy its kickoff recorded and prints a `NOTE` for each
+field its options would have changed. At kickoff the services the goal names
+(a URL, a host, an adapter's whole id such as `rdap_domain` or its service's
+name, alone or inside a tool's name such as `virustotal_hash`, a denied
+service by its own name: the name of a host that is the service's own, such as
+`google.*`, never a subdomain's label) are held
+to the policy and the adapter catalogue and printed as `WARN` lines: a
+closed network, a lookup the policy does not allow, an adapter whose key is
+not configured, a host no adapter reaches or the hard denials refuse. Nothing
+is refused for it.
+
+Everything the run asks of a person is an operator request with a durable id
+(`R-n`): a lead closed `needs_operator`, an acquisition (evidence the run does
+not have), a clarification an agent asked of a question, a network item, and a
+stop the harness proposes when nothing yields. The record that makes it (the
+lead's close, the question's `clarify_ask`, the grants chain's `item`) is its
+commit; the request is derived from it and written once to
+`requests/requests.jsonl`, a chain custody seals, and rendered to
+`operator-requests.jsonl` (one line per request as it stands) and
+`requests/requests.md`. Its lifecycle is `pending` → `notified` (your
+`--notify` targets were handed its id) → `acknowledged` → `answered`,
+`declined` or `withdrawn`. The hub reconciles and notifies after every act
+that may open one and on every round, so a crash between the commit and the
+notification loses nothing; the watchdog is the fallback (every round in a
+host run, every five minutes with a hub). A delivery is claimed on the chain
+before it is sent, so the hub and the fallback never both send one; a failed
+one is tried again after a backoff (a minute, doubling, at most an hour). A
+request imported from a run before the chain is notified unless that run's
+watchdog had notified it.
+
+- `requests <id> list [--open] [--json]` lists them, open first, with how each
+  is answered; `show R-n [--json]` prints one whole with its history.
+- `requests <id> ack R-n [--why W]` acknowledges one; `answer R-n TEXT` answers
+  it where it is answered (a lead's: its note, and the lead reopens; a
+  clarification's: its reply; a stop proposal's: on the request);
+  `decline R-n --why W` and `withdraw R-n --why W` close it. While the run's
+  hub runs, each act goes to it (it writes the chain), as a question's do;
+  the act is said on the board from its event on the chain, once, and a post
+  that fails is made at the next round. The outcome is on your record
+  (`requests_outcome` in `runs/operator-audit.jsonl`).
+- An acquisition carries what it asks for (`source`, `where`, `questions`,
+  `expected_value`, `urgency`: normal, urgent or volatile, `owner`,
+  `authority_needed`) and its stage: `requested` → `authorised` | `declined` →
+  `collecting` → `received` → `validated` | `unavailable`.
+  `requests <id> authorise|collecting|unavailable R-n [--why W]` moves it
+  (`unavailable` needs its reason); `evidence add --for R-n` makes it
+  `received` and `validated`. Under `--more-evidence no` it is declined at once
+  with "no additional input under this case policy"; under `yes` it is
+  authorised by the policy.
+- `evidence <id> add PATH --why W [--for R-n] [--question Q-n]... [--sha256 HEX]
+  [--as ID]` adds evidence acquired after the kickoff, a file or a directory
+  outside the run: each file is copied into a staging directory of its own
+  outside the run and held to the sha256 its source had (and to `--sha256`, an acquisition
+  hash of the one file), then sealed in the store as `import:ev-<n>` (the store's
+  import path: read-only, in a manifest, the bytes kept once), written on the
+  store journal as an `evidence_added` line with its inventory revision and
+  every file's sha256, and recorded on the ledger as external material
+  (`acquired_evidence`, with its provenance). It answers `R-n`, reopens the
+  closed leads under the request's questions (and `--question`'s) and the
+  request's own lead, makes the answers to those questions recorded before it
+  stale until they are recorded again, lifts an acceptance made before it,
+  makes stale every standing `bounded_negative`, `not_determinable` and
+  `partial` answer whose coverage was recorded before it, whatever question
+  it was added for (the reply and the board post name each; the finish line
+  holds each, `evidence_stale`, until the new evidence is examined for it
+  and another seat reviews that: a coverage record naming the import among
+  its objects, attested by another seat, or an entry resting on the import,
+  attested likewise, cited by the answer recorded again; a review made
+  before the evidence came does not count for it; an established answer is
+  not staled; `question accept` after the evidence came excuses it, and its
+  reply names what the finish line still holds), and, when the
+  run's catalogue is on, runs a detect pass over each file (at
+  once when the hub runs, else at its next round). While the hub runs the act
+  is handed to it: it is the store journal's writer. **Every seat's VM mounts
+  the run's directory read-only and live, so an addition is readable there at
+  once, at `store/imports/ev-<n>/out/`** (as it is to a host run's panes), and
+  in jobs (`job_run` with `inputs: ["import:ev-<n>/<file>"]`); a finding cites
+  it as `import:ev-<n>/<file>` however it was read, and its class and
+  provenance are its ledger entry's, never the path. What follows from an
+  addition is recorded once each, after its commit; a process that dies
+  between is caught up by the hub's next round (or `evidence <id> list` with no
+  hub), and the finish line waits for it. Refused under
+  `--more-evidence no`, for a path inside the run, and when a copy does not
+  hash as its source. `evidence <id> list [--json]` lists what was added.
+- `material <id> add PATH --why W [--class operator_supplied|case_material]
+  [--sensitive] [--as ID]` supplies material the same way (`import:mat-<n>`),
+  recorded as external with `{supplied_by, at, from, sha256, permitted_use}`;
+  `--sensitive` marks what its record says sensitive (no name, label or
+  question may carry it). `question add --attach FILE` supplies a file given on
+  this host the same way, and an attachment that is already an object of the
+  run is recorded as supplied material. `check-answers` names every answer that
+  rests on external material with its classes, the report marks it (§5) and
+  lists the evidence and material added (§3), and `release.json` binds them
+  (`external`, `acquisitions`). A record citing material whose class the policy
+  says `none` for is refused.
+
+The report's §8 carries "Evidence gaps and acquisition requests", generated
+from the records: every acquisition with its stage and outcome, and each gap
+told apart as never collected, unavailable, inaccessible, unexamined or
+inconclusive, with its questions, what it bounds and what would close it. A
+gap is never a finding that something is absent. The console's **Requests**
+tab lists every request, open ones first, with the acts above, and the
+header's badge counts the open ones.
+
 #### The lead register and until-solved runs
 
 `swarm.sh lead <run> list` prints every lead, the ones an agent closed
 `needs_operator` first with the request and the command that answers it;
 `lead <run> note L-n "TEXT" [--allow-host HOST]` answers one (recorded on the
 lead, the lead reopened, posted to the board as the examiner, and in a microVM
-run the host allowed for the run's jobs); `lead <run> reopen L-n` reopens a
+run the host allowed for the run's jobs, as a socket grant it names: host and
+port only, refused where the case policy permits none); `lead <run> reopen L-n` reopens a
 closed lead. Each is on the trace and the operator's record. The console's
 Leads tab does the same.
 
-`swarm.sh start --until-solved [--stall-minutes N]` runs until every question
-is answered: no wall clock, every cap advisory, no abandon, and a regroup post
-when nothing moves for N minutes (15). Only `swarm.sh stop` ends it. A goal can
+`swarm.sh start --until-solved [--stall-minutes N]` (the same as `--stop
+operator`) runs until every question in scope has a disposition under the bar
+([ADR 0013](adr/0013-a-negative-is-bounded-and-a-cap-pauses.md)): established;
+partial; a bounded negative or not determinable, each on a coverage record
+another seat reviewed; a premise shown not to hold; out of scope; accepted by
+the operator; or withdrawn. That is the rule for every run, whatever its stop
+policy; this one adds no stricter answer requirement: a question the evidence
+cannot answer is answered `not_determinable` on its reviewed coverage record,
+and the run ends examination-limited. What it takes away is the caps and the
+clock: no wall clock, every cap advisory, no abandon, and a regroup
+post when nothing moves for N minutes (15): first a nudge to the holder of a
+lead a job still runs under, with what the job is doing, then everyone a window
+later. Only `swarm.sh stop` ends it. A goal can
 ask for it in its metadata block (`until_solved: true`, `stall_minutes: N`).
 In a microVM run on a subscription (OAuth) provider, each VM's token is minted
-once, at its start, valid for at least 12 hours (`SWARM_TOKEN_MIN_VALIDITY`
-overrides it); a token that expires in a running VM is not refreshed there.
+at its start, valid for at least 12 hours (`SWARM_TOKEN_MIN_VALIDITY`
+overrides it), and renewed on the host at half that validity: the watchdog
+runs `scripts/vm.ts renew-secrets --spec <hub dir>/vm-spec.json --state <hub
+dir>/secret-renewal.json` every ten minutes, which mints fresh tokens from
+Pi's store and rotates each seat VM's secret in place with msb's live secret
+update (the guest keeps its placeholder; a VM whose rotation would not be live
+is left as it is and said on the trace, `secrets_renewed`).
+
+How the seats share the work and end it ([ADR 0015](adr/0015-one-seat-finishes-and-work-is-offered.md)):
+one seat coordinates the finish (normally the one that published the report
+last); every other seat's `done` is answered "not yours", and the agents'
+headers say whether the registers make the finish ready. `leads/finish.jsonl`
+records the coordinator, the report's reviews, the late items it resolved and
+the check result per state revision. Work nobody holds is offered to one idle
+seat at a time, for a minute from when the offer reaches it; a lead held with
+nothing done on it for ten minutes while its holder works on another lead is parked
+and offered too. First choices are staggered at the start of a run (20 s a
+seat, 90 s in all; `SWARM_FIRST_CHOICE_STAGGER_SEC=0` at kickoff turns it off,
+`SWARM_FIRST_CHOICE_BOUND_SEC` sets the bound). The timings are pilot
+settings: `SWARM_OFFER_SEC` (60), `SWARM_OFFER_MAX_SEC` (300),
+`SWARM_REVIEW_HOLD_SEC` (600, how long a review's offer stays the seat's once
+it took it with `offer accept`), `SWARM_LEAD_PARK_SEC` (600) and `SWARM_JOB_STALL_SEC` (600, for a running
+job's "suspected stall", which is shown, never acted on). The console's Jobs
+tab names a job that needed a program its image does not hold, with the
+profile, for the images' upkeep. The Leads tab, and `swarm.sh lead <run> list`,
+show the finish (ready by the registers or what holds it, who coordinates it,
+the last check and what is late against the report), the parked leads, and on
+each lead its standing offer, a closure waiting for its closer's confirmation,
+a second route with its reason and its product contract.
+
+#### The stop policy: `extend`, `pause`, `unpause`, `stop`, `resume`
+
+`done` finishes a run, under every stop policy, only when every question in
+scope has a disposition under the bar ([ADR 0013](adr/0013-a-negative-is-bounded-and-a-cap-pauses.md)):
+established; partial; a bounded negative or not determinable, each on a
+coverage record another seat reviewed; a premise shown not to hold; out of
+scope; accepted by the operator; or withdrawn. A limitation that only names a
+question is none, and neither is a best candidate (an answer that claims
+established, every review of which holds it a best candidate only) or a quick
+negative nobody attested: the finish line refuses `done` on them and says the
+way to a disposition. Partial is a disposition whatever its reviews' strength. The stop policy decides who else ends the run: a cap pauses or
+stops it and you stop it, whatever the questions' state.
+
+A run ends one of six ways (`runOutcome`, `stop-policy.ts outcome`):
+`completed` (every question established, or settled by a bounded negative that
+says the event did not happen under the stronger bar), `examination_limited`
+(a question not determinable, partial, out of scope, a bounded negative short of
+that, accepted by the operator, or resting on limitations or deferrals),
+`paused` (held at a
+cap, at the model provider's limit, or by you), `stopped` (`swarm.sh stop`, or `cap-stop` at a cap; never
+`completed`), `abandoned`, or `verification_unavailable`. The summary, the
+report and the console say which.
+
+- `extend <id> [--minutes N] [--tokens N] [--usd N]` adds to a going or paused
+  run's caps (`--tokens` only where it has a token cap, `--usd` only where
+  dollars are charged). A paused run whose caps then leave room goes on: the
+  pause is lifted (kept in `budget.json` as `pauses`), the wall clock starts
+  again where it stopped, and the watchdog wakes every seat once, where it was
+  (through the hub in a microVM run). An extension that leaves the run over a
+  cap is refused and changes nothing. On the board, the trace and the
+  operator's record, and to the notify command (`extended`) when it lifts a
+  pause. `cap <id>` changes caps too and lifts a pause
+  the same way. A pause that is not a cap's (the provider's limit, your own
+  hold) stays under an extension: `unpause` lifts it.
+- A seat whose last turn ended in a provider error is prompted again by the
+  watchdog, with backoff (each wait twice the last, up to half an hour): in
+  an until-solved run for as long as it goes, under `cap-pause` and
+  `cap-stop` three times per run of errors, within the wall clock. The seat
+  tells the board once per spell of failed turns; the trace has every one.
+- When the model provider refuses every live seat at once (a subscription's
+  usage limit), the watchdog pauses the run, under every stop policy
+  (`paused.reason: provider_limit`): when every live seat's last turn since
+  the last lift ended in a provider error, and each of them is limited, told
+  to wait 30 minutes or more or refused again after a retry. One seat's
+  error never pauses the run, nor one seat's long wait beside the others'
+  passing errors. While it holds, no seat is prompted, no model call goes
+  out and the wall clock does not run. The harness tries again at the end
+  the provider named, plus a minute (seats on one provider: the longest end
+  any of them was told; on several: the earliest, when each was told one),
+  or every 30 minutes when none is known; it wakes every seat, and pauses
+  the run again if every seat is refused again, without charging the try to
+  the wall clock. You are told once per spell (the notify command's
+  `paused`, with `reason: provider_limit` and `until`), and the board once.
+  A long wait holds every VM: to free the machine, `stop` the run now
+  (custody seals it) and `resume` it after the limit lifts (the resume wakes
+  the seats itself); `unpause`, or Unpause beside the pause in the console,
+  tries again at once.
+- `pause <id> [--why TEXT]` holds a going run under any stop policy: each seat
+  finishes its step and goes idle, no model call goes out, nobody is prompted,
+  and the wall clock stands (`paused.reason: operator`). `unpause <id>` lifts a
+  pause whose cause is gone and the watchdog wakes every seat: your hold and a
+  pause for the provider's limit always; a pause at a cap only when the caps
+  now leave room, and otherwise it is refused with nothing changed (`extend`
+  gives room). Both are on the board, the trace (`run_paused`,
+  `run_unpaused`) and the operator's record.
+- `stop <id>` on a run with no sentinel writes `done/STOPPED` (`{outcome:
+  "stopped", by, at, why}`) before custody seals it: a stopped run is never
+  read as completed.
+- When nothing has yielded (no new finding, question disposition or coverage
+  record) for 20 committed jobs or 30 minutes (`SWARM_YIELD_JOBS`,
+  `SWARM_YIELD_MINUTES`), the watchdog proposes a stop: an operator request of
+  kind `decision` (`D-n`, with its `R-n`), with what is still open,
+  on the trace (`stop_proposed`) and to the notify command. Nothing stops unless
+  you act; another proposal comes only after a further window with nothing
+  yielded. It is never an agent's vote.
+- `resume <id> [--question TEXT]... [--questions FILE] [--why TEXT] [--as ID]
+  [--minutes N] [--tokens N] [--usd N] [--env KEY=VALUE]... [--no-start] [-- START OPTIONS]`
+  continues a run that ended, the same run in the same sandbox on the same
+  chains. It is refused for a running run (that is `extend`), a purged one, and
+  a prepared run that never started. First the budget: the wall clock counts on
+  from where the run stopped, the caps grow by what you give, and a resume that
+  would still be over a cap is refused before anything moves. Then what marked
+  the end (the sentinel, `done/STOPPED`, `ALL_AGENTS_DEAD`, the seats' done
+  files and abandon votes) moves whole to `done/history/<k>/`, the first
+  segment's VM records to `vm/earlier-<k>/` and its kept disks to `earlier-<k>/`
+  beside the snapshots; each seat's last hand-off note or compaction summary is
+  written whole to `inbox/<seat>/resume.md`, where its resume kickoff sends it
+  first; and the resume is recorded in `budget.json` (`resumes`), the registry,
+  the operator's record, the trace and the custody anchor beside the run (with
+  each chain's length and head). The questions given are asked as analyst
+  questions (`--why` defaults to "asked when the run was resumed"). The run
+  restarts with the options it was started with, which the kickoff keeps outside
+  the run (`runs/resume/<id>.argv.json`, 0600, removed by `purge`; `runs/resume`
+  and `runs/notify` are denied to a host run's panes wherever the guard can
+  deny, as the reviews are). The notify command is taken from `runs/notify/`,
+  never kept with the options; an `--env` value is kept only where no pane can
+  read it, and elsewhere the resume refuses until it is given again
+  (`--env KEY=VALUE`). A run from before that gives its options after `--`, and
+  another number of seats is refused. Evidence on an image (`--inputs-image`)
+  that the stop detached is attached again, read-only, and held to the
+  manifest by every file's name and size before anything moves; the resume is
+  anchored beside the run first of all, and one that cannot be is refused with
+  nothing changed.
+  `--no-start` prepares it only; a later `resume <id>` starts it as prepared.
+  The next stop seals the continuation anew: a new custody verdict (the earlier
+  one kept beside it) and a new draft release. `custody-verify` holds every
+  earlier verdict the anchor names to the run as a prefix of its chains and
+  prints each (`Earlier seal: … before a resume: holds as a prefix: …`);
+  `releases --verify` verifies the chains each release binds with their own
+  verifiers, and accepts a release whose ledger, attestations or disputes are a
+  prefix of the run's only when the anchor records, after it, a resume at a
+  boundary the verified chains hold. The report each release binds is kept at
+  `release/bound/<sha256>` when the run is resumed, so an earlier release still
+  verifies after the continuation writes its own report. A
+  signed v1 stays untouched and valid for what it bound; the continuation's
+  answers are adopted through a later version (`review --sign --amend-reason`).
+  The console's run page has "Continue this run" (and Extend, and a paused
+  run's notice, which names its reason and, at the provider's limit, the end
+  the provider named, with Unpause beside it for a pause that is not a
+  cap's) for the same commands. Its elapsed time leaves every pause out.
+
+#### Questions: `swarm.sh question` and directives
+
+A run's questions are in its question register (`questions/questions.jsonl`,
+rendered in `questions/questions.md`; [ADR 0011](adr/0011-questions-are-a-register-with-their-askers.md)).
+The kickoff seeds it from the goal: each question the answers check names
+becomes `Q-<n>` (`Q-3` is the ledger's `question:3`), and each objective of an
+`## Objectives` section becomes `O-<n>`. A goal may put its objectives in its
+metadata block instead (`objectives:` followed by `- O-1: text` lines); the
+kickoff writes them into the goal's `## Objectives` section. A goal with
+objectives and no questions is open-ended: its first agents propose the
+questions with `question_open`.
+
+- `question <run> add --text T --why W [--objective O-n | --objective new --objective-text T] [--parent Q-n] [--materiality material|background] [--priority urgent --reason R] [--expects existence|value|narrative|timeline|list] [--completeness] [--hint REF [--hint-value V]]... [--attach REF]... [--suggest SEAT] [--deadline ISO] [--neutral T] [--submission TOKEN]`
+  asks the running swarm a question. `--completeness` says it asks for a complete set (every file, all connections, a complete list); a question whose words say so ("every", "all", "each", "complete list") is marked so without it, and `amend --no-completeness` takes the mark off. Its established or partial answer rests on a coverage record naming the areas searched (allocated, deleted, unallocated, slack, secondary), or the finish line holds it. It is written to the chain first and acknowledged after (the last line printed is the JSON of the act: `q`, `rev`, `scope`, the event's `seq` and `hash`, and what was delivered); then posted from `analyst:<you>`, offered to the suggested seat for its first minute (`SWARM_QUESTION_OFFER_SEC`) or to the most suited idle seat, and ranked first in every agent's header. A hint says where to look (a ref such as `input:<path>`, or a path in the run); `--hint-value` after it records what the hint says as an open hypothesis in the ledger. `--submission` makes a retry the same question.
+- `question <run> list [--json]` and `show Q-n [--json]`: every question, the triage queue and the clarifications waiting first; one question whole, with every revision, its offers, its leads, its answer and each signed act checked.
+- `question <run> amend Q-n --expect-rev N [--text T] [--why W] [--neutral T] [--completeness | --no-completeness] ...`: a new verbatim revision, refused unless N is the revision now; the standing answer, which names the revision it answers (`question_rev`), is stale until it is recorded again for the new one.
+- `question <run> priority Q-n urgent|normal [--reason R]`, `withdraw Q-n --why W`, `clarify-reply Q-n C-n TEXT`, `scope Q-n|L-n in_scope|excluded --why W`, `accept Q-n --as bounded|not_determinable --why W --expect-rev N`, `verify [--allowed-signers FILE] [--ca FILE]`. An acceptance takes a question's limits as they stand for that revision; it is refused while a lead under the question is still open (a route not yet closed) or its answer is a negative no other seat has reviewed, and any acceptance makes the run's outcome `examination_limited`. It excuses a partial store sweep, and evidence added before it (`evidence_stale`), never evidence added after it or the rest of the negative bar; its reply (`still_held`, and a line from `swarm.sh`) names what the finish line still holds on the question.
+- `lead <run> direct (--question Q-n | --new-question T --new-why W) --title T --why W --product P --acceptance A`: a directive, an unheld lead under a question with the product it is to make and what makes that acceptable. A directive is not signed (`--sign` is refused; sign the question it serves). Under a person's question no lead has framed yet, the first agent to claim it states the proposition and its negation.
+
+Every act takes `--as ID` (an enrolled person: a claim) and `--sign` (signed
+with that person's enrolled key in the namespace `dfirswarm-question`; the
+passphrase or PIN on the terminal or on the descriptor `--secret-fd N` names,
+as release signing takes it). On `accept`, `--as` names what is accepted, and
+a second `--as` the person. Without `--as` the act is this OS account's on
+this host, not enrolled, with the operator's authority. Who may do what: the
+operator and an examiner add in scope (`--objective new` expands the case),
+admit or exclude, amend, re-prioritise, withdraw and accept any question; an
+analyst (`examiner enroll --role analyst`) adds questions, in scope inside an
+objective and proposed otherwise, and amends, re-prioritises and withdraws
+their own; a reviewer's question is a proposed review query; an observer
+(`--role observer`) proposes. Neither an analyst nor an observer signs a
+release. Each act is on the trace and on the operator's record twice: the
+attempt, and the outcome naming the event. The console's Questions tab runs
+the same commands, with the person the console session chose as `--as`; an
+amend or accept form keeps the revision it was opened on until you refresh it,
+and a proposed question is a full card, so a clarification on it is answered
+before it is admitted.
+
+While the run's hub is up (a microVM run that is going) it is the register's
+one writer: `swarm.sh` hands each act, prepared and signed here, to the hub's
+admin socket, which checks and commits it. With no hub (a host run, or a run
+that is not going) the command admits the act itself under the registers'
+lock. The acknowledgement says which (`admitted_by`). `verify` fails on a
+signature that does not verify, on one whose key this install's enrolment or
+the `--allowed-signers` file names for someone else (`wrong-principal`), and
+on any act that says it is signed and carries no signature. A question
+withdrawn from the goal is no longer required by the answers check or the
+finish line; questions admitted or amended into new work after the run's
+done are follow-ups, which `resume` takes up as the continuation's work.
+
+#### The report, the outputs and the code left behind
+
+[ADR 0016](adr/0016-the-report-follows-each-question-and-the-outputs-carry-their-sensitivity.md).
+
+**The report follows each question.** The report's §1 is one screen: every
+question (the goal's, the agents', the ones a person asked, and those
+proposed, excluded or withdrawn), with its standing, who asked it, its answer
+by number, its leads by disposition, the operator's acceptance and its
+tokens. §2 then follows each question from who asked it to what it cost: the
+origin (the goal; an agent and the entry that raised it; a person, with name,
+role, and whether the act was claimed or signed), why, every verbatim revision
+and the neutral wording, hints, attachments with their provenance,
+clarifications, the proposition its first lead tested and its negation, its
+leads (a negative counted, a duplicate footnoted), the coverage that names
+it, the result with its contrary evidence, the acceptance, its evidence gaps
+and its cost; grouped as the goal's, asked during the run, emergent,
+proposed, excluded and withdrawn, each with why it matters, and then the
+questions in scope no answer settles. A chain also says how strongly other
+seats hold the answer (established, or a best candidate, with what capped
+it) and where a person's question was offered, and each lead its offers and
+what became of them, its hand-offs, its product contract, a confirmed
+closure and its route review. §5 keeps each answer's steps. Appendix F
+holds the whole register: every question and lead event — including an event
+tied to no lead, an interpretation of a job's output, under its own heading —
+each rendered whole as its fields' JSON so nothing is dropped, and every
+disposition with who made it, what it cites and whether another agent
+reviewed it; the negatives and duplicates the body counts are there in full;
+and the finish register (the coordinator's lease, readiness, the checks, the
+report's acks and their resolutions).
+
+**Cost per question.** Each model call the model gateway recorded (input,
+output and cache tokens) is given to the leads its seat held when the call
+was made, split evenly among them, and each lead's share to the questions it
+names, split evenly; a call made while the seat held no lead goes to what
+it named (an attest or a dispute to the question of the entry it names, a
+route review, a confirmation or a lead act to that lead, a record to the
+questions it answers, a job's status to the job's lead; with the gateway,
+what a call did is read from the trace rows that follow it), a finish call
+or a write of the report to a line of its own, and a call that named
+nothing to no question, on its own line by kind (waiting, compaction,
+coordination, reading, other), so the figures add up to the run's total. A run without the gateway (a host run) spreads each seat's total over
+its tool calls on the trace, an estimate the report calls one; a seat with a
+budget the trace cannot place keeps its tokens in an explicit unattributed
+bucket, so the total is still the whole budget. The per-question figures shown
+are whole numbers apportioned by the largest-remainder method, so they sum to
+the displayed total. It is an attribution by holding, not a measure of what a
+question needed.
+
+**A release binds the register.** `release.json` carries `questions`: the
+length and head of `questions/questions.jsonl` as custody sealed them, the
+questions those events opened by origin, every person who asked or acted on
+one (enrolled, claimed or signed, with their questions), and the events
+recorded after the verdict (`post_seal`), which the next release binds.
+`releases <id> --verify` holds the chain to that head and recomputes the
+rest. Custody holds the operator requests' chain to its seal too:
+`custody-verify` names the operator's acts on requests after the stop as
+following the sealed line, and a sealed line changed as a drift.
+
+**Sensitive outputs.** `job_run(secret_output: true)` seals every output of
+the job sensitive (its `job_committed` line and `job.json` say so, with why);
+the harness never reads the bytes to decide. Derivation is read from the
+snapshot a job's scope manifest recorded (each object's digest at the job's
+start), so a job that executed against a sensitive output's bytes — by their
+digest, wherever they sat: a work copy, a store blob, a catalogue link,
+generation or alias, a directory scope — is sealed sensitive too, and it
+carries through chains of jobs; a job declaring nothing whose command names the
+sensitive job is derived. A generation of a sensitive output withholds its
+coverage detail from the catalogue projection at the source. An entry citing a
+sensitive output (`job:`, `sha256:`, `member:`) is recorded sensitive, and the
+answer to `record` says so. The package side is above (`package --redact`);
+`export --redact` treats an unmarked entry citing one as sensitive.
+
+**A cancelled job's output.** An entry citing the kept output of a job that
+was cancelled or stopped must say in `qualifies` how it treats what the job
+wrote before it stopped; until a correction does, the answers check reports a
+`partial_output` defect, which no limitation names away. A limitation, a
+search recorded partial or failed, and a coverage record carry their own
+disposition.
+
+**The store sweep.** A coverage record names `looked_for`, the literal strings
+a hit would contain were the answer in the evidence (or `looked_for_none_why`
+when no literal form exists), and the hub then searches every output the run
+holds for them: every sealed job output and job log, every import (evidence
+added late included), every capture, every whole output kept under
+`tool-output/`; not the input images. Case-insensitive for ASCII, in UTF-8 and
+UTF-16LE, each file streamed whole, bytes and strings only. The result is a
+line of `ledger/sweeps.jsonl` (chained, bound to the record's hash): clean,
+hits (in objects neither the record's refs nor the outputs among its
+result_refs name), or partial (what the budget did not reach, each named;
+`SWARM_SWEEP_MAX_BYTES`, 16 GiB, and `SWARM_SWEEP_MAX_SEC`, 1800, set it). A
+negative resting on the record waits for its sweep (`sweep_pending`); a hit
+outside it holds the negative until the record is recorded again naming that
+object, with what it showed, or the answer is revised (`sweep_hits`). What it
+showed is an entry in the revised record's `result_refs`: a finding, an event
+or a limitation whose refs name the object itself (not a directory holding
+it), or one absence whose refs list several, written after the sweep that
+found it. A hit object a record names with no such entry keeps holding
+(`sweep_hits`, each object named, and the record's reply says so): naming a
+hit is not examining it. A partial
+sweep holds until the operator accepts the question's limits
+(`sweep_partial`). A sweep lost with the process that began it is run again by
+the finish gate and the answers check once its record is older than
+`SWARM_SWEEP_ORPHAN_SEC` (120). The review offer, `ledger.md`, the report and
+the metrics show each sweep.
+
+**A downgrade.** A revision that moves an answer from established or partial
+to not_determinable or bounded_negative carries `downgrade: {evidence:
+[E-<seq> or objects], why}`, what undermines the earlier chain; without it the
+revision is refused, and the refusal points to a dispute and a lower strength
+or confidence instead. At least one entry of the evidence bears against the
+chain (the answer and what it rests on): a finding or an event that
+contradicts one of them (`rel` contradicts), a refuted hypothesis tied to one,
+an entry it rests on under a dispute in force, or a correction of one. A
+limitation or a coverage record does not. While a finding or an event the
+earlier answer rested on for its question still stands (not corrected, not
+disputed, contradicted by nothing), the revision is refused and the refusal
+says to answer partial: a standing positive finding is never discarded to make
+an answer not determinable. The report shows the earlier answer, the disputes
+on it and the downgrade's evidence.
+
+**Partial is a disposition.** "A best candidate" concerns only an answer that
+claims established (its result established, or an answer from before results);
+one that every review holds a best candidate only has no disposition, and it
+holds readiness and the done under every stop policy. A partial answer, a
+negative, out of scope and a premise shown not to hold are disposed by their
+own bar whatever their reviews' strength. A review of a partial answer checks
+the parts the answer claims: a part it declares open is held
+`established: false` with `declared_open: "E-<seq>"`, the limitation it cites
+or the coverage record it rests on for that part, and such a part does not cap
+the review, nor does the answer's confidence.
+
+**Tool candidates.** `tools <id> --candidates [--out DIR] [--min-lines N]
+[--library DIR]...` takes the code out of every agent's command job (each
+heredoc, each inline `-c`/`-e` script, the command itself, each script of the
+agents' own under `work/` or `tool-output/` a job **ran as code** — an
+interpreter invoked it, not merely named or copied it — read without following
+a link and only when its bytes still match the snapshot the job read), keeps
+those of N lines or more (20), counts the same text run by several jobs as one
+candidate, and ranks them by lines times jobs. Output hygiene runs first: a
+candidate from a sensitive job, or one whose text holds a sensitive value, is
+withheld and named, its script never written. Each line says its job ids,
+seats, image profiles, statuses and lines, how often it was reused, and the
+library tools that may already cover it (the script names one, or its
+manifest's `use` matches what the jobs declared; `--library` names the
+libraries, the repository's `tool-library/` by default, beside the run's
+`tools/`). Every non-withheld script is written whole to DIR (default
+`<sandbox>.tool-candidates/`) with `candidates.json` and `README.txt`;
+[tool-library/README.md](../tool-library/README.md#folding-a-candidate) says
+how one is folded in.
+
+**The library's hint.** A tool's manifest may say what it reads in `use`:
+`extensions` (".evtx"), `magic` (`{offset, hex}`) and `names` (a file's own
+name, `*` for any run). When an agent's command job declares its inputs, the
+answer to `job_run` carries `library`: the run's tools that say they read
+those files (by extension, first bytes or name; a manifest without `use` by
+its description naming the extension as a word), each with what it matched.
+A hint only: the job runs as asked, and a tool its command already runs is
+not offered. It never holds the job: the inputs manifest is parsed once and
+cached against its size and time, a bounded number of file heads is read, and
+the hint gives what it has past a short deadline.
 
 ### `scripts/spawn.sh`
 
@@ -332,6 +856,114 @@ scripts/netguard.sh [--allow h1,h2] [--only LIST] [--allow-file F] [--port N]
 ```
 
 Default allowlist `api.openai.com,api.deepseek.com,api.x.ai,generativelanguage.googleapis.com` (+ `NETGUARD_ALLOW`). `swarm.sh start` adds the model's host (`anthropic/` → `api.anthropic.com`, `openrouter/` → `openrouter.ai`, others already listed). `--only` replaces the list. Port `NETGUARD_PORT` (3128; `swarm.sh` gives each swarm's sidecar the first free port at or above `SWARM_NETGUARD_PORT`, default 43178, so concurrent swarms never share a proxy). Mode `auto` picks `netns` when `unshare -rn` works and `lo` can be brought up, else `proxy-only` with a WARNING. `--dry-run` prints mode, allowlist, proxy and command. Exit 3 if the proxy fails to start or `--mode netns` was forced where unavailable.
+
+### Calibration: `calibration/generate.py`, `scripts/calibrate.ts`
+
+```
+python3 calibration/generate.py --out DIR --truth-dir DIR [--seed SEED] [--cases LIST] [--force]
+node --experimental-strip-types scripts/calibrate.ts <run-dir> --truth FILE [--out FILE] [--late auto|added|absent] [--json]
+```
+
+Synthetic cases whose answers are known, to measure how often a run says
+"not found" about a fact the evidence holds (a deleted file, slack,
+unallocated space, a rotated compressed log, two artefacts read together) and
+how often it answers a question the evidence cannot answer (a near miss that
+invites a guess, a false premise, evidence that was never collected). Three
+cases: a USB drive image and a workstation's logs, a web server's logs, a
+mailbox export and a browser history database. Each has a held-back evidence
+item under `late/` that settles its missing question, for the operator to add
+while the run goes on: `swarm.sh evidence <run> add <case>/late/<file> --why
+TEXT [--for R-n]`, which the scorer tells by its digest on the store
+journal's `evidence_added` line (`--late auto`). Python 3.8 and its standard library are all the
+generator needs; the same seed gives the same bytes on any host (the history
+database's page layout follows the host's SQLite version).
+
+**The truth must stay outside the repository and outside every run.** The
+generator writes it only to `--truth-dir`, and refuses a directory inside a
+dfirswarm checkout, inside `--out`, or inside a run, before anything is
+written. Without `--seed` a fresh seed is drawn and kept in the truth files
+only. `calibrate.ts` refuses a truth file or an output inside the run it
+scores or inside a checkout; its JSON goes beside the truth by default. It
+reads the run's register (the ledger's answers, what they cite, the
+attestations, the leads, the operator requests, and the question register and
+the `result` and coverage fields where they exist), never a tool's output,
+and reports the miss rate on present facts (the hard ones apart), false
+negatives, the forced-answer rate, decoy adoption, unsupported negatives,
+acquisition requests, the late item, and the calibration of the stated
+confidence. Exit 0 when scored, 1 when a generated case's bytes do not hold
+what its truth says, 2 on a usage error or a refusal. See
+[calibration/README.md](../calibration/README.md).
+
+### Metrics: `swarm.sh metrics`, `scripts/metrics.ts`
+
+```
+swarm.sh metrics <id> [--json]
+swarm.sh metrics --compare <id-A> <id-B> [--json]
+node --experimental-strip-types scripts/metrics.ts <run-dir> [--json]
+node --experimental-strip-types scripts/metrics.ts --compare <run-dir-A> <run-dir-B> [--json]
+```
+
+How a run worked, read from its own registers, for cases with no ground truth
+(the calibration cases above have one). Nothing is judged and nothing is
+written: every figure is a count of named records, the JSON lists them (lead
+ids, `E-n`, `Q-n`, `R-n`, job ids, seats, times, reason codes) so each can be
+checked against the register it came from, and no free text a record carries
+is copied into the table or the JSON: no answer's value, finding or command,
+no dispute's why, no done's or stop's reason (the outcome is its class, who
+and when). A register the run does not have is said to be absent, never read
+as zero: each metric whose register is missing says "not recorded (no
+<file>)", and its JSON object carries `recorded: false`; a run from before
+offers has no offer events, one from before the reuse hints no `job_similar`
+lines, one from before the finish register no readiness. Exit 0, 1 for an
+unknown id, 2 on a usage error.
+
+"The questions in scope" are, at the end of the run, the register's live
+questions: in scope, not withdrawn, and not a follow-up admitted after the
+run's done (`after_done`: a resume's work, not this run's; `Q.liveInScope`);
+else the goal's, else the sections the ledger answers. A proposed or excluded
+question is not in scope. The answer metrics count only questions in scope;
+an answer still standing for a question since withdrawn, excluded or deferred
+is listed apart as history (`negatives.out_of_scope`). A question is material
+unless the register says background. "Standing" is at the end of the run: not
+superseded by a later entry. A grant's status is read at the run's end, so a
+finished run measures the same whenever it is read.
+
+| Metric | What is counted, exactly |
+| --- | --- |
+| Quick negatives | Lead `close` events with disposition `negative` that the hub flagged `quick_negative` when it wrote them: the lead was held two minutes or less from its holder's take to the close, had at most one job, and that job's declared scope held at most one object (a job over everything is never quick). Each close counts, so a lead reopened and closed negative again counts twice; the flag is a review cue, not a defect. Out of every negative close. |
+| Negative answers, reviewed | Standing answers of a question in scope that the finish gate holds as negatives (protocol.ts `negativeByResult`, the gate's own test): `bounded_negative`, `not_determinable`, and a `premise_not_supported` resting on a search alone (no standing finding it cites for its question shows the premise false). Reviewed: an `attest` carrying its review (detection, reproduction, another route), by a seat that wrote neither the answer nor a coverage record it cites, on the answer or on a standing coverage record it cites whose results still stand (protocol.ts `negativeReview`, the gate's own test). |
+| Unreviewed negatives | The negative answers above that are not reviewed, split into material (these hold the finish) and background. Measured at the end, not at any moment during the run. |
+| Store sweeps | Coverage records that name `looked_for`, by how their sweep (`ledger/sweeps.jsonl`) ended: clean, with hits in objects the record does not name (and how many hit objects), partial, or pending (no line yet); the standing negatives in scope a sweep holds now (`sweep_pending`, `sweep_hits`, `sweep_partial`, with the coverage record); and the records with hits that a revision naming what the sweep found released (the revision's own sweep clean). |
+| Confidence | Each standing answer of a question in scope, by the confidence its author stated and the one the run records (protocol.ts `recordedConfidence`): a high stands only on an established answer another seat attested established, naming the alternatives it weighed, why the evidence rules each out and the entries that show it; any other high is recorded medium. The answers recorded lower than stated are named, with the harness's reason. An answer recorded before the rule (no `confidence_rule` in its entry) keeps the confidence its author declared, and such highs are counted apart (`legacy`). |
+| Coverage records | Standing `coverage` records, each counted once: stale when a result it names no longer stands (by code: `missing`, `rebound`, `superseded` with the entry that replaced it, `disputed` with the seats that dispute it, never their words), else by the hub's computed field: `complete`, `partial`, or not computed (a record from before the field). A stale record is never complete, whatever its field says. Complete means the jobs behind it were given, by digest, every object it names; it never means the objects were the relevant ones. Reviewed, as the finish gate counts it: an `attest` with its review on the record, by a seat that did not write it, while its results stand; or an `attest` with its review on a negative answer resting on the record that the gate holds reviewed (the review of the negative is the review of its search). Both are given apart. |
+| Negatives on partial coverage | Negative answers none of whose standing coverage records is complete and current (each is shown as partial, not computed or stale), and, apart, those that cite no coverage record at all. |
+| Offers | Lead offers (`offer` events) by what became of each while it stood (from the offer to the lead's next claim, release, close or reopen), one outcome each, the first that applies in this order: accepted (a `claim` or `confirm` that names the offer), declined (`offer_decline`), taken by another seat (that next claim was another seat's, lapsed or not), lapsed (`offer_lapse`), else no outcome. By reason too (wake, hand-off, parked, reopen, confirm). Question offers: made, accepted (`offer_accept`), declined, and not taken up. A run from before offers has none; its `wake` events are counted apart: taken by the woken seat (its first claim of the lead in that open spell), by another seat, or not taken. A woken seat's claim is not the same measure as an accepted offer: a wake reserved nothing. Review offers (a limiting route's review, a material negative's review, `reason: route_review | negative_review`) are counted apart (`reviews`): taken up by the review they asked for (recorded by the seat offered, even after its offer ran out), declined, withdrawn (`offer_withdraw`: reviewed by another route, or the answer superseded), lapsed, or with no outcome; and how many their seat took first (`offer_take`). |
+| `done` calls | Every `done` line on the trace, and every `done_deferred` line (a seat's done that was not its finish: another seat coordinates it). Accepted: a done line with no refusal (and, of those, the one that wrote the sentinel); refused by the seat's checks, by why (the finish line not met, posts that landed after the report, the finish line unsettled, an abandon vote that did not end the run); refused by the hub (a `markDone` the hub refused: the seat saw a thrown error and wrote no done line; a refusal the hub counted and wrote once is that many calls); not the seat's finish. A done after the sentinel (a seat leaving) is an accepted call that wrote nothing. |
+| Tail | From when the run was ready to its end (the sentinel's time, or the operator's stop). Ready is, where the finish register records readiness, the last turn to ready before the end that was not undone before it (a done that passed while readiness had not turned ready records the ready state itself, and the tail says so: "recorded by the done"); otherwise the moment every question in scope had its first answer. Two more tails are given apart, because they are not the same: from every question's first answer (any result, supported or not), and from every question's final answer (the one standing at the end). None while a question in scope has no answer; the unanswered are named. |
+| Acquisition | Operator requests of kind `acquisition`, by the stage each ended at (requested, authorised, collecting, received, validated, declined, unavailable), and those the case policy declined at once. A gap is a request that did not end validated (declined, unavailable, or still waiting), with the questions it named. Evidence added: the store journal's `evidence_added` lines, and how many answered a request. |
+| Interpretations | The lead register's `interpret` events, each bound to the entry it names: valid while that entry stands, otherwise on a superseded or on a disputed entry, or on none the ledger holds (the job needs interpreting again). Lead jobs never interpreted at all, and those with no valid interpretation left, are named. |
+| Reversals | A standing result that changed: an answer superseded by one of the same question with another `result` (a correction that keeps the result is counted apart, as a correction), and a lead closed negative that was reopened. The cause is new evidence when an `evidence_added` line came between the two (or the reopen's cause is `evidence_added`), and discoverable in the original evidence otherwise. A heuristic: evidence that came between is not proof it caused the change. |
+| Cost per question | Each call's tokens (input, output and cache, as `budget.json` counts them) and dollars, from the model gateway's log where the run has one, else the seats' Pi sessions, else each seat's total spread over its calls on the trace (`trace-estimate`), given to the leads its seat held when the call was made, in equal parts, and each lead's part to the questions it answers, in equal parts. A lead is held from its take to its release, close, reopen, hand-off or another seat's claim; a seat claiming what it holds keeps holding it. A call made while the seat held no lead is given to what it named (`named`: an attest or dispute to its entry's question, an act on a lead to that lead, a record to the questions it answers, a job's status to its lead); the finish's and the report's work made so is `finish_and_report`; calls that named nothing (`unheld`, with `by_kind`: waiting, compaction, coordination, reading, other), and parts of leads that answer no question, are counted apart; a call whose usage the provider did not report counts nothing. The same computation as the report's (`scripts/question-cost.ts`), shown with the same figures: the parts are kept exact until the end, then rounded to whole tokens and millionths of a dollar by the largest remainder (`roundParts`), so the questions, the unheld calls and the leads without a question add up to the run's totals. An apportionment, not a meter: a seat thinking about one lead while holding two is split evenly. |
+| Duplicates | From the store journal: jobs whose `job_similar` line names another seat's similar job (not counting declared reproductions), and of those the exact repeats (the same command or the same tool and arguments over the same objects); `independent: true` jobs, and those of them that had similar work to compare with; `job_same_as` lines (files, bytes, and jobs every non-empty output of which is an earlier job's); typed recipe requests answered with an earlier job (`job_deduplicated`); and, from older runs, the retired shadow merge's `job_would_merge` lines. |
+| Network | Requests and how the rules decided them (granted, denied, by each denial's code), operator items (and those still open), grants by status (granted, active, exhausted, expired, revoked), fetches, captures delivered (and complete), uses the fetch service refused, and contamination records. |
+
+`--compare` reads two runs of the same goal after both ended, question by
+question by section, each run over its own scope: its standing result and
+the result's kind (it asserts: established or partial; a negative, as the
+gate holds one; a premise a finding shows false; out of scope; or unknown, an
+answer recorded before results, which is not guessed at), whether a negative
+was reviewed, the coverage it cites (complete, partial, not computed, or
+stale) and the operator's acceptance while it stands (`Q.acceptanceStands`;
+one the question's amendment, new evidence or a replaced answer lifted is
+shown as lapsed, and flagged). A question outside a run's scope is compared
+as unanswered there, its old answer shown as history. The verdict is `agree`
+(the same result), `class_differs` (the same kind in another class),
+`disagree`, `unknown` (a side has no result class), or answered in one run
+only. A negative the other run asserts is flagged, and so is a negative both
+runs reached with no complete coverage that still stands: two runs of one
+harness can share a blind spot, and their agreement is not confirmation.
+When the two runs' questions in scope differ in number or text, it says so
+and still compares by section.
 
 ### `npm` scripts
 

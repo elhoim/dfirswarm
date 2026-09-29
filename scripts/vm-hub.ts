@@ -47,7 +47,9 @@
  *
  * The admin socket, `<dir>/admin.sock`, is for the harness's own scripts on
  * the host (idle-nudge.sh, await-done.sh, swarm.sh): prompt an agent, read
- * who is working, tell the hub which Herdr pane is whose.
+ * who is working, tell the hub which Herdr pane is whose, and admit the
+ * operator's acts on the question register (scripts/questions-cli.ts), so
+ * the hub is that register's one writer while it runs.
  *
  * And the stop. The extension in each VM steers its own seat as it does on
  * the host; this process enforces the swarm's wall clock from outside, where
@@ -73,19 +75,37 @@
  */
 import { execFile, execFileSync, spawn } from "node:child_process";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { appendFileSync, chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+import { appendFileSync, chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import { connect, createServer, type Server, type Socket } from "node:net";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import * as P from "../extensions/protocol.ts";
+import * as F from "../extensions/finish.ts";
 import * as L from "../extensions/leads.ts";
+import * as Q from "../extensions/questions.ts";
 import * as T from "../extensions/toolchain.ts";
 import { claimHolds, messageFor, resolvePeer } from "./nudge-broker.mjs";
 import { GATEWAY_STATE_REL } from "./model-gateway.ts";
 import { JobService, jobView, type JobSpec } from "./job-service.ts";
+import { similarView } from "./job-reuse.ts";
+import { bindJobGrants, checkJobGrants, fetchForSeat, netTick, netViewFor, requestAccess } from "./net-broker.ts";
+import { readCasePolicy } from "./case-policy.ts";
+import { resolveScope, scopeKindOf } from "./job-scope.ts";
+import { commandNames, libraryHint } from "./library-hint.ts";
 
 /** What a job tool is told in a run with no job service. */
+/**
+ * The library hint for a command job at its admission: the tools of the
+ * run's library whose manifest `use` (or description) matches the files the
+ * job declared, the ones its command already runs left out (library-hint.ts).
+ */
+async function admissionHint(S: string, spec: JobSpec): Promise<Awaited<ReturnType<typeof libraryHint>>> {
+  const r = await resolveScope(S, spec.inputs, {});
+  if (!r.ok) return null;
+  return libraryHint(S, r.objects, { skip: (tool) => commandNames(spec.command ?? "", tool) });
+}
+
 const NO_JOBS = "this run has no job service (a host run, or --no-jobs): run the work in your own shell";
 
 /** How long a record waits for the seal of a brain-side output it cites (an import job on the short lane). */
@@ -136,7 +156,7 @@ export async function sealCitedRefs(svc: JobService | undefined, who: string, in
   }
   return { ok: true, input: mapLedgerRefs(input, (r) => replaced.get(r) ?? r), notes };
 }
-import { destroyWorker, roomForWorker, runWorker } from "./vm.ts";
+import { destroyWorker, roomForWorker, runWorker, workerMetrics } from "./vm.ts";
 
 /**
  * One line from a VM: a trace line keeps a tool's whole input and output
@@ -201,6 +221,17 @@ const RATE_LIMITS: Record<string, { bucket: string; capacity: number; perSecond:
   leadClose: { bucket: "ledger", capacity: 200, perSecond: 5 },
   leadLink: { bucket: "ledger", capacity: 200, perSecond: 5 },
   leadInterpret: { bucket: "ledger", capacity: 200, perSecond: 5 },
+  leadReopen: { bucket: "ledger", capacity: 200, perSecond: 5 },
+  routeReview: { bucket: "ledger", capacity: 200, perSecond: 5 },
+  leadHandoff: { bucket: "ledger", capacity: 200, perSecond: 5 },
+  leadConfirm: { bucket: "ledger", capacity: 200, perSecond: 5 },
+  offerAnswer: { bucket: "ledger", capacity: 200, perSecond: 5 },
+  // A done that is not the coordinator's is answered at once; the finish's acts are few.
+  finishTurnFor: { bucket: "ledger", capacity: 200, perSecond: 5 },
+  finishAct: { bucket: "ledger", capacity: 200, perSecond: 5 },
+  // The question register grows as the leads do.
+  questionOpen: { bucket: "ledger", capacity: 200, perSecond: 5 },
+  questionAsk: { bucket: "ledger", capacity: 200, perSecond: 5 },
   attestEntry: { bucket: "ledger", capacity: 200, perSecond: 5 },
   disputeEntry: { bucket: "ledger", capacity: 200, perSecond: 5 },
   // Each done that would end the swarm runs the operator's finish line on
@@ -211,6 +242,11 @@ const RATE_LIMITS: Record<string, { bucket: string; capacity: number; perSecond:
   // per-agent limits hold what is accepted.
   jobSubmit: { bucket: "job", capacity: 20, perSecond: 0.2 },
   catalogRequest: { bucket: "job", capacity: 20, perSecond: 0.2 },
+  // The dynamic network: a request is decided and recorded, a fetch leaves
+  // the host; a few at once, then one every few seconds (the engine's own
+  // quotas hold the rest).
+  netRequest: { bucket: "net", capacity: 20, perSecond: 0.2 },
+  netFetch: { bucket: "net", capacity: 20, perSecond: 0.2 },
 };
 /**
  * How recent a finish-line run markDone takes as its own: the seat's `done`
@@ -251,7 +287,7 @@ const QUEUE_MAX = 192;
 export const SETTLE_MS_DEFAULT = 6_000;
 
 /** Calls the hub records on the trace when they succeed; every refusal is recorded. */
-const AUDITED = new Set(["markDone", "runFinishLine", "forgeTool", "restoreFileVersion", "claimName", "threadOpen", "publishFile", "recordEntry", "attestEntry", "disputeEntry", "jobSubmit", "catalogRequest", "leadOpen", "leadClaim", "leadRelease", "leadClose", "leadLink", "leadInterpret"]);
+const AUDITED = new Set(["markDone", "runFinishLine", "forgeTool", "restoreFileVersion", "claimName", "threadOpen", "publishFile", "recordEntry", "attestEntry", "disputeEntry", "jobSubmit", "catalogRequest", "leadOpen", "leadClaim", "leadRelease", "leadClose", "leadLink", "leadInterpret", "leadReopen", "routeReview", "leadHandoff", "leadConfirm", "offerAnswer", "finishTurnFor", "finishAct", "questionOpen", "questionAsk", "netRequest", "netFetch"]);
 
 /**
  * The job service's settings, from the kickoff: the image workers boot, how
@@ -509,6 +545,8 @@ export function boardTable(hub: {
   gatewaySeat?: (who: string) => boolean;
   /** The run's job service, when it has one. */
   jobs?: () => JobService | undefined;
+  /** The hub's own directory (the fetch service's config and secret are there, in no VM). */
+  dir?: string;
 }) {
   const S = hub.sandbox;
   const ids = hub.ids ?? [];
@@ -534,10 +572,17 @@ export function boardTable(hub: {
   let finishLine: Promise<FinishLine> | null = null;
   const askedBy = new Map<string, FinishLine & { at: number }>();
   const revisionNow = async () => (await P.stateRevision(S).catch(() => ({ revision: "" }))).revision;
+  // One check result per revision (A4): a run recorded against the
+  // revision that still holds is taken, not run again, by whichever seat asks.
   const sharedFinishLine = (): Promise<FinishLine> =>
     (finishLine ??= (async () => {
       const revision = await revisionNow();
+      const stored = await F.checkAt(S, revision).catch(() => null);
+      if (stored?.run) return { run: stored.run as FinishLine["run"], revision };
       const run = await P.runFinishLine(S).catch(() => null);
+      const untilSolved = (await P.readBudget(S).catch(() => null))?.until_solved === true;
+      const v = P.finishLineVerdict(run, false, { untilSolved });
+      if (run && !run.error) await F.recordCheck(S, "system", revision, v.proceed ? { proceed: true, outcome: v.outcome } : { proceed: false, reason: v.reason }, run).catch(() => undefined);
       return { run, revision };
     })().finally(() => {
       finishLine = null;
@@ -672,6 +717,9 @@ export function boardTable(hub: {
         args.outcome = verdict.outcome;
         if (verdict.outcome === "verification_unavailable" && !reason.startsWith(P.VERIFICATION_UNAVAILABLE_PREFIX)) reason = P.VERIFICATION_UNAVAILABLE_PREFIX + reason;
         args.reason = reason;
+        // Written only while the state that line was judged on holds, under
+        // the registers' lock: a question admitted since refuses it.
+        (args as { revision?: string }).revision = line.revision;
       }
       // An abandon one seat asks for while others work is a vote: the seat
       // stays, and markDone says so.
@@ -689,16 +737,34 @@ export function boardTable(hub: {
     },
     // The lead register (extensions/leads.ts): who acts is the channel's seat.
     leadOpen: (who, a) => L.openLead(as(who), (isObject(a[1]) ? a[1] : {}) as L.LeadOpenInput),
-    leadClaim: (who, a) => L.claimLead(as(who), a[1]),
+    leadClaim: (who, a) => L.claimLead(as(who), a[1], (isObject(a[2]) ? a[2] : {}) as L.LeadClaimInput),
     leadRelease: (who, a) => L.releaseLead(as(who), a[1], (isObject(a[2]) ? a[2] : {}) as { why?: string; generation?: number }),
-    leadClose: (who, a) => L.closeLead(as(who), a[1], (isObject(a[2]) ? a[2] : {}) as { disposition?: string; ref?: string; why?: string; generation?: number }),
-    leadLink: (who, a) => L.linkLead(as(who), a[1], (isObject(a[2]) ? a[2] : {}) as { add?: string[]; remove?: string[] }),
+    leadClose: (who, a) => L.closeLead(as(who), a[1], (isObject(a[2]) ? a[2] : {}) as { disposition?: string; ref?: string; why?: string; generation?: number; ask?: unknown }),
+    leadLink: (who, a) => L.linkLead(as(who), a[1], (isObject(a[2]) ? a[2] : {}) as { add?: string[]; remove?: string[]; routes?: unknown }),
     leadsView: (who, a) => {
       const o = isObject(a[1]) ? a[1] : {};
       return L.leadsView(as(who), { ...(typeof o.view === "string" ? { view: o.view } : {}), ...(typeof o.from === "string" ? { from: o.from } : {}), ...(typeof o.pageChars === "number" && Number.isFinite(o.pageChars) ? { pageChars: o.pageChars } : {}) });
     },
     leadsDigest: (who, a) => L.leadsDigest(as(who), { mark: isObject(a[1]) && a[1].mark === true }),
     leadInterpret: (who, a) => L.recordInterpretations(S, who, Number(a[1]), Array.isArray(a[2]) ? (a[2] as L.InterpretInput[]) : []),
+    leadReopen: (who, a) => L.agentReopenLead(as(who), a[1], (isObject(a[2]) ? a[2] : {}) as { expected_revision?: unknown; why?: string; take?: boolean }),
+    routeReview: (who, a) => L.routeReview(as(who), a[1], (isObject(a[2]) ? a[2] : {}) as { material?: unknown; why?: string; second_review_why?: string }),
+    leadHandoff: (who, a) => L.handoffLead(as(who), a[1], (isObject(a[2]) ? a[2] : {}) as { why?: string; to?: string; generation?: number }),
+    leadConfirm: (who, a) => {
+      const input = (isObject(a[2]) ? a[2] : {}) as { expected_revision?: unknown; ref?: string; why?: string; batch?: string };
+      // A batch of confirmations (one correction chain, one seat) is confirmed in one act.
+      return input.batch ? L.confirmBatch(as(who), input.batch, input) : L.confirmLead(as(who), a[1], input);
+    },
+    offerAnswer: (who, a) => L.answerOffer(as(who), a[1], (isObject(a[2]) ? a[2] : {}) as { action?: string; why?: string }),
+    finishTurnFor: (who, a) => F.finishTurnFor(as(who), (isObject(a[1]) ? a[1] : {}) as { output_file?: string }),
+    finishAct: (who, a) => F.finishAct(as(who), (isObject(a[1]) ? a[1] : {}) as Parameters<typeof F.finishAct>[1]),
+    // The question register (extensions/questions.ts): the seat is the channel's.
+    questionOpen: (who, a) => Q.questionOpen(as(who), (isObject(a[1]) ? a[1] : {}) as Q.ActInput),
+    questionAsk: (who, a) => Q.questionAsk(as(who), a[1], a[2]),
+    questionsView: (who, a) => {
+      const o = isObject(a[1]) ? a[1] : {};
+      return Q.questionsView(as(who), { ...(typeof o.view === "string" ? { view: o.view } : {}), ...(typeof o.id === "string" ? { id: o.id } : {}), ...(typeof o.from === "string" ? { from: o.from } : {}), ...(typeof o.pageChars === "number" && Number.isFinite(o.pageChars) ? { pageChars: o.pageChars } : {}) });
+    },
     postMessage: (who, a) => {
       // An agent's post is its own; `via` is the hub's to set.
       const { via: _via, ...args } = (a[1] as Record<string, unknown>) ?? {};
@@ -812,15 +878,37 @@ export function boardTable(hub: {
         network: raw.network === "allowlist" ? "allowlist" : "off",
         ...(typeof raw.note === "string" ? { note: raw.note } : {}),
         ...(typeof raw.profile === "string" && raw.profile ? { profile: raw.profile } : {}),
+        ...(Array.isArray(raw.net_grants) && raw.net_grants.length ? { net_grants: raw.net_grants.map(String) } : {}),
+        ...(raw.independent === true ? { independent: true } : {}),
+        // Every output sensitive at seal time (docs/adr/0016); anything but a boolean is refused by the service.
+        ...(raw.secret_output !== undefined ? { secret_output: raw.secret_output as boolean } : {}),
       };
       // A job run under a lead: the lead must be the seat's own, checked
       // before the job is accepted, and the job goes on the lead's record.
       const refusedLead = await L.jobLeadAllowed(S, who, raw.lead);
       if (refusedLead) return { ok: false, reason: refusedLead };
+      // Network grants a seat gives its job: each its own, asked for a job, not yet bound.
+      if (spec.net_grants?.length) {
+        const refusedGrants = await checkJobGrants(S, who, spec.net_grants);
+        if (refusedGrants) return { ok: false, reason: refusedGrants };
+      }
       const r = await svc.submit(who, spec, { watch: typeof raw.wait === "number" ? raw.wait : 0 });
       if (!r.ok) return r;
       const attached = r.job.requester.agent === who ? await L.attachJob(S, who, r.job.id, raw.lead).catch(() => null) : null;
-      return { ok: true, job: await jobView(S, r.job), ...(attached?.ok && attached.lead ? { lead: attached.lead } : {}) };
+      // The coverage hint at admission (A1): who else works these questions or these objects now.
+      const coverage = r.job.requester.agent === who ? await L.jobAdmissionHint(S, who, attached?.ok ? attached.lead : raw.lead, r.job.spec.inputs ?? []).catch(() => null) : null;
+      // Library visibility (docs/adr/0016): a command job that declared what it
+      // reads is told which library tools say they read that kind of file. A hint.
+      const library = r.job.spec.kind === "command" && scopeKindOf(r.job.spec) === "declared" ? await admissionHint(S, r.job.spec).catch(() => null) : null;
+      return {
+        ok: true,
+        job: await jobView(S, r.job),
+        ...(attached?.ok && attached.lead ? { lead: attached.lead } : {}),
+        ...(coverage ? { coverage: { ...coverage, note: "a hint: another seat works the same questions or objects now; overlap is not identity, so read what they have (leads, list_team) before you duplicate it" } } : {}),
+        // The reuse hint (ADR 0017): other seats' same operation over the same objects, under way or committed.
+        ...similarView(r.job.id, r.similar ?? [], r.job.spec.independent === true, r.similar_recorded !== false),
+        ...(library ? { library } : {}),
+      };
     },
     jobStatus: async (who, a) => {
       const svc = hub.jobs?.();
@@ -833,7 +921,7 @@ export function boardTable(hub: {
         ...(typeof raw.wait === "number" ? { wait: raw.wait } : {}),
       });
       if (!r.ok) return r;
-      return { ok: true, job: await jobView(S, r.job), ...(r.stdout ? { stdout: r.stdout } : {}) };
+      return { ok: true, job: await jobView(S, r.job), ...(r.stdout ? { stdout: r.stdout } : {}), ...(r.progress ? { progress: r.progress } : {}) };
     },
     catalogRequest: async (who, a) => {
       const svc = hub.jobs?.();
@@ -841,6 +929,22 @@ export function boardTable(hub: {
       const raw = isObject(a[1]) ? (a[1] as Record<string, unknown>) : {};
       const r = await svc.catalogRequest(who, String(raw.target ?? ""), typeof raw.recipe === "string" && raw.recipe ? raw.recipe : undefined, typeof raw.reason === "string" ? raw.reason : undefined);
       return r.ok ? { ok: true, job: await jobView(S, r.job) } : r;
+    },
+    // The dynamic network (net-broker.ts, docs/adr/0012): who asks is the
+    // socket's seat; a request is decided on the host and recorded before it
+    // is answered; a fetch goes to the fetch service as this seat.
+    netRequest: async (who, a) => {
+      const raw = isObject(a[1]) ? (a[1] as Record<string, unknown>) : {};
+      return requestAccess(S, who, raw, { jobs: Boolean(hub.jobs?.()), post: (args) => P.systemPost(S, args) });
+    },
+    netFetch: async (who, a) => {
+      if (!hub.dir) return { ok: false, grant: null, reason: "this hub has no directory for the fetch service", note: "" };
+      const raw = isObject(a[1]) ? (a[1] as Record<string, unknown>) : {};
+      return fetchForSeat(S, hub.dir, who, raw);
+    },
+    netView: async (who, a) => {
+      const raw = isObject(a[1]) ? (a[1] as Record<string, unknown>) : {};
+      return netViewFor(S, who, typeof raw.view === "string" ? raw.view : "summary");
     },
     systemPost: (who, a) => {
       // The harness's voice, sent from inside a VM: said by the harness code
@@ -870,6 +974,10 @@ export class Hub {
   readonly roster: string[];
   /** Tool jobs in worker VMs, and the catalogue they update (job-service.ts). */
   jobService?: JobService;
+  /** Whether the job service offers new objects to the derived catalogue (the kickoff's --no-derived-catalog says no). */
+  private jobsDerived = false;
+  /** The operator requests' outbox, reconciled and delivered one round at a time. */
+  private requestsFiring: Promise<unknown> = Promise.resolve();
   private servers: Server[] = [];
   /** Every open connection, so stopping does not wait on a held one. */
   private sockets = new Set<Socket>();
@@ -922,6 +1030,8 @@ export class Hub {
   private collector: CollectorLink;
   /** The swarm's stop clock, this process's own: no request can move it. */
   private stopSteer: { reason: P.StopReason; at: number } | null = null;
+  /** When the run was paused (budget.json paused.at), read on every tick; null while it runs. */
+  pausedAt: string | null = null;
   /** Per seat: when it was told it is over its own cap. */
   private seatSteer = new Map<string, number>();
   private doneSince = 0;
@@ -929,6 +1039,8 @@ export class Hub {
   /** The finish is over: the VMs put away (or not) and custody taken. */
   private finishDone = false;
   private finishing: Promise<void> | null = null;
+  /** Takes this hub's way of writing the harness's lines back (stop). */
+  private untraceHarness: () => void;
 
   constructor(cfg: HubConfig) {
     this.cfg = { ...cfg, sandbox: resolve(cfg.sandbox) };
@@ -951,8 +1063,13 @@ export class Hub {
       },
       gatewaySeat: (who) => this.gatewaySeats.has(who),
       jobs: () => this.jobService,
+      dir: this.cfg.dir,
     });
     this.collector = new CollectorLink(this.cfg.collector);
+    // A ledger entry the harness authors while this hub serves the run (an
+    // addition's external entry, a capture's, a hint's hypothesis) goes on
+    // the trace as the hub's own line, as a seat's record through the hub does.
+    this.untraceHarness = P.useHarnessTrace((_root, line) => this.event(line.tool, line.args, line.result), this.cfg.sandbox);
   }
 
   private log(line: string): void {
@@ -1004,8 +1121,84 @@ export class Hub {
    */
   private notifyConfigured(): boolean {
     // The run's own registry first: its directory is where the kickoff kept the hook.
-    const runsDir = this.cfg.registry ? dirname(resolve(this.cfg.registry)) : process.env.SWARM_RUNS_DIR || "";
-    return Boolean(this.cfg.run && runsDir && existsSync(join(runsDir, "notify", `${this.cfg.run}.cmd`)));
+    const runsDir = this.runsDir();
+    return Boolean(this.cfg.run && runsDir && (existsSync(join(runsDir, "notify", `${this.cfg.run}.cmd`)) || existsSync(join(runsDir, "notify", `${this.cfg.run}.targets`))));
+  }
+
+  /** The operator's runs directory: the registry's, else SWARM_RUNS_DIR. */
+  private runsDir(): string {
+    return this.cfg.registry ? dirname(resolve(this.cfg.registry)) : process.env.SWARM_RUNS_DIR || "";
+  }
+
+  /**
+   * The operator requests' outbox (extensions/requests.ts), fired by the hub
+   * itself: after every act that may open one (a lead closed needs_operator,
+   * a clarification, a network refusal), on every round, and at start, the
+   * committed records are reconciled into requests and each new one is
+   * handed, by its ids only, to the operator's notification targets. One
+   * round at a time; a failure is logged and the next round tries again.
+   */
+  fireRequests(): Promise<unknown> {
+    const next = this.requestsFiring
+      .then(async () => {
+        const R = await import("../extensions/requests.ts");
+        const dir = this.runsDir();
+        const r = await R.fireRequests(this.cfg.sandbox, dir ? { runsDir: dir } : {});
+        for (const rid of r.notified) await this.event("request_notified", { request: rid }, { ok: true });
+      })
+      .catch((err: Error) => this.log(`requests: ${err.message}`));
+    this.requestsFiring = next;
+    return next;
+  }
+
+  /** How the hub commits an addition: its job service's journal (the journal's one writer) and catalogue, when it runs one. */
+  private additionOptions(): { journal?: import("./evidence-store.ts").Journal; catalogueOn?: boolean; catalogue?: (target: string, note: string) => Promise<{ ok: boolean; job?: string; reason?: string }> } {
+    const svc = this.jobService;
+    if (!svc) return {};
+    return {
+      journal: svc.journal,
+      catalogueOn: this.jobsDerived || existsSync(join(this.cfg.sandbox, "catalog")),
+      catalogue: async (target: string, note: string) => {
+        const r = await svc.catalogRequest("system", target, undefined, note);
+        return r.ok ? { ok: true, job: r.job.id } : { ok: false, reason: r.reason };
+      },
+    };
+  }
+
+  /**
+   * Additions committed and not applied (a process that died after the
+   * commit): what follows from each, applied now, once (scripts/material.ts
+   * reconcileAdditions). On every round, at start, and when the CLI asks.
+   */
+  private async reconcileAdditions(): Promise<unknown[]> {
+    const M = await import("./material.ts");
+    return M.reconcileAdditions(this.cfg.sandbox, this.additionOptions()).catch((err: Error) => {
+      this.log(`additions: ${err.message}`);
+      return [];
+    });
+  }
+
+  /**
+   * Evidence added while no hub ran, or before its catalogue could take it:
+   * a detect pass over each file, once (the store journal's
+   * evidence_catalogue_queued line says it was queued).
+   */
+  private async catalogueAddedEvidence(): Promise<void> {
+    const svc = this.jobService;
+    if (!svc || !(this.jobsDerived || existsSync(join(this.cfg.sandbox, "catalog")))) return;
+    const queued = new Set(svc.journal.of("evidence_catalogue_queued").map((l) => String(l.import)));
+    for (const l of svc.journal.of("evidence_added")) {
+      const id = String(l.import ?? "");
+      if (!id || queued.has(id)) continue;
+      const jobs: string[] = [];
+      const refused: string[] = [];
+      for (const f of (l.files as Array<{ path: string }> | undefined) ?? []) {
+        const r = await svc.catalogRequest("system", `import:${id}/${f.path}`, undefined, `evidence added: import:${id}`).catch((err: Error) => ({ ok: false as const, reason: err.message }));
+        if (r.ok) jobs.push(r.job.id);
+        else refused.push(`${f.path}: ${r.reason}`);
+      }
+      await svc.journal.append({ type: "evidence_catalogue_queued", import: id, jobs, ...(refused.length ? { refused } : {}) });
+    }
   }
 
   private historyQuota(): number {
@@ -1046,7 +1239,8 @@ export class Hub {
     if (!existsSync(script) || !this.notifyConfigured()) return;
     let started = false;
     try {
-      const child = spawn("bash", [script, this.cfg.sandbox, what, JSON.stringify(detail)], { detached: true, stdio: "ignore", timeout: NOTIFY_TIMEOUT_MS });
+      const dir = this.runsDir();
+      const child = spawn("bash", [script, this.cfg.sandbox, what, JSON.stringify(detail)], { detached: true, stdio: "ignore", timeout: NOTIFY_TIMEOUT_MS, env: { ...process.env, ...(dir ? { SWARM_RUNS_DIR: dir } : {}) } });
       child.on("error", () => undefined);
       child.unref();
       started = true;
@@ -1081,6 +1275,8 @@ export class Hub {
     }
     await this.listen(this.adminSocket(), (socket) => this.serveAdmin(socket));
     if (this.cfg.jobs && this.cfg.run) await this.startJobs(this.cfg.jobs, this.cfg.run);
+    // What a crash left committed and not yet applied or delivered to the operator: now.
+    void this.reconcileAdditions().then(() => this.fireRequests());
     this.writeStatus();
     if (this.cfg.backstop !== false) {
       this.backstopTimer = setInterval(() => void this.backstop().catch(() => undefined), BACKSTOP_INTERVAL_MS);
@@ -1172,6 +1368,7 @@ export class Hub {
    */
   private async startJobs(jobs: JobsConfig, run: string): Promise<void> {
     const S = this.cfg.sandbox;
+    this.jobsDerived = jobs.derived === true;
     this.jobService = new JobService({
       sandbox: S,
       run,
@@ -1190,6 +1387,8 @@ export class Hub {
       ...(jobs.derived ? { derived: true } : {}),
       runWorker,
       destroyWorker,
+      // A running worker's CPU and I/O for the job's progress (B11); its heartbeat when msb cannot say.
+      metrics: (worker) => workerMetrics(worker),
       hostRoom: async (mib) => roomForWorker(mib),
       notify: async (to, body) => {
         await P.systemPost(S, { tag: "result", to, body });
@@ -1199,6 +1398,13 @@ export class Hub {
         return { ...(r?.name ? { name: r.name } : {}), ...(r?.doing ? { doing: r.doing } : {}) };
       },
       log: (line) => this.log(line),
+      // A job's network grants, bound to it when its worker is made (net-broker.ts).
+      netAccess: (job) => bindJobGrants(S, this.cfg.dir, job.id, job.requester.agent, job.spec.net_grants ?? []),
+      // The lead each job was run under, for the reuse hints (job-reuse.ts).
+      leadsOf: async (ids) => {
+        const jobLead = L.foldLeads((await L.readLeadEvents(S)).events).jobLead;
+        return new Map(ids.flatMap((id) => (jobLead.has(id) ? [[id, jobLead.get(id)!] as [string, string]] : [])));
+      },
     });
     try {
       await this.jobService.start();
@@ -1216,6 +1422,8 @@ export class Hub {
     if (this.transferTimer) clearInterval(this.transferTimer);
     for (const key of [...this.transfers.keys()]) this.dropTransfer(key, false);
     await this.flushRefusals().catch(() => undefined);
+    // Its link to the collector closes below: a harness line written after it goes the CLI's way.
+    this.untraceHarness();
     for (const link of this.links.values()) link.destroy();
     this.links.clear();
     for (const socket of this.sockets) socket.destroy();
@@ -1824,6 +2032,8 @@ export class Hub {
     try {
       const result = await handler(who, revive(args), signal);
       if (AUDITED.has(fn)) void this.audit(who, fn, { ok: true, ...summarize(fn, result) });
+      // An act that may have opened an operator request: the hub delivers it now.
+      if (fn === "leadClose" || fn === "questionAsk" || fn === "netRequest") void this.fireRequests();
       return { ok: true, result: result === undefined ? null : result };
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);
@@ -2001,6 +2211,10 @@ export class Hub {
    * idle. Queued, and delivered on the next hello, only when asked to be.
    */
   prompt(agent: string, text: string, options: { deliver?: "steer" | "followUp"; kind?: string; queue?: boolean } = {}): boolean {
+    // A paused run's seats are held idle: a prompt would start a turn whose
+    // model call the gateway then refuses. Only the words about the pause
+    // itself, and the operator's wake after an extension, go through.
+    if (this.pausedAt && !["stop_steer", "resume", "paused"].includes(options.kind ?? "")) return false;
     const link = this.links.get(agent);
     const message = { text, ...(options.deliver ? { deliver: options.deliver } : {}), ...(options.kind ? { kind: options.kind } : {}) };
     if (link && !link.destroyed) {
@@ -2140,6 +2354,98 @@ export class Hub {
           this.reply(socket, result, true);
           return false;
         }
+        case "material": {
+          // Evidence or material added by the operator: the hub is the store
+          // journal's one writer while it runs (scripts/material.ts).
+          const real = (x: string) => {
+            try {
+              return realpathSync(x);
+            } catch {
+              return resolve(x);
+            }
+          };
+          if (typeof msg.sandbox === "string" && real(msg.sandbox) !== real(this.cfg.sandbox)) {
+            this.reply(socket, { ok: false, reason: "this hub serves another run" }, true);
+            return false;
+          }
+          const M = await import("./material.ts");
+          const request = (isObject(msg.request) ? msg.request : {}) as never;
+          const result = await M.admitMaterial(this.cfg.sandbox, request, this.additionOptions()).catch((err: Error) => ({ ok: false, reason: err.message }));
+          this.reply(socket, result, true);
+          void this.fireRequests();
+          return false;
+        }
+        case "material_reconcile": {
+          // What a crash left committed and not applied (swarm.sh evidence <run> list asks): applied by the journal's one writer.
+          const real = (x: string) => {
+            try {
+              return realpathSync(x);
+            } catch {
+              return resolve(x);
+            }
+          };
+          if (typeof msg.sandbox === "string" && real(msg.sandbox) !== real(this.cfg.sandbox)) {
+            this.reply(socket, { ok: false, reason: "this hub serves another run" }, true);
+            return false;
+          }
+          const applied = await this.reconcileAdditions();
+          this.reply(socket, { ok: true, applied }, true);
+          return false;
+        }
+        case "request_act": {
+          // The operator's act on a request, from the host's CLI and console: the hub admits it while it runs, as it admits the question register's acts.
+          const real = (x: string) => {
+            try {
+              return realpathSync(x);
+            } catch {
+              return resolve(x);
+            }
+          };
+          if (typeof msg.sandbox === "string" && real(msg.sandbox) !== real(this.cfg.sandbox)) {
+            this.reply(socket, { ok: false, reason: "this hub serves another run" }, true);
+            return false;
+          }
+          const RC = await import("./requests-cli.ts");
+          const result = await RC.admitRequestAct(this.cfg.sandbox, msg.rid, (isObject(msg.act) ? msg.act : {}) as never).catch((err: Error) => ({ ok: false, reason: err.message }));
+          this.reply(socket, result, true);
+          void this.fireRequests();
+          return false;
+        }
+        case "requests_fire": {
+          await this.fireRequests();
+          this.reply(socket, { ok: true }, true);
+          return false;
+        }
+        case "question":
+        case "question_direct":
+        case "question_deliver": {
+          // The operator's acts on the question register, from the host's CLI
+          // and console: the hub admits them, so it is the register's one
+          // writer while it runs. The admin socket is in the hub's own 0700
+          // directory, the host account's and never a VM's; a request for
+          // another run's sandbox is refused.
+          const real = (x: string) => {
+            try {
+              return realpathSync(x);
+            } catch {
+              return resolve(x);
+            }
+          };
+          if (typeof msg.sandbox === "string" && real(msg.sandbox) !== real(this.cfg.sandbox)) {
+            this.reply(socket, { ok: false, reason: "this hub serves another run" }, true);
+            return false;
+          }
+          const QC = await import("./questions-cli.ts");
+          const request = (isObject(msg.request) ? msg.request : {}) as never;
+          const result = await (msg.op === "question"
+            ? QC.admitOperatorAct(this.cfg.sandbox, request)
+            : msg.op === "question_direct"
+              ? QC.admitDirective(this.cfg.sandbox, request)
+              : Q.deliverPending(this.cfg.sandbox).then((delivered) => ({ ok: true, delivered }))
+          ).catch((err: Error) => ({ ok: false, reason: err.message }));
+          this.reply(socket, result, true);
+          return false;
+        }
         case "shutdown":
           this.reply(socket, { ok: true }, true);
           setTimeout(() => void this.stop().then(() => process.exit(0)), 50);
@@ -2164,6 +2470,19 @@ export class Hub {
       await this.stop();
       process.exit(0);
     }
+    // Additions committed and not applied, then the operator requests' round: what is committed and not yet written or delivered.
+    await this.reconcileAdditions();
+    await this.fireRequests();
+    await this.catalogueAddedEvidence().catch((err: Error) => this.log(`catalogue of added evidence: ${err.message}`));
+    // The dynamic network's round: grants whose lead closed or whose job
+    // ended revoked, captures put on the ledger, contamination recorded.
+    if (readCasePolicy(S).network !== "closed") {
+      const svc = this.jobService;
+      await netTick(S, (job) => {
+        const j = svc?.jobs.get(job);
+        return !j || j.state === "committed" || j.state === "failed" || j.state === "cancelled";
+      }).catch((err: Error) => this.log(`net: ${err.message}`));
+    }
     const done = await P.swarmDoneExists(S);
     if (!done) {
       // The reaper found every seat done or dead and nobody wrote the
@@ -2175,6 +2494,11 @@ export class Hub {
       const budget = await P.readBudget(S).catch(() => null);
       if (!budget) return;
       await this.seatBackstop(budget, now);
+      // A paused run: no seat is prompted (prompt() holds them) until the pause's cause is gone or the operator stops it.
+      this.pausedAt = budget.paused?.at ?? null;
+      // The operator is told of a pause once, whoever wrote it (claimPauseNotice: the watchdog may tell it first);
+      // a spell of the provider's limit once, whatever the harness's tries within it.
+      if (budget.paused) await this.tellPause(budget.paused);
       const pressure = P.budgetPressure(budget, now);
       if (!pressure.reason) {
         if (this.stopSteer) {
@@ -2186,20 +2510,26 @@ export class Hub {
         }
         return;
       }
+      if (P.isPaused(budget)) return;
+      const policy = P.stopPolicyOf(budget);
       if (!this.stopSteer) {
         this.stopSteer = { reason: pressure.reason, at: now };
         this.saveState();
         await P.markStopSteer(S, pressure.reason).catch(() => undefined);
-        const text =
-          pressure.reason === "cap"
-            ? P.CAP_STEER
-            : `Swarm wall clock hit (${pressure.elapsed_minutes} of ${budget.wall_clock_minutes} minutes). Call done with reason cannot_complete and stop. Do not start new work.`;
+        // The words follow the stop policy: a pause is announced as a pause, a stop as a stop.
+        const text = P.capSteerText(budget, pressure);
         for (const agent of this.roster) this.prompt(agent, text, { deliver: "steer", kind: "stop_steer" });
-        await this.event(pressure.reason === "cap" ? "cap_steer" : "wall_steer", { via: "hub", reason: pressure.reason }, { ok: true });
+        await this.event(pressure.reason === "cap" ? "cap_steer" : "wall_steer", { via: "hub", reason: pressure.reason, policy }, { ok: true });
       }
       if (now - this.stopSteer.at < P.STOP_GRACE_MS) return;
-      const stop = await P.harnessStop(S, pressure.reason, `The hub stopped the swarm: ${pressure.reason} passed and the agents did not stop within the grace period.`, { verify: true });
-      if (stop.created) {
+      const acted = await P.capAct(S, pressure.reason, `The hub ${policy === "cap-pause" ? "paused" : "stopped"} the swarm: ${pressure.reason} passed and the grace period ended.`);
+      if (acted.kind === "paused" && acted.created) {
+        this.pausedAt = new Date(now).toISOString();
+        await this.event("run_paused", { via: "hub", reason: pressure.reason }, { ok: true });
+        const paused = (await P.readBudget(S).catch(() => null))?.paused;
+        if (paused) await this.tellPause(paused);
+        await P.systemPost(S, { tag: "stop", body: `The run is paused (${pressure.reason === "cap" ? "its cap" : "its wall clock"}): no model call goes out until the operator extends it (swarm.sh extend) or stops it (swarm.sh stop). What the run holds stays as it is.` }).catch(() => undefined);
+      } else if (acted.kind === "stopped" && acted.created) {
         await this.event("harness_stop", { via: "hub", reason: pressure.reason }, { created_sentinel: true });
         this.notify(pressure.reason === "wall_clock" ? "wall_clock" : "budget_cap", { scope: "run", reason: pressure.reason });
         await P.systemPost(S, { tag: "stop", body: `Harness wrote done/SWARM_DONE (reason ${pressure.reason}). Call done and stop.` }).catch(() => undefined);
@@ -2229,6 +2559,13 @@ export class Hub {
     this.writeStatus();
     this.finishing = this.finishVms(allOut);
     await this.finishing;
+  }
+
+  /** Tell the operator of a pause, when this process claims its notice (the same words the watchdog would use: pauseNotice). */
+  private async tellPause(paused: P.PauseRecord): Promise<void> {
+    if (!(await P.claimPauseNotice(this.cfg.sandbox, P.pauseNoticeKey(paused)).catch(() => false))) return;
+    const notice = P.pauseNotice(paused);
+    if (notice) this.notify("paused", notice);
   }
 
   /**
@@ -2504,6 +2841,8 @@ function summarize(fn: string, result: unknown): Record<string, unknown> {
       // The ledger entry's hash, on the harness's own line: custody holds
       // the ledger to it.
       const entry = isObject(result.entry) ? result.entry : {};
+      // A revision held while the finish is assembled is not a refusal: said as deferred.
+      if (result.quiet === true) return { ok: true, deferred: result.deferred ?? true };
       return { ok: result.ok, seq: entry.seq, merged: result.merged, ...(typeof entry.hash === "string" ? { hash: entry.hash } : {}) };
     }
     case "attestEntry":
@@ -2516,14 +2855,22 @@ function summarize(fn: string, result: unknown): Record<string, unknown> {
     case "leadClaim":
     case "leadRelease":
     case "leadClose":
-    case "leadLink": {
+    case "leadLink":
+    case "leadReopen":
+    case "routeReview":
+    case "leadHandoff":
+    case "leadConfirm": {
       // The lead's id, state and holder as the call left them, on the
       // harness's own line beside the register's chained event.
       const lead = isObject(result.lead) ? result.lead : {};
-      return { ok: result.ok, lead: lead.id, status: lead.status, holder: lead.holder, generation: lead.generation, ...(lead.disposition ? { disposition: lead.disposition, ref: lead.ref } : {}), ...(result.reclaimed_from ? { reclaimed_from: result.reclaimed_from } : {}), ...(result.woke ? { woke: result.woke } : {}) };
+      return { ok: result.ok, lead: lead.id, status: lead.status, holder: lead.holder, generation: lead.generation, ...(lead.disposition ? { disposition: lead.disposition, ref: lead.ref } : {}), ...(result.reclaimed_from ? { reclaimed_from: result.reclaimed_from } : {}), ...(result.woke ? { woke: result.woke } : {}), ...(Array.isArray(result.confirmed) ? { confirmed: result.confirmed } : {}), ...(result.deferred ? { deferred: true } : {}) };
     }
     case "leadInterpret":
       return { ok: result.ok, interprets: result.interprets };
+    case "questionOpen":
+    case "questionAsk":
+      // The question's id, revision and scope, and the register event's hash, beside the chained event.
+      return { ok: result.ok, q: result.q, rev: result.rev, ...(result.scope ? { scope: result.scope } : {}), ...(result.clarify ? { clarify: result.clarify } : {}), ...(typeof result.hash === "string" ? { hash: result.hash } : {}), ...(result.duplicate ? { duplicate: true } : {}) };
     default:
       return {};
   }

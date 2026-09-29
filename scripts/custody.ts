@@ -62,8 +62,11 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { execFile } from "node:child_process";
-import { eventChainVerifier, specialKind, verifyAttestationChain, verifyDisputeChain, verifyLedgerChain } from "../extensions/protocol.ts";
+import { eventChainVerifier, HARNESS_RECORD_TOOL, specialKind, verifyAttestationChain, verifyDisputeChain, verifyLedgerChain } from "../extensions/protocol.ts";
 import { verifyLeadChain } from "../extensions/leads.ts";
+import { LEDGER_SWEEPS, verifySweepChain } from "../extensions/store-sweep.ts";
+import { FINISH_LOG } from "../extensions/finish.ts";
+import { checkNetwork, FETCH_LOG, GRANTS_LOG, type NetworkCheck } from "./net-grants.ts";
 import { hashArtifacts, type ArtifactIndex } from "./artifacts.ts";
 import { checkStore, verifyJournalText, type StoreCheck } from "./evidence-store.ts";
 import {
@@ -573,13 +576,13 @@ export type Custody = {
     chained: number;
     intact: boolean;
     detail: string;
-    /** Entries whose hash the trace carries (the record tool's line, or the hub's) but the ledger does not: deleted. */
+    /** Entries whose hash the trace carries (the record tool's line, the hub's, or the harness's `harness_record` line) but the ledger does not: deleted. */
     missing_from_ledger: string[];
-    /** Chained entries the trace never carried: written into the file without the tool. */
+    /** Chained entries the trace never carried: written into the file without the tool, the hub or the harness's own line. */
     not_on_trace: number[];
-    /** Whether the ledger could be held to the trace at all (a readable trace), and to whose lines. */
+    /** Whether the ledger could be held to the trace at all (a readable trace), and to whose lines (beside them, always, the harness's `harness_record` lines for the entries it authored). */
     held_to: "the hub's lines" | "the record tool's lines" | "the seats' own lines (the hub logged none)" | "nothing (no readable trace)";
-    /** Hashes a seat's own `record` line carried that the hub never logged: a guest's word, not counted against the ledger. */
+    /** Hashes a seat's own `record` (or `harness_record`) line carried that the hub never logged: a guest's word, not counted against the ledger. */
     claimed_by_seat: string[];
   } | null;
   vms:
@@ -653,6 +656,18 @@ export type Custody = {
     disputes?: { lines: number; head: string | null };
     /** The lead register (leads/leads.jsonl): absent from a verdict taken before it was sealed. */
     leads?: { lines: number; head: string | null };
+    /** The question register (questions/questions.jsonl): absent from a verdict taken before it was sealed. */
+    questions?: { lines: number; head: string | null };
+    /** The dynamic network's two chains (network/grants.jsonl, network/fetches.jsonl): absent from a verdict taken before they were sealed. */
+    network?: { grants: { lines: number; head: string | null }; fetches: { lines: number; head: string | null } };
+    /** The operator requests' chain (requests/requests.jsonl, docs/adr/0014): absent from a verdict taken before it was sealed. */
+    requests?: { lines: number; head: string | null };
+    /** The store sweeps' chain (ledger/sweeps.jsonl, docs/adr/0013): absent from a verdict taken before it was sealed. */
+    sweeps?: { lines: number; head: string | null };
+    /** The finish register (leads/finish.jsonl, docs/adr/0015): absent from a verdict taken before it was sealed. */
+    finish?: { lines: number; head: string | null };
+    /** The case policy's record (network/policy.json) by its sha256: absent from a verdict taken before it was sealed. */
+    case_policy?: { sha256: string };
     journal: { lines: number; head: string | null } | null;
     model_gateway: { lines: number; sha256: string | null } | null;
   };
@@ -662,6 +677,23 @@ export type Custody = {
   disputes?: { lines: number; intact: boolean; detail: string } | null;
   /** The lead register's events (leads/leads.jsonl): their own chain, sealed unsigned; null when the run opened no lead. */
   leads?: { lines: number; intact: boolean; detail: string } | null;
+  /** The question register's events (questions/questions.jsonl): their own chain, sealed unsigned (a signed act carries its own signature); null when the run wrote none. */
+  questions?: { lines: number; intact: boolean; detail: string } | null;
+  /** The dynamic network's records: both chains, and every sealed capture re-hashed; null when the run made no request (docs/adr/0012). */
+  network?: NetworkCheck | null;
+  /** The operator requests (requests/requests.jsonl): their own chain, sealed unsigned; null when nothing was asked of the operator. */
+  requests?: { lines: number; intact: boolean; detail: string } | null;
+  /** The store sweeps (ledger/sweeps.jsonl): what the hub found when it searched the run's outputs for a coverage record's strings, a chain of its own; null when no sweep ran. */
+  sweeps?: { lines: number; intact: boolean; detail: string } | null;
+  /** The finish register (leads/finish.jsonl): the coordinator's lease, readiness, the checks and the report's reviews, a chain of its own; null when the run has none. */
+  finish?: { lines: number; intact: boolean; detail: string } | null;
+  /**
+   * The case policy the kickoff recorded (network/policy.json), by its
+   * sha256, against the one the kickoff anchored beside the run: a policy
+   * rewritten inside the run is named. Null for a run from before the case
+   * policy was recorded.
+   */
+  case_policy?: { path: string; sha256: string; anchored: boolean | null; policy: string; network: string; more_evidence: string; material_use: Record<string, string> } | { path: string; unreadable: string; anchored: boolean | null } | null;
   /** The operator's audit beside the registry, and each operator line on the trace matched to it. */
   operator: OperatorAudit;
   /** The acquisition hashes given at kickoff (--inputs-hashes), against the evidence as re-hashed now. */
@@ -715,6 +747,12 @@ export type CustodyState = {
   attestations?: Custody["attestations"];
   disputes?: Custody["disputes"];
   leads?: Custody["leads"];
+  questions?: Custody["questions"];
+  network?: Custody["network"];
+  requests?: Custody["requests"];
+  sweeps?: Custody["sweeps"];
+  finish?: Custody["finish"];
+  case_policy?: Custody["case_policy"];
   operator?: Custody["operator"];
   acquisition?: Custody["acquisition"];
   models?: Custody["models"];
@@ -1030,7 +1068,7 @@ export async function takeCustody(sandboxInput: string, options: CustodyOptions 
     return deadline.over;
   };
   const say = options.progress ?? (() => undefined);
-  let anchor: { inputs_manifest_sha256?: string; run?: string; isolation?: string } | null = null;
+  let anchor: { inputs_manifest_sha256?: string; case_policy_sha256?: string; run?: string; isolation?: string } | null = null;
   const anchorFile = await anchorPathFor(sandbox);
   try {
     anchor = JSON.parse(await readRegularTextOutside(anchorFile));
@@ -1257,6 +1295,14 @@ export async function takeCustody(sandboxInput: string, options: CustodyOptions 
   // record tool's own line is the one there is.
   const hubRecordHashes = new Set<string>();
   const seatRecordHashes = new Set<string>();
+  // An entry the harness authored itself (external material, a person's
+  // hint as a hypothesis) carries its hash on a `harness_record` line: the
+  // harness's own (agent "system", the hub's or the operator's CLI's), or,
+  // on the host, the line of the pane whose process wrote the entry. In a
+  // microVM run only the harness's own counts, as only the hub's record
+  // lines do.
+  const harnessRecordHashes = new Set<string>();
+  const paneHarnessHashes = new Set<string>();
   // Lines a sender says it could not deliver (logEvent's count, carried on
   // its next line).
   const senderLost = new Map<string, number>();
@@ -1270,6 +1316,7 @@ export async function takeCustody(sandboxInput: string, options: CustodyOptions 
     if (!result || result.ok !== true || typeof result.hash !== "string" || result.merged === true) return;
     if (parsed.tool === "hub_call" && args?.fn === "recordEntry" && parsed.agent === "system") hubRecordHashes.add(result.hash);
     else if (parsed.tool === "record") seatRecordHashes.add(result.hash);
+    else if (parsed.tool === HARNESS_RECORD_TOOL) (parsed.agent === "system" && parsed.claimed_agent === undefined ? harnessRecordHashes : paneHarnessHashes).add(result.hash);
   };
   // The kept outputs a line names. Only its own agent's (or the harness's)
   // are references: a line from one seat cannot vouch for, or cast doubt
@@ -1483,7 +1530,13 @@ export async function takeCustody(sandboxInput: string, options: CustodyOptions 
       : hubRecordHashes.size || !seatRecordHashes.size
         ? "the hub's lines"
         : "the seats' own lines (the hub logged none)";
-  const recordHashes = heldTo === "the hub's lines" ? hubRecordHashes : heldTo === "nothing (no readable trace)" ? new Set<string>() : seatRecordHashes;
+  // The harness's own lines for the entries it authored count beside them
+  // (every entry is on the trace by the line of the process that wrote it);
+  // on the host a pane's too, as its record lines do.
+  const recordHashes =
+    heldTo === "nothing (no readable trace)"
+      ? new Set<string>()
+      : new Set([...(heldTo === "the hub's lines" ? hubRecordHashes : seatRecordHashes), ...harnessRecordHashes, ...(vmRun ? [] : paneHarnessHashes)]);
   if ("why" in ledgerRead && ledgerRead.why !== "missing") {
     state.ledger = { entries: 0, chained: 0, intact: false, detail: `the ledger is ${ledgerRead.why}`, missing_from_ledger: [], not_on_trace: [], held_to: heldTo, claimed_by_seat: [] };
   } else if (ledgerText.trim() || recordHashes.size) {
@@ -1516,7 +1569,7 @@ export async function takeCustody(sandboxInput: string, options: CustodyOptions 
       }
     }
     if (state.seal) state.seal.ledger = { entries: v.total, head: v.hashes.at(-1) ?? null };
-    const claimedBySeat = heldTo === "the hub's lines" ? [...seatRecordHashes].filter((h) => !hubRecordHashes.has(h)).sort() : [];
+    const claimedBySeat = heldTo === "the hub's lines" ? [...new Set([...seatRecordHashes, ...paneHarnessHashes])].filter((h) => !recordHashes.has(h)).sort() : [];
     state.ledger = {
       entries: v.total,
       chained: v.chained,
@@ -1555,6 +1608,62 @@ export async function takeCustody(sandboxInput: string, options: CustodyOptions 
   } else if ("why" in leadsRead && leadsRead.why !== "missing") {
     state.leads = { lines: 0, intact: false, detail: `the lead register is ${leadsRead.why}` };
   } else state.leads = null;
+  // The question register: what the examination was asked and by whom, a chain of its own beside the leads.
+  const questionsRead = await readRegularText(join(sandbox, "questions", "questions.jsonl"));
+  if ("text" in questionsRead && questionsRead.text.trim()) {
+    const v = verifyLeadChain(questionsRead.text);
+    state.questions = { lines: v.total, intact: v.ok, detail: v.ok ? `${v.total} events, chain intact` : `broken at line ${v.broken_at} (${v.reason})` };
+    if (state.seal) state.seal.questions = { lines: v.total, head: v.head };
+  } else if ("why" in questionsRead && questionsRead.why !== "missing") {
+    state.questions = { lines: 0, intact: false, detail: `the question register is ${questionsRead.why}` };
+  } else state.questions = null;
+  // The dynamic network: requests, decisions and grants, and every fetch, each a chain of its own; each capture against its manifest.
+  const net = await checkNetwork(sandbox).catch(() => null);
+  state.network = net?.check ?? null;
+  if (state.seal && net) state.seal.network = net.seal;
+  // What was asked of the operator and how each request stood: a chain of its own (the outbox, docs/adr/0014).
+  const requestsRead = await readRegularText(join(sandbox, "requests", "requests.jsonl"));
+  if ("text" in requestsRead && requestsRead.text.trim()) {
+    const v = verifyLeadChain(requestsRead.text);
+    state.requests = { lines: v.total, intact: v.ok, detail: v.ok ? `${v.total} events, chain intact` : `broken at line ${v.broken_at} (${v.reason})` };
+    if (state.seal) state.seal.requests = { lines: v.total, head: v.head };
+  } else if ("why" in requestsRead && requestsRead.why !== "missing") {
+    state.requests = { lines: 0, intact: false, detail: `the operator requests are ${requestsRead.why}` };
+  } else state.requests = null;
+  // What the store sweeps found (the hub's search of the run's outputs for a coverage record's strings): a chain of its own beside the ledger.
+  const sweepsRead = await readRegularText(join(sandbox, LEDGER_SWEEPS));
+  if ("text" in sweepsRead && sweepsRead.text.trim()) {
+    const v = verifySweepChain(sweepsRead.text);
+    state.sweeps = { lines: v.total, intact: v.ok, detail: v.ok ? `${v.total} lines, chain intact` : `broken at line ${v.broken_at} (${v.reason})` };
+    if (state.seal) state.seal.sweeps = { lines: v.total, head: v.head };
+  } else if ("why" in sweepsRead && sweepsRead.why !== "missing") {
+    state.sweeps = { lines: 0, intact: false, detail: `the store sweeps are ${sweepsRead.why}` };
+  } else state.sweeps = null;
+  // The finish register: the coordinator's lease, readiness, the checks, the report's reviews (chained with the lead register's code).
+  const finishRead = await readRegularText(join(sandbox, FINISH_LOG));
+  if ("text" in finishRead && finishRead.text.trim()) {
+    const v = verifyLeadChain(finishRead.text);
+    state.finish = { lines: v.total, intact: v.ok, detail: v.ok ? `${v.total} events, chain intact` : `broken at line ${v.broken_at} (${v.reason})` };
+    if (state.seal) state.seal.finish = { lines: v.total, head: v.head };
+  } else if ("why" in finishRead && finishRead.why !== "missing") {
+    state.finish = { lines: 0, intact: false, detail: `the finish register is ${finishRead.why}` };
+  } else state.finish = null;
+  // The case policy, by its bytes, against the sha256 the kickoff anchored outside the run.
+  const policyRead = await readRegularText(join(sandbox, "network", "policy.json"));
+  if ("text" in policyRead) {
+    const sha = createHash("sha256").update(policyRead.text).digest("hex");
+    const anchored = anchor?.case_policy_sha256 ? anchor.case_policy_sha256 === sha : null;
+    try {
+      const p = JSON.parse(policyRead.text) as { policy?: string; network?: string; more_evidence?: string; material_use?: unknown };
+      const mu = p.material_use && typeof p.material_use === "object" ? Object.fromEntries(Object.entries(p.material_use as Record<string, unknown>).map(([k, v]) => [k, String(v)])) : typeof p.material_use === "string" ? { text: p.material_use } : {};
+      state.case_policy = { path: "network/policy.json", sha256: sha, anchored, policy: String(p.policy ?? ""), network: String(p.network ?? ""), more_evidence: String(p.more_evidence ?? ""), material_use: mu };
+    } catch {
+      state.case_policy = { path: "network/policy.json", unreadable: "not JSON", anchored };
+    }
+    if (state.seal) state.seal.case_policy = { sha256: sha };
+  } else if (policyRead.why !== "missing" || anchor?.case_policy_sha256) {
+    state.case_policy = { path: "network/policy.json", unreadable: policyRead.why === "missing" ? "gone, though the kickoff anchored it" : policyRead.why, anchored: anchor?.case_policy_sha256 ? false : null };
+  } else state.case_policy = null;
   state.ledgerDone = true;
 
   // --- the model gateway's log -----------------------------------------------
@@ -1883,6 +1992,12 @@ export function verdictOf(state: CustodyState, incomplete: string | null): Custo
     attestations: state.attestations ?? null,
     disputes: state.disputes ?? null,
     leads: state.leads ?? null,
+    questions: state.questions ?? null,
+    network: state.network ?? null,
+    requests: state.requests ?? null,
+    sweeps: state.sweeps ?? null,
+    finish: state.finish ?? null,
+    case_policy: state.case_policy ?? null,
     operator: state.operator ?? null,
     acquisition: state.acquisition ?? null,
     checks: [],
@@ -1984,6 +2099,22 @@ function summaryOf(c: Omit<Custody, "summary">, t: { traceProblem: string | null
   if (c.attestations) parts.push(c.attestations.intact ? `${plural(c.attestations.lines, "ledger attestation")}, chain intact` : `LEDGER ATTESTATIONS CHAIN BROKEN (${c.attestations.detail})`);
   if (c.disputes) parts.push(c.disputes.intact ? `${plural(c.disputes.lines, "ledger dispute line")}, chain intact` : `LEDGER DISPUTES CHAIN BROKEN (${c.disputes.detail})`);
   if (c.leads) parts.push(c.leads.intact ? `${plural(c.leads.lines, "lead event")}, chain intact` : `LEAD REGISTER CHAIN BROKEN (${c.leads.detail})`);
+  if (c.questions) parts.push(c.questions.intact ? `${plural(c.questions.lines, "question event")}, chain intact` : `QUESTION REGISTER CHAIN BROKEN (${c.questions.detail})`);
+  if (c.network) {
+    const n = c.network;
+    const bad = [...n.captures.mismatched, ...n.captures.missing];
+    const open = n.fetches.unresolved ?? [];
+    parts.push(n.grants.intact && n.fetches.intact && !bad.length && !open.length ? `network records: ${plural(n.grants.lines, "grant event")}, ${plural(n.fetches.lines, "fetch line")}, ${plural(n.captures.verified, "capture")} verified${n.captures.unpublished ? `, ${plural(n.captures.unpublished, "attempt")} recorded as not published` : ""}` : `NETWORK RECORDS DO NOT HOLD (${[...(n.grants.intact ? [] : [`grants: ${n.grants.detail}`]), ...(n.fetches.intact ? [] : [`fetches: ${n.fetches.detail}`]), ...(open.length ? [`attempts with no outcome: ${open.join(", ")}`] : []), ...(bad.length ? [`captures: ${bad.join(", ")}`] : [])].join("; ")})`);
+  }
+  if (c.requests) parts.push(c.requests.intact ? `${plural(c.requests.lines, "operator request event")}, chain intact` : `OPERATOR REQUESTS CHAIN BROKEN (${c.requests.detail})`);
+  if (c.sweeps) parts.push(c.sweeps.intact ? `${plural(c.sweeps.lines, "store sweep")}, chain intact` : `STORE SWEEPS CHAIN BROKEN (${c.sweeps.detail})`);
+  if (c.finish) parts.push(c.finish.intact ? `${plural(c.finish.lines, "finish event")}, chain intact` : `FINISH REGISTER CHAIN BROKEN (${c.finish.detail})`);
+  if (c.case_policy) {
+    const cp = c.case_policy;
+    if ("unreadable" in cp) parts.push(`CASE POLICY UNREADABLE (${cp.path} is ${cp.unreadable})`);
+    else if (cp.anchored === false) parts.push(`CASE POLICY REWRITTEN: ${cp.path} is not the policy the kickoff anchored (sha256 ${cp.sha256})`);
+    else parts.push(`case policy ${cp.policy}, network ${cp.network}, more evidence ${cp.more_evidence}, sealed${cp.anchored === true ? " and held to the kickoff's anchor" : " (not anchored: a run from before the anchor held it)"}`);
+  }
   if (c.operator && !c.operator.intact) parts.push(`OPERATOR AUDIT CHAIN BROKEN (${c.operator.detail})`);
   if (c.model_gateway) {
     const g = c.model_gateway;
@@ -2068,7 +2199,7 @@ function summaryOf(c: Omit<Custody, "summary">, t: { traceProblem: string | null
           : `what each job read is not observed by the harness (${st.access.observed_unknown} of ${st.access.jobs} jobs: declared inputs and accessible mounts are recorded)`,
       );
     }
-    if (st.imports) bits.push(`${plural(st.imports.sealed, "brain-side output")} a finding cited sealed as imports, ${st.imports.verified} verified against the journal${st.imports.mismatched.length ? `, ${st.imports.mismatched.length} NOT MATCHING (${some(st.imports.mismatched, 5, "store.imports.mismatched")})` : ""}`);
+    if (st.imports) bits.push(`${plural(st.imports.sealed, "import")} (brain-side outputs a finding cited, and evidence and material added from outside) sealed, ${st.imports.verified} verified against the journal${st.imports.mismatched.length ? `, ${st.imports.mismatched.length} NOT MATCHING (${some(st.imports.mismatched, 5, "store.imports.mismatched")})` : ""}`);
     if (st.catalogue) {
       const c = st.catalogue;
       const bad = [...c.revisions_mismatched, ...c.generations_mismatched];
@@ -2131,6 +2262,35 @@ function anchorVerdict(anchorFile: string, verdict: Record<string, unknown>): vo
   const verdicts = Array.isArray(anchor.custody) ? (anchor.custody as unknown[]) : [];
   verdicts.push(verdict);
   writeFileNoFollowSync(dirname(anchorFile), basename(anchorFile), `${JSON.stringify({ ...anchor, custody: verdicts }, null, 2)}\n`, 0o444);
+}
+
+/**
+ * A resume of the run (scripts/resume.ts), added to the anchor outside the
+ * run beside the verdicts: when, by whom, from what, and the chains' heads
+ * it found. An earlier verdict and an earlier release are held to the run
+ * as prefixes once the anchor names a resume after them.
+ */
+export function anchorResume(sandboxInput: string, entry: Record<string, unknown>): void {
+  const anchorFile = custodyAnchorPath(resolve(sandboxInput));
+  let anchor: Record<string, unknown> = {};
+  try {
+    anchor = JSON.parse(readFileSync(anchorFile, "utf8"));
+  } catch {
+    throw new Error(`the custody anchor beside the run (${anchorFile}) cannot be read: the resume is not anchored`);
+  }
+  const resumes = Array.isArray(anchor.resumes) ? (anchor.resumes as unknown[]) : [];
+  resumes.push(entry);
+  writeFileNoFollowSync(dirname(anchorFile), basename(anchorFile), `${JSON.stringify({ ...anchor, resumes }, null, 2)}\n`, 0o444);
+}
+
+/** The resumes the anchor outside the run names, in order. */
+export function anchoredResumes(sandboxInput: string, anchorFile?: string | null): Array<{ at: string; by?: string; from?: string; segment?: number }> {
+  try {
+    const a = JSON.parse(readFileSync(anchorFile ?? custodyAnchorPath(resolve(sandboxInput)), "utf8")) as { resumes?: unknown };
+    return Array.isArray(a.resumes) ? (a.resumes as Array<{ at: string; by?: string; from?: string; segment?: number }>).filter((r) => typeof r?.at === "string") : [];
+  } catch {
+    return [];
+  }
 }
 
 export type VerdictAnchor =
@@ -2300,11 +2460,11 @@ type Seal = Custody["seal"];
  * sha256. A part the verdict did not seal (an older custody) is not held,
  * and is said as not sealed; one that appeared or went since is a drift.
  */
-export function sealDrift(sealed: Partial<Seal> | undefined, now: Seal, journal: { hashes: string[]; types: string[] } | null): { drift: Array<{ what: string; sealed: string; now: string }>; after: string[]; not_sealed: string[] } {
+export function sealDrift(sealed: Partial<Seal> | undefined, now: Seal, journal: { hashes: string[]; types: string[] } | null, chains: { requests?: string[] } = {}): { drift: Array<{ what: string; sealed: string; now: string }>; after: string[]; not_sealed: string[] } {
   const drift: Array<{ what: string; sealed: string; now: string }> = [];
   const after: string[] = [];
   const notSealed: string[] = [];
-  if (!sealed) return { drift, after, not_sealed: ["the ledger", "the attestations", "the disputes", "the lead register", "the store journal", "the model gateway log"] };
+  if (!sealed) return { drift, after, not_sealed: ["the ledger", "the attestations", "the disputes", "the store sweeps", "the lead register", "the finish register", "the question register", "the network records", "the operator requests", "the store journal", "the model gateway log"] };
   const chain = (n: number, head: string | null, unit: string) => `${n} ${unit}, head ${head ?? "none"}`;
   if (!sealed.ledger) notSealed.push("the ledger");
   else if (sealed.ledger.entries !== now.ledger.entries || sealed.ledger.head !== now.ledger.head) {
@@ -2320,12 +2480,48 @@ export function sealDrift(sealed: Partial<Seal> | undefined, now: Seal, journal:
   else if (sealed.disputes.lines !== nowDisputes.lines || sealed.disputes.head !== nowDisputes.head) {
     drift.push({ what: "ledger disputes", sealed: chain(sealed.disputes.lines, sealed.disputes.head, "lines"), now: chain(nowDisputes.lines, nowDisputes.head, "lines") });
   }
+  // The store sweeps and the finish register, the same way: a verdict from before they were sealed does not hold them.
+  for (const [k, what, unit] of [["sweeps", "store sweeps", "lines"], ["finish", "finish register", "events"]] as const) {
+    const nowK = now[k] ?? { lines: 0, head: null };
+    const sealedK = sealed[k];
+    if (!sealedK) {
+      if (nowK.lines) notSealed.push(`the ${what}`);
+    } else if (sealedK.lines !== nowK.lines || sealedK.head !== nowK.head) drift.push({ what, sealed: chain(sealedK.lines, sealedK.head, unit), now: chain(nowK.lines, nowK.head, unit) });
+  }
   // The lead register, the same way: a verdict from before it was sealed does not hold it.
   const nowLeads = now.leads ?? { lines: 0, head: null };
   if (!sealed.leads) {
     if (nowLeads.lines) notSealed.push("the lead register");
   } else if (sealed.leads.lines !== nowLeads.lines || sealed.leads.head !== nowLeads.head) {
     drift.push({ what: "lead register", sealed: chain(sealed.leads.lines, sealed.leads.head, "events"), now: chain(nowLeads.lines, nowLeads.head, "events") });
+  }
+  // The question register, the same way.
+  const nowQuestions = now.questions ?? { lines: 0, head: null };
+  if (!sealed.questions) {
+    if (nowQuestions.lines) notSealed.push("the question register");
+  } else if (sealed.questions.lines !== nowQuestions.lines || sealed.questions.head !== nowQuestions.head) {
+    drift.push({ what: "question register", sealed: chain(sealed.questions.lines, sealed.questions.head, "events"), now: chain(nowQuestions.lines, nowQuestions.head, "events") });
+  }
+  // The network records, the same way (docs/adr/0012).
+  const nowNet = now.network ?? { grants: { lines: 0, head: null }, fetches: { lines: 0, head: null } };
+  if (!sealed.network) {
+    if (nowNet.grants.lines || nowNet.fetches.lines) notSealed.push("the network records");
+  } else {
+    for (const k of ["grants", "fetches"] as const) {
+      if (sealed.network[k].lines !== nowNet[k].lines || sealed.network[k].head !== nowNet[k].head) drift.push({ what: `network ${k}`, sealed: chain(sealed.network[k].lines, sealed.network[k].head, "lines"), now: chain(nowNet[k].lines, nowNet[k].head, "lines") });
+    }
+  }
+  // The operator requests (docs/adr/0014), the same way; what the operator did
+  // with them after the stop (acknowledged, answered, declined) follows the
+  // sealed line and is named, not a change to it. A sealed line changed or gone is.
+  const nowRequests = now.requests ?? { lines: 0, head: null };
+  if (!sealed.requests) {
+    if (nowRequests.lines) notSealed.push("the operator requests");
+  } else if (sealed.requests.lines !== nowRequests.lines || sealed.requests.head !== nowRequests.head) {
+    const n = sealed.requests.lines;
+    const prefix = chains.requests !== undefined && (n === 0 ? sealed.requests.head === null : chains.requests[n - 1] === sealed.requests.head);
+    if (prefix && nowRequests.lines > n) after.push(`operator requests: ${nowRequests.lines - n} event(s) after the seal (the operator's acts on them after the stop)`);
+    else drift.push({ what: "operator requests", sealed: chain(n, sealed.requests.head, "events"), now: chain(nowRequests.lines, nowRequests.head, "events") });
   }
   if (sealed.journal === undefined) notSealed.push("the store journal");
   else if (sealed.journal === null && now.journal) drift.push({ what: "store journal", sealed: "none", now: chain(now.journal.lines, now.journal.head, "lines") });
@@ -2344,6 +2540,148 @@ export function sealDrift(sealed: Partial<Seal> | undefined, now: Seal, journal:
     drift.push({ what: "model gateway log", sealed: g(sealed.model_gateway), now: g(now.model_gateway) });
   }
   return { drift, after, not_sealed: notSealed };
+}
+
+/** An earlier verdict the anchor names, held to the run as a prefix: every chain it sealed still begins with what it sealed. */
+export type EarlierSeal = { at: string | null; sha256: string | null; resumed_after: boolean; ok: boolean; held: string[]; broken: string[] };
+
+/** The lines of a JSONL text, and the `hash` each carries. */
+function lineHashField(text: string): string[] {
+  return text
+    .split("\n")
+    .filter((l) => l.trim())
+    .map((l) => {
+      try {
+        return String((JSON.parse(l) as { hash?: unknown }).hash ?? "");
+      } catch {
+        return "";
+      }
+    });
+}
+
+/**
+ * Whether every chain a verdict sealed is a prefix of the run now: the line
+ * it sealed as the last one is still at its place, with the hash it had,
+ * every chain recomputed over its first lines with its own code (the
+ * ledger, the attestations, the disputes, the registers, the journal), so a
+ * sealed line rewritten with its hash fields kept is broken.
+ * What the run appended after it (the continuation of a resumed run, the
+ * closing lines of a stop) is allowed; a line it sealed that changed or went
+ * is not. Pure over the texts read.
+ */
+export function sealPrefix(sealed: Partial<Seal> | undefined, now: { trace: string; ledger: string; attestations: string; disputes: string; leads: string; questions: string; grants: string; fetches: string; requests?: string; sweeps?: string; finish?: string; journal: string | null; gateway: string | null }): { ok: boolean; held: string[]; broken: string[] } {
+  const held: string[] = [];
+  const broken: string[] = [];
+  if (!sealed) return { ok: false, held, broken: ["the verdict seals no chain (a custody from before the seal)"] };
+  const at = (list: string[], n: number) => (n > 0 ? (list[n - 1] ?? null) : null);
+  const check = (what: string, n: number | undefined, head: string | null | undefined, list: string[]) => {
+    if (n === undefined) return;
+    if (n > list.length) broken.push(`${what}: it sealed ${n} line(s), and ${list.length} are here`);
+    else if ((at(list, n) ?? null) !== (head ?? null)) broken.push(`${what}: line ${n} is not the one it sealed`);
+    else held.push(`${what} (${n})`);
+  };
+  // A register chained with the lead register's code (leads, questions, the
+  // network chains, the operator requests): the first n events' own chain is
+  // recomputed (every event's hash over its content), never read from the
+  // hash fields the lines carry, so a changed body with its hash left in
+  // place does not pass (docs/adr/0016).
+  const checkChain = (what: string, n: number | undefined, head: string | null | undefined, text: string) => {
+    if (n === undefined) return;
+    const lines = text.split("\n").filter((l) => l.trim());
+    if (n > lines.length) {
+      broken.push(`${what}: it sealed ${n} event(s), and ${lines.length} are here`);
+      return;
+    }
+    const v = n > 0 ? verifyLeadChain(`${lines.slice(0, n).join("\n")}\n`) : { ok: true, head: null as string | null };
+    if (!v.ok) broken.push(`${what}: its first ${n} event(s) do not chain (${(v as { reason?: string }).reason})`);
+    else if ((v.head ?? null) !== (head ?? null)) broken.push(`${what}: event ${n} is not the one it sealed`);
+    else held.push(`${what} (${n})`);
+  };
+  const traceLines = now.trace.split("\n").filter((l) => l.trim());
+  if (sealed.trace) {
+    const n = sealed.trace.lines;
+    const line = n > 0 ? traceLines[n - 1] : undefined;
+    if (n > traceLines.length) broken.push(`the trace: it sealed ${n} line(s), and ${traceLines.length} are here`);
+    else if (n > 0 && createHash("sha256").update(line ?? "").digest("hex") !== sealed.trace.last_line_sha256) broken.push(`the trace: line ${n} is not the one it sealed`);
+    else held.push(`the trace (${n})`);
+  }
+  // The attestations and the disputes the same way, each with its own
+  // chain's code: the first n lines recomputed, never their hash fields read.
+  const checkActs = (what: string, n: number | undefined, head: string | null | undefined, text: string, verify: (t: string) => { ok: boolean; reason: string | null; head: string | null }) => {
+    if (n === undefined) return;
+    const lines = text.split("\n").filter((l) => l.trim());
+    if (n > lines.length) {
+      broken.push(`${what}: it sealed ${n} line(s), and ${lines.length} are here`);
+      return;
+    }
+    const v = n > 0 ? verify(`${lines.slice(0, n).join("\n")}\n`) : { ok: true, reason: null, head: null as string | null };
+    if (!v.ok) broken.push(`${what}: its first ${n} line(s) do not chain (${v.reason})`);
+    else if ((v.head ?? null) !== (head ?? null)) broken.push(`${what}: line ${n} is not the one it sealed`);
+    else held.push(`${what} (${n})`);
+  };
+  if (sealed.ledger) check("the ledger", sealed.ledger.entries, sealed.ledger.head, verifyLedgerChain(now.ledger).hashes);
+  checkActs("the attestations", sealed.attestations?.lines, sealed.attestations?.head, now.attestations, verifyAttestationChain);
+  checkActs("the disputes", sealed.disputes?.lines, sealed.disputes?.head, now.disputes, verifyDisputeChain);
+  checkChain("the lead register", sealed.leads?.lines, sealed.leads?.head, now.leads);
+  checkChain("the question register", sealed.questions?.lines, sealed.questions?.head, now.questions);
+  checkChain("the network grants", sealed.network?.grants.lines, sealed.network?.grants.head, now.grants);
+  checkChain("the network fetches", sealed.network?.fetches.lines, sealed.network?.fetches.head, now.fetches);
+  if (now.requests !== undefined) checkChain("the operator requests", sealed.requests?.lines, sealed.requests?.head, now.requests ?? "");
+  if (now.sweeps !== undefined) checkActs("the store sweeps", sealed.sweeps?.lines, sealed.sweeps?.head, now.sweeps, verifySweepChain);
+  if (now.finish !== undefined) checkChain("the finish register", sealed.finish?.lines, sealed.finish?.head, now.finish);
+  if (sealed.journal) check("the store journal", sealed.journal.lines, sealed.journal.head, now.journal === null ? [] : verifyJournalText(now.journal).hashes);
+  if (sealed.model_gateway && now.gateway === null && sealed.model_gateway.lines > 0) {
+    broken.push(`the model gateway log it sealed (${sealed.model_gateway.lines} lines) is not here`);
+  } else if (sealed.model_gateway && now.gateway !== null) {
+    const lines = now.gateway.split("\n").filter((l) => l.trim());
+    const first = lines.slice(0, sealed.model_gateway.lines);
+    const sha = first.length ? createHash("sha256").update(`${first.join("\n")}\n`).digest("hex") : null;
+    if (first.length < sealed.model_gateway.lines) broken.push(`the model gateway log: it sealed ${sealed.model_gateway.lines} line(s), and ${lines.length} are here`);
+    else if (sealed.model_gateway.sha256 && sha !== sealed.model_gateway.sha256) broken.push("the model gateway log: its first lines are not the ones it sealed");
+    else held.push(`the model gateway log (${sealed.model_gateway.lines})`);
+  }
+  return { ok: broken.length === 0, held, broken };
+}
+
+/**
+ * Every verdict the anchor names before the current one, each held to the
+ * run as a prefix (sealPrefix), and whether a resume came after it: a run
+ * resumed after a seal still verifies against that seal for what it held.
+ */
+export async function earlierSeals(sandbox: string): Promise<EarlierSeal[]> {
+  let anchor: { custody?: Array<{ at?: string; sha256?: string; seal?: Partial<Seal> }>; resumes?: Array<{ at?: string }> } = {};
+  try {
+    anchor = JSON.parse(await readRegularTextOutside(await anchorPathFor(sandbox)));
+  } catch {
+    return [];
+  }
+  const verdicts = Array.isArray(anchor.custody) ? anchor.custody : [];
+  const resumes = Array.isArray(anchor.resumes) ? anchor.resumes : [];
+  const read = async (rel: string) => {
+    const r = await readRegularText(join(sandbox, rel), 1 << 30);
+    return "text" in r ? r.text : "";
+  };
+  const journal = await readRegularText(join(sandbox, "store", "journal.jsonl"), 1 << 30);
+  const gateway = await readRegularText(join(sandbox, GATEWAY_LOG), 1 << 30);
+  const now = {
+    trace: await read(join("traces", "events.jsonl")),
+    ledger: await read(join("ledger", "entries.jsonl")),
+    attestations: await read(join("ledger", "attestations.jsonl")),
+    disputes: await read(join("ledger", "disputes.jsonl")),
+    leads: await read(join("leads", "leads.jsonl")),
+    questions: await read(join("questions", "questions.jsonl")),
+    grants: await read(GRANTS_LOG),
+    fetches: await read(FETCH_LOG),
+    requests: await read(join("requests", "requests.jsonl")),
+    sweeps: await read(LEDGER_SWEEPS),
+    finish: await read(FINISH_LOG),
+    journal: "text" in journal ? journal.text : null,
+    gateway: "text" in gateway ? gateway.text : null,
+  };
+  return verdicts.slice(0, -1).map((v) => {
+    const p = sealPrefix(v.seal, now);
+    return { at: v.at ?? null, sha256: v.sha256 ?? null, resumed_after: resumes.some((r) => typeof r.at === "string" && typeof v.at === "string" && r.at > v.at), ok: p.ok, held: p.held, broken: p.broken };
+  });
 }
 
 export type TimestampCheck = { present: boolean; imprint: boolean | null; gen_time: string | null; signature: { verified: boolean | null; ca: string | null; detail: string } | null; note: string };
@@ -2365,6 +2703,8 @@ export type VerifyReport = {
   timestamp: TimestampCheck;
   /** What the check wrote outside the run, or found and left alone. */
   touched: string[];
+  /** Every earlier verdict the anchor names, held to the run as a prefix (a resumed run's first seal among them). */
+  earlier: EarlierSeal[];
   ok: boolean;
 };
 
@@ -2405,7 +2745,8 @@ export async function verifyCustody(sandboxInput: string, opts: { timeoutSec?: n
     const j = verifyJournalText(journalRead.text);
     return { hashes: j.hashes, types: j.lines.map((l) => String((l as { type?: unknown }).type ?? "")) };
   })() : null;
-  const seal = sealDrift(sealed?.seal, now.seal, journal);
+  const requestsRead = await readRegularText(join(sandbox, "requests", "requests.jsonl"), 1 << 30);
+  const seal = sealDrift(sealed?.seal, now.seal, journal, { requests: lineHashField("text" in requestsRead ? requestsRead.text : "") });
   // work/ against the index custody sealed.
   const idx = await sealedIndex(sandbox, sealed, lastAnchored?.artifacts_sha256);
   const drift = idx.state === "sealed" ? await workDrift(sandbox, idx.index, deadline, walked) : null;
@@ -2452,6 +2793,7 @@ export async function verifyCustody(sandboxInput: string, opts: { timeoutSec?: n
     signature: sig ? { present: true, ok: sig.ok, how: sig.how, detail: sig.detail } : { present: false, ok: null, how: "none", detail: "custody.json is not signed" },
     timestamp: ts,
     touched,
+    earlier: await earlierSeals(sandbox),
     ok: false,
   };
   // A token's signature fails the check when it does not verify, and when a CA was given and it could not be checked.
@@ -2466,7 +2808,8 @@ export async function verifyCustody(sandboxInput: string, opts: { timeoutSec?: n
     work.index !== "differs" &&
     !driftLine &&
     (sig ? sig.ok : true) &&
-    tsOk;
+    tsOk &&
+    report.earlier.every((e) => e.ok);
   return report;
 }
 
@@ -2530,7 +2873,8 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
           console.log(`Signature:    ${r.signature.present ? `${r.signature.ok ? "valid" : "NOT VALID"} (${r.signature.how})` : r.signature.detail}`);
           console.log(`Timestamp:    ${r.timestamp.present ? `${r.timestamp.gen_time ?? "time unread"}; ${r.timestamp.note}` : r.timestamp.note}`);
           if (r.touched.length) console.log(`Outside run:  ${r.touched.join("; ")}`);
-          console.log(r.ok ? "VERIFIED: the run is as the verdict sealed it." : "NOT VERIFIED: see above.");
+          for (const e of r.earlier) console.log(`Earlier seal: ${e.at ?? "?"} (${e.sha256 ?? "?"})${e.resumed_after ? ", before a resume" : ""}: ${e.ok ? `holds as a prefix: ${e.held.join(", ")}` : `DOES NOT HOLD AS A PREFIX: ${e.broken.join("; ")}`}`);
+          console.log(r.ok ? `VERIFIED: the run is as the verdict sealed it${r.earlier.length ? `, and ${r.earlier.length === 1 ? "the earlier seal holds" : `each of the ${r.earlier.length} earlier seals holds`} as a prefix` : ""}.` : "NOT VERIFIED: see above.");
         }
         process.exit(r.ok ? 0 : 4);
       })

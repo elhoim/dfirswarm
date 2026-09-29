@@ -179,25 +179,27 @@ test("a job run under a lead: only the lead's holder may, and the job goes on th
   assert.deepEqual(snap.state.leads.get("L-1")?.jobs, [named.job.job, implied.job.job]);
 });
 
-test("raw jobs are never merged, only measured: the same spec over the same inputs by digest is logged as job_would_merge, and both run", async () => {
+test("raw jobs are never merged: another seat's same work over the same objects by digest is named in similar, and both run", async () => {
   const { S, svc, call } = rig();
   await svc.start();
   const journal = () => readFileSync(join(S, "store", "journal.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l) as Record<string, unknown>);
   const spec = { command: "unzip -l inputs/a.zip", inputs: ["input:a.zip"] };
   const first = await call("a1", "jobSubmit", spec);
-  const second = await call("a2", "jobSubmit", spec);
+  assert.equal(first.similar, undefined, "nothing ran before it");
+  const second = await call("a2", "jobSubmit", { ...spec, timeout_seconds: 60 });
   assert.equal(first.ok && second.ok, true);
   assert.notEqual(first.job.job, second.job.job, "the second request is a job of its own: nothing was merged");
-  const would = journal().filter((l) => l.type === "job_would_merge");
-  assert.equal(would.length, 1);
-  assert.deepEqual([would[0].job, would[0].same_as], [second.job.job, first.job.job]);
-  // Different bytes of spec, inputs=["all"] (live work/), and a file of one's own are never candidates.
-  await call("a2", "jobSubmit", { ...spec, timeout_seconds: 60 });
-  await call("a1", "jobSubmit", { command: "unzip -l inputs/a.zip", inputs: ["all"] });
-  await call("a1", "jobSubmit", { command: "unzip -l inputs/a.zip", inputs: ["all"] });
+  assert.deepEqual(second.similar.map((x: Record<string, unknown>) => [x.job, x.seat, x.match, x.objects]), [[first.job.job, "a1", "same command", "same"]], "a timeout of its own does not hide it");
+  assert.match(second.similar_note, /read their outputs/);
+  assert.equal(journal().filter((l) => l.type === "job_would_merge").length, 0, "the shadow merge is retired");
+  assert.equal(journal().filter((l) => l.type === "job_similar").length, 1);
+  // Its own earlier job, a job over everything (live work/), and a file of one's own are never similar.
+  const own = await call("a1", "jobSubmit", spec);
+  assert.deepEqual(own.similar.map((x: Record<string, unknown>) => x.job), [second.job.job], "a seat's own earlier job is not named, the other seat's is");
+  assert.equal((await call("a2", "jobSubmit", { command: "unzip -l inputs/a.zip", inputs: ["all"] })).similar, undefined);
   await call("a1", "jobSubmit", { command: "cat work/a1/notes.txt", inputs: ["work/a1/notes.txt"] });
-  await call("a1", "jobSubmit", { command: "cat work/a1/notes.txt", inputs: ["work/a1/notes.txt"] });
-  assert.equal(journal().filter((l) => l.type === "job_would_merge").length, 1, "only the identical declared-by-digest pair would merge");
+  assert.equal((await call("a2", "jobSubmit", { command: "cat work/a1/notes.txt", inputs: ["work/a1/notes.txt"] })).similar, undefined);
   await done(call, "a1", first.job.job);
   await done(call, "a2", second.job.job);
+  await svc.stop("over");
 });

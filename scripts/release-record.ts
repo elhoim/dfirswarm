@@ -53,6 +53,9 @@ const sha256 = (b: string | Buffer) => createHash("sha256").update(b).digest("he
 
 export type ChainHead = { lines: number; head: string | null };
 
+/** The ledger's chains a release binds by head and length (the store sweeps among them, from 2026-09-29). */
+type ChainKind = "ledger" | "attestations" | "disputes" | "sweeps";
+
 export type ReleaseSigner = {
   kind: "machine" | "examiner";
   principal: string;
@@ -110,6 +113,8 @@ export type ReleaseRecord = {
     ledger: { entries: number; head: string | null };
     attestations: ChainHead;
     disputes: ChainHead;
+    /** The store sweeps (ledger/sweeps.jsonl): absent from a release made before they were bound. */
+    sweeps?: ChainHead;
     journal: ChainHead | null;
     trace: { lines: number; last_line_sha256: string | null; sealed_lines: number | null };
     review: ChainHead | null;
@@ -143,7 +148,83 @@ export type ReleaseRecord = {
   };
   /** The technical-review policy in force when it was sealed. */
   policy?: { require_technical_review: boolean; source: string | null };
+  /**
+   * The case policy the kickoff recorded (network/policy.json, docs/adr/0014),
+   * by its sha256, and whether custody held it to the kickoff's anchor.
+   * Absent from a release made before it was bound.
+   */
+  case_policy?: { sha256: string; policy: string; network: string; more_evidence: string; material_use: Record<string, string>; anchored: boolean | null } | null;
+  /**
+   * The standing answers that rest on external material (a capture, evidence
+   * added after the kickoff, material the operator supplied, a question's
+   * attachment, and what was derived from them), each with its entry's hash
+   * and the source classes it rests on: named, never failed. Absent from a
+   * release made before it was bound.
+   */
+  external?: { answers: Array<{ section: string; seq: number; hash: string | null; classes: string[]; via: string[] }>; note: string };
+  /** The acquisition requests of the run as they stood (docs/adr/0014): what was asked for, and how each ended. */
+  acquisitions?: Array<{ id: string; state: string; stage: string | null; source: string; questions: string[]; import: string | null }>;
+  /**
+   * The question register as this release binds it (docs/adr/0016): the
+   * length and head custody sealed, what those events say (the questions by
+   * origin, and every person who asked or acted, claimed or signed), and the
+   * events recorded after the verdict (a follow-up after the done, a resume's
+   * continuation), which the next release binds. Absent from a release made
+   * before it was bound.
+   */
+  questions?: QuestionsBinding;
 };
+
+/** What a release says of the question register it binds. */
+export type QuestionsBinding = {
+  lines: number;
+  head: string | null;
+  /** Whether the length and head are the ones the custody verdict sealed (false: a verdict from before the register was sealed, bound as it is). */
+  sealed: boolean;
+  /** Questions opened in the bound events, by origin; derived from the goal (and none written) when the register was never written. */
+  by_origin: Record<string, number>;
+  /** Each person who asked a question or acted on one in the bound events: whether enrolled, and whether any act was signed. */
+  analysts: Array<{ person: string; name: string | null; role: string | null; enrolled: boolean | null; identity: "claimed" | "signed"; asked: string[]; acts: number; signed_acts: number }>;
+  /** Events after the ones bound. */
+  post_seal: { lines: number; events: Array<{ seq: number; ev: string; q: string | null; at: string }>; note: string };
+  note: string;
+};
+
+/**
+ * The question register's binding for a release, from the chain's text and
+ * the verdict's seal of it: pure over the events. `derived` is the goal's
+ * seed as a reader derives it, for a register never written.
+ */
+export function questionsBinding(events: Array<{ seq: number; ev: string; q?: string; at: string; hash: string; origin?: { kind?: string; person?: string; name?: string; role?: string; enrolled?: boolean; identity?: string }; signature?: unknown }>, sealed: { lines?: number; head?: string | null } | null | undefined, derived: Record<string, number> = {}): QuestionsBinding {
+  const lines = sealed ? Number(sealed.lines ?? 0) : events.length;
+  const head = sealed ? (sealed.head ?? null) : (events.at(-1)?.hash ?? null);
+  const bound = events.slice(0, lines);
+  const byOrigin: Record<string, number> = {};
+  const persons = new Map<string, QuestionsBinding["analysts"][number]>();
+  for (const e of bound) {
+    const o = e.origin;
+    if (e.ev === "open" && e.q) byOrigin[o?.kind ?? "goal"] = (byOrigin[o?.kind ?? "goal"] ?? 0) + 1;
+    if (!o?.person || !["analyst", "reviewer", "observer"].includes(o.kind ?? "")) continue;
+    const p = persons.get(o.person) ?? { person: o.person, name: o.name ?? null, role: o.role ?? null, enrolled: typeof o.enrolled === "boolean" ? o.enrolled : null, identity: "claimed" as const, asked: [], acts: 0, signed_acts: 0 };
+    p.acts += 1;
+    if (e.signature || o.identity === "signed") {
+      p.signed_acts += 1;
+      p.identity = "signed";
+    }
+    if (e.ev === "open" && e.q && !p.asked.includes(e.q)) p.asked.push(e.q);
+    persons.set(o.person, p);
+  }
+  const after = events.slice(lines);
+  return {
+    lines,
+    head,
+    sealed: Boolean(sealed),
+    by_origin: lines ? byOrigin : derived,
+    analysts: [...persons.values()].sort((a, b) => a.person.localeCompare(b.person)),
+    post_seal: { lines: after.length, events: after.map((e) => ({ seq: e.seq, ev: e.ev, q: e.q ?? null, at: e.at })), note: "Recorded after the verdict this release binds (a question admitted after the done, a follow-up, a resume's continuation): the next custody seals them and the next release binds them." },
+    note: lines ? "The register's events up to its bound head: who asked each question, as a claim or signed, every revision, scope decision, clarification, withdrawal and acceptance. A signed act carries its own signature on its line." : "The register was never written: the goal's questions were derived from the goal when this release was made (by_origin), and nothing else was asked.",
+  };
+}
 
 /** What the examiner confirms, word for word, before a release is sealed. */
 export const CONSENT_STATEMENT = "I have read the report and the answers I adopt";
@@ -318,6 +399,19 @@ export function hashFieldHead(text: string | null): ChainHead {
   return { lines: lines.length, head };
 }
 
+/** The `hash` field of line `n` (1-based) of a hashed chain, or null: whether a bound head is still at its place. */
+export function hashFieldAt(text: string | null, n: number): string | null {
+  if (n <= 0) return null;
+  const line = (text ?? "").split("\n").filter((l) => l.trim())[n - 1];
+  if (line === undefined) return null;
+  try {
+    const h = (JSON.parse(line) as { hash?: unknown }).hash;
+    return typeof h === "string" ? h : null;
+  } catch {
+    return null;
+  }
+}
+
 /** A prev-chained file's length and head: the last line's own hash (the trace, the journal, the review). */
 export function lineHead(text: string | null): ChainHead {
   const h = lineHashes(text ?? "");
@@ -342,6 +436,20 @@ export type ReleaseLayout = {
   disputes: string;
   journal: string;
   trace: string;
+  /** The two registers custody seals by head and count (the lead and the question register): checked against the verdict a release binds. */
+  leads: string;
+  questions: string;
+  /** The dynamic network's two chains (docs/adr/0012), which custody seals the same way: held to the verdict a release binds too. */
+  grants: string;
+  fetches: string;
+  /** The operator requests' chain (docs/adr/0014), which custody seals the same way. */
+  requests: string;
+  /** The store sweeps (docs/adr/0013): bound in the release's chains, and sealed by the verdict. */
+  sweeps: string;
+  /** The finish register (docs/adr/0015), which custody seals as it seals the lead register. */
+  finish: string;
+  /** The model gateway's log, which custody seals by its lines and their sha256. */
+  gateway: string;
   review: string | null;
   anchor: string | null;
   /** A package made with --redact: each changed file's sha256 before and after. */
@@ -370,6 +478,14 @@ export function runLayout(sandbox: string, reviewFile: string | null, anchorFile
     disputes: "ledger/disputes.jsonl",
     journal: "store/journal.jsonl",
     trace: "traces/events.jsonl",
+    leads: "leads/leads.jsonl",
+    questions: "questions/questions.jsonl",
+    grants: "network/grants.jsonl",
+    fetches: "network/fetches.jsonl",
+    requests: "requests/requests.jsonl",
+    sweeps: "ledger/sweeps.jsonl",
+    finish: "leads/finish.jsonl",
+    gateway: "traces/model-gateway.jsonl",
     review: reviewFile,
     anchor: anchorFile,
     redactions: new Map(),
@@ -400,6 +516,14 @@ export function packageLayout(dir: string): ReleaseLayout {
     disputes: "ledger-disputes.jsonl",
     journal: "store/journal.jsonl",
     trace: "trace/events.jsonl",
+    leads: "leads.jsonl",
+    questions: "questions.jsonl",
+    grants: "network/grants.jsonl",
+    fetches: "network/fetches.jsonl",
+    requests: "requests.jsonl",
+    sweeps: "ledger-sweeps.jsonl",
+    finish: "finish.jsonl",
+    gateway: "trace/model-gateway.jsonl",
     review: existsSync(join(dir, "review.jsonl")) ? join(dir, "review.jsonl") : null,
     anchor: existsSync(join(dir, "trace", "custody-anchor.json")) ? join(dir, "trace", "custody-anchor.json") : null,
     redactions: redactionRows(read("REDACTIONS.txt")),
@@ -442,7 +566,9 @@ const fileSha = (p: string): string | null => {
  * one is given, else against the key the release names, said as that), the
  * bytes it binds (the report's HTML and PDF, the swarm's report, a print),
  * the custody verdict and the index it names (the current ones or ones
- * custody kept aside), the ledger, its attestations and disputes as they
+ * custody kept aside), the lead and question registers and the network's
+ * grants and fetches as that verdict sealed them (their heads and counts;
+ * appended to since is a prefix, cut or rewritten fails), the ledger, its attestations and disputes as they
  * are, the trace, the journal and the review as prefixes (lines may follow
  * a release; the ones it bound may not change), its line in the anchor
  * beside the run, and a timestamp token over its signature, against the
@@ -473,18 +599,126 @@ export async function verifyReleases(layout: ReleaseLayout, opts: { allowedSigne
   };
   const heldWord = (h: ReturnType<typeof held>) => (h === "matches" ? "as bound" : h === "redacted" ? "redacted from the bound bytes (REDACTIONS.txt)" : h === "withheld" ? "withheld from this package (REDACTIONS.txt names the bound sha256)" : h === "missing" ? "NOT THERE" : "NOT THE BOUND BYTES");
   let anchorReleases: Array<{ version?: number; sha256?: string }> | null = null;
+  // The resumes the anchor names, as written: each is weighed below against the chains before it relaxes anything.
+  let anchorResumes: unknown[] = [];
   const anchorText = readText(layout.anchor);
   if (anchorText) {
     try {
-      const a = JSON.parse(anchorText) as { releases?: unknown };
+      const a = JSON.parse(anchorText) as { releases?: unknown; resumes?: unknown };
       anchorReleases = Array.isArray(a.releases) ? (a.releases as Array<{ version?: number; sha256?: string }>) : [];
+      anchorResumes = Array.isArray(a.resumes) ? a.resumes : [];
     } catch {
       anchorReleases = null;
     }
   }
-  const ledgerNow = hashFieldHead(readText(abs(layout.root, layout.ledger)));
-  const attNow = hashFieldHead(readText(abs(layout.root, layout.attestations)));
-  const dispNow = hashFieldHead(readText(abs(layout.root, layout.disputes)));
+  const ledgerText = readText(abs(layout.root, layout.ledger));
+  const attText = readText(abs(layout.root, layout.attestations));
+  const dispText = readText(abs(layout.root, layout.disputes));
+  const sweepText = readText(abs(layout.root, layout.sweeps));
+  const ledgerNow = hashFieldHead(ledgerText);
+  const attNow = hashFieldHead(attText);
+  const dispNow = hashFieldHead(dispText);
+  const sweepNow = hashFieldHead(sweepText);
+  /**
+   * The first n lines of a chain, verified with its own verifier (every
+   * line's hash recomputed from what it holds, and chained to the one
+   * before), and the head they end on. In a run only: a package's chains
+   * may carry redacted lines, which its own check (package-tools.ts) walks
+   * by the hashes they keep; there the stored hash fields are compared.
+   */
+  const P = layout.where === "run" ? await import("../extensions/protocol.ts") : null;
+  const texts: Record<ChainKind, string | null> = { ledger: ledgerText, attestations: attText, disputes: dispText, sweeps: sweepText };
+  const SW = layout.where === "run" ? await import("../extensions/store-sweep.ts") : null;
+  const prefixOf = (kind: ChainKind, n: number): { ok: true; head: string | null } | { ok: false; why: string } => {
+    const text = texts[kind];
+    const lines = (text ?? "").split("\n").filter((l) => l.trim());
+    if (n > lines.length) return { ok: false, why: `it has ${lines.length} line(s), fewer than ${n}` };
+    if (n === 0) return { ok: true, head: null };
+    const first = `${lines.slice(0, n).join("\n")}\n`;
+    if (!P) return { ok: true, head: hashFieldAt(first, n) };
+    if (kind === "ledger") {
+      const v = P.verifyLedgerChain(first);
+      return v.ok ? { ok: true, head: v.hashes.at(-1) ?? null } : { ok: false, why: `its chain is broken at line ${v.broken_at} (${v.reason})` };
+    }
+    const v = kind === "attestations" ? P.verifyAttestationChain(first) : kind === "sweeps" ? SW!.verifySweepChain(first) : P.verifyDisputeChain(first);
+    return v.ok ? { ok: true, head: v.head } : { ok: false, why: `its chain is broken at line ${v.broken_at} (${v.reason})` };
+  };
+  /**
+   * The resumes that stand: each recorded with its segment and the heads of
+   * the chains as the resume found them, every one of those heads the one
+   * the verified chain holds at that length. A bare time, a boundary the
+   * chain does not hold, or a line of the anchor that says less, relaxes
+   * nothing.
+   */
+  const resumes = anchorResumes
+    .map((raw) => {
+      const r = (raw && typeof raw === "object" ? raw : {}) as { at?: unknown; segment?: unknown; heads?: Record<string, { lines?: unknown; head?: unknown } | undefined> };
+      const at = typeof r.at === "string" && Number.isFinite(Date.parse(r.at)) ? r.at : null;
+      if (!at || !Number.isInteger(r.segment) || Number(r.segment) < 1 || !r.heads || typeof r.heads !== "object") return null;
+      const heads: Partial<Record<ChainKind, ChainHead>> = {};
+      for (const kind of ["ledger", "attestations", "disputes", "sweeps"] as const) {
+        const h = r.heads[kind];
+        if (!h) continue;
+        const lines = Number(h.lines);
+        if (!Number.isInteger(lines) || lines < 0) return null;
+        const got = prefixOf(kind, lines);
+        if (!got.ok || got.head !== ((h.head as string | null | undefined) ?? null)) return null;
+        heads[kind] = { lines, head: got.head };
+      }
+      return heads.ledger ? { at, heads } : null;
+    })
+    .filter((x): x is { at: string; heads: Partial<Record<ChainKind, ChainHead>> } => x !== null);
+  const resumedAfter = (at: string) => resumes.some((r) => Date.parse(r.at) > Date.parse(at));
+  // The registers custody seals by head and count, which a release binds through the verdict it binds:
+  // the lead and question registers, and the dynamic network's grants and
+  // fetches (sealed under seal.network, chained with the lead register's
+  // code). In a run, each is verified whole as well (every event's hash over
+  // its content); a package's may carry redacted events, which its own
+  // check (package-tools.ts) verifies by the hashes they keep.
+  type Sealed = { lines?: number; head?: string | null } | undefined;
+  type SealRecord = Record<string, unknown>;
+  const net = (seal: SealRecord, k: "grants" | "fetches"): Sealed => {
+    const n = seal.network as Record<string, Sealed> | undefined;
+    return n && typeof n === "object" ? n[k] : undefined;
+  };
+  const verifyChain = layout.where === "run" ? (await import("../extensions/leads.ts")).verifyLeadChain : null;
+  const registers = (
+    [
+      ["the lead register", layout.leads, (seal: SealRecord) => seal.leads as Sealed, "events", verifyChain],
+      ["the finish register", layout.finish, (seal: SealRecord) => seal.finish as Sealed, "events", verifyChain],
+      ["the question register", layout.questions, (seal: SealRecord) => seal.questions as Sealed, "events", verifyChain],
+      ["the network grants", layout.grants, (seal: SealRecord) => net(seal, "grants"), "lines", verifyChain],
+      ["the network fetches", layout.fetches, (seal: SealRecord) => net(seal, "fetches"), "lines", verifyChain],
+      ["the operator requests", layout.requests, (seal: SealRecord) => seal.requests as Sealed, "events", verifyChain],
+      ["the store sweeps", layout.sweeps, (seal: SealRecord) => seal.sweeps as Sealed, "lines", SW ? SW.verifySweepChain : null],
+    ] as const
+  ).map(([what, rel, sealedOf, unit, verify]) => {
+    const text = readText(abs(layout.root, rel));
+    const v = verify && text ? verify(text) : null;
+    return { what, sealedOf, unit, text, now: hashFieldHead(text), broken: v && !v.ok ? `broken at line ${v.broken_at} (${v.reason})` : null };
+  });
+  // The model gateway's log, which custody seals by its line count and the sha256 of those lines (no hash field of its own).
+  const gatewayText = readText(abs(layout.root, layout.gateway));
+  /**
+   * A chain bound as it is, or, when a resume that stands was recorded after
+   * the release at a boundary at or past what it binds, as a prefix. Either
+   * way the lines it binds are verified, never read by their hash fields.
+   * What the continuation appended is the next release's to bind.
+   */
+  const asBound = (kind: ChainKind, what: string, bound: ChainHead, now: ChainHead, at: string, bad: string[], parts: string[]) => {
+    const got = prefixOf(kind, bound.lines);
+    if (!got.ok && bound.lines <= now.lines) {
+      bad.push(`${what} it binds does not verify: ${got.why}`);
+      return;
+    }
+    if (got.ok && got.head === bound.head && bound.lines === now.lines) return;
+    const resumed = resumes.some((r) => Date.parse(r.at) > Date.parse(at) && (r.heads[kind] ?? r.heads.ledger)!.lines >= bound.lines);
+    if (got.ok && got.head === bound.head && resumed && now.lines > bound.lines) {
+      parts.push(`${what} it binds is a prefix of ${what} here (${bound.lines} of ${now.lines}): the run was resumed after it, and a later release binds the continuation`);
+      return;
+    }
+    bad.push(`${what} here ${what === "the ledger" ? "is not the one" : "are not the ones"} it binds (${bound.lines} ${what === "the ledger" ? "entries" : "lines"}, head ${bound.head ?? "none"}; here ${now.lines}, head ${now.head ?? "none"})`);
+  };
   const traceText = readText(abs(layout.root, layout.trace));
   const traceHashes = lineHashes(traceText ?? "");
   const journalText = readText(abs(layout.root, layout.journal));
@@ -553,26 +787,101 @@ export async function verifyReleases(layout: ReleaseLayout, opts: { allowedSigne
     }
     if (x.report?.markdown) {
       const md = held(x.report.markdown.path, x.report.markdown.sha256);
-      (md === "differs" ? bad : parts).push(`${x.report.markdown.path} ${md === "missing" ? "not here (left in the run)" : heldWord(md)}`);
+      // The run resumed after it and its continuation wrote its own report: the bytes this one binds were kept, by their digest.
+      const keptAt = `${RELEASE_DIR}/bound/${x.report.markdown.sha256}`;
+      if ((md === "differs" || md === "missing") && /^[0-9a-f]{64}$/.test(x.report.markdown.sha256) && resumedAfter(x.at) && held(keptAt, x.report.markdown.sha256) === "matches") {
+        parts.push(`${x.report.markdown.path} as bound, kept at ${keptAt} when the run was resumed (the continuation's report is the next release's)`);
+      } else (md === "differs" ? bad : parts).push(`${x.report.markdown.path} ${md === "missing" ? "not here (left in the run)" : heldWord(md)}`);
     }
     // The verdict and the index it names: the current ones, or ones custody kept aside.
     if (x.custody) {
       const candidates = [layout.custody, ...layout.custodyHistory];
       const hit = candidates.find((c) => held(c, x.custody?.sha256) !== "differs" && held(c, x.custody?.sha256) !== "missing");
       if (!hit) bad.push(`the custody verdict it binds (${x.custody.sha256}) is not here`);
-      else parts.push(hit === layout.custody ? "binds this custody verdict" : `binds an earlier custody verdict (${hit}); custody was taken again since`);
+      else {
+        parts.push(hit === layout.custody ? "binds this custody verdict" : `binds an earlier custody verdict (${hit}); custody was taken again since`);
+        // The registers that verdict sealed, held to what is here as the ledger is: as bound, or a prefix after a resume.
+        // A verdict from before the seal sealed no chain's head, and holds the registers to nothing.
+        let seal: SealRecord | null = null;
+        let readable = true;
+        try {
+          seal = (JSON.parse(readText(abs(layout.root, hit)) ?? "{}") as { seal?: SealRecord }).seal ?? null;
+        } catch {
+          readable = false;
+        }
+        if (!readable) bad.push("the custody verdict it binds is not JSON: the chains it sealed cannot be read");
+        else if (seal) {
+          for (const g of registers) {
+            const sealed = g.sealedOf(seal);
+            if (!sealed) continue; // a verdict taken before that register was sealed, or a run that never used it
+            const bound = { lines: Number(sealed.lines ?? 0), head: sealed.head ?? null };
+            if (g.broken) {
+              bad.push(`${g.what}'s chain here is ${g.broken}: it is not the one the custody verdict it binds sealed`);
+              continue;
+            }
+            if (bound.lines === g.now.lines && bound.head === g.now.head) continue;
+            // Appended to since (a follow-up recorded after the verdict, or the continuation of a resume), the part it binds intact.
+            if (g.now.lines > bound.lines && (bound.lines === 0 || hashFieldAt(g.text, bound.lines) === bound.head)) {
+              parts.push(`${g.what} it binds (${bound.lines} ${g.unit}) is a prefix of ${g.what} here (${g.now.lines}): what follows was recorded after the verdict`);
+              continue;
+            }
+            bad.push(`${g.what} here is not the one the custody verdict it binds sealed (${bound.lines} ${g.unit}, head ${bound.head ?? "none"}; here ${g.now.lines}, head ${g.now.head ?? "none"}): it was deleted, cut or rewritten`);
+          }
+          // The model gateway's log: its first sealed lines are the bytes the verdict sealed.
+          const gw = seal.model_gateway as { lines?: number; sha256?: string | null } | null | undefined;
+          if (gw && (gw.lines ?? 0) > 0) {
+            const lines = (gatewayText ?? "").split("\n").filter((l) => l.trim());
+            const n = gw.lines ?? 0;
+            const first = lines.slice(0, n);
+            const redactedLog = layout.redactions.has(layout.gateway);
+            if (gatewayText === null) bad.push(`the model gateway log the custody verdict it binds sealed (${n} lines) is not here`);
+            else if (first.length < n) bad.push(`the model gateway log here has ${lines.length} lines, fewer than the ${n} the custody verdict it binds sealed`);
+            else if (!redactedLog && gw.sha256 && sha256(`${first.join("\n")}\n`) !== gw.sha256) bad.push("the model gateway log's first lines are not the ones the custody verdict it binds sealed");
+            else if (lines.length > n) parts.push(`the model gateway log it binds (${n} lines) is a prefix of the log here (${lines.length})`);
+          }
+        }
+      }
     }
     if (x.sealed_index) {
       const candidates = [layout.sealedIndex, ...layout.indexHistory];
       const hit = candidates.find((c) => ["matches", "redacted"].includes(held(c, x.sealed_index?.sha256)));
       if (!hit) bad.push(`the sealed index of work/ it binds (${x.sealed_index.sha256}) is not here`);
     }
+    // The question register the release binds (docs/adr/0016), verified
+    // whether or not the custody verdict has a question seal: the prefix it
+    // binds is recomputed from the events, not read from their stored hash
+    // fields, so a change to a question's text or reason that leaves the
+    // hashes in place is caught; then what the release says of it (by_origin,
+    // analysts) is recomputed from the same events.
+    if (x.questions) {
+      const qText = readText(abs(layout.root, layout.questions)) ?? "";
+      const qLines = qText.split("\n").filter((l) => l.trim());
+      const verifyQ = layout.where === "run" ? (await import("../extensions/leads.ts")).verifyLeadChain : null;
+      if (x.questions.lines > qLines.length) bad.push(`the question register here has ${qLines.length} events, fewer than the ${x.questions.lines} it binds`);
+      else if (verifyQ) {
+        // Recompute the bound prefix's own chain (every event's hash over its content), never the stored hash fields.
+        const first = x.questions.lines ? `${qLines.slice(0, x.questions.lines).join("\n")}\n` : "";
+        const v = x.questions.lines ? verifyQ(first) : { ok: true, head: null as string | null };
+        if (!v.ok) bad.push(`the question register's chain here is broken at line ${(v as { broken_at?: number }).broken_at} (${(v as { reason?: string }).reason}): not the one it binds`);
+        else if ((v.head ?? null) !== x.questions.head) bad.push(`the question register here is not the one it binds (${x.questions.lines} events, head ${x.questions.head ?? "none"}; here ${v.head ?? "none"})`);
+        else {
+          const events = qLines.slice(0, x.questions.lines).map((l) => JSON.parse(l) as Parameters<typeof questionsBinding>[0][number]);
+          const again = questionsBinding(events, { lines: x.questions.lines, head: x.questions.head });
+          if (JSON.stringify(again.by_origin) !== JSON.stringify(x.questions.by_origin) || JSON.stringify(again.analysts) !== JSON.stringify(x.questions.analysts)) bad.push("what it says of the question register (by_origin, analysts) is not what the events it binds say");
+          else if (x.questions.lines) parts.push(`binds the question register's first ${x.questions.lines} events (${Object.entries(x.questions.by_origin).map(([k, n]) => `${n} ${k}`).join(", ") || "no question opened"}${x.questions.analysts.length ? `; asked or acted on by ${x.questions.analysts.map((a) => `${a.person} (${a.identity})`).join(", ")}` : ""})`);
+        }
+      } else if (x.questions.lines && hashFieldAt(qText, x.questions.lines) !== x.questions.head) {
+        // A package: its own check (package-tools.ts) recomputes the chain; here the stored head at the bound length.
+        bad.push(`the question register here is not the one it binds (${x.questions.lines} events; head differs)`);
+      }
+    }
     // The chains custody sealed: as they are; the growing ones as prefixes.
     const c = x.chains;
     if (c) {
-      if (c.ledger && (c.ledger.entries !== ledgerNow.lines || c.ledger.head !== ledgerNow.head)) bad.push(`the ledger is not the one it binds (${c.ledger.entries} entries, head ${c.ledger.head ?? "none"}; here ${ledgerNow.lines}, head ${ledgerNow.head ?? "none"})`);
-      if (c.attestations && (c.attestations.lines !== attNow.lines || c.attestations.head !== attNow.head)) bad.push(`the attestations are not the ones it binds (${c.attestations.lines} lines; here ${attNow.lines})`);
-      if (c.disputes && (c.disputes.lines !== dispNow.lines || c.disputes.head !== dispNow.head)) bad.push(`the disputes are not the ones it binds (${c.disputes.lines} lines; here ${dispNow.lines})`);
+      if (c.ledger) asBound("ledger", "the ledger", { lines: c.ledger.entries, head: c.ledger.head }, ledgerNow, x.at, bad, parts);
+      if (c.attestations) asBound("attestations", "the attestations", c.attestations, attNow, x.at, bad, parts);
+      if (c.disputes) asBound("disputes", "the disputes", c.disputes, dispNow, x.at, bad, parts);
+      if (c.sweeps) asBound("sweeps", "the store sweeps", c.sweeps, sweepNow, x.at, bad, parts);
       if (c.trace?.lines) {
         const at = traceHashes[c.trace.lines - 1];
         const broke = prevChainBreak(traceText ?? "", c.trace.lines);

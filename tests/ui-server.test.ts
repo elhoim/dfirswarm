@@ -3417,3 +3417,176 @@ test("the Leads tab: the register over the API, what waits on the operator in th
   assert.equal(l1.status, "open");
   assert.match(l1.notes[0].text, /Fetched it for you/);
 });
+
+test("the Questions tab: the register over the API, an act run as swarm.sh question and acknowledged after the chain write, and a directive on the Leads tab", async () => {
+  const registry = JSON.parse(await readFile(join(runsDir, "registry.json"), "utf8")) as { runs: Array<{ id: string; sandbox: string }> };
+  const S = registry.runs.find((r) => r.id === "s7a1c")!.sandbox;
+  assert.equal(classifyPath(runsDir, join(S, "questions", "questions.jsonl")).kind, "questions");
+  const before = await get<Record<string, any>>("/api/swarms/s7a1c/questions");
+  assert.equal(before.status, 200);
+  assert.equal(before.body.chain.ok, true);
+  assert.ok(Array.isArray(before.body.questions) && Array.isArray(before.body.seats));
+  assert.equal((await post("/api/swarms/s7a1c/questions", { action: "add", text: "Was the key reused?" })).status, 400, "a question needs why");
+  assert.equal((await post("/api/swarms/s7a1c/questions", { action: "drop", q: "Q-1" })).status, 400);
+  assert.equal((await post("/api/swarms/s7a1c/questions", { action: "scope", target: "Q-1; rm -rf", scope: "in_scope", why: "x" })).status, 400);
+  assert.equal((await post("/api/swarms/s7a1c/questions", { action: "add", text: "t", why: "w", as: "../../etc" })).status, 400, "as is an enrolled id");
+  const added = await post<{ id: string }>("/api/swarms/s7a1c/questions", { action: "add", text: "Was the key file reused on another host?", why: "the operator wants to know", materiality: "material", submission: "console-test-1" });
+  assert.equal(added.status, 202);
+  const job = await waitJob(added.body.id);
+  assert.equal(job.status, "ok", job.stderr);
+  assert.match(job.stdout, /Recorded Q-\d+ \(revision 1\), in_scope: by the operator's authority/);
+  const ack = JSON.parse(job.stdout.trim().split("\n").at(-1) ?? "{}") as { q?: string; seq?: number; hash?: string };
+  assert.ok(ack.q && ack.seq && ack.hash, "the acknowledgement names the chained event");
+  const after = await get<Record<string, any>>("/api/swarms/s7a1c/questions");
+  const q = after.body.questions.find((x: { id: string }) => x.id === ack.q);
+  assert.deepEqual([q.origin.kind, q.origin.role, q.origin.enrolled, q.origin.via, q.scope], ["analyst", "operator", false, "console", "in_scope"]);
+  const audit = (await readFile(join(runsDir, "operator-audit.jsonl"), "utf8")).trim().split("\n").map((l) => JSON.parse(l) as { command: string; via: string; detail?: { question?: { q?: string; hash?: string } } });
+  const outcome = audit.find((l) => l.command === "question_outcome" && l.detail?.question?.q === ack.q);
+  assert.equal(outcome?.detail?.question?.hash, ack.hash, "the operator's record names the event the act became");
+  assert.equal(outcome?.via, "console");
+  const directive = await post<{ id: string }>("/api/swarms/s7a1c/leads", { action: "direct", q: ack.q, title: "List the hosts the key file reached", why: "reuse", product: "a table of hosts and times", acceptance: "every host in the logs is on it" });
+  assert.equal(directive.status, 202);
+  const dj = await waitJob(directive.body.id);
+  assert.equal(dj.status, "ok", dj.stderr);
+  assert.match(dj.stdout, new RegExp(`Directive L-\\d+ opened under ${ack.q}, unheld`));
+  assert.equal((await post("/api/swarms/s7a1c/leads", { action: "direct", q: ack.q, title: "x", why: "y" })).status, 400, "a directive needs its product and acceptance");
+});
+
+test("the list says each run's stop policy, a pause in force, its outcome and how often it was resumed", async () => {
+  const { body } = await get<Array<Record<string, unknown>>>("/api/swarms");
+  for (const r of body) {
+    assert.ok(["cap-pause", "cap-stop", "operator"].includes(String(r.stop_policy)), `${String(r.id)}: ${String(r.stop_policy)}`);
+    assert.equal(typeof r.resumes, "number");
+    assert.ok(r.paused === null || typeof r.paused === "object");
+  }
+  const running = body.find((r) => r.id === "s7a1c");
+  assert.equal(running?.outcome, null, "a running run has no outcome yet");
+  assert.equal(running?.paused, null);
+});
+
+test("Extend, Unpause and Continue this run reach swarm.sh extend, unpause and resume with the operator's words, checked for shape only", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "swarm-resume-ui-"));
+  const fake = join(dir, "fake-swarm.sh");
+  await writeFile(fake, '#!/usr/bin/env bash\necho "ARGC=$#"\n', "utf8");
+  const runner = new ActionRunner({ root: ROOT, runsDir: dir, swarmSh: fake });
+  const guarded = createUiApp({ root: ROOT, runsDir, distDir: join(runsDir, "no-dist"), token: "t0k", runner });
+  const { port } = await guarded.listen(0, "127.0.0.1");
+  const at = `http://127.0.0.1:${port}`;
+  const send = (sub: string, payload: unknown, token = "t0k") => fetch(`${at}/api/swarms/s0d4e/${sub}`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${token}` }, body: JSON.stringify(payload) });
+  try {
+    assert.equal((await send("extend", { minutes: 5 }, "wrong")).status, 401, "a mutation takes the console's token");
+    const e = (await (await send("extend", { minutes: 30, tokens: 2000000 })).json()) as { id: string; kind: string; argv: string[] };
+    assert.equal(e.kind, "extend");
+    assert.deepEqual(e.argv, ["extend", "s0d4e", "--minutes", "30", "--tokens", "2000000"]);
+    await waitJobAt(at, e.id);
+    assert.equal((await send("extend", {})).status, 400, "an extension adds something");
+    assert.equal((await send("extend", { minutes: -3 })).status, 400);
+    assert.equal((await send("extend", { tokens: 1.5 })).status, 400);
+    // Unpause, beside a pause the console shows: swarm.sh unpause, whose own checks decide.
+    assert.equal((await send("unpause", {}, "wrong")).status, 401, "an unpause takes the console's token");
+    const u = (await (await send("unpause", {})).json()) as { id: string; kind: string; argv: string[] };
+    assert.equal(u.kind, "unpause");
+    assert.deepEqual(u.argv, ["unpause", "s0d4e"]);
+    await waitJobAt(at, u.id);
+    const long = `Was the host reached again after the first day, and from where? ${"and by whom ".repeat(200)}`.trim();
+    const r = (await (await send("resume", { questions: [long, "Which account did it use?"], why: "the client asked", minutes: 20 })).json()) as { id: string; kind: string; argv: string[] };
+    assert.equal(r.kind, "resume");
+    assert.deepEqual(r.argv, ["resume", "s0d4e", "--question", long, "--question", "Which account did it use?", "--why", "the client asked", "--minutes", "20"], "each question whole");
+    await waitJobAt(at, r.id);
+    const bare = (await (await send("resume", {})).json()) as { id: string; argv: string[] };
+    assert.deepEqual(bare.argv, ["resume", "s0d4e"], "a resume needs no question");
+    await waitJobAt(at, bare.id);
+    assert.equal((await send("resume", { questions: ["one\ntwo"] })).status, 400, "a question is one line");
+    assert.equal((await send("resume", { questions: ["x".repeat(4001)] })).status, 400, "a longer question is refused, never cut");
+    assert.equal((await send("resume", { questions: Array.from({ length: 21 }, (_x, i) => `Q ${i}?`) })).status, 400);
+    assert.equal((await send("resume", { as: "Not An Id" })).status, 400);
+  } finally {
+    await guarded.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a job's output is kept whole on disk: the job list carries its last part and says where the whole is, served whole with the secrets out", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "swarm-output-"));
+  const fake = join(dir, "fake-swarm.sh");
+  // 100,000 numbered lines on stdout, a value the operator gave on stderr.
+  await writeFile(fake, '#!/usr/bin/env bash\nseq 1 100000\necho "the value s3cr3t-value was refused" >&2\n', "utf8");
+  const runner = new ActionRunner({ root: ROOT, runsDir: dir, swarmSh: fake });
+  const guarded = createUiApp({ root: ROOT, runsDir, distDir: join(runsDir, "no-dist"), runner });
+  const { port } = await guarded.listen(0, "127.0.0.1");
+  const at = `http://127.0.0.1:${port}`;
+  try {
+    const ok = validateStart({ n: 2, cap_usd: 1, model: "x/y", env: ["EXTRA_TOKEN=s3cr3t-value"] });
+    assert.ok(ok.ok);
+    if (!ok.ok) return;
+    const job = runner.start(ok.params);
+    await waitJobAt(at, job.id);
+    const shown = runner.get(job.id)!;
+    const whole = Array.from({ length: 100000 }, (_x, i) => `${i + 1}\n`).join("");
+    assert.equal(shown.output?.stdout.bytes, Buffer.byteLength(whole));
+    assert.match(shown.stdout, /^\[\d+ earlier byte\(s\) of \d+ are not shown here; the whole stdout is kept in .*console-jobs\/start-[0-9a-f]+\.stdout\.log \(GET \/api\/jobs\/start-[0-9a-f]+\/output\?stream=stdout\)\]\n/);
+    assert.ok(shown.stdout.endsWith("99999\n100000\n"), "the last part is the end of it");
+    const res = await fetch(`${at}/api/jobs/${job.id}/output?stream=stdout`);
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get("content-type") ?? "", /^text\/plain/);
+    assert.equal(await res.text(), whole, "the whole output, as it came");
+    const err = await (await fetch(`${at}/api/jobs/${job.id}/output?stream=stderr`)).text();
+    assert.equal(err, "the value … was refused\n", "the operator's secret is out of the whole too");
+    assert.doesNotMatch(shown.stderr, /s3cr3t-value/);
+    assert.equal((await readFile(shown.output!.stdout.file, "utf8")).length, whole.length, "kept on disk whole");
+    assert.equal(execFileSync("stat", [process.platform === "darwin" ? "-f" : "-c", process.platform === "darwin" ? "%Lp" : "%a", shown.output!.stdout.file], { encoding: "utf8" }).trim(), "600");
+    assert.equal((await fetch(`${at}/api/jobs/nope/output`)).status, 404);
+  } finally {
+    await guarded.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("the jobs drawer shows every argument whole, quoted as a shell needs it", async () => {
+  const { jobCommandLine } = await import("../ui/src/lib/format.ts");
+  const goal = `Find how the intruder got in. ${"Read every log. ".repeat(40)}`.trim();
+  const line = jobCommandLine(["start", "--goal", goal, "--env", "KEY=…", "--label", "it's"]);
+  assert.ok(line.includes(`"${goal}"`), "a long argument is not cut");
+  assert.ok(!line.includes("…\""), "no ellipsis added");
+  assert.equal(jobCommandLine(["resume", "s1", "--question", 'Was "admin" used?']), 'swarm.sh resume s1 --question "Was \\"admin\\" used?"');
+  assert.equal(jobCommandLine(["stop", "s1", ""]), 'swarm.sh stop s1 ""');
+});
+
+test("the Network tab: the records over the API, what waits on the operator in the view, and the operator's act run as swarm.sh net, always with a reason", async () => {
+  const L = await import("../extensions/leads.ts");
+  const { resolveCasePolicy } = await import("../scripts/case-policy.ts");
+  const { requestAccess } = await import("../scripts/net-broker.ts");
+  const registry = JSON.parse(await readFile(join(runsDir, "registry.json"), "utf8")) as { runs: Array<{ id: string; sandbox: string }> };
+  const S = registry.runs.find((r) => r.id === "s7a1c")!.sandbox;
+  const a0 = { sandboxRoot: S, agentId: (JSON.parse(await readFile(join(S, "team.json"), "utf8")) as { agents: Array<{ id: string }> }).agents[0].id };
+  const r = resolveCasePolicy({ flags: { network: "dynamic" }, isolation: "microvm" });
+  assert.ok(r.ok);
+  await mkdir(join(S, "network"), { recursive: true });
+  await writeFile(join(S, "network", "policy.json"), JSON.stringify((r as { policy: unknown }).policy));
+  const lead = await L.openLead(a0, { title: "Where the short link points", why: "it names the drop site", take: true });
+  assert.equal(lead.ok, true);
+  const leadId = (lead as { lead: { id: string } }).lead.id;
+  const asked = await requestAccess(S, a0.agentId, { lead: leadId, adapter: "http_head", params: { url: "https://short.example.org/abc" }, purpose: "resolve the short link", evidence: [] }, { jobs: true });
+  assert.equal(asked.ok, false);
+  assert.equal(classifyPath(runsDir, join(S, "network", "grants.jsonl")).kind, "network");
+  const view = await get<Record<string, any>>("/api/swarms/s7a1c");
+  assert.equal(view.body.network.waiting, 1, "the header knows an item waits on the operator");
+  assert.equal(view.body.network.mode, "dynamic");
+  const net = await get<Record<string, any>>("/api/swarms/s7a1c/network");
+  assert.equal(net.status, 200);
+  assert.equal(net.body.items.length, 1);
+  assert.equal(net.body.requests[0].reasons.length > 0, true);
+  assert.ok(net.body.lines.some((l: string) => /Case policy: standard/.test(l)));
+  assert.equal((await post("/api/swarms/s7a1c/network", { action: "deny", target: "NI-1" })).status, 400, "an act needs its reason");
+  assert.equal((await post("/api/swarms/s7a1c/network", { action: "grant", target: "NI-1", why: "x" })).status, 400, "a grant names a request");
+  assert.equal((await post("/api/swarms/s7a1c/network", { action: "revoke", target: "N-1; rm -rf /", why: "x" })).status, 400);
+  assert.equal((await post("/api/swarms/s7a1c/network", { action: "open", why: "x" })).status, 400);
+  const deny = await post<{ id: string }>("/api/swarms/s7a1c/network", { action: "deny", target: "NI-1", why: "not this host" });
+  assert.equal(deny.status, 202);
+  const job = await waitJob(deny.body.id);
+  assert.equal(job.status, "ok", job.stderr);
+  assert.match(job.stdout, /OPERATOR declined NI-1/);
+  const after = await get<Record<string, any>>("/api/swarms/s7a1c/network");
+  assert.equal(after.body.items[0].closed.how, "denied");
+  assert.equal(after.body.items[0].closed.why, "not this host");
+});

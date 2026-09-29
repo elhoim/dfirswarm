@@ -24,8 +24,10 @@
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { connect, type Socket } from "node:net";
+import * as F from "./finish.ts";
 import * as L from "./leads.ts";
 import * as P from "./protocol.ts";
+import * as Q from "./questions.ts";
 import * as T from "./toolchain.ts";
 
 /** Where the hub listens, as the VM sees it; unset on the host. */
@@ -60,7 +62,7 @@ function refused(err: unknown): boolean {
 type Pending = { fn: string; socket: Socket; answered: () => void; resolve: (value: unknown) => void; reject: (err: Error) => void };
 
 /** Calls that change the board, sent once more with the same request id when a link drops. */
-const RETRIED = new Set(["postMessage", "systemPost", "recordEntry", "attestEntry", "disputeEntry", "threadOpen", "claimName", "markDone", "publishFile", "forgeTool", "recordFileVersion", "jobSubmit", "catalogRequest", "jobStatus", "leadOpen", "leadClaim", "leadRelease", "leadClose", "leadLink", "leadInterpret"]);
+const RETRIED = new Set(["postMessage", "systemPost", "recordEntry", "attestEntry", "disputeEntry", "threadOpen", "claimName", "markDone", "publishFile", "forgeTool", "recordFileVersion", "jobSubmit", "catalogRequest", "jobStatus", "leadOpen", "leadClaim", "leadRelease", "leadClose", "leadLink", "leadInterpret", "leadReopen", "routeReview", "leadHandoff", "leadConfirm", "offerAnswer", "finishTurnFor", "finishAct", "questionOpen", "questionAsk", "netRequest", "netFetch"]);
 
 /** Timings a test shortens; the defaults are the run's. */
 export type HubClientTimings = { partTimeoutMs?: number; writeStallMs?: number };
@@ -347,6 +349,8 @@ export const REMOTE_FUNCTIONS = [
   "correctionsAfter",
   "disputeEntry",
   "fileDiff",
+  "finishAct",
+  "finishTurnFor",
   "forgeTool",
   "forgedToolSeal",
   "guardWrite",
@@ -355,10 +359,13 @@ export const REMOTE_FUNCTIONS = [
   "jobSubmit",
   "leadClaim",
   "leadClose",
+  "leadConfirm",
+  "leadHandoff",
   "leadInterpret",
   "leadLink",
   "leadOpen",
   "leadRelease",
+  "leadReopen",
   "leadsDigest",
   "leadsView",
   "listClaims",
@@ -370,8 +377,15 @@ export const REMOTE_FUNCTIONS = [
   "markDone",
   "runFinishLine",
   "nameOf",
+  "netFetch",
+  "netRequest",
+  "netView",
+  "offerAnswer",
   "postMessage",
   "publishFile",
+  "questionAsk",
+  "questionOpen",
+  "questionsView",
   "readBudget",
   "readBudgetStatus",
   "readInbox",
@@ -381,6 +395,7 @@ export const REMOTE_FUNCTIONS = [
   "releaseAllOwned",
   "releaseFile",
   "restoreFileVersion",
+  "routeReview",
   "swarmDoneExists",
   "systemPost",
   "threadJoin",
@@ -395,13 +410,31 @@ export const applySessionUsage = remote("applySessionUsage", P.applySessionUsage
  * lock; in a VM the hub is its only writer, and who asks is the channel.
  */
 export const leadOpen = remote("leadOpen", L.openLead);
-export const leadClaim = remote("leadClaim", (ctx: P.SwarmContext, id: unknown) => L.claimLead(ctx, id));
+export const leadClaim = remote("leadClaim", (ctx: P.SwarmContext, id: unknown, input?: L.LeadClaimInput) => L.claimLead(ctx, id, input ?? {}));
 export const leadRelease = remote("leadRelease", L.releaseLead);
 export const leadClose = remote("leadClose", L.closeLead);
 export const leadLink = remote("leadLink", L.linkLead);
 export const leadsView = remote("leadsView", L.leadsView);
 export const leadsDigest = remote("leadsDigest", L.leadsDigest);
 export const leadInterpret = remote("leadInterpret", (ctx: P.SwarmContext, entry: number, items: L.InterpretInput[]) => L.recordInterpretations(ctx.sandboxRoot, ctx.agentId, entry, items));
+/** An agent reopens a closed lead (B4), and another seat reviews a limiting route (B3). */
+export const leadReopen = remote("leadReopen", L.agentReopenLead);
+export const routeReview = remote("routeReview", L.routeReview);
+/** A hand-off, a closure confirmed, and the answer to an offer of a lead or a question (A2, A3). */
+export const leadHandoff = remote("leadHandoff", L.handoffLead);
+export const leadConfirm = remote("leadConfirm", (ctx: P.SwarmContext, id: unknown, input: { expected_revision?: unknown; ref?: string; why?: string; batch?: string }) => (input?.batch ? L.confirmBatch(ctx, input.batch, input) : L.confirmLead(ctx, id, input ?? {})));
+export const offerAnswer = remote("offerAnswer", L.answerOffer);
+/** The finish (finish.ts): whose done it is, and the typed acts around the report. */
+export const finishTurnFor = remote("finishTurnFor", F.finishTurnFor);
+export const finishAct = remote("finishAct", F.finishAct);
+/**
+ * The question register (questions.ts): an agent opens a question, reads the
+ * register, and asks what is unclear. Who asks is the channel's seat; the
+ * rest of the register's acts are the operator's, on the host.
+ */
+export const questionOpen = remote("questionOpen", Q.questionOpen);
+export const questionAsk = remote("questionAsk", Q.questionAsk);
+export const questionsView = remote("questionsView", Q.questionsView);
 /** What each peer is doing and found (list_team), from the host's board, store and ledger. */
 export const teamView = remote("teamView", P.teamView);
 
@@ -429,6 +462,16 @@ export async function runFinishLine(sandbox: string): Promise<P.FinishLineRun | 
 type JobAnswer = { ok: boolean; reason?: string; job?: Record<string, unknown>; stdout?: { offset: number; bytes: number; total: number; text: string; next: number | null; path: string } };
 const noJobService = async (): Promise<JobAnswer> => ({ ok: false, reason: "this run has no job service (a host run): run the work in your own shell" });
 export const jobSubmit = remote("jobSubmit", noJobService as (sandboxRoot: string, spec: Record<string, unknown>) => Promise<JobAnswer>);
+/**
+ * The dynamic network (scripts/net-broker.ts, docs/adr/0012): decided and
+ * carried out on the host, by the hub and the fetch service. A host run has
+ * neither: the local answer says so.
+ */
+type NetAnswer = { ok: boolean; reason?: string } & Record<string, unknown>;
+const noNet = async (): Promise<NetAnswer> => ({ ok: false, reason: "this run has no dynamic network (a host run, or network closed): what the evidence does not hold, ask the operator for (lead_close needs_operator)" });
+export const netRequest = remote("netRequest", noNet as (sandboxRoot: string, input: Record<string, unknown>) => Promise<NetAnswer>);
+export const netFetch = remote("netFetch", noNet as (sandboxRoot: string, input: Record<string, unknown>) => Promise<NetAnswer>);
+export const netView = remote("netView", noNet as (sandboxRoot: string, input: Record<string, unknown>) => Promise<NetAnswer>);
 export const jobStatus = remote("jobStatus", noJobService as (sandboxRoot: string, o: Record<string, unknown>) => Promise<JobAnswer>);
 export const catalogRequest = remote("catalogRequest", noJobService as (sandboxRoot: string, o: Record<string, unknown>) => Promise<JobAnswer>);
 export const claimFile = remote("claimFile", P.claimFile);

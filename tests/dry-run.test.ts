@@ -257,13 +257,18 @@ test("an agent names itself, and its posts carry the name", async () => {
     assert.equal(clash.ok, false);
     if (!clash.ok) assert.equal(clash.taken_by, "agent00");
 
-    // Renaming is the agent's own business: work changes, the name follows.
-    const again = await claimName(root, "agent00", "memory");
+    // A seat's name is stable once given (A1): a later call updates what it
+    // is doing and keeps the name; the label peers see follows the lead it holds.
+    const again = await claimName(root, "agent00", "memory", "the memory image");
     assert.equal(again.ok, true);
-    if (again.ok) assert.equal(again.previous, "disk triage");
-    assert.equal(await nameOf(root, "agent00"), "memory");
-    const freed = await claimName(root, "agent01", "disk triage");
-    assert.equal(freed.ok, true, "a name its owner let go can be taken");
+    if (again.ok) assert.deepEqual([again.name, again.asked, again.previous], ["disk triage", "memory", "disk triage"]);
+    assert.equal(await nameOf(root, "agent00"), "disk triage");
+    const names = JSON.parse(await readFile(join(root, "names.json"), "utf8")) as { names: Array<{ id: string; doing?: string; at: string; first_at?: string }> };
+    const mine = names.names.find((n) => n.id === "agent00")!;
+    assert.equal(mine.doing, "the memory image");
+    assert.ok(mine.first_at && mine.first_at <= mine.at, "when it first named itself is kept");
+    const other = await claimName(root, "agent01", "memory");
+    assert.equal(other.ok, true, "a name asked for and kept from nobody can be taken");
     void a1;
   });
 });

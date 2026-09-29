@@ -251,6 +251,11 @@ The same gate runs, and then no credential enters a VM:
   operator's account at the provider, not an inference key. The guest never
   refreshes it and the refresh endpoint is never bound, so the token Pi mints
   at kickoff must last the wall clock and an hour more, or the kickoff stops.
+  The host renews it: at half its validity the idle watchdog mints the
+  seats' tokens again from Pi's store and msb rotates each seat VM's secret
+  in place (live, no restart; the guest keeps its placeholder), so a run
+  stopped only by the operator outlasts its first token
+  ([ADR 0015](adr/0015-one-seat-finishes-and-work-is-offered.md)).
 - An API key needs no flag, but its placeholder reaches every endpoint on the
   provider's host that the key may use, not only inference.
 - `--key-from-env` is refused, and so is an `--env` name that looks like a

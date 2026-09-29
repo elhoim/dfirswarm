@@ -11,7 +11,8 @@
  * cannot be adopted or qualified: the examiner cannot waive missing
  * evidence into a supported conclusion. It is withdrawn, rendered
  * inconclusive, or its support is repaired, and repairing it is further
- * examination (a new run: the evidence cutoff reopens), not a review act.
+ * examination (the run resumed, or a new run: the evidence cutoff reopens),
+ * not a review act.
  *
  * The same acts work on any ledger entry by seq and hash; the checks below
  * read whatever fields an entry has and name only what they find. Nothing

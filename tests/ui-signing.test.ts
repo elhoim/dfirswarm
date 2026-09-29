@@ -199,7 +199,7 @@ test("enrolment and a technical reviewer's signed record from the console", asyn
   const ok = await post(at, "/api/examiners/enroll", { kind: "ssh", role: "reviewer", name: "Bo Reviewer", organisation: "Lab Two", competence: "EnCE", passphrase: "reviewer pass 1", passphrase_again: "reviewer pass 1" });
   assert.equal(ok.status, 200, JSON.stringify(ok.body));
   assert.equal((ok.body.person as { role: string }).role, "reviewer");
-  assert.match(String(ok.body.register), /^bo-reviewer namespaces="dfirswarm-review" ssh-ed25519 /);
+  assert.match(String(ok.body.register), /^bo-reviewer namespaces="dfirswarm-review,dfirswarm-question" ssh-ed25519 /);
   const rec = await post(at, "/api/runs/s4v4/review/technical", { reviewer: "bo-reviewer", outcome: "agreed", checked: "re-ran fls", entries: [4, 10], secret: "reviewer pass 1", consent: true });
   assert.equal(rec.status, 200, JSON.stringify(rec.body));
   const state = (await (await fetch(`${at}/api/runs/s4v4/release`)).json()) as { technical: Array<{ status: string; words: string; reviewer: { name: string } }> };

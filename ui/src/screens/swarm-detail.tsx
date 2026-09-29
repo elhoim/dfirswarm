@@ -1,10 +1,10 @@
 import { hubStateCounts } from "@/lib/seat-state";
 import { useCallback, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { ArrowLeft, Archive, Skull, Square } from "lucide-react";
+import { ArrowLeft, Archive, FastForward, Play, Skull, Square } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
+import { Input, Textarea } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Chip, Meter, Vital, VitalsBand } from "@/components/console";
@@ -42,6 +42,9 @@ import { ReleasePanel } from "./detail/release-panel";
 import { ReviewerPanel } from "./detail/reviewer-panel";
 import { JobsPanel } from "./detail/jobs-panel";
 import { LeadsPanel } from "./detail/leads-panel";
+import { QuestionsPanel } from "./detail/questions-panel";
+import { NetworkPanel } from "./detail/network-panel";
+import { RequestsPanel } from "./detail/requests-panel";
 import { RecordActions } from "./detail/record-actions";
 import { isolationChip } from "@/components/swarm-bits";
 
@@ -53,7 +56,7 @@ import { isolationChip } from "@/components/swarm-bits";
  */
 const TAB_GROUPS = [
   { label: "The run", tabs: ["story", "threads", "traces", "agents"] },
-  { label: "Evidence", tabs: ["leads", "files", "artifacts", "jobs", "ledger"] },
+  { label: "Evidence", tabs: ["requests", "questions", "leads", "network", "files", "artifacts", "jobs", "ledger"] },
   { label: "The frame", tabs: ["goal", "packs", "tools", "claims", "budget"] },
   { label: "Output", tabs: ["report", "release", "review", "custody"] },
 ] as const;
@@ -67,6 +70,9 @@ const TAB_LABEL: Record<Tab, string> = {
   tools: "Tools",
   ledger: "Ledger",
   leads: "Leads",
+  questions: "Questions",
+  network: "Network",
+  requests: "Requests",
   claims: "Claims",
   budget: "Budget",
   files: "Files",
@@ -93,6 +99,15 @@ function ActionBar({ view }: { view: SwarmView }) {
   // swarm.sh stop's own custody options: skip the host's custody check, or bound it.
   const [noCustody, setNoCustody] = useState(false);
   const [custodyTimeout, setCustodyTimeout] = useState("");
+  // More room for a going or paused run (swarm.sh extend), and "Continue
+  // this run" for one that ended (swarm.sh resume).
+  const [extendOpen, setExtendOpen] = useState(false);
+  const [resumeOpen, setResumeOpen] = useState(false);
+  const [addMinutes, setAddMinutes] = useState("");
+  const [addTokens, setAddTokens] = useState("");
+  const [addUsd, setAddUsd] = useState("");
+  const [resumeQuestions, setResumeQuestions] = useState("");
+  const [resumeWhy, setResumeWhy] = useState("");
   const job = jobId ? live.jobs[jobId] ?? null : null;
   const id = view.summary.id;
   const state = view.summary.state;
@@ -119,6 +134,34 @@ function ActionBar({ view }: { view: SwarmView }) {
           ? "The hub is putting the VMs away; a stop now waits for it"
           : "swarm.sh stop";
 
+  const paused = view.summary.paused ?? null;
+  const canExtend = state === "running" && !reachedDone(view.summary.phase);
+  // A pause whose cause is not a cap is lifted here (swarm.sh unpause); a cap's is given room by Extend.
+  const canUnpause = canExtend && (paused?.reason === "provider_limit" || paused?.reason === "operator");
+  // A run that ended, by a stop or a finish, and was not purged: its chains go on.
+  const canResume = !canStop && state !== "purged" && state !== "resuming" && view.summary.phase !== "running";
+  const caps = () => ({
+    ...(addMinutes ? { minutes: Number(addMinutes) } : {}),
+    ...(addTokens ? { tokens: Number(addTokens) } : {}),
+    ...(addUsd ? { usd: Number(addUsd) } : {}),
+  });
+  const capFields = (
+    <div className="grid gap-3 sm:grid-cols-3">
+      <div className="space-y-1.5">
+        <Label htmlFor="add-minutes">Minutes to add</Label>
+        <Input id="add-minutes" inputMode="numeric" value={addMinutes} onChange={(e) => setAddMinutes(e.target.value.replace(/[^0-9]/g, ""))} className="tabular" />
+      </div>
+      <div className="space-y-1.5">
+        <Label htmlFor="add-tokens">Tokens to add</Label>
+        <Input id="add-tokens" inputMode="numeric" value={addTokens} onChange={(e) => setAddTokens(e.target.value.replace(/[^0-9]/g, ""))} className="tabular" />
+      </div>
+      <div className="space-y-1.5">
+        <Label htmlFor="add-usd">Dollars to add</Label>
+        <Input id="add-usd" inputMode="decimal" value={addUsd} onChange={(e) => setAddUsd(e.target.value.replace(/[^0-9.]/g, ""))} className="tabular" disabled={view.summary.metered === false} />
+      </div>
+    </div>
+  );
+
   async function run(fn: () => Promise<{ id: string }>) {
     setError(null);
     try {
@@ -131,7 +174,37 @@ function ActionBar({ view }: { view: SwarmView }) {
 
   return (
     <div className="flex flex-col items-end gap-2">
-      <div className="flex gap-2">
+      {paused ? (
+        <div className="flex items-start justify-end gap-2">
+        <InlineNote tone="warn">
+          {paused.reason === "provider_limit" ? (
+            <>
+              Paused since {paused.at}: the model provider refused every live seat{paused.until ? `, and said its limit lifts at ${paused.until}` : ", and named no time its limit lifts"}. It said: {paused.detail.replace(/\.?$/, ".")} Every seat is idle and no model call goes out; the harness tries again {paused.until ? "then" : "every half hour"}, and pauses the run again if every seat is refused again. A long wait holds every VM: stop the run to free the machine, and continue it after the limit lifts.
+            </>
+          ) : paused.reason === "operator" ? (
+            <>Paused since {paused.at} by the operator: {paused.detail.replace(/\.?$/, ".")} Every seat is idle and no model call goes out until it is unpaused.</>
+          ) : (
+            <>Paused since {paused.at} at its {paused.reason === "wall_clock" ? "wall clock" : "cap"}: {paused.detail.replace(/\.?$/, ".")} Every seat is idle and no model call goes out. Extend it to go on, or stop it: the run never goes on by itself.</>
+          )}
+        </InlineNote>
+        {canUnpause ? (
+          <Button variant="secondary" size="sm" className="h-8 shrink-0 border-band-line bg-transparent text-band-ink hover:bg-band-2" onClick={() => void run(() => api.unpause(id))} title="swarm.sh unpause: lift the pause and wake every seat where it was; on the operator's record">
+            <Play /> Unpause
+          </Button>
+        ) : null}
+        </div>
+      ) : null}
+      <div className="flex flex-wrap justify-end gap-2">
+        {canExtend ? (
+          <Button variant="secondary" size="sm" className="h-9 border-band-line bg-transparent text-band-ink hover:bg-band-2" onClick={() => setExtendOpen(true)} title="swarm.sh extend: more minutes, tokens or dollars">
+            <FastForward /> Extend
+          </Button>
+        ) : null}
+        {canResume ? (
+          <Button variant="secondary" size="sm" className="h-9 border-band-line bg-transparent text-band-ink hover:bg-band-2" onClick={() => setResumeOpen(true)} title="swarm.sh resume: the same run goes on, on the same chains">
+            <Play /> Continue this run
+          </Button>
+        ) : null}
         {view.summary.phase === "running" && !reachedDone(view.summary.phase) ? (
           <Button variant="secondary" size="sm" className="h-9 border-band-line bg-transparent text-band-ink hover:bg-band-2" onClick={() => setReapOpen(true)}>
             <Skull /> Reap stalled
@@ -252,6 +325,67 @@ function ActionBar({ view }: { view: SwarmView }) {
 
       <RecordActions view={view} open={recordOpen} onOpenChange={setRecordOpen} onJob={setJobId} />
 
+      <Dialog open={extendOpen} onOpenChange={setExtendOpen}>
+        <DialogContent>
+          <DialogTitle>Extend {view.summary.label}</DialogTitle>
+          <DialogDescription>
+            Runs <code>scripts/swarm.sh extend {id}</code>: adds to the run's caps. A paused run whose caps then leave room goes on, and every seat is woken where it was; one that would still be over a cap is refused, with nothing changed. On the board and the operator's record.
+          </DialogDescription>
+          <div className="mt-4">{capFields}</div>
+          <div className="mt-4 flex justify-end gap-2">
+            <Button variant="secondary" onClick={() => setExtendOpen(false)}>
+              Cancel
+            </Button>
+            <Button
+              disabled={!Object.keys(caps()).length}
+              onClick={() => {
+                setExtendOpen(false);
+                void run(() => api.extend(id, caps()));
+              }}
+            >
+              <FastForward /> Extend
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={resumeOpen} onOpenChange={setResumeOpen}>
+        <DialogContent className="max-w-2xl">
+          <DialogTitle>Continue {view.summary.label}</DialogTitle>
+          <DialogDescription>
+            Runs <code>scripts/swarm.sh resume {id}</code>: the same run goes on in the same sandbox, on the same ledger, registers and board. What marked its end is kept under <code>done/history/</code>; each seat starts from its last hand-off. The next stop seals the continuation as a new draft release; every earlier seal, and a signed release, stays valid for what it bound. A run that would still be over a cap is refused: add minutes or tokens here.
+          </DialogDescription>
+          <div className="mt-4 grid gap-3">
+            <div className="space-y-1.5">
+              <Label htmlFor="resume-questions">Questions for the continuation (one a line; each is asked as an analyst's question)</Label>
+              <Textarea id="resume-questions" value={resumeQuestions} onChange={(e) => setResumeQuestions(e.target.value)} placeholder="Was the host reached again after the first day?" />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="resume-why">Why (optional)</Label>
+              <Input id="resume-why" value={resumeWhy} onChange={(e) => setResumeWhy(e.target.value)} placeholder="asked when the run was resumed" />
+            </div>
+            {capFields}
+          </div>
+          <div className="mt-4 flex justify-end gap-2">
+            <Button variant="secondary" onClick={() => setResumeOpen(false)}>
+              Cancel
+            </Button>
+            <Button
+              onClick={() => {
+                setResumeOpen(false);
+                const questions = resumeQuestions
+                  .split("\n")
+                  .map((l) => l.trim())
+                  .filter(Boolean);
+                void run(() => api.resume(id, { questions, ...(resumeWhy.trim() ? { why: resumeWhy.trim() } : {}), ...caps() }));
+              }}
+            >
+              <Play /> Continue this run
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
       <Dialog open={reapOpen} onOpenChange={setReapOpen}>
         <DialogContent>
           <DialogTitle>Reap stalled agents in {view.summary.label}</DialogTitle>
@@ -322,7 +456,13 @@ export function SwarmDetailScreen() {
   const storeVersion = useSwarmVersion(id, ["store"]);
   // The register reads its own files, the ledger (a need on an entry, a
   // closure resting on one) and the store (a lead's jobs).
-  const leadsVersion = useSwarmVersion(id, ["leads", "ledger", "store"]);
+  const leadsVersion = useSwarmVersion(id, ["leads", "ledger", "store", "questions"]);
+  // The question register: its own chain, the ledger (answers) and the leads (the work on each).
+  const questionsVersion = useSwarmVersion(id, ["questions", "leads", "ledger"]);
+  // The network's records, and the ledger its captures are recorded on.
+  const networkVersion = useSwarmVersion(id, ["network", "ledger", "store"]);
+  // The operator requests: their chain (under leads' kind), the registers they are derived from, and the store (evidence added).
+  const requestsVersion = useSwarmVersion(id, ["leads", "questions", "network", "store"]);
   const checksVersion = useSwarmVersion(id, CHECKS_CHANGE_KINDS);
   const loader = useCallback(() => api.swarm(id), [id]);
   const view = useResource(loader, version, [id]);
@@ -465,13 +605,50 @@ export function SwarmDetailScreen() {
                   <Chip tone="saffron">{d.layout.split_failures} pane split{d.layout.split_failures === 1 ? "" : "s"} fell back to a new tab</Chip>
                 </div>
               ) : null}
-              {/* What the swarm asked of the operator, above everything else the band says: it waits on a person. */}
-              {d.leads && d.leads.waiting_on_operator > 0 ? (
+              {/* What the run asked of the operator, above everything else the band says: it waits on a person. */}
+              {d.requests && d.requests.open > 0 ? (
+                <div className="flex flex-wrap items-center gap-2">
+                  <button type="button" onClick={() => setTab("requests")} title={`Open operator requests: ${Object.entries(d.requests.by_kind).map(([k, n]) => `${n} ${k}`).join(", ")}`}>
+                    <Chip tone="brick" className="bg-brick text-white">
+                      {d.requests.open} request{d.requests.open === 1 ? "" : "s"} waiting on you
+                      {d.requests.acquisitions_open ? ` (${d.requests.acquisitions_open} acquisition${d.requests.acquisitions_open === 1 ? "" : "s"})` : ""}
+                    </Chip>
+                  </button>
+                </div>
+              ) : null}
+              {!d.requests && d.leads && d.leads.waiting_on_operator > 0 ? (
                 <div className="flex flex-wrap items-center gap-2">
                   <button type="button" onClick={() => setTab("leads")} title="Leads a swarm agent closed needs_operator: something only you can give">
                     <Chip tone="brick" className="bg-brick text-white">
                       {d.leads.waiting_on_operator} request{d.leads.waiting_on_operator === 1 ? "" : "s"} waiting on you
                     </Chip>
+                  </button>
+                </div>
+              ) : null}
+              {/* What the question register waits on the operator for: its triage and the agents' clarifications. */}
+              {d.questions && d.questions.triage + d.questions.proposed + d.questions.clarifications > 0 ? (
+                <div className="flex flex-wrap items-center gap-2">
+                  <button type="button" onClick={() => setTab("questions")} title="Questions proposed or leads held for your triage, and clarifications an agent asked of the asker">
+                    <Chip tone="saffron">
+                      {d.questions.proposed + d.questions.triage} for your triage
+                      {d.questions.clarifications ? `, ${d.questions.clarifications} clarification${d.questions.clarifications === 1 ? "" : "s"} waiting` : ""}
+                    </Chip>
+                  </button>
+                </div>
+              ) : null}
+              {d.network && d.network.waiting > 0 ? (
+                <div className="flex flex-wrap items-center gap-2">
+                  <button type="button" onClick={() => setTab("network")} title="Network requests the case policy refused and the operator may grant: one item per host and lead">
+                    <Chip tone="brick" className="bg-brick text-white">
+                      {d.network.waiting} network item{d.network.waiting === 1 ? "" : "s"} waiting on you
+                    </Chip>
+                  </button>
+                </div>
+              ) : null}
+              {d.network && d.network.contamination > 0 ? (
+                <div className="flex flex-wrap items-center gap-2">
+                  <button type="button" onClick={() => setTab("network")} title="A response exposed material the case policy prohibits">
+                    <Chip tone="brick">contamination recorded</Chip>
                   </button>
                 </div>
               ) : null}
@@ -589,6 +766,9 @@ export function SwarmDetailScreen() {
                       {t === "tools" && d.tools.length ? d.tools.length : ""}
                       {t === "ledger" && d.ledger?.entries.length ? d.ledger.entries.length : ""}
                       {t === "leads" && d.leads ? d.leads.open + d.leads.active + d.leads.blocked : ""}
+                      {t === "questions" && d.questions ? d.questions.unanswered : ""}
+                      {t === "network" && d.network ? d.network.requests : ""}
+                      {t === "requests" && d.requests ? d.requests.open : ""}
                     </span>
                   </button>
                 ))}
@@ -657,6 +837,9 @@ export function SwarmDetailScreen() {
           {tab === "jobs" ? <JobsPanel view={d} selected={sub ? decodeURIComponent(sub) : null} onSelect={(j) => setSub("jobs", j)} version={storeVersion} /> : null}
           {tab === "ledger" ? <LedgerPanel view={d} /> : null}
           {tab === "leads" ? <LeadsPanel view={d} version={leadsVersion} /> : null}
+          {tab === "questions" ? <QuestionsPanel view={d} version={questionsVersion} /> : null}
+          {tab === "network" ? <NetworkPanel view={d} version={networkVersion} /> : null}
+          {tab === "requests" ? <RequestsPanel view={d} version={requestsVersion} /> : null}
           {tab === "report" ? <ReportPanel view={d} /> : null}
           {tab === "release" ? <ReleasePanel view={d} /> : null}
           {tab === "review" ? <ReviewerPanel view={d} /> : null}

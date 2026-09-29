@@ -1,6 +1,25 @@
 {
   "name": "regkv",
   "description": "Read a Windows registry hive with regipy and dump a key's values plus subkeys with their last-modified (FILETIME->ISO) timestamps; optional recursive listing up to a depth. Returns JSON.",
+  "use": {
+    "extensions": [
+      ".hve"
+    ],
+    "magic": [
+      {
+        "offset": 0,
+        "hex": "72656766"
+      }
+    ],
+    "names": [
+      "NTUSER.DAT",
+      "UsrClass.dat",
+      "SAM",
+      "SYSTEM",
+      "SOFTWARE",
+      "SECURITY"
+    ]
+  },
   "params": {
     "hive": {
       "type": "string",

@@ -128,12 +128,57 @@ keep_gateway() {
     '{ts: $ts, agent: "system", tool: "model_gateway_restarted", args: {by: "hub-supervise", restart: $n, port: $port}, result: {ok: $ok}}')"
 }
 
+# The fetch service (--network dynamic or open), when the kickoff started
+# one: brought back on the port the hub and the job workers were given, with
+# the same config (the same secret, so every principal's token still holds).
+netfetch_alive() {
+  local pid cmd
+  pid="$(cat "$HUB_DIR/net-fetch.pid" 2>/dev/null || true)"
+  [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null || return 1
+  cmd="$(ps -ww -o command= -p "$pid" 2>/dev/null)" || return 1
+  [[ "$cmd" == *net-fetch.ts* && "$cmd" == *"$HUB_DIR"* ]]
+}
+netfetch_restarts=0
+netfetch_since=$SECONDS
+NETFETCH_GAVE_UP=0
+NETFETCH_SCRIPT="$ROOT/scripts/net-fetch.ts"
+[[ -f "$HUB_DIR/host/scripts/net-fetch.ts" ]] && NETFETCH_SCRIPT="$HUB_DIR/host/scripts/net-fetch.ts"
+
+keep_netfetch() {
+  [[ "$NETFETCH_GAVE_UP" -eq 0 && -f "$HUB_DIR/net-fetch.json" && -s "$HUB_DIR/net-fetch.port" ]] || return 0
+  netfetch_alive && return 0
+  over && return 0
+  (( SECONDS - netfetch_since >= STABLE_SEC )) && netfetch_restarts=0
+  netfetch_restarts=$((netfetch_restarts + 1))
+  if (( netfetch_restarts > MAX_RESTARTS )); then
+    echo "hub-supervise: the fetch service died ${MAX_RESTARTS} times in a row; not restarting it again" >> "$SANDBOX/traces/net-fetch.log"
+    NETFETCH_GAVE_UP=1
+    return 0
+  fi
+  local port pid ok=false i
+  port="$(cat "$HUB_DIR/net-fetch.port")"
+  rm -f "$HUB_DIR/net-fetch.ready"
+  SWARM_TRACE_TOKEN="$SYSTEM_TOKEN" node --experimental-strip-types --no-warnings "$NETFETCH_SCRIPT" --config "$HUB_DIR/net-fetch.json" \
+    --port "$port" --ready "$HUB_DIR/net-fetch.ready" --quiet >>"$SANDBOX/traces/net-fetch.log" 2>&1 </dev/null &
+  pid=$!
+  echo "$pid" > "$HUB_DIR/net-fetch.pid"
+  netfetch_since=$SECONDS
+  for ((i = 0; i < 100; i++)); do
+    [[ -s "$HUB_DIR/net-fetch.ready" ]] && kill -0 "$pid" 2>/dev/null && { ok=true; break; }
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+  done
+  emit "$(jq -nc --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson ok "$ok" --argjson n "$netfetch_restarts" --argjson port "$port" \
+    '{ts: $ts, agent: "system", tool: "net_fetch_restarted", args: {by: "hub-supervise", restart: $n, port: $port}, result: {ok: $ok}}')"
+}
+
 restarts=0
 up_since=$SECONDS
 while :; do
   while kill -0 "$PID" 2>/dev/null; do
     keep_collector
     keep_gateway
+    keep_netfetch
     sleep 2
   done
   over && exit 0

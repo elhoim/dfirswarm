@@ -39,9 +39,26 @@ started=$SECONDS
 bash "$ROOT/scripts/notify.sh" "$SB" evidence_changed '{"changed":["inputs/a"]}' || fail "notify.sh failed its caller"
 (( SECONDS - started < 3 )) || fail "notify.sh blocked its caller"
 wait_for "$TMP/got.json" 10 || fail "the command was not run"
-jq -e '.event == "evidence_changed" and .run == "snt1" and .detail.changed == ["inputs/a"] and (.at | test("Z$"))' "$TMP/got.json" >/dev/null \
-  || fail "the line is not {event, run, at, detail}: $(cat "$TMP/got.json")"
-pass "the operator's command gets {event, run, at, detail} on stdin, detached"
+jq -e '.event == "evidence_changed" and .run == "snt1" and .detail.changed_count == 1 and (.detail | has("changed") | not) and (.at | test("Z$")) and (.event_id | test("^n-"))' "$TMP/got.json" >/dev/null \
+  || fail "the line is not {event, run, at, event_id, detail} with identifiers only: $(cat "$TMP/got.json")"
+grep -q 'inputs/a' "$TMP/got.json" && fail "the envelope carried an evidence path: $(cat "$TMP/got.json")"
+eid="$(jq -r '.event_id' "$TMP/got.json")"
+jq -e --arg id "$eid" 'select(.id == $id) | .detail.changed == ["inputs/a"]' "$SB/traces/notify-events.jsonl" >/dev/null || fail "the details are not kept in the run under the event id"
+pass "the operator's command gets an identifier-only envelope on stdin, detached; the details stay in the run under its event id"
+
+echo "# every event is identifiers only: a failed finish's output, an evidence summary, never leave"
+: > "$TMP/got.json"
+secret_out='Traceback: /cases/acme/Jane Doe passport.pdf could not be read'
+bash "$ROOT/scripts/notify.sh" "$SB" finish_failed "$(jq -nc --arg e "$secret_out" '{all_out: true, error: $e}')" || fail "notify.sh failed its caller"
+wait_for "$TMP/got.json" 10 || fail "the command was not run"
+jq -e '.event == "finish_failed" and .detail.all_out == true and (.detail | has("error") | not)' "$TMP/got.json" >/dev/null || fail "finish_failed's envelope: $(cat "$TMP/got.json")"
+grep -q 'Jane Doe\|passport\|Traceback' "$TMP/got.json" && fail "a failed finish's output left the host: $(cat "$TMP/got.json")"
+: > "$TMP/got.json"
+bash "$ROOT/scripts/notify.sh" "$SB" evidence_changed '{"changed":["inputs/Jane Doe/diary.txt"],"missing":[],"added":["inputs/x"],"summary":"EVIDENCE CHANGED: inputs/Jane Doe/diary.txt"}'
+wait_for "$TMP/got.json" 10 || fail "the command was not run"
+grep -q 'Jane Doe\|diary\|EVIDENCE CHANGED' "$TMP/got.json" && fail "an evidence change's names left the host: $(cat "$TMP/got.json")"
+jq -e '.detail.changed_count == 1 and .detail.added_count == 1 and .detail.missing_count == 0' "$TMP/got.json" >/dev/null || fail "the counts are not in the envelope: $(cat "$TMP/got.json")"
+pass "a failed finish's output and an evidence change's names stay in the run; the envelope has identifiers and counts"
 
 echo "# a command that fails or hangs is written down, bounded, and harms nothing"
 printf 'echo broke >&2; exit 7\n' > "$RUNS/notify/snt1.cmd"

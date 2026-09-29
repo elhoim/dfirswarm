@@ -57,13 +57,20 @@
  * it rests on, why none of it counts and what fixes it); 2 on a usage error.
  */
 import { readFile } from "node:fs/promises";
+import { externalLineage } from "./net-broker.ts";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  acceptanceExcuses,
   answerSection,
-  attestationAct,
+  answerReviews,
   briefQuestions,
+  heldAsBestCandidate,
   ledgerGate,
+  negativeReview,
+  partialOutputCites,
+  coverageProblems,
+  forbiddenMaterialClasses,
   readAttestations,
   readDisputes,
   readLedger,
@@ -78,13 +85,16 @@ import {
   type LedgerDefect,
   type LedgerEntry,
 } from "../extensions/protocol.ts";
+import { answerResult, resultWords, NEGATIVE_RESULTS } from "../extensions/negative-bar.ts";
 import { committedLogHashes, resolveRef } from "./evidence-store.ts";
+import { producerIndex } from "./output-hygiene.ts";
+import { LEDGER_SWEEPS, readSweeps, reconcileSweeps, verifySweepChain } from "../extensions/store-sweep.ts";
 
 type Entry = { seq: number; kind: string; refs?: string[]; supersedes?: number; answers?: string[]; completion?: string; reason?: string; status?: string };
 
-/** A section id as the goal numbers it: "3", "Q3" and "q3" are section 3. */
+/** A section id as the goal numbers it: "3", "Q3", "q3" and the question register's "Q-3" are section 3. */
 export function sectionId(id: string): string {
-  return id.trim().replace(/^q(?=\d)/i, "");
+  return id.trim().replace(/^q-?(?=\d)/i, "");
 }
 
 /** The seqs a text cites: #12, E-12, and every seq of a range #12–#15 (at most 50 a range). */
@@ -244,17 +254,26 @@ export { briefQuestions };
 export type LedgerOutcome = "answered" | "limited" | "inconclusive" | "unanswered";
 
 /** Each job's status from its job.json, read once. */
-async function jobStatuses(S: string, entries: LedgerEntry[]): Promise<Map<number, string[]>> {
+/** Each job a ref of the ledger names, with its status as its record says (null when it has none). */
+async function jobStatusMap(S: string, entries: LedgerEntry[]): Promise<Map<string, string | null>> {
   const status = new Map<string, string | null>();
+  for (const e of entries) {
+    for (const ref of e.refs ?? []) {
+      const m = /^job:([a-z0-9-]{1,64})(?:\/|$)/.exec(ref);
+      if (!m || status.has(m[1])) continue;
+      const job = await readFile(join(S, "store", "jobs", m[1], "job.json"), "utf8").then((t) => JSON.parse(t) as { status?: string }).catch(() => null);
+      status.set(m[1], job?.status ?? null);
+    }
+  }
+  return status;
+}
+
+function jobStatuses(status: Map<string, string | null>, entries: LedgerEntry[]): Map<number, string[]> {
   const out = new Map<number, string[]>();
   for (const e of entries) {
     for (const ref of e.refs ?? []) {
       const m = /^job:([a-z0-9-]{1,64})(?:\/|$)/.exec(ref);
       if (!m) continue;
-      if (!status.has(m[1])) {
-        const job = await readFile(join(S, "store", "jobs", m[1], "job.json"), "utf8").then((t) => JSON.parse(t) as { status?: string }).catch(() => null);
-        status.set(m[1], job?.status ?? null);
-      }
       const st = status.get(m[1]);
       if (st && st !== "ok" && !(e.qualifies ?? []).some((q) => q.ref === ref)) out.set(e.seq, [...(out.get(e.seq) ?? []), `${ref} (${st})`]);
     }
@@ -262,39 +281,139 @@ async function jobStatuses(S: string, entries: LedgerEntry[]): Promise<Map<numbe
   return out;
 }
 
+/** The entries the lead register recorded under each question's leads (leads.ts questionLeadEntries), or null when its chain is broken or it cannot be read. */
+async function leadEntries(S: string): Promise<Map<string, Map<number, string[]>> | null> {
+  try {
+    const L = await import("../extensions/leads.ts");
+    const { events, text } = await L.readLeadEvents(S);
+    const chain = L.verifyLeadChain(text);
+    return chain.ok ? L.questionLeadEntries(L.foldLeads(events, chain)) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * What the negative bar needs of each question section, read from the
+ * registers: the goal's questions are material, a register question says;
+ * a question asks whether something exists when the goal's --existence
+ * names it or the register's expects says so.
+ */
+export async function sectionBars(S: string, existence: readonly string[] = []): Promise<(id: string) => { material: boolean; existence: boolean; completeness: boolean }> {
+  const Q = await import("../extensions/questions.ts").catch(() => null);
+  const snap = Q ? await Q.questionsSnapshot(S).catch(() => null) : null;
+  const goalIds = new Set((snap?.goal.questions ?? []).map((x) => sectionKey(x)));
+  const goalExistence = snap?.goal.existence ?? [];
+  return (id: string) => {
+    const key = sectionKey(id);
+    const q = snap?.bySection.get(key);
+    return {
+      material: goalIds.has(key) || !q ? true : q.materiality === "material",
+      existence: asksExistence(existence, key) || asksExistence(goalExistence, key) || q?.expects === "existence",
+      completeness: q?.completeness === true,
+    };
+  };
+}
+
 /**
  * Ledger mode: each wanted section's answer, and the ledger gate over them.
  * `wanted` takes goal question ids ("3", "Q3", "question:3") and summary and
  * narrative.
+ *
+ * An answer that states its result (the negative bar, extensions/negative-
+ * bar.ts) is held to it: established and premise_not_supported answer the
+ * question when they rest on what stands; partial and out_of_scope limit
+ * the run; not_determinable is inconclusive; bounded_negative answers a
+ * question that asks whether something exists when its coverage record is
+ * complete and another seat reviewed it, and limits the run otherwise. A
+ * material negative with no coverage record, or nobody's review, and an
+ * answer worded "it did not happen" without the bar for it, are defects no
+ * limitation excuses. An answer recorded before results reads as it always
+ * did (a limitation limits, a search answers only an existence question).
  */
-export async function checkLedgerAnswers(sandbox: string, wanted: string[], existence: readonly string[] = []): Promise<{ ok: boolean; lines: string[]; outcomes: Record<string, LedgerOutcome>; defects: LedgerDefect[] }> {
+/** An answer that rests on external material (docs/adr/0012, 0014): the entry, what it rests on, and the source classes. */
+export type ExternalFlag = { seq: number; via: string[]; classes: string[] };
+
+/**
+ * A question's disposition under the bar (docs/adr/0013): what a run may end
+ * on, under every stop policy. Established (a finding settles it); partial
+ * (on a finding); a bounded negative or not determinable, each resting on a
+ * standing coverage record another seat reviewed; a premise shown not to
+ * hold (on a finding); out of scope. A best candidate (an answer that
+ * claims established, every review of which holds it a best candidate only)
+ * is none (B2), and so is anything a defect holds. A partial answer is a
+ * disposition whatever its reviews' strength: its review attests the parts
+ * it claims, and "best candidate" concerns only an established claim.
+ */
+export const DISPOSITIONS = ["established", "partial", "bounded_negative", "not_determinable", "premise_not_supported", "out_of_scope"] as const;
+export type Disposition = (typeof DISPOSITIONS)[number];
+
+export async function checkLedgerAnswers(sandbox: string, wanted: string[], existence: readonly string[] = []): Promise<{ ok: boolean; lines: string[]; outcomes: Record<string, LedgerOutcome>; results: Record<string, string>; defects: LedgerDefect[]; withdrawn: Record<string, string>; external: Record<string, ExternalFlag>; best_candidate: string[]; dispositions: Record<string, Disposition>; warnings: string[] }> {
   const S = resolve(sandbox);
   const outcomes: Record<string, LedgerOutcome> = {};
+  const results: Record<string, string> = {};
+  // Each section whose answer is a disposition under the bar, before the defects are counted (dropped below for any section a defect holds).
+  const dispositions: Record<string, Disposition> = {};
+  // The sections whose answer claims established and every review holds a best candidate only (B2): limited, never answered.
+  const bestCandidate: string[] = [];
+  // A goal question the question register holds as withdrawn is no longer
+  // one the run must answer: the goal keeps it, the register says who took
+  // it off and why, and this check names it instead of requiring it.
+  const withdrawn: Record<string, string> = {};
   const text = await readFile(join(S, "ledger", "entries.jsonl"), "utf8").catch(() => "");
   const chain = verifyLedgerChain(text);
-  if (!chain.ok) return { ok: false, lines: [`the ledger's chain is broken at line ${chain.broken_at} (${chain.reason}): no answer can rest on it`], outcomes, defects: [] };
+  if (!chain.ok) return { ok: false, lines: [`the ledger's chain is broken at line ${chain.broken_at} (${chain.reason}): no answer can rest on it`], outcomes, results, defects: [], withdrawn, external: {}, best_candidate: bestCandidate, dispositions, warnings: [] };
   // The acts are chains of their own: a broken one cannot say who checked what.
-  for (const [rel, verify] of [[LEDGER_ATTESTATIONS, verifyAttestationChain], [LEDGER_DISPUTES, verifyDisputeChain]] as const) {
+  for (const [rel, verify] of [[LEDGER_ATTESTATIONS, verifyAttestationChain], [LEDGER_DISPUTES, verifyDisputeChain], [LEDGER_SWEEPS, verifySweepChain]] as const) {
     const t = await readFile(join(S, rel), "utf8").catch(() => "");
     const v = verify(t);
-    if (!v.ok) return { ok: false, lines: [`${rel}'s chain is broken at line ${v.broken_at} (${v.reason}): the acts on the answers cannot be read`], outcomes, defects: [] };
+    if (!v.ok) return { ok: false, lines: [`${rel}'s chain is broken at line ${v.broken_at} (${v.reason}): ${rel === LEDGER_SWEEPS ? "what the store sweeps found" : "the acts on the answers"} cannot be read`], outcomes, results, defects: [], withdrawn, external: {}, best_candidate: bestCandidate, dispositions, warnings: [] };
   }
   const entries = await readLedger(S);
   const attestations = await readAttestations(S);
   const disputes = await readDisputes(S);
+  const sweeps = await readSweeps(S);
   const sections: string[] = [];
   for (const w of wanted) {
     const sec = answerSection(w);
-    if (!sec.ok) return { ok: false, lines: [`--sections: ${sec.reason}`], outcomes, defects: [] };
+    if (!sec.ok) return { ok: false, lines: [`--sections: ${sec.reason}`], outcomes, results, defects: [], withdrawn, external: {}, best_candidate: bestCandidate, dispositions, warnings: [] };
     if (!sections.includes(sec.section)) sections.push(sec.section);
   }
-  const gate = ledgerGate({ entries, attestations, disputes, sections, failed: await jobStatuses(S, entries) });
+  const lines: string[] = [];
+  const Q = await import("../extensions/questions.ts").catch(() => null);
+  const register = Q ? await Q.questionsSnapshot(S).catch(() => null) : null;
+  for (const section of [...sections]) {
+    if (!section.startsWith("question:")) continue;
+    const q = register?.bySection.get(sectionAnswersId(section));
+    if (!q?.withdrawn) continue;
+    withdrawn[section] = `${q.id} was withdrawn by ${Q!.originWords(q.withdrawn.origin)} at ${q.withdrawn.at}: ${q.withdrawn.why}`;
+    sections.splice(sections.indexOf(section), 1);
+    lines.push(`${section}: not required: ${withdrawn[section]}`);
+  }
+  const bar = await sectionBars(S, existence);
+  const statuses = await jobStatusMap(S, entries);
+  // The kept output of a cancelled or stopped job, cited with no word on how
+  // it is treated (docs/adr/0016), by whatever ref names those bytes.
+  const { producerOf } = await producerIndex(S);
+  // Under the case policy's more_evidence: no, the no_acquisition_ask warning names the policy, never an ask.
+  const moreEvidence = await import("../extensions/requests.ts").then((R) => R.casePolicyMoreEvidence(S)).catch(() => "ask" as const);
+  // What the lead register recorded under each question's leads: a finding two seats hold there that the answer leaves out is a warning. A register whose chain is broken says nothing here (the finish gate names it).
+  const underLeads = await leadEntries(S);
+  const gate = ledgerGate({ entries, attestations, disputes, sections, failed: jobStatuses(statuses, entries), bar, partial: partialOutputCites(entries, producerOf), sweeps, moreEvidence, ...(underLeads ? { underLeads } : {}) });
   const bySeq = new Map(entries.map((e) => [e.seq, e]));
   const replaced = supersededBy(entries);
   const limits = entries.filter((e) => e.kind === "limitation" && !replaced.has(e.seq));
   const logs = await committedLogHashes(S);
-  const defects = [...gate.defects];
-  const lines: string[] = [];
+  // What the operator's standing acceptance of a question excuses on it
+  // (acceptanceExcuses): a partial store sweep, and evidence added before
+  // the acceptance. Every other defect of the negative bar still holds.
+  const acceptedAt = new Map<string, number | null>();
+  if (register && Q) {
+    const L = await import("../extensions/leads.ts");
+    const view = L.ledgerView(entries, disputes);
+    for (const q of register.state.questions.values()) if (q.accepted && Q.acceptanceStands(q, view)) acceptedAt.set(`question:${q.section}`, q.accepted.ledger_seq ?? null);
+  }
+  const defects = gate.defects.filter((d) => !(d.section && acceptedAt.has(d.section) && (d.code === "sweep_partial" || d.code === "evidence_stale") && acceptanceExcuses(d, acceptedAt.get(d.section))));
   for (const section of sections) {
     const a = gate.answers[section];
     const id = sectionAnswersId(section);
@@ -304,8 +423,9 @@ export async function checkLedgerAnswers(sandbox: string, wanted: string[], exis
       lines.push(`${section}: no answer${named.length ? `; examination-limited by ${named.map((l) => `#${l.seq} (${l.reason ?? "no reason"})`).join(", ")}` : ""}`);
       continue;
     }
+    const reviews = answerReviews(a, attestations);
     const acts = [
-      ...attestations.filter((x) => attestationAct(x) === "attest" && x.target === a.hash && !a.authors.includes(x.by)).map((x) => `attested by ${x.by}`),
+      ...reviews.map((x) => `attested by ${x.by}${x.strength === "best_candidate" ? " (best candidate)" : x.strength === "established" ? " (established)" : ""}`),
       ...disputes.filter((d) => d.act === "dispute" && d.target === a.hash).map((d) => `disputed by ${d.by}`),
     ];
     const actsText = acts.length ? `; ${[...new Set(acts)].join(", ")}` : "";
@@ -320,10 +440,22 @@ export async function checkLedgerAnswers(sandbox: string, wanted: string[], exis
       .filter((e): e is LedgerEntry => Boolean(e) && !replaced.has((e as LedgerEntry).seq) && ((e as LedgerEntry).answers ?? []).some((x) => sectionKey(x) === id));
     const why: string[] = [];
     let rests: string | null = null;
+    let restsOnFinding = false;
     let limited: string | null = null;
+    let coverage: LedgerEntry | null = null;
     for (const e of naming) {
       if (e.kind === "limitation") {
         limited ??= `#${e.seq} (a limitation: ${e.reason ?? "no reason"})`;
+        continue;
+      }
+      if (e.kind === "coverage") {
+        // The coverage the hub found, while its results still stand; a complete one is preferred over a partial one.
+        const stale = coverageProblems(e, entries, disputes);
+        if (stale.length) {
+          why.push(`coverage record #${e.seq} no longer says what its search found (${stale.join("; ")})`);
+          continue;
+        }
+        if (!coverage || (coverage.coverage !== "complete" && e.coverage === "complete")) coverage = e;
         continue;
       }
       if (e.kind !== "finding" && e.kind !== "absence") continue;
@@ -350,40 +482,168 @@ export async function checkLedgerAnswers(sandbox: string, wanted: string[], exis
         why.push(`#${e.seq} rests on unresolved: refs only`);
         continue;
       }
-      if (e.kind === "absence" && !asksExistence(existence, section)) {
+      if (e.kind === "absence" && !asksExistence(existence, section) && !bar(id).existence) {
         limited ??= `#${e.seq} (a search that found nothing: it documents the search, and the question asks for more than whether something exists)`;
         continue;
       }
+      if (rests && restsOnFinding) continue;
       rests = `#${e.seq} (${e.kind === "absence" ? "a search that found nothing" : "a finding with refs"})`;
-      break;
+      restsOnFinding = e.kind === "finding";
     }
-    if (rests && !a.inconclusive) {
-      outcomes[section] = "answered";
-      lines.push(`${section}: answered by #${a.seq}, resting on ${rests}${actsText}`);
-    } else if (rests || limited) {
-      outcomes[section] = a.inconclusive ? "inconclusive" : "limited";
-      lines.push(`${section}: ${a.inconclusive ? "inconclusive" : "examination-limited"}, #${a.seq} resting on ${rests ?? limited}${actsText}`);
+    const result = answerResult(a);
+    const covText = coverage ? `#${coverage.seq} (a coverage record, coverage ${coverage.coverage ?? "not computed"}${coverage.not_examined?.length ? `, ${coverage.not_examined.length} planned route(s) not examined` : ""})` : null;
+    let outcome: LedgerOutcome = "unanswered";
+    let said = "";
+    if (result) {
+      results[section] = result;
+      // A premise rejected on a search alone is a negative, held as one.
+      const premiseOnSearch = result === "premise_not_supported" && !restsOnFinding;
+      const review = NEGATIVE_RESULTS.has(result) || premiseOnSearch ? negativeReview(a, entries, attestations, disputes) : null;
+      const reviewText = review ? (review.reviewed ? `, reviewed by ${review.by.join(", ")}` : ", negative (unreviewed)") : "";
+      if (premiseOnSearch && (rests || covText)) [outcome, said] = ["limited", `examination-limited (a premise rejected on a search alone: no finding shows it false), #${a.seq} resting on ${covText ?? rests}${reviewText}`];
+      else if ((result === "established" || result === "premise_not_supported") && rests) [outcome, said] = ["answered", `answered by #${a.seq}, resting on ${rests}${result === "premise_not_supported" ? " (its premise is not supported)" : ""}`];
+      else if (result === "bounded_negative" && (rests || covText)) {
+        // It settles the question only under the stronger bar, saying so: an
+        // existence question, a coverage record the hub found complete that
+        // says the event would have left a trace, reviewed by another seat,
+        // and the answer saying the event did not happen (asserts_absence).
+        // Any other bounded negative is a disposition that limits the run.
+        const settled = bar(id).existence && coverage?.coverage === "complete" && coverage.detection_opportunity?.trace_expected === "yes" && review?.reviewed === true && a.asserts_absence === true;
+        [outcome, said] = settled
+          ? ["answered", `answered (a bounded negative that says the event did not happen, under the stronger bar: an existence question, its coverage complete with the trace expected, reviewed) by #${a.seq}, resting on ${covText ?? rests}${reviewText}`]
+          : [
+              "limited",
+              `examination-limited (a bounded negative: no evidence found in its scope${!bar(id).existence ? "; the question asks for more than whether something exists" : coverage?.coverage !== "complete" ? "; its coverage is partial" : coverage.detection_opportunity?.trace_expected !== "yes" ? "; its coverage does not say the event would have left a trace" : a.asserts_absence !== true ? "; the answer does not say the event did not happen" : ""}), #${a.seq} resting on ${covText ?? rests}${reviewText}`,
+            ];
+      } else if (result === "not_determinable" && (rests || limited || covText)) [outcome, said] = ["inconclusive", `inconclusive (not determinable), #${a.seq} resting on ${covText ?? limited ?? rests}${reviewText}`];
+      else if ((result === "partial" || result === "out_of_scope") && (rests || limited || covText)) [outcome, said] = ["limited", `examination-limited (${resultWords(result)}), #${a.seq} resting on ${rests ?? limited ?? covText}`];
+      else if ((result === "established" || result === "premise_not_supported") && limited) [outcome, said] = ["limited", `examination-limited, #${a.seq} (${resultWords(result)}) resting only on ${limited}`];
+    } else if (rests && !a.inconclusive) [outcome, said] = ["answered", `answered by #${a.seq}, resting on ${rests}`];
+    else if (rests || limited) [outcome, said] = [a.inconclusive ? "inconclusive" : "limited", `${a.inconclusive ? "inconclusive" : "examination-limited"}, #${a.seq} resting on ${rests ?? limited}`];
+    // A review that holds the answer a best candidate only does not make it
+    // answered (B2): with no review that holds it established, it has no
+    // disposition, and the run waits for the route or for the operator's
+    // acceptance. Only an answer that claims established is held so
+    // (heldAsBestCandidate, the test readiness reads too): a partial answer,
+    // a negative, out of scope and a premise shown not to hold are held to
+    // their own bars, never to a strength.
+    let best = false;
+    if (outcome === "answered" && heldAsBestCandidate(a, reviews)) {
+      best = true;
+      bestCandidate.push(section);
+      outcome = "limited";
+      said = `examination-limited: a best candidate, not established (every review holds #${a.seq} a best candidate: ${[...new Set(reviews.map((x) => x.by))].join(", ")}${reviews.some((x) => x.capped?.length) ? `; ${[...new Set(reviews.flatMap((x) => x.capped ?? []))].join("; ")}` : ""}); ${said}`;
+    }
+    // Its disposition under the bar: what the answer is, on what it rests.
+    // A negative rests on a standing coverage record another seat reviewed;
+    // a best candidate is none (B2), a partial answer on a finding is one
+    // whatever its reviews' strength; a section a defect holds loses it below.
+    if (outcome !== "unanswered" && !best) {
+      const negativeReviewed = Boolean(coverage) && Boolean(result && NEGATIVE_RESULTS.has(result) && negativeReview(a, entries, attestations, disputes).reviewed);
+      const d: Disposition | null = !result
+        ? outcome === "answered" && !a.inconclusive
+          ? "established"
+          : null
+        : result === "established"
+          ? outcome === "answered"
+            ? "established"
+            : null
+          : result === "premise_not_supported"
+            ? outcome === "answered" && restsOnFinding
+              ? "premise_not_supported"
+              : null
+            : result === "partial"
+              ? restsOnFinding
+                ? "partial"
+                : null
+              : result === "out_of_scope"
+                ? "out_of_scope"
+                : NEGATIVE_RESULTS.has(result) && negativeReviewed
+                  ? (result as Disposition)
+                  : null;
+      if (d) dispositions[section] = d;
+    }
+    if (outcome !== "unanswered") {
+      outcomes[section] = outcome;
+      lines.push(`${section}: ${said}${actsText}`);
     } else {
       outcomes[section] = "unanswered";
       defects.push({
         code: "answer_support",
         section,
         seqs: [a.seq],
-        what: `answer #${a.seq} (${section}) rests on no standing finding whose refs resolve, no complete search and no limitation that names ${section}${why.length ? ` (${why.join("; ")})` : ""}`,
+        what: `answer #${a.seq} (${section}) rests on no standing finding whose refs resolve, no complete search, no coverage record and no limitation that names ${section}${why.length ? ` (${why.join("; ")})` : ""}`,
         fix: `record the finding again with refs that resolve (a correction, supersedes=<seq>) and the answer with supersedes=${a.seq} citing it, or record a limitation citing E-${a.seq}`,
         named_by: limits.filter((l) => (l.rel ?? []).some((r) => r.to === a.seq) || new RegExp(`\\bE-${a.seq}\\b`).test(`${l.value}\n${l.source ?? ""}\n${l.evidence ?? ""}`)).map((l) => l.seq),
       });
       lines.push(`${section}: #${a.seq} stands on nothing a reader can check now${actsText}`);
     }
   }
+  // What rests on external material (a capture the fetch service sealed,
+  // evidence added after the kickoff, material the operator supplied, and
+  // whatever was derived from them: docs/adr/0012, 0014): named with its
+  // source classes, never failed. A capture's hash proves its bytes, not
+  // their truth or their fit to the time of the events; supplied material
+  // proves nothing by itself; an examiner weighs each. The one exception is
+  // a class the case policy says no record may rest on (material_use none):
+  // an answer whose resolved lineage reaches one is a defect, whatever path
+  // (a digest, a job's output, a coverage record) carried it there.
+  const lineage = await externalLineage(S).catch(() => null);
+  const forbidden = (await forbiddenMaterialClasses(S).catch(() => null))?.classes ?? new Set<string>();
+  if (lineage && forbidden.size) {
+    for (const section of sections) {
+      const a = gate.answers[section];
+      if (!a) continue;
+      const hit = (lineage.classes.get(a.seq) ?? []).filter((c) => forbidden.has(c));
+      if (!hit.length) continue;
+      defects.push({
+        code: "material_use",
+        section,
+        seqs: [a.seq],
+        what: `answer #${a.seq} (${section}) rests on ${hit.join(", ")} material (through ${(lineage.entries.get(a.seq) ?? []).join(", ") || "its lineage"}), which the case policy lets no record rest on (material_use ${hit.map((c) => `${c}=none`).join(", ")})`,
+        fix: `record the answer again (supersedes=${a.seq}) on findings that do not rest on that material, or record a limitation that says the question cannot be answered without it`,
+        named_by: [],
+      });
+    }
+  }
+  // A section a defect holds, named by a limitation or not, has no disposition under the bar.
+  for (const d of defects) if (d.section) delete dispositions[d.section];
+  // A partial_output defect names the entry that cites a cancelled or stopped
+  // job's output (its producer resolved by producerIndex), not a section: every
+  // section that entry names, and every section whose standing answer rests on
+  // it (support, contrary, limitations), is held by it and loses its disposition.
+  const heldByPartial = new Set<string>();
+  for (const d of defects) {
+    if (d.code !== "partial_output") continue;
+    for (const seq of d.seqs) {
+      for (const x of bySeq.get(seq)?.answers ?? []) {
+        const k = x === "summary" || x === "narrative" ? x : `question:${sectionKey(x)}`;
+        heldByPartial.add(k);
+      }
+      for (const a of entries) {
+        if (a.kind !== "answer" || replaced.has(a.seq) || !a.section) continue;
+        if ([...(a.support ?? []), ...(a.contrary ?? []), ...(a.limitations ?? [])].some((x) => x.seq === seq)) heldByPartial.add(a.section);
+      }
+    }
+  }
+  for (const k of heldByPartial) delete dispositions[k];
   const open = defects.filter((d) => !d.named_by.length);
   for (const d of defects) lines.push(`${d.named_by.length ? `defect, named by ${d.named_by.map((n) => `#${n}`).join(", ")}` : "DEFECT"}: ${d.what}${d.named_by.length ? "" : `. Fix: ${d.fix}`}`);
+  // What the gate warns of and does not hold on: said, counted in the machine line, never failed.
+  const warnings = gate.warnings.map((w) => `${w.what}. ${w.fix}`);
+  for (const w of warnings) lines.push(`WARN: ${w}`);
   const unsupported = Object.entries(gate.unsupported);
   if (unsupported.length) lines.push(`tokens in no cited entry (counted, not failed; the release weighs them): ${unsupported.map(([seq, t]) => `#${seq}: ${t.join(", ")}`).join("; ")}`);
+  const externalFlags: Record<string, ExternalFlag> = {};
+  if (lineage?.entries.size) {
+    const external = entries.filter((e) => e.kind === "answer" && !replaced.has(e.seq) && e.section && sections.includes(e.section) && lineage.entries.has(e.seq));
+    for (const e of external) externalFlags[e.section as string] = { seq: e.seq, via: lineage.entries.get(e.seq) ?? [], classes: lineage.classes.get(e.seq) ?? [] };
+    if (external.length) lines.push(`rests on external material (named, not failed; a capture proves its bytes and supplied material proves nothing by itself: an examiner weighs each): ${external.map((e) => `${e.section} #${e.seq} (${(lineage.classes.get(e.seq) ?? []).join(", ") || "external"}) through ${(lineage.entries.get(e.seq) ?? []).join(", ")}`).join("; ")}`);
+  }
   const count = (o: LedgerOutcome) => Object.values(outcomes).filter((x) => x === o).length;
   lines.push(`sections: ${count("answered")} answered, ${count("limited")} examination-limited, ${count("inconclusive")} inconclusive, ${count("unanswered")} unanswered; ${defects.length} defect${defects.length === 1 ? "" : "s"}, ${defects.length - open.length} named by a limitation, ${open.length} open`);
-  if (open.length) lines.push("The run ends once each open defect is fixed, or named by a standing limitation (citing E-<seq> of the answer, or with answers=[<section>] for a missing one); a named defect is still a defect, and the release counts it.");
-  return { ok: open.length === 0, lines, outcomes, defects };
+  if (open.length) lines.push("This check passes once each open defect is fixed, or named by a standing limitation (citing E-<seq> of the answer, or with answers=[<section>] for a missing one); a named defect is still a defect: the finish line holds done on it under every stop policy (a question ends on a disposition under the bar, never on a limitation that names it), and the release counts it. The negative bar's defects (coverage_missing, coverage_stale, negative_unreviewed, wording, evidence_stale, completeness_uncovered, and the store sweep's sweep_pending, sweep_hits and sweep_partial), an answer resting on material the case policy forbids (material_use) and an entry citing a cancelled or stopped job's output with no word on it (partial_output) are fixed, never named.");
+  return { ok: open.length === 0, lines, outcomes, results, defects, withdrawn, external: externalFlags, best_candidate: bestCandidate, dispositions, warnings };
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
@@ -414,6 +674,8 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     process.stderr.write("usage: check-answers.ts [--report <path>] --sections 1,2,3[,summary,narrative] [--existence 2,…] [--sections-in inputs/CASE.md] [--sandbox DIR]\n");
     process.exit(2);
   }
+  // A store sweep lost with the process that began it is run here before the gate is read.
+  if (!report) await reconcileSweeps(resolve(sandbox)).catch(() => 0);
   const r = report ? await checkAnswers(sandbox, report, wanted, existence) : await checkLedgerAnswers(sandbox, wanted, existence);
   process.stdout.write(`${r.lines.join("\n")}\n`);
   // One machine line last, for the harness's finish line: each section's
@@ -421,6 +683,6 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   // can still be told apart as examination-limited (await-done.sh hands it
   // back with the check's row, passing or not).
   const named = "defects" in r ? r.defects.filter((d) => d.named_by.length).map((d) => `${d.what} (named by ${d.named_by.map((n) => `#${n}`).join(", ")})`) : [];
-  process.stdout.write(`${ANSWERS_MARK} ${JSON.stringify({ outcomes: r.outcomes, named, existence, mode: report ? "report" : "ledger" })}\n`);
+  process.stdout.write(`${ANSWERS_MARK} ${JSON.stringify({ outcomes: r.outcomes, ...("results" in r ? { results: r.results } : {}), ...("withdrawn" in r && Object.keys(r.withdrawn).length ? { withdrawn: r.withdrawn } : {}), ...("external" in r && Object.keys(r.external).length ? { external: r.external } : {}), ...("best_candidate" in r && r.best_candidate.length ? { best_candidate: r.best_candidate } : {}), ...("dispositions" in r ? { dispositions: r.dispositions } : {}), ...("warnings" in r && r.warnings.length ? { warnings: r.warnings } : {}), named, existence, mode: report ? "report" : "ledger" })}\n`);
   process.exit(r.ok ? 0 : 1);
 }

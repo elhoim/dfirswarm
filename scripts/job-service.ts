@@ -36,12 +36,15 @@ import { createHash } from "node:crypto";
 import { constants, existsSync, lstatSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import { chmod, copyFile, link, lstat, mkdir, open, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { Journal, maybeCrash, publishGeneration, publishRevision, readManifest, resealMoved, sealTree, sha256File, sha256Hex, storePaths, traceLineBytes, traceOrigin, type JournalLine, type TraceOrigin } from "./evidence-store.ts";
+import { Journal, maybeCrash, publishGeneration, publishRevision, readManifest, resealMoved, sealTree, sha256File, sha256Hex, storePaths, traceLineBytes, traceOrigin, type JournalLine, type Manifest, type TraceOrigin } from "./evidence-store.ts";
 import { chooseImage, readImageRecords, type ImageChoice, type ImageRecord } from "./image-choice.ts";
 import { buildView, declaredScope, dropProjected, freeMb, PROJECTED_DIR, resolveScope, ScopeError, scopeKindOf, scopeManifestText, VIEW_DIR, type ScopeKind, type ScopeObject, type ViewEntry } from "./job-scope.ts";
 import { CANARY_NAME, OBSERVE_GUEST, observedRun, observeWanted, readObservation } from "./job-observe.ts";
+import { assessJob, HEARTBEAT_LINES, HEARTBEAT_STOP, keepSample, readSamples, sampleJob, type JobProgress } from "./job-telemetry.ts";
 import type { Mount, WorkerSpec } from "./vm.ts";
-import { operatorHostsSync } from "../extensions/leads.ts";
+import { jobNetworkHosts } from "./net-grants.ts";
+import { indexOutputs, objectsMatch, opMatch, rankSimilar, reuseOf, sameAsOf, sameAsView, type Reuse, type SameAs, type Similar } from "./job-reuse.ts";
+import { derivedFrom, derivedSensitivity, ownSensitivity, sensitiveIndex, snapshotObjects, type Sensitivity } from "./output-hygiene.ts";
 
 export type JobKind = "tool" | "command" | "recipe" | "detect" | "import";
 
@@ -128,6 +131,42 @@ print(json.dumps({"import": rel, "copied_live": mode == "live", **({"copied_from
 sys.exit(3 if changed else 0)
 `;
 
+/**
+ * What a job with network grants runs to use one (docs/adr/0012): one call
+ * to the fetch service on the host, as this job, for one grant. The request
+ * is the grant's own; the body comes back and is written where the job says
+ * (the capture is sealed in the store either way), the answer's other
+ * fields to stderr. Exit 0 when the body was delivered.
+ *
+ *   python3 /job/net_fetch.py N-<k> [--out FILE]
+ */
+export const NET_FETCH_SCRIPT = `import base64, json, os, sys, urllib.request, urllib.error
+args = sys.argv[1:]
+if not args:
+    sys.exit("usage: net_fetch.py N-<k> [--out FILE]")
+grant, out = args[0], None
+if "--out" in args:
+    out = args[args.index("--out") + 1]
+req = urllib.request.Request(os.environ["SWARM_NET_URL"], data=json.dumps({"grant": grant}).encode(), method="POST",
+    headers={"content-type": "application/json", "authorization": "Bearer " + os.environ["SWARM_NET_TOKEN"], "x-dfirswarm-principal": os.environ["SWARM_NET_PRINCIPAL"]})
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+try:
+    raw = opener.open(req, timeout=180).read()
+except urllib.error.HTTPError as e:
+    raw = e.read()
+answer = json.loads(raw.decode("utf-8"))
+body = answer.pop("body_b64", None)
+sys.stderr.write(json.dumps(answer, indent=1) + "\\n")
+if body is not None:
+    data = base64.b64decode(body)
+    if out:
+        with open(out, "wb") as f:
+            f.write(data)
+    else:
+        sys.stdout.buffer.write(data)
+sys.exit(0 if answer.get("delivered") else 1)
+`;
+
 /** sha256: the object's content, when it is one file of the store (a derived or requested target). */
 export type Target = { paths: string[]; name?: string; ref?: string; sha256?: string };
 
@@ -164,6 +203,24 @@ export type JobSpec = {
   experimental?: boolean;
   /** The job image to run in, by profile (disk, memory, mobile, …), when the run declares job images; else the run's worker image. */
   profile?: string;
+  /**
+   * The network grants its requester gave it (N-<k>, each asked for a job:
+   * docs/adr/0012): bound to this job when its worker is made, which then
+   * reaches the fetch service on the host and nothing else of it.
+   */
+  net_grants?: string[];
+  /**
+   * An intended reproduction of work another seat did (docs/adr/0017): a
+   * command or a tool only. Recorded, and counted apart by the metrics; the
+   * similar jobs are still named.
+   */
+  independent?: boolean;
+  /**
+   * Every output this job seals is sensitive (docs/adr/0016): its result
+   * may hold a secret. Said by the agent; the harness never reads the bytes
+   * to decide.
+   */
+  secret_output?: boolean;
 };
 
 export type Requester = { agent: string; name?: string; doing?: string };
@@ -203,14 +260,23 @@ export type JobRecord = {
   /** A recipe job's identity (recipe, its sha256, the image, the target): the same key is the same result. */
   dedup_key?: string;
   /**
-   * A command's or a tool's identity for the merge that is only measured
-   * (shadowKey): the same spec, byte for byte, over the same inputs by
-   * digest. Never used to merge; a job_would_merge line says when it would.
+   * A command's or a tool's objects by digest and its operation, for the
+   * reuse hints (job-reuse.ts, docs/adr/0017): never used to merge.
    */
-  shadow_key?: string;
+  reuse?: Reuse;
+  /** Its outputs that are an earlier job's, byte for byte (the job_same_as line). */
+  same_as?: SameAs[];
   cancel_requested?: string;
   lane?: Lane;
   image_choice?: ImageChoice;
+  /**
+   * A program the job ran is not in its image (B17): exit 127, or the
+   * shell's "command not found" on its stderr. The profile and image it ran
+   * in, for the images' upkeep; generic, never a tool's own message.
+   */
+  program_missing?: { program: string | null; profile: string | null; image: string };
+  /** Its outputs are sensitive, decided when they were sealed (output-hygiene.ts): run with secret_output, or made from a sensitive output. */
+  sensitive?: Sensitivity;
 };
 
 /**
@@ -279,9 +345,24 @@ export type JobServiceOptions = {
    */
   hostRoom?: (memoryMib: number) => Promise<{ ok: boolean; available_mib: number | null; needed_mib: number }>;
   destroyWorker: (name: string) => Promise<{ ok: boolean; error?: string }>;
+  /**
+   * A running worker's CPU and I/O counters (msb's metrics for its VM),
+   * when the host has them; absent or null, the worker's own heartbeat is
+   * read instead (job-telemetry.ts).
+   */
+  metrics?: (worker: string) => Promise<{ cpu_ns: number; io_bytes: number } | null>;
   notify: (to: string, body: string) => Promise<void>;
   identity: (agent: string) => Promise<{ name?: string; doing?: string }>;
   log?: (line: string) => void;
+  /**
+   * A job's network grants bound to it, and how its worker reaches the fetch
+   * service: the host port and the job's own token in its environment
+   * (net-broker.ts bindJobGrants). Absent, the run has no fetch service and
+   * a job given grants is not run.
+   */
+  netAccess?: (job: JobRecord) => Promise<{ ok: true; port: number; env: Record<string, string> } | { ok: false; reason: string }>;
+  /** The lead each of these jobs was run under (the lead register's), for the reuse hints; absent, none is named. */
+  leadsOf?: (jobs: string[]) => Promise<Map<string, string>>;
 };
 
 const JOB_ID = /^j\d{6}$/;
@@ -399,6 +480,7 @@ export class JobService {
   async start(): Promise<void> {
     this.journal = await Journal.open(this.S);
     this.replay(this.journal.lines);
+    this.indexOutputsInBackground();
     // The images jobs may run in, on the record before any job does: custody
     // holds each job's image to them.
     if (this.o.images && Object.keys(this.o.images).length) {
@@ -413,6 +495,8 @@ export class JobService {
       ticks += 1;
       void this.pump();
       if (ticks % 15 === 0) void this.sweep();
+      // Each running job sampled every half minute (B11): how long each signal has been still is read from these.
+      if (ticks % 15 === 7) void this.sampleRunning().catch(() => undefined);
     }, 2000);
     this.timer.unref?.();
     void this.pump();
@@ -424,7 +508,10 @@ export class JobService {
       const j = this.jobs.get(id);
       switch (l.type) {
         case "job_accepted":
-          this.jobs.set(id, { id, attempt: 1, spec: l.spec as JobSpec, requester: l.requester as Requester, state: "accepted", accepted_at: l.at, ...(l.dedup_key ? { dedup_key: String(l.dedup_key) } : {}), ...(l.shadow_key ? { shadow_key: String(l.shadow_key) } : {}) });
+          this.jobs.set(id, { id, attempt: 1, spec: l.spec as JobSpec, requester: l.requester as Requester, state: "accepted", accepted_at: l.at, ...(l.dedup_key ? { dedup_key: String(l.dedup_key) } : {}), ...(l.reuse ? { reuse: l.reuse as Reuse } : {}) });
+          break;
+        case "job_same_as":
+          if (j) j.same_as = l.same_as as SameAs[];
           break;
         case "job_started":
           if (j) Object.assign(j, { state: "running", attempt: Number(l.attempt), started_at: l.at, worker: l.worker, image: l.image, tool_sha256: l.tool_sha256, accessible: l.accessible, network: l.network, ...(l.scope ? { scope: l.scope as JobScope } : {}), ...(l.cpus ? { worker_size: `${l.cpus} vCPU, ${l.memory_mib} MiB` } : {}), ...(l.lane ? { lane: l.lane as Lane } : {}), ...(l.image_choice ? { image_choice: l.image_choice as ImageChoice } : {}) });
@@ -437,7 +524,7 @@ export class JobService {
           if (j && l.fenced) j.state = "fenced";
           break;
         case "job_committed":
-          if (j) Object.assign(j, { state: "committed", status: l.status, outputs: l.outputs, image_digest: l.image_digest ?? j.image_digest });
+          if (j) Object.assign(j, { state: "committed", status: l.status, outputs: l.outputs, image_digest: l.image_digest ?? j.image_digest, ...(l.sensitive ? { sensitive: l.sensitive as Sensitivity } : {}) });
           if (j?.requester.agent === DERIVED && j.spec.kind === "recipe") this.derivedOutputBytes += Number((l.outputs as { bytes?: number } | undefined)?.bytes ?? 0);
           break;
         case "job_failed":
@@ -524,7 +611,7 @@ export class JobService {
           // VM (a job with network may already have done what it does); its
           // output so far is kept, as that attempt's or as the job's result.
           const interrupted = { status: "interrupted" as const, exit: null, reason: "the hub stopped while it ran" };
-          if (j.attempt < 2 && !j.cancel_requested && j.spec.network === "off") {
+          if (j.attempt < 2 && !j.cancel_requested && j.spec.network === "off" && !j.spec.net_grants?.length) {
             await this.commit(j, interrupted, `attempt-${j.attempt}-interrupted`);
             await this.journal.append({ type: "job_retried", job: j.id, attempt: j.attempt + 1, why: "interrupted by the hub's restart" });
             Object.assign(j, { state: "accepted", attempt: j.attempt + 1 });
@@ -669,7 +756,7 @@ export class JobService {
    * Accept a job, durably, or refuse it with the reason. The answer comes
    * once the acceptance is on disk; the work comes after.
    */
-  async submit(agent: string, raw: Partial<JobSpec>, o: { watch?: number; seal?: SealSpec } = {}): Promise<{ ok: true; job: JobRecord } | { ok: false; reason: string }> {
+  async submit(agent: string, raw: Partial<JobSpec>, o: { watch?: number; seal?: SealSpec } = {}): Promise<{ ok: true; job: JobRecord; similar?: Similar[]; similar_recorded?: boolean } | { ok: false; reason: string }> {
     if (this.stopping) return { ok: false, reason: "the run is stopping; no new jobs" };
     // A seal comes only from sealCited, never in what an agent sends.
     const { seal: _seal, scope: _scope, ...asked } = raw;
@@ -694,17 +781,13 @@ export class JobService {
     }
     const requester = await this.requesterOf(agent);
     const id = this.nextId();
-    // Merging a command or a tool with an earlier identical job is measured
-    // before it is done (joint review, 2026-09-27): the key is kept and a
-    // would-be merge is written to the journal; the job runs as asked.
-    const shadow = !key ? await this.shadowKey(spec).catch(() => undefined) : undefined;
-    await this.journal.append({ type: "job_accepted", job: id, spec, requester, ...(key ? { dedup_key: key } : {}), ...(shadow ? { shadow_key: shadow } : {}) });
+    // A command or a tool is never merged (docs/adr/0017): what it reads, by
+    // digest, and what it runs are kept, and the jobs of other seats that do
+    // the same over the same objects are named to its requester.
+    const reuse = !key ? await reuseOf(this.S, spec, { collections: this.collections(), targets: targetPaths(spec) }).catch(() => null) : null;
+    await this.journal.append({ type: "job_accepted", job: id, spec, requester, ...(key ? { dedup_key: key } : {}), ...(reuse ? { reuse } : {}) });
     maybeCrash("job:accepted");
-    const job: JobRecord = { id, attempt: 1, spec, requester, state: "accepted", accepted_at: new Date().toISOString(), ...(key ? { dedup_key: key } : {}), ...(shadow ? { shadow_key: shadow } : {}) };
-    if (shadow) {
-      const same = [...this.jobs.values()].find((j) => j.shadow_key === shadow && (j.state === "accepted" || j.state === "running" || j.state === "finished" || j.state === "fenced" || (j.state === "committed" && j.status === "ok")));
-      if (same) await this.journal.append({ type: "job_would_merge", job: id, same_as: same.id, same_state: same.state, by: requester, first_by: same.requester, shadow_key: shadow });
-    }
+    const job: JobRecord = { id, attempt: 1, spec, requester, state: "accepted", accepted_at: new Date().toISOString(), ...(key ? { dedup_key: key } : {}), ...(reuse ? { reuse } : {}) };
     this.jobs.set(id, job);
     // The agent waits for it in job_run from this moment: a job that is done
     // before its first status call is answered there, not posted as well.
@@ -712,7 +795,49 @@ export class JobService {
     await this.project(job);
     this.queue.push(id);
     void this.pump();
-    return { ok: true, job };
+    // The hint, once the job is registered and queued: it never holds the job up.
+    const similar = reuse ? await this.similarTo(job, reuse).catch(() => []) : [];
+    let recorded = true;
+    if (similar.length) {
+      await this.journal.append({ type: "job_similar", job: id, by: requester, ...(spec.independent ? { independent: true } : {}), similar }).catch((err) => {
+        recorded = false;
+        this.log(`${id}: the job_similar line was not written: ${(err as Error).message}`);
+      });
+    }
+    return { ok: true, job, ...(similar.length ? { similar, similar_recorded: recorded } : {}) };
+  }
+
+  /**
+   * The jobs of other seats, under way or committed, that read some of the
+   * same objects by digest with the same tool or the same leading command
+   * (job-reuse.ts), ranked, each with its lead and what it made so far.
+   */
+  private async similarTo(job: JobRecord, reuse: Reuse): Promise<Similar[]> {
+    if (job.requester.agent === "system" || job.requester.agent === DERIVED) return [];
+    const found: Array<Omit<Similar, "lead">> = [];
+    for (const j of this.jobs.values()) {
+      if (j.id === job.id || !j.reuse || j.requester.agent === job.requester.agent || j.requester.agent === "system" || j.requester.agent === DERIVED) continue;
+      if (j.state === "failed" || j.state === "cancelled" || (j.state === "committed" && j.status === "cancelled")) continue;
+      const match = opMatch(job.spec, j.spec, reuse.op, j.reuse.op);
+      if (!match) continue;
+      const objects = objectsMatch(reuse.objects, j.reuse.objects);
+      if (!objects) continue;
+      found.push({
+        job: j.id,
+        seat: j.requester.agent,
+        ...(j.requester.name ? { name: j.requester.name } : {}),
+        state: j.state,
+        ...(j.status ? { status: j.status } : {}),
+        ...(j.outputs ? { outputs: { files: j.outputs.files, bytes: j.outputs.bytes, path: j.outputs.path } } : {}),
+        ...objects,
+        match,
+        op: j.reuse.op,
+        ...(j.spec.independent ? { independent: true as const } : {}),
+      });
+    }
+    if (!found.length) return [];
+    const leads = this.o.leadsOf ? await this.o.leadsOf(found.map((f) => f.job)).catch(() => new Map<string, string>()) : new Map<string, string>();
+    return rankSimilar(found.map((f) => ({ ...f, lead: leads.get(f.job) ?? null })));
   }
 
   /**
@@ -755,28 +880,6 @@ export class JobService {
     }
     this.imageRecords ??= readImageRecords(this.S, images);
     return chooseImage(text, await this.imageRecords, dflt);
-  }
-
-  /**
-   * The key a merge of raw jobs would use, were it on: a command or a tool,
-   * reading a declared scope (never inputs=["all"], which reads live work/),
-   * every object of which is known by its digest now (an input, a job's
-   * output, a stored blob; a file of an agent's own is copied only when the
-   * job starts, so it is not), and the spec itself byte for byte. Undefined
-   * when the job would never be merged.
-   */
-  private async shadowKey(spec: JobSpec): Promise<string | undefined> {
-    if (spec.kind !== "command" && spec.kind !== "tool") return undefined;
-    if (spec.scope !== "declared" || spec.seal || spec.inputs.includes("all")) return undefined;
-    const r = await resolveScope(this.S, spec.inputs, { collections: this.collections(), targets: targetPaths(spec) });
-    if (!r.ok) return undefined;
-    const digests: Array<[string, string]> = [];
-    for (const o of r.objects) {
-      if (!o.sha256 || o.area === "work") return undefined;
-      digests.push([o.ref, o.sha256]);
-    }
-    digests.sort((a, b) => a[0].localeCompare(b[0]) || a[1].localeCompare(b[1]));
-    return sha256Hex(canonical({ kind: spec.kind, command: spec.command ?? null, tool: spec.tool ?? null, args: spec.args ?? null, inputs: spec.inputs, timeout_seconds: spec.timeout_seconds, network: spec.network, profile: spec.profile ?? null, scratch: spec.scratch ?? false, digests }));
   }
 
   private async recipeKey(spec: JobSpec): Promise<string> {
@@ -833,7 +936,12 @@ export class JobService {
       const listing = have.map((p) => (packsOf(p).length ? `${p} (the packs ${packsOf(p).join(", ")})` : p)).join("; ");
       return { reason: have.length ? `no job image "${profile}" in this run: ${listing}; a pack's name also picks its image (or leave profile out for the run's worker image)` : `this run declared no job images: leave profile out (every job runs in ${this.o.image})` };
     }
-    const base = { kind, inputs, scope: declared.kind, timeout_seconds: timeout, network, ...(raw.scratch ? { scratch: true } : {}), ...(raw.note ? { note: String(raw.note) } : {}), ...(raw.parent ? { parent: String(raw.parent) } : {}), ...(profile ? { profile } : {}) } as JobSpec;
+    // Network grants go with a command or a tool (a job whose code makes the request); at most eight.
+    const grants = Array.isArray(raw.net_grants) ? [...new Set(raw.net_grants.map((g) => String(g).trim().toUpperCase()))].filter(Boolean) : [];
+    if (grants.length && kind !== "command" && kind !== "tool") return { reason: "network grants go with a command or a tool job" };
+    if (grants.some((g) => !/^N-[1-9]\d{0,6}$/.test(g)) || grants.length > 8) return { reason: "net_grants names up to 8 grants, N-<k>" };
+    if (raw.secret_output !== undefined && typeof raw.secret_output !== "boolean") return { reason: "secret_output is true or false" };
+    const base = { kind, inputs, scope: declared.kind, timeout_seconds: timeout, network, ...(raw.scratch ? { scratch: true } : {}), ...(raw.note ? { note: String(raw.note) } : {}), ...(raw.parent ? { parent: String(raw.parent) } : {}), ...(profile ? { profile } : {}), ...(grants.length ? { net_grants: grants } : {}), ...(raw.independent === true && (kind === "command" || kind === "tool") ? { independent: true } : {}), ...(raw.secret_output === true ? { secret_output: true } : {}) } as JobSpec;
     if (kind === "tool") {
       const args = raw.args && typeof raw.args === "object" && !Array.isArray(raw.args) ? raw.args : {};
       const checked = await this.toolCheck(String(raw.tool ?? ""), args);
@@ -1105,10 +1213,11 @@ export class JobService {
     const pip = job.spec.network === "allowlist" ? ["python3 -m pip list --format=freeze > /job/pip-before.txt 2>/dev/null || true"] : [];
     const pipAfter = job.spec.network === "allowlist" ? ["python3 -m pip list --format=freeze > /job/pip-after.txt 2>/dev/null || true"] : [];
     // EXPERIMENTAL (SWARM_JOB_OBSERVE=fanotify-experimental, a declared scope only): the command as an unprivileged user, a collector watching the view's mounts.
+    // A heartbeat beside the command (job-telemetry.ts): the VM's CPU and I/O counters every 15 s, for the host to read while it runs.
     const run = (cmd: string) =>
       observe
-        ? [...pip, ...observedRun({ mounts: observe.mounts, canary: observe.canary, cmd: `timeout --kill-after=10 ${box} ${cmd} > /job/stdout.log 2> /job/stderr.log` }), ...pipAfter]
-        : [...pip, `timeout --kill-after=10 ${box} ${cmd} > /job/stdout.log 2> /job/stderr.log`, "echo $? > /job/exit", ...pipAfter];
+        ? [...pip, ...HEARTBEAT_LINES, ...observedRun({ mounts: observe.mounts, canary: observe.canary, cmd: `timeout --kill-after=10 ${box} ${cmd} > /job/stdout.log 2> /job/stderr.log` }), HEARTBEAT_STOP, ...pipAfter]
+        : [...pip, ...HEARTBEAT_LINES, `timeout --kill-after=10 ${box} ${cmd} > /job/stdout.log 2> /job/stderr.log`, "echo $? > /job/exit", HEARTBEAT_STOP, ...pipAfter];
     const head = ["#!/bin/bash", "set -u", `cd ${q(this.S)} 2>/dev/null || cd /`, `export OUT=${q(out)}`];
     if (job.spec.kind === "tool") {
       const checked = await this.toolCheck(job.spec.tool ?? "", job.spec.args ?? {});
@@ -1174,7 +1283,11 @@ export class JobService {
     // (swarm.sh lead <run> note L-n TEXT --allow-host HOST): an agent's own
     // VM keeps the network it booted with, and a job's worker is made new,
     // so this is where a host allowed while the run goes on is reached.
-    const hosts = [...new Set([...this.o.allowHosts, ...operatorHostsSync(this.S)])];
+    // The operator's socket grants (tier 2) for this job's requester decide
+    // (net-grants.ts jobNetworkHosts): a host the operator took back is not
+    // given to a new worker in any spelling, and a note's host line counts
+    // only where no grant was ever made for that host.
+    const hosts = jobNetworkHosts(this.S, this.o.allowHosts, job.requester.agent);
     return hosts.length ? { mode: "hosts", hosts } : { mode: "off" };
   }
 
@@ -1208,6 +1321,16 @@ export class JobService {
     // A job that ran keeps its image (a retry, a rerun); a new one is placed by its spec.
     const chosen = job.image ? { profile: null, ref: job.image, choice: job.image_choice ?? { how: "default" as const, why: "the image it is recorded to have run in" } } : await this.imageFor(job.spec);
     const network = this.network(job);
+    // Its network grants: bound to it, and the fetch service's port and the
+    // job's own token given to its worker. A job that cannot have them is not run.
+    let net: { port: number; env: Record<string, string> } | null = null;
+    if (job.spec.net_grants?.length) {
+      if (!this.o.netAccess) throw new Error(`not run: this run has no fetch service for its network grants (${job.spec.net_grants.join(", ")})`);
+      const acc = await this.o.netAccess(job);
+      if (!acc.ok) throw new Error(`not run: its network grants: ${acc.reason}`);
+      net = { port: acc.port, env: acc.env };
+      await writeFile(join(st.ctl, "net_fetch.py"), NET_FETCH_SCRIPT);
+    }
     const spec: WorkerSpec = {
       name: `dfs-${this.o.run}-job-${job.id}-${job.attempt}`,
       image: chosen.ref,
@@ -1220,8 +1343,9 @@ export class JobService {
       maxDurationSec: job.spec.timeout_seconds + 120,
       workdir: this.S,
       mounts: placed.mounts,
-      env: { JOB_ID: job.id, OUT: this.outPath(job), AGENT_ID: job.requester.agent, SWARM_SANDBOX: this.S, TZ: "UTC", LANG: "C.UTF-8", PYTHONDONTWRITEBYTECODE: "1", NO_COLOR: "1" },
+      env: { JOB_ID: job.id, OUT: this.outPath(job), AGENT_ID: job.requester.agent, SWARM_SANDBOX: this.S, TZ: "UTC", LANG: "C.UTF-8", PYTHONDONTWRITEBYTECODE: "1", NO_COLOR: "1", ...(net?.env ?? {}) },
       network,
+      ...(net ? { hostPorts: [net.port] } : {}),
       command: ["bash", "/job/run.sh"],
     };
     return { spec, accessible: placed.accessible, manifest: placed.manifest, view: placed.view, chosen, script };
@@ -1286,7 +1410,7 @@ export class JobService {
     const { spec: workerSpec, accessible, chosen, script } = plan;
     const worker = workerSpec.name;
     const network = workerSpec.network;
-    const netText = network.mode === "off" ? "none" : network.mode === "public" ? "every public host" : `the run's allowlist (${network.hosts.join(", ")})`;
+    const netText = `${network.mode === "off" ? "none" : network.mode === "public" ? "every public host" : `the run's allowlist (${network.hosts.join(", ")})`}${workerSpec.hostPorts?.length ? `; the fetch service on this host for its grants ${job.spec.net_grants?.join(", ")}, each request exactly as granted` : ""}`;
     // The declared scope's manifest beside the job's record, its sha256 on job_started.
     const scope: JobScope = { kind: scopeKindOf(job.spec) };
     if (plan.manifest) {
@@ -1327,6 +1451,12 @@ export class JobService {
     }
     const cancelled = job.cancel_requested ? `cancelled by ${job.cancel_requested}` : undefined;
     const stopped = (job as JobRecord & { stopped?: string }).stopped;
+    // A program its image does not hold (B17): exit 127, or the shell's own words for it.
+    const missing = !cancelled && !stopped && exit !== 0 ? await programMissing(st.ctl, exit) : null;
+    if (missing) {
+      job.program_missing = { program: missing, profile: chosen.profile ?? job.spec.profile ?? null, image: chosen.ref };
+      await this.journal.append({ type: "job_program_missing", job: job.id, attempt: job.attempt, exit, ...job.program_missing });
+    }
     const status: NonNullable<JobRecord["status"]> = cancelled ? "cancelled" : stopped ? "stopped" : exit === 124 || exit === 137 ? "timed_out" : exit === 0 ? "ok" : "failed";
     const reason =
       cancelled ??
@@ -1337,9 +1467,11 @@ export class JobService {
           ? result.error ?? "the worker did not report an exit status"
           : job.spec.kind === "import" && exit === 3
             ? "the source changed while it was copied (stdout.log names each file): import it again once it is still"
-            : exit !== 0
-              ? `exit ${exit}`
-              : undefined);
+            : missing
+              ? `exit ${exit}: a program it runs is not in its image${job.program_missing?.profile ? ` (profile ${job.program_missing.profile})` : ""}: ${missing === "?" ? "exit 127" : missing}`
+              : exit !== 0
+                ? `exit ${exit}`
+                : undefined);
     if (job.requester.agent === DERIVED) this.derivedSpent.push({ at: Date.now(), s: (Date.now() - started) / 1000 });
     await this.journal.append({ type: "job_finished", job: job.id, attempt: job.attempt, exit, status, ...(reason ? { reason } : {}), duration_ms: Date.now() - started, ...(result.digest ? { image_digest: result.digest } : {}), ...(result.boot_retry ? { boot_retry: result.boot_retry } : {}), ...(result.create_ms !== undefined ? { create_ms: result.create_ms } : {}) });
     Object.assign(job, { state: "finished", exit, status, reason, finished_at: new Date().toISOString(), ...(result.digest ? { image_digest: result.digest } : {}) });
@@ -1395,7 +1527,10 @@ export class JobService {
    */
   private async commit(job: JobRecord, r: { status: NonNullable<JobRecord["status"]>; exit: number | null; reason?: string }, where = "out"): Promise<void> {
     const recorded = await this.exclusive(() => this.sealAndRecord(job, r, where));
-    if (recorded) await this.afterCommit(job);
+    if (!recorded) return;
+    // The hint is written outside the store's one-at-a-time section: it never holds a commit up.
+    if (job.same_as?.length) await this.writeSameAs(job);
+    await this.afterCommit(job);
   }
 
   private async sealAndRecord(job: JobRecord, r: { status: NonNullable<JobRecord["status"]>; exit: number | null; reason?: string }, where: string): Promise<boolean> {
@@ -1404,7 +1539,7 @@ export class JobService {
     const jobDir = join(P.jobs, job.id);
     const dest = join(jobDir, where);
     await mkdir(jobDir, { recursive: true });
-    let sealed: { manifest: { totals: { files: number; bytes: number }; rejected: unknown[] }; manifestSha256: string };
+    let sealed: { manifest: Manifest; manifestSha256: string };
     const manifestPath = join(jobDir, where === "out" ? "manifest.json" : `${where}.manifest.json`);
     // Where a crash stopped decides the step: moved but not sealed is sealed
     // in place; sealed but not recorded is read back; not moved is sealed now.
@@ -1431,13 +1566,117 @@ export class JobService {
     }
     maybeCrash("job:sealed");
     const outputs = { manifest_sha256: sealed.manifestSha256, files: sealed.manifest.totals.files, bytes: sealed.manifest.totals.bytes, rejected: sealed.manifest.rejected.length, path: `store/jobs/${job.id}/${where}` };
-    await this.journal.append({ type: "job_committed", job: job.id, attempt: job.attempt, status: r.status, exit: r.exit, ...(r.reason ? { reason: r.reason } : {}), outputs, logs, ...(job.image_digest ? { image_digest: job.image_digest } : {}) });
+    // Sensitive at seal time (docs/adr/0016): run with secret_output, or made from a sensitive output.
+    const sensitive = await this.sensitivityOf(job, sealed.manifest.files).catch((err: Error) => {
+      this.log(`${job.id}: its sensitivity could not be decided (${err.message}); sealed as sensitive`);
+      return { why: "derived" as const, from: [], note: `its sensitivity could not be decided when it was sealed (${err.message}): held sensitive` };
+    });
+    await this.journal.append({ type: "job_committed", job: job.id, attempt: job.attempt, status: r.status, exit: r.exit, ...(r.reason ? { reason: r.reason } : {}), outputs, logs, ...(job.image_digest ? { image_digest: job.image_digest } : {}), ...(sensitive ? { sensitive } : {}) });
     await rm(st.base, { recursive: true, force: true }).catch(() => undefined);
     if (where !== "out") return false;
-    Object.assign(job, { state: "committed", status: r.status, outputs });
+    // In memory only, before the record says committed (whoever reads the
+    // job then reads its hint too): no read, no write, no wait here. The
+    // sensitivity above never waits on that index: it read the sensitive
+    // jobs' own manifests before job_committed was written.
+    this.sameAsAtCommit(job, sealed.manifest.files ?? []);
+    Object.assign(job, { state: "committed", status: r.status, outputs, ...(sensitive ? { sensitive } : {}) });
     await this.project(job);
     maybeCrash("job:committed");
     return true;
+  }
+
+  /**
+   * Every committed job's output by content, the first job to write given
+   * bytes keeping them. Built once from the manifests, off the commit path
+   * (indexOutputsInBackground); null until it is.
+   */
+  private outputIndex: Map<string, { job: string; file: string }> | null = null;
+  /** Jobs committed while the index was being built, in commit order: their same_as is said once it is. */
+  private sameAsPending: Array<{ job: JobRecord; files: Manifest["files"] }> = [];
+
+  /**
+   * The index of every earlier job's output, read from the manifests of the
+   * jobs the journal says were committed, one at a time, in the background:
+   * a slow or unreadable manifest delays only the hints of the jobs committed
+   * meanwhile, never a commit. Those are then answered in order.
+   */
+  private indexOutputsInBackground(): void {
+    const ids = this.journal.of("job_committed").filter((l) => (l.outputs as { path?: string } | undefined)?.path === `store/jobs/${String(l.job ?? "")}/out`).map((l) => String(l.job));
+    void (async () => {
+      const index = new Map<string, { job: string; file: string }>();
+      for (const id of ids) {
+        const m = await readManifest(join(storePaths(this.S).jobs, id, "manifest.json")).catch(() => null);
+        if (m) indexOutputs(index, id, m.manifest.files);
+      }
+      this.outputIndex = index;
+      const pending = this.sameAsPending.splice(0);
+      for (const p of pending) {
+        this.sameAsAtCommit(p.job, p.files);
+        if (p.job.same_as?.length) {
+          await this.writeSameAs(p.job);
+          await this.project(p.job).catch(() => undefined);
+        }
+      }
+    })().catch((err) => this.log(`the output index for same_as was not built: ${(err as Error).message}`));
+  }
+
+  /**
+   * Which of a committed job's files are an earlier job's output byte for
+   * byte (docs/adr/0017), set on its record from the index in memory, or
+   * left for the index to answer when it is still being built. A hint: the
+   * files are sealed and cited as the job's own either way.
+   */
+  private sameAsAtCommit(job: JobRecord, files: Manifest["files"]): void {
+    if (!this.outputIndex) {
+      this.sameAsPending.push({ job, files });
+      return;
+    }
+    const same = sameAsOf(job.id, files, this.outputIndex);
+    indexOutputs(this.outputIndex, job.id, files);
+    if (same.length) job.same_as = same;
+  }
+
+  /** The job_same_as line; a failure to write it is logged, never raised. */
+  private async writeSameAs(job: JobRecord): Promise<void> {
+    await this.journal.append({ type: "job_same_as", job: job.id, same_as: job.same_as ?? [] }).catch((err) => this.log(`${job.id}: the job_same_as line was not written: ${(err as Error).message}`));
+  }
+
+  /**
+   * Whether what a job sealed is sensitive (docs/adr/0016): it was run with
+   * secret_output, or it read a sensitive output. What it read is what it
+   * declared (resolved again now: a sealed output does not change), by path,
+   * by digest, or a catalogue generation a sensitive job made; a job that
+   * declared no scope could read everything, so it is held to what its
+   * command, arguments, source and targets name; and a file it sealed that is
+   * byte for byte what a sensitive job wrote is sensitive whatever it read.
+   * Null when none of these.
+   */
+  private async sensitivityOf(job: JobRecord, outputs: ReadonlyArray<{ sha256: string }> = []): Promise<Sensitivity | null> {
+    const own = ownSensitivity(job.spec);
+    if (own) return own;
+    // Every job the run holds sensitive so far, from the journal (the record), by their outputs' and logs' digests.
+    const index = await sensitiveIndex(this.S);
+    const sensitive = new Set([...index.jobs.keys()].filter((id) => id !== job.id));
+    if (!sensitive.size) return null;
+    // What the job actually read: its scope manifest's snapshot (each file's digest hashed at the job's start), not a scope resolved anew.
+    const objects = await snapshotObjects(this.S, job.scope?.manifest);
+    const text = [job.spec.command ?? "", job.spec.args ? JSON.stringify(job.spec.args) : "", job.spec.source ?? "", ...targetPaths(job.spec)].join("\n");
+    const from = derivedFrom({
+      objects,
+      text,
+      sensitive,
+      contentJob: (sha) => (index.content.get(sha) === job.id ? null : index.content.get(sha) ?? null),
+      generationJob: (gen) => index.genJob.get(gen) ?? null,
+      aliasJob: (alias) => index.aliasJob.get(alias) ?? null,
+    });
+    // A file it sealed that is byte for byte what a sensitive job wrote (what
+    // same_as names, ADR 0017) holds what that output holds, however it was
+    // made. Read from the journal's sensitive jobs and their manifests (the
+    // index above, the empty file excluded), never from the same_as index,
+    // which may still be building: the sensitivity is decided before
+    // job_committed is written.
+    const sameBytes = outputs.map((f) => index.content.get(f.sha256) ?? null).filter((id): id is string => id !== null && id !== job.id);
+    return derivedSensitivity([...new Set([...from, ...sameBytes])].sort());
   }
 
   /**
@@ -1461,6 +1700,7 @@ export class JobService {
         ...(job.spec.experimental ? { experimental: true } : {}),
         ...(job.spec.parent ? { parent: job.spec.parent } : {}),
         ...(job.spec.alias ? { alias: job.spec.alias } : {}),
+        ...(job.sensitive ? { sensitive: true } : {}),
       }));
       Object.assign(job, { generation: generation.id, revision });
       await this.project(job);
@@ -1478,8 +1718,9 @@ export class JobService {
           await this.o.notify("all", `Catalogue revision ${revision}: ${what}, made by job ${job.spec.parent ?? "?"}${maker ? ` (${maker})` : ""} and catalogued on its own — complete. ${where}`).catch(() => undefined);
         } else if (maker) {
           const cov = generation.coverage as { errors?: unknown[]; limits_hit?: unknown[]; why?: string } | null;
-          const why = [...(cov?.errors ?? []), ...(cov?.limits_hit ?? []), ...(cov?.why ? [cov.why] : [])].map(String);
-          await this.o.notify(maker, `Catalogue revision ${revision}: ${what}, made by your job ${job.spec.parent}, is ${generation.status}${why.length ? `: ${why.join("; ")}` : ""}. ${where} When a readable form of it appears in a job's output, it is offered to the recipes again.`).catch(() => undefined);
+          // A sensitive generation's coverage detail may carry the secret: the notification says it is withheld, never the reasons.
+          const why = generation.sensitive ? [] : [...(cov?.errors ?? []), ...(cov?.limits_hit ?? []), ...(cov?.why ? [cov.why] : [])].map(String);
+          await this.o.notify(maker, `Catalogue revision ${revision}: ${what}, made by your job ${job.spec.parent}, is ${generation.status}${why.length ? `: ${why.join("; ")}` : generation.sensitive ? " (its coverage detail is withheld: a sensitive output)" : ""}. ${where} When a readable form of it appears in a job's output, it is offered to the recipes again.`).catch(() => undefined);
         }
       }
       if (generation.status === "complete") await this.relateReadable(generation);
@@ -1961,8 +2202,30 @@ export class JobService {
 
   // --- what agents see ---------------------------------------------------------------------------
 
+  /**
+   * What a running job is doing, from the host (B11): a sample now (its
+   * output directory's metadata, its logs' sizes, its CPU and I/O from
+   * msb's metrics or its heartbeat), kept beside its staging, and the
+   * verdict over the samples kept. Null when it is not running.
+   */
+  async progress(id: string): Promise<JobProgress | null> {
+    const job = this.jobs.get(id);
+    if (!job || job.state !== "running") return null;
+    const st = this.staging(job);
+    const worker = job.worker;
+    const metrics = worker && this.o.metrics ? () => this.o.metrics!(worker) : undefined;
+    const s = await sampleJob({ out: st.out, ctl: st.ctl }, { ...(metrics ? { metrics } : {}) }).catch(() => null);
+    if (s) await keepSample(st.base, s);
+    return assessJob(await readSamples(st.base), { started_at: job.started_at, timeout_seconds: job.spec.timeout_seconds });
+  }
+
+  /** Every running job sampled (the service's own clock), so the samples say how long each signal has been still. */
+  async sampleRunning(): Promise<void> {
+    for (const j of this.jobs.values()) if (j.state === "running") await this.progress(j.id).catch(() => null);
+  }
+
   /** A job's state for its requester (or anyone: jobs are the run's, not private), with a page of its stdout. */
-  async status(agent: string, id: string, o: { offset?: number; limit?: number; cancel?: boolean; wait?: number } = {}): Promise<{ ok: true; job: JobRecord; stdout?: { offset: number; bytes: number; total: number; text: string; next: number | null; path: string } } | { ok: false; reason: string }> {
+  async status(agent: string, id: string, o: { offset?: number; limit?: number; cancel?: boolean; wait?: number } = {}): Promise<{ ok: true; job: JobRecord; stdout?: { offset: number; bytes: number; total: number; text: string; next: number | null; path: string }; progress?: JobProgress } | { ok: false; reason: string }> {
     if (!JOB_ID.test(id)) return { ok: false, reason: `${id} is not a job id` };
     const job = this.jobs.get(id);
     if (!job) return { ok: false, reason: `no job ${id}` };
@@ -2012,7 +2275,8 @@ export class JobService {
         await this.journal.append({ type: "job_notified", job: id, to: agent, how: "status" });
       }
     }
-    return { ok: true, job, ...(stdout ? { stdout } : {}) };
+    const progress = job.state === "running" ? await this.progress(id).catch(() => null) : null;
+    return { ok: true, job, ...(stdout ? { stdout } : {}), ...(progress ? { progress } : {}) };
   }
 
   private async requesterOf(agent: string): Promise<Requester> {
@@ -2108,6 +2372,27 @@ export class JobService {
   }
 }
 
+/**
+ * The program a failed job's image did not hold (B17), from the generic
+ * signs only: a shell's own diagnostic on its stderr (bash's "X: command
+ * not found", zsh's "command not found: X", and dash's "sh: 1: X: not
+ * found" with the shell's exit 127; the name sanitised), or exit 127 with
+ * no name ("?"). An application's own "X: not found" (a file, an object it
+ * looked for) is no missing program: null, as when there is neither.
+ */
+export async function programMissing(ctl: string, exit: number | null): Promise<string | null> {
+  const err = await readFile(join(ctl, "stderr.log")).catch(() => Buffer.alloc(0));
+  const text = err.subarray(Math.max(0, err.length - 65536)).toString("utf8");
+  // zsh first: its "zsh: command not found: X" would otherwise read as a program named "zsh".
+  const zsh = /(?:^|\n)[^\n]*?: command not found: ([A-Za-z0-9_.+-]{1,64})/.exec(text);
+  if (zsh) return zsh[1]!;
+  const bash = /(?:^|\n)(?:[^\n]*?: )?(?:line \d+: )?([A-Za-z0-9_.+-]{1,64}): command not found/.exec(text);
+  if (bash) return bash[1]!;
+  if (exit !== 127) return null;
+  const dash = /(?:^|\n)[^\n:]*: \d+: ([A-Za-z0-9_.+-]{1,64}): not found/.exec(text);
+  return dash ? dash[1]! : "?";
+}
+
 /** One post, for the agent that asked. */
 export function describe(job: JobRecord): string {
   const what = job.spec.kind === "tool" ? `tool ${job.spec.tool}` : job.spec.kind === "command" ? "command" : job.spec.kind === "recipe" ? `recipe ${job.spec.recipe}` : job.spec.seal ? `the seal of ${job.spec.seal.ref}` : job.spec.kind === "import" ? `import of ${job.spec.source}${scopeKindOf(job.spec) === "declared" ? ", from the snapshot the hub took at its start" : ", copied live from where it was"}` : "detect pass";
@@ -2117,7 +2402,14 @@ export function describe(job: JobRecord): string {
   const files = o ? `${o.files} file(s), ${o.bytes} bytes in ${o.path}/${o.rejected ? ` (${o.rejected} link(s) or special file(s) left out, named in its manifest)` : ""}` : "no output";
   const head = job.status === "ok" ? "done" : `${job.status}${job.reason ? ` (${job.reason})` : ""}`;
   const cite = job.spec.seal && job.status === "ok" ? `record again citing ${job.spec.seal.ref}: it resolves to import:${job.id}/<name>` : `cite its files as job:${job.id}/<path>`;
-  return `Job ${job.id} (${what}) ${head}: ${files}; stdout and stderr whole in store/jobs/${job.id}/. job_status ${job.id} for the details; ${cite}.${job.generation ? ` Catalogued as ${job.generation}.` : ""}`;
+  const same = job.same_as?.length ? ` ${job.same_as.length} of its files are an earlier job's output byte for byte (job_status ${job.id} names them).` : "";
+  return `Job ${job.id} (${what}) ${head}: ${files}; stdout and stderr whole in store/jobs/${job.id}/. job_status ${job.id} for the details; ${cite}.${job.generation ? ` Catalogued as ${job.generation}.` : ""}${same}${job.sensitive ? ` ${sensitiveWords(job)}` : ""}`;
+}
+
+/** What a sensitive job's outputs mean for whoever uses them, in one sentence. */
+export function sensitiveWords(job: Pick<JobRecord, "id" | "sensitive">): string {
+  if (!job.sensitive) return "";
+  return `Its outputs are sensitive (${job.sensitive.why === "secret_output" ? "it ran with secret_output" : `made from the sensitive output of ${job.sensitive.from.join(", ")}`}): an entry citing them is recorded sensitive, a job reading them seals sensitive output too, and a redacted package withholds them. Say what they show without the value.`;
 }
 
 
@@ -2147,6 +2439,10 @@ export async function jobView(S: string, job: JobRecord, o: { files?: number } =
     ...(scopeKindOf(job.spec) === "declared" ? { declared: job.spec.inputs } : {}),
     ...(job.scope?.manifest ? { scope_manifest: job.scope.manifest } : {}),
     ...(job.generation ? { generation: job.generation, revision: job.revision } : {}),
+    ...(job.program_missing ? { program_missing: { ...job.program_missing, note: "the image of its profile does not hold it: run it in a profile that does, install it if the job may, or tell the operator (the console lists these for the images' upkeep)" } } : {}),
+    ...(job.spec.independent ? { independent: true } : {}),
+    ...(job.spec.secret_output ? { secret_output: true } : {}),
+    ...(job.sensitive ? { sensitive: sensitiveWords(job) } : {}),
   };
   if (job.state !== "committed" || !job.outputs) return view;
   const dir = join(storePaths(S).jobs, job.id);
@@ -2173,6 +2469,7 @@ export async function jobView(S: string, job: JobRecord, o: { files?: number } =
   } catch {
     // no stderr
   }
+  Object.assign(view, sameAsView(job.id, job.same_as ?? []));
   view.cite = `job:${job.id}/<path>`;
   return view;
 }

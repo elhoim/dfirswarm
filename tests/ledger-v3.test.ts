@@ -146,8 +146,9 @@ test("the report shows hypotheses, limitations, contradictions, the questions an
   assert.match(html, /<h3>Limitations \(1\)<\/h3>/);
   assert.match(html, /1 standing contradiction: <a href="#e-2">E-2<\/a> contradicts <a href="#e-1">E-1<\/a>/);
   // Each question with where it stands: named by entries, answered by none (the body's §1).
-  assert.match(html, /Question 4<\/a><\/td><td><span class="chip chip-brick">not answered<\/span><\/td><td>1 entry names this question: <a href="#e-1">E-1<\/a>/);
-  assert.match(html, /Question 5<\/a><\/td><td><span class="chip chip-brick">not answered<\/span><\/td><td>1 entry names this question: <a href="#e-3">E-3<\/a>/);
+  // The one-screen table (docs/adr/0016): its answer column names the entries a question with no answer has.
+  assert.match(html, /Question 4<\/a><\/td><td><span class="chip chip-brick">not answered<\/span><\/td><td>[^<]*<\/td><td>none; 1 entry: <a href="#e-1">E-1<\/a>/);
+  assert.match(html, /Question 5<\/a><\/td><td><span class="chip chip-brick">not answered<\/span><\/td><td>[^<]*<\/td><td>none; 1 entry: <a href="#e-3">E-3<\/a>/);
   assert.match(html, /<h3>Sensitive material<\/h3><p>1 standing entry is marked sensitive: <a href="#e-4">E-4<\/a>/);
   assert.match(html, /Failed job<\/dt><dd>job:j000002\/rows\.json: job j000002 ended failed/, "the exhibit says it rests on a failed job's kept output");
   assert.match(html, /id="e-1">[\s\S]*?chip-saffron">qualified \(failed job\)</, "and that its finder says why those bytes hold");

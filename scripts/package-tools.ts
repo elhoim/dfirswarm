@@ -38,14 +38,16 @@
  *
  * Nothing here knows a tool or an evidence format.
  */
-import { createHash } from "node:crypto";
+import { createHash, createHmac, randomBytes } from "node:crypto";
 import { closeSync, existsSync, lstatSync, openSync, readFileSync, readSync, readdirSync, writeFileSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { attestationHash, disputeHash, ledgerHash, readLedger, type LedgerAttestation, type LedgerDispute, type LedgerEntry } from "../extensions/protocol.ts";
+import { attestationHash, disputeHash, ledgerHash, readLedger, sensitiveTokens, type LedgerAttestation, type LedgerDispute, type LedgerEntry, type SensitiveToken } from "../extensions/protocol.ts";
 import { leadEventHash, type LeadEvent } from "../extensions/leads.ts";
+import { sweepHash, type SweepRecord } from "../extensions/store-sweep.ts";
 import { REVIEW_ACTIONS } from "./review.ts";
 import { packageLayout, verifyReleases } from "./release-record.ts";
+import { outputWords, sensitiveEntries, sensitiveIndex, withheldPaths } from "./output-hygiene.ts";
 
 const sha256 = (b: string | Buffer) => createHash("sha256").update(b).digest("hex");
 const REDACTED = "[redacted: marked sensitive]";
@@ -60,42 +62,8 @@ function walk(dir: string): string[] {
   return out;
 }
 
-/** The fields of an entry, of any version, that can hold what it says. */
-const ENTRY_TEXT_FIELDS = ["value", "evidence", "source", "indicates", "confidence_why", "reasoning", "would_change", "alternatives_open", "alternatives_none_why", "because"] as const;
-
-/** One of a sensitive entry's words, with the entry it came from. */
-export type SensitiveToken = { token: string; seq: number };
-
-/**
- * What a sensitive entry says, as the words redaction looks for: each text
- * field whole (six characters or more, or four with a digit in it), and
- * each identifier-like run inside one (eight characters or more with a
- * digit, an @, a dot, a slash, a backslash or a colon in it: a key, a
- * token, an address, a path, an account), longest first, each with the
- * entry it came from.
- */
-export function sensitiveTokens(entries: LedgerEntry[]): SensitiveToken[] {
-  const out = new Map<string, number>();
-  const add = (t: string, seq: number) => {
-    if (!out.has(t)) out.set(t, seq);
-  };
-  for (const e of entries) {
-    if (!e.sensitive) continue;
-    const raw = e as unknown as Record<string, unknown>;
-    const texts: string[] = [];
-    for (const f of ENTRY_TEXT_FIELDS) if (typeof raw[f] === "string") texts.push(raw[f] as string);
-    if (e.attribution?.subject) texts.push(e.attribution.subject);
-    for (const l of e.locators ?? []) texts.push(l.at);
-    for (const a of (raw.alternatives as Array<{ explanation?: string; why?: string }> | undefined) ?? []) texts.push(a.explanation ?? "", a.why ?? "");
-    for (const q of (raw.qualifies as Array<{ why?: string }> | undefined) ?? []) texts.push(q.why ?? "");
-    for (const w of texts) {
-      const whole = (w ?? "").trim();
-      if (whole.length >= 6 || (whole.length >= 4 && /\d/.test(whole))) add(whole, e.seq);
-      for (const t of whole.match(/[^\s"'`,;()<>[\]{}]{8,}/g) ?? []) if (/[\d@./\\:]/.test(t)) add(t.replace(/[.:]+$/, ""), e.seq);
-    }
-  }
-  return [...out].map(([token, seq]) => ({ token, seq })).sort((a, b) => b.token.length - a.token.length || a.token.localeCompare(b.token));
-}
+// What a sensitive entry says, as the words redaction looks for (protocol.ts, where the question register reads them too).
+export { sensitiveTokens, type SensitiveToken };
 
 /** Package paths a sensitive entry's refs name, as the package lays them out, with the entry. */
 function citedPaths(entries: LedgerEntry[]): Array<{ path: string; seq: number }> {
@@ -115,10 +83,115 @@ function citedPaths(entries: LedgerEntry[]): Array<{ path: string; seq: number }
 /** What one redaction replaced: the sha256 of the original (never the original), why, and which entry's words it held. */
 export type Replaced = { what: "entry" | "line" | "file" | "field" | "text"; entry: number | null; sha256_of_original: string; line?: number; pointer?: string; count?: number; why: string };
 export type RedactionChange = { path: string; before_sha256: string; after_sha256: string; why: string; replaced: Replaced[] };
-export type LeakHit = { path: string; entry: number; token_sha256: string; as: string };
+/** A hit of the scan: the file, the ledger entry whose words it holds (0 for a sensitive output's own text or a digest, named in `output`/`why`), a commitment to the word (its sha256, or an opaque id for low-entropy content), and how it was found. */
+export type LeakHit = { path: string; entry: number; token_sha256: string; as: string; output?: string };
+/** A word the scan looks for: a sensitive entry's (protocol.ts sensitiveTokens), or a small sensitive output's whole text (`output`: job/path); `id` is a keyed commitment reported in place of the word's sha256 for low-entropy content. */
+export type ScanToken = SensitiveToken & { output?: string; id?: string };
+/** What a redacted package withheld whole, and why: never its bytes, always its sha256. */
+export type Withheld = { path: string; job: string | null; why: string; sha256_of_original: string; bytes: number };
 
 /** A sensitive entry's words as they may stand in a file: as written, JSON-escaped. */
 const forms = (t: string) => [...new Set([t, JSON.stringify(t).slice(1, -1)])];
+
+/**
+ * Where a sensitive word counts as standing in a text. A long word (eight
+ * characters or more) counts wherever it stands. A short one (a PIN, a short
+ * code) counts wherever it stands too, a letter touching it included
+ * ("PIN4821"), except where it is part of a longer run that makes it
+ * something else:
+ * - its digits run on into more digits: a bigger number, a timestamp's
+ *   fraction ("12.482145Z"), a count;
+ * - a run of sixteen hex characters or more with digits of its own beyond
+ *   the word: a sha256, a keyed id (hidden-…);
+ * - a run of twenty base64 or base64url characters or more with letters and
+ *   digits of their own and few separators (under one in eight of '+', '/',
+ *   '-', '_'): an encoded blob, where a path's or a sentence's are not.
+ * Four digits inside a hash are chance, and every chained record a package
+ * carries is full of hashes: redacted there, a line would lose its content
+ * for one; found there, the scan would refuse the package for a leak that is
+ * not one. Leaving a real value in is the worse failure, so every other place
+ * counts. The redaction and the scan hold to the same rule, over text, UTF-8
+ * and UTF-16LE bytes and file names; it reads ASCII classes only, so the
+ * scan's lower-cased text and the original agree.
+ */
+const SHORT_WORD = 8;
+/** How far a run is read either side of the word: enough to tell a hash or a blob, bounded for a file of one. */
+const RUN_WINDOW = 64;
+const isDigit = (c: number | undefined) => c !== undefined && c >= 0x30 && c <= 0x39;
+const isLetter = (c: number | undefined) => c !== undefined && ((c >= 0x41 && c <= 0x5a) || (c >= 0x61 && c <= 0x7a));
+const isHex = (c: number | undefined) => isDigit(c) || (c !== undefined && ((c >= 0x41 && c <= 0x46) || (c >= 0x61 && c <= 0x66)));
+const isBase64 = (c: number | undefined) => isDigit(c) || isLetter(c) || c === 0x2b || c === 0x2f;
+const isBase64Url = (c: number | undefined) => isDigit(c) || isLetter(c) || c === 0x2d || c === 0x5f;
+/**
+ * Whether a short word found at a place is part of a longer run that makes
+ * it something else (the rule above). `at(k)` is the character k places from
+ * where the word starts (negative before it), undefined past either end; the
+ * word is `n` characters.
+ */
+function partOfLongerRun(at: (k: number) => number | undefined, n: number): boolean {
+  if ((isDigit(at(0)) && isDigit(at(-1))) || (isDigit(at(n - 1)) && isDigit(at(n)))) return true;
+  const run = (ok: (c: number | undefined) => boolean): [number, number] | null => {
+    for (let k = 0; k < n; k += 1) if (!ok(at(k))) return null;
+    let l = 0;
+    while (l > -RUN_WINDOW && ok(at(l - 1))) l -= 1;
+    let r = n;
+    while (r < n + RUN_WINDOW && ok(at(r))) r += 1;
+    return [l, r];
+  };
+  /** Whether the run holds a character of this class outside the word itself. */
+  const own = ([l, r]: [number, number], test: (c: number | undefined) => boolean) => {
+    for (let k = l; k < r; k += 1) if ((k < 0 || k >= n) && test(at(k))) return true;
+    return false;
+  };
+  const hex = run(isHex);
+  if (hex && hex[1] - hex[0] >= 16 && own(hex, isDigit)) return true;
+  for (const ok of [isBase64, isBase64Url]) {
+    const b = run(ok);
+    if (!b || b[1] - b[0] < 20 || !own(b, isDigit) || !own(b, isLetter)) continue;
+    let separators = 0;
+    for (let k = b[0]; k < b[1]; k += 1) if (!isDigit(at(k)) && !isLetter(at(k))) separators += 1;
+    if (separators * 8 < b[1] - b[0]) return true;
+  }
+  return false;
+}
+/** Each place `word` stands in `text` by that rule. */
+function wordPlaces(text: string, word: string): number[] {
+  const out: number[] = [];
+  if (!word) return out;
+  const short = word.length < SHORT_WORD;
+  for (let i = text.indexOf(word); i >= 0; i = text.indexOf(word, i + 1)) {
+    if (short && partOfLongerRun((k) => (i + k >= 0 && i + k < text.length ? text.charCodeAt(i + k) : undefined), word.length)) continue;
+    out.push(i);
+  }
+  return out;
+}
+const holdsWord = (text: string, word: string) => wordPlaces(text, word).length > 0;
+/** `text` with every place `word` stands replaced by `by`, and how many there were. */
+function replaceWord(text: string, word: string, by: string): { text: string; count: number } {
+  let out = "";
+  let from = 0;
+  let count = 0;
+  for (const i of wordPlaces(text, word)) {
+    if (i < from) continue;
+    out += text.slice(from, i) + by;
+    from = i + word.length;
+    count += 1;
+  }
+  return { text: out + text.slice(from), count };
+}
+/** The same rule over bytes: `unit` is 1 for UTF-8, 2 for UTF-16LE (a character is a little-endian code unit). */
+function bytesHoldWord(buf: Buffer, word: Buffer, unit: 1 | 2, short: boolean): boolean {
+  if (!short) return buf.includes(word);
+  for (let i = buf.indexOf(word); i >= 0; i = buf.indexOf(word, i + 1)) {
+    const at = (k: number): number | undefined => {
+      const j = i + k * unit;
+      if (j < 0 || j + unit > buf.length) return undefined;
+      return unit === 1 ? buf[j] : buf[j] | (buf[j + 1] << 8);
+    };
+    if (!partOfLongerRun(at, word.length / unit)) return true;
+  }
+  return false;
+}
 
 /** The files a package seals as they are: signatures, tokens, a release's record and its sidecars. Scanned, never rewritten. */
 function sealedAsIs(rel: string): boolean {
@@ -129,9 +202,10 @@ function sealedAsIs(rel: string): boolean {
 /** A JSON value with every string that holds a sensitive entry's words replaced whole; each replacement recorded by its pointer. */
 function redactJsonValue(v: unknown, pointer: string, tokens: SensitiveToken[], replaced: Replaced[]): unknown {
   if (typeof v === "string") {
-    const hit = tokens.find((t) => v.includes(t.token));
+    const hit = tokens.find((t) => holdsWord(v, t.token));
     if (!hit) return v;
-    replaced.push({ what: "field", entry: hit.seq, sha256_of_original: sha256(v), pointer, why: "a field holding a sensitive entry's words, replaced whole" });
+    const t = hit as ScanToken;
+    replaced.push({ what: "field", entry: t.output ? null : t.seq, sha256_of_original: t.id ?? sha256(t.token), pointer, why: t.output ? `a field holding the text of a sensitive output (${t.output}), replaced whole` : "a field holding a sensitive entry's words, replaced whole" });
     return REDACTED;
   }
   if (Array.isArray(v)) return v.map((x, i) => redactJsonValue(x, `${pointer}/${i}`, tokens, replaced));
@@ -143,26 +217,32 @@ function redactJsonValue(v: unknown, pointer: string, tokens: SensitiveToken[], 
  * Every packaged file searched for what redaction should have taken out:
  * each sensitive entry's words, normalised (lower case, one kind of path
  * separator, JSON escapes read), in a text file's text, and as UTF-8 and
- * UTF-16 bytes in any file (a PDF's compressed text is not read). A hit is
- * named by the file, the entry and the sha256 of the word, never the word.
+ * UTF-16 bytes in any file (a PDF's compressed text is not read); with
+ * `digests`, each sensitive output's sha256 as it may stand in a record;
+ * with `filenames`, a path whose own name holds a sensitive value. A hit is
+ * named by the file and a commitment to the word (its sha256, or a keyed id
+ * for low-entropy content), never the word.
  */
-export function leakScan(dir: string, tokens: SensitiveToken[]): { files: number; hits: LeakHit[] } {
+export function leakScan(dir: string, tokens: ScanToken[], o: { digests?: ReadonlySet<string>; filenames?: boolean } = {}): { files: number; hits: LeakHit[] } {
   const hits: LeakHit[] = [];
   let files = 0;
   const norm = (s: string) => s.replace(/\\"/g, '"').replace(/\\\//g, "/").replace(/\\\\/g, "\\").toLowerCase().replace(/\\/g, "/");
   const wanted = tokens.map((t) => ({ ...t, n: norm(t.token), raw: [Buffer.from(t.token, "utf8"), Buffer.from(t.token, "utf16le"), Buffer.from(t.token.toLowerCase(), "utf8")] }));
+  const digests = [...(o.digests ?? [])];
   const maxLen = Math.max(0, ...wanted.map((w) => w.raw[1].length));
   for (const abs of walk(dir)) {
     const rel = relative(dir, abs).split("\\").join("/");
-    if (rel === "REDACTIONS.txt" || rel === "REDACTIONS.json" || rel.startsWith("MANIFEST.txt")) continue;
+    if (rel === "REDACTIONS.txt" || rel === "REDACTIONS.json" || rel === "HYGIENE.json" || rel.startsWith("MANIFEST.txt")) continue;
     files += 1;
     const size = lstatSync(abs).size;
     const seen = new Set<string>();
-    const note = (w: (typeof wanted)[number], as: string) => {
-      if (seen.has(`${w.token}\u0000${as}`)) return;
-      seen.add(`${w.token}\u0000${as}`);
-      hits.push({ path: rel, entry: w.seq, token_sha256: sha256(w.token), as });
+    const note = (commit: string, entry: number, as: string, extra: { output?: string } = {}) => {
+      if (seen.has(`${commit}\u0000${as}`)) return;
+      seen.add(`${commit}\u0000${as}`);
+      hits.push({ path: rel, entry, token_sha256: commit, as, ...(extra.output ? { output: extra.output } : {}) });
     };
+    // A filename that itself holds a sensitive word (an agent named an output after the secret).
+    if (o.filenames) for (const w of wanted) if (holdsWord(norm(rel), w.n)) note(w.id ?? sha256(w.token), w.seq, "filename", { output: w.output });
     // Whole, when it can be held; in overlapping chunks when it cannot: nothing is left unread.
     const chunk = 32 * 1024 * 1024;
     const fd = openSync(abs, "r");
@@ -175,9 +255,11 @@ export function leakScan(dir: string, tokens: SensitiveToken[]): { files: number
         // Text when no NUL stands in its first 8 KiB; any file's bytes are searched either way.
         const text = !buf.subarray(0, 8192).includes(0) ? norm(buf.toString("utf8")) : null;
         for (const w of wanted) {
-          if (text !== null && text.includes(w.n)) note(w, "text");
-          else if (w.raw.some((b) => buf.includes(b))) note(w, "bytes");
+          if (text !== null && holdsWord(text, w.n)) note(w.id ?? sha256(w.token), w.seq, "text", { output: w.output });
+          else if (w.raw.some((b, k) => bytesHoldWord(buf, b, k === 1 ? 2 : 1, w.token.length < SHORT_WORD))) note(w.id ?? sha256(w.token), w.seq, "bytes", { output: w.output });
         }
+        // A sensitive output's digest left in a record: named, never printed.
+        if (text !== null) for (const d of digests) if (text.includes(d)) note(`digest:${d.slice(0, 12)}`, 0, "digest");
       }
     } finally {
       closeSync(fd);
@@ -200,18 +282,73 @@ export function leakScan(dir: string, tokens: SensitiveToken[]): { files: number
  * every file is scanned for what should have been taken out: `leaks: fail`
  * (the default) refuses the package on a hit, `list` records the hits.
  */
-export async function redactPackage(sandbox: string, dir: string, opts: { leaks?: "fail" | "list" } = {}): Promise<{ entries: number; files: number; lines: number; leaks: LeakHit[]; scanned: number }> {
-  const entries = await readLedger(sandbox, { raw: true });
-  const tokens = sensitiveTokens(entries);
+export async function redactPackage(sandbox: string, dir: string, opts: { leaks?: "fail" | "list" } = {}): Promise<{ entries: number; files: number; lines: number; leaks: LeakHit[]; scanned: number; withheld: Withheld[] }> {
+  // An entry citing a sensitive output is sensitive whether or not it was
+  // recorded so (an entry from before the harness marked such entries):
+  // taken out the same way (docs/adr/0016).
+  const raw = await readLedger(sandbox, { raw: true });
+  const derived = await sensitiveEntries(sandbox, raw);
+  const entries = raw.map((e) => (derived.has(e.seq) && !e.sensitive ? { ...e, sensitive: true } : e));
+  const index = await sensitiveIndex(sandbox);
+  const words = await outputWords(sandbox);
   const sensitiveSeqs = new Set(entries.filter((e) => e.sensitive).map((e) => e.seq));
+  const unmarked = raw.filter((e) => !e.sensitive && derived.has(e.seq)).map((e) => e.seq);
   const sensitiveHashes = new Set(entries.filter((e) => e.sensitive && e.hash).map((e) => e.hash as string));
+  // The bytes a sensitive job wrote, by digest (its outputs and logs), so a
+  // copy anywhere in the run is withheld by its content, not by its path; the
+  // empty digest is not one of them, or every empty file would be withheld.
+  const EMPTY = sha256(Buffer.alloc(0));
+  const sensitiveDigests = new Set([...index.content.keys()].filter((d) => d !== EMPTY));
+  // A keyed, non-reversible commitment for what is withheld or matched: a
+  // recipient cannot brute-force a low-entropy value from it, and the key
+  // lives only in the private sidecar the run's owner keeps, outside the
+  // handover (docs/adr/0016). The real digests and paths go there too.
+  const key = randomBytes(32);
+  const hidden = new Map<string, string>();
+  const idFor = (value: string): string => {
+    const got = hidden.get(value);
+    if (got) return got;
+    const id = `hidden-${createHmac("sha256", key).update(value).digest("hex").slice(0, 24)}`;
+    hidden.set(value, id);
+    return id;
+  };
+  const privateMap: Record<string, { of: "digest" | "path" | "word"; sha256?: string; path?: string; why?: string }> = {};
+  /** Hide a real digest behind its keyed id, and record the truth in the private sidecar. */
+  const hideDigest = (sha: string, why: string, path?: string): string => {
+    const id = idFor(`digest:${sha}`);
+    privateMap[id] = { of: "digest", sha256: sha, ...(path ? { path } : {}), why };
+    return id;
+  };
+  /** A path fit to appear in the handover's own records: a basename holding a sensitive word is hidden behind a keyed id, the real path kept in the sidecar. */
+  const safePath = (rel: string): string => {
+    if (!tokens.some((t) => forms(t.token).some((f) => holdsWord(rel, f)))) return rel;
+    const dir_ = rel.includes("/") ? `${rel.slice(0, rel.lastIndexOf("/"))}/` : "";
+    const id = idFor(`path:${rel}`);
+    privateMap[id] = { of: "path", path: rel, why: "a path whose name holds a sensitive value" };
+    return `${dir_}${id}`;
+  };
+  // The words the scan and the field redaction look for: a sensitive entry's,
+  // and the whole text of each small sensitive output (a low-entropy secret),
+  // the latter behind a keyed id so a hit names no recoverable value.
+  const tokens: ScanToken[] = [
+    ...sensitiveTokens(entries).map((t) => {
+      const id = idFor(`word:${t.token}`);
+      privateMap[id] = { of: "word", why: `a sensitive entry's words (E-${t.seq})` };
+      return { ...t, id } as ScanToken;
+    }),
+    ...words.map((w) => {
+      const id = idFor(`word:${w.token}`);
+      privateMap[id] = { of: "word", why: `the text of a sensitive output (job ${w.job}, ${w.path})` };
+      return { token: w.token, seq: 0, output: `job ${w.job}, ${w.path}`, id } as ScanToken;
+    }),
+  ];
   const changes: RedactionChange[] = [];
   let lines = 0;
   const change = (rel: string, before: Buffer, after: Buffer | string, why: string, replaced: Replaced[]) => {
     writeFileSync(join(dir, rel), after);
     changes.push({ path: rel, before_sha256: sha256(before), after_sha256: sha256(after), why, replaced });
   };
-  const holds = (l: string) => tokens.find((t) => forms(t.token).some((f) => l.includes(f)));
+  const holds = (l: string) => tokens.find((t) => forms(t.token).some((f) => holdsWord(l, f)));
   const handled = new Set<string>();
   // A chained file, line by line: `keep` says what a redacted line keeps of the one it replaces.
   const chained = (rel: string, judge: (o: Record<string, unknown>, raw: string) => { seq: number | null; why: string } | null, keep: (o: Record<string, unknown>, raw: string) => Record<string, unknown>, what: Replaced["what"], why: string) => {
@@ -245,7 +382,7 @@ export async function redactPackage(sandbox: string, dir: string, opts: { leaks?
   };
   const byWords = (l: string) => {
     const t = holds(l);
-    return t ? { seq: t.seq, why: "holds a sensitive entry's words" } : null;
+    return t ? { seq: t.output ? null : t.seq, why: t.output ? `holds the text of a sensitive output (${t.output})` : "holds a sensitive entry's words" } : null;
   };
   // The ledger: a sensitive entry, and any entry that repeats one's words, keeps what chains it.
   chained(
@@ -265,9 +402,34 @@ export async function redactPackage(sandbox: string, dir: string, opts: { leaks?
       "act(s) on or holding a sensitive entry, replaced keeping act, target, prev and hash",
     );
   }
+  // A store sweep of a sensitive coverage record, one that found its strings in a sensitive job's output, or one that says a sensitive entry's words (its looked_for terms, its hits' refs): the sweep kept by what chains it.
+  chained(
+    "ledger-sweeps.jsonl",
+    (o, l) => {
+      if (typeof o.target === "string" && sensitiveHashes.has(o.target)) return { seq: Number(o.seq), why: "the sweep of a sensitive coverage record" };
+      const hits = [...((o.hits as Array<{ ref?: string; also?: string[] }> | undefined) ?? []), ...((o.named_hits as Array<{ ref?: string; also?: string[] }> | undefined) ?? [])];
+      const refs = hits.flatMap((h) => [h.ref ?? "", ...(h.also ?? [])]);
+      const job = refs.map((r) => /^job:([^/]+)/.exec(r)?.[1]).find((id) => id && index.jobs.has(id));
+      if (job) return { seq: Number(o.seq), why: `found its strings in a sensitive output (job ${job})` };
+      return byWords(l);
+    },
+    (o, l) => ({ v: o.v, seq: o.seq, target: o.target, state: o.state, redacted: true, line_sha256: sha256(l), prev: o.prev, hash: o.hash }),
+    "line",
+    "store sweep(s) of a sensitive record, or holding a sensitive word or a sensitive output's ref, replaced keeping seq, target, state, prev and hash",
+  );
   if (tokens.length) {
+    // The finish register: an event that repeats a sensitive entry's words (an ack's why, a resolution), kept by what chains it.
+    chained("finish.jsonl", (_o, l) => byWords(l), (o, l) => ({ v: o.v, seq: o.seq, ev: o.ev, redacted: true, line_sha256: sha256(l), prev: o.prev, hash: o.hash }), "line", "finish event(s) holding a sensitive entry's words replaced, keeping seq, ev, prev and hash");
     // A lead that repeats a sensitive entry's words: its event kept by what chains it.
     chained("leads.jsonl", (_o, l) => byWords(l), (o, l) => ({ v: o.v, seq: o.seq, ev: o.ev, ...(o.lead ? { lead: o.lead } : {}), redacted: true, line_sha256: sha256(l), prev: o.prev, hash: o.hash }), "line", "lead event(s) holding a sensitive entry's words replaced, keeping seq, ev, lead, prev and hash");
+    // A question that repeats a sensitive entry's words, the same way.
+    chained("questions.jsonl", (_o, l) => byWords(l), (o, l) => ({ v: o.v, seq: o.seq, ev: o.ev, ...(o.q ? { q: o.q } : {}), redacted: true, line_sha256: sha256(l), prev: o.prev, hash: o.hash }), "line", "question event(s) holding a sensitive entry's words replaced, keeping seq, ev, q, prev and hash");
+    if (existsSync(join(dir, "questions.md"))) {
+      const before = readFileSync(join(dir, "questions.md"));
+      const hit = holds(before.toString("utf8"));
+      handled.add("questions.md");
+      if (hit) change("questions.md", before, `${REDACTED}: the rendered question register repeats a sensitive entry's words; questions.jsonl carries every event (those redacted by their hashes); its sha256 before redaction is ${sha256(before)}\n`, "the rendered register holds a sensitive entry's words, replaced whole", [{ what: "file", entry: hit.seq, sha256_of_original: sha256(before), why: "repeats a sensitive entry's words" }]);
+    }
     if (existsSync(join(dir, "leads.md"))) {
       const before = readFileSync(join(dir, "leads.md"));
       const hit = holds(before.toString("utf8"));
@@ -278,35 +440,83 @@ export async function redactPackage(sandbox: string, dir: string, opts: { leaks?
     chained("store/journal.jsonl", (_o, l) => byWords(l), (o, l) => ({ v: o.v, seq: o.seq, type: o.type, ...(o.job ? { job: o.job } : {}), redacted: true, line_sha256: sha256(l), prev: o.prev ?? null }), "line", "journal line(s) holding a sensitive entry's words replaced, keeping seq, prev and their own sha256");
     chained("review.jsonl", (_o, l) => byWords(l), (o, l) => ({ v: o.v, seq: o.seq, action: o.action, redacted: true, line_sha256: sha256(l), prev: o.prev ?? null }), "line", "review line(s) holding a sensitive entry's words replaced, keeping seq, action, prev and their own sha256");
   }
-  // A file a sensitive entry cites, whole.
-  for (const c of citedPaths(entries)) {
-    if (!existsSync(join(dir, c.path))) continue;
-    const before = readFileSync(join(dir, c.path));
-    handled.add(c.path);
-    change(c.path, before, `${REDACTED}: cited by a sensitive ledger entry; its sha256 before redaction is ${sha256(before)}\n`, "cited by a sensitive entry, replaced whole", [{ what: "file", entry: c.seq, sha256_of_original: sha256(before), why: "cited by a sensitive entry" }]);
-  }
-  let files = 0;
-  if (sensitiveSeqs.size) {
+  // A sensitive output, and its job's stdout and stderr, withheld whole
+  // (docs/adr/0016): by the bytes they hold, so a copy anywhere in the run —
+  // work/, a catalogue link, a second job's output — is withheld too, not
+  // only the canonical store path. The bytes are not read to decide what in
+  // them is secret, and the handover names each by a keyed id, never by the
+  // sha256 that would let a low-entropy value be brute-forced; the real
+  // digest and path are in the private sidecar. A basename that itself holds
+  // a secret is hidden in the recorded path.
+  const withheld: Withheld[] = [];
+  const patterns = withheldPaths(index);
+  const withholdPath = (rel: string, before: Buffer, why: string, jobId: string | null) => {
+    const sha = sha256(before);
+    const id = hideDigest(sha, why, rel);
+    handled.add(rel);
+    change(rel, before, `[withheld: sensitive content (${why}); matched ${id}. Its bytes, digest and path are in the run owner's private sidecar, not here.]\n`, `sensitive content, withheld whole (${why})`, [{ what: "file", entry: null, sha256_of_original: id, why }]);
+    withheld.push({ path: safePath(rel), job: jobId, why, sha256_of_original: id, bytes: before.length });
+  };
+  if (patterns.length || sensitiveDigests.size) {
     for (const abs of walk(dir)) {
       const rel = relative(dir, abs).split("\\").join("/");
       if (handled.has(rel) || sealedAsIs(rel)) continue;
       const before = readFileSync(abs);
-      // A PDF a release printed: words cannot be taken out of it, so it is withheld.
+      const byContent = sensitiveDigests.has(sha256(before)) ? (index.content.get(sha256(before)) ?? null) : null;
+      const byPath = patterns.find((p) => p.rel.test(rel));
+      if (byContent) withholdPath(rel, before, `bytes a sensitive job wrote (job ${byContent})`, byContent);
+      else if (byPath) withholdPath(rel, before, byPath.why, byPath.job);
+    }
+  }
+  // A file a sensitive entry cites, whole; by a keyed id, its digest and path in the sidecar.
+  for (const c of citedPaths(entries)) {
+    if (!existsSync(join(dir, c.path)) || handled.has(c.path)) continue;
+    const before = readFileSync(join(dir, c.path));
+    const id = hideDigest(sha256(before), `cited by a sensitive entry (E-${c.seq})`, c.path);
+    handled.add(c.path);
+    change(c.path, before, `${REDACTED}: cited by a sensitive ledger entry (E-${c.seq}); matched ${id} (its bytes and digest are in the run owner's private sidecar)\n`, "cited by a sensitive entry, replaced whole", [{ what: "file", entry: c.seq, sha256_of_original: id, why: "cited by a sensitive entry" }]);
+  }
+  // Every occurrence of a sensitive digest in a text file (a manifest, a
+  // job record, the store journal, a revision index) is the content's name:
+  // replaced by its keyed id, so the handover carries no digest a low-entropy
+  // value could be brute-forced from.
+  const digestList = [...sensitiveDigests];
+  const replaceDigests = (text: string, replaced: Replaced[]): string => {
+    let t = text;
+    for (const sha of digestList) {
+      if (!t.includes(sha)) continue;
+      const id = hideDigest(sha, "the digest of a sensitive output");
+      const count = t.split(sha).length - 1;
+      t = t.split(sha).join(id);
+      replaced.push({ what: "text", entry: null, sha256_of_original: id, count, why: "the digest of a sensitive output" });
+    }
+    return t;
+  };
+  let files = 0;
+  if (sensitiveSeqs.size || tokens.length || withheld.length || sensitiveDigests.size) {
+    for (const abs of walk(dir)) {
+      const rel = relative(dir, abs).split("\\").join("/");
+      if (handled.has(rel) || sealedAsIs(rel)) continue;
+      const before = readFileSync(abs);
+      // A PDF a release printed: words cannot be taken out of it, so it is withheld (by a keyed id, not its digest).
       if (/^release\/v\d+\/.+\.pdf$/.test(rel)) {
-        change(rel, before, `[withheld: a PDF cannot be redacted by replacing words; the release names it by its sha256 before redaction, ${sha256(before)}]\n`, "a release's PDF, withheld", [{ what: "file", entry: null, sha256_of_original: sha256(before), why: "a PDF cannot be redacted word by word" }]);
+        withholdPath(rel, before, "a release's PDF: words cannot be taken out of it", null);
         files += 1;
         continue;
       }
-      if (!tokens.length || before.subarray(0, 8192).includes(0)) continue;
+      if (before.subarray(0, 8192).includes(0)) continue;
       const text = before.toString("utf8");
-      if (!holds(text)) continue;
+      const hasWord = tokens.length > 0 && Boolean(holds(text));
+      const hasDigest = digestList.some((d) => text.includes(d));
+      if (!hasWord && !hasDigest) continue;
       const replaced: Replaced[] = [];
       let after: string | null = null;
       // JSON, field by field, keeping its shape.
       if (/\.json$/.test(rel)) {
         try {
-          const v = redactJsonValue(JSON.parse(text), "", tokens, replaced);
+          const v = hasWord ? redactJsonValue(JSON.parse(text), "", tokens, replaced) : JSON.parse(text);
           after = `${JSON.stringify(v, null, /\n\s+"/.test(text) ? 2 : undefined)}${text.endsWith("\n") ? "\n" : ""}`;
+          after = replaceDigests(after, replaced);
         } catch {
           after = null;
         }
@@ -314,9 +524,10 @@ export async function redactPackage(sandbox: string, dir: string, opts: { leaks?
         const out: string[] = [];
         let ok = true;
         text.split("\n").forEach((l, i) => {
-          if (!l.trim() || !holds(l)) return out.push(l);
+          if (!l.trim() || (!holds(l) && !digestList.some((d) => l.includes(d)))) return out.push(l);
           try {
-            out.push(JSON.stringify(redactJsonValue(JSON.parse(l), `${i + 1}`, tokens, replaced)));
+            const v = holds(l) ? redactJsonValue(JSON.parse(l), `${i + 1}`, tokens, replaced) : JSON.parse(l);
+            out.push(replaceDigests(JSON.stringify(v), replaced));
           } catch {
             ok = false;
             out.push(l);
@@ -325,43 +536,59 @@ export async function redactPackage(sandbox: string, dir: string, opts: { leaks?
         after = ok ? out.join("\n") : null;
       }
       if (after === null) {
-        // Any other text: the words replaced where they stand.
+        // Any other text: the words and the digests replaced where they stand.
         replaced.length = 0;
         let t = text;
         for (const tok of tokens) {
           for (const f of forms(tok.token)) {
-            const count = t.split(f).length - 1;
+            const r = replaceWord(t, f, REDACTED);
+            const count = r.count;
             if (!count) continue;
-            t = t.split(f).join(REDACTED);
-            replaced.push({ what: "text", entry: tok.seq, sha256_of_original: sha256(tok.token), count, why: "a sensitive entry's words" });
+            t = r.text;
+            replaced.push({ what: "text", entry: tok.output ? null : tok.seq, sha256_of_original: tok.id ?? sha256(tok.token), count, why: tok.output ? `the text of a sensitive output (${tok.output})` : "a sensitive entry's words" });
           }
         }
+        t = replaceDigests(t, replaced);
         after = t;
       }
       if (replaced.length) {
         files += 1;
-        change(rel, before, after, /\.jsonl?$/.test(rel) && replaced.every((r) => r.what === "field") ? "fields holding a sensitive entry's words replaced whole" : "a sensitive entry's words replaced", replaced);
+        change(rel, before, after, /\.jsonl?$/.test(rel) && replaced.every((r) => r.what === "field") ? "fields holding a sensitive entry's words replaced whole" : "a sensitive entry's words or output digests replaced", replaced);
       }
     }
   }
-  // What should have been taken out, looked for everywhere now.
-  const scan = leakScan(dir, tokens);
+  // The records' own paths are sanitised: a filename that holds a secret is a keyed id here too.
+  const changesOut = changes.map((c) => ({ ...c, path: safePath(c.path) }));
+  // What should have been taken out, looked for everywhere now, over the whole
+  // package including the records generated below and the filenames.
+  const scan = leakScan(dir, tokens, { digests: sensitiveDigests, filenames: true });
+  const hitsOut = scan.hits.map((h) => ({ ...h, path: safePath(h.path) }));
   const mode = opts.leaks ?? "fail";
+  // The private sidecar, beside the package and never inside it: the run's
+  // owner matches a keyed id to its real digest, path or word through this; a
+  // recipient never has it (docs/adr/0016). Written after every id is minted,
+  // and it is not under the package's directory, so the scan never reads it.
+  writeFileSync(`${dir.replace(/\/$/, "")}.private.json`, `${JSON.stringify({ v: 1, note: "Kept by the run's owner, NEVER handed over: the keyed ids in this package's REDACTIONS and withheld stubs, each to the real digest, path or word it stands for. Without it the ids reveal nothing.", key_note: "The ids are HMAC-SHA256 of the value under a per-package key held only here.", map: privateMap }, null, 2)}\n`, { mode: 0o600 });
   writeFileSync(
     join(dir, "REDACTIONS.txt"),
     [
       "Redactions",
       "==========",
       "",
-      `This package was made with --redact. ${sensitiveSeqs.size} ledger entr${sensitiveSeqs.size === 1 ? "y was" : "ies were"} marked sensitive (seq ${[...sensitiveSeqs].join(", ") || "none"}).`,
+      `This package was made with --redact. ${sensitiveSeqs.size} ledger entr${sensitiveSeqs.size === 1 ? "y was" : "ies were"} marked sensitive (seq ${[...sensitiveSeqs].join(", ") || "none"})${unmarked.length ? `, ${unmarked.length} of them because ${unmarked.length === 1 ? "it cites" : "they cite"} a sensitive output (seq ${unmarked.join(", ")})` : ""}.`,
+      `${index.jobs.size} job${index.jobs.size === 1 ? "'s" : "s'"} outputs were sensitive (${[...index.jobs.values()].map((j) => `${j.id}: ${j.sensitivity.why === "secret_output" ? "secret_output" : `derived from ${j.sensitivity.from.join(", ")}`}`).join("; ") || "none"}).`,
       "What they say, and the objects they cite, are not in it. A chained file keeps its chain: a redacted",
-      "line carries the sha256 of the line it replaces, which the next line's prev names. Each change below",
-      "is the file's sha256 before and after, so the owner of the original can match it; REDACTIONS.json",
-      "records what each replaced (the sha256 of the original, why, which entry) and the leak scan.",
+      "line carries the sha256 of the line it replaces, which the next line's prev names. Withheld or matched",
+      "sensitive content is named by a keyed id, never by a digest a low-entropy value could be brute-forced",
+      "from; the run's owner matches it through the private sidecar kept outside this package. REDACTIONS.json",
+      "records each change, what was withheld whole and the leak scan over every file.",
       `Leak scan: ${scan.hits.length ? `${scan.hits.length} HIT(S) over ${scan.files} file(s), LISTED in REDACTIONS.json (made with --redact-leaks list)` : `nothing found over ${scan.files} file(s)`}.`,
       "",
+      `Withheld whole: ${withheld.length ? "" : "nothing"}`,
+      ...withheld.map((w) => `${w.sha256_of_original}  ${String(w.bytes).padStart(12)}  ${w.path}  ${w.why}`),
+      "",
       "sha256 before                                                    sha256 after                                                     path  why",
-      ...changes.map((c) => `${c.before_sha256}  ${c.after_sha256}  ${c.path}  ${c.why}`),
+      ...changesOut.map((c) => `${c.before_sha256}  ${c.after_sha256}  ${c.path}  ${c.why}`),
       "",
     ].join("\n"),
   );
@@ -370,17 +597,79 @@ export async function redactPackage(sandbox: string, dir: string, opts: { leaks?
     `${JSON.stringify(
       {
         v: 1,
-        note: "What this package's redaction replaced: each change with the sha256 of what it replaced (never the words), why, and which sensitive entry's words it held; then every file scanned for what should have been taken out. Under MANIFEST.txt and its signature.",
-        entries: entries.filter((e) => e.sensitive).map((e) => ({ seq: e.seq, kind: e.kind, hash: e.hash ?? null })),
+        note: "What this package's redaction replaced: each change with what it replaced (a keyed id, or the sha256 of a line that carries no secret), why, and which entry; then every file scanned. Sensitive content is named by a keyed id whose truth is in the private sidecar the run's owner keeps, outside this package. Under MANIFEST.txt and its signature.",
+        entries: entries.filter((e) => e.sensitive).map((e) => ({ seq: e.seq, kind: e.kind, hash: e.hash ?? null, why: derived.get(e.seq) ?? "marked sensitive" })),
+        sensitive_outputs: [...index.jobs.values()].map((j) => ({ job: j.id, why: j.sensitivity.why, from: j.sensitivity.from, status: j.status, files: j.files.length, withheld: withheld.filter((w) => w.job === j.id).length })),
         words: tokens.length,
-        changes,
-        leak_scan: { mode, files: scan.files, hits: scan.hits },
+        output_words: words.length,
+        withheld: withheld.map((w) => ({ id: w.sha256_of_original, job: w.job, why: w.why, bytes: w.bytes, path: w.path })),
+        changes: changesOut,
+        leak_scan: { mode, files: scan.files, hits: hitsOut },
       },
       null,
       2,
     )}\n`,
   );
-  return { entries: sensitiveSeqs.size, files, lines, leaks: scan.hits, scanned: scan.files };
+  return { entries: sensitiveSeqs.size, files, lines, leaks: scan.hits, scanned: scan.files, withheld };
+}
+
+/**
+ * The hygiene of a package made without --redact (docs/adr/0016): what in it
+ * is sensitive, named, never taken out. Every sensitive ledger entry (marked,
+ * or citing a sensitive output) and every sensitive job output with whether
+ * the package carries it, then every file of the package scanned for the
+ * sensitive entries' words and the small sensitive outputs' text, each hit
+ * by file, entry or output, and the word's sha256. Written to HYGIENE.json,
+ * under the manifest. A package to hand over is made with --redact.
+ */
+export async function hygieneReport(sandbox: string, dir: string): Promise<{ entries: number; outputs: number; carried: number; hits: LeakHit[]; scanned: number }> {
+  const raw = await readLedger(sandbox, { raw: true });
+  const derived = await sensitiveEntries(sandbox, raw);
+  const entries = raw.map((e) => (derived.has(e.seq) && !e.sensitive ? { ...e, sensitive: true } : e));
+  const index = await sensitiveIndex(sandbox);
+  const words = await outputWords(sandbox);
+  // HYGIENE.json names what in the package is sensitive but must not itself
+  // disclose a value: a low-entropy output's text and a secret-bearing path
+  // are named by a keyed id whose truth is in a private sidecar kept outside
+  // the package (docs/adr/0016).
+  const key = randomBytes(32);
+  const privateMap: Record<string, { of: "word" | "path"; why?: string }> = {};
+  const idFor = (value: string) => `hidden-${createHmac("sha256", key).update(value).digest("hex").slice(0, 24)}`;
+  const tokens: ScanToken[] = [
+    ...sensitiveTokens(entries).map((t) => {
+      const id = idFor(`word:${t.token}`);
+      privateMap[id] = { of: "word", why: `a sensitive entry's words (E-${t.seq})` };
+      return { ...t, id } as ScanToken;
+    }),
+    ...words.map((w) => {
+      const id = idFor(`word:${w.token}`);
+      privateMap[id] = { of: "word", why: `the text of a sensitive output (job ${w.job}, ${w.path})` };
+      return { token: w.token, seq: 0, output: `job ${w.job}, ${w.path}`, id } as ScanToken;
+    }),
+  ];
+  const EMPTY = sha256(Buffer.alloc(0));
+  const sensitiveDigests = new Set([...index.content.keys()].filter((d) => d !== EMPTY));
+  const carriedPaths = walk(dir).map((abs) => relative(dir, abs).split("\\").join("/")).filter((rel) => index.content.has(sha256(readFileSync(join(dir, rel)))) || withheldPaths(index).some((p) => p.rel.test(rel)));
+  const scan = tokens.length || sensitiveDigests.size ? leakScan(dir, tokens, { digests: sensitiveDigests, filenames: true }) : { files: 0, hits: [] as LeakHit[] };
+  if (derived.size || index.jobs.size) {
+    writeFileSync(`${dir.replace(/\/$/, "")}.private.json`, `${JSON.stringify({ v: 1, note: "Kept by the run's owner, NEVER handed over: the keyed ids HYGIENE.json uses, each to the value it stands for.", map: privateMap }, null, 2)}\n`, { mode: 0o600 });
+    writeFileSync(
+      join(dir, "HYGIENE.json"),
+      `${JSON.stringify(
+        {
+          v: 1,
+          note: "This package was made without --redact: what in it is sensitive is named here and left in. Every file was scanned for the sensitive entries' words, the text of the small sensitive outputs and the sensitive outputs' digests; a hit names the file, the entry or output, and a keyed commitment (a sha256, or an id whose truth is in the private sidecar), never the word. A package to hand over is made with --redact.",
+          entries: [...derived.entries()].map(([seq, why]) => ({ seq, why })),
+          sensitive_outputs: [...index.jobs.values()].map((j) => ({ job: j.id, why: j.sensitivity.why, from: j.sensitivity.from, status: j.status, files: j.files.length, carried: carriedPaths.filter((c) => c.startsWith(`store/jobs/${j.id}/`)).length })),
+          carried: carriedPaths.length,
+          scan: { files: scan.files, words: tokens.length, hits: scan.hits },
+        },
+        null,
+        2,
+      )}\n`,
+    );
+  }
+  return { entries: derived.size, outputs: index.jobs.size, carried: carriedPaths.length, hits: scan.hits, scanned: scan.files };
 }
 
 // --- verify ------------------------------------------------------------------------------
@@ -587,7 +876,7 @@ function reviewChain(text: string): { ok: boolean; lines: number; redacted: numb
  * of them; `since` parts were first packaged then, so a package from before
  * it carries none and says so.
  */
-export const PACKAGE_COMPONENTS: ReadonlyArray<{ path: string; source: string; what: string; absent: string; core?: true; sealed?: "trace" | "ledger" | "attestations" | "disputes" | "leads" | "journal" | "artifacts"; since?: string }> = [
+export const PACKAGE_COMPONENTS: ReadonlyArray<{ path: string; source: string; what: string; absent: string; core?: true; sealed?: "trace" | "ledger" | "attestations" | "disputes" | "sweeps" | "leads" | "finish" | "questions" | "requests" | "grants" | "fetches" | "journal" | "model_gateway" | "artifacts"; since?: string }> = [
   { path: "custody.json", source: "custody.json", what: "the custody verdict", absent: "no custody was taken for this run (swarm.sh stop takes it)", core: true },
   { path: "trace/custody-anchor.json", source: "<sandbox>.custody-anchor.json", what: "the verdict's anchor, kept outside the run", absent: "the kickoff wrote no custody anchor for this run", core: true },
   { path: "custody.json.sig", source: "custody.json.sig", what: "the verdict's signature", absent: "custody.json was not signed (--custody-sign-key)" },
@@ -598,11 +887,21 @@ export const PACKAGE_COMPONENTS: ReadonlyArray<{ path: string; source: string; w
   { path: "ledger.jsonl", source: "ledger/entries.jsonl", what: "the ledger", absent: "nothing was recorded", sealed: "ledger" },
   { path: "ledger-attestations.jsonl", source: "ledger/attestations.jsonl", what: "the ledger's attestations", absent: "no entry has a second author", sealed: "attestations" },
   { path: "ledger-disputes.jsonl", source: "ledger/disputes.jsonl", what: "the agents' disputes of entries", absent: "no agent disputed an entry", sealed: "disputes", since: "2026-09-27" },
+  { path: "ledger-sweeps.jsonl", source: "ledger/sweeps.jsonl", what: "the store sweeps: what the hub found when it searched every output the run held for each coverage record's strings (a chain of its own, sealed by custody)", absent: "no store sweep ran (no coverage record named what a hit would contain)", sealed: "sweeps", since: "2026-09-29" },
+  { path: "finish.jsonl", source: "leads/finish.jsonl", what: "the finish register: the coordinator's lease, readiness, the checks and the report's reviews (unsigned, sealed by custody)", absent: "the run has no finish register (no seat coordinated a finish, or a run from before it)", sealed: "finish", since: "2026-09-29" },
   { path: "leads.jsonl", source: "leads/leads.jsonl", what: "the lead register: how the investigation proceeded (unsigned, sealed by custody)", absent: "no lead was opened", sealed: "leads", since: "2026-09-28" },
   { path: "leads.md", source: "leads/leads.md", what: "the lead register, rendered", absent: "no lead was opened", since: "2026-09-28" },
-  { path: "operator-requests.jsonl", source: "operator-requests.jsonl", what: "what the agents asked of the operator", absent: "no lead was closed needs_operator", since: "2026-09-28" },
+  { path: "questions.jsonl", source: "questions/questions.jsonl", what: "the question register: what the examination was asked, by whom (the goal, an agent, a person, claimed or signed), and how each question stood (unsigned as a whole, sealed by custody)", absent: "the run wrote no question event", sealed: "questions", since: "2026-09-28" },
+  { path: "questions.md", source: "questions/questions.md", what: "the question register, rendered", absent: "the run wrote no question event", since: "2026-09-28" },
+  { path: "operator-requests.jsonl", source: "operator-requests.jsonl", what: "what the run asked of the operator, one line per request as it stood", absent: "nothing was asked of the operator", since: "2026-09-28" },
+  { path: "requests.jsonl", source: "requests/requests.jsonl", what: "the operator requests' chain: every request (a lead's needs, an acquisition, a clarification, a network item, a stop proposed) with its id and lifecycle (unsigned, sealed by custody)", absent: "nothing was asked of the operator, or the run is from before the chain", sealed: "requests", since: "2026-09-28" },
+  { path: "requests.md", source: "requests/requests.md", what: "the operator requests, rendered", absent: "nothing was asked of the operator", since: "2026-09-28" },
+  { path: "material", source: "store/imports/", what: "what entered the run after its kickoff (evidence add, material add): each addition's provenance record and manifest; the bytes stay with the evidence", absent: "no evidence or material was added after the kickoff", since: "2026-09-28" },
+  { path: "network/grants.jsonl", source: "network/grants.jsonl", what: "the dynamic network's requests, decisions and grants (a chain of its own, sealed by custody)", absent: "the run made no network request", sealed: "grants", since: "2026-09-29" },
+  { path: "network/fetches.jsonl", source: "network/fetches.jsonl", what: "every fetch the fetch service made (a chain of its own, sealed by custody)", absent: "the run fetched nothing", sealed: "fetches", since: "2026-09-29" },
   { path: "operator-hosts.jsonl", source: "operator-hosts.jsonl", what: "the hosts the operator allowed while the run went on", absent: "the operator allowed no host during the run", since: "2026-09-28" },
   { path: "store/journal.jsonl", source: "store/journal.jsonl", what: "the store's journal", absent: "the run had no job service", sealed: "journal" },
+  { path: "trace/model-gateway.jsonl", source: "traces/model-gateway.jsonl", what: "the model gateway's call log (a chain of its own, sealed by custody by its lines and their sha256)", absent: "the run had no model gateway (a host run)", sealed: "model_gateway", since: "2026-09-29" },
   { path: "trace/journal-anchor.json", source: "<sandbox>.journal-anchor.json", what: "the journal's anchor", absent: "the run had no job service" },
   { path: "review.jsonl", source: "<runs>/reviews/<run>.jsonl", what: "the examiner's review", absent: "no examiner has reviewed this run", since: "2026-09-27" },
   { path: "release", source: "release/", what: "the report's releases: the machine's drafts and the examiner's adoptions, each signed", absent: "no release was sealed for this run (no custody taken, or a run from before releases)", since: "2026-09-27" },
@@ -657,7 +956,8 @@ function packagedFiles(dir: string, under: string): string[] {
   return walk(root).map((abs) => relative(dir, abs).split("\\").join("/")).sort();
 }
 
-type SealShape = { trace?: { lines?: number; last_line_sha256?: string | null }; ledger?: { entries?: number; head?: string | null }; attestations?: { lines?: number; head?: string | null }; disputes?: { lines?: number; head?: string | null }; leads?: { lines?: number; head?: string | null }; journal?: { lines?: number; head?: string | null } | null };
+type SealedChain = { lines?: number; head?: string | null };
+type SealShape = { trace?: { lines?: number; last_line_sha256?: string | null }; ledger?: { entries?: number; head?: string | null }; attestations?: SealedChain; disputes?: SealedChain; sweeps?: SealedChain; leads?: SealedChain; finish?: SealedChain; questions?: SealedChain; requests?: SealedChain; network?: { grants?: SealedChain; fetches?: SealedChain }; journal?: SealedChain | null; model_gateway?: { lines?: number; sha256?: string | null } | null };
 
 export function verifyPackage(dir: string): { ok: boolean; lines: string[] } {
   const out: string[] = [];
@@ -720,6 +1020,19 @@ export function verifyPackage(dir: string): { ok: boolean; lines: string[] } {
         return (seal?.disputes?.lines ?? 0) > 0 ? `the verdict sealed ${seal?.disputes?.lines} dispute lines` : null;
       case "leads":
         return (seal?.leads?.lines ?? 0) > 0 ? `the verdict sealed ${seal?.leads?.lines} lead events` : null;
+      case "questions":
+        return (seal?.questions?.lines ?? 0) > 0 ? `the verdict sealed ${seal?.questions?.lines} question events` : null;
+      case "requests":
+        return (seal?.requests?.lines ?? 0) > 0 ? `the verdict sealed ${seal?.requests?.lines} operator request events` : null;
+      case "sweeps":
+        return (seal?.sweeps?.lines ?? 0) > 0 ? `the verdict sealed ${seal?.sweeps?.lines} store sweeps` : null;
+      case "finish":
+        return (seal?.finish?.lines ?? 0) > 0 ? `the verdict sealed ${seal?.finish?.lines} finish events` : null;
+      case "grants":
+      case "fetches":
+        return (seal?.network?.[c.sealed]?.lines ?? 0) > 0 ? `the verdict sealed ${seal?.network?.[c.sealed]?.lines} network ${c.sealed} lines` : null;
+      case "model_gateway":
+        return (seal?.model_gateway?.lines ?? 0) > 0 ? `the verdict sealed ${seal?.model_gateway?.lines} model gateway lines` : null;
       case "journal":
         return seal?.journal ? `the verdict sealed a journal of ${seal.journal.lines} lines` : null;
       case "artifacts":
@@ -811,6 +1124,56 @@ export function verifyPackage(dir: string): { ok: boolean; lines: string[] } {
   } else if ((seal?.leads?.lines ?? 0) > 0) {
     out.push(`Leads:        NOT IN THE PACKAGE, and the verdict sealed ${seal?.leads?.lines} events`);
   }
+  // The question register: the same chain code, held to the seal the same way.
+  const questionsText = read("questions.jsonl");
+  if (questionsText !== null) {
+    const q = leadChain(questionsText);
+    const sealed = !seal?.questions || ((seal.questions.head ?? null) === q.head && (seal.questions.lines === undefined || seal.questions.lines === q.total));
+    out.push(`Questions:    ${q.ok ? `${q.total} events, chain intact${q.redacted ? `, ${q.redacted} redacted (their hashes kept)` : ""}` : `CHAIN BROKEN at line ${q.broken_at} (${q.reason})`}${seal?.questions ? (sealed ? "; head sealed" : "; HEAD NOT THE ONE SEALED") : "; not sealed by this verdict (a custody from before the question register was sealed)"}`);
+    ok &&= q.ok && sealed;
+  } else if ((seal?.questions?.lines ?? 0) > 0) {
+    out.push(`Questions:    NOT IN THE PACKAGE, and the verdict sealed ${seal?.questions?.lines} events`);
+  }
+  // The chains checked the same way: each its own chain (a redacted line keeps its hash), held to the seal when the verdict sealed it.
+  const heldChains: Array<{ label: string; rel: string; what: string; unit: string; sealed: SealedChain | undefined; verify: (t: string) => { ok: boolean; total: number; head: string | null; broken_at: number | null; reason: string | null; redacted: number } }> = [
+    { label: "Sweeps:       ", rel: "ledger-sweeps.jsonl", what: "store sweeps", unit: "lines", sealed: seal?.sweeps, verify: (t) => actChain(t, (o, prev) => sweepHash(o as unknown as SweepRecord, prev)) },
+    { label: "Finish:       ", rel: "finish.jsonl", what: "the finish register", unit: "events", sealed: seal?.finish, verify: leadChain },
+    { label: "Requests:     ", rel: "requests.jsonl", what: "the operator requests", unit: "events", sealed: seal?.requests, verify: leadChain },
+    { label: "Net grants:   ", rel: "network/grants.jsonl", what: "the network grants", unit: "lines", sealed: seal?.network?.grants, verify: leadChain },
+    { label: "Net fetches:  ", rel: "network/fetches.jsonl", what: "the network fetches", unit: "lines", sealed: seal?.network?.fetches, verify: leadChain },
+  ];
+  for (const h of heldChains) {
+    const text = read(h.rel);
+    if (text === null) {
+      if ((h.sealed?.lines ?? 0) > 0) out.push(`${h.label}NOT IN THE PACKAGE, and the verdict sealed ${h.sealed?.lines} ${h.unit}`);
+      continue;
+    }
+    const v = h.verify(text);
+    const sealed = !h.sealed || ((h.sealed.head ?? null) === v.head && (h.sealed.lines === undefined || h.sealed.lines === v.total));
+    out.push(`${h.label}${v.ok ? `${v.total} ${h.unit}, chain intact${v.redacted ? `, ${v.redacted} redacted (their hashes kept)` : ""}` : `CHAIN BROKEN at line ${v.broken_at} (${v.reason})`}${h.sealed ? (sealed ? "; head sealed" : "; HEAD NOT THE ONE SEALED") : `; not sealed by this verdict (a custody from before ${h.what} were sealed)`}`);
+    ok &&= v.ok && sealed;
+  }
+  // The model gateway's log: each line names the sha256 of the one before (the first, null); its first sealed lines hash to what the verdict sealed.
+  const gateway = read("trace/model-gateway.jsonl");
+  if (gateway !== null) {
+    const lines = gateway.split("\n").filter((l) => l.trim());
+    let prev: string | null = null;
+    let broken: string | null = null;
+    lines.forEach((l, i) => {
+      if (broken) return;
+      try {
+        const o = JSON.parse(l) as { prev?: unknown };
+        if ((o.prev ?? null) !== prev) broken = `line ${i + 1} does not name the line before it`;
+      } catch {
+        broken = `line ${i + 1} is not JSON`;
+      }
+      prev = sha256(l);
+    });
+    const n = seal?.model_gateway?.lines ?? 0;
+    const sealedOk = !seal?.model_gateway || (lines.length >= n && (!seal.model_gateway.sha256 || !n || sha256(`${lines.slice(0, n).join("\n")}\n`) === seal.model_gateway.sha256));
+    out.push(`Gateway log:  ${broken ? `CHAIN BROKEN (${broken})` : `${lines.length} lines, chain intact`}${seal?.model_gateway ? (sealedOk ? `; the ${n} lines the verdict sealed are there` : "; NOT THE LINES THE VERDICT SEALED") : ""}`);
+    ok &&= !broken && sealedOk;
+  } else if ((seal?.model_gateway?.lines ?? 0) > 0) out.push(`Gateway log:  NOT IN THE PACKAGE, and the verdict sealed ${seal?.model_gateway?.lines} lines`);
   // The store's journal: the sealed line where the seal says, and only examiner notes after it.
   const journal = read("store/journal.jsonl");
   if (journal !== null) {
@@ -914,7 +1277,8 @@ export function verifyPackage(dir: string): { ok: boolean; lines: string[] } {
       const listed = new Set((r.changes ?? []).map((c) => c.path));
       const unrecorded = [...rows.keys()].filter((p) => !listed.has(p));
       const hits = r.leak_scan?.hits ?? [];
-      lineage = `; REDACTIONS.json records what ${(r.changes ?? []).reduce((n, c) => n + (c.replaced?.length ?? 0), 0)} redaction(s) replaced (the sha256 of each original, why, which entry)${unrecorded.length ? `, and NOT ${unrecorded.join(", ")}` : ""}; the leak scan after it ${hits.length ? `FOUND ${hits.length} HIT(S), LISTED: ${hits.map((h) => `${h.path} (entry ${h.entry})`).join(", ")}` : `found nothing over ${r.leak_scan?.files ?? "?"} file(s)`}`;
+      const withheld = (r as { withheld?: Array<{ path: string }> }).withheld ?? [];
+      lineage = `; REDACTIONS.json records what ${(r.changes ?? []).reduce((n, c) => n + (c.replaced?.length ?? 0), 0)} redaction(s) replaced (the sha256 of each original, why, which entry)${unrecorded.length ? `, and NOT ${unrecorded.join(", ")}` : ""}${withheld.length ? `; ${withheld.length} file(s) withheld whole, each named with its sha256 (${withheld.map((w) => w.path).join(", ")})` : ""}; the leak scan after it ${hits.length ? `FOUND ${hits.length} HIT(S), LISTED: ${hits.map((h) => `${h.path} (entry ${h.entry})`).join(", ")}` : `found nothing over ${r.leak_scan?.files ?? "?"} file(s)`}`;
       if (unrecorded.length) ok = false;
     } catch {
       lineage = "; no REDACTIONS.json (a package made before redactions were recorded): what each replaced is not said";
@@ -933,10 +1297,13 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
       process.exit(2);
     }
     const r = await redactPackage(a, b, { leaks });
-    console.log(JSON.stringify({ entries: r.entries, files: r.files, lines: r.lines, scanned: r.scanned, leaks: r.leaks.length }));
+    console.log(JSON.stringify({ entries: r.entries, files: r.files, lines: r.lines, scanned: r.scanned, leaks: r.leaks.length, withheld: r.withheld.length }));
     // A word that should have been taken out and is still there: named by file, entry and the word's sha256, never the word.
-    for (const h of r.leaks) console.error(`  ${h.path}: entry ${h.entry}'s words (sha256 ${h.token_sha256.slice(0, 16)}…, as ${h.as})`);
+    for (const h of r.leaks) console.error(`  ${h.path}: ${h.output ? `the text of a sensitive output (${h.output})` : `entry ${h.entry}'s words`} (sha256 ${h.token_sha256.slice(0, 16)}…, as ${h.as})`);
     if (r.leaks.length && leaks === "fail") process.exit(5);
+  } else if (cmd === "hygiene" && a && b) {
+    const r = await hygieneReport(a, b);
+    console.log(JSON.stringify({ entries: r.entries, outputs: r.outputs, carried: r.carried, hits: r.hits.length, scanned: r.scanned }));
   } else if (cmd === "components" && a && b) {
     console.log(JSON.stringify(writeComponents(a, b)));
   } else if (cmd === "verify" && a) {
@@ -950,7 +1317,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     const unchecked = rel.signatures.some((s) => s.adopted && s.state !== "verified");
     process.exit(!r.ok || !rel.ok ? 1 : unchecked && opt("--allowed-signers") ? 3 : 0);
   } else {
-    console.error("usage: package-tools.ts redact <sandbox> <package dir> | components <sandbox> <package dir> | verify <package dir>");
+    console.error("usage: package-tools.ts redact <sandbox> <package dir> | hygiene <sandbox> <package dir> | components <sandbox> <package dir> | verify <package dir>");
     process.exit(2);
   }
 }

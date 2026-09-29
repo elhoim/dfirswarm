@@ -233,7 +233,7 @@ test("the report is one self-contained file that cites the ledger's own sequence
     assert.match(html, /<div class="sec-head"><h2>Appendix D: Chain of custody<\/h2>/);
     assert.match(html, /<li><span class="n"><\/span><a href="#sA">Appendix A: Exhibits<\/a>/);
     assert.doesNotMatch(html, /<span class="n">[A-E]<\/span>/);
-    const order = ["s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "sA", "sB", "sC", "sD", "sE"].map((id) => html.indexOf(`<section id="${id}"`));
+    const order = ["s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "sA", "sB", "sC", "sD", "sE", "sF"].map((id) => html.indexOf(`<section id="${id}"`));
     assert.deepEqual([...order].sort((a, b) => a - b), order, "the sections in their order");
     assert.ok(order.every((i) => i > 0), "every section present");
     // The cover carries the numbers a reader needs before the fold, and says it is a draft.

@@ -36,7 +36,9 @@
  * Nothing in a release directory is written over. A release changes by a
  * new version, which names the one before it and why it was made; a new
  * examination (evidence examined again, or more of it) reopens the
- * evidence cutoff and is a new run, not an amendment.
+ * evidence cutoff: the run resumed (its continuation sealed anew, this
+ * release kept as a prefix, the continuation's answers adopted by a later
+ * version) or a new run, never an amendment.
  *
  *   node scripts/release.ts draft <sandbox> [--run ID] [--runs DIR] [--reason TEXT] [--quiet]
  *   node scripts/release.ts sign --runs DIR --run ID --sandbox DIR [--examiner ID] [--pdf] [--amend-reason TEXT] [--report PATH] [--no-timestamp] [--yes] [--secret-fd N]
@@ -63,7 +65,9 @@ import { adoptionState, appendReview, independenceConflict, isSandboxPath, readR
 import { dispositionsOf } from "./adoption.ts";
 import {
   digestLine,
+  hashFieldAt,
   hashFieldHead,
+  questionsBinding,
   pickRelease,
   lineHashes,
   lineHead,
@@ -85,11 +89,12 @@ import {
 } from "./release-record.ts";
 import { mirrorRelease, timestampRelease } from "./release-witness.ts";
 import { otsRelease, transparencyRelease } from "./release-adapters.ts";
-import { checkSshSignature, consoleRefusal, dfirswarmHome, keyNeeds, keyWords, listExaminers, loadExaminer, machineSigner, signAs, sshKeygen, sshSign, verifyAs, RELEASE_NAMESPACE, type Examiner, type MachineSigner, type Person } from "./signers.ts";
+import { checkSshSignature, consoleRefusal, dfirswarmHome, keyNeeds, keyWords, listExaminers, loadExaminer, machineSigner, roleWords, signAs, sshKeygen, sshSign, verifyAs, RELEASE_NAMESPACE, type Examiner, type MachineSigner, type Person } from "./signers.ts";
 import { opensslBinary } from "./pkcs11.ts";
 import { confirmOnTty, hasTty, readFromTty, readSecretFromFd, wipe } from "./secret-io.ts";
 import { readLedger, supersededBy, verifyAttestationChain, verifyDisputeChain, verifyLedgerChain, type LedgerEntry } from "../extensions/protocol.ts";
 import { verifyLeadChain } from "../extensions/leads.ts";
+import { verifySweepChain } from "../extensions/store-sweep.ts";
 import { verifyJournalText } from "./evidence-store.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -97,7 +102,7 @@ const sha256 = (b: string | Buffer) => createHash("sha256").update(b).digest("he
 
 /** What the evidence cutoff is, said in every release. */
 export const CUTOFF_NOTE =
-  "The examination covers the evidence as custody sealed it at this time. A release after it corrects or re-renders what this examination found, or records the examiner's adoption; it examines nothing again. A new examination (the same evidence examined again, or more of it) reopens the cutoff: it is a new run, with its own custody and its own releases, never an amendment of these.";
+  "The examination covers the evidence as custody sealed it at this time. A release after it corrects or re-renders what this examination found, or records the examiner's adoption; it examines nothing again. Further examination reopens the cutoff: the run resumed (swarm.sh resume), whose continuation is sealed anew and bound by a later release while this one stays valid for what it bound, a prefix of the same chains; or a new run, with its own custody and its own releases. Never an amendment of these.";
 
 type Registry = { runs?: Array<Record<string, unknown>> };
 
@@ -175,6 +180,54 @@ export async function asSealed(ctx: RunCtx, custody: { seal?: Record<string, { l
     if (!seal.leads) {
       if (lv2.total) missing.push("the verdict did not seal the lead register (a custody from before it was sealed)");
     } else if ((seal.leads.lines ?? 0) !== lv2.total || (seal.leads.head ?? null) !== lv2.head) drift.push(`the lead register (sealed ${seal.leads.lines} events; now ${lv2.total})`);
+    // The question register, the same way: what was asked, by whom, and how each question stood.
+    const questionsText = read("questions/questions.jsonl");
+    const qv = questionsText && questionsText.trim() ? verifyLeadChain(questionsText) : { total: 0, head: null };
+    if (!seal.questions) {
+      if (qv.total) missing.push("the verdict did not seal the question register (a custody from before it was sealed)");
+    } else if ((seal.questions.lines ?? 0) !== qv.total || (seal.questions.head ?? null) !== qv.head) drift.push(`the question register (sealed ${seal.questions.lines} events; now ${qv.total})`);
+    // The dynamic network's two chains, the same way (docs/adr/0012).
+    const netSeal = seal.network as unknown as Record<string, { lines?: number; head?: string | null }> | undefined;
+    for (const [k, rel] of [["grants", "network/grants.jsonl"], ["fetches", "network/fetches.jsonl"]] as const) {
+      const t = read(rel);
+      const v = t && t.trim() ? verifyLeadChain(t) : { total: 0, head: null };
+      const sealedNet = netSeal?.[k];
+      if (!sealedNet) {
+        if (v.total) missing.push(`the verdict did not seal the network ${k} (a custody from before they were sealed)`);
+      } else if ((sealedNet.lines ?? 0) !== v.total || (sealedNet.head ?? null) !== v.head) drift.push(`the network ${k} (sealed ${sealedNet.lines} lines; now ${v.total})`);
+    }
+    // The operator requests (docs/adr/0014): what the operator did with them
+    // after the stop follows the sealed line, and is the next custody's; a
+    // sealed line changed or gone is a drift.
+    const reqText = read("requests/requests.jsonl");
+    const rv = reqText && reqText.trim() ? verifyLeadChain(reqText) : { total: 0, head: null };
+    if (!seal.requests) {
+      if (rv.total) missing.push("the verdict did not seal the operator requests (a custody from before they were sealed)");
+    } else if ((seal.requests.lines ?? 0) !== rv.total || (seal.requests.head ?? null) !== rv.head) {
+      const n = seal.requests.lines ?? 0;
+      const at = n ? hashFieldAt(reqText, n) : null;
+      if (rv.total > n && (n ? at === (seal.requests.head ?? null) : seal.requests.head === null || seal.requests.head === undefined)) missing.push(`${rv.total - n} operator request event(s) recorded after the verdict (the operator's acts after the stop): the next custody seals them`);
+      else drift.push(`the operator requests (sealed ${n} events; now ${rv.total})`);
+    }
+    // The store sweeps and the finish register (docs/adr/0013, 0015), sealed the same way.
+    for (const [k, rel, what, verify] of [
+      ["sweeps", "ledger/sweeps.jsonl", "the store sweeps", verifySweepChain],
+      ["finish", "leads/finish.jsonl", "the finish register", verifyLeadChain],
+    ] as const) {
+      const t = read(rel);
+      const v = t && t.trim() ? verify(t) : { total: 0, head: null };
+      const sealedK = (seal as Record<string, { lines?: number; head?: string | null } | null | undefined>)[k];
+      if (!sealedK) {
+        if (v.total) missing.push(`the verdict did not seal ${what} (a custody from before they were sealed)`);
+      } else if ((sealedK.lines ?? 0) !== v.total || (sealedK.head ?? null) !== v.head) drift.push(`${what} (sealed ${sealedK.lines} lines; now ${v.total})`);
+    }
+    // The model gateway's log: its line count and the sha256 of those lines, as sealed.
+    const gw = seal.model_gateway as unknown as { lines?: number; sha256?: string | null } | null | undefined;
+    if (gw && (gw.lines ?? 0) > 0) {
+      const lines = (read("traces/model-gateway.jsonl") ?? "").split("\n").filter((l) => l.trim());
+      const first = lines.slice(0, gw.lines ?? 0);
+      if (first.length < (gw.lines ?? 0) || (gw.sha256 && sha256(`${first.join("\n")}\n`) !== gw.sha256) || lines.length !== gw.lines) drift.push(`the model gateway log (sealed ${gw.lines} lines; now ${lines.length})`);
+    }
     const journalText = read("store/journal.jsonl");
     if (seal.journal) {
       const hashes = verifyJournalText(journalText ?? "").hashes;
@@ -395,6 +448,7 @@ async function buildRelease(ctx: RunCtx, input: ReleaseInput, dir: string, o: { 
       ledger: { entries: ledgerHead.lines, head: ledgerHead.head },
       attestations: hashFieldHead(read("ledger/attestations.jsonl")),
       disputes: hashFieldHead(read("ledger/disputes.jsonl")),
+      ...(read("ledger/sweeps.jsonl") !== null ? { sweeps: hashFieldHead(read("ledger/sweeps.jsonl")) } : {}),
       journal: journal === null ? null : lineHead(journal),
       trace: { lines: trace.lines, last_line_sha256: trace.head, sealed_lines: (custody.seal?.trace?.lines as number | undefined) ?? null },
       review: reviewHead,
@@ -428,7 +482,75 @@ async function buildRelease(ctx: RunCtx, input: ReleaseInput, dir: string, o: { 
     missing,
     host,
     ...(input.policy ? { policy: input.policy } : {}),
+    ...(await caseContract(S, ledger)),
+    questions: await questionsOf(S, custody.seal?.questions ?? null),
   };
+}
+
+/**
+ * The question register as a release binds it (docs/adr/0016): the head and
+ * length custody sealed, what those events say (the questions by origin, the
+ * persons who asked or acted, claimed or signed), and what was recorded after.
+ * A register never written is bound as empty, with the goal's questions as a
+ * reader derives them.
+ */
+async function questionsOf(S: string, sealed: { lines?: number; head?: string | null } | null): Promise<NonNullable<ReleaseRecord["questions"]>> {
+  const text = existsSync(join(S, "questions", "questions.jsonl")) ? readFileSync(join(S, "questions", "questions.jsonl"), "utf8") : "";
+  const events = text.split("\n").filter((l) => l.trim()).flatMap((l) => {
+    try {
+      return [JSON.parse(l) as Parameters<typeof questionsBinding>[0][number]];
+    } catch {
+      return [];
+    }
+  });
+  const derived: Record<string, number> = {};
+  if (!events.length) {
+    const Q = await import("../extensions/questions.ts");
+    const snap = await Q.questionsSnapshot(S).catch(() => null);
+    for (const q of snap?.state.questions.values() ?? []) derived[q.origin.kind] = (derived[q.origin.kind] ?? 0) + 1;
+  }
+  return questionsBinding(events, sealed, derived);
+}
+
+/**
+ * What the case contract adds to a release (docs/adr/0014): the case policy
+ * as the kickoff recorded it and custody held it, the standing answers that
+ * rest on external material with their classes, and the acquisitions as
+ * they stood.
+ */
+async function caseContract(S: string, ledger: LedgerEntry[]): Promise<Pick<ReleaseRecord, "case_policy" | "external" | "acquisitions">> {
+  const out: Pick<ReleaseRecord, "case_policy" | "external" | "acquisitions"> = {};
+  const policyText = existsSync(join(S, "network", "policy.json")) ? readFileSync(join(S, "network", "policy.json"), "utf8") : null;
+  if (policyText !== null) {
+    let anchored: boolean | null = null;
+    try {
+      const anchor = JSON.parse(readFileSync(custodyAnchorPath(S), "utf8")) as { case_policy_sha256?: string };
+      anchored = anchor.case_policy_sha256 ? anchor.case_policy_sha256 === sha256(policyText) : null;
+    } catch {
+      anchored = null;
+    }
+    try {
+      const p = JSON.parse(policyText) as { policy?: string; network?: string; more_evidence?: string; material_use?: unknown };
+      const mu = p.material_use && typeof p.material_use === "object" ? Object.fromEntries(Object.entries(p.material_use as Record<string, unknown>).map(([k, v]) => [k, String(v)])) : typeof p.material_use === "string" ? { text: p.material_use } : {};
+      out.case_policy = { sha256: sha256(policyText), policy: String(p.policy ?? ""), network: String(p.network ?? ""), more_evidence: String(p.more_evidence ?? ""), material_use: mu, anchored };
+    } catch {
+      out.case_policy = null;
+    }
+  }
+  const { externalLineage } = await import("./net-broker.ts");
+  const lineage = await externalLineage(S).catch(() => null);
+  if (lineage) {
+    const replaced = supersededBy(ledger);
+    const answers = ledger
+      .filter((e) => e.kind === "answer" && !replaced.has(e.seq) && lineage.entries.has(e.seq))
+      .map((e) => ({ section: e.section ?? "", seq: e.seq, hash: e.hash ?? null, classes: lineage.classes.get(e.seq) ?? [], via: lineage.entries.get(e.seq) ?? [] }));
+    out.external = { answers, note: "Each answer listed rests on material from outside the original evidence: a capture proves its bytes, not their truth or their fit to the time of the events; supplied material proves nothing by itself; evidence added after the kickoff is named with its acquisition. An examiner weighs each." };
+  }
+  const R = await import("../extensions/requests.ts");
+  const rs = await R.requestsSnapshot(S).catch(() => null);
+  const acq = rs ? [...rs.requests.values()].filter((r) => r.kind === "acquisition") : [];
+  if (acq.length) out.acquisitions = acq.map((r) => ({ id: r.rid, state: r.state, stage: r.stage, source: r.ask?.source ?? String(r.line.request ?? ""), questions: r.questions, import: r.stages.find((x) => x.import)?.import ?? null }));
+  return out;
 }
 
 /**
@@ -623,7 +745,13 @@ function pickExaminer(o: { examiner?: string; home: string }): { examiner: Perso
     ex = all.length === 1 ? loadExaminer(all[0].id, o.home) : { why: all.length ? `${all.length} examiners are enrolled (${all.map((e) => e.id).join(", ")}): name one (--examiner ID)` : "no examiner is enrolled on this install: swarm.sh examiner enroll" };
   }
   if ("why" in ex) throw new Error(`a release is signed by an enrolled examiner: ${ex.why}`);
-  if (ex.examiner.role !== "examiner") throw new Error(`${ex.examiner.name} (${ex.examiner.id}) is enrolled as a technical reviewer, not an examiner: a reviewer signs their own review, never a release`);
+  if (ex.examiner.role !== "examiner") {
+    throw new Error(
+      ex.examiner.role === "reviewer"
+        ? `${ex.examiner.name} (${ex.examiner.id}) is enrolled as a technical reviewer, not an examiner: a reviewer signs their own review, never a release`
+        : `${ex.examiner.name} (${ex.examiner.id}) is enrolled as ${roleWords(ex.examiner.role)}, not an examiner: ${ex.examiner.role === "analyst" ? "an analyst adds questions to a case" : "an observer proposes questions"}, and never signs a release`,
+    );
+  }
   const k = ex.examiner.key;
   if (k.kind !== "pkcs11" && !existsSync(k.path)) throw new Error(`the examiner's key is not at ${k.path}`);
   if (k.kind === "pkcs11" && !existsSync(k.module)) throw new Error(`the examiner's PKCS#11 module is not at ${k.module}`);
@@ -727,7 +855,7 @@ export async function prepareRelease(ctx: RunCtx, o: { examiner?: string; pdf?: 
   if (!fileSha(join(ctx.sandbox, reportPath))) throw new Error(`there is no ${reportPath} in run ${ctx.run} to sign over: a sign-off is over the report the examiner read (--report PATH names another)`);
   let releases = readReleases(ctx.sandbox);
   const adopted = [...releases].reverse().find((r) => r.record?.state === "adopted");
-  if (adopted && !o.amendReason?.trim()) throw new Error(`release v${adopted.version} is adopted already: a later adoption is an amendment and says why (--amend-reason TEXT). A new examination is a new run.`);
+  if (adopted && !o.amendReason?.trim()) throw new Error(`release v${adopted.version} is adopted already: a later adoption is an amendment and says why (--amend-reason TEXT). Further examination is the run resumed (swarm.sh resume) or a new run.`);
   if (!adopted && o.amendReason) throw new Error("there is no adopted release to amend: sign without --amend-reason");
   const gate = await adoptionGate(ctx);
   const policy = technicalReviewPolicy(ctx);
@@ -1137,7 +1265,7 @@ async function main(argv: string[]): Promise<number> {
       console.log(`Consent:      ${w.record.signing?.consent === "presented" ? "presented; its confirmation was skipped (--yes)" : "confirmed at the terminal"}: "${CONSENT_STATEMENT}", over report.html ${w.record.signing?.shown_sha256 ?? "?"}`);
       if (a) console.log(`Adoption:     ${a.scope === "answers" ? `${a.dispositions.filter((d) => d.kind === "answer").length} answer disposition(s); ${a.not_adopted.length} standing answer(s) not adopted, which the report shows as the agents' conclusions` : "the report as a whole: this ledger has no answer entries (recorded before ledger version 4)"}`);
       console.log(`Digest:       ${w.line}`);
-      console.log(`Cutoff:       the evidence as custody sealed it at ${w.record.evidence_cutoff.at ?? "?"}; a new examination is a new run.`);
+      console.log(`Cutoff:       the evidence as custody sealed it at ${w.record.evidence_cutoff.at ?? "?"}; further examination is the run resumed (a later release binds it) or a new run.`);
       return 0;
     }
     case "show": {

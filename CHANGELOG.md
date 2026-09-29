@@ -6,6 +6,1090 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Fixed: a case premise is not a reason to hold an answer partial, and an answer that leaves out what its question's leads established is warned of
+
+On the run s993d40 (a CTF case of six questions) all six answers stood
+partial. Two were complete answers whose only hedge was whether the person
+the case brief names did it personally, which the brief states as given;
+both were attested established by two reviewers while still labelled
+partial. A third left out two methods the ledger already held as findings,
+attested by another seat, under that question's leads. Now:
+
+- The worker prompt and the `record` tool (an answer, its `result`) say
+  what a premise is: what the case brief or the goal states as given (who
+  the subject is, whose device it is, the scenario's facts) is a premise of
+  the examination, not a part the answer must prove again. The answer names
+  the premise it relies on in its reasoning or limitations ("rests on the
+  case premise that …") and is established on the evidence for the rest; it
+  is partial only for a part of the question it could not establish; when
+  the evidence contradicts a premise, that is `premise_not_supported` or a
+  finding, never a silent hedge. The `attest` tool's parts say a premise is
+  not a part to hold open.
+- Two warnings in the answers check, each a `WARN:` line, in its machine
+  line's `warnings`, in the finish line's note and now in `finish status`
+  (readiness carries the gate's warnings apart from its items): neither
+  ever holds the finish. `partial_all_parts_established`: a partial answer
+  every review of which holds every part it weighed established, one of
+  them attesting it established; it asks the recorder to say which part is
+  open or record the answer established. `lead_findings_uncited`: a
+  standing finding or event, not disputed, attested by another seat or
+  recorded by two, that the lead register recorded under a lead linked to
+  the question (it interprets the lead's job, or a close or confirmation of
+  the lead names it: `questionLeadEntries`, `extensions/leads.ts`), which
+  the question's answer does not reach, directly or through the entries it
+  cites (`answerReach`); every such entry is listed by `E-<seq>` with its
+  leads, "established under Q-n's leads and not in its answer: cite them or
+  say why they do not bear on it". Registers and refs only.
+- `tests/case-premise.test.ts` and `tests/lead-findings-uncited.test.ts`.
+
+### Fixed: only the collector writes the trace, and a deep runs directory no longer keeps its lines out
+
+A Unix socket path takes at most 103 bytes on macOS and 107 on Linux. The
+collector, the gate and the nudge broker bind from inside their directory,
+but their clients dialled the full path, or one relative to wherever they
+ran: under a deep `SWARM_RUNS_DIR` the kickoff's own line, the watchdogs'
+and the operator's could not reach the collector, and on Linux the gate
+could not forward a single pane's line. The shell's fallback then appended
+a line to `events.jsonl` whenever the record was not chained yet, so a run
+could begin with lines no one could vouch for, and a line appended between
+its look at the tail and the collector's next write broke the chain.
+
+- `scripts/trace-emit.mjs` dials the socket from inside its directory, and
+  says why it failed: exit 1 when the collector could not be reached, 3 when
+  it answered and refused the line. The gate forwards from the collector's
+  directory; the operator CLI's harness lines (`emitHarnessLine`) go
+  through `trace-emit.mjs` when even a relative path is too long.
+- A line the collector does not take, for any reason, goes to
+  `traces/system-spill.jsonl`, never into `events.jsonl`: the shell's
+  `trace_emit`, the CLI's harness lines, and now the model gateway's and
+  the fetch service's, which dropped it. The provider-limit rule reads the
+  watchdog's nudges and wakes from the spill as well.
+- The kickoff's own line is the proof that the record can be written: when
+  the collector came up and cannot be reached, the start is refused, saying
+  why, before any pane, hub or VM starts. A collector that answers and
+  refuses the line (a trace that ends in a torn line) is not refused here.
+- `tests/kickoff-guards.test.sh` runs a kickoff under a runs directory where
+  no socket path fits (130 bytes).
+
+### Fixed: a short sensitive value is not taken for the digits inside a hash
+
+`--redact` looked for a sensitive entry's words anywhere in a text, so a
+four-character value (a PIN) was found inside any sha256, keyed id or
+timestamp that happened to contain its digits. The redaction then replaced a
+line of the ledger or the trace for its hash, and the leak scan after it
+refused the package for a leak that was not one; a real trace, full of
+hashes, holds almost any four digits somewhere. A word under eight
+characters (`scripts/package-tools.ts`) still counts wherever it stands, a
+letter touching it included (`PIN4821`), and is skipped only inside a longer
+run that makes it something else: its digits running on into a bigger number
+(`12.482145Z`), a run of sixteen hex characters or more with digits of its
+own, or a run of twenty base64 or base64url characters or more with letters
+and digits of its own and few separators. Leaving a real value in is the
+worse failure, so a path, a sentence or an identifier with the value in it
+still counts. The redaction and the scan hold to the one rule, in text, UTF-8
+and UTF-16 bytes and file names; a longer word counts wherever it stands, as
+before. `tests/redaction.test.ts` failed about once in a hundred runs on it.
+
+### Fixed: a partial answer is a disposition, whatever its reviews' strength, and a standing finding is never discarded to make an answer not determinable
+
+On the run s9722fa (a CTF case of six questions, `--stop operator`) every
+question had a partial answer with medium confidence. Each review was capped
+to best_candidate by that confidence and by the parts the answer itself
+declared open; readiness then held all six as "a best candidate, not
+established" while the answers check disposed them partial, the coordinator
+read the finish status as "best_candidate is not a disposition", and the
+seats revised all six to not_determinable with a `downgrade` citing their
+limitations and their own coverage records. The case lost every positive
+answer. Now:
+
+- "A best candidate" concerns only an answer that claims established
+  (`claimsEstablished`, `heldAsBestCandidate` in `extensions/protocol.ts`),
+  and readiness, the answers check (and through it the finish gate) and the
+  report read that one test. Partial, not determinable, a bounded negative,
+  out of scope and a premise shown not to hold are disposed by their own bar.
+  A best candidate now holds readiness under every stop policy, as it holds
+  the done; before, a cap-policy run could turn ready on one that the done
+  then refused.
+- A partial answer's review attests the answer's own claims: a part it
+  declares open is held `established: false` with
+  `answer_review.parts[].declared_open: "E-<seq>"` (a limitation the answer
+  cites, or a coverage record it rests on; checked), and does not cap the
+  review; neither does the answer's confidence nor a route its
+  `would_change` names. An answer that claims established keeps the whole
+  cap. The attest's reply says a best candidate on a disposition holds
+  nothing.
+- A downgrade's evidence names an entry that bears against the earlier
+  chain (a finding or event that contradicts it, a refuted hypothesis tied
+  to it, a supporting entry under dispute or contradicted, a correction of
+  one); a limitation or a coverage record does not (`downgradeCheck`). While
+  a finding or event the earlier answer rested on for its question still
+  stands, the downgrade is refused and the refusal says to answer partial.
+  This holds for a bounded negative as for not determinable.
+- The worker prompt, the SWARM.md template and the `attest`, `record`,
+  `finish` and `done` descriptions say it plainly. `tests/partial-disposition.test.ts`
+  reconstructs s9722fa under all three stop policies.
+
+### Fixed: a hit the store sweep found is cleared by saying what it showed, not by naming it
+
+On the run sb1b3c8 seats cleared `sweep_hits` by writing a revised coverage
+record whose refs named up to 66 hit objects, by their jobs' directories,
+with nothing recorded about what any showed. An object that moves from an
+earlier sweep's hits into a coverage record for the same question is now
+cited in its `result_refs` by an entry that says what it showed: a finding,
+an event, an absence or a limitation whose refs name the object itself (a
+directory does not count), written after the sweep that found it; one entry
+per object, or one absence over several (`unexaminedHits`,
+`extensions/store-sweep.ts`). Until then the gate keeps holding it as
+`sweep_hits`, naming each object and how to clear it, and the coverage
+record's reply says so when it is written. Object refs and times only.
+
+### Changed: under more_evidence: no, acquisition_none_why naming the policy is the answer, not an ask
+
+Under the ctf preset seats opened acquisition asks in the finish tail only to
+satisfy "a not_determinable names its acquisition ask", and the case policy
+declined each at once. Under `more_evidence: no` the `no_acquisition_ask`
+warning and the answer's reply now suggest `acquisition_none_why` naming the
+policy (`NO_MORE_EVIDENCE_NONE_WHY`) and no ask; the worker prompt says it in
+one sentence.
+
+### Changed: done asks whether the dispositions suffice, not the operator
+
+In a real run seats twice closed a lead needs_operator asking the operator
+to "accept or reject the examination-limited dispositions" before any done,
+and asked again when a note answer did not settle it. The worker prompt and
+the `lead_close` and `done` descriptions now say it: whether the
+dispositions suffice is what done asks the finish line; operator acceptance
+(`swarm.sh question <run> accept Q-n`) is for a question the finish line
+holds that only the operator can release; so the coordinator calls done
+first, and a seat asks the operator only for what a refused done names as
+the operator's. A needs_operator close whose words ask for dispositions to
+be accepted, made while no done has been refused on such a question, still
+stands, and its reply carries a `hint` saying so.
+
+### Fixed: a value typed into a job's command is refused as authored, and the refusal says so
+
+A seat read a value off an image, typed it into a job's own command, and
+cited the job's output (which held it) as the evidence for a lookup. The
+refusal read only "not in the cited bytes": the check set the value aside
+as authored, and returned before it said why whenever every value wanted was
+set aside. Now it says it whatever the other values are
+(`scripts/net-broker.ts` `evidenceCheck`, `authored`), and
+`evidence_link_missing` names the value as named by the cited job's own
+command or arguments, authored, not derived, and says what counts: an
+input, a catalogue member, or the output of a job that read the evidence.
+Every such refusal also says that a value read from an image is cited from
+the output of a job that read the image (an OCR tool run over the input),
+never from a transcription typed into a command.
+
+### Fixed: a notifier that failed says how
+
+A spawn error, the 20-second timeout and a signal all read "notify.sh could
+not be run" in a request's `delivery_failed`. The failure now says which:
+`could not be run (ENOENT)` with the errno, `took more than 20 s and was
+stopped`, `was ended by SIGKILL`, or the exit status as before
+(`extensions/requests.ts` `runNotify`). The retry after a backoff is as it
+was.
+
+### Fixed: an entry the harness writes on the ledger is on the trace, and custody holds the ledger to it
+
+Custody failed its ledger check on every run that took material from
+outside: the fetch service's captures (runs s26f142, s7f90eb) and the
+operator's evidence (sabfd76, sb177a7) were `external` entries written by
+`recordExternal`, no trace line carried their hash, and custody named each
+"in the ledger and never on the trace". `swarm.sh custody-verify sb177a7`
+said NOT VERIFIED for that alone.
+
+- **A line of the harness's own.** Every ledger entry the harness authors
+  without a seat's `record` or the hub's `recordEntry` call (the external
+  entry of an addition, of a question's attachment and of a capture; a
+  person's hint recorded as a hypothesis in the asker's name) puts a
+  `harness_record` line on the trace with the entry's seq and hash, the way
+  the process that wrote it writes its other lines: the hub as its own line
+  (the harness's token, its own spill), the operator's CLI with no hub
+  running as `trace_emit` does (to the collector, else the harness's spill
+  on a chained trace), a pane on the host through its `logEvent`. A merged
+  duplicate writes nothing, and no line.
+- **Custody counts it.** The ledger is held to those lines beside the record
+  tool's and the hub's; in a microVM run only the harness's own line counts,
+  never one a seat claimed (named in `claimed_by_seat`). An entry written
+  into the file with no line still fails the check, and the runs from before
+  still fail it: nothing is exempted.
+- The console describes the line; the report counts one written from the
+  operator's shell as the harness's, not as a line nobody can account for;
+  the provider-limit rule and the watchdog read it as a harness row.
+
+### Fixed: the model provider's limit on every seat pauses the run
+
+An until-solved run hit its provider's subscription usage limit on every
+seat at once ("Try again in ~6904 min.", "The usage limit has been
+reached"). The watchdog prompted each seat again, half an hour apart, for
+days, every VM and the hub up, and the operator was never told the run could
+not go on before a stated time (docs/adr/0013, "The provider's limit, and the
+operator's pause").
+
+- **A pause for the provider's limit.** When every live seat's last turn
+  since the last lift ended in a provider error, and each of them is limited
+  (told to wait 30 minutes or more, or refused again after a retry), the
+  watchdog pauses the run (`paused.reason: provider_limit`), under every
+  stop policy. One seat's error never pauses it, nor one seat's long wait
+  beside the others' passing errors. The pause keeps the provider's texts
+  whole, the models, and the end it holds to (`until`): on one provider the
+  longest end any seat was told, on several the earliest when each was told
+  one. No seat is prompted, no model call goes out and the wall clock does
+  not run.
+- **Every seat is retried.** A seat whose last turn ended in a provider error
+  is prompted again with backoff under every stop policy now (three times
+  per run of errors under a cap policy), which is what shows a limit that
+  persists; the harness's own rows under its id are not read as its turn.
+- **The harness tries again** at that end, or every 30 minutes, wakes the
+  seats, and pauses the run again if every seat is refused again, charging
+  the try nothing. The operator is told once per spell (`paused`, with the
+  end and the advice to stop the run to free the machine and resume it after
+  the limit lifts), and the board once. Each failed turn is recorded once,
+  whole; a seat tells the board once per spell of failed turns, a countdown
+  ("~6904 min", "~6874 min") being one error.
+- **`swarm.sh pause` and `unpause`**, and Unpause in the console beside the
+  pause. The operator can hold a going run under any stop policy, and lift a
+  pause whose cause is gone; a cap's pause still over its cap is refused,
+  pointing to `extend`. An extension no longer reads a pause that is not a
+  cap's as one it must lift. A run stopped in a pause keeps it, a resume
+  wakes no seat with words about a lift, a run whose seats all died in a
+  pause is not read as paused, and the console's elapsed time leaves pauses
+  out.
+
+### Fixed: what the first calibration run on the new flow showed (run sabfd76)
+
+Scored against a truth kept outside the repo, the run missed a third of the
+facts in deleted and unallocated space, answered "every file" and "every
+connection" established with no coverage, adopted a decoy at high
+confidence attested established, stated every answer high, answered a
+question that needed a missing source not determinable with no acquisition
+ask, and left a question not determinable after the evidence that settled
+it was added late. Five generic rules follow (docs/adr/0013, "After the
+first calibration run").
+
+- **New evidence stales what rests on older coverage.** An evidence
+  addition makes stale every standing bounded negative, not determinable
+  and partial answer whose coverage predates it, whatever question it was
+  added for; the gate holds each (`evidence_stale`) until a coverage record
+  at the new revision stands reviewed, or the answer cites the new evidence.
+  `evidence add` and its board post name them. An established answer is not
+  staled.
+- **A completeness claim rests on coverage of its areas.** A question that
+  asks for every one, all, each or a complete list is marked `completeness`
+  (by its words, or `question add --completeness`); its established or
+  partial answer rests on a coverage record naming the areas searched
+  (`areas`: allocated, deleted, unallocated, slack, secondary), or the gate
+  holds it (`completeness_uncovered`).
+- **An established attest names an alternative.** `answer_review.alternatives`
+  is `[{explanation, why}]`; an established attest that names none is
+  recorded best_candidate, and the reply says so.
+- **The run records the confidence.** High stands only on an established
+  answer another seat attested established naming its alternatives; any
+  other high is recorded medium, said in the reply and shown in the report,
+  the metrics (`confidence`) and the calibration score.
+- **A missing source is asked for.** A not determinable answer's coverage
+  names the acquisition ask (`acquisition_ask: R-<n>`) or why none
+  (`acquisition_none_why`); the answers check warns (`WARN:`, `warnings`)
+  when it does neither, and holds nothing.
+
+### Fixed: every chained register is sealed, bound, packaged and verified
+
+- The store sweeps (`ledger/sweeps.jsonl`) and the finish register
+  (`leads/finish.jsonl`) were sealed by nothing: custody seals both now
+  (`seal.sweeps`, `seal.finish`, and their checks), `custody-verify` holds
+  both to the seal and an earlier seal as a prefix after a resume, a release
+  binds the sweeps in its chains and holds the finish register to the
+  verdict, and a package carries both (`ledger-sweeps.jsonl`,
+  `finish.jsonl`), walked by `verify`; `--redact` treats a sweep's strings
+  and hits like other sensitive text.
+- The package's `verify` now walks the operator requests, the network's
+  grants and fetches and the model gateway's log against the seal (they
+  were copied and not checked), and declares them in `COMPONENTS.json`; a
+  release holds the gateway log's sealed lines to the verdict.
+- `scripts/chained-registers.ts` lists every chained register in one place;
+  `tests/chained-registers.test.ts` holds each to custody, the release, the
+  package and both verifies, and fails on a `.jsonl` name the harness uses
+  that the list does not classify.
+
+### Fixed: what the Fable review of the fix batches found
+
+An independent review of the first three fix batches found four rules
+that held less than their words said and ten smaller gaps.
+
+- **A correction re-points a closure only when nothing but what it cites
+  changed.** For a finding, an event, a hypothesis or a search every field
+  but what it cites is its conclusion now (a time, what it indicates, a
+  status, a completion, an attribution, the value exactly); an answer
+  keeps its rule.
+- **A review by the seat offered it is recorded** after its offer ran out
+  and moved on, the other seat's offer withdrawn; the register accepts a
+  reviewer's own offer rather than withdrawing it "reviewed by" itself; a
+  taken review whose seat is done or dead lapses at once.
+- **Stale evidence clears only on a reviewed examination**: a coverage
+  record naming the import, or an entry resting on it, attested by another
+  seat; a review made before the evidence came does not count for an answer
+  recorded after it. The operator's acceptance made after the evidence came
+  excuses it, and its reply says what the finish line still holds.
+- **An alternative counts only with the entries that rule it out** and a
+  real explanation; filler records the attest a best candidate.
+- **The recorded confidence reads only answers recorded under its rule**
+  (`confidence_rule`): a finished run's highs read as declared, and say so.
+- A confirmation made again after a compaction keeps its batch, and a batch
+  confirms what stands after a second correction; an objection to another
+  file is a late item; a quiet refusal says "NOT RECORDED:" and its trace
+  row keeps the whole record; "at each", "each time" and a doubled space no
+  longer mark a completeness claim; a leading form wrapped in "I want you
+  to" or "the goal is to" is flagged.
+
+### Fixed: what the round-13 scoring showed
+
+- **The store sweep: a negative is checked against everything the run
+  holds.** Two not-determinable answers had their row in an export the run
+  itself had made half an hour before, and passed review against their
+  coverage's two or three sources. A coverage record now names
+  `looked_for` (or `looked_for_none_why`), and the hub searches every job
+  output and log, import, capture and kept tool output for those strings,
+  in UTF-8 and UTF-16LE, streamed whole (`ledger/sweeps.jsonl`). A pending
+  sweep holds a negative like an unreviewed one; a hit outside the record's
+  objects holds it until the record is revised to name that object or the
+  answer is; a partial sweep names what it did not search and holds unless
+  the operator accepts the question. The review offer, `ledger.md`, the
+  report and the metrics (`sweeps`) show each sweep.
+- **A downgrade needs counter-evidence.** A revision from established or
+  partial to not determinable or a bounded negative carries `downgrade:
+  {evidence, why}`, or it is refused and pointed to a dispute and a lower
+  strength or confidence; the report shows the earlier answer, its disputes
+  and the downgrade's evidence.
+- **calibrate.ts counts a missing-evidence question by its state at the
+  start**: one a late item made present still counts in "Acquisition: k of n
+  missing-evidence questions requested the evidence".
+
+### Fixed: what the first pilot on the new flow showed (c10, run s6be12f)
+
+- **A review offer is held for the review, and withdrawn when it is not
+  needed.** Of the finished pilot's eleven negative-review offers one was
+  taken up, five declined and five had no outcome. A review's first claim
+  was a lead offer's minute, and accepting it recorded nothing, so the
+  offer passed on while the seat that took it was still reviewing: E-220's
+  went from s01 to s05 to s04 in two minutes, and s05's review of E-266
+  was deferred to the seat the offer had moved to while three more seats
+  declined in its favour. `offer accept` on a review now holds it for ten
+  minutes (`SWARM_REVIEW_HOLD_SEC`); the review its seat records takes up
+  that seat's offer even after it ran out; an offer whose item needs no
+  review any more (the answer superseded, as E-219 was seven seconds after
+  its offer; reviewed by any route) is withdrawn, and one that ran out is
+  recorded lapsed. The offer names where the gate counts the review ("attest
+  E-220 or its coverage record E-218 … not answer_review"), and what is
+  offered is what the gate holds.
+- **The metrics count coverage reviews as the gate does.** "Coverage
+  records: 0 reviewed" beside "Negative answers: 2 reviewed": the reviewers
+  attested the answers, which the gate counts for the records they rest on.
+  A record now counts reviewed on itself or through the negative answer
+  resting on it, both given apart; review offers count withdrawn and taken.
+- **Readiness turns ready on the dispositions the done ends on.** Under the
+  operator's stop, readiness held on "question:5 is not determinable" to
+  the end, and the metrics read "never ready" while the coordinator's done
+  passed examination-limited. A disposition that only limits the run no
+  longer holds readiness (a best candidate and a route limitation still do,
+  as the ADR says), and a done that passes while readiness had not turned
+  ready records the ready state in the sentinel's transaction, marked as the
+  done's, so the tail is measured.
+- **A summary's symbolic citation recorded before still stands.** Reading
+  the finished pilot with the new code took down its summary and narrative:
+  the answer fingerprint's fields had been reordered, and every recorded
+  fingerprint differed. The order is the earlier one again, pinned by a
+  test.
+
+- **Confirmations come in batches, and a refresh is re-pointed.** One
+  answer revision re-offered confirmation for four to six closures, several
+  to one seat. A seat is now offered one confirmation per correction chain,
+  confirmed with one `lead_confirm(batch)`; and a correction that changes
+  no conclusion (only its refs or its words) holds the closures on the
+  standing entry, recorded as `repoint (conclusion unchanged)`. A change of
+  value, result or kind still goes to confirm or reopen.
+- **The finish tail converges.** The resumed pilot sat in its finish tail
+  for over ninety minutes: answers kept being revised, and each revision
+  re-offered confirmations and made new late results. While a coordinator
+  holds the lease and the registers are met but for late items,
+  confirmations or resolutions, the finish is being assembled: another
+  seat's answer revision needs `material: why it changes a conclusion`,
+  and a rewording is refused quietly (not a refusal). The phase is in the
+  finish register, every header and `swarm.sh lead list`. A result post
+  that only restates its author's own revision is covered by it.
+
+- **B9 holds the sensitive values, not every word of a sensitive entry.**
+  The operator's analyst question "Is there evidence that any activity on
+  this system ran automatically (…startup entries)…" was refused because
+  "activity." and "entries." ended sentences of sensitive entries, and the
+  identifier rule took a word with its full stop for an identifier. B9 now
+  holds each sensitive entry's recorded value whole, as a phrase, and from
+  its text only the words that are values by their shape (a digit, a
+  symbol, a capital inside the word, or a long random string; never an id,
+  a number, a date or a time); ordinary words never refuse a question, a
+  name or a doing label. The package's redaction scanner is unchanged.
+- **B9 takes the value-shaped words from the value only.** The next
+  pilot questions naming "PowerShell" and "meeting.txt" were refused
+  because a sensitive entry's method and notes named that tool and file.
+  The words that are values by their shape now come only from what an
+  entry records (its `value`, and the subject an attribution names), never
+  from its evidence, source, method or notes; the whole value is still
+  held as a phrase.
+
+- **An earlier seal recomputes the attestations and the disputes.** Like the
+  lead, question, network and request chains, their first sealed lines are
+  now chained again with their own code; a sealed line rewritten with its
+  hash fields kept no longer passes as a prefix.
+- **A summary citing an answer by its seq is bound to its question.** The
+  pilot's summary and narrative cited answers as E-n and fell with every
+  revision of each. `record` now turns such a citation into the symbolic
+  `question:N` (bound to the answer's conclusion, not its seq) and says so;
+  a reworded correction keeps the summary standing.
+- **The finish register from the first header, and reviews before any
+  done.** The pilot had no `leads/finish.jsonl`: its five finish calls were
+  four status reads and an objection refused because no done had named the
+  report yet, and readiness was recorded only when it turned. The first
+  readiness is now recorded (not posted when not ready), and an ack or
+  objection before any done names the report and holds the coordinator's
+  done that names it. The writer, the docs, the metrics and the report all
+  use `leads/finish.jsonl`.
+- **Reviews are offered to one seat.** The pilot had six seats review one
+  deferred lead's route within minutes. A limiting route's review (once its
+  questions are answered, bound to those answers) and a material negative's
+  review are offered to one eligible seat, the relevant first; another
+  seat's review of an item reviewed or offered to another returns quietly
+  with who has it and records nothing, and a second review says why.
+- **A confirmation waits for a compacting closer.** The pilot's L-17 was
+  reopened three times because its closer began compacting as each
+  confirm-or-reopen offer arrived. Compaction is now a temporary absence:
+  the offer waits up to five minutes past the compaction's start; done or
+  dead still reopens at once.
+- **A call made holding no lead is given to what it named.** The pilot's
+  metrics put 136.3M of 240.0M tokens under "holding no lead". Reviews,
+  records, route reviews and lead acts made so named a lead, a question or
+  an entry: 16.5M are now given to those questions, 0.6M to the finish and
+  the report, and the 119.3M left are split by kind (waiting 61.9M,
+  coordination 23.1M, reading 23.8M, compaction 7.3M, other 3.1M). That
+  part is real: the header's "Yours: none" and the worker prompt now ask a
+  seat to hold a lead for sustained work and to take what is offered
+  before it waits.
+- **The quick start has the running case's commands.** `question add`,
+  `requests`, `evidence add`, `material add`, `net`, `extend`, `resume`,
+  `metrics` and `tools --candidates`, each with one example and a link to
+  usage.md.
+- **The kickoff checks the Herdr server first.** `herdr status server` is
+  asked with the other host programs, before any pane or VM is made; a
+  stopped server refuses the start (and a `--check`) and says how to start
+  it. The pilot's kickoff had booted every VM before it found the server
+  stopped.
+- **A leading form is an imperative at the start of a clause.** "Confirm
+  that…", "Show that…", "Prove…" at the start of the question or of a
+  sentence are flagged; "…if not, what shows that" is not.
+
+### Fixed: `--stop operator` no longer forces answers; B16 warns on services, not on English words
+
+- **The operator's stop policy adds no stricter answer requirement.** Under
+  `--stop operator` (`--until-solved`) the finish line refused `done` while
+  any question was not answered or accepted, so a `not_determinable` that
+  had passed the negative bar (coverage record, detection opportunity, peer
+  review, route plan) could only end by the operator's acceptance, and the
+  contract told the agents "an examination-limited finish is not
+  accepted". Now every run ends on the same rule: every question in scope
+  with a disposition under the bar (established; partial; a bounded
+  negative or not determinable on a coverage record another seat reviewed;
+  a premise shown not to hold; out of scope; accepted; withdrawn). The
+  answers check names each section's disposition (`dispositions`), the
+  finish gate carries it on each question and names what else holds a run
+  under the policy (`holding`: a defect a limitation only names), and a
+  quick negative nobody attested holds its question. The run ends
+  `completed` when every question is established or settled by a bounded
+  negative that says the event did not happen under the stronger bar, and
+  `examination_limited` otherwise; a best candidate never satisfies (B2).
+  The kickoff line, SWARM.md's "Until solved" section, the refusal and the
+  worker prompt say the negative-bar path plainly: plan the routes, record
+  the coverage record, have another seat review it, answer
+  `not_determinable`.
+- **One rule for the end of a run, under every stop policy.** Under
+  cap-pause and cap-stop a limitation that merely named an unanswered
+  question let the agents finish, examination-limited, with no coverage
+  record and no review. Now `done` needs every question in scope disposed
+  under the bar whatever the policy; a cap still pauses or stops the run,
+  and the operator still stops it, whatever the questions' state (paused,
+  stopped; never completed), and an agent may still abandon outside the
+  operator's policy. The contract's Questions section states the rule and
+  the way to not_determinable for every run.
+- **B16 matches services, not words.** The goal's service names came from
+  every label of every denied host, so "what did he search for" named
+  search.brave.com and "how did he hide" named hide.me. A bare name now
+  comes only from a host that is a service's own name (`google.*`,
+  `nominatim`, an adapter's id or service), never a subdomain's label, and
+  an ordinary English word among those (hide, archive, medium, proxy…) is
+  taken only written as a proper name inside a sentence; hosts, URLs and
+  adapter ids are matched as before.
+
+### Added: work another seat did is named, and the process is measured from its registers
+
+- **`similar` at `job_run`.** A command or tool job with a declared scope
+  keeps `reuse: {op, objects}` on its `job_accepted` line: its tool or its
+  leading command word, and its objects by sha256 (a directory by its path).
+  Another seat's job under way or committed with the same tool or the same
+  word over at least one of the same objects is named in the answer, with
+  its lead, state, status and outputs, the same command or tool and
+  arguments first; the whole list is a `job_similar` line. The job runs as
+  asked.
+- **`same_as` at commit.** A committed job's non-empty file with an earlier
+  job's output's sha256 names that job and file (`job_same_as`, the job's
+  record and view, its post).
+- **`independent: true`** on `job_run` records an intended reproduction; the
+  similar jobs are still named.
+- **Hints never hold a job up.** `similar` is sought once the job is
+  registered and queued; `same_as` is looked up in an index built in the
+  background, off the store's commit path. The console's Jobs tab shows both
+  for a job, every entry.
+- **The shadow merge is retired.** The whole-spec key matched none of 393,
+  127 and 190 keyed jobs on the last CTF round; nothing writes
+  `job_would_merge` now, and old lines are ignored. Typed recipes are still
+  merged.
+- **`swarm.sh metrics <run> [--json]`** (`scripts/metrics.ts`): quick and
+  unreviewed negatives, coverage completeness, offers by outcome (wakes from
+  before offers apart), `done` calls and refusals, the tail from readiness,
+  from the first answers and from the final ones, acquisition gaps,
+  interpretations still valid, reversals by new evidence or discoverable,
+  tokens per question apportioned by lead, duplicates and reproductions, and
+  the network's requests, grants and captures; each a count of named
+  records by id and code (no free text a record carries), over the
+  questions in scope at the run's end, with a missing register said as "not
+  recorded", defined in `docs/usage.md`. `--compare <run-A> <run-B>` sets two
+  runs of one goal side by side and flags a negative the other asserts and a
+  shared negative without complete, current coverage. ADR 0017.
+
+### Added: the report follows each question; outputs carry their sensitivity; the code agents wrote is ranked for the library
+
+- **The report, question by question.** §1 is one screen of every question
+  (the goal's, the agents', a person's, and those proposed, excluded or
+  withdrawn): its standing, who asked it, its answer by number, its leads,
+  the operator's acceptance and its tokens. §2 follows each from who asked
+  it (the goal; an agent and the entry that raised it; a person with role,
+  claimed or signed) through every verbatim revision, the neutral wording,
+  hints, attachments with their provenance, clarifications, the proposition
+  its first lead tested, its leads, its coverage, its result and contrary
+  evidence, the acceptance, its evidence gaps and its cost; each group of
+  questions says why it matters, and the unresolved ones say what would
+  settle them. A negative lead is counted in the body; Appendix F holds
+  every question and lead event and every disposition with its review.
+- **Cost per question.** Each model call the gateway recorded goes to the
+  leads its seat held then, split evenly, and to their questions; a call
+  outside every hold goes to no question and is shown on its own line. A
+  host run's seats' totals are spread over their tool calls, an estimate; a
+  seat with a budget the trace cannot place keeps its tokens in an explicit
+  unattributed bucket. The per-question figures shown are whole numbers that
+  sum to the displayed total (largest-remainder). Appendix F renders every
+  register event whole, including one tied to no lead.
+- **A release binds the question register.** `release.json.questions`: the
+  length and head custody sealed, the questions by origin, every person who
+  asked or acted (enrolled, claimed or signed), and what came after the
+  verdict. Verification recomputes the bound prefix's own chain, not the
+  stored hash fields, whether or not the custody verdict sealed the questions;
+  the operator requests and the other register chains are held to a seal the
+  same way, by custody-verify, an earlier verdict, a release and a draft.
+- **Sensitive outputs, held by their bytes.** `job_run(secret_output: true)`
+  seals every output sensitive; a job that executed against a sensitive
+  output's bytes — read from the snapshot its scope manifest recorded, so a
+  work copy, a store blob, a catalogue link, generation or alias counts,
+  through chains of jobs — is sealed sensitive too, as derived; an entry
+  citing one is recorded sensitive; a sensitive generation withholds its
+  coverage detail from the catalogue projection at the source. `package
+  --redact` withholds every file whose bytes are a sensitive job's, wherever
+  they sit, names each by a keyed id (never a hash a low-entropy value could
+  be brute-forced from; the key and the real digests are in a private sidecar
+  kept outside the hand-over), and scans every file and the filenames for the
+  sensitive entries' words, a small output's text and the outputs' digests; a
+  package without `--redact` names what in it is sensitive (`HYGIENE.json`),
+  the same way. An entry citing a cancelled or stopped job's output without
+  saying how it treats it is a `partial_output` defect, resolved by the job
+  that wrote the bytes so a copy or a `sha256:` citation is held too.
+- **Tool harvesting and the library's hint.** `swarm.sh tools <id>
+  --candidates` ranks the code agents wrote into command jobs by lines times
+  reuse, with its jobs, seats, profiles and the library tools that may cover
+  it, and writes each script whole for the maintainer; a work file is taken
+  only when the command ran it as code (read no-follow, its bytes matching the
+  snapshot), and output hygiene withholds a candidate from a sensitive job or
+  one holding a sensitive value before any script is written. A manifest's
+  `use` says what a tool reads; a command job that declares its inputs is told
+  which library tools read that kind of file, from a cached manifest, bounded
+  and under a deadline.
+- ADR 0016; README, docs/usage.md, docs/protocol.md, tool-library/README.md
+  and the worker prompt say it.
+
+### Added: one seat finishes, work is offered, and a review says how strongly it holds (ADR 0015)
+
+- **One coordinator ends the run.** `leads/finish.jsonl` holds the finish's
+  lease (the report's last publisher, else the first seat to call done),
+  with a generation and a takeover when its holder is done, dead,
+  compacting or silent. Any other seat's `done` is answered "not yours",
+  quietly (`done_deferred`), and `markDone` refuses its sentinel. Readiness
+  from the registers is in every header and posted when it turns; one check
+  result stands per state revision, which now covers the report's digest,
+  the shared deliverables, the jobs, the policy and the operator's
+  decisions. The report is reviewed with typed acts (`finish ack`), and a
+  result, veto or objection that lands after it needs the coordinator's
+  typed resolution (`finish resolve`). A limiting route stops holding the
+  finish only when its questions are disposed and another seat's
+  `route_review` holds it no longer material, or the operator accepted them.
+  A summary cites questions as `Q-<n>`, bound to each answer's fingerprint.
+  An offer's bookkeeping (made, delivered, declined, lapsed) does not move
+  the revision, so a waiting seat's delivery never makes the coordinator's
+  check run again; a closure offered to its closer to confirm does.
+  The sentinel is written in one transaction with the lease (the holder and
+  generation the coordinator's done began with) and what is late against
+  the report: a takeover or an objection made while the checks ran refuses
+  it. What landed against the report is an obligation until resolved,
+  through every later version of it. The revision counts what of each
+  job's stdout was handed over, and readiness is cached only for the
+  revision its own snapshot was read at. With the case contract (ADR 0014)
+  the revision also covers the case policy, the operator requests' chain
+  (a delivery claimed, sent or failed does not move it) and each addition
+  committed or applied; an addition not yet applied, or an answer recorded
+  before new evidence for its question, holds readiness as it holds the
+  gate.
+- **Reviews say how strongly they hold.** An attest of an answer to a
+  question takes `strength` (established or best_candidate) and
+  `answer_review`; a medium or low confidence, a part not established, or an
+  untaken route named in `would_change` allows only a best candidate, which
+  the answers check holds examination-limited. A dispute stays in force on
+  the correction of the entry it named until its disputer withdraws it. An
+  interpretation is bound to its entry. Agents reopen with `lead_reopen`,
+  within the operator's restrictions. An answer's contrary evidence is held
+  to its standing as its support is: corrected or disputed since it was
+  weighed, it takes the answer down, and a summary citing its question.
+- **Work is offered.** Wakes, hand-offs (`lead_handoff`), parked leads, a
+  reopen after the operator's note and a closure to confirm are offers: first
+  claim for a minute from delivery, bounded, accepted or declined (`offer`),
+  invalidated by a revision, restart-safe; a person's question's offers run
+  through the same machine. A superseded closure is offered to its closer to
+  confirm (`lead_confirm`) or reopen, never re-pointed. A take on questions
+  another seat covers is unheld unless it says it is a second route or a
+  verification; first choices are staggered at kickoff; names are stable and
+  labels follow the held lead. A standing entry is no need; a dropped need is
+  withdrawn with why; prerequisites open and link in one act, with a product
+  contract, and a loop is refused before either is written. A seat is offered
+  one thing at a time across both registers, and a person's question offered
+  to a seat holds against a peer's claim and reopen too. A lead is parked
+  only when its holder is seen working on another lead; a closure to confirm
+  reopens at once when its closer becomes unavailable. The prompts, the library's leads paragraph and the three CTF goals
+  say so: a follow-up is opened unheld unless it is started next turn, and
+  ending the run is the coordinator's done.
+- **The operator sees it.** The console's Leads tab and `swarm.sh lead <run>
+  list` show the finish (ready by the registers or what holds it, the
+  coordinator, the last check, what is late against the report), the parked
+  leads, and on each lead its standing offer, a closure to confirm, a second
+  route and its product contract; `leads/leads.md` renders the same.
+- **The runtime.** A running job is seen by its outputs, its logs and its CPU
+  and I/O (msb's metrics, or the worker's heartbeat): "suspected stall" is
+  shown, never acted on, and only on current measurements (a frozen
+  heartbeat or a stopped sampler is "unknown", and stillness is not counted
+  across missing samples). The regroup nudges a running job's holder first. A
+  program missing from a job's image is named with its profile in the job
+  record and the console, from the shell's own diagnostic or exit 127, never
+  from an application's "not found". The seats' subscription tokens are renewed on the
+  host with msb's live secret update, verified against a running VM.
+
+### Added: the case contract: what may come in, what was asked of whom, and where the evidence ends
+
+- **The case policy, complete.** `--more-evidence no|ask|yes` says whether
+  evidence may arrive while the run goes on, `--material-use CLASS=USE,...`
+  what each class of material from outside the evidence may be used for
+  (`evidence`, `reference`, `none`), and `--legal`, `--provider-retention`
+  what the operator records beside them; each also from the goal's metadata
+  block. A contract that contradicts itself is refused at kickoff (a capture
+  as evidence, a published case taking evidence later). The policy is
+  written before the custody anchor, which holds its sha256; custody seals
+  it and names a rewrite; a release binds it; a resume keeps it and says what
+  its options would have changed. The services a goal names are held to the
+  policy and the adapter catalogue at kickoff, as warnings.
+- **Operator requests, with ids and an outbox.** A lead's needs, an
+  acquisition, a clarification, a network item and a stop proposal are each
+  a request `R-n` on a chain of their own (`requests/requests.jsonl`, sealed
+  by custody), derived from the record that commits it, written once, and
+  rendered where every reader has always read them
+  (`operator-requests.jsonl`). The lead's request is no longer appended after
+  the close with its failure swallowed: a request not yet written is said to
+  the agent and written at the next reconciliation. Its lifecycle is pending,
+  notified, acknowledged, then answered, declined or withdrawn; `swarm.sh
+  requests` and the console's Requests tab act on it, and the header's badge
+  counts what waits on the operator.
+- **Notifications fired by the hub, with ids only.** `--notify` takes
+  `desktop:`, `ntfy:<topic>`, `mailto:<address>` and a command, repeatable,
+  kept outside the run; an operator request is notified when it is
+  committed, by its id, its kind and the lead's or question's id, never by
+  what it asks. The watchdog's polling is now a fallback.
+- **The acquisition lane.** An agent asks for evidence the run does not have
+  on the lead that needs it (`ask: {kind: acquisition, source, where,
+  expected_value, urgency, ...}`); under `more_evidence: no` it is answered
+  at once, "no additional input under this case policy", never as a finding
+  that something is absent. `swarm.sh evidence <run> add PATH --for R-n`
+  seals the evidence in the store as an inventory revision, catalogues it,
+  answers the acquisition, and reopens the leads, answers and acceptances
+  that rested on the evidence as it was; the agents read it through jobs.
+  Calibration tells a late item added this way by its digest.
+- **Material with provenance.** `swarm.sh material <run> add` and a
+  question's attachment record supplied material as `external` with who
+  supplied it, when, from where, its sha256 and what it may be used for;
+  `check-answers`, the report and `release.json` name every answer resting on
+  external material with its classes, and a record citing a class the policy
+  says `none` for is refused.
+- **Where the evidence ends.** The report's section 8 gains "Evidence gaps and
+  acquisition requests", generated from the records: never collected,
+  unavailable, inaccessible, unexamined, inconclusive.
+- **Sensitivity.** A name, a `doing` label and a question's text are refused
+  when they hold any value the run marks sensitive, whatever its origin: no
+  answer-value concept, no exemption for the goal's own words.
+
+### Fixed: the case contract's independent review
+
+- **A resume's egress follows its recorded policy.** `--no-netguard` among a
+  resumed run's options no longer opens a run whose recorded case policy is
+  closed or dynamic; the generated VM and job specs are held to the policy
+  (`case-policy.ts check-spec`) before anything boots.
+- **Every notification is identifiers only.** Not only an operator request:
+  `evidence_changed`, `finish_failed` and every other event leave as an
+  envelope of ids, numbers and counts, the details kept in the run
+  (`traces/notify-events.jsonl`, by event id). `mailto:` takes one mailbox,
+  never an option, given after `--`.
+- **Added evidence and material, committed then applied.** An addition is
+  copied into a staging directory of its own, its id reserved by making its
+  directory, and committed (record and journal line) one at a time under the
+  run's material lock; what follows (the external entry, the acquisition's
+  stages, the leads and answers it reopens, the board post) is derived from
+  the record, each step once, and replayed after a crash by the hub's round,
+  the next addition or `evidence list`; the finish line waits for it
+  (`addition_incomplete`). A reason too long for the ledger's entry or a
+  lead's reopen is kept whole in the record and named, never cut. Leads
+  under a custom question section (`bonus`) are reopened. The documents say
+  what the mounts do: an addition is readable at once, read-only, in every
+  seat's VM, and its provenance is its ledger entry's.
+- **`material_use none` holds on what a record rests on.** A digest of the
+  same bytes, a job's output made from them, a coverage record and an
+  attestation or dispute are refused as the material's own ref is, and
+  `check-answers` fails an answer resting on it (`material_use`). A job's
+  output attached as material keeps its lineage downstream.
+- **B9 holds what is published.** A name is checked as it would appear
+  (tidied) with Unicode folded, and a short value marked sensitive is held
+  whole, as a word.
+- **Operator requests.** An interrupted migration no longer loses the lines
+  of a run from before the chain, and a line an older harness appends is
+  imported; a delivery is claimed on the chain before it is sent (never two
+  sends), tried again after a backoff, and an imported request the old
+  watchdog never notified is notified. The operator's acts go through the
+  hub while it runs, their board posts are made from the chain once, and
+  their outcome is on the operator's record.
+- **B16** names an adapter by its whole id (`rdap_domain`) and a tool name
+  built on its service (`virustotal_hash`).
+- **The fetch service's per-host interval** is held against when the
+  previous request to the host actually left (each hop records `sent_at`).
+
+### Fixed: the question register, after an independent review
+
+- **The hub is the register's one writer.** While a run's hub is up, the
+  operator's acts (the CLI and the console, through `swarm.sh`) are handed
+  to its admin socket, which prepares each again from what was said, checks
+  its signature against that statement, commits and delivers it. With no
+  hub the CLI admits the act itself under the registers' lock; the
+  acknowledgement says which (`admitted_by`).
+- **A signature is carried by the act it signs.** A signed act and its
+  signature are one event, written whole or not at all; the act is kept
+  exactly as signed (a signed amendment that repeats the text no longer
+  invalidates itself). `verify` attributes a signature to the person the
+  signed act names, requires the key it carries to have the fingerprint the
+  act names and this install's enrolment of that person to hold it, fails on
+  `wrong-principal` as well as `bad`, and fails on any act that says it is
+  signed and carries none. `lead direct --sign` is refused: a directive is
+  not signed.
+- **An act's effects survive a crash.** What a withdrawal or a triage
+  decision implies on the lead register is reconciled from the chain under
+  the lock, in the act's own hold and at every later act and header. A lead
+  opened from a finding (`record(kind=finding, opens)`) counts as holding it:
+  a withdrawal sends it to triage. A board post or a hint's hypothesis that
+  failed leaves the revision pending, with no `deliver` event, and is tried
+  again; a delivery finds its post by an exact key in its front matter,
+  never by its words. Clarification requests and answers are derived from
+  the chain and published once, keyed by `C-n`.
+- **Answers are bound to a revision.** An answer to a register question
+  names the revision it answers (`question_rev`, in the ledger's hashed
+  core), checked under the registers' lock: a revision the question has
+  moved past is refused, and one is required once the question has been
+  amended. Staleness is by revision, not by time, and an unchanged answer is
+  reaffirmed for a new revision as a correction naming it.
+- **After the done.** Admitting a proposed question, or amending one into a
+  new revision, after the run's done is a follow-up, as a new question
+  already was; `resume` takes the follow-ups up as the continuation's work
+  (a `continue` event) and puts the reserved `run_resumed` line on the
+  trace. A withdrawn goal question is no longer required by the answers
+  check or the finish line (its outcome is `withdrawn`).
+- **One standing, whatever the name.** `question:N`, `N` and `QN` are held
+  to a question's scope and withdrawal as `Q-N` is. The first claim of a
+  directive under a person's question no lead has framed states the
+  proposition and its negation (`lead_claim`). A goal question is seeded
+  whole, through its later paragraphs and sub-questions.
+- **Release verification** holds the lead and question registers, and the
+  dynamic network's grants and fetches, to the heads the custody verdict it
+  binds sealed: appended to is a prefix; cut, deleted or rewritten fails.
+- **The console.** An amend or accept form keeps the revision it was
+  opened on until you refresh it; a proposed question is a full card, with
+  its clarifications to answer; the newest post is carried whole, clamped
+  on screen with the whole in its title.
+
+### Added: calibration cases with a truth kept apart, and a scorer for a run's answers
+
+- **`calibration/generate.py`** writes three synthetic cases (a USB drive
+  image with a workstation's logs, a web server's logs, a mailbox export
+  with a browser history database), each with a goal, its evidence, one
+  held-back item for the operator to add mid-run, and a truth file written
+  only where `--truth-dir` says: never inside a checkout, the cases
+  directory or a run. The facts are planted where examinations miss them
+  (deleted, unallocated, slack, rotated compressed logs, two artefacts read
+  together, base64) or are absent with a near miss beside them, and the
+  generator holds each to the bytes before it writes. Standard library
+  only; the same seed gives the same bytes on macOS and Linux.
+- **`scripts/calibrate.ts <run-dir> --truth FILE`** scores a finished run's
+  ledger answers against the truth: the miss rate on present facts, false
+  "not found", forced answers, decoy adoption, unsupported negatives,
+  acquisition requests, the late item and the calibration of the stated
+  confidence. It reads today's ledger and Plan 3's fields (`result`,
+  coverage records, the question register) when they appear, prints a table
+  and writes its JSON beside the truth, never into the run.
+- `tests/calibration.test.ts` and `tests/calibration-cases.test.sh`: the
+  generator's determinism and refusals, every kind of fact, goals that name
+  none of them, the facts read again with The Sleuth Kit, gzip and sqlite3,
+  each goal launched with `--no-start`, and the scorer on hand-made ledgers.
+
+### Added: three tools from later runs in the library, made general first
+
+- **`ledger_timeline`** (from run `se5fdcd`) writes a run's dated ledger
+  entries as one timeline in time order: Markdown, CSV or JSON Lines. It
+  reads any run's `ledger/entries.jsonl` with the attestations and disputes
+  beside it; kinds, a time range, a regex, excluded seqs, duplicates and
+  corrected entries are the caller's choice, and every entry left out is
+  counted by why. A sensitive entry is withheld unless asked, `redact` takes
+  patterns, and it writes nowhere under `ledger/`, `tools/` or `inputs/`.
+  The run's copy had one case's title, closing paragraph and password
+  pattern in its script.
+- **`contact_sheet`** (from run `s10d40e`, job `j000558`) tiles the images
+  of a directory, a list or a tar (read in place) into labelled sheets for
+  looking at: each distinct content once, exact duplicates (or look-alikes
+  by average hash) listed, not tiled again. Tile size, columns, rows, the
+  label format and dedup are parameters; `out_dir` keeps every tile, a
+  manifest row per file and an index from tile to file with the whole
+  label; a large set is done over several calls within the tool timeout.
+  Needs Pillow (pillow_heif for HEIC), and says so when it is missing.
+- **`nested_vdi`** (from run `sae6e7d`, job `j000136`) reads a VirtualBox
+  VDI that lies inside an E01 or raw image without writing it out: through
+  the NTFS data runs of the file holding it (a deleted one too; inline or
+  from a file, sparse runs as zeros) or at an offset, then through the
+  VDI's block map. `info` gives the header, the block counts and the
+  guest's partitions, `ls` lists a guest directory (recursive, paged,
+  nothing cut), `extract` writes one guest file, `read` gives guest bytes.
+  The job it came from had one case's partition offset and cluster size
+  written in and mounted the E01; the image, offset, runs, cluster size and
+  header location are parameters now. pyewf for an E01, pytsk3 for `ls` and
+  `extract`.
+- `tests/tool-library-folded.test.ts` builds every fixture itself: a ledger,
+  drawn images, and a FAT12 file system in a VDI with shuffled blocks inside
+  four data runs of an outer volume, one of them sparse. Without Pillow,
+  pytsk3 or pyewf the tests that need them are skipped; the header, the
+  block map and the two-level read are plain Python and always run.
+- **`optional_python` in a tool's manifest**: the Python modules only some
+  images carry (Pillow and pillow_heif for `contact_sheet`, pyewf and
+  pytsk3 for `nested_vdi`), imported under a `try` that catches
+  `ImportError` so the tool says one is missing. The library's import check
+  in `tests/recipe.test.sh` now reads each script's syntax tree: it sees an
+  import inside a function and one by name through `importlib`, refuses one
+  by a computed name, holds a declared module to its guard, and names a
+  declaration nothing imports.
+- The library's README says what each came from and how it was made
+  general, which modules only some images have, and which candidates
+  (the `$LogFile` scanner and mapping-pairs decoder of run `sae6e7d`) stay
+  out of Community.
+
+### Added: results and the negative bar; caps pause the run; a run that ended can be resumed
+
+- **Results.** A question's answer carries `result`: `established`,
+  `partial`, `bounded_negative`, `not_determinable`, `out_of_scope` or
+  `premise_not_supported` (required on new answers; `inconclusive` reads as
+  `not_determinable`). The answers check maps them onto its outcomes and
+  names them in its machine line. Run outcomes are `completed`,
+  `examination_limited`, `paused`, `stopped`, `abandoned` and
+  `verification_unavailable`; an operator's stop writes `done/STOPPED`, and
+  stopped is never completed.
+- **Coverage records** (`kind=coverage`): the proposition, the objects, the
+  time range, the method and settings, what was covered, skipped and failed,
+  the results, what is still open, and the detection opportunity. The hub
+  stamps the inventory revision and computes `coverage: complete|partial`
+  from the inputs the jobs behind it declared, by digest; it never judges
+  relevance. Required for every material bounded negative and not
+  determinable answer.
+- **Routes and quick negatives.** A question's leads carry `routes`; the
+  first lead under a question without them is warned, a person's question's
+  must carry them, and a material negative close is refused without them. A
+  negative close lists the routes nobody examined; one closed after one job
+  over one object within two minutes is flagged `quick_negative`.
+- **Peer review of material negatives.** `attest(..., review: {detection,
+  reproduced, other_route})` by a seat that recorded neither the answer nor
+  its coverage; the finish line refuses while one is unreviewed, and the
+  ledger, the header and the report say "negative (unreviewed)".
+- **Wording.** The report renders a bounded negative as "No evidence that …
+  was found in <scope>"; "did not happen" (`asserts_absence`) needs an
+  existence question, complete coverage and a detection opportunity, and the
+  answers check names an answer worded so without it.
+- **Acceptance** (`question accept`) is refused while a lead under the
+  question is open or its negative is unreviewed, and makes the run
+  examination-limited. A question's disposition follows its answer
+  (`dispose` events).
+- **Stop policy.** `--stop cap-pause|cap-stop|operator` (default
+  `cap-pause`; `--until-solved` is `operator`; a goal's `stop:`). At a cap
+  the run pauses: no model call goes out (the extension, the model gateway,
+  the hub and the watchdog each hold it), the operator is notified, and
+  `swarm.sh extend <run> [--minutes N] [--tokens N] [--usd N]` goes on (the
+  watchdog wakes each seat once) or `swarm.sh stop` ends it. The paused time
+  does not count against the wall clock. A metered team gets a default token
+  cap of 100,000,000. When nothing has yielded for 20 jobs or 30 minutes, a
+  stop is proposed to the operator (an operator request of kind
+  `decision`), never decided.
+- **Resume.** `swarm.sh resume <run> [--question TEXT]... [--questions FILE]
+  [--as ID] [--minutes N] [--tokens N] [--usd N] [--no-start]`, and
+  "Continue this run" in the console: the same sandbox and chains; what
+  marked the end moved whole to `done/history/<k>/`; each seat starts from
+  its last hand-off note or compaction summary; new questions are analyst
+  questions; refused before anything moves when it would still be over a
+  cap. The resume is anchored beside the run; the next stop seals the
+  continuation anew; `custody-verify` holds every earlier verdict to the run
+  as a prefix and shows each; a release's chains verify as a prefix only
+  after an anchored resume; a signed v1 stays valid, and the continuation is
+  adopted through a later version. The kickoff keeps its options outside the
+  run (0600) for it.
+- **Console.** Extend, Continue this run, and a paused run's notice on the
+  run page; the list carries the stop policy, the pause, the outcome and the
+  resumes. The jobs drawer shows every argument whole (it cut each at 40
+  characters), and a job's output is kept whole on disk and served whole
+  (`/api/jobs/<id>/output`) where the list carries its last 64 KiB.
+- [ADR 0013](docs/adr/0013-a-negative-is-bounded-and-a-cap-pauses.md).
+- **After review** (seventeen findings, each with a test that failed before
+  its fix): coverage records bind their results by hash (`coverage_stale`);
+  `premise_not_supported` rests on a finding and absolute wording is held
+  whatever the result; the report states a negative from its coverage
+  record; an acceptance is of the answer that stood; coverage names objects
+  as the job scopes do and takes directories; release verification runs the
+  chains' own verifiers and relaxes to a prefix only after a resume anchored
+  at a verified boundary; the bound report is kept at `release/bound/`; a
+  gone gateway log breaks an earlier seal; a resume is anchored before
+  anything moves; compaction and the pausing call are held while paused;
+  extend and stop are ordered under one lock; a pause is told once whoever
+  wrote it; the watchdog runs at `--idle-nudge-sec 0` and retries a wake;
+  the kept start options hold no secret a pane can read (`resume --env
+  KEY=VALUE`; the notify command and the typed `--notify` targets are given
+  to the resume's kickoff again from `runs/notify/`), and a resumed run's
+  evidence image is attached again. An acceptance also stands only until
+  new evidence arrives for its question (`evidence add`).
+
+### Added: a dynamic network, decided by rules and made on the host
+
+- **`--network closed|dynamic|open` and a case policy** (`--policy
+  standard|live_adversary|internal|ctf`, with `--lookups`, `--contact`,
+  `--disclosure` overrides, or the same keys in the goal's metadata block).
+  `closed` stays the default and changes nothing; a contradictory policy is
+  refused at kickoff, and so is direct egress it does not permit
+  (`--allow-host`, `--allow-install` without `--no-pypi`, a pack's secret
+  hosts under `ctf`, `internal` or `live_adversary`). The policy is recorded in `network/policy.json`,
+  SWARM.md and the registry (`scripts/case-policy.ts`).
+- **`net_request`, `net_fetch`, `network`.** An agent asks for one bounded
+  lookup from the adapter catalogue (`network/adapters.json`: RDAP, crt.sh,
+  NVD, CISA KEV, CIRCL hashlookup, RIPEstat, Nominatim, Overpass, YouTube
+  oEmbed title, an evidence-linked HEAD, VirusTotal with a host-managed key).
+  The hub decides it in eight fixed steps with machine-readable reasons
+  (`scripts/net-policy.ts`); a refusal closes the avenue, never the lead,
+  and opens one operator item per host and lead. Credentials are looked for
+  in each URL component as sent and decoded, sensitive values anywhere
+  inside one; the evidence link counts only source bytes (never an agent's
+  own words); quotas are counted again under the issuing lock. Grants are
+  capabilities in `network/grants.jsonl`.
+- **The fetch service** (`scripts/net-fetch.ts`) makes exactly a grant's
+  request: its own headers only, DNS once with every address checked
+  public (IPv6 by its parsed bytes), TLS against the name, no redirect
+  beyond an adapter's referral hosts and none past an oversize or stopped
+  answer, no CONNECT, the use logged before it leaves, the grant held to
+  again after every wait and DNS answer and before publishing, an adapter's
+  rate slot reserved per host, an oversize body refused whole. The result is
+  written before the capture is published; an attempt left without one is
+  reconciled, and custody names any that remains. What no seat is given (a
+  filtered response, a partial or withheld body) is kept in
+  `<run>.netraw/`, outside every VM, verified by custody, packaged under
+  `network/raw/` and purged with the run. Jobs use it through `job_run net_grants`, on the one host
+  port their worker is booted with. Each answer is sealed as `net:<k>/<n>`
+  and recorded as a ledger entry of the new kind `external`
+  (`source_class: external_capture`); what derives from it stays external,
+  by what each job resolved (its scope manifest, digests, a broad scope),
+  never by how it spelled its inputs.
+- **Socket grants (tier 2)** say what they are; `lead note --allow-host`
+  makes one, and `--allow-host` names itself a static socket allowance. A
+  host is written one canonical way, and the grant, not the legacy host
+  line, decides whether it is in force.
+- **`swarm.sh net <run> list|grant|deny|revoke`** and the console's
+  **Network** tab; every act needs a reason. Custody seals both network
+  chains and re-hashes every capture. [ADR 0012](docs/adr/0012-a-dynamic-network-decided-by-rules-and-made-on-the-host.md).
+
+### Added: the question register: what a run is asked, by the goal, an agent or a person, on one chain; analyst questions while it runs; the analyst and observer roles
+
+- **One register.** `questions/questions.jsonl` (rendered as
+  `questions/questions.md`), chained with the lead register's code and
+  written under its lock, holds every question as `Q-n`: the goal's (seeded
+  at kickoff, `Q-n` is `question:n`, so every goal and run keeps working),
+  the ones agents open (`question_open`, with the entry that raised it) and
+  the ones people ask while the run goes on. Each keeps every verbatim
+  revision, a neutral formulation, why, its objective or parent,
+  materiality, priority, what it expects, hints, attachments, a suggested
+  seat, a deadline, and its origin: who, in which role, from which account,
+  host and channel, enrolled or not, claimed or signed. Scope, work and the
+  evidential disposition are kept apart. Custody seals the chain; the
+  package carries and verifies it.
+- **Goals with objectives.** An `## Objectives` section (or a front-matter
+  `objectives:` list) declares `O-n`; a goal with objectives and no
+  questions is open-ended, and its first agents propose the questions.
+  `analyse-inputs.md` gains one.
+- **Scope rules and triage.** An agent's question is in scope inside an
+  objective or under a question in scope, otherwise proposed into a triage
+  queue; an examiner's and the operator's are in scope by authority and may
+  add an objective; an analyst's are in scope inside an objective; a
+  reviewer's and an observer's are proposed. Only the operator and an
+  examiner admit or exclude; an agent never changes a person's question.
+- **`swarm.sh question <run> add|list|show|amend|priority|scope|withdraw|clarify-reply|accept|verify`**
+  and `swarm.sh lead <run> direct`. `--as ID` names an enrolled person (a
+  claim); `--sign` signs the act with their key (namespace
+  `dfirswarm-question`, the secret on fd 3). An act is acknowledged only
+  after the chain holds it, and is on the operator's record twice: the
+  attempt and the outcome naming the event.
+- **Delivery.** A person's question is posted from `analyst:<person>`
+  (tagged `question`, addressed to the seat it is offered to), ranked first
+  in every agent's header, offered to the suggested seat for a minute and
+  then to the most suited idle seat; urgent tells the holders under the same
+  objective and cancels nothing. A crash between the chain write and the
+  post is made good at the next header, and posts nothing twice.
+- **Hypothesis framing.** The first agent lead under a person's question
+  records the proposition and its negation; its answer carries `contrary` or
+  `contrary_none_why`; `result: premise_not_supported` is an answer; leading
+  forms are flagged for the critic.
+- **The finish line.** Every material question in scope is held to an
+  answer; a stale answer (recorded before an amendment) refuses `done`; an
+  accepted question limits the run. The sentinel is written under the
+  registers' lock against the revision the finish line judged, so a question
+  admitted meanwhile refuses the done, and one after it is a follow-up.
+- **Roles.** `swarm.sh examiner enroll --role analyst|observer`: an analyst
+  adds questions and signs no release; an observer proposes. Every enrolled
+  person's register line admits `dfirswarm-question`.
+- **The console.** A Questions tab (the add form, the list with origin
+  badges and authors, the triage queue, the clarification threads, the
+  acting person for the session) and "Add directive" on the Leads tab.
+- [ADR 0011](docs/adr/0011-questions-are-a-register-with-their-askers.md).
+
 ### Added: the examiner signs with their own secret, from the command line or the console; three kinds of key; a technical reviewer signs their own record
 
 - **Three kinds of key, two roles.** `swarm.sh examiner enroll` records a

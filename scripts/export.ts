@@ -21,6 +21,7 @@ import { readEventLogChecked, readLedger, supersededBy, type LedgerEntry } from 
 import { groundingOf, type Grounding } from "./coverage.ts";
 import { readReviewState, reviewStatusOf } from "./report.ts";
 import { findRunBySandbox } from "./run-record.ts";
+import { sensitiveEntries } from "./output-hygiene.ts";
 
 export type ExportFormat = "csv" | "timesketch";
 
@@ -116,7 +117,10 @@ export function ledgerTimesketch(given: readonly LedgerEntry[], ctx: ExportConte
 
 export async function exportLedger(sandboxArg: string, format: ExportFormat, ctx: ExportContext & { runsDir?: string } = {}): Promise<string> {
   const sandbox = resolve(sandboxArg);
-  const ledger = await readLedger(sandbox);
+  const read = await readLedger(sandbox);
+  // For handing over, an entry citing a sensitive output is sensitive whether or not it was recorded so (docs/adr/0016).
+  const derived = ctx.redact ? await sensitiveEntries(sandbox, read) : new Map<number, string>();
+  const ledger = read.map((e) => (derived.has(e.seq) && !e.sensitive ? { ...e, sensitive: true } : e));
   let grounding = ctx.grounding;
   if (!grounding) {
     const trace = await readEventLogChecked(sandbox);

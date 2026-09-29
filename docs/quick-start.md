@@ -134,7 +134,7 @@ against the cap rather than "$0.00 spent".
 
 ### 2. First live run, N=2
 
-Herdr must be running before kickoff: open the Herdr app, or in a second terminal run `herdr server` (`swarm.sh` talks to it over the socket and does not start it for you). Make sure `herdr` is on `PATH` (`export PATH="$HOME/.local/bin:$PATH"` after the installer).
+Herdr must be running before kickoff: open the Herdr app, or in a second terminal run `herdr server` (`swarm.sh` talks to it over the socket and does not start it for you; it checks `herdr status server` before it makes anything, and refuses the start while the server is stopped). Make sure `herdr` is on `PATH` (`export PATH="$HOME/.local/bin:$PATH"` after the installer).
 
 ```bash
 pi /login                            # once; swarm.sh does not pass keys to panes
@@ -220,6 +220,70 @@ same `swarm.sh start` underneath. In the order the form asks, on a first case:
 | **5. The evidence.** Sets under `SWARM_INPUTS_ROOT`, with file count and size; in a VM run each VM mounts the set read-only, and in a host run *auto* takes the kernel guard the host has. | **6. The case.** The catalog, which takes the census of every input and plans the packs' recipes (in a microVM run they run as jobs while the agents work); install, quarantine, the toolbox, a per-agent cap, the case id and the examiner; the packs, which also choose the job images; and the microVM switch: on by default, and off makes a host run, labelled unisolated. |
 | ![The network card and the switches](screenshots/kickoff-07-network.png) | ![The label, the command the form built, and the Start button](screenshots/kickoff-08-command.png) |
 | **7. The network and the switches.** Guarded by default; hosts a case needs; local-only; browser tools, hard kill, tool writing, prepare only. | **8. The command, then Start.** The form shows the exact `swarm.sh start` line it will run. Starting needs the token from the server's startup line; watching never does. |
+
+### 3c. While the case runs, and after it stops
+
+The run is yours to steer while it runs; each command below acts through the
+hub, lands on the trace and on the operator's record, and has its detail in
+[usage.md](usage.md) (and `swarm.sh help <command>`).
+
+```bash
+# ask the running swarm a question (Q-n); list and follow them
+scripts/swarm.sh question <id> add --text "Was the archive mailed?" --why "the client says so"
+scripts/swarm.sh question <id> list
+
+# what the run asked of you (R-n): a lead only you can unblock, evidence it
+# lacks, a clarification, a stop proposal; answer, decline or ack each
+scripts/swarm.sh requests <id> list --open
+scripts/swarm.sh requests <id> answer R-3 "the key is in the second envelope"
+
+# evidence acquired after the kickoff, for an acquisition request, and
+# material you supply (a statement, a policy): both sealed and on the ledger
+scripts/swarm.sh evidence <id> add /evidence/phone.tar --why "the phone" --for R-4
+scripts/swarm.sh material <id> add memo.pdf --why "the client's timeline"
+
+# the dynamic network: what was asked, decided and granted; grant or deny
+scripts/swarm.sh net <id> list
+scripts/swarm.sh net <id> grant NR-2 --why "the geocoder is needed for Q5"
+
+# a run paused at a cap: more time (or --tokens, --usd) lifts the pause
+scripts/swarm.sh extend <id> --minutes 30
+
+# hold a going run yourself, and let it go on; unpause also tries again at
+# once when the model provider's limit paused it
+scripts/swarm.sh pause <id> --why "the client asked us to wait"
+scripts/swarm.sh unpause <id>
+
+# a run that ended: continue it on its own chains, with a new question
+scripts/swarm.sh resume <id> --question "When was the stick first attached?"
+
+# after it stops: its process metrics, and the code the agents wrote that
+# could become library tools
+scripts/swarm.sh metrics <id>
+scripts/swarm.sh tools <id> --candidates
+```
+
+- **Questions** ([usage.md](usage.md#questions-swarmsh-question-and-directives)):
+  a person's question is a proposition to test, offered to one seat; `--as ID`
+  names an enrolled person, `--sign` signs the act.
+- **Requests, evidence and material**
+  ([usage.md](usage.md#the-case-contract-requests-evidence-material)):
+  under `--more-evidence no` an acquisition is answered at once with "no
+  additional input under this case policy", never "the fact is absent".
+- **The network** ([usage.md](usage.md#the-dynamic-network-net)): a refusal
+  stops that avenue, never the lead; one item per host and lead waits for
+  you.
+- **The stop policy, pauses and resume**
+  ([usage.md](usage.md#the-stop-policy-extend-pause-unpause-stop-resume)): a
+  cap pauses the run by default; so does the model provider refusing every
+  seat, under any policy, until the time it named or a try every 30 minutes;
+  `pause` holds it under any policy and `unpause` lifts a pause whose cause is
+  gone; `stop` ends it as stopped, never completed; `resume` continues the
+  same run, and an earlier seal still verifies as a prefix.
+- **Metrics and tool candidates**
+  ([usage.md](usage.md#metrics-swarmsh-metrics-scriptsmetricsts),
+  [usage.md](usage.md#the-report-the-outputs-and-the-code-left-behind)): read
+  from the run's own registers, nothing written.
 
 ### 4. Your first case
 
@@ -336,5 +400,5 @@ recorded or a report changed after it shows the sign-off is not current.
 cites, while every chain in the package still verifies, and `--with-outputs`
 adds the jobs' sealed outputs. `hold <id>` keeps a run from being purged or reused;
 `purge <id> --yes` deletes a finished run's material and leaves a
-destruction record. [usage.md](usage.md#after-a-run-review-package---sign-verify-export-hold-release-purge)
+destruction record. [usage.md](usage.md#after-a-run-examiner-machine-review-releases-timestamp-rerun-package---sign-verify-certify-export-hold-release-purge)
 has each command.

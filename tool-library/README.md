@@ -1,9 +1,10 @@
 # The tool library
 
-Thirty-eight tools. Thirty-two were written by agents during the forensic
-cases in [docs/use-cases](../docs/use-cases/README.md); six were written for
-gaps those cases left, and are marked `maintainer` in the table. Each is a
-directory with a manifest and a script.
+Forty-one tools. Thirty-five were written by agents: thirty-two during the
+forensic cases in [docs/use-cases](../docs/use-cases/README.md), and three in
+later runs, folded in and made general ([below](#folded-from-later-runs));
+six were written for gaps those cases left, and are marked `maintainer` in
+the table. Each is a directory with a manifest and a script.
 
 Hand it to a run and every agent has them from its first turn:
 
@@ -45,12 +46,35 @@ image installs. Only `sqlite3` of those is in the base image, so
 that has the rest (disk, today); `tests/recipe.test.sh` fails when a script
 runs one of them without saying so.
 
+**Two import what only some images have.** `contact_sheet` needs Pillow
+(and pillow_heif for HEIC), which the mobile image carries; `nested_vdi`
+needs pytsk3 to list and extract and pyewf for an E01, which the disk and
+mobile images carry. None of them is in `library-python.txt`: each tool's
+manifest names them in `optional_python`, and the script imports them when
+it is called, under a `try` that catches `ImportError`, answering "Pillow is
+not installed" (or pytsk3, or pyewf) rather than failing on an import line.
+`tests/recipe.test.sh` reads every script's imports from its syntax tree
+(an import by name through `importlib` too): a module in `optional_python`
+must be imported under such a guard, and every other one must be in
+`library-python.txt`.
+
+**A tool says what it reads.** A manifest's `use` names the files the tool
+is for: `extensions` (`.evtx`), `magic` (bytes at an offset, as hex) and
+`names` (a file's own name, `*` for any run of characters: `History`,
+`$I*`). When an agent's command job declares its inputs, the hub matches
+each one against every tool of the run and names the matches in the job's
+admission answer, as a hint (docs/adr/0016): in BelkaCTF #6 the mobile
+readers here went unused while the agents wrote their own parsers for the
+same databases. A manifest without `use` is matched by its description
+naming the file's extension as a word. Nothing is refused on it; the harness
+compares what the manifests wrote, and knows no format.
+
 **A page is not a cut.** The paged query tools (`amcache_apps`,
 `browser_history`, `catalog_grep`, `csearch`, `esedb_query`,
 `chunk_needles`, `evtx_filter`, `evtx_query`, `ftk_csv`,
-`guest_syslog`, `ioc_scan`, `lnk_parse`, `mam_scan`, `prefetch_mam`,
-`recyclebin_i`, `sig_carve`, `sigscan_e01`, `usn_journal`, and
-`utf16_urls`) still scan the whole source. They return the requested first
+`guest_syslog`, `ioc_scan`, `lnk_parse`, `mam_scan`, `nested_vdi` (its
+`ls`), `prefetch_mam`, `recyclebin_i`, `sig_carve`, `sigscan_e01`,
+`usn_journal`, and `utf16_urls`) still scan the whole source. They return the requested first
 page and, when more matches exist, atomically keep the complete result as JSON
 Lines under `work/<agent>/tool-output/`; `all_results` (or the corresponding
 nested page record) names that file. A result's `matched` count is therefore
@@ -66,6 +90,7 @@ implementation is `_output.py`.
 | `catalog_search` | python3 | `sd1d100` | 9 | Search the evidence catalogue with a regex: a disk's filelist, timeline, bodyfile, fsstat or partitions, or a… |
 | `check_inputs` | python3 | `sfcc304` | 2 | Diff inputs/ against inputs.json (size and sha256). Fails if the manifest is missing or any file differs. |
 | `chunk_needles` | python3 | `sd1d102` | 3 | Scan a local file (or icat an inode from the E01) for ASCII/UTF-16 needles; return hit counts and nearby snip… |
+| `contact_sheet` | python3 | `s10d40e` | 1 | Tile many images into labelled contact sheets to look at: a directory, a list of paths or a tar read in place… |
 | `csearch` | python3 | `sf6df06` | 2 | Search the kickoff catalog files (filelist/timeline/bodyfile/pslist/cmdline/netscan/malfind/dlllist/psscan) f… |
 | `esedb_query` | python3 | `maintainer` | 3 | Read an ESE database (WebCacheV01.dat, SRUDB.dat, spartan.edb) as tables via esedbexport. Lists the tables, o… |
 | `evtx_filter` | python3 | `sd1d101` | 1 | Parse a local EVTX; return EventID/TimeCreated/EventData for matching IDs or a time prefix |
@@ -81,10 +106,12 @@ implementation is `_output.py`.
 | `icat_extract` | python3 | `s864a08` | 3 | Extract a file from the E01 image by inode to a specified output path. Returns JSON with path, size, and sha2… |
 | `icat_root` | python3 | `s9d8306` | 5 | Extract an inode from an EXT4 volume with icat. The Webserver case's image and its 503808-sector offset are t… |
 | `ioc_scan` | python3 | `s183900` | 3 | Stream a large binary for ASCII and UTF-16LE needles; return offsets, unique strings, and context snippets. |
+| `ledger_timeline` | python3 | `se5fdcd` | 3 | Write a run's dated ledger entries as one timeline in time order (Markdown table, CSV or JSON Lines). Leaves … |
 | `lnk_parse` | python3 | `s183902` | 2 | Parse a Windows LNK (or a dump slice) and return flags, FILETIME timestamps, local/common paths, arguments, a… |
 | `mam_pf_parse` | python3 | `s2f6600` | 1 | Decompress a MAM-wrapped Windows prefetch file and return executable name, version, run count, and non-zero l… |
 | `mam_scan` | python3 | `s183901` | 1 | Scan a raw dump for MAM\x04 prefetch, decompress LZXPRESS Huffman, return name, run count, last-run FILETIMEs… |
 | `master_icat` | bash | `s9a5f06` | 3 | Extract a file by inode from an E01 with icat. The HDFS master image and sector offset 2048 are the defaults;… |
+| `nested_vdi` | python3 | `sae6e7d` | 1 | Read a VirtualBox VDI that lies inside an E01 or raw image, in place: found by its NTFS data runs (a deleted … |
 | `prefetch_mam` | python3 | `sbe1803` | 2 | Decompresses MAM-compressed or plain Windows Prefetch files and returns header fields, last-run FILETIMEs, an… |
 | `recyclebin_i` | python3 | `maintainer` | 1 | Parse $Recycle.Bin $I metadata: original path, original size and deletion time, for one file or every $I unde… |
 | `reg_hive_query` | python3 | `sbe1805` | 1 | Query a Windows registry hive file (regipy) and return a key's values and subkey names as JSON. |
@@ -97,3 +124,91 @@ implementation is `_output.py`.
 | `utf16_urls` | python3 | `s5d1003` | 1 | Extract UTF-16LE and ASCII URL/Visited strings from a local file; filter optional substrings. Returns unique … |
 | `volrun` | python3 | `s69d306` | 2 | Run a Volatility 3 plugin against a memory image with typed arguments. Returns stdout/stderr. |
 | `yara_scan` | python3 | `maintainer` | 1 | Sweep a file or directory with a YARA rule file and report every match with its offset. No rules ship with th… |
+
+## Folded from later runs
+
+Three tools an agent wrote in a run after the use cases, each made general
+before it came in: the parameters say what the run's copy assumed, and
+nothing of that case (its image, offsets, names or wording) is left in the
+script. "Written by" is the run.
+
+- `ledger_timeline` — made with `make_tool` in run `se5fdcd` (seat
+  `se5fdcd05`) to render one case's events, with that case's title and
+  closing paragraph and one password pattern written into the script, and
+  its output held under `work/`. Now it reads any run's
+  `ledger/entries.jsonl` (or the one named), with `attestations.jsonl` and
+  `disputes.jsonl` beside it; `kinds`, `since`, `until`, `match`,
+  `exclude`, `keep_duplicates` (entries marked `rel` duplicates) and
+  `include_superseded` choose what it keeps, and every entry it leaves out
+  is counted by why. An entry marked `sensitive` is withheld by default and
+  `redact` takes the patterns; the title, a note, the columns and the format
+  (Markdown, CSV, JSON Lines) are the caller's; the E-n links are worked out
+  from where the output is; and it writes nowhere under `ledger/`, `tools/`
+  or `inputs/`.
+- `contact_sheet` — a job command in run `s10d40e` (job `j000558`, seat
+  `s10d40e00`) that read one archive's images by the byte offsets of an
+  earlier job's member list, tiled them twenty by twenty and grouped the
+  counts by that case's app directories. Now the images come from a
+  directory, a list, a list file or a tar read in place with `tarfile`;
+  tile size, columns, rows, the label (a format over the file's number,
+  name, path, hash, size and dimensions) and dedup (sha256, an average hash,
+  or none) are parameters; the counts are by parent directory; a manifest
+  row is kept for every file and the whole label in the index; and a large
+  set is done over several calls within the tool timeout, each carrying on
+  where the last stopped.
+- `nested_vdi` — a job command in run `sae6e7d` (job `j000136`, seat
+  `sae6e7d01`) that mounted one E01 with `ewfmount`, read a deleted
+  VirtualBox disk through data runs taken from another job's output, and
+  listed the root of each guest file system, with the partition offset and
+  the cluster size written in. Now the image (E01 through pyewf, or raw),
+  the volume `offset`, `cluster_size`, the runs (inline, or a JSON or text
+  file) and `vdi_offset` are parameters, and a VDI that is contiguous needs
+  no runs; nothing is mounted and nothing is written out on the way. The
+  header is checked by its signature and version, a differencing image is
+  refused, blocks stored past the runs given are counted, and it lists
+  (paged, recursive), extracts one file, or reads guest bytes, where the job
+  only listed a root.
+
+## Harvesting candidates from a run
+
+After a run, the code the agents wrote into command jobs is the next
+library's raw material:
+
+```bash
+scripts/swarm.sh tools <id> --candidates [--out DIR] [--min-lines N] [--library DIR]
+```
+
+lists every heredoc, inline `-c`/`-e` script, command and script of the
+agents' own that a job ran, of `--min-lines` lines or more (20), one entry
+per text however many jobs ran it, ranked by lines times the jobs that ran
+it. Each says its job ids, seats, image profiles and lines, how often it was
+reused, and which tools here may already cover it: one whose name the
+script uses, or whose `use` matches what the jobs declared. Each script is
+written whole to DIR (`<sandbox>.tool-candidates/` unless `--out` names
+one), with `candidates.json` and `README.txt` beside them.
+
+### Folding a candidate
+
+A candidate becomes a library tool when it no longer knows the case it was
+written on:
+
+1. Take out what the case wrote into it: an image name, an offset, a
+   path, a person's name, the wording of the case's questions. Each
+   becomes a parameter with a default that works on any case, or goes.
+2. Give it a manifest: `description`, `params`, `runtime`, `entry`,
+   `requires` (the programs it runs), `optional_python` where it imports
+   what only some images carry, and `use` (what it reads).
+3. Keep nothing cut: a paged result keeps the whole under `tool-output/`
+   (`_output.py`), as the query tools here do.
+4. Add a test under `tests/` (`tests/tool-library-folded.test.ts` for the
+   folded ones), a row to the table above, and a line to "Folded from later
+   runs" naming the run, the job and the seat it came from.
+
+## Candidates kept out of Community
+
+The `$LogFile` scanner and the mapping-pairs decoder written in run
+`sae6e7d` (jobs `j000117`, `j000119`, `j000122` and `j000125`; the last
+one's output gave the job behind `nested_vdi` its runs) would fold the same
+way. They are not here: `$LogFile` parsing is on the paid tier's list in
+[docs/community-waves.md](../docs/community-waves.md#what-genuinely-belongs-to-a-paid-tier).
+`nested_vdi` takes runs from whatever produced them.

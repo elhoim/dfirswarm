@@ -28,10 +28,38 @@ establish, and nothing here settles it.
   is the same. The gateway writes no request or response body: its log
   (`traces/model-gateway.jsonl`) holds seats, models, statuses, token
   counts, costs and byte counts.
-- **The operator's `--notify` command** receives each event's details: the
-  run id, states, counts, and on `evidence_changed` the names of the
-  evidence files that changed, went missing or appeared. No evidence
-  content. Where that command sends them is the operator's choice.
+- **With `--network dynamic`,** a lookup an agent asks for is sent by the
+  fetch service on the host to the adapter's service: rdap.org and the
+  registries it refers to, crt.sh, NVD, CISA, CIRCL, RIPEstat, Nominatim,
+  Overpass, YouTube's oEmbed, the host of an evidence URL for a HEAD, and
+  VirusTotal where the operator configured a key ([ADR
+  0012](adr/0012-a-dynamic-network-decided-by-rules-and-made-on-the-host.md)).
+  What leaves is the adapter's typed values (a domain, an address, a hash, a
+  coordinate, a place name) and nothing else of the case. Each adapter
+  declares the class of case data it carries, and the case policy says which
+  classes may leave: `standard` lets hashes and public indicators go to
+  passive reference services and nothing else, `internal` nothing at all,
+  and personal data or an internal name leaves under no preset unless the
+  operator's case policy says so. Even a hash or a coordinate tells a third
+  party what the case is interested in; the policy is where the operator
+  decides that. A value the run marked sensitive, and anything that looks
+  like a credential, never leaves. Every request, decision and answer is
+  kept in the run (`network/`, `store/net/`), so the record of a run says
+  what was sent where.
+- **The operator's `--notify` targets.** Every event leaves the host as an
+  envelope of identifiers only, whatever the event and whatever the target:
+  the event, the run's id, the time, an event id, and of its details only
+  what is an identifier (a request's `R-n`, its kind, a lead's or question's
+  id, an urgency, a state), a number or a yes/no; a list becomes its count.
+  No file name, summary, command output or request text is in it: the
+  details stay in the run (`traces/notify-events.jsonl`, under the event
+  id), where the operator reads them. The operator's own command gets that
+  envelope on stdin; a typed target (`desktop:`, `ntfy:<topic>`, which goes
+  through ntfy.sh unless the operator names a server of their own,
+  `mailto:<address>`, one mailbox, never an option to the mail program)
+  receives the event and the run's id alone
+  ([ADR 0014](adr/0014-the-case-contract-says-what-comes-in-and-what-is-asked.md)).
+  Where a target sends them is the operator's choice.
 - **Nothing to the harness's authors.** The harness sends no telemetry. Pi's
   own startup calls to `pi.dev` are not on netguard's list or a VM's
   allowlist and are refused; on a host run with `--no-netguard` they go
@@ -56,13 +84,38 @@ models.
 - **Beside the run directory:** `<sandbox>.custody-anchor.json`, and under
   `--isolation microvm` each VM's kept disk and logs in
   `<sandbox>.vm-snapshots/` (a link to `--vm-snapshot-dir` when that is
-  given). A kept disk holds whatever the agent left in its VM.
+  given). A kept disk holds whatever the agent left in its VM. Under
+  `--network dynamic`, `<sandbox>.netraw/` holds what the fetch service
+  received and delivered to no seat: a filtered adapter's whole response and
+  headers (a video's author, say, when only its title was delivered), a
+  transfer stopped or broken off, an answer withheld because its grant
+  ended. It is in no VM's reach, is packaged under `network/raw/`, and can
+  hold personal data.
+- **What was asked of the operator, and what came in later.** The
+  operator requests (`requests/requests.jsonl`, rendered to
+  `operator-requests.jsonl`) hold what each request asked in the agents'
+  words, which can name the case's subjects. Evidence added after the
+  kickoff (`swarm.sh evidence add`) and material the operator supplied
+  (`swarm.sh material add`, a question's attachment) are copied into the
+  store (`store/imports/ev-<n>/`, `mat-<n>/`) and are evidence content like
+  `inputs/`; each record says who supplied it, when and from where. Material
+  added with `--sensitive` is held to the same rule as a sensitive entry: no
+  name, label or question may carry what it says.
 - **The package** (`swarm.sh package <id>` → `<sandbox>/package/`): the
   report, the summary, everything under `work/` except `work/extracted/` and
   `work/quarantine/`, the ledger, the trace and the board, `court-set.json`
   and this run's lines of the operator's record. It is what gets handed
   over, and it carries evidence content too. `--sign` adds the examiner's
-  signature and public key.
+  signature and public key. `--redact` takes out what the sensitive entries
+  say and withholds the outputs of jobs whose output is sensitive (run with
+  `secret_output`, or made from such an output) whole, wherever their bytes
+  sit, naming each by a keyed id (never a hash a low-entropy value could be
+  brute-forced from; the key and the real digests are in a private sidecar
+  kept outside the hand-over), then scans every file it hands over — and the
+  filenames — for what should not be there; without `--redact`, `HYGIENE.json`
+  names what in the package is sensitive.
+  What a package may carry under GDPR or similar laws is the operator's to
+  decide; these are the means.
 - **Exports** (`swarm.sh export`, under `<sandbox>/exports/` by default):
   the ledger as CSV, values in full.
 - **Who ran it.** `runs/operator-audit.jsonl`, beside the registry, has a
@@ -87,8 +140,8 @@ models.
   ([SECURITY.md](../SECURITY.md)).
 
 The harness deletes none of this on its own. `swarm.sh purge <id> --yes`
-deletes a finished run's directory, its kept VM disks and its hub
-directory when the operator asks, keeps the anchor and the review (hashes,
+deletes a finished run's directory, its kept VM disks, its hub directory and
+its `<sandbox>.netraw/` when the operator asks, keeps the anchor and the review (hashes,
 verdicts and notes, not material), and leaves a destruction record on the
 operator's record; a held run (`swarm.sh hold`) is refused. Purge removes
 files the ordinary way and knows nothing of copies elsewhere: a package
@@ -103,6 +156,18 @@ says they may go, and warns about a run directory there for what the agents
 derive.
 
 ## What the operator decides
+
+- **The case policy** (`--policy`, or `policy:` in the goal's metadata
+  block): which classes of case data may leave the run and to what kind of
+  service, whether the subject's infrastructure may be contacted, and the
+  legal text the run records beside it (`legal:`, for instance "GDPR or
+  similar laws" and the scope of the authority the examination runs under)
+  and what the operator knows of the providers' retention
+  (`provider_retention:`), whether evidence may arrive while the run goes on
+  (`more_evidence:`) and what supplied or captured material may be used for
+  (`material_use:`). The harness records these, anchors and seals them, and
+  enforces the network part and the material use; it does not decide what
+  the law of a case requires.
 
 - **Whether the evidence may be processed this way at all**, and on what
   basis: who the controller is, and what the engagement or the law allows.

@@ -1,6 +1,21 @@
 {
   "name": "esedb_query",
   "description": "Read an ESE database (WebCacheV01.dat, SRUDB.dat, spartan.edb) as tables via esedbexport. Lists the tables, or returns the rows of one.",
+  "use": {
+    "extensions": [
+      ".edb"
+    ],
+    "magic": [
+      {
+        "offset": 4,
+        "hex": "efcdab89"
+      }
+    ],
+    "names": [
+      "WebCacheV01.dat",
+      "SRUDB.dat"
+    ]
+  },
   "params": {
     "path": {
       "type": "string",

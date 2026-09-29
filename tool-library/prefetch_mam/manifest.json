@@ -1,6 +1,21 @@
 {
   "name": "prefetch_mam",
   "description": "Decompresses MAM-compressed or plain Windows Prefetch files and returns header fields, last-run FILETIMEs, and extracted UTF-16 paths/strings.",
+  "use": {
+    "extensions": [
+      ".pf"
+    ],
+    "magic": [
+      {
+        "offset": 0,
+        "hex": "4d414d04"
+      },
+      {
+        "offset": 4,
+        "hex": "53434341"
+      }
+    ]
+  },
   "params": {
     "path": {
       "type": "string",

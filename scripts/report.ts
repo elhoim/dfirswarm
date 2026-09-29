@@ -919,6 +919,7 @@ export function chainLine(
   anchored = false,
   guarded = true,
   operatorActions = 0,
+  harnessFromShell = 0,
 ): string {
   // The failure verdict comes first — before "no trace" as well. A file
   // with every `prev` stripped has no chain *and* contradicts the anchor;
@@ -943,8 +944,9 @@ export function chainLine(
   // Both are ordinary in an older run and a finding in a current one, so they
   // are stated rather than folded into "intact".
   if (chain.disputed) notes.push(`${chain.disputed} line(s) claimed another agent's name`);
-  const unattributed = Math.max(0, (chain.unverified ?? 0) - operatorActions);
+  const unattributed = Math.max(0, (chain.unverified ?? 0) - operatorActions - harnessFromShell);
   if (operatorActions) notes.push(`${operatorActions} operator action(s) run from a shell outside the run (stop, reap, say), recorded as the operator's and also on runs/operator-audit.jsonl`);
+  if (harnessFromShell) notes.push(`${harnessFromShell} ledger entr${harnessFromShell === 1 ? "y" : "ies"} the harness recorded from the operator's shell (evidence or material added with no hub running), each line carrying its entry's hash`);
   if (unattributed) notes.push(`${unattributed} line(s) could not be attributed to a pane`);
   // Without the anchor, "intact" means the file agrees with itself — which a
   // wholesale rewrite also manages. Saying so is the difference between a
@@ -1349,6 +1351,8 @@ export async function renderReport(sandboxArg: string, options: ReportOptions = 
   // reach the collector with no pane's token: that is who they are, not a
   // line nobody can account for. Each is also on runs/operator-audit.jsonl.
   const operatorActions = events.filter((e) => e.tool === "operator_action" && (e as { agent_unverified?: unknown }).agent_unverified === true).length;
+  // A ledger entry the harness recorded in the operator's CLI (no hub to write it) carries no pane's token either: the harness's, not a line nobody can account for.
+  const harnessFromShell = events.filter((e) => e.tool === "harness_record" && e.agent === "system" && (e as { agent_unverified?: unknown }).agent_unverified === true).length;
   const toolchain = await readJsonFile<{ packages?: Array<{ name: string; version: string; record_sha256?: string }> }>(join(sandbox, "toolchain.json"));
   const artifacts = options.artifacts ?? (await hashArtifacts(sandbox));
   const version = (await readJsonFile<{ version?: string }>(join(ROOT, "package.json")))?.version ?? "0.0.0";
@@ -1722,7 +1726,7 @@ ${artifacts.skipped.length ? `<p>Not hashed: ${artifacts.skipped.map((s) => `<co
       "Trace integrity",
       traceUnread
         ? `NOT READ HERE: the trace could not be read by this report (${traceUnread}); the host's custody check streams it, and its verdict is below`
-        : chainLine(chain, Boolean(anchorPoint), anchorGuarded(run?.write_guard as string | undefined, run?.host_caps as Record<string, unknown> | undefined), operatorActions),
+        : chainLine(chain, Boolean(anchorPoint), anchorGuarded(run?.write_guard as string | undefined, run?.host_caps as Record<string, unknown> | undefined), operatorActions, harnessFromShell),
     ],
     ["Egress refused", egressRefusedLine(deniedHosts, netguardLog !== null, run, custodyViolations(hostCustody), custodyOwnHostStops(hostCustody))],
     ["Content sent to", providersLine(run)],
@@ -1825,10 +1829,13 @@ ${artifacts.skipped.length ? `<p>Not hashed: ${artifacts.skipped.map((s) => `<co
     // The release this rendering is for, or the run's latest (bodyRelease):
     // a draft unless an examiner adopted it; a release renders its own final bytes.
   });
+  // The body's sections and its appendices A to C, then this report's D and E, then the body's later appendices (F: the registers), in their letters' order.
+  const bodySection = (b: (typeof body.sections)[number]): Section => ({ id: b.id, n: b.n, title: /^[A-Z]$/.test(b.n) ? `Appendix ${b.n}: ${b.title}` : b.title, desc: b.desc, ...(b.count ? { count: b.count } : {}), html: b.html, ...(b.n === "A" || b.n === "C" || b.n === "F" ? { breakBefore: true } : {}) });
   const sections: Section[] = [
-    ...body.sections.map((b): Section => ({ id: b.id, n: b.n, title: /^[A-Z]$/.test(b.n) ? `Appendix ${b.n}: ${b.title}` : b.title, desc: b.desc, ...(b.count ? { count: b.count } : {}), html: b.html, ...(b.n === "A" || b.n === "C" ? { breakBefore: true } : {}) })),
+    ...body.sections.filter((b) => !/^[F-Z]$/.test(b.n)).map(bodySection),
     custodySection,
     artifactsSection,
+    ...body.sections.filter((b) => /^[F-Z]$/.test(b.n)).map(bodySection),
   ];
 
   const toc = sections

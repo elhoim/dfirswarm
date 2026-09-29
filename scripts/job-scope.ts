@@ -198,11 +198,16 @@ export function locate(text: string): Located | { reason: string } {
       const mm = /^([a-z0-9-]+)#\d+$/.exec(v);
       if (!mm) return { reason: `${t}: member:<generation>#<n>` };
       path = `catalog/gen/${mm[1]}/`;
+    } else if (kind === "net") {
+      // A capture the fetch service sealed: the whole of it, or one file.
+      const nm = /^([1-9]\d{0,6})\/([1-9]\d{0,6})(?:\/(.+))?$/.exec(v);
+      if (!nm) return { reason: `${t}: net:<k>/<n>[/<file>]` };
+      path = nm[3] ? `store/net/${nm[1]}/${nm[2]}/${nm[3]}` : `store/net/${nm[1]}/${nm[2]}/`;
     } else if (kind === "sha256") {
       if (!/^[0-9a-f]{64}$/.test(v)) return { reason: `${t}: sha256: takes 64 hex digits` };
       return { ref: t, area: "store", path: `store/blobs/${v}`, dir: false, sha: v };
     } else {
-      return { reason: `${t}: a job reads input:, job:, import:, member: or sha256: objects, or a path under inputs/, store/, catalog/, work/ or tool-output/` };
+      return { reason: `${t}: a job reads input:, job:, import:, member:, sha256: or net: objects, or a path under inputs/, store/, catalog/, work/ or tool-output/` };
     }
   } else {
     if (t.startsWith("/")) return { reason: `${t}: name it from the run's directory (inputs/…, store/…, catalog/…, work/…, tool-output/…)` };
@@ -216,7 +221,7 @@ export function locate(text: string): Located | { reason: string } {
   const segs = path.split("/");
   if (segs.some((s) => s === "" || s === "." || s === "..")) return { reason: `${t}: a path with no empty, . or .. part` };
   const area: ScopeArea | null =
-    segs[0] === "inputs" ? "inputs" : segs[0] === "store" && ["jobs", "imports", "blobs"].includes(segs[1] ?? "") && segs.length >= 3 ? "store" : segs[0] === "catalog" ? "catalog" : (segs[0] === "work" || segs[0] === "tool-output") && segs.length >= 2 ? "work" : null;
+    segs[0] === "inputs" ? "inputs" : segs[0] === "store" && ["jobs", "imports", "blobs", "net"].includes(segs[1] ?? "") && segs.length >= 3 ? "store" : segs[0] === "catalog" ? "catalog" : (segs[0] === "work" || segs[0] === "tool-output") && segs.length >= 2 ? "work" : null;
   if (!area) return { reason: `${t}: a job reads the evidence (input:<path>), the store (job:<id>[/<path>], import:…, sha256:…), the catalogue (member:…, catalog/…) or a file or directory under work/<…> or tool-output/<…>` };
   return { ref: t, area, path, dir };
 }
@@ -334,6 +339,20 @@ async function resolveObjects(S: string, declared: string[], o: { collections?: 
         const st = /^[0-9a-f]{64}$/.test(sha) && segs.length === 3 ? await lstat(join(P.blobs, sha)).catch(() => null) : null;
         if (!st?.isFile()) throw new ScopeError(`${at.ref}: not a stored object (store/blobs/<sha256>)`);
         add({ ref: at.ref, path: at.path, area: "store", shape: "file", from: w.from, sha256: sha, bytes: st.size });
+        continue;
+      }
+      if (segs[1] === "net") {
+        // A sealed capture (store/net/<k>/<n>/), by its own manifest.
+        const base = segs.slice(0, 4).join("/");
+        const found = segs.length >= 4 ? await readManifest(join(S, base, "manifest.json")) : null;
+        if (!found) throw new ScopeError(`${at.ref}: no capture is sealed at ${base}`);
+        if (segs.length === 4) {
+          add({ ref: at.ref, path: base, area: "store", shape: "dir", from: w.from, files: found.manifest.totals.files, bytes: found.manifest.totals.bytes });
+          continue;
+        }
+        const file = found.manifest.files.find((f) => f.path === segs.slice(4).join("/"));
+        if (!file || at.dir) throw new ScopeError(`${at.ref}: the capture at ${base} has no ${segs.slice(4).join("/")}`);
+        add({ ref: at.ref, path: `${base}/${file.path}`, area: "store", shape: "file", from: w.from, sha256: file.sha256, bytes: file.bytes });
         continue;
       }
       const kind = segs[1] as "jobs" | "imports";

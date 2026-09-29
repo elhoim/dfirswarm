@@ -133,7 +133,11 @@ are not.
 
 `make_tool` takes an optional `requires`, the programs the script calls; the
 manifest keeps it, and a VM run forged through the hub also records the
-image the tool was forged against (`image_digest`). `tools --save` copies a
+image the tool was forged against (`image_digest`). A library tool's
+manifest may also say `optional_python`: the Python modules only some images
+carry, which the script imports when called under a `try` that catches
+`ImportError`, saying which is missing (see
+[tool-library/README.md](../tool-library/README.md)). `tools --save` copies a
 tool only as the version sealed into file history (a script and a manifest
 rewritten together on disk are not that version) and writes, beside it, what
 it ran with: the run, its image, its packs, and what the run installed.
