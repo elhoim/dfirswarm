@@ -88,7 +88,7 @@ import {
 import { answerResult, resultWords, NEGATIVE_RESULTS } from "../extensions/negative-bar.ts";
 import { committedLogHashes, resolveRef } from "./evidence-store.ts";
 import { producerIndex } from "./output-hygiene.ts";
-import { LEDGER_SWEEPS, readSweeps, reconcileSweeps, verifySweepChain } from "../extensions/store-sweep.ts";
+import { LEDGER_SWEEPS, readImportSweeps, readSweeps, reconcileSweeps, verifySweepChain } from "../extensions/store-sweep.ts";
 
 type Entry = { seq: number; kind: string; refs?: string[]; supersedes?: number; answers?: string[]; completion?: string; reason?: string; status?: string };
 
@@ -373,6 +373,8 @@ export async function checkLedgerAnswers(sandbox: string, wanted: string[], exis
   const attestations = await readAttestations(S);
   const disputes = await readDisputes(S);
   const sweeps = await readSweeps(S);
+  // The additions' reverse sweeps (docs/adr/0013): said with a stale answer, warned of otherwise, never holding.
+  const imports = await readImportSweeps(S);
   const sections: string[] = [];
   for (const w of wanted) {
     const sec = answerSection(w);
@@ -401,7 +403,7 @@ export async function checkLedgerAnswers(sandbox: string, wanted: string[], exis
   const underLeads = await leadEntries(S);
   // The sources' broad extractions, as the store journal's receipts say them (extensions/preparation.ts): a negative that claims absence over one still under way holds; any other on one not produced is warned.
   const preparation = await import("../extensions/preparation.ts").then((PR) => PR.preparationFacts(S, entries)).catch(() => undefined);
-  const gate = ledgerGate({ entries, attestations, disputes, sections, failed: jobStatuses(statuses, entries), bar, partial: partialOutputCites(entries, producerOf), sweeps, moreEvidence, ...(underLeads ? { underLeads } : {}), ...(preparation ? { preparation } : {}) });
+  const gate = ledgerGate({ entries, attestations, disputes, sections, failed: jobStatuses(statuses, entries), bar, partial: partialOutputCites(entries, producerOf), sweeps, ...(imports.length ? { imports } : {}), moreEvidence, ...(underLeads ? { underLeads } : {}), ...(preparation ? { preparation } : {}) });
   const bySeq = new Map(entries.map((e) => [e.seq, e]));
   const replaced = supersededBy(entries);
   const limits = entries.filter((e) => e.kind === "limitation" && !replaced.has(e.seq));

@@ -42,17 +42,21 @@ type Run = { S: string; runs: string; a0: Ctx; a1: Ctx; a2: Ctx; a3: Ctx };
 const F = { basis: "observed", confidence: "high", indicates: "What the observation shows, and the step to it.", confidence_why: "Read directly from the object it cites." } as const;
 const A = { confidence: "medium", confidence_why: "The cited entries are direct.", alternatives_open: "none open", would_change: "a second source that disagrees" } as const;
 const HIGH = { ...A, confidence: "high" } as const;
-const ESTABLISHED = {
-  strength: "established",
-  answer_review: {
-    reproduced: "re-derived the cited finding from its sealed ref",
-    read: "nothing beyond the cited entries",
-    parts: [{ part: "the question as asked", established: true, why: "the cited finding shows it" }],
-    inference: "the finding is the answer",
-    alternatives: [{ explanation: "a copy of the record left by another process", why: "the cited record's own metadata ties it to the event, and no copy exists in the objects searched", evidence: ["E-1"] }],
-    other_family: { checked: false, text: "no other source family holds it in this fixture" },
-  },
+/** The source-first part of an established review (docs/adr/0015): the strongest rival and its test, and the job that derived the value (j000001, over the disk). */
+const SOURCE_FIRST = {
+  discriminator: { rival: "a copy of the record written later by a backup process", test: "read the record's own write time against the backup's run times", favours_if: "the answer if the write time falls outside every backup run; the rival if it falls inside one", outcome: "the write time falls outside every backup run", refs: ["E-1"] },
+  derivation: { job: "j000001", inputs: ["input:disk.E01"] },
 } as const;
+const REVIEWED = {
+  reproduced: "re-derived the cited finding from its sealed ref",
+  read: "nothing beyond the cited entries",
+  parts: [{ part: "the question as asked", established: true, why: "the cited finding shows it" }],
+  inference: "the finding is the answer",
+  alternatives: [{ explanation: "a copy of the record left by another process", why: "the cited record's own metadata ties it to the event, and no copy exists in the objects searched", evidence: ["E-1"] }],
+  other_family: { checked: false, text: "no other source family holds it in this fixture" },
+} as const;
+/** How a critic attests an answer established (a history written before the source-first rule has the review without SOURCE_FIRST). */
+const ESTABLISHED = { strength: "established", answer_review: { ...REVIEWED, ...SOURCE_FIRST } } as const;
 const REVIEW = {
   detection: { done: true, text: "the event writes to the objects searched, and they keep it for their whole range" },
   reproduced: { done: true, text: "ran the decisive search again over the same objects: nothing" },
@@ -214,6 +218,17 @@ async function preparationNegatives(base: string, id: string): Promise<Run> {
 // The cases
 // ---------------------------------------------------------------------------------------------
 
+/** Evidence added after the kickoff, from a neutral path outside the run (the addition records where it came from). */
+async function addLate(S: string, name: string, body: string, why: string): Promise<void> {
+  const late = "/tmp/dfirswarm-contract-late";
+  await rm(late, { recursive: true, force: true });
+  await mkdir(late, { recursive: true });
+  await writeFile(join(late, name), body);
+  const added = await admitMaterial(S, { mode: "evidence", path: join(late, name), why, supplied_by: "operator", via: "cli" });
+  await rm(late, { recursive: true, force: true });
+  assert.equal(added.ok, true, String((added as { reason?: string }).reason ?? ""));
+}
+
 const CASES: Record<string, (base: string) => Promise<string>> = {
   /**
    * The run s9722fa (a CTF case, c10), reconstructed: six goal questions
@@ -279,9 +294,42 @@ const CASES: Record<string, (base: string) => Promise<string>> = {
   /**
    * Two reviewed negatives; then evidence added. Question 1 is left on its
    * older coverage (stale); question 2 is examined again against the new
-   * import, and another seat reviews that coverage (cleared).
+   * import: what it shows is recorded with its delta (irrelevant to the
+   * answer), among the results of a coverage record naming the import,
+   * which another seat reviews (cleared).
    */
   "evidence-stale-cleared": async (base) => {
+    const r = await newRun(base, "esc", 2);
+    for (const q of ["1", "2"]) {
+      const id = await lead(r.a0, q, [{ source: "input:disk.E01", method: "search the disk" }]);
+      const abs = (await rec(r.a0, { kind: "absence", value: `the event of question ${q}`, source: "inputs/disk.E01", evidence: "a search", refs: ["job:j000001/hits.txt"], answers: [q] })).entry;
+      const cov = (await rec(r.a0, coverage(q, ["input:disk.E01"], [`E-${abs.seq}`, "job:j000001/hits.txt"], { acquisition_none_why: "no source outside the evidence records it" }))).entry;
+      await rec(r.a1, { kind: "answer", section: `question:${q}`, value: `No evidence of the event of question ${q} was found on the disk`, reasoning: `E-${cov.seq}`, ...A, result: "bounded_negative" });
+      await attest(r.a2, { seq: cov.seq, how: "ran the search again from job:j000001", review: REVIEW });
+      await close(r.a0, id, `E-${cov.seq}`);
+    }
+    await SW.awaitSweeps(r.S);
+    await addLate(r.S, "proxy.csv", "time,host\n09:58,ws\n", "the proxy export the network team kept");
+    // Question 2 examined against it: what the export shows, with its delta, reviewed by another seat.
+    const prev = (await P.readLedger(r.S)).filter((e) => e.kind === "answer" && e.section === "question:2").at(-1)!;
+    const abs2 = (await rec(r.a0, { kind: "absence", value: "the event of question 2 in the proxy export", source: "the proxy export", evidence: "read whole", refs: ["import:ev-0001/proxy.csv"], answers: ["2"], rel: [{ to: prev.seq, kind: "irrelevant" }] })).entry;
+    const cov2 = (await rec(r.a0, coverage("2", ["input:disk.E01", "import:ev-0001/proxy.csv"], [`E-${abs2.seq}`, "job:j000001/hits.txt"], { acquisition_none_why: "no source outside the evidence records it" }))).entry;
+    await rec(r.a1, { kind: "answer", section: "question:2", value: "No evidence of the event of question 2 was found on the disk or in the proxy export", reasoning: `E-${cov2.seq}`, ...A, result: "bounded_negative", supersedes: prev.seq });
+    await attest(r.a2, { seq: cov2.seq, how: "ran the search again over the disk and the export", review: REVIEW, second_review_why: "the export is new" });
+    await SW.awaitSweeps(r.S);
+    return r.S;
+  },
+
+  /**
+   * The history evidence-stale-cleared held before the delta rule, kept as
+   * it was recorded (by the harness at c34c6cb): question 2 examined
+   * against the new import on a coverage record naming it, which another
+   * seat reviews, and nothing it cites says how the export bears on the
+   * answer. Replayed under the rule before the delta it is cleared; under
+   * this checkout it is held (docs/adr/0013, "Late evidence: the reverse
+   * sweep and the delta"). Run again, this case makes the same history.
+   */
+  "evidence-stale-without-delta": async (base) => {
     const r = await newRun(base, "esc", 2);
     const covs: number[] = [];
     for (const q of ["1", "2"]) {
@@ -692,6 +740,75 @@ const CASES: Record<string, (base: string) => Promise<string>> = {
     await SW.awaitSweeps(r.S);
     return r.S;
   },
+
+  /**
+   * Evidence added late, and the reverse sweep of its files for every
+   * standing coverage record's looked_for strings. Question 1, a reviewed
+   * bounded negative whose coverage looked for "alice": the addition stales
+   * it and the sweep finds the string in the export; it is examined again,
+   * the hit object read with its delta, reviewed, and recorded again
+   * (cleared, nothing warned). Question 2, established, whose question's
+   * coverage looked for "bob-laptop": not staled; the sweep's hit is
+   * warned of at the record and the review of its answer written after the
+   * addition, and in finish status, and holds nothing.
+   */
+  "late-evidence-hits": async (base) => {
+    const r = await newRun(base, "leh", 2);
+    const id1 = await lead(r.a0, "1", [{ source: "input:disk.E01", method: "search the disk" }]);
+    const abs1 = (await rec(r.a0, { kind: "absence", value: "the event of question 1", source: "inputs/disk.E01", evidence: "a search", refs: ["job:j000001/hits.txt"], answers: ["1"] })).entry;
+    const cov1 = (await rec(r.a0, coverage("1", ["input:disk.E01"], [`E-${abs1.seq}`, "job:j000001/hits.txt"], { looked_for: ["alice"], acquisition_none_why: "no source outside the evidence records it" }))).entry;
+    const ans1 = (await rec(r.a1, { kind: "answer", section: "question:1", value: "No evidence of the event of question 1 was found on the disk", reasoning: `E-${cov1.seq}`, ...A, result: "bounded_negative" })).entry;
+    await SW.awaitSweeps(r.S);
+    await attest(r.a2, { seq: cov1.seq, how: "ran the search again from job:j000001", review: REVIEW });
+    const id2 = await lead(r.a0, "2");
+    const f2 = (await rec(r.a0, { kind: "finding", ...F, value: "a remote tool installed at 09:14", source: "the log", evidence: "line 12", refs: ["job:j000002/hits.txt"], answers: ["2"] })).entry;
+    const cov2 = (await rec(r.a0, coverage("2", ["input:logs/a.log"], [`E-${f2.seq}`, "job:j000002/hits.txt"], { looked_for: ["bob-laptop"], acquisition_none_why: "no source outside the evidence records it" }))).entry;
+    const ans2 = (await rec(r.a1, { kind: "answer", section: "question:2", value: "A remote tool, installed at 09:14", reasoning: `E-${f2.seq}, searched as E-${cov2.seq}`, ...HIGH, result: "established" })).entry;
+    await SW.awaitSweeps(r.S);
+    await attest(r.a3, { seq: ans2.seq, how: "re-read line 12 from job:j000002", ...ESTABLISHED });
+    await close(r.a0, id2, `E-${f2.seq}`);
+    await addLate(r.S, "proxy.csv", "time,user,host\n09:58,alice,bob-laptop\n", "the proxy export the network team kept");
+    // Question 1: the hit object read, with its delta, among the results of the coverage recorded again, reviewed; the answer recorded again.
+    const d1 = (await rec(r.a0, { kind: "absence", value: "the event of question 1 in the proxy export: alice is a proxy user there, not the event", source: "the proxy export", evidence: "read whole", refs: ["import:ev-0001/proxy.csv"], answers: ["1"], rel: [{ to: ans1.seq, kind: "irrelevant" }] })).entry;
+    const cov1b = (await rec(r.a0, coverage("1", ["input:disk.E01", "import:ev-0001/proxy.csv"], [`E-${abs1.seq}`, `E-${d1.seq}`, "job:j000001/hits.txt"], { looked_for: ["alice"], supersedes: cov1.seq, acquisition_none_why: "no source outside the evidence records it" }))).entry;
+    await rec(r.a1, { kind: "answer", section: "question:1", value: "No evidence of the event of question 1 was found on the disk or in the proxy export", reasoning: `E-${cov1b.seq}`, ...A, result: "bounded_negative", supersedes: ans1.seq });
+    await SW.awaitSweeps(r.S);
+    await attest(r.a2, { seq: cov1b.seq, how: "ran the search again over the disk and the export", review: REVIEW, second_review_why: "the export is new" });
+    await close(r.a0, id1, `E-${cov1b.seq}`);
+    // Question 2: its answer recorded again, reworded, and reviewed again: the hit is said at each, and holds nothing.
+    const ans2b = (await rec(r.a1, { kind: "answer", section: "question:2", value: "A remote tool, installed at 09:14, as the log shows", reasoning: `E-${f2.seq}, searched as E-${cov2.seq}`, ...HIGH, result: "established", supersedes: ans2.seq })).entry;
+    await attest(r.a3, { seq: ans2b.seq, how: "re-read line 12 from job:j000002", ...ESTABLISHED });
+    return r.S;
+  },
+
+  /**
+   * A source-first review (docs/adr/0015): question 1 established, its one
+   * review established with no discriminator and no locator or derivation
+   * (recorded best_candidate, the reasons in capped); question 2
+   * established, reviewed with a discriminator and a locator the hub finds
+   * at its offset (established); question 3 established, reviewed first
+   * with a locator one byte off (recorded best_candidate), then again at
+   * the right offset by the same seat (established: its later review).
+   */
+  "review-source-first": async (base) => {
+    const r = await newRun(base, "rsf", 3);
+    const answer = async (q: string, ref: string) => {
+      const id = await lead(r.a0, q);
+      const f = (await rec(r.a0, { kind: "finding", ...F, value: `the record question ${q} asks for`, source: "the log", evidence: "line 1", refs: [ref], answers: [q] })).entry;
+      const a = (await rec(r.a1, { kind: "answer", section: `question:${q}`, value: `Established: the record question ${q} asks for`, reasoning: `E-${f.seq}`, ...HIGH, result: "established" })).entry;
+      await close(r.a0, id, `E-${f.seq}`);
+      return a;
+    };
+    const a1 = await answer("1", "job:j000001/hits.txt");
+    await attest(r.a2, { seq: a1.seq, how: "re-read the record from job:j000001", strength: "established", answer_review: REVIEWED });
+    const a2 = await answer("2", "job:j000002/hits.txt");
+    await attest(r.a3, { seq: a2.seq, how: "re-read the record from job:j000002", strength: "established", answer_review: { ...REVIEWED, discriminator: SOURCE_FIRST.discriminator, reproduced_at: [{ ref: "job:j000002/hits.txt", offset: 0, value: "j000002" }] } });
+    const a3 = await answer("3", "job:j000001/hits.txt");
+    await attest(r.a2, { seq: a3.seq, how: "re-read the record from job:j000001", strength: "established", answer_review: { ...REVIEWED, discriminator: SOURCE_FIRST.discriminator, reproduced_at: [{ ref: "job:j000001/hits.txt", offset: 1, value: "j000001" }] } });
+    await attest(r.a2, { seq: a3.seq, how: "re-read the record from job:j000001, at its offset", strength: "established", answer_review: { ...REVIEWED, discriminator: SOURCE_FIRST.discriminator, reproduced_at: [{ ref: "job:j000001/hits.txt", offset: 0, value: "j000001" }] } });
+    return r.S;
+  },
+
 };
 
 // ---------------------------------------------------------------------------------------------

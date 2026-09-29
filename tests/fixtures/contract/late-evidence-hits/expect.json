@@ -1,0 +1,64 @@
+{
+  "case": "Evidence added late, and the reverse sweep of its files: question 1, a reviewed bounded negative whose coverage looked for a string the export holds, is staled, examined again (the hit object read, with its delta), reviewed and recorded again; question 2, established, whose question's coverage looked for another string the export holds, is not staled, and the hit is warned of where its answer is recorded and reviewed again, and in finish status.",
+  "design": [
+    "docs/adr/0013 'Late evidence: the reverse sweep and the delta': at the addition the import's files are searched for every standing coverage record's looked_for strings, each hit bound to the records whose strings it holds; the hits are delivered to the re-examination of the questions they bear on (the stale answer's words, and a warning, late_evidence_hits, where the addition does not stale the answer and no entry the answer reaches names the hit object); they hold nothing by themselves.",
+    "docs/adr/0013 'Late evidence: the reverse sweep and the delta': evidence_stale clears when the coverage recorded since cites an entry whose refs name the import's objects with a delta, and another seat reviewed it.",
+    "docs/adr/0013 'Warnings where the decision is made': a warning is delivered in the reply to the record that writes the answer, in the reply to an attest on it, and in finish status; none holds.",
+    "docs/adr/0015 'A source-first review': the established review carries a discriminator and a derivation, so it stands established."
+  ],
+  "policies": [
+    "as run"
+  ],
+  "expect": {
+    "questions": {
+      "question:1": {
+        "disposition": "bounded_negative",
+        "best_candidate": false,
+        "readiness_holds": false,
+        "defects_include": [],
+        "warnings": []
+      },
+      "question:2": {
+        "disposition": "established",
+        "best_candidate": false,
+        "readiness_holds": false,
+        "defects_include": [],
+        "warnings": [
+          "late_evidence_hits"
+        ],
+        "warned": {
+          "late_evidence_hits": [5]
+        }
+      }
+    },
+    "ready": true,
+    "verdict": {
+      "proceed": true,
+      "outcome": "examination_limited"
+    },
+    "done": "proceeds",
+    "late": [],
+    "agreement": [],
+    "late_evidence": [
+      {
+        "addition": 7,
+        "synthetic": false,
+        "state": "hits",
+        "records": 2,
+        "terms": 2,
+        "questions": [
+          { "section": "question:1", "objects": 1, "occurrences": 1 },
+          { "section": "question:2", "objects": 1, "occurrences": 1 }
+        ]
+      }
+    ],
+    "review_caps": { "established": 2, "capped": [] },
+    "deliveries": {
+      "delivered": [
+        { "point": "record", "entry": 11, "on": "answer", "sections": ["question:2"], "warnings": ["late_evidence_hits"] },
+        { "point": "attest", "entry": 11, "on": "answer", "by": "a3", "sections": ["question:2"], "warnings": ["late_evidence_hits"] },
+        { "point": "finish_status", "sections": ["question:2"], "warnings": ["late_evidence_hits"] }
+      ]
+    }
+  }
+}

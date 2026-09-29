@@ -2910,9 +2910,11 @@ function reviewWorkDue(snap: LeadsSnapshot, attestations: P.LedgerAttestation[],
  * Offer each review item due to one eligible seat (A3's offers, the c10
  * pilot's stampede): never the closer, a holder or an author, never a seat
  * done, dead or compacting, never one with an offer standing or offered
- * this item already; the relevant first (it held a lead under the item's
- * questions, then it recorded an entry answering them), then a waiting
- * seat, idle longest. Made under the registers' lock, one seat per item,
+ * this item already; a seat of another model family than those that did
+ * the work first (a preference, never a requirement), then the relevant
+ * (it held a lead under the item's questions, then it recorded an entry
+ * answering them), then a waiting seat, idle longest (rankReviewers).
+ * Made under the registers' lock, one seat per item,
  * each seat counted busy once offered. Offers whose item needs no review
  * any more are withdrawn first, and those that ran out recorded lapsed
  * (settleReviewOffers). Returns how many offers were made.
@@ -2950,7 +2952,7 @@ export async function offerReviews(sandboxRoot: string, now = Date.now()): Promi
         if (!(await seatAvailable(sandboxRoot, a, activity, now)).available) continue;
         candidates.push(a);
       }
-      const pick = await rankReviewers(sandboxRoot, snap, candidates, item.questions, now);
+      const pick = await rankReviewers(sandboxRoot, snap, candidates, item.questions, now, item.exclude);
       if (!pick) continue;
       busy.add(pick);
       append.push(item.draft(pick, now));
@@ -2961,19 +2963,44 @@ export async function offerReviews(sandboxRoot: string, now = Date.now()): Promi
   return r?.offered ?? 0;
 }
 
-/** The most relevant of the candidates for a review of work under these questions: held a lead under them, then recorded an entry answering them, then waiting, idle longest. */
-async function rankReviewers(sandboxRoot: string, snap: LeadsSnapshot, candidates: string[], questions: string[], now: number): Promise<string | null> {
+/**
+ * A seat's model family, from team.json: its model's name without the
+ * provider's route and without a release tag (-latest, -preview, a date),
+ * lower-cased; null when its model is not known. The harness knows no
+ * finer family than a model's name.
+ */
+export function modelFamily(model: string | null | undefined): string | null {
+  const m = String(model ?? "").trim();
+  if (!m) return null;
+  const name = m.slice(m.indexOf("/") + 1).toLowerCase();
+  return name.replace(/[-_.@:](?:latest|preview|\d{4}-?\d{2}-?\d{2}|\d{8})$/, "") || null;
+}
+
+/**
+ * The most relevant of the candidates for a review of work under these
+ * questions: first one of another model family than every seat that did
+ * the work (`authors`, as team.json names their models; docs/adr/0015: a
+ * routing preference, never a requirement: a team of one family is
+ * offered as before, and another model is not an independent source),
+ * then one that held a lead under them, then recorded an entry answering
+ * them, then waiting, idle longest.
+ */
+async function rankReviewers(sandboxRoot: string, snap: LeadsSnapshot, candidates: string[], questions: string[], now: number, authors: ReadonlySet<string> = new Set()): Promise<string | null> {
   if (!candidates.length) return null;
   const qs = new Set(questions);
-  const scored: Array<{ agent: string; score: number; since: number }> = [];
+  const team = await P.readTeam(sandboxRoot).catch(() => null);
+  const family = (id: string) => modelFamily(team?.agents.find((a) => a.id === id)?.model);
+  const theirs = new Set([...authors].map(family).filter((f): f is string => f !== null));
+  const scored: Array<{ agent: string; other: number; score: number; since: number }> = [];
   for (const agent of candidates) {
     let score = 0;
     if ([...snap.state.leads.values()].some((l) => l.answers.some((a) => qs.has(P.sectionKey(a))) && leadHolders(l, snap.state).has(agent))) score = 2;
     else if (snap.ledger.entries.some((e) => (e.by === agent || e.authors.includes(agent)) && ((e.answers ?? []).some((a) => qs.has(P.sectionKey(a))) || (e.section?.startsWith("question:") && qs.has(P.sectionKey(e.section.slice("question:".length))))))) score = 1;
     const since = P.waitingSince(await P.readWaiting(sandboxRoot, agent), now);
-    scored.push({ agent, score, since: since ?? Number.POSITIVE_INFINITY });
+    const f = family(agent);
+    scored.push({ agent, other: f !== null && theirs.size > 0 && !theirs.has(f) ? 1 : 0, score, since: since ?? Number.POSITIVE_INFINITY });
   }
-  scored.sort((a, b) => b.score - a.score || a.since - b.since || a.agent.localeCompare(b.agent));
+  scored.sort((a, b) => b.other - a.other || b.score - a.score || a.since - b.since || a.agent.localeCompare(b.agent));
   return scored[0]!.agent;
 }
 
@@ -2991,13 +3018,15 @@ function reviewHolderWords(o: O.Offer, now: number, rev: number): string {
 }
 
 /**
- * What a review's offer asks, for the seat it is made to; `warnings`, the
- * answers check's warnings on the answer offered (reviewOfferWarnings), said
- * last; `preparation`, the state of the broad extraction of each source the
- * negative rests on (negativePreparationWords), said first: what the
- * reviewer weighs the negative against.
+ * What a review's offer asks, for the seat it is made to; `packet`, the
+ * question, its scope and its original sources, with the answer linked, not
+ * quoted (reviewPacketWords), said first; `preparation`, the state of the
+ * broad extraction of each source the negative rests on
+ * (negativePreparationWords), said with the sources: what the reviewer
+ * weighs the negative against; `warnings`, the answers check's warnings on
+ * the answer offered (reviewOfferWarnings), said last.
  */
-export function reviewOfferText(key: string, o: O.Offer, snap: LeadsSnapshot, warnings: readonly string[] = [], preparation: string | null = null): string {
+export function reviewOfferText(key: string, o: O.Offer, snap: LeadsSnapshot, warnings: readonly string[] = [], preparation: string | null = null, packet: string | null = null): string {
   const until = O.untilWords(o, snap.at, reviewRev(key, snap.state));
   const hold = `it is then yours for ${Math.round(O.reviewHoldMs() / 60_000)} min`;
   if (o.reason === "route_review") {
@@ -3005,7 +3034,7 @@ export function reviewOfferText(key: string, o: O.Offer, snap: LeadsSnapshot, wa
     return `${key}${l ? ` ("${l.title}", closed ${l.closed?.disposition ?? "?"} on ${l.closed?.ref ?? "?"})` : ""} is offered to you for its route review, first claim ${until}: its questions are answered now. Take it with offer accept ${key} (${hold}), then say whether the route's limitation still matters with route_review(${key}, material, why); or offer decline ${key} with why. Other seats' reviews of it wait for yours.`;
   }
   const e = snap.ledger.bySeq.get(Number(key.slice(2)));
-  return `${preparation ? `${preparation} ` : ""}${key}${e ? ` (${e.section}, ${NB.resultWords(NB.answerResult(e) ?? "")})` : ""} is offered to you for its review, first claim ${until}. Take it with offer accept ${key} (${hold}), then ${negativeTargetWords(e, snap)} with review {detection, reproduced, other_route} (a negative's review, not answer_review); or offer decline ${key} with why. Other seats' reviews of it wait for yours.${sweepReviewWords(e, snap)}${warnings.length ? ` The finish line warns of this answer, holding nothing on it; weigh each in your review: ${warnings.join("; ")}` : ""}`;
+  return `${packet ? `${packet} ` : ""}${preparation ? `${preparation} ` : ""}${key}${e ? ` (${e.section}, ${NB.resultWords(NB.answerResult(e) ?? "")})` : ""} is offered to you for its review, first claim ${until}. Take it with offer accept ${key} (${hold}), then ${negativeTargetWords(e, snap)} with review {detection, reproduced, other_route} (a negative's review, not answer_review); or offer decline ${key} with why. Other seats' reviews of it wait for yours.${sweepReviewWords(e, snap)}${warnings.length ? ` The finish line warns of this answer, holding nothing on it; weigh each in your review: ${warnings.join("; ")}` : ""}`;
 }
 
 /**
@@ -3643,7 +3672,7 @@ export type LeadNotice = {
  * answers check's warnings on each answer offered to it for review
  * (reviewOfferWarnings), said in the offer.
  */
-export function noticesFor(agent: string, before: Told, snap: LeadsSnapshot, reviewWarnings: ReadonlyMap<string, readonly string[]> = new Map(), reviewPreparation: ReadonlyMap<string, string> = new Map()): LeadNotice[] {
+export function noticesFor(agent: string, before: Told, snap: LeadsSnapshot, reviewWarnings: ReadonlyMap<string, readonly string[]> = new Map(), reviewPreparation: ReadonlyMap<string, string> = new Map(), reviewPackets: ReadonlyMap<string, string> = new Map()): LeadNotice[] {
   const { state: s, ledger: v } = snap;
   const out: LeadNotice[] = [];
   const now = toldNow(agent, snap, Object.keys(before.held));
@@ -3701,7 +3730,7 @@ export function noticesFor(agent: string, before: Told, snap: LeadsSnapshot, rev
   // A review offered to this seat (a route review, a negative's review).
   for (const { key, offer: o } of reviewOffersFor(agent, snap)) {
     if (told.has(o.seq)) continue;
-    out.push({ kind: "review_offer", lead: key, offer: o.seq, text: reviewOfferText(key, o, snap, reviewWarnings.get(key) ?? [], reviewPreparation.get(key) ?? null), wakes: true });
+    out.push({ kind: "review_offer", lead: key, offer: o.seq, text: reviewOfferText(key, o, snap, reviewWarnings.get(key) ?? [], reviewPreparation.get(key) ?? null, reviewPackets.get(key) ?? null), wakes: true });
   }
   return out;
 }
@@ -3761,6 +3790,101 @@ export async function reviewOfferPreparation(sandboxRoot: string, agent: string,
   return out;
 }
 
+/** How many jobs back a job's output is followed to the sources it was made from. */
+const SOURCE_DEPTH = 8;
+
+/**
+ * The original sources refs lead back to: an input, an import, a capture
+ * or a digest as named; a job's output by the job's declared inputs,
+ * followed back through the jobs that made them (a job over everything is
+ * its own source); a catalogue member by its generation's target. Refs and
+ * the jobs' own records only, each once, in the order met. A brain's own
+ * output (tool:, trace:) is its own source.
+ */
+export async function originalSources(sandboxRoot: string, refs: readonly string[]): Promise<string[]> {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const put = (r: string) => {
+    if (!out.includes(r)) out.push(r);
+  };
+  const walk = async (ref: string, depth: number): Promise<void> => {
+    const r = ref.trim();
+    if (!r || seen.has(r) || depth > SOURCE_DEPTH || /^unresolved:/.test(r)) return;
+    seen.add(r);
+    const job = NB.jobOfRef(r);
+    if (job) {
+      // Only a job that declared what it reads leads back to it; one over everything is its own source.
+      const d = await NB.jobDeclared(sandboxRoot, job).catch(() => null);
+      if (!d || d.scope !== "declared" || !d.inputs.length) {
+        put(`job:${job}`);
+        return;
+      }
+      for (const i of d.inputs) await walk(i, depth + 1);
+      return;
+    }
+    const mem = /^member:([a-z0-9-]+)#\d+$/.exec(r);
+    if (mem) {
+      const g = (await NB.generations(sandboxRoot).catch(() => [] as NB.GenRecord[])).find((x) => x.id === mem[1]);
+      if (g?.target?.ref) await walk(g.target.ref, depth + 1);
+      else put(r);
+      return;
+    }
+    put(r.replace(/^input:inputs\//, "input:"));
+  };
+  for (const r of refs) await walk(r, 0);
+  return out;
+}
+
+/**
+ * A review's packet, source-first (docs/adr/0015, "A source-first
+ * review"): the question as it is asked now (its register id and revision,
+ * its words whole), its scope, and the original sources the answer's
+ * coverage records and cited entries lead back to (originalSources); then
+ * the answer under review, linked by its seq, the entries it corrects and
+ * the coverage it rests on, never quoted: the reviewer reads the question
+ * against the sources before it reads the conclusion. Reduced priming, not
+ * blindness: a seat may have seen the board. Null when the entry is not an
+ * answer to a question.
+ */
+export async function reviewPacketWords(sandboxRoot: string, snap: LeadsSnapshot, seq: number): Promise<string | null> {
+  const a = snap.ledger.bySeq.get(seq);
+  if (!a || a.kind !== "answer" || !a.section?.startsWith("question:")) return null;
+  const id = P.sectionKey(a.section.slice("question:".length));
+  const q = snap.questions?.bySection.get(id) ?? null;
+  let words: string | null = q?.text ?? null;
+  if (!words) {
+    const doc = await goalDocument(sandboxRoot).catch(() => null);
+    if (doc) words = (await import("./questions.ts")).goalQuestionText(doc.text, id, snap.goal.questions);
+  }
+  const name = q ? `${q.id}, revision ${q.rev}` : /^\d+$/.test(id) ? `Q-${id}` : a.section;
+  const material = snap.goal.questions.map(P.sectionKey).includes(id) || !q || q.materiality === "material";
+  const scope = [material ? "a material question" : "a question the operator marked not material", ...(snap.goal.existence.map(P.sectionKey).includes(id) || q?.expects === "existence" ? ["it asks whether something exists"] : []), ...(q?.completeness ? ["it asks for a complete set"] : [])];
+  const cited = [...(a.support ?? []), ...(a.contrary ?? []), ...(a.limitations ?? [])].map((x) => snap.ledger.bySeq.get(x.seq)).filter((e): e is P.LedgerEntry => Boolean(e));
+  const coverage = cited.filter((e) => e.kind === "coverage");
+  const sources = await originalSources(sandboxRoot, cited.flatMap((e) => e.refs ?? []));
+  const history: number[] = [];
+  for (let e: P.LedgerEntry | undefined = a; typeof e?.supersedes === "number" && history.length < 50; e = snap.ledger.bySeq.get(e.supersedes)) history.push(e.supersedes);
+  return [
+    `Review it source-first. The question: ${name}: ${words ? `"${words}"` : `its words are in the goal (${a.section})`}.`,
+    `Its scope: ${scope.join("; ")}.`,
+    `The original sources its answer's coverage and cited entries lead back to: ${sources.length ? sources.join(", ") : "none named (read the question's leads and routes)"}.`,
+    "Read the question against those sources before the answer under review, and weigh the strongest rival reading of them (another time, entity, mechanism, or the premise not holding).",
+    `The answer under review is linked, not quoted: E-${a.seq} in ledger/ledger.md${history.length ? `, correcting ${history.map((n) => `E-${n}`).join(" ← ")}` : ""}${coverage.length ? `; its coverage ${coverage.map((c) => `E-${c.seq}`).join(", ")}` : ""}.`,
+  ].join(" ");
+}
+
+/** The source-first packet of each answer offered to `agent` for review and not yet told it (reviewPacketWords): read as the offer is delivered. */
+export async function reviewOfferPackets(sandboxRoot: string, agent: string, snap: LeadsSnapshot, before: Told): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  const told = new Set(before.offers ?? []);
+  for (const { key, offer } of reviewOffersFor(agent, snap)) {
+    if (!key.startsWith("E-") || told.has(offer.seq)) continue;
+    const words = await reviewPacketWords(sandboxRoot, snap, Number(key.slice(2))).catch(() => null);
+    if (words) out.set(key, words);
+  }
+  return out;
+}
+
 /** The reviews offered to a seat now, each still held for it. */
 export function reviewOffersFor(agent: string, snap: LeadsSnapshot): Array<{ key: string; offer: O.Offer }> {
   const out: Array<{ key: string; offer: O.Offer }> = [];
@@ -3810,7 +3934,7 @@ export async function leadsDigest(ctx: P.SwarmContext, o: { mark?: boolean } = {
   const awaiting = (await awaitingInterpretation(ctx.sandboxRoot, snap.state, snap.jobs, snap.ledger)).filter((a) => a.agent === me);
   const cov = questionCoverage(snap);
   const before = await readTold(ctx.sandboxRoot, me);
-  const notices = noticesFor(me, before, snap, await reviewOfferWarnings(ctx.sandboxRoot, me, snap, before).catch(() => new Map<string, string[]>()), await reviewOfferPreparation(ctx.sandboxRoot, me, snap, before).catch(() => new Map<string, string>()));
+  const notices = noticesFor(me, before, snap, await reviewOfferWarnings(ctx.sandboxRoot, me, snap, before).catch(() => new Map<string, string[]>()), await reviewOfferPreparation(ctx.sandboxRoot, me, snap, before).catch(() => new Map<string, string>()), await reviewOfferPackets(ctx.sandboxRoot, me, snap, before).catch(() => new Map<string, string>()));
   // The register's part comes first: a person's question outranks the rest.
   const qTold = await Q.readTold(ctx.sandboxRoot, me);
   const qd = snap.questions ? Q.questionsDigest(me, { questions: snap.questions, leads: snap.state, ledger: snap.ledger }, qTold) : null;
@@ -3946,7 +4070,7 @@ export function leadsWaitCheck(ctx: P.SwarmContext): () => Promise<string | null
     if (due) await offerReviews(ctx.sandboxRoot, now).catch(() => 0);
     const snap = await leadsSnapshot(ctx.sandboxRoot);
     const before = await readTold(ctx.sandboxRoot, ctx.agentId);
-    const waking = noticesFor(ctx.agentId, before, snap, await reviewOfferWarnings(ctx.sandboxRoot, ctx.agentId, snap, before).catch(() => new Map<string, string[]>()), await reviewOfferPreparation(ctx.sandboxRoot, ctx.agentId, snap, before).catch(() => new Map<string, string>())).filter((n) => n.wakes);
+    const waking = noticesFor(ctx.agentId, before, snap, await reviewOfferWarnings(ctx.sandboxRoot, ctx.agentId, snap, before).catch(() => new Map<string, string[]>()), await reviewOfferPreparation(ctx.sandboxRoot, ctx.agentId, snap, before).catch(() => new Map<string, string>()), await reviewOfferPackets(ctx.sandboxRoot, ctx.agentId, snap, before).catch(() => new Map<string, string>())).filter((n) => n.wakes);
     // The question register's news for this seat: an offer, a clarification answered, its question amended or withdrawn.
     const Q = await import("./questions.ts");
     const qWaking = snap.questions ? Q.questionNotices(ctx.agentId, await Q.readTold(ctx.sandboxRoot, ctx.agentId), { questions: snap.questions, leads: snap.state, ledger: snap.ledger }).filter((n) => n.wakes) : [];

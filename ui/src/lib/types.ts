@@ -818,7 +818,7 @@ export type LedgerEntry = {
   refs?: string[];
   /** Version 3 (2026-09-26): the goal sections it answers, links to other entries, a sensitive mark, the clock and precision of its time, observed or inferred, a hypothesis's status, a limitation's reason, how far a search got, an attribution, where in a cited object, a correction's reason. */
   answers?: string[];
-  rel?: Array<{ to: number; kind: "supports" | "contradicts" | "duplicates" | "derived_from" }>;
+  rel?: Array<{ to: number; kind: "supports" | "contradicts" | "duplicates" | "derived_from" | "adds_part" | "irrelevant" | "inconclusive" }>;
   sensitive?: boolean;
   clock?: string;
   precision?: "date" | "minute" | "second" | "subsecond" | "unknown";

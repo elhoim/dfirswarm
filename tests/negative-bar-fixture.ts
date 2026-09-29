@@ -27,8 +27,17 @@ after(async () => {
 
 export const sha = (s: string) => createHash("sha256").update(s).digest("hex");
 export const F = { basis: "observed", confidence: "high", indicates: "What the observation shows, and the step to it.", confidence_why: "Read directly from the object it cites." } as const;
-/** How a critic attests an answer to a question since B2: established, with the review part by part, naming an alternative it weighed and why the evidence rules it out (an established review that names none is recorded best_candidate). */
-export const ESTABLISHED = { strength: "established", answer_review: { reproduced: "re-derived the cited finding from its sealed ref", read: "nothing beyond the cited entries", parts: [{ part: "the question as asked", established: true, why: "the cited finding shows it" }], inference: "the finding is the answer", alternatives: [{ explanation: "a copy of the record left by another process", why: "the cited record's own metadata ties it to the event, and no copy exists in the objects searched", evidence: ["E-1"] }], other_family: { checked: false, text: "no other source family holds it in this fixture" } } } as const;
+/**
+ * The source-first part of an established review (docs/adr/0015): the
+ * strongest rival and the test that separates it, and how the value was
+ * derived (j000001 over the disk, which every run here holds).
+ */
+export const SOURCE_FIRST = {
+  discriminator: { rival: "a copy of the record written later by a backup process", test: "read the record's own write time against the backup's run times", favours_if: "the answer if the write time falls outside every backup run; the rival if it falls inside one", outcome: "the write time falls outside every backup run", refs: ["E-1"] },
+  derivation: { job: "j000001", inputs: ["input:disk.E01"] },
+} as const;
+/** How a critic attests an answer to a question since B2: established, with the review part by part, naming an alternative it weighed and why the evidence rules it out (an established review that names none is recorded best_candidate), and source-first: the discriminator and the derivation. */
+export const ESTABLISHED = { strength: "established", answer_review: { reproduced: "re-derived the cited finding from its sealed ref", read: "nothing beyond the cited entries", parts: [{ part: "the question as asked", established: true, why: "the cited finding shows it" }], inference: "the finding is the answer", alternatives: [{ explanation: "a copy of the record left by another process", why: "the cited record's own metadata ties it to the event, and no copy exists in the objects searched", evidence: ["E-1"] }], other_family: { checked: false, text: "no other source family holds it in this fixture" }, ...SOURCE_FIRST } } as const;
 export const A = { confidence: "medium", confidence_why: "The cited entries are direct.", alternatives_open: "none open", would_change: "a second source that disagrees" } as const;
 export const REVIEW = {
   detection: { done: true, text: "a logon on this host writes an event the log keeps for its whole range" },

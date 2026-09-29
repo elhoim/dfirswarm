@@ -95,7 +95,10 @@ Leads (the swarm's open work)
   a material negative's review. When you are offered one, take it with `offer accept` (it is then
   yours for ten minutes, not the offer's minute) and do it: route_review, or attest what the offer
   names (the answer or its coverage record) with review {detection, reproduced, other_route}, not
-  answer_review. If you cannot, decline it with why and it passes on. Another seat's review of the
+  answer_review. A negative's offer leads with the question, its scope and the original sources,
+  and links the answer by its seq: read the sources for the question before the answer. A review
+  goes first to a seat of another model family than the work's when one is free: a preference,
+  not a second source. If you cannot, decline it with why and it passes on. Another seat's review of the
   same item comes back quietly with who has it, and records nothing; a second, independent review
   says why it adds something (second_review_why).
 - A lead closed deferred, infeasible or needs_operator keeps its disposition, and holds the finish
@@ -159,13 +162,22 @@ Leads (the swarm's open work)
   reopens the leads under its questions, and an answer recorded before it is stale until you
   record it again. Whatever question it was added for, every standing bounded_negative,
   not_determinable or partial answer whose coverage was recorded before it is stale too (the
-  board post and the finish line name each, `evidence_stale`): examine the new evidence for it,
-  record a coverage record that names the import among its objects (with what the search found
-  there, or why it cannot bear on the question), have another seat review it, and record the
-  answer again citing it; or cite an entry resting on the new evidence that another seat has
-  attested. A one-line finding nobody else looked at clears nothing, and a review made before the
-  evidence came does not count for the answer recorded after it. An established answer is not
-  staled. The operator may accept the question's limits after the evidence came instead.
+  board post and the finish line name each, `evidence_stale`): examine the new evidence for it
+  from its files, not from what you concluded before, and say how it bears on the answer: record
+  what it shows as an entry whose refs name the import's files, with a delta, `rel: [{to: <the
+  answer's seq>, kind}]` where kind is supports, contradicts, adds_part (it settles a part left
+  open), irrelevant (within the question's scope) or inconclusive; record a coverage record that
+  names the import among its objects and that entry among its results, have another seat review
+  it, and record the answer again citing it (or cite that entry in the answer, once another seat
+  has attested it). A citation of the import is not an examination of it, a one-line finding
+  nobody else looked at clears nothing, and a review made before the evidence came does not count
+  for the answer recorded after it. At the addition the hub searches the new files for every
+  standing coverage record's `looked_for` strings (the reverse sweep): the board post, the stale
+  answer and a warning (`late_evidence_hits`) name each hit with the questions it bears on. Open
+  each hit object and weigh it; a hit is a string found, not a fact, and holds nothing by itself.
+  An established answer is not staled, but a hit on its question is warned of until an entry the
+  answer reaches names the object. The operator may accept the question's limits after the
+  evidence came instead.
 - A lead is one agent's at a time: one a peer holds is theirs, so post to them. A holder silent
   past the stale limit, with no job running and not compacting, shows as stale; the first claim
   marks it and tells the holder, and a claim after a short grace takes it over. A turn that ended
@@ -472,6 +484,10 @@ Ledger (only when `record` is in your tool list)
   it rests on stand undisputed and uncorrected, the downgrade is refused, and a part the evidence
   cannot settle makes the answer partial (the established parts stated, the open parts named with
   their limitations and coverage).
+- Review source-first: before you read an answer's conclusion, read the question as asked, its
+  scope and the original sources it rests on (a review offer leads with them and links the answer
+  by its seq), and ask what the strongest rival reading of those sources is: another time, entity,
+  mechanism or activity, or the premise not holding.
 - `attest(seq, how, refs)` says you re-derived somebody else's entry: what you re-derived from which
   sealed object, and what you only read. An answer to a question is attested with `strength` and
   `answer_review`: established, or best_candidate (what the evidence best supports, not shown to be
@@ -482,7 +498,20 @@ Ledger (only when `record` is in your tool list)
   and say why the evidence rules it out, naming the entries that show it:
   `answer_review.alternatives [{explanation, why, evidence: ["E-<seq>"]}]`. An established attest
   that names none, or only placeholders ("none", "n/a"), or no entry, is recorded best_candidate,
-  and the reply says so; attest again once you have weighed one. On an answer that claims
+  and the reply says so; attest again once you have weighed one. An established attest of an
+  answer that claims established, on a material question, also names
+  `answer_review.discriminator {rival, test, favours_if, outcome, refs}` (the strongest rival, the
+  check that separates it from the answer, the result that would favour each, what the check
+  showed, and the `E-<seq>` or `job:<id>/<path>` it rests on), and says where you read each literal
+  value you vouch for: `answer_review.reproduced_at [{ref, offset, value}]`, the sealed object, the
+  byte offset where the value begins and the value as it is there (a job over the object gives
+  the offset: `grep -boa`, a hex dump; UTF-16LE text counts). A value you derived (a converted
+  time, a decoded field, a sum) takes `answer_review.derivation {job, inputs}` instead: the job
+  that derived it and the objects it read. The hub reads the bytes at each offset; without a
+  discriminator, with a locator that does not verify, or with neither a locator nor a
+  derivation, the attest is recorded best_candidate, and the reply says exactly what to add.
+  Bytes at an offset prove the value is there, not that it answers the question: that is what the
+  discriminator is for. On an answer that claims
   established, a medium or low confidence, a part not established, or a route its would_change
   names that nothing took allows only best_candidate, which does not satisfy the finish line: a
   best candidate you cannot break is still one. Say so, and open the lead for the route

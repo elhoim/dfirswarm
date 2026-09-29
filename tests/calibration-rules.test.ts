@@ -47,7 +47,7 @@ const attested = async (c: { sandboxRoot: string; agentId: string }, input: P.Le
 
 // --- 1. new evidence stales what rests on older coverage ------------------------------------------
 
-test("new evidence stales every standing negative, not-determinable and partial answer whose coverage is older, named or not; an established answer is not; only the new evidence examined and reviewed by another seat clears it: a coverage record naming it, or an entry resting on it, attested", async () => {
+test("new evidence stales every standing negative, not-determinable and partial answer whose coverage is older, named or not; an established answer is not; only the new evidence examined, reviewed by another seat, and weighed with a delta clears it: a coverage record naming it, or an entry resting on it, attested, citing an entry that interprets it with a delta", async () => {
   const { S, a0, a1, a2, a3 } = await run();
   await planned(a0, "2");
   await planned(a3, "4");
@@ -97,7 +97,7 @@ test("new evidence stales every standing negative, not-determinable and partial 
   }
   assert.match(defectsOf(r, "question:2", "evidence_stale")[0].what, new RegExp(`Its coverage record E-${cov2.seq} was recorded before the addition's entry E-${entry}`));
   assert.deepEqual(defectsOf(r, "question:2", "evidence_stale")[0].additions, [entry]);
-  assert.match(defectsOf(r, "question:2", "evidence_stale")[0].fix, /examine import:ev-0001 for question:2: record kind=coverage with answers=\["2"\]/);
+  assert.match(defectsOf(r, "question:2", "evidence_stale")[0].fix, /examine import:ev-0001 for question:2: record what it shows as an entry whose refs name the import's files, with a delta, rel \[\{to: \d+, kind: supports \| contradicts \| adds_part \| irrelevant \| inconclusive\}\].*record kind=coverage with answers=\["2"\]/);
   assert.deepEqual(defectsOf(r, "question:1", "evidence_stale"), []);
   assert.equal(r.dispositions["question:1"], "established");
   assert.ok(NEGATIVE_BAR_CODES.has("evidence_stale"), "an acceptance excuses it only when made after the evidence came (acceptanceExcuses; tested below)");
@@ -119,23 +119,37 @@ test("new evidence stales every standing negative, not-determinable and partial 
   r = await checkLedgerAnswers(S, sections, ["2"]);
   assert.match(defectsOf(r, "question:2", "evidence_stale")[0]?.what ?? "", new RegExp(`E-${cov2b.seq} examines it and no other seat has reviewed it yet`));
   await attested(a2, { seq: cov2b.seq, how: "ran the search again over the disk and the export", review: REVIEW, second_review_why: "the export is new" });
+  // Examined and reviewed, and nothing it cites says how the export bears on the answer: still stale (the delta rule, docs/adr/0013).
+  r = await checkLedgerAnswers(S, sections, ["2"]);
+  assert.match(defectsOf(r, "question:2", "evidence_stale")[0]?.what ?? "", /it was examined and reviewed, and nothing it cites says how the new evidence bears on the answer \(a delta\)/);
+  // What the export shows for the question, with its delta, among the results of the coverage the answer cites.
+  const d2 = ok(await rec(a0, { kind: "absence", value: "a remote tool in the proxy export", source: "the proxy export", evidence: "read whole: one line, a host at 09:58", refs: ["import:ev-0001/proxy.csv"], answers: ["2"], rel: [{ to: ans2b.seq, kind: "irrelevant" }] })).entry;
+  const cov2c = ok(await rec(a0, coverage("2", ["input:disk.E01", "import:ev-0001/proxy.csv"], [`E-${abs2.seq}`, `E-${d2.seq}`], { supersedes: cov2b.seq }))).entry;
+  const ans2c = ok(await rec(a1, { kind: "answer", section: "question:2", value: "No evidence of a remote tool was found on the disk or in the proxy export", reasoning: `E-${cov2c.seq}`, ...A, result: "bounded_negative", supersedes: ans2b.seq })).entry;
+  await attested(a2, { seq: cov2c.seq, how: "ran the search again over the disk and the export", review: REVIEW, second_review_why: "the export's delta is new" });
   r = await checkLedgerAnswers(S, sections, ["2"]);
   assert.deepEqual(defectsOf(r, "question:2", "evidence_stale"), [], r.lines.join("\n"));
   assert.equal(r.dispositions["question:2"], "bounded_negative");
-  assert.equal(P.evidenceStale(ans2b, await P.readLedger(S), await P.readAttestations(S)), null);
+  assert.equal(P.evidenceStale(ans2c, await P.readLedger(S), await P.readAttestations(S)), null);
 
   // Question 4: the answer again, citing an entry that rests on the new evidence: a one-line finding nobody else looked at clears nothing (the Fable review).
   const f4 = ok(await rec(a3, { kind: "finding", ...F, value: "the export's first line is at 09:58", source: "the proxy export", evidence: "line 2", refs: ["import:ev-0001/proxy.csv"], answers: ["4"] })).entry;
   const ans4b = ok(await rec(a1, { kind: "answer", section: "question:4", value: "No evidence of when it started was found in the log; the export begins after it", reasoning: `E-${cov4.seq} and E-${f4.seq}`, ...A, result: "not_determinable", supersedes: ans4.seq })).entry;
   r = await checkLedgerAnswers(S, sections, ["2"]);
   assert.match(defectsOf(r, "question:4", "evidence_stale")[0]?.what ?? "", new RegExp(`E-${f4.seq} examines it and no other seat has reviewed it yet`));
-  // Another seat attests the finding: the new evidence is examined and reviewed.
+  // Another seat attests the finding: the new evidence is examined and reviewed, and the finding says nothing of how it bears on the answer.
   await attested(a2, { seq: f4.seq, how: "read the export's second line again from import:ev-0001/proxy.csv", refs: ["import:ev-0001/proxy.csv"] });
+  r = await checkLedgerAnswers(S, sections, ["2"]);
+  assert.match(defectsOf(r, "question:4", "evidence_stale")[0]?.what ?? "", new RegExp(`E-${f4.seq} interprets it with no delta`));
+  // Corrected with its delta (the export begins after the start: it cannot say), attested, and cited.
+  const f4b = ok(await rec(a3, { kind: "finding", ...F, value: "the export's first line is at 09:58", source: "the proxy export", evidence: "line 2", refs: ["import:ev-0001/proxy.csv"], answers: ["4"], rel: [{ to: ans4b.seq, kind: "inconclusive" }], supersedes: f4.seq, because: "says how the export bears on the answer" })).entry;
+  const ans4c = ok(await rec(a1, { kind: "answer", section: "question:4", value: "No evidence of when it started was found in the log; the export begins after it", reasoning: `E-${cov4.seq} and E-${f4b.seq}`, ...A, result: "not_determinable", supersedes: ans4b.seq })).entry;
+  await attested(a2, { seq: f4b.seq, how: "read the export's second line again from import:ev-0001/proxy.csv", refs: ["import:ev-0001/proxy.csv"] });
   r = await checkLedgerAnswers(S, sections, ["2"]);
   assert.deepEqual(defectsOf(r, "question:4", "evidence_stale"), [], r.lines.join("\n"));
   // The review made before the evidence came counts for nothing on the answer recorded after it: reviewed again.
   assert.deepEqual(defectsOf(r, "question:4", "negative_unreviewed").length, 1, "the old review of E-cov4 predates the addition");
-  await attested(a2, { seq: ans4b.seq, how: "read the log and the export again", review: REVIEW });
+  await attested(a2, { seq: ans4c.seq, how: "read the log and the export again", review: REVIEW });
   r = await checkLedgerAnswers(S, sections, ["2"]);
   assert.equal(r.dispositions["question:4"], "not_determinable", r.lines.join("\n"));
   // Question 5 is still stale; nothing else is.

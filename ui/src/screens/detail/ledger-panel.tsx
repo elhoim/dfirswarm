@@ -63,7 +63,8 @@ const KINDS: Array<{ key: Kind; label: string }> = [
   { key: "limitation", label: "Limitations" },
 ];
 
-const REL_WORD = { supports: "supports", contradicts: "contradicts", duplicates: "duplicates", derived_from: "derived from" } as const;
+/** A late import's delta rels (adds_part, irrelevant, inconclusive) name the question's answer they weigh the evidence against. */
+const REL_WORD = { supports: "supports", contradicts: "contradicts", duplicates: "duplicates", derived_from: "derived from", adds_part: "adds a part to", irrelevant: "irrelevant to", inconclusive: "inconclusive on" } as const;
 const STATUS_TONE = { open: "neutral", supported: "moss", refuted: "brick" } as const;
 /** "Q3" and "3" are the same section. */
 const sectionId = (a: string) => a.trim().replace(/^q(?=\d)/i, "");

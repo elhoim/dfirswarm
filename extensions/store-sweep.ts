@@ -23,6 +23,16 @@
  * line of its own in ledger/sweeps.jsonl, chained like the attestations and
  * bound to the coverage record by its hash. A record with looked_for and no
  * sweep line is pending. The gate (protocol.ts ledgerGate) reads them.
+ *
+ * The reverse sweep (docs/adr/0013, "Late evidence: the reverse sweep and
+ * the delta"): when evidence is added, the new import's files, and only
+ * they, are searched at once for the looked_for strings of every coverage
+ * record standing then, and each hit is bound to the records whose strings
+ * it holds. Its line (version 2, `of: "import"`) is on the same chain,
+ * bound to the addition's external entry by its hash. Its hits are
+ * delivered to the re-examination of the questions those records name (the
+ * addition's board post, the stale answer's words, a warning); they hold
+ * nothing by themselves.
  */
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
@@ -80,6 +90,34 @@ export type SweepRecord = {
   prev?: string;
   hash?: string;
 };
+
+/** A hit of the reverse sweep: bound to the coverage records whose looked_for holds its string (by seq). */
+export type ImportSweepHit = SweepHit & { bears_on: number[] };
+/**
+ * The reverse sweep of an addition (version 2, `of: "import"`): the
+ * addition's external entry (seq, and hash as `target`), its import, each
+ * coverage record standing at the addition with looked_for (its seq, hash,
+ * questions and strings), and what the import's files hold of them.
+ */
+export type ImportSweepRecord = {
+  v: 2;
+  of: "import";
+  seq: number;
+  target: string;
+  import: string;
+  records: Array<{ seq: number; target: string; questions: string[]; terms: string[] }>;
+  state: SweepState;
+  terms: string[];
+  searched: { objects: number; bytes: number };
+  hits: ImportSweepHit[];
+  unsearched: Array<{ ref: string; why: string }>;
+  started_at: string;
+  at: string;
+  prev?: string;
+  hash?: string;
+};
+/** Any line of ledger/sweeps.jsonl: a coverage record's sweep, or an addition's reverse sweep. */
+export type AnySweepLine = SweepRecord | ImportSweepRecord;
 
 /** One object a sweep reads. */
 type SweepObject = { ref: string; path: string; bytes: number; key: string };
@@ -330,7 +368,7 @@ export async function computeSweep(sandboxRoot: string, cov: Pick<LedgerEntry, "
 }
 
 /** A sweep line's hash: over the previous line's and its own fields, canonical. */
-export function sweepHash(s: SweepRecord, prev: string): string {
+export function sweepHash(s: AnySweepLine, prev: string): string {
   const { prev: _p, hash: _h, ...core } = s;
   return createHash("sha256").update(`${prev}\n${JSON.stringify(sortKeys(core))}`).digest("hex");
 }
@@ -340,18 +378,29 @@ function sortKeys(v: unknown): unknown {
   return v;
 }
 
-export async function readSweeps(sandboxRoot: string): Promise<SweepRecord[]> {
+/** Every line of ledger/sweeps.jsonl, in order. */
+async function readSweepLines(sandboxRoot: string): Promise<AnySweepLine[]> {
   const text = await readFile(join(sandboxRoot, LEDGER_SWEEPS), "utf8").catch(() => "");
-  const out: SweepRecord[] = [];
+  const out: AnySweepLine[] = [];
   for (const line of text.split("\n")) {
     if (!line.trim()) continue;
     try {
-      out.push(JSON.parse(line) as SweepRecord);
+      out.push(JSON.parse(line) as AnySweepLine);
     } catch {
       // a torn line is the chain check's to name
     }
   }
   return out;
+}
+
+/** The coverage records' sweeps (version 1 lines): what the gate holds a negative to. */
+export async function readSweeps(sandboxRoot: string): Promise<SweepRecord[]> {
+  return (await readSweepLines(sandboxRoot)).filter((s): s is SweepRecord => s.v === 1);
+}
+
+/** The additions' reverse sweeps (version 2 lines, of: "import"). */
+export async function readImportSweeps(sandboxRoot: string): Promise<ImportSweepRecord[]> {
+  return (await readSweepLines(sandboxRoot)).filter((s): s is ImportSweepRecord => s.v === 2 && (s as ImportSweepRecord).of === "import");
 }
 
 /** The sweeps' chain: every line's hash recomputed over its fields and chained to the one before; the head is the last line's hash. */
@@ -361,13 +410,13 @@ export function verifySweepChain(text: string): { ok: boolean; total: number; br
   for (const line of text.split("\n")) {
     if (!line.trim()) continue;
     total += 1;
-    let s: SweepRecord;
+    let s: AnySweepLine;
     try {
-      s = JSON.parse(line) as SweepRecord;
+      s = JSON.parse(line) as AnySweepLine;
     } catch {
       return { ok: false, total, broken_at: total, reason: "not json", head: null };
     }
-    if (s.v !== 1) return { ok: false, total, broken_at: total, reason: `a sweep of version ${JSON.stringify(s.v)}, which this harness does not know`, head: null };
+    if (s.v !== 1 && !(s.v === 2 && (s as ImportSweepRecord).of === "import")) return { ok: false, total, broken_at: total, reason: `a sweep of version ${JSON.stringify(s.v)}${s.v === 2 ? ` of ${JSON.stringify((s as { of?: unknown }).of)}` : ""}, which this harness does not know`, head: null };
     if (s.prev !== last) return { ok: false, total, broken_at: total, reason: "prev does not name the line before it", head: null };
     if (s.hash !== sweepHash(s, last)) return { ok: false, total, broken_at: total, reason: "the line was rewritten", head: null };
     last = s.hash;
@@ -465,4 +514,196 @@ export async function reconcileSweeps(sandboxRoot: string, o: { orphanMs?: numbe
     ran += 1;
   }
   return ran;
+}
+
+// --- the reverse sweep: an addition's files against every standing looked_for -----------------
+
+/** A question's key as protocol.ts sectionKey reads it: question:Q-19, Q-19 and 19 are 19. */
+function questionKey(x: string): string {
+  return String(x ?? "").trim().replace(/^question:/i, "").replace(/^q-?(?=\d)/i, "");
+}
+
+/**
+ * The coverage records standing at an addition that name what a hit would
+ * contain: recorded before the addition's external entry (`seq`), not
+ * corrected by then, with looked_for. Read by seqs alone, so a
+ * reconciliation long after finds the same ones.
+ */
+export function recordsStandingAt(entries: readonly LedgerEntry[], seq: number): LedgerEntry[] {
+  const before = entries.filter((e) => e.seq < seq);
+  const corrected = new Set(before.filter((e) => typeof e.supersedes === "number").map((e) => e.supersedes as number));
+  return before.filter((e) => e.kind === "coverage" && !corrected.has(e.seq) && Boolean(e.looked_for?.length) && Boolean(e.hash));
+}
+
+/**
+ * Search an addition's import, and only it, for the looked_for strings of
+ * `records` (the coverage records standing at the addition), each object
+ * streamed whole once, as the store sweep reads one: bytes and strings
+ * only, in UTF-8 and UTF-16LE, ASCII case folded. Each hit names the
+ * records whose strings it holds (`bears_on`). A budget of bytes and time
+ * bounds it; what it did not reach is named, and it is partial. Pure over
+ * the store; `now` and the budget are the caller's (tests fix them).
+ */
+export async function computeImportSweep(sandboxRoot: string, addition: { seq: number; hash: string; import: string }, records: readonly LedgerEntry[], o: { maxBytes?: number; maxMs?: number; now?: () => number } = {}): Promise<Omit<ImportSweepRecord, "prev" | "hash">> {
+  const now = o.now ?? Date.now;
+  const budget = { ...sweepBudget(), ...(o.maxBytes !== undefined ? { maxBytes: o.maxBytes } : {}), ...(o.maxMs !== undefined ? { maxMs: o.maxMs } : {}) };
+  const started = now();
+  // Each string once, whatever case the records wrote it in; bound to every record that looked for it.
+  const terms: string[] = [];
+  const byTerm = new Map<string, number[]>();
+  for (const c of records) {
+    for (const t of c.looked_for ?? []) {
+      const k = t.toLowerCase();
+      if (!byTerm.has(k)) {
+        byTerm.set(k, []);
+        terms.push(t);
+      }
+      const on = byTerm.get(k)!;
+      if (!on.includes(c.seq)) on.push(c.seq);
+    }
+  }
+  const pats = patterns(terms);
+  const objects = terms.length ? (await sweepObjects(sandboxRoot)).filter((x) => x.ref.startsWith(`import:${addition.import}/`)) : [];
+  const groups = new Map<string, SweepObject[]>();
+  for (const x of objects) groups.set(x.key, [...(groups.get(x.key) ?? []), x]);
+  const hits: ImportSweepHit[] = [];
+  const unsearched: ImportSweepRecord["unsearched"] = [];
+  let searchedObjects = 0;
+  let searchedBytes = 0;
+  for (const [, group] of groups) {
+    const first = group[0]!;
+    if (now() - started > budget.maxMs) {
+      for (const g of group) unsearched.push({ ref: g.ref, why: `the reverse sweep's time budget (${Math.round(budget.maxMs / 1000)} s, SWARM_SWEEP_MAX_SEC) ran out before it` });
+      continue;
+    }
+    if (searchedBytes + first.bytes > budget.maxBytes) {
+      for (const g of group) unsearched.push({ ref: g.ref, why: `its ${first.bytes} bytes would pass the reverse sweep's byte budget (${budget.maxBytes}, SWARM_SWEEP_MAX_BYTES; ${searchedBytes} searched)` });
+      continue;
+    }
+    let found: Awaited<ReturnType<typeof searchFile>>;
+    try {
+      found = await searchFile(first.path, pats);
+    } catch (err) {
+      for (const g of group) unsearched.push({ ref: g.ref, why: `it could not be read (${(err as Error).message})` });
+      continue;
+    }
+    searchedObjects += group.length;
+    searchedBytes += first.bytes;
+    for (const [t, f] of [...found.entries()].sort((a, b) => a[0] - b[0])) {
+      const term = terms[t]!;
+      hits.push({ ref: first.ref, term, count: f.count, first_offset: f.first, encodings: [...f.encodings].sort(), ...(group.length > 1 ? { also: group.slice(1).map((g) => g.ref) } : {}), bears_on: [...(byTerm.get(term.toLowerCase()) ?? [])].sort((a, b) => a - b) });
+    }
+  }
+  const state: SweepState = hits.length ? "hits" : unsearched.length ? "partial" : "clean";
+  return {
+    v: 2,
+    of: "import",
+    seq: addition.seq,
+    target: addition.hash,
+    import: addition.import,
+    records: records.map((c) => ({ seq: c.seq, target: c.hash ?? "", questions: [...new Set((c.answers ?? []).map(questionKey))], terms: [...(c.looked_for ?? [])] })),
+    state,
+    terms,
+    searched: { objects: searchedObjects, bytes: searchedBytes },
+    hits,
+    unsearched,
+    started_at: new Date(started).toISOString(),
+    at: new Date(now()).toISOString(),
+  };
+}
+
+/** An addition's reverse sweep, by its external entry's hash: the line, or null. */
+export function importSweepOf(target: string, sweeps: readonly ImportSweepRecord[]): ImportSweepRecord | null {
+  return sweeps.filter((s) => s.target === target).at(-1) ?? null;
+}
+
+const importInflight = new Map<string, Promise<ImportSweepRecord>>();
+
+/**
+ * Run an addition's reverse sweep and record it, once per addition (by its
+ * external entry's hash): a line already recorded, or a sweep running in
+ * this process, is not run again. Written under the sweeps' lock, chained.
+ * The coverage records searched for are those standing at the addition
+ * (recordsStandingAt), read from `entries`. Throws what went wrong: the
+ * addition names it pending and applies it again at its next reconciliation.
+ */
+export function startImportSweep(sandboxRoot: string, addition: { seq: number; hash: string; import: string }, entries: readonly LedgerEntry[], o: { maxBytes?: number; maxMs?: number } = {}): Promise<ImportSweepRecord> {
+  const key = `${sandboxRoot}\u0000${addition.hash}`;
+  const running = importInflight.get(key);
+  if (running) return running;
+  const p = (async (): Promise<ImportSweepRecord> => {
+    const had = importSweepOf(addition.hash, await readImportSweeps(sandboxRoot));
+    if (had) return had;
+    const result = await computeImportSweep(sandboxRoot, addition, recordsStandingAt(entries, addition.seq), o);
+    const P = await import("./protocol.ts");
+    const line = await P.withNamedLock(sandboxRoot, "sweeps", async () => {
+      const existing = importSweepOf(addition.hash, await readImportSweeps(sandboxRoot));
+      if (existing) return existing;
+      const text = await readFile(join(sandboxRoot, LEDGER_SWEEPS), "utf8").catch(() => "");
+      const lines = text.split("\n").filter((l) => l.trim());
+      const prev = lines.length ? ((JSON.parse(lines.at(-1)!) as AnySweepLine).hash ?? "genesis") : "genesis";
+      const rec: ImportSweepRecord = { ...result, prev };
+      rec.hash = sweepHash(rec, prev);
+      await mkdir(join(sandboxRoot, "ledger"), { recursive: true });
+      await appendFile(join(sandboxRoot, LEDGER_SWEEPS), `${JSON.stringify(rec)}\n`, "utf8");
+      return rec;
+    });
+    await P.renderLedger(sandboxRoot).catch(() => undefined);
+    return line;
+  })().finally(() => importInflight.delete(key));
+  importInflight.set(key, p);
+  return p;
+}
+
+/** A reverse sweep's hit on a question: the sweep, the hit, and the question's coverage records it bears on. */
+export type ImportHitOn = { sweep: ImportSweepRecord; hit: ImportSweepHit; records: number[] };
+
+/** The reverse sweeps' hits that bear on a question (`id`, its section key): those in strings a coverage record naming it looked for. */
+export function importHitsFor(id: string, sweeps: readonly ImportSweepRecord[]): ImportHitOn[] {
+  const want = questionKey(id);
+  const out: ImportHitOn[] = [];
+  for (const s of sweeps) {
+    const mine = new Set(s.records.filter((r) => r.questions.includes(want)).map((r) => r.seq));
+    if (!mine.size) continue;
+    for (const h of s.hits) {
+      const records = h.bears_on.filter((n) => mine.has(n));
+      if (records.length) out.push({ sweep: s, hit: h, records });
+    }
+  }
+  return out;
+}
+
+/** A reverse sweep's hit in words, with the records whose strings it holds. */
+export function importHitWords(x: ImportHitOn): string {
+  return `${hitWords(x.hit)} (${x.records.map((n) => `E-${n}`).join(", ")}'s looked_for)`;
+}
+
+/**
+ * Whether an object a reverse sweep found a hit in is examined for an
+ * answer: an entry the answer reaches (`reach`, its seqs), that stands,
+ * was recorded after the addition's entry, and names the object itself in
+ * its refs (not the import or a directory that holds it). Refs and seqs
+ * only: nothing is read of what the entry says.
+ */
+export function importHitExamined(x: ImportHitOn, reach: ReadonlySet<number>, bySeq: ReadonlyMap<number, LedgerEntry>, replaced: ReadonlyMap<number, number>): boolean {
+  const wanted = new Set([x.hit.ref, ...(x.hit.also ?? [])].map(normRef));
+  for (const n of reach) {
+    const e = bySeq.get(n);
+    if (!e || replaced.has(n) || e.seq <= x.sweep.seq || e.kind === "answer" || e.kind === "coverage") continue;
+    if ((e.refs ?? []).some((r) => wanted.has(normRef(r)))) return true;
+  }
+  return false;
+}
+
+/** A reverse sweep in words, by question, for the addition's board post and the operator's reply: what it searched for, and each hit with the questions it bears on. */
+export function importSweepWords(s: ImportSweepRecord): string {
+  if (!s.records.length) return `no coverage record standing at the addition names looked_for strings: nothing to search import:${s.import} for`;
+  const head = `import:${s.import} searched for the ${s.terms.length} string(s) of ${s.records.length} standing coverage record(s): ${s.searched.objects} object(s), ${s.searched.bytes} bytes`;
+  const questions = [...new Set(s.records.flatMap((r) => (r.questions.length ? r.questions : [""])))];
+  const found: string[] = [];
+  for (const q of questions) {
+    const hs = q ? importHitsFor(q, [s]) : s.hits.map((hit) => ({ sweep: s, hit, records: hit.bears_on.filter((n) => s.records.some((r) => r.seq === n && !r.questions.length)) })).filter((x) => x.records.length);
+    if (hs.length) found.push(`${!q ? "no question named" : /^\d+$/.test(q) ? `Q-${q}` : q}: ${hs.map(importHitWords).join("; ")}`);
+  }
+  return [head, found.length ? `found: ${found.join(" | ")}` : "found none of them", s.unsearched.length ? `not searched: ${s.unsearched.map((u) => `${u.ref} (${u.why})`).join("; ")}` : ""].filter(Boolean).join("; ");
 }

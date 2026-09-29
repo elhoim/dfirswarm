@@ -5,8 +5,8 @@
  * "Measuring a rule change").
  *
  *   node --experimental-strip-types scripts/replay.ts <run-dir | run-id> [--registry FILE]
- *        [--checkout PATH] [--compare [A [B]]] [--stop-policy P[,P…]] [--deliveries] [--prepare-as STATE] [--json] [--show-text]
- *   swarm.sh replay <run> [--checkout PATH] [--compare [A [B]]] [--stop-policy P] [--deliveries] [--prepare-as STATE] [--json]
+ *        [--checkout PATH] [--compare [A [B]]] [--stop-policy P[,P…]] [--deliveries] [--prepare-as STATE] [--reverse-sweep] [--json] [--show-text]
+ *   swarm.sh replay <run> [--checkout PATH] [--compare [A [B]]] [--stop-policy P] [--deliveries] [--prepare-as STATE] [--reverse-sweep] [--json]
  *
  * The run is never written. Its directory is copied to a temporary one (a
  * clone where the file system makes one, APFS or a reflink), less what no
@@ -64,6 +64,17 @@
  * STATE (planned, attempted, produced, partial, failed or declined; one its
  * pack declares the images cannot run is declined, as the hub would record
  * it), by "replay", before it is evaluated.
+ *
+ * The source-first review rule (docs/adr/0015): where the checkout has it,
+ * the projection counts the recorded established attests of answers that
+ * claim established and names each the rule would cap, with its codes
+ * (no_discriminator, locator_unverified, derivation_unverified,
+ * no_locator_or_derivation). The recorded strengths are the run's and stay
+ * as they were: this says what the rule would have done at each attest.
+ * Each evidence addition's reverse sweep (docs/adr/0013), counted per
+ * question; `--reverse-sweep` gives an addition that has none (a run from
+ * before it) the line this checkout's store sweep computes over the copy's
+ * import, from the coverage records standing at the addition.
  *
  * `--deliveries` reads where the checkout delivers the answers check's
  * warnings (docs/adr/0013, "Warnings where the decision is made"), act by
@@ -178,6 +189,27 @@ export type Projection = {
    * that does not read them.
    */
   preparation?: PreparationProjection | null;
+  /**
+   * The established attests of answers that claim established, as the
+   * checkout's source-first rule reads each recorded review
+   * (protocol.ts reviewEvidenceCaps, docs/adr/0015): how many there are,
+   * and each the rule would cap, by the answer's section and seq, the
+   * attesting seat, whether the answer still stands, whether the question
+   * is material, and the codes. The recorded strengths are the run's own
+   * and are not changed: this says what the rule would have done at each
+   * attest. Null for a checkout without the rule.
+   */
+  review_caps?: { established: number; capped: Array<{ section: string; answer: number; by: string; standing: boolean; material: boolean; codes: string[] }> } | null;
+  /**
+   * Each evidence addition's reverse sweep, as the checkout reads the
+   * copy's sweeps (store-sweep.ts readImportSweeps, docs/adr/0013): the
+   * addition's entry and import, whether replay synthesised the line
+   * (--reverse-sweep), its state, how many standing coverage records and
+   * strings it searched for, how many objects it read, and per question
+   * the hit objects and occurrences. Counts only, never a string. Null for
+   * a checkout that reads none.
+   */
+  late_evidence?: Array<{ addition: number; import: string; synthetic: boolean; state: string; records: number; terms: number; objects: number; questions: Array<{ section: string; objects: number; occurrences: number }> }> | null;
   /** What could not be evaluated, in the harness's or node's words. */
   errors: string[];
   /** The harness's lines whole (they quote records): only with --show-text. */
@@ -285,6 +317,7 @@ const WARNING_CODES: ReadonlyArray<[string, RegExp]> = [
   ["lead_findings_uncited", /\) leaves out what two seats hold for \S+:/],
   ["lead_findings_uncited", /\) leaves out what the record ties to \S+:/],
   ["preparation_missing", /weighed without a produced broad extraction of what it rests on/],
+  ["late_evidence_hits", /does not reach what the reverse sweep of evidence added late found for/],
 ];
 
 /** A warning line's code and section, by the harness's own words for it. */
@@ -522,6 +555,8 @@ export async function project(harness: string, S: string, o: { showText?: boolea
   const seals = await sealCheck(harness, S, errors);
   const delivered = o.deliveries ? await deliveriesOf(S, FIN, ready) : undefined;
   const preparation = await guard("the preparations", () => preparationOf(harness, S));
+  const reviewCaps = await guard("the review rule", () => reviewCapsOf(P, S));
+  const lateEvidence = await guard("the reverse sweeps", () => lateEvidenceOf(SW, S));
   const projection: Projection = {
     harness: { path: harness, commit: harnessCommit(harness) },
     goal: { source: doc?.source ?? (goalText ? "sandbox contract" : null), checks: checks.length, answers_checks: rows.length, not_replayed: others },
@@ -546,6 +581,8 @@ export async function project(harness: string, S: string, o: { showText?: boolea
     seals,
     ...(delivered ? { deliveries: delivered } : {}),
     preparation,
+    review_caps: reviewCaps,
+    late_evidence: lateEvidence,
     errors,
   };
   if (o.showText) {
@@ -599,6 +636,97 @@ async function preparationOf(harness: string, S: string): Promise<PreparationPro
     held,
     warned,
   };
+}
+
+/**
+ * The checkout's source-first review rule over each recorded established
+ * attest of an answer that claims established (reviewEvidenceCaps): the
+ * codes it would cap each for. Locators are read against the copy, which
+ * leaves the evidence out: a locator into an input cannot be read there,
+ * and says so. Ids and codes only. Null for a checkout without the rule.
+ */
+async function reviewCapsOf(Pm: Mod | null, S: string): Promise<Projection["review_caps"]> {
+  const rule = fn(Pm, "reviewEvidenceCaps");
+  if (!rule || !fn(Pm, "readLedger") || !fn(Pm, "readAttestations") || !fn(Pm, "claimsEstablished")) return null;
+  type E = { seq: number; kind: string; section?: string; hash?: string; by: string; authors: string[] };
+  type A = { v?: number; act?: string; target?: string; by: string; strength?: string; answer_review?: unknown };
+  const entries = (await fn(Pm, "readLedger")!(S)) as E[];
+  const atts = (await fn(Pm, "readAttestations")!(S)) as A[];
+  const replaced = (await fn(Pm, "supersededBy")!(entries)) as Map<number, number>;
+  const byHash = new Map(entries.filter((e) => e.hash).map((e) => [e.hash!, e]));
+  const material = new Map<string, boolean>();
+  const out: NonNullable<Projection["review_caps"]> = { established: 0, capped: [] };
+  for (const a of atts) {
+    if (a.v !== 2 || a.act !== "attest" || a.strength !== "established" || !a.answer_review || !a.target) continue;
+    const e = byHash.get(a.target);
+    if (!e || e.kind !== "answer" || !e.section?.startsWith("question:") || !fn(Pm, "claimsEstablished")!(e)) continue;
+    out.established += 1;
+    if (!material.has(e.section)) {
+      const id = fn(Pm, "sectionAnswersId") ? String(fn(Pm, "sectionAnswersId")!(e.section)) : e.section.slice("question:".length);
+      const bar = fn(Pm, "questionBar") ? ((await Promise.resolve(fn(Pm, "questionBar")!(S, id)).catch(() => null)) as { material: boolean } | null) : null;
+      material.set(e.section, bar?.material ?? true);
+    }
+    const r = (await rule(S, e, a.answer_review, { material: material.get(e.section)! })) as { caps: Array<{ code: string }> };
+    const codes = [...new Set(r.caps.map((c) => c.code))].sort();
+    if (codes.length) out.capped.push({ section: e.section, answer: e.seq, by: a.by, standing: !replaced.has(e.seq), material: material.get(e.section)!, codes });
+  }
+  return out;
+}
+
+/** Each addition's reverse sweep as the checkout reads the copy's sweeps: counts per question, never a string. Null for a checkout that reads none. */
+async function lateEvidenceOf(SWm: Mod | null, S: string): Promise<Projection["late_evidence"]> {
+  const read = fn(SWm, "readImportSweeps");
+  if (!read) return null;
+  type Line = { seq: number; import: string; synthetic?: boolean; state: string; terms: string[]; records: Array<{ seq: number; questions: string[] }>; searched: { objects: number }; hits: Array<{ ref: string; count: number; bears_on: number[] }> };
+  const lines = (await read(S)) as Line[];
+  return lines.map((l) => {
+    const questions = [...new Set(l.records.flatMap((r) => r.questions))].sort();
+    return {
+      addition: l.seq,
+      import: l.import,
+      synthetic: l.synthetic === true,
+      state: l.state,
+      records: l.records.length,
+      terms: l.terms.length,
+      objects: l.searched.objects,
+      questions: questions.map((q) => {
+        const mine = new Set(l.records.filter((r) => r.questions.includes(q)).map((r) => r.seq));
+        const hits = l.hits.filter((h) => h.bears_on.some((n) => mine.has(n)));
+        return { section: questionKey(q), objects: new Set(hits.map((h) => h.ref)).size, occurrences: hits.reduce((n, h) => n + h.count, 0) };
+      }),
+    };
+  });
+}
+
+/**
+ * --reverse-sweep: each evidence addition in a copy that has no reverse
+ * sweep line gets one, computed by this checkout's store sweep over the
+ * copy's import as the hub would have at the addition (the coverage records
+ * standing at its entry, recordsStandingAt), marked synthetic, appended to
+ * the copy's chain. Only for a checkout that reads version 2 sweep lines
+ * (one that does not would read the chain as broken): its copy is left as
+ * it is, and the note says so. The run is never written.
+ */
+async function addSyntheticReverseSweeps(copy: string, harness: string): Promise<string | null> {
+  const target = await importFrom(harness, "extensions/store-sweep.ts").catch(() => null);
+  if (!fn(target, "readImportSweeps")) return `${harness} reads no reverse sweep: its copy has none added`;
+  const SWm = await import("../extensions/store-sweep.ts");
+  const Pm = await import("../extensions/protocol.ts");
+  const entries = await Pm.readLedger(copy);
+  const have = await SWm.readImportSweeps(copy);
+  for (const x of Pm.evidenceAdditions(entries)) {
+    const e = entries.find((y) => y.seq === x.seq);
+    if (!e?.hash || SWm.importSweepOf(e.hash, have)) continue;
+    const r = await SWm.computeImportSweep(copy, { seq: e.seq, hash: e.hash, import: x.import }, SWm.recordsStandingAt(entries, e.seq));
+    const file = join(copy, SWm.LEDGER_SWEEPS);
+    const lines = (await readFile(file, "utf8").catch(() => "")).split("\n").filter((l) => l.trim());
+    const prev = lines.length ? ((JSON.parse(lines.at(-1)!) as { hash?: string }).hash ?? "genesis") : "genesis";
+    const line: Record<string, unknown> & { hash?: string } = { ...r, synthetic: true, prev };
+    line.hash = SWm.sweepHash(line as unknown as Parameters<typeof SWm.sweepHash>[0], prev);
+    await mkdir(dirname(file), { recursive: true });
+    await writeFile(file, `${[...lines, JSON.stringify(line)].join("\n")}\n`);
+  }
+  return null;
 }
 
 /** A broad extraction this checkout's census finds applies to a run's input, for a synthetic receipt (--prepare-as). */
@@ -994,6 +1122,8 @@ export type Replay = {
   run: { id: string; case_id: string | null; stop_policy: string | null; harness_commit: string | null };
   /** With --prepare-as: the state given, the broad extractions this checkout's census found apply to the run's evidence, and what could not be asked. */
   prepared_as?: { state: string; items: Array<{ source: string; recipe: string; capability: string; unavailable: boolean }>; notes: string[] };
+  /** With --reverse-sweep: each addition without a reverse sweep got one in every copy a checkout can read it in (late_evidence says what it found); the notes name the checkouts that could not. */
+  reverse_swept?: { notes: string[] };
   copy: { left_out: string[]; links_removed: number };
   targets: Target[];
   evaluations: Evaluation[];
@@ -1002,7 +1132,7 @@ export type Replay = {
 };
 
 /** Evaluate each copy in `copies` with `harness`, in a process of its own; one projection per copy, in order. */
-async function evaluateIn(harness: string, copies: string[], showText: boolean, deliveries = false): Promise<Array<Projection | { error: string }>> {
+export async function evaluateIn(harness: string, copies: string[], showText: boolean, deliveries = false): Promise<Array<Projection | { error: string }>> {
   const env: NodeJS.ProcessEnv = {};
   for (const [k, v] of Object.entries(process.env)) if (!/^(SWARM_|DFIRSWARM_)/.test(k)) env[k] = v;
   const args = ["--experimental-strip-types", "--no-warnings", join(ROOT, "scripts", "replay.ts"), "--evaluate", "--harness", harness, ...(showText ? ["--show-text"] : []), ...(deliveries ? ["--deliveries"] : []), ...copies.flatMap((c) => ["--sandbox", c])];
@@ -1031,7 +1161,7 @@ async function evaluateIn(harness: string, copies: string[], showText: boolean, 
  * evaluated, the run's registers checked unchanged, and, for two
  * checkouts, every difference named.
  */
-export async function replay(o: { run: RunRef; targets: Target[]; policies?: StopPolicy[] | null; showText?: boolean; deliveries?: boolean; prepareAs?: string | null; scratch: string }): Promise<Replay> {
+export async function replay(o: { run: RunRef; targets: Target[]; policies?: StopPolicy[] | null; showText?: boolean; deliveries?: boolean; prepareAs?: string | null; reverseSweep?: boolean; scratch: string }): Promise<Replay> {
   const before = await registerDigest(o.run.sandbox);
   // --prepare-as: what this checkout's census finds applies to the run's evidence, asked once.
   const synthetic = o.prepareAs ? await syntheticPreparations(o.run, o.scratch) : null;
@@ -1040,6 +1170,7 @@ export async function replay(o: { run: RunRef; targets: Target[]; policies?: Sto
   const policies: Array<StopPolicy | null> = o.policies?.length ? o.policies : [null];
   let copyInfo = { left_out: [] as string[], links_removed: 0 };
   const evaluations: Evaluation[] = [];
+  const reverseNotes: string[] = [];
   for (const [ti, target] of o.targets.entries()) {
     const copies: string[] = [];
     for (const policy of policies) {
@@ -1059,6 +1190,10 @@ export async function replay(o: { run: RunRef; targets: Target[]; policies?: Sto
       if (existsSync(anchor)) await copyFile(anchor, join(runs, `${o.run.id}.custody-anchor.json`)).catch(() => undefined);
       if (policy) await applyPolicy(copy, policy);
       if (synthetic && o.prepareAs) await addSyntheticReceipts(copy, synthetic.items, o.prepareAs);
+      if (o.reverseSweep) {
+        const note = await addSyntheticReverseSweeps(copy, target.harness);
+        if (note && !reverseNotes.includes(note)) reverseNotes.push(note);
+      }
       copies.push(copy);
     }
     const results = await evaluateIn(target.harness, copies, o.showText === true, o.deliveries === true);
@@ -1083,6 +1218,7 @@ export async function replay(o: { run: RunRef; targets: Target[]; policies?: Sto
     differences,
     unchanged: before === after,
     ...(synthetic && o.prepareAs ? { prepared_as: { state: o.prepareAs, items: synthetic.items.map((x) => ({ source: x.source.ref, recipe: x.recipe, capability: x.capability, unavailable: Boolean(x.unavailable) })), notes: synthetic.notes } } : {}),
+    ...(o.reverseSweep ? { reverse_swept: { notes: reverseNotes } } : {}),
   };
 }
 
@@ -1116,6 +1252,8 @@ export function diffProjections(a: Projection, b: Projection): Array<Omit<Differ
   put(null, "gate defects", listWords(countWords((a.gate?.defects ?? []).map((d) => d.code))), listWords(countWords((b.gate?.defects ?? []).map((d) => d.code))));
   put(null, "verdict", verdictWords(a.verdict), verdictWords(b.verdict));
   const preparedWords = (p: Projection) => (!p.finish ? "none" : !p.finish.prepared ? "not read" : `${p.finish.prepared.count}${p.finish.prepared.last ? `, the last with ${p.finish.prepared.last.late} late` : ""}`);
+  // Only where both read them: a checkout from before the rule has none, which is no rule's difference.
+  if (a.review_caps && b.review_caps) put(null, "established attests the review rule caps", `${a.review_caps.capped.length} of ${a.review_caps.established}`, `${b.review_caps.capped.length} of ${b.review_caps.established}`);
   // Only where both read the prepares: a checkout from before them reads the register without them, which is no rule's difference.
   if (a.finish?.prepared && b.finish?.prepared) put(null, "prepared", preparedWords(a), preparedWords(b));
   put(null, "done", a.finish ? `${a.finish.done}${a.finish.held_by.length ? ` (${a.finish.held_by.join(", ")})` : ""}` : "none", b.finish ? `${b.finish.done}${b.finish.held_by.length ? ` (${b.finish.held_by.join(", ")})` : ""}` : "none");
@@ -1151,6 +1289,21 @@ function preparationWords(p: PreparationProjection): string[] {
   return out;
 }
 
+/** The source-first review rule over the recorded established attests, values-free: how many, and each it would cap, with its codes. */
+function reviewCapWords(r: NonNullable<Projection["review_caps"]>): string[] {
+  const out = [`  review rule (source-first): ${r.established} established attest(s) of answers that claim established; ${r.capped.length} would be capped`];
+  for (const c of r.capped) out.push(`    ${c.section} E-${c.answer} by ${c.by}${c.standing ? "" : " (superseded since)"}${c.material ? "" : " (not material)"}: ${c.codes.join(", ")}`);
+  return out;
+}
+
+/** Each addition's reverse sweep, values-free: counts per question. */
+function lateEvidenceWords(xs: NonNullable<Projection["late_evidence"]>): string[] {
+  if (!xs.length) return ["  reverse sweeps: none (no evidence addition has one)"];
+  const out = ["  reverse sweeps (each evidence addition's files searched for the standing looked_for strings):"];
+  for (const x of xs) out.push(`    E-${x.addition} import:${x.import}${x.synthetic ? " (synthetic, --reverse-sweep)" : ""}: ${x.state}; ${x.records} standing coverage record(s) with looked_for, ${x.terms} string(s), ${x.objects} object(s) read${x.questions.length ? `; ${x.questions.map((q) => `${q.section} ${q.objects} object(s), ${q.occurrences} occurrence(s)`).join("; ")}` : ""}`);
+  return out;
+}
+
 function countWords(codes: string[]): string[] {
   const m = new Map<string, number>();
   for (const c of codes) m.set(c, (m.get(c) ?? 0) + 1);
@@ -1173,6 +1326,7 @@ export function replayWords(r: Replay): string {
   const out: string[] = [];
   out.push(`Replay of ${r.run.id}${r.run.case_id ? ` (case ${r.run.case_id})` : ""}: its registers read again from a copy; the run is not written${r.unchanged ? " (its registers hashed the same before and after)" : ". ITS REGISTERS CHANGED WHILE THIS RAN: another process wrote the run, or this replay did; do not trust this reading"}.`);
   out.push(`The run's stop policy: ${r.run.stop_policy ?? "unknown"}; its harness: ${r.run.harness_commit ?? "not recorded"}. Left out of the copy: ${r.copy.left_out.join(", ") || "nothing"}${r.copy.links_removed ? `; ${r.copy.links_removed} link(s) removed, not followed` : ""}.`);
+  if (r.reverse_swept) out.push(`Reverse sweeps: each evidence addition without one got one in each copy, by this checkout's store sweep as the hub would have run it at the addition (the run untouched)${r.reverse_swept.notes.length ? `; ${r.reverse_swept.notes.join("; ")}` : ""}.`);
   if (r.prepared_as) {
     out.push(`Prepared as ${r.prepared_as.state} (synthetic receipts on each copy's store journal, the run untouched): ${r.prepared_as.items.length ? r.prepared_as.items.map((x) => `${x.recipe} over ${x.source}${x.unavailable ? " (declared, cannot run: declined)" : ""}`).join("; ") : "no broad extraction applies to the run's evidence"}.`);
     for (const n of r.prepared_as.notes) out.push(`  ${n}`);
@@ -1203,6 +1357,8 @@ export function replayWords(r: Replay): string {
     out.push(`  seals: ${p.seals.verdicts ? `${p.seals.hold} of ${p.seals.verdicts} custody verdict(s) hold as a prefix${p.seals.broken.map((b) => `; ${b.verdict} does not: ${b.broken.join("; ")}`).join("")}` : "no custody verdict in the run"}`);
     out.push(`  agreement: ${p.agreement.length ? `readiness, the answers check and the gate disagree: ${p.agreement.map((g) => `${g.section} ${g.kind}`).join("; ")}` : "readiness, the answers check and the gate agree on every question"}${p.warnings_hold.length ? `; a warning holds: ${p.warnings_hold.join(", ")}` : ""}`);
     if (p.preparation) out.push(...preparationWords(p.preparation));
+    if (p.review_caps) out.push(...reviewCapWords(p.review_caps));
+    if (p.late_evidence) out.push(...lateEvidenceWords(p.late_evidence));
     if (p.deliveries) out.push(...deliveryWords(p.deliveries));
     for (const x of p.errors) out.push(`  not evaluated: ${x}`);
     if (p.text) {
@@ -1223,7 +1379,7 @@ export function replayWords(r: Replay): string {
 // The command
 // ---------------------------------------------------------------------------------------------
 
-const USAGE = "usage: replay.ts <run-dir | run-id> [--registry FILE] [--checkout PATH] [--compare [A [B]]] [--stop-policy P[,P…]] [--deliveries] [--prepare-as STATE] [--json] [--show-text]";
+const USAGE = "usage: replay.ts <run-dir | run-id> [--registry FILE] [--checkout PATH] [--compare [A [B]]] [--stop-policy P[,P…]] [--deliveries] [--prepare-as STATE] [--reverse-sweep] [--json] [--show-text]";
 
 /** The states --prepare-as takes: a receipt's. */
 const PREPARE_STATES = ["planned", "attempted", "produced", "partial", "failed", "declined"] as const;
@@ -1260,6 +1416,7 @@ async function main(argv: string[]): Promise<number> {
   let showText = false;
   let deliveries = false;
   let prepareAs: string | null = null;
+  let reverseSweep = false;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--registry") registry = argv[++i] ?? null;
@@ -1282,6 +1439,7 @@ async function main(argv: string[]): Promise<number> {
     } else if (a === "--json") json = true;
     else if (a === "--show-text") showText = true;
     else if (a === "--deliveries") deliveries = true;
+    else if (a === "--reverse-sweep") reverseSweep = true;
     else if (a === "--prepare-as") {
       prepareAs = argv[++i] ?? "";
       if (!(PREPARE_STATES as readonly string[]).includes(prepareAs)) {
@@ -1316,7 +1474,7 @@ async function main(argv: string[]): Promise<number> {
       return { label: p, harness: path, how: path === ROOT ? `this checkout (${path})` : `the checkout at ${path}`, commit: harnessCommit(path) };
     };
     const targets: Target[] = compare === null ? [await named(current)] : compare.length === 0 ? [await named("frozen"), await named(current)] : compare.length === 1 ? [await named(compare[0]), await named(current)] : [await named(compare[0]), await named(compare[1])];
-    const r = await replay({ run, targets, policies, showText, deliveries, prepareAs, scratch });
+    const r = await replay({ run, targets, policies, showText, deliveries, prepareAs, reverseSweep, scratch });
     process.stdout.write(json ? `${JSON.stringify(r, null, 2)}\n` : `${replayWords(r)}\n`);
     return r.unchanged && r.evaluations.every((e) => e.projection) ? 0 : 1;
   } catch (e) {

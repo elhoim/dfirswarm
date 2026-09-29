@@ -45,7 +45,7 @@ import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import * as NB from "./negative-bar.ts";
 import * as PR from "./preparation.ts";
-import { unexaminedHits, type SweepRecord, type UnexaminedHit } from "./store-sweep.ts";
+import { importHitExamined, importHitsFor, importHitWords, unexaminedHits, type ImportSweepRecord, type SweepRecord, type UnexaminedHit } from "./store-sweep.ts";
 
 /**
  * Claims are short leases, renewed by re-claiming: make the edit, release,
@@ -7804,7 +7804,19 @@ export const LEDGER_CONFIDENCE = ["high", "medium", "low"] as const;
  */
 export const LEDGER_HYPOTHESIS_STATUS = ["open", "supported", "refuted"] as const;
 export const LEDGER_LIMITATION_REASONS = ["not_examined", "unavailable", "failed", "partial", "excluded"] as const;
-export const LEDGER_REL_KINDS = ["supports", "contradicts", "duplicates", "derived_from"] as const;
+export const LEDGER_REL_KINDS = ["supports", "contradicts", "duplicates", "derived_from", "adds_part", "irrelevant", "inconclusive"] as const;
+/**
+ * A delta: how an entry that interprets evidence added late bears on a
+ * question's earlier conclusion (docs/adr/0013, "Late evidence: the reverse
+ * sweep and the delta"): it supports it, contradicts it, adds a part it
+ * left open, is irrelevant to it within its scope, or is inconclusive.
+ * Recorded as a rel to the question's answer; adds_part, irrelevant and
+ * inconclusive exist only as deltas (their `to` is an answer). An entry
+ * with none hashes as it did.
+ */
+export const DELTA_REL_KINDS: ReadonlySet<string> = new Set(["supports", "contradicts", "adds_part", "irrelevant", "inconclusive"]);
+/** The rel kinds that weigh evidence only against an answer: `to` names one. */
+export const ANSWER_ONLY_REL_KINDS: ReadonlySet<string> = new Set(["adds_part", "irrelevant", "inconclusive"]);
 export const LEDGER_BASIS = ["observed", "inferred"] as const;
 export const LEDGER_PRECISION = ["date", "minute", "second", "subsecond", "unknown"] as const;
 export const LEDGER_COMPLETION = ["complete", "partial", "failed"] as const;
@@ -7912,7 +7924,7 @@ export type LedgerEntry = {
   refs?: string[];
   /** The goal sections the entry answers ("3", "Q3", "allegation-2"). */
   answers?: string[];
-  /** Links to other entries: supports, contradicts, duplicates, derived_from. */
+  /** Links to other entries: supports, contradicts, duplicates, derived_from; and, to a question's answer, a late import's delta: adds_part, irrelevant, inconclusive (DELTA_REL_KINDS). */
   rel?: LedgerRel[];
   /** The entry, or what it cites, holds a credential, a key or personal data a package must not carry out. */
   sensitive?: boolean;
@@ -8933,6 +8945,7 @@ export async function recordEntry(ctx: SwarmContext, input: LedgerInput): Promis
       if (!target) return { ok: false, reason: `rel names #${r.to}: there is no entry #${r.to} in the ledger (list them with ledger)` };
       const standing = replaced.get(r.to);
       if (r.kind === "duplicates" && standing !== undefined) return { ok: false, reason: `#${r.to} is superseded by #${standing}: a duplicate names the entry that stands, #${standing}` };
+      if (ANSWER_ONLY_REL_KINDS.has(r.kind) && !(target.kind === "answer" && target.section?.startsWith("question:"))) return { ok: false, reason: `rel ${r.kind} weighs evidence added late against a question's conclusion: its to names that question's answer (E-<seq> of an answer, section question:<n>); #${r.to} is ${target.kind === "answer" ? `the ${target.section}` : `a ${target.kind}`}. Link another entry with supports, contradicts, duplicates or derived_from` };
     }
     const candidate: LedgerEntry = {
       v: LEDGER_VERSION,
@@ -9185,6 +9198,25 @@ export type AttestStrength = (typeof ATTEST_STRENGTHS)[number];
 export type AnswerReviewAlternative = { explanation: string; why: string; evidence?: string[] };
 /** A part the review weighed: whether it is established, why, and for a partial answer the entry by which the answer declares it open. */
 export type AnswerReviewPart = { part: string; established: boolean; why: string; declared_open?: string };
+/**
+ * The strongest rival and the test that separates it from the answer
+ * (source-first review, docs/adr/0015): the rival (another time, entity,
+ * mechanism or activity the evidence could mean, or the premise not
+ * holding), the test, the result that would favour each, what it showed,
+ * and the observation or job it rests on (E-<seq>, or an object ref). The
+ * hub checks the refs, never whether the test is good.
+ */
+export type AnswerReviewDiscriminator = { rival: string; test: string; favours_if: string; outcome: string; refs: string[] };
+/**
+ * Where the reviewer read a literal value it vouches for: a sealed object,
+ * the byte offset where the value begins, and the value (or how many bytes
+ * hold it, read back from the object and found in the answer's words). The
+ * hub reads those bytes, in UTF-8 and in UTF-16LE: presence, never
+ * attribution.
+ */
+export type AnswerReviewLocator = { ref: string; offset: number; length?: number; value?: string };
+/** How a derived value was derived: the job that derived it, and the objects it read. */
+export type AnswerReviewDerivation = { job: string; inputs: string[] };
 export type AnswerReview = {
   reproduced: string;
   read: string;
@@ -9192,9 +9224,20 @@ export type AnswerReview = {
   inference: string;
   alternatives: string | AnswerReviewAlternative[];
   other_family: { checked: boolean; text: string };
+  /** Present only when given (a review from before them hashes as it did). */
+  discriminator?: AnswerReviewDiscriminator;
+  reproduced_at?: AnswerReviewLocator[];
+  derivation?: AnswerReviewDerivation;
 };
 export const ANSWER_REVIEW_MAX_PARTS = 20;
 export const ANSWER_REVIEW_MAX_ALTERNATIVES = 10;
+/** A review's locators: at most this many; a value at most this many bytes in either encoding; a length at most this many bytes. */
+export const ANSWER_REVIEW_MAX_LOCATORS = 10;
+export const LOCATOR_MAX_BYTES = 4096;
+/** The fewest characters a value read back by length may be: a shorter one is in every answer. */
+export const LOCATOR_MIN_CHARS = 3;
+/** How far either side of a locator's offset the hub looks for its value when it is not there (to say where it is): a bounded read, never a scan. */
+export const LOCATOR_NEAR_BYTES = 256;
 
 /** Words that say nothing was weighed: an alternative written so is none. */
 const PLACEHOLDER_WORDS: ReadonlySet<string> = new Set(["none", "na", "n a", "no alternative", "no alternatives", "nothing", "not applicable", "no other", "nothing else", "unknown", "tbd", "null", "nil", "no", "same", "see above", "none found", "no other explanation"]);
@@ -9290,13 +9333,262 @@ export function checkAnswerReview(raw: unknown): { ok: true; review: AnswerRevie
   if (!f || typeof f.checked !== "boolean") return { ok: false, reason: "answer_review.other_family is {checked: true|false, text}: whether a materially different source family was checked, and which, or why not" };
   const ft = text("other_family.text", f.text);
   if (!ft.ok) return ft;
-  return { ok: true, review: { reproduced: reproduced.value, read: read.value, parts, inference: inference.value, alternatives, other_family: { checked: f.checked, text: ft.value } } };
+  const extra = checkReviewEvidence(r);
+  if (!extra.ok) return extra;
+  return { ok: true, review: { reproduced: reproduced.value, read: read.value, parts, inference: inference.value, alternatives, other_family: { checked: f.checked, text: ft.value }, ...extra.fields } };
+}
+
+/** A ref an answer review names as its observation: an entry (E-<seq>, #<seq>), or an object, as given. */
+function reviewRef(v: unknown): string {
+  const s = String(v ?? "").trim();
+  return /^#\d+$/.test(s) ? `E-${s.slice(1)}` : /^e-\d+$/i.test(s) ? s.toUpperCase() : s;
+}
+
+/**
+ * The review's discriminator, locators and derivation as given, each only
+ * when present, each bounded (refused past it, never cut): the shape only.
+ * Whether a discriminator counts, a locator verifies and a derivation
+ * resolves is the attest's (reviewEvidenceCaps).
+ */
+function checkReviewEvidence(r: Record<string, unknown>): { ok: true; fields: Pick<AnswerReview, "discriminator" | "reproduced_at" | "derivation"> } | { ok: false; reason: string } {
+  const fields: Pick<AnswerReview, "discriminator" | "reproduced_at" | "derivation"> = {};
+  const given = (v: unknown) => v !== undefined && v !== null && !(typeof v === "string" && !v.trim());
+  if (given(r.discriminator)) {
+    const shape = "answer_review.discriminator is {rival, test, favours_if, outcome, refs}: the strongest rival reading, the test that separates it from the answer, the result that would favour each, what the test showed, and the observation or job it rests on (E-<seq>, job:<id>/<path>)";
+    const d = (typeof r.discriminator === "object" ? r.discriminator : null) as Record<string, unknown> | null;
+    if (!d || Array.isArray(d)) return { ok: false, reason: shape };
+    const out: Record<string, string> = {};
+    for (const k of ["rival", "test", "favours_if", "outcome"] as const) {
+      const t = String(d[k] ?? "").trim();
+      if (!t) return { ok: false, reason: `answer_review.discriminator.${k} is required (${shape})` };
+      if (t.length > LEDGER_ACT_MAX_CHARS) return { ok: false, reason: `answer_review.discriminator.${k} is over ${LEDGER_ACT_MAX_CHARS} characters: say it in fewer; nothing is cut, so a longer text is refused` };
+      out[k] = t;
+    }
+    const refs = (Array.isArray(d.refs) ? d.refs : given(d.refs) ? String(d.refs).split(/[\s,]+/) : []).map(reviewRef).filter(Boolean);
+    if (!refs.length) return { ok: false, reason: `answer_review.discriminator.refs names the observation or the job the outcome rests on, at least one: E-<seq> of an entry, or an object (job:<id>/<path>, input:<path>, import:<id>/<path>) (${shape})` };
+    if (refs.length > LEDGER_MAX_REFS) return { ok: false, reason: `answer_review.discriminator.refs names more than ${LEDGER_MAX_REFS}` };
+    const long = refs.find((x) => x.length > LEDGER_REF_MAX_CHARS);
+    if (long) return { ok: false, reason: `answer_review.discriminator.refs names one of ${long.length} characters, over ${LEDGER_REF_MAX_CHARS}: name the entry or the object` };
+    const badE = refs.find((x) => /^E-/i.test(x) && !/^E-[1-9]\d{0,6}$/.test(x));
+    if (badE) return { ok: false, reason: `answer_review.discriminator.refs names an entry as E-<seq> (got ${JSON.stringify(badE)})` };
+    fields.discriminator = { rival: out.rival!, test: out.test!, favours_if: out.favours_if!, outcome: out.outcome!, refs: [...new Set(refs)] };
+  }
+  if (given(r.reproduced_at)) {
+    const shape = "answer_review.reproduced_at is [{ref, offset, value}] (or {ref, offset, length}): the sealed object, the byte offset where the value begins, and the value you read there";
+    if (!Array.isArray(r.reproduced_at)) return { ok: false, reason: shape };
+    if (!r.reproduced_at.length) return { ok: false, reason: `${shape}; at least one, or leave it out` };
+    if (r.reproduced_at.length > ANSWER_REVIEW_MAX_LOCATORS) return { ok: false, reason: `answer_review.reproduced_at names at most ${ANSWER_REVIEW_MAX_LOCATORS} locators: keep the ones for the values you vouch for` };
+    const list: AnswerReviewLocator[] = [];
+    for (const [i, x] of r.reproduced_at.entries()) {
+      const o = (x && typeof x === "object" ? x : {}) as Record<string, unknown>;
+      const at = `answer_review.reproduced_at[${i}]`;
+      const ref = String(o.ref ?? "").trim();
+      if (!ref) return { ok: false, reason: `${at}.ref names the sealed object you read the value in (job:<id>/<path>, import:<id>/<path>, input:<path>) (${shape})` };
+      if (ref.length > LEDGER_REF_MAX_CHARS) return { ok: false, reason: `${at}.ref is over ${LEDGER_REF_MAX_CHARS} characters` };
+      const offset = typeof o.offset === "string" && /^\d+$/.test(o.offset.trim()) ? Number(o.offset) : o.offset;
+      if (typeof offset !== "number" || !Number.isSafeInteger(offset) || offset < 0) return { ok: false, reason: `${at}.offset is the byte offset in ${ref} where the value begins, a whole number from 0 (got ${JSON.stringify(o.offset)}): a job over the object gives it (grep -boa, a hex dump)` };
+      const length = o.length === undefined || o.length === null || o.length === "" ? undefined : typeof o.length === "string" && /^\d+$/.test(o.length.trim()) ? Number(o.length) : o.length;
+      if (length !== undefined && (typeof length !== "number" || !Number.isSafeInteger(length) || length < 1 || length > LOCATOR_MAX_BYTES)) return { ok: false, reason: `${at}.length is how many bytes hold the value, 1 to ${LOCATOR_MAX_BYTES} (got ${JSON.stringify(o.length)})` };
+      const value = o.value === undefined || o.value === null ? undefined : String(o.value);
+      if (value !== undefined && !value.trim()) return { ok: false, reason: `${at}.value is the value you read at the offset, as it is in the object; leave it out and give length to have it read back` };
+      if (value !== undefined && Buffer.byteLength(value, "utf16le") > 2 * LOCATOR_MAX_BYTES) return { ok: false, reason: `${at}.value is over ${LOCATOR_MAX_BYTES} bytes: a locator names a value, not a passage` };
+      if (value === undefined && length === undefined) return { ok: false, reason: `${at} names the value it vouches for (value, as it is in the object) or how many bytes hold it (length, read back and found in the answer's words) (${shape})` };
+      list.push({ ref, offset, ...(length !== undefined ? { length: length as number } : {}), ...(value !== undefined ? { value } : {}) });
+    }
+    fields.reproduced_at = list;
+  }
+  if (given(r.derivation)) {
+    const shape = "answer_review.derivation is {job, inputs}: the job that derived the value (j<id> or job:<id>) and the objects it read (input:<path>, job:<id>/<path>, import:<id>/<path>)";
+    const d = (typeof r.derivation === "object" && !Array.isArray(r.derivation) ? r.derivation : null) as Record<string, unknown> | null;
+    if (!d) return { ok: false, reason: shape };
+    const job = /^(?:job:)?(j\d{6,})(?:\/.*)?$/.exec(String(d.job ?? "").trim())?.[1];
+    if (!job) return { ok: false, reason: `answer_review.derivation.job names a job, j<id> or job:<id> (got ${JSON.stringify(d.job)}) (${shape})` };
+    const inputs = (Array.isArray(d.inputs) ? d.inputs : given(d.inputs) ? String(d.inputs).split(/[\s,]+/) : []).map((x) => String(x).trim()).filter(Boolean);
+    if (!inputs.length) return { ok: false, reason: `answer_review.derivation.inputs names the objects the job read, at least one (${shape})` };
+    if (inputs.length > LEDGER_MAX_REFS) return { ok: false, reason: `answer_review.derivation.inputs names more than ${LEDGER_MAX_REFS}` };
+    const long = inputs.find((x) => x.length > LEDGER_REF_MAX_CHARS);
+    if (long) return { ok: false, reason: `answer_review.derivation.inputs names one of ${long.length} characters, over ${LEDGER_REF_MAX_CHARS}: name the object` };
+    fields.derivation = { job, inputs: [...new Set(inputs)] };
+  }
+  return { ok: true, fields };
+}
+
+/** Whether a discriminator counts: each of its words a real one (not a placeholder), the rival not the test's words again, and at least one ref. */
+export function discriminatorCounts(d: AnswerReviewDiscriminator | undefined | null): boolean {
+  if (!d) return false;
+  const norm = (x: string) => x.normalize("NFKC").toLowerCase().replace(/\s+/g, " ").trim();
+  return d.refs.length > 0 && ![d.rival, d.test, d.favours_if, d.outcome].some((t) => placeholderText(t)) && norm(d.rival) !== norm(d.test);
+}
+
+/** A locator's verdict: its value is at its offset in the sealed object (in which encoding), or why not. */
+export type LocatorVerdict = { ok: true; ref: string; offset: number; encoding: "utf-8" | "utf-16le" } | { ok: false; ref: string; offset: number; why: string };
+
+/** ASCII letters folded to lower case, in a copy (as the store sweep folds them). */
+function foldAscii(b: Buffer): Buffer {
+  const out = Buffer.from(b);
+  for (let i = 0; i < out.length; i++) if (out[i]! >= 0x41 && out[i]! <= 0x5a) out[i] = out[i]! + 0x20;
+  return out;
+}
+
+/** A value's byte forms, folded: as given, lower- and upper-cased, in UTF-8 and UTF-16LE. */
+function valueForms(v: string): Array<{ enc: "utf-8" | "utf-16le"; bytes: Buffer }> {
+  const out: Array<{ enc: "utf-8" | "utf-16le"; bytes: Buffer }> = [];
+  for (const s of new Set([v, v.toLowerCase(), v.toUpperCase()])) {
+    for (const enc of ["utf-8", "utf-16le"] as const) {
+      const bytes = foldAscii(Buffer.from(s, enc === "utf-8" ? "utf8" : "utf16le"));
+      if (!out.some((x) => x.enc === enc && x.bytes.equals(bytes))) out.push({ enc, bytes });
+    }
+  }
+  return out;
+}
+
+/** Text as an answer's words are compared: NFKC, lower case, runs of space as one. */
+function looseText(s: string): string {
+  return s.normalize("NFKC").toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+/**
+ * A locator held to the sealed bytes: its ref resolves to a sealed object
+ * of this run (an input, a job's output or log, an import, a capture, a
+ * sealed brain output), and its value is at its offset there, in UTF-8 or
+ * UTF-16LE, ASCII letters in either case. With a length and no value, the
+ * bytes there are read back and must be words of the answer (`answerText`).
+ * Bounded reads at the offset (and LOCATOR_NEAR_BYTES either side, to say
+ * where the value is when it is not at the offset): never a scan, never the
+ * object's whole hash (resolving it against its manifest is the seal).
+ */
+export async function checkLocator(sandboxRoot: string, loc: AnswerReviewLocator, answerText: string): Promise<LocatorVerdict> {
+  const no = (why: string): LocatorVerdict => ({ ok: false, ref: loc.ref, offset: loc.offset, why });
+  const { resolveRef } = await import("../scripts/evidence-store.ts");
+  const r = await resolveRef(sandboxRoot, loc.ref).catch((err: Error) => ({ ok: false as const, ref: loc.ref, reason: err.message }));
+  if (!r.ok) return no(`${loc.ref} does not resolve to a sealed object of this run: ${r.reason}`);
+  if (r.kind === "unresolved" || r.kind === "member" || !r.path) return no(`${loc.ref} is not an object's bytes (${r.kind === "member" ? "a catalogue member is a row of a list: name the file it is in" : r.kind}): a locator names a sealed file`);
+  const abs = join(sandboxRoot, r.path);
+  const st = await stat(abs).catch(() => null);
+  if (!st?.isFile()) return no(`${loc.ref} ${st ? "is a directory: a locator names one file in it" : `cannot be read here (${r.path})`}`);
+  const forms = loc.value !== undefined ? valueForms(loc.value) : [];
+  const need = loc.value !== undefined ? Math.max(...forms.map((f) => f.bytes.length)) : (loc.length as number);
+  if (loc.offset >= st.size) return no(`offset ${loc.offset} is past the end of ${loc.ref} (${st.size} bytes)`);
+  const from = Math.max(0, loc.offset - LOCATOR_NEAR_BYTES);
+  const to = Math.min(st.size, loc.offset + need + LOCATOR_NEAR_BYTES);
+  const fh = await open(abs, "r");
+  let window: Buffer;
+  try {
+    window = Buffer.alloc(to - from);
+    const { bytesRead } = await fh.read(window, 0, to - from, from);
+    window = foldAscii(window.subarray(0, bytesRead));
+  } finally {
+    await fh.close();
+  }
+  const at = loc.offset - from;
+  if (loc.value !== undefined) {
+    for (const f of forms) {
+      if (window.subarray(at, at + f.bytes.length).equals(f.bytes)) {
+        if (loc.length !== undefined && loc.length !== f.bytes.length) return no(`the value is at offset ${loc.offset} in ${f.enc}, in ${f.bytes.length} bytes, not the length ${loc.length} given: leave length out, or give ${f.bytes.length}`);
+        return { ok: true, ref: loc.ref, offset: loc.offset, encoding: f.enc };
+      }
+    }
+    // Where it is nearby, when it is: the fix is then one number.
+    let near: { offset: number; enc: string } | null = null;
+    for (const f of forms) {
+      for (let i = window.indexOf(f.bytes); i >= 0; i = window.indexOf(f.bytes, i + 1)) {
+        const o = from + i;
+        if (!near || Math.abs(o - loc.offset) < Math.abs(near.offset - loc.offset)) near = { offset: o, enc: f.enc };
+      }
+    }
+    return no(`the value is not at offset ${loc.offset} of ${loc.ref} in UTF-8 or UTF-16LE${near ? `: it begins at offset ${near.offset} (${near.enc}), ${Math.abs(near.offset - loc.offset)} bytes ${near.offset < loc.offset ? "before" : "after"}` : `, nor within ${LOCATOR_NEAR_BYTES} bytes of it`}`);
+  }
+  // A length and no value: the bytes read back, and found in the answer's words.
+  const raw = window.subarray(at, at + need);
+  if (raw.length < need) return no(`${loc.ref} holds ${raw.length} bytes from offset ${loc.offset}, fewer than the length ${need} given`);
+  const answer = looseText(answerText);
+  const readings: Array<{ enc: "utf-8" | "utf-16le"; text: string }> = [];
+  // A reading is text: no control character but tab and line ends, no replacement character (UTF-16LE's zero bytes are not UTF-8 text).
+  const control = /[\u0000-\u0008\u000e-\u001f]/;
+  const unreadable = (t: string) => control.test(t) || t.includes(String.fromCodePoint(0xfffd));
+  try {
+    const t = new TextDecoder("utf-8", { fatal: true }).decode(raw);
+    if (!unreadable(t)) readings.push({ enc: "utf-8", text: t });
+  } catch {
+    // not UTF-8
+  }
+  if (need % 2 === 0) {
+    const t = raw.toString("utf16le");
+    if (Buffer.from(t, "utf16le").equals(raw) && !unreadable(t)) readings.push({ enc: "utf-16le", text: t });
+  }
+  for (const x of readings) {
+    const t = looseText(x.text);
+    if (t.length >= LOCATOR_MIN_CHARS && answer.includes(t)) return { ok: true, ref: loc.ref, offset: loc.offset, encoding: x.enc };
+  }
+  return no(`the ${need} bytes at offset ${loc.offset} of ${loc.ref} ${readings.length ? `read as ${readings.map((x) => x.enc).join(" or ")} text the answer does not state` : "are not UTF-8 or UTF-16LE text"}: give value, the value as it is in the object`);
+}
+
+/** A derivation held to the run: its job is sealed and ran to its end, each input resolves, and each is among what the job declared it would read. */
+export async function checkDerivation(sandboxRoot: string, d: AnswerReviewDerivation): Promise<{ ok: true } | { ok: false; why: string }> {
+  const { resolveRef } = await import("../scripts/evidence-store.ts");
+  const j = await resolveRef(sandboxRoot, `job:${d.job}`).catch((err: Error) => ({ ok: false as const, ref: `job:${d.job}`, reason: err.message }));
+  if (!j.ok) return { ok: false, why: `job ${d.job} is not a sealed job of this run: ${j.reason}` };
+  if (j.status && j.status !== "ok") return { ok: false, why: `job ${d.job} ended ${j.status}: a derivation is a job that ran to its end` };
+  const declared = await NB.jobDeclared(sandboxRoot, d.job).catch(() => null);
+  const scope = declared?.scope === "declared" && declared.inputs.length ? await Promise.all(declared.inputs.map((x) => NB.objectOf(sandboxRoot, x).catch(() => null))) : null;
+  for (const input of d.inputs) {
+    const r = await resolveRef(sandboxRoot, input).catch((err: Error) => ({ ok: false as const, ref: input, reason: err.message }));
+    if (!r.ok) return { ok: false, why: `derivation input ${input} does not resolve: ${r.reason}` };
+    if (!scope) continue;
+    const o = await NB.objectOf(sandboxRoot, input).catch(() => null);
+    const inside = o && !("reason" in o) && scope.some((s) => s && !("reason" in s) && NB.contains(s, o));
+    if (!inside) return { ok: false, why: `job ${d.job} did not declare ${input} among what it reads (it declared ${declared!.inputs.join(", ")}): name the objects the job read` };
+  }
+  return { ok: true };
+}
+
+/** Why an established attest is recorded a best candidate for want of source-first evidence: a code, and the words `capped` keeps. */
+export type ReviewEvidenceCap = { code: "no_discriminator" | "locator_unverified" | "no_locator_or_derivation" | "derivation_unverified"; why: string };
+
+/** How each cap is fixed, in the words the attest's reply gives. */
+export const REVIEW_CAP_FIX: Readonly<Record<ReviewEvidenceCap["code"], string>> = {
+  no_discriminator: "name the strongest rival and the test that separates it from the answer: answer_review.discriminator {rival (another reading the evidence allows: another time, entity, mechanism or activity, or the premise not holding), test (what you checked), favours_if (the result that would favour the answer, and the one that would favour the rival), outcome (what the check showed), refs (the E-<seq> of the observation, or the job:<id>/<path> it rests on)}",
+  locator_unverified: "give each locator's byte offset where the value begins in the sealed object and the value as it is there (a job over the object gives the offset: grep -boa, a hex dump; UTF-16LE text counts), or drop the locator; a value you derived (a converted time, a decoded field) takes derivation {job, inputs} instead",
+  no_locator_or_derivation: "say where you read the values you vouch for: answer_review.reproduced_at [{ref, offset, value}] (the sealed object, the byte offset where the value begins, the value as it is there, in UTF-8 or UTF-16LE); or, for a derived value, answer_review.derivation {job (the job that derived it), inputs (the objects it read)}",
+  derivation_unverified: "name a sealed job that ran to its end and the objects it declared it would read: answer_review.derivation {job: j<id>, inputs: [input:<path>, job:<id>/<path>, …]}",
+};
+
+/**
+ * The source-first evidence an established review must carry (docs/adr/0015,
+ * "A source-first review"), on an answer that claims established to a
+ * material question: a discriminator that counts; every locator verifying
+ * against the sealed bytes; and at least one of a verified locator or a
+ * derivation that resolves. Each missing or failing one is a cap: the
+ * attest is recorded best_candidate with the reason in `capped`, and the
+ * reply says how to fix it. Nothing else is judged: byte presence proves
+ * presence, not attribution. `locators` is every locator's verdict, for the
+ * reply of any review that gave them (a partial answer's too, which none of
+ * this caps).
+ */
+export async function reviewEvidenceCaps(sandboxRoot: string, answer: LedgerEntry, review: AnswerReview | null, o: { material: boolean }): Promise<{ caps: ReviewEvidenceCap[]; locators: LocatorVerdict[]; derivation: { ok: true } | { ok: false; why: string } | null }> {
+  const text = `${answer.value ?? ""}\n${answer.reasoning ?? ""}`;
+  const locators: LocatorVerdict[] = [];
+  for (const l of review?.reproduced_at ?? []) locators.push(await checkLocator(sandboxRoot, l, text).catch((err: Error) => ({ ok: false as const, ref: l.ref, offset: l.offset, why: `it could not be read (${err.message})` })));
+  const derivation = review?.derivation ? await checkDerivation(sandboxRoot, review.derivation).catch((err: Error) => ({ ok: false as const, why: `it could not be checked (${err.message})` })) : null;
+  const caps: ReviewEvidenceCap[] = [];
+  if (!claimsEstablished(answer) || !o.material || !review) return { caps, locators, derivation };
+  if (!review.discriminator) caps.push({ code: "no_discriminator", why: "the review names no discriminator: the strongest rival and a test that separates it from the answer (answer_review.discriminator {rival, test, favours_if, outcome, refs})" });
+  else if (!discriminatorCounts(review.discriminator)) caps.push({ code: "no_discriminator", why: "the review's discriminator says nothing a reader can weigh (a placeholder, or the rival in the test's words): a real rival and the test that separates it" });
+  for (const [i, v] of locators.entries()) if (!v.ok) caps.push({ code: "locator_unverified", why: `reproduced_at[${i}] (${v.ref} at ${v.offset}) does not verify: ${v.why}` });
+  if (derivation && !derivation.ok) caps.push({ code: "derivation_unverified", why: `the derivation does not resolve: ${derivation.why}` });
+  // Neither given: said once. One given and failing is capped by its own code above.
+  if (!review.reproduced_at?.length && !review.derivation) caps.push({ code: "no_locator_or_derivation", why: "the review vouches for no value by bytes or by derivation: no locator (answer_review.reproduced_at) and no derivation (answer_review.derivation)" });
+  return { caps, locators, derivation };
 }
 
 /** An answer review in words, for the ledger's rendering and the report. */
 export function answerReviewWords(r: AnswerReview): string {
   const alternatives = Array.isArray(r.alternatives) ? `alternatives weighed: ${r.alternatives.map((a) => `${a.explanation} (ruled out: ${a.why}${a.evidence?.length ? `; ${a.evidence.join(", ")}` : "; no entry named"})`).join("; ")}` : `alternatives still open: ${r.alternatives}`;
-  return `reproduced: ${r.reproduced}; only read: ${r.read}; parts: ${r.parts.map((p) => `${p.part} ${p.established ? "established" : p.declared_open ? `open, as the answer declares it (${p.declared_open})` : "NOT established"} (${p.why})`).join("; ")}; inference: ${r.inference}; ${alternatives}; another source family ${r.other_family.checked ? "checked" : "not checked"}: ${r.other_family.text}`;
+  const d = r.discriminator;
+  const discriminator = d ? `; the strongest rival: ${d.rival}; the test: ${d.test}; it would favour: ${d.favours_if}; it showed: ${d.outcome} (${d.refs.join(", ")})` : "";
+  const located = r.reproduced_at?.length ? `; read at: ${r.reproduced_at.map((l) => `${l.ref} byte ${l.offset}${l.value !== undefined ? ` ("${l.value}")` : ` (${l.length} bytes)`}`).join("; ")}` : "";
+  const derived = r.derivation ? `; derived by job ${r.derivation.job} from ${r.derivation.inputs.join(", ")}` : "";
+  return `reproduced: ${r.reproduced}; only read: ${r.read}; parts: ${r.parts.map((p) => `${p.part} ${p.established ? "established" : p.declared_open ? `open, as the answer declares it (${p.declared_open})` : "NOT established"} (${p.why})`).join("; ")}; inference: ${r.inference}; ${alternatives}; another source family ${r.other_family.checked ? "checked" : "not checked"}: ${r.other_family.text}${discriminator}${located}${derived}`;
 }
 
 /** Whether an attestation holds its answer established: a best candidate does not; a line from before strengths reads as it always did. */
@@ -10154,7 +10446,16 @@ export async function attestEntry(ctx: SwarmContext, input: LedgerActInput): Pro
   // answer's words beyond the refs and lead ids its would_change names.
   const pre = await readLedger(ctx.sandboxRoot);
   const preTarget = actTarget(pre, input.seq, ctx.agentId, "attest");
-  const caps = preTarget.ok && preTarget.entry.kind === "answer" && preTarget.entry.section?.startsWith("question:") && !isNegativeEntry(preTarget.entry) ? await strengthCaps(ctx.sandboxRoot, preTarget.entry, answerReview, pre) : [];
+  const preAnswer = preTarget.ok && preTarget.entry.kind === "answer" && preTarget.entry.section?.startsWith("question:") && !isNegativeEntry(preTarget.entry) ? preTarget.entry : null;
+  const caps = preAnswer ? await strengthCaps(ctx.sandboxRoot, preAnswer, answerReview, pre) : [];
+  // The objects a discriminator rests on resolve (its entries are checked under the lock, with the alternatives').
+  const discObjects = (answerReview?.discriminator?.refs ?? []).filter((r) => !/^E-\d+$/.test(r));
+  if (discObjects.length) {
+    const checked = await checkRefs(ctx.sandboxRoot, discObjects);
+    if (!checked.ok) return { ok: false, reason: `answer_review.discriminator.refs: ${checked.reason}` };
+  }
+  // The source-first evidence of an established review (docs/adr/0015): read before the lock, bounded reads at the locators' offsets.
+  const evidence = preAnswer && answerReview && (strength === "established" || answerReview.reproduced_at?.length || answerReview.derivation) ? await reviewEvidenceCaps(ctx.sandboxRoot, preAnswer, answerReview, { material: (await questionBar(ctx.sandboxRoot, sectionAnswersId(preAnswer.section!)).catch(() => null))?.material ?? true }) : null;
   // The negatives a review recorded here answers (the answer itself, or those resting on the coverage record): their offers are taken up after the lock.
   const reviewed: string[] = [];
   const result = await withTableLock(ctx.sandboxRoot, async (held): Promise<AttestResult> => {
@@ -10178,11 +10479,18 @@ export async function attestEntry(ctx: SwarmContext, input: LedgerActInput): Pro
         if (missing) return { ok: false, reason: `answer_review.alternatives[].evidence names ${missing}: there is no entry #${missing.slice(2)} in the ledger` };
       }
     }
+    if (answerReview?.discriminator) {
+      const seqs = new Set(entries.map((e) => e.seq));
+      const missing = answerReview.discriminator.refs.find((r) => /^E-\d+$/.test(r) && !seqs.has(Number(r.slice(2))));
+      if (missing) return { ok: false, reason: `answer_review.discriminator.refs names ${missing}: there is no entry #${missing.slice(2)} in the ledger` };
+    }
     // An established review names the alternatives it weighed and why the
     // evidence rules each out; one that names none is recorded a best
     // candidate, and the reply says so (nothing is refused).
     let recorded = strength;
     const downgraded: string[] = [];
+    // Each source-first cap with how to fix it, for the reply.
+    const downgradeFixes: string[] = [];
     // "A best candidate" concerns only an answer that claims established
     // (claimsEstablished); on a disposition that only limits the run it
     // holds nothing, and the replies say so.
@@ -10214,6 +10522,19 @@ export async function attestEntry(ctx: SwarmContext, input: LedgerActInput): Pro
       if (strength === "established" && !reviewNamesAlternative(answerReview)) {
         recorded = "best_candidate";
         downgraded.push(NO_ALTERNATIVE_CAP);
+      }
+      // Source-first (docs/adr/0015): an established review of an answer
+      // that claims established, on a material question, names the
+      // strongest rival and the test that separates it, and says where it
+      // read the values it vouches for (a locator the hub verifies against
+      // the sealed bytes) or how they were derived. What it lacks is
+      // recorded, the attest is a best candidate, and the reply says how.
+      if (strength === "established" && evidence?.caps.length) {
+        recorded = "best_candidate";
+        for (const c of evidence.caps) {
+          downgraded.push(c.why);
+          downgradeFixes.push(`${c.why}: ${REVIEW_CAP_FIX[c.code]}`);
+        }
       }
     } else if (answerReview) {
       return { ok: false, reason: `answer_review is for an answer to a question; #${t.entry.seq} is ${isNegativeEntry(t.entry) ? "a negative: its attest is a review {detection, reproduced, other_route}" : t.entry.kind === "answer" ? `the ${t.entry.section} (say in how what you re-derived)` : `a ${t.entry.kind}: say in how what you re-derived`}` };
@@ -10270,17 +10591,22 @@ export async function attestEntry(ctx: SwarmContext, input: LedgerActInput): Pro
     await held.assertOwned();
     const line = await appendAttestation(ctx.sandboxRoot, attested, { v: 2, act: "attest", seq: t.entry.seq, target, by: ctx.agentId, at: new Date().toISOString(), how: how.value, ...(refs.length ? { refs } : {}), ...(review ? { review } : {}), ...(recorded ? { strength: recorded } : {}), ...(answerReview ? { answer_review: answerReview } : {}), ...(questionAnswer && (caps.length || downgraded.length) ? { capped: [...caps, ...downgraded] } : {}), ...(secondWhy.value ? { second_review_why: secondWhy.value } : {}) });
     await renderLedger(ctx.sandboxRoot);
+    const noAlternative = downgraded.includes(NO_ALTERNATIVE_CAP);
+    // A partial answer's locators are checked too, and what does not verify is said (partial is a disposition: nothing is capped on it).
+    const unverified = !downgradeFixes.length ? (evidence?.locators ?? []).filter((v): v is Extract<LocatorVerdict, { ok: false }> => !v.ok) : [];
+    const locatorNote = unverified.length || (evidence?.derivation && !evidence.derivation.ok && !downgradeFixes.length) ? ` Not verified (said: it caps only an established review of an answer that claims established): ${[...unverified.map((v) => `${v.ref} at ${v.offset}: ${v.why}`), ...(evidence?.derivation && !evidence.derivation.ok ? [`the derivation: ${evidence.derivation.why}`] : [])].join("; ")}.` : "";
     const note = review
       ? `recorded as the review of a negative: ${NB.reviewWords(review)}`
       : downgraded.length
-        ? `you attested it established, and it is recorded as a best candidate: ${downgraded.join("; ")}. An established review names at least one alternative explanation you considered and why the evidence rules it out; attest again with answer_review.alternatives [{explanation, why}] once you have weighed one. ${claim ? `Until then ${t.entry.section} is not established by it, and the finish line says so` : holdsNothing}`
+        ? `you attested it established, and it is recorded as a best candidate: ${downgraded.join("; ")}. ${[...(noAlternative ? ["An established review names at least one alternative explanation you considered and why the evidence rules it out; attest again with answer_review.alternatives [{explanation, why}] once you have weighed one"] : []), ...(downgradeFixes.length ? [`A source-first review ${noAlternative ? "also " : ""}says what separates the answer from its strongest rival and where each value it vouches for is: ${downgradeFixes.join("; ")}. Attest again with them: your later attest is then your review`] : [])].join(". ")}. ${claim ? `Until then ${t.entry.section} is not established by it, and the finish line says so` : holdsNothing}`
         : recorded === "best_candidate"
           ? claim
             ? `recorded as a best candidate${caps.length ? ` (${caps.join("; ")})` : ""}: ${t.entry.section} is not established by it, and the finish line says so; the way out is the route that would settle it, or the operator's acceptance of its limits`
             : `recorded as a best candidate${caps.length ? ` (${caps.join("; ")})` : ""}: ${holdsNothing}`
           : undefined;
     if (review) for (const a of t.entry.kind === "answer" ? [t.entry] : negativesResting(t.entry, entries)) reviewed.push(`E-${a.seq}`);
-    return { ok: true, line, appended: true, ...(note ? { note } : {}) };
+    const said = note || locatorNote ? `${note ?? ""}${locatorNote}`.trim() : undefined;
+    return { ok: true, line, appended: true, ...(said ? { note: said } : {}) };
   });
   // Outside the ledger's lock (the registers' is taken after it, never inside): the review's offer, when it was this seat's, is taken up.
   if (result.ok && result.appended && reviewed.length) {
@@ -11696,6 +12022,21 @@ function namesImport(e: LedgerEntry, id: string): boolean {
   return re.test(JSON.stringify([e.refs ?? [], e.result_refs ?? [], e.method ?? []]));
 }
 
+/** Whether an entry's refs name an import's objects: the import itself, or a file of it. */
+export function namesImportObjects(e: Pick<LedgerEntry, "refs">, id: string): boolean {
+  return (e.refs ?? []).some((r) => r === `import:${id}` || r.startsWith(`import:${id}/`));
+}
+
+/**
+ * An entry's deltas on a question (DELTA_REL_KINDS): each rel of a delta's
+ * kind whose `to` is an answer in that section, the answer standing or one
+ * it corrects. How evidence the entry interprets bears on the question's
+ * earlier conclusion.
+ */
+export function deltasFor(e: Pick<LedgerEntry, "rel">, section: string, bySeq: ReadonlyMap<number, LedgerEntry>): LedgerRel[] {
+  return (e.rel ?? []).filter((r) => DELTA_REL_KINDS.has(r.kind) && bySeq.get(r.to)?.kind === "answer" && bySeq.get(r.to)?.section === section);
+}
+
 /**
  * Whether evidence added after an answer's coverage leaves the answer
  * stale (the calibration run sabfd76: the evidence that settled a question
@@ -11703,19 +12044,33 @@ function namesImport(e: LedgerEntry, id: string): boolean {
  * a question whose result is bounded_negative, not_determinable or partial
  * (or a premise rejected on a search alone) is stale for each addition in
  * the ledger, whether or not the addition named the question, until the new
- * evidence was examined for it and another seat reviewed that examination:
- * the answer cites a coverage record for the question recorded after the
- * addition that names the import among its objects and that another seat
- * attested (its review), or cites an entry other than a coverage record
- * that rests on the import (its refs, results or jobs name it) and that
- * another seat attested. A one-line finding nobody else looked at clears
- * nothing (the Fable review of batches 1-3). `coverage` lists the records
- * it cites recorded before the addition's entry; `unnamed` those recorded
+ * evidence was examined for it, another seat reviewed that examination, and
+ * the examination says how the new evidence bears on the answer:
+ * - examined and reviewed: the answer cites a coverage record for the
+ *   question recorded after the addition that names the import among its
+ *   objects and that another seat attested (its review), or cites an entry
+ *   other than a coverage record that rests on the import (its refs,
+ *   results or jobs name it) and that another seat attested. A one-line
+ *   finding nobody else looked at clears nothing (the Fable review of
+ *   batches 1-3).
+ * - the delta (docs/adr/0013, "Late evidence: the reverse sweep and the
+ *   delta"; the calibration run sb1b3c8 missed the late fact with the
+ *   import cited 28 times): the answer, or a coverage record it cites for
+ *   its question recorded after the addition (its result_refs), cites an
+ *   entry that interprets the import: a standing entry recorded after the
+ *   addition whose refs name the import's objects and that carries a
+ *   delta, a rel to the question's answer whose kind is supports,
+ *   contradicts, adds_part, irrelevant or inconclusive (deltasFor).
+ * The operator's acceptance of the question's limits after the addition
+ * still excuses it (acceptanceExcuses). `coverage` lists the records it
+ * cites recorded before the addition's entry; `unnamed` those recorded
  * after it that do not name the import; `unreviewed` those that name it
- * and entries resting on it that nobody else has attested yet. Null when
- * nothing stales it.
+ * and entries resting on it that nobody else has attested yet;
+ * `undelta` the entries so cited that interpret the import and carry no
+ * delta; `nodelta` the additions examined and reviewed whose delta is
+ * missing. Null when nothing stales it.
  */
-export function evidenceStale(answer: LedgerEntry, entries: LedgerEntry[], attestations: LedgerAttestation[]): { additions: EvidenceAddition[]; coverage: number[]; unnamed: number[]; unreviewed: number[] } | null {
+export function evidenceStale(answer: LedgerEntry, entries: LedgerEntry[], attestations: LedgerAttestation[]): { additions: EvidenceAddition[]; coverage: number[]; unnamed: number[]; unreviewed: number[]; undelta: number[]; nodelta: number[] } | null {
   if (answer.kind !== "answer" || !answer.section?.startsWith("question:")) return null;
   const additions = evidenceAdditions(entries);
   if (!additions.length) return null;
@@ -11728,6 +12083,9 @@ export function evidenceStale(answer: LedgerEntry, entries: LedgerEntry[], attes
   if (!result || !(EVIDENCE_STALE_RESULTS.has(result) || negativeByResult(result, cited))) return null;
   const cov = cited.filter((c) => c.kind === "coverage");
   const citedAll = [...(answer.support ?? []), ...(answer.limitations ?? [])].map((x) => bySeq.get(x.seq)).filter((e): e is LedgerEntry => Boolean(e) && !replaced.has((e as LedgerEntry).seq));
+  // What may carry the delta: the entries the answer cites (its contrary too: new evidence that contradicts it), and the results of its coverage.
+  const citedWithContrary = [...citedAll, ...(answer.contrary ?? []).map((x) => bySeq.get(x.seq)).filter((e): e is LedgerEntry => Boolean(e) && !replaced.has((e as LedgerEntry).seq))];
+  const resultsOf = (c: LedgerEntry): LedgerEntry[] => (c.result_refs ?? []).filter((r) => /^E-\d+$/.test(r)).map((r) => bySeq.get(Number(r.slice(2)))).filter((e): e is LedgerEntry => Boolean(e) && !replaced.has((e as LedgerEntry).seq));
   // Attested by a seat that recorded neither it nor the answer.
   const reviewed = (e: LedgerEntry): boolean => {
     const authors = new Set([e.by, ...e.authors, answer.by, ...answer.authors]);
@@ -11739,21 +12097,28 @@ export function evidenceStale(answer: LedgerEntry, entries: LedgerEntry[], attes
   const older = new Set<number>();
   const unnamed = new Set<number>();
   const unreviewed = new Set<number>();
+  const undelta = new Set<number>();
+  const nodelta: number[] = [];
   for (const x of additions) {
     const covAfter = cov.filter((c) => c.seq > x.seq);
-    if (covAfter.some((c) => namesAmongObjects(c, x.import) && reviewed(c))) continue;
     const resting = answer.seq > x.seq ? citedAll.filter((e) => e.kind !== "coverage" && e.seq !== x.seq && namesImport(e, x.import)) : [];
-    if (resting.some(reviewed)) continue;
+    const examined = covAfter.some((c) => namesAmongObjects(c, x.import) && reviewed(c)) || resting.some(reviewed);
+    // The entries that interpret the import, cited by the answer or by its coverage recorded since: one with a delta clears it.
+    const interpreting = [...new Map([...citedWithContrary, ...covAfter.flatMap(resultsOf)].map((e) => [e.seq, e])).values()].filter((e) => e.seq > x.seq && e.kind !== "coverage" && e.kind !== "answer" && namesImportObjects(e, x.import));
+    const delta = interpreting.some((e) => deltasFor(e, answer.section!, bySeq).length);
+    if (examined && delta) continue;
     stale.push(x);
+    if (examined) nodelta.push(x.seq);
+    for (const e of interpreting) if (!deltasFor(e, answer.section!, bySeq).length) undelta.add(e.seq);
     for (const c of cov) {
       if (c.seq < x.seq) older.add(c.seq);
       else if (!namesAmongObjects(c, x.import)) unnamed.add(c.seq);
-      else unreviewed.add(c.seq);
+      else if (!reviewed(c)) unreviewed.add(c.seq);
     }
-    for (const e of resting) unreviewed.add(e.seq);
+    for (const e of resting) if (!reviewed(e)) unreviewed.add(e.seq);
   }
   const sorted = (xs: Set<number>) => [...xs].sort((a, b) => a - b);
-  return stale.length ? { additions: stale, coverage: sorted(older), unnamed: sorted(unnamed), unreviewed: sorted(unreviewed) } : null;
+  return stale.length ? { additions: stale, coverage: sorted(older), unnamed: sorted(unnamed), unreviewed: sorted(unreviewed), undelta: sorted(undelta), nodelta } : null;
 }
 
 /**
@@ -11837,9 +12202,12 @@ export function noMoreEvidenceAskFix(coverage: number[], answer: number): string
  * that another question's answer relies on. preparation_missing: a
  * material negative resting on a source whose broad extraction has not
  * produced (extensions/preparation.ts), where it is not held for it.
+ * late_evidence_hits: what the reverse sweep of evidence added late found
+ * of a question's looked_for strings (store-sweep.ts), in objects no entry
+ * the answer reaches names, where the addition does not stale the answer.
  * `seqs` opens with the answer's.
  */
-export type LedgerWarning = { code: "no_acquisition_ask" | "partial_all_parts_established" | "lead_findings_uncited" | "preparation_missing"; section: string; seqs: number[]; what: string; fix: string };
+export type LedgerWarning = { code: "no_acquisition_ask" | "partial_all_parts_established" | "lead_findings_uncited" | "preparation_missing" | "late_evidence_hits"; section: string; seqs: number[]; what: string; fix: string };
 
 /** A warning in the words every point says it with: what, then the fix. */
 export function warningWords(w: Pick<LedgerWarning, "what" | "fix">): string {
@@ -11975,9 +12343,12 @@ export const CASE_PREMISE_WORDS = 'what the case brief or the goal states as giv
  * `preparation` is the sources' broad extractions as the store journal's
  * receipts say them, and each coverage record's reach into those sources
  * (extensions/preparation.ts preparationFacts); without it nothing is held
- * or warned on a preparation.
+ * or warned on a preparation. `imports` is the additions' reverse sweeps
+ * (store-sweep.ts readImportSweeps): their hits are said where a question's
+ * answer is stale by the addition, and warned of where its answer does not
+ * reach them; they hold nothing by themselves.
  */
-export function ledgerGate(o: { entries: LedgerEntry[]; attestations: LedgerAttestation[]; disputes: LedgerDispute[]; sections: string[]; failed?: Map<number, string[]>; bar?: (sectionId: string) => { material: boolean; existence: boolean; completeness?: boolean }; partial?: Map<number, Array<{ ref: string; job: string; status: string }>>; sweeps?: readonly SweepRecord[]; moreEvidence?: "no" | "ask" | "yes"; underLeads?: ReadonlyMap<string, ReadonlyMap<number, readonly string[]>>; preparation?: PR.PreparationFacts }): LedgerGate {
+export function ledgerGate(o: { entries: LedgerEntry[]; attestations: LedgerAttestation[]; disputes: LedgerDispute[]; sections: string[]; failed?: Map<number, string[]>; bar?: (sectionId: string) => { material: boolean; existence: boolean; completeness?: boolean }; partial?: Map<number, Array<{ ref: string; job: string; status: string }>>; sweeps?: readonly SweepRecord[]; imports?: readonly ImportSweepRecord[]; moreEvidence?: "no" | "ask" | "yes"; underLeads?: ReadonlyMap<string, ReadonlyMap<number, readonly string[]>>; preparation?: PR.PreparationFacts }): LedgerGate {
   const { entries } = o;
   const bySeq = new Map(entries.map((e) => [e.seq, e]));
   const replaced = supersededBy(entries);
@@ -12061,20 +12432,46 @@ export function ledgerGate(o: { entries: LedgerEntry[]; attestations: LedgerAtte
     // addition named the question): a negative, a not determinable or a
     // partial answer is examined against it before it stands again. Fixed,
     // never named.
+    // The reverse sweeps' hits on this question (store-sweep.ts): said
+    // with the stale answer they bear on, warned of otherwise; they hold
+    // nothing by themselves.
+    const importHits = bar && o.imports?.length ? importHitsFor(id, o.imports) : [];
+    const stale = bar && result ? evidenceStale(a, entries, o.attestations) : null;
     if (bar && result) {
-      const st = evidenceStale(a, entries, o.attestations);
+      const st = stale;
       if (st) {
         const imports = [...new Set(st.additions.map((x) => x.import))];
         const first = st.additions[0]!;
         const list = (xs: number[]) => xs.map((n) => `E-${n}`).join(", ");
+        const hitsHere = importHits.filter((x) => st.additions.some((y) => y.seq === x.sweep.seq));
+        const importWords = imports.map((i) => `import:${i}`).join(", ");
         defects.push({
           code: "evidence_stale",
           section: sec.section,
-          seqs: [a.seq, ...st.coverage, ...st.unnamed, ...st.unreviewed],
+          seqs: [a.seq, ...st.coverage, ...st.unnamed, ...st.unreviewed, ...st.undelta],
           additions: st.additions.map((x) => x.seq),
-          what: `answer #${a.seq} (${sec.section}) is ${NB.resultWords(result)}: new evidence since its coverage (${st.additions.map((x) => `${x.import}, E-${x.seq}${x.inventory_rev !== null ? `, inventory revision ${x.inventory_rev}` : ""}`).join("; ")}); re-examine against it${st.coverage.length ? `. Its coverage record${st.coverage.length === 1 ? "" : "s"} ${list(st.coverage)} ${st.coverage.length === 1 ? "was" : "were"} recorded before the addition's entry E-${first.seq}` : ""}${st.unnamed.length ? `; ${list(st.unnamed)}, recorded after it, ${st.unnamed.length === 1 ? "does" : "do"} not name ${imports.map((i) => `import:${i}`).join(", ")} among its objects` : ""}${st.unreviewed.length ? `; ${list(st.unreviewed)} ${st.unreviewed.length === 1 ? "examines" : "examine"} it and no other seat has reviewed ${st.unreviewed.length === 1 ? "it" : "them"} yet` : ""}`,
-          fix: `examine ${imports.map((i) => `import:${i}`).join(", ")} for ${sec.section}: record kind=coverage with answers=["${id}"] naming the import (or its files) among its objects, with what the search found there or why it cannot bear on the question; have another seat review it (attest it with review); and record the answer again with supersedes=${a.seq} citing it. An entry resting on the new evidence, cited by the answer, clears it too once another seat has attested it. Or the operator accepts the question's limits after the evidence came (question accept)`,
+          what: `answer #${a.seq} (${sec.section}) is ${NB.resultWords(result)}: new evidence since its coverage (${st.additions.map((x) => `${x.import}, E-${x.seq}${x.inventory_rev !== null ? `, inventory revision ${x.inventory_rev}` : ""}`).join("; ")}); re-examine against it${st.coverage.length ? `. Its coverage record${st.coverage.length === 1 ? "" : "s"} ${list(st.coverage)} ${st.coverage.length === 1 ? "was" : "were"} recorded before the addition's entry E-${first.seq}` : ""}${st.unnamed.length ? `; ${list(st.unnamed)}, recorded after it, ${st.unnamed.length === 1 ? "does" : "do"} not name ${importWords} among its objects` : ""}${st.unreviewed.length ? `; ${list(st.unreviewed)} ${st.unreviewed.length === 1 ? "examines" : "examine"} it and no other seat has reviewed ${st.unreviewed.length === 1 ? "it" : "them"} yet` : ""}${st.nodelta.length ? `; it was examined and reviewed, and nothing it cites says how the new evidence bears on the answer (a delta)` : ""}${st.undelta.length ? `; ${list(st.undelta)} ${st.undelta.length === 1 ? "interprets" : "interpret"} it with no delta` : ""}${hitsHere.length ? `. The reverse sweep found what this question's coverage looked for in it: ${hitsHere.map(importHitWords).join("; ")}` : ""}`,
+          fix: `examine ${importWords} for ${sec.section}${hitsHere.length ? ` (each object the reverse sweep names first)` : ""}: record what it shows as an entry whose refs name the import's files, with a delta, rel [{to: ${a.seq}, kind: supports | contradicts | adds_part | irrelevant | inconclusive}] (how the new evidence bears on this answer: it supports it, contradicts it, adds a part it left open, is irrelevant to it within its scope, or cannot say); record kind=coverage with answers=["${id}"] naming the import (or its files) among its objects and that entry among its results; have another seat review it (attest it with review); and record the answer again with supersedes=${a.seq} citing it. An entry resting on the new evidence with its delta, cited by the answer, clears it too once another seat has attested it. Or the operator accepts the question's limits after the evidence came (question accept)`,
           named_by: [],
+        });
+      }
+    }
+    // A reverse sweep's hit this answer does not reach, where the addition
+    // does not stale it (an established answer, or one examined since): a
+    // warning, never a hold (docs/adr/0013, "Late evidence: the reverse
+    // sweep and the delta").
+    if (importHits.length) {
+      const reach = answerReach(a, bySeq, replaced);
+      const staledBy = new Set((stale?.additions ?? []).map((x) => x.seq));
+      const left = importHits.filter((x) => !staledBy.has(x.sweep.seq) && !importHitExamined(x, reach, bySeq, replaced));
+      if (left.length) {
+        const q = questionName(id, sec.section);
+        warnings.push({
+          code: "late_evidence_hits",
+          section: sec.section,
+          seqs: [a.seq, ...[...new Set(left.flatMap((x) => x.records))].sort((x, y) => x - y)],
+          what: `answer #${a.seq} (${sec.section}) does not reach what the reverse sweep of evidence added late found for ${q}: ${left.map((x) => `import:${x.sweep.import} (E-${x.sweep.seq}): ${importHitWords(x)}`).join("; ")}`,
+          fix: `examine each object named and record what it shows for ${q}: an entry whose refs name the object, with a delta rel [{to: ${a.seq}, kind: supports | contradicts | adds_part | irrelevant | inconclusive}], and record the answer again with supersedes=${a.seq} citing it (or a coverage record citing it among its results). A hit is a string found, not a fact: weigh it, and say so if it does not bear on the question`,
         });
       }
     }
@@ -12243,7 +12640,7 @@ export function ledgerGate(o: { entries: LedgerEntry[]; attestations: LedgerAtte
     }
     const acted = o.attestations.some((x) => attestationAct(x) === "attest" && x.target === target && !a.authors.includes(x.by) && x.by !== a.by) || against.some((d) => !a.authors.includes(d.by)) || Boolean(review?.reviewed);
     if (!acted) {
-      defects.push({ code: "no_critic_act", section: sec.section, seqs: [a.seq], what: `answer #${a.seq} (${sec.section}) has no critic act`, fix: `an agent other than its author re-derives what it rests on from the sealed refs and records attest (how) or dispute (why) on #${a.seq}`, named_by: namedFor(a.seq) });
+      defects.push({ code: "no_critic_act", section: sec.section, seqs: [a.seq], what: `answer #${a.seq} (${sec.section}) has no critic act`, fix: `an agent other than its author re-derives what it rests on from the sealed refs${sec.section.startsWith("question:") ? ", reading the question against its sources before the answer's conclusion," : ""} and records attest (how) or dispute (why) on #${a.seq}${claimsEstablished(a) ? `; an established attest names the strongest rival and the test that separates it (answer_review.discriminator) and where it read each value it vouches for (answer_review.reproduced_at, checked against the bytes) or how it was derived (answer_review.derivation)` : ""}`, named_by: namedFor(a.seq) });
     }
   }
   for (const c of openContradictions(entries)) {

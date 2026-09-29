@@ -983,7 +983,8 @@ async function readinessSections(sandboxRoot: string, s: L.LeadsSnapshot): Promi
 
 /**
  * The ledger gate's inputs as readiness reads them from a snapshot: the
- * acts on the ledger, each question's bar, the store sweeps, the case
+ * acts on the ledger, each question's bar, the store sweeps and the
+ * additions' reverse sweeps, the case
  * policy (so a warning's fix reads as the answers check words it), what
  * the lead register recorded under each question's leads (none from a lead
  * register whose chain is broken) and the sources' broad extractions (the
@@ -999,11 +1000,13 @@ async function gateInputs(sandboxRoot: string, s: L.LeadsSnapshot): Promise<Omit
     return { material: s.goal.questions.map(P.sectionKey).includes(P.sectionKey(id)) || !q || q.materiality === "material", existence: s.goal.existence.map(P.sectionKey).includes(P.sectionKey(id)) || q?.expects === "existence", completeness: q?.completeness === true };
   };
   const sweeps = await import("./store-sweep.ts").then((SW) => SW.readSweeps(sandboxRoot)).catch(() => []);
+  // The additions' reverse sweeps: their hits said with the stale answers they bear on, warned of otherwise.
+  const imports = await import("./store-sweep.ts").then((SW) => SW.readImportSweeps(sandboxRoot)).catch(() => []);
   const moreEvidence = await import("./requests.ts").then((R) => R.casePolicyMoreEvidence(sandboxRoot)).catch(() => "ask" as const);
   // What the lead register recorded under each question's leads: a finding two seats hold there that an answer leaves out is warned of.
   const underLeads = s.state.chain.ok ? L.questionLeadEntries(s.state) : undefined;
   const preparation = await import("./preparation.ts").then((PR) => PR.preparationFacts(sandboxRoot, s.ledger.entries)).catch(() => undefined);
-  return { entries: s.ledger.entries, attestations, disputes, bar, sweeps, moreEvidence, ...(underLeads ? { underLeads } : {}), ...(preparation ? { preparation } : {}) };
+  return { entries: s.ledger.entries, attestations, disputes, bar, sweeps, ...(imports.length ? { imports } : {}), moreEvidence, ...(underLeads ? { underLeads } : {}), ...(preparation ? { preparation } : {}) };
 }
 
 /**

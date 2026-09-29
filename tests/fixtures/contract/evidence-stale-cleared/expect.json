@@ -1,7 +1,8 @@
 {
-  "case": "Two reviewed bounded negatives; then evidence added. Question 1 stays on its older coverage; question 2 is examined again against the new import on a coverage record naming it, which another seat reviews.",
+  "case": "Two reviewed bounded negatives; then evidence added. Question 1 stays on its older coverage; question 2 is examined again against the new import: what the export shows is recorded with its delta (irrelevant to the answer) among the results of a coverage record naming the import, which another seat reviews.",
   "design": [
-    "docs/adr/0013 'After the first calibration run', first rule: an evidence addition makes stale every standing bounded negative whose coverage was recorded before the addition's entry (evidence_stale); it clears only when the answer cites a coverage record recorded after it that names the import among its objects and that another seat attested.",
+    "docs/adr/0013 'After the first calibration run', first rule: an evidence addition makes stale every standing bounded negative whose coverage was recorded before the addition's entry (evidence_stale).",
+    "docs/adr/0013 'Late evidence: the reverse sweep and the delta': it clears only when the answer, or a coverage record it cites for its question recorded after the addition, cites an entry that interprets the import (its refs name the import's objects) with a delta (supports, contradicts, adds_part, irrelevant or inconclusive), and another seat reviewed the examination; the addition's reverse sweep searches its files for every standing looked_for string, and here no coverage record named any.",
     "docs/adr/0015 decision 8: readiness holds on what the ledger gate holds, and on a stale answer."
   ],
   "policies": [
@@ -36,6 +37,9 @@
     },
     "done": "held",
     "late": [],
-    "agreement": []
+    "agreement": [],
+    "late_evidence": [
+      { "addition": 7, "synthetic": false, "state": "clean", "records": 0, "terms": 0, "questions": [] }
+    ]
   }
 }

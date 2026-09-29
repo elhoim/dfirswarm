@@ -1,0 +1,23 @@
+{
+  "v": 2,
+  "import": "ev-0001",
+  "mode": "evidence",
+  "class": "acquired_evidence",
+  "at": "2026-09-29T14:36:32.781Z",
+  "supplied_by": "operator",
+  "via": "cli",
+  "from": "/tmp/dfirswarm-contract-late/proxy.csv",
+  "why": "the proxy export the network team kept",
+  "files": [
+    {
+      "path": "proxy.csv",
+      "sha256": "716c23c1fedefb54c1fa420e0e8431faec2d5a56b4a28414be489d1ebc69e754",
+      "bytes": 38
+    }
+  ],
+  "manifest_sha256": "d704101df8eb9a1f06537bee9325a7528dcd8790a00ab264a6f6dbc31ed03b8c",
+  "permitted_use": "evidence: a finding may rest on it as on the original evidence, named as material from outside the original set",
+  "inventory_rev": 1,
+  "ledger_seq": 6,
+  "lead_seq": 3
+}

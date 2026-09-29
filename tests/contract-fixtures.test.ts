@@ -27,11 +27,17 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import { after, test } from "node:test";
-import { extractCommit, replay, resolveRun, warningCode, type Delivery, type Projection, type StopPolicy, type Target } from "../scripts/replay.ts";
+import { copyFile } from "node:fs/promises";
+import { basename, dirname } from "node:path";
+import { copyRun, diffProjections, evaluateIn, extractCommit, replay, resolveRun, warningCode, type Delivery, type Projection, type StopPolicy, type Target } from "../scripts/replay.ts";
 
 const ROOT = resolve(import.meta.dirname, "..");
 const FIXTURES = join(ROOT, "tests", "fixtures", "contract");
 const OLD_RULE = "3338e3c7715ce612f227cf5663c1e60d2ed4bd23";
+/** The harness before the source-first review and the delta rule (docs/adr/0013, 0015): the parent of that change. */
+const BEFORE_DELTA = "c34c6cba3cde48b2507a952ae14d2828cf051a66";
+/** The histories written with the source-first review and the reverse sweep: the harness before them cannot read their sweep lines. */
+const WRITTEN_WITH_DELTA = new Set(["evidence-stale-cleared", "late-evidence-hits", "review-source-first"]);
 
 const scratch: string[] = [];
 after(async () => {
@@ -80,6 +86,10 @@ type Expect = {
   history?: { acquisition_requests?: number };
   /** The sources' broad extractions (docs/adr/0013): each source's outcome per capability, and the questions held or warned on them, with their sources. */
   preparation?: { sources: Record<string, string[]>; held: Record<string, string[]>; warned: Record<string, string[]> };
+  /** The source-first review rule over the recorded established attests (docs/adr/0015): how many, and each it would cap by section and codes. */
+  review_caps?: { established: number; capped: Array<{ section: string; codes: string[] }> };
+  /** Each evidence addition's reverse sweep (docs/adr/0013): counts per question. */
+  late_evidence?: Array<{ addition: number; synthetic: boolean; state: string; records: number; terms: number; questions: Array<{ section: string; objects: number; occurrences: number }> }>;
 };
 type Fixture = { name: string; case: string; design: string[]; policies: string[]; expect: Expect; rules?: Record<string, Expect & { why: string }> };
 
@@ -151,6 +161,14 @@ function holdTo(p: Projection, e: Expect, where: string): void {
     assert.deepEqual(Object.fromEntries(pp.sources.map((x) => [x.source, x.capabilities.map((c) => c.outcome)])), e.preparation.sources, `${where}: each source's broad extraction`);
     assert.deepEqual(Object.fromEntries(pp.held.map((x) => [x.section, x.sources])), e.preparation.held, `${where}: what a preparation holds`);
     assert.deepEqual(Object.fromEntries(pp.warned.map((x) => [x.section, x.sources])), e.preparation.warned, `${where}: what a preparation warns of`);
+  }
+  if (e.review_caps) {
+    assert.ok(p.review_caps, `${where}: the checkout read the review rule`);
+    assert.deepEqual({ established: p.review_caps.established, capped: p.review_caps.capped.map((c) => ({ section: c.section, codes: c.codes })) }, e.review_caps, `${where}: what the review rule would cap`);
+  }
+  if (e.late_evidence) {
+    assert.ok(p.late_evidence, `${where}: the checkout read the reverse sweeps`);
+    assert.deepEqual(p.late_evidence.map(({ addition, synthetic, state, records, terms, questions }) => ({ addition, synthetic, state, records, terms, questions })), e.late_evidence, `${where}: the reverse sweeps`);
   }
   for (const [section, w] of Object.entries(e.warning_words ?? {})) {
     const lines = (p.text?.warnings ?? []).filter((l) => warningCode(l).section === section);
@@ -235,4 +253,59 @@ test("acceptance: the c10 partial cascade is held under 3338e3c's readiness rule
   const fields = new Set(r.differences!.map((d) => d.field));
   assert.deepEqual([...fields].sort(), ["disagreements", "readiness holds", "readiness items", "ready", "report says best candidate"]);
   for (const d of r.differences!.filter((x) => x.field === "readiness holds")) assert.deepEqual([d.a, d.b], ["best_candidate", "none"], d.section ?? "");
+});
+
+test("the delta rule, measured: the history recorded before it clears question 2 under c34c6cb's rule and holds it under this checkout's", async (t) => {
+  const f = fixtures.find((x) => x.name === "evidence-stale-without-delta")!;
+  const rule = f.rules?.["c34c6cb"];
+  assert.ok(rule, "the old rule's expectation is on record");
+  if (spawnSync("git", ["-C", ROOT, "cat-file", "-e", `${BEFORE_DELTA}^{commit}`]).status !== 0) {
+    t.skip(`c34c6cb is not in this checkout's history: the old rule is not run here; its expectation stays in ${relative(ROOT, join(FIXTURES, f.name, "expect.json"))}`);
+    return;
+  }
+  const work = await tmp("contract-delta-");
+  const old = join(work, "harness-c34c6cb");
+  await extractCommit(BEFORE_DELTA, old);
+  const r = await replay({ run: await resolveRun(join(FIXTURES, f.name, "run")), targets: [{ label: "c34c6cb", harness: old, how: "c34c6cb, extracted", commit: BEFORE_DELTA }, HERE], scratch: work });
+  const [a, b] = r.evaluations.map((e) => e.projection!);
+  assert.ok(a && b, JSON.stringify(r.evaluations.map((e) => e.error)));
+  holdTo(a, { ...f.expect, ...rule, questions: rule.questions, late_evidence: undefined, done: undefined }, "without a delta, under c34c6cb");
+  holdTo(b, f.expect, "without a delta, under this checkout");
+  // The difference is question 2's, and the run's count of stale answers: nothing else.
+  assert.deepEqual([...new Set(r.differences!.filter((d) => d.section).map((d) => d.section))], ["question:2"], JSON.stringify(r.differences));
+  assert.deepEqual(r.differences!.filter((d) => !d.section).map((d) => d.field).sort(), ["readiness items"], JSON.stringify(r.differences));
+});
+
+test("old histories replayed unchanged: every fixture recorded before the source-first review and the delta reads the same under c34c6cb and this checkout, but where the delta rule applies", async (t) => {
+  if (spawnSync("git", ["-C", ROOT, "cat-file", "-e", `${BEFORE_DELTA}^{commit}`]).status !== 0) {
+    t.skip("c34c6cb is not in this checkout's history (a shallow clone or an archive): the comparison is not run here");
+    return;
+  }
+  const work = await tmp("contract-before-delta-");
+  const old = join(work, "harness-c34c6cb");
+  await extractCommit(BEFORE_DELTA, old);
+  const names = fixtures.map((f) => f.name).filter((n) => !WRITTEN_WITH_DELTA.has(n));
+  // One copy per checkout, each evaluated in one process per checkout (replay's own copy, and the custody anchor beside it).
+  const copies = async (label: string) => {
+    const out: string[] = [];
+    for (const n of names) {
+      const run = await resolveRun(join(FIXTURES, n, "run"));
+      const dest = join(work, label, n, "runs", run.id);
+      await copyRun(run.sandbox, dest);
+      const anchor = join(dirname(run.sandbox), `${basename(run.sandbox)}.custody-anchor.json`);
+      if (existsSync(anchor)) await copyFile(anchor, join(dirname(dest), `${run.id}.custody-anchor.json`));
+      out.push(dest);
+    }
+    return out;
+  };
+  const before = await evaluateIn(old, await copies("before"), false);
+  const now = await evaluateIn(ROOT, await copies("now"), false);
+  for (const [i, n] of names.entries()) {
+    const a = before[i]!;
+    const b = now[i]!;
+    assert.ok(!("error" in a) && !("error" in b), `${n}: ${JSON.stringify("error" in a ? a : b)}`);
+    const diffs = diffProjections(a as Projection, b as Projection);
+    if (n === "evidence-stale-without-delta") assert.deepEqual([...new Set(diffs.map((d) => d.section ?? d.field))].sort(), ["question:2", "readiness items"], `${n}: ${JSON.stringify(diffs)}`);
+    else assert.deepEqual(diffs, [], `${n}: an old history reads the same (${JSON.stringify(diffs)})`);
+  }
 });
