@@ -261,8 +261,10 @@ const CASES: Record<string, (base: string) => Promise<string>> = {
       covs.push(cov.seq);
     }
     await SW.awaitSweeps(r.S);
-    // Outside the directory the run is made in: the addition records where it came from.
-    const late = await mkdtemp(join(tmpdir(), "contract-evidence-"));
+    // Outside the directory the run is made in, at a neutral path: the addition records where it came from.
+    const late = "/tmp/dfirswarm-contract-late";
+    await rm(late, { recursive: true, force: true });
+    await mkdir(late, { recursive: true });
     await writeFile(join(late, "proxy.csv"), "time,host\n09:58,ws\n");
     const added = await admitMaterial(r.S, { mode: "evidence", path: join(late, "proxy.csv"), why: "the proxy export the network team kept", supplied_by: "operator", via: "cli" });
     await rm(late, { recursive: true, force: true });
