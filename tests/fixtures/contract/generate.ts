@@ -1,0 +1,457 @@
+/**
+ * Writes the register histories under tests/fixtures/contract/<case>/run/:
+ * synthetic runs, each made through the harness's own acts (record, attest,
+ * leads, the finish, evidence add, custody), for scripts/replay.ts to read
+ * again under any harness version (docs/adr/0017, "Measuring a rule
+ * change"). Each case's expect.json beside it is written by hand from the
+ * ADRs, never by this script and never from the code's output.
+ *
+ * No case, no tool, no truth: generic questions, one disk and one log named
+ * in inputs.json, two jobs whose outputs are a line of text.
+ *
+ *   node --experimental-strip-types --no-warnings tests/fixtures/contract/generate.ts [case…]
+ *
+ * The histories are written once and committed: running this again makes
+ * new ones (new times, new hashes), which the tests read the same way.
+ */
+import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
+import { mkdir, mkdtemp, readdir, rename, rm, rmdir, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import * as FIN from "../../../extensions/finish.ts";
+import * as L from "../../../extensions/leads.ts";
+import * as P from "../../../extensions/protocol.ts";
+import * as SW from "../../../extensions/store-sweep.ts";
+import { checkLedgerAnswers } from "../../../scripts/check-answers.ts";
+import { takeCustody } from "../../../scripts/custody.ts";
+import { sealTree, storePaths } from "../../../scripts/evidence-store.ts";
+import { finishGate } from "../../../scripts/finish-gate.ts";
+import { admitMaterial } from "../../../scripts/material.ts";
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+const sha = (s: string) => createHash("sha256").update(s).digest("hex");
+
+type Ctx = { sandboxRoot: string; agentId: string };
+type Run = { S: string; runs: string; a0: Ctx; a1: Ctx; a2: Ctx; a3: Ctx };
+
+const F = { basis: "observed", confidence: "high", indicates: "What the observation shows, and the step to it.", confidence_why: "Read directly from the object it cites." } as const;
+const A = { confidence: "medium", confidence_why: "The cited entries are direct.", alternatives_open: "none open", would_change: "a second source that disagrees" } as const;
+const HIGH = { ...A, confidence: "high" } as const;
+const ESTABLISHED = {
+  strength: "established",
+  answer_review: {
+    reproduced: "re-derived the cited finding from its sealed ref",
+    read: "nothing beyond the cited entries",
+    parts: [{ part: "the question as asked", established: true, why: "the cited finding shows it" }],
+    inference: "the finding is the answer",
+    alternatives: [{ explanation: "a copy of the record left by another process", why: "the cited record's own metadata ties it to the event, and no copy exists in the objects searched", evidence: ["E-1"] }],
+    other_family: { checked: false, text: "no other source family holds it in this fixture" },
+  },
+} as const;
+const REVIEW = {
+  detection: { done: true, text: "the event writes to the objects searched, and they keep it for their whole range" },
+  reproduced: { done: true, text: "ran the decisive search again over the same objects: nothing" },
+  other_route: { done: false, text: "no second source for the event in the case" },
+} as const;
+
+const QUESTIONS = ["Who logged on, and when?", "Was a remote tool installed?", "What was deleted?", "When did it start?", "Which account ran the tool?", "What left the network?"];
+
+function goal(n: number, existence: string[] = []): string {
+  return [
+    "## Goal",
+    "",
+    "Examine the host.",
+    "",
+    "### Questions",
+    "",
+    ...QUESTIONS.slice(0, n).map((q, i) => `${i + 1}. ${q}`),
+    "",
+    "## Definition of done",
+    "",
+    "Every question has a disposition under the bar.",
+    "",
+    "## Checks",
+    "",
+    `- \`node --experimental-strip-types --no-warnings "$SWARM_HARNESS/scripts/check-answers.ts" --sections ${Array.from({ length: n }, (_, i) => i + 1).join(",")}${existence.length ? ` --existence ${existence.join(",")}` : ""}\``,
+    "",
+  ].join("\n");
+}
+
+async function job(S: string, id: string, file: string, body: string, inputs: string[]): Promise<void> {
+  const staging = join(S, "..", `staging-${id}`);
+  await mkdir(staging, { recursive: true });
+  await writeFile(join(staging, file), body);
+  await sealTree(S, staging, join(storePaths(S).jobs, id, "out"), id, 1);
+  await writeFile(join(storePaths(S).jobs, id, "job.json"), `${JSON.stringify({ id, state: "committed", requester: { agent: "a0" }, status: "ok", exit: 0, spec: { kind: "command", scope: "declared", inputs, command: "search" } })}\n`);
+  await rm(staging, { recursive: true, force: true });
+}
+
+async function newRun(base: string, id: string, questions: number, existence: string[] = []): Promise<Run> {
+  const runs = join(base, "runs");
+  const S = join(runs, id);
+  await P.initSandbox(S, { swarmId: id, agentIds: ["a0", "a1", "a2", "a3"], capUsd: 5, wallClockMinutes: 30, goal: goal(questions, existence) });
+  await writeFile(join(S, "inputs.json"), `${JSON.stringify({ files: [{ path: "inputs/disk.E01", sha256: sha("disk"), bytes: 10 }, { path: "inputs/logs/a.log", sha256: sha("a"), bytes: 10 }] })}\n`);
+  await job(S, "j000001", "hits.txt", "j000001\n", ["input:disk.E01"]);
+  await job(S, "j000002", "hits.txt", "j000002\n", ["input:logs/a.log"]);
+  const ctx = (agentId: string) => ({ sandboxRoot: S, agentId });
+  return { S, runs, a0: ctx("a0"), a1: ctx("a1"), a2: ctx("a2"), a3: ctx("a3") };
+}
+
+const ok = async (p: Promise<{ ok: boolean }>) => {
+  const r = await p;
+  assert.ok(r.ok, (r as unknown as { reason?: string }).reason ?? JSON.stringify(r));
+  return r as unknown as { ok: true; entry: P.LedgerEntry; note?: string };
+};
+const rec = (c: Ctx, input: Record<string, unknown>) => ok(P.recordEntry(c, input as unknown as P.LedgerInput));
+const attest = async (c: Ctx, input: Record<string, unknown>) => {
+  const r = await P.attestEntry(c, input as unknown as P.LedgerActInput);
+  assert.ok(r.ok && (r as { line?: unknown }).line, JSON.stringify(r));
+};
+
+async function lead(c: Ctx, q: string, routes = [{ source: "input:logs/a.log", method: "read the log" }]): Promise<string> {
+  const r = await L.openLead(c, { title: `Work question ${q}`, why: "it is asked", answers: [q], take: true, routes });
+  assert.ok(r.ok, (r as { reason?: string }).reason);
+  return (r as { lead: { id: string } }).lead.id;
+}
+const close = async (c: Ctx, id: string, ref: string) => assert.ok((await L.closeLead(c, id, { disposition: "resolved", ref })).ok);
+
+/** A coverage record for question `q` over `refs`, resting on `results`. */
+const coverage = (q: string, refs: string[], results: string[], o: Record<string, unknown> = {}) => ({
+  kind: "coverage",
+  proposition: `The event question ${q} asks about happened`,
+  refs,
+  answers: [q],
+  time_range: "the whole of each object, no time bound",
+  search_method: "a keyword search",
+  settings: "case-insensitive, every encoding the tool offers",
+  coverage_actual: "every byte of the objects named",
+  skipped: "none: the search ran to its end",
+  failures: "none",
+  result_refs: results,
+  alternatives: "the event may have left its trace only in memory, which the case does not hold",
+  detection_opportunity: { trace_expected: "yes", why: "the event writes to the objects searched, and they keep it" },
+  ...(o.looked_for === undefined ? { looked_for_none_why: "the fixture's event has no literal form a byte search could find" } : {}),
+  ...o,
+});
+
+/** Question `q` established on a finding, attested established by another seat, its lead closed. */
+async function established(r: Run, q: string, by: Ctx = r.a1, critic: Ctx = r.a2): Promise<number> {
+  const id = await lead(r.a0, q, [{ source: "input:disk.E01", method: "read the disk" }]);
+  const f = (await rec(r.a0, { kind: "finding", ...F, value: `the record question ${q} asks for`, source: "the disk", evidence: "a registry key", refs: ["job:j000001/hits.txt"], answers: [q] })).entry;
+  const a = (await rec(by, { kind: "answer", section: `question:${q}`, value: `Established: the record question ${q} asks for`, reasoning: `E-${f.seq}`, ...HIGH, result: "established" })).entry;
+  await attest(critic, { seq: a.seq, how: "re-read the key from job:j000001", ...ESTABLISHED });
+  await close(r.a0, id, `E-${f.seq}`);
+  return a.seq;
+}
+
+/** Question `q` answered partial, medium confidence, on a finding, with the limitation that bounds the part it leaves open; its lead closed. */
+async function partial(r: Run, q: string) {
+  const id = await lead(r.a0, q);
+  const f = (await rec(r.a0, { kind: "finding", ...F, value: `a logon at 09:14 for question ${q}`, source: "the log", evidence: "line 12", refs: ["job:j000002/hits.txt"], answers: [q] })).entry;
+  const lim = (await rec(r.a0, { kind: "limitation", value: `The log keeps no account name for question ${q}`, source: "the log", evidence: "its field list", reason: "unavailable", answers: [q] })).entry;
+  const a = (await rec(r.a1, { kind: "answer", section: `question:${q}`, value: "A logon at 09:14; the account is not established", reasoning: `E-${f.seq} shows the logon and its time; the account is open (E-${lim.seq})`, ...A, limitations: [lim.seq], result: "partial" })).entry;
+  await close(r.a0, id, `E-${f.seq}`);
+  return { f, lim, a };
+}
+
+async function setPolicy(S: string, policy: "operator" | "cap-pause" | "cap-stop"): Promise<void> {
+  const b = await P.readBudget(S);
+  await P.writeBudget(S, policy === "operator" ? { ...b, stop_policy: "operator", until_solved: true, wall_clock_minutes: 0 } : { ...b, stop_policy: policy, until_solved: false, wall_clock_minutes: 60 });
+}
+
+/** `agent` publishes the report: a revision of work/report.md in its name. */
+async function publish(S: string, agent: string, text: string): Promise<void> {
+  await mkdir(join(S, "work"), { recursive: true });
+  await writeFile(join(S, "work", "report.md"), text);
+  await P.recordFileVersion(S, "work/report.md", agent);
+}
+
+async function traceRow(S: string, agent: string, tool: string): Promise<void> {
+  const at = new Date().toISOString();
+  await writeFile(join(S, P.EVENTS_REL), `${JSON.stringify({ ts: at, recv_ts: at, agent, tool, args: {}, result: { ok: true } })}\n`, { flag: "a" });
+}
+
+const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// ---------------------------------------------------------------------------------------------
+// The cases
+// ---------------------------------------------------------------------------------------------
+
+const CASES: Record<string, (base: string) => Promise<string>> = {
+  /**
+   * The run s9722fa (a CTF case, c10), reconstructed: six goal questions
+   * under --stop operator, every one a partial answer with medium
+   * confidence resting on a finding and citing the limitation that bounds
+   * its open part, each reviewed best_candidate by another seat that held
+   * the open part not established (the harness's cap of that time).
+   */
+  "c10-partial-cascade": async (base) => {
+    const r = await newRun(base, "c10pc", 6);
+    await setPolicy(r.S, "operator");
+    for (const q of ["1", "2", "3", "4", "5", "6"]) {
+      const p = await partial(r, q);
+      await attest(r.a3, {
+        seq: p.a.seq,
+        how: "re-read line 12 from job:j000002",
+        strength: "best_candidate",
+        answer_review: { ...ESTABLISHED.answer_review, parts: [{ part: "when", established: true, why: "line 12" }, { part: "which account", established: false, why: "no account field" }] },
+      });
+    }
+    return r.S;
+  },
+
+  /** A partial answer, its review holding the parts it claims and the open part as it declares it; the other question established. */
+  "partial-every-policy": async (base) => {
+    const r = await newRun(base, "pep", 2);
+    await established(r, "2");
+    const p = await partial(r, "1");
+    await attest(r.a3, {
+      seq: p.a.seq,
+      how: "re-read line 12 from job:j000002; no account field in the log",
+      ...ESTABLISHED,
+      answer_review: { ...ESTABLISHED.answer_review, parts: [{ part: "when, and from where", established: true, why: "line 12" }, { part: "which account", established: false, why: "the log keeps none", declared_open: `E-${p.lim.seq}` }] },
+    });
+    return r.S;
+  },
+
+  /** An answer that claims established, medium confidence, its one review a best candidate. */
+  "established-best-candidate": async (base) => {
+    const r = await newRun(base, "ebc", 2);
+    await established(r, "2");
+    const id = await lead(r.a0, "1");
+    const f = (await rec(r.a0, { kind: "finding", ...F, value: "a logon at 09:14 by the first account", source: "the log", evidence: "line 12", refs: ["job:j000002/hits.txt"], answers: ["1"] })).entry;
+    const a = (await rec(r.a1, { kind: "answer", section: "question:1", value: "The first account, at 09:14", reasoning: `E-${f.seq}`, ...A, result: "established" })).entry;
+    await close(r.a0, id, `E-${f.seq}`);
+    await attest(r.a3, { seq: a.seq, how: "re-read line 12", ...ESTABLISHED, strength: "best_candidate" });
+    return r.S;
+  },
+
+  /** A material bounded negative on its coverage record, which nobody else has reviewed. */
+  "negative-unreviewed": async (base) => {
+    const r = await newRun(base, "nur", 2, ["2"]);
+    await established(r, "1");
+    const id = await lead(r.a0, "2", [{ source: "input:disk.E01", method: "search the disk" }]);
+    const abs = (await rec(r.a0, { kind: "absence", value: "a remote tool", source: "inputs/disk.E01", evidence: "a search", refs: ["job:j000001/hits.txt"], answers: ["2"] })).entry;
+    const cov = (await rec(r.a0, coverage("2", ["input:disk.E01"], [`E-${abs.seq}`, "job:j000001/hits.txt"]))).entry;
+    await rec(r.a1, { kind: "answer", section: "question:2", value: "No evidence of a remote tool was found on the disk", reasoning: `E-${cov.seq}`, ...A, result: "bounded_negative" });
+    await close(r.a0, id, `E-${cov.seq}`);
+    await SW.awaitSweeps(r.S);
+    return r.S;
+  },
+
+  /**
+   * Two reviewed negatives; then evidence added. Question 1 is left on its
+   * older coverage (stale); question 2 is examined again against the new
+   * import, and another seat reviews that coverage (cleared).
+   */
+  "evidence-stale-cleared": async (base) => {
+    const r = await newRun(base, "esc", 2);
+    const covs: number[] = [];
+    for (const q of ["1", "2"]) {
+      const id = await lead(r.a0, q, [{ source: "input:disk.E01", method: "search the disk" }]);
+      const abs = (await rec(r.a0, { kind: "absence", value: `the event of question ${q}`, source: "inputs/disk.E01", evidence: "a search", refs: ["job:j000001/hits.txt"], answers: [q] })).entry;
+      const cov = (await rec(r.a0, coverage(q, ["input:disk.E01"], [`E-${abs.seq}`, "job:j000001/hits.txt"], { acquisition_none_why: "no source outside the evidence records it" }))).entry;
+      await rec(r.a1, { kind: "answer", section: `question:${q}`, value: `No evidence of the event of question ${q} was found on the disk`, reasoning: `E-${cov.seq}`, ...A, result: "bounded_negative" });
+      await attest(r.a2, { seq: cov.seq, how: "ran the search again from job:j000001", review: REVIEW });
+      await close(r.a0, id, `E-${cov.seq}`);
+      covs.push(cov.seq);
+    }
+    await SW.awaitSweeps(r.S);
+    // Outside the directory the run is made in: the addition records where it came from.
+    const late = await mkdtemp(join(tmpdir(), "contract-evidence-"));
+    await writeFile(join(late, "proxy.csv"), "time,host\n09:58,ws\n");
+    const added = await admitMaterial(r.S, { mode: "evidence", path: join(late, "proxy.csv"), why: "the proxy export the network team kept", supplied_by: "operator", via: "cli" });
+    await rm(late, { recursive: true, force: true });
+    assert.equal(added.ok, true, String((added as { reason?: string }).reason ?? ""));
+    // Question 2 examined against it, and reviewed by another seat.
+    const abs2 = (await rec(r.a0, { kind: "absence", value: "the event of question 2 in the proxy export", source: "the proxy export", evidence: "read whole", refs: ["import:ev-0001/proxy.csv"], answers: ["2"] })).entry;
+    const cov2 = (await rec(r.a0, coverage("2", ["input:disk.E01", "import:ev-0001/proxy.csv"], [`E-${abs2.seq}`, "job:j000001/hits.txt"], { acquisition_none_why: "no source outside the evidence records it" }))).entry;
+    const prev = (await P.readLedger(r.S)).filter((e) => e.kind === "answer" && e.section === "question:2").at(-1)!;
+    await rec(r.a1, { kind: "answer", section: "question:2", value: "No evidence of the event of question 2 was found on the disk or in the proxy export", reasoning: `E-${cov2.seq}`, ...A, result: "bounded_negative", supersedes: prev.seq });
+    await attest(r.a2, { seq: cov2.seq, how: "ran the search again over the disk and the export", review: REVIEW, second_review_why: "the export is new" });
+    await SW.awaitSweeps(r.S);
+    return r.S;
+  },
+
+  /**
+   * The store sweep: question 1's record names the object its sweep found a
+   * hit in and says nothing of what it showed (held); question 2's names it
+   * with a finding written after the sweep that examines it (released).
+   */
+  "sweep-hits-examined": async (base) => {
+    const r = await newRun(base, "she", 2);
+    await job(r.S, "j000007", "export.csv", "time,user\n09:58,alice\n", ["input:disk.E01"]);
+    await job(r.S, "j000008", "notes.txt", "bob-laptop was seen\n", ["input:disk.E01"]);
+    for (const [q, term, obj] of [["1", "alice", "j000007"], ["2", "bob-laptop", "j000008"]] as const) {
+      const id = await lead(r.a0, q, [{ source: "input:disk.E01", method: "search the disk" }]);
+      const abs = (await rec(r.a0, { kind: "absence", value: `the event of question ${q}`, source: "the disk", evidence: "a search", refs: ["job:j000001/hits.txt"], answers: [q] })).entry;
+      const cov = (await rec(r.a0, coverage(q, ["input:disk.E01"], [`E-${abs.seq}`, "job:j000001/hits.txt"], { looked_for: [term], acquisition_none_why: "no source outside the evidence records it" }))).entry;
+      let ans = (await rec(r.a1, { kind: "answer", section: `question:${q}`, value: `No evidence of the event of question ${q} was found on the disk`, reasoning: `E-${cov.seq}`, ...A, result: "bounded_negative" })).entry;
+      await SW.awaitSweeps(r.S);
+      const file = obj === "j000007" ? "export.csv" : "notes.txt";
+      // Question 2: what the hit object showed, recorded after the sweep.
+      const seen = q === "2" ? (await rec(r.a3, { kind: "finding", ...F, value: "the notes name another host's laptop, not a tool", source: "the notes", evidence: "line 1", refs: [`job:${obj}/${file}`], answers: [q] })).entry : null;
+      const cov2 = (await rec(r.a0, coverage(q, ["input:disk.E01", `job:${obj}`], [`E-${abs.seq}`, "job:j000001/hits.txt", ...(seen ? [`E-${seen.seq}`] : [])], { looked_for: [term], supersedes: cov.seq, acquisition_none_why: "no source outside the evidence records it" }))).entry;
+      ans = (await rec(r.a1, { kind: "answer", section: `question:${q}`, value: `No evidence of the event of question ${q} was found on the disk or the outputs`, reasoning: `E-${cov2.seq}`, ...A, result: "bounded_negative", supersedes: ans.seq })).entry;
+      await SW.awaitSweeps(r.S);
+      await attest(r.a2, { seq: cov2.seq, how: "ran the search again", review: REVIEW });
+      await close(r.a0, id, `E-${cov2.seq}`);
+    }
+    return r.S;
+  },
+
+  /** Every question disposed; a result posted by another seat after the report was written as the finish began, with no resolution. */
+  "late-post-after-report": async (base) => {
+    const r = await newRun(base, "lpr", 1);
+    await established(r, "1");
+    for (const a of ["a0", "a1", "a2", "a3"]) await traceRow(r.S, a, "bash");
+    await publish(r.S, "a0", "# Report\n\n## 1. Who logged on, and when?\n\nSee E-3.\n");
+    const t = await FIN.finishTurn(r.a0, { output_file: "work/report.md" });
+    assert.equal(t.mine, true);
+    await pause(30);
+    await P.postMessage(r.a1, { tag: "result", body: "the timeline misses the second logon at 09:20" });
+    return r.S;
+  },
+
+  /** The coordinator's finish line passed and was recorded at a revision; then another seat objected to the report (an ack, which moves no revision). */
+  "racing-objection": async (base) => {
+    const r = await newRun(base, "rob", 1);
+    await established(r, "1");
+    for (const a of ["a0", "a1", "a2", "a3"]) await traceRow(r.S, a, "bash");
+    await publish(r.S, "a0", "# Report\n\n## 1. Who logged on, and when?\n\nSee E-3.\n");
+    const t = await FIN.finishTurn(r.a0, { output_file: "work/report.md" });
+    assert.equal(t.mine, true);
+    const c = await checkLedgerAnswers(r.S, ["1"]);
+    const run = { total: 1, passed: c.ok ? 1 : 0, source: "registry", checks: [{ cmd: "check-answers --sections 1", ok: c.ok, answers: { outcomes: c.outcomes, results: c.results, dispositions: c.dispositions, best_candidate: c.best_candidate, named: [] } }] };
+    const gate = await finishGate(r.S, run);
+    const verdict = P.finishLineVerdict({ ...run, gate }, false);
+    assert.equal(verdict.proceed, true, JSON.stringify(verdict));
+    const { revision } = await P.stateRevision(r.S);
+    await FIN.recordCheck(r.S, "a0", revision, { proceed: true, outcome: (verdict as { outcome: string }).outcome }, { ...run, gate });
+    const obj = await FIN.ackReport(r.a2, { verdict: "objection", why: "section 1 names the wrong logon" });
+    assert.ok(obj.ok, JSON.stringify(obj));
+    return r.S;
+  },
+
+  /**
+   * A run sealed by custody, resumed, and sealed again: the first verdict
+   * kept as custody.<time>.json, as a resume sets it aside, the second as
+   * custody.json. The continuation revises question 2 from partial to
+   * established on a new finding.
+   */
+  "resume-prefix": async (base) => {
+    const r = await newRun(base, "rpx", 2);
+    await established(r, "1");
+    const p = await partial(r, "2");
+    await attest(r.a3, {
+      seq: p.a.seq,
+      how: "re-read line 12 from job:j000002; no account field in the log",
+      ...ESTABLISHED,
+      answer_review: { ...ESTABLISHED.answer_review, parts: [{ part: "when", established: true, why: "line 12" }, { part: "which account", established: false, why: "the log keeps none", declared_open: `E-${p.lim.seq}` }] },
+    });
+    await SW.awaitSweeps(r.S);
+    const first = await takeCustody(r.S, { runsDir: r.runs, readOnly: true });
+    await writeFile(join(r.S, "custody.20260929T000000000Z.json"), `${JSON.stringify(first, null, 2)}\n`);
+    // The continuation.
+    const id = await lead(r.a0, "2", [{ source: "input:disk.E01", method: "read the disk's account records" }]);
+    const f2 = (await rec(r.a0, { kind: "finding", ...F, value: "the logon at 09:14 was the second account", source: "the disk", evidence: "an account record", refs: ["job:j000001/hits.txt"], answers: ["2"] })).entry;
+    const a2 = (await rec(r.a1, { kind: "answer", section: "question:2", value: "The second account, at 09:14", reasoning: `E-${p.f.seq} and E-${f2.seq}`, ...HIGH, result: "established", supersedes: p.a.seq })).entry;
+    await attest(r.a2, { seq: a2.seq, how: "re-read the account record from job:j000001", ...ESTABLISHED });
+    await close(r.a0, id, `E-${f2.seq}`);
+    const second = await takeCustody(r.S, { runsDir: r.runs, readOnly: true });
+    await writeFile(join(r.S, "custody.json"), `${JSON.stringify(second, null, 2)}\n`);
+    return r.S;
+  },
+
+  /**
+   * Three warnings and nothing else: a not-determinable answer whose
+   * reviewed coverage names no acquisition ask and no reason for none; a
+   * partial answer every review holds whole, attested established; an
+   * established answer that leaves out a finding another seat attested
+   * under its question's lead.
+   */
+  "warnings-only": async (base) => {
+    const r = await newRun(base, "wno", 3);
+    // Question 1: not determinable, no acquisition ask.
+    const id1 = await lead(r.a0, "1", [{ source: "input:logs/a.log", method: "search the log" }]);
+    const abs = (await rec(r.a0, { kind: "absence", value: "a logon", source: "inputs/logs/a.log", evidence: "a search", refs: ["job:j000002/hits.txt"], answers: ["1"] })).entry;
+    const cov = (await rec(r.a0, coverage("1", ["input:logs/a.log"], [`E-${abs.seq}`, "job:j000002/hits.txt"]))).entry;
+    await rec(r.a1, { kind: "answer", section: "question:1", value: "No evidence of who logged on was found in the log", reasoning: `E-${cov.seq}`, ...A, result: "not_determinable" });
+    await attest(r.a2, { seq: cov.seq, how: "ran the search again from job:j000002", review: REVIEW });
+    await close(r.a0, id1, `E-${cov.seq}`);
+    // Question 2: partial, every part held established, attested established.
+    const id2 = await lead(r.a0, "2", [{ source: "input:disk.E01", method: "read the disk" }]);
+    const f2 = (await rec(r.a0, { kind: "finding", ...F, value: "a remote tool's service entry", source: "the disk", evidence: "a registry key", refs: ["job:j000001/hits.txt"], answers: ["2"] })).entry;
+    const a2 = (await rec(r.a1, { kind: "answer", section: "question:2", value: "A remote tool was installed as a service", reasoning: `E-${f2.seq}`, ...HIGH, result: "partial" })).entry;
+    await attest(r.a3, { seq: a2.seq, how: "re-read the key from job:j000001", ...ESTABLISHED });
+    await close(r.a0, id2, `E-${f2.seq}`);
+    // Question 3: established, leaving out a finding another seat attested under its lead.
+    const id3 = await lead(r.a0, "3", [{ source: "input:disk.E01", method: "read the disk" }]);
+    assert.ok((await L.attachJob(r.S, "a0", "j000001", id3)).ok);
+    const cited = (await rec(r.a0, { kind: "finding", ...F, value: "a folder was deleted", source: "the disk", evidence: "the journal", refs: ["job:j000001/hits.txt"], answers: ["3"] })).entry;
+    const left = (await rec(r.a0, { kind: "finding", ...F, value: "a second folder was deleted", source: "the disk", evidence: "the journal", refs: ["job:j000001/hits.txt"], answers: ["3"] })).entry;
+    for (const seq of [cited.seq, left.seq]) await attest(r.a3, { seq, how: "re-read the journal from job:j000001/hits.txt" });
+    assert.ok((await L.recordInterpretations(r.S, "a0", left.seq, ["j000001"])).ok);
+    await close(r.a0, id3, `E-${cited.seq}`);
+    const a3 = (await rec(r.a1, { kind: "answer", section: "question:3", value: "A folder was deleted", reasoning: `E-${cited.seq}`, ...HIGH, result: "established" })).entry;
+    await attest(r.a2, { seq: a3.seq, how: "re-derived the cited finding", ...ESTABLISHED });
+    await SW.awaitSweeps(r.S);
+    return r.S;
+  },
+};
+
+// ---------------------------------------------------------------------------------------------
+// Writing the fixture
+// ---------------------------------------------------------------------------------------------
+
+/** What a run keeps that is not its history: locks, spills, the kickoff's leftovers. */
+const DROP = new Set(["locks"]);
+
+/** Prunes `dir` of what DROP names, links, locks and logs, and of empty directories; true when anything is left. */
+async function prune(dir: string): Promise<boolean> {
+  let kept = false;
+  for (const d of await readdir(dir, { withFileTypes: true })) {
+    const p = join(dir, d.name);
+    if (d.isDirectory()) {
+      if (DROP.has(d.name)) await rm(p, { recursive: true, force: true });
+      else if (await prune(p)) kept = true;
+      else await rmdir(p);
+    } else if (d.isSymbolicLink() || d.name.endsWith(".lock") || d.name.endsWith(".log")) await rm(p, { force: true });
+    else kept = true;
+  }
+  return kept;
+}
+
+async function writeCase(name: string, build: (base: string) => Promise<string>): Promise<void> {
+  const base = await mkdtemp(join(tmpdir(), `contract-${name}-`));
+  try {
+    const S = await build(base);
+    const dest = join(HERE, name, "run");
+    await rm(dest, { recursive: true, force: true });
+    await mkdir(join(HERE, name), { recursive: true });
+    spawnSync("chmod", ["-R", "u+w", S]);
+    await rename(S, dest).catch(async () => {
+      const cp = spawnSync("cp", ["-Rp", S, dest]);
+      assert.equal(cp.status, 0, String(cp.stderr));
+    });
+    await prune(dest);
+    // A history is relocatable: nothing in it names where it was made.
+    const leaks = spawnSync("grep", ["-rl", base, dest], { encoding: "utf8" }).stdout.trim();
+    assert.equal(leaks, "", `${name}: these files name the directory the run was made in: ${leaks}`);
+    const bytes = spawnSync("du", ["-sk", dest], { encoding: "utf8" }).stdout.split("\t")[0];
+    process.stdout.write(`${name}: ${bytes} KiB${existsSync(join(HERE, name, "expect.json")) ? "" : " (no expect.json yet: write it from the ADRs)"}\n`);
+  } finally {
+    spawnSync("chmod", ["-R", "u+w", base]);
+    await rm(base, { recursive: true, force: true });
+  }
+}
+
+const wanted = process.argv.slice(2);
+for (const [name, build] of Object.entries(CASES)) {
+  if (wanted.length && !wanted.includes(name)) continue;
+  await writeCase(name, build);
+}

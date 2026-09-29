@@ -1,0 +1,41 @@
+{
+  "case": "Two reviewed bounded negatives; then evidence added. Question 1 stays on its older coverage; question 2 is examined again against the new import on a coverage record naming it, which another seat reviews.",
+  "design": [
+    "docs/adr/0013 'After the first calibration run', first rule: an evidence addition makes stale every standing bounded negative whose coverage was recorded before the addition's entry (evidence_stale); it clears only when the answer cites a coverage record recorded after it that names the import among its objects and that another seat attested.",
+    "docs/adr/0015 decision 8: readiness holds on what the ledger gate holds, and on a stale answer."
+  ],
+  "policies": [
+    "as run"
+  ],
+  "expect": {
+    "questions": {
+      "question:1": {
+        "disposition": null,
+        "best_candidate": false,
+        "readiness_holds": true,
+        "readiness_includes": [
+          "evidence_stale"
+        ],
+        "defects_include": [
+          "evidence_stale"
+        ],
+        "warnings": []
+      },
+      "question:2": {
+        "disposition": "bounded_negative",
+        "best_candidate": false,
+        "readiness_holds": false,
+        "defects_include": [],
+        "warnings": []
+      }
+    },
+    "ready": false,
+    "verdict": {
+      "proceed": false,
+      "failing": "check:check-answers"
+    },
+    "done": "held",
+    "late": [],
+    "agreement": []
+  }
+}

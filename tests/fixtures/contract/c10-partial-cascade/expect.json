@@ -1,0 +1,167 @@
+{
+  "case": "The run s9722fa (c10), reconstructed: six goal questions under --stop operator, every one a partial answer with medium confidence resting on a finding and citing the limitation that bounds its open part, each reviewed best_candidate by another seat.",
+  "design": [
+    "docs/adr/0015 'After the run s9722fa': 'A best candidate' concerns only an answer that claims established; a partial answer is held to its own bar, never to a strength; readiness, the answers check and the report read one test.",
+    "docs/adr/0013 'The end of a run, under every stop policy': partial is a disposition under the bar; the run ends examination_limited on it.",
+    "docs/adr/0015 decision 8, as it stood at 3338e3c: under the operator's stop policy readiness also held a best candidate, by the strength of the reviews of any answer that is not a negative; the answers check held only an answer it found answered."
+  ],
+  "policies": [
+    "as run"
+  ],
+  "expect": {
+    "questions": {
+      "question:1": {
+        "disposition": "partial",
+        "best_candidate": false,
+        "readiness_holds": false,
+        "defects_include": [],
+        "warnings": [],
+        "report_best_candidate": false
+      },
+      "question:2": {
+        "disposition": "partial",
+        "best_candidate": false,
+        "readiness_holds": false,
+        "defects_include": [],
+        "warnings": [],
+        "report_best_candidate": false
+      },
+      "question:3": {
+        "disposition": "partial",
+        "best_candidate": false,
+        "readiness_holds": false,
+        "defects_include": [],
+        "warnings": [],
+        "report_best_candidate": false
+      },
+      "question:4": {
+        "disposition": "partial",
+        "best_candidate": false,
+        "readiness_holds": false,
+        "defects_include": [],
+        "warnings": [],
+        "report_best_candidate": false
+      },
+      "question:5": {
+        "disposition": "partial",
+        "best_candidate": false,
+        "readiness_holds": false,
+        "defects_include": [],
+        "warnings": [],
+        "report_best_candidate": false
+      },
+      "question:6": {
+        "disposition": "partial",
+        "best_candidate": false,
+        "readiness_holds": false,
+        "defects_include": [],
+        "warnings": [],
+        "report_best_candidate": false
+      }
+    },
+    "ready": true,
+    "verdict": {
+      "proceed": true,
+      "outcome": "examination_limited"
+    },
+    "done": "proceeds",
+    "late": [],
+    "agreement": []
+  },
+  "rules": {
+    "3338e3c": {
+      "why": "The rule the run s9722fa ran under: readiness held all six partials as best candidates while the answers check and the finish gate disposed them partial; the coordinator read that as 'best_candidate is not a disposition' and the seats walked every answer down to not determinable.",
+      "questions": {
+        "question:1": {
+          "disposition": "partial",
+          "best_candidate": false,
+          "readiness_holds": true,
+          "readiness_includes": [
+            "best_candidate"
+          ],
+          "report_best_candidate": true
+        },
+        "question:2": {
+          "disposition": "partial",
+          "best_candidate": false,
+          "readiness_holds": true,
+          "readiness_includes": [
+            "best_candidate"
+          ],
+          "report_best_candidate": true
+        },
+        "question:3": {
+          "disposition": "partial",
+          "best_candidate": false,
+          "readiness_holds": true,
+          "readiness_includes": [
+            "best_candidate"
+          ],
+          "report_best_candidate": true
+        },
+        "question:4": {
+          "disposition": "partial",
+          "best_candidate": false,
+          "readiness_holds": true,
+          "readiness_includes": [
+            "best_candidate"
+          ],
+          "report_best_candidate": true
+        },
+        "question:5": {
+          "disposition": "partial",
+          "best_candidate": false,
+          "readiness_holds": true,
+          "readiness_includes": [
+            "best_candidate"
+          ],
+          "report_best_candidate": true
+        },
+        "question:6": {
+          "disposition": "partial",
+          "best_candidate": false,
+          "readiness_holds": true,
+          "readiness_includes": [
+            "best_candidate"
+          ],
+          "report_best_candidate": true
+        }
+      },
+      "ready": false,
+      "verdict": {
+        "proceed": true,
+        "outcome": "examination_limited"
+      },
+      "agreement": [
+        {
+          "section": "question:1",
+          "kind": "readiness_holds_disposed"
+        },
+        {
+          "section": "question:2",
+          "kind": "readiness_holds_disposed"
+        },
+        {
+          "section": "question:3",
+          "kind": "readiness_holds_disposed"
+        },
+        {
+          "section": "question:4",
+          "kind": "readiness_holds_disposed"
+        },
+        {
+          "section": "question:5",
+          "kind": "readiness_holds_disposed"
+        },
+        {
+          "section": "question:6",
+          "kind": "readiness_holds_disposed"
+        },
+        {
+          "section": "run",
+          "kind": "readiness_not_ready_gate_clear"
+        }
+      ]
+    }
+  }
+}

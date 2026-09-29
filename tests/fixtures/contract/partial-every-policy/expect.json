@@ -1,0 +1,39 @@
+{
+  "case": "A partial answer on a finding, its review holding the parts the answer claims and the open part as the answer declares it (declared_open names the limitation); the other question established and attested.",
+  "design": [
+    "docs/adr/0013 'The end of a run, under every stop policy': one rule under every stop policy; partial is a disposition under the bar; the run ends examination_limited on it.",
+    "docs/adr/0015 'After the run s9722fa': a partial answer's review attests the answer's own claims; a part it declares open, held so, does not cap the review; a disposition that only limits the run never holds readiness, under any policy."
+  ],
+  "policies": [
+    "operator",
+    "cap-pause",
+    "cap-stop"
+  ],
+  "expect": {
+    "questions": {
+      "question:1": {
+        "disposition": "partial",
+        "best_candidate": false,
+        "readiness_holds": false,
+        "defects_include": [],
+        "warnings": [],
+        "report_best_candidate": false
+      },
+      "question:2": {
+        "disposition": "established",
+        "best_candidate": false,
+        "readiness_holds": false,
+        "defects_include": [],
+        "warnings": []
+      }
+    },
+    "ready": true,
+    "verdict": {
+      "proceed": true,
+      "outcome": "examination_limited"
+    },
+    "done": "proceeds",
+    "late": [],
+    "agreement": []
+  }
+}

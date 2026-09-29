@@ -1,0 +1,12 @@
+{
+  "name": "main",
+  "purpose": "Primary thread. Everyone reads it; the harness posts here.",
+  "created_by": "system",
+  "created_at": "2026-09-29T10:10:01.425Z",
+  "members": [
+    "a0",
+    "a1",
+    "a2",
+    "a3"
+  ]
+}

@@ -1,0 +1,42 @@
+{
+  "case": "A material bounded negative on its coverage record, which no seat other than its authors has reviewed; the other question established and attested.",
+  "design": [
+    "docs/adr/0013 decision 7: a material negative stands 'negative (unreviewed)' until a seat that recorded neither the answer nor its coverage attests it with a review; the finish line refuses while one is unreviewed.",
+    "docs/adr/0013 'The end of a run': a bounded negative is a disposition only resting on a coverage record another seat reviewed.",
+    "docs/adr/0015 decision 8: readiness holds on what the ledger gate holds (a negative unreviewed)."
+  ],
+  "policies": [
+    "as run"
+  ],
+  "expect": {
+    "questions": {
+      "question:1": {
+        "disposition": "established",
+        "best_candidate": false,
+        "readiness_holds": false,
+        "defects_include": [],
+        "warnings": []
+      },
+      "question:2": {
+        "disposition": null,
+        "best_candidate": false,
+        "readiness_holds": true,
+        "readiness_includes": [
+          "negative_unreviewed"
+        ],
+        "defects_include": [
+          "negative_unreviewed"
+        ],
+        "warnings": []
+      }
+    },
+    "ready": false,
+    "verdict": {
+      "proceed": false,
+      "failing": "check:check-answers"
+    },
+    "done": "held",
+    "late": [],
+    "agreement": []
+  }
+}

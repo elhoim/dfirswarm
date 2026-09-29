@@ -1,0 +1,23 @@
+{
+  "v": 2,
+  "import": "ev-0001",
+  "mode": "evidence",
+  "class": "acquired_evidence",
+  "at": "2026-09-29T10:10:01.648Z",
+  "supplied_by": "operator",
+  "via": "cli",
+  "from": "/var/folders/g0/kchc1pgj0nj8nx2vgrqwhj0h0000gn/T/contract-evidence-glQSIc/proxy.csv",
+  "why": "the proxy export the network team kept",
+  "files": [
+    {
+      "path": "proxy.csv",
+      "sha256": "635baf1b6813586f8e967f77595742dee689338781867402bd308cdcccd6797a",
+      "bytes": 19
+    }
+  ],
+  "manifest_sha256": "851849deaa03ed8e9f0019d7b3771afbcf3b798d00622888bad41aae25273e70",
+  "permitted_use": "evidence: a finding may rest on it as on the original evidence, named as material from outside the original set",
+  "inventory_rev": 1,
+  "ledger_seq": 6,
+  "lead_seq": 4
+}

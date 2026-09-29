@@ -1,0 +1,241 @@
+{
+  "at": "2026-09-29T10:10:02.122Z",
+  "run": null,
+  "isolation": null,
+  "previous": null,
+  "inputs": {
+    "files": 2,
+    "bytes": 20,
+    "unchanged": false,
+    "complete": true,
+    "changed": [],
+    "missing": [
+      "inputs/disk.E01",
+      "inputs/logs/a.log"
+    ],
+    "added": [],
+    "skipped": [],
+    "unreadable": [],
+    "checked": {
+      "files": 0,
+      "links": 0,
+      "special": 0
+    },
+    "digests_compared": {
+      "sha256": 0,
+      "md5": 0,
+      "sha1": 0
+    },
+    "manifest_sha256": "abca337a41fd7d15a98093b84cc06ac208e6602de993df1846844d65a37c2dd0",
+    "manifest_anchored": null,
+    "links": {
+      "checked": 0,
+      "moved": []
+    }
+  },
+  "sessions": {
+    "files": [],
+    "digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "not_files": []
+  },
+  "tool_outputs": {
+    "referenced": 0,
+    "verified": 0,
+    "missing": [],
+    "mismatched": [],
+    "refused": [],
+    "rereferenced": [],
+    "foreign": []
+  },
+  "trace": {
+    "lines": 0,
+    "intact": false,
+    "detail": "no trace",
+    "unverified": 0,
+    "operator_actions": 0,
+    "disputed": 0,
+    "spilled": [],
+    "gaps": [],
+    "clock": [],
+    "sender_lost": []
+  },
+  "ledger": {
+    "entries": 5,
+    "chained": 5,
+    "intact": true,
+    "detail": "5 of 5 entries chained",
+    "missing_from_ledger": [],
+    "not_on_trace": [],
+    "held_to": "nothing (no readable trace)",
+    "claimed_by_seat": []
+  },
+  "vms": null,
+  "vm_records": null,
+  "artifacts": {
+    "files": 0,
+    "bytes": 0,
+    "skipped": 0,
+    "index_sha256": "9daefd7114cab44767192a281f9938ea8e395838c3f594cf9fada9d70bf399b2"
+  },
+  "model_gateway": null,
+  "store": null,
+  "seal": {
+    "trace": {
+      "lines": 0,
+      "bytes": 0,
+      "last_line_sha256": null
+    },
+    "ledger": {
+      "entries": 5,
+      "head": "540081100b35e61858a9289f2f4034bc75c72d09a0a4cebd14e7168523476582"
+    },
+    "attestations": {
+      "lines": 2,
+      "head": "7aaf10b80aeb9a092e682ea4dd2f020caa2b822388f3bbde77dbc473dc41aa9c"
+    },
+    "disputes": {
+      "lines": 0,
+      "head": null
+    },
+    "journal": null,
+    "model_gateway": null,
+    "leads": {
+      "lines": 4,
+      "head": "55676a0acfa421d594fbc471b1a869fc04fea8528a58e69533da74ba5e30ef17"
+    }
+  },
+  "attestations": {
+    "lines": 2,
+    "intact": true,
+    "detail": "2 lines, chain intact"
+  },
+  "disputes": null,
+  "leads": {
+    "lines": 4,
+    "intact": true,
+    "detail": "4 events, chain intact"
+  },
+  "questions": null,
+  "network": null,
+  "requests": null,
+  "sweeps": null,
+  "finish": null,
+  "case_policy": null,
+  "operator": null,
+  "acquisition": null,
+  "checks": [
+    {
+      "name": "evidence",
+      "status": "failed",
+      "reason": "0 changed, 2 missing, 0 added",
+      "expected": 2,
+      "checked": 0
+    },
+    {
+      "name": "acquisition hashes",
+      "status": "not_applicable",
+      "reason": "none were given at kickoff (--inputs-hashes)"
+    },
+    {
+      "name": "sessions",
+      "status": "not_applicable",
+      "reason": "no session files",
+      "expected": 0,
+      "checked": 0
+    },
+    {
+      "name": "kept outputs",
+      "status": "not_applicable",
+      "reason": "no kept output was referenced on the trace (tool work may still have run as jobs)",
+      "expected": 0,
+      "checked": 0
+    },
+    {
+      "name": "trace",
+      "status": "unavailable",
+      "reason": "no trace"
+    },
+    {
+      "name": "ledger",
+      "status": "passed",
+      "checked": 5
+    },
+    {
+      "name": "ledger attestations",
+      "status": "passed",
+      "checked": 2
+    },
+    {
+      "name": "lead register",
+      "status": "passed",
+      "checked": 4
+    },
+    {
+      "name": "model gateway log",
+      "status": "not_applicable",
+      "reason": "the run's model calls did not go through the host's gateway"
+    },
+    {
+      "name": "VMs",
+      "status": "not_applicable",
+      "reason": "a host run"
+    },
+    {
+      "name": "work files",
+      "status": "passed",
+      "checked": 0
+    },
+    {
+      "name": "store",
+      "status": "not_applicable",
+      "reason": "the run had no job service"
+    },
+    {
+      "name": "operator audit",
+      "status": "not_applicable",
+      "reason": "no runs/operator-audit.jsonl beside the run"
+    }
+  ],
+  "timing": {
+    "phases": {
+      "setting the previous verdict aside": 0,
+      "the evidence re-hash": 1,
+      "the session seal": 0,
+      "the trace": 1,
+      "the kept-output check": 0,
+      "the ledger": 1,
+      "the model gateway log": 0,
+      "the VM check": 0,
+      "the artifact index": 0,
+      "the store": 1
+    },
+    "evidence_bytes": 0,
+    "evidence_mb_per_s": null,
+    "total_ms": 4
+  },
+  "models": {
+    "team": [
+      {
+        "agent": "a0",
+        "model": null
+      },
+      {
+        "agent": "a1",
+        "model": null
+      },
+      {
+        "agent": "a2",
+        "model": null
+      },
+      {
+        "agent": "a3",
+        "model": null
+      }
+    ],
+    "gateway_answered": null
+  },
+  "time_reference": null,
+  "not_reached": [],
+  "incomplete": null,
+  "summary": "EVIDENCE CHANGED: 0 changed, 2 missing, 0 added · 0 session files sealed · 0/0 kept outputs verified · NO TRACE · ledger 5 entries, all chained, chain intact (not held to the trace: there is no readable trace) · 2 ledger attestations, chain intact · 4 lead events, chain intact · 0 work files indexed (artifacts.json) · checks: 4 passed, 1 failed, 0 incomplete, 1 unavailable, 7 not applicable (evidence FAILED: 0 changed, 2 missing, 0 added; trace UNAVAILABLE: no trace) · anchors are the operator's own files beside the run: they hold the agents to account; a signature and an external timestamp hold the verdict itself"
+}
