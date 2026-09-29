@@ -45,6 +45,7 @@ import type { Mount, WorkerSpec } from "./vm.ts";
 import { jobNetworkHosts } from "./net-grants.ts";
 import { indexOutputs, objectsMatch, opMatch, rankSimilar, reuseOf, sameAsOf, sameAsView, type Reuse, type SameAs, type Similar } from "./job-reuse.ts";
 import { derivedFrom, derivedSensitivity, ownSensitivity, sensitiveIndex, snapshotObjects, type Sensitivity } from "./output-hygiene.ts";
+import { writeRefused, writeRefusedWords, type WriteRefused } from "./job-write-refused.ts";
 
 export type JobKind = "tool" | "command" | "recipe" | "detect" | "import";
 
@@ -275,6 +276,13 @@ export type JobRecord = {
    * in, for the images' upkeep; generic, never a tool's own message.
    */
   program_missing?: { program: string | null; profile: string | null; image: string };
+  /**
+   * A write its worker refused (job-write-refused.ts): it ended non-zero and
+   * its stdout, stderr or a stderr file it kept says "Read-only file system",
+   * or "Permission denied" on a path outside what it may write. Its reason
+   * says so, names $OUT, and says what to do; generic, never a tool's own.
+   */
+  write_refused?: WriteRefused;
   /** Its outputs are sensitive, decided when they were sealed (output-hygiene.ts): run with secret_output, or made from a sensitive output. */
   sensitive?: Sensitivity;
 };
@@ -1501,6 +1509,14 @@ export class JobService {
       job.program_missing = { program: missing, profile: chosen.profile ?? job.spec.profile ?? null, image: chosen.ref };
       await this.journal.append({ type: "job_program_missing", job: job.id, attempt: job.attempt, exit, ...job.program_missing });
     }
+    // A write its worker refused: the run is read-only there, only $OUT (and
+    // its control directory) writable, as the worker and the host name them.
+    const writable = [...new Set([this.outPath(job), st.out, st.ctl, ...accessible.filter((a) => a.access.startsWith("read-write")).map((a) => a.path)])];
+    const refused = !cancelled && !stopped && !missing && exit !== null && exit !== 0 && exit !== 124 && exit !== 137 ? await writeRefused({ ctl: st.ctl, out: st.out, cwd: this.S, writable }).catch(() => null) : null;
+    if (refused) {
+      job.write_refused = refused;
+      await this.journal.append({ type: "job_write_refused", job: job.id, attempt: job.attempt, exit, ...refused });
+    }
     const status: NonNullable<JobRecord["status"]> = cancelled ? "cancelled" : stopped ? "stopped" : exit === 124 || exit === 137 ? "timed_out" : exit === 0 ? "ok" : "failed";
     const reason =
       cancelled ??
@@ -1513,9 +1529,11 @@ export class JobService {
             ? "the source changed while it was copied (stdout.log names each file): import it again once it is still"
             : missing
               ? `exit ${exit}: a program it runs is not in its image${job.program_missing?.profile ? ` (profile ${job.program_missing.profile})` : ""}: ${missing === "?" ? "exit 127" : missing}`
-              : exit !== 0
-                ? `exit ${exit}`
-                : undefined);
+              : refused
+                ? `exit ${exit}: ${writeRefusedWords(refused, { job: job.id, out: this.outPath(job) })}`
+                : exit !== 0
+                  ? `exit ${exit}`
+                  : undefined);
     if (job.requester.agent === DERIVED) this.derivedSpent.push({ at: Date.now(), s: (Date.now() - started) / 1000 });
     await this.journal.append({ type: "job_finished", job: job.id, attempt: job.attempt, exit, status, ...(reason ? { reason } : {}), duration_ms: Date.now() - started, ...(result.digest ? { image_digest: result.digest } : {}), ...(result.boot_retry ? { boot_retry: result.boot_retry } : {}), ...(result.create_ms !== undefined ? { create_ms: result.create_ms } : {}) });
     Object.assign(job, { state: "finished", exit, status, reason, finished_at: new Date().toISOString(), ...(result.digest ? { image_digest: result.digest } : {}) });
