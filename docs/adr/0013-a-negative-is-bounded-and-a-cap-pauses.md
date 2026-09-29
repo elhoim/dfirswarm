@@ -622,40 +622,47 @@ before any new rule.
 - **What the record ties to a question, wherever it was recorded.**
   `lead_findings_uncited` covers every standing finding or event, under no
   dispute in force, that the question's answer does not reach and that is
-  tied to the question: one that names the question in its own `answers`,
-  whoever holds it (its author tied it to the question, so an answer that
-  leaves it out says why; one seat is enough); and one two seats hold (a
-  second author, or another seat's attest) that the lead register recorded
-  under a lead of the question, or whose `rel` links it to an entry the
-  answer cites (`answerCites`: its support, contrary, limitations and a
-  downgrade's evidence, the correction standing for each). A tie by a lead
-  or by `rel` alone asks for two seats (`questionUncited`). Each is listed
-  with its tie: "under L-n", "that names Q-n", "that names Q-n, held by
-  one seat", or "whose rel supports E-m, which the answer cites"; the
-  warning reads "answer #n (question:q) leaves out what the record ties to
-  Q-q: …", every entry, however many. A lead register whose chain is
-  broken says nothing of the leads; the ledger's own ties still count.
-  Registers and refs only, nothing read of what an entry says.
+  tied to the question:
+  - one two seats hold (a second author, or another seat's attest) that
+    the lead register recorded under a lead of the question, or that
+    names the question in its own `answers`, or whose `rel` links it to
+    an entry the answer cites (`answerCites`: its support, contrary,
+    limitations and a downgrade's evidence, the correction standing for
+    each);
+  - one seat's, only when it names the question in its own `answers` and
+    another question's standing answer relies on it (reaches it, directly
+    or through what that answer cites): its author tied it to this
+    question, and the record already rests a conclusion on it. The
+    motivating case is of this shape: a method established under another
+    question's lead, which that question's answer cites.
+
+  One seat's entry that no answer relies on does not count, and neither
+  does one tied by a lead or by `rel` alone (`questionUncited`). Counting
+  every finding a seat tags with a question (a rule tried on this branch
+  and replaced) warned every question of s993d40 and of sa2f2f2, up to 18
+  entries each: warning fatigue. Each entry is listed with its tie:
+  "under L-n", "that names Q-n", "whose rel supports E-m, which the answer
+  cites", or "that names Q-n, held by one seat, relied on by the answer to
+  Q-m"; the warning reads "answer #n (question:q) leaves out what the
+  record ties to Q-q: …", every entry, however many. A lead register whose
+  chain is broken says nothing of the leads; the ledger's own ties still
+  count. Registers and refs only, nothing read of what an entry says.
 - **Replayed** (this checkout, values-free, entries by id):
-  - s993d40, every question warned. Q-1: 7 entries (E-20, E-24, E-25,
-    E-31, E-36, E-45, E-75), all one seat's. Q-2: 7 (E-4, E-10, E-13,
-    E-16, E-23, E-35, E-42), one seat's. Q-3: 2 (E-44, E-57), one seat's.
-    Q-4: 7 (E-4, E-57, E-84, E-85, E-86, E-91, E-92): E-84 two seats'
-    (established under question 6's leads, naming question 4: the
-    motivating case), six one seat's. Q-5: 5 (E-1, E-45, E-51, E-96,
-    E-98), one seat's. Q-6: 18 (E-10, E-11, E-13, E-15, E-18, E-22, E-24,
-    E-25, E-27, E-30, E-33, E-35, E-55, E-70, E-82, E-83, E-84, E-93):
-    E-84 and E-93 two seats' under its leads, sixteen one seat's.
-  - sa2f2f2, every question warned, every entry one seat's. Q-1: 11 (E-7,
-    E-8, E-17, E-25, E-26, E-29, E-31, E-35, E-54, E-56, E-57). Q-2: 12
-    (E-5, E-7, E-8, E-10, E-13, E-17, E-28, E-48, E-49, E-50, E-66,
-    E-70). Q-3: 4 (E-1, E-46, E-120, E-121). Q-4: 9 (E-2, E-3, E-18,
-    E-73, E-82, E-118, E-119, E-120, E-121). Q-5: 2 (E-21, E-47). Q-6: 17
-    (E-4, E-15, E-25, E-37, E-38, E-40, E-43, E-44, E-47, E-48, E-49,
-    E-50, E-54, E-56, E-57, E-58, E-82).
-  - Under the two-seat rule s993d40 warned Q-4 and Q-6 and sa2f2f2
-    nothing. Whether answers that must say why they leave out one seat's
-    findings get better, or only longer, is for paired runs.
+  - s993d40. Q-1: 4 (E-20, E-31, E-36, E-75), one seat's, relied on by
+    the answers to Q-2 and Q-6. Q-2: 4 (E-10, E-13, E-16, E-35), one
+    seat's, relied on by Q-1's. Q-3: 1 (E-57), relied on by Q-5's. Q-4: 6
+    (E-57, E-84, E-85, E-86, E-91, E-92): E-84 two seats' (established
+    under question 6's leads, naming question 4), five one seat's relied
+    on by Q-1's, Q-2's or Q-5's. Q-5: 2 (E-96, E-98), relied on by Q-4's.
+    Q-6: 9 (E-10, E-13, E-15, E-18, E-22, E-30, E-35, E-84, E-93): E-84
+    and E-93 two seats' under its leads, seven one seat's relied on by
+    Q-1's, Q-3's or Q-5's.
+  - sa2f2f2. Q-1: 4 (E-26, E-29, E-31, E-35), relied on by Q-6's. Q-4 and
+    Q-6: 1 each (E-82), relied on by Q-5's. Q-2, Q-3 and Q-5: none.
+  - Under the two-seat rule s993d40 warned Q-4 (1 entry) and Q-6 (2) and
+    sa2f2f2 nothing; counting every finding a seat tags warned 46 entries
+    on s993d40 and 55 on sa2f2f2; this rule, 26 and 6. Whether the answers
+    get better for it is for paired runs.
 - **Request guidance.** Under `more_evidence: no` nothing suggests an ask
   (verified; the rule is "No ask to satisfy a rule" above): the record's
   reply, the warning and the prompt give `acquisition_none_why` naming the

@@ -24,15 +24,17 @@ question's leads had established, were told nothing when they decided. Now
   the reply to a lead's close or confirmation, for each question whose
   warnings the act changed; and `finish status`. None holds, none refuses.
 - `lead_findings_uncited` covers what the record ties to a question outside
-  its leads too: a finding or an event that names the question in `answers`,
-  even one seat's (its author tied it to the question), or one two seats hold
-  whose `rel` links it to an entry the answer cites; a tie by a lead or by
-  `rel` alone still asks for two seats. Each entry is listed with its tie, and
-  the warning reads "answer #n (question:q) leaves out what the record ties
-  to Q-q: …". Replayed, every question of s993d40 and of sa2f2f2 now carries
-  it (s993d40: 7, 7, 2, 7, 5 and 18 entries; sa2f2f2: 11, 12, 4, 9, 2 and 17,
-  all one seat's); on s993d40 question 4's list holds the method established
-  under question 6's leads that names question 4.
+  its leads too: a finding or an event two seats hold that names the
+  question in `answers`, or whose `rel` links it to an entry the answer
+  cites; and one seat's that names the question when another question's
+  standing answer relies on it (the record already rests a conclusion on
+  it). One seat's that no answer relies on does not count. Each entry is
+  listed with its tie, and the warning reads "answer #n (question:q) leaves
+  out what the record ties to Q-q: …". Replayed: s993d40 4, 4, 1, 6, 2 and 9
+  entries on its six questions (question 4's list holds the method
+  established under question 6's leads that names question 4); sa2f2f2 4 on
+  question 1 and 1 each on questions 4 and 6. Counting every finding a seat
+  tags, tried first, warned 46 and 55.
 - Request guidance: a question put to the operator says what observation
   would settle its question and what each possible answer changes (the
   prompt, `lead_close`, and the close's reply, `guidance`); a value read from
