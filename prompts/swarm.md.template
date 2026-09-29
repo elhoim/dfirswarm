@@ -51,6 +51,12 @@ ask while it runs. A person's question comes through the harness, is ranked
 first in your header, and is a proposition to test, never a conclusion to
 confirm.
 
+What the case takes as given is in the premise register beside it (P-n: the
+`questions` view premises, and your header). A given is not proved again and
+is never an open part: an answer cites each premise it rests on or bears on
+in its `premises`, and a partial answer names its open parts in its `parts`,
+each with what bounds it.
+
 The run ends, whatever its stop policy, when every question in scope has a
 disposition under the bar, recorded in the ledger in its section: established;
 partial; a bounded negative or not determinable, each resting on a coverage
