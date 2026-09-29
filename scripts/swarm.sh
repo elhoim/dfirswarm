@@ -9293,7 +9293,7 @@ cmd_metrics() {
 # nothing; no model call, no job, no VM.
 cmd_replay() {
   local id="${1:-}"
-  [[ -n "$id" && "$id" != -* ]] || die_usage "replay requires <id> [--checkout PATH] [--compare [A [B]]] [--stop-policy P[,P...]] [--deliveries] [--json] [--show-text]"
+  [[ -n "$id" && "$id" != -* ]] || die_usage "replay requires <id> [--checkout PATH] [--compare [A [B]]] [--stop-policy P[,P...]] [--deliveries] [--prepare-as STATE] [--json] [--show-text]"
   shift
   ensure_registry
   node --experimental-strip-types --no-warnings "$ROOT/scripts/replay.ts" "$id" --registry "$REGISTRY" "$@"
@@ -11535,7 +11535,7 @@ by sha256 and the release's detached ssh signature; it carries no signature of i
 EOF
       ;;
     replay) cat <<'EOF'
-  replay <id> [--checkout PATH] [--compare [A [B]]] [--stop-policy P[,P...]] [--deliveries] [--json] [--show-text]
+  replay <id> [--checkout PATH] [--compare [A [B]]] [--stop-policy P[,P...]] [--deliveries] [--prepare-as STATE] [--json] [--show-text]
 Reads a finished run's registers again under a harness's finish rules: the answers check (each
 check-answers line of the goal, as its own function), the finish gate and the finish line's verdict,
 readiness, the finish register (the coordinator, what is late against the report), the report's
@@ -11553,6 +11553,11 @@ are hashed before and after. The goal's other checks are its own commands: not r
                     each answer's record, each review offered for an answer, the reply to each attest
                     and to each close or confirmation of a lead, each read on the registers as they
                     stood at the act; and finish status at the end
+  --prepare-as STATE  a synthetic receipt on each copy for every broad extraction this checkout's
+                    census finds applies to the run's evidence (read in place, never written), in
+                    STATE (planned, attempted, produced, partial, failed, declined): which negatives
+                    the preparation hold would have held, and which it would have warned
+Each source's broad extraction is shown, by its receipts, with the questions held or warned on it.
 Values-free: codes, ids, counts and the harness's own words, never a record's text; --show-text adds
 the harness's lines whole, which quote records. It measures rules on a recorded history; what the
 agents would have done under another rule is not in it. Exit 0 replayed, 1 not (the reason on stderr).

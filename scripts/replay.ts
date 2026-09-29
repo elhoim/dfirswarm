@@ -5,8 +5,8 @@
  * "Measuring a rule change").
  *
  *   node --experimental-strip-types scripts/replay.ts <run-dir | run-id> [--registry FILE]
- *        [--checkout PATH] [--compare [A [B]]] [--stop-policy P[,P…]] [--deliveries] [--json] [--show-text]
- *   swarm.sh replay <run> [--checkout PATH] [--compare [A [B]]] [--stop-policy P] [--deliveries] [--json]
+ *        [--checkout PATH] [--compare [A [B]]] [--stop-policy P[,P…]] [--deliveries] [--prepare-as STATE] [--json] [--show-text]
+ *   swarm.sh replay <run> [--checkout PATH] [--compare [A [B]]] [--stop-policy P] [--deliveries] [--prepare-as STATE] [--json]
  *
  * The run is never written. Its directory is copied to a temporary one (a
  * clone where the file system makes one, APFS or a reflink), less what no
@@ -51,6 +51,19 @@
  * `git archive` into the temporary directory. `--stop-policy` evaluates the
  * copy as though the run's stop policy were each one given (operator,
  * cap-pause, cap-stop; the copy's budget.json only).
+ *
+ * Where the checkout reads the sources' broad extractions (the store
+ * journal's preparation receipts, extensions/preparation.ts), the
+ * projection shows each source's state, capability by capability, and the
+ * questions held or warned on it (docs/adr/0013, "A source's broad
+ * extraction before a negative on it"). `--prepare-as STATE` asks what a
+ * run from before the receipts would have met: this checkout's census asks
+ * its packs' broad extractions about the run's own evidence (read, never
+ * written; the run's packs, by id, as this checkout ships them), and each
+ * copy gets a synthetic receipt per source and capability that applies, in
+ * STATE (planned, attempted, produced, partial, failed or declined; one its
+ * pack declares the images cannot run is declined, as the hub would record
+ * it), by "replay", before it is evaluated.
  *
  * `--deliveries` reads where the checkout delivers the answers check's
  * warnings (docs/adr/0013, "Warnings where the decision is made"), act by
@@ -156,6 +169,15 @@ export type Projection = {
   seals: { verdicts: number; hold: number; broken: Array<{ verdict: string; broken: string[] }> };
   /** With --deliveries: where the checkout delivers the warnings, act by act (deliveriesOf). */
   deliveries?: Deliveries;
+  /**
+   * The sources' broad extractions, as the checkout reads the store
+   * journal's receipts (extensions/preparation.ts): each source with each
+   * capability's newest state and the outcome a negative is weighed
+   * against, and the questions a preparation holds (preparation_pending) or
+   * warns (preparation_missing), each with the sources. Null for a checkout
+   * that does not read them.
+   */
+  preparation?: PreparationProjection | null;
   /** What could not be evaluated, in the harness's or node's words. */
   errors: string[];
   /** The harness's lines whole (they quote records): only with --show-text. */
@@ -173,6 +195,13 @@ export type Projection = {
  */
 export type Delivery = { point: "record" | "review_offer" | "attest" | "lead_close" | "finish_status"; entry: number | null; lead?: string; on: string | null; by: string | null; at: string | null; sections: string[]; warnings: string[] };
 export type Deliveries = { acts: { record: number; review_offer: number; attest: number; lead_close: number }; delivered: Delivery[]; error: string | null };
+
+/** The sources' broad extractions, per source and capability, and the questions held or warned on them (ids and states only). */
+export type PreparationProjection = {
+  sources: Array<{ source: string; pending: boolean; produced: boolean; capabilities: Array<{ capability: string; recipe: string; state: string; outcome: string; released: boolean; by: string; synthetic: boolean }> }>;
+  held: Array<{ section: string; sources: string[] }>;
+  warned: Array<{ section: string; sources: string[] }>;
+};
 
 type Mod = Record<string, unknown>;
 // A module of the checkout under evaluation: its exports are read by name, and one that is missing is an error in the projection, never a crash.
@@ -255,6 +284,7 @@ const WARNING_CODES: ReadonlyArray<[string, RegExp]> = [
   ["lead_findings_uncited", /established under \S+'s leads and not in its answer/],
   ["lead_findings_uncited", /\) leaves out what two seats hold for \S+:/],
   ["lead_findings_uncited", /\) leaves out what the record ties to \S+:/],
+  ["preparation_missing", /weighed without a produced broad extraction of what it rests on/],
 ];
 
 /** A warning line's code and section, by the harness's own words for it. */
@@ -446,13 +476,19 @@ export async function project(harness: string, S: string, o: { showText?: boolea
   // names (a lead serving it still open, a question defect on it); readiness
   // holds it by an item on it. Under the operator's stop policy readiness
   // holds a route limitation too, which only limits the done (docs/adr/0015,
-  // 7 and 8): by design, never counted as a disagreement.
+  // 7 and 8): by design, never counted as a disagreement. An answer the
+  // check reads as answered while one of its own defects holds it (a
+  // bounded negative that says the event did not happen, held on its
+  // source's broad extraction) has no disposition in the check: the gate
+  // reads the outcome, and the finish line holds it through the check's
+  // verdict. The finish line holds it, as readiness does.
   const agreement: Array<{ section: string; kind: string }> = [];
   const finalOutcome = (o: string) => ["answered", "accepted", "withdrawn"].includes(o);
   for (const q of questions) {
     if (!q.gate || !q.section.startsWith("question:")) continue;
     const disposed = Boolean(q.gate.disposition) || finalOutcome(q.gate.outcome);
-    const gateHolds = !disposed || (gate?.defects ?? []).some((d) => gateSections(d).includes(q.section));
+    const heldByCheck = q.gate.outcome === "answered" && (q.check?.defects.length ?? 0) > 0;
+    const gateHolds = !disposed || heldByCheck || (gate?.defects ?? []).some((d) => gateSections(d).includes(q.section));
     const readyHolds = q.readiness.some((c) => c !== "route_limitation");
     if (ready && readyHolds && !gateHolds) agreement.push({ section: q.section, kind: "readiness_holds_disposed" });
     if (ready && !readyHolds && gateHolds) agreement.push({ section: q.section, kind: "readiness_clear_held" });
@@ -485,6 +521,7 @@ export async function project(harness: string, S: string, o: { showText?: boolea
 
   const seals = await sealCheck(harness, S, errors);
   const delivered = o.deliveries ? await deliveriesOf(S, FIN, ready) : undefined;
+  const preparation = await guard("the preparations", () => preparationOf(harness, S));
   const projection: Projection = {
     harness: { path: harness, commit: harnessCommit(harness) },
     goal: { source: doc?.source ?? (goalText ? "sandbox contract" : null), checks: checks.length, answers_checks: rows.length, not_replayed: others },
@@ -508,6 +545,7 @@ export async function project(harness: string, S: string, o: { showText?: boolea
     warnings_hold: warningsHold,
     seals,
     ...(delivered ? { deliveries: delivered } : {}),
+    preparation,
     errors,
   };
   if (o.showText) {
@@ -521,6 +559,101 @@ export async function project(harness: string, S: string, o: { showText?: boolea
     };
   }
   return projection;
+}
+
+/**
+ * The sources' broad extractions as the checkout reads the copy's store
+ * journal (extensions/preparation.ts): every source and capability, and,
+ * for each standing answer to a question the checkout's gate holds or warns
+ * on a preparation, the sources it does so for. Null for a checkout that
+ * reads no receipts. Refs and states only.
+ */
+async function preparationOf(harness: string, S: string): Promise<PreparationProjection | null> {
+  const PRm = await importFrom(harness, "extensions/preparation.ts");
+  const Pm = await importFrom(harness, "extensions/protocol.ts");
+  const need = ["readReceipts", "foldPreparation", "preparationFacts", "preparationFindings"];
+  if (!PRm || !Pm || need.some((n) => !fn(PRm, n)) || !fn(Pm, "readLedger") || !fn(Pm, "citedForQuestion") || !fn(Pm, "supersededBy")) return null;
+  type Src = { source: { ref: string; name: string; sha256: string }; pending: boolean; produced: boolean; capabilities: Array<{ capability: string; recipe: string; state: string; outcome: string; released: boolean; latest: { by: string }; decisive: { by: string } }> };
+  const receipts = (await fn(PRm, "readReceipts")!(S)) as unknown[];
+  const sources = (await fn(PRm, "foldPreparation")!(receipts)) as Map<string, Src>;
+  const entries = (await fn(Pm, "readLedger")!(S)) as Array<{ seq: number; kind: string; section?: string; hash?: string; support?: unknown }>;
+  const facts = (await fn(PRm, "preparationFacts")!(S, entries)) as { sources: Map<string, Src> };
+  const replaced = (await fn(Pm, "supersededBy")!(entries)) as Map<number, number>;
+  const bySeq = new Map(entries.map((e) => [e.seq, e]));
+  const held: PreparationProjection["held"] = [];
+  const warned: PreparationProjection["warned"] = [];
+  const name = (x: Src) => x.source.ref || `sha256:${x.source.sha256}`;
+  for (const a of entries) {
+    if (a.kind !== "answer" || replaced.has(a.seq) || !a.section?.startsWith("question:")) continue;
+    const raw = a.section.slice("question:".length);
+    const id = fn(Pm, "sectionKey") ? String(fn(Pm, "sectionKey")!(raw)) : raw;
+    const cited = (await fn(Pm, "citedForQuestion")!(a, bySeq, replaced, id)) as Array<{ kind: string }>;
+    const found = (await fn(PRm, "preparationFindings")!(a, cited.filter((c) => c.kind === "coverage"), facts)) as { hold: Array<{ source: Src }>; warn: Array<{ source: Src }> };
+    if (found.hold.length) held.push({ section: a.section, sources: found.hold.map((h) => name(h.source)) });
+    if (found.warn.length) warned.push({ section: a.section, sources: found.warn.map((w) => name(w.source)) });
+  }
+  return {
+    sources: [...sources.values()]
+      .map((x) => ({ source: name(x), pending: x.pending, produced: x.produced, capabilities: x.capabilities.map((c) => ({ capability: c.capability, recipe: c.recipe, state: c.state, outcome: c.outcome, released: c.released, by: c.decisive.by, synthetic: c.latest.by === "replay" })) }))
+      .sort((a, b) => a.source.localeCompare(b.source)),
+    held,
+    warned,
+  };
+}
+
+/** A broad extraction this checkout's census finds applies to a run's input, for a synthetic receipt (--prepare-as). */
+export type SyntheticPreparation = { source: { sha256: string; ref: string; name: string; bytes?: number }; recipe: string; version: string; recipe_sha256: string; capability: string; exclusions: string[]; unavailable?: string };
+
+/**
+ * What this checkout's census finds applies to the run's own evidence: its
+ * packs' broad extractions (the run's packs by id, as this checkout ships
+ * them; every pack here when the run names none), each asked about each
+ * input, read in place and never written, in a scratch sandbox whose inputs/
+ * is a link to the run's. Nothing when the run's evidence is not there.
+ */
+export async function syntheticPreparations(run: RunRef, scratch: string): Promise<{ items: SyntheticPreparation[]; notes: string[] }> {
+  const notes: string[] = [];
+  const inputs = join(run.sandbox, "inputs");
+  if (!existsSync(inputs)) return { items: [], notes: [`${run.id} holds no evidence under inputs/ here: no broad extraction can be asked about it`] };
+  const ids = Array.isArray(run.entry?.packs) ? (run.entry!.packs as Array<{ id?: string }>).map((p) => String(p.id ?? "")).filter(Boolean) : [];
+  const packs = (ids.length ? ids : await readdir(join(ROOT, "packs")).catch(() => [] as string[])).map((id) => join(ROOT, "packs", id)).filter((d) => existsSync(join(d, "pack.json")));
+  for (const id of ids) if (!existsSync(join(ROOT, "packs", id, "pack.json"))) notes.push(`the run's pack ${id} is not in this checkout: its recipes are not asked`);
+  const S = join(scratch, "census", "run");
+  await mkdir(join(S, "catalog"), { recursive: true });
+  const { symlinkSync } = await import("node:fs");
+  symlinkSync(realpathSync(inputs), join(S, "inputs"));
+  const census = spawnSync("python3", [join(ROOT, "scripts", "evidence_catalog.py"), S, "--plan-only", ...packs.flatMap((d) => ["--recipes-from", d])], { encoding: "utf8", maxBuffer: 1 << 26 });
+  if (census.status !== 0) return { items: [], notes: [...notes, `the census did not run: ${String(census.stderr).trim().split("\n").slice(-2).join(" ")}`] };
+  const plan = JSON.parse(await readFile(join(S, "catalog", "plan.json"), "utf8")) as { preparations?: Array<{ input: string; recipe: string; target: { ref?: string } }> };
+  const files = (JSON.parse(await readFile(join(run.sandbox, "inputs.json"), "utf8").catch(() => "{}")) as { files?: Array<{ path: string; sha256?: string; bytes?: number }> }).files ?? [];
+  const items: SyntheticPreparation[] = [];
+  for (const p of plan.preparations ?? []) {
+    const f = files.find((x) => x.path === p.input);
+    if (!f?.sha256) {
+      notes.push(`${p.input} has no digest in the run's inputs.json: ${p.recipe} over it is not keyed`);
+      continue;
+    }
+    const [pack, name] = p.recipe.split("/");
+    const r = JSON.parse(await readFile(join(ROOT, "packs", pack!, "recipes", name!, "recipe.json"), "utf8")) as { version?: string; sha256?: string; capability?: string; exclusions?: string[]; unavailable?: string };
+    items.push({ source: { sha256: f.sha256, ref: p.target.ref ?? `input:${p.input.replace(/^inputs\//, "")}`, name: p.input, ...(typeof f.bytes === "number" ? { bytes: f.bytes } : {}) }, recipe: p.recipe, version: r.version ?? "", recipe_sha256: r.sha256 ?? "", capability: r.capability ?? p.recipe, exclusions: r.exclusions ?? [], ...(r.unavailable ? { unavailable: r.unavailable } : {}) });
+  }
+  return { items, notes };
+}
+
+/** The synthetic receipts on a copy's store journal: planned, then `state` (one the images cannot run, declined), each by "replay". */
+async function addSyntheticReceipts(copy: string, items: SyntheticPreparation[], state: string): Promise<void> {
+  if (!items.length) return;
+  const { Journal } = await import("./evidence-store.ts");
+  const j = await Journal.open(copy);
+  for (const x of items) {
+    const base = { type: "preparation", source: x.source, recipe: x.recipe, recipe_version: x.version, recipe_sha256: x.recipe_sha256, capability: x.capability, manifest: null, exclusions: x.exclusions, by: "replay", why: `synthetic: replay --prepare-as ${state}` };
+    if (x.unavailable) {
+      await j.append({ ...base, state: "declined", why: `synthetic: its pack declares it, and it cannot run in the job images: ${x.unavailable}` });
+      continue;
+    }
+    await j.append({ ...base, state: "planned" });
+    if (state !== "planned") await j.append({ ...base, state });
+  }
 }
 
 /** The registers a delivery point reads, each cut to the act: a chain cut at a line is a prefix of it, which verifies. */
@@ -809,7 +942,7 @@ export async function extractCommit(commit: string, dest: string): Promise<void>
 }
 
 /** The run's registers and custody, by size and sha256: taken before and after, so a replay that wrote the run says so. */
-async function registerDigest(sandbox: string): Promise<string> {
+export async function registerDigest(sandbox: string): Promise<string> {
   const rels = ["ledger/entries.jsonl", "ledger/attestations.jsonl", "ledger/disputes.jsonl", "ledger/sweeps.jsonl", "leads/leads.jsonl", "leads/finish.jsonl", "questions/questions.jsonl", "requests/requests.jsonl", "network/grants.jsonl", "network/fetches.jsonl", "store/journal.jsonl", "traces/events.jsonl", "budget.json", "custody.json"];
   const h = createHash("sha256");
   for (const rel of rels) {
@@ -859,6 +992,8 @@ export type Evaluation = { target: Target; policy: string; projection: Projectio
 export type Difference = { policy: string; section: string | null; field: string; a: string; b: string };
 export type Replay = {
   run: { id: string; case_id: string | null; stop_policy: string | null; harness_commit: string | null };
+  /** With --prepare-as: the state given, the broad extractions this checkout's census found apply to the run's evidence, and what could not be asked. */
+  prepared_as?: { state: string; items: Array<{ source: string; recipe: string; capability: string; unavailable: boolean }>; notes: string[] };
   copy: { left_out: string[]; links_removed: number };
   targets: Target[];
   evaluations: Evaluation[];
@@ -896,8 +1031,10 @@ async function evaluateIn(harness: string, copies: string[], showText: boolean, 
  * evaluated, the run's registers checked unchanged, and, for two
  * checkouts, every difference named.
  */
-export async function replay(o: { run: RunRef; targets: Target[]; policies?: StopPolicy[] | null; showText?: boolean; deliveries?: boolean; scratch: string }): Promise<Replay> {
+export async function replay(o: { run: RunRef; targets: Target[]; policies?: StopPolicy[] | null; showText?: boolean; deliveries?: boolean; prepareAs?: string | null; scratch: string }): Promise<Replay> {
   const before = await registerDigest(o.run.sandbox);
+  // --prepare-as: what this checkout's census finds applies to the run's evidence, asked once.
+  const synthetic = o.prepareAs ? await syntheticPreparations(o.run, o.scratch) : null;
   const goal = typeof o.run.entry?.goal === "string" ? (o.run.entry.goal as string) : await readFile(join(o.run.sandbox, "SWARM.md"), "utf8").catch(() => "");
   const briefs = answersChecks(goalChecks(goal)).map((c) => c.sectionsIn).filter((x): x is string => Boolean(x));
   const policies: Array<StopPolicy | null> = o.policies?.length ? o.policies : [null];
@@ -921,6 +1058,7 @@ export async function replay(o: { run: RunRef; targets: Target[]; policies?: Sto
       const anchor = join(dirname(o.run.sandbox), `${basename(o.run.sandbox)}.custody-anchor.json`);
       if (existsSync(anchor)) await copyFile(anchor, join(runs, `${o.run.id}.custody-anchor.json`)).catch(() => undefined);
       if (policy) await applyPolicy(copy, policy);
+      if (synthetic && o.prepareAs) await addSyntheticReceipts(copy, synthetic.items, o.prepareAs);
       copies.push(copy);
     }
     const results = await evaluateIn(target.harness, copies, o.showText === true, o.deliveries === true);
@@ -944,6 +1082,7 @@ export async function replay(o: { run: RunRef; targets: Target[]; policies?: Sto
     evaluations,
     differences,
     unchanged: before === after,
+    ...(synthetic && o.prepareAs ? { prepared_as: { state: o.prepareAs, items: synthetic.items.map((x) => ({ source: x.source.ref, recipe: x.recipe, capability: x.capability, unavailable: Boolean(x.unavailable) })), notes: synthetic.notes } } : {}),
   };
 }
 
@@ -1002,6 +1141,16 @@ function deliveryWords(d: Deliveries): string[] {
   return out;
 }
 
+/** The sources' broad extractions, values-free: each source's ref, each capability's recipe and state, and the questions held or warned on them. */
+function preparationWords(p: PreparationProjection): string[] {
+  if (!p.sources.length) return ["  preparation: no receipt on the store journal"];
+  const out = ["  preparation (each source's broad extraction, by the store journal's receipts):"];
+  for (const s of p.sources) out.push(`    ${s.source}: ${s.capabilities.map((c) => `${c.recipe} ${c.outcome}${c.state !== c.outcome ? ` (now ${c.state})` : ""}${c.synthetic ? ", synthetic" : ""}`).join("; ")}${s.pending ? " — pending" : ""}`);
+  out.push(`    held (preparation_pending): ${p.held.length ? p.held.map((h) => `${h.section} on ${h.sources.join(", ")}`).join("; ") : "none"}`);
+  out.push(`    warned (preparation_missing): ${p.warned.length ? p.warned.map((w) => `${w.section} on ${w.sources.join(", ")}`).join("; ") : "none"}`);
+  return out;
+}
+
 function countWords(codes: string[]): string[] {
   const m = new Map<string, number>();
   for (const c of codes) m.set(c, (m.get(c) ?? 0) + 1);
@@ -1024,6 +1173,10 @@ export function replayWords(r: Replay): string {
   const out: string[] = [];
   out.push(`Replay of ${r.run.id}${r.run.case_id ? ` (case ${r.run.case_id})` : ""}: its registers read again from a copy; the run is not written${r.unchanged ? " (its registers hashed the same before and after)" : ". ITS REGISTERS CHANGED WHILE THIS RAN: another process wrote the run, or this replay did; do not trust this reading"}.`);
   out.push(`The run's stop policy: ${r.run.stop_policy ?? "unknown"}; its harness: ${r.run.harness_commit ?? "not recorded"}. Left out of the copy: ${r.copy.left_out.join(", ") || "nothing"}${r.copy.links_removed ? `; ${r.copy.links_removed} link(s) removed, not followed` : ""}.`);
+  if (r.prepared_as) {
+    out.push(`Prepared as ${r.prepared_as.state} (synthetic receipts on each copy's store journal, the run untouched): ${r.prepared_as.items.length ? r.prepared_as.items.map((x) => `${x.recipe} over ${x.source}${x.unavailable ? " (declared, cannot run: declined)" : ""}`).join("; ") : "no broad extraction applies to the run's evidence"}.`);
+    for (const n of r.prepared_as.notes) out.push(`  ${n}`);
+  }
   const letters = "AB";
   for (const [i, t] of r.targets.entries()) out.push(`${r.targets.length > 1 ? `${letters[i]}: ` : "Checkout: "}${t.commit ? t.commit.slice(0, 12) : "unknown commit"}, ${t.how}`);
   for (const e of r.evaluations) {
@@ -1049,6 +1202,7 @@ export function replayWords(r: Replay): string {
     if (p.finish) out.push(`  finish: ${p.finish.lease ? `${p.finish.lease.holder} coordinates at generation ${p.finish.lease.generation}${p.finish.lease.segment ? ` (segment ${p.finish.lease.segment}${p.finish.lease.carried ? `, ${p.finish.lease.carried} post(s) carried from before the resume` : ""})` : ""}` : "no coordinator yet"}; ${!p.finish.prepared ? "prepares not read by this checkout" : p.finish.prepared.count ? `prepared ${p.finish.prepared.count} time(s), the last by ${p.finish.prepared.last!.by} at generation ${p.finish.prepared.last!.generation} with ${p.finish.prepared.last!.late} item(s) late${p.finish.prepared.last!.current ? "" : " (the lease or the report has moved since)"}` : "never prepared"}; ${p.finish.resolutions.count} resolution(s)${p.finish.resolutions.batches ? ` (${p.finish.resolutions.batches} batch(es))` : ""}; ${p.finish.late.length ? `late against the report: ${p.finish.late.map((x) => `${x.kind} ${x.id} by ${x.by}${x.tag ? ` (${x.tag})` : ""}`).join("; ")}` : "nothing late"}; ${p.finish.last_check ? `the last check ${p.finish.last_check.proceed ? `proceeded (${p.finish.last_check.outcome})` : "held"}${p.finish.last_check.current ? " at this revision" : ""}; ` : ""}the done ${p.finish.done}${p.finish.held_by.length ? ` (${p.finish.held_by.join(", ")})` : ""}`);
     out.push(`  seals: ${p.seals.verdicts ? `${p.seals.hold} of ${p.seals.verdicts} custody verdict(s) hold as a prefix${p.seals.broken.map((b) => `; ${b.verdict} does not: ${b.broken.join("; ")}`).join("")}` : "no custody verdict in the run"}`);
     out.push(`  agreement: ${p.agreement.length ? `readiness, the answers check and the gate disagree: ${p.agreement.map((g) => `${g.section} ${g.kind}`).join("; ")}` : "readiness, the answers check and the gate agree on every question"}${p.warnings_hold.length ? `; a warning holds: ${p.warnings_hold.join(", ")}` : ""}`);
+    if (p.preparation) out.push(...preparationWords(p.preparation));
     if (p.deliveries) out.push(...deliveryWords(p.deliveries));
     for (const x of p.errors) out.push(`  not evaluated: ${x}`);
     if (p.text) {
@@ -1069,7 +1223,10 @@ export function replayWords(r: Replay): string {
 // The command
 // ---------------------------------------------------------------------------------------------
 
-const USAGE = "usage: replay.ts <run-dir | run-id> [--registry FILE] [--checkout PATH] [--compare [A [B]]] [--stop-policy P[,P…]] [--deliveries] [--json] [--show-text]";
+const USAGE = "usage: replay.ts <run-dir | run-id> [--registry FILE] [--checkout PATH] [--compare [A [B]]] [--stop-policy P[,P…]] [--deliveries] [--prepare-as STATE] [--json] [--show-text]";
+
+/** The states --prepare-as takes: a receipt's. */
+const PREPARE_STATES = ["planned", "attempted", "produced", "partial", "failed", "declined"] as const;
 
 async function evaluateMain(args: string[]): Promise<void> {
   const harness = args[args.indexOf("--harness") + 1];
@@ -1102,6 +1259,7 @@ async function main(argv: string[]): Promise<number> {
   let json = false;
   let showText = false;
   let deliveries = false;
+  let prepareAs: string | null = null;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--registry") registry = argv[++i] ?? null;
@@ -1124,7 +1282,13 @@ async function main(argv: string[]): Promise<number> {
     } else if (a === "--json") json = true;
     else if (a === "--show-text") showText = true;
     else if (a === "--deliveries") deliveries = true;
-    else if (a === "-h" || a === "--help") {
+    else if (a === "--prepare-as") {
+      prepareAs = argv[++i] ?? "";
+      if (!(PREPARE_STATES as readonly string[]).includes(prepareAs)) {
+        process.stderr.write(`--prepare-as takes a receipt's state: ${PREPARE_STATES.join(", ")}${prepareAs ? `, not ${prepareAs}` : ""}\n`);
+        return 2;
+      }
+    } else if (a === "-h" || a === "--help") {
       process.stdout.write(`${USAGE}\n`);
       return 0;
     } else if (a.startsWith("--")) {
@@ -1152,7 +1316,7 @@ async function main(argv: string[]): Promise<number> {
       return { label: p, harness: path, how: path === ROOT ? `this checkout (${path})` : `the checkout at ${path}`, commit: harnessCommit(path) };
     };
     const targets: Target[] = compare === null ? [await named(current)] : compare.length === 0 ? [await named("frozen"), await named(current)] : compare.length === 1 ? [await named(compare[0]), await named(current)] : [await named(compare[0]), await named(compare[1])];
-    const r = await replay({ run, targets, policies, showText, deliveries, scratch });
+    const r = await replay({ run, targets, policies, showText, deliveries, prepareAs, scratch });
     process.stdout.write(json ? `${JSON.stringify(r, null, 2)}\n` : `${replayWords(r)}\n`);
     return r.unchanged && r.evaluations.every((e) => e.projection) ? 0 : 1;
   } catch (e) {

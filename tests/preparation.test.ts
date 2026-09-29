@@ -31,8 +31,9 @@ import { checkLedgerAnswers } from "../scripts/check-answers.ts";
 import { Journal, storePaths, verifyJournalText } from "../scripts/evidence-store.ts";
 import { JobService, type JobRecord } from "../scripts/job-service.ts";
 import { plannedPreparations, reconcilePreparation } from "../scripts/preparation.ts";
+import { registerDigest, replay, resolveRun } from "../scripts/replay.ts";
 import { localWorker } from "./job-service-worker.ts";
-import { A, coverage, dirs, F, ok, okq, planned, rec, REVIEW, run, sha } from "./negative-bar-fixture.ts";
+import { A, coverage, dirs, F, job, ok, okq, planned, rec, REVIEW, run, sha } from "./negative-bar-fixture.ts";
 
 const ROOT = join(import.meta.dirname, "..");
 const DISK = { sha256: sha("disk"), ref: "input:disk.E01", name: "inputs/disk.E01" };
@@ -422,4 +423,46 @@ test("the seats are told: what a broad extraction is, what to do with its lead, 
     "is warned (`preparation_missing`)",
     "The review offer opens with the state of each source's broad extraction",
   ]) assert.ok(prompt.includes(must), `prompts/worker-system.md does not say: ${must}`);
+});
+
+test("replay --prepare-as asks this checkout's packs about the run's own evidence, in place, and shows which negatives the hold would hold and which it would warn", async () => {
+  const r = await run();
+  // A phone's file-system tar, small: the mobile pack's broad extraction applies to it.
+  mkdirSync(join(r.S, "inputs"), { recursive: true });
+  const made = spawnSync("python3", ["-c", "import io,sys,tarfile\nwith tarfile.open(sys.argv[1],'w') as t:\n  i=tarfile.TarInfo('private/var/mobile/Library/SMS/sms.db'); i.size=3; t.addfile(i, io.BytesIO(b'sql'))", join(r.S, "inputs", "phone.tar")]);
+  assert.equal(made.status, 0, String(made.stderr));
+  const bytes = readFileSync(join(r.S, "inputs", "phone.tar"));
+  const inputs = JSON.parse(readFileSync(join(r.S, "inputs.json"), "utf8")) as { files: Array<Record<string, unknown>> };
+  inputs.files.push({ path: "inputs/phone.tar", sha256: (await import("node:crypto")).createHash("sha256").update(bytes).digest("hex"), bytes: bytes.length });
+  writeFileSync(join(r.S, "inputs.json"), JSON.stringify(inputs));
+  await job(r.S, "j000007", "hits.txt", { spec: { kind: "command", scope: "declared", inputs: ["input:phone.tar"], command: "search" } });
+  // Question 4 not determinable on coverage complete over the phone; question 1 on coverage that names it and is partial.
+  await planned(r.a0, "4", [{ source: "input:phone.tar", method: "search the phone" }]);
+  const f4 = ok(await rec(r.a0, { kind: "absence", value: "a start time", source: "the phone", evidence: "a search", refs: ["job:j000007/hits.txt"], answers: ["4"] })).entry;
+  const c4 = ok(await rec(r.a0, coverage("4", ["input:phone.tar"], [`E-${f4.seq}`, "job:j000007/hits.txt"], { acquisition_none_why: "none would settle it" }))).entry;
+  assert.equal(c4.coverage, "complete");
+  ok(await rec(r.a1, { kind: "answer", section: "question:4", value: "When it started cannot be determined from the phone", reasoning: `E-${c4.seq}`, ...A, result: "not_determinable" }));
+  await planned(r.a0, "1", [{ source: "input:phone.tar", method: "search the phone" }]);
+  const f1 = ok(await rec(r.a0, { kind: "absence", value: "a logon", source: "the log", evidence: "a search", refs: ["job:j000002/hits.txt"], answers: ["1"] })).entry;
+  const c1 = ok(await rec(r.a0, coverage("1", ["input:phone.tar", "input:logs/a.log"], [`E-${f1.seq}`, "job:j000002/hits.txt"], { acquisition_none_why: "none would settle it" }))).entry;
+  ok(await rec(r.a1, { kind: "answer", section: "question:1", value: "Who logged on cannot be determined", reasoning: `E-${c1.seq}`, ...A, result: "not_determinable" }));
+  const before = await registerDigest(r.S);
+  const scratch = await mkdtemp(join(tmpdir(), "prepare-as-"));
+  dirs.push(scratch);
+  const here = { label: "this checkout", harness: ROOT, how: "this checkout", commit: null };
+  const got = await replay({ run: await resolveRun(r.S), targets: [here], prepareAs: "attempted", scratch });
+  assert.equal(got.unchanged, true, "the run is not written");
+  assert.equal(await registerDigest(r.S), before);
+  assert.deepEqual(got.prepared_as?.items, [{ source: "input:phone.tar", recipe: "mobile-forensics/ios-ileapp", capability: "ios-artifacts", unavailable: false }]);
+  const p = got.evaluations[0]!.projection!;
+  assert.deepEqual(p.errors, []);
+  assert.deepEqual(p.preparation?.sources, [{ source: "input:phone.tar", pending: true, produced: false, capabilities: [{ capability: "ios-artifacts", recipe: "mobile-forensics/ios-ileapp", state: "attempted", outcome: "attempted", released: false, by: "replay", synthetic: true }] }]);
+  assert.deepEqual(p.preparation?.held, [{ section: "question:4", sources: ["input:phone.tar"] }]);
+  assert.deepEqual(p.preparation?.warned, [{ section: "question:1", sources: ["input:phone.tar"] }]);
+  assert.ok(p.questions.find((q) => q.section === "question:4")?.check?.defects.includes("preparation_pending"));
+  assert.ok(p.questions.find((q) => q.section === "question:1")?.warnings.includes("preparation_missing"));
+  // As produced: nothing held, nothing warned.
+  const produced = await replay({ run: await resolveRun(r.S), targets: [here], prepareAs: "produced", scratch: await mkdtemp(join(tmpdir(), "prepare-as-")) });
+  const q = produced.evaluations[0]!.projection!;
+  assert.deepEqual([q.preparation?.held, q.preparation?.warned], [[], []]);
 });

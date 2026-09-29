@@ -78,6 +78,8 @@ type Expect = {
   warning_words?: Record<string, { includes?: string[]; excludes?: string[] }>;
   /** What the history itself holds: the acquisition asks opened. */
   history?: { acquisition_requests?: number };
+  /** The sources' broad extractions (docs/adr/0013): each source's outcome per capability, and the questions held or warned on them, with their sources. */
+  preparation?: { sources: Record<string, string[]>; held: Record<string, string[]>; warned: Record<string, string[]> };
 };
 type Fixture = { name: string; case: string; design: string[]; policies: string[]; expect: Expect; rules?: Record<string, Expect & { why: string }> };
 
@@ -142,6 +144,13 @@ function holdTo(p: Projection, e: Expect, where: string): void {
     for (const [i, want] of e.deliveries.delivered.entries()) {
       for (const [k, v] of Object.entries(want)) assert.deepEqual(d.delivered[i]![k as keyof Delivery], v, `${where}: delivery ${i + 1}'s ${k} (${JSON.stringify(got)})`);
     }
+  }
+  if (e.preparation) {
+    const pp = p.preparation;
+    assert.ok(pp, `${where}: the checkout read the preparations`);
+    assert.deepEqual(Object.fromEntries(pp.sources.map((x) => [x.source, x.capabilities.map((c) => c.outcome)])), e.preparation.sources, `${where}: each source's broad extraction`);
+    assert.deepEqual(Object.fromEntries(pp.held.map((x) => [x.section, x.sources])), e.preparation.held, `${where}: what a preparation holds`);
+    assert.deepEqual(Object.fromEntries(pp.warned.map((x) => [x.section, x.sources])), e.preparation.warned, `${where}: what a preparation warns of`);
   }
   for (const [section, w] of Object.entries(e.warning_words ?? {})) {
     const lines = (p.text?.warnings ?? []).filter((l) => warningCode(l).section === section);

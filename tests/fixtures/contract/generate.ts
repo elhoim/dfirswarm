@@ -29,7 +29,7 @@ import * as SW from "../../../extensions/store-sweep.ts";
 import { checkLedgerAnswers } from "../../../scripts/check-answers.ts";
 import { custodyAnchorPath, takeCustody } from "../../../scripts/custody.ts";
 import { prepareResume } from "../../../scripts/resume.ts";
-import { sealTree, storePaths } from "../../../scripts/evidence-store.ts";
+import { Journal, sealTree, storePaths } from "../../../scripts/evidence-store.ts";
 import { finishGate } from "../../../scripts/finish-gate.ts";
 import { admitMaterial } from "../../../scripts/material.ts";
 
@@ -177,6 +177,38 @@ async function traceRow(S: string, agent: string, tool: string): Promise<void> {
 }
 
 const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** A receipt of the disk's broad extraction on the store journal, as the hub writes one (scripts/preparation.ts). */
+async function diskReceipt(S: string, state: string, o: Record<string, unknown> = {}): Promise<void> {
+  const j = await Journal.open(S);
+  await j.append({ type: "preparation", state, source: { sha256: sha("disk"), ref: "input:disk.E01", name: "inputs/disk.E01", bytes: 10 }, recipe: "computer-forensics-base/disk-timeline", recipe_version: "1.0.0", recipe_sha256: sha("disk-timeline"), capability: "disk-super-timeline", job: "j000009", manifest: null, exclusions: ["volume shadow copies", "unallocated space: nothing is carved"], by: "harness", ...o });
+}
+
+/**
+ * Three negatives over the disk while its broad extraction is under way:
+ * question 1 not determinable on coverage complete over the disk, question
+ * 2 (it asks whether something exists) a bounded negative that says the
+ * event did not happen, question 3 not determinable on coverage that names
+ * the disk but is partial (its job read the log). Each reviewed by another
+ * seat; the disk's extraction planned, then attempted.
+ */
+async function preparationNegatives(base: string, id: string): Promise<Run> {
+  const r = await newRun(base, id, 3, ["2"]);
+  await diskReceipt(r.S, "planned");
+  const negative = async (q: string, refs: string[], results: string[], answer: Record<string, unknown>) => {
+    const lid = await lead(r.a0, q, [{ source: "input:disk.E01", method: "search the disk" }]);
+    const abs = (await rec(r.a0, { kind: "absence", value: `the event of question ${q}`, source: "the disk", evidence: "a search", refs: [results[0]!], answers: [q] })).entry;
+    const cov = (await rec(r.a0, coverage(q, refs, [`E-${abs.seq}`, ...results], { acquisition_none_why: "no source outside the evidence records it" }))).entry;
+    await rec(r.a1, { kind: "answer", section: `question:${q}`, reasoning: `E-${cov.seq}`, ...A, ...answer });
+    await attest(r.a2, { seq: cov.seq, how: "ran the search again", review: REVIEW });
+    await close(r.a0, lid, `E-${cov.seq}`);
+  };
+  await negative("1", ["input:disk.E01"], ["job:j000001/hits.txt"], { value: "When it happened cannot be determined from the disk", result: "not_determinable" });
+  await negative("2", ["input:disk.E01"], ["job:j000001/hits.txt"], { value: "No remote tool was installed on the disk: the installation did not happen", result: "bounded_negative", asserts_absence: true });
+  await negative("3", ["input:disk.E01", "input:logs/a.log"], ["job:j000002/hits.txt"], { value: "What was deleted cannot be determined from the log", result: "not_determinable" });
+  await diskReceipt(r.S, "attempted", { when: new Date().toISOString() });
+  return r;
+}
 
 // ---------------------------------------------------------------------------------------------
 // The cases
@@ -630,6 +662,21 @@ const CASES: Record<string, (base: string) => Promise<string>> = {
    * says why no ask in the policy's words, question 2's says nothing of an
    * ask. Nobody opens one.
    */
+  /** The disk's broad extraction attempted: the absence negative and the one complete over the disk held, the plain one warned. */
+  "preparation-pending": async (base) => {
+    const r = await preparationNegatives(base, "ppd");
+    await SW.awaitSweeps(r.S);
+    return r.S;
+  },
+
+  /** Then the extraction failed, with why: nothing held, every negative over the disk warned. */
+  "preparation-failed-released": async (base) => {
+    const r = await preparationNegatives(base, "pfr");
+    await diskReceipt(r.S, "failed", { why: "log2timeline and psort not on PATH in this job image" });
+    await SW.awaitSweeps(r.S);
+    return r.S;
+  },
+
   "no-ceremonial-ask": async (base) => {
     const r = await newRun(base, "nca", 2);
     await mkdir(join(r.S, "network"), { recursive: true });
