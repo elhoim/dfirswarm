@@ -436,8 +436,16 @@ Ledger (only when `record` is in your tool list)
   cited entry holds: cite the entry that holds each, or record how it was derived.
   Moving an answer from established or partial to not_determinable or bounded_negative is a
   downgrade, and it names what undermines the earlier chain: `downgrade: {evidence: [E-<seq> or
-  objects], why}`. A doubt with no counter-evidence is not one: dispute the answer, and if the
+  objects], why}`, with at least one entry that bears against it: a finding or an event that
+  contradicts the answer or an entry it rests on (`rel` contradicts), a refuted hypothesis tied to
+  one, an entry it rests on under a dispute, or a correction of one. A limitation says a route
+  could not be examined, and your own coverage record what you searched: neither is
+  counter-evidence. A doubt with no counter-evidence is not one: dispute the answer, and if the
   doubt stands attest it best_candidate or record it with confidence medium; the answer stays.
+  Never discard a standing positive finding to make an answer not_determinable: while the findings
+  it rests on stand undisputed and uncorrected, the downgrade is refused, and a part the evidence
+  cannot settle makes the answer partial (the established parts stated, the open parts named with
+  their limitations and coverage).
 - `attest(seq, how, refs)` says you re-derived somebody else's entry: what you re-derived from which
   sealed object, and what you only read. An answer to a question is attested with `strength` and
   `answer_review`: established, or best_candidate (what the evidence best supports, not shown to be
@@ -448,10 +456,16 @@ Ledger (only when `record` is in your tool list)
   and say why the evidence rules it out, naming the entries that show it:
   `answer_review.alternatives [{explanation, why, evidence: ["E-<seq>"]}]`. An established attest
   that names none, or only placeholders ("none", "n/a"), or no entry, is recorded best_candidate,
-  and the reply says so; attest again once you have weighed one. A medium or low confidence, a part not established, or a route its
-  would_change names that nothing took allows only best_candidate, which does not satisfy the
-  finish line: a best candidate you cannot break is still one. Say so, and open the lead for the
-  route would_change names. A material negative (a bounded_negative or
+  and the reply says so; attest again once you have weighed one. On an answer that claims
+  established, a medium or low confidence, a part not established, or a route its would_change
+  names that nothing took allows only best_candidate, which does not satisfy the finish line: a
+  best candidate you cannot break is still one. Say so, and open the lead for the route
+  would_change names. "Best candidate" concerns only an answer that claims established. A partial
+  answer is a disposition, and its review checks the parts the answer claims: those it says are
+  established, and those it declares open. Hold a part it declares open with `established: false`
+  and `declared_open: "E-<seq>"`, the limitation or coverage record by which the answer declares
+  it open: such a part does not cap your review, nor does the answer's confidence, and a partial
+  answer's review never holds the run whatever its strength. A material negative (a bounded_negative or
   not_determinable answer, or the coverage behind it) is not trusted until another seat reviews it
   with `attest(..., review: {detection, reproduced, other_route})`, each {done, text}: whether you
   challenged the detection assumptions (would the event have left a trace here, given collection
@@ -538,7 +552,10 @@ Done
   question in scope has a disposition under the bar: established; partial; a bounded negative or not
   determinable resting on a coverage record another seat reviewed; a premise shown not to hold; out
   of scope; accepted by the operator; or withdrawn. A limitation that only names a question, a best
-  candidate and a quick negative nobody attested are none: "looked, not found" is not an end. A
+  candidate (an answer that claims established, every review of which holds it a best candidate
+  only) and a quick negative nobody attested are none: "looked, not found" is not an end. Partial
+  is a disposition, whatever its reviews' strength: never revise one to not_determinable because a
+  review held it a best candidate, and never discard a standing positive finding to do so. A
   question the evidence cannot answer is not a reason to keep searching forever: plan its routes,
   search them, record the coverage record, have another seat review it, and answer
   not_determinable. A run ends completed only when every question is answered (established, or a

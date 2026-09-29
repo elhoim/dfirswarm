@@ -70,9 +70,8 @@ import {
   verifyAttestationChain,
   verifyDisputeChain,
   verifyLedgerChain,
-  attestEstablishes,
-  citedForQuestion,
-  negativeByResult,
+  answerReviews,
+  heldAsBestCandidate,
   recordedConfidence,
   confidenceWords,
   type ForgedToolManifest,
@@ -1573,11 +1572,10 @@ function chainBlock(c: ChainQ, run: Run, memo: Map<number, EntryState>, limits: 
       ],
     });
     // How strongly other seats hold it (B2): established, or a best candidate only, and what capped it.
-    const target = a.hash ?? ledgerHash(a, "genesis");
-    const reviews = run.attestations.filter((x) => attestationAct(x) === "attest" && x.target === target && !a.authors.includes(x.by));
+    // Held a best candidate only when it claims established (heldAsBestCandidate, the test the finish reads).
+    const reviews = answerReviews(a, run.attestations);
     if (reviews.length) {
-      const best = !reviews.some(attestEstablishes);
-      body.push({ k: "p", s: [{ b: "Reviewed" }, `: ${reviews.map((x) => `by ${x.by} at ${x.at}, ${x.strength === "best_candidate" ? "a best candidate" : "established"}${x.capped?.length ? ` (capped: ${x.capped.join("; ")})` : ""}`).join("; ")}.`, ...(best && !negativeByResult(answerResult(a), citedForQuestion(a, run.bySeq, run.replaced, c.key)) ? [" ", { b: "A best candidate, not established: every review holds it so, and the run is examination-limited on it." } as Span] : [])] });
+      body.push({ k: "p", s: [{ b: "Reviewed" }, `: ${reviews.map((x) => `by ${x.by} at ${x.at}, ${x.strength === "best_candidate" ? "a best candidate" : "established"}${x.capped?.length ? ` (capped: ${x.capped.join("; ")})` : ""}`).join("; ")}.`, ...(heldAsBestCandidate(a, reviews) ? [" ", { b: "A best candidate, not established: every review holds it so, and the run is examination-limited on it." } as Span] : [])] });
     }
   }
   // The operator's acceptance of what is left.

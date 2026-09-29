@@ -63,11 +63,9 @@ import { fileURLToPath } from "node:url";
 import {
   acceptanceExcuses,
   answerSection,
-  attestationAct,
-  attestEstablishes,
-  citedForQuestion,
-  negativeByResult,
+  answerReviews,
   briefQuestions,
+  heldAsBestCandidate,
   ledgerGate,
   negativeReview,
   partialOutputCites,
@@ -329,8 +327,11 @@ export type ExternalFlag = { seq: number; via: string[]; classes: string[] };
  * on, under every stop policy. Established (a finding settles it); partial
  * (on a finding); a bounded negative or not determinable, each resting on a
  * standing coverage record another seat reviewed; a premise shown not to
- * hold (on a finding); out of scope. A best candidate is none (B2), and so
- * is anything a defect holds.
+ * hold (on a finding); out of scope. A best candidate (an answer that
+ * claims established, every review of which holds it a best candidate only)
+ * is none (B2), and so is anything a defect holds. A partial answer is a
+ * disposition whatever its reviews' strength: its review attests the parts
+ * it claims, and "best candidate" concerns only an established claim.
  */
 export const DISPOSITIONS = ["established", "partial", "bounded_negative", "not_determinable", "premise_not_supported", "out_of_scope"] as const;
 export type Disposition = (typeof DISPOSITIONS)[number];
@@ -341,7 +342,7 @@ export async function checkLedgerAnswers(sandbox: string, wanted: string[], exis
   const results: Record<string, string> = {};
   // Each section whose answer is a disposition under the bar, before the defects are counted (dropped below for any section a defect holds).
   const dispositions: Record<string, Disposition> = {};
-  // The sections whose answer every review holds a best candidate only (B2): limited, never answered.
+  // The sections whose answer claims established and every review holds a best candidate only (B2): limited, never answered.
   const bestCandidate: string[] = [];
   // A goal question the question register holds as withdrawn is no longer
   // one the run must answer: the goal keeps it, the register says who took
@@ -406,7 +407,7 @@ export async function checkLedgerAnswers(sandbox: string, wanted: string[], exis
       lines.push(`${section}: no answer${named.length ? `; examination-limited by ${named.map((l) => `#${l.seq} (${l.reason ?? "no reason"})`).join(", ")}` : ""}`);
       continue;
     }
-    const reviews = attestations.filter((x) => attestationAct(x) === "attest" && x.target === a.hash && !a.authors.includes(x.by));
+    const reviews = answerReviews(a, attestations);
     const acts = [
       ...reviews.map((x) => `attested by ${x.by}${x.strength === "best_candidate" ? " (best candidate)" : x.strength === "established" ? " (established)" : ""}`),
       ...disputes.filter((d) => d.act === "dispute" && d.target === a.hash).map((d) => `disputed by ${d.by}`),
@@ -504,12 +505,14 @@ export async function checkLedgerAnswers(sandbox: string, wanted: string[], exis
     } else if (rests && !a.inconclusive) [outcome, said] = ["answered", `answered by #${a.seq}, resting on ${rests}`];
     else if (rests || limited) [outcome, said] = [a.inconclusive ? "inconclusive" : "limited", `${a.inconclusive ? "inconclusive" : "examination-limited"}, #${a.seq} resting on ${rests ?? limited}`];
     // A review that holds the answer a best candidate only does not make it
-    // answered (B2): with no review that holds it established, it limits
-    // the run, and an operator-stopped run waits for the route or for the
-    // operator's acceptance.
-    // A negative, by the gate's own test (negativeByResult: a premise rejected on a search alone is one), is held to the negative review, never to a strength.
+    // answered (B2): with no review that holds it established, it has no
+    // disposition, and the run waits for the route or for the operator's
+    // acceptance. Only an answer that claims established is held so
+    // (heldAsBestCandidate, the test readiness reads too): a partial answer,
+    // a negative, out of scope and a premise shown not to hold are held to
+    // their own bars, never to a strength.
     let best = false;
-    if (outcome === "answered" && reviews.length && !reviews.some(attestEstablishes) && !negativeByResult(result, citedForQuestion(a, bySeq, replaced, id))) {
+    if (outcome === "answered" && heldAsBestCandidate(a, reviews)) {
       best = true;
       bestCandidate.push(section);
       outcome = "limited";
@@ -517,7 +520,8 @@ export async function checkLedgerAnswers(sandbox: string, wanted: string[], exis
     }
     // Its disposition under the bar: what the answer is, on what it rests.
     // A negative rests on a standing coverage record another seat reviewed;
-    // a best candidate is none (B2); a section a defect holds loses it below.
+    // a best candidate is none (B2), a partial answer on a finding is one
+    // whatever its reviews' strength; a section a defect holds loses it below.
     if (outcome !== "unanswered" && !best) {
       const negativeReviewed = Boolean(coverage) && Boolean(result && NEGATIVE_RESULTS.has(result) && negativeReview(a, entries, attestations, disputes).reviewed);
       const d: Disposition | null = !result

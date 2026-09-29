@@ -124,7 +124,7 @@ export async function finishGate(sandbox: string, run: FinishLineRun | null): Pr
     const limited: string[] = [];
     // What the answers check said about each section, passing or not.
     const outcomes = new Map<string, string>();
-    // The sections every review holds a best candidate only (B2).
+    // The sections whose answer claims established and every review holds a best candidate only (B2: check-answers.ts, protocol.ts heldAsBestCandidate).
     const best = new Set<string>();
     // Each section's disposition under the bar, as the answers check found it.
     const dispositions = new Map<string, string>();

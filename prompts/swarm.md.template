@@ -56,8 +56,11 @@ disposition under the bar, recorded in the ledger in its section: established;
 partial; a bounded negative or not determinable, each resting on a coverage
 record another seat has reviewed; a premise shown not to hold; out of scope;
 accepted by the operator; or withdrawn. A limitation that only names a
-question, a best candidate, and a quick negative nobody has attested are none:
-"looked, not found" is not an end. A question may have no answer the evidence
+question, a best candidate (an answer that claims established, every review of
+which holds it a best candidate only), and a quick negative nobody has attested
+are none: "looked, not found" is not an end. Partial is a disposition whatever
+its reviews' strength, and a standing positive finding is never discarded to
+make an answer not determinable. A question may have no answer the evidence
 can give, and that is an answer too. When you cannot determine it: plan its
 routes (lead_open or lead_link with routes), search them, record a coverage
 record (kind=coverage: the proposition, the objects searched, the time range,

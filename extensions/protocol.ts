@@ -9121,13 +9121,19 @@ export type AttestStrength = (typeof ATTEST_STRENGTHS)[number];
  * review said, and what a best candidate may still say. A review that holds
  * an answer established names at least one (the calibration run sabfd76: a
  * decoy adopted and attested established, "none the evidence allows").
+ * A part of a partial answer that the answer itself declares open names
+ * the entry that declares it (`declared_open`: E-<seq>, a limitation or a
+ * coverage record the answer cites): the review attests that it is open, as
+ * the answer says, and it does not cap the review (strengthCaps).
  */
 /** An alternative weighed: what else could explain the answer, why the evidence rules it out, and the entries that show it (E-<seq>). */
 export type AnswerReviewAlternative = { explanation: string; why: string; evidence?: string[] };
+/** A part the review weighed: whether it is established, why, and for a partial answer the entry by which the answer declares it open. */
+export type AnswerReviewPart = { part: string; established: boolean; why: string; declared_open?: string };
 export type AnswerReview = {
   reproduced: string;
   read: string;
-  parts: Array<{ part: string; established: boolean; why: string }>;
+  parts: AnswerReviewPart[];
   inference: string;
   alternatives: string | AnswerReviewAlternative[];
   other_family: { checked: boolean; text: string };
@@ -9215,7 +9221,15 @@ export function checkAnswerReview(raw: unknown): { ok: true; review: AnswerRevie
     if (typeof o.established !== "boolean") return { ok: false, reason: `answer_review.parts[].established is true or false: whether "${part.value}" is established` };
     const why = text("parts[].why", o.why);
     if (!why.ok) return why;
-    parts.push({ part: part.value, established: o.established, why: why.value });
+    // The entry by which a partial answer declares this part open, by seq.
+    let declaredOpen: string | undefined;
+    if (o.declared_open !== undefined && o.declared_open !== null && String(o.declared_open).trim() !== "") {
+      const v = String(o.declared_open).trim();
+      const m = /^(?:#|E-)?([1-9]\d{0,6})$/i.exec(v);
+      if (!m) return { ok: false, reason: `answer_review.parts[].declared_open names the entry by which the answer declares "${part.value}" open, as E-<seq> (a limitation or a coverage record the answer cites; got ${JSON.stringify(o.declared_open)})` };
+      declaredOpen = `E-${Number(m[1])}`;
+    }
+    parts.push({ part: part.value, established: o.established, why: why.value, ...(declaredOpen ? { declared_open: declaredOpen } : {}) });
   }
   const f = (r.other_family && typeof r.other_family === "object" ? r.other_family : null) as Record<string, unknown> | null;
   if (!f || typeof f.checked !== "boolean") return { ok: false, reason: "answer_review.other_family is {checked: true|false, text}: whether a materially different source family was checked, and which, or why not" };
@@ -9227,12 +9241,58 @@ export function checkAnswerReview(raw: unknown): { ok: true; review: AnswerRevie
 /** An answer review in words, for the ledger's rendering and the report. */
 export function answerReviewWords(r: AnswerReview): string {
   const alternatives = Array.isArray(r.alternatives) ? `alternatives weighed: ${r.alternatives.map((a) => `${a.explanation} (ruled out: ${a.why}${a.evidence?.length ? `; ${a.evidence.join(", ")}` : "; no entry named"})`).join("; ")}` : `alternatives still open: ${r.alternatives}`;
-  return `reproduced: ${r.reproduced}; only read: ${r.read}; parts: ${r.parts.map((p) => `${p.part} ${p.established ? "established" : "NOT established"} (${p.why})`).join("; ")}; inference: ${r.inference}; ${alternatives}; another source family ${r.other_family.checked ? "checked" : "not checked"}: ${r.other_family.text}`;
+  return `reproduced: ${r.reproduced}; only read: ${r.read}; parts: ${r.parts.map((p) => `${p.part} ${p.established ? "established" : p.declared_open ? `open, as the answer declares it (${p.declared_open})` : "NOT established"} (${p.why})`).join("; ")}; inference: ${r.inference}; ${alternatives}; another source family ${r.other_family.checked ? "checked" : "not checked"}: ${r.other_family.text}`;
 }
 
 /** Whether an attestation holds its answer established: a best candidate does not; a line from before strengths reads as it always did. */
 export function attestEstablishes(a: LedgerAttestation): boolean {
   return a.strength !== "best_candidate";
+}
+
+/**
+ * Whether an answer to a question claims established: its result is
+ * established, or it was recorded before results and is not inconclusive
+ * (it read as established). "A best candidate" concerns only such an
+ * answer (B2). A disposition that only limits the run (partial, not
+ * determinable, a bounded negative, out of scope) and a premise shown not
+ * to hold are each held to their own bar, never to a strength: the run
+ * s9722fa held six partial answers as best candidates, and its seats
+ * walked every one of them down to not determinable.
+ */
+export function claimsEstablished(a: Pick<LedgerEntry, "kind" | "section" | "result" | "inconclusive">): boolean {
+  if (a.kind !== "answer" || !a.section?.startsWith("question:")) return false;
+  const r = NB.answerResult(a);
+  return r === "established" || r === null;
+}
+
+/** The reviews of an answer: attests on it by seats other than its authors. */
+export function answerReviews(a: LedgerEntry, attestations: readonly LedgerAttestation[]): LedgerAttestation[] {
+  const h = a.hash ?? ledgerHash(a, "genesis");
+  return attestations.filter((x) => attestationAct(x) === "attest" && x.target === h && !a.authors.includes(x.by));
+}
+
+/**
+ * Whether an answer is held as a best candidate (B2): it claims
+ * established (claimsEstablished), another seat reviewed it, and every
+ * review holds it a best candidate only. The one test readiness
+ * (extensions/finish.ts), the answers check (scripts/check-answers.ts), and
+ * through it the finish gate, and the report read, so they cannot drift.
+ */
+export function heldAsBestCandidate(a: LedgerEntry, reviews: readonly LedgerAttestation[]): boolean {
+  return claimsEstablished(a) && reviews.length > 0 && !reviews.some(attestEstablishes);
+}
+
+/**
+ * The entries by which an answer declares a part of it open: the
+ * limitations it cites, and the coverage records it rests on. A partial
+ * answer's review names one of them for each part it holds open as the
+ * answer says (AnswerReviewPart.declared_open).
+ */
+export function declaredOpenBy(a: LedgerEntry, bySeq: ReadonlyMap<number, LedgerEntry>): Set<string> {
+  const out = new Set<string>();
+  for (const x of a.limitations ?? []) out.add(`E-${x.seq}`);
+  for (const x of a.support ?? []) if (bySeq.get(x.seq)?.kind === "coverage") out.add(`E-${x.seq}`);
+  return out;
 }
 
 /**
@@ -9943,9 +10003,28 @@ function actTarget(entries: LedgerEntry[], raw: number | string | undefined, age
  * that is not closed resolved, negative or duplicate. Read from the
  * registers and the refs; the answer's words are only searched for the
  * route sources and lead ids themselves. Empty when nothing caps it.
+ *
+ * A partial answer claims part of the question established and declares
+ * the rest open, so its review attests those claims: a part the review
+ * holds not established caps it only when the answer does not declare that
+ * part open (the part names, in declared_open, a limitation or a coverage
+ * record the answer cites: declaredOpenBy). Its confidence does not cap it,
+ * nor do the routes its would_change names, which are how its open parts
+ * would be settled: the answer already says they are open. The cap stays
+ * whole for an answer that claims established (claimsEstablished), and for
+ * any other that is not a negative.
  */
-export async function strengthCaps(sandboxRoot: string, answer: LedgerEntry, review: AnswerReview | null): Promise<string[]> {
+export async function strengthCaps(sandboxRoot: string, answer: LedgerEntry, review: AnswerReview | null, entries?: LedgerEntry[]): Promise<string[]> {
   const out: string[] = [];
+  if (NB.answerResult(answer) === "partial") {
+    const all = entries ?? (await readLedger(sandboxRoot));
+    const open = declaredOpenBy(answer, new Map(all.map((e) => [e.seq, e])));
+    for (const p of review?.parts ?? []) {
+      if (p.established || (p.declared_open && open.has(p.declared_open))) continue;
+      out.push(`the review holds "${p.part}" not established (${p.why}), and the answer does not declare it open${p.declared_open ? ` (${p.declared_open} is not a limitation or a coverage record it cites)` : ""}`);
+    }
+    return out;
+  }
   if (answer.confidence === "medium" || answer.confidence === "low") out.push(`its confidence is ${answer.confidence}`);
   for (const p of review?.parts ?? []) if (!p.established) out.push(`the review holds "${p.part}" not established (${p.why})`);
   const change = String(answer.would_change ?? "");
@@ -10020,7 +10099,7 @@ export async function attestEntry(ctx: SwarmContext, input: LedgerActInput): Pro
   // answer's words beyond the refs and lead ids its would_change names.
   const pre = await readLedger(ctx.sandboxRoot);
   const preTarget = actTarget(pre, input.seq, ctx.agentId, "attest");
-  const caps = preTarget.ok && preTarget.entry.kind === "answer" && preTarget.entry.section?.startsWith("question:") && !isNegativeEntry(preTarget.entry) ? await strengthCaps(ctx.sandboxRoot, preTarget.entry, answerReview) : [];
+  const caps = preTarget.ok && preTarget.entry.kind === "answer" && preTarget.entry.section?.startsWith("question:") && !isNegativeEntry(preTarget.entry) ? await strengthCaps(ctx.sandboxRoot, preTarget.entry, answerReview, pre) : [];
   // The negatives a review recorded here answers (the answer itself, or those resting on the coverage record): their offers are taken up after the lock.
   const reviewed: string[] = [];
   const result = await withTableLock(ctx.sandboxRoot, async (held): Promise<AttestResult> => {
@@ -10032,7 +10111,9 @@ export async function attestEntry(ctx: SwarmContext, input: LedgerActInput): Pro
     // it, and the review part by part (B2): a best candidate you cannot break
     // is still a best candidate. A medium or low confidence, a part not
     // established, or a route its would_change names that nothing took
-    // allows only best_candidate, which does not satisfy the finish line.
+    // allows only best_candidate, which does not satisfy the finish line on
+    // an answer that claims established. A partial answer's review attests
+    // its own claims: a part it declares open does not cap it (strengthCaps).
     const questionAnswer = t.entry.kind === "answer" && Boolean(t.entry.section?.startsWith("question:")) && !isNegativeEntry(t.entry);
     // The entries an alternative is ruled out by are in the ledger.
     if (answerReview && Array.isArray(answerReview.alternatives)) {
@@ -10047,10 +10128,34 @@ export async function attestEntry(ctx: SwarmContext, input: LedgerActInput): Pro
     // candidate, and the reply says so (nothing is refused).
     let recorded = strength;
     const downgraded: string[] = [];
+    // "A best candidate" concerns only an answer that claims established
+    // (claimsEstablished); on a disposition that only limits the run it
+    // holds nothing, and the replies say so.
+    const claim = claimsEstablished(t.entry);
+    const resultNow = NB.answerResult(t.entry);
+    const holdsNothing = `#${t.entry.seq} is ${NB.resultWords(resultNow)}, a disposition held to its own bar, so a best candidate holds nothing on it ("best candidate" concerns only an answer that claims established)`;
     if (questionAnswer) {
       if (!strength) return { ok: false, reason: `#${t.entry.seq} answers ${t.entry.section}: its attest says how strongly you hold it, strength established or best_candidate, with answer_review {reproduced, read, parts: [{part, established, why}], inference, alternatives, other_family: {checked, text}}` };
       if (!answerReview) return { ok: false, reason: `#${t.entry.seq} answers ${t.entry.section}: give answer_review {reproduced (what you re-derived yourself), read (what you only read), parts (each part the question asks, established or not, and why), inference (what connects the observations to the answer), alternatives (what the evidence still allows), other_family {checked, text} (whether another source family was checked, or why not)}` };
-      if (strength === "established" && caps.length) return { ok: false, reason: `#${t.entry.seq} can be attested best_candidate only: ${caps.join("; ")}. Attest it best_candidate (it does not satisfy the finish line), or take the route and record what it shows` };
+      // A part a partial answer declares open names the entry that declares it: a limitation it cites, or a coverage record it rests on.
+      const declared = answerReview.parts.filter((p) => p.declared_open);
+      if (declared.length && resultNow !== "partial") {
+        return { ok: false, reason: `answer_review.parts[].declared_open is for a partial answer's part the answer itself declares open; #${t.entry.seq} is ${NB.resultWords(resultNow)}${claim ? ": it claims every part established, and a part you do not hold established caps the review" : ""}` };
+      }
+      if (declared.length) {
+        const open = declaredOpenBy(t.entry, new Map(entries.map((e) => [e.seq, e])));
+        const bad = declared.find((p) => !open.has(p.declared_open as string));
+        if (bad) return { ok: false, reason: `answer_review.parts[].declared_open names ${bad.declared_open} for "${bad.part}": #${t.entry.seq} declares a part open by a limitation it cites or a coverage record it rests on, and it cites ${open.size ? [...open].join(", ") : "none"}. Name the one that declares that part open, or hold the part not established without it (a part the answer claims established that you do not hold so caps the review)` };
+      }
+      if (strength === "established" && caps.length) {
+        return {
+          ok: false,
+          reason:
+            resultNow === "partial"
+              ? `#${t.entry.seq} is partial: its review attests the answer's own claims, the parts it holds established and the parts it declares open, and ${caps.join("; ")}. A part the answer declares open names, in declared_open, the limitation or coverage record by which it does; a part it claims established that you do not hold so is a dispute (dispute #${t.entry.seq}, why, refs) or a best_candidate attest. ${holdsNothing}`
+              : `#${t.entry.seq} can be attested best_candidate only: ${caps.join("; ")}. Attest it best_candidate (${claim ? "it does not satisfy the finish line" : `on it that holds nothing: ${holdsNothing}`}), or take the route and record what it shows`,
+        };
+      }
       if (strength === "established" && !reviewNamesAlternative(answerReview)) {
         recorded = "best_candidate";
         downgraded.push(NO_ALTERNATIVE_CAP);
@@ -10113,9 +10218,11 @@ export async function attestEntry(ctx: SwarmContext, input: LedgerActInput): Pro
     const note = review
       ? `recorded as the review of a negative: ${NB.reviewWords(review)}`
       : downgraded.length
-        ? `you attested it established, and it is recorded as a best candidate: ${downgraded.join("; ")}. An established review names at least one alternative explanation you considered and why the evidence rules it out; attest again with answer_review.alternatives [{explanation, why}] once you have weighed one. Until then ${t.entry.section} is not established by it, and the finish line says so`
+        ? `you attested it established, and it is recorded as a best candidate: ${downgraded.join("; ")}. An established review names at least one alternative explanation you considered and why the evidence rules it out; attest again with answer_review.alternatives [{explanation, why}] once you have weighed one. ${claim ? `Until then ${t.entry.section} is not established by it, and the finish line says so` : holdsNothing}`
         : recorded === "best_candidate"
-          ? `recorded as a best candidate${caps.length ? ` (${caps.join("; ")})` : ""}: ${t.entry.section} is not established by it, and the finish line says so; the way out is the route that would settle it, or the operator's acceptance of its limits`
+          ? claim
+            ? `recorded as a best candidate${caps.length ? ` (${caps.join("; ")})` : ""}: ${t.entry.section} is not established by it, and the finish line says so; the way out is the route that would settle it, or the operator's acceptance of its limits`
+            : `recorded as a best candidate${caps.length ? ` (${caps.join("; ")})` : ""}: ${holdsNothing}`
           : undefined;
     if (review) for (const a of t.entry.kind === "answer" ? [t.entry] : negativesResting(t.entry, entries)) reviewed.push(`E-${a.seq}`);
     return { ok: true, line, appended: true, ...(note ? { note } : {}) };
@@ -10937,6 +11044,88 @@ async function recordCoverage(ctx: SwarmContext, input: LedgerInput): Promise<Le
   return recorded;
 }
 
+/**
+ * What a downgrade's evidence says against the earlier answer's chain
+ * (docs/adr/0013, "After the run s9722fa"): the earlier answer and the
+ * entries it rests on (its support). An entry of the evidence bears against
+ * it when it is a finding or an event that contradicts the answer or an
+ * entry it rests on (rel contradicts), a hypothesis refuted that names one
+ * of them (rel) or corrects one, an entry it rests on that a dispute in
+ * force or a standing finding or event contradicts, or a correction
+ * (supersedes, at any depth) of an entry it rests on. A limitation says a
+ * route could not be examined and a coverage record what a search covered:
+ * neither undermines a finding that stands (the run s9722fa walked six
+ * partial answers down to not determinable on its limitations and its own
+ * coverage records).
+ *
+ * `standing` is each positive finding the earlier answer rested on (a
+ * finding or an event it cites, recorded for its question) that still
+ * stands: not corrected, under no dispute in force, and contradicted by no
+ * standing finding or event. While one does, a revision to not determinable
+ * or a bounded negative would discard it; the answer is partial. Refs and
+ * links only: nothing here reads what an entry says.
+ */
+export function downgradeCheck(earlier: LedgerEntry, evidence: readonly string[], entries: LedgerEntry[], disputes: LedgerDispute[]): { bearing: Array<{ seq: number; how: string }>; not_bearing: Array<{ seq: number; why: string }>; standing: LedgerEntry[] } {
+  const bySeq = new Map(entries.map((e) => [e.seq, e]));
+  const replaced = supersededBy(entries);
+  const hashOf = (e: LedgerEntry) => e.hash ?? ledgerHash(e, "genesis");
+  const support = (earlier.support ?? []).map((x) => x.seq);
+  const chain = new Set([earlier.seq, ...support]);
+  const inForce = disputesInForce(entries, disputes);
+  const disputed = (e: LedgerEntry) => inForce.some((d) => d.target === hashOf(e));
+  const positive = (e: LedgerEntry | undefined): boolean => e?.kind === "finding" || e?.kind === "event";
+  const contradictedBy = (seq: number) => entries.filter((c) => !replaced.has(c.seq) && positive(c) && (c.rel ?? []).some((x) => x.kind === "contradicts" && Number(x.to) === seq));
+  // The entry of the chain an entry corrects, walking its supersedes back.
+  const corrects = (e: LedgerEntry): number | null => {
+    const seen = new Set<number>();
+    let cur: LedgerEntry | undefined = e;
+    while (cur && typeof cur.supersedes === "number" && !seen.has(cur.seq)) {
+      seen.add(cur.seq);
+      if (support.includes(cur.supersedes)) return cur.supersedes;
+      cur = bySeq.get(cur.supersedes);
+    }
+    return null;
+  };
+  const bearing: Array<{ seq: number; how: string }> = [];
+  const notBearing: Array<{ seq: number; why: string }> = [];
+  const list = (xs: number[]) => xs.map((n) => `E-${n}`).join(", ");
+  for (const r of evidence) {
+    if (!/^E-\d+$/.test(r)) continue;
+    const n = Number(r.slice(2));
+    const e = bySeq.get(n);
+    if (!e) continue;
+    const against = (e.rel ?? []).filter((x) => x.kind === "contradicts" && chain.has(Number(x.to))).map((x) => Number(x.to));
+    const fixed = corrects(e);
+    if (positive(e) && against.length) bearing.push({ seq: n, how: `a ${e.kind} that contradicts ${list(against)}` });
+    else if (e.kind === "hypothesis" && e.status === "refuted" && ((e.rel ?? []).some((x) => chain.has(Number(x.to))) || fixed !== null)) bearing.push({ seq: n, how: `a hypothesis refuted, tied to ${fixed !== null ? `E-${fixed}` : list((e.rel ?? []).filter((x) => chain.has(Number(x.to))).map((x) => Number(x.to)))}` });
+    else if (fixed !== null) bearing.push({ seq: n, how: `a correction of E-${fixed}, which the earlier answer rests on` });
+    else if (support.includes(n) && (disputed(e) || contradictedBy(n).length)) bearing.push({ seq: n, how: disputed(e) ? "an entry the earlier answer rests on, under a dispute in force" : `an entry the earlier answer rests on, contradicted by ${list(contradictedBy(n).map((c) => c.seq))}` });
+    else
+      notBearing.push({
+        seq: n,
+        why: support.includes(n)
+          ? "an entry the earlier answer rests on, under no dispute and contradicted by nothing"
+          : e.kind === "limitation"
+            ? "a limitation: it says a route could not be examined, not that a finding is wrong"
+            : e.kind === "coverage"
+              ? "a coverage record: it says what a search covered, not that a finding is wrong"
+              : e.kind === "absence"
+                ? "a search that found nothing: it does not undermine a finding that stands"
+                : positive(e)
+                  ? `a ${e.kind} that contradicts nothing the earlier answer rests on (no rel contradicts to ${list([...chain])})`
+                  : e.kind === "hypothesis"
+                    ? "a hypothesis not refuted, or tied to nothing the earlier answer rests on"
+                    : `a ${e.kind}: it does not bear against the earlier answer's chain`,
+      });
+  }
+  const id = sectionKey(sectionAnswersId(earlier.section ?? ""));
+  const standing = support
+    .map((s) => bySeq.get(s))
+    .filter((e): e is LedgerEntry => positive(e))
+    .filter((e) => (e.answers ?? []).some((a) => sectionKey(a) === id) && !replaced.has(e.seq) && !disputed(e) && !contradictedBy(e.seq).length);
+  return { bearing, not_bearing: notBearing, standing };
+}
+
 /** Record an answer (recordEntry with kind=answer): its checks need the ledger, so they run under the lock. */
 async function recordAnswer(ctx: SwarmContext, input: LedgerInput): Promise<LedgerResult> {
   const raw = input as Record<string, unknown>;
@@ -11119,7 +11308,7 @@ async function recordAnswer(ctx: SwarmContext, input: LedgerInput): Promise<Ledg
       if (downgrading && !downgrade) {
         return {
           ok: false,
-          reason: `#${supersedes} answered ${sec.section} ${NB.resultWords(earlierResult)}; recording it ${NB.resultWords(resultText)} is a downgrade, and a downgrade names what undermines the earlier chain: downgrade {evidence: [E-<seq> or objects that show it], why}. A doubt with no counter-evidence is not one: dispute #${supersedes} (why, refs), and if the doubt stands attest it best_candidate or record it again with confidence medium; the answer stays`,
+          reason: `#${supersedes} answered ${sec.section} ${NB.resultWords(earlierResult)}; recording it ${NB.resultWords(resultText)} is a downgrade, and a downgrade names what undermines the earlier chain: downgrade {evidence: [E-<seq> of an entry that bears against it: a finding that contradicts it, a correction of what it rests on, …], why}. A doubt with no counter-evidence is not one: dispute #${supersedes} (why, refs), and if the doubt stands attest it best_candidate or record it again with confidence medium; the answer stays. A part the evidence cannot settle makes an answer partial, never not determinable while the findings it rests on stand`,
         };
       }
       if (downgrade && !downgrading) return { ok: false, reason: `downgrade is for a revision that moves an answer from established or partial to not_determinable or bounded_negative${earlier ? `; #${supersedes} is ${NB.resultWords(earlierResult)} and this is ${NB.resultWords(resultText)}` : "; give supersedes"}` };
@@ -11129,6 +11318,28 @@ async function recordAnswer(ctx: SwarmContext, input: LedgerInput): Promise<Ledg
         if (!bySeq.has(n)) return { ok: false, reason: `downgrade.evidence names ${r}: there is no entry #${n} in the ledger` };
         if (n === supersedes) return { ok: false, reason: `downgrade.evidence names ${r}, the answer being downgraded: name what undermines it` };
         if (replaced.has(n)) return { ok: false, reason: `downgrade.evidence names ${r}, superseded by #${standingSeq(n, replaced)}: name the entry that stands` };
+      }
+      // The evidence bears against the earlier chain, and no positive finding
+      // it rested on still stands (downgradeCheck): a limitation, or the
+      // downgrader's own coverage, undermines nothing, and a standing finding
+      // is never discarded to make an answer not determinable.
+      if (downgrading && downgrade && earlier) {
+        const chk = downgradeCheck(earlier, downgrade.evidence, entries, disputes);
+        const rests = [earlier.seq, ...(earlier.support ?? []).map((x) => x.seq)].map((n) => `E-${n}`).join(", ");
+        const why: string[] = [];
+        if (!chk.bearing.length) {
+          why.push(
+            `downgrade.evidence names nothing that bears against #${supersedes}'s chain (${rests}): ${[...chk.not_bearing.map((x) => `E-${x.seq} is ${x.why}`), ...(downgrade.evidence.some((r) => !/^E-\d+$/.test(r)) ? ["an object says nothing until an entry says what it shows"] : [])].join("; ")}. A downgrade names at least one entry that does: a finding or an event that contradicts #${supersedes} or an entry it rests on (recorded with rel [{to: <seq>, kind: "contradicts"}]), a hypothesis refuted that names one, an entry it rests on under a dispute in force, or a correction (supersedes) of one`,
+          );
+        }
+        if (chk.standing.length) {
+          const s = chk.standing.map((e) => `E-${e.seq}`).join(", ");
+          const one = chk.standing.length === 1;
+          why.push(
+            `#${supersedes} rests on ${s}, recorded for ${sec.section}, which ${one ? "still stands" : "still stand"}: not corrected, under no dispute, contradicted by nothing. Recording ${sec.section} ${NB.resultWords(resultText)} would discard ${one ? "it" : "them"}. Answer partial instead (record it with supersedes=${supersedes}, result partial): state what ${s} establish${one ? "es" : ""}, and name the parts still open with their coverage (limitations: [E-<seq>], and the coverage record for each open part). If ${one ? "it does" : "one of them does"} not hold, say so first: dispute it (why, refs), correct it (supersedes), or record the finding that contradicts it (rel contradicts), and name that in downgrade.evidence`,
+          );
+        }
+        if (why.length) return { ok: false, reason: why.join(". ") };
       }
       // A summary or a narrative that cites a question's answer by its seq
       // (E-n) is bound to that question instead (question:N): the pilot's

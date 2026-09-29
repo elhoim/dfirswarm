@@ -583,8 +583,9 @@ const READINESS_ATTEMPTS = 3;
  * computed for: no material lead open (or waiting for a closure's
  * confirmation), no lead's job waiting for an interpretation, every
  * question in scope answered with nothing the ledger gate holds against it
- * (a negative unreviewed, a dispute, a best candidate only, a stale
- * answer), and under the operator's stop policy no route limitation left.
+ * (a negative unreviewed, a dispute, a stale answer) and no answer that
+ * claims established held a best candidate only, and under the operator's
+ * stop policy no route limitation left.
  * What would still limit the run is listed apart. Cheap and generic: the
  * goal's own checks run only at the coordinator's done. One result per
  * revision, shared by every reader in this process, and only for the
@@ -650,12 +651,19 @@ async function computeReadiness(sandboxRoot: string, s: L.LeadsSnapshot, revisio
     items.push(d.what);
   }
   // Best candidates, stale answers, and what else would limit the run.
-  // Under the operator's stop policy a best candidate and a route
-  // limitation hold readiness too (ADR 0015, 8); a disposition that only
-  // limits the run (partial, not determinable, a bounded negative, an
-  // acceptance) never does: the done ends the run examination-limited on
-  // it, and readiness held on it would never turn ready before a done that
-  // passes (the c10 pilot: "never ready").
+  // A best candidate (an answer that claims established, every review of
+  // which holds it a best candidate only: P.heldAsBestCandidate, the test
+  // the answers check and the finish gate read too) has no disposition, so
+  // it holds readiness under every stop policy, as it holds the done. Under
+  // the operator's stop policy a route limitation holds readiness too (ADR
+  // 0015, 8). A disposition that only limits the run (partial, not
+  // determinable, a bounded negative, out of scope, a premise shown not to
+  // hold, an acceptance) never holds it, whatever its reviews' strength:
+  // the done ends the run examination-limited on it, and readiness held on
+  // it would never turn ready before a done that passes (the c10 pilot:
+  // "never ready"; the run s9722fa: six partial answers read as "a best
+  // candidate, not established", and all six walked down to not
+  // determinable).
   const holdsUnderOperator: string[] = [];
   const disposed = new Map<string, "answered" | "accepted">();
   for (const sec of sections) {
@@ -667,12 +675,9 @@ async function computeReadiness(sandboxRoot: string, s: L.LeadsSnapshot, revisio
     }
     const a = gate.answers[sec];
     if (!a) continue;
-    const reviews = attestations.filter((x) => P.attestationAct(x) === "attest" && x.target === a.hash && !a.authors.includes(x.by));
     const result = NB.answerResult(a);
-    // A negative, by the gate's own test (a premise rejected on a search alone is one), is held to the negative review, never to a strength.
-    if (reviews.length && !reviews.some(P.attestEstablishes) && !P.negativeByResult(result, P.citedForQuestion(a, s.ledger.bySeq, s.ledger.replaced, sec.slice("question:".length)))) {
-      limited.push(`${sec} is a best candidate, not established (E-${a.seq})`);
-      holdsUnderOperator.push(`${sec} is a best candidate, not established (E-${a.seq})`);
+    if (P.heldAsBestCandidate(a, P.answerReviews(a, attestations))) {
+      items.push(`${sec} is a best candidate, not established (E-${a.seq} claims established, and every review holds it a best candidate only)`);
       continue;
     }
     const q = s.questions?.bySection.get(sec.slice("question:".length));
