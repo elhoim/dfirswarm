@@ -6205,8 +6205,9 @@ export const TOOL_RESERVED_NAMES = new Set([
   "collector_restarted", "operator_action", "artifact_scripts",
   // A long command run again pointed at its kept output, a seat stopped
   // before a model call, a ledger correction, the operator's --notify hook,
-  // the hub's history quota and a connection refused its seat token.
-  "repeat_hint", "job_hint", "budget_precall_stop", "ledger_superseded", "notify", "history_quota", "seat_auth",
+  // the hub's history quota and a connection refused its seat token; a
+  // command that ran or evaluated code from the evidence (evidence-code.ts).
+  "repeat_hint", "job_hint", "budget_precall_stop", "ledger_superseded", "notify", "history_quota", "seat_auth", "evidence_code",
   // A ledger entry the harness authored (external material, a hint's
   // hypothesis), its hash on the trace (HARNESS_RECORD_TOOL).
   "harness_record",
