@@ -6,7 +6,8 @@ yours", readiness is shown to everyone and posted when it turns, one check
 result stands per state revision, and the report is reviewed with typed acts
 rather than late posts. Work that nobody holds is offered to one seat at a
 time, from when the offer reaches it, and a closure whose entry was corrected
-is offered back to its closer to confirm or reopen, never re-pointed. A
+is offered back to its closer to confirm or reopen, and re-pointed only
+when the correction leaves every part of its conclusion unchanged. A
 review of an answer says whether it holds it established or a best
 candidate, part by part. A running job is seen from the host by three
 signals, and the seats' tokens are renewed in place.
