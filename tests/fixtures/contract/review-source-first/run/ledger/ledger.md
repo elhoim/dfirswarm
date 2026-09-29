@@ -20,9 +20,9 @@
 
 ## Answers
 
-- **#2** question:1 (established): Established: the record question 1 asks for [attested by a2 (best candidate)] _(high: The cited entries are direct.)_ — rests on: E-1 — still open: none open — would change it: a second source that disagrees — reasoning: E-1 — by a1
-- **#4** question:2 (established): Established: the record question 2 asks for [attested by a3] _(high: The cited entries are direct.)_ — rests on: E-3 — still open: none open — would change it: a second source that disagrees — reasoning: E-3 — by a1
-- **#6** question:3 (established): Established: the record question 3 asks for [attested by a2 (best candidate), a2] _(high: The cited entries are direct.)_ — rests on: E-5 — still open: none open — would change it: a second source that disagrees — reasoning: E-5 — by a1
+- **#2** question:1 (established): Established: the record question 1 asks for, j000001 [attested by a2 (best candidate)] _(high: The cited entries are direct.)_ — rests on: E-1 — still open: none open — would change it: a second source that disagrees — reasoning: E-1 — by a1
+- **#4** question:2 (established): Established: the record question 2 asks for, j000002 [attested by a3] _(high: The cited entries are direct.)_ — rests on: E-3 — still open: none open — would change it: a second source that disagrees — reasoning: E-3 — by a1
+- **#6** question:3 (established): Established: the record question 3 asks for, j000001 [attested by a2 (best candidate), a2] _(high: The cited entries are direct.)_ — rests on: E-5 — still open: none open — would change it: a second source that disagrees — reasoning: E-5 — by a1
 
 ## Searched, not found
 

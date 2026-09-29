@@ -845,7 +845,8 @@ const CASES: Record<string, (base: string) => Promise<string>> = {
     const answer = async (q: string, ref: string) => {
       const id = await lead(r.a0, q);
       const f = (await rec(r.a0, { kind: "finding", ...F, value: `the record question ${q} asks for`, source: "the log", evidence: "line 1", refs: [ref], answers: [q] })).entry;
-      const a = (await rec(r.a1, { kind: "answer", section: `question:${q}`, value: `Established: the record question ${q} asks for`, reasoning: `E-${f.seq}`, ...HIGH, result: "established" })).entry;
+      // The answer states the value its reviews locate (the job's record, as the job wrote it): a locator vouches for what the answer says.
+      const a = (await rec(r.a1, { kind: "answer", section: `question:${q}`, value: `Established: the record question ${q} asks for, ${ref.slice("job:".length, ref.indexOf("/"))}`, reasoning: `E-${f.seq}`, ...HIGH, result: "established" })).entry;
       await close(r.a0, id, `E-${f.seq}`);
       return a;
     };

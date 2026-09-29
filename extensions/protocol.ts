@@ -9485,14 +9485,18 @@ function looseText(s: string): string {
 }
 
 /**
- * A locator held to the sealed bytes: its ref resolves to a sealed object
- * of this run (an input, a job's output or log, an import, a capture, a
- * sealed brain output), and its value is at its offset there, in UTF-8 or
- * UTF-16LE, ASCII letters in either case. With a length and no value, the
- * bytes there are read back and must be words of the answer (`answerText`).
- * Bounded reads at the offset (and LOCATOR_NEAR_BYTES either side, to say
- * where the value is when it is not at the offset): never a scan, never the
- * object's whole hash (resolving it against its manifest is the seal).
+ * A locator held to the sealed bytes and to the answer: its ref resolves to
+ * a sealed object of this run (an input, a job's output or log, an import,
+ * a capture, a sealed brain output), and its value is at its offset there,
+ * in UTF-8 or UTF-16LE, ASCII letters in either case, and is among the
+ * answer's words (`answerText`, its value and reasoning; at least
+ * LOCATOR_MIN_CHARS): a locator vouches for what the answer says, never for
+ * any occurrence of anything (the Fable review of the limits branch, P2-2).
+ * With a length and no value, the bytes there are read back and must be
+ * words of the answer. Bounded reads at the offset (and LOCATOR_NEAR_BYTES
+ * either side, to say where the value is when it is not at the offset):
+ * never a scan, never the object's whole hash (resolving it against its
+ * manifest is the seal).
  */
 export async function checkLocator(sandboxRoot: string, loc: AnswerReviewLocator, answerText: string): Promise<LocatorVerdict> {
   const no = (why: string): LocatorVerdict => ({ ok: false, ref: loc.ref, offset: loc.offset, why });
@@ -9503,6 +9507,12 @@ export async function checkLocator(sandboxRoot: string, loc: AnswerReviewLocator
   const abs = join(sandboxRoot, r.path);
   const st = await stat(abs).catch(() => null);
   if (!st?.isFile()) return no(`${loc.ref} ${st ? "is a directory: a locator names one file in it" : `cannot be read here (${r.path})`}`);
+  // What it vouches for is a value the answer states: an occurrence of anything else vouches for nothing the answer says.
+  if (loc.value !== undefined) {
+    const v = looseText(loc.value);
+    if (v.length < LOCATOR_MIN_CHARS) return no(`the value "${loc.value}" is under ${LOCATOR_MIN_CHARS} characters: too short to vouch for what the answer says; locate a value the answer states`);
+    if (!looseText(answerText).includes(v)) return no(`the value "${loc.value}" is not among the answer's words (its value and reasoning): a locator vouches for a value the answer states. A value the answer gives in another form (a converted time, a decoded field) is vouched for by derivation {job, inputs}`);
+  }
   const forms = loc.value !== undefined ? valueForms(loc.value) : [];
   const need = loc.value !== undefined ? Math.max(...forms.map((f) => f.bytes.length)) : (loc.length as number);
   if (loc.offset >= st.size) return no(`offset ${loc.offset} is past the end of ${loc.ref} (${st.size} bytes)`);

@@ -70,6 +70,12 @@ test("a locator the hub finds at its offset holds an established review; one tha
   assert.equal(P.heldAsBestCandidate(ans, P.answerReviews(ans, await P.readAttestations(c.S))), false);
   assert.equal(P.verifyAttestationChain(await (await import("node:fs/promises")).readFile(join(c.S, P.LEDGER_ATTESTATIONS), "utf8")).ok, true);
   assert.match(P.answerReviewWords(right.line.answer_review!), new RegExp(`the strongest rival: .*; read at: job:j000010/export\\.csv byte ${at} \\("alice"\\)`));
+  // A value that is at its offset and that the answer does not state vouches for nothing the answer says: any occurrence of anything is not a locator (the Fable review of the limits branch, P2-2).
+  const elsewhere = await attest(c.a3, { seq: ans.seq, how: "read the export's header", strength: "established", answer_review: { ...BARE, discriminator: SOURCE_FIRST.discriminator, reproduced_at: [{ ref: "job:j000010/export.csv", offset: 0, value: "time,user" }] } });
+  assert.equal(elsewhere.line.strength, "best_candidate");
+  assert.match(elsewhere.line.capped!.join("\n"), /reproduced_at\[0\] \(job:j000010\/export\.csv at 0\) does not verify: the value "time,user" is not among the answer's words \(its value and reasoning\): a locator vouches for a value the answer states\. A value the answer gives in another form \(a converted time, a decoded field\) is vouched for by derivation \{job, inputs\}/);
+  const short = await P.checkLocator(c.S, { ref: "job:j000010/export.csv", offset: at, value: "al" }, "alice, at 09:58");
+  assert.match((short as { why: string }).why, /is under 3 characters: too short to vouch for what the answer says/);
 });
 
 test("a value in UTF-16LE is found at its offset, in either case, and a length alone is read back and found in the answer's words", async () => {
@@ -146,7 +152,7 @@ test("the rule is an established claim's on a material question: a best candidat
   await planned(c.a0, "3");
   const f = ok(await rec(c.a0, { kind: "finding", ...F, value: "a file was deleted at 09:14", source: "the log", evidence: "line 1", refs: ["job:j000001/hits.txt"], answers: ["3"] })).entry;
   const lim = ok(await rec(c.a0, { kind: "limitation", value: "The log keeps no file name", source: "the log", evidence: "its fields", reason: "unavailable", answers: ["3"] })).entry;
-  const part = ok(await rec(c.a1, { kind: "answer", section: "question:3", value: "A file, deleted at 09:14; its name is not established", reasoning: `E-${f.seq}; the name is open (E-${lim.seq})`, ...A, limitations: [lim.seq], result: "partial", parts: [{ id: "when", part: "when it was deleted", status: "established", refs: [`E-${f.seq}`] }, { id: "which", part: "which file", status: "open", open_by: `E-${lim.seq}` }] })).entry;
+  const part = ok(await rec(c.a1, { kind: "answer", section: "question:3", value: "A file, deleted at 09:14; its name is not established", reasoning: `E-${f.seq} (job j000001's hits); the name is open (E-${lim.seq})`, ...A, limitations: [lim.seq], result: "partial", parts: [{ id: "when", part: "when it was deleted", status: "established", refs: [`E-${f.seq}`] }, { id: "which", part: "which file", status: "open", open_by: `E-${lim.seq}` }] })).entry;
   const pr = await attest(c.a3, { seq: part.seq, how: "read line 1", strength: "established", answer_review: { ...BARE, parts: [{ part: "when", established: true, why: "line 1" }, { part: "which file", established: false, why: "no name kept", declared_open: `E-${lim.seq}` }], reproduced_at: [{ ref: "job:j000001/hits.txt", offset: 3, value: "j000001" }] } });
   assert.equal(pr.line.strength, "established", "partial is a disposition: nothing capped");
   assert.equal(pr.line.capped, undefined);
