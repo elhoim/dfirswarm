@@ -409,16 +409,18 @@ export async function checkLedgerAnswers(sandbox: string, wanted: string[], exis
   const limits = entries.filter((e) => e.kind === "limitation" && !replaced.has(e.seq));
   const logs = await committedLogHashes(S);
   // What the operator's standing acceptance of a question excuses on it
-  // (acceptanceExcuses): a partial store sweep, evidence added before the
-  // acceptance, and a source's broad extraction still under way. Every
-  // other defect of the negative bar still holds.
+  // (acceptanceExcuses), the one rule readiness (finish.ts) and the accept
+  // act's still_held (questions.ts) read: every defect but the negative
+  // bar's and material the case policy forbids (ACCEPTANCE_NEVER_EXCUSES),
+  // a partial store sweep, and evidence added before the acceptance.
   const acceptedAt = new Map<string, number | null>();
   if (register && Q) {
     const L = await import("../extensions/leads.ts");
     const view = L.ledgerView(entries, disputes);
     for (const q of register.state.questions.values()) if (q.accepted && Q.acceptanceStands(q, view)) acceptedAt.set(`question:${q.section}`, q.accepted.ledger_seq ?? null);
   }
-  const defects = gate.defects.filter((d) => !(d.section && acceptedAt.has(d.section) && (d.code === "sweep_partial" || d.code === "evidence_stale" || d.code === "preparation_pending") && acceptanceExcuses(d, acceptedAt.get(d.section))));
+  const excused = (d: LedgerDefect): boolean => Boolean(d.section && acceptedAt.has(d.section) && acceptanceExcuses(d, acceptedAt.get(d.section)));
+  const defects = gate.defects.filter((d) => !excused(d));
   for (const section of sections) {
     const a = gate.answers[section];
     const id = sectionAnswersId(section);
@@ -611,6 +613,8 @@ export async function checkLedgerAnswers(sandbox: string, wanted: string[], exis
       });
     }
   }
+  // What an acceptance excuses among the defects this check finds itself (an answer that rests on nothing checkable now), as among the gate's.
+  for (let i = defects.length - 1; i >= 0; i -= 1) if (excused(defects[i]!)) defects.splice(i, 1);
   // A section a defect holds, named by a limitation or not, has no disposition under the bar.
   for (const d of defects) if (d.section) delete dispositions[d.section];
   // A partial_output defect names the entry that cites a cancelled or stopped

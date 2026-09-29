@@ -219,9 +219,12 @@ export async function finishGate(sandbox: string, run: FinishLineRun | null): Pr
  * completeness claim with no coverage of its areas, a store sweep pending or
  * with hits outside its record, among them), and an answer resting on
  * material the case policy forbids: fixed, never named, and never excused
- * by an acceptance (protocol.ts ACCEPTANCE_NEVER_EXCUSES). A partial sweep is
- * excused by one, and evidence added before the acceptance too
- * (acceptanceExcuses); the answers check drops those before this reads it.
+ * by an acceptance (protocol.ts ACCEPTANCE_NEVER_EXCUSES). Every other
+ * defect on an accepted question is excused by the acceptance, a partial
+ * sweep and evidence added before it too (acceptanceExcuses): the answers
+ * check drops what it excuses before its verdict, as readiness and the
+ * accept act's still_held do, so this reads only these codes of an
+ * accepted question.
  */
 export const NEGATIVE_BAR_CODES: ReadonlySet<string> = ACCEPTANCE_NEVER_EXCUSES;
 

@@ -43,9 +43,14 @@ type Run = { S: string; runs: string; a0: Ctx; a1: Ctx; a2: Ctx; a3: Ctx };
 const F = { basis: "observed", confidence: "high", indicates: "What the observation shows, and the step to it.", confidence_why: "Read directly from the object it cites." } as const;
 const A = { confidence: "medium", confidence_why: "The cited entries are direct.", alternatives_open: "none open", would_change: "a second source that disagrees" } as const;
 const HIGH = { ...A, confidence: "high" } as const;
-/** The source-first part of an established review (docs/adr/0015): the strongest rival and its test, and the job that derived the value (j000001, over the disk). */
+/**
+ * The source-first part of an established review (docs/adr/0015): the
+ * strongest rival and its test, resting on the job output the test read
+ * (never the answer, nor only the entries it cites), and the job that
+ * derived the value (j000001, over the disk).
+ */
 const SOURCE_FIRST = {
-  discriminator: { rival: "a copy of the record written later by a backup process", test: "read the record's own write time against the backup's run times", favours_if: "the answer if the write time falls outside every backup run; the rival if it falls inside one", outcome: "the write time falls outside every backup run", refs: ["E-1"] },
+  discriminator: { rival: "a copy of the record written later by a backup process", test: "read the record's own write time against the backup's run times", favours_if: "the answer if the write time falls outside every backup run; the rival if it falls inside one", outcome: "the write time falls outside every backup run", refs: ["job:j000001/hits.txt"] },
   derivation: { job: "j000001", inputs: ["input:disk.E01"] },
 } as const;
 const REVIEWED = {
@@ -950,6 +955,51 @@ const CASES: Record<string, (base: string) => Promise<string>> = {
     await citing(r, "2", "the remote tool was installed from a second user's session", [{ id: "P-1", rev: 1, stance: "contradicted" }]);
     const again = (await rec(r.a1, { kind: "answer", section: "question:1", value: "Established, assuming P-1: the employee's account logged on at 09:14", reasoning: `E-${q1.f}`, ...HIGH, result: "established", premises: [{ id: "P-1", rev: 1, stance: "assumed", conditional: true }], supersedes: q1.a })).entry;
     await attest(r.a2, { seq: again.seq, how: "re-read the key from job:j000001", ...ESTABLISHED });
+    return r.S;
+  },
+
+  /**
+   * The operator's acceptance excuses what it excuses in every reader
+   * (docs/adr/0011, "Premises"; the Fable review of the limits branch,
+   * P1-1): P-1, a given; question 1's answer assumes it and question 2's
+   * contradicts it with no rebutting finding, both held
+   * (premise_inconsistent); question 3's partial answer has no critic act.
+   * The operator accepts all three questions' limits.
+   */
+  "accepted-excused": async (base) => {
+    const r = await newRun(base, "aex", 3, [], [LAPTOP_PREMISE]);
+    await Q.seedRegister(r.S);
+    await citing(r, "1", "the employee's account logged on at 09:14", [{ id: "P-1", rev: 1, stance: "assumed" }]);
+    await citing(r, "2", "the remote tool was installed from a second user's session", [{ id: "P-1", rev: 1, stance: "contradicted" }]);
+    await partial(r, "3");
+    await SW.awaitSweeps(r.S);
+    await operatorAct(r.S, "accept", { q: "Q-1", as: "bounded", why: "the brief's premise and the second session are for the client to weigh; the examination went as far as the disk allows", expected_rev: 1 });
+    await operatorAct(r.S, "accept", { q: "Q-2", as: "bounded", why: "the brief's premise and the second session are for the client to weigh; the examination went as far as the disk allows", expected_rev: 1 });
+    await operatorAct(r.S, "accept", { q: "Q-3", as: "bounded", why: "the log keeps no account names; nobody else is free to review it before the deadline", expected_rev: 1 });
+    return r.S;
+  },
+
+  /**
+   * An acceptance never excuses the negative bar (docs/adr/0013): question
+   * 1's not-determinable answer rests on a reviewed coverage record; the
+   * operator accepts its limits; then the search's result is corrected, so
+   * the coverage record no longer says what its search found
+   * (coverage_stale). Question 2 is established.
+   */
+  "accepted-negative-held": async (base) => {
+    const r = await newRun(base, "anh", 2);
+    await Q.seedRegister(r.S);
+    await established(r, "2");
+    const lid = await lead(r.a0, "1", [{ source: "input:logs/a.log", method: "search the log" }]);
+    const abs = (await rec(r.a0, { kind: "absence", value: "an account name for the logon", source: "the log", evidence: "a search", refs: ["job:j000002/hits.txt"], answers: ["1"] })).entry;
+    const cov = (await rec(r.a0, coverage("1", ["input:logs/a.log"], [`E-${abs.seq}`, "job:j000002/hits.txt"], { acquisition_none_why: "no source outside the evidence records it" }))).entry;
+    await rec(r.a1, { kind: "answer", section: "question:1", value: "Who logged on cannot be determined from the log", reasoning: `E-${cov.seq}`, ...A, result: "not_determinable" });
+    await attest(r.a2, { seq: cov.seq, how: "ran the search again from job:j000002", review: REVIEW });
+    await close(r.a0, lid, `E-${cov.seq}`);
+    await SW.awaitSweeps(r.S);
+    await operatorAct(r.S, "accept", { q: "Q-1", as: "not_determinable", why: "the log keeps no account names", expected_rev: 1 });
+    await rec(r.a0, { kind: "absence", value: "an account name for the logon, searched again in every encoding", source: "the log", evidence: "a search", refs: ["job:j000002/hits.txt"], answers: ["1"], supersedes: abs.seq });
+    await SW.awaitSweeps(r.S);
     return r.S;
   },
 

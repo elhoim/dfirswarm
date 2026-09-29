@@ -1,0 +1,42 @@
+{
+  "case": "Question 1's not-determinable answer rests on a reviewed coverage record; the operator accepts its limits; then the search's result is corrected, so the coverage record no longer says what its search found. Question 2 is established.",
+  "design": [
+    "docs/adr/0013 'After review': an acceptance is of the answer that stood, and an accepted question's negative is held to the bar all the same; the negative bar's defects (coverage_stale among them) are never excused by it (protocol.ts ACCEPTANCE_NEVER_EXCUSES).",
+    "docs/adr/0013 'After review': a coverage record binds its results by hash: a result superseded takes the record, and a review of the negative resting on it, out of standing (coverage_stale).",
+    "docs/adr/0017 addendum 'Measuring a rule change': readiness, the answers check and the finish gate never disagree on a question: all three hold question 1."
+  ],
+  "policies": [
+    "as run"
+  ],
+  "expect": {
+    "questions": {
+      "question:1": {
+        "disposition": null,
+        "gate_outcome": "accepted",
+        "best_candidate": false,
+        "readiness_holds": true,
+        "readiness_includes": [
+          "coverage_stale"
+        ],
+        "defects_include": [
+          "coverage_stale"
+        ],
+        "warnings": []
+      },
+      "question:2": {
+        "disposition": "established",
+        "best_candidate": false,
+        "readiness_holds": false,
+        "defects": [],
+        "warnings": []
+      }
+    },
+    "ready": false,
+    "verdict": {
+      "proceed": false,
+      "failing": "check:check-answers"
+    },
+    "done": "held",
+    "agreement": []
+  }
+}

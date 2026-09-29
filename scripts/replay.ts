@@ -543,13 +543,17 @@ export async function project(harness: string, S: string, o: { showText?: boolea
   // bounded negative that says the event did not happen, held on its
   // source's broad extraction) has no disposition in the check: the gate
   // reads the outcome, and the finish line holds it through the check's
-  // verdict. The finish line holds it, as readiness does.
+  // verdict. The finish line holds it, as readiness does. So does a
+  // question the operator accepted while the check still holds a defect on
+  // it: the gate reads it accepted, and the check's verdict refuses the
+  // done (the class the Fable review of the limits branch found, P1-1).
   const agreement: Array<{ section: string; kind: string }> = [];
   const finalOutcome = (o: string) => ["answered", "accepted", "withdrawn"].includes(o);
+  const heldThrough = (o: string) => o === "answered" || o === "accepted";
   for (const q of questions) {
     if (!q.gate || !q.section.startsWith("question:")) continue;
     const disposed = Boolean(q.gate.disposition) || finalOutcome(q.gate.outcome);
-    const heldByCheck = q.gate.outcome === "answered" && (q.check?.defects.length ?? 0) > 0;
+    const heldByCheck = heldThrough(q.gate.outcome) && (q.check?.defects.length ?? 0) > 0;
     const gateHolds = !disposed || heldByCheck || (gate?.defects ?? []).some((d) => gateSections(d).includes(q.section));
     const readyHolds = q.readiness.some((c) => c !== "route_limitation");
     if (ready && readyHolds && !gateHolds) agreement.push({ section: q.section, kind: "readiness_holds_disposed" });
@@ -560,7 +564,7 @@ export async function project(harness: string, S: string, o: { showText?: boolea
   }
   if (ready && gate && !gate.error) {
     // A question the check reads as answered while one of its own defects holds it is held through the check's verdict, as above (two answers that assume and contradict one premise revision: premise_inconsistent).
-    const heldThroughCheck = questions.some((q) => q.gate?.outcome === "answered" && (q.check?.defects.length ?? 0) > 0);
+    const heldThroughCheck = questions.some((q) => q.gate && heldThrough(q.gate.outcome) && (q.check?.defects.length ?? 0) > 0);
     const gateClear = !gate.defects.length && !(gate.holding ?? []).length && gate.questions.every((q) => q.disposition || finalOutcome(q.outcome)) && !heldThroughCheck;
     const readyHeld = items.some((i) => i.code !== "route_limitation");
     if (!ready.ready && readyHeld && gateClear) agreement.push({ section: "run", kind: "readiness_not_ready_gate_clear" });

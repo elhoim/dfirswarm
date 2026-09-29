@@ -1,0 +1,47 @@
+{
+  "case": "P-1, a given: question 1's answer assumes it and question 2's contradicts it with no rebutting finding (both held premise_inconsistent); question 3's partial answer has no critic act (no_critic_act). The operator accepts the limits of all three questions.",
+  "design": [
+    "docs/adr/0011 'Premises': premise_inconsistent is fixed, never named; the operator's acceptance of a question excuses it on that question, as it excuses a dispute.",
+    "docs/adr/0013 'Decision', 9 (operator acceptance), and 'After the first calibration run' (still_held: every defect an acceptance never excuses): an acceptance excuses every defect on its question but the negative bar's and material the case policy forbids (protocol.ts ACCEPTANCE_NEVER_EXCUSES); readiness, the accept act's still_held and the answers check read that one rule (acceptanceExcuses; the Fable review of the limits branch, P1-1).",
+    "docs/adr/0013 'The end of a run, under every stop policy': done finishes a run when every question has a disposition under the bar; an accepted question is disposed and limits the run.",
+    "docs/adr/0017 addendum 'Measuring a rule change': readiness, the answers check and the finish gate never disagree on a question."
+  ],
+  "policies": [
+    "as run"
+  ],
+  "expect": {
+    "questions": {
+      "question:1": {
+        "disposition": "established",
+        "best_candidate": false,
+        "readiness_holds": false,
+        "defects": [],
+        "warnings": []
+      },
+      "question:2": {
+        "disposition": "established",
+        "best_candidate": false,
+        "readiness_holds": false,
+        "defects": [],
+        "warnings": []
+      },
+      "question:3": {
+        "gate_outcome": "accepted",
+        "best_candidate": false,
+        "readiness_holds": false,
+        "defects": [],
+        "warnings": []
+      }
+    },
+    "ready": true,
+    "verdict": {
+      "proceed": true,
+      "outcome": "examination_limited"
+    },
+    "done": "proceeds",
+    "agreement": [],
+    "history": {
+      "premise_requests": 0
+    }
+  }
+}

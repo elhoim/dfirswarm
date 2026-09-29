@@ -41,7 +41,15 @@ const WRITTEN_WITH_DELTA = new Set(["evidence-stale-cleared", "late-evidence-hit
 /** The harness before the premise register and the claim and open-part rows (docs/adr/0011 "Premises", 0013 "Claim and open-part rows"). */
 const BEFORE_PREMISES = "be4e6a3cfe9f79825a223bd8b96d0d4d71682740";
 /** The histories written with premises or rows: the harness before them has neither. */
-const WRITTEN_WITH_PREMISES = new Set(["premise-given", "premise-admitted", "premise-scopes", "premise-held", "premise-rebutted", "premise-conditional", "parts-omitted"]);
+const WRITTEN_WITH_PREMISES = new Set(["premise-given", "premise-admitted", "premise-scopes", "premise-held", "premise-rebutted", "premise-conditional", "parts-omitted", "accepted-excused"]);
+/**
+ * The histories written for the acceptance's one rule (the Fable review of
+ * the limits branch, P1-1): the answers check before it held, on an accepted
+ * question, defects readiness excused (premise_inconsistent, no_critic_act,
+ * an answer resting on nothing checkable now). They read differently under
+ * an older harness by design, and are held to their expect.json instead.
+ */
+const WRITTEN_FOR_ACCEPTANCE = new Set(["accepted-excused", "accepted-negative-held"]);
 
 const scratch: string[] = [];
 after(async () => {
@@ -58,6 +66,10 @@ async function tmp(prefix: string): Promise<string> {
 
 type QuestionExpect = {
   disposition?: string | null;
+  /** The finish gate's outcome for the question (answered, accepted, limited, …). */
+  gate_outcome?: string;
+  /** The answers check's open defects on the question, exactly. */
+  defects?: string[];
   best_candidate?: boolean;
   readiness_holds?: boolean;
   readiness_includes?: string[];
@@ -125,6 +137,8 @@ function holdTo(p: Projection, e: Expect, where: string): void {
       assert.equal(q.gate?.disposition ?? null, want.disposition, `${at}: the gate's disposition`);
       if (q.check) assert.equal(q.check.disposition, want.disposition, `${at}: the answers check's disposition`);
     }
+    if (want.gate_outcome !== undefined) assert.equal(q.gate?.outcome ?? null, want.gate_outcome, `${at}: the gate's outcome`);
+    if (want.defects) assert.deepEqual(q.check?.defects ?? [], [...want.defects].sort(), `${at}: the answers check's open defects`);
     if (want.best_candidate !== undefined) assert.equal(q.check?.best_candidate ?? false, want.best_candidate, `${at}: held a best candidate`);
     if (want.readiness_holds !== undefined) assert.equal(q.readiness.length > 0, want.readiness_holds, `${at}: readiness holds it (${q.readiness.join(", ") || "nothing"})`);
     for (const c of want.readiness_includes ?? []) assert.ok(q.readiness.includes(c), `${at}: readiness holds it on ${c} (it holds ${q.readiness.join(", ") || "nothing"})`);
@@ -289,7 +303,7 @@ test("old histories replayed unchanged: every fixture recorded before the source
   const work = await tmp("contract-before-delta-");
   const old = join(work, "harness-c34c6cb");
   await extractCommit(BEFORE_DELTA, old);
-  const names = fixtures.map((f) => f.name).filter((n) => !WRITTEN_WITH_DELTA.has(n) && !WRITTEN_WITH_PREMISES.has(n));
+  const names = fixtures.map((f) => f.name).filter((n) => !WRITTEN_WITH_DELTA.has(n) && !WRITTEN_WITH_PREMISES.has(n) && !WRITTEN_FOR_ACCEPTANCE.has(n));
   // One copy per checkout, each evaluated in one process per checkout (replay's own copy, and the custody anchor beside it).
   const copies = async (label: string) => {
     const out: string[] = [];
@@ -323,7 +337,7 @@ test("old histories replayed unchanged: every fixture recorded before the premis
   const work = await tmp("contract-before-premises-");
   const old = join(work, "harness-be4e6a3");
   await extractCommit(BEFORE_PREMISES, old);
-  const names = fixtures.map((f) => f.name).filter((n) => !WRITTEN_WITH_PREMISES.has(n));
+  const names = fixtures.map((f) => f.name).filter((n) => !WRITTEN_WITH_PREMISES.has(n) && !WRITTEN_FOR_ACCEPTANCE.has(n));
   const copies = async (label: string) => {
     const out: string[] = [];
     for (const n of names) {
