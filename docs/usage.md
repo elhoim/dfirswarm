@@ -965,6 +965,85 @@ harness can share a blind spot, and their agreement is not confirmation.
 When the two runs' questions in scope differ in number or text, it says so
 and still compares by section.
 
+### Replay: `swarm.sh replay`, `scripts/replay.ts`
+
+```
+swarm.sh replay <id> [--checkout PATH] [--compare [A [B]]] [--stop-policy P[,P...]] [--json] [--show-text]
+node --experimental-strip-types scripts/replay.ts <run-dir | id --registry FILE> [the same options]
+```
+
+A finished run's registers read again under a harness's finish rules, to
+measure a rule change on recorded histories before paying for new runs
+(ADR 0017, "Measuring a rule change"). No model call, no job, no VM.
+
+- **The run is never written.** It is copied to a temporary directory, a
+  clone where the file system makes one (APFS, a reflink; elsewhere the copy
+  costs the store's size), with the times kept. Left out: `inputs/` (the
+  evidence, whose hashes `inputs.json` keeps), the VMs' records and images,
+  the seats' Pi sessions and the kickoff's options. Every link in the copy is
+  removed, never followed. The run's registers are hashed before and after,
+  and a change is said. One copy per checkout and stop policy: the finish
+  gate writes (it reopens leads on the ledger and runs a store sweep lost with
+  its process, as it does at a done), and one evaluation never sees another's.
+- **What is evaluated, in the order a done reads it**, each checkout in a
+  process of its own: the answers check (each `check-answers.ts` line of the
+  goal's checks, read as `await-done.sh` reads them from the registry record,
+  run as its own function); the finish gate over it and the finish line's
+  verdict; readiness; the finish register (the coordinator, what is late
+  against the report, the last check recorded); the report's standing for
+  each question (its status, and whether its chain says a best candidate);
+  and every custody verdict the run holds (`custody.json`, one a resume set
+  aside, the ones the anchor beside the run names), verified as a prefix of
+  the registers with the checkout's own chain code. The goal's other checks
+  are its own commands, which no harness version changes: they are not run,
+  and the verdict reads them as passing.
+- **What it prints**, per question: its declared result, the check's outcome
+  and disposition, whether it is held a best candidate, the codes of its open
+  and named defects, of its warnings and of the readiness items on it, the
+  gate's disposition, and the report's standing. Then readiness, the gate's
+  defect codes, the verdict (proceeds and how the run would end, or held and
+  on what), the finish (whose, what is late, whether the done would write the
+  sentinel now), the seals, and where readiness, the answers check and the
+  gate disagree on a question (`readiness_holds_disposed`,
+  `readiness_clear_held`, `gate_holds_check_disposed`, and a run whose
+  readiness is not ready while the gate holds nothing). A route limitation
+  that readiness holds under `--stop operator` only limits the done, by
+  design (ADR 0015, 7 and 8), and is not counted a disagreement.
+- **Values-free by default**: codes, ids, counts and the harness's own words,
+  never a record's text (no answer, finding, lead title, reason or post).
+  `--show-text` adds the harness's lines whole, which quote records; it is
+  off unless asked for. `--json` gives the same as data.
+- **Which rules.** This checkout's, or `--checkout PATH`'s (a worktree at a
+  commit: `git worktree add --detach /tmp/x <commit>`). `--compare` evaluates
+  two and names every difference: with no argument, the run's own harness
+  against this checkout (or `--checkout`); with one, that checkout against
+  this one; with two, the first against the second. `frozen` names the run's
+  own harness: the hub directory's frozen host copy while it is there, else
+  the commit its registry record names (`provenance.harness_commit`),
+  extracted from this repository with `git archive` into the temporary
+  directory (no worktree is made). A run whose commit is not in this
+  repository's history is refused, with how to give it instead.
+- **`--stop-policy`** evaluates the copy as though the run's stop policy were
+  each one given (`operator`, `cap-pause`, `cap-stop`; several with commas):
+  the copy's `budget.json` only.
+
+Exit 0 when replayed and the run's registers are unchanged; 1 when a
+checkout could not be evaluated, the run changed under it, or it was
+refused (the reason on stderr); 2 on a usage error. Replay measures
+decisions on a recorded history; what the agents would have done under the
+other rule is not in it, and a rule that changes their behaviour is measured
+by paired runs.
+
+The contract fixtures (`tests/fixtures/contract/`, written by
+`generate.ts` there) are synthetic histories made through the harness's own
+acts, each with an `expect.json` written by hand from the ADRs. The tests
+(`tests/contract-fixtures.test.ts`) replay each and hold it to that, and to
+three invariants under every fixture and stop policy: readiness, the answers
+check and the gate never disagree on a disposition; a warning never holds;
+every custody verdict verifies as a prefix. A rule change that moves a
+fixture's projection changes its `expect.json` in the same commit, with the
+ADR that says why.
+
 ### `npm` scripts
 
 | Script | Runs |

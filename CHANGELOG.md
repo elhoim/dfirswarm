@@ -6,6 +6,39 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Added: replay, and the contract fixtures
+
+A finished run's registers read again under a harness's finish rules, to
+measure a rule change on recorded histories before a paid run is spent on it
+(ADR 0017, "Measuring a rule change"). On the run s9722fa readiness and the
+answers check read six partial answers two ways, and the case lost every
+positive answer; nothing then could show that on the registers before the run.
+
+- `swarm.sh replay <run>` (`scripts/replay.ts`) copies the run (a clone where
+  the file system makes one; the evidence, the VMs and the seats' sessions left
+  out, every link removed) and evaluates a checkout's answers check, finish
+  gate, verdict, readiness, finish register, report standing and custody seals
+  over the copy, each checkout in a process of its own, with no model call, no
+  job and no VM. The run is never written: its registers are hashed before and
+  after. It prints values-free (codes, ids, counts, the harness's own words);
+  `--show-text` adds the lines that quote records. `--checkout PATH` evaluates
+  another checkout; `--compare` sets the run's own harness (the hub's frozen
+  copy, or the commit its registry records, extracted with `git archive`)
+  against this one, or any two, and names every difference; `--stop-policy`
+  evaluates the copy as though the run's policy were another.
+- `tests/fixtures/contract/`: synthetic histories made through the harness's
+  own acts, each with an `expect.json` written by hand from the ADRs: a partial
+  disposed under every stop policy, an established claim held a best candidate,
+  a negative nobody reviewed, evidence stale and cleared, sweep hits named and
+  examined, a post late against the report, an objection racing the finish, a
+  resumed run sealed twice, warnings and nothing else, and the c10 partial
+  cascade. Under every fixture and stop policy readiness, the answers check and
+  the gate agree on each disposition, a warning never holds, and every custody
+  verdict verifies as a prefix. The c10 cascade is replayed under 3338e3c's
+  harness, extracted from the history: its readiness holds the six partials as
+  best candidates while the check disposes them; under this one all six are
+  disposed and readiness is ready.
+
 ### Fixed: a case premise is not a reason to hold an answer partial, and an answer that leaves out what its question's leads established is warned of
 
 On the run s993d40 (a CTF case of six questions) all six answers stood
