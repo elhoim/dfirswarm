@@ -6,6 +6,68 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Fixed: a partial answer is a disposition, whatever its reviews' strength, and a standing finding is never discarded to make an answer not determinable
+
+On the run s9722fa (a CTF case of six questions, `--stop operator`) every
+question had a partial answer with medium confidence. Each review was capped
+to best_candidate by that confidence and by the parts the answer itself
+declared open; readiness then held all six as "a best candidate, not
+established" while the answers check disposed them partial, the coordinator
+read the finish status as "best_candidate is not a disposition", and the
+seats revised all six to not_determinable with a `downgrade` citing their
+limitations and their own coverage records. The case lost every positive
+answer. Now:
+
+- "A best candidate" concerns only an answer that claims established
+  (`claimsEstablished`, `heldAsBestCandidate` in `extensions/protocol.ts`),
+  and readiness, the answers check (and through it the finish gate) and the
+  report read that one test. Partial, not determinable, a bounded negative,
+  out of scope and a premise shown not to hold are disposed by their own bar.
+  A best candidate now holds readiness under every stop policy, as it holds
+  the done; before, a cap-policy run could turn ready on one that the done
+  then refused.
+- A partial answer's review attests the answer's own claims: a part it
+  declares open is held `established: false` with
+  `answer_review.parts[].declared_open: "E-<seq>"` (a limitation the answer
+  cites, or a coverage record it rests on; checked), and does not cap the
+  review; neither does the answer's confidence nor a route its
+  `would_change` names. An answer that claims established keeps the whole
+  cap. The attest's reply says a best candidate on a disposition holds
+  nothing.
+- A downgrade's evidence names an entry that bears against the earlier
+  chain (a finding or event that contradicts it, a refuted hypothesis tied
+  to it, a supporting entry under dispute or contradicted, a correction of
+  one); a limitation or a coverage record does not (`downgradeCheck`). While
+  a finding or event the earlier answer rested on for its question still
+  stands, the downgrade is refused and the refusal says to answer partial.
+  This holds for a bounded negative as for not determinable.
+- The worker prompt, the SWARM.md template and the `attest`, `record`,
+  `finish` and `done` descriptions say it plainly. `tests/partial-disposition.test.ts`
+  reconstructs s9722fa under all three stop policies.
+
+### Fixed: a hit the store sweep found is cleared by saying what it showed, not by naming it
+
+On the run sb1b3c8 seats cleared `sweep_hits` by writing a revised coverage
+record whose refs named up to 66 hit objects, by their jobs' directories,
+with nothing recorded about what any showed. An object that moves from an
+earlier sweep's hits into a coverage record for the same question is now
+cited in its `result_refs` by an entry that says what it showed: a finding,
+an event, an absence or a limitation whose refs name the object itself (a
+directory does not count), written after the sweep that found it; one entry
+per object, or one absence over several (`unexaminedHits`,
+`extensions/store-sweep.ts`). Until then the gate keeps holding it as
+`sweep_hits`, naming each object and how to clear it, and the coverage
+record's reply says so when it is written. Object refs and times only.
+
+### Changed: under more_evidence: no, acquisition_none_why naming the policy is the answer, not an ask
+
+Under the ctf preset seats opened acquisition asks in the finish tail only to
+satisfy "a not_determinable names its acquisition ask", and the case policy
+declined each at once. Under `more_evidence: no` the `no_acquisition_ask`
+warning and the answer's reply now suggest `acquisition_none_why` naming the
+policy (`NO_MORE_EVIDENCE_NONE_WHY`) and no ask; the worker prompt says it in
+one sentence.
+
 ### Changed: done asks whether the dispositions suffice, not the operator
 
 In a real run seats twice closed a lead needs_operator asking the operator

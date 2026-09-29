@@ -375,6 +375,67 @@ have lost its provider.
     anywhere). The minted validity (12 h for an operator-stopped run) stays
     the window each token covers.
 
+## After the run s9722fa
+
+A CTF case of six goal questions under `--stop operator`. Every question
+had a partial answer with medium confidence, resting on findings and
+citing the limitations that bounded what it left open. Each review was
+capped to best_candidate (1): by the answer's medium confidence, and by the
+parts the answer itself declared open, which the reviews held not
+established. Readiness (8) then held all six as "a best candidate, not
+established", under the operator's stop policy, while the answers check
+disposed each one partial (its best-candidate test applied only to an
+answer it found answered) and the finish gate agreed with the check. The
+coordinator read the finish status as "all six partial answers with a
+best_candidate attest are not under the bar; best_candidate is not a
+disposition", and the seats revised every answer to not determinable with a
+downgrade, moving their standing findings into the reasoning (ADR 0013,
+"After the runs s9722fa and sb1b3c8"). The case lost every positive answer.
+
+- **"A best candidate" concerns only an answer that claims established.**
+  An answer claims established when its result is established, or when it
+  was recorded before results and is not inconclusive
+  (`claimsEstablished`). It is held as a best candidate when it claims
+  established, another seat reviewed it, and every review holds it a best
+  candidate only (`heldAsBestCandidate`). A disposition that only limits
+  the run (partial, not determinable, a bounded negative, out of scope) and
+  a premise shown not to hold are each held to their own bar, never to a
+  strength, whatever their reviews say. Readiness, the answers check (and
+  through its machine line the finish gate) and the report read this one
+  test, so they cannot drift again.
+- **A best candidate holds readiness under every stop policy.** It has no
+  disposition, and the done has refused it under every policy since the one
+  rule (ADR 0013, "The end of a run"); readiness held it only under the
+  operator's, so a cap-policy run could turn ready on a best candidate that
+  the coordinator's done then refused. It holds readiness now wherever it
+  holds the done; a route limitation still holds readiness only under the
+  operator's (8). This supersedes "under the operator's stop policy" in 1
+  and 8 for a best candidate.
+- **A partial answer's review attests the answer's own claims.** A partial
+  answer claims some parts established and declares the rest open; its
+  review says whether both hold. A part the review holds open as the answer
+  declares it names the entry by which the answer declares it:
+  `answer_review.parts[].declared_open`, `E-<seq>` of a limitation the
+  answer cites or a coverage record it rests on (`declaredOpenBy`), checked
+  when the attest is written and kept in the chained attestation. Such a
+  part does not cap the review; neither does the answer's confidence, nor a
+  route its `would_change` names, which is how its open parts would be
+  settled and which the answer already says are open. A part it claims
+  established that the review does not hold so still caps it, and the
+  refusal says that is a dispute or a best_candidate attest. A
+  `declared_open` on an answer that is not partial, or naming an entry the
+  answer does not cite so, is refused. An answer that claims established
+  keeps the whole cap (1), and out of scope and a premise shown not to hold
+  keep it too, though a best candidate on them holds nothing. The attest's
+  reply says so: on a disposition, a best candidate "holds nothing".
+- **Said where the seats read it.** The worker prompt, the SWARM.md
+  template, and the `attest`, `record`, `finish` and `done` descriptions say
+  that partial is a disposition, that a review of a partial answer checks
+  the parts the answer claims, that "best candidate" concerns only an answer
+  that claims established, and that a standing positive finding is never
+  discarded to make an answer not determinable. Readiness names a best
+  candidate as one that claims established.
+
 ## Consequences
 
 - A run has one closer, and a finish that waits on a compacting or dead seat

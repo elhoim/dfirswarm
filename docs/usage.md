@@ -144,7 +144,7 @@ it. A wrong command line prints the mistake and where to read, not the manual.
 | `--network MODE` | no | `closed` | The run's network mode ([ADR 0012](adr/0012-a-dynamic-network-decided-by-rules-and-made-on-the-host.md)). `closed`: the models' hosts, the package index with `--allow-install`, `--allow-host`, and what the operator allows later with `lead note --allow-host` (a socket grant). `dynamic` (microVM runs): an agent asks for one bounded lookup with `net_request`; the hub decides it by rules under the case policy and records the decision; a fetch service on this host (`scripts/net-fetch.ts`, started with the hub and kept by its keeper) makes exactly the granted request and seals the answer as a capture (`store/net/<k>/<n>/`), recorded on the ledger as external material; the agents get `net_request`, `net_fetch` and `network`. Refused with `--isolation host`. `open`: every public host (`--no-netguard`), with the tools too. The goal's metadata block may say `network: MODE`. Recorded in `network/policy.json`, SWARM.md and the registry's `case_policy`. |
 | `--policy PRESET` | no | `standard` | The case policy: what the examination permits to leave the run and to reach outside it, whatever the mode. `standard`: hashes and public indicators, to approved passive adapters; active contact (an evidence URL's HEAD) is the operator's. `live_adversary`: stricter; nothing the evidence names is ever contacted, no socket grant. `internal`: nothing leaves (with `--network open` or any lookup it is refused). `ctf`: a published case; no search, no write-up site, only reference or evidence-linked adapters, and every value sent must be found in the evidence the request cites; no socket grant (so no `--allow-host`). The goal's metadata block may say `policy: PRESET`, and `legal:`, `provider_retention:`, `more_evidence:`, `material_use:` as text; a flag overrides the goal's value and the kickoff says so. A combination that contradicts its preset is refused before anything is written, and so is a run whose direct egress does not fit it: under `ctf`, `internal` and `live_adversary` no host is reached without a grant, so `--allow-host`, the package index `--allow-install` would open (add `--no-pypi` to keep the install machinery without it) and a pack's secret hosts (`--allow-pack-secrets`) are each refused, naming where they came from. |
 | `--lookups L`, `--contact C`, `--disclosure LIST` | no | the preset's | Override one field of the preset: what the hub grants by itself (`none`, `reference`, `evidence_linked`, `any`), whether what the evidence names may be contacted (`passive`, `active`), and which classes of case data may leave (`hash`, `public_indicator`, `coordinate`, `internal_name`, `personal`, `file_upload`, or `none`). |
-| `--more-evidence M` | no | the preset's (`ask`; `ctf`: `no`) | Whether evidence may arrive while the run goes on ([ADR 0014](adr/0014-the-case-contract-says-what-comes-in-and-what-is-asked.md)). `no`: a closed collection or a published case; an agent's acquisition is answered at once, "no additional input under this case policy", a constraint of the case and never a finding that something is absent, and `evidence add` is refused. `ask`: the operator authorises or declines each acquisition. `yes`: further collection is expected; an acquisition is authorised by the policy, and the operator collects it. Also `more_evidence:` in the goal's metadata block. `ctf` with `yes` is refused. |
+| `--more-evidence M` | no | the preset's (`ask`; `ctf`: `no`) | Whether evidence may arrive while the run goes on ([ADR 0014](adr/0014-the-case-contract-says-what-comes-in-and-what-is-asked.md)). `no`: a closed collection or a published case; an agent's acquisition is answered at once, "no additional input under this case policy", a constraint of the case and never a finding that something is absent, and `evidence add` is refused; a not_determinable's coverage says so in `acquisition_none_why` (the policy is the reason no ask was opened), which the `no_acquisition_ask` warning suggests instead of an ask. `ask`: the operator authorises or declines each acquisition. `yes`: further collection is expected; an acquisition is authorised by the policy, and the operator collects it. Also `more_evidence:` in the goal's metadata block. `ctf` with `yes` is refused. |
 | `--material-use SPEC` | no | the preset's | What each class of material from outside the original evidence may be used for: `CLASS=USE` pairs (`,` between them), the classes `acquired_evidence`, `case_material`, `operator_supplied`, `external_capture`, the uses `evidence` (a finding may rest on it as on the original evidence), `reference` (it may be cited; what rests on it is flagged) and `none` (kept on the record, never citable: a record citing it is refused). A class left out keeps the preset's use (`acquired_evidence=evidence`, the rest `reference`; `internal`: `external_capture=none`). A capture is never evidence of the events: `external_capture=evidence` is refused. Also `material_use:` in the goal's metadata block. |
 | `--legal TEXT`, `--provider-retention TEXT` | no | none | The case's legal text (jurisdiction, warrant or engagement scope, "GDPR or similar laws") and what you know of how the model and lookup providers keep what they are sent: recorded in the policy, SWARM.md and the registry, never inferred. Also `legal:` and `provider_retention:` in the goal's metadata block; at most 2,000 characters each, nothing cut. |
 | `--local-only` | no | off | Every model on the team must be served from this machine or this network — a `models.json` `baseUrl` on loopback, a private range, link-local or `.local`, or Pi's built-in `llama.cpp` provider — and the netguard allowlist becomes those endpoints and nothing else (`netguard --only`): the eight cloud hosts of the default list drop out. Panes also get `PI_OFFLINE=1`, so Pi makes no catalog-refresh calls at startup. Refused with a cloud model on the team, with a cloud `--compact-model`, and with `--no-netguard`. Recorded as `net: "local"` in the registry. |
@@ -452,9 +452,10 @@ scope has a disposition under the bar ([ADR 0013](adr/0013-a-negative-is-bounded
 established; partial; a bounded negative or not determinable, each on a
 coverage record another seat reviewed; a premise shown not to hold; out of
 scope; accepted by the operator; or withdrawn. A limitation that only names a
-question is none, and neither is a best candidate or a quick negative nobody
-attested: the finish line refuses `done` on them and says the way to a
-disposition. The stop policy decides who else ends the run: a cap pauses or
+question is none, and neither is a best candidate (an answer that claims
+established, every review of which holds it a best candidate only) or a quick
+negative nobody attested: the finish line refuses `done` on them and says the
+way to a disposition. Partial is a disposition whatever its reviews' strength. The stop policy decides who else ends the run: a cap pauses or
 stops it and you stop it, whatever the questions' state.
 
 A run ends one of six ways (`runOutcome`, `stop-policy.ts outcome`):
@@ -707,7 +708,13 @@ result_refs name), or partial (what the budget did not reach, each named;
 `SWARM_SWEEP_MAX_BYTES`, 16 GiB, and `SWARM_SWEEP_MAX_SEC`, 1800, set it). A
 negative resting on the record waits for its sweep (`sweep_pending`); a hit
 outside it holds the negative until the record is recorded again naming that
-object, with what it showed, or the answer is revised (`sweep_hits`); a partial
+object, with what it showed, or the answer is revised (`sweep_hits`). What it
+showed is an entry in the revised record's `result_refs`: a finding, an event
+or a limitation whose refs name the object itself (not a directory holding
+it), or one absence whose refs list several, written after the sweep that
+found it. A hit object a record names with no such entry keeps holding
+(`sweep_hits`, each object named, and the record's reply says so): naming a
+hit is not examining it. A partial
 sweep holds until the operator accepts the question's limits
 (`sweep_partial`). A sweep lost with the process that began it is run again by
 the finish gate and the answers check once its record is older than
@@ -718,8 +725,27 @@ the metrics show each sweep.
 to not_determinable or bounded_negative carries `downgrade: {evidence:
 [E-<seq> or objects], why}`, what undermines the earlier chain; without it the
 revision is refused, and the refusal points to a dispute and a lower strength
-or confidence instead. The report shows the earlier answer, the disputes on it
-and the downgrade's evidence.
+or confidence instead. At least one entry of the evidence bears against the
+chain (the answer and what it rests on): a finding or an event that
+contradicts one of them (`rel` contradicts), a refuted hypothesis tied to one,
+an entry it rests on under a dispute in force, or a correction of one. A
+limitation or a coverage record does not. While a finding or an event the
+earlier answer rested on for its question still stands (not corrected, not
+disputed, contradicted by nothing), the revision is refused and the refusal
+says to answer partial: a standing positive finding is never discarded to make
+an answer not determinable. The report shows the earlier answer, the disputes
+on it and the downgrade's evidence.
+
+**Partial is a disposition.** "A best candidate" concerns only an answer that
+claims established (its result established, or an answer from before results);
+one that every review holds a best candidate only has no disposition, and it
+holds readiness and the done under every stop policy. A partial answer, a
+negative, out of scope and a premise shown not to hold are disposed by their
+own bar whatever their reviews' strength. A review of a partial answer checks
+the parts the answer claims: a part it declares open is held
+`established: false` with `declared_open: "E-<seq>"`, the limitation it cites
+or the coverage record it rests on for that part, and such a part does not cap
+the review, nor does the answer's confidence.
 
 **Tool candidates.** `tools <id> --candidates [--out DIR] [--min-lines N]
 [--library DIR]...` takes the code out of every agent's command job (each

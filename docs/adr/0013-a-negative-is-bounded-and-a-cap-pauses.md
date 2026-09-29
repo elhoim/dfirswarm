@@ -464,6 +464,66 @@ was over a cap, and the policy had none.
   as one that died unpaused; neither is shown as paused, and the console's
   elapsed time leaves every pause out.
 
+## After the runs s9722fa and sb1b3c8
+
+Two real runs on the CTF preset (`--more-evidence no`) walked around the
+rules above from the other side. On s9722fa (six goal questions, `--stop
+operator`) every question had a partial answer resting on findings; once
+readiness had held all six as best candidates (ADR 0015, "After the run
+s9722fa"), the seats revised every one to not determinable with a
+`downgrade` whose evidence was limitations, the downgraders' own coverage
+records and findings that contradicted nothing, and moved their standing
+findings into the reasoning. The case lost every positive answer; the
+round before had three correct and two partial. On sb1b3c8 seats cleared
+`sweep_hits` by writing a revised coverage record whose refs named up to 66
+hit objects (by their jobs' directories), with nothing recorded about what
+any of them showed. On both, seats opened acquisition asks in the finish
+tail only to satisfy "a not_determinable names its acquisition ask", and
+the case policy declined each at once.
+
+- **A downgrade's evidence bears against the chain.** The earlier chain is
+  the earlier answer and the entries it rests on (its support). At least
+  one entry of `downgrade.evidence` bears against it: a finding or an event
+  that contradicts the answer or an entry it rests on (`rel` contradicts),
+  a hypothesis refuted that names one of them (`rel`) or corrects one, an
+  entry it rests on that a dispute in force or a standing finding or event
+  contradicts, or a correction (supersedes, at any depth) of one. A
+  limitation says a route could not be examined, and a coverage record what
+  a search covered: neither undermines a finding that stands, and an
+  object alone says nothing until an entry says what it shows. The refusal
+  names each entry given and why it does not bear (`downgradeCheck`).
+- **A standing finding is never discarded.** While a positive finding the
+  earlier answer rested on (a finding or an event it cites, recorded for
+  its question) still stands, not corrected, under no dispute in force and
+  contradicted by no standing finding or event, a revision to not
+  determinable or a bounded negative is refused whatever its evidence. The
+  refusal says to answer partial (the established parts stated, the open
+  parts named with their limitations and coverage) or, if a finding does
+  not hold, to say so first: dispute it, correct it, or record the finding
+  that contradicts it. The spec named not determinable; a bounded negative
+  after a positive answer discards the same findings, so the rule holds
+  for both. The dispute path is unchanged: a doubt is a dispute, and the
+  answer stays.
+- **Naming a hit is not examining it.** An object an earlier sweep for one
+  of a coverage record's questions found a hit in, which the record now
+  names (in refs, a directory holding it included, or among its object
+  results), is cited in its `result_refs` by an entry that interprets it: a
+  finding, an event, an absence or a limitation that stands, names the
+  object itself in its refs (a directory does not count), and was written
+  after the sweep that first found it. One entry per object, or one absence
+  whose refs list several. Until then the gate keeps holding it as
+  `sweep_hits`, naming each object, the strings found in it and the record
+  whose sweep found it, and the coverage record's reply says it when it is
+  written (`unexaminedHits`, store-sweep.ts). Object refs and times only:
+  nothing is read or judged. It applies to a record whether or not it
+  names `looked_for` itself, so dropping the strings does not clear it.
+- **No ask to satisfy a rule.** Under the case policy's `more_evidence: no`
+  an ask is declined at once, so `acquisition_none_why` naming the policy
+  satisfies "a not_determinable names its acquisition ask": the
+  `no_acquisition_ask` warning and the answer's reply give that wording
+  (`NO_MORE_EVIDENCE_NONE_WHY`) and no longer suggest an ask. Under `ask`
+  and `yes` they say what they said.
+
 ## Consequences
 
 - Every existing goal and run keeps working: an answer without `result`
