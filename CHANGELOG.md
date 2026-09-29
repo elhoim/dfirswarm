@@ -6,6 +6,15 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Fixed: a notifier that failed says how
+
+A spawn error, the 20-second timeout and a signal all read "notify.sh could
+not be run" in a request's `delivery_failed`. The failure now says which:
+`could not be run (ENOENT)` with the errno, `took more than 20 s and was
+stopped`, `was ended by SIGKILL`, or the exit status as before
+(`extensions/requests.ts` `runNotify`). The retry after a backoff is as it
+was.
+
 ### Fixed: an entry the harness writes on the ledger is on the trace, and custody holds the ledger to it
 
 Custody failed its ledger check on every run that took material from

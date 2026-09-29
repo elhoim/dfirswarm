@@ -208,6 +208,25 @@ test("the outbox: a crash between the commit and the notification loses nothing 
   assert.deepEqual(again.got.map((g) => g.notice.request), ["R-2"]);
 });
 
+test("a notifier that fails says how: the errno it could not be started with, that it took too long and was stopped, the signal that ended it, or its exit status", async () => {
+  // A spawn error, the timeout and a signal once all read "notify.sh could not be run".
+  assert.equal(await R.runNotify("bash", ["-c", "exit 0"]), null);
+  assert.equal(await R.runNotify("bash", ["-c", "exit 3"]), "exited 3");
+  assert.equal(await R.runNotify(join(tmpdir(), "no-such-notifier-for-this-test"), []), "could not be run (ENOENT)");
+  assert.equal(await R.runNotify("bash", ["-c", "sleep 5"], { timeoutMs: 200 }), "took more than 200 ms and was stopped");
+  assert.equal(await R.runNotify("bash", ["-c", "kill -KILL $$"]), "was ended by SIGKILL");
+  assert.equal(R.NOTIFY_TIMEOUT_MS, 20_000, "the hook keeps the 20 s it always had");
+  // The words reach the chain on the failed delivery, which is retried after its backoff as before.
+  const { S, a0 } = await run();
+  ok(await L.openLead(a0, { title: "t", why: "w", take: true }));
+  ok(await L.closeLead(a0, "L-1", { disposition: "needs_operator", ref: "allow the host example.org for a job" }));
+  await R.dispatchRequests(S, { notifier: async () => { throw new Error(`notify.sh ${await R.runNotify("bash", ["-c", "sleep 5"], { timeoutMs: 100 })}`); } });
+  const snap = await R.requestsSnapshot(S);
+  assert.equal(snap.requests.get("R-1")?.state, "pending");
+  assert.equal(snap.requests.get("R-1")?.failures, 1);
+  assert.deepEqual(snap.events.filter((e) => e.ev === "delivery_failed").map((e) => e.why), ["the notifier failed: notify.sh took more than 100 ms and was stopped"]);
+});
+
 test("a notification carries ids only: the request's id and kind, the lead's or question's id, never what was asked", async () => {
   const { S, a0 } = await run();
   await Q.seedRegister(S);

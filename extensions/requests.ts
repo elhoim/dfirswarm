@@ -935,14 +935,44 @@ export function scriptNotifier(runsDir?: string): Notifier {
     const script = join(dirname(fileURLToPath(import.meta.url)), "..", "scripts", "notify.sh");
     if (!existsSync(script)) return { targets: [] };
     // notify.sh hands each target the notice detached and returns: waited for here without blocking the hub.
-    const status = await new Promise<number | null>((done) => {
-      const child = spawn("bash", [script, sandboxRoot, event, JSON.stringify(notice)], { env: { ...process.env, SWARM_RUNS_DIR: dir }, stdio: "ignore", timeout: 20_000 });
-      child.on("error", () => done(null));
-      child.on("close", (code) => done(code));
-    });
-    if (status !== 0) throw new Error(`notify.sh ${status === null ? "could not be run" : `exited ${status}`}`);
+    const failed = await runNotify("bash", [script, sandboxRoot, event, JSON.stringify(notice)], { env: { ...process.env, SWARM_RUNS_DIR: dir } });
+    if (failed) throw new Error(`notify.sh ${failed}`);
     return { targets };
   };
+}
+
+/** How long notify.sh may take to hand the notice on before it is stopped. */
+export const NOTIFY_TIMEOUT_MS = 20_000;
+
+/**
+ * Run the notifier and say how it failed, or null when it exited 0: the
+ * errno when it could not be started, that it took too long and was stopped,
+ * the signal that ended it, or its exit status. The first three once all
+ * read "could not be run", and a failed delivery said nothing of which.
+ */
+export function runNotify(cmd: string, args: string[], o: { env?: NodeJS.ProcessEnv; timeoutMs?: number } = {}): Promise<string | null> {
+  const timeoutMs = o.timeoutMs ?? NOTIFY_TIMEOUT_MS;
+  return new Promise((done) => {
+    let settled = false;
+    let timedOut = false;
+    const settle = (why: string | null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      done(why);
+    };
+    const child = spawn(cmd, args, { env: o.env ?? process.env, stdio: "ignore" });
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGTERM");
+    }, timeoutMs);
+    child.on("error", (err: NodeJS.ErrnoException) => settle(`could not be run (${err.code ?? err.message})`));
+    child.on("close", (code, signal) => {
+      if (timedOut) settle(`took more than ${timeoutMs >= 1000 ? `${Math.round(timeoutMs / 1000)} s` : `${timeoutMs} ms`} and was stopped`);
+      else if (signal) settle(`was ended by ${signal}`);
+      else settle(code === 0 ? null : `exited ${code}`);
+    });
+  });
 }
 
 /** How long a claimed delivery is held before another dispatch may take it over (its dispatcher died between the claim and the outcome). */
