@@ -81,6 +81,25 @@ first calibration run").
   (`acquisition_none_why`); the answers check warns (`WARN:`, `warnings`)
   when it does neither, and holds nothing.
 
+### Fixed: every chained register is sealed, bound, packaged and verified
+
+- The store sweeps (`ledger/sweeps.jsonl`) and the finish register
+  (`leads/finish.jsonl`) were sealed by nothing: custody seals both now
+  (`seal.sweeps`, `seal.finish`, and their checks), `custody-verify` holds
+  both to the seal and an earlier seal as a prefix after a resume, a release
+  binds the sweeps in its chains and holds the finish register to the
+  verdict, and a package carries both (`ledger-sweeps.jsonl`,
+  `finish.jsonl`), walked by `verify`; `--redact` treats a sweep's strings
+  and hits like other sensitive text.
+- The package's `verify` now walks the operator requests, the network's
+  grants and fetches and the model gateway's log against the seal (they
+  were copied and not checked), and declares them in `COMPONENTS.json`; a
+  release holds the gateway log's sealed lines to the verdict.
+- `scripts/chained-registers.ts` lists every chained register in one place;
+  `tests/chained-registers.test.ts` holds each to custody, the release, the
+  package and both verifies, and fails on a `.jsonl` name the harness uses
+  that the list does not classify.
+
 ### Fixed: what the Fable review of the fix batches found
 
 An independent review of the first three fix batches found four rules

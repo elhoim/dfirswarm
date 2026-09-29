@@ -373,6 +373,14 @@ cited nothing against it.
   The report's chain for the question shows the earlier answer, the disputes
   on it and the downgrade's evidence.
 
+The sweeps are a register like the others: custody seals
+`ledger/sweeps.jsonl` by its length and head, a release binds it in its
+chains, a package carries it (`ledger-sweeps.jsonl`, its lines redacted
+by their hashes under `--redact` when they say a sensitive entry's words or
+sweep a sensitive record), and `custody-verify` and the package's `verify`
+walk it; `scripts/chained-registers.ts` keeps the list of every chained
+register, and a test fails on one it does not name.
+
 ## The provider's limit, and the operator's pause
 
 A run under `--stop operator` hit its model provider's subscription usage

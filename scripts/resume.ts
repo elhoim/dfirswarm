@@ -271,6 +271,9 @@ async function chainHeads(sandbox: string): Promise<Record<string, { lines: numb
     fetches: lastHash(text(FETCH_LOG)),
     // The operator requests' chain (extensions/requests.ts), which custody seals and an earlier verdict holds as a prefix.
     requests: lastHash(text("requests/requests.jsonl")),
+    // The store sweeps and the finish register, which custody seals the same way.
+    sweeps: lastHash(text("ledger/sweeps.jsonl")),
+    finish: lastHash(text("leads/finish.jsonl")),
     trace: { lines: trace.length, head: trace.length ? sha256(trace.at(-1)!) : null },
   };
 }

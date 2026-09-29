@@ -64,6 +64,8 @@ import { pathToFileURL } from "node:url";
 import { execFile } from "node:child_process";
 import { eventChainVerifier, specialKind, verifyAttestationChain, verifyDisputeChain, verifyLedgerChain } from "../extensions/protocol.ts";
 import { verifyLeadChain } from "../extensions/leads.ts";
+import { LEDGER_SWEEPS, verifySweepChain } from "../extensions/store-sweep.ts";
+import { FINISH_LOG } from "../extensions/finish.ts";
 import { checkNetwork, FETCH_LOG, GRANTS_LOG, type NetworkCheck } from "./net-grants.ts";
 import { hashArtifacts, type ArtifactIndex } from "./artifacts.ts";
 import { checkStore, verifyJournalText, type StoreCheck } from "./evidence-store.ts";
@@ -660,6 +662,10 @@ export type Custody = {
     network?: { grants: { lines: number; head: string | null }; fetches: { lines: number; head: string | null } };
     /** The operator requests' chain (requests/requests.jsonl, docs/adr/0014): absent from a verdict taken before it was sealed. */
     requests?: { lines: number; head: string | null };
+    /** The store sweeps' chain (ledger/sweeps.jsonl, docs/adr/0013): absent from a verdict taken before it was sealed. */
+    sweeps?: { lines: number; head: string | null };
+    /** The finish register (leads/finish.jsonl, docs/adr/0015): absent from a verdict taken before it was sealed. */
+    finish?: { lines: number; head: string | null };
     /** The case policy's record (network/policy.json) by its sha256: absent from a verdict taken before it was sealed. */
     case_policy?: { sha256: string };
     journal: { lines: number; head: string | null } | null;
@@ -677,6 +683,10 @@ export type Custody = {
   network?: NetworkCheck | null;
   /** The operator requests (requests/requests.jsonl): their own chain, sealed unsigned; null when nothing was asked of the operator. */
   requests?: { lines: number; intact: boolean; detail: string } | null;
+  /** The store sweeps (ledger/sweeps.jsonl): what the hub found when it searched the run's outputs for a coverage record's strings, a chain of its own; null when no sweep ran. */
+  sweeps?: { lines: number; intact: boolean; detail: string } | null;
+  /** The finish register (leads/finish.jsonl): the coordinator's lease, readiness, the checks and the report's reviews, a chain of its own; null when the run has none. */
+  finish?: { lines: number; intact: boolean; detail: string } | null;
   /**
    * The case policy the kickoff recorded (network/policy.json), by its
    * sha256, against the one the kickoff anchored beside the run: a policy
@@ -740,6 +750,8 @@ export type CustodyState = {
   questions?: Custody["questions"];
   network?: Custody["network"];
   requests?: Custody["requests"];
+  sweeps?: Custody["sweeps"];
+  finish?: Custody["finish"];
   case_policy?: Custody["case_policy"];
   operator?: Custody["operator"];
   acquisition?: Custody["acquisition"];
@@ -1603,6 +1615,24 @@ export async function takeCustody(sandboxInput: string, options: CustodyOptions 
   } else if ("why" in requestsRead && requestsRead.why !== "missing") {
     state.requests = { lines: 0, intact: false, detail: `the operator requests are ${requestsRead.why}` };
   } else state.requests = null;
+  // What the store sweeps found (the hub's search of the run's outputs for a coverage record's strings): a chain of its own beside the ledger.
+  const sweepsRead = await readRegularText(join(sandbox, LEDGER_SWEEPS));
+  if ("text" in sweepsRead && sweepsRead.text.trim()) {
+    const v = verifySweepChain(sweepsRead.text);
+    state.sweeps = { lines: v.total, intact: v.ok, detail: v.ok ? `${v.total} lines, chain intact` : `broken at line ${v.broken_at} (${v.reason})` };
+    if (state.seal) state.seal.sweeps = { lines: v.total, head: v.head };
+  } else if ("why" in sweepsRead && sweepsRead.why !== "missing") {
+    state.sweeps = { lines: 0, intact: false, detail: `the store sweeps are ${sweepsRead.why}` };
+  } else state.sweeps = null;
+  // The finish register: the coordinator's lease, readiness, the checks, the report's reviews (chained with the lead register's code).
+  const finishRead = await readRegularText(join(sandbox, FINISH_LOG));
+  if ("text" in finishRead && finishRead.text.trim()) {
+    const v = verifyLeadChain(finishRead.text);
+    state.finish = { lines: v.total, intact: v.ok, detail: v.ok ? `${v.total} events, chain intact` : `broken at line ${v.broken_at} (${v.reason})` };
+    if (state.seal) state.seal.finish = { lines: v.total, head: v.head };
+  } else if ("why" in finishRead && finishRead.why !== "missing") {
+    state.finish = { lines: 0, intact: false, detail: `the finish register is ${finishRead.why}` };
+  } else state.finish = null;
   // The case policy, by its bytes, against the sha256 the kickoff anchored outside the run.
   const policyRead = await readRegularText(join(sandbox, "network", "policy.json"));
   if ("text" in policyRead) {
@@ -1950,6 +1980,8 @@ export function verdictOf(state: CustodyState, incomplete: string | null): Custo
     questions: state.questions ?? null,
     network: state.network ?? null,
     requests: state.requests ?? null,
+    sweeps: state.sweeps ?? null,
+    finish: state.finish ?? null,
     case_policy: state.case_policy ?? null,
     operator: state.operator ?? null,
     acquisition: state.acquisition ?? null,
@@ -2060,6 +2092,8 @@ function summaryOf(c: Omit<Custody, "summary">, t: { traceProblem: string | null
     parts.push(n.grants.intact && n.fetches.intact && !bad.length && !open.length ? `network records: ${plural(n.grants.lines, "grant event")}, ${plural(n.fetches.lines, "fetch line")}, ${plural(n.captures.verified, "capture")} verified${n.captures.unpublished ? `, ${plural(n.captures.unpublished, "attempt")} recorded as not published` : ""}` : `NETWORK RECORDS DO NOT HOLD (${[...(n.grants.intact ? [] : [`grants: ${n.grants.detail}`]), ...(n.fetches.intact ? [] : [`fetches: ${n.fetches.detail}`]), ...(open.length ? [`attempts with no outcome: ${open.join(", ")}`] : []), ...(bad.length ? [`captures: ${bad.join(", ")}`] : [])].join("; ")})`);
   }
   if (c.requests) parts.push(c.requests.intact ? `${plural(c.requests.lines, "operator request event")}, chain intact` : `OPERATOR REQUESTS CHAIN BROKEN (${c.requests.detail})`);
+  if (c.sweeps) parts.push(c.sweeps.intact ? `${plural(c.sweeps.lines, "store sweep")}, chain intact` : `STORE SWEEPS CHAIN BROKEN (${c.sweeps.detail})`);
+  if (c.finish) parts.push(c.finish.intact ? `${plural(c.finish.lines, "finish event")}, chain intact` : `FINISH REGISTER CHAIN BROKEN (${c.finish.detail})`);
   if (c.case_policy) {
     const cp = c.case_policy;
     if ("unreadable" in cp) parts.push(`CASE POLICY UNREADABLE (${cp.path} is ${cp.unreadable})`);
@@ -2415,7 +2449,7 @@ export function sealDrift(sealed: Partial<Seal> | undefined, now: Seal, journal:
   const drift: Array<{ what: string; sealed: string; now: string }> = [];
   const after: string[] = [];
   const notSealed: string[] = [];
-  if (!sealed) return { drift, after, not_sealed: ["the ledger", "the attestations", "the disputes", "the lead register", "the question register", "the network records", "the operator requests", "the store journal", "the model gateway log"] };
+  if (!sealed) return { drift, after, not_sealed: ["the ledger", "the attestations", "the disputes", "the store sweeps", "the lead register", "the finish register", "the question register", "the network records", "the operator requests", "the store journal", "the model gateway log"] };
   const chain = (n: number, head: string | null, unit: string) => `${n} ${unit}, head ${head ?? "none"}`;
   if (!sealed.ledger) notSealed.push("the ledger");
   else if (sealed.ledger.entries !== now.ledger.entries || sealed.ledger.head !== now.ledger.head) {
@@ -2430,6 +2464,14 @@ export function sealDrift(sealed: Partial<Seal> | undefined, now: Seal, journal:
   if (!sealed.disputes) notSealed.push("the disputes");
   else if (sealed.disputes.lines !== nowDisputes.lines || sealed.disputes.head !== nowDisputes.head) {
     drift.push({ what: "ledger disputes", sealed: chain(sealed.disputes.lines, sealed.disputes.head, "lines"), now: chain(nowDisputes.lines, nowDisputes.head, "lines") });
+  }
+  // The store sweeps and the finish register, the same way: a verdict from before they were sealed does not hold them.
+  for (const [k, what, unit] of [["sweeps", "store sweeps", "lines"], ["finish", "finish register", "events"]] as const) {
+    const nowK = now[k] ?? { lines: 0, head: null };
+    const sealedK = sealed[k];
+    if (!sealedK) {
+      if (nowK.lines) notSealed.push(`the ${what}`);
+    } else if (sealedK.lines !== nowK.lines || sealedK.head !== nowK.head) drift.push({ what, sealed: chain(sealedK.lines, sealedK.head, unit), now: chain(nowK.lines, nowK.head, unit) });
   }
   // The lead register, the same way: a verdict from before it was sealed does not hold it.
   const nowLeads = now.leads ?? { lines: 0, head: null };
@@ -2512,7 +2554,7 @@ function lineHashField(text: string): string[] {
  * closing lines of a stop) is allowed; a line it sealed that changed or went
  * is not. Pure over the texts read.
  */
-export function sealPrefix(sealed: Partial<Seal> | undefined, now: { trace: string; ledger: string; attestations: string; disputes: string; leads: string; questions: string; grants: string; fetches: string; requests?: string; journal: string | null; gateway: string | null }): { ok: boolean; held: string[]; broken: string[] } {
+export function sealPrefix(sealed: Partial<Seal> | undefined, now: { trace: string; ledger: string; attestations: string; disputes: string; leads: string; questions: string; grants: string; fetches: string; requests?: string; sweeps?: string; finish?: string; journal: string | null; gateway: string | null }): { ok: boolean; held: string[]; broken: string[] } {
   const held: string[] = [];
   const broken: string[] = [];
   if (!sealed) return { ok: false, held, broken: ["the verdict seals no chain (a custody from before the seal)"] };
@@ -2570,6 +2612,8 @@ export function sealPrefix(sealed: Partial<Seal> | undefined, now: { trace: stri
   checkChain("the network grants", sealed.network?.grants.lines, sealed.network?.grants.head, now.grants);
   checkChain("the network fetches", sealed.network?.fetches.lines, sealed.network?.fetches.head, now.fetches);
   if (now.requests !== undefined) checkChain("the operator requests", sealed.requests?.lines, sealed.requests?.head, now.requests ?? "");
+  if (now.sweeps !== undefined) checkActs("the store sweeps", sealed.sweeps?.lines, sealed.sweeps?.head, now.sweeps, verifySweepChain);
+  if (now.finish !== undefined) checkChain("the finish register", sealed.finish?.lines, sealed.finish?.head, now.finish);
   if (sealed.journal) check("the store journal", sealed.journal.lines, sealed.journal.head, now.journal === null ? [] : verifyJournalText(now.journal).hashes);
   if (sealed.model_gateway && now.gateway === null && sealed.model_gateway.lines > 0) {
     broken.push(`the model gateway log it sealed (${sealed.model_gateway.lines} lines) is not here`);
@@ -2614,6 +2658,8 @@ export async function earlierSeals(sandbox: string): Promise<EarlierSeal[]> {
     grants: await read(GRANTS_LOG),
     fetches: await read(FETCH_LOG),
     requests: await read(join("requests", "requests.jsonl")),
+    sweeps: await read(LEDGER_SWEEPS),
+    finish: await read(FINISH_LOG),
     journal: "text" in journal ? journal.text : null,
     gateway: "text" in gateway ? gateway.text : null,
   };

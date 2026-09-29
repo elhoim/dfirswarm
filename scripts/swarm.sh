@@ -10291,6 +10291,10 @@ PY
   pkg_copy "$sandbox/ledger/attestations.jsonl" "$out/ledger-attestations.jsonl" non-empty
   # An agent's dispute of an entry, and its withdrawal: a chain of its own.
   pkg_copy "$sandbox/ledger/disputes.jsonl" "$out/ledger-disputes.jsonl" non-empty
+  # What the store sweeps found for each coverage record's strings: a chain of its own.
+  pkg_copy "$sandbox/ledger/sweeps.jsonl" "$out/ledger-sweeps.jsonl" non-empty
+  # The finish register (the coordinator's lease, readiness, the checks, the report's reviews): chained, sealed by custody.
+  pkg_copy "$sandbox/leads/finish.jsonl" "$out/finish.jsonl" non-empty
   # The lead register (how the investigation proceeded): its chained events,
   # sealed unsigned by custody, the rendering, what the agents asked of the
   # operator and the hosts the operator allowed in answer.

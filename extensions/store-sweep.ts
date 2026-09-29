@@ -281,7 +281,8 @@ export async function readSweeps(sandboxRoot: string): Promise<SweepRecord[]> {
   return out;
 }
 
-export function verifySweepChain(text: string): { ok: boolean; total: number; broken_at: number | null; reason: string | null } {
+/** The sweeps' chain: every line's hash recomputed over its fields and chained to the one before; the head is the last line's hash. */
+export function verifySweepChain(text: string): { ok: boolean; total: number; broken_at: number | null; reason: string | null; head: string | null } {
   let last = "genesis";
   let total = 0;
   for (const line of text.split("\n")) {
@@ -291,14 +292,14 @@ export function verifySweepChain(text: string): { ok: boolean; total: number; br
     try {
       s = JSON.parse(line) as SweepRecord;
     } catch {
-      return { ok: false, total, broken_at: total, reason: "not json" };
+      return { ok: false, total, broken_at: total, reason: "not json", head: null };
     }
-    if (s.v !== 1) return { ok: false, total, broken_at: total, reason: `a sweep of version ${JSON.stringify(s.v)}, which this harness does not know` };
-    if (s.prev !== last) return { ok: false, total, broken_at: total, reason: "prev does not name the line before it" };
-    if (s.hash !== sweepHash(s, last)) return { ok: false, total, broken_at: total, reason: "the line was rewritten" };
+    if (s.v !== 1) return { ok: false, total, broken_at: total, reason: `a sweep of version ${JSON.stringify(s.v)}, which this harness does not know`, head: null };
+    if (s.prev !== last) return { ok: false, total, broken_at: total, reason: "prev does not name the line before it", head: null };
+    if (s.hash !== sweepHash(s, last)) return { ok: false, total, broken_at: total, reason: "the line was rewritten", head: null };
     last = s.hash;
   }
-  return { ok: true, total, broken_at: null, reason: null };
+  return { ok: true, total, broken_at: null, reason: null, head: total ? last : null };
 }
 
 /** The sweep recorded for a coverage record, by its hash: the latest line, or null (pending, when the record names looked_for). */

@@ -53,8 +53,8 @@ const sha256 = (b: string | Buffer) => createHash("sha256").update(b).digest("he
 
 export type ChainHead = { lines: number; head: string | null };
 
-/** The ledger's chains a release binds by head and length. */
-type ChainKind = "ledger" | "attestations" | "disputes";
+/** The ledger's chains a release binds by head and length (the store sweeps among them, from 2026-09-29). */
+type ChainKind = "ledger" | "attestations" | "disputes" | "sweeps";
 
 export type ReleaseSigner = {
   kind: "machine" | "examiner";
@@ -113,6 +113,8 @@ export type ReleaseRecord = {
     ledger: { entries: number; head: string | null };
     attestations: ChainHead;
     disputes: ChainHead;
+    /** The store sweeps (ledger/sweeps.jsonl): absent from a release made before they were bound. */
+    sweeps?: ChainHead;
     journal: ChainHead | null;
     trace: { lines: number; last_line_sha256: string | null; sealed_lines: number | null };
     review: ChainHead | null;
@@ -442,6 +444,12 @@ export type ReleaseLayout = {
   fetches: string;
   /** The operator requests' chain (docs/adr/0014), which custody seals the same way. */
   requests: string;
+  /** The store sweeps (docs/adr/0013): bound in the release's chains, and sealed by the verdict. */
+  sweeps: string;
+  /** The finish register (docs/adr/0015), which custody seals as it seals the lead register. */
+  finish: string;
+  /** The model gateway's log, which custody seals by its lines and their sha256. */
+  gateway: string;
   review: string | null;
   anchor: string | null;
   /** A package made with --redact: each changed file's sha256 before and after. */
@@ -475,6 +483,9 @@ export function runLayout(sandbox: string, reviewFile: string | null, anchorFile
     grants: "network/grants.jsonl",
     fetches: "network/fetches.jsonl",
     requests: "requests/requests.jsonl",
+    sweeps: "ledger/sweeps.jsonl",
+    finish: "leads/finish.jsonl",
+    gateway: "traces/model-gateway.jsonl",
     review: reviewFile,
     anchor: anchorFile,
     redactions: new Map(),
@@ -510,6 +521,9 @@ export function packageLayout(dir: string): ReleaseLayout {
     grants: "network/grants.jsonl",
     fetches: "network/fetches.jsonl",
     requests: "requests.jsonl",
+    sweeps: "ledger-sweeps.jsonl",
+    finish: "finish.jsonl",
+    gateway: "trace/model-gateway.jsonl",
     review: existsSync(join(dir, "review.jsonl")) ? join(dir, "review.jsonl") : null,
     anchor: existsSync(join(dir, "trace", "custody-anchor.json")) ? join(dir, "trace", "custody-anchor.json") : null,
     redactions: redactionRows(read("REDACTIONS.txt")),
@@ -600,9 +614,11 @@ export async function verifyReleases(layout: ReleaseLayout, opts: { allowedSigne
   const ledgerText = readText(abs(layout.root, layout.ledger));
   const attText = readText(abs(layout.root, layout.attestations));
   const dispText = readText(abs(layout.root, layout.disputes));
+  const sweepText = readText(abs(layout.root, layout.sweeps));
   const ledgerNow = hashFieldHead(ledgerText);
   const attNow = hashFieldHead(attText);
   const dispNow = hashFieldHead(dispText);
+  const sweepNow = hashFieldHead(sweepText);
   /**
    * The first n lines of a chain, verified with its own verifier (every
    * line's hash recomputed from what it holds, and chained to the one
@@ -611,7 +627,8 @@ export async function verifyReleases(layout: ReleaseLayout, opts: { allowedSigne
    * by the hashes they keep; there the stored hash fields are compared.
    */
   const P = layout.where === "run" ? await import("../extensions/protocol.ts") : null;
-  const texts: Record<ChainKind, string | null> = { ledger: ledgerText, attestations: attText, disputes: dispText };
+  const texts: Record<ChainKind, string | null> = { ledger: ledgerText, attestations: attText, disputes: dispText, sweeps: sweepText };
+  const SW = layout.where === "run" ? await import("../extensions/store-sweep.ts") : null;
   const prefixOf = (kind: ChainKind, n: number): { ok: true; head: string | null } | { ok: false; why: string } => {
     const text = texts[kind];
     const lines = (text ?? "").split("\n").filter((l) => l.trim());
@@ -623,7 +640,7 @@ export async function verifyReleases(layout: ReleaseLayout, opts: { allowedSigne
       const v = P.verifyLedgerChain(first);
       return v.ok ? { ok: true, head: v.hashes.at(-1) ?? null } : { ok: false, why: `its chain is broken at line ${v.broken_at} (${v.reason})` };
     }
-    const v = kind === "attestations" ? P.verifyAttestationChain(first) : P.verifyDisputeChain(first);
+    const v = kind === "attestations" ? P.verifyAttestationChain(first) : kind === "sweeps" ? SW!.verifySweepChain(first) : P.verifyDisputeChain(first);
     return v.ok ? { ok: true, head: v.head } : { ok: false, why: `its chain is broken at line ${v.broken_at} (${v.reason})` };
   };
   /**
@@ -639,7 +656,7 @@ export async function verifyReleases(layout: ReleaseLayout, opts: { allowedSigne
       const at = typeof r.at === "string" && Number.isFinite(Date.parse(r.at)) ? r.at : null;
       if (!at || !Number.isInteger(r.segment) || Number(r.segment) < 1 || !r.heads || typeof r.heads !== "object") return null;
       const heads: Partial<Record<ChainKind, ChainHead>> = {};
-      for (const kind of ["ledger", "attestations", "disputes"] as const) {
+      for (const kind of ["ledger", "attestations", "disputes", "sweeps"] as const) {
         const h = r.heads[kind];
         if (!h) continue;
         const lines = Number(h.lines);
@@ -667,17 +684,21 @@ export async function verifyReleases(layout: ReleaseLayout, opts: { allowedSigne
   const verifyChain = layout.where === "run" ? (await import("../extensions/leads.ts")).verifyLeadChain : null;
   const registers = (
     [
-      ["the lead register", layout.leads, (seal: SealRecord) => seal.leads as Sealed, "events"],
-      ["the question register", layout.questions, (seal: SealRecord) => seal.questions as Sealed, "events"],
-      ["the network grants", layout.grants, (seal: SealRecord) => net(seal, "grants"), "lines"],
-      ["the network fetches", layout.fetches, (seal: SealRecord) => net(seal, "fetches"), "lines"],
-      ["the operator requests", layout.requests, (seal: SealRecord) => seal.requests as Sealed, "events"],
+      ["the lead register", layout.leads, (seal: SealRecord) => seal.leads as Sealed, "events", verifyChain],
+      ["the finish register", layout.finish, (seal: SealRecord) => seal.finish as Sealed, "events", verifyChain],
+      ["the question register", layout.questions, (seal: SealRecord) => seal.questions as Sealed, "events", verifyChain],
+      ["the network grants", layout.grants, (seal: SealRecord) => net(seal, "grants"), "lines", verifyChain],
+      ["the network fetches", layout.fetches, (seal: SealRecord) => net(seal, "fetches"), "lines", verifyChain],
+      ["the operator requests", layout.requests, (seal: SealRecord) => seal.requests as Sealed, "events", verifyChain],
+      ["the store sweeps", layout.sweeps, (seal: SealRecord) => seal.sweeps as Sealed, "lines", SW ? SW.verifySweepChain : null],
     ] as const
-  ).map(([what, rel, sealedOf, unit]) => {
+  ).map(([what, rel, sealedOf, unit, verify]) => {
     const text = readText(abs(layout.root, rel));
-    const v = verifyChain && text ? verifyChain(text) : null;
+    const v = verify && text ? verify(text) : null;
     return { what, sealedOf, unit, text, now: hashFieldHead(text), broken: v && !v.ok ? `broken at line ${v.broken_at} (${v.reason})` : null };
   });
+  // The model gateway's log, which custody seals by its line count and the sha256 of those lines (no hash field of its own).
+  const gatewayText = readText(abs(layout.root, layout.gateway));
   /**
    * A chain bound as it is, or, when a resume that stands was recorded after
    * the release at a boundary at or past what it binds, as a prefix. Either
@@ -806,6 +827,18 @@ export async function verifyReleases(layout: ReleaseLayout, opts: { allowedSigne
             }
             bad.push(`${g.what} here is not the one the custody verdict it binds sealed (${bound.lines} ${g.unit}, head ${bound.head ?? "none"}; here ${g.now.lines}, head ${g.now.head ?? "none"}): it was deleted, cut or rewritten`);
           }
+          // The model gateway's log: its first sealed lines are the bytes the verdict sealed.
+          const gw = seal.model_gateway as { lines?: number; sha256?: string | null } | null | undefined;
+          if (gw && (gw.lines ?? 0) > 0) {
+            const lines = (gatewayText ?? "").split("\n").filter((l) => l.trim());
+            const n = gw.lines ?? 0;
+            const first = lines.slice(0, n);
+            const redactedLog = layout.redactions.has(layout.gateway);
+            if (gatewayText === null) bad.push(`the model gateway log the custody verdict it binds sealed (${n} lines) is not here`);
+            else if (first.length < n) bad.push(`the model gateway log here has ${lines.length} lines, fewer than the ${n} the custody verdict it binds sealed`);
+            else if (!redactedLog && gw.sha256 && sha256(`${first.join("\n")}\n`) !== gw.sha256) bad.push("the model gateway log's first lines are not the ones the custody verdict it binds sealed");
+            else if (lines.length > n) parts.push(`the model gateway log it binds (${n} lines) is a prefix of the log here (${lines.length})`);
+          }
         }
       }
     }
@@ -848,6 +881,7 @@ export async function verifyReleases(layout: ReleaseLayout, opts: { allowedSigne
       if (c.ledger) asBound("ledger", "the ledger", { lines: c.ledger.entries, head: c.ledger.head }, ledgerNow, x.at, bad, parts);
       if (c.attestations) asBound("attestations", "the attestations", c.attestations, attNow, x.at, bad, parts);
       if (c.disputes) asBound("disputes", "the disputes", c.disputes, dispNow, x.at, bad, parts);
+      if (c.sweeps) asBound("sweeps", "the store sweeps", c.sweeps, sweepNow, x.at, bad, parts);
       if (c.trace?.lines) {
         const at = traceHashes[c.trace.lines - 1];
         const broke = prevChainBreak(traceText ?? "", c.trace.lines);
