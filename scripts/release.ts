@@ -94,6 +94,7 @@ import { opensslBinary } from "./pkcs11.ts";
 import { confirmOnTty, hasTty, readFromTty, readSecretFromFd, wipe } from "./secret-io.ts";
 import { readLedger, supersededBy, verifyAttestationChain, verifyDisputeChain, verifyLedgerChain, type LedgerEntry } from "../extensions/protocol.ts";
 import { verifyLeadChain } from "../extensions/leads.ts";
+import { verifySweepChain } from "../extensions/store-sweep.ts";
 import { verifyJournalText } from "./evidence-store.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -207,6 +208,25 @@ export async function asSealed(ctx: RunCtx, custody: { seal?: Record<string, { l
       const at = n ? hashFieldAt(reqText, n) : null;
       if (rv.total > n && (n ? at === (seal.requests.head ?? null) : seal.requests.head === null || seal.requests.head === undefined)) missing.push(`${rv.total - n} operator request event(s) recorded after the verdict (the operator's acts after the stop): the next custody seals them`);
       else drift.push(`the operator requests (sealed ${n} events; now ${rv.total})`);
+    }
+    // The store sweeps and the finish register (docs/adr/0013, 0015), sealed the same way.
+    for (const [k, rel, what, verify] of [
+      ["sweeps", "ledger/sweeps.jsonl", "the store sweeps", verifySweepChain],
+      ["finish", "leads/finish.jsonl", "the finish register", verifyLeadChain],
+    ] as const) {
+      const t = read(rel);
+      const v = t && t.trim() ? verify(t) : { total: 0, head: null };
+      const sealedK = (seal as Record<string, { lines?: number; head?: string | null } | null | undefined>)[k];
+      if (!sealedK) {
+        if (v.total) missing.push(`the verdict did not seal ${what} (a custody from before they were sealed)`);
+      } else if ((sealedK.lines ?? 0) !== v.total || (sealedK.head ?? null) !== v.head) drift.push(`${what} (sealed ${sealedK.lines} lines; now ${v.total})`);
+    }
+    // The model gateway's log: its line count and the sha256 of those lines, as sealed.
+    const gw = seal.model_gateway as unknown as { lines?: number; sha256?: string | null } | null | undefined;
+    if (gw && (gw.lines ?? 0) > 0) {
+      const lines = (read("traces/model-gateway.jsonl") ?? "").split("\n").filter((l) => l.trim());
+      const first = lines.slice(0, gw.lines ?? 0);
+      if (first.length < (gw.lines ?? 0) || (gw.sha256 && sha256(`${first.join("\n")}\n`) !== gw.sha256) || lines.length !== gw.lines) drift.push(`the model gateway log (sealed ${gw.lines} lines; now ${lines.length})`);
     }
     const journalText = read("store/journal.jsonl");
     if (seal.journal) {
@@ -428,6 +448,7 @@ async function buildRelease(ctx: RunCtx, input: ReleaseInput, dir: string, o: { 
       ledger: { entries: ledgerHead.lines, head: ledgerHead.head },
       attestations: hashFieldHead(read("ledger/attestations.jsonl")),
       disputes: hashFieldHead(read("ledger/disputes.jsonl")),
+      ...(read("ledger/sweeps.jsonl") !== null ? { sweeps: hashFieldHead(read("ledger/sweeps.jsonl")) } : {}),
       journal: journal === null ? null : lineHead(journal),
       trace: { lines: trace.lines, last_line_sha256: trace.head, sealed_lines: (custody.seal?.trace?.lines as number | undefined) ?? null },
       review: reviewHead,
