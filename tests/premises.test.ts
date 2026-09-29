@@ -381,3 +381,38 @@ test("scope overlap is structural: entities shared, time ranges that meet (a dat
   assert.equal(PM.scopeOutside({ times: [{ from: "2024-02-01", to: "2024-02-28" }] }, { times: [{ from: "2024-01-01", to: "2024-12-31" }] }), null);
   assert.equal(PM.checkScope({ owners: ["x"] }).ok, false);
 });
+
+// The shipped goals designate what their briefs state as given (the limits
+// spec, item 6 refinement: c10 run sd9645b held four givens of its brief open
+// as parts to prove). Each premise is the goal's own sentence, closely
+// restated, with its scope; the questions a scope names are questions the
+// goal numbers. What a premise must never be (an answer, or what a question
+// tests) is a reviewer's judgement, recorded beside each list.
+test("the shipped goals with a brief designate its givens: each premise parses with its scope, and names only questions the goal has", async () => {
+  const { readdir } = await import("node:fs/promises");
+  const dir = join(ROOT, "prompts", "goals");
+  const counts: Record<string, number> = {};
+  for (const name of (await readdir(dir)).filter((f) => f.endsWith(".md")).sort()) {
+    const text = await readFile(join(dir, name), "utf8");
+    const front = /^---\n([\s\S]*?)\n---\n/.exec(text)?.[1] ?? null;
+    const items = front ? [...(/^premises:\n((?:[ \t]+-[^\n]*\n?)*)/m.exec(`${front}\n`)?.[1] ?? "").matchAll(/^[ \t]+-[ \t]*(.*?)[ \t]*$/gm)].map((m) => m[1]) : [];
+    const brief = /\b(case brief|published brief|the brief|intake note|scenario)\b|^#{2,3}[ \t]*.*\b(brief|scenario|background|situation)\b/im.test(text);
+    if (!items.length) {
+      assert.ok(!brief, `${name} has a brief and designates no premises`);
+      continue;
+    }
+    counts[name] = items.length;
+    assert.ok(items.length <= 3, `${name}: a short list`);
+    const parsed = Q.goalPremises(`## Premises\n\n${items.map((x) => `- ${x}`).join("\n")}\n`);
+    assert.equal(parsed.length, items.length, name);
+    const numbered = new Set([...text.matchAll(/^(\d+)\. /gm)].map((m) => `Q-${m[1]}`));
+    for (const p of parsed) {
+      assert.equal(p.bad, undefined, `${name}: ${p.text}`);
+      assert.ok(p.scope.entities?.length || p.scope.questions?.length, `${name}: a premise names its scope: ${p.text}`);
+      for (const q of p.scope.questions ?? []) assert.ok(numbered.has(q), `${name}: ${q} is not a question of the goal`);
+    }
+  }
+  // Every case goal with a brief, and none of the goals without a case (hello, pelican, analyse-inputs).
+  assert.deepEqual(Object.keys(counts).length, 17);
+  for (const plain of ["hello.md", "pelican.md", "analyse-inputs.md"]) assert.equal(counts[plain], undefined);
+});

@@ -1,3 +1,7 @@
+---
+premises:
+  - inputs/4orensics.001 is a raw disk image of a Windows workstation, prepared for a full Windows forensics course. [scope: entities inputs/4orensics.001]
+---
 > From [docs/use-cases/dfir-c02-user-policy-violation](../../docs/use-cases/dfir-c02-user-policy-violation/README.md): the goal document a real run was given,
 > and what that run produced is written up beside it. The evidence filenames below are
 > the ones that case had — change them, and the checks that name them, for yours.

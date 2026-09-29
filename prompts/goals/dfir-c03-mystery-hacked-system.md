@@ -1,3 +1,8 @@
+---
+premises:
+  - inputs/Windows8.1-Challenge3.001 is a raw disk image of the workstation of an IT department employee. [scope: entities inputs/Windows8.1-Challenge3.001, the IT department employee]
+  - One day the employee came to work, found a message written in a file on their system, and reported it. [scope: entities the IT department employee; questions 1, 5]
+---
 > From [docs/use-cases/dfir-c03-mystery-hacked-system](../../docs/use-cases/dfir-c03-mystery-hacked-system/README.md): the goal document a real run was given,
 > and what that run produced is written up beside it. The evidence filenames below are
 > the ones that case had — change them, and the checks that name them, for yours.

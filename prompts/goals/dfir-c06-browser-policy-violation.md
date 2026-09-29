@@ -1,3 +1,8 @@
+---
+premises:
+  - inputs/Browser_Policy_Violation.E01 is an image of the employee's Windows machine. [scope: entities inputs/Browser_Policy_Violation.E01, the employee]
+  - This is an internal investigation for HR into whether the employee violates the acceptable use policy by using a web browser that does not comply with it. [scope: entities the employee]
+---
 > From [docs/use-cases/dfir-c06-browser-policy-violation](../../docs/use-cases/dfir-c06-browser-policy-violation/README.md): the goal document a real run was given,
 > and what that run produced is written up beside it. The evidence filenames below are
 > the ones that case had — change them, and the checks that name them, for yours.

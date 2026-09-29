@@ -379,6 +379,12 @@ the same commands again.""",
         existence=["5"],
         timeline_rows=10,
         events=8,
+        # What the brief above states as given, and nothing a question asks: how the
+        # server was entered, what runs there and where it connects are the questions'.
+        premises=[
+            f"`web01` is the web server of {org}'s customer portal. [scope: entities web01]",
+            "The operations team copied the server's logs, the portal application's upload log and the web server user's crontab. [scope: entities web01]",
+        ],
     )
 
     # --- the truth --------------------------------------------------------------------------------

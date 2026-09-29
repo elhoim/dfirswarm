@@ -462,6 +462,13 @@ hash. If `SWARM.md` has an "Evidence catalog" section, the kickoff already ran t
         existence=[],
         timeline_rows=10,
         events=8,
+        # What the brief above states as given, and nothing a question asks: who
+        # copied, when, where the data went and whose drive it is are the questions'.
+        premises=[
+            f"`{host}` is {org}'s sales office workstation; the evidence is a USB flash drive and that workstation's logs. [scope: entities {host}, the USB flash drive]",
+            f"{suspect['full']} resigned from {org}. [scope: entities {suspect['full']}]",
+            f"HR found the drive in {suspect['first']}'s desk drawer. [scope: entities the USB flash drive, {suspect['full']}]",
+        ],
     )
 
     # --- the truth ------------------------------------------------------------------------------

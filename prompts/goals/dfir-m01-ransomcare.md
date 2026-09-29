@@ -1,3 +1,8 @@
+---
+premises:
+  - inputs/ransomcare4.raw (a raw memory image) and inputs/ransomcare5.dmp (a Windows crash dump) are memory captures of two Windows 10 systems. [scope: entities inputs/ransomcare4.raw, inputs/ransomcare5.dmp]
+  - Both systems were hit by RansomCare, the ransomware of the adversary simulation system TARIQ. [scope: entities inputs/ransomcare4.raw, inputs/ransomcare5.dmp; questions 2, 3, 4]
+---
 > From [docs/use-cases/dfir-m01-ransomcare](../../docs/use-cases/dfir-m01-ransomcare/README.md): the goal document a real run was given,
 > and what that run produced is written up beside it. The evidence filenames below are
 > the ones that case had — change them, and the checks that name them, for yours.

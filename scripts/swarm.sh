@@ -4665,6 +4665,7 @@ path = sys.argv[1]
 text = open(path, encoding="utf-8").read()
 m = re.match(r"^---[ \t]*\r?\n[\s\S]*?\r?\n---[ \t]*(?:\r?\n|$)", text)
 out = {"toolbox": "", "until_solved": "", "stall_minutes": "", "stop": ""}
+premises = []
 if m:
     for k in out:
         key = re.search(r"^" + k + r":[ \t]*(.*?)[ \t]*\r?$", m.group(0), re.M)
@@ -4684,7 +4685,6 @@ if m:
     # The premises of the goal, what the case takes as given, carried the same way
     # into a Premises section, verbatim with any trailing scope kept, where
     # the question register seeds each as a given P-n.
-    premises = []
     pblock = re.search(r"^premises:[ \t]*(.*?)\r?\n((?:[ \t]+-[^\n]*\n?)*)", m.group(0), re.M)
     if pblock:
         if pblock.group(1).strip():
@@ -4696,10 +4696,35 @@ if m:
         body = body.rstrip("\n") + "\n\n## Premises\n\n" + "".join("- " + p + "\n" for p in premises)
     with open(path, "w", encoding="utf-8") as f:
         f.write(body)
+# A goal with a case brief and no premises designated (docs/adr/0011,
+# "Premises"): what the brief states as given (whose devices these are, who
+# the subject is, the setting) is then no premise of the register, and
+# answers hold it open as parts still to prove (c10 run sd9645b: 4 of its 10
+# open parts were such givens). Said, never refused: the operator decides.
+# (No apostrophe in this block: bash 3.2 misreads one in a heredoc inside $(...).)
+contract = text[m.end():] if m else text
+designated = bool(premises) or any(re.search(r"^\s*(?:[-*]|\d+[.)])\s+\S", sec, re.M) for sec in re.findall(r"^#{2,3}[ \t]*Premises[ \t]*$([\s\S]*?)(?=^#{1,6}[ \t]|\Z)", contract, re.M | re.I))
+brief = ""
+heading = re.search(r"^#{2,3}[ \t]*(.*\b(?:brief|scenario|background|situation)\b.*?)[ \t]*$", contract, re.M | re.I)
+if heading:
+    brief = "its section \"" + heading.group(1).strip() + "\""
+elif re.search(r"--sections-in\b", contract):
+    brief = "its questions are numbered in a brief, --sections-in"
+else:
+    said = re.search(r"\b(case brief|published brief|the brief|intake note|scenario)\b", contract, re.I)
+    if said:
+        brief = "it names one, \"" + said.group(1) + "\""
+out["premises"] = len(premises)
+out["brief_without_premises"] = brief if brief and not designated else ""
 print(json.dumps(out))
 STRIP
 )"
   goal_toolbox="$(jq -r '.toolbox' <<<"$goal_meta")"
+  local goal_brief
+  goal_brief="$(jq -r '.brief_without_premises // empty' <<<"$goal_meta")"
+  if [[ -n "$goal_brief" ]]; then
+    echo "WARN: the goal has a case brief ($goal_brief) and designates no premises: its answers will hold the brief's givens (whose devices these are, who the subject is, the setting) open, as parts still to prove. Designate what the brief states as given with a premises: list in the goal's front matter (a line each: - <the brief's sentence> [scope: questions 1, 2; entities <who or what>]), or once the run exists with: swarm.sh question <run> premise add --text \"<the brief's sentence>\" --locator \"<where it stands>\" [--entity E] [--for-question Q-n]. Never a premise that answers a question, or that a question tests ($goal_source)." >&2
+  fi
   case "$(jq -r '.until_solved' <<<"$goal_meta" | tr 'A-Z' 'a-z')" in
     ""|false|no) ;;
     true|yes) until_solved=1 ;;

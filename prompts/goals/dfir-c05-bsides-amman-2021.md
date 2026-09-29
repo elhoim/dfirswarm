@@ -1,3 +1,8 @@
+---
+premises:
+  - inputs/BSidesAmman21.E01 is an image of the Windows system in the case (the BSides Amman 2021 workshop). [scope: entities inputs/BSidesAmman21.E01]
+  - Two accounts are the suspects, joker and IEUser. [scope: entities joker, IEUser]
+---
 > From [docs/use-cases/dfir-c05-bsides-amman-2021](../../docs/use-cases/dfir-c05-bsides-amman-2021/README.md): the goal document a real run was given,
 > and what that run produced is written up beside it. The evidence filenames below are
 > the ones that case had — change them, and the checks that name them, for yours.

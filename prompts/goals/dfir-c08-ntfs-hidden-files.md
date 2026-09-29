@@ -1,3 +1,8 @@
+---
+premises:
+  - inputs/NTFS-HiddenFiles.E01 is a logical image of one NTFS volume, with no partition table. [scope: entities inputs/NTFS-HiddenFiles.E01]
+  - Five things were hidden on this NTFS volume using capabilities of the file system itself. [scope: entities inputs/NTFS-HiddenFiles.E01; questions 1, 2, 3, 4, 5, 6]
+---
 > From [docs/use-cases/dfir-c08-ntfs-hidden-files](../../docs/use-cases/dfir-c08-ntfs-hidden-files/README.md): the goal document a real run was given,
 > and what that run produced is written up beside it. The evidence filenames below are
 > the ones that case had — change them, and the checks that name them, for yours.

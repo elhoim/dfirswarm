@@ -1,3 +1,8 @@
+---
+premises:
+  - inputs/ThreatSimServer.E01 is an image of the ThreatSim server (Windows Server). [scope: entities inputs/ThreatSimServer.E01]
+  - The ThreatSim domain administrator's files are gone, and nobody knows what happened or how. [scope: entities the ThreatSim domain administrator; questions 2, 3, 6]
+---
 > From [docs/use-cases/dfir-c11-administrator-files](../../docs/use-cases/dfir-c11-administrator-files/README.md): the goal document a real run was given,
 > and what that run produced is written up beside it. The evidence filenames below are
 > the ones that case had — change them, and the checks that name them, for yours.

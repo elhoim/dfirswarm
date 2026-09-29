@@ -1,3 +1,8 @@
+---
+premises:
+  - inputs/SysInternalsCase.E01 is an image of the user's Windows machine. [scope: entities inputs/SysInternalsCase.E01, the user]
+  - The user reports downloading what they thought was the SysInternals tool suite and double-clicking it; the tools did not open, and since then the system has slowed down and become less responsive. [scope: entities the user; questions 1, 2, 3]
+---
 > From [docs/use-cases/dfir-c07-sysinternals-azure](../../docs/use-cases/dfir-c07-sysinternals-azure/README.md): the goal document a real run was given,
 > and what that run produced is written up beside it. The evidence filenames below are
 > the ones that case had — change them, and the checks that name them, for yours.

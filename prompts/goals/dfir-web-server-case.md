@@ -1,3 +1,8 @@
+---
+premises:
+  - inputs/s4a-challenge4 (a raw disk image) and inputs/memdump.mem (a memory dump) are of the same compromised Windows machine. [scope: entities inputs/s4a-challenge4, inputs/memdump.mem]
+  - Our team arrived in time: the attacker(s) could not clean and cover their tracks. [scope: questions 3]
+---
 > From [docs/use-cases/dfir-web-server-case](../../docs/use-cases/dfir-web-server-case/README.md): the goal document a real run was given,
 > and what that run produced is written up beside it. The evidence filenames below are
 > the ones that case had — change them, and the checks that name them, for yours.
