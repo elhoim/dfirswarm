@@ -51,7 +51,7 @@ const ESTABLISHED = {
     alternatives: [{ explanation: "a copy of the record left by another process", why: "the record's own metadata ties it to the event", evidence: ["E-1"] }],
     other_family: { checked: false, text: "no other source family holds it here" },
     // Source-first (docs/adr/0015): the strongest rival and its test, and how the value was derived.
-    discriminator: { rival: "a copy of the record written later by a backup process", test: "read the record's write time against the backup's run times", favours_if: "the answer if it falls outside every backup run; the rival if inside one", outcome: "it falls outside every backup run", refs: ["E-1"] },
+    discriminator: { rival: "a copy of the record written later by a backup process", test: "read the record's write time against the backup's run times", favours_if: "the answer if it falls outside every backup run; the rival if inside one", outcome: "it falls outside every backup run", refs: ["job:j000001/hits.txt"] },
     derivation: { job: "j000001", inputs: ["input:logs/a.log"] },
   },
 } as const;

@@ -3486,7 +3486,7 @@ export default function (pi: ExtensionAPI) {
                   test: Type.String({ description: "The check that separates the rival from the answer" }),
                   favours_if: Type.String({ description: "The result that would favour the answer, and the one that would favour the rival" }),
                   outcome: Type.String({ description: "What the check showed" }),
-                  refs: Type.Array(Type.String(), { description: "The observation or job the outcome rests on: E-<seq>, or job:<id>/<path>, input:<path>, import:<id>/<path>" }),
+                  refs: Type.Array(Type.String(), { description: "The observation or job the outcome rests on: E-<seq>, or job:<id>/<path>, input:<path>, import:<id>/<path>. Never the answer under review, nor only entries the answer already cites" }),
                 },
                 { description: "Required for an established review of an answer that claims established, on a material question: without it the attest is recorded best_candidate." },
               ),

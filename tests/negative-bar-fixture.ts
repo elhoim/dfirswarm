@@ -33,7 +33,7 @@ export const F = { basis: "observed", confidence: "high", indicates: "What the o
  * derived (j000001 over the disk, which every run here holds).
  */
 export const SOURCE_FIRST = {
-  discriminator: { rival: "a copy of the record written later by a backup process", test: "read the record's own write time against the backup's run times", favours_if: "the answer if the write time falls outside every backup run; the rival if it falls inside one", outcome: "the write time falls outside every backup run", refs: ["E-1"] },
+  discriminator: { rival: "a copy of the record written later by a backup process", test: "read the record's own write time against the backup's run times", favours_if: "the answer if the write time falls outside every backup run; the rival if it falls inside one", outcome: "the write time falls outside every backup run", refs: ["job:j000001/hits.txt"] },
   derivation: { job: "j000001", inputs: ["input:disk.E01"] },
 } as const;
 /** How a critic attests an answer to a question since B2: established, with the review part by part, naming an alternative it weighed and why the evidence rules it out (an established review that names none is recorded best_candidate), and source-first: the discriminator and the derivation. */

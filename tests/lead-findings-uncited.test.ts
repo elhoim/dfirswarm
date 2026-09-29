@@ -194,3 +194,19 @@ test("every entry left out is listed, however many; a broken lead register says 
   assert.equal(broken.length, 1, broken.join("\n"));
   assert.equal(broken[0].split(": cite them")[0], `answer #${a.seq} (question:1) leaves out what the record ties to Q-1: ${left.map((n) => `E-${n} (a finding that names Q-1)`).join(", ")}`);
 });
+
+test("a rel ties an entry to the question only when it weighs what the answer cites (supports, contradicts, a delta): one that duplicates it, or is derived from it, ties nothing", async () => {
+  const r = await run({ goal: GOAL });
+  const L1 = await planned(r.a0, "1");
+  await planned(r.a0, "2");
+  const base = ok(await rec(r.a0, finding("the data left over the proxy"))).entry;
+  const dup = ok(await rec(r.a0, finding("the data left over the proxy, as its log repeats it", { answers: ["2"], rel: [{ to: base.seq, kind: "duplicates" }] }))).entry;
+  const derived = ok(await rec(r.a0, finding("the proxy's session, carved from its log", { answers: ["2"], rel: [{ to: base.seq, kind: "derived_from" }] }))).entry;
+  const sup = ok(await rec(r.a0, finding("the firewall passed the proxy's upload", { answers: ["2"], rel: [{ to: base.seq, kind: "supports" }] }))).entry;
+  for (const seq of [base.seq, dup.seq, derived.seq, sup.seq]) await attest(r.a3, seq);
+  assert.ok((await L.closeLead(r.a0, L1, { disposition: "resolved", ref: `E-${base.seq}` })).ok);
+  const a = await answer(r.a1, "question:1", [base.seq]);
+  const w = (await checkLedgerAnswers(r.S, ["1"])).warnings.filter((x) => WARN.test(x));
+  assert.equal(w.length, 1, w.join("\n"));
+  assert.equal(w[0].split(": cite it")[0], `answer #${a.seq} (question:1) leaves out what the record ties to Q-1: E-${sup.seq} (a finding whose rel supports E-${base.seq}, which the answer cites)`);
+});

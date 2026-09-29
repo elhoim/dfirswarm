@@ -10550,8 +10550,14 @@ export async function attestEntry(ctx: SwarmContext, input: LedgerActInput): Pro
     }
     if (answerReview?.discriminator) {
       const seqs = new Set(entries.map((e) => e.seq));
-      const missing = answerReview.discriminator.refs.find((r) => /^E-\d+$/.test(r) && !seqs.has(Number(r.slice(2))));
+      const refs = answerReview.discriminator.refs;
+      const missing = refs.find((r) => /^E-\d+$/.test(r) && !seqs.has(Number(r.slice(2))));
       if (missing) return { ok: false, reason: `answer_review.discriminator.refs names ${missing}: there is no entry #${missing.slice(2)} in the ledger` };
+      // The test that separates the rival rests on its own observation: never the answer under review, nor only what the answer already cites (the Fable review of the limits branch, P3-7).
+      const self = refs.find((r) => /^E-\d+$/.test(r) && Number(r.slice(2)) === t.entry.seq);
+      if (self) return { ok: false, reason: `answer_review.discriminator.refs names ${self}, the answer under review: a discriminator rests on an observation or a job, not the answer. Name the E-<seq> of what the test showed, or the job:<id>/<path> it read` };
+      const cited = answerCites(t.entry, supersededBy(entries));
+      if (refs.every((r) => /^E-\d+$/.test(r) && cited.has(Number(r.slice(2))))) return { ok: false, reason: `answer_review.discriminator.refs names only ${refs.join(", ")}, which #${t.entry.seq} cites already: the test that separates the rival from the answer rests on what it read or showed. Name the job:<id>/<path> the test read, or the E-<seq> of an observation the answer does not cite (record what the test showed first, if it is not on the ledger)` };
     }
     // An established review names the alternatives it weighed and why the
     // evidence rules each out; one that names none is recorded a best
@@ -12509,8 +12515,11 @@ export type UncitedEntry = { seq: number; kind: "finding" | "event"; leads: read
  * force, that either
  * - two seats hold (heldByTwoSeats) and the lead register recorded under a
  *   lead of the question (`under`, leads.ts questionLeadEntries), or that
- *   names the question in its own `answers`, or whose `rel` links to an
- *   entry the answer cites (answerCites); or
+ *   names the question in its own `answers`, or whose `rel` supports or
+ *   contradicts an entry the answer cites (answerCites), or weighs late
+ *   evidence against it (DELTA_REL_KINDS); a `duplicates` or `derived_from`
+ *   rel says what an entry repeats or comes from, and ties it to nothing
+ *   (the Fable review of the limits branch, P3-6); or
  * - one seat holds, names the question in its own `answers`, and another
  *   question's standing answer reaches (`others`, each standing answer's
  *   reach by its section): its author tied it to this question, and the
@@ -12528,7 +12537,8 @@ export function questionUncited(
   const disputed = new Set(o.disputes.map((d) => d.target));
   const out: UncitedEntry[] = [];
   const seqs = new Set<number>(o.under?.keys() ?? []);
-  for (const e of o.entries) if ((e.kind === "finding" || e.kind === "event") && ((e.answers ?? []).some((x) => sectionKey(x) === id) || (e.rel ?? []).some((r) => cites.has(r.to)))) seqs.add(e.seq);
+  const ties = (r: LedgerRel) => DELTA_REL_KINDS.has(r.kind) && cites.has(r.to);
+  for (const e of o.entries) if ((e.kind === "finding" || e.kind === "event") && ((e.answers ?? []).some((x) => sectionKey(x) === id) || (e.rel ?? []).some(ties))) seqs.add(e.seq);
   for (const seq of [...seqs].sort((x, y) => x - y)) {
     if (seq === a.seq || reach.has(seq) || o.replaced.has(seq)) continue;
     const e = o.bySeq.get(seq);
@@ -12538,7 +12548,7 @@ export function questionUncited(
     const two = heldByTwoSeats(e, o.attestations);
     const relied = [...(o.others ?? [])].filter(([section, reach]) => section !== a.section && reach.has(seq)).map(([section]) => section);
     if (!two && !(names && relied.length)) continue;
-    out.push({ seq, kind: e.kind, leads: o.under?.get(seq) ?? [], names, rel: (e.rel ?? []).filter((r) => cites.has(r.to)), seats: two ? 2 : 1, relied });
+    out.push({ seq, kind: e.kind, leads: o.under?.get(seq) ?? [], names, rel: (e.rel ?? []).filter(ties), seats: two ? 2 : 1, relied });
   }
   return out;
 }
