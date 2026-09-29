@@ -65,7 +65,8 @@ test("the goal's checks are read as await-done.sh reads them, and an answers che
 test("warnings and readiness items are read by the harness's own words, into codes and sections, and nothing else", () => {
   assert.deepEqual(warningCode("answer #12 (question:3) is partial, and every review holds every part it weighed established (a1; attested established by a1). fix"), { code: "partial_all_parts_established", section: "question:3" });
   assert.deepEqual(warningCode("answer #9 (question:1) is not determinable, and its coverage record E-7 names no acquisition ask and no reason for none. fix"), { code: "no_acquisition_ask", section: "question:1" });
-  assert.deepEqual(warningCode("answer #4 (question:2): E-3 (a finding under L-1) established under Q-2's leads and not in its answer: cite it. fix"), { code: "lead_findings_uncited", section: "question:2" });
+  assert.deepEqual(warningCode("answer #4 (question:2): E-3 (a finding under L-1) established under Q-2's leads and not in its answer: cite it. fix"), { code: "lead_findings_uncited", section: "question:2" }, "the words of the harness before the rule reached past the leads");
+  assert.deepEqual(warningCode("answer #4 (question:2) leaves out what two seats hold for Q-2: E-3 (a finding that names Q-2): cite it or say why it does not bear on it. fix"), { code: "lead_findings_uncited", section: "question:2" });
   const known = new Map([["answer #5 (question:2) is negative (unreviewed)", { code: "negative_unreviewed", section: "question:2" }]]);
   assert.deepEqual(readinessCode("answer #5 (question:2) is negative (unreviewed)", known), { code: "negative_unreviewed", section: "question:2" });
   assert.deepEqual(readinessCode("question:4 is a best candidate, not established (E-9)", known), { code: "best_candidate", section: "question:4" });

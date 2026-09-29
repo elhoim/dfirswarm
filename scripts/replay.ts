@@ -210,10 +210,12 @@ export function answersChecks(checks: string[]): AnswersCheck[] {
   return out;
 }
 
+/** Each warning's words, as every harness version since it was added says it (a later wording beside the earlier). */
 const WARNING_CODES: ReadonlyArray<[string, RegExp]> = [
   ["no_acquisition_ask", /is not determinable, and .*no acquisition ask/],
   ["partial_all_parts_established", /is partial, and every review holds every part it weighed established/],
   ["lead_findings_uncited", /established under \S+'s leads and not in its answer/],
+  ["lead_findings_uncited", /\) leaves out what two seats hold for \S+:/],
 ];
 
 /** A warning line's code and section, by the harness's own words for it. */
