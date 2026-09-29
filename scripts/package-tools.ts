@@ -93,6 +93,59 @@ export type Withheld = { path: string; job: string | null; why: string; sha256_o
 /** A sensitive entry's words as they may stand in a file: as written, JSON-escaped. */
 const forms = (t: string) => [...new Set([t, JSON.stringify(t).slice(1, -1)])];
 
+/**
+ * Where a sensitive word counts as standing in a text. A short word (under
+ * eight characters: a PIN, a short code) counts only where it stands on its
+ * own, not inside a longer run of letters and digits: four digits inside a
+ * sha256, a keyed id or a timestamp are chance, and every chained record a
+ * package carries is full of those. Redacted there, a line would lose its
+ * content for a hash; found there, the scan would refuse the package for a
+ * leak that is not one. A longer word counts wherever it stands. The
+ * redaction and the scan hold to the same rule, so the scan never finds what
+ * the redaction was right to leave.
+ */
+const SHORT_WORD = 8;
+const wordByte = (c: number | undefined) => c !== undefined && ((c >= 0x30 && c <= 0x39) || (c >= 0x41 && c <= 0x5a) || (c >= 0x61 && c <= 0x7a));
+/** Each place `word` stands in `text` by that rule. */
+function wordPlaces(text: string, word: string): number[] {
+  const out: number[] = [];
+  if (!word) return out;
+  const short = word.length < SHORT_WORD;
+  const first = wordByte(word.charCodeAt(0));
+  const last = wordByte(word.charCodeAt(word.length - 1));
+  for (let i = text.indexOf(word); i >= 0; i = text.indexOf(word, i + 1)) {
+    if (short && ((first && wordByte(text.charCodeAt(i - 1))) || (last && wordByte(text.charCodeAt(i + word.length))))) continue;
+    out.push(i);
+  }
+  return out;
+}
+const holdsWord = (text: string, word: string) => wordPlaces(text, word).length > 0;
+/** `text` with every place `word` stands replaced by `by`, and how many there were. */
+function replaceWord(text: string, word: string, by: string): { text: string; count: number } {
+  let out = "";
+  let from = 0;
+  let count = 0;
+  for (const i of wordPlaces(text, word)) {
+    if (i < from) continue;
+    out += text.slice(from, i) + by;
+    from = i + word.length;
+    count += 1;
+  }
+  return { text: out + text.slice(from), count };
+}
+/** The same rule over bytes: `unit` is 1 for UTF-8, 2 for UTF-16LE (a neighbour is a letter or digit with a zero high byte). */
+function bytesHoldWord(buf: Buffer, word: Buffer, unit: 1 | 2, short: boolean): boolean {
+  if (!short) return buf.includes(word);
+  const neighbour = (i: number) => i >= 0 && i + unit <= buf.length && wordByte(buf[i]) && (unit === 1 || buf[i + 1] === 0);
+  const first = wordByte(word[0]);
+  const last = wordByte(word[word.length - unit]);
+  for (let i = buf.indexOf(word); i >= 0; i = buf.indexOf(word, i + 1)) {
+    if ((first && neighbour(i - unit)) || (last && neighbour(i + word.length))) continue;
+    return true;
+  }
+  return false;
+}
+
 /** The files a package seals as they are: signatures, tokens, a release's record and its sidecars. Scanned, never rewritten. */
 function sealedAsIs(rel: string): boolean {
   if (["MANIFEST.txt", "MANIFEST.txt.sig", "SIGNER.txt", "signer.pub", "REDACTIONS.txt", "REDACTIONS.json", "COMPONENTS.json", "custody.json.sig", "custody.json.tsr"].includes(rel)) return true;
@@ -102,7 +155,7 @@ function sealedAsIs(rel: string): boolean {
 /** A JSON value with every string that holds a sensitive entry's words replaced whole; each replacement recorded by its pointer. */
 function redactJsonValue(v: unknown, pointer: string, tokens: SensitiveToken[], replaced: Replaced[]): unknown {
   if (typeof v === "string") {
-    const hit = tokens.find((t) => v.includes(t.token));
+    const hit = tokens.find((t) => holdsWord(v, t.token));
     if (!hit) return v;
     const t = hit as ScanToken;
     replaced.push({ what: "field", entry: t.output ? null : t.seq, sha256_of_original: t.id ?? sha256(t.token), pointer, why: t.output ? `a field holding the text of a sensitive output (${t.output}), replaced whole` : "a field holding a sensitive entry's words, replaced whole" });
@@ -142,7 +195,7 @@ export function leakScan(dir: string, tokens: ScanToken[], o: { digests?: Readon
       hits.push({ path: rel, entry, token_sha256: commit, as, ...(extra.output ? { output: extra.output } : {}) });
     };
     // A filename that itself holds a sensitive word (an agent named an output after the secret).
-    if (o.filenames) for (const w of wanted) if (norm(rel).includes(w.n)) note(w.id ?? sha256(w.token), w.seq, "filename", { output: w.output });
+    if (o.filenames) for (const w of wanted) if (holdsWord(norm(rel), w.n)) note(w.id ?? sha256(w.token), w.seq, "filename", { output: w.output });
     // Whole, when it can be held; in overlapping chunks when it cannot: nothing is left unread.
     const chunk = 32 * 1024 * 1024;
     const fd = openSync(abs, "r");
@@ -155,8 +208,8 @@ export function leakScan(dir: string, tokens: ScanToken[], o: { digests?: Readon
         // Text when no NUL stands in its first 8 KiB; any file's bytes are searched either way.
         const text = !buf.subarray(0, 8192).includes(0) ? norm(buf.toString("utf8")) : null;
         for (const w of wanted) {
-          if (text !== null && text.includes(w.n)) note(w.id ?? sha256(w.token), w.seq, "text", { output: w.output });
-          else if (w.raw.some((b) => buf.includes(b))) note(w.id ?? sha256(w.token), w.seq, "bytes", { output: w.output });
+          if (text !== null && holdsWord(text, w.n)) note(w.id ?? sha256(w.token), w.seq, "text", { output: w.output });
+          else if (w.raw.some((b, k) => bytesHoldWord(buf, b, k === 1 ? 2 : 1, w.token.length < SHORT_WORD))) note(w.id ?? sha256(w.token), w.seq, "bytes", { output: w.output });
         }
         // A sensitive output's digest left in a record: named, never printed.
         if (text !== null) for (const d of digests) if (text.includes(d)) note(`digest:${d.slice(0, 12)}`, 0, "digest");
@@ -221,7 +274,7 @@ export async function redactPackage(sandbox: string, dir: string, opts: { leaks?
   };
   /** A path fit to appear in the handover's own records: a basename holding a sensitive word is hidden behind a keyed id, the real path kept in the sidecar. */
   const safePath = (rel: string): string => {
-    if (!tokens.some((t) => forms(t.token).some((f) => rel.includes(f)))) return rel;
+    if (!tokens.some((t) => forms(t.token).some((f) => holdsWord(rel, f)))) return rel;
     const dir_ = rel.includes("/") ? `${rel.slice(0, rel.lastIndexOf("/"))}/` : "";
     const id = idFor(`path:${rel}`);
     privateMap[id] = { of: "path", path: rel, why: "a path whose name holds a sensitive value" };
@@ -248,7 +301,7 @@ export async function redactPackage(sandbox: string, dir: string, opts: { leaks?
     writeFileSync(join(dir, rel), after);
     changes.push({ path: rel, before_sha256: sha256(before), after_sha256: sha256(after), why, replaced });
   };
-  const holds = (l: string) => tokens.find((t) => forms(t.token).some((f) => l.includes(f)));
+  const holds = (l: string) => tokens.find((t) => forms(t.token).some((f) => holdsWord(l, f)));
   const handled = new Set<string>();
   // A chained file, line by line: `keep` says what a redacted line keeps of the one it replaces.
   const chained = (rel: string, judge: (o: Record<string, unknown>, raw: string) => { seq: number | null; why: string } | null, keep: (o: Record<string, unknown>, raw: string) => Record<string, unknown>, what: Replaced["what"], why: string) => {
@@ -441,9 +494,10 @@ export async function redactPackage(sandbox: string, dir: string, opts: { leaks?
         let t = text;
         for (const tok of tokens) {
           for (const f of forms(tok.token)) {
-            const count = t.split(f).length - 1;
+            const r = replaceWord(t, f, REDACTED);
+            const count = r.count;
             if (!count) continue;
-            t = t.split(f).join(REDACTED);
+            t = r.text;
             replaced.push({ what: "text", entry: tok.output ? null : tok.seq, sha256_of_original: tok.id ?? sha256(tok.token), count, why: tok.output ? `the text of a sensitive output (${tok.output})` : "a sensitive entry's words" });
           }
         }

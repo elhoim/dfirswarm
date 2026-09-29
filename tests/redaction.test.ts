@@ -3,8 +3,10 @@
  * every change recorded with the sha256 of what it replaced, why and which
  * sensitive entry's words it held (REDACTIONS.json, under the manifest); a
  * JSON file redacted field by field, keeping its shape; a short value (a
- * PIN) taken out; an agent's dispute of a sensitive entry redacted keeping
- * its chain; a release's PDF withheld and its signed record left as it was;
+ * PIN) taken out where it stands on its own, and its digits inside a hash
+ * or a keyed id left, by the redaction and the scan; an agent's dispute of
+ * a sensitive entry redacted keeping its chain; a release's PDF withheld
+ * and its signed record left as it was;
  * and a scan of every packaged file for each sensitive entry's words,
  * normalised (case, path separators, JSON escapes, UTF-16), which names a
  * hit by file, entry and the word's sha256, never the word.
@@ -25,6 +27,8 @@ after(async () => {
 const sha = (s: string | Buffer) => createHash("sha256").update(s).digest("hex");
 const KEY = "5f3c9a17e2b84d06a1c7f9e3b2d58a40";
 const PIN = "4821";
+/** The PIN as a value, standing on its own: the same four digits inside a keyed id or a sha256 are chance, and are not it (package-tools.ts holds a short word to that rule). */
+const PIN_WORD = `(?<![0-9A-Za-z])${PIN}(?![0-9A-Za-z])`;
 const PATH = "C:\\Users\\mira\\Documents\\vault.kdbx";
 
 /** A run with a key, a PIN and a path marked sensitive, a dispute of one, and a package laid out as swarm.sh package lays it. */
@@ -95,7 +99,7 @@ test("every redaction is recorded with the sha256 of what it replaced, why, and 
   // Text, word by word, each word recorded by its sha256 and how often.
   const board = byPath.get("board/main.md");
   assert.ok(board?.replaced.some((x) => x.what === "text" && /^hidden-[0-9a-f]{24}$/.test(x.sha256_of_original) && x.count === 1), "a low-entropy word's commitment is a keyed id");
-  assert.doesNotMatch(await readFile(join(pkg, "board", "main.md"), "utf8"), new RegExp(`${PIN}|${KEY}`));
+  assert.doesNotMatch(await readFile(join(pkg, "board", "main.md"), "utf8"), new RegExp(`${PIN_WORD}|${KEY}`));
   // A release's PDF cannot be redacted word by word: withheld. Its signed record is left as it was, and the scan names what it holds.
   assert.match(await readFile(join(pkg, "release", "v1", "report.pdf"), "utf8"), /^\[withheld: sensitive content \(a release's PDF[^)]*\); matched hidden-[0-9a-f]{24}\./);
   assert.doesNotMatch(await readFile(join(pkg, "release", "v1", "report.html"), "utf8"), new RegExp(KEY));
@@ -103,15 +107,38 @@ test("every redaction is recorded with the sha256 of what it replaced, why, and 
   assert.equal(rec.leak_scan.mode, "list");
   assert.deepEqual(rec.leak_scan.hits.map((h) => [h.path, h.entry]), [["release/v1/release.json", 3]]);
   assert.match(rec.leak_scan.hits[0].token_sha256, /^hidden-[0-9a-f]{24}$/, "a scan hit on a low-entropy value is a keyed id, not its hash");
-  assert.doesNotMatch(JSON.stringify(rec), new RegExp(`${KEY}|${PIN}|vault\\.kdbx`), "the record names keyed ids, never the words");
+  assert.doesNotMatch(JSON.stringify(rec), new RegExp(`${KEY}|${PIN_WORD}|vault\\.kdbx`), "the record names keyed ids, never the words");
   // The private sidecar, outside the package, carries the map and never a value.
   const side = JSON.parse(await readFile(join(pkg, "..", `${pkg.slice(pkg.lastIndexOf("/") + 1)}.private.json`), "utf8"));
   assert.ok(Object.keys(side.map).length >= 1);
-  assert.doesNotMatch(JSON.stringify(side), new RegExp(`${KEY}|${PIN}`), "the sidecar maps ids to a description, not to the value");
+  assert.doesNotMatch(JSON.stringify(side), new RegExp(`${KEY}|${PIN_WORD}`), "the sidecar maps ids to a description, not to the value");
   // Verify: the chains walk, the lineage and the scan are said.
   const v = verifyPackage(pkg);
   assert.match(v.lines.join("\n"), /Disputes:     1 lines, chain intact, 1 redacted \(their hashes kept\)/);
   assert.match(v.lines.join("\n"), /the leak scan after it FOUND 1 HIT\(S\), LISTED: release\/v1\/release\.json \(entry 3\)/);
+});
+
+test("a short sensitive value counts where it stands on its own: its digits inside a sha256 or a keyed id are neither redacted nor a leak, in UTF-8 or UTF-16", async () => {
+  const { root, pkg } = await run();
+  const hash = `9f0e${PIN}ab`.padEnd(64, "c");
+  const id = `hidden-c${PIN}d7e4078e6518613b415`;
+  await writeFile(join(pkg, "work", "a0", "hashes.md"), `sha256 ${hash}\nid ${id}\n`);
+  await writeFile(join(pkg, "work", "a0", "row.json"), `${JSON.stringify({ sha256: hash })}\n`);
+  await writeFile(join(pkg, "work", "a0", "pin.md"), `pin=${PIN}\n`);
+  const r = await redactPackage(root, pkg, { leaks: "list" });
+  assert.equal(await readFile(join(pkg, "work", "a0", "hashes.md"), "utf8"), `sha256 ${hash}\nid ${id}\n`);
+  assert.equal(JSON.parse(await readFile(join(pkg, "work", "a0", "row.json"), "utf8")).sha256, hash);
+  assert.equal(await readFile(join(pkg, "work", "a0", "pin.md"), "utf8"), "pin=[redacted: marked sensitive]\n");
+  assert.deepEqual(r.leaks.filter((h) => h.path.startsWith("work/")), []);
+  // The scan alone: the digits inside a hash are no hit, as text or as UTF-16 bytes; the PIN on its own is.
+  const tokens = sensitiveTokens(await readLedger(root, { raw: true }));
+  const d = await mkdtemp(join(tmpdir(), "redaction-short-"));
+  dirs.push(d);
+  await writeFile(join(d, "h.txt"), `${hash}\n${id}\n`);
+  await writeFile(join(d, "h16.bin"), Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(`${hash}\n`, "utf16le")]));
+  assert.deepEqual(leakScan(d, tokens).hits, []);
+  await writeFile(join(d, "p16.bin"), Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(`PIN ${PIN}\n`, "utf16le")]));
+  assert.deepEqual(leakScan(d, tokens).hits.map((h) => [h.path, h.entry, h.as]), [["p16.bin", 3, "bytes"]]);
 });
 
 test("the scan after redaction finds what word replacement cannot: UTF-16 text, another case, the other path separator, bytes in a binary", async () => {

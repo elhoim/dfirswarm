@@ -6,6 +6,19 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Fixed: a short sensitive value is found where it stands on its own, not as digits inside a hash
+
+`--redact` looked for a sensitive entry's words anywhere in a text, so a
+four-character value (a PIN) was found inside any sha256, keyed id or
+timestamp that happened to contain its digits. The redaction then replaced a
+line of the ledger or the trace for its hash, and the leak scan after it
+refused the package for a leak that was not one; a real trace, full of
+hashes, holds almost any four digits somewhere. A word under eight
+characters now counts only where no letter or digit stands against it
+(`scripts/package-tools.ts`), in the redaction and the scan alike, as text
+and as UTF-8 and UTF-16 bytes; a longer word counts wherever it stands, as
+before. `tests/redaction.test.ts` failed about once in a hundred runs on it.
+
 ### Fixed: a partial answer is a disposition, whatever its reviews' strength, and a standing finding is never discarded to make an answer not determinable
 
 On the run s9722fa (a CTF case of six questions, `--stop operator`) every
