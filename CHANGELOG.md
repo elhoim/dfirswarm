@@ -6,6 +6,31 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Added: a command or job that runs code recovered from the evidence is flagged
+
+On the c10 run sd9645b one seat's seven password-test jobs (worker VMs,
+Node) evaluated a crypto library recovered from a browser cache blob, an
+earlier job's sealed output, with `vm.runInContext` and `runInThisContext`;
+the run disclosed it itself. Nothing stopped it: no-exec stops a file
+executing, not an interpreter reading one, and a job's output under `store/`
+is not no-exec at all. Now:
+
+- **Flagged from the command's words** (`extensions/evidence-code.ts`): an
+  interpreter, a shell or a browser given a file from the evidence, an
+  extraction or a job's output as its script (or on its stdin, or through a
+  pipe), and a construct that evaluates code (`eval`, `exec`, `compile`,
+  `new Function`, `vm.runIn…`, `runpy`, `importlib`, `require`) given such
+  a path or a name bound to what was read from one. Never refused. On the
+  local runs replayed it names those seven jobs of sd9645b and nothing on
+  s10d40e, s7827e1 or sa2f2f2.
+- **Where it is said**: the `bash` result's note and an `evidence_code`
+  trace event; the `job_run` reply's `evidence_code` and its trace row; the
+  report's job record ("evidence code executed") and a list in Appendix B.
+- **The prompt, the contract and the kickoff** say that never running
+  recovered code covers every way of running it, that no-exec does not stop
+  an interpreter and a job's output is not no-exec, and what to do instead:
+  reimplement it or use a trusted program, or ask the operator first.
+
 ### Added: a goal with a brief and no premises is warned about, and the shipped goals designate theirs
 
 On c10 run sd9645b 4 of the 10 parts its answers held open were attribution
