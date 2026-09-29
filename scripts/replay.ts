@@ -277,7 +277,10 @@ export async function project(harness: string, S: string, o: { showText?: boolea
     try {
       return await f();
     } catch (e) {
-      errors.push(`${what}: ${(e as Error).message}`);
+      const err = e as Error & { code?: string };
+      // A package the checkout imports that its tree does not hold: a worktree made without node_modules.
+      const pkg = err.code === "ERR_MODULE_NOT_FOUND" ? /Cannot find package '([^']+)'/.exec(err.message)?.[1] : undefined;
+      errors.push(`${what}: ${err.message}${pkg ? `. The checkout has no ${pkg}: link a checkout's packages into it (ln -s ${join(ROOT, "node_modules")} ${join(harness, "node_modules")}) and replay again` : ""}`);
       return null;
     }
   };
