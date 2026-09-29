@@ -428,7 +428,18 @@ one seat coordinates the finish (normally the one that published the report
 last); every other seat's `done` is answered "not yours", and the agents'
 headers say whether the registers make the finish ready. `leads/finish.jsonl`
 records the coordinator, the report's reviews, the late items it resolved and
-the check result per state revision. Work nobody holds is offered to one idle
+the check result per state revision. The coordinator drafts the report, then
+prepares the finish (`finish prepare`): it takes the finish as a done would,
+runs no check, and answers readiness and every result, veto or objection late
+against the report, with the lease's generation and the report's digest. It
+resolves them all in one call (`finish resolve` with `items`, each folded with
+where the report says it now or not_material with why, the generation, the
+digest and a key naming the batch), invites the report's review (`finish
+ack`), and calls done. A stale generation or digest, or an item that is not
+late, refuses the whole batch and records nothing; a batch sent again under its
+key is answered with what was recorded. What was late stays late through a
+second prepare, a republished report and a takeover; after a resume, the first
+prepare opens the new segment and keeps what was still late by name. Work nobody holds is offered to one idle
 seat at a time, for a minute from when the offer reaches it; a lead held with
 nothing done on it for ten minutes while its holder works on another lead is parked
 and offered too. First choices are staggered at the start of a run (20 s a
@@ -441,7 +452,8 @@ job's "suspected stall", which is shown, never acted on). The console's Jobs
 tab names a job that needed a program its image does not hold, with the
 profile, for the images' upkeep. The Leads tab, and `swarm.sh lead <run> list`,
 show the finish (ready by the registers or what holds it, who coordinates it,
-the last check and what is late against the report), the parked leads, and on
+the boundary and the last prepare, the last check and what is late against the
+report), the parked leads, and on
 each lead its standing offer, a closure waiting for its closer's confirmation,
 a second route with its reason and its product contract.
 
@@ -939,6 +951,7 @@ finished run measures the same whenever it is read.
 | Negatives on partial coverage | Negative answers none of whose standing coverage records is complete and current (each is shown as partial, not computed or stale), and, apart, those that cite no coverage record at all. |
 | Offers | Lead offers (`offer` events) by what became of each while it stood (from the offer to the lead's next claim, release, close or reopen), one outcome each, the first that applies in this order: accepted (a `claim` or `confirm` that names the offer), declined (`offer_decline`), taken by another seat (that next claim was another seat's, lapsed or not), lapsed (`offer_lapse`), else no outcome. By reason too (wake, hand-off, parked, reopen, confirm). Question offers: made, accepted (`offer_accept`), declined, and not taken up. A run from before offers has none; its `wake` events are counted apart: taken by the woken seat (its first claim of the lead in that open spell), by another seat, or not taken. A woken seat's claim is not the same measure as an accepted offer: a wake reserved nothing. Review offers (a limiting route's review, a material negative's review, `reason: route_review | negative_review`) are counted apart (`reviews`): taken up by the review they asked for (recorded by the seat offered, even after its offer ran out), declined, withdrawn (`offer_withdraw`: reviewed by another route, or the answer superseded), lapsed, or with no outcome; and how many their seat took first (`offer_take`). |
 | `done` calls | Every `done` line on the trace, and every `done_deferred` line (a seat's done that was not its finish: another seat coordinates it). Accepted: a done line with no refusal (and, of those, the one that wrote the sentinel); refused by the seat's checks, by why (the finish line not met, posts that landed after the report, the finish line unsettled, an abandon vote that did not end the run); refused by the hub (a `markDone` the hub refused: the seat saw a thrown error and wrote no done line; a refusal the hub counted and wrote once is that many calls); not the seat's finish. A done after the sentinel (a seat leaving) is an accepted call that wrote nothing. |
+| Finish | The finish's own acts ([ADR 0015](adr/0015-one-seat-finishes-and-work-is-offered.md), "Preparing the finish"). The first done that was a finish (not another seat's, not a seat leaving on its cap, not an abandon vote) and how it was answered, and whether it was refused on what was late against the report: the refusal `finish prepare` exists to remove (the goal's checks run only after it, so whether they would have passed is not in the trace; replay reads that on the registers). Every done refused on late items. The finish tool's calls by act (prepare, resolve and how many of those carried items, status, ack), so a refusal renamed into more calls cannot pass for a gain; the register's resolutions, the batches they came in and its checks. From ready (the tail's) to the end: the minutes, every seat's tokens in that span (from the same per-call record as the cost; none without one) and the finish's calls in it, through the done that wrote the sentinel. |
 | Tail | From when the run was ready to its end (the sentinel's time, or the operator's stop). Ready is, where the finish register records readiness, the last turn to ready before the end that was not undone before it (a done that passed while readiness had not turned ready records the ready state itself, and the tail says so: "recorded by the done"); otherwise the moment every question in scope had its first answer. Two more tails are given apart, because they are not the same: from every question's first answer (any result, supported or not), and from every question's final answer (the one standing at the end). None while a question in scope has no answer; the unanswered are named. |
 | Acquisition | Operator requests of kind `acquisition`, by the stage each ended at (requested, authorised, collecting, received, validated, declined, unavailable), and those the case policy declined at once. A gap is a request that did not end validated (declined, unavailable, or still waiting), with the questions it named. Evidence added: the store journal's `evidence_added` lines, and how many answered a request. |
 | Interpretations | The lead register's `interpret` events, each bound to the entry it names: valid while that entry stands, otherwise on a superseded or on a disputed entry, or on none the ledger holds (the job needs interpreting again). Lead jobs never interpreted at all, and those with no valid interpretation left, are named. |
@@ -989,8 +1002,10 @@ measure a rule change on recorded histories before paying for new runs
   process of its own: the answers check (each `check-answers.ts` line of the
   goal's checks, read as `await-done.sh` reads them from the registry record,
   run as its own function); the finish gate over it and the finish line's
-  verdict; readiness; the finish register (the coordinator, what is late
-  against the report, the last check recorded); the report's standing for
+  verdict; readiness; the finish register (the coordinator, its resume
+  segment and how many posts it carries, what is late against the report,
+  the coordinator's prepares, the resolutions and the batches they came in,
+  the last check recorded); the report's standing for
   each question (its status, and whether its chain says a best candidate);
   and every custody verdict the run holds (`custody.json`, one a resume set
   aside, the ones the anchor beside the run names), verified as a prefix of

@@ -436,12 +436,131 @@ downgrade, moving their standing findings into the reasoning (ADR 0013,
   discarded to make an answer not determinable. Readiness names a best
   candidate as one that claims established.
 
+## Preparing the finish
+
+Added 2026-09-29 (the limits spec, item 3; the Plan 3 brainstorm, L6: Astra
+F1 and F2, Fable L6-A in part).
+
+Every first done of the three runs of 2026-09-29 (s993d40, sa2f2f2,
+s5764c4) was refused on items late against the report: 4, 5 and 15. The
+code made it so. What is late is read against the lease's boundary
+(`lateItems`), so `finish status` listed nothing before a lease existed;
+only `finishTurn`, a done, made the lease; and only the lease's holder could
+resolve (`resolveLate`). Showing the list in status could not have helped.
+The coordinator then resolved each item in a call of its own: 4, 6 and 15
+calls before its next done. On s5764c4 those 15 calls took 71 s, a result
+posted in them refused the second done and another the third, one item
+each.
+
+1. **`finish prepare`.** After drafting the report, the coordinator
+   prepares the finish (`report`: its path). The lease and the report's
+   boundary are taken exactly as a done takes them (one function,
+   `takeLease`): a first lease goes to the report's last publisher when it
+   can hold it, else to the seat asking; an unavailable holder is taken over
+   at the next generation; a report named anew is kept on the lease. No goal
+   check runs and no sentinel is written. The answer is readiness (with the
+   answers check's warnings) and every item late against the report, whole,
+   with the lease's generation and the report's digest, and a `prepare`
+   event records it (generation, report, digest, boundary, readiness, and
+   the items it listed by kind and id). Another seat's prepare is answered
+   "not yours", quietly, as its done is. A prepare is refused while the
+   report does not exist.
+2. **The boundary forgives nothing.** It is the report's write time when
+   the finish was first taken, never the time of a prepare, so calling
+   prepare late manufactures no clean boundary. A prepare again, a report
+   published again and a takeover keep the earliest one (6 and 10 above):
+   what was late stays late until a typed resolution names it.
+3. **A resume opens a new segment.** The finish register is append-only
+   and outlives a resume; the old boundary would make every result of the
+   continuation late. The first prepare (or done) after a resume
+   (`budget.json` `resumes`) opens the new segment: designated as a first
+   lease is, at the next generation, with the report's time then as its
+   boundary, and every post that was late against the report when the run
+   was resumed and that no resolution answers is carried on the lease by
+   name (`segment`, `carried`). An objection needs no carrying: it holds
+   until it is resolved, whatever the boundary. A post of the
+   continuation's written before its report is its own work, which that
+   report answers. The fields are versioned: a run from before reads, and
+   hashes, as it did.
+4. **Batch resolve.** `finish resolve` takes `items` [{post or ack, how:
+   folded, where} or {post or ack, how: not_material, why}], each with its
+   own words, the coordinator's `generation` and the report's `digest` it
+   read (from prepare or status), and an idempotency `key` (when none is
+   given, the batch's own content names it). The batch is validated whole
+   under the finish lock, then one ordinary resolution event is appended per
+   item, each carrying the key, the generation and the digest; a folded
+   item names the version it was folded into, as before. A stale generation
+   or digest, or any item that is not late (resolved already, never late,
+   named twice), refuses the whole batch with the exact stale fields, each
+   item's problem and every id still unresolved, and records nothing. The
+   same batch sent again under its key by the same seat (a retry after an
+   interruption) is answered with what was recorded and what is still late:
+   nothing twice, nothing hidden. Another batch under a key used already is
+   refused. There is no blanket "all resolved": a bulk call proves the
+   accounting, and each judgement stays attributable and reviewable. The
+   one-item form stays.
+5. **What stays.** `finishTransaction` is unchanged: the lease and what is
+   late are read again in the transaction that writes the sentinel, and the
+   state revision the checks ran at must still hold, so a veto, an
+   objection or an evidence addition racing the done still refuses it. No
+   quiet period holds evidence admission, and no all-seats acknowledgement
+   is required. The finish phase (10a) turns assembling on the same
+   condition as before, the registers met, whether the lease came from a
+   prepare or a done.
+6. **The order, said where the seats read it.** The prompt and the
+   `finish` and `done` descriptions: draft the report, prepare, resolve the
+   late items in one call, invite the report's review (`finish ack`), then
+   done. The done's late refusal, the coordinator's header and the
+   readiness post name the batch, its generation and its digest.
+7. **Not built: covering a late post by the report's reach** (Fable L6-A,
+   a result whose cited entries the report's standing answers already
+   reach, recorded covered with no coordinator act). Republishing does not
+   show a caveat was weighed, and an entry already cited can carry a new
+   objection (Astra, round 2). Only prepare and the batch are built, and
+   the first-done refusals are measured.
+
+**Measured.** The metrics' finish block counts the first done and whether
+it was refused on late items, every late refusal, the finish tool's calls
+by act (prepare, resolve and how many carried items), the resolutions,
+batches and checks, and the tail from ready with every seat's tokens, so a
+refusal renamed into more calls cannot pass for a gain. Replay reads the
+prepares, the batches, the lease's segment and what it carries.
+
+On the three runs, replayed values-free with each run's registers cut to
+its first done (posts written after it removed, the finish register cut
+after the lease that done took, the ledger, attestations, leads and
+questions cut to its time): a prepare there lists exactly the items the
+done was refused on (4, 5, 15). The finish line on the cut registers is
+not met on s993d40 and s5764c4 (the answers check), so their first done
+would still be refused, by the finish line (their later dones were so
+refused, 6 of 7 and 8 of 10 checks), and on sa2f2f2 it proceeds (examination-limited) with
+readiness ready: sa2f2f2's is the one first-done refusal caused only by
+late items. After a prepare at the first done's time, a batch composed in
+the coordinator's own measured time (4.2, 17 and 11.6 s from the refusal
+to its first resolution) and a done as long after it as its next one came
+after its last resolution (4.6, 9.5 and 4.7 s), no result or veto lands
+in that window on s993d40 or s5764c4. On sa2f2f2 one result lands 9 s
+after the first done: before the batch's reply, which names it still
+late. So first-done late refusals go from 3 to 0 if the coordinator
+resolves what the reply names before its done, and to 1 (sa2f2f2) if a
+post landing between prepare and done is left to refuse it; the refusals
+caused only by late items go from 1 to 0, or stay 1, on the same terms.
+s5764c4's second and third late refusals do not arise in a 16 s window.
+Replay cannot show what the seats would have done under the rule: the
+paired runs measure that, with the finish tail's tokens and wall time
+(sa2f2f2: one minute and 2.4 million tokens from ready to the sentinel,
+6 resolve calls and 2 dones; the other two turned ready only at their
+done).
+
 ## Consequences
 
 - A run has one closer, and a finish that waits on a compacting or dead seat
   is taken over by the next done. The tail from "every question answered" to
   the sentinel should be the coordinator's review of what is late, not a
   round of refusals.
+- The coordinator learns what is late from its prepare, not from a refused
+  done, and answers it in one call; a done refused on late items then means
+  a result, a veto or an objection really raced the finish.
 - A best candidate is said to be one, in the ledger, the check and the
   finish; a run that ends on one is examination-limited, never completed.
 - Offers make "the woken seat got first claim" a native measure (offer,

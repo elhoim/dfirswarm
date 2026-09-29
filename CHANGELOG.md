@@ -6,6 +6,52 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Added: `finish prepare`, and late items resolved in one batch
+
+Every first done of s993d40, sa2f2f2 and s5764c4 was refused on items late
+against the report (4, 5 and 15): only a done made the lease the late list
+is read under, and the coordinator then resolved each item in a call of its
+own. Now (ADR 0015, "Preparing the finish"):
+
+- `finish prepare` takes the lease and the report's boundary exactly as a
+  done does (a first lease to the report's publisher, a takeover of an
+  unavailable holder, a report named anew), runs no goal check and writes
+  no sentinel, and answers readiness and every late item, whole, with the
+  lease's generation and the report's digest; a `prepare` event records
+  it. Another seat's prepare is "not yours", quietly. A prepare again, a
+  republished report and a takeover keep the earliest boundary. After a
+  resume, the first prepare or done opens the new segment and carries every
+  post still late by name (`segment`, `carried` on the lease).
+- `finish resolve` with `items` ({post or ack, how: folded, where} or
+  {post or ack, how: not_material, why}), `generation`, `digest` and a
+  `key`: validated whole under the finish lock, one resolution event per
+  item carrying the key, the generation and the digest. A stale generation
+  or digest, or an item not late, refuses the batch with the exact stale
+  fields and every id still unresolved, and records nothing; the same batch
+  sent again under its key records nothing twice and says what is still
+  late. The one-item form stays.
+- The final transaction is unchanged: a veto, an objection or an evidence
+  addition racing the done still holds the sentinel.
+- The prompt and the `finish` and `done` descriptions say the order:
+  draft, prepare, resolve in one call, invite acks, done. The done's late
+  refusal, the header and the readiness post name the batch's generation
+  and digest; `finish status`, `swarm.sh lead <run> list` and the report
+  give the boundary, the segment and the last prepare.
+- Metrics: a finish block (the first done and whether it was refused on
+  late items, every late refusal, the finish tool's calls by act, the
+  resolutions and batches, the tail from ready with every seat's tokens).
+  Replay reads the prepares, the batches and the lease's segment.
+- Contract fixtures prepared-batch-resolved, prepared-racing-veto,
+  prepared-takeover and resume-carried; tests/finish-prepare.test.ts.
+- Replayed, each run cut to its first done: a prepare there lists exactly
+  the items that done was refused on; the finish line on the cut registers
+  proceeds on sa2f2f2 only (the one refusal caused by late items alone). No
+  post lands between a prepare and a batch in the coordinators' own
+  measured times on s993d40 and s5764c4; on sa2f2f2 one lands before the
+  batch's reply, which names it. First-done late refusals 3 to 0, or 1 if
+  that post is left to refuse the done. Covering a late post by the
+  report's reach was not built.
+
 ### Added: the warnings are delivered where the decision is made, and request guidance
 
 The answers check's three warnings were said to the coordinator at the end
