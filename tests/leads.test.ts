@@ -455,6 +455,23 @@ test("priority is how much waits on a lead, transitively, then its age; uncovere
   assert.deepEqual(cov.open_leads_for, { "1": ["L-3"] });
 });
 
+test("a needs_operator close asking the operator to accept dispositions stands, and is told done asks the finish line first; once a done was refused on a question the operator may accept, it is not", async () => {
+  const { S, a1 } = await run();
+  const F_ = await import("../extensions/finish.ts");
+  ok(await L.openLead(a1, { title: "Have the limits ruled on", why: "two answers rest on what could not be examined", take: true }));
+  const asked = ok(await L.closeLead(a1, "L-1", { disposition: "needs_operator", ref: "Operator: accept or reject the examination-limited dispositions of Q-1 and Q-2 before we finish" }));
+  assert.ok(asked.request?.id, "the close stands, with its request");
+  assert.match(asked.hint ?? "", /no done has been refused on anything only the operator can release: whether examination-limited dispositions suffice is what done asks the finish line/);
+  assert.match(asked.hint ?? "", /swarm\.sh question <run> accept Q-n/);
+  // An ask of what only the operator can do is not hinted.
+  ok(await L.openLead(a1, { title: "Reach the paste site", why: "the key is there", take: true }));
+  assert.equal(ok(await L.closeLead(a1, "L-2", { disposition: "needs_operator", ref: "allow the host paste.example.org so a job can fetch the key" })).hint, undefined);
+  // A done refused on a question with no disposition names what the operator may accept: the ask may be the operator's now.
+  await F_.recordCheck(S, "a1", "r1", { proceed: false, reason: `done finishes a run only when ${P.DISPOSITION_WORDS}. No disposition yet: question:2 is limited` }, {});
+  ok(await L.openLead(a1, { title: "Have Q-2 accepted", why: "the finish line holds it", take: true }));
+  assert.equal(ok(await L.closeLead(a1, "L-3", { disposition: "needs_operator", ref: "The finish line holds Q-2: accept its examination-limited disposition (swarm.sh question accept Q-2)" })).hint, undefined);
+});
+
 test("needs_operator writes the request for the operator; the operator's note reopens the lead, allows a host for jobs, and its holder is told", async () => {
   const { S, a1 } = await run();
   await traceRow(S, "a1", "bash", new Date());

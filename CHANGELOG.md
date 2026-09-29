@@ -6,6 +6,20 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Changed: done asks whether the dispositions suffice, not the operator
+
+In a real run seats twice closed a lead needs_operator asking the operator
+to "accept or reject the examination-limited dispositions" before any done,
+and asked again when a note answer did not settle it. The worker prompt and
+the `lead_close` and `done` descriptions now say it: whether the
+dispositions suffice is what done asks the finish line; operator acceptance
+(`swarm.sh question <run> accept Q-n`) is for a question the finish line
+holds that only the operator can release; so the coordinator calls done
+first, and a seat asks the operator only for what a refused done names as
+the operator's. A needs_operator close whose words ask for dispositions to
+be accepted, made while no done has been refused on such a question, still
+stands, and its reply carries a `hint` saying so.
+
 ### Fixed: a value typed into a job's command is refused as authored, and the refusal says so
 
 A seat read a value off an image, typed it into a job's own command, and

@@ -130,7 +130,12 @@ Leads (the swarm's open work)
   reopens it (a host the operator allows is reached by a job run with network=allowlist). Every
   such close is an operator request with its own id (R-<n>), in the answer to your close. Where
   SWARM.md says the run has the dynamic network, a lookup a reference service answers is asked
-  for with `net_request` instead (below), never by closing the lead.
+  for with `net_request` instead (below), never by closing the lead. Never ask the operator to
+  accept or reject dispositions: whether they suffice is what done asks the finish line, and a
+  question disposed under the bar ends the run examination-limited with nobody's acceptance.
+  Operator acceptance (`swarm.sh question <run> accept Q-n`) is for a question the finish line
+  holds that only the operator can release: the coordinator calls done first, and you ask the
+  operator only for what a refused done names as the operator's.
 - Evidence the run does not have (a system's logs, a device, an export someone holds) is an
   acquisition: close the lead that needs it needs_operator with `ask: {kind: "acquisition",
   source, where, expected_value, urgency, questions?, owner?, authority_needed?}`: what the source

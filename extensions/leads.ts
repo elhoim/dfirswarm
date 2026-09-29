@@ -2183,7 +2183,7 @@ function checkRef(disposition: LeadDisposition, raw: string, l: Lead, snap: Lead
  * with a durable id. A write that fails is not swallowed: the answer says the
  * request is pending, and the next reconciliation writes it.
  */
-export async function closeLead(ctx: P.SwarmContext, rawId: unknown, input: { disposition?: string; ref?: string; why?: string; generation?: number; ask?: unknown; result_refs?: string[] | string }): Promise<LeadResult<{ lead: LeadView; operator_request?: string; request?: { id: string; kind: string; state: string; stage: string | null; answer: string | null }; request_pending?: string }>> {
+export async function closeLead(ctx: P.SwarmContext, rawId: unknown, input: { disposition?: string; ref?: string; why?: string; generation?: number; ask?: unknown; result_refs?: string[] | string }): Promise<LeadResult<{ lead: LeadView; operator_request?: string; request?: { id: string; kind: string; state: string; stage: string | null; answer: string | null }; request_pending?: string; hint?: string }>> {
   const ref = leadRef(rawId);
   if (!ref.ok) return ref;
   const disposition = String(input.disposition ?? "").trim().toLowerCase() as LeadDisposition;
@@ -2227,6 +2227,8 @@ export async function closeLead(ctx: P.SwarmContext, rawId: unknown, input: { di
     const snap = await leadsSnapshot(ctx.sandboxRoot);
     const view = viewLead(snap.state.leads.get(ref.id)!, snap);
     if (disposition !== "needs_operator") return { ok: true, lead: view };
+    const hinted = await dispositionAskHint(ctx.sandboxRoot, `${refText.value}\n${why.value ?? ""}`).catch(() => null);
+    const hint = hinted ? { hint: hinted } : {};
     // The close is the commit; the request is written from it, once, by its key.
     const closeSeq = r.events.find((e) => e.ev === "close")?.seq;
     try {
@@ -2234,20 +2236,39 @@ export async function closeLead(ctx: P.SwarmContext, rawId: unknown, input: { di
       const rs = await R.requestsSnapshot(ctx.sandboxRoot);
       const rid = closeSeq ? rs.byKey.get(`lead:${ref.id}:${closeSeq}`) : undefined;
       const req = rid ? rs.requests.get(rid) : undefined;
-      if (!req) return { ok: true, lead: view, request_pending: `the request is committed on ${ref.id}'s close and is written to the operator's requests at the next reconciliation` };
+      if (!req) return { ok: true, lead: view, request_pending: `the request is committed on ${ref.id}'s close and is written to the operator's requests at the next reconciliation`, ...hint };
       return {
         ok: true,
         lead: view,
         operator_request: String(req.line.answer ?? ""),
         request: { id: req.rid, kind: req.kind, state: req.state, stage: req.stage, answer: req.closed ? req.closed.text : null },
+        ...hint,
       };
     } catch (err) {
       // Not swallowed: said to the agent, on the trace with its answer, and made good at the next reconciliation.
-      return { ok: true, lead: view, request_pending: `the request is committed on ${ref.id}'s close and could not be written to the operator's requests yet (${(err as Error).message}); the next reconciliation writes it` };
+      return { ok: true, lead: view, request_pending: `the request is committed on ${ref.id}'s close and could not be written to the operator's requests yet (${(err as Error).message}); the next reconciliation writes it`, ...hint };
     }
   } catch (err) {
     return { ok: false, reason: (err as Error).message };
   }
+}
+
+/**
+ * A needs_operator close that asks the operator to accept or reject
+ * dispositions, made before any done was refused on something only the
+ * operator can release: said in the reply, never refused. In a real run
+ * seats asked twice for the operator to rule on examination-limited
+ * dispositions before any done, and a note answer settled nothing. Whether
+ * they suffice is what done asks the finish line; the operator's acceptance
+ * is for a question the finish line holds.
+ */
+async function dispositionAskHint(sandboxRoot: string, text: string): Promise<string | null> {
+  if (!/\b(accept|reject|approv|ratif|rule on|sign[\s-]?off)/i.test(text) || !/\bdispositions?\b|examination[\s-]limited/i.test(text)) return null;
+  const F = await import("./finish.ts");
+  const st = await F.readFinish(sandboxRoot);
+  // A done refused on a question with no disposition names what the operator may accept: then the ask may be the operator's.
+  if (st.checks.some((c) => !c.proceed && /accepted by the operator|the operator accepts/i.test(c.reason ?? ""))) return null;
+  return "no done has been refused on anything only the operator can release: whether examination-limited dispositions suffice is what done asks the finish line, and a question disposed under the bar needs nobody's acceptance. The coordinator calls done first; ask the operator only for what a refused done names as the operator's (a question it holds, which the operator accepts with swarm.sh question <run> accept Q-n). The close stands, and so does its request";
 }
 
 /**
