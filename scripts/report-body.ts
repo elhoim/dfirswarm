@@ -94,6 +94,7 @@ import { originWords, premiseViews, questionViews, type PremiseView, type Questi
 import { classWords, scopeWords } from "../extensions/premises.ts";
 import { questionCost, tokensWords, type QuestionCost } from "./question-cost.ts";
 import { FINISH_LOG, readFinish, type FinishState } from "../extensions/finish.ts";
+import { evidenceCodeRun } from "../extensions/evidence-code.ts";
 
 // ---------------------------------------------------------------------------
 // Options
@@ -2999,6 +3000,8 @@ function jobsSection(run: Run): BodySection {
   if (!run.jobs.size) blocks.push({ k: "note", s: ["No job ran."] });
   const cited = [...run.jobs.keys()].filter((id) => citedBy.has(id)).length;
   if (run.jobs.size) blocks.push({ k: "p", s: [`${plural(cited, "job")} ${cited === 1 ? "is" : "are"} cited by an entry and ${cited === 1 ? "comes" : "come"} first; the ${plural(run.jobs.size - cited, "job")} no entry cites follow, whole, in a group a browser shows collapsed (open it to read them; a printout shows the group's count only).`] });
+  const ranCode = [...run.jobs.values()].filter((j) => j.spec.command !== undefined && evidenceCodeRun(j.spec.command, Array.isArray(j.spec.inputs) ? j.spec.inputs : []));
+  if (ranCode.length) blocks.push({ k: "note", s: [`${plural(ranCode.length, "job")} may have executed code recovered from the evidence (its command runs, or evaluates, code from the evidence, an extraction or a job's output; read from the command's words): ${ranCode.map((j) => j.id).join(", ")}. What comes out of the evidence is read, never run, and a no-exec mount does not stop an interpreter reading it: what rests on these jobs rests on that code's behaviour.`] });
   for (const j of run.jobs.values()) {
     const sp = j.spec;
     const rows: Row[] = [];
@@ -3012,6 +3015,9 @@ function jobsSection(run: Run): BodySection {
     if (sp.targets?.length) rows.push({ label: "Targets", s: [sp.targets.map((t) => t.ref ?? t.name ?? "?").join(", ")] });
     if (sp.source !== undefined) rows.push({ label: "Imported", s: [{ code: sp.source }, " — the file an agent made; how it was made is not recorded"] });
     rows.push({ label: "Declared scope", s: [Array.isArray(sp.inputs) ? sp.inputs.map(String).join(", ") || "none" : "not recorded (the legacy default: every input)"] });
+    // Code recovered from the evidence, run or evaluated by the command (extensions/evidence-code.ts): read from the command's own words, a flag that says "may have".
+    const code = sp.command !== undefined ? evidenceCodeRun(sp.command, Array.isArray(sp.inputs) ? sp.inputs : []) : null;
+    if (code) rows.push({ label: "Evidence code", s: [`may have been executed: the command ${code.how === "runs" ? `runs ${code.paths.join(", ")} with ${code.what}` : `evaluates code (${code.what}) it read from ${code.paths.join(", ")}`}. What comes out of the evidence is read, never run; an interpreter reading it is not stopped by a no-exec mount.`] });
     rows.push({ label: "Network", s: [sp.network ?? "not recorded"] });
     if (sp.timeout_seconds) rows.push({ label: "Time limit", s: [`${sp.timeout_seconds} s`] });
     if (sp.note) rows.push({ label: "Note", s: [sp.note] });
@@ -3021,7 +3027,7 @@ function jobsSection(run: Run): BodySection {
     else for (const [i, f] of j.outputs.entries()) rows.push({ label: i ? "" : "Output", s: [{ code: f.path }, ` ${bytesHuman(f.bytes)}, sha256 `, { code: f.sha256 }] });
     const by = citedBy.get(j.id) ?? [];
     rows.push({ label: "Cited by", s: by.length ? by.flatMap((n, i): Span[] => [...(i ? [", "] : []), { e: n }]) : ["no entry"] });
-    const box: Block = { k: "box", cls: "exhibit job", id: `job-${j.id}`, level: 4, title: [{ plain: `Job ${j.id}` }], chips: [{ text: j.status ?? "unknown", tone: j.status === "ok" ? "moss" : "brick" }], body: [{ k: "rows", rows }] };
+    const box: Block = { k: "box", cls: "exhibit job", id: `job-${j.id}`, level: 4, title: [{ plain: `Job ${j.id}` }], chips: [{ text: j.status ?? "unknown", tone: j.status === "ok" ? "moss" : "brick" }, ...(code ? [{ text: "evidence code executed", tone: "brick" as const }] : [])], body: [{ k: "rows", rows }] };
     (by.length ? blocks : uncited).push(box);
   }
   if (uncited.length) blocks.push({ k: "details", summary: `${plural(uncited.length, "job")} no entry cites`, body: uncited });

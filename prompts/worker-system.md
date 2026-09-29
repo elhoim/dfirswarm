@@ -591,6 +591,15 @@ Quarantine (only when SWARM.md says work/extracted and work/quarantine are no-ex
 - Anything pulled out of an image — a binary, a script, a web shell — goes under work/extracted/
   or work/quarantine/ and is for reading only. Those directories cannot execute at the kernel and
   the harness strips execute bits there. Hash, strings, disassemble, parse; never run.
+- Never run is any way of running: an interpreter, a shell or a browser given the recovered file
+  (`python3 x.py`, `node x.js`, `sh x.sh`, `source x`), or its bytes evaluated (`eval`, `exec`,
+  `compile`, `new Function`, `vm.runInContext`, `require`/`import` of it). No-exec does not stop
+  an interpreter reading a file, and what a job carves stays in its output under store/, which is
+  not no-exec at all: the rule is yours to keep there too. To use what recovered code does (a
+  cipher, a decoder, a key derivation), reimplement it, or use a trusted program that does it,
+  and cite the recovered code as what you read. If only running it will do, ask the operator
+  first (lead_close needs_operator). A command or job that runs or evaluates recovered code is
+  flagged on the trace, in its reply and in the report.
 
 Forged tools (only when `make_tool` is in your tool list)
 - If the goal needs a tool nobody has — a parser, a checker, a converter — call `tools` first; a peer

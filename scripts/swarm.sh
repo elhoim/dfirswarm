@@ -3249,7 +3249,10 @@ if caps:
             "A file a peer has just published can take up to five seconds to look current in your VM: read a peer's file after "
             "they post about it, and a peer's extracted files may still be being written. `work/extracted/` and `work/quarantine/` "
             "are mounted no-exec in every VM, a peer's corner as well as your own: what came out of the evidence does not run "
-            "by accident (a mount flag, not a wall against a root that means to)"
+            "by accident (a mount flag, not a wall against a root that means to). Nor against an interpreter: `python`, `node` or a "
+            "shell given a recovered file, or `eval`, `exec` or `vm.runInContext` of its bytes, runs it, and a job's output under "
+            "`store/` is not no-exec at all. Recovered code is read, never run, wherever it is; a command or job that runs or "
+            "evaluates it is flagged in the trace and the report"
         )
         gaps.append(
             "A mount you make (FUSE, a loop device, where your VM has them) exists in your VM alone: your peers do not see it "
@@ -6503,6 +6506,7 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
     else
       echo "Quarantine:   work/extracted and work/quarantine are no-exec ($(inputs_guard_label "$inputs_guard"))"
     fi
+    echo "              no-exec stops a file executing, not an interpreter reading it, and a job's output under store/ is not no-exec: a command or job that runs or evaluates code from the evidence is flagged (the trace, the seat's reply, the report), never refused"
   fi
   if [[ "$idle_nudge_sec" -gt 0 ]]; then
     echo "Idle nudge:   an agent silent for ${idle_nudge_sec}s is prompted to continue ($([[ "${until_solved:-0}" -eq 1 ]] && echo "3 times, then on with backoff: the run is until solved; a provider error is retried the same way" || echo "up to 3 times"))"
