@@ -623,6 +623,13 @@ questions with `question_open`. Its premises, what the case takes as given
 the metadata block's `premises:` list (`- text [scope: questions 1, 2;
 entities E; times 2024-01-01..2024-06-30]`, the scope optional): each becomes
 `P-<n>`, a given ([ADR 0011](adr/0011-questions-are-a-register-with-their-askers.md), "Premises").
+A goal with a case brief (a heading naming a brief, a scenario, a background
+or a situation, a `--sections-in` brief, or words naming one) and no premises
+is warned about at the kickoff and by `start --check`: its answers would hold
+the brief's givens open as parts to prove. Designate what the brief states as
+given (never what a question asks or tests) in the metadata block, or on the
+run with `question <run> premise add`. The shipped goals under
+`prompts/goals/` and the calibration generator's designate theirs.
 
 - `question <run> add --text T --why W [--objective O-n | --objective new --objective-text T] [--parent Q-n] [--materiality material|background] [--priority urgent --reason R] [--expects existence|value|narrative|timeline|list] [--completeness] [--hint REF [--hint-value V]]... [--attach REF]... [--suggest SEAT] [--deadline ISO] [--neutral T] [--submission TOKEN]`
   asks the running swarm a question. `--completeness` says it asks for a complete set (every file, all connections, a complete list); a question whose words say so ("every", "all", "each", "complete list") is marked so without it, and `amend --no-completeness` takes the mark off. Its established or partial answer rests on a coverage record naming the areas searched (allocated, deleted, unallocated, slack, secondary), or the finish line holds it. It is written to the chain first and acknowledged after (the last line printed is the JSON of the act: `q`, `rev`, `scope`, the event's `seq` and `hash`, and what was delivered); then posted from `analyst:<you>`, offered to the suggested seat for its first minute (`SWARM_QUESTION_OFFER_SEC`) or to the most suited idle seat, and ranked first in every agent's header. A hint says where to look (a ref such as `input:<path>`, or a path in the run); `--hint-value` after it records what the hint says as an open hypothesis in the ledger. `--submission` makes a retry the same question.

@@ -42,7 +42,7 @@ Per case, under `--out/<case>/`:
 | --- | --- |
 | `inputs/` | the evidence, for `--inputs` |
 | `late/` | one evidence item held back, for the operator to add while the run goes on |
-| `goal.md` | the goal document, for `--goal-file`: the case as a lab would receive it, objectives, numbered questions, no hint at what was planted |
+| `goal.md` | the goal document, for `--goal-file`: the case as a lab would receive it, objectives, numbered questions, no hint at what was planted; its metadata block designates as premises what the brief states as given (from the brief alone, never the truth) |
 | `case.json` | what was written, with sizes and SHA-256 digests; no seed and no truth |
 
 and `--truth-dir/<case>.truth.json` (mode 0600, in a 0700 directory).

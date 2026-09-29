@@ -6,6 +6,31 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Added: a goal with a brief and no premises is warned about, and the shipped goals designate theirs
+
+On c10 run sd9645b 4 of the 10 parts its answers held open were attribution
+hedges ("did this person do it") on what the case brief states as given: the
+goal designated no premises, so the premise register never acted. Now (ADR
+0011, "Premises"):
+
+- **The kickoff warns** (and `swarm.sh start --check` with it) when a goal
+  has a case brief (a heading naming a brief, a scenario, a background or a
+  situation, a `--sections-in` brief, or words naming one) and designates no
+  premises: its answers will hold the brief's givens open. The warning says
+  how to designate them: a `premises:` list in the front matter, or
+  `swarm.sh question <run> premise add`. It never refuses.
+- **The shipped goals designate theirs.** Every case goal under
+  `prompts/goals/` opens with a `premises:` list of what its own text states
+  as given (whose devices these are, who the subject is, the stated
+  setting), each closely restating the goal's sentence with its scope, none
+  an answer or something a question tests: belkactf6-bogus-bill 3, c02 1,
+  c03 2, c04 1, c05 2, c06 2, c07 2, c08 2, c09 2, c10 2, c11 2, l01 2, l02
+  1, l03 2, m01 2, u01 2, web-server-case 2. hello, pelican and
+  analyse-inputs have no case and none.
+- **The calibration generator** writes its cases' premises from each brief
+  alone (usb-departure 3, web-intrusion 2, invoice-fraud 3), never from the
+  truth; generator version 2.
+
 ### Changed: a review of the report carries over while what it covered is unchanged
 
 The c10 run sd9645b's finish took about 49 minutes over three versions of

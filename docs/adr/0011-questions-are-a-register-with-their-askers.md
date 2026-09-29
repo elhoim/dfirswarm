@@ -182,6 +182,27 @@ record, never by forcing either side.
   `supplied_assertion` or `proposition_under_test`), or the console's
   Questions tab. The operator and an examiner designate; an analyst, a
   reviewer and an observer do not (refused with why: ask it as a question).
+- **A brief with no premises is said at the kickoff** (added 2026-09-29, the
+  limits spec, item 6 refinement). On c10 run sd9645b the goal designated
+  none, so the register never acted: 4 of the 10 parts its answers held open
+  were attribution hedges ("did this person do it") on what the case brief
+  states as given, and three answers complete but for them stayed partial.
+  The kickoff, and `swarm.sh start --check` with it, warns when a goal has a
+  case brief (a `##` or `###` heading that names a brief, a scenario, a
+  background or a situation; a `--sections-in` brief; or words naming one:
+  a case brief, the published brief, an intake note, a scenario) and
+  designates no premises (no front-matter `premises:`, no `## Premises`
+  section with an item). The warning says what follows (the brief's givens
+  held open as parts to prove) and both ways to designate them: the front
+  matter's list, or `swarm.sh question <run> premise add` once the run
+  exists. It never refuses: whether the brief's words are givens is the
+  operator's call. The goals shipped under `prompts/goals/`, and the
+  calibration generator's, designate theirs: each premise closely restates
+  the goal's own sentence (whose devices these are, who the subject is, the
+  stated setting) with its scope, and none is an answer to a question or
+  something a question tests: where a brief states what a question asks (a
+  file's location, an encryption method, a compromise "suspected, with no
+  proof yet"), it is left out.
 - **Classes.** A `given` is not proved again and is never an open part. A
   `supplied_assertion` (a client's statement, a witness's) is assumed as
   asserted, and the report says so. A `proposition_under_test` is examined
