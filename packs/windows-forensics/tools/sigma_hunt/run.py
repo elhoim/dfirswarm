@@ -26,6 +26,14 @@ is counted, and the engine's own stdout and stderr are kept whole beside its
 result. Past `limit` the detections are a page, and all of them, normalised,
 are in detections.jsonl in out_dir; each file is named with its path, size and
 sha256.
+
+Neither engine writes beside the run. Each would put its log in the working
+directory, which is the run's, read-only in an agent's VM and in a job's
+worker: Zircolite its zircolite.log, which --logfile moves into out_dir
+(Zircolite has taken -l/--logfile since 2.x, and 4.0, the images' pin, still
+does); Hayabusa its ./logs/errorlog-<time>.log, whose place no option names
+(-Q only drops it), so Hayabusa runs in out_dir, given every path absolute,
+and its error log is kept there.
 """
 import hashlib
 import json
@@ -76,6 +84,16 @@ def kept_file(path, text=None, rows=None):
     if rows is not None:
         named["rows"] = len(rows)
     return named
+
+
+def engine_logs(engine, out_dir, zircolite_log):
+    """The logs the engine wrote in out_dir: Zircolite's one file, Hayabusa's logs/."""
+    if engine == "zircolite":
+        return [zircolite_log] if os.path.isfile(zircolite_log) else []
+    logs = os.path.join(out_dir, "logs")
+    if not os.path.isdir(logs):
+        return []
+    return sorted(os.path.join(logs, name) for name in os.listdir(logs) if os.path.isfile(os.path.join(logs, name)))
 
 
 def rank(level):
@@ -197,19 +215,28 @@ def main():
 
     os.makedirs(out_dir, exist_ok=True)
     result = resolve_output(os.path.join(out_dir, "%s.json" % engine), "out_dir")
+    zircolite_log = resolve_output(os.path.join(out_dir, "zircolite.log"), "out_dir")
 
     if engine == "zircolite":
         # No --noexternal: Zircolite 3 removed it (it reads EVTX through its
         # Python bindings only) and refuses the flag; 2.x without it uses its
-        # own bundled evtx_dump.
-        argv = [binary, "--evtx", path, "--outfile", result]
+        # own bundled evtx_dump. --logfile: its log in out_dir, not in the
+        # working directory (the run's, read-only in a VM and in a job).
+        argv = [binary, "--evtx", path, "--outfile", result, "--logfile", zircolite_log]
         if args.get("rules"):
             argv += ["--ruleset", str(args["rules"])]
+        cwd = None
     else:
-        argv = [binary, "json-timeline", "-d" if os.path.isdir(path) else "-f", path,
-                "-o", result, "-w", "-q"]
+        # Hayabusa saves its error log under ./logs/ and no option moves it:
+        # it runs in out_dir, so every path it is given is absolute, and a
+        # link left there as logs is followed to where it lands first.
+        resolve_output(os.path.join(out_dir, "logs"), "out_dir")
+        argv = [binary, "json-timeline", "-d" if os.path.isdir(path) else "-f", os.path.abspath(path),
+                "-o", os.path.abspath(result), "-w", "-q"]
         if args.get("rules"):
-            argv += ["-r", str(args["rules"])]
+            rules = str(args["rules"])
+            argv += ["-r", os.path.abspath(rules) if os.path.exists(rules) else rules]
+        cwd = os.path.abspath(out_dir)
 
     # The engine's own words, whole, beside its result: they used to be
     # dropped when it succeeded and cut to their last few hundred characters
@@ -217,17 +244,18 @@ def main():
     stdout_path = resolve_output(os.path.join(out_dir, "%s.stdout" % engine), "out_dir")
     stderr_path = resolve_output(os.path.join(out_dir, "%s.stderr" % engine), "out_dir")
     try:
-        proc = subprocess.run(argv, capture_output=True, text=True, errors="surrogateescape", timeout=timeout)
+        proc = subprocess.run(argv, capture_output=True, text=True, errors="surrogateescape", timeout=timeout, cwd=cwd)
     except subprocess.TimeoutExpired as exc:
         said = {"stdout": kept_file(stdout_path, text=_text(exc.stdout)),
                 "stderr": kept_file(stderr_path, text=_text(exc.stderr))}
-        fail("%s did not finish in time" % engine, after_seconds=timeout, command=" ".join(argv), **said)
+        fail("%s did not finish in time" % engine, after_seconds=timeout, command=" ".join(argv), **said,
+             engine_logs=engine_logs(engine, out_dir, zircolite_log))
     said = {"stdout": kept_file(stdout_path, text=proc.stdout or ""),
             "stderr": kept_file(stderr_path, text=proc.stderr or "")}
 
     if not os.path.isfile(result):
         fail("%s wrote no result file" % engine, exit_code=proc.returncode,
-             command=" ".join(argv), **said,
+             command=" ".join(argv), **said, engine_logs=engine_logs(engine, out_dir, zircolite_log),
              note="Engine command lines change between versions; the exact invocation is above "
                   "so it can be corrected by hand and re-run. Its whole stdout and stderr are "
                   "the files named here.")
@@ -263,6 +291,7 @@ def main():
         "rules_fired": len(by_rule),
         "engine_stdout": said["stdout"],
         "engine_stderr": said["stderr"],
+        "engine_logs": engine_logs(engine, out_dir, zircolite_log),
         "note": "A rule firing is a hypothesis with a name, not a finding. Take its record id and "
                 "channel to evtx_query, read the record, and cite the record. Community rulesets "
                 "are tuned for live estates and produce false positives on a forensic image: an "

@@ -1,6 +1,6 @@
 {
   "id": "disk-timeline",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "A broad extraction of a disk image: Plaso's log2timeline over every partition and volume with every parser it carries, then psort's CSV super timeline, the searchable form of what the image's artefacts say happened when. It takes hours on a large image, so it is offered, not run by itself.",
   "object": "disk image",
   "order": 12,
@@ -69,11 +69,13 @@
     "timeline.csv",
     "log2timeline.stdout",
     "log2timeline.stderr",
+    "log2timeline.log.gz",
     "psort.stdout",
     "psort.stderr",
+    "psort.log.gz",
     "index.tsv",
     "coverage.json"
   ],
   "covers": "What log2timeline's parsers read from every partition and volume of the image, written by psort as one CSV timeline; the storage file is kept for psort and pinfo. A parser that finds nothing adds no row, which does not show the artefact never existed.",
-  "sha256": "9e04e791048eb4abe227cd17013eb4b3b86e2c8ff0fdf2631ebc864a4c83880a"
+  "sha256": "eb17ffeea6c9f842cf46a0000d004fb8c887f45e921a8e7762bdee73c89d7659"
 }

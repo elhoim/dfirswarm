@@ -394,8 +394,20 @@ OUT="$WORK/outpaths"; mkdir -p "$OUT/run/work" "$OUT/run/inputs" "$OUT/bin"
 # file_carver takes only a signature whose size it can read whole: a PNG ends
 # at its IEND chunk.
 printf '\211PNG\r\n\032\n\000\000\000\000IEND\256B`\202' > "$OUT/run/inputs/pic.png"
-printf '#!/usr/bin/env bash\nwhile [[ $# -gt 0 ]]; do [[ "$1" == --storage_file ]] && echo s > "$2"; shift; done\n' > "$OUT/bin/log2timeline.py"
-printf '#!/usr/bin/env bash\nwhile [[ $# -gt 0 ]]; do [[ "$1" == -w ]] && echo "{}" > "$2"; shift; done\n' > "$OUT/bin/psort.py"
+# The Plaso stand-ins keep its way with its log: where --logfile says, else
+# <tool>-<time>.log.gz in the working directory, and a log that cannot be
+# written fails the run.
+for t in log2timeline psort; do
+  cat > "$OUT/bin/$t.py" <<'PLASO'
+#!/usr/bin/env bash
+log="$(basename "$0" .py)-$(date +%Y%m%dT%H%M%S).log.gz"
+while [[ $# -gt 0 ]]; do
+  case "$1" in --logfile) log="$2"; shift ;; --storage_file) echo s > "$2"; shift ;; -w) echo "{}" > "$2"; shift ;; esac
+  shift
+done
+echo log 2>/dev/null > "$log" || { echo "OSError: [Errno 30] Read-only file system: '$log'" >&2; exit 1; }
+PLASO
+done
 chmod +x "$OUT/bin/"*
 carve() { (cd "$OUT/run" && printf '{"path":"inputs/pic.png","offset":0,"sig_type":"PNG","max_size":64,"output":"%s"}' "$1" | "$PY" "$BASE/tools/file_carver/run.py"); }
 memc() { (cd "$OUT/run" && printf '{"path":"inputs/blob.bin","extract_to":"%s","max_extract":1}' "$1" | "$PY" "$ROOT/packs/memory-forensics/tools/mem_carve/run.py"); }
@@ -415,6 +427,19 @@ plaso work/p >/dev/null || fail "timeline_super refused an out_dir under work/"
 [[ -s "$OUT/run/work/c.bin" && -n "$(ls "$OUT/run/work/a1/m")" && -f "$OUT/run/work/p/timeline.plaso" ]] || fail "outputs under work/ were not written"
 cmp -s "$BASE/tools/file_carver/run.py" "$ROOT/tool-library/file_carver/run.py" || fail "the tool-library copy of file_carver has drifted from the pack's"
 pass "file_carver, mem_carve and timeline_super write under the run directory and never under inputs/"
+
+# In an agent's VM and in a job's worker the run's directory is read-only
+# (only work/<agent>/ or $OUT is writable), and it is the working directory:
+# Plaso's default log there failed log2timeline on the Belka run.
+# timeline_super gives each step its log in out_dir.
+chmod a-w "$OUT/run"
+got="$(plaso work/ro 2>&1)"; rc=$?
+chmod u+w "$OUT/run"
+[[ "$rc" -eq 0 ]] || fail "timeline_super should run with the run directory read-only: $got"
+[[ -s "$OUT/run/work/ro/log2timeline.log.gz" && -s "$OUT/run/work/ro/psort.log.gz" ]] || fail "timeline_super should keep each step's log in out_dir (--logfile): $(ls "$OUT/run/work/ro")"
+[[ -z "$(find "$OUT/run" -maxdepth 1 -name '*.log.gz')" ]] || fail "timeline_super let Plaso write its log in the run directory"
+jq -e '.logs | length == 2' <<<"$got" >/dev/null || fail "timeline_super should name the logs it kept: $got"
+pass "timeline_super keeps log2timeline's and psort's logs in out_dir, and runs with the run directory read-only"
 
 # feature_scan, zeek_run, sigma_hunt, unified_log and doc_probe wrote wherever
 # out_dir (extract_to) pointed too. Each refuses a place outside the run, the
@@ -500,8 +525,12 @@ ap = argparse.ArgumentParser()
 ap.add_argument("-e", "--evtx", "--events")
 ap.add_argument("-o", "--outfile")
 ap.add_argument("-r", "--ruleset", action="append", nargs="+")
+ap.add_argument("-l", "--logfile", default="zircolite.log")
 a = ap.parse_args()
 import os, sys
+# Its log where --logfile says, else zircolite.log in the working directory;
+# a log it cannot open stops it, as logging's FileHandler does.
+open(a.logfile, "w").write("log\n")
 # SIGMA_STUB_MANY: that many rules fire, each on a record of 15 fields, and the
 # engine talks at length on both streams. SIGMA_STUB_FAIL: it writes no result.
 many = int(os.environ.get("SIGMA_STUB_MANY") or 0)
@@ -573,6 +602,47 @@ assert os.path.getsize(os.path.join(run, d["stderr"]["path"])) == d["stderr"]["b
 assert os.path.getsize(os.path.join(run, d["stdout"]["path"])) == d["stdout"]["bytes"] == 3001, d["stdout"]
 EOF
 pass "sigma_hunt keeps every field, every rule and every detection, and the engine's stdout and stderr whole in files it names"
+
+# Neither engine writes beside the run: in a VM or a job the run's directory
+# is read-only and it is the working directory. Zircolite is given its log in
+# out_dir (--logfile); Hayabusa saves its error log as ./logs/errorlog-<time>.log
+# with no option to move it, so it runs in out_dir with every path absolute.
+cat > "$SH/bin/hayabusa" <<'HB'
+#!/usr/bin/env python3
+import argparse, json, os, sys
+ap = argparse.ArgumentParser()
+ap.add_argument("command")
+ap.add_argument("-f", "--file")
+ap.add_argument("-d", "--directory")
+ap.add_argument("-o", "--output")
+ap.add_argument("-r", "--rules")
+ap.add_argument("-w", "--no-wizard", action="store_true")
+ap.add_argument("-q", "--quiet", action="store_true")
+a = ap.parse_args()
+source = a.file or a.directory
+if not os.path.exists(source):
+    sys.exit("no such file: %s (from %s)" % (source, os.getcwd()))
+json.dump([{"RuleTitle": "Hayabusa rule", "Level": "high", "Timestamp": "2026-09-01T10:00:00Z", "EventID": 4688,
+            "Channel": "Security", "Computer": "WS01", "RecordID": 9, "Details": {"Cmd": "x"}}], open(a.output, "w"))
+os.makedirs("logs", exist_ok=True)
+open("logs/errorlog-20260929_120000.log", "w").write("user input: %s\n" % " ".join(sys.argv))
+HB
+chmod +x "$SH/bin/hayabusa"
+chmod a-w "$SH/run"
+zc="$(cd "$SH/run" && printf '{"path": "Security.evtx", "out_dir": "work/ro-z", "engine": "zircolite"}' | PATH="$SH/bin:$PATH" "$PY" "$WIN/tools/sigma_hunt/run.py" 2>&1)"; zrc=$?
+hb="$(cd "$SH/run" && printf '{"path": "Security.evtx", "out_dir": "work/ro-h", "engine": "hayabusa"}' | PATH="$SH/bin:$PATH" "$PY" "$WIN/tools/sigma_hunt/run.py" 2>&1)"; hrc=$?
+chmod u+w "$SH/run"
+[[ "$zrc" -eq 0 ]] || fail "sigma_hunt should run Zircolite with the run directory read-only: $zc"
+[[ "$hrc" -eq 0 ]] || fail "sigma_hunt should run Hayabusa with the run directory read-only: $hb"
+[[ -z "$(find "$SH/run" -maxdepth 1 \( -name zircolite.log -o -name logs \))" ]] || fail "an engine wrote its log in the run directory"
+"$PY" - "$zc" "$hb" "$SH/run" <<'EOF' || fail "sigma_hunt should keep each engine's log in out_dir and name it: $zc $hb"
+import json, os, sys
+z, h, run = json.loads(sys.argv[1]), json.loads(sys.argv[2]), sys.argv[3]
+assert z["engine_logs"] == ["work/ro-z/zircolite.log"] and os.path.isfile(os.path.join(run, z["engine_logs"][0])), z
+assert h["engine_logs"] == ["work/ro-h/logs/errorlog-20260929_120000.log"], h
+assert h["detections"][0]["rule"] == "Hayabusa rule" and h["detections"][0]["record_id"] == 9, h
+EOF
+pass "sigma_hunt keeps Zircolite's log (--logfile) and Hayabusa's error log (run in out_dir) in out_dir, and runs with the run directory read-only"
 
 # --- unified_log hands the reader one archive and keeps its whole output --------
 # The 2020 UnifiedLogReader crashed on modern archives and the wrapper still

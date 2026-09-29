@@ -128,7 +128,12 @@ pass "the shipped recipes answer detect and run as the runner expects"
 # disk-timeline, the base pack's broad extraction of a disk image: detect by
 # signature alone (an EWF container, a partition table with a partition, a
 # filesystem's boot sector), run with stand-ins for log2timeline and psort
-# that write what the real ones do, and without them, failed and why.
+# that write what the real ones do, and without them, failed and why. The
+# stand-ins keep Plaso's way with its log: where --logfile says, else
+# <tool>-<time>.log.gz in the working directory, and a log that cannot be
+# written fails the step. On the Belka run the job started in the run's
+# directory, read-only in its worker, and both steps failed there; here the
+# recipe runs from a read-only directory too.
 DT="$CFB/recipes/disk-timeline/run.py"
 python3 - "$T" <<'EOF2'
 import os, struct, sys
@@ -152,16 +157,33 @@ for f in a.zip no-parts.img zeros.img; do
   python3 "$DT" detect --target "{\"paths\": [\"$T/$f\"]}" >/dev/null && fail "disk-timeline should turn down $f"
 done
 mkdir -p "$T/bin"
-printf '#!/usr/bin/env bash\nwhile [[ $# -gt 0 ]]; do case "$1" in --storage-file) s="$2"; shift 2;; *) shift;; esac; done\necho plaso > "$s"\n' > "$T/bin/log2timeline"
-printf '#!/usr/bin/env bash\nwhile [[ $# -gt 1 ]]; do case "$1" in -w) w="$2"; shift 2;; *) shift;; esac; done\nprintf "datetime,message\\n2024-04-01T00:00:00,x\\n" > "$w"\n' > "$T/bin/psort"
+cat > "$T/bin/log2timeline" <<'L2T'
+#!/usr/bin/env bash
+log="log2timeline-$(date +%Y%m%dT%H%M%S).log.gz"
+while [[ $# -gt 0 ]]; do case "$1" in --storage-file) s="$2"; shift 2;; --logfile) log="$2"; shift 2;; *) shift;; esac; done
+echo log 2>/dev/null > "$log" || { echo "OSError: [Errno 30] Read-only file system: '$log'" >&2; exit 1; }
+echo plaso > "$s"
+L2T
+cat > "$T/bin/psort" <<'PSORT'
+#!/usr/bin/env bash
+log="psort-$(date +%Y%m%dT%H%M%S).log.gz"
+while [[ $# -gt 1 ]]; do case "$1" in -w) w="$2"; shift 2;; --logfile) log="$2"; shift 2;; *) shift;; esac; done
+echo log 2>/dev/null > "$log" || { echo "OSError: [Errno 30] Read-only file system: '$log'" >&2; exit 1; }
+printf "datetime,message\n2024-04-01T00:00:00,x\n" > "$w"
+PSORT
 chmod +x "$T/bin/log2timeline" "$T/bin/psort"
-PATH="$T/bin:$PATH" python3 "$DT" run --target "{\"paths\": [\"$T/x.E01\"]}" --out "$T/dt" >/dev/null || fail "disk-timeline should run with log2timeline and psort: $(cat "$T/dt/coverage.json" 2>/dev/null)"
+mkdir -p "$T/ro"; chmod a-w "$T/ro"
+(cd "$T/ro" && PATH="$T/bin:$PATH" python3 "$DT" run --target "{\"paths\": [\"$T/x.E01\"]}" --out "$T/dt" >/dev/null); rc=$?
+chmod u+w "$T/ro"
+[[ "$rc" -eq 0 ]] || fail "disk-timeline should run with log2timeline and psort from a read-only directory: $(cat "$T/dt/coverage.json" 2>/dev/null; cat "$T/dt/"*.stderr 2>/dev/null)"
 jq -e '.status == "complete"' "$T/dt/coverage.json" >/dev/null || fail "disk-timeline should say complete: $(cat "$T/dt/coverage.json")"
 [[ "$(cut -f1 "$T/dt/index.tsv" | tr '\n' ' ')" == "timeline.plaso timeline.csv " ]] || fail "disk-timeline should index the storage file and the timeline: $(cat "$T/dt/index.tsv")"
+[[ -s "$T/dt/log2timeline.log.gz" && -s "$T/dt/psort.log.gz" ]] || fail "disk-timeline should give each Plaso step its log in --out (--logfile): $(ls "$T/dt")"
+[[ -z "$(ls -A "$T/ro")" ]] || fail "disk-timeline wrote in the directory it was run from: $(ls -A "$T/ro")"
 PY3="$(command -v python3)"
 env PATH=/usr/bin:/bin "$PY3" "$DT" run --target "{\"paths\": [\"$T/x.E01\"]}" --out "$T/dt-none" >/dev/null && fail "disk-timeline with no Plaso should fail"
 jq -e '.status == "failed" and (.errors[0] | test("log2timeline and psort not on PATH"))' "$T/dt-none/coverage.json" >/dev/null || fail "disk-timeline with no Plaso should say which program is missing: $(cat "$T/dt-none/coverage.json")"
-pass "disk-timeline takes a disk image by its signature, writes the timeline, and says failed and why with no Plaso"
+pass "disk-timeline takes a disk image by its signature, writes the timeline and each step's log under --out from a read-only directory, and says failed and why with no Plaso"
 
 # Every recipe of every pack answers detect the two ways the harness asks: the
 # kickoff's census gives the target as JSON with a --probe-out directory

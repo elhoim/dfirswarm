@@ -1,7 +1,7 @@
 {
   "id": "windows-forensics",
   "name": "Windows Forensics Pack",
-  "version": "1.3.2",
+  "version": "1.3.3",
   "description": "Artefact-by-artefact method and tooling for a Windows examination: the file system and its journals, the hives, execution evidence, the event logs and the records inside a cleared one, accounts and remote access, persistence, PowerShell, browsers, shadow copies, memory, and the traces anti-forensics leaves.",
   "licence": "AGPL-3.0-or-later",
   "authors": [
@@ -19,8 +19,8 @@
     "sha256": {
       "LICENCE": "617dec43b30845a8c7d062db3f6d892400d96796b91f363586beacfbdffd1721",
       "README.md": "2a06317f36049f85350185b3c3bc95e9f1cf9ff5319427e1561340a250011c09",
-      "tools/sigma_hunt/manifest.json": "908427e7f727c62e23768e72f15e3040aef18c735f3f7b400cd168403a872b9f",
-      "tools/sigma_hunt/run.py": "2f5bf5e79c020ca394f75e9f57651db58a5c0c10bcd495555b5c1ee1b89c0459",
+      "tools/sigma_hunt/manifest.json": "515f059da5e2364bc7b5c7b6cedbbacef8e6dd04fcb20d57817bcb2fb1940601",
+      "tools/sigma_hunt/run.py": "2d5dd9088024b6ca46e6ddbec0e4ba3bb1fe7441856a5ebf71696c54496811b7",
       "tools/lnk_parse/manifest.json": "b2075211309edfb89c7168ed76e09228f9ba26f7e5676ed93eaafeb67c0e6462",
       "tools/lnk_parse/run.py": "c55d9528dd4140eedb849c7082c182d90f6bff0592a1f4fdff9648b338c6e655",
       "tools/regkv/manifest.json": "648e42643a6cfcfb56f543eae93ce7d9f54524a2c44151dc9b69be5a95f1cd52",

@@ -37,6 +37,6 @@
   "example": "{\"path\": \"work/extracted/winevt\", \"min_level\": \"high\", \"out_dir\": \"work/hunt\"}",
   "by": "maintainer",
   "at": "2026-09-22T14:00:00.000Z",
-  "version": 2,
-  "sha256": "2f5bf5e79c020ca394f75e9f57651db58a5c0c10bcd495555b5c1ee1b89c0459"
+  "version": 3,
+  "sha256": "2d5dd9088024b6ca46e6ddbec0e4ba3bb1fe7441856a5ebf71696c54496811b7"
 }

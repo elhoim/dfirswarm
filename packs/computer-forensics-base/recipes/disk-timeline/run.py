@@ -16,6 +16,15 @@ declines it with why.
 Detect reads signatures only (an EWF, VMDK, VHD(X) or QCOW container, a
 partition table, a filesystem's boot sector), so it answers the same on any
 host. A run stopped before its end leaves coverage.json saying partial.
+
+Plaso writes its log to the working directory unless told otherwise
+(log2timeline-<timestamp>.log.gz, psort-<timestamp>.log.gz), and a job starts
+in the run's directory, which is read-only in its worker: on the Belka run
+log2timeline and psort both failed there with EROFS on that log. Each is
+given its log under --out (--logfile, which Plaso's tools have taken, with
+--log_file and --log-file as its aliases, since at least 20180818; the images
+install 20260720), and each runs with --out as its working directory, so
+nothing either writes lands beside the run.
 """
 import argparse
 import json
@@ -108,11 +117,15 @@ def write_coverage(out, status, covered, errors):
 
 
 def step(out, name, argv):
+    # cwd=out: what a step writes where it stands lands in out, never in the
+    # (read-only) directory the job started in.
     with open(os.path.join(out, name + ".stdout"), "wb") as so, open(os.path.join(out, name + ".stderr"), "wb") as se:
-        return subprocess.run(argv, stdout=so, stderr=se).returncode
+        return subprocess.run(argv, stdout=so, stderr=se, cwd=out).returncode
 
 
 def run(image, out):
+    out = os.path.abspath(out)
+    image = os.path.abspath(image)
     os.makedirs(out, exist_ok=True)
     write_coverage(out, "partial", "started; log2timeline or psort did not finish (stopped before its end)", ["the run ended before Plaso did"])
     l2t = program("log2timeline", "log2timeline.py")
@@ -122,16 +135,17 @@ def run(image, out):
         write_coverage(out, "failed", "nothing: Plaso is not in this image", ["%s not on PATH in this job image" % " and ".join(missing)])
         return 1
     storage = os.path.join(out, "timeline.plaso")
-    rc = step(out, "log2timeline", [l2t, "--unattended", "--partitions", "all", "--volumes", "all", "--vss_stores", "none", "--storage-file", storage, image])
+    rc = step(out, "log2timeline", [l2t, "--unattended", "--logfile", os.path.join(out, "log2timeline.log.gz"), "--partitions", "all", "--volumes", "all",
+                                    "--vss_stores", "none", "--storage-file", storage, image])
     errors = []
     if rc != 0:
-        errors.append("log2timeline exited %d; its output is kept whole in log2timeline.stdout and log2timeline.stderr" % rc)
+        errors.append("log2timeline exited %d; its output is kept whole in log2timeline.stdout and log2timeline.stderr, its log in log2timeline.log.gz" % rc)
     rows = []
     if os.path.isfile(storage):
         rows.append(("timeline.plaso", "Plaso storage file of the whole image (psort, pinfo)"))
-        prc = step(out, "psort", [psort, "-o", "dynamic", "-w", os.path.join(out, "timeline.csv"), storage])
+        prc = step(out, "psort", [psort, "--logfile", os.path.join(out, "psort.log.gz"), "-o", "dynamic", "-w", os.path.join(out, "timeline.csv"), storage])
         if prc != 0:
-            errors.append("psort exited %d; its output is kept whole in psort.stdout and psort.stderr" % prc)
+            errors.append("psort exited %d; its output is kept whole in psort.stdout and psort.stderr, its log in psort.log.gz" % prc)
         if os.path.isfile(os.path.join(out, "timeline.csv")):
             rows.append(("timeline.csv", "super timeline (psort -o dynamic): one event per row, every parser's, in time order"))
     with open(os.path.join(out, "index.tsv"), "w", encoding="utf-8", newline="\n") as handle:

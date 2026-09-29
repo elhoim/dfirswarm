@@ -37,6 +37,6 @@
   "example": "{\"source\": \"inputs/disk.E01\", \"out_dir\": \"work/timeline\", \"parsers\": \"winreg,winevtx,prefetch,filestat\"}",
   "by": "maintainer",
   "at": "2026-09-22T14:00:00.000Z",
-  "version": 2,
-  "sha256": "0ce7cdb9a6550f3e178aacc961c6edb0503cc18bcbd1470a8b699d9df3169a2c"
+  "version": 3,
+  "sha256": "415f089fa75d1ae409bdc46116e72c5fefe5b4052dcca795f9ed8ee7451235b3"
 }
