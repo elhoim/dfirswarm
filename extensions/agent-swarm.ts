@@ -119,6 +119,7 @@ import {
   realPathKey,
   nudgePeerViaBroker,
   postSender,
+  useHarnessTrace,
 } from "./protocol.ts";
 // The board: protocol.ts on the host, the hub on the other side of a VM's wall (board.ts says why).
 import {
@@ -474,6 +475,11 @@ export default function (pi: ExtensionAPI) {
   // credential in for goes chunked (vm-egress.ts says why).
   installChunkedEgress();
   let agentId = process.env.AGENT_ID?.trim() ?? "";
+  // A ledger entry the harness authors in this pane on the host (a person's
+  // hint recorded as a hypothesis while this seat's header is made) goes on
+  // the trace as this process writes its lines. In a VM the hub writes every
+  // entry, and its line.
+  useHarnessTrace((root, line) => logEvent(root, agentId, line.tool, line.args, line.result));
   /** Start times per tool call, so every trace row can carry its duration. */
   const toolStarts = new Map<string, number>();
   /** Watched-path snapshot taken before a bash call, keyed by tool call id. */

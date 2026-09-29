@@ -3877,13 +3877,19 @@ async function sendToCollector(sandboxRoot: string, line: string): Promise<boole
     if (Date.now() - collectorGaveUpAt < COLLECTOR_RETRY_AFTER_MS) return false;
     collectorFailures = 0;
   }
+  const ok = await collectorExchange(socketPath, line);
+  collectorFailures = ok ? 0 : collectorFailures + 1;
+  if (!ok && collectorFailures === COLLECTOR_GIVE_UP_AFTER) collectorGaveUpAt = Date.now();
+  return ok;
+}
+
+/** One line to the collector at `socketPath`: true only when it answers that it wrote it. */
+function collectorExchange(socketPath: string, line: string): Promise<boolean> {
   return new Promise<boolean>((resolvePromise) => {
     let settled = false;
     const finish = (ok: boolean) => {
       if (settled) return;
       settled = true;
-      collectorFailures = ok ? 0 : collectorFailures + 1;
-      if (!ok && collectorFailures === COLLECTOR_GIVE_UP_AFTER) collectorGaveUpAt = Date.now();
       resolvePromise(ok);
     };
     try {
@@ -4201,6 +4207,103 @@ export async function appendEvent(
     throw err;
   }
   return record;
+}
+
+/**
+ * Where the harness's own trace lines go when the collector does not take
+ * them and the trace is chained (scripts/lib/trace.sh trace_emit): under
+ * traces/, which no pane and no VM writes. Custody reads it as the harness's.
+ */
+export const SYSTEM_SPILL_REL = "traces/system-spill.jsonl";
+
+/**
+ * The line a ledger entry the harness itself authors puts on the trace:
+ * material that entered the run (the operator's evidence or material, a
+ * question's attachment, a capture the fetch service sealed: recordExternal)
+ * and a person's hint recorded as a hypothesis in the asker's name. No seat's
+ * `record` and no hub `recordEntry` call wrote them, so no line carried
+ * their hash, and custody named every one "in the ledger and never on the
+ * trace": the ledger check failed every run that had one (s26f142, s7f90eb,
+ * sabfd76, sb177a7). The line carries the entry's seq and hash as the hub's
+ * record line does, and custody holds the ledger to it (scripts/custody.ts).
+ */
+export const HARNESS_RECORD_TOOL = "harness_record";
+
+/** A line of the harness's own, as the process that writes it puts it on the trace. */
+export type HarnessTraceLine = { tool: string; args: Record<string, unknown>; result: Record<string, unknown> };
+
+/**
+ * How a process writes the harness's own lines: the hub as it writes its
+ * hub_call lines (the harness's token, its own spill when the collector does
+ * not answer), a pane on the host as it writes its own (logEvent). A process
+ * that registers nothing, the operator's CLI, writes them as the shell's
+ * trace_emit does (emitHarnessLine).
+ */
+export type HarnessTraceSink = (sandboxRoot: string, line: HarnessTraceLine) => Promise<void>;
+const harnessSinks = new Map<string, HarnessTraceSink>();
+
+function harnessSinkKey(sandboxRoot: string): string {
+  try {
+    return realpathSync(sandboxRoot);
+  } catch {
+    return resolve(sandboxRoot);
+  }
+}
+
+/** This process's way of writing the harness's lines, for one run (its sandbox) or for any run it touches; returns what takes it back. */
+export function useHarnessTrace(sink: HarnessTraceSink, sandboxRoot?: string): () => void {
+  const key = sandboxRoot === undefined ? "" : harnessSinkKey(sandboxRoot);
+  harnessSinks.set(key, sink);
+  return () => {
+    if (harnessSinks.get(key) === sink) harnessSinks.delete(key);
+  };
+}
+
+/**
+ * Put a ledger entry the harness authored on the trace, after it is written:
+ * a `harness_record` line with its seq and hash, by the writing process's
+ * own way (useHarnessTrace). A merged duplicate wrote nothing and has no
+ * line. A line that reaches nowhere leaves the entry named as never on the
+ * trace, which is then what happened; the entry stands either way, so this
+ * never throws.
+ */
+export async function traceHarnessEntry(sandboxRoot: string, entry: Pick<LedgerEntry, "seq" | "kind" | "by" | "hash" | "source_class">, about: Record<string, unknown> = {}): Promise<void> {
+  if (!entry.hash) return;
+  const line: HarnessTraceLine = {
+    tool: HARNESS_RECORD_TOOL,
+    args: { kind: entry.kind, by: entry.by, ...(entry.source_class ? { source_class: entry.source_class } : {}), ...about },
+    result: { ok: true, seq: entry.seq, merged: false, hash: entry.hash },
+  };
+  const sink = harnessSinks.get(harnessSinkKey(sandboxRoot)) ?? harnessSinks.get("");
+  try {
+    await (sink ? sink(sandboxRoot, line) : emitHarnessLine(sandboxRoot, line));
+  } catch (err) {
+    try {
+      process.stderr.write(`dfirswarm: the trace line for ledger entry #${entry.seq} reached neither the collector nor a spill: ${err instanceof Error ? err.message : String(err)}\n`);
+    } catch {
+      // no stderr either
+    }
+  }
+}
+
+/**
+ * The harness's line from a process with no way of its own (the operator's
+ * CLI), as scripts/lib/trace.sh trace_emit writes one: to the collector
+ * (SWARM_TRACE_SOCKET, or the run's own socket), with the harness's token
+ * when this shell holds it (a kickoff's; from any other shell the collector
+ * marks the line unverified, as it does an operator action); failing that,
+ * into traces/system-spill.jsonl when the trace is chained, else appended to
+ * the unchained trace.
+ */
+async function emitHarnessLine(sandboxRoot: string, line: HarnessTraceLine): Promise<void> {
+  const record = { ts: new Date().toISOString(), agent: "system", ...line };
+  const token = process.env.SWARM_TRACE_TOKEN || "";
+  const configured = process.env.SWARM_TRACE_SOCKET || join(sandboxRoot, COLLECTOR_SOCKET_REL);
+  const socketPath = configured.length > SOCKET_PATH_SAFE ? shortSocketPath(configured) : configured;
+  if (await collectorExchange(socketPath, `${JSON.stringify(token ? { ...record, token } : record)}\n`)) return;
+  const file = join(sandboxRoot, EVENTS_REL);
+  await mkdir(dirname(file), { recursive: true });
+  await appendFile((await tailRefusesAppend(file)) ? join(sandboxRoot, SYSTEM_SPILL_REL) : file, `${JSON.stringify(record)}\n`, "utf8");
 }
 
 export function formatEventLine(event: SwarmEvent): string {
@@ -6074,6 +6177,9 @@ export const TOOL_RESERVED_NAMES = new Set([
   // before a model call, a ledger correction, the operator's --notify hook,
   // the hub's history quota and a connection refused its seat token.
   "repeat_hint", "job_hint", "budget_precall_stop", "ledger_superseded", "notify", "history_quota", "seat_auth",
+  // A ledger entry the harness authored (external material, a hint's
+  // hypothesis), its hash on the trace (HARNESS_RECORD_TOOL).
+  "harness_record",
   // Tool jobs in worker VMs and the catalogue they grow (scripts/job-service.ts).
   "job_run", "job_status", "catalog_request",
   // The host-side model gateway (scripts/model-gateway.ts).
@@ -8930,7 +9036,7 @@ export async function recordExternal(sandboxRoot: string, input: { value: string
   if (!input.refs.length || input.refs.length > LEDGER_MAX_REFS) return { ok: false, reason: "an external entry cites the material it records" };
   const checked = await checkRefs(sandboxRoot, input.refs);
   if (!checked.ok) return checked;
-  return withTableLock(sandboxRoot, async (held) => {
+  const r = await withTableLock(sandboxRoot, async (held): Promise<LedgerResult> => {
     const entries = await readLedger(sandboxRoot);
     const same = entries.find((e) => e.kind === "external" && e.source_class === input.source_class && JSON.stringify(e.refs ?? []) === JSON.stringify(input.refs));
     if (same) return { ok: true, entry: same, merged: true, total: entries.length, note: `#${same.seq} records it already` };
@@ -8951,6 +9057,9 @@ export async function recordExternal(sandboxRoot: string, input: { value: string
     };
     return appendLedgerEntry({ sandboxRoot, agentId: "system" }, held, entries, entry, []);
   });
+  // No seat's record and no hub recordEntry wrote it: its own line carries its hash.
+  if (r.ok && !r.merged) await traceHarnessEntry(sandboxRoot, r.entry, { fn: "recordExternal" });
+  return r;
 }
 
 /**

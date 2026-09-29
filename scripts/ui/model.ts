@@ -233,6 +233,7 @@ export const LIFECYCLE_TOOLS = new Set([
   "agent_start", "agent_stop", "harness_stop", "cap_steer", "wall_steer", "claim_violation", "reap", "reaped", "thinking",
   "hub_call", "hub_link", "hub_clear_up", "hub_restarted", "collector_restarted", "agent_cap_steer", "agent_cap_stop",
   "vm_finish", "custody", "idle_nudge", "notify", "repeat_hint", "budget_precall_stop", "operator_action", "artifact_scripts",
+  "harness_record",
 ]);
 
 export function activitySeries(events: readonly SwarmEvent[], from: string | null, to: string | null, buckets = 96, now = Date.now()): ActivitySeries {

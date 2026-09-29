@@ -6,6 +6,34 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Fixed: an entry the harness writes on the ledger is on the trace, and custody holds the ledger to it
+
+Custody failed its ledger check on every run that took material from
+outside: the fetch service's captures (runs s26f142, s7f90eb) and the
+operator's evidence (sabfd76, sb177a7) were `external` entries written by
+`recordExternal`, no trace line carried their hash, and custody named each
+"in the ledger and never on the trace". `swarm.sh custody-verify sb177a7`
+said NOT VERIFIED for that alone.
+
+- **A line of the harness's own.** Every ledger entry the harness authors
+  without a seat's `record` or the hub's `recordEntry` call (the external
+  entry of an addition, of a question's attachment and of a capture; a
+  person's hint recorded as a hypothesis in the asker's name) puts a
+  `harness_record` line on the trace with the entry's seq and hash, the way
+  the process that wrote it writes its other lines: the hub as its own line
+  (the harness's token, its own spill), the operator's CLI with no hub
+  running as `trace_emit` does (to the collector, else the harness's spill
+  on a chained trace), a pane on the host through its `logEvent`. A merged
+  duplicate writes nothing, and no line.
+- **Custody counts it.** The ledger is held to those lines beside the record
+  tool's and the hub's; in a microVM run only the harness's own line counts,
+  never one a seat claimed (named in `claimed_by_seat`). An entry written
+  into the file with no line still fails the check, and the runs from before
+  still fail it: nothing is exempted.
+- The console describes the line; the report counts one written from the
+  operator's shell as the harness's, not as a line nobody can account for;
+  the provider-limit rule and the watchdog read it as a harness row.
+
 ### Fixed: the model provider's limit on every seat pauses the run
 
 An until-solved run hit its provider's subscription usage limit on every

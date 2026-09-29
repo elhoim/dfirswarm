@@ -124,6 +124,8 @@ export const SEAT_HARNESS_ROWS: ReadonlySet<string> = new Set([
   "agent_cap_steer", "agent_cap_stop", "sentinel_nudge", "repeat_hint", "job_hint", "forge_hint", "publish_needed",
   "self_compact", "compact_config", "compact_notice", "compact_warning", "compact_forced", "compact_hold",
   "compact_note", "compact_start", "compact_done", "compact_failed", "compact_stalled", "compact_held",
+  // A ledger entry the harness authored while it made the seat's header (a person's hint as a hypothesis).
+  "harness_record",
 ]);
 
 /**

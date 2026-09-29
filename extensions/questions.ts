@@ -1946,6 +1946,8 @@ async function hintHypotheses(sandboxRoot: string, q: Question): Promise<{ seqs:
         status: "open",
       } as P.LedgerInput,
     ).catch((err: Error) => ({ ok: false as const, reason: err.message }));
+    // Recorded by the harness in the asker's name, through no seat's record and no hub recordEntry call: its own line carries its hash.
+    if (r.ok && !r.merged) await P.traceHarnessEntry(sandboxRoot, r.entry, { fn: "questionHint", q: q.id });
     if (r.ok) out.push(r.entry.seq);
     else failed.push(`${h.ref}: ${r.reason}`);
   }

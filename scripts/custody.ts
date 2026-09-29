@@ -62,7 +62,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { execFile } from "node:child_process";
-import { eventChainVerifier, specialKind, verifyAttestationChain, verifyDisputeChain, verifyLedgerChain } from "../extensions/protocol.ts";
+import { eventChainVerifier, HARNESS_RECORD_TOOL, specialKind, verifyAttestationChain, verifyDisputeChain, verifyLedgerChain } from "../extensions/protocol.ts";
 import { verifyLeadChain } from "../extensions/leads.ts";
 import { LEDGER_SWEEPS, verifySweepChain } from "../extensions/store-sweep.ts";
 import { FINISH_LOG } from "../extensions/finish.ts";
@@ -576,13 +576,13 @@ export type Custody = {
     chained: number;
     intact: boolean;
     detail: string;
-    /** Entries whose hash the trace carries (the record tool's line, or the hub's) but the ledger does not: deleted. */
+    /** Entries whose hash the trace carries (the record tool's line, the hub's, or the harness's `harness_record` line) but the ledger does not: deleted. */
     missing_from_ledger: string[];
-    /** Chained entries the trace never carried: written into the file without the tool. */
+    /** Chained entries the trace never carried: written into the file without the tool, the hub or the harness's own line. */
     not_on_trace: number[];
-    /** Whether the ledger could be held to the trace at all (a readable trace), and to whose lines. */
+    /** Whether the ledger could be held to the trace at all (a readable trace), and to whose lines (beside them, always, the harness's `harness_record` lines for the entries it authored). */
     held_to: "the hub's lines" | "the record tool's lines" | "the seats' own lines (the hub logged none)" | "nothing (no readable trace)";
-    /** Hashes a seat's own `record` line carried that the hub never logged: a guest's word, not counted against the ledger. */
+    /** Hashes a seat's own `record` (or `harness_record`) line carried that the hub never logged: a guest's word, not counted against the ledger. */
     claimed_by_seat: string[];
   } | null;
   vms:
@@ -1295,6 +1295,14 @@ export async function takeCustody(sandboxInput: string, options: CustodyOptions 
   // record tool's own line is the one there is.
   const hubRecordHashes = new Set<string>();
   const seatRecordHashes = new Set<string>();
+  // An entry the harness authored itself (external material, a person's
+  // hint as a hypothesis) carries its hash on a `harness_record` line: the
+  // harness's own (agent "system", the hub's or the operator's CLI's), or,
+  // on the host, the line of the pane whose process wrote the entry. In a
+  // microVM run only the harness's own counts, as only the hub's record
+  // lines do.
+  const harnessRecordHashes = new Set<string>();
+  const paneHarnessHashes = new Set<string>();
   // Lines a sender says it could not deliver (logEvent's count, carried on
   // its next line).
   const senderLost = new Map<string, number>();
@@ -1308,6 +1316,7 @@ export async function takeCustody(sandboxInput: string, options: CustodyOptions 
     if (!result || result.ok !== true || typeof result.hash !== "string" || result.merged === true) return;
     if (parsed.tool === "hub_call" && args?.fn === "recordEntry" && parsed.agent === "system") hubRecordHashes.add(result.hash);
     else if (parsed.tool === "record") seatRecordHashes.add(result.hash);
+    else if (parsed.tool === HARNESS_RECORD_TOOL) (parsed.agent === "system" && parsed.claimed_agent === undefined ? harnessRecordHashes : paneHarnessHashes).add(result.hash);
   };
   // The kept outputs a line names. Only its own agent's (or the harness's)
   // are references: a line from one seat cannot vouch for, or cast doubt
@@ -1521,7 +1530,13 @@ export async function takeCustody(sandboxInput: string, options: CustodyOptions 
       : hubRecordHashes.size || !seatRecordHashes.size
         ? "the hub's lines"
         : "the seats' own lines (the hub logged none)";
-  const recordHashes = heldTo === "the hub's lines" ? hubRecordHashes : heldTo === "nothing (no readable trace)" ? new Set<string>() : seatRecordHashes;
+  // The harness's own lines for the entries it authored count beside them
+  // (every entry is on the trace by the line of the process that wrote it);
+  // on the host a pane's too, as its record lines do.
+  const recordHashes =
+    heldTo === "nothing (no readable trace)"
+      ? new Set<string>()
+      : new Set([...(heldTo === "the hub's lines" ? hubRecordHashes : seatRecordHashes), ...harnessRecordHashes, ...(vmRun ? [] : paneHarnessHashes)]);
   if ("why" in ledgerRead && ledgerRead.why !== "missing") {
     state.ledger = { entries: 0, chained: 0, intact: false, detail: `the ledger is ${ledgerRead.why}`, missing_from_ledger: [], not_on_trace: [], held_to: heldTo, claimed_by_seat: [] };
   } else if (ledgerText.trim() || recordHashes.size) {
@@ -1554,7 +1569,7 @@ export async function takeCustody(sandboxInput: string, options: CustodyOptions 
       }
     }
     if (state.seal) state.seal.ledger = { entries: v.total, head: v.hashes.at(-1) ?? null };
-    const claimedBySeat = heldTo === "the hub's lines" ? [...seatRecordHashes].filter((h) => !hubRecordHashes.has(h)).sort() : [];
+    const claimedBySeat = heldTo === "the hub's lines" ? [...new Set([...seatRecordHashes, ...paneHarnessHashes])].filter((h) => !recordHashes.has(h)).sort() : [];
     state.ledger = {
       entries: v.total,
       chained: v.chained,

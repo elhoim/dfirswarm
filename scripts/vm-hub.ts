@@ -1039,6 +1039,8 @@ export class Hub {
   /** The finish is over: the VMs put away (or not) and custody taken. */
   private finishDone = false;
   private finishing: Promise<void> | null = null;
+  /** Takes this hub's way of writing the harness's lines back (stop). */
+  private untraceHarness: () => void;
 
   constructor(cfg: HubConfig) {
     this.cfg = { ...cfg, sandbox: resolve(cfg.sandbox) };
@@ -1064,6 +1066,10 @@ export class Hub {
       dir: this.cfg.dir,
     });
     this.collector = new CollectorLink(this.cfg.collector);
+    // A ledger entry the harness authors while this hub serves the run (an
+    // addition's external entry, a capture's, a hint's hypothesis) goes on
+    // the trace as the hub's own line, as a seat's record through the hub does.
+    this.untraceHarness = P.useHarnessTrace((_root, line) => this.event(line.tool, line.args, line.result), this.cfg.sandbox);
   }
 
   private log(line: string): void {
@@ -1416,6 +1422,8 @@ export class Hub {
     if (this.transferTimer) clearInterval(this.transferTimer);
     for (const key of [...this.transfers.keys()]) this.dropTransfer(key, false);
     await this.flushRefusals().catch(() => undefined);
+    // Its link to the collector closes below: a harness line written after it goes the CLI's way.
+    this.untraceHarness();
     for (const link of this.links.values()) link.destroy();
     this.links.clear();
     for (const socket of this.sockets) socket.destroy();

@@ -37,6 +37,7 @@ const INFRASTRUCTURE = new Set([
   "notify",
   "repeat_hint",
   "budget_precall_stop",
+  "harness_record",
 ]);
 const OPERATOR = new Set(["operator_action", "artifact_scripts"]);
 
@@ -111,6 +112,8 @@ export function describeEvent(e: { tool: string; agent: string; args?: unknown; 
       return `${e.agent} was told its long command's whole output is already kept`;
     case "budget_precall_stop":
       return `${e.agent} was stopped before a model call: ${precallReason(a.reason)}`;
+    case "harness_record":
+      return `the harness recorded E-${str(r.seq)} on the ledger (${str(a.kind)}${a.source_class ? `, ${str(a.source_class)}` : ""}${a.by && a.by !== "system" ? `, in ${str(a.by)}'s name` : ""})`;
     case "operator_action":
       return `the operator ran ${str(a.command)}${Array.isArray(a.argv) && a.argv.length ? ` ${(a.argv as unknown[]).map(str).join(" ")}` : ""}${a.via ? ` via ${str(a.via)}` : ""}${a.os_user ? ` as ${str(a.os_user)}` : ""}`;
     case "artifact_scripts":
