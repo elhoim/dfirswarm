@@ -6,6 +6,41 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Added: the warnings are delivered where the decision is made, and request guidance
+
+The answers check's three warnings were said to the coordinator at the end
+(the answers check, the finish gate, `finish status`), after the seats that
+could act on them had moved on: on s993d40 the reviewers who held a partial
+answer whole, and the seat that recorded an answer leaving out what its
+question's leads had established, were told nothing when they decided. Now
+(ADR 0013, "Warnings where the decision is made"):
+
+- Each point asks the same gate over readiness's own inputs
+  (`finish.ts` `warningsAt`) and says the warnings in the words `finish
+  status` uses: the reply to the record that writes a question's answer
+  (`warnings`; their codes on the trace as `warned`); a material negative's
+  review offer, as it reaches its seat; the reply to an attest on the answer,
+  on the coverage record a negative rests on, or on an entry a warning names;
+  and `finish status`. None holds, none refuses.
+- `lead_findings_uncited` covers what two seats hold for a question outside
+  its leads too: a finding or an event that names the question in `answers`,
+  or whose `rel` links it to an entry the answer cites. Each entry is listed
+  with its tie, and the warning reads "answer #n (question:q) leaves out what
+  two seats hold for Q-q: …". Replayed on s993d40, question 4 now carries it:
+  a method established under question 6's leads names question 4, and
+  question 4's answer does not reach it.
+- Request guidance: a question put to the operator says what observation
+  would settle its question and what each possible answer changes (the
+  prompt, `lead_close`, and the close's reply, `guidance`); a value read from
+  an image is cited from the output of a job that read it, never from a
+  transcription typed into a command (the prompt and `net_request`, as the
+  network's refusal already said); under `more_evidence: no` nothing suggests
+  an ask (verified, now a contract fixture).
+- `swarm.sh replay --deliveries` reads, act by act, which warnings each point
+  would have carried, on the registers as they stood at each act. Three
+  contract fixtures hold the points to the ADR: `warnings-delivered`,
+  `lead-findings-tied` and `no-ceremonial-ask`.
+
 ### Added: replay, and the contract fixtures
 
 A finished run's registers read again under a harness's finish rules, to

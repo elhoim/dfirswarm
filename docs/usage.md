@@ -968,7 +968,7 @@ and still compares by section.
 ### Replay: `swarm.sh replay`, `scripts/replay.ts`
 
 ```
-swarm.sh replay <id> [--checkout PATH] [--compare [A [B]]] [--stop-policy P[,P...]] [--json] [--show-text]
+swarm.sh replay <id> [--checkout PATH] [--compare [A [B]]] [--stop-policy P[,P...]] [--deliveries] [--json] [--show-text]
 node --experimental-strip-types scripts/replay.ts <run-dir | id --registry FILE> [the same options]
 ```
 
@@ -1026,6 +1026,19 @@ measure a rule change on recorded histories before paying for new runs
 - **`--stop-policy`** evaluates the copy as though the run's stop policy were
   each one given (`operator`, `cap-pause`, `cap-stop`; several with commas):
   the copy's `budget.json` only.
+- **`--deliveries`** reads where the checkout delivers the answers check's
+  warnings (ADR 0013, "Warnings where the decision is made"), act by act:
+  the reply to every record of a question's answer, every review offered
+  for an answer (read when it reached its seat), and the reply to every
+  attest. Each act's registers are cut to the moment of the act in a scratch
+  directory beside the copy (the ledger to the answer's own seq for its
+  record, the attestations to the attest's own line, every other register to
+  the act's time: a chain cut at a line is a prefix of it), and the
+  checkout's own `warningsAt` says what that point carries then; finish
+  status is read at the end. It prints the acts read, each act that carries
+  a warning (the point, the entry, the seat, the questions and the codes)
+  and finish status; `--compare` names the difference point by point. A
+  checkout from before the delivery says it delivered in finish status only.
 
 Exit 0 when replayed and the run's registers are unchanged; 1 when a
 checkout could not be evaluated, the run changed under it, or it was
@@ -1040,7 +1053,9 @@ acts, each with an `expect.json` written by hand from the ADRs. The tests
 (`tests/contract-fixtures.test.ts`) replay each and hold it to that, and to
 three invariants under every fixture and stop policy: readiness, the answers
 check and the gate never disagree on a disposition; a warning never holds;
-every custody verdict verifies as a prefix. A rule change that moves a
+every custody verdict verifies as a prefix. A fixture that names its
+`deliveries` is replayed with `--deliveries` and held to each act's warnings
+too, and finish status to the answers check's. A rule change that moves a
 fixture's projection changes its `expect.json` in the same commit, with the
 ADR that says why.
 
