@@ -93,6 +93,106 @@ export type Withheld = { path: string; job: string | null; why: string; sha256_o
 /** A sensitive entry's words as they may stand in a file: as written, JSON-escaped. */
 const forms = (t: string) => [...new Set([t, JSON.stringify(t).slice(1, -1)])];
 
+/**
+ * Where a sensitive word counts as standing in a text. A long word (eight
+ * characters or more) counts wherever it stands. A short one (a PIN, a short
+ * code) counts wherever it stands too, a letter touching it included
+ * ("PIN4821"), except where it is part of a longer run that makes it
+ * something else:
+ * - its digits run on into more digits: a bigger number, a timestamp's
+ *   fraction ("12.482145Z"), a count;
+ * - a run of sixteen hex characters or more with digits of its own beyond
+ *   the word: a sha256, a keyed id (hidden-…);
+ * - a run of twenty base64 or base64url characters or more with letters and
+ *   digits of their own and few separators (under one in eight of '+', '/',
+ *   '-', '_'): an encoded blob, where a path's or a sentence's are not.
+ * Four digits inside a hash are chance, and every chained record a package
+ * carries is full of hashes: redacted there, a line would lose its content
+ * for one; found there, the scan would refuse the package for a leak that is
+ * not one. Leaving a real value in is the worse failure, so every other place
+ * counts. The redaction and the scan hold to the same rule, over text, UTF-8
+ * and UTF-16LE bytes and file names; it reads ASCII classes only, so the
+ * scan's lower-cased text and the original agree.
+ */
+const SHORT_WORD = 8;
+/** How far a run is read either side of the word: enough to tell a hash or a blob, bounded for a file of one. */
+const RUN_WINDOW = 64;
+const isDigit = (c: number | undefined) => c !== undefined && c >= 0x30 && c <= 0x39;
+const isLetter = (c: number | undefined) => c !== undefined && ((c >= 0x41 && c <= 0x5a) || (c >= 0x61 && c <= 0x7a));
+const isHex = (c: number | undefined) => isDigit(c) || (c !== undefined && ((c >= 0x41 && c <= 0x46) || (c >= 0x61 && c <= 0x66)));
+const isBase64 = (c: number | undefined) => isDigit(c) || isLetter(c) || c === 0x2b || c === 0x2f;
+const isBase64Url = (c: number | undefined) => isDigit(c) || isLetter(c) || c === 0x2d || c === 0x5f;
+/**
+ * Whether a short word found at a place is part of a longer run that makes
+ * it something else (the rule above). `at(k)` is the character k places from
+ * where the word starts (negative before it), undefined past either end; the
+ * word is `n` characters.
+ */
+function partOfLongerRun(at: (k: number) => number | undefined, n: number): boolean {
+  if ((isDigit(at(0)) && isDigit(at(-1))) || (isDigit(at(n - 1)) && isDigit(at(n)))) return true;
+  const run = (ok: (c: number | undefined) => boolean): [number, number] | null => {
+    for (let k = 0; k < n; k += 1) if (!ok(at(k))) return null;
+    let l = 0;
+    while (l > -RUN_WINDOW && ok(at(l - 1))) l -= 1;
+    let r = n;
+    while (r < n + RUN_WINDOW && ok(at(r))) r += 1;
+    return [l, r];
+  };
+  /** Whether the run holds a character of this class outside the word itself. */
+  const own = ([l, r]: [number, number], test: (c: number | undefined) => boolean) => {
+    for (let k = l; k < r; k += 1) if ((k < 0 || k >= n) && test(at(k))) return true;
+    return false;
+  };
+  const hex = run(isHex);
+  if (hex && hex[1] - hex[0] >= 16 && own(hex, isDigit)) return true;
+  for (const ok of [isBase64, isBase64Url]) {
+    const b = run(ok);
+    if (!b || b[1] - b[0] < 20 || !own(b, isDigit) || !own(b, isLetter)) continue;
+    let separators = 0;
+    for (let k = b[0]; k < b[1]; k += 1) if (!isDigit(at(k)) && !isLetter(at(k))) separators += 1;
+    if (separators * 8 < b[1] - b[0]) return true;
+  }
+  return false;
+}
+/** Each place `word` stands in `text` by that rule. */
+function wordPlaces(text: string, word: string): number[] {
+  const out: number[] = [];
+  if (!word) return out;
+  const short = word.length < SHORT_WORD;
+  for (let i = text.indexOf(word); i >= 0; i = text.indexOf(word, i + 1)) {
+    if (short && partOfLongerRun((k) => (i + k >= 0 && i + k < text.length ? text.charCodeAt(i + k) : undefined), word.length)) continue;
+    out.push(i);
+  }
+  return out;
+}
+const holdsWord = (text: string, word: string) => wordPlaces(text, word).length > 0;
+/** `text` with every place `word` stands replaced by `by`, and how many there were. */
+function replaceWord(text: string, word: string, by: string): { text: string; count: number } {
+  let out = "";
+  let from = 0;
+  let count = 0;
+  for (const i of wordPlaces(text, word)) {
+    if (i < from) continue;
+    out += text.slice(from, i) + by;
+    from = i + word.length;
+    count += 1;
+  }
+  return { text: out + text.slice(from), count };
+}
+/** The same rule over bytes: `unit` is 1 for UTF-8, 2 for UTF-16LE (a character is a little-endian code unit). */
+function bytesHoldWord(buf: Buffer, word: Buffer, unit: 1 | 2, short: boolean): boolean {
+  if (!short) return buf.includes(word);
+  for (let i = buf.indexOf(word); i >= 0; i = buf.indexOf(word, i + 1)) {
+    const at = (k: number): number | undefined => {
+      const j = i + k * unit;
+      if (j < 0 || j + unit > buf.length) return undefined;
+      return unit === 1 ? buf[j] : buf[j] | (buf[j + 1] << 8);
+    };
+    if (!partOfLongerRun(at, word.length / unit)) return true;
+  }
+  return false;
+}
+
 /** The files a package seals as they are: signatures, tokens, a release's record and its sidecars. Scanned, never rewritten. */
 function sealedAsIs(rel: string): boolean {
   if (["MANIFEST.txt", "MANIFEST.txt.sig", "SIGNER.txt", "signer.pub", "REDACTIONS.txt", "REDACTIONS.json", "COMPONENTS.json", "custody.json.sig", "custody.json.tsr"].includes(rel)) return true;
@@ -102,7 +202,7 @@ function sealedAsIs(rel: string): boolean {
 /** A JSON value with every string that holds a sensitive entry's words replaced whole; each replacement recorded by its pointer. */
 function redactJsonValue(v: unknown, pointer: string, tokens: SensitiveToken[], replaced: Replaced[]): unknown {
   if (typeof v === "string") {
-    const hit = tokens.find((t) => v.includes(t.token));
+    const hit = tokens.find((t) => holdsWord(v, t.token));
     if (!hit) return v;
     const t = hit as ScanToken;
     replaced.push({ what: "field", entry: t.output ? null : t.seq, sha256_of_original: t.id ?? sha256(t.token), pointer, why: t.output ? `a field holding the text of a sensitive output (${t.output}), replaced whole` : "a field holding a sensitive entry's words, replaced whole" });
@@ -142,7 +242,7 @@ export function leakScan(dir: string, tokens: ScanToken[], o: { digests?: Readon
       hits.push({ path: rel, entry, token_sha256: commit, as, ...(extra.output ? { output: extra.output } : {}) });
     };
     // A filename that itself holds a sensitive word (an agent named an output after the secret).
-    if (o.filenames) for (const w of wanted) if (norm(rel).includes(w.n)) note(w.id ?? sha256(w.token), w.seq, "filename", { output: w.output });
+    if (o.filenames) for (const w of wanted) if (holdsWord(norm(rel), w.n)) note(w.id ?? sha256(w.token), w.seq, "filename", { output: w.output });
     // Whole, when it can be held; in overlapping chunks when it cannot: nothing is left unread.
     const chunk = 32 * 1024 * 1024;
     const fd = openSync(abs, "r");
@@ -155,8 +255,8 @@ export function leakScan(dir: string, tokens: ScanToken[], o: { digests?: Readon
         // Text when no NUL stands in its first 8 KiB; any file's bytes are searched either way.
         const text = !buf.subarray(0, 8192).includes(0) ? norm(buf.toString("utf8")) : null;
         for (const w of wanted) {
-          if (text !== null && text.includes(w.n)) note(w.id ?? sha256(w.token), w.seq, "text", { output: w.output });
-          else if (w.raw.some((b) => buf.includes(b))) note(w.id ?? sha256(w.token), w.seq, "bytes", { output: w.output });
+          if (text !== null && holdsWord(text, w.n)) note(w.id ?? sha256(w.token), w.seq, "text", { output: w.output });
+          else if (w.raw.some((b, k) => bytesHoldWord(buf, b, k === 1 ? 2 : 1, w.token.length < SHORT_WORD))) note(w.id ?? sha256(w.token), w.seq, "bytes", { output: w.output });
         }
         // A sensitive output's digest left in a record: named, never printed.
         if (text !== null) for (const d of digests) if (text.includes(d)) note(`digest:${d.slice(0, 12)}`, 0, "digest");
@@ -221,7 +321,7 @@ export async function redactPackage(sandbox: string, dir: string, opts: { leaks?
   };
   /** A path fit to appear in the handover's own records: a basename holding a sensitive word is hidden behind a keyed id, the real path kept in the sidecar. */
   const safePath = (rel: string): string => {
-    if (!tokens.some((t) => forms(t.token).some((f) => rel.includes(f)))) return rel;
+    if (!tokens.some((t) => forms(t.token).some((f) => holdsWord(rel, f)))) return rel;
     const dir_ = rel.includes("/") ? `${rel.slice(0, rel.lastIndexOf("/"))}/` : "";
     const id = idFor(`path:${rel}`);
     privateMap[id] = { of: "path", path: rel, why: "a path whose name holds a sensitive value" };
@@ -248,7 +348,7 @@ export async function redactPackage(sandbox: string, dir: string, opts: { leaks?
     writeFileSync(join(dir, rel), after);
     changes.push({ path: rel, before_sha256: sha256(before), after_sha256: sha256(after), why, replaced });
   };
-  const holds = (l: string) => tokens.find((t) => forms(t.token).some((f) => l.includes(f)));
+  const holds = (l: string) => tokens.find((t) => forms(t.token).some((f) => holdsWord(l, f)));
   const handled = new Set<string>();
   // A chained file, line by line: `keep` says what a redacted line keeps of the one it replaces.
   const chained = (rel: string, judge: (o: Record<string, unknown>, raw: string) => { seq: number | null; why: string } | null, keep: (o: Record<string, unknown>, raw: string) => Record<string, unknown>, what: Replaced["what"], why: string) => {
@@ -441,9 +541,10 @@ export async function redactPackage(sandbox: string, dir: string, opts: { leaks?
         let t = text;
         for (const tok of tokens) {
           for (const f of forms(tok.token)) {
-            const count = t.split(f).length - 1;
+            const r = replaceWord(t, f, REDACTED);
+            const count = r.count;
             if (!count) continue;
-            t = t.split(f).join(REDACTED);
+            t = r.text;
             replaced.push({ what: "text", entry: tok.output ? null : tok.seq, sha256_of_original: tok.id ?? sha256(tok.token), count, why: tok.output ? `the text of a sensitive output (${tok.output})` : "a sensitive entry's words" });
           }
         }

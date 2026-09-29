@@ -42,6 +42,54 @@ attested by another seat, under that question's leads. Now:
   say why they do not bear on it". Registers and refs only.
 - `tests/case-premise.test.ts` and `tests/lead-findings-uncited.test.ts`.
 
+### Fixed: only the collector writes the trace, and a deep runs directory no longer keeps its lines out
+
+A Unix socket path takes at most 103 bytes on macOS and 107 on Linux. The
+collector, the gate and the nudge broker bind from inside their directory,
+but their clients dialled the full path, or one relative to wherever they
+ran: under a deep `SWARM_RUNS_DIR` the kickoff's own line, the watchdogs'
+and the operator's could not reach the collector, and on Linux the gate
+could not forward a single pane's line. The shell's fallback then appended
+a line to `events.jsonl` whenever the record was not chained yet, so a run
+could begin with lines no one could vouch for, and a line appended between
+its look at the tail and the collector's next write broke the chain.
+
+- `scripts/trace-emit.mjs` dials the socket from inside its directory, and
+  says why it failed: exit 1 when the collector could not be reached, 3 when
+  it answered and refused the line. The gate forwards from the collector's
+  directory; the operator CLI's harness lines (`emitHarnessLine`) go
+  through `trace-emit.mjs` when even a relative path is too long.
+- A line the collector does not take, for any reason, goes to
+  `traces/system-spill.jsonl`, never into `events.jsonl`: the shell's
+  `trace_emit`, the CLI's harness lines, and now the model gateway's and
+  the fetch service's, which dropped it. The provider-limit rule reads the
+  watchdog's nudges and wakes from the spill as well.
+- The kickoff's own line is the proof that the record can be written: when
+  the collector came up and cannot be reached, the start is refused, saying
+  why, before any pane, hub or VM starts. A collector that answers and
+  refuses the line (a trace that ends in a torn line) is not refused here.
+- `tests/kickoff-guards.test.sh` runs a kickoff under a runs directory where
+  no socket path fits (130 bytes).
+
+### Fixed: a short sensitive value is not taken for the digits inside a hash
+
+`--redact` looked for a sensitive entry's words anywhere in a text, so a
+four-character value (a PIN) was found inside any sha256, keyed id or
+timestamp that happened to contain its digits. The redaction then replaced a
+line of the ledger or the trace for its hash, and the leak scan after it
+refused the package for a leak that was not one; a real trace, full of
+hashes, holds almost any four digits somewhere. A word under eight
+characters (`scripts/package-tools.ts`) still counts wherever it stands, a
+letter touching it included (`PIN4821`), and is skipped only inside a longer
+run that makes it something else: its digits running on into a bigger number
+(`12.482145Z`), a run of sixteen hex characters or more with digits of its
+own, or a run of twenty base64 or base64url characters or more with letters
+and digits of its own and few separators. Leaving a real value in is the
+worse failure, so a path, a sentence or an identifier with the value in it
+still counts. The redaction and the scan hold to the one rule, in text, UTF-8
+and UTF-16 bytes and file names; a longer word counts wherever it stands, as
+before. `tests/redaction.test.ts` failed about once in a hundred runs on it.
+
 ### Fixed: a partial answer is a disposition, whatever its reviews' strength, and a standing finding is never discarded to make an answer not determinable
 
 On the run s9722fa (a CTF case of six questions, `--stop operator`) every

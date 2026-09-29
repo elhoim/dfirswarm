@@ -4,6 +4,11 @@
 #
 # - the VM hubs' directory is one per user, not a link, not someone else's,
 #   and a run whose hub sockets would not fit a Unix socket path is refused;
+# - under a runs directory deep enough that no socket path in it fits, the
+#   kickoff's line still reaches the collector (through the gate on Linux),
+#   and so do the shell's and the CLI's lines from any directory; a line the
+#   collector does not take is kept in the system spill, and events.jsonl
+#   never gets one the collector did not write;
 # - stop ends a daemon only when the pid names that daemon for that sandbox;
 # - a run id is not allocated past a failed `msb list`;
 # - a host process's temporary files go to work/.tmp and Node's compile cache
@@ -140,5 +145,50 @@ if command -v pi >/dev/null 2>&1; then
 else
   echo "skip - pi is not on PATH: where Pi puts its compile cache is not measured"
 fi
+
+echo "# a deep runs directory: every trace socket reached from inside its directory, nothing appended unchained"
+DEEP="$TMP/a-runs-directory-deep-enough-that-no-unix-socket-path-fits/under/it/runs"
+mkdir -p "$DEEP"
+out="$(cd / && SWARM_ISOLATION=host SWARM_RUNS_DIR="$DEEP" bash "$ROOT/scripts/swarm.sh" start --model solo/model --n 2 --cap-usd 1 --no-start \
+  --goal-file "$ROOT/prompts/goals/hello.md" --toolbox off --label deep1 2>&1)" || fail "a kickoff under a deep runs directory was refused: $out"
+sb="$(printf '%s\n' "$out" | sed -n 's/^SANDBOX=//p' | tail -1)"
+[[ -n "$sb" && -d "$sb/traces" ]] || fail "the kickoff made no sandbox: $out"
+sock="$sb/traces/.collector-gate.sock"
+[[ "$(printf '%s' "$sock" | LC_ALL=C wc -c | tr -d ' ')" -gt 108 ]] || fail "the runs directory is not deep enough to test anything: $sock"
+first="$(head -n 1 "$sb/traces/events.jsonl")"
+jq -e '.tool == "operator_action" and .args.command == "start" and (.prev | type) == "string" and (.recv_ts | type) == "string" and (.agent_unverified // false) == false' <<<"$first" >/dev/null \
+  || fail "the kickoff's own line did not reach the collector: $first"
+emit_from_root() { (cd / && . "$ROOT/scripts/lib/trace.sh" && trace_emit "$ROOT" "$1" "$2"); }
+chained_only() { jq -se 'all(.[]; (.prev | type) == "string")' "$1/traces/events.jsonl" >/dev/null; }
+# --no-start stopped the collector: the watchdog's line is kept in the spill.
+emit_from_root "$sb" '{"ts":"2026-01-01T00:00:00.000Z","agent":"system","tool":"idle_nudge","args":{"agent":"x0"},"result":{"ok":true}}'
+grep -q '"tool":"idle_nudge"' "$sb/traces/system-spill.jsonl" 2>/dev/null || fail "a line no collector took is not in the system spill"
+chained_only "$sb" || fail "events.jsonl holds a line the collector did not write: $(cat "$sb/traces/events.jsonl")"
+# A record not chained yet takes no appended line either: nothing can say who wrote it.
+PLAIN="$TMP/plain"
+mkdir -p "$PLAIN/traces"
+printf '%s\n' '{"ts":"t1","agent":"a0","tool":"bash","args":{},"result":{"ok":true}}' > "$PLAIN/traces/events.jsonl"
+emit_from_root "$PLAIN" '{"ts":"2026-01-01T00:00:00.000Z","agent":"system","tool":"idle_nudge","args":{"agent":"a0"},"result":{"ok":true}}'
+[[ "$(wc -l < "$PLAIN/traces/events.jsonl" | tr -d ' ')" -eq 1 ]] || fail "a line was appended to a record not chained yet: $(cat "$PLAIN/traces/events.jsonl")"
+grep -q '"tool":"idle_nudge"' "$PLAIN/traces/system-spill.jsonl" 2>/dev/null || fail "the line is not in the system spill"
+# A collector at the deep path: the shell's line and the CLI's reach it from another directory.
+node "$ROOT/scripts/trace-collector.mjs" "$sb" --quiet >"$TMP/deep-collector.log" 2>&1 &
+coll=$!
+PIDS+=("$coll")
+for _ in $(seq 1 50); do [[ -S "$sb/traces/.collector.sock" ]] && break; sleep 0.1; done
+[[ -S "$sb/traces/.collector.sock" ]] || fail "the collector did not come up under the deep runs directory: $(cat "$TMP/deep-collector.log")"
+emit_from_root "$sb" '{"ts":"2026-01-01T00:00:01.000Z","agent":"system","tool":"resume_wake","args":{"agent":"x0"},"result":{"ok":true}}'
+tail -n 1 "$sb/traces/events.jsonl" | jq -e '.tool == "resume_wake" and (.prev | type) == "string"' >/dev/null \
+  || fail "the shell's line from another directory did not reach the collector: $(tail -n 1 "$sb/traces/events.jsonl")"
+(cd / && node --experimental-strip-types --no-warnings --input-type=module -e '
+  const P = await import(process.argv[1]);
+  await P.traceHarnessEntry(process.argv[2], { seq: 1, kind: "finding", by: "a0", hash: "0".repeat(64) });
+' "$ROOT/extensions/protocol.ts" "$sb") || fail "the CLI's harness line failed"
+tail -n 1 "$sb/traces/events.jsonl" | jq -e '.tool == "harness_record" and (.prev | type) == "string"' >/dev/null \
+  || fail "the CLI's line from another directory did not reach the collector: $(tail -n 1 "$sb/traces/events.jsonl")"
+kill "$coll" 2>/dev/null || true
+wait "$coll" 2>/dev/null || true
+chained_only "$sb" || fail "events.jsonl holds a line the collector did not write: $(cat "$sb/traces/events.jsonl")"
+pass "under a runs directory where no socket path fits, the kickoff's line, the shell's and the CLI's reach the collector; a line none took is kept in the spill, and events.jsonl holds only the collector's"
 
 echo "kickoff-guards.test.sh: all checks passed"

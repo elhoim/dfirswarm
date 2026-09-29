@@ -3,8 +3,11 @@
  * every change recorded with the sha256 of what it replaced, why and which
  * sensitive entry's words it held (REDACTIONS.json, under the manifest); a
  * JSON file redacted field by field, keeping its shape; a short value (a
- * PIN) taken out; an agent's dispute of a sensitive entry redacted keeping
- * its chain; a release's PDF withheld and its signed record left as it was;
+ * PIN) taken out wherever it stands, a letter touching it included, and
+ * its digits left only inside a longer number, a hash, a keyed id or an
+ * encoded blob, by the redaction and the scan alike; an agent's dispute of
+ * a sensitive entry redacted keeping its chain; a release's PDF withheld
+ * and its signed record left as it was;
  * and a scan of every packaged file for each sensitive entry's words,
  * normalised (case, path separators, JSON escapes, UTF-16), which names a
  * hit by file, entry and the word's sha256, never the word.
@@ -25,6 +28,8 @@ after(async () => {
 const sha = (s: string | Buffer) => createHash("sha256").update(s).digest("hex");
 const KEY = "5f3c9a17e2b84d06a1c7f9e3b2d58a40";
 const PIN = "4821";
+/** A record without its hashes and keyed ids: the PIN's four digits inside one are chance, not the PIN (package-tools.ts holds a short word to that rule). */
+const withoutHex = (s: string) => s.replace(/[0-9a-fA-F]{16,}/g, "");
 const PATH = "C:\\Users\\mira\\Documents\\vault.kdbx";
 
 /** A run with a key, a PIN and a path marked sensitive, a dispute of one, and a package laid out as swarm.sh package lays it. */
@@ -103,15 +108,53 @@ test("every redaction is recorded with the sha256 of what it replaced, why, and 
   assert.equal(rec.leak_scan.mode, "list");
   assert.deepEqual(rec.leak_scan.hits.map((h) => [h.path, h.entry]), [["release/v1/release.json", 3]]);
   assert.match(rec.leak_scan.hits[0].token_sha256, /^hidden-[0-9a-f]{24}$/, "a scan hit on a low-entropy value is a keyed id, not its hash");
-  assert.doesNotMatch(JSON.stringify(rec), new RegExp(`${KEY}|${PIN}|vault\\.kdbx`), "the record names keyed ids, never the words");
+  assert.doesNotMatch(JSON.stringify(rec), new RegExp(`${KEY}|vault\\.kdbx`), "the record names keyed ids, never the words");
+  assert.doesNotMatch(withoutHex(JSON.stringify(rec)), new RegExp(PIN), "the record names keyed ids, never the words");
   // The private sidecar, outside the package, carries the map and never a value.
   const side = JSON.parse(await readFile(join(pkg, "..", `${pkg.slice(pkg.lastIndexOf("/") + 1)}.private.json`), "utf8"));
   assert.ok(Object.keys(side.map).length >= 1);
-  assert.doesNotMatch(JSON.stringify(side), new RegExp(`${KEY}|${PIN}`), "the sidecar maps ids to a description, not to the value");
+  assert.doesNotMatch(JSON.stringify(side), new RegExp(KEY), "the sidecar maps ids to a description, not to the value");
+  assert.doesNotMatch(withoutHex(JSON.stringify(side)), new RegExp(PIN), "the sidecar maps ids to a description, not to the value");
   // Verify: the chains walk, the lineage and the scan are said.
   const v = verifyPackage(pkg);
   assert.match(v.lines.join("\n"), /Disputes:     1 lines, chain intact, 1 redacted \(their hashes kept\)/);
   assert.match(v.lines.join("\n"), /the leak scan after it FOUND 1 HIT\(S\), LISTED: release\/v1\/release\.json \(entry 3\)/);
+});
+
+test("a short sensitive value is caught wherever it stands, a letter touching it included; its digits inside a longer number, a sha256, a keyed id or a base64 blob are not it", async () => {
+  const { root, pkg } = await run();
+  const hash = `9f0e${PIN}ab`.padEnd(64, "c");
+  const id = `hidden-c${PIN}d7e4078e6518613b415`;
+  const stamp = `2026-09-29T03:33:12.${PIN}45Z`;
+  const blob = `YSBibG9iIG9m${PIN}IGVuY29kZWQgYnl0ZXM=`;
+  const chance = `sha256 ${hash}\nid ${id}\nat ${stamp}\nbody ${blob}\n`;
+  await writeFile(join(pkg, "work", "a0", "chance.md"), chance);
+  await writeFile(join(pkg, "work", "a0", "row.json"), `${JSON.stringify({ sha256: hash, at: stamp, body: blob, note: `PIN${PIN}` })}\n`);
+  // A path's run is long, but holds no digits of its own beyond the PIN: not an encoding.
+  await writeFile(join(pkg, "work", "a0", "pin.md"), `pin=${PIN}\nPIN${PIN}\npin=${PIN}x\narchive/userfolders/Pin${PIN}/notes\n`);
+  const r = await redactPackage(root, pkg, { leaks: "list" });
+  // Redaction: left inside a longer run, taken out wherever else it stands.
+  assert.equal(await readFile(join(pkg, "work", "a0", "chance.md"), "utf8"), chance);
+  const row = JSON.parse(await readFile(join(pkg, "work", "a0", "row.json"), "utf8"));
+  assert.deepEqual([row.sha256, row.at, row.body, row.note], [hash, stamp, blob, "[redacted: marked sensitive]"]);
+  assert.equal(await readFile(join(pkg, "work", "a0", "pin.md"), "utf8"), "pin=[redacted: marked sensitive]\nPIN[redacted: marked sensitive]\npin=[redacted: marked sensitive]x\narchive/userfolders/Pin[redacted: marked sensitive]/notes\n");
+  assert.deepEqual(r.leaks.filter((h) => h.path.startsWith("work/")), []);
+  // The scan alone, as text, UTF-8 and UTF-16LE bytes, and file names.
+  const tokens = sensitiveTokens(await readLedger(root, { raw: true }));
+  const d = await mkdtemp(join(tmpdir(), "redaction-short-"));
+  dirs.push(d);
+  const utf16 = (t: string) => Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(t, "utf16le")]);
+  await writeFile(join(d, "chance.txt"), chance);
+  await writeFile(join(d, "chance16.bin"), utf16(chance));
+  await writeFile(join(d, "chance8.bin"), Buffer.concat([Buffer.from([0, 1, 2]), Buffer.from(chance)]));
+  await writeFile(join(d, `${hash}.bin`), "nothing\n");
+  assert.deepEqual(leakScan(d, tokens, { filenames: true }).hits, []);
+  await writeFile(join(d, "glued.txt"), `PIN${PIN}\n`);
+  await writeFile(join(d, "glued16.bin"), utf16(`PIN${PIN}\n`));
+  await writeFile(join(d, "glued8.bin"), Buffer.concat([Buffer.from([0, 1, 2]), Buffer.from(`PIN${PIN}\n`)]));
+  await writeFile(join(d, `pin${PIN}.txt`), "nothing\n");
+  const hits = leakScan(d, tokens, { filenames: true }).hits.map((h) => [h.path, h.entry, h.as]).sort((a, b) => String(a[0]).localeCompare(String(b[0])));
+  assert.deepEqual(hits, [["glued.txt", 3, "text"], ["glued16.bin", 3, "bytes"], ["glued8.bin", 3, "bytes"], [`pin${PIN}.txt`, 3, "filename"]]);
 });
 
 test("the scan after redaction finds what word replacement cannot: UTF-16 text, another case, the other path separator, bytes in a binary", async () => {

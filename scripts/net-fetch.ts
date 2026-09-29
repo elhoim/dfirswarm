@@ -51,7 +51,7 @@
 import { spawn } from "node:child_process";
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { lookup as dnsLookup } from "node:dns/promises";
-import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, cpSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { request as httpRequest, createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { isIP, type Socket } from "node:net";
@@ -916,14 +916,28 @@ export function planFetch(input: { sandbox: string; run: string; port?: number }
   return { v: 1, run: input.run, sandbox: resolve(input.sandbox), secret: randomBytes(32).toString("hex"), host: "127.0.0.1", ...(input.port ? { port: input.port } : {}) };
 }
 
-/** Trace lines through the collector, as the gateway sends them (scripts/trace-emit.mjs). */
+/** Trace lines through the collector, as the gateway sends them (scripts/trace-emit.mjs). A line the collector does not take, for any reason, is kept in traces/system-spill.jsonl, as scripts/lib/trace.sh keeps one: never appended to events.jsonl. */
 function collectorEmitter(sandbox: string): ((record: Record<string, unknown>) => void) | null {
   if (!process.env.SWARM_TRACE_TOKEN) return null;
   const script = join(dirname(fileURLToPath(import.meta.url)), "trace-emit.mjs");
   return (record) => {
+    const line = JSON.stringify({ ts: new Date().toISOString(), agent: "system", ...record });
+    let settled = false;
+    const settle = (taken: boolean) => {
+      if (settled) return;
+      settled = true;
+      if (taken) return;
+      try {
+        appendFileSync(join(sandbox, "traces", "system-spill.jsonl"), `${line}\n`);
+      } catch {
+        // no traces/ to keep it in: the run is gone
+      }
+    };
     const child = spawn(process.execPath, [script, sandbox], { stdio: ["pipe", "ignore", "ignore"], env: process.env });
-    child.on("error", () => undefined);
-    child.stdin?.end(JSON.stringify({ ts: new Date().toISOString(), agent: "system", ...record }));
+    child.on("error", () => settle(false));
+    child.on("close", (code) => settle(code === 0));
+    child.stdin?.on("error", () => undefined);
+    child.stdin?.end(line);
   };
 }
 

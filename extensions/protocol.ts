@@ -3988,6 +3988,8 @@ const COLLECTOR_TIMEOUT_MS = 2000;
 const NUDGE_TIMEOUT_MS = 8000;
 /** Below the ~104-byte `sun_path` limit with room for a prefix. */
 const SOCKET_PATH_SAFE = 96;
+/** The longest Unix socket path every platform the harness runs on takes, in bytes (macOS: 104 with the NUL; Linux 108). */
+const SOCKET_PATH_MAX = 103;
 
 /**
  * The first line a VM's process writes on every connection it opens to its
@@ -4292,18 +4294,44 @@ export async function traceHarnessEntry(sandboxRoot: string, entry: Pick<LedgerE
  * (SWARM_TRACE_SOCKET, or the run's own socket), with the harness's token
  * when this shell holds it (a kickoff's; from any other shell the collector
  * marks the line unverified, as it does an operator action); failing that,
- * into traces/system-spill.jsonl when the trace is chained, else appended to
- * the unchained trace.
+ * for any reason, into traces/system-spill.jsonl. Never appended to
+ * events.jsonl, where only the collector writes: a line it did not write is
+ * one nobody can vouch for, and the collector can chain the file between a
+ * look at its tail and the append.
  */
 async function emitHarnessLine(sandboxRoot: string, line: HarnessTraceLine): Promise<void> {
   const record = { ts: new Date().toISOString(), agent: "system", ...line };
   const token = process.env.SWARM_TRACE_TOKEN || "";
   const configured = process.env.SWARM_TRACE_SOCKET || join(sandboxRoot, COLLECTOR_SOCKET_REL);
   const socketPath = configured.length > SOCKET_PATH_SAFE ? shortSocketPath(configured) : configured;
-  if (await collectorExchange(socketPath, `${JSON.stringify(token ? { ...record, token } : record)}\n`)) return;
-  const file = join(sandboxRoot, EVENTS_REL);
-  await mkdir(dirname(file), { recursive: true });
-  await appendFile((await tailRefusesAppend(file)) ? join(sandboxRoot, SYSTEM_SPILL_REL) : file, `${JSON.stringify(record)}\n`, "utf8");
+  // A path the kernel would refuse even relative to this process (a deep
+  // runs directory seen from a directory far from it): scripts/trace-emit.mjs
+  // dials it from inside its own directory, which this process cannot move to.
+  const taken =
+    Buffer.byteLength(socketPath) > SOCKET_PATH_MAX
+      ? await emitFromSocketDir(sandboxRoot, configured, record, token)
+      : await collectorExchange(socketPath, `${JSON.stringify(token ? { ...record, token } : record)}\n`);
+  if (taken) return;
+  await mkdir(join(sandboxRoot, "traces"), { recursive: true });
+  await appendFile(join(sandboxRoot, SYSTEM_SPILL_REL), `${JSON.stringify(record)}\n`, "utf8");
+}
+
+/** One line through scripts/trace-emit.mjs, which dials the socket from its own directory: true when the collector wrote it. */
+function emitFromSocketDir(sandboxRoot: string, socket: string, record: Record<string, unknown>, token: string): Promise<boolean> {
+  return new Promise<boolean>((resolvePromise) => {
+    try {
+      const child = spawn(process.execPath, [resolve(dirname(fileURLToPath(import.meta.url)), "..", "scripts", "trace-emit.mjs"), sandboxRoot], {
+        env: { ...process.env, SWARM_TRACE_SOCKET: socket, SWARM_TRACE_TOKEN: token },
+        stdio: ["pipe", "ignore", "ignore"],
+      });
+      child.on("error", () => resolvePromise(false));
+      child.on("close", (code) => resolvePromise(code === 0));
+      child.stdin.on("error", () => undefined);
+      child.stdin.end(JSON.stringify(record));
+    } catch {
+      resolvePromise(false);
+    }
+  });
 }
 
 export function formatEventLine(event: SwarmEvent): string {

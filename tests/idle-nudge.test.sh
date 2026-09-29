@@ -15,6 +15,9 @@ TMP="$(mktemp -d "${TMPDIR:-/tmp}/idle-nudge.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
 fail() { echo "FAIL: $*" >&2; exit 1; }
 pass() { echo "ok - $*"; }
+# The run's trace as the harness keeps it: events.jsonl, and the system spill,
+# where a harness line the collector did not take is kept (scripts/lib/trace.sh).
+trace_of() { local f; for f in "$1/traces/events.jsonl" "$1/traces/system-spill.jsonl"; do [[ -f "$f" ]] && cat "$f"; done; return 0; }
 
 SB="$TMP/sandbox"
 mkdir -p "$SB"/{traces,done/agents,threads/main,inbox/a00,inbox/a01,.pi-sessions/a00,.pi-sessions/a01,locks}
@@ -91,7 +94,7 @@ run_once --news-sec 45 --idle-sec 180
 pass "an agent with a done marker is left alone"
 
 # Every nudge is on the trace.
-[[ "$(grep -c '"tool":"idle_nudge"' "$SB/traces/events.jsonl")" -ge 3 ]] || fail "the nudges are not on the trace"
+[[ "$(trace_of "$SB" | grep -c '"tool":"idle_nudge"')" -ge 3 ]] || fail "the nudges are not on the trace"
 pass "each nudge is written to the trace"
 
 # --- a provider error is not a silence --------------------------------------
@@ -173,8 +176,8 @@ wait_once --wait-idle-sec 900
 [[ "$(grep -c '^w0	' "$PROMPT_LOG")" -eq 0 ]] || fail "an agent waiting for less than --wait-idle-sec was nudged"
 wait_once --wait-idle-sec 600
 grep '^w0	' "$PROMPT_LOG" | grep -q 'For 11 minutes you have called only wait and inbox' || fail "an agent that only waited past --wait-idle-sec was not nudged: $(cat "$PROMPT_LOG")"
-grep -q '"tool":"idle_nudge","args":{"agent":"w0","idle_seconds":7[0-9][0-9],"why":"waiting"}' "$WS/traces/events.jsonl" \
-  || fail "the nudge is not recorded as one for waiting: $(grep idle_nudge "$WS/traces/events.jsonl")"
+grep -q '"tool":"idle_nudge","args":{"agent":"w0","idle_seconds":7[0-9][0-9],"why":"waiting"}' <<<"$(trace_of "$WS")" \
+  || fail "the nudge is not recorded as one for waiting: $(trace_of "$WS" | grep idle_nudge)"
 pass "an agent that has only waited since its last post is nudged past --wait-idle-sec, though its pane is working"
 
 # Waiting on its own job is what the job asked of it.
@@ -228,8 +231,8 @@ comp_once --compact-stall-sec 300
 post="$(cat "$CS"/threads/main/*.md 2>/dev/null || true)"
 grep -q "COMPACTION STALLED: k0's context compaction started 6 minutes ago and has not ended" <<<"$post" || fail "a compaction past its bound was not said on the board: $post"
 grep -q '^tag: hold' <<<"$post" || fail "the report is not a hold post: $post"
-grep -q '"tool":"compact_stalled","args":{"agent":"k0","by":"watchdog","limit_ms":300000},"result":{"ok":true,"open_seconds":' "$CS/traces/events.jsonl" \
-  || fail "the stalled compaction is not on the trace: $(grep compact_stalled "$CS/traces/events.jsonl")"
+grep -q '"tool":"compact_stalled","args":{"agent":"k0","by":"watchdog","limit_ms":300000},"result":{"ok":true,"open_seconds":' <<<"$(trace_of "$CS")" \
+  || fail "the stalled compaction is not on the trace: $(trace_of "$CS" | grep compact_stalled)"
 comp_once --compact-stall-sec 300
 [[ "$(ls "$CS"/threads/main/*.md | wc -l | tr -d ' ')" == 1 ]] || fail "the stalled compaction was reported twice"
 [[ "$(grep -c '^k0	' "$PROMPT_LOG")" -eq 0 ]] || fail "a seat with a stalled compaction was nudged"
@@ -305,7 +308,7 @@ HERDR_BIN="$TMP/bin/herdr-broken" SWARM_HUB_ADMIN="$HUB_DIR/admin.sock" SWARM_HU
 for _ in $(seq 100); do grep -q '1 post(s) you have not read' "$TMP/vm-prompts.txt" 2>/dev/null && break; sleep 0.05; done
 grep -q '1 post(s) you have not read' "$TMP/vm-prompts.txt" 2>/dev/null || fail "a VM agent's nudge did not arrive through the hub: $(cat "$TMP/vm-prompts.txt" 2>/dev/null)"
 [[ ! -s "$TMP/herdr-used.txt" ]] || fail "the watchdog asked Herdr about a VM agent: $(cat "$TMP/herdr-used.txt")"
-grep -q '"tool":"idle_nudge"' "$VM_SB/traces/events.jsonl" "$VM_SB/traces/system-spill.jsonl" 2>/dev/null || fail "the VM nudge is not recorded"
+{ cat "$VM_SB/traces/events.jsonl" "$VM_SB/traces/system-spill.jsonl" 2>/dev/null || true; } | grep -q '"tool":"idle_nudge"' || fail "the VM nudge is not recorded"
 pass "an agent in a microVM is nudged through the hub, and Herdr is never asked"
 
 printf '{"agents":{"v0":{"state":"working","connected":true}}}\n' > "$TMP/working.json"
@@ -347,7 +350,7 @@ HUB_PID="$(cat "$VM_SB/hub.pid")"
 kill -0 "$HUB_PID" 2>/dev/null || fail "hub.pid does not name the resumed hub"
 answer="$(node "$ROOT/scripts/vm-hub-send.mjs" "$HUB_DIR/admin.sock" '{"op":"status"}')"
 printf '%s' "$answer" | jq -e '.ok == true and (.agents | has("v0"))' >/dev/null || fail "the resumed hub does not know the run's agents: $answer"
-grep -q 'hub_restarted' "$VM_SB/traces/events.jsonl" "$HUB_DIR/hub-spill.jsonl" 2>/dev/null || fail "the restart is not on the record"
+{ cat "$VM_SB/traces/events.jsonl" "$HUB_DIR/hub-spill.jsonl" 2>/dev/null || true; } | grep -q 'hub_restarted' || fail "the restart is not on the record"
 pass "a hub that died is brought back by the watchdog with the run's agents, and the restart is on the record"
 
 # --- a host run's stop from outside the panes ---------------------------------
@@ -365,7 +368,7 @@ jq --arg t "$long_ago" '.stop_steer_at = $t' "$BS/budget.json" > "$BS/b.tmp" && 
 HERDR_BIN="$TMP/bin/herdr-broken" bash "$ROOT/scripts/idle-nudge.sh" --sandbox "$BS" --once >"$TMP/bs2.log" 2>&1
 [[ -f "$BS/done/SWARM_DONE" ]] || fail "past the grace period the watchdog did not stop the swarm: $(cat "$TMP/bs2.log")"
 grep -q '^by: harness' "$BS/done/SWARM_DONE" || fail "the sentinel is not the harness's"
-grep -q '"tool":"harness_stop"' "$BS/traces/events.jsonl" "$BS/traces/system-spill.jsonl" 2>/dev/null || fail "the stop is not on the record"
+{ cat "$BS/traces/events.jsonl" "$BS/traces/system-spill.jsonl" 2>/dev/null || true; } | grep -q '"tool":"harness_stop"' || fail "the stop is not on the record"
 pass "a host run past its wall clock is steered from outside the panes, and stopped by the harness after the grace period"
 
 # --- the operator hears the swarm's cap --------------------------------------------
@@ -402,11 +405,11 @@ HERDR_BIN="$TMP/bin/herdr-broken" bash "$ROOT/scripts/idle-nudge.sh" --sandbox "
 [[ "$(ls "$CV"/threads/main/*.md | wc -l | tr -d ' ')" == 1 ]] || fail "the coverage was posted twice"
 pass "past three quarters of the wall clock the inputs no command named are posted once, naming none that was named"
 
-# --- the fallback append ----------------------------------------------------
-# With no collector answering, a harness line goes to the trace only when the
-# trace has no chain. A trace that ends partway through a line is spilled
-# around too: the fragment is usually a chained line cut short, and `prev` is
-# its last key, so the last line alone does not show the chain.
+# --- no collector answering ---------------------------------------------------
+# A harness line the collector does not take goes to the system spill, never
+# into events.jsonl: not onto a trace that ends partway through a line (the
+# fragment is usually a chained line cut short), and not onto one with no
+# chain yet either, where nothing could say who wrote it.
 TORN_SB="$TMP/torn"
 mkdir -p "$TORN_SB/traces"
 printf '{"ts":"t1","agent":"a0","tool":"bash","args":{},"result":{"ok":true},"prev":""}\n{"ts":"t2","agent":"a0","tool":"bash","args":{"cmd":"cut sh' \
@@ -417,13 +420,14 @@ before="$(cksum < "$TORN_SB/traces/events.jsonl")"
 [[ "$(grep -c idle_nudge "$TORN_SB/traces/system-spill.jsonl" 2>/dev/null)" -eq 1 ]] || fail "the line refused by a torn tail is not in the spill"
 pass "a harness line spills rather than fusing onto a torn trace tail"
 
-# An unchained trace that ends in a newline still takes the append.
+# A trace with no chain yet, whole lines: the spill all the same.
 PLAIN_SB="$TMP/plain"
 mkdir -p "$PLAIN_SB/traces"
 printf '{"ts":"t1","agent":"a0","tool":"bash","args":{},"result":{"ok":true}}\n' > "$PLAIN_SB/traces/events.jsonl"
 ( source "$ROOT/scripts/lib/trace.sh"; trace_emit "$ROOT" "$PLAIN_SB" '{"ts":"t2","agent":"system","tool":"idle_nudge","args":{},"result":{"ok":true}}' )
-[[ "$(wc -l < "$PLAIN_SB/traces/events.jsonl" | tr -d ' ')" -eq 2 ]] || fail "an unchained trace no longer takes the fallback append"
-pass "an unchained trace with whole lines still takes the fallback append"
+[[ "$(wc -l < "$PLAIN_SB/traces/events.jsonl" | tr -d ' ')" -eq 1 ]] || fail "a line was appended to a trace with no chain: $(cat "$PLAIN_SB/traces/events.jsonl")"
+[[ "$(grep -c idle_nudge "$PLAIN_SB/traces/system-spill.jsonl" 2>/dev/null)" -eq 1 ]] || fail "the line is not in the spill"
+pass "a trace with no chain yet takes no appended line either: the harness's line is in the spill"
 
 # --- the lead register in the nudge -------------------------------------------
 # An idle agent is told what the register would have it take: the ready lead

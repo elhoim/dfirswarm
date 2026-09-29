@@ -22,6 +22,21 @@ export SWARM_RUNS_DIR="$TMP/runs"
 kick() { bash "$ROOT/scripts/swarm.sh" start --model solo/model --n 2 --no-start --goal-file "$HELLO" --toolbox off "$@" 2>&1; }
 sandbox_of() { jq -r --arg l "$1" '.runs[] | select(.label == $l) | .sandbox' "$TMP/runs/registry.json"; }
 id_of() { jq -r --arg l "$1" '.runs[] | select(.label == $l) | .id' "$TMP/runs/registry.json"; }
+# A harness line is on the run's trace in one of two files (scripts/lib/trace.sh):
+# the kickoff's line, taken by its collector, chains the record, and --no-start
+# then stops the collector, so the watchdog's lines are kept in
+# traces/system-spill.jsonl rather than put unchained into a chained record.
+# Where the collector's socket could not be reached (a path past the 104 bytes
+# macOS allows) the record stays unchained and the line is appended. Each file
+# on its own: BSD grep exits 2 when one of several files is missing, whatever
+# it matched in the others.
+trace_has() { # <sandbox> <pattern>
+  local f
+  for f in "$1/traces/events.jsonl" "$1/traces/system-spill.jsonl"; do
+    [[ -f "$f" ]] && grep -q -- "$2" "$f" && return 0
+  done
+  return 1
+}
 
 echo "# the kickoff"
 out="$(kick --cap-usd 5 --label p1)" || fail "a default kickoff was refused: $out"
@@ -124,13 +139,13 @@ done
 woken="$(grep -c 'The operator extended the run' "$PROMPT_LOG")"
 watch_once
 [[ "$(grep -c 'The operator extended the run' "$PROMPT_LOG")" -eq "$woken" ]] || fail "the seats were woken twice for one extension"
-grep -q '"tool":"resume_wake"' "$SB/traces/events.jsonl" || fail "the wake is not on the trace"
+trace_has "$SB" '"tool":"resume_wake"' || fail "the wake is not on the trace"
 # The pause, enforced from outside the panes: over the cap under cap-pause, the watchdog steers, and past the grace pauses.
 tmp="$(mktemp)"; jq --arg t "$(date -u -v-5M +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '5 minutes ago' +%Y-%m-%dT%H:%M:%SZ)" '.tokens = 90000 | .stop_steer_at = $t | .stop_reason = "cap"' "$SB/budget.json" > "$tmp" && mv "$tmp" "$SB/budget.json"
 watch_once
 [[ "$(jq -r '.paused.reason' "$SB/budget.json")" == cap ]] || fail "the watchdog did not pause the run past the grace: $(jq -c '{paused, stop_steer_at}' "$SB/budget.json")"
 [[ ! -f "$SB/done/SWARM_DONE" ]] || fail "a paused run got a sentinel"
-grep -q '"tool":"run_paused"' "$SB/traces/events.jsonl" || fail "the pause is not on the trace"
+trace_has "$SB" '"tool":"run_paused"' || fail "the pause is not on the trace"
 pass "the watchdog: a paused run's seats are held, woken once when an extension lifts the pause, and a cap past its grace pauses the run"
 
 echo "# diminishing returns"
@@ -138,7 +153,7 @@ tmp="$(mktemp)"; jq 'del(.paused) | .tokens = 0 | .started_at = "2026-01-01T00:0
 rm -f "$SB/traces/idle-nudge.yield"
 watch_once
 grep -q '"kind":"decision"' "$SB/operator-requests.jsonl" || fail "no stop was proposed after a window with nothing yielded"
-grep -q '"tool":"stop_proposed"' "$SB/traces/events.jsonl" || fail "the proposal is not on the trace"
+trace_has "$SB" '"tool":"stop_proposed"' || fail "the proposal is not on the trace"
 [[ ! -f "$SB/done/SWARM_DONE" && ! -f "$SB/done/STOPPED" ]] || fail "a proposal stopped the run"
 pass "diminishing returns: a stop is proposed to the operator (a request of kind decision), and nothing is stopped"
 
