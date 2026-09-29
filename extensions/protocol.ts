@@ -44,6 +44,7 @@ import { basename, dirname, join, posix, relative, resolve, sep } from "node:pat
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import * as NB from "./negative-bar.ts";
+import * as PR from "./preparation.ts";
 import { unexaminedHits, type SweepRecord, type UnexaminedHit } from "./store-sweep.ts";
 
 /**
@@ -11599,7 +11600,7 @@ async function recordAnswer(ctx: SwarmContext, input: LedgerInput): Promise<Ledg
  * the bar, never on a limitation that names it; the release counts it.
  */
 export type LedgerDefect = {
-  code: "no_answer" | "answer_support" | "answer_disputed" | "no_critic_act" | "open_contradiction" | "coverage_missing" | "negative_unreviewed" | "wording" | "coverage_stale" | "material_use" | "partial_output" | "evidence_stale" | "completeness_uncovered" | "sweep_pending" | "sweep_hits" | "sweep_partial";
+  code: "no_answer" | "answer_support" | "answer_disputed" | "no_critic_act" | "open_contradiction" | "coverage_missing" | "negative_unreviewed" | "wording" | "coverage_stale" | "material_use" | "partial_output" | "evidence_stale" | "completeness_uncovered" | "sweep_pending" | "sweep_hits" | "sweep_partial" | "preparation_pending";
   section?: string;
   seqs: number[];
   what: string;
@@ -11833,10 +11834,12 @@ export function noMoreEvidenceAskFix(coverage: number[], answer: number): string
  * lead_findings_uncited: findings and events tied to the question that
  * its answer does not reach: held by two seats under its leads, naming it,
  * or linked by rel to an entry its answer cites; or one seat's naming it
- * that another question's answer relies on. `seqs` opens with the
- * answer's.
+ * that another question's answer relies on. preparation_missing: a
+ * material negative resting on a source whose broad extraction has not
+ * produced (extensions/preparation.ts), where it is not held for it.
+ * `seqs` opens with the answer's.
  */
-export type LedgerWarning = { code: "no_acquisition_ask" | "partial_all_parts_established" | "lead_findings_uncited"; section: string; seqs: number[]; what: string; fix: string };
+export type LedgerWarning = { code: "no_acquisition_ask" | "partial_all_parts_established" | "lead_findings_uncited" | "preparation_missing"; section: string; seqs: number[]; what: string; fix: string };
 
 /** A warning in the words every point says it with: what, then the fix. */
 export function warningWords(w: Pick<LedgerWarning, "what" | "fix">): string {
@@ -11969,8 +11972,12 @@ export const CASE_PREMISE_WORDS = 'what the case brief or the goal states as giv
  * leads it was recorded under; without it (a lead register whose chain is
  * broken) the lead_findings_uncited warning looks only at what the ledger
  * itself ties to the question: an entry's `answers`, its `rel`.
+ * `preparation` is the sources' broad extractions as the store journal's
+ * receipts say them, and each coverage record's reach into those sources
+ * (extensions/preparation.ts preparationFacts); without it nothing is held
+ * or warned on a preparation.
  */
-export function ledgerGate(o: { entries: LedgerEntry[]; attestations: LedgerAttestation[]; disputes: LedgerDispute[]; sections: string[]; failed?: Map<number, string[]>; bar?: (sectionId: string) => { material: boolean; existence: boolean; completeness?: boolean }; partial?: Map<number, Array<{ ref: string; job: string; status: string }>>; sweeps?: readonly SweepRecord[]; moreEvidence?: "no" | "ask" | "yes"; underLeads?: ReadonlyMap<string, ReadonlyMap<number, readonly string[]>> }): LedgerGate {
+export function ledgerGate(o: { entries: LedgerEntry[]; attestations: LedgerAttestation[]; disputes: LedgerDispute[]; sections: string[]; failed?: Map<number, string[]>; bar?: (sectionId: string) => { material: boolean; existence: boolean; completeness?: boolean }; partial?: Map<number, Array<{ ref: string; job: string; status: string }>>; sweeps?: readonly SweepRecord[]; moreEvidence?: "no" | "ask" | "yes"; underLeads?: ReadonlyMap<string, ReadonlyMap<number, readonly string[]>>; preparation?: PR.PreparationFacts }): LedgerGate {
   const { entries } = o;
   const bySeq = new Map(entries.map((e) => [e.seq, e]));
   const replaced = supersededBy(entries);
@@ -12126,6 +12133,39 @@ export function ledgerGate(o: { entries: LedgerEntry[]; attestations: LedgerAtte
             named_by: [],
           });
         }
+      }
+    }
+    // A source's broad extraction (extensions/preparation.ts): a material
+    // negative that says the event did not happen, or whose coverage is
+    // complete over a source, holds while that source's broad extraction is
+    // planned or attempted (a wait on work already queued or offered, never
+    // a demand to find something); produced, partial, failed or declined
+    // releases it, and so does the operator's acceptance. Every other
+    // material negative on a source whose extraction has not produced is
+    // warned. Receipts and refs only.
+    if (bar?.material && result && (negativeLike || a.asserts_absence === true) && o.preparation?.sources.size) {
+      const covs = cited.filter((c) => c.kind === "coverage");
+      const found = PR.preparationFindings(a, covs, o.preparation);
+      const what = NB.resultWords(result);
+      if (found.hold.length) {
+        defects.push({
+          code: "preparation_pending",
+          section: sec.section,
+          seqs: [a.seq, ...[...new Set(found.hold.flatMap((h) => h.coverage))].sort((x, y) => x - y)],
+          what: `answer #${a.seq} (${sec.section}) is ${what} and ${found.hold.map((h) => `${h.claim === "absence" ? "says the event did not happen" : `rests on coverage record${h.coverage.length === 1 ? "" : "s"} ${h.coverage.map((n) => `E-${n}`).join(", ")}, complete`} over ${h.source.source.name}, whose broad extraction is not in yet: ${PR.sourceWords(h.source)}`).join("; and ")}`,
+          fix: `${found.hold.map((h) => PR.holdFix(h.source)).join("; ")}. Produced, partial, failed or declined releases the hold (record the answer again with supersedes=${a.seq} if what the extraction holds bears on it); or the operator accepts the question's limits (question accept)`,
+          named_by: [],
+        });
+      }
+      if (found.warn.length) {
+        const how = (w: PR.PreparationWarn) => (w.how === "named" ? "names" : w.how === "member" ? "names members of the catalogue of" : "rests on outputs made from");
+        warnings.push({
+          code: "preparation_missing",
+          section: sec.section,
+          seqs: [a.seq, ...[...new Set(found.warn.flatMap((w) => w.coverage))].sort((x, y) => x - y)],
+          what: `answer #${a.seq} (${sec.section}) is ${what}, weighed without a produced broad extraction of what it rests on: ${found.warn.map((w) => `coverage record${w.coverage.length === 1 ? "" : "s"} ${w.coverage.map((n) => `E-${n}`).join(", ")} ${how(w)} ${PR.sourceWords(w.source)}`).join("; ")}`,
+          fix: `weigh the answer against the extraction when it is in (catalog/gen/<generation>/, catalog_search), or say in its coverage record why it does not bear on the question; a failed or declined extraction is a limit on the search, said in the coverage record's skipped or failures`,
+        });
       }
     }
     // A question not determinable for want of a source: its coverage names

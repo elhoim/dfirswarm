@@ -494,9 +494,11 @@ const ADDITION_LINES = new Set(["evidence_added", "material_added", "addition_ap
  * job's state, the policy (the stop policy, the caps, a pause, the
  * contract and the run's case policy, docs/adr/0014), the operator's
  * decisions (the requests' chain less its delivery bookkeeping, and the
- * hosts allowed) and what was added to the run after its kickoff (each
- * addition committed, and whether it was applied). The review's acks are
- * not in it: a typed ack is not a change of state.
+ * hosts allowed), what was added to the run after its kickoff (each
+ * addition committed, and whether it was applied) and the sources' broad
+ * extractions (each preparation receipt, only where the run has one, so a
+ * run from before them keeps its revision). The review's acks are not in
+ * it: a typed ack is not a change of state.
  */
 export async function finishParts(sandboxRoot: string): Promise<Record<string, string>> {
   const out: Record<string, string> = {};
@@ -577,6 +579,21 @@ export async function finishParts(sandboxRoot: string): Promise<Record<string, s
     }
   }
   out.additions = P.sha256Hex(additions.join("\n"));
+  // The sources' broad extractions (extensions/preparation.ts): each receipt
+  // on the journal. The gate holds a negative on a source whose extraction is
+  // still planned or attempted, and a receipt written without a job changing
+  // state (a seat's or the operator's decline) must move the revision too.
+  const receipts: string[] = [];
+  for (const line of journal.split("\n")) {
+    if (!line.includes('"type":"preparation"')) continue;
+    try {
+      const j = JSON.parse(line) as { seq?: unknown; state?: unknown; capability?: unknown; source?: { sha256?: unknown } };
+      receipts.push(`${String(j.seq)}:${String(j.state)}:${String(j.capability)}:${String(j.source?.sha256)}`);
+    } catch {
+      // a torn last line: the journal's own check names it
+    }
+  }
+  if (receipts.length) out.preparation = P.sha256Hex(receipts.join("\n"));
   return out;
 }
 
@@ -967,11 +984,12 @@ async function readinessSections(sandboxRoot: string, s: L.LeadsSnapshot): Promi
 /**
  * The ledger gate's inputs as readiness reads them from a snapshot: the
  * acts on the ledger, each question's bar, the store sweeps, the case
- * policy (so a warning's fix reads as the answers check words it) and what
+ * policy (so a warning's fix reads as the answers check words it), what
  * the lead register recorded under each question's leads (none from a lead
- * register whose chain is broken). One reading for readiness and for every
- * point a warning is delivered at (warningsAt), so no two say different
- * things.
+ * register whose chain is broken) and the sources' broad extractions (the
+ * store journal's preparation receipts, extensions/preparation.ts). One
+ * reading for readiness and for every point a warning is delivered at
+ * (warningsAt), so no two say different things.
  */
 async function gateInputs(sandboxRoot: string, s: L.LeadsSnapshot): Promise<Omit<Parameters<typeof P.ledgerGate>[0], "sections">> {
   const attestations = await P.readAttestations(sandboxRoot).catch(() => [] as P.LedgerAttestation[]);
@@ -984,7 +1002,8 @@ async function gateInputs(sandboxRoot: string, s: L.LeadsSnapshot): Promise<Omit
   const moreEvidence = await import("./requests.ts").then((R) => R.casePolicyMoreEvidence(sandboxRoot)).catch(() => "ask" as const);
   // What the lead register recorded under each question's leads: a finding two seats hold there that an answer leaves out is warned of.
   const underLeads = s.state.chain.ok ? L.questionLeadEntries(s.state) : undefined;
-  return { entries: s.ledger.entries, attestations, disputes, bar, sweeps, moreEvidence, ...(underLeads ? { underLeads } : {}) };
+  const preparation = await import("./preparation.ts").then((PR) => PR.preparationFacts(sandboxRoot, s.ledger.entries)).catch(() => undefined);
+  return { entries: s.ledger.entries, attestations, disputes, bar, sweeps, moreEvidence, ...(underLeads ? { underLeads } : {}), ...(preparation ? { preparation } : {}) };
 }
 
 /**

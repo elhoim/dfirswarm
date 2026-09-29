@@ -399,21 +399,24 @@ export async function checkLedgerAnswers(sandbox: string, wanted: string[], exis
   const moreEvidence = await import("../extensions/requests.ts").then((R) => R.casePolicyMoreEvidence(S)).catch(() => "ask" as const);
   // What the lead register recorded under each question's leads: a finding two seats hold there that the answer leaves out is a warning. A register whose chain is broken says nothing here (the finish gate names it).
   const underLeads = await leadEntries(S);
-  const gate = ledgerGate({ entries, attestations, disputes, sections, failed: jobStatuses(statuses, entries), bar, partial: partialOutputCites(entries, producerOf), sweeps, moreEvidence, ...(underLeads ? { underLeads } : {}) });
+  // The sources' broad extractions, as the store journal's receipts say them (extensions/preparation.ts): a negative that claims absence over one still under way holds; any other on one not produced is warned.
+  const preparation = await import("../extensions/preparation.ts").then((PR) => PR.preparationFacts(S, entries)).catch(() => undefined);
+  const gate = ledgerGate({ entries, attestations, disputes, sections, failed: jobStatuses(statuses, entries), bar, partial: partialOutputCites(entries, producerOf), sweeps, moreEvidence, ...(underLeads ? { underLeads } : {}), ...(preparation ? { preparation } : {}) });
   const bySeq = new Map(entries.map((e) => [e.seq, e]));
   const replaced = supersededBy(entries);
   const limits = entries.filter((e) => e.kind === "limitation" && !replaced.has(e.seq));
   const logs = await committedLogHashes(S);
   // What the operator's standing acceptance of a question excuses on it
-  // (acceptanceExcuses): a partial store sweep, and evidence added before
-  // the acceptance. Every other defect of the negative bar still holds.
+  // (acceptanceExcuses): a partial store sweep, evidence added before the
+  // acceptance, and a source's broad extraction still under way. Every
+  // other defect of the negative bar still holds.
   const acceptedAt = new Map<string, number | null>();
   if (register && Q) {
     const L = await import("../extensions/leads.ts");
     const view = L.ledgerView(entries, disputes);
     for (const q of register.state.questions.values()) if (q.accepted && Q.acceptanceStands(q, view)) acceptedAt.set(`question:${q.section}`, q.accepted.ledger_seq ?? null);
   }
-  const defects = gate.defects.filter((d) => !(d.section && acceptedAt.has(d.section) && (d.code === "sweep_partial" || d.code === "evidence_stale") && acceptanceExcuses(d, acceptedAt.get(d.section))));
+  const defects = gate.defects.filter((d) => !(d.section && acceptedAt.has(d.section) && (d.code === "sweep_partial" || d.code === "evidence_stale" || d.code === "preparation_pending") && acceptanceExcuses(d, acceptedAt.get(d.section))));
   for (const section of sections) {
     const a = gate.answers[section];
     const id = sectionAnswersId(section);
@@ -642,7 +645,7 @@ export async function checkLedgerAnswers(sandbox: string, wanted: string[], exis
   }
   const count = (o: LedgerOutcome) => Object.values(outcomes).filter((x) => x === o).length;
   lines.push(`sections: ${count("answered")} answered, ${count("limited")} examination-limited, ${count("inconclusive")} inconclusive, ${count("unanswered")} unanswered; ${defects.length} defect${defects.length === 1 ? "" : "s"}, ${defects.length - open.length} named by a limitation, ${open.length} open`);
-  if (open.length) lines.push("This check passes once each open defect is fixed, or named by a standing limitation (citing E-<seq> of the answer, or with answers=[<section>] for a missing one); a named defect is still a defect: the finish line holds done on it under every stop policy (a question ends on a disposition under the bar, never on a limitation that names it), and the release counts it. The negative bar's defects (coverage_missing, coverage_stale, negative_unreviewed, wording, evidence_stale, completeness_uncovered, and the store sweep's sweep_pending, sweep_hits and sweep_partial), an answer resting on material the case policy forbids (material_use) and an entry citing a cancelled or stopped job's output with no word on it (partial_output) are fixed, never named.");
+  if (open.length) lines.push("This check passes once each open defect is fixed, or named by a standing limitation (citing E-<seq> of the answer, or with answers=[<section>] for a missing one); a named defect is still a defect: the finish line holds done on it under every stop policy (a question ends on a disposition under the bar, never on a limitation that names it), and the release counts it. The negative bar's defects (coverage_missing, coverage_stale, negative_unreviewed, wording, evidence_stale, completeness_uncovered, and the store sweep's sweep_pending, sweep_hits and sweep_partial), an answer resting on material the case policy forbids (material_use) and an entry citing a cancelled or stopped job's output with no word on it (partial_output) are fixed, never named. A negative held on a source's broad extraction (preparation_pending) is released when that extraction is produced, partial, failed or declined, or when the operator accepts the question's limits.");
   return { ok: open.length === 0, lines, outcomes, results, defects, withdrawn, external: externalFlags, best_candidate: bestCandidate, dispositions, warnings };
 }
 

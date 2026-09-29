@@ -558,7 +558,8 @@ async function loadRun(sandboxArg: string, opts: ReportBodyOptions): Promise<Run
   const bar = await sectionBars(sandbox).catch(() => (() => ({ material: true, existence: false })) as (id: string) => { material: boolean; existence: boolean });
   const { producerOf } = await (await import("./output-hygiene.ts")).producerIndex(sandbox).catch(() => ({ producerOf: () => null as null }));
   const sweeps = await readSweeps(sandbox).catch(() => [] as SweepRecord[]);
-  const gate = hasAnswers ? ledgerGate({ entries, attestations, disputes, sections, failed: unqualified, bar, partial: partialOutputCites(entries, producerOf), sweeps }) : null;
+  const preparation = hasAnswers ? await import("../extensions/preparation.ts").then((PR) => PR.preparationFacts(sandbox, entries)).catch(() => undefined) : undefined;
+  const gate = hasAnswers ? ledgerGate({ entries, attestations, disputes, sections, failed: unqualified, bar, partial: partialOutputCites(entries, producerOf), sweeps, ...(preparation ? { preparation } : {}) }) : null;
 
   const text = async (rel: string) => (await readFile(join(sandbox, rel), "utf8").catch(() => ""));
   const ledgerChain = verifyLedgerChain(await text("ledger/entries.jsonl"));
@@ -2704,6 +2705,8 @@ function resolveWords(d: LedgerGate["defects"][number]): string {
       return `each object the store sweep found what was looked for in examined, and the search record for ${where} recorded again naming it with what it showed, or the answer revised on what those objects show. A limitation does not resolve it.`;
     case "sweep_partial":
       return `the store sweep run again within a larger budget over what it left unsearched, or the question's limits accepted by the operator.`;
+    case "preparation_pending":
+      return `the broad extraction of the source ${where}'s negative claims absence over (a parse of the whole source that a pack declares) run to an outcome: produced, partial, failed or declined, each on the record with what it does not hold; or the question's limits accepted by the operator.`;
     case "completeness_uncovered":
       return `a search record for ${where} that says what was searched and which parts of the stored data it reached (live, deleted, unallocated, slack, secondary copies), and the answer recorded again on it. A question that asks for every item is not answered by the items found alone.`;
     default:

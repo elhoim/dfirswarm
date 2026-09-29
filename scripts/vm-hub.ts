@@ -1201,6 +1201,38 @@ export class Hub {
     }
   }
 
+  /** What a round of preparation said it could not do, each said once (the hub's log). */
+  private readonly preparationSaid = new Set<string>();
+
+  /**
+   * The sources' broad extractions (scripts/preparation.ts): the receipts the
+   * jobs and leads call for, the offers due, the leads whose extraction
+   * reached an outcome closed. On every round, and once the job service is
+   * up; one round at a time.
+   */
+  private preparationRound: Promise<void> | null = null;
+  private async reconcilePreparation(): Promise<void> {
+    const svc = this.jobService;
+    if (!svc) return;
+    if (this.preparationRound) return this.preparationRound;
+    this.preparationRound = (async () => {
+      const PREP = await import("./preparation.ts");
+      const r = await PREP.reconcilePreparation(svc, this.cfg.sandbox);
+      for (const n of r.notes) {
+        if (this.preparationSaid.has(n)) continue;
+        this.preparationSaid.add(n);
+        this.log(`preparation: ${n}`);
+      }
+      if (r.opened.length) this.log(`preparation: offered ${r.opened.join(", ")}`);
+      if (r.closed.length) this.log(`preparation: closed ${r.closed.join(", ")} (their extraction reached an outcome)`);
+    })()
+      .catch((err: Error) => this.log(`preparation: ${err.message}`))
+      .finally(() => {
+        this.preparationRound = null;
+      });
+    return this.preparationRound;
+  }
+
   private historyQuota(): number {
     return this.cfg.historyQuotaBytes ?? historyQuotaBytes();
   }
@@ -1277,6 +1309,8 @@ export class Hub {
     if (this.cfg.jobs && this.cfg.run) await this.startJobs(this.cfg.jobs, this.cfg.run);
     // What a crash left committed and not yet applied or delivered to the operator: now.
     void this.reconcileAdditions().then(() => this.fireRequests());
+    // The kickoff's broad extractions: receipts for what it queued, offers for the rest.
+    void this.reconcilePreparation();
     this.writeStatus();
     if (this.cfg.backstop !== false) {
       this.backstopTimer = setInterval(() => void this.backstop().catch(() => undefined), BACKSTOP_INTERVAL_MS);
@@ -2474,6 +2508,8 @@ export class Hub {
     await this.reconcileAdditions();
     await this.fireRequests();
     await this.catalogueAddedEvidence().catch((err: Error) => this.log(`catalogue of added evidence: ${err.message}`));
+    // The sources' broad extractions: receipts, offers and closes due since the last round.
+    await this.reconcilePreparation();
     // The dynamic network's round: grants whose lead closed or whose job
     // ended revoked, captures put on the ledger, contamination recorded.
     if (readCasePolicy(S).network !== "closed") {

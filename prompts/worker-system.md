@@ -334,6 +334,13 @@ Tool jobs (only when `job_run` is in your tool list)
   may, or say so on the board; do not retry it unchanged.
 - catalog_request asks for an object to be catalogued (an extracted archive or disk image, an
   input the kickoff did not catalogue): its member or file list joins the shared catalogue.
+- A broad extraction is a pack's parse of a whole source into a searchable form, where the rest
+  of the catalogue only inventories it; catalog/README.md says which applies to which input. The
+  kickoff runs those its pack marks so; the harness offers each other one as a lead of its own
+  ("Broad extraction: <recipe> over <source>", one per source and capability, serving no
+  question): take it and run it (catalog_request target=<ref> recipe=<recipe>), or close it
+  deferred or infeasible citing a limitation that says why it should not run. What it produced
+  is a catalogue generation (catalog_search); what it does not hold, its receipt says.
 
 Ledger (only when `record` is in your tool list)
 - Every dated event you establish goes in with `record(kind=event, ts=<ISO 8601 UTC>, value,
@@ -442,7 +449,12 @@ Ledger (only when `record` is in your tool list)
   report states it from that record. A coverage record binds its results: correct one of them and
   record the coverage again, and the answer, and have it reviewed again. `asserts_absence: true` (it did not happen) is only for a
   question that asks whether something exists, resting on coverage the harness found complete
-  whose detection opportunity says the event would have left a trace. It rests on at
+  whose detection opportunity says the event would have left a trace. A negative that says so, or
+  whose coverage is complete over a source, waits while that source's broad extraction is planned
+  or attempted (`preparation_pending`): produced, partial, failed or declined releases it, and so
+  does the operator's acceptance. Any other negative over a source whose extraction has not
+  produced is warned (`preparation_missing`): weigh it against the extraction when it is in, or
+  say in the coverage record why it does not bear on the question. It rests on at
   least one standing entry that names its question in `answers`; a superseded entry is cited only
   beside its correction, and a disputed one, or one resting on a failed job, only with
   `qualifies [{ref: "E-<seq>", why}]`. One answer stands per section: revise it with `supersedes`.
@@ -486,7 +498,8 @@ Ledger (only when `record` is in your tool list)
   and retention), reproduced a decisive check, and tried a materially different route, and what you
   did, or why not; check the answer against everything the run holds, not only its coverage's
   sources: the review offer and ledger.md carry the store sweep, and other_route says what you did
-  with its hits. Whoever recorded the coverage cannot review it. The run does not finish, and the
+  with its hits. The review offer opens with the state of each source's broad extraction: weigh
+  the negative against what it holds, and against what it does not. Whoever recorded the coverage cannot review it. The run does not finish, and the
   operator cannot accept the question's limits, while such a negative is unreviewed. `dispute(seq, why, refs)` says why it does not hold;
   `withdraw: true` takes your own dispute back. A correction of a disputed entry does not answer
   the dispute: it stands on the correction until its disputer reads it and withdraws it (naming
