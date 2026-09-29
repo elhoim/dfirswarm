@@ -955,12 +955,41 @@ operator_audit() { # <command> [args...]
 # the line carries no token and the collector marks it unverified, as it
 # does a `swarm.sh reap` line: the harness cannot prove who typed it.
 operator_trace() { # <sandbox> <command> [args...]
-  local sandbox="$1" cmd="$2" line
-  shift 2
+  local sandbox="$1" line
   [[ -n "$sandbox" && -d "$sandbox/traces" ]] && declare -F trace_emit >/dev/null || return 0
-  line="$(operator_identity_json | jq -c --arg ts "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" --arg cmd "$cmd" --argjson argv "$(redact_args_json "$@")" \
-    '{ts: $ts, agent: "system", tool: "operator_action", args: ({command: $cmd, argv: $argv} + .), result: {ok: true}}')" || return 0
+  shift
+  line="$(operator_trace_line "$@")" || return 0
   trace_emit "$ROOT" "$sandbox" "$line" >/dev/null 2>&1 || true
+}
+operator_trace_line() { # <command> [args...]
+  local cmd="$1"
+  shift
+  operator_identity_json | jq -c --arg ts "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" --arg cmd "$cmd" --argjson argv "$(redact_args_json "$@")" \
+    '{ts: $ts, agent: "system", tool: "operator_action", args: ({command: $cmd, argv: $argv} + .), result: {ok: true}}'
+}
+
+# The kickoff's own line, which is also the proof that this run's record can
+# be written at all: the collector (through the gate, where there is one)
+# must take it, before any pane, hub or VM starts. Every socket is bound and
+# dialled from inside its own directory, so a deep runs directory is no
+# reason for it to fail; if it does fail, the start is refused rather than
+# begun on a record the harness cannot write to. A line the collector does
+# not take is kept in the system spill. <sandbox> <command> [args...]; 1, with why on
+# stderr, when the collector could not be reached.
+kickoff_trace() {
+  local sandbox="$1" line why
+  shift
+  line="$(operator_trace_line "$@")" || { echo "the kickoff's line could not be made" >&2; return 1; }
+  local rc=0
+  why="$(printf '%s' "$line" | node "$ROOT/scripts/trace-emit.mjs" "$sandbox" 2>&1 >/dev/null)" || rc=$?
+  [[ "$rc" -eq 0 ]] && return 0
+  printf '%s\n' "$line" >> "$sandbox/traces/system-spill.jsonl"
+  # Reached, and the line refused (a trace that ends in a torn line, say):
+  # the collector answers, which is what this asks; the record's state is
+  # custody's to report.
+  [[ "$rc" -eq 3 ]] && return 0
+  printf '%s\n' "${why:-the collector did not answer}" >&2
+  return 1
 }
 
 # The harness's own line on a live run's trace: a reserved tool name
@@ -5658,8 +5687,10 @@ console.log(r.ok ? "" : r.reason);' "$_gp" "$_gk" 2>/dev/null || echo "could not
     # kickoff holds the harness's token, so this line is attributed.
     # A resume is the operator's resume on the record, with the words the
     # operator's audit holds for it, not a start it never typed.
+    local kickoff_why=""
     if [[ -n "$resume_of" ]]; then
-      SWARM_TRACE_TOKEN="$(trace_token_for system)" SWARM_TRACE_SOCKET="${trace_gate:-}" operator_trace "$sandbox" resume ${RESUME_ARGS[@]+"${RESUME_ARGS[@]}"}
+      kickoff_why="$(SWARM_TRACE_TOKEN="$(trace_token_for system)" SWARM_TRACE_SOCKET="${trace_gate:-}" kickoff_trace "$sandbox" resume ${RESUME_ARGS[@]+"${RESUME_ARGS[@]}"} 2>&1)" \
+        || trace_unreachable "$sandbox" "${trace_gate:-$trace_socket}" "$kickoff_why"
       # And the harness's own line that the run goes on (the stop policy's
       # reserved run_resumed): what it resumed from, the segment, and the
       # follow-ups the resume took up as its work.
@@ -5667,7 +5698,8 @@ console.log(r.ok ? "" : r.reason);' "$_gp" "$_gk" 2>/dev/null || echo "could not
         "$(jq -cn --arg from "${RESUME_FROM:-}" --arg seg "${RESUME_SEGMENT:-}" --arg fu "${RESUME_FOLLOW_UPS:-}" \
           '{from: (if $from == "" then null else $from end), segment: ($seg | tonumber? // null), follow_ups: ($fu | split(",") | map(select(. != "")))}')"
     else
-      SWARM_TRACE_TOKEN="$(trace_token_for system)" SWARM_TRACE_SOCKET="${trace_gate:-}" operator_trace "$sandbox" start ${start_args[@]+"${start_args[@]}"}
+      kickoff_why="$(SWARM_TRACE_TOKEN="$(trace_token_for system)" SWARM_TRACE_SOCKET="${trace_gate:-}" kickoff_trace "$sandbox" start ${start_args[@]+"${start_args[@]}"} 2>&1)" \
+        || trace_unreachable "$sandbox" "${trace_gate:-$trace_socket}" "$kickoff_why"
     fi
   elif [[ "$isolation" == "microvm" ]]; then
     # A pane on the host falls back to appending the file itself. A VM
@@ -7495,6 +7527,15 @@ daemon_pid_ours() { # <pid> <script> <sandbox>
   [[ -n "$1" && "$1" =~ ^[0-9]+$ ]] && kill -0 "$1" 2>/dev/null || return 1
   cmd="$(ps -ww -o command= -p "$1" 2>/dev/null)" || return 1
   [[ "$cmd" == *"$2"* && "$cmd" == *"$3"* ]]
+}
+
+# The collector came up and did not take the kickoff's own line: refused,
+# before anything else starts. <sandbox> <socket> <why>
+trace_unreachable() {
+  local sandbox="$1" socket="$2" why="$3" LC_ALL=C
+  echo "BLOCKER: the run's trace collector came up, but the kickoff's own line did not reach it through $socket (${#socket} bytes): ${why:-no reason given}. Nothing was started: a run whose record the harness cannot write through its collector is not one to begin a case on. If the reason is the socket's path, a Unix socket takes at most 103 bytes on macOS and 107 on Linux; set SWARM_RUNS_DIR (or --sandbox) to a shorter directory. See $sandbox/traces/collector.log." >&2
+  stop_sandbox_daemons "$sandbox"
+  exit 1
 }
 
 stop_sandbox_daemons() {

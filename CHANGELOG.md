@@ -6,6 +6,35 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Fixed: only the collector writes the trace, and a deep runs directory no longer keeps its lines out
+
+A Unix socket path takes at most 103 bytes on macOS and 107 on Linux. The
+collector, the gate and the nudge broker bind from inside their directory,
+but their clients dialled the full path, or one relative to wherever they
+ran: under a deep `SWARM_RUNS_DIR` the kickoff's own line, the watchdogs'
+and the operator's could not reach the collector, and on Linux the gate
+could not forward a single pane's line. The shell's fallback then appended
+a line to `events.jsonl` whenever the record was not chained yet, so a run
+could begin with lines no one could vouch for, and a line appended between
+its look at the tail and the collector's next write broke the chain.
+
+- `scripts/trace-emit.mjs` dials the socket from inside its directory, and
+  says why it failed: exit 1 when the collector could not be reached, 3 when
+  it answered and refused the line. The gate forwards from the collector's
+  directory; the operator CLI's harness lines (`emitHarnessLine`) go
+  through `trace-emit.mjs` when even a relative path is too long.
+- A line the collector does not take, for any reason, goes to
+  `traces/system-spill.jsonl`, never into `events.jsonl`: the shell's
+  `trace_emit`, the CLI's harness lines, and now the model gateway's and
+  the fetch service's, which dropped it. The provider-limit rule reads the
+  watchdog's nudges and wakes from the spill as well.
+- The kickoff's own line is the proof that the record can be written: when
+  the collector came up and cannot be reached, the start is refused, saying
+  why, before any pane, hub or VM starts. A collector that answers and
+  refuses the line (a trace that ends in a torn line) is not refused here.
+- `tests/kickoff-guards.test.sh` runs a kickoff under a runs directory where
+  no socket path fits (130 bytes).
+
 ### Fixed: a short sensitive value is not taken for the digits inside a hash
 
 `--redact` looked for a sensitive entry's words anywhere in a text, so a

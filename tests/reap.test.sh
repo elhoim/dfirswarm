@@ -12,6 +12,9 @@ trap 'rm -rf "$SB"' EXIT
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 pass() { echo "ok - $*"; }
+# The run's trace as the harness keeps it: events.jsonl, and the system spill,
+# where a harness line the collector did not take is kept (scripts/lib/trace.sh).
+trace_of() { local f; for f in "$1/traces/events.jsonl" "$1/traces/system-spill.jsonl"; do [[ -f "$f" ]] && cat "$f"; done; return 0; }
 
 mkdir -p "$SB/threads/main" "$SB/locks" "$SB/done/agents" "$SB/inbox/agent00" "$SB/inbox/agent01" "$SB/inbox/agent02" "$SB/work" "$SB/traces"
 cat > "$SB/team.json" <<'EOF'
@@ -67,29 +70,29 @@ grep -q "^locks_released: 1" "$SB/done/agents/agent01.dead" || fail ".dead shoul
 [[ -e "$SB/done/agents/agent00.dead" ]] && fail "agent00 must stay alive"
 [[ -e "$SB/done/agents/agent02.dead" ]] && fail "done agent02 must not be reaped"
 [[ -d "$SB/locks/.table.lock" ]] && fail "table lock left behind"
-reaped_lines="$(jq -c 'select(.tool == "reap")' "$SB/traces/events.jsonl")"
+reaped_lines="$(trace_of "$SB" | jq -c 'select(.tool == "reap")')"
 [[ "$(wc -l <<< "$reaped_lines")" -eq 1 ]] || fail "expected exactly one reaped event"
-jq -e 'select(.tool == "reap")
+trace_of "$SB" | jq -e 'select(.tool == "reap")
   | (.agent == "agent01")
   and (keys == ["agent","args","result","tool","ts"])
   and (.args.reason == "stall") and (.args.timeout_seconds == 300)
   and (.result.reaped == true) and (.result.locks_released == 1) and (.result.idle_seconds >= 600)' \
-  "$SB/traces/events.jsonl" >/dev/null || fail "reap event schema mismatch (expect ts, agent, tool, args, result)"
+  >/dev/null || fail "reap event schema mismatch (expect ts, agent, tool, args, result)"
 pass "stale agent reaped, lock released, event appended"
 
 echo "# second run (idempotent)"
-before="$(cat "$SB/traces/events.jsonl")"
+before="$(trace_of "$SB")"
 out="$(bash "$ROOT/scripts/reap.sh" --sandbox "$SB" --timeout 300)"
 echo "$out"
 grep -q "dead agent01: already reaped" <<< "$out" || fail "second run should skip agent01"
-[[ "$(cat "$SB/traces/events.jsonl")" == "$before" ]] || fail "second run appended events"
+[[ "$(trace_of "$SB")" == "$before" ]] || fail "second run appended events"
 pass "second run is a no-op"
 
 echo "# tiny timeout reaps the live agent too, exactly once"
 sleep 1.1
 bash "$ROOT/scripts/reap.sh" --sandbox "$SB" --timeout 0 --quiet >/dev/null
 [[ -f "$SB/done/agents/agent00.dead" ]] || fail "agent00 should be reaped at timeout 0"
-[[ "$(jq -c 'select(.tool == "reap" and .args.reason == "stall")' "$SB/traces/events.jsonl" | wc -l)" -eq 2 ]] || fail "expected two reaped events total"
+[[ "$(trace_of "$SB" | jq -c 'select(.tool == "reap" and .args.reason == "stall")' | wc -l)" -eq 2 ]] || fail "expected two reaped events total"
 # agent02 was done and both others are now dead, with no sentinel: the stop is recorded too.
 [[ -f "$SB/done/ALL_AGENTS_DEAD" ]] || fail "every seat is marked and there is no sentinel: expected done/ALL_AGENTS_DEAD"
 pass "timeout 0 reaps remaining agent once"
@@ -165,14 +168,14 @@ out="$(HERDR_BIN="$SB4/bin/herdr" bash "$ROOT/scripts/reap.sh" --sandbox "$SB4" 
 grep -qx 'reason: all_agents_dead' "$SB4/done/ALL_AGENTS_DEAD" || fail "the marker should carry reason all_agents_dead: $(cat "$SB4/done/ALL_AGENTS_DEAD")"
 [[ -e "$SB4/done/SWARM_DONE" ]] && fail "a crashed run must not get done/SWARM_DONE"
 grep -q "done/ALL_AGENTS_DEAD" <<< "$out" || fail "the stop should be printed even under --quiet: $out"
-[[ "$(grep -c '"reason":"all_agents_dead"' "$SB4/traces/events.jsonl")" -eq 1 ]] || fail "one all_agents_dead line on the trace: $(cat "$SB4/traces/events.jsonl")"
+[[ "$(trace_of "$SB4" | grep -c '"reason":"all_agents_dead"')" -eq 1 ]] || fail "one all_agents_dead line on the trace: $(trace_of "$SB4")"
 # The harness's own line: the name the collector keys the system's token to,
 # not a name nobody holds a token for.
-[[ "$(grep '"reason":"all_agents_dead"' "$SB4/traces/events.jsonl" | jq -r .agent)" == system ]] || fail "the all_agents_dead line is not the system's: $(cat "$SB4/traces/events.jsonl")"
+[[ "$(trace_of "$SB4" | grep '"reason":"all_agents_dead"' | jq -r .agent)" == system ]] || fail "the all_agents_dead line is not the system's: $(trace_of "$SB4")"
 first="$(cat "$SB4/done/ALL_AGENTS_DEAD")"
 HERDR_BIN="$SB4/bin/herdr" bash "$ROOT/scripts/reap.sh" --sandbox "$SB4" --timeout 300 --quiet >/dev/null
 [[ "$(cat "$SB4/done/ALL_AGENTS_DEAD")" == "$first" ]] || fail "a second run rewrote the marker"
-[[ "$(grep -c '"reason":"all_agents_dead"' "$SB4/traces/events.jsonl")" -eq 1 ]] || fail "a second run traced the stop again"
+[[ "$(trace_of "$SB4" | grep -c '"reason":"all_agents_dead"')" -eq 1 ]] || fail "a second run traced the stop again"
 pass "every agent dead and no sentinel: done/ALL_AGENTS_DEAD once, never SWARM_DONE"
 
 # await-done reads it as a failure at once, not "DoD met" and not a timeout.

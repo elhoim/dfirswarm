@@ -27,7 +27,7 @@
  *       the wait a provider's error text states, as JSON (null when none)
  */
 import { existsSync } from "node:fs";
-import { open } from "node:fs/promises";
+import { open, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import * as P from "../extensions/protocol.ts";
@@ -311,7 +311,9 @@ async function* linesBackward(path: string, chunk: number): AsyncGenerator<strin
  * when a seat's start (agent_start) comes before any turn of its own
  * (neither leaves the run to pause); otherwise at the row before each seat's
  * errors in a row, or at its start. A line cut short (one still being
- * written) is passed over.
+ * written) is passed over. The watchdog's nudges and wakes that the
+ * collector did not take are in traces/system-spill.jsonl (scripts/lib/
+ * trace.sh): they are read from there too, in their place by time.
  */
 export async function readSeatRows(sandbox: string, seats: string[], since: number, o: { chunk?: number } = {}): Promise<TraceRow[]> {
   const want = new Set(seats);
@@ -322,6 +324,8 @@ export async function readSeatRows(sandbox: string, seats: string[], since: numb
   const missed = new Set<string>();
   const stirred = new Set<string>();
   const out: TraceRow[] = [];
+  const spilled = await spilledPrompts(sandbox, want);
+  for (const r of spilled) if (r.tool === "resume_wake" && r.at > since) (r.result?.ok === true ? woke : missed).add(String(r.args?.agent ?? ""));
   for await (const line of linesBackward(join(sandbox, P.EVENTS_REL), o.chunk ?? 256 * 1024)) {
     if (!line.trim()) continue;
     let e: { agent?: string; tool?: string; ts?: string; recv_ts?: string; args?: Record<string, unknown>; result?: Record<string, unknown> };
@@ -364,7 +368,33 @@ export async function readSeatRows(sandbox: string, seats: string[], since: numb
     }
     if (settled.size === want.size) break;
   }
-  return out.reverse();
+  const rows = out.reverse();
+  for (const r of spilled) {
+    let at = rows.length;
+    while (at > 0 && rows[at - 1].at > r.at) at -= 1;
+    rows.splice(at, 0, r);
+  }
+  return rows;
+}
+
+/** The watchdog's nudges and wakes about these seats that went to the system spill, oldest first. */
+async function spilledPrompts(sandbox: string, want: Set<string>): Promise<TraceRow[]> {
+  const text = await readFile(join(sandbox, P.SYSTEM_SPILL_REL), "utf8").catch(() => "");
+  const rows: TraceRow[] = [];
+  for (const line of text.split("\n")) {
+    if (!line.trim()) continue;
+    let e: { agent?: string; tool?: string; ts?: string; args?: Record<string, unknown>; result?: Record<string, unknown> };
+    try {
+      e = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (e.agent !== "system" || (e.tool !== "idle_nudge" && e.tool !== "resume_wake") || !want.has(String(e.args?.agent ?? ""))) continue;
+    const at = Date.parse(e.ts ?? "");
+    if (!Number.isFinite(at)) continue;
+    rows.push({ agent: "system", tool: e.tool, at, ...(e.args ? { args: e.args } : {}), ...(e.result && typeof e.result === "object" ? { result: e.result } : {}) });
+  }
+  return rows.sort((a, b) => a.at - b.at);
 }
 
 /** The seats still in the run: on the team, with no done or dead marker. */

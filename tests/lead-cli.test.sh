@@ -11,6 +11,9 @@ TMP="$(mktemp -d "${TMPDIR:-/tmp}/lead-cli.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
 fail() { echo "FAIL: $*" >&2; exit 1; }
 pass() { echo "ok - $*"; }
+# The run's trace as the harness keeps it: events.jsonl, and the system spill,
+# where a harness line the collector did not take is kept (scripts/lib/trace.sh).
+trace_of() { local f; for f in "$1/traces/events.jsonl" "$1/traces/system-spill.jsonl"; do [[ -f "$f" ]] && cat "$f"; done; return 0; }
 
 RUNS="$TMP/runs"
 mkdir -p "$RUNS"
@@ -55,7 +58,7 @@ grep -q 'OPERATOR NOTE on L-1: The host is allowed now' "$post" || fail "the pos
 grep -q 'lead_claim L-1' "$post" || fail "the post does not say the lead is open again"
 grep -q '"host":"paste.example.org"' "$VM/operator-hosts.jsonl" || fail "the host is not in operator-hosts.jsonl"
 grep -q '"ev":"note"' "$VM/leads/leads.jsonl" && grep -q '"ev":"reopen"' "$VM/leads/leads.jsonl" || fail "the note and the reopen are not events on the register"
-grep -q '"tool":"operator_action"' "$VM/traces/events.jsonl" && grep -q '"command":"lead"' "$VM/traces/events.jsonl" || fail "the note is not on the trace"
+grep -q '"tool":"operator_action","args":{"command":"lead"' <<<"$(trace_of "$VM")" || fail "the note is not on the trace"
 grep -q '"lead"' "$RUNS/operator-audit.jsonl" || fail "the note is not on the operator's record"
 pass "lead note records the answer, reopens the lead, allows the host for jobs, and posts it to the lead's holder"
 

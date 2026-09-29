@@ -20,6 +20,9 @@ TMP="$(mktemp -d "${TMPDIR:-/tmp}/provider-pause.XXXXXX")"
 trap 'chmod -R u+w "$TMP" 2>/dev/null; rm -rf "$TMP"' EXIT
 fail() { echo "FAIL: $*" >&2; exit 1; }
 pass() { echo "ok - $*"; }
+# The run's trace as the harness keeps it: events.jsonl, and the system spill,
+# where a harness line the collector did not take is kept (scripts/lib/trace.sh).
+trace_of() { local f; for f in "$1/traces/events.jsonl" "$1/traces/system-spill.jsonl"; do [[ -f "$f" ]] && cat "$f"; done; return 0; }
 HELLO="$ROOT/prompts/goals/hello.md"
 export SWARM_RUNS_DIR="$TMP/runs"
 kick() { bash "$ROOT/scripts/swarm.sh" start --model solo/model --n 2 --no-start --goal-file "$HELLO" --toolbox off "$@" 2>&1; }
@@ -68,7 +71,7 @@ done
 watch_once
 jq -e '.paused.reason == "provider_limit" and .paused.by == "harness" and (.paused.until | type) == "string" and .paused.models == ["openai-codex/gpt-6-sol"]' "$SB/budget.json" >/dev/null \
   || fail "the run was not paused for the provider's limit: $(jq -c '.paused' "$SB/budget.json"); $(cat "$TMP/watch.log")"
-grep -q '"tool":"run_paused".*"reason":"provider_limit"' "$SB/traces/events.jsonl" || fail "the pause is not on the trace"
+grep -q '"tool":"run_paused".*"reason":"provider_limit"' <<<"$(trace_of "$SB")" || fail "the pause is not on the trace"
 [[ ! -s "$PROMPT_LOG" ]] || fail "a seat was prompted while the run is paused: $(cat "$PROMPT_LOG")"
 grep -rq 'The run is paused: the model provider refused every live seat' "$SB/threads/main/" || fail "the pause is not on the board"
 for _ in $(seq 1 40); do grep -q '"event":"paused"' "$TMP/notified.jsonl" && break; sleep 0.25; done
@@ -86,7 +89,7 @@ budget_set "$SB" ".paused.until = \"$(iso_ago 120)\""
 watch_once
 jq -e '(has("paused") | not) and (.pauses | last | .reason == "provider_limit" and .resumed_by == "harness")' "$SB/budget.json" >/dev/null \
   || fail "the pause was not lifted at its end: $(jq -c '{paused, pauses}' "$SB/budget.json")"
-grep -q '"tool":"run_unpaused".*"by":"harness"' "$SB/traces/events.jsonl" || fail "the lift is not on the trace"
+grep -q '"tool":"run_unpaused".*"by":"harness"' <<<"$(trace_of "$SB")" || fail "the lift is not on the trace"
 for a in $ids; do
   grep -q "^$a	The harness lifted the pause for the model provider's limit at .*, to try again" "$PROMPT_LOG" || fail "$a was not woken after the harness's lift: $(cat "$PROMPT_LOG")"
 done
@@ -139,11 +142,11 @@ pass "unpause refuses a cap's pause still over its cap and names extend; help li
 
 echo "# a resume's fold of a pause wakes nobody"
 : > "$PROMPT_LOG"
-wakes_before="$(grep -c '"tool":"resume_wake"' "$SB/traces/events.jsonl" || true)"
+wakes_before="$(trace_of "$SB" | grep -c '"tool":"resume_wake"' || true)"
 budget_set "$SB" ".pauses += [{at: \"$(iso_ago 3600)\", reason: \"provider_limit\", detail: \"d\", by: \"harness\", resumed_at: \"$(iso_ago 0)\", resumed_by: \"operator (resume)\"}]"
 watch_once
 if grep -q 'lifted the pause' "$PROMPT_LOG"; then fail "a resume's fold woke the seats with words about a lift: $(cat "$PROMPT_LOG")"; fi
-[[ "$(grep -c '"tool":"resume_wake"' "$SB/traces/events.jsonl" || true)" -eq "$wakes_before" ]] || fail "a resume's fold is on the trace as a wake"
+[[ "$(trace_of "$SB" | grep -c '"tool":"resume_wake"' || true)" -eq "$wakes_before" ]] || fail "a resume's fold is on the trace as a wake"
 pass "a pause swarm.sh resume folded into the history wakes nobody: the resume starts the seats itself"
 
 echo "# a cap-pause run whose every seat is refused with no time named"

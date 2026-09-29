@@ -1067,14 +1067,28 @@ export class ModelGateway {
   }
 }
 
-/** Trace lines through the collector, the way the harness's own scripts send them (scripts/trace-emit.mjs). */
+/** Trace lines through the collector, the way the harness's own scripts send them (scripts/trace-emit.mjs). A line the collector does not take, for any reason, is kept in traces/system-spill.jsonl, as scripts/lib/trace.sh keeps one: never appended to events.jsonl. */
 function collectorEmitter(sandbox: string): ((record: Record<string, unknown>) => void) | null {
   if (!process.env.SWARM_TRACE_TOKEN) return null;
   const script = join(dirname(fileURLToPath(import.meta.url)), "trace-emit.mjs");
   return (record) => {
+    const line = JSON.stringify({ ts: new Date().toISOString(), agent: "system", ...record });
+    let settled = false;
+    const settle = (taken: boolean) => {
+      if (settled) return;
+      settled = true;
+      if (taken) return;
+      try {
+        appendFileSync(join(sandbox, "traces", "system-spill.jsonl"), `${line}\n`);
+      } catch {
+        // no traces/ to keep it in: the run is gone
+      }
+    };
     const child = spawn(process.execPath, [script, sandbox], { stdio: ["pipe", "ignore", "ignore"], env: process.env });
-    child.on("error", () => undefined);
-    child.stdin?.end(JSON.stringify({ ts: new Date().toISOString(), agent: "system", ...record }));
+    child.on("error", () => settle(false));
+    child.on("close", (code) => settle(code === 0));
+    child.stdin?.on("error", () => undefined);
+    child.stdin?.end(line);
   };
 }
 

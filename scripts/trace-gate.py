@@ -49,6 +49,8 @@ import sys
 import threading
 
 GATE_SOCKET_REL = "traces/.collector-gate.sock"
+# The longest Unix socket path every platform takes, in bytes (macOS: 104 with the NUL).
+SOCKET_PATH_MAX = 103
 COLLECTOR_SOCKET_REL = "traces/.collector.sock"
 MAX_LINE = 64_000_000
 IDLE_S = 30
@@ -103,7 +105,9 @@ def forward(collector, line):
     s = socket.socket(socket.AF_UNIX)
     s.settimeout(5)
     try:
-        s.connect(collector)
+        # main() keeps this process in the collector's directory: its name
+        # alone is a path any kernel takes, however deep the run is.
+        s.connect(collector if len(collector.encode()) <= SOCKET_PATH_MAX else os.path.basename(collector))
         s.sendall(line.encode("utf-8") + b"\n")
         answer = b""
         while not answer.endswith(b"\n"):
@@ -169,9 +173,9 @@ def main():
     gate = os.path.join(sandbox, GATE_SOCKET_REL)
     quiet = "--quiet" in args
     if "--collector" in args:
-        collector = args[args.index("--collector") + 1]
+        collector = os.path.abspath(args[args.index("--collector") + 1])
     if "--socket" in args:
-        gate = args[args.index("--socket") + 1]
+        gate = os.path.abspath(args[args.index("--socket") + 1])
     tokens = {}
     key = ""
     if "--tokens" in args:
@@ -193,11 +197,13 @@ def main():
     except FileNotFoundError:
         pass
     srv = socket.socket(socket.AF_UNIX)
-    # The same ~104-byte sun_path limit the collector works around.
-    cwd = os.getcwd()
+    # The same sun_path limit the collector works around (103 bytes on macOS,
+    # 107 on Linux; a run under a deep SWARM_RUNS_DIR is past both): bound
+    # from inside its directory, and the collector dialled from inside its
+    # own, where this process then stays. Every path it holds is absolute.
     os.chdir(os.path.dirname(gate))
     srv.bind(os.path.basename(gate))
-    os.chdir(cwd)
+    os.chdir(os.path.dirname(collector))
     os.chmod(gate, 0o600)
     srv.listen(64)
 

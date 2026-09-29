@@ -15,13 +15,22 @@
  *
  *   printf '%s' "$json" | SWARM_TRACE_TOKEN=... node scripts/trace-emit.mjs <sandbox>
  *
- * Exit 0 when the collector took the line. Exit 1 when it did not, and the
- * caller falls back to appending the file itself — a record that loses a line
- * is worse than one with an unchained line in it.
+ * Exit 0 when the collector took the line; 1 when it could not be reached
+ * (no socket, no connection, no answer); 3 when it answered and refused the
+ * line. Why is on stderr. On anything but 0 the caller keeps the line in
+ * traces/system-spill.jsonl (scripts/lib/trace.sh), which custody reads as
+ * the harness's: never in events.jsonl, where an unchained line is one
+ * nobody can vouch for.
+ *
+ * The socket is dialled from inside its own directory, as the collector
+ * binds it: a Unix socket path is at most 103 bytes on macOS (107 on Linux),
+ * and a run under a deep SWARM_RUNS_DIR puts traces/.collector.sock past
+ * that from any other directory. This process does nothing else, so moving
+ * into that directory costs nothing.
  */
 import { existsSync } from "node:fs";
 import { connect } from "node:net";
-import { basename, dirname, join, relative, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 
 const args = process.argv.slice(2);
 const sandbox = resolve(args[0] ?? "");
@@ -37,7 +46,10 @@ const token = process.env.SWARM_TRACE_TOKEN || "";
 // decides who sent the line from the process tree instead).
 const socketPath = process.env.SWARM_TRACE_SOCKET || join(sandbox, "traces", ".collector.sock");
 
-if (!sandbox || !existsSync(socketPath)) process.exit(1);
+if (!sandbox || !existsSync(socketPath)) {
+  process.stderr.write(`trace-emit: no collector socket at ${socketPath}\n`);
+  process.exit(1);
+}
 
 let input = "";
 process.stdin.setEncoding("utf8");
@@ -51,13 +63,16 @@ process.stdin.on("end", () => {
   } catch {
     process.exit(2);
   }
-  // The same ~104-byte limit the collector works around, from the other side.
-  const here = process.cwd();
-  const short = join(relative(here, dirname(socketPath)), basename(socketPath));
-  const target = short.length < socketPath.length ? short : socketPath;
-  const socket = connect(target);
+  try {
+    process.chdir(dirname(socketPath));
+  } catch (err) {
+    process.stderr.write(`trace-emit: cannot enter ${dirname(socketPath)}: ${err.code ?? err.message}\n`);
+    process.exit(1);
+  }
+  const socket = connect(basename(socketPath));
   let answer = "";
-  const done = (code) => {
+  const done = (code, why) => {
+    if (code !== 0 && why) process.stderr.write(`trace-emit: ${socketPath}: ${why}\n`);
     try {
       socket.destroy();
     } catch {
@@ -65,8 +80,8 @@ process.stdin.on("end", () => {
     }
     process.exit(code);
   };
-  socket.setTimeout(2000, () => done(1));
-  socket.on("error", () => done(1));
+  socket.setTimeout(2000, () => done(1, "no answer in 2 s"));
+  socket.on("error", (err) => done(1, err.code ?? err.message));
   // Exit 0 means *written*, which is what the caller's fallback turns on.
   // It used to mean "flushed to the kernel": a line the collector then
   // refused — too big, missing a field — reported success and was simply
@@ -79,12 +94,13 @@ process.stdin.on("end", () => {
     const cut = answer.indexOf("\n");
     if (cut < 0) return;
     try {
-      done(JSON.parse(answer.slice(0, cut))?.ok === true ? 0 : 1);
+      const reply = JSON.parse(answer.slice(0, cut));
+      done(reply?.ok === true ? 0 : 3, `refused: ${reply?.error ?? "not written"}`);
     } catch {
-      done(1);
+      done(3, "an answer that does not read");
     }
   });
-  socket.on("close", () => done(1));
+  socket.on("close", () => done(1, "closed before it answered"));
   socket.on("connect", () => {
     socket.write(`${JSON.stringify(token ? { ...record, token } : record)}\n`);
   });
