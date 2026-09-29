@@ -10168,6 +10168,8 @@ export function sensitiveTokens(entries: LedgerEntry[]): SensitiveToken[] {
     for (const l of e.locators ?? []) texts.push(l.at);
     for (const a of (raw.alternatives as Array<{ explanation?: string; why?: string }> | undefined) ?? []) texts.push(a.explanation ?? "", a.why ?? "");
     for (const q of (raw.qualifies as Array<{ why?: string }> | undefined) ?? []) texts.push(q.why ?? "");
+    // A sensitive coverage record's looked_for strings are what its sweep searched for: sensitive words too.
+    for (const t of e.looked_for ?? []) texts.push(t);
     for (const w of texts) {
       const whole = (w ?? "").trim();
       if (whole.length >= 6 || (whole.length >= 4 && /\d/.test(whole))) add(whole, e.seq);
