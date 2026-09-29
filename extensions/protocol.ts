@@ -8660,8 +8660,16 @@ export function supersededBy(entries: LedgerEntry[]): Map<number, number> {
 }
 
 export type LedgerResult =
-  | { ok: true; entry: LedgerEntry; merged: boolean; total: number; note?: string }
+  | ({ ok: true; entry: LedgerEntry; merged: boolean; total: number; note?: string } & WarningsDelivered)
   | { ok: false; reason: string; quiet?: true; deferred?: { coordinator: string; generation: number } };
+
+/**
+ * The answers check's warnings a reply delivers where the decision is made
+ * (finish.ts warningsAt): `warnings` in the words finish status says them
+ * with, `warned` their codes (for the trace). Absent when there are none;
+ * never a refusal.
+ */
+export type WarningsDelivered = { warnings?: string[]; warned?: string[] };
 
 /** The names closest to `want`: the same base name first, then by edit distance. */
 function nearestNames(want: string, names: string[], n = 5): string[] {
@@ -8780,6 +8788,24 @@ export async function readLedger(sandboxRoot: string, opts: { raw?: boolean } = 
 }
 
 /** Append one entry, merging with an equal one, and re-render ledger.md. */
+/**
+ * A reply with the warnings its point delivers (finish.ts warningsAt), read
+ * after the act, outside every lock. What cannot be read adds nothing: a
+ * warning never makes an act fail, and never holds.
+ */
+async function withWarnings<R extends { ok: boolean }>(sandboxRoot: string, r: R, point: (ok: Extract<R, { ok: true }>) => import("./finish.ts").WarningPoint | null): Promise<R> {
+  if (!r.ok) return r;
+  const at = point(r as Extract<R, { ok: true }>);
+  if (!at) return r;
+  try {
+    const F = await import("./finish.ts");
+    const ws = await F.warningsAt(sandboxRoot, at);
+    return ws.length ? { ...r, warnings: ws.map(warningWords), warned: [...new Set(ws.map((w) => w.code))] } : r;
+  } catch {
+    return r;
+  }
+}
+
 export async function recordEntry(ctx: SwarmContext, input: LedgerInput): Promise<LedgerResult> {
   // Q-<n> names a question of the register: its section, which is n unless
   // the goal gave it its own id.
@@ -8793,7 +8819,7 @@ export async function recordEntry(ctx: SwarmContext, input: LedgerInput): Promis
     return { ok: false, reason: `kind must be one of ${LEDGER_KINDS.join(", ")}` };
   }
   if (kind === "external") return { ok: false, reason: "external material is recorded by the harness when it enters the run (a capture the fetch service sealed, material the operator supplied), with its provenance: cite it (net:<k>/<n>, E-<seq>) and record what it establishes as a finding of yours" };
-  if (kind === "answer") return recordAnswer(ctx, input);
+  if (kind === "answer") return withWarnings(ctx.sandboxRoot, await recordAnswer(ctx, input), (r) => (r.entry.section?.startsWith("question:") ? { point: "record", section: r.entry.section } : null));
   if (kind === "coverage") return recordCoverage(ctx, input);
   const absence = kind === "absence";
   const limitation = kind === "limitation";
@@ -10006,7 +10032,7 @@ export function isNegativeEntry(e: LedgerEntry): boolean {
   const r = NB.answerResult(e);
   return r !== null && NB.NEGATIVE_RESULTS.has(r) && Boolean(e.section?.startsWith("question:"));
 }
-export type LedgerActResult<T> = { ok: true; line: T; appended: boolean; note?: string } | { ok: false; reason: string };
+export type LedgerActResult<T> = ({ ok: true; line: T; appended: boolean; note?: string } & WarningsDelivered) | { ok: false; reason: string };
 
 /** The entry an act names, standing, and not the actor's own. */
 function actTarget(entries: LedgerEntry[], raw: number | string | undefined, agentId: string, act: string): { ok: true; entry: LedgerEntry } | { ok: false; reason: string } {
@@ -10260,7 +10286,8 @@ export async function attestEntry(ctx: SwarmContext, input: LedgerActInput): Pro
     const L = await import("./leads.ts");
     for (const key of reviewed) await L.reviewOfferTaken(ctx.sandboxRoot, key, ctx.agentId).catch(() => undefined);
   }
-  return result;
+  // The warnings on what the attest bears on, delivered to the reviewer: an answer, the negatives resting on a coverage record, an entry an answer leaves out.
+  return withWarnings(ctx.sandboxRoot, result, (r) => (r.line ? { point: "attest", entry: r.line.seq } : null));
 }
 
 /**
@@ -11797,14 +11824,23 @@ export function noMoreEvidenceAskFix(coverage: number[], answer: number): string
 
 /**
  * A warning the gate says and does not hold on: shown with the answers
- * check, counted in the finish line's note, and listed by readiness (finish
- * status). no_acquisition_ask: a not-determinable answer names no ask, nor
- * why none. partial_all_parts_established: a partial answer every review of
- * which holds every part it weighed established. lead_findings_uncited:
- * findings and events two seats hold, recorded under the question's leads,
- * that its answer does not reach.
+ * check, counted in the finish line's note, and delivered where the
+ * decision is made (finish.ts warningsAt): in the reply to the record that
+ * writes the answer, in its review offer and the reply to an attest on it,
+ * and in finish status. no_acquisition_ask: a not-determinable answer names
+ * no ask, nor why none. partial_all_parts_established: a partial answer
+ * every review of which holds every part it weighed established.
+ * lead_findings_uncited: findings and events two seats hold for the
+ * question (under its leads, naming it, or linked by rel to an entry its
+ * answer cites) that its answer does not reach. `seqs` opens with the
+ * answer's.
  */
 export type LedgerWarning = { code: "no_acquisition_ask" | "partial_all_parts_established" | "lead_findings_uncited"; section: string; seqs: number[]; what: string; fix: string };
+
+/** A warning in the words every point says it with: what, then the fix. */
+export function warningWords(w: Pick<LedgerWarning, "what" | "fix">): string {
+  return `${w.what}. ${w.fix}`;
+}
 
 /** A question's section as the register names it: Q-<n> for a numbered one, the section otherwise. */
 function questionName(id: string, section: string): string {

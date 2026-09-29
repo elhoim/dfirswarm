@@ -2224,7 +2224,7 @@ function checkRef(disposition: LeadDisposition, raw: string, l: Lead, snap: Lead
  * with a durable id. A write that fails is not swallowed: the answer says the
  * request is pending, and the next reconciliation writes it.
  */
-export async function closeLead(ctx: P.SwarmContext, rawId: unknown, input: { disposition?: string; ref?: string; why?: string; generation?: number; ask?: unknown; result_refs?: string[] | string }): Promise<LeadResult<{ lead: LeadView; operator_request?: string; request?: { id: string; kind: string; state: string; stage: string | null; answer: string | null }; request_pending?: string; hint?: string }>> {
+export async function closeLead(ctx: P.SwarmContext, rawId: unknown, input: { disposition?: string; ref?: string; why?: string; generation?: number; ask?: unknown; result_refs?: string[] | string }): Promise<LeadResult<{ lead: LeadView; operator_request?: string; request?: { id: string; kind: string; state: string; stage: string | null; answer: string | null }; request_pending?: string; hint?: string; guidance?: string }>> {
   const ref = leadRef(rawId);
   if (!ref.ok) return ref;
   const disposition = String(input.disposition ?? "").trim().toLowerCase() as LeadDisposition;
@@ -2269,7 +2269,8 @@ export async function closeLead(ctx: P.SwarmContext, rawId: unknown, input: { di
     const view = viewLead(snap.state.leads.get(ref.id)!, snap);
     if (disposition !== "needs_operator") return { ok: true, lead: view };
     const hinted = await dispositionAskHint(ctx.sandboxRoot, `${refText.value}\n${why.value ?? ""}`).catch(() => null);
-    const hint = hinted ? { hint: hinted } : {};
+    const guided = input.ask === undefined || input.ask === null ? operatorQuestionGuidance(snap.state.leads.get(ref.id)!.answers) : null;
+    const hint = { ...(hinted ? { hint: hinted } : {}), ...(guided ? { guidance: guided } : {}) };
     // The close is the commit; the request is written from it, once, by its key.
     const closeSeq = r.events.find((e) => e.ev === "close")?.seq;
     try {
@@ -2292,6 +2293,20 @@ export async function closeLead(ctx: P.SwarmContext, rawId: unknown, input: { di
   } catch (err) {
     return { ok: false, reason: (err as Error).message };
   }
+}
+
+/**
+ * What a question put to the operator says, in the reply to every
+ * needs_operator close that is not an acquisition (request guidance): the
+ * observation that would settle the lead's questions, and what each
+ * possible answer changes, so the answer can be acted on when it comes.
+ * Guidance, never a refusal: whether the ref is a question is in its words,
+ * which the harness does not read. Null for a lead that serves no question.
+ */
+export function operatorQuestionGuidance(answers: readonly string[]): string | null {
+  const qs = [...new Set(answers.map((a) => (/^\d+$/.test(a) ? `Q-${a}` : a)))];
+  if (!qs.length) return null;
+  return `a question put to the operator says what observation would settle ${qs.join(", ")}, and what each possible answer changes (which answer, and to which result), so the answer can be acted on when it comes; a host to allow or a file to add says what it would establish`;
 }
 
 /**
@@ -2860,8 +2875,8 @@ function reviewHolderWords(o: O.Offer, now: number, rev: number): string {
   return o.held_until ? `taken by ${o.to}, who reviews it until ${until}` : `offered to ${o.to} ${O.untilWords(o, now, rev)}`;
 }
 
-/** What a review's offer asks, for the seat it is made to. */
-export function reviewOfferText(key: string, o: O.Offer, snap: LeadsSnapshot): string {
+/** What a review's offer asks, for the seat it is made to; `warnings`, the answers check's warnings on the answer offered (reviewOfferWarnings), said last. */
+export function reviewOfferText(key: string, o: O.Offer, snap: LeadsSnapshot, warnings: readonly string[] = []): string {
   const until = O.untilWords(o, snap.at, reviewRev(key, snap.state));
   const hold = `it is then yours for ${Math.round(O.reviewHoldMs() / 60_000)} min`;
   if (o.reason === "route_review") {
@@ -2869,7 +2884,7 @@ export function reviewOfferText(key: string, o: O.Offer, snap: LeadsSnapshot): s
     return `${key}${l ? ` ("${l.title}", closed ${l.closed?.disposition ?? "?"} on ${l.closed?.ref ?? "?"})` : ""} is offered to you for its route review, first claim ${until}: its questions are answered now. Take it with offer accept ${key} (${hold}), then say whether the route's limitation still matters with route_review(${key}, material, why); or offer decline ${key} with why. Other seats' reviews of it wait for yours.`;
   }
   const e = snap.ledger.bySeq.get(Number(key.slice(2)));
-  return `${key}${e ? ` (${e.section}, ${NB.resultWords(NB.answerResult(e) ?? "")})` : ""} is offered to you for its review, first claim ${until}. Take it with offer accept ${key} (${hold}), then ${negativeTargetWords(e, snap)} with review {detection, reproduced, other_route} (a negative's review, not answer_review); or offer decline ${key} with why. Other seats' reviews of it wait for yours.${sweepReviewWords(e, snap)}`;
+  return `${key}${e ? ` (${e.section}, ${NB.resultWords(NB.answerResult(e) ?? "")})` : ""} is offered to you for its review, first claim ${until}. Take it with offer accept ${key} (${hold}), then ${negativeTargetWords(e, snap)} with review {detection, reproduced, other_route} (a negative's review, not answer_review); or offer decline ${key} with why. Other seats' reviews of it wait for yours.${sweepReviewWords(e, snap)}${warnings.length ? ` The finish line warns of this answer, holding nothing on it; weigh each in your review: ${warnings.join("; ")}` : ""}`;
 }
 
 /**
@@ -3501,8 +3516,13 @@ export type LeadNotice = {
   wakes: boolean;
 };
 
-/** What changed for this agent since it was last told: derived from the state, never stored, so none is lost to a restart. */
-export function noticesFor(agent: string, before: Told, snap: LeadsSnapshot): LeadNotice[] {
+/**
+ * What changed for this agent since it was last told: derived from the
+ * state, never stored, so none is lost to a restart. `reviewWarnings`, the
+ * answers check's warnings on each answer offered to it for review
+ * (reviewOfferWarnings), said in the offer.
+ */
+export function noticesFor(agent: string, before: Told, snap: LeadsSnapshot, reviewWarnings: ReadonlyMap<string, readonly string[]> = new Map()): LeadNotice[] {
   const { state: s, ledger: v } = snap;
   const out: LeadNotice[] = [];
   const now = toldNow(agent, snap, Object.keys(before.held));
@@ -3560,7 +3580,27 @@ export function noticesFor(agent: string, before: Told, snap: LeadsSnapshot): Le
   // A review offered to this seat (a route review, a negative's review).
   for (const { key, offer: o } of reviewOffersFor(agent, snap)) {
     if (told.has(o.seq)) continue;
-    out.push({ kind: "review_offer", lead: key, offer: o.seq, text: reviewOfferText(key, o, snap), wakes: true });
+    out.push({ kind: "review_offer", lead: key, offer: o.seq, text: reviewOfferText(key, o, snap, reviewWarnings.get(key) ?? []), wakes: true });
+  }
+  return out;
+}
+
+/**
+ * The answers check's warnings on each answer offered to `agent` for
+ * review and not yet told it (finish.ts warningsAt, review_offer): read as
+ * the offer is delivered, so it says what the gate warns of then. A route
+ * review is of a lead, not of an answer, and carries none. Nothing when no
+ * such offer waits, so a delivery with none reads nothing more.
+ */
+export async function reviewOfferWarnings(sandboxRoot: string, agent: string, snap: LeadsSnapshot, before: Told): Promise<Map<string, string[]>> {
+  const out = new Map<string, string[]>();
+  const told = new Set(before.offers ?? []);
+  const keys = reviewOffersFor(agent, snap).filter((x) => x.key.startsWith("E-") && !told.has(x.offer.seq)).map((x) => x.key);
+  if (!keys.length) return out;
+  const F = await import("./finish.ts");
+  for (const key of keys) {
+    const ws = await F.warningsAt(sandboxRoot, { point: "review_offer", entry: Number(key.slice(2)) }).catch(() => [] as P.LedgerWarning[]);
+    if (ws.length) out.set(key, ws.map(P.warningWords));
   }
   return out;
 }
@@ -3614,7 +3654,7 @@ export async function leadsDigest(ctx: P.SwarmContext, o: { mark?: boolean } = {
   const awaiting = (await awaitingInterpretation(ctx.sandboxRoot, snap.state, snap.jobs, snap.ledger)).filter((a) => a.agent === me);
   const cov = questionCoverage(snap);
   const before = await readTold(ctx.sandboxRoot, me);
-  const notices = noticesFor(me, before, snap);
+  const notices = noticesFor(me, before, snap, await reviewOfferWarnings(ctx.sandboxRoot, me, snap, before).catch(() => new Map<string, string[]>()));
   // The register's part comes first: a person's question outranks the rest.
   const qTold = await Q.readTold(ctx.sandboxRoot, me);
   const qd = snap.questions ? Q.questionsDigest(me, { questions: snap.questions, leads: snap.state, ledger: snap.ledger }, qTold) : null;
@@ -3750,7 +3790,7 @@ export function leadsWaitCheck(ctx: P.SwarmContext): () => Promise<string | null
     if (due) await offerReviews(ctx.sandboxRoot, now).catch(() => 0);
     const snap = await leadsSnapshot(ctx.sandboxRoot);
     const before = await readTold(ctx.sandboxRoot, ctx.agentId);
-    const waking = noticesFor(ctx.agentId, before, snap).filter((n) => n.wakes);
+    const waking = noticesFor(ctx.agentId, before, snap, await reviewOfferWarnings(ctx.sandboxRoot, ctx.agentId, snap, before).catch(() => new Map<string, string[]>())).filter((n) => n.wakes);
     // The question register's news for this seat: an offer, a clarification answered, its question amended or withdrawn.
     const Q = await import("./questions.ts");
     const qWaking = snap.questions ? Q.questionNotices(ctx.agentId, await Q.readTold(ctx.sandboxRoot, ctx.agentId), { questions: snap.questions, leads: snap.state, ledger: snap.ledger }).filter((n) => n.wakes) : [];

@@ -90,7 +90,7 @@ export async function run(o: { goal?: string } = {}) {
   return { S, a0: ctx("a0"), a1: ctx("a1"), a2: ctx("a2"), a3: ctx("a3") };
 }
 
-export type Ok = { ok: true; entry: P.LedgerEntry; merged: boolean; total: number; note?: string };
+export type Ok = { ok: true; entry: P.LedgerEntry; merged: boolean; total: number; note?: string } & P.WarningsDelivered;
 export const ok = (r: Awaited<ReturnType<typeof P.recordEntry>>): Ok => {
   assert.ok(r.ok, (r as { reason?: string }).reason);
   return r as Ok;

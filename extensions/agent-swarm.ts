@@ -2638,6 +2638,7 @@ export default function (pi: ExtensionAPI) {
     promptGuidelines: [
       "Use net_request only for what the evidence cannot answer and a reference service can: a registration record, a certificate log, a CVE, a hash's reputation, a place. Never search: there is no search adapter, and a write-up is never material.",
       "What a lookup returns is external material: record what it establishes as your own finding, with its limits; it proves its bytes, not the truth or the fit to the time of the events.",
+      "A value read from an image (a photo, a scan, a screenshot) is cited from the output of a job that read the image (an OCR tool run over the input), never from a transcription typed into a command: a value the cited job's own command names is authored, not derived.",
     ],
     parameters: Type.Object({
       lead: Type.String({ description: "The lead you hold that this lookup serves (L-<n>)" }),
@@ -3210,6 +3211,7 @@ export default function (pi: ExtensionAPI) {
       "Record what you could not examine, or could only partly, as kind=limitation with its reason; a proposition you are still testing as kind=hypothesis.",
       "Before a negative answer (bounded_negative) or a not_determinable one on a material question, record kind=coverage: what was searched, over which objects, how, what was covered, skipped and failed, the results, what is still open, and whether the event would have left a trace here at all.",
       "An answer (kind=answer) is written from the ledger, not from memory: one per question, one summary, one narrative, each citing E-<seq> for every claim.",
+      "The reply to an answer carries the finish line's warnings on its question (warnings): a not_determinable with no acquisition ask and no reason for none, a partial every review holds whole, what two seats hold for the question and the answer leaves out. They hold nothing: weigh each now, and record the answer again if it is right.",
     ],
     parameters: Type.Object({
       kind: Type.Union(LEDGER_AGENT_KINDS.map((k) => Type.Literal(k)), { description: "event | ioc | finding | absence | hypothesis | limitation | answer | coverage" }),
@@ -3334,7 +3336,7 @@ export default function (pi: ExtensionAPI) {
       // The entry's hash goes on the trace, which is anchored outside the
       // run: custody holds the ledger to it, so an entry deleted from the
       // tail, or one written into the file without this tool, is named.
-      await logEvent(toolCtx.cwd, agentId, "record", { ...(params as Record<string, unknown>), ...(result.entry.supersedes !== undefined ? { supersedes: result.entry.supersedes } : {}) }, { ok: true, seq: result.entry.seq, merged: result.merged, total: result.total, ...(result.entry.hash ? { hash: result.entry.hash } : {}), ...(result.note ? { note: result.note } : {}) }, Date.now() - started);
+      await logEvent(toolCtx.cwd, agentId, "record", { ...(params as Record<string, unknown>), ...(result.entry.supersedes !== undefined ? { supersedes: result.entry.supersedes } : {}) }, { ok: true, seq: result.entry.seq, merged: result.merged, total: result.total, ...(result.entry.hash ? { hash: result.entry.hash } : {}), ...(result.note ? { note: result.note } : {}), ...(result.warned?.length ? { warned: result.warned } : {}) }, Date.now() - started);
       // A correction is said on the trace as itself, so a reader of the
       // record sees which entry stopped standing, when, and by whom.
       if (result.entry.supersedes !== undefined && !result.merged) {
@@ -3354,7 +3356,7 @@ export default function (pi: ExtensionAPI) {
       if (leadsOpened.length || interpreted) {
         await logEvent(toolCtx.cwd, agentId, "record_leads", { seq }, { ok: true, ...(leadsOpened.length ? { opened: leadsOpened } : {}), ...(interpreted ? { interprets: interpreted.ok ? interpreted.interprets : [], ...(interpreted.ok ? {} : { refused: interpreted.reason }) } : {}) }).catch(() => undefined);
       }
-      return okResult({ ok: true, seq, merged: result.merged, total: result.total, ...(result.entry.supersedes !== undefined ? { supersedes: result.entry.supersedes } : {}), ...(result.entry.refs?.length ? { refs: result.entry.refs } : {}), ...(result.entry.unsupported_tokens?.length ? { unsupported_tokens: result.entry.unsupported_tokens } : {}), ...(result.note ? { note: result.note } : {}), ...(leadsOpened.length ? { leads_opened: leadsOpened } : {}), ...(interpreted ? (interpreted.ok ? { interprets: interpreted.interprets } : { interprets_refused: `the entry stands, but its interpretation was not recorded: ${interpreted.reason}` }) : {}), rendered: LEDGER_MD });
+      return okResult({ ok: true, seq, merged: result.merged, total: result.total, ...(result.entry.supersedes !== undefined ? { supersedes: result.entry.supersedes } : {}), ...(result.entry.refs?.length ? { refs: result.entry.refs } : {}), ...(result.entry.unsupported_tokens?.length ? { unsupported_tokens: result.entry.unsupported_tokens } : {}), ...(result.note ? { note: result.note } : {}), ...(result.warnings?.length ? { warnings: result.warnings } : {}), ...(leadsOpened.length ? { leads_opened: leadsOpened } : {}), ...(interpreted ? (interpreted.ok ? { interprets: interpreted.interprets } : { interprets_refused: `the entry stands, but its interpretation was not recorded: ${interpreted.reason}` }) : {}), rendered: LEDGER_MD });
     },
   });
 
@@ -3389,6 +3391,7 @@ export default function (pi: ExtensionAPI) {
       "An answer to a question is attested with strength (established or best_candidate) and answer_review: what you reproduced and what you only read, each part the question asks and whether it is established, the inference, the alternatives you weighed, and whether another source family was checked. A best candidate you cannot break is still a best candidate: say so, and open the lead for the route would_change names.",
       "\"Best candidate\" concerns only an answer that claims established. Partial is a disposition: a review of a partial answer checks the parts the answer claims, those it says are established and those it declares open. A part it declares open is held established: false with declared_open naming the limitation or coverage record the answer cites for it; that part, and the answer's confidence, do not cap your review, and a partial answer never holds the run as a best candidate.",
       "Before you attest an answer established, name at least one alternative explanation you weighed, why the evidence rules it out, and the entries that show it: answer_review.alternatives [{explanation, why, evidence: [E-<seq>]}] (a decoy that looks like the answer, another actor, another mechanism, another time). An established attest that names none, or only placeholders, is recorded best_candidate, and the reply says so. Only an established answer attested so keeps a high confidence; any other high is recorded medium.",
+      "The reply carries the finish line's warnings on what you attested (warnings): a partial answer you hold whole, what the answer leaves out that two seats hold, a not_determinable with no acquisition ask. They hold nothing: tell the answer's author on the board, or say in your review which part is open.",
     ],
     parameters: Type.Object({
       seq: Type.Number({ description: "The entry's seq (standing, not your own)." }),
@@ -3446,8 +3449,8 @@ export default function (pi: ExtensionAPI) {
         await logEvent(toolCtx.cwd, agentId, "review_deferred", { seq: params.seq }, { ok: true, deferred: result.deferred }, Date.now() - started);
         return okResult({ ok: true, seq: params.seq, appended: false, deferred: result.deferred, note: result.note });
       }
-      await logEvent(toolCtx.cwd, agentId, "attest", params as Record<string, unknown>, { ok: true, seq: result.line.seq, appended: result.appended, ...(result.line.hash ? { hash: result.line.hash } : {}), ...(result.note ? { note: result.note } : {}) }, Date.now() - started);
-      return okResult({ ok: true, seq: result.line.seq, appended: result.appended, ...(result.note ? { note: result.note } : {}), rendered: LEDGER_MD });
+      await logEvent(toolCtx.cwd, agentId, "attest", params as Record<string, unknown>, { ok: true, seq: result.line.seq, appended: result.appended, ...(result.line.hash ? { hash: result.line.hash } : {}), ...(result.note ? { note: result.note } : {}), ...(result.warned?.length ? { warned: result.warned } : {}) }, Date.now() - started);
+      return okResult({ ok: true, seq: result.line.seq, appended: result.appended, ...(result.note ? { note: result.note } : {}), ...(result.warnings?.length ? { warnings: result.warnings } : {}), rendered: LEDGER_MD });
     },
   });
 
@@ -3582,6 +3585,7 @@ export default function (pi: ExtensionAPI) {
       "Close every lead you hold with a disposition; a material lead left open holds the finish line.",
       "Use needs_operator for anything outside the evidence and the allowlist (a host to reach, a file the run does not have, a question only a person can answer); never fetch it yourself.",
       "Ask for missing evidence as an acquisition (needs_operator with ask.kind acquisition): the source, where it is, what it would establish, how urgent. \"No additional input under this case policy\" is a constraint of the case, never a finding that something is absent.",
+      "A question put to the operator (needs_operator) says what observation would settle the lead's question (Q-<n>) and what each possible answer changes: which answer, and to which result.",
     ],
     parameters: Type.Object({
       id: Type.String({ description: "L-<n>" }),

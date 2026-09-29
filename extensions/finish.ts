@@ -573,10 +573,11 @@ async function goalExtraSections(sandboxRoot: string): Promise<string[]> {
 /**
  * Readiness at a revision; `confirming`, the items among `items` that are
  * closures waiting for their closer's confirmation; `warnings`, what the
- * ledger gate warns of on the answers (protocol.ts LedgerWarning): said in
- * finish status, never held on.
+ * ledger gate warns of on the answers (protocol.ts LedgerWarning), in the
+ * words every point says them with, and `warned`, the same warnings whole:
+ * said in finish status, never held on.
  */
-export type Readiness = { ready: boolean; revision: string; items: string[]; limited: string[]; confirming: string[]; warnings: string[] };
+export type Readiness = { ready: boolean; revision: string; items: string[]; limited: string[]; confirming: string[]; warnings: string[]; warned: P.LedgerWarning[] };
 
 const readinessCache = new Map<string, Readiness>();
 
@@ -617,6 +618,70 @@ export async function readiness(sandboxRoot: string): Promise<Readiness> {
   return last!;
 }
 
+/** The answer sections readiness reads: the case's questions, and the summary and narrative a goal's check names. */
+async function readinessSections(sandboxRoot: string, s: L.LeadsSnapshot): Promise<string[]> {
+  return [...L.caseQuestions(s).map((q) => `question:${q}`), ...(await goalExtraSections(sandboxRoot))];
+}
+
+/**
+ * The ledger gate's inputs as readiness reads them from a snapshot: the
+ * acts on the ledger, each question's bar, the store sweeps, the case
+ * policy (so a warning's fix reads as the answers check words it) and what
+ * the lead register recorded under each question's leads (none from a lead
+ * register whose chain is broken). One reading for readiness and for every
+ * point a warning is delivered at (warningsAt), so no two say different
+ * things.
+ */
+async function gateInputs(sandboxRoot: string, s: L.LeadsSnapshot): Promise<Omit<Parameters<typeof P.ledgerGate>[0], "sections">> {
+  const attestations = await P.readAttestations(sandboxRoot).catch(() => [] as P.LedgerAttestation[]);
+  const disputes = await P.readDisputes(sandboxRoot).catch(() => [] as P.LedgerDispute[]);
+  const bar = (id: string) => {
+    const q = s.questions?.bySection.get(P.sectionKey(id));
+    return { material: s.goal.questions.map(P.sectionKey).includes(P.sectionKey(id)) || !q || q.materiality === "material", existence: s.goal.existence.map(P.sectionKey).includes(P.sectionKey(id)) || q?.expects === "existence", completeness: q?.completeness === true };
+  };
+  const sweeps = await import("./store-sweep.ts").then((SW) => SW.readSweeps(sandboxRoot)).catch(() => []);
+  const moreEvidence = await import("./requests.ts").then((R) => R.casePolicyMoreEvidence(sandboxRoot)).catch(() => "ask" as const);
+  // What the lead register recorded under each question's leads: a finding two seats hold there that an answer leaves out is warned of.
+  const underLeads = s.state.chain.ok ? L.questionLeadEntries(s.state) : undefined;
+  return { entries: s.ledger.entries, attestations, disputes, bar, sweeps, moreEvidence, ...(underLeads ? { underLeads } : {}) };
+}
+
+/**
+ * Where the answers check's warnings are delivered, as well as in the
+ * check itself (docs/adr/0013, "Warnings where the decision is made"):
+ * - `record`: the reply to the record that writes a question's answer:
+ *   every warning on that question;
+ * - `review_offer`: a review offered for an answer (a material negative's,
+ *   the only answers reviews are offered for): the warnings on it;
+ * - `attest`: the reply to an attest: the warnings on each answer the
+ *   attested entry bears on (the answer itself, or the negatives resting on
+ *   a coverage record), and each warning that names it (an entry an answer
+ *   leaves out, now held by two seats);
+ * - `finish_status`: every warning readiness carries.
+ * Never a refusal, never an item: nothing holds on a warning.
+ */
+export type WarningPoint = { point: "record"; section: string } | { point: "review_offer"; entry: number } | { point: "attest"; entry: number } | { point: "finish_status" };
+
+/**
+ * The warnings a point delivers now, as readiness reads the registers:
+ * the same gate over the same inputs (gateInputs), for the questions
+ * readiness reads, so a reply never says what finish status would not.
+ */
+export async function warningsAt(sandboxRoot: string, at: WarningPoint): Promise<P.LedgerWarning[]> {
+  if (at.point === "finish_status") return (await readiness(sandboxRoot)).warned;
+  const s = await L.leadsSnapshot(sandboxRoot);
+  const all = await readinessSections(sandboxRoot, s);
+  const e = at.point === "record" ? null : s.ledger.bySeq.get(at.entry);
+  if (at.point !== "record" && !e) return [];
+  const sections = at.point === "record" ? all.filter((x) => x === at.section) : at.point === "review_offer" ? all.filter((x) => e!.kind === "answer" && x === e!.section) : all;
+  if (!sections.length) return [];
+  const gate = P.ledgerGate({ ...(await gateInputs(sandboxRoot, s)), sections });
+  if (at.point === "record") return gate.warnings;
+  if (at.point === "review_offer") return gate.warnings.filter((w) => w.seqs[0] === at.entry);
+  const resting = new Set(e!.kind === "coverage" ? P.negativesResting(e!, s.ledger.entries).map((x) => x.seq) : []);
+  return gate.warnings.filter((w) => w.seqs.includes(at.entry) || resting.has(w.seqs[0]!));
+}
+
 async function computeReadiness(sandboxRoot: string, s: L.LeadsSnapshot, revision: string): Promise<Readiness> {
   const items: string[] = [];
   const limited: string[] = [];
@@ -629,26 +694,17 @@ async function computeReadiness(sandboxRoot: string, s: L.LeadsSnapshot, revisio
   // An addition committed and not yet applied (docs/adr/0014): what it reopens may still look settled; the gate holds it too.
   const M = await import("../scripts/material.ts").catch(() => null);
   for (const a of (await M?.unappliedAdditions(sandboxRoot).catch(() => [])) ?? []) items.push(`import:${a.import} (${a.type === "evidence_added" ? "evidence" : "material"} added at ${a.at}) is committed and not all it implies is recorded yet (the hub records it at its next round)`);
-  const sections = [...L.caseQuestions(s).map((q) => `question:${q}`), ...(await goalExtraSections(sandboxRoot))];
-  const attestations = await P.readAttestations(sandboxRoot).catch(() => [] as P.LedgerAttestation[]);
-  const disputes = await P.readDisputes(sandboxRoot).catch(() => [] as P.LedgerDispute[]);
-  const barOf = (id: string) => {
-    const q = s.questions?.bySection.get(P.sectionKey(id));
-    return { material: s.goal.questions.map(P.sectionKey).includes(P.sectionKey(id)) || !q || q.materiality === "material", existence: s.goal.existence.map(P.sectionKey).includes(P.sectionKey(id)) || q?.expects === "existence", completeness: q?.completeness === true };
-  };
+  const sections = await readinessSections(sandboxRoot, s);
+  const inputs = await gateInputs(sandboxRoot, s);
+  const { attestations } = inputs;
   // The kept output of a cancelled or stopped job, cited with no word on how it is treated (docs/adr/0016): the answers check holds it, and so does readiness.
   // The producer of each citation (scripts/output-hygiene.ts producerIndex): a copy or a digest of a cancelled job's bytes keeps its partial status.
   const hygiene = await import("../scripts/output-hygiene.ts").catch(() => null);
   const { producerOf } = hygiene ? await hygiene.producerIndex(sandboxRoot).catch(() => ({ producerOf: (_ref: string) => null })) : { producerOf: (_ref: string) => null };
   const partial = P.partialOutputCites(s.ledger.entries, producerOf);
-  const sweeps = await import("./store-sweep.ts").then((SW) => SW.readSweeps(sandboxRoot)).catch(() => []);
-  // The case policy, so a warning's fix reads as the answers check words it.
-  const moreEvidence = await import("./requests.ts").then((R) => R.casePolicyMoreEvidence(sandboxRoot)).catch(() => "ask" as const);
-  // What the lead register recorded under each question's leads: a finding two seats hold there that an answer leaves out is warned of.
-  const underLeads = s.state.chain.ok ? L.questionLeadEntries(s.state) : undefined;
-  const gate = P.ledgerGate({ entries: s.ledger.entries, attestations, disputes, sections, bar: barOf, partial, sweeps, moreEvidence, ...(underLeads ? { underLeads } : {}) });
+  const gate = P.ledgerGate({ ...inputs, sections, partial });
   // What the gate warns of: shown to every seat that reads finish status, and never an item.
-  const warnings = gate.warnings.map((w) => `${w.what}. ${w.fix}`);
+  const warnings = gate.warnings.map(P.warningWords);
   const accepted = new Set<string>();
   const acceptedAt = new Map<string, number | null>();
   for (const q of s.questions?.state.questions.values() ?? []) {
@@ -717,7 +773,7 @@ async function computeReadiness(sandboxRoot: string, s: L.LeadsSnapshot, revisio
   const budget = await P.readBudget(sandboxRoot).catch(() => null);
   const operatorStop = P.stopPolicyOf(budget) === "operator";
   const blocking = operatorStop ? [...items, ...holdsUnderOperator] : items;
-  return { ready: !blocking.length, revision, items: blocking, limited, confirming: confirming.filter((c) => blocking.includes(c)), warnings };
+  return { ready: !blocking.length, revision, items: blocking, limited, confirming: confirming.filter((c) => blocking.includes(c)), warnings, warned: gate.warnings };
 }
 
 
@@ -726,7 +782,7 @@ async function computeReadiness(sandboxRoot: string, s: L.LeadsSnapshot, revisio
  * told to call done and everyone else to wait; not ready again, what came
  * up. Recorded in the finish register, so a restart posts nothing twice.
  */
-export async function syncReadiness(sandboxRoot: string, r: Omit<Readiness, "warnings">): Promise<boolean> {
+export async function syncReadiness(sandboxRoot: string, r: Omit<Readiness, "warnings" | "warned">): Promise<boolean> {
   const st = await readFinish(sandboxRoot);
   const last = st.readiness;
   if (last && last.ready === r.ready) return false;
