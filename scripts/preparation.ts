@@ -30,7 +30,6 @@
  * Nothing here parses a format or names a tool: recipe declarations, job
  * records, refs, digests and the two registers.
  */
-import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import * as L from "../extensions/leads.ts";
@@ -262,9 +261,4 @@ export async function reconcilePreparation(svc: PreparationService, sandbox: str
     }
   }
   return round;
-}
-
-/** Whether a run holds anything preparation reads: a plan's preparations, or a receipt already. */
-export function preparationInPlay(sandbox: string): boolean {
-  return existsSync(join(sandbox, "catalog", "plan.json")) || existsSync(join(sandbox, "store", "journal.jsonl"));
 }
