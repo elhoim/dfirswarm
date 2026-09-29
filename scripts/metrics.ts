@@ -227,6 +227,23 @@ export type RunMetrics = {
     /** From ready (tail.ready_at) to the end: minutes, every seat's tokens (null when no per-call record), and the finish's calls in it. */
     tail: { from: string | null; to: string | null; minutes: number | null; tokens: number | null; calls: { prepare: number; resolve: number; done: number; status: number; ack: number } };
   };
+  /**
+   * What the warnings and the review packets cost in deliveries (the Fable
+   * review of the limits branch, P3-10): from the trace, each reply to a
+   * record, an attest or a lead's close or confirmation that carried a
+   * warning, and the warning codes they carried; from the lead register,
+   * each review of an answer offered and delivered to its seat, each of
+   * which leads with its source-first packet (leads.ts reviewPacketWords).
+   * Every finish status also carries the warnings (finish.calls.status).
+   */
+  deliveries: {
+    /** Whether the trace is there to count the warnings from. */
+    recorded: boolean;
+    warnings: { record: number; attest: number; lead_close: number };
+    codes: Record<string, number>;
+    /** Null when the lead register holds no offer events (a run from before offers). */
+    review_packets: number | null;
+  };
   tail: {
     /** Whether the ledger holds answers to measure the answer tails from. */
     recorded: boolean;
@@ -735,6 +752,26 @@ async function finishActs(c: Context, events: readonly P.SwarmEvent[], recorded:
   return out;
 }
 
+/** The replies that carried a warning, by act, and the codes; the review packets delivered (RunMetrics["deliveries"]). */
+function deliveries(c: Context, events: readonly P.SwarmEvent[], recorded: boolean): RunMetrics["deliveries"] {
+  const out: RunMetrics["deliveries"] = { recorded, warnings: { record: 0, attest: 0, lead_close: 0 }, codes: {}, review_packets: null };
+  for (const e of events) {
+    const r = (e.result && typeof e.result === "object" ? e.result : {}) as Rec;
+    if (!Array.isArray(r.warned) || !r.warned.length) continue;
+    const act = e.tool === "record" ? "record" : e.tool === "attest" ? "attest" : e.tool.startsWith("lead") ? "lead_close" : null;
+    if (!act) continue;
+    out.warnings[act] += 1;
+    for (const code of r.warned) out.codes[str(code)] = (out.codes[str(code)] ?? 0) + 1;
+  }
+  const ev = c.leadEvents as unknown as Array<Rec & { seq: number; ev: string; entry?: unknown; offer?: unknown }>;
+  if (ev.some((e) => e.ev.startsWith("offer"))) {
+    const bySeq = new Map(c.entries.map((e) => [e.seq, e]));
+    const offers = new Map(ev.filter((e) => e.ev === "offer" && typeof e.entry === "number").map((e) => [e.seq, e.entry as number]));
+    out.review_packets = ev.filter((e) => e.ev === "offer_seen" && typeof e.offer === "number" && offers.has(e.offer) && bySeq.get(offers.get(e.offer)!)?.kind === "answer" && str(bySeq.get(offers.get(e.offer)!)?.section).startsWith("question:")).length;
+  }
+  return out;
+}
+
 async function tail(c: Context, scope: RunMetrics["questions"], outcome: RunMetrics["outcome"]): Promise<RunMetrics["tail"]> {
   const endAt = ms(outcome.at);
   const end: RunMetrics["tail"]["end"] = outcome.outcome === "stopped" && existsSync(join(c.S, P.STOPPED_REL)) ? "stopped" : outcome.outcome === "paused" ? "paused" : existsSync(join(c.S, P.SENTINEL_REL)) ? "sentinel" : null;
@@ -1041,6 +1078,7 @@ export async function measureRun(runDirArg: string, o: { now?: number } = {}): P
     offers: off,
     done: doneCalls(events, c.have.trace && !unreadable),
     finish: await finishActs(c, events, c.have.trace && !unreadable, t),
+    deliveries: deliveries(c, events, c.have.trace && !unreadable),
     tail: t,
     acquisition: await acquisition(c),
     interpretations: interpretations(c),
@@ -1210,6 +1248,7 @@ export function metricsText(m: RunMetrics): string {
     ["Wakes (before offers)", o.wakes_before_offers.recorded ? `${o.wakes_before_offers.made}: ${o.wakes_before_offers.taken_by_woken} taken by the woken seat, ${o.wakes_before_offers.taken_by_another} by another, ${o.wakes_before_offers.not_taken} not taken` : absent(LEADS)],
     ["done calls", d.recorded ? `${d.calls}: ${d.accepted} accepted (${d.created_sentinel} wrote the sentinel), ${d.refused} refused by the seat's checks (${counts(d.refused_by)}), ${d.hub_refused} refused by the hub, ${d.not_yours} not the seat's finish` : absent("readable traces/events.jsonl")],
     ["Finish", m.finish.recorded ? `the first done ${m.finish.first_done ? `${m.finish.first_done.how} (${m.finish.first_done.agent})${m.finish.first_done_late ? ", on late items" : ""}` : "never came"}; ${m.finish.late_refusals} done(s) refused on late items; finish calls: ${m.finish.calls.prepare} prepare, ${m.finish.calls.resolve} resolve (${m.finish.calls.resolve_batches} with items), ${m.finish.calls.status} status, ${m.finish.calls.ack} ack; ${m.finish.resolutions} resolution(s) in the register (${m.finish.batches} batch(es)), ${m.finish.checks} check(s); from ready to the end: ${m.finish.tail.minutes === null ? "not measured" : `${mins(m.finish.tail.minutes)}, ${m.finish.tail.tokens === null ? "tokens not measured" : `${m.finish.tail.tokens} tokens`}, ${m.finish.tail.calls.prepare} prepare, ${m.finish.tail.calls.resolve} resolve, ${m.finish.tail.calls.done} done`}` : absent("readable traces/events.jsonl")],
+    ["Warnings delivered", m.deliveries.recorded ? `${m.deliveries.warnings.record + m.deliveries.warnings.attest + m.deliveries.warnings.lead_close} repl(ies) carried a warning: ${m.deliveries.warnings.record} to a record, ${m.deliveries.warnings.attest} to an attest, ${m.deliveries.warnings.lead_close} to a lead's close or confirmation (${counts(m.deliveries.codes)}); ${m.deliveries.review_packets === null ? "review packets not recorded (no offer events)" : `${m.deliveries.review_packets} review packet(s) delivered with an answer's review offer`}` : absent("readable traces/events.jsonl")],
     ["Tail to the end", !t.end_at ? "not measured (the run has not ended)" : `${mins(t.minutes_from_ready)} from ready (${t.ready_source === "done" ? "recorded by the done: readiness had not turned ready before it passed" : (t.ready_source ?? "never ready")}); ${t.recorded ? `${mins(t.minutes_from_first_answers)} from the first answers, ${mins(t.minutes_from_final_answers)} from the final ones${t.unanswered.length ? `; unanswered: ${list(t.unanswered)}` : ""}` : `the answer tails ${absent(LEDGER)}`}`],
     ["Acquisition", a.recorded ? `${a.requests} request(s) (${counts(a.by_stage)}; ${a.declined_by_policy} declined by the case policy); ${a.gaps.length} gap(s)${a.questions_with_gap.length ? ` on ${list(a.questions_with_gap)}` : ""}` : absent("requests/requests.jsonl")],
     ["Evidence added", a.evidence_recorded ? `${a.evidence_added} time(s), ${a.evidence_added_for_request} for a request` : absent("store/journal.jsonl")],
