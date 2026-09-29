@@ -11830,10 +11830,10 @@ export function noMoreEvidenceAskFix(coverage: number[], answer: number): string
  * and in finish status. no_acquisition_ask: a not-determinable answer names
  * no ask, nor why none. partial_all_parts_established: a partial answer
  * every review of which holds every part it weighed established.
- * lead_findings_uncited: findings and events two seats hold for the
- * question (under its leads, naming it, or linked by rel to an entry its
- * answer cites) that its answer does not reach. `seqs` opens with the
- * answer's.
+ * lead_findings_uncited: findings and events tied to the question that
+ * its answer does not reach: naming it (one seat is enough), or held by two
+ * seats under its leads or linked by rel to an entry its answer cites.
+ * `seqs` opens with the answer's.
  */
 export type LedgerWarning = { code: "no_acquisition_ask" | "partial_all_parts_established" | "lead_findings_uncited"; section: string; seqs: number[]; what: string; fix: string };
 
@@ -11907,17 +11907,18 @@ export function answerCites(a: LedgerEntry, replaced: Map<number, number>): Set<
   return out;
 }
 
-/** An entry a question's answer leaves out (lead_findings_uncited), with what ties it to the question: the leads it was recorded under, its own `answers`, its `rel` to an entry the answer cites. */
-export type UncitedEntry = { seq: number; kind: "finding" | "event"; leads: readonly string[]; names: boolean; rel: LedgerRel[] };
+/** An entry a question's answer leaves out (lead_findings_uncited), with what ties it to the question (the leads it was recorded under, its own `answers`, its `rel` to an entry the answer cites) and how many seats hold it. */
+export type UncitedEntry = { seq: number; kind: "finding" | "event"; leads: readonly string[]; names: boolean; rel: LedgerRel[]; seats: 1 | 2 };
 
 /**
- * What two seats hold for question `id` that its answer `a` does not reach
- * (answerReach): each standing finding or event, under no dispute in force,
- * held by two seats (heldByTwoSeats), that the registers tie to the
- * question: the lead register recorded it under a lead of the question
- * (`under`, leads.ts questionLeadEntries), or it names the question in its
- * `answers`, or its `rel` links it to an entry the answer cites
- * (answerCites). In ledger order, every one. Registers and refs only.
+ * What the registers tie to question `id` that its answer `a` does not
+ * reach (answerReach): each standing finding or event, under no dispute in
+ * force, that names the question in its own `answers` (its author tied it
+ * to the question: one seat is enough), or that two seats hold
+ * (heldByTwoSeats) and the lead register recorded under a lead of the
+ * question (`under`, leads.ts questionLeadEntries) or its `rel` links to an
+ * entry the answer cites (answerCites). In ledger order, every one.
+ * Registers and refs only.
  */
 export function questionUncited(
   a: LedgerEntry,
@@ -11935,8 +11936,10 @@ export function questionUncited(
     const e = o.bySeq.get(seq);
     if (!e || (e.kind !== "finding" && e.kind !== "event")) continue;
     if (disputed.has(e.hash ?? ledgerHash(e, "genesis"))) continue;
-    if (!heldByTwoSeats(e, o.attestations)) continue;
-    out.push({ seq, kind: e.kind, leads: o.under?.get(seq) ?? [], names: (e.answers ?? []).some((x) => sectionKey(x) === id), rel: (e.rel ?? []).filter((r) => cites.has(r.to)) });
+    const names = (e.answers ?? []).some((x) => sectionKey(x) === id);
+    const two = heldByTwoSeats(e, o.attestations);
+    if (!two && !names) continue;
+    out.push({ seq, kind: e.kind, leads: o.under?.get(seq) ?? [], names, rel: (e.rel ?? []).filter((r) => cites.has(r.to)), seats: two ? 2 : 1 });
   }
   return out;
 }
@@ -12145,17 +12148,18 @@ export function ledgerGate(o: { entries: LedgerEntry[]; attestations: LedgerAtte
         });
       }
     }
-    // What two seats hold for the question and its answer leaves out (on
+    // What the registers tie to the question and its answer leaves out (on
     // s993d40 an answer left out two methods the ledger held as findings
     // under that question's leads, and one of them, established under that
     // other question's leads, named a second question whose answer never
-    // reached it either): a standing finding or event, not disputed, that another
-    // seat attested or two seats recorded, and that the answer does not
-    // reach, directly or through the entries it cites (answerReach), when
-    // it is tied to the question by the registers: the lead register
-    // recorded it under a lead linked to the question (it interprets a
-    // lead's job, or a lead's close or confirmation names it), or it names
-    // the question in its own `answers`, or its `rel` links it to an entry
+    // reached it either; on sa2f2f2 every finding no answer reached was
+    // one seat's): a standing finding or event, not disputed, that the
+    // answer does not reach, directly or through the entries it cites
+    // (answerReach), and that names the question in its own `answers` (one
+    // seat is enough: its author tied it to the question), or that another
+    // seat attested or two seats recorded and the lead register recorded
+    // under a lead linked to the question (it interprets a lead's job, or a
+    // lead's close or confirmation names it) or its `rel` links to an entry
     // the answer cites (questionUncited). Registers and refs only: nothing
     // is read of what an entry says. A warning: every such entry is listed,
     // with what ties it to the question.
@@ -12163,12 +12167,13 @@ export function ledgerGate(o: { entries: LedgerEntry[]; attestations: LedgerAtte
     if (left.length) {
       const q = questionName(id, sec.section);
       const one = left.length === 1;
-      const tie = (x: UncitedEntry) => (x.leads.length ? `under ${x.leads.join(", ")}` : x.names ? `that names ${q}` : `whose rel ${x.rel.map((r) => `${r.kind} E-${r.to}`).join(" and ")}, which the answer cites`);
+      // One seat's entry counts by the question it names; the tie said is that one, with its leads when it has them.
+      const tie = (x: UncitedEntry) => (x.seats === 1 ? `${x.leads.length ? `under ${x.leads.join(", ")} ` : ""}that names ${q}, held by one seat` : x.leads.length ? `under ${x.leads.join(", ")}` : x.names ? `that names ${q}` : `whose rel ${x.rel.map((r) => `${r.kind} E-${r.to}`).join(" and ")}, which the answer cites`);
       warnings.push({
         code: "lead_findings_uncited",
         section: sec.section,
         seqs: [a.seq, ...left.map((x) => x.seq)],
-        what: `answer #${a.seq} (${sec.section}) leaves out what two seats hold for ${q}: ${left.map((x) => `E-${x.seq} (${x.kind === "event" ? "an event" : "a finding"} ${tie(x)})`).join(", ")}: ${one ? "cite it or say why it does not bear on it" : "cite them or say why they do not bear on it"}`,
+        what: `answer #${a.seq} (${sec.section}) leaves out what the record ties to ${q}: ${left.map((x) => `E-${x.seq} (${x.kind === "event" ? "an event" : "a finding"} ${tie(x)})`).join(", ")}: ${one ? "cite it or say why it does not bear on it" : "cite them or say why they do not bear on it"}`,
         fix: `record the answer again with supersedes=${a.seq}, citing ${one ? "it" : "each"} as E-<seq> in its reasoning (or among its contrary or limitations), or saying there why ${one ? "it does" : "each does"} not bear on ${q}; an entry the answer cites that names ${one ? "it" : "one"} (rel, a coverage record's result_refs) counts`,
       });
     }

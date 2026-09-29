@@ -55,7 +55,7 @@ async function attest(c: Ctx, input: Record<string, unknown>) {
 
 const answer = (c: Ctx, section: string, cites: number[], o: Record<string, unknown> = {}) => rec(c, { kind: "answer", section, value: `the answer, on ${cites.map((n) => `E-${n}`).join(", ")}`, reasoning: cites.map((n) => `E-${n}`).join("; "), ...A, confidence: "high", result: "established", ...o });
 
-test("lead_findings_uncited reaches past the question's leads: a finding under another question's lead that names the question, and one whose rel links it to an entry the answer cites; never one tied by nothing, held by one seat, disputed, superseded or reached", async () => {
+test("lead_findings_uncited reaches past the question's leads: a finding under another question's lead that names the question, one seat's that names it, and one whose rel links it to an entry the answer cites; never one tied by nothing, one seat's tied only by rel, disputed, superseded or reached", async () => {
   const r = await run({ goal: GOAL(2) });
   const L1 = await planned(r.a0, "1");
   // Reached through a rel of the entry the answer cites: never warned of.
@@ -70,7 +70,9 @@ test("lead_findings_uncited reaches past the question's leads: a finding under a
   const apart = ok(await rec(r.a2, finding("the account was svc_backup", ["2"]))).entry;
   for (const e of [names, linked, apart]) assert.ok((await L.recordInterpretations(r.S, "a2", e.seq, ["j000001"])).ok);
   assert.ok((await L.closeLead(r.a2, L2, { disposition: "resolved", ref: `E-${apart.seq}` })).ok);
-  // Tied to question 1 but not warned of: one seat alone, disputed, superseded (its correction is).
+  // One seat's, linked by rel to the cited finding, naming question 2 only: rel alone asks for two seats.
+  const oneLinked = ok(await rec(r.a0, finding("the first method left a log", ["2"], { rel: [{ to: cited.seq, kind: "supports" }] }))).entry;
+  // Tied to question 1 by name: one seat's (warned of: its author tied it), and a disputed and a superseded one (not; the correction is).
   const alone = ok(await rec(r.a0, finding("a third method, seen once", ["1"]))).entry;
   const disputed = ok(await rec(r.a0, finding("a fourth method", ["1"]))).entry;
   const old = ok(await rec(r.a0, finding("a fifth method, in 2023", ["1"]))).entry;
@@ -81,19 +83,19 @@ test("lead_findings_uncited reaches past the question's leads: a finding under a
   assert.ok((await P.disputeEntry(r.a1, { seq: disputed.seq, why: "the record shows another volume" })).ok);
   const correction = ok(await rec(r.a0, finding("a fifth method, in 2024", ["1"], { supersedes: old.seq }))).entry;
   await attest(r.a3, { seq: correction.seq, how: "re-read the record from job:j000001/hits.txt" });
-  const a2 = ok(await answer(r.a1, "question:2", [names.seq, linked.seq, apart.seq]));
+  const a2 = ok(await answer(r.a1, "question:2", [names.seq, linked.seq, apart.seq, oneLinked.seq]));
   assert.equal(a2.warnings, undefined, "question 2's answer reaches what its leads hold");
 
   // The record's reply says it, in the words finish status says it with.
   const a1 = await answer(r.a1, "question:1", [cited.seq]);
   assert.ok(a1.ok);
   const seq = a1.entry.seq;
-  const want = `answer #${seq} (question:1) leaves out what two seats hold for Q-1: E-${names.seq} (a finding that names Q-1), E-${linked.seq} (a finding whose rel supports E-${cited.seq}, which the answer cites), E-${twice.seq} (an event that names Q-1), E-${correction.seq} (a finding that names Q-1): cite them or say why they do not bear on it. record the answer again with supersedes=${seq}, citing each as E-<seq> in its reasoning (or among its contrary or limitations), or saying there why each does not bear on Q-1; an entry the answer cites that names one (rel, a coverage record's result_refs) counts`;
+  const want = `answer #${seq} (question:1) leaves out what the record ties to Q-1: E-${names.seq} (a finding that names Q-1), E-${linked.seq} (a finding whose rel supports E-${cited.seq}, which the answer cites), E-${alone.seq} (a finding that names Q-1, held by one seat), E-${twice.seq} (an event that names Q-1), E-${correction.seq} (a finding that names Q-1): cite them or say why they do not bear on it. record the answer again with supersedes=${seq}, citing each as E-<seq> in its reasoning (or among its contrary or limitations), or saying there why each does not bear on Q-1; an entry the answer cites that names one (rel, a coverage record's result_refs) counts`;
   assert.deepEqual(a1.warnings, [want]);
   assert.deepEqual(a1.warned, ["lead_findings_uncited"]);
   const check = await checkLedgerAnswers(r.S, ["1", "2"]);
   assert.deepEqual(check.warnings, [want], "the answers check says the same, for question 1 alone");
-  assert.ok(![apart, alone, disputed, old, reached].some((e) => want.includes(`E-${e.seq} (`)), "tied by nothing, one seat, disputed, superseded, reached: none is named");
+  assert.ok(![apart, oneLinked, disputed, old, reached].some((e) => want.includes(`E-${e.seq} (`)), "tied by nothing, one seat's by rel alone, disputed, superseded, reached: none is named");
   // The reply to the attest on it; the review of question 2's answer carries nothing.
   const at = await attest(r.a2, { seq, how: "re-derived the cited finding", ...ESTABLISHED });
   assert.deepEqual(at.warnings, [want]);
@@ -110,7 +112,7 @@ test("lead_findings_uncited reaches past the question's leads: a finding under a
   assert.equal(ready.ready, true, ready.items.join("; "));
   assert.deepEqual(ready.warnings, [want]);
   // Citing them clears it.
-  const again = ok(await answer(r.a1, "question:1", [cited.seq, names.seq, linked.seq, twice.seq, correction.seq], { supersedes: seq }));
+  const again = ok(await answer(r.a1, "question:1", [cited.seq, names.seq, linked.seq, alone.seq, twice.seq, correction.seq], { supersedes: seq }));
   assert.equal(again.warnings, undefined);
   assert.deepEqual((await checkLedgerAnswers(r.S, ["1", "2"])).warnings, []);
 });
