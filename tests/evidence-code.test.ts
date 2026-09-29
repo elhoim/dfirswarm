@@ -16,7 +16,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { after, test } from "node:test";
-import { evidenceCodeNote, evidenceCodeRun, evidencePaths } from "../extensions/evidence-code.ts";
+import { evidenceCodeNote, evidenceCodeRun, evidencePaths, onlyOwnOutputs, ownJobOutputs, withOwnJobOutputs } from "../extensions/evidence-code.ts";
 import { renderReportBodyMarkdown } from "../scripts/report-body.ts";
 
 const dirs: string[] = [];
@@ -81,8 +81,28 @@ test("reading an evidence-derived place is not running it: patterns, hashes, str
     "node /tmp/t.js",
     "python3 work/me/inputs/tool.py",
     "file work/quarantine/a1/dropper.sh; xxd work/quarantine/a1/dropper.sh | head",
+    "node -e \"const rows = require('store/jobs/j000001/out/rows.json'); console.log(rows.length)\"",
   ]) assert.equal(evidenceCodeRun(cmd), null, cmd);
   assert.deepEqual(evidencePaths("icat -o 2048 inputs/Case.E01 1234 > work/extracted/a1/f.bin; ls /run/s/store/jobs/j2/out/"), ["inputs/Case.E01", "work/extracted/a1/f.bin", "store/jobs/j2/out/"]);
+});
+
+test("an output of the seat's own command job is said apart, never dropped: its own code, or code that job recovered, is the seat's to say", async () => {
+  const x = evidenceCodeRun("python3 store/jobs/j000012/out/helper.py store/jobs/j000013/out/rows.txt")!;
+  assert.deepEqual(x.paths, ["store/jobs/j000012/out/helper.py"]);
+  const jobs: Record<string, { requester: { agent: string }; spec: { kind: string } }> = { j000012: { requester: { agent: "a1" }, spec: { kind: "command" } }, j000010: { requester: { agent: "a2" }, spec: { kind: "command" } } };
+  assert.deepEqual(ownJobOutputs(x, "a1", (id) => jobs[id]), { paths: ["store/jobs/j000012/out/helper.py"], jobs: ["j000012"] });
+  assert.deepEqual(ownJobOutputs(x, "a2", (id) => jobs[id]), { paths: [], jobs: [] }, "another seat's job output is not its own");
+  const own = { ...x, own: ownJobOutputs(x, "a1", (id) => jobs[id]) };
+  assert.equal(onlyOwnOutputs(own), true);
+  const note = evidenceCodeNote(own, "shell");
+  assert.match(note, /code recovered from the evidence may have been executed\. It is an output of a command job this seat asked for \(j000012\): code the seat wrote there itself is not the evidence's; code that job recovered from the evidence is\./);
+  // Read from the run's job records.
+  const base = await mkdtemp(join(tmpdir(), "evidence-code-own-"));
+  dirs.push(base);
+  await mkdir(join(base, "store", "jobs", "j000012"), { recursive: true });
+  await writeFile(join(base, "store", "jobs", "j000012", "job.json"), JSON.stringify({ id: "j000012", ...jobs.j000012 }));
+  assert.deepEqual((await withOwnJobOutputs(base, x, "a1")).own, { paths: ["store/jobs/j000012/out/helper.py"], jobs: ["j000012"] });
+  assert.equal((await withOwnJobOutputs(base, x, "a3")).own, undefined);
 });
 
 test("the seat is told the rule, why the mount did not stop it and what to do instead, never refused", () => {
@@ -102,6 +122,9 @@ test("the report's job record says a job may have executed evidence code, and li
     "ledger/entries.jsonl": "",
     "store/jobs/j000001/job.json": JSON.stringify({ id: "j000001", ...job(BOUND, ["job:j000010/cache-0001.decoded"]) }),
     "store/jobs/j000002/job.json": JSON.stringify({ id: "j000002", ...job("sha256sum store/jobs/j000010/out/cache-0001.decoded", ["job:j000010/cache-0001.decoded"]) }),
+    // A helper the same seat's earlier command job wrote, run: said apart.
+    "store/jobs/j000003/job.json": JSON.stringify({ id: "j000003", ...job("cat > \"$OUT/helper.py\" <<'EOF'\nprint('rows')\nEOF", []) }),
+    "store/jobs/j000004/job.json": JSON.stringify({ id: "j000004", ...job("python3 store/jobs/j000003/out/helper.py", ["job:j000003/helper.py"]) }),
   };
   for (const [rel, text] of Object.entries(files)) {
     await mkdir(dirname(join(S, rel)), { recursive: true });
@@ -109,11 +132,16 @@ test("the report's job record says a job may have executed evidence code, and li
   }
   const md = await renderReportBodyMarkdown(S);
   assert.match(md, /1 job may have executed code recovered from the evidence \(.*\): j000001\./);
+  assert.match(md, /1 job ran or evaluated only an output of a command job its own seat asked for: j000004\. Code the seat wrote there itself is not the evidence's; code that job recovered from the evidence is: the seat says which\./);
   const one = md.slice(md.indexOf("Job j000001"), md.indexOf("Job j000002") > 0 ? md.indexOf("Job j000002") : undefined);
-  assert.match(one, /evidence code executed/);
+  assert.match(one, /evidence code may have run/, "the chip says what the row says: may have");
+  assert.doesNotMatch(one, /evidence code executed/);
   assert.match(one, /Evidence code.*may have been executed: the command evaluates code \(vm\.runIn…\) it read from store\/jobs\/j000010\/out\/cache-0001\.decoded/);
-  const two = md.slice(md.indexOf("Job j000002"));
+  const two = md.slice(md.indexOf("Job j000002"), md.indexOf("Job j000003"));
   assert.doesNotMatch(two.slice(0, two.indexOf("Cited by")), /evidence code/i);
+  const four = md.slice(md.indexOf("Job j000004"));
+  assert.match(four.slice(0, four.indexOf("Cited by")), /own job's code may have run/);
+  assert.match(four.slice(0, four.indexOf("Cited by")), /It is an output of a command job this seat asked for \(j000003\)/);
   // The worker prompt says the rule where the seats read it.
   const prompt = (await readFile(join(import.meta.dirname, "..", "prompts", "worker-system.md"), "utf8")).replace(/\s+/g, " ");
   for (const must of ["Never run is any way of running", "No-exec does not stop an interpreter reading a file", "which is not no-exec at all", "reimplement it, or use a trusted program that does it"]) assert.ok(prompt.includes(must), `prompts/worker-system.md does not say: ${must}`);

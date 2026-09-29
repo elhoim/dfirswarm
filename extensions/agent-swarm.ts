@@ -196,7 +196,7 @@ import {
 import { LEAD_DISPOSITIONS, leadsWaitCheck, reopenOnLedger } from "./leads.ts";
 // The finish's host-side pieces: one check result per revision, recorded where the finish line runs.
 import { checkAt, LATE_PENDING, lateRefusal, NOT_YOURS, recordCheck } from "./finish.ts";
-import { evidenceCodeNote, evidenceCodeRun } from "./evidence-code.ts";
+import { evidenceCodeNote, evidenceCodeRun, withOwnJobOutputs } from "./evidence-code.ts";
 import { registerPlaywrightTool, runBrowserCheck } from "./playwright-tool.ts";
 import { readToolchainAt, TOOLCHAIN_DIR } from "./toolchain.ts";
 import { installChunkedEgress } from "./vm-egress.ts";
@@ -1927,7 +1927,8 @@ export default function (pi: ExtensionAPI) {
         longRuns.set(key, { ms: durationMs, path: fullOutput.path });
       }
       // Code from the evidence, run or evaluated in this VM: flagged on the trace and told to the seat, never refused (extensions/evidence-code.ts).
-      const code = evidenceCodeRun(input.command);
+      const flagged = evidenceCodeRun(input.command);
+      const code = flagged ? await withOwnJobOutputs(ctx.cwd, flagged, agentId).catch(() => flagged) : null;
       if (code) {
         content = [...(Array.isArray(content) ? content : []), { type: "text", text: evidenceCodeNote(code, "shell") }];
         contentChanged = true;
@@ -2577,7 +2578,8 @@ export default function (pi: ExtensionAPI) {
         return { content: [{ type: "text" as const, text: refused.reason }], details: refused, isError: true };
       }
       // A command that runs or evaluates code from an evidence-derived place is flagged, never refused (extensions/evidence-code.ts).
-      const code = typeof params.command === "string" ? evidenceCodeRun(params.command, Array.isArray(params.inputs) ? params.inputs : []) : null;
+      const flagged = typeof params.command === "string" ? evidenceCodeRun(params.command, Array.isArray(params.inputs) ? params.inputs : []) : null;
+      const code = flagged ? await withOwnJobOutputs(toolCtx.cwd, flagged, agentId).catch(() => flagged) : null;
       const result = { ok: true, ...res.result, ...(code ? { evidence_code: { ...code, note: evidenceCodeNote(code, "job") } } : {}) };
       await logEvent(toolCtx.cwd, agentId, "job_run", params, { ok: true, job: res.job, state: res.result.state, status: res.result.status, ...(res.result.lead ? { lead: res.result.lead } : {}), ...(Array.isArray(res.result.similar) ? { similar: (res.result.similar as Array<{ job?: unknown }>).map((x) => x.job) } : {}), ...(code ? { evidence_code: code } : {}) }, Date.now() - started);
       return okResult(result);

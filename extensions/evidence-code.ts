@@ -30,6 +30,13 @@
  * forensic tool's; a script that takes its path from its arguments or its
  * environment, or recovered code copied elsewhere first, is not seen. A
  * flag says "may have": the seat or a reviewer says whether it did.
+ *
+ * A path that is an output of the seat's own command job (a helper an
+ * earlier job of its own wrote) is said apart (`own`): code the seat wrote
+ * itself is not the evidence's, and only the seat can say whether that job
+ * wrote it or recovered it from the evidence, so it is still flagged, never
+ * dropped. `require` of a JSON file loads data, not code, and is not
+ * flagged (the Fable review of the limits branch, P3-4).
  */
 
 /** Where evidence-derived bytes are, as a command names them: the evidence, what was extracted or quarantined from it, a job's sealed output, an import. */
@@ -84,8 +91,14 @@ const RUNS_ARG = new RegExp(`${PROGRAM}\\s+(?:-{1,2}[A-Za-z][\\w-]*(?:=\\S+)?\\s
 const RUNS_STDIN = new RegExp(`${PROGRAM}(?:\\s+-)?\\s*<\\s*${SCRIPT}`, "m");
 const PIPED = new RegExp(`\\|\\s*(?:/(?:[^\\s;&|(]*/)?)?(${WORDS})(?:\\d+(?:\\.\\d+)*)?(?:\\s+-)?\\s*(?:$|[;&|)])`, "m");
 
-/** How a command runs evidence-derived code: `runs` (an interpreter, shell or browser given such a path as its script) or `evaluates` (a construct that evaluates code, given what was read from such a place), what did it, and the evidence-derived paths or inputs it names. */
-export type EvidenceCode = { how: "runs" | "evaluates"; what: string; paths: string[] };
+/**
+ * How a command runs evidence-derived code: `runs` (an interpreter, shell or
+ * browser given such a path as its script) or `evaluates` (a construct that
+ * evaluates code, given what was read from such a place), what did it, and
+ * the evidence-derived paths or inputs it names; `own`, those of them that
+ * are outputs of the seat's own command jobs, and the jobs (ownJobOutputs).
+ */
+export type EvidenceCode = { how: "runs" | "evaluates"; what: string; paths: string[]; own?: { paths: string[]; jobs: string[] } };
 
 /** The evidence-derived paths a command names, each once, in order. */
 export function evidencePaths(command: string): string[] {
@@ -159,13 +172,69 @@ export function evaluatesEvidence(text: string): string | null {
   for (const [what, re] of EVALUATES) {
     for (const m of text.matchAll(re)) {
       const args = argsAt(text, m.index! + m[0].length);
+      // A JSON file required is data, not code.
+      if (what === "require" && /^\s*['"`][^'"`]*\.json['"`]\s*$/i.test(args)) continue;
       if (QUOTED_AREA.test(args) || names(args)) return what;
     }
   }
   return null;
 }
 
+/** The job an evidence-derived path or input is an output of (store/jobs/<id>/…, job:<id>/…), or null. */
+export function outputJobOf(path: string): string | null {
+  return /^(?:store\/jobs\/|job:)(j\d{6,})(?:\/|$)/.exec(path)?.[1] ?? null;
+}
+
+/** A job as a flag reads it: who asked for it, and its kind. */
+export type JobOrigin = { requester?: { agent?: string } | null; spec?: { kind?: string } | null };
+
+/**
+ * The paths of a flag that are outputs of `seat`'s own command jobs (the
+ * job record's requester is the seat, its kind command), and those jobs:
+ * code the seat may have written itself. Said apart, never dropped: its own
+ * command job may also have recovered what it runs from the evidence.
+ */
+export function ownJobOutputs(x: EvidenceCode, seat: string, job: (id: string) => JobOrigin | null | undefined): { paths: string[]; jobs: string[] } {
+  const paths: string[] = [];
+  const jobs: string[] = [];
+  for (const p of x.paths) {
+    const id = outputJobOf(p);
+    const j = id ? job(id) : null;
+    if (!id || !j || j.requester?.agent !== seat || j.spec?.kind !== "command") continue;
+    paths.push(p);
+    if (!jobs.includes(id)) jobs.push(id);
+  }
+  return { paths, jobs };
+}
+
+/** A flag with its own-job outputs read from the run's job records (store/jobs/<id>/job.json), when there are any. */
+export async function withOwnJobOutputs(sandboxRoot: string, x: EvidenceCode, seat: string): Promise<EvidenceCode> {
+  const { readFile } = await import("node:fs/promises");
+  const { join } = await import("node:path");
+  const records = new Map<string, JobOrigin | null>();
+  for (const p of x.paths) {
+    const id = outputJobOf(p);
+    if (!id || records.has(id)) continue;
+    records.set(id, await readFile(join(sandboxRoot, "store", "jobs", id, "job.json"), "utf8").then((t) => JSON.parse(t) as JobOrigin).catch(() => null));
+  }
+  const own = ownJobOutputs(x, seat, (id) => records.get(id));
+  return own.paths.length ? { ...x, own } : x;
+}
+
+/** Whether every path a flag names is an output of the seat's own command jobs. */
+export function onlyOwnOutputs(x: EvidenceCode): boolean {
+  return Boolean(x.own?.paths.length) && x.paths.every((p) => x.own!.paths.includes(p));
+}
+
 /** What the seat is told when a command of its runs or evaluates evidence-derived code: the rule, why the mount did not stop it, and what to do instead. */
 export function evidenceCodeNote(x: EvidenceCode, where: "job" | "shell"): string {
-  return `Note from the harness: this ${where === "job" ? "job's command" : "command"} ${x.how === "runs" ? `runs ${x.paths.join(", ")} with ${x.what}` : `evaluates code (${x.what}) it read from ${x.paths.join(", ")}`}: code recovered from the evidence may have been executed. What comes out of the evidence is read, never run: no-exec stops the kernel running a file, not an interpreter reading it, and a job's output under store/ is not no-exec at all. Reimplement what the recovered code does, or use a trusted program that does it, and cite the recovered code as what you read. If it did run, say so in the ledger (a limitation on what rests on it); if only running it will do, ask the operator first (lead_close needs_operator). This is flagged on the trace and in the report.`;
+  const own = x.own?.paths.length ? ownWords(x) : "";
+  return `Note from the harness: this ${where === "job" ? "job's command" : "command"} ${x.how === "runs" ? `runs ${x.paths.join(", ")} with ${x.what}` : `evaluates code (${x.what}) it read from ${x.paths.join(", ")}`}: code recovered from the evidence may have been executed.${own ? ` ${own}` : ""} What comes out of the evidence is read, never run: no-exec stops the kernel running a file, not an interpreter reading it, and a job's output under store/ is not no-exec at all. Reimplement what the recovered code does, or use a trusted program that does it, and cite the recovered code as what you read. If it did run, say so in the ledger (a limitation on what rests on it); if only running it will do, ask the operator first (lead_close needs_operator). This is flagged on the trace and in the report.`;
+}
+
+/** The own-job outputs of a flag in words: which paths, which jobs, and what that does and does not mean. */
+export function ownWords(x: EvidenceCode): string {
+  if (!x.own?.paths.length) return "";
+  const all = onlyOwnOutputs(x);
+  return `${all ? (x.own.paths.length === 1 ? "It is" : "Each is") : `Of these, ${x.own.paths.join(", ")} ${x.own.paths.length === 1 ? "is" : "are"}`} an output of ${x.own.jobs.length === 1 ? "a command job" : "command jobs"} this seat asked for (${x.own.jobs.join(", ")}): code the seat wrote there itself is not the evidence's; code ${x.own.jobs.length === 1 ? "that job" : "those jobs"} recovered from the evidence is.`;
 }
