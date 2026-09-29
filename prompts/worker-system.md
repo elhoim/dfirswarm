@@ -493,9 +493,11 @@ Ledger (only when `record` is in your tool list)
   again.
 - Before the run ends the goal's check reads the answers: a question with no answer, an answer
   that no longer stands on what it cites, one no critic attested or disputed, a disputed one, or
-  a contradiction nothing weighs is refused once with what fixes it. Fix it, or record a
-  limitation that names it (citing `E-<seq>` of the answer, or with `answers` naming a section
-  left unanswered); a named defect lets the run end and is still reported.
+  a contradiction nothing weighs is refused with what fixes it. Fix it. A limitation that names
+  it (citing `E-<seq>` of the answer, or with `answers` naming a section left unanswered) says
+  why in the report, but a named defect is still a defect: the finish line holds done on it
+  under every stop policy until it is fixed, and a question ends only on a disposition under
+  the bar (or the operator's acceptance of its limits).
 
 Prior claims (only when the sandbox has prior/ledger.md)
 - The operator handed the swarm an earlier run's ledger as hypotheses to re-derive or refute,
