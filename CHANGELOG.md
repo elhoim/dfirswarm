@@ -6,6 +6,42 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Fixed: a program's log goes under the job's output, and a job that failed on a refused write says so
+
+On the Belka validation run (s7827e1) the new disk-timeline recipe failed
+with exit 1: log2timeline writes its log (`log2timeline-<timestamp>.log.gz`)
+to its working directory unless told otherwise, and a job starts in the
+run's directory, read-only in its worker (`OSError: [Errno 30] Read-only
+file system`). psort failed on its own log the same way, and so did two
+agents' own log2timeline jobs; each said only "exit 1". The recipe had only
+met stand-ins.
+
+- **The packs.** disk-timeline 1.0.1 gives log2timeline and psort their
+  logs under `--out` (`--logfile`, which Plaso's tools have taken with
+  `--log_file` and `--log-file` as aliases since at least 20180818; the
+  images install 20260720) and runs each step there. timeline_super gives
+  both its logs in `out_dir` (an agent's VM has the run read-only too) and
+  names them. sigma_hunt gives Zircolite `--logfile` in `out_dir` and runs
+  Hayabusa there, since no option moves its `./logs/errorlog-<time>.log`;
+  both name their logs. No other recipe or tool runs a program that writes
+  to its working directory as it is called. computer-forensics-base 1.4.1,
+  windows-forensics 1.3.3. The stand-ins write each log where the real
+  program does, fail when that is read-only, and the tests run the recipe
+  and the tools from a read-only directory.
+- **The job's reason.** A job that ends non-zero is read for a refused
+  write (`scripts/job-write-refused.ts`): its stdout, its stderr and every
+  stderr file it kept in `$OUT`, each whole. A line saying `Read-only file
+  system`, or `Permission denied` on a path outside `$OUT`, makes its reason
+  `exit N: a write outside $OUT was refused (…)`, with the path whole, where
+  the line is, how many there are, that the working directory and the run
+  are read-only in a worker, `$OUT` by name and path, and to point the
+  program's log, temp or output options there or `cd "$OUT"`. On the job
+  record (`write_refused`), the journal (`job_write_refused`, and
+  `job_finished`'s reason), the requester's post and `job_run`'s and
+  `job_status`'s answer. On the error text alone: no program is named.
+- **The prompt** says a job runs with the run read-only, so a program's log
+  or temp files are given a path under `$OUT`, or it runs after `cd "$OUT"`.
+
 ### Added: the premise register, and claim and open-part rows
 
 A case brief supplies things several questions share (whose device it is,

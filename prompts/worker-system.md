@@ -306,6 +306,9 @@ Tool jobs (only when `job_run` is in your tool list)
 - A job reads inputs/, store/, catalog/ and tools/; it cannot write anywhere but $OUT, has no
   network unless you ask for the run's allowlist, and cannot see the board. Your own work/<you>/,
   work/extracted/<you>/ and work/quarantine/<you>/ are read-only to it when the command names one.
+- A job starts in the run's directory and runs with the run read-only, so a program that writes its
+  log or temp files to its working directory must be given a path under $OUT (its log, temp or
+  output option), or run after cd "$OUT". A job that failed on such a write says so in its reason.
 - Everything a job reads is read-only: open a SQLite database as
   sqlite3.connect('file:<path>?mode=ro&immutable=1', uri=True) (or with the sqlite_query tool), or
   copy it into $OUT first; a plain connect fails there ("unable to open database file").

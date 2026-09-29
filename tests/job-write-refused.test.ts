@@ -141,3 +141,11 @@ test("through the service: a job that ended non-zero on a refused write has it i
   assert.equal(ok.reason, undefined);
   await svc.stop("test over");
 });
+
+test("the worker prompt says a job runs with the run read-only, and where a program's log or temp files go", async () => {
+  const prompt = readFileSync(join(import.meta.dirname, "..", "prompts", "worker-system.md"), "utf8").replace(/\s+/g, " ");
+  for (const must of [
+    "A job starts in the run's directory and runs with the run read-only, so a program that writes its log or temp files to its working directory must be given a path under $OUT (its log, temp or output option), or run after cd \"$OUT\".",
+    "A job that failed on such a write says so in its reason.",
+  ]) assert.ok(prompt.includes(must), `prompts/worker-system.md does not say: ${must}`);
+});
