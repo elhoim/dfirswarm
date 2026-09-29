@@ -33,7 +33,7 @@ out="$(kick --cap-usd 5 --wall-clock 30 --label r1)" || fail "the kickoff was re
 id="$(id_of r1)"; sb="$(sandbox_of r1)"
 argv="$TMP/runs/resume/$id.argv.json"
 [[ -f "$argv" ]] || fail "the start options were not kept"
-[[ "$(stat -f %Lp "$argv" 2>/dev/null || stat -c %a "$argv")" == 600 ]] || fail "the kept options are not 0600"
+[[ "$(stat -c %a "$argv" 2>/dev/null || stat -f %Lp "$argv")" == 600 ]] || fail "the kept options are not 0600"
 jq -e '.argv | index("--cap-usd") != null and index("--label") != null' "$argv" >/dev/null || fail "the kept options are not the kickoff's: $(cat "$argv")"
 pass "the kickoff keeps its start options outside the run, 0600"
 

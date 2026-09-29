@@ -77,7 +77,7 @@ pass "the case policy is in policy.json, SWARM.md, the registry and the anchor; 
 
 echo "# typed notify targets: outside the run, 0600, and told ids only"
 tg="$TMP/runs/notify/$id.targets"
-[[ -f "$tg" && "$(stat -f %Lp "$tg" 2>/dev/null || stat -c %a "$tg")" == 600 ]] || fail "the typed targets were not kept 0600"
+[[ -f "$tg" && "$(stat -c %a "$tg" 2>/dev/null || stat -f %Lp "$tg")" == 600 ]] || fail "the typed targets were not kept 0600"
 grep -qx 'ntfy:dfs-test-topic' "$tg" && grep -qx 'desktop:' "$tg" && grep -qx 'mailto:examiner@example.org' "$tg" || fail "the targets file: $(cat "$tg")"
 grep -rq 'dfs-test-topic' "$TMP/runs/registry.json" "$sb" 2>/dev/null && fail "the ntfy topic (its secret) is in the registry or the run"
 out="$(kick --notify ntfy:'bad topic!' --label c-bad4)" && fail "a malformed ntfy topic was accepted"
