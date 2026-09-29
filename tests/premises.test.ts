@@ -268,6 +268,38 @@ test("a premise revised or withdrawn: the answers citing its earlier revision, o
   assert.doesNotMatch(cli.stdout, /is a premise request: /, "a premise dispute is answered on the request, as a stop proposal is");
 });
 
+test("the operator's ruling releases an unreconciled conflict: a revision revised since, or a premise withdrawn, holds nothing, and the answers citing it are warned instead; on a question not material the conflict is a warning", async () => {
+  const c = await run({ goal: PREMISED });
+  await Q.seedRegister(c.S);
+  ok(await answer(c, "1", [{ id: "P-1", rev: 1, stance: "assumed" }]));
+  ok(await answer(c, "2", [{ id: "P-1", rev: 1, stance: "contradicted" }]));
+  let r = await checkLedgerAnswers(c.S, ["1", "2"]);
+  assert.deepEqual([codes(r, "question:1").includes("premise_inconsistent"), codes(r, "question:2").includes("premise_inconsistent")], [true, true], r.lines.join("\n"));
+  // A question the operator marked not material: the conflict is warned there, and still holds the material one.
+  const snap = await Q.questionsSnapshot(c.S);
+  const g = P.ledgerGate({ entries: await P.readLedger(c.S), attestations: [], disputes: [], sections: ["question:1", "question:2"], bar: (id) => ({ material: id !== "2", existence: false }), premises: snap.state.premises });
+  assert.deepEqual(g.defects.filter((d) => d.code === "premise_inconsistent").map((d) => d.section), ["question:1"]);
+  const warned = g.warnings.filter((w) => w.code === "premise_inconsistent");
+  assert.deepEqual(warned.map((w) => w.section), ["question:2"]);
+  assert.match(warned[0]!.what, /contradicts P-1 \(revision 1\), which #\d+ \(question:1\) assumes, over scopes that overlap \(a question not material: warned, never held\)/);
+  // The operator revises P-1: the conflict was over revision 1, which is retired; each answer is warned it cites it.
+  await act(c.S, OPERATOR, "premise_revise", { p: "P-1", expected_rev: 1, why: "the brief named the wrong period", premise_scope: { entities: ["disk.E01"], times: ["2024-01-01..2024-12-31"], questions: ["Q-1", "Q-2"] }, text: "The disk image disk.E01 is of the laptop issued to the employee" });
+  r = await checkLedgerAnswers(c.S, ["1", "2"]);
+  assert.ok(!r.defects.some((d) => d.code === "premise_inconsistent"), r.lines.join("\n"));
+  assert.equal(r.warnings.filter((w) => /cites P-1 at revision 1, revised to 2 since/.test(w)).length, 2, r.warnings.join("\n"));
+  const ready = await FIN.readiness(c.S);
+  assert.ok(!ready.items.some((i) => /over scopes that overlap/.test(i)), `readiness holds no premise conflict: ${ready.items.join("; ")}`);
+  // The same pair, and the operator withdraws P-1: nothing holds, and each answer is warned it cites a withdrawn premise.
+  const d = await run({ goal: PREMISED });
+  await Q.seedRegister(d.S);
+  ok(await answer(d, "1", [{ id: "P-1", rev: 1, stance: "assumed" }]));
+  ok(await answer(d, "2", [{ id: "P-1", rev: 1, stance: "contradicted" }]));
+  await act(d.S, OPERATOR, "premise_withdraw", { p: "P-1", why: "the brief was wrong about the laptop" });
+  r = await checkLedgerAnswers(d.S, ["1", "2"]);
+  assert.ok(!r.defects.some((x) => x.code === "premise_inconsistent"), r.lines.join("\n"));
+  assert.equal(r.warnings.filter((w) => /cites P-1, withdrawn at .*the brief was wrong about the laptop/.test(w)).length, 2, r.warnings.join("\n"));
+});
+
 test("a review names the answer's parts by id and may add one the answer leaves out: an omitted part allows an established claim only best_candidate, and stays warned (part_omitted); a partial answer's open row needs no declared_open; review parts without ids read as they always did", async () => {
   const c = await run();
   const lead = await planned(c.a0, "1");

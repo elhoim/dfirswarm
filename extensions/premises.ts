@@ -495,8 +495,13 @@ export type PremiseConflict = { premise: string; rev: number; assumed: { seq: nu
  * revision over overlapping scopes (scopesOverlap on each citation's scope:
  * its own narrowing, or the premise's at that revision). A conditional
  * assumption ("assuming P-n") is none; neither is uncertainty (unresolved,
- * supported). `rebuttal(refs)` says which of a contradiction's refs name a
- * standing, undisputed finding or event. Pure.
+ * supported). Nor is a premise the operator withdrew, or a revision the
+ * operator has revised since: the ruling is made, and the answers citing it
+ * are warned (premise_withdrawn, premise_revised) until they are recorded
+ * again; a hold on a retired revision would force nothing on either side
+ * (the Fable review of the limits branch, P2-1). `rebuttal(refs)` says
+ * which of a contradiction's refs name a standing, undisputed finding or
+ * event. Pure.
  */
 export function premiseConflicts(answers: readonly CitingAnswer[], premises: ReadonlyMap<string, Premise> | undefined, rebuttal: (refs: readonly string[]) => string[]): PremiseConflict[] {
   const out: PremiseConflict[] = [];
@@ -512,6 +517,7 @@ export function premiseConflicts(answers: readonly CitingAnswer[], premises: Rea
     for (const y of contradicted) {
       if (x.a.seq === y.a.seq || x.c.id !== y.c.id || x.c.rev !== y.c.rev) continue;
       const p = premises?.get(x.c.id);
+      if (p && (p.withdrawn || p.rev !== x.c.rev)) continue;
       if (!scopesOverlap(citationScope(x.c, p), citationScope(y.c, p))) continue;
       out.push({ premise: x.c.id, rev: x.c.rev, assumed: { seq: x.a.seq, section: x.a.section }, contradicted: { seq: y.a.seq, section: y.a.section, rebuttal: rebuttal(y.c.refs ?? []) } });
     }

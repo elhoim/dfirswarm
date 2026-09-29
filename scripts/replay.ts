@@ -346,6 +346,7 @@ const WARNING_CODES: ReadonlyArray<[string, RegExp]> = [
   ["premise_disputed", /\) assumes P-\d+ .*: the premise is disputed before the operator/],
   ["premise_revised", /\) cites P-\d+ at revision \d+, revised to \d+ since/],
   ["premise_withdrawn", /\) cites P-\d+, withdrawn at /],
+  ["premise_inconsistent", /\) (?:assumes|contradicts) P-\d+ \(revision \d+\), which #\d+ .*over scopes that overlap \(a question not material: warned, never held\)/],
   ["part_omitted", /\) leaves out (?:a part|parts) of the question its reviews? names?:/],
 ];
 

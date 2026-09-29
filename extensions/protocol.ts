@@ -12388,9 +12388,15 @@ export function noMoreEvidenceAskFix(coverage: number[], answer: number): string
  * late_evidence_hits: what the reverse sweep of evidence added late found
  * of a question's looked_for strings (store-sweep.ts), in objects no entry
  * the answer reaches names, where the addition does not stale the answer.
+ * premise_disputed, premise_revised, premise_withdrawn: an answer that
+ * assumes a premise disputed on a rebutting finding, or cites a revision
+ * revised since, or a premise withdrawn. premise_inconsistent: the premise
+ * conflict that holds a material question, on a question the operator
+ * marked not material. part_omitted: a part of the question a review says
+ * the answer leaves out.
  * `seqs` opens with the answer's.
  */
-export type LedgerWarning = { code: "no_acquisition_ask" | "partial_all_parts_established" | "lead_findings_uncited" | "preparation_missing" | "late_evidence_hits" | "premise_disputed" | "premise_revised" | "premise_withdrawn" | "part_omitted"; section: string; seqs: number[]; what: string; fix: string };
+export type LedgerWarning = { code: "no_acquisition_ask" | "partial_all_parts_established" | "lead_findings_uncited" | "preparation_missing" | "late_evidence_hits" | "premise_disputed" | "premise_revised" | "premise_withdrawn" | "premise_inconsistent" | "part_omitted"; section: string; seqs: number[]; what: string; fix: string };
 
 /** A warning in the words every point says it with: what, then the fix. */
 export function warningWords(w: Pick<LedgerWarning, "what" | "fix">): string {
@@ -12840,19 +12846,24 @@ export function ledgerGate(o: { entries: LedgerEntry[]; attestations: LedgerAtte
     // (the premise goes to the operator as a dispute, and the answer that
     // assumes it is warned), narrow a citation's scope, or answer
     // conditionally. Uncertainty (unresolved) holds nothing. Fixed, never named.
+    // A withdrawn premise, or a revision revised since, holds nothing
+    // (premiseConflicts): its warnings (premise_withdrawn, premise_revised)
+    // carry it. On a question the operator marked not material it is a
+    // warning, as every other defect of the bar is held on material
+    // questions only (the Fable review of the limits branch, P2-1 and P3-5).
     const mine = conflicts.filter((c) => c.assumed.seq === a.seq || c.contradicted.seq === a.seq);
     const unreconciled = mine.filter((c) => !c.contradicted.rebuttal.length);
     if (unreconciled.length) {
       const says = (c: PM.PremiseConflict) => (c.assumed.seq === a.seq ? `assumes ${c.premise} (revision ${c.rev}), which #${c.contradicted.seq} (${c.contradicted.section}) contradicts` : `contradicts ${c.premise} (revision ${c.rev}), which #${c.assumed.seq} (${c.assumed.section}) assumes`);
       const revs = [...new Map(unreconciled.map((c) => [`${c.premise}@${c.rev}`, c])).values()];
-      defects.push({
-        code: "premise_inconsistent",
+      const held = {
         section: sec.section,
         seqs: [a.seq, ...[...new Set(unreconciled.map((c) => (c.assumed.seq === a.seq ? c.contradicted.seq : c.assumed.seq)))]],
         what: `answer #${a.seq} (${sec.section}) ${unreconciled.map(says).join("; and ")}, over scopes that overlap`,
         fix: `reconcile them on the record; neither side is forced: ${revs.map((c) => PREMISE_WAYS_OUT(c.premise, c.rev)).join("; and for the next premise, ")}`,
-        named_by: [],
-      });
+      };
+      if (bar && !bar.material) warnings.push({ code: "premise_inconsistent", ...held, what: `${held.what} (a question not material: warned, never held)` });
+      else defects.push({ code: "premise_inconsistent", ...held, named_by: [] });
     }
     const rebutted = mine.filter((c) => c.assumed.seq === a.seq && c.contradicted.rebuttal.length);
     if (rebutted.length) {
