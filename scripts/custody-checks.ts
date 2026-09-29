@@ -197,6 +197,8 @@ type CustodyLike = {
   questions?: { lines: number; intact: boolean; detail: string } | null;
   network?: { grants: { lines: number; intact: boolean; detail: string }; fetches: { lines: number; intact: boolean; detail: string; unresolved?: string[] }; captures: { sealed: number; verified: number; mismatched: string[]; missing: string[] } } | null;
   requests?: { lines: number; intact: boolean; detail: string } | null;
+  sweeps?: { lines: number; intact: boolean; detail: string } | null;
+  finish?: { lines: number; intact: boolean; detail: string } | null;
   case_policy?: { sha256?: string; anchored: boolean | null; unreadable?: string } | null;
   model_gateway: { intact: boolean; detail: string; refused?: string } | null;
   vms: Array<{ snapshot: unknown; stopped: boolean; kept: string | null }> | null;
@@ -277,6 +279,9 @@ export function checksOf(c: CustodyLike, errors: Record<string, string> = {}): C
   }
   // The operator requests' chain (docs/adr/0014).
   if (c.requests) add("operator requests", c.requests.intact ? "passed" : "failed", c.requests.intact ? undefined : c.requests.detail, { checked: c.requests.lines });
+  // The store sweeps (docs/adr/0013) and the finish register (docs/adr/0015), each its own chain.
+  if (c.sweeps) add("store sweeps", c.sweeps.intact ? "passed" : "failed", c.sweeps.intact ? undefined : c.sweeps.detail, { checked: c.sweeps.lines });
+  if (c.finish) add("finish register", c.finish.intact ? "passed" : "failed", c.finish.intact ? undefined : c.finish.detail, { checked: c.finish.lines });
   // The case policy, against the sha256 the kickoff anchored beside the run.
   if (c.case_policy) {
     const cp = c.case_policy;
