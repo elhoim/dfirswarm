@@ -587,7 +587,7 @@ moment they decided. The brainstorm of 2026-09-29 (L3) agreed to make the
 existing warnings land where the decision is made, and to measure that,
 before any new rule.
 
-- **Three points, never blocking.** Each point asks the same gate over the
+- **Four points, never blocking.** Each point asks the same gate over the
   same inputs as readiness, for the questions readiness reads, and says the
   warnings in the words `finish status` says them with (`finish.ts`
   `warningsAt`, `gateInputs`; `protocol.ts` `warningWords`):
@@ -603,29 +603,59 @@ before any new rule.
     reviewer is told in the reply to its attest. `partial_all_parts_established`
     is made by the reviews, so the first point that can say it is the reply
     to the attest that makes it;
+  - the reply to a lead's close, or to a confirmation of one (the closer's
+    `lead_confirm`, one lead or a batch): the warnings of each question the
+    lead serves that the act changed, by what it recorded under the lead
+    (its ref and results), as they stand after it. The gate is read twice
+    on one snapshot, with the act's events and without them, so nothing
+    else that moved meanwhile is laid at its door (`closeChanged`); a close
+    that changes nothing says nothing. On s993d40 the closes of question
+    6's leads after its answer and its reviews added the two entries two
+    seats held there (E-84, E-93) to its warning, and only those closes'
+    replies and finish status said them;
   - `finish status`, as before.
 
   A point says what the gate warns of at that moment. A warning that
-  arises later (a finding attested after the answer, a lead closed on an
-  entry) is said at the next point that bears on it, and always in
-  `finish status`. A warning is never a refusal and never an item.
-- **What two seats hold for a question, wherever it was recorded.**
-  `lead_findings_uncited` covers, beside the entries under the question's
-  leads, a standing finding or event, under no dispute in force, that two
-  seats hold and that names the question in its `answers`, or whose `rel`
-  links it to an entry the answer cites (`answerCites`: its support,
-  contrary, limitations and a downgrade's evidence, the correction standing
-  for each), when the answer does not reach it (`questionUncited`). Each is
-  listed with its tie: "under L-n", "that names Q-n", or "whose rel
-  supports E-m, which the answer cites"; the warning reads "answer #n
-  (question:q) leaves out what two seats hold for Q-q: …". A lead register
-  whose chain is broken says nothing of the leads; the ledger's own ties
-  still count. Registers and refs only, nothing read of what an entry says.
-  Replayed on s993d40, one of the two methods left out of question 6's
-  answer, established under question 6's leads, names question 4 too, and
-  question 4's answer does not reach it: a warning on question 4 now. On
-  sa2f2f2 it finds nothing: every standing finding or event no answer
-  reaches there (36) is held by one seat, and the rule asks for two.
+  arises later (a finding attested after the answer) is said at the next
+  point that bears on it, and always in `finish status`. A warning is
+  never a refusal and never an item.
+- **What the record ties to a question, wherever it was recorded.**
+  `lead_findings_uncited` covers every standing finding or event, under no
+  dispute in force, that the question's answer does not reach and that is
+  tied to the question: one that names the question in its own `answers`,
+  whoever holds it (its author tied it to the question, so an answer that
+  leaves it out says why; one seat is enough); and one two seats hold (a
+  second author, or another seat's attest) that the lead register recorded
+  under a lead of the question, or whose `rel` links it to an entry the
+  answer cites (`answerCites`: its support, contrary, limitations and a
+  downgrade's evidence, the correction standing for each). A tie by a lead
+  or by `rel` alone asks for two seats (`questionUncited`). Each is listed
+  with its tie: "under L-n", "that names Q-n", "that names Q-n, held by
+  one seat", or "whose rel supports E-m, which the answer cites"; the
+  warning reads "answer #n (question:q) leaves out what the record ties to
+  Q-q: …", every entry, however many. A lead register whose chain is
+  broken says nothing of the leads; the ledger's own ties still count.
+  Registers and refs only, nothing read of what an entry says.
+- **Replayed** (this checkout, values-free, entries by id):
+  - s993d40, every question warned. Q-1: 7 entries (E-20, E-24, E-25,
+    E-31, E-36, E-45, E-75), all one seat's. Q-2: 7 (E-4, E-10, E-13,
+    E-16, E-23, E-35, E-42), one seat's. Q-3: 2 (E-44, E-57), one seat's.
+    Q-4: 7 (E-4, E-57, E-84, E-85, E-86, E-91, E-92): E-84 two seats'
+    (established under question 6's leads, naming question 4: the
+    motivating case), six one seat's. Q-5: 5 (E-1, E-45, E-51, E-96,
+    E-98), one seat's. Q-6: 18 (E-10, E-11, E-13, E-15, E-18, E-22, E-24,
+    E-25, E-27, E-30, E-33, E-35, E-55, E-70, E-82, E-83, E-84, E-93):
+    E-84 and E-93 two seats' under its leads, sixteen one seat's.
+  - sa2f2f2, every question warned, every entry one seat's. Q-1: 11 (E-7,
+    E-8, E-17, E-25, E-26, E-29, E-31, E-35, E-54, E-56, E-57). Q-2: 12
+    (E-5, E-7, E-8, E-10, E-13, E-17, E-28, E-48, E-49, E-50, E-66,
+    E-70). Q-3: 4 (E-1, E-46, E-120, E-121). Q-4: 9 (E-2, E-3, E-18,
+    E-73, E-82, E-118, E-119, E-120, E-121). Q-5: 2 (E-21, E-47). Q-6: 17
+    (E-4, E-15, E-25, E-37, E-38, E-40, E-43, E-44, E-47, E-48, E-49,
+    E-50, E-54, E-56, E-57, E-58, E-82).
+  - Under the two-seat rule s993d40 warned Q-4 and Q-6 and sa2f2f2
+    nothing. Whether answers that must say why they leave out one seat's
+    findings get better, or only longer, is for paired runs.
 - **Request guidance.** Under `more_evidence: no` nothing suggests an ask
   (verified; the rule is "No ask to satisfy a rule" above): the record's
   reply, the warning and the prompt give `acquisition_none_why` naming the
@@ -641,8 +671,9 @@ before any new rule.
 - **Measured, not assumed.** `swarm.sh replay --deliveries` reads, act by
   act, which warnings each point would have carried, on the registers as
   they stood at each act (ADR 0017, "Measuring a rule change"); the
-  contract fixtures `warnings-delivered`, `lead-findings-tied` and
-  `no-ceremonial-ask` hold each point to this section. Whether the agents
+  contract fixtures `warnings-delivered`, `lead-findings-tied`,
+  `lead-close-delivered` and `no-ceremonial-ask` hold each point to this
+  section. Whether the agents
   act on them is for paired runs: fewer complete answers left partial, and
   no rise in false established.
 

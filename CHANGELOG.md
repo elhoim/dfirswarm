@@ -21,14 +21,18 @@ question's leads had established, were told nothing when they decided. Now
   (`warnings`; their codes on the trace as `warned`); a material negative's
   review offer, as it reaches its seat; the reply to an attest on the answer,
   on the coverage record a negative rests on, or on an entry a warning names;
-  and `finish status`. None holds, none refuses.
-- `lead_findings_uncited` covers what two seats hold for a question outside
+  the reply to a lead's close or confirmation, for each question whose
+  warnings the act changed; and `finish status`. None holds, none refuses.
+- `lead_findings_uncited` covers what the record ties to a question outside
   its leads too: a finding or an event that names the question in `answers`,
-  or whose `rel` links it to an entry the answer cites. Each entry is listed
-  with its tie, and the warning reads "answer #n (question:q) leaves out what
-  two seats hold for Q-q: …". Replayed on s993d40, question 4 now carries it:
-  a method established under question 6's leads names question 4, and
-  question 4's answer does not reach it.
+  even one seat's (its author tied it to the question), or one two seats hold
+  whose `rel` links it to an entry the answer cites; a tie by a lead or by
+  `rel` alone still asks for two seats. Each entry is listed with its tie, and
+  the warning reads "answer #n (question:q) leaves out what the record ties
+  to Q-q: …". Replayed, every question of s993d40 and of sa2f2f2 now carries
+  it (s993d40: 7, 7, 2, 7, 5 and 18 entries; sa2f2f2: 11, 12, 4, 9, 2 and 17,
+  all one seat's); on s993d40 question 4's list holds the method established
+  under question 6's leads that names question 4.
 - Request guidance: a question put to the operator says what observation
   would settle its question and what each possible answer changes (the
   prompt, `lead_close`, and the close's reply, `guidance`); a value read from
@@ -37,9 +41,9 @@ question's leads had established, were told nothing when they decided. Now
   network's refusal already said); under `more_evidence: no` nothing suggests
   an ask (verified, now a contract fixture).
 - `swarm.sh replay --deliveries` reads, act by act, which warnings each point
-  would have carried, on the registers as they stood at each act. Three
+  would have carried, on the registers as they stood at each act. Four
   contract fixtures hold the points to the ADR: `warnings-delivered`,
-  `lead-findings-tied` and `no-ceremonial-ask`.
+  `lead-findings-tied`, `lead-close-delivered` and `no-ceremonial-ask`.
 
 ### Added: replay, and the contract fixtures
 

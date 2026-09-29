@@ -1029,11 +1029,13 @@ measure a rule change on recorded histories before paying for new runs
 - **`--deliveries`** reads where the checkout delivers the answers check's
   warnings (ADR 0013, "Warnings where the decision is made"), act by act:
   the reply to every record of a question's answer, every review offered
-  for an answer (read when it reached its seat), and the reply to every
-  attest. Each act's registers are cut to the moment of the act in a scratch
-  directory beside the copy (the ledger to the answer's own seq for its
-  record, the attestations to the attest's own line, every other register to
-  the act's time: a chain cut at a line is a prefix of it), and the
+  for an answer (read when it reached its seat), the reply to every attest,
+  and the reply to every seat's close or confirmation of a lead. Each act's
+  registers are cut to the moment of the act in a scratch directory beside
+  the copy (the ledger to the answer's own seq for its record, the
+  attestations to the attest's own line, the lead register to a close's or
+  a confirmation's own lines, every other register to the act's time: a
+  chain cut at a line is a prefix of it), and the
   checkout's own `warningsAt` says what that point carries then; finish
   status is read at the end. It prints the acts read, each act that carries
   a warning (the point, the entry, the seat, the questions and the codes)
