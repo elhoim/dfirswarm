@@ -127,7 +127,8 @@ test("a declared job sees what it named and nothing beside it: no undeclared inp
   assert.match(out, /memory\.raw: No such file/, "a sibling in the same directory is not there");
   assert.match(out, /notes\.txt: No such file/, "an undeclared input is not there");
   assert.match(out, /secret\.txt: No such file/, "a peer's scratch is not there");
-  assert.match(out, /ledger: No such file/);
+  // BSD ls says "ledger: No such file", GNU ls "cannot access 'ledger': No such file".
+  assert.match(out, /ledger'?: No such file/, "the run's ledger is not there");
   // The worker's mounts: the view at the run's path, nothing of the run's own directories.
   const mounts = specs.at(-1)!.mounts;
   assert.ok(mounts.some((m) => m.guest === S && m.view && m.readonly && m.host.includes(".staging/")), JSON.stringify(mounts));
