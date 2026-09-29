@@ -277,6 +277,8 @@ async function addLate(S: string, name: string, body: string, why: string): Prom
   const added = await admitMaterial(S, { mode: "evidence", path: join(late, name), why, supplied_by: "operator", via: "cli" });
   await rm(late, { recursive: true, force: true });
   assert.equal(added.ok, true, String((added as { reason?: string }).reason ?? ""));
+  // Its reverse sweep runs once the addition is committed, in the background: settled before the history goes on.
+  await SW.awaitSweeps(S);
 }
 
 const CASES: Record<string, (base: string) => Promise<string>> = {

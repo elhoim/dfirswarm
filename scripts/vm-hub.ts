@@ -1181,6 +1181,21 @@ export class Hub {
   }
 
   /**
+   * The reverse sweeps of evidence added late (extensions/store-sweep.ts): a
+   * pass of each that is not done, started in this process's background and
+   * never awaited, so neither an addition nor the round waits on it; what a
+   * pass leaves is searched by the next round's pass. Nothing is read while
+   * every addition on the store journal is known swept whole.
+   */
+  private continueReverseSweeps(): void {
+    const imports = this.jobService?.journal.of("evidence_added").map((l) => String(l.import ?? ""));
+    if (imports && !imports.length) return;
+    void import("../extensions/store-sweep.ts")
+      .then((SW) => SW.reverseSweepInBackground(this.cfg.sandbox, imports ? { imports } : {}))
+      .catch((err: Error) => this.log(`reverse sweeps: ${err.message}`));
+  }
+
+  /**
    * Evidence added while no hub ran, or before its catalogue could take it:
    * a detect pass over each file, once (the store journal's
    * evidence_catalogue_queued line says it was queued).
@@ -1310,7 +1325,10 @@ export class Hub {
     await this.listen(this.adminSocket(), (socket) => this.serveAdmin(socket));
     if (this.cfg.jobs && this.cfg.run) await this.startJobs(this.cfg.jobs, this.cfg.run);
     // What a crash left committed and not yet applied or delivered to the operator: now.
-    void this.reconcileAdditions().then(() => this.fireRequests());
+    void this.reconcileAdditions().then(() => {
+      this.continueReverseSweeps();
+      return this.fireRequests();
+    });
     // The kickoff's broad extractions: receipts for what it queued, offers for the rest.
     void this.reconcilePreparation();
     this.writeStatus();
@@ -2508,6 +2526,7 @@ export class Hub {
     }
     // Additions committed and not applied, then the operator requests' round: what is committed and not yet written or delivered.
     await this.reconcileAdditions();
+    this.continueReverseSweeps();
     await this.fireRequests();
     await this.catalogueAddedEvidence().catch((err: Error) => this.log(`catalogue of added evidence: ${err.message}`));
     // The sources' broad extractions: receipts, offers and closes due since the last round.

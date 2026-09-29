@@ -10,8 +10,9 @@
  * operator's acceptance after the addition still clears it.
  */
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { test } from "node:test";
 import * as FIN from "../extensions/finish.ts";
 import * as L from "../extensions/leads.ts";
@@ -23,6 +24,7 @@ import { admitMaterial, reconcileAdditions } from "../scripts/material.ts";
 import { renderReportBodyMarkdown } from "../scripts/report-body.ts";
 import { A, coverage, ESTABLISHED, F, ok, okq, planned, rec, refused, REVIEW, run } from "./negative-bar-fixture.ts";
 
+const ROOT = resolve(import.meta.dirname, "..");
 const HIGH = { ...A, confidence: "high" } as const;
 const OPERATOR: Q.Actor = { kind: "human", role: "operator", person: "ops@lab", enrolled: false, os_user: "ops", host: "lab", via: "cli", identity: "claimed" };
 
@@ -65,11 +67,14 @@ async function before() {
   return { ...c, lead2, abs2, cov2, ans2, f1, cov1, ans1, cov4b };
 }
 
-test("the reverse sweep at evidence add: the import's files, and only they, searched for every standing record's strings, each hit bound to its records, on the sweeps' chain, and said by question in the board post", async () => {
+test("the reverse sweep of an addition: the import's files, and only they, searched for every standing record's strings once the addition is committed, each hit bound to its records, on the sweeps' chain, and said by question on the board when it completes", async () => {
   const c = await before();
   const dir = await lateDir(c.S, { "proxy.csv": "time,user\n09:58,alice\n10:02,ALICE\n", "strings.bin": Buffer.concat([Buffer.from([0, 1]), Buffer.from("bob-laptop", "utf16le")]), "dave.txt": "dave was here\n" });
-  const added = await admitMaterial(c.S, { mode: "evidence", path: dir, why: "the proxy export and a binary", supplied_by: "t", via: "cli", sweepBudget: {} } as never);
+  const added = await admitMaterial(c.S, { mode: "evidence", path: dir, why: "the proxy export and a binary", supplied_by: "t", via: "cli" });
   assert.equal(added.ok, true, String(added.reason ?? ""));
+  // The addition answers without waiting for it: it runs in the background, and its hits follow on the board.
+  assert.deepEqual(added.reverse_sweep, { runs: "in the background", records: 2, terms: 3 });
+  await SW.awaitSweeps(c.S);
   const lines = await SW.readImportSweeps(c.S);
   assert.equal(lines.length, 1);
   const s = lines[0]!;
@@ -87,12 +92,15 @@ test("the reverse sweep at evidence add: the import's files, and only they, sear
   assert.equal(s.searched.objects, 3, "every file of the import, none other");
   assert.equal(SW.verifySweepChain(await readFile(join(c.S, SW.LEDGER_SWEEPS), "utf8")).ok, true, "one chain with the coverage records' sweeps");
   assert.deepEqual((await SW.readSweeps(c.S)).map((x) => x.v), [1, 1, 1], "the coverage records' sweeps (those that looked for something) read as they were");
-  assert.deepEqual(added.reverse_sweep, { state: "hits", records: 2, terms: 3, searched: s.searched, hits: 2, questions: ["1", "2"], unsearched: 0 });
+  assert.equal(s.pass, undefined, "one pass: no continuation");
   const posts = await Promise.all((await readdir(join(c.S, "threads", "main"))).filter((n) => n.endsWith("-system.md")).map((n) => readFile(join(c.S, "threads", "main", n), "utf8")));
   const post = posts.find((p) => /EVIDENCE ADDED/.test(p))!;
-  assert.match(post, /The reverse sweep: import:ev-0001 searched for the 3 string\(s\) of 2 standing coverage record\(s\): 3 object\(s\), \d+ bytes; found: Q-2: "alice" in import:ev-0001\/proxy\.csv, 2 times, first at byte 16 \(E-\d+'s looked_for\) \| Q-1: "bob-laptop" in import:ev-0001\/strings\.bin, 1 time, first at byte 2 \(utf-16le\)/);
-  assert.match(post, /it holds nothing by itself/);
+  assert.match(post, /The reverse sweep runs now, outside this addition: import:ev-0001's files searched for the 3 string\(s\) of the 2 coverage record\(s\) standing at it, a pass at a time; each pass's hits follow on the board when it completes/);
   assert.match(post, /with a delta, rel \[\{to: <the answer's seq>, kind: supports \| contradicts \| adds_part \| irrelevant \| inconclusive\}\]/);
+  const swept = posts.find((p) => /REVERSE SWEEP of import:ev-0001/.test(p))!;
+  assert.match(swept, new RegExp(`REVERSE SWEEP of import:ev-0001 \\(evidence added as E-${added.entry}\\): import:ev-0001 searched for the 3 string\\(s\\) of 2 standing coverage record\\(s\\): 3 object\\(s\\), \\d+ bytes; found: Q-2: "alice" in import:ev-0001/proxy\\.csv, 2 times, first at byte 16 \\(E-\\d+'s looked_for\\) \\| Q-1: "bob-laptop" in import:ev-0001/strings\\.bin, 1 time, first at byte 2 \\(utf-16le\\)`));
+  assert.match(swept, /it holds nothing by itself/);
+  assert.match(swept, /The reverse sweep of import:ev-0001 is complete\./);
   // Once per addition: applied again, nothing more is written.
   await reconcileAdditions(c.S);
   const again = await SW.startImportSweep(c.S, { seq: ext.seq, hash: ext.hash!, import: "ev-0001" }, await P.readLedger(c.S));
@@ -100,11 +108,61 @@ test("the reverse sweep at evidence add: the import's files, and only they, sear
   assert.equal((await SW.readImportSweeps(c.S)).length, 1);
 });
 
+test("a reverse sweep bigger than a pass's budget goes on pass by pass, each on the chain continuing the last and delivered when it completes, until nothing is left; the whole is every pass's hits; the detached step runs it to the end", async () => {
+  const files = { "proxy.csv": "time,user\n09:58,alice\n", "strings.bin": Buffer.concat([Buffer.from([0, 1]), Buffer.from("bob-laptop", "utf16le")]), "dave.txt": "dave was here\n" };
+  const c = await before();
+  // A pass's byte budget of one byte: each pass searches one object, and leaves the rest to the next.
+  const added = await admitMaterial(c.S, { mode: "evidence", path: await lateDir(c.S, files), why: "the proxy export and a binary", supplied_by: "t", via: "cli" }, { sweepBudget: { maxBytes: 1 } });
+  assert.equal(added.ok, true);
+  await SW.awaitSweeps(c.S);
+  const ext = (await P.readLedger(c.S)).find((e) => e.seq === added.entry)!;
+  let whole = SW.importSweepWhole(ext.hash!, await SW.readImportSweeps(c.S))!;
+  assert.equal(whole.passes.length, 1);
+  assert.equal(whole.latest.searched.objects, 1);
+  assert.equal(whole.left.length, 2, "what the pass left is named, to be searched");
+  assert.ok(whole.latest.unsearched.every((u) => u.left && /the next pass searches it/.test(u.why)));
+  assert.deepEqual((await SW.pendingImportSweeps(c.S)).map((x) => x.import), ["ev-0001"]);
+  // The next rounds (the hub's, in the background): a pass each, each continuing the last, until nothing is left.
+  for (let i = 0; i < 2; i++) {
+    await SW.reverseSweepInBackground(c.S, { maxBytes: 1 });
+    await SW.awaitSweeps(c.S);
+  }
+  whole = SW.importSweepWhole(ext.hash!, await SW.readImportSweeps(c.S))!;
+  assert.deepEqual(whole.passes.map((x) => [x.pass ?? 1, x.searched.objects]), [[1, 1], [2, 1], [3, 1]]);
+  assert.deepEqual(whole.passes.slice(1).map((x) => x.continues), whole.passes.slice(0, -1).map((x) => x.hash), "each pass names the one it continues");
+  assert.deepEqual([whole.left, whole.unsearched, whole.state, whole.searched.objects], [[], [], "hits", 3]);
+  assert.deepEqual(whole.hits.map((h) => h.term).sort(), ["alice", "bob-laptop"]);
+  assert.deepEqual(await SW.pendingImportSweeps(c.S), []);
+  assert.equal(SW.verifySweepChain(await readFile(join(c.S, SW.LEDGER_SWEEPS), "utf8")).ok, true);
+  // Each pass delivered on the board, once.
+  const posts = await Promise.all((await readdir(join(c.S, "threads", "main"))).filter((n) => n.endsWith("-system.md")).map((n) => readFile(join(c.S, "threads", "main", n), "utf8")));
+  const passes = posts.filter((p) => /REVERSE SWEEP of import:ev-0001/.test(p));
+  assert.equal(passes.length, 3);
+  assert.ok(passes.some((p) => /, pass 3: /.test(p) && /is complete\./.test(p)));
+  assert.ok(passes.some((p) => /The next pass searches the 2 object\(s\) this one left/.test(p)));
+  // The gate reads every pass: Q-1's hit (in whichever pass found it) is warned of on its established answer.
+  const r = await checkLedgerAnswers(c.S, ["1", "2"], ["2"]);
+  assert.equal(r.warnings.filter((w) => /does not reach what the reverse sweep of evidence added late found for Q-1: .*"bob-laptop"/.test(w)).length, 1, r.warnings.join("\n"));
+  // The detached step (the CLI's, with no hub): rounds until nothing is left, then it exits.
+  const d = await before();
+  const addedD = await admitMaterial(d.S, { mode: "evidence", path: await lateDir(d.S, files), why: "the proxy export and a binary", supplied_by: "t", via: "cli" }, { reverse: "detached" });
+  assert.deepEqual(addedD.reverse_sweep, { runs: "as a detached step", records: 2, terms: 3 });
+  const step = spawnSync(process.execPath, ["--experimental-strip-types", "--no-warnings", join(ROOT, "scripts", "reverse-sweep.ts"), d.S], { encoding: "utf8", env: { ...process.env, SWARM_REVERSE_SWEEP_MAX_BYTES: "1" } });
+  assert.equal(step.status, 0, step.stderr);
+  const extD = (await P.readLedger(d.S)).find((e) => e.seq === addedD.entry)!;
+  // The detached child the addition started may have recorded passes too: every object is searched, once, and nothing is left.
+  await new Promise((res) => setTimeout(res, 50));
+  const wholeD = SW.importSweepWhole(extD.hash!, await SW.readImportSweeps(d.S))!;
+  assert.deepEqual([wholeD.left, wholeD.searched.objects], [[], 3]);
+  assert.deepEqual(await SW.pendingImportSweeps(d.S), []);
+});
+
 test("the hits go to the re-examination of their questions and hold nothing: said with the stale answer, warned of on the established one at each delivery point, and gone once an entry the answer reaches names the object", async () => {
   const c = await before();
   const dir = await lateDir(c.S, { "proxy.csv": "time,user\n09:58,alice\n", "strings.bin": Buffer.concat([Buffer.from([0, 1]), Buffer.from("bob-laptop", "utf16le")]) });
   const added = await admitMaterial(c.S, { mode: "evidence", path: dir, why: "the proxy export and a binary", supplied_by: "t", via: "cli" });
   assert.equal(added.ok, true);
+  await SW.awaitSweeps(c.S);
   const r = await checkLedgerAnswers(c.S, ["1", "2"], ["2"]);
   // Question 2 is stale by the addition: the hit is in its defect's words, and in its fix.
   const d2 = defectsOf(r, "question:2", "evidence_stale")[0]!;

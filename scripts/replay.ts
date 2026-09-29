@@ -838,9 +838,14 @@ function reviewWords(r: ReviewReplay): string[] {
 async function lateEvidenceOf(SWm: Mod | null, S: string): Promise<Projection["late_evidence"]> {
   const read = fn(SWm, "readImportSweeps");
   if (!read) return null;
-  type Line = { seq: number; import: string; synthetic?: boolean; state: string; terms: string[]; records: Array<{ seq: number; questions: string[] }>; searched: { objects: number }; hits: Array<{ ref: string; count: number; bears_on: number[] }> };
-  const lines = (await read(S)) as Line[];
-  return lines.map((l) => {
+  type Line = { seq: number; import: string; synthetic?: boolean; state: string; terms: string[]; records: Array<{ seq: number; questions: string[] }>; searched: { objects: number }; hits: Array<{ ref: string; count: number; bears_on: number[] }>; unsearched?: unknown[] };
+  // An addition's sweep may be recorded in passes (each continuing the last): read as one, its hits and objects every pass's, its state what the passes found and what the last left.
+  const passes = new Map<number, Line[]>();
+  for (const l of (await read(S)) as Line[]) passes.set(l.seq, [...(passes.get(l.seq) ?? []), l]);
+  return [...passes.values()].map((ps) => {
+    const last = ps.at(-1)!;
+    const hits = ps.flatMap((x) => x.hits);
+    const l: Line = { ...last, hits, searched: { objects: ps.reduce((n, x) => n + x.searched.objects, 0) }, state: ps.length === 1 ? last.state : hits.length ? "hits" : last.unsearched?.length ? "partial" : "clean" };
     const questions = [...new Set(l.records.flatMap((r) => r.questions))].sort();
     return {
       addition: l.seq,
