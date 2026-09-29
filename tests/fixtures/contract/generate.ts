@@ -455,9 +455,11 @@ const CASES: Record<string, (base: string) => Promise<string>> = {
    * The run s993d40's second shape: a method established under another
    * question's lead. Question 2's lead holds three findings two seats hold:
    * one names question 1 too, one is linked by rel to the finding question
-   * 1's answer cites, and one is tied to question 1 by nothing. Question 2's
-   * answer cites all three; question 1's answer, recorded after them, cites
-   * only its own finding.
+   * 1's answer cites, and one is tied to question 1 by nothing; and one
+   * seat's finding naming question 1 too. Question 2's answer cites all
+   * four. One seat's finding naming question 1 alone, which no answer
+   * cites, stands beside them. Question 1's answer, recorded after them,
+   * cites only its own finding.
    */
   "lead-findings-tied": async (base) => {
     const r = await newRun(base, "lft", 2);
@@ -474,8 +476,11 @@ const CASES: Record<string, (base: string) => Promise<string>> = {
       await attest(r.a3, { seq, how: "re-read the record from job:j000001/hits.txt" });
       assert.ok((await L.recordInterpretations(r.S, "a2", seq, ["j000001"])).ok);
     }
+    const relied = (await rec(r.a2, { kind: "finding", ...F, value: "the third method", source: "the disk", evidence: "a record", refs: ["job:j000001/hits.txt"], answers: ["2", "1"] })).entry;
+    assert.ok((await L.recordInterpretations(r.S, "a2", relied.seq, ["j000001"])).ok);
+    await rec(r.a0, { kind: "finding", ...F, value: "a fourth method, seen once", source: "the disk", evidence: "a record", refs: ["job:j000001/hits.txt"], answers: ["1"] });
     await close(r.a2, id2, `E-${apart.seq}`);
-    const a2 = (await rec(r.a1, { kind: "answer", section: "question:2", value: "The account, and two methods", reasoning: `E-${names.seq}, E-${linked.seq} and E-${apart.seq}`, ...HIGH, result: "established" })).entry;
+    const a2 = (await rec(r.a1, { kind: "answer", section: "question:2", value: "The account, and three methods", reasoning: `E-${names.seq}, E-${linked.seq}, E-${relied.seq} and E-${apart.seq}`, ...HIGH, result: "established" })).entry;
     await attest(r.a3, { seq: a2.seq, how: "re-derived the cited findings", ...ESTABLISHED });
     const a1 = (await rec(r.a1, { kind: "answer", section: "question:1", value: "The first method", reasoning: `E-${m1.seq}`, ...HIGH, result: "established" })).entry;
     await attest(r.a2, { seq: a1.seq, how: "re-derived the cited finding", ...ESTABLISHED });

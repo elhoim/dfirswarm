@@ -503,9 +503,10 @@ Ledger (only when `record` is in your tool list)
   the bar (or the operator's acceptance of its limits).
 - The check also warns, and holds nothing on a warning: a not_determinable answer whose coverage
   names no acquisition ask and no reason for none; a partial answer every review holds whole; and
-  what the record ties to a question that its answer does not reach (a finding or an event that
-  names the question in `answers`, even one seat's; or one two seats hold under the question's
-  leads, or whose `rel` links it to an entry the answer cites). A warning is said where the
+  what the record ties to a question that its answer does not reach (a finding or an event two
+  seats hold that names the question in `answers`, sits under the question's leads, or whose `rel`
+  links it to an entry the answer cites; or one seat's that names the question and that another
+  question's answer relies on). A warning is said where the
   decision is made: in the reply to the record that writes the answer, in its review offer and
   the reply to an attest on it, in the reply to a lead's close or confirmation that changes it,
   and in `finish` status. Weigh it then: cite the entry or say in the reasoning why it does not

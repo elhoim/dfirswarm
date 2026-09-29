@@ -4,7 +4,7 @@
   "tokens": 0,
   "calls": 0,
   "wall_clock_minutes": 30,
-  "started_at": "2026-09-29T11:01:22.141Z",
+  "started_at": "2026-09-29T11:55:48.883Z",
   "source": "pi.sessionManager.getEntries",
   "hard_kill": false,
   "cap_steer_sent": false,

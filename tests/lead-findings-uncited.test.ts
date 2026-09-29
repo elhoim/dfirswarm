@@ -3,14 +3,14 @@
  * s993d40, a CTF case of six questions: one answer left out two methods the
  * ledger held as findings, attested by another seat, under that question's
  * leads, and one of them named a second question whose answer never
- * reached it either; on sa2f2f2 every finding no answer reached was one
- * seat's). The answers check warns, never holds: a standing finding or
- * event, not disputed, which the answer does not reach, directly or through
- * the entries it cites, and which names the question in its answers (one
- * seat is enough), or which two seats hold (another seat attested it, or
- * two recorded it) and the lead register recorded under a lead linked to
- * the question or its rel links to an entry the answer cites. Registers and
- * refs only. Synthetic runs only.
+ * reached it either). The answers check warns, never holds: a standing
+ * finding or event, not disputed, which the answer does not reach,
+ * directly or through the entries it cites, and which two seats hold
+ * (another seat attested it, or two recorded it) and the lead register
+ * recorded under a lead linked to the question, or which names the
+ * question in its answers, or whose rel links it to an entry the answer
+ * cites; or one seat's that names the question and that another question's
+ * answer relies on. Registers and refs only. Synthetic runs only.
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -91,7 +91,7 @@ test("the register records an entry under a lead by the lead's acts: its jobs' i
   assert.equal(got.size, 2, "a job run under no lead records nothing under one");
 });
 
-test("an answer that leaves out findings the record ties to its question is warned of, each named with its lead or its own tie, one seat's only by the question it names, in the answers check, its machine line, the finish line's note and finish status; the done proceeds; citing them clears it", async () => {
+test("an answer that leaves out findings the record ties to its question is warned of, each named with its lead or its own tie, never one seat's no other answer relies on, in the answers check, its machine line, the finish line's note and finish status; the done proceeds; citing them clears it", async () => {
   const r = await run({ goal: GOAL });
   const L1 = await planned(r.a0, "1");
   assert.ok((await L.attachJob(r.S, "a0", "j000001", L1)).ok);
@@ -131,12 +131,12 @@ test("an answer that leaves out findings the record ties to its question is warn
   }
 
   // The correction names Q-1 and another seat attested it, though no act of the lead register names it: left out, by its own tie.
-  // One seat's finding that names Q-1 counts by that name; one that names no question does not.
-  const want = `answer #${a1.seq} (question:1) leaves out what the record ties to Q-1: E-${attested.seq} (a finding under ${L1}), E-${twice.seq} (an event under ${L1}), E-${alone.seq} (a finding under ${L1} that names Q-1, held by one seat), E-${correction.seq} (a finding that names Q-1): cite them or say why they do not bear on it. record the answer again with supersedes=${a1.seq}, citing each as E-<seq> in its reasoning (or among its contrary or limitations), or saying there why each does not bear on Q-1; an entry the answer cites that names one (rel, a coverage record's result_refs) counts`;
+  // One seat's finding that names Q-1 counts only where another question's answer relies on it: none does here, so neither it nor one naming no question is listed.
+  const want = `answer #${a1.seq} (question:1) leaves out what the record ties to Q-1: E-${attested.seq} (a finding under ${L1}), E-${twice.seq} (an event under ${L1}), E-${correction.seq} (a finding that names Q-1): cite them or say why they do not bear on it. record the answer again with supersedes=${a1.seq}, citing each as E-<seq> in its reasoning (or among its contrary or limitations), or saying there why each does not bear on Q-1; an entry the answer cites that names one (rel, a coverage record's result_refs) counts`;
   const f = await finish(r.S);
   assert.equal(f.check.ok, true, f.check.lines.join("\n"));
   assert.deepEqual(f.check.dispositions, { "question:1": "established", "question:2": "established" });
-  assert.deepEqual(f.check.warnings, [want], "one warning, for question 1 alone, naming exactly the four entries");
+  assert.deepEqual(f.check.warnings, [want], "one warning, for question 1 alone, naming exactly the three entries");
   assert.ok(f.check.lines.includes(`WARN: ${want}`));
   // The finish line: completed, the warning in its note; readiness ready, the warning apart from its items; finish status shows it.
   assert.deepEqual(f.gate.warnings, [want]);
@@ -156,7 +156,7 @@ test("an answer that leaves out findings the record ties to its question is warn
 
   // Citing them clears it: one in the reasoning, the other through a finding the answer cites that names it.
   const bridge = ok(await rec(r.a0, finding("the USB copy and the upload were the same archive", { rel: [{ to: twice.seq, kind: "supports" }] }))).entry;
-  const again = await answer(r.a1, "question:1", [cited.seq, attested.seq, bridge.seq, alone.seq, correction.seq], { supersedes: a1.seq });
+  const again = await answer(r.a1, "question:1", [cited.seq, attested.seq, bridge.seq, correction.seq], { supersedes: a1.seq });
   const att = await P.attestEntry(r.a2, { seq: again.seq, how: "re-derived the cited findings", ...ESTABLISHED });
   assert.ok(att.ok, (att as { reason?: string }).reason);
   const after = await finish(r.S);
