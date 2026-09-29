@@ -1,0 +1,46 @@
+{
+  "case": "The contradiction of premise-held, a custody seal taken while it held; then question 2's answer recorded again naming the finding that rebuts P-1. Question 1's answer still assumes P-1.",
+  "design": [
+    "docs/adr/0011 'Premises': premise_inconsistent holds while standing answers assume and contradict the same premise revision over scopes that overlap; the ways out are all on the record and none forces either side: revise an answer, name the rebutting finding (the premise goes to the operator as a dispute, a request of kind premise), narrow a scope, or answer conditionally. Uncertainty alone holds nothing.",
+    "docs/adr/0011 'Premises': the answer that assumes a premise another answer rebuts on a standing finding is warned (premise_disputed); nothing is forced on it, and the ruling on the premise is the operator's.",
+    "docs/adr/0011 'Consequences': premises ride the question chain, so custody seals them and an earlier seal verifies as a prefix of the chain that grew after it.",
+    "docs/adr/0013 'The end of a run, under every stop policy': done finishes a run when every question has a disposition under the bar; a warning never holds."
+  ],
+  "policies": [
+    "as run"
+  ],
+  "expect": {
+    "questions": {
+      "question:1": {
+        "disposition": "established",
+        "best_candidate": false,
+        "readiness_holds": false,
+        "defects_include": [],
+        "warnings": [
+          "premise_disputed"
+        ]
+      },
+      "question:2": {
+        "disposition": "established",
+        "best_candidate": false,
+        "readiness_holds": false,
+        "defects_include": [],
+        "warnings": []
+      }
+    },
+    "ready": true,
+    "verdict": {
+      "proceed": true,
+      "outcome": "completed"
+    },
+    "done": "proceeds",
+    "agreement": [],
+    "seals": {
+      "verdicts": 1,
+      "hold": 1
+    },
+    "history": {
+      "premise_requests": 1
+    }
+  }
+}

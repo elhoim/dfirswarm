@@ -1,0 +1,39 @@
+{
+  "case": "The goal's premise (the laptop is the employee's, for 2024), seeded at the kickoff as P-1, a given; both questions answered established assuming it, each attested established.",
+  "design": [
+    "docs/adr/0011 'Premises': a premise is a P-n on the question chain with its words verbatim, where they stand, its authority, scope, revision and class; only the operator's are givens (the goal's front matter, the register's premise add, the console); a given is not proved again and is never an open part.",
+    "docs/adr/0011 'Premises': an answer cites premises [{id, rev, stance: assumed | supported | contradicted | unresolved, refs?}], present-only in the ledger's hashed core; an answer that cites none reads as before.",
+    "docs/adr/0013 'The end of a run, under every stop policy': done finishes a run when every question has a disposition under the bar; a warning never holds."
+  ],
+  "policies": [
+    "as run"
+  ],
+  "expect": {
+    "questions": {
+      "question:1": {
+        "disposition": "established",
+        "best_candidate": false,
+        "readiness_holds": false,
+        "defects_include": [],
+        "warnings": []
+      },
+      "question:2": {
+        "disposition": "established",
+        "best_candidate": false,
+        "readiness_holds": false,
+        "defects_include": [],
+        "warnings": []
+      }
+    },
+    "ready": true,
+    "verdict": {
+      "proceed": true,
+      "outcome": "completed"
+    },
+    "done": "proceeds",
+    "agreement": [],
+    "history": {
+      "premise_requests": 0
+    }
+  }
+}

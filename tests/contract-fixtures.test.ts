@@ -38,6 +38,10 @@ const OLD_RULE = "3338e3c7715ce612f227cf5663c1e60d2ed4bd23";
 const BEFORE_DELTA = "c34c6cba3cde48b2507a952ae14d2828cf051a66";
 /** The histories written with the source-first review and the reverse sweep: the harness before them cannot read their sweep lines. */
 const WRITTEN_WITH_DELTA = new Set(["evidence-stale-cleared", "late-evidence-hits", "review-source-first"]);
+/** The harness before the premise register and the claim and open-part rows (docs/adr/0011 "Premises", 0013 "Claim and open-part rows"). */
+const BEFORE_PREMISES = "be4e6a3cfe9f79825a223bd8b96d0d4d71682740";
+/** The histories written with premises or rows: the harness before them has neither. */
+const WRITTEN_WITH_PREMISES = new Set(["premise-given", "premise-admitted", "premise-scopes", "premise-held", "premise-rebutted", "premise-conditional", "parts-omitted"]);
 
 const scratch: string[] = [];
 after(async () => {
@@ -82,8 +86,8 @@ type Expect = {
   deliveries?: { acts?: { record: number; review_offer: number; attest: number; lead_close: number }; delivered: Array<Partial<Delivery>> };
   /** The harness's own words of a question's warnings (replay --show-text): what they say, and what they never say. */
   warning_words?: Record<string, { includes?: string[]; excludes?: string[] }>;
-  /** What the history itself holds: the acquisition asks opened. */
-  history?: { acquisition_requests?: number };
+  /** What the history itself holds: the acquisition asks opened, and the premise disputes (requests of kind premise). */
+  history?: { acquisition_requests?: number; premise_requests?: number };
   /** The sources' broad extractions (docs/adr/0013): each source's outcome per capability, and the questions held or warned on them, with their sources. */
   preparation?: { sources: Record<string, string[]>; held: Record<string, string[]>; warned: Record<string, string[]> };
   /** The source-first review rule over the recorded established attests (docs/adr/0015): how many, and each it would cap by section and codes. */
@@ -211,11 +215,12 @@ for (const f of fixtures) {
         assert.deepEqual(status, p.questions.flatMap((q) => q.warnings.map((c) => `${q.section} ${c}`)).sort(), `${where}: finish status and the answers check say the same warnings`);
       }
     }
-    if (f.expect.history?.acquisition_requests !== undefined) {
+    const opened = (kind: string) => {
       const log = join(dir, "requests", "requests.jsonl");
-      const opened = existsSync(log) ? readFileSync(log, "utf8").split("\n").filter((l) => l.trim() && (JSON.parse(l) as { ev?: string; kind?: string }).ev === "open" && (JSON.parse(l) as { kind?: string }).kind === "acquisition").length : 0;
-      assert.equal(opened, f.expect.history.acquisition_requests, `${f.name}: the acquisition asks the history holds`);
-    }
+      return existsSync(log) ? readFileSync(log, "utf8").split("\n").filter((l) => l.trim() && (JSON.parse(l) as { ev?: string; kind?: string }).ev === "open" && (JSON.parse(l) as { kind?: string }).kind === kind).length : 0;
+    };
+    if (f.expect.history?.acquisition_requests !== undefined) assert.equal(opened("acquisition"), f.expect.history.acquisition_requests, `${f.name}: the acquisition asks the history holds`);
+    if (f.expect.history?.premise_requests !== undefined) assert.equal(opened("premise"), f.expect.history.premise_requests, `${f.name}: the premise disputes the history holds`);
   });
 }
 
@@ -284,7 +289,7 @@ test("old histories replayed unchanged: every fixture recorded before the source
   const work = await tmp("contract-before-delta-");
   const old = join(work, "harness-c34c6cb");
   await extractCommit(BEFORE_DELTA, old);
-  const names = fixtures.map((f) => f.name).filter((n) => !WRITTEN_WITH_DELTA.has(n));
+  const names = fixtures.map((f) => f.name).filter((n) => !WRITTEN_WITH_DELTA.has(n) && !WRITTEN_WITH_PREMISES.has(n));
   // One copy per checkout, each evaluated in one process per checkout (replay's own copy, and the custody anchor beside it).
   const copies = async (label: string) => {
     const out: string[] = [];
@@ -307,5 +312,36 @@ test("old histories replayed unchanged: every fixture recorded before the source
     const diffs = diffProjections(a as Projection, b as Projection);
     if (n === "evidence-stale-without-delta") assert.deepEqual([...new Set(diffs.map((d) => d.section ?? d.field))].sort(), ["question:2", "readiness items"], `${n}: ${JSON.stringify(diffs)}`);
     else assert.deepEqual(diffs, [], `${n}: an old history reads the same (${JSON.stringify(diffs)})`);
+  }
+});
+
+test("old histories replayed unchanged: every fixture recorded before the premise register and the claim and open-part rows reads the same under be4e6a3 and this checkout", async (t) => {
+  if (spawnSync("git", ["-C", ROOT, "cat-file", "-e", `${BEFORE_PREMISES}^{commit}`]).status !== 0) {
+    t.skip("be4e6a3 is not in this checkout's history (a shallow clone or an archive): the comparison is not run here");
+    return;
+  }
+  const work = await tmp("contract-before-premises-");
+  const old = join(work, "harness-be4e6a3");
+  await extractCommit(BEFORE_PREMISES, old);
+  const names = fixtures.map((f) => f.name).filter((n) => !WRITTEN_WITH_PREMISES.has(n));
+  const copies = async (label: string) => {
+    const out: string[] = [];
+    for (const n of names) {
+      const run = await resolveRun(join(FIXTURES, n, "run"));
+      const dest = join(work, label, n, "runs", run.id);
+      await copyRun(run.sandbox, dest);
+      const anchor = join(dirname(run.sandbox), `${basename(run.sandbox)}.custody-anchor.json`);
+      if (existsSync(anchor)) await copyFile(anchor, join(dirname(dest), `${run.id}.custody-anchor.json`));
+      out.push(dest);
+    }
+    return out;
+  };
+  const before = await evaluateIn(old, await copies("before"), false);
+  const now = await evaluateIn(ROOT, await copies("now"), false);
+  for (const [i, n] of names.entries()) {
+    const a = before[i]!;
+    const b = now[i]!;
+    assert.ok(!("error" in a) && !("error" in b), `${n}: ${JSON.stringify("error" in a ? a : b)}`);
+    assert.deepEqual(diffProjections(a as Projection, b as Projection), [], `${n}: an old history reads the same`);
   }
 });

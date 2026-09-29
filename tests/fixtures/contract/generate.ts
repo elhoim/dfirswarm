@@ -25,6 +25,7 @@ import { fileURLToPath } from "node:url";
 import * as FIN from "../../../extensions/finish.ts";
 import * as L from "../../../extensions/leads.ts";
 import * as P from "../../../extensions/protocol.ts";
+import * as Q from "../../../extensions/questions.ts";
 import * as SW from "../../../extensions/store-sweep.ts";
 import { checkLedgerAnswers } from "../../../scripts/check-answers.ts";
 import { custodyAnchorPath, takeCustody } from "../../../scripts/custody.ts";
@@ -63,9 +64,20 @@ const REVIEW = {
   other_route: { done: false, text: "no second source for the event in the case" },
 } as const;
 
+/** A partial answer's rows (docs/adr/0013): how the tool was installed, on the finding; who installed it, open on the lead's route. */
+const TOOL_PARTS = (finding: number, lead: string) => [
+  { id: "how", part: "how the remote tool was installed", status: "established", refs: [`E-${finding}`] },
+  { id: "who", part: "which account installed it", status: "open", open_by: lead },
+];
+/** A review that holds both of those rows established: the partial label a hedge (partial_all_parts_established). */
+const TOOL_PARTS_HELD = [
+  { id: "how", part: "how the remote tool was installed", established: true, why: "the service entry shows it" },
+  { id: "who", part: "which account installed it", established: true, why: "the service entry names its account" },
+];
+
 const QUESTIONS = ["Who logged on, and when?", "Was a remote tool installed?", "What was deleted?", "When did it start?", "Which account ran the tool?", "What left the network?"];
 
-function goal(n: number, existence: string[] = []): string {
+function goal(n: number, existence: string[] = [], premises: string[] = []): string {
   return [
     "## Goal",
     "",
@@ -75,6 +87,8 @@ function goal(n: number, existence: string[] = []): string {
     "",
     ...QUESTIONS.slice(0, n).map((q, i) => `${i + 1}. ${q}`),
     "",
+    // The goal's premises (docs/adr/0011, "Premises"): each a given of the premise register.
+    ...(premises.length ? ["## Premises", "", ...premises.map((p) => `- ${p}`), ""] : []),
     "## Definition of done",
     "",
     "Every question has a disposition under the bar.",
@@ -95,10 +109,10 @@ async function job(S: string, id: string, file: string, body: string, inputs: st
   await rm(staging, { recursive: true, force: true });
 }
 
-async function newRun(base: string, id: string, questions: number, existence: string[] = []): Promise<Run> {
+async function newRun(base: string, id: string, questions: number, existence: string[] = [], premises: string[] = []): Promise<Run> {
   const runs = join(base, "runs");
   const S = join(runs, id);
-  await P.initSandbox(S, { swarmId: id, agentIds: ["a0", "a1", "a2", "a3"], capUsd: 5, wallClockMinutes: 30, goal: goal(questions, existence) });
+  await P.initSandbox(S, { swarmId: id, agentIds: ["a0", "a1", "a2", "a3"], capUsd: 5, wallClockMinutes: 30, goal: goal(questions, existence, premises) });
   await writeFile(join(S, "inputs.json"), `${JSON.stringify({ files: [{ path: "inputs/disk.E01", sha256: sha("disk"), bytes: 10 }, { path: "inputs/logs/a.log", sha256: sha("a"), bytes: 10 }] })}\n`);
   await job(S, "j000001", "hits.txt", "j000001\n", ["input:disk.E01"]);
   await job(S, "j000002", "hits.txt", "j000002\n", ["input:logs/a.log"]);
@@ -153,12 +167,18 @@ async function established(r: Run, q: string, by: Ctx = r.a1, critic: Ctx = r.a2
   return a.seq;
 }
 
-/** Question `q` answered partial, medium confidence, on a finding, with the limitation that bounds the part it leaves open; its lead closed. */
+/**
+ * Question `q` answered partial, medium confidence, on a finding, with the
+ * limitation that bounds the part it leaves open; its lead closed. Its rows
+ * (docs/adr/0013, "Claim and open-part rows"): "when" established on the
+ * finding, "who" open by the limitation. The histories committed before the
+ * rows were recorded without them, and are kept as they were.
+ */
 async function partial(r: Run, q: string) {
   const id = await lead(r.a0, q);
   const f = (await rec(r.a0, { kind: "finding", ...F, value: `a logon at 09:14 for question ${q}`, source: "the log", evidence: "line 12", refs: ["job:j000002/hits.txt"], answers: [q] })).entry;
   const lim = (await rec(r.a0, { kind: "limitation", value: `The log keeps no account name for question ${q}`, source: "the log", evidence: "its field list", reason: "unavailable", answers: [q] })).entry;
-  const a = (await rec(r.a1, { kind: "answer", section: `question:${q}`, value: "A logon at 09:14; the account is not established", reasoning: `E-${f.seq} shows the logon and its time; the account is open (E-${lim.seq})`, ...A, limitations: [lim.seq], result: "partial" })).entry;
+  const a = (await rec(r.a1, { kind: "answer", section: `question:${q}`, value: "A logon at 09:14; the account is not established", reasoning: `E-${f.seq} shows the logon and its time; the account is open (E-${lim.seq})`, ...A, limitations: [lim.seq], result: "partial", parts: [{ id: "when", part: "when the logon happened", status: "established", refs: [`E-${f.seq}`] }, { id: "who", part: "which account logged on", status: "open", open_by: `E-${lim.seq}` }] })).entry;
   await close(r.a0, id, `E-${f.seq}`);
   return { f, lim, a };
 }
@@ -214,6 +234,31 @@ async function preparationNegatives(base: string, id: string): Promise<Run> {
   return r;
 }
 
+/** The operator on the host, not enrolled: who designates and admits premises in the fixtures. */
+const OPERATOR: Q.Actor = { kind: "human", role: "operator", person: "ops@lab", enrolled: false, os_user: "ops", host: "lab", via: "cli", identity: "claimed" };
+
+/** The goal's one premise in the premise cases: the laptop is the employee's, for the whole of 2024 (a given, P-1). */
+const LAPTOP_PREMISE = "The disk image disk.E01 is of the laptop issued to the employee the brief names, who alone used it [scope: entities disk.E01; times 2024-01-01..2024-12-31]";
+
+/**
+ * Question `q` established on a finding, citing `premises`, attested
+ * established by another seat, its lead closed; the finding's words given.
+ */
+async function citing(r: Run, q: string, value: string, premises: unknown[], o: { by?: Ctx; critic?: Ctx; supersedes?: number; finding?: number } = {}): Promise<{ f: number; a: number }> {
+  const id = await lead(r.a0, q, [{ source: "input:disk.E01", method: "read the disk" }]);
+  const f = o.finding ?? (await rec(r.a0, { kind: "finding", ...F, value, source: "the disk", evidence: "a registry key", refs: ["job:j000001/hits.txt"], answers: [q] })).entry.seq;
+  const a = (await rec(o.by ?? r.a1, { kind: "answer", section: `question:${q}`, value: `Established: ${value}`, reasoning: `E-${f}`, ...HIGH, result: "established", premises, ...(o.supersedes ? { supersedes: o.supersedes } : {}) })).entry;
+  await attest(o.critic ?? r.a2, { seq: a.seq, how: "re-read the key from job:j000001", ...ESTABLISHED });
+  await close(r.a0, id, `E-${f}`);
+  return { f, a: a.seq };
+}
+
+/** The premise acts through the register's own admission, as the CLI's are when no hub runs. */
+async function operatorAct(S: string, ev: Q.ActKind, input: Q.ActInput): Promise<void> {
+  const r = await Q.act(S, OPERATOR, ev, input);
+  assert.ok(r.ok, (r as { reason?: string }).reason);
+}
+
 // ---------------------------------------------------------------------------------------------
 // The cases
 // ---------------------------------------------------------------------------------------------
@@ -246,7 +291,7 @@ const CASES: Record<string, (base: string) => Promise<string>> = {
         seq: p.a.seq,
         how: "re-read line 12 from job:j000002",
         strength: "best_candidate",
-        answer_review: { ...ESTABLISHED.answer_review, parts: [{ part: "when", established: true, why: "line 12" }, { part: "which account", established: false, why: "no account field" }] },
+        answer_review: { ...ESTABLISHED.answer_review, parts: [{ id: "when", part: "when", established: true, why: "line 12" }, { id: "who", part: "which account", established: false, why: "no account field" }] },
       });
     }
     return r.S;
@@ -261,7 +306,7 @@ const CASES: Record<string, (base: string) => Promise<string>> = {
       seq: p.a.seq,
       how: "re-read line 12 from job:j000002; no account field in the log",
       ...ESTABLISHED,
-      answer_review: { ...ESTABLISHED.answer_review, parts: [{ part: "when, and from where", established: true, why: "line 12" }, { part: "which account", established: false, why: "the log keeps none", declared_open: `E-${p.lim.seq}` }] },
+      answer_review: { ...ESTABLISHED.answer_review, parts: [{ id: "when", part: "when, and from where", established: true, why: "line 12" }, { id: "who", part: "which account", established: false, why: "the log keeps none", declared_open: `E-${p.lim.seq}` }] },
     });
     return r.S;
   },
@@ -534,7 +579,7 @@ const CASES: Record<string, (base: string) => Promise<string>> = {
       seq: p.a.seq,
       how: "re-read line 12 from job:j000002; no account field in the log",
       ...ESTABLISHED,
-      answer_review: { ...ESTABLISHED.answer_review, parts: [{ part: "when", established: true, why: "line 12" }, { part: "which account", established: false, why: "the log keeps none", declared_open: `E-${p.lim.seq}` }] },
+      answer_review: { ...ESTABLISHED.answer_review, parts: [{ id: "when", part: "when", established: true, why: "line 12" }, { id: "who", part: "which account", established: false, why: "the log keeps none", declared_open: `E-${p.lim.seq}` }] },
     });
     await SW.awaitSweeps(r.S);
     const first = await takeCustody(r.S, { runsDir: r.runs, readOnly: true });
@@ -569,8 +614,8 @@ const CASES: Record<string, (base: string) => Promise<string>> = {
     // Question 2: partial, every part held established, attested established.
     const id2 = await lead(r.a0, "2", [{ source: "input:disk.E01", method: "read the disk" }]);
     const f2 = (await rec(r.a0, { kind: "finding", ...F, value: "a remote tool's service entry", source: "the disk", evidence: "a registry key", refs: ["job:j000001/hits.txt"], answers: ["2"] })).entry;
-    const a2 = (await rec(r.a1, { kind: "answer", section: "question:2", value: "A remote tool was installed as a service", reasoning: `E-${f2.seq}`, ...HIGH, result: "partial" })).entry;
-    await attest(r.a3, { seq: a2.seq, how: "re-read the key from job:j000001", ...ESTABLISHED });
+    const a2 = (await rec(r.a1, { kind: "answer", section: "question:2", value: "A remote tool was installed as a service", reasoning: `E-${f2.seq}`, ...HIGH, result: "partial", parts: TOOL_PARTS(f2.seq, id2) })).entry;
+    await attest(r.a3, { seq: a2.seq, how: "re-read the key from job:j000001", ...ESTABLISHED, answer_review: { ...ESTABLISHED.answer_review, parts: TOOL_PARTS_HELD } });
     await close(r.a0, id2, `E-${f2.seq}`);
     // Question 3: established, leaving out a finding another seat attested under its lead.
     const id3 = await lead(r.a0, "3", [{ source: "input:disk.E01", method: "read the disk" }]);
@@ -613,9 +658,9 @@ const CASES: Record<string, (base: string) => Promise<string>> = {
     // Question 2.
     const id2 = await lead(r.a0, "2", [{ source: "input:disk.E01", method: "read the disk" }]);
     const f2 = (await rec(r.a0, { kind: "finding", ...F, value: "a remote tool's service entry", source: "the disk", evidence: "a registry key", refs: ["job:j000001/hits.txt"], answers: ["2"] })).entry;
-    const a2 = (await rec(r.a1, { kind: "answer", section: "question:2", value: "A remote tool was installed as a service", reasoning: `E-${f2.seq}`, ...HIGH, result: "partial" })).entry;
+    const a2 = (await rec(r.a1, { kind: "answer", section: "question:2", value: "A remote tool was installed as a service", reasoning: `E-${f2.seq}`, ...HIGH, result: "partial", parts: TOOL_PARTS(f2.seq, id2) })).entry;
     await close(r.a0, id2, `E-${f2.seq}`);
-    await attest(r.a3, { seq: a2.seq, how: "re-read the key from job:j000001", ...ESTABLISHED });
+    await attest(r.a3, { seq: a2.seq, how: "re-read the key from job:j000001", ...ESTABLISHED, answer_review: { ...ESTABLISHED.answer_review, parts: TOOL_PARTS_HELD } });
     // Question 3.
     const id3 = await lead(r.a0, "3", [{ source: "input:disk.E01", method: "read the disk" }]);
     assert.ok((await L.attachJob(r.S, "a0", "j000001", id3)).ok);
@@ -809,6 +854,128 @@ const CASES: Record<string, (base: string) => Promise<string>> = {
     return r.S;
   },
 
+
+  /**
+   * A given (docs/adr/0011, "Premises"): the goal's premise, seeded as P-1
+   * at the kickoff, assumed by both questions' established answers. It is
+   * not proved again and holds nothing.
+   */
+  "premise-given": async (base) => {
+    const r = await newRun(base, "pgv", 2, [], [LAPTOP_PREMISE]);
+    await Q.seedRegister(r.S);
+    await citing(r, "1", "the employee's account logged on at 09:14", [{ id: "P-1", rev: 1, stance: "assumed" }]);
+    await citing(r, "2", "a remote tool was installed as a service", [{ id: "P-1", rev: 1, stance: "assumed" }]);
+    return r.S;
+  },
+
+  /**
+   * A proposition under test, later admitted: a seat proposes P-1 (the
+   * laptop's clock kept UTC); question 1's answer assumes it only
+   * conditionally ("assuming P-1"); the operator admits it as a given; then
+   * question 2's answer assumes it outright.
+   */
+  "premise-admitted": async (base) => {
+    const r = await newRun(base, "pad", 2);
+    await Q.seedRegister(r.S);
+    const proposed = await Q.premisePropose(r.a0, { text: "The laptop's clock kept UTC for the whole examined period", locator: "input:logs/a.log, its header line", why: "every time the answers give is read off that clock" });
+    assert.ok(proposed.ok && proposed.p === "P-1", JSON.stringify(proposed));
+    await citing(r, "1", "the employee's account logged on at 09:14 UTC", [{ id: "P-1", rev: 1, stance: "assumed", conditional: true }]);
+    await operatorAct(r.S, "premise_admit", { p: "P-1", as: "given", why: "the lab's intake notes record the clock on UTC" });
+    await citing(r, "2", "a remote tool was installed as a service at 10:02 UTC", [{ id: "P-1", rev: 1, stance: "assumed" }]);
+    return r.S;
+  },
+
+  /**
+   * Two scopes that do not conflict: question 1's answer assumes P-1 for
+   * January to March; question 2's answer contradicts it for July to
+   * December, on a finding (the laptop was reissued in July), which takes
+   * the premise to the operator as a dispute. The two scopes never meet:
+   * nothing holds, and nothing is warned.
+   */
+  "premise-scopes": async (base) => {
+    const r = await newRun(base, "psc", 2, [], [LAPTOP_PREMISE]);
+    await Q.seedRegister(r.S);
+    await citing(r, "1", "the employee's account logged on on 2024-02-12", [{ id: "P-1", rev: 1, stance: "assumed", scope: { times: [{ from: "2024-01-01", to: "2024-03-31" }] } }]);
+    const f2 = (await rec(r.a0, { kind: "finding", ...F, value: "the laptop was reissued to a contractor on 2024-07-01", source: "the disk", evidence: "the asset tag's history", refs: ["job:j000001/hits.txt"], answers: ["2"] })).entry.seq;
+    await citing(r, "2", "the remote tool was installed on 2024-08-03, after the laptop was reissued", [{ id: "P-1", rev: 1, stance: "contradicted", refs: [`E-${f2}`], scope: { times: [{ from: "2024-07-01", to: "2024-12-31" }] } }], { finding: f2 });
+    return r.S;
+  },
+
+  /**
+   * A contradiction on the record: question 1's answer assumes P-1;
+   * question 2's contradicts it over the same scope and names no finding
+   * that rebuts it. Both questions are held (premise_inconsistent): neither
+   * side is forced, and the fix says the four ways out.
+   */
+  "premise-held": async (base) => {
+    const r = await newRun(base, "phd", 2, [], [LAPTOP_PREMISE]);
+    await Q.seedRegister(r.S);
+    await citing(r, "1", "the employee's account logged on at 09:14", [{ id: "P-1", rev: 1, stance: "assumed" }]);
+    await citing(r, "2", "the remote tool was installed from a second user's session", [{ id: "P-1", rev: 1, stance: "contradicted" }]);
+    return r.S;
+  },
+
+  /**
+   * The same contradiction, reconciled without forcing either answer: a
+   * custody seal is taken while it holds; then question 2's answer is
+   * recorded again naming the finding that rebuts P-1, which takes the
+   * premise to the operator as a dispute (a request of kind premise).
+   * Question 1's answer still assumes P-1, and is warned
+   * (premise_disputed); nothing holds, and the earlier seal verifies as a
+   * prefix.
+   */
+  "premise-rebutted": async (base) => {
+    const r = await newRun(base, "prb", 2, [], [LAPTOP_PREMISE]);
+    await Q.seedRegister(r.S);
+    await citing(r, "1", "the employee's account logged on at 09:14", [{ id: "P-1", rev: 1, stance: "assumed" }]);
+    const q2 = await citing(r, "2", "the remote tool was installed from a second user's session", [{ id: "P-1", rev: 1, stance: "contradicted" }]);
+    await SW.awaitSweeps(r.S);
+    const seal = await takeCustody(r.S, { runsDir: r.runs, readOnly: true });
+    await writeFile(join(r.S, "custody.20260929T120000000Z.json"), `${JSON.stringify(seal, null, 2)}\n`);
+    const second = (await rec(r.a0, { kind: "finding", ...F, value: "a second user's profile on the laptop, created 2024-05-02", source: "the disk", evidence: "the profile list", refs: ["job:j000001/hits.txt"], answers: ["2"] })).entry.seq;
+    const again = (await rec(r.a1, { kind: "answer", section: "question:2", value: "Established: the remote tool was installed from a second user's session", reasoning: `E-${q2.f}, and E-${second} shows the second user`, ...HIGH, result: "established", premises: [{ id: "P-1", rev: 1, stance: "contradicted", refs: [`E-${second}`] }], supersedes: q2.a })).entry;
+    await attest(r.a2, { seq: again.seq, how: "re-read the profile list from job:j000001", ...ESTABLISHED });
+    return r.S;
+  },
+
+  /**
+   * The same contradiction, reconciled by a conditional answer: question
+   * 1's answer is recorded again assuming P-1 only conditionally
+   * ("assuming P-1"). Nothing holds, nothing is warned; both stand.
+   */
+  "premise-conditional": async (base) => {
+    const r = await newRun(base, "pcd", 2, [], [LAPTOP_PREMISE]);
+    await Q.seedRegister(r.S);
+    const q1 = await citing(r, "1", "the employee's account logged on at 09:14", [{ id: "P-1", rev: 1, stance: "assumed" }]);
+    await citing(r, "2", "the remote tool was installed from a second user's session", [{ id: "P-1", rev: 1, stance: "contradicted" }]);
+    const again = (await rec(r.a1, { kind: "answer", section: "question:1", value: "Established, assuming P-1: the employee's account logged on at 09:14", reasoning: `E-${q1.f}`, ...HIGH, result: "established", premises: [{ id: "P-1", rev: 1, stance: "assumed", conditional: true }], supersedes: q1.a })).entry;
+    await attest(r.a2, { seq: again.seq, how: "re-read the key from job:j000001", ...ESTABLISHED });
+    return r.S;
+  },
+
+  /**
+   * Claim and open-part rows (docs/adr/0013): question 1's established
+   * answer carries two parts; its review weighs both and names a third the
+   * question asks that the answer leaves out (missing), which allows only
+   * best_candidate: the question is held as a best candidate, and the
+   * omitted part stays visible (part_omitted). Question 2's partial answer
+   * names its open part by the limitation that bounds it; its review holds
+   * that part open, as the answer declares it: disposed partial.
+   */
+  "parts-omitted": async (base) => {
+    const r = await newRun(base, "pom", 2);
+    const id1 = await lead(r.a0, "1", [{ source: "input:logs/a.log", method: "read the logons" }]);
+    const f1 = (await rec(r.a0, { kind: "finding", ...F, value: "alice logged on at 09:14", source: "the log", evidence: "line 12", refs: ["job:j000002/hits.txt"], answers: ["1"] })).entry;
+    const a1 = (await rec(r.a1, { kind: "answer", section: "question:1", value: "alice, at 09:14", reasoning: `E-${f1.seq}`, ...HIGH, result: "established", parts: [{ id: "who", part: "who logged on", status: "established", refs: [`E-${f1.seq}`] }, { id: "when", part: "when", status: "established", refs: [`E-${f1.seq}`] }] })).entry;
+    await close(r.a0, id1, `E-${f1.seq}`);
+    const omitted = { ...ESTABLISHED.answer_review, parts: [{ id: "who", part: "who logged on", established: true, why: "line 12 names alice" }, { id: "when", part: "when", established: true, why: "line 12's time" }, { part: "from which host", established: false, why: "the question asks where from; the log's line 12 has a source address the answer does not give", missing: true }] };
+    const refusedEstablished = await P.attestEntry(r.a2, { seq: a1.seq, how: "re-read line 12 from job:j000002", strength: "established", answer_review: omitted });
+    assert.ok(!refusedEstablished.ok, "a part the answer leaves out allows only best_candidate");
+    await attest(r.a2, { seq: a1.seq, how: "re-read line 12 from job:j000002", strength: "best_candidate", answer_review: omitted });
+    const p = await partial(r, "2");
+    await attest(r.a3, { seq: p.a.seq, how: "re-read line 12 from job:j000002", ...ESTABLISHED, answer_review: { ...ESTABLISHED.answer_review, parts: [{ id: "when", part: "when the logon happened", established: true, why: "line 12" }, { id: "who", part: "which account logged on", established: false, why: "the log keeps none" }] } });
+    return r.S;
+  },
 };
 
 // ---------------------------------------------------------------------------------------------

@@ -318,6 +318,10 @@ const WARNING_CODES: ReadonlyArray<[string, RegExp]> = [
   ["lead_findings_uncited", /\) leaves out what the record ties to \S+:/],
   ["preparation_missing", /weighed without a produced broad extraction of what it rests on/],
   ["late_evidence_hits", /does not reach what the reverse sweep of evidence added late found for/],
+  ["premise_disputed", /\) assumes P-\d+ .*: the premise is disputed before the operator/],
+  ["premise_revised", /\) cites P-\d+ at revision \d+, revised to \d+ since/],
+  ["premise_withdrawn", /\) cites P-\d+, withdrawn at /],
+  ["part_omitted", /\) leaves out (?:a part|parts) of the question its reviews? names?:/],
 ];
 
 /** A warning line's code and section, by the harness's own words for it. */
@@ -530,7 +534,9 @@ export async function project(harness: string, S: string, o: { showText?: boolea
     if (q.check?.best_candidate && q.gate.disposition) agreement.push({ section: q.section, kind: "gate_disposes_best_candidate" });
   }
   if (ready && gate && !gate.error) {
-    const gateClear = !gate.defects.length && !(gate.holding ?? []).length && gate.questions.every((q) => q.disposition || finalOutcome(q.outcome));
+    // A question the check reads as answered while one of its own defects holds it is held through the check's verdict, as above (two answers that assume and contradict one premise revision: premise_inconsistent).
+    const heldThroughCheck = questions.some((q) => q.gate?.outcome === "answered" && (q.check?.defects.length ?? 0) > 0);
+    const gateClear = !gate.defects.length && !(gate.holding ?? []).length && gate.questions.every((q) => q.disposition || finalOutcome(q.outcome)) && !heldThroughCheck;
     const readyHeld = items.some((i) => i.code !== "route_limitation");
     if (!ready.ready && readyHeld && gateClear) agreement.push({ section: "run", kind: "readiness_not_ready_gate_clear" });
     if (ready.ready && !gateClear) agreement.push({ section: "run", kind: "readiness_ready_gate_holds" });
