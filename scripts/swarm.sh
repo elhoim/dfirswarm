@@ -11608,7 +11608,7 @@ by sha256 and the release's detached ssh signature; it carries no signature of i
 EOF
       ;;
     replay) cat <<'EOF'
-  replay <id> [--checkout PATH] [--compare [A [B]]] [--stop-policy P[,P...]] [--deliveries] [--prepare-as STATE] [--json] [--show-text]
+  replay <id> [--checkout PATH] [--compare [A [B]]] [--stop-policy P[,P...]] [--deliveries] [--prepare-as STATE] [--reverse-sweep] [--json] [--show-text]
 Reads a finished run's registers again under a harness's finish rules: the answers check (each
 check-answers line of the goal, as its own function), the finish gate and the finish line's verdict,
 readiness, the finish register (the coordinator, what is late against the report), the report's
@@ -11630,6 +11630,8 @@ are hashed before and after. The goal's other checks are its own commands: not r
                     census finds applies to the run's evidence (read in place, never written), in
                     STATE (planned, attempted, produced, partial, failed, declined): which negatives
                     the preparation hold would have held, and which it would have warned
+  --reverse-sweep   for a run recorded before the reverse sweep existed: each evidence addition swept
+                    on the copy against the coverage records standing at it, counted per question
 Each source's broad extraction is shown, by its receipts, with the questions held or warned on it.
 Values-free: codes, ids, counts and the harness's own words, never a record's text; --show-text adds
 the harness's lines whole, which quote records. It measures rules on a recorded history; what the
