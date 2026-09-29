@@ -28,6 +28,9 @@ normalised TSV plus an aggregate summary.
 
 **One catalogue recipe.** `network-capture` detects pcap and pcapng by magic,
 then writes lossless packet, DNS, HTTP and TLS listings plus capture metadata.
+It is a broad extraction of the capture (`purpose: broad_extraction`): every
+packet's fields, whole; its `exclusions` say it decodes no protocol but DNS,
+HTTP and TLS field by field, reassembles no payload and reads no encrypted TLS.
 
 **One goal template**: `what-left-the-network.md`.
 

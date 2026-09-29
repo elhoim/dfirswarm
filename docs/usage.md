@@ -122,7 +122,7 @@ it. A wrong command line prints the mistake and where to read, not the manual.
 | `--inputs DIR` | no | — | Hand the swarm a read-only copy of `DIR` as `inputs/`: the tools refuse to write it, a shell write is detected and healed from a pristine copy, and where the host can (macOS `sandbox-exec`, Linux mount namespace) the panes run with it read-only at the kernel. Recorded as `inputs` in the registry. Repeatable: several sets each land at `inputs/<name>/` (the directory's name as given), and every other `--inputs` flag applies to all of them. See [inputs.md](inputs.md). |
 | `--inputs-enforce M` | no | `auto` | `auto`: kernel guard when the host has one, otherwise a `WARN`; `on`: refuse to start without one (exit 3); `off`: detection and healing only. |
 | `--inputs-max-mb N`, `--inputs-max-files N` | no | none | Refuse an inputs directory larger than N MB, or with more than N files, before anything is copied (several sets: together). Unset by default: evidence is as large as the case is. `SWARM_INPUTS_MAX_MB` and `SWARM_INPUTS_MAX_FILES` set the same limits from the environment. |
-| `--catalog` | no | off | Before the agents start, run the standard first pass over the inputs once (`scripts/evidence-catalog.sh`): for a disk image the partition table, per partition a body file, a MAC timeline and a path list (a logical volume image with no partition table is catalogued from sector 0); for a memory image Volatility's info, pslist, psscan, cmdline, netscan, malfind and dlllist. What an input is and how it is catalogued are the packs' recipes (`recipes/<name>/` in a pack; computer-forensics-base ships disk volumes, Windows memory and archive members); the harness takes the census: every input gets a row in `catalog/coverage.tsv` — catalogued, in part, planned, a further segment of a set, not catalogued, or smaller than any recipe asks about — with why, and the index names those not catalogued, so an input this pass could not read is named rather than missing. In a microVM run with the job service (the default) the census only plans the recipes (`catalog/plan.json`); they run as jobs once the hub is up, while the agents work, each result a generation under `catalog/gen/` and each change a revision under `catalog/revisions/<n>/`, announced on the board. What a step wrote to stderr is kept whole beside its output (`<file>.stderr`). Lands in `catalog/`, harness-owned and read-only, indexed in `catalog/README.md` and rendered into `SWARM.md`. Needs `--inputs`; implies `--quarantine` and `--toolbox dfir`. Under `--isolation microvm` it runs with the image's tools, not the host's. |
+| `--catalog` | no | off | Before the agents start, run the standard first pass over the inputs once (`scripts/evidence-catalog.sh`): for a disk image the partition table, per partition a body file, a MAC timeline and a path list (a logical volume image with no partition table is catalogued from sector 0); for a memory image Volatility's info, pslist, psscan, cmdline, netscan, malfind and dlllist. What an input is and how it is catalogued are the packs' recipes (`recipes/<name>/` in a pack; computer-forensics-base ships disk volumes, Windows memory and archive members); the harness takes the census: every input gets a row in `catalog/coverage.tsv` — catalogued, in part, planned, a further segment of a set, not catalogued, or smaller than any recipe asks about — with why, and the index names those not catalogued, so an input this pass could not read is named rather than missing. In a microVM run with the job service (the default) the census only plans the recipes (`catalog/plan.json`); they run as jobs once the hub is up, while the agents work, each result a generation under `catalog/gen/` and each change a revision under `catalog/revisions/<n>/`, announced on the board. What a step wrote to stderr is kept whole beside its output (`<file>.stderr`). A recipe a pack declares a broad extraction (a parse of the whole source into a searchable form, where the rest of the catalogue inventories it: the mobile pack's iOS and Android parsers over a full file-system acquisition, the base pack's super timeline of a disk image) is asked about every input too; each that applies is listed in `catalog/plan.json`'s `preparations` and in the README, run by the kickoff where its pack marks it so and otherwise offered as a lead once the run is up, and its receipts are kept on the store journal ([ADR 0013](adr/0013-a-negative-is-bounded-and-a-cap-pauses.md), "A source's broad extraction before a negative on it"). Lands in `catalog/`, harness-owned and read-only, indexed in `catalog/README.md` and rendered into `SWARM.md`. Needs `--inputs`; implies `--quarantine` and `--toolbox dfir`. Under `--isolation microvm` it runs with the image's tools, not the host's. |
 | `--toolbox M` | no | `off` | `dfir`: check the forensic toolbox on this host (`scripts/toolbox.sh`: Sleuth Kit, Volatility 3, regipy, python-evtx, yara, exiftool, sqlite3, strings, python3) into `toolbox.json` and a Toolbox section of `SWARM.md`, with install commands for what is missing; `auto`: `dfir` when `--catalog` is set, plus the sets a `--goal-file`'s metadata block names in `toolbox:` (without the key, the sets its words suggest), and `crypto` when a VHD(X), VMDK, QCOW2 or encrypted container is under the inputs; `off`. `crypto` adds the volume readers (libbde, libvhdi, libluksde, libvshadow, dfvfs, qemu-img), `linux` the journal, XFS (xfsprogs) and LVM (libvslvm) readers. |
 | `--toolbox-required` | no | off | A missing tool is a `BLOCKER` (exit 3) instead of a `WARN`. |
 | `--quarantine` | no | off | `work/extracted/` and `work/quarantine/` cannot execute: no-exec at the kernel where the host can (`fsguard.sh --noexec`), and the harness strips execute bits from anything written there. Evidence pulled out of an image is for reading, never for running. |
@@ -456,6 +456,26 @@ the boundary and the last prepare, the last check and what is late against the
 report), the parked leads, and on
 each lead its standing offer, a closure waiting for its closer's confirmation,
 a second route with its reason and its product contract.
+
+A source's broad extraction ([ADR 0013](adr/0013-a-negative-is-bounded-and-a-cap-pauses.md),
+"A source's broad extraction before a negative on it") is on the record as
+receipts on the store journal (`type: preparation`): planned, attempted,
+produced, partial, failed or declined, each with the source's digest, the
+recipe and its version, the output manifest and what the extraction does not
+hold. One its pack runs by itself runs at the kickoff; every other is a lead
+of its own, "Broad extraction: <recipe> over <source>", opened by the harness,
+serving no question and not material, offered to an idle seat, which runs it
+or closes it deferred or infeasible with why (the preparation's decline). A
+negative that says the event did not happen, or whose coverage is complete
+over a source, waits while that source's extraction is planned or attempted:
+`finish status`, readiness and the answers check name it (`preparation_pending`)
+with the job to wait for or the lead to run or decline. The extraction's
+outcome releases it, whatever that is, and so does `swarm.sh question <run>
+accept Q-n`. Any other negative on a source whose extraction has not
+produced carries the warning `preparation_missing`, which holds nothing, and a
+negative's review offer opens with the state of each source it rests on.
+The receipts are lines of `store/journal.jsonl`, and `swarm.sh replay <run>`
+shows each source's state and what it holds or warns.
 
 #### The stop policy: `extend`, `pause`, `unpause`, `stop`, `resume`
 
@@ -981,7 +1001,7 @@ and still compares by section.
 ### Replay: `swarm.sh replay`, `scripts/replay.ts`
 
 ```
-swarm.sh replay <id> [--checkout PATH] [--compare [A [B]]] [--stop-policy P[,P...]] [--deliveries] [--json] [--show-text]
+swarm.sh replay <id> [--checkout PATH] [--compare [A [B]]] [--stop-policy P[,P...]] [--deliveries] [--prepare-as STATE] [--json] [--show-text]
 node --experimental-strip-types scripts/replay.ts <run-dir | id --registry FILE> [the same options]
 ```
 
@@ -1023,7 +1043,13 @@ measure a rule change on recorded histories before paying for new runs
   `readiness_clear_held`, `gate_holds_check_disposed`, and a run whose
   readiness is not ready while the gate holds nothing). A route limitation
   that readiness holds under `--stop operator` only limits the done, by
-  design (ADR 0015, 7 and 8), and is not counted a disagreement.
+  design (ADR 0015, 7 and 8), and is not counted a disagreement. An answer
+  the check reads as answered while one of its own defects holds it (an
+  absence negative held on its source's broad extraction) is held by the
+  finish line through the check, and counted held. Where the checkout reads
+  the store journal's preparation receipts, each source's broad extraction,
+  capability by capability, and the questions held (`preparation_pending`)
+  or warned (`preparation_missing`) on it, with their sources.
 - **Values-free by default**: codes, ids, counts and the harness's own words,
   never a record's text (no answer, finding, lead title, reason or post).
   `--show-text` adds the harness's lines whole, which quote records; it is
@@ -1056,6 +1082,16 @@ measure a rule change on recorded histories before paying for new runs
   a warning (the point, the entry, the seat, the questions and the codes)
   and finish status; `--compare` names the difference point by point. A
   checkout from before the delivery says it delivered in finish status only.
+- **`--prepare-as STATE`** asks what a run from before the receipts would
+  have met under the preparation hold: this checkout's census asks the run's
+  packs' broad extractions (by id, as this checkout ships them) about the
+  run's own evidence, read in place through a scratch sandbox whose
+  `inputs/` links to the run's and never written; each copy then gets, per
+  source and capability that applies, a synthetic receipt by `replay` in
+  STATE (planned, attempted, produced, partial, failed, declined; one its
+  pack says the images cannot run is declined), and is evaluated as usual.
+  It prints what applied, and what could not be asked (a pack this checkout
+  does not ship, an input with no digest, a run whose evidence is not here).
 
 Exit 0 when replayed and the run's registers are unchanged; 1 when a
 checkout could not be evaluated, the run changed under it, or it was

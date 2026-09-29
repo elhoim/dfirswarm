@@ -18,7 +18,7 @@
   "checksums": {
     "sha256": {
       "LICENCE": "5b94f18424dbef1e77eda33a465e946c2c8eb715fa5236afe2c6ec6763af80d3",
-      "README.md": "581b14349a4d059d005e58478e492ff6fde1a81beeaf9c0866bf900634bd081e",
+      "README.md": "0b320c82adec3f724a9578da0d3e0c459fb5a426f5890c39337bfd1875f73d35",
       "tools/fuzzy_hash/manifest.json": "3e8af5f8e41bcd93d49a04dd0cf28ca27b3bf3fd9eead2ecd3945d7a2a9a185e",
       "tools/fuzzy_hash/run.py": "914ec5e2b00c1b635ab9d82bd496eef94f47de3574a8ae539848bc543a547e26",
       "tools/pe_info/manifest.json": "b475d13e1cb43293efc3d3c0152c499d3efc90c57572abcd2142dc5af74a1478",

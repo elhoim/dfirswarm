@@ -18,7 +18,7 @@
   "checksums": {
     "sha256": {
       "LICENCE": "5b94f18424dbef1e77eda33a465e946c2c8eb715fa5236afe2c6ec6763af80d3",
-      "README.md": "fee0cf37acd751b991c2cd4b852aeffeeb8bfe48229fe8930accbec4b019947d",
+      "README.md": "53573f3fe4773929df7688de39f57c79335d67f5158250fcc236cdf7cfe250a1",
       "tools/suricata_run/manifest.json": "0626315f9410bf999ec30fd20130d5e14e4b895f414b230ce3a316c8f97591bd",
       "tools/suricata_run/run.py": "4aa97d8254a636def222f1bcc1c93704af00573ad70bfbb14a59a19b5c69ffc0",
       "tools/network_log_summary/manifest.json": "fd8d3c563da11ad216f8c140578cd6e5319cdf06f10d3e8269deda2f2c365023",

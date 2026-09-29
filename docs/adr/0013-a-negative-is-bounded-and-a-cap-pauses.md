@@ -684,6 +684,137 @@ before any new rule.
   act on them is for paired runs: fewer complete answers left partial, and
   no rise in false established.
 
+## A source's broad extraction before a negative on it
+
+On the Belka runs four of five false negatives rested on a row no job had
+ever produced. The iPhone's tar was catalogued at the kickoff by the mobile
+pack's recipe, which inventories the tar and "parses no artifact content",
+and then read narrowly, one database at a time; the whole-source parse the
+pack's own programs can do was an agent's choice that nobody made. The hub's
+object coverage called a search complete as soon as a job had declared the
+tar. The brainstorm of 2026-09-29 (L1) agreed that the packs say which of
+their recipes parse a whole source, that the harness offers that work per
+source and records what became of it, and that the reviewer of a negative
+reads that first. Whether a negative waits for it was left open; the call
+recorded with the limits plan is the narrow one: only a negative that
+claims absence, or claims complete coverage over the source, waits, and
+only while the extraction is under way.
+
+- **What a pack declares.** A recipe says its `purpose`: `inventory` (it
+  lists what a source holds) or `broad_extraction` (it parses the whole
+  source into a searchable form). A broad extraction names the
+  `capability` it prepares and lists its `exclusions`, what it does not
+  hold; one the job images cannot run says why (`unavailable`), has no
+  trigger, and the job service refuses it by name with that why. A recipe
+  that says nothing is an inventory. The shipped recipes, read as they are:
+  disk-volumes, archive-members, ios-filesystem, android-backup and
+  static-binary inventory; memory-windows (the standard views of a memory
+  image), linux-target (the Linux artefact plugins over a disk) and
+  network-capture (every packet's fields) are broad extractions. New:
+  mobile-forensics/ios-ileapp and android-aleapp (every artefact module of
+  the pack's iOS or Android parser over a whole file-system acquisition,
+  run by the kickoff), mobile-forensics/android-backup-apps (declared
+  unavailable: nothing in the mobile image parses an adb backup's app tree
+  as a whole, so its preparation is declined, with that why, rather than
+  faked), and computer-forensics-base/disk-timeline (a super timeline of a
+  whole disk image; hours on a large image, so offered, not run by
+  itself). The programs are already in the images; no image changes. The
+  harness reads the declarations and names no program.
+- **What applies.** The census asks every broad extraction about every
+  input whatever its `auto`, and lists each that applies in plan.json's
+  `preparations` (the recipe, its capability, whether the kickoff runs it,
+  and the pack's why when it cannot run); the input's row and the
+  catalogue's README say it. Evidence added later is asked by the system's
+  detect pass over each file. A detect pass never runs a broad extraction
+  its pack does not mark `auto`, or one that cannot run: the first is
+  offered, the second declined, and an agent that asked for the pass is
+  told.
+- **Offers, one per source digest and capability.** One the pack marks
+  `auto` runs without an agent (the kickoff's lane) and needs no offer.
+  Every other is offered as a lead of its own (`openPreparationLead`): the
+  harness's, unheld, serving no question and not material (it holds the
+  finish only through the negatives on its source), with the route
+  {source, recipe}, the source among its objects, what it prepares and
+  excludes in its why, and the next action, catalog_request with the
+  recipe; it is offered to the seat idle longest, as any lead nobody holds.
+  It is not offered when the same capability over the same bytes is queued,
+  running or sealed, or on the record in any state. The seat that takes it
+  runs it, or closes it deferred, infeasible or needs_operator citing a
+  limitation that says why it is not run: that is the preparation's
+  decline, with the seat's why. A lead whose extraction reached an outcome
+  by any route (the lane, a seat under the lead or not) is closed by the
+  harness, withdrawn, citing the receipt.
+- **Receipts, on the store journal.** `type: preparation`, one line per
+  step: planned (queued as a job, or offered as a lead), attempted (its
+  job started), produced, partial or failed (its job ended: the generation,
+  the output manifest's digest, files and bytes, and what this run of it did
+  not cover beside what the recipe excludes), declined (declared
+  unavailable, refused by the kickoff's queue with the refusal's words, or a
+  seat's decline). Each names the source snapshot by digest, the recipe, its
+  version and sha256, the capability, the job or the lead, and the
+  exclusions. Every recipe job whose recipe is a broad extraction has its
+  receipts, whoever asked for it. The hub writes them each round from what
+  the job service and the lead register already say (`scripts/preparation.ts
+  reconcilePreparation`), each state once: a restart writes nothing twice.
+  Produced never means complete: the exclusions say what it does not hold,
+  and a module that found nothing wrote no report. No new register: the
+  journal is already chained, sealed by custody, bound by a release and
+  carried by a package.
+- **The hold, `preparation_pending`.** A material negative (a bounded
+  negative, not determinable, a premise rejected on a search alone) holds
+  while a source's broad extraction is planned or attempted when the answer
+  says the event did not happen (`asserts_absence`), or a coverage record it
+  cites is complete (the hub's object coverage) and names that source, or
+  a directory holding it. It is a defect with its fix: the job to wait for,
+  or the lead to run or decline, or the operator's acceptance of the
+  question. Produced, partial, failed or declined releases it, and a later
+  run of a released capability does not hold again: the hold is a wait on
+  work already queued or offered, never a demand that it succeed or that
+  anything be found, so partial and not determinable stay honest
+  dispositions under every stop policy. The operator's acceptance excuses
+  it (it is not among the negative bar's defects an acceptance never
+  excuses).
+- **The warning, `preparation_missing`.** Every other material negative
+  whose coverage reaches a source whose extraction has not produced is
+  warned, never held: one that names the source or a directory holding it,
+  one that names a member of the source's catalogue, and one that rests on
+  outputs made from the source (followed back through the jobs' declared
+  inputs, as many jobs as it takes; a job that read everything is traced to
+  no source). A held negative is not also warned; once released without
+  producing, it is. The warning names each source's state and exclusions
+  and is delivered at every point the others are (`warningsAt`: the
+  record's reply, the review offer, the attest's reply, finish status).
+- **The review packet.** A negative's review offer opens with the state of
+  the broad extraction of each source it rests on: held, weighed without
+  it, or produced, each with what the extraction does not hold.
+- **The finish revision** moves with each receipt (a decline changes no
+  job), and only in a run that has one.
+
+Replayed (`swarm.sh replay --prepare-as`, values-free, ADR 0017), on
+s5764c4 (Belka): this checkout's census finds two broad extractions that
+apply to its evidence, the mobile pack's over the iPhone tar (run by the
+kickoff) and the base pack's disk timeline over the laptop's image
+(offered as a lead). With both attempted, one of the run's eight negatives
+is held: question 4's, whose coverage record is complete over the tar.
+Seven are warned (questions 10 and 13 to 18), each reaching both images:
+three coverage records name both, four rest on outputs made from both.
+The three that name them are partial, and question 4's is the only
+complete one that names a source. With both produced, nothing is held
+or warned; with both failed, nothing is held and all eight are warned. As
+the run was recorded, with no receipt, nothing changes. Whether the offers
+and the hold make fewer never-produced misses is for paired runs on a
+generated-source fixture and on Belka (the hold arm against offers only).
+
+Not built: an iTunes or Finder backup (a directory of files) as a recipe's
+target, since a recipe is asked about one file; a broad extraction in the
+derived catalogue's lane (its budget is minutes, an iOS parse is an hour).
+Without the job service (a host run, `--no-jobs`) the census runs each
+kickoff recipe where it runs, as it always has (memory-windows, with its
+four hours, among them), the new parses included, and no receipt is kept:
+receipts, offers and the hold are the hub's. The recipes' calls to iLEAPP,
+ALEAPP and Plaso are held to the recipe protocol by stand-ins in the
+tests; they have not yet run against the programs in the images.
+
 ## Consequences
 
 - Every existing goal and run keeps working: an answer without `result`
@@ -697,6 +828,10 @@ before any new rule.
   has none. "It did not happen" needs the evidence for saying so.
 - A case can grow without losing its custody: further questions after a
   stop are the same run's, and the releases say which chains each one bound.
+- A negative over a source whose pack parses it whole waits only while
+  that parse is under way, and only when it claims absence or complete
+  coverage; every other says it was weighed without it. A pack that
+  declares nothing changes nothing.
 - Not decided here: the acquisition lane and notifications as sealed
   material (Phase 1b), the full offer protocol and the reviewer's query
   (Phase 2), the report's per-question chains (Phase 3), and the mediated

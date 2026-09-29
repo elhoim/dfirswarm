@@ -6,6 +6,72 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Added: a source's broad extraction, offered and on the record, before a negative on it
+
+On the Belka runs four of five false negatives rested on a row no job had
+ever produced: the phone's tar was inventoried at the kickoff (the mobile
+pack's recipe "parses no artifact content") and then read narrowly, and the
+whole-source parse the pack's own programs can do was nobody's work. Now
+(ADR 0013, "A source's broad extraction before a negative on it"):
+
+- **Recipes say what they prepare.** `purpose: inventory | broad_extraction`
+  in `recipe.json`; a broad extraction names its `capability` and its
+  `exclusions`, and one the job images cannot run says why (`unavailable`:
+  no trigger, refused by name). pack.sh holds them to that. The shipped
+  recipes are declared as they are: disk-volumes, archive-members,
+  ios-filesystem, android-backup and static-binary inventory;
+  memory-windows, linux-target and network-capture are broad extractions.
+- **New recipes.** mobile-forensics `ios-ileapp` and `android-aleapp`
+  (iLEAPP and ALEAPP over a whole iOS or Android full file-system tar or zip,
+  every report kept, run by the kickoff); `android-backup-apps` (declared
+  unavailable: nothing in the mobile image parses an adb backup's app tree
+  as a whole, so its preparation is declined with that reason, not faked);
+  computer-forensics-base `disk-timeline` (Plaso's log2timeline and a psort
+  CSV over a whole disk image; hours on a large one, so offered, not run by
+  itself). The programs are already in the images. Base pack 1.4.0, mobile
+  1.2.0, linux, network and reverse-engineering 1.1.3.
+- **The census** asks every broad extraction about every input and lists
+  each that applies in `catalog/plan.json`'s `preparations`, the input's row
+  and the README; it plans only the kickoff's. A detect pass never runs a
+  broad extraction that is not `auto`, nor one that cannot run, and tells an
+  agent that asked. The kickoff's queue says what it refused, and why.
+- **Offers and receipts.** Each round the hub (`scripts/preparation.ts`)
+  writes, once each, receipts on the store journal (`type: preparation`):
+  planned, attempted, produced, partial, failed or declined, with the source's
+  digest, the recipe and its version and sha256, the output manifest and the
+  exclusions (the recipe's, then what this run of it did not cover). Every
+  broad-extraction job has them, whoever asked. One not `auto` is offered as
+  a lead of its own, one per source digest and capability, never when the
+  same work is queued, running, sealed or recorded; a seat's close of it
+  deferred, infeasible or needs_operator declines it with the seat's why, and
+  the harness closes the lead once its extraction reached an outcome by any
+  route. No new register: the journal is already chained, sealed and
+  carried.
+- **The hold, narrow.** `preparation_pending` holds a material negative that
+  says the event did not happen, or whose coverage record is complete over
+  a source, while that source's broad extraction is planned or attempted.
+  Produced, partial, failed or declined releases it, and so does the
+  operator's acceptance; a later run does not hold again. Every other
+  material negative that reaches such a source (naming it, a member of its
+  catalogue, or outputs made from it) while it has not produced is warned,
+  `preparation_missing`, at every point warnings are delivered. A negative's
+  review offer opens with the state of each source it rests on. The finish
+  revision moves with each receipt; a run with none reads as before.
+- **The prompt** says what a broad extraction is, what to do with its lead,
+  the hold and the warning.
+- **Replay** shows each source's preparation and the questions held or
+  warned on it; `--prepare-as STATE` puts a synthetic receipt on each copy
+  for every broad extraction this checkout's census finds applies to the
+  run's own evidence (read in place). Replay counts an answer the check
+  holds on its own defect as held by the finish line. Contract fixtures
+  preparation-pending and preparation-failed-released;
+  tests/preparation.test.ts.
+- **Replayed on s5764c4 (Belka)**, values-free: two broad extractions apply,
+  the mobile pack's over the iPhone tar (run by the kickoff) and the disk
+  timeline over the laptop image (offered). With both attempted, one of its
+  eight negatives is held (question 4, complete over the tar) and seven are
+  warned (10 and 13 to 18); produced, none; failed, all eight warned.
+
 ### Added: `finish prepare`, and late items resolved in one batch
 
 Every first done of s993d40, sa2f2f2 and s5764c4 was refused on items late
