@@ -1079,7 +1079,16 @@ measure a rule change on recorded histories before paying for new runs
   "Late evidence: the reverse sweep and the delta"), each evidence
   addition's: its state, how many standing coverage records and strings it
   searched for, how many objects it read, and per question the hit objects
-  and occurrences, never a string.
+  and occurrences, never a string. Where it has the review carry rule (ADR
+  0015, "A review carries over"), the report's reviews replayed over its
+  versions in `history/`: the acks, the re-reviews of a later version and
+  how many the rule finds standing already (each recorded ack read as a
+  review of the whole report, and as the what-if in which each seat named
+  the sections of the questions it answered), the section reviews the
+  re-reviews covered against those the rule asks again, per reviewed
+  version how many sections changed and how many seats are asked again,
+  and the resolved late posts that announced their author's ack a moment
+  after it (within two minutes). Counts and seats, never a section's words.
 - **Values-free by default**: codes, ids, counts and the harness's own words,
   never a record's text (no answer, finding, lead title, reason or post).
   `--show-text` adds the harness's lines whole, which quote records; it is

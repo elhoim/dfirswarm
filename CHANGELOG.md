@@ -6,6 +6,39 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Changed: a review of the report carries over while what it covered is unchanged
+
+The c10 run sd9645b's finish took about 49 minutes over three versions of
+the report: 19 acks, 10 of them a seat's no-objection review given again to
+a later version, since an ack was bound to the whole report's digest and
+every version reset every seat's. And 15 of the 33 posts resolved as late
+items were a seat's own ack announced on the board. Now (ADR 0015, "A
+review carries over"):
+
+- **An ack binds sections.** `finish ack` takes `sections` (a heading's
+  number or words; none is the whole report) and records each section it
+  covered with its digest. The sections are the report's `## ` headings as
+  the report body reads them, numbered ones keyed by their number.
+- **Only what changed is asked again.** When the report is published again,
+  a review whose sections are unchanged carries over; one whose sections
+  changed is asked about those alone; a review of the whole report is asked
+  about a section added or removed. A `carry` event on `leads/finish.jsonl`
+  records which reviews stand and which are asked again, and on what.
+  Prepare's reply, `finish status` and the headers say whom to ask and on
+  which sections, and tell a seat whose review stands not to ack it again.
+- **What stays.** Late items keep their per-item rule, and the final
+  transaction is unchanged. An objector's later ack answers its objection
+  only when it reviews what the objection named, so an objection to one
+  section stands through its objector's review of another.
+- **The prompt** says never to ack again a review that stands, and never to
+  announce an ack on the board.
+- **Replay** estimates the rule on a run's recorded acks (`reviews`). On
+  sd9645b: the closing section changed in every version, so none of the 10
+  re-reviews, read as whole-report reviews, would have carried over, and no
+  review round is avoided; they would have been asked about 23 sections
+  instead of 80. Had each seat named its own questions' sections, 6 of the
+  10 would not have been asked.
+
 ### Fixed: a program's log goes under the job's output, and a job that failed on a refused write says so
 
 On the Belka validation run (s7827e1) the new disk-timeline recipe failed

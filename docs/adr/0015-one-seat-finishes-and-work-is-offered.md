@@ -552,6 +552,85 @@ paired runs measure that, with the finish tail's tokens and wall time
 6 resolve calls and 2 dones; the other two turned ready only at their
 done).
 
+### A review carries over
+
+Added 2026-09-29 (the limits spec, item 3 refinement; the c10 run sd9645b).
+
+The finish of sd9645b took about 49 minutes over three versions of the
+report: three prepares, 35 resolutions in four batches, and 19 acks, of
+which 10 were a seat's no-objection review given again to a later version.
+An ack was bound to the report's digest, so every version reset every
+seat's review: `finish status` and the coordinator's header showed only the
+acks of the current digest, and the coordinator invited everyone again.
+Nothing the finish rests on required those acks; they were asked for
+because a changed digest could not say what had changed. And 15 of the 33
+posts resolved as late items were their author's own ack announced on the
+board a moment after it was made, each a late post the coordinator had to
+resolve.
+
+1. **An ack binds sections.** `finish ack` takes `sections`, the report's
+   sections the reviewer covered (a heading's number, `3`, `§3` or `Q-3`,
+   or its words; none named is the whole report). The report's sections are
+   read as the report body reads a Markdown document and the answers check
+   numbers it: the text before the first `## ` heading (`preamble`), then
+   each `## ` heading with its lines, fenced blocks skipped, a numbered
+   heading keyed by its number (`reportSections`). The ack records each
+   section it covered with that section's digest (its lines, heading
+   included, less the blank lines that end it), and `whole` when none was
+   named. The fields are versioned: an ack without them is of the whole
+   report at its digest, and hashes as it did.
+2. **What stands.** For the report as it is now, each seat's acks are read
+   in order, section by section (`reviewStanding`): a no objection vouches
+   for each section it covered at the digest it had then (a review of the
+   whole report replaces what the seat vouched before), and an objection
+   withdraws the vouching of the sections it names. A section whose digest
+   is unchanged stays covered and the review carries over; a changed one is
+   asked again, and only it; a review of the whole report is asked about a
+   section added since, and about one removed (answered by a review of the
+   whole report as it is). A seat asked about section 3 acks section 3
+   alone, and its review of the rest stands.
+3. **Recorded.** When the report's current version has acks of another
+   version that were not weighed for it, a `carry` event records it before
+   the next act (the header's turn, a prepare, an ack, a done): the version
+   (`report`, `digest`), each seat whose review stands carried over with the
+   acks it rests on and the sections they cover (`kept`), and each seat
+   asked again with the sections that changed or went (`reasked`). The
+   chain shows why an ack of an earlier version still counts. One event per
+   version and what was weighed: acks of the version itself need none.
+4. **Said where it is decided.** Prepare's reply and `finish status` carry
+   the review (`reviews`: the sections, each seat's standing, the acks it
+   rests on, what changed, what no standing review covers) and the
+   invitation in words: whose reviews stand, and whom to ask again, on
+   which sections. The coordinator's header says the same; another seat's
+   header says its review stands (do not ack it again, do not post it), or
+   which sections it is asked about and the ack that answers. The prompt
+   and the tool's description say never to ack again a review that stands,
+   and never to announce an ack on the board.
+5. **What stays.** A late post or an objection keeps its per-item rule: it
+   holds the done until a typed resolution answers it, whatever section it
+   is on and whatever version follows. An objector's own later ack answers
+   its objection only when it reviews what the objection was about: the
+   whole report, or every section the objection named, so an objection to
+   section 3 stands through its objector's review of section 2 alone.
+   `finishTransaction` is unchanged: an objection racing the done still
+   refuses it. Acks, carries included, are not in the state revision.
+
+**Measured on sd9645b** (replay, values-free, `reviews`): the report's
+three versions have eight sections each; the second changed three of them,
+the third two, and the closing "conclusions and limitations" section
+changed in both. Read as they were recorded, every ack a review of the
+whole report, none of the 10 re-reviews would have carried over: that
+section changed each time, so no review round is avoided. What changes is
+what each re-review is asked for: 23 section reviews instead of the 80 the
+re-reviews covered. Had each seat named the sections of the questions it
+answered, 6 of the 10 re-reviews would not have been asked; each version
+would still have asked two seats again (the seat whose question changed,
+and a seat that answered none and so reviewed the whole report). The 15
+announced acks are what the prompt's rule removes; replay cannot show
+whether seats follow it, nor how narrowly they will name their sections:
+paired runs measure that, with the finish tail's tokens and wall time.
+
+
 ## A source-first review
 
 On Belka a wrong value was attested established by three seats, each
@@ -642,6 +721,11 @@ unsupported downgrades, with the reviewers' tokens.
 - The coordinator learns what is late from its prepare, not from a refused
   done, and answers it in one call; a done refused on late items then means
   a result, a veto or an objection really raced the finish.
+- A new version of the report asks again only the reviews of what changed:
+  a review carries over while the sections it covered are unchanged, and
+  the finish register says so. A review of the whole report still meets a
+  summary section that changes with every fold; a reviewer who names the
+  sections it checked is asked less.
 - A best candidate is said to be one, in the ledger, the check and the
   finish; a run that ends on one is examination-limited, never completed.
 - An established review of an established claim says what separates the
