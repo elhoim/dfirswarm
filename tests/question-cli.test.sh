@@ -37,12 +37,14 @@ trace_has() { # <sandbox> <pattern>
   return 1
 }
 
-# A goal with numbered questions, an answers check, and its objectives in front matter.
+# A goal with numbered questions, an answers check, and its objectives and premises in front matter.
 cat > "$TMP/goal.md" <<'EOF'
 ---
 objectives:
   - O-1: Establish how the archive came to be on this machine
   - Establish who handled it afterwards
+premises:
+  - The archive was found on the employee's laptop [scope: questions 1, 2]
 ---
 ## Goal
 
@@ -157,8 +159,38 @@ grep -q 'a directive is not signed' <<<"$out" || fail "the signed directive's re
 [[ "$(wc -l < "$SB/leads/leads.jsonl")" -eq "$leads_before" ]] || fail "a refused signed directive wrote a lead"
 pass "a directive is an unheld lead under its question, with its product and acceptance; --sign on a directive is refused"
 
+# Premises (docs/adr/0011, "Premises"): the front matter's carried into the
+# contract and seeded as a given; the operator adds, admits and withdraws,
+# each on the chain and the record; an analyst designates nothing; list and
+# show read them and are not on the operator's record.
+grep -q '^## Premises' "$SB/SWARM.md" || fail "the front matter's premises are not in the contract"
+grep -q "^- The archive was found on the employee's laptop \[scope: questions 1, 2\]" "$SB/SWARM.md" || fail "the premise is not carried verbatim, its scope kept"
+plist="$(swarm question "$RUN" premise list)" || fail "premise list failed: $plist"
+grep -q "P-1 rev 1, a given (the goal): \"The archive was found on the employee's laptop\"" <<<"$plist" || fail "the goal's premise is not P-1, a given, whole: $plist"
+grep -q 'questions Q-1, Q-2' <<<"$plist" || fail "its scope is not read from the bracket: $plist"
+audit_before="$(grep -c '"command":"question"' "$SWARM_RUNS_DIR/operator-audit.jsonl")"
+swarm question "$RUN" premise show P-1 >/dev/null || fail "premise show failed"
+[[ "$(grep -c '"command":"question"' "$SWARM_RUNS_DIR/operator-audit.jsonl")" -eq "$audit_before" ]] || fail "reading the premises was put on the operator's record"
+out="$(swarm question "$RUN" premise add --why "no words")" && fail "a premise without its words was taken: $out"
+grep -q 'BLOCKER: text is required' <<<"$out" || fail "the refusal does not say what is missing: $out"
+out="$(swarm question "$RUN" premise add --text "The mail server keeps ninety days of mail" --locator "the brief, page 3" --class supplied_assertion --why "the mail administrator says so")" || fail "premise add failed: $out"
+grep -q 'Recorded P-2 (revision 1), supplied assertion.' <<<"$out" || fail "the premise is not acknowledged: $out"
+grep '"command":"question_outcome"' "$SWARM_RUNS_DIR/operator-audit.jsonl" | grep -q '"p":"P-2"' || fail "the outcome on the operator's record does not name the premise"
+node --experimental-strip-types --no-warnings --input-type=module -e '
+  const Q = await import(process.argv[1]);
+  const r = await Q.premisePropose({ sandboxRoot: process.argv[2], agentId: "a0" }, { text: "The archive was copied once", locator: "input:archive.zip", why: "every answer counts one copy" });
+  if (!r.ok || r.p !== "P-3") { console.error(JSON.stringify(r)); process.exit(1); }
+' "$ROOT/extensions/questions.ts" "$SB" || fail "an agent could not propose a premise"
+out="$(swarm question "$RUN" premise admit P-3 --as given --as ana --why "x")" && fail "an analyst admitted a premise: $out"
+grep -q "not an analyst's" <<<"$out" || fail "the analyst's admission is refused without why: $out"
+out="$(swarm question "$RUN" premise admit P-3 --as given --why "the intake notes count one copy")" || fail "premise admit failed: $out"
+grep -q 'Recorded P-3 (revision 1), given.' <<<"$out" || fail "the admission is not said: $out"
+out="$(swarm question "$RUN" premise withdraw P-2 --why "the administrator corrected it")" || fail "premise withdraw failed: $out"
+grep -q '"ev":"premise_withdraw","p":"P-2"' "$SB/questions/questions.jsonl" || fail "the withdrawal is not on the chain"
+pass "premises: the front matter's a given, the operator's add, admission and withdrawal on the chain and the record, an analyst's refused, reading them unrecorded"
+
 help="$(swarm help question)"
-grep -q 'question <id> add --text T --why W' <<<"$help" && grep -q 'dfirswarm-question' <<<"$help" || fail "help question does not describe the command: $help"
+grep -q 'question <id> add --text T --why W' <<<"$help" && grep -q 'dfirswarm-question' <<<"$help" && grep -q 'question <id> premise add --text T' <<<"$help" || fail "help question does not describe the command: $help"
 grep -q 'question <id> add|list' <<<"$(swarm --help)" || fail "the short usage does not name question"
 pass "help question describes every act, and the short usage names it"
 

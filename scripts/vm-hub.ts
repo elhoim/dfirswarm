@@ -232,6 +232,7 @@ const RATE_LIMITS: Record<string, { bucket: string; capacity: number; perSecond:
   // The question register grows as the leads do.
   questionOpen: { bucket: "ledger", capacity: 200, perSecond: 5 },
   questionAsk: { bucket: "ledger", capacity: 200, perSecond: 5 },
+  premisePropose: { bucket: "ledger", capacity: 200, perSecond: 5 },
   attestEntry: { bucket: "ledger", capacity: 200, perSecond: 5 },
   disputeEntry: { bucket: "ledger", capacity: 200, perSecond: 5 },
   // Each done that would end the swarm runs the operator's finish line on
@@ -287,7 +288,7 @@ const QUEUE_MAX = 192;
 export const SETTLE_MS_DEFAULT = 6_000;
 
 /** Calls the hub records on the trace when they succeed; every refusal is recorded. */
-const AUDITED = new Set(["markDone", "runFinishLine", "forgeTool", "restoreFileVersion", "claimName", "threadOpen", "publishFile", "recordEntry", "attestEntry", "disputeEntry", "jobSubmit", "catalogRequest", "leadOpen", "leadClaim", "leadRelease", "leadClose", "leadLink", "leadInterpret", "leadReopen", "routeReview", "leadHandoff", "leadConfirm", "offerAnswer", "finishTurnFor", "finishAct", "questionOpen", "questionAsk", "netRequest", "netFetch"]);
+const AUDITED = new Set(["markDone", "runFinishLine", "forgeTool", "restoreFileVersion", "claimName", "threadOpen", "publishFile", "recordEntry", "attestEntry", "disputeEntry", "jobSubmit", "catalogRequest", "leadOpen", "leadClaim", "leadRelease", "leadClose", "leadLink", "leadInterpret", "leadReopen", "routeReview", "leadHandoff", "leadConfirm", "offerAnswer", "finishTurnFor", "finishAct", "questionOpen", "questionAsk", "premisePropose", "netRequest", "netFetch"]);
 
 /**
  * The job service's settings, from the kickoff: the image workers boot, how
@@ -761,6 +762,7 @@ export function boardTable(hub: {
     // The question register (extensions/questions.ts): the seat is the channel's.
     questionOpen: (who, a) => Q.questionOpen(as(who), (isObject(a[1]) ? a[1] : {}) as Q.ActInput),
     questionAsk: (who, a) => Q.questionAsk(as(who), a[1], a[2]),
+    premisePropose: (who, a) => Q.premisePropose(as(who), (isObject(a[1]) ? a[1] : {}) as { text?: string; locator?: string; why?: string; scope?: unknown }),
     questionsView: (who, a) => {
       const o = isObject(a[1]) ? a[1] : {};
       return Q.questionsView(as(who), { ...(typeof o.view === "string" ? { view: o.view } : {}), ...(typeof o.id === "string" ? { id: o.id } : {}), ...(typeof o.from === "string" ? { from: o.from } : {}), ...(typeof o.pageChars === "number" && Number.isFinite(o.pageChars) ? { pageChars: o.pageChars } : {}) });
@@ -2907,6 +2909,9 @@ function summarize(fn: string, result: unknown): Record<string, unknown> {
     case "questionAsk":
       // The question's id, revision and scope, and the register event's hash, beside the chained event.
       return { ok: result.ok, q: result.q, rev: result.rev, ...(result.scope ? { scope: result.scope } : {}), ...(result.clarify ? { clarify: result.clarify } : {}), ...(typeof result.hash === "string" ? { hash: result.hash } : {}), ...(result.duplicate ? { duplicate: true } : {}) };
+    case "premisePropose":
+      // The premise's id, revision and class, and the register event's hash, beside the chained event.
+      return { ok: result.ok, p: result.p, rev: result.rev, class: result.class, ...(typeof result.hash === "string" ? { hash: result.hash } : {}) };
     default:
       return {};
   }

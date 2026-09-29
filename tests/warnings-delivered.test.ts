@@ -147,7 +147,7 @@ test("each point delivers the warnings of its moment in the words finish status 
   // Question 2: partial, nothing to warn of until a review holds every part established.
   const L2 = await planned(r.a0, "2");
   const f2 = ok(await rec(r.a0, finding("the account was svc_backup", ["2"]))).entry;
-  const a2 = ok(await rec(r.a1, { kind: "answer", section: "question:2", value: "svc_backup", reasoning: `E-${f2.seq}`, ...A, result: "partial" }));
+  const a2 = ok(await rec(r.a1, { kind: "answer", section: "question:2", value: "svc_backup", reasoning: `E-${f2.seq}`, ...A, result: "partial", parts: [{ id: "who", part: "which account", status: "established", refs: [`E-${f2.seq}`] }, { id: "how", part: "how it was used", status: "open", open_by: L2 }] }));
   assert.equal(a2.warnings, undefined, "no review yet: nothing to say");
   assert.ok((await L.closeLead(r.a0, L2, { disposition: "resolved", ref: `E-${f2.seq}` })).ok);
   const whole = await attest(r.a3, { seq: a2.entry.seq, how: "re-read the account record", ...ESTABLISHED });

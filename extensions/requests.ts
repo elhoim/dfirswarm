@@ -3,13 +3,15 @@
  * durable id, a lifecycle and a transactional outbox (docs/adr/0014, the
  * case contract).
  *
- * A request comes from one of five places, each recorded first where its
+ * A request comes from one of six places, each recorded first where its
  * state lives: a lead closed `needs_operator` (the lead register's close
  * event, with an `ask` when it asks for evidence: kind `acquisition`), a
  * clarification an agent asked of a question (the question register's
  * `clarify_ask`), a network item the policy engine opened (the grants chain's
- * `item`), and the harness's own stop proposal when nothing yields (kind
- * `decision`, recorded here first). That record is the commit; this module
+ * `item`), a premise a standing answer contradicts on a standing finding (the
+ * ledger's answer and its citation: kind `premise`, one per premise
+ * revision, docs/adr/0011 "Premises"), and the harness's own stop proposal
+ * when nothing yields (kind `decision`, recorded here first). That record is the commit; this module
  * derives the request from it and writes it once, keyed by where it came
  * from, under its own lock. So a process that dies between the commit and
  * the request loses nothing: the next reconciliation (every header, every
@@ -47,7 +49,9 @@ import { existsSync, readFileSync } from "node:fs";
 import { mkdir, open, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import * as PM from "./premises.ts";
 import * as P from "./protocol.ts";
+import type { QuestionEvent } from "./questions.ts";
 
 // --- the files --------------------------------------------------------------------------------
 
@@ -60,7 +64,7 @@ const LOCK = "requests";
 
 // --- the vocabulary ---------------------------------------------------------------------------
 
-export const REQUEST_KINDS = ["lead", "acquisition", "clarification", "decision", "network"] as const;
+export const REQUEST_KINDS = ["lead", "acquisition", "clarification", "decision", "network", "premise"] as const;
 export type RequestKind = (typeof REQUEST_KINDS)[number];
 export const REQUEST_STATES = ["pending", "notified", "acknowledged", "answered", "declined", "withdrawn"] as const;
 export type RequestState = (typeof REQUEST_STATES)[number];
@@ -103,7 +107,7 @@ export type RequestEvent = {
   rid: string;
   // open
   kind?: RequestKind;
-  /** Where it came from, the key it is written once by: lead:L-3:<close seq>, clarification:Q-2#C-1, network:NI-1, decision:D-1. */
+  /** Where it came from, the key it is written once by: lead:L-3:<close seq>, clarification:Q-2#C-1, network:NI-1, decision:D-1, premise:P-1@r1. */
   key?: string;
   /** The request as its readers have always seen it (operator-requests.jsonl's line). */
   line?: Record<string, unknown>;
@@ -619,6 +623,11 @@ export async function reconcileRequests(sandboxRoot: string): Promise<{ opened: 
   const netEvents = jsonLines<NetEv>(grantsText);
   const run = await runId(S);
   const more = await casePolicyMoreEvidence(S);
+  // The premise disputes (docs/adr/0011, "Premises"): read only where the question chain holds a premise, so a run without one reads nothing more.
+  const premiseEvents = qEvents.some((e) => PM.isPremiseEvent(e.ev));
+  const premises = premiseEvents ? PM.foldPremises(qEvents as unknown as QuestionEvent[]) : new Map<string, PM.Premise>();
+  const ledger = premiseEvents ? await P.readLedger(S).catch(() => [] as P.LedgerEntry[]) : [];
+  const ledgerDisputes = premiseEvents ? await P.readDisputes(S).catch(() => [] as P.LedgerDispute[]) : [];
   const stopped = existsSync(join(S, P.STOPPED_REL));
   const finished = existsSync(join(S, "done", "SWARM_DONE"));
   const plan = (s: RequestsState): { append: RequestDraft[]; opened: string[]; closed: string[] } => {
@@ -732,6 +741,48 @@ export async function reconcileRequests(sandboxRoot: string): Promise<{ opened: 
       if (shut) {
         append.push({ at: shut.at, by: shut.by, ev: shut.how === "granted" ? "answered" : "declined", rid, text: `${shut.how === "granted" ? `granted${shut.grant ? ` (${shut.grant})` : ""}` : "denied"}: ${shut.why ?? ""}`, cause: "network_item" });
         closed.push(rid);
+      }
+    }
+    // --- premise disputes: a standing answer contradicts a premise revision on a standing finding ---
+    if (premiseEvents) {
+      const replaced = P.supersededBy(ledger);
+      const bySeq = new Map(ledger.map((e) => [e.seq, e]));
+      const inForce = new Set(P.disputesInForce(ledger, ledgerDisputes).map((d) => d.target));
+      const rebuttals = new Map<string, Array<{ premise: string; rev: number; answer: P.LedgerEntry; refs: string[] }>>();
+      for (const a of ledger) {
+        if (a.kind !== "answer" || !a.section?.startsWith("question:") || replaced.has(a.seq)) continue;
+        for (const c of a.premises ?? []) {
+          if (c.stance !== "contradicted") continue;
+          const refs = P.rebuttingRefs(c.refs ?? [], bySeq, replaced, inForce);
+          if (!refs.length) continue;
+          const key = PM.premiseDisputeKey(c.id, c.rev);
+          rebuttals.set(key, [...(rebuttals.get(key) ?? []), { premise: c.id, rev: c.rev, answer: a, refs }]);
+        }
+      }
+      for (const [key, list] of rebuttals) {
+        if (s.byKey.get(key) ?? append.find((d) => d.key === key)) continue;
+        const first = list[0]!;
+        const answerCmd = `swarm.sh question ${run || "<run>"} premise revise ${first.premise} --expect-rev ${first.rev} --why TEXT [--text T] [--locator L] | swarm.sh question ${run || "<run>"} premise withdraw ${first.premise} --why TEXT | swarm.sh requests ${run || "<run>"} answer R-${next + 1} "the premise stands, and why"`;
+        const line = { at: first.answer.at, run, kind: "premise", id: first.premise, rev: first.rev, by: first.answer.by, title: `${first.premise} revision ${first.rev} is disputed`, request: `${list.map((x) => `E-${x.answer.seq} (${x.answer.section}) contradicts it on ${x.refs.join(", ")}`).join("; ")}: rule on the premise. Nothing waits on it: the answers that assume it are warned`, answer: answerCmd };
+        open({ at: first.answer.at, by: first.answer.by, kind: "premise", key, line, questions: [...new Set(list.map((x) => questionId(x.answer.section!)))] });
+      }
+      // Closed when the premise moved on (revised or withdrawn), or when no standing answer contradicts it on a standing finding any more.
+      for (const req of s.requests.values()) {
+        if (req.kind !== "premise" || req.closed) continue;
+        const id = String(req.line.id ?? "");
+        const rev = Number(req.line.rev ?? 0);
+        const p = premises.get(id);
+        if (p?.withdrawn) {
+          append.push({ at: p.withdrawn.at, by: "operator", ev: "answered", rid: req.rid, text: `${id} was withdrawn: ${p.withdrawn.why}`, cause: "premise_withdrawn" });
+          closed.push(req.rid);
+        } else if (p && p.rev > rev) {
+          const r = p.revisions.find((x) => x.rev > rev)!;
+          append.push({ at: r.at, by: "operator", ev: "answered", rid: req.rid, text: `${id} was revised to revision ${r.rev}${r.why ? `: ${r.why}` : ""}`, cause: "premise_revised" });
+          closed.push(req.rid);
+        } else if (!rebuttals.has(req.key)) {
+          append.push({ by: "harness", ev: "withdrawn", rid: req.rid, why: `no standing answer contradicts ${id} revision ${rev} on a standing finding any more`, cause: "no_rebuttal" });
+          closed.push(req.rid);
+        }
       }
     }
     // --- stop proposals: the operator stopped the run, or it finished otherwise ---
@@ -885,7 +936,7 @@ export function noticeOf(r: OperatorRequest, run: string): Record<string, unknow
     run,
     ...(r.lead ? { lead: r.lead } : {}),
     ...(typeof l.q === "string" ? { question: l.q } : {}),
-    ...(typeof l.id === "string" && /^[CD]-\d+$/.test(l.id) ? { id: l.id } : {}),
+    ...(typeof l.id === "string" && /^[CDP]-\d+$/.test(l.id) ? { id: l.id } : {}),
     ...(typeof l.item === "string" ? { item: l.item } : {}),
     ...(r.questions.length ? { questions: r.questions.filter((q) => /^Q-\d+$/.test(q)) } : {}),
     ...(r.ask ? { urgency: r.ask.urgency } : {}),

@@ -39,6 +39,29 @@ export const SOURCE_FIRST = {
 /** How a critic attests an answer to a question since B2: established, with the review part by part, naming an alternative it weighed and why the evidence rules it out (an established review that names none is recorded best_candidate), and source-first: the discriminator and the derivation. */
 export const ESTABLISHED = { strength: "established", answer_review: { reproduced: "re-derived the cited finding from its sealed ref", read: "nothing beyond the cited entries", parts: [{ part: "the question as asked", established: true, why: "the cited finding shows it" }], inference: "the finding is the answer", alternatives: [{ explanation: "a copy of the record left by another process", why: "the cited record's own metadata ties it to the event, and no copy exists in the objects searched", evidence: ["E-1"] }], other_family: { checked: false, text: "no other source family holds it in this fixture" }, ...SOURCE_FIRST } } as const;
 export const A = { confidence: "medium", confidence_why: "The cited entries are direct.", alternatives_open: "none open", would_change: "a second source that disagrees" } as const;
+/**
+ * A partial answer's claim and open-part rows (docs/adr/0013, "Claim and
+ * open-part rows"): the part `finding` establishes, and the part left open
+ * by what bounds it (`openBy`: a limitation or a coverage record E-<seq>,
+ * an acquisition ask R-<n>, a route L-<n>).
+ */
+export const partialParts = (finding: number, openBy: string) => [
+  { id: "shown", part: "what the finding shows", status: "established", refs: [`E-${finding}`] },
+  { id: "open", part: "what it leaves open", status: "open", open_by: openBy },
+];
+/** A review of an answer carrying those rows, each weighed by its id: the open one held open (as the answer declares it), or held established too. */
+export function partsReview<T extends { answer_review: Record<string, unknown> }>(review: T, open: "held_open" | "held_established" = "held_open"): T {
+  return {
+    ...review,
+    answer_review: {
+      ...review.answer_review,
+      parts: [
+        { id: "shown", part: "what the finding shows", established: true, why: "the cited finding shows it" },
+        { id: "open", part: "what it leaves open", established: open === "held_established", why: open === "held_established" ? "the cited finding shows that too" : "nothing the run holds settles it" },
+      ],
+    },
+  };
+}
 export const REVIEW = {
   detection: { done: true, text: "a logon on this host writes an event the log keeps for its whole range" },
   reproduced: { done: true, text: "ran the decisive query again over the same objects: nothing" },

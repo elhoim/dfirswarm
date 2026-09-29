@@ -22,7 +22,7 @@ import * as NB from "../extensions/negative-bar.ts";
 import { checkLedgerAnswers } from "../scripts/check-answers.ts";
 import { finishGate } from "../scripts/finish-gate.ts";
 import { renderReportBodyMarkdown } from "../scripts/report-body.ts";
-import { A, coverage, F, job, ok, okq, planned, rec, refused, REVIEW, run, sha } from "./negative-bar-fixture.ts";
+import { A, coverage, F, job, ok, okq, partialParts, planned, rec, refused, REVIEW, run, sha } from "./negative-bar-fixture.ts";
 
 test("every result an answer may state, what each rests on, and how the answers check reads it", async () => {
   const { S, a0, a1 } = await run();
@@ -37,7 +37,10 @@ test("every result an answer may state, what each rests on, and how the answers 
   const established = ok(await rec(a1, { kind: "answer", section: "question:1", value: "alice", reasoning: `E-${f1.seq}`, ...A, result: "established" })).entry;
   assert.equal(established.result, "established");
   const f5 = ok(await rec(a0, { kind: "finding", ...F, value: "the tool ran as some account", source: "a log", evidence: "line 2", refs: ["job:j000001/hits.txt"], answers: ["5"] })).entry;
-  ok(await rec(a1, { kind: "answer", section: "question:5", value: "an administrator, not named", reasoning: `E-${f5.seq}`, ...A, result: "partial" }));
+  // A partial answer names what is open (docs/adr/0013, "Claim and open-part rows"): with no open part it is refused.
+  refused(await rec(a1, { kind: "answer", section: "question:5", value: "an administrator, not named", reasoning: `E-${f5.seq}`, ...A, result: "partial" }), /^record it established or name what is open: /);
+  const lim5 = ok(await rec(a0, { kind: "limitation", value: "the log does not name the account", source: "a log", evidence: "its fields", reason: "unavailable", answers: ["5"] })).entry;
+  ok(await rec(a1, { kind: "answer", section: "question:5", value: "an administrator, not named", reasoning: `E-${f5.seq}`, ...A, result: "partial", parts: partialParts(f5.seq, `E-${lim5.seq}`) }));
   // out_of_scope rests on what it cites, a limitation included.
   const lim6 = ok(await rec(a0, { kind: "limitation", value: "no network capture in the case", source: "the case's evidence", evidence: "inputs.json lists none", reason: "unavailable", answers: ["6"] })).entry;
   ok(await rec(a1, { kind: "answer", section: "question:6", value: "the case holds no network evidence", reasoning: `E-${lim6.seq}`, ...A, result: "out_of_scope" }));

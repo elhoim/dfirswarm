@@ -50,7 +50,26 @@ function person(body: Record<string, unknown>): string[] {
   return ["--as", as];
 }
 
-export const QUESTION_ACTIONS = ["add", "amend", "priority", "scope", "withdraw", "clarify_reply", "accept"] as const;
+export const QUESTION_ACTIONS = ["add", "amend", "priority", "scope", "withdraw", "clarify_reply", "accept", "premise_add", "premise_revise", "premise_admit", "premise_withdraw"] as const;
+
+const P_ID = /^P-[1-9]\d{0,5}$/;
+
+/** A premise's scope from the console: entities, time ranges and questions, each a list (premises.ts checks them again). */
+function scopeArgv(argv: string[], body: Record<string, unknown>): void {
+  const list = (key: string): string[] => {
+    const v = body[key];
+    if (v === undefined || v === null || v === "") return [];
+    const items = Array.isArray(v) ? v : String(v).split(/\s*[,;]\s*/);
+    if (items.length > 50) throw new QuestionRequestError(`${key} names at most 50`);
+    return items.map((x) => String(x ?? "").trim()).filter(Boolean);
+  };
+  for (const e of list("entities")) argv.push("--entity", e);
+  for (const t of list("times")) argv.push("--time", t);
+  for (const x of list("questions")) {
+    if (!Q_ID.test(x.toUpperCase())) throw new QuestionRequestError("a premise's questions are Q-<n>");
+    argv.push("--for-question", x.toUpperCase());
+  }
+}
 
 /** A Questions tab request as `swarm.sh question <id> <sub> …` arguments. */
 export function questionArgv(body: Record<string, unknown>): { sub: string; argv: string[] } {
@@ -121,6 +140,35 @@ export function questionArgv(body: Record<string, unknown>): { sub: string; argv
     case "clarify_reply":
       argv.push(id(body, "q", Q_ID, "Q-<n>"), id(body, "clarify", C_ID, "C-<n>"), text(body, "answer", 4000, true));
       break;
+    case "premise_add": {
+      argv.push("add", "--text", text(body, "text", 4000, true));
+      opt(argv, "--locator", text(body, "locator", 1000));
+      const cls = text(body, "class", 40);
+      if (cls && !["given", "supplied_assertion", "proposition_under_test"].includes(cls)) throw new QuestionRequestError("class is given, supplied_assertion or proposition_under_test");
+      opt(argv, "--class", cls);
+      opt(argv, "--why", text(body, "why", 2000));
+      scopeArgv(argv, body);
+      break;
+    }
+    case "premise_revise": {
+      argv.push("revise", id(body, "p", P_ID, "P-<n>"));
+      const rev = Number(body.expected_rev);
+      if (!Number.isInteger(rev) || rev < 1) throw new QuestionRequestError("expected_rev is the revision the revision was written against");
+      argv.push("--expect-rev", String(rev), "--why", text(body, "why", 2000, true));
+      opt(argv, "--text", text(body, "text", 4000));
+      opt(argv, "--locator", text(body, "locator", 1000));
+      scopeArgv(argv, body);
+      break;
+    }
+    case "premise_admit": {
+      argv.push("admit", id(body, "p", P_ID, "P-<n>"));
+      if (body.admit_as !== "given" && body.admit_as !== "supplied_assertion") throw new QuestionRequestError("admit_as is given or supplied_assertion");
+      argv.push("--as", body.admit_as, "--why", text(body, "why", 2000, true));
+      break;
+    }
+    case "premise_withdraw":
+      argv.push("withdraw", id(body, "p", P_ID, "P-<n>"), "--why", text(body, "why", 2000, true));
+      break;
     case "accept": {
       argv.push(id(body, "q", Q_ID, "Q-<n>"));
       if (body.accept_as !== "bounded" && body.accept_as !== "not_determinable") throw new QuestionRequestError("accept_as is bounded or not_determinable");
@@ -130,7 +178,7 @@ export function questionArgv(body: Record<string, unknown>): { sub: string; argv
       break;
     }
   }
-  return { sub: action === "clarify_reply" ? "clarify-reply" : action, argv: [...argv, ...person(body)] };
+  return { sub: action === "clarify_reply" ? "clarify-reply" : action.startsWith("premise_") ? "premise" : action, argv: [...argv, ...person(body)] };
 }
 
 /** "Add directive" on the Leads tab as `swarm.sh lead <id> direct …` arguments. */

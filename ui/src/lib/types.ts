@@ -501,7 +501,7 @@ export type AcquisitionAsk = { kind: "acquisition"; source: string; where: strin
 export type OperatorRequest = {
   rid: string;
   n: number;
-  kind: "lead" | "acquisition" | "clarification" | "decision" | "network";
+  kind: "lead" | "acquisition" | "clarification" | "decision" | "network" | "premise";
   key: string;
   at: string;
   by: string;
@@ -581,7 +581,20 @@ export type QuestionView = {
   accepted: { at: string; as: string; why: string; rev: number; origin: QuestionOrigin; stands: boolean } | null;
   disposition: Record<string, unknown> | null;
   work: "admitted" | "working" | "clarification_needed" | "paused" | null;
-  answer: { seq: number; at: string; inconclusive: boolean; result?: string; question_rev?: number; stale: boolean } | null;
+  answer: {
+    seq: number;
+    at: string;
+    inconclusive: boolean;
+    result?: string;
+    question_rev?: number;
+    stale: boolean;
+    /** Its claim and open-part rows, when it has them (extensions/premises.ts). */
+    parts?: AnswerPart[];
+    /** The premises it cites, when it cites any. */
+    premises?: PremiseCitation[];
+    /** Each part a review says it leaves out. */
+    omitted?: Array<{ by: string; part: string; why: string }>;
+  } | null;
   leads: Array<{ id: string; status: string; holder: string | null; disposition?: string; opened_by: string }>;
   clarifications: Array<{ id: string; at: string; by: string; what: string; to: string; answer: { at: string; by: string; text: string; origin: QuestionOrigin | null } | null }>;
   pending_clarifications: string[];
@@ -592,9 +605,37 @@ export type QuestionView = {
   opened_by: string;
 };
 
+/** A part of an answer; mirrors `AnswerPart` in `extensions/premises.ts`. */
+export type AnswerPart = { id: string; part: string; status: "established" | "open"; refs?: string[]; open_by?: string };
+export type TimeRange = { from?: string; to?: string };
+export type PremiseScope = { entities?: string[]; times?: TimeRange[]; questions?: string[] };
+/** An answer's citation of a premise; mirrors `PremiseCitation` in `extensions/premises.ts`. */
+export type PremiseCitation = { id: string; rev: number; stance: "assumed" | "supported" | "contradicted" | "unresolved"; refs?: string[]; conditional?: true; scope?: { entities?: string[]; times?: TimeRange[] } };
+/** A premise as the register shows it; mirrors `PremiseView` in `extensions/questions.ts`. */
+export type PremiseView = {
+  id: string;
+  n: number;
+  authority: "goal" | "operator" | "agent";
+  origin: QuestionOrigin | null;
+  class: "given" | "supplied_assertion" | "proposition_under_test";
+  classes: Array<{ class: string; at: string; origin: QuestionOrigin | null; why: string; seq: number }>;
+  rev: number;
+  text: string;
+  locator: string;
+  scope: PremiseScope;
+  revisions: Array<{ rev: number; text: string; locator: string; scope: PremiseScope; at: string; by: string; origin: QuestionOrigin | null; why?: string; seq: number }>;
+  why: string;
+  withdrawn: { at: string; why: string; origin: QuestionOrigin | null; seq: number } | null;
+  opened_at: string;
+  author: string;
+  cited_by: Array<{ answer: number; section: string; stance: PremiseCitation["stance"]; rev: number; conditional: boolean; refs: string[]; current: boolean }>;
+};
+
 /** The Questions tab; mirrors `QuestionsPanelView` in `scripts/ui/model.ts`. */
 export type QuestionsPanelView = {
   questions: QuestionView[];
+  /** The premise register (none on a run from before it). */
+  premises?: PremiseView[];
   objectives: Array<{ id: string; text: string; why: string; added_by: string | null }>;
   triage: Array<{ seq: number; at: string; q: string | null; lead: string | null; cause: string; entries: number[]; resolved: { at: string; decision: string; why: string; origin: QuestionOrigin | null } | null }>;
   chain: { ok: boolean; broken_at: number | null; reason: string | null; head: string | null; events: number };

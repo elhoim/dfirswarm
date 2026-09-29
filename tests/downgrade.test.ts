@@ -71,8 +71,8 @@ test("a downgrade of a partial answer resting on standing findings, citing only 
   const f2 = ok(await rec(a0, { kind: "finding", ...F, value: "the logon came from the office network", source: "a log", evidence: "line 13", refs: ["job:j000002/hits.txt"], answers: ["1"] })).entry;
   const other = ok(await rec(a0, { kind: "finding", ...F, value: "a remote tool's service entry", source: "the disk", evidence: "a registry key", refs: ["job:j000001/hits.txt"], answers: ["2"] })).entry;
   const lim = ok(await rec(a0, { kind: "limitation", value: "The account name is not in the log's retained fields", source: "the log", evidence: "the field list", reason: "unavailable", answers: ["1"] })).entry;
-  const part = ok(await rec(a1, { kind: "answer", section: "question:1", value: "A logon from the office network at 09:14; the account is not established", reasoning: `E-${f1.seq} and E-${f2.seq}; the account is open (E-${lim.seq})`, ...A, limitations: [lim.seq], result: "partial" })).entry;
-  await attested(a2, { seq: part.seq, how: "re-read lines 12 and 13", ...ESTABLISHED, answer_review: { ...ESTABLISHED.answer_review, parts: [{ part: "when and from where", established: true, why: "lines 12 and 13" }, { part: "which account", established: false, why: "not in the log", declared_open: `E-${lim.seq}` }] } });
+  const part = ok(await rec(a1, { kind: "answer", section: "question:1", value: "A logon from the office network at 09:14; the account is not established", reasoning: `E-${f1.seq} and E-${f2.seq}; the account is open (E-${lim.seq})`, ...A, limitations: [lim.seq], result: "partial", parts: [{ id: "when", part: "when and from where", status: "established", refs: [`E-${f1.seq}`, `E-${f2.seq}`] }, { id: "who", part: "which account", status: "open", open_by: `E-${lim.seq}` }] })).entry;
+  await attested(a2, { seq: part.seq, how: "re-read lines 12 and 13", ...ESTABLISHED, answer_review: { ...ESTABLISHED.answer_review, parts: [{ id: "when", part: "when and from where", established: true, why: "lines 12 and 13" }, { id: "who", part: "which account", established: false, why: "not in the log", declared_open: `E-${lim.seq}` }] } });
   // The downgrader's own coverage record for the open part.
   const abs = ok(await rec(a3, { kind: "absence", value: "an account name for the logon", source: "the log", evidence: "a search", refs: ["job:j000002/hits.txt"], answers: ["1"] })).entry;
   const cov = ok(await rec(a3, coverage("1", ["input:logs/a.log"], [`E-${abs.seq}`]))).entry;
@@ -84,7 +84,7 @@ test("a downgrade of a partial answer resting on standing findings, citing only 
   assert.match(reason, new RegExp(`E-${cov.seq} is a coverage record: it says what a search covered, not that a finding is wrong`));
   assert.match(reason, new RegExp(`E-${other.seq} is a finding that contradicts nothing the earlier answer rests on`));
   assert.match(reason, new RegExp(`#${part.seq} rests on E-${f1.seq}, E-${f2.seq}, recorded for question:1, which still stand: not corrected, under no dispute, contradicted by nothing\\. Recording question:1 not determinable would discard them\\. Answer partial instead \\(record it with supersedes=${part.seq}, result partial\\)`));
-  assert.match(reason, /name the parts still open with their coverage/);
+  assert.match(reason, /name the parts still open, each with what bounds it \(parts \[\{id, part, status: "open", open_by: E-<seq> of its limitation or coverage record, R-<n> or L-<n>\}\]/);
   // A dispute on one finding bears against the chain; the other still stands.
   assert.ok((await P.disputeEntry(a3, { seq: f1.seq, why: "line 12 is a logoff, not a logon", refs: ["job:j000002/hits.txt"] })).ok);
   const r2 = await rec(a3, { ...down, downgrade: { evidence: [`E-${f1.seq}`, `E-${cov.seq}`], why: "line 12 is a logoff" } });

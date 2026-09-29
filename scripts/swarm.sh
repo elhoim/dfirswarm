@@ -4603,7 +4603,9 @@ cmd_start() {
   # say it is to be run until every question is answered. And objectives:
   # a list the goal's `## Objectives` section carries from then on, where
   # the question register reads them (a goal may name objectives and no
-  # questions: its first agents propose the questions).
+  # questions: its first agents propose the questions). And premises: what
+  # the case takes as given, carried into a `## Premises` section the same
+  # way; each is a given of the premise register (P-n).
   # The case policy, from the flags, the goal's metadata block (read before
   # it is stripped) and the preset: refused here when it contradicts itself,
   # never guessed. `network: open` is --no-netguard.
@@ -4679,6 +4681,19 @@ if m:
                 objectives.append(item.strip().strip("\"'"))
     if objectives and not re.search(r"^#{2,3}[ \t]*Objectives[ \t]*$", body, re.M | re.I):
         body = body.rstrip("\n") + "\n\n## Objectives\n\n" + "".join("- " + o + "\n" for o in objectives)
+    # The premises of the goal, what the case takes as given, carried the same way
+    # into a Premises section, verbatim with any trailing scope kept, where
+    # the question register seeds each as a given P-n.
+    premises = []
+    pblock = re.search(r"^premises:[ \t]*(.*?)\r?\n((?:[ \t]+-[^\n]*\n?)*)", m.group(0), re.M)
+    if pblock:
+        if pblock.group(1).strip():
+            premises.append(pblock.group(1).strip())
+        for item in re.findall(r"^[ \t]+-[ \t]*(.*?)[ \t]*\r?$", pblock.group(2), re.M):
+            if item.strip():
+                premises.append(item.strip())
+    if premises and not re.search(r"^#{2,3}[ \t]*Premises[ \t]*$", body, re.M | re.I):
+        body = body.rstrip("\n") + "\n\n## Premises\n\n" + "".join("- " + p + "\n" for p in premises)
     with open(path, "w", encoding="utf-8") as f:
         f.write(body)
 print(json.dumps(out))
@@ -6490,7 +6505,7 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
 
   # The tools each Pi is given, known before a prepared run returns: a
   # prepared VM run writes them into vm-spec.json.
-  local PI_TOOLS="read,bash,edit,write,post,inbox,wait,claim_file,release_file,claims,list_team,budget,file_history,file_restore,file_diff,publish_file,thread_open,thread_join,inputs,name,record,ledger,attest,dispute,lead_open,lead_claim,lead_release,lead_close,lead_link,leads,lead_reopen,route_review,lead_handoff,lead_confirm,offer,finish,question_open,questions,question_ask,done"
+  local PI_TOOLS="read,bash,edit,write,post,inbox,wait,claim_file,release_file,claims,list_team,budget,file_history,file_restore,file_diff,publish_file,thread_open,thread_join,inputs,name,record,ledger,attest,dispute,lead_open,lead_claim,lead_release,lead_close,lead_link,leads,lead_reopen,route_review,lead_handoff,lead_confirm,offer,finish,question_open,questions,question_ask,premise_propose,done"
   # Pi's --tools is an allowlist by name, so a tool the extension registers is
   # invisible until it is named here. The skill tool exists only when the run
   # carries packs.
@@ -9626,13 +9641,22 @@ cmd_lead() {
 #   question <id> withdraw Q-n --why W
 #   question <id> clarify-reply Q-n C-n TEXT
 #   question <id> accept Q-n --as bounded|not_determinable --why W --expect-rev N
+#   question <id> premise add --text T [--locator L] [--class given|supplied_assertion|proposition_under_test]
+#                     [--entity E]... [--time FROM..TO]... [--for-question Q-n]... [--why W]
+#   question <id> premise revise P-n --expect-rev N --why W [--text T] [--locator L] [scope flags | --no-scope]
+#   question <id> premise admit P-n --as given|supplied_assertion --why W
+#   question <id> premise withdraw P-n --why W
+#   question <id> premise list [--json] | show P-n [--json]
+# The premises (extensions/premises.ts) ride the same chain: what the case
+# takes as given, each with its words verbatim, where they stand, its scope
+# and revisions; an agent's proposal is under test until it is admitted.
 # Every act takes [--as ID] (an enrolled person, a claim) and [--sign] (signed
 # with that person's enrolled key; the secret on the terminal or --secret-fd N).
 # The act is acknowledged only once the chain holds it, and the outcome is a
 # second line on the operator's record, beside the attempt, naming the event.
 cmd_question() {
   local id="${1:-}" sub="${2:-}"
-  [[ -n "$id" && -n "$sub" ]] || { echo "BLOCKER: question needs <id> and add, list, show, amend, priority, scope, withdraw, clarify-reply, accept or verify." >&2; exit 2; }
+  [[ -n "$id" && -n "$sub" ]] || { echo "BLOCKER: question needs <id> and add, list, show, amend, priority, scope, withdraw, clarify-reply, accept, premise or verify." >&2; exit 2; }
   shift 2
   ensure_registry
   local rec sandbox
@@ -9643,6 +9667,26 @@ cmd_question() {
   case "$sub" in
     list|show|verify)
       SWARM_RUNS_DIR="$RUNS_DIR" node --experimental-strip-types --no-warnings "$cli" "$sub" "$sandbox" "$@" ;;
+    premise)
+      local op="${1:-}"
+      case "$op" in
+        list|show) SWARM_RUNS_DIR="$RUNS_DIR" node --experimental-strip-types --no-warnings "$cli" premise "$sandbox" "$@"; return ;;
+        add|revise|admit|withdraw) ;;
+        *) echo "BLOCKER: question premise takes add, revise, admit, withdraw, list or show (got ${op:-nothing})." >&2; exit 2 ;;
+      esac
+      local out status=0 admission=()
+      while IFS= read -r a; do admission+=("$a"); done < <(question_admission_args "$sandbox")
+      out="$(SWARM_RUNS_DIR="$RUNS_DIR" node --experimental-strip-types --no-warnings "$cli" premise "$sandbox" --via "${SWARM_OPERATOR_VIA:-cli}" ${admission[@]+"${admission[@]}"} "$@")" || status=$?
+      OPERATOR_AUDIT_DETAIL="$(jq -c '{premise: {ok: (.ok != false), p: (.p // null), rev: (.rev // null), class: (.class // null), seq: (.seq // null), hash: (.hash // null), reason: (.reason // null)}}' <<<"$out" 2>/dev/null || echo null)" \
+        operator_audit question_outcome "$id" premise "$op"
+      if [[ "$status" -ne 0 ]]; then
+        echo "BLOCKER: $(jq -r '.reason // "the act was not recorded"' <<<"$out" 2>/dev/null || printf '%s' "$out")" >&2
+        exit 2
+      fi
+      operator_trace "$sandbox" question "$id" premise "$@"
+      jq -r '"Recorded \(.p // "the premise")\(if .rev then " (revision \(.rev))" else "" end)\(if .class then ", \(.class | gsub("_"; " "))" else "" end)." + (if .signed then " Signed (event \(.signed.seq))." else "" end)' <<<"$out"
+      printf '%s\n' "$out"
+      ;;
     add|amend|priority|scope|withdraw|clarify-reply|accept)
       local out status=0 admission=()
       while IFS= read -r a; do admission+=("$a"); done < <(question_admission_args "$sandbox")
@@ -9667,7 +9711,7 @@ cmd_question() {
         + ((.delivered // []) | if type == "array" and length > 0 then " Delivered: " + (map("\(.q) revision \(.rev)" + (if .post then " (post \(.post.thread)#\(.post.id))" else "" end) + (if .offer_to then ", offered to \(.offer_to)\(if .first then " first" else "" end)" else ", offered to the first idle seat" end)) | join("; ")) + "." else "" end)' <<<"$out"
       printf '%s\n' "$out"
       ;;
-    *) echo "BLOCKER: question takes add, list, show, amend, priority, scope, withdraw, clarify-reply, accept or verify (got $sub)." >&2; exit 2 ;;
+    *) echo "BLOCKER: question takes add, list, show, amend, priority, scope, withdraw, clarify-reply, accept, premise or verify (got $sub)." >&2; exit 2 ;;
   esac
 }
 
@@ -9680,7 +9724,7 @@ cmd_question() {
 #   requests <id> list [--open] [--json] | show R-n [--json]
 #   requests <id> ack R-n [--why W]
 #   requests <id> answer R-n TEXT              a lead's: its note (reopened); a clarification's: its
-#                                              reply; a stop proposal's: on the request
+#                                              reply; a stop proposal's and a premise dispute's: on the request
 #   requests <id> decline|withdraw R-n --why W
 #   requests <id> authorise|collecting|unavailable R-n [--why W]   an acquisition's stages
 # Each act takes --as ID; it is on the trace and the operator's record, and
@@ -11650,9 +11694,20 @@ EOF
   question <id> accept Q-n --as bounded|not_determinable --why W --expect-rev N
                                                accept a question's limits (refused while a lead on it is open);
                                                the run ends examination-limited
+  question <id> premise add --text T [--locator L] [--class given|supplied_assertion|proposition_under_test]
+                    [--entity E]... [--time FROM..TO]... [--for-question Q-n]... [--why W]
+                                               a premise the case takes (a given unless --class says otherwise):
+                                               its words verbatim, where they stand, what it is about
+  question <id> premise revise P-n --expect-rev N --why W [--text T] [--locator L] [scope flags | --no-scope]
+                                               a new revision; answers citing an earlier one are warned
+  question <id> premise admit P-n --as given|supplied_assertion --why W
+                                               admit an agent's proposal (a proposition under test until then)
+  question <id> premise withdraw P-n --why W   answers citing it are warned; a dispute on it is closed
+  question <id> premise list [--json] | show P-n [--json]
+                                               every premise whole, and the answers that cite it
   question <id> verify [--allowed-signers FILE] [--ca FILE]
                                                every signed act, its signature checked
-Every act takes --as ID (an enrolled person, a claim; on accept, a second --as) and --sign (signed with
+Every act takes --as ID (an enrolled person, a claim; on accept and premise admit, a second --as) and --sign (signed with
 that person's enrolled key, namespace dfirswarm-question; the passphrase or PIN on the terminal, or
 --secret-fd N). Without --as the act is this OS account's on this host, not enrolled, with the
 operator's authority. An examiner's question is in scope by authority (--objective new expands the
@@ -11711,7 +11766,8 @@ EOF
   requests <id> show R-n [--json]                 one request whole, with its history
   requests <id> ack R-n [--why W]                 acknowledged: you have seen it
   requests <id> answer R-n TEXT                   a lead's answer (its note: the lead reopens), a clarification's
-                                                  reply, or a stop proposal's answer
+                                                  reply, a stop proposal's answer, or your ruling on a premise
+                                                  dispute (or revise or withdraw the premise: question premise)
   requests <id> decline R-n --why W               declined; an acquisition declined is an evidence gap, never a
                                                   finding that the fact is absent
   requests <id> withdraw R-n --why W              withdrawn (moot, asked twice)
@@ -11769,7 +11825,7 @@ main() {
     # The operator's answer to a lead, and a reopen, change the run; a list reads it.
     lead) [[ "${2:-}" == list ]] || operator_audit "$cmd" "$@" ;;
     # A question act changes the run (its outcome is a second line, from cmd_question); list, show and verify read it.
-    question) [[ "${2:-}" == list || "${2:-}" == show || "${2:-}" == verify ]] || operator_audit "$cmd" "$@" ;;
+    question) [[ "${2:-}" == list || "${2:-}" == show || "${2:-}" == verify || ( "${2:-}" == premise && ( "${3:-}" == list || "${3:-}" == show ) ) ]] || operator_audit "$cmd" "$@" ;;
     # A network act (grant, deny, revoke) changes the run; list reads it.
     net) [[ "${2:-}" == list ]] || operator_audit "$cmd" "$@" ;;
     # An act on an operator request, and added evidence or material, change the run; list and show read it.

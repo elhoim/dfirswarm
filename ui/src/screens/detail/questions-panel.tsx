@@ -11,6 +11,13 @@
  * only then acknowledged; the acting person this console session chose goes
  * with it as `--as`, a claim (signing an act is the command line's). A
  * question's words are shown whole; nothing is cut.
+ *
+ * The premises (extensions/premises.ts) come after the add form: what the
+ * case takes as given, each whole with its class, revisions, scope and the
+ * answers that cite it, and the operator's acts on them (add, revise, admit
+ * an agent's proposal, withdraw), run as `swarm.sh question <id> premise`.
+ * Each answer shows its claim and open-part rows, the premises it cites,
+ * and a part a review says it leaves out.
  */
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { AlertTriangle, HelpCircle, ListChecks, MessageSquare, PenLine, PlusCircle } from "lucide-react";
@@ -24,7 +31,7 @@ import { EmptyState, ErrorState, InlineNote, LoadingState } from "@/components/s
 import { api, ApiError } from "@/lib/api";
 import { clock } from "@/lib/format";
 import { useLive, useResource } from "@/lib/live";
-import type { QuestionOrigin, QuestionView, QuestionsPanelView, SwarmView } from "@/lib/types";
+import type { PremiseView, QuestionOrigin, QuestionView, QuestionsPanelView, SwarmView } from "@/lib/types";
 import { acceptPayload, amendPayload, baseMoved, formBase, questionGroups, type FormBase } from "@/lib/question-forms";
 import { cn } from "@/lib/utils";
 
@@ -223,6 +230,28 @@ function QuestionCard({ q, sigs, act, busy, children }: { q: QuestionView; sigs:
             "none yet"
           )}
         </Row>
+        {q.answer?.parts?.length ? (
+          <Row label="Parts">
+            <ul className="m-0 list-none space-y-0.5 p-0">
+              {q.answer.parts.map((p) => (
+                <li key={p.id}>
+                  <code className="font-mono">{p.id}</code> {p.part}:{" "}
+                  <span className={p.status === "established" ? "text-moss-ink" : "text-saffron-ink"}>{p.status === "established" ? `established on ${(p.refs ?? []).join(", ")}` : `open, bounded by ${p.open_by ?? "?"}${p.refs?.length ? ` (so far ${p.refs.join(", ")})` : ""}`}</span>
+                </li>
+              ))}
+            </ul>
+          </Row>
+        ) : null}
+        {q.answer?.premises?.length ? (
+          <Row label="Premises">
+            {q.answer.premises.map((c) => `${c.stance === "assumed" && c.conditional ? `assuming ${c.id}` : `${c.id} ${c.stance}`} (revision ${c.rev})${c.refs?.length ? ` on ${c.refs.join(", ")}` : ""}`).join("; ")}
+          </Row>
+        ) : null}
+        {q.answer?.omitted?.length ? (
+          <Row label="Left out">
+            <span className="text-brick-ink">{q.answer.omitted.map((x) => `"${x.part}" (${x.by}: ${x.why})`).join("; ")}</span>
+          </Row>
+        ) : null}
         {q.leads.length ? <Row label="Leads">{q.leads.map((l) => `${l.id} ${l.status}${l.holder ? ` (${l.holder})` : ""}${l.disposition ? ` ${l.disposition}` : ""}`).join(", ")}</Row> : null}
         {q.offers.length ? <Row label="Offered">{q.offers.map((o) => `${o.to}${o.first ? " first" : ""} at ${clock(o.at)}${o.accepted ? " (accepted)" : o.declined ? ` (declined: ${o.declined.why})` : ""}`).join(", ")}</Row> : null}
         {q.accepted ? <Row label="Accepted">{`${q.accepted.as.replace("_", " ")} by ${q.accepted.origin.name ?? q.accepted.origin.person ?? "?"}${q.accepted.stands ? "" : " (no longer stands: amended since)"}: ${q.accepted.why}`}</Row> : null}
@@ -278,6 +307,137 @@ function QuestionCard({ q, sigs, act, busy, children }: { q: QuestionView; sigs:
       {children}
       <CardActions q={q} act={act} busy={busy} />
     </li>
+  );
+}
+
+const CLASS_TONE: Record<PremiseView["class"], Tone> = { given: "moss", supplied_assertion: "kelp", proposition_under_test: "saffron" };
+const CLASS_LABEL: Record<PremiseView["class"], string> = { given: "given", supplied_assertion: "supplied assertion", proposition_under_test: "under test" };
+
+/** A list typed in one field: comma or semicolon separated. */
+const listOf = (v: string) => v.split(/\s*[,;]\s*/).map((x) => x.trim()).filter(Boolean);
+
+/** One premise whole, with the operator's acts on it: revise, admit a proposal, withdraw. */
+function PremiseCard({ p, act, busy }: { p: PremiseView; act: Act; busy: boolean }) {
+  const [open, setOpen] = useState<null | "revise" | "admit" | "withdraw">(null);
+  const [text, setText] = useState(p.text);
+  const [why, setWhy] = useState("");
+  const [admitAs, setAdmitAs] = useState("given");
+  const submit = async (payload: Record<string, unknown> & { action: string }) => {
+    await act(payload);
+    setOpen(null);
+    setWhy("");
+  };
+  const scope = [p.scope.entities?.length ? `entities ${p.scope.entities.join(", ")}` : null, p.scope.times?.length ? `times ${p.scope.times.map((t) => `${t.from ?? "…"} to ${t.to ?? "…"}`).join("; ")}` : null, p.scope.questions?.length ? `questions ${p.scope.questions.join(", ")}` : null].filter(Boolean).join("; ");
+  return (
+    <li className="card space-y-1.5 px-3 py-2.5 text-[12.5px]">
+      <div className="flex flex-wrap items-center gap-2">
+        <code className="font-mono text-[12px] font-semibold text-ink">{p.id}</code>
+        <span className="font-mono text-[11px] text-ink-3">rev {p.rev}</span>
+        <Chip tone={CLASS_TONE[p.class]}>{CLASS_LABEL[p.class]}</Chip>
+        <Chip tone="slate">{p.authority === "goal" ? "the goal" : p.authority === "agent" ? "an agent's proposal" : "the operator's"}</Chip>
+        {p.withdrawn ? <Chip tone="slate">withdrawn</Chip> : null}
+      </div>
+      <p className="m-0 whitespace-pre-wrap text-[13px] text-ink">{p.text}</p>
+      <dl className="m-0 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-ink-2">
+        <Row label="Where">{p.locator || "not said"}</Row>
+        <Row label="By">
+          {p.author}, {clock(p.opened_at)}
+        </Row>
+        <Row label="Scope">{scope || "unbounded"}</Row>
+        {p.revisions.length > 1 ? <Row label="Revisions">{p.revisions.map((r) => `rev ${r.rev}${r.why && r.rev > 1 ? ` (${r.why})` : ""}: ${r.text}`).join(" · ")}</Row> : null}
+        <Row label="Cited by">{p.cited_by.length ? p.cited_by.map((c) => `E-${c.answer} (${c.section}) ${c.conditional ? "assuming it" : c.stance}${c.refs.length ? ` on ${c.refs.join(", ")}` : ""}${c.current ? "" : ` at revision ${c.rev}`}`).join("; ") : "no standing answer"}</Row>
+        {p.withdrawn ? <Row label="Withdrawn">{`${clock(p.withdrawn.at)}: ${p.withdrawn.why}`}</Row> : null}
+      </dl>
+      {p.withdrawn ? null : (
+        <div className="space-y-2">
+          <div className="flex flex-wrap gap-1.5">
+            {(["revise", ...(p.class === "proposition_under_test" ? (["admit"] as const) : []), "withdraw"] as const).map((k) => (
+              <Button key={k} size="sm" variant={open === k ? "default" : "secondary"} onClick={() => setOpen(open === k ? null : k)}>
+                {k === "revise" ? "Revise" : k === "admit" ? "Admit" : "Withdraw"}
+              </Button>
+            ))}
+          </div>
+          {open === "revise" ? (
+            <div className="grid gap-1.5">
+              <Label className="text-[12px] text-ink-2">A new revision against revision {p.rev}: answers citing revision {p.rev} are warned, never rewritten</Label>
+              <Textarea value={text} onChange={(e) => setText(e.target.value)} />
+              <Input value={why} onChange={(e) => setWhy(e.target.value)} placeholder="why it is revised" />
+              <Button size="sm" disabled={busy || !why.trim() || !text.trim() || text.trim() === p.text} onClick={() => void submit({ action: "premise_revise", p: p.id, expected_rev: p.rev, text, why })}>
+                Record revision
+              </Button>
+            </div>
+          ) : null}
+          {open === "admit" ? (
+            <div className="flex flex-wrap items-center gap-2">
+              <Select className="max-w-[240px]" value={admitAs} onChange={setAdmitAs} aria-label="Admit as" options={[{ value: "given", label: "As a given", hint: "not proved again; never an open part" }, { value: "supplied_assertion", label: "As a supplied assertion", hint: "assumed as asserted, said so in the report" }]} />
+              <Input className="h-8 max-w-[420px]" value={why} onChange={(e) => setWhy(e.target.value)} placeholder="why" />
+              <Button size="sm" disabled={busy || !why.trim()} onClick={() => void submit({ action: "premise_admit", p: p.id, admit_as: admitAs, why })}>
+                Admit
+              </Button>
+            </div>
+          ) : null}
+          {open === "withdraw" ? (
+            <div className="flex flex-wrap items-center gap-2">
+              <Input className="h-8 max-w-[420px]" value={why} onChange={(e) => setWhy(e.target.value)} placeholder="why it no longer holds" />
+              <Button size="sm" variant="secondary" disabled={busy || !why.trim()} onClick={() => void submit({ action: "premise_withdraw", p: p.id, why })}>
+                Withdraw
+              </Button>
+            </div>
+          ) : null}
+        </div>
+      )}
+    </li>
+  );
+}
+
+/** The premises: each whole, and the form that designates one (a given unless the class says otherwise). */
+function PremisesSection({ premises, act, busy }: { premises: PremiseView[]; act: Act; busy: boolean }) {
+  const [text, setText] = useState("");
+  const [locator, setLocator] = useState("");
+  const [cls, setCls] = useState("given");
+  const [entities, setEntities] = useState("");
+  const [times, setTimes] = useState("");
+  const [qs, setQs] = useState("");
+  const [why, setWhy] = useState("");
+  const submit = async () => {
+    await act({ action: "premise_add", text, ...(locator.trim() ? { locator } : {}), class: cls, ...(entities.trim() ? { entities: listOf(entities) } : {}), ...(times.trim() ? { times: times.split(/\s*;\s*/).filter(Boolean) } : {}), ...(qs.trim() ? { questions: listOf(qs) } : {}), ...(why.trim() ? { why } : {}) });
+    setText("");
+    setLocator("");
+    setEntities("");
+    setTimes("");
+    setQs("");
+    setWhy("");
+  };
+  return (
+    <section className="space-y-2" aria-label="Premises">
+      <h3 className="label-caps m-0 flex items-center gap-1.5">
+        <ListChecks className="size-3.5" /> Premises ({premises.length})
+      </h3>
+      <p className="m-0 text-[12px] text-ink-3">
+        What the case takes as given. A given is not proved again and is never an open part; a proposition under test (an agent's proposal) is assumed only conditionally until you admit it. Two answers that assume and contradict one revision hold the run until they are reconciled on the record; nothing forces either side.
+      </p>
+      {premises.length ? (
+        <ul className="m-0 list-none space-y-2 p-0">
+          {premises.map((p) => (
+            <PremiseCard key={p.id} p={p} act={act} busy={busy} />
+          ))}
+        </ul>
+      ) : null}
+      <div className="card space-y-2 px-3 py-3">
+        <Textarea value={text} onChange={(e) => setText(e.target.value)} placeholder="the premise, verbatim from where it stands" aria-label="Premise" />
+        <div className="grid gap-2 sm:grid-cols-2">
+          <Input value={locator} onChange={(e) => setLocator(e.target.value)} placeholder="where it stands (the brief's page and line, a ref)" aria-label="Where it stands" />
+          <Select value={cls} onChange={setCls} aria-label="Class" options={[{ value: "given", label: "A given" }, { value: "supplied_assertion", label: "A supplied assertion" }, { value: "proposition_under_test", label: "A proposition under test" }]} />
+          <Input value={entities} onChange={(e) => setEntities(e.target.value)} placeholder="entities it is about (comma separated, optional)" aria-label="Entities" />
+          <Input value={times} onChange={(e) => setTimes(e.target.value)} placeholder="time ranges FROM..TO (semicolon separated, optional)" aria-label="Times" />
+          <Input value={qs} onChange={(e) => setQs(e.target.value)} placeholder="questions it applies to, Q-n (optional: all)" aria-label="Questions" />
+          <Input value={why} onChange={(e) => setWhy(e.target.value)} placeholder="why (optional)" aria-label="Why" />
+        </div>
+        <Button size="sm" disabled={busy || !text.trim()} onClick={() => void submit()}>
+          Record premise
+        </Button>
+      </div>
+    </section>
   );
 }
 
@@ -410,7 +570,7 @@ export function QuestionsPanel({ view, version }: { view: SwarmView; version: nu
     if (!job || job.status === "running") return null;
     const last = job.stdout.trim().split("\n").at(-1) ?? "";
     try {
-      return JSON.parse(last) as { ok?: boolean; q?: string; rev?: number; scope?: string; scope_why?: string; delivered?: Array<{ q: string; offer_to: string | null; first: boolean }>; reason?: string };
+      return JSON.parse(last) as { ok?: boolean; q?: string; p?: string; rev?: number; scope?: string; scope_why?: string; delivered?: Array<{ q: string; offer_to: string | null; first: boolean }>; reason?: string };
     } catch {
       return null;
     }
@@ -444,6 +604,12 @@ export function QuestionsPanel({ view, version }: { view: SwarmView; version: nu
       {error ? <InlineNote tone="danger">{error}</InlineNote> : null}
       {job ? (
         <div className="space-y-1">
+          {ack?.ok && ack.p ? (
+            <InlineNote tone="ok">
+              {ack.p}
+              {ack.rev ? ` revision ${ack.rev}` : ""} is on the chain.
+            </InlineNote>
+          ) : null}
           {ack?.ok && ack.q ? (
             <InlineNote tone="ok">
               {ack.q}
@@ -510,6 +676,8 @@ export function QuestionsPanel({ view, version }: { view: SwarmView; version: nu
       ) : null}
 
       <AddForm data={d} view={view} act={act} busy={busy} />
+
+      <PremisesSection premises={d.premises ?? []} act={act} busy={busy} />
 
       {d.objectives.length ? (
         <section className="space-y-1">

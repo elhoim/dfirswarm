@@ -24,7 +24,7 @@ import { finishGate, NEGATIVE_BAR_CODES } from "../scripts/finish-gate.ts";
 import { admitMaterial } from "../scripts/material.ts";
 import { measureRun } from "../scripts/metrics.ts";
 import { renderReportBodyMarkdown } from "../scripts/report-body.ts";
-import { A, coverage, ESTABLISHED, F, ok, okq, planned, rec, refused, REVIEW, run } from "./negative-bar-fixture.ts";
+import { A, coverage, ESTABLISHED, F, ok, okq, partialParts, partsReview, planned, rec, refused, REVIEW, run } from "./negative-bar-fixture.ts";
 
 const ROOT = join(fileURLToPath(import.meta.url), "..", "..");
 /** An answer an established review may hold so: its author's confidence high (a medium caps a review at best_candidate). */
@@ -66,8 +66,9 @@ test("new evidence stales every standing negative, not-determinable and partial 
   const ans1 = ok(await rec(a1, { kind: "answer", section: "question:1", value: "alice", reasoning: `E-${f1.seq}`, ...HIGH, result: "established" })).entry;
   await attested(a2, { seq: ans1.seq, how: "read E-" + f1.seq + " again", ...ESTABLISHED });
   const f5 = ok(await rec(a0, { kind: "finding", ...F, value: "the tool ran as an administrator", source: "a log", evidence: "line 2", refs: ["job:j000001/hits.txt"], answers: ["5"] })).entry;
-  const ans5 = ok(await rec(a1, { kind: "answer", section: "question:5", value: "an administrator, not named", reasoning: `E-${f5.seq}`, ...HIGH, result: "partial" })).entry;
-  await attested(a2, { seq: ans5.seq, how: "read E-" + f5.seq + " again", ...ESTABLISHED });
+  const lim5 = ok(await rec(a0, { kind: "limitation", value: "The log does not name the administrator account", source: "a log", evidence: "its fields", reason: "unavailable", answers: ["5"] })).entry;
+  const ans5 = ok(await rec(a1, { kind: "answer", section: "question:5", value: "an administrator, not named", reasoning: `E-${f5.seq}`, ...HIGH, result: "partial", parts: partialParts(f5.seq, `E-${lim5.seq}`) })).entry;
+  await attested(a2, { seq: ans5.seq, how: "read E-" + f5.seq + " again", ...partsReview(ESTABLISHED) });
   const sections = ["1", "2", "4", "5"];
   const before = await checkLedgerAnswers(S, sections, ["2"]);
   assert.deepEqual(before.defects.filter((d) => d.code === "evidence_stale"), [], "no evidence was added yet");
@@ -103,7 +104,7 @@ test("new evidence stales every standing negative, not-determinable and partial 
   assert.ok(NEGATIVE_BAR_CODES.has("evidence_stale"), "an acceptance excuses it only when made after the evidence came (acceptanceExcuses; tested below)");
 
   // Recorded again without examining it: still stale.
-  const ans5b = ok(await rec(a1, { kind: "answer", section: "question:5", value: "an administrator, still not named", reasoning: `E-${f5.seq}`, ...HIGH, result: "partial", supersedes: ans5.seq })).entry;
+  const ans5b = ok(await rec(a1, { kind: "answer", section: "question:5", value: "an administrator, still not named", reasoning: `E-${f5.seq}`, ...HIGH, result: "partial", parts: partialParts(f5.seq, `E-${lim5.seq}`), supersedes: ans5.seq })).entry;
   r = await checkLedgerAnswers(S, sections, ["2"]);
   assert.equal(defectsOf(r, "question:5", "evidence_stale").length, 1, `E-${ans5b.seq} does not cite the new evidence or coverage at the new revision`);
 

@@ -49,6 +49,7 @@ import { dirname, isAbsolute, join, normalize } from "node:path";
 import * as L from "./leads.ts";
 import * as NB from "./negative-bar.ts";
 import * as O from "./offers.ts";
+import * as PM from "./premises.ts";
 import * as P from "./protocol.ts";
 
 // --- the files --------------------------------------------------------------------------------
@@ -177,7 +178,8 @@ export type QuestionEventKind =
   | "offer_accept"
   | "triage"
   | "continue"
-  | "evidence";
+  | "evidence"
+  | PM.PremiseEventKind;
 
 /**
  * Who acted, as the record keeps it. A person is an enrolled id (`--as ID`,
@@ -232,6 +234,8 @@ export type QuestionAct = {
   as?: AcceptAs;
   /** A goal question's own id when it is not its number ("bonus"). */
   section?: string;
+  /** A premise act (premises.ts): the premise acted on, its words, locator, class, scope, or what an admission makes it. */
+  premise?: PM.PremiseAct;
 };
 
 export type ActSignature = {
@@ -253,6 +257,8 @@ export type QuestionEvent = {
   by: string;
   ev: QuestionEventKind;
   q?: string;
+  /** A premise event's premise (P-<n>): premises ride this chain (premises.ts). */
+  p?: string;
   /** The text revision the question stands at after this event. */
   rev?: number;
   act?: QuestionAct;
@@ -266,6 +272,8 @@ export type QuestionEvent = {
   source?: string | null;
   questions?: string[];
   objectives?: string[];
+  /** seed: the goal's premises, when it names any. */
+  premises?: string[];
   // deliver, offer
   post?: { thread: string; id: number } | null;
   to?: string;
@@ -360,6 +368,8 @@ export type TriageItem = { seq: number; at: string; q: string | null; lead: stri
 export type QuestionsState = {
   events: QuestionEvent[];
   questions: Map<string, Question>;
+  /** The premise register, folded from the same chain (premises.ts): none on a chain from before it. */
+  premises: Map<string, PM.Premise>;
   objectives: Map<string, Objective>;
   triage: TriageItem[];
   seeded: boolean;
@@ -449,6 +459,52 @@ export function goalObjectives(text: string): Array<{ id: string; text: string }
       }
       id ??= `O-${out.length + 1}`;
       if (!out.some((x) => x.id === id)) out.push({ id, text: t.trim() });
+    }
+  }
+  return out;
+}
+
+/**
+ * The goal's premises: a `## Premises` section (the kickoff writes a goal's
+ * front-matter `premises:` there too), one bullet or numbered line each,
+ * verbatim. A bullet may end with its scope in brackets, `[scope: questions
+ * 1, 2; entities laptop-1; times 2024-01-01..2024-06-30]`; a bullet that
+ * says none is about everything the goal asks. Each is a given: the operator
+ * wrote the goal (docs/adr/0011, "Premises").
+ */
+export function goalPremises(text: string): Array<{ text: string; item: number; scope: PM.PremiseScope; bad?: string }> {
+  const out: Array<{ text: string; item: number; scope: PM.PremiseScope; bad?: string }> = [];
+  const sections = [...text.matchAll(/^#{2,3}[ \t]*Premises[ \t]*$([\s\S]*?)(?=^#{1,6}[ \t]|(?![\s\S]))/gim)].map((m) => m[1]);
+  for (const body of sections) {
+    const items: string[] = [];
+    let open = false;
+    for (const line of body.split("\n")) {
+      const item = /^\s*(?:[-*]|\d+[.)])\s+(.*\S)\s*$/.exec(line);
+      if (item) {
+        items.push(item[1]);
+        open = true;
+      } else if (open && line.trim() && !/^\s*#/.test(line)) items[items.length - 1] += ` ${line.trim()}`;
+      else open = false;
+    }
+    for (const raw of items) {
+      let t = raw.trim();
+      let scope: PM.PremiseScope = {};
+      let bad: string | undefined;
+      const m = /\s*\[scope:\s*([^\]]*)\]\s*$/i.exec(t);
+      if (m) {
+        t = t.slice(0, m.index).trim();
+        const said: Record<string, string> = {};
+        for (const part of m[1].split(";")) {
+          const kv = /^\s*(questions|entities|times)\s+(.*?)\s*$/i.exec(part);
+          if (kv) said[kv[1].toLowerCase()] = kv[2];
+          else if (part.trim()) bad = `"${part.trim()}" is not questions, entities or times`;
+        }
+        const checked = PM.checkScope({ ...(said.questions ? { questions: said.questions } : {}), ...(said.entities ? { entities: said.entities } : {}), ...(said.times ? { times: said.times.split(/\s*,\s*/) } : {}) });
+        if (checked.ok) scope = checked.scope;
+        else bad = checked.reason;
+      }
+      t = t.replace(/^["'\u201c](.*)["'\u201d]$/, "$1").trim();
+      if (t) out.push({ text: t, item: out.length + 1, scope, ...(bad ? { bad } : {}) });
     }
   }
   return out;
@@ -547,7 +603,23 @@ export async function seedDrafts(sandboxRoot: string, goal?: L.GoalQuestions): P
       decided: { scope: "in_scope", scope_why: "a question of the goal", section, leading_forms: leadingForms(text), ...(completenessWords(text) ? { completeness: true } : {}) },
     });
   }
-  drafts.push({ at, by: "system", ev: "seed", source: doc?.source ?? null, questions: ids, objectives: objectives.map((o) => o.id) });
+  // The goal's premises, each a given (P-<n> in order): present only when the goal has a Premises section, so a goal without one seeds as it always did.
+  const premises = doc ? goalPremises(doc.text) : [];
+  for (const [i, g] of premises.entries()) {
+    const scope = { ...g.scope, ...(g.scope.questions ? { questions: g.scope.questions.filter((q) => ids.includes(q)) } : {}) };
+    if (scope.questions && !scope.questions.length) delete scope.questions;
+    drafts.push({
+      at,
+      by: "system",
+      ev: "premise_add",
+      p: `P-${i + 1}`,
+      rev: 1,
+      act: { premise: { text: g.text, ...(Object.keys(scope).length ? { scope } : {}) }, why: "a premise of the goal" },
+      origin: { kind: "goal", via: "goal" },
+      decided: { class: "given", authority: "goal", locator: `the goal (${doc?.source === "registry" ? "the registry's copy" : "SWARM.md"}), Premises, item ${g.item}`, ...(g.bad ? { scope_ignored: g.bad } : {}) },
+    });
+  }
+  drafts.push({ at, by: "system", ev: "seed", source: doc?.source ?? null, questions: ids, objectives: objectives.map((o) => o.id), ...(premises.length ? { premises: premises.map((_, i) => `P-${i + 1}`) } : {}) });
   return drafts;
 }
 
@@ -787,7 +859,7 @@ export function foldQuestions(events: QuestionEvent[], chain: QuestionsState["ch
       if (sq) sq.signed.push({ act_seq: e.seq, sign_seq: e.seq, person: e.origin?.person ?? "?", fingerprint: e.origin?.fingerprint ?? "?" });
     }
   }
-  return { events, questions, objectives, triage, seeded, chain };
+  return { events, questions, objectives, triage, seeded, chain, premises: PM.foldPremises(events) };
 }
 
 // --- the snapshot -------------------------------------------------------------------------------
@@ -892,7 +964,7 @@ export type QuestionView = {
    * inconclusive), and for a negative whether another seat reviewed it and
    * what coverage it rests on (the negative bar).
    */
-  answer: { seq: number; at: string; inconclusive: boolean; result?: string; question_rev: number; stale: boolean; stale_why?: "revision" | "evidence"; negative?: { reviewed: boolean; by: string[]; coverage: Array<{ seq: number; coverage: string | null }> } } | null;
+  answer: { seq: number; at: string; inconclusive: boolean; result?: string; question_rev: number; stale: boolean; stale_why?: "revision" | "evidence"; negative?: { reviewed: boolean; by: string[]; coverage: Array<{ seq: number; coverage: string | null }> }; parts?: PM.AnswerPart[]; premises?: PM.PremiseCitation[]; omitted?: Array<{ by: string; part: string; why: string }> } | null;
   /** Evidence that arrived for it after the kickoff (the acquisition lane). */
   evidence: Question["evidence"];
   leads: Array<{ id: string; status: L.LeadStatus; holder: string | null; disposition?: string; opened_by: string }>;
@@ -966,6 +1038,13 @@ export function viewQuestion(q: Question, ctx: ViewContext): QuestionView {
         stale: (a.question_rev ?? 1) !== q.rev || q.evidence.some((x) => a.seq <= x.ledger_seq),
         ...((a.question_rev ?? 1) !== q.rev ? { stale_why: "revision" as const } : q.evidence.some((x) => a.seq <= x.ledger_seq) ? { stale_why: "evidence" as const } : {}),
         ...(negative ? { negative } : {}),
+        // Its claim and open-part rows and the premises it cites (premises.ts), and each part a review says it leaves out: present only when it has them.
+        ...(a.parts?.length ? { parts: a.parts } : {}),
+        ...(a.premises?.length ? { premises: a.premises } : {}),
+        ...((): { omitted?: Array<{ by: string; part: string; why: string }> } => {
+          const omitted = P.answerReviews(a, ctx.attestations ?? []).flatMap((x) => (x.answer_review?.parts ?? []).filter((p) => p.missing).map((p) => ({ by: x.by, part: p.part, why: p.why })));
+          return omitted.length ? { omitted } : {};
+        })(),
       }
     : null;
   return {
@@ -1018,6 +1097,29 @@ export function viewQuestion(q: Question, ctx: ViewContext): QuestionView {
 export function questionViews(ctx: ViewContext): QuestionView[] {
   const rank = (q: Question) => (HUMAN_ORIGINS.has(q.origin.kind) ? 0 : q.origin.kind === "goal" ? 1 : 2);
   return [...ctx.questions.state.questions.values()].sort((a, b) => rank(a) - rank(b) || a.n - b.n).map((q) => viewQuestion(q, ctx));
+}
+
+/**
+ * A premise as the views show it: the register's record of it, who
+ * designated it in words, and every standing answer that cites it, with its
+ * stance, the revision it cites (current or not) and the entries it names.
+ */
+export type PremiseView = PM.Premise & { author: string; cited_by: Array<{ answer: number; section: string; stance: PM.PremiseStance; rev: number; conditional: boolean; refs: string[]; current: boolean }> };
+
+export function premiseViews(ctx: Pick<ViewContext, "questions" | "ledger">): PremiseView[] {
+  const standing = ctx.ledger.entries.filter((e) => e.kind === "answer" && e.section?.startsWith("question:") && !ctx.ledger.replaced.has(e.seq) && e.premises?.length);
+  return [...ctx.questions.state.premises.values()]
+    .sort((a, b) => a.n - b.n)
+    .map((p) => ({
+      ...p,
+      author: p.authority === "goal" ? "the goal" : originWords(p.origin),
+      cited_by: standing.flatMap((a) => (a.premises ?? []).filter((c) => c.id === p.id).map((c) => ({ answer: a.seq, section: a.section as string, stance: c.stance, rev: c.rev, conditional: c.conditional === true, refs: c.refs ?? [], current: c.rev === p.rev }))),
+    }));
+}
+
+/** A premise in one line: its id, revision, class, author, words whole, locator and scope. */
+export function premiseLine(p: PM.Premise, author: string): string {
+  return `${p.id} rev ${p.rev}, ${PM.classWords(p.class)} (${author}): "${p.text}"${p.locator ? ` (at ${p.locator})` : ""}${Object.keys(p.scope).length ? ` [${PM.scopeWords(p.scope)}]` : ""}${p.withdrawn ? `; WITHDRAWN: ${p.withdrawn.why}` : ""}`;
 }
 
 /** The register with the ledger and the leads beside it, read now. */
@@ -1083,12 +1185,15 @@ function asked(q: Question, o: QuestionOrigin): boolean {
 export function refusalFor(ev: ActKind, o: QuestionOrigin, q: Question | null): string | null {
   const who = originWords(o);
   if (o.kind === "agent") {
-    if (ev === "open" || ev === "clarify_ask") return null;
+    if (ev === "open" || ev === "clarify_ask" || ev === "premise_propose") return null;
+    if (PM.isPremiseEvent(ev)) return "an agent proposes a premise (premise_propose), which stays a proposition under test; adding, revising, admitting and withdrawing a premise are the operator's (swarm.sh question <run> premise …)";
     return `an agent does not ${ev.replace("_", " ")} a question: amending, re-prioritising, re-scoping, withdrawing and accepting are the asker's and the operator's`;
   }
   if (ev === "clarify_ask") return "a clarification is asked by an agent working the question (question_ask); a person answers it with clarify-reply";
+  if (ev === "premise_propose") return "premise_propose is an agent's; on the operator's side a premise is added (premise add), and a proposition under test is admitted (premise admit)";
   if (ev === "open") return null;
   if (authority(o)) return null;
+  if (PM.isPremiseEvent(ev)) return `${who}: designating the case's premises (adding, revising, admitting, withdrawing) is the examiner's or the operator's, not an ${o.role ?? o.kind}'s; ask it as a question instead`;
   const role = o.role ?? o.kind;
   if (ev === "scope" || ev === "accept") return `${who}: ${ev === "scope" ? "admitting to or excluding from the case" : "accepting a question's limits"} is the examiner's or the operator's, not an ${role}'s`;
   if (!q) return null;
@@ -1114,6 +1219,12 @@ function oneOf<T extends readonly string[]>(name: string, raw: unknown, allowed:
   if (!text) return { ok: true };
   if (!(allowed as readonly string[]).includes(text)) return { ok: false, reason: `${name} is one of ${allowed.join(", ")} (got ${JSON.stringify(raw)})` };
   return { ok: true, value: text as T[number] };
+}
+
+function pRef(raw: unknown): { ok: true; id: string } | Fail {
+  const m = /^P-?([1-9]\d{0,5})$/i.exec(String(raw ?? "").trim());
+  if (!m) return { ok: false, reason: `a premise is named P-<n> (got ${JSON.stringify(raw)})` };
+  return { ok: true, id: `P-${Number(m[1])}` };
 }
 
 function qRef(raw: unknown): { ok: true; id: string } | Fail {
@@ -1172,8 +1283,8 @@ async function checkAttachments(sandboxRoot: string, raw: unknown): Promise<{ ok
 
 // --- acts ---------------------------------------------------------------------------------------
 
-export type ActKind = "open" | "amend" | "priority" | "scope" | "withdraw" | "clarify_ask" | "clarify_answer" | "accept";
-export const ACT_KINDS: readonly ActKind[] = ["open", "amend", "priority", "scope", "withdraw", "clarify_ask", "clarify_answer", "accept"];
+export type ActKind = "open" | "amend" | "priority" | "scope" | "withdraw" | "clarify_ask" | "clarify_answer" | "accept" | PM.PremiseEventKind;
+export const ACT_KINDS: readonly ActKind[] = ["open", "amend", "priority", "scope", "withdraw", "clarify_ask", "clarify_answer", "accept", ...PM.PREMISE_EVENTS];
 
 export type ActInput = {
   q?: string;
@@ -1201,7 +1312,16 @@ export type ActInput = {
   clarify?: string;
   what?: string;
   answer?: string;
+  /** An acceptance's (bounded, not_determinable), or a premise admission's (given, supplied_assertion). */
   as?: string;
+  /** A premise act's: the premise acted on (P-<n>). */
+  p?: string;
+  /** A premise's: where its words stand (the brief's page and line, a ref, E-<seq>, the goal). */
+  locator?: string;
+  /** A premise the operator adds: given (the default), supplied_assertion or proposition_under_test. */
+  class?: string;
+  /** A premise's scope: {entities, times, questions}. */
+  premise_scope?: unknown;
 };
 
 /** An act checked and put in its final words, ready to be signed and committed. */
@@ -1221,7 +1341,7 @@ export async function prepareAct(sandboxRoot: string, actor: Actor, ev: ActKind,
   const by = actor.kind === "agent" ? actor.agent : "operator";
   const act: QuestionAct = {};
   let q: string | undefined;
-  if (ev !== "open") {
+  if (ev !== "open" && !PM.isPremiseEvent(ev)) {
     const r = input.lead && ev === "scope" ? null : qRef(input.q);
     if (r && !r.ok) return r;
     if (r) q = r.id;
@@ -1413,6 +1533,59 @@ export async function prepareAct(sandboxRoot: string, actor: Actor, ev: ActKind,
       sensitive.push(["why", act.why]);
       break;
     }
+    case "premise_add":
+    case "premise_propose": {
+      const agent = ev === "premise_propose";
+      const text = bounded("text", input.text, PM.PREMISE_TEXT_MAX, true);
+      if (!text.ok) return { ok: false, reason: `${text.reason}: the premise's words, verbatim from where they stand` };
+      const locator = bounded("locator", input.locator, PM.PREMISE_LOCATOR_MAX, agent);
+      if (!locator.ok) return { ok: false, reason: agent ? `${locator.reason}: where its words stand (E-<seq> of the entry you read it in, a ref such as input:<path> with the page or line, or the goal's words)` : locator.reason };
+      const why = bounded("why", input.why, QUESTION_WHY_MAX, agent);
+      if (!why.ok) return { ok: false, reason: agent ? `${why.reason}: why the case's answers rest on it` : why.reason };
+      const cls = oneOf("class", input.class, PM.PREMISE_CLASSES);
+      if (!cls.ok) return cls;
+      if (agent && cls.value && cls.value !== "proposition_under_test") return { ok: false, reason: "an agent's premise is a proposition under test until the operator admits it (swarm.sh question <run> premise admit P-<n> --as given|supplied_assertion): propose it without a class" };
+      const scope = PM.checkScope(input.premise_scope);
+      if (!scope.ok) return scope;
+      const premise: PM.PremiseAct = { text: text.value, ...(locator.value ? { locator: locator.value } : {}), ...(!agent && cls.value ? { class: cls.value } : {}), ...(Object.keys(scope.scope).length ? { scope: scope.scope } : {}) };
+      Object.assign(act, { premise, ...(why.value ? { why: why.value } : {}) });
+      sensitive.push(["text", text.value], ["locator", locator.value], ["why", why.value], ...(scope.scope.entities ?? []).map((x): [string, string] => ["an entity of its scope", x]));
+      break;
+    }
+    case "premise_revise":
+    case "premise_admit":
+    case "premise_withdraw": {
+      const id = pRef(input.p);
+      if (!id.ok) return id;
+      const why = bounded("why", input.why, QUESTION_WHY_MAX, true);
+      if (!why.ok) return { ok: false, reason: `${why.reason}: why the premise ${ev === "premise_revise" ? "is revised" : ev === "premise_admit" ? "is admitted" : "is withdrawn"}` };
+      const rev = expectedRev();
+      if (!rev.ok) return rev;
+      if (ev === "premise_revise") {
+        if (rev.value === undefined) return { ok: false, reason: "a revision names the revision it revises (expected_rev, --expect-rev): one against a revision somebody else has since replaced is refused, not merged" };
+        const text = bounded("text", input.text, PM.PREMISE_TEXT_MAX, false);
+        if (!text.ok) return text;
+        const locator = bounded("locator", input.locator, PM.PREMISE_LOCATOR_MAX, false);
+        if (!locator.ok) return locator;
+        const scope = input.premise_scope !== undefined ? PM.checkScope(input.premise_scope) : null;
+        if (scope && !scope.ok) return scope;
+        if (!text.value && !locator.value && !scope) return { ok: false, reason: "a revision changes something: the premise's words (text), where they stand (locator), or its scope" };
+        const premise: PM.PremiseAct = { id: id.id, ...(text.value ? { text: text.value } : {}), ...(locator.value ? { locator: locator.value } : {}), ...(scope?.ok ? { scope: scope.scope } : {}) };
+        Object.assign(act, { premise, why: why.value, expected_rev: rev.value });
+        sensitive.push(["text", text.value], ["locator", locator.value], ...((scope?.ok ? scope.scope.entities : undefined) ?? []).map((x): [string, string] => ["an entity of its scope", x]));
+      } else if (ev === "premise_admit") {
+        const as = oneOf("as", input.as, PM.ADMIT_AS);
+        if (!as.ok) return as;
+        if (!as.value) return { ok: false, reason: "an admission says what the premise becomes: given (not proved again) or supplied_assertion (assumed as the one who asserted it said it)" };
+        const premise: PM.PremiseAct = { id: id.id, as: as.value };
+        Object.assign(act, { premise, why: why.value, ...(rev.value ? { expected_rev: rev.value } : {}) });
+      } else {
+        const premise: PM.PremiseAct = { id: id.id };
+        Object.assign(act, { premise, why: why.value, ...(rev.value ? { expected_rev: rev.value } : {}) });
+      }
+      sensitive.push(["why", why.value]);
+      break;
+    }
   }
   const leak = await sensitiveRefusal(sandboxRoot, sensitive);
   if (leak) return { ok: false, reason: leak };
@@ -1426,7 +1599,8 @@ export async function prepareAct(sandboxRoot: string, actor: Actor, ev: ActKind,
  * carries the signature over these bytes and names the act's hash.
  */
 export function statementOf(p: PreparedAct, run: string): string {
-  return JSON.stringify(P.canonicalValue({ namespace: QUESTION_NAMESPACE, run, ev: p.ev, target: p.ev === "open" ? null : (p.q ?? p.act.lead ?? null), act: p.act, origin: p.origin }));
+  const opens = p.ev === "open" || p.ev === "premise_add" || p.ev === "premise_propose";
+  return JSON.stringify(P.canonicalValue({ namespace: QUESTION_NAMESPACE, run, ev: p.ev, target: opens ? null : (p.q ?? p.act.premise?.id ?? p.act.lead ?? null), act: p.act, origin: p.origin }));
 }
 
 /** The statement an act on the chain was signed as, rebuilt from the chain. */
@@ -1437,6 +1611,9 @@ export function statementOfEvent(e: QuestionEvent, run: string): string {
 export type ActResult = {
   ok: true;
   q?: string;
+  /** A premise act's premise (P-<n>), and its class after the act. */
+  p?: string;
+  class?: PM.PremiseClass;
   rev?: number;
   seq: number;
   hash: string;
@@ -1496,6 +1673,7 @@ async function commitUnderLock(sandboxRoot: string, p: PreparedAct, snap: Questi
   const fail = (reason: string): Commit => ({ append: [], result: { ok: false, reason } });
   const o = p.origin;
   const who = originWords(o);
+  if (PM.isPremiseEvent(p.ev)) return commitPremise(p, snap);
   const q = p.q ? snap.state.questions.get(p.q) ?? null : null;
   if (p.ev !== "open" && !(p.ev === "scope" && p.act.lead)) {
     if (!q) return fail(`${p.q} is not in the question register`);
@@ -1665,6 +1843,7 @@ async function commitUnderLock(sandboxRoot: string, p: PreparedAct, snap: Questi
         sections: [`question:${q!.section}`],
         bar: () => ({ material: q!.materiality === "material", existence: q!.expects === "existence", completeness: q!.completeness }),
         sweeps: await SW.readSweeps(sandboxRoot).catch(() => []),
+        ...(vc.questions.state.premises.size ? { premises: vc.questions.state.premises } : {}),
       });
       const stillHeld = gate.defects.filter((d) => d.section === `question:${q!.section}` && !P.acceptanceExcuses(d, ledgerSeq)).map((d) => `${d.code}: ${d.what}. Fix: ${d.fix}`);
       return {
@@ -1672,6 +1851,61 @@ async function commitUnderLock(sandboxRoot: string, p: PreparedAct, snap: Questi
         result: { ok: true, q: q!.id, rev: q!.rev, still_held: stillHeld },
       };
     }
+  }
+}
+
+/**
+ * A premise act under the lock (premises.ts): an add or a proposal is a new
+ * P-<n> (a given unless the operator says otherwise; an agent's, a
+ * proposition under test), never twice with the same words; a revision is
+ * against the revision it read and changes something; an admission changes
+ * a premise's class; a withdrawal needs its why. The questions a scope names
+ * are in the register. Nothing else is changed: answers citing an earlier
+ * revision are warned of, not rewritten.
+ */
+function commitPremise(p: PreparedAct, snap: QuestionsSnapshot): Commit {
+  const fail = (reason: string): Commit => ({ append: [], result: { ok: false, reason } });
+  const o = p.origin;
+  const who = originWords(o);
+  const base = { by: p.by, origin: o };
+  const reg = snap.state.premises;
+  const pa = p.act.premise ?? {};
+  const unknownQs = (pa.scope?.questions ?? []).filter((id) => !snap.state.questions.has(id));
+  if (unknownQs.length) return fail(`scope.questions names ${unknownQs.join(", ")}, not in the question register (questions list names them)`);
+  const norm = (t: string) => t.replace(/\s+/g, " ").trim().toLowerCase();
+  if (p.ev === "premise_add" || p.ev === "premise_propose") {
+    const twin = [...reg.values()].find((x) => !x.withdrawn && norm(x.text) === norm(pa.text ?? ""));
+    if (twin) return fail(`${twin.id} says this already, word for word (${PM.premiseWords(twin)}): ${p.ev === "premise_propose" ? `cite it in an answer (premises [{id: "${twin.id}", rev: ${twin.rev}, stance}])` : `revise it (premise revise ${twin.id} --expect-rev ${twin.rev}) or admit it`}`);
+    const id = `P-${Math.max(0, ...[...reg.values()].map((x) => x.n)) + 1}`;
+    const cls: PM.PremiseClass = p.ev === "premise_propose" ? "proposition_under_test" : (pa.class ?? "given");
+    const authority: PM.PremiseAuthority = p.ev === "premise_propose" ? "agent" : "operator";
+    const locator = pa.locator ?? `stated by ${who} on the question register`;
+    return { append: [{ ...base, ev: p.ev, p: id, rev: 1, act: p.act, decided: { class: cls, authority, locator } }], result: { ok: true, p: id, rev: 1, class: cls } };
+  }
+  const x = pa.id ? reg.get(pa.id) : undefined;
+  if (!x) return fail(`${pa.id ?? "the premise"} is not in the premise register (questions premise list names them)`);
+  if (x.withdrawn) return fail(`${x.id} was withdrawn by ${originWords(x.withdrawn.origin)} at ${x.withdrawn.at} (${x.withdrawn.why}); it takes no further act: add a new premise`);
+  if (p.act.expected_rev !== undefined && p.act.expected_rev !== x.rev) {
+    const last = x.revisions.at(-1);
+    return fail(`${x.id} is at revision ${x.rev}${last ? ` (by ${originWords(last.origin)} at ${last.at})` : ""}, not ${p.act.expected_rev}: read it again (questions premise show ${x.id}) and act against revision ${x.rev}`);
+  }
+  switch (p.ev) {
+    case "premise_revise": {
+      const same = (a: unknown, b: unknown) => JSON.stringify(P.canonicalValue(a ?? {})) === JSON.stringify(P.canonicalValue(b ?? {}));
+      const changes = (pa.text !== undefined && pa.text !== x.text) || (pa.locator !== undefined && pa.locator !== x.locator) || (pa.scope !== undefined && !same(pa.scope, x.scope));
+      if (!changes) return fail(`revision ${x.rev} of ${x.id} says this already`);
+      if (pa.text !== undefined) {
+        const twin = [...reg.values()].find((y) => y.id !== x.id && !y.withdrawn && norm(y.text) === norm(pa.text ?? ""));
+        if (twin) return fail(`${twin.id} says this already, word for word: revise toward what is different, or withdraw one`);
+      }
+      return { append: [{ ...base, ev: "premise_revise", p: x.id, rev: x.rev + 1, act: p.act, decided: { revision: true, from: x.rev } }], result: { ok: true, p: x.id, rev: x.rev + 1, class: x.class } };
+    }
+    case "premise_admit": {
+      if (x.class === pa.as) return fail(`${x.id} is ${PM.classWords(x.class)} already`);
+      return { append: [{ ...base, ev: "premise_admit", p: x.id, rev: x.rev, act: p.act, decided: { from: x.class, class: pa.as } }], result: { ok: true, p: x.id, rev: x.rev, class: pa.as } };
+    }
+    default:
+      return { append: [{ ...base, ev: "premise_withdraw", p: x.id, rev: x.rev, act: p.act }], result: { ok: true, p: x.id, rev: x.rev, class: x.class } };
   }
 }
 
@@ -2334,7 +2568,34 @@ export async function markTold(sandboxRoot: string, agent: string, snap: Questio
   await rename(tmp, path);
 }
 
-export type QuestionNotice = { kind: "offer" | "clarified" | "amended" | "withdrawn" | "urgent" | "admitted" | "excluded" | "triage"; q: string; text: string; wakes: boolean; offer?: number };
+export type QuestionNotice = { kind: "offer" | "clarified" | "amended" | "withdrawn" | "urgent" | "admitted" | "excluded" | "triage" | "premise"; q: string; text: string; wakes: boolean; offer?: number };
+
+/**
+ * What every seat is told of a premise event, once (premises.ts): a premise
+ * added or proposed, revised, admitted or withdrawn, whole, with how an
+ * answer cites it. Never a wake: it changes how an answer is recorded, not
+ * what a seat does next.
+ */
+function premiseNotice(e: QuestionEvent, p: PM.Premise): QuestionNotice | null {
+  const who = e.origin?.kind === "goal" ? "the goal" : originWords(e.origin);
+  const cite = `premises [{id: "${p.id}", rev: ${e.rev ?? p.rev}, stance: "assumed" | "supported" | "contradicted" | "unresolved"}]`;
+  const rev = p.revisions.find((r) => r.rev === e.rev) ?? p.revisions.at(-1)!;
+  const words = `"${rev.text}"${rev.locator ? ` (at ${rev.locator})` : ""}${Object.keys(rev.scope).length ? ` [${PM.scopeWords(rev.scope)}]` : ""}`;
+  switch (e.ev) {
+    case "premise_add":
+      return { kind: "premise", q: p.id, wakes: false, text: `PREMISE ${p.id} (revision 1), ${PM.classWords(String(e.decided?.class ?? p.class) as PM.PremiseClass)}, from ${who}: ${words}. ${String(e.decided?.class ?? "given") === "proposition_under_test" ? "It is under test: examine it like any claim; assume it only conditionally (conditional: true)." : "It is not proved again, and never an open part."} An answer that rests on it or bears on it cites it: ${cite}, a contradiction or support naming the finding in refs.` };
+    case "premise_propose":
+      return { kind: "premise", q: p.id, wakes: false, text: `PREMISE ${p.id} (revision 1) proposed by ${who}: ${words}. A proposition under test until the operator admits it: an answer cites it supported or contradicted on the finding that shows it (refs), unresolved, or assumed only conditionally (conditional: true, "assuming ${p.id}").` };
+    case "premise_revise":
+      return { kind: "premise", q: p.id, wakes: false, text: `PREMISE ${p.id} was revised to revision ${e.rev} by ${who}${e.act?.why ? ` (${e.act.why})` : ""}: ${words}. An answer citing an earlier revision is warned (premise_revised): record it again against revision ${e.rev} if it rests on it.` };
+    case "premise_admit":
+      return { kind: "premise", q: p.id, wakes: false, text: `PREMISE ${p.id} was admitted as ${PM.classWords(String(e.act?.premise?.as ?? p.class) as PM.PremiseClass)} by ${who}${e.act?.why ? ` (${e.act.why})` : ""}: ${words}. An answer may now assume it without a condition: ${cite}.` };
+    case "premise_withdraw":
+      return { kind: "premise", q: p.id, wakes: false, text: `PREMISE ${p.id} was withdrawn by ${who}: ${e.act?.why ?? ""}. An answer citing it is warned (premise_withdrawn): say what it rests on instead.` };
+    default:
+      return null;
+  }
+}
 
 /** The leads an agent holds, open, and the questions they serve. */
 function heldSections(agent: string, ctx: ViewContext): Set<string> {
@@ -2358,6 +2619,12 @@ export function questionNotices(agent: string, told: Told, ctx: ViewContext): Qu
   const mineQs = [...mine].map((s) => ctx.questions.bySection.get(s)).filter((x): x is Question => Boolean(x));
   for (const e of qs.events) {
     if (e.seq <= told.seq) continue;
+    if (PM.isPremiseEvent(e.ev)) {
+      const p = e.p ? qs.premises.get(e.p) : undefined;
+      const n = p ? premiseNotice(e, p) : null;
+      if (n) out.push(n);
+      continue;
+    }
     const q = e.q ? qs.questions.get(e.q) : undefined;
     if (!q) continue;
     switch (e.ev) {
@@ -2464,6 +2731,9 @@ export function questionsDigest(agent: string, ctx: ViewContext, told: Told): Qu
     lines.push(`Waiting for the operator's triage, not the case's work yet (${items.length}): ${items.join("; ")}.`);
   }
   if (pending.length) lines.push(`Clarifications not answered yet (the rest of the work goes on): ${pending.map(({ v, c }) => `${c.id} on ${v.id} asked by ${c.by}: ${c.what}`).join("; ")}.`);
+  // The premises the case takes, whole (premises.ts): an answer cites those it rests on or bears on; a given is never an open part.
+  const premises = premiseViews(ctx).filter((p) => !p.withdrawn);
+  if (premises.length) lines.push(`Premises (${premises.length}; an answer cites each it rests on or bears on: premises [{id, rev, stance: assumed | supported | contradicted | unresolved, refs?, conditional?}]; a given is not proved again and is never an open part; one under test is assumed only conditionally): ${premises.map((p) => premiseLine(p, p.author)).join("; ")}.`);
   const objectives = [...ctx.questions.state.objectives.values()];
   if (!live.length && objectives.length) {
     lines.push(
@@ -2476,7 +2746,7 @@ export function questionsDigest(agent: string, ctx: ViewContext, told: Told): Qu
 
 // --- the views an agent asks for ----------------------------------------------------------------
 
-export const QUESTIONS_VIEWS = ["list", "show", "triage", "objectives", "mine"] as const;
+export const QUESTIONS_VIEWS = ["list", "show", "triage", "objectives", "mine", "premises"] as const;
 
 /** A question as a list shows it: whole words, no history. */
 function brief(v: QuestionView): Record<string, unknown> {
@@ -2514,6 +2784,14 @@ export async function questionsView(ctx: P.SwarmContext, o: { view?: string; id?
   const view = String(o.view ?? (o.id ? "show" : "list")).trim();
   if (!(QUESTIONS_VIEWS as readonly string[]).includes(view)) return { ok: false, reason: `view is one of ${QUESTIONS_VIEWS.join(", ")}` };
   const chain = vc.questions.state.chain.ok ? "intact" : `BROKEN at line ${vc.questions.state.chain.broken_at} (${vc.questions.state.chain.reason})`;
+  if (view === "premises") return { ok: true, view, premises: premiseViews(vc), note: "Each premise whole, with its revisions, class, scope and the standing answers that cite it. A given is not proved again and never an open part; a proposition under test is assumed only conditionally until the operator admits it.", chain };
+  if (view === "show" && /^P-?\d+$/i.test(String(o.id ?? "").trim())) {
+    const id = `P-${Number(/(\d+)$/.exec(String(o.id))![1])}`;
+    const p = premiseViews(vc).find((x) => x.id === id);
+    if (!p) return { ok: false, reason: `${id} is not in the premise register (questions view premises lists them)` };
+    const history = vc.questions.state.events.filter((e) => e.p === id).map(({ prev: _p, hash: _h, v: _v, signature, ...e }) => ({ ...e, ...(signature ? { signature: { person: signature.person, fingerprint: signature.fingerprint, format: signature.format } } : {}) }));
+    return { ok: true, view, premise: p, history, chain };
+  }
   if (view === "show") {
     const q = findQuestion(vc.questions, o.id);
     if (!q) return { ok: false, reason: `${JSON.stringify(o.id ?? "")} is not in the question register (a question is Q-<n>)` };
@@ -2555,6 +2833,15 @@ export async function questionsView(ctx: P.SwarmContext, o: { view?: string; id?
 export async function questionOpen(ctx: P.SwarmContext, input: ActInput): Promise<ActResult | Fail> {
   const { expected_rev: _r, scope: _s, lead: _l, clarify: _c, what: _w, answer: _a, as: _as, priority: _p, reason: _re, suggested_to: _st, deadline: _d, ...rest } = input ?? {};
   return act(ctx.sandboxRoot, { kind: "agent", agent: ctx.agentId }, "open", rest);
+}
+
+/**
+ * An agent proposes a premise (premise_propose): what several answers would
+ * rest on, verbatim from where it stands, recorded as a proposition under
+ * test until the operator admits it (premises.ts).
+ */
+export async function premisePropose(ctx: P.SwarmContext, input: { text?: string; locator?: string; why?: string; scope?: unknown }): Promise<ActResult | Fail> {
+  return act(ctx.sandboxRoot, { kind: "agent", agent: ctx.agentId }, "premise_propose", { text: input?.text, locator: input?.locator, why: input?.why, ...(input?.scope !== undefined ? { premise_scope: input.scope } : {}) });
 }
 
 /** An agent asks the question's author what is unclear (question_ask): an operator request of kind clarification, with a durable id. */
@@ -2617,12 +2904,29 @@ export function renderQuestionsMd(ctx: ViewContext): string {
       if (v.leading_forms.length) lines.push(`- Leading form: ${v.leading_forms.map((f) => `"${f}"`).join(", ")} (flagged for the critic)`);
       if (v.leads.length) lines.push(`- Leads: ${v.leads.map((l) => `${l.id} ${l.status}${l.holder ? ` (${l.holder})` : ""}${l.disposition ? ` ${l.disposition}` : ""}`).join(", ")}`);
       lines.push(`- Answer: ${v.answer ? `E-${v.answer.seq}${v.answer.inconclusive ? " (inconclusive)" : ""}${v.answer.result ? ` (${NB.resultWords(v.answer.result)})` : ""}${v.answer.negative ? (v.answer.negative.reviewed ? `; negative, reviewed by ${v.answer.negative.by.join(", ")}` : "; negative (unreviewed)") : ""}${v.answer.negative?.coverage.length ? `; coverage ${v.answer.negative.coverage.map((c) => `E-${c.seq} ${c.coverage ?? "not computed"}`).join(", ")}` : ""}; answers revision ${v.answer.question_rev}${v.answer.stale ? ` of ${v.rev}: stale` : ""}` : "none yet"}`);
+      if (v.answer?.parts?.length) lines.push(`- The answer's parts: ${PM.partsWords(v.answer.parts)}`);
+      if (v.answer?.premises?.length) lines.push(`- The answer's premises: ${PM.citationsWords(v.answer.premises)}`);
+      for (const x of v.answer?.omitted ?? []) lines.push(`- A part the answer leaves out, as ${x.by}'s review says: "${x.part}" (${x.why})`);
       for (const c of v.clarifications) lines.push(`- Clarification ${c.id} (${c.by}, ${c.at}): ${c.what}${c.answer ? ` — answered by ${originWords(c.answer.origin)} at ${c.answer.at}: ${c.answer.text}` : " — not answered yet"}`);
       for (const o of v.offers) lines.push(`- Offered to ${o.to} at ${o.at}${o.first ? ` first, until ${o.until}` : ""} (${o.why})`);
       if (v.accepted) lines.push(`- Accepted as ${v.accepted.as} by ${originWords(v.accepted.origin)} at ${v.accepted.at} for revision ${v.accepted.rev}${v.accepted.stands ? "" : " (no longer stands: amended, or new evidence arrived, since)"}: ${v.accepted.why}`);
       for (const x of v.evidence) lines.push(`- New evidence ${x.import}${x.request ? ` for ${x.request}` : ""} at ${x.at}${x.inventory_rev !== null ? ` (inventory revision ${x.inventory_rev})` : ""}: what was concluded or accepted before it is open again`);
       if (v.withdrawn) lines.push(`- Withdrawn by ${originWords(v.withdrawn.origin)} at ${v.withdrawn.at}: ${v.withdrawn.why}`);
       for (const g of v.signed) lines.push(`- Event ${g.act_seq} signed by ${g.person} (${g.fingerprint}), sign event ${g.sign_seq}`);
+      lines.push("");
+    }
+  }
+  // The premises (premises.ts): each whole, with its revisions, class and the answers that cite it.
+  const premises = premiseViews(ctx);
+  if (premises.length) {
+    lines.push(`## Premises (${premises.length})`, "");
+    for (const p of premises) {
+      lines.push(`### ${p.id}: revision ${p.rev}, ${PM.classWords(p.class)}${p.withdrawn ? ", withdrawn" : ""}`, "");
+      lines.push(`- Designated by ${p.author} at ${p.opened_at}${p.why ? ` (${p.why})` : ""}`);
+      for (const r of p.revisions) lines.push(`- Revision ${r.rev} (${r.origin?.kind === "goal" ? "the goal" : originWords(r.origin)}, ${r.at}): ${r.text} — at ${r.locator || "no locator"}; scope ${PM.scopeWords(r.scope)}${r.why && r.rev > 1 ? ` — why revised: ${r.why}` : ""}`);
+      if (p.classes.length > 1) lines.push(`- Class: ${p.classes.map((c) => `${PM.classWords(c.class)} (${c.at}${c.why ? `: ${c.why}` : ""})`).join(" → ")}`);
+      lines.push(`- Cited by: ${p.cited_by.length ? p.cited_by.map((c) => `E-${c.answer} (${c.section}) ${c.conditional ? "assuming it" : c.stance}${c.refs.length ? ` on ${c.refs.join(", ")}` : ""}${c.current ? "" : ` at revision ${c.rev}`}`).join("; ") : "no standing answer"}`);
+      if (p.withdrawn) lines.push(`- Withdrawn by ${originWords(p.withdrawn.origin)} at ${p.withdrawn.at}: ${p.withdrawn.why}`);
       lines.push("");
     }
   }

@@ -1006,7 +1006,9 @@ async function gateInputs(sandboxRoot: string, s: L.LeadsSnapshot): Promise<Omit
   // What the lead register recorded under each question's leads: a finding two seats hold there that an answer leaves out is warned of.
   const underLeads = s.state.chain.ok ? L.questionLeadEntries(s.state) : undefined;
   const preparation = await import("./preparation.ts").then((PR) => PR.preparationFacts(sandboxRoot, s.ledger.entries)).catch(() => undefined);
-  return { entries: s.ledger.entries, attestations, disputes, bar, sweeps, ...(imports.length ? { imports } : {}), moreEvidence, ...(underLeads ? { underLeads } : {}), ...(preparation ? { preparation } : {}) };
+  // The premise register, from the question chain (premises.ts): what the premise gate reads each citation's scope from.
+  const premises = s.questions?.state.premises;
+  return { entries: s.ledger.entries, attestations, disputes, bar, sweeps, ...(imports.length ? { imports } : {}), moreEvidence, ...(underLeads ? { underLeads } : {}), ...(preparation ? { preparation } : {}), ...(premises?.size ? { premises } : {}) };
 }
 
 /**

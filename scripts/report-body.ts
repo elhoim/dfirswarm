@@ -90,7 +90,8 @@ import { readSweeps, sweepOf, sweepWords, type SweepRecord } from "../extensions
 import { answerResult, resultWords, reviewWords as negativeReviewWords, NEGATIVE_RESULTS } from "../extensions/negative-bar.ts";
 import { sectionBars } from "./check-answers.ts";
 import { leadsSnapshot, rankedLeads, viewLead, type LeadEvent, type LeadView, type LeadsSnapshot } from "../extensions/leads.ts";
-import { originWords, questionViews, type QuestionEvent, type QuestionView, type QuestionsSnapshot } from "../extensions/questions.ts";
+import { originWords, premiseViews, questionViews, type PremiseView, type QuestionEvent, type QuestionView, type QuestionsSnapshot } from "../extensions/questions.ts";
+import { classWords, scopeWords } from "../extensions/premises.ts";
 import { questionCost, tokensWords, type QuestionCost } from "./question-cost.ts";
 import { FINISH_LOG, readFinish, type FinishState } from "../extensions/finish.ts";
 
@@ -559,7 +560,8 @@ async function loadRun(sandboxArg: string, opts: ReportBodyOptions): Promise<Run
   const { producerOf } = await (await import("./output-hygiene.ts")).producerIndex(sandbox).catch(() => ({ producerOf: () => null as null }));
   const sweeps = await readSweeps(sandbox).catch(() => [] as SweepRecord[]);
   const preparation = hasAnswers ? await import("../extensions/preparation.ts").then((PR) => PR.preparationFacts(sandbox, entries)).catch(() => undefined) : undefined;
-  const gate = hasAnswers ? ledgerGate({ entries, attestations, disputes, sections, failed: unqualified, bar, partial: partialOutputCites(entries, producerOf), sweeps, ...(preparation ? { preparation } : {}) }) : null;
+  const premises = register?.snap.state.premises;
+  const gate = hasAnswers ? ledgerGate({ entries, attestations, disputes, sections, failed: unqualified, bar, partial: partialOutputCites(entries, producerOf), sweeps, ...(preparation ? { preparation } : {}), ...(premises?.size ? { premises } : {}) }) : null;
 
   const text = async (rel: string) => (await readFile(join(sandbox, rel), "utf8").catch(() => ""));
   const ledgerChain = verifyLedgerChain(await text("ledger/entries.jsonl"));
@@ -2084,6 +2086,7 @@ function answerSectionOf(run: Run, memo: Map<number, EntryState>): BodySection {
       ],
     });
   }
+  blocks.push(...premisesTable(run));
   for (const q of run.questions) blocks.push(questionBlock(q, run, memo));
   return { id: "s5", n: "5", title: "Answers", desc: "each question: the answer, how it was reached, how sure", count: run.hasAnswers ? `${run.questions.filter((q) => standingAnswer(run, `question:${q.id}`)).length} of ${run.questions.length} answered` : "no structured answers", blocks };
 }
@@ -2102,6 +2105,8 @@ function questionBlock(q: Question, run: Run, memo: Map<number, EntryState>): Bl
   body.push({ k: "voice", voice: "opinion", label: a.inconclusive ? "Answer (inconclusive)" : "Answer", s: [bounded ?? a.value], chips: chipsOf(a, s).filter((c) => c.text !== "answer") });
   if (bounded) body.push({ k: "p", s: [`As the agents worded it (not the conclusion: the bar for saying more is not met): ${a.value}`] });
   body.push(...resultBlocks(a, q, run));
+  body.push(...partsBlocks(a, q, run));
+  body.push(...premiseBlocks(a, run));
   body.push({
     k: "p",
     s: [
@@ -2115,6 +2120,111 @@ function questionBlock(q: Question, run: Run, memo: Map<number, EntryState>): Bl
   body.push(...downgradeBlocks(a, run));
   body.push(...answerSteps(a, s, run, memo));
   return { k: "box", cls: "answer", id: questionAnchor(q.id), level: 3, title, chips: [questionStatus_(q, run, memo).status], body };
+}
+
+/** The premise register, read from the question chain with the ledger beside it; none on a run from before it. */
+function premisesOf(run: Run): PremiseView[] {
+  const snap = run.register?.snap;
+  if (!snap?.state.premises.size) return [];
+  return premiseViews({ questions: snap, ledger: { entries: run.entries, replaced: run.replaced } as never });
+}
+
+/**
+ * The premises the case took (docs/adr/0011, "Premises"): each whole, its
+ * class (a given, a supplied assertion, a proposition under test), its
+ * revision, where its words stand, its scope, who designated it, and the
+ * answers that cite it. Nothing on a run with none.
+ */
+function premisesTable(run: Run): Block[] {
+  const premises = premisesOf(run);
+  if (!premises.length) return [];
+  return [
+    { k: "h", level: 3, text: "The premises the examination took" },
+    { k: "p", s: ["A given was designated by the operator (the goal or the register) and is not proved again; a supplied assertion is assumed as asserted, not as established; a proposition under test (an agent's, not admitted) is assumed only conditionally. Each answer below says which premises it rests on and how."] },
+    {
+      k: "table",
+      cls: "premises",
+      head: ["Premise", "Class", "Words (verbatim)", "Where", "Scope", "Designated by", "Cited by"],
+      rows: premises.map((p): Span[][] => [
+        [`${p.id} (revision ${p.rev})${p.withdrawn ? ", withdrawn" : ""}`],
+        [classWords(p.class)],
+        [p.text],
+        [p.locator || "not said"],
+        [scopeWords(p.scope)],
+        [p.author],
+        p.cited_by.length ? p.cited_by.flatMap((c, i): Span[] => [i ? "; " : "", { e: c.answer }, ` ${c.conditional ? "assuming it" : c.stance}${c.current ? "" : ` (revision ${c.rev})`}`]) : ["no standing answer"],
+      ]),
+    },
+  ];
+}
+
+/** An entry, a request or a lead, as a span: an entry is linked to its exhibit. */
+function refSpan(r: string): Span {
+  return /^E-\d+$/.test(r) ? { e: Number(r.slice(2)) } : { code: r };
+}
+
+/**
+ * An answer's claim and open-part rows (docs/adr/0013, "Claim and open-part
+ * rows"), against the question's revision it answers, and each part a
+ * review says the answer leaves out. Nothing on an answer without them.
+ */
+function partsBlocks(a: LedgerEntry, q: Question, run: Run): Block[] {
+  const out: Block[] = [];
+  if (a.parts?.length) {
+    const v = q.reg ? run.register?.byId.get(q.reg) : undefined;
+    const asked = v?.revisions.find((r) => r.rev === (a.question_rev ?? 1))?.text ?? q.text;
+    out.push({ k: "p", s: [`Part by part, as the answer reads revision ${a.question_rev ?? 1} of the question${asked ? ` ("${asked}")` : ""}:`] });
+    out.push({
+      k: "table",
+      cls: "parts",
+      head: ["Part", "What it asks", "Status", "Rests on, or what bounds it"],
+      rows: a.parts.map((p): Span[][] => [
+        [p.id],
+        [p.part],
+        [p.status],
+        p.status === "established" ? (p.refs ?? []).flatMap((r, i): Span[] => [i ? ", " : "", refSpan(r)]) : [refSpan(p.open_by ?? "?"), ...(p.refs?.length ? [" (so far ", ...p.refs.flatMap((r, i): Span[] => [i ? ", " : "", refSpan(r)]), ")"] : [])],
+      ]),
+    });
+  }
+  const omitted = run.attestations.filter((x) => x.target === (a.hash ?? "") && !a.authors.includes(x.by)).flatMap((x) => (x.answer_review?.parts ?? []).filter((p) => p.missing).map((p) => ({ by: x.by, part: p.part, why: p.why })));
+  if (omitted.length) out.push({ k: "note", s: [`A review says the answer leaves out ${omitted.length === 1 ? "a part" : "parts"} of the question: ${omitted.map((x) => `"${x.part}" (${x.by}: ${x.why})`).join("; ")}. It stays here until the answer is recorded again with ${omitted.length === 1 ? "it" : "them"}.`] });
+  return out;
+}
+
+/**
+ * The premises an answer cites, each with its stance: what it assumes (a
+ * conditional assumption said as "assuming P-n": the answer holds only if
+ * the premise does), what it supports or contradicts and on which entries,
+ * what it leaves unresolved. Nothing on an answer that cites none.
+ */
+function premiseBlocks(a: LedgerEntry, run: Run): Block[] {
+  if (!a.premises?.length) return [];
+  const reg = run.register?.snap.state.premises;
+  return [
+    {
+      k: "rows",
+      rows: a.premises.map((c): Row => {
+        const p = reg?.get(c.id);
+        const words = p ? `"${p.revisions.find((r) => r.rev === c.rev)?.text ?? p.text}" (${classWords(p.class)})` : "";
+        const refs = (c.refs ?? []).flatMap((r, i): Span[] => [i ? ", " : "", refSpan(r)]);
+        const how =
+          c.stance === "assumed"
+            ? c.conditional
+              ? `assuming ${c.id}: the answer holds only if it does`
+              : p?.class === "supplied_assertion"
+                ? `rests on it as asserted (${p.locator}), not as established`
+                : "rests on it as given"
+            : c.stance === "supported"
+              ? "the evidence supports it, on "
+              : c.stance === "contradicted"
+                ? refs.length
+                  ? "the evidence contradicts it, on "
+                  : "the answer says the evidence contradicts it (no finding named)"
+                : "unresolved: the evidence does not settle it";
+        return { label: `${c.id} (revision ${c.rev})`, s: [`${words ? `${words}: ` : ""}${how}`, ...(c.stance === "supported" || (c.stance === "contradicted" && refs.length) ? refs : []), ...(c.scope ? [` (for ${scopeWords(c.scope)})`] : [])] };
+      }),
+    },
+  ];
 }
 
 /**
@@ -2707,6 +2817,8 @@ function resolveWords(d: LedgerGate["defects"][number]): string {
       return `the store sweep run again within a larger budget over what it left unsearched, or the question's limits accepted by the operator.`;
     case "preparation_pending":
       return `the broad extraction of the source ${where}'s negative claims absence over (a parse of the whole source that a pack declares) run to an outcome: produced, partial, failed or declined, each on the record with what it does not hold; or the question's limits accepted by the operator.`;
+    case "premise_inconsistent":
+      return `the two answers reconciled on the record, neither side forced: one answer revised, the finding that rebuts the premise named in the contradiction (the premise then goes to the operator as a dispute), either answer's scope narrowed so the two no longer overlap, or one answer made conditional on the premise ("assuming P-n").`;
     case "completeness_uncovered":
       return `a search record for ${where} that says what was searched and which parts of the stored data it reached (live, deleted, unallocated, slack, secondary copies), and the answer recorded again on it. A question that asks for every item is not answered by the items found alone.`;
     default:

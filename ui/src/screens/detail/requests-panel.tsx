@@ -25,7 +25,7 @@ import { useLive, useResource } from "@/lib/live";
 import type { OperatorRequest, SwarmView } from "@/lib/types";
 
 const STATE_TONE: Record<OperatorRequest["state"], Tone> = { pending: "brick", notified: "saffron", acknowledged: "kelp", answered: "moss", declined: "slate", withdrawn: "slate" };
-const KIND_LABEL: Record<OperatorRequest["kind"], string> = { lead: "a lead needs you", acquisition: "acquisition", clarification: "clarification", decision: "decision", network: "network item" };
+const KIND_LABEL: Record<OperatorRequest["kind"], string> = { lead: "a lead needs you", acquisition: "acquisition", clarification: "clarification", decision: "decision", network: "network item", premise: "premise dispute" };
 
 function actingPerson(): string {
   try {
@@ -58,7 +58,8 @@ function RequestCard({ r, runId, onJob }: { r: OperatorRequest; runId: string; o
     }
   };
   const l = r.line;
-  const answerable = r.kind === "decision" || r.kind === "lead" || r.kind === "clarification";
+  // A premise dispute is answered on the request too (the premise stands, and why), or by revising or withdrawing the premise on the Questions tab.
+  const answerable = r.kind === "decision" || r.kind === "lead" || r.kind === "clarification" || r.kind === "premise";
   const stage = r.stage ?? "requested";
   return (
     <li className={`rounded-md border px-3 py-2.5 text-[13px] ${open ? "border-2 border-brick bg-brick-soft/40" : "border-line bg-card"}`}>

@@ -58,7 +58,7 @@ async function hedged(r: Awaited<ReturnType<typeof run>>) {
   const lead = await planned(r.a0, "1", [{ source: "input:disk.E01", method: "read the USB history" }]);
   const f = ok(await rec(r.a0, { kind: "finding", ...F, value: "the file was copied to a USB stick at 09:14", source: "the disk", evidence: "the USB history", refs: ["job:j000001/hits.txt"], answers: ["1"] })).entry;
   const lim = ok(await rec(r.a0, { kind: "limitation", value: "Nothing on the laptop shows who sat at it at 09:14", source: "the disk", evidence: "no camera, no badge log", reason: "unavailable", answers: ["1"] })).entry;
-  const a = ok(await rec(r.a1, { kind: "answer", section: "question:1", value: "Copied to a USB stick at 09:14; whether the employee did it personally is not established", reasoning: `E-${f.seq} shows the copy; who did it is open (E-${lim.seq})`, ...A, limitations: [lim.seq], result: "partial" })).entry;
+  const a = ok(await rec(r.a1, { kind: "answer", section: "question:1", value: "Copied to a USB stick at 09:14; whether the employee did it personally is not established", reasoning: `E-${f.seq} shows the copy; who did it is open (E-${lim.seq})`, ...A, limitations: [lim.seq], result: "partial", parts: [{ id: "how", part: "how the file was taken", status: "established", refs: [`E-${f.seq}`] }, { id: "who", part: "who took it", status: "open", open_by: `E-${lim.seq}` }] })).entry;
   assert.ok((await L.closeLead(r.a0, lead, { disposition: "resolved", ref: `E-${f.seq}` })).ok);
   return { f, lim, a };
 }
@@ -67,8 +67,8 @@ test("a partial answer every review holds whole, one attesting it established, i
   const r = await run({ goal: GOAL });
   const q = await hedged(r);
   for (const [who, parts] of [
-    ["a2", [{ part: "how it was taken", established: true, why: "E-1 shows the copy" }, { part: "who took it", established: true, why: "the brief names the employee, and the laptop is theirs" }]],
-    ["a3", [{ part: "how and when", established: true, why: "the USB history" }]],
+    ["a2", [{ id: "how", part: "how it was taken", established: true, why: "E-1 shows the copy" }, { id: "who", part: "who took it", established: true, why: "the brief names the employee, and the laptop is theirs" }]],
+    ["a3", [{ id: "how", part: "how and when", established: true, why: "the USB history" }, { id: "who", part: "who took it", established: true, why: "the laptop is the employee's" }]],
   ] as const) {
     const att = await P.attestEntry({ sandboxRoot: r.S, agentId: who }, { seq: q.a.seq, how: "re-read the USB history from job:j000001", ...review(who === "a2" ? "established" : "best_candidate", [...parts]) });
     assert.ok(att.ok, (att as { reason?: string }).reason);
@@ -100,12 +100,12 @@ test("no warning where a review holds a part open, as s993d40's reviewers did, n
   const r = await run({ goal: GOAL });
   const q = await hedged(r);
   // Every part held established, but only as a best candidate: no established attest, no warning.
-  const bc = await P.attestEntry(r.a3, { seq: q.a.seq, how: "re-read the USB history", ...review("best_candidate", [{ part: "how", established: true, why: "the USB history" }]) });
+  const bc = await P.attestEntry(r.a3, { seq: q.a.seq, how: "re-read the USB history", ...review("best_candidate", [{ id: "how", part: "how", established: true, why: "the USB history" }, { id: "who", part: "who took it", established: true, why: "the laptop is the employee's" }]) });
   assert.ok(bc.ok, (bc as { reason?: string }).reason);
   let c = await checkLedgerAnswers(r.S, ["1"]);
   assert.ok(!c.warnings.some((x) => WARN.test(x)), c.warnings.join("\n"));
   // An established attest that holds the part the answer declares open as open: the answer is partial on its reviews' word.
-  const est = await P.attestEntry(r.a2, { seq: q.a.seq, how: "re-read the USB history", ...review("established", [{ part: "how", established: true, why: "the USB history" }, { part: "who took it", established: false, why: "nothing shows who sat at it", declared_open: `E-${q.lim.seq}` }]) });
+  const est = await P.attestEntry(r.a2, { seq: q.a.seq, how: "re-read the USB history", ...review("established", [{ id: "how", part: "how", established: true, why: "the USB history" }, { id: "who", part: "who took it", established: false, why: "nothing shows who sat at it", declared_open: `E-${q.lim.seq}` }]) });
   assert.ok(est.ok, (est as { reason?: string }).reason);
   c = await checkLedgerAnswers(r.S, ["1"]);
   assert.equal(c.ok, true, c.lines.join("\n"));
@@ -124,14 +124,17 @@ test("the worker prompt and the record and attest tools say what a case premise 
   const prompt = flat(await readFile(join(ROOT, "prompts", "worker-system.md"), "utf8"));
   for (const must of [
     "What the case brief or the goal states as given (who the subject is, whose device it is, the scenario's facts) is a premise of the examination, not a part the answer must prove again",
-    'names the premise it relies on in its reasoning or limitations ("rests on the case premise that …") and is established on the evidence for the rest',
+    // The premise register (docs/adr/0011, "Premises"): a premise is cited, never held open.
+    "An answer cites each premise it rests on or bears on",
+    'A premise the register does not hold is named in the reasoning ("rests on the case premise that …")',
     "An answer is partial only for a part of the question it could not establish",
-    "When the evidence contradicts a premise, that is premise_not_supported or a finding, never a silent hedge",
+    "A premise is never an open part, and a review does not hold one open",
+    "When the evidence contradicts a premise, that is premise_not_supported, a contradicted stance or a finding, never a silent hedge",
   ]) assert.ok(prompt.includes(must), `prompts/worker-system.md does not say: ${must}`);
   const src = flat(await readFile(join(ROOT, "extensions", "agent-swarm.ts"), "utf8"));
   for (const must of [
     // The record tool's description of an answer, and its result field.
-    'is named in reasoning or limitations, \\"rests on the case premise that …\\", and is no reason to answer partial: partial is only for a part the evidence could not establish, and evidence against a premise is premise_not_supported or a finding',
+    'or named in reasoning, \\"rests on the case premise that …\\", and is no reason to answer partial: partial is only for a part the evidence could not establish, and evidence against a premise is premise_not_supported, or a stance contradicted on the finding, never a silent hedge',
     "What the case brief or the goal states as given (who the subject is, whose device it is, the scenario's facts) is a premise, not a part to prove again",
     "Partial is only for a part the evidence could not establish; evidence against a premise is premise_not_supported or a finding, never a silent hedge.",
     // The attest tool's parts.

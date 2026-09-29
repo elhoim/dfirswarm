@@ -146,7 +146,7 @@ test("the rule is an established claim's on a material question: a best candidat
   await planned(c.a0, "3");
   const f = ok(await rec(c.a0, { kind: "finding", ...F, value: "a file was deleted at 09:14", source: "the log", evidence: "line 1", refs: ["job:j000001/hits.txt"], answers: ["3"] })).entry;
   const lim = ok(await rec(c.a0, { kind: "limitation", value: "The log keeps no file name", source: "the log", evidence: "its fields", reason: "unavailable", answers: ["3"] })).entry;
-  const part = ok(await rec(c.a1, { kind: "answer", section: "question:3", value: "A file, deleted at 09:14; its name is not established", reasoning: `E-${f.seq}; the name is open (E-${lim.seq})`, ...A, limitations: [lim.seq], result: "partial" })).entry;
+  const part = ok(await rec(c.a1, { kind: "answer", section: "question:3", value: "A file, deleted at 09:14; its name is not established", reasoning: `E-${f.seq}; the name is open (E-${lim.seq})`, ...A, limitations: [lim.seq], result: "partial", parts: [{ id: "when", part: "when it was deleted", status: "established", refs: [`E-${f.seq}`] }, { id: "which", part: "which file", status: "open", open_by: `E-${lim.seq}` }] })).entry;
   const pr = await attest(c.a3, { seq: part.seq, how: "read line 1", strength: "established", answer_review: { ...BARE, parts: [{ part: "when", established: true, why: "line 1" }, { part: "which file", established: false, why: "no name kept", declared_open: `E-${lim.seq}` }], reproduced_at: [{ ref: "job:j000001/hits.txt", offset: 3, value: "j000001" }] } });
   assert.equal(pr.line.strength, "established", "partial is a disposition: nothing capped");
   assert.equal(pr.line.capped, undefined);

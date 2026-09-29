@@ -44,6 +44,7 @@ import { basename, dirname, join, posix, relative, resolve, sep } from "node:pat
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import * as NB from "./negative-bar.ts";
+import * as PM from "./premises.ts";
 import * as PR from "./preparation.ts";
 import { importHitExamined, importHitsFor, importHitWords, unexaminedHits, type ImportSweepRecord, type SweepRecord, type UnexaminedHit } from "./store-sweep.ts";
 
@@ -6220,8 +6221,8 @@ export const TOOL_RESERVED_NAMES = new Set([
   // and interpreted, the watchdog's regroup in an until-solved run, and the
   // operator's answer to a lead.
   "lead_open", "lead_claim", "lead_release", "lead_close", "lead_link", "leads", "record_leads", "regroup", "operator_note",
-  // The question register (extensions/questions.ts): its tools.
-  "question_open", "questions", "question_ask",
+  // The question register (extensions/questions.ts): its tools, and the premise register's (premises.ts).
+  "question_open", "questions", "question_ask", "premise_propose",
   // The coordination of the work and of the finish (docs/adr/0015): a lead
   // reopened by an agent, a limiting route reviewed.
   "lead_reopen", "route_review", "lead_handoff", "lead_confirm", "offer", "finish", "done_deferred", "review_deferred", "record_deferred",
@@ -7998,6 +7999,20 @@ export type LedgerEntry = {
   /** Version 4, an answer: it says the event did not happen, not only that no evidence of it was found; the negative bar says when it may. */
   asserts_absence?: boolean;
   /**
+   * Version 4, an answer to a question: its claim and open-part rows
+   * (premises.ts AnswerPart), against the verbatim revision of the question
+   * it answers: each part established on the entries it names, or open with
+   * what bounds it (R-<n>, L-<n>, E-<seq>). In the core only when present.
+   */
+  parts?: PM.AnswerPart[];
+  /**
+   * Version 4, an answer to a question: the premises it cites (premises.ts
+   * PremiseCitation), each at a revision with a stance: assumed (a
+   * conditional one "assuming P-n"), supported, contradicted or unresolved.
+   * In the core only when present.
+   */
+  premises?: PM.PremiseCitation[];
+  /**
    * A summary's or a narrative's symbolic citations (A4): each question it
    * cites as Q-<n>, the answer that stood then, and that answer's
    * fingerprint (its result, the revision it answers, and the hashes of what
@@ -8141,6 +8156,8 @@ function ledgerV4Fields(e: LedgerEntry): Record<string, unknown> {
     ...(e.unsupported_tokens?.length ? { unsupported_tokens: e.unsupported_tokens } : {}),
     ...(e.downgrade ? { downgrade: { evidence: e.downgrade.evidence, why: e.downgrade.why } } : {}),
     ...(e.confidence_rule ? { confidence_rule: e.confidence_rule } : {}),
+    ...(e.parts?.length ? { parts: e.parts.map(canonicalValue) } : {}),
+    ...(e.premises?.length ? { premises: e.premises.map(canonicalValue) } : {}),
     ...coverageFields(e),
     ...(e.source_class ? { source_class: e.source_class } : {}),
     ...(e.provenance ? { provenance: canonicalValue(e.provenance) } : {}),
@@ -8348,6 +8365,10 @@ export type LedgerInput = {
   looked_for_none_why?: string;
   /** An answer from a positive result to a negative one: {evidence: [E-<seq> or refs], why}. */
   downgrade?: unknown;
+  /** An answer to a question: its claim and open-part rows, [{id, part, status: established | open, refs, open_by?}] (premises.ts). */
+  parts?: unknown;
+  /** An answer to a question: the premises it cites, [{id: P-<n>, rev, stance, refs?, conditional?, scope?}] (premises.ts). */
+  premises?: unknown;
 };
 
 function listOf(v: string[] | string | undefined): string[] {
@@ -8460,7 +8481,7 @@ async function ledgerV3Input(
 }
 
 /** The fields only an answer takes, and only a finding takes: named in a refusal when they come with another kind. */
-const ANSWER_ONLY_FIELDS = ["section", "reasoning", "contrary", "limitations", "alternatives_open", "would_change", "inconclusive", "result", "contrary_none_why", "asserts_absence", "question_rev", "material", "downgrade"] as const;
+const ANSWER_ONLY_FIELDS = ["section", "reasoning", "contrary", "limitations", "alternatives_open", "would_change", "inconclusive", "result", "contrary_none_why", "asserts_absence", "question_rev", "material", "downgrade", "parts", "premises"] as const;
 const FINDING_ONLY_FIELDS = ["indicates", "alternatives", "alternatives_none_why", "significance"] as const;
 /** The fields only a coverage record takes. */
 const COVERAGE_ONLY_FIELDS = ["proposition", "inventory_rev", "time_range", "search_method", "settings", "coverage_actual", "skipped", "failures", "result_refs", "result_bound", "detection_opportunity", "areas", "acquisition_ask", "acquisition_none_why", "looked_for", "looked_for_none_why"] as const;
@@ -9196,8 +9217,15 @@ export type AttestStrength = (typeof ATTEST_STRENGTHS)[number];
  */
 /** An alternative weighed: what else could explain the answer, why the evidence rules it out, and the entries that show it (E-<seq>). */
 export type AnswerReviewAlternative = { explanation: string; why: string; evidence?: string[] };
-/** A part the review weighed: whether it is established, why, and for a partial answer the entry by which the answer declares it open. */
-export type AnswerReviewPart = { part: string; established: boolean; why: string; declared_open?: string };
+/**
+ * A part the review weighed: whether it is established, why, and for a
+ * partial answer the entry by which the answer declares it open. Against an
+ * answer that carries parts (premises.ts AnswerPart), `id` names the answer's
+ * part it weighs, and `missing` names a part the question asks that the
+ * answer leaves out (never established by it). Each only when given: a
+ * review from before them hashes as it did.
+ */
+export type AnswerReviewPart = { id?: string; part: string; established: boolean; why: string; declared_open?: string; missing?: true };
 /**
  * The strongest rival and the test that separates it from the answer
  * (source-first review, docs/adr/0015): the rival (another time, entity,
@@ -9327,7 +9355,15 @@ export function checkAnswerReview(raw: unknown): { ok: true; review: AnswerRevie
       if (!m) return { ok: false, reason: `answer_review.parts[].declared_open names the entry by which the answer declares "${part.value}" open, as E-<seq> (a limitation or a coverage record the answer cites; got ${JSON.stringify(o.declared_open)})` };
       declaredOpen = `E-${Number(m[1])}`;
     }
-    parts.push({ part: part.value, established: o.established, why: why.value, ...(declaredOpen ? { declared_open: declaredOpen } : {}) });
+    // Against an answer's parts: the id of the part it weighs, or a part the answer leaves out (missing).
+    const pid = o.id === undefined || o.id === null || String(o.id).trim() === "" ? undefined : String(o.id).trim();
+    if (pid !== undefined && !PM.PART_ID.test(pid)) return { ok: false, reason: `answer_review.parts[].id names the answer's part by its id (a, b, who; got ${JSON.stringify(o.id)})` };
+    if (o.missing !== undefined && o.missing !== null && typeof o.missing !== "boolean") return { ok: false, reason: "answer_review.parts[].missing is true or false: whether the answer leaves this part of the question out" };
+    const missing = o.missing === true;
+    if (missing && o.established) return { ok: false, reason: `answer_review.parts[]: "${part.value}" is missing from the answer, so the answer does not establish it: established false, and say in why what the evidence shows of it` };
+    if (missing && pid !== undefined) return { ok: false, reason: `answer_review.parts[]: "${part.value}" is missing from the answer: it has no id of the answer's (leave id out)` };
+    if (missing && declaredOpen) return { ok: false, reason: `answer_review.parts[]: "${part.value}" is missing from the answer: the answer declares nothing of it open` };
+    parts.push({ ...(pid !== undefined ? { id: pid } : {}), part: part.value, established: o.established, why: why.value, ...(declaredOpen ? { declared_open: declaredOpen } : {}), ...(missing ? { missing: true as const } : {}) });
   }
   const f = (r.other_family && typeof r.other_family === "object" ? r.other_family : null) as Record<string, unknown> | null;
   if (!f || typeof f.checked !== "boolean") return { ok: false, reason: "answer_review.other_family is {checked: true|false, text}: whether a materially different source family was checked, and which, or why not" };
@@ -9588,7 +9624,7 @@ export function answerReviewWords(r: AnswerReview): string {
   const discriminator = d ? `; the strongest rival: ${d.rival}; the test: ${d.test}; it would favour: ${d.favours_if}; it showed: ${d.outcome} (${d.refs.join(", ")})` : "";
   const located = r.reproduced_at?.length ? `; read at: ${r.reproduced_at.map((l) => `${l.ref} byte ${l.offset}${l.value !== undefined ? ` ("${l.value}")` : ` (${l.length} bytes)`}`).join("; ")}` : "";
   const derived = r.derivation ? `; derived by job ${r.derivation.job} from ${r.derivation.inputs.join(", ")}` : "";
-  return `reproduced: ${r.reproduced}; only read: ${r.read}; parts: ${r.parts.map((p) => `${p.part} ${p.established ? "established" : p.declared_open ? `open, as the answer declares it (${p.declared_open})` : "NOT established"} (${p.why})`).join("; ")}; inference: ${r.inference}; ${alternatives}; another source family ${r.other_family.checked ? "checked" : "not checked"}: ${r.other_family.text}${discriminator}${located}${derived}`;
+  return `reproduced: ${r.reproduced}; only read: ${r.read}; parts: ${r.parts.map((p) => `${p.id ? `${p.id} ` : ""}${p.part} ${p.missing ? "MISSING from the answer" : p.established ? "established" : p.declared_open ? `open, as the answer declares it (${p.declared_open})` : "NOT established"} (${p.why})`).join("; ")}; inference: ${r.inference}; ${alternatives}; another source family ${r.other_family.checked ? "checked" : "not checked"}: ${r.other_family.text}${discriminator}${located}${derived}`;
 }
 
 /** Whether an attestation holds its answer established: a best candidate does not; a line from before strengths reads as it always did. */
@@ -9842,7 +9878,7 @@ export async function renderLedger(sandboxRoot: string, entries?: LedgerEntry[])
       const neg = r && NB.NEGATIVE_RESULTS.has(r) && e.section?.startsWith("question:") ? negativeReview(e, all, allAttestations) : null;
       const negText = neg ? (neg.reviewed ? ` (negative, reviewed by ${neg.by.join(", ")})` : " **(negative, unreviewed)**") : "";
       lines.push(
-        `- **#${e.seq}** ${e.section}${e.question_rev ? ` (revision ${e.question_rev})` : ""}${e.inconclusive ? " (inconclusive)" : ""}${e.result ? ` (${e.result})` : ""}${e.asserts_absence ? " (asserts absence)" : ""}${negText}: ${e.value}${mark(e)}${e.confidence ? ` _(${e.confidence}${e.confidence_why ? `: ${e.confidence_why}` : ""})_` : ""}${cites("rests on", e.support)}${cites("contrary", e.contrary)}${e.contrary_none_why ? ` — nothing says otherwise: ${e.contrary_none_why}` : ""}${cites("limitations", e.limitations)}${e.qualifies?.length ? ` — qualifies: ${e.qualifies.map((q) => `${q.ref} (${q.why})`).join("; ")}` : ""}${e.alternatives_open ? ` — still open: ${e.alternatives_open}` : ""}${e.would_change ? ` — would change it: ${e.would_change}` : ""}${e.unsupported_tokens?.length ? ` — in none of the cited entries: ${e.unsupported_tokens.join(", ")}` : ""}${p?.length ? ` — **no longer stands on its support: ${p.join("; ")}**` : ""} — reasoning: ${e.reasoning ?? ""} — by ${e.authors.join(", ")}`,
+        `- **#${e.seq}** ${e.section}${e.question_rev ? ` (revision ${e.question_rev})` : ""}${e.inconclusive ? " (inconclusive)" : ""}${e.result ? ` (${e.result})` : ""}${e.asserts_absence ? " (asserts absence)" : ""}${negText}: ${e.value}${mark(e)}${e.confidence ? ` _(${e.confidence}${e.confidence_why ? `: ${e.confidence_why}` : ""})_` : ""}${cites("rests on", e.support)}${cites("contrary", e.contrary)}${e.contrary_none_why ? ` — nothing says otherwise: ${e.contrary_none_why}` : ""}${cites("limitations", e.limitations)}${e.qualifies?.length ? ` — qualifies: ${e.qualifies.map((q) => `${q.ref} (${q.why})`).join("; ")}` : ""}${e.alternatives_open ? ` — still open: ${e.alternatives_open}` : ""}${e.would_change ? ` — would change it: ${e.would_change}` : ""}${e.unsupported_tokens?.length ? ` — in none of the cited entries: ${e.unsupported_tokens.join(", ")}` : ""}${p?.length ? ` — **no longer stands on its support: ${p.join("; ")}**` : ""}${e.parts?.length ? ` — parts: ${PM.partsWords(e.parts)}` : ""}${e.premises?.length ? ` — premises: ${PM.citationsWords(e.premises)}` : ""} — reasoning: ${e.reasoning ?? ""} — by ${e.authors.join(", ")}`,
       );
     }
   }
@@ -10366,14 +10402,16 @@ export async function strengthCaps(sandboxRoot: string, answer: LedgerEntry, rev
   if (NB.answerResult(answer) === "partial") {
     const all = entries ?? (await readLedger(sandboxRoot));
     const open = declaredOpenBy(answer, new Map(all.map((e) => [e.seq, e])));
+    // A part the answer's own rows hold open (premises.ts AnswerPart, status open), weighed by its id, is declared open too.
+    const openRows = new Set((answer.parts ?? []).filter((p) => p.status === "open").map((p) => p.id));
     for (const p of review?.parts ?? []) {
-      if (p.established || (p.declared_open && open.has(p.declared_open))) continue;
-      out.push(`the review holds "${p.part}" not established (${p.why}), and the answer does not declare it open${p.declared_open ? ` (${p.declared_open} is not a limitation or a coverage record it cites)` : ""}`);
+      if (p.established || (p.declared_open && open.has(p.declared_open)) || (p.id && openRows.has(p.id))) continue;
+      out.push(p.missing ? `the review names "${p.part}", a part of the question the answer leaves out (${p.why})` : `the review holds "${p.part}" not established (${p.why}), and the answer does not declare it open${p.declared_open ? ` (${p.declared_open} is not a limitation or a coverage record it cites)` : ""}`);
     }
     return out;
   }
   if (answer.confidence === "medium" || answer.confidence === "low") out.push(`its confidence is ${answer.confidence}`);
-  for (const p of review?.parts ?? []) if (!p.established) out.push(`the review holds "${p.part}" not established (${p.why})`);
+  for (const p of review?.parts ?? []) if (!p.established) out.push(p.missing ? `the review names "${p.part}", a part of the question the answer leaves out (${p.why})` : `the review holds "${p.part}" not established (${p.why})`);
   const change = String(answer.would_change ?? "");
   if (!change || !answer.section?.startsWith("question:")) return out;
   const id = sectionAnswersId(answer.section);
@@ -10505,6 +10543,14 @@ export async function attestEntry(ctx: SwarmContext, input: LedgerActInput): Pro
       if (declared.length && resultNow !== "partial") {
         return { ok: false, reason: `answer_review.parts[].declared_open is for a partial answer's part the answer itself declares open; #${t.entry.seq} is ${NB.resultWords(resultNow)}${claim ? ": it claims every part established, and a part you do not hold established caps the review" : ""}` };
       }
+      // Against an answer that carries parts (docs/adr/0013, "Claim and open-part rows"): a review part names the row it weighs by its id, and may add a part the answer leaves out (missing). A review part without an id is read as it always was.
+      const rows = t.entry.parts ?? [];
+      const byId = answerReview.parts.filter((p) => p.id);
+      if (byId.length && !rows.length) return { ok: false, reason: `#${t.entry.seq} carries no parts: answer_review.parts[].id names an answer's part (${byId[0]!.id}), and this answer lists none. Weigh each part the question asks without an id, and a part the answer leaves out with missing: true` };
+      const stray = byId.find((p) => !rows.some((r) => r.id === p.id));
+      if (stray) return { ok: false, reason: `#${t.entry.seq} carries parts ${rows.map((r) => r.id).join(", ")}: answer_review.parts[].id names one of them (got ${stray.id} for "${stray.part}"); a part the answer leaves out is a row of its own, with missing: true and no id` };
+      const twice = rows.map((r) => r.id).find((id) => byId.filter((p) => p.id === id).length > 1);
+      if (twice) return { ok: false, reason: `answer_review.parts weighs ${twice} twice: one row per part` };
       if (declared.length) {
         const open = declaredOpenBy(t.entry, new Map(entries.map((e) => [e.seq, e])));
         const bad = declared.find((p) => !open.has(p.declared_open as string));
@@ -10801,7 +10847,8 @@ export function answerFingerprint(a: LedgerEntry): string {
   const hashes = (edges: LedgerEdge[] | undefined) => (edges ?? []).map((x) => x.hash).sort();
   const c = conclusionFields(a);
   // The keys in this order, always: a fingerprint recorded by an earlier harness is compared with this one.
-  return sha256Hex(JSON.stringify({ result: c.result, question_rev: c.question_rev, support: hashes(a.support), contrary: hashes(a.contrary), limitations: hashes(a.limitations), inconclusive: c.inconclusive, asserts_absence: c.asserts_absence }));
+  // What the answer stands on of the premises and which of its parts are open come last, and only when it has them (premises.ts): an answer without them keeps its fingerprint.
+  return sha256Hex(JSON.stringify({ result: c.result, question_rev: c.question_rev, support: hashes(a.support), contrary: hashes(a.contrary), limitations: hashes(a.limitations), inconclusive: c.inconclusive, asserts_absence: c.asserts_absence, ...(c.premises ? { premises: c.premises } : {}), ...(c.parts ? { parts: c.parts } : {}) }));
 }
 
 /**
@@ -10811,8 +10858,16 @@ export function answerFingerprint(a: LedgerEntry): string {
  * holds a summary's symbolic citation to these and to what the answer rests
  * on). Its words are not among them.
  */
-export function conclusionFields(e: LedgerEntry): { result: string | null; question_rev: number; inconclusive: boolean; asserts_absence: boolean } {
-  return { result: NB.answerResult(e) ?? null, question_rev: e.question_rev ?? 1, inconclusive: e.inconclusive === true, asserts_absence: e.asserts_absence === true };
+export function conclusionFields(e: LedgerEntry): { result: string | null; question_rev: number; inconclusive: boolean; asserts_absence: boolean; premises?: Array<[string, number, string, boolean]>; parts?: Array<[string, string]> } {
+  return {
+    result: NB.answerResult(e) ?? null,
+    question_rev: e.question_rev ?? 1,
+    inconclusive: e.inconclusive === true,
+    asserts_absence: e.asserts_absence === true,
+    // Present only on an answer that has them: how it stands on each premise, and which of its parts are established or open.
+    ...(e.premises?.length ? { premises: e.premises.map((c): [string, number, string, boolean] => [c.id, c.rev, c.stance, c.conditional === true]).sort() } : {}),
+    ...(e.parts?.length ? { parts: e.parts.map((p): [string, string] => [p.id, p.status]).sort() } : {}),
+  };
 }
 
 /**
@@ -11576,6 +11631,34 @@ async function recordAnswer(ctx: SwarmContext, input: LedgerInput): Promise<Ledg
     questionRev = n;
   }
   if (noneWhy.value && contrary.seqs.length) return { ok: false, reason: "contrary_none_why says no entry says otherwise: give contrary or contrary_none_why, not both" };
+  // The claim and open-part rows and the premises it cites (premises.ts):
+  // their shape here, what they name in the registers under the locks.
+  const partsIn = PM.parseParts(input.parts);
+  if (!partsIn.ok) return partsIn;
+  const citesIn = PM.parseCitations(input.premises);
+  if (!citesIn.ok) return citesIn;
+  const parts = partsIn.parts;
+  const citations = citesIn.citations;
+  if (!question && (parts.length || citations.length)) return { ok: false, reason: "parts and premises are a question's answer's; a summary or a narrative cites the questions it sums up (Q-<n>)" };
+  if (question && resultText === "partial" && !parts.some((p) => p.status === "open")) return { ok: false, reason: PARTIAL_NEEDS_OPEN_PART };
+  const openParts = parts.filter((p) => p.status === "open");
+  if (question && resultText === "established" && openParts.length) {
+    return { ok: false, reason: `result established claims every part the question asks, and ${openParts.map((p) => `"${p.id}"`).join(", ")} ${openParts.length === 1 ? "is" : "are"} open: record it partial (its open parts named, each with what bounds it), or establish ${openParts.length === 1 ? "it" : "them"} on the entries that show ${openParts.length === 1 ? "it" : "them"} (status established, refs)` };
+  }
+  // What bounds an open part outside the ledger: an acquisition ask the requests hold, or a route the lead register holds.
+  for (const p of openParts) {
+    if (p.open_by?.startsWith("R-")) {
+      const R = await import("./requests.ts");
+      const req = (await R.requestsSnapshot(ctx.sandboxRoot).catch(() => null))?.requests.get(p.open_by);
+      if (!req) return { ok: false, reason: `parts: "${p.id}" is open by ${p.open_by}, which is not a request of this run (swarm.sh requests <run> list; an agent's ask is lead_close needs_operator with ask {kind: acquisition, …})` };
+      if (req.kind !== "acquisition") return { ok: false, reason: `parts: "${p.id}" is open by ${p.open_by}, a ${req.kind} request: an open part is bounded by an acquisition ask (the source that would settle it), a route (L-<n>), or a limitation or a coverage record (E-<seq>)` };
+    }
+    if (p.open_by?.startsWith("L-")) {
+      const L = await import("./leads.ts");
+      const l = (await L.leadsSnapshot(ctx.sandboxRoot).catch(() => null))?.state.leads.get(p.open_by);
+      if (!l) return { ok: false, reason: `parts: "${p.id}" is open by ${p.open_by}, which is not in the lead register (leads lists them): name the lead whose route would examine it` };
+    }
+  }
   // A person's question is a hypothesis to test: its answer names what says
   // otherwise, or says why nothing does (extensions/questions.ts).
   if (question && !contrary.seqs.length && !noneWhy.value) {
@@ -11640,7 +11723,9 @@ async function recordAnswer(ctx: SwarmContext, input: LedgerInput): Promise<Ledg
   if (!source.ok) return source;
   const evidence = boundedText("evidence", input.evidence, LEDGER_EVIDENCE_MAX_CHARS);
   if (!evidence.ok) return evidence;
-  const cited = answerCitations(`${value}\n${reasoning.value}`);
+  // The entries its rows name are citations as the text's are: a part's refs and the entry that bounds an open part, a premise citation's refs.
+  const rowRefs = [...parts.flatMap((p) => [...(p.refs ?? []), ...(p.open_by?.startsWith("E-") ? [p.open_by] : [])]), ...citations.flatMap((c) => c.refs ?? [])].map((r) => Number(r.slice(2)));
+  const cited = [...new Set([...answerCitations(`${value}\n${reasoning.value}`), ...rowRefs])];
   const support = cited.filter((n) => !contrary.seqs.includes(n) && !limits.seqs.includes(n));
   // A summary or a narrative cites the questions it sums up symbolically
   // (Q-<n>): bound to each answer's conclusion, not to its seq (A4).
@@ -11669,12 +11754,20 @@ async function recordAnswer(ctx: SwarmContext, input: LedgerInput): Promise<Ledg
   // is written: the register's lock (the questions' amendments take it too),
   // then the ledger's. A question amended since the agent read it refuses
   // the answer; one amended past revision 1 needs its revision said.
-  return withNamedLock(ctx.sandboxRoot, REGISTER_LOCK, async () => {
+  const recorded = await withNamedLock(ctx.sandboxRoot, REGISTER_LOCK, async (): Promise<LedgerResult> => {
+    let premiseReg: ReadonlyMap<string, PM.Premise> | undefined;
     if (question) {
       const reg = await registerRevision(ctx.sandboxRoot, sec.id).catch(() => null);
       if (reg) {
         if (questionRev !== undefined && questionRev !== reg.rev) return { ok: false as const, reason: `${reg.id} (${sec.section}) is at revision ${reg.rev}, amended since the revision ${questionRev} this answers: read it again (questions show ${reg.id}) and answer revision ${reg.rev}, with question_rev: ${reg.rev}` };
         if (questionRev === undefined && reg.rev > 1) return { ok: false as const, reason: `${reg.id} (${sec.section}) was amended to revision ${reg.rev}: say which revision this answers (question_rev: ${reg.rev}, after reading it with questions show ${reg.id}); an answer to an earlier revision is stale` };
+      }
+      // The premises it cites, held still under the same lock (a revision, an admission or a withdrawal takes it too).
+      if (citations.length) {
+        const Q = await import("./questions.ts");
+        premiseReg = (await Q.questionsSnapshot(ctx.sandboxRoot)).state.premises;
+        const bad = citationRefusal(citations, premiseReg, reg?.id ?? `question:${sec.id}`);
+        if (bad) return { ok: false as const, reason: bad };
       }
     }
     return withTableLock(ctx.sandboxRoot, async (held) => {
@@ -11727,7 +11820,7 @@ async function recordAnswer(ctx: SwarmContext, input: LedgerInput): Promise<Ledg
           const s = chk.standing.map((e) => `E-${e.seq}`).join(", ");
           const one = chk.standing.length === 1;
           why.push(
-            `#${supersedes} rests on ${s}, recorded for ${sec.section}, which ${one ? "still stands" : "still stand"}: not corrected, under no dispute, contradicted by nothing. Recording ${sec.section} ${NB.resultWords(resultText)} would discard ${one ? "it" : "them"}. Answer partial instead (record it with supersedes=${supersedes}, result partial): state what ${s} establish${one ? "es" : ""}, and name the parts still open with their coverage (limitations: [E-<seq>], and the coverage record for each open part). If ${one ? "it does" : "one of them does"} not hold, say so first: dispute it (why, refs), correct it (supersedes), or record the finding that contradicts it (rel contradicts), and name that in downgrade.evidence`,
+            `#${supersedes} rests on ${s}, recorded for ${sec.section}, which ${one ? "still stands" : "still stand"}: not corrected, under no dispute, contradicted by nothing. Recording ${sec.section} ${NB.resultWords(resultText)} would discard ${one ? "it" : "them"}. Answer partial instead (record it with supersedes=${supersedes}, result partial): state what ${s} establish${one ? "es" : ""}, and name the parts still open, each with what bounds it (parts [{id, part, status: "open", open_by: E-<seq> of its limitation or coverage record, R-<n> or L-<n>}], beside the parts ${s} establish${one ? "es" : ""}, status "established"). If ${one ? "it does" : "one of them does"} not hold, say so first: dispute it (why, refs), correct it (supersedes), or record the finding that contradicts it (rel contradicts), and name that in downgrade.evidence`,
           );
         }
         if (why.length) return { ok: false, reason: why.join(". ") };
@@ -11768,6 +11861,25 @@ async function recordAnswer(ctx: SwarmContext, input: LedgerInput): Promise<Ledg
       for (const n of [...support, ...contrary.seqs, ...limits.seqs]) {
         if (!bySeq.has(n)) return { ok: false, reason: `E-${n}: there is no entry #${n} in the ledger (list them with ledger)` };
         if (n === supersedes) return { ok: false, reason: `E-${n} is the answer this one replaces: an answer does not rest on the answer it corrects` };
+      }
+      // An open part is bounded by a limitation (it joins the answer's limitations) or a coverage record, each standing.
+      for (const p of parts) {
+        if (!p.open_by?.startsWith("E-")) continue;
+        const n = Number(p.open_by.slice(2));
+        const b = bySeq.get(n) as LedgerEntry;
+        if (b.kind !== "limitation" && b.kind !== "coverage") return { ok: false, reason: `parts: "${p.id}" is open by ${p.open_by}, a ${b.kind}: an open part is bounded by a limitation (why it could not be established) or a coverage record (what was searched for it) E-<seq>, an acquisition ask R-<n>, or a route L-<n>; a ${b.kind} that bears on it goes in its refs` };
+        if (replaced.has(n)) return { ok: false, reason: `parts: "${p.id}" is open by ${p.open_by}, superseded by #${standingSeq(n, replaced)}: name the one that stands` };
+        if (b.kind === "limitation" && !limits.seqs.includes(n)) {
+          limits.seqs.push(n);
+          const i = support.indexOf(n);
+          if (i >= 0) support.splice(i, 1);
+        }
+      }
+      // A premise the answer says the evidence supports rests on a finding or an event that stands, undisputed.
+      const inForce = new Set(disputesInForce(entries, disputes).map((d) => d.target));
+      for (const c of citations) {
+        if (c.stance !== "supported" || rebuttingRefs(c.refs ?? [], bySeq, replaced, inForce).length) continue;
+        return { ok: false, reason: `premises: ${c.id} is supported: name in its refs the standing finding or event that shows it (E-<seq>, not disputed, not superseded)${c.refs?.length ? `; ${c.refs.join(", ")} ${c.refs.length === 1 ? "is not one" : "are not"}` : ""}. Without one, cite it assumed (a given is not proved again), or unresolved` };
       }
       for (const n of limits.seqs) {
         const l = bySeq.get(n) as LedgerEntry;
@@ -11864,6 +11976,8 @@ async function recordAnswer(ctx: SwarmContext, input: LedgerInput): Promise<Ledg
         ...(questionRefs.length ? { question_refs: questionRefs } : {}),
         ...(materialWhy.value ? { finish_material: materialWhy.value } : {}),
         ...(input.asserts_absence === true ? { asserts_absence: true } : {}),
+        ...(parts.length ? { parts } : {}),
+        ...(citations.length ? { premises: citations } : {}),
         ...(tokens.length ? { unsupported_tokens: tokens } : {}),
         ...(downgrade ? { downgrade } : {}),
         // Recorded under the recorded-confidence rule: its high is kept only as recordedConfidence says.
@@ -11909,9 +12023,77 @@ async function recordAnswer(ctx: SwarmContext, input: LedgerInput): Promise<Ledg
       if (question && confidence === "high") {
         notes.push(resultText === "established" ? "confidence high is recorded as medium until another seat attests this answer established, naming the alternatives it weighed and why the evidence rules each out; the report and the metrics show the recorded confidence" : `confidence high is recorded as medium: high is kept only by an established answer, and this one is ${NB.resultWords(resultText)}; the report and the metrics show the recorded confidence`);
       }
+      // The premises: what this answer's citations meet among the answers that stand (premise_inconsistent), said now.
+      if (question && citations.length) {
+        const others: PM.CitingAnswer[] = entries.filter((e) => e.kind === "answer" && e.section?.startsWith("question:") && e.section !== sec.section && !replaced.has(e.seq) && e.premises?.length).map((e) => ({ seq: e.seq, section: e.section as string, citations: e.premises! }));
+        const me: PM.CitingAnswer = { seq: candidate.seq, section: sec.section, citations };
+        for (const c of PM.premiseConflicts([...others, me], premiseReg, (refs) => rebuttingRefs(refs, bySeq, replaced, inForce)).filter((x) => x.assumed.seq === me.seq || x.contradicted.seq === me.seq)) {
+          const mine = c.assumed.seq === me.seq;
+          const other = mine ? c.contradicted : c.assumed;
+          if (c.contradicted.rebuttal.length) {
+            notes.push(mine ? `this answer assumes ${c.premise} (revision ${c.rev}), which E-${other.seq} (${other.section}) contradicts on ${c.contradicted.rebuttal.join(", ")}: the premise is disputed before the operator, and nothing waits on the ruling. If this answer holds only if the premise does, cite it conditionally (premises [{id: "${c.premise}", rev: ${c.rev}, stance: "assumed", conditional: true}]: "assuming ${c.premise}")` : `${c.premise} (revision ${c.rev}), which E-${other.seq} (${other.section}) assumes, is contradicted here on ${c.contradicted.rebuttal.join(", ")}: the premise is disputed before the operator (a request of kind premise), and the answers that assume it are warned (premise_disputed); nothing is forced on either`);
+          } else {
+            notes.push(`${mine ? `this answer assumes ${c.premise} (revision ${c.rev}), which E-${other.seq} (${other.section}) contradicts` : `this answer contradicts ${c.premise} (revision ${c.rev}), which E-${other.seq} (${other.section}) assumes`}, over scopes that overlap: the finish line holds both questions (premise_inconsistent) until they are reconciled, and neither side is forced: ${PREMISE_WAYS_OUT(c.premise, c.rev)}`);
+          }
+        }
+        for (const c of citations) {
+          const p = premiseReg?.get(c.id);
+          if (p?.class === "supplied_assertion" && c.stance === "assumed" && !c.conditional) notes.push(`${c.id} is a supplied assertion: the report says the answer rests on it as asserted (${p.locator}), not as established`);
+        }
+      }
       return appendLedgerEntry(ctx, held, entries, { ...candidate, ...(supersedes !== undefined ? { supersedes } : {}) }, notes);
     });
   });
+  // A contradiction that names its rebutting finding opens a premise dispute for the operator (a request of kind premise): written now, its id said.
+  if (recorded.ok && !recorded.merged && recorded.entry.premises?.some((c) => c.stance === "contradicted" && c.refs?.length)) {
+    const R = await import("./requests.ts");
+    await R.reconcileRequests(ctx.sandboxRoot).catch(() => undefined);
+    const byKey = (await R.requestsSnapshot(ctx.sandboxRoot).catch(() => null))?.byKey;
+    const ids = recorded.entry.premises.filter((c) => c.stance === "contradicted" && c.refs?.length).map((c) => ({ c, rid: byKey?.get(PM.premiseDisputeKey(c.id, c.rev)) })).filter((x) => x.rid);
+    if (ids.length) recorded.note = [recorded.note, `the premise dispute${ids.length === 1 ? "" : "s"} ${ids.map((x) => `${x.rid} (${x.c.id} revision ${x.c.rev})`).join(", ")} ${ids.length === 1 ? "is" : "are"} with the operator: they revise or withdraw the premise, or answer the request; nothing waits on it`].filter(Boolean).join("; ");
+  }
+  return recorded;
+}
+
+/** What a partial answer with no open part is told: the refusal's words (docs/adr/0013, "Claim and open-part rows"). */
+export const PARTIAL_NEEDS_OPEN_PART =
+  'record it established or name what is open: a partial answer carries parts [{id, part, status, refs, open_by?}], each part the question asks as you read its revision, the parts it establishes (status "established", refs: the entries that establish each) and at least one open part (status "open", open_by: what bounds it: an acquisition ask R-<n>, a route L-<n>, or a limitation or a coverage record E-<seq>). A premise is never an open part: what the case takes as given is cited in premises (stance assumed), not held open';
+
+/** The ways out of premise_inconsistent, each on the record and none forcing either side (docs/adr/0011, "Premises"). */
+export function PREMISE_WAYS_OUT(premise: string, rev: number): string {
+  return `revise one answer (supersedes; a different stance, or without the premise); cite the finding that rebuts ${premise} in the contradiction's refs (premises [{id: "${premise}", rev: ${rev}, stance: "contradicted", refs: ["E-<seq>"]}]), which takes the premise to the operator as a dispute; narrow either citation's scope (scope {entities, times}) so the two no longer overlap; or answer conditionally (premises [{id: "${premise}", rev: ${rev}, stance: "assumed", conditional: true}]: "assuming ${premise}", said so in the report)`;
+}
+
+/** Which of `refs` name a standing finding or event, not superseded and under no dispute in force: what rebuts or supports a premise. */
+export function rebuttingRefs(refs: readonly string[], bySeq: ReadonlyMap<number, LedgerEntry>, replaced: ReadonlyMap<number, number>, inForce: ReadonlySet<string>): string[] {
+  return refs.filter((r) => {
+    const e = bySeq.get(Number(r.replace(/^E-/, "")));
+    return Boolean(e) && (e!.kind === "finding" || e!.kind === "event") && !replaced.has(e!.seq) && !inForce.has(e!.hash ?? ledgerHash(e!, "genesis"));
+  });
+}
+
+/**
+ * Why an answer's premise citations cannot stand against the register
+ * (checked under the registers' lock), or null: each premise is in it, not
+ * withdrawn, at the revision cited; a proposition under test is assumed only
+ * conditionally; a premise scoped to named questions is assumed without a
+ * condition only by an answer to one of them; and a citation's scope lies
+ * inside its premise's.
+ */
+export function citationRefusal(citations: readonly PM.PremiseCitation[], reg: ReadonlyMap<string, PM.Premise>, question: string): string | null {
+  for (const c of citations) {
+    const p = reg.get(c.id);
+    if (!p) return `premises cites ${c.id}, which is not in the premise register (questions view premises lists them)`;
+    if (p.withdrawn) return `premises cites ${c.id}, withdrawn at ${p.withdrawn.at}: ${p.withdrawn.why}. An answer no longer rests on it: drop it, or cite what stands`;
+    if (c.rev !== p.rev) return `premises cites ${c.id} at revision ${c.rev}, and it is at revision ${p.rev}: read it again (questions show ${c.id}) and cite rev ${p.rev}`;
+    if (c.stance === "assumed" && !c.conditional && p.class === "proposition_under_test") return `${c.id} is a proposition under test (${p.authority === "agent" ? "proposed by an agent, not admitted by the operator" : "the operator put it under test"}): it is examined like any claim, never taken as given. Cite it supported or contradicted with the finding that shows it (refs), unresolved, or assumed conditionally (conditional: true: "assuming ${c.id}", and the report says the answer holds only if it does)`;
+    if (c.stance === "assumed" && !c.conditional && p.scope.questions?.length && !p.scope.questions.includes(question)) return `${c.id} applies to ${p.scope.questions.join(", ")} (its scope), and this answers ${question}: assume it here only conditionally (conditional: true), or ask the operator to widen its scope (premise revise)`;
+    if (c.scope) {
+      const out = PM.scopeOutside(c.scope, PM.scopeAt(p, c.rev));
+      if (out) return `premises: ${c.id}'s scope is narrower than the premise's or it is none: ${out}`;
+    }
+  }
+  return null;
 }
 
 
@@ -11926,7 +12108,7 @@ async function recordAnswer(ctx: SwarmContext, input: LedgerInput): Promise<Ledg
  * the bar, never on a limitation that names it; the release counts it.
  */
 export type LedgerDefect = {
-  code: "no_answer" | "answer_support" | "answer_disputed" | "no_critic_act" | "open_contradiction" | "coverage_missing" | "negative_unreviewed" | "wording" | "coverage_stale" | "material_use" | "partial_output" | "evidence_stale" | "completeness_uncovered" | "sweep_pending" | "sweep_hits" | "sweep_partial" | "preparation_pending";
+  code: "no_answer" | "answer_support" | "answer_disputed" | "no_critic_act" | "open_contradiction" | "coverage_missing" | "negative_unreviewed" | "wording" | "coverage_stale" | "material_use" | "partial_output" | "evidence_stale" | "completeness_uncovered" | "sweep_pending" | "sweep_hits" | "sweep_partial" | "preparation_pending" | "premise_inconsistent";
   section?: string;
   seqs: number[];
   what: string;
@@ -12207,7 +12389,7 @@ export function noMoreEvidenceAskFix(coverage: number[], answer: number): string
  * the answer reaches names, where the addition does not stale the answer.
  * `seqs` opens with the answer's.
  */
-export type LedgerWarning = { code: "no_acquisition_ask" | "partial_all_parts_established" | "lead_findings_uncited" | "preparation_missing" | "late_evidence_hits"; section: string; seqs: number[]; what: string; fix: string };
+export type LedgerWarning = { code: "no_acquisition_ask" | "partial_all_parts_established" | "lead_findings_uncited" | "preparation_missing" | "late_evidence_hits" | "premise_disputed" | "premise_revised" | "premise_withdrawn" | "part_omitted"; section: string; seqs: number[]; what: string; fix: string };
 
 /** A warning in the words every point says it with: what, then the fix. */
 export function warningWords(w: Pick<LedgerWarning, "what" | "fix">): string {
@@ -12347,8 +12529,13 @@ export const CASE_PREMISE_WORDS = 'what the case brief or the goal states as giv
  * (store-sweep.ts readImportSweeps): their hits are said where a question's
  * answer is stale by the addition, and warned of where its answer does not
  * reach them; they hold nothing by themselves.
+ * `premises` is the premise register (premises.ts, folded from the question
+ * chain): the pairs of standing answers that assume and contradict one
+ * premise revision over overlapping scopes hold both questions
+ * (premise_inconsistent) until reconciled on the record; without it a
+ * citation's scope is its own, or unbounded.
  */
-export function ledgerGate(o: { entries: LedgerEntry[]; attestations: LedgerAttestation[]; disputes: LedgerDispute[]; sections: string[]; failed?: Map<number, string[]>; bar?: (sectionId: string) => { material: boolean; existence: boolean; completeness?: boolean }; partial?: Map<number, Array<{ ref: string; job: string; status: string }>>; sweeps?: readonly SweepRecord[]; imports?: readonly ImportSweepRecord[]; moreEvidence?: "no" | "ask" | "yes"; underLeads?: ReadonlyMap<string, ReadonlyMap<number, readonly string[]>>; preparation?: PR.PreparationFacts }): LedgerGate {
+export function ledgerGate(o: { entries: LedgerEntry[]; attestations: LedgerAttestation[]; disputes: LedgerDispute[]; sections: string[]; failed?: Map<number, string[]>; bar?: (sectionId: string) => { material: boolean; existence: boolean; completeness?: boolean }; partial?: Map<number, Array<{ ref: string; job: string; status: string }>>; sweeps?: readonly SweepRecord[]; imports?: readonly ImportSweepRecord[]; moreEvidence?: "no" | "ask" | "yes"; underLeads?: ReadonlyMap<string, ReadonlyMap<number, readonly string[]>>; preparation?: PR.PreparationFacts; premises?: ReadonlyMap<string, PM.Premise> }): LedgerGate {
   const { entries } = o;
   const bySeq = new Map(entries.map((e) => [e.seq, e]));
   const replaced = supersededBy(entries);
@@ -12366,6 +12553,12 @@ export function ledgerGate(o: { entries: LedgerEntry[]; attestations: LedgerAtte
   const unsupported: Record<number, string[]> = {};
   const warnings: LedgerWarning[] = [];
   const namedFor = (seq: number) => limits.filter((l) => limitationCites(l).has(seq)).map((l) => l.seq);
+  // The premises (premises.ts): every standing answer's citations, and the
+  // pairs that assume and contradict one premise revision over overlapping
+  // scopes, each with the standing finding its contradiction names, if any.
+  const inForceTargets = new Set(standingD.map((d) => d.target));
+  const citing: PM.CitingAnswer[] = entries.filter((e) => e.kind === "answer" && e.section?.startsWith("question:") && !replaced.has(e.seq) && e.premises?.length).map((e) => ({ seq: e.seq, section: e.section as string, citations: e.premises! }));
+  const conflicts = citing.length ? PM.premiseConflicts(citing, o.premises, (refs) => rebuttingRefs(refs, bySeq, replaced, inForceTargets)) : [];
   for (const raw of o.sections) {
     const sec = answerSection(raw);
     if (!sec.ok) continue;
@@ -12637,6 +12830,78 @@ export function ledgerGate(o: { entries: LedgerEntry[]; attestations: LedgerAtte
       if ((forms.length || a.asserts_absence) && !earned) {
         defects.push({ code: "wording", section: sec.section, seqs: [a.seq], what: `answer #${a.seq} (${sec.section}) says the event did not happen${forms.length ? ` (${forms.map((f) => `"${f}"`).join(", ")})` : ""}, and the bar for saying so is not met: ${result !== "bounded_negative" ? `its result is ${NB.resultWords(result)}, and only a bounded negative may say it` : !bar.existence ? "the question does not ask whether something exists" : !cov.some((c) => c.coverage === "complete") ? "no coverage record it rests on is complete" : "no coverage record it rests on says the event would have left a trace"}`, fix: `record the answer again with supersedes=${a.seq}, worded "No evidence of … was found in …" (the coverage record's scope)`, named_by: [] });
       }
+    }
+    // Premises (docs/adr/0011, "Premises"): a standing answer that assumes a
+    // premise revision another standing answer contradicts, over scopes that
+    // overlap, holds both questions while the contradiction names no
+    // standing finding that rebuts it. The ways out are all on the record and
+    // none forces either side: revise an answer, name the rebutting finding
+    // (the premise goes to the operator as a dispute, and the answer that
+    // assumes it is warned), narrow a citation's scope, or answer
+    // conditionally. Uncertainty (unresolved) holds nothing. Fixed, never named.
+    const mine = conflicts.filter((c) => c.assumed.seq === a.seq || c.contradicted.seq === a.seq);
+    const unreconciled = mine.filter((c) => !c.contradicted.rebuttal.length);
+    if (unreconciled.length) {
+      const says = (c: PM.PremiseConflict) => (c.assumed.seq === a.seq ? `assumes ${c.premise} (revision ${c.rev}), which #${c.contradicted.seq} (${c.contradicted.section}) contradicts` : `contradicts ${c.premise} (revision ${c.rev}), which #${c.assumed.seq} (${c.assumed.section}) assumes`);
+      const revs = [...new Map(unreconciled.map((c) => [`${c.premise}@${c.rev}`, c])).values()];
+      defects.push({
+        code: "premise_inconsistent",
+        section: sec.section,
+        seqs: [a.seq, ...[...new Set(unreconciled.map((c) => (c.assumed.seq === a.seq ? c.contradicted.seq : c.assumed.seq)))]],
+        what: `answer #${a.seq} (${sec.section}) ${unreconciled.map(says).join("; and ")}, over scopes that overlap`,
+        fix: `reconcile them on the record; neither side is forced: ${revs.map((c) => PREMISE_WAYS_OUT(c.premise, c.rev)).join("; and for the next premise, ")}`,
+        named_by: [],
+      });
+    }
+    const rebutted = mine.filter((c) => c.assumed.seq === a.seq && c.contradicted.rebuttal.length);
+    if (rebutted.length) {
+      warnings.push({
+        code: "premise_disputed",
+        section: sec.section,
+        seqs: [a.seq, ...[...new Set(rebutted.map((c) => c.contradicted.seq))]],
+        what: `answer #${a.seq} (${sec.section}) assumes ${rebutted.map((c) => `${c.premise} (revision ${c.rev}), which #${c.contradicted.seq} (${c.contradicted.section}) contradicts on ${c.contradicted.rebuttal.join(", ")}`).join("; and ")}: the premise is disputed before the operator`,
+        fix: `weigh the rebutting finding: if the answer holds only if the premise does, record it again with supersedes=${a.seq} citing it conditionally (stance assumed, conditional: true: "assuming ${rebutted[0]!.premise}"); if the finding bears on it, revise it; otherwise it stands as it is, and the ruling on the premise (revise, withdraw, or answer the request) is the operator's`,
+      });
+    }
+    if (o.premises && a.premises?.length) {
+      const moved = a.premises.filter((c) => {
+        const p = o.premises!.get(c.id);
+        return p && !p.withdrawn && c.rev < p.rev;
+      });
+      if (moved.length) {
+        warnings.push({
+          code: "premise_revised",
+          section: sec.section,
+          seqs: [a.seq],
+          what: `answer #${a.seq} (${sec.section}) cites ${moved.map((c) => `${c.id} at revision ${c.rev}, revised to ${o.premises!.get(c.id)!.rev} since`).join(", ")}`,
+          fix: `read ${moved.length === 1 ? "it" : "them"} again (questions show ${moved[0]!.id}) and record the answer again with supersedes=${a.seq} citing the revision that stands (the same stance if it still holds)`,
+        });
+      }
+      const gone = a.premises.filter((c) => o.premises!.get(c.id)?.withdrawn);
+      if (gone.length) {
+        warnings.push({
+          code: "premise_withdrawn",
+          section: sec.section,
+          seqs: [a.seq],
+          what: `answer #${a.seq} (${sec.section}) cites ${gone.map((c) => {
+            const w = o.premises!.get(c.id)!.withdrawn!;
+            return `${c.id}, withdrawn at ${w.at} (${w.why})`;
+          }).join("; ")}`,
+          fix: `record the answer again with supersedes=${a.seq} without ${gone.length === 1 ? "it" : "them"}, saying what it rests on instead`,
+        });
+      }
+    }
+    // A requested part a review says the answer omits (docs/adr/0013, "Claim and open-part rows"): it stays visible until the answer is recorded again with it, or says why the question does not ask it.
+    const omitted = answerReviews(a, o.attestations).flatMap((x) => (x.answer_review?.parts ?? []).filter((p) => p.missing).map((p) => ({ by: x.by, part: p.part, why: p.why })));
+    if (omitted.length) {
+      const reviewers = new Set(omitted.map((x) => x.by)).size;
+      warnings.push({
+        code: "part_omitted",
+        section: sec.section,
+        seqs: [a.seq],
+        what: `answer #${a.seq} (${sec.section}) leaves out ${omitted.length === 1 ? "a part" : "parts"} of the question its review${reviewers === 1 ? "" : "s"} name${reviewers === 1 ? "s" : ""}: ${omitted.map((x) => `"${x.part}" (${x.by}: ${x.why})`).join("; ")}`,
+        fix: `record the answer again with supersedes=${a.seq}, with ${omitted.length === 1 ? "the part" : "each part"} among its parts: established on the entries that show it, or open with what bounds it (R-<n>, L-<n>, E-<seq>); or say in its reasoning why the question does not ask it`,
+      });
     }
     const acted = o.attestations.some((x) => attestationAct(x) === "attest" && x.target === target && !a.authors.includes(x.by) && x.by !== a.by) || against.some((d) => !a.authors.includes(d.by)) || Boolean(review?.reviewed);
     if (!acted) {

@@ -221,6 +221,10 @@ Questions (the question register)
   question in scope it is the case's at once; otherwise it waits for the operator's triage, and no
   lead names it until it is admitted. When the goal names objectives and no questions, the first
   of you propose the initial questions from the objectives and the inventory.
+- A statement several answers would rest on and nobody designated (whose device it is, who the
+  subject is) you propose with premise_propose(text verbatim, locator: where it stands, why,
+  scope?): it is a proposition under test until the operator admits it. Never propose what the
+  register already holds: cite it.
 - A question amended after its answer makes that answer stale: record the answer again against
   the new revision. A withdrawn question's leads close withdrawn; a lead that found something goes
   to the operator's triage, and nothing found is erased.
@@ -450,12 +454,29 @@ Ledger (only when `record` is in your tool list)
   not_determinable (the evidence cannot say), out_of_scope, or premise_not_supported (it rests on
   a finding that shows the premise false; a search that found nothing is a bounded_negative).
   What the case brief or the goal states as given (who the subject is, whose device it is, the
-  scenario's facts) is a premise of the examination, not a part the answer must prove again: the
-  answer names the premise it relies on in its reasoning or limitations ("rests on the case
-  premise that …") and is established on the evidence for the rest. An answer is partial only for
-  a part of the question it could not establish, and a review does not hold a premise open. When
-  the evidence contradicts a premise, that is premise_not_supported or a finding, never a silent
-  hedge. A negative is bounded: word it "No evidence of <what> was found in <which objects, which time
+  scenario's facts) is a premise of the examination, not a part the answer must prove again. The
+  premises the case takes are P-<n> on the question register (`questions` view premises; the
+  header lists them): each with its words verbatim, where they stand, its scope and its class. A
+  given (the operator's) is not proved again and is never an open part; a supplied assertion is
+  assumed as asserted; a proposition under test (an agent's proposal, `premise_propose`) is
+  examined like any claim and assumed only conditionally until the operator admits it. An answer
+  cites each premise it rests on or bears on: `premises [{id: "P-<n>", rev, stance, refs?,
+  conditional?, scope?}]`, stance assumed, supported (on the standing finding in refs),
+  contradicted (name the finding that rebuts it in refs: the premise then goes to the operator as
+  a dispute) or unresolved. A premise the register does not hold is named in the reasoning ("rests
+  on the case premise that …"). Two standing answers that assume and contradict one premise
+  revision over scopes that overlap hold the run (`premise_inconsistent`) until they are reconciled
+  on the record, never by forcing either side: revise one, name the rebutting finding, narrow a
+  citation's scope (`scope {entities, times}`), or answer conditionally (stance assumed with
+  `conditional: true`, "assuming P-n"). Uncertainty alone holds nothing. An answer carries its
+  parts: `parts [{id, part, status, refs, open_by?}]`, each part the question asks as you read its
+  revision, established on the entries in refs, or open with what bounds it in open_by (an
+  acquisition ask R-<n>, a route L-<n>, or a limitation or a coverage record E-<seq>). An answer
+  is partial only for a part of the question it could not establish: a partial answer names at
+  least one open part, and one with none is refused ("record it established or name what is
+  open"). A premise is never an open part, and a review does not hold one open. When the evidence
+  contradicts a premise, that is premise_not_supported, a contradicted stance or a finding, never
+  a silent hedge. A negative is bounded: word it "No evidence of <what> was found in <which objects, which time
   range>", never "<what> did not happen", whatever the result; a bounded_negative or
   not_determinable on a material question cites a coverage record naming the question, and the
   report states it from that record. A coverage record binds its results: correct one of them and
@@ -520,7 +541,11 @@ Ledger (only when `record` is in your tool list)
   established, and those it declares open. Hold a part it declares open with `established: false`
   and `declared_open: "E-<seq>"`, the limitation or coverage record by which the answer declares
   it open: such a part does not cap your review, nor does the answer's confidence, and a partial
-  answer's review never holds the run whatever its strength. A material negative (a bounded_negative or
+  answer's review never holds the run whatever its strength. When the answer carries parts, your
+  review weighs each by its id (`answer_review.parts[].id`; a part its row holds open needs no
+  declared_open), and names a part the question asks that the answer leaves out as a row of its
+  own with `missing: true` (established false): it stays visible (`part_omitted`) until the answer
+  is recorded again with it, and on an answer that claims established it allows only best_candidate. A material negative (a bounded_negative or
   not_determinable answer, or the coverage behind it) is not trusted until another seat reviews it
   with `attest(..., review: {detection, reproduced, other_route})`, each {done, text}: whether you
   challenged the detection assumptions (would the event have left a trace here, given collection

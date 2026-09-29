@@ -187,6 +187,7 @@ import {
   questionOpen,
   questionAsk,
   questionsView,
+  premisePropose,
   netRequest,
   netFetch,
   netView,
@@ -268,6 +269,7 @@ export const SWARM_TOOLS = new Set([
   "question_open",
   "questions",
   "question_ask",
+  "premise_propose",
 ]);
 
 /** A bash command run this many times by one agent earns a hint to forge a tool. */
@@ -3197,7 +3199,7 @@ export default function (pi: ExtensionAPI) {
     description:
       "Put a fact in the swarm's ledger with its provenance: kind event (a dated event for the timeline; ts required, ISO 8601 with its zone: Z when the source's time is UTC, or the offset the source records), ioc (an indicator: address, hash, file, account), finding (an observation and what you make of it), absence (a search that found nothing, when that matters: value is what was looked for, source what was searched, evidence the query, the tool and its version, and the scope), hypothesis (a proposition under test, with status open, supported or refuted), limitation (what the examination could not establish, with reason not_examined, unavailable, failed, partial or excluded), coverage (what a negative, or a not_determinable answer, was searched over: the proposition, the objects in refs, time_range, search_method, settings, coverage_actual, skipped, failures, result_refs, alternatives and detection_opportunity; areas {allocated, deleted, unallocated, slack, secondary} when it backs an answer to a question that asks for a complete set; acquisition_ask (R-<n>) or acquisition_none_why when it backs a not_determinable; looked_for (the literal strings a hit would contain, which the hub then searches for in every output the run holds) or looked_for_none_why; the harness adds whether the jobs behind it were given every object it names) or answer (the swarm's answer to one question of the goal, or its summary or narrative). Every kind but answer needs source and evidence: where it was seen (a path, a log, a registry key) and how to check it (the command, the inode, the record id, the hash). An entry nobody can check is not a record. refs names the run's objects it rests on, each checked when it is written: input:<path> (under inputs/), job:<id>/<path> (a job's sealed output), import:<id>/<path>, member:<generation>#<n> (an archive member in the catalogue), sha256:<hex> (a sealed blob), or unresolved:<why> when none can be named; a file only in your own work/ is not an object of the run: run the work as a job and cite job:. The harness writes how each cited job or import was made into the entry. " +
       "A finding needs basis (observed or inferred), confidence with confidence_why (where the data came from, whether the method is reliable for it, how specific the observation is, whether your sources depend on each other: the quality of the evidence, not a count), and indicates (what the observation means and the step from one to the other, one to three sentences); an inferred finding lists alternatives (what else could explain it, each rejected with why or left open) or says in alternatives_none_why why none was considered; a finding resting on a job that did not succeed says in qualifies why those bytes are still usable, and can never support a claim that something is absent. " +
-      "An answer names its section (question:<id>, summary or narrative), gives the answer in value and the reasoning citing E-<seq> for every claim, and for a question its result (established, partial, bounded_negative, not_determinable, out_of_scope, premise_not_supported; a premise the case brief or goal states as given, such as who the subject is or whose device it is, is named in reasoning or limitations, \"rests on the case premise that …\", and is no reason to answer partial: partial is only for a part the evidence could not establish, and evidence against a premise is premise_not_supported or a finding), confidence with confidence_why, contrary (entries that say otherwise), limitations (limitation entries that bound it), alternatives_open and would_change; a bounded_negative or not_determinable on a material question cites a coverage record naming it, is worded \"No evidence of <what> was found in <scope>\" (asserts_absence: true, \"it did not happen\", only on an existence question whose coverage is complete and would have shown it), and another seat reviews it (attest with review) before the run may end; it rests on at least one standing entry that names its question in answers, cites a superseded entry only with its correction, and a disputed entry or one resting on a failed job only with qualifies [{ref: E-<seq>, why}]. One answer stands per section: revise it with supersedes. An answer to a register question says which revision it answers in question_rev once the question has more than one; an amendment makes the standing answer stale until it is recorded again for the new revision. Tokens in an answer (hashes, paths, times, inodes, addresses, accounts) that no cited entry holds are marked on it. " +
+      "An answer names its section (question:<id>, summary or narrative), gives the answer in value and the reasoning citing E-<seq> for every claim, and for a question its result (established, partial, bounded_negative, not_determinable, out_of_scope, premise_not_supported; a premise the case brief or goal states as given, such as who the subject is or whose device it is, is cited in premises [{id: P-<n>, rev, stance: assumed}] when the register holds it (questions view premises), or named in reasoning, \"rests on the case premise that …\", and is no reason to answer partial: partial is only for a part the evidence could not establish, and evidence against a premise is premise_not_supported, or a stance contradicted on the finding, never a silent hedge), parts [{id, part, status: established | open, refs, open_by?}] (required on a partial answer, with at least one open part bounded by R-<n>, L-<n> or E-<seq>), confidence with confidence_why, contrary (entries that say otherwise), limitations (limitation entries that bound it), alternatives_open and would_change; a bounded_negative or not_determinable on a material question cites a coverage record naming it, is worded \"No evidence of <what> was found in <scope>\" (asserts_absence: true, \"it did not happen\", only on an existence question whose coverage is complete and would have shown it), and another seat reviews it (attest with review) before the run may end; it rests on at least one standing entry that names its question in answers, cites a superseded entry only with its correction, and a disputed entry or one resting on a failed job only with qualifies [{ref: E-<seq>, why}]. One answer stands per section: revise it with supersedes. An answer to a register question says which revision it answers in question_rev once the question has more than one; an amendment makes the standing answer stale until it is recorded again for the new revision. Tokens in an answer (hashes, paths, times, inodes, addresses, accounts) that no cited entry holds are marked on it. " +
       "To correct an entry, yours or a peer's, record the corrected one with supersedes=<its seq> (and because=<why>): nothing is deleted, and the newer entry is the correction. The optional fields are for the reader: answers (the goal sections it answers), rel (supports, contradicts, duplicates or derived_from another entry; for evidence added late, a delta to the question's answer: supports, contradicts, adds_part, irrelevant or inconclusive), sensitive, clock and precision, completion, attribution, locators, significance. The harness renders ledger/ledger.md after every record; cite that file in the report.",
     promptSnippet: "Record an event, an indicator, a finding with what it indicates, or an answer",
     promptGuidelines: [
@@ -3276,6 +3278,37 @@ export default function (pi: ExtensionAPI) {
       looked_for: Type.Optional(Type.Array(Type.String(), { description: "A coverage record's, required (or looked_for_none_why): the literal strings a hit would contain if the answer were in the evidence (names, identifiers, addresses, keywords), each at least 3 characters. The hub then searches every output the run already holds for them (every job's output and logs, imports including evidence added late, captures, tool-output/), case-insensitive, UTF-8 and UTF-16LE; a hit in an object this record does not name holds the negative until the record is revised to name it, with what it showed, or the answer is revised." })),
       looked_for_none_why: Type.Optional(Type.String({ description: "A coverage record's, in place of looked_for: why no literal form of what was sought exists." })),
       downgrade: Type.Optional(Type.Object({ evidence: Type.Array(Type.String()), why: Type.String() }, { description: "An answer's, required when a revision (supersedes) moves a question from established or partial to not_determinable or bounded_negative: the entries (E-<seq>) or objects that undermine the earlier answer's chain, and why. At least one entry bears against it: a finding or an event that contradicts the answer or an entry it rests on (rel contradicts), a refuted hypothesis tied to one, an entry it rests on under a dispute, or a correction of one; a limitation or a coverage record is not counter-evidence. While the findings the earlier answer rests on stand undisputed and uncorrected the revision is refused: never discard a standing positive finding to make an answer not_determinable; answer partial. A doubt with no counter-evidence is a dispute, and a lower strength or confidence, not a downgrade." })),
+      parts: Type.Optional(
+        Type.Array(
+          Type.Object({
+            id: Type.String({ description: "A short id for the part, stable across the answer's revisions and its reviews: a, b, who, when" }),
+            part: Type.String({ description: "The part of the question, as you read its revision" }),
+            status: Type.Union([Type.Literal("established"), Type.Literal("open")]),
+            refs: Type.Optional(Type.Array(Type.String(), { description: "The entries it rests on, E-<seq>: an established part names at least one" })),
+            open_by: Type.Optional(Type.String({ description: "An open part's: what bounds it: an acquisition ask R-<n>, a route L-<n>, or a limitation or a coverage record E-<seq>. Never a premise" })),
+          }),
+          {
+            description:
+              "A question's answer: its claim and open-part rows, each part the question asks as you read its revision, established on the entries in refs, or open with what bounds it (open_by). Required on a partial answer, with at least one open part: a partial answer with none is refused (record it established or name what is open). An established answer's parts are all established. A premise is never an open part: what the case takes as given goes in premises.",
+          },
+        ),
+      ),
+      premises: Type.Optional(
+        Type.Array(
+          Type.Object({
+            id: Type.String({ description: "The premise, P-<n>" }),
+            rev: Type.Number({ description: "The revision you read (questions view premises)" }),
+            stance: Type.Union([Type.Literal("assumed"), Type.Literal("supported"), Type.Literal("contradicted"), Type.Literal("unresolved")]),
+            refs: Type.Optional(Type.Array(Type.String(), { description: "The entries that show it, E-<seq>: supported needs a standing finding or event; a contradiction that names one takes the premise to the operator as a dispute" })),
+            conditional: Type.Optional(Type.Boolean({ description: "With assumed: the answer holds only if the premise does (\"assuming P-n\", said so in the report). The only way to assume a proposition under test" })),
+            scope: Type.Optional(Type.Object({ entities: Type.Optional(Type.Array(Type.String())), times: Type.Optional(Type.Array(Type.Object({ from: Type.Optional(Type.String()), to: Type.Optional(Type.String()) }))) }, { description: "The entities and times the answer takes it for, inside the premise's own scope" })),
+          }),
+          {
+            description:
+              "A question's answer: each premise (P-<n>) it rests on or bears on, at the revision you read: assumed (a given is not proved again), supported or contradicted (on the finding in refs), or unresolved. Two standing answers that assume and contradict one premise revision over scopes that overlap hold the run (premise_inconsistent) until one is revised, the contradiction names its rebutting finding, a scope is narrowed, or one answers conditionally.",
+          },
+        ),
+      ),
       limitations: Type.Optional(Type.Array(Type.Union([Type.Number(), Type.String()]), { description: "An answer's: the limitation entries that bound it, by seq." })),
       alternatives_open: Type.Optional(Type.String({ description: "An answer's: what else could still explain it, or that nothing remains open and why. Required on a question's answer." })),
       would_change: Type.Optional(Type.String({ description: "An answer's: what evidence would change it. Required on a question's answer." })),
@@ -3422,12 +3455,14 @@ export default function (pi: ExtensionAPI) {
             read: Type.String({ description: "What you only read (a peer's entry, a summary) without re-deriving it" }),
             parts: Type.Array(
               Type.Object({
+                id: Type.Optional(Type.String({ description: "The answer's part this row weighs, by its id, when the answer carries parts: weigh each of them; a row the answer holds open needs no declared_open" })),
                 part: Type.String(),
                 established: Type.Boolean(),
                 why: Type.String(),
                 declared_open: Type.Optional(Type.String({ description: "A partial answer's part that the answer itself declares open: E-<seq> of the limitation it cites, or the coverage record it rests on, that declares it so. Such a part does not cap the review." })),
+                missing: Type.Optional(Type.Boolean({ description: "A part the question asks that the answer leaves out (no id; established false): it stays visible (part_omitted) until the answer is recorded again with it" })),
               }),
-              { description: "Each part the question asks, whether it is established, and why; for a partial answer, a part it declares open names the entry that declares it (declared_open). What the case brief or the goal states as given (who the subject is, whose device it is) is a premise, not a part to hold open" },
+              { description: "Each part the question asks, whether it is established, and why; against an answer that carries parts, each of its parts by its id, and a part it leaves out with missing: true. For a partial answer, a part it declares open (its row open, or declared_open naming the entry) does not cap the review. What the case brief or the goal states as given (who the subject is, whose device it is) is a premise, not a part to hold open" },
             ),
             inference: Type.String({ description: "The step that connects the observations to the answer" }),
             alternatives: Type.Union([Type.Array(Type.Object({ explanation: Type.String(), why: Type.String(), evidence: Type.Optional(Type.Array(Type.String())) })), Type.String()], {
@@ -3889,11 +3924,11 @@ export default function (pi: ExtensionAPI) {
     name: "questions",
     label: "Questions",
     description:
-      "Read the question register: list (default: every question, whole, with its origin (goal, agent, or a person: analyst, reviewer, observer, claimed or signed), scope, work state, answer and leads, a page at a time; from: next for the rest), show (one question with id: every verbatim revision, the neutral formulation, hints, clarifications, offers, leads and its answer), triage (what waits for the operator), objectives, or mine. The rendered register is questions/questions.md.",
+      "Read the question register: list (default: every question, whole, with its origin (goal, agent, or a person: analyst, reviewer, observer, claimed or signed), scope, work state, answer and leads, a page at a time; from: next for the rest), show (one question with id: every verbatim revision, the neutral formulation, hints, clarifications, offers, leads and its answer), triage (what waits for the operator), objectives, mine, or premises (every premise whole: its words, locator, class, revisions, scope, and the answers that cite it; show with id P-<n> for one and its history). The rendered register is questions/questions.md.",
     promptSnippet: "Read the question register",
     parameters: Type.Object({
-      view: Type.Optional(Type.Union(["list", "show", "triage", "objectives", "mine"].map((k) => Type.Literal(k)))),
-      id: Type.Optional(Type.String({ description: "Q-<n>, for show" })),
+      view: Type.Optional(Type.Union(["list", "show", "triage", "objectives", "mine", "premises"].map((k) => Type.Literal(k)))),
+      id: Type.Optional(Type.String({ description: "Q-<n> or P-<n>, for show" })),
       from: Type.Optional(Type.String({ description: "The question id a previous page named as next" })),
     }),
     async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
@@ -3919,6 +3954,39 @@ export default function (pi: ExtensionAPI) {
       const started = Date.now();
       const r = await questionAsk(ctxFrom(toolCtx.cwd, agentId), params.id, params.what_is_unclear);
       return questionAnswer(toolCtx.cwd, "question_ask", params as Record<string, unknown>, started, r as never);
+    },
+  });
+
+  pi.registerTool({
+    name: "premise_propose",
+    label: "Propose a premise",
+    description:
+      "Propose a premise (P-<n>) several answers would rest on: text is its words verbatim from where they stand, locator where that is (E-<seq> of the entry you read it in, a ref such as input:<path> with its page or line, or the goal's words), why is why the case's answers rest on it, and scope what it is about ({entities, times: [{from, to}], questions: [Q-<n>]}, each optional). It is a proposition under test until the operator admits it: examine it like any claim, and assume it only conditionally (\"assuming P-n\") until then. What the operator designated (the goal's premises) is a given already: cite it, do not propose it again. Read the premises with questions view premises.",
+    promptSnippet: "Propose a premise the answers would rest on",
+    promptGuidelines: [
+      "A premise is the case's, not a part of a question: propose one only when several answers would rest on the same unproved statement (whose device it is, who the subject is), and cite it in each answer's premises.",
+    ],
+    parameters: Type.Object({
+      text: Type.String({ description: "The premise's words, verbatim from where they stand" }),
+      locator: Type.String({ description: "Where its words stand: E-<seq>, a ref with its page or line, or the goal" }),
+      why: Type.String({ description: "Why the case's answers rest on it" }),
+      scope: Type.Optional(
+        Type.Object(
+          {
+            entities: Type.Optional(Type.Array(Type.String())),
+            times: Type.Optional(Type.Array(Type.Object({ from: Type.Optional(Type.String()), to: Type.Optional(Type.String()) }))),
+            questions: Type.Optional(Type.Array(Type.String())),
+          },
+          { description: "What it is about: the entities, the time ranges (ISO 8601 ends), and the questions it applies to; left out, it is unbounded" },
+        ),
+      ),
+    }),
+    async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
+      const started = Date.now();
+      const r = (await premisePropose(ctxFrom(toolCtx.cwd, agentId), params as never)) as { ok: boolean; reason?: string } & Record<string, unknown>;
+      await logEvent(toolCtx.cwd, agentId, "premise_propose", params as Record<string, unknown>, r.ok ? { ok: true, p: r.p, rev: r.rev, class: r.class } : { ok: false, reason: r.reason }, Date.now() - started).catch(() => undefined);
+      if (!r.ok) return { content: [{ type: "text" as const, text: `premise_propose refused: ${String(r.reason)}` }], details: r, isError: true };
+      return okResult(r);
     },
   });
 
