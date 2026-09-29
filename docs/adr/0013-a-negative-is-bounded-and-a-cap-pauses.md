@@ -906,6 +906,74 @@ count and the first offset, as the store sweep does); a hold on hits in new
 objects; the delta on a question the addition does not stale (a hit there
 is warned of, and an entry that names the object answers the warning).
 
+## Claim and open-part rows
+
+Added 2026-09-29 (the known-limits plan, item 6). "Partial" was one word
+for a whole answer: on s993d40 and c10 complete answers stood partial on
+what was a case premise, and a review's parts were free text no answer's
+part was named by, so a part the answer never listed could not be seen to
+be missing. The brainstorm of 2026-09-29 (L3 and Astra's B2 and C2) merged
+the claim rows and the stable part ids into one structure.
+
+- **An answer's rows.** `parts: [{id, part, status: established | open,
+  refs, open_by?}]` on an answer to a question: each part the question asks
+  as the answer reads its verbatim revision (the one `question_rev` names),
+  established on the entries in `refs` (at least one), or open with what
+  bounds it in `open_by`: an acquisition ask `R-<n>` (the source that would
+  settle it), a route `L-<n>` (the lead that would examine it), or a
+  limitation or a coverage record `E-<seq>` (a limitation joins the
+  answer's limitations). A premise is never an open part: `open_by: P-<n>`
+  is refused, with where the premise goes instead (the answer's `premises`,
+  ADR 0011 "Premises"). The rows' entries are citations as the reasoning's
+  are. Present-only in the ledger's hashed core, versioned with the entry
+  (version 4), so an answer without them hashes as it did; which rows are
+  open joins the answer's conclusion fields, and its fingerprint, only when
+  it has them.
+- **A partial answer names what is open.** A partial answer with no open
+  part is refused: "record it established or name what is open", the
+  refusal saying the shape. An established answer has no open part
+  (refused: record it partial, or establish the part). The negatives and
+  the other results may carry rows and are not held to them. Partial stays
+  a disposition under every stop policy; the refusal is at record time and
+  holds nothing at the finish line, so a run recorded before it reads as
+  before.
+- **A review's parts by id.** An `answer_review`'s part may name the
+  answer's row it weighs (`id`); one the answer does not carry is refused,
+  as is an id on a review of an answer that carries no rows. A part the
+  question asks that the answer leaves out is a row of the review's own,
+  `missing: true`, never established by the answer. A part without an id
+  reads as it always did, and round 14's `declared_open` still names the
+  entry by which a partial answer declares a part open; a part the answer's
+  own row holds open needs neither. Each new field is in the attestation's
+  hashed record only when given.
+- **What an omitted part does.** On an answer that claims established, a
+  missing part caps an established review as a part held not established
+  does (strengthCaps): the review is attested best_candidate, and the
+  question is held as a best candidate until the answer is recorded again
+  with the part, or says why the question does not ask it. On a partial
+  answer it caps an established review the same way, and a best candidate
+  holds nothing there. Whatever the result, the omission is warned of,
+  `part_omitted`, wherever warnings are delivered, until the answer is
+  recorded again: it stays visible.
+- **Where it shows.** The report shows each answer's rows against the
+  revision it answers (the question's words beside them), and a part a
+  review says it leaves out; the console's Questions tab and
+  `questions/questions.md` show the rows, the premises the answer cites and
+  the omitted parts; `ledger.md` shows both on the answer.
+
+Replayed values-free (`swarm.sh replay --compare <be4e6a3> <this
+checkout>`), s5764c4 (Belka, 18 questions), sa2f2f2 and sb1b3c8 read the
+same under both harnesses: no difference in any question's disposition,
+defects, warnings, readiness or report, their partial answers (without
+rows) disposed as before. Every contract fixture recorded before the rows
+reads the same under both (tests/contract-fixtures.test.ts). Whether the
+rows make fewer complete answers stand partial is for paired runs.
+
+Not built: a recorded result derived from what the reviews hold open (L3-A:
+Astra's "never promote automatically" stands until the warnings are shown
+insufficient), and a check that the rows cover the question's words (the
+review's `missing` is the check).
+
 ## Consequences
 
 - Every existing goal and run keeps working: an answer without `result`
@@ -927,6 +995,9 @@ is warned of, and an entry that names the object answers the warning).
   looked for, and an answer it stales stands again only on an entry that
   says how the evidence bears on it. A citation of the import no longer
   clears it; a hit never holds by itself.
+- A partial answer now says which part is open and what bounds it, and a
+  review can say which part of the question an answer leaves out; an
+  answer recorded before the rows reads as it did.
 - Not decided here: the acquisition lane and notifications as sealed
   material (Phase 1b), the full offer protocol and the reviewer's query
   (Phase 2), the report's per-question chains (Phase 3), and the mediated

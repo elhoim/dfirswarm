@@ -618,23 +618,29 @@ becomes `Q-<n>` (`Q-3` is the ledger's `question:3`), and each objective of an
 metadata block instead (`objectives:` followed by `- O-1: text` lines); the
 kickoff writes them into the goal's `## Objectives` section. A goal with
 objectives and no questions is open-ended: its first agents propose the
-questions with `question_open`.
+questions with `question_open`. Its premises, what the case takes as given
+(whose device it is, who the subject is), go in a `## Premises` section or
+the metadata block's `premises:` list (`- text [scope: questions 1, 2;
+entities E; times 2024-01-01..2024-06-30]`, the scope optional): each becomes
+`P-<n>`, a given ([ADR 0011](adr/0011-questions-are-a-register-with-their-askers.md), "Premises").
 
 - `question <run> add --text T --why W [--objective O-n | --objective new --objective-text T] [--parent Q-n] [--materiality material|background] [--priority urgent --reason R] [--expects existence|value|narrative|timeline|list] [--completeness] [--hint REF [--hint-value V]]... [--attach REF]... [--suggest SEAT] [--deadline ISO] [--neutral T] [--submission TOKEN]`
   asks the running swarm a question. `--completeness` says it asks for a complete set (every file, all connections, a complete list); a question whose words say so ("every", "all", "each", "complete list") is marked so without it, and `amend --no-completeness` takes the mark off. Its established or partial answer rests on a coverage record naming the areas searched (allocated, deleted, unallocated, slack, secondary), or the finish line holds it. It is written to the chain first and acknowledged after (the last line printed is the JSON of the act: `q`, `rev`, `scope`, the event's `seq` and `hash`, and what was delivered); then posted from `analyst:<you>`, offered to the suggested seat for its first minute (`SWARM_QUESTION_OFFER_SEC`) or to the most suited idle seat, and ranked first in every agent's header. A hint says where to look (a ref such as `input:<path>`, or a path in the run); `--hint-value` after it records what the hint says as an open hypothesis in the ledger. `--submission` makes a retry the same question.
 - `question <run> list [--json]` and `show Q-n [--json]`: every question, the triage queue and the clarifications waiting first; one question whole, with every revision, its offers, its leads, its answer and each signed act checked.
 - `question <run> amend Q-n --expect-rev N [--text T] [--why W] [--neutral T] [--completeness | --no-completeness] ...`: a new verbatim revision, refused unless N is the revision now; the standing answer, which names the revision it answers (`question_rev`), is stale until it is recorded again for the new one.
 - `question <run> priority Q-n urgent|normal [--reason R]`, `withdraw Q-n --why W`, `clarify-reply Q-n C-n TEXT`, `scope Q-n|L-n in_scope|excluded --why W`, `accept Q-n --as bounded|not_determinable --why W --expect-rev N`, `verify [--allowed-signers FILE] [--ca FILE]`. An acceptance takes a question's limits as they stand for that revision; it is refused while a lead under the question is still open (a route not yet closed) or its answer is a negative no other seat has reviewed, and any acceptance makes the run's outcome `examination_limited`. It excuses a partial store sweep, and evidence added before it (`evidence_stale`), never evidence added after it or the rest of the negative bar; its reply (`still_held`, and a line from `swarm.sh`) names what the finish line still holds on the question.
+- `question <run> premise add --text T [--locator L] [--class given|supplied_assertion|proposition_under_test] [--entity E]... [--time FROM..TO]... [--for-question Q-n]... [--why W]`: a premise the case takes, its words verbatim, where they stand, and what it is about (entities, time ranges, the questions it applies to; each optional, none meaning everything). A given unless `--class` says otherwise: a given is not proved again and is never an open part; a supplied assertion (a client's or a witness's statement) is assumed as asserted, and the report says so; a proposition under test is examined like any claim. `premise revise P-n --expect-rev N --why W [--text T] [--locator L] [scope flags | --no-scope]` makes a new revision (answers citing the earlier one are warned, never rewritten); `premise admit P-n --as given|supplied_assertion --why W` admits an agent's proposal (`premise_propose`: a proposition under test until then); `premise withdraw P-n --why W`; `premise list [--json]` and `premise show P-n [--json]` read them, with the answers that cite each. Two standing answers that assume and contradict one premise revision over scopes that overlap hold the run (`premise_inconsistent`) until they are reconciled on the record: one revised, the finding that rebuts the premise named (the premise then comes to you as a request of kind `premise`: revise it, withdraw it, or `requests <run> answer R-n "the premise stands, and why"`; nothing waits on your answer), a scope narrowed, or an answer made conditional ("assuming P-n"). Neither side is forced.
 - `lead <run> direct (--question Q-n | --new-question T --new-why W) --title T --why W --product P --acceptance A`: a directive, an unheld lead under a question with the product it is to make and what makes that acceptable. A directive is not signed (`--sign` is refused; sign the question it serves). Under a person's question no lead has framed yet, the first agent to claim it states the proposition and its negation.
 
 Every act takes `--as ID` (an enrolled person: a claim) and `--sign` (signed
 with that person's enrolled key in the namespace `dfirswarm-question`; the
 passphrase or PIN on the terminal or on the descriptor `--secret-fd N` names,
-as release signing takes it). On `accept`, `--as` names what is accepted, and
-a second `--as` the person. Without `--as` the act is this OS account's on
+as release signing takes it). On `accept` and `premise admit`, `--as` names
+what is accepted or admitted as, and a second `--as` the person. Without `--as` the act is this OS account's on
 this host, not enrolled, with the operator's authority. Who may do what: the
 operator and an examiner add in scope (`--objective new` expands the case),
-admit or exclude, amend, re-prioritise, withdraw and accept any question; an
+admit or exclude, amend, re-prioritise, withdraw and accept any question, and
+designate, revise, admit and withdraw premises (nobody else does); an
 analyst (`examiner enroll --role analyst`) adds questions, in scope inside an
 objective and proposed otherwise, and amends, re-prioritises and withdraws
 their own; a reviewer's question is a proposed review query; an observer
@@ -644,7 +650,9 @@ attempt, and the outcome naming the event. The console's Questions tab runs
 the same commands, with the person the console session chose as `--as`; an
 amend or accept form keeps the revision it was opened on until you refresh it,
 and a proposed question is a full card, so a clarification on it is answered
-before it is admitted.
+before it is admitted. It shows the premises with the same acts on them, and
+each answer's parts (established, or open with what bounds it), the premises
+it cites and a part a review says it leaves out.
 
 While the run's hub is up (a microVM run that is going) it is the register's
 one writer: `swarm.sh` hands each act, prepared and signed here, to the hub's

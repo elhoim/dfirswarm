@@ -151,6 +151,93 @@ revision, and a directive is framed at its first claim (items 1, 5 to 10).
    withdrawal and status checks, so a proposed, excluded or withdrawn
    question takes no work under any of its names.
 
+## Premises
+
+Added 2026-09-29 (the known-limits plan, item 6). A case brief supplies
+things several questions share: whose device it is, who the subject is, the
+scenario. Until now they were words in reasoning ("rests on the case
+premise that …"): on the runs the brainstorm of 2026-09-29 read (L4), one
+answer took a premise for granted while another answer's findings
+contradicted it and nothing on the record said so, and a partial answer
+held a premise open as if it were a part to prove. The three rounds agreed
+that only the operator designates a given, that an agent's premise is a
+proposition under test, and that a contradiction is reconciled on the
+record, never by forcing either side.
+
+- **P-n on this chain.** A premise is an event on `questions/questions.jsonl`
+  (`premise_add`, `premise_propose`, `premise_revise`, `premise_admit`,
+  `premise_withdraw`, each with `p: P-n`), not a side file: the same lock,
+  the same hash, the same custody seal, release binding and package. Each
+  carries its words verbatim and where they stand (its locator), its
+  authority (`goal`, `operator` or `agent`), its scope (the entities and
+  time ranges it is about, and the questions it applies to, each optional:
+  what a scope leaves out is unbounded), its revisions (each kept whole, as
+  a question's are) and its class. A chain from before the register folds
+  no premise and reads as it did (`extensions/premises.ts foldPremises`).
+- **Who makes a given.** Only the operator's premises are givens: the goal's
+  front matter `premises:` (the kickoff carries the list into a `## Premises`
+  section, where the register seeds each, verbatim, a bracket `[scope:
+  questions 1, 2; entities E; times FROM..TO]` read as its scope), `swarm.sh
+  question <run> premise add` (a given unless `--class` says
+  `supplied_assertion` or `proposition_under_test`), or the console's
+  Questions tab. The operator and an examiner designate; an analyst, a
+  reviewer and an observer do not (refused with why: ask it as a question).
+- **Classes.** A `given` is not proved again and is never an open part. A
+  `supplied_assertion` (a client's statement, a witness's) is assumed as
+  asserted, and the report says so. A `proposition_under_test` is examined
+  like any claim: an answer assumes it only conditionally.
+- **An agent proposes.** `premise_propose(text, locator, why, scope?)`
+  records a proposition under test (the locator and why required); the
+  operator admits it (`premise admit P-n --as given|supplied_assertion`),
+  which changes its class and never its revision. Revising (`premise revise
+  P-n --expect-rev N`, against the revision read; a stale one is refused,
+  not merged) makes a new revision; withdrawing needs its why. Every act on
+  a premise is told once to every seat, and the header lists the premises
+  that stand, whole.
+- **Answers cite premises.** `premises: [{id, rev, stance, refs?,
+  conditional?, scope?}]` on an answer to a question, stance `assumed`,
+  `supported`, `contradicted` or `unresolved`; present-only in the ledger's
+  hashed core (and in the fingerprint a summary is bound to), so an answer
+  without it hashes as it did. Checked where it is recorded, under the
+  registers' lock: the premise is in the register, not withdrawn, at the
+  revision cited; a proposition under test is assumed only with
+  `conditional: true`; a premise scoped to named questions is assumed
+  without a condition only by an answer to one of them; a citation's scope
+  lies inside its premise's; `supported` names a standing, undisputed
+  finding or event in its refs. Each refusal says how to fix it. A
+  citation's refs are citations as the reasoning's are.
+- **The gate `premise_inconsistent`.** It holds both questions while one
+  standing answer assumes a premise revision, without a condition, and
+  another contradicts the same revision, over scopes that overlap (two
+  scopes overlap unless both name entities and share none, or both name
+  times and no two ranges meet; a citation's scope is its own narrowing or
+  the premise's at that revision), and the contradiction names no standing,
+  undisputed finding that rebuts it. The ways out are all on the record and
+  none forces either side: revise an answer; name the rebutting finding in
+  the contradiction's refs, which takes the premise to the operator as a
+  dispute (an operator request of kind `premise`, one per premise
+  revision, closed when the premise is revised or withdrawn, answered on
+  the request, or withdrawn when no standing answer rebuts it any more)
+  and warns the answer that assumes it (`premise_disputed`); narrow either
+  citation's scope; or answer conditionally ("assuming P-n"). Uncertainty
+  alone (`unresolved`, `supported`) holds nothing. Fixed, never named; the
+  operator's acceptance of a question excuses it on that question, as it
+  excuses a dispute. An answer citing an earlier revision is warned
+  (`premise_revised`), as is one citing a withdrawn premise
+  (`premise_withdrawn`); nothing is rewritten.
+- **Where it shows.** The report lists the premises the examination took
+  (each whole, its class, revision, locator, scope, who designated it and
+  the answers that cite it) and, in each answer, how it stands on each
+  premise it cites ("assuming P-n: the answer holds only if it does"); the
+  console's Questions tab shows them with the operator's acts on them;
+  `questions/questions.md`, `swarm.sh question <run> premise list|show` and
+  the agents' `questions` view `premises` read them.
+
+What is not decided here: premises read from a brief's words (nothing is
+extracted; a premise is designated or proposed), a model judging whether
+two premises are one, and a recorded result derived from what reviews hold
+open (L3-A, waiting for the paired runs).
+
 ## Consequences
 
 - Every existing goal and run keeps working: `question:N`, `N` and `QN` stay
@@ -167,6 +254,10 @@ revision, and a directive is framed at its first claim (items 1, 5 to 10).
   ([ADR 0014](0014-the-case-contract-says-what-comes-in-and-what-is-asked.md))
   widened the hook to every sensitive value the run knows of, whatever its
   origin, and to names and `doing` labels.
+- A run's premises are on its question chain: custody seals them, a release
+  binds them and a package carries them with the register; a verdict taken
+  before a premise act verifies as a prefix after it. A run with no premise
+  reads, renders and replays as before.
 - What is not decided here: the result vocabulary and coverage records
   (Phase 1a, part 2), the acquisition lane, notifications and attachments as
   sealed material (Phase 1b), the full offer protocol and the reviewer's

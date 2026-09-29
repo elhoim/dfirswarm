@@ -6,6 +6,80 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Added: the premise register, and claim and open-part rows
+
+A case brief supplies things several questions share (whose device it is,
+who the subject is), and until now they were words in reasoning: one answer
+could take a premise for granted while another's findings contradicted it,
+with nothing on the record, and a partial answer could hold a premise open as
+if it were a part to prove. "Partial" was one word for a whole answer, and a
+review's parts named no part of the answer, so a part the answer never
+listed could not be seen to be missing. Now (ADR 0011, "Premises"; ADR 0013,
+"Claim and open-part rows"):
+
+- **Premises on the question chain.** A premise is a `P-n`, an event on
+  `questions/questions.jsonl` (`premise_add`, `premise_propose`,
+  `premise_revise`, `premise_admit`, `premise_withdraw`): its words
+  verbatim, where they stand, its authority, its scope (entities, time
+  ranges, the questions it applies to), its revisions and its class, sealed,
+  released and packaged with the register. Only the operator's premises are
+  givens: the goal's `## Premises` section or front-matter `premises:`
+  (seeded at the kickoff, a trailing `[scope: …]` read as its scope),
+  `swarm.sh question <run> premise add|revise|admit|withdraw`, or the
+  console's Questions tab. A given is not proved again and is never an open
+  part; a supplied assertion is assumed as asserted; an agent's proposal
+  (`premise_propose`, a new tool) is a proposition under test, assumed only
+  conditionally, until the operator admits it.
+- **Answers cite them.** `premises: [{id, rev, stance: assumed | supported
+  | contradicted | unresolved, refs?, conditional?, scope?}]`, checked under
+  the registers' lock (the revision read, a proposition under test only
+  conditional, a premise scoped to named questions only there, a narrowed
+  scope inside the premise's, `supported` on a standing finding), in the
+  ledger's hashed core only when present.
+- **The gate `premise_inconsistent`** holds both questions while standing
+  answers assume and contradict one premise revision over scopes that
+  overlap, and the contradiction names no standing finding that rebuts it.
+  The ways out are all on the record and none forces either side: revise an
+  answer; name the rebutting finding, which takes the premise to the
+  operator as a request of kind `premise` (one per revision, closed when the
+  premise is revised or withdrawn, or answered on the request) and warns the
+  answer that assumes it (`premise_disputed`); narrow a scope; or answer
+  conditionally ("assuming P-n"). Uncertainty holds nothing. An answer citing
+  an earlier revision or a withdrawn premise is warned (`premise_revised`,
+  `premise_withdrawn`).
+- **Claim and open-part rows.** `parts: [{id, part, status: established |
+  open, refs, open_by?}]` on an answer, against the verbatim revision it
+  answers: an open part names what bounds it, an acquisition ask `R-n`, a
+  route `L-n`, or a limitation or coverage record `E-n`; a premise never.
+  A partial answer with no open part is refused ("record it established or
+  name what is open"), an established one with an open part too. A review's
+  parts name the answer's rows by `id` and may add one it leaves out
+  (`missing`): that caps an established review as a part not held does, and
+  is warned of (`part_omitted`) until the answer is recorded again with it.
+  Review parts without ids and round 14's `declared_open` read as before.
+- **Where they show.** The report lists the premises the examination took
+  and, in each answer, its rows and how it stands on each premise; the
+  console's Questions tab shows premises (with the operator's acts) and each
+  answer's rows; `questions.md`, `ledger.md`, `swarm.sh question <run>
+  premise list|show` and the agents' `questions` view `premises` read them;
+  the header lists the premises that stand, and every premise act is told
+  once to every seat. The prompt and the record, attest and questions tools
+  say how to cite a premise and name an open part.
+- **Replay** codes the new warnings, and holds a run whose answers check
+  holds a question it reads as answered (as the finish line does). Contract
+  fixtures premise-given, premise-admitted, premise-scopes, premise-held,
+  premise-rebutted (a custody seal taken while it held verifies as a prefix
+  after it), premise-conditional and parts-omitted, their expectations
+  written from the ADRs; every fixture recorded before reads the same under
+  be4e6a3 and this checkout; tests/premises.test.ts.
+
+Replayed values-free (`swarm.sh replay --compare <be4e6a3> <this
+checkout>`): s5764c4 (Belka), sa2f2f2 and sb1b3c8 read the same under both
+harnesses, every question's disposition, defects, warnings, readiness and
+report; their partial answers, recorded without rows, are disposed as
+before. The generator's older cases were updated so that they can be
+recorded again under the rows rule; their committed histories were kept.
+
 ### Added: a source-first review with checked locators, and late evidence weighed with a delta
 
 On Belka a wrong value was attested established by three seats, each
