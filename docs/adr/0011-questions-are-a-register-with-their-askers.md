@@ -241,11 +241,17 @@ record, never by forcing either side.
   the request, or withdrawn when no standing answer rebuts it any more)
   and warns the answer that assumes it (`premise_disputed`); narrow either
   citation's scope; or answer conditionally ("assuming P-n"). Uncertainty
-  alone (`unresolved`, `supported`) holds nothing. Fixed, never named; the
-  operator's acceptance of a question excuses it on that question, as it
-  excuses a dispute. An answer citing an earlier revision is warned
-  (`premise_revised`), as is one citing a withdrawn premise
-  (`premise_withdrawn`); nothing is rewritten.
+  alone (`unresolved`, `supported`) holds nothing. The operator rules on
+  the premise too: a premise withdrawn, or a revision revised since, holds
+  nothing, and the answers citing it are warned instead (below). Fixed,
+  never named; the operator's acceptance of a question excuses it on that
+  question, as it excuses a dispute, in readiness, the accept act's
+  `still_held` and the answers check alike (`acceptanceExcuses`; the Fable
+  review of the limits branch found the check holding it). On a question
+  the operator marked not material it is a warning, never a hold, as every
+  other defect of the bar is held on material questions only. An answer
+  citing an earlier revision is warned (`premise_revised`), as is one
+  citing a withdrawn premise (`premise_withdrawn`); nothing is rewritten.
 - **Where it shows.** The report lists the premises the examination took
   (each whole, its class, revision, locator, scope, who designated it and
   the answers that cite it) and, in each answer, how it stands on each

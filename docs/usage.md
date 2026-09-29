@@ -353,19 +353,26 @@ watchdog had notified it.
   another seat reviews that, and the examination says how the evidence
   bears on the answer: a coverage record naming the import among its
   objects, attested by another seat, or an entry resting on the import,
-  attested likewise, cited by the answer recorded again, with an entry
-  whose refs name the import's files and that carries a delta, a `rel` to
-  the answer of kind supports, contradicts, adds_part, irrelevant or
-  inconclusive, cited by the answer or among that coverage record's
-  results; a review made before the evidence came does not count for it;
+  attested likewise, cited by the answer recorded again, with the entry
+  that examined the import carrying a delta (its refs name the import's
+  files; a `rel` to the answer of kind supports, contradicts, adds_part,
+  irrelevant or inconclusive), among that reviewed coverage record's
+  results, or cited by the answer and attested by another seat; a review
+  made before the evidence came does not count for it;
   an established answer is not staled; `question accept` after the
   evidence came excuses it, and its reply names what the finish line still
-  holds), searches the new files at once for every standing coverage
-  record's `looked_for` strings (the reverse sweep: the reply's
-  `reverse_sweep` counts it, the board post names each hit by question, the
-  stale answers say theirs, and on an answer it does not stale a hit its
-  answer does not reach is warned of, `late_evidence_hits`; a hit never
-  holds by itself), and, when the
+  holds), then, once it is committed and never inside it, searches the new
+  files for every standing coverage record's `looked_for` strings (the
+  reverse sweep: the reply's `reverse_sweep` says where it runs and for how
+  many records and strings; it runs in the hub's background, or, when the
+  addition was made here with no hub, as a detached step,
+  `scripts/reverse-sweep.ts`; a pass at a time within its own budget,
+  `SWARM_REVERSE_SWEEP_MAX_SEC`, 120, and `SWARM_REVERSE_SWEEP_MAX_BYTES`,
+  2 GiB, what a pass leaves named and searched by the next; each pass's
+  board post names its hits by question when it completes, the stale
+  answers say theirs, and on an answer it does not stale a hit its answer
+  does not reach is warned of, `late_evidence_hits`; a hit never holds by
+  itself; `evidence list` continues a sweep left undone), and, when the
   run's catalogue is on, runs a detect pass over each file (at
   once when the hub runs, else at its next round). While the hub runs the act
   is handed to it: it is the store journal's writer. **Every seat's VM mounts
@@ -997,10 +1004,11 @@ finished run measures the same whenever it is read.
 | Offers | Lead offers (`offer` events) by what became of each while it stood (from the offer to the lead's next claim, release, close or reopen), one outcome each, the first that applies in this order: accepted (a `claim` or `confirm` that names the offer), declined (`offer_decline`), taken by another seat (that next claim was another seat's, lapsed or not), lapsed (`offer_lapse`), else no outcome. By reason too (wake, hand-off, parked, reopen, confirm). Question offers: made, accepted (`offer_accept`), declined, and not taken up. A run from before offers has none; its `wake` events are counted apart: taken by the woken seat (its first claim of the lead in that open spell), by another seat, or not taken. A woken seat's claim is not the same measure as an accepted offer: a wake reserved nothing. Review offers (a limiting route's review, a material negative's review, `reason: route_review | negative_review`) are counted apart (`reviews`): taken up by the review they asked for (recorded by the seat offered, even after its offer ran out), declined, withdrawn (`offer_withdraw`: reviewed by another route, or the answer superseded), lapsed, or with no outcome; and how many their seat took first (`offer_take`). |
 | `done` calls | Every `done` line on the trace, and every `done_deferred` line (a seat's done that was not its finish: another seat coordinates it). Accepted: a done line with no refusal (and, of those, the one that wrote the sentinel); refused by the seat's checks, by why (the finish line not met, posts that landed after the report, the finish line unsettled, an abandon vote that did not end the run); refused by the hub (a `markDone` the hub refused: the seat saw a thrown error and wrote no done line; a refusal the hub counted and wrote once is that many calls); not the seat's finish. A done after the sentinel (a seat leaving) is an accepted call that wrote nothing. |
 | Finish | The finish's own acts ([ADR 0015](adr/0015-one-seat-finishes-and-work-is-offered.md), "Preparing the finish"). The first done that was a finish (not another seat's, not a seat leaving on its cap, not an abandon vote) and how it was answered, and whether it was refused on what was late against the report: the refusal `finish prepare` exists to remove (the goal's checks run only after it, so whether they would have passed is not in the trace; replay reads that on the registers). Every done refused on late items. The finish tool's calls by act (prepare, resolve and how many of those carried items, status, ack), so a refusal renamed into more calls cannot pass for a gain; the register's resolutions, the batches they came in and its checks. From ready (the tail's) to the end: the minutes, every seat's tokens in that span (from the same per-call record as the cost; none without one) and the finish's calls in it, through the done that wrote the sentinel. |
+| Warnings delivered | From the trace, each reply to a record, an attest, or a lead's close or confirmation that carried a warning, by act, and the warning codes they carried; from the lead register, each review of an answer offered and delivered to its seat (`offer_seen`), which leads with its source-first packet. Every finish status carries the warnings too (the finish's status calls). What the warning points and the packets cost, counted rather than assumed. |
 | Tail | From when the run was ready to its end (the sentinel's time, or the operator's stop). Ready is, where the finish register records readiness, the last turn to ready before the end that was not undone before it (a done that passed while readiness had not turned ready records the ready state itself, and the tail says so: "recorded by the done"); otherwise the moment every question in scope had its first answer. Two more tails are given apart, because they are not the same: from every question's first answer (any result, supported or not), and from every question's final answer (the one standing at the end). None while a question in scope has no answer; the unanswered are named. |
 | Acquisition | Operator requests of kind `acquisition`, by the stage each ended at (requested, authorised, collecting, received, validated, declined, unavailable), and those the case policy declined at once. A gap is a request that did not end validated (declined, unavailable, or still waiting), with the questions it named. Evidence added: the store journal's `evidence_added` lines, and how many answered a request. |
 | Interpretations | The lead register's `interpret` events, each bound to the entry it names: valid while that entry stands, otherwise on a superseded or on a disputed entry, or on none the ledger holds (the job needs interpreting again). Lead jobs never interpreted at all, and those with no valid interpretation left, are named. |
-| Reversals | A standing result that changed: an answer superseded by one of the same question with another `result` (a correction that keeps the result is counted apart, as a correction), and a lead closed negative that was reopened. The cause is new evidence when an `evidence_added` line came between the two (or the reopen's cause is `evidence_added`), and discoverable in the original evidence otherwise. A heuristic: evidence that came between is not proof it caused the change. |
+| Reversals | A standing result that changed: an answer superseded by one of the same question with another `result` (a correction that keeps the result is counted apart, as a correction), and a lead closed negative that was reopened. The cause is new evidence when an `evidence_added` line came between the two (or the reopen's cause is `evidence_added`), and discoverable in the original evidence otherwise. A heuristic: evidence that came between is not proof it caused the change. Apart: each answer that claimed established and was recorded partial after an attest of it was capped (`partial_after_cap`, with the seats that capped it), what the review rule's caps cost ([ADR 0015](adr/0015-one-seat-finishes-and-work-is-offered.md), "A source-first review"). |
 | Cost per question | Each call's tokens (input, output and cache, as `budget.json` counts them) and dollars, from the model gateway's log where the run has one, else the seats' Pi sessions, else each seat's total spread over its calls on the trace (`trace-estimate`), given to the leads its seat held when the call was made, in equal parts, and each lead's part to the questions it answers, in equal parts. A lead is held from its take to its release, close, reopen, hand-off or another seat's claim; a seat claiming what it holds keeps holding it. A call made while the seat held no lead is given to what it named (`named`: an attest or dispute to its entry's question, an act on a lead to that lead, a record to the questions it answers, a job's status to its lead); the finish's and the report's work made so is `finish_and_report`; calls that named nothing (`unheld`, with `by_kind`: waiting, compaction, coordination, reading, other), and parts of leads that answer no question, are counted apart; a call whose usage the provider did not report counts nothing. The same computation as the report's (`scripts/question-cost.ts`), shown with the same figures: the parts are kept exact until the end, then rounded to whole tokens and millionths of a dollar by the largest remainder (`roundParts`), so the questions, the unheld calls and the leads without a question add up to the run's totals. An apportionment, not a meter: a seat thinking about one lead while holding two is split evenly. |
 | Duplicates | From the store journal: jobs whose `job_similar` line names another seat's similar job (not counting declared reproductions), and of those the exact repeats (the same command or the same tool and arguments over the same objects); `independent: true` jobs, and those of them that had similar work to compare with; `job_same_as` lines (files, bytes, and jobs every non-empty output of which is an earlier job's); typed recipe requests answered with an earlier job (`job_deduplicated`); and, from older runs, the retired shadow merge's `job_would_merge` lines. |
 | Network | Requests and how the rules decided them (granted, denied, by each denial's code), operator items (and those still open), grants by status (granted, active, exhausted, expired, revoked), fetches, captures delivered (and complete), uses the fetch service refused, and contamination records. |
@@ -1070,8 +1078,9 @@ measure a rule change on recorded histories before paying for new runs
   that readiness holds under `--stop operator` only limits the done, by
   design (ADR 0015, 7 and 8), and is not counted a disagreement. An answer
   the check reads as answered while one of its own defects holds it (an
-  absence negative held on its source's broad extraction) is held by the
-  finish line through the check, and counted held. Where the checkout reads
+  absence negative held on its source's broad extraction), and a question
+  the gate reads accepted while the check holds a defect on it, are held by
+  the finish line through the check, and counted held. Where the checkout reads
   the store journal's preparation receipts, each source's broad extraction,
   capability by capability, and the questions held (`preparation_pending`)
   or warned (`preparation_missing`) on it, with their sources. Where the
@@ -1079,13 +1088,15 @@ measure a rule change on recorded histories before paying for new runs
   review"), how many established attests of answers that claim established
   the run recorded, and each the rule would cap, by question, answer, seat
   and codes (`no_discriminator`, `locator_unverified`,
-  `derivation_unverified`, `no_locator_or_derivation`): the recorded
+  `derivation_unverified`), and each it would warn and not cap
+  (`no_locator_or_derivation`, `warned`; a checkout before the Fable review
+  of the limits branch capped it): the recorded
   strengths stand, this says what the rule would have done at each attest
   (a locator into an input cannot be read in the copy, which leaves the
   evidence out, and says so). Where it reads the reverse sweeps (ADR 0013,
   "Late evidence: the reverse sweep and the delta"), each evidence
-  addition's: its state, how many standing coverage records and strings it
-  searched for, how many objects it read, and per question the hit objects
+  addition's, its passes read as one: its state, how many standing
+  coverage records and strings it searched for, how many objects it read, and per question the hit objects
   and occurrences, never a string. Where it has the review carry rule (ADR
   0015, "A review carries over"), the report's reviews replayed over its
   versions in `history/`: the acks, the re-reviews of a later version and

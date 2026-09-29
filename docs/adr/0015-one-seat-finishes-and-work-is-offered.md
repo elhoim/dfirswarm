@@ -492,7 +492,10 @@ each.
    item names the version it was folded into, as before. A stale generation
    or digest, or any item that is not late (resolved already, never late,
    named twice), refuses the whole batch with the exact stale fields, each
-   item's problem and every id still unresolved, and records nothing. The
+   item's problem and every id still unresolved, and records nothing; a
+   batch whose every item was resolved already (a retry under another key)
+   records nothing and says so, with what is still late or "nothing is late
+   against the report: call done", never "send the batch again". The
    same batch sent again under its key by the same seat (a retry after an
    interruption) is answered with what was recorded and what is still late:
    nothing twice, nothing hidden. Another batch under a key used already is
@@ -664,28 +667,41 @@ a second source.
   rival (another time, entity, mechanism or activity, or the premise not
   holding), the test, the result that would favour each, what it showed,
   and the observation or job it rests on (an E-<seq> the ledger holds or an
-  object that resolves; refused otherwise); `reproduced_at [{ref, offset,
+  object that resolves; never the answer under review, nor only entries the
+  answer already cites; refused otherwise); `reproduced_at [{ref, offset,
   length?, value?}]`, where each literal value it vouches for was read; and
   `derivation {job, inputs}`, how a derived value was derived.
 - **The hub's checks.** A locator's ref resolves to a sealed object of the
   run (an input, a job's output or log, an import, a capture, a sealed brain
   output; never a directory or a catalogue row), and its value is at its
-  offset, in UTF-8 or UTF-16LE, ASCII letters in either case; with a
-  length and no value, the bytes there are read back and must be words of
-  the answer. A bounded read at the offset, and 256 bytes either side to
-  say where the value is when it is not there: never a scan, never the
+  offset, in UTF-8 or UTF-16LE, ASCII letters in either case, and is among
+  the answer's words (its value and reasoning, at least three characters:
+  a locator vouches for what the answer says, never for any occurrence of
+  anything); with a length and no value, the bytes there are read back and
+  must be words of the answer. A bounded read at the offset, and 256 bytes
+  either side to say where the value is when it is not there: never a scan, never the
   object's whole hash (resolving it against its manifest is the seal). A
   derivation's job is sealed and ran to its end, and each input resolves
   and is among what the job declared it would read.
 - **The cap.** An established attest of an answer that claims established,
   on a material question, is recorded `best_candidate` when it names no
   discriminator that counts (a placeholder, or the rival in the test's
-  words, is none), when a locator does not verify, when a derivation does
-  not resolve, or when it names neither a locator nor a derivation. Each
-  reason is in `capped` (codes `no_discriminator`, `locator_unverified`,
-  `derivation_unverified`, `no_locator_or_derivation`), and the reply says
-  how to fix each; the seat's later review that meets them is its review,
-  as with the alternatives. The rule affects only claims of established: a
+  words, is none), when a locator does not verify, or when a derivation
+  does not resolve. Each reason is in `capped` (codes `no_discriminator`,
+  `locator_unverified`, `derivation_unverified`), and the reply says how to
+  fix each; the seat's later review that meets them is its review, as with
+  the alternatives. A review that names neither a locator nor a derivation
+  is warned, never capped (`no_locator_or_derivation`, in the attest's
+  reply and in finish status while no established review of the answer
+  locates a value or names a derivation): the approved rule capped a
+  missing discriminator and a locator that does not verify, and requiring
+  one of the two would cap a correct established answer that is an
+  inference over several entries, no single literal in the bytes and no
+  job that derived it, whose way out was to be recorded partial (the Fable
+  review of the limits branch). It stays a warning until the paired runs
+  show a cap catches more than it costs; the metrics count each answer
+  that claimed established and was recorded partial after a capped attest
+  (`reversals.partial_after_cap`), so the cost is measured. The rule affects only claims of established: a
   partial answer's review checks its claimed parts as before, its locators
   are checked and one that does not verify is said, and nothing is capped
   for it; partial stays a disposition. A best candidate asked for is not
@@ -703,8 +719,8 @@ established attest; the recorded strengths stand): on s5764c4 (Belka) six
 established attests of answers that claim established (questions 1, 2, 3,
 5, 8, 11), on sa2f2f2 two (questions 3, 6), and on sb1b3c8 three (two on
 question 1, one on question 5), and the rule would cap every one of them,
-for the same two reasons: no discriminator, and neither a locator nor a
-derivation. The established attests of partial answers (three on s5764c4,
+for want of a discriminator; each also names neither a locator nor a
+derivation, which the rule first capped and now warns of. The established attests of partial answers (three on s5764c4,
 eight on sa2f2f2) are not capped. Had the rule held at those attests, each
 of those answers would have been held a best candidate until a review
 named its rival, its test and where its values were read; replay cannot

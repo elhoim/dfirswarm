@@ -625,10 +625,13 @@ before any new rule.
   tied to the question:
   - one two seats hold (a second author, or another seat's attest) that
     the lead register recorded under a lead of the question, or that
-    names the question in its own `answers`, or whose `rel` links it to
-    an entry the answer cites (`answerCites`: its support, contrary,
+    names the question in its own `answers`, or whose `rel` supports or
+    contradicts an entry the answer cites, or weighs late evidence
+    against it (a delta kind; `answerCites`: its support, contrary,
     limitations and a downgrade's evidence, the correction standing for
-    each);
+    each): a `rel` that `duplicates` an entry or is `derived_from` one
+    says what it repeats or comes from, and ties it to nothing (the Fable
+    review of the limits branch);
   - one seat's, only when it names the question in its own `answers` and
     another question's standing answer relies on it (reaches it, directly
     or through what that answer cites): its author tied it to this
@@ -741,9 +744,15 @@ only while the extraction is under way.
   running or sealed, or on the record in any state. The seat that takes it
   runs it, or closes it deferred, infeasible or needs_operator citing a
   limitation that says why it is not run: that is the preparation's
-  decline, with the seat's why. A lead whose extraction reached an outcome
-  by any route (the lane, a seat under the lead or not) is closed by the
-  harness, withdrawn, citing the receipt.
+  decline, with the seat's why. A seat's close of it any other way
+  (resolved, duplicate, negative) with nothing that ran the extraction or
+  runs it now is its decline too, and the receipt says how it was closed
+  and that nothing ran it (the Fable review of the limits branch found it
+  left no receipt, the hold in place, and a fix that named the closed
+  lead). A lead whose extraction reached an outcome by any route (the
+  lane, a seat under the lead or not) is closed by the harness, withdrawn,
+  citing the receipt, while no seat holds it: a held lead is its holder's
+  to close.
 - **Receipts, on the store journal.** `type: preparation`, one line per
   step: planned (queued as a job, or offered as a lead), attempted (its
   job started), produced, partial or failed (its job ended: the generation,
@@ -766,8 +775,9 @@ only while the extraction is under way.
   says the event did not happen (`asserts_absence`), or a coverage record it
   cites is complete (the hub's object coverage) and names that source, or
   a directory holding it. It is a defect with its fix: the job to wait for,
-  or the lead to run or decline, or the operator's acceptance of the
-  question. Produced, partial, failed or declined releases it, and a later
+  or the lead to run or decline (never a closed one: its close is recorded
+  as the decline at the hub's next round, or the extraction is run
+  directly), or the operator's acceptance of the question. Produced, partial, failed or declined releases it, and a later
   run of a released capability does not hold again: the hold is a wait on
   work already queued or offered, never a demand that it succeed or that
   anything be found, so partial and not determinable stay honest
@@ -831,24 +841,40 @@ the citations already): the hits are delivered, and the delta is what
 clears.
 
 - **The reverse sweep.** When evidence is added (`scripts/material.ts`,
-  after the addition's external entry), the hub searches the import's files,
-  and only they, for the `looked_for` strings of every coverage record
+  after the addition's external entry), the import's files, and only they,
+  are searched for the `looked_for` strings of every coverage record
   standing at the addition (recorded before its entry, not corrected by
   then: `recordsStandingAt`, by seqs alone, so a reconciliation long after
   finds the same records). The search is the store sweep's: bytes and
   strings, in UTF-8 and UTF-16LE, ASCII case folded, each file streamed
-  whole, the same budget, and what it did not reach named (partial). Each
-  hit is bound to the records whose strings it holds (`bears_on`). The line
-  is on the sweeps' chain, version 2 with `of: "import"`, bound to the
-  addition's external entry by its hash, with the records (seq, hash,
-  questions, strings); a version 1 line is a coverage record's sweep, read
-  as before (`readSweeps`), and the chain, custody, the release and the
-  package carry both. Once per addition: applied again (the addition's
-  reconciliation), nothing more is written. A failure is a step pending,
-  applied at the next reconciliation.
+  whole. Each hit is bound to the records whose strings it holds
+  (`bears_on`). The line is on the sweeps' chain, version 2 with `of:
+  "import"`, bound to the addition's external entry by its hash, with the
+  records (seq, hash, questions, strings); a version 1 line is a coverage
+  record's sweep, read as before (`readSweeps`), and the chain, custody,
+  the release and the package carry both.
+- **After the addition, a pass at a time.** The sweep never runs inside
+  the addition: the addition commits and answers at once, and the sweep
+  runs after it, in the hub's background (a round's pass for each addition
+  not done, never awaited by the round) or, when the CLI made the addition
+  with no hub, as a detached step (`scripts/reverse-sweep.ts`, one at a
+  time) that runs passes until nothing is left or the run ends. A pass has
+  a budget of its own (`SWARM_REVERSE_SWEEP_MAX_SEC`, 120 s;
+  `SWARM_REVERSE_SWEEP_MAX_BYTES`, 2 GiB); what it leaves is named on its
+  line (`left`) and searched by the next pass, whose line continues it
+  (`pass`, `continues`), at the next round, until nothing is left: an
+  object larger than a pass's budget is searched by a pass of its own, and
+  one over the store sweep's own byte budget is named and not searched, as
+  the store sweep names it. Every line names what is not searched yet. The
+  Fable review of the limits branch found the first form awaited inside
+  the addition's lock with the store sweep's budget (16 GiB, 30 minutes),
+  holding the addition's post, the operator's reply and the hub's round as
+  long, and partial for good past it. A pass already recorded is not run
+  again; a failure is run again at the next round.
 - **Where the hits go.** To the re-examination of the questions they bear
-  on, and nowhere as a hold: the addition's board post says them by
-  question (each with the records whose strings it holds); a stale answer's
+  on, and nowhere as a hold: each pass's board post says its hits by
+  question when it completes (each with the records whose strings it
+  holds), and what the next pass searches; a stale answer's
   `evidence_stale` says those on its question, first among what to
   examine; and on a question whose answer the addition does not stale (an
   established one, or one examined since), a hit in an object no entry the
@@ -859,14 +885,20 @@ clears.
   the entry that names the object says what it is.
 - **The delta.** `evidence_stale` clears as before (the new evidence
   examined for the question on a coverage record naming the import, or an
-  entry resting on it, reviewed by another seat) and only when the answer,
-  or a coverage record it cites for its question recorded after the
-  addition (its results), cites an entry that interprets the import: a
-  standing entry recorded after the addition whose refs name the import's
-  objects (the import, or a file of it) and that carries a delta, a `rel`
-  to the question's answer (the one standing when it was written, or its
-  correction) of kind `supports`, `contradicts`, `adds_part`, `irrelevant`
-  (within the question's scope) or `inconclusive` (`deltasFor`). The rel
+  entry resting on it, reviewed by another seat) and only when the entry
+  that examined the import carries a delta: a standing entry recorded after
+  the addition whose refs name the import's objects (the import, or a file
+  of it), among the results of a coverage record the answer cites that
+  names the import and another seat reviewed (its reviewer saw it), or
+  cited by the answer (or as its contrary) and attested by another seat,
+  with a `rel` to the question's answer (the one standing when it was
+  written, or its correction) of kind `supports`, `contradicts`,
+  `adds_part`, `irrelevant` (within the question's scope) or `inconclusive`
+  (`deltasFor`). A delta on an entry nobody else looked at, beside a
+  coverage record somebody did, clears nothing: an `irrelevant` costs the
+  same review as any other delta (the Fable review of the limits branch).
+  The report's answer chain says each late delta that neither supports nor
+  contradicts the answer (irrelevant, inconclusive, adds_part). The rel
   kinds `adds_part`, `irrelevant` and `inconclusive` are new and name an
   answer (refused otherwise, with why); an entry is recorded with them as
   with any rel, in the chained core only when present, so an old entry
@@ -874,8 +906,9 @@ clears.
   contradiction until the answer is recorded again; the answer may cite it
   as contrary evidence. The defect says what it lacks: the records before
   the addition, those after it that do not name the import, those not yet
-  reviewed, an examination with no delta, and the entries that interpret
-  the import with none. The operator's acceptance after the addition still
+  reviewed, an examination with no delta, the entries that interpret the
+  import with none, and those that carry a delta outside the reviewed
+  examination. The operator's acceptance after the addition still
   excuses it (`acceptanceExcuses`, unchanged).
 - **Old runs.** The rule reads the registers as they are, so a run from
   before it replays with its examined-and-reviewed answers stale again

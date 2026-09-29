@@ -175,7 +175,13 @@ is trusted or a paid run is spent on it.
   every fixture and every stop policy it names: readiness, the answers
   check and the finish gate agree on each question's disposition; a warning
   never holds; every custody verdict verifies as a prefix. A later item adds
-  its own cases.
+  its own cases. The Fable review of the limits branch found the agreement
+  blind to a question the gate reads accepted while the answers check still
+  holds a defect on it (the check's verdict refuses the done): replay now
+  counts that question held through the check, and two fixtures hold it
+  (`accepted-excused`, a premise pair and an unreviewed answer, all
+  accepted, disposed and ready; `accepted-negative-held`, an accepted
+  negative whose coverage went stale after it, held by all three).
 - **The acceptance** is the c10 cascade replayed under both rules: under
   3338e3c (the harness s9722fa ran with) readiness holds the six partial
   answers as best candidates while the answers check and the gate dispose

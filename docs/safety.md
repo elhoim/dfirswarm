@@ -209,7 +209,9 @@ back to a host run on its own.
     a job that runs or evaluates code from the evidence, an extraction or a
     job's output is flagged from its words (the seat's reply, the trace,
     the report's job record), never refused, and the prompt says the rule
-    covers every way of running. The finish line, custody and the report
+    covers every way of running. A path that is an output of the seat's own
+    command job is said apart (code the seat wrote there itself is not the
+    evidence's; code that job recovered is), and still flagged. The finish line, custody and the report
     are decided on the host, never from what a VM reads.
   - Inside a VM the extension's refusals are the agent's own code under the
     guest's root: tool refusals, claim-before-write, the self-compaction lock,

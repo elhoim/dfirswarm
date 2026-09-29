@@ -6,6 +6,50 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Fixed: the findings of an independent review of the limits branch
+
+Fable's review of the branch (one P1, four P2, ten P3) found one place
+where the readers of the finish disagreed, and several where a rule held,
+capped or waited beyond what was decided. Each fix has its test; the
+contract fixtures gained two cases.
+
+- **An acceptance excuses the same everywhere (P1).** The answers check
+  dropped only a partial sweep, stale evidence and a pending preparation on
+  an accepted question, while readiness and the accept act's `still_held`
+  excuse every defect but the negative bar's: an accepted question held
+  `premise_inconsistent` or `no_critic_act` was clear in readiness and
+  refused by the check's verdict. The check now reads `acceptanceExcuses`
+  alone. Replay counts such a question held through the check; fixtures
+  `accepted-excused` and `accepted-negative-held`.
+- **The operator's ruling on a premise releases its conflict.** A premise
+  withdrawn, or a revision revised since, holds nothing; the answers citing
+  it are warned (`premise_withdrawn`, `premise_revised`). On a question not
+  material the conflict is a warning.
+- **A locator vouches for what the answer says.** Its value must be among
+  the answer's words, else `locator_unverified`.
+- **No locator or derivation is warned, not capped.** The approved rule
+  capped a missing discriminator and a locator that does not verify; the
+  third cap is now the warning `no_locator_or_derivation`, and the metrics
+  count each established answer recorded partial after a capped attest
+  (`reversals.partial_after_cap`).
+- **The reverse sweep runs after the addition.** An evidence addition
+  commits and answers at once; the sweep runs in the hub's background or
+  as a detached step (`scripts/reverse-sweep.ts`), a pass at a time within
+  its own budget (`SWARM_REVERSE_SWEEP_MAX_SEC`, 120;
+  `SWARM_REVERSE_SWEEP_MAX_BYTES`, 2 GiB), what a pass leaves searched by
+  the next, each pass posted when it completes.
+- **Smaller fixes.** A late delta clears stale evidence only on the entry
+  that examined the import, under review, and the report says irrelevant,
+  inconclusive and adds_part deltas; a preparation lead closed without a
+  run is its decline, a hold's fix never names a closed lead, and the
+  harness closes only a preparation lead no seat holds; evidence code
+  says a seat's own job output apart, a JSON `require` is not flagged, and
+  the chip reads "may have run"; `lead_findings_uncited` ignores
+  `duplicates` and `derived_from` rels; a discriminator may not rest on the
+  answer, nor only on what it cites; a batch whose items were all resolved
+  already records nothing and says so; the metrics count warning deliveries
+  and review packets.
+
 ### Added: a command or job that runs code recovered from the evidence is flagged
 
 On the c10 run sd9645b one seat's seven password-test jobs (worker VMs,
@@ -25,7 +69,7 @@ is not no-exec at all. Now:
   s10d40e, s7827e1 or sa2f2f2.
 - **Where it is said**: the `bash` result's note and an `evidence_code`
   trace event; the `job_run` reply's `evidence_code` and its trace row; the
-  report's job record ("evidence code executed") and a list in Appendix B.
+  report's job record ("evidence code may have run") and a list in Appendix B.
 - **The prompt, the contract and the kickoff** say that never running
   recovered code covers every way of running it, that no-exec does not stop
   an interpreter and a job's output is not no-exec, and what to do instead:
