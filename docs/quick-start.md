@@ -249,6 +249,11 @@ scripts/swarm.sh net <id> grant NR-2 --why "the geocoder is needed for Q5"
 # a run paused at a cap: more time (or --tokens, --usd) lifts the pause
 scripts/swarm.sh extend <id> --minutes 30
 
+# hold a going run yourself, and let it go on; unpause also tries again at
+# once when the model provider's limit paused it
+scripts/swarm.sh pause <id> --why "the client asked us to wait"
+scripts/swarm.sh unpause <id>
+
 # a run that ended: continue it on its own chains, with a new question
 scripts/swarm.sh resume <id> --question "When was the stick first attached?"
 
@@ -268,10 +273,13 @@ scripts/swarm.sh tools <id> --candidates
 - **The network** ([usage.md](usage.md#the-dynamic-network-net)): a refusal
   stops that avenue, never the lead; one item per host and lead waits for
   you.
-- **The stop policy and resume**
-  ([usage.md](usage.md#the-stop-policy-extend-stop-resume)): a cap pauses the
-  run by default; `stop` ends it as stopped, never completed; `resume`
-  continues the same run, and an earlier seal still verifies as a prefix.
+- **The stop policy, pauses and resume**
+  ([usage.md](usage.md#the-stop-policy-extend-pause-unpause-stop-resume)): a
+  cap pauses the run by default; so does the model provider refusing every
+  seat, under any policy, until the time it named or a try every 30 minutes;
+  `pause` holds it under any policy and `unpause` lifts a pause whose cause is
+  gone; `stop` ends it as stopped, never completed; `resume` continues the
+  same run, and an earlier seal still verifies as a prefix.
 - **Metrics and tool candidates**
   ([usage.md](usage.md#metrics-swarmsh-metrics-scriptsmetricsts),
   [usage.md](usage.md#the-report-the-outputs-and-the-code-left-behind)): read
@@ -392,5 +400,5 @@ recorded or a report changed after it shows the sign-off is not current.
 cites, while every chain in the package still verifies, and `--with-outputs`
 adds the jobs' sealed outputs. `hold <id>` keeps a run from being purged or reused;
 `purge <id> --yes` deletes a finished run's material and leaves a
-destruction record. [usage.md](usage.md#after-a-run-review-package---sign-verify-export-hold-release-purge)
+destruction record. [usage.md](usage.md#after-a-run-examiner-machine-review-releases-timestamp-rerun-package---sign-verify-certify-export-hold-release-purge)
 has each command.
