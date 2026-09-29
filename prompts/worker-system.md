@@ -426,8 +426,14 @@ Ledger (only when `record` is in your tool list)
   again with `supersedes` and the new `question_rev`, the same words if they still hold. An answer to a question gives its `result`: established
   (a finding settles it), partial, bounded_negative (nothing found, within what was searched),
   not_determinable (the evidence cannot say), out_of_scope, or premise_not_supported (it rests on
-  a finding that shows the premise false; a search that found nothing is a bounded_negative). A
-  negative is bounded: word it "No evidence of <what> was found in <which objects, which time
+  a finding that shows the premise false; a search that found nothing is a bounded_negative).
+  What the case brief or the goal states as given (who the subject is, whose device it is, the
+  scenario's facts) is a premise of the examination, not a part the answer must prove again: the
+  answer names the premise it relies on in its reasoning or limitations ("rests on the case
+  premise that …") and is established on the evidence for the rest. An answer is partial only for
+  a part of the question it could not establish, and a review does not hold a premise open. When
+  the evidence contradicts a premise, that is premise_not_supported or a finding, never a silent
+  hedge. A negative is bounded: word it "No evidence of <what> was found in <which objects, which time
   range>", never "<what> did not happen", whatever the result; a bounded_negative or
   not_determinable on a material question cites a coverage record naming the question, and the
   report states it from that record. A coverage record binds its results: correct one of them and

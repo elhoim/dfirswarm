@@ -570,8 +570,13 @@ async function goalExtraSections(sandboxRoot: string): Promise<string[]> {
   return out;
 }
 
-/** Readiness at a revision; `confirming`, the items among `items` that are closures waiting for their closer's confirmation. */
-export type Readiness = { ready: boolean; revision: string; items: string[]; limited: string[]; confirming: string[] };
+/**
+ * Readiness at a revision; `confirming`, the items among `items` that are
+ * closures waiting for their closer's confirmation; `warnings`, what the
+ * ledger gate warns of on the answers (protocol.ts LedgerWarning): said in
+ * finish status, never held on.
+ */
+export type Readiness = { ready: boolean; revision: string; items: string[]; limited: string[]; confirming: string[]; warnings: string[] };
 
 const readinessCache = new Map<string, Readiness>();
 
@@ -637,7 +642,11 @@ async function computeReadiness(sandboxRoot: string, s: L.LeadsSnapshot, revisio
   const { producerOf } = hygiene ? await hygiene.producerIndex(sandboxRoot).catch(() => ({ producerOf: (_ref: string) => null })) : { producerOf: (_ref: string) => null };
   const partial = P.partialOutputCites(s.ledger.entries, producerOf);
   const sweeps = await import("./store-sweep.ts").then((SW) => SW.readSweeps(sandboxRoot)).catch(() => []);
-  const gate = P.ledgerGate({ entries: s.ledger.entries, attestations, disputes, sections, bar: barOf, partial, sweeps });
+  // The case policy, so a warning's fix reads as the answers check words it.
+  const moreEvidence = await import("./requests.ts").then((R) => R.casePolicyMoreEvidence(sandboxRoot)).catch(() => "ask" as const);
+  const gate = P.ledgerGate({ entries: s.ledger.entries, attestations, disputes, sections, bar: barOf, partial, sweeps, moreEvidence });
+  // What the gate warns of: shown to every seat that reads finish status, and never an item.
+  const warnings = gate.warnings.map((w) => `${w.what}. ${w.fix}`);
   const accepted = new Set<string>();
   const acceptedAt = new Map<string, number | null>();
   for (const q of s.questions?.state.questions.values() ?? []) {
@@ -706,7 +715,7 @@ async function computeReadiness(sandboxRoot: string, s: L.LeadsSnapshot, revisio
   const budget = await P.readBudget(sandboxRoot).catch(() => null);
   const operatorStop = P.stopPolicyOf(budget) === "operator";
   const blocking = operatorStop ? [...items, ...holdsUnderOperator] : items;
-  return { ready: !blocking.length, revision, items: blocking, limited, confirming: confirming.filter((c) => blocking.includes(c)) };
+  return { ready: !blocking.length, revision, items: blocking, limited, confirming: confirming.filter((c) => blocking.includes(c)), warnings };
 }
 
 
@@ -715,7 +724,7 @@ async function computeReadiness(sandboxRoot: string, s: L.LeadsSnapshot, revisio
  * told to call done and everyone else to wait; not ready again, what came
  * up. Recorded in the finish register, so a restart posts nothing twice.
  */
-export async function syncReadiness(sandboxRoot: string, r: Readiness): Promise<boolean> {
+export async function syncReadiness(sandboxRoot: string, r: Omit<Readiness, "warnings">): Promise<boolean> {
   const st = await readFinish(sandboxRoot);
   const last = st.readiness;
   if (last && last.ready === r.ready) return false;
@@ -827,6 +836,8 @@ export async function finishStatus(ctx: P.SwarmContext): Promise<Record<string, 
     revision: r.revision,
     items: r.items,
     limited: r.limited,
+    // What the answers check warns of and the finish never holds on: the coordinator weighs each before its done.
+    ...(r.warnings.length ? { warnings: r.warnings } : {}),
     coordinator: st.lease ? { holder: st.lease.holder, generation: st.lease.generation, why: st.lease.why, report: st.lease.report, digest } : null,
     ...(last ? { last_check: { revision: last.revision, current: last.revision === r.revision, proceed: last.proceed, outcome: last.outcome ?? null, reason: last.reason ?? null, by: last.by, at: last.at } } : {}),
     acks: st.acks.filter((a) => a.digest === digest).map((a) => ({ seq: a.seq, by: a.by, verdict: a.verdict, why: a.why })),

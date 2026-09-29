@@ -11562,7 +11562,7 @@ export type LedgerGate = {
   open: LedgerDefect[];
   /** Every standing answer's unsupported tokens, by seq (the release counts them). */
   unsupported: Record<number, string[]>;
-  /** What the gate says and does not hold on (a not-determinable answer that names no acquisition ask, nor why none). */
+  /** What the gate says and does not hold on (LedgerWarning). */
   warnings: LedgerWarning[];
 };
 
@@ -11767,8 +11767,22 @@ export function noMoreEvidenceAskFix(coverage: number[], answer: number): string
   return `this case admits no further evidence (more_evidence: no), so open no acquisition ask: record the coverage again${coverage.length ? ` with supersedes=${coverage[0]}` : ""} with acquisition_none_why: "${NO_MORE_EVIDENCE_NONE_WHY}", and the answer again with supersedes=${answer} citing it`;
 }
 
-/** A warning the gate says and does not hold on: shown with the answers check, counted in the finish line's note. */
-export type LedgerWarning = { code: "no_acquisition_ask"; section: string; seqs: number[]; what: string; fix: string };
+/**
+ * A warning the gate says and does not hold on: shown with the answers
+ * check, counted in the finish line's note, and listed by readiness (finish
+ * status). no_acquisition_ask: a not-determinable answer names no ask, nor
+ * why none. partial_all_parts_established: a partial answer every review of
+ * which holds every part it weighed established.
+ */
+export type LedgerWarning = { code: "no_acquisition_ask" | "partial_all_parts_established"; section: string; seqs: number[]; what: string; fix: string };
+
+/**
+ * What a partial answer's warning says of a case premise: what the case
+ * brief or the goal states as given is a premise, named, never a part held
+ * open (the run s993d40: two complete answers stood partial on whether the
+ * person the brief names did it).
+ */
+export const CASE_PREMISE_WORDS = 'what the case brief or the goal states as given (who the subject is, whose device it is, the scenario\'s facts) is a premise of the examination, not a part to prove again: name it ("rests on the case premise that …") and answer on the evidence for the rest';
 
 /**
  * The ledger gate: each wanted section's answer (question:<id>, summary,
@@ -11939,6 +11953,25 @@ export function ledgerGate(o: { entries: LedgerEntry[]; attestations: LedgerAtte
           seqs: [a.seq, ...covNow.map((c) => c.seq)],
           what: `answer #${a.seq} (${sec.section}) is not determinable, and ${covNow.length ? `its coverage record${covNow.length === 1 ? "" : "s"} ${covNow.map((c) => `E-${c.seq}`).join(", ")} name${covNow.length === 1 ? "s" : ""}` : "it rests on no coverage record that names"} no acquisition ask and no reason for none`,
           fix: o.moreEvidence === "no" ? noMoreEvidenceAskFix(covNow.map((c) => c.seq), a.seq) : `when the question needs a source the evidence does not hold, open an acquisition ask (lead_close needs_operator with ask {kind: acquisition, source, where, expected_value, urgency}) and record the coverage again with acquisition_ask: "R-<n>"; otherwise say why none would settle it in acquisition_none_why`,
+        });
+      }
+    }
+    // A partial answer whose every review holds every part it weighed
+    // established, at least one of them attesting it established: the
+    // partial label is then most often a hedge (on s993d40, whether the
+    // person the case brief names did it). A warning: partial is for a part
+    // the evidence could not establish, and the recorder says which.
+    if (bar && result === "partial") {
+      const reviews = answerReviews(a, o.attestations);
+      const weighed = reviews.filter((x) => x.answer_review?.parts?.length);
+      const established = reviews.filter((x) => x.strength === "established");
+      if (weighed.length && established.length && weighed.every((x) => x.answer_review!.parts.every((p) => p.established === true))) {
+        warnings.push({
+          code: "partial_all_parts_established",
+          section: sec.section,
+          seqs: [a.seq],
+          what: `answer #${a.seq} (${sec.section}) is partial, and every review holds every part it weighed established (${[...new Set(weighed.map((x) => x.by))].join(", ")}; attested established by ${[...new Set(established.map((x) => x.by))].join(", ")})`,
+          fix: `an answer is partial only for a part of the question the evidence could not establish: say which part is open (in its reasoning or limitations, citing what bounds it), or record the answer again with supersedes=${a.seq} and result established; ${CASE_PREMISE_WORDS}`,
         });
       }
     }
@@ -12263,7 +12296,7 @@ export type FinishGateView = {
   accepted?: string[];
   /** What holds a run under the operator's stop policy beside its questions: a defect a limitation only names. */
   holding?: string[];
-  /** What the answers check warns of and does not hold on (a not-determinable answer that names no acquisition ask): said in the verdict's note. */
+  /** What the answers check warns of and does not hold on (LedgerWarning: a not-determinable answer that names no acquisition ask, a partial answer every review holds whole): said in the verdict's note. */
   warnings?: string[];
   error?: string;
 };
