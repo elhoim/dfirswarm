@@ -39,6 +39,7 @@
     "index.tsv",
     "coverage.json"
   ],
+  "purpose": "inventory",
   "covers": "Static headers, sections, imports or linked libraries, and whole-file entropy. It does not execute, unpack, decompile or claim observed behaviour.",
   "sha256": "96ca2ee08e3107b783f7beba0a1576ea071184d170fb7c0b78f35a3de8409098"
 }

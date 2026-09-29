@@ -33,6 +33,7 @@
     "index.tsv",
     "coverage.json"
   ],
+  "purpose": "inventory",
   "covers": "The paths, sizes and archive timestamps of mobile-forensic structures in one iOS full file-system tar, plus SQLite companion presence. It extracts nothing, parses no artifact content, decrypts no protected data and does not claim that a listed path contains responsive records.",
   "sha256": "4e00bad3f6b3a32820b92160135d3dc47d81b19c2b6649c7a2fa848403ee9454"
 }

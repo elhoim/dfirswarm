@@ -1,0 +1,51 @@
+{
+  "id": "android-aleapp",
+  "version": "1.0.0",
+  "description": "A broad extraction of an Android full file-system acquisition (a tar, plain or compressed, or a zip, holding a userdata root): ALEAPP runs every artefact module over the whole of it and writes a TSV report per artefact, a timeline database and an HTML report, the searchable form of what the phone holds.",
+  "object": "Android full file-system archive",
+  "order": 38,
+  "min_bytes": 1024,
+  "suffixes": [
+    ".tar",
+    ".tgz",
+    ".tar.gz",
+    ".tar.xz",
+    ".tar.bz2",
+    ".zip"
+  ],
+  "magic": [
+    {
+      "offset": 257,
+      "hex": "7573746172"
+    },
+    {
+      "offset": 0,
+      "hex": "504b0304"
+    }
+  ],
+  "runtime": "python3",
+  "entry": "run.py",
+  "auto": [
+    "kickoff"
+  ],
+  "purpose": "broad_extraction",
+  "capability": "android-artifacts",
+  "exclusions": [
+    "artefacts no module of the pinned ALEAPP release parses: their files stay in the source, unread by this extraction",
+    "deleted records beyond what a module reads itself (SQLite free pages, WAL): nothing is carved",
+    "protected data that needs a key it does not have (file-based encryption without its keys)",
+    "archives nested inside the acquisition"
+  ],
+  "limits": {
+    "seconds": 14400
+  },
+  "outputs": [
+    "aleapp/",
+    "aleapp.stdout",
+    "aleapp.stderr",
+    "index.tsv",
+    "coverage.json"
+  ],
+  "covers": "What ALEAPP's modules parse from the whole acquisition: one TSV per artefact that has records, its timeline and every file it wrote, kept under aleapp/. A module that finds nothing writes no report, which does not show the artefact never existed; files no module targets are not read.",
+  "sha256": "51f2412cd4a0b7547992b79a2780fa5c4aa937c19584e40f2db14ad16e8b091b"
+}

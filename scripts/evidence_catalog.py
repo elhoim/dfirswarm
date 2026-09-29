@@ -24,6 +24,15 @@ the run is up, and the rows say "planned". Recipes come from each
 --recipes-from pack directory, else SWARM_PACK_DIRS (colon-separated), else
 the computer-forensics-base pack in this checkout.
 
+A recipe whose pack declares it a broad extraction (`purpose:
+broad_extraction`: a parse of the whole source into a searchable form, as
+opposed to an inventory of what it holds) is asked too, whatever its `auto`.
+Each one that applies to an input is listed in plan.json's `preparations`
+(recipe, capability, whether the kickoff runs it, and the pack's why when
+the job images cannot run it), for the hub to record and offer
+(scripts/preparation.ts, docs/adr/0013); only one whose `auto` holds
+"kickoff" runs here or is planned with the rest.
+
 The index, catalog/README.md, lists every catalog file with its row count and
 size and what was not catalogued; swarm.sh copies it into SWARM.md.
 """
@@ -111,7 +120,9 @@ def human(b):
 
 
 def list_recipes(packs):
-    """The recipes whose auto holds "kickoff", pack by pack, then by order and name."""
+    """The recipes whose auto holds "kickoff", and every broad extraction
+    (they are offered, not run, unless kickoff holds them too), pack by pack,
+    then by order and name."""
     seen, rows = set(), []
     for pack in packs:
         try:
@@ -128,7 +139,8 @@ def list_recipes(packs):
                 r = json.load(open(os.path.join(d, "recipe.json")))
             except Exception:
                 continue
-            if "kickoff" not in (r.get("auto") or []):
+            broad = r.get("purpose") == "broad_extraction"
+            if "kickoff" not in (r.get("auto") or []) and not broad:
                 continue
             found.append((int(r.get("order", 100)), name, d, r))
         for _o, name, d, r in sorted(found, key=lambda x: (x[0], x[1])):
@@ -136,9 +148,15 @@ def list_recipes(packs):
             if rid in seen:
                 continue
             seen.add(rid)
+            broad = r.get("purpose") == "broad_extraction"
+            unavailable = str(r.get("unavailable") or "").strip()
             rows.append({"id": rid, "name": name, "dir": d, "runtime": r.get("runtime", "bash"), "min_bytes": int(r.get("min_bytes", SMALL)),
                          "entry": r.get("entry", ""), "seconds": int((r.get("limits") or {}).get("seconds", 900)),
-                         "object": r.get("object", "object"), "sha256": r.get("sha256", "")})
+                         "object": r.get("object", "object"), "sha256": r.get("sha256", ""),
+                         # Runs at the kickoff: its auto says so, and its pack does not say the images cannot run it.
+                         "kickoff": "kickoff" in (r.get("auto") or []) and not unavailable,
+                         "broad": broad, "capability": str(r.get("capability") or "").strip() or rid,
+                         "version": str(r.get("version", "")), "unavailable": unavailable})
     return rows
 
 
@@ -181,6 +199,7 @@ class Catalog:
         self.plan_only = plan_only
         self.recipes = list_recipes(packs)
         self.index, self.notes, self.coverage, self.plan = [], [], [], []
+        self.preparations = []
         self.collections = []
         self.objects = {}
         for r in self.recipes:
@@ -286,8 +305,20 @@ class Catalog:
                 whys.append(line)
             rmdir_quiet(os.path.join(self.out, "probes", slug))
             rmdir_quiet(os.path.join(self.out, "probes"))
+        # Every broad extraction that applies is listed for the hub to record
+        # and offer; only a kickoff recipe runs (or is planned) here.
+        offered = []
+        for r in applied:
+            if not r["broad"]:
+                continue
+            self.preparations.append({"input": rel_raw, "recipe": r["id"], "capability": r["capability"], "version": r["version"],
+                                      "recipe_sha256": r["sha256"], "auto": r["kickoff"], "target": target,
+                                      **({"unavailable": r["unavailable"]} if r["unavailable"] else {})})
+            if not r["kickoff"]:
+                offered.append("%s (%s)" % (r["id"], "declared, and it cannot run in this run's job images: " + r["unavailable"] if r["unavailable"] else "a broad extraction, offered once the run is up"))
+        applied = [r for r in applied if r["kickoff"]]
         if not applied:
-            self.cover(rel_raw, size, "not catalogued", "no recipe of this run applies" + (": " + "; ".join(whys) if whys else ""))
+            self.cover(rel_raw, size, "not catalogued", ("no recipe of this run catalogues it" if offered else "no recipe of this run applies") + (": " + "; ".join(whys) if whys else "") + ("; " + "; ".join(offered) if offered else ""))
             return
         statuses, by = [], []
         for n, r in enumerate(applied):
@@ -325,7 +356,7 @@ class Catalog:
             statuses.append(status)
             by.append("%s:%s" % (r["id"], status))
             rmdir_quiet(d)
-        who = ", ".join(by)
+        who = ", ".join(by) + ("; " + "; ".join(offered) if offered else "")
         if self.plan_only:
             self.cover(rel_raw, size, "planned", "to be catalogued once the run is up by " + who)
         elif all(s == "complete" for s in statuses):
@@ -357,9 +388,9 @@ class Catalog:
         self.add_index("coverage.tsv", "every input, one row each: path, bytes, status (catalogued, partial, planned, segment, not catalogued, not probed) and why")
         if self.plan_only:
             with open(os.path.join(self.out, "plan.json"), "w", encoding="utf-8") as fh:
-                json.dump({"recipes": self.plan, "collections": self.collections}, fh, indent=2, ensure_ascii=False)
+                json.dump({"recipes": self.plan, "collections": self.collections, "preparations": self.preparations}, fh, indent=2, ensure_ascii=False)
                 fh.write("\n")
-            self.add_index("plan.json", "what the job service runs once the run is up: recipe, input, target")
+            self.add_index("plan.json", "what the job service runs once the run is up: recipe, input, target; and every broad extraction that applies (preparations)")
         objects = "".join("%d %s(s), " % (n, obj) for obj, n in self.objects.items())
         lines = ["Summary: %s%d catalog file(s); %d input file(s): %d catalogued, %d partial, %d planned, %d segment(s) of a set, %d not catalogued, %d not probed"
                  % (objects, len(self.index), len(self.coverage), self.count("catalogued"), self.count("partial"), self.count("planned"),
@@ -370,6 +401,13 @@ class Catalog:
         lines += ["", "Coverage: every input has a row in `catalog/coverage.tsv` with its status and why. An input that is not catalogued has no file list or timeline here: open it with other tools. Missing from the catalog is not missing from the evidence."]
         if self.plan_only and self.count("planned"):
             lines += ["", "Being built: the inputs marked planned are catalogued by the job service once the run is up; each recipe's result is a generation under `catalog/gen/`, each change a new numbered revision under `catalog/revisions/`, announced on the board."]
+        if self.preparations:
+            lines += ["", "Broad extractions (a pack's parse of a whole source into a searchable form; the rest of the catalogue only inventories): each applies to the input named, and is %s. A negative that says an event did not happen on a source, or whose coverage is complete over it, waits for its source's to be produced, partial, failed or declined:" % ("run by the kickoff where it says so, and otherwise offered as a lead once the run is up" if self.plan_only else "listed here; with no job service no receipt is kept")]
+            for p in self.preparations[:LIST_AT_MOST]:
+                how = "declared, and it cannot run in this run's job images: %s" % p["unavailable"] if p.get("unavailable") else ("run by the kickoff" if p["auto"] else "offered as a lead")
+                lines.append("- `%s`: %s %s (%s)" % (shown(p["input"]), p["recipe"], p["version"], how))
+            if len(self.preparations) > LIST_AT_MOST:
+                lines.append("- and %d more, every one in `catalog/plan.json`" % (len(self.preparations) - LIST_AT_MOST))
         lines += self.listing("planned", "Planned")
         lines += self.listing("not catalogued", "Not catalogued")
         lines += self.listing("partial", "Catalogued in part")

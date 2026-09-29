@@ -73,6 +73,75 @@ python3 "$PACK/recipes/android-backup/run.py" run --target "$AB_TARGET" --out "$
 jq -e '.status == "complete" and .covered == "3 embedded tar members"' "$WORK/ab-out/coverage.json" >/dev/null
 [[ "$(($(wc -l < "$WORK/ab-out/members.tsv") - 1))" -eq 3 ]]
 
+# The broad extractions (purpose broad_extraction): iLEAPP and ALEAPP over a
+# whole acquisition, each with a stand-in on PATH that writes one report the
+# way the real one does (a report folder of its own, a TSV per artefact, a
+# timeline database); and the adb backup's, declared and never run.
+PY3="$(command -v python3)"
+python3 - "$WORK" <<'PY'
+import io, os, sys, tarfile, zipfile
+work = sys.argv[1]
+with tarfile.open(os.path.join(work, "android.tar"), "w") as archive:
+    for name in ("data/system/packages.xml", "data/data/com.example/databases/messages.db"):
+        info = tarfile.TarInfo(name); info.size = 1; info.mtime = 1700000000
+        archive.addfile(info, io.BytesIO(b"x"))
+with zipfile.ZipFile(os.path.join(work, "ios.zip"), "w") as z:
+    z.writestr("private/var/mobile/Library/SMS/sms.db", b"SQLite format 3\0")
+PY
+mkdir -p "$WORK/bin"
+for tool in ileapp aleapp; do
+  up="$(printf '%s' "$tool" | sed 's/^i/iL/; s/^a/AL/' | tr '[:lower:]' '[:upper:]' | sed 's/^IL/iL/')"
+  cat > "$WORK/bin/$tool" <<SH
+#!/usr/bin/env bash
+while [[ \$# -gt 0 ]]; do case "\$1" in -o) out="\$2"; shift 2;; -t) kind="\$2"; shift 2;; *) shift;; esac; done
+[[ -n "\${STANDIN_SLEEP:-}" ]] && sleep "\$STANDIN_SLEEP"
+d="\$out/${up}_Reports_2026-09-29"; mkdir -p "\$d/_TSV Exports" "\$d/_Timeline" "\$d/_HTML"
+printf 'time\tfrom\n1\t2\n' > "\$d/_TSV Exports/Messages (\$kind).tsv"
+: > "\$d/_Timeline/tl.db"; : > "\$d/_HTML/index.html"
+SH
+  chmod +x "$WORK/bin/$tool"
+done
+ILEAPP="$PACK/recipes/ios-ileapp/run.py"
+ALEAPP="$PACK/recipes/android-aleapp/run.py"
+target() { python3 -c 'import json,sys; print(json.dumps({"paths":[sys.argv[1]]}))' "$1"; }
+# `! cmd` never stops a set -e script: a refusal is checked by hand.
+refuses() { if "$@" >/dev/null 2>&1; then echo "FAIL: should have refused: $*" >&2; exit 1; fi; }
+python3 "$ILEAPP" detect --target "$IOS_TARGET" --probe-out "$WORK/p1" | grep -q '"applies": true'
+python3 "$ILEAPP" detect --target "$(target "$WORK/ios.zip")" | grep -q '"applies": true'
+refuses python3 "$ILEAPP" detect --target "$(target "$WORK/android.tar")"
+refuses python3 "$ILEAPP" detect --target "$AB_TARGET"
+PATH="$WORK/bin:$PATH" python3 "$ILEAPP" run --target "$IOS_TARGET" --out "$WORK/ileapp-out" >/dev/null
+jq -e '.status == "complete" and (.errors | length) == 0' "$WORK/ileapp-out/coverage.json" >/dev/null
+grep -q $'^ileapp/_TSV Exports/Messages (tar).tsv\tiLEAPP artefact report' "$WORK/ileapp-out/index.tsv"
+grep -q $'^ileapp/_Timeline/tl.db\t' "$WORK/ileapp-out/index.tsv"
+[[ -f "$WORK/ileapp-out/ileapp/_HTML/index.html" && ! -e "$WORK/ileapp-out/ileapp-run" ]]
+PATH="$WORK/bin:$PATH" python3 "$ILEAPP" run --target "$(target "$WORK/ios.zip")" --out "$WORK/ileapp-zip" >/dev/null
+[[ -f "$WORK/ileapp-zip/ileapp/_TSV Exports/Messages (zip).tsv" ]]
+# No iLEAPP in the image: failed, and why.
+refuses env PATH=/usr/bin:/bin "$PY3" "$ILEAPP" run --target "$IOS_TARGET" --out "$WORK/ileapp-none"
+jq -e '.status == "failed" and (.errors[0] | test("not on PATH"))' "$WORK/ileapp-none/coverage.json" >/dev/null
+# Stopped before its end: what it leaves says partial, never complete.
+STANDIN_SLEEP=30 PATH="$WORK/bin:$PATH" python3 - "$ILEAPP" "$IOS_TARGET" "$WORK/ileapp-cut" <<'PY'
+import subprocess, sys
+try:
+    subprocess.run([sys.executable, sys.argv[1], "run", "--target", sys.argv[2], "--out", sys.argv[3]], timeout=2, capture_output=True)
+except subprocess.TimeoutExpired:
+    pass
+PY
+jq -e '.status == "partial"' "$WORK/ileapp-cut/coverage.json" >/dev/null
+python3 "$ALEAPP" detect --target "$(target "$WORK/android.tar")" | grep -q '"applies": true'
+refuses python3 "$ALEAPP" detect --target "$IOS_TARGET"
+PATH="$WORK/bin:$PATH" python3 "$ALEAPP" run --target "$(target "$WORK/android.tar")" --out "$WORK/aleapp-out" >/dev/null
+jq -e '.status == "complete"' "$WORK/aleapp-out/coverage.json" >/dev/null
+grep -q $'^aleapp/_TSV Exports/Messages (tar).tsv\tALEAPP artefact report' "$WORK/aleapp-out/index.tsv"
+BAA="$PACK/recipes/android-backup-apps/run.py"
+python3 "$BAA" detect --target "$AB_TARGET" | grep -q '"applies": true'
+refuses python3 "$BAA" detect --target "$IOS_TARGET"
+out="$(python3 "$BAA" run --target "$AB_TARGET" --out "$WORK/baa-out")" && exit 1
+jq -e '.status == "unsupported" and (.why | test("app tree"))' <<<"$out" >/dev/null
+jq -e '.status == "failed"' "$WORK/baa-out/coverage.json" >/dev/null
+[[ "$(jq -r .unavailable "$PACK/recipes/android-backup-apps/recipe.json")" == *"app tree"* && "$(jq -c .auto "$PACK/recipes/android-backup-apps/recipe.json")" == "[]" ]]
+
 printf '%s' "{\"path\":\"$WORK/backup\"}" | python3 "$PACK/tools/manifest_db/run.py" > "$WORK/manifest.json"
 jq -e '.encrypted == false and .entry_count == 750 and (.domains | length) == 30 and .truncated == null' "$WORK/manifest.json" >/dev/null
 

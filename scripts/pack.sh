@@ -191,6 +191,29 @@ if os.path.isdir(rdir):
             errors.append("recipes/%s: object names what the recipe catalogues (\"disk image\")" % name)
         if not str(rm.get("description", "")).strip() or not str(rm.get("covers", "")).strip():
             errors.append("recipes/%s: description and covers say what it does and what it does not cover" % name)
+        # What it prepares (docs/adr/0013, "A source's broad extraction before
+        # a negative on it"): an inventory lists what a source holds; a broad
+        # extraction parses the whole source into a searchable form, names the
+        # capability it prepares and what it does not hold, and, when the job
+        # images cannot run it, says why (it is then never run, and each
+        # source it applies to has its preparation declined with that why).
+        purpose = rm.get("purpose", "inventory")
+        if purpose not in ("inventory", "broad_extraction"):
+            errors.append("recipes/%s: purpose is inventory (it lists what a source holds) or broad_extraction (it parses the whole source into a searchable form)" % name)
+        if "capability" in rm and (not isinstance(rm.get("capability"), str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]{1,63}", rm.get("capability"))):
+            errors.append("recipes/%s: capability names what a broad extraction prepares, in lower case letters, digits and dashes (\"ios-artifacts\")" % name)
+        ex = rm.get("exclusions")
+        if purpose == "broad_extraction" and (not isinstance(ex, list) or not ex or not all(isinstance(x, str) and x.strip() for x in ex)):
+            errors.append("recipes/%s: a broad extraction lists its exclusions, what it does not hold, one line each (a receipt names them: produced never means complete)" % name)
+        if "exclusions" in rm and purpose != "broad_extraction":
+            errors.append("recipes/%s: exclusions belong to a broad extraction (purpose broad_extraction); an inventory says what it leaves out in covers" % name)
+        if "unavailable" in rm:
+            if not isinstance(rm.get("unavailable"), str) or not rm.get("unavailable").strip():
+                errors.append("recipes/%s: unavailable says why the job images cannot run it" % name)
+            if purpose != "broad_extraction":
+                errors.append("recipes/%s: unavailable is a broad extraction's (the harness records its preparation declined with the why)" % name)
+            if rm.get("auto"):
+                errors.append("recipes/%s: a recipe the images cannot run has no auto trigger (auto: [])" % name)
         recipes[name] = rm
 
 # What the dependencies carry, from the packs beside this one: the installed

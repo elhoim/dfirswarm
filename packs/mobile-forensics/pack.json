@@ -1,7 +1,7 @@
 {
   "id": "mobile-forensics",
   "name": "Mobile Forensics Pack",
-  "version": "1.1.2",
+  "version": "1.2.0",
   "description": "Method and tooling for a phone: what kind of extraction you were handed and what it cannot contain, iOS backups and their manifest, Android package and user data, the app databases that carry messages and location, protobuf blobs, and what deleted means inside SQLite.",
   "licence": "AGPL-3.0-or-later",
   "authors": [
@@ -29,11 +29,17 @@
       "tools/protobuf_peek/run.py": "ba7b8b401c22e223c8bdac0262b5b5cdecc4c40eb04a27417fc15156f42fef62",
       "goals/phone-examination.md": "6259f02e3acaa07c03c2669684466cbe9836b45c645621cf2f22a4e0797515c4",
       "tests/cases.json": "073cde529d3deab7c45c6f60310ae362765ba36e127aadd5980a977d5bd0c038",
-      "tests/pack.test.sh": "dd2818a831a8ceafbeba0c12ca8d037186ba8f0b730b9344c0ed450934102f8a",
-      "recipes/android-backup/recipe.json": "c7c1642f923e883a306f68125a0aca973472c8d3b566276db200ca3b8b77a835",
+      "tests/pack.test.sh": "71f4d2a9ba3f6b9f496fd26069182392bbfd1112381f383d47aff3fe1173ab5f",
+      "recipes/android-aleapp/recipe.json": "07e2cf97ce082335fa7a3a728330b2e3db8548b8288be83bd61311b7e18d457a",
+      "recipes/android-aleapp/run.py": "51f2412cd4a0b7547992b79a2780fa5c4aa937c19584e40f2db14ad16e8b091b",
+      "recipes/android-backup/recipe.json": "a21d4258906e8f72d08d9b11271b6614c9b0a1bfbca1909ed005cb1f393b4c54",
       "recipes/android-backup/run.py": "e0e9a981196df93c7562c709f21b92b7af4dda01f5e0d849f5edfd02cf7b4ac2",
-      "recipes/ios-filesystem/recipe.json": "ed9e31d30272ce129fb84093a296e2c8a704734238478a937e143dbc72f8c0f8",
+      "recipes/ios-filesystem/recipe.json": "40ba75b57a2fa8c210c2013145b4e0f37a76ae0b0e95c5eddfde92ed2e54a7e6",
       "recipes/ios-filesystem/run.py": "4e00bad3f6b3a32820b92160135d3dc47d81b19c2b6649c7a2fa848403ee9454",
+      "recipes/android-backup-apps/recipe.json": "d4b99dc88e943b0ec224444277aeba83a0a8e7965f6addd17a2f7bd487f764ec",
+      "recipes/android-backup-apps/run.py": "157ab570f17d98c75f7a383b704bf99788a58fce3f32c384b730d7e244a3cf86",
+      "recipes/ios-ileapp/recipe.json": "eb9e2527a30397a83bdeb354e9d23abd3578c44dcb0bb7e5a9a039669d2dbc5c",
+      "recipes/ios-ileapp/run.py": "5d2838fb601dca507aeeb86bab4acb68feaba03bcc7661775636e6a0716e20db",
       "skills/location/sources.md": "8f9217212e0a96a8fc70c35808bfae761ab651a6a843f719a52c45223bd63802",
       "skills/ios/artifacts.md": "687f4331a79d88a6b2a6d39547fa848bd3c38d6ca34c8af5b5c92f5f1deb40a3",
       "skills/ios/biome-segb.md": "c0ff1f40ab1c7157b2dab30cd69fe47662eebcec0aa03e3aa172f055207cda3e",
@@ -53,7 +59,10 @@
   ],
   "skills": 7,
   "recipes": [
+    "mobile-forensics/android-aleapp",
     "mobile-forensics/android-backup",
-    "mobile-forensics/ios-filesystem"
+    "mobile-forensics/android-backup-apps",
+    "mobile-forensics/ios-filesystem",
+    "mobile-forensics/ios-ileapp"
   ]
 }
