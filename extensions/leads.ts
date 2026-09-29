@@ -2187,6 +2187,25 @@ export async function releaseLead(ctx: P.SwarmContext, rawId: unknown, input: { 
   }
 }
 
+/**
+ * The answers check's warnings a close or a confirmation changed, for its
+ * reply (finish.ts warningsAt, lead_close): what it recorded under the lead
+ * (its ref, its results) can leave a question's answer short of an entry
+ * the lead now holds. Nothing when it changed none, or when they cannot be
+ * read: a warning never fails the act.
+ */
+async function closeWarnings(sandboxRoot: string, events: readonly LeadEvent[]): Promise<P.WarningsDelivered> {
+  const seqs = events.filter((e) => e.ev === "close" || e.ev === "confirm").map((e) => e.seq);
+  if (!seqs.length) return {};
+  try {
+    const F = await import("./finish.ts");
+    const ws = await F.warningsAt(sandboxRoot, { point: "lead_close", events: seqs });
+    return ws.length ? { warnings: ws.map(P.warningWords), warned: [...new Set(ws.map((w) => w.code))] } : {};
+  } catch {
+    return {};
+  }
+}
+
 /** What a disposition's ref must be, checked against the ledger and the register. */
 function checkRef(disposition: LeadDisposition, raw: string, l: Lead, snap: LeadsSnapshot): { ok: true; ref: string } | { ok: false; reason: string } {
   const text = raw.trim();
@@ -2224,7 +2243,7 @@ function checkRef(disposition: LeadDisposition, raw: string, l: Lead, snap: Lead
  * with a durable id. A write that fails is not swallowed: the answer says the
  * request is pending, and the next reconciliation writes it.
  */
-export async function closeLead(ctx: P.SwarmContext, rawId: unknown, input: { disposition?: string; ref?: string; why?: string; generation?: number; ask?: unknown; result_refs?: string[] | string }): Promise<LeadResult<{ lead: LeadView; operator_request?: string; request?: { id: string; kind: string; state: string; stage: string | null; answer: string | null }; request_pending?: string; hint?: string; guidance?: string }>> {
+export async function closeLead(ctx: P.SwarmContext, rawId: unknown, input: { disposition?: string; ref?: string; why?: string; generation?: number; ask?: unknown; result_refs?: string[] | string }): Promise<LeadResult<{ lead: LeadView; operator_request?: string; request?: { id: string; kind: string; state: string; stage: string | null; answer: string | null }; request_pending?: string; hint?: string; guidance?: string } & P.WarningsDelivered>> {
   const ref = leadRef(rawId);
   if (!ref.ok) return ref;
   const disposition = String(input.disposition ?? "").trim().toLowerCase() as LeadDisposition;
@@ -2267,10 +2286,12 @@ export async function closeLead(ctx: P.SwarmContext, rawId: unknown, input: { di
     if (!r.ok) return r;
     const snap = await leadsSnapshot(ctx.sandboxRoot);
     const view = viewLead(snap.state.leads.get(ref.id)!, snap);
-    if (disposition !== "needs_operator") return { ok: true, lead: view };
+    // The warnings the close changed, on the questions the lead serves (never a refusal).
+    const warned = await closeWarnings(ctx.sandboxRoot, r.events);
+    if (disposition !== "needs_operator") return { ok: true, lead: view, ...warned };
     const hinted = await dispositionAskHint(ctx.sandboxRoot, `${refText.value}\n${why.value ?? ""}`).catch(() => null);
     const guided = input.ask === undefined || input.ask === null ? operatorQuestionGuidance(snap.state.leads.get(ref.id)!.answers) : null;
-    const hint = { ...(hinted ? { hint: hinted } : {}), ...(guided ? { guidance: guided } : {}) };
+    const hint = { ...(hinted ? { hint: hinted } : {}), ...(guided ? { guidance: guided } : {}), ...warned };
     // The close is the commit; the request is written from it, once, by its key.
     const closeSeq = r.events.find((e) => e.ev === "close")?.seq;
     try {
@@ -3253,7 +3274,7 @@ export function confirmCompactionHoldMs(): number {
  * reopens (reopenOnLedger). Never automatic: a correction by the same author
  * can reverse the basis.
  */
-export async function confirmLead(ctx: P.SwarmContext, rawId: unknown, input: { expected_revision?: unknown; ref?: string; why?: string }, now = Date.now()): Promise<LeadResult<{ lead: LeadView }>> {
+export async function confirmLead(ctx: P.SwarmContext, rawId: unknown, input: { expected_revision?: unknown; ref?: string; why?: string }, now = Date.now()): Promise<LeadResult<{ lead: LeadView } & P.WarningsDelivered>> {
   const ref = leadRef(rawId);
   if (!ref.ok) return ref;
   const why = bounded("why", input.why, LEAD_WHY_MAX, true);
@@ -3277,7 +3298,7 @@ export async function confirmLead(ctx: P.SwarmContext, rawId: unknown, input: { 
     });
     if (!r.ok) return r;
     const snap = await leadsSnapshot(ctx.sandboxRoot);
-    return { ok: true, lead: viewLead(snap.state.leads.get(ref.id)!, snap) };
+    return { ok: true, lead: viewLead(snap.state.leads.get(ref.id)!, snap), ...(await closeWarnings(ctx.sandboxRoot, r.events)) };
   } catch (err) {
     return { ok: false, reason: (err as Error).message };
   }
@@ -3291,7 +3312,7 @@ export async function confirmLead(ctx: P.SwarmContext, rawId: unknown, input: { 
  * them. A closure whose offer ended or whose ref does not fit is skipped,
  * with why.
  */
-export async function confirmBatch(ctx: P.SwarmContext, rawBatch: unknown, input: { ref?: string; why?: string }, now = Date.now()): Promise<LeadResult<{ confirmed: string[]; skipped: Array<{ lead: string; why: string }> }>> {
+export async function confirmBatch(ctx: P.SwarmContext, rawBatch: unknown, input: { ref?: string; why?: string }, now = Date.now()): Promise<LeadResult<{ confirmed: string[]; skipped: Array<{ lead: string; why: string }> } & P.WarningsDelivered>> {
   const batch = String(rawBatch ?? "").trim().replace(/^e-/i, "E-");
   if (!/^E-\d+$/.test(batch)) return { ok: false, reason: `a batch is named by the correction it follows, E-<seq> (got ${JSON.stringify(rawBatch)})` };
   const why = bounded("why", input.why, LEAD_WHY_MAX, true);
@@ -3323,7 +3344,7 @@ export async function confirmBatch(ctx: P.SwarmContext, rawBatch: unknown, input
       return { append, result: { ok: true as const, confirmed, skipped } };
     });
     if (!r.ok) return r;
-    return { ok: true, confirmed: r.confirmed, skipped: r.skipped };
+    return { ok: true, confirmed: r.confirmed, skipped: r.skipped, ...(await closeWarnings(ctx.sandboxRoot, r.events)) };
   } catch (err) {
     return { ok: false, reason: (err as Error).message };
   }

@@ -484,6 +484,41 @@ const CASES: Record<string, (base: string) => Promise<string>> = {
   },
 
   /**
+   * A lead's close and a confirmation, each tying to the question an entry
+   * its answer does not reach. Question 1 is answered on its first lead's
+   * finding and reviewed. A second lead of question 1 is closed on a finding
+   * two seats hold that names no question. A third is closed on one seat's
+   * finding that names none (nothing changes); the finding is corrected,
+   * another seat attests the correction, and the closer confirms the
+   * closure on it.
+   */
+  "lead-close-delivered": async (base) => {
+    const r = await newRun(base, "lcd", 1);
+    await traceRow(r.S, "a0", "bash");
+    const id1 = await lead(r.a0, "1", [{ source: "input:disk.E01", method: "read the disk" }]);
+    const c = (await rec(r.a0, { kind: "finding", ...F, value: "the first method", source: "the disk", evidence: "a record", refs: ["job:j000001/hits.txt"], answers: ["1"] })).entry;
+    await attest(r.a3, { seq: c.seq, how: "re-read the record from job:j000001/hits.txt" });
+    await close(r.a0, id1, `E-${c.seq}`);
+    const a1 = (await rec(r.a1, { kind: "answer", section: "question:1", value: "The first method", reasoning: `E-${c.seq}`, ...HIGH, result: "established" })).entry;
+    await attest(r.a2, { seq: a1.seq, how: "re-derived the cited finding", ...ESTABLISHED });
+    const id2 = await lead(r.a2, "1", [{ source: "input:logs/a.log", method: "read the log" }]);
+    const x = (await rec(r.a2, { kind: "finding", ...F, value: "the second method", source: "the log", evidence: "line 3", refs: ["job:j000002/hits.txt"] })).entry;
+    await attest(r.a3, { seq: x.seq, how: "re-read line 3 from job:j000002/hits.txt" });
+    await close(r.a2, id2, `E-${x.seq}`);
+    const id3 = await lead(r.a0, "1", [{ source: "input:logs/a.log", method: "read the log again" }]);
+    const w = (await rec(r.a0, { kind: "finding", ...F, value: "the third method, as first read", source: "the log", evidence: "line 9", refs: ["job:j000002/hits.txt"] })).entry;
+    await close(r.a0, id3, `E-${w.seq}`);
+    const w2 = (await rec(r.a0, { kind: "finding", ...F, value: "the third method, read again", source: "the log", evidence: "line 9 and its date", refs: ["job:j000002/hits.txt"], supersedes: w.seq, because: "the second read has the date" })).entry;
+    await attest(r.a3, { seq: w2.seq, how: "re-read line 9 from job:j000002/hits.txt" });
+    await L.reopenOnLedger(r.S);
+    const lv = (await L.leadsSnapshot(r.S)).state.leads.get(id3)!;
+    assert.ok(lv.confirm, "the closure waits for its closer");
+    assert.ok((await L.confirmLead(r.a0, id3, { expected_revision: lv.rev, why: "the correction adds the date; the method is the same" })).ok);
+    await SW.awaitSweeps(r.S);
+    return r.S;
+  },
+
+  /**
    * Under the case policy's more_evidence: no, two not-determinable answers,
    * each resting on a coverage record another seat reviewed: question 1's
    * says why no ask in the policy's words, question 2's says nothing of an

@@ -3487,7 +3487,7 @@ export default function (pi: ExtensionAPI) {
   /** A lead call's answer to the agent, and its line on the trace. */
   async function leadAnswer(cwd: string, tool: string, params: Record<string, unknown>, started: number, r: { ok: boolean; reason?: string } & Record<string, unknown>) {
     const lead = (r.lead ?? {}) as Record<string, unknown>;
-    await logEvent(cwd, agentId, tool, params, r.ok ? { ok: true, lead: lead.id, status: lead.status, holder: lead.holder, generation: lead.generation, ...(lead.disposition ? { disposition: lead.disposition, ref: lead.ref } : {}), ...(r.reclaimed_from ? { reclaimed_from: r.reclaimed_from } : {}), ...(r.woke ? { woke: r.woke } : {}) } : { ok: false, reason: r.reason }, Date.now() - started).catch(() => undefined);
+    await logEvent(cwd, agentId, tool, params, r.ok ? { ok: true, lead: lead.id, status: lead.status, holder: lead.holder, generation: lead.generation, ...(lead.disposition ? { disposition: lead.disposition, ref: lead.ref } : {}), ...(r.reclaimed_from ? { reclaimed_from: r.reclaimed_from } : {}), ...(r.woke ? { woke: r.woke } : {}), ...(Array.isArray(r.warned) && r.warned.length ? { warned: r.warned } : {}) } : { ok: false, reason: r.reason }, Date.now() - started).catch(() => undefined);
     if (!r.ok) return { content: [{ type: "text" as const, text: `${tool} refused: ${r.reason}` }], details: r, isError: true };
     return okResult(r);
   }
@@ -3586,6 +3586,7 @@ export default function (pi: ExtensionAPI) {
       "Use needs_operator for anything outside the evidence and the allowlist (a host to reach, a file the run does not have, a question only a person can answer); never fetch it yourself.",
       "Ask for missing evidence as an acquisition (needs_operator with ask.kind acquisition): the source, where it is, what it would establish, how urgent. \"No additional input under this case policy\" is a constraint of the case, never a finding that something is absent.",
       "A question put to the operator (needs_operator) says what observation would settle the lead's question (Q-<n>) and what each possible answer changes: which answer, and to which result.",
+      "The reply carries the finish line's warnings the close changed (warnings): an entry the lead now holds that its question's answer does not reach. They hold nothing: tell the answer's author, or record the answer again.",
     ],
     parameters: Type.Object({
       id: Type.String({ description: "L-<n>" }),

@@ -657,10 +657,14 @@ async function gateInputs(sandboxRoot: string, s: L.LeadsSnapshot): Promise<Omit
  *   attested entry bears on (the answer itself, or the negatives resting on
  *   a coverage record), and each warning that names it (an entry an answer
  *   leaves out, now held by two seats);
+ * - `lead_close`: the reply to a lead's close or a confirmation of it (the
+ *   lead register's events, `events`): the warnings of each question the
+ *   lead serves whose warnings that act changed, by what it recorded under
+ *   the lead (its ref and results), as they stand after it;
  * - `finish_status`: every warning readiness carries.
  * Never a refusal, never an item: nothing holds on a warning.
  */
-export type WarningPoint = { point: "record"; section: string } | { point: "review_offer"; entry: number } | { point: "attest"; entry: number } | { point: "finish_status" };
+export type WarningPoint = { point: "record"; section: string } | { point: "review_offer"; entry: number } | { point: "attest"; entry: number } | { point: "lead_close"; events: number[] } | { point: "finish_status" };
 
 /**
  * The warnings a point delivers now, as readiness reads the registers:
@@ -671,6 +675,7 @@ export async function warningsAt(sandboxRoot: string, at: WarningPoint): Promise
   if (at.point === "finish_status") return (await readiness(sandboxRoot)).warned;
   const s = await L.leadsSnapshot(sandboxRoot);
   const all = await readinessSections(sandboxRoot, s);
+  if (at.point === "lead_close") return closeChanged(sandboxRoot, s, all, at.events);
   const e = at.point === "record" ? null : s.ledger.bySeq.get(at.entry);
   if (at.point !== "record" && !e) return [];
   const sections = at.point === "record" ? all.filter((x) => x === at.section) : at.point === "review_offer" ? all.filter((x) => e!.kind === "answer" && x === e!.section) : all;
@@ -680,6 +685,28 @@ export async function warningsAt(sandboxRoot: string, at: WarningPoint): Promise
   if (at.point === "review_offer") return gate.warnings.filter((w) => w.seqs[0] === at.entry);
   const resting = new Set(e!.kind === "coverage" ? P.negativesResting(e!, s.ledger.entries).map((x) => x.seq) : []);
   return gate.warnings.filter((w) => w.seqs.includes(at.entry) || resting.has(w.seqs[0]!));
+}
+
+/**
+ * What a lead's close or confirmation changed (warningsAt, lead_close): the
+ * gate over each question the act's leads serve, once as the register
+ * stands and once as it would without the act's events, on the same
+ * snapshot, so nothing else that moved meanwhile is laid at its door. The
+ * warnings, as they stand, of each question whose warnings differ.
+ */
+async function closeChanged(sandboxRoot: string, s: L.LeadsSnapshot, all: string[], events: readonly number[]): Promise<P.LedgerWarning[]> {
+  const acts = s.state.events.filter((e) => events.includes(e.seq) && (e.ev === "close" || e.ev === "confirm") && e.lead);
+  if (!acts.length || !s.state.chain.ok) return [];
+  const served = new Set(acts.flatMap((e) => s.state.leads.get(e.lead!)?.answers ?? []).map((x) => `question:${P.sectionKey(x)}`));
+  const sections = all.filter((x) => served.has(x));
+  if (!sections.length) return [];
+  const inputs = await gateInputs(sandboxRoot, s);
+  const without = new Set(acts.map((e) => e.seq));
+  const before = P.ledgerGate({ ...inputs, sections, underLeads: L.questionLeadEntries(L.foldLeads(s.state.events.filter((e) => !without.has(e.seq)), s.state.chain)) }).warnings;
+  const after = P.ledgerGate({ ...inputs, sections }).warnings;
+  const words = (ws: P.LedgerWarning[], section: string) => JSON.stringify(ws.filter((w) => w.section === section).map((w) => [w.code, w.seqs, w.what]));
+  const changed = new Set(sections.filter((x) => words(before, x) !== words(after, x)));
+  return after.filter((w) => changed.has(w.section));
 }
 
 async function computeReadiness(sandboxRoot: string, s: L.LeadsSnapshot, revision: string): Promise<Readiness> {

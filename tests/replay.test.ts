@@ -180,7 +180,7 @@ test("--deliveries on the command line: each act that carries a warning, values-
   const { S } = await runsWith("warnings-delivered", "wdl");
   const out = replayCli([S, "--deliveries"]);
   assert.equal(out.status, 0, out.stderr);
-  assert.match(out.stdout, /deliveries: 3 answer record\(s\), 1 review offer\(s\) for an answer and 6 attest\(s\) read again as the registers stood at each/);
+  assert.match(out.stdout, /deliveries: 3 answer record\(s\), 1 review offer\(s\) for an answer, 6 attest\(s\) and 3 lead close\(s\) or confirmation\(s\) read again as the registers stood at each/);
   assert.match(out.stdout, /review offer of E-3 to a2: question:1 no_acquisition_ask/);
   assert.match(out.stdout, /finish status: question:1 no_acquisition_ask; question:2 partial_all_parts_established; question:3 lead_findings_uncited/);
   // Values-free: no record's words.
@@ -188,6 +188,14 @@ test("--deliveries on the command line: each act that carries a warning, values-
   // A harness from before the delivery: finish status only, and said so.
   const old = await deliveriesOf(S, null, { warnings: ["answer #3 (question:1) is not determinable, and its coverage record E-2 names no acquisition ask and no reason for none. fix"] });
   assert.equal(old.error, "this checkout delivers the warnings in finish status only (it has no warningsAt)");
-  assert.deepEqual(old.acts, { record: 0, review_offer: 0, attest: 0 });
+  assert.deepEqual(old.acts, { record: 0, review_offer: 0, attest: 0, lead_close: 0 });
   assert.deepEqual(old.delivered.map((d) => [d.point, d.sections, d.warnings]), [["finish_status", ["question:1"], ["no_acquisition_ask"]]]);
+});
+
+test("--deliveries reads a seat's close and confirmation of a lead as acts, each on the lead register cut to its own lines", async () => {
+  const { S } = await runsWith("lead-close-delivered", "lcd");
+  const out = replayCli([S, "--deliveries"]);
+  assert.equal(out.status, 0, out.stderr);
+  assert.match(out.stdout, /1 answer record\(s\), 0 review offer\(s\) for an answer, 4 attest\(s\) and 4 lead close\(s\) or confirmation\(s\)/);
+  assert.match(out.stdout, /\n    close of L-2 by a2: question:1 lead_findings_uncited\n    confirm of L-3 by a0: question:1 lead_findings_uncited\n    finish status: question:1 lead_findings_uncited/);
 });

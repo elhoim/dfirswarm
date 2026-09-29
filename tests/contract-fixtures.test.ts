@@ -67,7 +67,7 @@ type Expect = {
   seals?: { verdicts: number; hold: number };
   agreement?: Array<{ section: string; kind: string }>;
   /** Where the warnings are delivered, act by act (replay --deliveries): the acts read, and each delivery in time order, held field by field as given. */
-  deliveries?: { acts?: { record: number; review_offer: number; attest: number }; delivered: Array<Partial<Delivery>> };
+  deliveries?: { acts?: { record: number; review_offer: number; attest: number; lead_close: number }; delivered: Array<Partial<Delivery>> };
   /** The harness's own words of a question's warnings (replay --show-text): what they say, and what they never say. */
   warning_words?: Record<string, { includes?: string[]; excludes?: string[] }>;
   /** What the history itself holds: the acquisition asks opened. */
@@ -128,7 +128,7 @@ function holdTo(p: Projection, e: Expect, where: string): void {
     assert.ok(d, `${where}: the deliveries were read`);
     assert.equal(d.error, null, `${where}: ${d.error}`);
     if (e.deliveries.acts) assert.deepEqual(d.acts, e.deliveries.acts, `${where}: the acts read again`);
-    const got = d.delivered.map(({ point, entry, on, by, sections, warnings }) => ({ point, entry, on, by, sections, warnings }));
+    const got = d.delivered.map(({ point, entry, lead, on, by, sections, warnings }) => ({ point, entry, lead, on, by, sections, warnings }));
     assert.equal(d.delivered.length, e.deliveries.delivered.length, `${where}: the deliveries (${JSON.stringify(got)})`);
     for (const [i, want] of e.deliveries.delivered.entries()) {
       for (const [k, v] of Object.entries(want)) assert.deepEqual(d.delivered[i]![k as keyof Delivery], v, `${where}: delivery ${i + 1}'s ${k} (${JSON.stringify(got)})`);

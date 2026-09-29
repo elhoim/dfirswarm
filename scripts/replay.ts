@@ -55,8 +55,9 @@
  * act: each act's registers cut to the moment of the act in a scratch
  * directory (a chain cut at a line is a prefix of it), and the checkout's
  * own warningsAt asked what the reply to each answer's record, each review
- * offered for an answer and the reply to each attest would carry then; and
- * finish status at the end (deliveriesOf).
+ * offered for an answer, the reply to each attest and the reply to each
+ * seat's close or confirmation of a lead would carry then; and finish
+ * status at the end (deliveriesOf).
  *
  * Replay measures decisions on recorded histories. It cannot show what the
  * agents would have done under the other rule: a rule that changes their
@@ -153,11 +154,12 @@ export type Projection = {
  * "Warnings where the decision is made"), read act by act on the registers
  * as they stood at each act: the reply to every record of a question's
  * answer, every review offered for an answer, the reply to every attest,
- * and finish status at the end. Only the acts that carry a warning are
+ * the reply to every seat's close or confirmation of a lead, and finish
+ * status at the end. Only the acts that carry a warning are
  * listed; `acts` counts every act read. Ids, codes and sections only.
  */
-export type Delivery = { point: "record" | "review_offer" | "attest" | "finish_status"; entry: number | null; on: string | null; by: string | null; at: string | null; sections: string[]; warnings: string[] };
-export type Deliveries = { acts: { record: number; review_offer: number; attest: number }; delivered: Delivery[]; error: string | null };
+export type Delivery = { point: "record" | "review_offer" | "attest" | "lead_close" | "finish_status"; entry: number | null; lead?: string; on: string | null; by: string | null; at: string | null; sections: string[]; warnings: string[] };
+export type Deliveries = { acts: { record: number; review_offer: number; attest: number; lead_close: number }; delivered: Delivery[]; error: string | null };
 
 type Mod = Record<string, unknown>;
 // A module of the checkout under evaluation: its exports are read by name, and one that is missing is an error in the projection, never a crash.
@@ -532,15 +534,16 @@ function prefixOf(rows: Array<{ line: string; row: Row | null }>, keep: (row: Ro
 /**
  * Where the checkout delivers the warnings, act by act (Deliveries): each
  * act's registers cut to the moment of the act in a scratch directory beside
- * the copy (the ledger to the answer's own seq for its record, every other
- * register to the act's time; the attestations to the attest's own line),
- * and the checkout's own warningsAt asked what that point carries then;
+ * the copy (the ledger to the answer's own seq for its record, the
+ * attestations to the attest's own line, the lead register to a seat's
+ * close's or confirmation's own lines, every other register to the act's
+ * time), and the checkout's own warningsAt asked what that point carries then;
  * finish status from readiness at the end. A checkout without warningsAt
  * delivered them in finish status only, and says so. The copy is not
  * written; the scratch directory is removed.
  */
 export async function deliveriesOf(S: string, FIN: Mod | null, ready: { warnings?: string[]; warned?: Array<{ code: string; section: string; seqs: number[] }> } | null): Promise<Deliveries> {
-  const acts = { record: 0, review_offer: 0, attest: 0 };
+  const acts = { record: 0, review_offer: 0, attest: 0, lead_close: 0 };
   const delivered: Delivery[] = [];
   // Finish status, at the end: every warning readiness carries, question by question.
   const finishStatus = (): Delivery[] => {
@@ -559,7 +562,7 @@ export async function deliveriesOf(S: string, FIN: Mod | null, ready: { warnings
   for (const rel of CUT_REGISTERS) registers.set(rel, rowsOf(await readFile(join(S, rel), "utf8").catch(() => "")));
   const bySeq = new Map<number, Row>();
   for (const { row } of registers.get("ledger/entries.jsonl")!) if (row && typeof row.seq === "number") bySeq.set(row.seq, row);
-  type Act = { point: Delivery["point"]; at: number; when: string; entry: number; on: string; by: string; ledgerSeq?: number; attestations?: number; wp: Record<string, unknown> };
+  type Act = { point: Delivery["point"]; at: number; when: string; entry: number | null; lead?: string; on: string; by: string; ledgerSeq?: number; attestations?: number; leads?: number; wp: Record<string, unknown> };
   const list: Act[] = [];
   for (const { row } of registers.get("ledger/entries.jsonl")!) {
     if (!row || row.kind !== "answer" || typeof row.section !== "string" || !row.section.startsWith("question:")) continue;
@@ -576,6 +579,20 @@ export async function deliveriesOf(S: string, FIN: Mod | null, ready: { warnings
     const seen = leads.find((x) => x.ev === "offer_seen" && x.entry === r.entry && x.offer === r.seq);
     const when = String((seen ?? r).at);
     list.push({ point: "review_offer", at: Date.parse(when), when, entry: r.entry, on: String(bySeq.get(r.entry)?.kind ?? "entry"), by: String(r.to ?? ""), wp: { point: "review_offer", entry: r.entry } });
+  }
+  // A seat's close of a lead, or its confirmation of one (a batch's confirmations are one act): read right after its own lines.
+  const leadRows = registers.get("leads/leads.jsonl")!;
+  for (let i = 0; i < leadRows.length; i++) {
+    const r = leadRows[i]!.row;
+    if (!r || (r.ev !== "close" && r.ev !== "confirm") || typeof r.lead !== "string" || r.by === "system") continue;
+    const seqs = [Number(r.seq)];
+    const leadIds = [r.lead];
+    while (r.ev === "confirm" && r.batch && leadRows[i + 1]?.row?.ev === "confirm" && leadRows[i + 1]!.row!.batch === r.batch && leadRows[i + 1]!.row!.by === r.by && leadRows[i + 1]!.row!.at === r.at) {
+      i += 1;
+      seqs.push(Number(leadRows[i]!.row!.seq));
+      leadIds.push(String(leadRows[i]!.row!.lead));
+    }
+    list.push({ point: "lead_close", at: timeOf(r), when: String(r.at), entry: null, lead: leadIds.join(", "), on: String(r.ev), by: String(r.by ?? ""), leads: i + 1, wp: { point: "lead_close", events: seqs } });
   }
   list.sort((x, y) => x.at - y.at);
   // The scratch run the acts are read in, with a registry of its own that points at it (the goal is read from there).
@@ -602,13 +619,15 @@ export async function deliveriesOf(S: string, FIN: Mod | null, ready: { warnings
             ? prefixOf(rows, (r) => r !== null && Number(r.seq) <= act.ledgerSeq!)
             : rel === "ledger/attestations.jsonl" && act.attestations !== undefined
               ? prefixOf(rows, (_r, i) => i < act.attestations!)
-              : prefixOf(rows, (r) => !(timeOf(r) > act.at));
+              : rel === "leads/leads.jsonl" && act.leads !== undefined
+                ? prefixOf(rows, (_r, i) => i < act.leads!)
+                : prefixOf(rows, (r) => !(timeOf(r) > act.at));
         await mkdir(dirname(join(cut, rel)), { recursive: true });
         await writeFile(join(cut, rel), body);
       }
       acts[act.point as keyof typeof acts] += 1;
       const ws = (await warningsAt(cut, act.wp)) as Array<{ code: string; section: string }>;
-      if (ws.length) delivered.push({ point: act.point, entry: act.entry, on: act.on, by: act.by, at: act.when, sections: [...new Set(ws.map((w) => questionKey(w.section)))], warnings: [...new Set(ws.map((w) => w.code))].sort() });
+      if (ws.length) delivered.push({ point: act.point, entry: act.entry, ...(act.lead ? { lead: act.lead } : {}), on: act.on, by: act.by, at: act.when, sections: [...new Set(ws.map((w) => questionKey(w.section)))], warnings: [...new Set(ws.map((w) => w.code))].sort() });
     }
   } catch (e) {
     return { acts, delivered: [...delivered, ...finishStatus()], error: `the acts could not all be read again: ${(e as Error).message}` };
@@ -940,7 +959,7 @@ export function diffProjections(a: Projection, b: Projection): Array<Omit<Differ
   put(null, "disagreements", listWords(a.agreement.map((g) => `${g.section} ${g.kind}`)), listWords(b.agreement.map((g) => `${g.section} ${g.kind}`)));
   put(null, "seals", `${a.seals.hold} of ${a.seals.verdicts} hold`, `${b.seals.hold} of ${b.seals.verdicts} hold`);
   if (a.deliveries && b.deliveries) {
-    for (const point of ["record", "review_offer", "attest", "finish_status"] as const) {
+    for (const point of ["record", "review_offer", "attest", "lead_close", "finish_status"] as const) {
       const at = (d: Deliveries) => listWords(countWords(d.delivered.filter((x) => x.point === point).flatMap((x) => x.warnings)));
       put(null, `delivered at ${point.replace("_", " ")}`, at(a.deliveries), at(b.deliveries));
     }
@@ -950,10 +969,10 @@ export function diffProjections(a: Projection, b: Projection): Array<Omit<Differ
 
 /** Where the warnings were delivered, act by act, values-free: the point, the act's entry and seat, the questions and codes. */
 function deliveryWords(d: Deliveries): string[] {
-  const out = [`  deliveries: ${d.acts.record} answer record(s), ${d.acts.review_offer} review offer(s) for an answer and ${d.acts.attest} attest(s) read again as the registers stood at each${d.error ? ` (${d.error})` : ""}`];
+  const out = [`  deliveries: ${d.acts.record} answer record(s), ${d.acts.review_offer} review offer(s) for an answer, ${d.acts.attest} attest(s) and ${d.acts.lead_close ?? 0} lead close(s) or confirmation(s) read again as the registers stood at each${d.error ? ` (${d.error})` : ""}`];
   const acts = d.delivered.filter((x) => x.point !== "finish_status");
   if (!acts.length) out.push("    no act carries a warning");
-  for (const x of acts) out.push(`    ${x.point === "record" ? `record E-${x.entry}` : x.point === "review_offer" ? `review offer of E-${x.entry} to ${x.by}` : `attest by ${x.by} of E-${x.entry} (${x.on})`}${x.point === "record" ? ` by ${x.by}` : ""}: ${x.sections.join(", ")} ${x.warnings.join(", ")}`);
+  for (const x of acts) out.push(`    ${x.point === "record" ? `record E-${x.entry} by ${x.by}` : x.point === "review_offer" ? `review offer of E-${x.entry} to ${x.by}` : x.point === "lead_close" ? `${x.on} of ${x.lead} by ${x.by}` : `attest by ${x.by} of E-${x.entry} (${x.on})`}: ${x.sections.join(", ")} ${x.warnings.join(", ")}`);
   const fs = d.delivered.filter((x) => x.point === "finish_status");
   out.push(`    finish status: ${fs.length ? fs.map((x) => `${x.sections.join(", ")} ${x.warnings.join(", ")}`).join("; ") : "no warning"}`);
   return out;

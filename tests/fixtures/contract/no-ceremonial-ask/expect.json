@@ -47,7 +47,8 @@
       "acts": {
         "record": 2,
         "review_offer": 0,
-        "attest": 2
+        "attest": 2,
+        "lead_close": 2
       },
       "delivered": [
         { "point": "record", "entry": 6, "on": "answer", "sections": ["question:2"], "warnings": ["no_acquisition_ask"] },

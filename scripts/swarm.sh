@@ -11550,8 +11550,9 @@ are hashed before and after. The goal's other checks are its own commands: not r
   --compare A [B]   checkout A against this one, or A against B; "frozen" names the run's own harness
   --stop-policy P   as though the stop policy were P (operator, cap-pause, cap-stop; several with commas)
   --deliveries      where the checkout delivers the answers check's warnings, act by act: the reply to
-                    each answer's record, each review offered for an answer, the reply to each attest,
-                    each read on the registers as they stood at the act; and finish status at the end
+                    each answer's record, each review offered for an answer, the reply to each attest
+                    and to each close or confirmation of a lead, each read on the registers as they
+                    stood at the act; and finish status at the end
 Values-free: codes, ids, counts and the harness's own words, never a record's text; --show-text adds
 the harness's lines whole, which quote records. It measures rules on a recorded history; what the
 agents would have done under another rule is not in it. Exit 0 replayed, 1 not (the reason on stderr).

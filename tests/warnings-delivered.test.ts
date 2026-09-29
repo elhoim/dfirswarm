@@ -2,10 +2,12 @@
  * The answers check's warnings delivered where the decision is made
  * (docs/adr/0013, "Warnings where the decision is made"): in the reply to
  * the record that writes the answer, in the review offered for it and the
- * reply to an attest on it, and in finish status, each in the same words,
- * none holding. lead_findings_uncited covers what two seats hold for a
- * question outside its leads too: a finding or an event that names the
- * question, or whose rel links it to an entry the answer cites. And the
+ * reply to an attest on it, in the reply to a lead's close or confirmation
+ * that changes them, and in finish status, each in the same words, none
+ * holding. lead_findings_uncited covers what the record ties to a question
+ * outside its leads too: a finding or an event that names the question
+ * (one seat is enough), or one two seats hold whose rel links it to an
+ * entry the answer cites. And the
  * request guidance: a question put to the operator says what would settle
  * it, a value read from an image comes from a job that read it, and under
  * more_evidence: no nothing suggests an ask. Synthetic runs only.
@@ -68,10 +70,10 @@ test("lead_findings_uncited reaches past the question's leads: a finding under a
   const names = ok(await rec(r.a2, finding("the second hiding method", ["2", "Q-1"]))).entry;
   const linked = ok(await rec(r.a2, finding("the first method was used twice", ["2"], { rel: [{ to: cited.seq, kind: "supports" }] }))).entry;
   const apart = ok(await rec(r.a2, finding("the account was svc_backup", ["2"]))).entry;
-  for (const e of [names, linked, apart]) assert.ok((await L.recordInterpretations(r.S, "a2", e.seq, ["j000001"])).ok);
-  assert.ok((await L.closeLead(r.a2, L2, { disposition: "resolved", ref: `E-${apart.seq}` })).ok);
   // One seat's, linked by rel to the cited finding, naming question 2 only: rel alone asks for two seats.
   const oneLinked = ok(await rec(r.a0, finding("the first method left a log", ["2"], { rel: [{ to: cited.seq, kind: "supports" }] }))).entry;
+  for (const e of [names, linked, apart]) assert.ok((await L.recordInterpretations(r.S, "a2", e.seq, ["j000001"])).ok);
+  assert.ok((await L.closeLead(r.a2, L2, { disposition: "resolved", ref: `E-${apart.seq}` })).ok);
   // Tied to question 1 by name: one seat's (warned of: its author tied it), and a disputed and a superseded one (not; the correction is).
   const alone = ok(await rec(r.a0, finding("a third method, seen once", ["1"]))).entry;
   const disputed = ok(await rec(r.a0, finding("a fourth method", ["1"]))).entry;
@@ -180,6 +182,43 @@ test("each point delivers the warnings of its moment in the words finish status 
   assert.deepEqual(check.dispositions, { "question:1": "not_determinable", "question:2": "partial", "question:3": "established" });
 });
 
+test("a lead's close or confirmation that changes a question's warnings says them in its reply: what it recorded under the lead that the answer does not reach; a close that changes none says nothing; nothing holds", async () => {
+  const r = await run({ goal: GOAL(1) });
+  // Question 1 answered on its first lead's finding, and reviewed; that close changes nothing (nothing to warn of, before the answer or after).
+  const L1 = await planned(r.a0, "1");
+  const c = ok(await rec(r.a0, finding("the first hiding method", ["1"]))).entry;
+  await attest(r.a3, { seq: c.seq, how: "re-read the record" });
+  const first = okq(await L.closeLead(r.a0, L1, { disposition: "resolved", ref: `E-${c.seq}` }));
+  assert.equal(first.warnings, undefined);
+  const a = ok(await answer(r.a1, "question:1", [c.seq]));
+  assert.equal(a.warnings, undefined);
+  await attest(r.a2, { seq: a.entry.seq, how: "re-derived the cited finding", ...ESTABLISHED });
+  // A second lead of question 1 closed on a finding two seats hold that names no question: the close ties it to question 1.
+  const L2 = await planned(r.a2, "1", [{ source: "input:logs/a.log", method: "read the log" }]);
+  const x = ok(await rec(r.a2, finding("a second hiding method", [], { answers: undefined }))).entry;
+  assert.equal((await attest(r.a3, { seq: x.seq, how: "re-read the record" })).warnings, undefined, "tied to no question yet");
+  const closed = okq(await L.closeLead(r.a2, L2, { disposition: "resolved", ref: `E-${x.seq}` }));
+  assert.deepEqual(closed.warned, ["lead_findings_uncited"]);
+  const once = `answer #${a.entry.seq} (question:1) leaves out what the record ties to Q-1: E-${x.seq} (a finding under ${L2}): cite it or say why it does not bear on it`;
+  assert.ok(closed.warnings![0]!.startsWith(once), closed.warnings![0]);
+  // A third lead closed on one seat's finding that names no question: nothing changes. Then its finding is corrected, another seat attests the correction, and the closer confirms the closure on it: the confirmation ties it.
+  const L3 = await planned(r.a0, "1", [{ source: "input:logs/b.log", method: "read the log" }]);
+  const w = ok(await rec(r.a0, finding("a third method, as first read", [], { answers: undefined }))).entry;
+  assert.equal(okq(await L.closeLead(r.a0, L3, { disposition: "resolved", ref: `E-${w.seq}` })).warnings, undefined, "one seat's, naming no question");
+  const w2 = ok(await rec(r.a0, finding("a third method, read again", [], { answers: undefined, supersedes: w.seq, because: "the second read has the date" }))).entry;
+  await attest(r.a3, { seq: w2.seq, how: "re-read the record" });
+  await L.reopenOnLedger(r.S);
+  const lv = (await L.leadsSnapshot(r.S)).state.leads.get(L3)!;
+  assert.ok(lv.confirm, "the closure waits for its closer's confirmation");
+  const confirmed = okq(await L.confirmLead(r.a0, L3, { expected_revision: lv.rev, why: "the correction adds the date; the method is the same" }));
+  assert.deepEqual(confirmed.warned, ["lead_findings_uncited"]);
+  assert.ok(confirmed.warnings![0]!.startsWith(`answer #${a.entry.seq} (question:1) leaves out what the record ties to Q-1: E-${x.seq} (a finding under ${L2}), E-${w2.seq} (a finding under ${L3}): cite them`), confirmed.warnings![0]);
+  // The same words in finish status; ready, nothing held.
+  const status = (await FIN.finishStatus(r.a1)) as { ready: boolean; warnings?: string[]; items: string[] };
+  assert.equal(status.ready, true, status.items.join("; "));
+  assert.deepEqual(status.warnings, confirmed.warnings);
+});
+
 test("a question put to the operator is told what it says: the observation that would settle the lead's question and what each answer changes; an acquisition ask, and a lead that serves no question, are not", async () => {
   const r = await run({ goal: GOAL(2) });
   const L2 = await planned(r.a0, "2");
@@ -216,8 +255,8 @@ test("the request guidance is said in the prompt and the tools: warnings at the 
   const flat = (t: string) => t.replace(/\s+/g, " ");
   const prompt = flat(await readFile(join(ROOT, "prompts", "worker-system.md"), "utf8"));
   for (const must of [
-    "A warning is said where the decision is made: in the reply to the record that writes the answer, in its review offer and the reply to an attest on it, and in `finish` status.",
-    "one that names the question in `answers`, or one whose `rel` links it to an entry the answer cites",
+    "A warning is said where the decision is made: in the reply to the record that writes the answer, in its review offer and the reply to an attest on it, in the reply to a lead's close or confirmation that changes it, and in `finish` status.",
+    "a finding or an event that names the question in `answers`, even one seat's; or one two seats hold under the question's leads, or whose `rel` links it to an entry the answer cites",
     "A question put to the operator says what observation would settle its question (Q-<n>) and what each possible answer changes (which answer, and to which result)",
     "A value read from an image (a photo, a scan, a screenshot) is cited from the output of a job that read the image (an OCR tool run over the input), never from a transcription typed into a command",
     'Under "no more evidence" open no ask for that: `acquisition_none_why` naming the case policy (more_evidence: no, so an ask would be declined at once) satisfies it.',
@@ -226,6 +265,7 @@ test("the request guidance is said in the prompt and the tools: warnings at the 
   for (const must of [
     "The reply to an answer carries the finish line's warnings on its question (warnings)",
     "The reply carries the finish line's warnings on what you attested (warnings)",
+    "The reply carries the finish line's warnings the close changed (warnings)",
     "A question put to the operator (needs_operator) says what observation would settle the lead's question (Q-<n>) and what each possible answer changes",
     "A value read from an image (a photo, a scan, a screenshot) is cited from the output of a job that read the image (an OCR tool run over the input), never from a transcription typed into a command",
   ]) assert.ok(tools.includes(must), `extensions/agent-swarm.ts does not say: ${must}`);

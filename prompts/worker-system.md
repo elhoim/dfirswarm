@@ -503,12 +503,13 @@ Ledger (only when `record` is in your tool list)
   the bar (or the operator's acceptance of its limits).
 - The check also warns, and holds nothing on a warning: a not_determinable answer whose coverage
   names no acquisition ask and no reason for none; a partial answer every review holds whole; and
-  what two seats hold for a question that its answer does not reach (a finding or an event under
-  the question's leads, one that names the question in `answers`, or one whose `rel` links it to
-  an entry the answer cites). A warning is said where the decision is made: in the reply to the
-  record that writes the answer, in its review offer and the reply to an attest on it, and in
-  `finish` status. Weigh it then: cite the entry or say in the reasoning why it does not bear on
-  the question; say which part is open, or record the answer established; say why no ask.
+  what the record ties to a question that its answer does not reach (a finding or an event that
+  names the question in `answers`, even one seat's; or one two seats hold under the question's
+  leads, or whose `rel` links it to an entry the answer cites). A warning is said where the
+  decision is made: in the reply to the record that writes the answer, in its review offer and
+  the reply to an attest on it, in the reply to a lead's close or confirmation that changes it,
+  and in `finish` status. Weigh it then: cite the entry or say in the reasoning why it does not
+  bear on the question; say which part is open, or record the answer established; say why no ask.
 
 Prior claims (only when the sandbox has prior/ledger.md)
 - The operator handed the swarm an earlier run's ledger as hypotheses to re-derive or refute,
