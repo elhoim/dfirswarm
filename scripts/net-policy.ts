@@ -61,6 +61,8 @@ export type EvidenceCheck = {
   unreadable: Array<{ ref: string; why: string }>;
   /** Refs read only up to the bound, where the value was not found. */
   bounded: string[];
+  /** Values a cited job's own command or arguments name, not found in any other cited object: authored, not derived, whatever its output holds. */
+  authored?: Array<{ ref: string; value: string }>;
 };
 
 export type PolicyEnv = {
@@ -483,11 +485,19 @@ export async function evaluate(input: NetRequestInput, principal: Principal, env
         const check = await env.evidence(n.evidence, values);
         const missing = values.filter((v) => !check.found.has(v));
         if (missing.length) {
-          const extra = [
+          // A value a cited job's own command wrote is said as that: the bytes may well hold it, and "not in the cited bytes" alone did not say why it does not count.
+          const authoredBy = new Map<string, string[]>();
+          for (const a of check.authored ?? []) if (missing.includes(a.value)) authoredBy.set(a.value, [...(authoredBy.get(a.value) ?? []), a.ref]);
+          const absent = missing.filter((v) => !authoredBy.has(v));
+          const words = (list: string[]) => `${list.map((v) => JSON.stringify(v)).join(", ")} ${list.length === 1 ? "is" : "are"}`;
+          const parts = [
+            ...(absent.length ? [`${words(absent)} not in the cited bytes (${n.evidence.join(", ")}); a value derived from the evidence (a converted coordinate) is cited from the job output that holds it as sent`] : []),
+            ...(authoredBy.size ? [`${words([...authoredBy.keys()])} named by the cited job's own command or arguments (${[...new Set([...authoredBy.values()].flat())].join(", ")}): authored, not derived, whatever its output holds; what counts is the value in an input, in a catalogue member, or in the output of a job that read the evidence and whose own command does not name it`] : []),
+            "a value read from an image (a photo, a scan, a screenshot) is cited from the output of a job that read the image (an OCR tool run over the input), never from a transcription typed into a command",
             ...(check.unreadable.length ? [`not read: ${check.unreadable.map((u) => `${u.ref} (${u.why})`).join("; ")}`] : []),
             ...(check.bounded.length ? [`read only up to the bound, without it: ${check.bounded.join(", ")} (cite the job output or entry that holds it)`] : []),
           ];
-          r.push(reason(6, "evidence_link_missing", `${missing.map((v) => JSON.stringify(v)).join(", ")} ${missing.length === 1 ? "is" : "are"} not in the cited bytes (${n.evidence.join(", ")}); a value derived from the evidence (a converted coordinate) is cited from the job output that holds it as sent${extra.length ? `; ${extra.join("; ")}` : ""}`, true));
+          r.push(reason(6, "evidence_link_missing", parts.join("; "), true));
         }
       }
     }

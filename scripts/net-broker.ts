@@ -115,6 +115,7 @@ export async function evidenceCheck(sandbox: string, refs: string[], values: str
   const S = resolve(sandbox);
   const found = new Map<string, string>();
   const unreadable: EvidenceCheck["unreadable"] = [];
+  const authored: NonNullable<EvidenceCheck["authored"]> = [];
   const bounded: string[] = [];
   const wanted = () => values.filter((v) => !found.has(v));
   const needles = (v: string) => {
@@ -122,6 +123,10 @@ export async function evidenceCheck(sandbox: string, refs: string[], values: str
     return [Buffer.from(lower, "utf8").toString("latin1"), Buffer.from(lower, "utf16le").toString("latin1")];
   };
   const scanFile = async (abs: string, ref: string, excluded: Set<string>) => {
+    // A value the job's own command or arguments name is authored, whatever
+    // its output holds: said first, so a refusal whose every value is one
+    // says why, rather than only that the bytes lack it (they may hold it).
+    for (const v of excluded) if (!found.has(v) && values.includes(v)) authored.push({ ref, value: v });
     const want = wanted().filter((v) => !excluded.has(v));
     if (!want.length) return;
     const probes = want.map((v) => ({ v, n: needles(v) }));
@@ -148,7 +153,6 @@ export async function evidenceCheck(sandbox: string, refs: string[], values: str
         done();
       });
     });
-    for (const v of excluded) if (!found.has(v) && values.includes(v)) unreadable.push({ ref, why: `its job's own command or arguments name ${JSON.stringify(v)}: authored, not derived` });
   };
   const readObject = async (ref: string, via?: string) => {
     const name = via ? `${via} (through ${ref})` : ref;
@@ -175,7 +179,8 @@ export async function evidenceCheck(sandbox: string, refs: string[], values: str
     }
     await readObject(ref);
   }
-  return { found, unreadable, bounded };
+  // A value found in another cited object after all is not held against the request.
+  return { found, unreadable, bounded, authored: authored.filter((a) => !found.has(a.value)) };
 }
 
 /** The run's sensitive texts: every ledger entry marked sensitive, whatever its origin. */

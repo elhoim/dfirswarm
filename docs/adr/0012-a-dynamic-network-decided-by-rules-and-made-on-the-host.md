@@ -220,7 +220,12 @@ the decision.
 - The evidence link is a literal match (case-insensitive for ASCII, UTF-8 and
   UTF-16LE), bounded at 256 MiB of each cited object. A value the agent
   converted (a coordinate from EXIF rationals) is cited from the job output
-  that holds it as sent; a refusal says so.
+  that holds it as sent; a refusal says so. A value the cited job's own
+  command or arguments name is authored, not derived, whatever its output
+  holds, and the refusal says that too, with what counts (an input, a
+  catalogue member, the output of a job that read the evidence); a value
+  read from an image is cited from a job that read the image (an OCR tool
+  run over the input), never from a transcription typed into a command.
 - Domain categories cannot enforce a published case's integrity alone (a
   write-up can sit on any personal site); `ctf` therefore also requires that
   every value sent is in the evidence, so the question's own words can never

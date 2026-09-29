@@ -6,6 +6,21 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Fixed: a value typed into a job's command is refused as authored, and the refusal says so
+
+A seat read a value off an image, typed it into a job's own command, and
+cited the job's output (which held it) as the evidence for a lookup. The
+refusal read only "not in the cited bytes": the check set the value aside
+as authored, and returned before it said why whenever every value wanted was
+set aside. Now it says it whatever the other values are
+(`scripts/net-broker.ts` `evidenceCheck`, `authored`), and
+`evidence_link_missing` names the value as named by the cited job's own
+command or arguments, authored, not derived, and says what counts: an
+input, a catalogue member, or the output of a job that read the evidence.
+Every such refusal also says that a value read from an image is cited from
+the output of a job that read the image (an OCR tool run over the input),
+never from a transcription typed into a command.
+
 ### Fixed: a notifier that failed says how
 
 A spawn error, the 20-second timeout and a signal all read "notify.sh could

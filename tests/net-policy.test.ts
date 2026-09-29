@@ -329,6 +329,40 @@ test("step 6: under ctf what leaves must be in the bytes the request cites, read
   assert.equal((await evaluate(req({ adapter: "nvd_cve", params: { cve: "CVE-2024-3094" }, evidence: [] }), seat, env(policy({ network: "dynamic" })))).decision, "granted");
 });
 
+test("step 6: a value the cited job's own command names is refused as authored, not derived, even when its output holds it, and the refusal says what counts", async () => {
+  const base = await mkdtemp(join(tmpdir(), "ev-"));
+  dirs.push(base);
+  const S = join(base, "run");
+  await P.initSandbox(S, { swarmId: "e2", agentIds: ["a1"], capUsd: 5, wallClockMinutes: 30 });
+  // A seat read the coordinate off a photo and typed it into its job's command; the output holds it, as the command wrote it.
+  const job = async (id: string, command: string, bytes: string) => {
+    const dir = join(S, "store", "jobs", id);
+    await mkdir(join(dir, "out"), { recursive: true });
+    await writeFile(join(dir, "out", "coords.txt"), bytes);
+    await writeFile(join(dir, "manifest.json"), JSON.stringify({ v: 1, job: id, attempt: 1, sealed_at: "x", files: [{ path: "coords.txt", path_b64: Buffer.from("coords.txt").toString("base64"), bytes: bytes.length, sha256: P.sha256Hex(bytes), mode: "0444" }], dirs: [], rejected: [], totals: { files: 1, bytes: bytes.length } }));
+    await writeFile(join(dir, "job.json"), JSON.stringify({ id, state: "committed", status: "ok", requester: { agent: "a1" }, spec: { kind: "command", command, inputs: ["input:photo.jpg"], scope: "declared" } }));
+  };
+  await job("j000001", "echo 'lat=55.7558 lon=37.6173' > $OUT/coords.txt", "lat=55.7558 lon=37.6173\n");
+  const check = await evidenceCheck(S, ["job:j000001/coords.txt"], ["55.7558", "37.6173"]);
+  assert.equal(check.found.size, 0, "a value the command wrote was taken as evidence");
+  assert.deepEqual(check.authored, [{ ref: "job:j000001/coords.txt", value: "55.7558" }, { ref: "job:j000001/coords.txt", value: "37.6173" }], "every value excluded, and still said why");
+  const ctf = policy({ policy: "ctf", network: "dynamic" });
+  const real: PolicyEnv = { ...env(ctf), evidence: (refs, values) => evidenceCheck(S, refs, values) };
+  const d = await evaluate(req({ adapter: "nominatim_reverse", params: { lat: "55.7558", lon: "37.6173" }, evidence: ["job:j000001/coords.txt"] }), seat, real);
+  assert.deepEqual(codes(d), ["evidence_link_missing"]);
+  const detail = d.reasons[0].detail;
+  assert.match(detail, /^"55\.7558", "37\.6173" are named by the cited job's own command or arguments \(job:j000001\/coords\.txt\): authored, not derived/);
+  assert.doesNotMatch(detail, /not in the cited bytes/, "the bytes hold them: the refusal said only that they did not");
+  assert.match(detail, /what counts is the value in an input, in a catalogue member, or in the output of a job that read the evidence and whose own command does not name it/);
+  assert.match(detail, /a value read from an image \(a photo, a scan, a screenshot\) is cited from the output of a job that read the image \(an OCR tool run over the input\), never from a transcription typed into a command/);
+  // One value from a job that read the photo, the other typed into another job's command: only the typed one is held against it.
+  await job("j000002", "exiftool -n -GPSLatitude inputs/photo.jpg > $OUT/coords.txt", "55.7558\n");
+  const mixed = await evaluate(req({ adapter: "nominatim_reverse", params: { lat: "55.7558", lon: "37.6173" }, evidence: ["job:j000001/coords.txt", "job:j000002/coords.txt"] }), seat, real);
+  assert.deepEqual(codes(mixed), ["evidence_link_missing"]);
+  assert.match(mixed.reasons[0].detail, /^"37\.6173" is named by the cited job's own command/);
+  assert.doesNotMatch(mixed.reasons[0].detail, /55\.7558/, "a value a derivation holds is not held against the request");
+});
+
 test("step 7 and 8: what cannot be enforced is refused; quotas hold the rest", async () => {
   const std = policy({ network: "dynamic" });
   const job = await evaluate(req({ adapter: "rdap_domain", params: { domain: "example.org" }, for: "job" }), seat, env(std, { jobs: false }));
