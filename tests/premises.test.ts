@@ -336,6 +336,51 @@ test("a review names the answer's parts by id and may add one the answer leaves 
   assert.ok((await P.attestEntry(c.a2, { seq: plain.seq, how: "re-read", ...ESTABLISHED })).ok);
 });
 
+test("an open part the question does not ask: a review marks it not_asked, which caps nothing; the partial answer whose every other part is established is warned to be recorded established with it among its limitations, and never promoted", async () => {
+  const c = await run();
+  const lead = await planned(c.a0, "1");
+  const f = ok(await rec(c.a0, { kind: "finding", ...F, value: "alice logged on at 09:14", source: "a log", evidence: "line 12", refs: ["job:j000002/hits.txt"], answers: ["1"] })).entry.seq;
+  const lim = ok(await rec(c.a0, { kind: "limitation", value: "The log keeps no other session detail", source: "a log", evidence: "its fields", reason: "unavailable", answers: ["1"] })).entry.seq;
+  // The question asks who logged on and when; the answer holds open the terminal the session used, which it does not ask.
+  const a = ok(await rec(c.a1, { kind: "answer", section: "question:1", value: "alice, at 09:14; the terminal is not established", reasoning: `E-${f}; the terminal is open (E-${lim})`, ...A, limitations: [lim], result: "partial", parts: [{ id: "who", part: "who logged on", status: "established", refs: [`E-${f}`] }, { id: "when", part: "when", status: "established", refs: [`E-${f}`] }, { id: "tty", part: "which terminal the session used", status: "open", open_by: `E-${lim}` }] })).entry;
+  assert.ok((await L.closeLead(c.a0, lead, { disposition: "resolved", ref: `E-${f}` })).ok);
+  const review = (parts: unknown[]) => ({ ...ESTABLISHED, answer_review: { ...ESTABLISHED.answer_review, parts } });
+  // Its shape: never with missing, never established.
+  refused(await P.attestEntry(c.a2, { seq: a.seq, how: "re-read line 12", ...review([{ part: "which terminal", established: false, why: "w", not_asked: true, missing: true }]) }), /is either missing \(the question asks it and the answer leaves it out\) or not_asked \(the answer holds it and the question does not ask it\), not both/);
+  refused(await P.attestEntry(c.a2, { seq: a.seq, how: "re-read line 12", ...review([{ id: "tty", part: "which terminal", established: true, why: "w", not_asked: true }]) }), /is not asked by the question, so the review does not weigh it: established false/);
+  // A review that holds the open part open, as the answer declares it: nothing is warned, the answer is partial.
+  const held = review([{ id: "who", part: "who logged on", established: true, why: "line 12" }, { id: "when", part: "when", established: true, why: "line 12" }, { id: "tty", part: "which terminal the session used", established: false, why: "the log keeps none" }]);
+  assert.equal((await P.attestEntry(c.a3, { seq: a.seq, how: "re-read line 12", ...held })).ok, true);
+  let r = await checkLedgerAnswers(c.S, ["1"]);
+  assert.equal(r.dispositions["question:1"], "partial");
+  assert.ok(!r.warnings.some((x) => /partial/.test(x) && /question:1/.test(x)), r.warnings.join("\n"));
+  // Another review marks it outside the question: recorded established, nothing capped; the warning says what to record, and the answer stays partial.
+  const marked = review([{ id: "who", part: "who logged on", established: true, why: "line 12" }, { id: "when", part: "when", established: true, why: "line 12" }, { id: "tty", part: "which terminal the session used", established: false, why: "the question asks who and when, not the terminal", not_asked: true }]);
+  const att = await P.attestEntry(c.a2, { seq: a.seq, how: "re-read line 12", ...marked });
+  assert.ok(att.ok && att.line, JSON.stringify(att));
+  assert.equal(att.line!.strength, "established");
+  assert.equal(att.line!.capped, undefined);
+  assert.deepEqual(att.line!.answer_review?.parts.map((p) => p.not_asked ?? false), [false, false, true], "kept in the chained attestation");
+  assert.match(P.answerReviewWords(att.line!.answer_review!), /tty which terminal the session used NOT ASKED by the question \(a limitation, not an open part\)/);
+  assert.deepEqual((att as { warned?: string[] }).warned, ["partial_all_parts_established"], "said in the attest's reply");
+  r = await checkLedgerAnswers(c.S, ["1"]);
+  assert.equal(r.dispositions["question:1"], "partial", "never promoted: the answer stands as recorded");
+  assert.equal(r.results["question:1"], "partial");
+  const w = r.warnings.filter((x) => /\(question:1\) is partial, and every part of the question its reviews weighed is established/.test(x));
+  assert.equal(w.length, 1, r.warnings.join("\n"));
+  assert.match(w[0]!, /what it holds open the question does not ask, as its reviews mark it: tty "which terminal the session used" \(a2: the question asks who and when, not the terminal\)/);
+  assert.match(w[0]!, new RegExp(`record the answer again with supersedes=${a.seq} and result established, with what the question does not ask \\("which terminal the session used"\\) among its limitations, not its parts`));
+  assert.match(w[0]!, /Nothing is changed for you: the answer stands as recorded until you record it again/);
+  assert.ok(!(await FIN.readiness(c.S)).items.some((x) => /question:1/.test(x)), "a warning never holds");
+  // The report says it where the answer is.
+  assert.match(await renderReportBodyMarkdown(c.S), /A review says a part the answer holds is outside what the question asks: tty "which terminal the session used" \(a2: the question asks who and when, not the terminal\)\. Such a part is a limitation, not an open part; the answer stands as recorded\./);
+  // On an answer that claims established, a part marked not asked caps nothing either.
+  const f2 = ok(await rec(c.a0, { kind: "finding", ...F, value: "a remote tool installed as a service", source: "the disk", evidence: "a key", refs: ["job:j000001/hits.txt"], answers: ["2"] })).entry.seq;
+  const est = ok(await rec(c.a1, { kind: "answer", section: "question:2", value: "a remote tool, as a service", reasoning: `E-${f2}`, ...HIGH, result: "established" })).entry;
+  const e2 = await P.attestEntry(c.a2, { seq: est.seq, how: "re-read the key", ...review([{ part: "the question as asked", established: true, why: "the key" }, { part: "every other tool the host ever ran", established: false, why: "the question asks whether one was installed, not every tool", not_asked: true }]) });
+  assert.ok(e2.ok && e2.line?.strength === "established" && !e2.line.capped, JSON.stringify(e2));
+});
+
 test("an answer without parts or premises hashes as it always did: the fields are in the core only when present, and a ledger written before them verifies", async () => {
   const entry = { v: 4, seq: 7, kind: "answer", value: "alice", section: "question:1", reasoning: "E-1", result: "established", confidence: "high", by: "a1", authors: ["a1"], at: "2026-09-29T00:00:00Z" } as P.LedgerEntry;
   const h = P.ledgerHash(entry, "genesis");

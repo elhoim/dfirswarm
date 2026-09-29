@@ -341,6 +341,7 @@ export function answersChecks(checks: string[]): AnswersCheck[] {
 const WARNING_CODES: ReadonlyArray<[string, RegExp]> = [
   ["no_acquisition_ask", /is not determinable, and .*no acquisition ask/],
   ["partial_all_parts_established", /is partial, and every review holds every part it weighed established/],
+  ["partial_all_parts_established", /is partial, and every part of the question its reviews weighed is established/],
   ["lead_findings_uncited", /established under \S+'s leads and not in its answer/],
   ["lead_findings_uncited", /\) leaves out what two seats hold for \S+:/],
   ["lead_findings_uncited", /\) leaves out what the record ties to \S+:/],

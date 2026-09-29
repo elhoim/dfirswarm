@@ -9223,10 +9223,18 @@ export type AnswerReviewAlternative = { explanation: string; why: string; eviden
  * partial answer the entry by which the answer declares it open. Against an
  * answer that carries parts (premises.ts AnswerPart), `id` names the answer's
  * part it weighs, and `missing` names a part the question asks that the
- * answer leaves out (never established by it). Each only when given: a
- * review from before them hashes as it did.
+ * answer leaves out (never established by it). `not_asked` says a part the
+ * answer holds (most often open) is outside what the question asks: detail
+ * beyond it, an example category the evidence does not show, an
+ * exhaustiveness the question does not demand, a hedge on direction (the c10
+ * run s704e4b held three complete answers partial on such parts). It is a
+ * limitation, not an open part: it caps no review, and a partial answer
+ * whose every other part is established is warned
+ * (partial_all_parts_established). Never a promotion: the answer stands as
+ * recorded. Each only when given: a review from before them hashes as it
+ * did.
  */
-export type AnswerReviewPart = { id?: string; part: string; established: boolean; why: string; declared_open?: string; missing?: true };
+export type AnswerReviewPart = { id?: string; part: string; established: boolean; why: string; declared_open?: string; missing?: true; not_asked?: true };
 /**
  * The strongest rival and the test that separates it from the answer
  * (source-first review, docs/adr/0015): the rival (another time, entity,
@@ -9364,7 +9372,12 @@ export function checkAnswerReview(raw: unknown): { ok: true; review: AnswerRevie
     if (missing && o.established) return { ok: false, reason: `answer_review.parts[]: "${part.value}" is missing from the answer, so the answer does not establish it: established false, and say in why what the evidence shows of it` };
     if (missing && pid !== undefined) return { ok: false, reason: `answer_review.parts[]: "${part.value}" is missing from the answer: it has no id of the answer's (leave id out)` };
     if (missing && declaredOpen) return { ok: false, reason: `answer_review.parts[]: "${part.value}" is missing from the answer: the answer declares nothing of it open` };
-    parts.push({ ...(pid !== undefined ? { id: pid } : {}), part: part.value, established: o.established, why: why.value, ...(declaredOpen ? { declared_open: declaredOpen } : {}), ...(missing ? { missing: true as const } : {}) });
+    // A part the answer holds that the question does not ask (a limitation, not an open part).
+    if (o.not_asked !== undefined && o.not_asked !== null && typeof o.not_asked !== "boolean") return { ok: false, reason: "answer_review.parts[].not_asked is true or false: whether this part of the answer is outside what the question asks" };
+    const notAsked = o.not_asked === true;
+    if (notAsked && missing) return { ok: false, reason: `answer_review.parts[]: "${part.value}" is either missing (the question asks it and the answer leaves it out) or not_asked (the answer holds it and the question does not ask it), not both` };
+    if (notAsked && o.established) return { ok: false, reason: `answer_review.parts[]: "${part.value}" is not asked by the question, so the review does not weigh it: established false, and say in why why the question does not ask it (detail beyond it, an example category, an exhaustiveness it does not demand)` };
+    parts.push({ ...(pid !== undefined ? { id: pid } : {}), part: part.value, established: o.established, why: why.value, ...(declaredOpen ? { declared_open: declaredOpen } : {}), ...(missing ? { missing: true as const } : {}), ...(notAsked ? { not_asked: true as const } : {}) });
   }
   const f = (r.other_family && typeof r.other_family === "object" ? r.other_family : null) as Record<string, unknown> | null;
   if (!f || typeof f.checked !== "boolean") return { ok: false, reason: "answer_review.other_family is {checked: true|false, text}: whether a materially different source family was checked, and which, or why not" };
@@ -9675,7 +9688,7 @@ export function answerReviewWords(r: AnswerReview): string {
   const discriminator = d ? `; the strongest rival: ${d.rival}; the test: ${d.test}; it would favour: ${d.favours_if}; it showed: ${d.outcome} (${d.refs.join(", ")})` : "";
   const located = r.reproduced_at?.length ? `; read at: ${r.reproduced_at.map((l) => `${l.ref} byte ${l.offset}${l.value !== undefined ? ` ("${l.value}")` : ` (${l.length} bytes)`}`).join("; ")}` : "";
   const derived = r.derivation ? `; derived by job ${r.derivation.job} from ${r.derivation.inputs.join(", ")}` : "";
-  return `reproduced: ${r.reproduced}; only read: ${r.read}; parts: ${r.parts.map((p) => `${p.id ? `${p.id} ` : ""}${p.part} ${p.missing ? "MISSING from the answer" : p.established ? "established" : p.declared_open ? `open, as the answer declares it (${p.declared_open})` : "NOT established"} (${p.why})`).join("; ")}; inference: ${r.inference}; ${alternatives}; another source family ${r.other_family.checked ? "checked" : "not checked"}: ${r.other_family.text}${discriminator}${located}${derived}`;
+  return `reproduced: ${r.reproduced}; only read: ${r.read}; parts: ${r.parts.map((p) => `${p.id ? `${p.id} ` : ""}${p.part} ${p.missing ? "MISSING from the answer" : p.not_asked ? "NOT ASKED by the question (a limitation, not an open part)" : p.established ? "established" : p.declared_open ? `open, as the answer declares it (${p.declared_open})` : "NOT established"} (${p.why})`).join("; ")}; inference: ${r.inference}; ${alternatives}; another source family ${r.other_family.checked ? "checked" : "not checked"}: ${r.other_family.text}${discriminator}${located}${derived}`;
 }
 
 /** Whether an attestation holds its answer established: a best candidate does not; a line from before strengths reads as it always did. */
@@ -10456,13 +10469,13 @@ export async function strengthCaps(sandboxRoot: string, answer: LedgerEntry, rev
     // A part the answer's own rows hold open (premises.ts AnswerPart, status open), weighed by its id, is declared open too.
     const openRows = new Set((answer.parts ?? []).filter((p) => p.status === "open").map((p) => p.id));
     for (const p of review?.parts ?? []) {
-      if (p.established || (p.declared_open && open.has(p.declared_open)) || (p.id && openRows.has(p.id))) continue;
+      if (p.established || p.not_asked || (p.declared_open && open.has(p.declared_open)) || (p.id && openRows.has(p.id))) continue;
       out.push(p.missing ? `the review names "${p.part}", a part of the question the answer leaves out (${p.why})` : `the review holds "${p.part}" not established (${p.why}), and the answer does not declare it open${p.declared_open ? ` (${p.declared_open} is not a limitation or a coverage record it cites)` : ""}`);
     }
     return out;
   }
   if (answer.confidence === "medium" || answer.confidence === "low") out.push(`its confidence is ${answer.confidence}`);
-  for (const p of review?.parts ?? []) if (!p.established) out.push(p.missing ? `the review names "${p.part}", a part of the question the answer leaves out (${p.why})` : `the review holds "${p.part}" not established (${p.why})`);
+  for (const p of review?.parts ?? []) if (!p.established && !p.not_asked) out.push(p.missing ? `the review names "${p.part}", a part of the question the answer leaves out (${p.why})` : `the review holds "${p.part}" not established (${p.why})`);
   const change = String(answer.would_change ?? "");
   if (!change || !answer.section?.startsWith("question:")) return out;
   const id = sectionAnswersId(answer.section);
@@ -12114,7 +12127,7 @@ async function recordAnswer(ctx: SwarmContext, input: LedgerInput): Promise<Ledg
 
 /** What a partial answer with no open part is told: the refusal's words (docs/adr/0013, "Claim and open-part rows"). */
 export const PARTIAL_NEEDS_OPEN_PART =
-  'record it established or name what is open: a partial answer carries parts [{id, part, status, refs, open_by?}], each part the question asks as you read its revision, the parts it establishes (status "established", refs: the entries that establish each) and at least one open part (status "open", open_by: what bounds it: an acquisition ask R-<n>, a route L-<n>, or a limitation or a coverage record E-<seq>). A premise is never an open part: what the case takes as given is cited in premises (stance assumed), not held open';
+  'record it established or name what is open: a partial answer carries parts [{id, part, status, refs, open_by?}], each part the question asks as you read its revision, the parts it establishes (status "established", refs: the entries that establish each) and at least one open part (status "open", open_by: what bounds it: an acquisition ask R-<n>, a route L-<n>, or a limitation or a coverage record E-<seq>). An open part is a part the question asks: detail beyond the question, an example category the evidence does not show, and an exhaustiveness the question does not demand go in limitations, not in open parts (a question that asks for a complete set is held to its completeness coverage). A premise is never an open part: what the case takes as given is cited in premises (stance assumed), not held open';
 
 /** The ways out of premise_inconsistent, each on the record and none forcing either side (docs/adr/0011, "Premises"). */
 export function PREMISE_WAYS_OUT(premise: string, rev: number): string {
@@ -12858,19 +12871,32 @@ export function ledgerGate(o: { entries: LedgerEntry[]; attestations: LedgerAtte
     // A partial answer whose every review holds every part it weighed
     // established, at least one of them attesting it established: the
     // partial label is then most often a hedge (on s993d40, whether the
-    // person the case brief names did it). A warning: partial is for a part
-    // the evidence could not establish, and the recorder says which.
+    // person the case brief names did it). A part a review marks not asked
+    // by the question (not_asked: detail beyond it, an example category, an
+    // exhaustiveness it does not demand; on s704e4b three complete answers
+    // stood partial on such parts) is left out of "every part", whichever
+    // review marks it. A warning: partial is for a part the question asks
+    // that the evidence could not establish, and the recorder says which.
+    // Never a promotion: the answer stands as recorded.
     if (bar && result === "partial") {
       const reviews = answerReviews(a, o.attestations);
       const weighed = reviews.filter((x) => x.answer_review?.parts?.length);
       const established = reviews.filter((x) => x.strength === "established");
-      if (weighed.length && established.length && weighed.every((x) => x.answer_review!.parts.every((p) => p.established === true))) {
+      const marks = weighed.flatMap((x) => x.answer_review!.parts.filter((p) => p.not_asked).map((p) => ({ by: x.by, p })));
+      const unasked = (p: AnswerReviewPart) => marks.some((m) => (p.id && m.p.id ? p.id === m.p.id : looseText(p.part) === looseText(m.p.part)));
+      const asked = weighed.map((x) => x.answer_review!.parts.filter((p) => !unasked(p)));
+      if (weighed.length && established.length && asked.some((ps) => ps.length) && asked.every((ps) => ps.every((p) => p.established === true))) {
+        const outside = [...new Map(marks.map((m) => [m.p.id ?? looseText(m.p.part), m])).values()];
         warnings.push({
           code: "partial_all_parts_established",
           section: sec.section,
           seqs: [a.seq],
-          what: `answer #${a.seq} (${sec.section}) is partial, and every review holds every part it weighed established (${[...new Set(weighed.map((x) => x.by))].join(", ")}; attested established by ${[...new Set(established.map((x) => x.by))].join(", ")})`,
-          fix: `an answer is partial only for a part of the question the evidence could not establish: say which part is open (in its reasoning or limitations, citing what bounds it), or record the answer again with supersedes=${a.seq} and result established; ${CASE_PREMISE_WORDS}`,
+          what: outside.length
+            ? `answer #${a.seq} (${sec.section}) is partial, and every part of the question its reviews weighed is established (${[...new Set(weighed.map((x) => x.by))].join(", ")}; attested established by ${[...new Set(established.map((x) => x.by))].join(", ")}); what it holds open the question does not ask, as its reviews mark it: ${outside.map((m) => `${m.p.id ? `${m.p.id} ` : ""}"${m.p.part}" (${m.by}: ${m.p.why})`).join("; ")}`
+            : `answer #${a.seq} (${sec.section}) is partial, and every review holds every part it weighed established (${[...new Set(weighed.map((x) => x.by))].join(", ")}; attested established by ${[...new Set(established.map((x) => x.by))].join(", ")})`,
+          fix: outside.length
+            ? `an open part is a part the question asks: record the answer again with supersedes=${a.seq} and result established, with what the question does not ask (${outside.map((m) => `"${m.p.part}"`).join(", ")}) among its limitations, not its parts; unasked detail, an example category the evidence does not show and an exhaustiveness the question does not demand are limitations (a question that asks for a complete set is held to its completeness coverage instead). If a part the question does ask is open, name it and what bounds it. Nothing is changed for you: the answer stands as recorded until you record it again`
+            : `an answer is partial only for a part of the question the evidence could not establish: say which part is open (in its reasoning or limitations, citing what bounds it), or record the answer again with supersedes=${a.seq} and result established; ${CASE_PREMISE_WORDS}`,
         });
       }
     }

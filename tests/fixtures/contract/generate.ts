@@ -962,6 +962,28 @@ const CASES: Record<string, (base: string) => Promise<string>> = {
   },
 
   /**
+   * Only a part the question asks is open (docs/adr/0013, "Claim and
+   * open-part rows"; the c10 run s704e4b): question 1's partial answer
+   * establishes who logged on and when, and holds open which terminal the
+   * session used, which the question does not ask; its review holds the two
+   * parts established and marks the third not asked. Question 2's partial
+   * answer holds open the account, which the question asks; its review
+   * holds that part open, as the answer declares it.
+   */
+  "parts-not-asked": async (base) => {
+    const r = await newRun(base, "pna", 2);
+    const id1 = await lead(r.a0, "1");
+    const f1 = (await rec(r.a0, { kind: "finding", ...F, value: "alice logged on at 09:14", source: "the log", evidence: "line 12", refs: ["job:j000002/hits.txt"], answers: ["1"] })).entry;
+    const lim1 = (await rec(r.a0, { kind: "limitation", value: "The log keeps no other session detail", source: "the log", evidence: "its field list", reason: "unavailable", answers: ["1"] })).entry;
+    const a1 = (await rec(r.a1, { kind: "answer", section: "question:1", value: "alice, at 09:14; the terminal is not established", reasoning: `E-${f1.seq}; the terminal is open (E-${lim1.seq})`, ...A, limitations: [lim1.seq], result: "partial", parts: [{ id: "who", part: "who logged on", status: "established", refs: [`E-${f1.seq}`] }, { id: "when", part: "when", status: "established", refs: [`E-${f1.seq}`] }, { id: "tty", part: "which terminal the session used", status: "open", open_by: `E-${lim1.seq}` }] })).entry;
+    await close(r.a0, id1, `E-${f1.seq}`);
+    await attest(r.a3, { seq: a1.seq, how: "re-read line 12 from job:j000002", ...ESTABLISHED, answer_review: { ...ESTABLISHED.answer_review, parts: [{ id: "who", part: "who logged on", established: true, why: "line 12 names alice" }, { id: "when", part: "when", established: true, why: "line 12's time" }, { id: "tty", part: "which terminal the session used", established: false, why: "the question asks who logged on and when, not the terminal", not_asked: true }] } });
+    const p = await partial(r, "2");
+    await attest(r.a3, { seq: p.a.seq, how: "re-read line 12 from job:j000002", ...ESTABLISHED, answer_review: { ...ESTABLISHED.answer_review, parts: [{ id: "when", part: "when the logon happened", established: true, why: "line 12" }, { id: "who", part: "which account logged on", established: false, why: "the log keeps none" }] } });
+    return r.S;
+  },
+
+  /**
    * The operator's acceptance excuses what it excuses in every reader
    * (docs/adr/0011, "Premises"; the Fable review of the limits branch,
    * P1-1): P-1, a given; question 1's answer assumes it and question 2's

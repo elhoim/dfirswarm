@@ -988,9 +988,28 @@ the claim rows and the stable part ids into one structure.
   holds nothing there. Whatever the result, the omission is warned of,
   `part_omitted`, wherever warnings are delivered, until the answer is
   recorded again: it stays visible.
+- **Only a part the question asks is open.** On the c10 run s704e4b all
+  six answers were partial, and three were complete answers whose open
+  parts were mostly what the question does not ask: detail beyond it,
+  negatives for example categories the evidence does not show, an
+  exhaustiveness no evidence could close, hedges on direction. An open part
+  is a part the question asks; the rest are limitations, and the record
+  tool, its refusal and the prompt say so (a question that asks for a
+  complete set is held to its completeness coverage, not to an open part).
+  A review marks a part the answer holds that the question does not ask
+  `not_asked: true` (established false, never with `missing`, in the
+  attestation's hashed record only when given): it caps nothing, on a
+  partial answer or one that claims established. A partial answer whose
+  every part its reviews weigh is established, but for those a review marks
+  not asked, with at least one review attesting it established, is warned
+  (`partial_all_parts_established`, wherever warnings are delivered): record
+  it established, with the unasked parts among its limitations. A warning,
+  never a hold and never a promotion: the answer stands as its recorder
+  recorded it (Astra's "never promote automatically").
 - **Where it shows.** The report shows each answer's rows against the
-  revision it answers (the question's words beside them), and a part a
-  review says it leaves out; the console's Questions tab and
+  revision it answers (the question's words beside them), a part a review
+  says it leaves out, and a part a review says the question does not ask;
+  the console's Questions tab and
   `questions/questions.md` show the rows, the premises the answer cites and
   the omitted parts; `ledger.md` shows both on the answer.
 

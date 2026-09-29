@@ -41,7 +41,7 @@ const WRITTEN_WITH_DELTA = new Set(["evidence-stale-cleared", "late-evidence-hit
 /** The harness before the premise register and the claim and open-part rows (docs/adr/0011 "Premises", 0013 "Claim and open-part rows"). */
 const BEFORE_PREMISES = "be4e6a3cfe9f79825a223bd8b96d0d4d71682740";
 /** The histories written with premises or rows: the harness before them has neither. */
-const WRITTEN_WITH_PREMISES = new Set(["premise-given", "premise-admitted", "premise-scopes", "premise-held", "premise-rebutted", "premise-conditional", "parts-omitted", "accepted-excused"]);
+const WRITTEN_WITH_PREMISES = new Set(["premise-given", "premise-admitted", "premise-scopes", "premise-held", "premise-rebutted", "premise-conditional", "parts-omitted", "accepted-excused", "parts-not-asked"]);
 /**
  * The histories written for the acceptance's one rule (the Fable review of
  * the limits branch, P1-1): the answers check before it held, on an accepted

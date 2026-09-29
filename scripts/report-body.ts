@@ -2197,6 +2197,9 @@ function partsBlocks(a: LedgerEntry, q: Question, run: Run): Block[] {
   }
   const omitted = run.attestations.filter((x) => x.target === (a.hash ?? "") && !a.authors.includes(x.by)).flatMap((x) => (x.answer_review?.parts ?? []).filter((p) => p.missing).map((p) => ({ by: x.by, part: p.part, why: p.why })));
   if (omitted.length) out.push({ k: "note", s: [`A review says the answer leaves out ${omitted.length === 1 ? "a part" : "parts"} of the question: ${omitted.map((x) => `"${x.part}" (${x.by}: ${x.why})`).join("; ")}. It stays here until the answer is recorded again with ${omitted.length === 1 ? "it" : "them"}.`] });
+  // A part a review says the question does not ask (not_asked): a limitation, not an open part; the answer stands as recorded.
+  const unasked = run.attestations.filter((x) => x.target === (a.hash ?? "") && !a.authors.includes(x.by)).flatMap((x) => (x.answer_review?.parts ?? []).filter((p) => p.not_asked).map((p) => ({ by: x.by, id: p.id, part: p.part, why: p.why })));
+  if (unasked.length) out.push({ k: "note", s: [`A review says ${unasked.length === 1 ? "a part" : "parts"} the answer holds ${unasked.length === 1 ? "is" : "are"} outside what the question asks: ${unasked.map((x) => `${x.id ? `${x.id} ` : ""}"${x.part}" (${x.by}: ${x.why})`).join("; ")}. Such a part is a limitation, not an open part; the answer stands as recorded.`] });
   return out;
 }
 

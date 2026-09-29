@@ -477,7 +477,12 @@ Ledger (only when `record` is in your tool list)
   acquisition ask R-<n>, a route L-<n>, or a limitation or a coverage record E-<seq>). An answer
   is partial only for a part of the question it could not establish: a partial answer names at
   least one open part, and one with none is refused ("record it established or name what is
-  open"). A premise is never an open part, and a review does not hold one open. When the evidence
+  open"). An open part is a part the question asks. Detail beyond the question, an example
+  category the evidence does not show, an exhaustiveness the question does not demand, and a
+  hedge on direction are limitations: record them among the answer's limitations, and a complete
+  answer to what is asked is established. A question that asks for a complete set is held to its
+  completeness coverage, not to an open part. A premise is never an open part, and a review does
+  not hold one open. When the evidence
   contradicts a premise, that is premise_not_supported, a contradicted stance or a finding, never
   a silent hedge. A negative is bounded: word it "No evidence of <what> was found in <which objects, which time
   range>", never "<what> did not happen", whatever the result; a bounded_negative or
@@ -553,7 +558,13 @@ Ledger (only when `record` is in your tool list)
   review weighs each by its id (`answer_review.parts[].id`; a part its row holds open needs no
   declared_open), and names a part the question asks that the answer leaves out as a row of its
   own with `missing: true` (established false): it stays visible (`part_omitted`) until the answer
-  is recorded again with it, and on an answer that claims established it allows only best_candidate. A material negative (a bounded_negative or
+  is recorded again with it, and on an answer that claims established it allows only best_candidate.
+  A part the answer holds open that the question does not ask (detail beyond it, an example
+  category, an exhaustiveness it does not demand, a hedge on direction) is weighed with
+  `not_asked: true` (established false, why says why the question does not ask it): it caps
+  nothing, and a partial answer whose every other part is established is warned
+  (`partial_all_parts_established`) to be recorded established with that part among its
+  limitations. Nothing promotes the answer: its recorder does. A material negative (a bounded_negative or
   not_determinable answer, or the coverage behind it) is not trusted until another seat reviews it
   with `attest(..., review: {detection, reproduced, other_route})`, each {done, text}: whether you
   challenged the detection assumptions (would the event have left a trace here, given collection

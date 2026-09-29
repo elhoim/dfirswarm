@@ -39,6 +39,14 @@ contract fixtures gained two cases.
   its own budget (`SWARM_REVERSE_SWEEP_MAX_SEC`, 120;
   `SWARM_REVERSE_SWEEP_MAX_BYTES`, 2 GiB), what a pass leaves searched by
   the next, each pass posted when it completes.
+- **Only a part the question asks is open.** On c10 run s704e4b three
+  complete answers stood partial on parts the question does not ask. The
+  record tool, its refusal and the prompt say an open part is a part the
+  question asks, and the rest are limitations; a review marks such a part
+  `not_asked: true`, which caps nothing, and a partial answer whose every
+  other part is established is warned (`partial_all_parts_established`) to
+  be recorded established with it among its limitations. Never a promotion.
+  Fixture `parts-not-asked`.
 - **Smaller fixes.** A late delta clears stale evidence only on the entry
   that examined the import, under review, and the report says irrelevant,
   inconclusive and adds_part deltas; a preparation lead closed without a

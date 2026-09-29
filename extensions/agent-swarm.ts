@@ -3301,7 +3301,7 @@ export default function (pi: ExtensionAPI) {
           }),
           {
             description:
-              "A question's answer: its claim and open-part rows, each part the question asks as you read its revision, established on the entries in refs, or open with what bounds it (open_by). Required on a partial answer, with at least one open part: a partial answer with none is refused (record it established or name what is open). An established answer's parts are all established. A premise is never an open part: what the case takes as given goes in premises.",
+              "A question's answer: its claim and open-part rows, each part the question asks as you read its revision, established on the entries in refs, or open with what bounds it (open_by). Required on a partial answer, with at least one open part: a partial answer with none is refused (record it established or name what is open). An open part is a part the question asks: detail beyond the question, an example category the evidence does not show, an exhaustiveness the question does not demand, and a hedge on direction go in limitations, not in open parts; a question that asks for a complete set is held to its completeness coverage, not to an open part. An established answer's parts are all established. A premise is never an open part: what the case takes as given goes in premises.",
           },
         ),
       ),
@@ -3473,8 +3473,9 @@ export default function (pi: ExtensionAPI) {
                 why: Type.String(),
                 declared_open: Type.Optional(Type.String({ description: "A partial answer's part that the answer itself declares open: E-<seq> of the limitation it cites, or the coverage record it rests on, that declares it so. Such a part does not cap the review." })),
                 missing: Type.Optional(Type.Boolean({ description: "A part the question asks that the answer leaves out (no id; established false): it stays visible (part_omitted) until the answer is recorded again with it" })),
+                not_asked: Type.Optional(Type.Boolean({ description: "A part the answer holds, most often open, that the question does not ask (detail beyond it, an example category the evidence does not show, an exhaustiveness it does not demand, a hedge on direction): established false, and why says why the question does not ask it. It caps nothing; a partial answer whose every other part is established is then warned (partial_all_parts_established) to be recorded established with that part among its limitations. Never with missing" })),
               }),
-              { description: "Each part the question asks, whether it is established, and why; against an answer that carries parts, each of its parts by its id, and a part it leaves out with missing: true. For a partial answer, a part it declares open (its row open, or declared_open naming the entry) does not cap the review. What the case brief or the goal states as given (who the subject is, whose device it is) is a premise, not a part to hold open" },
+              { description: "Each part the question asks, whether it is established, and why; against an answer that carries parts, each of its parts by its id, and a part it leaves out with missing: true, and a part it holds that the question does not ask with not_asked: true. For a partial answer, a part it declares open (its row open, or declared_open naming the entry) does not cap the review. What the case brief or the goal states as given (who the subject is, whose device it is) is a premise, not a part to hold open" },
             ),
             inference: Type.String({ description: "The step that connects the observations to the answer" }),
             alternatives: Type.Union([Type.Array(Type.Object({ explanation: Type.String(), why: Type.String(), evidence: Type.Optional(Type.Array(Type.String())) })), Type.String()], {
