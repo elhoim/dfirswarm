@@ -2075,6 +2075,13 @@ function humanChecked(run: Run): string {
   return parts.join(" ");
 }
 
+/** How a late delta that neither supports nor contradicts the answer reads in its chain. */
+const LATE_DELTA_WORDS: Readonly<Record<string, string>> = {
+  irrelevant: "irrelevant to it within its scope",
+  inconclusive: "inconclusive: it cannot say how the new evidence bears on it",
+  adds_part: "it adds a part the answer left open",
+};
+
 const STEPS = ["How it was obtained", "What it indicates", "Why this confidence", "What else could explain it", "Contrary evidence", "Limitations", "What would change it", "Exhibits"] as const;
 
 function answerSectionOf(run: Run, memo: Map<number, EntryState>): BodySection {
@@ -2421,6 +2428,14 @@ function answerSteps(a: LedgerEntry, s: EntryState, run: Run, memo: Map<number, 
     for (const d of stateOf(e, run, memo).disputes) out.push({ k: "p", s: [{ e: e.seq }, ` is disputed by ${d.by}: ${d.why}. `, qualified.has(e.seq) ? `The answer cites it qualified: ${qualified.get(e.seq)}.` : "The answer does not qualify it."] });
   }
   for (const d of s.disputes) out.push({ k: "p", s: [{ b: "The answer itself is disputed " }, `by ${d.by}: ${d.why}.`] });
+  // Evidence added late and weighed against the answer by a delta that neither supports nor contradicts it (docs/adr/0013, "Late evidence: the reverse sweep and the delta"): said, so an "irrelevant" or an "inconclusive" is read where the answer is (the Fable review of the limits branch, P3-1).
+  const weighed = run.entries
+    .filter((e) => !run.replaced.has(e.seq))
+    .flatMap((e) => (e.rel ?? []).filter((r) => LATE_DELTA_WORDS[r.kind] && run.bySeq.get(r.to)?.kind === "answer" && run.bySeq.get(r.to)?.section === a.section).map((r) => ({ e, r })));
+  if (weighed.length) {
+    out.push({ k: "p", s: ["Evidence added late, weighed against the answer, neither supporting nor contradicting it:"] });
+    out.push({ k: "list", items: weighed.map(({ e, r }): Span[] => [{ e: e.seq }, ` on `, { e: r.to }, `: ${LATE_DELTA_WORDS[r.kind]}${e.value ? ` (${e.value})` : ""}`]) });
+  }
 
   // 6. Limitations.
   out.push({ k: "h", level: 4, text: STEPS[5] });

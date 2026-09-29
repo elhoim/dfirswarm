@@ -20,6 +20,7 @@ import * as Q from "../extensions/questions.ts";
 import * as SW from "../extensions/store-sweep.ts";
 import { checkLedgerAnswers } from "../scripts/check-answers.ts";
 import { admitMaterial, reconcileAdditions } from "../scripts/material.ts";
+import { renderReportBodyMarkdown } from "../scripts/report-body.ts";
 import { A, coverage, ESTABLISHED, F, ok, okq, planned, rec, refused, REVIEW, run } from "./negative-bar-fixture.ts";
 
 const HIGH = { ...A, confidence: "high" } as const;
@@ -132,6 +133,39 @@ test("the hits go to the re-examination of their questions and hold nothing: sai
   const seen = ok(await rec(c.a0, { kind: "finding", ...F, value: "the binary names bob-laptop as its build host, not a host of the case", source: "the binary", evidence: "its strings", refs: ["import:ev-0001/strings.bin"], answers: ["1"], rel: [{ to: ans1b.seq, kind: "irrelevant" }] })).entry;
   const ans1c = ok(await rec(c.a1, { kind: "answer", section: "question:1", value: "The first account, at 09:14; the binary's host is not the case's", reasoning: `E-${c.f1.seq} and E-${seen.seq}, searched as E-${c.cov1.seq}`, ...HIGH, result: "established", supersedes: ans1b.seq }));
   assert.equal(ans1c.warned, undefined, JSON.stringify(ans1c.warnings));
+});
+
+test("a delta clears evidence_stale only on the entry that examined the import: an \"irrelevant\" nobody else reviewed, beside a reviewed coverage record that does not list it, clears nothing; attested, or among that record's results, it does", async () => {
+  const setup = async () => {
+    const c = await before();
+    const dir = await lateDir(c.S, { "proxy.csv": "time,user\n09:58,ws\n" });
+    assert.equal((await admitMaterial(c.S, { mode: "evidence", path: dir, why: "the proxy export", supplied_by: "t", via: "cli" })).ok, true);
+    const imp = `import:ev-0001/${(await readdir(join(c.S, "store", "imports", "ev-0001", "out")))[0]}`;
+    const d = ok(await rec(c.a0, { kind: "finding", ...F, value: "the export holds no traffic of a remote tool", source: "the export", evidence: "every row", refs: [imp], answers: ["2"], rel: [{ to: c.ans2.seq, kind: "irrelevant" }] })).entry;
+    return { c, imp, d };
+  };
+  // The Fable review's case (P3-1): the coverage record names the import and another seat reviews it; the answer cites a finding with an irrelevant delta that the record does not list and nobody reviewed.
+  const { c, imp, d } = await setup();
+  const cov = ok(await rec(c.a0, coverage("2", ["input:disk.E01", imp], [`E-${c.abs2.seq}`], { looked_for: ["alice"], supersedes: c.cov2.seq }))).entry;
+  const ans = ok(await rec(c.a1, { kind: "answer", section: "question:2", value: "No evidence of a remote tool was found on the disk or the export", reasoning: `E-${cov.seq}; E-${d.seq} weighs the export`, ...A, result: "bounded_negative", supersedes: c.ans2.seq })).entry;
+  await attested(c.a2, { seq: cov.seq, how: "ran the search again over both", review: REVIEW, second_review_why: "the export is new" });
+  const r = await checkLedgerAnswers(c.S, ["2"], ["2"]);
+  const st = defectsOf(r, "question:2", "evidence_stale")[0];
+  assert.ok(st, r.lines.join("\n"));
+  assert.match(st.what, new RegExp(`E-${d.seq} carries a delta that no other seat reviewed: it is not among the results of a reviewed coverage record naming the import, nor attested`));
+  assert.ok(st.seqs.includes(d.seq));
+  // Attested by another seat: it examined the import under review, and its delta clears the answer.
+  await attested(c.a3, { seq: d.seq, how: "read the export's rows again" });
+  assert.equal(P.evidenceStale(ans, await P.readLedger(c.S), await P.readAttestations(c.S)), null);
+  // The report says the irrelevant delta where the answer is.
+  const md = await renderReportBodyMarkdown(c.S);
+  assert.match(md, new RegExp(`Evidence added late, weighed against the answer, neither supporting nor contradicting it:[\\s\\S]*E-${d.seq}[^\\n]* on [^\\n]*E-${c.ans2.seq}[^\\n]*: irrelevant to it within its scope`));
+  // Or listed among the results of the reviewed coverage record: its reviewer saw it.
+  const b = await setup();
+  const covB = ok(await rec(b.c.a0, coverage("2", ["input:disk.E01", b.imp], [`E-${b.c.abs2.seq}`, `E-${b.d.seq}`], { looked_for: ["alice"], supersedes: b.c.cov2.seq }))).entry;
+  const ansB = ok(await rec(b.c.a1, { kind: "answer", section: "question:2", value: "No evidence of a remote tool was found on the disk or the export", reasoning: `E-${covB.seq}`, ...A, result: "bounded_negative", supersedes: b.c.ans2.seq })).entry;
+  await attested(b.c.a2, { seq: covB.seq, how: "ran the search again over both", review: REVIEW, second_review_why: "the export is new" });
+  assert.equal(P.evidenceStale(ansB, await P.readLedger(b.c.S), await P.readAttestations(b.c.S)), null);
 });
 
 test("evidence_stale clears only on a delta: an entry that interprets the import with a rel to the question's answer; one with no delta, one weighed against another question's answer, one that names no object of the import clear nothing; the operator's acceptance after the addition still clears it", async () => {

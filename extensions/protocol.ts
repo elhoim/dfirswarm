@@ -12274,22 +12274,29 @@ export function deltasFor(e: Pick<LedgerEntry, "rel">, section: string, bySeq: R
  *   batches 1-3).
  * - the delta (docs/adr/0013, "Late evidence: the reverse sweep and the
  *   delta"; the calibration run sb1b3c8 missed the late fact with the
- *   import cited 28 times): the answer, or a coverage record it cites for
- *   its question recorded after the addition (its result_refs), cites an
- *   entry that interprets the import: a standing entry recorded after the
- *   addition whose refs name the import's objects and that carries a
- *   delta, a rel to the question's answer whose kind is supports,
- *   contradicts, adds_part, irrelevant or inconclusive (deltasFor).
+ *   import cited 28 times): an entry that interprets the import (a
+ *   standing entry recorded after the addition whose refs name the
+ *   import's objects) carries a delta, a rel to the question's answer whose
+ *   kind is supports, contradicts, adds_part, irrelevant or inconclusive
+ *   (deltasFor), and it is the entry that examined the import, under the
+ *   review the rule asks for: among the results of a coverage record the
+ *   answer cites that names the import and another seat reviewed (its
+ *   reviewer saw it), or an entry the answer cites (or cites as contrary)
+ *   that rests on the import and another seat attested. A delta on an
+ *   entry nobody else looked at, beside a coverage record somebody did,
+ *   clears nothing: an "irrelevant" costs the same review as any other
+ *   delta (the Fable review of the limits branch, P3-1).
  * The operator's acceptance of the question's limits after the addition
  * still excuses it (acceptanceExcuses). `coverage` lists the records it
  * cites recorded before the addition's entry; `unnamed` those recorded
  * after it that do not name the import; `unreviewed` those that name it
  * and entries resting on it that nobody else has attested yet;
  * `undelta` the entries so cited that interpret the import and carry no
- * delta; `nodelta` the additions examined and reviewed whose delta is
- * missing. Null when nothing stales it.
+ * delta; `unexamined` those that carry a delta outside the reviewed
+ * examination; `nodelta` the additions examined and reviewed whose delta
+ * is missing there. Null when nothing stales it.
  */
-export function evidenceStale(answer: LedgerEntry, entries: LedgerEntry[], attestations: LedgerAttestation[]): { additions: EvidenceAddition[]; coverage: number[]; unnamed: number[]; unreviewed: number[]; undelta: number[]; nodelta: number[] } | null {
+export function evidenceStale(answer: LedgerEntry, entries: LedgerEntry[], attestations: LedgerAttestation[]): { additions: EvidenceAddition[]; coverage: number[]; unnamed: number[]; unreviewed: number[]; undelta: number[]; unexamined: number[]; nodelta: number[] } | null {
   if (answer.kind !== "answer" || !answer.section?.startsWith("question:")) return null;
   const additions = evidenceAdditions(entries);
   if (!additions.length) return null;
@@ -12317,18 +12324,25 @@ export function evidenceStale(answer: LedgerEntry, entries: LedgerEntry[], attes
   const unnamed = new Set<number>();
   const unreviewed = new Set<number>();
   const undelta = new Set<number>();
+  const unexamined = new Set<number>();
   const nodelta: number[] = [];
   for (const x of additions) {
     const covAfter = cov.filter((c) => c.seq > x.seq);
     const resting = answer.seq > x.seq ? citedAll.filter((e) => e.kind !== "coverage" && e.seq !== x.seq && namesImport(e, x.import)) : [];
-    const examined = covAfter.some((c) => namesAmongObjects(c, x.import) && reviewed(c)) || resting.some(reviewed);
-    // The entries that interpret the import, cited by the answer or by its coverage recorded since: one with a delta clears it.
+    // The reviewed examinations of the import: a coverage record naming it that another seat attested, and an entry the answer cites that rests on it, attested.
+    const examiners = covAfter.filter((c) => namesAmongObjects(c, x.import) && reviewed(c));
+    const examined = examiners.length > 0 || resting.some(reviewed);
+    // The entries that interpret the import, cited by the answer or by its coverage recorded since.
     const interpreting = [...new Map([...citedWithContrary, ...covAfter.flatMap(resultsOf)].map((e) => [e.seq, e])).values()].filter((e) => e.seq > x.seq && e.kind !== "coverage" && e.kind !== "answer" && namesImportObjects(e, x.import));
-    const delta = interpreting.some((e) => deltasFor(e, answer.section!, bySeq).length);
-    if (examined && delta) continue;
+    // A delta clears it only on the entry that examined the import: a result of a reviewed coverage record naming it, or an entry the answer cites that another seat attested.
+    const carriers = new Set(examiners.flatMap(resultsOf).map((e) => e.seq));
+    const carried = (e: LedgerEntry) => carriers.has(e.seq) || (answer.seq > x.seq && citedWithContrary.some((c) => c.seq === e.seq) && reviewed(e));
+    const withDelta = interpreting.filter((e) => deltasFor(e, answer.section!, bySeq).length);
+    if (withDelta.some(carried)) continue;
     stale.push(x);
     if (examined) nodelta.push(x.seq);
     for (const e of interpreting) if (!deltasFor(e, answer.section!, bySeq).length) undelta.add(e.seq);
+    for (const e of withDelta) unexamined.add(e.seq);
     for (const c of cov) {
       if (c.seq < x.seq) older.add(c.seq);
       else if (!namesAmongObjects(c, x.import)) unnamed.add(c.seq);
@@ -12337,7 +12351,7 @@ export function evidenceStale(answer: LedgerEntry, entries: LedgerEntry[], attes
     for (const e of resting) if (!reviewed(e)) unreviewed.add(e.seq);
   }
   const sorted = (xs: Set<number>) => [...xs].sort((a, b) => a - b);
-  return stale.length ? { additions: stale, coverage: sorted(older), unnamed: sorted(unnamed), unreviewed: sorted(unreviewed), undelta: sorted(undelta), nodelta } : null;
+  return stale.length ? { additions: stale, coverage: sorted(older), unnamed: sorted(unnamed), unreviewed: sorted(unreviewed), undelta: sorted(undelta), unexamined: sorted(unexamined), nodelta } : null;
 }
 
 /**
@@ -12690,9 +12704,9 @@ export function ledgerGate(o: { entries: LedgerEntry[]; attestations: LedgerAtte
         defects.push({
           code: "evidence_stale",
           section: sec.section,
-          seqs: [a.seq, ...st.coverage, ...st.unnamed, ...st.unreviewed, ...st.undelta],
+          seqs: [a.seq, ...st.coverage, ...st.unnamed, ...st.unreviewed, ...st.undelta, ...st.unexamined],
           additions: st.additions.map((x) => x.seq),
-          what: `answer #${a.seq} (${sec.section}) is ${NB.resultWords(result)}: new evidence since its coverage (${st.additions.map((x) => `${x.import}, E-${x.seq}${x.inventory_rev !== null ? `, inventory revision ${x.inventory_rev}` : ""}`).join("; ")}); re-examine against it${st.coverage.length ? `. Its coverage record${st.coverage.length === 1 ? "" : "s"} ${list(st.coverage)} ${st.coverage.length === 1 ? "was" : "were"} recorded before the addition's entry E-${first.seq}` : ""}${st.unnamed.length ? `; ${list(st.unnamed)}, recorded after it, ${st.unnamed.length === 1 ? "does" : "do"} not name ${importWords} among its objects` : ""}${st.unreviewed.length ? `; ${list(st.unreviewed)} ${st.unreviewed.length === 1 ? "examines" : "examine"} it and no other seat has reviewed ${st.unreviewed.length === 1 ? "it" : "them"} yet` : ""}${st.nodelta.length ? `; it was examined and reviewed, and nothing it cites says how the new evidence bears on the answer (a delta)` : ""}${st.undelta.length ? `; ${list(st.undelta)} ${st.undelta.length === 1 ? "interprets" : "interpret"} it with no delta` : ""}${hitsHere.length ? `. The reverse sweep found what this question's coverage looked for in it: ${hitsHere.map(importHitWords).join("; ")}` : ""}`,
+          what: `answer #${a.seq} (${sec.section}) is ${NB.resultWords(result)}: new evidence since its coverage (${st.additions.map((x) => `${x.import}, E-${x.seq}${x.inventory_rev !== null ? `, inventory revision ${x.inventory_rev}` : ""}`).join("; ")}); re-examine against it${st.coverage.length ? `. Its coverage record${st.coverage.length === 1 ? "" : "s"} ${list(st.coverage)} ${st.coverage.length === 1 ? "was" : "were"} recorded before the addition's entry E-${first.seq}` : ""}${st.unnamed.length ? `; ${list(st.unnamed)}, recorded after it, ${st.unnamed.length === 1 ? "does" : "do"} not name ${importWords} among its objects` : ""}${st.unreviewed.length ? `; ${list(st.unreviewed)} ${st.unreviewed.length === 1 ? "examines" : "examine"} it and no other seat has reviewed ${st.unreviewed.length === 1 ? "it" : "them"} yet` : ""}${st.nodelta.length ? `; it was examined and reviewed, and nothing it cites says how the new evidence bears on the answer (a delta)` : ""}${st.undelta.length ? `; ${list(st.undelta)} ${st.undelta.length === 1 ? "interprets" : "interpret"} it with no delta` : ""}${st.unexamined.length ? `; ${list(st.unexamined)} ${st.unexamined.length === 1 ? "carries a delta" : "carry deltas"} that no other seat reviewed: ${st.unexamined.length === 1 ? "it is" : "they are"} not among the results of a reviewed coverage record naming the import, nor attested` : ""}${hitsHere.length ? `. The reverse sweep found what this question's coverage looked for in it: ${hitsHere.map(importHitWords).join("; ")}` : ""}`,
           fix: `examine ${importWords} for ${sec.section}${hitsHere.length ? ` (each object the reverse sweep names first)` : ""}: record what it shows as an entry whose refs name the import's files, with a delta, rel [{to: ${a.seq}, kind: supports | contradicts | adds_part | irrelevant | inconclusive}] (how the new evidence bears on this answer: it supports it, contradicts it, adds a part it left open, is irrelevant to it within its scope, or cannot say); record kind=coverage with answers=["${id}"] naming the import (or its files) among its objects and that entry among its results; have another seat review it (attest it with review); and record the answer again with supersedes=${a.seq} citing it. An entry resting on the new evidence with its delta, cited by the answer, clears it too once another seat has attested it. Or the operator accepts the question's limits after the evidence came (question accept)`,
           named_by: [],
         });
