@@ -25,7 +25,7 @@ import struct
 import subprocess
 import sys
 
-NOT_COVERED = ("volume shadow copies (run with --no_vss); encrypted volumes without their key; unallocated space and "
+NOT_COVERED = ("volume shadow copies (run with --vss_stores none); encrypted volumes without their key; unallocated space and "
                "deleted file contents (nothing is carved); formats no parser of the pinned Plaso handles, and the text inside documents")
 
 
@@ -122,7 +122,7 @@ def run(image, out):
         write_coverage(out, "failed", "nothing: Plaso is not in this image", ["%s not on PATH in this job image" % " and ".join(missing)])
         return 1
     storage = os.path.join(out, "timeline.plaso")
-    rc = step(out, "log2timeline", [l2t, "--unattended", "--partitions", "all", "--volumes", "all", "--no_vss", "--storage-file", storage, image])
+    rc = step(out, "log2timeline", [l2t, "--unattended", "--partitions", "all", "--volumes", "all", "--vss_stores", "none", "--storage-file", storage, image])
     errors = []
     if rc != 0:
         errors.append("log2timeline exited %d; its output is kept whole in log2timeline.stdout and log2timeline.stderr" % rc)

@@ -56,7 +56,7 @@
   "purpose": "broad_extraction",
   "capability": "disk-super-timeline",
   "exclusions": [
-    "volume shadow copies: it runs with --no_vss (the windows-forensics pack's vss tools read them)",
+    "volume shadow copies: it runs with --vss_stores none (the windows-forensics pack's vss tools read them)",
     "encrypted volumes (BitLocker, LUKS, FileVault, encrypted APFS) without their key",
     "unallocated space and deleted file contents: Plaso parses allocated files and the metadata its parsers read, and carves nothing",
     "formats no parser of the pinned Plaso handles, and the text inside documents"
@@ -75,5 +75,5 @@
     "coverage.json"
   ],
   "covers": "What log2timeline's parsers read from every partition and volume of the image, written by psort as one CSV timeline; the storage file is kept for psort and pinfo. A parser that finds nothing adds no row, which does not show the artefact never existed.",
-  "sha256": "355f01d826a32ea54fb272f4632cbca39ab75d1b94799bb16c7fc956b83a0e8d"
+  "sha256": "9e04e791048eb4abe227cd17013eb4b3b86e2c8ff0fdf2631ebc864a4c83880a"
 }
