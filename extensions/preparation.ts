@@ -207,10 +207,14 @@ export async function readReceipts(sandboxRoot: string): Promise<PreparationRece
  */
 export type SourceReach = { sha256: string; how: "named" | "member" | "derived"; via: string };
 
-/** What the gate reads of the preparations: each source's state, and each coverage record's reach into them, by the record's seq. */
+/** A preparation lead a seat or the operator closed, by its id: how, on what, and by whom. */
+export type ClosedPreparationLead = { disposition: string; ref: string; by: string };
+
+/** What the gate reads of the preparations: each source's state, each coverage record's reach into them, by the record's seq, and the preparation leads closed (a hold's fix never points at one). */
 export type PreparationFacts = {
   sources: ReadonlyMap<string, SourcePreparation>;
   reach: ReadonlyMap<number, readonly SourceReach[]>;
+  closed?: ReadonlyMap<string, ClosedPreparationLead>;
 };
 
 export const NO_PREPARATION: PreparationFacts = { sources: new Map(), reach: new Map() };
@@ -228,7 +232,15 @@ function producingJob(path: string): string | null {
  * are of (reachOf). Refs, digests, the catalogue's generations and the jobs'
  * declared inputs only. Nothing when the run holds no receipt.
  */
-export async function preparationFacts(sandboxRoot: string, entries: readonly LedgerEntry[]): Promise<PreparationFacts> {
+export async function preparationFacts(sandboxRoot: string, entries: readonly LedgerEntry[], leads?: Iterable<{ id: string; preparation?: unknown; closed?: { disposition: string; ref: string; by: string } | null }>): Promise<PreparationFacts> {
+  const facts = await sourceFacts(sandboxRoot, entries);
+  if (!leads || !facts.sources.size) return facts;
+  const closed = new Map<string, ClosedPreparationLead>();
+  for (const l of leads) if (l.preparation && l.closed) closed.set(l.id, { disposition: l.closed.disposition, ref: l.closed.ref, by: l.closed.by });
+  return closed.size ? { ...facts, closed } : facts;
+}
+
+async function sourceFacts(sandboxRoot: string, entries: readonly LedgerEntry[]): Promise<PreparationFacts> {
   const receipts = await readReceipts(sandboxRoot);
   if (!receipts.length) return NO_PREPARATION;
   // Read once per state of the two records it rests on: the receipts and the ledger (what a ref names, a job's declared inputs and a generation's target do not change once written).
@@ -420,13 +432,21 @@ export function sourceWords(s: SourcePreparation): string {
   return `${s.source.name}: broad extraction ${s.capabilities.map(capabilityWords).join(" / ")}`;
 }
 
-/** What a hold asks: wait for the job, run or decline the offered lead, or the operator accepts. */
-export function holdFix(s: SourcePreparation): string {
+/**
+ * What a hold asks: wait for the job, run or decline the offered lead, or
+ * the operator accepts. A lead already closed (`closed`, by id) is never
+ * pointed at as something to claim or close: its close is recorded as the
+ * decline at the hub's next round, or the extraction is run directly.
+ */
+export function holdFix(s: SourcePreparation, closed?: ReadonlyMap<string, ClosedPreparationLead>): string {
   const pending = s.capabilities.filter((c) => !c.released);
+  const target = s.source.ref || `sha256:${s.source.sha256}`;
   const steps = pending.map((c) => {
     const r = c.latest;
     if (r.job) return `wait for job ${r.job} (${c.recipe} over ${s.source.ref || s.source.name}; job_status ${r.job})`;
-    if (r.lead) return `run or decline ${r.lead}, the offered ${c.recipe} over ${s.source.ref || s.source.name}: lead_claim ${r.lead}, then catalog_request target=${s.source.ref || `sha256:${s.source.sha256}`} recipe=${c.recipe}; or close ${r.lead} deferred or infeasible citing a limitation that says why it is not run (its receipt is then declined)`;
+    const shut = r.lead ? closed?.get(r.lead) : undefined;
+    if (r.lead && shut) return `${r.lead}, the offered ${c.recipe} over ${s.source.ref || s.source.name}, was closed ${shut.disposition} by ${shut.by} (${shut.ref}) and nothing ran it: the hub records that close as its decline at its next round, which releases the hold; or run it now: catalog_request target=${target} recipe=${c.recipe}`;
+    if (r.lead) return `run or decline ${r.lead}, the offered ${c.recipe} over ${s.source.ref || s.source.name}: lead_claim ${r.lead}, then catalog_request target=${target} recipe=${c.recipe}; or close ${r.lead} deferred or infeasible citing a limitation that says why it is not run (its receipt is then declined)`;
     return `wait for ${c.recipe} over ${s.source.ref || s.source.name} to be queued`;
   });
   return steps.join("; ");

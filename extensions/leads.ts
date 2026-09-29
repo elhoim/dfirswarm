@@ -2099,13 +2099,15 @@ export async function openPreparationLead(sandboxRoot: string, p: PreparationOff
  * lane ran it, a seat ran it under the lead or without it, it was declined)
  * is closed by the harness, withdrawn: what it offered needs nothing more.
  * The close cites the receipt in words (`ref`) and says why; a lead already
- * closed is left as it is.
+ * closed is left as it is, and so is one a seat holds: the harness closes
+ * its own preparation leads only, never one under a seat's hand (the Fable
+ * review of the limits branch, P3-3).
  */
 export async function closePreparationLead(sandboxRoot: string, lead: string, ref: string, why: string): Promise<LeadResult<{ closed: boolean }>> {
   try {
     return await transact<{ ok: true; closed: boolean }>(sandboxRoot, async (snap) => {
       const l = snap.state.leads.get(lead);
-      if (!l?.preparation || l.closed) return { append: [], result: { ok: true as const, closed: false } };
+      if (!l?.preparation || l.closed || l.holder) return { append: [], result: { ok: true as const, closed: false } };
       return { append: [{ by: "system", ev: "close", lead: l.id, generation: l.generation, disposition: "withdrawn", ref, why }], result: { ok: true as const, closed: true } };
     });
   } catch (err) {

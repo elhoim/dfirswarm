@@ -12806,7 +12806,7 @@ export function ledgerGate(o: { entries: LedgerEntry[]; attestations: LedgerAtte
           section: sec.section,
           seqs: [a.seq, ...[...new Set(found.hold.flatMap((h) => h.coverage))].sort((x, y) => x - y)],
           what: `answer #${a.seq} (${sec.section}) is ${what} and ${found.hold.map((h) => `${h.claim === "absence" ? "says the event did not happen" : `rests on coverage record${h.coverage.length === 1 ? "" : "s"} ${h.coverage.map((n) => `E-${n}`).join(", ")}, complete`} over ${h.source.source.name}, whose broad extraction is not in yet: ${PR.sourceWords(h.source)}`).join("; and ")}`,
-          fix: `${found.hold.map((h) => PR.holdFix(h.source)).join("; ")}. Produced, partial, failed or declined releases the hold (record the answer again with supersedes=${a.seq} if what the extraction holds bears on it); or the operator accepts the question's limits (question accept)`,
+          fix: `${found.hold.map((h) => PR.holdFix(h.source, o.preparation?.closed)).join("; ")}. Produced, partial, failed or declined releases the hold (record the answer again with supersedes=${a.seq} if what the extraction holds bears on it); or the operator accepts the question's limits (question accept)`,
           named_by: [],
         });
       }

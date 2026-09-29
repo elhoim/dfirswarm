@@ -67,6 +67,8 @@ function tag(r: Pick<PR.PreparationReceipt, "source" | "capability" | "job" | "l
 
 /** The limiting dispositions a seat declines a preparation lead with. */
 const DECLINING: ReadonlySet<string> = new Set(["deferred", "infeasible", "needs_operator"]);
+/** A job's states once it will run no more. */
+const ENDED: ReadonlySet<string> = new Set(["committed", "failed", "cancelled"]);
 
 /**
  * The source a recipe's target is, by digest: its own sha256 (a derived or
@@ -253,7 +255,12 @@ export async function reconcilePreparation(svc: PreparationService, sandbox: str
     if (l.closed && l.closed.by !== "system" && DECLINING.has(l.closed.disposition) && !released(k)) {
       await put({ ...b, state: "declined", manifest: null, by: l.closed.by, why: `${l.id} closed ${l.closed.disposition} on ${l.closed.ref}${l.closed.why ? `: ${l.closed.why}` : ""}` });
     }
-    if (!l.closed && released(k)) {
+    // Closed any other way (resolved, duplicate, negative) with nothing that ran the extraction or runs it now: the seat's decline, and the receipt says so (the Fable review of the limits branch, P3-2).
+    else if (l.closed && l.closed.by !== "system" && !released(k) && !(jobsByKey.get(k) ?? []).some((j) => !ENDED.has(j.state))) {
+      await put({ ...b, state: "declined", manifest: null, by: l.closed.by, why: `${l.id} closed ${l.closed.disposition} on ${l.closed.ref}${l.closed.why ? `: ${l.closed.why}` : ""}, and nothing ran the extraction it offered: its close is its decline` });
+    }
+    // Closed by the harness only while no seat holds it: a held lead is its holder's to close (P3-3).
+    if (!l.closed && !l.holder && released(k)) {
       const last = [...(byKey.get(k) ?? [])].reverse().find((x) => PR.PREPARATION_RELEASING.has(x.state))!;
       const ref = `${last.state}${last.job ? ` by job ${last.job}` : ""}${last.generation ? `, generation ${last.generation}` : ""} (store journal line ${last.seq})`;
       const c = await L.closePreparationLead(S, l.id, ref, `the broad extraction it offered is ${last.state}${last.why ? `: ${last.why}` : ""}; its receipt is on the store journal, and nothing more is asked of this lead`);

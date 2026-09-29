@@ -282,12 +282,12 @@ function jobStatuses(status: Map<string, string | null>, entries: LedgerEntry[])
 }
 
 /** The entries the lead register recorded under each question's leads (leads.ts questionLeadEntries), or null when its chain is broken or it cannot be read. */
-async function leadEntries(S: string): Promise<Map<string, Map<number, string[]>> | null> {
+async function leadState(S: string): Promise<import("../extensions/leads.ts").LeadsState | null> {
   try {
     const L = await import("../extensions/leads.ts");
     const { events, text } = await L.readLeadEvents(S);
     const chain = L.verifyLeadChain(text);
-    return chain.ok ? L.questionLeadEntries(L.foldLeads(events, chain)) : null;
+    return chain.ok ? L.foldLeads(events, chain) : null;
   } catch {
     return null;
   }
@@ -400,9 +400,10 @@ export async function checkLedgerAnswers(sandbox: string, wanted: string[], exis
   // Under the case policy's more_evidence: no, the no_acquisition_ask warning names the policy, never an ask.
   const moreEvidence = await import("../extensions/requests.ts").then((R) => R.casePolicyMoreEvidence(S)).catch(() => "ask" as const);
   // What the lead register recorded under each question's leads: a finding two seats hold there that the answer leaves out is a warning. A register whose chain is broken says nothing here (the finish gate names it).
-  const underLeads = await leadEntries(S);
+  const leads = await leadState(S);
+  const underLeads = leads ? await import("../extensions/leads.ts").then((L) => L.questionLeadEntries(leads)) : null;
   // The sources' broad extractions, as the store journal's receipts say them (extensions/preparation.ts): a negative that claims absence over one still under way holds; any other on one not produced is warned.
-  const preparation = await import("../extensions/preparation.ts").then((PR) => PR.preparationFacts(S, entries)).catch(() => undefined);
+  const preparation = await import("../extensions/preparation.ts").then((PR) => PR.preparationFacts(S, entries, leads?.leads.values())).catch(() => undefined);
   const gate = ledgerGate({ entries, attestations, disputes, sections, failed: jobStatuses(statuses, entries), bar, partial: partialOutputCites(entries, producerOf), sweeps, ...(imports.length ? { imports } : {}), moreEvidence, ...(underLeads ? { underLeads } : {}), ...(preparation ? { preparation } : {}), ...(register?.state.premises.size ? { premises: register.state.premises } : {}) });
   const bySeq = new Map(entries.map((e) => [e.seq, e]));
   const replaced = supersededBy(entries);

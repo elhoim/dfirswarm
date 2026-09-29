@@ -362,6 +362,48 @@ test("a seat's decline of an offered extraction is its receipt, with why; a run 
   await svc.stop("over");
 });
 
+test("a seat's close of an offered extraction any other way, with nothing run, is its decline and says so; the hold's fix never points at a closed lead; the harness closes only a lead no seat holds", async () => {
+  // The hold's fix: an open lead is to be run or declined; a closed one is never pointed at, its close being the decline the hub records.
+  const r = (seq: number, state: PR.PreparationState, o: Partial<PR.PreparationReceipt> = {}): PR.PreparationReceipt => ({ seq, at: "t", state, source: DISK, recipe: "tpack/slow", recipe_version: "1.0.0", recipe_sha256: "s", capability: "thing-timeline", exclusions: [], by: "harness", ...o });
+  const src = PR.foldPreparation([r(1, "planned", { lead: "L-3" })]).get(DISK.sha256)!;
+  assert.match(PR.holdFix(src), /^run or decline L-3, the offered tpack\/slow over input:disk\.E01: lead_claim L-3/);
+  const shut = PR.holdFix(src, new Map([["L-3", { disposition: "duplicate", ref: "L-4", by: "a1" }]]));
+  assert.match(shut, /^L-3, the offered tpack\/slow over input:disk\.E01, was closed duplicate by a1 \(L-4\) and nothing ran it: the hub records that close as its decline at its next round, which releases the hold; or run it now: catalog_request target=input:disk\.E01 recipe=tpack\/slow$/);
+  assert.doesNotMatch(shut, /lead_claim|close L-3/);
+  // The hub: a1 closes the offered timeline of a.thing a duplicate of b.thing's, running nothing; a1 takes b.thing's, and a0 runs it by another route.
+  const { S, svc } = await thingRun({ "a.thing": "THING one", "b.thing": "THING-PART two" });
+  await svc.start();
+  await eventually(() => [...svc.jobs.values()].every((j) => done(j)), "the kickoff's jobs done");
+  await reconcilePreparation(svc, S);
+  const snap = await L.leadsSnapshot(S);
+  const leadOf = (name: string) => [...snap.state.leads.values()].find((l) => l.preparation?.ref === `input:${name}`)!.id;
+  const la = leadOf("a.thing");
+  const lb = leadOf("b.thing");
+  const a1 = { sandboxRoot: S, agentId: "a1" };
+  assert.ok((await L.claimLead(a1, la)).ok);
+  const closedA = await L.closeLead(a1, la, { disposition: "duplicate", ref: lb, why: "one timeline run is enough" });
+  assert.ok(closedA.ok, (closedA as { reason?: string }).reason);
+  assert.ok((await L.claimLead(a1, lb)).ok);
+  const ran = await svc.catalogRequest("a0", "input:b.thing", "tpack/slow");
+  assert.ok(ran.ok);
+  await eventually(() => done(svc.jobs.get((ran as { job: JobRecord }).job.id)), "a0's run");
+  const round = await reconcilePreparation(svc, S);
+  const declined = receipts(S).find((x) => x.state === "declined" && x.lead === la)!;
+  assert.ok(declined, JSON.stringify(receipts(S).filter((x) => x.lead === la)));
+  assert.equal(declined.by, "a1");
+  assert.match(String(declined.why), new RegExp(`^${la} closed duplicate on ${lb}: one timeline run is enough, and nothing ran the extraction it offered: its close is its decline$`));
+  // b.thing's extraction reached an outcome by another route; a1 holds its lead, so the harness leaves it to a1.
+  assert.deepEqual(round.closed, []);
+  const held = (await L.leadsSnapshot(S)).state.leads.get(lb)!;
+  assert.deepEqual([held.closed, held.holder], [null, "a1"]);
+  // a1's own close is taken, and writes no decline: the extraction ran.
+  const lim = ok(await rec(a1, { kind: "limitation", value: "The timeline of b.thing was run by a0", source: "the thing", evidence: "its job", reason: "not_examined", answers: ["1"] })).entry;
+  assert.ok((await L.closeLead(a1, lb, { disposition: "deferred", ref: `E-${lim.seq}`, why: "a0 ran it" })).ok);
+  await reconcilePreparation(svc, S);
+  assert.ok(!receipts(S).some((x) => x.state === "declined" && x.lead === lb), "a released extraction is not declined");
+  await svc.stop("over");
+});
+
 test("evidence detected after the kickoff: the auto extraction runs, the rest is offered; an agent's detect pass is told what is not run unasked", async () => {
   const { S, svc, posts } = await thingRun({ "a.thing": "THING one" });
   await svc.start();
