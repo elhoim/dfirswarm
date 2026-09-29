@@ -94,27 +94,73 @@ export type Withheld = { path: string; job: string | null; why: string; sha256_o
 const forms = (t: string) => [...new Set([t, JSON.stringify(t).slice(1, -1)])];
 
 /**
- * Where a sensitive word counts as standing in a text. A short word (under
- * eight characters: a PIN, a short code) counts only where it stands on its
- * own, not inside a longer run of letters and digits: four digits inside a
- * sha256, a keyed id or a timestamp are chance, and every chained record a
- * package carries is full of those. Redacted there, a line would lose its
- * content for a hash; found there, the scan would refuse the package for a
- * leak that is not one. A longer word counts wherever it stands. The
- * redaction and the scan hold to the same rule, so the scan never finds what
- * the redaction was right to leave.
+ * Where a sensitive word counts as standing in a text. A long word (eight
+ * characters or more) counts wherever it stands. A short one (a PIN, a short
+ * code) counts wherever it stands too, a letter touching it included
+ * ("PIN4821"), except where it is part of a longer run that makes it
+ * something else:
+ * - its digits run on into more digits: a bigger number, a timestamp's
+ *   fraction ("12.482145Z"), a count;
+ * - a run of sixteen hex characters or more with digits of its own beyond
+ *   the word: a sha256, a keyed id (hidden-…);
+ * - a run of twenty base64 or base64url characters or more with letters and
+ *   digits of their own and few separators (under one in eight of '+', '/',
+ *   '-', '_'): an encoded blob, where a path's or a sentence's are not.
+ * Four digits inside a hash are chance, and every chained record a package
+ * carries is full of hashes: redacted there, a line would lose its content
+ * for one; found there, the scan would refuse the package for a leak that is
+ * not one. Leaving a real value in is the worse failure, so every other place
+ * counts. The redaction and the scan hold to the same rule, over text, UTF-8
+ * and UTF-16LE bytes and file names; it reads ASCII classes only, so the
+ * scan's lower-cased text and the original agree.
  */
 const SHORT_WORD = 8;
-const wordByte = (c: number | undefined) => c !== undefined && ((c >= 0x30 && c <= 0x39) || (c >= 0x41 && c <= 0x5a) || (c >= 0x61 && c <= 0x7a));
+/** How far a run is read either side of the word: enough to tell a hash or a blob, bounded for a file of one. */
+const RUN_WINDOW = 64;
+const isDigit = (c: number | undefined) => c !== undefined && c >= 0x30 && c <= 0x39;
+const isLetter = (c: number | undefined) => c !== undefined && ((c >= 0x41 && c <= 0x5a) || (c >= 0x61 && c <= 0x7a));
+const isHex = (c: number | undefined) => isDigit(c) || (c !== undefined && ((c >= 0x41 && c <= 0x46) || (c >= 0x61 && c <= 0x66)));
+const isBase64 = (c: number | undefined) => isDigit(c) || isLetter(c) || c === 0x2b || c === 0x2f;
+const isBase64Url = (c: number | undefined) => isDigit(c) || isLetter(c) || c === 0x2d || c === 0x5f;
+/**
+ * Whether a short word found at a place is part of a longer run that makes
+ * it something else (the rule above). `at(k)` is the character k places from
+ * where the word starts (negative before it), undefined past either end; the
+ * word is `n` characters.
+ */
+function partOfLongerRun(at: (k: number) => number | undefined, n: number): boolean {
+  if ((isDigit(at(0)) && isDigit(at(-1))) || (isDigit(at(n - 1)) && isDigit(at(n)))) return true;
+  const run = (ok: (c: number | undefined) => boolean): [number, number] | null => {
+    for (let k = 0; k < n; k += 1) if (!ok(at(k))) return null;
+    let l = 0;
+    while (l > -RUN_WINDOW && ok(at(l - 1))) l -= 1;
+    let r = n;
+    while (r < n + RUN_WINDOW && ok(at(r))) r += 1;
+    return [l, r];
+  };
+  /** Whether the run holds a character of this class outside the word itself. */
+  const own = ([l, r]: [number, number], test: (c: number | undefined) => boolean) => {
+    for (let k = l; k < r; k += 1) if ((k < 0 || k >= n) && test(at(k))) return true;
+    return false;
+  };
+  const hex = run(isHex);
+  if (hex && hex[1] - hex[0] >= 16 && own(hex, isDigit)) return true;
+  for (const ok of [isBase64, isBase64Url]) {
+    const b = run(ok);
+    if (!b || b[1] - b[0] < 20 || !own(b, isDigit) || !own(b, isLetter)) continue;
+    let separators = 0;
+    for (let k = b[0]; k < b[1]; k += 1) if (!isDigit(at(k)) && !isLetter(at(k))) separators += 1;
+    if (separators * 8 < b[1] - b[0]) return true;
+  }
+  return false;
+}
 /** Each place `word` stands in `text` by that rule. */
 function wordPlaces(text: string, word: string): number[] {
   const out: number[] = [];
   if (!word) return out;
   const short = word.length < SHORT_WORD;
-  const first = wordByte(word.charCodeAt(0));
-  const last = wordByte(word.charCodeAt(word.length - 1));
   for (let i = text.indexOf(word); i >= 0; i = text.indexOf(word, i + 1)) {
-    if (short && ((first && wordByte(text.charCodeAt(i - 1))) || (last && wordByte(text.charCodeAt(i + word.length))))) continue;
+    if (short && partOfLongerRun((k) => (i + k >= 0 && i + k < text.length ? text.charCodeAt(i + k) : undefined), word.length)) continue;
     out.push(i);
   }
   return out;
@@ -133,15 +179,16 @@ function replaceWord(text: string, word: string, by: string): { text: string; co
   }
   return { text: out + text.slice(from), count };
 }
-/** The same rule over bytes: `unit` is 1 for UTF-8, 2 for UTF-16LE (a neighbour is a letter or digit with a zero high byte). */
+/** The same rule over bytes: `unit` is 1 for UTF-8, 2 for UTF-16LE (a character is a little-endian code unit). */
 function bytesHoldWord(buf: Buffer, word: Buffer, unit: 1 | 2, short: boolean): boolean {
   if (!short) return buf.includes(word);
-  const neighbour = (i: number) => i >= 0 && i + unit <= buf.length && wordByte(buf[i]) && (unit === 1 || buf[i + 1] === 0);
-  const first = wordByte(word[0]);
-  const last = wordByte(word[word.length - unit]);
   for (let i = buf.indexOf(word); i >= 0; i = buf.indexOf(word, i + 1)) {
-    if ((first && neighbour(i - unit)) || (last && neighbour(i + word.length))) continue;
-    return true;
+    const at = (k: number): number | undefined => {
+      const j = i + k * unit;
+      if (j < 0 || j + unit > buf.length) return undefined;
+      return unit === 1 ? buf[j] : buf[j] | (buf[j + 1] << 8);
+    };
+    if (!partOfLongerRun(at, word.length / unit)) return true;
   }
   return false;
 }
