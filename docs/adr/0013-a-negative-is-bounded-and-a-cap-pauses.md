@@ -524,6 +524,57 @@ the case policy declined each at once.
   (`NO_MORE_EVIDENCE_NONE_WHY`) and no longer suggest an ask. Under `ask`
   and `yes` they say what they said.
 
+## After the run s993d40
+
+On s993d40 (a CTF case of six questions) all six answers stood partial.
+Two were complete answers whose only hedge was whether the person the case
+brief names did it personally, which the brief states as given; both were
+attested established by two reviewers while still labelled partial, each
+review holding that one part open as the answer declared it. A third
+answer left out two methods the ledger already held as findings, attested
+by another seat, under that question's leads.
+
+- **A case premise is not a part to prove again.** What the case brief or
+  the goal states as given (who the subject is, whose device it is, the
+  scenario's facts) is a premise of the examination. The answer names the
+  premise it relies on, in its reasoning or limitations ("rests on the case
+  premise that …"), and is established on the evidence for the rest. An
+  answer is partial only for a part of the question it could not establish,
+  and a review does not hold a premise open. When the evidence contradicts
+  a premise, that is `premise_not_supported` or a finding, never a silent
+  hedge. The worker prompt, the `record` tool's answer and `result`, and
+  the `attest` tool's parts say it. The harness cannot tell a premise from
+  an open part without reading words, so this is the agents' rule; the
+  gate warns only of the shape it can see:
+  `partial_all_parts_established`, a partial answer every review of which
+  holds every part it weighed established, one of them attesting it
+  established. The warning asks the recorder to say which part is open or
+  to record the answer established. It would not have fired on s993d40,
+  whose reviewers held the premise open as the answers declared it: the
+  words are the fix there, the warning the backstop.
+- **What the question's leads established is in its answer, or said not
+  to bear on it.** The lead register knows each lead's questions and the
+  entries recorded under it: those that interpret a job run under it, and
+  those a close or a confirmation of it names (its ref and its
+  `result_refs`), every close in its history included
+  (`questionLeadEntries`). A standing finding or event recorded there, not
+  disputed, that another seat attested or two seats recorded, and that the
+  question's standing answer does not reach, directly or through the
+  entries it cites (support, contrary, limitations, a downgrade's
+  evidence, then `rel`, a coverage record's `result_refs` and
+  `result_bound`, and a cited answer's own citations: `answerReach`), is a
+  warning, `lead_findings_uncited`. It lists every such entry by `E-<seq>`
+  with its leads: "established under Q-n's leads and not in its answer:
+  cite them or say why they do not bear on it". Registers and refs only,
+  nothing read of what an entry says; nothing capped. Over s993d40's
+  registers it names two entries, on that one answer alone.
+- **A warning never holds.** Both are the gate's warnings, as
+  `no_acquisition_ask` is: a `WARN:` line of the answers check, its
+  machine line's `warnings`, the finish gate's, the verdict's note, and
+  now readiness, apart from its items, so `finish status` shows them to
+  the coordinator before its done. None makes readiness not ready or
+  refuses a done.
+
 ## Consequences
 
 - Every existing goal and run keeps working: an answer without `result`

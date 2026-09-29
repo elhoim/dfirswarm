@@ -6,6 +6,42 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Fixed: a case premise is not a reason to hold an answer partial, and an answer that leaves out what its question's leads established is warned of
+
+On the run s993d40 (a CTF case of six questions) all six answers stood
+partial. Two were complete answers whose only hedge was whether the person
+the case brief names did it personally, which the brief states as given;
+both were attested established by two reviewers while still labelled
+partial. A third left out two methods the ledger already held as findings,
+attested by another seat, under that question's leads. Now:
+
+- The worker prompt and the `record` tool (an answer, its `result`) say
+  what a premise is: what the case brief or the goal states as given (who
+  the subject is, whose device it is, the scenario's facts) is a premise of
+  the examination, not a part the answer must prove again. The answer names
+  the premise it relies on in its reasoning or limitations ("rests on the
+  case premise that …") and is established on the evidence for the rest; it
+  is partial only for a part of the question it could not establish; when
+  the evidence contradicts a premise, that is `premise_not_supported` or a
+  finding, never a silent hedge. The `attest` tool's parts say a premise is
+  not a part to hold open.
+- Two warnings in the answers check, each a `WARN:` line, in its machine
+  line's `warnings`, in the finish line's note and now in `finish status`
+  (readiness carries the gate's warnings apart from its items): neither
+  ever holds the finish. `partial_all_parts_established`: a partial answer
+  every review of which holds every part it weighed established, one of
+  them attesting it established; it asks the recorder to say which part is
+  open or record the answer established. `lead_findings_uncited`: a
+  standing finding or event, not disputed, attested by another seat or
+  recorded by two, that the lead register recorded under a lead linked to
+  the question (it interprets the lead's job, or a close or confirmation of
+  the lead names it: `questionLeadEntries`, `extensions/leads.ts`), which
+  the question's answer does not reach, directly or through the entries it
+  cites (`answerReach`); every such entry is listed by `E-<seq>` with its
+  leads, "established under Q-n's leads and not in its answer: cite them or
+  say why they do not bear on it". Registers and refs only.
+- `tests/case-premise.test.ts` and `tests/lead-findings-uncited.test.ts`.
+
 ### Fixed: a partial answer is a disposition, whatever its reviews' strength, and a standing finding is never discarded to make an answer not determinable
 
 On the run s9722fa (a CTF case of six questions, `--stop operator`) every
