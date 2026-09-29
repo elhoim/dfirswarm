@@ -147,6 +147,8 @@ Leads (the swarm's open work)
   source the evidence does not hold, open the ask before you answer it not_determinable: the
   coverage record behind that answer names the ask (`acquisition_ask: "R-<n>"`) or says why none
   would settle it (`acquisition_none_why`), and the finish line warns of one that does neither.
+  Under "no more evidence" open no ask for that: `acquisition_none_why` naming the case policy
+  (more_evidence: no, so an ask would be declined at once) satisfies it.
   Evidence that arrives
   later is announced on the board as `import:ev-<n>`: it is readable at once, read-only, at
   `store/imports/ev-<n>/out/` (your VM mounts the run live) and in jobs; cite it as

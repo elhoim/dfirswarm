@@ -383,7 +383,9 @@ export async function checkLedgerAnswers(sandbox: string, wanted: string[], exis
   // The kept output of a cancelled or stopped job, cited with no word on how
   // it is treated (docs/adr/0016), by whatever ref names those bytes.
   const { producerOf } = await producerIndex(S);
-  const gate = ledgerGate({ entries, attestations, disputes, sections, failed: jobStatuses(statuses, entries), bar, partial: partialOutputCites(entries, producerOf), sweeps });
+  // Under the case policy's more_evidence: no, the no_acquisition_ask warning names the policy, never an ask.
+  const moreEvidence = await import("../extensions/requests.ts").then((R) => R.casePolicyMoreEvidence(S)).catch(() => "ask" as const);
+  const gate = ledgerGate({ entries, attestations, disputes, sections, failed: jobStatuses(statuses, entries), bar, partial: partialOutputCites(entries, producerOf), sweeps, moreEvidence });
   const bySeq = new Map(entries.map((e) => [e.seq, e]));
   const replaced = supersededBy(entries);
   const limits = entries.filter((e) => e.kind === "limitation" && !replaced.has(e.seq));

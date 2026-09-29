@@ -11273,6 +11273,8 @@ async function recordAnswer(ctx: SwarmContext, input: LedgerInput): Promise<Ledg
   if (support.length + contrary.seqs.length + limits.seqs.length > LEDGER_MAX_CITATIONS) return { ok: false, reason: `the answer cites more than ${LEDGER_MAX_CITATIONS} entries: cite the ones it rests on` };
   // The negative bar (extensions/negative-bar.ts): what the question is, as the registers say.
   const bar = question ? await questionBar(ctx.sandboxRoot, sec.id) : null;
+  // What the case policy says of more evidence: under no, an acquisition ask is declined at once, and acquisition_none_why names the policy instead.
+  const moreEvidence = question && resultText === "not_determinable" ? await import("./requests.ts").then((R) => R.casePolicyMoreEvidence(ctx.sandboxRoot)).catch(() => "ask" as const) : "ask";
   const negative = NB.NEGATIVE_RESULTS.has(resultText);
   const absolute = question ? NB.absoluteAbsenceForms(`${value}\n${reasoning.value}`) : [];
   if (absolute.length && !input.asserts_absence) {
@@ -11514,7 +11516,11 @@ async function recordAnswer(ctx: SwarmContext, input: LedgerInput): Promise<Ledg
         }
         // A question the evidence cannot settle for want of a source: the ask comes first.
         if (resultText === "not_determinable" && !covFor.some((c) => c.acquisition_ask || c.acquisition_none_why)) {
-          notes.push("not determinable for want of a source the evidence does not hold? Ask for it first: lead_close needs_operator with ask {kind: acquisition, source, where, expected_value, urgency} opens R-<n>. The coverage record behind this answer names the ask (acquisition_ask: R-<n>) or says why none would settle it (acquisition_none_why); the finish line warns until it does");
+          notes.push(
+            moreEvidence === "no"
+              ? `this case admits no further evidence (more_evidence: no), so open no acquisition ask: the coverage record behind this answer says so in acquisition_none_why ("${NO_MORE_EVIDENCE_NONE_WHY}"); the finish line warns until it does`
+              : "not determinable for want of a source the evidence does not hold? Ask for it first: lead_close needs_operator with ask {kind: acquisition, source, where, expected_value, urgency} opens R-<n>. The coverage record behind this answer names the ask (acquisition_ask: R-<n>) or says why none would settle it (acquisition_none_why); the finish line warns until it does",
+          );
         }
       }
       // The confidence the run records: high only on an established answer another seat attested established, naming the alternatives it weighed.
@@ -11749,6 +11755,18 @@ export function sweepHolds(answer: LedgerEntry, entries: LedgerEntry[], sweeps: 
   return out;
 }
 
+/**
+ * The acquisition_none_why a case under more_evidence: no gives (the ctf
+ * preset): the case admits no further evidence, so an ask would be declined
+ * at once, and naming the policy says why none was opened. Seats opened
+ * asks in the finish tail only to satisfy the rule, each declined at once.
+ */
+export const NO_MORE_EVIDENCE_NONE_WHY = "the case policy admits no further evidence (more_evidence: no): an acquisition ask would be declined at once, so none was opened";
+/** The fix the no_acquisition_ask warning gives under more_evidence: no: the policy as the reason, never an ask. */
+export function noMoreEvidenceAskFix(coverage: number[], answer: number): string {
+  return `this case admits no further evidence (more_evidence: no), so open no acquisition ask: record the coverage again${coverage.length ? ` with supersedes=${coverage[0]}` : ""} with acquisition_none_why: "${NO_MORE_EVIDENCE_NONE_WHY}", and the answer again with supersedes=${answer} citing it`;
+}
+
 /** A warning the gate says and does not hold on: shown with the answers check, counted in the finish line's note. */
 export type LedgerWarning = { code: "no_acquisition_ask"; section: string; seqs: number[]; what: string; fix: string };
 
@@ -11758,7 +11776,7 @@ export type LedgerWarning = { code: "no_acquisition_ask"; section: string; seqs:
  * the contradictions left open. Pure over what was read: the caller reads
  * the files (and which entries rest on a failed job) and verifies the chains.
  */
-export function ledgerGate(o: { entries: LedgerEntry[]; attestations: LedgerAttestation[]; disputes: LedgerDispute[]; sections: string[]; failed?: Map<number, string[]>; bar?: (sectionId: string) => { material: boolean; existence: boolean; completeness?: boolean }; partial?: Map<number, Array<{ ref: string; job: string; status: string }>>; sweeps?: readonly SweepRecord[] }): LedgerGate {
+export function ledgerGate(o: { entries: LedgerEntry[]; attestations: LedgerAttestation[]; disputes: LedgerDispute[]; sections: string[]; failed?: Map<number, string[]>; bar?: (sectionId: string) => { material: boolean; existence: boolean; completeness?: boolean }; partial?: Map<number, Array<{ ref: string; job: string; status: string }>>; sweeps?: readonly SweepRecord[]; moreEvidence?: "no" | "ask" | "yes" }): LedgerGate {
   const { entries } = o;
   const bySeq = new Map(entries.map((e) => [e.seq, e]));
   const replaced = supersededBy(entries);
@@ -11920,7 +11938,7 @@ export function ledgerGate(o: { entries: LedgerEntry[]; attestations: LedgerAtte
           section: sec.section,
           seqs: [a.seq, ...covNow.map((c) => c.seq)],
           what: `answer #${a.seq} (${sec.section}) is not determinable, and ${covNow.length ? `its coverage record${covNow.length === 1 ? "" : "s"} ${covNow.map((c) => `E-${c.seq}`).join(", ")} name${covNow.length === 1 ? "s" : ""}` : "it rests on no coverage record that names"} no acquisition ask and no reason for none`,
-          fix: `when the question needs a source the evidence does not hold, open an acquisition ask (lead_close needs_operator with ask {kind: acquisition, source, where, expected_value, urgency}) and record the coverage again with acquisition_ask: "R-<n>"; otherwise say why none would settle it in acquisition_none_why`,
+          fix: o.moreEvidence === "no" ? noMoreEvidenceAskFix(covNow.map((c) => c.seq), a.seq) : `when the question needs a source the evidence does not hold, open an acquisition ask (lead_close needs_operator with ask {kind: acquisition, source, where, expected_value, urgency}) and record the coverage again with acquisition_ask: "R-<n>"; otherwise say why none would settle it in acquisition_none_why`,
         });
       }
     }

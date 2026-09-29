@@ -11,6 +11,7 @@
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -402,4 +403,30 @@ test("a not-determinable answer's coverage names the acquisition ask, or why non
   assert.equal(v.proceed, true);
   assert.equal((v as { outcome: string }).outcome, "examination_limited");
   assert.match((v as { note?: string }).note ?? "", /warnings \(not held on\): a warning/);
+});
+
+test("under the case policy's more_evidence: no, acquisition_none_why naming the policy satisfies the rule: the warning and the answer's reply suggest it, never an ask (the ctf preset's asks, each declined at once)", async () => {
+  const { S, a0, a1, a2 } = await run();
+  await mkdir(join(S, "network"), { recursive: true });
+  await writeFile(join(S, "network", "policy.json"), JSON.stringify({ policy: "ctf", more_evidence: "no" }));
+  await planned(a0, "4");
+  const abs = ok(await rec(a0, { kind: "absence", value: "a start time", source: "inputs/logs/a.log", evidence: "a search", refs: ["job:j000002/hits.txt"], answers: ["4"] })).entry;
+  const cov = ok(await rec(a0, coverage("4", ["input:logs/a.log"], [`E-${abs.seq}`]))).entry;
+  const ans = ok(await rec(a1, { kind: "answer", section: "question:4", value: "No evidence of when it started was found in the log", reasoning: `E-${cov.seq}`, ...A, result: "not_determinable" }));
+  assert.match(ans.note ?? "", new RegExp(`this case admits no further evidence \\(more_evidence: no\\), so open no acquisition ask: the coverage record behind this answer says so in acquisition_none_why \\("${P.NO_MORE_EVIDENCE_NONE_WHY.replace(/[()]/g, "\\$&")}"\\)`));
+  assert.doesNotMatch(ans.note ?? "", /Ask for it first/);
+  await attested(a2, { seq: cov.seq, how: "ran the search again", review: REVIEW });
+  let r = await checkLedgerAnswers(S, ["4"]);
+  assert.equal(r.warnings.length, 1);
+  assert.match(r.warnings[0], new RegExp(`this case admits no further evidence \\(more_evidence: no\\), so open no acquisition ask: record the coverage again with supersedes=${cov.seq} with acquisition_none_why: "the case policy admits no further evidence`));
+  assert.doesNotMatch(r.warnings[0], /lead_close needs_operator/);
+  // Said so, the rule is met: no ask was opened.
+  const cov2 = ok(await rec(a0, coverage("4", ["input:logs/a.log"], [`E-${abs.seq}`], { acquisition_none_why: P.NO_MORE_EVIDENCE_NONE_WHY, supersedes: cov.seq }))).entry;
+  ok(await rec(a1, { kind: "answer", section: "question:4", value: "No evidence of when it started was found in the log", reasoning: `E-${cov2.seq}`, ...A, result: "not_determinable", supersedes: ans.entry.seq }));
+  await attested(a2, { seq: cov2.seq, how: "ran the search again", review: REVIEW, second_review_why: "the record now says why no ask" });
+  r = await checkLedgerAnswers(S, ["4"]);
+  assert.deepEqual(r.warnings, [], r.lines.join("\n"));
+  assert.equal(r.dispositions["question:4"], "not_determinable");
+  const requests = existsSync(join(S, "requests", "requests.jsonl")) ? await readFile(join(S, "requests", "requests.jsonl"), "utf8") : "";
+  assert.doesNotMatch(requests, /"acquisition"/, "no acquisition was asked");
 });

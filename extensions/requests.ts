@@ -587,7 +587,8 @@ async function runId(sandboxRoot: string): Promise<string> {
   return (await P.readTeam(sandboxRoot).catch(() => null))?.swarm_id ?? "";
 }
 
-async function casePolicyMoreEvidence(sandboxRoot: string): Promise<"no" | "ask" | "yes"> {
+/** What the case policy says of more evidence (network/policy.json more_evidence): no, ask (the default, and a run with no policy) or yes. */
+export async function casePolicyMoreEvidence(sandboxRoot: string): Promise<"no" | "ask" | "yes"> {
   try {
     const raw = JSON.parse(await readFile(join(sandboxRoot, "network", "policy.json"), "utf8")) as { more_evidence?: string };
     return raw.more_evidence === "no" || raw.more_evidence === "yes" ? raw.more_evidence : "ask";
