@@ -168,7 +168,7 @@ test("a section whose answer rests on a cancelled job's output with no word on i
   const { ESTABLISHED } = await import("./negative-bar-fixture.ts");
   // Source-first: where the value was read (this run holds no job over the disk the shared review's derivation names).
   const { derivation: _derivation, ...review } = ESTABLISHED.answer_review;
-  const att = await P.attestEntry(a1, { seq: (a as { entry: P.LedgerEntry }).entry.seq, how: "re-derived it from the sealed ref", ...ESTABLISHED, answer_review: { ...review, reproduced_at: [{ ref: "job:j000001/summary.txt", offset: 13, value: "a payment run" }] } } as never);
+  const att = await P.attestEntry(a1, { seq: (a as { entry: P.LedgerEntry }).entry.seq, how: "re-derived it from the sealed ref", ...ESTABLISHED, answer_review: { ...review, discriminator: { ...review.discriminator, refs: ["job:j000001/summary.txt"] }, reproduced_at: [{ ref: "job:j000001/summary.txt", offset: 13, value: "a payment run" }] } } as never);
   assert.ok(att.ok, (att as { reason?: string }).reason);
   const { checkLedgerAnswers } = await import("../scripts/check-answers.ts");
   const held = await checkLedgerAnswers(S, ["1"]);
