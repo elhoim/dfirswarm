@@ -675,12 +675,15 @@ a second source.
   run (an input, a job's output or log, an import, a capture, a sealed brain
   output; never a directory or a catalogue row), and its value is at its
   offset, in UTF-8 or UTF-16LE, ASCII letters in either case, and is among
-  the answer's words (its value and reasoning, at least three characters:
-  a locator vouches for what the answer says, never for any occurrence of
-  anything); with a length and no value, the bytes there are read back and
-  must be words of the answer. A bounded read at the offset, and 256 bytes
-  either side to say where the value is when it is not there: never a scan, never the
-  object's whole hash (resolving it against its manifest is the seal). A
+  the words of the answer (its value and reasoning) or of an entry it
+  reaches (its support, and what those cite: `answerReach`), at least three
+  characters: a locator vouches for what the answer or its chain states,
+  often a supporting observation, never for an occurrence of something
+  nothing in the chain states; with a length and no value, the bytes there
+  are read back and held to the same words. A bounded read at the offset,
+  and 256 bytes either side to say where the value is when it is not
+  there: never a scan, never the object's whole hash (resolving it against
+  its manifest is the seal). A
   derivation's job is sealed and ran to its end, and each input resolves
   and is among what the job declared it would read.
 - **The cap.** An established attest of an answer that claims established,

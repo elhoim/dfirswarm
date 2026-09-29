@@ -25,8 +25,9 @@ contract fixtures gained two cases.
   withdrawn, or a revision revised since, holds nothing; the answers citing
   it are warned (`premise_withdrawn`, `premise_revised`). On a question not
   material the conflict is a warning.
-- **A locator vouches for what the answer says.** Its value must be among
-  the answer's words, else `locator_unverified`.
+- **A locator vouches for what the answer rests on.** Its value must be
+  among the words of the answer or of an entry it reaches (its support,
+  and what those cite), else `locator_unverified`.
 - **No locator or derivation is warned, not capped.** The approved rule
   capped a missing discriminator and a locator that does not verify; the
   third cap is now the warning `no_locator_or_derivation`, and the metrics

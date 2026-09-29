@@ -72,12 +72,32 @@ test("a locator the hub finds at its offset holds an established review; one tha
   assert.equal(P.heldAsBestCandidate(ans, P.answerReviews(ans, await P.readAttestations(c.S))), false);
   assert.equal(P.verifyAttestationChain(await (await import("node:fs/promises")).readFile(join(c.S, P.LEDGER_ATTESTATIONS), "utf8")).ok, true);
   assert.match(P.answerReviewWords(right.line.answer_review!), new RegExp(`the strongest rival: .*; read at: job:j000010/export\\.csv byte ${at} \\("alice"\\)`));
-  // A value that is at its offset and that the answer does not state vouches for nothing the answer says: any occurrence of anything is not a locator (the Fable review of the limits branch, P2-2).
+  // A value that is at its offset and that neither the answer nor anything it rests on states vouches for nothing: an occurrence of anything is not a locator (the Fable review of the limits branch, P2-2).
   const elsewhere = await attest(c.a3, { seq: ans.seq, how: "read the export's header", strength: "established", answer_review: { ...BARE, discriminator: SOURCE_FIRST.discriminator, reproduced_at: [{ ref: "job:j000010/export.csv", offset: 0, value: "time,user" }] } });
   assert.equal(elsewhere.line.strength, "best_candidate");
-  assert.match(elsewhere.line.capped!.join("\n"), /reproduced_at\[0\] \(job:j000010\/export\.csv at 0\) does not verify: the value "time,user" is not among the answer's words \(its value and reasoning\): a locator vouches for a value the answer states\. A value the answer gives in another form \(a converted time, a decoded field\) is vouched for by derivation \{job, inputs\}/);
+  assert.match(elsewhere.line.capped!.join("\n"), /reproduced_at\[0\] \(job:j000010\/export\.csv at 0\) does not verify: the value "time,user" is not among the words of the answer \(its value and reasoning\) nor of any entry it rests on \(its support, and what those cite\): a locator vouches for a value the answer or its chain states\. A value given there in another form \(a converted time, a decoded field\) is vouched for by derivation \{job, inputs\}/);
   const short = await P.checkLocator(c.S, { ref: "job:j000010/export.csv", offset: at, value: "al" }, "alice, at 09:58");
-  assert.match((short as { why: string }).why, /is under 3 characters: too short to vouch for what the answer says/);
+  assert.match((short as { why: string }).why, /is under 3 characters: too short to vouch for what the answer rests on/);
+});
+
+test("a locator vouches for a supporting observation: a value a cited finding states verifies, though the answer's own words do not state it; one nothing in the chain states does not", async () => {
+  const c = await run();
+  const body = Buffer.from("user=alice host=ws-17 tty=pts/3\n");
+  await sealed(c.S, "j000012", "auth.log", body);
+  await planned(c.a0, "1");
+  // The finding says where the logon came from; the answer names only the account.
+  const f = ok(await rec(c.a0, { kind: "finding", ...F, value: "alice logged on from ws-17", source: "the auth log", evidence: "its first line", refs: ["job:j000012/auth.log"], answers: ["1"] })).entry;
+  const ans = ok(await rec(c.a1, { kind: "answer", section: "question:1", value: "alice", reasoning: `E-${f.seq}`, ...HIGH, result: "established" })).entry;
+  const review = (offset: number, value: string) => ({ ...BARE, discriminator: SOURCE_FIRST.discriminator, reproduced_at: [{ ref: "job:j000012/auth.log", offset, value }] });
+  const chained = await attest(c.a2, { seq: ans.seq, how: "read the auth log's first line", strength: "established", answer_review: review(body.indexOf("ws-17"), "ws-17") });
+  assert.equal(chained.line.strength, "established", chained.note);
+  assert.equal(chained.line.capped, undefined);
+  const nowhere = await attest(c.a3, { seq: ans.seq, how: "read the auth log's first line", strength: "established", answer_review: review(body.indexOf("pts/3"), "pts/3") });
+  assert.equal(nowhere.line.strength, "best_candidate");
+  assert.match(nowhere.line.capped!.join("\n"), /the value "pts\/3" is not among the words of the answer \(its value and reasoning\) nor of any entry it rests on/);
+  // Read back by length: the same words.
+  const byLength = await P.checkLocator(c.S, { ref: "job:j000012/auth.log", offset: body.indexOf("ws-17"), length: 5 }, "alice", P.chainWords(ans, await P.readLedger(c.S)));
+  assert.equal(byLength.ok, true, JSON.stringify(byLength));
 });
 
 test("a value in UTF-16LE is found at its offset, in either case, and a length alone is read back and found in the answer's words", async () => {
@@ -92,7 +112,7 @@ test("a value in UTF-16LE is found at its offset, in either case, and a length a
   assert.equal((byLength as { encoding: string }).encoding, "utf-16le");
   const notSaid = await P.checkLocator(c.S, { ref: "job:j000011/strings.bin", offset: 4, length: 20 }, "another host");
   assert.equal(notSaid.ok, false);
-  assert.match((notSaid as { why: string }).why, /read as utf-16le text the answer does not state: give value/);
+  assert.match((notSaid as { why: string }).why, /read as utf-16le text neither the answer nor an entry it rests on states: give value/);
   const r = await attest(c.a2, { seq: ans.seq, how: "read the strings of the binary", strength: "established", answer_review: { ...BARE, discriminator: SOURCE_FIRST.discriminator, reproduced_at: [{ ref: "job:j000011/strings.bin", offset: 4, value: "bob-laptop" }] } });
   assert.equal(r.line.strength, "established", r.note);
   // A locator into nothing the run sealed is refused by nothing and verifies nothing.

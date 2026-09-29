@@ -708,7 +708,7 @@ async function reviewCapsOf(Pm: Mod | null, S: string): Promise<Projection["revi
       const bar = fn(Pm, "questionBar") ? ((await Promise.resolve(fn(Pm, "questionBar")!(S, id)).catch(() => null)) as { material: boolean } | null) : null;
       material.set(e.section, bar?.material ?? true);
     }
-    const r = (await rule(S, e, a.answer_review, { material: material.get(e.section)! })) as { caps: Array<{ code: string }>; unlocated?: { code: string } | null };
+    const r = (await rule(S, e, a.answer_review, { material: material.get(e.section)!, entries })) as { caps: Array<{ code: string }>; unlocated?: { code: string } | null };
     const codes = [...new Set(r.caps.map((c) => c.code))].sort();
     const row = { section: e.section, answer: e.seq, by: a.by, standing: !replaced.has(e.seq), material: material.get(e.section)! };
     if (codes.length) out.capped.push({ ...row, codes });

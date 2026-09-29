@@ -9485,20 +9485,22 @@ function looseText(s: string): string {
 }
 
 /**
- * A locator held to the sealed bytes and to the answer: its ref resolves to
- * a sealed object of this run (an input, a job's output or log, an import,
- * a capture, a sealed brain output), and its value is at its offset there,
- * in UTF-8 or UTF-16LE, ASCII letters in either case, and is among the
- * answer's words (`answerText`, its value and reasoning; at least
- * LOCATOR_MIN_CHARS): a locator vouches for what the answer says, never for
- * any occurrence of anything (the Fable review of the limits branch, P2-2).
- * With a length and no value, the bytes there are read back and must be
- * words of the answer. Bounded reads at the offset (and LOCATOR_NEAR_BYTES
- * either side, to say where the value is when it is not at the offset):
- * never a scan, never the object's whole hash (resolving it against its
- * manifest is the seal).
+ * A locator held to the sealed bytes and to what the answer rests on: its
+ * ref resolves to a sealed object of this run (an input, a job's output or
+ * log, an import, a capture, a sealed brain output), and its value is at
+ * its offset there, in UTF-8 or UTF-16LE, ASCII letters in either case, and
+ * is among the words of the answer (`answerText`, its value and reasoning)
+ * or of an entry the answer reaches (`chainText`: its support, and what
+ * those cite, answerReach), at least LOCATOR_MIN_CHARS: a locator vouches
+ * for what the answer or its chain states, often a supporting observation,
+ * never for an occurrence of something nothing in the chain states (the
+ * Fable review of the limits branch, P2-2). With a length and no value, the
+ * bytes there are read back and held to the same words. Bounded reads at
+ * the offset (and LOCATOR_NEAR_BYTES either side, to say where the value is
+ * when it is not at the offset): never a scan, never the object's whole
+ * hash (resolving it against its manifest is the seal).
  */
-export async function checkLocator(sandboxRoot: string, loc: AnswerReviewLocator, answerText: string): Promise<LocatorVerdict> {
+export async function checkLocator(sandboxRoot: string, loc: AnswerReviewLocator, answerText: string, chainText = ""): Promise<LocatorVerdict> {
   const no = (why: string): LocatorVerdict => ({ ok: false, ref: loc.ref, offset: loc.offset, why });
   const { resolveRef } = await import("../scripts/evidence-store.ts");
   const r = await resolveRef(sandboxRoot, loc.ref).catch((err: Error) => ({ ok: false as const, ref: loc.ref, reason: err.message }));
@@ -9507,11 +9509,12 @@ export async function checkLocator(sandboxRoot: string, loc: AnswerReviewLocator
   const abs = join(sandboxRoot, r.path);
   const st = await stat(abs).catch(() => null);
   if (!st?.isFile()) return no(`${loc.ref} ${st ? "is a directory: a locator names one file in it" : `cannot be read here (${r.path})`}`);
-  // What it vouches for is a value the answer states: an occurrence of anything else vouches for nothing the answer says.
+  // What it vouches for is a value the answer or its chain states: an occurrence of anything else vouches for nothing the answer rests on.
+  const stated = [looseText(answerText), looseText(chainText)];
   if (loc.value !== undefined) {
     const v = looseText(loc.value);
-    if (v.length < LOCATOR_MIN_CHARS) return no(`the value "${loc.value}" is under ${LOCATOR_MIN_CHARS} characters: too short to vouch for what the answer says; locate a value the answer states`);
-    if (!looseText(answerText).includes(v)) return no(`the value "${loc.value}" is not among the answer's words (its value and reasoning): a locator vouches for a value the answer states. A value the answer gives in another form (a converted time, a decoded field) is vouched for by derivation {job, inputs}`);
+    if (v.length < LOCATOR_MIN_CHARS) return no(`the value "${loc.value}" is under ${LOCATOR_MIN_CHARS} characters: too short to vouch for what the answer rests on; locate a value the answer or an entry it rests on states`);
+    if (!stated.some((t) => t.includes(v))) return no(`the value "${loc.value}" is not among the words of the answer (its value and reasoning) nor of any entry it rests on (its support, and what those cite): a locator vouches for a value the answer or its chain states. A value given there in another form (a converted time, a decoded field) is vouched for by derivation {job, inputs}`);
   }
   const forms = loc.value !== undefined ? valueForms(loc.value) : [];
   const need = loc.value !== undefined ? Math.max(...forms.map((f) => f.bytes.length)) : (loc.length as number);
@@ -9548,7 +9551,6 @@ export async function checkLocator(sandboxRoot: string, loc: AnswerReviewLocator
   // A length and no value: the bytes read back, and found in the answer's words.
   const raw = window.subarray(at, at + need);
   if (raw.length < need) return no(`${loc.ref} holds ${raw.length} bytes from offset ${loc.offset}, fewer than the length ${need} given`);
-  const answer = looseText(answerText);
   const readings: Array<{ enc: "utf-8" | "utf-16le"; text: string }> = [];
   // A reading is text: no control character but tab and line ends, no replacement character (UTF-16LE's zero bytes are not UTF-8 text).
   const control = /[\u0000-\u0008\u000e-\u001f]/;
@@ -9565,9 +9567,9 @@ export async function checkLocator(sandboxRoot: string, loc: AnswerReviewLocator
   }
   for (const x of readings) {
     const t = looseText(x.text);
-    if (t.length >= LOCATOR_MIN_CHARS && answer.includes(t)) return { ok: true, ref: loc.ref, offset: loc.offset, encoding: x.enc };
+    if (t.length >= LOCATOR_MIN_CHARS && stated.some((w) => w.includes(t))) return { ok: true, ref: loc.ref, offset: loc.offset, encoding: x.enc };
   }
-  return no(`the ${need} bytes at offset ${loc.offset} of ${loc.ref} ${readings.length ? `read as ${readings.map((x) => x.enc).join(" or ")} text the answer does not state` : "are not UTF-8 or UTF-16LE text"}: give value, the value as it is in the object`);
+  return no(`the ${need} bytes at offset ${loc.offset} of ${loc.ref} ${readings.length ? `read as ${readings.map((x) => x.enc).join(" or ")} text neither the answer nor an entry it rests on states` : "are not UTF-8 or UTF-16LE text"}: give value, the value as it is in the object`);
 }
 
 /** A derivation held to the run: its job is sealed and ran to its end, each input resolves, and each is among what the job declared it would read. */
@@ -9608,13 +9610,13 @@ export type ReviewEvidenceWarning = { code: "no_locator_or_derivation"; why: str
 /** How each cap is fixed, in the words the attest's reply gives. */
 export const REVIEW_CAP_FIX: Readonly<Record<ReviewEvidenceCap["code"], string>> = {
   no_discriminator: "name the strongest rival and the test that separates it from the answer: answer_review.discriminator {rival (another reading the evidence allows: another time, entity, mechanism or activity, or the premise not holding), test (what you checked), favours_if (the result that would favour the answer, and the one that would favour the rival), outcome (what the check showed), refs (the E-<seq> of the observation, or the job:<id>/<path> it rests on: not the answer, nor only entries it cites)}",
-  locator_unverified: "give each locator's byte offset where the value begins in the sealed object and the value as it is there and as the answer states it (a job over the object gives the offset: grep -boa, a hex dump; UTF-16LE text counts), or drop the locator; a value you derived (a converted time, a decoded field) takes derivation {job, inputs} instead",
+  locator_unverified: "give each locator's byte offset where the value begins in the sealed object and the value as it is there and as the answer or an entry it rests on states it (a job over the object gives the offset: grep -boa, a hex dump; UTF-16LE text counts), or drop the locator; a value you derived (a converted time, a decoded field) takes derivation {job, inputs} instead",
   derivation_unverified: "name a sealed job that ran to its end and the objects it declared it would read: answer_review.derivation {job: j<id>, inputs: [input:<path>, job:<id>/<path>, …]}",
 };
 
 /** How the warning no_locator_or_derivation is answered, where a value can be located. */
 export const REVIEW_UNLOCATED_FIX =
-  "where a value the answer states is in the bytes, say where you read it: answer_review.reproduced_at [{ref, offset, value}] (the sealed object, the byte offset where the value begins, the value as it is there and as the answer states it, in UTF-8 or UTF-16LE); for a derived value, answer_review.derivation {job (the job that derived it), inputs (the objects it read)}. An answer that is an inference over several entries, with no single value in the bytes, stands on its discriminator: a warning, never a hold";
+  "where a value the answer or an entry it rests on states is in the bytes, say where you read it: answer_review.reproduced_at [{ref, offset, value}] (the sealed object, the byte offset where the value begins, the value as it is there and as the answer or that entry states it, in UTF-8 or UTF-16LE); for a derived value, answer_review.derivation {job (the job that derived it), inputs (the objects it read)}. An answer that is an inference over several entries, with no single value in the bytes, stands on its discriminator: a warning, never a hold";
 
 /**
  * The source-first evidence an established review carries (docs/adr/0015,
@@ -9629,10 +9631,11 @@ export const REVIEW_UNLOCATED_FIX =
  * every locator's verdict, for the reply of any review that gave them (a
  * partial answer's too, which none of this caps).
  */
-export async function reviewEvidenceCaps(sandboxRoot: string, answer: LedgerEntry, review: AnswerReview | null, o: { material: boolean }): Promise<{ caps: ReviewEvidenceCap[]; unlocated: ReviewEvidenceWarning | null; locators: LocatorVerdict[]; derivation: { ok: true } | { ok: false; why: string } | null }> {
+export async function reviewEvidenceCaps(sandboxRoot: string, answer: LedgerEntry, review: AnswerReview | null, o: { material: boolean; entries?: readonly LedgerEntry[] }): Promise<{ caps: ReviewEvidenceCap[]; unlocated: ReviewEvidenceWarning | null; locators: LocatorVerdict[]; derivation: { ok: true } | { ok: false; why: string } | null }> {
   const text = `${answer.value ?? ""}\n${answer.reasoning ?? ""}`;
   const locators: LocatorVerdict[] = [];
-  for (const l of review?.reproduced_at ?? []) locators.push(await checkLocator(sandboxRoot, l, text).catch((err: Error) => ({ ok: false as const, ref: l.ref, offset: l.offset, why: `it could not be read (${err.message})` })));
+  const chain = review?.reproduced_at?.length ? chainWords(answer, o.entries ?? (await readLedger(sandboxRoot).catch(() => [] as LedgerEntry[]))) : "";
+  for (const l of review?.reproduced_at ?? []) locators.push(await checkLocator(sandboxRoot, l, text, chain).catch((err: Error) => ({ ok: false as const, ref: l.ref, offset: l.offset, why: `it could not be read (${err.message})` })));
   const derivation = review?.derivation ? await checkDerivation(sandboxRoot, review.derivation).catch((err: Error) => ({ ok: false as const, why: `it could not be checked (${err.message})` })) : null;
   const caps: ReviewEvidenceCap[] = [];
   if (!claimsEstablished(answer) || !o.material || !review) return { caps, unlocated: null, locators, derivation };
@@ -9643,6 +9646,23 @@ export async function reviewEvidenceCaps(sandboxRoot: string, answer: LedgerEntr
   // Neither given: warned, never capped. One given and failing is capped by its own code above.
   const unlocated: ReviewEvidenceWarning | null = !review.reproduced_at?.length && !review.derivation ? { code: "no_locator_or_derivation", why: UNLOCATED_WHY } : null;
   return { caps, unlocated, locators, derivation };
+}
+
+/**
+ * The words of every entry an answer reaches (answerReach: its support,
+ * contrary and limitations, and what those cite in turn), for a locator to
+ * be held to: what each says, where it was read, and what it indicates.
+ */
+export function chainWords(answer: LedgerEntry, entries: readonly LedgerEntry[]): string {
+  const bySeq = new Map(entries.map((e) => [e.seq, e]));
+  const reach = answerReach(answer, bySeq, supersededBy(entries as LedgerEntry[]));
+  const out: string[] = [];
+  for (const n of reach) {
+    const e = bySeq.get(n);
+    if (!e || n === answer.seq) continue;
+    for (const w of [e.value, e.reasoning, e.evidence, e.source, e.indicates, e.significance]) if (typeof w === "string" && w) out.push(w);
+  }
+  return out.join("\n");
 }
 
 /** What a review that locates no value is warned of, in its words. */
@@ -10524,7 +10544,7 @@ export async function attestEntry(ctx: SwarmContext, input: LedgerActInput): Pro
     if (!checked.ok) return { ok: false, reason: `answer_review.discriminator.refs: ${checked.reason}` };
   }
   // The source-first evidence of an established review (docs/adr/0015): read before the lock, bounded reads at the locators' offsets.
-  const evidence = preAnswer && answerReview && (strength === "established" || answerReview.reproduced_at?.length || answerReview.derivation) ? await reviewEvidenceCaps(ctx.sandboxRoot, preAnswer, answerReview, { material: (await questionBar(ctx.sandboxRoot, sectionAnswersId(preAnswer.section!)).catch(() => null))?.material ?? true }) : null;
+  const evidence = preAnswer && answerReview && (strength === "established" || answerReview.reproduced_at?.length || answerReview.derivation) ? await reviewEvidenceCaps(ctx.sandboxRoot, preAnswer, answerReview, { material: (await questionBar(ctx.sandboxRoot, sectionAnswersId(preAnswer.section!)).catch(() => null))?.material ?? true, entries: pre }) : null;
   // The negatives a review recorded here answers (the answer itself, or those resting on the coverage record): their offers are taken up after the lock.
   const reviewed: string[] = [];
   const result = await withTableLock(ctx.sandboxRoot, async (held): Promise<AttestResult> => {
