@@ -200,12 +200,85 @@ async function searchFile(path: string, pats: Pattern[]): Promise<Map<number, { 
 
 /** Whether a coverage record's refs name an object: the ref itself, a directory of it (job:<id>, job:<id>/<dir>), or its bytes by sha256. */
 export function refsName(refs: readonly string[], ref: string, key?: string): boolean {
-  const norm = (r: string) => r.trim().replace(/^(job|import):([^/]+)\/out\//, "$1:$2/").replace(/\/+$/, "");
-  const want = norm(ref);
+  const want = normRef(ref);
   return refs.some((r) => {
-    const n = norm(r);
+    const n = normRef(r);
     return n === want || want.startsWith(`${n}/`) || (key?.startsWith("sha256:") && n === key);
   });
+}
+
+/** An object an earlier sweep found a record's strings in, that a coverage record now names with no entry among its results saying what it showed. */
+export type UnexaminedHit = {
+  /** The object, as the earlier sweep named it. */
+  ref: string;
+  /** Other names of the same bytes. */
+  also: string[];
+  /** The strings found in it. */
+  terms: string[];
+  /** The coverage record whose sweep first found it, and when that sweep ended. */
+  found_by: number;
+  found_at: string;
+};
+
+/** The kinds of entry that say what an object showed: a finding, an event, a search that found nothing in it, or a limitation on it. */
+export const INTERPRETING_KINDS: ReadonlySet<string> = new Set(["finding", "event", "absence", "limitation"]);
+
+/**
+ * The objects a coverage record names that the sweep of an earlier coverage
+ * record for one of its questions found hits in, with no entry among its
+ * results that says what each showed. Naming a hit is not examining it (the
+ * run sb1b3c8 cleared sweep_hits by naming up to 66 hit objects in a
+ * revised record's refs, with nothing recorded about any of them): an
+ * object that moves from hits into a record is cited in its result_refs by
+ * an entry that interprets it, a finding, an event, an absence or a
+ * limitation that stands, names the object itself in its refs (not a
+ * directory that holds it), and was written after the sweep that found it.
+ * One entry per object, or one absence whose refs list several. Object refs
+ * and times only: no content is read or judged.
+ */
+export function unexaminedHits(cov: LedgerEntry, entries: readonly LedgerEntry[], sweeps: readonly SweepRecord[], replaced: ReadonlyMap<number, number>): UnexaminedHit[] {
+  // A question's id as protocol.ts sectionKey reads it: Q-19 is 19.
+  const qkey = (x: string) => String(x ?? "").trim().replace(/^question:/i, "").replace(/^q-?(?=\d)/i, "");
+  const questions = new Set((cov.answers ?? []).map(qkey));
+  const found = new Map<string, UnexaminedHit>();
+  for (const e of entries) {
+    if (e.kind !== "coverage" || e.seq >= cov.seq || !e.hash || !(e.answers ?? []).some((a) => questions.has(qkey(a)))) continue;
+    for (const sw of sweeps) {
+      if (sw.target !== e.hash) continue;
+      for (const h of sw.hits) {
+        const was = found.get(h.ref);
+        const earlier = !was || Date.parse(sw.at) < Date.parse(was.found_at);
+        found.set(h.ref, {
+          ref: h.ref,
+          also: [...new Set([...(was?.also ?? []), ...(h.also ?? [])])],
+          terms: [...new Set([...(was?.terms ?? []), h.term])],
+          found_by: earlier ? e.seq : was!.found_by,
+          found_at: earlier ? sw.at : was!.found_at,
+        });
+      }
+    }
+  }
+  if (!found.size) return [];
+  const names = [...(cov.refs ?? []), ...(cov.result_refs ?? []).filter((r) => !/^E-\d+$/.test(r))];
+  const bySeq = new Map(entries.map((e) => [e.seq, e]));
+  const results = (cov.result_refs ?? [])
+    .filter((r) => /^E-\d+$/.test(r))
+    .map((r) => bySeq.get(Number(r.slice(2))))
+    .filter((e): e is LedgerEntry => Boolean(e) && !replaced.has((e as LedgerEntry).seq) && INTERPRETING_KINDS.has((e as LedgerEntry).kind));
+  const out: UnexaminedHit[] = [];
+  for (const h of [...found.values()].sort((a, b) => a.ref.localeCompare(b.ref))) {
+    const all = [h.ref, ...h.also];
+    if (!all.some((n) => refsName(names, n))) continue;
+    const wanted = new Set(all.map(normRef));
+    const examined = results.some((e) => Date.parse(e.at) >= Date.parse(h.found_at) && (e.refs ?? []).some((r) => wanted.has(normRef(r))));
+    if (!examined) out.push(h);
+  }
+  return out;
+}
+
+/** An object ref as the sweep compares it: job:<id>/out/x is job:<id>/x, no trailing slash. */
+function normRef(r: string): string {
+  return r.trim().replace(/^(job|import):([^/]+)\/out\//, "$1:$2/").replace(/\/+$/, "");
 }
 
 /** Search every output the run holds for a coverage record's looked_for strings. Pure over the store; `now` and the budget are the caller's (tests fix them). */

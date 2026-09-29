@@ -93,11 +93,15 @@ test("the store sweep: a hit outside the record's objects holds the negative, UT
   assert.deepEqual(codes(r, "question:2"), ["sweep_hits"]);
   const d = r.defects.find((x) => x.code === "sweep_hits")!;
   assert.match(d.what, /found what it looked for in objects the record does not name: "alice" in job:j000007\/export\.csv \(1 time, first at byte 21\); "bob-laptop" in job:j000008\/strings\.bin \(1 time, first at byte 16, utf-16le\)/);
-  assert.match(d.fix, new RegExp(`record the coverage again with supersedes=${cov.seq} naming each in refs, with what it showed`));
+  assert.match(d.fix, new RegExp(`record the coverage again with supersedes=${cov.seq} naming each in refs, with what it showed: those entries in result_refs`));
+  assert.match(d.fix, /one entry per object \(a finding, an event or a limitation whose refs name the object itself\), or one absence whose refs list several/);
   assert.deepEqual(d.named_by, []);
   assert.equal(r.dispositions["question:2"], undefined);
+  // What each hit object showed, recorded after the sweep: a finding on the export, a search of the listing that found no tool.
+  const seenExport = ok(await rec(a0, { kind: "finding", ...F, value: "the export's row with alice is a user of another host", source: "the export", evidence: "row 2", refs: ["job:j000007/export.csv"], answers: ["2"] })).entry;
+  const seenListing = ok(await rec(a0, { kind: "absence", value: "a remote tool in the listing", source: "the listing", evidence: "read whole: it names a host", refs: ["job:j000008/strings.bin"], answers: ["2"] })).entry;
   // The record revised to name what the sweep found, with what it showed; its own sweep then holds nothing.
-  const cov2 = ok(await rec(a0, coverage("2", ["input:disk.E01", "job:j000007/export.csv", "job:j000008"], [`E-${abs.seq}`, "job:j000001/hits.txt"], { looked_for: ["alice", "bob-laptop", "no-such-string-xyz"], supersedes: cov.seq, coverage_actual: "the disk, and the export and the listing the sweep named: the export's row is a user of another host, the listing names a host, not a tool" }))).entry;
+  const cov2 = ok(await rec(a0, coverage("2", ["input:disk.E01", "job:j000007/export.csv", "job:j000008"], [`E-${abs.seq}`, "job:j000001/hits.txt", `E-${seenExport.seq}`, `E-${seenListing.seq}`], { looked_for: ["alice", "bob-laptop", "no-such-string-xyz"], supersedes: cov.seq, coverage_actual: "the disk, and the export and the listing the sweep named: the export's row is a user of another host, the listing names a host, not a tool" }))).entry;
   ok(await rec(a1, { kind: "answer", section: "question:2", value: "No evidence of a remote tool was found on the disk, the export or the listing", reasoning: `E-${cov2.seq}`, ...A, result: "bounded_negative", supersedes: ans.seq }));
   await SW.awaitSweeps(S);
   const sw2 = SW.sweepOf(cov2, await SW.readSweeps(S))!;
@@ -114,6 +118,56 @@ test("the store sweep: a hit outside the record's objects holds the negative, UT
   assert.match(md, /### Store sweeps/);
   assert.match(md, /2 coverage records named what a hit would contain.*2 swept, 0 pending, 1 with hits in objects the record did not name, 0 partial; 1 of the records with hits were revised/);
   assert.match(md, /Store sweep \(by the hub\):\*\* store sweep clean/);
+});
+
+test("naming a hit object in a revised record is not examining it (the run sb1b3c8): the gate holds each until an entry written after the sweep that names the object itself says what it showed, one per object or one absence over several", async () => {
+  const { S, a0, a1, a2, a3 } = await run();
+  await jobWith(S, "j000007", "export.csv", "time,user\n09:58,alice\n");
+  await jobWith(S, "j000008", "a.txt", "alice was here\n");
+  await jobWith(S, "j000009", "b.txt", "and alice again\n");
+  await planned(a0, "2");
+  // Recorded before any sweep: it names the export, but it was not written in answer to the hit (it says nothing of what the hit is).
+  const early = ok(await rec(a0, { kind: "finding", ...F, value: "the export lists logons", source: "the export", evidence: "its header", refs: ["job:j000007/export.csv"], answers: ["2"] })).entry;
+  const abs = ok(await rec(a0, { kind: "absence", value: "a remote tool", source: "the disk", evidence: "a search", refs: ["job:j000001/hits.txt"], answers: ["2"] })).entry;
+  const cov = ok(await rec(a0, coverage("2", ["input:disk.E01"], [`E-${abs.seq}`, "job:j000001/hits.txt"], { looked_for: ["alice"] }))).entry;
+  let ans = ok(await rec(a1, { kind: "answer", section: "question:2", value: "No evidence of a remote tool was found on the disk", reasoning: `E-${cov.seq}`, ...A, result: "bounded_negative" })).entry;
+  await SW.awaitSweeps(S);
+  assert.deepEqual(SW.sweepOf(cov, await SW.readSweeps(S))!.hits.map((h) => h.ref), ["job:j000007/export.csv", "job:j000008/a.txt", "job:j000009/b.txt"]);
+  // Revised to name them all, by their directories, with nothing said about any: the reply says so, and the gate still holds.
+  const named = ok(await rec(a0, coverage("2", ["input:disk.E01", "job:j000007", "job:j000008", "job:j000009"], [`E-${abs.seq}`, "job:j000001/hits.txt", `E-${early.seq}`], { looked_for: ["alice"], supersedes: cov.seq })));
+  assert.match(named.note ?? "", /it names 3 objects an earlier sweep found hits in, and no entry among its result_refs says what each showed: job:j000007\/export\.csv, job:j000008\/a\.txt, job:j000009\/b\.txt\. Naming a hit is not examining it/);
+  ans = ok(await rec(a1, { kind: "answer", section: "question:2", value: "No evidence of a remote tool was found on the disk or the outputs", reasoning: `E-${named.entry.seq}`, ...A, result: "bounded_negative", supersedes: ans.seq })).entry;
+  await SW.awaitSweeps(S);
+  assert.equal(SW.sweepOf(named.entry, await SW.readSweeps(S))!.state, "clean", "its own sweep finds the hits named");
+  await attested(a2, { seq: named.entry.seq, how: "ran the search again", review: REVIEW });
+  let r = await checkLedgerAnswers(S, ["2"], ["2"]);
+  assert.deepEqual(codes(r, "question:2"), ["sweep_hits"], r.lines.join("\n"));
+  let d = r.defects.find((x) => x.code === "sweep_hits")!;
+  assert.match(d.what, new RegExp(`coverage record E-${named.entry.seq} names 3 objects an earlier sweep found hits in with no entry among its results that says what each showed: job:j000007/export\\.csv \\("alice", found by the sweep of E-${cov.seq}\\); job:j000008/a\\.txt .*; job:j000009/b\\.txt .*Naming a hit is not examining it`));
+  assert.match(d.fix, /one entry per object .* or one absence whose refs list several .* written after the sweep/);
+  assert.equal(r.dispositions["question:2"], undefined);
+  // What each showed: a finding on the export; one absence over the other two, but first one that names only a directory, which examines nothing in particular.
+  const seen = ok(await rec(a3, { kind: "finding", ...F, value: "the export's alice is a user of another host", source: "the export", evidence: "row 2", refs: ["job:j000007/export.csv"], answers: ["2"] })).entry;
+  const byDir = ok(await rec(a3, { kind: "absence", value: "a remote tool in the notes", source: "the notes", evidence: "read", refs: ["job:j000008", "job:j000009"], answers: ["2"] })).entry;
+  const cov3 = ok(await rec(a0, coverage("2", ["input:disk.E01", "job:j000007", "job:j000008", "job:j000009"], [`E-${abs.seq}`, "job:j000001/hits.txt", `E-${seen.seq}`, `E-${byDir.seq}`], { looked_for: ["alice"], supersedes: named.entry.seq }))).entry;
+  ans = ok(await rec(a1, { kind: "answer", section: "question:2", value: "No evidence of a remote tool was found on the disk or the outputs", reasoning: `E-${cov3.seq}`, ...A, result: "bounded_negative", supersedes: ans.seq })).entry;
+  await SW.awaitSweeps(S);
+  await attested(a2, { seq: cov3.seq, how: "ran the search again", review: REVIEW, second_review_why: "the record now cites what the objects showed" });
+  r = await checkLedgerAnswers(S, ["2"], ["2"]);
+  d = r.defects.find((x) => x.code === "sweep_hits")!;
+  assert.ok(d, r.lines.join("\n"));
+  assert.match(d.what, /names 2 objects an earlier sweep found hits in .*: job:j000008\/a\.txt .*; job:j000009\/b\.txt/);
+  assert.doesNotMatch(d.what, /export\.csv/, "the export is examined: a finding written after the sweep names it");
+  // One absence over both, naming each object: released.
+  const both = ok(await rec(a3, { kind: "absence", value: "a remote tool in the notes", source: "the notes", evidence: "read whole: each names a person, no tool", refs: ["job:j000008/a.txt", "job:j000009/b.txt"], answers: ["2"] })).entry;
+  const cov4 = ok(await rec(a0, coverage("2", ["input:disk.E01", "job:j000007", "job:j000008", "job:j000009"], [`E-${abs.seq}`, "job:j000001/hits.txt", `E-${seen.seq}`, `E-${both.seq}`], { looked_for: ["alice"], supersedes: cov3.seq })));
+  assert.doesNotMatch(cov4.note ?? "", /Naming a hit is not examining it/);
+  ok(await rec(a1, { kind: "answer", section: "question:2", value: "No evidence of a remote tool was found on the disk or the outputs", reasoning: `E-${cov4.entry.seq}`, ...A, result: "bounded_negative", supersedes: ans.seq }));
+  await SW.awaitSweeps(S);
+  await attested(a2, { seq: cov4.entry.seq, how: "ran the search again", review: REVIEW, second_review_why: "the record now cites what each object showed" });
+  r = await checkLedgerAnswers(S, ["2"], ["2"]);
+  assert.deepEqual(codes(r, "question:2"), [], r.lines.join("\n"));
+  assert.equal(r.dispositions["question:2"], "bounded_negative");
 });
 
 test("a hit in an object the record names does not hold; a partial sweep names what it did not search and holds until the operator accepts the question's limits; a sweep lost with its process is run again", async () => {

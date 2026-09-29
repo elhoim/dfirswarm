@@ -385,9 +385,12 @@ Ledger (only when `record` is in your tool list)
   run already holds for them (every job's output and logs, every import, the evidence added late
   included, the captures, tool-output/), case-insensitive, in UTF-8 and UTF-16LE: an export or a
   listing made an hour ago often holds the row a narrow search missed. A negative waits for the
-  sweep; a hit in an object the record does not name holds it until you examine that object and
-  record the coverage again naming it (with what it showed), or revise the answer; a sweep its
-  budget left partial holds it too, unless the operator accepts the question's limits.
+  sweep; a hit in an object the record does not name holds it until you examine that object,
+  record what it showed (a finding, an event or a limitation whose refs name the object, or one
+  absence whose refs list several, written after the sweep) and record the coverage again naming
+  it with those entries in `result_refs`, or revise the answer. Naming a hit object in refs without
+  such an entry does not clear it: the finish line keeps holding it and names each object. A sweep
+  its budget left partial holds it too, unless the operator accepts the question's limits.
 - `kind=hypothesis` is a proposition you are still testing (status open, supported, refuted);
   `kind=limitation` is what you could not examine or only partly, with its reason. Neither is a
   finding: a report weighs its conclusions against them.

@@ -44,7 +44,7 @@ import { basename, dirname, join, posix, relative, resolve, sep } from "node:pat
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import * as NB from "./negative-bar.ts";
-import type { SweepRecord } from "./store-sweep.ts";
+import { unexaminedHits, type SweepRecord, type UnexaminedHit } from "./store-sweep.ts";
 
 /**
  * Claims are short leases, renewed by re-claiming: make the edit, release,
@@ -11036,12 +11036,19 @@ async function recordCoverage(ctx: SwarmContext, input: LedgerInput): Promise<Le
   // The store sweep, begun now and recorded when it ends (ledger/sweeps.jsonl):
   // the record stands at once, and a negative resting on it waits for the
   // sweep as it waits for a review.
-  if (recorded.ok && !recorded.merged && recorded.entry.looked_for?.length) {
-    void SW.startSweep(ctx.sandboxRoot, recorded.entry);
-    const said = `the hub now searches every output the run holds (job outputs and logs, imports, captures, tool-output/) for ${recorded.entry.looked_for.map((t) => `"${t}"`).join(", ")}, in UTF-8 and UTF-16LE: a negative resting on this record waits for the sweep, and a hit in an object it does not name holds it until the record is revised to name that object (with what it showed) or the answer is revised`;
-    return { ...recorded, note: recorded.note ? `${recorded.note}; ${said}` : said };
+  if (!recorded.ok || recorded.merged) return recorded;
+  const notes: string[] = [];
+  // An object an earlier sweep found a hit in, named here with nothing among the results saying what it showed: said now, held by the gate.
+  const now = await readLedger(ctx.sandboxRoot);
+  const unexamined = SW.unexaminedHits(recorded.entry, now, await SW.readSweeps(ctx.sandboxRoot), supersededBy(now));
+  if (unexamined.length) {
+    notes.push(`it names ${unexamined.length === 1 ? "an object" : `${unexamined.length} objects`} an earlier sweep found hits in, and no entry among its result_refs says what ${unexamined.length === 1 ? "it" : "each"} showed: ${unexamined.map((u) => u.ref).join(", ")}. Naming a hit is not examining it: a negative resting on this record is held (sweep_hits) until you record what each showed (a finding, an event or a limitation whose refs name the object, or one absence whose refs list several, written after the sweep) and record the coverage again citing them in result_refs`);
   }
-  return recorded;
+  if (recorded.entry.looked_for?.length) {
+    void SW.startSweep(ctx.sandboxRoot, recorded.entry);
+    notes.push(`the hub now searches every output the run holds (job outputs and logs, imports, captures, tool-output/) for ${recorded.entry.looked_for.map((t) => `"${t}"`).join(", ")}, in UTF-8 and UTF-16LE: a negative resting on this record waits for the sweep, and a hit in an object it does not name holds it until you examine that object, record what it showed, and record the coverage again naming it with that entry in result_refs, or the answer is revised`);
+  }
+  return notes.length ? { ...recorded, note: [recorded.note, ...notes].filter(Boolean).join("; ") } : recorded;
 }
 
 /**
@@ -11717,7 +11724,8 @@ export function coverageNamesAreas(c: LedgerEntry): boolean {
  * For a negative the bar holds, a partial answer on a material question,
  * and an answer that says the event did not happen; empty for any other.
  */
-export function sweepHolds(answer: LedgerEntry, entries: LedgerEntry[], sweeps: readonly SweepRecord[], disputes: LedgerDispute[] = [], material = true): Array<{ code: "sweep_pending" | "sweep_hits" | "sweep_partial"; coverage: LedgerEntry; sweep: SweepRecord | null }> {
+export type SweepHold = { code: "sweep_pending" | "sweep_hits" | "sweep_partial"; coverage: LedgerEntry; sweep: SweepRecord | null; unexamined?: UnexaminedHit[] };
+export function sweepHolds(answer: LedgerEntry, entries: LedgerEntry[], sweeps: readonly SweepRecord[], disputes: LedgerDispute[] = [], material = true): SweepHold[] {
   if (answer.kind !== "answer" || !answer.section?.startsWith("question:")) return [];
   const bySeq = new Map(entries.map((e) => [e.seq, e]));
   const replaced = supersededBy(entries);
@@ -11725,16 +11733,18 @@ export function sweepHolds(answer: LedgerEntry, entries: LedgerEntry[], sweeps: 
   const result = NB.answerResult(answer);
   const cited = citedForQuestion(answer, bySeq, replaced, id);
   if (!result || !(negativeByResult(result, cited) || (result === "partial" && material) || answer.asserts_absence === true)) return [];
-  const out: Array<{ code: "sweep_pending" | "sweep_hits" | "sweep_partial"; coverage: LedgerEntry; sweep: SweepRecord | null }> = [];
+  const out: SweepHold[] = [];
   for (const c of cited) {
-    if (c.kind !== "coverage" || !c.looked_for?.length || coverageProblems(c, entries, disputes).length) continue;
+    if (c.kind !== "coverage" || coverageProblems(c, entries, disputes).length) continue;
+    // An object an earlier sweep for its question found a hit in, named
+    // here with no entry among its results saying what it showed, holds as
+    // a hit does (store-sweep.ts unexaminedHits): naming is not examining.
+    const unexamined = unexaminedHits(c, entries, sweeps, replaced);
     const h = c.hash ?? ledgerHash(c, "genesis");
-    const sw = sweeps.filter((x) => x.target === h).at(-1) ?? null;
-    if (!sw) out.push({ code: "sweep_pending", coverage: c, sweep: null });
-    else {
-      if (sw.hits.length) out.push({ code: "sweep_hits", coverage: c, sweep: sw });
-      if (sw.unsearched.length) out.push({ code: "sweep_partial", coverage: c, sweep: sw });
-    }
+    const sw = c.looked_for?.length ? (sweeps.filter((x) => x.target === h).at(-1) ?? null) : null;
+    if (c.looked_for?.length && !sw) out.push({ code: "sweep_pending", coverage: c, sweep: null });
+    if (sw?.hits.length || unexamined.length) out.push({ code: "sweep_hits", coverage: c, sweep: sw, ...(unexamined.length ? { unexamined } : {}) });
+    if (sw?.unsearched.length) out.push({ code: "sweep_partial", coverage: c, sweep: sw });
   }
   return out;
 }
@@ -11873,13 +11883,19 @@ export function ledgerGate(o: { entries: LedgerEntry[]; attestations: LedgerAtte
         if (hold.code === "sweep_pending") {
           defects.push({ code: "sweep_pending", section: sec.section, seqs: [a.seq, c.seq], what: `answer #${a.seq} (${sec.section}) rests on coverage record E-${c.seq}, whose store sweep for ${c.looked_for!.map((t) => `"${t}"`).join(", ")} has not finished (pending)`, fix: "wait for the sweep: the hub runs it when the record is written and records it in ledger/sweeps.jsonl (the finish line runs one lost with its process); then examine what it found", named_by: [] });
         } else if (hold.code === "sweep_hits") {
-          const words = sw!.hits.map((h) => `"${h.term}" in ${h.ref}${h.also?.length ? ` (also ${h.also.join(", ")})` : ""} (${h.count} time${h.count === 1 ? "" : "s"}, first at byte ${h.first_offset}${h.encodings.includes("utf-16le") ? `, ${h.encodings.join(" and ")}` : ""})`);
+          const words = (sw?.hits ?? []).map((h) => `"${h.term}" in ${h.ref}${h.also?.length ? ` (also ${h.also.join(", ")})` : ""} (${h.count} time${h.count === 1 ? "" : "s"}, first at byte ${h.first_offset}${h.encodings.includes("utf-16le") ? `, ${h.encodings.join(" and ")}` : ""})`);
+          const unexamined = hold.unexamined ?? [];
+          const named = unexamined.map((u) => `${u.ref}${u.also.length ? ` (also ${u.also.join(", ")})` : ""} (${u.terms.map((t) => `"${t}"`).join(", ")}, found by the sweep of E-${u.found_by})`);
+          const said = [
+            ...(words.length ? [`the store sweep for coverage record E-${c.seq} found what it looked for in objects the record does not name: ${words.join("; ")}`] : []),
+            ...(named.length ? [`coverage record E-${c.seq} names ${unexamined.length === 1 ? "an object" : `${unexamined.length} objects`} an earlier sweep found hits in with no entry among its results that says what ${unexamined.length === 1 ? "it" : "each"} showed: ${named.join("; ")}. Naming a hit is not examining it`] : []),
+          ];
           defects.push({
             code: "sweep_hits",
             section: sec.section,
             seqs: [a.seq, c.seq],
-            what: `answer #${a.seq} (${sec.section}) is ${NB.resultWords(result)}, and the store sweep for coverage record E-${c.seq} found what it looked for in objects the record does not name: ${words.join("; ")}`,
-            fix: `examine each object the sweep names: record the coverage again with supersedes=${c.seq} naming each in refs, with what it showed (coverage_actual, result_refs), and the answer again with supersedes=${a.seq} citing it; or record the answer again on what those objects show`,
+            what: `answer #${a.seq} (${sec.section}) is ${NB.resultWords(result)}, and ${said.join("; and ")}`,
+            fix: `examine each object the sweep names and record what it showed: one entry per object (a finding, an event or a limitation whose refs name the object itself), or one absence whose refs list several (a search that found nothing that bears on the question in them), written after the sweep; then record the coverage again with supersedes=${c.seq} naming each in refs, with what it showed: those entries in result_refs (and coverage_actual), and the answer again with supersedes=${a.seq} citing it; or record the answer again on what those objects show`,
             named_by: [],
           });
         } else {
