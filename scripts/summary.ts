@@ -187,8 +187,12 @@ export async function summarize(sandboxArg: string, options: { runsDir?: string 
   lines.push(`# Run summary: ${id || "(no id)"}${label ? ` — ${label}` : ""}`, "");
   const outcome = await P.runOutcome(sandbox).catch(() => null);
   lines.push(`- State: ${run?.state ?? "unknown (no registry entry)"} · sentinel ${sentinel ? "present" : "absent"}${outcome?.outcome ? ` · outcome ${outcome.outcome}` : sentinel?.outcome ? ` · outcome ${sentinel.outcome}` : ""}`);
-  if (budget?.until_solved) lines.push(`- Mode: until solved (--stop operator): no wall clock, every cap advisory (spend recorded, nothing stopped for it), no abandon, a regroup after ${budget.stall_minutes ?? 15} minutes without progress`);
-  else if (budget) lines.push(`- Stop policy: ${P.stopPolicyOf(budget)}${P.stopPolicyOf(budget) === "cap-pause" ? " (a cap pauses the run for the operator)" : " (a cap stops the run)"}${budget.pauses?.length ? `; paused ${budget.pauses.length} time(s) and extended (${budget.pauses.map((x) => `${x.reason} at ${x.at}, lifted by ${x.resumed_by ?? "?"} at ${x.resumed_at ?? "?"}`).join("; ")})` : ""}${budget.paused ? `; PAUSED since ${budget.paused.at} (${budget.paused.reason}): swarm.sh extend or swarm.sh stop` : ""}`);
+  // Every pause, whatever paused it: a cap, the provider's limit, the operator.
+  const pauses = budget
+    ? `${budget.pauses?.length ? `; paused ${budget.pauses.length} time(s) and went on (${budget.pauses.map((x) => `${x.reason} at ${x.at}, lifted by ${x.resumed_by ?? "?"} at ${x.resumed_at ?? "?"}`).join("; ")})` : ""}${budget.paused ? (outcome?.outcome === "paused" ? `; PAUSED since ${budget.paused.at} (${budget.paused.reason}${budget.paused.until ? `, until ${budget.paused.until}` : ""}): ${P.pauseWayOn(budget.paused)}` : `; it ended while paused since ${budget.paused.at} (${budget.paused.reason})`) : ""}`
+    : "";
+  if (budget?.until_solved) lines.push(`- Mode: until solved (--stop operator): no wall clock, every cap advisory (spend recorded, nothing stopped for it), no abandon, a regroup after ${budget.stall_minutes ?? 15} minutes without progress${pauses}`);
+  else if (budget) lines.push(`- Stop policy: ${P.stopPolicyOf(budget)}${P.stopPolicyOf(budget) === "cap-pause" ? " (a cap pauses the run for the operator)" : " (a cap stops the run)"}${pauses}`);
   if (budget?.resumes?.length) lines.push(`- Resumed: ${budget.resumes.map((r) => `${r.at} by ${r.by} (after it was ${r.from})`).join("; ")}`);
   lines.push(`- Started: ${startedAt || "unknown"} · Duration: ${durationHuman(durationMs)}${endedAt ? ` (to ${sentinel ? "the sentinel" : "the last trace event"} at ${endedAt})` : ""}`);
   // What the kickoff was told about who ran the run: never the examiner who adopts a report (swarm.sh releases says who did).
@@ -264,7 +268,8 @@ export async function summarize(sandboxArg: string, options: { runsDir?: string 
   } else if (outcome?.outcome === "stopped") {
     lines.push(`No sentinel: the operator stopped the run (\`done/STOPPED\`, ${outcome.by ?? "?"} at ${outcome.at ?? "?"}). Outcome: **stopped**, never completed.`, "");
   } else if (outcome?.outcome === "paused") {
-    lines.push(`No sentinel: the run is **paused** since ${outcome.at ?? "?"} (${outcome.why ?? ""}): no model call goes out until the operator extends it (swarm.sh extend) or stops it (swarm.sh stop).`, "");
+    const pause = budget?.paused;
+    lines.push(`No sentinel: the run is **paused** since ${outcome.at ?? "?"} (${outcome.why ?? ""}): no model call goes out until ${pause ? P.pauseWayOn(pause) : "the operator extends it (swarm.sh extend) or stops it (swarm.sh stop)"}.`, "");
   } else if (allDead) {
     lines.push(`No sentinel: every agent died (\`done/ALL_AGENTS_DEAD\`, ${allDead.reason ?? "all_agents_dead"}, at ${allDead.at ?? "?"}). The swarm stopped without meeting its definition of done.`, "");
   } else {

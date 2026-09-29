@@ -107,8 +107,8 @@ Commands:
   package <id>       Hand a run over: report, board, trace, hashes (--sign signs it)
   examiner machine review releases timestamp rerun verify certify export hold release purge image-for   After a run: adoption and releases, checks, reruns, export, retention; the image packs boot (help <command>)
   tools <id>         What the run forged; --save DIR keeps it for the next run; --candidates ranks the code agents wrote into jobs
-  say <id> "<msg>"   Post as the examiner; cap|extend <id> its caps (extend lifts a pause); lead <id> list|note its leads; question <id> add|list … asks it one; net <id> list|grant|deny|revoke its network
-  stop <id>          Stop a run (stopped, never completed); resume <id> [--question TEXT] continues one that ended, on its own chains
+  say <id> "<msg>"   Post as the examiner; cap|extend <id> its caps (extend lifts a cap's pause); lead <id> list|note its leads; question <id> add|list … asks it one; net <id> list|grant|deny|revoke its network
+  stop <id>          Stop a run (stopped, never completed); pause|unpause <id> holds it and lifts a pause; resume <id> [--question TEXT] continues one that ended, on its own chains
   reap [id]          Stop agents that stalled
   ui                 The console, at http://<this-host>:43173 (SWARM_UI_PORT); --inputs-root DIR (repeatable) · --allow-inputs-root-from-ui
   netcheck           What a run's VM (or, --isolation host, the network guard) would allow
@@ -9808,12 +9808,82 @@ cmd_extend() {
   operator_trace "$sandbox" extend "$id" ${args[@]+"${args[@]}"}
   registry_merge "$id" "$(jq -c '{wall_clock_minutes: .caps.wall_clock_minutes, cap_usd: .caps.cap_usd} + (if .caps.cap_tokens then {cap_tokens: .caps.cap_tokens} else {} end)' <<<"$out")"
   local body
-  body="The operator extended the run ($(jq -r '.set | to_entries | map("\(.key) to \(.value)") | join(", ")' <<<"$out"))$([[ "$(jq -r '.resumed != null' <<<"$out")" == true ]] && printf ': the pause is lifted, and every seat is woken where it was' || printf '.')"
+  body="The operator extended the run ($(jq -r '.set | to_entries | map("\(.key) to \(.value)") | join(", ")' <<<"$out"))$([[ "$(jq -r '.resumed != null' <<<"$out")" == true ]] && printf ': the pause is lifted, and every seat is woken where it was' || { [[ "$(jq -r '.paused' <<<"$out")" == true ]] && printf '; the run stays paused: its pause is not a cap'"'"'s (swarm.sh unpause lifts it).' || printf '.'; })"
   node --experimental-strip-types --no-warnings -e '
     const [protocol, S, body] = process.argv.slice(1);
     import(protocol).then((P) => P.systemPost(S, { tag: "ask", to: "all", body })).catch(() => process.exit(1));
   ' "$ROOT/extensions/protocol.ts" "$sandbox" "$body" >/dev/null 2>&1 || true
   [[ "$(jq -r '.resumed != null' <<<"$out")" == true ]] && notify_run "$sandbox" extended "$(jq -c '{set, resumed}' <<<"$out")"
+  echo "$body"
+}
+
+# The operator's hold on a going run (docs/adr/0013): under any stop policy
+# the seats finish their step and go idle, no model call goes out, and the
+# wall clock stands, until swarm.sh unpause. On the board, the trace and the
+# operator's record, like an extension.
+cmd_pause() {
+  local id="${1:-}"
+  [[ -n "$id" && "$id" != -* ]] || die_usage "pause requires <id>"
+  shift
+  local why=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --why) why="${2:-}"; [[ -n "$why" ]] || die_usage "pause: --why takes a text"; shift 2 ;;
+      *) die_usage "pause: unknown option $1 (--why TEXT)" ;;
+    esac
+  done
+  ensure_registry
+  local rec sandbox state out body
+  rec="$(json_get "$id")"
+  [[ -n "$rec" ]] || { echo "Unknown swarm id: $id" >&2; exit 1; }
+  sandbox="$(jq -r '.sandbox // empty' <<<"$rec")"
+  state="$(jq -r '.state // empty' <<<"$rec")"
+  [[ -n "$sandbox" && -d "$sandbox" ]] || { echo "BLOCKER: run $id's sandbox is not there." >&2; exit 2; }
+  [[ "$state" == running ]] || { echo "BLOCKER: $id is $state; a pause holds a run that is going." >&2; exit 2; }
+  out="$(node --experimental-strip-types --no-warnings "$ROOT/scripts/stop-policy.ts" pause "$sandbox" --by operator ${why:+--why "$why"})" || {
+    echo "BLOCKER: $(jq -r '.reason // "the run could not be paused"' <<<"$out" 2>/dev/null || printf '%s' "$out")" >&2
+    exit 2
+  }
+  operator_trace "$sandbox" pause "$id" ${why:+--why "$why"}
+  system_trace "$sandbox" run_paused "$(jq -c '{via: "swarm.sh", reason: "operator", since: .paused.at}' <<<"$out" 2>/dev/null || echo '{}')"
+  body="The operator paused the run${why:+: $why}. No model call goes out and nobody is prompted until the operator lifts it; what you hold stays as it is."
+  node --experimental-strip-types --no-warnings -e '
+    const [protocol, S, body] = process.argv.slice(1);
+    import(protocol).then((P) => P.systemPost(S, { tag: "stop", body })).catch(() => process.exit(1));
+  ' "$ROOT/extensions/protocol.ts" "$sandbox" "$body" >/dev/null 2>&1 || true
+  echo "Paused $id since $(jq -r '.paused.at' <<<"$out"): every seat is held and the wall clock stands. swarm.sh unpause $id lifts it; swarm.sh stop $id ends the run."
+}
+
+# Lift a pause whose cause is gone (docs/adr/0013): the operator's own hold
+# and the provider's limit always, a cap's only when the caps leave room
+# (refused otherwise, pointing to extend). The watchdog wakes every seat
+# where it was. On the board, the trace and the operator's record.
+cmd_unpause() {
+  local id="${1:-}"
+  [[ -n "$id" && "$id" != -* ]] || die_usage "unpause requires <id>"
+  shift
+  [[ $# -eq 0 ]] || die_usage "unpause: unknown option $1"
+  ensure_registry
+  local rec sandbox state out body
+  rec="$(json_get "$id")"
+  [[ -n "$rec" ]] || { echo "Unknown swarm id: $id" >&2; exit 1; }
+  sandbox="$(jq -r '.sandbox // empty' <<<"$rec")"
+  state="$(jq -r '.state // empty' <<<"$rec")"
+  [[ -n "$sandbox" && -d "$sandbox" ]] || { echo "BLOCKER: run $id's sandbox is not there." >&2; exit 2; }
+  [[ "$state" == running ]] || { echo "BLOCKER: $id is $state; only a going run is paused. A run that ended is continued with swarm.sh resume $id." >&2; exit 2; }
+  out="$(node --experimental-strip-types --no-warnings "$ROOT/scripts/stop-policy.ts" unpause "$sandbox" --by operator)" || {
+    local why
+    why="$(jq -r '.reason // "the pause could not be lifted"' <<<"$out" 2>/dev/null || printf '%s' "$out")"
+    echo "BLOCKER: ${why//swarm.sh extend/swarm.sh extend $id}" >&2
+    exit 2
+  }
+  operator_trace "$sandbox" unpause "$id"
+  system_trace "$sandbox" run_unpaused "$(jq -c '{via: "swarm.sh", reason: .resumed.reason, by: "operator", paused_at: .resumed.at}' <<<"$out" 2>/dev/null || echo '{}')"
+  body="The operator lifted the pause ($(jq -r '.resumed.reason' <<<"$out")): every seat is woken where it was."
+  node --experimental-strip-types --no-warnings -e '
+    const [protocol, S, body] = process.argv.slice(1);
+    import(protocol).then((P) => P.systemPost(S, { tag: "ask", to: "all", body })).catch(() => process.exit(1));
+  ' "$ROOT/extensions/protocol.ts" "$sandbox" "$body" >/dev/null 2>&1 || true
   echo "$body"
 }
 
@@ -11263,8 +11333,29 @@ EOF
       A run paused at a cap (--stop cap-pause, the default) goes on: the pause lifts, the
       wall clock starts again where it stopped, and the watchdog wakes every seat where it
       was. An extension that leaves the run still over a cap is refused, and nothing
-      changes. On the board, the trace and the operator's record. A run that has ended is
-      continued with swarm.sh resume.
+      changes. A pause that is not a cap's (the model provider's limit, swarm.sh pause)
+      stays under an extension: swarm.sh unpause lifts it. On the board, the trace and
+      the operator's record. A run that has ended is continued with swarm.sh resume.
+EOF
+      ;;
+    pause) cat <<'EOF'
+  pause <id> [--why TEXT]
+      Hold a going run, under any stop policy: each seat finishes its step and
+      goes idle, no model call goes out, nobody is prompted, and the wall clock
+      stands while it holds. Nothing the run holds changes. swarm.sh unpause <id>
+      lifts it; swarm.sh stop <id> ends the run. On the board, the trace and the
+      operator's record.
+EOF
+      ;;
+    unpause) cat <<'EOF'
+  unpause <id>
+      Lift a pause whose cause is gone, and wake every seat where it was: the
+      operator's own hold and a pause for the model provider's limit always (the
+      harness otherwise tries again by itself, at the end the provider named or
+      every half hour; a run whose seats are all refused again pauses again); a
+      pause at a cap only when the caps now leave room, and otherwise it is refused
+      with nothing changed (swarm.sh extend gives room). On the board, the trace and
+      the operator's record.
 EOF
       ;;
     resume) cat <<'EOF'
@@ -11586,7 +11677,7 @@ main() {
   # What changes or leaves a run is on the operator's record; what only reads
   # it (list, status, summary, context, help) is not.
   case "$cmd" in
-    start|stop|reap|say|cap|extend|resume|package|report|tools|review|export|hold|release|purge|verify|releases|examiner|machine|timestamp|rerun)
+    start|stop|reap|say|cap|extend|pause|unpause|resume|package|report|tools|review|export|hold|release|purge|verify|releases|examiner|machine|timestamp|rerun)
       # A start --check writes nothing, the audit included.
       case " $* " in *" -h "*|*" --help "*|*" --check "*) ;; *) operator_audit "$cmd" "$@" ;; esac ;;
     # The operator's answer to a lead, and a reopen, change the run; a list reads it.
@@ -11614,6 +11705,8 @@ main() {
     say) cmd_say "$@" ;;
     cap) cmd_cap "$@" ;;
     extend) cmd_extend "$@" ;;
+    pause) cmd_pause "$@" ;;
+    unpause) cmd_unpause "$@" ;;
     resume) cmd_resume "$@" ;;
     lead) cmd_lead "$@" ;;
     question) cmd_question "$@" ;;

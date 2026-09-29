@@ -136,6 +136,8 @@ function ActionBar({ view }: { view: SwarmView }) {
 
   const paused = view.summary.paused ?? null;
   const canExtend = state === "running" && !reachedDone(view.summary.phase);
+  // A pause whose cause is not a cap is lifted here (swarm.sh unpause); a cap's is given room by Extend.
+  const canUnpause = canExtend && (paused?.reason === "provider_limit" || paused?.reason === "operator");
   // A run that ended, by a stop or a finish, and was not purged: its chains go on.
   const canResume = !canStop && state !== "purged" && state !== "resuming" && view.summary.phase !== "running";
   const caps = () => ({
@@ -173,9 +175,24 @@ function ActionBar({ view }: { view: SwarmView }) {
   return (
     <div className="flex flex-col items-end gap-2">
       {paused ? (
+        <div className="flex items-start justify-end gap-2">
         <InlineNote tone="warn">
-          Paused since {paused.at} at its {paused.reason === "wall_clock" ? "wall clock" : "cap"}: {paused.detail.replace(/\.?$/, ".")} Every seat is idle and no model call goes out. Extend it to go on, or stop it: the run never goes on by itself.
+          {paused.reason === "provider_limit" ? (
+            <>
+              Paused since {paused.at}: the model provider refused every live seat{paused.until ? `, and said its limit lifts at ${paused.until}` : ", and named no time its limit lifts"}. It said: {paused.detail.replace(/\.?$/, ".")} Every seat is idle and no model call goes out; the harness tries again {paused.until ? "then" : "every half hour"}, and pauses the run again if every seat is refused again. A long wait holds every VM: stop the run to free the machine, and continue it after the limit lifts.
+            </>
+          ) : paused.reason === "operator" ? (
+            <>Paused since {paused.at} by the operator: {paused.detail.replace(/\.?$/, ".")} Every seat is idle and no model call goes out until it is unpaused.</>
+          ) : (
+            <>Paused since {paused.at} at its {paused.reason === "wall_clock" ? "wall clock" : "cap"}: {paused.detail.replace(/\.?$/, ".")} Every seat is idle and no model call goes out. Extend it to go on, or stop it: the run never goes on by itself.</>
+          )}
         </InlineNote>
+        {canUnpause ? (
+          <Button variant="secondary" size="sm" className="h-8 shrink-0 border-band-line bg-transparent text-band-ink hover:bg-band-2" onClick={() => void run(() => api.unpause(id))} title="swarm.sh unpause: lift the pause and wake every seat where it was; on the operator's record">
+            <Play /> Unpause
+          </Button>
+        ) : null}
+        </div>
       ) : null}
       <div className="flex flex-wrap justify-end gap-2">
         {canExtend ? (

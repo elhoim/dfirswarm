@@ -10,7 +10,7 @@ import { readdir, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-export type JobKind = "start" | "stop" | "reap" | "hold" | "release" | "export" | "package" | "verify" | "purge" | "review" | "lead" | "question" | "extend" | "resume" | "net" | "requests";
+export type JobKind = "start" | "stop" | "reap" | "hold" | "release" | "export" | "package" | "verify" | "purge" | "review" | "lead" | "question" | "extend" | "unpause" | "resume" | "net" | "requests";
 export type JobStatus = "running" | "ok" | "failed";
 
 export type Job = {
@@ -1220,6 +1220,11 @@ export class ActionRunner {
   /** More room for a going or paused run (swarm.sh extend): a paused run whose caps then leave room goes on. */
   extend(swarmId: string, argv: string[]): Job {
     return this.run("extend", argv, swarmId);
+  }
+
+  /** Lift a pause whose cause is gone (swarm.sh unpause): on the operator's record as the console's, like every job here. */
+  unpause(swarmId: string): Job {
+    return this.run("unpause", ["unpause", swarmId], swarmId);
   }
 
   /** "Continue this run" (swarm.sh resume): the same run, in the same sandbox, on the same chains. */

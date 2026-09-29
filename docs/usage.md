@@ -31,6 +31,8 @@ scripts/swarm.sh list
 scripts/swarm.sh status <id>
 scripts/swarm.sh stop <id> [--no-custody] [--custody-timeout SEC]
 scripts/swarm.sh extend <id> [--minutes N] [--tokens N] [--usd N]
+scripts/swarm.sh pause <id> [--why TEXT]
+scripts/swarm.sh unpause <id>
 scripts/swarm.sh resume <id> [--question TEXT]... [--questions FILE] [--why TEXT] [--as ID]
     [--minutes N] [--tokens N] [--usd N] [--env KEY=VALUE]... [--no-start] [-- START OPTIONS]
 scripts/swarm.sh requests <id> list [--open] [--json] | show R-n [--json]
@@ -135,7 +137,7 @@ it. A wrong command line prints the mistake and where to read, not the manual.
 | `--cap-tokens N` | required when nothing on the team bills | 100000000 for a metered team (not under `--stop operator`) | A swarm-wide cap in tokens: Pi's own totals (`input + output + cacheRead + cacheWrite`) summed over every turn of every agent. The brake for a team whose dollars are not charged: local models, which bill nothing, and a subscription, whose dollars are Pi's estimate. Required for such a team; a metered team without it gets 100,000,000 as a second brake, which the kickoff says is the default (a seven-agent case runs to tens of millions, so the default stops a runaway, not a case). Over it, the same steer and grace period as the USD cap. The context is re-sent every turn, so a small goal on two agents is a few million and a seven-agent case runs to tens of millions. Written to `budget.json` as `cap_tokens`, next to `metered`. See [credentials-and-teams.md](credentials-and-teams.md#local-models-ollama-lm-studio-vllm-llamacpp). |
 | `--allow-host HOST` | no | — | Add a host to the netguard allowlist for this run (repeatable): the provider hosts plus, say, a symbol server. A bare host means port 443 and nothing else, so anything on another port is named as `host:port` — a bare `127.0.0.1` would open every port on the machine, the console's included. `*.suffix` or `.suffix` allows the names under a domain. Whether it also allows the domain itself (the apex) depends on the mode: netguard does not (`*.example.com` does not allow `example.com` on a host run), msb does (under `--isolation microvm` it does). A suffix lets an agent send data to any host under it, not only the one the case needs: `*.blob.core.windows.net` reaches anyone's storage account there. A suffix of one label (`*.com`) is refused under `--isolation microvm` and by the console; a host run's command line does not check it. Under `--isolation microvm` every entry is checked before anything is written, as the VM's policy will read it: an IPv6 address is `[addr]:port` with a port, a CIDR block (`10.0.0.0/8`, `10.0.0.0/8:8080`) is an address range, a loopback entry (`127.0.0.1:8080`, `[::1]:11434`, `localhost:1234`) is this machine's port reached through msb's host gateway, which the guest calls `host.microsandbox.internal:<port>` (a local model's base URL is rewritten to it; the guest's own `127.0.0.1` is the VM itself), and an entry with a scheme, a path or a wildcard anywhere but in front is refused with the reason. Volatility 3 fetches a Windows kernel's symbols over plain HTTP from Microsoft, which redirects to a numbered blob host: `--allow-host msdl.microsoft.com:80 --allow-host '*.blob.core.windows.net'`. The same syntax holds under `--isolation microvm`. Recorded as `allow_hosts` in the registry. |
 | `--case-id ID`, `--examiner NAME` | no | — | Chain of custody: both go into the registry, the contract's title block and the run summary. |
-| `--idle-nudge-sec N` | no | 180 | The idle watchdog (`scripts/idle-nudge.sh`, started next to netguard): an agent with no tool call for N seconds and no marker is prompted through Herdr to continue its seat or call done, at most three times, each an `idle_nudge` event on the trace. An agent that has called only `wait` and `inbox` for 600 s (`SWARM_WAIT_IDLE_SEC`) is steered the same way, unless a job of its own is running. `0` turns it off. |
+| `--idle-nudge-sec N` | no | 180 | The idle watchdog (`scripts/idle-nudge.sh`, started next to netguard): an agent with no tool call for N seconds and no marker is prompted through Herdr to continue its seat or call done, at most three times, each an `idle_nudge` event on the trace. An agent that has called only `wait` and `inbox` for 600 s (`SWARM_WAIT_IDLE_SEC`) is steered the same way, unless a job of its own is running. One whose last turn ended in a provider error is retried with backoff instead: three times under a cap policy, without end until solved. `0` turns the prompts off; the watchdog still runs the stop policy. |
 | `--probe-violation` | no | off | Dev only. Starts one extra agent `<id>pv` (not in `team.json`) without `claim_file`, told to do both: a `write` (which the guard must block) and a shell write (which the harness must detect and announce). |
 | `--provider-host P=HOST` | no | — | The host provider `P` is called on, when the harness cannot know it: a gateway, a region, an account (repeatable). The harness knows a provider's host from `models.json` (its `baseUrl`, which Pi takes over its own for a built-in provider too), from its own table, and otherwise from Pi's model list, which names the host of every provider Pi ships (Groq, Mistral, Fireworks, …). Under `--isolation microvm` a provider with no known host is refused before anything is written, with or without `--no-netguard`: its key is bound to its hosts and swapped in nowhere else. Providers that sign each request with their secret on the client (`amazon-bedrock`, `google-vertex`) are refused under microvm, since the secret itself would have to be in the VM. On the host a provider with no known host is a warning. |
 | `--no-netguard` / `--open-net` | no | netguard on | Skip the netguard sidecar and PATH shim: open egress. Under `--isolation microvm` each VM may reach every public host, and its credentials still go only to their own hosts; recorded as `netguard_mode: "microvm-open"`, and the report's egress row says OPEN. It is the network mode `open`, and contradicts `--network closed` or `dynamic`. |
@@ -443,7 +445,7 @@ the last check and what is late against the report), the parked leads, and on
 each lead its standing offer, a closure waiting for its closer's confirmation,
 a second route with its reason and its product contract.
 
-#### The stop policy: `extend`, `stop`, `resume`
+#### The stop policy: `extend`, `pause`, `unpause`, `stop`, `resume`
 
 `done` finishes a run, under every stop policy, only when every question in
 scope has a disposition under the bar ([ADR 0013](adr/0013-a-negative-is-bounded-and-a-cap-pauses.md)):
@@ -461,7 +463,7 @@ says the event did not happen under the stronger bar), `examination_limited`
 (a question not determinable, partial, out of scope, a bounded negative short of
 that, accepted by the operator, or resting on limitations or deferrals),
 `paused` (held at a
-cap, waiting for you), `stopped` (`swarm.sh stop`, or `cap-stop` at a cap; never
+cap, at the model provider's limit, or by you), `stopped` (`swarm.sh stop`, or `cap-stop` at a cap; never
 `completed`), `abandoned`, or `verification_unavailable`. The summary, the
 report and the console say which.
 
@@ -474,7 +476,39 @@ report and the console say which.
   cap is refused and changes nothing. On the board, the trace and the
   operator's record, and to the notify command (`extended`) when it lifts a
   pause. `cap <id>` changes caps too and lifts a pause
-  the same way.
+  the same way. A pause that is not a cap's (the provider's limit, your own
+  hold) stays under an extension: `unpause` lifts it.
+- A seat whose last turn ended in a provider error is prompted again by the
+  watchdog, with backoff (each wait twice the last, up to half an hour): in
+  an until-solved run for as long as it goes, under `cap-pause` and
+  `cap-stop` three times per run of errors, within the wall clock. The seat
+  tells the board once per spell of failed turns; the trace has every one.
+- When the model provider refuses every live seat at once (a subscription's
+  usage limit), the watchdog pauses the run, under every stop policy
+  (`paused.reason: provider_limit`): when every live seat's last turn since
+  the last lift ended in a provider error, and each of them is limited, told
+  to wait 30 minutes or more or refused again after a retry. One seat's
+  error never pauses the run, nor one seat's long wait beside the others'
+  passing errors. While it holds, no seat is prompted, no model call goes
+  out and the wall clock does not run. The harness tries again at the end
+  the provider named, plus a minute (seats on one provider: the longest end
+  any of them was told; on several: the earliest, when each was told one),
+  or every 30 minutes when none is known; it wakes every seat, and pauses
+  the run again if every seat is refused again, without charging the try to
+  the wall clock. You are told once per spell (the notify command's
+  `paused`, with `reason: provider_limit` and `until`), and the board once.
+  A long wait holds every VM: to free the machine, `stop` the run now
+  (custody seals it) and `resume` it after the limit lifts (the resume wakes
+  the seats itself); `unpause`, or Unpause beside the pause in the console,
+  tries again at once.
+- `pause <id> [--why TEXT]` holds a going run under any stop policy: each seat
+  finishes its step and goes idle, no model call goes out, nobody is prompted,
+  and the wall clock stands (`paused.reason: operator`). `unpause <id>` lifts a
+  pause whose cause is gone and the watchdog wakes every seat: your hold and a
+  pause for the provider's limit always; a pause at a cap only when the caps
+  now leave room, and otherwise it is refused with nothing changed (`extend`
+  gives room). Both are on the board, the trace (`run_paused`,
+  `run_unpaused`) and the operator's record.
 - `stop <id>` on a run with no sentinel writes `done/STOPPED` (`{outcome:
   "stopped", by, at, why}`) before custody seals it: a stopped run is never
   read as completed.
@@ -527,7 +561,9 @@ report and the console say which.
   signed v1 stays untouched and valid for what it bound; the continuation's
   answers are adopted through a later version (`review --sign --amend-reason`).
   The console's run page has "Continue this run" (and Extend, and a paused
-  run's notice) for the same commands.
+  run's notice, which names its reason and, at the provider's limit, the end
+  the provider named, with Unpause beside it for a pause that is not a
+  cap's) for the same commands. Its elapsed time leaves every pause out.
 
 #### Questions: `swarm.sh question` and directives
 

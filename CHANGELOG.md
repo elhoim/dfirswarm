@@ -6,6 +6,45 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Fixed: the model provider's limit on every seat pauses the run
+
+An until-solved run hit its provider's subscription usage limit on every
+seat at once ("Try again in ~6904 min.", "The usage limit has been
+reached"). The watchdog prompted each seat again, half an hour apart, for
+days, every VM and the hub up, and the operator was never told the run could
+not go on before a stated time (docs/adr/0013, "The provider's limit, and the
+operator's pause").
+
+- **A pause for the provider's limit.** When every live seat's last turn
+  since the last lift ended in a provider error, and each of them is limited
+  (told to wait 30 minutes or more, or refused again after a retry), the
+  watchdog pauses the run (`paused.reason: provider_limit`), under every
+  stop policy. One seat's error never pauses it, nor one seat's long wait
+  beside the others' passing errors. The pause keeps the provider's texts
+  whole, the models, and the end it holds to (`until`): on one provider the
+  longest end any seat was told, on several the earliest when each was told
+  one. No seat is prompted, no model call goes out and the wall clock does
+  not run.
+- **Every seat is retried.** A seat whose last turn ended in a provider error
+  is prompted again with backoff under every stop policy now (three times
+  per run of errors under a cap policy), which is what shows a limit that
+  persists; the harness's own rows under its id are not read as its turn.
+- **The harness tries again** at that end, or every 30 minutes, wakes the
+  seats, and pauses the run again if every seat is refused again, charging
+  the try nothing. The operator is told once per spell (`paused`, with the
+  end and the advice to stop the run to free the machine and resume it after
+  the limit lifts), and the board once. Each failed turn is recorded once,
+  whole; a seat tells the board once per spell of failed turns, a countdown
+  ("~6904 min", "~6874 min") being one error.
+- **`swarm.sh pause` and `unpause`**, and Unpause in the console beside the
+  pause. The operator can hold a going run under any stop policy, and lift a
+  pause whose cause is gone; a cap's pause still over its cap is refused,
+  pointing to `extend`. An extension no longer reads a pause that is not a
+  cap's as one it must lift. A run stopped in a pause keeps it, a resume
+  wakes no seat with words about a lift, a run whose seats all died in a
+  pause is not read as paused, and the console's elapsed time leaves pauses
+  out.
+
 ### Fixed: what the first calibration run on the new flow showed (run sabfd76)
 
 Scored against a truth kept outside the repo, the run missed a third of the

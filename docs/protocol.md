@@ -569,11 +569,48 @@ the time the run went: `wall_used_ms` holds what earlier stretches used and
 run stood do not count. `resumes` lists each `swarm.sh resume` (`{at, by,
 from}`).
 
+Two pauses are not a cap's, and hold a run under every stop policy with the
+same brakes. `provider_limit`: the watchdog (`scripts/provider-limit.ts`)
+pauses the run when every live seat's last own row since the last lift is an
+`agent_error` and every one of those seats is limited: its errors state a
+wait of 30 minutes or more still ahead ("try again in ~N min", "in N hours",
+"retry after N seconds", a Retry-After number, the first time with its zone
+that is ahead; none past 30 days), or it was prompted again after its first
+error (`idle_nudge`, `resume_wake`, `hub_prompt`; a prompt's row may land up
+to 5 s after the refusal) and refused again. The watchdog retries a seat
+whose last turn is an `agent_error` under every policy, with backoff: until
+solved without end, under a cap policy three times per run of errors. A
+seat's own rows the harness writes (`SEAT_HARNESS_ROWS`: a prompt's echo, a
+lost hub link, an extension's error, a stop) are not turns, and a seat the
+last lift's wake did not reach, with nothing of its own since, is left out.
+The pause keeps `{at, reason: "provider_limit", detail, by: "harness",
+models, until?, since?}`: `detail` the distinct error texts, whole, one a
+line; `until` the longest end named when every limited seat is on one
+provider (the model's part before the slash), else the earliest when each
+was told one, else none; `since` the start of the spell when this pause
+follows the harness's own try with no seat having worked since (the try is
+then not charged to the wall clock: `wall_base_at` moves to the pause). The
+rule is read again under the table lock (`pauseRun`'s `recheck`). The
+harness tries again at `until` plus a minute, or 30 minutes after the pause
+when no end is known (`liftProviderLimit`, `resumed_by: "harness"`; never on
+a run with `done/STOPPED`), and the watchdog wakes each seat; a run whose
+seats are all refused again is paused again. The operator is told once per
+spell (`pauseNoticeKey`), with `reason`, `until`, `retry_at` and the advice,
+and the board once, in one line. `operator`: `swarm.sh pause <run> [--why
+TEXT]` writes `{at, reason: "operator", detail, by: "operator"}`; `swarm.sh
+unpause <run>` (`unpauseRun`; the console's Unpause) lifts a pause whose
+cause is gone: the provider's limit and the operator's hold always, a cap's
+only when the caps leave room (refused otherwise). An extension does not
+lift a pause that is not a cap's. The wake's words (`pauseLiftedText`) say
+who lifted it and why; a pause `swarm.sh resume` folded into `pauses`
+(`resumed_by: "<by> (resume)"`) wakes nobody.
+
 A run's outcome (`runOutcome`) is read from its files: `done/STOPPED`
 (`{outcome: "stopped", by, at, why}`, written by `swarm.sh stop` on a run with
 no sentinel) is `stopped`; a sentinel says its own `outcome:`, and one the
-harness wrote at a cap or the wall clock is `stopped`; a `paused` budget is
-`paused`; otherwise the run has none yet. `stopped` is never `completed`.
+harness wrote at a cap or the wall clock is `stopped`; a run whose seats all
+died (`done/ALL_AGENTS_DEAD`, no sentinel) has none, paused or not; a
+`paused` budget is `paused`; otherwise the run has none yet. `stopped` is never `completed`.
 
 When nothing yields (no new finding, question disposition, acceptance or
 coverage record since the later of the stretch's start and the last one)
@@ -691,7 +728,9 @@ anywhere; the model's own trailer names the same file.
 | `cap_steer`, `wall_steer` | budget fold | `{reason:"cannot_complete", delivered}`, `args.hard_kill` |
 | `budget_unreadable` | budget fold, once per process | `{error}`: `budget.json` could not be parsed twice in a row, so the fold was refused and the file left alone; a `veto` post says the same on the board |
 | `harness_stop` | budget fold, past the grace period | `{created_sentinel:true}`, `args.reason` = `cap` / `wall_clock` (`cap-stop`) |
-| `run_paused` | budget fold, the hub or the watchdog, past the grace period (`cap-pause`) | `{ok}`, `args.reason`, `args.via`: the pause written into `budget.json` |
+| `run_paused` | budget fold, the hub or the watchdog, past the grace period (`cap-pause`); the watchdog at the provider's limit; `swarm.sh pause` | `{ok}`, `args.reason` (`cap`, `wall_clock`, `provider_limit`, `operator`), `args.via`: the pause written into `budget.json`; at the provider's limit also `args` = `{until, retry_at, models, spell, since}` and `result` = `{why, seats[{agent, model, errors, retried, until}]}` |
+| `run_unpaused` | the watchdog, at the harness's try under the provider's limit; `swarm.sh unpause` | `{ok}`, `args` = `{via, reason, by, paused_at, until?}` (`until` the watchdog's, the end the pause held to): the pause lifted, before the seats are woken (`resume_wake`) |
+| `agent_error` | the extension, at a turn's end in a provider error | `{ok: false, reason}` (the provider's words, whole), `args.model`: each failed turn once; the board hears it (a `veto` post) once per spell of failed turns, and not again for the error last told, numbers and times masked (`normalizeProviderError`) |
 | `pause_hold` | the extension's `context` hook, while the run is paused (the call whose check wrote the pause included) | a model call held: the turn aborted without shutting the session |
 | `compact_held` | self-compaction, while the run is paused | `{ok: false, cancelled: true}`, `args` = `{reason, since, attempt}`: the compaction cancelled before any summary attempt, retry or fallback called the provider |
 | `resume_wake` | the watchdog, once per lifted pause | `{ok}`, `args` = `{agent, resumed_at}`: the seat prompted to go on |
@@ -712,7 +751,7 @@ anywhere; the model's own trailer names the same file.
 | `claim_file` with `args.implicit:true` | the bash detector | the harness took the claim for a shell writer of an unclaimed `work/` path |
 | `forge_hint` | the harness, on the eighth `bash` call with the same command word | `{runs}`; `args` = `{command}` |
 | `sentinel_nudge` | the process that created the sentinel; `await-done.sh --nudge` | `{reached[], missed[]}`; `args` = `{peers[]}` |
-| `idle_nudge` | `scripts/idle-nudge.sh` (`agent:"system"`) | `{ok, nudges}`; `args` = `{agent, idle_seconds, why: idle\|waiting}` (for `waiting`, the seconds since its last call other than a wait) |
+| `idle_nudge` | `scripts/idle-nudge.sh` (`agent:"system"`) | `{ok, nudges}`; `args` = `{agent, idle_seconds, why: idle\|waiting\|provider_error}` (for `waiting`, the seconds since its last call other than a wait; `provider_error`, a retry of a seat whose last turn was an `agent_error`) |
 | `operator_action` | `swarm.sh` on a live run (`agent:"system"`): `start`, `stop`, `reap`, `say`, `review`, `export`, `hold`, `release` | `{ok}`; `args` = `{command, argv, os_user, host, via}` (`--env` values and the goal left out). From a shell that is not the kickoff's the line carries no token and is marked unverified. The same action is a line in `runs/operator-audit.jsonl`. |
 | `artifact_scripts` | the console (`agent:"operator"`), when the operator opens an HTML artifact with its scripts | `{ok, opened_with_scripts:true}`; `args` = `{path, sha256, via:"web", os_user, remote}` |
 | `collector_restarted` | `scripts/hub-supervise.sh` (`agent:"system"`), a microVM run's collector brought back | `{ok}`; `args` = `{by, restart}` |

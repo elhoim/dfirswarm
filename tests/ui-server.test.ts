@@ -3464,7 +3464,7 @@ test("the list says each run's stop policy, a pause in force, its outcome and ho
   assert.equal(running?.paused, null);
 });
 
-test("Extend and Continue this run reach swarm.sh extend and resume with the operator's words, checked for shape only", async () => {
+test("Extend, Unpause and Continue this run reach swarm.sh extend, unpause and resume with the operator's words, checked for shape only", async () => {
   const dir = await mkdtemp(join(tmpdir(), "swarm-resume-ui-"));
   const fake = join(dir, "fake-swarm.sh");
   await writeFile(fake, '#!/usr/bin/env bash\necho "ARGC=$#"\n', "utf8");
@@ -3482,6 +3482,12 @@ test("Extend and Continue this run reach swarm.sh extend and resume with the ope
     assert.equal((await send("extend", {})).status, 400, "an extension adds something");
     assert.equal((await send("extend", { minutes: -3 })).status, 400);
     assert.equal((await send("extend", { tokens: 1.5 })).status, 400);
+    // Unpause, beside a pause the console shows: swarm.sh unpause, whose own checks decide.
+    assert.equal((await send("unpause", {}, "wrong")).status, 401, "an unpause takes the console's token");
+    const u = (await (await send("unpause", {})).json()) as { id: string; kind: string; argv: string[] };
+    assert.equal(u.kind, "unpause");
+    assert.deepEqual(u.argv, ["unpause", "s0d4e"]);
+    await waitJobAt(at, u.id);
     const long = `Was the host reached again after the first day, and from where? ${"and by whom ".repeat(200)}`.trim();
     const r = (await (await send("resume", { questions: [long, "Which account did it use?"], why: "the client asked", minutes: 20 })).json()) as { id: string; kind: string; argv: string[] };
     assert.equal(r.kind, "resume");

@@ -1,12 +1,20 @@
 #!/usr/bin/env node
 /**
  * The stop policy from the operator's side and the watchdog's (docs/adr/0013):
- * extending a paused run, recording the operator's stop, reading how a run
- * stands, and the diminishing-returns proposal.
+ * extending a paused run, the operator's own pause and its lift, recording
+ * the operator's stop, reading how a run stands, and the diminishing-returns
+ * proposal. The provider's limit is scripts/provider-limit.ts.
  *
  *   stop-policy.ts extend <sandbox> [--minutes N] [--tokens N] [--usd N] [--by WHO]
  *       add to the caps; a paused run whose caps then leave room goes on (the
  *       watchdog wakes its seats), one still over a cap is refused
+ *   stop-policy.ts pause <sandbox> [--by WHO] [--why TEXT]
+ *       the operator's hold on a going run, under any stop policy: seats idle,
+ *       no model call goes out, the wall clock stands, until unpause
+ *   stop-policy.ts unpause <sandbox> [--by WHO]
+ *       lift a pause whose cause is gone: the provider's limit or the
+ *       operator's hold always, a cap's only when the caps leave room (else
+ *       refused, pointing to extend); the watchdog wakes the seats
  *   stop-policy.ts stopped <sandbox> [--by WHO] [--why TEXT]
  *       the operator's stop of a run with no sentinel: done/STOPPED, outcome stopped
  *   stop-policy.ts outcome <sandbox>
@@ -125,7 +133,7 @@ function opt(args: string[], name: string): string | undefined {
 async function main(argv: string[]): Promise<number> {
   const [cmd, sandboxArg, ...rest] = argv;
   if (!cmd || !sandboxArg) {
-    process.stderr.write("usage: stop-policy.ts extend|stopped|outcome|yield <sandbox> [options]\n");
+    process.stderr.write("usage: stop-policy.ts extend|pause|unpause|stopped|outcome|yield <sandbox> [options]\n");
     return 2;
   }
   const sandbox = resolve(sandboxArg);
@@ -142,6 +150,24 @@ async function main(argv: string[]): Promise<number> {
       case "extend": {
         const r = await P.extendRun(sandbox, { minutes: num("--minutes"), tokens: num("--tokens"), usd: num("--usd") }, opt(rest, "--by") ?? "operator");
         emit({ ok: true, set: r.set, resumed: r.resumed, paused: Boolean(r.budget.paused), caps: { wall_clock_minutes: r.budget.wall_clock_minutes, cap_tokens: r.budget.cap_tokens ?? null, cap_usd: r.budget.cap_usd } });
+        return 0;
+      }
+      case "pause": {
+        const by = opt(rest, "--by") ?? "operator";
+        const why = opt(rest, "--why") ?? "";
+        const r = await P.pauseRun(sandbox, "operator", why || `${by} paused the run`, Date.now(), { by });
+        if (!r.paused) {
+          const b = await P.readBudget(sandbox).catch(() => null);
+          const reason = r.already && b?.paused ? `the run is paused already, since ${b.paused.at}, for ${P.pauseReasonWords(b.paused)}` : "the run has ended or was stopped: there is nothing to pause";
+          emit({ ok: false, reason });
+          return 1;
+        }
+        emit({ ok: true, paused: (await P.readBudget(sandbox)).paused });
+        return 0;
+      }
+      case "unpause": {
+        const r = await P.unpauseRun(sandbox, opt(rest, "--by") ?? "operator");
+        emit({ ok: true, resumed: r.resumed });
         return 0;
       }
       case "stopped": {

@@ -26,7 +26,9 @@
 # kept in the run, traces/notify-events.jsonl, under the event id.
 #
 # Events: finished, finish_failed, stop_incomplete, budget_cap, wall_clock,
-# paused (a cap-pause run held at a cap), extended (the operator gave it
+# paused (a cap-pause run held at a cap, or any run held by the model
+# provider's limit on every seat: reason provider_limit, with the time the
+# provider named, `until`, when it named one), extended (the operator gave it
 # room), operator_request (the operator requests' outbox: a lead needs the
 # operator, an acquisition, a clarification, a network item, a stop proposed
 # when nothing yields), evidence_changed, chain_broken, agent_dead,
@@ -91,7 +93,7 @@ if [[ -d "$sandbox_real/traces" ]]; then
 fi
 ENVELOPE="$(jq -c '
   def idlike: type == "string" and test("^[A-Za-z0-9_.:@-]{1,64}$");
-  ["request", "kind", "run", "lead", "question", "id", "item", "questions", "urgency", "agent", "scope", "reason", "state", "by", "event"] as $keys
+  ["request", "kind", "run", "lead", "question", "id", "item", "questions", "urgency", "agent", "scope", "reason", "state", "by", "event", "until"] as $keys
   | if type == "object" then . else {} end
   | to_entries
   | map(
@@ -105,10 +107,14 @@ ENVELOPE="$(jq -c '
   | from_entries' <<<"$DETAIL" 2>/dev/null || echo '{}')"
 line="$(jq -nc --arg e "$EVENT" --arg r "$run" --arg at "$at" --arg id "$event_id" --argjson d "$ENVELOPE" \
   '{event: $e, run: $r, at: $at, event_id: $id, detail: $d, details: "traces/notify-events.jsonl in the run, under event_id"}')" || exit 0
-# What a typed target is told: the event and the run, and an operator request's ids.
+# What a typed target is told: the event and the run, an operator request's
+# ids, and for a pause at the provider's limit when it lifts and what frees
+# the machine meanwhile.
 words="$(jq -r --arg r "$run" '
   if .event == "operator_request" then
     "operator request \(.detail.request // "?") (\(.detail.kind // "request")\(if .detail.lead then "; lead \(.detail.lead)" else "" end)\(if .detail.question then "; question \(.detail.question)" else "" end)\(if .detail.item then "; item \(.detail.item)" else "" end)\(if .detail.urgency and .detail.urgency != "normal" then "; \(.detail.urgency)" else "" end)): swarm.sh requests \($r) show \(.detail.request // "")"
+  elif .event == "paused" and .detail.reason == "provider_limit" then
+    "paused: the model provider refused every seat\(if .detail.until then " until \(.detail.until)" else "" end). Every VM is held while it waits; to free the machine, swarm.sh stop \($r) now and swarm.sh resume \($r) after the limit lifts"
   else (.event | gsub("_"; " ")) end' <<<"$line")"
 title="DFIR Swarm $run"
 log="$sandbox_real/traces/notify.log"

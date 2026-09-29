@@ -54,8 +54,8 @@ export type SwarmRow = {
   stop_reason: string | null;
   /** What the run does at a cap (docs/adr/0013). Absent from an older server. */
   stop_policy?: "cap-pause" | "cap-stop" | "operator";
-  /** The pause in force: seats idle, no model call, until the operator extends or stops the run. */
-  paused?: { at: string; reason: string; detail: string } | null;
+  /** The pause in force: seats idle, no model call. reason cap, wall_clock, provider_limit (until: the end the provider named) or operator. */
+  paused?: { at: string; reason: string; detail: string; until?: string } | null;
   /** completed, examination_limited, paused, stopped, abandoned, verification_unavailable, or null while it runs. */
   outcome?: string | null;
   /** How many times the run was resumed (swarm.sh resume). */
@@ -972,7 +972,7 @@ export type TracePage = {
 
 export type Job = {
   id: string;
-  kind: "start" | "stop" | "reap" | "hold" | "release" | "export" | "package" | "verify" | "purge" | "review" | "lead" | "question" | "extend" | "resume" | "net";
+  kind: "start" | "stop" | "reap" | "hold" | "release" | "export" | "package" | "verify" | "purge" | "review" | "lead" | "question" | "extend" | "unpause" | "resume" | "net";
   argv: string[];
   status: "running" | "ok" | "failed";
   exit_code: number | null;

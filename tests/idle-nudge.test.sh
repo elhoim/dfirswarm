@@ -97,23 +97,46 @@ pass "each nudge is written to the trace"
 # --- a provider error is not a silence --------------------------------------
 # Both DeepSeek agents on the BelkaCTF #6 run died on `402 Insufficient
 # Balance` nine minutes in, and the watchdog spent all three nudges on each of
-# them: every retry hit the same 402, and the board never heard about any of
-# it. An agent whose last event is agent_error is finished, not idle.
+# them, as plain idle nudges back to back: every retry hit the same 402. A
+# seat whose last turn is agent_error is tried again with words that say so,
+# each wait twice the last, a bounded number of times under a cap policy
+# (this run has no budget.json: not until solved). A retry refused again is
+# also what tells a limit on every seat from a passing error, so it must be
+# made under every stop policy.
 rm -f "$SB/done/agents/a00.done"
 : > "$PROMPT_LOG"
 : > "$SB/traces/idle-nudge.state"
 printf '{"ts":"2026-01-01T00:00:00.000Z","agent":"a00","tool":"agent_error","args":{"model":"deepseek/deepseek-v4-pro"},"result":{"ok":false,"reason":"402 Insufficient Balance"}}\n' \
   >> "$SB/traces/events.jsonl"
+# The watchdog's own row about a00 is not a00's turn.
+printf '{"ts":"2026-01-01T00:00:01.000Z","agent":"system","tool":"idle_nudge","args":{"agent":"a00","idle_seconds":1,"why":"idle"},"result":{"ok":true,"nudges":1}}\n' \
+  >> "$SB/traces/events.jsonl"
 run_once --news-sec 45 --idle-sec 180
-[[ "$(grep -c '^a00	' "$PROMPT_LOG")" -eq 0 ]] || fail "an agent that died on a provider error must not be nudged"
-pass "a turn that ended in a provider error stops the nudges, because no nudge can fix it"
+[[ "$(grep -c '^a00	' "$PROMPT_LOG")" -eq 1 ]] || fail "a seat whose turn ended in a provider error is tried again once: $(cat "$PROMPT_LOG")"
+grep '^a00	' "$PROMPT_LOG" | grep -q 'Your last turn ended in a provider error. The harness tries you again up to 3 times' \
+  || fail "the retry does not say what it is: $(cat "$PROMPT_LOG")"
+grep '^a00	' "$PROMPT_LOG" | grep -q 'Try 1 of 3\.' || fail "the retry is not numbered: $(cat "$PROMPT_LOG")"
+run_once --news-sec 45 --idle-sec 180
+[[ "$(grep -c '^a00	' "$PROMPT_LOG")" -eq 1 ]] || fail "a second retry came before its backoff"
+# Past its backoff each time, it is tried up to the bound, and no more.
+printf 'a00 2 0\n' > "$SB/traces/idle-nudge.errors"
+run_once --news-sec 45 --idle-sec 180
+grep '^a00	' "$PROMPT_LOG" | tail -1 | grep -q 'Try 3 of 3\.' || fail "the last retry is not the third: $(cat "$PROMPT_LOG")"
+printf 'a00 3 0\n' > "$SB/traces/idle-nudge.errors"
+run_once --news-sec 45 --idle-sec 180
+[[ "$(grep -c '^a00	' "$PROMPT_LOG")" -eq 2 ]] || fail "a seat past its retries was tried again: $(cat "$PROMPT_LOG")"
+pass "a turn that ended in a provider error is retried with backoff, a bounded number of times, and says so"
 
 # …and an agent that worked after the error is idle again like any other.
 printf '{"ts":"2026-01-01T00:01:00.000Z","agent":"a00","tool":"bash","args":{},"result":{"ok":true}}\n' \
   >> "$SB/traces/events.jsonl"
 touch -t "$old" "$SB/.pi-sessions/a00/session.jsonl"
+: > "$PROMPT_LOG"
+: > "$SB/traces/idle-nudge.state"
 run_once --news-sec 45 --idle-sec 180
 [[ "$(grep -c '^a00	' "$PROMPT_LOG")" -eq 1 ]] || fail "an agent that came back after an error is nudged normally"
+grep '^a00	' "$PROMPT_LOG" | grep -q 'You ended your turn' || fail "a seat that worked is nudged as idle, not as a provider error: $(cat "$PROMPT_LOG")"
+[[ "$(awk '$1 == "a00" { print $2 }' "$SB/traces/idle-nudge.errors")" == 0 ]] || fail "work did not start its retries over"
 pass "an agent that works after a provider error is watched like any other"
 
 # --- an agent that only waits ------------------------------------------------

@@ -373,6 +373,89 @@ cited nothing against it.
   The report's chain for the question shows the earlier answer, the disputes
   on it and the downgrade's evidence.
 
+## The provider's limit, and the operator's pause
+
+A run under `--stop operator` hit its model provider's subscription usage
+limit on every seat at once. Each turn ended in the provider's words ("You
+have hit your ChatGPT usage limit (pro plan). Try again in ~6904 min.",
+"Codex error: The usage limit has been reached"), recorded as `agent_error`,
+and the watchdog prompted each seat again, half an hour apart, for days,
+while every VM and the hub stayed up; the operator was never told the run
+could not go on before a stated time. A cap's pause did not apply: nothing
+was over a cap, and the policy had none.
+
+- **A pause that is not a cap.** `paused.reason` is `provider_limit` beside
+  `cap` and `wall_clock`, and it pauses a run under every stop policy. The
+  pause keeps the provider's distinct error texts, whole (`detail`), the
+  models refused (`models`), and the end it holds to (`until`, below). A
+  wait is read from the words: "try again in ~N min", "in N minutes", "in N
+  hours", "retry after N seconds", a Retry-After number, the first time with
+  its zone that is still ahead; a wait of more than 30 days (an epoch sent
+  where seconds were meant) is not taken for one. Nothing else about a
+  provider is read.
+- **Every seat is retried.** A seat whose last turn ended in a provider
+  error is prompted again by the watchdog with backoff (each wait twice the
+  last, up to half an hour): until solved, for as long as the run goes;
+  under `cap-pause` and `cap-stop`, three times per run of errors, within
+  the wall clock. Before, only an until-solved run retried, so the second
+  half of the rule below could not hold under a cap policy.
+- **The rule.** The watchdog pauses the run when every live seat (not done,
+  not dead, and reached by the last lift's wake) has, as its last own row
+  since the last lift, a provider error, and every one of those seats is
+  limited by its own evidence: its errors state a wait of 30 minutes or more
+  still ahead, or it was prompted again after its first error and refused
+  again (a prompt's row may land up to five seconds after the refusal it
+  caused). One seat's error never pauses the run, and neither does one
+  seat's long wait beside the others' passing errors: those are retried.
+  The harness's own rows under a seat's id (a prompt's echo, a lost hub
+  link, an extension's error, a stop) are not turns. The rule is read again
+  under the table lock the pause is written under, as a cap is, so two
+  watchdogs never both act and a seat that came back leaves the run going.
+  Each failed turn is on the trace once, whole (a retry that failed on the
+  same words used to leave no row).
+- **The end it holds to.** When every limited seat is on one provider (the
+  part of its model before the slash), `until` is the longest end any of
+  them was told: every seat on a provider uses the one credential the run's
+  Pi store (or the key the kickoff was given) holds for it, so its limit is
+  one limit, and a try before its last named end would only be refused. In the run above one seat said ~6904 minutes
+  and the others named no time; the pause holds to the 6904 minutes. When
+  the seats are on several providers, `until` is the earliest end if each
+  was told one (the first time any seat can go on), and otherwise there is
+  none and the harness tries every half hour.
+- **While it holds** every brake of a cap's pause holds: no seat is
+  prompted, no model call goes out, the wall clock does not run, and the
+  watchdog's provider-error prompts stop.
+- **The harness tries again** at `until` and a minute, or half an hour after
+  the pause when no end is known: it lifts the pause (`resumed_by:
+  harness`, `run_unpaused` on the trace) and wakes each seat once. If every
+  seat is refused again, the same rule pauses the run again; a pause that
+  follows the harness's own try, no seat having worked since, continues the
+  same spell (`since`) and does not charge the try to the wall clock. A seat
+  the wake could not reach, with nothing of its own since, is left out of
+  the rule until the reaper marks it. The operator is told once per spell,
+  with the end the provider named and the advice: a long wait holds every
+  VM; to free the machine, stop the run (custody seals it) and resume it
+  after the limit lifts. The board is told the same, once, in one line. A
+  seat tells the board of its own provider error once per spell of failed
+  turns, and not again for the error it last told, its numbers and times
+  masked: a countdown ("~6904 min", then "~6874 min") put one post per seat
+  on the board at every try.
+- **The operator's pause.** `swarm.sh pause <run> [--why TEXT]` holds a
+  going run under any stop policy (`reason: operator`), and `swarm.sh
+  unpause <run>` (the console's Unpause beside the pause) lifts a pause
+  whose cause is gone: the operator's hold and the provider's limit always,
+  a cap's pause only when the caps leave room, and otherwise it is refused,
+  pointing to `swarm.sh extend`. An extension does not lift a pause that is
+  not a cap's. Both are on the operator's record and the trace.
+- **The run's end in a pause.** A run stopped while paused keeps the pause
+  it was stopped in: the harness's try is not made on it (the stop is read
+  under the lock the lift takes), and a resume folds the pause into the
+  history as the resume's (`resumed_by: "<by> (resume)"`), which wakes no
+  seat, since the resume starts each from its hand-off. A run whose seats
+  all died while paused (`done/ALL_AGENTS_DEAD`) has no outcome of its own,
+  as one that died unpaused; neither is shown as paused, and the console's
+  elapsed time leaves every pause out.
+
 ## Consequences
 
 - Every existing goal and run keeps working: an answer without `result`
