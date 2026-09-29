@@ -105,7 +105,7 @@ Commands:
   context <id>       Each agent's context history from the trace: peaks, lines crossed, hand-offs, summary cost; metrics <id> the process, from its registers
   report <id>        One self-contained report.html; --pdf prints it, --lint checks its citations
   package <id>       Hand a run over: report, board, trace, hashes (--sign signs it)
-  examiner machine review releases timestamp rerun verify certify export hold release purge image-for   After a run: adoption and releases, checks, reruns, export, retention; the image packs boot (help <command>)
+  examiner machine review releases timestamp rerun replay verify certify export hold release purge image-for   After a run: adoption and releases, checks, reruns, a rule change replayed, export, retention; the image packs boot (help <command>)
   tools <id>         What the run forged; --save DIR keeps it for the next run; --candidates ranks the code agents wrote into jobs
   say <id> "<msg>"   Post as the examiner; cap|extend <id> its caps (extend lifts a cap's pause); lead <id> list|note its leads; question <id> add|list … asks it one; net <id> list|grant|deny|revoke its network
   stop <id>          Stop a run (stopped, never completed); pause|unpause <id> holds it and lifts a pause; resume <id> [--question TEXT] continues one that ended, on its own chains
@@ -9287,6 +9287,18 @@ cmd_metrics() {
   fi
 }
 
+# A finished run's registers read again by a harness's finish rules
+# (scripts/replay.ts, docs/usage.md "Replay"): the run is copied to a
+# temporary directory and never written, so the operator's record takes
+# nothing; no model call, no job, no VM.
+cmd_replay() {
+  local id="${1:-}"
+  [[ -n "$id" && "$id" != -* ]] || die_usage "replay requires <id> [--checkout PATH] [--compare [A [B]]] [--stop-policy P[,P...]] [--json] [--show-text]"
+  shift
+  ensure_registry
+  node --experimental-strip-types --no-warnings "$ROOT/scripts/replay.ts" "$id" --registry "$REGISTRY" "$@"
+}
+
 # PDF printing lives in scripts/print-pdf.sh. Chrome and its relatives are
 # the only engines that get the page breaks in the report's print stylesheet
 # right, and none of them is a dependency: without one, `report` still writes
@@ -11522,6 +11534,26 @@ in it is true because this printed it; it is not legal advice. The report's PDF 
 by sha256 and the release's detached ssh signature; it carries no signature of its own (no PAdES).
 EOF
       ;;
+    replay) cat <<'EOF'
+  replay <id> [--checkout PATH] [--compare [A [B]]] [--stop-policy P[,P...]] [--json] [--show-text]
+Reads a finished run's registers again under a harness's finish rules: the answers check (each
+check-answers line of the goal, as its own function), the finish gate and the finish line's verdict,
+readiness, the finish register (the coordinator, what is late against the report), the report's
+standing for each question, and each custody verdict held as a prefix. No model call, no job, no VM.
+The run is copied to a temporary directory (a clone where the file system makes one; the evidence,
+the VMs and the seats' sessions are left out, every link removed) and never written: its registers
+are hashed before and after. The goal's other checks are its own commands: not run, read as passing.
+  --checkout PATH   that checkout's rules instead of this one's (git worktree add --detach /tmp/x <commit>)
+  --compare         the run's own harness against this checkout (or --checkout), each difference named;
+                    the own harness is the hub's frozen copy while it is there, else the commit the
+                    registry records, extracted from this repository with git archive
+  --compare A [B]   checkout A against this one, or A against B; "frozen" names the run's own harness
+  --stop-policy P   as though the stop policy were P (operator, cap-pause, cap-stop; several with commas)
+Values-free: codes, ids, counts and the harness's own words, never a record's text; --show-text adds
+the harness's lines whole, which quote records. It measures rules on a recorded history; what the
+agents would have done under another rule is not in it. Exit 0 replayed, 1 not (the reason on stderr).
+EOF
+      ;;
     rerun) cat <<'EOF'
   rerun <id> <job> [--normalise timestamps@1] [--network] [--json]
 Runs a sealed job again: its recorded spec through the job service's own worker path, in the image
@@ -11744,6 +11776,7 @@ main() {
     summary) cmd_summary "$@" ;;
     context) cmd_context "$@" ;;
     metrics) cmd_metrics "$@" ;;
+    replay) cmd_replay "$@" ;;
     report) cmd_report "$@" ;;
     package) cmd_package "$@" ;;
     tools) cmd_tools "$@" ;;
