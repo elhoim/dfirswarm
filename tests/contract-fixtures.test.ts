@@ -22,12 +22,12 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import { after, test } from "node:test";
-import { extractCommit, replay, resolveRun, type Projection, type StopPolicy, type Target } from "../scripts/replay.ts";
+import { extractCommit, replay, resolveRun, warningCode, type Delivery, type Projection, type StopPolicy, type Target } from "../scripts/replay.ts";
 
 const ROOT = resolve(import.meta.dirname, "..");
 const FIXTURES = join(ROOT, "tests", "fixtures", "contract");
@@ -53,6 +53,8 @@ type QuestionExpect = {
   readiness_includes?: string[];
   defects_include?: string[];
   warnings?: string[];
+  /** The entries each warning names beside the answer, by code (ids). */
+  warned?: Record<string, number[]>;
   report_best_candidate?: boolean;
 };
 type Expect = {
@@ -64,6 +66,12 @@ type Expect = {
   late?: Array<{ kind: string; by: string; tag: string | null }>;
   seals?: { verdicts: number; hold: number };
   agreement?: Array<{ section: string; kind: string }>;
+  /** Where the warnings are delivered, act by act (replay --deliveries): the acts read, and each delivery in time order, held field by field as given. */
+  deliveries?: { acts?: { record: number; review_offer: number; attest: number }; delivered: Array<Partial<Delivery>> };
+  /** The harness's own words of a question's warnings (replay --show-text): what they say, and what they never say. */
+  warning_words?: Record<string, { includes?: string[]; excludes?: string[] }>;
+  /** What the history itself holds: the acquisition asks opened. */
+  history?: { acquisition_requests?: number };
 };
 type Fixture = { name: string; case: string; design: string[]; policies: string[]; expect: Expect; rules?: Record<string, Expect & { why: string }> };
 
@@ -101,6 +109,7 @@ function holdTo(p: Projection, e: Expect, where: string): void {
     for (const c of want.defects_include ?? []) assert.ok(q.check?.defects.includes(c), `${at}: the answers check's defect ${c} (it has ${q.check?.defects.join(", ") || "none"})`);
     if (want.disposition) assert.deepEqual(q.check?.defects ?? [], [], `${at}: a question with a disposition has no open defect`);
     if (want.warnings) assert.deepEqual(q.warnings, [...want.warnings].sort(), `${at}: its warnings`);
+    for (const [code, entries] of Object.entries(want.warned ?? {})) assert.deepEqual(q.warned?.find((w) => w.code === code)?.entries, entries, `${at}: the entries ${code} names`);
     if (want.report_best_candidate !== undefined) assert.equal(q.report?.best_candidate ?? false, want.report_best_candidate, `${at}: the report says best candidate`);
   }
   if (e.ready !== undefined) assert.equal(p.readiness?.ready, e.ready, `${where}: ready (${JSON.stringify(p.readiness?.items)})`);
@@ -114,6 +123,23 @@ function holdTo(p: Projection, e: Expect, where: string): void {
   if (e.late) assert.deepEqual(p.finish?.late.map((x) => ({ kind: x.kind, by: x.by, tag: x.tag })), e.late, `${where}: what is late against the report`);
   if (e.seals) assert.deepEqual({ verdicts: p.seals.verdicts, hold: p.seals.hold }, e.seals, `${where}: the custody verdicts (${JSON.stringify(p.seals.broken)})`);
   if (e.agreement) assert.deepEqual(p.agreement, e.agreement, `${where}: where readiness, the check and the gate disagree`);
+  if (e.deliveries) {
+    const d = p.deliveries;
+    assert.ok(d, `${where}: the deliveries were read`);
+    assert.equal(d.error, null, `${where}: ${d.error}`);
+    if (e.deliveries.acts) assert.deepEqual(d.acts, e.deliveries.acts, `${where}: the acts read again`);
+    const got = d.delivered.map(({ point, entry, on, by, sections, warnings }) => ({ point, entry, on, by, sections, warnings }));
+    assert.equal(d.delivered.length, e.deliveries.delivered.length, `${where}: the deliveries (${JSON.stringify(got)})`);
+    for (const [i, want] of e.deliveries.delivered.entries()) {
+      for (const [k, v] of Object.entries(want)) assert.deepEqual(d.delivered[i]![k as keyof Delivery], v, `${where}: delivery ${i + 1}'s ${k} (${JSON.stringify(got)})`);
+    }
+  }
+  for (const [section, w] of Object.entries(e.warning_words ?? {})) {
+    const lines = (p.text?.warnings ?? []).filter((l) => warningCode(l).section === section);
+    assert.ok(lines.length, `${where} ${section}: its warnings' words were read (--show-text)`);
+    for (const must of w.includes ?? []) assert.ok(lines.every((l) => l.includes(must)), `${where} ${section}: every warning says "${must}": ${lines.join(" | ")}`);
+    for (const never of w.excludes ?? []) assert.ok(lines.every((l) => !l.includes(never)), `${where} ${section}: no warning says "${never}": ${lines.join(" | ")}`);
+  }
 }
 
 const HERE: Target = { label: "this checkout", harness: ROOT, how: "this checkout", commit: null };
@@ -124,7 +150,7 @@ for (const f of fixtures) {
     const dir = join(FIXTURES, f.name, "run");
     const before = treeDigest(dir);
     const policies = f.policies.filter((p) => p !== "as run") as StopPolicy[];
-    const r = await replay({ run: await resolveRun(dir), targets: [HERE], policies: policies.length ? policies : null, scratch: await tmp(`contract-${f.name}-`) });
+    const r = await replay({ run: await resolveRun(dir), targets: [HERE], policies: policies.length ? policies : null, deliveries: Boolean(f.expect.deliveries), showText: Boolean(f.expect.warning_words), scratch: await tmp(`contract-${f.name}-`) });
     assert.equal(r.unchanged, true, "the history's registers are unchanged");
     assert.equal(treeDigest(dir), before, "no file of the history was written");
     assert.equal(r.evaluations.length, Math.max(1, policies.length));
@@ -143,6 +169,16 @@ for (const f of fixtures) {
         if (!q.warnings.length) continue;
         assert.ok(!q.readiness.some((c) => q.warnings.includes(c)), `${where} ${q.section}: a warning is never a readiness item`);
       }
+      // Finish status says every warning the answers check says, and nothing else.
+      if (p.deliveries) {
+        const status = p.deliveries.delivered.filter((x) => x.point === "finish_status").flatMap((x) => x.warnings.map((c) => `${x.sections[0]} ${c}`)).sort();
+        assert.deepEqual(status, p.questions.flatMap((q) => q.warnings.map((c) => `${q.section} ${c}`)).sort(), `${where}: finish status and the answers check say the same warnings`);
+      }
+    }
+    if (f.expect.history?.acquisition_requests !== undefined) {
+      const log = join(dir, "requests", "requests.jsonl");
+      const opened = existsSync(log) ? readFileSync(log, "utf8").split("\n").filter((l) => l.trim() && (JSON.parse(l) as { ev?: string; kind?: string }).ev === "open" && (JSON.parse(l) as { kind?: string }).kind === "acquisition").length : 0;
+      assert.equal(opened, f.expect.history.acquisition_requests, `${f.name}: the acquisition asks the history holds`);
     }
   });
 }

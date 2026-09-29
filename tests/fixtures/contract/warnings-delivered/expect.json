@@ -1,0 +1,72 @@
+{
+  "case": "The three warnings, each where its decision is made: a not-determinable answer with no ask and no reason for none, at its record, in its review's offer and in the reply to the review of its coverage; a partial answer recorded with nothing to warn of, then attested established with every part held, in the reply to that attest; an established answer recorded after another seat attested a finding under its lead that it leaves out, at its record, in the reply to its review, and again when a later finding naming its question is attested.",
+  "design": [
+    "docs/adr/0013 'Warnings where the decision is made': the answers check's warnings are delivered in the reply to the record that writes the answer, in the review offered for it and the reply to an attest on it (on the answer, on a coverage record a negative rests on, or on an entry a warning names), and in finish status; each point says what the gate warns of at that moment; none holds.",
+    "docs/adr/0013 'After the first calibration run', last rule: no_acquisition_ask, a not_determinable answer whose coverage names no ask and no reason for none; a warning, never a hold.",
+    "docs/adr/0013 'After the run s993d40': partial_all_parts_established is made by the reviews (every review holds every part it weighed, one attests established), so it cannot be said before the attest that makes it; lead_findings_uncited lists every entry two seats hold for the question that the answer does not reach.",
+    "docs/adr/0013 'Warnings where the decision is made': the reviews offered to one seat are a limiting route's and a material negative's; an established or partial answer has no review offer, so its reviewer is told in the reply to the attest."
+  ],
+  "policies": [
+    "as run"
+  ],
+  "expect": {
+    "questions": {
+      "question:1": {
+        "disposition": "not_determinable",
+        "best_candidate": false,
+        "readiness_holds": false,
+        "defects_include": [],
+        "warnings": [
+          "no_acquisition_ask"
+        ]
+      },
+      "question:2": {
+        "disposition": "partial",
+        "best_candidate": false,
+        "readiness_holds": false,
+        "defects_include": [],
+        "warnings": [
+          "partial_all_parts_established"
+        ]
+      },
+      "question:3": {
+        "disposition": "established",
+        "best_candidate": false,
+        "readiness_holds": false,
+        "defects_include": [],
+        "warnings": [
+          "lead_findings_uncited"
+        ],
+        "warned": {
+          "lead_findings_uncited": [7, 9]
+        }
+      }
+    },
+    "ready": true,
+    "verdict": {
+      "proceed": true,
+      "outcome": "examination_limited"
+    },
+    "done": "proceeds",
+    "agreement": [],
+    "deliveries": {
+      "acts": {
+        "record": 3,
+        "review_offer": 1,
+        "attest": 6
+      },
+      "delivered": [
+        { "point": "record", "entry": 3, "on": "answer", "sections": ["question:1"], "warnings": ["no_acquisition_ask"] },
+        { "point": "review_offer", "entry": 3, "on": "answer", "by": "a2", "sections": ["question:1"], "warnings": ["no_acquisition_ask"] },
+        { "point": "attest", "entry": 2, "on": "coverage", "by": "a2", "sections": ["question:1"], "warnings": ["no_acquisition_ask"] },
+        { "point": "attest", "entry": 5, "on": "answer", "by": "a3", "sections": ["question:2"], "warnings": ["partial_all_parts_established"] },
+        { "point": "record", "entry": 8, "on": "answer", "sections": ["question:3"], "warnings": ["lead_findings_uncited"] },
+        { "point": "attest", "entry": 8, "on": "answer", "by": "a2", "sections": ["question:3"], "warnings": ["lead_findings_uncited"] },
+        { "point": "attest", "entry": 9, "on": "finding", "by": "a3", "sections": ["question:3"], "warnings": ["lead_findings_uncited"] },
+        { "point": "finish_status", "sections": ["question:1"], "warnings": ["no_acquisition_ask"] },
+        { "point": "finish_status", "sections": ["question:2"], "warnings": ["partial_all_parts_established"] },
+        { "point": "finish_status", "sections": ["question:3"], "warnings": ["lead_findings_uncited"] }
+      ]
+    }
+  }
+}

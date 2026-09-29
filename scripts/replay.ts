@@ -5,8 +5,8 @@
  * "Measuring a rule change").
  *
  *   node --experimental-strip-types scripts/replay.ts <run-dir | run-id> [--registry FILE]
- *        [--checkout PATH] [--compare [A [B]]] [--stop-policy P[,P…]] [--json] [--show-text]
- *   swarm.sh replay <run> [--checkout PATH] [--compare [A [B]]] [--stop-policy P] [--json]
+ *        [--checkout PATH] [--compare [A [B]]] [--stop-policy P[,P…]] [--deliveries] [--json] [--show-text]
+ *   swarm.sh replay <run> [--checkout PATH] [--compare [A [B]]] [--stop-policy P] [--deliveries] [--json]
  *
  * The run is never written. Its directory is copied to a temporary one (a
  * clone where the file system makes one, APFS or a reflink), less what no
@@ -49,6 +49,14 @@
  * `git archive` into the temporary directory. `--stop-policy` evaluates the
  * copy as though the run's stop policy were each one given (operator,
  * cap-pause, cap-stop; the copy's budget.json only).
+ *
+ * `--deliveries` reads where the checkout delivers the answers check's
+ * warnings (docs/adr/0013, "Warnings where the decision is made"), act by
+ * act: each act's registers cut to the moment of the act in a scratch
+ * directory (a chain cut at a line is a prefix of it), and the checkout's
+ * own warningsAt asked what the reply to each answer's record, each review
+ * offered for an answer and the reply to each attest would carry then; and
+ * finish status at the end (deliveriesOf).
  *
  * Replay measures decisions on recorded histories. It cannot show what the
  * agents would have done under the other rule: a rule that changes their
@@ -103,6 +111,8 @@ export type QuestionProjection = {
   readiness: string[];
   /** The codes of the answers check's warnings on it. */
   warnings: string[];
+  /** Each warning on it with the entries it names beside the answer (ids only), when the checkout's readiness gives its warnings whole. */
+  warned?: Array<{ code: string; entries: number[] }>;
   /** The report's standing for it: its status chip, and whether its chain says a best candidate. */
   report: { status: string; best_candidate: boolean } | null;
 };
@@ -130,11 +140,24 @@ export type Projection = {
   /** Warning codes that also appear as something that holds: readiness, the gate or the verdict. */
   warnings_hold: string[];
   seals: { verdicts: number; hold: number; broken: Array<{ verdict: string; broken: string[] }> };
+  /** With --deliveries: where the checkout delivers the warnings, act by act (deliveriesOf). */
+  deliveries?: Deliveries;
   /** What could not be evaluated, in the harness's or node's words. */
   errors: string[];
   /** The harness's lines whole (they quote records): only with --show-text. */
   text?: { check: string[]; readiness: string[]; limited: string[]; gate: string[]; verdict: string | null; warnings: string[] };
 };
+
+/**
+ * Where a checkout delivers the answers check's warnings (docs/adr/0013,
+ * "Warnings where the decision is made"), read act by act on the registers
+ * as they stood at each act: the reply to every record of a question's
+ * answer, every review offered for an answer, the reply to every attest,
+ * and finish status at the end. Only the acts that carry a warning are
+ * listed; `acts` counts every act read. Ids, codes and sections only.
+ */
+export type Delivery = { point: "record" | "review_offer" | "attest" | "finish_status"; entry: number | null; on: string | null; by: string | null; at: string | null; sections: string[]; warnings: string[] };
+export type Deliveries = { acts: { record: number; review_offer: number; attest: number }; delivered: Delivery[]; error: string | null };
 
 type Mod = Record<string, unknown>;
 // A module of the checkout under evaluation: its exports are read by name, and one that is missing is an error in the projection, never a crash.
@@ -273,7 +296,7 @@ function harnessCommit(harness: string): string | null {
  * leaves, then the report and the seals. A part the checkout cannot
  * evaluate is named in `errors`.
  */
-export async function project(harness: string, S: string, o: { showText?: boolean } = {}): Promise<Projection> {
+export async function project(harness: string, S: string, o: { showText?: boolean; deliveries?: boolean } = {}): Promise<Projection> {
   const errors: string[] = [];
   const guard = async <T>(what: string, f: () => Promise<T>): Promise<T | null> => {
     try {
@@ -326,7 +349,7 @@ export async function project(harness: string, S: string, o: { showText?: boolea
   type Gate = { defects: Array<{ code: string; lead?: string; question?: string; what: string }>; limited: string[]; questions: Array<{ id: string; outcome: string; blocks: string[]; disposition?: string }>; holding?: string[]; warnings?: string[]; error?: string };
   const gate = (await guard("the finish gate", async () => (await fn(FG, "finishGate")!(S, run)) as Gate)) as Gate | null;
   const verdictRaw = gate ? ((await guard("the verdict", async () => fn(P, "finishLineVerdict")!({ ...run, gate }, false))) as { proceed: boolean; outcome?: string; failing?: string; reason?: string; note?: string } | null) : null;
-  type Ready = { ready: boolean; revision: string; items: string[]; limited: string[]; warnings?: string[] };
+  type Ready = { ready: boolean; revision: string; items: string[]; limited: string[]; warnings?: string[]; warned?: Array<{ code: string; section: string; seqs: number[] }> };
   const ready = (await guard("readiness", async () => (await fn(FIN, "readiness")!(S)) as Ready)) as Ready | null;
   type FinState = { lease: { holder: string; generation: number; report: string | null } | null; checks: Array<{ revision: string; proceed: boolean; outcome?: string }> };
   const fin = (await guard("the finish register", async () => (await fn(FIN, "readFinish")!(S)) as FinState)) as FinState | null;
@@ -397,6 +420,7 @@ export async function project(harness: string, S: string, o: { showText?: boolea
       gate: g ? { outcome: g.outcome, disposition: g.disposition ?? null, blocks: g.blocks.length } : null,
       readiness: items.filter((i) => i.sections.includes(section)).map((i) => i.code).sort(),
       warnings: warnings.filter((w) => w.section === section).map((w) => w.code).sort(),
+      ...(ready?.warned ? { warned: ready.warned.filter((w) => questionKey(w.section) === section).map((w) => ({ code: w.code, entries: w.seqs.slice(1) })) } : {}),
       report: status ? { status: status.status, best_candidate: reportBest.has(section) } : null,
     };
   });
@@ -438,6 +462,7 @@ export async function project(harness: string, S: string, o: { showText?: boolea
   const last = fin?.checks.at(-1);
 
   const seals = await sealCheck(harness, S, errors);
+  const delivered = o.deliveries ? await deliveriesOf(S, FIN, ready) : undefined;
   const projection: Projection = {
     harness: { path: harness, commit: harnessCommit(harness) },
     goal: { source: doc?.source ?? (goalText ? "sandbox contract" : null), checks: checks.length, answers_checks: rows.length, not_replayed: others },
@@ -458,6 +483,7 @@ export async function project(harness: string, S: string, o: { showText?: boolea
     agreement,
     warnings_hold: warningsHold,
     seals,
+    ...(delivered ? { deliveries: delivered } : {}),
     errors,
   };
   if (o.showText) {
@@ -471,6 +497,126 @@ export async function project(harness: string, S: string, o: { showText?: boolea
     };
   }
   return projection;
+}
+
+/** The registers a delivery point reads, each cut to the act: a chain cut at a line is a prefix of it, which verifies. */
+const CUT_REGISTERS = ["ledger/entries.jsonl", "ledger/attestations.jsonl", "ledger/disputes.jsonl", "ledger/sweeps.jsonl", "leads/leads.jsonl", "questions/questions.jsonl"] as const;
+/** What else they read, whole: the contract, the budget, the team, the inputs, the case policy. */
+const WHOLE_FILES = ["SWARM.md", "budget.json", "team.json", "inputs.json", "network/policy.json"] as const;
+
+type Row = Record<string, unknown>;
+const rowsOf = (text: string): Array<{ line: string; row: Row | null }> =>
+  text
+    .split("\n")
+    .filter((l) => l.trim())
+    .map((line) => {
+      try {
+        return { line, row: JSON.parse(line) as Row };
+      } catch {
+        return { line, row: null };
+      }
+    });
+const timeOf = (row: Row | null): number => (row && typeof row.at === "string" ? Date.parse(row.at) : Number.NaN);
+
+/** A register's lines up to the first one `keep` refuses: a prefix, never a selection. */
+function prefixOf(rows: Array<{ line: string; row: Row | null }>, keep: (row: Row | null, i: number) => boolean): string {
+  const out: string[] = [];
+  for (const [i, r] of rows.entries()) {
+    if (!keep(r.row, i)) break;
+    out.push(r.line);
+  }
+  return out.length ? `${out.join("\n")}\n` : "";
+}
+
+/**
+ * Where the checkout delivers the warnings, act by act (Deliveries): each
+ * act's registers cut to the moment of the act in a scratch directory beside
+ * the copy (the ledger to the answer's own seq for its record, every other
+ * register to the act's time; the attestations to the attest's own line),
+ * and the checkout's own warningsAt asked what that point carries then;
+ * finish status from readiness at the end. A checkout without warningsAt
+ * delivered them in finish status only, and says so. The copy is not
+ * written; the scratch directory is removed.
+ */
+export async function deliveriesOf(S: string, FIN: Mod | null, ready: { warnings?: string[]; warned?: Array<{ code: string; section: string; seqs: number[] }> } | null): Promise<Deliveries> {
+  const acts = { record: 0, review_offer: 0, attest: 0 };
+  const delivered: Delivery[] = [];
+  // Finish status, at the end: every warning readiness carries, question by question.
+  const finishStatus = (): Delivery[] => {
+    const bySection = new Map<string, Set<string>>();
+    const put = (section: string | null, code: string) => {
+      if (!section) return;
+      bySection.set(questionKey(section), (bySection.get(questionKey(section)) ?? new Set()).add(code));
+    };
+    if (ready?.warned) for (const w of ready.warned) put(w.section, w.code);
+    else for (const w of ready?.warnings ?? []) put(warningCode(w).section, warningCode(w).code);
+    return [...bySection].sort(([x], [y]) => x.localeCompare(y, undefined, { numeric: true })).map(([section, codes]) => ({ point: "finish_status" as const, entry: null, on: null, by: null, at: null, sections: [section], warnings: [...codes].sort() }));
+  };
+  const warningsAt = fn(FIN, "warningsAt");
+  if (!warningsAt) return { acts, delivered: finishStatus(), error: "this checkout delivers the warnings in finish status only (it has no warningsAt)" };
+  const registers = new Map<string, Array<{ line: string; row: Row | null }>>();
+  for (const rel of CUT_REGISTERS) registers.set(rel, rowsOf(await readFile(join(S, rel), "utf8").catch(() => "")));
+  const bySeq = new Map<number, Row>();
+  for (const { row } of registers.get("ledger/entries.jsonl")!) if (row && typeof row.seq === "number") bySeq.set(row.seq, row);
+  type Act = { point: Delivery["point"]; at: number; when: string; entry: number; on: string; by: string; ledgerSeq?: number; attestations?: number; wp: Record<string, unknown> };
+  const list: Act[] = [];
+  for (const { row } of registers.get("ledger/entries.jsonl")!) {
+    if (!row || row.kind !== "answer" || typeof row.section !== "string" || !row.section.startsWith("question:")) continue;
+    list.push({ point: "record", at: timeOf(row), when: String(row.at), entry: Number(row.seq), on: "answer", by: String(row.by ?? ""), ledgerSeq: Number(row.seq), wp: { point: "record", section: row.section } });
+  }
+  for (const [i, { row }] of registers.get("ledger/attestations.jsonl")!.entries()) {
+    if (!row || row.act === "same_content" || typeof row.seq !== "number") continue;
+    list.push({ point: "attest", at: timeOf(row), when: String(row.at), entry: row.seq, on: String(bySeq.get(row.seq)?.kind ?? "entry"), by: String(row.by ?? ""), attestations: i + 1, wp: { point: "attest", entry: row.seq } });
+  }
+  // A review offered for an answer: read when it reached its seat (offer_seen), else when it was made.
+  const leads = registers.get("leads/leads.jsonl")!.map((x) => x.row).filter((r): r is Row => r !== null);
+  for (const r of leads) {
+    if (r.ev !== "offer" || typeof r.entry !== "number") continue;
+    const seen = leads.find((x) => x.ev === "offer_seen" && x.entry === r.entry && x.offer === r.seq);
+    const when = String((seen ?? r).at);
+    list.push({ point: "review_offer", at: Date.parse(when), when, entry: r.entry, on: String(bySeq.get(r.entry)?.kind ?? "entry"), by: String(r.to ?? ""), wp: { point: "review_offer", entry: r.entry } });
+  }
+  list.sort((x, y) => x.at - y.at);
+  // The scratch run the acts are read in, with a registry of its own that points at it (the goal is read from there).
+  const base = await mkdtemp(join(dirname(dirname(S)), "deliveries-"));
+  const runs = join(base, "runs");
+  const cut = join(runs, basename(S));
+  const was = process.env.SWARM_RUNS_DIR;
+  try {
+    await mkdir(cut, { recursive: true });
+    for (const rel of WHOLE_FILES) {
+      if (!existsSync(join(S, rel))) continue;
+      await mkdir(dirname(join(cut, rel)), { recursive: true });
+      await copyFile(join(S, rel), join(cut, rel));
+    }
+    const reg = JSON.parse(await readFile(join(dirname(S), "registry.json"), "utf8").catch(() => "{}")) as { runs?: Array<Record<string, unknown>> };
+    const entry = (reg.runs ?? []).find((r) => typeof r.sandbox === "string" && resolve(r.sandbox) === resolve(S));
+    if (entry) await writeFile(join(runs, "registry.json"), `${JSON.stringify({ runs: [{ ...entry, sandbox: cut }] })}\n`);
+    process.env.SWARM_RUNS_DIR = runs;
+    for (const act of list) {
+      for (const rel of CUT_REGISTERS) {
+        const rows = registers.get(rel)!;
+        const body =
+          rel === "ledger/entries.jsonl" && act.ledgerSeq !== undefined
+            ? prefixOf(rows, (r) => r !== null && Number(r.seq) <= act.ledgerSeq!)
+            : rel === "ledger/attestations.jsonl" && act.attestations !== undefined
+              ? prefixOf(rows, (_r, i) => i < act.attestations!)
+              : prefixOf(rows, (r) => !(timeOf(r) > act.at));
+        await mkdir(dirname(join(cut, rel)), { recursive: true });
+        await writeFile(join(cut, rel), body);
+      }
+      acts[act.point as keyof typeof acts] += 1;
+      const ws = (await warningsAt(cut, act.wp)) as Array<{ code: string; section: string }>;
+      if (ws.length) delivered.push({ point: act.point, entry: act.entry, on: act.on, by: act.by, at: act.when, sections: [...new Set(ws.map((w) => questionKey(w.section)))], warnings: [...new Set(ws.map((w) => w.code))].sort() });
+    }
+  } catch (e) {
+    return { acts, delivered: [...delivered, ...finishStatus()], error: `the acts could not all be read again: ${(e as Error).message}` };
+  } finally {
+    if (was === undefined) delete process.env.SWARM_RUNS_DIR;
+    else process.env.SWARM_RUNS_DIR = was;
+    await rm(base, { recursive: true, force: true });
+  }
+  return { acts, delivered: [...delivered, ...finishStatus()], error: null };
 }
 
 /**
@@ -680,10 +826,10 @@ export type Replay = {
 };
 
 /** Evaluate each copy in `copies` with `harness`, in a process of its own; one projection per copy, in order. */
-async function evaluateIn(harness: string, copies: string[], showText: boolean): Promise<Array<Projection | { error: string }>> {
+async function evaluateIn(harness: string, copies: string[], showText: boolean, deliveries = false): Promise<Array<Projection | { error: string }>> {
   const env: NodeJS.ProcessEnv = {};
   for (const [k, v] of Object.entries(process.env)) if (!/^(SWARM_|DFIRSWARM_)/.test(k)) env[k] = v;
-  const args = ["--experimental-strip-types", "--no-warnings", join(ROOT, "scripts", "replay.ts"), "--evaluate", "--harness", harness, ...(showText ? ["--show-text"] : []), ...copies.flatMap((c) => ["--sandbox", c])];
+  const args = ["--experimental-strip-types", "--no-warnings", join(ROOT, "scripts", "replay.ts"), "--evaluate", "--harness", harness, ...(showText ? ["--show-text"] : []), ...(deliveries ? ["--deliveries"] : []), ...copies.flatMap((c) => ["--sandbox", c])];
   return new Promise((done) => {
     const child = spawn(process.execPath, args, { env, stdio: ["ignore", "pipe", "pipe"] });
     const out: Buffer[] = [];
@@ -709,7 +855,7 @@ async function evaluateIn(harness: string, copies: string[], showText: boolean):
  * evaluated, the run's registers checked unchanged, and, for two
  * checkouts, every difference named.
  */
-export async function replay(o: { run: RunRef; targets: Target[]; policies?: StopPolicy[] | null; showText?: boolean; scratch: string }): Promise<Replay> {
+export async function replay(o: { run: RunRef; targets: Target[]; policies?: StopPolicy[] | null; showText?: boolean; deliveries?: boolean; scratch: string }): Promise<Replay> {
   const before = await registerDigest(o.run.sandbox);
   const goal = typeof o.run.entry?.goal === "string" ? (o.run.entry.goal as string) : await readFile(join(o.run.sandbox, "SWARM.md"), "utf8").catch(() => "");
   const briefs = answersChecks(goalChecks(goal)).map((c) => c.sectionsIn).filter((x): x is string => Boolean(x));
@@ -736,7 +882,7 @@ export async function replay(o: { run: RunRef; targets: Target[]; policies?: Sto
       if (policy) await applyPolicy(copy, policy);
       copies.push(copy);
     }
-    const results = await evaluateIn(target.harness, copies, o.showText === true);
+    const results = await evaluateIn(target.harness, copies, o.showText === true, o.deliveries === true);
     for (const [i, r] of results.entries()) evaluations.push({ target, policy: policies[i] ?? "as run", projection: "error" in r ? null : r, error: "error" in r ? r.error : null });
   }
   const after = await registerDigest(o.run.sandbox);
@@ -792,6 +938,23 @@ export function diffProjections(a: Projection, b: Projection): Array<Omit<Differ
   put(null, "done", a.finish ? `${a.finish.done}${a.finish.held_by.length ? ` (${a.finish.held_by.join(", ")})` : ""}` : "none", b.finish ? `${b.finish.done}${b.finish.held_by.length ? ` (${b.finish.held_by.join(", ")})` : ""}` : "none");
   put(null, "disagreements", listWords(a.agreement.map((g) => `${g.section} ${g.kind}`)), listWords(b.agreement.map((g) => `${g.section} ${g.kind}`)));
   put(null, "seals", `${a.seals.hold} of ${a.seals.verdicts} hold`, `${b.seals.hold} of ${b.seals.verdicts} hold`);
+  if (a.deliveries && b.deliveries) {
+    for (const point of ["record", "review_offer", "attest", "finish_status"] as const) {
+      const at = (d: Deliveries) => listWords(countWords(d.delivered.filter((x) => x.point === point).flatMap((x) => x.warnings)));
+      put(null, `delivered at ${point.replace("_", " ")}`, at(a.deliveries), at(b.deliveries));
+    }
+  }
+  return out;
+}
+
+/** Where the warnings were delivered, act by act, values-free: the point, the act's entry and seat, the questions and codes. */
+function deliveryWords(d: Deliveries): string[] {
+  const out = [`  deliveries: ${d.acts.record} answer record(s), ${d.acts.review_offer} review offer(s) for an answer and ${d.acts.attest} attest(s) read again as the registers stood at each${d.error ? ` (${d.error})` : ""}`];
+  const acts = d.delivered.filter((x) => x.point !== "finish_status");
+  if (!acts.length) out.push("    no act carries a warning");
+  for (const x of acts) out.push(`    ${x.point === "record" ? `record E-${x.entry}` : x.point === "review_offer" ? `review offer of E-${x.entry} to ${x.by}` : `attest by ${x.by} of E-${x.entry} (${x.on})`}${x.point === "record" ? ` by ${x.by}` : ""}: ${x.sections.join(", ")} ${x.warnings.join(", ")}`);
+  const fs = d.delivered.filter((x) => x.point === "finish_status");
+  out.push(`    finish status: ${fs.length ? fs.map((x) => `${x.sections.join(", ")} ${x.warnings.join(", ")}`).join("; ") : "no warning"}`);
   return out;
 }
 
@@ -842,6 +1005,7 @@ export function replayWords(r: Replay): string {
     if (p.finish) out.push(`  finish: ${p.finish.lease ? `${p.finish.lease.holder} coordinates at generation ${p.finish.lease.generation}` : "no coordinator yet"}; ${p.finish.late.length ? `late against the report: ${p.finish.late.map((x) => `${x.kind} ${x.id} by ${x.by}${x.tag ? ` (${x.tag})` : ""}`).join("; ")}` : "nothing late"}; ${p.finish.last_check ? `the last check ${p.finish.last_check.proceed ? `proceeded (${p.finish.last_check.outcome})` : "held"}${p.finish.last_check.current ? " at this revision" : ""}; ` : ""}the done ${p.finish.done}${p.finish.held_by.length ? ` (${p.finish.held_by.join(", ")})` : ""}`);
     out.push(`  seals: ${p.seals.verdicts ? `${p.seals.hold} of ${p.seals.verdicts} custody verdict(s) hold as a prefix${p.seals.broken.map((b) => `; ${b.verdict} does not: ${b.broken.join("; ")}`).join("")}` : "no custody verdict in the run"}`);
     out.push(`  agreement: ${p.agreement.length ? `readiness, the answers check and the gate disagree: ${p.agreement.map((g) => `${g.section} ${g.kind}`).join("; ")}` : "readiness, the answers check and the gate agree on every question"}${p.warnings_hold.length ? `; a warning holds: ${p.warnings_hold.join(", ")}` : ""}`);
+    if (p.deliveries) out.push(...deliveryWords(p.deliveries));
     for (const x of p.errors) out.push(`  not evaluated: ${x}`);
     if (p.text) {
       out.push("  --show-text: the harness's lines, whole (they quote records):");
@@ -861,18 +1025,19 @@ export function replayWords(r: Replay): string {
 // The command
 // ---------------------------------------------------------------------------------------------
 
-const USAGE = "usage: replay.ts <run-dir | run-id> [--registry FILE] [--checkout PATH] [--compare [A [B]]] [--stop-policy P[,P…]] [--json] [--show-text]";
+const USAGE = "usage: replay.ts <run-dir | run-id> [--registry FILE] [--checkout PATH] [--compare [A [B]]] [--stop-policy P[,P…]] [--deliveries] [--json] [--show-text]";
 
 async function evaluateMain(args: string[]): Promise<void> {
   const harness = args[args.indexOf("--harness") + 1];
   const showText = args.includes("--show-text");
+  const deliveries = args.includes("--deliveries");
   const copies = args.flatMap((a, i) => (a === "--sandbox" ? [args[i + 1]] : []));
   const out: Array<Projection | { error: string }> = [];
   for (const S of copies) {
     // The registry the goal is read from is the replay's own, beside the copy.
     process.env.SWARM_RUNS_DIR = dirname(S);
     try {
-      out.push(await project(harness, S, { showText }));
+      out.push(await project(harness, S, { showText, deliveries }));
     } catch (e) {
       out.push({ error: (e as Error).message });
     }
@@ -892,6 +1057,7 @@ async function main(argv: string[]): Promise<number> {
   let policies: StopPolicy[] | null = null;
   let json = false;
   let showText = false;
+  let deliveries = false;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--registry") registry = argv[++i] ?? null;
@@ -913,6 +1079,7 @@ async function main(argv: string[]): Promise<number> {
       policies = list as StopPolicy[];
     } else if (a === "--json") json = true;
     else if (a === "--show-text") showText = true;
+    else if (a === "--deliveries") deliveries = true;
     else if (a === "-h" || a === "--help") {
       process.stdout.write(`${USAGE}\n`);
       return 0;
@@ -941,7 +1108,7 @@ async function main(argv: string[]): Promise<number> {
       return { label: p, harness: path, how: path === ROOT ? `this checkout (${path})` : `the checkout at ${path}`, commit: harnessCommit(path) };
     };
     const targets: Target[] = compare === null ? [await named(current)] : compare.length === 0 ? [await named("frozen"), await named(current)] : compare.length === 1 ? [await named(compare[0]), await named(current)] : [await named(compare[0]), await named(compare[1])];
-    const r = await replay({ run, targets, policies, showText, scratch });
+    const r = await replay({ run, targets, policies, showText, deliveries, scratch });
     process.stdout.write(json ? `${JSON.stringify(r, null, 2)}\n` : `${replayWords(r)}\n`);
     return r.unchanged && r.evaluations.every((e) => e.projection) ? 0 : 1;
   } catch (e) {

@@ -404,6 +404,106 @@ const CASES: Record<string, (base: string) => Promise<string>> = {
     await SW.awaitSweeps(r.S);
     return r.S;
   },
+
+  /**
+   * The three warnings, each where its decision is made: question 1's
+   * not-determinable answer (no ask, no reason for none) at its record, in
+   * its review's offer, delivered to the seat it went to, and in the reply
+   * to that seat's review of its coverage; question 2's partial answer,
+   * recorded with nothing to warn of, then attested established with every
+   * part held, in the reply to that attest; question 3's established answer,
+   * recorded after another seat attested a finding under its lead that it
+   * leaves out, at its record and in the reply to its review, and again when
+   * a later finding for it is attested.
+   */
+  "warnings-delivered": async (base) => {
+    const r = await newRun(base, "wdl", 3);
+    // Question 1.
+    const id1 = await lead(r.a0, "1", [{ source: "input:logs/a.log", method: "search the log" }]);
+    const abs = (await rec(r.a0, { kind: "absence", value: "a logon", source: "inputs/logs/a.log", evidence: "a search", refs: ["job:j000002/hits.txt"], answers: ["1"] })).entry;
+    const cov = (await rec(r.a0, coverage("1", ["input:logs/a.log"], [`E-${abs.seq}`, "job:j000002/hits.txt"]))).entry;
+    const a1 = (await rec(r.a1, { kind: "answer", section: "question:1", value: "No evidence of who logged on was found in the log", reasoning: `E-${cov.seq}`, ...A, result: "not_determinable" })).entry;
+    await close(r.a0, id1, `E-${cov.seq}`);
+    assert.equal(await L.offerReviews(r.S), 1);
+    const to = (await L.leadsSnapshot(r.S)).state.reviewOffers.get(`E-${a1.seq}`)![0]!.to;
+    const seat = [r.a2, r.a3].find((c) => c.agentId === to)!;
+    assert.match((await L.leadsDigest(seat, { mark: true })).text, /is offered to you for its review.*The finish line warns of this answer/);
+    await attest(seat, { seq: cov.seq, how: "ran the search again from job:j000002", review: REVIEW });
+    // Question 2.
+    const id2 = await lead(r.a0, "2", [{ source: "input:disk.E01", method: "read the disk" }]);
+    const f2 = (await rec(r.a0, { kind: "finding", ...F, value: "a remote tool's service entry", source: "the disk", evidence: "a registry key", refs: ["job:j000001/hits.txt"], answers: ["2"] })).entry;
+    const a2 = (await rec(r.a1, { kind: "answer", section: "question:2", value: "A remote tool was installed as a service", reasoning: `E-${f2.seq}`, ...HIGH, result: "partial" })).entry;
+    await close(r.a0, id2, `E-${f2.seq}`);
+    await attest(r.a3, { seq: a2.seq, how: "re-read the key from job:j000001", ...ESTABLISHED });
+    // Question 3.
+    const id3 = await lead(r.a0, "3", [{ source: "input:disk.E01", method: "read the disk" }]);
+    assert.ok((await L.attachJob(r.S, "a0", "j000001", id3)).ok);
+    const cited = (await rec(r.a0, { kind: "finding", ...F, value: "a folder was deleted", source: "the disk", evidence: "the journal", refs: ["job:j000001/hits.txt"], answers: ["3"] })).entry;
+    const left = (await rec(r.a0, { kind: "finding", ...F, value: "a second folder was deleted", source: "the disk", evidence: "the journal", refs: ["job:j000001/hits.txt"], answers: ["3"] })).entry;
+    for (const seq of [cited.seq, left.seq]) await attest(r.a3, { seq, how: "re-read the journal from job:j000001/hits.txt" });
+    assert.ok((await L.recordInterpretations(r.S, "a0", left.seq, ["j000001"])).ok);
+    await close(r.a0, id3, `E-${cited.seq}`);
+    const a3 = (await rec(r.a1, { kind: "answer", section: "question:3", value: "A folder was deleted", reasoning: `E-${cited.seq}`, ...HIGH, result: "established" })).entry;
+    await attest(r.a2, { seq: a3.seq, how: "re-derived the cited finding", ...ESTABLISHED });
+    const late = (await rec(r.a0, { kind: "finding", ...F, value: "a third folder was deleted", source: "the disk", evidence: "the journal", refs: ["job:j000001/hits.txt"], answers: ["3"] })).entry;
+    await attest(r.a3, { seq: late.seq, how: "re-read the journal from job:j000001/hits.txt" });
+    await SW.awaitSweeps(r.S);
+    return r.S;
+  },
+
+  /**
+   * The run s993d40's second shape: a method established under another
+   * question's lead. Question 2's lead holds three findings two seats hold:
+   * one names question 1 too, one is linked by rel to the finding question
+   * 1's answer cites, and one is tied to question 1 by nothing. Question 2's
+   * answer cites all three; question 1's answer, recorded after them, cites
+   * only its own finding.
+   */
+  "lead-findings-tied": async (base) => {
+    const r = await newRun(base, "lft", 2);
+    const id1 = await lead(r.a0, "1", [{ source: "input:disk.E01", method: "read the disk" }]);
+    const m1 = (await rec(r.a0, { kind: "finding", ...F, value: "the first method", source: "the disk", evidence: "a record", refs: ["job:j000001/hits.txt"], answers: ["1"] })).entry;
+    await attest(r.a3, { seq: m1.seq, how: "re-read the record from job:j000001/hits.txt" });
+    await close(r.a0, id1, `E-${m1.seq}`);
+    const id2 = await lead(r.a2, "2", [{ source: "input:disk.E01", method: "read the disk" }]);
+    assert.ok((await L.attachJob(r.S, "a2", "j000001", id2)).ok);
+    const names = (await rec(r.a2, { kind: "finding", ...F, value: "the second method", source: "the disk", evidence: "a record", refs: ["job:j000001/hits.txt"], answers: ["2", "1"] })).entry;
+    const linked = (await rec(r.a2, { kind: "finding", ...F, value: "the first method was run twice", source: "the disk", evidence: "a record", refs: ["job:j000001/hits.txt"], answers: ["2"], rel: [{ to: m1.seq, kind: "supports" }] })).entry;
+    const apart = (await rec(r.a2, { kind: "finding", ...F, value: "the account used", source: "the disk", evidence: "a record", refs: ["job:j000001/hits.txt"], answers: ["2"] })).entry;
+    for (const seq of [names.seq, linked.seq, apart.seq]) {
+      await attest(r.a3, { seq, how: "re-read the record from job:j000001/hits.txt" });
+      assert.ok((await L.recordInterpretations(r.S, "a2", seq, ["j000001"])).ok);
+    }
+    await close(r.a2, id2, `E-${apart.seq}`);
+    const a2 = (await rec(r.a1, { kind: "answer", section: "question:2", value: "The account, and two methods", reasoning: `E-${names.seq}, E-${linked.seq} and E-${apart.seq}`, ...HIGH, result: "established" })).entry;
+    await attest(r.a3, { seq: a2.seq, how: "re-derived the cited findings", ...ESTABLISHED });
+    const a1 = (await rec(r.a1, { kind: "answer", section: "question:1", value: "The first method", reasoning: `E-${m1.seq}`, ...HIGH, result: "established" })).entry;
+    await attest(r.a2, { seq: a1.seq, how: "re-derived the cited finding", ...ESTABLISHED });
+    await SW.awaitSweeps(r.S);
+    return r.S;
+  },
+
+  /**
+   * Under the case policy's more_evidence: no, two not-determinable answers,
+   * each resting on a coverage record another seat reviewed: question 1's
+   * says why no ask in the policy's words, question 2's says nothing of an
+   * ask. Nobody opens one.
+   */
+  "no-ceremonial-ask": async (base) => {
+    const r = await newRun(base, "nca", 2);
+    await mkdir(join(r.S, "network"), { recursive: true });
+    await writeFile(join(r.S, "network", "policy.json"), `${JSON.stringify({ policy: "ctf", more_evidence: "no" })}\n`);
+    for (const q of ["1", "2"]) {
+      const id = await lead(r.a0, q, [{ source: "input:logs/a.log", method: "search the log" }]);
+      const abs = (await rec(r.a0, { kind: "absence", value: `the event of question ${q}`, source: "inputs/logs/a.log", evidence: "a search", refs: ["job:j000002/hits.txt"], answers: [q] })).entry;
+      const cov = (await rec(r.a0, coverage(q, ["input:logs/a.log"], [`E-${abs.seq}`, "job:j000002/hits.txt"], q === "1" ? { acquisition_none_why: P.NO_MORE_EVIDENCE_NONE_WHY } : {}))).entry;
+      await rec(r.a1, { kind: "answer", section: `question:${q}`, value: `No evidence of the event of question ${q} was found in the log`, reasoning: `E-${cov.seq}`, ...A, result: "not_determinable" });
+      await attest(r.a2, { seq: cov.seq, how: "ran the search again from job:j000002", review: REVIEW });
+      await close(r.a0, id, `E-${cov.seq}`);
+    }
+    await SW.awaitSweeps(r.S);
+    return r.S;
+  },
 };
 
 // ---------------------------------------------------------------------------------------------

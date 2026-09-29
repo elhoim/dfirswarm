@@ -14,7 +14,7 @@ import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { after, test } from "node:test";
-import { answersChecks, goalChecks, readinessCode, shellWords, warningCode, type Replay } from "../scripts/replay.ts";
+import { answersChecks, deliveriesOf, goalChecks, readinessCode, shellWords, warningCode, type Replay } from "../scripts/replay.ts";
 
 const ROOT = resolve(import.meta.dirname, "..");
 const FIXTURES = join(ROOT, "tests", "fixtures", "contract");
@@ -174,4 +174,20 @@ test("earlier seals: a verdict holds as a prefix of what the run appended after 
   assert.equal(seals.hold, 0);
   // The ledger's chain no longer verifies, so no sealed prefix of it is here.
   for (const b of seals.broken) assert.ok(b.broken.some((w) => /^the ledger: /.test(w)), JSON.stringify(b));
+});
+
+test("--deliveries on the command line: each act that carries a warning, values-free; a checkout without warningsAt said to deliver in finish status only", async () => {
+  const { S } = await runsWith("warnings-delivered", "wdl");
+  const out = replayCli([S, "--deliveries"]);
+  assert.equal(out.status, 0, out.stderr);
+  assert.match(out.stdout, /deliveries: 3 answer record\(s\), 1 review offer\(s\) for an answer and 6 attest\(s\) read again as the registers stood at each/);
+  assert.match(out.stdout, /review offer of E-3 to a2: question:1 no_acquisition_ask/);
+  assert.match(out.stdout, /finish status: question:1 no_acquisition_ask; question:2 partial_all_parts_established; question:3 lead_findings_uncited/);
+  // Values-free: no record's words.
+  for (const words of ["A folder was deleted", "a second folder was deleted", "A remote tool was installed"]) assert.ok(!out.stdout.includes(words), words);
+  // A harness from before the delivery: finish status only, and said so.
+  const old = await deliveriesOf(S, null, { warnings: ["answer #3 (question:1) is not determinable, and its coverage record E-2 names no acquisition ask and no reason for none. fix"] });
+  assert.equal(old.error, "this checkout delivers the warnings in finish status only (it has no warningsAt)");
+  assert.deepEqual(old.acts, { record: 0, review_offer: 0, attest: 0 });
+  assert.deepEqual(old.delivered.map((d) => [d.point, d.sections, d.warnings]), [["finish_status", ["question:1"], ["no_acquisition_ask"]]]);
 });
