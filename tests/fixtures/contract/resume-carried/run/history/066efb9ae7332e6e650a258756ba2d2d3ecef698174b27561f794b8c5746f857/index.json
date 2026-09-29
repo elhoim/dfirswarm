@@ -1,0 +1,18 @@
+[
+  {
+    "rev": 1,
+    "ts": "2026-09-29T12:24:49.644Z",
+    "agent": "a0",
+    "path": "work/report.md",
+    "bytes": 54,
+    "sha256": "33e84be163636c8da759fdf05ecf1d05a073549de619b7bb25904173d98454c9"
+  },
+  {
+    "rev": 2,
+    "ts": "2026-09-29T12:24:49.756Z",
+    "agent": "a0",
+    "path": "work/report.md",
+    "bytes": 68,
+    "sha256": "bdfd89c29376026dd5b74ebe695a2e138c33c1e0622f241ee25e82b1f5800a10"
+  }
+]

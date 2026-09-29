@@ -1,0 +1,4 @@
+{"ts":"2026-09-29T12:23:54.818Z","recv_ts":"2026-09-29T12:23:54.818Z","agent":"a0","tool":"bash","args":{},"result":{"ok":true}}
+{"ts":"2026-09-29T12:23:54.818Z","recv_ts":"2026-09-29T12:23:54.818Z","agent":"a1","tool":"bash","args":{},"result":{"ok":true}}
+{"ts":"2026-09-29T12:23:54.818Z","recv_ts":"2026-09-29T12:23:54.818Z","agent":"a2","tool":"bash","args":{},"result":{"ok":true}}
+{"ts":"2026-09-29T12:23:54.818Z","recv_ts":"2026-09-29T12:23:54.818Z","agent":"a3","tool":"bash","args":{},"result":{"ok":true}}

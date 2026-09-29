@@ -64,6 +64,12 @@ type Expect = {
   last_check?: { proceed: boolean };
   done?: "proceeds" | "held";
   late?: Array<{ kind: string; by: string; tag: string | null }>;
+  /** The coordinator's lease at the end: holder, generation, and after a resume its segment and how many posts it carries. */
+  lease?: { holder: string; generation: number; segment?: number; carried?: number };
+  /** The coordinator's prepares (docs/adr/0015, "Preparing the finish"): how many, and the last one. */
+  prepared?: { count: number; last: { by: string; generation: number; late: number; current: boolean } | null };
+  /** The typed resolutions in the finish register, and the batches they came in. */
+  resolutions?: { count: number; batches: number };
   seals?: { verdicts: number; hold: number };
   agreement?: Array<{ section: string; kind: string }>;
   /** Where the warnings are delivered, act by act (replay --deliveries): the acts read, and each delivery in time order, held field by field as given. */
@@ -121,6 +127,9 @@ function holdTo(p: Projection, e: Expect, where: string): void {
   if (e.last_check) assert.equal(p.finish?.last_check?.proceed, e.last_check.proceed, `${where}: the last check recorded`);
   if (e.done) assert.equal(p.finish?.done, e.done, `${where}: the done (${p.finish?.held_by.join(", ")})`);
   if (e.late) assert.deepEqual(p.finish?.late.map((x) => ({ kind: x.kind, by: x.by, tag: x.tag })), e.late, `${where}: what is late against the report`);
+  if (e.lease) assert.deepEqual(p.finish?.lease, e.lease, `${where}: the coordinator's lease`);
+  if (e.prepared) assert.deepEqual(p.finish?.prepared, e.prepared, `${where}: the prepares`);
+  if (e.resolutions) assert.deepEqual(p.finish?.resolutions, e.resolutions, `${where}: the resolutions and their batches`);
   if (e.seals) assert.deepEqual({ verdicts: p.seals.verdicts, hold: p.seals.hold }, e.seals, `${where}: the custody verdicts (${JSON.stringify(p.seals.broken)})`);
   if (e.agreement) assert.deepEqual(p.agreement, e.agreement, `${where}: where readiness, the check and the gate disagree`);
   if (e.deliveries) {
@@ -211,7 +220,7 @@ test("acceptance: the c10 partial cascade is held under 3338e3c's readiness rule
   const r = await replay({ run: await resolveRun(join(FIXTURES, f.name, "run")), targets: [{ label: "3338e3c", harness: old, how: "3338e3c, extracted", commit: OLD_RULE }, HERE], scratch: work });
   const [a, b] = r.evaluations.map((e) => e.projection!);
   assert.ok(a && b, JSON.stringify(r.evaluations.map((e) => e.error)));
-  holdTo(a, { ...f.expect, ...rule, questions: rule.questions, done: undefined, late: undefined }, "c10 under 3338e3c");
+  holdTo(a, { ...f.expect, ...rule, questions: rule.questions, done: undefined, late: undefined, lease: undefined, prepared: undefined, resolutions: undefined }, "c10 under 3338e3c");
   holdTo(b, f.expect, "c10 under this checkout");
   // The difference is the rule, and only the rule: readiness and the report's words, never a disposition.
   const fields = new Set(r.differences!.map((d) => d.field));

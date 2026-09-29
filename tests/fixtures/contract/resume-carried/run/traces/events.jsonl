@@ -1,0 +1,8 @@
+{"ts":"2026-09-29T12:24:49.642Z","recv_ts":"2026-09-29T12:24:49.642Z","agent":"a0","tool":"bash","args":{},"result":{"ok":true}}
+{"ts":"2026-09-29T12:24:49.642Z","recv_ts":"2026-09-29T12:24:49.642Z","agent":"a1","tool":"bash","args":{},"result":{"ok":true}}
+{"ts":"2026-09-29T12:24:49.642Z","recv_ts":"2026-09-29T12:24:49.642Z","agent":"a2","tool":"bash","args":{},"result":{"ok":true}}
+{"ts":"2026-09-29T12:24:49.642Z","recv_ts":"2026-09-29T12:24:49.642Z","agent":"a3","tool":"bash","args":{},"result":{"ok":true}}
+{"ts":"2026-09-29T12:24:49.743Z","recv_ts":"2026-09-29T12:24:49.743Z","agent":"a0","tool":"bash","args":{},"result":{"ok":true}}
+{"ts":"2026-09-29T12:24:49.744Z","recv_ts":"2026-09-29T12:24:49.744Z","agent":"a1","tool":"bash","args":{},"result":{"ok":true}}
+{"ts":"2026-09-29T12:24:49.745Z","recv_ts":"2026-09-29T12:24:49.745Z","agent":"a2","tool":"bash","args":{},"result":{"ok":true}}
+{"ts":"2026-09-29T12:24:49.745Z","recv_ts":"2026-09-29T12:24:49.745Z","agent":"a3","tool":"bash","args":{},"result":{"ok":true}}

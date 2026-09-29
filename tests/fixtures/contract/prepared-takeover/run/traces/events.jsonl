@@ -1,0 +1,5 @@
+{"ts":"2026-09-29T12:23:54.976Z","recv_ts":"2026-09-29T12:23:54.976Z","agent":"a0","tool":"bash","args":{},"result":{"ok":true}}
+{"ts":"2026-09-29T12:23:54.976Z","recv_ts":"2026-09-29T12:23:54.976Z","agent":"a1","tool":"bash","args":{},"result":{"ok":true}}
+{"ts":"2026-09-29T12:23:54.976Z","recv_ts":"2026-09-29T12:23:54.976Z","agent":"a2","tool":"bash","args":{},"result":{"ok":true}}
+{"ts":"2026-09-29T12:23:54.976Z","recv_ts":"2026-09-29T12:23:54.976Z","agent":"a3","tool":"bash","args":{},"result":{"ok":true}}
+{"ts":"2026-09-29T12:23:55.021Z","recv_ts":"2026-09-29T12:23:55.021Z","agent":"a0","tool":"compact_start","args":{},"result":{"ok":true}}

@@ -1,0 +1,69 @@
+{
+  "cap_usd": 5,
+  "spent_usd": 0,
+  "tokens": 0,
+  "calls": 0,
+  "wall_clock_minutes": 60,
+  "started_at": "2026-09-29T12:24:49.571Z",
+  "source": "pi.sessionManager.getEntries",
+  "hard_kill": false,
+  "cap_steer_sent": false,
+  "cap_changes": [
+    {
+      "at": "2026-09-29T12:24:49.697Z",
+      "by": "operator (resume)",
+      "set": {
+        "wall_clock_minutes": 60
+      },
+      "caps": "5|60|2026-09-29T12:24:49.571Z||1|||[]"
+    }
+  ],
+  "metered": true,
+  "wall_used_ms": 124,
+  "wall_base_at": "2026-09-29T12:24:49.697Z",
+  "resumes": [
+    {
+      "at": "2026-09-29T12:24:49.697Z",
+      "by": "operator",
+      "from": "stopped"
+    }
+  ],
+  "agents": {
+    "a0": {
+      "spent_usd": 0,
+      "tokens": 0,
+      "calls": 0,
+      "input": 0,
+      "output": 0,
+      "cache_read": 0,
+      "cache_write": 0
+    },
+    "a1": {
+      "spent_usd": 0,
+      "tokens": 0,
+      "calls": 0,
+      "input": 0,
+      "output": 0,
+      "cache_read": 0,
+      "cache_write": 0
+    },
+    "a2": {
+      "spent_usd": 0,
+      "tokens": 0,
+      "calls": 0,
+      "input": 0,
+      "output": 0,
+      "cache_read": 0,
+      "cache_write": 0
+    },
+    "a3": {
+      "spent_usd": 0,
+      "tokens": 0,
+      "calls": 0,
+      "input": 0,
+      "output": 0,
+      "cache_read": 0,
+      "cache_write": 0
+    }
+  }
+}

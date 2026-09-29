@@ -156,7 +156,7 @@ test("readiness per revision: not ready with what holds it, ready once it is not
   const posts = async () => (await P.readInbox({ sandboxRoot: S, agentId: "a0" }, { markSeen: false })).posts.map((p) => p.body);
   assert.ok((await posts()).some((b) => /^FINISH READY by the registers/.test(b)));
   const header = await F.finishHeader(S, "a0");
-  assert.match(header ?? "", /^Finish: READY by the registers; nobody coordinates it yet: the first done takes it/);
+  assert.match(header ?? "", /^Finish: READY by the registers; nobody coordinates it yet: the first prepare or done takes it/);
   // Back to not ready: said once.
   assert.ok((await L.openLead(a0, { title: "A late avenue", why: "found", take: true })).ok);
   r = await F.readiness(S);

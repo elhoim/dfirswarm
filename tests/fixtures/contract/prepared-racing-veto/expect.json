@@ -1,0 +1,53 @@
+{
+  "case": "As prepared-batch-resolved (without the retry): the finish prepared and both late items resolved in one batch; then a third seat posts a veto, racing the coordinator's done.",
+  "design": [
+    "docs/adr/0015 \"Preparing the finish\": the final transaction is unchanged; a veto posted after the report is late whenever it lands, and prepare and a batch forgive nothing posted after them.",
+    "docs/adr/0015 decision 10: a result or veto posted after the report was written as the finish began holds the coordinator's done until finish resolve answers it.",
+    "The limits spec, item 3: a racing objection or evidence addition still blocks."
+  ],
+  "policies": [
+    "as run"
+  ],
+  "expect": {
+    "questions": {
+      "question:1": {
+        "disposition": "established",
+        "best_candidate": false,
+        "readiness_holds": false,
+        "defects_include": [],
+        "warnings": []
+      }
+    },
+    "ready": true,
+    "verdict": {
+      "proceed": true,
+      "outcome": "completed"
+    },
+    "done": "held",
+    "late": [
+      {
+        "kind": "post",
+        "by": "a3",
+        "tag": "veto"
+      }
+    ],
+    "lease": {
+      "holder": "a0",
+      "generation": 1
+    },
+    "prepared": {
+      "count": 1,
+      "last": {
+        "by": "a0",
+        "generation": 1,
+        "late": 2,
+        "current": true
+      }
+    },
+    "resolutions": {
+      "count": 2,
+      "batches": 1
+    },
+    "agreement": []
+  }
+}

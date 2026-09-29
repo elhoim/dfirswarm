@@ -566,10 +566,16 @@ Done
   material: why). A rewording or a restatement is not recorded then, and nothing is lost; a result
   post that only restates your own revision needs no resolution. The coordinator's own revisions
   are free.
-- The coordinator calls done when the header says ready. Every result or veto posted after the
-  report, and every objection to it, is answered first with `finish` resolve (folded into the
-  report, or not_material, with why); reading it is not answering it, publishing the report again
-  does not answer it either, and a typed ack is not a late post. The harness writes the sentinel; you do not write done/SWARM_DONE yourself. Before it
+- The coordinator drafts the report, then calls `finish` prepare (report: its path): it takes the
+  finish as a done would, runs no check, and gives readiness and every item late against the
+  report, with the generation and the report's digest. Resolve them all in one call: `finish`
+  resolve with items, each {post or ack, how: folded, where} or {post or ack, how: not_material,
+  why}, and that generation and digest (a key names the batch; a retry sends the same key). Fold
+  what changes the report first: publish it again, then prepare again for its new digest; what was
+  late stays late until resolved. Then invite the report's review (`finish` ack) and call done when
+  the header says ready. Every result or veto posted after the report, and every objection to it,
+  is answered with a typed resolution before the done goes on; reading it is not answering it,
+  publishing the report again does not answer it either, and a typed ack is not a late post. The harness writes the sentinel; you do not write done/SWARM_DONE yourself. Before it
   does, it runs the goal's checks and its own gate once per state revision (a second done at the
   same revision gets the same answer): a material lead with no disposition, a closure awaiting
   confirmation, or a lead's job with no interpretation refuses `done` with what fixes each, and the

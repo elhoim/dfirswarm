@@ -194,7 +194,7 @@ import {
 // The lead register's host-side pieces: a host run's wait checks it itself (a VM's hub does it there).
 import { LEAD_DISPOSITIONS, leadsWaitCheck, reopenOnLedger } from "./leads.ts";
 // The finish's host-side pieces: one check result per revision, recorded where the finish line runs.
-import { checkAt, LATE_PENDING, NOT_YOURS, recordCheck } from "./finish.ts";
+import { checkAt, LATE_PENDING, lateRefusal, NOT_YOURS, recordCheck } from "./finish.ts";
 import { registerPlaywrightTool, runBrowserCheck } from "./playwright-tool.ts";
 import { readToolchainAt, TOOLCHAIN_DIR } from "./toolchain.ts";
 import { installChunkedEgress } from "./vm-egress.ts";
@@ -3727,22 +3727,43 @@ export default function (pi: ExtensionAPI) {
     name: "finish",
     label: "The finish",
     description:
-      "The run's finish, one seat's to call (the coordinator's, named in every header). status: where it stands (ready by the registers or what holds it, the coordinator, the last check at which revision, the report's reviews, what is late against it, and what the answers check warns of: never held on, weighed before the done). ack (any other seat): your review of the report's current digest, verdict no_objection, or objection with why (before any done names the report, name it: report); an ack is not a late post, and an objection holds the finish until the coordinator resolves it. resolve (the coordinator): answer a result or veto posted after the report, or an objection, how: folded (the report says it now, and where) or not_material (with why it changes nothing the report concludes). Reading a late post is not answering it. The dispositions a run ends on: partial is one (a review of a partial answer checks the parts the answer claims, established and declared open); \"a best candidate, not established\" concerns only an answer that claims established; never discard a standing positive finding to make an answer not_determinable.",
-    promptSnippet: "See or act on the run's finish",
+      "The run's finish, one seat's to call (the coordinator's, named in every header). status: where it stands (ready by the registers or what holds it, the coordinator with its generation, the report's digest and the boundary, the last check at which revision, the report's reviews, what is late against it once a coordinator has prepared, and what the answers check warns of: never held on, weighed before the done). prepare (the seat that drafted the report, before done): takes the finish for you as a done would (no goal check, no sentinel), and gives readiness and every item late against the report, whole, with the generation and digest a batch of resolutions carries; prepare again after publishing the report again, for its new digest (what was late stays late). ack (any other seat): your review of the report's current digest, verdict no_objection, or objection with why (before any prepare or done names the report, name it: report); an ack is not a late post, and an objection holds the finish until the coordinator resolves it. resolve (the coordinator): answer each result or veto posted after the report, and each objection, how: folded (the report says it now, and where) or not_material (with why it changes nothing the report concludes); all of them in one call with items [{post or ack, how, where or why}], generation and digest (checked together: a stale generation or digest, or an item not late, records nothing and names each), and key, your name for the batch (a retry with the same key records nothing twice). Reading a late post is not answering it. The dispositions a run ends on: partial is one (a review of a partial answer checks the parts the answer claims, established and declared open); \"a best candidate, not established\" concerns only an answer that claims established; never discard a standing positive finding to make an answer not_determinable.",
+    promptSnippet: "See, prepare or act on the run's finish",
     parameters: Type.Object({
-      action: Type.Union([Type.Literal("status"), Type.Literal("ack"), Type.Literal("resolve")]),
-      digest: Type.Optional(Type.String({ description: "ack: the report's digest you read (its current one when left out)" })),
-      report: Type.Optional(Type.String({ description: "ack: the report you reviewed (e.g. work/report.md), needed while no coordinator's done has named it; your objection then holds that done" })),
+      action: Type.Union([Type.Literal("status"), Type.Literal("prepare"), Type.Literal("ack"), Type.Literal("resolve")]),
+      digest: Type.Optional(Type.String({ description: "ack: the report's digest you read (its current one when left out); resolve with items: the report's digest finish prepare or status gave you (its first 12 characters or more)" })),
+      report: Type.Optional(Type.String({ description: "prepare: the report you drafted (e.g. work/report.md; the coordinator's when left out); ack: the report you reviewed, needed while no prepare or done has named it (your objection then holds that done)" })),
       verdict: Type.Optional(Type.Union([Type.Literal("no_objection"), Type.Literal("objection")], { description: "ack: your verdict on the report" })),
-      why: Type.Optional(Type.String({ description: "ack objection: what does not hold; resolve: where it was folded, or why it is not material" })),
-      post: Type.Optional(Type.Union([Type.Number(), Type.String()], { description: "resolve: the late post's id (#123)" })),
-      ack: Type.Optional(Type.Number({ description: "resolve: the objection's ack seq" })),
-      how: Type.Optional(Type.Union([Type.Literal("folded"), Type.Literal("not_material")], { description: "resolve: folded into the report, or not material" })),
+      why: Type.Optional(Type.String({ description: "ack objection: what does not hold; resolve (one item): where it was folded, or why it is not material" })),
+      post: Type.Optional(Type.Union([Type.Number(), Type.String()], { description: "resolve (one item): the late post's id (#123)" })),
+      ack: Type.Optional(Type.Number({ description: "resolve (one item): the objection's ack seq" })),
+      how: Type.Optional(Type.Union([Type.Literal("folded"), Type.Literal("not_material")], { description: "resolve (one item): folded into the report, or not material" })),
+      items: Type.Optional(
+        Type.Array(
+          Type.Object({
+            post: Type.Optional(Type.Union([Type.Number(), Type.String()], { description: "The late post's id (#123)" })),
+            ack: Type.Optional(Type.Number({ description: "The objection's ack seq" })),
+            how: Type.Union([Type.Literal("folded"), Type.Literal("not_material")]),
+            where: Type.Optional(Type.String({ description: "folded: where the report says it now" })),
+            why: Type.Optional(Type.String({ description: "not_material: why it changes nothing the report concludes" })),
+          }),
+          { description: "resolve: every late item in one call, each with its own words" },
+        ),
+      ),
+      generation: Type.Optional(Type.Number({ description: "resolve with items: the coordinator's generation finish prepare or status gave you" })),
+      key: Type.Optional(Type.String({ description: "resolve with items: your name for this batch; send the same key again only to retry the same batch after an interruption" })),
     }),
     async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
       const started = Date.now();
       const r = (await finishAct(ctxFrom(toolCtx.cwd, agentId), params as never)) as { ok: boolean; reason?: string } & Record<string, unknown>;
-      await logEvent(toolCtx.cwd, agentId, "finish", params as Record<string, unknown>, r.ok ? { ok: true, action: params.action, ...(params.action === "status" ? { ready: r.ready } : {}), ...(typeof r.seq === "number" ? { seq: r.seq } : {}) } : { ok: false, reason: r.reason }, Date.now() - started).catch(() => undefined);
+      // What the trace keeps of the act: its codes and counts, never its words.
+      const counts = {
+        ...(params.action === "status" ? { ready: r.ready } : {}),
+        ...(params.action === "prepare" ? { mine: r.mine !== false, ...(Array.isArray(r.late) ? { late: (r.late as unknown[]).length } : {}), ...(typeof r.generation === "number" ? { generation: r.generation } : {}), ...(r.readiness && typeof r.readiness === "object" ? { ready: (r.readiness as { ready?: unknown }).ready === true } : {}) } : {}),
+        ...(params.action === "resolve" && Array.isArray(params.items) ? { items: params.items.length, ...(typeof r.resolved === "number" ? { resolved: r.resolved } : {}), ...(r.replayed ? { replayed: true } : {}), ...(Array.isArray(r.late) ? { late: (r.late as unknown[]).length } : {}) } : {}),
+        ...(typeof r.seq === "number" ? { seq: r.seq } : {}),
+      };
+      await logEvent(toolCtx.cwd, agentId, "finish", params as Record<string, unknown>, r.ok ? { ok: true, action: params.action, ...counts } : { ok: false, reason: r.reason, ...(r.stale ? { stale: Object.keys(r.stale as object) } : {}), ...(Array.isArray(r.unresolved) ? { unresolved: (r.unresolved as unknown[]).length } : {}) }, Date.now() - started).catch(() => undefined);
       if (!r.ok) return { content: [{ type: "text" as const, text: `finish refused: ${r.reason}` }], details: r, isError: true };
       return okResult(r);
     },
@@ -3899,10 +3920,10 @@ export default function (pi: ExtensionAPI) {
     name: "done",
     label: "Done",
     description:
-      "End the run: the coordinator's call. One seat coordinates the finish (normally the one that published the report last; the header names it, and a coordinator that is done, dead, compacting or silent is taken over by the next seat's done). Any other seat's done is answered \"not yours\" and changes nothing. The coordinator's done first needs every result or veto posted after the report, and every objection to it, answered with a typed resolution (finish resolve); then the harness runs the goal's checks and its own gate once per state revision (in a microVM run on the host): while any fails, done is refused with each check and its fix; when they pass it writes done/agents/<id>.done and done/SWARM_DONE while that revision still holds, drops this worker's locks and ends the session. Once done/SWARM_DONE exists every seat calls done and stops. Whether the dispositions suffice (an examination-limited end included) is what done asks the finish line, not the operator: call done before asking the operator anything, and ask it (lead_close needs_operator) only for what a refusal names as the operator's, such as accepting a question the finish line holds (swarm.sh question <run> accept Q-n). Partial is a disposition: a review of a partial answer checks the parts the answer claims, and a best_candidate review of it holds nothing. \"A best candidate, not established\" concerns only an answer that claims established. Never discard a standing positive finding to make an answer not_determinable: a part the evidence cannot settle makes the answer partial.",
+      "End the run: the coordinator's call. One seat coordinates the finish (normally the one that published the report last; the header names it, and a coordinator that is done, dead, compacting or silent is taken over by the next seat's done). Any other seat's done is answered \"not yours\" and changes nothing. The coordinator drafts the report, prepares the finish (finish prepare: it lists every item late against the report), resolves them in one call (finish resolve with items), invites the report's review (finish ack), then calls done. The done first needs every result or veto posted after the report, and every objection to it, answered with a typed resolution (finish resolve); then the harness runs the goal's checks and its own gate once per state revision (in a microVM run on the host): while any fails, done is refused with each check and its fix; when they pass it writes done/agents/<id>.done and done/SWARM_DONE while that revision still holds, drops this worker's locks and ends the session. Once done/SWARM_DONE exists every seat calls done and stops. Whether the dispositions suffice (an examination-limited end included) is what done asks the finish line, not the operator: call done before asking the operator anything, and ask it (lead_close needs_operator) only for what a refusal names as the operator's, such as accepting a question the finish line holds (swarm.sh question <run> accept Q-n). Partial is a disposition: a review of a partial answer checks the parts the answer claims, and a best_candidate review of it holds nothing. \"A best candidate, not established\" concerns only an answer that claims established. Never discard a standing positive finding to make an answer not_determinable: a part the evidence cannot settle makes the answer partial.",
     promptSnippet: "End the run (the coordinator's call), or stop once the sentinel exists",
     promptGuidelines: [
-      "done is the coordinator's call, when the header says the finish is ready; a finished slice is posted to the board, never done. Once done/SWARM_DONE exists, call done and stop. When the task is impossible or unsafe, call done with abandon: true and say why (a vote while others work).",
+      "done is the coordinator's call, when the header says the finish is ready and after finish prepare and its late items resolved in one call; a finished slice is posted to the board, never done. Once done/SWARM_DONE exists, call done and stop. When the task is impossible or unsafe, call done with abandon: true and say why (a vote while others work).",
     ],
     parameters: Type.Object({
       reason: Type.String({ description: "Why this worker is stopping" }),
@@ -3933,9 +3954,8 @@ export default function (pi: ExtensionAPI) {
         }
         if (turn?.took_over) await systemPost(toolCtx.cwd, { tag: "hold", via: agentId, body: `${agentId} coordinates the finish now (generation ${turn.generation}): ${turn.why}.` }).catch(() => undefined);
         // What landed against the report since it was written: each answered with a typed resolution, never by reading it alone.
-        if (turn?.late.length) {
-          const each = turn.late.map((x) => (x.kind === "post" ? `- post #${x.id} (${x.tag}) by ${x.by}` : `- objection ${x.id} by ${x.by}: ${x.why}`)).join("\n");
-          const reason = `${turn.late.length} item(s) landed against \`${params.output_file}\` since it was written, each for your typed resolution before the finish:\n${each}\nFor each: fold it into the report and publish it again (then finish resolve with how: folded, saying where), or finish resolve with how: not_material and why it changes nothing the report concludes. Typed acks of no objection are not among them.`;
+        const reason = turn?.mine ? lateRefusal(turn, params.output_file) : null;
+        if (turn && reason) {
           await logEvent(toolCtx.cwd, agentId, "done", params, { ok: false, reason, late: turn.late.length });
           return { content: [{ type: "text" as const, text: reason }], details: { ok: false, reason, late: turn.late }, isError: true };
         }

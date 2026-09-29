@@ -27,7 +27,8 @@ import * as L from "../../../extensions/leads.ts";
 import * as P from "../../../extensions/protocol.ts";
 import * as SW from "../../../extensions/store-sweep.ts";
 import { checkLedgerAnswers } from "../../../scripts/check-answers.ts";
-import { takeCustody } from "../../../scripts/custody.ts";
+import { custodyAnchorPath, takeCustody } from "../../../scripts/custody.ts";
+import { prepareResume } from "../../../scripts/resume.ts";
 import { sealTree, storePaths } from "../../../scripts/evidence-store.ts";
 import { finishGate } from "../../../scripts/finish-gate.ts";
 import { admitMaterial } from "../../../scripts/material.ts";
@@ -336,6 +337,106 @@ const CASES: Record<string, (base: string) => Promise<string>> = {
     await FIN.recordCheck(r.S, "a0", revision, { proceed: true, outcome: (verdict as { outcome: string }).outcome }, { ...run, gate });
     const obj = await FIN.ackReport(r.a2, { verdict: "objection", why: "section 1 names the wrong logon" });
     assert.ok(obj.ok, JSON.stringify(obj));
+    return r.S;
+  },
+
+  /**
+   * The finish prepared and resolved in one batch (docs/adr/0015, "Preparing
+   * the finish"): the report published, a result and a veto posted after it
+   * by two other seats, the coordinator's prepare listing both, one batch
+   * resolving both, and the same batch sent again with its key, as a retry
+   * after an interruption does.
+   */
+  "prepared-batch-resolved": async (base) => {
+    const r = await newRun(base, "pbr", 1);
+    await established(r, "1");
+    for (const a of ["a0", "a1", "a2", "a3"]) await traceRow(r.S, a, "bash");
+    await publish(r.S, "a0", "# Report\n\n## 1. Who logged on, and when?\n\nSee E-3.\n");
+    await pause(30);
+    const p1 = await P.postMessage(r.a1, { tag: "result", body: "the second logon at 09:20 is the same session" });
+    const p2 = await P.postMessage(r.a2, { tag: "veto", body: "the logon came over the VPN" });
+    const prep = await FIN.prepareFinish(r.a0, { report: "work/report.md" });
+    assert.ok(prep.ok && prep.mine, JSON.stringify(prep));
+    const batch = { items: [{ post: p1.id, how: "not_material", why: "the same session, in section 1 already" }, { post: p2.id, how: "folded", where: "section 1 says the logon came over the VPN" }], generation: prep.generation, digest: prep.digest as string, key: "finish-batch-1" };
+    const b = await FIN.resolveLate(r.a0, batch);
+    assert.ok(b.ok && b.resolved === 2, JSON.stringify(b));
+    const again = await FIN.resolveLate(r.a0, batch);
+    assert.ok(again.ok && again.replayed, JSON.stringify(again));
+    return r.S;
+  },
+
+  /** As prepared-batch-resolved, then a veto posted after the batch, racing the done: it is late, and holds it. */
+  "prepared-racing-veto": async (base) => {
+    const r = await newRun(base, "prv", 1);
+    await established(r, "1");
+    for (const a of ["a0", "a1", "a2", "a3"]) await traceRow(r.S, a, "bash");
+    await publish(r.S, "a0", "# Report\n\n## 1. Who logged on, and when?\n\nSee E-3.\n");
+    await pause(30);
+    const p1 = await P.postMessage(r.a1, { tag: "result", body: "the second logon at 09:20 is the same session" });
+    const p2 = await P.postMessage(r.a2, { tag: "veto", body: "the logon came over the VPN" });
+    const prep = await FIN.prepareFinish(r.a0, { report: "work/report.md" });
+    assert.ok(prep.ok && prep.mine, JSON.stringify(prep));
+    const b = await FIN.resolveLate(r.a0, { items: [{ post: p1.id, how: "not_material", why: "the same session" }, { post: p2.id, how: "folded", where: "section 1" }], generation: prep.generation, digest: prep.digest as string, key: "finish-batch-1" });
+    assert.ok(b.ok, JSON.stringify(b));
+    await pause(30);
+    await P.postMessage(r.a3, { tag: "veto", body: "the account in section 1 is a service account" });
+    return r.S;
+  },
+
+  /**
+   * A takeover after a prepare: the coordinator prepared, a result was
+   * posted after the report, the coordinator began compacting, and another
+   * seat's prepare took the finish over at the next generation with the
+   * boundary kept, and resolved the result in one batch.
+   */
+  "prepared-takeover": async (base) => {
+    const r = await newRun(base, "ptk", 1);
+    await established(r, "1");
+    for (const a of ["a0", "a1", "a2", "a3"]) await traceRow(r.S, a, "bash");
+    await publish(r.S, "a0", "# Report\n\n## 1. Who logged on, and when?\n\nSee E-3.\n");
+    const first = await FIN.prepareFinish(r.a0, { report: "work/report.md" });
+    assert.ok(first.ok && first.mine, JSON.stringify(first));
+    await pause(30);
+    const p1 = await P.postMessage(r.a1, { tag: "result", body: "the second logon at 09:20 is the same session" });
+    await traceRow(r.S, "a0", "compact_start");
+    const took = await FIN.prepareFinish(r.a2, { report: "work/report.md" });
+    assert.ok(took.ok && took.mine && took.took_over === "a0" && took.generation === 2, JSON.stringify(took));
+    const b = await FIN.resolveLate(r.a2, { items: [{ post: p1.id, how: "not_material", why: "the same session" }], generation: 2, digest: took.digest as string, key: "takeover-1" });
+    assert.ok(b.ok, JSON.stringify(b));
+    return r.S;
+  },
+
+  /**
+   * A resume after a prepare: in the first segment the report was
+   * published and prepared on, two results were posted after it and one of
+   * them resolved, and another seat objected to the report; the operator
+   * stopped the run and resumed it. In the continuation the report was
+   * published again, and the coordinator's prepare opened the new segment.
+   * (A post of the continuation's made before its report is not late: that
+   * rests on the files' times, which a checkout does not keep, so it is
+   * held in tests/finish-prepare.test.ts, not here.)
+   */
+  "resume-carried": async (base) => {
+    const r = await newRun(base, "rcd", 1);
+    await established(r, "1");
+    for (const a of ["a0", "a1", "a2", "a3"]) await traceRow(r.S, a, "bash");
+    await publish(r.S, "a0", "# Report v1\n\n## 1. Who logged on, and when?\n\nSee E-3.\n");
+    const s1 = await FIN.prepareFinish(r.a0, { report: "work/report.md" });
+    assert.ok(s1.ok && s1.mine, JSON.stringify(s1));
+    await pause(30);
+    await P.postMessage(r.a1, { tag: "result", body: "the first logon was remote" });
+    const p2 = await P.postMessage(r.a2, { tag: "result", body: "a second account logged on too" });
+    assert.ok((await FIN.resolveLate(r.a0, { post: p2.id, how: "folded", why: "section 1 names both accounts" })).ok);
+    assert.ok((await FIN.ackReport(r.a3, { verdict: "objection", why: "section 1 misses the remote logon" })).ok);
+    await P.markStopped(r.S, "operator", "swarm.sh stop");
+    await writeFile(custodyAnchorPath(r.S), JSON.stringify({ run: "rcd", started_at: new Date().toISOString() }));
+    const res = await prepareResume(r.S, { run: "rcd", by: "operator", minutes: 30 });
+    assert.equal(res.ok, true, JSON.stringify(res));
+    await pause(30);
+    for (const a of ["a0", "a1", "a2", "a3"]) await traceRow(r.S, a, "bash");
+    await publish(r.S, "a0", "# Report v2\n\n## 1. Who logged on, and when?\n\nSee E-3; three logons.\n");
+    const s2 = await FIN.prepareFinish(r.a0, { report: "work/report.md" });
+    assert.ok(s2.ok && s2.mine && s2.generation === 2, JSON.stringify(s2));
     return r.S;
   },
 

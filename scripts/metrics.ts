@@ -47,7 +47,7 @@ import * as NB from "../extensions/negative-bar.ts";
 import * as SW from "../extensions/store-sweep.ts";
 import { readNetState, grantStatus } from "./net-grants.ts";
 import { storePaths } from "./evidence-store.ts";
-import { questionCost, roundParts } from "./question-cost.ts";
+import { questionCost, roundParts, runCalls } from "./question-cost.ts";
 
 type Rec = Record<string, unknown>;
 
@@ -194,6 +194,38 @@ export type RunMetrics = {
     hub_refused: number;
     not_yours: number;
     items: Array<{ at: string; agent: string; how: string }>;
+  };
+  /**
+   * The finish's own acts (docs/adr/0015, "Preparing the finish"), from the
+   * trace and the finish register: the coordinator's first done and whether
+   * it was refused on late items (the refusal prepare exists to
+   * remove), every done refused on late items, the finish tool's calls by
+   * act (so a refusal renamed into more calls cannot pass for a gain), the
+   * resolutions and checks the register holds, and the finish tail from
+   * ready to the end with every seat's tokens in it.
+   */
+  finish: {
+    /** Whether the trace is there to count them from. */
+    recorded: boolean;
+    /** The first done that was a finish (not another seat's, not a seat leaving on its cap, not an abandon vote): when, whose, and how it was answered. */
+    first_done: { at: string; agent: string; how: string } | null;
+    /**
+     * Whether that first done was refused on what was late against the
+     * report (null when there was none): the refusal a prepare exists to
+     * remove. The goal's checks run only after it, so whether they would
+     * have passed is not in the trace (replay reads it on the registers).
+     */
+    first_done_late: boolean | null;
+    /** Every done refused on what was late against the report. */
+    late_refusals: number;
+    /** The finish tool's calls by act, whatever each answered. */
+    calls: { prepare: number; resolve: number; resolve_batches: number; status: number; ack: number };
+    /** The register's typed resolutions, the batches they came in, and its checks. */
+    resolutions: number;
+    batches: number;
+    checks: number;
+    /** From ready (tail.ready_at) to the end: minutes, every seat's tokens (null when no per-call record), and the finish's calls in it. */
+    tail: { from: string | null; to: string | null; minutes: number | null; tokens: number | null; calls: { prepare: number; resolve: number; done: number; status: number; ack: number } };
   };
   tail: {
     /** Whether the ledger holds answers to measure the answer tails from. */
@@ -595,16 +627,19 @@ function offers(c: Context): RunMetrics["offers"] {
   return { recorded: recorded || qOffers.length > 0, leads, questions, reviews, wakes_before_offers: { recorded: c.have.leads, ...wakes } };
 }
 
+/** Why a done was refused, by the trace's own record of it. */
+function doneRefusal(reason: string, r: Rec): string {
+  if (r.late !== undefined || /landed (?:after|against)/i.test(reason) || /^late against the report: /.test(reason)) return "late posts";
+  if (r.abandon !== undefined) return "abandon vote";
+  if (/changed while the finish line ran/i.test(reason)) return "finish line unsettled";
+  if (/finish line is not met/i.test(reason)) return "finish line not met";
+  return "other";
+}
+
 /** done calls, from the trace: each seat's own line, the hub's refusals of markDone, and a finish that was not the seat's (done_deferred). */
 function doneCalls(events: readonly P.SwarmEvent[], recorded: boolean): RunMetrics["done"] {
   const out: RunMetrics["done"] = { recorded, calls: 0, accepted: 0, created_sentinel: 0, refused: 0, refused_by: {}, hub_refused: 0, not_yours: 0, items: [] };
-  const why = (reason: string, r: Rec): string => {
-    if (r.late !== undefined || /landed (?:after|against)/i.test(reason)) return "late posts";
-    if (r.abandon !== undefined) return "abandon vote";
-    if (/changed while the finish line ran/i.test(reason)) return "finish line unsettled";
-    if (/finish line is not met/i.test(reason)) return "finish line not met";
-    return "other";
-  };
+  const why = doneRefusal;
   for (const e of events) {
     const r = (e.result && typeof e.result === "object" ? e.result : {}) as Rec;
     const at = P.hostTime(e);
@@ -635,6 +670,60 @@ function doneCalls(events: readonly P.SwarmEvent[], recorded: boolean): RunMetri
     }
   }
   // A refusal on the hub reached its seat as a thrown error, never as a done line of its own: its hub_call line is the call.
+  return out;
+}
+
+/**
+ * The finish's own acts (RunMetrics.finish): from the trace (the done
+ * lines, the finish tool's calls) and the finish register (resolutions,
+ * batches, checks); the tail's tokens from the run's per-call record
+ * (question-cost.ts runCalls), every seat's, between ready and the end.
+ */
+async function finishActs(c: Context, events: readonly P.SwarmEvent[], recorded: boolean, t: RunMetrics["tail"]): Promise<RunMetrics["finish"]> {
+  const out: RunMetrics["finish"] = { recorded, first_done: null, first_done_late: null, late_refusals: 0, calls: { prepare: 0, resolve: 0, resolve_batches: 0, status: 0, ack: 0 }, resolutions: 0, batches: 0, checks: 0, tail: { from: t.ready_at, to: t.end_at, minutes: t.minutes_from_ready, tokens: null, calls: { prepare: 0, resolve: 0, done: 0, status: 0, ack: 0 } } };
+  const from = ms(t.ready_at);
+  const to = ms(t.end_at);
+  // The tail runs from ready to the end: through the done that wrote the sentinel (its own row comes after the sentinel's stamp), else to the stop.
+  const last = events.findIndex((e) => e.tool === "done" && ((e.result ?? {}) as Rec).created_sentinel === true);
+  const inTail = (i: number, at: number | null) => at !== null && from !== null && to !== null && at >= from && (last >= 0 ? i <= last : at <= to);
+  for (const [i, e] of events.entries()) {
+    const r = (e.result && typeof e.result === "object" ? e.result : {}) as Rec;
+    const a = (e.args && typeof e.args === "object" ? e.args : {}) as Rec;
+    const at = P.hostTime(e);
+    const tailed = inTail(i, ms(at));
+    if (e.tool === "done") {
+      if (tailed) out.tail.calls.done += 1;
+      // A seat leaving on its own cap, an abandon vote, and a done after the sentinel (it succeeds, and ends nothing) are not the finish.
+      if (a.abandon === true || str(a.reason) === "agent_cap") continue;
+      const refused = r.ok === false;
+      const kind = refused ? doneRefusal(str(r.reason), r) : null;
+      if (kind === "late posts") out.late_refusals += 1;
+      if (!out.first_done) {
+        out.first_done = { at, agent: e.agent, how: refused ? `refused: ${kind}` : r.created_sentinel === true ? "accepted: wrote the sentinel" : "accepted" };
+        out.first_done_late = kind === "late posts";
+      }
+    } else if (e.tool === "finish") {
+      const act = str(a.action) || "status";
+      if (act === "prepare" || act === "resolve" || act === "status" || act === "ack") {
+        out.calls[act] += 1;
+        if (tailed) out.tail.calls[act] += 1;
+      }
+      if (act === "resolve" && Array.isArray(a.items)) out.calls.resolve_batches += 1;
+    }
+  }
+  const finish = await jsonl(join(c.S, "leads", "finish.jsonl"));
+  const batches = new Set<string>();
+  for (const f of finish) {
+    if (f.ev === "resolve") {
+      out.resolutions += 1;
+      if (str(f.batch)) batches.add(str(f.batch));
+    } else if (f.ev === "check") out.checks += 1;
+  }
+  out.batches = batches.size;
+  if (from !== null && to !== null) {
+    const { source, calls } = await runCalls(c.S).catch(() => ({ source: "none" as const, calls: [] as Array<{ at: number; tokens: number }> }));
+    if (source !== "none") out.tail.tokens = Math.round(calls.filter((x) => Number.isFinite(x.at) && x.at >= from && x.at <= to).reduce((n, x) => n + x.tokens, 0));
+  }
   return out;
 }
 
@@ -935,6 +1024,7 @@ export async function measureRun(runDirArg: string, o: { now?: number } = {}): P
     confidence: confidenceOf(c, scope),
     offers: off,
     done: doneCalls(events, c.have.trace && !unreadable),
+    finish: await finishActs(c, events, c.have.trace && !unreadable, t),
     tail: t,
     acquisition: await acquisition(c),
     interpretations: interpretations(c),
@@ -1103,6 +1193,7 @@ export function metricsText(m: RunMetrics): string {
     ["Offers (reviews)", o.recorded ? `${o.reviews.made} made (${Object.entries(o.reviews.by_reason).map(([k, n]) => `${k} ${n}`).join(", ") || "none"}): ${o.reviews.accepted} taken up, ${o.reviews.declined} declined, ${o.reviews.withdrawn} withdrawn (reviewed by another route, or superseded), ${o.reviews.lapsed} lapsed, ${o.reviews.open} with no outcome; ${o.reviews.taken} taken by their seat first (offer accept)` : o.wakes_before_offers.recorded ? "not recorded (no offer events: a run from before offers)" : absent(LEADS)],
     ["Wakes (before offers)", o.wakes_before_offers.recorded ? `${o.wakes_before_offers.made}: ${o.wakes_before_offers.taken_by_woken} taken by the woken seat, ${o.wakes_before_offers.taken_by_another} by another, ${o.wakes_before_offers.not_taken} not taken` : absent(LEADS)],
     ["done calls", d.recorded ? `${d.calls}: ${d.accepted} accepted (${d.created_sentinel} wrote the sentinel), ${d.refused} refused by the seat's checks (${counts(d.refused_by)}), ${d.hub_refused} refused by the hub, ${d.not_yours} not the seat's finish` : absent("readable traces/events.jsonl")],
+    ["Finish", m.finish.recorded ? `the first done ${m.finish.first_done ? `${m.finish.first_done.how} (${m.finish.first_done.agent})${m.finish.first_done_late ? ", on late items" : ""}` : "never came"}; ${m.finish.late_refusals} done(s) refused on late items; finish calls: ${m.finish.calls.prepare} prepare, ${m.finish.calls.resolve} resolve (${m.finish.calls.resolve_batches} with items), ${m.finish.calls.status} status, ${m.finish.calls.ack} ack; ${m.finish.resolutions} resolution(s) in the register (${m.finish.batches} batch(es)), ${m.finish.checks} check(s); from ready to the end: ${m.finish.tail.minutes === null ? "not measured" : `${mins(m.finish.tail.minutes)}, ${m.finish.tail.tokens === null ? "tokens not measured" : `${m.finish.tail.tokens} tokens`}, ${m.finish.tail.calls.prepare} prepare, ${m.finish.tail.calls.resolve} resolve, ${m.finish.tail.calls.done} done`}` : absent("readable traces/events.jsonl")],
     ["Tail to the end", !t.end_at ? "not measured (the run has not ended)" : `${mins(t.minutes_from_ready)} from ready (${t.ready_source === "done" ? "recorded by the done: readiness had not turned ready before it passed" : (t.ready_source ?? "never ready")}); ${t.recorded ? `${mins(t.minutes_from_first_answers)} from the first answers, ${mins(t.minutes_from_final_answers)} from the final ones${t.unanswered.length ? `; unanswered: ${list(t.unanswered)}` : ""}` : `the answer tails ${absent(LEDGER)}`}`],
     ["Acquisition", a.recorded ? `${a.requests} request(s) (${counts(a.by_stage)}; ${a.declined_by_policy} declined by the case policy); ${a.gaps.length} gap(s)${a.questions_with_gap.length ? ` on ${list(a.questions_with_gap)}` : ""}` : absent("requests/requests.jsonl")],
     ["Evidence added", a.evidence_recorded ? `${a.evidence_added} time(s), ${a.evidence_added_for_request} for a request` : absent("store/journal.jsonl")],

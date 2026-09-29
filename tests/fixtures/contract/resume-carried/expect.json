@@ -1,0 +1,60 @@
+{
+  "case": "The finish prepared in the first segment; two results posted after the report, one of them resolved; another seat objected to the report; the operator stopped the run and resumed it; the report was published again and the coordinator prepared the finish in the continuation.",
+  "design": [
+    "docs/adr/0015 \"Preparing the finish\": after a resume, the first prepare (or done) opens the new segment at the next generation, with its own boundary, and carries by name every post still late when the run was resumed; no boundary forgives an unresolved post.",
+    "docs/adr/0015 decision 10: an objection holds until it is resolved, whatever the report's version; a resolved post stays resolved.",
+    "docs/adr/0013 decision 12: a resume appends to the same registers and rewrites nothing."
+  ],
+  "policies": [
+    "as run"
+  ],
+  "expect": {
+    "questions": {
+      "question:1": {
+        "disposition": "established",
+        "best_candidate": false,
+        "readiness_holds": false,
+        "defects_include": [],
+        "warnings": []
+      }
+    },
+    "ready": true,
+    "verdict": {
+      "proceed": true,
+      "outcome": "completed"
+    },
+    "done": "held",
+    "late": [
+      {
+        "kind": "post",
+        "by": "a1",
+        "tag": "result"
+      },
+      {
+        "kind": "objection",
+        "by": "a3",
+        "tag": null
+      }
+    ],
+    "lease": {
+      "holder": "a0",
+      "generation": 2,
+      "segment": 1,
+      "carried": 1
+    },
+    "prepared": {
+      "count": 2,
+      "last": {
+        "by": "a0",
+        "generation": 2,
+        "late": 2,
+        "current": true
+      }
+    },
+    "resolutions": {
+      "count": 1,
+      "batches": 0
+    },
+    "agreement": []
+  }
+}

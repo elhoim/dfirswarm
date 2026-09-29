@@ -48,7 +48,11 @@ export async function finishText(sandbox: string): Promise<string> {
   const F = await import("../extensions/finish.ts");
   const r = await F.readiness(sandbox);
   const st = await F.readFinish(sandbox);
-  const lines = [`Finish: ${r.ready ? "READY by the registers" : `not ready (${r.items.length})`}${st.lease ? `; ${st.lease.holder} coordinates it (generation ${st.lease.generation}: ${st.lease.why})` : "; nobody coordinates it yet: the first done takes it"}.`];
+  const lines = [`Finish: ${r.ready ? "READY by the registers" : `not ready (${r.items.length})`}${st.lease ? `; ${st.lease.holder} coordinates it (generation ${st.lease.generation}: ${st.lease.why})` : "; nobody coordinates it yet: the first prepare or done takes it"}.`];
+  // The boundary what is late is read against, and the coordinator's last prepare (docs/adr/0015, "Preparing the finish").
+  if (st.lease) lines.push(`  boundary: ${typeof st.lease.since === "number" ? `the report as written at ${new Date(st.lease.since).toISOString()}` : "none yet (the report did not exist when the finish was taken)"}${st.lease.segment ? `, segment ${st.lease.segment} (resumed)` : ""}${st.lease.carried.length ? `, ${st.lease.carried.length} post(s) carried from before the resume` : ""}`);
+  const prepared = st.prepares.at(-1);
+  if (prepared) lines.push(`  prepared: by ${prepared.by} at ${prepared.at}, generation ${prepared.generation}, ${prepared.late.length} item(s) late then`);
   const phase = await F.finishPhase(sandbox).catch(() => null);
   if (phase?.assembling) lines.push(`  phase: assembling by ${phase.coordinator} (${phase.why}): another seat's answer revision is admitted only with material`);
   for (const i of r.items) lines.push(`  holds it: ${i}`);

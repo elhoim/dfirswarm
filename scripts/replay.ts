@@ -22,8 +22,10 @@
  * no job and no VM: its answers check (each `check-answers.ts` line of the
  * goal's checks, read as await-done.sh reads them, run as its own function,
  * not as a shell command), its finish gate over that check, the finish
- * line's verdict, readiness, the finish register (the coordinator, what is
- * late against the report, the last check), the report's per-question
+ * line's verdict, readiness, the finish register (the coordinator, its
+ * resume segment and what it carries, what is late against the report, the
+ * coordinator's prepares, the resolutions and their batches, the last
+ * check), the report's per-question
  * standing, and each custody verdict the run holds, verified as a prefix of
  * the registers with the checkout's own chain code. The goal's other checks
  * are its own commands, which no harness version changes: they are not run,
@@ -129,8 +131,19 @@ export type Projection = {
   /** The finish line's verdict (proceeds, and how the run would end; or held, and on what: a question, a defect code or a check). */
   verdict: { proceed: boolean; outcome: string | null; failing: string | null } | null;
   finish: {
-    lease: { holder: string; generation: number } | null;
+    /** The coordinator's lease; `segment` and `carried` (how many posts it carries from before a resume) where the checkout's register reads them and they are set. */
+    lease: { holder: string; generation: number; segment?: number; carried?: number } | null;
     late: Array<{ kind: string; id: number; by: string; tag: string | null }>;
+    /**
+     * The coordinator's prepares (docs/adr/0015, "Preparing the finish"), as
+     * the checkout's finish register reads them: how many, and the last (by
+     * whom, at which generation, how many items it was given as late, and
+     * whether the lease and the report still stand as it prepared them);
+     * null for a checkout that does not read them.
+     */
+    prepared: { count: number; last: { by: string; generation: number; late: number; current: boolean } | null } | null;
+    /** The typed resolutions in the register, and how many batches (finish resolve with items) they came in; batches null for a checkout that does not read them. */
+    resolutions: { count: number; batches: number | null };
     last_check: { proceed: boolean; outcome: string | null; current: boolean } | null;
     /** Whether the coordinator's done would write the sentinel now: the verdict proceeds and nothing is late against the report. */
     done: "proceeds" | "held";
@@ -354,7 +367,7 @@ export async function project(harness: string, S: string, o: { showText?: boolea
   const verdictRaw = gate ? ((await guard("the verdict", async () => fn(P, "finishLineVerdict")!({ ...run, gate }, false))) as { proceed: boolean; outcome?: string; failing?: string; reason?: string; note?: string } | null) : null;
   type Ready = { ready: boolean; revision: string; items: string[]; limited: string[]; warnings?: string[]; warned?: Array<{ code: string; section: string; seqs: number[] }> };
   const ready = (await guard("readiness", async () => (await fn(FIN, "readiness")!(S)) as Ready)) as Ready | null;
-  type FinState = { lease: { holder: string; generation: number; report: string | null } | null; checks: Array<{ revision: string; proceed: boolean; outcome?: string }> };
+  type FinState = { lease: { holder: string; generation: number; report: string | null; segment?: number; carried?: unknown[] } | null; checks: Array<{ revision: string; proceed: boolean; outcome?: string }>; resolutions?: Array<{ batch?: string }>; prepares?: Array<{ by: string; generation: number; digest: string | null; late: unknown[] }> };
   const fin = (await guard("the finish register", async () => (await fn(FIN, "readFinish")!(S)) as FinState)) as FinState | null;
   const late = fin?.lease ? (((await guard("what is late against the report", async () => fn(FIN, "lateItems")!(S, fin.lease!.holder, fin.lease!.report))) as Array<{ kind: string; id: number; by: string; tag?: string }> | null) ?? []) : [];
 
@@ -464,6 +477,12 @@ export async function project(harness: string, S: string, o: { showText?: boolea
   const heldBy = [...(verdict && !verdict.proceed ? [`verdict:${verdict.failing ?? "held"}`] : []), ...late.map((x) => `late_${x.kind}`)];
   const last = fin?.checks.at(-1);
 
+  // The coordinator's prepares and the batches of resolutions, where the checkout's finish register reads them.
+  const lastPrepare = fin?.prepares?.at(-1);
+  const reportNow = fin?.lease?.report && fn(FIN, "reportDigest") ? ((await guard("the report's digest", async () => fn(FIN, "reportDigest")!(S, fin.lease!.report))) as string | null) : null;
+  const prepared = fin && Array.isArray(fin.prepares) ? { count: fin.prepares.length, last: lastPrepare ? { by: lastPrepare.by, generation: lastPrepare.generation, late: lastPrepare.late.length, current: lastPrepare.generation === fin.lease?.generation && lastPrepare.digest !== null && lastPrepare.digest === reportNow } : null } : null;
+  const resolutions = { count: fin?.resolutions?.length ?? 0, batches: fin && Array.isArray(fin.prepares) ? new Set((fin.resolutions ?? []).map((r) => r.batch).filter(Boolean)).size : null };
+
   const seals = await sealCheck(harness, S, errors);
   const delivered = o.deliveries ? await deliveriesOf(S, FIN, ready) : undefined;
   const projection: Projection = {
@@ -476,8 +495,10 @@ export async function project(harness: string, S: string, o: { showText?: boolea
     verdict,
     finish: fin
       ? {
-          lease: fin.lease ? { holder: fin.lease.holder, generation: fin.lease.generation } : null,
+          lease: fin.lease ? { holder: fin.lease.holder, generation: fin.lease.generation, ...(fin.lease.segment ? { segment: fin.lease.segment } : {}), ...(Array.isArray(fin.lease.carried) && fin.lease.carried.length ? { carried: fin.lease.carried.length } : {}) } : null,
           late: late.map((x) => ({ kind: x.kind, id: x.id, by: x.by, tag: x.tag ?? null })),
+          prepared,
+          resolutions,
           last_check: last ? { proceed: last.proceed, outcome: last.outcome ?? null, current: Boolean(ready && last.revision === ready.revision) } : null,
           done: heldBy.length ? "held" : "proceeds",
           held_by: heldBy,
@@ -955,6 +976,9 @@ export function diffProjections(a: Projection, b: Projection): Array<Omit<Differ
   put(null, "readiness items", listWords(countWords((a.readiness?.items ?? []).map((i) => i.code))), listWords(countWords((b.readiness?.items ?? []).map((i) => i.code))));
   put(null, "gate defects", listWords(countWords((a.gate?.defects ?? []).map((d) => d.code))), listWords(countWords((b.gate?.defects ?? []).map((d) => d.code))));
   put(null, "verdict", verdictWords(a.verdict), verdictWords(b.verdict));
+  const preparedWords = (p: Projection) => (!p.finish ? "none" : !p.finish.prepared ? "not read" : `${p.finish.prepared.count}${p.finish.prepared.last ? `, the last with ${p.finish.prepared.last.late} late` : ""}`);
+  // Only where both read the prepares: a checkout from before them reads the register without them, which is no rule's difference.
+  if (a.finish?.prepared && b.finish?.prepared) put(null, "prepared", preparedWords(a), preparedWords(b));
   put(null, "done", a.finish ? `${a.finish.done}${a.finish.held_by.length ? ` (${a.finish.held_by.join(", ")})` : ""}` : "none", b.finish ? `${b.finish.done}${b.finish.held_by.length ? ` (${b.finish.held_by.join(", ")})` : ""}` : "none");
   put(null, "disagreements", listWords(a.agreement.map((g) => `${g.section} ${g.kind}`)), listWords(b.agreement.map((g) => `${g.section} ${g.kind}`)));
   put(null, "seals", `${a.seals.hold} of ${a.seals.verdicts} hold`, `${b.seals.hold} of ${b.seals.verdicts} hold`);
@@ -1022,7 +1046,7 @@ export function replayWords(r: Replay): string {
     if (p.readiness) out.push(`  readiness: ${p.readiness.ready ? "ready" : `not ready, ${p.readiness.items.length} item(s): ${countWords(p.readiness.items.map((i) => i.code)).join(", ")}`}; ${p.readiness.limited} line(s) limit the run; ${p.readiness.warnings} warning(s)`);
     if (p.gate) out.push(`  gate: ${p.gate.error ? `unavailable (${p.gate.error})` : `${p.gate.defects.length ? countWords(p.gate.defects.map((d) => d.code)).join(", ") : "no defect"}; ${p.gate.holding} holding`}`);
     out.push(`  verdict: ${verdictWords(p.verdict)}`);
-    if (p.finish) out.push(`  finish: ${p.finish.lease ? `${p.finish.lease.holder} coordinates at generation ${p.finish.lease.generation}` : "no coordinator yet"}; ${p.finish.late.length ? `late against the report: ${p.finish.late.map((x) => `${x.kind} ${x.id} by ${x.by}${x.tag ? ` (${x.tag})` : ""}`).join("; ")}` : "nothing late"}; ${p.finish.last_check ? `the last check ${p.finish.last_check.proceed ? `proceeded (${p.finish.last_check.outcome})` : "held"}${p.finish.last_check.current ? " at this revision" : ""}; ` : ""}the done ${p.finish.done}${p.finish.held_by.length ? ` (${p.finish.held_by.join(", ")})` : ""}`);
+    if (p.finish) out.push(`  finish: ${p.finish.lease ? `${p.finish.lease.holder} coordinates at generation ${p.finish.lease.generation}${p.finish.lease.segment ? ` (segment ${p.finish.lease.segment}${p.finish.lease.carried ? `, ${p.finish.lease.carried} post(s) carried from before the resume` : ""})` : ""}` : "no coordinator yet"}; ${!p.finish.prepared ? "prepares not read by this checkout" : p.finish.prepared.count ? `prepared ${p.finish.prepared.count} time(s), the last by ${p.finish.prepared.last!.by} at generation ${p.finish.prepared.last!.generation} with ${p.finish.prepared.last!.late} item(s) late${p.finish.prepared.last!.current ? "" : " (the lease or the report has moved since)"}` : "never prepared"}; ${p.finish.resolutions.count} resolution(s)${p.finish.resolutions.batches ? ` (${p.finish.resolutions.batches} batch(es))` : ""}; ${p.finish.late.length ? `late against the report: ${p.finish.late.map((x) => `${x.kind} ${x.id} by ${x.by}${x.tag ? ` (${x.tag})` : ""}`).join("; ")}` : "nothing late"}; ${p.finish.last_check ? `the last check ${p.finish.last_check.proceed ? `proceeded (${p.finish.last_check.outcome})` : "held"}${p.finish.last_check.current ? " at this revision" : ""}; ` : ""}the done ${p.finish.done}${p.finish.held_by.length ? ` (${p.finish.held_by.join(", ")})` : ""}`);
     out.push(`  seals: ${p.seals.verdicts ? `${p.seals.hold} of ${p.seals.verdicts} custody verdict(s) hold as a prefix${p.seals.broken.map((b) => `; ${b.verdict} does not: ${b.broken.join("; ")}`).join("")}` : "no custody verdict in the run"}`);
     out.push(`  agreement: ${p.agreement.length ? `readiness, the answers check and the gate disagree: ${p.agreement.map((g) => `${g.section} ${g.kind}`).join("; ")}` : "readiness, the answers check and the gate agree on every question"}${p.warnings_hold.length ? `; a warning holds: ${p.warnings_hold.join(", ")}` : ""}`);
     if (p.deliveries) out.push(...deliveryWords(p.deliveries));

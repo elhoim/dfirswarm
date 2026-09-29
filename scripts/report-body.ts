@@ -1738,11 +1738,12 @@ function registerSection(run: Run): BodySection {
       items: fin.events.map((e): Span[] => {
         const x = e as unknown as Record<string, unknown>;
         const what =
-          e.ev === "lease" ? `lease to ${String(x.holder)} (generation ${String(x.generation ?? "?")})${x.from ? ` from ${String(x.from)}` : ""}${x.why ? `: ${String(x.why)}` : ""}`
+          e.ev === "lease" ? `lease to ${String(x.holder)} (generation ${String(x.generation ?? "?")})${x.from ? ` from ${String(x.from)}` : ""}${x.segment ? `, segment ${String(x.segment)}` : ""}${Array.isArray(x.carried) && x.carried.length ? `, carrying ${(x.carried as Array<{ id?: unknown }>).map((c) => `post #${String(c.id)}`).join(", ")} from before the resume` : ""}${x.why ? `: ${String(x.why)}` : ""}`
+          : e.ev === "prepare" ? `the finish prepared at generation ${String(x.generation ?? "?")} on ${String(x.report ?? "the report")} ${String(x.digest ?? "").slice(0, 12)}: ${x.ready ? "ready" : "not ready"} by the registers, ${Array.isArray(x.late) ? x.late.length : 0} item(s) late against it${Array.isArray(x.late) && x.late.length ? ` (${(x.late as Array<{ kind?: unknown; id?: unknown }>).map((l) => (l.kind === "post" ? `post #${String(l.id)}` : `objection ${String(l.id)}`)).join(", ")})` : ""}`
           : e.ev === "readiness" ? `${x.ready ? "ready" : "not ready"} at revision ${String(x.revision ?? "").slice(0, 12)}${Array.isArray(x.items) && x.items.length ? `: ${(x.items as string[]).join("; ")}` : ""}`
           : e.ev === "check" ? `the finish line at revision ${String(x.revision ?? "").slice(0, 12)}: ${x.proceed ? "proceed" : "refused"}${x.outcome ? ` (${String(x.outcome)})` : ""}${x.reason ? `: ${String(x.reason)}` : ""}`
           : e.ev === "ack" ? `${x.verdict === "objection" ? "objection" : "no objection"} to the report ${String(x.digest ?? "").slice(0, 12)}${x.why ? `: ${String(x.why)}` : ""}`
-          : e.ev === "resolve" ? `resolved ${x.post !== undefined ? `post #${String(x.post)}` : `ack ${String(x.ack)}`} as ${String(x.how)}${x.why ? `: ${String(x.why)}` : ""}`
+          : e.ev === "resolve" ? `resolved ${x.post !== undefined ? `post #${String(x.post)}` : `ack ${String(x.ack)}`} as ${String(x.how)}${x.batch ? ` (batch ${String(x.batch)})` : ""}${x.why ? `: ${String(x.why)}` : ""}`
           : JSON.stringify(Object.fromEntries(Object.entries(x).filter(([k]) => !["v", "seq", "at", "by", "ev", "prev", "hash", "run"].includes(k))));
         return [`${e.seq} · ${e.at} · ${e.by} · ${e.ev}: ${what}`];
       }),

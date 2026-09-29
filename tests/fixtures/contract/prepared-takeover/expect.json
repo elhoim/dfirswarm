@@ -1,0 +1,47 @@
+{
+  "case": "The report's publisher prepared the finish; a result was posted after the report; the coordinator began compacting; another seat's prepare took the finish over and resolved the result in one batch at the new generation.",
+  "design": [
+    "docs/adr/0015 decision 6: a holder that is compacting is unavailable, and the next seat to ask for the finish takes it over at the next generation.",
+    "docs/adr/0015 \"Preparing the finish\": a prepare takes the lease as a done does, a takeover included, and keeps the earliest boundary; a batch carries the generation it was made at.",
+    "docs/adr/0015 decision 10: once every late item has a typed resolution nothing holds the coordinator's done on what is late."
+  ],
+  "policies": [
+    "as run"
+  ],
+  "expect": {
+    "questions": {
+      "question:1": {
+        "disposition": "established",
+        "best_candidate": false,
+        "readiness_holds": false,
+        "defects_include": [],
+        "warnings": []
+      }
+    },
+    "ready": true,
+    "verdict": {
+      "proceed": true,
+      "outcome": "completed"
+    },
+    "done": "proceeds",
+    "late": [],
+    "lease": {
+      "holder": "a2",
+      "generation": 2
+    },
+    "prepared": {
+      "count": 2,
+      "last": {
+        "by": "a2",
+        "generation": 2,
+        "late": 1,
+        "current": true
+      }
+    },
+    "resolutions": {
+      "count": 1,
+      "batches": 1
+    },
+    "agreement": []
+  }
+}
