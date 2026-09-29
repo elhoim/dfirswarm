@@ -78,7 +78,7 @@ export type FinishGate = {
    * route's, and makes the end examination-limited.
    */
   holding?: string[];
-  /** What the answers check warns of and does not hold on (protocol.ts LedgerWarning: a not-determinable answer naming no acquisition ask, nor why none; a partial answer every review holds whole). */
+  /** What the answers check warns of and does not hold on (protocol.ts LedgerWarning: a not-determinable answer naming no acquisition ask, nor why none; a partial answer every review holds whole; findings two seats hold under a question's leads that its answer leaves out). */
   warnings?: string[];
 };
 

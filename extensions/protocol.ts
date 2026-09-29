@@ -11772,9 +11772,61 @@ export function noMoreEvidenceAskFix(coverage: number[], answer: number): string
  * check, counted in the finish line's note, and listed by readiness (finish
  * status). no_acquisition_ask: a not-determinable answer names no ask, nor
  * why none. partial_all_parts_established: a partial answer every review of
- * which holds every part it weighed established.
+ * which holds every part it weighed established. lead_findings_uncited:
+ * findings and events two seats hold, recorded under the question's leads,
+ * that its answer does not reach.
  */
-export type LedgerWarning = { code: "no_acquisition_ask" | "partial_all_parts_established"; section: string; seqs: number[]; what: string; fix: string };
+export type LedgerWarning = { code: "no_acquisition_ask" | "partial_all_parts_established" | "lead_findings_uncited"; section: string; seqs: number[]; what: string; fix: string };
+
+/** A question's section as the register names it: Q-<n> for a numbered one, the section otherwise. */
+function questionName(id: string, section: string): string {
+  return /^\d+$/.test(id) ? `Q-${Number(id)}` : section;
+}
+
+/**
+ * Every entry an answer reaches: those it cites (support, contrary,
+ * limitations, a downgrade's evidence), and through them each entry they
+ * name in turn (rel, a coverage record's result_refs and result_bound, a
+ * cited answer's own citations), with the correction that stands in the
+ * place of each. Refs only: nothing is read of what an entry says.
+ */
+export function answerReach(a: LedgerEntry, bySeq: ReadonlyMap<number, LedgerEntry>, replaced: Map<number, number>): Set<number> {
+  const eseq = (r: string): number | null => {
+    const m = /^E-(\d+)$/i.exec(String(r).trim());
+    return m ? Number(m[1]) : null;
+  };
+  const stack: number[] = [...(a.support ?? []), ...(a.contrary ?? []), ...(a.limitations ?? [])].map((x) => x.seq);
+  for (const r of a.downgrade?.evidence ?? []) {
+    const n = eseq(r);
+    if (n !== null) stack.push(n);
+  }
+  const seen = new Set<number>();
+  while (stack.length) {
+    const seq = stack.pop() as number;
+    if (seen.has(seq)) continue;
+    seen.add(seq);
+    const head = standingSeq(seq, replaced);
+    if (head !== seq) stack.push(head);
+    const e = bySeq.get(seq);
+    if (!e) continue;
+    for (const r of e.rel ?? []) stack.push(r.to);
+    for (const r of e.result_refs ?? []) {
+      const n = eseq(r);
+      if (n !== null) stack.push(n);
+    }
+    for (const x of [...(e.result_bound ?? []), ...(e.support ?? []), ...(e.contrary ?? []), ...(e.limitations ?? [])]) stack.push(x.seq);
+  }
+  return seen;
+}
+
+/** Whether two seats hold an entry: two recorded it (a second author), or a seat other than its authors attested it. */
+export function heldByTwoSeats(e: LedgerEntry, attestations: readonly LedgerAttestation[]): boolean {
+  const authors = new Set([e.by, ...(e.authors ?? [])]);
+  if (authors.size >= 2) return true;
+  const h = e.hash ?? ledgerHash(e, "genesis");
+  // A line from before version 2 names its entry by seq; either act by another seat counts (a same_content one is a second author).
+  return attestations.some((x) => (x.target ? x.target === h : x.seq === e.seq) && !authors.has(x.by));
+}
 
 /**
  * What a partial answer's warning says of a case premise: what the case
@@ -11789,8 +11841,12 @@ export const CASE_PREMISE_WORDS = 'what the case brief or the goal states as giv
  * narrative), what keeps it from standing, whether a critic acted on it, and
  * the contradictions left open. Pure over what was read: the caller reads
  * the files (and which entries rest on a failed job) and verifies the chains.
+ * `underLeads` is what the lead register recorded under each question's
+ * leads (leads.ts questionLeadEntries): by question id, each entry with the
+ * leads it was recorded under; without it the lead_findings_uncited warning
+ * is not looked for.
  */
-export function ledgerGate(o: { entries: LedgerEntry[]; attestations: LedgerAttestation[]; disputes: LedgerDispute[]; sections: string[]; failed?: Map<number, string[]>; bar?: (sectionId: string) => { material: boolean; existence: boolean; completeness?: boolean }; partial?: Map<number, Array<{ ref: string; job: string; status: string }>>; sweeps?: readonly SweepRecord[]; moreEvidence?: "no" | "ask" | "yes" }): LedgerGate {
+export function ledgerGate(o: { entries: LedgerEntry[]; attestations: LedgerAttestation[]; disputes: LedgerDispute[]; sections: string[]; failed?: Map<number, string[]>; bar?: (sectionId: string) => { material: boolean; existence: boolean; completeness?: boolean }; partial?: Map<number, Array<{ ref: string; job: string; status: string }>>; sweeps?: readonly SweepRecord[]; moreEvidence?: "no" | "ask" | "yes"; underLeads?: ReadonlyMap<string, ReadonlyMap<number, readonly string[]>> }): LedgerGate {
   const { entries } = o;
   const bySeq = new Map(entries.map((e) => [e.seq, e]));
   const replaced = supersededBy(entries);
@@ -11972,6 +12028,40 @@ export function ledgerGate(o: { entries: LedgerEntry[]; attestations: LedgerAtte
           seqs: [a.seq],
           what: `answer #${a.seq} (${sec.section}) is partial, and every review holds every part it weighed established (${[...new Set(weighed.map((x) => x.by))].join(", ")}; attested established by ${[...new Set(established.map((x) => x.by))].join(", ")})`,
           fix: `an answer is partial only for a part of the question the evidence could not establish: say which part is open (in its reasoning or limitations, citing what bounds it), or record the answer again with supersedes=${a.seq} and result established; ${CASE_PREMISE_WORDS}`,
+        });
+      }
+    }
+    // What the run established under the question's own leads and the
+    // answer leaves out (on s993d40 an answer left out two methods the
+    // ledger held as findings under that question's leads): a standing
+    // finding or event, not disputed, that another seat attested or two
+    // seats recorded, which the lead register recorded under a lead linked
+    // to the question (it interprets a lead's job, or a lead's close or
+    // confirmation names it), and which the answer does not reach, directly
+    // or through the entries it cites. Registers and refs only: nothing is
+    // read of what an entry says. A warning: every such entry is listed.
+    const under = bar ? o.underLeads?.get(id) : undefined;
+    if (under?.size) {
+      const reach = answerReach(a, bySeq, replaced);
+      const left: Array<{ seq: number; kind: string; leads: readonly string[] }> = [];
+      for (const [seq, leads] of [...under].sort((x, y) => x[0] - y[0])) {
+        if (reach.has(seq) || replaced.has(seq)) continue;
+        const e = bySeq.get(seq);
+        if (!e || (e.kind !== "finding" && e.kind !== "event")) continue;
+        const h = e.hash ?? ledgerHash(e, "genesis");
+        if (standingD.some((d) => d.target === h)) continue;
+        if (!heldByTwoSeats(e, o.attestations)) continue;
+        left.push({ seq, kind: e.kind, leads });
+      }
+      if (left.length) {
+        const q = questionName(id, sec.section);
+        const one = left.length === 1;
+        warnings.push({
+          code: "lead_findings_uncited",
+          section: sec.section,
+          seqs: [a.seq, ...left.map((x) => x.seq)],
+          what: `answer #${a.seq} (${sec.section}): ${left.map((x) => `E-${x.seq} (${x.kind === "event" ? "an event" : "a finding"} under ${x.leads.join(", ")})`).join(", ")} established under ${q}'s leads and not in its answer: ${one ? "cite it or say why it does not bear on it" : "cite them or say why they do not bear on it"}`,
+          fix: `record the answer again with supersedes=${a.seq}, citing ${one ? "it" : "each"} as E-<seq> in its reasoning (or among its contrary or limitations), or saying there why ${one ? "it does" : "each does"} not bear on ${q}; an entry the answer cites that names ${one ? "it" : "one"} (rel, a coverage record's result_refs) counts`,
         });
       }
     }
@@ -12296,7 +12386,7 @@ export type FinishGateView = {
   accepted?: string[];
   /** What holds a run under the operator's stop policy beside its questions: a defect a limitation only names. */
   holding?: string[];
-  /** What the answers check warns of and does not hold on (LedgerWarning: a not-determinable answer that names no acquisition ask, a partial answer every review holds whole): said in the verdict's note. */
+  /** What the answers check warns of and does not hold on (LedgerWarning: a not-determinable answer that names no acquisition ask, a partial answer every review holds whole, findings under a question's leads its answer leaves out): said in the verdict's note. */
   warnings?: string[];
   error?: string;
 };

@@ -644,7 +644,9 @@ async function computeReadiness(sandboxRoot: string, s: L.LeadsSnapshot, revisio
   const sweeps = await import("./store-sweep.ts").then((SW) => SW.readSweeps(sandboxRoot)).catch(() => []);
   // The case policy, so a warning's fix reads as the answers check words it.
   const moreEvidence = await import("./requests.ts").then((R) => R.casePolicyMoreEvidence(sandboxRoot)).catch(() => "ask" as const);
-  const gate = P.ledgerGate({ entries: s.ledger.entries, attestations, disputes, sections, bar: barOf, partial, sweeps, moreEvidence });
+  // What the lead register recorded under each question's leads: a finding two seats hold there that an answer leaves out is warned of.
+  const underLeads = s.state.chain.ok ? L.questionLeadEntries(s.state) : undefined;
+  const gate = P.ledgerGate({ entries: s.ledger.entries, attestations, disputes, sections, bar: barOf, partial, sweeps, moreEvidence, ...(underLeads ? { underLeads } : {}) });
   // What the gate warns of: shown to every seat that reads finish status, and never an item.
   const warnings = gate.warnings.map((w) => `${w.what}. ${w.fix}`);
   const accepted = new Set<string>();

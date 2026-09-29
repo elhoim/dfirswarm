@@ -281,6 +281,18 @@ function jobStatuses(status: Map<string, string | null>, entries: LedgerEntry[])
   return out;
 }
 
+/** The entries the lead register recorded under each question's leads (leads.ts questionLeadEntries), or null when its chain is broken or it cannot be read. */
+async function leadEntries(S: string): Promise<Map<string, Map<number, string[]>> | null> {
+  try {
+    const L = await import("../extensions/leads.ts");
+    const { events, text } = await L.readLeadEvents(S);
+    const chain = L.verifyLeadChain(text);
+    return chain.ok ? L.questionLeadEntries(L.foldLeads(events, chain)) : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * What the negative bar needs of each question section, read from the
  * registers: the goal's questions are material, a register question says;
@@ -385,7 +397,9 @@ export async function checkLedgerAnswers(sandbox: string, wanted: string[], exis
   const { producerOf } = await producerIndex(S);
   // Under the case policy's more_evidence: no, the no_acquisition_ask warning names the policy, never an ask.
   const moreEvidence = await import("../extensions/requests.ts").then((R) => R.casePolicyMoreEvidence(S)).catch(() => "ask" as const);
-  const gate = ledgerGate({ entries, attestations, disputes, sections, failed: jobStatuses(statuses, entries), bar, partial: partialOutputCites(entries, producerOf), sweeps, moreEvidence });
+  // What the lead register recorded under each question's leads: a finding two seats hold there that the answer leaves out is a warning. A register whose chain is broken says nothing here (the finish gate names it).
+  const underLeads = await leadEntries(S);
+  const gate = ledgerGate({ entries, attestations, disputes, sections, failed: jobStatuses(statuses, entries), bar, partial: partialOutputCites(entries, producerOf), sweeps, moreEvidence, ...(underLeads ? { underLeads } : {}) });
   const bySeq = new Map(entries.map((e) => [e.seq, e]));
   const replaced = supersededBy(entries);
   const limits = entries.filter((e) => e.kind === "limitation" && !replaced.has(e.seq));

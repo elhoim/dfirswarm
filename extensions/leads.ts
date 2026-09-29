@@ -596,6 +596,47 @@ export function foldLeads(events: LeadEvent[], chain: LeadsState["chain"] = { ok
   return { events, leads, jobLead, interpretations, wakes, reviewOffers, chain };
 }
 
+/**
+ * The ledger entries the register recorded under each question's leads, by
+ * question id (its section key), each with the leads it was recorded under:
+ * an entry that interprets a job run under a lead, and one a lead's close or
+ * confirmation names (its ref and its result_refs, as E-<seq>), every close
+ * in the lead's history included. The register's own acts only: nothing is
+ * read of what an entry says. The answers check warns when a question's
+ * answer leaves out one that two seats hold (protocol.ts ledgerGate,
+ * lead_findings_uncited).
+ */
+export function questionLeadEntries(s: LeadsState): Map<string, Map<number, string[]>> {
+  const byLead = new Map<string, Set<number>>();
+  const add = (lead: string, seq: number) => {
+    const set = byLead.get(lead) ?? new Set<number>();
+    set.add(seq);
+    byLead.set(lead, set);
+  };
+  for (const e of s.events) {
+    if ((e.ev !== "close" && e.ev !== "confirm") || !e.lead) continue;
+    for (const r of [e.ref ?? "", ...(e.result_refs ?? [])]) {
+      const m = /^E-(\d+)$/i.exec(r.trim());
+      if (m) add(e.lead, Number(m[1]));
+    }
+  }
+  for (const [job, list] of s.interpretations) {
+    const lead = s.jobLead.get(job);
+    if (lead) for (const i of list) add(lead, i.entry);
+  }
+  const out = new Map<string, Map<number, string[]>>();
+  for (const l of [...s.leads.values()].sort((x, y) => x.n - y.n)) {
+    const seqs = byLead.get(l.id);
+    if (!seqs) continue;
+    for (const q of new Set(l.answers.map((x) => P.sectionKey(x)))) {
+      const m = out.get(q) ?? new Map<number, string[]>();
+      for (const seq of seqs) m.set(seq, [...(m.get(seq) ?? []), l.id]);
+      out.set(q, m);
+    }
+  }
+  return out;
+}
+
 // --- needs --------------------------------------------------------------------------------------
 
 /** A need, as agents write it: L-3 (resolved), L-3:negative, or E-12 (a standing ledger entry). */
