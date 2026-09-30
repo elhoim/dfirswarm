@@ -9719,6 +9719,20 @@ export function answerReviews(a: LedgerEntry, attestations: readonly LedgerAttes
 }
 
 /**
+ * An answer's parts as its reviews weigh them (premises.ts partsStanding):
+ * each review's not_asked and missing marks, with its reviewer. Null for an
+ * answer without rows, which reads as it always did. The one reading the
+ * report, the console's view, questions.md and the metrics share.
+ */
+export function answerPartsStanding(a: LedgerEntry, attestations: readonly LedgerAttestation[]): PM.PartsStanding | null {
+  if (!a.parts?.length) return null;
+  const marks: PM.PartMark[] = answerReviews(a, attestations).flatMap((x) =>
+    (x.answer_review?.parts ?? []).filter((p) => p.not_asked || p.missing).map((p) => ({ by: x.by, ...(p.id ? { id: p.id } : {}), part: p.part, why: p.why, ...(p.not_asked ? { not_asked: true as const } : {}), ...(p.missing ? { missing: true as const } : {}) })),
+  );
+  return PM.partsStanding(a.parts, marks);
+}
+
+/**
  * Whether an answer is held as a best candidate (B2): it claims
  * established (claimsEstablished), another seat reviewed it, and every
  * review holds it a best candidate only. The one test readiness

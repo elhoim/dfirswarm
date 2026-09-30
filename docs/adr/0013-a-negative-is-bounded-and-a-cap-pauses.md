@@ -1026,6 +1026,45 @@ Astra's "never promote automatically" stands until the warnings are shown
 insufficient), and a check that the rows cover the question's words (the
 review's `missing` is the check).
 
+## What the report shows of an answer's parts
+
+Added 2026-09-30, after the last validation round. Complete answers were
+still recorded partial, at medium confidence, and their open parts were
+often what the question does not ask. The score did not suffer, but a
+reader takes "partial" to mean "not fully known". The owner chose to show
+the parts rather than change the label: presentation only, and a metric.
+
+- **Each answer's parts, where it is rendered.** The report's §5 answer
+  shows each part established on what it rests on, or open with what bounds
+  it, and a review's `not_asked` mark beside the part it marks (a mark that
+  names none of the answer's rows is said apart, never dropped); its §2
+  chain lists the same parts under its result; its §1 table gives the plain
+  line with the answer. The console's question view and
+  `questions/questions.md` show the same, from one reading
+  (`protocol.ts answerPartsStanding`, `premises.ts partsStanding`), and so
+  does the release, whose report is the same render.
+- **A partial answer leads with a plain line.** "Asked parts: 3 of 3
+  established. Open: 1, which a review marks as not asked." A part is asked
+  unless a review marks it not asked; a part a review names missing is asked
+  and not established. When every asked part is established (at least one,
+  none named missing), the report says so beside the partial label ("every
+  part the question asks is established"), in §1 and in the answer. The
+  label is the recorder's and is unchanged: nothing is promoted, as above.
+- **An answer without parts** (one recorded before them) renders as before.
+- **The under-claiming count.** `swarm.sh metrics` counts the standing
+  partial answers in scope whose asked parts are all established (`claims`:
+  each with its counts; a partial answer without parts named apart and
+  counted neither way), and `--compare` marks such an answer on its side,
+  flags the question and sets the two runs' counts side by side. The count
+  rests on the reviews' marks: a partial answer whose unasked open part no
+  review marked is not counted.
+
+Measured values-free on this checkout: s85febc (a calibration run) 0 of 6
+partial answers with parts, s704e4b (c10) 0 of 6. Neither run's reviews
+marked a part not asked (s704e4b predates the mark), so the count cannot see
+the complete answers this section describes there; it counts them from the
+runs that review with the mark.
+
 ## Consequences
 
 - Every existing goal and run keeps working: an answer without `result`

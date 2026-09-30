@@ -222,7 +222,7 @@ function QuestionCard({ q, sigs, act, busy, children }: { q: QuestionView; sigs:
           {q.answer ? (
             <span className={q.answer.stale ? "text-brick-ink" : "text-moss-ink"}>
               E-{q.answer.seq}
-              {q.answer.result ? ` (${q.answer.result.replace(/_/g, " ")})` : ""}
+              {q.answer.result ? ` (${q.answer.result.replace(/_/g, " ")}${q.answer.standing?.plain ? `: ${q.answer.standing.plain}` : ""})` : ""}
               {q.answer.inconclusive ? " (inconclusive)" : ""}
               {q.answer.stale ? `: answers revision ${q.answer.question_rev ?? 1} of ${q.rev}, stale` : q.rev > 1 ? ` (revision ${q.answer.question_rev ?? 1})` : ""}
             </span>
@@ -232,14 +232,18 @@ function QuestionCard({ q, sigs, act, busy, children }: { q: QuestionView; sigs:
         </Row>
         {q.answer?.parts?.length ? (
           <Row label="Parts">
+            {/* A partial answer leads with its plain line; a review's not_asked mark sits beside the part it marks. */}
+            {q.answer.result === "partial" && q.answer.standing ? <p className="m-0 font-medium text-ink">{q.answer.standing.summary}</p> : null}
             <ul className="m-0 list-none space-y-0.5 p-0">
-              {q.answer.parts.map((p) => (
+              {(q.answer.standing?.rows ?? q.answer.parts.map((p) => ({ ...p, not_asked_by: [] as Array<{ by: string; why: string }> }))).map((p) => (
                 <li key={p.id}>
                   <code className="font-mono">{p.id}</code> {p.part}:{" "}
                   <span className={p.status === "established" ? "text-moss-ink" : "text-saffron-ink"}>{p.status === "established" ? `established on ${(p.refs ?? []).join(", ")}` : `open, bounded by ${p.open_by ?? "?"}${p.refs?.length ? ` (so far ${p.refs.join(", ")})` : ""}`}</span>
+                  {p.not_asked_by.length ? <span className="text-ink-3">{`; not asked by the question, as ${p.not_asked_by.length === 1 ? "a review marks it" : "reviews mark it"}: ${p.not_asked_by.map((x) => `${x.by} (${x.why})`).join("; ")}`}</span> : null}
                 </li>
               ))}
             </ul>
+            {q.answer.standing?.unmatched.length ? <p className="m-0 text-ink-3">{`Outside what the question asks, as a review marks it, and no part of the answer by that name: ${q.answer.standing.unmatched.map((x) => `${x.id ? `${x.id} ` : ""}"${x.part}" (${x.by}: ${x.why})`).join("; ")}`}</p> : null}
           </Row>
         ) : null}
         {q.answer?.premises?.length ? (

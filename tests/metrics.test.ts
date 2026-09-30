@@ -329,7 +329,7 @@ test("two runs of the same goal compared: agreement, a negative the other establ
   assert.ok(row("Q-2").flags.some((f) => /not reviewed by another seat in A and B/.test(f)));
   assert.equal(row("Q-3").verdict, "agree");
   assert.equal(row("Q-4").verdict, "only_a");
-  assert.deepEqual(c.summary, { questions: 4, agree: 1, class_differs: 1, disagree: 1, unknown: 0, one_sided: 1, neither: 0, negative_disagreements: 1, shared_partial_negatives: 1 });
+  assert.deepEqual(c.summary, { questions: 4, agree: 1, class_differs: 1, disagree: 1, unknown: 0, one_sided: 1, neither: 0, negative_disagreements: 1, shared_partial_negatives: 1, under_claimed: { a: 0, b: 0 } });
   const text = compareText(c);
   assert.match(text, /Agreement is not confirmation/);
   assert.ok(!/entry \d+/.test(text), "no answer's value is printed");

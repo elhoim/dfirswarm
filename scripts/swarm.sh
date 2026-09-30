@@ -11434,11 +11434,13 @@ cmd_help() {
       echo "docs/usage.md has the detail; start is the only command with a long page." ;;
     metrics) cat <<'EOF'
   metrics <id> [--json]                    a run's process metrics, read from its own registers (nothing written):
-                                           quick and unreviewed negatives, coverage, offers, done calls and refusals,
+                                           quick and unreviewed negatives, coverage, under-claiming (partial answers
+                                           whose asked parts are all established), offers, done calls and refusals,
                                            the tail to the end, acquisition gaps, interpretations, reversals by cause,
                                            tokens per question, duplicates, the network
   metrics --compare <id-A> <id-B> [--json] two runs of one goal side by side, question by question; a negative the
-                                           other run established, and a shared negative on partial coverage, flagged
+                                           other run established, a shared negative on partial coverage, and a partial
+                                           answer whose asked parts are all established, flagged
 Every metric's definition is in docs/usage.md (Metrics).
 EOF
       ;;

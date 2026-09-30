@@ -590,6 +590,8 @@ export type QuestionView = {
     stale: boolean;
     /** Its claim and open-part rows, when it has them (extensions/premises.ts). */
     parts?: AnswerPart[];
+    /** Its parts as its reviews weigh them; mirrors the view's `standing` (extensions/questions.ts): each row with the reviews that mark it not asked, the plain line a partial answer leads with, and what is said beside a partial label whose every asked part is established. */
+    standing?: PartsStanding;
     /** The premises it cites, when it cites any. */
     premises?: PremiseCitation[];
     /** Each part a review says it leaves out. */
@@ -607,6 +609,19 @@ export type QuestionView = {
 
 /** A part of an answer; mirrors `AnswerPart` in `extensions/premises.ts`. */
 export type AnswerPart = { id: string; part: string; status: "established" | "open"; refs?: string[]; open_by?: string };
+/** An answer's parts as its reviews weigh them; mirrors `PartsStanding` in `extensions/premises.ts`, with the words the view adds. */
+export type PartsStanding = {
+  rows: Array<AnswerPart & { not_asked_by: Array<{ by: string; why: string }> }>;
+  asked: number;
+  established: number;
+  open: number;
+  open_not_asked: number;
+  missing: Array<{ by: string; part: string; why: string }>;
+  all_asked_established: boolean;
+  unmatched: Array<{ by: string; id?: string; part: string; why: string; not_asked?: true; missing?: true }>;
+  summary: string;
+  plain: string | null;
+};
 export type TimeRange = { from?: string; to?: string };
 export type PremiseScope = { entities?: string[]; times?: TimeRange[]; questions?: string[] };
 /** An answer's citation of a premise; mirrors `PremiseCitation` in `extensions/premises.ts`. */

@@ -472,6 +472,97 @@ export function partsWords(parts: readonly AnswerPart[]): string {
   return parts.map((p) => `${p.id} "${p.part}" ${p.status === "established" ? `established (${(p.refs ?? []).join(", ")})` : `open, bounded by ${p.open_by}${p.refs?.length ? ` (so far ${p.refs.join(", ")})` : ""}`}`).join("; ");
 }
 
+/**
+ * A review's word on a part of an answer, as the standing reads it
+ * (protocol.ts AnswerReviewPart, with its reviewer): the part (the answer's
+ * id, or its words), and whether the review marks it not asked by the
+ * question or names it missing from the answer.
+ */
+export type PartMark = { by: string; id?: string; part: string; why: string; not_asked?: true; missing?: true };
+
+/** One of an answer's rows, with each review that marks it not asked by the question and why. */
+export type PartRow = AnswerPart & { not_asked_by: Array<{ by: string; why: string }> };
+
+/**
+ * An answer's parts as a reader weighs them (docs/adr/0013, "What the
+ * report shows of an answer's parts"): its rows, each with the reviews that
+ * mark it not asked; the parts the question asks, which are the rows no
+ * review marks not asked and each part a review names missing from the
+ * answer (once, however many reviews name it); how many of those the answer
+ * holds established; its open rows, and how many of them a review marks not
+ * asked; and whether every part the question asks is established (at least
+ * one, and none named missing). A mark matches a row by its id, else by its
+ * words as answers are compared (case and runs of space folded); a mark that
+ * matches no row is kept apart, never dropped.
+ */
+export type PartsStanding = {
+  rows: PartRow[];
+  asked: number;
+  established: number;
+  open: number;
+  open_not_asked: number;
+  missing: Array<{ by: string; part: string; why: string }>;
+  all_asked_established: boolean;
+  unmatched: PartMark[];
+};
+
+const foldWords = (s: string) => s.normalize("NFKC").toLowerCase().replace(/\s+/g, " ").trim();
+
+export function partsStanding(parts: readonly AnswerPart[], marks: readonly PartMark[]): PartsStanding {
+  const rows: PartRow[] = parts.map((p) => ({ ...p, not_asked_by: [] }));
+  const unmatched: PartMark[] = [];
+  const missing: PartsStanding["missing"] = [];
+  for (const m of marks) {
+    if (m.missing) {
+      if (!missing.some((x) => foldWords(x.part) === foldWords(m.part))) missing.push({ by: m.by, part: m.part, why: m.why });
+      continue;
+    }
+    if (!m.not_asked) continue;
+    const row = rows.find((r) => (m.id ? r.id === m.id : foldWords(r.part) === foldWords(m.part)));
+    if (!row) {
+      unmatched.push(m);
+      continue;
+    }
+    if (!row.not_asked_by.some((x) => x.by === m.by)) row.not_asked_by.push({ by: m.by, why: m.why });
+  }
+  const asked = rows.filter((r) => !r.not_asked_by.length);
+  const established = asked.filter((r) => r.status === "established").length;
+  const open = rows.filter((r) => r.status === "open");
+  return {
+    rows,
+    asked: asked.length + missing.length,
+    established,
+    open: open.length,
+    open_not_asked: open.filter((r) => r.not_asked_by.length).length,
+    missing,
+    all_asked_established: asked.length > 0 && established === asked.length && !missing.length,
+    unmatched,
+  };
+}
+
+/**
+ * The plain line a partial answer leads with: "Asked parts: 3 of 3
+ * established. Open: 1, which a review marks as not asked." Harness words
+ * and counts only.
+ */
+export function partsSummaryWords(s: PartsStanding): string {
+  const plural = (n: number, one: string, many: string) => (n === 1 ? one : many);
+  const open = !s.open
+    ? "Open: none."
+    : s.open_not_asked === s.open
+      ? `Open: ${s.open}, ${plural(s.open, "which a review marks", "each of which a review marks")} as not asked.`
+      : s.open_not_asked
+        ? `Open: ${s.open}, of which ${s.open_not_asked} ${plural(s.open_not_asked, "a review marks", "reviews mark")} as not asked.`
+        : `Open: ${s.open}.`;
+  const missing = s.missing.length ? ` ${s.missing.length === 1 ? "A review names 1 part" : `Reviews name ${s.missing.length} parts`} of the question the answer leaves out.` : "";
+  return `Asked parts: ${s.established} of ${s.asked} established. ${open}${missing}`;
+}
+
+/** What a partial answer whose every asked part is established says beside its label (the label is unchanged); null otherwise. */
+export function partialPlainWords(result: string | null, s: PartsStanding | null): string | null {
+  return result === "partial" && s?.all_asked_established ? "every part the question asks is established" : null;
+}
+
 /** An answer's premise citations in words. */
 export function citationsWords(cs: readonly PremiseCitation[]): string {
   return cs.map((c) => `${c.stance === "assumed" && c.conditional ? `assuming ${c.id}` : `${c.id} ${c.stance}`} (revision ${c.rev}${c.scope ? `; ${scopeWords(c.scope)}` : ""})${c.refs?.length ? ` on ${c.refs.join(", ")}` : ""}`).join("; ");

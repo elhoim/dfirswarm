@@ -71,6 +71,7 @@ import {
   verifyDisputeChain,
   verifyLedgerChain,
   answerReviews,
+  answerPartsStanding,
   heldAsBestCandidate,
   recordedConfidence,
   confidenceWords,
@@ -91,7 +92,7 @@ import { answerResult, resultWords, reviewWords as negativeReviewWords, NEGATIVE
 import { sectionBars } from "./check-answers.ts";
 import { leadsSnapshot, rankedLeads, viewLead, type LeadEvent, type LeadView, type LeadsSnapshot } from "../extensions/leads.ts";
 import { originWords, premiseViews, questionViews, type PremiseView, type QuestionEvent, type QuestionView, type QuestionsSnapshot } from "../extensions/questions.ts";
-import { classWords, scopeWords } from "../extensions/premises.ts";
+import { classWords, partialPlainWords, partsSummaryWords, scopeWords, type PartsStanding } from "../extensions/premises.ts";
 import { questionCost, tokensWords, type QuestionCost } from "./question-cost.ts";
 import { FINISH_LOG, readFinish, type FinishState } from "../extensions/finish.ts";
 import { evidenceCodeRun, onlyOwnOutputs, ownJobOutputs, ownWords, type EvidenceCode } from "../extensions/evidence-code.ts";
@@ -1253,11 +1254,14 @@ function summarySection(run: Run, memo: Map<number, EntryState>): BodySection {
         for (const l of leads) tally.set(l.disposition ?? l.status, (tally.get(l.disposition ?? l.status) ?? 0) + 1);
         const named = st.answer ? [] : run.entries.filter((e) => !run.replaced.has(e.seq) && (e.answers ?? []).some((x) => sectionKey(x) === c.key));
         const ans = st.answer ? answerResult(st.answer) : null;
+        // A partial answer's parts (docs/adr/0013, "What the report shows of an answer's parts"): the plain line, and beside the label when every asked part is established.
+        const standing = st.answer && ans === "partial" ? answerPartsStanding(st.answer, run.attestations) : null;
+        const plain = partialPlainWords(ans, standing);
         return [
           [c.q ? { a: `#${questionAnchor(c.q.id)}`, text: questionName(c.q) } : { a: `#${chainAnchor(chainName(c))}`, text: chainName(c) }],
-          [{ chip: state ?? st.status }, ...(c.v?.answer?.stale ? [" ", { chip: { text: "stale", tone: "brick" } } as Span] : [])],
+          [{ chip: state ?? st.status }, ...(plain && !state ? [` ${plain}`] : []), ...(c.v?.answer?.stale ? [" ", { chip: { text: "stale", tone: "brick" } } as Span] : [])],
           [...(c.v ? [`${c.v.id} · `] : []), ...askerSpans(c.v, c.q)],
-          st.answer ? [{ e: st.answer.seq }, ` ${ans ? resultWords(ans) : st.answer.inconclusive ? "inconclusive" : "no result stated"}`] : named.length ? [`none; ${plural(named.length, "entry", "entries")}: `, ...named.flatMap((e, i): Span[] => [...(i ? [", " as Span] : []), { e: e.seq }])] : ["none"],
+          st.answer ? [{ e: st.answer.seq }, ` ${ans ? resultWords(ans) : st.answer.inconclusive ? "inconclusive" : "no result stated"}`, ...(standing ? [`. ${partsSummaryWords(standing)}`] : [])] : named.length ? [`none; ${plural(named.length, "entry", "entries")}: `, ...named.flatMap((e, i): Span[] => [...(i ? [", " as Span] : []), { e: e.seq }])] : ["none"],
           [leads.length ? `${leads.length}: ${[...tally].map(([k, n]) => `${n} ${k}`).join(", ")}` : "0"],
           [c.v?.accepted ? `${c.v.accepted.as === "bounded" ? "bounded" : "not determinable"}${c.v.accepted.stands ? "" : " (lifted)"}` : "—"],
           [run.cost && run.cost.source !== "none" ? `${(run.cost.shown.byQuestion.get(costKey(c)) ?? 0).toLocaleString("en-US")}${run.cost.source === "trace" ? " (est.)" : ""}` : "—"],
@@ -1575,6 +1579,8 @@ function chainBlock(c: ChainQ, run: Run, memo: Map<number, EntryState>, limits: 
         ...(v?.answer?.stale ? [" ", { b: `Stale: ${v.answer.stale_why === "evidence" ? "evidence arrived for the question after it was recorded" : `it answers r${v.answer.question_rev}, and the question stands at r${v.rev}`}.` } as Span] : []),
       ],
     });
+    // Its parts, part by part (docs/adr/0013, "What the report shows of an answer's parts").
+    body.push(...chainPartsBlocks(a, run));
     // How strongly other seats hold it (B2): established, or a best candidate only, and what capped it.
     // Held a best candidate only when it claims established (heldAsBestCandidate, the test the finish reads).
     const reviews = answerReviews(a, run.attestations);
@@ -2111,6 +2117,8 @@ function questionBlock(q: Question, run: Run, memo: Map<number, EntryState>): Bl
   // what was not found where, unless the answer earned the stronger words;
   // the agents' own words follow it, whole, and marked as theirs.
   const bounded = boundedConclusion(a, q, run);
+  // A partial answer leads with its parts in a plain line (docs/adr/0013, "What the report shows of an answer's parts"); one without rows reads as before.
+  body.push(...partialLeadBlocks(a, run));
   body.push({ k: "voice", voice: "opinion", label: a.inconclusive ? "Answer (inconclusive)" : "Answer", s: [bounded ?? a.value], chips: chipsOf(a, s).filter((c) => c.text !== "answer") });
   if (bounded) body.push({ k: "p", s: [`As the agents worded it (not the conclusion: the bar for saying more is not met): ${a.value}`] });
   body.push(...resultBlocks(a, q, run));
@@ -2179,7 +2187,8 @@ function refSpan(r: string): Span {
  */
 function partsBlocks(a: LedgerEntry, q: Question, run: Run): Block[] {
   const out: Block[] = [];
-  if (a.parts?.length) {
+  const standing = answerPartsStanding(a, run.attestations);
+  if (standing) {
     const v = q.reg ? run.register?.byId.get(q.reg) : undefined;
     const asked = v?.revisions.find((r) => r.rev === (a.question_rev ?? 1))?.text ?? q.text;
     out.push({ k: "p", s: [`Part by part, as the answer reads revision ${a.question_rev ?? 1} of the question${asked ? ` ("${asked}")` : ""}:`] });
@@ -2187,20 +2196,56 @@ function partsBlocks(a: LedgerEntry, q: Question, run: Run): Block[] {
       k: "table",
       cls: "parts",
       head: ["Part", "What it asks", "Status", "Rests on, or what bounds it"],
-      rows: a.parts.map((p): Span[][] => [
-        [p.id],
-        [p.part],
-        [p.status],
-        p.status === "established" ? (p.refs ?? []).flatMap((r, i): Span[] => [i ? ", " : "", refSpan(r)]) : [refSpan(p.open_by ?? "?"), ...(p.refs?.length ? [" (so far ", ...p.refs.flatMap((r, i): Span[] => [i ? ", " : "", refSpan(r)]), ")"] : [])],
-      ]),
+      // A review's not_asked mark beside the part it marks: a limitation, not an open part; the answer stands as recorded.
+      rows: standing.rows.map((p): Span[][] => [[p.id], [p.part], [p.status, ...notAskedSpans(p.not_asked_by)], partRefSpans(p)]),
     });
   }
-  const omitted = run.attestations.filter((x) => x.target === (a.hash ?? "") && !a.authors.includes(x.by)).flatMap((x) => (x.answer_review?.parts ?? []).filter((p) => p.missing).map((p) => ({ by: x.by, part: p.part, why: p.why })));
+  const omitted = answerReviews(a, run.attestations).flatMap((x) => (x.answer_review?.parts ?? []).filter((p) => p.missing).map((p) => ({ by: x.by, part: p.part, why: p.why })));
   if (omitted.length) out.push({ k: "note", s: [`A review says the answer leaves out ${omitted.length === 1 ? "a part" : "parts"} of the question: ${omitted.map((x) => `"${x.part}" (${x.by}: ${x.why})`).join("; ")}. It stays here until the answer is recorded again with ${omitted.length === 1 ? "it" : "them"}.`] });
-  // A part a review says the question does not ask (not_asked): a limitation, not an open part; the answer stands as recorded.
-  const unasked = run.attestations.filter((x) => x.target === (a.hash ?? "") && !a.authors.includes(x.by)).flatMap((x) => (x.answer_review?.parts ?? []).filter((p) => p.not_asked).map((p) => ({ by: x.by, id: p.id, part: p.part, why: p.why })));
+  // A part a review says the question does not ask (not_asked) that names none of the answer's rows (or an answer without rows): said apart, never dropped.
+  const unasked = standing
+    ? standing.unmatched.map((m) => ({ by: m.by, id: m.id, part: m.part, why: m.why }))
+    : answerReviews(a, run.attestations).flatMap((x) => (x.answer_review?.parts ?? []).filter((p) => p.not_asked).map((p) => ({ by: x.by, id: p.id, part: p.part, why: p.why })));
   if (unasked.length) out.push({ k: "note", s: [`A review says ${unasked.length === 1 ? "a part" : "parts"} the answer holds ${unasked.length === 1 ? "is" : "are"} outside what the question asks: ${unasked.map((x) => `${x.id ? `${x.id} ` : ""}"${x.part}" (${x.by}: ${x.why})`).join("; ")}. Such a part is a limitation, not an open part; the answer stands as recorded.`] });
   return out;
+}
+
+/** The reviews that mark a part not asked by the question, beside it. */
+function notAskedSpans(by: PartsStanding["rows"][number]["not_asked_by"]): Span[] {
+  return by.length ? [`; not asked by the question, as ${by.length === 1 ? "a review marks it" : "reviews mark it"}: ${by.map((x) => `${x.by} (${x.why})`).join("; ")}`] : [];
+}
+
+/** What a part rests on, or what bounds it and what it rests on so far. */
+function partRefSpans(p: PartsStanding["rows"][number]): Span[] {
+  return p.status === "established" ? (p.refs ?? []).flatMap((r, i): Span[] => [i ? ", " : "", refSpan(r)]) : [refSpan(p.open_by ?? "?"), ...(p.refs?.length ? [" (so far ", ...p.refs.flatMap((r, i): Span[] => [i ? ", " : "", refSpan(r)]), ")"] : [])];
+}
+
+/**
+ * The plain line a partial answer leads with (docs/adr/0013, "What the
+ * report shows of an answer's parts"): how many of the parts the question
+ * asks are established, how many are open and how many of those a review
+ * marks not asked; and, when every asked part is established, that it is,
+ * beside the label, which is the recorder's and unchanged. Nothing on an
+ * answer without rows, or one that is not partial.
+ */
+function partialLeadBlocks(a: LedgerEntry, run: Run): Block[] {
+  if (answerResult(a) !== "partial") return [];
+  const s = answerPartsStanding(a, run.attestations);
+  if (!s) return [];
+  const plain = partialPlainWords("partial", s);
+  return [{ k: "p", s: [{ b: partsSummaryWords(s) }, ...(plain ? [` Partial as recorded, and ${plain}.`] : [])] }];
+}
+
+/** An answer's parts in its §2 chain: a partial answer's plain line, then each part, established on what it rests on or open with what bounds it, with the reviews that mark it not asked. Nothing on an answer without rows. */
+function chainPartsBlocks(a: LedgerEntry, run: Run): Block[] {
+  const s = answerPartsStanding(a, run.attestations);
+  if (!s) return [];
+  const partial = answerResult(a) === "partial";
+  const plain = partialPlainWords(answerResult(a), s);
+  return [
+    { k: "p", s: [{ b: "Parts" }, ...(partial ? [`: ${partsSummaryWords(s)}${plain ? ` Partial as recorded, and ${plain}.` : ""}`] : [])] },
+    { k: "list", items: s.rows.map((p): Span[] => [{ code: p.id }, ` ${p.part}: ${p.status === "established" ? "established on " : "open, bounded by "}`, ...partRefSpans(p), ...notAskedSpans(p.not_asked_by)]) },
+  ];
 }
 
 /**

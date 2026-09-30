@@ -964,7 +964,27 @@ export type QuestionView = {
    * inconclusive), and for a negative whether another seat reviewed it and
    * what coverage it rests on (the negative bar).
    */
-  answer: { seq: number; at: string; inconclusive: boolean; result?: string; question_rev: number; stale: boolean; stale_why?: "revision" | "evidence"; negative?: { reviewed: boolean; by: string[]; coverage: Array<{ seq: number; coverage: string | null }> }; parts?: PM.AnswerPart[]; premises?: PM.PremiseCitation[]; omitted?: Array<{ by: string; part: string; why: string }> } | null;
+  answer: {
+    seq: number;
+    at: string;
+    inconclusive: boolean;
+    result?: string;
+    question_rev: number;
+    stale: boolean;
+    stale_why?: "revision" | "evidence";
+    negative?: { reviewed: boolean; by: string[]; coverage: Array<{ seq: number; coverage: string | null }> };
+    parts?: PM.AnswerPart[];
+    /**
+     * Its parts as its reviews weigh them (protocol.ts answerPartsStanding):
+     * each row with the reviews that mark it not asked, the counts, the
+     * plain line a partial answer leads with (`summary`), and, when every
+     * asked part of a partial answer is established, the words said beside
+     * its label (`plain`). Present only with parts.
+     */
+    standing?: PM.PartsStanding & { summary: string; plain: string | null };
+    premises?: PM.PremiseCitation[];
+    omitted?: Array<{ by: string; part: string; why: string }>;
+  } | null;
   /** Evidence that arrived for it after the kickoff (the acquisition lane). */
   evidence: Question["evidence"];
   leads: Array<{ id: string; status: L.LeadStatus; holder: string | null; disposition?: string; opened_by: string }>;
@@ -1040,6 +1060,10 @@ export function viewQuestion(q: Question, ctx: ViewContext): QuestionView {
         ...(negative ? { negative } : {}),
         // Its claim and open-part rows and the premises it cites (premises.ts), and each part a review says it leaves out: present only when it has them.
         ...(a.parts?.length ? { parts: a.parts } : {}),
+        ...((): { standing?: PM.PartsStanding & { summary: string; plain: string | null } } => {
+          const standing = P.answerPartsStanding(a, ctx.attestations ?? []);
+          return standing ? { standing: { ...standing, summary: PM.partsSummaryWords(standing), plain: PM.partialPlainWords(result, standing) } } : {};
+        })(),
         ...(a.premises?.length ? { premises: a.premises } : {}),
         ...((): { omitted?: Array<{ by: string; part: string; why: string }> } => {
           const omitted = P.answerReviews(a, ctx.attestations ?? []).flatMap((x) => (x.answer_review?.parts ?? []).filter((p) => p.missing).map((p) => ({ by: x.by, part: p.part, why: p.why })));
@@ -2904,7 +2928,9 @@ export function renderQuestionsMd(ctx: ViewContext): string {
       if (v.leading_forms.length) lines.push(`- Leading form: ${v.leading_forms.map((f) => `"${f}"`).join(", ")} (flagged for the critic)`);
       if (v.leads.length) lines.push(`- Leads: ${v.leads.map((l) => `${l.id} ${l.status}${l.holder ? ` (${l.holder})` : ""}${l.disposition ? ` ${l.disposition}` : ""}`).join(", ")}`);
       lines.push(`- Answer: ${v.answer ? `E-${v.answer.seq}${v.answer.inconclusive ? " (inconclusive)" : ""}${v.answer.result ? ` (${NB.resultWords(v.answer.result)})` : ""}${v.answer.negative ? (v.answer.negative.reviewed ? `; negative, reviewed by ${v.answer.negative.by.join(", ")}` : "; negative (unreviewed)") : ""}${v.answer.negative?.coverage.length ? `; coverage ${v.answer.negative.coverage.map((c) => `E-${c.seq} ${c.coverage ?? "not computed"}`).join(", ")}` : ""}; answers revision ${v.answer.question_rev}${v.answer.stale ? ` of ${v.rev}: stale` : ""}` : "none yet"}`);
+      if (v.answer?.standing && v.answer.result === "partial") lines.push(`- ${v.answer.standing.summary}${v.answer.standing.plain ? ` Partial as recorded, and ${v.answer.standing.plain}.` : ""}`);
       if (v.answer?.parts?.length) lines.push(`- The answer's parts: ${PM.partsWords(v.answer.parts)}`);
+      for (const r of v.answer?.standing?.rows ?? []) for (const x of r.not_asked_by) lines.push(`- A part the question does not ask, as ${x.by}'s review marks it: ${r.id} "${r.part}" (${x.why})`);
       if (v.answer?.premises?.length) lines.push(`- The answer's premises: ${PM.citationsWords(v.answer.premises)}`);
       for (const x of v.answer?.omitted ?? []) lines.push(`- A part the answer leaves out, as ${x.by}'s review says: "${x.part}" (${x.why})`);
       for (const c of v.clarifications) lines.push(`- Clarification ${c.id} (${c.by}, ${c.at}): ${c.what}${c.answer ? ` — answered by ${originWords(c.answer.origin)} at ${c.answer.at}: ${c.answer.text}` : " — not answered yet"}`);

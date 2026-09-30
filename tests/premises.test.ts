@@ -372,8 +372,8 @@ test("an open part the question does not ask: a review marks it not_asked, which
   assert.match(w[0]!, new RegExp(`record the answer again with supersedes=${a.seq} and result established, with what the question does not ask \\("which terminal the session used"\\) among its limitations, not its parts`));
   assert.match(w[0]!, /Nothing is changed for you: the answer stands as recorded until you record it again/);
   assert.ok(!(await FIN.readiness(c.S)).items.some((x) => /question:1/.test(x)), "a warning never holds");
-  // The report says it where the answer is.
-  assert.match(await renderReportBodyMarkdown(c.S), /A review says a part the answer holds is outside what the question asks: tty "which terminal the session used" \(a2: the question asks who and when, not the terminal\)\. Such a part is a limitation, not an open part; the answer stands as recorded\./);
+  // The report says it beside the part it marks (docs/adr/0013, "What the report shows of an answer's parts").
+  assert.match(await renderReportBodyMarkdown(c.S), /\| tty \| which terminal the session used \| open; not asked by the question, as a review marks it: a2 \(the question asks who and when, not the terminal\) \|/);
   // On an answer that claims established, a part marked not asked caps nothing either.
   const f2 = ok(await rec(c.a0, { kind: "finding", ...F, value: "a remote tool installed as a service", source: "the disk", evidence: "a key", refs: ["job:j000001/hits.txt"], answers: ["2"] })).entry.seq;
   const est = ok(await rec(c.a1, { kind: "answer", section: "question:2", value: "a remote tool, as a service", reasoning: `E-${f2}`, ...HIGH, result: "established" })).entry;

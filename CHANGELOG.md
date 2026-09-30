@@ -6,6 +6,28 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Changed: the report shows each answer's parts, and the metrics count the under-claimed
+
+Complete answers were still recorded partial at medium confidence, their
+open parts often what the question does not ask: the score did not suffer,
+but a reader takes "partial" to mean "not fully known". Presentation only
+(ADR 0013, "What the report shows of an answer's parts"):
+
+- **Each answer's parts, where it is rendered**: the report's §5 answer (a
+  review's `not_asked` mark now beside the part it marks, in the parts
+  table), its §2 chain (the parts listed under the result) and its §1 table,
+  the console's question view, `questions/questions.md`, and the release,
+  whose report is the same render.
+- **A partial answer leads with a plain line**: "Asked parts: 3 of 3
+  established. Open: 1, which a review marks as not asked." When every
+  asked part is established, the report says so beside the partial label,
+  which is unchanged. An answer without parts renders as before.
+- **The under-claiming count**: `swarm.sh metrics` counts the partial
+  answers whose asked parts are all established (asked: not marked
+  `not_asked` by a review), and `--compare` sets each run's count side by
+  side and flags the question. On s85febc and s704e4b it is 0 of 6: neither
+  run's reviews marked a part not asked.
+
 ### Fixed: the findings of an independent review of the limits branch
 
 Fable's review of the branch (one P1, four P2, ten P3) found one place
