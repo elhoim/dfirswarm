@@ -26,7 +26,8 @@
  * Answers cite premises (`premises: [{id, rev, stance, refs?, conditional?,
  * scope?}]`, stance assumed, supported, contradicted or unresolved), and
  * carry their claims part by part (`parts: [{id, part, status, refs,
- * open_by?}]`, against the verbatim revision of the question they answer).
+ * open_by?, limited_by?}]`, against the verbatim revision of the question
+ * they answer).
  * Both are present-only in the ledger's hashed core: an answer without them
  * hashes as it always did.
  *
@@ -54,7 +55,14 @@ export type PremiseAuthority = (typeof PREMISE_AUTHORITIES)[number];
 /** How an answer stands on a premise it cites. */
 export const PREMISE_STANCES = ["assumed", "supported", "contradicted", "unresolved"] as const;
 export type PremiseStance = (typeof PREMISE_STANCES)[number];
-export const PART_STATUSES = ["established", "open"] as const;
+/**
+ * A part is established on entries, open (a route or an ask could still
+ * settle it), or limited: the question asks it, and the evidence in scope
+ * cannot settle it (docs/adr/0013, "A part at the limit of the evidence").
+ * A limited part does not make an answer partial; claiming one costs what a
+ * negative costs.
+ */
+export const PART_STATUSES = ["established", "open", "limited"] as const;
 export type PartStatus = (typeof PART_STATUSES)[number];
 /** A part's id: short, stable across the answer's revisions and its reviews (a, 1, who, when-2). */
 export const PART_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,15}$/;
@@ -88,12 +96,16 @@ export type PremiseCitation = { id: string; rev: number; stance: PremiseStance; 
 
 /**
  * One row of an answer: a part the question asks, as the answer takes it
- * from the question's verbatim revision, established or open, the entries
- * it rests on, and for an open part what bounds it: an acquisition ask
+ * from the question's verbatim revision, established, open or limited, the
+ * entries it rests on; for an open part what bounds it: an acquisition ask
  * (R-<n>), a route (a lead, L-<n>), or a limitation or a coverage record
- * (E-<seq>). A premise is never an open part.
+ * (E-<seq>); for a limited part what shows the evidence cannot settle it
+ * (`limited_by`): the coverage record for the question, or a limitation
+ * whose reason is unavailable or excluded (E-<seq>), which another seat
+ * reviews as it reviews a negative. A premise is never an open or a limited
+ * part.
  */
-export type AnswerPart = { id: string; part: string; status: PartStatus; refs?: string[]; open_by?: string };
+export type AnswerPart = { id: string; part: string; status: PartStatus; refs?: string[]; open_by?: string; limited_by?: string };
 
 /**
  * What a premise act says of the premise, as the actor said it (the part a
@@ -428,14 +440,14 @@ export function parseCitations(raw: unknown): { ok: true; citations: PremiseCita
 
 /**
  * An answer's `parts` as given, the shape only: each {id, part, status:
- * established | open, refs?, open_by?}. A premise is never an open part
- * (open_by P-<n> is refused here); what the refs and open_by name is checked
- * against the ledger, the requests and the leads where the answer is
- * recorded.
+ * established | open | limited, refs?, open_by?, limited_by?}. A premise is
+ * never an open or a limited part (P-<n> is refused here); what the refs,
+ * open_by and limited_by name is checked against the ledger, the requests
+ * and the leads where the answer is recorded.
  */
 export function parseParts(raw: unknown): { ok: true; parts: AnswerPart[] } | Fail {
   if (raw === undefined || raw === null || (Array.isArray(raw) && !raw.length)) return { ok: true, parts: [] };
-  const shape = "parts is [{id, part, status: established | open, refs: [E-<seq>], open_by?: R-<n> | L-<n> | E-<seq>}]: each part the question asks, as you read its revision, established on the entries in refs or open with what bounds it";
+  const shape = "parts is [{id, part, status: established | open | limited, refs: [E-<seq>], open_by?: R-<n> | L-<n> | E-<seq>, limited_by?: E-<seq>}]: each part the question asks, as you read its revision, established on the entries in refs, open with what could still settle it, or limited with what shows the evidence in scope cannot";
   if (!Array.isArray(raw)) return { ok: false, reason: shape };
   if (raw.length > ANSWER_MAX_PARTS) return { ok: false, reason: `parts names at most ${ANSWER_MAX_PARTS}: keep the parts the question asks` };
   const out: AnswerPart[] = [];
@@ -448,28 +460,39 @@ export function parseParts(raw: unknown): { ok: true; parts: AnswerPart[] } | Fa
     if (!part) return { ok: false, reason: `parts: "${id}" says which part of the question it is (part)` };
     if (part.length > PART_TEXT_MAX) return { ok: false, reason: `parts: "${id}"'s part is over ${PART_TEXT_MAX} characters: say it in fewer; nothing is cut, so a longer one is refused` };
     const status = String(o.status ?? "").trim().toLowerCase();
-    if (!(PART_STATUSES as readonly string[]).includes(status)) return { ok: false, reason: `parts: "${id}"'s status is established or open (got ${JSON.stringify(o.status)})` };
+    if (!(PART_STATUSES as readonly string[]).includes(status)) return { ok: false, reason: `parts: "${id}"'s status is established, open or limited (got ${JSON.stringify(o.status)})` };
     const refs = refList(`parts: "${id}"'s refs`, o.refs);
     if (!refs.ok) return refs;
     if (status === "established" && !refs.value.length) return { ok: false, reason: `parts: "${id}" is established: name the entries that establish it in refs (E-<seq>)` };
     let openBy: string | undefined;
     const rawBy = String(o.open_by ?? "").trim();
     if (rawBy) {
-      if (status !== "open") return { ok: false, reason: `parts: "${id}" is established: open_by is an open part's (what bounds it)` };
+      if (status !== "open") return { ok: false, reason: `parts: "${id}" is ${status}: open_by is an open part's (what could still settle it)${status === "limited" ? `; a limited part names in limited_by what shows the evidence in scope cannot settle it` : ""}` };
       if (/^P-?\d+$/i.test(rawBy)) return { ok: false, reason: `parts: "${id}" is open by ${rawBy.toUpperCase()}, a premise, and a premise is never an open part: what the case takes as given is cited in premises (stance assumed; a given is not proved again). Name what bounds the part (an acquisition ask R-<n>, a route L-<n>, a limitation or a coverage record E-<seq>), or record the part established` };
       const r = /^R-?([1-9]\d{0,6})$/i.exec(rawBy) ? `R-${Number(/(\d+)$/.exec(rawBy)![1])}` : /^L-?([1-9]\d{0,5})$/i.exec(rawBy) ? `L-${Number(/(\d+)$/.exec(rawBy)![1])}` : entryRef(rawBy);
       if (!r) return { ok: false, reason: `parts: "${id}"'s open_by names what bounds it: an acquisition ask R-<n>, a route L-<n>, or a limitation or a coverage record E-<seq> (got ${JSON.stringify(o.open_by)})` };
       openBy = r;
     }
     if (status === "open" && !openBy) return { ok: false, reason: `parts: "${id}" is open: say what bounds it in open_by: an acquisition ask R-<n> (the source that would settle it), a route L-<n> (the lead that would examine it), or a limitation or a coverage record E-<seq> (why it could not be established)` };
-    out.push({ id, part, status: status as PartStatus, ...(refs.value.length ? { refs: refs.value } : {}), ...(openBy ? { open_by: openBy } : {}) });
+    let limitedBy: string | undefined;
+    const rawLimit = String(o.limited_by ?? "").trim();
+    if (rawLimit) {
+      if (status !== "limited") return { ok: false, reason: `parts: "${id}" is ${status}: limited_by is a limited part's (what shows the evidence in scope cannot settle it)` };
+      if (/^P-?\d+$/i.test(rawLimit)) return { ok: false, reason: `parts: "${id}" is limited by ${rawLimit.toUpperCase()}, a premise, and a premise is never a limited part: what the case takes as given is cited in premises. Name the coverage record for the question, or a limitation whose reason is unavailable or excluded (E-<seq>)` };
+      const r = entryRef(rawLimit);
+      if (!r) return { ok: false, reason: `parts: "${id}"'s limited_by names what shows the evidence in scope cannot settle it: the coverage record for the question, or a limitation whose reason is unavailable or excluded, as E-<seq> (got ${JSON.stringify(o.limited_by)})` };
+      limitedBy = r;
+    }
+    if (status === "limited" && !limitedBy) return { ok: false, reason: `parts: "${id}" is limited: name in limited_by what shows the evidence in scope cannot settle it: the coverage record for the question (what was searched for it), or a limitation whose reason is unavailable or excluded (E-<seq>). Another seat reviews it as it reviews a negative. If a route or an ask could still settle it, it is open` };
+    out.push({ id, part, status: status as PartStatus, ...(refs.value.length ? { refs: refs.value } : {}), ...(openBy ? { open_by: openBy } : {}), ...(limitedBy ? { limited_by: limitedBy } : {}) });
   }
   return { ok: true, parts: out };
 }
 
-/** An answer's parts in words: each id, established or open (and by what), and its entries. */
+/** An answer's parts in words: each id, established, open or limited (and by what), and its entries. */
 export function partsWords(parts: readonly AnswerPart[]): string {
-  return parts.map((p) => `${p.id} "${p.part}" ${p.status === "established" ? `established (${(p.refs ?? []).join(", ")})` : `open, bounded by ${p.open_by}${p.refs?.length ? ` (so far ${p.refs.join(", ")})` : ""}`}`).join("; ");
+  const soFar = (p: AnswerPart) => (p.refs?.length ? ` (so far ${p.refs.join(", ")})` : "");
+  return parts.map((p) => `${p.id} "${p.part}" ${p.status === "established" ? `established (${(p.refs ?? []).join(", ")})` : p.status === "limited" ? `at the limit of the evidence, shown by ${p.limited_by}${soFar(p)}` : `open, bounded by ${p.open_by}${soFar(p)}`}`).join("; ");
 }
 
 /**
@@ -505,8 +528,16 @@ export type PremiseTest = { outcome: string; refs: string[] };
  */
 export type PartMark = { by: string; id?: string; part: string; why: string; not_asked?: true; missing?: true };
 
-/** One of an answer's rows, with each review that marks it not asked by the question and why. */
-export type PartRow = AnswerPart & { not_asked_by: Array<{ by: string; why: string }> };
+/**
+ * One of an answer's rows, with each review that marks it not asked by the
+ * question and why; a limited row with whether its bound is reviewed by a
+ * seat other than its authors, and by whom (null when the caller did not
+ * read the ledger).
+ */
+export type PartRow = AnswerPart & { not_asked_by: Array<{ by: string; why: string }>; bound?: BoundReview | null };
+
+/** Whether what a limited part is limited by stands reviewed as a negative is (protocol.ts limitedBoundReview): by whom, or why not. */
+export type BoundReview = { reviewed: boolean; by: string[]; why?: string };
 
 /**
  * An answer's parts as a reader weighs them (docs/adr/0013, "What the
@@ -524,6 +555,9 @@ export type PartsStanding = {
   rows: PartRow[];
   asked: number;
   established: number;
+  /** Asked parts at the limit of the evidence, and how many of those rest on a bound no other seat has reviewed yet. */
+  limited: number;
+  limited_unreviewed: number;
   open: number;
   open_not_asked: number;
   missing: Array<{ by: string; part: string; why: string }>;
@@ -533,8 +567,8 @@ export type PartsStanding = {
 
 const foldWords = (s: string) => s.normalize("NFKC").toLowerCase().replace(/\s+/g, " ").trim();
 
-export function partsStanding(parts: readonly AnswerPart[], marks: readonly PartMark[]): PartsStanding {
-  const rows: PartRow[] = parts.map((p) => ({ ...p, not_asked_by: [] }));
+export function partsStanding(parts: readonly AnswerPart[], marks: readonly PartMark[], bounds?: ReadonlyMap<string, BoundReview>): PartsStanding {
+  const rows: PartRow[] = parts.map((p) => ({ ...p, not_asked_by: [], ...(p.status === "limited" && bounds ? { bound: (p.limited_by && bounds.get(p.limited_by)) || null } : {}) }));
   const unmatched: PartMark[] = [];
   const missing: PartsStanding["missing"] = [];
   for (const m of marks) {
@@ -552,11 +586,14 @@ export function partsStanding(parts: readonly AnswerPart[], marks: readonly Part
   }
   const asked = rows.filter((r) => !r.not_asked_by.length);
   const established = asked.filter((r) => r.status === "established").length;
+  const limited = asked.filter((r) => r.status === "limited");
   const open = rows.filter((r) => r.status === "open");
   return {
     rows,
     asked: asked.length + missing.length,
     established,
+    limited: limited.length,
+    limited_unreviewed: limited.filter((r) => r.bound && !r.bound.reviewed).length,
     open: open.length,
     open_not_asked: open.filter((r) => r.not_asked_by.length).length,
     missing,
@@ -566,9 +603,10 @@ export function partsStanding(parts: readonly AnswerPart[], marks: readonly Part
 }
 
 /**
- * The plain line a partial answer leads with: "Asked parts: 3 of 3
- * established. Open: 1, which a review marks as not asked." Harness words
- * and counts only.
+ * The plain line an answer's parts lead with: "Asked parts: 3 of 3
+ * established. Open: 1, which a review marks as not asked.", or "Asked
+ * parts: 2 of 3 established, 1 at the limit of the evidence (its bound not
+ * yet reviewed by another seat). Open: none." Harness words and counts only.
  */
 export function partsSummaryWords(s: PartsStanding): string {
   const plural = (n: number, one: string, many: string) => (n === 1 ? one : many);
@@ -580,7 +618,8 @@ export function partsSummaryWords(s: PartsStanding): string {
         ? `Open: ${s.open}, of which ${s.open_not_asked} ${plural(s.open_not_asked, "a review marks", "reviews mark")} as not asked.`
         : `Open: ${s.open}.`;
   const missing = s.missing.length ? ` ${s.missing.length === 1 ? "A review names 1 part" : `Reviews name ${s.missing.length} parts`} of the question the answer leaves out.` : "";
-  return `Asked parts: ${s.established} of ${s.asked} established. ${open}${missing}`;
+  const limited = s.limited ? `, ${s.limited} at the limit of the evidence${s.limited_unreviewed ? ` (${s.limited_unreviewed === s.limited ? (s.limited === 1 ? "its bound" : "their bounds") : `${s.limited_unreviewed} of them`} not yet reviewed by another seat)` : ""}` : "";
+  return `Asked parts: ${s.established} of ${s.asked} established${limited}. ${open}${missing}`;
 }
 
 /** What a partial answer whose every asked part is established says beside its label (the label is unchanged); null otherwise. */

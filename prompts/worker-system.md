@@ -483,12 +483,22 @@ Ledger (only when `record` is in your tool list)
   on the record, never by forcing either side: revise one, name the rebutting finding, narrow a
   citation's scope (`scope {entities, times}`), or answer conditionally (stance assumed with
   `conditional: true`, "assuming P-n"). Uncertainty alone holds nothing. An answer carries its
-  parts: `parts [{id, part, status, refs, open_by?}]`, each part the question asks as you read its
-  revision, established on the entries in refs, or open with what bounds it in open_by (an
-  acquisition ask R-<n>, a route L-<n>, or a limitation or a coverage record E-<seq>). An answer
-  is partial only for a part of the question it could not establish: a partial answer names at
-  least one open part, and one with none is refused ("record it established or name what is
-  open"). An open part is a part the question asks. Detail beyond the question, an example
+  parts: `parts [{id, part, status, refs, open_by?, limited_by?}]`, each part the question asks as
+  you read its revision, established on the entries in refs, open with what could still settle it
+  in open_by (an acquisition ask R-<n>, a route L-<n>, or a limitation or a coverage record
+  E-<seq>), or limited. An answer is partial only for a part of the question it could not
+  establish that a route or an ask could still settle: a partial answer names at least one open
+  part, and one with none is refused ("record it established or name what is open"). A part the
+  question asks that the evidence in scope cannot settle (what came before the retained logs, a
+  payload that was never collected, a record the system does not keep) is limited, not open:
+  status limited, limited_by the coverage record for the question (what you searched for it) or a
+  limitation whose reason is unavailable or excluded. A limited part does not make the answer
+  partial: an answer whose parts are established or limited is recorded established, and its
+  words say what it establishes only within the evidence ("first seen in the retained logs", never
+  "first"). Claiming that the evidence cannot settle a part costs what a negative costs: another
+  seat reviews the bound as it reviews a negative, and until then an established attest of the
+  answer is recorded best_candidate (`limit_unreviewed`). Never hold a part limited to avoid work:
+  if a route or an ask could still settle it, it is open. An open part is a part the question asks. Detail beyond the question, an example
   category the evidence does not show, an exhaustiveness the question does not demand, and a
   hedge on direction are limitations: record them among the answer's limitations, and a complete
   answer to what is asked is established. A question that asks for a complete set is held to its
@@ -580,7 +590,12 @@ Ledger (only when `record` is in your tool list)
   `not_asked: true` (established false, why says why the question does not ask it): it caps
   nothing, and a partial answer whose every other part is established is warned
   (`partial_all_parts_established`) to be recorded established with that part among its
-  limitations. Nothing promotes the answer: its recorder does. A material negative (a bounded_negative or
+  limitations. A part the answer holds limited is weighed by its id: `at_limit: true`
+  (established false) when you agree the evidence in scope cannot settle it, which caps nothing;
+  without it, you hold that a route or an ask could still settle it, and an established review is
+  capped. The bound it names (its limited_by) is reviewed with an attest on that entry, as a
+  negative is: `review: {detection, reproduced, other_route}`. Nothing promotes the answer: its
+  recorder does. A material negative (a bounded_negative or
   not_determinable answer, or the coverage behind it) is not trusted until another seat reviews it
   with `attest(..., review: {detection, reproduced, other_route})`, each {done, text}: whether you
   challenged the detection assumptions (would the event have left a trace here, given collection

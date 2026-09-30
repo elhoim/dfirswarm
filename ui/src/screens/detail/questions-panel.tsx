@@ -31,7 +31,7 @@ import { EmptyState, ErrorState, InlineNote, LoadingState } from "@/components/s
 import { api, ApiError } from "@/lib/api";
 import { clock } from "@/lib/format";
 import { useLive, useResource } from "@/lib/live";
-import type { PremiseView, QuestionOrigin, QuestionView, QuestionsPanelView, SwarmView } from "@/lib/types";
+import type { PartsStanding, PremiseView, QuestionOrigin, QuestionView, QuestionsPanelView, SwarmView } from "@/lib/types";
 import { acceptPayload, amendPayload, baseMoved, formBase, questionGroups, type FormBase } from "@/lib/question-forms";
 import { cn } from "@/lib/utils";
 
@@ -70,6 +70,14 @@ function OriginBadge({ o }: { o: QuestionOrigin }) {
       ) : null}
     </>
   );
+}
+
+/** A part's status in words: established on what, open and what bounds it, or at the limit of the evidence and whether another seat reviewed what shows it. */
+function partWords(p: PartsStanding["rows"][number]): string {
+  const soFar = p.refs?.length ? ` (so far ${p.refs.join(", ")})` : "";
+  if (p.status === "established") return `established on ${(p.refs ?? []).join(", ")}`;
+  if (p.status === "limited") return `at the limit of the evidence, shown by ${p.limited_by ?? "?"}${p.bound ? (p.bound.reviewed ? `, reviewed by ${p.bound.by.join(", ")}` : ", not yet reviewed by another seat") : ""}${soFar}`;
+  return `open, bounded by ${p.open_by ?? "?"}${soFar}`;
 }
 
 function Row({ label, children }: { label: string; children: ReactNode }) {
@@ -237,13 +245,13 @@ function QuestionCard({ q, sigs, act, busy, children }: { q: QuestionView; sigs:
         </Row>
         {q.answer?.parts?.length ? (
           <Row label="Parts">
-            {/* A partial answer leads with its plain line; a review's not_asked mark sits beside the part it marks. */}
-            {q.answer.result === "partial" && q.answer.standing ? <p className="m-0 font-medium text-ink">{q.answer.standing.summary}</p> : null}
+            {/* A partial answer, or one holding parts at the limit of the evidence, leads with its plain line; a review's not_asked mark sits beside the part it marks. */}
+            {(q.answer.result === "partial" || (q.answer.standing?.limited ?? 0) > 0) && q.answer.standing ? <p className="m-0 font-medium text-ink">{q.answer.standing.summary}</p> : null}
             <ul className="m-0 list-none space-y-0.5 p-0">
               {(q.answer.standing?.rows ?? q.answer.parts.map((p) => ({ ...p, not_asked_by: [] as Array<{ by: string; why: string }> }))).map((p) => (
                 <li key={p.id}>
                   <code className="font-mono">{p.id}</code> {p.part}:{" "}
-                  <span className={p.status === "established" ? "text-moss-ink" : "text-saffron-ink"}>{p.status === "established" ? `established on ${(p.refs ?? []).join(", ")}` : `open, bounded by ${p.open_by ?? "?"}${p.refs?.length ? ` (so far ${p.refs.join(", ")})` : ""}`}</span>
+                  <span className={p.status === "established" ? "text-moss-ink" : "text-saffron-ink"}>{partWords(p)}</span>
                   {p.not_asked_by.length ? <span className="text-ink-3">{`; not asked by the question, as ${p.not_asked_by.length === 1 ? "a review marks it" : "reviews mark it"}: ${p.not_asked_by.map((x) => `${x.by} (${x.why})`).join("; ")}`}</span> : null}
                 </li>
               ))}

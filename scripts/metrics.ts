@@ -178,7 +178,10 @@ export type RunMetrics = {
    * and each whose asked parts are all established (asked: not marked
    * not_asked by a review; a part a review names missing is asked, and not
    * established), with its counts. A partial answer without parts is listed
-   * apart and never counted either way. Counts and ids only.
+   * apart and never counted either way. And the parts standing answers in
+   * scope hold at the limit of the evidence (docs/adr/0013, "A part at the
+   * limit of the evidence"), each with whether its bound is reviewed by
+   * another seat. Counts and ids only.
    */
   claims: {
     recorded: boolean;
@@ -186,6 +189,7 @@ export type RunMetrics = {
     with_parts: number;
     without_parts: Array<{ section: string; id: string | null; answer: string }>;
     asked_all_established: Array<{ section: string; id: string | null; answer: string; asked: number; established: number; open: number; open_not_asked: number }>;
+    limited?: Array<{ section: string; id: string | null; answer: string; part: string; bound: string; reviewed: boolean }>;
   };
   offers: {
     /** Whether the registers hold offer events at all (a run from before offers has none). */
@@ -541,7 +545,12 @@ function claimsOf(c: Context, scope: RunMetrics["questions"]): RunMetrics["claim
   let partial = 0;
   const without: RunMetrics["claims"]["without_parts"] = [];
   const all: RunMetrics["claims"]["asked_all_established"] = [];
+  const limited: NonNullable<RunMetrics["claims"]["limited"]> = [];
   for (const [section, e] of standingAnswers(c)) {
+    if (live.has(section) && e.parts?.some((p) => p.status === "limited")) {
+      const bounds = P.limitedBounds(e, c.entries, c.attestations, c.disputes);
+      for (const p of e.parts.filter((x) => x.status === "limited")) limited.push({ section, id: c.qs?.bySection.get(section)?.id ?? null, answer: `E-${e.seq}`, part: p.id, bound: p.limited_by ?? "", reviewed: bounds.get(p.limited_by ?? "")?.reviewed === true });
+    }
     if (!live.has(section) || NB.answerResult(e) !== "partial") continue;
     partial += 1;
     const id = c.qs?.bySection.get(section)?.id ?? null;
@@ -552,7 +561,7 @@ function claimsOf(c: Context, scope: RunMetrics["questions"]): RunMetrics["claim
     }
     if (s.all_asked_established) all.push({ section, id, answer: `E-${e.seq}`, asked: s.asked, established: s.established, open: s.open, open_not_asked: s.open_not_asked });
   }
-  return { recorded: c.have.ledger, partial, with_parts: partial - without.length, without_parts: without, asked_all_established: all };
+  return { recorded: c.have.ledger, partial, with_parts: partial - without.length, without_parts: without, asked_all_established: all, ...(limited.length ? { limited } : {}) };
 }
 
 function negativesAndCoverage(c: Context, scope: RunMetrics["questions"]): Pick<RunMetrics, "negatives" | "coverage"> {
@@ -1295,6 +1304,7 @@ export function metricsText(m: RunMetrics): string {
     ["Store sweeps", m.sweeps.recorded ? `${m.sweeps.records} coverage record(s) named what a hit would contain: ${m.sweeps.clean} clean, ${m.sweeps.with_hits} with hits outside the record (${m.sweeps.hit_objects} hit(s)), ${m.sweeps.echoes} echo(es) named and holding nothing, ${m.sweeps.partial} partial, ${m.sweeps.pending} pending; ${m.sweeps.held.length} negative hold(s) now (${list(m.sweeps.held.map((x) => `${qname(x)} ${x.answer} ${x.code} on ${x.coverage}`))}); ${m.sweeps.released} record(s) with hits released by a revision whose sweep is clean` : absent(LEDGER)],
     ["Confidence", m.confidence.recorded ? `${m.confidence.answers} standing answer(s) in scope, recorded: high ${m.confidence.recorded_levels.high}, medium ${m.confidence.recorded_levels.medium}, low ${m.confidence.recorded_levels.low}, none ${m.confidence.recorded_levels.none}; stated high ${m.confidence.stated.high}; ${m.confidence.lowered.length} recorded lower than stated${m.confidence.lowered.length ? ` (${list(m.confidence.lowered.map((x) => `${qname(x)} ${x.answer}: ${x.why}`))})` : ""}${m.confidence.legacy ? `; ${m.confidence.legacy} high(s) kept as declared (recorded before the run recorded confidence)` : ""}` : absent(LEDGER)],
     ["Under-claiming", m.claims.recorded ? `${m.claims.asked_all_established.length} of ${m.claims.with_parts} partial answer(s) with parts have every asked part established (asked: not marked not_asked by a review)${m.claims.asked_all_established.length ? ` (${list(m.claims.asked_all_established.map((x) => `${qname(x)} ${x.answer}: ${x.established} of ${x.asked} asked established, ${x.open} open, ${x.open_not_asked} not asked`))})` : ""}; ${m.claims.partial} partial in scope${m.claims.without_parts.length ? `, ${m.claims.without_parts.length} without parts, not counted (${list(m.claims.without_parts.map((x) => `${qname(x)} ${x.answer}`))})` : ""}` : absent(LEDGER)],
+    ["Limited parts", m.claims.recorded ? (m.claims.limited?.length ? `${m.claims.limited.length} part(s) held at the limit of the evidence, ${m.claims.limited.filter((x) => x.reviewed).length} on a bound another seat reviewed (${list(m.claims.limited.map((x) => `${qname(x)} ${x.answer} "${x.part}" by ${x.bound}${x.reviewed ? "" : ", not reviewed"}`))})` : "none") : absent(LEDGER)],
     ["Offers (leads)", o.recorded ? `${o.leads.made} made: ${o.leads.accepted} accepted, ${o.leads.declined} declined, ${o.leads.taken_by_another} taken by another seat, ${o.leads.lapsed} lapsed, ${o.leads.open} with no outcome` : o.wakes_before_offers.recorded ? "not recorded (no offer events: a run from before offers)" : absent(LEADS)],
     ["Offers (questions)", o.recorded ? `${o.questions.made} made: ${o.questions.accepted} accepted, ${o.questions.declined} declined, ${o.questions.not_taken_up} not taken up` : o.wakes_before_offers.recorded ? "not recorded (no offer events: a run from before offers)" : absent(LEADS)],
     ["Offers (reviews)", o.recorded ? `${o.reviews.made} made (${Object.entries(o.reviews.by_reason).map(([k, n]) => `${k} ${n}`).join(", ") || "none"}): ${o.reviews.accepted} taken up, ${o.reviews.declined} declined, ${o.reviews.withdrawn} withdrawn (reviewed by another route, or superseded), ${o.reviews.lapsed} lapsed, ${o.reviews.open} with no outcome; ${o.reviews.taken} taken by their seat first (offer accept)` : o.wakes_before_offers.recorded ? "not recorded (no offer events: a run from before offers)" : absent(LEADS)],
