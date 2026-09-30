@@ -24,6 +24,27 @@
  * bound to the coverage record by its hash. A record with looked_for and no
  * sweep line is pending. The gate (protocol.ts ledgerGate) reads them.
  *
+ * The same bytes under several names are one object: a file the harness
+ * kept under tool-output/ and the import it was sealed as are one, so a
+ * record that names either names both (the run sd0e59d held three
+ * negatives on kept outputs whose sealed imports their records named).
+ *
+ * Echoes (docs/adr/0013, "Echoes: authored, not derived"): a hit in an
+ * object whose every name was made by a command or a job that read nothing
+ * of the run but its own registers (the ledger, the board, SWARM.md, the
+ * trace…) and named objects this sweep found the same string in, and whose
+ * own words name the string or that read registers alone, or kept by the
+ * harness from a seat's own model words outside any tool call (a
+ * compaction summary), holds the string by construction: it is the run's
+ * words, or a named hit's again, not new evidence. It is named on the line
+ * (`echoes`, with what made each name) and holds nothing. One whose maker
+ * read such named objects, and whose words do not name the string, is said
+ * among the named hits, with what it read. A maker that read anything else
+ * (an input, which the sweep never reads, included), or whose reads cannot
+ * be told (a command that names no path, a job that saw everything),
+ * leaves the hit standing. The makers come from the trace (the line that
+ * kept the file) and the jobs' own records: refs and words only, no parser.
+ *
  * The reverse sweep (docs/adr/0013, "Late evidence: the reverse sweep and
  * the delta"): when evidence is added, the new import's files, and only
  * they, are searched for the looked_for strings of every coverage record
@@ -42,7 +63,7 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { appendFile, lstat, mkdir, readdir, readFile } from "node:fs/promises";
+import { appendFile, lstat, mkdir, readdir, readFile, realpath } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { LedgerEntry } from "./protocol.ts";
@@ -87,7 +108,36 @@ export type SweepHit = {
   encodings: Array<"utf-8" | "utf-16le">;
   /** Other objects that hold the same bytes (one blob, several names). */
   also?: string[];
+  /** What made each name of the object, when that is why the hit holds nothing (an echo, or a reading of objects the record names). */
+  origins?: HitOrigin[];
 };
+/**
+ * What made one name of a hit object, and why that makes the hit the run's
+ * own words or a reading of what the record names (docs/adr/0013, "Echoes:
+ * authored, not derived"). `by` is the maker: `trace:<sha256>` (the trace
+ * line that kept a file under tool-output/), `job:<id>` (a job), or
+ * `trace-spill` (the trace itself, spilled under a seat's tool-output/).
+ * - `searched`: its maker's own words (a command, a tool's arguments, a
+ *   job's command or arguments, the run's paths they name aside) name the
+ *   string, and it read nothing of the run but what is accounted for
+ *   (`reads`; a job by its declared inputs, a command by the paths its
+ *   words name): the output holds the string because the search asked for
+ *   it. A search that read evidence the record does not name, or an input
+ *   (which the sweep never reads), is no echo: its matches are the miss
+ *   the sweep is for.
+ * - `registers`: its maker read the run's own registers and harness files
+ *   and no other path of the run (RUN_REGISTERS): the run's words about the
+ *   case, not evidence of it.
+ * - `harness`: the harness kept it from a seat's own model words outside
+ *   any tool call (HARNESS_KEEPERS: a compaction summary).
+ * - `named_sources`: its maker read only what is accounted for, at least
+ *   one object (`reads`): their hits are said already.
+ * Accounted for: a register, or an object the record names in which the
+ * same sweep found the same string (a named hit says it). An input is never
+ * accounted for: the sweep does not read the images, so what is made from
+ * one is the only place its rows show (the round-13 export).
+ */
+export type HitOrigin = { name: string; by: string; why: "searched" | "registers" | "harness" | "named_sources"; reads?: string[] };
 export type SweepState = "clean" | "hits" | "partial";
 export type SweepRecord = {
   v: 1;
@@ -99,8 +149,10 @@ export type SweepRecord = {
   searched: { objects: number; bytes: number };
   /** In objects the record does not name (its refs, or the outputs among its result_refs): these hold the negative. */
   hits: SweepHit[];
-  /** In objects the record names already: said, never holding; a reviewer checks the answer accounts for them. */
+  /** In objects the record names already, or whose every name was made from objects it names in which this sweep found the string (`origins`): said, never holding; a reviewer checks the answer accounts for them. */
   named_hits: SweepHit[];
+  /** Echoes: in objects the record does not name whose every name was made from the run's own words (a command that read only registers, a summary the harness kept, a search for the string over what is accounted for; `origins` says which and by what): said, never holding. Absent on a line from before 2026-09-30. */
+  echoes?: SweepHit[];
   /** What the budget did not reach, each named with why. */
   unsearched: Array<{ ref: string; why: string }>;
   started_at: string;
@@ -145,9 +197,34 @@ export type ImportSweepRecord = {
 export type AnySweepLine = SweepRecord | ImportSweepRecord;
 
 /** One object a sweep reads. */
-type SweepObject = { ref: string; path: string; bytes: number; key: string };
+type SweepObject = { ref: string; path: string; bytes: number; key: string; mtimeMs?: number };
 
-/** Every output the run holds that is not an input image, sorted by ref; the same bytes under several names share a key. */
+/** The sha256 of a file known by its inode, by its inode, size and time: a kept output or a job's log is written once. */
+const contentHashes = new Map<string, string>();
+async function contentKey(x: SweepObject): Promise<string | null> {
+  const stamp = `${x.key}:${x.bytes}:${x.mtimeMs ?? 0}`;
+  const had = contentHashes.get(stamp);
+  if (had) return had;
+  try {
+    const h = createHash("sha256");
+    for await (const chunk of createReadStream(x.path)) h.update(chunk as Buffer);
+    const key = `sha256:${h.digest("hex")}`;
+    contentHashes.set(stamp, key);
+    return key;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Every output the run holds that is not an input image, sorted by ref; the
+ * same bytes under several names share a key. A sealed object is known by
+ * the sha256 its manifest gives; a file the harness kept under tool-output/
+ * and a job's log by their inode, and by their content when another object
+ * has their size: a kept output and the import it was sealed as are one
+ * object (the run sd0e59d's records named the import, and the kept file
+ * went on holding their negatives).
+ */
 export async function sweepObjects(sandboxRoot: string): Promise<SweepObject[]> {
   const out: SweepObject[] = [];
   const dirs = async (p: string) => (await readdir(p, { withFileTypes: true }).catch(() => [])).filter((d) => d.isDirectory()).map((d) => d.name);
@@ -159,9 +236,9 @@ export async function sweepObjects(sandboxRoot: string): Promise<SweepObject[]> 
       return null;
     }
   };
-  const fileKey = async (path: string): Promise<{ key: string; bytes: number } | null> => {
+  const fileKey = async (path: string): Promise<{ key: string; bytes: number; mtimeMs: number } | null> => {
     const st = await lstat(path).catch(() => null);
-    return st?.isFile() ? { key: `ino:${st.dev}:${st.ino}`, bytes: st.size } : null;
+    return st?.isFile() ? { key: `ino:${st.dev}:${st.ino}`, bytes: st.size, mtimeMs: st.mtimeMs } : null;
   };
   // Sealed job outputs, and each job's logs (stdout.log is what job_status pages).
   const jobs = join(sandboxRoot, "store", "jobs");
@@ -201,6 +278,14 @@ export async function sweepObjects(sandboxRoot: string): Promise<SweepObject[]> 
       }
     };
     await walk(join(tools, seat), "");
+  }
+  // Known by its inode and the same size as another object: known by its content, so the same bytes are one object whatever named them.
+  const sizes = new Map<number, number>();
+  for (const x of out) sizes.set(x.bytes, (sizes.get(x.bytes) ?? 0) + 1);
+  for (const x of out) {
+    if (!x.key.startsWith("ino:") || (sizes.get(x.bytes) ?? 0) < 2) continue;
+    const key = await contentKey(x);
+    if (key) x.key = key;
   }
   return out.sort((a, b) => a.ref.localeCompare(b.ref));
 }
@@ -306,8 +391,8 @@ export function unexaminedHits(cov: LedgerEntry, entries: readonly LedgerEntry[]
   const found = new Map<string, UnexaminedHit>();
   for (const e of entries) {
     if (e.kind !== "coverage" || e.seq >= cov.seq || !e.hash || !(e.answers ?? []).some((a) => questions.has(qkey(a)))) continue;
-    for (const sw of sweeps) {
-      if (sw.target !== e.hash) continue;
+    // Its sweep as the gate reads it: the latest line for it (a replay's --resweep adds one).
+    for (const sw of [sweepOf(e, sweeps)].filter((x): x is SweepRecord => Boolean(x))) {
       for (const h of sw.hits) {
         const was = found.get(h.ref);
         const earlier = !was || Date.parse(sw.at) < Date.parse(was.found_at);
@@ -344,6 +429,244 @@ function normRef(r: string): string {
   return r.trim().replace(/^(job|import):([^/]+)\/out\//, "$1:$2/").replace(/\/+$/, "");
 }
 
+// --- echoes: authored, not derived ----------------------------------------------------------------
+
+/**
+ * The run's own registers and harness files (docs/adr/0013, "Echoes:
+ * authored, not derived"): what the run says about the case, written by its
+ * seats, its operator and the harness, never evidence of it. A command that
+ * read these and no other path of the run made the run's words again.
+ */
+export const RUN_REGISTERS: readonly string[] = ["ledger/", "leads/", "questions/", "requests/", "threads/", "board/", "inbox/", "traces/", "done/", "locks/", "SWARM.md", "operator-requests.jsonl", "team.json", "names.json", "budget.json", "layout.json"];
+
+/**
+ * The harness's own trace events that keep a file under tool-output/ from a
+ * seat's model words outside any tool call: the self-compaction's
+ * (extensions/self-compact.ts SELF_COMPACT_EVENTS; a stopped summary is kept
+ * by compact_failed). Named, so an event not here that keeps a file is read
+ * as a tool call's and its hits hold (tests/store-sweep-echoes.test.ts keeps
+ * the two lists the same).
+ */
+export const HARNESS_KEEPERS: ReadonlySet<string> = new Set(["context", "compact_notice", "compact_warning", "compact_forced", "compact_hold", "compact_note", "compact_start", "compact_done", "compact_failed", "compact_stalled", "compact_config"]);
+
+/** The trace spilled under a seat's tool-output/ when its collector could not be reached (protocol.ts traceSpillRel): the trace itself. */
+const TRACE_SPILL = "trace-spill.jsonl";
+
+/** Every string in a tool call's arguments, at any depth (not the keys). */
+function stringsIn(v: unknown, depth = 0): string[] {
+  if (typeof v === "string") return [v];
+  if (!v || typeof v !== "object" || depth > 8) return [];
+  return (Array.isArray(v) ? v : Object.values(v as Record<string, unknown>)).flatMap((x) => stringsIn(x, depth + 1));
+}
+
+/**
+ * The paths a maker's own words name (docs/adr/0013, "Echoes: authored, not
+ * derived"), token by token, after the run's absolute paths (`roots`), $PWD
+ * and ./ are taken off: a token that begins with one of the run's own
+ * top-level names and a slash, a top-level file's name, or a top-level
+ * directory's name quoted whole, as the run path it is; and, as a path
+ * outside what the run's layout says (read as unnamed evidence), the run's
+ * root (`.`, `*`), a parent (`..`), a hidden entry at the root, a path
+ * through a variable, and an absolute path elsewhere (/dev/null and the
+ * standard streams aside). Words, not a parser: a path the command builds
+ * while it runs is not seen, which is why a maker that names no path is
+ * never read as having read nothing. `text` is the words with the run
+ * paths blanked, for the string's own test.
+ */
+export function runPathsIn(words: string, top: ReadonlySet<string>, roots: readonly string[] = []): { text: string; paths: string[] } {
+  let w = words;
+  for (const r of roots) if (r && r !== "/") w = w.split(`${r.replace(/\/+$/, "")}/`).join("");
+  w = w.replace(/\$\{?PWD\}?\/|\$\(pwd\)\//g, "");
+  const paths: string[] = [];
+  let text = "";
+  let last = 0;
+  for (const m of w.matchAll(/[^\s'"`;|&<>(){}[\],=]+/g)) {
+    const raw = m[0];
+    const at = m.index ?? 0;
+    const t = raw.replace(/^(?:\.\/)+/, "");
+    let path: string | null = null;
+    if (/^(?:\.{1,2}|\*|\.\.\/.*|\*\/.*)$/.test(t) || (raw.startsWith("./") && !t)) path = t || ".";
+    else if (/^\/[A-Za-z0-9_.~-]/.test(t) || /^~(?:\/|$)/.test(t) || /^[a-z][a-z0-9+.-]*:\/\//i.test(t)) path = /^\/dev\/(?:null|stdin|stdout|stderr|fd\/\d+)$/.test(t) ? null : t;
+    else if (/^\.[A-Za-z0-9_-][^/]*\//.test(t) || /^\$[A-Za-z_{(].*\//.test(t)) path = t;
+    else {
+      const first = t.split("/")[0]!;
+      if (top.has(first)) {
+        const q = w[at - 1];
+        const quoted = (q === "'" || q === '"') && w[at + raw.length] === q;
+        // A directory's bare name is a word as often as a path: read as one only quoted whole ('inputs').
+        if (t.includes("/") || first.includes(".")) path = t;
+        else if (quoted) path = `${t}/`;
+        if (path) {
+          text += `${w.slice(last, at)} `;
+          last = at + raw.length;
+        }
+      }
+    }
+    if (path) paths.push(path);
+  }
+  return { text: text + w.slice(last), paths };
+}
+
+/** A path of the run as what it names: a register, an object by its ref, or another path of the run (null). */
+function pathNames(p: string): { register: true } | { ref: string } | null {
+  const clean = p.replace(/\/{2,}/g, "/");
+  if (clean.split("/").some((s) => s === "..")) return null;
+  for (const r of RUN_REGISTERS) if (r.endsWith("/") ? clean === r.slice(0, -1) || clean.startsWith(r) : clean === r) return { register: true };
+  let m: RegExpExecArray | null;
+  if ((m = /^inputs\/(.+)$/.exec(clean))) return { ref: `input:${m[1]}` };
+  if ((m = /^store\/(jobs|imports)\/([^/]+)(?:\/(.*))?$/.exec(clean))) {
+    const rest = (m[3] ?? "").replace(/^out(?:\/|$)/, "").replace(/\/+$/, "");
+    return { ref: `${m[1] === "jobs" ? "job" : "import"}:${m[2]}${rest ? `/${rest}` : ""}` };
+  }
+  if ((m = /^store\/net\/([^/]+\/[^/]+(?:\/.+)?)$/.exec(clean))) return { ref: `net:${m[1]!.replace(/\/+$/, "")}` };
+  if ((m = /^store\/blobs\/([0-9a-f]{64})$/.exec(clean))) return { ref: `sha256:${m[1]}` };
+  if ((m = /^tool-output\/([^/]+)\/(.+)$/.exec(clean))) return { ref: `tool:${m[1]}/${m[2]}` };
+  return null;
+}
+
+/** Whether words name a string, as the sweep folds case; a backslash before punctuation (a pattern's escape) read as nothing. */
+function namesTerm(words: string, term: string): boolean {
+  const t = term.toLowerCase();
+  const l = words.toLowerCase();
+  return l.includes(t) || l.replace(/\\(?=[^A-Za-z0-9\s])/g, "").includes(t);
+}
+
+type JobSpec = { kind?: string; command?: string; tool?: string; args?: unknown; inputs?: string[]; scope?: string; network?: string; seal?: { ref?: string } };
+
+/**
+ * What made each name of a hit object, for a coverage record whose objects
+ * are `refs` (docs/adr/0013, "Echoes: authored, not derived"): a function of
+ * the object's names and a string, null when any name was made by something
+ * that is neither an echo of the string nor a reading of what the record
+ * names (its hit holds). What it reads it reads once, when first asked: the
+ * trace's kept outputs (keptOutputOrigins), the jobs' records, the seals of
+ * the seats' own outputs, the run's top-level names.
+ */
+export function hitOrigins(sandboxRoot: string, refs: readonly string[]): (names: readonly string[], term: string, said: (ref: string, term: string) => boolean) => Promise<HitOrigin[] | null> {
+  const S = resolve(sandboxRoot);
+  const canon = refs.map((r) => r.trim().replace(/^input:inputs\//, "input:"));
+  const named = (ref: string) => refsName(canon, ref);
+  let kept: Promise<Map<string, { line_sha256: string; tool: string; args: unknown }>> | null = null;
+  let seals: Promise<Map<string, string>> | null = null;
+  let top: Promise<{ names: Set<string>; roots: string[] }> | null = null;
+  const jobs = new Map<string, Promise<JobSpec | null>>();
+  const ES = () => import("../scripts/evidence-store.ts");
+  const keptOf = () => (kept ??= ES().then((m) => m.keptOutputOrigins(S)).catch(() => new Map()));
+  // A seat's own output sealed: its import and the import job's output are its bytes, made as it was.
+  const sealsOf = () => (seals ??= ES().then(async (m) => new Map((await m.brainOutputSeals(S)).map((x) => [normRef(x.import), x.ref] as [string, string]))).catch(() => new Map<string, string>()));
+  const topOf = () => (top ??= (async () => ({ names: new Set((await readdir(S).catch(() => [] as string[])).filter((n) => !n.startsWith("."))), roots: [...new Set([S, await realpath(S).catch(() => S)])] }))());
+  const jobOf = (id: string) => {
+    let p = jobs.get(id);
+    if (!p) {
+      p = readFile(join(S, "store", "jobs", id, "job.json"), "utf8")
+        .then((t) => {
+          const j = JSON.parse(t) as { state?: string; spec?: JobSpec };
+          return j.state === "committed" ? (j.spec ?? null) : null;
+        })
+        .catch(() => null);
+      jobs.set(id, p);
+    }
+    return p;
+  };
+  // What a maker read, accounted for: a register, or an object the record names in which this sweep found the string (its hit said already). An input is never swept: what is made from it is the only place its rows show.
+  const accounted = (ref: string, term: string, said: (ref: string, term: string) => boolean) => named(ref) && said(ref, term);
+  // The paths a maker's words name, each accounted for; null when any is not, or none is named.
+  const readsOf = async (words: string, term: string, said: (ref: string, term: string) => boolean): Promise<{ text: string; verdict: { why: "registers" } | { why: "named_sources"; reads: string[] } | null }> => {
+    const t = await topOf();
+    const { text, paths } = runPathsIn(words, t.names, t.roots);
+    if (!paths.length) return { text, verdict: null };
+    const reads: string[] = [];
+    for (const p of paths) {
+      const k = pathNames(p);
+      if (!k || ("ref" in k && !accounted(k.ref, term, said))) return { text, verdict: null };
+      if ("ref" in k && !reads.includes(k.ref)) reads.push(k.ref);
+    }
+    return { text, verdict: reads.length ? { why: "named_sources", reads } : { why: "registers" } };
+  };
+  const originOf = async (name: string, term: string, said: (ref: string, term: string) => boolean, depth = 0): Promise<HitOrigin | null> => {
+    if (depth > 3) return null;
+    const n = normRef(name);
+    let m: RegExpExecArray | null;
+    if ((m = /^tool:([^/]+)\/(.+)$/.exec(n))) {
+      if (m[2] === TRACE_SPILL) return { name, by: "trace-spill", why: "registers" };
+      const line = (await keptOf()).get(`tool-output/${m[1]}/${m[2]}`);
+      if (!line) return null;
+      const by = `trace:${line.line_sha256}`;
+      if (HARNESS_KEEPERS.has(line.tool)) return { name, by, why: "harness" };
+      // What a command read is what its words name: nothing it names, or anything but registers and objects the record names, and the hit stands.
+      const { text, verdict } = await readsOf(stringsIn(line.args).join("\n"), term, said);
+      if (!verdict) return null;
+      if (namesTerm(text, term)) return { name, by, why: "searched", ...(verdict.why === "named_sources" ? { reads: verdict.reads } : {}) };
+      return { name, by, ...verdict };
+    }
+    if ((m = /^trace:([0-9a-f]{64})$/.exec(n))) return { name, by: n, why: "registers" };
+    if ((m = /^import:([^/]+)\/.+$/.exec(n))) {
+      const origin = (await sealsOf()).get(n);
+      const o = origin ? await originOf(origin, term, said, depth + 1) : null;
+      return o ? { ...o, name } : null;
+    }
+    if ((m = /^job:([^/]+)(?:\/.*)?$/.exec(n))) {
+      const spec = await jobOf(m[1]!);
+      if (!spec) return null;
+      const by = `job:${m[1]}`;
+      if (spec.kind === "import" && spec.seal?.ref) {
+        const o = await originOf(spec.seal.ref, term, said, depth + 1);
+        return o ? { ...o, name } : null;
+      }
+      // What a job read is what it declared, and nothing else: each an object the record names, and no network. A job that saw everything (inputs left out, or all) read unnamed evidence.
+      if (spec.kind !== "command" && spec.kind !== "tool") return null;
+      if (spec.scope !== "declared" || (spec.network ?? "off") !== "off") return null;
+      const reads: string[] = [];
+      for (const d of spec.inputs ?? []) {
+        const t = d.trim();
+        const ref = /^[a-z0-9]+:/.test(t) ? t.replace(/^input:inputs\//, "input:") : (pathNames(t) as { ref?: string } | null)?.ref;
+        if (!ref || !accounted(ref, term, said)) return null;
+        if (!reads.includes(ref)) reads.push(ref);
+      }
+      const { text } = runPathsIn((await ES()).jobOwnWords(spec), (await topOf()).names);
+      if (namesTerm(text, term)) return { name, by, why: "searched", ...(reads.length ? { reads } : {}) };
+      return reads.length ? { name, by, why: "named_sources", reads } : null;
+    }
+    return null;
+  };
+  return async (names, term, said) => {
+    const out: HitOrigin[] = [];
+    for (const name of names) {
+      const o = await originOf(name, term, said);
+      if (!o) return null;
+      out.push(o);
+    }
+    return out.length ? out : null;
+  };
+}
+
+/**
+ * What a sweep found in the objects the record names, as a test: whether it
+ * found `term` in the object `ref` names (any name of its bytes; a
+ * directory, in any object under it). A maker that read such an object
+ * made again what the named hit says already.
+ */
+function saidIn(named: readonly SweepHit[]): (ref: string, term: string) => boolean {
+  const found = new Map<string, Set<string>>();
+  for (const h of named) {
+    for (const n of [h.ref, ...(h.also ?? [])]) {
+      const k = normRef(n);
+      found.set(k, (found.get(k) ?? new Set()).add(h.term.toLowerCase()));
+    }
+  }
+  return (ref, term) => {
+    const r = normRef(ref);
+    const t = term.toLowerCase();
+    for (const [k, terms] of found) if ((k === r || k.startsWith(`${r}/`)) && terms.has(t)) return true;
+    return false;
+  };
+}
+
+/** Whether a hit's makers make it an echo (every name the run's own words), not a reading of named objects. */
+export function isEcho(origins: readonly HitOrigin[]): boolean {
+  return origins.length > 0 && origins.every((o) => o.why !== "named_sources");
+}
+
 /** Search every output the run holds for a coverage record's looked_for strings. Pure over the store; `now` and the budget are the caller's (tests fix them). */
 export async function computeSweep(sandboxRoot: string, cov: Pick<LedgerEntry, "seq" | "hash" | "refs" | "result_refs" | "looked_for">, o: { maxBytes?: number; maxMs?: number; now?: () => number } = {}): Promise<Omit<SweepRecord, "prev" | "hash">> {
   const now = o.now ?? Date.now;
@@ -353,13 +676,16 @@ export async function computeSweep(sandboxRoot: string, cov: Pick<LedgerEntry, "
   const pats = patterns(terms);
   // What the record names: the objects it searched, and the outputs its search produced (a search's own
   // output echoes what it looked for; it was read as the search's result). A hit there is said, never holding.
-  const refs = [...(cov.refs ?? []), ...(cov.result_refs ?? []).filter((r) => !/^E-\d+$/.test(r))];
+  const refs = recordObjects(cov);
   const objects = await sweepObjects(sandboxRoot);
   // The same bytes under several names are read once; a group is named when any of its names is.
   const groups = new Map<string, SweepObject[]>();
   for (const x of objects) groups.set(x.key, [...(groups.get(x.key) ?? []), x]);
+  const origins = hitOrigins(sandboxRoot, refs);
   const hits: SweepHit[] = [];
   const namedHits: SweepHit[] = [];
+  const echoes: SweepHit[] = [];
+  const unnamed: Array<{ hit: SweepHit; names: string[] }> = [];
   const unsearched: SweepRecord["unsearched"] = [];
   let searchedObjects = 0;
   let searchedBytes = 0;
@@ -385,11 +711,58 @@ export async function computeSweep(sandboxRoot: string, cov: Pick<LedgerEntry, "
     const named = group.some((g) => refsName(refs, g.ref, key));
     for (const [t, f] of [...found.entries()].sort((a, b) => a[0] - b[0])) {
       const hit: SweepHit = { ref: first.ref, term: terms[t]!, count: f.count, first_offset: f.first, encodings: [...f.encodings].sort(), ...(group.length > 1 ? { also: group.slice(1).map((g) => g.ref) } : {}) };
-      (named ? namedHits : hits).push(hit);
+      if (named) namedHits.push(hit);
+      else unnamed.push({ hit, names: group.map((g) => g.ref) });
     }
   }
+  // Not named: an echo, or said among the named hits, when what made every name of it says so (hitOrigins), read against what this sweep found in the objects the record names; else a hit.
+  const said = saidIn(namedHits);
+  for (const { hit, names } of unnamed) {
+    const made = await origins(names, hit.term, said);
+    if (!made) hits.push(hit);
+    else (isEcho(made) ? echoes : namedHits).push({ ...hit, origins: made });
+  }
   const state: SweepState = hits.length ? "hits" : unsearched.length ? "partial" : "clean";
-  return { v: 1, seq: cov.seq, target: cov.hash ?? "", state, terms, searched: { objects: searchedObjects, bytes: searchedBytes }, hits, named_hits: namedHits, unsearched, started_at: new Date(started).toISOString(), at: new Date(now()).toISOString() };
+  return { v: 1, seq: cov.seq, target: cov.hash ?? "", state, terms, searched: { objects: searchedObjects, bytes: searchedBytes }, hits, named_hits: namedHits, echoes, unsearched, started_at: new Date(started).toISOString(), at: new Date(now()).toISOString() };
+}
+
+/** The objects a coverage record names: its refs, and the outputs among its result_refs (a search's own output echoes what it looked for). */
+function recordObjects(cov: Pick<LedgerEntry, "refs" | "result_refs">): string[] {
+  return [...(cov.refs ?? []), ...(cov.result_refs ?? []).filter((r) => !/^E-\d+$/.test(r))];
+}
+
+/**
+ * A recorded sweep's hits read again by this harness (scripts/replay.ts
+ * --resweep): each hit's object as the store names it now (every name of
+ * its bytes), named when the record names any of them, an echo or said
+ * among the named hits when what made each name says so (hitOrigins), a
+ * hit otherwise. The line's other fields are its own: what it searched,
+ * what it did not, and when. Nothing is searched again.
+ */
+export async function resplitSweep(sandboxRoot: string, cov: Pick<LedgerEntry, "refs" | "result_refs">, line: SweepRecord): Promise<Omit<SweepRecord, "prev" | "hash">> {
+  const refs = recordObjects(cov);
+  const objects = await sweepObjects(sandboxRoot);
+  const keyOf = new Map(objects.map((x) => [x.ref, x.key]));
+  const origins = hitOrigins(sandboxRoot, refs);
+  const hits: SweepHit[] = [];
+  const namedHits = [...line.named_hits];
+  const echoes = [...(line.echoes ?? [])];
+  const said = saidIn(line.named_hits.filter((h) => !h.origins?.length));
+  for (const h of line.hits) {
+    const was = [h.ref, ...(h.also ?? [])];
+    const keys = new Set(was.map((n) => keyOf.get(n)).filter((k): k is string => Boolean(k)));
+    const names = [...new Set([...was, ...objects.filter((x) => keys.has(x.key)).map((x) => x.ref)])];
+    const hit: SweepHit = { ...h, ...(names.length > 1 ? { also: names.filter((n) => n !== h.ref) } : {}) };
+    if (names.some((n) => refsName(refs, n, keyOf.get(n)))) {
+      namedHits.push(hit);
+      continue;
+    }
+    const made = await origins(names, h.term, said);
+    if (!made) hits.push(hit);
+    else (isEcho(made) ? echoes : namedHits).push({ ...hit, origins: made });
+  }
+  const { prev: _p, hash: _h, ...rest } = line;
+  return { ...rest, state: hits.length ? "hits" : line.unsearched.length ? "partial" : "clean", hits, named_hits: namedHits, echoes };
 }
 
 /** A sweep line's hash: over the previous line's and its own fields, canonical. */
@@ -454,9 +827,26 @@ export function sweepOf(c: Pick<LedgerEntry, "hash">, sweeps: readonly SweepReco
   return sweeps.filter((s) => s.target === c.hash).at(-1) ?? null;
 }
 
-/** A hit in words. */
+/** A hit in words, with what made its object when that is why it holds nothing. */
 export function hitWords(h: SweepHit): string {
-  return `"${h.term}" in ${h.ref}${h.also?.length ? ` (the same bytes as ${h.also.join(", ")})` : ""}, ${h.count} time${h.count === 1 ? "" : "s"}, first at byte ${h.first_offset}${h.encodings.includes("utf-16le") ? ` (${h.encodings.join(" and ")})` : ""}`;
+  return `"${h.term}" in ${h.ref}${h.also?.length ? ` (the same bytes as ${h.also.join(", ")})` : ""}, ${h.count} time${h.count === 1 ? "" : "s"}, first at byte ${h.first_offset}${h.encodings.includes("utf-16le") ? ` (${h.encodings.join(" and ")})` : ""}${h.origins?.length ? ` [${originWords(h.origins)}]` : ""}`;
+}
+
+/** What made a hit's object, in words: each maker once. */
+export function originWords(origins: readonly HitOrigin[]): string {
+  const seen = new Map<string, HitOrigin>();
+  for (const o of origins) if (!seen.has(`${o.by}\u0000${o.why}`)) seen.set(`${o.by}\u0000${o.why}`, o);
+  return [...seen.values()]
+    .map((o) =>
+      o.why === "searched"
+        ? `made by ${o.by}, whose own words name the string: an echo of the search`
+        : o.why === "registers"
+          ? `made by ${o.by} from the run's own registers: the run's words, not evidence`
+          : o.why === "harness"
+            ? `kept by the harness from a seat's own words (${o.by}): not evidence`
+            : `made by ${o.by} from ${(o.reads ?? []).join(", ")}, which the record names`,
+    )
+    .join("; ");
 }
 
 /** A sweep in words, for the ledger's rendering, the report and the review offer. */
@@ -468,6 +858,7 @@ export function sweepWords(s: SweepRecord | null, c: Pick<LedgerEntry, "looked_f
     head,
     s.hits.length ? `found outside the record's objects: ${s.hits.map(hitWords).join("; ")}` : "",
     s.named_hits.length ? `found in objects the record names (does the answer account for them?): ${s.named_hits.map(hitWords).join("; ")}` : "",
+    s.echoes?.length ? `echoes, holding nothing (is each only the run's own words?): ${s.echoes.map(hitWords).join("; ")}` : "",
     s.unsearched.length ? `not searched: ${s.unsearched.map((u) => `${u.ref} (${u.why})`).join("; ")}` : "",
   ]
     .filter(Boolean)

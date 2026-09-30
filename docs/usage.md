@@ -785,7 +785,17 @@ or a limitation whose refs name the object itself (not a directory holding
 it), or one absence whose refs list several, written after the sweep that
 found it. A hit object a record names with no such entry keeps holding
 (`sweep_hits`, each object named, and the record's reply says so): naming a
-hit is not examining it. A partial
+hit is not examining it. A kept output and the import it was sealed as are
+one object: naming either names both. A hit in an object made from the run's
+own words is an echo, said on the line and holding nothing (ADR 0013,
+"Echoes: authored, not derived"): a command that read only the run's
+registers (a dump of the ledger), a summary the harness kept from a seat's
+own words (a compaction), or a search whose own words name the string and
+that read only the registers and named objects the sweep found the string
+in. One made only from such named objects is said among the named hits. A
+maker that read an input, anything else of the run, or paths that cannot be
+told (a command naming none, a job that saw everything) leaves the hit
+holding. A partial
 sweep holds until the operator accepts the question's limits
 (`sweep_partial`). A sweep lost with the process that began it is run again by
 the finish gate and the answers check once its record is older than
@@ -1007,7 +1017,7 @@ finished run measures the same whenever it is read.
 | Quick negatives | Lead `close` events with disposition `negative` that the hub flagged `quick_negative` when it wrote them: the lead was held two minutes or less from its holder's take to the close, had at most one job, and that job's declared scope held at most one object (a job over everything is never quick). Each close counts, so a lead reopened and closed negative again counts twice; the flag is a review cue, not a defect. Out of every negative close. |
 | Negative answers, reviewed | Standing answers of a question in scope that the finish gate holds as negatives (protocol.ts `negativeByResult`, the gate's own test): `bounded_negative`, `not_determinable`, and a `premise_not_supported` resting on a search alone (no standing finding it cites for its question shows the premise false). Reviewed: an `attest` carrying its review (detection, reproduction, another route), by a seat that wrote neither the answer nor a coverage record it cites, on the answer or on a standing coverage record it cites whose results still stand (protocol.ts `negativeReview`, the gate's own test). |
 | Unreviewed negatives | The negative answers above that are not reviewed, split into material (these hold the finish) and background. Measured at the end, not at any moment during the run. |
-| Store sweeps | Coverage records that name `looked_for`, by how their sweep (`ledger/sweeps.jsonl`) ended: clean, with hits in objects the record does not name (and how many hit objects), partial, or pending (no line yet); the standing negatives in scope a sweep holds now (`sweep_pending`, `sweep_hits`, `sweep_partial`, with the coverage record); and the records with hits that a revision naming what the sweep found released (the revision's own sweep clean). |
+| Store sweeps | Coverage records that name `looked_for`, by how their sweep (`ledger/sweeps.jsonl`) ended: clean, with hits in objects the record does not name (and how many hit objects, and how many echoes were named and hold nothing), partial, or pending (no line yet); the standing negatives in scope a sweep holds now (`sweep_pending`, `sweep_hits`, `sweep_partial`, with the coverage record); and the records with hits that a revision naming what the sweep found released (the revision's own sweep clean). |
 | Confidence | Each standing answer of a question in scope, by the confidence its author stated and the one the run records (protocol.ts `recordedConfidence`): a high stands only on an established answer another seat attested established, naming the alternatives it weighed, why the evidence rules each out and the entries that show it; any other high is recorded medium. The answers recorded lower than stated are named, with the harness's reason. An answer recorded before the rule (no `confidence_rule` in its entry) keeps the confidence its author declared, and such highs are counted apart (`legacy`). |
 | Under-claiming | The standing `partial` answers of questions in scope, those that carry parts, and each of those whose asked parts are all established: a part is asked unless a review of the answer marks it `not_asked`, a part a review names `missing` is asked and not established, and at least one part is asked (protocol.ts `answerPartsStanding`, the reading the report's plain line and the console show). Each is named with its counts (asked, established, open, open parts a review marks not asked). A partial answer without parts (one recorded before them) is named apart and counted neither way. What it measures is how often a complete answer is labelled partial on what the question does not ask; the answer itself stands as recorded. |
 | Coverage records | Standing `coverage` records, each counted once: stale when a result it names no longer stands (by code: `missing`, `rebound`, `superseded` with the entry that replaced it, `disputed` with the seats that dispute it, never their words), else by the hub's computed field: `complete`, `partial`, or not computed (a record from before the field). A stale record is never complete, whatever its field says. Complete means the jobs behind it were given, by digest, every object it names; it never means the objects were the relevant ones. Reviewed, as the finish gate counts it: an `attest` with its review on the record, by a seat that did not write it, while its results stand; or an `attest` with its review on a negative answer resting on the record that the gate holds reviewed (the review of the negative is the review of its search). Both are given apart. |
@@ -1047,7 +1057,7 @@ run's under-claiming count (the metric above), side by side.
 ### Replay: `swarm.sh replay`, `scripts/replay.ts`
 
 ```
-swarm.sh replay <id> [--checkout PATH] [--compare [A [B]]] [--stop-policy P[,P...]] [--deliveries] [--prepare-as STATE] [--reverse-sweep] [--presumes Q[,Q...]] [--json] [--show-text]
+swarm.sh replay <id> [--checkout PATH] [--compare [A [B]]] [--stop-policy P[,P...]] [--deliveries] [--prepare-as STATE] [--reverse-sweep] [--resweep] [--presumes Q[,Q...]] [--json] [--show-text]
 node --experimental-strip-types scripts/replay.ts <run-dir | id --registry FILE> [the same options]
 ```
 
@@ -1110,7 +1120,8 @@ measure a rule change on recorded histories before paying for new runs
   "Late evidence: the reverse sweep and the delta"), each evidence
   addition's, its passes read as one: its state, how many standing
   coverage records and strings it searched for, how many objects it read, and per question the hit objects
-  and occurrences, never a string. Where it has the review carry rule (ADR
+  and occurrences, never a string. Each coverage record's store sweep, by
+  its latest line: the hits, the named hits and the echoes, counted. Where it has the review carry rule (ADR
   0015, "A review carries over"), the report's reviews replayed over its
   versions in `history/`: the acks, the re-reviews of a later version and
   how many the rule finds standing already (each recorded ack read as a
@@ -1169,6 +1180,15 @@ measure a rule change on recorded histories before paying for new runs
   addition, marked synthetic, on the copy's chain. Only for a checkout that
   reads version 2 sweep lines (one from before would read the chain as
   broken): its copy is left as it is, and the output says so.
+- **`--resweep`** reads each coverage record's recorded store sweep again
+  with this checkout's rules (ADR 0013, "Echoes: authored, not derived"):
+  each recorded hit whose object the record names under another name of the
+  same bytes (a kept output and its sealed import), or whose makers make it
+  an echo or a reading of what the record names, is moved, and the record
+  gets the result as a synthetic line on the copy's chain. Nothing is
+  searched again; a sweep where nothing moves gets no line. It prints how
+  many sweeps moved hits, how many hits there were and are, and how many
+  went to the named hits and to the echoes.
 - **`--presumes Q[,Q...]`** asks what the premise rule (ADR 0011, "What a
   question presumes") would have said of a run from before it: each question
   named is amended in every copy, by this checkout's register as the

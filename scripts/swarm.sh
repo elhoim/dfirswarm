@@ -9353,7 +9353,7 @@ cmd_metrics() {
 # nothing; no model call, no job, no VM.
 cmd_replay() {
   local id="${1:-}"
-  [[ -n "$id" && "$id" != -* ]] || die_usage "replay requires <id> [--checkout PATH] [--compare [A [B]]] [--stop-policy P[,P...]] [--deliveries] [--prepare-as STATE] [--reverse-sweep] [--presumes Q[,Q...]] [--json] [--show-text]"
+  [[ -n "$id" && "$id" != -* ]] || die_usage "replay requires <id> [--checkout PATH] [--compare [A [B]]] [--stop-policy P[,P...]] [--deliveries] [--prepare-as STATE] [--reverse-sweep] [--resweep] [--presumes Q[,Q...]] [--json] [--show-text]"
   shift
   ensure_registry
   node --experimental-strip-types --no-warnings "$ROOT/scripts/replay.ts" "$id" --registry "$REGISTRY" "$@"
@@ -11626,7 +11626,7 @@ by sha256 and the release's detached ssh signature; it carries no signature of i
 EOF
       ;;
     replay) cat <<'EOF'
-  replay <id> [--checkout PATH] [--compare [A [B]]] [--stop-policy P[,P...]] [--deliveries] [--prepare-as STATE] [--reverse-sweep] [--presumes Q[,Q...]] [--json] [--show-text]
+  replay <id> [--checkout PATH] [--compare [A [B]]] [--stop-policy P[,P...]] [--deliveries] [--prepare-as STATE] [--reverse-sweep] [--resweep] [--presumes Q[,Q...]] [--json] [--show-text]
 Reads a finished run's registers again under a harness's finish rules: the answers check (each
 check-answers line of the goal, as its own function), the finish gate and the finish line's verdict,
 readiness, the finish register (the coordinator, what is late against the report), the report's
@@ -11650,6 +11650,9 @@ are hashed before and after. The goal's other checks are its own commands: not r
                     the preparation hold would have held, and which it would have warned
   --reverse-sweep   for a run recorded before the reverse sweep existed: each evidence addition swept
                     on the copy against the coverage records standing at it, counted per question
+  --resweep         each coverage record's recorded store sweep read again by this checkout (nothing
+                    searched again): hits in the same bytes the record names under another name, and
+                    echoes (an output made from the run's own words), moved off the hits
   --presumes Q,...  for a run recorded before questions presumed: each question named amended on the
                     copy to presume its event (synthetic words): which partial answers the premise rule
                     would have warned (premise_untested), and which established attests it would cap

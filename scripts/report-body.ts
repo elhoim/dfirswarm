@@ -2794,6 +2794,7 @@ function limitsSection(run: Run, memo: Map<number, EntryState>): BodySection {
   if (swept.length) {
     const recs = swept.map((c) => ({ c, sw: sweepOf({ hash: entryHash(c) }, run.sweeps) }));
     const withHits = recs.filter((x) => x.sw?.hits.length);
+    const withEchoes = recs.filter((x) => !x.sw?.hits.length && x.sw?.echoes?.length);
     const released = withHits.filter((x) => {
       const next = run.replaced.get(x.c.seq);
       const n = next !== undefined ? run.bySeq.get(next) : undefined;
@@ -2804,10 +2805,10 @@ function limitsSection(run: Run, memo: Map<number, EntryState>): BodySection {
     blocks.push({
       k: "p",
       s: [
-        `${plural(swept.length, "coverage record")} named what a hit would contain, and the hub searched every output the run held for it (job outputs and logs, imports, captures, the agents' kept tool outputs): ${recs.filter((x) => x.sw).length} swept, ${recs.filter((x) => !x.sw).length} pending, ${withHits.length} with hits in objects the record did not name, ${recs.filter((x) => x.sw?.unsearched.length).length} partial; ${released.length} of the records with hits were revised to name what the sweep found, and their sweep is clean.`,
+        `${plural(swept.length, "coverage record")} named what a hit would contain, and the hub searched every output the run held for it (job outputs and logs, imports, captures, the agents' kept tool outputs): ${recs.filter((x) => x.sw).length} swept, ${recs.filter((x) => !x.sw).length} pending, ${withHits.length} with hits in objects the record did not name, ${recs.filter((x) => x.sw?.unsearched.length).length} partial; ${released.length} of the records with hits were revised to name what the sweep found, and their sweep is clean.${withEchoes.length ? ` ${plural(withEchoes.length, "record")} found its strings only in echoes (an output made from the run's own words, or by a search that asked for the string and read nothing the record does not name): named below, holding nothing.` : ""}`,
       ],
     });
-    if (withHits.length) blocks.push({ k: "list", items: withHits.map((x): Span[] => [{ e: x.c.seq }, `: ${sweepWords(x.sw, x.c)}`, run.replaced.has(x.c.seq) ? " (revised)" : ""]) });
+    if (withHits.length || withEchoes.length) blocks.push({ k: "list", items: [...withHits, ...withEchoes].map((x): Span[] => [{ e: x.c.seq }, `: ${sweepWords(x.sw, x.c)}`, run.replaced.has(x.c.seq) ? " (revised)" : ""]) });
   }
 
   blocks.push({ k: "h", level: 3, text: "Searched and not found" });

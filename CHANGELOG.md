@@ -6,6 +6,58 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Fixed: the store sweep reads a kept output and its sealed import as one object, and names echoes
+
+On the calibration run sd0e59d the store sweep held three negatives
+(`sweep_hits`, questions 2, 5 and 6) on hits in whole outputs the harness had
+kept under `tool-output/`. The seats sealed each file and named the import in
+revised coverage records, as the fix said, and the hits held on for two done
+calls and more than half an hour: the sweep knew the import by its manifest's
+sha256 and the kept file by its inode, so the two were separate objects. Now
+(ADR 0013, "Echoes: authored, not derived"):
+
+- **One object under several names.** A kept output or a job's log is known
+  by its content when another object has its size (hashed once, cached): a
+  kept output and the import it was sealed as are one object, and a record
+  that names either names both.
+- **Echoes.** A hit in an object made from the run's own words is named on
+  the sweep's line (`echoes`, each with its `origins`: what made every name
+  of the object, and why) and holds nothing: a command that read only the
+  run's registers and harness files (a dump of the ledger, which holds every
+  `looked_for` string; `RUN_REGISTERS`), a summary the harness kept from a
+  seat's own words outside any tool call (a compaction; `HARNESS_KEEPERS`),
+  or a search whose own words name the string and that read nothing but
+  what is accounted for. The same principle as the network's evidence link
+  (ADR 0012): what a command's own words name is authored, not derived
+  (`jobOwnWords`, now one helper for both).
+- **Accounted for** is a register, or an object the record names in which the
+  same sweep found the same string. An output made only from such objects,
+  whose maker does not name the string, is said among the named hits with
+  what it read. A maker that read an input (which the sweep never reads, so
+  a derivation of one is the only place its rows show), anything else of the
+  run, or paths that cannot be told (a command naming none, a job that saw
+  everything or reached the network) leaves the hit holding: a search for
+  the string over evidence the record does not name is the miss the sweep
+  is for.
+- **Makers from the record, not a parser.** A kept output's maker is the
+  trace line that kept it (attributed to its seat, on the chain:
+  `keptOutputOrigins`), and what it read the run paths its words name
+  (`runPathsIn`); a job's is its record and its declared inputs; a sealed
+  import is made as the output it sealed was.
+- **Shown** in the sweep's words (`ledger.md`, the review offer, which asks
+  whether each echo is only the run's own words, the report's store sweeps)
+  and the metrics (`sweeps.echoes`). A line from before has no `echoes` and
+  reads as it did; `unexaminedHits` reads each earlier sweep by its latest
+  line, as the gate does.
+- **Measured**: `swarm.sh replay --resweep` reads each recorded sweep again
+  with this checkout's rules and adds the result as a synthetic line on the
+  copy's chain, nothing searched again. On sd0e59d, of 106 recorded hits 67
+  still hold, 26 move to the named hits (the sealed imports the records
+  named) and 13 are echoes (8 a ledger dump, 3 a compaction summary, 2 jobs
+  that searched named objects the sweep found the string in); the three
+  `sweep_hits` holds clear, and the three questions take the dispositions
+  their answers claim.
+
 ### Added: a question's premise is tested first
 
 In a synthetic calibration case a question asks about an event that did not
