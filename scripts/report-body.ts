@@ -71,6 +71,7 @@ import {
   verifyDisputeChain,
   verifyLedgerChain,
   answerReviews,
+  answerPartsStanding,
   heldAsBestCandidate,
   recordedConfidence,
   confidenceWords,
@@ -90,8 +91,8 @@ import { readSweeps, sweepOf, sweepWords, type SweepRecord } from "../extensions
 import { answerResult, resultWords, reviewWords as negativeReviewWords, NEGATIVE_RESULTS } from "../extensions/negative-bar.ts";
 import { sectionBars } from "./check-answers.ts";
 import { leadsSnapshot, rankedLeads, viewLead, type LeadEvent, type LeadView, type LeadsSnapshot } from "../extensions/leads.ts";
-import { originWords, premiseViews, questionViews, type PremiseView, type QuestionEvent, type QuestionView, type QuestionsSnapshot } from "../extensions/questions.ts";
-import { classWords, scopeWords } from "../extensions/premises.ts";
+import { originWords, premiseViews, presumptionsOf, questionViews, type PremiseView, type QuestionEvent, type QuestionView, type QuestionsSnapshot } from "../extensions/questions.ts";
+import { classWords, partialPlainWords, partsSummaryWords, presumptionWords, scopeWords, type PartsStanding, type Presumption } from "../extensions/premises.ts";
 import { questionCost, tokensWords, type QuestionCost } from "./question-cost.ts";
 import { FINISH_LOG, readFinish, type FinishState } from "../extensions/finish.ts";
 import { evidenceCodeRun, onlyOwnOutputs, ownJobOutputs, ownWords, type EvidenceCode } from "../extensions/evidence-code.ts";
@@ -562,7 +563,8 @@ async function loadRun(sandboxArg: string, opts: ReportBodyOptions): Promise<Run
   const sweeps = await readSweeps(sandbox).catch(() => [] as SweepRecord[]);
   const preparation = hasAnswers ? await import("../extensions/preparation.ts").then((PR) => PR.preparationFacts(sandbox, entries)).catch(() => undefined) : undefined;
   const premises = register?.snap.state.premises;
-  const gate = hasAnswers ? ledgerGate({ entries, attestations, disputes, sections, failed: unqualified, bar, partial: partialOutputCites(entries, producerOf), sweeps, ...(preparation ? { preparation } : {}), ...(premises?.size ? { premises } : {}) }) : null;
+  const presumes = ls ? presumptionsOf(ls.questions, ls.state) : new Map<string, Presumption>();
+  const gate = hasAnswers ? ledgerGate({ entries, attestations, disputes, sections, failed: unqualified, bar, partial: partialOutputCites(entries, producerOf), sweeps, ...(preparation ? { preparation } : {}), ...(premises?.size ? { premises } : {}), ...(presumes.size ? { presumes } : {}) }) : null;
 
   const text = async (rel: string) => (await readFile(join(sandbox, rel), "utf8").catch(() => ""));
   const ledgerChain = verifyLedgerChain(await text("ledger/entries.jsonl"));
@@ -1253,11 +1255,14 @@ function summarySection(run: Run, memo: Map<number, EntryState>): BodySection {
         for (const l of leads) tally.set(l.disposition ?? l.status, (tally.get(l.disposition ?? l.status) ?? 0) + 1);
         const named = st.answer ? [] : run.entries.filter((e) => !run.replaced.has(e.seq) && (e.answers ?? []).some((x) => sectionKey(x) === c.key));
         const ans = st.answer ? answerResult(st.answer) : null;
+        // A partial answer's parts (docs/adr/0013, "What the report shows of an answer's parts"): the plain line, and beside the label when every asked part is established.
+        const standing = st.answer && ans === "partial" ? answerPartsStanding(st.answer, run.attestations) : null;
+        const plain = partialPlainWords(ans, standing);
         return [
           [c.q ? { a: `#${questionAnchor(c.q.id)}`, text: questionName(c.q) } : { a: `#${chainAnchor(chainName(c))}`, text: chainName(c) }],
-          [{ chip: state ?? st.status }, ...(c.v?.answer?.stale ? [" ", { chip: { text: "stale", tone: "brick" } } as Span] : [])],
+          [{ chip: state ?? st.status }, ...(plain && !state ? [` ${plain}`] : []), ...(c.v?.answer?.stale ? [" ", { chip: { text: "stale", tone: "brick" } } as Span] : [])],
           [...(c.v ? [`${c.v.id} · `] : []), ...askerSpans(c.v, c.q)],
-          st.answer ? [{ e: st.answer.seq }, ` ${ans ? resultWords(ans) : st.answer.inconclusive ? "inconclusive" : "no result stated"}`] : named.length ? [`none; ${plural(named.length, "entry", "entries")}: `, ...named.flatMap((e, i): Span[] => [...(i ? [", " as Span] : []), { e: e.seq }])] : ["none"],
+          st.answer ? [{ e: st.answer.seq }, ` ${ans ? resultWords(ans) : st.answer.inconclusive ? "inconclusive" : "no result stated"}`, ...(standing ? [`. ${partsSummaryWords(standing)}`] : [])] : named.length ? [`none; ${plural(named.length, "entry", "entries")}: `, ...named.flatMap((e, i): Span[] => [...(i ? [", " as Span] : []), { e: e.seq }])] : ["none"],
           [leads.length ? `${leads.length}: ${[...tally].map(([k, n]) => `${n} ${k}`).join(", ")}` : "0"],
           [c.v?.accepted ? `${c.v.accepted.as === "bounded" ? "bounded" : "not determinable"}${c.v.accepted.stands ? "" : " (lifted)"}` : "—"],
           [run.cost && run.cost.source !== "none" ? `${(run.cost.shown.byQuestion.get(costKey(c)) ?? 0).toLocaleString("en-US")}${run.cost.source === "trace" ? " (est.)" : ""}` : "—"],
@@ -1531,6 +1536,8 @@ function chainBlock(c: ChainQ, run: Run, memo: Map<number, EntryState>, limits: 
   // The proposition tested: the first lead under the question that stated one.
   const framed = leads.find((l) => l.proposition);
   rows.push({ label: "Proposition tested", s: framed ? [`${framed.proposition}; its negation: ${framed.negation ?? "not stated"} (${framed.id})`] : [v && ["analyst", "reviewer", "observer"].includes(v.origin.kind) ? "no lead stated one (a person's question is tested as a proposition and its negation)" : "none stated: the question was worked as asked"] });
+  // What the question takes as happened (docs/adr/0011, "What a question presumes"): its answer tests it first.
+  if (v?.presumption) rows.push({ label: "Presumes", s: [`${presumptionWords(v.presumption)}: its answer tests that premise first, against "the question's premise is not supported"`] });
   const body: Block[] = [{ k: "rows", rows }];
   // The leads: whole, except the negatives and the duplicates, counted here and listed whole in Appendix F.
   const negatives = leads.filter((l) => l.disposition === "negative");
@@ -1575,6 +1582,10 @@ function chainBlock(c: ChainQ, run: Run, memo: Map<number, EntryState>, limits: 
         ...(v?.answer?.stale ? [" ", { b: `Stale: ${v.answer.stale_why === "evidence" ? "evidence arrived for the question after it was recorded" : `it answers r${v.answer.question_rev}, and the question stands at r${v.rev}`}.` } as Span] : []),
       ],
     });
+    // Its parts, part by part (docs/adr/0013, "What the report shows of an answer's parts").
+    body.push(...chainPartsBlocks(a, run));
+    // The test of what it presumes (docs/adr/0011, "What a question presumes").
+    body.push(...premiseTestBlocks(a, v, run));
     // How strongly other seats hold it (B2): established, or a best candidate only, and what capped it.
     // Held a best candidate only when it claims established (heldAsBestCandidate, the test the finish reads).
     const reviews = answerReviews(a, run.attestations);
@@ -2111,11 +2122,14 @@ function questionBlock(q: Question, run: Run, memo: Map<number, EntryState>): Bl
   // what was not found where, unless the answer earned the stronger words;
   // the agents' own words follow it, whole, and marked as theirs.
   const bounded = boundedConclusion(a, q, run);
+  // A partial answer leads with its parts in a plain line (docs/adr/0013, "What the report shows of an answer's parts"); one without rows reads as before.
+  body.push(...partialLeadBlocks(a, run));
   body.push({ k: "voice", voice: "opinion", label: a.inconclusive ? "Answer (inconclusive)" : "Answer", s: [bounded ?? a.value], chips: chipsOf(a, s).filter((c) => c.text !== "answer") });
   if (bounded) body.push({ k: "p", s: [`As the agents worded it (not the conclusion: the bar for saying more is not met): ${a.value}`] });
   body.push(...resultBlocks(a, q, run));
   body.push(...partsBlocks(a, q, run));
   body.push(...premiseBlocks(a, run));
+  body.push(...premiseTestBlocks(a, q.reg ? (run.register?.byId.get(q.reg) ?? null) : null, run));
   body.push({
     k: "p",
     s: [
@@ -2179,7 +2193,8 @@ function refSpan(r: string): Span {
  */
 function partsBlocks(a: LedgerEntry, q: Question, run: Run): Block[] {
   const out: Block[] = [];
-  if (a.parts?.length) {
+  const standing = answerPartsStanding(a, run.attestations);
+  if (standing) {
     const v = q.reg ? run.register?.byId.get(q.reg) : undefined;
     const asked = v?.revisions.find((r) => r.rev === (a.question_rev ?? 1))?.text ?? q.text;
     out.push({ k: "p", s: [`Part by part, as the answer reads revision ${a.question_rev ?? 1} of the question${asked ? ` ("${asked}")` : ""}:`] });
@@ -2187,20 +2202,83 @@ function partsBlocks(a: LedgerEntry, q: Question, run: Run): Block[] {
       k: "table",
       cls: "parts",
       head: ["Part", "What it asks", "Status", "Rests on, or what bounds it"],
-      rows: a.parts.map((p): Span[][] => [
-        [p.id],
-        [p.part],
-        [p.status],
-        p.status === "established" ? (p.refs ?? []).flatMap((r, i): Span[] => [i ? ", " : "", refSpan(r)]) : [refSpan(p.open_by ?? "?"), ...(p.refs?.length ? [" (so far ", ...p.refs.flatMap((r, i): Span[] => [i ? ", " : "", refSpan(r)]), ")"] : [])],
-      ]),
+      // A review's not_asked mark beside the part it marks: a limitation, not an open part; the answer stands as recorded.
+      rows: standing.rows.map((p): Span[][] => [[p.id], [p.part], [p.status, ...notAskedSpans(p.not_asked_by)], partRefSpans(p)]),
     });
   }
-  const omitted = run.attestations.filter((x) => x.target === (a.hash ?? "") && !a.authors.includes(x.by)).flatMap((x) => (x.answer_review?.parts ?? []).filter((p) => p.missing).map((p) => ({ by: x.by, part: p.part, why: p.why })));
+  const omitted = answerReviews(a, run.attestations).flatMap((x) => (x.answer_review?.parts ?? []).filter((p) => p.missing).map((p) => ({ by: x.by, part: p.part, why: p.why })));
   if (omitted.length) out.push({ k: "note", s: [`A review says the answer leaves out ${omitted.length === 1 ? "a part" : "parts"} of the question: ${omitted.map((x) => `"${x.part}" (${x.by}: ${x.why})`).join("; ")}. It stays here until the answer is recorded again with ${omitted.length === 1 ? "it" : "them"}.`] });
-  // A part a review says the question does not ask (not_asked): a limitation, not an open part; the answer stands as recorded.
-  const unasked = run.attestations.filter((x) => x.target === (a.hash ?? "") && !a.authors.includes(x.by)).flatMap((x) => (x.answer_review?.parts ?? []).filter((p) => p.not_asked).map((p) => ({ by: x.by, id: p.id, part: p.part, why: p.why })));
+  // A part a review says the question does not ask (not_asked) that names none of the answer's rows (or an answer without rows): said apart, never dropped.
+  const unasked = standing
+    ? standing.unmatched.map((m) => ({ by: m.by, id: m.id, part: m.part, why: m.why }))
+    : answerReviews(a, run.attestations).flatMap((x) => (x.answer_review?.parts ?? []).filter((p) => p.not_asked).map((p) => ({ by: x.by, id: p.id, part: p.part, why: p.why })));
   if (unasked.length) out.push({ k: "note", s: [`A review says ${unasked.length === 1 ? "a part" : "parts"} the answer holds ${unasked.length === 1 ? "is" : "are"} outside what the question asks: ${unasked.map((x) => `${x.id ? `${x.id} ` : ""}"${x.part}" (${x.by}: ${x.why})`).join("; ")}. Such a part is a limitation, not an open part; the answer stands as recorded.`] });
   return out;
+}
+
+/** The reviews that mark a part not asked by the question, beside it. */
+function notAskedSpans(by: PartsStanding["rows"][number]["not_asked_by"]): Span[] {
+  return by.length ? [`; not asked by the question, as ${by.length === 1 ? "a review marks it" : "reviews mark it"}: ${by.map((x) => `${x.by} (${x.why})`).join("; ")}`] : [];
+}
+
+/** What a part rests on, or what bounds it and what it rests on so far. */
+function partRefSpans(p: PartsStanding["rows"][number]): Span[] {
+  return p.status === "established" ? (p.refs ?? []).flatMap((r, i): Span[] => [i ? ", " : "", refSpan(r)]) : [refSpan(p.open_by ?? "?"), ...(p.refs?.length ? [" (so far ", ...p.refs.flatMap((r, i): Span[] => [i ? ", " : "", refSpan(r)]), ")"] : [])];
+}
+
+/**
+ * The plain line a partial answer leads with (docs/adr/0013, "What the
+ * report shows of an answer's parts"): how many of the parts the question
+ * asks are established, how many are open and how many of those a review
+ * marks not asked; and, when every asked part is established, that it is,
+ * beside the label, which is the recorder's and unchanged. Nothing on an
+ * answer without rows, or one that is not partial.
+ */
+function partialLeadBlocks(a: LedgerEntry, run: Run): Block[] {
+  if (answerResult(a) !== "partial") return [];
+  const s = answerPartsStanding(a, run.attestations);
+  if (!s) return [];
+  const plain = partialPlainWords("partial", s);
+  return [{ k: "p", s: [{ b: partsSummaryWords(s) }, ...(plain ? [` Partial as recorded, and ${plain}.`] : [])] }];
+}
+
+/**
+ * The test of what a question presumes (docs/adr/0011, "What a question
+ * presumes"): what it presumes, then each test on the record (the answer's
+ * own, each review's), what it showed and on what; for an established or
+ * partial answer with none, that none is recorded. Nothing on a question
+ * that presumes nothing, unless the answer carries a test of its own.
+ */
+function premiseTestBlocks(a: LedgerEntry, v: QuestionView | null, run: Run): Block[] {
+  const tests = [...(a.premise_tested ? [{ who: `the answer (${a.authors.join(", ")})`, t: a.premise_tested }] : []), ...answerReviews(a, run.attestations).flatMap((x) => (x.answer_review?.premise_tested ? [{ who: `${x.by}'s review`, t: x.answer_review.premise_tested }] : []))];
+  const p = v?.presumption ?? null;
+  if (!p && !tests.length) return [];
+  const result = answerResult(a);
+  return [
+    {
+      k: "p",
+      s: [
+        { b: "Premise tested" },
+        p ? `: the question presumes ${presumptionWords(p)}. ` : ": ",
+        ...(tests.length
+          ? tests.flatMap((x, i): Span[] => [i ? "; " : "", `by ${x.who}, against "the question's premise is not supported": ${x.t.outcome} (`, ...x.t.refs.flatMap((r, j): Span[] => [j ? ", " : "", refSpan(r)]), ")"])
+          : [result === "established" || result === "partial" || result === null ? "No test of that premise is on the record: neither the answer nor a review of it tests whether it happened." : "No test of that premise is on the record."]),
+        tests.length ? "." : "",
+      ],
+    },
+  ];
+}
+
+/** An answer's parts in its §2 chain: a partial answer's plain line, then each part, established on what it rests on or open with what bounds it, with the reviews that mark it not asked. Nothing on an answer without rows. */
+function chainPartsBlocks(a: LedgerEntry, run: Run): Block[] {
+  const s = answerPartsStanding(a, run.attestations);
+  if (!s) return [];
+  const partial = answerResult(a) === "partial";
+  const plain = partialPlainWords(answerResult(a), s);
+  return [
+    { k: "p", s: [{ b: "Parts" }, ...(partial ? [`: ${partsSummaryWords(s)}${plain ? ` Partial as recorded, and ${plain}.` : ""}`] : [])] },
+    { k: "list", items: s.rows.map((p): Span[] => [{ code: p.id }, ` ${p.part}: ${p.status === "established" ? "established on " : "open, bounded by "}`, ...partRefSpans(p), ...notAskedSpans(p.not_asked_by)]) },
+  ];
 }
 
 /**
@@ -2716,6 +2794,7 @@ function limitsSection(run: Run, memo: Map<number, EntryState>): BodySection {
   if (swept.length) {
     const recs = swept.map((c) => ({ c, sw: sweepOf({ hash: entryHash(c) }, run.sweeps) }));
     const withHits = recs.filter((x) => x.sw?.hits.length);
+    const withEchoes = recs.filter((x) => !x.sw?.hits.length && x.sw?.echoes?.length);
     const released = withHits.filter((x) => {
       const next = run.replaced.get(x.c.seq);
       const n = next !== undefined ? run.bySeq.get(next) : undefined;
@@ -2726,10 +2805,10 @@ function limitsSection(run: Run, memo: Map<number, EntryState>): BodySection {
     blocks.push({
       k: "p",
       s: [
-        `${plural(swept.length, "coverage record")} named what a hit would contain, and the hub searched every output the run held for it (job outputs and logs, imports, captures, the agents' kept tool outputs): ${recs.filter((x) => x.sw).length} swept, ${recs.filter((x) => !x.sw).length} pending, ${withHits.length} with hits in objects the record did not name, ${recs.filter((x) => x.sw?.unsearched.length).length} partial; ${released.length} of the records with hits were revised to name what the sweep found, and their sweep is clean.`,
+        `${plural(swept.length, "coverage record")} named what a hit would contain, and the hub searched every output the run held for it (job outputs and logs, imports, captures, the agents' kept tool outputs): ${recs.filter((x) => x.sw).length} swept, ${recs.filter((x) => !x.sw).length} pending, ${withHits.length} with hits in objects the record did not name, ${recs.filter((x) => x.sw?.unsearched.length).length} partial; ${released.length} of the records with hits were revised to name what the sweep found, and their sweep is clean.${withEchoes.length ? ` ${plural(withEchoes.length, "record")} found its strings only in echoes (an output made from the run's own words, or by a search that asked for the string and read nothing the record does not name): named below, holding nothing.` : ""}`,
       ],
     });
-    if (withHits.length) blocks.push({ k: "list", items: withHits.map((x): Span[] => [{ e: x.c.seq }, `: ${sweepWords(x.sw, x.c)}`, run.replaced.has(x.c.seq) ? " (revised)" : ""]) });
+    if (withHits.length || withEchoes.length) blocks.push({ k: "list", items: [...withHits, ...withEchoes].map((x): Span[] => [{ e: x.c.seq }, `: ${sweepWords(x.sw, x.c)}`, run.replaced.has(x.c.seq) ? " (revised)" : ""]) });
   }
 
   blocks.push({ k: "h", level: 3, text: "Searched and not found" });

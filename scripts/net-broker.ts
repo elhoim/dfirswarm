@@ -25,7 +25,7 @@ import { join, resolve } from "node:path";
 import * as L from "../extensions/leads.ts";
 import * as P from "../extensions/protocol.ts";
 import { permittedUse, POLICY_REL, readCasePolicy, type CasePolicy } from "./case-policy.ts";
-import { resolveRef } from "./evidence-store.ts";
+import { jobOwnWords, resolveRef } from "./evidence-store.ts";
 import { loadCatalogue, loadDeny, type Catalogue, type DenyList } from "./net-adapters.ts";
 import { principalToken, type FetchAnswer, type NetFetchConfig } from "./net-fetch.ts";
 import { appendNetEvents, captureDir, GRANTS_LOG, grantStatus, NET_LOCK, parseCaptureRef, readNetState, type GrantRecord, type NetDraft, type NetState, type Reason } from "./net-grants.ts";
@@ -95,7 +95,7 @@ async function evidenceSource(S: string, ref: string, values: string[]): Promise
     if (kind === "command" || kind === "tool") {
       const declared = job.spec.scope === "declared" ? job.spec.inputs ?? [] : [];
       if (!declared.some(sourceDeclaration)) return { ok: false, why: `job ${id} declared no source it read (${job.spec.scope === "declared" ? "only an agent's own files" : "its inputs were left out or all"}): a job that declares the evidence it reads makes a derivation of it` };
-      const own = [job.spec.command ?? "", job.spec.tool ?? "", JSON.stringify(job.spec.args ?? {})].join("\n").toLowerCase();
+      const own = jobOwnWords(job.spec);
       for (const v of values) if (own.includes(v.toLowerCase())) excluded.add(v);
     }
   }

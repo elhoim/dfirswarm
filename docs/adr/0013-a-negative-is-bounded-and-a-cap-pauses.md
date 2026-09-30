@@ -364,6 +364,10 @@ cited nothing against it.
   against the whole store. The calibration run's late false negative was
   this case: its revised coverage named the new evidence, so a sweep's hit
   there would be a named one, shown to the reviewer rather than holding.
+  An object made from the run's own words (a dump of the ledger, a seat's
+  compaction summary, a search that asked for the string and read only
+  what is accounted for) is an echo, named on the line and holding
+  nothing; see "Echoes: authored, not derived" below.
 - **A downgrade needs counter-evidence.** A revision from established or
   partial to not determinable or a bounded negative carries `downgrade:
   {evidence, why}`: the entries or objects that undermine the earlier chain.
@@ -939,6 +943,176 @@ count and the first offset, as the store sweep does); a hold on hits in new
 objects; the delta on a question the addition does not stale (a hit there
 is warned of, and an entry that names the object answers the warning).
 
+## Echoes: authored, not derived
+
+On the calibration run sd0e59d the store sweep held three negatives
+(`sweep_hits`, questions 2, 5 and 6) on hits in three whole outputs the
+harness had kept under `tool-output/`: two seats' shell outputs and one
+seat's compaction summary. The swarm spent two done calls and more than
+half an hour on them. The seats did what the fix said: each hit file was
+sealed as an import (`tool:<seat>/<file>` cited, `import:<job>/<file>`
+published) and each revised coverage record named the import. The hits went
+on holding. The sweep knew a sealed object by the sha256 its manifest gives
+and a kept output by its inode, so the file and the import it was sealed
+as were two objects, and the record named only one of them. Read by what
+made them, the three files held nothing new: one was a seat's script
+printing the run's own ledger (which holds the records' `looked_for`
+strings), one re-read a job's log the record named, and one was the
+seat's own summary of its context.
+
+- **One object under several names.** A kept output and a job's log are
+  known by their inode, and by their content when another object has their
+  size (the hash cached by inode, size and time): a kept output and the
+  import it was sealed as are one object, and a record that names either
+  names both, as "a group is named when any of its names is" always said.
+- **Echoes.** A hit is an echo, named on the sweep's line (`echoes`, each
+  with what made every name of its object: `origins`, `{name, by, why,
+  reads?}`) and holding nothing, when every name of its object was made
+  by the run's own words:
+  - `registers`: a command whose words name the run's own registers and
+    harness files and no other path of the run (the ledger, the leads, the
+    questions, the requests, the board, the inboxes, the trace, SWARM.md;
+    `RUN_REGISTERS`). What the run says about the case is not evidence of
+    it, and a dump of the ledger holds every `looked_for` string by
+    construction.
+  - `harness`: a file the harness kept from a seat's own model words outside
+    any tool call, by one of its own events (the self-compaction's summary;
+    `HARNESS_KEEPERS`, which a test keeps equal to the self-compaction's
+    events, all of them reserved names no seat's tool can take).
+  - `searched`: a maker whose own words name the string (a command, a
+    tool's arguments, a job's command or arguments, the run's paths in them
+    blanked first, so an evidence path that holds the string does not make
+    it one), and that read nothing of the run but what is accounted for.
+  This is the network's evidence link (ADR 0012: a value the cited job's
+  own command or arguments name is authored, not derived, whatever its
+  output holds; `jobOwnWords`, one helper for both) turned the other way:
+  what the run wrote itself is no more a hit against its negatives than it
+  is evidence for a fetch.
+- **Accounted for, and said among the named hits.** What a maker read is
+  accounted for when it is a register, or an object the record names in
+  which the same sweep found the same string (the named hit says it
+  already). A maker that read only what is accounted for, one object at
+  least, and whose words do not name the string, made a named hit again:
+  it is said among the named hits with its `origins` (`named_sources`,
+  with `reads`). An input is never accounted for: the sweep does not read
+  the images, so a derivation of one is the only place its rows show
+  (the round-13 export), and its hit holds whatever the record names.
+- **What made each name, and when it cannot be told.** A kept output's
+  maker is the trace line that kept it (`keptOutputOrigins`, traceOrigin's
+  rules for every file in one pass: attributed by the collector to the seat
+  whose directory holds it, on the chain), and what it read is what its
+  words name (`runPathsIn`, token by token, the run's absolute path and
+  `$PWD` taken off). A job's maker is its own record, and what it read is
+  its declared inputs; a job that saw everything, or reached the network,
+  read what cannot be told. A sealed import is made as the output it
+  sealed was (the store journal's seal lines). A maker that names no path,
+  names the run's root, a parent, a hidden entry, a path through a
+  variable, or a path outside the run leaves its hit standing, and so does
+  a line not on the chain, one another seat wrote, and every capture and
+  addition. Words, not a parser: a path a command builds while it runs is
+  not seen, which is why a maker that names no path is never read as
+  having read nothing. The first draft made any maker whose words name the
+  string an echo; a search for the string over evidence the record does
+  not name is the very miss the sweep is for, and it holds.
+- **Where it shows.** The sweep's words say the echoes and each named hit's
+  makers, so the ledger's rendering, the review offer (which asks whether
+  each is only the run's own words), the report's store sweeps (a record
+  whose strings were found only in echoes is listed with the records with
+  hits) and the metrics (`sweeps.echoes`) carry them. A line from before has
+  no `echoes` and reads as it did. `unexaminedHits` reads each earlier
+  record's sweep as the gate does, by its latest line.
+
+Replayed values-free (`swarm.sh replay sd0e59d --resweep`, which reads each
+coverage record's recorded sweep again with this checkout's rules and adds
+the result as a synthetic line on the copy's chain; nothing is searched
+again): of the 20 recorded sweeps' 106 hits, 67 still hold; 26 move to the
+named hits, the same bytes as an import the record names; 13 are echoes (8
+from the ledger's dump, 3 from the compaction summary, 2 from jobs that
+searched for the string over named objects the sweep found it in). The
+three `sweep_hits` holds clear, on the sealed imports alone, and the three
+questions take the dispositions their answers claim; what still holds the
+run is an open lead and route limitations. Whether the seats spend less
+time on the sweep is for a paired run.
+
+### Re-reading after a rules change
+
+The run sd0e59d was stopped on the harness before the echoes and resumed
+on the one that made them. Its three `sweep_hits` holds (on E-111, E-118
+and E-129) did not clear. The gate reads each coverage record's latest
+sweep line, every line the run held had been written under the older
+identity rule, and nothing read them again: the new rules reached a line
+only when a seat recorded its coverage anew, which is the work the fix was
+to spare. `replay --resweep` already knew how to read a recorded sweep
+under the current rules without searching the bytes again; a live run did
+not.
+
+- **A version on each line.** Every coverage record's sweep line names
+  the version of the sweep's rules it was written under (`rules`).
+  `SWEEP_RULE_CHANGES` lists each version: since when, what changed, and
+  whether a line from before it can be read again from what it recorded
+  (`bytes`). A line with no version was written before versions were
+  recorded and is older than any versioned one. Version 1 is the rules
+  above: the same bytes under several names are one object, and echoes
+  hold nothing.
+- **Read again when the hub starts.** A hub that starts (a kickoff, or a
+  resume on a newer harness) reads, in its background, every coverage
+  record whose latest line is older than its rules again under them
+  (`rereadSweeps`): one line per record, appended on the sweeps' chain
+  with the current `rules` and `reread: {from_version, reason: "rules
+  changed", of, at, how}` (`from_version` null for a line that recorded
+  none, `of` the hash of the line read again). Every such record is read
+  again, a corrected one too, since the gate reads an earlier record's
+  line for the objects a later record names (`unexaminedHits`). A line
+  already under the current rules is left alone, so a second start writes
+  nothing.
+- **From what the line recorded, or searched again.** Where the change is
+  in what a hit is or where it goes, the line's hits are sorted anew as
+  `replay --resweep` sorts them (`resplitSweep`): each object by every
+  name of its bytes now, named, an echo, said among the named hits, or a
+  hit. Nothing is searched, and the line keeps its search's `started_at`
+  and `at`, so an entry written after that search still counts as written
+  after the sweep that found the hit (`unexaminedHits` reads `at`); the
+  re-read's own time is `reread.at`. Where a change needs bytes the line
+  did not record (one marked `bytes`, or a line that lacks what a re-read
+  needs), the record is searched again for real, within the sweep's budget
+  (`SWARM_SWEEP_MAX_BYTES`, `SWARM_SWEEP_MAX_SEC`), and the times are that
+  search's (`how: "searched"`).
+- **Said.** The trace gets one line, the hub's own (`sweep_reread`:
+  `{records, read, searched, lines, holds_cleared, holds_added}`), and the
+  board one post: how many records were read again and how, what moved,
+  and which of the gate's sweep holds changed, each by its question,
+  answer, code and record (`sweepHolds` over each question's standing
+  answer, before and after). The sweep's words, in the ledger's rendering,
+  the review offer and the report, say a line was read again, from which
+  version, and how.
+- **Also at the answers check.** `reconcileSweeps`, which the answers check
+  and the finish gate run before they read the gate, reads older lines
+  again as a step of its own, so a host run with no hub is covered, and a
+  replay's evaluation of a copy does the same (`store_sweeps.reread`). The
+  step is idempotent: its lines are written under the sweeps' lock, a
+  record whose latest line changed meanwhile (another process read it
+  again first) is left to that line, and one that could not be read again
+  is tried at the next pass.
+- **Chains.** The lines are appended: every earlier line stands, the chain
+  verifies, and a custody verdict taken before holds the sweeps as a
+  prefix. A harness from before reads a re-read line as any other: its
+  fields are hashed as they are, and the gate reads the latest line.
+
+Replayed values-free on sd0e59d as of its resume (every chained register
+cut at the resume's trace line, before its seats recorded again), 1666851
+against this harness (`swarm.sh replay --compare`): under 1666851 questions
+2, 5 and 6 hold on `sweep_hits`; under this harness the answers check reads
+the 20 recorded sweeps again from what they recorded (in 11 the hits move:
+106 hits become 67, the named hits 163 become 189, 13 echoes), the holds on
+E-111, E-118 and E-129 clear, and the three questions take the dispositions
+their answers claim (partial, bounded negative, not determinable). What
+still holds the run is an open lead and route limitations, and the custody
+verdict taken at the stop before the resume holds as a prefix.
+
+Not built: a version per rule (a change bumps the one number, and a line
+older than it is read again whole); a re-read of the reverse sweep's lines,
+whose hits hold nothing by themselves.
+
 ## Claim and open-part rows
 
 Added 2026-09-29 (the known-limits plan, item 6). "Partial" was one word
@@ -1025,6 +1199,45 @@ Not built: a recorded result derived from what the reviews hold open (L3-A:
 Astra's "never promote automatically" stands until the warnings are shown
 insufficient), and a check that the rows cover the question's words (the
 review's `missing` is the check).
+
+## What the report shows of an answer's parts
+
+Added 2026-09-30, after the last validation round. Complete answers were
+still recorded partial, at medium confidence, and their open parts were
+often what the question does not ask. The score did not suffer, but a
+reader takes "partial" to mean "not fully known". The owner chose to show
+the parts rather than change the label: presentation only, and a metric.
+
+- **Each answer's parts, where it is rendered.** The report's §5 answer
+  shows each part established on what it rests on, or open with what bounds
+  it, and a review's `not_asked` mark beside the part it marks (a mark that
+  names none of the answer's rows is said apart, never dropped); its §2
+  chain lists the same parts under its result; its §1 table gives the plain
+  line with the answer. The console's question view and
+  `questions/questions.md` show the same, from one reading
+  (`protocol.ts answerPartsStanding`, `premises.ts partsStanding`), and so
+  does the release, whose report is the same render.
+- **A partial answer leads with a plain line.** "Asked parts: 3 of 3
+  established. Open: 1, which a review marks as not asked." A part is asked
+  unless a review marks it not asked; a part a review names missing is asked
+  and not established. When every asked part is established (at least one,
+  none named missing), the report says so beside the partial label ("every
+  part the question asks is established"), in §1 and in the answer. The
+  label is the recorder's and is unchanged: nothing is promoted, as above.
+- **An answer without parts** (one recorded before them) renders as before.
+- **The under-claiming count.** `swarm.sh metrics` counts the standing
+  partial answers in scope whose asked parts are all established (`claims`:
+  each with its counts; a partial answer without parts named apart and
+  counted neither way), and `--compare` marks such an answer on its side,
+  flags the question and sets the two runs' counts side by side. The count
+  rests on the reviews' marks: a partial answer whose unasked open part no
+  review marked is not counted.
+
+Measured values-free on this checkout: s85febc (a calibration run) 0 of 6
+partial answers with parts, s704e4b (c10) 0 of 6. Neither run's reviews
+marked a part not asked (s704e4b predates the mark), so the count cannot see
+the complete answers this section describes there; it counts them from the
+runs that review with the mark.
 
 ## Consequences
 

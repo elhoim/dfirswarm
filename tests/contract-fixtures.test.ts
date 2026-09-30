@@ -50,6 +50,10 @@ const WRITTEN_WITH_PREMISES = new Set(["premise-given", "premise-admitted", "pre
  * an older harness by design, and are held to their expect.json instead.
  */
 const WRITTEN_FOR_ACCEPTANCE = new Set(["accepted-excused", "accepted-negative-held"]);
+/** The harness before questions presumed and reviews tested the premise (docs/adr/0011, "What a question presumes"): main when it was built. */
+const BEFORE_PRESUMES = "9dd3c7bce6abc400351281ec7b3ca00af543f966";
+/** The histories written with presumes and premise tests: a harness before them reads no presumption, and cannot verify an answer carrying premise_tested. */
+const WRITTEN_WITH_PRESUMES = new Set(["premise-untested-capped", "premise-untested-warned", "premise-tested-not-supported"]);
 
 const scratch: string[] = [];
 after(async () => {
@@ -303,7 +307,7 @@ test("old histories replayed unchanged: every fixture recorded before the source
   const work = await tmp("contract-before-delta-");
   const old = join(work, "harness-c34c6cb");
   await extractCommit(BEFORE_DELTA, old);
-  const names = fixtures.map((f) => f.name).filter((n) => !WRITTEN_WITH_DELTA.has(n) && !WRITTEN_WITH_PREMISES.has(n) && !WRITTEN_FOR_ACCEPTANCE.has(n));
+  const names = fixtures.map((f) => f.name).filter((n) => !WRITTEN_WITH_DELTA.has(n) && !WRITTEN_WITH_PREMISES.has(n) && !WRITTEN_FOR_ACCEPTANCE.has(n) && !WRITTEN_WITH_PRESUMES.has(n));
   // One copy per checkout, each evaluated in one process per checkout (replay's own copy, and the custody anchor beside it).
   const copies = async (label: string) => {
     const out: string[] = [];
@@ -337,7 +341,7 @@ test("old histories replayed unchanged: every fixture recorded before the premis
   const work = await tmp("contract-before-premises-");
   const old = join(work, "harness-be4e6a3");
   await extractCommit(BEFORE_PREMISES, old);
-  const names = fixtures.map((f) => f.name).filter((n) => !WRITTEN_WITH_PREMISES.has(n) && !WRITTEN_FOR_ACCEPTANCE.has(n));
+  const names = fixtures.map((f) => f.name).filter((n) => !WRITTEN_WITH_PREMISES.has(n) && !WRITTEN_FOR_ACCEPTANCE.has(n) && !WRITTEN_WITH_PRESUMES.has(n));
   const copies = async (label: string) => {
     const out: string[] = [];
     for (const n of names) {
@@ -357,5 +361,36 @@ test("old histories replayed unchanged: every fixture recorded before the premis
     const b = now[i]!;
     assert.ok(!("error" in a) && !("error" in b), `${n}: ${JSON.stringify("error" in a ? a : b)}`);
     assert.deepEqual(diffProjections(a as Projection, b as Projection), [], `${n}: an old history reads the same`);
+  }
+});
+
+test("old histories replayed unchanged: every fixture recorded before questions presumed reads the same under 9dd3c7b and this checkout", async (t) => {
+  if (spawnSync("git", ["-C", ROOT, "cat-file", "-e", `${BEFORE_PRESUMES}^{commit}`]).status !== 0) {
+    t.skip("9dd3c7b is not in this checkout's history (a shallow clone or an archive): the comparison is not run here");
+    return;
+  }
+  const work = await tmp("contract-before-presumes-");
+  const old = join(work, "harness-9dd3c7b");
+  await extractCommit(BEFORE_PRESUMES, old);
+  const names = fixtures.map((f) => f.name).filter((n) => !WRITTEN_WITH_PRESUMES.has(n));
+  const copies = async (label: string) => {
+    const out: string[] = [];
+    for (const n of names) {
+      const run = await resolveRun(join(FIXTURES, n, "run"));
+      const dest = join(work, label, n, "runs", run.id);
+      await copyRun(run.sandbox, dest);
+      const anchor = join(dirname(run.sandbox), `${basename(run.sandbox)}.custody-anchor.json`);
+      if (existsSync(anchor)) await copyFile(anchor, join(dirname(dest), `${run.id}.custody-anchor.json`));
+      out.push(dest);
+    }
+    return out;
+  };
+  const before = await evaluateIn(old, await copies("before"), false);
+  const now = await evaluateIn(ROOT, await copies("now"), false);
+  for (const [i, n] of names.entries()) {
+    const a = before[i]!;
+    const b = now[i]!;
+    assert.ok(!("error" in a) && !("error" in b), `${n}: ${JSON.stringify("error" in a ? a : b)}`);
+    assert.deepEqual(diffProjections(a as Projection, b as Projection), [], `${n}: a history from before presumes reads the same`);
   }
 });

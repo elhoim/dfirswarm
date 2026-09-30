@@ -1,0 +1,60 @@
+{
+  "case": "The goal says question 1 presumes someone logged on. Its partial answer, and the review of it, test no premise: the answer is warned (premise_untested) where the decision is made, at its record, in the reply to its attest and in finish status, and nothing holds on it. Question 2 presumes nothing.",
+  "design": [
+    "docs/adr/0011 'What a question presumes': a partial answer to a question that presumes an event, neither it nor a review of it testing that premise, is warned (premise_untested), never held; partial stays a disposition.",
+    "docs/adr/0013 'Warnings where the decision is made': a warning is delivered in the reply to the record that writes the answer, in the reply to an attest on it and in finish status; a partial answer has no review offer; none holds.",
+    "docs/adr/0013 'The end of a run, under every stop policy': partial is a disposition under the bar; the run ends examination_limited on it."
+  ],
+  "policies": [
+    "as run"
+  ],
+  "expect": {
+    "questions": {
+      "question:1": {
+        "disposition": "partial",
+        "best_candidate": false,
+        "readiness_holds": false,
+        "defects": [],
+        "warnings": [
+          "premise_untested"
+        ]
+      },
+      "question:2": {
+        "disposition": "established",
+        "best_candidate": false,
+        "readiness_holds": false,
+        "defects": [],
+        "warnings": []
+      }
+    },
+    "ready": true,
+    "verdict": {
+      "proceed": true,
+      "outcome": "examination_limited"
+    },
+    "done": "proceeds",
+    "agreement": [],
+    "deliveries": {
+      "acts": {
+        "record": 2,
+        "review_offer": 0,
+        "attest": 2,
+        "lead_close": 2
+      },
+      "delivered": [
+        { "point": "record", "entry": 5, "on": "answer", "sections": ["question:1"], "warnings": ["premise_untested"] },
+        { "point": "attest", "entry": 5, "on": "answer", "by": "a3", "sections": ["question:1"], "warnings": ["premise_untested"] },
+        { "point": "finish_status", "sections": ["question:1"], "warnings": ["premise_untested"] }
+      ]
+    },
+    "warning_words": {
+      "question:1": {
+        "includes": [
+          "is partial on a question that presumes \"Someone logged on to the host.\" (presumed by the goal), and neither it nor a review of it tests that premise",
+          "If the evidence does not support it, the answer is premise_not_supported",
+          "A clue that fits the question's frame is a candidate to test against that rival, not an answer"
+        ]
+      }
+    }
+  }
+}

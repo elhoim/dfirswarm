@@ -636,12 +636,19 @@ is warned about at the kickoff and by `start --check`: its answers would hold
 the brief's givens open as parts to prove. Designate what the brief states as
 given (never what a question asks or tests) in the metadata block, or on the
 run with `question <run> premise add`. The shipped goals under
-`prompts/goals/` and the calibration generator's designate theirs.
+`prompts/goals/` and the calibration generator's designate theirs. What a
+question takes as happened goes in a `## Presumptions` section or the
+metadata block's `presumes:` list (`- 7: the drive was wiped`, the question
+as the goal numbers it): its answer tests that premise first, against "the
+question's premise is not supported", and a review names that test
+([ADR 0011](adr/0011-questions-are-a-register-with-their-askers.md), "What a
+question presumes"). The calibration generator marks every question that
+asks which, when or how of an event, whatever its truth.
 
-- `question <run> add --text T --why W [--objective O-n | --objective new --objective-text T] [--parent Q-n] [--materiality material|background] [--priority urgent --reason R] [--expects existence|value|narrative|timeline|list] [--completeness] [--hint REF [--hint-value V]]... [--attach REF]... [--suggest SEAT] [--deadline ISO] [--neutral T] [--submission TOKEN]`
-  asks the running swarm a question. `--completeness` says it asks for a complete set (every file, all connections, a complete list); a question whose words say so ("every", "all", "each", "complete list") is marked so without it, and `amend --no-completeness` takes the mark off. Its established or partial answer rests on a coverage record naming the areas searched (allocated, deleted, unallocated, slack, secondary), or the finish line holds it. It is written to the chain first and acknowledged after (the last line printed is the JSON of the act: `q`, `rev`, `scope`, the event's `seq` and `hash`, and what was delivered); then posted from `analyst:<you>`, offered to the suggested seat for its first minute (`SWARM_QUESTION_OFFER_SEC`) or to the most suited idle seat, and ranked first in every agent's header. A hint says where to look (a ref such as `input:<path>`, or a path in the run); `--hint-value` after it records what the hint says as an open hypothesis in the ledger. `--submission` makes a retry the same question.
+- `question <run> add --text T --why W [--objective O-n | --objective new --objective-text T] [--parent Q-n] [--materiality material|background] [--priority urgent --reason R] [--expects existence|value|narrative|timeline|list] [--completeness] [--presumes P] [--hint REF [--hint-value V]]... [--attach REF]... [--suggest SEAT] [--deadline ISO] [--neutral T] [--submission TOKEN]`
+  asks the running swarm a question. `--presumes` says what it takes as happened ("the drive was wiped"): its answer tests that premise first, an established review of an established answer without that test is recorded best_candidate, and a partial answer without it is warned (`premise_untested`), never held; the console's question form has the same field. `--completeness` says it asks for a complete set (every file, all connections, a complete list); a question whose words say so ("every", "all", "each", "complete list") is marked so without it, and `amend --no-completeness` takes the mark off. Its established or partial answer rests on a coverage record naming the areas searched (allocated, deleted, unallocated, slack, secondary), or the finish line holds it. It is written to the chain first and acknowledged after (the last line printed is the JSON of the act: `q`, `rev`, `scope`, the event's `seq` and `hash`, and what was delivered); then posted from `analyst:<you>`, offered to the suggested seat for its first minute (`SWARM_QUESTION_OFFER_SEC`) or to the most suited idle seat, and ranked first in every agent's header. A hint says where to look (a ref such as `input:<path>`, or a path in the run); `--hint-value` after it records what the hint says as an open hypothesis in the ledger. `--submission` makes a retry the same question.
 - `question <run> list [--json]` and `show Q-n [--json]`: every question, the triage queue and the clarifications waiting first; one question whole, with every revision, its offers, its leads, its answer and each signed act checked.
-- `question <run> amend Q-n --expect-rev N [--text T] [--why W] [--neutral T] [--completeness | --no-completeness] ...`: a new verbatim revision, refused unless N is the revision now; the standing answer, which names the revision it answers (`question_rev`), is stale until it is recorded again for the new one.
+- `question <run> amend Q-n --expect-rev N [--text T] [--why W] [--neutral T] [--completeness | --no-completeness] [--presumes P] ...`: `--presumes` alone changes what the question takes as happened and makes no new revision; otherwise a new verbatim revision, refused unless N is the revision now; the standing answer, which names the revision it answers (`question_rev`), is stale until it is recorded again for the new one.
 - `question <run> priority Q-n urgent|normal [--reason R]`, `withdraw Q-n --why W`, `clarify-reply Q-n C-n TEXT`, `scope Q-n|L-n in_scope|excluded --why W`, `accept Q-n --as bounded|not_determinable --why W --expect-rev N`, `verify [--allowed-signers FILE] [--ca FILE]`. An acceptance takes a question's limits as they stand for that revision; it is refused while a lead under the question is still open (a route not yet closed) or its answer is a negative no other seat has reviewed, and any acceptance makes the run's outcome `examination_limited`. It excuses a partial store sweep, and evidence added before it (`evidence_stale`), never evidence added after it or the rest of the negative bar; its reply (`still_held`, and a line from `swarm.sh`) names what the finish line still holds on the question.
 - `question <run> premise add --text T [--locator L] [--class given|supplied_assertion|proposition_under_test] [--entity E]... [--time FROM..TO]... [--for-question Q-n]... [--why W]`: a premise the case takes, its words verbatim, where they stand, and what it is about (entities, time ranges, the questions it applies to; each optional, none meaning everything). A given unless `--class` says otherwise: a given is not proved again and is never an open part; a supplied assertion (a client's or a witness's statement) is assumed as asserted, and the report says so; a proposition under test is examined like any claim. `premise revise P-n --expect-rev N --why W [--text T] [--locator L] [scope flags | --no-scope]` makes a new revision (answers citing the earlier one are warned, never rewritten); `premise admit P-n --as given|supplied_assertion --why W` admits an agent's proposal (`premise_propose`: a proposition under test until then); `premise withdraw P-n --why W`; `premise list [--json]` and `premise show P-n [--json]` read them, with the answers that cite each. Two standing answers that assume and contradict one premise revision over scopes that overlap hold the run (`premise_inconsistent`) until they are reconciled on the record: one revised, the finding that rebuts the premise named (the premise then comes to you as a request of kind `premise`: revise it, withdraw it, or `requests <run> answer R-n "the premise stands, and why"`; nothing waits on your answer), a scope narrowed, or an answer made conditional ("assuming P-n"). Neither side is forced.
 - `lead <run> direct (--question Q-n | --new-question T --new-why W) --title T --why W --product P --acceptance A`: a directive, an unheld lead under a question with the product it is to make and what makes that acceptable. A directive is not signed (`--sign` is refused; sign the question it serves). Under a person's question no lead has framed yet, the first agent to claim it states the proposition and its negation.
@@ -778,7 +785,17 @@ or a limitation whose refs name the object itself (not a directory holding
 it), or one absence whose refs list several, written after the sweep that
 found it. A hit object a record names with no such entry keeps holding
 (`sweep_hits`, each object named, and the record's reply says so): naming a
-hit is not examining it. A partial
+hit is not examining it. A kept output and the import it was sealed as are
+one object: naming either names both. A hit in an object made from the run's
+own words is an echo, said on the line and holding nothing (ADR 0013,
+"Echoes: authored, not derived"): a command that read only the run's
+registers (a dump of the ledger), a summary the harness kept from a seat's
+own words (a compaction), or a search whose own words name the string and
+that read only the registers and named objects the sweep found the string
+in. One made only from such named objects is said among the named hits. A
+maker that read an input, anything else of the run, or paths that cannot be
+told (a command naming none, a job that saw everything) leaves the hit
+holding. A partial
 sweep holds until the operator accepts the question's limits
 (`sweep_partial`). A sweep lost with the process that began it is run again by
 the finish gate and the answers check once its record is older than
@@ -953,8 +970,11 @@ attestations, the leads, the operator requests, and the question register and
 the `result` and coverage fields where they exist), never a tool's output,
 and reports the miss rate on present facts (the hard ones apart), false
 negatives, the forced-answer rate, decoy adoption, unsupported negatives,
-acquisition requests, the late item, and the calibration of the stated
-confidence. Exit 0 when scored, 1 when a generated case's bytes do not hold
+acquisition requests, the late item, the calibration of the stated
+confidence, under-claiming (present questions answered partial with every
+present fact found, each with its confidence) and, for each question that
+expects `premise_not_supported`, whether its answer and its reviews carried a
+premise test. Exit 0 when scored, 1 when a generated case's bytes do not hold
 what its truth says, 2 on a usage error or a refusal. See
 [calibration/README.md](../calibration/README.md).
 
@@ -997,8 +1017,9 @@ finished run measures the same whenever it is read.
 | Quick negatives | Lead `close` events with disposition `negative` that the hub flagged `quick_negative` when it wrote them: the lead was held two minutes or less from its holder's take to the close, had at most one job, and that job's declared scope held at most one object (a job over everything is never quick). Each close counts, so a lead reopened and closed negative again counts twice; the flag is a review cue, not a defect. Out of every negative close. |
 | Negative answers, reviewed | Standing answers of a question in scope that the finish gate holds as negatives (protocol.ts `negativeByResult`, the gate's own test): `bounded_negative`, `not_determinable`, and a `premise_not_supported` resting on a search alone (no standing finding it cites for its question shows the premise false). Reviewed: an `attest` carrying its review (detection, reproduction, another route), by a seat that wrote neither the answer nor a coverage record it cites, on the answer or on a standing coverage record it cites whose results still stand (protocol.ts `negativeReview`, the gate's own test). |
 | Unreviewed negatives | The negative answers above that are not reviewed, split into material (these hold the finish) and background. Measured at the end, not at any moment during the run. |
-| Store sweeps | Coverage records that name `looked_for`, by how their sweep (`ledger/sweeps.jsonl`) ended: clean, with hits in objects the record does not name (and how many hit objects), partial, or pending (no line yet); the standing negatives in scope a sweep holds now (`sweep_pending`, `sweep_hits`, `sweep_partial`, with the coverage record); and the records with hits that a revision naming what the sweep found released (the revision's own sweep clean). |
+| Store sweeps | Coverage records that name `looked_for`, by how their sweep (`ledger/sweeps.jsonl`) ended: clean, with hits in objects the record does not name (and how many hit objects, and how many echoes were named and hold nothing), partial, or pending (no line yet); the standing negatives in scope a sweep holds now (`sweep_pending`, `sweep_hits`, `sweep_partial`, with the coverage record); and the records with hits that a revision naming what the sweep found released (the revision's own sweep clean). |
 | Confidence | Each standing answer of a question in scope, by the confidence its author stated and the one the run records (protocol.ts `recordedConfidence`): a high stands only on an established answer another seat attested established, naming the alternatives it weighed, why the evidence rules each out and the entries that show it; any other high is recorded medium. The answers recorded lower than stated are named, with the harness's reason. An answer recorded before the rule (no `confidence_rule` in its entry) keeps the confidence its author declared, and such highs are counted apart (`legacy`). |
+| Under-claiming | The standing `partial` answers of questions in scope, those that carry parts, and each of those whose asked parts are all established: a part is asked unless a review of the answer marks it `not_asked`, a part a review names `missing` is asked and not established, and at least one part is asked (protocol.ts `answerPartsStanding`, the reading the report's plain line and the console show). Each is named with its counts (asked, established, open, open parts a review marks not asked). A partial answer without parts (one recorded before them) is named apart and counted neither way. What it measures is how often a complete answer is labelled partial on what the question does not ask; the answer itself stands as recorded. |
 | Coverage records | Standing `coverage` records, each counted once: stale when a result it names no longer stands (by code: `missing`, `rebound`, `superseded` with the entry that replaced it, `disputed` with the seats that dispute it, never their words), else by the hub's computed field: `complete`, `partial`, or not computed (a record from before the field). A stale record is never complete, whatever its field says. Complete means the jobs behind it were given, by digest, every object it names; it never means the objects were the relevant ones. Reviewed, as the finish gate counts it: an `attest` with its review on the record, by a seat that did not write it, while its results stand; or an `attest` with its review on a negative answer resting on the record that the gate holds reviewed (the review of the negative is the review of its search). Both are given apart. |
 | Negatives on partial coverage | Negative answers none of whose standing coverage records is complete and current (each is shown as partial, not computed or stale), and, apart, those that cite no coverage record at all. |
 | Offers | Lead offers (`offer` events) by what became of each while it stood (from the offer to the lead's next claim, release, close or reopen), one outcome each, the first that applies in this order: accepted (a `claim` or `confirm` that names the offer), declined (`offer_decline`), taken by another seat (that next claim was another seat's, lapsed or not), lapsed (`offer_lapse`), else no outcome. By reason too (wake, hand-off, parked, reopen, confirm). Question offers: made, accepted (`offer_accept`), declined, and not taken up. A run from before offers has none; its `wake` events are counted apart: taken by the woken seat (its first claim of the lead in that open spell), by another seat, or not taken. A woken seat's claim is not the same measure as an accepted offer: a wake reserved nothing. Review offers (a limiting route's review, a material negative's review, `reason: route_review | negative_review`) are counted apart (`reviews`): taken up by the review they asked for (recorded by the seat offered, even after its offer ran out), declined, withdrawn (`offer_withdraw`: reviewed by another route, or the answer superseded), lapsed, or with no outcome; and how many their seat took first (`offer_take`). |
@@ -1029,12 +1050,14 @@ only. A negative the other run asserts is flagged, and so is a negative both
 runs reached with no complete coverage that still stands: two runs of one
 harness can share a blind spot, and their agreement is not confirmation.
 When the two runs' questions in scope differ in number or text, it says so
-and still compares by section.
+and still compares by section. A partial answer whose every asked part is
+established is marked on its side and flagged, and the summary gives each
+run's under-claiming count (the metric above), side by side.
 
 ### Replay: `swarm.sh replay`, `scripts/replay.ts`
 
 ```
-swarm.sh replay <id> [--checkout PATH] [--compare [A [B]]] [--stop-policy P[,P...]] [--deliveries] [--prepare-as STATE] [--reverse-sweep] [--json] [--show-text]
+swarm.sh replay <id> [--checkout PATH] [--compare [A [B]]] [--stop-policy P[,P...]] [--deliveries] [--prepare-as STATE] [--reverse-sweep] [--resweep] [--presumes Q[,Q...]] [--json] [--show-text]
 node --experimental-strip-types scripts/replay.ts <run-dir | id --registry FILE> [the same options]
 ```
 
@@ -1097,7 +1120,8 @@ measure a rule change on recorded histories before paying for new runs
   "Late evidence: the reverse sweep and the delta"), each evidence
   addition's, its passes read as one: its state, how many standing
   coverage records and strings it searched for, how many objects it read, and per question the hit objects
-  and occurrences, never a string. Where it has the review carry rule (ADR
+  and occurrences, never a string. Each coverage record's store sweep, by
+  its latest line: the hits, the named hits and the echoes, counted. Where it has the review carry rule (ADR
   0015, "A review carries over"), the report's reviews replayed over its
   versions in `history/`: the acks, the re-reviews of a later version and
   how many the rule finds standing already (each recorded ack read as a
@@ -1156,6 +1180,28 @@ measure a rule change on recorded histories before paying for new runs
   addition, marked synthetic, on the copy's chain. Only for a checkout that
   reads version 2 sweep lines (one from before would read the chain as
   broken): its copy is left as it is, and the output says so.
+- **`--resweep`** reads each coverage record's recorded store sweep again
+  with this checkout's rules (ADR 0013, "Echoes: authored, not derived"):
+  each recorded hit whose object the record names under another name of the
+  same bytes (a kept output and its sealed import), or whose makers make it
+  an echo or a reading of what the record names, is moved, and the record
+  gets the result as a synthetic line on the copy's chain. Nothing is
+  searched again; a sweep where nothing moves gets no line. It prints how
+  many sweeps moved hits, how many hits there were and are, and how many
+  went to the named hits and to the echoes. Without it, a checkout that
+  records the sweep's rules version on each line reads a line recorded
+  under older rules again under its own at its answers check, in the copy,
+  as a hub that starts does (ADR 0013, "Re-reading after a rules change"):
+  the store sweeps' counts say how many (`reread`).
+- **`--presumes Q[,Q...]`** asks what the premise rule (ADR 0011, "What a
+  question presumes") would have said of a run from before it: each question
+  named is amended in every copy, by this checkout's register as the
+  operator would amend it, to presume "the event question <n> asks about
+  happened" (synthetic words); a question the register does not hold is
+  named. Each partial answer none of whose tests covers the premise is then
+  warned (`premise_untested`), and the review rule names each recorded
+  established attest it would cap for it; the recorded strengths stay the
+  run's. A checkout from before the rule reads the amendment as nothing.
 
 Exit 0 when replayed and the run's registers are unchanged; 1 when a
 checkout could not be evaluated, the run changed under it, or it was

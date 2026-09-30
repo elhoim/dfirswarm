@@ -82,7 +82,7 @@ const TOOL_PARTS_HELD = [
 
 const QUESTIONS = ["Who logged on, and when?", "Was a remote tool installed?", "What was deleted?", "When did it start?", "Which account ran the tool?", "What left the network?"];
 
-function goal(n: number, existence: string[] = [], premises: string[] = []): string {
+function goal(n: number, existence: string[] = [], premises: string[] = [], presumes: string[] = []): string {
   return [
     "## Goal",
     "",
@@ -94,6 +94,8 @@ function goal(n: number, existence: string[] = [], premises: string[] = []): str
     "",
     // The goal's premises (docs/adr/0011, "Premises"): each a given of the premise register.
     ...(premises.length ? ["## Premises", "", ...premises.map((p) => `- ${p}`), ""] : []),
+    // What the goal's questions presume (docs/adr/0011, "What a question presumes"): "<n>: <what it takes as happened>".
+    ...(presumes.length ? ["## Presumptions", "", ...presumes.map((p) => `- ${p}`), ""] : []),
     "## Definition of done",
     "",
     "Every question has a disposition under the bar.",
@@ -114,10 +116,10 @@ async function job(S: string, id: string, file: string, body: string, inputs: st
   await rm(staging, { recursive: true, force: true });
 }
 
-async function newRun(base: string, id: string, questions: number, existence: string[] = [], premises: string[] = []): Promise<Run> {
+async function newRun(base: string, id: string, questions: number, existence: string[] = [], premises: string[] = [], presumes: string[] = []): Promise<Run> {
   const runs = join(base, "runs");
   const S = join(runs, id);
-  await P.initSandbox(S, { swarmId: id, agentIds: ["a0", "a1", "a2", "a3"], capUsd: 5, wallClockMinutes: 30, goal: goal(questions, existence, premises) });
+  await P.initSandbox(S, { swarmId: id, agentIds: ["a0", "a1", "a2", "a3"], capUsd: 5, wallClockMinutes: 30, goal: goal(questions, existence, premises, presumes) });
   await writeFile(join(S, "inputs.json"), `${JSON.stringify({ files: [{ path: "inputs/disk.E01", sha256: sha("disk"), bytes: 10 }, { path: "inputs/logs/a.log", sha256: sha("a"), bytes: 10 }] })}\n`);
   await job(S, "j000001", "hits.txt", "j000001\n", ["input:disk.E01"]);
   await job(S, "j000002", "hits.txt", "j000002\n", ["input:logs/a.log"]);
@@ -980,6 +982,60 @@ const CASES: Record<string, (base: string) => Promise<string>> = {
     await attest(r.a3, { seq: a1.seq, how: "re-read line 12 from job:j000002", ...ESTABLISHED, answer_review: { ...ESTABLISHED.answer_review, parts: [{ id: "who", part: "who logged on", established: true, why: "line 12 names alice" }, { id: "when", part: "when", established: true, why: "line 12's time" }, { id: "tty", part: "which terminal the session used", established: false, why: "the question asks who logged on and when, not the terminal", not_asked: true }] } });
     const p = await partial(r, "2");
     await attest(r.a3, { seq: p.a.seq, how: "re-read line 12 from job:j000002", ...ESTABLISHED, answer_review: { ...ESTABLISHED.answer_review, parts: [{ id: "when", part: "when the logon happened", established: true, why: "line 12" }, { id: "who", part: "which account logged on", established: false, why: "the log keeps none" }] } });
+    return r.S;
+  },
+
+  /**
+   * A question's premise, tested first (docs/adr/0011, "What a question
+   * presumes"): the goal says question 1 presumes someone logged on. Its
+   * established answer is attested established by another seat on a
+   * source-first review that tests no premise: recorded best_candidate,
+   * capped. Question 2 presumes nothing, and its established answer stands.
+   */
+  "premise-untested-capped": async (base) => {
+    const r = await newRun(base, "puc", 2, [], [], ["1: Someone logged on to the host."]);
+    await Q.seedRegister(r.S);
+    await established(r, "2");
+    const id = await lead(r.a0, "1", [{ source: "input:disk.E01", method: "read the disk" }]);
+    const f = (await rec(r.a0, { kind: "finding", ...F, value: "alice logged on at 09:14", source: "the disk", evidence: "a logon record", refs: ["job:j000001/hits.txt"], answers: ["1"] })).entry;
+    const a = (await rec(r.a1, { kind: "answer", section: "question:1", value: "alice, at 09:14", reasoning: `E-${f.seq}`, ...HIGH, result: "established" })).entry;
+    await close(r.a0, id, `E-${f.seq}`);
+    const got = await P.attestEntry(r.a2, { seq: a.seq, how: "re-read the logon record from job:j000001", ...ESTABLISHED } as unknown as P.LedgerActInput);
+    assert.ok(got.ok && got.line?.strength === "best_candidate" && got.line.capped?.some((x) => /presumes/.test(x)), JSON.stringify(got));
+    return r.S;
+  },
+
+  /**
+   * The same premise on a partial answer (docs/adr/0011, "What a question
+   * presumes"): question 1's partial answer, and its review, test no
+   * premise: warned (premise_untested) at the answer's record, the reply to
+   * its attest and finish status, never held. Question 2 presumes nothing.
+   */
+  "premise-untested-warned": async (base) => {
+    const r = await newRun(base, "puw", 2, [], [], ["1: Someone logged on to the host."]);
+    await Q.seedRegister(r.S);
+    await established(r, "2");
+    const p = await partial(r, "1");
+    await attest(r.a3, { seq: p.a.seq, how: "re-read line 12 from job:j000002; no account field in the log", ...ESTABLISHED, answer_review: { ...ESTABLISHED.answer_review, parts: [{ id: "when", part: "when the logon happened", established: true, why: "line 12" }, { id: "who", part: "which account logged on", established: false, why: "the log keeps none" }] } });
+    return r.S;
+  },
+
+  /**
+   * The premise tested and found unsupported (docs/adr/0011, "What a
+   * question presumes"): question 1 presumes someone logged on; a finding
+   * shows every logon in the log's range failed; the answer tests the
+   * premise on it and records premise_not_supported, and another seat's
+   * review tests it too. Disposed; question 2 established.
+   */
+  "premise-tested-not-supported": async (base) => {
+    const r = await newRun(base, "pns", 2, [], [], ["1: Someone logged on to the host."]);
+    await Q.seedRegister(r.S);
+    await established(r, "2");
+    const id = await lead(r.a0, "1");
+    const f = (await rec(r.a0, { kind: "finding", ...F, value: "every logon attempt in the log's range failed; none succeeded", source: "the log", evidence: "lines 1 to 40", refs: ["job:j000002/hits.txt"], answers: ["1"] })).entry;
+    const a = (await rec(r.a1, { kind: "answer", section: "question:1", value: "The question's premise is not supported: nobody logged on to the host in the log's range", reasoning: `E-${f.seq}`, ...HIGH, result: "premise_not_supported", premise_tested: { outcome: "every logon attempt in the log's whole range failed", refs: [`E-${f.seq}`] } })).entry;
+    await close(r.a0, id, `E-${f.seq}`);
+    await attest(r.a2, { seq: a.seq, how: "re-read the log from job:j000002", ...ESTABLISHED, answer_review: { ...ESTABLISHED.answer_review, premise_tested: { outcome: "the log holds only failed attempts over its whole range", refs: ["job:j000002/hits.txt"] } } });
     return r.S;
   },
 

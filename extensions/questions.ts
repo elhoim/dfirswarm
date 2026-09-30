@@ -94,6 +94,8 @@ export type AcceptAs = (typeof ACCEPT_AS)[number];
 export const QUESTION_TEXT_MAX = 4000;
 export const QUESTION_WHY_MAX = 2000;
 export const QUESTION_MAX_HINTS = 20;
+/** What a question takes as happened (presumes): at most this many characters. */
+export const QUESTION_PRESUMES_MAX = 2000;
 export const QUESTION_MAX_ATTACHMENTS = 20;
 
 /**
@@ -220,6 +222,8 @@ export type QuestionAct = {
   expects?: Expects;
   /** The asker's word on whether the question asks for a complete set; absent, its words decide (completenessWords). */
   completeness?: boolean;
+  /** What the question takes as happened (docs/adr/0011, "What a question presumes"): on an open, an amend, or an agent's clarification. Present only when given. */
+  presumes?: string;
   hints?: QuestionHint[];
   attachments?: string[];
   suggested_to?: string;
@@ -327,6 +331,13 @@ export type Question = {
   completeness: boolean;
   /** Who said so: the asker (the act's completeness), or its words (completenessWords); null when neither. */
   completeness_by: "asker" | "words" | null;
+  /**
+   * What the question takes as happened, when somebody said so (docs/adr/0011,
+   * "What a question presumes"): the asker's word on its open or an
+   * amendment, or an agent's with a clarification it asked while none was
+   * said; who, when, at which revision, by which act.
+   */
+  presumes: { text: string; rev: number; at: string; by: string; origin: QuestionOrigin; seq: number; via: "open" | "amend" | "clarify" } | null;
   hints: QuestionHint[];
   attachments: string[];
   suggested_to: string | null;
@@ -510,6 +521,42 @@ export function goalPremises(text: string): Array<{ text: string; item: number; 
   return out;
 }
 
+/**
+ * What the goal's questions presume (docs/adr/0011, "What a question
+ * presumes"): a `## Presumptions` section (the kickoff writes a goal's
+ * front-matter `presumes:` there too), one bullet or numbered line each,
+ * `- <question>: <what it takes as happened>`, the question named as the
+ * goal names it (`7`, `Q-7`, `Q7`, `question:7`, or a goal's own id such as
+ * `bonus`). The words after the colon are kept verbatim. A line that names
+ * no question is kept with why (`bad`), and seeds nothing.
+ */
+export function goalPresumes(text: string): Array<{ section: string; text: string; item: number; bad?: string }> {
+  const out: Array<{ section: string; text: string; item: number; bad?: string }> = [];
+  const sections = [...text.matchAll(/^#{2,3}[ \t]*Presumptions[ \t]*$([\s\S]*?)(?=^#{1,6}[ \t]|(?![\s\S]))/gim)].map((m) => m[1]);
+  for (const body of sections) {
+    const items: string[] = [];
+    let open = false;
+    for (const line of body.split("\n")) {
+      const item = /^\s*(?:[-*]|\d+[.)])\s+(.*\S)\s*$/.exec(line);
+      if (item) {
+        items.push(item[1]);
+        open = true;
+      } else if (open && line.trim() && !/^\s*#/.test(line)) items[items.length - 1] += ` ${line.trim()}`;
+      else open = false;
+    }
+    for (const raw of items) {
+      const m = /^\**\s*(?:question:)?([A-Za-z0-9][A-Za-z0-9._-]{0,31}?)\s*\**\s*:\s+(.*\S)\s*$/i.exec(raw.trim());
+      const words = m?.[2]?.replace(/^["'\u201c](.*)["'\u201d]$/, "$1").trim();
+      if (!m || !words) {
+        out.push({ section: "", text: raw.trim(), item: out.length + 1, bad: "names no question: write it as - <question>: <what it takes as happened>" });
+        continue;
+      }
+      out.push({ section: P.sectionKey(m[1]), text: words, item: out.length + 1 });
+    }
+  }
+  return out;
+}
+
 /** The brief a goal's answers check numbers its questions in (--sections-in), if any. */
 function briefPathOf(goal: string): string | null {
   for (const check of L.goalChecks(goal)) {
@@ -579,6 +626,8 @@ export async function seedDrafts(sandboxRoot: string, goal?: L.GoalQuestions): P
   const numeric = gq.questions.filter((q) => /^\d+$/.test(q)).map(Number);
   let next = Math.max(0, ...numeric);
   const ids: string[] = [];
+  // What the goal's questions presume, by section: present only when the goal says so, so a goal without it seeds as it always did.
+  const presumed = new Map((doc ? goalPresumes(doc.text) : []).filter((x) => !x.bad).map((x) => [x.section, x.text]));
   for (const section of gq.questions) {
     const n = /^\d+$/.test(section) ? Number(section) : ++next;
     const id = `Q-${n}`;
@@ -597,6 +646,7 @@ export async function seedDrafts(sandboxRoot: string, goal?: L.GoalQuestions): P
         materiality: "material",
         priority: "normal",
         ...(gq.existence.includes(section) ? { expects: "existence" as const } : {}),
+        ...(presumed.get(P.sectionKey(section)) ? { presumes: presumed.get(P.sectionKey(section)) } : {}),
         ...(String(n) !== section ? { section } : {}),
       },
       origin: { kind: "goal", via: "goal" },
@@ -670,6 +720,7 @@ function blankQuestion(e: QuestionEvent): Question {
     expects: act.expects ?? null,
     completeness: typeof act.completeness === "boolean" ? act.completeness : d.completeness === true,
     completeness_by: typeof act.completeness === "boolean" ? "asker" : d.completeness === true ? "words" : null,
+    presumes: act.presumes ? { text: act.presumes, rev: e.rev ?? 1, at: e.at, by: e.by, origin, seq: e.seq, via: "open" } : null,
     hints: act.hints ?? [],
     attachments: act.attachments ?? [],
     suggested_to: act.suggested_to ?? null,
@@ -737,6 +788,7 @@ export function foldQuestions(events: QuestionEvent[], chain: QuestionsState["ch
           q.completeness = d.completeness;
           q.completeness_by = d.completeness ? "words" : null;
         }
+        if (act.presumes) q.presumes = { text: act.presumes, rev: q.rev, at: e.at, by: e.by, origin: origin ?? q.origin, seq: e.seq, via: "amend" };
         if (act.hints) q.hints = act.hints;
         if (act.attachments) q.attachments = act.attachments;
         if (act.deadline !== undefined) q.deadline = act.deadline || null;
@@ -774,6 +826,8 @@ export function foldQuestions(events: QuestionEvent[], chain: QuestionsState["ch
       case "clarify_ask":
         if (!q || !act.clarify) break;
         q.clarifications.push({ id: act.clarify, at: e.at, by: e.by, what: act.what ?? "", to: String(d.to ?? ""), answer: null });
+        // An agent's reading of what the question takes as happened, recorded while nobody had said so.
+        if (act.presumes && !q.presumes) q.presumes = { text: act.presumes, rev: q.rev, at: e.at, by: e.by, origin: origin ?? q.origin, seq: e.seq, via: "clarify" };
         q.last_seq = e.seq;
         break;
       case "clarify_answer": {
@@ -943,6 +997,14 @@ export type QuestionView = {
   expects: Expects | null;
   completeness: boolean;
   completeness_by: Question["completeness_by"];
+  /** What somebody said the question takes as happened (the asker, or an agent with a clarification). */
+  presumes: Question["presumes"];
+  /**
+   * What the question presumes as the review rule reads it
+   * (questionPresumption): its presumes, or a person's question's framing;
+   * null when neither.
+   */
+  presumption: PM.Presumption | null;
   hints: QuestionHint[];
   attachments: string[];
   suggested_to: string | null;
@@ -964,7 +1026,29 @@ export type QuestionView = {
    * inconclusive), and for a negative whether another seat reviewed it and
    * what coverage it rests on (the negative bar).
    */
-  answer: { seq: number; at: string; inconclusive: boolean; result?: string; question_rev: number; stale: boolean; stale_why?: "revision" | "evidence"; negative?: { reviewed: boolean; by: string[]; coverage: Array<{ seq: number; coverage: string | null }> }; parts?: PM.AnswerPart[]; premises?: PM.PremiseCitation[]; omitted?: Array<{ by: string; part: string; why: string }> } | null;
+  answer: {
+    seq: number;
+    at: string;
+    inconclusive: boolean;
+    result?: string;
+    question_rev: number;
+    stale: boolean;
+    stale_why?: "revision" | "evidence";
+    negative?: { reviewed: boolean; by: string[]; coverage: Array<{ seq: number; coverage: string | null }> };
+    parts?: PM.AnswerPart[];
+    /**
+     * Its parts as its reviews weigh them (protocol.ts answerPartsStanding):
+     * each row with the reviews that mark it not asked, the counts, the
+     * plain line a partial answer leads with (`summary`), and, when every
+     * asked part of a partial answer is established, the words said beside
+     * its label (`plain`). Present only with parts.
+     */
+    standing?: PM.PartsStanding & { summary: string; plain: string | null };
+    premises?: PM.PremiseCitation[];
+    omitted?: Array<{ by: string; part: string; why: string }>;
+    /** The tests of what the question presumes: the answer's own (by its author) and each review's, whole. Present only when there is one. */
+    premise_tests?: Array<{ by: string; review: boolean; outcome: string; refs: string[] }>;
+  } | null;
   /** Evidence that arrived for it after the kickoff (the acquisition lane). */
   evidence: Question["evidence"];
   leads: Array<{ id: string; status: L.LeadStatus; holder: string | null; disposition?: string; opened_by: string }>;
@@ -1040,7 +1124,18 @@ export function viewQuestion(q: Question, ctx: ViewContext): QuestionView {
         ...(negative ? { negative } : {}),
         // Its claim and open-part rows and the premises it cites (premises.ts), and each part a review says it leaves out: present only when it has them.
         ...(a.parts?.length ? { parts: a.parts } : {}),
+        ...((): { standing?: PM.PartsStanding & { summary: string; plain: string | null } } => {
+          const standing = P.answerPartsStanding(a, ctx.attestations ?? []);
+          return standing ? { standing: { ...standing, summary: PM.partsSummaryWords(standing), plain: PM.partialPlainWords(result, standing) } } : {};
+        })(),
         ...(a.premises?.length ? { premises: a.premises } : {}),
+        ...((): { premise_tests?: Array<{ by: string; review: boolean; outcome: string; refs: string[] }> } => {
+          const tests = [
+            ...(a.premise_tested ? [{ by: a.authors.join(", "), review: false, outcome: a.premise_tested.outcome, refs: a.premise_tested.refs }] : []),
+            ...P.answerReviews(a, ctx.attestations ?? []).flatMap((x) => (x.answer_review?.premise_tested ? [{ by: x.by, review: true, outcome: x.answer_review.premise_tested.outcome, refs: x.answer_review.premise_tested.refs }] : [])),
+          ];
+          return tests.length ? { premise_tests: tests } : {};
+        })(),
         ...((): { omitted?: Array<{ by: string; part: string; why: string }> } => {
           const omitted = P.answerReviews(a, ctx.attestations ?? []).flatMap((x) => (x.answer_review?.parts ?? []).filter((p) => p.missing).map((p) => ({ by: x.by, part: p.part, why: p.why })));
           return omitted.length ? { omitted } : {};
@@ -1066,6 +1161,8 @@ export function viewQuestion(q: Question, ctx: ViewContext): QuestionView {
     expects: q.expects,
     completeness: q.completeness,
     completeness_by: q.completeness_by,
+    presumes: q.presumes,
+    presumption: questionPresumption(q, ctx.leads),
     hints: q.hints,
     attachments: q.attachments,
     suggested_to: q.suggested_to,
@@ -1130,6 +1227,32 @@ export async function viewContext(sandboxRoot: string): Promise<ViewContext> {
   const attestations = await P.readAttestations(sandboxRoot).catch(() => [] as P.LedgerAttestation[]);
   // A paused run (the stop policy: a cap reached, the operator not yet asked) pauses every question in it.
   return { questions, leads: ls.state, ledger: ls.ledger, paused: Boolean(budget?.paused), attestations };
+}
+
+/**
+ * What a question takes as happened (docs/adr/0011, "What a question
+ * presumes"), when the record says: its `presumes` (the asker's word, or an
+ * agent's), else, for a person's question, the proposition the register's
+ * framing states (ADR 0011, item 7: the first lead under it that states a
+ * proposition and its negation, in the order the leads were opened; the
+ * question's own words while none has). Null when neither. The words are
+ * the register's, never read for what they mean.
+ */
+export function questionPresumption(q: Question, leads: L.LeadsState | null): PM.Presumption | null {
+  if (q.presumes) return { q: q.id, section: q.section, text: q.presumes.text, source: "presumes", by: originWords(q.presumes.origin) };
+  if (!HUMAN_ORIGINS.has(q.origin.kind)) return null;
+  const framed = [...(leads?.leads.values() ?? [])].filter((l) => l.answers.includes(q.section) && l.proposition).sort((a, b) => a.n - b.n)[0];
+  return { q: q.id, section: q.section, text: framed?.proposition ?? q.text, source: "framing", by: originWords(q.origin), ...(framed ? { lead: framed.id, ...(framed.negation ? { negation: framed.negation } : {}) } : {}) };
+}
+
+/** Every question's presumption, by its section (questionPresumption): what the ledger gate and the attest read. */
+export function presumptionsOf(qs: QuestionsSnapshot | null | undefined, leads: L.LeadsState | null): Map<string, PM.Presumption> {
+  const out = new Map<string, PM.Presumption>();
+  for (const q of qs?.state.questions.values() ?? []) {
+    const p = questionPresumption(q, leads);
+    if (p) out.set(q.section, p);
+  }
+  return out;
 }
 
 /** The questions a finish line holds the run to beyond the goal's own check: in scope, not withdrawn, not a follow-up, asked by a person or an agent. */
@@ -1300,6 +1423,8 @@ export type ActInput = {
   expects?: string;
   /** true or false (yes, no): whether the question asks for a complete set; absent, its words decide. */
   completeness?: boolean | string;
+  /** What the question takes as happened ("X happened"): its answer is reviewed against "the question's premise is not supported". */
+  presumes?: string;
   hints?: unknown;
   attachments?: unknown;
   suggested_to?: string;
@@ -1363,6 +1488,9 @@ export async function prepareAct(sandboxRoot: string, actor: Actor, ev: ActKind,
     return { ok: false, reason: `completeness is true or false: whether the question asks for a complete set (every one, all, each, a complete list) (got ${JSON.stringify(v)})` };
   })();
   if (!completeness.ok) return completeness;
+  const presumes = bounded("presumes", input.presumes, QUESTION_PRESUMES_MAX, false);
+  if (!presumes.ok) return { ok: false, reason: `${presumes.reason}: what the question takes as happened, in one sentence ("the drive was wiped")` };
+  if (presumes.value && !["open", "amend", "clarify_ask"].includes(ev)) return { ok: false, reason: "presumes is said when a question is opened, amended, or (by an agent) with a clarification" };
   switch (ev) {
     case "open": {
       const text = bounded("text", input.text, QUESTION_TEXT_MAX, true);
@@ -1416,13 +1544,14 @@ export async function prepareAct(sandboxRoot: string, actor: Actor, ev: ActKind,
         ...(reason.value && priority.value === "urgent" ? { reason: reason.value } : {}),
         ...(expects.value ? { expects: expects.value } : {}),
         ...(completeness.value !== undefined ? { completeness: completeness.value } : {}),
+        ...(presumes.value ? { presumes: presumes.value } : {}),
         ...(hints.hints.length ? { hints: hints.hints } : {}),
         ...(attachments.attachments.length ? { attachments: attachments.attachments } : {}),
         ...(suggested ? { suggested_to: suggested } : {}),
         ...(deadline ? { deadline: new Date(Date.parse(deadline)).toISOString() } : {}),
         ...(submission ? { submission } : {}),
       });
-      sensitive.push(["text", act.text], ["why", act.why], ["neutral", act.neutral], ["objective_text", act.objective_text], ["reason", act.reason], ...hints.hints.map((h): [string, string | undefined] => ["a hint's value", h.value]));
+      sensitive.push(["text", act.text], ["why", act.why], ["neutral", act.neutral], ["objective_text", act.objective_text], ["reason", act.reason], ["presumes", act.presumes], ...hints.hints.map((h): [string, string | undefined] => ["a hint's value", h.value]));
       break;
     }
     case "amend": {
@@ -1458,14 +1587,15 @@ export async function prepareAct(sandboxRoot: string, actor: Actor, ev: ActKind,
         ...(materiality.value ? { materiality: materiality.value } : {}),
         ...(expects.value ? { expects: expects.value } : {}),
         ...(completeness.value !== undefined ? { completeness: completeness.value } : {}),
+        ...(presumes.value ? { presumes: presumes.value } : {}),
         ...(hints?.ok ? { hints: hints.hints } : {}),
         ...(attachments?.ok ? { attachments: attachments.attachments } : {}),
         ...(deadline !== undefined ? { deadline: deadline ? new Date(Date.parse(deadline)).toISOString() : "" } : {}),
         ...(suggested !== undefined ? { suggested_to: suggested } : {}),
       });
       const changes = Object.keys(act).filter((k) => k !== "expected_rev" && k !== "why");
-      if (!changes.length) return { ok: false, reason: "an amendment changes something: text (a new revision), neutral, materiality, expects, completeness, hints, attachments, deadline or suggested_to" };
-      sensitive.push(["text", act.text], ["why", act.why], ["neutral", act.neutral], ...(hints?.ok ? hints.hints.map((h): [string, string | undefined] => ["a hint's value", h.value]) : []));
+      if (!changes.length) return { ok: false, reason: "an amendment changes something: text (a new revision), neutral, materiality, expects, completeness, presumes, hints, attachments, deadline or suggested_to" };
+      sensitive.push(["text", act.text], ["why", act.why], ["neutral", act.neutral], ["presumes", act.presumes], ...(hints?.ok ? hints.hints.map((h): [string, string | undefined] => ["a hint's value", h.value]) : []));
       break;
     }
     case "priority": {
@@ -1507,8 +1637,8 @@ export async function prepareAct(sandboxRoot: string, actor: Actor, ev: ActKind,
     case "clarify_ask": {
       const what = bounded("what_is_unclear", input.what, QUESTION_WHY_MAX, true);
       if (!what.ok) return what;
-      Object.assign(act, { what: what.value });
-      sensitive.push(["what_is_unclear", act.what]);
+      Object.assign(act, { what: what.value, ...(presumes.value ? { presumes: presumes.value } : {}) });
+      sensitive.push(["what_is_unclear", act.what], ["presumes", act.presumes]);
       break;
     }
     case "clarify_answer": {
@@ -1808,6 +1938,8 @@ async function commitUnderLock(sandboxRoot: string, p: PreparedAct, snap: Questi
     }
     case "clarify_ask": {
       if (q!.origin.kind === "agent") return fail(`${q!.id} was asked by ${q!.origin.agent}: ask on the board`);
+      // What the question presumes is recorded once by an agent, and never over the asker's word: ask about it instead.
+      if (p.act.presumes && q!.presumes) return fail(`${q!.id} presumes already, as ${originWords(q!.presumes.origin)} recorded it: "${q!.presumes.text}". The recorded word stands: ask what is unclear about it without presumes`);
       const n = [...snap.state.questions.values()].reduce((m, x) => m + x.clarifications.length, 0) + 1;
       const id = `C-${n}`;
       const to = q!.origin.kind === "goal" ? "operator" : posterOf(q!.origin);
@@ -2131,6 +2263,7 @@ export function questionPostBody(q: Question, qs: QuestionsSnapshot, o: { offerT
   if (q.objective) lines.push(`Objective: ${q.objective}${qs.state.objectives.get(q.objective) ? ` "${qs.state.objectives.get(q.objective)!.text}"` : ""}`);
   if (q.parent) lines.push(`Follows: ${q.parent}.`);
   if (q.expects) lines.push(`Expects: ${q.expects} (a hint to the examination, never a format demand).`);
+  if (q.presumes) lines.push(`Presumes: "${q.presumes.text}". Test whether it happened before answering, against the rival "the question's premise is not supported"; if the evidence does not support it, the answer is premise_not_supported.`);
   if (q.completeness) lines.push(`It asks for a complete set: an established or partial answer rests on a coverage record for it that says what was searched and its areas (${NB.COVERAGE_AREAS.join(", ")}), each searched, skipped or not_applicable.`);
   if (q.hints.length) lines.push(`Hints (where to look, never what to find): ${q.hints.map((h) => `${h.ref}${h.value ? ` (says: ${h.value})` : ""}`).join("; ")}.${o.hypotheses.length ? ` A hint that says something is recorded as a hypothesis to test: ${o.hypotheses.map((n) => `E-${n}`).join(", ")}.` : ""}`);
   if (q.attachments.length) lines.push(`Attachments: ${q.attachments.join(", ")} (supplied material: it proves nothing by itself).`);
@@ -2765,6 +2898,7 @@ function brief(v: QuestionView): Record<string, unknown> {
     ...(v.parent ? { parent: v.parent } : {}),
     ...(v.expects ? { expects: v.expects } : {}),
     ...(v.completeness ? { completeness: true } : {}),
+    ...(v.presumption ? { presumes: v.presumption.text } : {}),
     ...(v.leading_forms.length ? { leading_forms: v.leading_forms } : {}),
     answer: v.answer ? `E-${v.answer.seq}${v.answer.stale ? ` (stale: answers revision ${v.answer.question_rev} of ${v.rev})` : ""}` : null,
     leads: v.leads.map((l) => `${l.id} ${l.status}${l.holder ? ` (${l.holder})` : ""}`),
@@ -2844,9 +2978,15 @@ export async function premisePropose(ctx: P.SwarmContext, input: { text?: string
   return act(ctx.sandboxRoot, { kind: "agent", agent: ctx.agentId }, "premise_propose", { text: input?.text, locator: input?.locator, why: input?.why, ...(input?.scope !== undefined ? { premise_scope: input.scope } : {}) });
 }
 
-/** An agent asks the question's author what is unclear (question_ask): an operator request of kind clarification, with a durable id. */
-export async function questionAsk(ctx: P.SwarmContext, id: unknown, what: unknown): Promise<(ActResult & { request?: string; request_id?: string; request_pending?: string }) | Fail> {
-  const r = await act(ctx.sandboxRoot, { kind: "agent", agent: ctx.agentId }, "clarify_ask", { q: String(id ?? ""), what: String(what ?? "") });
+/**
+ * An agent asks the question's author what is unclear (question_ask): an
+ * operator request of kind clarification, with a durable id. With
+ * `presumes`, the agent records what it reads the question as taking for
+ * happened, while nobody has said so (docs/adr/0011, "What a question
+ * presumes"): the asker sees it with the clarification.
+ */
+export async function questionAsk(ctx: P.SwarmContext, id: unknown, what: unknown, presumes?: unknown): Promise<(ActResult & { request?: string; request_id?: string; request_pending?: string }) | Fail> {
+  const r = await act(ctx.sandboxRoot, { kind: "agent", agent: ctx.agentId }, "clarify_ask", { q: String(id ?? ""), what: String(what ?? ""), ...(presumes !== undefined && presumes !== null && String(presumes).trim() ? { presumes: String(presumes) } : {}) });
   if (!r.ok || !r.clarify || !r.q) return r;
   // Committed: the request is derived from the ask. A failure is said, never swallowed; the next header writes it.
   try {
@@ -2899,14 +3039,18 @@ export function renderQuestionsMd(ctx: ViewContext): string {
         v.review_query ? "a reviewer's query" : null,
       ].filter(Boolean);
       lines.push(`- ${meta.join("; ")}`);
+      if (v.presumption) lines.push(`- Presumes ${PM.presumptionWords(v.presumption)}: its answer tests that premise first, against "the question's premise is not supported"`);
       if (v.hints.length) lines.push(`- Hints: ${v.hints.map((h) => `${h.ref}${h.value ? ` (says: ${h.value})` : ""}`).join("; ")}`);
       if (v.attachments.length) lines.push(`- Attachments: ${v.attachments.join(", ")}`);
       if (v.leading_forms.length) lines.push(`- Leading form: ${v.leading_forms.map((f) => `"${f}"`).join(", ")} (flagged for the critic)`);
       if (v.leads.length) lines.push(`- Leads: ${v.leads.map((l) => `${l.id} ${l.status}${l.holder ? ` (${l.holder})` : ""}${l.disposition ? ` ${l.disposition}` : ""}`).join(", ")}`);
       lines.push(`- Answer: ${v.answer ? `E-${v.answer.seq}${v.answer.inconclusive ? " (inconclusive)" : ""}${v.answer.result ? ` (${NB.resultWords(v.answer.result)})` : ""}${v.answer.negative ? (v.answer.negative.reviewed ? `; negative, reviewed by ${v.answer.negative.by.join(", ")}` : "; negative (unreviewed)") : ""}${v.answer.negative?.coverage.length ? `; coverage ${v.answer.negative.coverage.map((c) => `E-${c.seq} ${c.coverage ?? "not computed"}`).join(", ")}` : ""}; answers revision ${v.answer.question_rev}${v.answer.stale ? ` of ${v.rev}: stale` : ""}` : "none yet"}`);
+      if (v.answer?.standing && v.answer.result === "partial") lines.push(`- ${v.answer.standing.summary}${v.answer.standing.plain ? ` Partial as recorded, and ${v.answer.standing.plain}.` : ""}`);
       if (v.answer?.parts?.length) lines.push(`- The answer's parts: ${PM.partsWords(v.answer.parts)}`);
+      for (const r of v.answer?.standing?.rows ?? []) for (const x of r.not_asked_by) lines.push(`- A part the question does not ask, as ${x.by}'s review marks it: ${r.id} "${r.part}" (${x.why})`);
       if (v.answer?.premises?.length) lines.push(`- The answer's premises: ${PM.citationsWords(v.answer.premises)}`);
       for (const x of v.answer?.omitted ?? []) lines.push(`- A part the answer leaves out, as ${x.by}'s review says: "${x.part}" (${x.why})`);
+      for (const t of v.answer?.premise_tests ?? []) lines.push(`- The premise tested ${t.review ? `by ${t.by}'s review` : `by the answer (${t.by})`}: ${t.outcome} (${t.refs.join(", ")})`);
       for (const c of v.clarifications) lines.push(`- Clarification ${c.id} (${c.by}, ${c.at}): ${c.what}${c.answer ? ` — answered by ${originWords(c.answer.origin)} at ${c.answer.at}: ${c.answer.text}` : " — not answered yet"}`);
       for (const o of v.offers) lines.push(`- Offered to ${o.to} at ${o.at}${o.first ? ` first, until ${o.until}` : ""} (${o.why})`);
       if (v.accepted) lines.push(`- Accepted as ${v.accepted.as} by ${originWords(v.accepted.origin)} at ${v.accepted.at} for revision ${v.accepted.rev}${v.accepted.stands ? "" : " (no longer stands: amended, or new evidence arrived, since)"}: ${v.accepted.why}`);

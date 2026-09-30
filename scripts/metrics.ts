@@ -32,8 +32,10 @@
  * coverage and acceptance, and where they agree or disagree. A negative in
  * one run that the other established is flagged; so is agreement on a
  * negative resting on partial coverage in both, which may be a shared blind
- * spot rather than a confirmation. Neither run's conclusions are shown to the
- * other: this is read after both ended.
+ * spot rather than a confirmation. A partial answer whose every asked part
+ * is established (the under-claiming metric, `claims`) is marked and counted
+ * on each side. Neither run's conclusions are shown to the other: this is
+ * read after both ended.
  */
 import { existsSync, statSync } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
@@ -156,6 +158,8 @@ export type RunMetrics = {
     with_hits: number;
     partial: number;
     hit_objects: number;
+    /** Hits recorded as echoes (the run's own words, or a search's own; store-sweep.ts HitOrigin): named on their sweeps, holding nothing. */
+    echoes: number;
     held: Array<{ section: string; id: string | null; answer: string; code: string; coverage: string }>;
     released: number;
   };
@@ -167,6 +171,21 @@ export type RunMetrics = {
     lowered: Array<{ section: string; id: string | null; answer: string; why: string }>;
     /** Highs kept as declared: answers recorded before the run recorded confidence (no confidence_rule). */
     legacy: number;
+  };
+  /**
+   * Under-claiming (docs/adr/0013, "What the report shows of an answer's
+   * parts"): the standing partial answers in scope, those that carry parts,
+   * and each whose asked parts are all established (asked: not marked
+   * not_asked by a review; a part a review names missing is asked, and not
+   * established), with its counts. A partial answer without parts is listed
+   * apart and never counted either way. Counts and ids only.
+   */
+  claims: {
+    recorded: boolean;
+    partial: number;
+    with_parts: number;
+    without_parts: Array<{ section: string; id: string | null; answer: string }>;
+    asked_all_established: Array<{ section: string; id: string | null; answer: string; asked: number; established: number; open: number; open_not_asked: number }>;
   };
   offers: {
     /** Whether the registers hold offer events at all (a run from before offers has none). */
@@ -486,6 +505,7 @@ function sweepsOf(c: Context, scope: RunMetrics["questions"]): RunMetrics["sweep
     with_hits: states.filter((x) => x?.hits.length).length,
     partial: states.filter((x) => x?.unsearched.length).length,
     hit_objects: states.reduce((n, x) => n + (x?.hits.length ?? 0), 0),
+    echoes: states.reduce((n, x) => n + (x?.echoes?.length ?? 0), 0),
     held,
     released,
   };
@@ -509,6 +529,30 @@ function confidenceOf(c: Context, scope: RunMetrics["questions"]): RunMetrics["c
     if (r.stated !== r.recorded) lowered.push({ section, id: c.qs?.bySection.get(section)?.id ?? null, answer: `E-${e.seq}`, why: r.why ?? "" });
   }
   return { recorded: c.have.ledger, answers, stated, recorded_levels: recorded, lowered, legacy };
+}
+
+/**
+ * The standing partial answers in scope whose asked parts are all
+ * established (protocol.ts answerPartsStanding, the reading the report and
+ * the console show): the under-claiming count.
+ */
+function claimsOf(c: Context, scope: RunMetrics["questions"]): RunMetrics["claims"] {
+  const live = new Set(scope.in_scope.map((q) => q.section));
+  let partial = 0;
+  const without: RunMetrics["claims"]["without_parts"] = [];
+  const all: RunMetrics["claims"]["asked_all_established"] = [];
+  for (const [section, e] of standingAnswers(c)) {
+    if (!live.has(section) || NB.answerResult(e) !== "partial") continue;
+    partial += 1;
+    const id = c.qs?.bySection.get(section)?.id ?? null;
+    const s = P.answerPartsStanding(e, c.attestations);
+    if (!s) {
+      without.push({ section, id, answer: `E-${e.seq}` });
+      continue;
+    }
+    if (s.all_asked_established) all.push({ section, id, answer: `E-${e.seq}`, asked: s.asked, established: s.established, open: s.open, open_not_asked: s.open_not_asked });
+  }
+  return { recorded: c.have.ledger, partial, with_parts: partial - without.length, without_parts: without, asked_all_established: all };
 }
 
 function negativesAndCoverage(c: Context, scope: RunMetrics["questions"]): Pick<RunMetrics, "negatives" | "coverage"> {
@@ -1075,6 +1119,7 @@ export async function measureRun(runDirArg: string, o: { now?: number } = {}): P
     ...nc,
     sweeps: sweepsOf(c, scope),
     confidence: confidenceOf(c, scope),
+    claims: claimsOf(c, scope),
     offers: off,
     done: doneCalls(events, c.have.trace && !unreadable),
     finish: await finishActs(c, events, c.have.trace && !unreadable, t),
@@ -1115,6 +1160,8 @@ export type QuestionSide = {
   acceptance_lapsed: string | null;
   /** The answer still standing for a question that is no longer in scope: history, not compared. */
   history: { answer: string; result: string | null } | null;
+  /** A partial answer with parts: whether every asked part is established (claims.asked_all_established); null for any other answer, or one without parts. */
+  asked_all_established: boolean | null;
 };
 export type Verdict = "agree" | "class_differs" | "disagree" | "unknown" | "only_a" | "only_b" | "neither";
 export type Comparison = {
@@ -1124,7 +1171,7 @@ export type Comparison = {
   compared_at: string;
   same_questions: boolean;
   questions: Array<{ section: string; id: string | null; a: QuestionSide; b: QuestionSide; verdict: Verdict; flags: string[] }>;
-  summary: { questions: number; agree: number; class_differs: number; disagree: number; unknown: number; one_sided: number; neither: number; negative_disagreements: number; shared_partial_negatives: number };
+  summary: { questions: number; agree: number; class_differs: number; disagree: number; unknown: number; one_sided: number; neither: number; negative_disagreements: number; shared_partial_negatives: number; under_claimed: { a: number; b: number } };
   notes: string[];
 };
 
@@ -1134,7 +1181,7 @@ function sideOf(c: Context, section: string, live: Set<string>, standing: Map<st
   const stands = q?.accepted ? Q.acceptanceStands(q, L.ledgerView(c.entries, c.disputes)) : false;
   const accepted = q?.accepted && stands ? q.accepted.as : null;
   const lapsed = q?.accepted && !stands ? q.accepted.as : null;
-  const blank: QuestionSide = { in_scope: live.has(section), answer: null, result: null, kind: null, reviewed: null, coverage: [], accepted, acceptance_lapsed: lapsed, history: null };
+  const blank: QuestionSide = { in_scope: live.has(section), answer: null, result: null, kind: null, reviewed: null, coverage: [], accepted, acceptance_lapsed: lapsed, history: null, asked_all_established: null };
   if (!e) return blank;
   const result = NB.answerResult(e);
   if (!live.has(section)) return { ...blank, history: { answer: `E-${e.seq}`, result } };
@@ -1142,7 +1189,8 @@ function sideOf(c: Context, section: string, live: Set<string>, standing: Map<st
   const kind: ResultKind = result === null ? "unknown" : negative ? "negative" : result === "established" || result === "partial" ? "asserts" : result === "premise_not_supported" ? "premise_rejected" : result === "out_of_scope" ? "out_of_scope" : "unknown";
   const bySeq = new Map(c.entries.map((x) => [x.seq, x]));
   const cov = (e.support ?? []).map((x) => bySeq.get(x.seq)).filter((x): x is P.LedgerEntry => x?.kind === "coverage" && !c.replaced.has(x.seq)).map((x) => coverageState(c, x));
-  return { ...blank, answer: `E-${e.seq}`, result, kind, reviewed: negative ? P.negativeReview(e, c.entries, c.attestations, c.disputes).reviewed : null, coverage: cov };
+  const parts = result === "partial" ? P.answerPartsStanding(e, c.attestations) : null;
+  return { ...blank, answer: `E-${e.seq}`, result, kind, reviewed: negative ? P.negativeReview(e, c.entries, c.attestations, c.disputes).reviewed : null, coverage: cov, asked_all_established: parts ? parts.all_asked_established : null };
 }
 
 export async function compareRuns(aDir: string, bDir: string): Promise<Comparison> {
@@ -1181,6 +1229,9 @@ export async function compareRuns(aDir: string, bDir: string): Promise<Compariso
     }
     for (const [s, n] of [[a, "A"], [b, "B"]] as const) if (s.acceptance_lapsed) flags.push(`${n}'s acceptance (${s.acceptance_lapsed}) no longer stands`);
     if (verdict === "agree" && (a.accepted || b.accepted)) flags.push("agreement where a run's question was accepted by the operator as limited");
+    // Under-claiming: a partial answer whose every asked part is established, in one run or both.
+    const under = [a.asked_all_established ? "A" : "", b.asked_all_established ? "B" : ""].filter(Boolean);
+    if (under.length) flags.push(`partial in ${under.join(" and ")} with every asked part established (under-claimed: what is open, a review marks not asked)`);
     rows.push({ section, id: A.qs?.bySection.get(section)?.id ?? B.qs?.bySection.get(section)?.id ?? null, a, b, verdict, flags });
   }
   const count = (v: Verdict) => rows.filter((r) => r.verdict === v).length;
@@ -1201,6 +1252,7 @@ export async function compareRuns(aDir: string, bDir: string): Promise<Compariso
       neither: count("neither"),
       negative_disagreements: rows.filter((r) => r.flags.some((f) => f.startsWith("a negative in"))).length,
       shared_partial_negatives: rows.filter((r) => r.flags.some((f) => f.includes("shared blind spot"))).length,
+      under_claimed: { a: rows.filter((r) => r.a.asked_all_established).length, b: rows.filter((r) => r.b.asked_all_established).length },
     },
     notes,
   };
@@ -1240,8 +1292,9 @@ export function metricsText(m: RunMetrics): string {
     ["Unreviewed negatives", neg.recorded ? `${neg.unreviewed_material.length} material (${list(neg.unreviewed_material.map((x) => `${qname(x)} ${x.answer}`))}), ${neg.unreviewed_background.length} background` : absent(LEDGER)],
     ["Coverage records", cov.recorded ? `${cov.records} standing: ${cov.complete} complete, ${cov.partial} partial, ${cov.not_computed} not computed, ${cov.stale.length} stale (a result no longer stands: ${list(cov.stale.map((x) => `${x.record} ${x.results.map((y) => `${y.result} ${y.code}`).join(" ")}`))}); ${cov.reviewed} reviewed by another seat as the gate counts it (${cov.reviewed_on_record} on the record, ${cov.reviewed_through_answer} through the negative answer resting on it)` : absent(LEDGER)],
     ["Negatives on partial coverage", cov.recorded ? `${cov.negatives_on_partial.length} (${list(cov.negatives_on_partial.map((x) => `${qname(x)} ${x.answer}`))}); ${cov.negatives_without_coverage.length} cite no coverage record` : absent(LEDGER)],
-    ["Store sweeps", m.sweeps.recorded ? `${m.sweeps.records} coverage record(s) named what a hit would contain: ${m.sweeps.clean} clean, ${m.sweeps.with_hits} with hits outside the record (${m.sweeps.hit_objects} hit(s)), ${m.sweeps.partial} partial, ${m.sweeps.pending} pending; ${m.sweeps.held.length} negative hold(s) now (${list(m.sweeps.held.map((x) => `${qname(x)} ${x.answer} ${x.code} on ${x.coverage}`))}); ${m.sweeps.released} record(s) with hits released by a revision whose sweep is clean` : absent(LEDGER)],
+    ["Store sweeps", m.sweeps.recorded ? `${m.sweeps.records} coverage record(s) named what a hit would contain: ${m.sweeps.clean} clean, ${m.sweeps.with_hits} with hits outside the record (${m.sweeps.hit_objects} hit(s)), ${m.sweeps.echoes} echo(es) named and holding nothing, ${m.sweeps.partial} partial, ${m.sweeps.pending} pending; ${m.sweeps.held.length} negative hold(s) now (${list(m.sweeps.held.map((x) => `${qname(x)} ${x.answer} ${x.code} on ${x.coverage}`))}); ${m.sweeps.released} record(s) with hits released by a revision whose sweep is clean` : absent(LEDGER)],
     ["Confidence", m.confidence.recorded ? `${m.confidence.answers} standing answer(s) in scope, recorded: high ${m.confidence.recorded_levels.high}, medium ${m.confidence.recorded_levels.medium}, low ${m.confidence.recorded_levels.low}, none ${m.confidence.recorded_levels.none}; stated high ${m.confidence.stated.high}; ${m.confidence.lowered.length} recorded lower than stated${m.confidence.lowered.length ? ` (${list(m.confidence.lowered.map((x) => `${qname(x)} ${x.answer}: ${x.why}`))})` : ""}${m.confidence.legacy ? `; ${m.confidence.legacy} high(s) kept as declared (recorded before the run recorded confidence)` : ""}` : absent(LEDGER)],
+    ["Under-claiming", m.claims.recorded ? `${m.claims.asked_all_established.length} of ${m.claims.with_parts} partial answer(s) with parts have every asked part established (asked: not marked not_asked by a review)${m.claims.asked_all_established.length ? ` (${list(m.claims.asked_all_established.map((x) => `${qname(x)} ${x.answer}: ${x.established} of ${x.asked} asked established, ${x.open} open, ${x.open_not_asked} not asked`))})` : ""}; ${m.claims.partial} partial in scope${m.claims.without_parts.length ? `, ${m.claims.without_parts.length} without parts, not counted (${list(m.claims.without_parts.map((x) => `${qname(x)} ${x.answer}`))})` : ""}` : absent(LEDGER)],
     ["Offers (leads)", o.recorded ? `${o.leads.made} made: ${o.leads.accepted} accepted, ${o.leads.declined} declined, ${o.leads.taken_by_another} taken by another seat, ${o.leads.lapsed} lapsed, ${o.leads.open} with no outcome` : o.wakes_before_offers.recorded ? "not recorded (no offer events: a run from before offers)" : absent(LEADS)],
     ["Offers (questions)", o.recorded ? `${o.questions.made} made: ${o.questions.accepted} accepted, ${o.questions.declined} declined, ${o.questions.not_taken_up} not taken up` : o.wakes_before_offers.recorded ? "not recorded (no offer events: a run from before offers)" : absent(LEADS)],
     ["Offers (reviews)", o.recorded ? `${o.reviews.made} made (${Object.entries(o.reviews.by_reason).map(([k, n]) => `${k} ${n}`).join(", ") || "none"}): ${o.reviews.accepted} taken up, ${o.reviews.declined} declined, ${o.reviews.withdrawn} withdrawn (reviewed by another route, or superseded), ${o.reviews.lapsed} lapsed, ${o.reviews.open} with no outcome; ${o.reviews.taken} taken by their seat first (offer accept)` : o.wakes_before_offers.recorded ? "not recorded (no offer events: a run from before offers)" : absent(LEADS)],
@@ -1270,7 +1323,7 @@ export function metricsText(m: RunMetrics): string {
 export function compareText(c: Comparison): string {
   const side = (s: QuestionSide) =>
     s.answer
-      ? `${s.result ?? "no result class"}${s.reviewed === false ? " (unreviewed)" : ""}${s.coverage.length ? ` [${s.coverage.join(", ")}]` : ""}${s.accepted ? ` accepted ${s.accepted}` : ""}`
+      ? `${s.result ?? "no result class"}${s.asked_all_established ? " (every asked part established)" : ""}${s.reviewed === false ? " (unreviewed)" : ""}${s.coverage.length ? ` [${s.coverage.join(", ")}]` : ""}${s.accepted ? ` accepted ${s.accepted}` : ""}`
       : !s.in_scope
         ? `not in scope${s.history ? ` (${s.history.answer} ${s.history.result ?? "no result class"}, history)` : ""}`
         : "no answer";
@@ -1283,6 +1336,7 @@ export function compareText(c: Comparison): string {
   }
   const s = c.summary;
   lines.push("", `${s.questions} question(s): ${s.agree} agree, ${s.class_differs} of the same kind in another class, ${s.disagree} disagree, ${s.unknown} with no result class to compare, ${s.one_sided} answered in one run only, ${s.neither} in neither; ${s.negative_disagreements} negative(s) the other run asserted, ${s.shared_partial_negatives} shared negative(s) without complete coverage.`);
+  lines.push(`Under-claiming: ${s.under_claimed.a} partial answer(s) in A and ${s.under_claimed.b} in B with every asked part established (asked: not marked not_asked by a review).`);
   lines.push("Agreement is not confirmation: two runs of one harness can share a blind spot.");
   if (c.notes.length) lines.push("", ...c.notes.map((x) => `Note: ${x}`));
   return `${lines.join("\n")}\n`;

@@ -265,6 +265,106 @@ extracted; a premise is designated or proposed), a model judging whether
 two premises are one, and a recorded result derived from what reviews hold
 open (L3-A, waiting for the paired runs).
 
+## What a question presumes
+
+Added 2026-09-30, after the last validation round. In a synthetic
+calibration case a question asks about an event that did not happen: the
+truth there is `premise_not_supported`. Round after round the swarm answered
+it partial, with a planted clue that fits the question's frame in the
+headline. A premise (above) is what the case takes as given; this is what
+one question takes as happened, and it is tested, never given.
+
+- **Which questions presume something.** A question presumes what the
+  register says it does:
+  - `presumes: "<what the question takes as happened>"` on the question,
+    said by its asker when it is opened (`swarm.sh question <run> add
+    --presumes`, the console's question form, an agent's `question_open`) or
+    amended (`amend --presumes`), by the goal (a front-matter `presumes:`
+    list, `- 7: <what it takes as happened>`, which the kickoff carries into
+    a `## Presumptions` section the register seeds from), or by an agent with
+    a clarification it asks (`question_ask(id, what, presumes)`), once and
+    only while nobody has said it: the recorded word stands, and the asker
+    sees the agent's with the clarification. The act carries it (a signature
+    covers it); the fold keeps the text, who said it, when, at which
+    revision and by which act. A new revision is made by the text alone.
+  - a person's question, which the register frames as a hypothesis (item 7
+    above): it presumes the proposition its first framed lead states, with
+    that lead's negation, or its own words while no lead has framed it.
+  A goal's question with neither presumes nothing. The words are the
+  register's, never read for what they mean (`questions.ts
+  questionPresumption`, `presumptionsOf`).
+- **The premise is tested first.** The review of an answer to such a
+  question names the premise itself as a rival, "the question's premise is
+  not supported". The shape chosen is a field of its own,
+  `answer_review.premise_tested {outcome, refs}`, beside the discriminator:
+  a discriminator whose rival is the premise would have displaced the
+  strongest other rival, which a source-first review still names. Its
+  outcome says what the test showed of whether the event happened at all;
+  its refs name the observation or job it rests on (entries in the ledger,
+  objects that resolve), never the answer under review. The answer may carry
+  the test itself, `premise_tested {outcome, refs}`, its entries citations as
+  the reasoning's are. Each is present only when given: an answer or a
+  review without it hashes as it did.
+- **An established attest without it is capped.** On an answer that claims
+  established, to a material question that presumes an event, an established
+  attest whose review does not test the premise (or tests it in a
+  placeholder) is recorded best_candidate, with why in `capped`
+  (`premise_untested`, a code of the source-first review, `protocol.ts
+  reviewEvidenceCaps`), and the reply says how to fix it. The answer is then
+  held a best candidate, as any capped claim is, until a review tests the
+  premise.
+- **A partial answer without it is warned.** A partial answer to such a
+  question that neither it nor any review of it tests the premise of is
+  warned, `premise_untested`, never held, wherever warnings are delivered
+  (`warningsAt`: the reply to the record of the answer, the reply to an
+  attest on it, finish status; the answers check and the verdict's note).
+  Partial stays a disposition, and nothing is forced.
+- **What agents are told.** The worker prompt, the record, attest and
+  question_open tools, and the question's post say: before answering a
+  question that presumes an event, test whether the event happened; if the
+  evidence does not support it, the answer is `premise_not_supported`; a
+  clue that fits the question's frame is a candidate to test against that
+  rival, not an answer.
+- **Where it shows.** `questions/questions.md`, `swarm.sh question <run>
+  show`, the agents' `questions` list and the console's question card show
+  what each question presumes; the report's §2 chain says it beside the
+  proposition tested, and each answer (in §2 and §5) says each premise test
+  on the record, the answer's and each review's, or that none is.
+- **The calibration generator frames every presumption.** Its
+  premise-false questions carried neither a framing nor `presumes`, and the
+  generator knows which they are from its truth. That knowledge must not
+  reach the goal. So the generator (version 3) frames every question's
+  presumption neutrally, from the question's words alone: each question that
+  asks which, when or how of an event presumes it, whether or not it
+  happened; one that asks whether (with an "if so") presumes nothing.
+  usb-departure presumes on questions 3, 6 and 7, web-intrusion on 1, 2, 3, 4
+  and 6, invoice-fraud on 1, 2, 4, 5 and 6: the premise-false question of
+  each is among them, and so are questions whose premise holds. Its test
+  holds that the presumed questions do not depend on the seed.
+- **Measured.** `swarm.sh replay --presumes Q[,Q…]` amends the named
+  questions in the copy, as the operator would, to presume their event in
+  synthetic words, and says what the rule would have done. Replayed
+  values-free, main before this change (9dd3c7b) against this checkout: on
+  s85febc (usb-departure, a calibration run) and s704e4b (c10) nothing
+  differs, since neither run's questions presume anything (goal questions
+  only, no person's question). With the generator's presumptions, s85febc's
+  questions 3 and 7 (both partial) would have been warned
+  `premise_untested`, and nothing else differs: question 6 is not
+  determinable, which the rule does not reach, and its one established
+  attest is on question 1, which presumes nothing. On s704e4b, with
+  questions 1 to 5 marked as the generator would mark them (each takes an
+  event as happened; question 6 asks for a reflection), each of their
+  partial answers would have been warned, and no attest there is on an
+  answer that claims established. Nothing is held in either.
+  Whether the swarm then tests the premise, and answers the premise-false
+  question `premise_not_supported`, is for paired runs.
+
+What is not decided here: a presumption read from a question's words
+(nothing is inferred; it is said, or it is a person's framing); a hold on a
+partial answer whose premise is untested (a warning, as the owner chose);
+and the cap on a question not material, which the source-first review does
+not cap either.
+
 ## Consequences
 
 - Every existing goal and run keeps working: `question:N`, `N` and `QN` stay

@@ -208,6 +208,17 @@ Questions (the question register)
   routes). Its answer names the entries that say otherwise (contrary) or says why none
   does (contrary_none_why), and "the premise is not supported" is an answer (result:
   premise_not_supported). Who asked it and how urgently carry no evidential weight.
+- A question that asks which, when or how of an event presumes that event happened. The register
+  holds what a question presumes (`presumes`: the asker's word, the goal's Presumptions section, or
+  an agent's; `questions` shows it), and a person's question presumes the proposition its first
+  lead states. Before answering a question that presumes an event, test whether the event happened
+  at all. If the evidence does not support it, the answer is premise_not_supported. A clue that
+  fits the question's frame is a candidate to test against that rival, not an answer. Say what the
+  test showed in the answer's `premise_tested {outcome, refs}` (the observation or job it rests
+  on); a partial answer whose premise nothing tests is warned (`premise_untested`), never held.
+  When you open such a question, say what it takes as happened in question_open's `presumes`; when
+  a question you work presumes an event nobody has named, record it with question_ask(id, what is
+  unclear, presumes).
 - Leading forms: a question worded as the conclusion it wants, an imperative at the start of it or
   of a sentence ("Confirm that", "Show that", "Prove", "Demonstrate that", "Verify that"), is
   flagged in the register ("what shows that" asks, it does not lead). Test it all the same; the
@@ -545,7 +556,12 @@ Ledger (only when `record` is in your tool list)
   With neither a locator nor a derivation it is warned, never capped: an answer that is an
   inference over several entries stands on its discriminator.
   Bytes at an offset prove the value is there, not that it answers the question: that is what the
-  discriminator is for. On an answer that claims
+  discriminator is for. On a question that presumes an event, the review also tests the premise
+  itself, against the rival "the question's premise is not supported": `answer_review.premise_tested
+  {outcome, refs}`, what the test showed of whether the event happened, on the observation or job it
+  read (never the answer under review). An established attest of an answer that claims established,
+  on a material question, without it is recorded best_candidate, and the reply says how to fix it; if
+  the evidence does not support the premise, dispute the answer: it is premise_not_supported. On an answer that claims
   established, a medium or low confidence, a part not established, or a route its would_change
   names that nothing took allows only best_candidate, which does not satisfy the finish line: a
   best candidate you cannot break is still one. Say so, and open the lead for the route

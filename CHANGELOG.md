@@ -6,6 +6,167 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Fixed: a store sweep recorded under older rules is read again under the current ones
+
+The calibration run sd0e59d, stopped on the harness before the echoes below
+and resumed on the one that made them, kept its three `sweep_hits` holds (on
+E-111, E-118 and E-129): the gate reads each coverage record's latest sweep
+line, those lines were written under the older identity rule, and nothing
+read them again. Now (ADR 0013, "Re-reading after a rules change"):
+
+- **A version on each line.** Every coverage record's sweep line names the
+  version of the sweep's rules it was written under (`rules`;
+  `SWEEP_RULE_CHANGES` says what each version changed and whether a line from
+  before it can be read again from what it recorded). A line with none is
+  older than any versioned one.
+- **Read again when the hub starts** (a kickoff or a resume): each record
+  whose latest line is older than the current rules gets one line on the
+  sweeps' chain with `reread: {from_version, reason: "rules changed", of, at,
+  how}`, its hits sorted anew from what the line recorded (the logic of
+  `replay --resweep`, nothing searched, the search's own times kept) or,
+  where a change needs bytes the line did not record, its record searched
+  again within the sweep's budget. A line under the current rules is left
+  alone.
+- **Said**: a `sweep_reread` line on the trace, and one board post with how
+  many records were read again and which of the gate's sweep holds changed.
+  The sweep's words say a line was read again, from which version and how.
+- **Also at the answers check and the finish gate**, as a step of
+  `reconcileSweeps`, idempotent: a host run with no hub is covered, and a
+  replay's evaluation reads a copy's older lines again too
+  (`store_sweeps.reread`).
+- **Chains**: the lines are appended, the chain verifies, and a custody
+  verdict taken before holds as a prefix.
+- **Measured**: sd0e59d replayed as of its resume, 1666851 against this
+  harness: the answers check reads its 20 recorded sweeps again (in 11 the
+  hits move, 106 becoming 67, with 13 echoes), the three holds clear, and
+  questions 2, 5 and 6 take the dispositions their answers claim.
+
+### Fixed: the store sweep reads a kept output and its sealed import as one object, and names echoes
+
+On the calibration run sd0e59d the store sweep held three negatives
+(`sweep_hits`, questions 2, 5 and 6) on hits in whole outputs the harness had
+kept under `tool-output/`. The seats sealed each file and named the import in
+revised coverage records, as the fix said, and the hits held on for two done
+calls and more than half an hour: the sweep knew the import by its manifest's
+sha256 and the kept file by its inode, so the two were separate objects. Now
+(ADR 0013, "Echoes: authored, not derived"):
+
+- **One object under several names.** A kept output or a job's log is known
+  by its content when another object has its size (hashed once, cached): a
+  kept output and the import it was sealed as are one object, and a record
+  that names either names both.
+- **Echoes.** A hit in an object made from the run's own words is named on
+  the sweep's line (`echoes`, each with its `origins`: what made every name
+  of the object, and why) and holds nothing: a command that read only the
+  run's registers and harness files (a dump of the ledger, which holds every
+  `looked_for` string; `RUN_REGISTERS`), a summary the harness kept from a
+  seat's own words outside any tool call (a compaction; `HARNESS_KEEPERS`),
+  or a search whose own words name the string and that read nothing but
+  what is accounted for. The same principle as the network's evidence link
+  (ADR 0012): what a command's own words name is authored, not derived
+  (`jobOwnWords`, now one helper for both).
+- **Accounted for** is a register, or an object the record names in which the
+  same sweep found the same string. An output made only from such objects,
+  whose maker does not name the string, is said among the named hits with
+  what it read. A maker that read an input (which the sweep never reads, so
+  a derivation of one is the only place its rows show), anything else of the
+  run, or paths that cannot be told (a command naming none, a job that saw
+  everything or reached the network) leaves the hit holding: a search for
+  the string over evidence the record does not name is the miss the sweep
+  is for.
+- **Makers from the record, not a parser.** A kept output's maker is the
+  trace line that kept it (attributed to its seat, on the chain:
+  `keptOutputOrigins`), and what it read the run paths its words name
+  (`runPathsIn`); a job's is its record and its declared inputs; a sealed
+  import is made as the output it sealed was.
+- **Shown** in the sweep's words (`ledger.md`, the review offer, which asks
+  whether each echo is only the run's own words, the report's store sweeps)
+  and the metrics (`sweeps.echoes`). A line from before has no `echoes` and
+  reads as it did; `unexaminedHits` reads each earlier sweep by its latest
+  line, as the gate does.
+- **Measured**: `swarm.sh replay --resweep` reads each recorded sweep again
+  with this checkout's rules and adds the result as a synthetic line on the
+  copy's chain, nothing searched again. On sd0e59d, of 106 recorded hits 67
+  still hold, 26 move to the named hits (the sealed imports the records
+  named) and 13 are echoes (8 a ledger dump, 3 a compaction summary, 2 jobs
+  that searched named objects the sweep found the string in); the three
+  `sweep_hits` holds clear, and the three questions take the dispositions
+  their answers claim.
+
+### Added: a question's premise is tested first
+
+In a synthetic calibration case a question asks about an event that did not
+happen; the truth is `premise_not_supported`. Round after round the swarm
+answered it partial, a planted clue that fits the question's frame in the
+headline. Now (ADR 0011, "What a question presumes"):
+
+- **What a question presumes** is on the register: `presumes` said by its
+  asker (`swarm.sh question <run> add|amend --presumes`, the console's
+  question form, `question_open`), by the goal (a front-matter `presumes:`
+  list the kickoff carries into a `## Presumptions` section), or by an agent
+  with a clarification (`question_ask(…, presumes)`, once, never over a
+  recorded word); a person's question presumes the proposition its framing
+  states.
+- **The review tests the premise** against the fixed rival "the question's
+  premise is not supported": `answer_review.premise_tested {outcome, refs}`,
+  never resting on the answer under review. The answer may carry the test
+  itself (`premise_tested`). Both are present only when given: an old entry
+  or review hashes as it did.
+- **An established attest without it is recorded best_candidate**, on an
+  answer that claims established to a material question that presumes an
+  event (the source-first review's code `premise_untested`), and the reply
+  says how to fix it. **A partial answer without it is warned**
+  (`premise_untested`) at its record, the attest's reply and finish status,
+  never held.
+- **The prompt and the tools** (the worker prompt, record, attest,
+  question_open, question_ask) say: before answering a question that
+  presumes an event, test whether the event happened; if the evidence does
+  not support it, the answer is premise_not_supported; a clue that fits the
+  question's frame is a candidate to test against that rival, not an answer.
+- **The calibration generator** (version 3) frames every question's
+  presumption from its words alone: each that asks which, when or how of an
+  event presumes it, whatever the truth, so a presumption says nothing of
+  which premise is false.
+- **Shown** in questions.md, `question show`, the agents' list, the
+  question's post, the console's card and the report (the §2 chain and each
+  answer's premise tests, or that none is on the record).
+- **Measured**: `swarm.sh replay --presumes Q[,Q…]` presumes the named
+  questions in the copy and says what the rule would have warned and
+  capped. s85febc and s704e4b replay with no difference against main; with
+  the generator's presumptions, s85febc's questions 3 and 7 would have been
+  warned, and nothing else changes. Fixtures `premise-untested-capped`,
+  `premise-untested-warned`, `premise-tested-not-supported`. The calibration
+  scorer says, for each question that expects `premise_not_supported`, what
+  its answer recorded and whether the answer and its reviews carried a
+  premise test (`summary.premise`, codes and counts only).
+
+### Changed: the report shows each answer's parts, and the metrics count the under-claimed
+
+Complete answers were still recorded partial at medium confidence, their
+open parts often what the question does not ask: the score did not suffer,
+but a reader takes "partial" to mean "not fully known". Presentation only
+(ADR 0013, "What the report shows of an answer's parts"):
+
+- **Each answer's parts, where it is rendered**: the report's §5 answer (a
+  review's `not_asked` mark now beside the part it marks, in the parts
+  table), its §2 chain (the parts listed under the result) and its §1 table,
+  the console's question view, `questions/questions.md`, and the release,
+  whose report is the same render.
+- **A partial answer leads with a plain line**: "Asked parts: 3 of 3
+  established. Open: 1, which a review marks as not asked." When every
+  asked part is established, the report says so beside the partial label,
+  which is unchanged. An answer without parts renders as before.
+- **The under-claiming count**: `swarm.sh metrics` counts the partial
+  answers whose asked parts are all established (asked: not marked
+  `not_asked` by a review), and `--compare` sets each run's count side by
+  side and flags the question. On s85febc and s704e4b it is 0 of 6: neither
+  run's reviews marked a part not asked.
+- **Measured on the truth too**: the calibration scorer
+  (`scripts/calibrate.ts`) gives "Under-claimed: k of n present questions
+  answered partial with every present fact found", each with its label and
+  confidence, in its summary and its score JSON (`summary.under_claimed`);
+  where the truth is known it sees what no review marked.
+
 ### Fixed: the findings of an independent review of the limits branch
 
 Fable's review of the branch (one P1, four P2, ten P3) found one place

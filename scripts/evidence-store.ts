@@ -694,14 +694,7 @@ export async function traceOrigin(sandbox: string, ref: string): Promise<{ ok: t
     if (!line) continue;
     if (pending) {
       // On the chain: this line names the one before it.
-      const prev = /"prev":"([0-9a-f]{64})"/.exec(line.slice(-100))?.[1] ?? (() => {
-        try {
-          return String((JSON.parse(line) as { prev?: unknown }).prev ?? "");
-        } catch {
-          return "";
-        }
-      })();
-      if (prev === pending.hash) {
+      if (lineParent(line) === pending.hash) {
         confirmed = pending;
         rl.close();
         break;
@@ -795,6 +788,96 @@ export async function sealedBrainOutput(sandbox: string, ref: string): Promise<{
     }
   }
   return hit;
+}
+
+/** Every brain-side output sealed, as the journal's brain_output_sealed lines name them: the ref, the import it became and the import job. */
+export async function brainOutputSeals(sandbox: string): Promise<Array<{ ref: string; import: string; job: string }>> {
+  const text = await readFile(storePaths(resolve(sandbox)).journal, "utf8").catch(() => "");
+  const out: Array<{ ref: string; import: string; job: string }> = [];
+  for (const line of text.split("\n")) {
+    if (!line.includes('"brain_output_sealed"')) continue;
+    try {
+      const l = JSON.parse(line) as { type?: string; ref?: string; import?: string; job?: string };
+      if (l.type === "brain_output_sealed" && l.ref && l.import) out.push({ ref: l.ref, import: l.import, job: String(l.job ?? "") });
+    } catch {
+      // a torn line is the journal check's to name
+    }
+  }
+  return out;
+}
+
+/**
+ * A job's own words: its command, its tool and its arguments, as one
+ * lower-cased text. A value they name was written by whoever asked for the
+ * job, not derived by it: authored, not derived (the network's evidence
+ * check, net-broker.ts; the store sweep's echoes, store-sweep.ts).
+ */
+export function jobOwnWords(spec: { command?: string; tool?: string; args?: unknown } | undefined): string {
+  return [spec?.command ?? "", spec?.tool ?? "", JSON.stringify(spec?.args ?? {})].join("\n").toLowerCase();
+}
+
+/** The parent a trace line names (its `prev`), read from its end where the collector writes it. */
+function lineParent(line: string): string {
+  return (
+    /"prev":"([0-9a-f]{64})"/.exec(line.slice(-100))?.[1] ??
+    (() => {
+      try {
+        return String((JSON.parse(line) as { prev?: unknown }).prev ?? "");
+      } catch {
+        return "";
+      }
+    })()
+  );
+}
+
+/** The line of the trace that kept a file under tool-output/: the file, the line's sha256, its seat, tool and arguments. */
+export type KeptOutputOrigin = { path: string; line_sha256: string; seat: string; tool: string; args: unknown };
+
+/**
+ * The line of the trace that kept each file under tool-output/, in one pass
+ * (traceOrigin's rules, for every file at once): a line whose result names
+ * the file as a kept output with its sha256 and size, attributed by the
+ * collector to the seat whose directory holds it (never a claim), and on the
+ * chain (the next line names it as its parent, or, the last, the trace's
+ * anchor does). The first such line for a file is its origin; a file no line
+ * keeps is not in the map. `wanted` limits it to those paths.
+ */
+export async function keptOutputOrigins(sandbox: string, wanted?: ReadonlySet<string>): Promise<Map<string, KeptOutputOrigin>> {
+  const S = resolve(sandbox);
+  const out = new Map<string, KeptOutputOrigin>();
+  const file = join(S, TRACE_REL);
+  if (!existsSync(file)) return out;
+  let pending: { hash: string; origins: KeptOutputOrigin[] } | null = null;
+  const confirm = (p: { origins: KeptOutputOrigin[] }) => {
+    for (const o of p.origins) if (!out.has(o.path)) out.set(o.path, o);
+  };
+  const rl = createInterface({ input: createReadStream(file, { encoding: "utf8" }), crlfDelay: Infinity });
+  for await (const line of rl) {
+    if (!line) continue;
+    if (pending) {
+      if (lineParent(line) === pending.hash) confirm(pending);
+      pending = null;
+    }
+    if (!line.includes('"tool-output/')) continue;
+    let record: Record<string, unknown>;
+    try {
+      record = JSON.parse(line) as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+    const seat = typeof record.agent === "string" ? record.agent : "";
+    if (!SEAT.test(seat) || record.agent_unverified || record.claimed_agent !== undefined) continue;
+    const mine = (p: string) => p.startsWith(`tool-output/${seat}/`) && !p.includes("\0") && p.split("/").every((s) => s !== "" && s !== "." && s !== "..");
+    const kept = keptOutputs(record.result).filter((k) => mine(k.path) && (!wanted || wanted.has(k.path)) && !out.has(k.path));
+    if (!kept.length) continue;
+    const hash = sha256Hex(line);
+    pending = { hash, origins: kept.map((k) => ({ path: k.path, line_sha256: hash, seat, tool: String(record.tool ?? ""), args: record.args ?? null })) };
+  }
+  if (pending) {
+    const anchor = traceAnchorHead(S);
+    if (anchor && (anchor.head === pending.hash || anchor.prev_head === pending.hash)) confirm(pending);
+  }
+  return out;
 }
 
 // --- catalogue generations and revisions ---------------------------------------------

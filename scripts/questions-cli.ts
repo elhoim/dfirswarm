@@ -4,10 +4,12 @@
  * the CLI and, through `swarm.sh question`, the console.
  *
  *   questions-cli.ts seed <sandbox>                         put the goal's questions and objectives on the chain
- *   questions-cli.ts add <sandbox> --text T --why W [...]   a person's question (analyst, reviewer, observer, examiner)
+ *   questions-cli.ts add <sandbox> --text T --why W [--presumes P] [...]
+ *                                                           a person's question (analyst, reviewer, observer, examiner);
+ *                                                           --presumes: what it takes as happened, tested first
  *   questions-cli.ts list <sandbox> [--json]                every question: triage and clarifications first
  *   questions-cli.ts show <sandbox> Q-n [--json]            one question whole, with its history and signatures checked
- *   questions-cli.ts amend <sandbox> Q-n --expect-rev N [--text T] [--why W] [--neutral T] [...]
+ *   questions-cli.ts amend <sandbox> Q-n --expect-rev N [--text T] [--why W] [--neutral T] [--presumes P] [...]
  *   questions-cli.ts priority <sandbox> Q-n urgent|normal [--reason R]
  *   questions-cli.ts scope <sandbox> Q-n|L-n in_scope|excluded --why W
  *   questions-cli.ts withdraw <sandbox> Q-n --why W
@@ -579,6 +581,7 @@ export async function showText(sandbox: string, id: string): Promise<string | nu
   if (v.neutral) out.push(`    neutral formulation (${Q.originWords(v.neutral.origin)}): ${v.neutral.text}`);
   if (v.expects) out.push(`    expects: ${v.expects}`);
   if (v.completeness) out.push(`    asks for a complete set (${v.completeness_by === "asker" ? "the asker says so" : "by its words"}): an established or partial answer rests on a coverage record naming the areas searched`);
+  if (v.presumption) out.push(`    presumes ${PM.presumptionWords(v.presumption)}: its answer tests that premise first`);
   if (v.hints.length) out.push(`    hints: ${v.hints.map((h) => `${h.ref}${h.value ? ` (says: ${h.value})` : ""}`).join("; ")}`);
   if (v.attachments.length) out.push(`    attachments: ${v.attachments.join(", ")}`);
   if (v.suggested_to) out.push(`    suggested to: ${v.suggested_to}`);
@@ -598,7 +601,7 @@ function parseArgs(rest: string[]): { pos: string[]; opts: Map<string, string[]>
   const pos: string[] = [];
   const opts = new Map<string, string[]>();
   const flags = new Set<string>();
-  const valued = new Set(["--text", "--why", "--neutral", "--objective", "--objective-text", "--parent", "--materiality", "--priority", "--reason", "--expects", "--hint", "--hint-value", "--attach", "--suggest", "--deadline", "--submission", "--expect-rev", "--as", "--secret-fd", "--via", "--title", "--product", "--acceptance", "--question", "--new-question", "--new-why", "--allowed-signers", "--ca", "--hub-admin", "--locator", "--class", "--entity", "--time", "--for-question"]);
+  const valued = new Set(["--text", "--why", "--neutral", "--presumes", "--objective", "--objective-text", "--parent", "--materiality", "--priority", "--reason", "--expects", "--hint", "--hint-value", "--attach", "--suggest", "--deadline", "--submission", "--expect-rev", "--as", "--secret-fd", "--via", "--title", "--product", "--acceptance", "--question", "--new-question", "--new-why", "--allowed-signers", "--ca", "--hub-admin", "--locator", "--class", "--entity", "--time", "--for-question"]);
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i];
     if (valued.has(a)) {
@@ -656,6 +659,8 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     ...(one("--neutral") !== undefined ? { neutral: one("--neutral") } : {}),
     ...(one("--materiality") !== undefined ? { materiality: one("--materiality") } : {}),
     ...(one("--expects") !== undefined ? { expects: one("--expects") } : {}),
+    // --presumes: what the question takes as happened; its answer tests that premise first (docs/adr/0011, "What a question presumes").
+    ...(one("--presumes") !== undefined ? { presumes: one("--presumes") } : {}),
     // --completeness: the question asks for a complete set (every one, all, each); --no-completeness: it does not, whatever its words.
     ...(flags.has("--completeness") ? { completeness: true } : flags.has("--no-completeness") ? { completeness: false } : {}),
     ...(opts.has("--hint") ? { hints: hintsFrom(rest) } : {}),

@@ -1,0 +1,22 @@
+{
+  "swarm_id": "puw",
+  "n": 4,
+  "agents": [
+    {
+      "id": "a0",
+      "role": "worker"
+    },
+    {
+      "id": "a1",
+      "role": "worker"
+    },
+    {
+      "id": "a2",
+      "role": "worker"
+    },
+    {
+      "id": "a3",
+      "role": "worker"
+    }
+  ]
+}

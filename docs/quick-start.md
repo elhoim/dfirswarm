@@ -231,6 +231,9 @@ while `metrics` and `replay` only read it. Each has its detail in
 ```bash
 # ask the running swarm a question (Q-n); list and follow them
 scripts/swarm.sh question <id> add --text "Was the archive mailed?" --why "the client says so"
+# a question that takes something as happened says so; the premise is tested first
+scripts/swarm.sh question <id> add --text "When was the archive mailed?" --presumes "The archive was mailed" \
+  --why "the client says so"
 scripts/swarm.sh question <id> list
 
 # what the case takes as given (P-n), when the goal did not designate it:

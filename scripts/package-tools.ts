@@ -407,8 +407,9 @@ export async function redactPackage(sandbox: string, dir: string, opts: { leaks?
     "ledger-sweeps.jsonl",
     (o, l) => {
       if (typeof o.target === "string" && sensitiveHashes.has(o.target)) return { seq: Number(o.seq), why: "the sweep of a sensitive coverage record" };
-      const hits = [...((o.hits as Array<{ ref?: string; also?: string[] }> | undefined) ?? []), ...((o.named_hits as Array<{ ref?: string; also?: string[] }> | undefined) ?? [])];
-      const refs = hits.flatMap((h) => [h.ref ?? "", ...(h.also ?? [])]);
+      type Hit = { ref?: string; also?: string[]; origins?: Array<{ by?: string; reads?: string[] }> };
+      const hits = [...((o.hits as Hit[] | undefined) ?? []), ...((o.named_hits as Hit[] | undefined) ?? []), ...((o.echoes as Hit[] | undefined) ?? [])];
+      const refs = hits.flatMap((h) => [h.ref ?? "", ...(h.also ?? []), ...(h.origins ?? []).flatMap((x) => [x.by ?? "", ...(x.reads ?? [])])]);
       const job = refs.map((r) => /^job:([^/]+)/.exec(r)?.[1]).find((id) => id && index.jobs.has(id));
       if (job) return { seq: Number(o.seq), why: `found its strings in a sensitive output (job ${job})` };
       return byWords(l);

@@ -22,7 +22,7 @@ import { join, relative } from "node:path";
 import { citedSeqs, normaliseResult, parseTruth, questionKey, resultOf, scoreRun, scoreText, type Truth } from "../scripts/calibrate.ts";
 import { patternOf } from "../scripts/score.ts";
 import { ledgerHash, type LedgerEntry } from "../extensions/protocol.ts";
-import { goalPremises } from "../extensions/questions.ts";
+import { goalPremises, goalPresumes } from "../extensions/questions.ts";
 
 const ROOT = join(import.meta.dirname, "..");
 const GEN = join(ROOT, "calibration", "generate.py");
@@ -44,6 +44,13 @@ async function digests(dir: string): Promise<Record<string, string>> {
   };
   await walk(dir);
   return out;
+}
+
+/** A generated goal's front-matter presumes, as the kickoff carries them into a Presumptions section and the register reads them: the question's number and what it takes as happened. */
+function presumesOf(goal: string): Array<{ section: string; text: string; bad?: string }> {
+  const front = /^---\n([\s\S]*?)\n---\n/.exec(goal)?.[1] ?? "";
+  const items = [...(/^presumes:\n((?:[ \t]+-[^\n]*\n?)*)/m.exec(`${front}\n`)?.[1] ?? "").matchAll(/^[ \t]+-[ \t]*(.*?)[ \t]*$/gm)].map((m) => m[1]);
+  return goalPresumes(`## Presumptions\n\n${items.map((x) => `- ${x}`).join("\n")}\n`);
 }
 
 async function truthOf(dir: string, c: string): Promise<Truth & { case: { dir?: string }; seed: string; probes: Array<{ ok: boolean }> }> {
@@ -76,6 +83,9 @@ test("the generator: the same seed gives the same cases and truth, another seed 
     const caseJson = await readFile(join(T, "cases1", "usb-departure", "case.json"), "utf8");
     assert.doesNotMatch(caseJson, /determinism/);
     assert.ok(!Object.keys(one).some((p) => p.includes("truth")));
+    // What each question presumes is framed from its words alone: the same questions presume, whatever the seed.
+    const presumed = async (dir: string, c: string) => presumesOf(await readFile(join(T, dir, c, "goal.md"), "utf8")).map((x) => x.section);
+    assert.deepEqual(await presumed("cases3", "usb-departure"), await presumed("cases1", "usb-departure"), "the presumed questions do not depend on the seed");
     // Refused without --force, replaced with it.
     assert.equal(gen(["--out", join(T, "cases1"), "--truth-dir", join(T, "truth1"), "--seed", "determinism"]).status, 2);
     assert.equal(gen(["--out", join(T, "cases1"), "--truth-dir", join(T, "truth1"), "--seed", "determinism", "--force"]).status, 0);
@@ -148,6 +158,16 @@ test("every case plants each kind of fact, holds it to the bytes, and its goal n
       assert.deepEqual(parsed.filter((x) => x.bad || !x.scope.entities?.length).map((x) => x.text), [], `${c}: every premise names its entities and parses`);
       const numbered = goal.split("\n").filter((l) => /^\d+\. /.test(l)).length;
       assert.equal(numbered, t.questions.length, `${c}: the goal numbers every question of the truth`);
+      // What the questions presume (docs/adr/0011, "What a question presumes"), framed neutrally: every premise-false
+      // question presumes its event, and so do others whose premise holds, so a presumption says nothing of the truth.
+      const presumes = presumesOf(goal);
+      assert.deepEqual(presumes.filter((x) => x.bad), [], `${c}: every presumes item names a question`);
+      assert.ok(presumes.every((x) => Number(x.section) >= 1 && Number(x.section) <= t.questions.length), `${c}: every presumes item names a question the goal numbers`);
+      const presumedIds = new Set(presumes.map((x) => x.section));
+      const premiseFalse = t.questions.filter((q) => q.expected.result === "premise_not_supported").map((q) => q.id);
+      assert.ok(premiseFalse.length && premiseFalse.every((q) => presumedIds.has(q)), `${c}: a premise-false question presumes its event`);
+      assert.ok(presumedIds.size > premiseFalse.length, `${c}: questions whose premise holds presume theirs too`);
+      assert.ok(t.questions.some((q) => q.expected.result !== "premise_not_supported" && presumedIds.has(q.id)), `${c}: a presumption is not a mark of a false premise`);
       assert.ok(t.late.length >= 1 && t.late.every((l) => existsSync(join(T, "cases", c, l.path)) && !existsSync(join(T, "cases", c, "inputs", l.path))));
       for (const q of t.questions) {
         results.add(q.expected.result);
@@ -325,6 +345,46 @@ test("the scorer takes Plan 3's fields when they are there: result, coverage rec
     assert.equal(q("3").decoys[0].in_value, true);
     assert.equal(q("5").answer?.seq, 12);
     assert.deepEqual(q("5").negative_support, { covered: true, complete: true, reviewed: true, reviewers: ["critic"], by: ["E-11"] });
+    // Under-claimed, on the truth: question 1 is partial by the register and finds both its present facts; question 2 is a negative.
+    assert.deepEqual(r.summary.under_claimed, { questions: 2, under_claimed: 1, rate: 0.5, items: [{ id: "1", label: "partial", confidence: "high", stated_confidence: "high" }] });
+    assert.match(scoreText(r), /^Under-claimed: +1 of 2 present questions answered partial with every present fact found \(Q1 partial, high\)$/m);
+    assert.deepEqual(r.summary.premise, [], "no question here expects premise_not_supported");
+  } finally {
+    await rm(S, { recursive: true, force: true });
+  }
+});
+
+test("the premise-false question: what its answer recorded, and whether the answer and its reviews tested the premise, in codes; under-claiming counts only a partial answer that finds every present fact", async () => {
+  const truth = miniTruth();
+  truth.questions.push({ id: "7", text: "Which wiping tool was used?", scored: true, kind: "absent", expected: { result: "premise_not_supported", accept_results: ["premise_not_supported", "bounded_negative"] }, facts: [{ id: "F7.1", category: "absent", summary: "none was" }, { id: "F7.2", category: "decoy", summary: "a shredder's archive", accept: ["shredder"] }] });
+  const S = await miniRun();
+  try {
+    const add = async (lines: string[]) => writeFile(join(S, "ledger", "entries.jsonl"), `${(await readFile(join(S, "ledger", "entries.jsonl"), "utf8")).trimEnd()}\n${lines.join("\n")}\n`);
+    // Question 7 answered partial on the decoy, no premise test anywhere; question 2 partial, finding its fact.
+    await add([
+      E(20, "finding", "A shredder archive sits in the downloads", { confidence: "medium", answers: ["7"] }),
+      E(21, "answer", "A shredder tool, apparently (E-20)", { section: "question:7", result: "partial", confidence: "medium", reasoning: "E-20.", by: "author", authors: ["author"] }),
+      E(22, "answer", "Jane Roe, named in the slack of notes.txt (E-2)", { section: "question:2", result: "partial", confidence: "medium", reasoning: "E-2.", supersedes: 7, by: "author", authors: ["author"] }),
+    ]);
+    let r = await scoreRun(S, truth);
+    assert.deepEqual(r.summary.premise, [{ id: "7", result: "partial", class_ok: false, verdict: "decoy adopted", tested_on_answer: false, tested_in_reviews: 0 }]);
+    assert.deepEqual(r.questions.find((x) => x.id === "7")?.premise_test, { answer: false, reviews: [] });
+    assert.equal(r.questions.find((x) => x.id === "1")?.premise_test, null, "only a question expecting premise_not_supported");
+    assert.deepEqual(r.summary.under_claimed.items.map((x) => [x.id, x.label, x.confidence]), [["2", "partial", "medium"]]);
+    let text = scoreText(r);
+    assert.match(text, /^Premise tested: +Q7 expects premise_not_supported; answered partial \(not accepted\), decoy adopted; premise_tested on the answer no, in 0 review\(s\)$/m);
+    assert.match(text, /^Under-claimed: +1 of 2 present questions answered partial with every present fact found \(Q2 partial, medium\)$/m);
+    // Recorded again premise_not_supported with its own test, and a review by another seat that tests it too (and one by the author, which is not a review).
+    await add([E(23, "answer", "The question's premise is not supported: no wiping tool ran (E-20)", { section: "question:7", result: "premise_not_supported", confidence: "medium", reasoning: "E-20 is an archive never unpacked.", supersedes: 21, premise_tested: { outcome: "an outcome's words, never printed", refs: ["E-20"] }, by: "author", authors: ["author"] })]);
+    await writeFile(join(S, "ledger", "attestations.jsonl"), `${(await readFile(join(S, "ledger", "attestations.jsonl"), "utf8")).trimEnd()}\n${[
+      JSON.stringify({ v: 2, act: "attest", seq: 23, target: "h", by: "critic", at: "2026-01-01T00:00:00Z", how: "re-read", answer_review: { premise_tested: { outcome: "words", refs: ["job:j1/x"] } } }),
+      JSON.stringify({ v: 2, act: "attest", seq: 23, target: "h", by: "author", at: "2026-01-01T00:00:00Z", how: "mine", answer_review: { premise_tested: { outcome: "words", refs: ["E-20"] } } }),
+    ].join("\n")}\n`);
+    r = await scoreRun(S, truth);
+    assert.deepEqual(r.summary.premise, [{ id: "7", result: "premise_not_supported", class_ok: true, verdict: "held", tested_on_answer: true, tested_in_reviews: 1 }]);
+    text = scoreText(r);
+    assert.match(text, /Q7 expects premise_not_supported; answered premise_not_supported \(accepted\), held; premise_tested on the answer yes, in 1 review\(s\)/);
+    assert.ok(!text.includes("never printed") && !JSON.stringify(r.summary).includes("never printed"), "the test's words are not in the summary");
   } finally {
     await rm(S, { recursive: true, force: true });
   }
@@ -416,6 +476,8 @@ test("a generated case scored against an empty run: every question unanswered, n
     assert.equal(r.summary.unanswered, scored);
     assert.equal(r.summary.forced.forced, 0);
     assert.equal(r.summary.hard_facts.found, 0);
+    assert.equal(r.summary.under_claimed.under_claimed, 0);
+    assert.deepEqual(r.summary.premise.map((x) => [x.result, x.tested_on_answer, x.tested_in_reviews]), [[null, false, 0]], "the premise-false question, unanswered");
     assert.ok(r.notes.some((n) => /no ledger/.test(n)));
   } finally {
     await rm(T, { recursive: true, force: true });
@@ -472,6 +534,9 @@ test("a run that answers as the truth does scores clean, before and after the la
             assert.equal(s.decoys.adopted, 0, `${where}: ${JSON.stringify(r.questions.flatMap((q) => q.decoys.filter((d) => d.adopted).map((d) => d.id)))}`);
             assert.equal(s.false_negatives.answered_negative, 0, where);
             assert.equal(s.negatives.unsupported, 0, where);
+            assert.equal(s.under_claimed.questions, s.false_negatives.questions, where);
+            assert.equal(s.premise.length, 1, `${where}: one premise-false question per case`);
+            assert.ok(s.premise.every((x) => x.class_ok === true), where);
             assert.equal(s.acquisition.requested, s.acquisition.questions, where);
             assert.equal(r.late.every((l) => l.added === withLate), true, where);
             assert.ok(r.questions.filter((q) => q.scored).every((q) => q.correct), `${where}: ${JSON.stringify(r.questions.filter((q) => q.scored && !q.correct).map((q) => [q.id, q.verdict]))}`);

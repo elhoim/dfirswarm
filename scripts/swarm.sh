@@ -4608,7 +4608,9 @@ cmd_start() {
   # the question register reads them (a goal may name objectives and no
   # questions: its first agents propose the questions). And premises: what
   # the case takes as given, carried into a `## Premises` section the same
-  # way; each is a given of the premise register (P-n).
+  # way; each is a given of the premise register (P-n). And presumes: what
+  # each question takes as happened (`- 7: <what>`), carried into a
+  # `## Presumptions` section; its answer tests that premise first.
   # The case policy, from the flags, the goal's metadata block (read before
   # it is stripped) and the preset: refused here when it contradicts itself,
   # never guessed. `network: open` is --no-netguard.
@@ -4697,6 +4699,20 @@ if m:
                 premises.append(item.strip())
     if premises and not re.search(r"^#{2,3}[ \t]*Premises[ \t]*$", body, re.M | re.I):
         body = body.rstrip("\n") + "\n\n## Premises\n\n" + "".join("- " + p + "\n" for p in premises)
+    # What the questions presume (docs/adr/0011, "What a question presumes"), one
+    # item each, "- <question>: <what it takes as happened>", carried the same way
+    # into a Presumptions section, verbatim, where the question register reads it.
+    presumes = []
+    sblock = re.search(r"^presumes:[ \t]*(.*?)\r?\n((?:[ \t]+-[^\n]*\n?)*)", m.group(0), re.M)
+    if sblock:
+        if sblock.group(1).strip():
+            presumes.append(sblock.group(1).strip())
+        for item in re.findall(r"^[ \t]+-[ \t]*(.*?)[ \t]*\r?$", sblock.group(2), re.M):
+            if item.strip():
+                presumes.append(item.strip())
+    if presumes and not re.search(r"^#{2,3}[ \t]*Presumptions[ \t]*$", body, re.M | re.I):
+        body = body.rstrip("\n") + "\n\n## Presumptions\n\n" + "".join("- " + x + "\n" for x in presumes)
+    out["presumes"] = len(presumes)
     with open(path, "w", encoding="utf-8") as f:
         f.write(body)
 # A goal with a case brief and no premises designated (docs/adr/0011,
@@ -9337,7 +9353,7 @@ cmd_metrics() {
 # nothing; no model call, no job, no VM.
 cmd_replay() {
   local id="${1:-}"
-  [[ -n "$id" && "$id" != -* ]] || die_usage "replay requires <id> [--checkout PATH] [--compare [A [B]]] [--stop-policy P[,P...]] [--deliveries] [--prepare-as STATE] [--reverse-sweep] [--json] [--show-text]"
+  [[ -n "$id" && "$id" != -* ]] || die_usage "replay requires <id> [--checkout PATH] [--compare [A [B]]] [--stop-policy P[,P...]] [--deliveries] [--prepare-as STATE] [--reverse-sweep] [--resweep] [--presumes Q[,Q...]] [--json] [--show-text]"
   shift
   ensure_registry
   node --experimental-strip-types --no-warnings "$ROOT/scripts/replay.ts" "$id" --registry "$REGISTRY" "$@"
@@ -9661,10 +9677,10 @@ cmd_lead() {
 # what the examination is asked, by the goal, an agent or a person.
 #   question <id> add --text T --why W [--objective O-n | --objective new --objective-text T] [--parent Q-n]
 #                     [--materiality material|background] [--priority urgent --reason R] [--expects E] [--completeness]
-#                     [--hint REF [--hint-value V]]... [--attach REF]... [--suggest SEAT] [--deadline ISO]
+#                     [--presumes P] [--hint REF [--hint-value V]]... [--attach REF]... [--suggest SEAT] [--deadline ISO]
 #                     [--neutral T] [--submission TOKEN]
 #   question <id> list [--json] | show Q-n [--json] | verify [--allowed-signers FILE] [--ca FILE]
-#   question <id> amend Q-n --expect-rev N [--text T] [--why W] [--neutral T] [--materiality M] [--expects E] ...
+#   question <id> amend Q-n --expect-rev N [--text T] [--why W] [--neutral T] [--materiality M] [--expects E] [--presumes P] ...
 #   question <id> priority Q-n urgent|normal [--reason R]
 #   question <id> scope Q-n|L-n in_scope|excluded --why W
 #   question <id> withdraw Q-n --why W
@@ -11434,11 +11450,13 @@ cmd_help() {
       echo "docs/usage.md has the detail; start is the only command with a long page." ;;
     metrics) cat <<'EOF'
   metrics <id> [--json]                    a run's process metrics, read from its own registers (nothing written):
-                                           quick and unreviewed negatives, coverage, offers, done calls and refusals,
+                                           quick and unreviewed negatives, coverage, under-claiming (partial answers
+                                           whose asked parts are all established), offers, done calls and refusals,
                                            the tail to the end, acquisition gaps, interpretations, reversals by cause,
                                            tokens per question, duplicates, the network
   metrics --compare <id-A> <id-B> [--json] two runs of one goal side by side, question by question; a negative the
-                                           other run established, and a shared negative on partial coverage, flagged
+                                           other run established, a shared negative on partial coverage, and a partial
+                                           answer whose asked parts are all established, flagged
 Every metric's definition is in docs/usage.md (Metrics).
 EOF
       ;;
@@ -11608,7 +11626,7 @@ by sha256 and the release's detached ssh signature; it carries no signature of i
 EOF
       ;;
     replay) cat <<'EOF'
-  replay <id> [--checkout PATH] [--compare [A [B]]] [--stop-policy P[,P...]] [--deliveries] [--prepare-as STATE] [--reverse-sweep] [--json] [--show-text]
+  replay <id> [--checkout PATH] [--compare [A [B]]] [--stop-policy P[,P...]] [--deliveries] [--prepare-as STATE] [--reverse-sweep] [--resweep] [--presumes Q[,Q...]] [--json] [--show-text]
 Reads a finished run's registers again under a harness's finish rules: the answers check (each
 check-answers line of the goal, as its own function), the finish gate and the finish line's verdict,
 readiness, the finish register (the coordinator, what is late against the report), the report's
@@ -11632,6 +11650,12 @@ are hashed before and after. The goal's other checks are its own commands: not r
                     the preparation hold would have held, and which it would have warned
   --reverse-sweep   for a run recorded before the reverse sweep existed: each evidence addition swept
                     on the copy against the coverage records standing at it, counted per question
+  --resweep         each coverage record's recorded store sweep read again by this checkout (nothing
+                    searched again): hits in the same bytes the record names under another name, and
+                    echoes (an output made from the run's own words), moved off the hits
+  --presumes Q,...  for a run recorded before questions presumed: each question named amended on the
+                    copy to presume its event (synthetic words): which partial answers the premise rule
+                    would have warned (premise_untested), and which established attests it would cap
 Each source's broad extraction is shown, by its receipts, with the questions held or warned on it.
 Values-free: codes, ids, counts and the harness's own words, never a record's text; --show-text adds
 the harness's lines whole, which quote records. It measures rules on a recorded history; what the
@@ -11698,7 +11722,7 @@ EOF
     question) cat <<'EOF'
   question <id> add --text T --why W [--objective O-n | --objective new --objective-text T] [--parent Q-n]
                     [--materiality material|background] [--priority urgent --reason R]
-                    [--expects existence|value|narrative|timeline|list] [--completeness]
+                    [--expects existence|value|narrative|timeline|list] [--completeness] [--presumes P]
                     [--hint REF [--hint-value V]]... [--attach REF]... [--suggest SEAT] [--deadline ISO]
                     [--neutral T] [--submission TOKEN]
                                                a question for the running swarm (Q-n): recorded on the chain
@@ -11706,11 +11730,13 @@ EOF
                                                offered to the suggested seat for its first minute or to the
                                                most suited idle seat, and ranked first in every agent's header;
                                                --completeness: it asks for a complete set (its words "every",
-                                               "all", "each" say so too), answered only on coverage of the areas
+                                               "all", "each" say so too), answered only on coverage of the areas;
+                                               --presumes: what it takes as happened ("the drive was wiped"): its
+                                               answer tests that premise first, and a review names it as a rival
   question <id> list [--json]                  every question: your triage and the clarifications waiting first
   question <id> show Q-n [--json]              one question whole: every revision, hints, clarifications, leads,
                                                offers, its answer, and each signed act checked
-  question <id> amend Q-n --expect-rev N [--text T] [--why W] [--neutral T] [...]
+  question <id> amend Q-n --expect-rev N [--text T] [--why W] [--neutral T] [--presumes P] [...]
                                                a new verbatim revision (refused when N is not the current one);
                                                an answer recorded before it is stale until recorded again
   question <id> priority Q-n urgent|normal [--reason R]
