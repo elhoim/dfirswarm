@@ -1,0 +1,36 @@
+{
+  "case": "Two answers each hold \"which account\" at the limit of the evidence, shown by a limitation that says the directory's log was not retained, and each is recorded partial. Question 1's bound no other seat has reviewed; question 2's a seat that wrote neither it nor the answer reviewed as a negative is reviewed. Each answer's review agrees the part is at the limit.",
+  "design": [
+    "docs/adr/0013 'A part at the limit of the evidence' (amended): a limited part keeps the answer partial, as an open part does, and never lifts the label; whether another seat reviewed what shows it is shown and gates nothing; a review's at_limit caps nothing.",
+    "docs/adr/0013 'The end of a run, under every stop policy': partial is a disposition under every stop policy; done finishes a run when every question has one."
+  ],
+  "policies": [
+    "as run"
+  ],
+  "expect": {
+    "questions": {
+      "question:1": {
+        "disposition": "partial",
+        "best_candidate": false,
+        "readiness_holds": false,
+        "defects": [],
+        "warnings": []
+      },
+      "question:2": {
+        "disposition": "partial",
+        "best_candidate": false,
+        "readiness_holds": false,
+        "defects": [],
+        "warnings": []
+      }
+    },
+    "ready": true,
+    "verdict": {
+      "proceed": true,
+      "outcome": "examination_limited"
+    },
+    "done": "proceeds",
+    "agreement": [],
+    "review_caps": { "established": 0, "capped": [] }
+  }
+}

@@ -866,25 +866,24 @@ const CASES: Record<string, (base: string) => Promise<string>> = {
 
 
   /**
-   * A part at the limit of the evidence (docs/adr/0013): two established
-   * answers each hold "which account" limited, by a limitation that says the
-   * directory's log was not retained. Question 1's bound no other seat has
-   * reviewed: its review agrees the part is at the limit, and is recorded
-   * best_candidate (limit_unreviewed). Question 2's bound a seat that wrote
-   * neither it nor the answer reviewed as a negative is reviewed first: its
-   * review stands established.
+   * A part at the limit of the evidence (docs/adr/0013, amended): two answers
+   * each hold "which account" limited, by a limitation that says the
+   * directory's log was not retained, and each is recorded partial: a limited
+   * part never lifts the label. Question 1's bound no other seat has
+   * reviewed; question 2's a seat that wrote neither it nor the answer
+   * reviewed as a negative is reviewed. Each answer's review agrees the part
+   * is at the limit (at_limit). Both stand partial; nothing holds.
    */
-  "limited-part-unreviewed": async (base) => {
-    const r = await newRun(base, "lpu", 2);
+  "limited-part-partial": async (base) => {
+    const r = await newRun(base, "lpp", 2);
     for (const q of ["1", "2"]) {
       const id = await lead(r.a0, q);
       const f = (await rec(r.a0, { kind: "finding", ...F, value: `a logon at 09:14 for question ${q}`, source: "the log", evidence: "line 12", refs: ["job:j000002/hits.txt"], answers: [q] })).entry;
       const lim = (await rec(r.a0, { kind: "limitation", value: `The log keeps no account name for question ${q}, and the directory's own log was not retained`, source: "the log", evidence: "its field list; the retention setting", reason: "unavailable", answers: [q] })).entry;
-      const a = (await rec(r.a1, { kind: "answer", section: `question:${q}`, value: "A logon at 09:14 from the office host; which account is at the limit of the evidence", reasoning: `E-${f.seq}; E-${lim.seq}`, ...HIGH, result: "established", parts: [{ id: "when", part: "when the logon happened", status: "established", refs: [`E-${f.seq}`] }, { id: "who", part: "which account logged on", status: "limited", limited_by: `E-${lim.seq}` }] })).entry;
+      const a = (await rec(r.a1, { kind: "answer", section: `question:${q}`, value: "A logon at 09:14 from the office host; which account is at the limit of the evidence", reasoning: `E-${f.seq}; E-${lim.seq}`, ...A, result: "partial", parts: [{ id: "when", part: "when the logon happened", status: "established", refs: [`E-${f.seq}`] }, { id: "who", part: "which account logged on", status: "limited", limited_by: `E-${lim.seq}` }] })).entry;
       await close(r.a0, id, `E-${f.seq}`);
       if (q === "2") await attest(r.a3, { seq: lim.seq, how: "checked the retention setting and the directory", review: REVIEW });
-      const got = await P.attestEntry(r.a2, { seq: a.seq, how: "re-read line 12 from job:j000002", ...ESTABLISHED, answer_review: { ...ESTABLISHED.answer_review, parts: [{ id: "when", part: "when the logon happened", established: true, why: "line 12" }, { id: "who", part: "which account logged on", established: false, at_limit: true, why: "the log keeps none, and the directory's log is gone" }] } } as unknown as P.LedgerActInput);
-      assert.ok(got.ok && got.line?.strength === (q === "1" ? "best_candidate" : "established"), JSON.stringify(got));
+      await attest(r.a2, { seq: a.seq, how: "re-read line 12 from job:j000002", ...ESTABLISHED, answer_review: { ...ESTABLISHED.answer_review, parts: [{ id: "when", part: "when the logon happened", established: true, why: "line 12" }, { id: "who", part: "which account logged on", established: false, at_limit: true, why: "the log keeps none, and the directory's log is gone" }] } });
     }
     return r.S;
   },

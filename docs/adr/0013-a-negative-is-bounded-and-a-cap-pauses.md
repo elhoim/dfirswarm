@@ -1242,14 +1242,13 @@ runs that review with the mark.
 ## A part at the limit of the evidence
 
 Added 2026-09-30, after the calibration runs on the claims branch. Complete
-answers were still recorded partial. Reviewers never used the `not_asked`
-mark, so the warning that depends on it never fired. The hedged parts were
-mostly not parts the question does not ask: they were limits of the
-evidence itself, such as "whether this was the first exploitation, before
-the retained logs", "the payload actually run" or "an exhaustive inventory
-beyond the known entries". The parts table made this worse: every residual
-got an open row, and one open row made the answer partial. Claude, Fable
-and Astra reviewed the options, and the owner chose the joint way.
+answers were still recorded partial, and reviewers never used the
+`not_asked` mark, so its warning never fired. Most hedged parts were not
+parts the question does not ask. They were limits of the evidence itself:
+"whether this was the first exploitation, before the retained logs", "the
+payload actually run", "an exhaustive inventory beyond the known entries".
+Claude, Fable and Astra reviewed the options, and the owner chose a third
+status.
 
 - **A third status.** A part is `established`, `open` (a route or an ask
   could still settle it), or `limited`: the question asks it, and the
@@ -1258,38 +1257,19 @@ and Astra reviewed the options, and the owner chose the joint way.
     record for its question, or a limitation whose reason is `unavailable`
     or `excluded`.
   - A limitation that was not examined, failed or is partial could still be
-    settled, so it bounds an open part and never a limited one.
-  - A premise is never a limited part. The recorder chooses the status;
-    nothing promotes.
-- **A limited part does not make an answer partial.**
-  - A partial answer still needs at least one open part.
-  - An answer whose parts are established or limited is recorded
-    established. Its words say what it establishes only within the
-    evidence ("first seen in the retained logs", never "first").
-  - The refusals say so: a partial answer with only limited parts, and an
-    established answer with an open part.
-- **Claiming it costs what a negative costs.**
-  - The bound is reviewed by a seat that recorded neither it nor the
-    answer, with a negative's review `{detection, reproduced, other_route}`.
-    A limitation whose reason is unavailable or excluded now takes that
-    review too.
-  - Until the bound is reviewed, an established attest of the answer is
-    recorded best_candidate (`limit_unreviewed`), and the answers check
-    warns where the decision is made: the record's reply, the attest,
-    finish status.
-  - A cap, not a warning: this round the cap on the premise test moved
-    seats, and the warning that waited on a reviewer's mark moved nothing.
-- **Reviews.**
-  - A review weighs a limited part by its id. `at_limit: true` agrees that
-    the evidence cannot settle it, and caps nothing.
-  - Holding it not established without that says a route or an ask could
-    still settle it, and caps an established review.
-  - `not_asked` stays, for parts outside the question.
-- **Shown where the answer is rendered.** The report's answer leads with
-  "Established, at the limit of the evidence on:", then each such part,
-  what shows it, and who reviewed that. The parts table, the §2 chain, the
-  §1 line, the console and `swarm.sh metrics` ("Limited parts") show the
-  same.
+    settled. It bounds an open part and never a limited one.
+  - A premise is never a limited part.
+- **It keeps the answer partial.**
+  - A partial answer needs at least one open or limited part.
+  - An established answer holds neither, and the refusal says so.
+  - The report, the console and the parts line count limited parts apart
+    ("Asked parts: 2 of 3 established, 1 at the limit of the evidence"), and
+    show what shows each and whether another seat reviewed it.
+- **Reviews.** A review weighs a limited part by its id; `at_limit: true`
+  agrees that the evidence cannot settle it, and caps nothing. The bound can
+  be reviewed as a negative is: a limitation whose reason is unavailable or
+  excluded now takes a negative's review. `not_asked` stays, for parts
+  outside the question.
 - **Measured honestly.** The calibration truth names each question's parts
   and the facts that settle each. `scripts/calibrate.ts` counts:
   - an unnecessary partial: every part the evidence settles is settled in
@@ -1299,6 +1279,29 @@ and Astra reviewed the options, and the owner chose the joint way.
 
   On the claims runs the stricter count agrees with the proxy: 2 of 5 and
   3 of 4.
+
+### Amended the same day: a limited part never lifts the label
+
+As first built, an answer whose parts were all established or limited was
+recorded established once another seat reviewed each bound (a cap,
+`limit_unreviewed`, until then). The branch's runs measured it:
+
+- **Four calibration runs:** limited was never used. Every open part there
+  was bounded by an unavailable limitation or a coverage record and could
+  have been limited; the agents chose open. Unnecessary partials did not
+  move.
+- **Two c10 runs:** limited was used three times.
+  - Once fairly, on an exhaustiveness part.
+  - Twice on the case's hardest step. In one of these the recorder re-cut
+    the question's parts so that the step itself (which file was encrypted,
+    and how it was decrypted) was "limited". The answer was recorded
+    established at high confidence while its own words said that no
+    encrypted file or decryption could be identified.
+
+The bound's review did not catch this: a limit is easy to agree with. The
+owner chose honest labels over fewer partials. A limited part now keeps the
+answer partial, and the label is never lifted by it. Under-claiming is
+accepted for now.
 
 ## A locator is not coverage
 

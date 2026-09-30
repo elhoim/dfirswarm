@@ -19,8 +19,8 @@
 
 ## Answers
 
-- **#3** question:1 (established): A logon at 09:14 from the office host; which account is at the limit of the evidence [attested by a2 (best candidate)] _(high: The cited entries are direct.)_ — rests on: E-1 — limitations: E-2 — still open: none open — would change it: a second source that disagrees — parts: when "when the logon happened" established (E-1); who "which account logged on" at the limit of the evidence, shown by E-2 — reasoning: E-1; E-2 — by a1
-- **#6** question:2 (established): A logon at 09:14 from the office host; which account is at the limit of the evidence [attested by a2] _(high: The cited entries are direct.)_ — rests on: E-4 — limitations: E-5 — still open: none open — would change it: a second source that disagrees — parts: when "when the logon happened" established (E-4); who "which account logged on" at the limit of the evidence, shown by E-5 — reasoning: E-4; E-5 — by a1
+- **#3** question:1 (partial): A logon at 09:14 from the office host; which account is at the limit of the evidence [attested by a2] _(medium: The cited entries are direct.)_ — rests on: E-1 — limitations: E-2 — still open: none open — would change it: a second source that disagrees — parts: when "when the logon happened" established (E-1); who "which account logged on" at the limit of the evidence, shown by E-2 — reasoning: E-1; E-2 — by a1
+- **#6** question:2 (partial): A logon at 09:14 from the office host; which account is at the limit of the evidence [attested by a2] _(medium: The cited entries are direct.)_ — rests on: E-4 — limitations: E-5 — still open: none open — would change it: a second source that disagrees — parts: when "when the logon happened" established (E-4); who "which account logged on" at the limit of the evidence, shown by E-5 — reasoning: E-4; E-5 — by a1
 
 ## Searched, not found
 

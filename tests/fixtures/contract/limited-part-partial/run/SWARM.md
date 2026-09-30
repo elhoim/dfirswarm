@@ -29,7 +29,7 @@ review each other's output.
 - Spend: $5.00 USD across the swarm
 - Wall clock: 30 minutes
 - N: 4
-- Swarm id: `lpu`
+- Swarm id: `lpp`
 
 ## Bail-out
 

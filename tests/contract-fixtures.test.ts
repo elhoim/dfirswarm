@@ -57,7 +57,7 @@ const WRITTEN_WITH_PRESUMES = new Set(["premise-untested-capped", "premise-untes
 /** The harness before limited parts and the rival-area cap (docs/adr/0013, "A part at the limit of the evidence", "A locator is not coverage"): main when they were built. */
 const BEFORE_LIMITED = "373d3cfd6cdceb944611c201115c8a8103bbb5b2";
 /** The histories written with limited parts or under the rival-area cap: a harness before them has neither. */
-const WRITTEN_WITH_LIMITED = new Set(["limited-part-unreviewed", "rival-area-uncovered"]);
+const WRITTEN_WITH_LIMITED = new Set(["limited-part-partial", "rival-area-uncovered"]);
 /**
  * The histories whose recorded reviews locate a value no coverage record
  * covers where a rival could live: the rival-area rule, replayed, would cap

@@ -245,8 +245,8 @@ function QuestionCard({ q, sigs, act, busy, children }: { q: QuestionView; sigs:
         </Row>
         {q.answer?.parts?.length ? (
           <Row label="Parts">
-            {/* A partial answer, or one holding parts at the limit of the evidence, leads with its plain line; a review's not_asked mark sits beside the part it marks. */}
-            {(q.answer.result === "partial" || (q.answer.standing?.limited ?? 0) > 0) && q.answer.standing ? <p className="m-0 font-medium text-ink">{q.answer.standing.summary}</p> : null}
+            {/* A partial answer leads with its plain line; a review's not_asked mark sits beside the part it marks. */}
+            {q.answer.result === "partial" && q.answer.standing ? <p className="m-0 font-medium text-ink">{q.answer.standing.summary}</p> : null}
             <ul className="m-0 list-none space-y-0.5 p-0">
               {(q.answer.standing?.rows ?? q.answer.parts.map((p) => ({ ...p, not_asked_by: [] as Array<{ by: string; why: string }> }))).map((p) => (
                 <li key={p.id}>

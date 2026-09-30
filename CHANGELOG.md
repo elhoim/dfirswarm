@@ -14,19 +14,11 @@ never fired. It also showed a decoy value that is in the allocated bytes
 attested established on a verified locator, while the true value sat in slack.
 Claude, Fable and Astra reviewed the options, and the owner chose these.
 
-- **Limited parts.** An answer's part can be `limited`: the question asks it,
-  and the evidence in scope cannot settle it.
-  - `limited_by` names what shows that: the coverage record for the
-    question, or a limitation whose reason is unavailable or excluded.
-  - A limited part does not make an answer partial.
-  - Another seat reviews the bound with a negative's review, which such a
-    limitation now takes. Until then an established attest is recorded
-    best_candidate (`limit_unreviewed`), and the answers check warns at the
-    record, the attest and finish status.
-  - A review weighs a limited part with `at_limit`, or holds it still to be
-    settled, which caps an established review.
-  - The report, the console and `swarm.sh metrics` ("Limited parts") show
-    each such part, what shows it and who reviewed that.
+- **Limited parts.** An answer's part can be `limited`: the question asks it, and the evidence in scope cannot settle it.
+  - `limited_by` names what shows that: the coverage record for the question, or a limitation whose reason is unavailable or excluded.
+  - A limited part keeps the answer partial, as an open part does. The report, the console and `swarm.sh metrics` ("Limited parts") say it is beyond the evidence rather than open to more work, and whether another seat reviewed what shows it.
+  - A review weighs it with `at_limit`. A limitation that says the evidence is gone now takes a negative's review.
+  - As first built, a limited part could lift an answer to established once its bound was reviewed. The branch's c10 runs recorded the case's hardest step "limited" and the answer established at high confidence while its words said the step could not be done. The label is now never lifted (ADR 0013, amended).
 - **A locator is not coverage.** An established attest that locates a value
   is recorded best_candidate (`rival_area_uncovered`) until, for each input
   the located object was read from, a coverage record for the question:
@@ -46,7 +38,7 @@ Claude, Fable and Astra reviewed the options, and the owner chose these.
   - "Limited parts".
 
   The old line is kept as the proxy.
-- **Replay.** Contract fixtures `limited-part-unreviewed` and
+- **Replay.** Contract fixtures `limited-part-partial` and
   `rival-area-uncovered` hold the two rules. Replayed over the older
   `review-source-first` history, the rival-area rule would cap two of its
   established attests; nothing else reads differently.

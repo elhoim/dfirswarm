@@ -138,13 +138,12 @@ export type RunMetrics = {
     areas_not_applicable?: Record<string, number>;
   };
   /**
-   * The established attests the review rule capped for the two reasons a
-   * seat can game by paperwork (docs/adr/0013): a located value whose input
-   * no coverage record covered where a rival could live
-   * (rival_area_uncovered), and a limited part whose bound no other seat
-   * reviewed (limit_unreviewed). Counted from the attests' recorded caps.
+   * The established attests the review rule capped because a located value's
+   * input no coverage record covered where a rival could live
+   * (rival_area_uncovered, docs/adr/0013), counted from the attests'
+   * recorded caps.
    */
-  review_caps?: { rival_area_uncovered: number; limit_unreviewed: number };
+  review_caps?: { rival_area_uncovered: number };
   /**
    * The confidence of each standing answer in scope, as its author stated
    * it and as the run records it (P.recordedConfidence: high stands only on
@@ -648,12 +647,11 @@ function negativesAndCoverage(c: Context, scope: RunMetrics["questions"]): Pick<
   };
 }
 
-/** The established attests capped for rival_area_uncovered or limit_unreviewed, by their recorded reasons (protocol.ts reviewEvidenceCaps words them). */
+/** The established attests capped for rival_area_uncovered, by their recorded reasons (protocol.ts reviewEvidenceCaps words them). */
 function reviewCapsOf(c: Context): NonNullable<RunMetrics["review_caps"]> {
   const capped = c.attestations.filter((x) => P.attestationAct(x) === "attest" && (x.capped?.length ?? 0) > 0);
   return {
     rival_area_uncovered: capped.filter((x) => x.capped!.some((w) => w.startsWith("a locator is not coverage: "))).length,
-    limit_unreviewed: capped.filter((x) => x.capped!.some((w) => / is held at the limit of the evidence by E-\d+, and /.test(w))).length,
   };
 }
 
@@ -1326,7 +1324,7 @@ export function metricsText(m: RunMetrics): string {
     ["Confidence", m.confidence.recorded ? `${m.confidence.answers} standing answer(s) in scope, recorded: high ${m.confidence.recorded_levels.high}, medium ${m.confidence.recorded_levels.medium}, low ${m.confidence.recorded_levels.low}, none ${m.confidence.recorded_levels.none}; stated high ${m.confidence.stated.high}; ${m.confidence.lowered.length} recorded lower than stated${m.confidence.lowered.length ? ` (${list(m.confidence.lowered.map((x) => `${qname(x)} ${x.answer}: ${x.why}`))})` : ""}${m.confidence.legacy ? `; ${m.confidence.legacy} high(s) kept as declared (recorded before the run recorded confidence)` : ""}` : absent(LEDGER)],
     ["Under-claiming", m.claims.recorded ? `${m.claims.asked_all_established.length} of ${m.claims.with_parts} partial answer(s) with parts have every asked part established (asked: not marked not_asked by a review)${m.claims.asked_all_established.length ? ` (${list(m.claims.asked_all_established.map((x) => `${qname(x)} ${x.answer}: ${x.established} of ${x.asked} asked established, ${x.open} open, ${x.open_not_asked} not asked`))})` : ""}; ${m.claims.partial} partial in scope${m.claims.without_parts.length ? `, ${m.claims.without_parts.length} without parts, not counted (${list(m.claims.without_parts.map((x) => `${qname(x)} ${x.answer}`))})` : ""}` : absent(LEDGER)],
     ["Limited parts", m.claims.recorded ? (m.claims.limited?.length ? `${m.claims.limited.length} part(s) held at the limit of the evidence, ${m.claims.limited.filter((x) => x.reviewed).length} on a bound another seat reviewed (${list(m.claims.limited.map((x) => `${qname(x)} ${x.answer} "${x.part}" by ${x.bound}${x.reviewed ? "" : ", not reviewed"}`))})` : "none") : absent(LEDGER)],
-    ["Rival areas", m.claims.recorded ? `${m.review_caps?.rival_area_uncovered ?? 0} established attest(s) capped because a located value's input was not covered where a rival could live, ${m.review_caps?.limit_unreviewed ?? 0} because a limited part's bound was not reviewed; not_applicable per area across standing coverage records: ${m.coverage.areas_not_applicable ? Object.entries(m.coverage.areas_not_applicable).map(([k, v]) => `${k} ${v}`).join(", ") : "no record names its areas"}` : absent(LEDGER)],
+    ["Rival areas", m.claims.recorded ? `${m.review_caps?.rival_area_uncovered ?? 0} established attest(s) capped because a located value's input was not covered where a rival could live; not_applicable per area across standing coverage records: ${m.coverage.areas_not_applicable ? Object.entries(m.coverage.areas_not_applicable).map(([k, v]) => `${k} ${v}`).join(", ") : "no record names its areas"}` : absent(LEDGER)],
     ["Offers (leads)", o.recorded ? `${o.leads.made} made: ${o.leads.accepted} accepted, ${o.leads.declined} declined, ${o.leads.taken_by_another} taken by another seat, ${o.leads.lapsed} lapsed, ${o.leads.open} with no outcome` : o.wakes_before_offers.recorded ? "not recorded (no offer events: a run from before offers)" : absent(LEADS)],
     ["Offers (questions)", o.recorded ? `${o.questions.made} made: ${o.questions.accepted} accepted, ${o.questions.declined} declined, ${o.questions.not_taken_up} not taken up` : o.wakes_before_offers.recorded ? "not recorded (no offer events: a run from before offers)" : absent(LEADS)],
     ["Offers (reviews)", o.recorded ? `${o.reviews.made} made (${Object.entries(o.reviews.by_reason).map(([k, n]) => `${k} ${n}`).join(", ") || "none"}): ${o.reviews.accepted} taken up, ${o.reviews.declined} declined, ${o.reviews.withdrawn} withdrawn (reviewed by another route, or superseded), ${o.reviews.lapsed} lapsed, ${o.reviews.open} with no outcome; ${o.reviews.taken} taken by their seat first (offer accept)` : o.wakes_before_offers.recorded ? "not recorded (no offer events: a run from before offers)" : absent(LEADS)],

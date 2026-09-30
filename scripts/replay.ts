@@ -390,7 +390,6 @@ const WARNING_CODES: ReadonlyArray<[string, RegExp]> = [
   ["part_omitted", /\) leaves out (?:a part|parts) of the question its reviews? names?:/],
   ["no_locator_or_derivation", /\) is held established by .* on a review that vouches for no value by bytes or by derivation/],
   ["premise_untested", /\) is partial on a question that presumes .*, and neither it nor a review of it tests that premise/],
-  ["limit_unreviewed", /\) is established and holds ".*" \(.*\) at the limit of the evidence by E-\d+/],
 ];
 
 /** A warning line's code and section, by the harness's own words for it. */

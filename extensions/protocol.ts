@@ -9691,7 +9691,7 @@ export const PREMISE_TEST_FIX =
   "test the premise before the answer: does the evidence show that what the question presumes happened at all? Weigh it against the rival \"the question's premise is not supported\" and say what the test showed: premise_tested {outcome (what the test showed of whether it happened), refs (the E-<seq> of the observation, or the job:<id>/<path> it rests on)}, which a review gives as answer_review.premise_tested (never resting on the answer under review). If the evidence does not support it, the answer is premise_not_supported: its recorder records it so, and a reviewer disputes an answer that says otherwise. A clue that fits the question's frame is a candidate to test against that rival, not an answer";
 
 /** Why an established attest is recorded a best candidate for want of source-first evidence: a code, and the words `capped` keeps. */
-export type ReviewEvidenceCap = { code: "no_discriminator" | "locator_unverified" | "derivation_unverified" | "premise_untested" | "limit_unreviewed" | "rival_area_uncovered"; why: string };
+export type ReviewEvidenceCap = { code: "no_discriminator" | "locator_unverified" | "derivation_unverified" | "premise_untested" | "rival_area_uncovered"; why: string };
 /**
  * What a source-first review is warned of and not capped for: it vouches
  * for no value by bytes or by derivation (no_locator_or_derivation). The
@@ -9707,13 +9707,6 @@ export type ReviewEvidenceCap = { code: "no_discriminator" | "locator_unverified
 export type ReviewEvidenceWarning = { code: "no_locator_or_derivation"; why: string };
 
 /**
- * How a limited part's bound comes to stand reviewed, and what else the
- * answer can do (docs/adr/0013, "A part at the limit of the evidence").
- */
-export const LIMIT_REVIEW_FIX =
-  "a seat that recorded neither the answer nor the bound attests the bound (the coverage record or the limitation the part names in limited_by) with review {detection, reproduced, other_route}, as it would review a negative: whether it challenged what the search could detect, reproduced a decisive check, tried a materially different route; then attest this answer again. If a route or an ask could still settle the part, record the answer again with that part open (open_by) and the answer partial";
-
-/**
  * How a located value's source comes to be covered where a rival value
  * could live (docs/adr/0013, "A locator is not coverage").
  */
@@ -9726,7 +9719,6 @@ export const REVIEW_CAP_FIX: Readonly<Record<ReviewEvidenceCap["code"], string>>
   locator_unverified: "give each locator's byte offset where the value begins in the sealed object and the value as it is there and as the answer or an entry it rests on states it (a job over the object gives the offset: grep -boa, a hex dump; UTF-16LE text counts), or drop the locator; a value you derived (a converted time, a decoded field) takes derivation {job, inputs} instead",
   derivation_unverified: "name a sealed job that ran to its end and the objects it declared it would read: answer_review.derivation {job: j<id>, inputs: [input:<path>, job:<id>/<path>, …]}",
   premise_untested: PREMISE_TEST_FIX,
-  limit_unreviewed: LIMIT_REVIEW_FIX,
   rival_area_uncovered: RIVAL_AREA_FIX,
 };
 
@@ -9769,17 +9761,6 @@ export async function reviewEvidenceCaps(sandboxRoot: string, answer: LedgerEntr
   const presumption = o.presumption !== undefined ? o.presumption : answer.section?.startsWith("question:") ? ((await questionBar(sandboxRoot, sectionAnswersId(answer.section)).catch(() => null))?.presumption ?? null) : null;
   if (presumption && !premiseTestCounts(review.premise_tested)) {
     caps.push({ code: "premise_untested", why: review.premise_tested ? `the review's premise test says nothing a reader can weigh (a placeholder outcome): ${answer.section} presumes ${PM.presumptionWords(presumption)}` : `${answer.section} presumes ${PM.presumptionWords(presumption)}, and the review does not test that premise (answer_review.premise_tested {outcome, refs})` });
-  }
-  // A part at the limit of the evidence (docs/adr/0013): its bound stands
-  // reviewed by another seat, as a negative's does, before the answer that
-  // holds it is established.
-  if (answer.parts?.some((p) => p.status === "limited")) {
-    const entries = [...(o.entries ?? (await readLedger(sandboxRoot).catch(() => [] as LedgerEntry[])))];
-    const attestations = [...(o.attestations ?? (await readAttestations(sandboxRoot).catch(() => [] as LedgerAttestation[])))];
-    const disputes = [...(o.disputes ?? (await readDisputes(sandboxRoot).catch(() => [] as LedgerDispute[])))];
-    const bounds = limitedBounds(answer, entries, attestations, disputes);
-    const unreviewed = (answer.parts ?? []).filter((p) => p.status === "limited" && !bounds.get(p.limited_by ?? "")?.reviewed);
-    if (unreviewed.length) caps.push({ code: "limit_unreviewed", why: `${unreviewed.map((p) => `"${p.id}" is held at the limit of the evidence by ${p.limited_by}, and ${bounds.get(p.limited_by ?? "")?.why ?? "that is not reviewed"}`).join("; ")}` });
   }
   // A locator is not coverage (docs/adr/0013): each input a located value
   // was read from is covered, for the question, where a rival value could
@@ -10670,12 +10651,7 @@ export async function strengthCaps(sandboxRoot: string, answer: LedgerEntry, rev
     return out;
   }
   if (answer.confidence === "medium" || answer.confidence === "low") out.push(`its confidence is ${answer.confidence}`);
-  // A part the answer holds limited, which the review agrees is at the limit of the evidence, caps nothing; held not established without that, a route could still settle it.
-  const limitedIds = new Set((answer.parts ?? []).filter((p) => p.status === "limited").map((p) => p.id));
-  for (const p of review?.parts ?? []) {
-    if (p.established || p.not_asked || (p.at_limit && p.id && limitedIds.has(p.id))) continue;
-    out.push(p.missing ? `the review names "${p.part}", a part of the question the answer leaves out (${p.why})` : p.id && limitedIds.has(p.id) ? `the review holds "${p.part}", which the answer holds at the limit of the evidence, still to be settled (${p.why}): a route or an ask could settle it, so it is open` : `the review holds "${p.part}" not established (${p.why})`);
-  }
+  for (const p of review?.parts ?? []) if (!p.established && !p.not_asked) out.push(p.missing ? `the review names "${p.part}", a part of the question the answer leaves out (${p.why})` : `the review holds "${p.part}" not established (${p.why})`);
   const change = String(answer.would_change ?? "");
   if (!change || !answer.section?.startsWith("question:")) return out;
   const id = sectionAnswersId(answer.section);
@@ -11968,10 +11944,18 @@ async function recordAnswer(ctx: SwarmContext, input: LedgerInput): Promise<Ledg
     }
     premiseTest = t.test;
   }
-  if (question && resultText === "partial" && !parts.some((p) => p.status === "open")) return { ok: false, reason: PARTIAL_NEEDS_OPEN_PART };
+  if (question && resultText === "partial" && !parts.some((p) => p.status === "open" || p.status === "limited")) return { ok: false, reason: PARTIAL_NEEDS_OPEN_PART };
   const openParts = parts.filter((p) => p.status === "open");
   if (question && resultText === "established" && openParts.length) {
-    return { ok: false, reason: `result established claims every part the question asks, and ${openParts.map((p) => `"${p.id}"`).join(", ")} ${openParts.length === 1 ? "is" : "are"} open: record it partial (its open parts named, each with what bounds it), establish ${openParts.length === 1 ? "it" : "them"} on the entries that show ${openParts.length === 1 ? "it" : "them"} (status established, refs), or, where the evidence in scope cannot settle a part, hold it limited (status limited, limited_by: the coverage record for the question, or a limitation whose reason is unavailable or excluded), which another seat reviews as it reviews a negative` };
+    return { ok: false, reason: `result established claims every part the question asks, and ${openParts.map((p) => `"${p.id}"`).join(", ")} ${openParts.length === 1 ? "is" : "are"} open: record it partial (its open parts named, each with what bounds it), or establish ${openParts.length === 1 ? "it" : "them"} on the entries that show ${openParts.length === 1 ? "it" : "them"} (status established, refs)` };
+  }
+  // A part at the limit of the evidence is still a part the answer does not
+  // establish: it keeps the answer partial, and the report says it is beyond
+  // the evidence rather than open to more work (docs/adr/0013, "A part at the
+  // limit of the evidence"). It never lifts the label.
+  const limitedParts = parts.filter((p) => p.status === "limited");
+  if (question && resultText === "established" && limitedParts.length) {
+    return { ok: false, reason: `result established claims every part the question asks, and ${limitedParts.map((p) => `"${p.id}"`).join(", ")} ${limitedParts.length === 1 ? "is" : "are"} at the limit of the evidence: a part the answer does not establish keeps it partial. Record it partial, with ${limitedParts.length === 1 ? "that part" : "those parts"} limited (the report says ${limitedParts.length === 1 ? "it is" : "they are"} beyond the evidence, not open to more work), or establish ${limitedParts.length === 1 ? "it" : "them"} on the entries that show ${limitedParts.length === 1 ? "it" : "them"}` };
   }
   // What bounds an open part outside the ledger: an acquisition ask the requests hold, or a route the lead register holds.
   for (const p of openParts) {
@@ -12405,7 +12389,7 @@ async function recordAnswer(ctx: SwarmContext, input: LedgerInput): Promise<Ledg
 
 /** What a partial answer with no open part is told: the refusal's words (docs/adr/0013, "Claim and open-part rows"). */
 export const PARTIAL_NEEDS_OPEN_PART =
-  'record it established or name what is open: a partial answer carries parts [{id, part, status, refs, open_by?}], each part the question asks as you read its revision, the parts it establishes (status "established", refs: the entries that establish each) and at least one open part (status "open", open_by: what bounds it: an acquisition ask R-<n>, a route L-<n>, or a limitation or a coverage record E-<seq>). An open part is a part the question asks: detail beyond the question, an example category the evidence does not show, and an exhaustiveness the question does not demand go in limitations, not in open parts (a question that asks for a complete set is held to its completeness coverage). A premise is never an open part: what the case takes as given is cited in premises (stance assumed), not held open. A part the question asks that the evidence in scope cannot settle is limited, not open (status "limited", limited_by: the coverage record for the question, or a limitation whose reason is unavailable or excluded), and a limited part does not make an answer partial: an answer whose parts are established or limited is recorded established, and another seat reviews each bound as it reviews a negative';
+  'record it established or name what is open: a partial answer carries parts [{id, part, status, refs, open_by?}], each part the question asks as you read its revision, the parts it establishes (status "established", refs: the entries that establish each) and at least one open part (status "open", open_by: what bounds it: an acquisition ask R-<n>, a route L-<n>, or a limitation or a coverage record E-<seq>). An open part is a part the question asks: detail beyond the question, an example category the evidence does not show, and an exhaustiveness the question does not demand go in limitations, not in open parts (a question that asks for a complete set is held to its completeness coverage). A premise is never an open part: what the case takes as given is cited in premises (stance assumed), not held open. A part the question asks that the evidence in scope cannot settle may be held limited instead of open (status "limited", limited_by: the coverage record for the question, or a limitation whose reason is unavailable or excluded): the answer stays partial, and the report says that part is beyond the evidence rather than open to more work';
 
 /** The ways out of premise_inconsistent, each on the record and none forcing either side (docs/adr/0011, "Premises"). */
 export function PREMISE_WAYS_OUT(premise: string, rev: number): string {
@@ -12761,7 +12745,7 @@ export function noMoreEvidenceAskFix(coverage: number[], answer: number): string
  * (docs/adr/0011, "What a question presumes").
  * `seqs` opens with the answer's.
  */
-export type LedgerWarning = { code: "no_acquisition_ask" | "partial_all_parts_established" | "limit_unreviewed" | "lead_findings_uncited" | "preparation_missing" | "late_evidence_hits" | "premise_disputed" | "premise_revised" | "premise_withdrawn" | "premise_inconsistent" | "part_omitted" | "no_locator_or_derivation" | "premise_untested"; section: string; seqs: number[]; what: string; fix: string };
+export type LedgerWarning = { code: "no_acquisition_ask" | "partial_all_parts_established" | "lead_findings_uncited" | "preparation_missing" | "late_evidence_hits" | "premise_disputed" | "premise_revised" | "premise_withdrawn" | "premise_inconsistent" | "part_omitted" | "no_locator_or_derivation" | "premise_untested"; section: string; seqs: number[]; what: string; fix: string };
 
 /** A warning in the words every point says it with: what, then the fix. */
 export function warningWords(w: Pick<LedgerWarning, "what" | "fix">): string {
@@ -13181,24 +13165,6 @@ export function ledgerGate(o: { entries: LedgerEntry[]; attestations: LedgerAtte
           fix: outside.length
             ? `an open part is a part the question asks: record the answer again with supersedes=${a.seq} and result established, with what the question does not ask (${outside.map((m) => `"${m.p.part}"`).join(", ")}) among its limitations, not its parts; unasked detail, an example category the evidence does not show and an exhaustiveness the question does not demand are limitations (a question that asks for a complete set is held to its completeness coverage instead). If a part the question does ask is open, name it and what bounds it. Nothing is changed for you: the answer stands as recorded until you record it again`
             : `an answer is partial only for a part of the question the evidence could not establish: say which part is open (in its reasoning or limitations, citing what bounds it), or record the answer again with supersedes=${a.seq} and result established; ${CASE_PREMISE_WORDS}`,
-        });
-      }
-    }
-    // An established answer that holds a part at the limit of the evidence
-    // (docs/adr/0013, "A part at the limit of the evidence"): each bound is
-    // reviewed by another seat as a negative's is. A warning here, where the
-    // decision is made; an established attest before that is recorded
-    // best_candidate (reviewEvidenceCaps, limit_unreviewed).
-    if (bar && result === "established" && a.parts?.some((p) => p.status === "limited")) {
-      const bounds = limitedBounds(a, o.entries, o.attestations, o.disputes);
-      const unreviewed = a.parts.filter((p) => p.status === "limited" && !bounds.get(p.limited_by ?? "")?.reviewed);
-      if (unreviewed.length) {
-        warnings.push({
-          code: "limit_unreviewed",
-          section: sec.section,
-          seqs: [a.seq, ...[...new Set(unreviewed.map((p) => Number((p.limited_by ?? "E-0").slice(2))))].filter((n) => n > 0)],
-          what: `answer #${a.seq} (${sec.section}) is established and holds ${unreviewed.map((p) => `"${p.id}" (${p.part}) at the limit of the evidence by ${p.limited_by}, which ${bounds.get(p.limited_by ?? "")?.why ?? "is not reviewed"}`).join("; ")}`,
-          fix: `${LIMIT_REVIEW_FIX}. Until then an established attest of #${a.seq} is recorded best_candidate`,
         });
       }
     }

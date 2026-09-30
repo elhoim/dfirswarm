@@ -78,7 +78,7 @@ test("a located value whose disk no coverage record covers where a rival could l
   const m = await measureRun(c.S);
   assert.equal(m.review_caps?.rival_area_uncovered, 3);
   assert.equal(m.coverage.areas_not_applicable?.secondary, 1);
-  assert.match(metricsText(m), /Rival areas:? +3 established attest\(s\) capped because a located value's input was not covered where a rival could live, 0 because a limited part's bound was not reviewed; not_applicable per area across standing coverage records: .*secondary 1/);
+  assert.match(metricsText(m), /Rival areas:? +3 established attest\(s\) capped because a located value's input was not covered where a rival could live; not_applicable per area across standing coverage records: .*secondary 1/);
 });
 
 test("a located object that traces to no input is not held, a coverage record for another question covers nothing, and a partial answer is never capped for it", async () => {

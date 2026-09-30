@@ -1256,7 +1256,7 @@ function summarySection(run: Run, memo: Map<number, EntryState>): BodySection {
         const named = st.answer ? [] : run.entries.filter((e) => !run.replaced.has(e.seq) && (e.answers ?? []).some((x) => sectionKey(x) === c.key));
         const ans = st.answer ? answerResult(st.answer) : null;
         // A partial answer's parts (docs/adr/0013, "What the report shows of an answer's parts"): the plain line, and beside the label when every asked part is established.
-        const standing = st.answer && (ans === "partial" || (ans === "established" && st.answer.parts?.some((p) => p.status === "limited"))) ? partsOf(st.answer, run) : null;
+        const standing = st.answer && ans === "partial" ? partsOf(st.answer, run) : null;
         const plain = partialPlainWords(ans, standing);
         return [
           [c.q ? { a: `#${questionAnchor(c.q.id)}`, text: questionName(c.q) } : { a: `#${chainAnchor(chainName(c))}`, text: chainName(c) }],
@@ -2234,29 +2234,18 @@ function partsOf(a: LedgerEntry, run: Run): PartsStanding | null {
   return answerPartsStanding(a, run.attestations, { entries: run.entries, disputes: run.disputes });
 }
 
-/** A limited part in the lead line: the part, what shows it, who reviewed that. */
-function limitedLeadSpans(s: PartsStanding): Span[] {
-  return s.rows.filter((r) => r.status === "limited").flatMap((r, i): Span[] => [i ? "; " : "", `${r.part} (`, ...partRefSpans(r), ")"]);
-}
 
 /**
  * The plain line a partial answer leads with (docs/adr/0013, "What the
  * report shows of an answer's parts"): how many of the parts the question
  * asks are established, how many are open and how many of those a review
  * marks not asked; and, when every asked part is established, that it is,
- * beside the label, which is the recorder's and unchanged. An established
- * answer that holds parts at the limit of the evidence leads with them,
- * each with what shows it and who reviewed that ("A part at the limit of
- * the evidence"). Nothing on an answer without rows, or on any other.
+ * beside the label, which is the recorder's and unchanged. A part held at
+ * the limit of the evidence is counted apart ("A part at the limit of the
+ * evidence"). Nothing on an answer without rows, or one that is not partial.
  */
 function partialLeadBlocks(a: LedgerEntry, run: Run): Block[] {
-  const result = answerResult(a);
-  // An established answer that holds parts at the limit of the evidence says so first (docs/adr/0013, "A part at the limit of the evidence").
-  if (result === "established" && a.parts?.some((p) => p.status === "limited")) {
-    const s = partsOf(a, run);
-    return s ? [{ k: "p", s: [{ b: "Established, at the limit of the evidence on: " }, ...limitedLeadSpans(s), `. ${partsSummaryWords(s)}`] }] : [];
-  }
-  if (result !== "partial") return [];
+  if (answerResult(a) !== "partial") return [];
   const s = partsOf(a, run);
   if (!s) return [];
   const plain = partialPlainWords("partial", s);
@@ -2294,7 +2283,7 @@ function premiseTestBlocks(a: LedgerEntry, v: QuestionView | null, run: Run): Bl
 function chainPartsBlocks(a: LedgerEntry, run: Run): Block[] {
   const s = partsOf(a, run);
   if (!s) return [];
-  const partial = answerResult(a) === "partial" || s.limited > 0;
+  const partial = answerResult(a) === "partial";
   const plain = partialPlainWords(answerResult(a), s);
   return [
     { k: "p", s: [{ b: "Parts" }, ...(partial ? [`: ${partsSummaryWords(s)}${plain ? ` Partial as recorded, and ${plain}.` : ""}`] : [])] },

@@ -59,8 +59,8 @@ export type PremiseStance = (typeof PREMISE_STANCES)[number];
  * A part is established on entries, open (a route or an ask could still
  * settle it), or limited: the question asks it, and the evidence in scope
  * cannot settle it (docs/adr/0013, "A part at the limit of the evidence").
- * A limited part does not make an answer partial; claiming one costs what a
- * negative costs.
+ * Open or limited, a part not established keeps the answer partial; the
+ * report says which kind it is.
  */
 export const PART_STATUSES = ["established", "open", "limited"] as const;
 export type PartStatus = (typeof PART_STATUSES)[number];
@@ -101,9 +101,8 @@ export type PremiseCitation = { id: string; rev: number; stance: PremiseStance; 
  * (R-<n>), a route (a lead, L-<n>), or a limitation or a coverage record
  * (E-<seq>); for a limited part what shows the evidence cannot settle it
  * (`limited_by`): the coverage record for the question, or a limitation
- * whose reason is unavailable or excluded (E-<seq>), which another seat
- * reviews as it reviews a negative. A premise is never an open or a limited
- * part.
+ * whose reason is unavailable or excluded (E-<seq>). A premise is never an
+ * open or a limited part.
  */
 export type AnswerPart = { id: string; part: string; status: PartStatus; refs?: string[]; open_by?: string; limited_by?: string };
 
@@ -483,7 +482,7 @@ export function parseParts(raw: unknown): { ok: true; parts: AnswerPart[] } | Fa
       if (!r) return { ok: false, reason: `parts: "${id}"'s limited_by names what shows the evidence in scope cannot settle it: the coverage record for the question, or a limitation whose reason is unavailable or excluded, as E-<seq> (got ${JSON.stringify(o.limited_by)})` };
       limitedBy = r;
     }
-    if (status === "limited" && !limitedBy) return { ok: false, reason: `parts: "${id}" is limited: name in limited_by what shows the evidence in scope cannot settle it: the coverage record for the question (what was searched for it), or a limitation whose reason is unavailable or excluded (E-<seq>). Another seat reviews it as it reviews a negative. If a route or an ask could still settle it, it is open` };
+    if (status === "limited" && !limitedBy) return { ok: false, reason: `parts: "${id}" is limited: name in limited_by what shows the evidence in scope cannot settle it: the coverage record for the question (what was searched for it), or a limitation whose reason is unavailable or excluded (E-<seq>). If a route or an ask could still settle it, it is open` };
     out.push({ id, part, status: status as PartStatus, ...(refs.value.length ? { refs: refs.value } : {}), ...(openBy ? { open_by: openBy } : {}), ...(limitedBy ? { limited_by: limitedBy } : {}) });
   }
   return { ok: true, parts: out };
