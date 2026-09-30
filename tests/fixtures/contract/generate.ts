@@ -866,6 +866,60 @@ const CASES: Record<string, (base: string) => Promise<string>> = {
 
 
   /**
+   * A part at the limit of the evidence (docs/adr/0013, amended): two answers
+   * each hold "which account" limited, by a limitation that says the
+   * directory's log was not retained, and each is recorded partial: a limited
+   * part never lifts the label. Question 1's bound no other seat has
+   * reviewed; question 2's a seat that wrote neither it nor the answer
+   * reviewed as a negative is reviewed. Each answer's review agrees the part
+   * is at the limit (at_limit). Both stand partial; nothing holds.
+   */
+  "limited-part-partial": async (base) => {
+    const r = await newRun(base, "lpp", 2);
+    for (const q of ["1", "2"]) {
+      const id = await lead(r.a0, q);
+      const f = (await rec(r.a0, { kind: "finding", ...F, value: `a logon at 09:14 for question ${q}`, source: "the log", evidence: "line 12", refs: ["job:j000002/hits.txt"], answers: [q] })).entry;
+      const lim = (await rec(r.a0, { kind: "limitation", value: `The log keeps no account name for question ${q}, and the directory's own log was not retained`, source: "the log", evidence: "its field list; the retention setting", reason: "unavailable", answers: [q] })).entry;
+      const a = (await rec(r.a1, { kind: "answer", section: `question:${q}`, value: "A logon at 09:14 from the office host; which account is at the limit of the evidence", reasoning: `E-${f.seq}; E-${lim.seq}`, ...A, result: "partial", parts: [{ id: "when", part: "when the logon happened", status: "established", refs: [`E-${f.seq}`] }, { id: "who", part: "which account logged on", status: "limited", limited_by: `E-${lim.seq}` }] })).entry;
+      await close(r.a0, id, `E-${f.seq}`);
+      if (q === "2") await attest(r.a3, { seq: lim.seq, how: "checked the retention setting and the directory", review: REVIEW });
+      await attest(r.a2, { seq: a.seq, how: "re-read line 12 from job:j000002", ...ESTABLISHED, answer_review: { ...ESTABLISHED.answer_review, parts: [{ id: "when", part: "when the logon happened", established: true, why: "line 12" }, { id: "who", part: "which account logged on", established: false, at_limit: true, why: "the log keeps none, and the directory's log is gone" }] } });
+    }
+    return r.S;
+  },
+
+  /**
+   * A locator is not coverage (docs/adr/0013): two established answers whose
+   * reviews locate the value in a job's output over an input. Question 1's
+   * first review is recorded best_candidate (rival_area_uncovered); then a
+   * coverage record for it names the disk, says every area searched or not
+   * applicable and cites the job over the disk, and the same seat's later
+   * review stands established. Question 2's log no coverage record covers:
+   * its review stays a best candidate.
+   */
+  "rival-area-uncovered": async (base) => {
+    const r = await newRun(base, "rau", 2);
+    const answer = async (q: string, ref: string) => {
+      const id = await lead(r.a0, q);
+      const f = (await rec(r.a0, { kind: "finding", ...F, value: `the record question ${q} asks for`, source: "the evidence", evidence: "line 1", refs: [ref], answers: [q] })).entry;
+      const a = (await rec(r.a1, { kind: "answer", section: `question:${q}`, value: `Established: the record question ${q} asks for, ${ref.slice("job:".length, ref.indexOf("/"))}`, reasoning: `E-${f.seq}`, ...HIGH, result: "established" })).entry;
+      await close(r.a0, id, `E-${f.seq}`);
+      return a;
+    };
+    const located = (ref: string, inference: string) => ({ ...REVIEWED, inference, discriminator: SOURCE_FIRST.discriminator, reproduced_at: [{ ref, offset: 0, value: ref.slice("job:".length, ref.indexOf("/")) }] });
+    const a1 = await answer("1", "job:j000001/hits.txt");
+    const first = await P.attestEntry(r.a2, { seq: a1.seq, how: "re-read the record from job:j000001", strength: "established", answer_review: located("job:j000001/hits.txt", "the record is the answer") } as unknown as P.LedgerActInput);
+    assert.ok(first.ok && first.line?.strength === "best_candidate" && first.line.capped?.some((x) => /a locator is not coverage/.test(x)), JSON.stringify(first));
+    await rec(r.a0, coverage("1", ["input:disk.E01"], ["job:j000001/hits.txt"], { areas: { allocated: "searched", deleted: "searched", unallocated: "searched", slack: "searched", secondary: "not_applicable" } }));
+    const later = await P.attestEntry(r.a2, { seq: a1.seq, how: "re-read the record, and the disk's other areas", strength: "established", answer_review: located("job:j000001/hits.txt", "the record is the answer, and the disk's other areas hold no other") } as unknown as P.LedgerActInput);
+    assert.ok(later.ok && later.line?.strength === "established", JSON.stringify(later));
+    const a2 = await answer("2", "job:j000002/hits.txt");
+    const held = await P.attestEntry(r.a3, { seq: a2.seq, how: "re-read the record from job:j000002", strength: "established", answer_review: located("job:j000002/hits.txt", "the record is the answer") } as unknown as P.LedgerActInput);
+    assert.ok(held.ok && held.line?.strength === "best_candidate", JSON.stringify(held));
+    return r.S;
+  },
+
+  /**
    * A given (docs/adr/0011, "Premises"): the goal's premise, seeded as P-1
    * at the kickoff, assumed by both questions' established answers. It is
    * not proved again and holds nothing.

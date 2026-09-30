@@ -116,15 +116,24 @@ The truth gives each question an expected result and the results it accepts:
   "questions": [{ id, text, scored, kind: present|absent|missing,
                   expected: {result, accept_results, summary},
                   facts: [{id, category, subkind?, summary, where?, accept?}],
+                  parts?: [{id, clause, settled_by: [fact id], after_late?: [fact id]}],
                   acquisition?: {accept}, late?: {item, expected, facts} }],
   "probes": [{fact, claim, ok}], "context": {…the case's drawn values…} }
 ```
 
 A fact's `category` is `present` (easy), `hard_present` (with `subkind`
 `deleted`, `unallocated`, `slack`, `secondary`, `correlation` or `encoded`),
-`absent`, `decoy`, `missing` or `late`. `accept` is a list of patterns in
+`absent`, `decoy`, `missing`, `late` or `part` (a fact that settles a
+clause of the question and is not scored on its own). `accept` is a list of patterns in
 `scripts/score.ts`'s form: `/re/flags` is a regular expression, anything else
 plain text matched without regard to case.
+
+A question's `parts` are the clauses it asks, each with the facts that settle
+it from the evidence; an empty `settled_by` says nothing in the evidence
+settles that clause, and `after_late` names the facts that settle it once the
+late item is in the run. Every scored present question names its parts. The
+parts live in the truth only: a case regenerated with the same seed has the
+same inputs, late items and goal, byte for byte.
 
 ## Running a case
 
@@ -191,7 +200,10 @@ operator requests, and, when they exist, the question register
 | acquisition | a missing question for which the swarm asked the operator for the evidence: an operator request or a lead closed `needs_operator` naming the question, or matching the truth's acquisition patterns; whether the gap is named at all is counted apart |
 | the late item | whether it is in the run, and whether the question it settles was answered as it settles it |
 | calibration of confidence | accuracy per stated confidence, a Brier score (high 0.9, medium 0.7, low 0.4) and the number wrong at high confidence |
-| under-claiming | a present question (as scored) answered `partial` whose every present fact the answer finds: the label says less than the answer holds. Each is named with its confidence, recorded and stated. Measured on the truth, where `swarm.sh metrics` can count only what reviews mark `not_asked` |
+| under-claiming (a proxy) | a present question (as scored) answered `partial` whose every present fact the answer finds: the label says less than the answer holds. Each is named with its confidence, recorded and stated. A fact found in a limitation or a contrary entry counts here, so it is a proxy |
+| unnecessary partial | a present question (as scored) answered `partial` whose every part the evidence settles (the truth's `parts`, each with the facts that settle it) is settled in the answer's words or in the entries it cites as support, never in its limitations or contrary entries. A part the evidence cannot settle never counts against a partial label. Not judged, and said so, on a truth file without parts |
+| false established | an answer recorded `established` where the truth accepts no established answer, or whose headline takes a decoy |
+| limited parts | the answers' `limited` rows (ADR 0013), and how many rest on a bound (the coverage record or limitation they name) that a seat other than its authors attests |
 | the premise test | for each question that expects `premise_not_supported`: what its answer recorded, and whether the answer carried `premise_tested` and how many other seats' reviews of it carried `answer_review.premise_tested` (ADR 0011, "What a question presumes"); codes and counts only, never the tests' words |
 
 An answer's class is its own `result` when it has one, else the question

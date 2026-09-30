@@ -1256,7 +1256,7 @@ function summarySection(run: Run, memo: Map<number, EntryState>): BodySection {
         const named = st.answer ? [] : run.entries.filter((e) => !run.replaced.has(e.seq) && (e.answers ?? []).some((x) => sectionKey(x) === c.key));
         const ans = st.answer ? answerResult(st.answer) : null;
         // A partial answer's parts (docs/adr/0013, "What the report shows of an answer's parts"): the plain line, and beside the label when every asked part is established.
-        const standing = st.answer && ans === "partial" ? answerPartsStanding(st.answer, run.attestations) : null;
+        const standing = st.answer && ans === "partial" ? partsOf(st.answer, run) : null;
         const plain = partialPlainWords(ans, standing);
         return [
           [c.q ? { a: `#${questionAnchor(c.q.id)}`, text: questionName(c.q) } : { a: `#${chainAnchor(chainName(c))}`, text: chainName(c) }],
@@ -2193,7 +2193,7 @@ function refSpan(r: string): Span {
  */
 function partsBlocks(a: LedgerEntry, q: Question, run: Run): Block[] {
   const out: Block[] = [];
-  const standing = answerPartsStanding(a, run.attestations);
+  const standing = partsOf(a, run);
   if (standing) {
     const v = q.reg ? run.register?.byId.get(q.reg) : undefined;
     const asked = v?.revisions.find((r) => r.rev === (a.question_rev ?? 1))?.text ?? q.text;
@@ -2203,7 +2203,7 @@ function partsBlocks(a: LedgerEntry, q: Question, run: Run): Block[] {
       cls: "parts",
       head: ["Part", "What it asks", "Status", "Rests on, or what bounds it"],
       // A review's not_asked mark beside the part it marks: a limitation, not an open part; the answer stands as recorded.
-      rows: standing.rows.map((p): Span[][] => [[p.id], [p.part], [p.status, ...notAskedSpans(p.not_asked_by)], partRefSpans(p)]),
+      rows: standing.rows.map((p): Span[][] => [[p.id], [p.part], [p.status === "limited" ? "at the limit of the evidence" : p.status, ...notAskedSpans(p.not_asked_by)], partRefSpans(p)]),
     });
   }
   const omitted = answerReviews(a, run.attestations).flatMap((x) => (x.answer_review?.parts ?? []).filter((p) => p.missing).map((p) => ({ by: x.by, part: p.part, why: p.why })));
@@ -2221,22 +2221,32 @@ function notAskedSpans(by: PartsStanding["rows"][number]["not_asked_by"]): Span[
   return by.length ? [`; not asked by the question, as ${by.length === 1 ? "a review marks it" : "reviews mark it"}: ${by.map((x) => `${x.by} (${x.why})`).join("; ")}`] : [];
 }
 
-/** What a part rests on, or what bounds it and what it rests on so far. */
+/** What a part rests on; or what bounds it, or shows it is at the limit of the evidence (and whether another seat reviewed that), and what it rests on so far. */
 function partRefSpans(p: PartsStanding["rows"][number]): Span[] {
-  return p.status === "established" ? (p.refs ?? []).flatMap((r, i): Span[] => [i ? ", " : "", refSpan(r)]) : [refSpan(p.open_by ?? "?"), ...(p.refs?.length ? [" (so far ", ...p.refs.flatMap((r, i): Span[] => [i ? ", " : "", refSpan(r)]), ")"] : [])];
+  if (p.status === "established") return (p.refs ?? []).flatMap((r, i): Span[] => [i ? ", " : "", refSpan(r)]);
+  const soFar: Span[] = p.refs?.length ? [" (so far ", ...p.refs.flatMap((r, i): Span[] => [i ? ", " : "", refSpan(r)]), ")"] : [];
+  if (p.status === "limited") return [refSpan(p.limited_by ?? "?"), p.bound ? (p.bound.reviewed ? `, reviewed by ${p.bound.by.join(", ")}` : `, not yet reviewed by another seat (${p.bound.why ?? "no review"})`) : "", ...soFar];
+  return [refSpan(p.open_by ?? "?"), ...soFar];
 }
+
+/** An answer's parts as its reviews weigh them, with each limited part's bound and whether another seat reviewed it. */
+function partsOf(a: LedgerEntry, run: Run): PartsStanding | null {
+  return answerPartsStanding(a, run.attestations, { entries: run.entries, disputes: run.disputes });
+}
+
 
 /**
  * The plain line a partial answer leads with (docs/adr/0013, "What the
  * report shows of an answer's parts"): how many of the parts the question
  * asks are established, how many are open and how many of those a review
  * marks not asked; and, when every asked part is established, that it is,
- * beside the label, which is the recorder's and unchanged. Nothing on an
- * answer without rows, or one that is not partial.
+ * beside the label, which is the recorder's and unchanged. A part held at
+ * the limit of the evidence is counted apart ("A part at the limit of the
+ * evidence"). Nothing on an answer without rows, or one that is not partial.
  */
 function partialLeadBlocks(a: LedgerEntry, run: Run): Block[] {
   if (answerResult(a) !== "partial") return [];
-  const s = answerPartsStanding(a, run.attestations);
+  const s = partsOf(a, run);
   if (!s) return [];
   const plain = partialPlainWords("partial", s);
   return [{ k: "p", s: [{ b: partsSummaryWords(s) }, ...(plain ? [` Partial as recorded, and ${plain}.`] : [])] }];
@@ -2271,13 +2281,13 @@ function premiseTestBlocks(a: LedgerEntry, v: QuestionView | null, run: Run): Bl
 
 /** An answer's parts in its §2 chain: a partial answer's plain line, then each part, established on what it rests on or open with what bounds it, with the reviews that mark it not asked. Nothing on an answer without rows. */
 function chainPartsBlocks(a: LedgerEntry, run: Run): Block[] {
-  const s = answerPartsStanding(a, run.attestations);
+  const s = partsOf(a, run);
   if (!s) return [];
   const partial = answerResult(a) === "partial";
   const plain = partialPlainWords(answerResult(a), s);
   return [
     { k: "p", s: [{ b: "Parts" }, ...(partial ? [`: ${partsSummaryWords(s)}${plain ? ` Partial as recorded, and ${plain}.` : ""}`] : [])] },
-    { k: "list", items: s.rows.map((p): Span[] => [{ code: p.id }, ` ${p.part}: ${p.status === "established" ? "established on " : "open, bounded by "}`, ...partRefSpans(p), ...notAskedSpans(p.not_asked_by)]) },
+    { k: "list", items: s.rows.map((p): Span[] => [{ code: p.id }, ` ${p.part}: ${p.status === "established" ? "established on " : p.status === "limited" ? "at the limit of the evidence, shown by " : "open, bounded by "}`, ...partRefSpans(p), ...notAskedSpans(p.not_asked_by)]) },
   ];
 }
 

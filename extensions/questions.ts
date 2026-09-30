@@ -1125,7 +1125,7 @@ export function viewQuestion(q: Question, ctx: ViewContext): QuestionView {
         // Its claim and open-part rows and the premises it cites (premises.ts), and each part a review says it leaves out: present only when it has them.
         ...(a.parts?.length ? { parts: a.parts } : {}),
         ...((): { standing?: PM.PartsStanding & { summary: string; plain: string | null } } => {
-          const standing = P.answerPartsStanding(a, ctx.attestations ?? []);
+          const standing = P.answerPartsStanding(a, ctx.attestations ?? [], { entries: ctx.ledger.entries });
           return standing ? { standing: { ...standing, summary: PM.partsSummaryWords(standing), plain: PM.partialPlainWords(result, standing) } } : {};
         })(),
         ...(a.premises?.length ? { premises: a.premises } : {}),

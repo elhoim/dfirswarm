@@ -15,7 +15,10 @@ jobs:
   test:
     name: typecheck · node tests · shell suites · ui build
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # The node and shell suites together took 19 min on the limits branch and
+    # 20 min 15 s on the next push, which the old 20 cut off mid-suite: a limit
+    # is there to stop a hang, not a suite that has grown.
+    timeout-minutes: 35
     steps:
       # actions/checkout runs `git init` on the runner, and git prints its
       # init.defaultBranch hint unless one is configured.

@@ -168,14 +168,27 @@ class CaseOutput:
 
 
 def question(qid: str, text: str, *, kind: str, expected: dict, facts: List[dict],
-             acquisition: Optional[dict] = None, late: Optional[dict] = None, scored: bool = True) -> dict:
-    """A question of the truth file. `kind` is present, absent or missing; see calibration/README.md."""
+             acquisition: Optional[dict] = None, late: Optional[dict] = None, scored: bool = True,
+             parts: Optional[List[dict]] = None) -> dict:
+    """A question of the truth file. `kind` is present, absent or missing; see calibration/README.md.
+    `parts` are the clauses the question asks, each settled by facts or by nothing in the evidence."""
     q = {"id": qid, "text": text, "scored": scored, "kind": kind, "expected": expected, "facts": facts}
+    if parts:
+        q["parts"] = parts
     if acquisition:
         q["acquisition"] = acquisition
     if late:
         q["late"] = late
     return q
+
+
+def part(pid: str, clause: str, settled_by: List[str], *, after_late: Optional[List[str]] = None) -> dict:
+    """A clause the question asks, and the facts that settle it from the evidence (empty: nothing in the
+    evidence settles it). `after_late` are the facts that settle it once the late item is added."""
+    p: dict = {"id": pid, "clause": clause, "settled_by": settled_by}
+    if after_late is not None:
+        p["after_late"] = after_late
+    return p
 
 
 def fact(fid: str, category: str, summary: str, accept: Optional[List[str]] = None, *, subkind: Optional[str] = None,

@@ -1239,6 +1239,108 @@ marked a part not asked (s704e4b predates the mark), so the count cannot see
 the complete answers this section describes there; it counts them from the
 runs that review with the mark.
 
+## A part at the limit of the evidence
+
+Added 2026-09-30, after the calibration runs on the claims branch. Complete
+answers were still recorded partial, and reviewers never used the
+`not_asked` mark, so its warning never fired. Most hedged parts were not
+parts the question does not ask. They were limits of the evidence itself:
+"whether this was the first exploitation, before the retained logs", "the
+payload actually run", "an exhaustive inventory beyond the known entries".
+Claude, Fable and Astra reviewed the options, and the owner chose a third
+status.
+
+- **A third status.** A part is `established`, `open` (a route or an ask
+  could still settle it), or `limited`: the question asks it, and the
+  evidence in scope cannot settle it.
+  - A limited part names what shows that in `limited_by`: the coverage
+    record for its question, or a limitation whose reason is `unavailable`
+    or `excluded`.
+  - A limitation that was not examined, failed or is partial could still be
+    settled. It bounds an open part and never a limited one.
+  - A premise is never a limited part.
+- **It keeps the answer partial.**
+  - A partial answer needs at least one open or limited part.
+  - An established answer holds neither, and the refusal says so.
+  - The report, the console and the parts line count limited parts apart
+    ("Asked parts: 2 of 3 established, 1 at the limit of the evidence"), and
+    show what shows each and whether another seat reviewed it.
+- **Reviews.** A review weighs a limited part by its id; `at_limit: true`
+  agrees that the evidence cannot settle it, and caps nothing. The bound can
+  be reviewed as a negative is: a limitation whose reason is unavailable or
+  excluded now takes a negative's review. `not_asked` stays, for parts
+  outside the question.
+- **Measured honestly.** The calibration truth names each question's parts
+  and the facts that settle each. `scripts/calibrate.ts` counts:
+  - an unnecessary partial: every part the evidence settles is settled in
+    the answer's words or its support, never in a limitation;
+  - false established;
+  - limited parts and their bounds.
+
+  On the claims runs the stricter count agrees with the proxy: 2 of 5 and
+  3 of 4.
+
+### Amended the same day: a limited part never lifts the label
+
+As first built, an answer whose parts were all established or limited was
+recorded established once another seat reviewed each bound (a cap,
+`limit_unreviewed`, until then). The branch's runs measured it:
+
+- **Four calibration runs:** limited was never used. Every open part there
+  was bounded by an unavailable limitation or a coverage record and could
+  have been limited; the agents chose open. Unnecessary partials did not
+  move.
+- **Two c10 runs:** limited was used three times.
+  - Once fairly, on an exhaustiveness part.
+  - Twice on the case's hardest step. In one of these the recorder re-cut
+    the question's parts so that the step itself (which file was encrypted,
+    and how it was decrypted) was "limited". The answer was recorded
+    established at high confidence while its own words said that no
+    encrypted file or decryption could be identified.
+
+The bound's review did not catch this: a limit is easy to agree with. The
+owner chose honest labels over fewer partials. A limited part now keeps the
+answer partial, and the label is never lifted by it. Under-claiming is
+accepted for now.
+
+## A locator is not coverage
+
+Added the same day. A decoy value that is literally in the allocated bytes
+was attested established high on a verified `reproduced_at` locator, while
+the true value sat in file slack, which no seat examined. A locator proves
+presence, not truth.
+
+- **A cap on an established attest with a locator.** On an established
+  attest of an answer to a material question that gives `reproduced_at`,
+  the hub follows each located object back to the run's input files: an
+  input is its own source, a catalogue member leads to its generation's
+  target, and a job's output leads through the job's declared inputs.
+- **The condition.** For each such source, a standing coverage record for
+  the question must meet all of these:
+  - it names the source, or a directory holding it;
+  - its `areas` are each `searched` or `not_applicable`, none skipped;
+  - its `result_refs` include a job whose declared inputs reach the source.
+
+  Without that record the attest is recorded best_candidate
+  (`rival_area_uncovered`), and the reply names the source, what is
+  missing, and the fix.
+- **The harness never knows what slack is.** It reads the areas a seat
+  records (`allocated`, `deleted`, `unallocated`, `slack`, `secondary`),
+  the vocabulary the completeness claim already uses, and the jobs' declared
+  inputs.
+- **What it does not touch.**
+  - A located object that traces to no input (a job that read everything,
+    or an agent's own file) is not capped.
+  - A partial or not-determinable answer is not affected.
+  - An answer that rests on a derivation alone is not affected.
+- **The review asks the question.** "Could these exact bytes exist if the
+  claim were wrong? Which observation would tell them apart, and where
+  would a rival value live?"
+- **Counted.** `swarm.sh metrics` counts the caps and each area's
+  `not_applicable` across coverage records, the signs to watch for gaming.
+  So does `reversals.partial_after_cap`, which already counts answers
+  recorded partial after a cap.
+
 ## Consequences
 
 - Every existing goal and run keeps working: an answer without `result`

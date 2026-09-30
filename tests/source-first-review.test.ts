@@ -42,9 +42,13 @@ const attest = async (c: { sandboxRoot: string; agentId: string }, input: Record
   return r as { ok: true; line: P.LedgerAttestation; appended: boolean; note?: string };
 };
 
-/** Question 1 answered established on a finding over `ref`, by a1. */
+/** Every area of the disk searched for question 1: a locator is not coverage (docs/adr/0013), and these tests are about the locator. */
+const ALL_AREAS = { allocated: "searched", deleted: "searched", unallocated: "searched", slack: "searched", secondary: "not_applicable" } as const;
+
+/** Question 1 answered established on a finding over `ref`, by a1, with the disk it was read from covered where a rival value could live. */
 async function established(c: Awaited<ReturnType<typeof run>>, ref: string, value: string) {
   await planned(c.a0, "1");
+  ok(await rec(c.a0, coverage("1", ["input:disk.E01"], [ref], { areas: ALL_AREAS })));
   const f = ok(await rec(c.a0, { kind: "finding", ...F, value: `${value} is in the export`, source: "the export", evidence: "its second row", refs: [ref], answers: ["1"] })).entry;
   return ok(await rec(c.a1, { kind: "answer", section: "question:1", value, reasoning: `E-${f.seq}`, ...HIGH, result: "established" })).entry;
 }
@@ -85,6 +89,7 @@ test("a locator vouches for a supporting observation: a value a cited finding st
   const body = Buffer.from("user=alice host=ws-17 tty=pts/3\n");
   await sealed(c.S, "j000012", "auth.log", body);
   await planned(c.a0, "1");
+  ok(await rec(c.a0, coverage("1", ["input:disk.E01"], ["job:j000012/auth.log"], { areas: ALL_AREAS })));
   // The finding says where the logon came from; the answer names only the account.
   const f = ok(await rec(c.a0, { kind: "finding", ...F, value: "alice logged on from ws-17", source: "the auth log", evidence: "its first line", refs: ["job:j000012/auth.log"], answers: ["1"] })).entry;
   const ans = ok(await rec(c.a1, { kind: "answer", section: "question:1", value: "alice", reasoning: `E-${f.seq}`, ...HIGH, result: "established" })).entry;

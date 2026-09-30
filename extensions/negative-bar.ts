@@ -247,7 +247,8 @@ export async function objectOf(sandboxRoot: string, ref: string): Promise<Obj | 
 
 let inputsCache: { key: string; files: Array<{ path: string; sha256?: string }> } | null = null;
 
-async function inputFiles(sandboxRoot: string): Promise<Array<{ path: string; sha256?: string }>> {
+/** The run's input files as inputs.json lists them (path under inputs/, and digest). */
+export async function inputFiles(sandboxRoot: string): Promise<Array<{ path: string; sha256?: string }>> {
   const raw = await readFile(join(sandboxRoot, "inputs.json"), "utf8").catch(() => null);
   const key = `${sandboxRoot}:${raw?.length ?? -1}:${raw ? createHash("sha256").update(raw).digest("hex") : ""}`;
   if (inputsCache?.key === key) return inputsCache.files;

@@ -329,6 +329,58 @@ test("the scorer reads today's ledger: misses, false negatives, forced answers, 
   }
 });
 
+test("the truth's parts: an unnecessary partial is judged on the answer's support, never on its limitations; false established; limited rows and their bounds", async () => {
+  const truth = miniTruth();
+  const q1 = truth.questions.find((x) => x.id === "1")!;
+  q1.parts = [{ id: "a", clause: "the deleted files", settled_by: ["F1.1", "F1.2"] }];
+  truth.questions.find((x) => x.id === "2")!.parts = [{ id: "a", clause: "the recipient", settled_by: ["F2.1"] }];
+  truth.questions.find((x) => x.id === "3")!.parts = [{ id: "a", clause: "the password", settled_by: [] }];
+  const S = await mkdtemp(join(tmpdir(), "calrun-"));
+  try {
+    await mkdir(join(S, "ledger"), { recursive: true });
+    await mkdir(join(S, "leads"), { recursive: true });
+    await writeFile(join(S, "ledger", "entries.jsonl"), `${[
+      E(1, "finding", "secret_plans.csv was deleted from the drive (inode 7)", { confidence: "high" }),
+      E(2, "limitation", "A name in the slack of notes.txt may be Jane Roe; unread", { reason: "partial", answers: ["2"] }),
+      E(3, "coverage", "The drive's unallocated space and slack, searched for other exports", { answers: ["1"], by: "a1", authors: ["a1"] }),
+      E(4, "limitation", "The workstation's own copy was not collected", { reason: "unavailable", answers: ["1"], by: "a1", authors: ["a1"] }),
+      // Question 1: partial, every part settled by its words and its support; two limited rows, one bound reviewed by another seat.
+      E(5, "answer", "notes.txt and secret_plans.csv (E-1)", { section: "question:1", result: "partial", confidence: "medium", reasoning: "E-1.", support: [{ seq: 1, hash: "x" }], by: "author", authors: ["author"],
+        parts: [{ id: "a", part: "the files", status: "established", refs: ["E-1"] }, { id: "b", part: "earlier copies", status: "limited", limited_by: "E-3" }, { id: "c", part: "the source copy", status: "limited", limited_by: "E-4" }] }),
+      // Question 2: partial; the recipient is only in a limitation it cites: found for the proxy, not settled for the parts.
+      E(6, "answer", "The recipient is not established", { section: "question:2", result: "partial", confidence: "medium", reasoning: "See E-2.", limitations: [{ seq: 2, hash: "y" }], by: "author", authors: ["author"] }),
+      // Question 3: established where the truth expects not determinable.
+      E(7, "answer", "The password was Password123", { section: "question:3", result: "established", confidence: "high", reasoning: "Read.", by: "author", authors: ["author"] }),
+    ].join("\n")}\n`);
+    await writeFile(join(S, "ledger", "attestations.jsonl"), `${[
+      JSON.stringify({ v: 2, act: "attest", seq: 3, target: "h", by: "critic", at: "2026-01-01T00:00:00Z", how: "re-ran the search" }),
+      JSON.stringify({ v: 2, act: "attest", seq: 4, target: "h", by: "a1", at: "2026-01-01T00:00:00Z", how: "mine" }),
+    ].join("\n")}\n`);
+    const r = await scoreRun(S, truth);
+    const q = (id: string) => r.questions.find((x) => x.id === id)!;
+    assert.deepEqual(q("1").parts, [{ id: "a", clause: "the deleted files", settleable: true, settled: true }]);
+    assert.deepEqual(q("2").parts, [{ id: "a", clause: "the recipient", settleable: true, settled: false }], "a fact read only in a limitation settles nothing");
+    assert.equal(q("2").facts[0].found, true, "the proxy still finds it, in a cited entry");
+    assert.deepEqual(q("5").parts, null, "a question the truth names no parts for");
+    assert.deepEqual(r.summary.under_claimed.items.map((x) => x.id), ["1", "2"]);
+    assert.deepEqual(r.summary.unnecessary_partial, { questions: 2, count: 1, rate: 0.5, items: [{ id: "1", confidence: "medium" }] });
+    assert.deepEqual(r.summary.false_established, { answers: 1, count: 1, items: ["3"] });
+    assert.deepEqual(q("1").limited, [{ id: "b", limited_by: "E-3", bound_reviewed: true }, { id: "c", limited_by: "E-4", bound_reviewed: false }], "the author's own attest is not a review");
+    assert.deepEqual(r.summary.limited, { rows: 2, bound_reviewed: 1 });
+    const text = scoreText(r);
+    assert.match(text, /^Unnecessary partial: +1 of 2 present questions answered partial with every part the evidence settles settled in the answer's support \(Q1, medium\)$/m);
+    assert.match(text, /^False established: +1 of 1 established answers \(Q3\)$/m);
+    assert.match(text, /^Limited parts: +2 row\(s\), 1 with a bound another seat attests$/m);
+    // An older truth, with no parts: not judged, and said so.
+    const old = await scoreRun(S, miniTruth());
+    assert.equal(old.summary.unnecessary_partial, null);
+    assert.match(scoreText(old), /^Unnecessary partial: +not judged \(the truth names no parts\)$/m);
+    assert.ok(old.notes.some((n) => /names no parts/.test(n)));
+  } finally {
+    await rm(S, { recursive: true, force: true });
+  }
+});
+
 test("the scorer takes Plan 3's fields when they are there: result, coverage records, the question register", async () => {
   const S = await miniRun({ wp2: true });
   try {
@@ -347,7 +399,7 @@ test("the scorer takes Plan 3's fields when they are there: result, coverage rec
     assert.deepEqual(q("5").negative_support, { covered: true, complete: true, reviewed: true, reviewers: ["critic"], by: ["E-11"] });
     // Under-claimed, on the truth: question 1 is partial by the register and finds both its present facts; question 2 is a negative.
     assert.deepEqual(r.summary.under_claimed, { questions: 2, under_claimed: 1, rate: 0.5, items: [{ id: "1", label: "partial", confidence: "high", stated_confidence: "high" }] });
-    assert.match(scoreText(r), /^Under-claimed: +1 of 2 present questions answered partial with every present fact found \(Q1 partial, high\)$/m);
+    assert.match(scoreText(r), /^Under-claimed: +1 of 2 present questions answered partial with every present fact found \(a proxy\) \(Q1 partial, high\)$/m);
     assert.deepEqual(r.summary.premise, [], "no question here expects premise_not_supported");
   } finally {
     await rm(S, { recursive: true, force: true });
@@ -373,7 +425,7 @@ test("the premise-false question: what its answer recorded, and whether the answ
     assert.deepEqual(r.summary.under_claimed.items.map((x) => [x.id, x.label, x.confidence]), [["2", "partial", "medium"]]);
     let text = scoreText(r);
     assert.match(text, /^Premise tested: +Q7 expects premise_not_supported; answered partial \(not accepted\), decoy adopted; premise_tested on the answer no, in 0 review\(s\)$/m);
-    assert.match(text, /^Under-claimed: +1 of 2 present questions answered partial with every present fact found \(Q2 partial, medium\)$/m);
+    assert.match(text, /^Under-claimed: +1 of 2 present questions answered partial with every present fact found \(a proxy\) \(Q2 partial, medium\)$/m);
     // Recorded again premise_not_supported with its own test, and a review by another seat that tests it too (and one by the author, which is not a review).
     await add([E(23, "answer", "The question's premise is not supported: no wiping tool ran (E-20)", { section: "question:7", result: "premise_not_supported", confidence: "medium", reasoning: "E-20 is an archive never unpacked.", supersedes: 21, premise_tested: { outcome: "an outcome's words, never printed", refs: ["E-20"] }, by: "author", authors: ["author"] })]);
     await writeFile(join(S, "ledger", "attestations.jsonl"), `${(await readFile(join(S, "ledger", "attestations.jsonl"), "utf8")).trimEnd()}\n${[

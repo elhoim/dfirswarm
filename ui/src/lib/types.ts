@@ -614,12 +614,16 @@ export type QuestionView = {
 };
 
 /** A part of an answer; mirrors `AnswerPart` in `extensions/premises.ts`. */
-export type AnswerPart = { id: string; part: string; status: "established" | "open"; refs?: string[]; open_by?: string };
+export type AnswerPart = { id: string; part: string; status: "established" | "open" | "limited"; refs?: string[]; open_by?: string; limited_by?: string };
+/** Whether what a limited part is limited by stands reviewed by another seat; mirrors `BoundReview` in `extensions/premises.ts`. */
+export type BoundReview = { reviewed: boolean; by: string[]; why?: string };
 /** An answer's parts as its reviews weigh them; mirrors `PartsStanding` in `extensions/premises.ts`, with the words the view adds. */
 export type PartsStanding = {
-  rows: Array<AnswerPart & { not_asked_by: Array<{ by: string; why: string }> }>;
+  rows: Array<AnswerPart & { not_asked_by: Array<{ by: string; why: string }>; bound?: BoundReview | null }>;
   asked: number;
   established: number;
+  limited: number;
+  limited_unreviewed: number;
   open: number;
   open_not_asked: number;
   missing: Array<{ by: string; part: string; why: string }>;

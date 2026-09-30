@@ -1,0 +1,42 @@
+{
+  "case": "Two established answers whose reviews locate the value in a job's output over an input. Question 1's first review is recorded best_candidate; a coverage record for it then names the disk, says every area searched or not applicable and cites the job over the disk, and the same seat's later review stands established. No coverage record covers question 2's log: its review stays a best candidate.",
+  "design": [
+    "docs/adr/0013 'A locator is not coverage': an established attest of an answer to a material question that locates a value is recorded best_candidate (rival_area_uncovered) unless, for each input the located object was read from, a standing coverage record for the question names it, says every area searched or not_applicable, and cites a job over it among its results.",
+    "docs/adr/0015 'A source-first review': a seat's later review that meets the rule is its review.",
+    "docs/adr/0013 'The end of a run, under every stop policy': a best candidate is no disposition (B2); done finishes a run only when every question has one.",
+    "docs/adr/0015 'After the run s9722fa': an answer that claims established, every review of which holds it a best candidate, is held so, by readiness as by the done."
+  ],
+  "policies": [
+    "as run"
+  ],
+  "expect": {
+    "questions": {
+      "question:1": {
+        "disposition": "established",
+        "best_candidate": false,
+        "readiness_holds": false,
+        "defects_include": [],
+        "warnings": []
+      },
+      "question:2": {
+        "disposition": null,
+        "best_candidate": true,
+        "readiness_holds": true,
+        "readiness_includes": [
+          "best_candidate"
+        ],
+        "defects_include": [],
+        "warnings": [],
+        "report_best_candidate": true
+      }
+    },
+    "ready": false,
+    "verdict": {
+      "proceed": false,
+      "failing": "question:2"
+    },
+    "done": "held",
+    "agreement": [],
+    "review_caps": { "established": 1, "capped": [] }
+  }
+}

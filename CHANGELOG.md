@@ -6,6 +6,43 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Added: a part at the limit of the evidence; a locator is not coverage; an honest under-claim count
+
+The claims round showed that complete answers stayed partial over residuals
+the evidence cannot settle. Reviewers never used `not_asked`, so its warning
+never fired. It also showed a decoy value that is in the allocated bytes
+attested established on a verified locator, while the true value sat in slack.
+Claude, Fable and Astra reviewed the options, and the owner chose these.
+
+- **Limited parts.** An answer's part can be `limited`: the question asks it, and the evidence in scope cannot settle it.
+  - `limited_by` names what shows that: the coverage record for the question, or a limitation whose reason is unavailable or excluded.
+  - A limited part keeps the answer partial, as an open part does. The report, the console and `swarm.sh metrics` ("Limited parts") say it is beyond the evidence rather than open to more work, and whether another seat reviewed what shows it.
+  - A review weighs it with `at_limit`. A limitation that says the evidence is gone now takes a negative's review.
+  - As first built, a limited part could lift an answer to established once its bound was reviewed. The branch's c10 runs recorded the case's hardest step "limited" and the answer established at high confidence while its words said the step could not be done. The label is now never lifted (ADR 0013, amended).
+- **A locator is not coverage.** An established attest that locates a value
+  is recorded best_candidate (`rival_area_uncovered`) until, for each input
+  the located object was read from, a coverage record for the question:
+  - names that input;
+  - says every area searched or not_applicable;
+  - cites a job over the input.
+
+  A located object that traces to no input, and a partial answer, are not
+  held. The review prompt asks where a rival value would live. `swarm.sh
+  metrics` ("Rival areas") counts the caps and each area's not_applicable.
+- **Calibration.** The truth names each question's parts and the facts that
+  settle each. Regenerating with the same seed keeps the inputs and the goal
+  byte for byte. `scripts/calibrate.ts` adds:
+  - "Unnecessary partial": every part the evidence settles is settled in the
+    answer's support, never in a limitation;
+  - "False established";
+  - "Limited parts".
+
+  The old line is kept as the proxy.
+- **Replay.** Contract fixtures `limited-part-partial` and
+  `rival-area-uncovered` hold the two rules. Replayed over the older
+  `review-source-first` history, the rival-area rule would cap two of its
+  established attests; nothing else reads differently.
+
 ### Fixed: a store sweep recorded under older rules is read again under the current ones
 
 The calibration run sd0e59d, stopped on the harness before the echoes below

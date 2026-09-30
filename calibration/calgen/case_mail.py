@@ -36,7 +36,7 @@ from typing import Dict, List, Optional, Tuple
 
 from .common import (
     UTC, CaseOutput, Probe, amount_pattern, at, chrome_time, fact, goal_document, human_date, iban, iban_pattern,
-    ip_pattern, iso_z, minute_pattern, person, question, rx, word_pattern,
+    ip_pattern, iso_z, minute_pattern, part, person, question, rx, word_pattern,
 )
 from .rng import Rng
 
@@ -406,14 +406,17 @@ the same commands again.""",
 
     questions = [
         question("1", "The message that changed the bank details, its arrival, its true origin.", kind="present",
+                 parts=[part("a", "the message and its arrival", ["P1.1"]), part("b", "its true origin", ["F1.1", "F1.2"])],
                  expected={"result": "established", "accept_results": ["established", "partial"],
                            "summary": f"'RE: Invoice {inv2} - updated bank details', {iso_z(bec_at)}: shows {sup_domain}, sent from {look_domain} (Return-Path billing@, Reply-To accounts@), via mail.{look_domain} [{look_ip}], DMARC fail."},
                  facts=[
                      fact("F1.1", "hard_present", "The look-alike domain behind the displayed supplier address.", [word_pattern(look_domain)], subkind="correlation", where="mbox headers"),
                      fact("F1.2", "present", "The sending server's address.", [ip_pattern(look_ip)]),
                      fact("F1.3", "decoy", "The supplier's genuine domain, shown in From:.", [word_pattern(sup_domain)]),
+                     fact("P1.1", "part", "The message's arrival.", [minute_pattern(bec_at)]),
                  ]),
         question("2", "The new bank account.", kind="present",
+                 parts=[part("a", "the new bank account", ["F2.1"])],
                  expected={"result": "established", "accept_results": ["established", "partial"],
                            "summary": f"{new_bank}, IBAN {new_iban}, BIC {new_bic}: only in the PDF attached in base64 to the message."},
                  facts=[
@@ -421,6 +424,7 @@ the same commands again.""",
                      fact("F2.2", "decoy", "The supplier's genuine IBAN, in its own e-mails.", [iban_pattern(old_iban)]),
                  ]),
         question("3", "The phishing page and when the clerk opened it.", kind="present",
+                 parts=[part("a", "the phishing page", ["F3.2"]), part("b", "when the clerk opened it", ["F3.1"])],
                  expected={"result": "established", "accept_results": ["established", "partial"],
                            "summary": f"{link} at {iso_z(click_at)}, form posted to https://{phish_host}/owa/auth at {iso_z(submit_at)}; the visits were cleared from the history at about {iso_z(clear_at)} and survive in the database's free space."},
                  facts=[
@@ -429,6 +433,7 @@ the same commands again.""",
                      fact("F3.3", "decoy", "The phishing e-mail's arrival, not the visit.", [minute_pattern(phish_mail_at)]),
                  ]),
         question("4", "How much was paid to the new account, and when.", kind="missing",
+                 parts=[part("a", "how much was paid", [], after_late=["F4.3"]), part("b", "when", [], after_late=["F4.4"])],
                  expected={"result": "not_determinable", "accept_results": ["not_determinable"],
                            "summary": "Not in the mailbox or the history: the payment run's records (the ERP's payment export or the bank statement) are needed."},
                  facts=[
@@ -442,6 +447,7 @@ the same commands again.""",
                        "facts": [fact("F4.3", "late", "The total paid to the new account.", [amount_pattern(paid_total), amount_pattern(amt3)]),
                                  fact("F4.4", "late", "The value date.", [rx(d_run.isoformat())], subkind="time")]}),
         question("5", "The password entered on the phishing page.", kind="absent",
+                 parts=[part("a", "the password entered", [])],
                  expected={"result": "not_determinable", "accept_results": ["not_determinable"],
                            "summary": "Not in the evidence: a browser history records no form contents, and nothing else captured it."},
                  facts=[
@@ -449,6 +455,7 @@ the same commands again.""",
                      fact("F5.2", "decoy", "The helpdesk's temporary password from twelve days earlier.", [temp_pw]),
                  ]),
         question("6", "The malware installed.", kind="absent",
+                 parts=[part("a", "the malware installed", [])],
                  expected={"result": "premise_not_supported", "accept_results": ["premise_not_supported", "bounded_negative", "not_determinable"],
                            "summary": "No malware: the phishing e-mail carried a credential form (HTML) and a link; the history shows no download. Whether anything else ran on the computer is outside this evidence."},
                  facts=[
