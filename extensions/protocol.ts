@@ -9691,7 +9691,7 @@ export const PREMISE_TEST_FIX =
   "test the premise before the answer: does the evidence show that what the question presumes happened at all? Weigh it against the rival \"the question's premise is not supported\" and say what the test showed: premise_tested {outcome (what the test showed of whether it happened), refs (the E-<seq> of the observation, or the job:<id>/<path> it rests on)}, which a review gives as answer_review.premise_tested (never resting on the answer under review). If the evidence does not support it, the answer is premise_not_supported: its recorder records it so, and a reviewer disputes an answer that says otherwise. A clue that fits the question's frame is a candidate to test against that rival, not an answer";
 
 /** Why an established attest is recorded a best candidate for want of source-first evidence: a code, and the words `capped` keeps. */
-export type ReviewEvidenceCap = { code: "no_discriminator" | "locator_unverified" | "derivation_unverified" | "premise_untested" | "limit_unreviewed"; why: string };
+export type ReviewEvidenceCap = { code: "no_discriminator" | "locator_unverified" | "derivation_unverified" | "premise_untested" | "limit_unreviewed" | "rival_area_uncovered"; why: string };
 /**
  * What a source-first review is warned of and not capped for: it vouches
  * for no value by bytes or by derivation (no_locator_or_derivation). The
@@ -9713,6 +9713,13 @@ export type ReviewEvidenceWarning = { code: "no_locator_or_derivation"; why: str
 export const LIMIT_REVIEW_FIX =
   "a seat that recorded neither the answer nor the bound attests the bound (the coverage record or the limitation the part names in limited_by) with review {detection, reproduced, other_route}, as it would review a negative: whether it challenged what the search could detect, reproduced a decisive check, tried a materially different route; then attest this answer again. If a route or an ask could still settle the part, record the answer again with that part open (open_by) and the answer partial";
 
+/**
+ * How a located value's source comes to be covered where a rival value
+ * could live (docs/adr/0013, "A locator is not coverage").
+ */
+export const RIVAL_AREA_FIX =
+  "a located value proves the value is there, not that it is the answer: record kind=coverage for the question over the source the value was read from (refs naming it), with areas {allocated, deleted, unallocated, slack, secondary} each searched or not_applicable (none skipped), result_refs naming the job that searched the source's other areas, and looked_for the strings a rival record would carry (another name, time or version of the same field); then attest again. Ask of the bytes: could they be there if the claim were wrong, and where would a rival value live?";
+
 /** How each cap is fixed, in the words the attest's reply gives. */
 export const REVIEW_CAP_FIX: Readonly<Record<ReviewEvidenceCap["code"], string>> = {
   no_discriminator: "name the strongest rival and the test that separates it from the answer: answer_review.discriminator {rival (another reading the evidence allows: another time, entity, mechanism or activity, or the premise not holding), test (what you checked), favours_if (the result that would favour the answer, and the one that would favour the rival), outcome (what the check showed), refs (the E-<seq> of the observation, or the job:<id>/<path> it rests on: not the answer, nor only entries it cites)}",
@@ -9720,6 +9727,7 @@ export const REVIEW_CAP_FIX: Readonly<Record<ReviewEvidenceCap["code"], string>>
   derivation_unverified: "name a sealed job that ran to its end and the objects it declared it would read: answer_review.derivation {job: j<id>, inputs: [input:<path>, job:<id>/<path>, …]}",
   premise_untested: PREMISE_TEST_FIX,
   limit_unreviewed: LIMIT_REVIEW_FIX,
+  rival_area_uncovered: RIVAL_AREA_FIX,
 };
 
 /** How the warning no_locator_or_derivation is answered, where a value can be located. */
@@ -9773,9 +9781,55 @@ export async function reviewEvidenceCaps(sandboxRoot: string, answer: LedgerEntr
     const unreviewed = (answer.parts ?? []).filter((p) => p.status === "limited" && !bounds.get(p.limited_by ?? "")?.reviewed);
     if (unreviewed.length) caps.push({ code: "limit_unreviewed", why: `${unreviewed.map((p) => `"${p.id}" is held at the limit of the evidence by ${p.limited_by}, and ${bounds.get(p.limited_by ?? "")?.why ?? "that is not reviewed"}`).join("; ")}` });
   }
+  // A locator is not coverage (docs/adr/0013): each input a located value
+  // was read from is covered, for the question, where a rival value could
+  // live: a standing coverage record naming it, every area searched or not
+  // applicable, and a job over it among its results. A located object that
+  // traces to no input is not held.
+  if (review.reproduced_at?.length) {
+    const entries = [...(o.entries ?? (await readLedger(sandboxRoot).catch(() => [] as LedgerEntry[])))];
+    const disputes = [...(o.disputes ?? (await readDisputes(sandboxRoot).catch(() => [] as LedgerDispute[])))];
+    const uncovered = await rivalAreasUncovered(sandboxRoot, answer, review.reproduced_at.map((l) => l.ref), entries, disputes);
+    if (uncovered.length) caps.push({ code: "rival_area_uncovered", why: `a locator is not coverage: ${uncovered.map((u) => `the value was read from ${u.source}, and ${u.why}`).join("; ")}` });
+  }
   // Neither given: warned, never capped. One given and failing is capped by its own code above.
   const unlocated: ReviewEvidenceWarning | null = !review.reproduced_at?.length && !review.derivation ? { code: "no_locator_or_derivation", why: UNLOCATED_WHY } : null;
   return { caps, unlocated, locators, derivation };
+}
+
+/**
+ * The inputs located values were read from that no coverage record for the
+ * answer's question covers where a rival value could live (docs/adr/0013,
+ * "A locator is not coverage"): for each input the refs reach, a standing
+ * coverage record whose results still stand, recorded for the question,
+ * that names the input (or a directory holding it), says every area
+ * searched or not_applicable, and cites among its result_refs a job whose
+ * declared inputs reach it. Each uncovered input with what is missing.
+ */
+export async function rivalAreasUncovered(sandboxRoot: string, answer: LedgerEntry, refs: readonly string[], entries: LedgerEntry[], disputes: LedgerDispute[] = []): Promise<Array<{ source: string; why: string }>> {
+  if (!answer.section?.startsWith("question:")) return [];
+  const qid = sectionKey(sectionAnswersId(answer.section));
+  const replaced = supersededBy(entries);
+  const covs = entries.filter((e) => e.kind === "coverage" && !replaced.has(e.seq) && (e.answers ?? []).some((x) => sectionKey(x) === qid) && !coverageProblems(e, entries, disputes).length);
+  const { reach, names } = await PR.inputReach(sandboxRoot, [refs, ...covs.map((c) => c.refs ?? []), ...covs.map((c) => c.result_refs ?? [])]);
+  const located = [...new Set(reach[0].map((r) => r.sha256))];
+  const out: Array<{ source: string; why: string }> = [];
+  for (const sha of located) {
+    const name = names.get(sha) ?? `sha256:${sha}`;
+    const naming = covs.filter((_, i) => reach[1 + i].some((r) => r.sha256 === sha && (r.how === "named" || r.how === "member")));
+    if (!naming.length) {
+      out.push({ source: name, why: `no standing coverage record for ${answer.section} names it` });
+      continue;
+    }
+    const withAreas = naming.filter((c) => c.areas && NB.COVERAGE_AREAS.every((a) => c.areas?.[a] === "searched" || c.areas?.[a] === "not_applicable"));
+    if (!withAreas.length) {
+      out.push({ source: name, why: `its coverage record${naming.length === 1 ? "" : "s"} ${naming.map((c) => `E-${c.seq}`).join(", ")} ${naming.length === 1 ? "does" : "do"} not say every area {${NB.COVERAGE_AREAS.join(", ")}} searched or not applicable (${naming.map((c) => (c.areas ? NB.COVERAGE_AREAS.filter((a) => c.areas?.[a] !== "searched" && c.areas?.[a] !== "not_applicable").map((a) => `${a} ${c.areas?.[a] ?? "not said"}`).join(", ") : "no areas")).join("; ")})` });
+      continue;
+    }
+    const byJob = withAreas.filter((c) => reach[1 + covs.length + covs.indexOf(c)].some((r) => r.sha256 === sha && r.how === "derived"));
+    if (!byJob.length) out.push({ source: name, why: `its coverage record${withAreas.length === 1 ? "" : "s"} ${withAreas.map((c) => `E-${c.seq}`).join(", ")} ${withAreas.length === 1 ? "cites" : "cite"} no job over it among ${withAreas.length === 1 ? "its" : "their"} result_refs` });
+  }
+  return out;
 }
 
 /**

@@ -1,0 +1,43 @@
+{
+  "case": "Two established answers each hold \"which account\" at the limit of the evidence, shown by a limitation that says the directory's log was not retained. Question 1's bound no other seat has reviewed: its review agrees the part is at the limit and is recorded best_candidate. Question 2's bound a seat that wrote neither it nor the answer reviewed as a negative is reviewed, before the answer's review: it stands established.",
+  "design": [
+    "docs/adr/0013 'A part at the limit of the evidence': a limited part does not make an answer partial; claiming it costs what a negative costs: a seat that recorded neither the bound nor the answer reviews the bound with a negative's review, and until then an established attest of the answer is recorded best_candidate (limit_unreviewed), and the answers check warns.",
+    "docs/adr/0013 'The end of a run, under every stop policy': a best candidate is no disposition (B2); done finishes a run only when every question has one.",
+    "docs/adr/0015 'After the run s9722fa': an answer that claims established, every review of which holds it a best candidate, is held so, by readiness as by the done."
+  ],
+  "policies": [
+    "as run"
+  ],
+  "expect": {
+    "questions": {
+      "question:1": {
+        "disposition": null,
+        "best_candidate": true,
+        "readiness_holds": true,
+        "readiness_includes": [
+          "best_candidate"
+        ],
+        "defects_include": [],
+        "warnings": [
+          "limit_unreviewed"
+        ],
+        "report_best_candidate": true
+      },
+      "question:2": {
+        "disposition": "established",
+        "best_candidate": false,
+        "readiness_holds": false,
+        "defects": [],
+        "warnings": []
+      }
+    },
+    "ready": false,
+    "verdict": {
+      "proceed": false,
+      "failing": "question:1"
+    },
+    "done": "held",
+    "agreement": [],
+    "review_caps": { "established": 1, "capped": [] }
+  }
+}

@@ -537,7 +537,14 @@ Ledger (only when `record` is in your tool list)
 - Review source-first: before you read an answer's conclusion, read the question as asked, its
   scope and the original sources it rests on (a review offer leads with them and links the answer
   by its seq), and ask what the strongest rival reading of those sources is: another time, entity,
-  mechanism or activity, or the premise not holding.
+  mechanism or activity, or the premise not holding. Ask of any value you locate: could these exact
+  bytes be there if the claim were wrong (an earlier version, a draft, another record of the same
+  kind), which observation would tell them apart, and where would a rival value live (deleted
+  entries, unallocated space, slack, another copy or source)? A locator proves the value is there,
+  not that it is the answer: an established attest that locates a value is recorded best_candidate
+  (`rival_area_uncovered`) until a coverage record for the question names the input it was read
+  from, says every area {allocated, deleted, unallocated, slack, secondary} searched or
+  not_applicable, and cites the job that searched it among its result_refs.
 - `attest(seq, how, refs)` says you re-derived somebody else's entry: what you re-derived from which
   sealed object, and what you only read. An answer to a question is attested with `strength` and
   `answer_review`: established, or best_candidate (what the evidence best supports, not shown to be

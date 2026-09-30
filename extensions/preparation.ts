@@ -361,6 +361,28 @@ async function reachOf(ctx: ReachContext, refs: readonly string[]): Promise<Sour
   return [...best.values()].sort((a, b) => rank[a.how] - rank[b.how] || a.sha256.localeCompare(b.sha256));
 }
 
+/**
+ * Where objects lead among the run's input files (docs/adr/0013, "A locator
+ * is not coverage"): each input inputs.json lists with its digest is a
+ * source, whether or not a pack prepares it. For each list of refs, the
+ * sources it reaches: named (it is one, or a directory holding one), a
+ * member of one's catalogue, or derived from one through the declared
+ * inputs of the jobs that made it. One context serves every list, so each
+ * object and job is read once. `names` gives each source's input ref.
+ */
+export async function inputReach(sandboxRoot: string, lists: ReadonlyArray<readonly string[]>): Promise<{ reach: SourceReach[][]; names: Map<string, string> }> {
+  const sources = new Map<string, SourcePreparation>();
+  for (const f of await NB.inputFiles(sandboxRoot)) {
+    if (!f.sha256 || sources.has(f.sha256)) continue;
+    const rel = f.path.replace(/^inputs\//, "");
+    sources.set(f.sha256, { source: { sha256: f.sha256, ref: `input:${rel}`, name: rel }, capabilities: [], pending: false, produced: false });
+  }
+  const ctx = await reachContext(sandboxRoot, sources);
+  const reach: SourceReach[][] = [];
+  for (const refs of lists) reach.push(await reachOf(ctx, refs));
+  return { reach, names: new Map([...sources].map(([sha, s]) => [sha, s.source.ref])) };
+}
+
 // --- the gate's reading ---------------------------------------------------------------------------
 
 /** A source a negative is held on: the pending preparation, and the coverage records whose claim makes it hold (absence, or complete coverage over the source). */
