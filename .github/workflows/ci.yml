@@ -151,7 +151,9 @@ jobs:
     # check and says so.
     name: macOS · typecheck · node tests · shell suites
     runs-on: macos-latest
-    timeout-minutes: 40
+    # 28 to 31 minutes over the last pushes, against 40: headroom, as the
+    # Linux job was given, so a grown suite is not cut off mid-run.
+    timeout-minutes: 55
     steps:
       - run: git config --global init.defaultBranch main
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
