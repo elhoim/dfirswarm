@@ -18,7 +18,8 @@ import { dirname, join } from "node:path";
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 test("the extension imports every protocol function it calls", async () => {
-  const protocol = await readFile(join(root, "extensions/protocol.ts"), "utf8");
+  // protocol.ts is the index of four modules (export * from each); their functions are its exports.
+  const protocol = (await Promise.all(["protocol-core", "ledger-rules", "sensitive", "finish-line"].map((m) => readFile(join(root, `extensions/${m}.ts`), "utf8")))).join("\n");
   const extension = await readFile(join(root, "extensions/agent-swarm.ts"), "utf8");
 
   const exported = new Set<string>();
