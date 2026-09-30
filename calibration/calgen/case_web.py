@@ -33,7 +33,7 @@ from typing import Dict, List, Tuple
 
 from .common import (
     CaseOutput, Probe, at, fact, goal_document, human_date, ip_pattern, iso_z, minute_pattern, nginx_time, person,
-    question, rfc3339_us, rx, word_pattern,
+    part, question, rfc3339_us, rx, word_pattern,
 )
 from .deflate import gzip_bytes
 from .rng import Rng
@@ -403,6 +403,7 @@ the same commands again.""",
     gz_day = f"access.log.{(collect_day - exploit_day).days}.gz"
     questions = [
         question("1", "Which address first exploited the portal, when, through which request.", kind="present",
+                 parts=[part("a", "the address", ["F1.1"]), part("b", "when", ["F1.2"]), part("c", "through which request", ["P1.1"])],
                  expected={"result": "established", "accept_results": ["established", "partial"],
                            "summary": f"{attacker} at {iso_z(upload_at)}: POST /account/avatar uploading avatar.php, stored as files/{shell}.php (upload.log), after registering an account; in {gz_day}."},
                  facts=[
@@ -410,8 +411,10 @@ the same commands again.""",
                      fact("F1.2", "hard_present", "The upload's time.", [minute_pattern(upload_at)], subkind="correlation", where=f"{gz_day}, upload.log"),
                      fact("F1.3", "decoy", "The scanner: loud, in the plain logs and the auth log, never successful.", [ip_pattern(scanner)]),
                      fact("F1.4", "decoy", "The attacker's later address, the only shell use in the uncompressed logs.", [ip_pattern(attacker2)]),
+                     fact("P1.1", "part", "The request: the avatar upload.", [word_pattern("avatar")]),
                  ]),
         question("2", "The web shell and the commands run through it.", kind="present",
+                 parts=[part("a", "the web shell", ["F2.1"]), part("b", "the commands run through it", ["F2.2", "F2.3"])],
                  expected={"result": "established", "accept_results": ["established", "partial"],
                            "summary": f"files/{shell}.php, uploaded as avatar.php through the avatar form; commands: {'; '.join(commands[:6])}; the base64 write of update.sh; chmod; the crontab install; crontab -l."},
                  facts=[
@@ -420,6 +423,7 @@ the same commands again.""",
                      fact("F2.3", "present", "The script written through the shell from base64.", [rx("base64")]),
                  ]),
         question("3", "Persistence: mechanism, what it runs, where it connects.", kind="present",
+                 parts=[part("a", "the mechanism and what it runs", ["F3.1"]), part("b", "where it connects", ["F3.2"])],
                  expected={"result": "established", "accept_results": ["established", "partial"],
                            "summary": f"www-data crontab every 5 minutes running /var/tmp/.cache/update.sh, installed {iso_z(cron_installed)}; the script (base64 in the shell command) fetches https://{beacon}/v1/check and runs what it gets."},
                  facts=[
@@ -427,6 +431,7 @@ the same commands again.""",
                      fact("F3.2", "hard_present", "The callback host, only inside the base64 of a URL-encoded shell command in a compressed log; the script was not collected.", [word_pattern(beacon)], subkind="encoded", where=gz_day),
                  ]),
         question("4", "Which database tables the attacker read.", kind="missing",
+                 parts=[part("a", "the tables read", [], after_late=["F4.3", "F4.4"])],
                  expected={"result": "not_determinable", "accept_results": ["not_determinable", "partial"],
                            "summary": f"Not determinable from web01's logs: the attacker read the application's database credentials and sent three POSTs to the shell with large responses ({iso_z(dumps[0])} onward), but nginx logs no request bodies. db01's query log is needed."},
                  facts=[
@@ -440,6 +445,7 @@ the same commands again.""",
                        "facts": [fact("F4.3", "late", "The first table read.", [word_pattern(t_true)]),
                                  fact("F4.4", "late", "The second table read.", [word_pattern(t_true2)])]}),
         question("5", "Whether the attacker logged in over SSH.", kind="absent",
+                 parts=[part("a", "an SSH login by the attacker", [])],
                  expected={"result": "bounded_negative", "accept_results": ["bounded_negative"],
                            "summary": f"No: auth.log, auth.log.1 and auth.log.2.gz cover {iso_z(start)} to {iso_z(collect_at)} without a gap; the only accepted logins are deploy from {jump_ip}; the scanner's brute force failed; neither attacker address appears."},
                  facts=[
@@ -448,6 +454,7 @@ the same commands again.""",
                      fact("F5.3", "decoy", "The scanner's failed brute force.", [ip_pattern(scanner)]),
                  ]),
         question("6", "Which CVE was exploited.", kind="absent",
+                 parts=[part("a", "the CVE", [])],
                  expected={"result": "premise_not_supported", "accept_results": ["premise_not_supported", "not_determinable", "bounded_negative"],
                            "summary": "No CVE: the portal's own avatar upload stored a .php file under the web root and served it; nothing in the evidence names a CVE or a vulnerable version."},
                  facts=[

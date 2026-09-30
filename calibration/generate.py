@@ -157,6 +157,14 @@ def _check_truth(c: CaseOutput) -> List[str]:
                 hits = [p for p in f.get("accept", []) if pattern_matches(p, blob)]
                 if hits:
                     problems.append(f"{c.case_id} {f['id']}: the late fact already matches the inputs ({hits})")
+        # Each part is settled by facts of its own question that a scorer can find.
+        findable = {f["id"] for f in facts if f.get("accept")}
+        for p in q.get("parts", []) or []:
+            for fid in list(p.get("settled_by", [])) + list(p.get("after_late", []) or []):
+                if fid not in findable:
+                    problems.append(f"{c.case_id} Q{q['id']} part {p['id']}: {fid} is not a fact of the question with patterns")
+        if q.get("scored") and q.get("kind") == "present" and not q.get("parts"):
+            problems.append(f"{c.case_id} Q{q['id']}: a scored present question names its parts")
     return problems
 
 

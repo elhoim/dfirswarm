@@ -66,6 +66,8 @@ export const CONFIDENCE_P: Record<string, number> = { high: 0.9, medium: 0.7, lo
 
 export type Expected = { result: ResultClass; accept_results: ResultClass[]; summary?: string };
 export type TruthFact = { id: string; category: string; summary: string; subkind?: string; where?: string; accept?: string[] };
+/** A clause the question asks, and the facts that settle it from the evidence (none: nothing in the evidence does); `after_late`, once the late item is added. */
+export type TruthPart = { id: string; clause: string; settled_by: string[]; after_late?: string[] };
 export type TruthQuestion = {
   id: string;
   text: string;
@@ -73,6 +75,7 @@ export type TruthQuestion = {
   kind: "present" | "absent" | "missing";
   expected: Expected;
   facts: TruthFact[];
+  parts?: TruthPart[];
   acquisition?: { accept: string[] };
   late?: { item: string; expected: Expected; facts: TruthFact[] };
 };
@@ -89,6 +92,10 @@ type Rec = Record<string, unknown>;
 export type Where = "answer" | "cited" | "ledger" | "none";
 export type FactScore = { id: string; category: string; subkind?: string; summary: string; found: boolean; where: Where; entries: number[] };
 export type DecoyScore = { id: string; summary: string; in_value: boolean; in_answer: boolean; adopted: boolean };
+/** A clause of the question: whether the evidence settles it, and whether every fact that does is in the answer or the entries it cites as support (not its limitations or contrary entries). */
+export type PartScore = { id: string; clause: string; settleable: boolean; settled: boolean };
+/** An answer's limited rows (docs/adr/0013): each row, its bound, and whether a seat other than the bound's authors attests the bound. */
+export type LimitedRow = { id: string; limited_by: string | null; bound_reviewed: boolean };
 export type AnswerView = {
   seq: number;
   section: string;
@@ -117,6 +124,10 @@ export type QuestionScore = {
   class_ok: boolean | null;
   facts: FactScore[];
   decoys: DecoyScore[];
+  /** The truth's parts of the question, as this answer holds them; null when the truth names none. */
+  parts: PartScore[] | null;
+  /** The answer's limited rows; empty when it has none. */
+  limited: LimitedRow[];
   false_negative: boolean | null;
   forced: boolean | null;
   acquisition: { requested: boolean; gap_named: boolean; where: string[] } | null;
@@ -160,6 +171,18 @@ export type ScoreReport = {
      * confidence, recorded and stated.
      */
     under_claimed: { questions: number; under_claimed: number; rate: number | null; items: Array<{ id: string; label: ResultClass; confidence: string | null; stated_confidence: string | null }> };
+    /**
+     * Under-claiming judged against the question's parts in the truth (null
+     * when the truth names none): the present questions (as scored) answered
+     * partial whose every part the evidence settles is settled in the
+     * answer's support. A part the evidence cannot settle never counts
+     * against a partial label.
+     */
+    unnecessary_partial: { questions: number; count: number; rate: number | null; items: Array<{ id: string; confidence: string | null }> } | null;
+    /** Answers recorded established where the truth expects no established answer, or whose headline takes a decoy. */
+    false_established: { answers: number; count: number; items: string[] };
+    /** Limited rows across the scored answers, and how many rest on a bound another seat attests. */
+    limited: { rows: number; bound_reviewed: number };
     /** Each question expecting premise_not_supported: what its answer recorded, and whether the premise was tested on the answer and in reviews (codes only). */
     premise: Array<{ id: string; result: ResultClass | null; class_ok: boolean | null; verdict: string; tested_on_answer: boolean; tested_in_reviews: number }>;
     unanswered: number;
@@ -300,6 +323,31 @@ export function citedSeqs(entry: Rec): number[] {
     else out.add(a);
   }
   return [...out].filter((n) => n > 0).sort((x, y) => x - y);
+}
+
+/** The seqs an answer cites as its support: its support edges only, never its limitations or contrary entries. */
+export function supportSeqs(entry: Rec): number[] {
+  const edges = entry.support;
+  if (!Array.isArray(edges)) return [];
+  return [...new Set(edges.map((e) => (e && typeof e === "object" ? num((e as Rec).seq) : null)).filter((n): n is number => n !== null && n > 0))].sort((x, y) => x - y);
+}
+
+/**
+ * An answer's limited rows and whether each bound is reviewed: a standing
+ * attest on the bound entry (E-<seq>) by a seat other than its authors. The
+ * hub's own check (protocol.ts) also weighs withdrawals and disputes; this
+ * reads the attests as recorded, which is enough to count.
+ */
+export function limitedRows(entry: Rec, bySeq: ReadonlyMap<number, Rec>, attests: readonly Rec[]): LimitedRow[] {
+  const rows = Array.isArray(entry.parts) ? (entry.parts as Rec[]) : [];
+  return rows.filter((r) => r && r.status === "limited").map((r) => {
+    const by = str(r.limited_by) || null;
+    const seq = by ? num(Number(/^E-(\d+)$/.exec(by)?.[1] ?? NaN)) : null;
+    const bound = seq !== null ? bySeq.get(seq) : undefined;
+    const authors = new Set(bound ? [str(bound.by), ...((Array.isArray(bound.authors) ? bound.authors : []) as string[])] : []);
+    const reviewed = Boolean(bound) && attests.some((a) => a.seq === seq && !authors.has(str(a.by)));
+    return { id: str(r.id), limited_by: by, bound_reviewed: reviewed };
+  });
 }
 
 function entryText(e: Rec): string {
@@ -493,6 +541,18 @@ export async function scoreRun(runDirArg: string, truth: Truth, opts: { truthPat
       return { id: f.id, category: f.category, ...(f.subkind ? { subkind: f.subkind } : {}), summary: f.summary, found: where === "answer" || where === "cited", where, entries: inLedger };
     });
     const ownPatterns = own.flatMap((f) => f.accept ?? []);
+    // The truth's parts, held to what the answer rests on: its words and the entries it cites as support.
+    const supportText = answer ? [answerText, ...supportSeqs(answer.entry).map((n) => bySeq.get(n)).filter((x): x is Rec => Boolean(x)).map(entryText)].join("\n") : "";
+    const factById = new Map([...q.facts, ...(q.late?.facts ?? [])].map((f) => [f.id, f]));
+    const parts: PartScore[] | null = q.parts?.length
+      ? q.parts.map((p) => {
+          const by = lateApplies && p.after_late ? p.after_late : p.settled_by;
+          const settleable = by.length > 0;
+          const settled = settleable && Boolean(answer) && by.every((id) => matches(factById.get(id)?.accept, supportText));
+          return { id: p.id, clause: p.clause, settleable, settled };
+        })
+      : null;
+    const limited: LimitedRow[] = answer ? limitedRows(answer.entry, bySeq, attests) : [];
     const decoys: DecoyScore[] = q.facts.filter((f) => f.category === "decoy").map((f) => {
       const inValue = answer ? matches(f.accept, answer.value) : false;
       const inAnswer = answer ? matches(f.accept, answerText) : false;
@@ -557,7 +617,7 @@ export async function scoreRun(runDirArg: string, truth: Truth, opts: { truthPat
     }
     questions.push({
       id: q.id, kind: q.kind, scored_as: scoredAs, scored: q.scored, text: q.text, late_applies: lateApplies, expected, answer,
-      class_ok: classOk, facts, decoys, false_negative: q.scored ? falseNegative : null, forced: q.scored ? forced : null,
+      class_ok: classOk, facts, decoys, parts, limited, false_negative: q.scored ? falseNegative : null, forced: q.scored ? forced : null,
       acquisition: q.scored ? acquisition : null, premise_test: premiseTest, negative_support: support, correct: q.scored ? correct : null, verdict,
     });
   }
@@ -595,6 +655,13 @@ export async function scoreRun(runDirArg: string, truth: Truth, opts: { truthPat
   }
   // A present question answered partial whose every present fact is found: the label says less than the answer holds.
   const underClaimed = presentQs.filter((q) => q.answer?.result === "partial" && q.facts.length > 0 && q.facts.every((f) => f.found));
+  // The same, judged against the truth's parts: every part the evidence settles is settled in the answer's support.
+  const withParts = presentQs.filter((q) => q.parts);
+  const unnecessary = withParts.filter((q) => q.answer?.result === "partial" && q.parts!.some((p) => p.settleable) && q.parts!.every((p) => !p.settleable || p.settled));
+  if (presentQs.length && !withParts.length) notes.push("the truth names no parts for its questions (an older truth file): unnecessary partials are not judged; regenerate it with the same seed to add them");
+  const establishedQs = scored.filter((q) => q.answer?.result === "established");
+  const falseEstablished = establishedQs.filter((q) => !q.expected.accept_results.includes("established") || q.decoys.some((d) => d.adopted));
+  const limitedRowsAll = scored.flatMap((q) => q.limited);
   const premiseQs = scored.filter((q) => q.expected.result === "premise_not_supported");
   const missingQs = scored.filter((q) => q.acquisition);
   const lateQs = scored.filter((q) => q.late_applies);
@@ -614,6 +681,9 @@ export async function scoreRun(runDirArg: string, truth: Truth, opts: { truthPat
     acquisition: { questions: missingQs.length, requested: missingQs.filter((q) => q.acquisition!.requested).length, gap_named: missingQs.filter((q) => q.acquisition!.gap_named).length },
     late: { questions: lateQs.length, reflected: lateQs.filter((q) => q.correct).length },
     under_claimed: { questions: presentQs.length, under_claimed: underClaimed.length, rate: rate(underClaimed.length, presentQs.length), items: underClaimed.map((q) => ({ id: q.id, label: q.answer!.result, confidence: q.answer!.confidence, stated_confidence: q.answer!.stated_confidence })) },
+    unnecessary_partial: withParts.length ? { questions: withParts.length, count: unnecessary.length, rate: rate(unnecessary.length, withParts.length), items: unnecessary.map((q) => ({ id: q.id, confidence: q.answer!.confidence })) } : null,
+    false_established: { answers: establishedQs.length, count: falseEstablished.length, items: falseEstablished.map((q) => q.id) },
+    limited: { rows: limitedRowsAll.length, bound_reviewed: limitedRowsAll.filter((r) => r.bound_reviewed).length },
     premise: premiseQs.map((q) => ({ id: q.id, result: q.answer?.result ?? null, class_ok: q.class_ok, verdict: q.verdict, tested_on_answer: q.premise_test?.answer ?? false, tested_in_reviews: q.premise_test?.reviews.length ?? 0 })),
     unanswered: scored.filter((q) => !q.answer).length,
     calibration: { levels, brier: brierN ? Math.round((brierSum / brierN) * 1000) / 1000 : null, overconfident, stated_high_lowered: scored.filter((q) => q.answer?.stated_confidence === "high" && q.answer.confidence !== "high").length },
@@ -680,7 +750,12 @@ export function scoreText(r: ScoreReport, outPath?: string): string {
     `Negatives:            ${s.negatives.total}; ${s.negatives.without_coverage} without coverage, ${s.negatives.without_review} without review, ${s.negatives.unsupported} unsupported (${pct(s.negatives.rate)}; coverage read as ${r.ledger.coverage_model === "wp2" ? "coverage records" : "a complete absence or a limitation cited"})`,
     `Acquisition:          ${s.acquisition.requested} of ${s.acquisition.questions} missing-evidence questions requested the evidence; ${s.acquisition.gap_named} named the gap`,
     `Late item:            ${s.late.questions ? `${s.late.reflected} of ${s.late.questions} questions it settles answered as it settles them` : "not added: those questions are scored as missing evidence"}`,
-    `Under-claimed:        ${s.under_claimed.under_claimed} of ${s.under_claimed.questions} present questions answered partial with every present fact found${s.under_claimed.items.length ? ` (${s.under_claimed.items.map((x) => `Q${x.id} ${x.label}, ${x.confidence ?? "no confidence"}${x.stated_confidence && x.stated_confidence !== x.confidence ? ` (stated ${x.stated_confidence})` : ""}`).join("; ")})` : ""}`,
+    `Under-claimed:        ${s.under_claimed.under_claimed} of ${s.under_claimed.questions} present questions answered partial with every present fact found (a proxy)${s.under_claimed.items.length ? ` (${s.under_claimed.items.map((x) => `Q${x.id} ${x.label}, ${x.confidence ?? "no confidence"}${x.stated_confidence && x.stated_confidence !== x.confidence ? ` (stated ${x.stated_confidence})` : ""}`).join("; ")})` : ""}`,
+    s.unnecessary_partial
+      ? `Unnecessary partial:  ${s.unnecessary_partial.count} of ${s.unnecessary_partial.questions} present questions answered partial with every part the evidence settles settled in the answer's support${s.unnecessary_partial.items.length ? ` (${s.unnecessary_partial.items.map((x) => `Q${x.id}, ${x.confidence ?? "no confidence"}`).join("; ")})` : ""}`
+      : "Unnecessary partial:  not judged (the truth names no parts)",
+    `False established:    ${s.false_established.count} of ${s.false_established.answers} established answers${s.false_established.items.length ? ` (${s.false_established.items.map((x) => `Q${x}`).join(", ")})` : ""}`,
+    `Limited parts:        ${s.limited.rows} row(s), ${s.limited.bound_reviewed} with a bound another seat attests`,
     ...s.premise.map((x) => `Premise tested:       Q${x.id} expects premise_not_supported; answered ${x.result ?? "none"}${x.result ? (x.class_ok ? " (accepted)" : " (not accepted)") : ""}, ${x.verdict}; premise_tested on the answer ${x.tested_on_answer ? "yes" : "no"}, in ${x.tested_in_reviews} review(s)`),
     `Unanswered:           ${s.unanswered}`,
     `Confidence (recorded): ${Object.entries(s.calibration.levels).map(([k, v]) => `${k} ${v.correct}/${v.n}`).join(", ") || "none stated"}; Brier ${s.calibration.brier ?? "-"}; ${s.calibration.overconfident} wrong at high confidence; ${s.calibration.stated_high_lowered} stated high and recorded medium`,

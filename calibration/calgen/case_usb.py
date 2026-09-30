@@ -36,7 +36,7 @@ from typing import Dict, List, Tuple
 
 from .common import (
     CaseOutput, Probe, at, fact, goal_document, human_date, iso_z, minute_pattern, naive_utc, person,
-    question, rfc3339_us, rx, word_pattern,
+    part, question, rfc3339_us, rx, word_pattern,
 )
 from .deflate import gzip_bytes
 from .fat import Fat16, fat_date, fat_time, lfn_slots, read_volume
@@ -487,6 +487,8 @@ hash. If `SWARM.md` has an "Evidence catalog" section, the kickoff already ran t
     questions = [
         question("1", "The drive: partitioning, file system, volume serial number, every connection to the workstation, and the mounting account.",
                  kind="present",
+                 parts=[part("a", "partitioning and file system", ["P1.1"]), part("b", "volume serial number", ["F1.1"]),
+                        part("c", "every connection to the workstation", ["F1.2", "F1.3"]), part("d", "the mounting account", ["P1.2"])],
                  expected={"result": "established", "accept_results": ["established", "partial"],
                            "summary": f"MBR, one FAT16 partition at sector 2048, volume serial {vs}; connected {iso_z(mount1)} and {iso_z(mount2)}, both mounted on behalf of uid {uid[colleague['user']]} ({colleague['user']})."},
                  facts=[
@@ -494,8 +496,11 @@ hash. If `SWARM.md` has an "Evidence catalog" section, the kickoff already ran t
                      fact("F1.2", "hard_present", "The first connection, on the evening of the copy, recorded only in the rotated, compressed syslog.", [minute_pattern(mount1)], subkind="secondary", where="syslog.2.gz"),
                      fact("F1.3", "present", "The later connection, matched by the volume serial in the mount path.", [minute_pattern(mount2)], subkind="correlation", where="syslog"),
                      fact("F1.4", "decoy", "The suspect's own drive of the same model and vendor, with another volume serial and USB serial, connected on other days.", [rx(f"{vs_other[:4]}-?{vs_other[5:]}")] + [minute_pattern(t) for t in other_mounts]),
+                     fact("P1.1", "part", "The file system.", [rx("FAT ?16")]),
+                     fact("P1.2", "part", "The account the drive was mounted for.", [word_pattern(colleague["user"])]),
                  ]),
         question("2", "The company files the drive holds or held, including deleted ones.", kind="present",
+                 parts=[part("a", "every company file it holds or held, deleted ones included", ["F2.1", "F2.2", "F2.3"])],
                  expected={"result": "established", "accept_results": ["established", "partial"],
                            "summary": f"{csv_name} (deleted, {len(csv_bytes)} bytes, {n_rows} records, recoverable), {gz_name} (deleted, its directory slots reused; only its clusters remain, gzip with the name {pl_inner} inside), notes.txt, {zip_name}."},
                  facts=[
@@ -504,6 +509,7 @@ hash. If `SWARM.md` has an "Evidence catalog" section, the kickoff already ran t
                      fact("F2.3", "present", "notes.txt, allocated.", [word_pattern("notes.txt")]),
                  ]),
         question("3", "The account that copied the files, and its session.", kind="present",
+                 parts=[part("a", "the account", ["F3.1"]), part("b", "its session", ["F3.2"])],
                  expected={"result": "established", "accept_results": ["established", "partial"],
                            "summary": f"{colleague['user']} (uid {uid[colleague['user']]}), gdm session {iso_z(b_login)} to {iso_z(b_logout)}: the FAT creation times fall in it, the mount was on behalf of uid {uid[colleague['user']]}, and {suspect['user']} had logged out."},
                  facts=[
@@ -512,6 +518,7 @@ hash. If `SWARM.md` has an "Evidence catalog" section, the kickoff already ran t
                      fact("F3.3", "decoy", "The suspect named in the brief, whose sessions end before the copy.", [word_pattern(suspect["user"]), word_pattern(suspect["last"])]),
                  ]),
         question("4", "Whether and where the data was sent outside the company.", kind="missing",
+                 parts=[part("a", "whether the data was sent outside", [], after_late=["F4.3"]), part("b", "where and when", [], after_late=["F4.3", "F4.4"])],
                  expected={"result": "not_determinable", "accept_results": ["not_determinable"],
                            "summary": "Not determinable from the drive and the workstation's auth and syslog: an upload leaves no trace there. The web gateway's (or mail gateway's) records for the workstation are needed."},
                  facts=[
@@ -527,6 +534,7 @@ hash. If `SWARM.md` has an "Evidence catalog" section, the kickoff already ran t
                            fact("F4.4", "late", "The first upload's time.", [minute_pattern(upload1)], subkind="time"),
                        ]}),
         question("5", "Whom the data was intended for.", kind="present",
+                 parts=[part("a", "the intended recipient", ["F5.1"])],
                  expected={"result": "established", "accept_results": ["established", "partial"],
                            "summary": f"{recipient['full']} ({recipient_org}): in the slack of notes.txt, the tail of the version written at {iso_z(t_notes)}."},
                  facts=[
@@ -534,6 +542,7 @@ hash. If `SWARM.md` has an "Evidence catalog" section, the kickoff already ran t
                      fact("F5.2", "decoy", "A colleague named in the live notes.txt.", [word_pattern(named["last"])]),
                  ]),
         question("6", "When the customer list was first created on the source system.", kind="absent",
+                 parts=[part("a", "the creation time on the source system", [])],
                  expected={"result": "not_determinable", "accept_results": ["not_determinable", "partial"],
                            "summary": f"Not in the evidence. The copy's creation time ({iso_z(t_csv)}) records the copy; its modification time ({iso_z(csv_src_mtime)}), carried over, bounds the source file's last change at most. The CRM was not collected."},
                  facts=[
@@ -541,6 +550,7 @@ hash. If `SWARM.md` has an "Evidence catalog" section, the kickoff already ran t
                      fact("F6.2", "decoy", "The copy's FAT creation time.", [minute_pattern(t_csv)]),
                  ]),
         question("7", "Which wiping tool was used.", kind="absent",
+                 parts=[part("a", "the wiping tool", [])],
                  expected={"result": "premise_not_supported", "accept_results": ["premise_not_supported", "bounded_negative"],
                            "summary": f"No wiping: the deleted files' clusters are intact and recoverable, and the shredder's archive ({zip_name}) holds no program and shows no sign of having been run."},
                  facts=[
