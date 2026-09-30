@@ -29,6 +29,17 @@
  * record that names either names both (the run sd0e59d held three
  * negatives on kept outputs whose sealed imports their records named).
  *
+ * The rules change, and a recorded line keeps what it was written under
+ * (docs/adr/0013, "Re-reading after a rules change"): each line names the
+ * version of the sweep's rules it was written by (`rules`; a line with none
+ * is older than any versioned one). When the hub starts, and at the answers
+ * check and the finish gate, a record whose latest line is older than this
+ * harness's rules is read again under them (rereadSweeps): its hits sorted
+ * anew from what the line recorded, nothing searched, or, where a change
+ * needs bytes the line did not record, its record searched again within
+ * the sweep's budget. The result is a line of its own on the chain
+ * (`reread`), the trace gets a line and the board one post.
+ *
  * Echoes (docs/adr/0013, "Echoes: authored, not derived"): a hit in an
  * object whose every name was made by a command or a job that read nothing
  * of the run but its own registers (the ledger, the board, SWARM.md, the
@@ -139,11 +150,57 @@ export type SweepHit = {
  */
 export type HitOrigin = { name: string; by: string; why: "searched" | "registers" | "harness" | "named_sources"; reads?: string[] };
 export type SweepState = "clean" | "hits" | "partial";
+
+/**
+ * A change of the sweep's rules (docs/adr/0013, "Re-reading after a rules
+ * change"): its version, since when, what changed, and whether a line
+ * written before it can be read again from what it recorded (`bytes`
+ * false: its hits sorted anew, nothing searched) or needs bytes it did not
+ * record (`bytes` true: its record is searched again, within the sweep's
+ * budget).
+ */
+export type SweepRuleChange = { version: number; since: string; what: string; bytes: boolean };
+/**
+ * The sweep's rules, by version, oldest first. A line with no version was
+ * written before versions were recorded and is older than any versioned
+ * one. A change of what a hit is, or where it goes, adds a version here;
+ * a hub that starts, and the answers check, read every record's latest
+ * line from before it again (rereadSweeps).
+ */
+export const SWEEP_RULE_CHANGES: readonly SweepRuleChange[] = [
+  {
+    version: 1,
+    since: "2026-09-30",
+    what: "the same bytes under several names are one object (a kept output and the import it was sealed as), and a hit in an object made from the run's own words is an echo, holding nothing",
+    bytes: false,
+  },
+];
+/** This harness's version of the sweep's rules: written on every coverage record's sweep line. */
+export const SWEEP_RULES: number = SWEEP_RULE_CHANGES.at(-1)!.version;
+/** The version of the sweep's rules a line was written under: 0 when it records none (older than any versioned one). */
+export function sweepRulesOf(s: { rules?: unknown }): number {
+  return typeof s.rules === "number" && Number.isFinite(s.rules) ? s.rules : 0;
+}
+/**
+ * What a line that read an earlier one again says of it: the version that
+ * line was written under (null: it recorded none), why (the rules
+ * changed), the hash of the line read again (`of`), when it was read
+ * again, and how: `read` (its hits sorted anew from what it recorded,
+ * nothing searched; the line's `started_at` and `at` stay the search's),
+ * or `searched` (a change needed bytes it did not record: the record was
+ * searched again, and the times are that search's).
+ */
+export type SweepReread = { from_version: number | null; reason: "rules changed"; of: string; at: string; how: "read" | "searched" };
+
 export type SweepRecord = {
   v: 1;
   /** The coverage record's seq and hash. */
   seq: number;
   target: string;
+  /** The version of the sweep's rules it was written, or read again, under (SWEEP_RULES). Absent on a line from before 2026-09-30, which is older than any versioned one. */
+  rules?: number;
+  /** On a line that read the record's earlier one again after the rules changed (rereadSweeps). */
+  reread?: SweepReread;
   state: SweepState;
   terms: string[];
   searched: { objects: number; bytes: number };
@@ -723,7 +780,7 @@ export async function computeSweep(sandboxRoot: string, cov: Pick<LedgerEntry, "
     else (isEcho(made) ? echoes : namedHits).push({ ...hit, origins: made });
   }
   const state: SweepState = hits.length ? "hits" : unsearched.length ? "partial" : "clean";
-  return { v: 1, seq: cov.seq, target: cov.hash ?? "", state, terms, searched: { objects: searchedObjects, bytes: searchedBytes }, hits, named_hits: namedHits, echoes, unsearched, started_at: new Date(started).toISOString(), at: new Date(now()).toISOString() };
+  return { v: 1, seq: cov.seq, target: cov.hash ?? "", rules: SWEEP_RULES, state, terms, searched: { objects: searchedObjects, bytes: searchedBytes }, hits, named_hits: namedHits, echoes, unsearched, started_at: new Date(started).toISOString(), at: new Date(now()).toISOString() };
 }
 
 /** The objects a coverage record names: its refs, and the outputs among its result_refs (a search's own output echoes what it looked for). */
@@ -732,12 +789,13 @@ function recordObjects(cov: Pick<LedgerEntry, "refs" | "result_refs">): string[]
 }
 
 /**
- * A recorded sweep's hits read again by this harness (scripts/replay.ts
- * --resweep): each hit's object as the store names it now (every name of
- * its bytes), named when the record names any of them, an echo or said
- * among the named hits when what made each name says so (hitOrigins), a
- * hit otherwise. The line's other fields are its own: what it searched,
- * what it did not, and when. Nothing is searched again.
+ * A recorded sweep's hits read again by this harness (rereadSweeps, and
+ * scripts/replay.ts --resweep): each hit's object as the store names it
+ * now (every name of its bytes), named when the record names any of them,
+ * an echo or said among the named hits when what made each name says so
+ * (hitOrigins), a hit otherwise. The line's other fields are its own: what
+ * it searched, what it did not, and when; the rules are this harness's.
+ * Nothing is searched again.
  */
 export async function resplitSweep(sandboxRoot: string, cov: Pick<LedgerEntry, "refs" | "result_refs">, line: SweepRecord): Promise<Omit<SweepRecord, "prev" | "hash">> {
   const refs = recordObjects(cov);
@@ -761,8 +819,8 @@ export async function resplitSweep(sandboxRoot: string, cov: Pick<LedgerEntry, "
     if (!made) hits.push(hit);
     else (isEcho(made) ? echoes : namedHits).push({ ...hit, origins: made });
   }
-  const { prev: _p, hash: _h, ...rest } = line;
-  return { ...rest, state: hits.length ? "hits" : line.unsearched.length ? "partial" : "clean", hits, named_hits: namedHits, echoes };
+  const { prev: _p, hash: _h, reread: _r, ...rest } = line;
+  return { ...rest, rules: SWEEP_RULES, state: hits.length ? "hits" : line.unsearched.length ? "partial" : "clean", hits, named_hits: namedHits, echoes };
 }
 
 /** A sweep line's hash: over the previous line's and its own fields, canonical. */
@@ -849,6 +907,14 @@ export function originWords(origins: readonly HitOrigin[]): string {
     .join("; ");
 }
 
+/** A line that read an earlier one again, in words: under which rules, from which, and how. */
+export function rereadWords(s: Pick<SweepRecord, "reread" | "rules">): string {
+  const r = s.reread;
+  if (!r) return "";
+  const from = r.from_version === null ? "a line that recorded no rules version" : `rules version ${r.from_version}`;
+  return `read again at ${r.at} under the sweep's rules version ${sweepRulesOf(s)}, from ${from} (the rules changed): ${r.how === "searched" ? "the record searched again, since the change needs bytes the earlier line did not record" : "its hits sorted anew from what the earlier line recorded, nothing searched again"}`;
+}
+
 /** A sweep in words, for the ledger's rendering, the report and the review offer. */
 export function sweepWords(s: SweepRecord | null, c: Pick<LedgerEntry, "looked_for">): string {
   if (!c.looked_for?.length) return "no store sweep (no looked_for strings)";
@@ -856,6 +922,7 @@ export function sweepWords(s: SweepRecord | null, c: Pick<LedgerEntry, "looked_f
   const head = `store sweep ${s.state}: ${s.searched.objects} object(s), ${s.searched.bytes} bytes searched for ${s.terms.map((t) => `"${t}"`).join(", ")}`;
   return [
     head,
+    s.reread ? rereadWords(s) : "",
     s.hits.length ? `found outside the record's objects: ${s.hits.map(hitWords).join("; ")}` : "",
     s.named_hits.length ? `found in objects the record names (does the answer account for them?): ${s.named_hits.map(hitWords).join("; ")}` : "",
     s.echoes?.length ? `echoes, holding nothing (is each only the run's own words?): ${s.echoes.map(hitWords).join("; ")}` : "",
@@ -903,9 +970,10 @@ export function startSweep(sandboxRoot: string, cov: LedgerEntry, o: { maxBytes?
   return p;
 }
 
-/** Every sweep running in this process for a run, settled: the coverage records' and a background round of the reverse sweeps. */
+/** Every sweep running in this process for a run, settled: the coverage records', a pass reading them again after a rules change, and a background round of the reverse sweeps. */
 export async function awaitSweeps(sandboxRoot: string): Promise<void> {
   await Promise.all([...inflight.entries()].filter(([k]) => k.startsWith(`${sandboxRoot}\u0000`)).map(([, p]) => p));
+  await rereadInflight.get(resolve(sandboxRoot))?.catch(() => null);
   await backgroundRounds.get(resolve(sandboxRoot));
   await Promise.all([...importInflight.entries()].filter(([k]) => k.startsWith(`${sandboxRoot}\u0000`)).map(([, p]) => p.catch(() => null)));
 }
@@ -913,8 +981,12 @@ export async function awaitSweeps(sandboxRoot: string): Promise<void> {
 /**
  * The sweeps still pending on standing coverage records, run: those running
  * in this process are awaited, and those whose record is older than the
- * orphan bound (lost with the process that began them) are run here. The
- * finish gate and the answers check call it before they read the gate.
+ * orphan bound (lost with the process that began them) are run here; then
+ * every record's latest line written under an older version of the sweep's
+ * rules is read again under this harness's (rereadSweeps; idempotent: a
+ * line already under them is left alone), so a run with no hub (a host
+ * run) is read again too. The finish gate and the answers check call it
+ * before they read the gate. Returns how many sweeps it ran or read again.
  */
 export async function reconcileSweeps(sandboxRoot: string, o: { orphanMs?: number; maxBytes?: number; maxMs?: number; now?: number } = {}): Promise<number> {
   const P = await import("./protocol.ts");
@@ -931,7 +1003,208 @@ export async function reconcileSweeps(sandboxRoot: string, o: { orphanMs?: numbe
     await startSweep(sandboxRoot, c, o);
     ran += 1;
   }
-  return ran;
+  const reread = await rereadSweeps(sandboxRoot, { ...(o.maxBytes !== undefined ? { maxBytes: o.maxBytes } : {}), ...(o.maxMs !== undefined ? { maxMs: o.maxMs } : {}) }).catch(() => null);
+  return ran + (reread?.records.length ?? 0);
+}
+
+// --- a line read again after the sweep's rules changed ---------------------------------------------
+
+/** A hold of the store sweep on a question's standing answer, as the gate names it: the section, the answer, the code, and the coverage record it is on. */
+export type SweepHoldKey = { section: string; answer: number; code: "sweep_pending" | "sweep_hits" | "sweep_partial"; coverage: number };
+
+/** A hold in words: `question:2 (answer E-137): sweep_hits on E-111`. */
+export function holdKeyWords(h: SweepHoldKey): string {
+  return `${h.section} (answer E-${h.answer}): ${h.code} on E-${h.coverage}`;
+}
+
+/**
+ * The store sweep's holds on the run's standing answers over `sweeps`, as
+ * the gate reads them: each question's standing answer (the first that no
+ * correction replaced, as ledgerGate takes it) through protocol.ts
+ * sweepHolds, with the question's materiality as the answers check reads
+ * it (check-answers.ts sectionBars: a goal's question, or one the register
+ * does not hold, is material). Read from the question register, never
+ * through check-answers.ts, whose CLI calls this before it has finished
+ * loading. Sorted.
+ */
+export async function sweepHoldKeys(sandboxRoot: string, entries: readonly LedgerEntry[], sweeps: readonly SweepRecord[]): Promise<SweepHoldKey[]> {
+  const P = await import("./protocol.ts");
+  const disputes = await P.readDisputes(sandboxRoot).catch(() => []);
+  const snap = await import("./questions.ts").then((Q) => Q.questionsSnapshot(sandboxRoot)).catch(() => null);
+  const goal = new Set((snap?.goal.questions ?? []).map((x) => P.sectionKey(x)));
+  const bars = (id: string) => {
+    const key = P.sectionKey(id);
+    const q = snap?.bySection.get(key);
+    return { material: goal.has(key) || !q ? true : q.materiality === "material" };
+  };
+  const all = entries as LedgerEntry[];
+  const replaced = P.supersededBy(all);
+  const standing = new Map<string, LedgerEntry>();
+  for (const e of all) if (e.kind === "answer" && e.section?.startsWith("question:") && !replaced.has(e.seq) && !standing.has(e.section)) standing.set(e.section, e);
+  const out: SweepHoldKey[] = [];
+  for (const [section, a] of standing) {
+    const material = bars(P.sectionAnswersId(section)).material;
+    for (const h of P.sweepHolds(a, all, sweeps, disputes, material)) out.push({ section, answer: a.seq, code: h.code, coverage: h.coverage.seq });
+  }
+  return out.sort((x, y) => x.section.localeCompare(y.section, undefined, { numeric: true }) || x.coverage - y.coverage || x.code.localeCompare(y.code));
+}
+
+/** A coverage record whose latest sweep line was read again: its seq, the version that line was written under (null: none), how, the line read again (`of`) and the line written (`line`), and its hits, named hits and echoes before and after. */
+export type RereadRecord = {
+  seq: number;
+  from_version: number | null;
+  how: "read" | "searched";
+  of: string;
+  line: string;
+  hits: [number, number];
+  named: [number, number];
+  echoes: [number, number];
+};
+/** A pass of rereadSweeps: the rules version read under, each record read again, and the gate's sweep holds the pass cleared and added. */
+export type RereadResult = { rules: number; records: RereadRecord[]; cleared: SweepHoldKey[]; added: SweepHoldKey[] };
+
+const rereadInflight = new Map<string, Promise<RereadResult>>();
+
+/**
+ * The coverage records' sweeps recorded under an older version of the
+ * sweep's rules, read again under this harness's (docs/adr/0013,
+ * "Re-reading after a rules change"). Each record whose latest line (the
+ * one the gate reads) was written under a version before the current one,
+ * or under none, gets one line on the chain with this harness's `rules`
+ * and `reread` ({from_version, reason: "rules changed", of, at, how}). Its
+ * hits are sorted anew from what the line recorded (resplitSweep), nothing
+ * searched; where a change since its version needs bytes the line did not
+ * record (SWEEP_RULE_CHANGES, `bytes`), or the line lacks what a re-read
+ * needs, its record is searched again (computeSweep), within the sweep's
+ * budget. Every such record is read again, a corrected one too: the gate
+ * reads an earlier record's line for the objects a later one names
+ * (unexaminedHits). A line already under the current rules is left alone,
+ * so a second pass writes nothing: the hub runs one when it starts (a
+ * kickoff or a resume), the answers check and the finish gate as a step of
+ * reconcileSweeps. The lines are written under the sweeps' lock; a record
+ * whose latest line changed meanwhile (another process read it again
+ * first) is left to that line, and one that could not be read again stays
+ * as it was, for the next pass. When it wrote a line, the trace gets one
+ * (`sweep_reread`) and the board one post: how many records were read
+ * again and which of the gate's sweep holds changed. One pass at a time
+ * per run in this process; `changes` and `now` are the caller's (tests
+ * give them).
+ */
+export function rereadSweeps(sandboxRoot: string, o: { maxBytes?: number; maxMs?: number; changes?: readonly SweepRuleChange[]; now?: () => number } = {}): Promise<RereadResult> {
+  const S = resolve(sandboxRoot);
+  const running = rereadInflight.get(S);
+  if (running) return running;
+  const p = rereadPass(S, o).finally(() => rereadInflight.delete(S));
+  rereadInflight.set(S, p);
+  return p;
+}
+
+async function rereadPass(S: string, o: { maxBytes?: number; maxMs?: number; changes?: readonly SweepRuleChange[]; now?: () => number }): Promise<RereadResult> {
+  const changes = o.changes ?? SWEEP_RULE_CHANGES;
+  const current = changes.at(-1)?.version ?? 0;
+  const now = o.now ?? Date.now;
+  const result: RereadResult = { rules: current, records: [], cleared: [], added: [] };
+  const P = await import("./protocol.ts");
+  const entries = await P.readLedger(S).catch(() => [] as LedgerEntry[]);
+  const sweeps = await readSweeps(S);
+  const due: Array<{ e: LedgerEntry; line: SweepRecord }> = [];
+  for (const e of entries) {
+    if (e.kind !== "coverage" || !e.hash) continue;
+    const line = sweepOf(e, sweeps);
+    if (line && sweepRulesOf(line) < current) due.push({ e, line });
+  }
+  if (!due.length) return result;
+  const before = await sweepHoldKeys(S, entries, sweeps).catch(() => [] as SweepHoldKey[]);
+  const made: Array<{ e: LedgerEntry; line: SweepRecord; next: Omit<SweepRecord, "prev" | "hash"> }> = [];
+  for (const { e, line } of due) {
+    const from = sweepRulesOf(line);
+    const whole = Array.isArray(line.hits) && Array.isArray(line.named_hits) && Array.isArray(line.unsearched);
+    const how: SweepReread["how"] = whole && !changes.some((c) => c.version > from && c.bytes) ? "read" : "searched";
+    let r: Omit<SweepRecord, "prev" | "hash">;
+    try {
+      r = how === "read" ? await resplitSweep(S, e, line) : await computeSweep(S, e, { ...(o.maxBytes !== undefined ? { maxBytes: o.maxBytes } : {}), ...(o.maxMs !== undefined ? { maxMs: o.maxMs } : {}), ...(o.now ? { now: o.now } : {}) });
+    } catch {
+      // Not read again: its line stands as it was, and the next pass tries again.
+      continue;
+    }
+    const reread: SweepReread = { from_version: typeof line.rules === "number" ? line.rules : null, reason: "rules changed", of: line.hash ?? "", at: new Date(now()).toISOString(), how };
+    made.push({ e, line, next: { ...r, rules: current, reread } });
+  }
+  if (!made.length) return result;
+  const written = await P.withNamedLock(S, "sweeps", async () => {
+    const latest = await readSweeps(S);
+    const text = await readFile(join(S, LEDGER_SWEEPS), "utf8").catch(() => "");
+    const lines = text.split("\n").filter((l) => l.trim());
+    let prev = lines.length ? ((JSON.parse(lines.at(-1)!) as AnySweepLine).hash ?? "genesis") : "genesis";
+    const out: Array<{ m: (typeof made)[number]; rec: SweepRecord }> = [];
+    let body = "";
+    for (const m of made) {
+      // Read again, or swept anew, by another process first: its line stands.
+      if (sweepOf(m.e, latest)?.hash !== m.line.hash) continue;
+      const rec: SweepRecord = { ...m.next, prev };
+      rec.hash = sweepHash(rec, prev);
+      prev = rec.hash;
+      body += `${JSON.stringify(rec)}\n`;
+      out.push({ m, rec });
+    }
+    if (body) {
+      await mkdir(join(S, "ledger"), { recursive: true });
+      await appendFile(join(S, LEDGER_SWEEPS), body, "utf8");
+    }
+    return out;
+  });
+  if (!written.length) return result;
+  await P.renderLedger(S).catch(() => undefined);
+  const after = await sweepHoldKeys(S, entries, await readSweeps(S)).catch(() => [] as SweepHoldKey[]);
+  const key = (h: SweepHoldKey) => `${h.section}\u0000${h.answer}\u0000${h.code}\u0000${h.coverage}`;
+  const had = new Set(before.map(key));
+  const has = new Set(after.map(key));
+  result.cleared = before.filter((h) => !has.has(key(h)));
+  result.added = after.filter((h) => !had.has(key(h)));
+  const count = (xs: unknown) => (Array.isArray(xs) ? xs.length : 0);
+  result.records = written.map(({ m, rec }) => ({
+    seq: m.e.seq,
+    from_version: rec.reread!.from_version,
+    how: rec.reread!.how,
+    of: rec.reread!.of,
+    line: rec.hash!,
+    hits: [count(m.line.hits), rec.hits.length],
+    named: [count(m.line.named_hits), rec.named_hits.length],
+    echoes: [count(m.line.echoes), rec.echoes?.length ?? 0],
+  }));
+  await P.traceHarnessLine(S, {
+    tool: "sweep_reread",
+    args: { rules: current, reason: "rules changed" },
+    result: {
+      ok: true,
+      records: result.records.length,
+      read: result.records.filter((r) => r.how === "read").length,
+      searched: result.records.filter((r) => r.how === "searched").length,
+      lines: result.records.map((r) => ({ seq: r.seq, from_version: r.from_version, how: r.how, of: r.of, hash: r.line, hits: r.hits, named: r.named, echoes: r.echoes })),
+      holds_cleared: result.cleared,
+      holds_added: result.added,
+    },
+  });
+  await P.systemPost(S, { tag: "result", key: `sweep-reread:${current}:${result.records[0]!.line}`, body: rereadPostWords(result, changes) }).catch(() => undefined);
+  return result;
+}
+
+/** A pass of rereadSweeps, as its board post says it: what changed in the rules, how many records were read again and how, what moved, and which holds changed. */
+export function rereadPostWords(r: RereadResult, changes: readonly SweepRuleChange[] = SWEEP_RULE_CHANGES): string {
+  const oldest = Math.min(...r.records.map((x) => x.from_version ?? 0));
+  const since = changes.filter((c) => c.version > oldest && c.version <= r.rules);
+  const read = r.records.filter((x) => x.how === "read").length;
+  const searched = r.records.length - read;
+  const moved = r.records.filter((x) => x.hits[0] !== x.hits[1] || x.named[0] !== x.named[1] || x.echoes[0] !== x.echoes[1]);
+  const sum = (f: (x: RereadRecord) => number) => r.records.reduce((n, x) => n + f(x), 0);
+  const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+  return [
+    `STORE SWEEPS READ AGAIN: the sweep's rules changed since ${plural(r.records.length, "coverage record")} (${r.records.map((x) => `E-${x.seq}`).join(", ")}) had ${r.records.length === 1 ? "its" : "their"} sweep recorded${since.length ? ` (${since.map((c) => `version ${c.version}, ${c.since}: ${c.what}`).join("; ")})` : ""}. Each was read again under this harness's rules (version ${r.rules}), a line of its own on ledger/sweeps.jsonl with \`reread\`: ${[read ? `${read} from what ${read === 1 ? "its line" : "their lines"} recorded, nothing searched again` : "", searched ? `${searched} searched again, the change needing bytes ${searched === 1 ? "its line" : "their lines"} did not record` : ""].filter(Boolean).join("; ")}.`,
+    moved.length ? `In ${plural(moved.length, "record")} what the sweep found moved: ${sum((x) => x.hits[0])} hit(s) became ${sum((x) => x.hits[1])}, named hits ${sum((x) => x.named[0])} became ${sum((x) => x.named[1])}, echoes ${sum((x) => x.echoes[0])} became ${sum((x) => x.echoes[1])}.` : "In none did what the sweep found move.",
+    r.cleared.length || r.added.length
+      ? `The gate's holds that changed: ${[...r.cleared.map((h) => `${holdKeyWords(h)} cleared`), ...r.added.map((h) => `${holdKeyWords(h)} now held`)].join("; ")}.`
+      : "No hold of the gate changed.",
+  ].join(" ");
 }
 
 // --- the reverse sweep: an addition's files against every standing looked_for -----------------

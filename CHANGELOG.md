@@ -6,6 +6,41 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Fixed: a store sweep recorded under older rules is read again under the current ones
+
+The calibration run sd0e59d, stopped on the harness before the echoes below
+and resumed on the one that made them, kept its three `sweep_hits` holds (on
+E-111, E-118 and E-129): the gate reads each coverage record's latest sweep
+line, those lines were written under the older identity rule, and nothing
+read them again. Now (ADR 0013, "Re-reading after a rules change"):
+
+- **A version on each line.** Every coverage record's sweep line names the
+  version of the sweep's rules it was written under (`rules`;
+  `SWEEP_RULE_CHANGES` says what each version changed and whether a line from
+  before it can be read again from what it recorded). A line with none is
+  older than any versioned one.
+- **Read again when the hub starts** (a kickoff or a resume): each record
+  whose latest line is older than the current rules gets one line on the
+  sweeps' chain with `reread: {from_version, reason: "rules changed", of, at,
+  how}`, its hits sorted anew from what the line recorded (the logic of
+  `replay --resweep`, nothing searched, the search's own times kept) or,
+  where a change needs bytes the line did not record, its record searched
+  again within the sweep's budget. A line under the current rules is left
+  alone.
+- **Said**: a `sweep_reread` line on the trace, and one board post with how
+  many records were read again and which of the gate's sweep holds changed.
+  The sweep's words say a line was read again, from which version and how.
+- **Also at the answers check and the finish gate**, as a step of
+  `reconcileSweeps`, idempotent: a host run with no hub is covered, and a
+  replay's evaluation reads a copy's older lines again too
+  (`store_sweeps.reread`).
+- **Chains**: the lines are appended, the chain verifies, and a custody
+  verdict taken before holds as a prefix.
+- **Measured**: sd0e59d replayed as of its resume, 1666851 against this
+  harness: the answers check reads its 20 recorded sweeps again (in 11 the
+  hits move, 106 becoming 67, with 13 echoes), the three holds clear, and
+  questions 2, 5 and 6 take the dispositions their answers claim.
+
 ### Fixed: the store sweep reads a kept output and its sealed import as one object, and names echoes
 
 On the calibration run sd0e59d the store sweep held three negatives

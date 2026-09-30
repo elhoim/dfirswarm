@@ -1188,7 +1188,11 @@ measure a rule change on recorded histories before paying for new runs
   gets the result as a synthetic line on the copy's chain. Nothing is
   searched again; a sweep where nothing moves gets no line. It prints how
   many sweeps moved hits, how many hits there were and are, and how many
-  went to the named hits and to the echoes.
+  went to the named hits and to the echoes. Without it, a checkout that
+  records the sweep's rules version on each line reads a line recorded
+  under older rules again under its own at its answers check, in the copy,
+  as a hub that starts does (ADR 0013, "Re-reading after a rules change"):
+  the store sweeps' counts say how many (`reread`).
 - **`--presumes Q[,Q...]`** asks what the premise rule (ADR 0011, "What a
   question presumes") would have said of a run from before it: each question
   named is amended in every copy, by this checkout's register as the

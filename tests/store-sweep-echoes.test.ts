@@ -241,7 +241,7 @@ test("the run paths a maker's words name, and the harness's own events that keep
   for (const e of SW.HARNESS_KEEPERS) assert.ok(P.TOOL_RESERVED_NAMES.has(e), `${e} is a reserved name: no seat's tool can take it`);
 });
 
-test("replay --resweep reads a recorded sweep again: the hit an older harness held on a kept output whose sealed import the record names moves to the named hits, on a synthetic line in the copy, the run untouched", async () => {
+test("replay --resweep reads a recorded sweep again: the hit an older harness held on a kept output whose sealed import the record names moves to the named hits, on a synthetic line in the copy, the run untouched; without it, the checkout's answers check reads the line again, recorded under older rules", async () => {
   const { S, a0, a1, a2 } = await run();
   const file = "20260930083000000-bash-mmmm.out.log";
   const body = "a.log: alice again, from ws-12\n";
@@ -259,9 +259,9 @@ test("replay --resweep reads a recorded sweep again: the hit an older harness he
   const cov = ok(await rec(a0, coverage("2", ["input:disk.E01", `import:j000021/${file}`], [`E-${abs.seq}`, "job:j000001/hits.txt", `E-${seen.seq}`], { looked_for: ["alice"] }))).entry;
   ok(await rec(a1, { kind: "answer", section: "question:2", value: "No evidence of a remote tool was found on the disk or the strings", reasoning: `E-${cov.seq}`, ...A, result: "bounded_negative" }));
   await SW.awaitSweeps(S);
-  // The line an older harness recorded: the kept file known by its inode, a hit of its own.
+  // The line an older harness recorded: the kept file known by its inode, a hit of its own, and no rules version.
   const now = SW.sweepOf(cov, await SW.readSweeps(S))!;
-  const { prev: _p, hash: _h, echoes: _e, ...core } = now;
+  const { prev: _p, hash: _h, echoes: _e, rules: _r, ...core } = now;
   const old: Record<string, unknown> & { hash?: string } = { ...core, state: "hits", hits: [{ ref: k.ref, term: "alice", count: 1, first_offset: 6, encodings: ["utf-8"] }], named_hits: now.named_hits.filter((h) => !h.also?.includes(k.ref)).map((h) => ({ ...h, also: h.also?.filter((n) => n !== k.ref) })), prev: "genesis" };
   old.hash = SW.sweepHash(old as unknown as SW.SweepRecord, "genesis");
   await writeFile(join(S, SW.LEDGER_SWEEPS), `${JSON.stringify(old)}\n`);
@@ -270,13 +270,15 @@ test("replay --resweep reads a recorded sweep again: the hit an older harness he
   const before = await readFile(join(S, SW.LEDGER_SWEEPS), "utf8");
   const replay = (args: string[]) => JSON.parse(spawnSync(process.execPath, ["--experimental-strip-types", "--no-warnings", join(import.meta.dirname, "..", "scripts", "replay.ts"), S, "--json", ...args], { encoding: "utf8", maxBuffer: 1 << 26 }).stdout) as Replay;
   const q2 = (r: Replay) => r.evaluations[0]!.projection!.questions.find((q) => q.section === "question:2")!;
+  // The checkout's answers check reads the line, recorded under no rules version, again under its own (store-sweep.ts rereadSweeps), in the copy.
   const as = replay([]);
-  assert.deepEqual(q2(as).check?.defects, ["sweep_hits"]);
-  assert.deepEqual(as.evaluations[0]!.projection!.store_sweeps, { records: 1, swept: 1, resplit: 0, hits: 1, named: now.named_hits.length - 1, echoes: 0, with_hits: 1 });
+  assert.deepEqual(q2(as).check?.defects, [], "read again by the answers check: the record names the import");
+  assert.deepEqual(as.evaluations[0]!.projection!.store_sweeps, { records: 1, swept: 1, resplit: 0, reread: 1, hits: 0, named: now.named_hits.length, echoes: 0, with_hits: 0 });
   const again = replay(["--resweep"]);
   assert.deepEqual(again.resplit, { records: 1, moved: 1, to_named: 1, to_echoes: 0, hits_before: 1, hits_after: 0 });
   assert.deepEqual(q2(again).check?.defects, [], "the record names the import: the kept file is the same object");
   assert.equal(again.evaluations[0]!.projection!.store_sweeps?.resplit, 1);
+  assert.equal(again.evaluations[0]!.projection!.store_sweeps?.reread, 0, "the synthetic line is under this checkout's rules: the answers check leaves it alone");
   assert.equal(again.unchanged, true);
   assert.equal(await readFile(join(S, SW.LEDGER_SWEEPS), "utf8"), before, "the run's own sweeps are untouched");
 });

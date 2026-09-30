@@ -80,7 +80,11 @@
  * import, from the coverage records standing at the addition.
  *
  * Each coverage record's store sweep as the checkout reads it (the latest
- * line for it): how many hits, named hits and echoes. `--resweep` reads the
+ * line for it), after the checkout's answers check ran (which, from the
+ * harness that records the sweep's rules version on each line, reads a
+ * line recorded under older rules again under its own, a line of its own
+ * in the copy, as a hub that starts does: store-sweep.ts rereadSweeps):
+ * how many hits, named hits and echoes. `--resweep` reads the
  * copy's recorded sweeps again with this checkout's store sweep
  * (store-sweep.ts resplitSweep): each recorded hit whose object the record
  * names under another name of the same bytes, or whose makers make it an
@@ -235,13 +239,16 @@ export type Projection = {
   late_evidence?: Array<{ addition: number; import: string; synthetic: boolean; state: string; records: number; terms: number; objects: number; questions: Array<{ section: string; objects: number; occurrences: number }> }> | null;
   /**
    * Each coverage record's store sweep as the checkout reads the copy's
-   * sweeps (store-sweep.ts readSweeps, the latest line for each record):
-   * how many records named looked_for, how many are swept, how many of
-   * those lines replay synthesised (--resweep), and over the latest lines
-   * the hits, the named hits and the echoes, and the records with hits.
-   * Counts only. Null for a checkout that reads none.
+   * sweeps (store-sweep.ts readSweeps, the latest line for each record),
+   * after its answers check ran: how many records named looked_for, how
+   * many are swept, how many of those lines replay synthesised
+   * (--resweep), how many the checkout's own answers check read again
+   * under its rules because they were recorded under older ones
+   * (`reread`, reconcileSweeps; absent for a checkout that does not), and
+   * over the latest lines the hits, the named hits and the echoes, and the
+   * records with hits. Counts only. Null for a checkout that reads none.
    */
-  store_sweeps?: { records: number; swept: number; resplit: number; hits: number; named: number; echoes: number; with_hits: number } | null;
+  store_sweeps?: { records: number; swept: number; resplit: number; reread?: number; hits: number; named: number; echoes: number; with_hits: number } | null;
   /** The report's reviews replayed under the checkout's carry rule (reviewsOf): null for a checkout without it, or a run with no review of a report in history. */
   reviews?: ReviewReplay | null;
   /** What could not be evaluated, in the harness's or node's words. */
@@ -902,7 +909,7 @@ async function storeSweepsOf(SWm: Mod | null, Pm: Mod | null, S: string): Promis
   const read = fn(SWm, "readSweeps");
   const ledger = fn(Pm, "readLedger");
   if (!read || !ledger) return null;
-  type Line = { target: string; synthetic?: boolean; hits: unknown[]; named_hits: unknown[]; echoes?: unknown[] };
+  type Line = { target: string; synthetic?: boolean; reread?: unknown; hits: unknown[]; named_hits: unknown[]; echoes?: unknown[] };
   const lines = (await read(S)) as Line[];
   const records = ((await ledger(S)) as Array<{ kind: string; hash?: string; looked_for?: string[] }>).filter((e) => e.kind === "coverage" && e.looked_for?.length);
   const latest = records.map((e) => lines.filter((l) => l.target === e.hash).at(-1)).filter((l): l is Line => Boolean(l));
@@ -910,6 +917,7 @@ async function storeSweepsOf(SWm: Mod | null, Pm: Mod | null, S: string): Promis
     records: records.length,
     swept: latest.length,
     resplit: latest.filter((l) => l.synthetic).length,
+    ...(fn(SWm, "rereadSweeps") ? { reread: latest.filter((l) => l.reread && !l.synthetic).length } : {}),
     hits: latest.reduce((n, l) => n + l.hits.length, 0),
     named: latest.reduce((n, l) => n + l.named_hits.length, 0),
     echoes: latest.reduce((n, l) => n + (l.echoes?.length ?? 0), 0),
@@ -1079,7 +1087,12 @@ const rowsOf = (text: string): Array<{ line: string; row: Row | null }> =>
         return { line, row: null };
       }
     });
-const timeOf = (row: Row | null): number => (row && typeof row.at === "string" ? Date.parse(row.at) : Number.NaN);
+/** When a line was written: its `at`, or, for a sweep line that read an earlier one again (whose `at` stays the search's), when it read it (`reread.at`). */
+const timeOf = (row: Row | null): number => {
+  const reread = row?.reread as { at?: unknown } | undefined;
+  if (typeof reread?.at === "string") return Date.parse(reread.at);
+  return row && typeof row.at === "string" ? Date.parse(row.at) : Number.NaN;
+};
 
 /** A register's lines up to the first one `keep` refuses: a prefix, never a selection. */
 function prefixOf(rows: Array<{ line: string; row: Row | null }>, keep: (row: Row | null, i: number) => boolean): string {
@@ -1655,7 +1668,7 @@ export function replayWords(r: Replay): string {
     if (p.preparation) out.push(...preparationWords(p.preparation));
     if (p.review_caps) out.push(...reviewCapWords(p.review_caps));
     if (p.late_evidence) out.push(...lateEvidenceWords(p.late_evidence));
-    if (p.store_sweeps) out.push(`  store sweeps (the latest line of each coverage record's): ${p.store_sweeps.swept} of ${p.store_sweeps.records} record(s) with looked_for swept${p.store_sweeps.resplit ? ` (${p.store_sweeps.resplit} read again, --resweep)` : ""}; ${p.store_sweeps.hits} hit(s) in ${p.store_sweeps.with_hits} record(s), ${p.store_sweeps.named} named hit(s), ${p.store_sweeps.echoes} echo(es)`);
+    if (p.store_sweeps) out.push(`  store sweeps (the latest line of each coverage record's): ${p.store_sweeps.swept} of ${p.store_sweeps.records} record(s) with looked_for swept${p.store_sweeps.resplit ? ` (${p.store_sweeps.resplit} read again, --resweep)` : ""}${p.store_sweeps.reread ? ` (${p.store_sweeps.reread} recorded under older rules, read again by the answers check)` : ""}; ${p.store_sweeps.hits} hit(s) in ${p.store_sweeps.with_hits} record(s), ${p.store_sweeps.named} named hit(s), ${p.store_sweeps.echoes} echo(es)`);
     if (p.reviews) out.push(...reviewWords(p.reviews));
     if (p.deliveries) out.push(...deliveryWords(p.deliveries));
     for (const x of p.errors) out.push(`  not evaluated: ${x}`);

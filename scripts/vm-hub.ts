@@ -1196,6 +1196,24 @@ export class Hub {
   }
 
   /**
+   * The coverage records' sweeps recorded under an older version of the
+   * sweep's rules, read again under this harness's when the hub starts (a
+   * kickoff, or a resume on a newer harness): extensions/store-sweep.ts
+   * rereadSweeps, in the background and once; a line already under the
+   * current rules is left alone. Its trace line is the hub's own (the
+   * harness trace this hub registered), its board post the harness's.
+   */
+  private async rereadSweeps(): Promise<void> {
+    try {
+      const SW = await import("../extensions/store-sweep.ts");
+      const r = await SW.rereadSweeps(this.cfg.sandbox);
+      if (r.records.length) this.log(`store sweeps: ${r.records.length} read again under the sweep's rules version ${r.rules}; ${r.cleared.length} hold(s) cleared, ${r.added.length} added`);
+    } catch (err) {
+      this.log(`store sweeps read again: ${(err as Error).message}`);
+    }
+  }
+
+  /**
    * Evidence added while no hub ran, or before its catalogue could take it:
    * a detect pass over each file, once (the store journal's
    * evidence_catalogue_queued line says it was queued).
@@ -1331,6 +1349,8 @@ export class Hub {
     });
     // The kickoff's broad extractions: receipts for what it queued, offers for the rest.
     void this.reconcilePreparation();
+    // Sweep lines recorded under an older version of the sweep's rules (a run resumed on a newer harness): read again under this one's.
+    void this.rereadSweeps();
     this.writeStatus();
     if (this.cfg.backstop !== false) {
       this.backstopTimer = setInterval(() => void this.backstop().catch(() => undefined), BACKSTOP_INTERVAL_MS);

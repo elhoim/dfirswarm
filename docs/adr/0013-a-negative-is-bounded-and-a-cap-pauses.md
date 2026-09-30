@@ -1034,6 +1034,85 @@ questions take the dispositions their answers claim; what still holds the
 run is an open lead and route limitations. Whether the seats spend less
 time on the sweep is for a paired run.
 
+### Re-reading after a rules change
+
+The run sd0e59d was stopped on the harness before the echoes and resumed
+on the one that made them. Its three `sweep_hits` holds (on E-111, E-118
+and E-129) did not clear. The gate reads each coverage record's latest
+sweep line, every line the run held had been written under the older
+identity rule, and nothing read them again: the new rules reached a line
+only when a seat recorded its coverage anew, which is the work the fix was
+to spare. `replay --resweep` already knew how to read a recorded sweep
+under the current rules without searching the bytes again; a live run did
+not.
+
+- **A version on each line.** Every coverage record's sweep line names
+  the version of the sweep's rules it was written under (`rules`).
+  `SWEEP_RULE_CHANGES` lists each version: since when, what changed, and
+  whether a line from before it can be read again from what it recorded
+  (`bytes`). A line with no version was written before versions were
+  recorded and is older than any versioned one. Version 1 is the rules
+  above: the same bytes under several names are one object, and echoes
+  hold nothing.
+- **Read again when the hub starts.** A hub that starts (a kickoff, or a
+  resume on a newer harness) reads, in its background, every coverage
+  record whose latest line is older than its rules again under them
+  (`rereadSweeps`): one line per record, appended on the sweeps' chain
+  with the current `rules` and `reread: {from_version, reason: "rules
+  changed", of, at, how}` (`from_version` null for a line that recorded
+  none, `of` the hash of the line read again). Every such record is read
+  again, a corrected one too, since the gate reads an earlier record's
+  line for the objects a later record names (`unexaminedHits`). A line
+  already under the current rules is left alone, so a second start writes
+  nothing.
+- **From what the line recorded, or searched again.** Where the change is
+  in what a hit is or where it goes, the line's hits are sorted anew as
+  `replay --resweep` sorts them (`resplitSweep`): each object by every
+  name of its bytes now, named, an echo, said among the named hits, or a
+  hit. Nothing is searched, and the line keeps its search's `started_at`
+  and `at`, so an entry written after that search still counts as written
+  after the sweep that found the hit (`unexaminedHits` reads `at`); the
+  re-read's own time is `reread.at`. Where a change needs bytes the line
+  did not record (one marked `bytes`, or a line that lacks what a re-read
+  needs), the record is searched again for real, within the sweep's budget
+  (`SWARM_SWEEP_MAX_BYTES`, `SWARM_SWEEP_MAX_SEC`), and the times are that
+  search's (`how: "searched"`).
+- **Said.** The trace gets one line, the hub's own (`sweep_reread`:
+  `{records, read, searched, lines, holds_cleared, holds_added}`), and the
+  board one post: how many records were read again and how, what moved,
+  and which of the gate's sweep holds changed, each by its question,
+  answer, code and record (`sweepHolds` over each question's standing
+  answer, before and after). The sweep's words, in the ledger's rendering,
+  the review offer and the report, say a line was read again, from which
+  version, and how.
+- **Also at the answers check.** `reconcileSweeps`, which the answers check
+  and the finish gate run before they read the gate, reads older lines
+  again as a step of its own, so a host run with no hub is covered, and a
+  replay's evaluation of a copy does the same (`store_sweeps.reread`). The
+  step is idempotent: its lines are written under the sweeps' lock, a
+  record whose latest line changed meanwhile (another process read it
+  again first) is left to that line, and one that could not be read again
+  is tried at the next pass.
+- **Chains.** The lines are appended: every earlier line stands, the chain
+  verifies, and a custody verdict taken before holds the sweeps as a
+  prefix. A harness from before reads a re-read line as any other: its
+  fields are hashed as they are, and the gate reads the latest line.
+
+Replayed values-free on sd0e59d as of its resume (every chained register
+cut at the resume's trace line, before its seats recorded again), 1666851
+against this harness (`swarm.sh replay --compare`): under 1666851 questions
+2, 5 and 6 hold on `sweep_hits`; under this harness the answers check reads
+the 20 recorded sweeps again from what they recorded (in 11 the hits move:
+106 hits become 67, the named hits 163 become 189, 13 echoes), the holds on
+E-111, E-118 and E-129 clear, and the three questions take the dispositions
+their answers claim (partial, bounded negative, not determinable). What
+still holds the run is an open lead and route limitations, and the custody
+verdict taken at the stop before the resume holds as a prefix.
+
+Not built: a version per rule (a change bumps the one number, and a line
+older than it is read again whole); a re-read of the reverse sweep's lines,
+whose hits hold nothing by themselves.
+
 ## Claim and open-part rows
 
 Added 2026-09-29 (the known-limits plan, item 6). "Partial" was one word

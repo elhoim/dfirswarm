@@ -4278,12 +4278,25 @@ export async function traceHarnessEntry(sandboxRoot: string, entry: Pick<LedgerE
     args: { kind: entry.kind, by: entry.by, ...(entry.source_class ? { source_class: entry.source_class } : {}), ...about },
     result: { ok: true, seq: entry.seq, merged: false, hash: entry.hash },
   };
+  await traceHarnessLine(sandboxRoot, line, `ledger entry #${entry.seq}`);
+}
+
+/**
+ * A line of the harness's own on the trace, by the writing process's own
+ * way (useHarnessTrace; the operator's CLI and the answers check, which
+ * register none, as the shell's trace_emit writes one): a ledger entry the
+ * harness authored (traceHarnessEntry), the store sweeps read again after
+ * a rules change (store-sweep.ts rereadSweeps). A line that reaches
+ * nowhere is said on stderr, and the act it records stands; this never
+ * throws.
+ */
+export async function traceHarnessLine(sandboxRoot: string, line: HarnessTraceLine, what = `the ${line.tool} line`): Promise<void> {
   const sink = harnessSinks.get(harnessSinkKey(sandboxRoot)) ?? harnessSinks.get("");
   try {
     await (sink ? sink(sandboxRoot, line) : emitHarnessLine(sandboxRoot, line));
   } catch (err) {
     try {
-      process.stderr.write(`dfirswarm: the trace line for ledger entry #${entry.seq} reached neither the collector nor a spill: ${err instanceof Error ? err.message : String(err)}\n`);
+      process.stderr.write(`dfirswarm: the trace line for ${what} reached neither the collector nor a spill: ${err instanceof Error ? err.message : String(err)}\n`);
     } catch {
       // no stderr either
     }
@@ -6240,6 +6253,8 @@ export const TOOL_RESERVED_NAMES = new Set([
   // The dynamic network (scripts/net-broker.ts, scripts/net-fetch.ts): its
   // tools, and the fetch service's own lines and its keeper's restart.
   "net_request", "net_fetch", "network", "net_fetch_started", "net_fetch_refused", "net_fetch_restarted",
+  // The store sweeps read again after a change of the sweep's rules (extensions/store-sweep.ts rereadSweeps).
+  "sweep_reread",
 ]);
 
 const RUNTIME_EXT: Record<ToolRuntime, string> = { python3: "py", node: "mjs", bash: "sh" };
