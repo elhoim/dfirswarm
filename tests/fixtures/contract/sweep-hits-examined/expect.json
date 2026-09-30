@@ -1,0 +1,41 @@
+{
+  "case": "Two bounded negatives whose store sweeps found hits in an object their first records did not name. Question 1's revised record names the object and records nothing about what it showed; question 2's names it with a finding written after the sweep that examines it.",
+  "design": [
+    "docs/adr/0013 'After the round-13 scoring', the store sweep: a hit in an object the record does not name holds the negative (sweep_hits) until the record is revised to name that object, with what it showed.",
+    "docs/adr/0013 'After the runs s9722fa and sb1b3c8', naming a hit is not examining it: the object is cited in result_refs by an entry that names it and was written after the sweep; until then the gate keeps holding it as sweep_hits."
+  ],
+  "policies": [
+    "as run"
+  ],
+  "expect": {
+    "questions": {
+      "question:1": {
+        "disposition": null,
+        "best_candidate": false,
+        "readiness_holds": true,
+        "readiness_includes": [
+          "sweep_hits"
+        ],
+        "defects_include": [
+          "sweep_hits"
+        ],
+        "warnings": []
+      },
+      "question:2": {
+        "disposition": "bounded_negative",
+        "best_candidate": false,
+        "readiness_holds": false,
+        "defects_include": [],
+        "warnings": []
+      }
+    },
+    "ready": false,
+    "verdict": {
+      "proceed": false,
+      "failing": "check:check-answers"
+    },
+    "done": "held",
+    "late": [],
+    "agreement": []
+  }
+}

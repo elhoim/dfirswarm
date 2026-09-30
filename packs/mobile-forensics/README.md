@@ -23,10 +23,26 @@ reads a protobuf blob without its schema, for the Android and iOS artefacts that
 stopped being SQLite. All three return their complete matching result; the
 harness retains oversized stdout rather than letting the tools cut it.
 
-**Two recipes.** `ios-filesystem` turns a full-file-system tar into a structural
-mobile catalogue without extracting it. `android-backup` reads an adb-backup
-header and inventories every member of an unencrypted payload. Both say exactly
-what they did not cover in `coverage.json`.
+**Five recipes**, each saying what it prepares (`purpose` in its
+`recipe.json`). Two inventories: `ios-filesystem` turns a full-file-system tar
+into a structural mobile catalogue without extracting it (it parses no
+artefact content), and `android-backup` reads an adb-backup header and
+inventories every member of an unencrypted payload. Two broad extractions, run
+by the kickoff: `ios-ileapp` hands a whole iOS full file-system acquisition (a
+tar or a zip) to iLEAPP and keeps every report it writes, a TSV per artefact
+with records, its timeline and the HTML, under `ileapp/`; `android-aleapp`
+does the same for an Android full file-system acquisition with ALEAPP. Their
+`exclusions` say what they do not hold (artefacts no module parses, deleted
+records beyond what a module reads, protected data without its key), and a
+run stopped before its end says partial. And one declared and never run:
+`android-backup-apps`, the broad extraction an adb backup would need, which the
+image cannot do (ALEAPP reads a file-system layout, an adb backup keeps each
+app under `apps/<package>/`), so the harness records the preparation of every
+adb backup declined with that reason instead of a parse that would find next
+to nothing. Every recipe says exactly what it did not cover in
+`coverage.json`. What the harness does with a broad extraction (its receipts,
+the lead that offers one, the hold on a negative that claims absence while it
+runs) is ADR 0013's "A source's broad extraction before a negative on it".
 
 **One goal template**: `phone-examination.md`.
 

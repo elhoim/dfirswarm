@@ -34,7 +34,12 @@
  * evidence as it was (under its questions, resolved through the question
  * register, and the request's own lead) reopened; the answers recorded
  * before it made stale and the acceptances made before it lifted; the
- * catalogue queued when the run's is on; the board told. The journal's
+ * reverse sweep of its files for every standing coverage record's
+ * looked_for strings started once it is committed, never inside it
+ * (extensions/store-sweep.ts: a pass at a time in the hub's background or a
+ * detached step, its hits delivered on the board and to the questions they
+ * bear on, holding nothing); the catalogue queued when the
+ * run's is on; the board told. The journal's
  * `addition_applied` line says all of it is recorded. A process that dies
  * after the commit leaves the rest to the next reconciliation (the hub's
  * round, the next addition, `swarm.sh evidence <run> list`), and the finish
@@ -65,6 +70,7 @@ import * as L from "../extensions/leads.ts";
 import * as P from "../extensions/protocol.ts";
 import * as Q from "../extensions/questions.ts";
 import * as R from "../extensions/requests.ts";
+import * as SW from "../extensions/store-sweep.ts";
 import { permittedUse, readCasePolicy, type SourceClass } from "./case-policy.ts";
 import { Journal, sealTree, storePaths, type JournalLine } from "./evidence-store.ts";
 
@@ -119,7 +125,19 @@ export type MaterialRecord = {
 /** The run's lock for additions: one commit (and what follows from it) at a time, across processes. */
 export const MATERIAL_LOCK = "material";
 
-type AdditionOptions = { journal?: Journal; catalogue?: (target: string, note: string) => Promise<{ ok: boolean; job?: string; reason?: string }>; catalogueOn?: boolean };
+type AdditionOptions = {
+  journal?: Journal;
+  catalogue?: (target: string, note: string) => Promise<{ ok: boolean; job?: string; reason?: string }>;
+  catalogueOn?: boolean;
+  /** A reverse sweep pass's budget, when not the environment's (tests). */
+  sweepBudget?: { maxBytes?: number; maxMs?: number };
+  /**
+   * Where the reverse sweep runs once the addition is committed, never
+   * inside it: in this process's background (the hub, which goes on), or as
+   * a detached step (the CLI, which exits once it has answered).
+   */
+  reverse?: "background" | "detached";
+};
 
 const sha256Of = (b: string | Buffer) => createHash("sha256").update(b).digest("hex");
 
@@ -440,6 +458,8 @@ export async function applyAddition(sandbox: string, id: string, o: AdditionOpti
   const S = resolve(sandbox);
   const journal = o.journal;
   const P_ = storePaths(S);
+  // Whether the addition's reverse sweep is to be started once it is committed (evidence on the ledger).
+  let reverseDue = false;
   const line = journal.lines.find((l) => ADDED.has(l.type) && l.import === id);
   if (!line) return { ok: false, reason: `import:${id} is not on the store journal: it was never committed` };
   let recordText: string;
@@ -534,6 +554,17 @@ export async function applyAddition(sandbox: string, id: string, o: AdditionOpti
     // Every standing negative, not-determinable or partial answer whose coverage predates it, whether or not a question was named: stale until examined against it (the gate's evidence_stale).
     const staleAnswers = await answersStaledBy(S, entry);
     out.stale_answers = staleAnswers;
+    // The reverse sweep (docs/adr/0013, "Late evidence: the reverse sweep and the delta"): the import's files, and only
+    // they, searched for every standing coverage record's looked_for strings. It runs once the addition is committed and
+    // applied, outside the material lock, a pass at a time within a budget of its own (store-sweep.ts); each pass's hits
+    // follow on the board when it completes, and hold nothing by themselves (the Fable review of the limits branch, P2-4).
+    let reverse: { records: number; terms: number } | null = null;
+    if (external.ok && external.entry.hash) {
+      reverseDue = true;
+      const standing = SW.recordsStandingAt(await P.readLedger(S), external.entry.seq);
+      reverse = { records: standing.length, terms: new Set(standing.flatMap((c) => (c.looked_for ?? []).map((t) => t.toLowerCase()))).size };
+      out.reverse_sweep = { runs: o.reverse === "detached" ? "as a detached step" : "in the background", ...reverse };
+    }
     const arrival = rec.questions?.length ? await Q.recordEvidenceArrival(S, rec.questions, { import: `import:${id}`, request: rec.request ?? null, inventory_rev: inventoryRev, why, ...(rec.ledger_seq !== undefined ? { ledger_seq: rec.ledger_seq } : {}) }).catch((err: Error) => { pending.push(`the questions' arrivals (${err.message})`); return { recorded: [] as string[], unknown: [] as string[] }; }) : { recorded: [], unknown: [] };
     out.reopened = { leads: reopened, questions: arrival.recorded, ...(arrival.unknown.length ? { unknown_questions: arrival.unknown } : {}) };
     // Catalogued when the run's catalogue is on and a catalogue is at hand: a detect pass over each file, as the system's own, once.
@@ -559,8 +590,13 @@ export async function applyAddition(sandbox: string, id: string, o: AdditionOpti
         `It is readable now, read-only, at store/imports/${id}/out/ (every seat's VM mounts the run's directory live), and jobs read it as import:${id}/<file>. Cite it as import:${id}/<file> however you read it: its class and provenance are its ledger entry's, not the path you read it by.`,
         reopened.length ? `Reopened: ${reopened.join(", ")}.` : "",
         arrival.recorded.length ? `Answers to ${arrival.recorded.join(", ")} recorded before it are stale until recorded again, and an acceptance made before it no longer stands.` : "",
+        reverse
+          ? reverse.records
+            ? `The reverse sweep runs now, outside this addition: import:${id}'s files searched for the ${reverse.terms} string(s) of the ${reverse.records} coverage record(s) standing at it, a pass at a time; each pass's hits follow on the board when it completes. A hit is a string a coverage record looked for, found in the new files: weigh it for its question; it holds nothing by itself.`
+            : `No coverage record standing at it names looked_for strings: the reverse sweep has nothing to search import:${id} for.`
+          : "",
         staleAnswers.length
-          ? `Now stale, whatever question the evidence was added for: ${staleAnswersWords(staleAnswers)}. Each is examined against import:${id} before it stands: a coverage record naming import:${id} among its objects (with what the search found there, or why it cannot bear on the question) that another seat reviews, then the answer again citing it; or the answer again citing an entry that rests on the new evidence and that another seat has attested. A review made before this evidence does not count for an answer recorded after it. Until then the finish line holds it (evidence_stale), unless the operator accepts the question's limits now.`
+          ? `Now stale, whatever question the evidence was added for: ${staleAnswersWords(staleAnswers)}. Each is examined against import:${id} before it stands, and the examination says how the new evidence bears on the answer: record what it shows as an entry whose refs name the import's files, with a delta, rel [{to: <the answer's seq>, kind: supports | contradicts | adds_part | irrelevant | inconclusive}]; a coverage record naming import:${id} among its objects and that entry among its results, which another seat reviews; then the answer again citing it (or the answer again citing that entry, once another seat has attested it). A citation of the import is not an examination of it. A review made before this evidence does not count for an answer recorded after it. Until then the finish line holds it (evidence_stale), unless the operator accepts the question's limits now.`
           : "",
         `It is on the ledger as E-${entry ?? "?"} (kind external, class acquired_evidence).`,
       ].filter(Boolean).join(" "),
@@ -571,6 +607,7 @@ export async function applyAddition(sandbox: string, id: string, o: AdditionOpti
   }
   if (notes.length) out.notes = notes;
   if (pending.length) {
+    if (reverseDue) startReverseSweep(S, o);
     out.complete = false;
     out.pending = pending;
     out.pending_note = "committed: the addition is sealed and on the store journal; what is pending is recorded at the next reconciliation (the hub's round, the next addition, or swarm.sh evidence <run> list), and the finish line holds a done until it is";
@@ -578,7 +615,14 @@ export async function applyAddition(sandbox: string, id: string, o: AdditionOpti
   }
   await journal.append({ type: "addition_applied", import: id, entry, ...(out.reopened ? { reopened: (out.reopened as { leads: string[] }).leads, questions: (out.reopened as { questions: string[] }).questions } : {}), ...(rec.request ? { request: rec.request } : {}) });
   out.complete = true;
+  if (reverseDue) startReverseSweep(S, o);
   return out;
+}
+
+/** The reverse sweeps started, never awaited: in this process's background, or as a detached step (AdditionOptions.reverse). */
+function startReverseSweep(S: string, o: AdditionOptions): void {
+  if (o.reverse === "detached") SW.detachReverseSweeps(S);
+  else void SW.reverseSweepInBackground(S, o.sweepBudget ?? {});
 }
 
 /**
@@ -616,7 +660,12 @@ async function main(argv: string[]): Promise<void> {
     const i = rest.indexOf("--hub-admin");
     const hub = i >= 0 ? rest[i + 1] : undefined;
     const QC = await import("./questions-cli.ts");
-    const replayed = await QC.admit(S, hub, { op: "material_reconcile" }, async () => ({ ok: true, applied: await reconcileAdditions(S) })).catch((err: Error) => ({ ok: false, reason: err.message }));
+    const replayed = await QC.admit(S, hub, { op: "material_reconcile" }, async () => {
+      const applied = await reconcileAdditions(S, { reverse: "detached" });
+      // A reverse sweep left undone (a pass its budget ended, a step that died): continued as a step of its own.
+      if ((await SW.pendingImportSweeps(S).catch(() => [])).length) SW.detachReverseSweeps(S);
+      return { ok: true, applied };
+    }).catch((err: Error) => ({ ok: false, reason: err.message }));
     const list = await listMaterial(S);
     emit({ ok: true, material: list, ...((replayed as { applied?: unknown[] }).applied?.length ? { replayed: (replayed as { applied: unknown[] }).applied } : {}), ...(replayed.ok === false ? { replay_failed: (replayed as { reason?: string }).reason } : {}) });
   }
@@ -655,7 +704,8 @@ async function main(argv: string[]): Promise<void> {
     supplied_by: Q.originWords(Q.originOf(actor)),
     via,
   };
-  const r = await QC.admit(S, one("--hub-admin"), { op: "material", request: req }, () => admitMaterial(S, req));
+  // With no hub running the addition is made here, and this process exits once it has answered: its reverse sweep runs as a step of its own.
+  const r = await QC.admit(S, one("--hub-admin"), { op: "material", request: req }, () => admitMaterial(S, req, { reverse: "detached" }));
   emit(r);
 }
 

@@ -1,0 +1,40 @@
+{
+  "case": "A run sealed by custody (the verdict set aside as custody.<time>.json, as a resume does), continued (question 2 revised from partial to established on a new finding), and sealed again.",
+  "design": [
+    "docs/adr/0013 decision 12: a resume appends to the same registers, never rewrites them; every earlier verdict verifies as a prefix of the chains.",
+    "The limits spec, rules: hash-chained registers stay verifiable, and earlier seals verify as a prefix."
+  ],
+  "policies": [
+    "as run"
+  ],
+  "expect": {
+    "questions": {
+      "question:1": {
+        "disposition": "established",
+        "best_candidate": false,
+        "readiness_holds": false,
+        "defects_include": [],
+        "warnings": []
+      },
+      "question:2": {
+        "disposition": "established",
+        "best_candidate": false,
+        "readiness_holds": false,
+        "defects_include": [],
+        "warnings": []
+      }
+    },
+    "ready": true,
+    "verdict": {
+      "proceed": true,
+      "outcome": "completed"
+    },
+    "done": "proceeds",
+    "late": [],
+    "seals": {
+      "verdicts": 2,
+      "hold": 2
+    },
+    "agreement": []
+  }
+}

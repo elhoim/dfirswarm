@@ -1,0 +1,81 @@
+{
+  "id": "disk-timeline",
+  "version": "1.0.1",
+  "description": "A broad extraction of a disk image: Plaso's log2timeline over every partition and volume with every parser it carries, then psort's CSV super timeline, the searchable form of what the image's artefacts say happened when. It takes hours on a large image, so it is offered, not run by itself.",
+  "object": "disk image",
+  "order": 12,
+  "min_bytes": 65536,
+  "suffixes": [
+    ".e01",
+    ".ex01",
+    ".dd",
+    ".img",
+    ".raw",
+    ".vhd",
+    ".vhdx",
+    ".vmdk",
+    ".qcow2"
+  ],
+  "magic": [
+    {
+      "offset": 0,
+      "hex": "455646090d0aff00"
+    },
+    {
+      "offset": 0,
+      "hex": "455646320d0a8100"
+    },
+    {
+      "offset": 510,
+      "hex": "55aa"
+    },
+    {
+      "offset": 512,
+      "hex": "4546492050415254"
+    },
+    {
+      "offset": 3,
+      "hex": "4e54465320202020"
+    },
+    {
+      "offset": 0,
+      "hex": "7668647866696c65"
+    },
+    {
+      "offset": 0,
+      "hex": "4b444d56"
+    },
+    {
+      "offset": 0,
+      "hex": "514649fb"
+    }
+  ],
+  "runtime": "python3",
+  "entry": "run.py",
+  "auto": [],
+  "purpose": "broad_extraction",
+  "capability": "disk-super-timeline",
+  "exclusions": [
+    "volume shadow copies: it runs with --vss_stores none (the windows-forensics pack's vss tools read them)",
+    "encrypted volumes (BitLocker, LUKS, FileVault, encrypted APFS) without their key",
+    "unallocated space and deleted file contents: Plaso parses allocated files and the metadata its parsers read, and carves nothing",
+    "formats no parser of the pinned Plaso handles, and the text inside documents"
+  ],
+  "limits": {
+    "seconds": 14400
+  },
+  "outputs": [
+    "timeline.plaso",
+    "timeline.csv",
+    "log2timeline.stdout",
+    "log2timeline.stderr",
+    "log2timeline.log.gz",
+    "psort.stdout",
+    "psort.stderr",
+    "psort.log.gz",
+    "index.tsv",
+    "coverage.json"
+  ],
+  "covers": "What log2timeline's parsers read from every partition and volume of the image, written by psort as one CSV timeline; the storage file is kept for psort and pinfo. A parser that finds nothing adds no row, which does not show the artefact never existed.",
+  "sha256": "eb17ffeea6c9f842cf46a0000d004fb8c887f45e921a8e7762bdee73c89d7659"
+}

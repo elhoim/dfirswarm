@@ -1,3 +1,8 @@
+---
+premises:
+  - inputs/Webserver.E01 is an image of the Linux web server of the OSDFCon 2019 Linux forensics workshop, case 1 (VulnOSv2, LVM). [scope: entities inputs/Webserver.E01]
+  - The web server was compromised by a threat actor. [scope: entities inputs/Webserver.E01; questions 1, 2, 3, 4]
+---
 > From [docs/use-cases/dfir-l01-compromised-web-server](../../docs/use-cases/dfir-l01-compromised-web-server/README.md): the goal document a real run was given,
 > and what that run produced is written up beside it. The evidence filenames below are
 > the ones that case had — change them, and the checks that name them, for yours.

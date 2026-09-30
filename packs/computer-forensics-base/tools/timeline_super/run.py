@@ -18,6 +18,13 @@ The second is the timezone. Plaso writes UTC, but it needs the evidence
 machine's own zone to interpret the formats that store local time. Getting it
 wrong shifts a whole class of artefacts and nothing in the output says so,
 which is why the zone used is returned with the result.
+
+And a log each. Plaso writes its log to the working directory unless told
+otherwise (log2timeline-<timestamp>.log.gz), and the working directory is the
+run's, read-only in an agent's VM and in a job's worker: there log2timeline
+fails on the log before it has parsed anything. Each is given its log in
+out_dir with --logfile, which Plaso's tools have taken (with --log_file and
+--log-file as its aliases) since at least 20180818.
 """
 import datetime
 import json
@@ -102,8 +109,10 @@ def main():
     os.makedirs(out_dir, exist_ok=True)
     store = os.path.join(out_dir, "timeline.plaso")
     output = os.path.join(out_dir, "timeline.jsonl")
+    collect_log = os.path.join(out_dir, "log2timeline.log.gz")
+    export_log = os.path.join(out_dir, "psort.log.gz")
 
-    collect = [l2t, "--status_view", "none", "--partitions", "all", "--volumes", "all",
+    collect = [l2t, "--status_view", "none", "--logfile", collect_log, "--partitions", "all", "--volumes", "all",
                "--unattended", "--quiet"]
     if args.get("parsers"):
         collect += ["--parsers", str(args["parsers"])]
@@ -118,9 +127,9 @@ def main():
              after_seconds=timeout, command=" ".join(collect), partial_storage=store)
     if first.returncode != 0 and not os.path.isfile(store):
         fail("log2timeline failed", exit_code=first.returncode,
-             stderr=(first.stderr or "").strip(), command=" ".join(collect))
+             stderr=(first.stderr or "").strip(), command=" ".join(collect), log=collect_log)
 
-    export = [psort, "--status_view", "none", "-o", "json_line", "-w", output]
+    export = [psort, "--status_view", "none", "--logfile", export_log, "-o", "json_line", "-w", output]
     if args.get("psort_filter"):
         export += ["--filter", str(args["psort_filter"])]
     export += [store]
@@ -130,7 +139,7 @@ def main():
         fail("psort did not finish in time", after_seconds=timeout, storage=store)
     if second.returncode != 0 and not os.path.isfile(output):
         fail("psort failed", exit_code=second.returncode,
-             stderr=(second.stderr or "").strip(), command=" ".join(export))
+             stderr=(second.stderr or "").strip(), command=" ".join(export), log=export_log)
 
     events, head = 0, []
     first_event = last_event = None
@@ -168,6 +177,7 @@ def main():
         "source": source,
         "storage_file": store,
         "output": output,
+        "logs": [p for p in (collect_log, export_log) if os.path.isfile(p)],
         "events": events,
         "first_event": first_event,
         "last_event": last_event,

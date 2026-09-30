@@ -1,3 +1,7 @@
+---
+premises:
+  - inputs/StealthyADS.E01 is an image of a Windows machine prepared to test NTFS alternate data streams. [scope: entities inputs/StealthyADS.E01]
+---
 > From [docs/use-cases/dfir-c04-alternate-data-streams](../../docs/use-cases/dfir-c04-alternate-data-streams/README.md): the goal document a real run was given,
 > and what that run produced is written up beside it. The evidence filenames below are
 > the ones that case had — change them, and the checks that name them, for yours.

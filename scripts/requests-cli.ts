@@ -141,7 +141,8 @@ async function main(argv: string[]): Promise<void> {
       const s = await R.requestsSnapshot(S);
       const m = /^R-?([1-9]\d{0,6})$/i.exec(String(pos[0] ?? "").trim());
       const r = m ? s.requests.get(`R-${Number(m[1])}`) : undefined;
-      if (r && r.kind !== "decision") emit({ ok: false, reason: `${r.rid} is a ${r.kind} request: ${r.kind === "lead" ? `answer it on its lead (swarm.sh lead <run> note ${r.lead} TEXT), which reopens the lead` : r.kind === "clarification" ? `answer it on its question (swarm.sh question <run> clarify-reply ${String(r.line.q)} ${String(r.line.id)} TEXT)` : r.kind === "network" ? `grant or deny it (swarm.sh net <run> grant|deny)` : "supply the evidence (swarm.sh evidence <run> add PATH --for " + r.rid + " --why TEXT), or say it is unavailable or declined"}` });
+      // A stop proposal is answered on the request; so is a premise dispute, whose ruling (the premise stands, and why) forces no answer either way.
+      if (r && r.kind !== "decision" && r.kind !== "premise") emit({ ok: false, reason: `${r.rid} is a ${r.kind} request: ${r.kind === "lead" ? `answer it on its lead (swarm.sh lead <run> note ${r.lead} TEXT), which reopens the lead` : r.kind === "clarification" ? `answer it on its question (swarm.sh question <run> clarify-reply ${String(r.line.q)} ${String(r.line.id)} TEXT)` : r.kind === "network" ? `grant or deny it (swarm.sh net <run> grant|deny)` : "supply the evidence (swarm.sh evidence <run> add PATH --for " + r.rid + " --why TEXT), or say it is unavailable or declined"}` });
       await act(pos[0], { ev: "answered", by: await who(), text });
       return;
     }

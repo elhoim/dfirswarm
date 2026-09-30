@@ -573,7 +573,458 @@ by another seat, under that question's leads.
   machine line's `warnings`, the finish gate's, the verdict's note, and
   now readiness, apart from its items, so `finish status` shows them to
   the coordinator before its done. None makes readiness not ready or
-  refuses a done.
+  refuses a done. (Since then they are delivered where the decision is
+  made: the next section.)
+
+## Warnings where the decision is made
+
+The three warnings were said in the answers check, the finish gate, the
+verdict's note and `finish status`: to the coordinator, at the end, after
+the seats that could act on them had moved on. On s993d40 the reviewers who
+held a partial answer whole, and the seat that recorded an answer leaving
+out what its question's leads had established, were told nothing at the
+moment they decided. The brainstorm of 2026-09-29 (L3) agreed to make the
+existing warnings land where the decision is made, and to measure that,
+before any new rule.
+
+- **Four points, never blocking.** Each point asks the same gate over the
+  same inputs as readiness, for the questions readiness reads, and says the
+  warnings in the words `finish status` says them with (`finish.ts`
+  `warningsAt`, `gateInputs`; `protocol.ts` `warningWords`):
+  - the reply to the record that writes a question's answer: every warning
+    on that question (`warnings` in the reply; their codes, `warned`, on
+    the trace);
+  - the review offered for the answer, as the offer reaches its seat, and
+    the reply to an attest: on the answer, on a coverage record a negative
+    answer rests on (each negative resting on it), or on an entry a warning
+    names (an entry an answer leaves out, now held by two seats). Reviews
+    are offered to one seat for a limiting route and a material negative
+    only (ADR 0015); an established or partial answer has no offer, so its
+    reviewer is told in the reply to its attest. `partial_all_parts_established`
+    is made by the reviews, so the first point that can say it is the reply
+    to the attest that makes it;
+  - the reply to a lead's close, or to a confirmation of one (the closer's
+    `lead_confirm`, one lead or a batch): the warnings of each question the
+    lead serves that the act changed, by what it recorded under the lead
+    (its ref and results), as they stand after it. The gate is read twice
+    on one snapshot, with the act's events and without them, so nothing
+    else that moved meanwhile is laid at its door (`closeChanged`); a close
+    that changes nothing says nothing. On s993d40 the closes of question
+    6's leads after its answer and its reviews added the two entries two
+    seats held there (E-84, E-93) to its warning, and only those closes'
+    replies and finish status said them;
+  - `finish status`, as before.
+
+  A point says what the gate warns of at that moment. A warning that
+  arises later (a finding attested after the answer) is said at the next
+  point that bears on it, and always in `finish status`. A warning is
+  never a refusal and never an item.
+- **What the record ties to a question, wherever it was recorded.**
+  `lead_findings_uncited` covers every standing finding or event, under no
+  dispute in force, that the question's answer does not reach and that is
+  tied to the question:
+  - one two seats hold (a second author, or another seat's attest) that
+    the lead register recorded under a lead of the question, or that
+    names the question in its own `answers`, or whose `rel` supports or
+    contradicts an entry the answer cites, or weighs late evidence
+    against it (a delta kind; `answerCites`: its support, contrary,
+    limitations and a downgrade's evidence, the correction standing for
+    each): a `rel` that `duplicates` an entry or is `derived_from` one
+    says what it repeats or comes from, and ties it to nothing (the Fable
+    review of the limits branch);
+  - one seat's, only when it names the question in its own `answers` and
+    another question's standing answer relies on it (reaches it, directly
+    or through what that answer cites): its author tied it to this
+    question, and the record already rests a conclusion on it. The
+    motivating case is of this shape: a method established under another
+    question's lead, which that question's answer cites.
+
+  One seat's entry that no answer relies on does not count, and neither
+  does one tied by a lead or by `rel` alone (`questionUncited`). Counting
+  every finding a seat tags with a question (a rule tried on this branch
+  and replaced) warned every question of s993d40 and of sa2f2f2, up to 18
+  entries each: warning fatigue. Each entry is listed with its tie:
+  "under L-n", "that names Q-n", "whose rel supports E-m, which the answer
+  cites", or "that names Q-n, held by one seat, relied on by the answer to
+  Q-m"; the warning reads "answer #n (question:q) leaves out what the
+  record ties to Q-q: …", every entry, however many. A lead register whose
+  chain is broken says nothing of the leads; the ledger's own ties still
+  count. Registers and refs only, nothing read of what an entry says.
+- **Replayed** (this checkout, values-free, entries by id):
+  - s993d40. Q-1: 4 (E-20, E-31, E-36, E-75), one seat's, relied on by
+    the answers to Q-2 and Q-6. Q-2: 4 (E-10, E-13, E-16, E-35), one
+    seat's, relied on by Q-1's. Q-3: 1 (E-57), relied on by Q-5's. Q-4: 6
+    (E-57, E-84, E-85, E-86, E-91, E-92): E-84 two seats' (established
+    under question 6's leads, naming question 4), five one seat's relied
+    on by Q-1's, Q-2's or Q-5's. Q-5: 2 (E-96, E-98), relied on by Q-4's.
+    Q-6: 9 (E-10, E-13, E-15, E-18, E-22, E-30, E-35, E-84, E-93): E-84
+    and E-93 two seats' under its leads, seven one seat's relied on by
+    Q-1's, Q-3's or Q-5's.
+  - sa2f2f2. Q-1: 4 (E-26, E-29, E-31, E-35), relied on by Q-6's. Q-4 and
+    Q-6: 1 each (E-82), relied on by Q-5's. Q-2, Q-3 and Q-5: none.
+  - Under the two-seat rule s993d40 warned Q-4 (1 entry) and Q-6 (2) and
+    sa2f2f2 nothing; counting every finding a seat tags warned 46 entries
+    on s993d40 and 55 on sa2f2f2; this rule, 26 and 6. Whether the answers
+    get better for it is for paired runs.
+- **Request guidance.** Under `more_evidence: no` nothing suggests an ask
+  (verified; the rule is "No ask to satisfy a rule" above): the record's
+  reply, the warning and the prompt give `acquisition_none_why` naming the
+  policy. A value read from an image is cited from the output of a job
+  that read the image (an OCR tool run over the input), never from a
+  transcription typed into a command: the network's refusal said so (ADR
+  0012); the prompt and the `net_request` tool say it now. A question put
+  to the operator (a `needs_operator` close that is not an acquisition)
+  says what observation would settle its question and what each possible
+  answer changes (which answer, to which result): the prompt, the
+  `lead_close` tool and the close's reply (`guidance`) say it. Guidance
+  only: the harness does not read a ref's words.
+- **Measured, not assumed.** `swarm.sh replay --deliveries` reads, act by
+  act, which warnings each point would have carried, on the registers as
+  they stood at each act (ADR 0017, "Measuring a rule change"); the
+  contract fixtures `warnings-delivered`, `lead-findings-tied`,
+  `lead-close-delivered` and `no-ceremonial-ask` hold each point to this
+  section. Whether the agents
+  act on them is for paired runs: fewer complete answers left partial, and
+  no rise in false established.
+
+## A source's broad extraction before a negative on it
+
+On the Belka runs four of five false negatives rested on a row no job had
+ever produced. The iPhone's tar was catalogued at the kickoff by the mobile
+pack's recipe, which inventories the tar and "parses no artifact content",
+and then read narrowly, one database at a time; the whole-source parse the
+pack's own programs can do was an agent's choice that nobody made. The hub's
+object coverage called a search complete as soon as a job had declared the
+tar. The brainstorm of 2026-09-29 (L1) agreed that the packs say which of
+their recipes parse a whole source, that the harness offers that work per
+source and records what became of it, and that the reviewer of a negative
+reads that first. Whether a negative waits for it was left open; the call
+recorded with the limits plan is the narrow one: only a negative that
+claims absence, or claims complete coverage over the source, waits, and
+only while the extraction is under way.
+
+- **What a pack declares.** A recipe says its `purpose`: `inventory` (it
+  lists what a source holds) or `broad_extraction` (it parses the whole
+  source into a searchable form). A broad extraction names the
+  `capability` it prepares and lists its `exclusions`, what it does not
+  hold; one the job images cannot run says why (`unavailable`), has no
+  trigger, and the job service refuses it by name with that why. A recipe
+  that says nothing is an inventory. The shipped recipes, read as they are:
+  disk-volumes, archive-members, ios-filesystem, android-backup and
+  static-binary inventory; memory-windows (the standard views of a memory
+  image), linux-target (the Linux artefact plugins over a disk) and
+  network-capture (every packet's fields) are broad extractions. New:
+  mobile-forensics/ios-ileapp and android-aleapp (every artefact module of
+  the pack's iOS or Android parser over a whole file-system acquisition,
+  run by the kickoff), mobile-forensics/android-backup-apps (declared
+  unavailable: nothing in the mobile image parses an adb backup's app tree
+  as a whole, so its preparation is declined, with that why, rather than
+  faked), and computer-forensics-base/disk-timeline (a super timeline of a
+  whole disk image; hours on a large image, so offered, not run by
+  itself). The programs are already in the images; no image changes. The
+  harness reads the declarations and names no program.
+- **What applies.** The census asks every broad extraction about every
+  input whatever its `auto`, and lists each that applies in plan.json's
+  `preparations` (the recipe, its capability, whether the kickoff runs it,
+  and the pack's why when it cannot run); the input's row and the
+  catalogue's README say it. Evidence added later is asked by the system's
+  detect pass over each file. A detect pass never runs a broad extraction
+  its pack does not mark `auto`, or one that cannot run: the first is
+  offered, the second declined, and an agent that asked for the pass is
+  told.
+- **Offers, one per source digest and capability.** One the pack marks
+  `auto` runs without an agent (the kickoff's lane) and needs no offer.
+  Every other is offered as a lead of its own (`openPreparationLead`): the
+  harness's, unheld, serving no question and not material (it holds the
+  finish only through the negatives on its source), with the route
+  {source, recipe}, the source among its objects, what it prepares and
+  excludes in its why, and the next action, catalog_request with the
+  recipe; it is offered to the seat idle longest, as any lead nobody holds.
+  It is not offered when the same capability over the same bytes is queued,
+  running or sealed, or on the record in any state. The seat that takes it
+  runs it, or closes it deferred, infeasible or needs_operator citing a
+  limitation that says why it is not run: that is the preparation's
+  decline, with the seat's why. A seat's close of it any other way
+  (resolved, duplicate, negative) with nothing that ran the extraction or
+  runs it now is its decline too, and the receipt says how it was closed
+  and that nothing ran it (the Fable review of the limits branch found it
+  left no receipt, the hold in place, and a fix that named the closed
+  lead). A lead whose extraction reached an outcome by any route (the
+  lane, a seat under the lead or not) is closed by the harness, withdrawn,
+  citing the receipt, while no seat holds it: a held lead is its holder's
+  to close.
+- **Receipts, on the store journal.** `type: preparation`, one line per
+  step: planned (queued as a job, or offered as a lead), attempted (its
+  job started), produced, partial or failed (its job ended: the generation,
+  the output manifest's digest, files and bytes, and what this run of it did
+  not cover beside what the recipe excludes), declined (declared
+  unavailable, refused by the kickoff's queue with the refusal's words, or a
+  seat's decline). Each names the source snapshot by digest, the recipe, its
+  version and sha256, the capability, the job or the lead, and the
+  exclusions. Every recipe job whose recipe is a broad extraction has its
+  receipts, whoever asked for it. The hub writes them each round from what
+  the job service and the lead register already say (`scripts/preparation.ts
+  reconcilePreparation`), each state once: a restart writes nothing twice.
+  Produced never means complete: the exclusions say what it does not hold,
+  and a module that found nothing wrote no report. No new register: the
+  journal is already chained, sealed by custody, bound by a release and
+  carried by a package.
+- **The hold, `preparation_pending`.** A material negative (a bounded
+  negative, not determinable, a premise rejected on a search alone) holds
+  while a source's broad extraction is planned or attempted when the answer
+  says the event did not happen (`asserts_absence`), or a coverage record it
+  cites is complete (the hub's object coverage) and names that source, or
+  a directory holding it. It is a defect with its fix: the job to wait for,
+  or the lead to run or decline (never a closed one: its close is recorded
+  as the decline at the hub's next round, or the extraction is run
+  directly), or the operator's acceptance of the question. Produced, partial, failed or declined releases it, and a later
+  run of a released capability does not hold again: the hold is a wait on
+  work already queued or offered, never a demand that it succeed or that
+  anything be found, so partial and not determinable stay honest
+  dispositions under every stop policy. The operator's acceptance excuses
+  it (it is not among the negative bar's defects an acceptance never
+  excuses).
+- **The warning, `preparation_missing`.** Every other material negative
+  whose coverage reaches a source whose extraction has not produced is
+  warned, never held: one that names the source or a directory holding it,
+  one that names a member of the source's catalogue, and one that rests on
+  outputs made from the source (followed back through the jobs' declared
+  inputs, as many jobs as it takes; a job that read everything is traced to
+  no source). A held negative is not also warned; once released without
+  producing, it is. The warning names each source's state and exclusions
+  and is delivered at every point the others are (`warningsAt`: the
+  record's reply, the review offer, the attest's reply, finish status).
+- **The review packet.** A negative's review offer opens with the state of
+  the broad extraction of each source it rests on: held, weighed without
+  it, or produced, each with what the extraction does not hold.
+- **The finish revision** moves with each receipt (a decline changes no
+  job), and only in a run that has one.
+
+Replayed (`swarm.sh replay --prepare-as`, values-free, ADR 0017), on
+s5764c4 (Belka): this checkout's census finds two broad extractions that
+apply to its evidence, the mobile pack's over the iPhone tar (run by the
+kickoff) and the base pack's disk timeline over the laptop's image
+(offered as a lead). With both attempted, one of the run's eight negatives
+is held: question 4's, whose coverage record is complete over the tar.
+Seven are warned (questions 10 and 13 to 18), each reaching both images:
+three coverage records name both, four rest on outputs made from both.
+The three that name them are partial, and question 4's is the only
+complete one that names a source. With both produced, nothing is held
+or warned; with both failed, nothing is held and all eight are warned. As
+the run was recorded, with no receipt, nothing changes. Whether the offers
+and the hold make fewer never-produced misses is for paired runs on a
+generated-source fixture and on Belka (the hold arm against offers only).
+
+Not built: an iTunes or Finder backup (a directory of files) as a recipe's
+target, since a recipe is asked about one file; a broad extraction in the
+derived catalogue's lane (its budget is minutes, an iOS parse is an hour).
+Without the job service (a host run, `--no-jobs`) the census runs each
+kickoff recipe where it runs, as it always has (memory-windows, with its
+four hours, among them), the new parses included, and no receipt is kept:
+receipts, offers and the hold are the hub's. The recipes' calls to iLEAPP,
+ALEAPP and Plaso are held to the recipe protocol by stand-ins in the
+tests; they have not yet run against the programs in the images.
+
+## Late evidence: the reverse sweep and the delta
+
+On the calibration run sb1b3c8 the evidence that settled a question came
+late, and the answers stood without it: every stale answer was examined
+again on a coverage record that named the import, another seat reviewed
+each, and the late fact was still missed, with the import cited 28 times.
+The rule above checked that the new evidence was looked at, never what the
+look concluded. The brainstorm of 2026-09-29 (L5) agreed on two things: the
+addition is the moment to run the store sweep the other way, and the
+re-examination says how the new evidence bears on the answer, not only that
+it was cited. A blanket hold on every hit in new bytes was rejected (an
+echoing query or a broad string would multiply work, and the failure had
+the citations already): the hits are delivered, and the delta is what
+clears.
+
+- **The reverse sweep.** When evidence is added (`scripts/material.ts`,
+  after the addition's external entry), the import's files, and only they,
+  are searched for the `looked_for` strings of every coverage record
+  standing at the addition (recorded before its entry, not corrected by
+  then: `recordsStandingAt`, by seqs alone, so a reconciliation long after
+  finds the same records). The search is the store sweep's: bytes and
+  strings, in UTF-8 and UTF-16LE, ASCII case folded, each file streamed
+  whole. Each hit is bound to the records whose strings it holds
+  (`bears_on`). The line is on the sweeps' chain, version 2 with `of:
+  "import"`, bound to the addition's external entry by its hash, with the
+  records (seq, hash, questions, strings); a version 1 line is a coverage
+  record's sweep, read as before (`readSweeps`), and the chain, custody,
+  the release and the package carry both.
+- **After the addition, a pass at a time.** The sweep never runs inside
+  the addition: the addition commits and answers at once, and the sweep
+  runs after it, in the hub's background (a round's pass for each addition
+  not done, never awaited by the round) or, when the CLI made the addition
+  with no hub, as a detached step (`scripts/reverse-sweep.ts`, one at a
+  time) that runs passes until nothing is left or the run ends. A pass has
+  a budget of its own (`SWARM_REVERSE_SWEEP_MAX_SEC`, 120 s;
+  `SWARM_REVERSE_SWEEP_MAX_BYTES`, 2 GiB); what it leaves is named on its
+  line (`left`) and searched by the next pass, whose line continues it
+  (`pass`, `continues`), at the next round, until nothing is left: an
+  object larger than a pass's budget is searched by a pass of its own, and
+  one over the store sweep's own byte budget is named and not searched, as
+  the store sweep names it. Every line names what is not searched yet. The
+  Fable review of the limits branch found the first form awaited inside
+  the addition's lock with the store sweep's budget (16 GiB, 30 minutes),
+  holding the addition's post, the operator's reply and the hub's round as
+  long, and partial for good past it. A pass already recorded is not run
+  again; a failure is run again at the next round.
+- **Where the hits go.** To the re-examination of the questions they bear
+  on, and nowhere as a hold: each pass's board post says its hits by
+  question when it completes (each with the records whose strings it
+  holds), and what the next pass searches; a stale answer's
+  `evidence_stale` says those on its question, first among what to
+  examine; and on a question whose answer the addition does not stale (an
+  established one, or one examined since), a hit in an object no entry the
+  answer reaches names is a warning, `late_evidence_hits`, delivered where
+  every warning is (the reply to the record of the answer, its review offer,
+  the reply to an attest on it, a lead's close that changes it, finish
+  status). A hit is a string a record looked for, found in the new files:
+  the entry that names the object says what it is.
+- **The delta.** `evidence_stale` clears as before (the new evidence
+  examined for the question on a coverage record naming the import, or an
+  entry resting on it, reviewed by another seat) and only when the entry
+  that examined the import carries a delta: a standing entry recorded after
+  the addition whose refs name the import's objects (the import, or a file
+  of it), among the results of a coverage record the answer cites that
+  names the import and another seat reviewed (its reviewer saw it), or
+  cited by the answer (or as its contrary) and attested by another seat,
+  with a `rel` to the question's answer (the one standing when it was
+  written, or its correction) of kind `supports`, `contradicts`,
+  `adds_part`, `irrelevant` (within the question's scope) or `inconclusive`
+  (`deltasFor`). A delta on an entry nobody else looked at, beside a
+  coverage record somebody did, clears nothing: an `irrelevant` costs the
+  same review as any other delta (the Fable review of the limits branch).
+  The report's answer chain says each late delta that neither supports nor
+  contradicts the answer (irrelevant, inconclusive, adds_part). The rel
+  kinds `adds_part`, `irrelevant` and `inconclusive` are new and name an
+  answer (refused otherwise, with why); an entry is recorded with them as
+  with any rel, in the chained core only when present, so an old entry
+  hashes as it did. A `contradicts` delta on a standing answer is an open
+  contradiction until the answer is recorded again; the answer may cite it
+  as contrary evidence. The defect says what it lacks: the records before
+  the addition, those after it that do not name the import, those not yet
+  reviewed, an examination with no delta, the entries that interpret the
+  import with none, and those that carry a delta outside the reviewed
+  examination. The operator's acceptance after the addition still
+  excuses it (`acceptanceExcuses`, unchanged).
+- **Old runs.** The rule reads the registers as they are, so a run from
+  before it replays with its examined-and-reviewed answers stale again
+  where nothing carried a delta; replay says so (ADR 0017). A run resumed
+  under it meets the same defect, with its fix. The reverse sweep is the
+  hub's at an addition: a run from before it has none, and
+  `swarm.sh replay --reverse-sweep` computes, in the copy, what this
+  checkout's sweep would have found at each addition.
+
+Replayed values-free (`swarm.sh replay --compare <c34c6cb> --reverse-sweep`),
+the harness before these rules against this checkout. sb1b3c8's evidence
+came at E-20, before the run's first coverage record (E-31): at the
+addition no record stood with `looked_for`, so the reverse sweep would have
+searched for nothing and delivered nothing, 0 hits on every question. The
+coverage records recorded after it swept the import themselves (the store
+sweep reads every import): records for questions 2, 3, 4 and 6 found their
+strings there, one object each, most of them in the object the record
+already named. Under the delta rule the six answers the addition staled
+(questions 2, 3, 4, 6, 7 and 8) are stale again, none of their examinations
+carrying a delta; questions 7 and 8 lose the partial disposition they had.
+s5764c4 and sa2f2f2 hold no evidence addition, and read the same under both
+harnesses. Whether the delta and the delivered hits make fewer missed late
+corrections is for paired runs (the usb-departure calibration with late
+evidence, `late.reflected`), with wrong reversals counted beside it.
+
+Not built: a complete occurrence index of each hit (the sweep keeps the
+count and the first offset, as the store sweep does); a hold on hits in new
+objects; the delta on a question the addition does not stale (a hit there
+is warned of, and an entry that names the object answers the warning).
+
+## Claim and open-part rows
+
+Added 2026-09-29 (the known-limits plan, item 6). "Partial" was one word
+for a whole answer: on s993d40 and c10 complete answers stood partial on
+what was a case premise, and a review's parts were free text no answer's
+part was named by, so a part the answer never listed could not be seen to
+be missing. The brainstorm of 2026-09-29 (L3 and Astra's B2 and C2) merged
+the claim rows and the stable part ids into one structure.
+
+- **An answer's rows.** `parts: [{id, part, status: established | open,
+  refs, open_by?}]` on an answer to a question: each part the question asks
+  as the answer reads its verbatim revision (the one `question_rev` names),
+  established on the entries in `refs` (at least one), or open with what
+  bounds it in `open_by`: an acquisition ask `R-<n>` (the source that would
+  settle it), a route `L-<n>` (the lead that would examine it), or a
+  limitation or a coverage record `E-<seq>` (a limitation joins the
+  answer's limitations). A premise is never an open part: `open_by: P-<n>`
+  is refused, with where the premise goes instead (the answer's `premises`,
+  ADR 0011 "Premises"). The rows' entries are citations as the reasoning's
+  are. Present-only in the ledger's hashed core, versioned with the entry
+  (version 4), so an answer without them hashes as it did; which rows are
+  open joins the answer's conclusion fields, and its fingerprint, only when
+  it has them.
+- **A partial answer names what is open.** A partial answer with no open
+  part is refused: "record it established or name what is open", the
+  refusal saying the shape. An established answer has no open part
+  (refused: record it partial, or establish the part). The negatives and
+  the other results may carry rows and are not held to them. Partial stays
+  a disposition under every stop policy; the refusal is at record time and
+  holds nothing at the finish line, so a run recorded before it reads as
+  before.
+- **A review's parts by id.** An `answer_review`'s part may name the
+  answer's row it weighs (`id`); one the answer does not carry is refused,
+  as is an id on a review of an answer that carries no rows. A part the
+  question asks that the answer leaves out is a row of the review's own,
+  `missing: true`, never established by the answer. A part without an id
+  reads as it always did, and round 14's `declared_open` still names the
+  entry by which a partial answer declares a part open; a part the answer's
+  own row holds open needs neither. Each new field is in the attestation's
+  hashed record only when given.
+- **What an omitted part does.** On an answer that claims established, a
+  missing part caps an established review as a part held not established
+  does (strengthCaps): the review is attested best_candidate, and the
+  question is held as a best candidate until the answer is recorded again
+  with the part, or says why the question does not ask it. On a partial
+  answer it caps an established review the same way, and a best candidate
+  holds nothing there. Whatever the result, the omission is warned of,
+  `part_omitted`, wherever warnings are delivered, until the answer is
+  recorded again: it stays visible.
+- **Only a part the question asks is open.** On the c10 run s704e4b all
+  six answers were partial, and three were complete answers whose open
+  parts were mostly what the question does not ask: detail beyond it,
+  negatives for example categories the evidence does not show, an
+  exhaustiveness no evidence could close, hedges on direction. An open part
+  is a part the question asks; the rest are limitations, and the record
+  tool, its refusal and the prompt say so (a question that asks for a
+  complete set is held to its completeness coverage, not to an open part).
+  A review marks a part the answer holds that the question does not ask
+  `not_asked: true` (established false, never with `missing`, in the
+  attestation's hashed record only when given): it caps nothing, on a
+  partial answer or one that claims established. A partial answer whose
+  every part its reviews weigh is established, but for those a review marks
+  not asked, with at least one review attesting it established, is warned
+  (`partial_all_parts_established`, wherever warnings are delivered): record
+  it established, with the unasked parts among its limitations. A warning,
+  never a hold and never a promotion: the answer stands as its recorder
+  recorded it (Astra's "never promote automatically").
+- **Where it shows.** The report shows each answer's rows against the
+  revision it answers (the question's words beside them), a part a review
+  says it leaves out, and a part a review says the question does not ask;
+  the console's Questions tab and
+  `questions/questions.md` show the rows, the premises the answer cites and
+  the omitted parts; `ledger.md` shows both on the answer.
+
+Replayed values-free (`swarm.sh replay --compare <be4e6a3> <this
+checkout>`), s5764c4 (Belka, 18 questions), sa2f2f2 and sb1b3c8 read the
+same under both harnesses: no difference in any question's disposition,
+defects, warnings, readiness or report, their partial answers (without
+rows) disposed as before. Every contract fixture recorded before the rows
+reads the same under both (tests/contract-fixtures.test.ts). Whether the
+rows make fewer complete answers stand partial is for paired runs.
+
+Not built: a recorded result derived from what the reviews hold open (L3-A:
+Astra's "never promote automatically" stands until the warnings are shown
+insufficient), and a check that the rows cover the question's words (the
+review's `missing` is the check).
 
 ## Consequences
 
@@ -588,6 +1039,17 @@ by another seat, under that question's leads.
   has none. "It did not happen" needs the evidence for saying so.
 - A case can grow without losing its custody: further questions after a
   stop are the same run's, and the releases say which chains each one bound.
+- A negative over a source whose pack parses it whole waits only while
+  that parse is under way, and only when it claims absence or complete
+  coverage; every other says it was weighed without it. A pack that
+  declares nothing changes nothing.
+- Evidence added late is searched at once for what the standing coverage
+  looked for, and an answer it stales stands again only on an entry that
+  says how the evidence bears on it. A citation of the import no longer
+  clears it; a hit never holds by itself.
+- A partial answer now says which part is open and what bounds it, and a
+  review can say which part of the question an answer leaves out; an
+  answer recorded before the rows reads as it did.
 - Not decided here: the acquisition lane and notifications as sealed
   material (Phase 1b), the full offer protocol and the reviewer's query
   (Phase 2), the report's per-question chains (Phase 3), and the mediated

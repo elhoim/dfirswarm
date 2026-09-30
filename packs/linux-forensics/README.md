@@ -33,7 +33,11 @@ roots held in LVM, one complete file per artefact family).
 
 **One recipe.** `linux-target` recognises a Linux disk and builds those Linux
 artefact-family files automatically; the base pack's `disk-volumes` recipe
-still supplies partition tables, file lists and MAC timelines.
+still supplies partition tables, file lists and MAC timelines. It is the pack's
+broad extraction of a Linux disk (`purpose: broad_extraction`), and its
+`exclusions` say what it does not hold: application data no selected plugin
+parses, deleted and unallocated data, and encrypted volumes without their key;
+an empty plugin result never shows the artefact was absent.
 
 **Two goal templates**: `server-compromise.md`, `what-was-scheduled.md`.
 

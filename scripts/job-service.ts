@@ -45,6 +45,7 @@ import type { Mount, WorkerSpec } from "./vm.ts";
 import { jobNetworkHosts } from "./net-grants.ts";
 import { indexOutputs, objectsMatch, opMatch, rankSimilar, reuseOf, sameAsOf, sameAsView, type Reuse, type SameAs, type Similar } from "./job-reuse.ts";
 import { derivedFrom, derivedSensitivity, ownSensitivity, sensitiveIndex, snapshotObjects, type Sensitivity } from "./output-hygiene.ts";
+import { writeRefused, writeRefusedWords, type WriteRefused } from "./job-write-refused.ts";
 
 export type JobKind = "tool" | "command" | "recipe" | "detect" | "import";
 
@@ -275,6 +276,13 @@ export type JobRecord = {
    * in, for the images' upkeep; generic, never a tool's own message.
    */
   program_missing?: { program: string | null; profile: string | null; image: string };
+  /**
+   * A write its worker refused (job-write-refused.ts): it ended non-zero and
+   * its stdout, stderr or a stderr file it kept says "Read-only file system",
+   * or "Permission denied" on a path outside what it may write. Its reason
+   * says so, names $OUT, and says what to do; generic, never a tool's own.
+   */
+  write_refused?: WriteRefused;
   /** Its outputs are sensitive, decided when they were sealed (output-hygiene.ts): run with secret_output, or made from a sensitive output. */
   sensitive?: Sensitivity;
 };
@@ -283,9 +291,33 @@ export type JobRecord = {
  * minBytes, suffixes and magic: what the recipe says it is worth being
  * offered (recipe.json min_bytes, suffixes, and magic, bytes at an offset),
  * so the harness picks no file by its own measure and knows no format: it
- * compares what the recipe wrote.
+ * compares what the recipe wrote. purpose, capability, exclusions and
+ * unavailable: what the pack declares the recipe prepares
+ * (extensions/preparation.ts): an inventory, or a broad extraction of a
+ * whole source into a searchable form, the capability it prepares (its id
+ * when none is named), what it does not hold, and, for one the job images
+ * cannot run, why (it is never run, and each source it applies to has its
+ * preparation declined with that why).
  */
-export type RecipeInfo = { id: string; dir: string; runtime: string; entry: string; sha256: string; seconds: number; auto: string[]; experimental?: boolean; minBytes?: number; suffixes?: string[]; magic?: Array<{ offset: number; bytes: Buffer }> };
+export type RecipeInfo = {
+  id: string;
+  dir: string;
+  runtime: string;
+  entry: string;
+  sha256: string;
+  seconds: number;
+  auto: string[];
+  experimental?: boolean;
+  minBytes?: number;
+  suffixes?: string[];
+  magic?: Array<{ offset: number; bytes: Buffer }>;
+  version?: string;
+  description?: string;
+  purpose?: "inventory" | "broad_extraction";
+  capability?: string;
+  exclusions?: string[];
+  unavailable?: string;
+};
 
 /** The requester the derived catalogue's work runs as: the lowest lane. */
 export const DERIVED = "derived";
@@ -668,11 +700,30 @@ export class JobService {
         if (pid !== m[1]) continue;
         const dir = join(pack, "recipes", m[2]);
         try {
-          const r = JSON.parse(await readFile(join(dir, "recipe.json"), "utf8")) as { runtime?: string; entry?: string; sha256?: string; limits?: { seconds?: number }; auto?: string[]; min_bytes?: number; suffixes?: string[]; magic?: Array<{ offset?: number; hex?: string }> };
+          const r = JSON.parse(await readFile(join(dir, "recipe.json"), "utf8")) as { runtime?: string; entry?: string; sha256?: string; limits?: { seconds?: number }; auto?: string[]; min_bytes?: number; suffixes?: string[]; magic?: Array<{ offset?: number; hex?: string }>; version?: string; description?: string; purpose?: string; capability?: string; exclusions?: unknown[]; unavailable?: string };
           const entry = join(dir, String(r.entry ?? ""));
           const sha = sha256Hex(await readFile(entry));
           if (r.sha256 && r.sha256 !== sha) return null;
-          return { id, dir, runtime: r.runtime === "python3" ? "python3" : "bash", entry, sha256: sha, seconds: Number(r.limits?.seconds ?? 900), auto: r.auto ?? [], minBytes: Number(r.min_bytes ?? 0) || 0, ...(Array.isArray(r.suffixes) ? { suffixes: r.suffixes.map((x) => String(x).toLowerCase()) } : {}), ...(Array.isArray(r.magic) ? { magic: r.magic.filter((m) => Number.isInteger(m.offset) && /^([0-9a-f]{2})+$/i.test(m.hex ?? "")).map((m) => ({ offset: Number(m.offset), bytes: Buffer.from(String(m.hex), "hex") })) } : {}) };
+          const broad = r.purpose === "broad_extraction";
+          const unavailable = typeof r.unavailable === "string" && r.unavailable.trim() ? r.unavailable.trim() : undefined;
+          return {
+            id,
+            dir,
+            runtime: r.runtime === "python3" ? "python3" : "bash",
+            entry,
+            sha256: sha,
+            seconds: Number(r.limits?.seconds ?? 900),
+            // A recipe the images cannot run is never triggered.
+            auto: unavailable ? [] : (r.auto ?? []),
+            minBytes: Number(r.min_bytes ?? 0) || 0,
+            ...(Array.isArray(r.suffixes) ? { suffixes: r.suffixes.map((x) => String(x).toLowerCase()) } : {}),
+            ...(Array.isArray(r.magic) ? { magic: r.magic.filter((m) => Number.isInteger(m.offset) && /^([0-9a-f]{2})+$/i.test(m.hex ?? "")).map((m) => ({ offset: Number(m.offset), bytes: Buffer.from(String(m.hex), "hex") })) } : {}),
+            ...(r.version ? { version: String(r.version) } : {}),
+            ...(r.description ? { description: String(r.description) } : {}),
+            purpose: broad ? "broad_extraction" : "inventory",
+            ...(broad ? { capability: String(r.capability ?? "").trim() || id, exclusions: Array.isArray(r.exclusions) ? r.exclusions.map(String) : [] } : {}),
+            ...(unavailable ? { unavailable } : {}),
+          };
         } catch {
           return null;
         }
@@ -976,6 +1027,7 @@ export class JobService {
     if (kind === "recipe") {
       const r = raw.recipe ? await this.recipe(String(raw.recipe)) : null;
       if (!r) return { reason: `no recipe ${raw.recipe ?? "(none named)"} in this run's packs${this.o.forging ? " (a forged tool is named tool:<name> and must declare \"recipe\": true)" : ""}` };
+      if (r.unavailable) return { reason: `${r.id} is declared by its pack but cannot run in this run's job images: ${r.unavailable}. Its preparation of each source it applies to is recorded declined with that why; read the source with the tools the images hold` };
       const target = raw.target;
       if (!target || !Array.isArray(target.paths) || !target.paths.length) return { reason: "a recipe job needs a target" };
       for (const p of target.paths) if (!this.insideRun(p)) return { reason: `${p} is not an object of this run` };
@@ -1457,6 +1509,14 @@ export class JobService {
       job.program_missing = { program: missing, profile: chosen.profile ?? job.spec.profile ?? null, image: chosen.ref };
       await this.journal.append({ type: "job_program_missing", job: job.id, attempt: job.attempt, exit, ...job.program_missing });
     }
+    // A write its worker refused: the run is read-only there, only $OUT (and
+    // its control directory) writable, as the worker and the host name them.
+    const writable = [...new Set([this.outPath(job), st.out, st.ctl, ...accessible.filter((a) => a.access.startsWith("read-write")).map((a) => a.path)])];
+    const refused = !cancelled && !stopped && !missing && exit !== null && exit !== 0 && exit !== 124 && exit !== 137 ? await writeRefused({ ctl: st.ctl, out: st.out, cwd: this.S, writable }).catch(() => null) : null;
+    if (refused) {
+      job.write_refused = refused;
+      await this.journal.append({ type: "job_write_refused", job: job.id, attempt: job.attempt, exit, ...refused });
+    }
     const status: NonNullable<JobRecord["status"]> = cancelled ? "cancelled" : stopped ? "stopped" : exit === 124 || exit === 137 ? "timed_out" : exit === 0 ? "ok" : "failed";
     const reason =
       cancelled ??
@@ -1469,9 +1529,11 @@ export class JobService {
             ? "the source changed while it was copied (stdout.log names each file): import it again once it is still"
             : missing
               ? `exit ${exit}: a program it runs is not in its image${job.program_missing?.profile ? ` (profile ${job.program_missing.profile})` : ""}: ${missing === "?" ? "exit 127" : missing}`
-              : exit !== 0
-                ? `exit ${exit}`
-                : undefined);
+              : refused
+                ? `exit ${exit}: ${writeRefusedWords(refused, { job: job.id, out: this.outPath(job) })}`
+                : exit !== 0
+                  ? `exit ${exit}`
+                  : undefined);
     if (job.requester.agent === DERIVED) this.derivedSpent.push({ at: Date.now(), s: (Date.now() - started) / 1000 });
     await this.journal.append({ type: "job_finished", job: job.id, attempt: job.attempt, exit, status, ...(reason ? { reason } : {}), duration_ms: Date.now() - started, ...(result.digest ? { image_digest: result.digest } : {}), ...(result.boot_retry ? { boot_retry: result.boot_retry } : {}), ...(result.create_ms !== undefined ? { create_ms: result.create_ms } : {}) });
     Object.assign(job, { state: "finished", exit, status, reason, finished_at: new Date().toISOString(), ...(result.digest ? { image_digest: result.digest } : {}) });
@@ -2050,10 +2112,21 @@ export class JobService {
     const derivedPass = job.requester.agent === DERIVED;
     if (derivedPass && this.derivedProcessed.has(job.id)) return;
     let applied = 0;
+    const unasked: string[] = [];
     for (const a of answered) {
       if (a.rc !== "0") continue;
       const t = targets[a.t];
       applied += 1;
+      // A broad extraction its pack does not mark auto, or one the images
+      // cannot run, is not run unasked: the hub offers the one as a lead and
+      // declines the other with the pack's why (scripts/preparation.ts).
+      if (!derivedPass) {
+        const info = await this.recipe(a.recipe).catch(() => null);
+        if (info && (info.unavailable || (info.purpose === "broad_extraction" && !info.auto.length))) {
+          unasked.push(`${a.recipe} over ${t.name ?? t.ref ?? "the object"}${info.unavailable ? ` (declared, and it cannot run in this run's images: ${info.unavailable})` : ""}`);
+          continue;
+        }
+      }
       // Its parent is the job that made the object (a derived target names it).
       const maker = derivedPass ? /^job:(j\d{6})\//.exec(t.ref ?? "")?.[1] : undefined;
       const r = await this.submit(derivedPass ? DERIVED : job.requester.agent === "system" ? "system" : job.requester.agent, { kind: "recipe", recipe: a.recipe, target: t, inputs: [t.ref ?? "all"], timeout_seconds: 900, network: "allowlist", parent: maker ?? job.spec.parent ?? job.id });
@@ -2070,6 +2143,10 @@ export class JobService {
     if (derivedPass) {
       await this.derivedReturn(job, answered);
       return;
+    }
+    if (unasked.length && job.requester.agent !== "system") {
+      await this.journal.append({ type: "job_notified", job: job.id, to: job.requester.agent, how: "post" });
+      await this.o.notify(job.requester.agent, `A broad extraction applies and is not run unasked (job ${job.id}): ${unasked.join("; ")}. One that can run is started with catalog_request target=<ref> recipe=<id> when the case needs it.`).catch(() => undefined);
     }
     if (!applied && job.requester.agent !== "system") {
       const whys = answered.map((a) => `${a.recipe}: ${a.why || "does not apply"}`);
@@ -2179,12 +2256,17 @@ export class JobService {
       plan = [];
     }
     const ids: string[] = [];
+    // A recipe the plan names that the service refuses is named with why, on the record: a broad extraction refused here is declined with that why (scripts/preparation.ts).
+    const refused: Array<{ recipe: string; input: string; reason: string }> = [];
     for (const p of plan) {
       const r = await this.submit("system", { kind: "recipe", recipe: p.recipe, target: p.target, alias: p.alias, inputs: [p.target.ref ?? "all"], timeout_seconds: 900, network: "allowlist", note: `kickoff: ${p.input}` });
       if (r.ok) ids.push(r.job.id);
-      else this.log(`kickoff recipe ${p.recipe} over ${p.input} refused: ${r.reason}`);
+      else {
+        refused.push({ recipe: p.recipe, input: p.input, reason: r.reason });
+        this.log(`kickoff recipe ${p.recipe} over ${p.input} refused: ${r.reason}`);
+      }
     }
-    await this.journal.append({ type: "kickoff_queued", jobs: ids });
+    await this.journal.append({ type: "kickoff_queued", jobs: ids, ...(refused.length ? { refused } : {}) });
   }
 
   /**

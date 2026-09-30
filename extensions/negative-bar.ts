@@ -177,11 +177,12 @@ export async function inventoryRevision(sandboxRoot: string): Promise<string> {
 // --- objects, as the hub compares them ------------------------------------------------------------
 
 /** An object as the hub compares it: where it is in the run, whether it is a directory, and its digest when the run has one. */
-type Obj = { ref: string; path: string; dir: boolean; sha?: string; member?: { gen: string; n: string } };
+export type Obj = { ref: string; path: string; dir: boolean; sha?: string; member?: { gen: string; n: string } };
 
-type GenRecord = { id: string; job?: string; target?: { ref?: string; sha256?: string; name?: string } };
+export type GenRecord = { id: string; job?: string; target?: { ref?: string; sha256?: string; name?: string } };
 
-async function generations(sandboxRoot: string): Promise<GenRecord[]> {
+/** The catalogue's generations, by their records (catalog/gen/<g>/generation.json), in order. */
+export async function generations(sandboxRoot: string): Promise<GenRecord[]> {
   const out: GenRecord[] = [];
   for (const g of (await readdir(join(sandboxRoot, "catalog", "gen")).catch(() => [] as string[])).sort()) {
     const raw = await readFile(join(sandboxRoot, "catalog", "gen", g, "generation.json"), "utf8").catch(() => null);
@@ -203,7 +204,7 @@ async function generations(sandboxRoot: string): Promise<GenRecord[]> {
  * and a path in the store names that job's output, so the same bytes are
  * the same object whichever way a job or a record named them.
  */
-async function objectOf(sandboxRoot: string, ref: string): Promise<Obj | { reason: string }> {
+export async function objectOf(sandboxRoot: string, ref: string): Promise<Obj | { reason: string }> {
   const { locate } = await import("../scripts/job-scope.ts");
   const text = ref.trim();
   const mem = /^member:([a-z0-9-]+)#(\d+)$/.exec(text);
@@ -261,7 +262,7 @@ async function inputFiles(sandboxRoot: string): Promise<Array<{ path: string; sh
 }
 
 /** Whether `inner` is `outer` or inside it, by place or by digest. */
-function contains(outer: Obj, inner: Obj): boolean {
+export function contains(outer: Obj, inner: Obj): boolean {
   if (outer.path === inner.path) return true;
   // A member is inside its generation's directory, and inside the catalogue.
   if (inner.member && outer.dir && (outer.path === "catalog" || outer.path === "catalog/gen" || outer.path === `catalog/gen/${inner.member.gen}`)) return true;

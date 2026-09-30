@@ -232,6 +232,20 @@ and what makes that acceptable. Never a held lead: nobody is assigned one.
 What an answer to a question is: established, partial, bounded negative, not
 determinable, out of scope, or premise not supported.
 
+**Premise**:
+What the case takes as given, a `P-n` on the question register: its words
+verbatim, where they stand, its scope and revisions. A **given** (the
+operator's) is not proved again and is never an open part; a **supplied
+assertion** is assumed as asserted; a **proposition under test** (an agent's
+proposal) is examined like any claim until the operator admits it.
+_Avoid_: "assumption" for a given; "open part" for a premise
+
+**Part**:
+One row of an answer: a part the question asks, established on the entries
+it names, or open with what bounds it (an acquisition ask, a route, a
+limitation or a coverage record). A partial answer names at least one open
+part.
+
 **Bounded negative**:
 "No evidence of X was found in <scope>": nothing found, within what was
 searched. Not "X did not happen", which needs an existence question,

@@ -358,3 +358,10 @@ place outside the run directory, the run directory itself, or anything under
 `inputs/` (`resolve_output` in each such tool; in a job `$OUT` is inside the
 run directory). A file it then makes inside that directory is checked the
 same way, so a link left there cannot carry the write out of it.
+
+A tool or a recipe runs from the run's directory, which is read-only in an
+agent's VM and in a job's worker. A program it calls that writes its log or
+temp files to its working directory by default is given a path under the
+output (Plaso's and Zircolite's `--logfile`) or run there (Hayabusa, Zeek, the
+disk-timeline recipe's Plaso steps), and its test runs it from a read-only
+directory with a stand-in that writes where the real program does.

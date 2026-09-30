@@ -1,0 +1,1 @@
+{"v":1,"job":"j000007","attempt":1,"sealed_at":"2026-09-29T10:10:01.775Z","files":[{"path":"export.csv","path_b64":"ZXhwb3J0LmNzdg==","bytes":22,"sha256":"51c91b774d841bc9f0a68f830eaada42e68b169bf53122804628f71a79313b67","mode":"644"}],"dirs":[],"rejected":[],"totals":{"files":1,"bytes":22}}

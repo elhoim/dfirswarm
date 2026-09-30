@@ -1,0 +1,51 @@
+{
+  "id": "ios-ileapp",
+  "version": "1.0.0",
+  "description": "A broad extraction of an iOS full file-system acquisition (a tar, plain or compressed, or a zip): iLEAPP runs every artefact module over the whole of it and writes a TSV report per artefact, a timeline database and an HTML report, the searchable form of what the phone holds.",
+  "object": "iOS full file-system archive",
+  "order": 37,
+  "min_bytes": 1024,
+  "suffixes": [
+    ".tar",
+    ".tgz",
+    ".tar.gz",
+    ".tar.xz",
+    ".tar.bz2",
+    ".zip"
+  ],
+  "magic": [
+    {
+      "offset": 257,
+      "hex": "7573746172"
+    },
+    {
+      "offset": 0,
+      "hex": "504b0304"
+    }
+  ],
+  "runtime": "python3",
+  "entry": "run.py",
+  "auto": [
+    "kickoff"
+  ],
+  "purpose": "broad_extraction",
+  "capability": "ios-artifacts",
+  "exclusions": [
+    "artefacts no module of the pinned iLEAPP release parses: their files stay in the source, unread by this extraction",
+    "deleted records beyond what a module reads itself (SQLite free pages, WAL): nothing is carved",
+    "protected data that needs a key it does not have (keychain secrets, data protection classes locked in the acquisition)",
+    "archives nested inside the acquisition"
+  ],
+  "limits": {
+    "seconds": 14400
+  },
+  "outputs": [
+    "ileapp/",
+    "ileapp.stdout",
+    "ileapp.stderr",
+    "index.tsv",
+    "coverage.json"
+  ],
+  "covers": "What iLEAPP's modules parse from the whole acquisition: one TSV per artefact that has records, its timeline and every file it wrote, kept under ileapp/. A module that finds nothing writes no report, which does not show the artefact never existed; files no module targets are not read.",
+  "sha256": "5d2838fb601dca507aeeb86bab4acb68feaba03bcc7661775636e6a0716e20db"
+}

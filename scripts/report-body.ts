@@ -90,9 +90,11 @@ import { readSweeps, sweepOf, sweepWords, type SweepRecord } from "../extensions
 import { answerResult, resultWords, reviewWords as negativeReviewWords, NEGATIVE_RESULTS } from "../extensions/negative-bar.ts";
 import { sectionBars } from "./check-answers.ts";
 import { leadsSnapshot, rankedLeads, viewLead, type LeadEvent, type LeadView, type LeadsSnapshot } from "../extensions/leads.ts";
-import { originWords, questionViews, type QuestionEvent, type QuestionView, type QuestionsSnapshot } from "../extensions/questions.ts";
+import { originWords, premiseViews, questionViews, type PremiseView, type QuestionEvent, type QuestionView, type QuestionsSnapshot } from "../extensions/questions.ts";
+import { classWords, scopeWords } from "../extensions/premises.ts";
 import { questionCost, tokensWords, type QuestionCost } from "./question-cost.ts";
 import { FINISH_LOG, readFinish, type FinishState } from "../extensions/finish.ts";
+import { evidenceCodeRun, onlyOwnOutputs, ownJobOutputs, ownWords, type EvidenceCode } from "../extensions/evidence-code.ts";
 
 // ---------------------------------------------------------------------------
 // Options
@@ -558,7 +560,9 @@ async function loadRun(sandboxArg: string, opts: ReportBodyOptions): Promise<Run
   const bar = await sectionBars(sandbox).catch(() => (() => ({ material: true, existence: false })) as (id: string) => { material: boolean; existence: boolean });
   const { producerOf } = await (await import("./output-hygiene.ts")).producerIndex(sandbox).catch(() => ({ producerOf: () => null as null }));
   const sweeps = await readSweeps(sandbox).catch(() => [] as SweepRecord[]);
-  const gate = hasAnswers ? ledgerGate({ entries, attestations, disputes, sections, failed: unqualified, bar, partial: partialOutputCites(entries, producerOf), sweeps }) : null;
+  const preparation = hasAnswers ? await import("../extensions/preparation.ts").then((PR) => PR.preparationFacts(sandbox, entries)).catch(() => undefined) : undefined;
+  const premises = register?.snap.state.premises;
+  const gate = hasAnswers ? ledgerGate({ entries, attestations, disputes, sections, failed: unqualified, bar, partial: partialOutputCites(entries, producerOf), sweeps, ...(preparation ? { preparation } : {}), ...(premises?.size ? { premises } : {}) }) : null;
 
   const text = async (rel: string) => (await readFile(join(sandbox, rel), "utf8").catch(() => ""));
   const ledgerChain = verifyLedgerChain(await text("ledger/entries.jsonl"));
@@ -1738,11 +1742,13 @@ function registerSection(run: Run): BodySection {
       items: fin.events.map((e): Span[] => {
         const x = e as unknown as Record<string, unknown>;
         const what =
-          e.ev === "lease" ? `lease to ${String(x.holder)} (generation ${String(x.generation ?? "?")})${x.from ? ` from ${String(x.from)}` : ""}${x.why ? `: ${String(x.why)}` : ""}`
+          e.ev === "lease" ? `lease to ${String(x.holder)} (generation ${String(x.generation ?? "?")})${x.from ? ` from ${String(x.from)}` : ""}${x.segment ? `, segment ${String(x.segment)}` : ""}${Array.isArray(x.carried) && x.carried.length ? `, carrying ${(x.carried as Array<{ id?: unknown }>).map((c) => `post #${String(c.id)}`).join(", ")} from before the resume` : ""}${x.why ? `: ${String(x.why)}` : ""}`
+          : e.ev === "prepare" ? `the finish prepared at generation ${String(x.generation ?? "?")} on ${String(x.report ?? "the report")} ${String(x.digest ?? "").slice(0, 12)}: ${x.ready ? "ready" : "not ready"} by the registers, ${Array.isArray(x.late) ? x.late.length : 0} item(s) late against it${Array.isArray(x.late) && x.late.length ? ` (${(x.late as Array<{ kind?: unknown; id?: unknown }>).map((l) => (l.kind === "post" ? `post #${String(l.id)}` : `objection ${String(l.id)}`)).join(", ")})` : ""}`
           : e.ev === "readiness" ? `${x.ready ? "ready" : "not ready"} at revision ${String(x.revision ?? "").slice(0, 12)}${Array.isArray(x.items) && x.items.length ? `: ${(x.items as string[]).join("; ")}` : ""}`
           : e.ev === "check" ? `the finish line at revision ${String(x.revision ?? "").slice(0, 12)}: ${x.proceed ? "proceed" : "refused"}${x.outcome ? ` (${String(x.outcome)})` : ""}${x.reason ? `: ${String(x.reason)}` : ""}`
-          : e.ev === "ack" ? `${x.verdict === "objection" ? "objection" : "no objection"} to the report ${String(x.digest ?? "").slice(0, 12)}${x.why ? `: ${String(x.why)}` : ""}`
-          : e.ev === "resolve" ? `resolved ${x.post !== undefined ? `post #${String(x.post)}` : `ack ${String(x.ack)}`} as ${String(x.how)}${x.why ? `: ${String(x.why)}` : ""}`
+          : e.ev === "ack" ? `${x.verdict === "objection" ? "objection" : "no objection"} to the report ${String(x.digest ?? "").slice(0, 12)}${x.sections && typeof x.sections === "object" && !x.whole ? `, sections ${Object.keys(x.sections as object).join(", ")}` : ""}${x.why ? `: ${String(x.why)}` : ""}`
+          : e.ev === "carry" ? `the reviews of earlier versions weighed for ${String(x.report ?? "the report")} ${String(x.digest ?? "").slice(0, 12)}: ${Array.isArray(x.kept) && x.kept.length ? `carried over, their sections unchanged: ${(x.kept as Array<{ by?: unknown; acks?: unknown[]; sections?: unknown[] }>).map((k) => `${String(k.by)} (ack ${(k.acks ?? []).map(String).join(", ")}; ${(k.sections ?? []).map(String).join(", ")})`).join("; ")}` : "none carried over"}${Array.isArray(x.reasked) && x.reasked.length ? `; asked again: ${(x.reasked as Array<{ by?: unknown; changed?: unknown[]; removed?: unknown[] }>).map((k) => `${String(k.by)} (${[...(k.changed ?? []).map(String), ...(k.removed ?? []).map((r) => `${String(r)} removed`)].join(", ")})`).join("; ")}` : ""}`
+          : e.ev === "resolve" ? `resolved ${x.post !== undefined ? `post #${String(x.post)}` : `ack ${String(x.ack)}`} as ${String(x.how)}${x.batch ? ` (batch ${String(x.batch)})` : ""}${x.why ? `: ${String(x.why)}` : ""}`
           : JSON.stringify(Object.fromEntries(Object.entries(x).filter(([k]) => !["v", "seq", "at", "by", "ev", "prev", "hash", "run"].includes(k))));
         return [`${e.seq} · ${e.at} · ${e.by} · ${e.ev}: ${what}`];
       }),
@@ -2069,6 +2075,13 @@ function humanChecked(run: Run): string {
   return parts.join(" ");
 }
 
+/** How a late delta that neither supports nor contradicts the answer reads in its chain. */
+const LATE_DELTA_WORDS: Readonly<Record<string, string>> = {
+  irrelevant: "irrelevant to it within its scope",
+  inconclusive: "inconclusive: it cannot say how the new evidence bears on it",
+  adds_part: "it adds a part the answer left open",
+};
+
 const STEPS = ["How it was obtained", "What it indicates", "Why this confidence", "What else could explain it", "Contrary evidence", "Limitations", "What would change it", "Exhibits"] as const;
 
 function answerSectionOf(run: Run, memo: Map<number, EntryState>): BodySection {
@@ -2082,6 +2095,7 @@ function answerSectionOf(run: Run, memo: Map<number, EntryState>): BodySection {
       ],
     });
   }
+  blocks.push(...premisesTable(run));
   for (const q of run.questions) blocks.push(questionBlock(q, run, memo));
   return { id: "s5", n: "5", title: "Answers", desc: "each question: the answer, how it was reached, how sure", count: run.hasAnswers ? `${run.questions.filter((q) => standingAnswer(run, `question:${q.id}`)).length} of ${run.questions.length} answered` : "no structured answers", blocks };
 }
@@ -2100,6 +2114,8 @@ function questionBlock(q: Question, run: Run, memo: Map<number, EntryState>): Bl
   body.push({ k: "voice", voice: "opinion", label: a.inconclusive ? "Answer (inconclusive)" : "Answer", s: [bounded ?? a.value], chips: chipsOf(a, s).filter((c) => c.text !== "answer") });
   if (bounded) body.push({ k: "p", s: [`As the agents worded it (not the conclusion: the bar for saying more is not met): ${a.value}`] });
   body.push(...resultBlocks(a, q, run));
+  body.push(...partsBlocks(a, q, run));
+  body.push(...premiseBlocks(a, run));
   body.push({
     k: "p",
     s: [
@@ -2113,6 +2129,114 @@ function questionBlock(q: Question, run: Run, memo: Map<number, EntryState>): Bl
   body.push(...downgradeBlocks(a, run));
   body.push(...answerSteps(a, s, run, memo));
   return { k: "box", cls: "answer", id: questionAnchor(q.id), level: 3, title, chips: [questionStatus_(q, run, memo).status], body };
+}
+
+/** The premise register, read from the question chain with the ledger beside it; none on a run from before it. */
+function premisesOf(run: Run): PremiseView[] {
+  const snap = run.register?.snap;
+  if (!snap?.state.premises.size) return [];
+  return premiseViews({ questions: snap, ledger: { entries: run.entries, replaced: run.replaced } as never });
+}
+
+/**
+ * The premises the case took (docs/adr/0011, "Premises"): each whole, its
+ * class (a given, a supplied assertion, a proposition under test), its
+ * revision, where its words stand, its scope, who designated it, and the
+ * answers that cite it. Nothing on a run with none.
+ */
+function premisesTable(run: Run): Block[] {
+  const premises = premisesOf(run);
+  if (!premises.length) return [];
+  return [
+    { k: "h", level: 3, text: "The premises the examination took" },
+    { k: "p", s: ["A given was designated by the operator (the goal or the register) and is not proved again; a supplied assertion is assumed as asserted, not as established; a proposition under test (an agent's, not admitted) is assumed only conditionally. Each answer below says which premises it rests on and how."] },
+    {
+      k: "table",
+      cls: "premises",
+      head: ["Premise", "Class", "Words (verbatim)", "Where", "Scope", "Designated by", "Cited by"],
+      rows: premises.map((p): Span[][] => [
+        [`${p.id} (revision ${p.rev})${p.withdrawn ? ", withdrawn" : ""}`],
+        [classWords(p.class)],
+        [p.text],
+        [p.locator || "not said"],
+        [scopeWords(p.scope)],
+        [p.author],
+        p.cited_by.length ? p.cited_by.flatMap((c, i): Span[] => [i ? "; " : "", { e: c.answer }, ` ${c.conditional ? "assuming it" : c.stance}${c.current ? "" : ` (revision ${c.rev})`}`]) : ["no standing answer"],
+      ]),
+    },
+  ];
+}
+
+/** An entry, a request or a lead, as a span: an entry is linked to its exhibit. */
+function refSpan(r: string): Span {
+  return /^E-\d+$/.test(r) ? { e: Number(r.slice(2)) } : { code: r };
+}
+
+/**
+ * An answer's claim and open-part rows (docs/adr/0013, "Claim and open-part
+ * rows"), against the question's revision it answers, and each part a
+ * review says the answer leaves out. Nothing on an answer without them.
+ */
+function partsBlocks(a: LedgerEntry, q: Question, run: Run): Block[] {
+  const out: Block[] = [];
+  if (a.parts?.length) {
+    const v = q.reg ? run.register?.byId.get(q.reg) : undefined;
+    const asked = v?.revisions.find((r) => r.rev === (a.question_rev ?? 1))?.text ?? q.text;
+    out.push({ k: "p", s: [`Part by part, as the answer reads revision ${a.question_rev ?? 1} of the question${asked ? ` ("${asked}")` : ""}:`] });
+    out.push({
+      k: "table",
+      cls: "parts",
+      head: ["Part", "What it asks", "Status", "Rests on, or what bounds it"],
+      rows: a.parts.map((p): Span[][] => [
+        [p.id],
+        [p.part],
+        [p.status],
+        p.status === "established" ? (p.refs ?? []).flatMap((r, i): Span[] => [i ? ", " : "", refSpan(r)]) : [refSpan(p.open_by ?? "?"), ...(p.refs?.length ? [" (so far ", ...p.refs.flatMap((r, i): Span[] => [i ? ", " : "", refSpan(r)]), ")"] : [])],
+      ]),
+    });
+  }
+  const omitted = run.attestations.filter((x) => x.target === (a.hash ?? "") && !a.authors.includes(x.by)).flatMap((x) => (x.answer_review?.parts ?? []).filter((p) => p.missing).map((p) => ({ by: x.by, part: p.part, why: p.why })));
+  if (omitted.length) out.push({ k: "note", s: [`A review says the answer leaves out ${omitted.length === 1 ? "a part" : "parts"} of the question: ${omitted.map((x) => `"${x.part}" (${x.by}: ${x.why})`).join("; ")}. It stays here until the answer is recorded again with ${omitted.length === 1 ? "it" : "them"}.`] });
+  // A part a review says the question does not ask (not_asked): a limitation, not an open part; the answer stands as recorded.
+  const unasked = run.attestations.filter((x) => x.target === (a.hash ?? "") && !a.authors.includes(x.by)).flatMap((x) => (x.answer_review?.parts ?? []).filter((p) => p.not_asked).map((p) => ({ by: x.by, id: p.id, part: p.part, why: p.why })));
+  if (unasked.length) out.push({ k: "note", s: [`A review says ${unasked.length === 1 ? "a part" : "parts"} the answer holds ${unasked.length === 1 ? "is" : "are"} outside what the question asks: ${unasked.map((x) => `${x.id ? `${x.id} ` : ""}"${x.part}" (${x.by}: ${x.why})`).join("; ")}. Such a part is a limitation, not an open part; the answer stands as recorded.`] });
+  return out;
+}
+
+/**
+ * The premises an answer cites, each with its stance: what it assumes (a
+ * conditional assumption said as "assuming P-n": the answer holds only if
+ * the premise does), what it supports or contradicts and on which entries,
+ * what it leaves unresolved. Nothing on an answer that cites none.
+ */
+function premiseBlocks(a: LedgerEntry, run: Run): Block[] {
+  if (!a.premises?.length) return [];
+  const reg = run.register?.snap.state.premises;
+  return [
+    {
+      k: "rows",
+      rows: a.premises.map((c): Row => {
+        const p = reg?.get(c.id);
+        const words = p ? `"${p.revisions.find((r) => r.rev === c.rev)?.text ?? p.text}" (${classWords(p.class)})` : "";
+        const refs = (c.refs ?? []).flatMap((r, i): Span[] => [i ? ", " : "", refSpan(r)]);
+        const how =
+          c.stance === "assumed"
+            ? c.conditional
+              ? `assuming ${c.id}: the answer holds only if it does`
+              : p?.class === "supplied_assertion"
+                ? `rests on it as asserted (${p.locator}), not as established`
+                : "rests on it as given"
+            : c.stance === "supported"
+              ? "the evidence supports it, on "
+              : c.stance === "contradicted"
+                ? refs.length
+                  ? "the evidence contradicts it, on "
+                  : "the answer says the evidence contradicts it (no finding named)"
+                : "unresolved: the evidence does not settle it";
+        return { label: `${c.id} (revision ${c.rev})`, s: [`${words ? `${words}: ` : ""}${how}`, ...(c.stance === "supported" || (c.stance === "contradicted" && refs.length) ? refs : []), ...(c.scope ? [` (for ${scopeWords(c.scope)})`] : [])] };
+      }),
+    },
+  ];
 }
 
 /**
@@ -2307,6 +2431,14 @@ function answerSteps(a: LedgerEntry, s: EntryState, run: Run, memo: Map<number, 
     for (const d of stateOf(e, run, memo).disputes) out.push({ k: "p", s: [{ e: e.seq }, ` is disputed by ${d.by}: ${d.why}. `, qualified.has(e.seq) ? `The answer cites it qualified: ${qualified.get(e.seq)}.` : "The answer does not qualify it."] });
   }
   for (const d of s.disputes) out.push({ k: "p", s: [{ b: "The answer itself is disputed " }, `by ${d.by}: ${d.why}.`] });
+  // Evidence added late and weighed against the answer by a delta that neither supports nor contradicts it (docs/adr/0013, "Late evidence: the reverse sweep and the delta"): said, so an "irrelevant" or an "inconclusive" is read where the answer is (the Fable review of the limits branch, P3-1).
+  const weighed = run.entries
+    .filter((e) => !run.replaced.has(e.seq))
+    .flatMap((e) => (e.rel ?? []).filter((r) => LATE_DELTA_WORDS[r.kind] && run.bySeq.get(r.to)?.kind === "answer" && run.bySeq.get(r.to)?.section === a.section).map((r) => ({ e, r })));
+  if (weighed.length) {
+    out.push({ k: "p", s: ["Evidence added late, weighed against the answer, neither supporting nor contradicting it:"] });
+    out.push({ k: "list", items: weighed.map(({ e, r }): Span[] => [{ e: e.seq }, ` on `, { e: r.to }, `: ${LATE_DELTA_WORDS[r.kind]}${e.value ? ` (${e.value})` : ""}`]) });
+  }
 
   // 6. Limitations.
   out.push({ k: "h", level: 4, text: STEPS[5] });
@@ -2703,6 +2835,10 @@ function resolveWords(d: LedgerGate["defects"][number]): string {
       return `each object the store sweep found what was looked for in examined, and the search record for ${where} recorded again naming it with what it showed, or the answer revised on what those objects show. A limitation does not resolve it.`;
     case "sweep_partial":
       return `the store sweep run again within a larger budget over what it left unsearched, or the question's limits accepted by the operator.`;
+    case "preparation_pending":
+      return `the broad extraction of the source ${where}'s negative claims absence over (a parse of the whole source that a pack declares) run to an outcome: produced, partial, failed or declined, each on the record with what it does not hold; or the question's limits accepted by the operator.`;
+    case "premise_inconsistent":
+      return `the two answers reconciled on the record, neither side forced: one answer revised, the finding that rebuts the premise named in the contradiction (the premise then goes to the operator as a dispute), either answer's scope narrowed so the two no longer overlap, or one answer made conditional on the premise ("assuming P-n").`;
     case "completeness_uncovered":
       return `a search record for ${where} that says what was searched and which parts of the stored data it reached (live, deleted, unallocated, slack, secondary copies), and the answer recorded again on it. A question that asks for every item is not answered by the items found alone.`;
     default:
@@ -2882,6 +3018,17 @@ function jobsSection(run: Run): BodySection {
   if (!run.jobs.size) blocks.push({ k: "note", s: ["No job ran."] });
   const cited = [...run.jobs.keys()].filter((id) => citedBy.has(id)).length;
   if (run.jobs.size) blocks.push({ k: "p", s: [`${plural(cited, "job")} ${cited === 1 ? "is" : "are"} cited by an entry and ${cited === 1 ? "comes" : "come"} first; the ${plural(run.jobs.size - cited, "job")} no entry cites follow, whole, in a group a browser shows collapsed (open it to read them; a printout shows the group's count only).`] });
+  // Code recovered from the evidence, run or evaluated by a job's command (extensions/evidence-code.ts), read from its words; an output of the same seat's own command job is said apart (its own code, or code that job recovered).
+  const codeOf = (j: JobRecord): EvidenceCode | null => {
+    const x = j.spec.command !== undefined ? evidenceCodeRun(j.spec.command, Array.isArray(j.spec.inputs) ? j.spec.inputs : []) : null;
+    if (!x) return null;
+    const own = j.requester?.agent ? ownJobOutputs(x, j.requester.agent, (id) => run.jobs.get(id) ?? null) : { paths: [], jobs: [] };
+    return own.paths.length ? { ...x, own } : x;
+  };
+  const codes = new Map([...run.jobs.values()].map((j) => [j.id, codeOf(j)] as const).filter((x): x is readonly [string, EvidenceCode] => x[1] !== null));
+  const fromEvidence = [...codes].filter(([, x]) => !onlyOwnOutputs(x)).map(([id]) => id);
+  const fromOwn = [...codes].filter(([, x]) => onlyOwnOutputs(x)).map(([id]) => id);
+  if (codes.size) blocks.push({ k: "note", s: [[fromEvidence.length ? `${plural(fromEvidence.length, "job")} may have executed code recovered from the evidence (its command runs, or evaluates, code from the evidence, an extraction or a job's output; read from the command's words): ${fromEvidence.join(", ")}. What comes out of the evidence is read, never run, and a no-exec mount does not stop an interpreter reading it: what rests on these jobs rests on that code's behaviour.` : "", fromOwn.length ? `${plural(fromOwn.length, "job")} ran or evaluated only an output of a command job its own seat asked for: ${fromOwn.join(", ")}. Code the seat wrote there itself is not the evidence's; code that job recovered from the evidence is: the seat says which.` : ""].filter(Boolean).join(" ")] });
   for (const j of run.jobs.values()) {
     const sp = j.spec;
     const rows: Row[] = [];
@@ -2895,6 +3042,9 @@ function jobsSection(run: Run): BodySection {
     if (sp.targets?.length) rows.push({ label: "Targets", s: [sp.targets.map((t) => t.ref ?? t.name ?? "?").join(", ")] });
     if (sp.source !== undefined) rows.push({ label: "Imported", s: [{ code: sp.source }, " — the file an agent made; how it was made is not recorded"] });
     rows.push({ label: "Declared scope", s: [Array.isArray(sp.inputs) ? sp.inputs.map(String).join(", ") || "none" : "not recorded (the legacy default: every input)"] });
+    // Code recovered from the evidence, run or evaluated by the command (extensions/evidence-code.ts): read from the command's own words, a flag that says "may have".
+    const code = codes.get(j.id) ?? null;
+    if (code) rows.push({ label: "Evidence code", s: [`may have been executed: the command ${code.how === "runs" ? `runs ${code.paths.join(", ")} with ${code.what}` : `evaluates code (${code.what}) it read from ${code.paths.join(", ")}`}. ${code.own?.paths.length ? `${ownWords(code)} ` : ""}What comes out of the evidence is read, never run; an interpreter reading it is not stopped by a no-exec mount.`] });
     rows.push({ label: "Network", s: [sp.network ?? "not recorded"] });
     if (sp.timeout_seconds) rows.push({ label: "Time limit", s: [`${sp.timeout_seconds} s`] });
     if (sp.note) rows.push({ label: "Note", s: [sp.note] });
@@ -2904,7 +3054,7 @@ function jobsSection(run: Run): BodySection {
     else for (const [i, f] of j.outputs.entries()) rows.push({ label: i ? "" : "Output", s: [{ code: f.path }, ` ${bytesHuman(f.bytes)}, sha256 `, { code: f.sha256 }] });
     const by = citedBy.get(j.id) ?? [];
     rows.push({ label: "Cited by", s: by.length ? by.flatMap((n, i): Span[] => [...(i ? [", "] : []), { e: n }]) : ["no entry"] });
-    const box: Block = { k: "box", cls: "exhibit job", id: `job-${j.id}`, level: 4, title: [{ plain: `Job ${j.id}` }], chips: [{ text: j.status ?? "unknown", tone: j.status === "ok" ? "moss" : "brick" }], body: [{ k: "rows", rows }] };
+    const box: Block = { k: "box", cls: "exhibit job", id: `job-${j.id}`, level: 4, title: [{ plain: `Job ${j.id}` }], chips: [{ text: j.status ?? "unknown", tone: j.status === "ok" ? "moss" : "brick" }, ...(code ? [onlyOwnOutputs(code) ? { text: "own job's code may have run", tone: "saffron" as const } : { text: "evidence code may have run", tone: "brick" as const }] : [])], body: [{ k: "rows", rows }] };
     (by.length ? blocks : uncited).push(box);
   }
   if (uncited.length) blocks.push({ k: "details", summary: `${plural(uncited.length, "job")} no entry cites`, body: uncited });

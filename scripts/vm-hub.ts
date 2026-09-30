@@ -232,6 +232,7 @@ const RATE_LIMITS: Record<string, { bucket: string; capacity: number; perSecond:
   // The question register grows as the leads do.
   questionOpen: { bucket: "ledger", capacity: 200, perSecond: 5 },
   questionAsk: { bucket: "ledger", capacity: 200, perSecond: 5 },
+  premisePropose: { bucket: "ledger", capacity: 200, perSecond: 5 },
   attestEntry: { bucket: "ledger", capacity: 200, perSecond: 5 },
   disputeEntry: { bucket: "ledger", capacity: 200, perSecond: 5 },
   // Each done that would end the swarm runs the operator's finish line on
@@ -287,7 +288,7 @@ const QUEUE_MAX = 192;
 export const SETTLE_MS_DEFAULT = 6_000;
 
 /** Calls the hub records on the trace when they succeed; every refusal is recorded. */
-const AUDITED = new Set(["markDone", "runFinishLine", "forgeTool", "restoreFileVersion", "claimName", "threadOpen", "publishFile", "recordEntry", "attestEntry", "disputeEntry", "jobSubmit", "catalogRequest", "leadOpen", "leadClaim", "leadRelease", "leadClose", "leadLink", "leadInterpret", "leadReopen", "routeReview", "leadHandoff", "leadConfirm", "offerAnswer", "finishTurnFor", "finishAct", "questionOpen", "questionAsk", "netRequest", "netFetch"]);
+const AUDITED = new Set(["markDone", "runFinishLine", "forgeTool", "restoreFileVersion", "claimName", "threadOpen", "publishFile", "recordEntry", "attestEntry", "disputeEntry", "jobSubmit", "catalogRequest", "leadOpen", "leadClaim", "leadRelease", "leadClose", "leadLink", "leadInterpret", "leadReopen", "routeReview", "leadHandoff", "leadConfirm", "offerAnswer", "finishTurnFor", "finishAct", "questionOpen", "questionAsk", "premisePropose", "netRequest", "netFetch"]);
 
 /**
  * The job service's settings, from the kickoff: the image workers boot, how
@@ -761,6 +762,7 @@ export function boardTable(hub: {
     // The question register (extensions/questions.ts): the seat is the channel's.
     questionOpen: (who, a) => Q.questionOpen(as(who), (isObject(a[1]) ? a[1] : {}) as Q.ActInput),
     questionAsk: (who, a) => Q.questionAsk(as(who), a[1], a[2]),
+    premisePropose: (who, a) => Q.premisePropose(as(who), (isObject(a[1]) ? a[1] : {}) as { text?: string; locator?: string; why?: string; scope?: unknown }),
     questionsView: (who, a) => {
       const o = isObject(a[1]) ? a[1] : {};
       return Q.questionsView(as(who), { ...(typeof o.view === "string" ? { view: o.view } : {}), ...(typeof o.id === "string" ? { id: o.id } : {}), ...(typeof o.from === "string" ? { from: o.from } : {}), ...(typeof o.pageChars === "number" && Number.isFinite(o.pageChars) ? { pageChars: o.pageChars } : {}) });
@@ -1179,6 +1181,21 @@ export class Hub {
   }
 
   /**
+   * The reverse sweeps of evidence added late (extensions/store-sweep.ts): a
+   * pass of each that is not done, started in this process's background and
+   * never awaited, so neither an addition nor the round waits on it; what a
+   * pass leaves is searched by the next round's pass. Nothing is read while
+   * every addition on the store journal is known swept whole.
+   */
+  private continueReverseSweeps(): void {
+    const imports = this.jobService?.journal.of("evidence_added").map((l) => String(l.import ?? ""));
+    if (imports && !imports.length) return;
+    void import("../extensions/store-sweep.ts")
+      .then((SW) => SW.reverseSweepInBackground(this.cfg.sandbox, imports ? { imports } : {}))
+      .catch((err: Error) => this.log(`reverse sweeps: ${err.message}`));
+  }
+
+  /**
    * Evidence added while no hub ran, or before its catalogue could take it:
    * a detect pass over each file, once (the store journal's
    * evidence_catalogue_queued line says it was queued).
@@ -1199,6 +1216,38 @@ export class Hub {
       }
       await svc.journal.append({ type: "evidence_catalogue_queued", import: id, jobs, ...(refused.length ? { refused } : {}) });
     }
+  }
+
+  /** What a round of preparation said it could not do, each said once (the hub's log). */
+  private readonly preparationSaid = new Set<string>();
+
+  /**
+   * The sources' broad extractions (scripts/preparation.ts): the receipts the
+   * jobs and leads call for, the offers due, the leads whose extraction
+   * reached an outcome closed. On every round, and once the job service is
+   * up; one round at a time.
+   */
+  private preparationRound: Promise<void> | null = null;
+  private async reconcilePreparation(): Promise<void> {
+    const svc = this.jobService;
+    if (!svc) return;
+    if (this.preparationRound) return this.preparationRound;
+    this.preparationRound = (async () => {
+      const PREP = await import("./preparation.ts");
+      const r = await PREP.reconcilePreparation(svc, this.cfg.sandbox);
+      for (const n of r.notes) {
+        if (this.preparationSaid.has(n)) continue;
+        this.preparationSaid.add(n);
+        this.log(`preparation: ${n}`);
+      }
+      if (r.opened.length) this.log(`preparation: offered ${r.opened.join(", ")}`);
+      if (r.closed.length) this.log(`preparation: closed ${r.closed.join(", ")} (their extraction reached an outcome)`);
+    })()
+      .catch((err: Error) => this.log(`preparation: ${err.message}`))
+      .finally(() => {
+        this.preparationRound = null;
+      });
+    return this.preparationRound;
   }
 
   private historyQuota(): number {
@@ -1276,7 +1325,12 @@ export class Hub {
     await this.listen(this.adminSocket(), (socket) => this.serveAdmin(socket));
     if (this.cfg.jobs && this.cfg.run) await this.startJobs(this.cfg.jobs, this.cfg.run);
     // What a crash left committed and not yet applied or delivered to the operator: now.
-    void this.reconcileAdditions().then(() => this.fireRequests());
+    void this.reconcileAdditions().then(() => {
+      this.continueReverseSweeps();
+      return this.fireRequests();
+    });
+    // The kickoff's broad extractions: receipts for what it queued, offers for the rest.
+    void this.reconcilePreparation();
     this.writeStatus();
     if (this.cfg.backstop !== false) {
       this.backstopTimer = setInterval(() => void this.backstop().catch(() => undefined), BACKSTOP_INTERVAL_MS);
@@ -2472,8 +2526,11 @@ export class Hub {
     }
     // Additions committed and not applied, then the operator requests' round: what is committed and not yet written or delivered.
     await this.reconcileAdditions();
+    this.continueReverseSweeps();
     await this.fireRequests();
     await this.catalogueAddedEvidence().catch((err: Error) => this.log(`catalogue of added evidence: ${err.message}`));
+    // The sources' broad extractions: receipts, offers and closes due since the last round.
+    await this.reconcilePreparation();
     // The dynamic network's round: grants whose lead closed or whose job
     // ended revoked, captures put on the ledger, contamination recorded.
     if (readCasePolicy(S).network !== "closed") {
@@ -2871,6 +2928,9 @@ function summarize(fn: string, result: unknown): Record<string, unknown> {
     case "questionAsk":
       // The question's id, revision and scope, and the register event's hash, beside the chained event.
       return { ok: result.ok, q: result.q, rev: result.rev, ...(result.scope ? { scope: result.scope } : {}), ...(result.clarify ? { clarify: result.clarify } : {}), ...(typeof result.hash === "string" ? { hash: result.hash } : {}), ...(result.duplicate ? { duplicate: true } : {}) };
+    case "premisePropose":
+      // The premise's id, revision and class, and the register event's hash, beside the chained event.
+      return { ok: result.ok, p: result.p, rev: result.rev, class: result.class, ...(typeof result.hash === "string" ? { hash: result.hash } : {}) };
     default:
       return {};
   }

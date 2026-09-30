@@ -39,7 +39,7 @@ import { requestsBrief } from "./requests.ts";
 import type { RequestsBrief } from "../../extensions/requests.ts";
 import { awaitingInterpretation, leadsSnapshot, OPERATOR_REQUESTS, operatorHosts, parkedLeads, questionCoverage, rankedLeads, type AwaitingJob, type LeadView, type ParkedLead } from "../../extensions/leads.ts";
 import { lateItems, readFinish, readiness, type LateItem } from "../../extensions/finish.ts";
-import { HUMAN_ORIGINS, originWords, questionViews, viewContext, type QuestionView, type TriageItem } from "../../extensions/questions.ts";
+import { HUMAN_ORIGINS, originWords, premiseViews, questionViews, viewContext, type PremiseView, type QuestionView, type TriageItem } from "../../extensions/questions.ts";
 import { verifySignedActs, type SignedAct } from "../questions-cli.ts";
 import { claimSequences, type ClaimSequence } from "../../ui/src/lib/claim-sequences.ts";
 import { isFailureEvent } from "../../ui/src/lib/event-taxonomy.ts";
@@ -596,6 +596,8 @@ export type QuestionsBrief = { in_scope: number; persons: number; unanswered: nu
  */
 export type QuestionsPanelView = {
   questions: QuestionView[];
+  /** The premise register (extensions/premises.ts): each premise whole, and the answers that cite it. */
+  premises: PremiseView[];
   objectives: Array<{ id: string; text: string; why: string; added_by: string | null }>;
   triage: TriageItem[];
   chain: { ok: boolean; broken_at: number | null; reason: string | null; head: string | null; events: number };
@@ -613,6 +615,7 @@ export async function readQuestions(sandbox: string): Promise<QuestionsPanelView
   const team = await readTeamIds(sandbox);
   return {
     questions: questionViews(ctx),
+    premises: premiseViews(ctx),
     objectives: [...s.objectives.values()].map((o) => ({ id: o.id, text: o.text, why: o.why, added_by: o.origin && o.origin.kind !== "goal" ? originWords(o.origin) : null })),
     triage: s.triage,
     chain: { ...s.chain, events: s.events.length },

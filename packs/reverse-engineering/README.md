@@ -32,7 +32,8 @@ themselves, and RTF objects that a plain `strings` cannot see.
 
 **One catalogue recipe.** `static-binary` recognises PE, ELF and Mach-O files
 by magic and writes the parser's uncapped structure plus a complete entropy report for kickoff
-or the derived catalogue.
+or the derived catalogue. It is an inventory (`purpose: inventory`): the
+binary's structure, not its behaviour or its strings.
 
 **One goal template**: `sample-triage.md`.
 

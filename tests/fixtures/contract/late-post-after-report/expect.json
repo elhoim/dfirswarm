@@ -1,0 +1,35 @@
+{
+  "case": "Every question established and attested; the coordinator's report published and its lease taken; then another seat posts a result, with no typed resolution.",
+  "design": [
+    "docs/adr/0015 decision 10: a result or veto posted after the report was written as the finish began holds the coordinator's done until finish resolve answers it; they are obligations, read again in the transaction that writes the sentinel.",
+    "docs/adr/0015 decision 8: readiness is the registers' (leads, the ledger gate); what is late against the report is the finish's, not readiness's."
+  ],
+  "policies": [
+    "as run"
+  ],
+  "expect": {
+    "questions": {
+      "question:1": {
+        "disposition": "established",
+        "best_candidate": false,
+        "readiness_holds": false,
+        "defects_include": [],
+        "warnings": []
+      }
+    },
+    "ready": true,
+    "verdict": {
+      "proceed": true,
+      "outcome": "completed"
+    },
+    "done": "held",
+    "late": [
+      {
+        "kind": "post",
+        "by": "a1",
+        "tag": "result"
+      }
+    ],
+    "agreement": []
+  }
+}

@@ -1,0 +1,67 @@
+{
+  "case": "The same three reviewed negatives over the disk; then the disk's broad extraction failed, with why (its programs are not in the job image).",
+  "design": [
+    "docs/adr/0013 'A source's broad extraction before a negative on it': produced, partial, failed or declined releases the hold; a failed extraction says why on its receipt, and the hold is a wait on work under way, never a demand that it succeed.",
+    "docs/adr/0013 the same section: a negative on a source whose broad extraction has not produced is warned (preparation_missing), held ones included once released, and a warning never holds.",
+    "docs/adr/0013 'The end of a run': not determinable and a bounded negative are dispositions under every stop policy."
+  ],
+  "policies": [
+    "operator",
+    "cap-pause",
+    "cap-stop"
+  ],
+  "expect": {
+    "questions": {
+      "question:1": {
+        "disposition": "not_determinable",
+        "readiness_holds": false,
+        "defects_include": [],
+        "warnings": [
+          "preparation_missing"
+        ]
+      },
+      "question:2": {
+        "disposition": "bounded_negative",
+        "readiness_holds": false,
+        "defects_include": [],
+        "warnings": [
+          "preparation_missing"
+        ]
+      },
+      "question:3": {
+        "disposition": "not_determinable",
+        "readiness_holds": false,
+        "defects_include": [],
+        "warnings": [
+          "preparation_missing"
+        ]
+      }
+    },
+    "ready": true,
+    "verdict": {
+      "proceed": true,
+      "outcome": "examination_limited"
+    },
+    "done": "proceeds",
+    "agreement": [],
+    "preparation": {
+      "sources": {
+        "input:disk.E01": [
+          "failed"
+        ]
+      },
+      "held": {},
+      "warned": {
+        "question:1": [
+          "input:disk.E01"
+        ],
+        "question:2": [
+          "input:disk.E01"
+        ],
+        "question:3": [
+          "input:disk.E01"
+        ]
+      }
+    }
+  }
+}

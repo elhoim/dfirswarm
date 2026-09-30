@@ -29,6 +29,7 @@
     "index.tsv",
     "coverage.json"
   ],
+  "purpose": "inventory",
   "covers": "The adb-backup header and every member name, type, size and tar timestamp when encryption is none. It extracts nothing, does not bypass app backup exclusions, and cannot list an encrypted payload without its password.",
   "sha256": "e0e9a981196df93c7562c709f21b92b7af4dda01f5e0d849f5edfd02cf7b4ac2"
 }

@@ -201,8 +201,18 @@ back to a host run on its own.
     both directories are mounted whole, read-only and no-exec, with the seat's
     own corner writable and no-exec on top, so a peer's carved material is
     no-exec in every VM too. It stops an agent running carved material by
-    mistake, not a root that means to. The finish line, custody and the
-    report are decided on the host, never from what a VM reads.
+    mistake, not a root that means to, and not an interpreter: `python`,
+    `node` or a shell given a carved file, or `eval` or `vm.runInContext` of
+    its bytes, runs it, and a job's output under `store/` is not no-exec at
+    all. On the c10 run sd9645b a seat's password-test jobs evaluated a
+    crypto library recovered from a browser cache that way. So a command or
+    a job that runs or evaluates code from the evidence, an extraction or a
+    job's output is flagged from its words (the seat's reply, the trace,
+    the report's job record), never refused, and the prompt says the rule
+    covers every way of running. A path that is an output of the seat's own
+    command job is said apart (code the seat wrote there itself is not the
+    evidence's; code that job recovered is), and still flagged. The finish line, custody and the report
+    are decided on the host, never from what a VM reads.
   - Inside a VM the extension's refusals are the agent's own code under the
     guest's root: tool refusals, claim-before-write, the self-compaction lock,
     the per-seat cap steer and the budget check before each model call are

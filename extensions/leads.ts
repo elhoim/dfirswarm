@@ -39,6 +39,7 @@ import { appendFile, mkdir, open, readdir, readFile, realpath, rename, stat, wri
 import { dirname, join, resolve } from "node:path";
 import * as NB from "./negative-bar.ts";
 import * as O from "./offers.ts";
+import * as PR from "./preparation.ts";
 import * as P from "./protocol.ts";
 import * as SW from "./store-sweep.ts";
 
@@ -75,7 +76,9 @@ const LOCK = REGISTER_LOCK;
  * methods tried and why none worked (E-<seq>). needs_operator: what only the
  * operator can do (allow a host, add a file, answer a question), in words.
  * withdrawn: the harness's alone, when every question the lead served was
- * withdrawn (extensions/questions.ts); it cites the question.
+ * withdrawn (extensions/questions.ts), or when the broad extraction a
+ * preparation lead offered reached an outcome by any route
+ * (closePreparationLead); it cites the question, or the receipt.
  */
 export const LEAD_DISPOSITIONS = ["resolved", "negative", "duplicate", "deferred", "infeasible", "needs_operator", "withdrawn"] as const;
 export type LeadDisposition = (typeof LEAD_DISPOSITIONS)[number];
@@ -247,9 +250,18 @@ export type LeadEvent = {
   second_review_why?: string;
   /** A confirmation offer: the batch it belongs to (the correction chain's head, E-<seq>): one offer per seat and batch, confirmed at once. */
   batch?: string;
+  /**
+   * An open by the harness of a source's broad extraction (extensions/preparation.ts):
+   * the source by digest and ref, the capability and the recipe a pack
+   * declares for it. One lead per source digest and capability.
+   */
+  preparation?: LeadPreparation;
   prev: string;
   hash: string;
 };
+
+/** What a preparation lead offers: a pack's broad extraction (its recipe and capability) over one source, by digest. */
+export type LeadPreparation = { sha256: string; ref: string; capability: string; recipe: string };
 
 /** A need dropped from a lead: withdrawn with a reason, never read as met. */
 export type DroppedNeed = { need: string; why: string; at: string; by: string };
@@ -306,6 +318,8 @@ export type Lead = {
   covered_by?: string[];
   /** A closure confirmed on the entry that stands after its first was superseded. */
   confirmed?: Array<{ at: string; by: string; from: string; to: string; why: string }>;
+  /** A preparation lead (openPreparationLead): the broad extraction it offers. */
+  preparation?: LeadPreparation;
 };
 
 export type LeadsState = {
@@ -430,6 +444,7 @@ export function foldLeads(events: LeadEvent[], chain: LeadsState["chain"] = { ok
           ...(e.objects?.length ? { objects: [...e.objects] } : {}),
           ...(e.overlap ? { overlap: { kind: e.overlap, why: e.overlap_why ?? "", by: e.by } } : {}),
           ...(e.covered_by?.length ? { covered_by: [...e.covered_by] } : {}),
+          ...(e.preparation ? { preparation: { ...e.preparation } } : {}),
         });
         break;
       }
@@ -2020,6 +2035,86 @@ export async function openLead(ctx: P.SwarmContext, input: LeadOpenInput): Promi
   }
 }
 
+/** What the harness offers when it offers a source's broad extraction (extensions/preparation.ts, scripts/preparation.ts). */
+export type PreparationOffer = LeadPreparation & { name: string; version: string; description: string; exclusions: string[] };
+
+/** A preparation lead's title: the recipe and the source, within the title's bound (the source is named whole in why, routes and objects). */
+function preparationTitle(p: PreparationOffer): string {
+  const t = `Broad extraction: ${p.recipe} over ${p.name}`;
+  return t.length <= LEAD_TITLE_MAX ? t : `Broad extraction: ${p.recipe} over one source (named in why)`;
+}
+
+/**
+ * The harness offers a source's broad extraction as a lead (docs/adr/0013,
+ * "A source's broad extraction before a negative on it"): opened by
+ * `system`, unheld, serving no question and not material (it holds the
+ * finish line only through the negatives that rest on its source), with the
+ * route {source, recipe} and the source among its objects, and offered to
+ * the seat idle longest, as a lead nobody holds is (A3). One per source
+ * digest and capability: an open lead of the same preparation, or a closed
+ * one, is answered with, never a second. A seat takes it and runs the
+ * recipe (catalog_request), or closes it deferred or infeasible citing a
+ * limitation that says why it is not run, which is the preparation's
+ * decline.
+ */
+export async function openPreparationLead(sandboxRoot: string, p: PreparationOffer, now = Date.now()): Promise<LeadResult<{ id: string; already?: true; offered_to?: string }>> {
+  try {
+    const r = await transact<{ ok: true; id: string; already?: true; offered_to?: string }>(sandboxRoot, async (snap) => {
+      const same = [...snap.state.leads.values()].find((l) => l.preparation?.sha256 === p.sha256 && l.preparation.capability === p.capability);
+      if (same) return { append: [], result: { ok: true as const, id: same.id, already: true as const } };
+      const id = `L-${snap.state.leads.size + 1}`;
+      const target = p.ref || `sha256:${p.sha256}`;
+      const append: LeadDraft[] = [
+        {
+          by: "system",
+          ev: "open",
+          lead: id,
+          title: preparationTitle(p),
+          why: `${p.description} A broad extraction of ${p.name} (sha256 ${p.sha256}), declared by its pack as ${p.recipe} ${p.version} (capability ${p.capability}); it does not hold: ${p.exclusions.join("; ") || "nothing said"}. A negative that says an event did not happen on this source, or whose coverage is complete over it, is held (preparation_pending) until this extraction is produced, partial, failed or declined.`,
+          origin: "a broad extraction offered by the harness",
+          needs: [],
+          answers: [],
+          material: false,
+          generation: 0,
+          routes: [{ source: target, method: `recipe ${p.recipe}` }],
+          objects: [target],
+          next_action: `catalog_request target=${target} recipe=${p.recipe}; or, if it should not be run, close ${id} deferred or infeasible citing a limitation that says why`,
+          preparation: { sha256: p.sha256, ref: p.ref, capability: p.capability, recipe: p.recipe },
+        },
+      ];
+      // Offered to the seat idle longest now, if one waits; otherwise to the first that does (electOffer).
+      const idle = await idleSeats(sandboxRoot, snap.state, snap.ledger, snap.jobs, now, snap.questions).catch(() => [] as Array<{ agent: string; since: number }>);
+      const pick = idle[0]?.agent;
+      if (pick) append.push(offerDraft(id, pick, "wake", 1, 0, now));
+      return { append, result: { ok: true as const, id, ...(pick ? { offered_to: pick } : {}) } };
+    });
+    return r;
+  } catch (err) {
+    return { ok: false, reason: (err as Error).message };
+  }
+}
+
+/**
+ * A preparation lead whose extraction reached an outcome by any route (the
+ * lane ran it, a seat ran it under the lead or without it, it was declined)
+ * is closed by the harness, withdrawn: what it offered needs nothing more.
+ * The close cites the receipt in words (`ref`) and says why; a lead already
+ * closed is left as it is, and so is one a seat holds: the harness closes
+ * its own preparation leads only, never one under a seat's hand (the Fable
+ * review of the limits branch, P3-3).
+ */
+export async function closePreparationLead(sandboxRoot: string, lead: string, ref: string, why: string): Promise<LeadResult<{ closed: boolean }>> {
+  try {
+    return await transact<{ ok: true; closed: boolean }>(sandboxRoot, async (snap) => {
+      const l = snap.state.leads.get(lead);
+      if (!l?.preparation || l.closed || l.holder) return { append: [], result: { ok: true as const, closed: false } };
+      return { append: [{ by: "system", ev: "close", lead: l.id, generation: l.generation, disposition: "withdrawn", ref, why }], result: { ok: true as const, closed: true } };
+    });
+  } catch (err) {
+    return { ok: false, reason: (err as Error).message };
+  }
+}
+
 function leadRef(raw: unknown): { ok: true; id: string } | { ok: false; reason: string } {
   const text = String(raw ?? "").trim().toUpperCase();
   const m = LEAD_ID.exec(text);
@@ -2187,6 +2282,25 @@ export async function releaseLead(ctx: P.SwarmContext, rawId: unknown, input: { 
   }
 }
 
+/**
+ * The answers check's warnings a close or a confirmation changed, for its
+ * reply (finish.ts warningsAt, lead_close): what it recorded under the lead
+ * (its ref, its results) can leave a question's answer short of an entry
+ * the lead now holds. Nothing when it changed none, or when they cannot be
+ * read: a warning never fails the act.
+ */
+async function closeWarnings(sandboxRoot: string, events: readonly LeadEvent[]): Promise<P.WarningsDelivered> {
+  const seqs = events.filter((e) => e.ev === "close" || e.ev === "confirm").map((e) => e.seq);
+  if (!seqs.length) return {};
+  try {
+    const F = await import("./finish.ts");
+    const ws = await F.warningsAt(sandboxRoot, { point: "lead_close", events: seqs });
+    return ws.length ? { warnings: ws.map(P.warningWords), warned: [...new Set(ws.map((w) => w.code))] } : {};
+  } catch {
+    return {};
+  }
+}
+
 /** What a disposition's ref must be, checked against the ledger and the register. */
 function checkRef(disposition: LeadDisposition, raw: string, l: Lead, snap: LeadsSnapshot): { ok: true; ref: string } | { ok: false; reason: string } {
   const text = raw.trim();
@@ -2224,7 +2338,7 @@ function checkRef(disposition: LeadDisposition, raw: string, l: Lead, snap: Lead
  * with a durable id. A write that fails is not swallowed: the answer says the
  * request is pending, and the next reconciliation writes it.
  */
-export async function closeLead(ctx: P.SwarmContext, rawId: unknown, input: { disposition?: string; ref?: string; why?: string; generation?: number; ask?: unknown; result_refs?: string[] | string }): Promise<LeadResult<{ lead: LeadView; operator_request?: string; request?: { id: string; kind: string; state: string; stage: string | null; answer: string | null }; request_pending?: string; hint?: string }>> {
+export async function closeLead(ctx: P.SwarmContext, rawId: unknown, input: { disposition?: string; ref?: string; why?: string; generation?: number; ask?: unknown; result_refs?: string[] | string }): Promise<LeadResult<{ lead: LeadView; operator_request?: string; request?: { id: string; kind: string; state: string; stage: string | null; answer: string | null }; request_pending?: string; hint?: string; guidance?: string } & P.WarningsDelivered>> {
   const ref = leadRef(rawId);
   if (!ref.ok) return ref;
   const disposition = String(input.disposition ?? "").trim().toLowerCase() as LeadDisposition;
@@ -2267,9 +2381,12 @@ export async function closeLead(ctx: P.SwarmContext, rawId: unknown, input: { di
     if (!r.ok) return r;
     const snap = await leadsSnapshot(ctx.sandboxRoot);
     const view = viewLead(snap.state.leads.get(ref.id)!, snap);
-    if (disposition !== "needs_operator") return { ok: true, lead: view };
+    // The warnings the close changed, on the questions the lead serves (never a refusal).
+    const warned = await closeWarnings(ctx.sandboxRoot, r.events);
+    if (disposition !== "needs_operator") return { ok: true, lead: view, ...warned };
     const hinted = await dispositionAskHint(ctx.sandboxRoot, `${refText.value}\n${why.value ?? ""}`).catch(() => null);
-    const hint = hinted ? { hint: hinted } : {};
+    const guided = input.ask === undefined || input.ask === null ? operatorQuestionGuidance(snap.state.leads.get(ref.id)!.answers) : null;
+    const hint = { ...(hinted ? { hint: hinted } : {}), ...(guided ? { guidance: guided } : {}), ...warned };
     // The close is the commit; the request is written from it, once, by its key.
     const closeSeq = r.events.find((e) => e.ev === "close")?.seq;
     try {
@@ -2292,6 +2409,20 @@ export async function closeLead(ctx: P.SwarmContext, rawId: unknown, input: { di
   } catch (err) {
     return { ok: false, reason: (err as Error).message };
   }
+}
+
+/**
+ * What a question put to the operator says, in the reply to every
+ * needs_operator close that is not an acquisition (request guidance): the
+ * observation that would settle the lead's questions, and what each
+ * possible answer changes, so the answer can be acted on when it comes.
+ * Guidance, never a refusal: whether the ref is a question is in its words,
+ * which the harness does not read. Null for a lead that serves no question.
+ */
+export function operatorQuestionGuidance(answers: readonly string[]): string | null {
+  const qs = [...new Set(answers.map((a) => (/^\d+$/.test(a) ? `Q-${a}` : a)))];
+  if (!qs.length) return null;
+  return `a question put to the operator says what observation would settle ${qs.join(", ")}, and what each possible answer changes (which answer, and to which result), so the answer can be acted on when it comes; a host to allow or a file to add says what it would establish`;
 }
 
 /**
@@ -2455,6 +2586,7 @@ export function previousHolder(l: Lead, s: LeadsState): string | null {
 async function reopenRefusal(sandboxRoot: string, l: Lead, snap: LeadsSnapshot): Promise<string | null> {
   if (!l.closed) return `${l.id} is not closed: claim it (lead_claim) to work it`;
   if (l.closed.by === "operator") return `${l.id} was closed by the operator: only the operator reopens it (swarm.sh lead <run> reopen)`;
+  if (l.closed.disposition === "withdrawn" && l.preparation) return `${l.id} was closed by the harness once the broad extraction it offered reached an outcome (${l.closed.ref}): that outcome is on the store journal; to run ${l.preparation.recipe} again, catalog_request target=${l.preparation.ref || `sha256:${l.preparation.sha256}`} recipe=${l.preparation.recipe}`;
   if (l.closed.disposition === "withdrawn") return `${l.id} was closed withdrawn with the question it served: a withdrawn question is the asker's, and only the operator brings it back`;
   if (l.closed.disposition === "needs_operator") {
     const answered = l.notes.some((n) => Date.parse(n.at) >= Date.parse(l.closed!.at));
@@ -2780,9 +2912,11 @@ function reviewWorkDue(snap: LeadsSnapshot, attestations: P.LedgerAttestation[],
  * Offer each review item due to one eligible seat (A3's offers, the c10
  * pilot's stampede): never the closer, a holder or an author, never a seat
  * done, dead or compacting, never one with an offer standing or offered
- * this item already; the relevant first (it held a lead under the item's
- * questions, then it recorded an entry answering them), then a waiting
- * seat, idle longest. Made under the registers' lock, one seat per item,
+ * this item already; a seat of another model family than those that did
+ * the work first (a preference, never a requirement), then the relevant
+ * (it held a lead under the item's questions, then it recorded an entry
+ * answering them), then a waiting seat, idle longest (rankReviewers).
+ * Made under the registers' lock, one seat per item,
  * each seat counted busy once offered. Offers whose item needs no review
  * any more are withdrawn first, and those that ran out recorded lapsed
  * (settleReviewOffers). Returns how many offers were made.
@@ -2820,7 +2954,7 @@ export async function offerReviews(sandboxRoot: string, now = Date.now()): Promi
         if (!(await seatAvailable(sandboxRoot, a, activity, now)).available) continue;
         candidates.push(a);
       }
-      const pick = await rankReviewers(sandboxRoot, snap, candidates, item.questions, now);
+      const pick = await rankReviewers(sandboxRoot, snap, candidates, item.questions, now, item.exclude);
       if (!pick) continue;
       busy.add(pick);
       append.push(item.draft(pick, now));
@@ -2831,19 +2965,44 @@ export async function offerReviews(sandboxRoot: string, now = Date.now()): Promi
   return r?.offered ?? 0;
 }
 
-/** The most relevant of the candidates for a review of work under these questions: held a lead under them, then recorded an entry answering them, then waiting, idle longest. */
-async function rankReviewers(sandboxRoot: string, snap: LeadsSnapshot, candidates: string[], questions: string[], now: number): Promise<string | null> {
+/**
+ * A seat's model family, from team.json: its model's name without the
+ * provider's route and without a release tag (-latest, -preview, a date),
+ * lower-cased; null when its model is not known. The harness knows no
+ * finer family than a model's name.
+ */
+export function modelFamily(model: string | null | undefined): string | null {
+  const m = String(model ?? "").trim();
+  if (!m) return null;
+  const name = m.slice(m.indexOf("/") + 1).toLowerCase();
+  return name.replace(/[-_.@:](?:latest|preview|\d{4}-?\d{2}-?\d{2}|\d{8})$/, "") || null;
+}
+
+/**
+ * The most relevant of the candidates for a review of work under these
+ * questions: first one of another model family than every seat that did
+ * the work (`authors`, as team.json names their models; docs/adr/0015: a
+ * routing preference, never a requirement: a team of one family is
+ * offered as before, and another model is not an independent source),
+ * then one that held a lead under them, then recorded an entry answering
+ * them, then waiting, idle longest.
+ */
+async function rankReviewers(sandboxRoot: string, snap: LeadsSnapshot, candidates: string[], questions: string[], now: number, authors: ReadonlySet<string> = new Set()): Promise<string | null> {
   if (!candidates.length) return null;
   const qs = new Set(questions);
-  const scored: Array<{ agent: string; score: number; since: number }> = [];
+  const team = await P.readTeam(sandboxRoot).catch(() => null);
+  const family = (id: string) => modelFamily(team?.agents.find((a) => a.id === id)?.model);
+  const theirs = new Set([...authors].map(family).filter((f): f is string => f !== null));
+  const scored: Array<{ agent: string; other: number; score: number; since: number }> = [];
   for (const agent of candidates) {
     let score = 0;
     if ([...snap.state.leads.values()].some((l) => l.answers.some((a) => qs.has(P.sectionKey(a))) && leadHolders(l, snap.state).has(agent))) score = 2;
     else if (snap.ledger.entries.some((e) => (e.by === agent || e.authors.includes(agent)) && ((e.answers ?? []).some((a) => qs.has(P.sectionKey(a))) || (e.section?.startsWith("question:") && qs.has(P.sectionKey(e.section.slice("question:".length))))))) score = 1;
     const since = P.waitingSince(await P.readWaiting(sandboxRoot, agent), now);
-    scored.push({ agent, score, since: since ?? Number.POSITIVE_INFINITY });
+    const f = family(agent);
+    scored.push({ agent, other: f !== null && theirs.size > 0 && !theirs.has(f) ? 1 : 0, score, since: since ?? Number.POSITIVE_INFINITY });
   }
-  scored.sort((a, b) => b.score - a.score || a.since - b.since || a.agent.localeCompare(b.agent));
+  scored.sort((a, b) => b.other - a.other || b.score - a.score || a.since - b.since || a.agent.localeCompare(b.agent));
   return scored[0]!.agent;
 }
 
@@ -2860,8 +3019,16 @@ function reviewHolderWords(o: O.Offer, now: number, rev: number): string {
   return o.held_until ? `taken by ${o.to}, who reviews it until ${until}` : `offered to ${o.to} ${O.untilWords(o, now, rev)}`;
 }
 
-/** What a review's offer asks, for the seat it is made to. */
-export function reviewOfferText(key: string, o: O.Offer, snap: LeadsSnapshot): string {
+/**
+ * What a review's offer asks, for the seat it is made to; `packet`, the
+ * question, its scope and its original sources, with the answer linked, not
+ * quoted (reviewPacketWords), said first; `preparation`, the state of the
+ * broad extraction of each source the negative rests on
+ * (negativePreparationWords), said with the sources: what the reviewer
+ * weighs the negative against; `warnings`, the answers check's warnings on
+ * the answer offered (reviewOfferWarnings), said last.
+ */
+export function reviewOfferText(key: string, o: O.Offer, snap: LeadsSnapshot, warnings: readonly string[] = [], preparation: string | null = null, packet: string | null = null): string {
   const until = O.untilWords(o, snap.at, reviewRev(key, snap.state));
   const hold = `it is then yours for ${Math.round(O.reviewHoldMs() / 60_000)} min`;
   if (o.reason === "route_review") {
@@ -2869,7 +3036,7 @@ export function reviewOfferText(key: string, o: O.Offer, snap: LeadsSnapshot): s
     return `${key}${l ? ` ("${l.title}", closed ${l.closed?.disposition ?? "?"} on ${l.closed?.ref ?? "?"})` : ""} is offered to you for its route review, first claim ${until}: its questions are answered now. Take it with offer accept ${key} (${hold}), then say whether the route's limitation still matters with route_review(${key}, material, why); or offer decline ${key} with why. Other seats' reviews of it wait for yours.`;
   }
   const e = snap.ledger.bySeq.get(Number(key.slice(2)));
-  return `${key}${e ? ` (${e.section}, ${NB.resultWords(NB.answerResult(e) ?? "")})` : ""} is offered to you for its review, first claim ${until}. Take it with offer accept ${key} (${hold}), then ${negativeTargetWords(e, snap)} with review {detection, reproduced, other_route} (a negative's review, not answer_review); or offer decline ${key} with why. Other seats' reviews of it wait for yours.${sweepReviewWords(e, snap)}`;
+  return `${packet ? `${packet} ` : ""}${preparation ? `${preparation} ` : ""}${key}${e ? ` (${e.section}, ${NB.resultWords(NB.answerResult(e) ?? "")})` : ""} is offered to you for its review, first claim ${until}. Take it with offer accept ${key} (${hold}), then ${negativeTargetWords(e, snap)} with review {detection, reproduced, other_route} (a negative's review, not answer_review); or offer decline ${key} with why. Other seats' reviews of it wait for yours.${sweepReviewWords(e, snap)}${warnings.length ? ` The finish line warns of this answer, holding nothing on it; weigh each in your review: ${warnings.join("; ")}` : ""}`;
 }
 
 /**
@@ -3238,7 +3405,7 @@ export function confirmCompactionHoldMs(): number {
  * reopens (reopenOnLedger). Never automatic: a correction by the same author
  * can reverse the basis.
  */
-export async function confirmLead(ctx: P.SwarmContext, rawId: unknown, input: { expected_revision?: unknown; ref?: string; why?: string }, now = Date.now()): Promise<LeadResult<{ lead: LeadView }>> {
+export async function confirmLead(ctx: P.SwarmContext, rawId: unknown, input: { expected_revision?: unknown; ref?: string; why?: string }, now = Date.now()): Promise<LeadResult<{ lead: LeadView } & P.WarningsDelivered>> {
   const ref = leadRef(rawId);
   if (!ref.ok) return ref;
   const why = bounded("why", input.why, LEAD_WHY_MAX, true);
@@ -3262,7 +3429,7 @@ export async function confirmLead(ctx: P.SwarmContext, rawId: unknown, input: { 
     });
     if (!r.ok) return r;
     const snap = await leadsSnapshot(ctx.sandboxRoot);
-    return { ok: true, lead: viewLead(snap.state.leads.get(ref.id)!, snap) };
+    return { ok: true, lead: viewLead(snap.state.leads.get(ref.id)!, snap), ...(await closeWarnings(ctx.sandboxRoot, r.events)) };
   } catch (err) {
     return { ok: false, reason: (err as Error).message };
   }
@@ -3276,7 +3443,7 @@ export async function confirmLead(ctx: P.SwarmContext, rawId: unknown, input: { 
  * them. A closure whose offer ended or whose ref does not fit is skipped,
  * with why.
  */
-export async function confirmBatch(ctx: P.SwarmContext, rawBatch: unknown, input: { ref?: string; why?: string }, now = Date.now()): Promise<LeadResult<{ confirmed: string[]; skipped: Array<{ lead: string; why: string }> }>> {
+export async function confirmBatch(ctx: P.SwarmContext, rawBatch: unknown, input: { ref?: string; why?: string }, now = Date.now()): Promise<LeadResult<{ confirmed: string[]; skipped: Array<{ lead: string; why: string }> } & P.WarningsDelivered>> {
   const batch = String(rawBatch ?? "").trim().replace(/^e-/i, "E-");
   if (!/^E-\d+$/.test(batch)) return { ok: false, reason: `a batch is named by the correction it follows, E-<seq> (got ${JSON.stringify(rawBatch)})` };
   const why = bounded("why", input.why, LEAD_WHY_MAX, true);
@@ -3308,7 +3475,7 @@ export async function confirmBatch(ctx: P.SwarmContext, rawBatch: unknown, input
       return { append, result: { ok: true as const, confirmed, skipped } };
     });
     if (!r.ok) return r;
-    return { ok: true, confirmed: r.confirmed, skipped: r.skipped };
+    return { ok: true, confirmed: r.confirmed, skipped: r.skipped, ...(await closeWarnings(ctx.sandboxRoot, r.events)) };
   } catch (err) {
     return { ok: false, reason: (err as Error).message };
   }
@@ -3501,8 +3668,13 @@ export type LeadNotice = {
   wakes: boolean;
 };
 
-/** What changed for this agent since it was last told: derived from the state, never stored, so none is lost to a restart. */
-export function noticesFor(agent: string, before: Told, snap: LeadsSnapshot): LeadNotice[] {
+/**
+ * What changed for this agent since it was last told: derived from the
+ * state, never stored, so none is lost to a restart. `reviewWarnings`, the
+ * answers check's warnings on each answer offered to it for review
+ * (reviewOfferWarnings), said in the offer.
+ */
+export function noticesFor(agent: string, before: Told, snap: LeadsSnapshot, reviewWarnings: ReadonlyMap<string, readonly string[]> = new Map(), reviewPreparation: ReadonlyMap<string, string> = new Map(), reviewPackets: ReadonlyMap<string, string> = new Map()): LeadNotice[] {
   const { state: s, ledger: v } = snap;
   const out: LeadNotice[] = [];
   const now = toldNow(agent, snap, Object.keys(before.held));
@@ -3560,7 +3732,157 @@ export function noticesFor(agent: string, before: Told, snap: LeadsSnapshot): Le
   // A review offered to this seat (a route review, a negative's review).
   for (const { key, offer: o } of reviewOffersFor(agent, snap)) {
     if (told.has(o.seq)) continue;
-    out.push({ kind: "review_offer", lead: key, offer: o.seq, text: reviewOfferText(key, o, snap), wakes: true });
+    out.push({ kind: "review_offer", lead: key, offer: o.seq, text: reviewOfferText(key, o, snap, reviewWarnings.get(key) ?? [], reviewPreparation.get(key) ?? null, reviewPackets.get(key) ?? null), wakes: true });
+  }
+  return out;
+}
+
+/**
+ * The answers check's warnings on each answer offered to `agent` for
+ * review and not yet told it (finish.ts warningsAt, review_offer): read as
+ * the offer is delivered, so it says what the gate warns of then. A route
+ * review is of a lead, not of an answer, and carries none. Nothing when no
+ * such offer waits, so a delivery with none reads nothing more.
+ */
+export async function reviewOfferWarnings(sandboxRoot: string, agent: string, snap: LeadsSnapshot, before: Told): Promise<Map<string, string[]>> {
+  const out = new Map<string, string[]>();
+  const told = new Set(before.offers ?? []);
+  const keys = reviewOffersFor(agent, snap).filter((x) => x.key.startsWith("E-") && !told.has(x.offer.seq)).map((x) => x.key);
+  if (!keys.length) return out;
+  const F = await import("./finish.ts");
+  for (const key of keys) {
+    const ws = await F.warningsAt(sandboxRoot, { point: "review_offer", entry: Number(key.slice(2)) }).catch(() => [] as P.LedgerWarning[]);
+    if (ws.length) out.set(key, ws.map(P.warningWords));
+  }
+  return out;
+}
+
+/**
+ * The state of the broad extraction of each source a negative rests on
+ * (extensions/preparation.ts), in words, for its review offer to lead with:
+ * the sources it is held on, those it was weighed without, then those whose
+ * extraction produced, each with what the extraction does not hold. Null
+ * when no receipt bears on the answer's coverage.
+ */
+export async function negativePreparationWords(sandboxRoot: string, snap: LeadsSnapshot, seq: number): Promise<string | null> {
+  const a = snap.ledger.bySeq.get(seq);
+  if (!a || a.kind !== "answer" || !a.section?.startsWith("question:")) return null;
+  const facts = await PR.preparationFacts(sandboxRoot, snap.ledger.entries);
+  if (!facts.sources.size) return null;
+  const id = P.sectionKey(a.section.slice("question:".length));
+  const covs = P.citedForQuestion(a, snap.ledger.bySeq, snap.ledger.replaced, id).filter((c) => c.kind === "coverage");
+  const found = PR.preparationFindings(a, covs, facts);
+  const shown = new Set([...found.hold, ...found.warn].map((x) => x.source.source.sha256));
+  const others = [...new Set(covs.flatMap((c) => (facts.reach.get(c.seq) ?? []).map((r) => r.sha256)))]
+    .filter((sha) => !shown.has(sha))
+    .map((sha) => facts.sources.get(sha))
+    .filter((x): x is PR.SourcePreparation => Boolean(x));
+  return PR.reviewPreparationWords(found, others);
+}
+
+/** The preparation words of each negative offered to `agent` for review and not yet told it (negativePreparationWords): read as the offer is delivered. */
+export async function reviewOfferPreparation(sandboxRoot: string, agent: string, snap: LeadsSnapshot, before: Told): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  const told = new Set(before.offers ?? []);
+  for (const { key, offer } of reviewOffersFor(agent, snap)) {
+    if (!key.startsWith("E-") || told.has(offer.seq)) continue;
+    const words = await negativePreparationWords(sandboxRoot, snap, Number(key.slice(2))).catch(() => null);
+    if (words) out.set(key, words);
+  }
+  return out;
+}
+
+/** How many jobs back a job's output is followed to the sources it was made from. */
+const SOURCE_DEPTH = 8;
+
+/**
+ * The original sources refs lead back to: an input, an import, a capture
+ * or a digest as named; a job's output by the job's declared inputs,
+ * followed back through the jobs that made them (a job over everything is
+ * its own source); a catalogue member by its generation's target. Refs and
+ * the jobs' own records only, each once, in the order met. A brain's own
+ * output (tool:, trace:) is its own source.
+ */
+export async function originalSources(sandboxRoot: string, refs: readonly string[]): Promise<string[]> {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const put = (r: string) => {
+    if (!out.includes(r)) out.push(r);
+  };
+  const walk = async (ref: string, depth: number): Promise<void> => {
+    const r = ref.trim();
+    if (!r || seen.has(r) || depth > SOURCE_DEPTH || /^unresolved:/.test(r)) return;
+    seen.add(r);
+    const job = NB.jobOfRef(r);
+    if (job) {
+      // Only a job that declared what it reads leads back to it; one over everything is its own source.
+      const d = await NB.jobDeclared(sandboxRoot, job).catch(() => null);
+      if (!d || d.scope !== "declared" || !d.inputs.length) {
+        put(`job:${job}`);
+        return;
+      }
+      for (const i of d.inputs) await walk(i, depth + 1);
+      return;
+    }
+    const mem = /^member:([a-z0-9-]+)#\d+$/.exec(r);
+    if (mem) {
+      const g = (await NB.generations(sandboxRoot).catch(() => [] as NB.GenRecord[])).find((x) => x.id === mem[1]);
+      if (g?.target?.ref) await walk(g.target.ref, depth + 1);
+      else put(r);
+      return;
+    }
+    put(r.replace(/^input:inputs\//, "input:"));
+  };
+  for (const r of refs) await walk(r, 0);
+  return out;
+}
+
+/**
+ * A review's packet, source-first (docs/adr/0015, "A source-first
+ * review"): the question as it is asked now (its register id and revision,
+ * its words whole), its scope, and the original sources the answer's
+ * coverage records and cited entries lead back to (originalSources); then
+ * the answer under review, linked by its seq, the entries it corrects and
+ * the coverage it rests on, never quoted: the reviewer reads the question
+ * against the sources before it reads the conclusion. Reduced priming, not
+ * blindness: a seat may have seen the board. Null when the entry is not an
+ * answer to a question.
+ */
+export async function reviewPacketWords(sandboxRoot: string, snap: LeadsSnapshot, seq: number): Promise<string | null> {
+  const a = snap.ledger.bySeq.get(seq);
+  if (!a || a.kind !== "answer" || !a.section?.startsWith("question:")) return null;
+  const id = P.sectionKey(a.section.slice("question:".length));
+  const q = snap.questions?.bySection.get(id) ?? null;
+  let words: string | null = q?.text ?? null;
+  if (!words) {
+    const doc = await goalDocument(sandboxRoot).catch(() => null);
+    if (doc) words = (await import("./questions.ts")).goalQuestionText(doc.text, id, snap.goal.questions);
+  }
+  const name = q ? `${q.id}, revision ${q.rev}` : /^\d+$/.test(id) ? `Q-${id}` : a.section;
+  const material = snap.goal.questions.map(P.sectionKey).includes(id) || !q || q.materiality === "material";
+  const scope = [material ? "a material question" : "a question the operator marked not material", ...(snap.goal.existence.map(P.sectionKey).includes(id) || q?.expects === "existence" ? ["it asks whether something exists"] : []), ...(q?.completeness ? ["it asks for a complete set"] : [])];
+  const cited = [...(a.support ?? []), ...(a.contrary ?? []), ...(a.limitations ?? [])].map((x) => snap.ledger.bySeq.get(x.seq)).filter((e): e is P.LedgerEntry => Boolean(e));
+  const coverage = cited.filter((e) => e.kind === "coverage");
+  const sources = await originalSources(sandboxRoot, cited.flatMap((e) => e.refs ?? []));
+  const history: number[] = [];
+  for (let e: P.LedgerEntry | undefined = a; typeof e?.supersedes === "number" && history.length < 50; e = snap.ledger.bySeq.get(e.supersedes)) history.push(e.supersedes);
+  return [
+    `Review it source-first. The question: ${name}: ${words ? `"${words}"` : `its words are in the goal (${a.section})`}.`,
+    `Its scope: ${scope.join("; ")}.`,
+    `The original sources its answer's coverage and cited entries lead back to: ${sources.length ? sources.join(", ") : "none named (read the question's leads and routes)"}.`,
+    "Read the question against those sources before the answer under review, and weigh the strongest rival reading of them (another time, entity, mechanism, or the premise not holding).",
+    `The answer under review is linked, not quoted: E-${a.seq} in ledger/ledger.md${history.length ? `, correcting ${history.map((n) => `E-${n}`).join(" ← ")}` : ""}${coverage.length ? `; its coverage ${coverage.map((c) => `E-${c.seq}`).join(", ")}` : ""}.`,
+  ].join(" ");
+}
+
+/** The source-first packet of each answer offered to `agent` for review and not yet told it (reviewPacketWords): read as the offer is delivered. */
+export async function reviewOfferPackets(sandboxRoot: string, agent: string, snap: LeadsSnapshot, before: Told): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  const told = new Set(before.offers ?? []);
+  for (const { key, offer } of reviewOffersFor(agent, snap)) {
+    if (!key.startsWith("E-") || told.has(offer.seq)) continue;
+    const words = await reviewPacketWords(sandboxRoot, snap, Number(key.slice(2))).catch(() => null);
+    if (words) out.set(key, words);
   }
   return out;
 }
@@ -3614,7 +3936,7 @@ export async function leadsDigest(ctx: P.SwarmContext, o: { mark?: boolean } = {
   const awaiting = (await awaitingInterpretation(ctx.sandboxRoot, snap.state, snap.jobs, snap.ledger)).filter((a) => a.agent === me);
   const cov = questionCoverage(snap);
   const before = await readTold(ctx.sandboxRoot, me);
-  const notices = noticesFor(me, before, snap);
+  const notices = noticesFor(me, before, snap, await reviewOfferWarnings(ctx.sandboxRoot, me, snap, before).catch(() => new Map<string, string[]>()), await reviewOfferPreparation(ctx.sandboxRoot, me, snap, before).catch(() => new Map<string, string>()), await reviewOfferPackets(ctx.sandboxRoot, me, snap, before).catch(() => new Map<string, string>()));
   // The register's part comes first: a person's question outranks the rest.
   const qTold = await Q.readTold(ctx.sandboxRoot, me);
   const qd = snap.questions ? Q.questionsDigest(me, { questions: snap.questions, leads: snap.state, ledger: snap.ledger }, qTold) : null;
@@ -3750,7 +4072,7 @@ export function leadsWaitCheck(ctx: P.SwarmContext): () => Promise<string | null
     if (due) await offerReviews(ctx.sandboxRoot, now).catch(() => 0);
     const snap = await leadsSnapshot(ctx.sandboxRoot);
     const before = await readTold(ctx.sandboxRoot, ctx.agentId);
-    const waking = noticesFor(ctx.agentId, before, snap).filter((n) => n.wakes);
+    const waking = noticesFor(ctx.agentId, before, snap, await reviewOfferWarnings(ctx.sandboxRoot, ctx.agentId, snap, before).catch(() => new Map<string, string[]>()), await reviewOfferPreparation(ctx.sandboxRoot, ctx.agentId, snap, before).catch(() => new Map<string, string>()), await reviewOfferPackets(ctx.sandboxRoot, ctx.agentId, snap, before).catch(() => new Map<string, string>())).filter((n) => n.wakes);
     // The question register's news for this seat: an offer, a clarification answered, its question amended or withdrawn.
     const Q = await import("./questions.ts");
     const qWaking = snap.questions ? Q.questionNotices(ctx.agentId, await Q.readTold(ctx.sandboxRoot, ctx.agentId), { questions: snap.questions, leads: snap.state, ledger: snap.ledger }).filter((n) => n.wakes) : [];

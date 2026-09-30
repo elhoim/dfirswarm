@@ -1,13 +1,16 @@
 /**
- * An answer that leaves out what its own question's leads established (the
- * run s993d40, a CTF case of six questions: one answer left out two methods
- * the ledger held as findings, attested by another seat, under that
- * question's leads). The answers check warns, never holds: a standing
- * finding or event, not disputed, attested by another seat or recorded by
- * two, that the lead register recorded under a lead linked to the question
- * (it interprets the lead's job, or the lead's close or confirmation names
- * it), which the answer does not reach, directly or through the entries it
- * cites. Registers and refs only. Synthetic runs only.
+ * An answer that leaves out what the record ties to its question (the run
+ * s993d40, a CTF case of six questions: one answer left out two methods the
+ * ledger held as findings, attested by another seat, under that question's
+ * leads, and one of them named a second question whose answer never
+ * reached it either). The answers check warns, never holds: a standing
+ * finding or event, not disputed, which the answer does not reach,
+ * directly or through the entries it cites, and which two seats hold
+ * (another seat attested it, or two recorded it) and the lead register
+ * recorded under a lead linked to the question, or which names the
+ * question in its answers, or whose rel links it to an entry the answer
+ * cites; or one seat's that names the question and that another question's
+ * answer relies on. Registers and refs only. Synthetic runs only.
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -42,7 +45,7 @@ const GOAL = [
   "",
 ].join("\n");
 
-const WARN = /established under Q-1's leads and not in its answer/;
+const WARN = /\(question:1\) leaves out what the record ties to Q-1:/;
 
 type Ctx = { sandboxRoot: string; agentId: string };
 
@@ -88,7 +91,7 @@ test("the register records an entry under a lead by the lead's acts: its jobs' i
   assert.equal(got.size, 2, "a job run under no lead records nothing under one");
 });
 
-test("an answer that leaves out findings two seats hold under its question's leads is warned of, each named with its lead, in the answers check, its machine line, the finish line's note and finish status; the done proceeds; citing them clears it", async () => {
+test("an answer that leaves out findings the record ties to its question is warned of, each named with its lead or its own tie, never one seat's no other answer relies on, in the answers check, its machine line, the finish line's note and finish status; the done proceeds; citing them clears it", async () => {
   const r = await run({ goal: GOAL });
   const L1 = await planned(r.a0, "1");
   assert.ok((await L.attachJob(r.S, "a0", "j000001", L1)).ok);
@@ -101,6 +104,8 @@ test("an answer that leaves out findings two seats hold under its question's lea
   const twice = ok(await rec(r.a0, event)).entry;
   assert.equal(ok(await rec(r.a2, event)).merged, true, "the same event again from another seat is a second author");
   const alone = ok(await rec(r.a0, finding("a mail client was open"))).entry;
+  // One seat's, under the lead, naming no question: its author tied it to none, so one seat is not enough.
+  const unnamed = ok(await rec(r.a0, finding("the mail client's cache was 2 MB", { answers: undefined }))).entry;
   const disputed = ok(await rec(r.a0, finding("the archive was encrypted"))).entry;
   const replaced = ok(await rec(r.a0, finding("the archive was 4 MB"))).entry;
   const lim = ok(await rec(r.a0, { kind: "limitation", value: "The proxy log is not in the case", source: "the case", evidence: "the inventory", reason: "unavailable", answers: ["1"] })).entry;
@@ -109,7 +114,7 @@ test("an answer that leaves out findings two seats hold under its question's lea
   const correction = ok(await rec(r.a0, finding("the archive was 5 MB", { supersedes: replaced.seq }))).entry;
   await attest(r.a3, correction.seq);
   assert.ok((await L.recordInterpretations(r.S, "a0", attested.seq, ["j000001"])).ok);
-  for (const seq of [alone.seq, disputed.seq, replaced.seq, lim.seq]) assert.ok((await L.recordInterpretations(r.S, "a0", seq, ["j000001"])).ok);
+  for (const seq of [alone.seq, unnamed.seq, disputed.seq, replaced.seq, lim.seq]) assert.ok((await L.recordInterpretations(r.S, "a0", seq, ["j000001"])).ok);
   assert.ok((await L.closeLead(r.a0, L1, { disposition: "resolved", ref: `E-${cited.seq}`, result_refs: [`E-${twice.seq}`, `E-${through.seq}`] })).ok);
   // Question 2's lead and answer: what they hold is not question 1's.
   const L2 = await planned(r.a1, "2");
@@ -125,11 +130,13 @@ test("an answer that leaves out findings two seats hold under its question's lea
     assert.ok(att.ok, (att as { reason?: string }).reason);
   }
 
-  const want = `answer #${a1.seq} (question:1): E-${attested.seq} (a finding under ${L1}), E-${twice.seq} (an event under ${L1}) established under Q-1's leads and not in its answer: cite them or say why they do not bear on it. record the answer again with supersedes=${a1.seq}, citing each as E-<seq> in its reasoning (or among its contrary or limitations), or saying there why each does not bear on Q-1; an entry the answer cites that names one (rel, a coverage record's result_refs) counts`;
+  // The correction names Q-1 and another seat attested it, though no act of the lead register names it: left out, by its own tie.
+  // One seat's finding that names Q-1 counts only where another question's answer relies on it: none does here, so neither it nor one naming no question is listed.
+  const want = `answer #${a1.seq} (question:1) leaves out what the record ties to Q-1: E-${attested.seq} (a finding under ${L1}), E-${twice.seq} (an event under ${L1}), E-${correction.seq} (a finding that names Q-1): cite them or say why they do not bear on it. record the answer again with supersedes=${a1.seq}, citing each as E-<seq> in its reasoning (or among its contrary or limitations), or saying there why each does not bear on Q-1; an entry the answer cites that names one (rel, a coverage record's result_refs) counts`;
   const f = await finish(r.S);
   assert.equal(f.check.ok, true, f.check.lines.join("\n"));
   assert.deepEqual(f.check.dispositions, { "question:1": "established", "question:2": "established" });
-  assert.deepEqual(f.check.warnings, [want], "one warning, for question 1 alone, naming exactly the two entries");
+  assert.deepEqual(f.check.warnings, [want], "one warning, for question 1 alone, naming exactly the three entries");
   assert.ok(f.check.lines.includes(`WARN: ${want}`));
   // The finish line: completed, the warning in its note; readiness ready, the warning apart from its items; finish status shows it.
   assert.deepEqual(f.gate.warnings, [want]);
@@ -149,7 +156,7 @@ test("an answer that leaves out findings two seats hold under its question's lea
 
   // Citing them clears it: one in the reasoning, the other through a finding the answer cites that names it.
   const bridge = ok(await rec(r.a0, finding("the USB copy and the upload were the same archive", { rel: [{ to: twice.seq, kind: "supports" }] }))).entry;
-  const again = await answer(r.a1, "question:1", [cited.seq, attested.seq, bridge.seq], { supersedes: a1.seq });
+  const again = await answer(r.a1, "question:1", [cited.seq, attested.seq, bridge.seq, correction.seq], { supersedes: a1.seq });
   const att = await P.attestEntry(r.a2, { seq: again.seq, how: "re-derived the cited findings", ...ESTABLISHED });
   assert.ok(att.ok, (att as { reason?: string }).reason);
   const after = await finish(r.S);
@@ -159,7 +166,7 @@ test("an answer that leaves out findings two seats hold under its question's lea
   assert.equal((await FIN.finishStatus(r.a1)).warnings, undefined);
 });
 
-test("every entry left out is listed, however many, and a broken lead register says nothing", async () => {
+test("every entry left out is listed, however many; a broken lead register says nothing of the leads, and the ledger's own tie still counts", async () => {
   const r = await run({ goal: GOAL });
   const L1 = await planned(r.a0, "1");
   assert.ok((await L.attachJob(r.S, "a0", "j000001", L1)).ok);
@@ -177,12 +184,29 @@ test("every entry left out is listed, however many, and a broken lead register s
   const c = await checkLedgerAnswers(r.S, ["1"]);
   const w = c.warnings.filter((x) => WARN.test(x));
   assert.equal(w.length, 1);
-  assert.equal(w[0].split(`established under Q-1's leads`)[0], `answer #${a.seq} (question:1): ${left.map((n) => `E-${n} (a finding under ${L1})`).join(", ")} `, "all 25, none cut");
-  // A lead register whose chain is broken says nothing here (the finish gate names it).
+  assert.equal(w[0].split(": cite them")[0], `answer #${a.seq} (question:1) leaves out what the record ties to Q-1: ${left.map((n) => `E-${n} (a finding under ${L1})`).join(", ")}`, "all 25, none cut");
+  // A lead register whose chain is broken says nothing of the leads (the finish gate names it); each finding names Q-1 itself, and that tie is the ledger's.
   const { readFile, writeFile } = await import("node:fs/promises");
   const log = join(r.S, L.LEADS_LOG);
   const text = await readFile(log, "utf8");
   await writeFile(log, text.replace(/"title":"Work question 1"/, '"title":"Work question one"'));
-  const broken = await checkLedgerAnswers(r.S, ["1"]);
-  assert.ok(!broken.warnings.some((x) => WARN.test(x)), broken.warnings.join("\n"));
+  const broken = (await checkLedgerAnswers(r.S, ["1"])).warnings.filter((x) => WARN.test(x));
+  assert.equal(broken.length, 1, broken.join("\n"));
+  assert.equal(broken[0].split(": cite them")[0], `answer #${a.seq} (question:1) leaves out what the record ties to Q-1: ${left.map((n) => `E-${n} (a finding that names Q-1)`).join(", ")}`);
+});
+
+test("a rel ties an entry to the question only when it weighs what the answer cites (supports, contradicts, a delta): one that duplicates it, or is derived from it, ties nothing", async () => {
+  const r = await run({ goal: GOAL });
+  const L1 = await planned(r.a0, "1");
+  await planned(r.a0, "2");
+  const base = ok(await rec(r.a0, finding("the data left over the proxy"))).entry;
+  const dup = ok(await rec(r.a0, finding("the data left over the proxy, as its log repeats it", { answers: ["2"], rel: [{ to: base.seq, kind: "duplicates" }] }))).entry;
+  const derived = ok(await rec(r.a0, finding("the proxy's session, carved from its log", { answers: ["2"], rel: [{ to: base.seq, kind: "derived_from" }] }))).entry;
+  const sup = ok(await rec(r.a0, finding("the firewall passed the proxy's upload", { answers: ["2"], rel: [{ to: base.seq, kind: "supports" }] }))).entry;
+  for (const seq of [base.seq, dup.seq, derived.seq, sup.seq]) await attest(r.a3, seq);
+  assert.ok((await L.closeLead(r.a0, L1, { disposition: "resolved", ref: `E-${base.seq}` })).ok);
+  const a = await answer(r.a1, "question:1", [base.seq]);
+  const w = (await checkLedgerAnswers(r.S, ["1"])).warnings.filter((x) => WARN.test(x));
+  assert.equal(w.length, 1, w.join("\n"));
+  assert.equal(w[0].split(": cite it")[0], `answer #${a.seq} (question:1) leaves out what the record ties to Q-1: E-${sup.seq} (a finding whose rel supports E-${base.seq}, which the answer cites)`);
 });

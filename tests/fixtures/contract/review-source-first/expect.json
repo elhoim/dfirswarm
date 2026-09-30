@@ -1,0 +1,49 @@
+{
+  "case": "Three established answers, each reviewed established: question 1's review names no discriminator and no locator or derivation (recorded best_candidate); question 2's names a discriminator and a locator the hub finds at its offset; question 3's first review names a locator one byte off (recorded best_candidate), and the same seat's later review names it at its offset.",
+  "design": [
+    "docs/adr/0015 'A source-first review': an established attest of an answer that claims established, on a material question, with no discriminator, or a locator that does not verify against the sealed bytes, or neither a verified locator nor a derivation, is recorded best_candidate with the reasons in capped, and the reply says how to fix it; a seat's later review that meets it is its review.",
+    "docs/adr/0013 'The end of a run, under every stop policy': a best candidate is no disposition (B2); done finishes a run only when every question has one.",
+    "docs/adr/0015 'After the run s9722fa': an answer that claims established, every review of which holds it a best candidate, is held so, by readiness as by the done."
+  ],
+  "policies": [
+    "as run"
+  ],
+  "expect": {
+    "questions": {
+      "question:1": {
+        "disposition": null,
+        "best_candidate": true,
+        "readiness_holds": true,
+        "readiness_includes": [
+          "best_candidate"
+        ],
+        "defects_include": [],
+        "warnings": [],
+        "report_best_candidate": true
+      },
+      "question:2": {
+        "disposition": "established",
+        "best_candidate": false,
+        "readiness_holds": false,
+        "defects_include": [],
+        "warnings": []
+      },
+      "question:3": {
+        "disposition": "established",
+        "best_candidate": false,
+        "readiness_holds": false,
+        "defects_include": [],
+        "warnings": []
+      }
+    },
+    "ready": false,
+    "verdict": {
+      "proceed": false,
+      "failing": "question:1"
+    },
+    "done": "held",
+    "late": [],
+    "agreement": [],
+    "review_caps": { "established": 2, "capped": [] }
+  }
+}

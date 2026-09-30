@@ -1,0 +1,55 @@
+{
+  "case": "A method established under another question's lead (the run s993d40's second shape): question 2's lead holds three findings two seats hold, one naming question 1 too, one linked by rel to the finding question 1's answer cites, one tied to question 1 by nothing, and one seat's finding naming question 1 too; question 2's answer cites all four. One seat's finding naming question 1 alone, which no answer cites, stands beside them. Question 1's answer cites only its own finding.",
+  "design": [
+    "docs/adr/0013 'Warnings where the decision is made': lead_findings_uncited also covers a standing finding or event two seats hold that is not under the question's leads but names the question in its answers, or whose rel links it to an entry the question's answer cites, when the answer does not reach it; registers and refs only.",
+    "docs/adr/0013 'Warnings where the decision is made': one seat's finding or event counts only when it names the question in its answers and another question's standing answer relies on it (reaches it); one seat's that no answer relies on does not.",
+    "docs/adr/0013 'After the run s993d40': the entries under the question's own leads are listed as before; a warning never holds.",
+    "docs/adr/0013 'Warnings where the decision is made': the warning is said in the reply to the answer's record and to the attest on it, and in finish status."
+  ],
+  "policies": [
+    "as run"
+  ],
+  "expect": {
+    "questions": {
+      "question:1": {
+        "disposition": "established",
+        "best_candidate": false,
+        "readiness_holds": false,
+        "defects_include": [],
+        "warnings": [
+          "lead_findings_uncited"
+        ],
+        "warned": {
+          "lead_findings_uncited": [2, 3, 5]
+        }
+      },
+      "question:2": {
+        "disposition": "established",
+        "best_candidate": false,
+        "readiness_holds": false,
+        "defects_include": [],
+        "warnings": []
+      }
+    },
+    "ready": true,
+    "verdict": {
+      "proceed": true,
+      "outcome": "completed"
+    },
+    "done": "proceeds",
+    "agreement": [],
+    "deliveries": {
+      "acts": {
+        "record": 2,
+        "review_offer": 0,
+        "attest": 6,
+        "lead_close": 2
+      },
+      "delivered": [
+        { "point": "record", "entry": 8, "on": "answer", "sections": ["question:1"], "warnings": ["lead_findings_uncited"] },
+        { "point": "attest", "entry": 8, "on": "answer", "by": "a2", "sections": ["question:1"], "warnings": ["lead_findings_uncited"] },
+        { "point": "finish_status", "sections": ["question:1"], "warnings": ["lead_findings_uncited"] }
+      ]
+    }
+  }
+}

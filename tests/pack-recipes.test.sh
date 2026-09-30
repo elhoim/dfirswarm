@@ -80,7 +80,27 @@ refuse "no time limit" 'r["limits"] = {}' "limits.seconds is a whole number"
 refuse "a recipe whose id is not its directory" 'r["id"] = "other"' "declares the id"
 refuse "a magic that is not hex bytes" 'r["magic"] = [{"offset": 0, "hex": "zz"}]' "magic is a list of {offset, hex}"
 refuse "suffixes that are not a list of names" 'r["suffixes"] = ".tar"' "suffixes is a list of name endings"
+# What it prepares (docs/adr/0013): an inventory, or a broad extraction that
+# says what it does not hold; one the images cannot run says why, and has no
+# trigger.
+refuse "a purpose that is neither" 'r["purpose"] = "everything"' "purpose is inventory"
+refuse "a broad extraction that lists no exclusions" 'r["purpose"] = "broad_extraction"' "lists its exclusions"
+refuse "exclusions on an inventory" 'r["exclusions"] = ["the contents"]' "exclusions belong to a broad extraction"
+refuse "a capability that is not a name" 'r.update(purpose="broad_extraction", exclusions=["the contents"], capability="Two Words")' "capability names what a broad extraction prepares"
+refuse "an unavailable recipe with a trigger" 'r.update(purpose="broad_extraction", exclusions=["the contents"], unavailable="no program in the images reads it")' "has no auto trigger"
+refuse "an unavailable inventory" 'r.update(unavailable="no program in the images reads it", auto=[])' "unavailable is a broad extraction's"
+refuse "an unavailable with no why" 'r.update(purpose="broad_extraction", exclusions=["the contents"], unavailable=" ", auto=[])' "unavailable says why"
 pass "a malformed recipe keeps the pack from sealing, with the reason"
+
+d="$WORK/broad"; mkdir -p "$d"; mk_pack "$d" bpack
+python3 - "$d/bpack/recipes/list-things/recipe.json" <<'EOF2'
+import json, sys
+r = json.load(open(sys.argv[1]))
+r.update(purpose="broad_extraction", capability="thing-records", exclusions=["what no parser reads"], auto=[])
+json.dump(r, open(sys.argv[1], "w"), indent=2)
+EOF2
+"$PACK" seal "$d/bpack" >/dev/null || fail "a broad extraction with its capability and exclusions should seal"
+pass "a broad extraction with its capability and exclusions seals"
 
 # The shipped recipes answer the protocol: detect exits 0 or 1 with a why,
 # run writes coverage.json and index.tsv.
@@ -104,6 +124,66 @@ done
 python3 "$CFB/recipes/archive-members/run.py" run --target "{\"paths\": [\"$T/a.zip\"]}" --out "$T/out" >/dev/null || fail "archive-members should catalogue a zip"
 [[ "$(jq -r .status "$T/out/coverage.json")" == complete && -s "$T/out/index.tsv" && -s "$T/out/members.tsv" ]] || fail "archive-members should write coverage.json, index.tsv and members.tsv"
 pass "the shipped recipes answer detect and run as the runner expects"
+
+# disk-timeline, the base pack's broad extraction of a disk image: detect by
+# signature alone (an EWF container, a partition table with a partition, a
+# filesystem's boot sector), run with stand-ins for log2timeline and psort
+# that write what the real ones do, and without them, failed and why. The
+# stand-ins keep Plaso's way with its log: where --logfile says, else
+# <tool>-<time>.log.gz in the working directory, and a log that cannot be
+# written fails the step. On the Belka run the job started in the run's
+# directory, read-only in its worker, and both steps failed there; here the
+# recipe runs from a read-only directory too.
+DT="$CFB/recipes/disk-timeline/run.py"
+python3 - "$T" <<'EOF2'
+import os, struct, sys
+t = sys.argv[1]
+open(os.path.join(t, "x.E01"), "wb").write(b"EVF\x09\x0d\x0a\xff\x00" + b"\0" * 70000)
+mbr = bytearray(70000)
+mbr[446 + 4] = 0x07
+struct.pack_into("<I", mbr, 446 + 8, 2048)
+struct.pack_into("<I", mbr, 446 + 12, 4096)
+mbr[510:512] = b"\x55\xaa"
+open(os.path.join(t, "mbr.img"), "wb").write(bytes(mbr))
+empty = bytearray(70000)
+empty[510:512] = b"\x55\xaa"
+open(os.path.join(t, "no-parts.img"), "wb").write(bytes(empty))
+EOF2
+for f in x.E01 mbr.img; do
+  python3 "$DT" detect --target "{\"paths\": [\"$T/$f\"]}" | jq -e '.applies' >/dev/null || fail "disk-timeline should take $f"
+done
+for f in a.zip no-parts.img zeros.img; do
+  [[ -f "$T/$f" ]] || dd if=/dev/zero of="$T/$f" bs=1024 count=0 seek=65536 status=none
+  python3 "$DT" detect --target "{\"paths\": [\"$T/$f\"]}" >/dev/null && fail "disk-timeline should turn down $f"
+done
+mkdir -p "$T/bin"
+cat > "$T/bin/log2timeline" <<'L2T'
+#!/usr/bin/env bash
+log="log2timeline-$(date +%Y%m%dT%H%M%S).log.gz"
+while [[ $# -gt 0 ]]; do case "$1" in --storage-file) s="$2"; shift 2;; --logfile) log="$2"; shift 2;; *) shift;; esac; done
+echo log 2>/dev/null > "$log" || { echo "OSError: [Errno 30] Read-only file system: '$log'" >&2; exit 1; }
+echo plaso > "$s"
+L2T
+cat > "$T/bin/psort" <<'PSORT'
+#!/usr/bin/env bash
+log="psort-$(date +%Y%m%dT%H%M%S).log.gz"
+while [[ $# -gt 1 ]]; do case "$1" in -w) w="$2"; shift 2;; --logfile) log="$2"; shift 2;; *) shift;; esac; done
+echo log 2>/dev/null > "$log" || { echo "OSError: [Errno 30] Read-only file system: '$log'" >&2; exit 1; }
+printf "datetime,message\n2024-04-01T00:00:00,x\n" > "$w"
+PSORT
+chmod +x "$T/bin/log2timeline" "$T/bin/psort"
+mkdir -p "$T/ro"; chmod a-w "$T/ro"
+(cd "$T/ro" && PATH="$T/bin:$PATH" python3 "$DT" run --target "{\"paths\": [\"$T/x.E01\"]}" --out "$T/dt" >/dev/null); rc=$?
+chmod u+w "$T/ro"
+[[ "$rc" -eq 0 ]] || fail "disk-timeline should run with log2timeline and psort from a read-only directory: $(cat "$T/dt/coverage.json" 2>/dev/null; cat "$T/dt/"*.stderr 2>/dev/null)"
+jq -e '.status == "complete"' "$T/dt/coverage.json" >/dev/null || fail "disk-timeline should say complete: $(cat "$T/dt/coverage.json")"
+[[ "$(cut -f1 "$T/dt/index.tsv" | tr '\n' ' ')" == "timeline.plaso timeline.csv " ]] || fail "disk-timeline should index the storage file and the timeline: $(cat "$T/dt/index.tsv")"
+[[ -s "$T/dt/log2timeline.log.gz" && -s "$T/dt/psort.log.gz" ]] || fail "disk-timeline should give each Plaso step its log in --out (--logfile): $(ls "$T/dt")"
+[[ -z "$(ls -A "$T/ro")" ]] || fail "disk-timeline wrote in the directory it was run from: $(ls -A "$T/ro")"
+PY3="$(command -v python3)"
+env PATH=/usr/bin:/bin "$PY3" "$DT" run --target "{\"paths\": [\"$T/x.E01\"]}" --out "$T/dt-none" >/dev/null && fail "disk-timeline with no Plaso should fail"
+jq -e '.status == "failed" and (.errors[0] | test("log2timeline and psort not on PATH"))' "$T/dt-none/coverage.json" >/dev/null || fail "disk-timeline with no Plaso should say which program is missing: $(cat "$T/dt-none/coverage.json")"
+pass "disk-timeline takes a disk image by its signature, writes the timeline and each step's log under --out from a read-only directory, and says failed and why with no Plaso"
 
 # Every recipe of every pack answers detect the two ways the harness asks: the
 # kickoff's census gives the target as JSON with a --probe-out directory

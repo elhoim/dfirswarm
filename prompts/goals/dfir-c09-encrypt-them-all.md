@@ -1,3 +1,8 @@
+---
+premises:
+  - inputs/AF-Case2.E01 is an image of Jane's Windows machine. [scope: entities inputs/AF-Case2.E01, Jane]
+  - Jane's system holds data encrypted with different methods, in the three parts the published brief sets out. [scope: entities Jane; questions 1, 2, 3, 4]
+---
 > From [docs/use-cases/dfir-c09-encrypt-them-all](../../docs/use-cases/dfir-c09-encrypt-them-all/README.md): the goal document a real run was given,
 > and what that run produced is written up beside it. The evidence filenames below are
 > the ones that case had — change them, and the checks that name them, for yours.

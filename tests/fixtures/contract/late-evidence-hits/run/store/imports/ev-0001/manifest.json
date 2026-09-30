@@ -1,0 +1,1 @@
+{"v":1,"job":"ev-0001","attempt":1,"sealed_at":"2026-09-29T14:36:32.776Z","files":[{"path":"proxy.csv","path_b64":"cHJveHkuY3N2","bytes":38,"sha256":"716c23c1fedefb54c1fa420e0e8431faec2d5a56b4a28414be489d1ebc69e754","mode":"644"}],"dirs":[],"rejected":[],"totals":{"files":1,"bytes":38}}

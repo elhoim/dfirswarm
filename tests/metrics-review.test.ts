@@ -254,3 +254,20 @@ test("the cost's parts add up to its whole: an indivisible call is shared by the
   assert.equal(m.cost.per_question.reduce((a, q) => a + micro(q.usd), 0), micro(m.cost.usd));
   assert.equal(micro(m.cost.usd), 100);
 });
+
+test("what the warnings and the review packets cost is counted: each reply that carried a warning, by act and code, and each review of an answer delivered with its packet", async () => {
+  const S = run("sdel01");
+  write(S, "ledger/entries.jsonl", lines([entry(1, "a1", "finding", { answers: ["1"] }), answer(2, "a2", "1", "established", [1]), entry(3, "a1", "coverage", { coverage: "complete", result_refs: ["E-1"], answers: ["1"] })]));
+  write(S, "leads/leads.jsonl", chained([
+    { at: T("10:00:00"), by: "a1", ev: "open", lead: "L-1", title: "t", why: "w", origin: "o", needs: [], answers: ["1"], material: true, generation: 0 },
+    { at: T("10:03:00"), by: "system", ev: "offer", entry: 2, to: "a3", reason: "answer_review" },
+    { at: T("10:03:30"), by: "a3", ev: "offer_seen", entry: 2, offer: 2 },
+    { at: T("10:04:00"), by: "system", ev: "offer", entry: 3, to: "a3", reason: "negative_review" },
+    { at: T("10:04:30"), by: "a3", ev: "offer_seen", entry: 3, offer: 4 },
+  ]));
+  const row = (tool: string, warned?: string[]) => ({ ts: T("10:05:00"), recv_ts: T("10:05:00"), agent: "a1", tool, args: {}, result: { ok: true, ...(warned ? { warned } : {}) } });
+  write(S, "traces/events.jsonl", lines([row("record", ["lead_findings_uncited"]), row("record"), row("attest", ["no_locator_or_derivation", "lead_findings_uncited"]), row("lead_close", ["late_evidence_hits"]), row("bash", ["x"])]));
+  const m = await measureRun(S);
+  assert.deepEqual(m.deliveries, { recorded: true, warnings: { record: 1, attest: 1, lead_close: 1 }, codes: { lead_findings_uncited: 2, no_locator_or_derivation: 1, late_evidence_hits: 1 }, review_packets: 1 });
+  assert.match(metricsText(m), /Warnings delivered +3 repl\(ies\) carried a warning: 1 to a record, 1 to an attest, 1 to a lead's close or confirmation \(late_evidence_hits 1, lead_findings_uncited 2, no_locator_or_derivation 1\); 1 review packet\(s\) delivered with an answer's review offer/);
+});

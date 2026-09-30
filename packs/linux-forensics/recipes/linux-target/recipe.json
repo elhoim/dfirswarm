@@ -26,6 +26,9 @@
     "index.tsv",
     "coverage.json"
   ],
+  "purpose": "broad_extraction",
+  "capability": "linux-artifacts",
+  "exclusions": ["application data no selected dissect.target plugin parses", "deleted and unallocated data: nothing is carved", "encrypted volumes without their key", "memory: a disk image holds none", "an empty plugin result is not proof the artefact never existed"],
   "covers": "Records exposed by the selected dissect.target Linux plugins. It does not carve deleted/unallocated data, parse arbitrary application data, acquire memory, unlock encrypted volumes without a key, or prove that an empty parser result means the artefact never existed.",
   "sha256": "ab4e47d306ed032339a373c097f58d9d8133e05ba06b706fefcf1a9b04b1cd24"
 }

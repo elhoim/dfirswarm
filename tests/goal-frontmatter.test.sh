@@ -52,3 +52,53 @@ if swarm start --model solo/model --n 2 --cap-usd 1 --no-start --goal-file "$TMP
   fail "a goal with an unclosed block and no definition of done was accepted"
 fi
 echo "ok - an unclosed block is not stripped and the goal is refused for what it lacks"
+
+# A goal with a case brief and no premises designated is warned about at the
+# kickoff and in start --check (c10 run sd9645b: 4 of its 10 open parts were
+# givens of the brief, held open as parts to prove). A warning, never a
+# refusal: the start goes ahead. Designated in the front matter (premises:)
+# or in a Premises section, it is not warned about.
+brief_goal() { # <file> <front matter lines, or empty> <extra body>
+  { if [[ -n "$2" ]]; then printf -- '---\n%s\n---\n' "$2"; fi
+    printf '## Goal\n\nMax is suspected of meeting an unknown party. `inputs/CASE.md` is the published brief.\n\n%s\n### Questions the report has to answer\n\n1. Where are they meeting?\n\n## Definition of done\n\n`work/report.md` exists.\n\n## Checks\n\n- `test -f work/report.md`\n' "$3"; } > "$1"
+}
+check() { SWARM_RUNS_DIR="$TMP/check-runs" bash "$ROOT/scripts/swarm.sh" start --check --isolation host --model solo/model --provider-host solo=api.solo.example --n 2 --cap-usd 1 --toolbox off --no-start "$@" 2>&1; }
+WARNED='WARN: the goal has a case brief'
+
+brief_goal "$TMP/brief.md" "" ""
+out="$(check --goal-file "$TMP/brief.md")" || fail "a goal with a brief and no premises was refused by --check: $out"
+grep -q "^$WARNED (it names one, \"published brief\") and designates no premises" <<<"$out" || fail "--check does not warn of a brief without premises: $out"
+grep -q 'premises: list in the goal.s front matter' <<<"$out" || fail "the warning does not say how to designate them in the front matter: $out"
+grep -q 'swarm.sh question <run> premise add --text' <<<"$out" || fail "the warning does not say how to designate them on a run: $out"
+grep -q '^Check:        the start would go ahead' <<<"$out" || fail "the warning held the start: $out"
+[[ ! -e "$TMP/check-runs" ]] || fail "--check wrote under the runs directory"
+out="$(swarm start --model solo/model --n 2 --cap-usd 1 --no-start --goal-file "$TMP/brief.md" --label briefnoprem)"
+grep -q "^$WARNED" <<<"$out" || fail "the kickoff does not warn of a brief without premises: $out"
+[[ -n "$(sandbox_of "$out")" ]] || fail "the kickoff with the warning did not prepare the run: $out"
+echo "ok - a brief without premises is warned about by the kickoff and by start --check, with how to designate them, and nothing is refused"
+
+brief_goal "$TMP/brief-premised.md" $'premises:\n  - inputs/Case4.E01 is an image of Max\'s machine; this is the only system he uses. [scope: entities Max]' ""
+out="$(check --goal-file "$TMP/brief-premised.md")" || fail "--check refused a goal with premises: $out"
+grep -q "$WARNED" <<<"$out" && fail "a goal whose front matter designates premises was warned about: $out"
+out="$(swarm start --model solo/model --n 2 --cap-usd 1 --no-start --goal-file "$TMP/brief-premised.md" --label briefprem)"
+grep -q "$WARNED" <<<"$out" && fail "the kickoff warned of a goal with premises: $out"
+sb3="$(sandbox_of "$out")"
+grep -q "^- inputs/Case4.E01 is an image of Max's machine; this is the only system he uses. \[scope: entities Max\]" "$sb3/SWARM.md" || fail "the front matter's premise is not in the contract's Premises section"
+echo "ok - premises: in the front matter designate the brief's givens: no warning, and each is in the contract"
+
+brief_goal "$TMP/brief-section.md" "" $'## Premises\n\n- Max uses only this system. [scope: entities Max]\n'
+out="$(check --goal-file "$TMP/brief-section.md")"
+grep -q "$WARNED" <<<"$out" && fail "a goal with a Premises section was warned about: $out"
+printf '## Goal\n\nA case.\n\n## Scenario\n\nThe laptop was found in a car.\n\n## Premises\n\n## Definition of done\n\nx\n\n## Checks\n\n- `true`\n' > "$TMP/scenario.md"
+out="$(check --goal-file "$TMP/scenario.md")"
+grep -q "^$WARNED (its section \"Scenario\")" <<<"$out" || fail "a Scenario section with an empty Premises section was not warned about: $out"
+out="$(check --goal-file "$ROOT/prompts/goals/hello.md")"
+grep -q "$WARNED" <<<"$out" && fail "a goal with no brief was warned about: $out"
+echo "ok - a Premises section designates them too; an empty one does not; a scenario heading is a brief; a goal with no brief is not warned about"
+
+# The shipped goals: each with a brief designates its givens, so none is warned about.
+for g in "$ROOT"/prompts/goals/*.md; do
+  out="$(check --goal-file "$g")" || fail "$(basename "$g"): --check refused it: $out"
+  grep -q "$WARNED" <<<"$out" && fail "$(basename "$g") has a brief and designates no premises: $out"
+done
+echo "ok - no shipped goal has a brief without premises"

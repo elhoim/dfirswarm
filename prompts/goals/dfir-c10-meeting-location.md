@@ -1,3 +1,8 @@
+---
+premises:
+  - inputs/Case4.E01 is an image of Max's Windows machine, imaged after he left; this is the only system he uses. [scope: entities Max, inputs/Case4.E01]
+  - Max is suspected of belonging to a foreign intelligence group and has agreed to meet an unknown party somewhere. [scope: entities Max; questions 3, 4, 5]
+---
 > From [docs/use-cases/dfir-c10-meeting-location](../../docs/use-cases/dfir-c10-meeting-location/README.md): the goal document a real run was given,
 > and what that run produced is written up beside it. The evidence filenames below are
 > the ones that case had — change them, and the checks that name them, for yours.

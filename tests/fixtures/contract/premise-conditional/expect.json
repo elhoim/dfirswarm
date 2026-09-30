@@ -1,0 +1,39 @@
+{
+  "case": "The contradiction of premise-held, reconciled by question 1's answer recorded again assuming P-1 only conditionally (\"assuming P-1\").",
+  "design": [
+    "docs/adr/0011 'Premises': premise_inconsistent holds while standing answers assume and contradict the same premise revision over scopes that overlap; the ways out are all on the record and none forces either side: revise an answer, name the rebutting finding (the premise goes to the operator as a dispute, a request of kind premise), narrow a scope, or answer conditionally. Uncertainty alone holds nothing.",
+    "docs/adr/0011 'Premises': a conditional assumption (stance assumed, conditional: true) says the answer holds only if the premise does; it conflicts with nothing, and the report says the condition.",
+    "docs/adr/0013 'The end of a run, under every stop policy': done finishes a run when every question has a disposition under the bar; a warning never holds."
+  ],
+  "policies": [
+    "as run"
+  ],
+  "expect": {
+    "questions": {
+      "question:1": {
+        "disposition": "established",
+        "best_candidate": false,
+        "readiness_holds": false,
+        "defects_include": [],
+        "warnings": []
+      },
+      "question:2": {
+        "disposition": "established",
+        "best_candidate": false,
+        "readiness_holds": false,
+        "defects_include": [],
+        "warnings": []
+      }
+    },
+    "ready": true,
+    "verdict": {
+      "proceed": true,
+      "outcome": "completed"
+    },
+    "done": "proceeds",
+    "agreement": [],
+    "history": {
+      "premise_requests": 0
+    }
+  }
+}

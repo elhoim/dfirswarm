@@ -1,0 +1,47 @@
+{
+  "case": "Every question established and attested; the report published; a result and a veto posted after it by two other seats; the coordinator prepared the finish on the report and resolved both in one batch with a key; the same batch was sent again with the same key, as a retry after an interruption.",
+  "design": [
+    "docs/adr/0015 decision 6: the first seat to ask for the finish designates the report's last publisher when it can hold it; a prepare takes the lease as a done does (\"Preparing the finish\").",
+    "docs/adr/0015 \"Preparing the finish\": prepare runs no goal check and writes no sentinel; it lists every item late against the report; a batch records one resolution event per item, carrying its key, and a retry with the same key records nothing twice.",
+    "docs/adr/0015 decision 10: once every late item has a typed resolution nothing holds the coordinator's done on what is late."
+  ],
+  "policies": [
+    "as run"
+  ],
+  "expect": {
+    "questions": {
+      "question:1": {
+        "disposition": "established",
+        "best_candidate": false,
+        "readiness_holds": false,
+        "defects_include": [],
+        "warnings": []
+      }
+    },
+    "ready": true,
+    "verdict": {
+      "proceed": true,
+      "outcome": "completed"
+    },
+    "done": "proceeds",
+    "late": [],
+    "lease": {
+      "holder": "a0",
+      "generation": 1
+    },
+    "prepared": {
+      "count": 1,
+      "last": {
+        "by": "a0",
+        "generation": 1,
+        "late": 2,
+        "current": true
+      }
+    },
+    "resolutions": {
+      "count": 2,
+      "batches": 1
+    },
+    "agreement": []
+  }
+}

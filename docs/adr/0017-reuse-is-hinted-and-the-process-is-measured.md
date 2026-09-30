@@ -139,3 +139,60 @@ their own (`calibration/`, `scripts/calibrate.ts`).
   built), the dependency and blocking metrics, and any merge of raw jobs;
   a merge would need the operation's semantics, which the harness does not
   know.
+
+## Addendum: measuring a rule change (2026-09-29)
+
+The finish rules changed four times in a day (the partial disposition, the
+downgrade rule, the case premise, the uncited lead findings), and each was
+measured by hand: "over s993d40's registers it names two entries". The run
+s9722fa showed what a rule that is not measured against a recorded history
+costs: readiness and the answers check read a partial answer two ways, the
+seats read the disagreement as a refusal, and the case lost every positive
+answer. Claude, Fable and Astra agreed (Plan 3's known limits, the joint
+position of 2026-09-29) that replay comes first: a recorded history read
+again under a given harness's rules, with no model call, before a change
+is trusted or a paid run is spent on it.
+
+- **Replay** (`scripts/replay.ts`, `swarm.sh replay <run>`) copies a run
+  and evaluates a checkout's answers check, finish gate, verdict, readiness,
+  finish register, report standing and custody seals over the copy, each
+  checkout in a process of its own, and prints the projection values-free
+  (codes, ids, counts, the harness's own words; `--show-text` adds the lines
+  that quote records). `--compare` sets two checkouts side by side and names
+  each difference; the run's own harness is the hub's frozen copy, or the
+  commit its registry records, extracted with `git archive`. The run is
+  never written: its registers are hashed before and after. The goal's own
+  commands are not run; they do not change with the harness.
+- **Contract fixtures** (`tests/fixtures/contract/`) are synthetic
+  histories made through the harness's own acts, one per rule the finish
+  rests on: a partial disposed under every stop policy, an established
+  claim held a best candidate, a negative nobody reviewed, evidence gone
+  stale and cleared, sweep hits named and examined, a post late against the
+  report, an objection racing the finish, a resumed run sealed twice, a run
+  with warnings and nothing else, and the c10 partial cascade (s9722fa,
+  reconstructed). Each `expect.json` is written from these ADRs, never from
+  the code's output, and names the decisions it is written from. Under
+  every fixture and every stop policy it names: readiness, the answers
+  check and the finish gate agree on each question's disposition; a warning
+  never holds; every custody verdict verifies as a prefix. A later item adds
+  its own cases. The Fable review of the limits branch found the agreement
+  blind to a question the gate reads accepted while the answers check still
+  holds a defect on it (the check's verdict refuses the done): replay now
+  counts that question held through the check, and two fixtures hold it
+  (`accepted-excused`, a premise pair and an unreviewed answer, all
+  accepted, disposed and ready; `accepted-negative-held`, an accepted
+  negative whose coverage went stale after it, held by all three).
+- **The acceptance** is the c10 cascade replayed under both rules: under
+  3338e3c (the harness s9722fa ran with) readiness holds the six partial
+  answers as best candidates while the answers check and the gate dispose
+  them partial; under the rule since, all six are disposed and readiness is
+  ready. The test extracts 3338e3c from the repository's history and runs
+  it, rather than asserting what it would say; a checkout without that
+  history skips the half and keeps the expectation on record.
+- **What replay cannot measure.** It measures the decisions the rules make
+  on a history the agents already wrote. A rule that changes what the
+  agents do (a hold that sends a seat to run a broad parse, a warning that
+  makes an answer be recorded again) shows only as where it would fire;
+  whether it helps is measured by paired, repeated calibration runs with
+  the versions, the team, the scorer and the budget frozen (Astra's H1),
+  and a single run proves nothing.

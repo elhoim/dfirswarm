@@ -1,0 +1,40 @@
+{
+  "case": "P-1, a given for the whole of 2024: question 1's answer assumes it for January to March; question 2's answer contradicts it for July to December on a finding (the laptop reissued in July). The scopes never meet.",
+  "design": [
+    "docs/adr/0011 'Premises': premise_inconsistent holds while standing answers assume and contradict the same premise revision over scopes that overlap; the ways out are all on the record and none forces either side: revise an answer, name the rebutting finding (the premise goes to the operator as a dispute, a request of kind premise), narrow a scope, or answer conditionally. Uncertainty alone holds nothing.",
+    "docs/adr/0011 'Premises': a citation's scope is its own narrowing (entities, times) inside the premise's, or the premise's at the revision it cites; two scopes overlap unless both name entities and share none, or both name times and no two ranges meet.",
+    "docs/adr/0011 'Premises': a contradiction that names a standing finding opens a premise dispute for the operator (one per premise revision), holding nothing.",
+    "docs/adr/0013 'The end of a run, under every stop policy': done finishes a run when every question has a disposition under the bar; a warning never holds."
+  ],
+  "policies": [
+    "as run"
+  ],
+  "expect": {
+    "questions": {
+      "question:1": {
+        "disposition": "established",
+        "best_candidate": false,
+        "readiness_holds": false,
+        "defects_include": [],
+        "warnings": []
+      },
+      "question:2": {
+        "disposition": "established",
+        "best_candidate": false,
+        "readiness_holds": false,
+        "defects_include": [],
+        "warnings": []
+      }
+    },
+    "ready": true,
+    "verdict": {
+      "proceed": true,
+      "outcome": "completed"
+    },
+    "done": "proceeds",
+    "agreement": [],
+    "history": {
+      "premise_requests": 1
+    }
+  }
+}

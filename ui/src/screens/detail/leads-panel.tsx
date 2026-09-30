@@ -153,7 +153,7 @@ function FinishSection({ finish, names }: { finish: FinishPanel; names: (id: str
       <div className="flex flex-wrap items-center gap-2 text-[12.5px]">
         <Chip tone={finish.ready ? "moss" : "saffron"}>{finish.ready ? "ready by the registers" : `not ready (${finish.items.length})`}</Chip>
         <span className="text-ink-2">
-          {finish.coordinator ? `${names(finish.coordinator.holder)} coordinates it (generation ${finish.coordinator.generation}: ${finish.coordinator.why})` : "nobody coordinates it yet: the first done takes it, normally the report's publisher"}
+          {finish.coordinator ? `${names(finish.coordinator.holder)} coordinates it (generation ${finish.coordinator.generation}: ${finish.coordinator.why})` : "nobody coordinates it yet: the first prepare or done takes it, normally the report's publisher"}
         </span>
       </div>
       {finish.items.length ? (

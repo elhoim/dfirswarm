@@ -62,7 +62,7 @@ function refused(err: unknown): boolean {
 type Pending = { fn: string; socket: Socket; answered: () => void; resolve: (value: unknown) => void; reject: (err: Error) => void };
 
 /** Calls that change the board, sent once more with the same request id when a link drops. */
-const RETRIED = new Set(["postMessage", "systemPost", "recordEntry", "attestEntry", "disputeEntry", "threadOpen", "claimName", "markDone", "publishFile", "forgeTool", "recordFileVersion", "jobSubmit", "catalogRequest", "jobStatus", "leadOpen", "leadClaim", "leadRelease", "leadClose", "leadLink", "leadInterpret", "leadReopen", "routeReview", "leadHandoff", "leadConfirm", "offerAnswer", "finishTurnFor", "finishAct", "questionOpen", "questionAsk", "netRequest", "netFetch"]);
+const RETRIED = new Set(["postMessage", "systemPost", "recordEntry", "attestEntry", "disputeEntry", "threadOpen", "claimName", "markDone", "publishFile", "forgeTool", "recordFileVersion", "jobSubmit", "catalogRequest", "jobStatus", "leadOpen", "leadClaim", "leadRelease", "leadClose", "leadLink", "leadInterpret", "leadReopen", "routeReview", "leadHandoff", "leadConfirm", "offerAnswer", "finishTurnFor", "finishAct", "questionOpen", "questionAsk", "premisePropose", "netRequest", "netFetch"]);
 
 /** Timings a test shortens; the defaults are the run's. */
 export type HubClientTimings = { partTimeoutMs?: number; writeStallMs?: number };
@@ -382,6 +382,7 @@ export const REMOTE_FUNCTIONS = [
   "netView",
   "offerAnswer",
   "postMessage",
+  "premisePropose",
   "publishFile",
   "questionAsk",
   "questionOpen",
@@ -435,6 +436,8 @@ export const finishAct = remote("finishAct", F.finishAct);
 export const questionOpen = remote("questionOpen", Q.questionOpen);
 export const questionAsk = remote("questionAsk", Q.questionAsk);
 export const questionsView = remote("questionsView", Q.questionsView);
+/** An agent proposes a premise (premises.ts): a proposition under test until the operator admits it. */
+export const premisePropose = remote("premisePropose", Q.premisePropose);
 /** What each peer is doing and found (list_team), from the host's board, store and ledger. */
 export const teamView = remote("teamView", P.teamView);
 

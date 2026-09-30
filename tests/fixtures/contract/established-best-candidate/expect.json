@@ -1,0 +1,42 @@
+{
+  "case": "An answer that claims established, with medium confidence, whose one review holds it a best candidate only; the other question established and attested.",
+  "design": [
+    "docs/adr/0013 'The end of a run, under every stop policy': a best candidate is no disposition (B2); done finishes a run only when every question has one, under every stop policy.",
+    "docs/adr/0015 'After the run s9722fa': an answer that claims established, every review of which holds it a best candidate, is held so; a best candidate holds readiness under every stop policy, as it holds the done."
+  ],
+  "policies": [
+    "operator",
+    "cap-pause",
+    "cap-stop"
+  ],
+  "expect": {
+    "questions": {
+      "question:1": {
+        "disposition": null,
+        "best_candidate": true,
+        "readiness_holds": true,
+        "readiness_includes": [
+          "best_candidate"
+        ],
+        "defects_include": [],
+        "warnings": [],
+        "report_best_candidate": true
+      },
+      "question:2": {
+        "disposition": "established",
+        "best_candidate": false,
+        "readiness_holds": false,
+        "defects_include": [],
+        "warnings": []
+      }
+    },
+    "ready": false,
+    "verdict": {
+      "proceed": false,
+      "failing": "question:1"
+    },
+    "done": "held",
+    "late": [],
+    "agreement": []
+  }
+}

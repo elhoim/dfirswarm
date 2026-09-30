@@ -6,6 +6,499 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Fixed: the findings of an independent review of the limits branch
+
+Fable's review of the branch (one P1, four P2, ten P3) found one place
+where the readers of the finish disagreed, and several where a rule held,
+capped or waited beyond what was decided. Each fix has its test; the
+contract fixtures gained two cases.
+
+- **An acceptance excuses the same everywhere (P1).** The answers check
+  dropped only a partial sweep, stale evidence and a pending preparation on
+  an accepted question, while readiness and the accept act's `still_held`
+  excuse every defect but the negative bar's: an accepted question held
+  `premise_inconsistent` or `no_critic_act` was clear in readiness and
+  refused by the check's verdict. The check now reads `acceptanceExcuses`
+  alone. Replay counts such a question held through the check; fixtures
+  `accepted-excused` and `accepted-negative-held`.
+- **The operator's ruling on a premise releases its conflict.** A premise
+  withdrawn, or a revision revised since, holds nothing; the answers citing
+  it are warned (`premise_withdrawn`, `premise_revised`). On a question not
+  material the conflict is a warning.
+- **A locator vouches for what the answer rests on.** Its value must be
+  among the words of the answer or of an entry it reaches (its support,
+  and what those cite), else `locator_unverified`.
+- **No locator or derivation is warned, not capped.** The approved rule
+  capped a missing discriminator and a locator that does not verify; the
+  third cap is now the warning `no_locator_or_derivation`, and the metrics
+  count each established answer recorded partial after a capped attest
+  (`reversals.partial_after_cap`).
+- **The reverse sweep runs after the addition.** An evidence addition
+  commits and answers at once; the sweep runs in the hub's background or
+  as a detached step (`scripts/reverse-sweep.ts`), a pass at a time within
+  its own budget (`SWARM_REVERSE_SWEEP_MAX_SEC`, 120;
+  `SWARM_REVERSE_SWEEP_MAX_BYTES`, 2 GiB), what a pass leaves searched by
+  the next, each pass posted when it completes.
+- **Only a part the question asks is open.** On c10 run s704e4b three
+  complete answers stood partial on parts the question does not ask. The
+  record tool, its refusal and the prompt say an open part is a part the
+  question asks, and the rest are limitations; a review marks such a part
+  `not_asked: true`, which caps nothing, and a partial answer whose every
+  other part is established is warned (`partial_all_parts_established`) to
+  be recorded established with it among its limitations. Never a promotion.
+  Fixture `parts-not-asked`.
+- **Smaller fixes.** A late delta clears stale evidence only on the entry
+  that examined the import, under review, and the report says irrelevant,
+  inconclusive and adds_part deltas; a preparation lead closed without a
+  run is its decline, a hold's fix never names a closed lead, and the
+  harness closes only a preparation lead no seat holds; evidence code
+  says a seat's own job output apart, a JSON `require` is not flagged, and
+  the chip reads "may have run"; `lead_findings_uncited` ignores
+  `duplicates` and `derived_from` rels; a discriminator may not rest on the
+  answer, nor only on what it cites; a batch whose items were all resolved
+  already records nothing and says so; the metrics count warning deliveries
+  and review packets.
+
+### Added: a command or job that runs code recovered from the evidence is flagged
+
+On the c10 run sd9645b one seat's seven password-test jobs (worker VMs,
+Node) evaluated a crypto library recovered from a browser cache blob, an
+earlier job's sealed output, with `vm.runInContext` and `runInThisContext`;
+the run disclosed it itself. Nothing stopped it: no-exec stops a file
+executing, not an interpreter reading one, and a job's output under `store/`
+is not no-exec at all. Now:
+
+- **Flagged from the command's words** (`extensions/evidence-code.ts`): an
+  interpreter, a shell or a browser given a file from the evidence, an
+  extraction or a job's output as its script (or on its stdin, or through a
+  pipe), and a construct that evaluates code (`eval`, `exec`, `compile`,
+  `new Function`, `vm.runIn…`, `runpy`, `importlib`, `require`) given such
+  a path or a name bound to what was read from one. Never refused. On the
+  local runs replayed it names those seven jobs of sd9645b and nothing on
+  s10d40e, s7827e1 or sa2f2f2.
+- **Where it is said**: the `bash` result's note and an `evidence_code`
+  trace event; the `job_run` reply's `evidence_code` and its trace row; the
+  report's job record ("evidence code may have run") and a list in Appendix B.
+- **The prompt, the contract and the kickoff** say that never running
+  recovered code covers every way of running it, that no-exec does not stop
+  an interpreter and a job's output is not no-exec, and what to do instead:
+  reimplement it or use a trusted program, or ask the operator first.
+
+### Added: a goal with a brief and no premises is warned about, and the shipped goals designate theirs
+
+On c10 run sd9645b 4 of the 10 parts its answers held open were attribution
+hedges ("did this person do it") on what the case brief states as given: the
+goal designated no premises, so the premise register never acted. Now (ADR
+0011, "Premises"):
+
+- **The kickoff warns** (and `swarm.sh start --check` with it) when a goal
+  has a case brief (a heading naming a brief, a scenario, a background or a
+  situation, a `--sections-in` brief, or words naming one) and designates no
+  premises: its answers will hold the brief's givens open. The warning says
+  how to designate them: a `premises:` list in the front matter, or
+  `swarm.sh question <run> premise add`. It never refuses.
+- **The shipped goals designate theirs.** Every case goal under
+  `prompts/goals/` opens with a `premises:` list of what its own text states
+  as given (whose devices these are, who the subject is, the stated
+  setting), each closely restating the goal's sentence with its scope, none
+  an answer or something a question tests: belkactf6-bogus-bill 3, c02 1,
+  c03 2, c04 1, c05 2, c06 2, c07 2, c08 2, c09 2, c10 2, c11 2, l01 2, l02
+  1, l03 2, m01 2, u01 2, web-server-case 2. hello, pelican and
+  analyse-inputs have no case and none.
+- **The calibration generator** writes its cases' premises from each brief
+  alone (usb-departure 3, web-intrusion 2, invoice-fraud 3), never from the
+  truth; generator version 2.
+
+### Changed: a review of the report carries over while what it covered is unchanged
+
+The c10 run sd9645b's finish took about 49 minutes over three versions of
+the report: 19 acks, 10 of them a seat's no-objection review given again to
+a later version, since an ack was bound to the whole report's digest and
+every version reset every seat's. And 15 of the 33 posts resolved as late
+items were a seat's own ack announced on the board. Now (ADR 0015, "A
+review carries over"):
+
+- **An ack binds sections.** `finish ack` takes `sections` (a heading's
+  number or words; none is the whole report) and records each section it
+  covered with its digest. The sections are the report's `## ` headings as
+  the report body reads them, numbered ones keyed by their number.
+- **Only what changed is asked again.** When the report is published again,
+  a review whose sections are unchanged carries over; one whose sections
+  changed is asked about those alone; a review of the whole report is asked
+  about a section added or removed. A `carry` event on `leads/finish.jsonl`
+  records which reviews stand and which are asked again, and on what.
+  Prepare's reply, `finish status` and the headers say whom to ask and on
+  which sections, and tell a seat whose review stands not to ack it again.
+- **What stays.** Late items keep their per-item rule, and the final
+  transaction is unchanged. An objector's later ack answers its objection
+  only when it reviews what the objection named, so an objection to one
+  section stands through its objector's review of another.
+- **The prompt** says never to ack again a review that stands, and never to
+  announce an ack on the board.
+- **Replay** estimates the rule on a run's recorded acks (`reviews`). On
+  sd9645b: the closing section changed in every version, so none of the 10
+  re-reviews, read as whole-report reviews, would have carried over, and no
+  review round is avoided; they would have been asked about 23 sections
+  instead of 80. Had each seat named its own questions' sections, 6 of the
+  10 would not have been asked.
+
+### Fixed: a program's log goes under the job's output, and a job that failed on a refused write says so
+
+On the Belka validation run (s7827e1) the new disk-timeline recipe failed
+with exit 1: log2timeline writes its log (`log2timeline-<timestamp>.log.gz`)
+to its working directory unless told otherwise, and a job starts in the
+run's directory, read-only in its worker (`OSError: [Errno 30] Read-only
+file system`). psort failed on its own log the same way, and so did two
+agents' own log2timeline jobs; each said only "exit 1". The recipe had only
+met stand-ins.
+
+- **The packs.** disk-timeline 1.0.1 gives log2timeline and psort their
+  logs under `--out` (`--logfile`, which Plaso's tools have taken with
+  `--log_file` and `--log-file` as aliases since at least 20180818; the
+  images install 20260720) and runs each step there. timeline_super gives
+  both its logs in `out_dir` (an agent's VM has the run read-only too) and
+  names them. sigma_hunt gives Zircolite `--logfile` in `out_dir` and runs
+  Hayabusa there, since no option moves its `./logs/errorlog-<time>.log`;
+  both name their logs. No other recipe or tool runs a program that writes
+  to its working directory as it is called. computer-forensics-base 1.4.1,
+  windows-forensics 1.3.3. The stand-ins write each log where the real
+  program does, fail when that is read-only, and the tests run the recipe
+  and the tools from a read-only directory.
+- **The job's reason.** A job that ends non-zero is read for a refused
+  write (`scripts/job-write-refused.ts`): its stdout, its stderr and every
+  stderr file it kept in `$OUT`, each whole. A line saying `Read-only file
+  system`, or `Permission denied` on a path outside `$OUT`, makes its reason
+  `exit N: a write outside $OUT was refused (…)`, with the path whole, where
+  the line is, how many there are, that the working directory and the run
+  are read-only in a worker, `$OUT` by name and path, and to point the
+  program's log, temp or output options there or `cd "$OUT"`. On the job
+  record (`write_refused`), the journal (`job_write_refused`, and
+  `job_finished`'s reason), the requester's post and `job_run`'s and
+  `job_status`'s answer. On the error text alone: no program is named.
+- **The prompt** says a job runs with the run read-only, so a program's log
+  or temp files are given a path under `$OUT`, or it runs after `cd "$OUT"`.
+
+### Added: the premise register, and claim and open-part rows
+
+A case brief supplies things several questions share (whose device it is,
+who the subject is), and until now they were words in reasoning: one answer
+could take a premise for granted while another's findings contradicted it,
+with nothing on the record, and a partial answer could hold a premise open as
+if it were a part to prove. "Partial" was one word for a whole answer, and a
+review's parts named no part of the answer, so a part the answer never
+listed could not be seen to be missing. Now (ADR 0011, "Premises"; ADR 0013,
+"Claim and open-part rows"):
+
+- **Premises on the question chain.** A premise is a `P-n`, an event on
+  `questions/questions.jsonl` (`premise_add`, `premise_propose`,
+  `premise_revise`, `premise_admit`, `premise_withdraw`): its words
+  verbatim, where they stand, its authority, its scope (entities, time
+  ranges, the questions it applies to), its revisions and its class, sealed,
+  released and packaged with the register. Only the operator's premises are
+  givens: the goal's `## Premises` section or front-matter `premises:`
+  (seeded at the kickoff, a trailing `[scope: …]` read as its scope),
+  `swarm.sh question <run> premise add|revise|admit|withdraw`, or the
+  console's Questions tab. A given is not proved again and is never an open
+  part; a supplied assertion is assumed as asserted; an agent's proposal
+  (`premise_propose`, a new tool) is a proposition under test, assumed only
+  conditionally, until the operator admits it.
+- **Answers cite them.** `premises: [{id, rev, stance: assumed | supported
+  | contradicted | unresolved, refs?, conditional?, scope?}]`, checked under
+  the registers' lock (the revision read, a proposition under test only
+  conditional, a premise scoped to named questions only there, a narrowed
+  scope inside the premise's, `supported` on a standing finding), in the
+  ledger's hashed core only when present.
+- **The gate `premise_inconsistent`** holds both questions while standing
+  answers assume and contradict one premise revision over scopes that
+  overlap, and the contradiction names no standing finding that rebuts it.
+  The ways out are all on the record and none forces either side: revise an
+  answer; name the rebutting finding, which takes the premise to the
+  operator as a request of kind `premise` (one per revision, closed when the
+  premise is revised or withdrawn, or answered on the request) and warns the
+  answer that assumes it (`premise_disputed`); narrow a scope; or answer
+  conditionally ("assuming P-n"). Uncertainty holds nothing. An answer citing
+  an earlier revision or a withdrawn premise is warned (`premise_revised`,
+  `premise_withdrawn`).
+- **Claim and open-part rows.** `parts: [{id, part, status: established |
+  open, refs, open_by?}]` on an answer, against the verbatim revision it
+  answers: an open part names what bounds it, an acquisition ask `R-n`, a
+  route `L-n`, or a limitation or coverage record `E-n`; a premise never.
+  A partial answer with no open part is refused ("record it established or
+  name what is open"), an established one with an open part too. A review's
+  parts name the answer's rows by `id` and may add one it leaves out
+  (`missing`): that caps an established review as a part not held does, and
+  is warned of (`part_omitted`) until the answer is recorded again with it.
+  Review parts without ids and round 14's `declared_open` read as before.
+- **Where they show.** The report lists the premises the examination took
+  and, in each answer, its rows and how it stands on each premise; the
+  console's Questions tab shows premises (with the operator's acts) and each
+  answer's rows; `questions.md`, `ledger.md`, `swarm.sh question <run>
+  premise list|show` and the agents' `questions` view `premises` read them;
+  the header lists the premises that stand, and every premise act is told
+  once to every seat. The prompt and the record, attest and questions tools
+  say how to cite a premise and name an open part.
+- **Replay** codes the new warnings, and holds a run whose answers check
+  holds a question it reads as answered (as the finish line does). Contract
+  fixtures premise-given, premise-admitted, premise-scopes, premise-held,
+  premise-rebutted (a custody seal taken while it held verifies as a prefix
+  after it), premise-conditional and parts-omitted, their expectations
+  written from the ADRs; every fixture recorded before reads the same under
+  be4e6a3 and this checkout; tests/premises.test.ts.
+
+Replayed values-free (`swarm.sh replay --compare <be4e6a3> <this
+checkout>`): s5764c4 (Belka), sa2f2f2 and sb1b3c8 read the same under both
+harnesses, every question's disposition, defects, warnings, readiness and
+report; their partial answers, recorded without rows, are disposed as
+before. The generator's older cases were updated so that they can be
+recorded again under the rows rule; their committed histories were kept.
+
+### Added: a source-first review with checked locators, and late evidence weighed with a delta
+
+On Belka a wrong value was attested established by three seats, each
+naming an alternative: the rule was met and the answer was wrong. On the
+calibration run sb1b3c8 the evidence that settled a question came late,
+every stale answer was examined again on a record that named it and
+reviewed, and the late fact was still missed. Now (ADR 0015, "A
+source-first review"; ADR 0013, "Late evidence: the reverse sweep and the
+delta"):
+
+- **Review source-first.** A material negative's review offer leads with
+  the question as asked (its revision, its words whole), its scope and the
+  original sources its answer's coverage and cited entries lead back to;
+  the answer under review is linked by its seq, never quoted first. The
+  attest tool, its guidance, the prompt and the critic's fix say the same
+  for the attests the finish line asks for. A review goes first to a seat
+  of another model family than the work's (team.json's model per seat): a
+  preference, never a requirement.
+- **`answer_review` gains** `discriminator {rival, test, favours_if,
+  outcome, refs}`, `reproduced_at [{ref, offset, length?, value?}]` and
+  `derivation {job, inputs}`, each in the hashed record only when given (an
+  older review hashes as it did). The hub reads each locator's bytes at its
+  offset, in UTF-8 and UTF-16LE (bounded reads, never a scan; it says where
+  the value is when it is near), and holds a derivation to a sealed job
+  that ran to its end over what it declared.
+- **The cap.** An established attest of an answer that claims established,
+  on a material question, with no discriminator that counts, a locator
+  that does not verify, a derivation that does not resolve, or neither a
+  locator nor a derivation, is recorded best_candidate, each reason in
+  `capped`, and the reply says how to fix each; the seat's later review
+  that meets them is its review. A partial answer's review is checked and
+  never capped for it: partial stays a disposition.
+- **The reverse sweep.** At `evidence add` the import's files, and only
+  they, are searched for the `looked_for` strings of every coverage record
+  standing at the addition, each hit bound to the records it bears on, on
+  `ledger/sweeps.jsonl` (a version 2 line, `of: "import"`, on the same
+  chain). The hits go to the board post by question, to the words of each
+  stale answer they bear on, and, on an answer the addition does not stale,
+  to the warning `late_evidence_hits` at every point warnings are
+  delivered. A hit never holds by itself.
+- **The delta.** `evidence_stale` clears only when the answer, or the
+  coverage it cites recorded since, cites an entry whose refs name the
+  import's objects and that carries a delta: a `rel` to the question's
+  answer of kind supports, contradicts, adds_part, irrelevant or
+  inconclusive (the last three new, present-only in the core). The
+  operator's acceptance after the addition still clears it.
+- **Replay** counts, per run, the established attests the review rule would
+  cap and why (codes only), and each addition's reverse sweep per question;
+  `--reverse-sweep` gives an addition from before it the line this
+  checkout's sweep would have written. Four contract fixtures: the delta
+  clearing, the history from before it (held now, cleared under c34c6cb,
+  replayed under both), the reverse sweep's hits delivered and not holding,
+  and the review's caps; every older fixture reads the same under both
+  harnesses but where the delta applies.
+
+Replayed values-free: every established attest of an established answer
+in s5764c4 (6), sa2f2f2 (2) and sb1b3c8 (3) would have been capped (no
+discriminator; no locator or derivation); sb1b3c8's evidence came before
+any coverage record, so its reverse sweep would have delivered nothing, and
+under the delta its six examined answers are stale again.
+
+### Added: a source's broad extraction, offered and on the record, before a negative on it
+
+On the Belka runs four of five false negatives rested on a row no job had
+ever produced: the phone's tar was inventoried at the kickoff (the mobile
+pack's recipe "parses no artifact content") and then read narrowly, and the
+whole-source parse the pack's own programs can do was nobody's work. Now
+(ADR 0013, "A source's broad extraction before a negative on it"):
+
+- **Recipes say what they prepare.** `purpose: inventory | broad_extraction`
+  in `recipe.json`; a broad extraction names its `capability` and its
+  `exclusions`, and one the job images cannot run says why (`unavailable`:
+  no trigger, refused by name). pack.sh holds them to that. The shipped
+  recipes are declared as they are: disk-volumes, archive-members,
+  ios-filesystem, android-backup and static-binary inventory;
+  memory-windows, linux-target and network-capture are broad extractions.
+- **New recipes.** mobile-forensics `ios-ileapp` and `android-aleapp`
+  (iLEAPP and ALEAPP over a whole iOS or Android full file-system tar or zip,
+  every report kept, run by the kickoff); `android-backup-apps` (declared
+  unavailable: nothing in the mobile image parses an adb backup's app tree
+  as a whole, so its preparation is declined with that reason, not faked);
+  computer-forensics-base `disk-timeline` (Plaso's log2timeline and a psort
+  CSV over a whole disk image; hours on a large one, so offered, not run by
+  itself). The programs are already in the images. Base pack 1.4.0, mobile
+  1.2.0, linux, network and reverse-engineering 1.1.3.
+- **The census** asks every broad extraction about every input and lists
+  each that applies in `catalog/plan.json`'s `preparations`, the input's row
+  and the README; it plans only the kickoff's. A detect pass never runs a
+  broad extraction that is not `auto`, nor one that cannot run, and tells an
+  agent that asked. The kickoff's queue says what it refused, and why.
+- **Offers and receipts.** Each round the hub (`scripts/preparation.ts`)
+  writes, once each, receipts on the store journal (`type: preparation`):
+  planned, attempted, produced, partial, failed or declined, with the source's
+  digest, the recipe and its version and sha256, the output manifest and the
+  exclusions (the recipe's, then what this run of it did not cover). Every
+  broad-extraction job has them, whoever asked. One not `auto` is offered as
+  a lead of its own, one per source digest and capability, never when the
+  same work is queued, running, sealed or recorded; a seat's close of it
+  deferred, infeasible or needs_operator declines it with the seat's why, and
+  the harness closes the lead once its extraction reached an outcome by any
+  route. No new register: the journal is already chained, sealed and
+  carried.
+- **The hold, narrow.** `preparation_pending` holds a material negative that
+  says the event did not happen, or whose coverage record is complete over
+  a source, while that source's broad extraction is planned or attempted.
+  Produced, partial, failed or declined releases it, and so does the
+  operator's acceptance; a later run does not hold again. Every other
+  material negative that reaches such a source (naming it, a member of its
+  catalogue, or outputs made from it) while it has not produced is warned,
+  `preparation_missing`, at every point warnings are delivered. A negative's
+  review offer opens with the state of each source it rests on. The finish
+  revision moves with each receipt; a run with none reads as before.
+- **The prompt** says what a broad extraction is, what to do with its lead,
+  the hold and the warning.
+- **Replay** shows each source's preparation and the questions held or
+  warned on it; `--prepare-as STATE` puts a synthetic receipt on each copy
+  for every broad extraction this checkout's census finds applies to the
+  run's own evidence (read in place). Replay counts an answer the check
+  holds on its own defect as held by the finish line. Contract fixtures
+  preparation-pending and preparation-failed-released;
+  tests/preparation.test.ts.
+- **Replayed on s5764c4 (Belka)**, values-free: two broad extractions apply,
+  the mobile pack's over the iPhone tar (run by the kickoff) and the disk
+  timeline over the laptop image (offered). With both attempted, one of its
+  eight negatives is held (question 4, complete over the tar) and seven are
+  warned (10 and 13 to 18); produced, none; failed, all eight warned.
+
+### Added: `finish prepare`, and late items resolved in one batch
+
+Every first done of s993d40, sa2f2f2 and s5764c4 was refused on items late
+against the report (4, 5 and 15): only a done made the lease the late list
+is read under, and the coordinator then resolved each item in a call of its
+own. Now (ADR 0015, "Preparing the finish"):
+
+- `finish prepare` takes the lease and the report's boundary exactly as a
+  done does (a first lease to the report's publisher, a takeover of an
+  unavailable holder, a report named anew), runs no goal check and writes
+  no sentinel, and answers readiness and every late item, whole, with the
+  lease's generation and the report's digest; a `prepare` event records
+  it. Another seat's prepare is "not yours", quietly. A prepare again, a
+  republished report and a takeover keep the earliest boundary. After a
+  resume, the first prepare or done opens the new segment and carries every
+  post still late by name (`segment`, `carried` on the lease).
+- `finish resolve` with `items` ({post or ack, how: folded, where} or
+  {post or ack, how: not_material, why}), `generation`, `digest` and a
+  `key`: validated whole under the finish lock, one resolution event per
+  item carrying the key, the generation and the digest. A stale generation
+  or digest, or an item not late, refuses the batch with the exact stale
+  fields and every id still unresolved, and records nothing; the same batch
+  sent again under its key records nothing twice and says what is still
+  late. The one-item form stays.
+- The final transaction is unchanged: a veto, an objection or an evidence
+  addition racing the done still holds the sentinel.
+- The prompt and the `finish` and `done` descriptions say the order:
+  draft, prepare, resolve in one call, invite acks, done. The done's late
+  refusal, the header and the readiness post name the batch's generation
+  and digest; `finish status`, `swarm.sh lead <run> list` and the report
+  give the boundary, the segment and the last prepare.
+- Metrics: a finish block (the first done and whether it was refused on
+  late items, every late refusal, the finish tool's calls by act, the
+  resolutions and batches, the tail from ready with every seat's tokens).
+  Replay reads the prepares, the batches and the lease's segment.
+- Contract fixtures prepared-batch-resolved, prepared-racing-veto,
+  prepared-takeover and resume-carried; tests/finish-prepare.test.ts.
+- Replayed, each run cut to its first done: a prepare there lists exactly
+  the items that done was refused on; the finish line on the cut registers
+  proceeds on sa2f2f2 only (the one refusal caused by late items alone). No
+  post lands between a prepare and a batch in the coordinators' own
+  measured times on s993d40 and s5764c4; on sa2f2f2 one lands before the
+  batch's reply, which names it. First-done late refusals 3 to 0, or 1 if
+  that post is left to refuse the done. Covering a late post by the
+  report's reach was not built.
+
+### Added: the warnings are delivered where the decision is made, and request guidance
+
+The answers check's three warnings were said to the coordinator at the end
+(the answers check, the finish gate, `finish status`), after the seats that
+could act on them had moved on: on s993d40 the reviewers who held a partial
+answer whole, and the seat that recorded an answer leaving out what its
+question's leads had established, were told nothing when they decided. Now
+(ADR 0013, "Warnings where the decision is made"):
+
+- Each point asks the same gate over readiness's own inputs
+  (`finish.ts` `warningsAt`) and says the warnings in the words `finish
+  status` uses: the reply to the record that writes a question's answer
+  (`warnings`; their codes on the trace as `warned`); a material negative's
+  review offer, as it reaches its seat; the reply to an attest on the answer,
+  on the coverage record a negative rests on, or on an entry a warning names;
+  the reply to a lead's close or confirmation, for each question whose
+  warnings the act changed; and `finish status`. None holds, none refuses.
+- `lead_findings_uncited` covers what the record ties to a question outside
+  its leads too: a finding or an event two seats hold that names the
+  question in `answers`, or whose `rel` links it to an entry the answer
+  cites; and one seat's that names the question when another question's
+  standing answer relies on it (the record already rests a conclusion on
+  it). One seat's that no answer relies on does not count. Each entry is
+  listed with its tie, and the warning reads "answer #n (question:q) leaves
+  out what the record ties to Q-q: …". Replayed: s993d40 4, 4, 1, 6, 2 and 9
+  entries on its six questions (question 4's list holds the method
+  established under question 6's leads that names question 4); sa2f2f2 4 on
+  question 1 and 1 each on questions 4 and 6. Counting every finding a seat
+  tags, tried first, warned 46 and 55.
+- Request guidance: a question put to the operator says what observation
+  would settle its question and what each possible answer changes (the
+  prompt, `lead_close`, and the close's reply, `guidance`); a value read from
+  an image is cited from the output of a job that read it, never from a
+  transcription typed into a command (the prompt and `net_request`, as the
+  network's refusal already said); under `more_evidence: no` nothing suggests
+  an ask (verified, now a contract fixture).
+- `swarm.sh replay --deliveries` reads, act by act, which warnings each point
+  would have carried, on the registers as they stood at each act. Four
+  contract fixtures hold the points to the ADR: `warnings-delivered`,
+  `lead-findings-tied`, `lead-close-delivered` and `no-ceremonial-ask`.
+
+### Added: replay, and the contract fixtures
+
+A finished run's registers read again under a harness's finish rules, to
+measure a rule change on recorded histories before a paid run is spent on it
+(ADR 0017, "Measuring a rule change"). On the run s9722fa readiness and the
+answers check read six partial answers two ways, and the case lost every
+positive answer; nothing then could show that on the registers before the run.
+
+- `swarm.sh replay <run>` (`scripts/replay.ts`) copies the run (a clone where
+  the file system makes one; the evidence, the VMs and the seats' sessions left
+  out, every link removed) and evaluates a checkout's answers check, finish
+  gate, verdict, readiness, finish register, report standing and custody seals
+  over the copy, each checkout in a process of its own, with no model call, no
+  job and no VM. The run is never written: its registers are hashed before and
+  after. It prints values-free (codes, ids, counts, the harness's own words);
+  `--show-text` adds the lines that quote records. `--checkout PATH` evaluates
+  another checkout; `--compare` sets the run's own harness (the hub's frozen
+  copy, or the commit its registry records, extracted with `git archive`)
+  against this one, or any two, and names every difference; `--stop-policy`
+  evaluates the copy as though the run's policy were another.
+- `tests/fixtures/contract/`: synthetic histories made through the harness's
+  own acts, each with an `expect.json` written by hand from the ADRs: a partial
+  disposed under every stop policy, an established claim held a best candidate,
+  a negative nobody reviewed, evidence stale and cleared, sweep hits named and
+  examined, a post late against the report, an objection racing the finish, a
+  resumed run sealed twice, warnings and nothing else, and the c10 partial
+  cascade. Under every fixture and stop policy readiness, the answers check and
+  the gate agree on each disposition, a warning never holds, and every custody
+  verdict verifies as a prefix. The c10 cascade is replayed under 3338e3c's
+  harness, extracted from the history: its readiness holds the six partials as
+  best candidates while the check disposes them; under this one all six are
+  disposed and readiness is ready.
+
 ### Fixed: a case premise is not a reason to hold an answer partial, and an answer that leaves out what its question's leads established is warned of
 
 On the run s993d40 (a CTF case of six questions) all six answers stood

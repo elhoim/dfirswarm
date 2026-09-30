@@ -1,3 +1,9 @@
+---
+premises:
+  - A cashier at a corner shop took a counterfeit 50-dollar bill and reported it. [scope: entities the counterfeit bill]
+  - inputs/BelkaCTF_6_CASE240405_D201AP.tar is a full file system acquisition of the suspect's iPhone (iOS). [scope: entities the suspect, inputs/BelkaCTF_6_CASE240405_D201AP.tar]
+  - inputs/BelkaCTF_6_CASE240405_LAPTOP.E01 to .E06 is an image of the suspect's Windows laptop. [scope: entities the suspect, inputs/BelkaCTF_6_CASE240405_LAPTOP.E01]
+---
 ## Goal
 
 A cashier at a corner shop took a counterfeit $50 bill and reported it. The

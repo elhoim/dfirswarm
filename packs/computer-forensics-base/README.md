@@ -36,6 +36,19 @@ them.
 Every one takes JSON on stdin and returns JSON, and every call lands on the
 run's trace under the calling agent's name.
 
+**Four recipes**, each saying what it prepares (`purpose` in its
+`recipe.json`). `disk-volumes` (the partition table, and per filesystem a body
+file, a path list and a MAC timeline) and `archive-members` (an archive's
+member list) inventory: they read no file's contents. `memory-windows` is a
+broad extraction of a Windows memory image, Volatility's standard views of
+the whole of it. `disk-timeline` is a broad extraction of a disk image,
+Plaso's log2timeline over every partition and volume and a psort CSV timeline;
+it takes hours on a large image, so it is not run by itself: the harness offers
+it as a lead, and a seat runs it (`catalog_request recipe=computer-forensics-base/disk-timeline`)
+or declines it with why. Each broad extraction lists its `exclusions` (for the
+timeline: shadow copies, encrypted volumes without their key, unallocated
+space, and the text inside documents).
+
 ## Host requirements
 
 The Sleuth Kit and libewf are invoked as executables and are not redistributed

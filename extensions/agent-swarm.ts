@@ -187,6 +187,7 @@ import {
   questionOpen,
   questionAsk,
   questionsView,
+  premisePropose,
   netRequest,
   netFetch,
   netView,
@@ -194,7 +195,8 @@ import {
 // The lead register's host-side pieces: a host run's wait checks it itself (a VM's hub does it there).
 import { LEAD_DISPOSITIONS, leadsWaitCheck, reopenOnLedger } from "./leads.ts";
 // The finish's host-side pieces: one check result per revision, recorded where the finish line runs.
-import { checkAt, LATE_PENDING, NOT_YOURS, recordCheck } from "./finish.ts";
+import { checkAt, LATE_PENDING, lateRefusal, NOT_YOURS, recordCheck } from "./finish.ts";
+import { evidenceCodeNote, evidenceCodeRun, withOwnJobOutputs } from "./evidence-code.ts";
 import { registerPlaywrightTool, runBrowserCheck } from "./playwright-tool.ts";
 import { readToolchainAt, TOOLCHAIN_DIR } from "./toolchain.ts";
 import { installChunkedEgress } from "./vm-egress.ts";
@@ -268,6 +270,7 @@ export const SWARM_TOOLS = new Set([
   "question_open",
   "questions",
   "question_ask",
+  "premise_propose",
 ]);
 
 /** A bash command run this many times by one agent earns a hint to forge a tool. */
@@ -1923,6 +1926,14 @@ export default function (pi: ExtensionAPI) {
       if (fullOutput && !fullOutput.write_error && !isError && durationMs !== undefined && durationMs >= repeatHintMinMs()) {
         longRuns.set(key, { ms: durationMs, path: fullOutput.path });
       }
+      // Code from the evidence, run or evaluated in this VM: flagged on the trace and told to the seat, never refused (extensions/evidence-code.ts).
+      const flagged = evidenceCodeRun(input.command);
+      const code = flagged ? await withOwnJobOutputs(ctx.cwd, flagged, agentId).catch(() => flagged) : null;
+      if (code) {
+        content = [...(Array.isArray(content) ? content : []), { type: "text", text: evidenceCodeNote(code, "shell") }];
+        contentChanged = true;
+        await logEvent(ctx.cwd, agentId, "evidence_code", { command: leadingCommand(input.command) ?? "" }, { ok: true, ...code }).catch(() => undefined);
+      }
       // Jobs are offered when the contract has its Tool jobs section.
       if (jobsOffered === undefined) jobsOffered = /^## Tool jobs/m.test(await readFile(join(ctx.cwd, "SWARM.md"), "utf8").catch(() => ""));
       const head = leadingCommand(input.command) ?? "";
@@ -2566,8 +2577,11 @@ export default function (pi: ExtensionAPI) {
         await logEvent(toolCtx.cwd, agentId, "job_run", params, refused, Date.now() - started);
         return { content: [{ type: "text" as const, text: refused.reason }], details: refused, isError: true };
       }
-      const result = { ok: true, ...res.result };
-      await logEvent(toolCtx.cwd, agentId, "job_run", params, { ok: true, job: res.job, state: res.result.state, status: res.result.status, ...(res.result.lead ? { lead: res.result.lead } : {}), ...(Array.isArray(res.result.similar) ? { similar: (res.result.similar as Array<{ job?: unknown }>).map((x) => x.job) } : {}) }, Date.now() - started);
+      // A command that runs or evaluates code from an evidence-derived place is flagged, never refused (extensions/evidence-code.ts).
+      const flagged = typeof params.command === "string" ? evidenceCodeRun(params.command, Array.isArray(params.inputs) ? params.inputs : []) : null;
+      const code = flagged ? await withOwnJobOutputs(toolCtx.cwd, flagged, agentId).catch(() => flagged) : null;
+      const result = { ok: true, ...res.result, ...(code ? { evidence_code: { ...code, note: evidenceCodeNote(code, "job") } } : {}) };
+      await logEvent(toolCtx.cwd, agentId, "job_run", params, { ok: true, job: res.job, state: res.result.state, status: res.result.status, ...(res.result.lead ? { lead: res.result.lead } : {}), ...(Array.isArray(res.result.similar) ? { similar: (res.result.similar as Array<{ job?: unknown }>).map((x) => x.job) } : {}), ...(code ? { evidence_code: code } : {}) }, Date.now() - started);
       return okResult(result);
     },
   });
@@ -2638,6 +2652,7 @@ export default function (pi: ExtensionAPI) {
     promptGuidelines: [
       "Use net_request only for what the evidence cannot answer and a reference service can: a registration record, a certificate log, a CVE, a hash's reputation, a place. Never search: there is no search adapter, and a write-up is never material.",
       "What a lookup returns is external material: record what it establishes as your own finding, with its limits; it proves its bytes, not the truth or the fit to the time of the events.",
+      "A value read from an image (a photo, a scan, a screenshot) is cited from the output of a job that read the image (an OCR tool run over the input), never from a transcription typed into a command: a value the cited job's own command names is authored, not derived.",
     ],
     parameters: Type.Object({
       lead: Type.String({ description: "The lead you hold that this lookup serves (L-<n>)" }),
@@ -3196,8 +3211,8 @@ export default function (pi: ExtensionAPI) {
     description:
       "Put a fact in the swarm's ledger with its provenance: kind event (a dated event for the timeline; ts required, ISO 8601 with its zone: Z when the source's time is UTC, or the offset the source records), ioc (an indicator: address, hash, file, account), finding (an observation and what you make of it), absence (a search that found nothing, when that matters: value is what was looked for, source what was searched, evidence the query, the tool and its version, and the scope), hypothesis (a proposition under test, with status open, supported or refuted), limitation (what the examination could not establish, with reason not_examined, unavailable, failed, partial or excluded), coverage (what a negative, or a not_determinable answer, was searched over: the proposition, the objects in refs, time_range, search_method, settings, coverage_actual, skipped, failures, result_refs, alternatives and detection_opportunity; areas {allocated, deleted, unallocated, slack, secondary} when it backs an answer to a question that asks for a complete set; acquisition_ask (R-<n>) or acquisition_none_why when it backs a not_determinable; looked_for (the literal strings a hit would contain, which the hub then searches for in every output the run holds) or looked_for_none_why; the harness adds whether the jobs behind it were given every object it names) or answer (the swarm's answer to one question of the goal, or its summary or narrative). Every kind but answer needs source and evidence: where it was seen (a path, a log, a registry key) and how to check it (the command, the inode, the record id, the hash). An entry nobody can check is not a record. refs names the run's objects it rests on, each checked when it is written: input:<path> (under inputs/), job:<id>/<path> (a job's sealed output), import:<id>/<path>, member:<generation>#<n> (an archive member in the catalogue), sha256:<hex> (a sealed blob), or unresolved:<why> when none can be named; a file only in your own work/ is not an object of the run: run the work as a job and cite job:. The harness writes how each cited job or import was made into the entry. " +
       "A finding needs basis (observed or inferred), confidence with confidence_why (where the data came from, whether the method is reliable for it, how specific the observation is, whether your sources depend on each other: the quality of the evidence, not a count), and indicates (what the observation means and the step from one to the other, one to three sentences); an inferred finding lists alternatives (what else could explain it, each rejected with why or left open) or says in alternatives_none_why why none was considered; a finding resting on a job that did not succeed says in qualifies why those bytes are still usable, and can never support a claim that something is absent. " +
-      "An answer names its section (question:<id>, summary or narrative), gives the answer in value and the reasoning citing E-<seq> for every claim, and for a question its result (established, partial, bounded_negative, not_determinable, out_of_scope, premise_not_supported; a premise the case brief or goal states as given, such as who the subject is or whose device it is, is named in reasoning or limitations, \"rests on the case premise that …\", and is no reason to answer partial: partial is only for a part the evidence could not establish, and evidence against a premise is premise_not_supported or a finding), confidence with confidence_why, contrary (entries that say otherwise), limitations (limitation entries that bound it), alternatives_open and would_change; a bounded_negative or not_determinable on a material question cites a coverage record naming it, is worded \"No evidence of <what> was found in <scope>\" (asserts_absence: true, \"it did not happen\", only on an existence question whose coverage is complete and would have shown it), and another seat reviews it (attest with review) before the run may end; it rests on at least one standing entry that names its question in answers, cites a superseded entry only with its correction, and a disputed entry or one resting on a failed job only with qualifies [{ref: E-<seq>, why}]. One answer stands per section: revise it with supersedes. An answer to a register question says which revision it answers in question_rev once the question has more than one; an amendment makes the standing answer stale until it is recorded again for the new revision. Tokens in an answer (hashes, paths, times, inodes, addresses, accounts) that no cited entry holds are marked on it. " +
-      "To correct an entry, yours or a peer's, record the corrected one with supersedes=<its seq> (and because=<why>): nothing is deleted, and the newer entry is the correction. The optional fields are for the reader: answers (the goal sections it answers), rel (supports, contradicts, duplicates or derived_from another entry), sensitive, clock and precision, completion, attribution, locators, significance. The harness renders ledger/ledger.md after every record; cite that file in the report.",
+      "An answer names its section (question:<id>, summary or narrative), gives the answer in value and the reasoning citing E-<seq> for every claim, and for a question its result (established, partial, bounded_negative, not_determinable, out_of_scope, premise_not_supported; a premise the case brief or goal states as given, such as who the subject is or whose device it is, is cited in premises [{id: P-<n>, rev, stance: assumed}] when the register holds it (questions view premises), or named in reasoning, \"rests on the case premise that …\", and is no reason to answer partial: partial is only for a part the evidence could not establish, and evidence against a premise is premise_not_supported, or a stance contradicted on the finding, never a silent hedge), parts [{id, part, status: established | open, refs, open_by?}] (required on a partial answer, with at least one open part bounded by R-<n>, L-<n> or E-<seq>), confidence with confidence_why, contrary (entries that say otherwise), limitations (limitation entries that bound it), alternatives_open and would_change; a bounded_negative or not_determinable on a material question cites a coverage record naming it, is worded \"No evidence of <what> was found in <scope>\" (asserts_absence: true, \"it did not happen\", only on an existence question whose coverage is complete and would have shown it), and another seat reviews it (attest with review) before the run may end; it rests on at least one standing entry that names its question in answers, cites a superseded entry only with its correction, and a disputed entry or one resting on a failed job only with qualifies [{ref: E-<seq>, why}]. One answer stands per section: revise it with supersedes. An answer to a register question says which revision it answers in question_rev once the question has more than one; an amendment makes the standing answer stale until it is recorded again for the new revision. Tokens in an answer (hashes, paths, times, inodes, addresses, accounts) that no cited entry holds are marked on it. " +
+      "To correct an entry, yours or a peer's, record the corrected one with supersedes=<its seq> (and because=<why>): nothing is deleted, and the newer entry is the correction. The optional fields are for the reader: answers (the goal sections it answers), rel (supports, contradicts, duplicates or derived_from another entry; for evidence added late, a delta to the question's answer: supports, contradicts, adds_part, irrelevant or inconclusive), sensitive, clock and precision, completion, attribution, locators, significance. The harness renders ledger/ledger.md after every record; cite that file in the report.",
     promptSnippet: "Record an event, an indicator, a finding with what it indicates, or an answer",
     promptGuidelines: [
       "Record every dated event you establish as kind=event with ts in UTC; the timeline is built from them.",
@@ -3210,6 +3225,7 @@ export default function (pi: ExtensionAPI) {
       "Record what you could not examine, or could only partly, as kind=limitation with its reason; a proposition you are still testing as kind=hypothesis.",
       "Before a negative answer (bounded_negative) or a not_determinable one on a material question, record kind=coverage: what was searched, over which objects, how, what was covered, skipped and failed, the results, what is still open, and whether the event would have left a trace here at all.",
       "An answer (kind=answer) is written from the ledger, not from memory: one per question, one summary, one narrative, each citing E-<seq> for every claim.",
+      "The reply to an answer carries the finish line's warnings on its question (warnings): a not_determinable with no acquisition ask and no reason for none, a partial every review holds whole, what the record ties to the question and the answer leaves out. They hold nothing: weigh each now, and record the answer again if it is right.",
     ],
     parameters: Type.Object({
       kind: Type.Union(LEDGER_AGENT_KINDS.map((k) => Type.Literal(k)), { description: "event | ioc | finding | absence | hypothesis | limitation | answer | coverage" }),
@@ -3274,6 +3290,37 @@ export default function (pi: ExtensionAPI) {
       looked_for: Type.Optional(Type.Array(Type.String(), { description: "A coverage record's, required (or looked_for_none_why): the literal strings a hit would contain if the answer were in the evidence (names, identifiers, addresses, keywords), each at least 3 characters. The hub then searches every output the run already holds for them (every job's output and logs, imports including evidence added late, captures, tool-output/), case-insensitive, UTF-8 and UTF-16LE; a hit in an object this record does not name holds the negative until the record is revised to name it, with what it showed, or the answer is revised." })),
       looked_for_none_why: Type.Optional(Type.String({ description: "A coverage record's, in place of looked_for: why no literal form of what was sought exists." })),
       downgrade: Type.Optional(Type.Object({ evidence: Type.Array(Type.String()), why: Type.String() }, { description: "An answer's, required when a revision (supersedes) moves a question from established or partial to not_determinable or bounded_negative: the entries (E-<seq>) or objects that undermine the earlier answer's chain, and why. At least one entry bears against it: a finding or an event that contradicts the answer or an entry it rests on (rel contradicts), a refuted hypothesis tied to one, an entry it rests on under a dispute, or a correction of one; a limitation or a coverage record is not counter-evidence. While the findings the earlier answer rests on stand undisputed and uncorrected the revision is refused: never discard a standing positive finding to make an answer not_determinable; answer partial. A doubt with no counter-evidence is a dispute, and a lower strength or confidence, not a downgrade." })),
+      parts: Type.Optional(
+        Type.Array(
+          Type.Object({
+            id: Type.String({ description: "A short id for the part, stable across the answer's revisions and its reviews: a, b, who, when" }),
+            part: Type.String({ description: "The part of the question, as you read its revision" }),
+            status: Type.Union([Type.Literal("established"), Type.Literal("open")]),
+            refs: Type.Optional(Type.Array(Type.String(), { description: "The entries it rests on, E-<seq>: an established part names at least one" })),
+            open_by: Type.Optional(Type.String({ description: "An open part's: what bounds it: an acquisition ask R-<n>, a route L-<n>, or a limitation or a coverage record E-<seq>. Never a premise" })),
+          }),
+          {
+            description:
+              "A question's answer: its claim and open-part rows, each part the question asks as you read its revision, established on the entries in refs, or open with what bounds it (open_by). Required on a partial answer, with at least one open part: a partial answer with none is refused (record it established or name what is open). An open part is a part the question asks: detail beyond the question, an example category the evidence does not show, an exhaustiveness the question does not demand, and a hedge on direction go in limitations, not in open parts; a question that asks for a complete set is held to its completeness coverage, not to an open part. An established answer's parts are all established. A premise is never an open part: what the case takes as given goes in premises.",
+          },
+        ),
+      ),
+      premises: Type.Optional(
+        Type.Array(
+          Type.Object({
+            id: Type.String({ description: "The premise, P-<n>" }),
+            rev: Type.Number({ description: "The revision you read (questions view premises)" }),
+            stance: Type.Union([Type.Literal("assumed"), Type.Literal("supported"), Type.Literal("contradicted"), Type.Literal("unresolved")]),
+            refs: Type.Optional(Type.Array(Type.String(), { description: "The entries that show it, E-<seq>: supported needs a standing finding or event; a contradiction that names one takes the premise to the operator as a dispute" })),
+            conditional: Type.Optional(Type.Boolean({ description: "With assumed: the answer holds only if the premise does (\"assuming P-n\", said so in the report). The only way to assume a proposition under test" })),
+            scope: Type.Optional(Type.Object({ entities: Type.Optional(Type.Array(Type.String())), times: Type.Optional(Type.Array(Type.Object({ from: Type.Optional(Type.String()), to: Type.Optional(Type.String()) }))) }, { description: "The entities and times the answer takes it for, inside the premise's own scope" })),
+          }),
+          {
+            description:
+              "A question's answer: each premise (P-<n>) it rests on or bears on, at the revision you read: assumed (a given is not proved again), supported or contradicted (on the finding in refs), or unresolved. Two standing answers that assume and contradict one premise revision over scopes that overlap hold the run (premise_inconsistent) until one is revised, the contradiction names its rebutting finding, a scope is narrowed, or one answers conditionally.",
+          },
+        ),
+      ),
       limitations: Type.Optional(Type.Array(Type.Union([Type.Number(), Type.String()]), { description: "An answer's: the limitation entries that bound it, by seq." })),
       alternatives_open: Type.Optional(Type.String({ description: "An answer's: what else could still explain it, or that nothing remains open and why. Required on a question's answer." })),
       would_change: Type.Optional(Type.String({ description: "An answer's: what evidence would change it. Required on a question's answer." })),
@@ -3281,7 +3328,7 @@ export default function (pi: ExtensionAPI) {
       supersedes: Type.Optional(Type.Number({ description: "The seq of an entry this one corrects. The older entry stays, marked superseded." })),
       refs: Type.Optional(Type.Array(Type.String(), { description: "The run's objects it rests on: input:<path>, job:<id>/<path>, import:<id>/<path>, member:<gen>#<n>, sha256:<hex>, or unresolved:<why>. Each is checked; one that does not resolve is refused with the nearest names. Not on an answer." })),
       answers: Type.Optional(Type.Array(Type.String(), { description: "The sections it answers: the goal's \"3\" or \"Q3\", a register question \"Q-19\", summary, narrative." })),
-      rel: Type.Optional(Type.Array(Type.Object({ to: Type.Number(), kind: Type.Union(LEDGER_REL_KINDS.map((k) => Type.Literal(k))) }), { description: "Links to other entries by seq: supports, contradicts, duplicates, derived_from." })),
+      rel: Type.Optional(Type.Array(Type.Object({ to: Type.Number(), kind: Type.Union(LEDGER_REL_KINDS.map((k) => Type.Literal(k))) }), { description: "Links to other entries by seq: supports, contradicts, duplicates, derived_from. An entry that interprets evidence added late says how it bears on a question's answer with a delta, a rel to that answer: supports, contradicts, adds_part, irrelevant or inconclusive (the stale answer clears only on one)." })),
       sensitive: Type.Optional(Type.Boolean({ description: "It, or what it cites, holds a credential, a key or personal data: a package redacts it." })),
       status: Type.Optional(Type.Union(LEDGER_HYPOTHESIS_STATUS.map((k) => Type.Literal(k)), { description: "A hypothesis's status." })),
       reason: Type.Optional(Type.Union(LEDGER_LIMITATION_REASONS.map((k) => Type.Literal(k)), { description: "A limitation's reason." })),
@@ -3334,7 +3381,7 @@ export default function (pi: ExtensionAPI) {
       // The entry's hash goes on the trace, which is anchored outside the
       // run: custody holds the ledger to it, so an entry deleted from the
       // tail, or one written into the file without this tool, is named.
-      await logEvent(toolCtx.cwd, agentId, "record", { ...(params as Record<string, unknown>), ...(result.entry.supersedes !== undefined ? { supersedes: result.entry.supersedes } : {}) }, { ok: true, seq: result.entry.seq, merged: result.merged, total: result.total, ...(result.entry.hash ? { hash: result.entry.hash } : {}), ...(result.note ? { note: result.note } : {}) }, Date.now() - started);
+      await logEvent(toolCtx.cwd, agentId, "record", { ...(params as Record<string, unknown>), ...(result.entry.supersedes !== undefined ? { supersedes: result.entry.supersedes } : {}) }, { ok: true, seq: result.entry.seq, merged: result.merged, total: result.total, ...(result.entry.hash ? { hash: result.entry.hash } : {}), ...(result.note ? { note: result.note } : {}), ...(result.warned?.length ? { warned: result.warned } : {}) }, Date.now() - started);
       // A correction is said on the trace as itself, so a reader of the
       // record sees which entry stopped standing, when, and by whom.
       if (result.entry.supersedes !== undefined && !result.merged) {
@@ -3354,7 +3401,7 @@ export default function (pi: ExtensionAPI) {
       if (leadsOpened.length || interpreted) {
         await logEvent(toolCtx.cwd, agentId, "record_leads", { seq }, { ok: true, ...(leadsOpened.length ? { opened: leadsOpened } : {}), ...(interpreted ? { interprets: interpreted.ok ? interpreted.interprets : [], ...(interpreted.ok ? {} : { refused: interpreted.reason }) } : {}) }).catch(() => undefined);
       }
-      return okResult({ ok: true, seq, merged: result.merged, total: result.total, ...(result.entry.supersedes !== undefined ? { supersedes: result.entry.supersedes } : {}), ...(result.entry.refs?.length ? { refs: result.entry.refs } : {}), ...(result.entry.unsupported_tokens?.length ? { unsupported_tokens: result.entry.unsupported_tokens } : {}), ...(result.note ? { note: result.note } : {}), ...(leadsOpened.length ? { leads_opened: leadsOpened } : {}), ...(interpreted ? (interpreted.ok ? { interprets: interpreted.interprets } : { interprets_refused: `the entry stands, but its interpretation was not recorded: ${interpreted.reason}` }) : {}), rendered: LEDGER_MD });
+      return okResult({ ok: true, seq, merged: result.merged, total: result.total, ...(result.entry.supersedes !== undefined ? { supersedes: result.entry.supersedes } : {}), ...(result.entry.refs?.length ? { refs: result.entry.refs } : {}), ...(result.entry.unsupported_tokens?.length ? { unsupported_tokens: result.entry.unsupported_tokens } : {}), ...(result.note ? { note: result.note } : {}), ...(result.warnings?.length ? { warnings: result.warnings } : {}), ...(leadsOpened.length ? { leads_opened: leadsOpened } : {}), ...(interpreted ? (interpreted.ok ? { interprets: interpreted.interprets } : { interprets_refused: `the entry stands, but its interpretation was not recorded: ${interpreted.reason}` }) : {}), rendered: LEDGER_MD });
     },
   });
 
@@ -3380,15 +3427,18 @@ export default function (pi: ExtensionAPI) {
     name: "attest",
     label: "Attest",
     description:
-      "Say that you re-derived a ledger entry somebody else recorded (a finding, an answer, any kind): how names what you re-derived and from which sealed object (job:<id>/<path>, input:<path>, …), and what you only read. refs lists the objects you re-derived from, each checked. The harness writes it, chained, into ledger/attestations.jsonl. You cannot attest your own entry; an attestation is a check by somebody else, not agreement.",
+      "Say that you re-derived a ledger entry somebody else recorded (a finding, an answer, any kind): how names what you re-derived and from which sealed object (job:<id>/<path>, input:<path>, …), and what you only read. refs lists the objects you re-derived from, each checked. The harness writes it, chained, into ledger/attestations.jsonl. You cannot attest your own entry; an attestation is a check by somebody else, not agreement. Review an answer source-first: the question and its original sources before the answer's conclusion, and the strongest rival reading of them.",
     promptSnippet: "Record that you re-derived a peer's entry, and how",
     promptGuidelines: [
       "attest only what you re-derived from the sealed refs yourself, and say in how what you re-derived and what you only read.",
       "A critic attests or disputes every answer before the run ends; the author of an entry never attests it.",
       "A negative (a coverage record, or an answer bounded_negative or not_determinable) is attested with review: say whether you challenged the detection assumptions, reproduced a decisive check and tried a materially different route, and what you did or why not.",
+      "Review source-first: read the question as asked, its scope and the original sources it rests on before the answer's conclusion, and weigh the strongest rival reading of those sources (another time, entity, mechanism or activity, or the premise not holding). A review offer leads with them and links the answer by its seq.",
       "An answer to a question is attested with strength (established or best_candidate) and answer_review: what you reproduced and what you only read, each part the question asks and whether it is established, the inference, the alternatives you weighed, and whether another source family was checked. A best candidate you cannot break is still a best candidate: say so, and open the lead for the route would_change names.",
+      "An established attest of an answer that claims established, on a material question, also names answer_review.discriminator {rival, test, favours_if, outcome, refs}: the strongest rival, the test that separates it from the answer, the result that would favour each, what it showed, and the E-<seq> or job:<id>/<path> it rests on; and, where a value the answer or an entry it rests on states is in the bytes, says where it read it, answer_review.reproduced_at [{ref, offset, value}] (the sealed object, the byte offset where the value begins, the value as it is there and as the answer or that entry states it; the hub reads those bytes, in UTF-8 and UTF-16LE), or, for a derived value (a converted time, a decoded field), answer_review.derivation {job, inputs}. Without a discriminator, or with a locator that does not verify (its bytes at the offset, its value among the words of the answer or of an entry it rests on) or a derivation that does not resolve, it is recorded best_candidate, and the reply says how to fix it; with neither a locator nor a derivation it is warned, never capped (an answer that is an inference over several entries stands on its discriminator). Bytes at an offset prove the value is there, not that it answers the question: that is the discriminator's.",
       "\"Best candidate\" concerns only an answer that claims established. Partial is a disposition: a review of a partial answer checks the parts the answer claims, those it says are established and those it declares open. A part it declares open is held established: false with declared_open naming the limitation or coverage record the answer cites for it; that part, and the answer's confidence, do not cap your review, and a partial answer never holds the run as a best candidate.",
       "Before you attest an answer established, name at least one alternative explanation you weighed, why the evidence rules it out, and the entries that show it: answer_review.alternatives [{explanation, why, evidence: [E-<seq>]}] (a decoy that looks like the answer, another actor, another mechanism, another time). An established attest that names none, or only placeholders, is recorded best_candidate, and the reply says so. Only an established answer attested so keeps a high confidence; any other high is recorded medium.",
+      "The reply carries the finish line's warnings on what you attested (warnings): a partial answer you hold whole, what the record ties to the question and the answer leaves out, a not_determinable with no acquisition ask. They hold nothing: tell the answer's author on the board, or say in your review which part is open.",
     ],
     parameters: Type.Object({
       seq: Type.Number({ description: "The entry's seq (standing, not your own)." }),
@@ -3407,7 +3457,7 @@ export default function (pi: ExtensionAPI) {
       second_review_why: Type.Optional(Type.String({ description: "A negative's review is offered to one seat; another seat's review of a negative reviewed already or offered to another is answered quietly with who has it, and nothing is recorded. A second, independent review says here why it adds something (another route, a check the first review did not make)." })),
       strength: Type.Optional(
         Type.Union([Type.Literal("established"), Type.Literal("best_candidate")], {
-          description: "Required on an answer to a question: established (the review shows the answer's claims hold), or best_candidate (what the evidence best supports, not shown to be the answer; on an answer that claims established it does not satisfy the finish line, and on a partial answer or another disposition it holds nothing). On an answer that claims established, a medium or low confidence, a part you hold not established, or a route its would_change names that nothing took allows only best_candidate. On a partial answer only a part it claims established that you do not hold so caps it; a part it declares open (declared_open) and its confidence do not. Established with no alternative named in answer_review.alternatives is recorded best_candidate.",
+          description: "Required on an answer to a question: established (the review shows the answer's claims hold), or best_candidate (what the evidence best supports, not shown to be the answer; on an answer that claims established it does not satisfy the finish line, and on a partial answer or another disposition it holds nothing). On an answer that claims established, a medium or low confidence, a part you hold not established, or a route its would_change names that nothing took allows only best_candidate. On a partial answer only a part it claims established that you do not hold so caps it; a part it declares open (declared_open) and its confidence do not. Established with no alternative named in answer_review.alternatives is recorded best_candidate; so is an established review of an answer that claims established, on a material question, with no discriminator, a locator that does not verify, or neither a locator nor a derivation.",
         }),
       ),
       answer_review: Type.Optional(
@@ -3417,20 +3467,55 @@ export default function (pi: ExtensionAPI) {
             read: Type.String({ description: "What you only read (a peer's entry, a summary) without re-deriving it" }),
             parts: Type.Array(
               Type.Object({
+                id: Type.Optional(Type.String({ description: "The answer's part this row weighs, by its id, when the answer carries parts: weigh each of them; a row the answer holds open needs no declared_open" })),
                 part: Type.String(),
                 established: Type.Boolean(),
                 why: Type.String(),
                 declared_open: Type.Optional(Type.String({ description: "A partial answer's part that the answer itself declares open: E-<seq> of the limitation it cites, or the coverage record it rests on, that declares it so. Such a part does not cap the review." })),
+                missing: Type.Optional(Type.Boolean({ description: "A part the question asks that the answer leaves out (no id; established false): it stays visible (part_omitted) until the answer is recorded again with it" })),
+                not_asked: Type.Optional(Type.Boolean({ description: "A part the answer holds, most often open, that the question does not ask (detail beyond it, an example category the evidence does not show, an exhaustiveness it does not demand, a hedge on direction): established false, and why says why the question does not ask it. It caps nothing; a partial answer whose every other part is established is then warned (partial_all_parts_established) to be recorded established with that part among its limitations. Never with missing" })),
               }),
-              { description: "Each part the question asks, whether it is established, and why; for a partial answer, a part it declares open names the entry that declares it (declared_open). What the case brief or the goal states as given (who the subject is, whose device it is) is a premise, not a part to hold open" },
+              { description: "Each part the question asks, whether it is established, and why; against an answer that carries parts, each of its parts by its id, and a part it leaves out with missing: true, and a part it holds that the question does not ask with not_asked: true. For a partial answer, a part it declares open (its row open, or declared_open naming the entry) does not cap the review. What the case brief or the goal states as given (who the subject is, whose device it is) is a premise, not a part to hold open" },
             ),
             inference: Type.String({ description: "The step that connects the observations to the answer" }),
             alternatives: Type.Union([Type.Array(Type.Object({ explanation: Type.String(), why: Type.String(), evidence: Type.Optional(Type.Array(Type.String())) })), Type.String()], {
               description: "Each alternative explanation you weighed, why the evidence rules it out, and the entries that show it (evidence: [E-<seq>], each in the ledger): [{explanation, why, evidence}]. Strength established needs at least one that names its evidence and is a real explanation, not a placeholder (\"none\", \"n/a\"); without one the attest is recorded best_candidate. A text is read too: what the evidence still allows, for a best candidate.",
             }),
             other_family: Type.Object({ checked: Type.Boolean(), text: Type.String() }, { description: "Whether a materially different source family was checked, which, or why not" }),
+            discriminator: Type.Optional(
+              Type.Object(
+                {
+                  rival: Type.String({ description: "The strongest rival reading: another time, entity, mechanism or activity the evidence could mean, or the premise not holding" }),
+                  test: Type.String({ description: "The check that separates the rival from the answer" }),
+                  favours_if: Type.String({ description: "The result that would favour the answer, and the one that would favour the rival" }),
+                  outcome: Type.String({ description: "What the check showed" }),
+                  refs: Type.Array(Type.String(), { description: "The observation or job the outcome rests on: E-<seq>, or job:<id>/<path>, input:<path>, import:<id>/<path>. Never the answer under review, nor only entries the answer already cites" }),
+                },
+                { description: "Required for an established review of an answer that claims established, on a material question: without it the attest is recorded best_candidate." },
+              ),
+            ),
+            reproduced_at: Type.Optional(
+              Type.Array(
+                Type.Object({
+                  ref: Type.String({ description: "The sealed object you read the value in: job:<id>/<path>, import:<id>/<path>, input:<path>" }),
+                  offset: Type.Number({ description: "The byte offset where the value begins (a job over the object gives it: grep -boa, a hex dump)" }),
+                  length: Type.Optional(Type.Number({ description: "How many bytes hold it: give it without value to have the bytes read back and found in the words of the answer or of an entry it rests on" })),
+                  value: Type.Optional(Type.String({ description: "The value as it is in the object (UTF-8 or UTF-16LE; letters in either case)" })),
+                }),
+                { description: "Where you read each literal value the answer, or an entry it rests on, states that you vouch for; the hub reads the bytes at each offset and holds the value to those words. One that does not verify caps an established review; none at all, and no derivation, is warned, never capped." },
+              ),
+            ),
+            derivation: Type.Optional(
+              Type.Object(
+                {
+                  job: Type.String({ description: "The job that derived the value: j<id> or job:<id>" }),
+                  inputs: Type.Array(Type.String(), { description: "The objects it read, among those it declared" }),
+                },
+                { description: "For a derived value (a converted time, a decoded field, a sum): how it was derived, in place of a locator." },
+              ),
+            ),
           },
-          { description: "Required with strength on an answer to a question: the review part by part." },
+          { description: "Required with strength on an answer to a question: the review part by part, source-first." },
         ),
       ),
     }),
@@ -3446,8 +3531,8 @@ export default function (pi: ExtensionAPI) {
         await logEvent(toolCtx.cwd, agentId, "review_deferred", { seq: params.seq }, { ok: true, deferred: result.deferred }, Date.now() - started);
         return okResult({ ok: true, seq: params.seq, appended: false, deferred: result.deferred, note: result.note });
       }
-      await logEvent(toolCtx.cwd, agentId, "attest", params as Record<string, unknown>, { ok: true, seq: result.line.seq, appended: result.appended, ...(result.line.hash ? { hash: result.line.hash } : {}), ...(result.note ? { note: result.note } : {}) }, Date.now() - started);
-      return okResult({ ok: true, seq: result.line.seq, appended: result.appended, ...(result.note ? { note: result.note } : {}), rendered: LEDGER_MD });
+      await logEvent(toolCtx.cwd, agentId, "attest", params as Record<string, unknown>, { ok: true, seq: result.line.seq, appended: result.appended, ...(result.line.hash ? { hash: result.line.hash } : {}), ...(result.note ? { note: result.note } : {}), ...(result.warned?.length ? { warned: result.warned } : {}) }, Date.now() - started);
+      return okResult({ ok: true, seq: result.line.seq, appended: result.appended, ...(result.note ? { note: result.note } : {}), ...(result.warnings?.length ? { warnings: result.warnings } : {}), rendered: LEDGER_MD });
     },
   });
 
@@ -3484,7 +3569,7 @@ export default function (pi: ExtensionAPI) {
   /** A lead call's answer to the agent, and its line on the trace. */
   async function leadAnswer(cwd: string, tool: string, params: Record<string, unknown>, started: number, r: { ok: boolean; reason?: string } & Record<string, unknown>) {
     const lead = (r.lead ?? {}) as Record<string, unknown>;
-    await logEvent(cwd, agentId, tool, params, r.ok ? { ok: true, lead: lead.id, status: lead.status, holder: lead.holder, generation: lead.generation, ...(lead.disposition ? { disposition: lead.disposition, ref: lead.ref } : {}), ...(r.reclaimed_from ? { reclaimed_from: r.reclaimed_from } : {}), ...(r.woke ? { woke: r.woke } : {}) } : { ok: false, reason: r.reason }, Date.now() - started).catch(() => undefined);
+    await logEvent(cwd, agentId, tool, params, r.ok ? { ok: true, lead: lead.id, status: lead.status, holder: lead.holder, generation: lead.generation, ...(lead.disposition ? { disposition: lead.disposition, ref: lead.ref } : {}), ...(r.reclaimed_from ? { reclaimed_from: r.reclaimed_from } : {}), ...(r.woke ? { woke: r.woke } : {}), ...(Array.isArray(r.warned) && r.warned.length ? { warned: r.warned } : {}) } : { ok: false, reason: r.reason }, Date.now() - started).catch(() => undefined);
     if (!r.ok) return { content: [{ type: "text" as const, text: `${tool} refused: ${r.reason}` }], details: r, isError: true };
     return okResult(r);
   }
@@ -3582,6 +3667,8 @@ export default function (pi: ExtensionAPI) {
       "Close every lead you hold with a disposition; a material lead left open holds the finish line.",
       "Use needs_operator for anything outside the evidence and the allowlist (a host to reach, a file the run does not have, a question only a person can answer); never fetch it yourself.",
       "Ask for missing evidence as an acquisition (needs_operator with ask.kind acquisition): the source, where it is, what it would establish, how urgent. \"No additional input under this case policy\" is a constraint of the case, never a finding that something is absent.",
+      "A question put to the operator (needs_operator) says what observation would settle the lead's question (Q-<n>) and what each possible answer changes: which answer, and to which result.",
+      "The reply carries the finish line's warnings the close changed (warnings): an entry the lead now holds that its question's answer does not reach. They hold nothing: tell the answer's author, or record the answer again.",
     ],
     parameters: Type.Object({
       id: Type.String({ description: "L-<n>" }),
@@ -3722,22 +3809,45 @@ export default function (pi: ExtensionAPI) {
     name: "finish",
     label: "The finish",
     description:
-      "The run's finish, one seat's to call (the coordinator's, named in every header). status: where it stands (ready by the registers or what holds it, the coordinator, the last check at which revision, the report's reviews, what is late against it, and what the answers check warns of: never held on, weighed before the done). ack (any other seat): your review of the report's current digest, verdict no_objection, or objection with why (before any done names the report, name it: report); an ack is not a late post, and an objection holds the finish until the coordinator resolves it. resolve (the coordinator): answer a result or veto posted after the report, or an objection, how: folded (the report says it now, and where) or not_material (with why it changes nothing the report concludes). Reading a late post is not answering it. The dispositions a run ends on: partial is one (a review of a partial answer checks the parts the answer claims, established and declared open); \"a best candidate, not established\" concerns only an answer that claims established; never discard a standing positive finding to make an answer not_determinable.",
-    promptSnippet: "See or act on the run's finish",
+      "The run's finish, one seat's to call (the coordinator's, named in every header). status: where it stands (ready by the registers or what holds it, the coordinator with its generation, the report's digest and the boundary, the last check at which revision, the report's reviews, what is late against it once a coordinator has prepared, and what the answers check warns of: never held on, weighed before the done). prepare (the seat that drafted the report, before done): takes the finish for you as a done would (no goal check, no sentinel), and gives readiness and every item late against the report, whole, with the generation and digest a batch of resolutions carries; prepare again after publishing the report again, for its new digest (what was late stays late). ack (any other seat): your review of the report's current digest, verdict no_objection, or objection with why (before any prepare or done names the report, name it: report), and sections, the report's sections you reviewed (their numbers or headings; none named is the whole report); an ack is not a late post, and an objection holds the finish until the coordinator resolves it. An ack binds each section it covered by that section's digest: while they are unchanged it carries over to the next version of the report, and you are asked again only on the sections that changed (your header says which). Never ack again a review that stands, and never announce an ack on the board: a post after the report is a late item the coordinator has to resolve. resolve (the coordinator): answer each result or veto posted after the report, and each objection, how: folded (the report says it now, and where) or not_material (with why it changes nothing the report concludes); all of them in one call with items [{post or ack, how, where or why}], generation and digest (checked together: a stale generation or digest, or an item not late, records nothing and names each), and key, your name for the batch (a retry with the same key records nothing twice). Reading a late post is not answering it. The dispositions a run ends on: partial is one (a review of a partial answer checks the parts the answer claims, established and declared open); \"a best candidate, not established\" concerns only an answer that claims established; never discard a standing positive finding to make an answer not_determinable.",
+    promptSnippet: "See, prepare or act on the run's finish",
     parameters: Type.Object({
-      action: Type.Union([Type.Literal("status"), Type.Literal("ack"), Type.Literal("resolve")]),
-      digest: Type.Optional(Type.String({ description: "ack: the report's digest you read (its current one when left out)" })),
-      report: Type.Optional(Type.String({ description: "ack: the report you reviewed (e.g. work/report.md), needed while no coordinator's done has named it; your objection then holds that done" })),
+      action: Type.Union([Type.Literal("status"), Type.Literal("prepare"), Type.Literal("ack"), Type.Literal("resolve")]),
+      digest: Type.Optional(Type.String({ description: "ack: the report's digest you read (its current one when left out); resolve with items: the report's digest finish prepare or status gave you (its first 12 characters or more)" })),
+      report: Type.Optional(Type.String({ description: "prepare: the report you drafted (e.g. work/report.md; the coordinator's when left out); ack: the report you reviewed, needed while no prepare or done has named it (your objection then holds that done)" })),
       verdict: Type.Optional(Type.Union([Type.Literal("no_objection"), Type.Literal("objection")], { description: "ack: your verdict on the report" })),
-      why: Type.Optional(Type.String({ description: "ack objection: what does not hold; resolve: where it was folded, or why it is not material" })),
-      post: Type.Optional(Type.Union([Type.Number(), Type.String()], { description: "resolve: the late post's id (#123)" })),
-      ack: Type.Optional(Type.Number({ description: "resolve: the objection's ack seq" })),
-      how: Type.Optional(Type.Union([Type.Literal("folded"), Type.Literal("not_material")], { description: "resolve: folded into the report, or not material" })),
+      sections: Type.Optional(Type.Array(Type.String(), { description: "ack: the report's sections you reviewed, by number (\"3\") or heading; left out, the whole report. An objection names the sections it objects to" })),
+      why: Type.Optional(Type.String({ description: "ack objection: what does not hold; resolve (one item): where it was folded, or why it is not material" })),
+      post: Type.Optional(Type.Union([Type.Number(), Type.String()], { description: "resolve (one item): the late post's id (#123)" })),
+      ack: Type.Optional(Type.Number({ description: "resolve (one item): the objection's ack seq" })),
+      how: Type.Optional(Type.Union([Type.Literal("folded"), Type.Literal("not_material")], { description: "resolve (one item): folded into the report, or not material" })),
+      items: Type.Optional(
+        Type.Array(
+          Type.Object({
+            post: Type.Optional(Type.Union([Type.Number(), Type.String()], { description: "The late post's id (#123)" })),
+            ack: Type.Optional(Type.Number({ description: "The objection's ack seq" })),
+            how: Type.Union([Type.Literal("folded"), Type.Literal("not_material")]),
+            where: Type.Optional(Type.String({ description: "folded: where the report says it now" })),
+            why: Type.Optional(Type.String({ description: "not_material: why it changes nothing the report concludes" })),
+          }),
+          { description: "resolve: every late item in one call, each with its own words" },
+        ),
+      ),
+      generation: Type.Optional(Type.Number({ description: "resolve with items: the coordinator's generation finish prepare or status gave you" })),
+      key: Type.Optional(Type.String({ description: "resolve with items: your name for this batch; send the same key again only to retry the same batch after an interruption" })),
     }),
     async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
       const started = Date.now();
       const r = (await finishAct(ctxFrom(toolCtx.cwd, agentId), params as never)) as { ok: boolean; reason?: string } & Record<string, unknown>;
-      await logEvent(toolCtx.cwd, agentId, "finish", params as Record<string, unknown>, r.ok ? { ok: true, action: params.action, ...(params.action === "status" ? { ready: r.ready } : {}), ...(typeof r.seq === "number" ? { seq: r.seq } : {}) } : { ok: false, reason: r.reason }, Date.now() - started).catch(() => undefined);
+      // What the trace keeps of the act: its codes and counts, never its words.
+      const counts = {
+        ...(params.action === "status" ? { ready: r.ready } : {}),
+        ...(params.action === "prepare" ? { mine: r.mine !== false, ...(Array.isArray(r.late) ? { late: (r.late as unknown[]).length } : {}), ...(typeof r.generation === "number" ? { generation: r.generation } : {}), ...(r.readiness && typeof r.readiness === "object" ? { ready: (r.readiness as { ready?: unknown }).ready === true } : {}) } : {}),
+        ...(params.action === "ack" && Array.isArray(r.sections) ? { sections: (r.sections as unknown[]).length, whole: r.whole === true } : {}),
+        ...(params.action === "resolve" && Array.isArray(params.items) ? { items: params.items.length, ...(typeof r.resolved === "number" ? { resolved: r.resolved } : {}), ...(r.replayed ? { replayed: true } : {}), ...(Array.isArray(r.late) ? { late: (r.late as unknown[]).length } : {}) } : {}),
+        ...(typeof r.seq === "number" ? { seq: r.seq } : {}),
+      };
+      await logEvent(toolCtx.cwd, agentId, "finish", params as Record<string, unknown>, r.ok ? { ok: true, action: params.action, ...counts } : { ok: false, reason: r.reason, ...(r.stale ? { stale: Object.keys(r.stale as object) } : {}), ...(Array.isArray(r.unresolved) ? { unresolved: (r.unresolved as unknown[]).length } : {}) }, Date.now() - started).catch(() => undefined);
       if (!r.ok) return { content: [{ type: "text" as const, text: `finish refused: ${r.reason}` }], details: r, isError: true };
       return okResult(r);
     },
@@ -3829,11 +3939,11 @@ export default function (pi: ExtensionAPI) {
     name: "questions",
     label: "Questions",
     description:
-      "Read the question register: list (default: every question, whole, with its origin (goal, agent, or a person: analyst, reviewer, observer, claimed or signed), scope, work state, answer and leads, a page at a time; from: next for the rest), show (one question with id: every verbatim revision, the neutral formulation, hints, clarifications, offers, leads and its answer), triage (what waits for the operator), objectives, or mine. The rendered register is questions/questions.md.",
+      "Read the question register: list (default: every question, whole, with its origin (goal, agent, or a person: analyst, reviewer, observer, claimed or signed), scope, work state, answer and leads, a page at a time; from: next for the rest), show (one question with id: every verbatim revision, the neutral formulation, hints, clarifications, offers, leads and its answer), triage (what waits for the operator), objectives, mine, or premises (every premise whole: its words, locator, class, revisions, scope, and the answers that cite it; show with id P-<n> for one and its history). The rendered register is questions/questions.md.",
     promptSnippet: "Read the question register",
     parameters: Type.Object({
-      view: Type.Optional(Type.Union(["list", "show", "triage", "objectives", "mine"].map((k) => Type.Literal(k)))),
-      id: Type.Optional(Type.String({ description: "Q-<n>, for show" })),
+      view: Type.Optional(Type.Union(["list", "show", "triage", "objectives", "mine", "premises"].map((k) => Type.Literal(k)))),
+      id: Type.Optional(Type.String({ description: "Q-<n> or P-<n>, for show" })),
       from: Type.Optional(Type.String({ description: "The question id a previous page named as next" })),
     }),
     async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
@@ -3859,6 +3969,39 @@ export default function (pi: ExtensionAPI) {
       const started = Date.now();
       const r = await questionAsk(ctxFrom(toolCtx.cwd, agentId), params.id, params.what_is_unclear);
       return questionAnswer(toolCtx.cwd, "question_ask", params as Record<string, unknown>, started, r as never);
+    },
+  });
+
+  pi.registerTool({
+    name: "premise_propose",
+    label: "Propose a premise",
+    description:
+      "Propose a premise (P-<n>) several answers would rest on: text is its words verbatim from where they stand, locator where that is (E-<seq> of the entry you read it in, a ref such as input:<path> with its page or line, or the goal's words), why is why the case's answers rest on it, and scope what it is about ({entities, times: [{from, to}], questions: [Q-<n>]}, each optional). It is a proposition under test until the operator admits it: examine it like any claim, and assume it only conditionally (\"assuming P-n\") until then. What the operator designated (the goal's premises) is a given already: cite it, do not propose it again. Read the premises with questions view premises.",
+    promptSnippet: "Propose a premise the answers would rest on",
+    promptGuidelines: [
+      "A premise is the case's, not a part of a question: propose one only when several answers would rest on the same unproved statement (whose device it is, who the subject is), and cite it in each answer's premises.",
+    ],
+    parameters: Type.Object({
+      text: Type.String({ description: "The premise's words, verbatim from where they stand" }),
+      locator: Type.String({ description: "Where its words stand: E-<seq>, a ref with its page or line, or the goal" }),
+      why: Type.String({ description: "Why the case's answers rest on it" }),
+      scope: Type.Optional(
+        Type.Object(
+          {
+            entities: Type.Optional(Type.Array(Type.String())),
+            times: Type.Optional(Type.Array(Type.Object({ from: Type.Optional(Type.String()), to: Type.Optional(Type.String()) }))),
+            questions: Type.Optional(Type.Array(Type.String())),
+          },
+          { description: "What it is about: the entities, the time ranges (ISO 8601 ends), and the questions it applies to; left out, it is unbounded" },
+        ),
+      ),
+    }),
+    async execute(_id, params, _signal, _onUpdate, toolCtx: ToolCtx) {
+      const started = Date.now();
+      const r = (await premisePropose(ctxFrom(toolCtx.cwd, agentId), params as never)) as { ok: boolean; reason?: string } & Record<string, unknown>;
+      await logEvent(toolCtx.cwd, agentId, "premise_propose", params as Record<string, unknown>, r.ok ? { ok: true, p: r.p, rev: r.rev, class: r.class } : { ok: false, reason: r.reason }, Date.now() - started).catch(() => undefined);
+      if (!r.ok) return { content: [{ type: "text" as const, text: `premise_propose refused: ${String(r.reason)}` }], details: r, isError: true };
+      return okResult(r);
     },
   });
 
@@ -3894,10 +4037,10 @@ export default function (pi: ExtensionAPI) {
     name: "done",
     label: "Done",
     description:
-      "End the run: the coordinator's call. One seat coordinates the finish (normally the one that published the report last; the header names it, and a coordinator that is done, dead, compacting or silent is taken over by the next seat's done). Any other seat's done is answered \"not yours\" and changes nothing. The coordinator's done first needs every result or veto posted after the report, and every objection to it, answered with a typed resolution (finish resolve); then the harness runs the goal's checks and its own gate once per state revision (in a microVM run on the host): while any fails, done is refused with each check and its fix; when they pass it writes done/agents/<id>.done and done/SWARM_DONE while that revision still holds, drops this worker's locks and ends the session. Once done/SWARM_DONE exists every seat calls done and stops. Whether the dispositions suffice (an examination-limited end included) is what done asks the finish line, not the operator: call done before asking the operator anything, and ask it (lead_close needs_operator) only for what a refusal names as the operator's, such as accepting a question the finish line holds (swarm.sh question <run> accept Q-n). Partial is a disposition: a review of a partial answer checks the parts the answer claims, and a best_candidate review of it holds nothing. \"A best candidate, not established\" concerns only an answer that claims established. Never discard a standing positive finding to make an answer not_determinable: a part the evidence cannot settle makes the answer partial.",
+      "End the run: the coordinator's call. One seat coordinates the finish (normally the one that published the report last; the header names it, and a coordinator that is done, dead, compacting or silent is taken over by the next seat's done). Any other seat's done is answered \"not yours\" and changes nothing. The coordinator drafts the report, prepares the finish (finish prepare: it lists every item late against the report), resolves them in one call (finish resolve with items), asks for the report's review only of the seats and sections prepare names (a review carries over while the sections it covered are unchanged; finish ack), then calls done. The done first needs every result or veto posted after the report, and every objection to it, answered with a typed resolution (finish resolve); then the harness runs the goal's checks and its own gate once per state revision (in a microVM run on the host): while any fails, done is refused with each check and its fix; when they pass it writes done/agents/<id>.done and done/SWARM_DONE while that revision still holds, drops this worker's locks and ends the session. Once done/SWARM_DONE exists every seat calls done and stops. Whether the dispositions suffice (an examination-limited end included) is what done asks the finish line, not the operator: call done before asking the operator anything, and ask it (lead_close needs_operator) only for what a refusal names as the operator's, such as accepting a question the finish line holds (swarm.sh question <run> accept Q-n). Partial is a disposition: a review of a partial answer checks the parts the answer claims, and a best_candidate review of it holds nothing. \"A best candidate, not established\" concerns only an answer that claims established. Never discard a standing positive finding to make an answer not_determinable: a part the evidence cannot settle makes the answer partial.",
     promptSnippet: "End the run (the coordinator's call), or stop once the sentinel exists",
     promptGuidelines: [
-      "done is the coordinator's call, when the header says the finish is ready; a finished slice is posted to the board, never done. Once done/SWARM_DONE exists, call done and stop. When the task is impossible or unsafe, call done with abandon: true and say why (a vote while others work).",
+      "done is the coordinator's call, when the header says the finish is ready and after finish prepare and its late items resolved in one call; a finished slice is posted to the board, never done. Once done/SWARM_DONE exists, call done and stop. When the task is impossible or unsafe, call done with abandon: true and say why (a vote while others work).",
     ],
     parameters: Type.Object({
       reason: Type.String({ description: "Why this worker is stopping" }),
@@ -3928,9 +4071,8 @@ export default function (pi: ExtensionAPI) {
         }
         if (turn?.took_over) await systemPost(toolCtx.cwd, { tag: "hold", via: agentId, body: `${agentId} coordinates the finish now (generation ${turn.generation}): ${turn.why}.` }).catch(() => undefined);
         // What landed against the report since it was written: each answered with a typed resolution, never by reading it alone.
-        if (turn?.late.length) {
-          const each = turn.late.map((x) => (x.kind === "post" ? `- post #${x.id} (${x.tag}) by ${x.by}` : `- objection ${x.id} by ${x.by}: ${x.why}`)).join("\n");
-          const reason = `${turn.late.length} item(s) landed against \`${params.output_file}\` since it was written, each for your typed resolution before the finish:\n${each}\nFor each: fold it into the report and publish it again (then finish resolve with how: folded, saying where), or finish resolve with how: not_material and why it changes nothing the report concludes. Typed acks of no objection are not among them.`;
+        const reason = turn?.mine ? lateRefusal(turn, params.output_file) : null;
+        if (turn && reason) {
           await logEvent(toolCtx.cwd, agentId, "done", params, { ok: false, reason, late: turn.late.length });
           return { content: [{ type: "text" as const, text: reason }], details: { ok: false, reason, late: turn.late }, isError: true };
         }

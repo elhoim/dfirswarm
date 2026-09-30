@@ -22,6 +22,7 @@ import { join, relative } from "node:path";
 import { citedSeqs, normaliseResult, parseTruth, questionKey, resultOf, scoreRun, scoreText, type Truth } from "../scripts/calibrate.ts";
 import { patternOf } from "../scripts/score.ts";
 import { ledgerHash, type LedgerEntry } from "../extensions/protocol.ts";
+import { goalPremises } from "../extensions/questions.ts";
 
 const ROOT = join(import.meta.dirname, "..");
 const GEN = join(ROOT, "calibration", "generate.py");
@@ -139,6 +140,12 @@ test("every case plants each kind of fact, holds it to the bytes, and its goal n
       assert.match(goal, /^## Definition of done$/m);
       assert.match(goal, /^## Checks$/m);
       assert.match(goal, /^## Objectives$/m);
+      // The brief's givens are designated as premises in the front matter, each with its scope, from the brief alone (the loop below holds them, with the rest of the goal, to naming no planted fact).
+      const front = /^---\n([\s\S]*?)\n---\n/.exec(goal)?.[1] ?? "";
+      const premises = [...(/^premises:\n((?:[ \t]+-[^\n]*\n?)*)/m.exec(`${front}\n`)?.[1] ?? "").matchAll(/^[ \t]+-[ \t]*(.*?)[ \t]*$/gm)].map((m) => m[1]);
+      assert.ok(premises.length >= 2, `${c}: the goal designates no premises`);
+      const parsed = goalPremises(`## Premises\n\n${premises.map((x) => `- ${x}`).join("\n")}\n`);
+      assert.deepEqual(parsed.filter((x) => x.bad || !x.scope.entities?.length).map((x) => x.text), [], `${c}: every premise names its entities and parses`);
       const numbered = goal.split("\n").filter((l) => /^\d+\. /.test(l)).length;
       assert.equal(numbered, t.questions.length, `${c}: the goal numbers every question of the truth`);
       assert.ok(t.late.length >= 1 && t.late.every((l) => existsSync(join(T, "cases", c, l.path)) && !existsSync(join(T, "cases", c, "inputs", l.path))));

@@ -474,7 +474,7 @@ test("what coordination adds is shown whole: leads.md and the operator's list na
   assert.match(text, /offered to a1 \(handoff, from a0\), first claim until/);
   assert.match(text, /product: the carved strings, one file; accepted when: every hit with its offset; then: grep the strings for the key/);
   assert.match(text, new RegExp(`need ${producer.id}:resolved dropped by a0: the pagefile is outside the volume`));
-  assert.match(text, /^Finish: not ready \(\d+\); nobody coordinates it yet: the first done takes it\.$/m);
+  assert.match(text, /^Finish: not ready \(\d+\); nobody coordinates it yet: the first prepare or done takes it\.$/m);
   assert.match(text, new RegExp(`^  holds it: ${l.id} "Carve the pagefile" is open`, "m"));
 });
 

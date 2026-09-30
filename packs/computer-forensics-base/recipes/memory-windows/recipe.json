@@ -72,6 +72,14 @@
     "index.tsv",
     "coverage.json"
   ],
+  "purpose": "broad_extraction",
+  "capability": "windows-memory-views",
+  "exclusions": [
+    "every Volatility plugin other than windows.info and the eleven listed (no registry, file, timeline or YARA scan)",
+    "Linux and macOS memory images, and hibernation or crash-dump variants Volatility does not open",
+    "an image whose kernel symbols are neither in the image nor fetched from the symbol server (the network may not allow it)",
+    "memory the capture did not hold: paged-out or swapped regions"
+  ],
   "covers": "What windows.info and the eleven listed Volatility plugins report with symbols already in the image. Linux and macOS images, unsupported hibernation/crash-dump variants, YARA rules and every other plugin are not covered; symbols come from the image first, and from the symbol server only when the image has none for the kernel and the job's network allows it, which coverage says.",
   "sha256": "5fd633d7b030b82add00d89eac7d7a4aff74db31eb3cd72395558203f41217dc"
 }

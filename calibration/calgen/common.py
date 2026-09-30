@@ -278,11 +278,18 @@ by attesting or disputing the entry it cites.
 
 
 def goal_document(*, meta: Dict[str, str], goal: str, objectives: List[str], questions: List[str],
-                  existence: List[str], timeline_rows: int, events: int) -> str:
+                  existence: List[str], timeline_rows: int, events: int, premises: Optional[List[str]] = None) -> str:
+    """The goal document. `premises`: what the case brief (`goal`) itself states
+    as given, each closely restating the brief's own sentence with its scope
+    (`[scope: entities ...; questions ...]`), written to the front matter's
+    `premises:` list, where the kickoff makes each a given of the premise
+    register. Only the brief: never the truth, and never what a question asks
+    or tests."""
     n = len(questions)
     heads = ", ".join(f"`## {i}.`" for i in range(1, n + 1))
     sections = ",".join(str(i) for i in range(1, n + 1))
-    lines = ["---"] + [f"{k}: {v}" for k, v in meta.items()] + ["---", "## Goal", "", goal.strip(), ""]
+    front = [f"{k}: {v}" for k, v in meta.items()] + (["premises:"] + [f"  - {x}" for x in premises] if premises else [])
+    lines = ["---"] + front + ["---", "## Goal", "", goal.strip(), ""]
     lines += ["## Objectives", ""] + [f"- O{i}: {o}" for i, o in enumerate(objectives, 1)] + [""]
     lines += ["### Questions the report has to answer", ""]
     lines += [f"{i}. {q}" for i, q in enumerate(questions, 1)] + [""]

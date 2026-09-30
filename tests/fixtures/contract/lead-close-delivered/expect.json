@@ -1,0 +1,47 @@
+{
+  "case": "A lead's close and a confirmation, each tying to the question an entry its answer does not reach: a second lead of question 1 closed on a finding two seats hold that names no question; a third closed on one seat's finding that names none (nothing changes), the finding corrected, the correction attested by another seat, and the closure confirmed on it by its closer.",
+  "design": [
+    "docs/adr/0013 'Warnings where the decision is made': a fourth point, the reply to a lead's close or a confirmation of it, carries the warnings of each question the lead serves that the act changed (what it recorded under the lead, its ref and results), as they stand after it; a close that changes none says nothing; never a hold.",
+    "docs/adr/0013 'After the run s993d40': an entry the lead register records under a question's lead (a close's or a confirmation's ref) that two seats hold and the answer does not reach is a lead_findings_uncited warning; one seat's entry that names no question is not.",
+    "docs/adr/0015: a closure whose entry is corrected waits for its closer's confirmation on what stands; the confirmation is the closer's act."
+  ],
+  "policies": [
+    "as run"
+  ],
+  "expect": {
+    "questions": {
+      "question:1": {
+        "disposition": "established",
+        "best_candidate": false,
+        "readiness_holds": false,
+        "defects_include": [],
+        "warnings": [
+          "lead_findings_uncited"
+        ],
+        "warned": {
+          "lead_findings_uncited": [3, 5]
+        }
+      }
+    },
+    "ready": true,
+    "verdict": {
+      "proceed": true,
+      "outcome": "completed"
+    },
+    "done": "proceeds",
+    "agreement": [],
+    "deliveries": {
+      "acts": {
+        "record": 1,
+        "review_offer": 0,
+        "attest": 4,
+        "lead_close": 4
+      },
+      "delivered": [
+        { "point": "lead_close", "lead": "L-2", "on": "close", "by": "a2", "sections": ["question:1"], "warnings": ["lead_findings_uncited"] },
+        { "point": "lead_close", "lead": "L-3", "on": "confirm", "by": "a0", "sections": ["question:1"], "warnings": ["lead_findings_uncited"] },
+        { "point": "finish_status", "sections": ["question:1"], "warnings": ["lead_findings_uncited"] }
+      ]
+    }
+  }
+}

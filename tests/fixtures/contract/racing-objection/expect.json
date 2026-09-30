@@ -1,0 +1,39 @@
+{
+  "case": "Every question established and attested; the coordinator's finish line passed and was recorded at a revision; then another seat acked an objection to the report.",
+  "design": [
+    "docs/adr/0015 decision 9: a review's ack does not move the state revision.",
+    "docs/adr/0015 decision 10: an objection to any version of the report holds the coordinator's done until finish resolve answers it, and is read again in the transaction that writes the sentinel, so one acked while the checks ran holds it.",
+    "The limits spec, item 3: a racing objection or evidence addition still blocks."
+  ],
+  "policies": [
+    "as run"
+  ],
+  "expect": {
+    "questions": {
+      "question:1": {
+        "disposition": "established",
+        "best_candidate": false,
+        "readiness_holds": false,
+        "defects_include": [],
+        "warnings": []
+      }
+    },
+    "ready": true,
+    "verdict": {
+      "proceed": true,
+      "outcome": "completed"
+    },
+    "last_check": {
+      "proceed": true
+    },
+    "done": "held",
+    "late": [
+      {
+        "kind": "objection",
+        "by": "a2",
+        "tag": null
+      }
+    ],
+    "agreement": []
+  }
+}

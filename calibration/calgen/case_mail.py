@@ -382,6 +382,14 @@ the same commands again.""",
         existence=[],
         timeline_rows=10,
         events=8,
+        # What the brief above states as given, and nothing a question asks: which
+        # e-mail, which account, whether the clerk's account was compromised and what
+        # was paid are the questions'.
+        premises=[
+            f"{sup_name}, the supplier, says the bank account {org} paid its invoice to is not theirs. [scope: entities {sup_name}, {org}]",
+            f"The finance clerk {clerk_p['full']} changed the supplier's bank details after an e-mail. [scope: entities {clerk_p['full']}; questions 1]",
+            f"The evidence is {clerk_p['full']}'s mailbox, exported by IT, and the browser's history database, copied by IT. [scope: entities {clerk_p['full']}]",
+        ],
     )
 
     questions = [

@@ -1,3 +1,8 @@
+---
+premises:
+  - inputs/workshop-kali.E01 is an image of the attacker's own Kali Linux system (OSDFCon 2019 Linux forensics workshop, case 3). [scope: entities inputs/workshop-kali.E01, the attacker]
+  - The evidence is the attacker's system, not the target: the target company's server is not in inputs/. [scope: questions 4]
+---
 > From [docs/use-cases/dfir-l03-attacker-kali](../../docs/use-cases/dfir-l03-attacker-kali/README.md): the goal document a real run was given,
 > and what that run produced is written up beside it. The evidence filenames below are
 > the ones that case had — change them, and the checks that name them, for yours.

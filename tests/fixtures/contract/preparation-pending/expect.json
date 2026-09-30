@@ -1,0 +1,73 @@
+{
+  "case": "Three reviewed negatives over the disk while its broad extraction (a disk timeline) is attempted: question 1 not determinable on coverage the hub found complete over the disk; question 2, an existence question, a bounded negative that says the event did not happen; question 3 not determinable on coverage that names the disk but is partial (its job read a log).",
+  "design": [
+    "docs/adr/0013 'A source's broad extraction before a negative on it': a material negative that says the event did not happen, or whose coverage is complete over a source, holds (preparation_pending) while that source's broad extraction is planned or attempted; the hold is a defect, fixed by the extraction's outcome or the operator's acceptance, under every stop policy.",
+    "docs/adr/0013 the same section: every other material negative on a source whose broad extraction has not produced is warned (preparation_missing), and a warning never holds.",
+    "docs/adr/0015 decision 8: readiness holds on what the ledger gate holds."
+  ],
+  "policies": [
+    "operator",
+    "cap-pause",
+    "cap-stop"
+  ],
+  "expect": {
+    "questions": {
+      "question:1": {
+        "disposition": null,
+        "readiness_holds": true,
+        "readiness_includes": [
+          "preparation_pending"
+        ],
+        "defects_include": [
+          "preparation_pending"
+        ],
+        "warnings": []
+      },
+      "question:2": {
+        "disposition": null,
+        "readiness_holds": true,
+        "readiness_includes": [
+          "preparation_pending"
+        ],
+        "defects_include": [
+          "preparation_pending"
+        ],
+        "warnings": []
+      },
+      "question:3": {
+        "disposition": "not_determinable",
+        "readiness_holds": false,
+        "warnings": [
+          "preparation_missing"
+        ]
+      }
+    },
+    "ready": false,
+    "verdict": {
+      "proceed": false,
+      "failing": "check:check-answers"
+    },
+    "done": "held",
+    "agreement": [],
+    "preparation": {
+      "sources": {
+        "input:disk.E01": [
+          "attempted"
+        ]
+      },
+      "held": {
+        "question:1": [
+          "input:disk.E01"
+        ],
+        "question:2": [
+          "input:disk.E01"
+        ]
+      },
+      "warned": {
+        "question:3": [
+          "input:disk.E01"
+        ]
+      }
+    }
+  }
+}

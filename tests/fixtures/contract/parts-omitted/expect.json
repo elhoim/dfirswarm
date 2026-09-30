@@ -1,0 +1,43 @@
+{
+  "case": "Question 1's established answer carries two parts; its one review weighs both and names a third part the question asks that the answer leaves out (missing), and is recorded best_candidate. Question 2's partial answer names its open part by the limitation that bounds it; its review holds that part open.",
+  "design": [
+    "docs/adr/0013 'Claim and open-part rows': an answer carries parts [{id, part, status: established | open, refs, open_by?}] against the verbatim revision of its question, present-only in the hashed core; a review's parts name the answer's parts by id and may add one the answer leaves out (missing), never established by it.",
+    "docs/adr/0013 'Claim and open-part rows': a part a review says the answer leaves out allows an answer that claims established only best_candidate, as a part held not established does; it stays visible (part_omitted, a warning) until the answer is recorded again with it.",
+    "docs/adr/0015 'After the run s9722fa': an answer that claims established, every review of which holds it a best candidate, is held so, by readiness as by the done.",
+    "docs/adr/0013 'Claim and open-part rows': a partial answer names at least one open part and what bounds it; a review that holds a part open that the answer's own row holds open does not cap it; partial is a disposition."
+  ],
+  "policies": [
+    "as run"
+  ],
+  "expect": {
+    "questions": {
+      "question:1": {
+        "disposition": null,
+        "best_candidate": true,
+        "readiness_holds": true,
+        "readiness_includes": [
+          "best_candidate"
+        ],
+        "defects_include": [],
+        "warnings": [
+          "part_omitted"
+        ],
+        "report_best_candidate": true
+      },
+      "question:2": {
+        "disposition": "partial",
+        "best_candidate": false,
+        "readiness_holds": false,
+        "defects_include": [],
+        "warnings": []
+      }
+    },
+    "ready": false,
+    "verdict": {
+      "proceed": false,
+      "failing": "question:1"
+    },
+    "done": "held",
+    "agreement": []
+  }
+}

@@ -1,0 +1,49 @@
+{
+  "case": "Three warnings and nothing that holds: a not-determinable answer whose reviewed coverage names neither an acquisition ask nor why none; a partial answer every review holds whole, attested established; an established answer that leaves out a finding another seat attested under its question's lead.",
+  "design": [
+    "docs/adr/0013 'After the first calibration run', last rule: the gate warns, and does not hold, when a not_determinable answer's coverage names no acquisition ask and no reason for none (no_acquisition_ask).",
+    "docs/adr/0013 'After the run s993d40': partial_all_parts_established and lead_findings_uncited are warnings; a warning never holds: none makes readiness not ready or refuses a done."
+  ],
+  "policies": [
+    "as run"
+  ],
+  "expect": {
+    "questions": {
+      "question:1": {
+        "disposition": "not_determinable",
+        "best_candidate": false,
+        "readiness_holds": false,
+        "defects_include": [],
+        "warnings": [
+          "no_acquisition_ask"
+        ]
+      },
+      "question:2": {
+        "disposition": "partial",
+        "best_candidate": false,
+        "readiness_holds": false,
+        "defects_include": [],
+        "warnings": [
+          "partial_all_parts_established"
+        ]
+      },
+      "question:3": {
+        "disposition": "established",
+        "best_candidate": false,
+        "readiness_holds": false,
+        "defects_include": [],
+        "warnings": [
+          "lead_findings_uncited"
+        ]
+      }
+    },
+    "ready": true,
+    "verdict": {
+      "proceed": true,
+      "outcome": "examination_limited"
+    },
+    "done": "proceeds",
+    "late": [],
+    "agreement": []
+  }
+}

@@ -1,0 +1,60 @@
+{
+  "case": "Under the case policy's more_evidence: no, two not-determinable answers resting on reviewed coverage: question 1's coverage says why no ask in the policy's words, question 2's says nothing of an ask. Nobody opens an acquisition ask.",
+  "design": [
+    "docs/adr/0013 'After the runs s9722fa and sb1b3c8', 'No ask to satisfy a rule': under more_evidence: no, acquisition_none_why naming the policy satisfies the rule, and the no_acquisition_ask warning and the answer's reply give that wording and never suggest an ask.",
+    "docs/adr/0013 'Warnings where the decision is made': the warning is said in the reply to the answer's record and to the review of its coverage, and in finish status, in the same words; it holds nothing.",
+    "docs/adr/0014: under more_evidence: no an acquisition ask is declined at once; a run that follows the rule opens none."
+  ],
+  "policies": [
+    "as run"
+  ],
+  "expect": {
+    "questions": {
+      "question:1": {
+        "disposition": "not_determinable",
+        "best_candidate": false,
+        "readiness_holds": false,
+        "defects_include": [],
+        "warnings": []
+      },
+      "question:2": {
+        "disposition": "not_determinable",
+        "best_candidate": false,
+        "readiness_holds": false,
+        "defects_include": [],
+        "warnings": [
+          "no_acquisition_ask"
+        ]
+      }
+    },
+    "warning_words": {
+      "question:2": {
+        "includes": ["this case admits no further evidence (more_evidence: no), so open no acquisition ask", "acquisition_none_why"],
+        "excludes": ["lead_close needs_operator", "open an acquisition ask"]
+      }
+    },
+    "history": {
+      "acquisition_requests": 0
+    },
+    "ready": true,
+    "verdict": {
+      "proceed": true,
+      "outcome": "examination_limited"
+    },
+    "done": "proceeds",
+    "agreement": [],
+    "deliveries": {
+      "acts": {
+        "record": 2,
+        "review_offer": 0,
+        "attest": 2,
+        "lead_close": 2
+      },
+      "delivered": [
+        { "point": "record", "entry": 6, "on": "answer", "sections": ["question:2"], "warnings": ["no_acquisition_ask"] },
+        { "point": "attest", "entry": 5, "on": "coverage", "by": "a2", "sections": ["question:2"], "warnings": ["no_acquisition_ask"] },
+        { "point": "finish_status", "sections": ["question:2"], "warnings": ["no_acquisition_ask"] }
+      ]
+    }
+  }
+}

@@ -1,0 +1,34 @@
+{
+  "id": "android-backup-apps",
+  "version": "1.0.0",
+  "description": "The broad extraction an Android adb backup would need: every app's data parsed into a searchable form. Declared so that the preparation of an adb backup is on the record as declined, with why, rather than missing.",
+  "object": "Android adb backup",
+  "order": 39,
+  "min_bytes": 24,
+  "suffixes": [
+    ".ab"
+  ],
+  "magic": [
+    {
+      "offset": 0,
+      "hex": "414e44524f4944204241434b55500a"
+    }
+  ],
+  "runtime": "python3",
+  "entry": "run.py",
+  "auto": [],
+  "purpose": "broad_extraction",
+  "capability": "android-backup-artifacts",
+  "exclusions": [
+    "every app's data: nothing is parsed (see unavailable)"
+  ],
+  "unavailable": "no program in the mobile job image parses an adb backup's app tree (apps/<package>/db, f, sp, r) as a whole: ALEAPP reads a file-system layout (data/data/<package>/databases), and nothing in the image converts one into the other. The android-backup recipe lists every member; read the databases it lists with sqlite3 and the pack's tools",
+  "limits": {
+    "seconds": 60
+  },
+  "outputs": [
+    "coverage.json"
+  ],
+  "covers": "Nothing: it is declared, never run. Its detect step reads the backup's header only.",
+  "sha256": "157ab570f17d98c75f7a383b704bf99788a58fce3f32c384b730d7e244a3cf86"
+}

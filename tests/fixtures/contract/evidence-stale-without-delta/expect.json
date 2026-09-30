@@ -1,0 +1,80 @@
+{
+  "case": "The history evidence-stale-cleared held before the delta rule, as it was recorded: two reviewed bounded negatives; then evidence added; question 1 stays on its older coverage; question 2 is examined again against the new import on a coverage record naming it, which another seat reviews, and nothing it cites says how the export bears on the answer.",
+  "design": [
+    "docs/adr/0013 'After the first calibration run', first rule: an evidence addition makes stale every standing bounded negative whose coverage was recorded before the addition's entry (evidence_stale).",
+    "docs/adr/0013 'Late evidence: the reverse sweep and the delta': examined and reviewed is not enough; it clears only when the answer, or the coverage record it cites for its question recorded after the addition, cites an entry that interprets the import with a delta (supports, contradicts, adds_part, irrelevant or inconclusive). Question 2's coverage cites an entry that names the import and carries none: held.",
+    "docs/adr/0017 'Measuring a rule change': under the rule before the delta (c34c6cb) the same history clears question 2; the difference is that rule's, and only it.",
+    "docs/adr/0015 decision 8: readiness holds on what the ledger gate holds, and on a stale answer."
+  ],
+  "policies": [
+    "as run"
+  ],
+  "expect": {
+    "questions": {
+      "question:1": {
+        "disposition": null,
+        "best_candidate": false,
+        "readiness_holds": true,
+        "readiness_includes": [
+          "evidence_stale"
+        ],
+        "defects_include": [
+          "evidence_stale"
+        ],
+        "warnings": []
+      },
+      "question:2": {
+        "disposition": null,
+        "best_candidate": false,
+        "readiness_holds": true,
+        "readiness_includes": [
+          "evidence_stale"
+        ],
+        "defects_include": [
+          "evidence_stale"
+        ],
+        "warnings": []
+      }
+    },
+    "ready": false,
+    "verdict": {
+      "proceed": false,
+      "failing": "check:check-answers"
+    },
+    "done": "held",
+    "late": [],
+    "agreement": [],
+    "late_evidence": []
+  },
+  "rules": {
+    "c34c6cb": {
+      "why": "the rule before the delta: an examination that names the import, reviewed by another seat, clears question 2",
+      "questions": {
+        "question:1": {
+          "disposition": null,
+          "best_candidate": false,
+          "readiness_holds": true,
+          "readiness_includes": [
+            "evidence_stale"
+          ],
+          "defects_include": [
+            "evidence_stale"
+          ],
+          "warnings": []
+        },
+        "question:2": {
+          "disposition": "bounded_negative",
+          "best_candidate": false,
+          "readiness_holds": false,
+          "defects_include": [],
+          "warnings": []
+        }
+      },
+      "ready": false,
+      "verdict": {
+        "proceed": false,
+        "failing": "check:check-answers"
+      }
+    }
+  }
+}

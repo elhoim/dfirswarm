@@ -1,3 +1,7 @@
+---
+premises:
+  - inputs/HDFS-Master.E01 is the Hadoop cluster's name node (master), and inputs/HDFS-Slave1.E01 and inputs/HDFS-Slave2.E01 are its two data nodes (slaves) (OSDFCon 2019 Linux forensics workshop, case 2). [scope: entities inputs/HDFS-Master.E01, inputs/HDFS-Slave1.E01, inputs/HDFS-Slave2.E01]
+---
 > From [docs/use-cases/dfir-l02-hdfs-cluster](../../docs/use-cases/dfir-l02-hdfs-cluster/README.md): the goal document a real run was given,
 > and what that run produced is written up beside it. The evidence filenames below are
 > the ones that case had — change them, and the checks that name them, for yours.

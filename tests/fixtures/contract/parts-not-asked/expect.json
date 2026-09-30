@@ -1,0 +1,50 @@
+{
+  "case": "Question 1's partial answer establishes who logged on and when and holds open which terminal the session used, which the question does not ask; its review holds the two parts established and marks the third not asked. Question 2's partial answer holds open the account, which the question asks; its review holds that part open, as the answer declares it.",
+  "design": [
+    "docs/adr/0013 'Claim and open-part rows', 'Only a part the question asks is open': an open part is a part the question asks; a review marks a part the question does not ask not_asked, which caps nothing; a partial answer whose every part its reviews weigh is established, but for those marked not asked, with a review attesting it established, is warned (partial_all_parts_established) to be recorded established with the unasked parts among its limitations; never a hold and never a promotion.",
+    "docs/adr/0013 'After the run s993d40': partial_all_parts_established is a warning; a warning never holds.",
+    "docs/adr/0013 'The end of a run, under every stop policy': partial is a disposition under the bar; the run ends examination_limited on it."
+  ],
+  "policies": [
+    "as run"
+  ],
+  "expect": {
+    "questions": {
+      "question:1": {
+        "disposition": "partial",
+        "best_candidate": false,
+        "readiness_holds": false,
+        "defects": [],
+        "warnings": [
+          "partial_all_parts_established"
+        ]
+      },
+      "question:2": {
+        "disposition": "partial",
+        "best_candidate": false,
+        "readiness_holds": false,
+        "defects": [],
+        "warnings": []
+      }
+    },
+    "ready": true,
+    "verdict": {
+      "proceed": true,
+      "outcome": "examination_limited"
+    },
+    "done": "proceeds",
+    "agreement": [],
+    "warning_words": {
+      "question:1": {
+        "includes": [
+          "what it holds open the question does not ask, as its reviews mark it",
+          "among its limitations, not its parts",
+          "the answer stands as recorded"
+        ],
+        "excludes": [
+          "every review holds every part it weighed established"
+        ]
+      }
+    }
+  }
+}

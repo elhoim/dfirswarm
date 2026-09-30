@@ -47,7 +47,7 @@ import * as NB from "../extensions/negative-bar.ts";
 import * as SW from "../extensions/store-sweep.ts";
 import { readNetState, grantStatus } from "./net-grants.ts";
 import { storePaths } from "./evidence-store.ts";
-import { questionCost, roundParts } from "./question-cost.ts";
+import { questionCost, roundParts, runCalls } from "./question-cost.ts";
 
 type Rec = Record<string, unknown>;
 
@@ -195,6 +195,55 @@ export type RunMetrics = {
     not_yours: number;
     items: Array<{ at: string; agent: string; how: string }>;
   };
+  /**
+   * The finish's own acts (docs/adr/0015, "Preparing the finish"), from the
+   * trace and the finish register: the coordinator's first done and whether
+   * it was refused on late items (the refusal prepare exists to
+   * remove), every done refused on late items, the finish tool's calls by
+   * act (so a refusal renamed into more calls cannot pass for a gain), the
+   * resolutions and checks the register holds, and the finish tail from
+   * ready to the end with every seat's tokens in it.
+   */
+  finish: {
+    /** Whether the trace is there to count them from. */
+    recorded: boolean;
+    /** The first done that was a finish (not another seat's, not a seat leaving on its cap, not an abandon vote): when, whose, and how it was answered. */
+    first_done: { at: string; agent: string; how: string } | null;
+    /**
+     * Whether that first done was refused on what was late against the
+     * report (null when there was none): the refusal a prepare exists to
+     * remove. The goal's checks run only after it, so whether they would
+     * have passed is not in the trace (replay reads it on the registers).
+     */
+    first_done_late: boolean | null;
+    /** Every done refused on what was late against the report. */
+    late_refusals: number;
+    /** The finish tool's calls by act, whatever each answered. */
+    calls: { prepare: number; resolve: number; resolve_batches: number; status: number; ack: number };
+    /** The register's typed resolutions, the batches they came in, and its checks. */
+    resolutions: number;
+    batches: number;
+    checks: number;
+    /** From ready (tail.ready_at) to the end: minutes, every seat's tokens (null when no per-call record), and the finish's calls in it. */
+    tail: { from: string | null; to: string | null; minutes: number | null; tokens: number | null; calls: { prepare: number; resolve: number; done: number; status: number; ack: number } };
+  };
+  /**
+   * What the warnings and the review packets cost in deliveries (the Fable
+   * review of the limits branch, P3-10): from the trace, each reply to a
+   * record, an attest or a lead's close or confirmation that carried a
+   * warning, and the warning codes they carried; from the lead register,
+   * each review of an answer offered and delivered to its seat, each of
+   * which leads with its source-first packet (leads.ts reviewPacketWords).
+   * Every finish status also carries the warnings (finish.calls.status).
+   */
+  deliveries: {
+    /** Whether the trace is there to count the warnings from. */
+    recorded: boolean;
+    warnings: { record: number; attest: number; lead_close: number };
+    codes: Record<string, number>;
+    /** Null when the lead register holds no offer events (a run from before offers). */
+    review_packets: number | null;
+  };
   tail: {
     /** Whether the ledger holds answers to measure the answer tails from. */
     recorded: boolean;
@@ -240,6 +289,14 @@ export type RunMetrics = {
     answer_supersessions: number;
     corrections: number;
     result_changes: Array<{ section: string; from: string; to: string; from_result: string | null; to_result: string | null; cause: "new_evidence" | "discoverable" }>;
+    /**
+     * An answer that claimed established recorded again partial after an
+     * attest of it was capped (recorded best_candidate with its reasons in
+     * `capped`, docs/adr/0015): what the review rule's caps cost, measured
+     * rather than assumed (the Fable review of the limits branch, P2-3).
+     * Each with the seats whose capped attests came before the revision.
+     */
+    partial_after_cap: Array<{ section: string; from: string; to: string; capped_by: string[] }>;
     negative_reopens: Array<{ lead: string; closed_seq: number; reopened_at: string; reopen_cause: string; cause: "new_evidence" | "discoverable" }>;
     new_evidence: number;
     discoverable: number;
@@ -595,16 +652,19 @@ function offers(c: Context): RunMetrics["offers"] {
   return { recorded: recorded || qOffers.length > 0, leads, questions, reviews, wakes_before_offers: { recorded: c.have.leads, ...wakes } };
 }
 
+/** Why a done was refused, by the trace's own record of it. */
+function doneRefusal(reason: string, r: Rec): string {
+  if (r.late !== undefined || /landed (?:after|against)/i.test(reason) || /^late against the report: /.test(reason)) return "late posts";
+  if (r.abandon !== undefined) return "abandon vote";
+  if (/changed while the finish line ran/i.test(reason)) return "finish line unsettled";
+  if (/finish line is not met/i.test(reason)) return "finish line not met";
+  return "other";
+}
+
 /** done calls, from the trace: each seat's own line, the hub's refusals of markDone, and a finish that was not the seat's (done_deferred). */
 function doneCalls(events: readonly P.SwarmEvent[], recorded: boolean): RunMetrics["done"] {
   const out: RunMetrics["done"] = { recorded, calls: 0, accepted: 0, created_sentinel: 0, refused: 0, refused_by: {}, hub_refused: 0, not_yours: 0, items: [] };
-  const why = (reason: string, r: Rec): string => {
-    if (r.late !== undefined || /landed (?:after|against)/i.test(reason)) return "late posts";
-    if (r.abandon !== undefined) return "abandon vote";
-    if (/changed while the finish line ran/i.test(reason)) return "finish line unsettled";
-    if (/finish line is not met/i.test(reason)) return "finish line not met";
-    return "other";
-  };
+  const why = doneRefusal;
   for (const e of events) {
     const r = (e.result && typeof e.result === "object" ? e.result : {}) as Rec;
     const at = P.hostTime(e);
@@ -635,6 +695,80 @@ function doneCalls(events: readonly P.SwarmEvent[], recorded: boolean): RunMetri
     }
   }
   // A refusal on the hub reached its seat as a thrown error, never as a done line of its own: its hub_call line is the call.
+  return out;
+}
+
+/**
+ * The finish's own acts (RunMetrics.finish): from the trace (the done
+ * lines, the finish tool's calls) and the finish register (resolutions,
+ * batches, checks); the tail's tokens from the run's per-call record
+ * (question-cost.ts runCalls), every seat's, between ready and the end.
+ */
+async function finishActs(c: Context, events: readonly P.SwarmEvent[], recorded: boolean, t: RunMetrics["tail"]): Promise<RunMetrics["finish"]> {
+  const out: RunMetrics["finish"] = { recorded, first_done: null, first_done_late: null, late_refusals: 0, calls: { prepare: 0, resolve: 0, resolve_batches: 0, status: 0, ack: 0 }, resolutions: 0, batches: 0, checks: 0, tail: { from: t.ready_at, to: t.end_at, minutes: t.minutes_from_ready, tokens: null, calls: { prepare: 0, resolve: 0, done: 0, status: 0, ack: 0 } } };
+  const from = ms(t.ready_at);
+  const to = ms(t.end_at);
+  // The tail runs from ready to the end: through the done that wrote the sentinel (its own row comes after the sentinel's stamp), else to the stop.
+  const last = events.findIndex((e) => e.tool === "done" && ((e.result ?? {}) as Rec).created_sentinel === true);
+  const inTail = (i: number, at: number | null) => at !== null && from !== null && to !== null && at >= from && (last >= 0 ? i <= last : at <= to);
+  for (const [i, e] of events.entries()) {
+    const r = (e.result && typeof e.result === "object" ? e.result : {}) as Rec;
+    const a = (e.args && typeof e.args === "object" ? e.args : {}) as Rec;
+    const at = P.hostTime(e);
+    const tailed = inTail(i, ms(at));
+    if (e.tool === "done") {
+      if (tailed) out.tail.calls.done += 1;
+      // A seat leaving on its own cap, an abandon vote, and a done after the sentinel (it succeeds, and ends nothing) are not the finish.
+      if (a.abandon === true || str(a.reason) === "agent_cap") continue;
+      const refused = r.ok === false;
+      const kind = refused ? doneRefusal(str(r.reason), r) : null;
+      if (kind === "late posts") out.late_refusals += 1;
+      if (!out.first_done) {
+        out.first_done = { at, agent: e.agent, how: refused ? `refused: ${kind}` : r.created_sentinel === true ? "accepted: wrote the sentinel" : "accepted" };
+        out.first_done_late = kind === "late posts";
+      }
+    } else if (e.tool === "finish") {
+      const act = str(a.action) || "status";
+      if (act === "prepare" || act === "resolve" || act === "status" || act === "ack") {
+        out.calls[act] += 1;
+        if (tailed) out.tail.calls[act] += 1;
+      }
+      if (act === "resolve" && Array.isArray(a.items)) out.calls.resolve_batches += 1;
+    }
+  }
+  const finish = await jsonl(join(c.S, "leads", "finish.jsonl"));
+  const batches = new Set<string>();
+  for (const f of finish) {
+    if (f.ev === "resolve") {
+      out.resolutions += 1;
+      if (str(f.batch)) batches.add(str(f.batch));
+    } else if (f.ev === "check") out.checks += 1;
+  }
+  out.batches = batches.size;
+  if (from !== null && to !== null) {
+    const { source, calls } = await runCalls(c.S).catch(() => ({ source: "none" as const, calls: [] as Array<{ at: number; tokens: number }> }));
+    if (source !== "none") out.tail.tokens = Math.round(calls.filter((x) => Number.isFinite(x.at) && x.at >= from && x.at <= to).reduce((n, x) => n + x.tokens, 0));
+  }
+  return out;
+}
+
+/** The replies that carried a warning, by act, and the codes; the review packets delivered (RunMetrics["deliveries"]). */
+function deliveries(c: Context, events: readonly P.SwarmEvent[], recorded: boolean): RunMetrics["deliveries"] {
+  const out: RunMetrics["deliveries"] = { recorded, warnings: { record: 0, attest: 0, lead_close: 0 }, codes: {}, review_packets: null };
+  for (const e of events) {
+    const r = (e.result && typeof e.result === "object" ? e.result : {}) as Rec;
+    if (!Array.isArray(r.warned) || !r.warned.length) continue;
+    const act = e.tool === "record" ? "record" : e.tool === "attest" ? "attest" : e.tool.startsWith("lead") ? "lead_close" : null;
+    if (!act) continue;
+    out.warnings[act] += 1;
+    for (const code of r.warned) out.codes[str(code)] = (out.codes[str(code)] ?? 0) + 1;
+  }
+  const ev = c.leadEvents as unknown as Array<Rec & { seq: number; ev: string; entry?: unknown; offer?: unknown }>;
+  if (ev.some((e) => e.ev.startsWith("offer"))) {
+    const bySeq = new Map(c.entries.map((e) => [e.seq, e]));
+    const offers = new Map(ev.filter((e) => e.ev === "offer" && typeof e.entry === "number").map((e) => [e.seq, e.entry as number]));
+    out.review_packets = ev.filter((e) => e.ev === "offer_seen" && typeof e.offer === "number" && offers.has(e.offer) && bySeq.get(offers.get(e.offer)!)?.kind === "answer" && str(bySeq.get(offers.get(e.offer)!)?.section).startsWith("question:")).length;
+  }
   return out;
 }
 
@@ -762,6 +896,7 @@ function reversals(c: Context): RunMetrics["reversals"] {
   let supersessions = 0;
   let corrections = 0;
   const changes: RunMetrics["reversals"]["result_changes"] = [];
+  const partialAfterCap: RunMetrics["reversals"]["partial_after_cap"] = [];
   for (const e of c.entries) {
     if (e.kind !== "answer" || e.supersedes === undefined) continue;
     const old = bySeq.get(e.supersedes);
@@ -774,6 +909,12 @@ function reversals(c: Context): RunMetrics["reversals"] {
       continue;
     }
     changes.push({ section: sectionOf(str(e.section), c.qs), from: `E-${old.seq}`, to: `E-${e.seq}`, from_result: a, to_result: b, cause: evidenceBetween(c, ms(old.at), ms(e.at)) ? "new_evidence" : "discoverable" });
+    if (b === "partial" && P.claimsEstablished(old)) {
+      const target = old.hash ?? P.ledgerHash(old, "genesis");
+      const at = ms(e.at);
+      const capped = c.attestations.filter((x) => P.attestationAct(x) === "attest" && x.target === target && !old.authors.includes(x.by) && (x.capped?.length ?? 0) > 0 && (at === null || (ms(x.at) ?? 0) <= at));
+      if (capped.length) partialAfterCap.push({ section: sectionOf(str(e.section), c.qs), from: `E-${old.seq}`, to: `E-${e.seq}`, capped_by: [...new Set(capped.map((x) => x.by))] });
+    }
   }
   const reopens: RunMetrics["reversals"]["negative_reopens"] = [];
   const lastNegative = new Map<string, { seq: number; at: number | null }>();
@@ -796,6 +937,7 @@ function reversals(c: Context): RunMetrics["reversals"] {
     answer_supersessions: supersessions,
     corrections,
     result_changes: changes,
+    partial_after_cap: partialAfterCap,
     negative_reopens: reopens,
     new_evidence: all.filter((x) => x === "new_evidence").length,
     discoverable: all.filter((x) => x === "discoverable").length,
@@ -935,6 +1077,8 @@ export async function measureRun(runDirArg: string, o: { now?: number } = {}): P
     confidence: confidenceOf(c, scope),
     offers: off,
     done: doneCalls(events, c.have.trace && !unreadable),
+    finish: await finishActs(c, events, c.have.trace && !unreadable, t),
+    deliveries: deliveries(c, events, c.have.trace && !unreadable),
     tail: t,
     acquisition: await acquisition(c),
     interpretations: interpretations(c),
@@ -1103,11 +1247,13 @@ export function metricsText(m: RunMetrics): string {
     ["Offers (reviews)", o.recorded ? `${o.reviews.made} made (${Object.entries(o.reviews.by_reason).map(([k, n]) => `${k} ${n}`).join(", ") || "none"}): ${o.reviews.accepted} taken up, ${o.reviews.declined} declined, ${o.reviews.withdrawn} withdrawn (reviewed by another route, or superseded), ${o.reviews.lapsed} lapsed, ${o.reviews.open} with no outcome; ${o.reviews.taken} taken by their seat first (offer accept)` : o.wakes_before_offers.recorded ? "not recorded (no offer events: a run from before offers)" : absent(LEADS)],
     ["Wakes (before offers)", o.wakes_before_offers.recorded ? `${o.wakes_before_offers.made}: ${o.wakes_before_offers.taken_by_woken} taken by the woken seat, ${o.wakes_before_offers.taken_by_another} by another, ${o.wakes_before_offers.not_taken} not taken` : absent(LEADS)],
     ["done calls", d.recorded ? `${d.calls}: ${d.accepted} accepted (${d.created_sentinel} wrote the sentinel), ${d.refused} refused by the seat's checks (${counts(d.refused_by)}), ${d.hub_refused} refused by the hub, ${d.not_yours} not the seat's finish` : absent("readable traces/events.jsonl")],
+    ["Finish", m.finish.recorded ? `the first done ${m.finish.first_done ? `${m.finish.first_done.how} (${m.finish.first_done.agent})${m.finish.first_done_late ? ", on late items" : ""}` : "never came"}; ${m.finish.late_refusals} done(s) refused on late items; finish calls: ${m.finish.calls.prepare} prepare, ${m.finish.calls.resolve} resolve (${m.finish.calls.resolve_batches} with items), ${m.finish.calls.status} status, ${m.finish.calls.ack} ack; ${m.finish.resolutions} resolution(s) in the register (${m.finish.batches} batch(es)), ${m.finish.checks} check(s); from ready to the end: ${m.finish.tail.minutes === null ? "not measured" : `${mins(m.finish.tail.minutes)}, ${m.finish.tail.tokens === null ? "tokens not measured" : `${m.finish.tail.tokens} tokens`}, ${m.finish.tail.calls.prepare} prepare, ${m.finish.tail.calls.resolve} resolve, ${m.finish.tail.calls.done} done`}` : absent("readable traces/events.jsonl")],
+    ["Warnings delivered", m.deliveries.recorded ? `${m.deliveries.warnings.record + m.deliveries.warnings.attest + m.deliveries.warnings.lead_close} repl(ies) carried a warning: ${m.deliveries.warnings.record} to a record, ${m.deliveries.warnings.attest} to an attest, ${m.deliveries.warnings.lead_close} to a lead's close or confirmation (${counts(m.deliveries.codes)}); ${m.deliveries.review_packets === null ? "review packets not recorded (no offer events)" : `${m.deliveries.review_packets} review packet(s) delivered with an answer's review offer`}` : absent("readable traces/events.jsonl")],
     ["Tail to the end", !t.end_at ? "not measured (the run has not ended)" : `${mins(t.minutes_from_ready)} from ready (${t.ready_source === "done" ? "recorded by the done: readiness had not turned ready before it passed" : (t.ready_source ?? "never ready")}); ${t.recorded ? `${mins(t.minutes_from_first_answers)} from the first answers, ${mins(t.minutes_from_final_answers)} from the final ones${t.unanswered.length ? `; unanswered: ${list(t.unanswered)}` : ""}` : `the answer tails ${absent(LEDGER)}`}`],
     ["Acquisition", a.recorded ? `${a.requests} request(s) (${counts(a.by_stage)}; ${a.declined_by_policy} declined by the case policy); ${a.gaps.length} gap(s)${a.questions_with_gap.length ? ` on ${list(a.questions_with_gap)}` : ""}` : absent("requests/requests.jsonl")],
     ["Evidence added", a.evidence_recorded ? `${a.evidence_added} time(s), ${a.evidence_added_for_request} for a request` : absent("store/journal.jsonl")],
     ["Interpretations", i.recorded ? `${i.total}: ${i.valid} valid, ${i.superseded} on a superseded entry, ${i.disputed} on a disputed one${i.missing ? `, ${i.missing} on no entry` : ""}; ${i.jobs_uninterpreted.length} of ${i.jobs_under_leads} lead jobs uninterpreted, ${i.jobs_without_valid.length} with no valid interpretation` : absent(LEADS)],
-    ["Reversals", r.recorded ? `${r.result_changes.length + r.negative_reopens.length}: ${r.new_evidence} after new evidence, ${r.discoverable} discoverable in the original evidence (${r.result_changes.length} answer result changes, ${r.leads_recorded ? `${r.negative_reopens.length} negative leads reopened` : `negative reopens ${absent(LEADS)}`}); ${r.corrections} corrections kept the result` : absent(LEDGER)],
+    ["Reversals", r.recorded ? `${r.result_changes.length + r.negative_reopens.length}: ${r.new_evidence} after new evidence, ${r.discoverable} discoverable in the original evidence (${r.result_changes.length} answer result changes, ${r.leads_recorded ? `${r.negative_reopens.length} negative leads reopened` : `negative reopens ${absent(LEADS)}`}); ${r.corrections} corrections kept the result; ${r.partial_after_cap.length} established answer(s) recorded partial after a capped attest${r.partial_after_cap.length ? ` (${list(r.partial_after_cap.map((x) => `question:${x.section} ${x.from} to ${x.to}, capped by ${x.capped_by.join(" ")}`))})` : ""}` : absent(LEDGER)],
     ["Cost", m.cost.source ? `${m.cost.tokens} tokens, $${m.cost.usd} (from ${m.cost.source === "model-gateway" ? "the model gateway's log" : m.cost.source === "pi-sessions" ? "the seats' Pi sessions" : "each seat's total spread over its calls on the trace, an estimate"}); ${m.cost.named.tokens} given to the questions and leads a call made holding no lead named (reviews, records, lead acts), ${m.cost.finish_and_report.tokens} on the finish and the report, ${m.cost.unheld.tokens} spent holding no lead and naming nothing (${Object.entries(m.cost.unheld.by_kind).map(([k, n]) => `${k} ${n}`).join(", ") || "none"}), ${m.cost.leads_without_question.tokens} on leads that answer no question${m.cost.no_trace.tokens ? `, ${m.cost.no_trace.tokens} a seat spent that the trace could not place (${m.cost.no_trace.seats.join(", ")})` : ""}` : "not measured (no per-call token record)"],
     ["Duplicates", m.duplicates.recorded ? `${m.duplicates.jobs_with_similar.length} jobs with similar work by another seat (${m.duplicates.exact_repeats.length} exact repeats); ${m.duplicates.independent.length} independent reproductions; same_as ${m.duplicates.same_as.files} file(s), ${m.duplicates.same_as.bytes} bytes in ${m.duplicates.same_as.jobs.length} job(s), ${m.duplicates.same_as.whole.length} wholly; recipes merged ${m.duplicates.recipe_merged}` : `not recorded${m.duplicates.shadow_would_merge ? ` (the retired shadow merge said ${m.duplicates.shadow_would_merge})` : " (no reuse hints on the store's journal)"}`],
     ["Network", n.recorded ? `${n.requests} request(s): ${n.granted} granted, ${n.denied} denied (${counts(n.denied_by_code)}); ${n.operator_items} operator item(s), ${n.operator_items_open} open; ${n.grants} grant(s) (${counts(n.grants_by_status)}); ${n.fetches} fetch(es), ${n.captures} capture(s), ${n.fetch_refusals} refused by the fetch service${n.contamination ? `; contamination ${n.contamination}` : ""}` : "not used (no network/ records)"],

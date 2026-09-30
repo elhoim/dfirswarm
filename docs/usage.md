@@ -122,7 +122,7 @@ it. A wrong command line prints the mistake and where to read, not the manual.
 | `--inputs DIR` | no | — | Hand the swarm a read-only copy of `DIR` as `inputs/`: the tools refuse to write it, a shell write is detected and healed from a pristine copy, and where the host can (macOS `sandbox-exec`, Linux mount namespace) the panes run with it read-only at the kernel. Recorded as `inputs` in the registry. Repeatable: several sets each land at `inputs/<name>/` (the directory's name as given), and every other `--inputs` flag applies to all of them. See [inputs.md](inputs.md). |
 | `--inputs-enforce M` | no | `auto` | `auto`: kernel guard when the host has one, otherwise a `WARN`; `on`: refuse to start without one (exit 3); `off`: detection and healing only. |
 | `--inputs-max-mb N`, `--inputs-max-files N` | no | none | Refuse an inputs directory larger than N MB, or with more than N files, before anything is copied (several sets: together). Unset by default: evidence is as large as the case is. `SWARM_INPUTS_MAX_MB` and `SWARM_INPUTS_MAX_FILES` set the same limits from the environment. |
-| `--catalog` | no | off | Before the agents start, run the standard first pass over the inputs once (`scripts/evidence-catalog.sh`): for a disk image the partition table, per partition a body file, a MAC timeline and a path list (a logical volume image with no partition table is catalogued from sector 0); for a memory image Volatility's info, pslist, psscan, cmdline, netscan, malfind and dlllist. What an input is and how it is catalogued are the packs' recipes (`recipes/<name>/` in a pack; computer-forensics-base ships disk volumes, Windows memory and archive members); the harness takes the census: every input gets a row in `catalog/coverage.tsv` — catalogued, in part, planned, a further segment of a set, not catalogued, or smaller than any recipe asks about — with why, and the index names those not catalogued, so an input this pass could not read is named rather than missing. In a microVM run with the job service (the default) the census only plans the recipes (`catalog/plan.json`); they run as jobs once the hub is up, while the agents work, each result a generation under `catalog/gen/` and each change a revision under `catalog/revisions/<n>/`, announced on the board. What a step wrote to stderr is kept whole beside its output (`<file>.stderr`). Lands in `catalog/`, harness-owned and read-only, indexed in `catalog/README.md` and rendered into `SWARM.md`. Needs `--inputs`; implies `--quarantine` and `--toolbox dfir`. Under `--isolation microvm` it runs with the image's tools, not the host's. |
+| `--catalog` | no | off | Before the agents start, run the standard first pass over the inputs once (`scripts/evidence-catalog.sh`): for a disk image the partition table, per partition a body file, a MAC timeline and a path list (a logical volume image with no partition table is catalogued from sector 0); for a memory image Volatility's info, pslist, psscan, cmdline, netscan, malfind and dlllist. What an input is and how it is catalogued are the packs' recipes (`recipes/<name>/` in a pack; computer-forensics-base ships disk volumes, Windows memory and archive members); the harness takes the census: every input gets a row in `catalog/coverage.tsv` — catalogued, in part, planned, a further segment of a set, not catalogued, or smaller than any recipe asks about — with why, and the index names those not catalogued, so an input this pass could not read is named rather than missing. In a microVM run with the job service (the default) the census only plans the recipes (`catalog/plan.json`); they run as jobs once the hub is up, while the agents work, each result a generation under `catalog/gen/` and each change a revision under `catalog/revisions/<n>/`, announced on the board. What a step wrote to stderr is kept whole beside its output (`<file>.stderr`). A recipe a pack declares a broad extraction (a parse of the whole source into a searchable form, where the rest of the catalogue inventories it: the mobile pack's iOS and Android parsers over a full file-system acquisition, the base pack's super timeline of a disk image) is asked about every input too; each that applies is listed in `catalog/plan.json`'s `preparations` and in the README, run by the kickoff where its pack marks it so and otherwise offered as a lead once the run is up, and its receipts are kept on the store journal ([ADR 0013](adr/0013-a-negative-is-bounded-and-a-cap-pauses.md), "A source's broad extraction before a negative on it"). Lands in `catalog/`, harness-owned and read-only, indexed in `catalog/README.md` and rendered into `SWARM.md`. Needs `--inputs`; implies `--quarantine` and `--toolbox dfir`. Under `--isolation microvm` it runs with the image's tools, not the host's. |
 | `--toolbox M` | no | `off` | `dfir`: check the forensic toolbox on this host (`scripts/toolbox.sh`: Sleuth Kit, Volatility 3, regipy, python-evtx, yara, exiftool, sqlite3, strings, python3) into `toolbox.json` and a Toolbox section of `SWARM.md`, with install commands for what is missing; `auto`: `dfir` when `--catalog` is set, plus the sets a `--goal-file`'s metadata block names in `toolbox:` (without the key, the sets its words suggest), and `crypto` when a VHD(X), VMDK, QCOW2 or encrypted container is under the inputs; `off`. `crypto` adds the volume readers (libbde, libvhdi, libluksde, libvshadow, dfvfs, qemu-img), `linux` the journal, XFS (xfsprogs) and LVM (libvslvm) readers. |
 | `--toolbox-required` | no | off | A missing tool is a `BLOCKER` (exit 3) instead of a `WARN`. |
 | `--quarantine` | no | off | `work/extracted/` and `work/quarantine/` cannot execute: no-exec at the kernel where the host can (`fsguard.sh --noexec`), and the harness strips execute bits from anything written there. Evidence pulled out of an image is for reading, never for running. |
@@ -153,7 +153,7 @@ it. A wrong command line prints the mistake and where to read, not the manual.
 | `--isolation M` | no | `microvm` (`SWARM_ISOLATION`) | `host`: unisolated. Every agent is a Pi process on this machine, held by the host guards (the write guard, the tool guard, netguard) with no VM around it; a host guard's flag (`--no-write-guard`, `--no-seal-herdr`, `--inputs-enforce`, `--key-from-env`, `--probe-violation`) needs it named, and is refused under the default with that hint. `microvm` (the default): every agent runs Pi inside its own microVM (microsandbox; macOS on Apple silicon, Linux with KVM), created at kickoff and put away by `stop`. The run is mounted read-only in each VM except the agent's own `work/<id>/`, `work/extracted/<id>/` and `work/quarantine/<id>/` (no-exec), its own `tool-output/<id>/` and its own Pi session; a shared deliverable under `work/` is written through `publish_file`, claimed and recorded for the agent; `--allow-install` installs into the VM's own disk; `--inputs DIR` is used in place and mounted read-only (no copy, no pristine clone), and a link in it that leads out of it is refused at kickoff, since no VM could follow it; the board is written by one process on the host, `scripts/vm-hub.ts`, which each VM reaches over its own vsock port and which decides who is asking by the port; a VM reaches only its models' hosts, `--allow-host` and, with `--allow-install`, the package index (every public host under `--no-netguard`); no provider credential enters a VM (Pi on the host resolves it and msb swaps it in on the way out). The host guards (fsguard, netguard, the trace gate, the nudge broker) are not started: the VM is the guard. Refused before anything is written on a host that cannot boot a VM (except with `--no-start`, which boots nothing, so there is no probe), with what it lacks, how to fix it (the image's build commands, KVM) and `--isolation host` as the unisolated way on; the kickoff never falls back to host processes on its own. A registry record from before the default changed carries no isolation and is shown as a host run. See [ADR 0009](adr/0009-agents-live-in-microvms.md). |
 | `--image REF` | no | from the packs | The VM image (`SWARM_VM_IMAGE`). Default: the smallest profile that holds the run's packs or covers every program they require and every Python package they import (`images/recipe.py profile-for`), by the digest a lock pins (`SWARM_IMAGES_LOCK`, else `images/images.lock.json`), else the local build `dfirswarm-<profile>:dev-<arch>` ([images/README.md](../images/README.md)). In a microVM run with jobs and packs that default is the job image that holds every pack, and the agents boot the base (see `--brains-with-packs`); an image named here is the one the agents and their jobs boot. The digest a VM booted is in `vm/<id>.json`. |
 | `--vm-cpus N`, `--vm-memory MIB`, `--vm-disk MIB` | no | 2, 2048 (1024 on a host with less than 8 GiB), 8192 | Per agent VM. N VMs that would take more than 85% of this host's memory, or four times its cores, are refused before anything is written; past 60% or past its cores, warned about. The disk is where a VM's own installs and its `/tmp` live. With `--playwright` and no packs the image is the `web` profile (the base with Chromium); each VM's `TMPDIR` is its own `/tmp`. The host guards' flags (`--no-write-guard`, `--no-seal-herdr`, `--inputs-enforce`, `--key-from-env`) are refused under microvm, and so is a `--no-read` path the VMs are given (the harness, the packs, the evidence, the run). |
-| `--workers N` | no | 2 (4 on a host with 64 GiB or more, 6 with 128 GiB or more) | Tool-job worker VMs that may run at once (1–16). From 3, one is kept for short jobs (an agent's `timeout_seconds` of 120 or less, stopped at that limit), so a quick look never waits behind long parses; the kickoff's recipes and the derived catalogue never take it. Each worker starts only while the host keeps 15% of its memory free beside it (several runs may share a host); until then its job waits, said on the journal (`job_waits_for_host`) and on its `job_started` line. Each job — an agent's `job_run` or `catalog_request`, the kickoff's recipes — runs in a throwaway VM of the run's image, made for it and removed after, seeing what its `inputs` declare (`input:<path>`, `input:<dir>/`, `job:<id>[/<path>]`, `member:<gen>#<n>`, `sha256:<hex>`, `work/<you>/<path>`, `tool-output/<you>/<path>`; `[]` for nothing) and nothing else, read-only, in a view the hub builds for that job outside every VM (an evidence set bound whole when the scope covers every file of it, a part of one cloned file by file, never hard-linked; a segment set whole, as the census recorded it; an agent's file copied and hashed at the job's start; a declaration that does not resolve refuses the job), or, with `inputs` left out or `["all"]`, what an agent sees (the evidence, `store/`, `catalog/`, `tools/`, `tool-output/`, the packs, all of `work/`), the record saying which, with the declared scope's manifest at `store/jobs/<id>/scope.<attempt>.json`; no network unless the job asks for the run's `--allow-host` list (plus PyPI with `--allow-install`), and only its own directory (`$OUT`) writable; what it wrote is sealed into `store/jobs/<id>/` (read-only, hashed, every file stored once under `store/blobs/`) and every step is a line of the hash-chained `store/journal.jsonl`, whose head is anchored beside the run (`<sandbox>.journal-anchor.json`). Counted with the seats against the host's capacity: unset, as many as fit beside the seats up to that default, and none fitting leaves the run without a job service (the kickoff says so); given, kept or refused. |
+| `--workers N` | no | 2 (4 on a host with 64 GiB or more, 6 with 128 GiB or more) | Tool-job worker VMs that may run at once (1–16). From 3, one is kept for short jobs (an agent's `timeout_seconds` of 120 or less, stopped at that limit), so a quick look never waits behind long parses; the kickoff's recipes and the derived catalogue never take it. Each worker starts only while the host keeps 15% of its memory free beside it (several runs may share a host); until then its job waits, said on the journal (`job_waits_for_host`) and on its `job_started` line. Each job — an agent's `job_run` or `catalog_request`, the kickoff's recipes — runs in a throwaway VM of the run's image, made for it and removed after, seeing what its `inputs` declare (`input:<path>`, `input:<dir>/`, `job:<id>[/<path>]`, `member:<gen>#<n>`, `sha256:<hex>`, `work/<you>/<path>`, `tool-output/<you>/<path>`; `[]` for nothing) and nothing else, read-only, in a view the hub builds for that job outside every VM (an evidence set bound whole when the scope covers every file of it, a part of one cloned file by file, never hard-linked; a segment set whole, as the census recorded it; an agent's file copied and hashed at the job's start; a declaration that does not resolve refuses the job), or, with `inputs` left out or `["all"]`, what an agent sees (the evidence, `store/`, `catalog/`, `tools/`, `tool-output/`, the packs, all of `work/`), the record saying which, with the declared scope's manifest at `store/jobs/<id>/scope.<attempt>.json`; no network unless the job asks for the run's `--allow-host` list (plus PyPI with `--allow-install`), and only its own directory (`$OUT`) writable (it starts in the run's directory, read-only there, so a program that writes its log or temp files where it stands is given a path under `$OUT` or run after `cd "$OUT"`; a job that ends non-zero on such a write, a `Read-only file system` or a `Permission denied` outside `$OUT` in its stdout, its stderr or a stderr file it kept, says so in its reason, with the path, where the line is, and `$OUT`); what it wrote is sealed into `store/jobs/<id>/` (read-only, hashed, every file stored once under `store/blobs/`) and every step is a line of the hash-chained `store/journal.jsonl`, whose head is anchored beside the run (`<sandbox>.journal-anchor.json`). Counted with the seats against the host's capacity: unset, as many as fit beside the seats up to that default, and none fitting leaves the run without a job service (the kickoff says so); given, kept or refused. |
 | `--worker-cpus N` / `--worker-memory MIB` | no | 2 / 2048 | Each worker VM's size. |
 | `--no-jobs` | no | off | No job service: no tool jobs, and the kickoff's catalogue is built before the agents start, as in a host run. A host run (`--isolation host`) has none. |
 | `--no-derived-catalog` | no | on | Turn off the derived catalogue. By default what jobs make is offered to the packs' recipes whose trigger is `derived`, by content (sha256: an object is answered once in a run, wherever it appears; a copy of an input is skipped): a file is offered when a recipe's `min_bytes` and, if it names any, its `suffixes` or `magic` say so, and only to those recipes. The work runs in the lowest lane — one worker, started only when no agent job waits — the largest objects first, 32 object–recipe pairs a pass, within 300 worker-seconds each 10 minutes; a run makes at most 50 derived generations and 2 GiB of them (what the catalogue costs, not what it asks about). Nothing is dropped: what waits is named in the journal (`derived_offered`), a pass's answers are read whatever its status (`detect_answered`), a pair not answered is tried once more then named (`detect_unanswered`), and a limit is journalled (`derived_deferred`, `derived_bounded`, told to all). A complete derived generation is posted to all; a partial one to the agent whose job made the object, with the recipe's reasons, and it is linked to its readable form when one is catalogued (`generation_related`). Imports and the files of failed jobs are offered too; a recipe's or a detect pass's own outputs never are. |
@@ -349,13 +349,30 @@ watchdog had notified it.
   makes stale every standing `bounded_negative`, `not_determinable` and
   `partial` answer whose coverage was recorded before it, whatever question
   it was added for (the reply and the board post name each; the finish line
-  holds each, `evidence_stale`, until the new evidence is examined for it
-  and another seat reviews that: a coverage record naming the import among
-  its objects, attested by another seat, or an entry resting on the import,
-  attested likewise, cited by the answer recorded again; a review made
-  before the evidence came does not count for it; an established answer is
-  not staled; `question accept` after the evidence came excuses it, and its
-  reply names what the finish line still holds), and, when the
+  holds each, `evidence_stale`, until the new evidence is examined for it,
+  another seat reviews that, and the examination says how the evidence
+  bears on the answer: a coverage record naming the import among its
+  objects, attested by another seat, or an entry resting on the import,
+  attested likewise, cited by the answer recorded again, with the entry
+  that examined the import carrying a delta (its refs name the import's
+  files; a `rel` to the answer of kind supports, contradicts, adds_part,
+  irrelevant or inconclusive), among that reviewed coverage record's
+  results, or cited by the answer and attested by another seat; a review
+  made before the evidence came does not count for it;
+  an established answer is not staled; `question accept` after the
+  evidence came excuses it, and its reply names what the finish line still
+  holds), then, once it is committed and never inside it, searches the new
+  files for every standing coverage record's `looked_for` strings (the
+  reverse sweep: the reply's `reverse_sweep` says where it runs and for how
+  many records and strings; it runs in the hub's background, or, when the
+  addition was made here with no hub, as a detached step,
+  `scripts/reverse-sweep.ts`; a pass at a time within its own budget,
+  `SWARM_REVERSE_SWEEP_MAX_SEC`, 120, and `SWARM_REVERSE_SWEEP_MAX_BYTES`,
+  2 GiB, what a pass leaves named and searched by the next; each pass's
+  board post names its hits by question when it completes, the stale
+  answers say theirs, and on an answer it does not stale a hit its answer
+  does not reach is warned of, `late_evidence_hits`; a hit never holds by
+  itself; `evidence list` continues a sweep left undone), and, when the
   run's catalogue is on, runs a detect pass over each file (at
   once when the hub runs, else at its next round). While the hub runs the act
   is handed to it: it is the store journal's writer. **Every seat's VM mounts
@@ -428,7 +445,18 @@ one seat coordinates the finish (normally the one that published the report
 last); every other seat's `done` is answered "not yours", and the agents'
 headers say whether the registers make the finish ready. `leads/finish.jsonl`
 records the coordinator, the report's reviews, the late items it resolved and
-the check result per state revision. Work nobody holds is offered to one idle
+the check result per state revision. The coordinator drafts the report, then
+prepares the finish (`finish prepare`): it takes the finish as a done would,
+runs no check, and answers readiness and every result, veto or objection late
+against the report, with the lease's generation and the report's digest. It
+resolves them all in one call (`finish resolve` with `items`, each folded with
+where the report says it now or not_material with why, the generation, the
+digest and a key naming the batch), invites the report's review (`finish
+ack`), and calls done. A stale generation or digest, or an item that is not
+late, refuses the whole batch and records nothing; a batch sent again under its
+key is answered with what was recorded. What was late stays late through a
+second prepare, a republished report and a takeover; after a resume, the first
+prepare opens the new segment and keeps what was still late by name. Work nobody holds is offered to one idle
 seat at a time, for a minute from when the offer reaches it; a lead held with
 nothing done on it for ten minutes while its holder works on another lead is parked
 and offered too. First choices are staggered at the start of a run (20 s a
@@ -441,9 +469,30 @@ job's "suspected stall", which is shown, never acted on). The console's Jobs
 tab names a job that needed a program its image does not hold, with the
 profile, for the images' upkeep. The Leads tab, and `swarm.sh lead <run> list`,
 show the finish (ready by the registers or what holds it, who coordinates it,
-the last check and what is late against the report), the parked leads, and on
+the boundary and the last prepare, the last check and what is late against the
+report), the parked leads, and on
 each lead its standing offer, a closure waiting for its closer's confirmation,
 a second route with its reason and its product contract.
+
+A source's broad extraction ([ADR 0013](adr/0013-a-negative-is-bounded-and-a-cap-pauses.md),
+"A source's broad extraction before a negative on it") is on the record as
+receipts on the store journal (`type: preparation`): planned, attempted,
+produced, partial, failed or declined, each with the source's digest, the
+recipe and its version, the output manifest and what the extraction does not
+hold. One its pack runs by itself runs at the kickoff; every other is a lead
+of its own, "Broad extraction: <recipe> over <source>", opened by the harness,
+serving no question and not material, offered to an idle seat, which runs it
+or closes it deferred or infeasible with why (the preparation's decline). A
+negative that says the event did not happen, or whose coverage is complete
+over a source, waits while that source's extraction is planned or attempted:
+`finish status`, readiness and the answers check name it (`preparation_pending`)
+with the job to wait for or the lead to run or decline. The extraction's
+outcome releases it, whatever that is, and so does `swarm.sh question <run>
+accept Q-n`. Any other negative on a source whose extraction has not
+produced carries the warning `preparation_missing`, which holds nothing, and a
+negative's review offer opens with the state of each source it rests on.
+The receipts are lines of `store/journal.jsonl`, and `swarm.sh replay <run>`
+shows each source's state and what it holds or warns.
 
 #### The stop policy: `extend`, `pause`, `unpause`, `stop`, `resume`
 
@@ -576,23 +625,36 @@ becomes `Q-<n>` (`Q-3` is the ledger's `question:3`), and each objective of an
 metadata block instead (`objectives:` followed by `- O-1: text` lines); the
 kickoff writes them into the goal's `## Objectives` section. A goal with
 objectives and no questions is open-ended: its first agents propose the
-questions with `question_open`.
+questions with `question_open`. Its premises, what the case takes as given
+(whose device it is, who the subject is), go in a `## Premises` section or
+the metadata block's `premises:` list (`- text [scope: questions 1, 2;
+entities E; times 2024-01-01..2024-06-30]`, the scope optional): each becomes
+`P-<n>`, a given ([ADR 0011](adr/0011-questions-are-a-register-with-their-askers.md), "Premises").
+A goal with a case brief (a heading naming a brief, a scenario, a background
+or a situation, a `--sections-in` brief, or words naming one) and no premises
+is warned about at the kickoff and by `start --check`: its answers would hold
+the brief's givens open as parts to prove. Designate what the brief states as
+given (never what a question asks or tests) in the metadata block, or on the
+run with `question <run> premise add`. The shipped goals under
+`prompts/goals/` and the calibration generator's designate theirs.
 
 - `question <run> add --text T --why W [--objective O-n | --objective new --objective-text T] [--parent Q-n] [--materiality material|background] [--priority urgent --reason R] [--expects existence|value|narrative|timeline|list] [--completeness] [--hint REF [--hint-value V]]... [--attach REF]... [--suggest SEAT] [--deadline ISO] [--neutral T] [--submission TOKEN]`
   asks the running swarm a question. `--completeness` says it asks for a complete set (every file, all connections, a complete list); a question whose words say so ("every", "all", "each", "complete list") is marked so without it, and `amend --no-completeness` takes the mark off. Its established or partial answer rests on a coverage record naming the areas searched (allocated, deleted, unallocated, slack, secondary), or the finish line holds it. It is written to the chain first and acknowledged after (the last line printed is the JSON of the act: `q`, `rev`, `scope`, the event's `seq` and `hash`, and what was delivered); then posted from `analyst:<you>`, offered to the suggested seat for its first minute (`SWARM_QUESTION_OFFER_SEC`) or to the most suited idle seat, and ranked first in every agent's header. A hint says where to look (a ref such as `input:<path>`, or a path in the run); `--hint-value` after it records what the hint says as an open hypothesis in the ledger. `--submission` makes a retry the same question.
 - `question <run> list [--json]` and `show Q-n [--json]`: every question, the triage queue and the clarifications waiting first; one question whole, with every revision, its offers, its leads, its answer and each signed act checked.
 - `question <run> amend Q-n --expect-rev N [--text T] [--why W] [--neutral T] [--completeness | --no-completeness] ...`: a new verbatim revision, refused unless N is the revision now; the standing answer, which names the revision it answers (`question_rev`), is stale until it is recorded again for the new one.
 - `question <run> priority Q-n urgent|normal [--reason R]`, `withdraw Q-n --why W`, `clarify-reply Q-n C-n TEXT`, `scope Q-n|L-n in_scope|excluded --why W`, `accept Q-n --as bounded|not_determinable --why W --expect-rev N`, `verify [--allowed-signers FILE] [--ca FILE]`. An acceptance takes a question's limits as they stand for that revision; it is refused while a lead under the question is still open (a route not yet closed) or its answer is a negative no other seat has reviewed, and any acceptance makes the run's outcome `examination_limited`. It excuses a partial store sweep, and evidence added before it (`evidence_stale`), never evidence added after it or the rest of the negative bar; its reply (`still_held`, and a line from `swarm.sh`) names what the finish line still holds on the question.
+- `question <run> premise add --text T [--locator L] [--class given|supplied_assertion|proposition_under_test] [--entity E]... [--time FROM..TO]... [--for-question Q-n]... [--why W]`: a premise the case takes, its words verbatim, where they stand, and what it is about (entities, time ranges, the questions it applies to; each optional, none meaning everything). A given unless `--class` says otherwise: a given is not proved again and is never an open part; a supplied assertion (a client's or a witness's statement) is assumed as asserted, and the report says so; a proposition under test is examined like any claim. `premise revise P-n --expect-rev N --why W [--text T] [--locator L] [scope flags | --no-scope]` makes a new revision (answers citing the earlier one are warned, never rewritten); `premise admit P-n --as given|supplied_assertion --why W` admits an agent's proposal (`premise_propose`: a proposition under test until then); `premise withdraw P-n --why W`; `premise list [--json]` and `premise show P-n [--json]` read them, with the answers that cite each. Two standing answers that assume and contradict one premise revision over scopes that overlap hold the run (`premise_inconsistent`) until they are reconciled on the record: one revised, the finding that rebuts the premise named (the premise then comes to you as a request of kind `premise`: revise it, withdraw it, or `requests <run> answer R-n "the premise stands, and why"`; nothing waits on your answer), a scope narrowed, or an answer made conditional ("assuming P-n"). Neither side is forced.
 - `lead <run> direct (--question Q-n | --new-question T --new-why W) --title T --why W --product P --acceptance A`: a directive, an unheld lead under a question with the product it is to make and what makes that acceptable. A directive is not signed (`--sign` is refused; sign the question it serves). Under a person's question no lead has framed yet, the first agent to claim it states the proposition and its negation.
 
 Every act takes `--as ID` (an enrolled person: a claim) and `--sign` (signed
 with that person's enrolled key in the namespace `dfirswarm-question`; the
 passphrase or PIN on the terminal or on the descriptor `--secret-fd N` names,
-as release signing takes it). On `accept`, `--as` names what is accepted, and
-a second `--as` the person. Without `--as` the act is this OS account's on
+as release signing takes it). On `accept` and `premise admit`, `--as` names
+what is accepted or admitted as, and a second `--as` the person. Without `--as` the act is this OS account's on
 this host, not enrolled, with the operator's authority. Who may do what: the
 operator and an examiner add in scope (`--objective new` expands the case),
-admit or exclude, amend, re-prioritise, withdraw and accept any question; an
+admit or exclude, amend, re-prioritise, withdraw and accept any question, and
+designate, revise, admit and withdraw premises (nobody else does); an
 analyst (`examiner enroll --role analyst`) adds questions, in scope inside an
 objective and proposed otherwise, and amends, re-prioritises and withdraws
 their own; a reviewer's question is a proposed review query; an observer
@@ -602,7 +664,9 @@ attempt, and the outcome naming the event. The console's Questions tab runs
 the same commands, with the person the console session chose as `--as`; an
 amend or accept form keeps the revision it was opened on until you refresh it,
 and a proposed question is a full card, so a clarification on it is answered
-before it is admitted.
+before it is admitted. It shows the premises with the same acts on them, and
+each answer's parts (established, or open with what bounds it), the premises
+it cites and a part a review says it leaves out.
 
 While the run's hub is up (a microVM run that is going) it is the register's
 one writer: `swarm.sh` hands each act, prepared and signed here, to the hub's
@@ -939,10 +1003,12 @@ finished run measures the same whenever it is read.
 | Negatives on partial coverage | Negative answers none of whose standing coverage records is complete and current (each is shown as partial, not computed or stale), and, apart, those that cite no coverage record at all. |
 | Offers | Lead offers (`offer` events) by what became of each while it stood (from the offer to the lead's next claim, release, close or reopen), one outcome each, the first that applies in this order: accepted (a `claim` or `confirm` that names the offer), declined (`offer_decline`), taken by another seat (that next claim was another seat's, lapsed or not), lapsed (`offer_lapse`), else no outcome. By reason too (wake, hand-off, parked, reopen, confirm). Question offers: made, accepted (`offer_accept`), declined, and not taken up. A run from before offers has none; its `wake` events are counted apart: taken by the woken seat (its first claim of the lead in that open spell), by another seat, or not taken. A woken seat's claim is not the same measure as an accepted offer: a wake reserved nothing. Review offers (a limiting route's review, a material negative's review, `reason: route_review | negative_review`) are counted apart (`reviews`): taken up by the review they asked for (recorded by the seat offered, even after its offer ran out), declined, withdrawn (`offer_withdraw`: reviewed by another route, or the answer superseded), lapsed, or with no outcome; and how many their seat took first (`offer_take`). |
 | `done` calls | Every `done` line on the trace, and every `done_deferred` line (a seat's done that was not its finish: another seat coordinates it). Accepted: a done line with no refusal (and, of those, the one that wrote the sentinel); refused by the seat's checks, by why (the finish line not met, posts that landed after the report, the finish line unsettled, an abandon vote that did not end the run); refused by the hub (a `markDone` the hub refused: the seat saw a thrown error and wrote no done line; a refusal the hub counted and wrote once is that many calls); not the seat's finish. A done after the sentinel (a seat leaving) is an accepted call that wrote nothing. |
+| Finish | The finish's own acts ([ADR 0015](adr/0015-one-seat-finishes-and-work-is-offered.md), "Preparing the finish"). The first done that was a finish (not another seat's, not a seat leaving on its cap, not an abandon vote) and how it was answered, and whether it was refused on what was late against the report: the refusal `finish prepare` exists to remove (the goal's checks run only after it, so whether they would have passed is not in the trace; replay reads that on the registers). Every done refused on late items. The finish tool's calls by act (prepare, resolve and how many of those carried items, status, ack), so a refusal renamed into more calls cannot pass for a gain; the register's resolutions, the batches they came in and its checks. From ready (the tail's) to the end: the minutes, every seat's tokens in that span (from the same per-call record as the cost; none without one) and the finish's calls in it, through the done that wrote the sentinel. |
+| Warnings delivered | From the trace, each reply to a record, an attest, or a lead's close or confirmation that carried a warning, by act, and the warning codes they carried; from the lead register, each review of an answer offered and delivered to its seat (`offer_seen`), which leads with its source-first packet. Every finish status carries the warnings too (the finish's status calls). What the warning points and the packets cost, counted rather than assumed. |
 | Tail | From when the run was ready to its end (the sentinel's time, or the operator's stop). Ready is, where the finish register records readiness, the last turn to ready before the end that was not undone before it (a done that passed while readiness had not turned ready records the ready state itself, and the tail says so: "recorded by the done"); otherwise the moment every question in scope had its first answer. Two more tails are given apart, because they are not the same: from every question's first answer (any result, supported or not), and from every question's final answer (the one standing at the end). None while a question in scope has no answer; the unanswered are named. |
 | Acquisition | Operator requests of kind `acquisition`, by the stage each ended at (requested, authorised, collecting, received, validated, declined, unavailable), and those the case policy declined at once. A gap is a request that did not end validated (declined, unavailable, or still waiting), with the questions it named. Evidence added: the store journal's `evidence_added` lines, and how many answered a request. |
 | Interpretations | The lead register's `interpret` events, each bound to the entry it names: valid while that entry stands, otherwise on a superseded or on a disputed entry, or on none the ledger holds (the job needs interpreting again). Lead jobs never interpreted at all, and those with no valid interpretation left, are named. |
-| Reversals | A standing result that changed: an answer superseded by one of the same question with another `result` (a correction that keeps the result is counted apart, as a correction), and a lead closed negative that was reopened. The cause is new evidence when an `evidence_added` line came between the two (or the reopen's cause is `evidence_added`), and discoverable in the original evidence otherwise. A heuristic: evidence that came between is not proof it caused the change. |
+| Reversals | A standing result that changed: an answer superseded by one of the same question with another `result` (a correction that keeps the result is counted apart, as a correction), and a lead closed negative that was reopened. The cause is new evidence when an `evidence_added` line came between the two (or the reopen's cause is `evidence_added`), and discoverable in the original evidence otherwise. A heuristic: evidence that came between is not proof it caused the change. Apart: each answer that claimed established and was recorded partial after an attest of it was capped (`partial_after_cap`, with the seats that capped it), what the review rule's caps cost ([ADR 0015](adr/0015-one-seat-finishes-and-work-is-offered.md), "A source-first review"). |
 | Cost per question | Each call's tokens (input, output and cache, as `budget.json` counts them) and dollars, from the model gateway's log where the run has one, else the seats' Pi sessions, else each seat's total spread over its calls on the trace (`trace-estimate`), given to the leads its seat held when the call was made, in equal parts, and each lead's part to the questions it answers, in equal parts. A lead is held from its take to its release, close, reopen, hand-off or another seat's claim; a seat claiming what it holds keeps holding it. A call made while the seat held no lead is given to what it named (`named`: an attest or dispute to its entry's question, an act on a lead to that lead, a record to the questions it answers, a job's status to its lead); the finish's and the report's work made so is `finish_and_report`; calls that named nothing (`unheld`, with `by_kind`: waiting, compaction, coordination, reading, other), and parts of leads that answer no question, are counted apart; a call whose usage the provider did not report counts nothing. The same computation as the report's (`scripts/question-cost.ts`), shown with the same figures: the parts are kept exact until the end, then rounded to whole tokens and millionths of a dollar by the largest remainder (`roundParts`), so the questions, the unheld calls and the leads without a question add up to the run's totals. An apportionment, not a meter: a seat thinking about one lead while holding two is split evenly. |
 | Duplicates | From the store journal: jobs whose `job_similar` line names another seat's similar job (not counting declared reproductions), and of those the exact repeats (the same command or the same tool and arguments over the same objects); `independent: true` jobs, and those of them that had similar work to compare with; `job_same_as` lines (files, bytes, and jobs every non-empty output of which is an earlier job's); typed recipe requests answered with an earlier job (`job_deduplicated`); and, from older runs, the retired shadow merge's `job_would_merge` lines. |
 | Network | Requests and how the rules decided them (granted, denied, by each denial's code), operator items (and those still open), grants by status (granted, active, exhausted, expired, revoked), fetches, captures delivered (and complete), uses the fetch service refused, and contamination records. |
@@ -964,6 +1030,156 @@ runs reached with no complete coverage that still stands: two runs of one
 harness can share a blind spot, and their agreement is not confirmation.
 When the two runs' questions in scope differ in number or text, it says so
 and still compares by section.
+
+### Replay: `swarm.sh replay`, `scripts/replay.ts`
+
+```
+swarm.sh replay <id> [--checkout PATH] [--compare [A [B]]] [--stop-policy P[,P...]] [--deliveries] [--prepare-as STATE] [--reverse-sweep] [--json] [--show-text]
+node --experimental-strip-types scripts/replay.ts <run-dir | id --registry FILE> [the same options]
+```
+
+A finished run's registers read again under a harness's finish rules, to
+measure a rule change on recorded histories before paying for new runs
+(ADR 0017, "Measuring a rule change"). No model call, no job, no VM.
+
+- **The run is never written.** It is copied to a temporary directory, a
+  clone where the file system makes one (APFS, a reflink; elsewhere the copy
+  costs the store's size), with the times kept. Left out: `inputs/` (the
+  evidence, whose hashes `inputs.json` keeps), the VMs' records and images,
+  the seats' Pi sessions and the kickoff's options. Every link in the copy is
+  removed, never followed. The run's registers are hashed before and after,
+  and a change is said. One copy per checkout and stop policy: the finish
+  gate writes (it reopens leads on the ledger and runs a store sweep lost with
+  its process, as it does at a done), and one evaluation never sees another's.
+- **What is evaluated, in the order a done reads it**, each checkout in a
+  process of its own: the answers check (each `check-answers.ts` line of the
+  goal's checks, read as `await-done.sh` reads them from the registry record,
+  run as its own function); the finish gate over it and the finish line's
+  verdict; readiness; the finish register (the coordinator, its resume
+  segment and how many posts it carries, what is late against the report,
+  the coordinator's prepares, the resolutions and the batches they came in,
+  the last check recorded); the report's standing for
+  each question (its status, and whether its chain says a best candidate);
+  and every custody verdict the run holds (`custody.json`, one a resume set
+  aside, the ones the anchor beside the run names), verified as a prefix of
+  the registers with the checkout's own chain code. The goal's other checks
+  are its own commands, which no harness version changes: they are not run,
+  and the verdict reads them as passing.
+- **What it prints**, per question: its declared result, the check's outcome
+  and disposition, whether it is held a best candidate, the codes of its open
+  and named defects, of its warnings and of the readiness items on it, the
+  gate's disposition, and the report's standing. Then readiness, the gate's
+  defect codes, the verdict (proceeds and how the run would end, or held and
+  on what), the finish (whose, what is late, whether the done would write the
+  sentinel now), the seals, and where readiness, the answers check and the
+  gate disagree on a question (`readiness_holds_disposed`,
+  `readiness_clear_held`, `gate_holds_check_disposed`, and a run whose
+  readiness is not ready while the gate holds nothing). A route limitation
+  that readiness holds under `--stop operator` only limits the done, by
+  design (ADR 0015, 7 and 8), and is not counted a disagreement. An answer
+  the check reads as answered while one of its own defects holds it (an
+  absence negative held on its source's broad extraction), and a question
+  the gate reads accepted while the check holds a defect on it, are held by
+  the finish line through the check, and counted held. Where the checkout reads
+  the store journal's preparation receipts, each source's broad extraction,
+  capability by capability, and the questions held (`preparation_pending`)
+  or warned (`preparation_missing`) on it, with their sources. Where the
+  checkout has the source-first review rule (ADR 0015, "A source-first
+  review"), how many established attests of answers that claim established
+  the run recorded, and each the rule would cap, by question, answer, seat
+  and codes (`no_discriminator`, `locator_unverified`,
+  `derivation_unverified`), and each it would warn and not cap
+  (`no_locator_or_derivation`, `warned`; a checkout before the Fable review
+  of the limits branch capped it): the recorded
+  strengths stand, this says what the rule would have done at each attest
+  (a locator into an input cannot be read in the copy, which leaves the
+  evidence out, and says so). Where it reads the reverse sweeps (ADR 0013,
+  "Late evidence: the reverse sweep and the delta"), each evidence
+  addition's, its passes read as one: its state, how many standing
+  coverage records and strings it searched for, how many objects it read, and per question the hit objects
+  and occurrences, never a string. Where it has the review carry rule (ADR
+  0015, "A review carries over"), the report's reviews replayed over its
+  versions in `history/`: the acks, the re-reviews of a later version and
+  how many the rule finds standing already (each recorded ack read as a
+  review of the whole report, and as the what-if in which each seat named
+  the sections of the questions it answered), the section reviews the
+  re-reviews covered against those the rule asks again, per reviewed
+  version how many sections changed and how many seats are asked again,
+  and the resolved late posts that announced their author's ack a moment
+  after it (within two minutes). Counts and seats, never a section's words.
+- **Values-free by default**: codes, ids, counts and the harness's own words,
+  never a record's text (no answer, finding, lead title, reason or post).
+  `--show-text` adds the harness's lines whole, which quote records; it is
+  off unless asked for. `--json` gives the same as data.
+- **Which rules.** This checkout's, or `--checkout PATH`'s (a worktree at a
+  commit: `git worktree add --detach /tmp/x <commit>`). `--compare` evaluates
+  two and names every difference: with no argument, the run's own harness
+  against this checkout (or `--checkout`); with one, that checkout against
+  this one; with two, the first against the second. `frozen` names the run's
+  own harness: the hub directory's frozen host copy while it is there, else
+  the commit its registry record names (`provenance.harness_commit`),
+  extracted from this repository with `git archive` into the temporary
+  directory (no worktree is made). A run whose commit is not in this
+  repository's history is refused, with how to give it instead.
+- **`--stop-policy`** evaluates the copy as though the run's stop policy were
+  each one given (`operator`, `cap-pause`, `cap-stop`; several with commas):
+  the copy's `budget.json` only.
+- **`--deliveries`** reads where the checkout delivers the answers check's
+  warnings (ADR 0013, "Warnings where the decision is made"), act by act:
+  the reply to every record of a question's answer, every review offered
+  for an answer (read when it reached its seat), the reply to every attest,
+  and the reply to every seat's close or confirmation of a lead. Each act's
+  registers are cut to the moment of the act in a scratch directory beside
+  the copy (the ledger to the answer's own seq for its record, the
+  attestations to the attest's own line, the lead register to a close's or
+  a confirmation's own lines, every other register to the act's time: a
+  chain cut at a line is a prefix of it), and the
+  checkout's own `warningsAt` says what that point carries then; finish
+  status is read at the end. It prints the acts read, each act that carries
+  a warning (the point, the entry, the seat, the questions and the codes)
+  and finish status; `--compare` names the difference point by point. A
+  checkout from before the delivery says it delivered in finish status only.
+- **`--prepare-as STATE`** asks what a run from before the receipts would
+  have met under the preparation hold: this checkout's census asks the run's
+  packs' broad extractions (by id, as this checkout ships them) about the
+  run's own evidence, read in place through a scratch sandbox whose
+  `inputs/` links to the run's and never written; each copy then gets, per
+  source and capability that applies, a synthetic receipt by `replay` in
+  STATE (planned, attempted, produced, partial, failed, declined; one its
+  pack says the images cannot run is declined), and is evaluated as usual.
+  It prints what applied, and what could not be asked (a pack this checkout
+  does not ship, an input with no digest, a run whose evidence is not here).
+- **`--reverse-sweep`** asks what a run from before the reverse sweep would
+  have been told at each evidence addition: each addition in a copy that has
+  no reverse sweep line gets the one this checkout's store sweep computes
+  over the copy's import, from the coverage records standing at the
+  addition, marked synthetic, on the copy's chain. Only for a checkout that
+  reads version 2 sweep lines (one from before would read the chain as
+  broken): its copy is left as it is, and the output says so.
+
+Exit 0 when replayed and the run's registers are unchanged; 1 when a
+checkout could not be evaluated, the run changed under it, or it was
+refused (the reason on stderr); 2 on a usage error. Replay measures
+decisions on a recorded history; what the agents would have done under the
+other rule is not in it, and a rule that changes their behaviour is measured
+by paired runs.
+
+The contract fixtures (`tests/fixtures/contract/`, written by
+`generate.ts` there) are synthetic histories made through the harness's own
+acts, each with an `expect.json` written by hand from the ADRs. The tests
+(`tests/contract-fixtures.test.ts`) replay each and hold it to that, and to
+three invariants under every fixture and stop policy: readiness, the answers
+check and the gate never disagree on a disposition; a warning never holds;
+every custody verdict verifies as a prefix. A fixture recorded before a
+rule may keep its history and name, in `rules`, what the harness before the
+rule reads in it (`evidence-stale-without-delta`, under c34c6cb), and the
+test runs that harness, extracted with `git archive`, beside this one; every
+history recorded before the source-first review and the delta is replayed
+under both, and reads the same but where the delta applies. A fixture that names its
+`deliveries` is replayed with `--deliveries` and held to each act's warnings
+too, and finish status to the answers check's. A rule change that moves a
+fixture's projection changes its `expect.json` in the same commit, with the
+ADR that says why.
 
 ### `npm` scripts
 

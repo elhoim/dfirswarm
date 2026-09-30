@@ -74,7 +74,7 @@ async function partialOne(r: Awaited<ReturnType<typeof run>>, o: { would_change?
   const lead = await planned(r.a0, "1", [{ source: "input:logs/a.log", method: "read the logons" }]);
   const f = ok(await rec(r.a0, { kind: "finding", ...F, value: "a logon at 09:14 from the office network", source: "the log", evidence: "line 12", refs: ["job:j000002/hits.txt"], answers: ["1"] })).entry;
   const lim = ok(await rec(r.a0, { kind: "limitation", value: "The log keeps no account name for a network logon", source: "the log", evidence: "its field list", reason: "unavailable", answers: ["1"] })).entry;
-  const a = ok(await rec(r.a1, { kind: "answer", section: "question:1", value: "A logon at 09:14 from the office network; the account is not established", reasoning: `E-${f.seq} shows the logon and its time; the account is open (E-${lim.seq})`, ...A, ...(o.would_change ? { would_change: o.would_change } : {}), limitations: [lim.seq], result: "partial" })).entry;
+  const a = ok(await rec(r.a1, { kind: "answer", section: "question:1", value: "A logon at 09:14 from the office network; the account is not established", reasoning: `E-${f.seq} shows the logon and its time; the account is open (E-${lim.seq})`, ...A, ...(o.would_change ? { would_change: o.would_change } : {}), limitations: [lim.seq], result: "partial", parts: [{ id: "when", part: "when and from where the logon came", status: "established", refs: [`E-${f.seq}`] }, { id: "who", part: "which account logged on", status: "open", open_by: `E-${lim.seq}` }] })).entry;
   assert.equal(a.confidence, "medium");
   assert.ok((await L.closeLead(r.a0, lead, { disposition: "resolved", ref: `E-${f.seq}` })).ok);
   return { f, lim, a };

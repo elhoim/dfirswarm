@@ -436,14 +436,323 @@ downgrade, moving their standing findings into the reasoning (ADR 0013,
   discarded to make an answer not determinable. Readiness names a best
   candidate as one that claims established.
 
+## Preparing the finish
+
+Added 2026-09-29 (the limits spec, item 3; the Plan 3 brainstorm, L6: Astra
+F1 and F2, Fable L6-A in part).
+
+Every first done of the three runs of 2026-09-29 (s993d40, sa2f2f2,
+s5764c4) was refused on items late against the report: 4, 5 and 15. The
+code made it so. What is late is read against the lease's boundary
+(`lateItems`), so `finish status` listed nothing before a lease existed;
+only `finishTurn`, a done, made the lease; and only the lease's holder could
+resolve (`resolveLate`). Showing the list in status could not have helped.
+The coordinator then resolved each item in a call of its own: 4, 6 and 15
+calls before its next done. On s5764c4 those 15 calls took 71 s, a result
+posted in them refused the second done and another the third, one item
+each.
+
+1. **`finish prepare`.** After drafting the report, the coordinator
+   prepares the finish (`report`: its path). The lease and the report's
+   boundary are taken exactly as a done takes them (one function,
+   `takeLease`): a first lease goes to the report's last publisher when it
+   can hold it, else to the seat asking; an unavailable holder is taken over
+   at the next generation; a report named anew is kept on the lease. No goal
+   check runs and no sentinel is written. The answer is readiness (with the
+   answers check's warnings) and every item late against the report, whole,
+   with the lease's generation and the report's digest, and a `prepare`
+   event records it (generation, report, digest, boundary, readiness, and
+   the items it listed by kind and id). Another seat's prepare is answered
+   "not yours", quietly, as its done is. A prepare is refused while the
+   report does not exist.
+2. **The boundary forgives nothing.** It is the report's write time when
+   the finish was first taken, never the time of a prepare, so calling
+   prepare late manufactures no clean boundary. A prepare again, a report
+   published again and a takeover keep the earliest one (6 and 10 above):
+   what was late stays late until a typed resolution names it.
+3. **A resume opens a new segment.** The finish register is append-only
+   and outlives a resume; the old boundary would make every result of the
+   continuation late. The first prepare (or done) after a resume
+   (`budget.json` `resumes`) opens the new segment: designated as a first
+   lease is, at the next generation, with the report's time then as its
+   boundary, and every post that was late against the report when the run
+   was resumed and that no resolution answers is carried on the lease by
+   name (`segment`, `carried`). An objection needs no carrying: it holds
+   until it is resolved, whatever the boundary. A post of the
+   continuation's written before its report is its own work, which that
+   report answers. The fields are versioned: a run from before reads, and
+   hashes, as it did.
+4. **Batch resolve.** `finish resolve` takes `items` [{post or ack, how:
+   folded, where} or {post or ack, how: not_material, why}], each with its
+   own words, the coordinator's `generation` and the report's `digest` it
+   read (from prepare or status), and an idempotency `key` (when none is
+   given, the batch's own content names it). The batch is validated whole
+   under the finish lock, then one ordinary resolution event is appended per
+   item, each carrying the key, the generation and the digest; a folded
+   item names the version it was folded into, as before. A stale generation
+   or digest, or any item that is not late (resolved already, never late,
+   named twice), refuses the whole batch with the exact stale fields, each
+   item's problem and every id still unresolved, and records nothing; a
+   batch whose every item was resolved already (a retry under another key)
+   records nothing and says so, with what is still late or "nothing is late
+   against the report: call done", never "send the batch again". The
+   same batch sent again under its key by the same seat (a retry after an
+   interruption) is answered with what was recorded and what is still late:
+   nothing twice, nothing hidden. Another batch under a key used already is
+   refused. There is no blanket "all resolved": a bulk call proves the
+   accounting, and each judgement stays attributable and reviewable. The
+   one-item form stays.
+5. **What stays.** `finishTransaction` is unchanged: the lease and what is
+   late are read again in the transaction that writes the sentinel, and the
+   state revision the checks ran at must still hold, so a veto, an
+   objection or an evidence addition racing the done still refuses it. No
+   quiet period holds evidence admission, and no all-seats acknowledgement
+   is required. The finish phase (10a) turns assembling on the same
+   condition as before, the registers met, whether the lease came from a
+   prepare or a done.
+6. **The order, said where the seats read it.** The prompt and the
+   `finish` and `done` descriptions: draft the report, prepare, resolve the
+   late items in one call, invite the report's review (`finish ack`), then
+   done. The done's late refusal, the coordinator's header and the
+   readiness post name the batch, its generation and its digest.
+7. **Not built: covering a late post by the report's reach** (Fable L6-A,
+   a result whose cited entries the report's standing answers already
+   reach, recorded covered with no coordinator act). Republishing does not
+   show a caveat was weighed, and an entry already cited can carry a new
+   objection (Astra, round 2). Only prepare and the batch are built, and
+   the first-done refusals are measured.
+
+**Measured.** The metrics' finish block counts the first done and whether
+it was refused on late items, every late refusal, the finish tool's calls
+by act (prepare, resolve and how many carried items), the resolutions,
+batches and checks, and the tail from ready with every seat's tokens, so a
+refusal renamed into more calls cannot pass for a gain. Replay reads the
+prepares, the batches, the lease's segment and what it carries.
+
+On the three runs, replayed values-free with each run's registers cut to
+its first done (posts written after it removed, the finish register cut
+after the lease that done took, the ledger, attestations, leads and
+questions cut to its time): a prepare there lists exactly the items the
+done was refused on (4, 5, 15). The finish line on the cut registers is
+not met on s993d40 and s5764c4 (the answers check), so their first done
+would still be refused, by the finish line (their later dones were so
+refused, 6 of 7 and 8 of 10 checks), and on sa2f2f2 it proceeds (examination-limited) with
+readiness ready: sa2f2f2's is the one first-done refusal caused only by
+late items. After a prepare at the first done's time, a batch composed in
+the coordinator's own measured time (4.2, 17 and 11.6 s from the refusal
+to its first resolution) and a done as long after it as its next one came
+after its last resolution (4.6, 9.5 and 4.7 s), no result or veto lands
+in that window on s993d40 or s5764c4. On sa2f2f2 one result lands 9 s
+after the first done: before the batch's reply, which names it still
+late. So first-done late refusals go from 3 to 0 if the coordinator
+resolves what the reply names before its done, and to 1 (sa2f2f2) if a
+post landing between prepare and done is left to refuse it; the refusals
+caused only by late items go from 1 to 0, or stay 1, on the same terms.
+s5764c4's second and third late refusals do not arise in a 16 s window.
+Replay cannot show what the seats would have done under the rule: the
+paired runs measure that, with the finish tail's tokens and wall time
+(sa2f2f2: one minute and 2.4 million tokens from ready to the sentinel,
+6 resolve calls and 2 dones; the other two turned ready only at their
+done).
+
+### A review carries over
+
+Added 2026-09-29 (the limits spec, item 3 refinement; the c10 run sd9645b).
+
+The finish of sd9645b took about 49 minutes over three versions of the
+report: three prepares, 35 resolutions in four batches, and 19 acks, of
+which 10 were a seat's no-objection review given again to a later version.
+An ack was bound to the report's digest, so every version reset every
+seat's review: `finish status` and the coordinator's header showed only the
+acks of the current digest, and the coordinator invited everyone again.
+Nothing the finish rests on required those acks; they were asked for
+because a changed digest could not say what had changed. And 15 of the 33
+posts resolved as late items were their author's own ack announced on the
+board a moment after it was made, each a late post the coordinator had to
+resolve.
+
+1. **An ack binds sections.** `finish ack` takes `sections`, the report's
+   sections the reviewer covered (a heading's number, `3`, `§3` or `Q-3`,
+   or its words; none named is the whole report). The report's sections are
+   read as the report body reads a Markdown document and the answers check
+   numbers it: the text before the first `## ` heading (`preamble`), then
+   each `## ` heading with its lines, fenced blocks skipped, a numbered
+   heading keyed by its number (`reportSections`). The ack records each
+   section it covered with that section's digest (its lines, heading
+   included, less the blank lines that end it), and `whole` when none was
+   named. The fields are versioned: an ack without them is of the whole
+   report at its digest, and hashes as it did.
+2. **What stands.** For the report as it is now, each seat's acks are read
+   in order, section by section (`reviewStanding`): a no objection vouches
+   for each section it covered at the digest it had then (a review of the
+   whole report replaces what the seat vouched before), and an objection
+   withdraws the vouching of the sections it names. A section whose digest
+   is unchanged stays covered and the review carries over; a changed one is
+   asked again, and only it; a review of the whole report is asked about a
+   section added since, and about one removed (answered by a review of the
+   whole report as it is). A seat asked about section 3 acks section 3
+   alone, and its review of the rest stands.
+3. **Recorded.** When the report's current version has acks of another
+   version that were not weighed for it, a `carry` event records it before
+   the next act (the header's turn, a prepare, an ack, a done): the version
+   (`report`, `digest`), each seat whose review stands carried over with the
+   acks it rests on and the sections they cover (`kept`), and each seat
+   asked again with the sections that changed or went (`reasked`). The
+   chain shows why an ack of an earlier version still counts. One event per
+   version and what was weighed: acks of the version itself need none.
+4. **Said where it is decided.** Prepare's reply and `finish status` carry
+   the review (`reviews`: the sections, each seat's standing, the acks it
+   rests on, what changed, what no standing review covers) and the
+   invitation in words: whose reviews stand, and whom to ask again, on
+   which sections. The coordinator's header says the same; another seat's
+   header says its review stands (do not ack it again, do not post it), or
+   which sections it is asked about and the ack that answers. The prompt
+   and the tool's description say never to ack again a review that stands,
+   and never to announce an ack on the board.
+5. **What stays.** A late post or an objection keeps its per-item rule: it
+   holds the done until a typed resolution answers it, whatever section it
+   is on and whatever version follows. An objector's own later ack answers
+   its objection only when it reviews what the objection was about: the
+   whole report, or every section the objection named, so an objection to
+   section 3 stands through its objector's review of section 2 alone.
+   `finishTransaction` is unchanged: an objection racing the done still
+   refuses it. Acks, carries included, are not in the state revision.
+
+**Measured on sd9645b** (replay, values-free, `reviews`): the report's
+three versions have eight sections each; the second changed three of them,
+the third two, and the closing "conclusions and limitations" section
+changed in both. Read as they were recorded, every ack a review of the
+whole report, none of the 10 re-reviews would have carried over: that
+section changed each time, so no review round is avoided. What changes is
+what each re-review is asked for: 23 section reviews instead of the 80 the
+re-reviews covered. Had each seat named the sections of the questions it
+answered, 6 of the 10 re-reviews would not have been asked; each version
+would still have asked two seats again (the seat whose question changed,
+and a seat that answered none and so reviewed the whole report). The 15
+announced acks are what the prompt's rule removes; replay cannot show
+whether seats follow it, nor how narrowly they will name their sections:
+paired runs measure that, with the finish tail's tokens and wall time.
+
+
+## A source-first review
+
+On Belka a wrong value was attested established by three seats, each
+naming an alternative with its evidence: the rule was met and the answer
+was wrong. What nothing but words had checked was that the value sits in
+the bytes the review read, and that the review weighed the reading that
+would make it wrong. The brainstorm of 2026-09-29 (L2) agreed: the review
+starts from the question and its sources, not from the candidate; it names
+the strongest rival and a test that separates it; it says where a literal
+value was read (a locator the hub checks against the sealed bytes) or how
+a derived one was derived; and byte presence proves presence, never
+attribution or truth. Another model family is a routing preference, never
+a second source.
+
+- **The packet.** A material negative's review offer (the answers reviews
+  are offered for) leads with the question as it is asked now (its
+  register id, revision and words, whole), its scope (material, whether it
+  asks whether something exists or for a complete set) and the original
+  sources its answer's coverage records and cited entries lead back to (an
+  input, an import or a capture as named, a job's output by its declared
+  inputs, followed back); then the answer under review, linked by its seq
+  with the entries it corrects and its coverage records, never quoted;
+  then each source's broad extraction (ADR 0013), the task, the store
+  sweep and the warnings. Established and partial answers are reviewed
+  through attests the finish line asks for: the attest tool, its guidance,
+  the prompt and the critic's fix say the same, source first. Reduced
+  priming, not blindness: a seat may have read the board.
+- **The review's evidence** (`answer_review`, each in the hashed record only
+  when given, so an older review hashes as it did):
+  `discriminator {rival, test, favours_if, outcome, refs}`, the strongest
+  rival (another time, entity, mechanism or activity, or the premise not
+  holding), the test, the result that would favour each, what it showed,
+  and the observation or job it rests on (an E-<seq> the ledger holds or an
+  object that resolves; never the answer under review, nor only entries the
+  answer already cites; refused otherwise); `reproduced_at [{ref, offset,
+  length?, value?}]`, where each literal value it vouches for was read; and
+  `derivation {job, inputs}`, how a derived value was derived.
+- **The hub's checks.** A locator's ref resolves to a sealed object of the
+  run (an input, a job's output or log, an import, a capture, a sealed brain
+  output; never a directory or a catalogue row), and its value is at its
+  offset, in UTF-8 or UTF-16LE, ASCII letters in either case, and is among
+  the words of the answer (its value and reasoning) or of an entry it
+  reaches (its support, and what those cite: `answerReach`), at least three
+  characters: a locator vouches for what the answer or its chain states,
+  often a supporting observation, never for an occurrence of something
+  nothing in the chain states; with a length and no value, the bytes there
+  are read back and held to the same words. A bounded read at the offset,
+  and 256 bytes either side to say where the value is when it is not
+  there: never a scan, never the object's whole hash (resolving it against
+  its manifest is the seal). A
+  derivation's job is sealed and ran to its end, and each input resolves
+  and is among what the job declared it would read.
+- **The cap.** An established attest of an answer that claims established,
+  on a material question, is recorded `best_candidate` when it names no
+  discriminator that counts (a placeholder, or the rival in the test's
+  words, is none), when a locator does not verify, or when a derivation
+  does not resolve. Each reason is in `capped` (codes `no_discriminator`,
+  `locator_unverified`, `derivation_unverified`), and the reply says how to
+  fix each; the seat's later review that meets them is its review, as with
+  the alternatives. A review that names neither a locator nor a derivation
+  is warned, never capped (`no_locator_or_derivation`, in the attest's
+  reply and in finish status while no established review of the answer
+  locates a value or names a derivation): the approved rule capped a
+  missing discriminator and a locator that does not verify, and requiring
+  one of the two would cap a correct established answer that is an
+  inference over several entries, no single literal in the bytes and no
+  job that derived it, whose way out was to be recorded partial (the Fable
+  review of the limits branch). It stays a warning until the paired runs
+  show a cap catches more than it costs; the metrics count each answer
+  that claimed established and was recorded partial after a capped attest
+  (`reversals.partial_after_cap`), so the cost is measured. The rule affects only claims of established: a
+  partial answer's review checks its claimed parts as before, its locators
+  are checked and one that does not verify is said, and nothing is capped
+  for it; partial stays a disposition. A best candidate asked for is not
+  capped again. The hub judges refs, bytes and sequence, never whether the
+  test is good: a decoy in the evidence is in the bytes, and the
+  discriminator is what weighs it.
+- **Routing.** A review offer goes first to an eligible seat of another
+  model family than every seat that did the work (team.json's model per
+  seat, its provider's route and release tag dropped), then by relevance
+  and idleness as before. A team of one family is offered as before, and
+  nothing requires another family.
+
+Replayed values-free (`swarm.sh replay`, the review rule over each recorded
+established attest; the recorded strengths stand): on s5764c4 (Belka) six
+established attests of answers that claim established (questions 1, 2, 3,
+5, 8, 11), on sa2f2f2 two (questions 3, 6), and on sb1b3c8 three (two on
+question 1, one on question 5), and the rule would cap every one of them,
+for want of a discriminator; each also names neither a locator nor a
+derivation, which the rule first capped and now warns of. The established attests of partial answers (three on s5764c4,
+eight on sa2f2f2) are not capped. Had the rule held at those attests, each
+of those answers would have been held a best candidate until a review
+named its rival, its test and where its values were read; replay cannot
+show what the reviewers would then have done. That is for paired runs:
+wrong-at-established and decoy headlines against false negatives and
+unsupported downgrades, with the reviewers' tokens.
+
 ## Consequences
 
 - A run has one closer, and a finish that waits on a compacting or dead seat
   is taken over by the next done. The tail from "every question answered" to
   the sentinel should be the coordinator's review of what is late, not a
   round of refusals.
+- The coordinator learns what is late from its prepare, not from a refused
+  done, and answers it in one call; a done refused on late items then means
+  a result, a veto or an objection really raced the finish.
+- A new version of the report asks again only the reviews of what changed:
+  a review carries over while the sections it covered are unchanged, and
+  the finish register says so. A review of the whole report still meets a
+  summary section that changes with every fold; a reviewer who names the
+  sections it checked is asked less.
 - A best candidate is said to be one, in the ledger, the check and the
   finish; a run that ends on one is examination-limited, never completed.
+- An established review of an established claim says what separates the
+  answer from its strongest rival and where its values are, and the hub
+  reads those bytes; a review that does not is a best candidate, and says
+  how to become one that is. Every recorded established attest of the runs
+  replayed would have been capped: reviews get longer, and the paired runs
+  weigh that against what they catch.
 - Offers make "the woken seat got first claim" a native measure (offer,
   offer_seen, the claim that names it, decline, lapse), as are hand-offs,
   parked leads, confirmations and `done_deferred` (WP7's metrics read them).

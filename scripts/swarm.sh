@@ -105,7 +105,7 @@ Commands:
   context <id>       Each agent's context history from the trace: peaks, lines crossed, hand-offs, summary cost; metrics <id> the process, from its registers
   report <id>        One self-contained report.html; --pdf prints it, --lint checks its citations
   package <id>       Hand a run over: report, board, trace, hashes (--sign signs it)
-  examiner machine review releases timestamp rerun verify certify export hold release purge image-for   After a run: adoption and releases, checks, reruns, export, retention; the image packs boot (help <command>)
+  examiner machine review releases timestamp rerun replay verify certify export hold release purge image-for   After a run: adoption and releases, checks, reruns, a rule change replayed, export, retention; the image packs boot (help <command>)
   tools <id>         What the run forged; --save DIR keeps it for the next run; --candidates ranks the code agents wrote into jobs
   say <id> "<msg>"   Post as the examiner; cap|extend <id> its caps (extend lifts a cap's pause); lead <id> list|note its leads; question <id> add|list … asks it one; net <id> list|grant|deny|revoke its network
   stop <id>          Stop a run (stopped, never completed); pause|unpause <id> holds it and lifts a pause; resume <id> [--question TEXT] continues one that ended, on its own chains
@@ -3249,7 +3249,10 @@ if caps:
             "A file a peer has just published can take up to five seconds to look current in your VM: read a peer's file after "
             "they post about it, and a peer's extracted files may still be being written. `work/extracted/` and `work/quarantine/` "
             "are mounted no-exec in every VM, a peer's corner as well as your own: what came out of the evidence does not run "
-            "by accident (a mount flag, not a wall against a root that means to)"
+            "by accident (a mount flag, not a wall against a root that means to). Nor against an interpreter: `python`, `node` or a "
+            "shell given a recovered file, or `eval`, `exec` or `vm.runInContext` of its bytes, runs it, and a job's output under "
+            "`store/` is not no-exec at all. Recovered code is read, never run, wherever it is; a command or job that runs or "
+            "evaluates it is flagged in the trace and the report"
         )
         gaps.append(
             "A mount you make (FUSE, a loop device, where your VM has them) exists in your VM alone: your peers do not see it "
@@ -4603,7 +4606,9 @@ cmd_start() {
   # say it is to be run until every question is answered. And objectives:
   # a list the goal's `## Objectives` section carries from then on, where
   # the question register reads them (a goal may name objectives and no
-  # questions: its first agents propose the questions).
+  # questions: its first agents propose the questions). And premises: what
+  # the case takes as given, carried into a `## Premises` section the same
+  # way; each is a given of the premise register (P-n).
   # The case policy, from the flags, the goal's metadata block (read before
   # it is stripped) and the preset: refused here when it contradicts itself,
   # never guessed. `network: open` is --no-netguard.
@@ -4663,6 +4668,7 @@ path = sys.argv[1]
 text = open(path, encoding="utf-8").read()
 m = re.match(r"^---[ \t]*\r?\n[\s\S]*?\r?\n---[ \t]*(?:\r?\n|$)", text)
 out = {"toolbox": "", "until_solved": "", "stall_minutes": "", "stop": ""}
+premises = []
 if m:
     for k in out:
         key = re.search(r"^" + k + r":[ \t]*(.*?)[ \t]*\r?$", m.group(0), re.M)
@@ -4679,12 +4685,49 @@ if m:
                 objectives.append(item.strip().strip("\"'"))
     if objectives and not re.search(r"^#{2,3}[ \t]*Objectives[ \t]*$", body, re.M | re.I):
         body = body.rstrip("\n") + "\n\n## Objectives\n\n" + "".join("- " + o + "\n" for o in objectives)
+    # The premises of the goal, what the case takes as given, carried the same way
+    # into a Premises section, verbatim with any trailing scope kept, where
+    # the question register seeds each as a given P-n.
+    pblock = re.search(r"^premises:[ \t]*(.*?)\r?\n((?:[ \t]+-[^\n]*\n?)*)", m.group(0), re.M)
+    if pblock:
+        if pblock.group(1).strip():
+            premises.append(pblock.group(1).strip())
+        for item in re.findall(r"^[ \t]+-[ \t]*(.*?)[ \t]*\r?$", pblock.group(2), re.M):
+            if item.strip():
+                premises.append(item.strip())
+    if premises and not re.search(r"^#{2,3}[ \t]*Premises[ \t]*$", body, re.M | re.I):
+        body = body.rstrip("\n") + "\n\n## Premises\n\n" + "".join("- " + p + "\n" for p in premises)
     with open(path, "w", encoding="utf-8") as f:
         f.write(body)
+# A goal with a case brief and no premises designated (docs/adr/0011,
+# "Premises"): what the brief states as given (whose devices these are, who
+# the subject is, the setting) is then no premise of the register, and
+# answers hold it open as parts still to prove (c10 run sd9645b: 4 of its 10
+# open parts were such givens). Said, never refused: the operator decides.
+# (No apostrophe in this block: bash 3.2 misreads one in a heredoc inside $(...).)
+contract = text[m.end():] if m else text
+designated = bool(premises) or any(re.search(r"^\s*(?:[-*]|\d+[.)])\s+\S", sec, re.M) for sec in re.findall(r"^#{2,3}[ \t]*Premises[ \t]*$([\s\S]*?)(?=^#{1,6}[ \t]|\Z)", contract, re.M | re.I))
+brief = ""
+heading = re.search(r"^#{2,3}[ \t]*(.*\b(?:brief|scenario|background|situation)\b.*?)[ \t]*$", contract, re.M | re.I)
+if heading:
+    brief = "its section \"" + heading.group(1).strip() + "\""
+elif re.search(r"--sections-in\b", contract):
+    brief = "its questions are numbered in a brief, --sections-in"
+else:
+    said = re.search(r"\b(case brief|published brief|the brief|intake note|scenario)\b", contract, re.I)
+    if said:
+        brief = "it names one, \"" + said.group(1) + "\""
+out["premises"] = len(premises)
+out["brief_without_premises"] = brief if brief and not designated else ""
 print(json.dumps(out))
 STRIP
 )"
   goal_toolbox="$(jq -r '.toolbox' <<<"$goal_meta")"
+  local goal_brief
+  goal_brief="$(jq -r '.brief_without_premises // empty' <<<"$goal_meta")"
+  if [[ -n "$goal_brief" ]]; then
+    echo "WARN: the goal has a case brief ($goal_brief) and designates no premises: its answers will hold the brief's givens (whose devices these are, who the subject is, the setting) open, as parts still to prove. Designate what the brief states as given with a premises: list in the goal's front matter (a line each: - <the brief's sentence> [scope: questions 1, 2; entities <who or what>]), or once the run exists with: swarm.sh question <run> premise add --text \"<the brief's sentence>\" --locator \"<where it stands>\" [--entity E] [--for-question Q-n]. Never a premise that answers a question, or that a question tests ($goal_source)." >&2
+  fi
   case "$(jq -r '.until_solved' <<<"$goal_meta" | tr 'A-Z' 'a-z')" in
     ""|false|no) ;;
     true|yes) until_solved=1 ;;
@@ -6463,6 +6506,7 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
     else
       echo "Quarantine:   work/extracted and work/quarantine are no-exec ($(inputs_guard_label "$inputs_guard"))"
     fi
+    echo "              no-exec stops a file executing, not an interpreter reading it, and a job's output under store/ is not no-exec: a command or job that runs or evaluates code from the evidence is flagged (the trace, the seat's reply, the report), never refused"
   fi
   if [[ "$idle_nudge_sec" -gt 0 ]]; then
     echo "Idle nudge:   an agent silent for ${idle_nudge_sec}s is prompted to continue ($([[ "${until_solved:-0}" -eq 1 ]] && echo "3 times, then on with backoff: the run is until solved; a provider error is retried the same way" || echo "up to 3 times"))"
@@ -6490,7 +6534,7 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
 
   # The tools each Pi is given, known before a prepared run returns: a
   # prepared VM run writes them into vm-spec.json.
-  local PI_TOOLS="read,bash,edit,write,post,inbox,wait,claim_file,release_file,claims,list_team,budget,file_history,file_restore,file_diff,publish_file,thread_open,thread_join,inputs,name,record,ledger,attest,dispute,lead_open,lead_claim,lead_release,lead_close,lead_link,leads,lead_reopen,route_review,lead_handoff,lead_confirm,offer,finish,question_open,questions,question_ask,done"
+  local PI_TOOLS="read,bash,edit,write,post,inbox,wait,claim_file,release_file,claims,list_team,budget,file_history,file_restore,file_diff,publish_file,thread_open,thread_join,inputs,name,record,ledger,attest,dispute,lead_open,lead_claim,lead_release,lead_close,lead_link,leads,lead_reopen,route_review,lead_handoff,lead_confirm,offer,finish,question_open,questions,question_ask,premise_propose,done"
   # Pi's --tools is an allowlist by name, so a tool the extension registers is
   # invisible until it is named here. The skill tool exists only when the run
   # carries packs.
@@ -9287,6 +9331,18 @@ cmd_metrics() {
   fi
 }
 
+# A finished run's registers read again by a harness's finish rules
+# (scripts/replay.ts, docs/usage.md "Replay"): the run is copied to a
+# temporary directory and never written, so the operator's record takes
+# nothing; no model call, no job, no VM.
+cmd_replay() {
+  local id="${1:-}"
+  [[ -n "$id" && "$id" != -* ]] || die_usage "replay requires <id> [--checkout PATH] [--compare [A [B]]] [--stop-policy P[,P...]] [--deliveries] [--prepare-as STATE] [--reverse-sweep] [--json] [--show-text]"
+  shift
+  ensure_registry
+  node --experimental-strip-types --no-warnings "$ROOT/scripts/replay.ts" "$id" --registry "$REGISTRY" "$@"
+}
+
 # PDF printing lives in scripts/print-pdf.sh. Chrome and its relatives are
 # the only engines that get the page breaks in the report's print stylesheet
 # right, and none of them is a dependency: without one, `report` still writes
@@ -9614,13 +9670,22 @@ cmd_lead() {
 #   question <id> withdraw Q-n --why W
 #   question <id> clarify-reply Q-n C-n TEXT
 #   question <id> accept Q-n --as bounded|not_determinable --why W --expect-rev N
+#   question <id> premise add --text T [--locator L] [--class given|supplied_assertion|proposition_under_test]
+#                     [--entity E]... [--time FROM..TO]... [--for-question Q-n]... [--why W]
+#   question <id> premise revise P-n --expect-rev N --why W [--text T] [--locator L] [scope flags | --no-scope]
+#   question <id> premise admit P-n --as given|supplied_assertion --why W
+#   question <id> premise withdraw P-n --why W
+#   question <id> premise list [--json] | show P-n [--json]
+# The premises (extensions/premises.ts) ride the same chain: what the case
+# takes as given, each with its words verbatim, where they stand, its scope
+# and revisions; an agent's proposal is under test until it is admitted.
 # Every act takes [--as ID] (an enrolled person, a claim) and [--sign] (signed
 # with that person's enrolled key; the secret on the terminal or --secret-fd N).
 # The act is acknowledged only once the chain holds it, and the outcome is a
 # second line on the operator's record, beside the attempt, naming the event.
 cmd_question() {
   local id="${1:-}" sub="${2:-}"
-  [[ -n "$id" && -n "$sub" ]] || { echo "BLOCKER: question needs <id> and add, list, show, amend, priority, scope, withdraw, clarify-reply, accept or verify." >&2; exit 2; }
+  [[ -n "$id" && -n "$sub" ]] || { echo "BLOCKER: question needs <id> and add, list, show, amend, priority, scope, withdraw, clarify-reply, accept, premise or verify." >&2; exit 2; }
   shift 2
   ensure_registry
   local rec sandbox
@@ -9631,6 +9696,26 @@ cmd_question() {
   case "$sub" in
     list|show|verify)
       SWARM_RUNS_DIR="$RUNS_DIR" node --experimental-strip-types --no-warnings "$cli" "$sub" "$sandbox" "$@" ;;
+    premise)
+      local op="${1:-}"
+      case "$op" in
+        list|show) SWARM_RUNS_DIR="$RUNS_DIR" node --experimental-strip-types --no-warnings "$cli" premise "$sandbox" "$@"; return ;;
+        add|revise|admit|withdraw) ;;
+        *) echo "BLOCKER: question premise takes add, revise, admit, withdraw, list or show (got ${op:-nothing})." >&2; exit 2 ;;
+      esac
+      local out status=0 admission=()
+      while IFS= read -r a; do admission+=("$a"); done < <(question_admission_args "$sandbox")
+      out="$(SWARM_RUNS_DIR="$RUNS_DIR" node --experimental-strip-types --no-warnings "$cli" premise "$sandbox" --via "${SWARM_OPERATOR_VIA:-cli}" ${admission[@]+"${admission[@]}"} "$@")" || status=$?
+      OPERATOR_AUDIT_DETAIL="$(jq -c '{premise: {ok: (.ok != false), p: (.p // null), rev: (.rev // null), class: (.class // null), seq: (.seq // null), hash: (.hash // null), reason: (.reason // null)}}' <<<"$out" 2>/dev/null || echo null)" \
+        operator_audit question_outcome "$id" premise "$op"
+      if [[ "$status" -ne 0 ]]; then
+        echo "BLOCKER: $(jq -r '.reason // "the act was not recorded"' <<<"$out" 2>/dev/null || printf '%s' "$out")" >&2
+        exit 2
+      fi
+      operator_trace "$sandbox" question "$id" premise "$@"
+      jq -r '"Recorded \(.p // "the premise")\(if .rev then " (revision \(.rev))" else "" end)\(if .class then ", \(.class | gsub("_"; " "))" else "" end)." + (if .signed then " Signed (event \(.signed.seq))." else "" end)' <<<"$out"
+      printf '%s\n' "$out"
+      ;;
     add|amend|priority|scope|withdraw|clarify-reply|accept)
       local out status=0 admission=()
       while IFS= read -r a; do admission+=("$a"); done < <(question_admission_args "$sandbox")
@@ -9655,7 +9740,7 @@ cmd_question() {
         + ((.delivered // []) | if type == "array" and length > 0 then " Delivered: " + (map("\(.q) revision \(.rev)" + (if .post then " (post \(.post.thread)#\(.post.id))" else "" end) + (if .offer_to then ", offered to \(.offer_to)\(if .first then " first" else "" end)" else ", offered to the first idle seat" end)) | join("; ")) + "." else "" end)' <<<"$out"
       printf '%s\n' "$out"
       ;;
-    *) echo "BLOCKER: question takes add, list, show, amend, priority, scope, withdraw, clarify-reply, accept or verify (got $sub)." >&2; exit 2 ;;
+    *) echo "BLOCKER: question takes add, list, show, amend, priority, scope, withdraw, clarify-reply, accept, premise or verify (got $sub)." >&2; exit 2 ;;
   esac
 }
 
@@ -9668,7 +9753,7 @@ cmd_question() {
 #   requests <id> list [--open] [--json] | show R-n [--json]
 #   requests <id> ack R-n [--why W]
 #   requests <id> answer R-n TEXT              a lead's: its note (reopened); a clarification's: its
-#                                              reply; a stop proposal's: on the request
+#                                              reply; a stop proposal's and a premise dispute's: on the request
 #   requests <id> decline|withdraw R-n --why W
 #   requests <id> authorise|collecting|unavailable R-n [--why W]   an acquisition's stages
 # Each act takes --as ID; it is on the trace and the operator's record, and
@@ -11522,6 +11607,37 @@ in it is true because this printed it; it is not legal advice. The report's PDF 
 by sha256 and the release's detached ssh signature; it carries no signature of its own (no PAdES).
 EOF
       ;;
+    replay) cat <<'EOF'
+  replay <id> [--checkout PATH] [--compare [A [B]]] [--stop-policy P[,P...]] [--deliveries] [--prepare-as STATE] [--reverse-sweep] [--json] [--show-text]
+Reads a finished run's registers again under a harness's finish rules: the answers check (each
+check-answers line of the goal, as its own function), the finish gate and the finish line's verdict,
+readiness, the finish register (the coordinator, what is late against the report), the report's
+standing for each question, and each custody verdict held as a prefix. No model call, no job, no VM.
+The run is copied to a temporary directory (a clone where the file system makes one; the evidence,
+the VMs and the seats' sessions are left out, every link removed) and never written: its registers
+are hashed before and after. The goal's other checks are its own commands: not run, read as passing.
+  --checkout PATH   that checkout's rules instead of this one's (git worktree add --detach /tmp/x <commit>)
+  --compare         the run's own harness against this checkout (or --checkout), each difference named;
+                    the own harness is the hub's frozen copy while it is there, else the commit the
+                    registry records, extracted from this repository with git archive
+  --compare A [B]   checkout A against this one, or A against B; "frozen" names the run's own harness
+  --stop-policy P   as though the stop policy were P (operator, cap-pause, cap-stop; several with commas)
+  --deliveries      where the checkout delivers the answers check's warnings, act by act: the reply to
+                    each answer's record, each review offered for an answer, the reply to each attest
+                    and to each close or confirmation of a lead, each read on the registers as they
+                    stood at the act; and finish status at the end
+  --prepare-as STATE  a synthetic receipt on each copy for every broad extraction this checkout's
+                    census finds applies to the run's evidence (read in place, never written), in
+                    STATE (planned, attempted, produced, partial, failed, declined): which negatives
+                    the preparation hold would have held, and which it would have warned
+  --reverse-sweep   for a run recorded before the reverse sweep existed: each evidence addition swept
+                    on the copy against the coverage records standing at it, counted per question
+Each source's broad extraction is shown, by its receipts, with the questions held or warned on it.
+Values-free: codes, ids, counts and the harness's own words, never a record's text; --show-text adds
+the harness's lines whole, which quote records. It measures rules on a recorded history; what the
+agents would have done under another rule is not in it. Exit 0 replayed, 1 not (the reason on stderr).
+EOF
+      ;;
     rerun) cat <<'EOF'
   rerun <id> <job> [--normalise timestamps@1] [--network] [--json]
 Runs a sealed job again: its recorded spec through the job service's own worker path, in the image
@@ -11609,9 +11725,20 @@ EOF
   question <id> accept Q-n --as bounded|not_determinable --why W --expect-rev N
                                                accept a question's limits (refused while a lead on it is open);
                                                the run ends examination-limited
+  question <id> premise add --text T [--locator L] [--class given|supplied_assertion|proposition_under_test]
+                    [--entity E]... [--time FROM..TO]... [--for-question Q-n]... [--why W]
+                                               a premise the case takes (a given unless --class says otherwise):
+                                               its words verbatim, where they stand, what it is about
+  question <id> premise revise P-n --expect-rev N --why W [--text T] [--locator L] [scope flags | --no-scope]
+                                               a new revision; answers citing an earlier one are warned
+  question <id> premise admit P-n --as given|supplied_assertion --why W
+                                               admit an agent's proposal (a proposition under test until then)
+  question <id> premise withdraw P-n --why W   answers citing it are warned; a dispute on it is closed
+  question <id> premise list [--json] | show P-n [--json]
+                                               every premise whole, and the answers that cite it
   question <id> verify [--allowed-signers FILE] [--ca FILE]
                                                every signed act, its signature checked
-Every act takes --as ID (an enrolled person, a claim; on accept, a second --as) and --sign (signed with
+Every act takes --as ID (an enrolled person, a claim; on accept and premise admit, a second --as) and --sign (signed with
 that person's enrolled key, namespace dfirswarm-question; the passphrase or PIN on the terminal, or
 --secret-fd N). Without --as the act is this OS account's on this host, not enrolled, with the
 operator's authority. An examiner's question is in scope by authority (--objective new expands the
@@ -11670,7 +11797,8 @@ EOF
   requests <id> show R-n [--json]                 one request whole, with its history
   requests <id> ack R-n [--why W]                 acknowledged: you have seen it
   requests <id> answer R-n TEXT                   a lead's answer (its note: the lead reopens), a clarification's
-                                                  reply, or a stop proposal's answer
+                                                  reply, a stop proposal's answer, or your ruling on a premise
+                                                  dispute (or revise or withdraw the premise: question premise)
   requests <id> decline R-n --why W               declined; an acquisition declined is an evidence gap, never a
                                                   finding that the fact is absent
   requests <id> withdraw R-n --why W              withdrawn (moot, asked twice)
@@ -11728,7 +11856,7 @@ main() {
     # The operator's answer to a lead, and a reopen, change the run; a list reads it.
     lead) [[ "${2:-}" == list ]] || operator_audit "$cmd" "$@" ;;
     # A question act changes the run (its outcome is a second line, from cmd_question); list, show and verify read it.
-    question) [[ "${2:-}" == list || "${2:-}" == show || "${2:-}" == verify ]] || operator_audit "$cmd" "$@" ;;
+    question) [[ "${2:-}" == list || "${2:-}" == show || "${2:-}" == verify || ( "${2:-}" == premise && ( "${3:-}" == list || "${3:-}" == show ) ) ]] || operator_audit "$cmd" "$@" ;;
     # A network act (grant, deny, revoke) changes the run; list reads it.
     net) [[ "${2:-}" == list ]] || operator_audit "$cmd" "$@" ;;
     # An act on an operator request, and added evidence or material, change the run; list and show read it.
@@ -11744,6 +11872,7 @@ main() {
     summary) cmd_summary "$@" ;;
     context) cmd_context "$@" ;;
     metrics) cmd_metrics "$@" ;;
+    replay) cmd_replay "$@" ;;
     report) cmd_report "$@" ;;
     package) cmd_package "$@" ;;
     tools) cmd_tools "$@" ;;

@@ -1,0 +1,52 @@
+{
+  "cap_usd": 5,
+  "spent_usd": 0,
+  "tokens": 0,
+  "calls": 0,
+  "wall_clock_minutes": 0,
+  "started_at": "2026-09-29T10:10:01.134Z",
+  "source": "pi.sessionManager.getEntries",
+  "hard_kill": false,
+  "cap_steer_sent": false,
+  "metered": true,
+  "until_solved": true,
+  "stop_policy": "operator",
+  "agents": {
+    "a0": {
+      "spent_usd": 0,
+      "tokens": 0,
+      "calls": 0,
+      "input": 0,
+      "output": 0,
+      "cache_read": 0,
+      "cache_write": 0
+    },
+    "a1": {
+      "spent_usd": 0,
+      "tokens": 0,
+      "calls": 0,
+      "input": 0,
+      "output": 0,
+      "cache_read": 0,
+      "cache_write": 0
+    },
+    "a2": {
+      "spent_usd": 0,
+      "tokens": 0,
+      "calls": 0,
+      "input": 0,
+      "output": 0,
+      "cache_read": 0,
+      "cache_write": 0
+    },
+    "a3": {
+      "spent_usd": 0,
+      "tokens": 0,
+      "calls": 0,
+      "input": 0,
+      "output": 0,
+      "cache_read": 0,
+      "cache_write": 0
+    }
+  }
+}

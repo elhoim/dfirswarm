@@ -16,6 +16,14 @@
  *                                                           (the person, when named, is a second --as ID)
  *   questions-cli.ts direct <sandbox> (--question Q-n | --new-question T --new-why W) --title T --why W --product P --acceptance A
  *                                                           (never --sign: a directive is not signed)
+ *   questions-cli.ts premise <sandbox> add --text T [--locator L] [--class given|supplied_assertion|proposition_under_test]
+ *                                    [--entity E …] [--time FROM..TO …] [--for-question Q-n …] [--why W]
+ *   questions-cli.ts premise <sandbox> revise P-n --expect-rev N --why W [--text T] [--locator L] [scope flags | --no-scope]
+ *   questions-cli.ts premise <sandbox> admit P-n --as given|supplied_assertion --why W
+ *   questions-cli.ts premise <sandbox> withdraw P-n --why W
+ *   questions-cli.ts premise <sandbox> list [--json] | show P-n [--json]
+ *                                                           the premise register (extensions/premises.ts), on the
+ *                                                           same chain; the person, when named on admit, is a second --as ID
  *   questions-cli.ts deliver <sandbox>                      publish what was committed and not yet published
  *   questions-cli.ts verify <sandbox> [--json] [--allowed-signers FILE] [--ca FILE]
  *                                                           every signed act, its signature checked; fails on
@@ -44,6 +52,7 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import * as L from "../extensions/leads.ts";
 import * as P from "../extensions/protocol.ts";
+import * as PM from "../extensions/premises.ts";
 import * as Q from "../extensions/questions.ts";
 import { hasTty, readFromTty, readSecretFromFd, wipe } from "./secret-io.ts";
 import { fingerprintOf, keyNeeds, loadPerson, signAs, verifyAs, type Person, type PersonKey, type SignatureState } from "./signers.ts";
@@ -149,6 +158,8 @@ export async function admitOperatorAct(sandbox: string, req: AdmissionRequest, o
   if (!r.ok) return r;
   // Committed: the acknowledgement may be given. What it publishes follows.
   const out: Record<string, unknown> = { ...r, by: Q.originWords(p.origin) };
+  // A premise revised or withdrawn closes the disputes on its earlier revision: the operator requests are reconciled now.
+  if (req.ev === "premise_revise" || req.ev === "premise_withdraw") await import("../extensions/requests.ts").then((R) => R.reconcileRequests(sandbox)).catch(() => undefined);
   // A question's attachments are supplied material: each on the ledger as external (docs/adr/0014).
   if ((req.ev === "open" || req.ev === "amend") && p.act.attachments?.length && r.q) out.attachments = await recordAttachments(sandbox, r.q, p.act.attachments, Q.originWords(p.origin)).catch((err: Error) => ({ pending: err.message }));
   if (req.ev === "clarify_answer" && r.q && r.clarify) out.post = await Q.publishClarification(sandbox, r.q, r.clarify).catch((err: Error) => ({ pending: err.message }));
@@ -492,10 +503,27 @@ function line(v: Q.QuestionView): string {
     v.leading_forms.length ? `leading form ${v.leading_forms.map((f) => `"${f}"`).join(", ")}` : null,
     v.after_done ? "after done: a follow-up" : null,
   ].filter(Boolean);
-  const state = v.answer ? `answer E-${v.answer.seq}${v.answer.stale ? ` (STALE: before revision ${v.rev})` : ""}` : "no answer";
+  const state = v.answer ? `answer E-${v.answer.seq}${v.answer.stale ? ` (STALE: before revision ${v.rev})` : ""}${v.answer.parts?.length ? `; parts: ${PM.partsWords(v.answer.parts)}` : ""}${v.answer.premises?.length ? `; premises: ${PM.citationsWords(v.answer.premises)}` : ""}${v.answer.omitted?.length ? `; a review says it leaves out: ${v.answer.omitted.map((x) => `"${x.part}" (${x.by})`).join(", ")}` : ""}` : "no answer";
   const leads = v.leads.length ? `; leads ${v.leads.map((l) => `${l.id} ${l.status}${l.holder ? ` (${l.holder})` : ""}`).join(", ")}` : "";
   const signed = v.signed.length ? `; ${v.signed.length} signed act(s)` : "";
   return `${v.id} rev ${v.rev} [${bits.join(", ")}] ${v.author}${signed}\n    ${v.text.split("\n").join("\n    ")}\n    why: ${v.why}\n    ${state}${leads}`;
+}
+
+/** The premise register in words: each premise whole, with its revisions, class and the answers that cite it. */
+export async function premisesText(sandbox: string, id?: string): Promise<string | null> {
+  const ctx = await Q.viewContext(sandbox);
+  const all = Q.premiseViews(ctx);
+  const list = id ? all.filter((p) => p.id === id) : all;
+  if (id && !list.length) return null;
+  const out: string[] = id ? [] : [`${all.length} premise(s); chain ${ctx.questions.state.chain.ok ? "intact" : `BROKEN at line ${ctx.questions.state.chain.broken_at} (${ctx.questions.state.chain.reason})`}.`];
+  for (const p of list) {
+    out.push(`${Q.premiseLine(p, p.author)}`);
+    for (const r of p.revisions) out.push(`    revision ${r.rev} (${r.origin?.kind === "goal" ? "the goal" : Q.originWords(r.origin)}, ${r.at}): ${r.text}${r.locator ? ` — at ${r.locator}` : ""}; scope ${PM.scopeWords(r.scope)}${r.why && r.rev > 1 ? ` (why revised: ${r.why})` : ""}`);
+    if (p.classes.length > 1) out.push(`    class: ${p.classes.map((x) => `${PM.classWords(x.class)} at ${x.at}${x.why ? ` (${x.why})` : ""}`).join(" → ")}`);
+    out.push(`    cited by: ${p.cited_by.length ? p.cited_by.map((x) => `E-${x.answer} (${x.section}) ${x.conditional ? "assuming it" : x.stance}${x.refs.length ? ` on ${x.refs.join(", ")}` : ""}${x.current ? "" : ` at revision ${x.rev}`}`).join("; ") : "no standing answer"}`);
+    if (p.class === "proposition_under_test" && !p.withdrawn) out.push(`    admit: swarm.sh question <run> premise admit ${p.id} --as given|supplied_assertion --why "…"`);
+  }
+  return `${out.join("\n")}\n`;
 }
 
 /** Every question, what waits on the operator first (the triage, the clarifications), then by origin. */
@@ -506,6 +534,12 @@ export async function listText(sandbox: string): Promise<string> {
   const out: string[] = [];
   out.push(`${all.length} question(s); chain ${s.chain.ok ? `intact, ${s.events.length} events` : `BROKEN at line ${s.chain.broken_at} (${s.chain.reason})`}${ctx.questions.seeded ? "" : "; the goal's questions derived from the goal, not yet on the chain"}.`);
   if (s.objectives.size) out.push("", "OBJECTIVES:", ...[...s.objectives.values()].map((o) => `  ${o.id}: ${o.text}${o.origin && o.origin.kind !== "goal" ? ` (${o.why})` : ""}`));
+  if (s.premises.size) {
+    const premises = Q.premiseViews(ctx);
+    const under = premises.filter((p) => p.class === "proposition_under_test" && !p.withdrawn);
+    out.push("", "PREMISES:", ...premises.map((p) => `  ${Q.premiseLine(p, p.author)}`));
+    if (under.length) out.push(`  under test until you admit them: ${under.map((p) => `swarm.sh question <run> premise admit ${p.id} --as given|supplied_assertion --why "…"`).join("; ")}`);
+  }
   const proposed = all.filter((v) => v.scope === "proposed" && !v.withdrawn);
   const triage = s.triage.filter((t) => !t.resolved);
   if (proposed.length || triage.length) {
@@ -564,7 +598,7 @@ function parseArgs(rest: string[]): { pos: string[]; opts: Map<string, string[]>
   const pos: string[] = [];
   const opts = new Map<string, string[]>();
   const flags = new Set<string>();
-  const valued = new Set(["--text", "--why", "--neutral", "--objective", "--objective-text", "--parent", "--materiality", "--priority", "--reason", "--expects", "--hint", "--hint-value", "--attach", "--suggest", "--deadline", "--submission", "--expect-rev", "--as", "--secret-fd", "--via", "--title", "--product", "--acceptance", "--question", "--new-question", "--new-why", "--allowed-signers", "--ca", "--hub-admin"]);
+  const valued = new Set(["--text", "--why", "--neutral", "--objective", "--objective-text", "--parent", "--materiality", "--priority", "--reason", "--expects", "--hint", "--hint-value", "--attach", "--suggest", "--deadline", "--submission", "--expect-rev", "--as", "--secret-fd", "--via", "--title", "--product", "--acceptance", "--question", "--new-question", "--new-why", "--allowed-signers", "--ca", "--hub-admin", "--locator", "--class", "--entity", "--time", "--for-question"]);
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i];
     if (valued.has(a)) {
@@ -594,7 +628,7 @@ function emit(r: Record<string, unknown>): never {
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const [cmd, sandboxArg, ...rest] = process.argv.slice(2);
   const usage = () => {
-    process.stderr.write("usage: questions-cli.ts seed|add|list|show|amend|priority|scope|withdraw|clarify-reply|accept|direct|deliver|verify <sandbox> ...\n");
+    process.stderr.write("usage: questions-cli.ts seed|add|list|show|amend|priority|scope|withdraw|clarify-reply|accept|direct|premise|deliver|verify <sandbox> ...\n");
     process.exit(2);
   };
   if (!cmd || !sandboxArg) usage();
@@ -606,7 +640,12 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   // On accept, --as also takes what is accepted (bounded, not_determinable);
   // the other --as is the person. Everywhere else --as is the person.
   const asValues = opts.get("--as") ?? [];
-  const acceptAs = cmd === "accept" ? asValues.find((v) => (Q.ACCEPT_AS as readonly string[]).includes(v.replace(/-/g, "_"))) : undefined;
+  const acceptAs =
+    cmd === "accept"
+      ? asValues.find((v) => (Q.ACCEPT_AS as readonly string[]).includes(v.replace(/-/g, "_")))
+      : cmd === "premise" && pos[0] === "admit"
+        ? asValues.find((v) => (PM.ADMIT_AS as readonly string[]).includes(v.replace(/-/g, "_")))
+        : undefined;
   const person = asValues.filter((v) => v !== acceptAs).at(-1);
   // The run's hub, when one runs: the register's writer (swarm.sh names its admin socket).
   const admission = one("--hub-admin") ? { hubAdmin: one("--hub-admin") } : {};
@@ -632,7 +671,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     case "list":
       if (flags.has("--json")) {
         const ctx = await Q.viewContext(sandbox);
-        process.stdout.write(`${JSON.stringify({ questions: Q.questionViews(ctx).map((v) => ({ ...v, delivered: v.delivered })), objectives: [...ctx.questions.state.objectives.values()], triage: ctx.questions.state.triage, chain: ctx.questions.state.chain, seeded: ctx.questions.seeded }, null, 2)}\n`);
+        process.stdout.write(`${JSON.stringify({ questions: Q.questionViews(ctx).map((v) => ({ ...v, delivered: v.delivered })), objectives: [...ctx.questions.state.objectives.values()], triage: ctx.questions.state.triage, chain: ctx.questions.state.chain, seeded: ctx.questions.seeded, ...(ctx.questions.state.premises.size ? { premises: Q.premiseViews(ctx) } : {}) }, null, 2)}\n`);
       } else process.stdout.write(await listText(sandbox));
       break;
     case "show": {
@@ -717,6 +756,65 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
         ),
       );
       break;
+    case "premise": {
+      // The premise register (extensions/premises.ts): the operator designates what the case takes as given.
+      const op = pos[0];
+      const id = pos[1];
+      // A scope from its flags: --entity, --time FROM..TO, --for-question Q-n (each repeatable); --no-scope clears it on a revision.
+      const scope = (): Record<string, unknown> | undefined =>
+        flags.has("--no-scope")
+          ? {}
+          : opts.has("--entity") || opts.has("--time") || opts.has("--for-question")
+            ? { ...(opts.has("--entity") ? { entities: opts.get("--entity") } : {}), ...(opts.has("--time") ? { times: opts.get("--time") } : {}), ...(opts.has("--for-question") ? { questions: opts.get("--for-question") } : {}) }
+            : undefined;
+      const words = (): Q.ActInput => ({
+        ...(one("--text") !== undefined ? { text: one("--text") } : {}),
+        ...(one("--locator") !== undefined ? { locator: one("--locator") } : {}),
+        ...(one("--why") !== undefined ? { why: one("--why") } : {}),
+        ...(scope() !== undefined ? { premise_scope: scope() } : {}),
+      });
+      switch (op) {
+        case "list":
+        case "show": {
+          if (op === "show" && !id) usage();
+          const pid = op === "show" ? `P-${Number(/(\d+)$/.exec(id ?? "")?.[1] ?? 0)}` : undefined;
+          if (flags.has("--json")) {
+            const ctx = await Q.viewContext(sandbox);
+            const views = Q.premiseViews(ctx);
+            if (!pid) emit({ ok: true, premises: views, chain: ctx.questions.state.chain });
+            const p = views.find((x) => x.id === pid);
+            if (!p) emit({ ok: false, reason: `${id} is not in the premise register` });
+            emit({ ok: true, premise: p, history: ctx.questions.state.events.filter((e) => e.p === pid) });
+          }
+          const text = await premisesText(sandbox, pid);
+          if (text === null) {
+            process.stderr.write(`${id} is not in the premise register\n`);
+            process.exit(1);
+          }
+          process.stdout.write(text);
+          break;
+        }
+        case "add":
+          emit(await operatorAct(sandbox, "premise_add", { ...words(), ...(one("--class") !== undefined ? { class: one("--class") } : {}) }, f, undefined, admission));
+          break;
+        case "revise":
+          if (!id) usage();
+          emit(await operatorAct(sandbox, "premise_revise", { p: id, ...words(), ...(one("--expect-rev") !== undefined ? { expected_rev: one("--expect-rev") } : {}) }, f, undefined, admission));
+          break;
+        case "admit":
+          if (!id) usage();
+          emit(await operatorAct(sandbox, "premise_admit", { p: id, as: acceptAs ?? "", ...(one("--why") !== undefined ? { why: one("--why") } : {}) }, f, undefined, admission));
+          break;
+        case "withdraw":
+          if (!id) usage();
+          emit(await operatorAct(sandbox, "premise_withdraw", { p: id, ...(one("--why") !== undefined ? { why: one("--why") } : {}), ...(one("--expect-rev") !== undefined ? { expected_rev: one("--expect-rev") } : {}) }, f, undefined, admission));
+          break;
+        default:
+          process.stderr.write("usage: questions-cli.ts premise <sandbox> add|revise|admit|withdraw|list|show ...\n");
+          process.exit(2);
+      }
+      break;
+    }
     case "deliver":
       emit(await admit(sandbox, admission.hubAdmin, { op: "question_deliver" }, async () => ({ ok: true, delivered: await Q.deliverPending(sandbox) })));
       break;

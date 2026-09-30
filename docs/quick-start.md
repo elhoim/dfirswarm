@@ -223,14 +223,20 @@ same `swarm.sh start` underneath. In the order the form asks, on a first case:
 
 ### 3c. While the case runs, and after it stops
 
-The run is yours to steer while it runs; each command below acts through the
-hub, lands on the trace and on the operator's record, and has its detail in
+The run is yours to steer while it runs; each command below that changes it
+acts through the hub and lands on the trace and on the operator's record,
+while `metrics` and `replay` only read it. Each has its detail in
 [usage.md](usage.md) (and `swarm.sh help <command>`).
 
 ```bash
 # ask the running swarm a question (Q-n); list and follow them
 scripts/swarm.sh question <id> add --text "Was the archive mailed?" --why "the client says so"
 scripts/swarm.sh question <id> list
+
+# what the case takes as given (P-n), when the goal did not designate it:
+# a given is never proved again nor held open as a part of an answer
+scripts/swarm.sh question <id> premise add --text "The laptop was issued to the subject" \
+  --locator "the case brief, first paragraph" --why "stated in the brief"
 
 # what the run asked of you (R-n): a lead only you can unblock, evidence it
 # lacks, a clarification, a stop proposal; answer, decline or ack each
@@ -257,15 +263,19 @@ scripts/swarm.sh unpause <id>
 # a run that ended: continue it on its own chains, with a new question
 scripts/swarm.sh resume <id> --question "When was the stick first attached?"
 
-# after it stops: its process metrics, and the code the agents wrote that
-# could become library tools
+# after it stops: its process metrics, its registers replayed under this
+# checkout's finish rules (no model call, nothing written in the run), and
+# the code the agents wrote that could become library tools
 scripts/swarm.sh metrics <id>
+scripts/swarm.sh replay <id>
 scripts/swarm.sh tools <id> --candidates
 ```
 
 - **Questions** ([usage.md](usage.md#questions-swarmsh-question-and-directives)):
   a person's question is a proposition to test, offered to one seat; `--as ID`
-  names an enrolled person, `--sign` signs the act.
+  names an enrolled person, `--sign` signs the act. A premise is the case's
+  given, designated by you (or in the goal's front matter `premises:`); an
+  agent's proposal is a proposition under test until you `premise admit` it.
 - **Requests, evidence and material**
   ([usage.md](usage.md#the-case-contract-requests-evidence-material)):
   under `--more-evidence no` an acquisition is answered at once with "no
@@ -280,10 +290,13 @@ scripts/swarm.sh tools <id> --candidates
   `pause` holds it under any policy and `unpause` lifts a pause whose cause is
   gone; `stop` ends it as stopped, never completed; `resume` continues the
   same run, and an earlier seal still verifies as a prefix.
-- **Metrics and tool candidates**
+- **Metrics, replay and tool candidates**
   ([usage.md](usage.md#metrics-swarmsh-metrics-scriptsmetricsts),
+  [usage.md](usage.md#replay-swarmsh-replay-scriptsreplayts),
   [usage.md](usage.md#the-report-the-outputs-and-the-code-left-behind)): read
-  from the run's own registers, nothing written.
+  from the run's own registers, nothing written. `replay` evaluates a copy,
+  values-free; `--compare` sets the run's own harness against this checkout
+  and names every difference.
 
 ### 4. Your first case
 

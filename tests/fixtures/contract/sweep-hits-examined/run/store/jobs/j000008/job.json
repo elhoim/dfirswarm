@@ -1,0 +1,1 @@
+{"id":"j000008","state":"committed","requester":{"agent":"a0"},"status":"ok","exit":0,"spec":{"kind":"command","scope":"declared","inputs":["input:disk.E01"],"command":"search"}}
