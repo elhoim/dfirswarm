@@ -48,7 +48,10 @@ headline. Now (ADR 0011, "What a question presumes"):
   capped. s85febc and s704e4b replay with no difference against main; with
   the generator's presumptions, s85febc's questions 3 and 7 would have been
   warned, and nothing else changes. Fixtures `premise-untested-capped`,
-  `premise-untested-warned`, `premise-tested-not-supported`.
+  `premise-untested-warned`, `premise-tested-not-supported`. The calibration
+  scorer says, for each question that expects `premise_not_supported`, what
+  its answer recorded and whether the answer and its reviews carried a
+  premise test (`summary.premise`, codes and counts only).
 
 ### Changed: the report shows each answer's parts, and the metrics count the under-claimed
 
@@ -71,6 +74,11 @@ but a reader takes "partial" to mean "not fully known". Presentation only
   `not_asked` by a review), and `--compare` sets each run's count side by
   side and flags the question. On s85febc and s704e4b it is 0 of 6: neither
   run's reviews marked a part not asked.
+- **Measured on the truth too**: the calibration scorer
+  (`scripts/calibrate.ts`) gives "Under-claimed: k of n present questions
+  answered partial with every present fact found", each with its label and
+  confidence, in its summary and its score JSON (`summary.under_claimed`);
+  where the truth is known it sees what no review marked.
 
 ### Fixed: the findings of an independent review of the limits branch
 

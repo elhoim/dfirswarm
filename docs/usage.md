@@ -960,8 +960,11 @@ attestations, the leads, the operator requests, and the question register and
 the `result` and coverage fields where they exist), never a tool's output,
 and reports the miss rate on present facts (the hard ones apart), false
 negatives, the forced-answer rate, decoy adoption, unsupported negatives,
-acquisition requests, the late item, and the calibration of the stated
-confidence. Exit 0 when scored, 1 when a generated case's bytes do not hold
+acquisition requests, the late item, the calibration of the stated
+confidence, under-claiming (present questions answered partial with every
+present fact found, each with its confidence) and, for each question that
+expects `premise_not_supported`, whether its answer and its reviews carried a
+premise test. Exit 0 when scored, 1 when a generated case's bytes do not hold
 what its truth says, 2 on a usage error or a refusal. See
 [calibration/README.md](../calibration/README.md).
 

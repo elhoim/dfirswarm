@@ -191,6 +191,8 @@ operator requests, and, when they exist, the question register
 | acquisition | a missing question for which the swarm asked the operator for the evidence: an operator request or a lead closed `needs_operator` naming the question, or matching the truth's acquisition patterns; whether the gap is named at all is counted apart |
 | the late item | whether it is in the run, and whether the question it settles was answered as it settles it |
 | calibration of confidence | accuracy per stated confidence, a Brier score (high 0.9, medium 0.7, low 0.4) and the number wrong at high confidence |
+| under-claiming | a present question (as scored) answered `partial` whose every present fact the answer finds: the label says less than the answer holds. Each is named with its confidence, recorded and stated. Measured on the truth, where `swarm.sh metrics` can count only what reviews mark `not_asked` |
+| the premise test | for each question that expects `premise_not_supported`: what its answer recorded, and whether the answer carried `premise_tested` and how many other seats' reviews of it carried `answer_review.premise_tested` (ADR 0011, "What a question presumes"); codes and counts only, never the tests' words |
 
 An answer's class is its own `result` when it has one, else the question
 register's disposition (the last `dispose` event's `decided.result`, or what

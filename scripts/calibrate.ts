@@ -35,6 +35,12 @@
  *   that would settle it;
  * - the late item: whether the run was given it (by digest), and whether the
  *   answer it settles moved;
+ * - under-claiming: a present question answered partial whose every present
+ *   fact the answer finds, with its confidence (the truth sees what the
+ *   metrics' not_asked marks cannot);
+ * - for each question that expects premise_not_supported: what its answer
+ *   recorded, and whether the answer and its reviews carried a premise test
+ *   (premise_tested; codes and counts only);
  * - confidence calibration: accuracy per recorded confidence and a Brier score
  *   (high 0.9, medium 0.7, low 0.4). The recorded confidence is the run's
  *   (protocol.ts recordedConfidence: high only on an established answer
@@ -114,6 +120,14 @@ export type QuestionScore = {
   false_negative: boolean | null;
   forced: boolean | null;
   acquisition: { requested: boolean; gap_named: boolean; where: string[] } | null;
+  /**
+   * A question whose expected result is premise_not_supported (docs/adr/0011,
+   * "What a question presumes"): whether its standing answer carried its own
+   * premise_tested, and the seats other than its authors whose attests of it
+   * carried answer_review.premise_tested. Codes and seats, never the tests'
+   * words. Null on every other question, and on one with no answer.
+   */
+  premise_test: { answer: boolean; reviews: string[] } | null;
   negative_support: { covered: boolean; complete: boolean | null; reviewed: boolean; reviewers: string[]; by: string[] } | null;
   correct: boolean | null;
   verdict: string;
@@ -138,6 +152,16 @@ export type ScoreReport = {
     negatives: { total: number; without_coverage: number; without_review: number; unsupported: number; rate: number | null };
     acquisition: { questions: number; requested: number; gap_named: number };
     late: { questions: number; reflected: number };
+    /**
+     * Under-claiming, measured on the truth rather than on the reviews'
+     * not_asked marks (docs/adr/0013, "What the report shows of an answer's
+     * parts"): the present questions (as scored) whose answer is partial and
+     * finds every present fact the question has, each with its label and its
+     * confidence, recorded and stated.
+     */
+    under_claimed: { questions: number; under_claimed: number; rate: number | null; items: Array<{ id: string; label: ResultClass; confidence: string | null; stated_confidence: string | null }> };
+    /** Each question expecting premise_not_supported: what its answer recorded, and whether the premise was tested on the answer and in reviews (codes only). */
+    premise: Array<{ id: string; result: ResultClass | null; class_ok: boolean | null; verdict: string; tested_on_answer: boolean; tested_in_reviews: number }>;
     unanswered: number;
     /** By the recorded confidence; `stated_high_lowered`: answers stated high that the run records medium. */
     calibration: { levels: Record<string, { n: number; correct: number }>; brier: number | null; overconfident: number; stated_high_lowered: number };
@@ -492,6 +516,15 @@ export async function scoreRun(runDirArg: string, truth: Truth, opts: { truthPat
       acquisition = { requested: hits.length > 0, gap_named: gap.length > 0 || (answer ? matches(pats, answerText) : false), where: [...hits.map((h) => h.where), ...gap.map((g) => `ledger E-${g.seq}`)] };
     }
 
+    // The premise test on a question whose premise is false: on the answer, and in each other seat's review of it.
+    let premiseTest: QuestionScore["premise_test"] = null;
+    if (answer && expected.result === "premise_not_supported") {
+      const authors = new Set([answer.by, ...((Array.isArray(answer.entry.authors) ? answer.entry.authors : []) as string[])]);
+      const tested = (t: unknown) => Boolean(t && typeof t === "object" && Array.isArray((t as Rec).refs) && ((t as Rec).refs as unknown[]).length);
+      const reviews = attests.filter((a) => a.seq === answer!.seq && !authors.has(str(a.by)) && tested((a.answer_review as Rec | undefined)?.premise_tested)).map((a) => str(a.by));
+      premiseTest = { answer: tested(answer.entry.premise_tested), reviews: [...new Set(reviews)] };
+    }
+
     let support: QuestionScore["negative_support"] = null;
     if (answer && negative) {
       const covering = cited.filter((c) => {
@@ -525,7 +558,7 @@ export async function scoreRun(runDirArg: string, truth: Truth, opts: { truthPat
     questions.push({
       id: q.id, kind: q.kind, scored_as: scoredAs, scored: q.scored, text: q.text, late_applies: lateApplies, expected, answer,
       class_ok: classOk, facts, decoys, false_negative: q.scored ? falseNegative : null, forced: q.scored ? forced : null,
-      acquisition: q.scored ? acquisition : null, negative_support: support, correct: q.scored ? correct : null, verdict,
+      acquisition: q.scored ? acquisition : null, premise_test: premiseTest, negative_support: support, correct: q.scored ? correct : null, verdict,
     });
   }
 
@@ -560,6 +593,9 @@ export async function scoreRun(runDirArg: string, truth: Truth, opts: { truthPat
       if (q.answer.confidence === "high" && !q.correct) overconfident += 1;
     }
   }
+  // A present question answered partial whose every present fact is found: the label says less than the answer holds.
+  const underClaimed = presentQs.filter((q) => q.answer?.result === "partial" && q.facts.length > 0 && q.facts.every((f) => f.found));
+  const premiseQs = scored.filter((q) => q.expected.result === "premise_not_supported");
   const missingQs = scored.filter((q) => q.acquisition);
   const lateQs = scored.filter((q) => q.late_applies);
   const summary: ScoreReport["summary"] = {
@@ -577,6 +613,8 @@ export async function scoreRun(runDirArg: string, truth: Truth, opts: { truthPat
     },
     acquisition: { questions: missingQs.length, requested: missingQs.filter((q) => q.acquisition!.requested).length, gap_named: missingQs.filter((q) => q.acquisition!.gap_named).length },
     late: { questions: lateQs.length, reflected: lateQs.filter((q) => q.correct).length },
+    under_claimed: { questions: presentQs.length, under_claimed: underClaimed.length, rate: rate(underClaimed.length, presentQs.length), items: underClaimed.map((q) => ({ id: q.id, label: q.answer!.result, confidence: q.answer!.confidence, stated_confidence: q.answer!.stated_confidence })) },
+    premise: premiseQs.map((q) => ({ id: q.id, result: q.answer?.result ?? null, class_ok: q.class_ok, verdict: q.verdict, tested_on_answer: q.premise_test?.answer ?? false, tested_in_reviews: q.premise_test?.reviews.length ?? 0 })),
     unanswered: scored.filter((q) => !q.answer).length,
     calibration: { levels, brier: brierN ? Math.round((brierSum / brierN) * 1000) / 1000 : null, overconfident, stated_high_lowered: scored.filter((q) => q.answer?.stated_confidence === "high" && q.answer.confidence !== "high").length },
   };
@@ -642,6 +680,8 @@ export function scoreText(r: ScoreReport, outPath?: string): string {
     `Negatives:            ${s.negatives.total}; ${s.negatives.without_coverage} without coverage, ${s.negatives.without_review} without review, ${s.negatives.unsupported} unsupported (${pct(s.negatives.rate)}; coverage read as ${r.ledger.coverage_model === "wp2" ? "coverage records" : "a complete absence or a limitation cited"})`,
     `Acquisition:          ${s.acquisition.requested} of ${s.acquisition.questions} missing-evidence questions requested the evidence; ${s.acquisition.gap_named} named the gap`,
     `Late item:            ${s.late.questions ? `${s.late.reflected} of ${s.late.questions} questions it settles answered as it settles them` : "not added: those questions are scored as missing evidence"}`,
+    `Under-claimed:        ${s.under_claimed.under_claimed} of ${s.under_claimed.questions} present questions answered partial with every present fact found${s.under_claimed.items.length ? ` (${s.under_claimed.items.map((x) => `Q${x.id} ${x.label}, ${x.confidence ?? "no confidence"}${x.stated_confidence && x.stated_confidence !== x.confidence ? ` (stated ${x.stated_confidence})` : ""}`).join("; ")})` : ""}`,
+    ...s.premise.map((x) => `Premise tested:       Q${x.id} expects premise_not_supported; answered ${x.result ?? "none"}${x.result ? (x.class_ok ? " (accepted)" : " (not accepted)") : ""}, ${x.verdict}; premise_tested on the answer ${x.tested_on_answer ? "yes" : "no"}, in ${x.tested_in_reviews} review(s)`),
     `Unanswered:           ${s.unanswered}`,
     `Confidence (recorded): ${Object.entries(s.calibration.levels).map(([k, v]) => `${k} ${v.correct}/${v.n}`).join(", ") || "none stated"}; Brier ${s.calibration.brier ?? "-"}; ${s.calibration.overconfident} wrong at high confidence; ${s.calibration.stated_high_lowered} stated high and recorded medium`,
   );
