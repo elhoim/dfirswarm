@@ -96,6 +96,21 @@ out="$(check --goal-file "$ROOT/prompts/goals/hello.md")"
 grep -q "$WARNED" <<<"$out" && fail "a goal with no brief was warned about: $out"
 echo "ok - a Premises section designates them too; an empty one does not; a scenario heading is a brief; a goal with no brief is not warned about"
 
+# What a question presumes (docs/adr/0011, "What a question presumes"): the
+# front matter's presumes: list is carried into a Presumptions section, and
+# the question register seeds each on the question it names.
+printf -- '---\npresumes:\n  - 1: The drive was connected to the workstation.\n---\n## Goal\n\nA case.\n\n### Questions the report has to answer\n\n1. When was the drive first connected?\n\n## Premises\n\n- The drive is the company%ss. [scope: entities the drive]\n\n## Definition of done\n\n`work/report.md` exists.\n\n## Checks\n\n- `node --experimental-strip-types --no-warnings "$SWARM_HARNESS/scripts/check-answers.ts" --sections 1`\n' "'" > "$TMP/presumed.md"
+out="$(swarm start --model solo/model --n 2 --cap-usd 1 --no-start --goal-file "$TMP/presumed.md" --label presumed)"
+sb4="$(sandbox_of "$out")"
+[[ -n "$sb4" && -f "$sb4/SWARM.md" ]] || fail "no sandbox for the presumed goal: $out"
+grep -q '^## Presumptions$' "$sb4/SWARM.md" || fail "the front matter's presumes is not in a Presumptions section of the contract"
+grep -q '^- 1: The drive was connected to the workstation\.$' "$sb4/SWARM.md" || fail "the presumption is not in the contract verbatim"
+grep -q '^presumes:' "$sb4/SWARM.md" && fail "the front matter leaked into the contract"
+pid="$(jq -r '.runs[] | select(.label == "presumed") | .id' "$TMP/runs/registry.json")"
+got="$(swarm question "$pid" list --json | jq -r '.questions[] | select(.id == "Q-1") | .presumes.text')"
+[[ "$got" == "The drive was connected to the workstation." ]] || fail "the register does not hold what Q-1 presumes: $got"
+echo "ok - presumes: in the front matter is carried into the contract's Presumptions section, and the register holds it on its question"
+
 # The shipped goals: each with a brief designates its givens, so none is warned about.
 for g in "$ROOT"/prompts/goals/*.md; do
   out="$(check --goal-file "$g")" || fail "$(basename "$g"): --check refused it: $out"

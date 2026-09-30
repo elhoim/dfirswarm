@@ -636,12 +636,19 @@ is warned about at the kickoff and by `start --check`: its answers would hold
 the brief's givens open as parts to prove. Designate what the brief states as
 given (never what a question asks or tests) in the metadata block, or on the
 run with `question <run> premise add`. The shipped goals under
-`prompts/goals/` and the calibration generator's designate theirs.
+`prompts/goals/` and the calibration generator's designate theirs. What a
+question takes as happened goes in a `## Presumptions` section or the
+metadata block's `presumes:` list (`- 7: the drive was wiped`, the question
+as the goal numbers it): its answer tests that premise first, against "the
+question's premise is not supported", and a review names that test
+([ADR 0011](adr/0011-questions-are-a-register-with-their-askers.md), "What a
+question presumes"). The calibration generator marks every question that
+asks which, when or how of an event, whatever its truth.
 
-- `question <run> add --text T --why W [--objective O-n | --objective new --objective-text T] [--parent Q-n] [--materiality material|background] [--priority urgent --reason R] [--expects existence|value|narrative|timeline|list] [--completeness] [--hint REF [--hint-value V]]... [--attach REF]... [--suggest SEAT] [--deadline ISO] [--neutral T] [--submission TOKEN]`
-  asks the running swarm a question. `--completeness` says it asks for a complete set (every file, all connections, a complete list); a question whose words say so ("every", "all", "each", "complete list") is marked so without it, and `amend --no-completeness` takes the mark off. Its established or partial answer rests on a coverage record naming the areas searched (allocated, deleted, unallocated, slack, secondary), or the finish line holds it. It is written to the chain first and acknowledged after (the last line printed is the JSON of the act: `q`, `rev`, `scope`, the event's `seq` and `hash`, and what was delivered); then posted from `analyst:<you>`, offered to the suggested seat for its first minute (`SWARM_QUESTION_OFFER_SEC`) or to the most suited idle seat, and ranked first in every agent's header. A hint says where to look (a ref such as `input:<path>`, or a path in the run); `--hint-value` after it records what the hint says as an open hypothesis in the ledger. `--submission` makes a retry the same question.
+- `question <run> add --text T --why W [--objective O-n | --objective new --objective-text T] [--parent Q-n] [--materiality material|background] [--priority urgent --reason R] [--expects existence|value|narrative|timeline|list] [--completeness] [--presumes P] [--hint REF [--hint-value V]]... [--attach REF]... [--suggest SEAT] [--deadline ISO] [--neutral T] [--submission TOKEN]`
+  asks the running swarm a question. `--presumes` says what it takes as happened ("the drive was wiped"): its answer tests that premise first, an established review of an established answer without that test is recorded best_candidate, and a partial answer without it is warned (`premise_untested`), never held; the console's question form has the same field. `--completeness` says it asks for a complete set (every file, all connections, a complete list); a question whose words say so ("every", "all", "each", "complete list") is marked so without it, and `amend --no-completeness` takes the mark off. Its established or partial answer rests on a coverage record naming the areas searched (allocated, deleted, unallocated, slack, secondary), or the finish line holds it. It is written to the chain first and acknowledged after (the last line printed is the JSON of the act: `q`, `rev`, `scope`, the event's `seq` and `hash`, and what was delivered); then posted from `analyst:<you>`, offered to the suggested seat for its first minute (`SWARM_QUESTION_OFFER_SEC`) or to the most suited idle seat, and ranked first in every agent's header. A hint says where to look (a ref such as `input:<path>`, or a path in the run); `--hint-value` after it records what the hint says as an open hypothesis in the ledger. `--submission` makes a retry the same question.
 - `question <run> list [--json]` and `show Q-n [--json]`: every question, the triage queue and the clarifications waiting first; one question whole, with every revision, its offers, its leads, its answer and each signed act checked.
-- `question <run> amend Q-n --expect-rev N [--text T] [--why W] [--neutral T] [--completeness | --no-completeness] ...`: a new verbatim revision, refused unless N is the revision now; the standing answer, which names the revision it answers (`question_rev`), is stale until it is recorded again for the new one.
+- `question <run> amend Q-n --expect-rev N [--text T] [--why W] [--neutral T] [--completeness | --no-completeness] [--presumes P] ...`: `--presumes` alone changes what the question takes as happened and makes no new revision; otherwise a new verbatim revision, refused unless N is the revision now; the standing answer, which names the revision it answers (`question_rev`), is stale until it is recorded again for the new one.
 - `question <run> priority Q-n urgent|normal [--reason R]`, `withdraw Q-n --why W`, `clarify-reply Q-n C-n TEXT`, `scope Q-n|L-n in_scope|excluded --why W`, `accept Q-n --as bounded|not_determinable --why W --expect-rev N`, `verify [--allowed-signers FILE] [--ca FILE]`. An acceptance takes a question's limits as they stand for that revision; it is refused while a lead under the question is still open (a route not yet closed) or its answer is a negative no other seat has reviewed, and any acceptance makes the run's outcome `examination_limited`. It excuses a partial store sweep, and evidence added before it (`evidence_stale`), never evidence added after it or the rest of the negative bar; its reply (`still_held`, and a line from `swarm.sh`) names what the finish line still holds on the question.
 - `question <run> premise add --text T [--locator L] [--class given|supplied_assertion|proposition_under_test] [--entity E]... [--time FROM..TO]... [--for-question Q-n]... [--why W]`: a premise the case takes, its words verbatim, where they stand, and what it is about (entities, time ranges, the questions it applies to; each optional, none meaning everything). A given unless `--class` says otherwise: a given is not proved again and is never an open part; a supplied assertion (a client's or a witness's statement) is assumed as asserted, and the report says so; a proposition under test is examined like any claim. `premise revise P-n --expect-rev N --why W [--text T] [--locator L] [scope flags | --no-scope]` makes a new revision (answers citing the earlier one are warned, never rewritten); `premise admit P-n --as given|supplied_assertion --why W` admits an agent's proposal (`premise_propose`: a proposition under test until then); `premise withdraw P-n --why W`; `premise list [--json]` and `premise show P-n [--json]` read them, with the answers that cite each. Two standing answers that assume and contradict one premise revision over scopes that overlap hold the run (`premise_inconsistent`) until they are reconciled on the record: one revised, the finding that rebuts the premise named (the premise then comes to you as a request of kind `premise`: revise it, withdraw it, or `requests <run> answer R-n "the premise stands, and why"`; nothing waits on your answer), a scope narrowed, or an answer made conditional ("assuming P-n"). Neither side is forced.
 - `lead <run> direct (--question Q-n | --new-question T --new-why W) --title T --why W --product P --acceptance A`: a directive, an unheld lead under a question with the product it is to make and what makes that acceptable. A directive is not signed (`--sign` is refused; sign the question it serves). Under a person's question no lead has framed yet, the first agent to claim it states the proposition and its negation.
@@ -1037,7 +1044,7 @@ run's under-claiming count (the metric above), side by side.
 ### Replay: `swarm.sh replay`, `scripts/replay.ts`
 
 ```
-swarm.sh replay <id> [--checkout PATH] [--compare [A [B]]] [--stop-policy P[,P...]] [--deliveries] [--prepare-as STATE] [--reverse-sweep] [--json] [--show-text]
+swarm.sh replay <id> [--checkout PATH] [--compare [A [B]]] [--stop-policy P[,P...]] [--deliveries] [--prepare-as STATE] [--reverse-sweep] [--presumes Q[,Q...]] [--json] [--show-text]
 node --experimental-strip-types scripts/replay.ts <run-dir | id --registry FILE> [the same options]
 ```
 
@@ -1159,6 +1166,15 @@ measure a rule change on recorded histories before paying for new runs
   addition, marked synthetic, on the copy's chain. Only for a checkout that
   reads version 2 sweep lines (one from before would read the chain as
   broken): its copy is left as it is, and the output says so.
+- **`--presumes Q[,Q...]`** asks what the premise rule (ADR 0011, "What a
+  question presumes") would have said of a run from before it: each question
+  named is amended in every copy, by this checkout's register as the
+  operator would amend it, to presume "the event question <n> asks about
+  happened" (synthetic words); a question the register does not hold is
+  named. Each partial answer none of whose tests covers the premise is then
+  warned (`premise_untested`), and the review rule names each recorded
+  established attest it would cap for it; the recorded strengths stay the
+  run's. A checkout from before the rule reads the amendment as nothing.
 
 Exit 0 when replayed and the run's registers are unchanged; 1 when a
 checkout could not be evaluated, the run changed under it, or it was

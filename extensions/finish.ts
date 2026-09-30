@@ -1330,7 +1330,9 @@ async function gateInputs(sandboxRoot: string, s: L.LeadsSnapshot): Promise<Omit
   const preparation = await import("./preparation.ts").then((PR) => PR.preparationFacts(sandboxRoot, s.ledger.entries, s.state.leads.values())).catch(() => undefined);
   // The premise register, from the question chain (premises.ts): what the premise gate reads each citation's scope from.
   const premises = s.questions?.state.premises;
-  return { entries: s.ledger.entries, attestations, disputes, bar, sweeps, ...(imports.length ? { imports } : {}), moreEvidence, ...(underLeads ? { underLeads } : {}), ...(preparation ? { preparation } : {}), ...(premises?.size ? { premises } : {}) };
+  // What each question takes as happened (docs/adr/0011, "What a question presumes"): a partial answer to one whose premise nothing tests is warned.
+  const presumes = await import("./questions.ts").then((Q) => Q.presumptionsOf(s.questions, s.state)).catch(() => new Map());
+  return { entries: s.ledger.entries, attestations, disputes, bar, sweeps, ...(imports.length ? { imports } : {}), moreEvidence, ...(underLeads ? { underLeads } : {}), ...(preparation ? { preparation } : {}), ...(premises?.size ? { premises } : {}), ...(presumes.size ? { presumes } : {}) };
 }
 
 /**

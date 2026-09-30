@@ -567,6 +567,10 @@ export type QuestionView = {
   priority: "normal" | "urgent";
   priority_reason: string | null;
   expects: string | null;
+  /** What somebody said the question takes as happened; mirrors `presumes` in `extensions/questions.ts`. */
+  presumes?: { text: string; rev: number; at: string; by: string; origin: QuestionOrigin; seq: number; via: "open" | "amend" | "clarify" } | null;
+  /** What the question presumes as the review rule reads it (its presumes, or a person's question's framing); mirrors `Presumption` in `extensions/premises.ts`. */
+  presumption?: { q: string; section: string; text: string; source: "presumes" | "framing"; by: string; lead?: string; negation?: string } | null;
   hints: Array<{ ref: string; value?: string }>;
   attachments: string[];
   suggested_to: string | null;
@@ -596,6 +600,8 @@ export type QuestionView = {
     premises?: PremiseCitation[];
     /** Each part a review says it leaves out. */
     omitted?: Array<{ by: string; part: string; why: string }>;
+    /** The tests of what the question presumes: the answer's own and each review's. */
+    premise_tests?: Array<{ by: string; review: boolean; outcome: string; refs: string[] }>;
   } | null;
   leads: Array<{ id: string; status: string; holder: string | null; disposition?: string; opened_by: string }>;
   clarifications: Array<{ id: string; at: string; by: string; what: string; to: string; answer: { at: string; by: string; text: string; origin: QuestionOrigin | null } | null }>;

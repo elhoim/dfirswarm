@@ -385,6 +385,18 @@ the same commands again.""",
             f"`web01` is the web server of {org}'s customer portal. [scope: entities web01]",
             "The operations team copied the server's logs, the portal application's upload log and the web server user's crontab. [scope: entities web01]",
         ],
+        # What each question takes as happened, from its own words, whatever the
+        # truth: which address exploited the portal (1), the web shell (2), how the
+        # attacker kept access (3), which tables were read (4), which CVE was
+        # exploited (6). Question 5 asks whether (with an "if so"), and presumes
+        # nothing; 7 asks for the timeline.
+        presumes={
+            1: "The portal was exploited through a request.",
+            2: "A web shell was placed on the server.",
+            3: "The attacker kept access to the server after the web shell.",
+            4: "The attacker read database tables.",
+            6: "The attacker exploited a published vulnerability (a CVE).",
+        },
     )
 
     # --- the truth --------------------------------------------------------------------------------

@@ -469,6 +469,15 @@ hash. If `SWARM.md` has an "Evidence catalog" section, the kickoff already ran t
             f"{suspect['full']} resigned from {org}. [scope: entities {suspect['full']}]",
             f"HR found the drive in {suspect['first']}'s desk drawer. [scope: entities the USB flash drive, {suspect['full']}]",
         ],
+        # What each question takes as happened, from its own words, whatever the
+        # truth: which account copied (3), when the list was first created (6), which
+        # tool was used (7). Questions 1, 2, 4 and 5 ask whether, or ask for what the
+        # evidence shows, and presume nothing; 8 asks for the timeline.
+        presumes={
+            3: f"Company files were copied to the drive by an account of `{host}`.",
+            6: "The customer list was first created on a company system it came from.",
+            7: "A wiping or anti-forensic tool was used on the drive.",
+        },
     )
 
     # --- the truth ------------------------------------------------------------------------------

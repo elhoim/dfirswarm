@@ -1,0 +1,37 @@
+{
+  "case": "The goal says question 1 presumes someone logged on. A finding shows every logon attempt in the log's range failed; the answer tests the premise on it and records premise_not_supported, and another seat's review tests the premise too. The question is disposed; question 2 is established.",
+  "design": [
+    "docs/adr/0011 'What a question presumes': before answering a question that presumes an event, test whether the event happened; if the evidence does not support it, the answer is premise_not_supported; the answer may carry the test itself (premise_tested), its entries citations as the reasoning's are.",
+    "docs/adr/0011 'Decision', item 7: premise_not_supported is an answer.",
+    "docs/adr/0013 'The end of a run, under every stop policy': a premise shown not to hold, on a finding, is a disposition under the bar; the run ends completed when every question is established or so settled."
+  ],
+  "policies": [
+    "as run"
+  ],
+  "expect": {
+    "questions": {
+      "question:1": {
+        "disposition": "premise_not_supported",
+        "best_candidate": false,
+        "readiness_holds": false,
+        "defects": [],
+        "warnings": []
+      },
+      "question:2": {
+        "disposition": "established",
+        "best_candidate": false,
+        "readiness_holds": false,
+        "defects": [],
+        "warnings": []
+      }
+    },
+    "ready": true,
+    "verdict": {
+      "proceed": true,
+      "outcome": "completed"
+    },
+    "done": "proceeds",
+    "agreement": [],
+    "review_caps": { "established": 1, "capped": [] }
+  }
+}

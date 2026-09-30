@@ -571,7 +571,7 @@ export function questionId(raw: string): string {
 // --- reconciliation: the requests the committed records imply ------------------------------------
 
 type LeadEv = { seq: number; at: string; by: string; ev: string; lead?: string; title?: string; answers?: string[]; disposition?: string; ref?: string; ask?: unknown; why?: string; cause?: string; text?: string };
-type QuestionEv = { seq: number; at: string; by: string; ev: string; q?: string; rev?: number; act?: { clarify?: string; what?: string; answer?: string; why?: string }; decided?: { to?: string } };
+type QuestionEv = { seq: number; at: string; by: string; ev: string; q?: string; rev?: number; act?: { clarify?: string; what?: string; answer?: string; why?: string; presumes?: string }; decided?: { to?: string } };
 type NetEv = { seq: number; at: string; by: string; ev: string; item?: string; host?: string; lead?: string | null; request?: string; how?: string; why?: string; grant?: string; principal?: string };
 
 function jsonLines<T>(text: string): T[] {
@@ -706,7 +706,7 @@ export async function reconcileRequests(sandboxRoot: string): Promise<{ opened: 
       let rid = s.byKey.get(key) ?? append.find((d) => d.key === key)?.rid;
       if (!rid) {
         const answer = `swarm.sh question ${run || "<run>"} clarify-reply ${e.q} ${e.act.clarify} "<your answer>"`;
-        const line = { at: e.at, run, kind: "clarification", id: e.act.clarify, q: e.q, rev: e.rev ?? null, by: e.by, to: e.decided?.to || "operator", title: `${e.q}: clarification ${e.act.clarify}`, request: e.act.what ?? "", answer };
+        const line = { at: e.at, run, kind: "clarification", id: e.act.clarify, q: e.q, rev: e.rev ?? null, by: e.by, to: e.decided?.to || "operator", title: `${e.q}: clarification ${e.act.clarify}`, request: e.act.what ?? "", ...(e.act.presumes ? { presumes: e.act.presumes } : {}), answer };
         rid = open({ at: e.at, by: e.by, kind: "clarification", key, line, questions: [e.q] });
       }
       const req = s.requests.get(rid);

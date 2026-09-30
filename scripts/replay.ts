@@ -5,8 +5,8 @@
  * "Measuring a rule change").
  *
  *   node --experimental-strip-types scripts/replay.ts <run-dir | run-id> [--registry FILE]
- *        [--checkout PATH] [--compare [A [B]]] [--stop-policy P[,P…]] [--deliveries] [--prepare-as STATE] [--reverse-sweep] [--json] [--show-text]
- *   swarm.sh replay <run> [--checkout PATH] [--compare [A [B]]] [--stop-policy P] [--deliveries] [--prepare-as STATE] [--reverse-sweep] [--json]
+ *        [--checkout PATH] [--compare [A [B]]] [--stop-policy P[,P…]] [--deliveries] [--prepare-as STATE] [--reverse-sweep] [--presumes Q[,Q…]] [--json] [--show-text]
+ *   swarm.sh replay <run> [--checkout PATH] [--compare [A [B]]] [--stop-policy P] [--deliveries] [--prepare-as STATE] [--reverse-sweep] [--presumes Q[,Q…]] [--json]
  *
  * The run is never written. Its directory is copied to a temporary one (a
  * clone where the file system makes one, APFS or a reflink), less what no
@@ -78,6 +78,16 @@
  * question; `--reverse-sweep` gives an addition that has none (a run from
  * before it) the line this checkout's store sweep computes over the copy's
  * import, from the coverage records standing at the addition.
+ *
+ * `--presumes Q[,Q…]` asks what the premise rule (docs/adr/0011, "What a
+ * question presumes") would have asked of a run from before it: each
+ * question named is amended in every copy, by this checkout's register, as
+ * the operator would amend it with `--presumes`, to presume "the event
+ * question <n> asks about happened" (synthetic words; the run untouched).
+ * The projection then shows the partial answers warned (premise_untested),
+ * and the review rule's caps name each established attest it would cap
+ * (premise_untested); the recorded strengths stay the run's. A checkout
+ * before the rule reads the amendment as nothing.
  *
  * `--deliveries` reads where the checkout delivers the answers check's
  * warnings (docs/adr/0013, "Warnings where the decision is made"), act by
@@ -353,6 +363,7 @@ const WARNING_CODES: ReadonlyArray<[string, RegExp]> = [
   ["premise_inconsistent", /\) (?:assumes|contradicts) P-\d+ \(revision \d+\), which #\d+ .*over scopes that overlap \(a question not material: warned, never held\)/],
   ["part_omitted", /\) leaves out (?:a part|parts) of the question its reviews? names?:/],
   ["no_locator_or_derivation", /\) is held established by .* on a review that vouches for no value by bytes or by derivation/],
+  ["premise_untested", /\) is partial on a question that presumes .*, and neither it nor a review of it tests that premise/],
 ];
 
 /** A warning line's code and section, by the harness's own words for it. */
@@ -951,6 +962,29 @@ async function addSyntheticReceipts(copy: string, items: SyntheticPreparation[],
   }
 }
 
+/**
+ * --presumes: each question named amended in the copy to presume its event,
+ * as the operator would (`question amend Q-n --presumes …`), by this
+ * checkout's register, in synthetic words that say so; the run untouched.
+ * What could not be done is said, never guessed.
+ */
+async function addSyntheticPresumptions(copy: string, ids: string[]): Promise<string[]> {
+  const Q = await import("../extensions/questions.ts");
+  const notes: string[] = [];
+  const actor = { kind: "human", role: "operator", person: "replay", enrolled: false, os_user: "replay", host: "replay", via: "cli", identity: "claimed" } as const;
+  for (const raw of ids) {
+    const snap = await Q.questionsSnapshot(copy);
+    const q = Q.findQuestion(snap, raw);
+    if (!q) {
+      notes.push(`${raw} is not in the run's question register: not presumed`);
+      continue;
+    }
+    const r = await Q.act(copy, actor, "amend", { q: q.id, expected_rev: q.rev, presumes: `the event question ${q.section} asks about happened (synthetic: replay --presumes)`, why: "synthetic: replay --presumes" });
+    if (!r.ok) notes.push(`${q.id} could not be presumed in the copy: ${r.reason}`);
+  }
+  return notes;
+}
+
 /** The registers a delivery point reads, each cut to the act: a chain cut at a line is a prefix of it, which verifies. */
 const CUT_REGISTERS = ["ledger/entries.jsonl", "ledger/attestations.jsonl", "ledger/disputes.jsonl", "ledger/sweeps.jsonl", "leads/leads.jsonl", "questions/questions.jsonl"] as const;
 /** What else they read, whole: the contract, the budget, the team, the inputs, the case policy. */
@@ -1291,6 +1325,8 @@ export type Replay = {
   prepared_as?: { state: string; items: Array<{ source: string; recipe: string; capability: string; unavailable: boolean }>; notes: string[] };
   /** With --reverse-sweep: each addition without a reverse sweep got one in every copy a checkout can read it in (late_evidence says what it found); the notes name the checkouts that could not. */
   reverse_swept?: { notes: string[] };
+  /** With --presumes: the questions amended in each copy to presume their event (synthetic), and what could not be. */
+  presumed?: { questions: string[]; notes: string[] };
   copy: { left_out: string[]; links_removed: number };
   targets: Target[];
   evaluations: Evaluation[];
@@ -1328,7 +1364,7 @@ export async function evaluateIn(harness: string, copies: string[], showText: bo
  * evaluated, the run's registers checked unchanged, and, for two
  * checkouts, every difference named.
  */
-export async function replay(o: { run: RunRef; targets: Target[]; policies?: StopPolicy[] | null; showText?: boolean; deliveries?: boolean; prepareAs?: string | null; reverseSweep?: boolean; scratch: string }): Promise<Replay> {
+export async function replay(o: { run: RunRef; targets: Target[]; policies?: StopPolicy[] | null; showText?: boolean; deliveries?: boolean; prepareAs?: string | null; reverseSweep?: boolean; presumes?: string[] | null; scratch: string }): Promise<Replay> {
   const before = await registerDigest(o.run.sandbox);
   // --prepare-as: what this checkout's census finds applies to the run's evidence, asked once.
   const synthetic = o.prepareAs ? await syntheticPreparations(o.run, o.scratch) : null;
@@ -1338,6 +1374,7 @@ export async function replay(o: { run: RunRef; targets: Target[]; policies?: Sto
   let copyInfo = { left_out: [] as string[], links_removed: 0 };
   const evaluations: Evaluation[] = [];
   const reverseNotes: string[] = [];
+  const presumeNotes: string[] = [];
   for (const [ti, target] of o.targets.entries()) {
     const copies: string[] = [];
     for (const policy of policies) {
@@ -1361,6 +1398,7 @@ export async function replay(o: { run: RunRef; targets: Target[]; policies?: Sto
         const note = await addSyntheticReverseSweeps(copy, target.harness);
         if (note && !reverseNotes.includes(note)) reverseNotes.push(note);
       }
+      if (o.presumes?.length) for (const n of await addSyntheticPresumptions(copy, o.presumes)) if (!presumeNotes.includes(n)) presumeNotes.push(n);
       copies.push(copy);
     }
     const results = await evaluateIn(target.harness, copies, o.showText === true, o.deliveries === true);
@@ -1386,6 +1424,7 @@ export async function replay(o: { run: RunRef; targets: Target[]; policies?: Sto
     unchanged: before === after,
     ...(synthetic && o.prepareAs ? { prepared_as: { state: o.prepareAs, items: synthetic.items.map((x) => ({ source: x.source.ref, recipe: x.recipe, capability: x.capability, unavailable: Boolean(x.unavailable) })), notes: synthetic.notes } } : {}),
     ...(o.reverseSweep ? { reverse_swept: { notes: reverseNotes } } : {}),
+    ...(o.presumes?.length ? { presumed: { questions: o.presumes, notes: presumeNotes } } : {}),
   };
 }
 
@@ -1496,6 +1535,7 @@ export function replayWords(r: Replay): string {
   const out: string[] = [];
   out.push(`Replay of ${r.run.id}${r.run.case_id ? ` (case ${r.run.case_id})` : ""}: its registers read again from a copy; the run is not written${r.unchanged ? " (its registers hashed the same before and after)" : ". ITS REGISTERS CHANGED WHILE THIS RAN: another process wrote the run, or this replay did; do not trust this reading"}.`);
   out.push(`The run's stop policy: ${r.run.stop_policy ?? "unknown"}; its harness: ${r.run.harness_commit ?? "not recorded"}. Left out of the copy: ${r.copy.left_out.join(", ") || "nothing"}${r.copy.links_removed ? `; ${r.copy.links_removed} link(s) removed, not followed` : ""}.`);
+  if (r.presumed) out.push(`Presumed (synthetic, --presumes): ${r.presumed.questions.join(", ")}, each amended in every copy to presume its event, by this checkout's register (the run untouched)${r.presumed.notes.length ? `; ${r.presumed.notes.join("; ")}` : ""}.`);
   if (r.reverse_swept) out.push(`Reverse sweeps: each evidence addition without one got one in each copy, by this checkout's store sweep as the hub would have run it at the addition (the run untouched)${r.reverse_swept.notes.length ? `; ${r.reverse_swept.notes.join("; ")}` : ""}.`);
   if (r.prepared_as) {
     out.push(`Prepared as ${r.prepared_as.state} (synthetic receipts on each copy's store journal, the run untouched): ${r.prepared_as.items.length ? r.prepared_as.items.map((x) => `${x.recipe} over ${x.source}${x.unavailable ? " (declared, cannot run: declined)" : ""}`).join("; ") : "no broad extraction applies to the run's evidence"}.`);
@@ -1550,7 +1590,7 @@ export function replayWords(r: Replay): string {
 // The command
 // ---------------------------------------------------------------------------------------------
 
-const USAGE = "usage: replay.ts <run-dir | run-id> [--registry FILE] [--checkout PATH] [--compare [A [B]]] [--stop-policy P[,P…]] [--deliveries] [--prepare-as STATE] [--reverse-sweep] [--json] [--show-text]";
+const USAGE = "usage: replay.ts <run-dir | run-id> [--registry FILE] [--checkout PATH] [--compare [A [B]]] [--stop-policy P[,P…]] [--deliveries] [--prepare-as STATE] [--reverse-sweep] [--presumes Q[,Q…]] [--json] [--show-text]";
 
 /** The states --prepare-as takes: a receipt's. */
 const PREPARE_STATES = ["planned", "attempted", "produced", "partial", "failed", "declined"] as const;
@@ -1588,6 +1628,7 @@ async function main(argv: string[]): Promise<number> {
   let deliveries = false;
   let prepareAs: string | null = null;
   let reverseSweep = false;
+  let presumes: string[] | null = null;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--registry") registry = argv[++i] ?? null;
@@ -1611,7 +1652,13 @@ async function main(argv: string[]): Promise<number> {
     else if (a === "--show-text") showText = true;
     else if (a === "--deliveries") deliveries = true;
     else if (a === "--reverse-sweep") reverseSweep = true;
-    else if (a === "--prepare-as") {
+    else if (a === "--presumes") {
+      presumes = (argv[++i] ?? "").split(",").map((x) => x.trim()).filter(Boolean);
+      if (!presumes.length || presumes.some((x) => !/^(?:Q-?|question:)?[A-Za-z0-9][A-Za-z0-9._-]{0,31}$/i.test(x))) {
+        process.stderr.write("--presumes takes the questions to presume their event, by id (Q-7, 7, question:7), several with commas\n");
+        return 2;
+      }
+    } else if (a === "--prepare-as") {
       prepareAs = argv[++i] ?? "";
       if (!(PREPARE_STATES as readonly string[]).includes(prepareAs)) {
         process.stderr.write(`--prepare-as takes a receipt's state: ${PREPARE_STATES.join(", ")}${prepareAs ? `, not ${prepareAs}` : ""}\n`);
@@ -1645,7 +1692,7 @@ async function main(argv: string[]): Promise<number> {
       return { label: p, harness: path, how: path === ROOT ? `this checkout (${path})` : `the checkout at ${path}`, commit: harnessCommit(path) };
     };
     const targets: Target[] = compare === null ? [await named(current)] : compare.length === 0 ? [await named("frozen"), await named(current)] : compare.length === 1 ? [await named(compare[0]), await named(current)] : [await named(compare[0]), await named(compare[1])];
-    const r = await replay({ run, targets, policies, showText, deliveries, prepareAs, reverseSweep, scratch });
+    const r = await replay({ run, targets, policies, showText, deliveries, prepareAs, reverseSweep, presumes, scratch });
     process.stdout.write(json ? `${JSON.stringify(r, null, 2)}\n` : `${replayWords(r)}\n`);
     return r.unchanged && r.evaluations.every((e) => e.projection) ? 0 : 1;
   } catch (e) {

@@ -8014,6 +8014,14 @@ export type LedgerEntry = {
    */
   premises?: PM.PremiseCitation[];
   /**
+   * Version 4, an answer to a question: the test of what the question
+   * presumes (premises.ts PremiseTest; docs/adr/0011, "What a question
+   * presumes"): what it showed of whether the presumed event happened, and
+   * the observation or job it rests on; its entries are citations as the
+   * reasoning's are. In the core only when present.
+   */
+  premise_tested?: PM.PremiseTest;
+  /**
    * A summary's or a narrative's symbolic citations (A4): each question it
    * cites as Q-<n>, the answer that stood then, and that answer's
    * fingerprint (its result, the revision it answers, and the hashes of what
@@ -8159,6 +8167,7 @@ function ledgerV4Fields(e: LedgerEntry): Record<string, unknown> {
     ...(e.confidence_rule ? { confidence_rule: e.confidence_rule } : {}),
     ...(e.parts?.length ? { parts: e.parts.map(canonicalValue) } : {}),
     ...(e.premises?.length ? { premises: e.premises.map(canonicalValue) } : {}),
+    ...(e.premise_tested ? { premise_tested: { outcome: e.premise_tested.outcome, refs: e.premise_tested.refs } } : {}),
     ...coverageFields(e),
     ...(e.source_class ? { source_class: e.source_class } : {}),
     ...(e.provenance ? { provenance: canonicalValue(e.provenance) } : {}),
@@ -8370,6 +8379,8 @@ export type LedgerInput = {
   parts?: unknown;
   /** An answer to a question: the premises it cites, [{id: P-<n>, rev, stance, refs?, conditional?, scope?}] (premises.ts). */
   premises?: unknown;
+  /** An answer to a question that presumes an event: the test of that premise, {outcome, refs} (premises.ts PremiseTest; docs/adr/0011, "What a question presumes"). */
+  premise_tested?: unknown;
 };
 
 function listOf(v: string[] | string | undefined): string[] {
@@ -8482,7 +8493,7 @@ async function ledgerV3Input(
 }
 
 /** The fields only an answer takes, and only a finding takes: named in a refusal when they come with another kind. */
-const ANSWER_ONLY_FIELDS = ["section", "reasoning", "contrary", "limitations", "alternatives_open", "would_change", "inconclusive", "result", "contrary_none_why", "asserts_absence", "question_rev", "material", "downgrade", "parts", "premises"] as const;
+const ANSWER_ONLY_FIELDS = ["section", "reasoning", "contrary", "limitations", "alternatives_open", "would_change", "inconclusive", "result", "contrary_none_why", "asserts_absence", "question_rev", "material", "downgrade", "parts", "premises", "premise_tested"] as const;
 const FINDING_ONLY_FIELDS = ["indicates", "alternatives", "alternatives_none_why", "significance"] as const;
 /** The fields only a coverage record takes. */
 const COVERAGE_ONLY_FIELDS = ["proposition", "inventory_rev", "time_range", "search_method", "settings", "coverage_actual", "skipped", "failures", "result_refs", "result_bound", "detection_opportunity", "areas", "acquisition_ask", "acquisition_none_why", "looked_for", "looked_for_none_why"] as const;
@@ -9265,6 +9276,13 @@ export type AnswerReview = {
   discriminator?: AnswerReviewDiscriminator;
   reproduced_at?: AnswerReviewLocator[];
   derivation?: AnswerReviewDerivation;
+  /**
+   * The test of what the question presumes (docs/adr/0011, "What a question
+   * presumes"): the rival is fixed, "the question's premise is not
+   * supported"; what the test showed, and the observation or job it rests
+   * on. Present only when given.
+   */
+  premise_tested?: PM.PremiseTest;
 };
 export const ANSWER_REVIEW_MAX_PARTS = 20;
 export const ANSWER_REVIEW_MAX_ALTERNATIVES = 10;
@@ -9400,9 +9418,14 @@ function reviewRef(v: unknown): string {
  * Whether a discriminator counts, a locator verifies and a derivation
  * resolves is the attest's (reviewEvidenceCaps).
  */
-function checkReviewEvidence(r: Record<string, unknown>): { ok: true; fields: Pick<AnswerReview, "discriminator" | "reproduced_at" | "derivation"> } | { ok: false; reason: string } {
-  const fields: Pick<AnswerReview, "discriminator" | "reproduced_at" | "derivation"> = {};
+function checkReviewEvidence(r: Record<string, unknown>): { ok: true; fields: Pick<AnswerReview, "discriminator" | "reproduced_at" | "derivation" | "premise_tested"> } | { ok: false; reason: string } {
+  const fields: Pick<AnswerReview, "discriminator" | "reproduced_at" | "derivation" | "premise_tested"> = {};
   const given = (v: unknown) => v !== undefined && v !== null && !(typeof v === "string" && !v.trim());
+  if (given(r.premise_tested)) {
+    const t = checkPremiseTest(r.premise_tested, "answer_review.premise_tested");
+    if (!t.ok) return t;
+    fields.premise_tested = t.test;
+  }
   if (given(r.discriminator)) {
     const shape = "answer_review.discriminator is {rival, test, favours_if, outcome, refs}: the strongest rival reading, the test that separates it from the answer, the result that would favour each, what the test showed, and the observation or job it rests on (E-<seq>, job:<id>/<path>)";
     const d = (typeof r.discriminator === "object" ? r.discriminator : null) as Record<string, unknown> | null;
@@ -9461,6 +9484,40 @@ function checkReviewEvidence(r: Record<string, unknown>): { ok: true; fields: Pi
     fields.derivation = { job, inputs: [...new Set(inputs)] };
   }
   return { ok: true, fields };
+}
+
+/**
+ * A premise test as given (premises.ts PremiseTest), on a review or on an
+ * answer: {outcome, refs}, bounded (refused past it, never cut), the shape
+ * only. Whether its entries are in the ledger, and not the answer itself, is
+ * checked where it is recorded; whether it counts, by premiseTestCounts.
+ */
+export function checkPremiseTest(raw: unknown, name: string): { ok: true; test: PM.PremiseTest } | { ok: false; reason: string } {
+  const shape = `${name} is {outcome, refs}: what the test showed of whether what the question presumes happened at all (the rival: the question's premise is not supported), and the observation or job it rests on (E-<seq>, job:<id>/<path>, input:<path>, import:<id>/<path>)`;
+  const d = (raw && typeof raw === "object" && !Array.isArray(raw) ? raw : null) as Record<string, unknown> | null;
+  if (!d) return { ok: false, reason: shape };
+  const outcome = String(d.outcome ?? "").trim();
+  if (!outcome) return { ok: false, reason: `${name}.outcome is required (${shape})` };
+  if (outcome.length > LEDGER_ACT_MAX_CHARS) return { ok: false, reason: `${name}.outcome is over ${LEDGER_ACT_MAX_CHARS} characters: say it in fewer; nothing is cut, so a longer text is refused` };
+  const given = (v: unknown) => v !== undefined && v !== null && !(typeof v === "string" && !v.trim());
+  const refs = [...new Set((Array.isArray(d.refs) ? d.refs : given(d.refs) ? String(d.refs).split(/[\s,]+/) : []).map(reviewRef).filter(Boolean))];
+  if (!refs.length) return { ok: false, reason: `${name}.refs names the observation or the job the outcome rests on, at least one (${shape})` };
+  if (refs.length > LEDGER_MAX_REFS) return { ok: false, reason: `${name}.refs names more than ${LEDGER_MAX_REFS}` };
+  const long = refs.find((x) => x.length > LEDGER_REF_MAX_CHARS);
+  if (long) return { ok: false, reason: `${name}.refs names one of ${long.length} characters, over ${LEDGER_REF_MAX_CHARS}: name the entry or the object` };
+  const badE = refs.find((x) => /^E-/i.test(x) && !/^E-[1-9]\d{0,6}$/.test(x));
+  if (badE) return { ok: false, reason: `${name}.refs names an entry as E-<seq> (got ${JSON.stringify(badE)})` };
+  return { ok: true, test: { outcome, refs } };
+}
+
+/** Whether a premise test counts: an outcome that says something (not a placeholder) and at least one ref. */
+export function premiseTestCounts(t: PM.PremiseTest | undefined | null): boolean {
+  return Boolean(t && t.refs.length > 0 && !placeholderText(t.outcome));
+}
+
+/** A premise test in words: what it tested, what it showed, and on what. */
+export function premiseTestWords(t: PM.PremiseTest): string {
+  return `the premise tested against "the question's premise is not supported": ${t.outcome} (${t.refs.join(", ")})`;
 }
 
 /** Whether a discriminator counts: each of its words a real one (not a placeholder), the rival not the test's words again, and at least one ref. */
@@ -9604,8 +9661,15 @@ export async function checkDerivation(sandboxRoot: string, d: AnswerReviewDeriva
   return { ok: true };
 }
 
+/**
+ * How a question's premise is tested (docs/adr/0011, "What a question
+ * presumes"): the words the attest's reply, the warning and the tools give.
+ */
+export const PREMISE_TEST_FIX =
+  "test the premise before the answer: does the evidence show that what the question presumes happened at all? Weigh it against the rival \"the question's premise is not supported\" and say what the test showed: premise_tested {outcome (what the test showed of whether it happened), refs (the E-<seq> of the observation, or the job:<id>/<path> it rests on)}, which a review gives as answer_review.premise_tested (never resting on the answer under review). If the evidence does not support it, the answer is premise_not_supported: its recorder records it so, and a reviewer disputes an answer that says otherwise. A clue that fits the question's frame is a candidate to test against that rival, not an answer";
+
 /** Why an established attest is recorded a best candidate for want of source-first evidence: a code, and the words `capped` keeps. */
-export type ReviewEvidenceCap = { code: "no_discriminator" | "locator_unverified" | "derivation_unverified"; why: string };
+export type ReviewEvidenceCap = { code: "no_discriminator" | "locator_unverified" | "derivation_unverified" | "premise_untested"; why: string };
 /**
  * What a source-first review is warned of and not capped for: it vouches
  * for no value by bytes or by derivation (no_locator_or_derivation). The
@@ -9625,6 +9689,7 @@ export const REVIEW_CAP_FIX: Readonly<Record<ReviewEvidenceCap["code"], string>>
   no_discriminator: "name the strongest rival and the test that separates it from the answer: answer_review.discriminator {rival (another reading the evidence allows: another time, entity, mechanism or activity, or the premise not holding), test (what you checked), favours_if (the result that would favour the answer, and the one that would favour the rival), outcome (what the check showed), refs (the E-<seq> of the observation, or the job:<id>/<path> it rests on: not the answer, nor only entries it cites)}",
   locator_unverified: "give each locator's byte offset where the value begins in the sealed object and the value as it is there and as the answer or an entry it rests on states it (a job over the object gives the offset: grep -boa, a hex dump; UTF-16LE text counts), or drop the locator; a value you derived (a converted time, a decoded field) takes derivation {job, inputs} instead",
   derivation_unverified: "name a sealed job that ran to its end and the objects it declared it would read: answer_review.derivation {job: j<id>, inputs: [input:<path>, job:<id>/<path>, …]}",
+  premise_untested: PREMISE_TEST_FIX,
 };
 
 /** How the warning no_locator_or_derivation is answered, where a value can be located. */
@@ -9636,7 +9701,10 @@ export const REVIEW_UNLOCATED_FIX =
  * "A source-first review"), on an answer that claims established to a
  * material question: a discriminator that counts, and every locator
  * verifying against the sealed bytes and the answer's words, every
- * derivation resolving. Each missing or failing one is a cap: the attest is
+ * derivation resolving; and, on a question that presumes an event
+ * (docs/adr/0011, "What a question presumes"; `presumption`, read from the
+ * register when the caller does not give it), a premise test that counts
+ * (premise_untested). Each missing or failing one is a cap: the attest is
  * recorded best_candidate with the reason in `capped`, and the reply says
  * how to fix it. A review with neither a locator nor a derivation is warned
  * (`unlocated`, no_locator_or_derivation), not capped. Nothing else is
@@ -9644,7 +9712,7 @@ export const REVIEW_UNLOCATED_FIX =
  * every locator's verdict, for the reply of any review that gave them (a
  * partial answer's too, which none of this caps).
  */
-export async function reviewEvidenceCaps(sandboxRoot: string, answer: LedgerEntry, review: AnswerReview | null, o: { material: boolean; entries?: readonly LedgerEntry[] }): Promise<{ caps: ReviewEvidenceCap[]; unlocated: ReviewEvidenceWarning | null; locators: LocatorVerdict[]; derivation: { ok: true } | { ok: false; why: string } | null }> {
+export async function reviewEvidenceCaps(sandboxRoot: string, answer: LedgerEntry, review: AnswerReview | null, o: { material: boolean; entries?: readonly LedgerEntry[]; presumption?: PM.Presumption | null }): Promise<{ caps: ReviewEvidenceCap[]; unlocated: ReviewEvidenceWarning | null; locators: LocatorVerdict[]; derivation: { ok: true } | { ok: false; why: string } | null }> {
   const text = `${answer.value ?? ""}\n${answer.reasoning ?? ""}`;
   const locators: LocatorVerdict[] = [];
   const chain = review?.reproduced_at?.length ? chainWords(answer, o.entries ?? (await readLedger(sandboxRoot).catch(() => [] as LedgerEntry[]))) : "";
@@ -9656,6 +9724,14 @@ export async function reviewEvidenceCaps(sandboxRoot: string, answer: LedgerEntr
   else if (!discriminatorCounts(review.discriminator)) caps.push({ code: "no_discriminator", why: "the review's discriminator says nothing a reader can weigh (a placeholder, or the rival in the test's words): a real rival and the test that separates it" });
   for (const [i, v] of locators.entries()) if (!v.ok) caps.push({ code: "locator_unverified", why: `reproduced_at[${i}] (${v.ref} at ${v.offset}) does not verify: ${v.why}` });
   if (derivation && !derivation.ok) caps.push({ code: "derivation_unverified", why: `the derivation does not resolve: ${derivation.why}` });
+  // A question that presumes an event (docs/adr/0011, "What a question
+  // presumes"): the review tests the premise itself against the rival "the
+  // question's premise is not supported". Read from the register when the
+  // caller did not say (a replay of an older caller).
+  const presumption = o.presumption !== undefined ? o.presumption : answer.section?.startsWith("question:") ? ((await questionBar(sandboxRoot, sectionAnswersId(answer.section)).catch(() => null))?.presumption ?? null) : null;
+  if (presumption && !premiseTestCounts(review.premise_tested)) {
+    caps.push({ code: "premise_untested", why: review.premise_tested ? `the review's premise test says nothing a reader can weigh (a placeholder outcome): ${answer.section} presumes ${PM.presumptionWords(presumption)}` : `${answer.section} presumes ${PM.presumptionWords(presumption)}, and the review does not test that premise (answer_review.premise_tested {outcome, refs})` });
+  }
   // Neither given: warned, never capped. One given and failing is capped by its own code above.
   const unlocated: ReviewEvidenceWarning | null = !review.reproduced_at?.length && !review.derivation ? { code: "no_locator_or_derivation", why: UNLOCATED_WHY } : null;
   return { caps, unlocated, locators, derivation };
@@ -9688,7 +9764,8 @@ export function answerReviewWords(r: AnswerReview): string {
   const discriminator = d ? `; the strongest rival: ${d.rival}; the test: ${d.test}; it would favour: ${d.favours_if}; it showed: ${d.outcome} (${d.refs.join(", ")})` : "";
   const located = r.reproduced_at?.length ? `; read at: ${r.reproduced_at.map((l) => `${l.ref} byte ${l.offset}${l.value !== undefined ? ` ("${l.value}")` : ` (${l.length} bytes)`}`).join("; ")}` : "";
   const derived = r.derivation ? `; derived by job ${r.derivation.job} from ${r.derivation.inputs.join(", ")}` : "";
-  return `reproduced: ${r.reproduced}; only read: ${r.read}; parts: ${r.parts.map((p) => `${p.id ? `${p.id} ` : ""}${p.part} ${p.missing ? "MISSING from the answer" : p.not_asked ? "NOT ASKED by the question (a limitation, not an open part)" : p.established ? "established" : p.declared_open ? `open, as the answer declares it (${p.declared_open})` : "NOT established"} (${p.why})`).join("; ")}; inference: ${r.inference}; ${alternatives}; another source family ${r.other_family.checked ? "checked" : "not checked"}: ${r.other_family.text}${discriminator}${located}${derived}`;
+  const premise = r.premise_tested ? `; ${premiseTestWords(r.premise_tested)}` : "";
+  return `reproduced: ${r.reproduced}; only read: ${r.read}; parts: ${r.parts.map((p) => `${p.id ? `${p.id} ` : ""}${p.part} ${p.missing ? "MISSING from the answer" : p.not_asked ? "NOT ASKED by the question (a limitation, not an open part)" : p.established ? "established" : p.declared_open ? `open, as the answer declares it (${p.declared_open})` : "NOT established"} (${p.why})`).join("; ")}; inference: ${r.inference}; ${alternatives}; another source family ${r.other_family.checked ? "checked" : "not checked"}: ${r.other_family.text}${discriminator}${located}${derived}${premise}`;
 }
 
 /** Whether an attestation holds its answer established: a best candidate does not; a line from before strengths reads as it always did. */
@@ -9956,7 +10033,7 @@ export async function renderLedger(sandboxRoot: string, entries?: LedgerEntry[])
       const neg = r && NB.NEGATIVE_RESULTS.has(r) && e.section?.startsWith("question:") ? negativeReview(e, all, allAttestations) : null;
       const negText = neg ? (neg.reviewed ? ` (negative, reviewed by ${neg.by.join(", ")})` : " **(negative, unreviewed)**") : "";
       lines.push(
-        `- **#${e.seq}** ${e.section}${e.question_rev ? ` (revision ${e.question_rev})` : ""}${e.inconclusive ? " (inconclusive)" : ""}${e.result ? ` (${e.result})` : ""}${e.asserts_absence ? " (asserts absence)" : ""}${negText}: ${e.value}${mark(e)}${e.confidence ? ` _(${e.confidence}${e.confidence_why ? `: ${e.confidence_why}` : ""})_` : ""}${cites("rests on", e.support)}${cites("contrary", e.contrary)}${e.contrary_none_why ? ` — nothing says otherwise: ${e.contrary_none_why}` : ""}${cites("limitations", e.limitations)}${e.qualifies?.length ? ` — qualifies: ${e.qualifies.map((q) => `${q.ref} (${q.why})`).join("; ")}` : ""}${e.alternatives_open ? ` — still open: ${e.alternatives_open}` : ""}${e.would_change ? ` — would change it: ${e.would_change}` : ""}${e.unsupported_tokens?.length ? ` — in none of the cited entries: ${e.unsupported_tokens.join(", ")}` : ""}${p?.length ? ` — **no longer stands on its support: ${p.join("; ")}**` : ""}${e.parts?.length ? ` — parts: ${PM.partsWords(e.parts)}` : ""}${e.premises?.length ? ` — premises: ${PM.citationsWords(e.premises)}` : ""} — reasoning: ${e.reasoning ?? ""} — by ${e.authors.join(", ")}`,
+        `- **#${e.seq}** ${e.section}${e.question_rev ? ` (revision ${e.question_rev})` : ""}${e.inconclusive ? " (inconclusive)" : ""}${e.result ? ` (${e.result})` : ""}${e.asserts_absence ? " (asserts absence)" : ""}${negText}: ${e.value}${mark(e)}${e.confidence ? ` _(${e.confidence}${e.confidence_why ? `: ${e.confidence_why}` : ""})_` : ""}${cites("rests on", e.support)}${cites("contrary", e.contrary)}${e.contrary_none_why ? ` — nothing says otherwise: ${e.contrary_none_why}` : ""}${cites("limitations", e.limitations)}${e.qualifies?.length ? ` — qualifies: ${e.qualifies.map((q) => `${q.ref} (${q.why})`).join("; ")}` : ""}${e.alternatives_open ? ` — still open: ${e.alternatives_open}` : ""}${e.would_change ? ` — would change it: ${e.would_change}` : ""}${e.unsupported_tokens?.length ? ` — in none of the cited entries: ${e.unsupported_tokens.join(", ")}` : ""}${p?.length ? ` — **no longer stands on its support: ${p.join("; ")}**` : ""}${e.parts?.length ? ` — parts: ${PM.partsWords(e.parts)}` : ""}${e.premises?.length ? ` — premises: ${PM.citationsWords(e.premises)}` : ""}${e.premise_tested ? ` — ${premiseTestWords(e.premise_tested)}` : ""} — reasoning: ${e.reasoning ?? ""} — by ${e.authors.join(", ")}`,
       );
     }
   }
@@ -10564,14 +10641,17 @@ export async function attestEntry(ctx: SwarmContext, input: LedgerActInput): Pro
   const preTarget = actTarget(pre, input.seq, ctx.agentId, "attest");
   const preAnswer = preTarget.ok && preTarget.entry.kind === "answer" && preTarget.entry.section?.startsWith("question:") && !isNegativeEntry(preTarget.entry) ? preTarget.entry : null;
   const caps = preAnswer ? await strengthCaps(ctx.sandboxRoot, preAnswer, answerReview, pre) : [];
-  // The objects a discriminator rests on resolve (its entries are checked under the lock, with the alternatives').
-  const discObjects = (answerReview?.discriminator?.refs ?? []).filter((r) => !/^E-\d+$/.test(r));
-  if (discObjects.length) {
-    const checked = await checkRefs(ctx.sandboxRoot, discObjects);
-    if (!checked.ok) return { ok: false, reason: `answer_review.discriminator.refs: ${checked.reason}` };
+  // The objects a discriminator and a premise test rest on resolve (their entries are checked under the lock, with the alternatives').
+  for (const [name, refs] of [["answer_review.discriminator.refs", answerReview?.discriminator?.refs ?? []], ["answer_review.premise_tested.refs", answerReview?.premise_tested?.refs ?? []]] as const) {
+    const objects = refs.filter((r) => !/^E-\d+$/.test(r));
+    if (!objects.length) continue;
+    const checked = await checkRefs(ctx.sandboxRoot, objects);
+    if (!checked.ok) return { ok: false, reason: `${name}: ${checked.reason}` };
   }
   // The source-first evidence of an established review (docs/adr/0015): read before the lock, bounded reads at the locators' offsets.
-  const evidence = preAnswer && answerReview && (strength === "established" || answerReview.reproduced_at?.length || answerReview.derivation) ? await reviewEvidenceCaps(ctx.sandboxRoot, preAnswer, answerReview, { material: (await questionBar(ctx.sandboxRoot, sectionAnswersId(preAnswer.section!)).catch(() => null))?.material ?? true, entries: pre }) : null;
+  // What the question presumes is read here too (docs/adr/0011, "What a question presumes"): its premise is one of the rivals the review tests.
+  const preBar = preAnswer && answerReview ? await questionBar(ctx.sandboxRoot, sectionAnswersId(preAnswer.section!)).catch(() => null) : null;
+  const evidence = preAnswer && answerReview && (strength === "established" || answerReview.reproduced_at?.length || answerReview.derivation) ? await reviewEvidenceCaps(ctx.sandboxRoot, preAnswer, answerReview, { material: preBar?.material ?? true, entries: pre, presumption: preBar?.presumption ?? null }) : null;
   // The negatives a review recorded here answers (the answer itself, or those resting on the coverage record): their offers are taken up after the lock.
   const reviewed: string[] = [];
   const result = await withTableLock(ctx.sandboxRoot, async (held): Promise<AttestResult> => {
@@ -10605,6 +10685,15 @@ export async function attestEntry(ctx: SwarmContext, input: LedgerActInput): Pro
       if (self) return { ok: false, reason: `answer_review.discriminator.refs names ${self}, the answer under review: a discriminator rests on an observation or a job, not the answer. Name the E-<seq> of what the test showed, or the job:<id>/<path> it read` };
       const cited = answerCites(t.entry, supersededBy(entries));
       if (refs.every((r) => /^E-\d+$/.test(r) && cited.has(Number(r.slice(2))))) return { ok: false, reason: `answer_review.discriminator.refs names only ${refs.join(", ")}, which #${t.entry.seq} cites already: the test that separates the rival from the answer rests on what it read or showed. Name the job:<id>/<path> the test read, or the E-<seq> of an observation the answer does not cite (record what the test showed first, if it is not on the ledger)` };
+    }
+    // A premise test rests on an observation or a job the ledger holds, never on the answer under review.
+    if (answerReview?.premise_tested) {
+      const seqs = new Set(entries.map((e) => e.seq));
+      const refs = answerReview.premise_tested.refs;
+      const missing = refs.find((r) => /^E-\d+$/.test(r) && !seqs.has(Number(r.slice(2))));
+      if (missing) return { ok: false, reason: `answer_review.premise_tested.refs names ${missing}: there is no entry #${missing.slice(2)} in the ledger` };
+      const self = refs.find((r) => /^E-\d+$/.test(r) && Number(r.slice(2)) === t.entry.seq);
+      if (self) return { ok: false, reason: `answer_review.premise_tested.refs names ${self}, the answer under review: a premise test rests on what the test read or showed. Name the E-<seq> of that observation, or the job:<id>/<path> it read` };
     }
     // An established review names the alternatives it weighed and why the
     // evidence rules each out; one that names none is recorded a best
@@ -11323,7 +11412,7 @@ async function registerSection(sandboxRoot: string, raw: string): Promise<string
  * route plan (every route the leads under it planned), and the jobs run under
  * those leads. Read from the registers.
  */
-export async function questionBar(sandboxRoot: string, sectionId: string): Promise<{ material: boolean; existence: boolean; completeness: boolean; routes: NB.Route[]; jobs: string[]; question: string | null }> {
+export async function questionBar(sandboxRoot: string, sectionId: string): Promise<{ material: boolean; existence: boolean; completeness: boolean; routes: NB.Route[]; jobs: string[]; question: string | null; presumption: PM.Presumption | null }> {
   const L = await import("./leads.ts");
   const snap = await L.leadsSnapshot(sandboxRoot);
   const id = sectionKey(sectionId);
@@ -11338,7 +11427,10 @@ export async function questionBar(sandboxRoot: string, sectionId: string): Promi
     for (const r of l.routes ?? []) if (!routes.some((x) => x.source === r.source && x.method === r.method)) routes.push(r);
     for (const j of l.jobs) if (!jobs.includes(j)) jobs.push(j);
   }
-  return { material, existence, completeness: q?.completeness === true, routes, jobs, question: q?.id ?? null };
+  // What the question presumes (docs/adr/0011, "What a question presumes"): its presumes, or a person's question's framing.
+  const Q = await import("./questions.ts");
+  const presumption = q ? Q.questionPresumption(q, snap.state) : null;
+  return { material, existence, completeness: q?.completeness === true, routes, jobs, question: q?.id ?? null, presumption };
 }
 
 /**
@@ -11724,6 +11816,19 @@ async function recordAnswer(ctx: SwarmContext, input: LedgerInput): Promise<Ledg
   const parts = partsIn.parts;
   const citations = citesIn.citations;
   if (!question && (parts.length || citations.length)) return { ok: false, reason: "parts and premises are a question's answer's; a summary or a narrative cites the questions it sums up (Q-<n>)" };
+  // The test of what the question presumes (docs/adr/0011, "What a question presumes"): its shape here, its objects now, its entries under the lock.
+  let premiseTest: PM.PremiseTest | undefined;
+  if (input.premise_tested !== undefined && input.premise_tested !== null && input.premise_tested !== "") {
+    if (!question) return { ok: false, reason: "premise_tested is a question's answer's: the test of what the question presumes" };
+    const t = checkPremiseTest(input.premise_tested, "premise_tested");
+    if (!t.ok) return t;
+    const objects = t.test.refs.filter((r) => !/^E-\d+$/.test(r));
+    if (objects.length) {
+      const c = await checkRefs(ctx.sandboxRoot, objects);
+      if (!c.ok) return { ok: false, reason: `premise_tested.refs: ${c.reason}` };
+    }
+    premiseTest = t.test;
+  }
   if (question && resultText === "partial" && !parts.some((p) => p.status === "open")) return { ok: false, reason: PARTIAL_NEEDS_OPEN_PART };
   const openParts = parts.filter((p) => p.status === "open");
   if (question && resultText === "established" && openParts.length) {
@@ -11808,7 +11913,7 @@ async function recordAnswer(ctx: SwarmContext, input: LedgerInput): Promise<Ledg
   const evidence = boundedText("evidence", input.evidence, LEDGER_EVIDENCE_MAX_CHARS);
   if (!evidence.ok) return evidence;
   // The entries its rows name are citations as the text's are: a part's refs and the entry that bounds an open part, a premise citation's refs.
-  const rowRefs = [...parts.flatMap((p) => [...(p.refs ?? []), ...(p.open_by?.startsWith("E-") ? [p.open_by] : [])]), ...citations.flatMap((c) => c.refs ?? [])].map((r) => Number(r.slice(2)));
+  const rowRefs = [...parts.flatMap((p) => [...(p.refs ?? []), ...(p.open_by?.startsWith("E-") ? [p.open_by] : [])]), ...citations.flatMap((c) => c.refs ?? []), ...(premiseTest?.refs ?? []).filter((r) => /^E-\d+$/.test(r))].map((r) => Number(r.slice(2)));
   const cited = [...new Set([...answerCitations(`${value}\n${reasoning.value}`), ...rowRefs])];
   const support = cited.filter((n) => !contrary.seqs.includes(n) && !limits.seqs.includes(n));
   // A summary or a narrative cites the questions it sums up symbolically
@@ -12062,6 +12167,7 @@ async function recordAnswer(ctx: SwarmContext, input: LedgerInput): Promise<Ledg
         ...(input.asserts_absence === true ? { asserts_absence: true } : {}),
         ...(parts.length ? { parts } : {}),
         ...(citations.length ? { premises: citations } : {}),
+        ...(premiseTest ? { premise_tested: premiseTest } : {}),
         ...(tokens.length ? { unsupported_tokens: tokens } : {}),
         ...(downgrade ? { downgrade } : {}),
         // Recorded under the recorded-confidence rule: its high is kept only as recordedConfidence says.
@@ -12492,10 +12598,12 @@ export function noMoreEvidenceAskFix(coverage: number[], answer: number): string
  * marked not material. part_omitted: a part of the question a review says
  * the answer leaves out. no_locator_or_derivation: an answer held
  * established on source-first reviews none of which vouches for a value by
- * bytes or by derivation.
+ * bytes or by derivation. premise_untested: a partial answer to a question
+ * that presumes an event, neither it nor a review of it testing that premise
+ * (docs/adr/0011, "What a question presumes").
  * `seqs` opens with the answer's.
  */
-export type LedgerWarning = { code: "no_acquisition_ask" | "partial_all_parts_established" | "lead_findings_uncited" | "preparation_missing" | "late_evidence_hits" | "premise_disputed" | "premise_revised" | "premise_withdrawn" | "premise_inconsistent" | "part_omitted" | "no_locator_or_derivation"; section: string; seqs: number[]; what: string; fix: string };
+export type LedgerWarning = { code: "no_acquisition_ask" | "partial_all_parts_established" | "lead_findings_uncited" | "preparation_missing" | "late_evidence_hits" | "premise_disputed" | "premise_revised" | "premise_withdrawn" | "premise_inconsistent" | "part_omitted" | "no_locator_or_derivation" | "premise_untested"; section: string; seqs: number[]; what: string; fix: string };
 
 /** A warning in the words every point says it with: what, then the fix. */
 export function warningWords(w: Pick<LedgerWarning, "what" | "fix">): string {
@@ -12644,8 +12752,12 @@ export const CASE_PREMISE_WORDS = 'what the case brief or the goal states as giv
  * premise revision over overlapping scopes hold both questions
  * (premise_inconsistent) until reconciled on the record; without it a
  * citation's scope is its own, or unbounded.
+ * `presumes` is what each question takes as happened, by its section id
+ * (questions.ts presumptionsOf): a partial answer to one that neither it
+ * nor a review tests the premise of is warned (premise_untested); without
+ * it nothing is.
  */
-export function ledgerGate(o: { entries: LedgerEntry[]; attestations: LedgerAttestation[]; disputes: LedgerDispute[]; sections: string[]; failed?: Map<number, string[]>; bar?: (sectionId: string) => { material: boolean; existence: boolean; completeness?: boolean }; partial?: Map<number, Array<{ ref: string; job: string; status: string }>>; sweeps?: readonly SweepRecord[]; imports?: readonly ImportSweepRecord[]; moreEvidence?: "no" | "ask" | "yes"; underLeads?: ReadonlyMap<string, ReadonlyMap<number, readonly string[]>>; preparation?: PR.PreparationFacts; premises?: ReadonlyMap<string, PM.Premise> }): LedgerGate {
+export function ledgerGate(o: { entries: LedgerEntry[]; attestations: LedgerAttestation[]; disputes: LedgerDispute[]; sections: string[]; failed?: Map<number, string[]>; bar?: (sectionId: string) => { material: boolean; existence: boolean; completeness?: boolean }; partial?: Map<number, Array<{ ref: string; job: string; status: string }>>; sweeps?: readonly SweepRecord[]; imports?: readonly ImportSweepRecord[]; moreEvidence?: "no" | "ask" | "yes"; underLeads?: ReadonlyMap<string, ReadonlyMap<number, readonly string[]>>; preparation?: PR.PreparationFacts; premises?: ReadonlyMap<string, PM.Premise>; presumes?: ReadonlyMap<string, PM.Presumption> }): LedgerGate {
   const { entries } = o;
   const bySeq = new Map(entries.map((e) => [e.seq, e]));
   const replaced = supersededBy(entries);
@@ -12913,6 +13025,23 @@ export function ledgerGate(o: { entries: LedgerEntry[]; attestations: LedgerAtte
             : `an answer is partial only for a part of the question the evidence could not establish: say which part is open (in its reasoning or limitations, citing what bounds it), or record the answer again with supersedes=${a.seq} and result established; ${CASE_PREMISE_WORDS}`,
         });
       }
+    }
+    // A partial answer to a question that presumes an event (docs/adr/0011,
+    // "What a question presumes"): the premise is tested before the answer,
+    // against the rival "the question's premise is not supported", by the
+    // answer itself (premise_tested) or by a review of it. On the
+    // calibration runs a premise-false question was answered partial on a
+    // planted clue that fitted its frame, round after round. A warning,
+    // never a hold: partial stays a disposition.
+    const presumed = bar && result === "partial" ? o.presumes?.get(id) : undefined;
+    if (presumed && !premiseTestCounts(a.premise_tested) && !answerReviews(a, o.attestations).some((x) => premiseTestCounts(x.answer_review?.premise_tested))) {
+      warnings.push({
+        code: "premise_untested",
+        section: sec.section,
+        seqs: [a.seq],
+        what: `answer #${a.seq} (${sec.section}) is partial on a question that presumes ${PM.presumptionWords(presumed)}, and neither it nor a review of it tests that premise`,
+        fix: `${PREMISE_TEST_FIX}. The answer may carry the test itself: record it again with supersedes=${a.seq} and premise_tested {outcome, refs}`,
+      });
     }
     // What the registers tie to the question and its answer leaves out (on
     // s993d40 an answer left out two methods the ledger held as findings

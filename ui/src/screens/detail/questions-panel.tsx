@@ -214,6 +214,11 @@ function QuestionCard({ q, sigs, act, busy, children }: { q: QuestionView; sigs:
         {q.objective || q.objective_text ? <Row label="Objective">{q.objective ?? `would add: ${q.objective_text}`}</Row> : null}
         {q.parent ? <Row label="Follows">{q.parent}</Row> : null}
         {q.expects ? <Row label="Expects">{q.expects} (a hint, never a format)</Row> : null}
+        {q.presumption ? (
+          <Row label="Presumes">
+            {`"${q.presumption.text}" (${q.presumption.source === "presumes" ? `presumed by ${q.presumption.by}` : `${q.presumption.by}, framed ${q.presumption.lead ? `by ${q.presumption.lead}` : "by its own words"}`}): its answer tests that premise first`}
+          </Row>
+        ) : null}
         {q.hints.length ? <Row label="Hints">{q.hints.map((h) => `${h.ref}${h.value ? ` (says: ${h.value})` : ""}`).join("; ")}</Row> : null}
         {q.attachments.length ? <Row label="Attached">{q.attachments.join(", ")}</Row> : null}
         {q.suggested_to ? <Row label="Suggested">{q.suggested_to}</Row> : null}
@@ -249,6 +254,13 @@ function QuestionCard({ q, sigs, act, busy, children }: { q: QuestionView; sigs:
         {q.answer?.premises?.length ? (
           <Row label="Premises">
             {q.answer.premises.map((c) => `${c.stance === "assumed" && c.conditional ? `assuming ${c.id}` : `${c.id} ${c.stance}`} (revision ${c.rev})${c.refs?.length ? ` on ${c.refs.join(", ")}` : ""}`).join("; ")}
+          </Row>
+        ) : null}
+        {q.answer?.premise_tests?.length ? (
+          <Row label="Premise tested">{q.answer.premise_tests.map((t) => `${t.review ? `${t.by}'s review` : `the answer (${t.by})`}: ${t.outcome} (${t.refs.join(", ")})`).join("; ")}</Row>
+        ) : q.presumption && q.answer && (q.answer.result === "partial" || q.answer.result === "established") ? (
+          <Row label="Premise tested">
+            <span className="text-saffron-ink">not on the record: neither the answer nor a review tests it</span>
           </Row>
         ) : null}
         {q.answer?.omitted?.length ? (
@@ -456,6 +468,7 @@ function AddForm({ data, view, act, busy }: { data: QuestionsPanelView; view: Sw
   const [priority, setPriority] = useState("normal");
   const [reason, setReason] = useState("");
   const [expects, setExpects] = useState("");
+  const [presumes, setPresumes] = useState("");
   const [hints, setHints] = useState<Array<{ ref: string; value: string }>>([]);
   const [hintPick, setHintPick] = useState("");
   const [attachments, setAttachments] = useState("");
@@ -482,6 +495,7 @@ function AddForm({ data, view, act, busy }: { data: QuestionsPanelView; view: Sw
       priority,
       ...(priority === "urgent" ? { reason } : {}),
       ...(expects ? { expects } : {}),
+      ...(presumes.trim() ? { presumes } : {}),
       ...(hints.length ? { hints: hints.map((h) => ({ ref: h.ref, ...(h.value.trim() ? { value: h.value } : {}) })) } : {}),
       ...(attachments.trim() ? { attachments: attachments.split(/[\s,]+/).filter(Boolean) } : {}),
       ...(suggested ? { suggested_to: suggested } : {}),
@@ -489,6 +503,7 @@ function AddForm({ data, view, act, busy }: { data: QuestionsPanelView; view: Sw
     });
     setText("");
     setWhy("");
+    setPresumes("");
     setHints([]);
     setReason("");
   };
@@ -502,6 +517,7 @@ function AddForm({ data, view, act, busy }: { data: QuestionsPanelView; view: Sw
       </p>
       <Textarea value={text} onChange={(e) => setText(e.target.value)} placeholder="the question, whole (it is kept verbatim)" aria-label="Question" />
       <Input value={why} onChange={(e) => setWhy(e.target.value)} placeholder="why the case needs it" aria-label="Why" />
+      <Input value={presumes} onChange={(e) => setPresumes(e.target.value)} placeholder="what it takes as happened, if it asks which, when or how of an event (optional): its answer tests that first" aria-label="Presumes" />
       <div className="grid gap-2 sm:grid-cols-2">
         <Select value={objective} onChange={setObjective} options={objectives} aria-label="Objective" />
         <Select value={parent} onChange={setParent} options={parents} aria-label="Follows" placeholder="Follows" />

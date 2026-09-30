@@ -761,7 +761,7 @@ export function boardTable(hub: {
     finishAct: (who, a) => F.finishAct(as(who), (isObject(a[1]) ? a[1] : {}) as Parameters<typeof F.finishAct>[1]),
     // The question register (extensions/questions.ts): the seat is the channel's.
     questionOpen: (who, a) => Q.questionOpen(as(who), (isObject(a[1]) ? a[1] : {}) as Q.ActInput),
-    questionAsk: (who, a) => Q.questionAsk(as(who), a[1], a[2]),
+    questionAsk: (who, a) => Q.questionAsk(as(who), a[1], a[2], a[3]),
     premisePropose: (who, a) => Q.premisePropose(as(who), (isObject(a[1]) ? a[1] : {}) as { text?: string; locator?: string; why?: string; scope?: unknown }),
     questionsView: (who, a) => {
       const o = isObject(a[1]) ? a[1] : {};

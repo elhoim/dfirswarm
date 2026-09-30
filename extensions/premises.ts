@@ -473,6 +473,31 @@ export function partsWords(parts: readonly AnswerPart[]): string {
 }
 
 /**
+ * What a question takes as happened (docs/adr/0011, "What a question
+ * presumes"): the asker's word, or an agent's (`presumes`, on the question
+ * register), or, for a person's question, the proposition the register's
+ * framing states with its negation (the first lead under it that framed it;
+ * the question's own words while none has). Its answer is reviewed against
+ * the rival "the question's premise is not supported". Words the register
+ * holds, never read for what they mean.
+ */
+export type Presumption = { q: string; section: string; text: string; source: "presumes" | "framing"; by: string; lead?: string; negation?: string };
+
+/** A presumption in words: what it takes as happened, and whose word it is. */
+export function presumptionWords(p: Presumption): string {
+  return `"${p.text}" (${p.source === "presumes" ? `presumed by ${p.by}` : `${p.by}, framed ${p.lead ? `by ${p.lead}` : "by its own words (no lead has framed it yet)"}${p.negation ? `, against "${p.negation}"` : ""}`})`;
+}
+
+/**
+ * A test of a question's premise (docs/adr/0011, "What a question
+ * presumes"), on a review (`answer_review.premise_tested`) or on the answer
+ * itself (`premise_tested`): what the test showed of whether the presumed
+ * event happened, and the observation or job it rests on (E-<seq>, or an
+ * object ref). The rival is fixed: the question's premise is not supported.
+ */
+export type PremiseTest = { outcome: string; refs: string[] };
+
+/**
  * A review's word on a part of an answer, as the standing reads it
  * (protocol.ts AnswerReviewPart, with its reviewer): the part (the answer's
  * id, or its words), and whether the review marks it not asked by the

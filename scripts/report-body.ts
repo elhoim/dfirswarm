@@ -91,8 +91,8 @@ import { readSweeps, sweepOf, sweepWords, type SweepRecord } from "../extensions
 import { answerResult, resultWords, reviewWords as negativeReviewWords, NEGATIVE_RESULTS } from "../extensions/negative-bar.ts";
 import { sectionBars } from "./check-answers.ts";
 import { leadsSnapshot, rankedLeads, viewLead, type LeadEvent, type LeadView, type LeadsSnapshot } from "../extensions/leads.ts";
-import { originWords, premiseViews, questionViews, type PremiseView, type QuestionEvent, type QuestionView, type QuestionsSnapshot } from "../extensions/questions.ts";
-import { classWords, partialPlainWords, partsSummaryWords, scopeWords, type PartsStanding } from "../extensions/premises.ts";
+import { originWords, premiseViews, presumptionsOf, questionViews, type PremiseView, type QuestionEvent, type QuestionView, type QuestionsSnapshot } from "../extensions/questions.ts";
+import { classWords, partialPlainWords, partsSummaryWords, presumptionWords, scopeWords, type PartsStanding, type Presumption } from "../extensions/premises.ts";
 import { questionCost, tokensWords, type QuestionCost } from "./question-cost.ts";
 import { FINISH_LOG, readFinish, type FinishState } from "../extensions/finish.ts";
 import { evidenceCodeRun, onlyOwnOutputs, ownJobOutputs, ownWords, type EvidenceCode } from "../extensions/evidence-code.ts";
@@ -563,7 +563,8 @@ async function loadRun(sandboxArg: string, opts: ReportBodyOptions): Promise<Run
   const sweeps = await readSweeps(sandbox).catch(() => [] as SweepRecord[]);
   const preparation = hasAnswers ? await import("../extensions/preparation.ts").then((PR) => PR.preparationFacts(sandbox, entries)).catch(() => undefined) : undefined;
   const premises = register?.snap.state.premises;
-  const gate = hasAnswers ? ledgerGate({ entries, attestations, disputes, sections, failed: unqualified, bar, partial: partialOutputCites(entries, producerOf), sweeps, ...(preparation ? { preparation } : {}), ...(premises?.size ? { premises } : {}) }) : null;
+  const presumes = ls ? presumptionsOf(ls.questions, ls.state) : new Map<string, Presumption>();
+  const gate = hasAnswers ? ledgerGate({ entries, attestations, disputes, sections, failed: unqualified, bar, partial: partialOutputCites(entries, producerOf), sweeps, ...(preparation ? { preparation } : {}), ...(premises?.size ? { premises } : {}), ...(presumes.size ? { presumes } : {}) }) : null;
 
   const text = async (rel: string) => (await readFile(join(sandbox, rel), "utf8").catch(() => ""));
   const ledgerChain = verifyLedgerChain(await text("ledger/entries.jsonl"));
@@ -1535,6 +1536,8 @@ function chainBlock(c: ChainQ, run: Run, memo: Map<number, EntryState>, limits: 
   // The proposition tested: the first lead under the question that stated one.
   const framed = leads.find((l) => l.proposition);
   rows.push({ label: "Proposition tested", s: framed ? [`${framed.proposition}; its negation: ${framed.negation ?? "not stated"} (${framed.id})`] : [v && ["analyst", "reviewer", "observer"].includes(v.origin.kind) ? "no lead stated one (a person's question is tested as a proposition and its negation)" : "none stated: the question was worked as asked"] });
+  // What the question takes as happened (docs/adr/0011, "What a question presumes"): its answer tests it first.
+  if (v?.presumption) rows.push({ label: "Presumes", s: [`${presumptionWords(v.presumption)}: its answer tests that premise first, against "the question's premise is not supported"`] });
   const body: Block[] = [{ k: "rows", rows }];
   // The leads: whole, except the negatives and the duplicates, counted here and listed whole in Appendix F.
   const negatives = leads.filter((l) => l.disposition === "negative");
@@ -1581,6 +1584,8 @@ function chainBlock(c: ChainQ, run: Run, memo: Map<number, EntryState>, limits: 
     });
     // Its parts, part by part (docs/adr/0013, "What the report shows of an answer's parts").
     body.push(...chainPartsBlocks(a, run));
+    // The test of what it presumes (docs/adr/0011, "What a question presumes").
+    body.push(...premiseTestBlocks(a, v, run));
     // How strongly other seats hold it (B2): established, or a best candidate only, and what capped it.
     // Held a best candidate only when it claims established (heldAsBestCandidate, the test the finish reads).
     const reviews = answerReviews(a, run.attestations);
@@ -2124,6 +2129,7 @@ function questionBlock(q: Question, run: Run, memo: Map<number, EntryState>): Bl
   body.push(...resultBlocks(a, q, run));
   body.push(...partsBlocks(a, q, run));
   body.push(...premiseBlocks(a, run));
+  body.push(...premiseTestBlocks(a, q.reg ? (run.register?.byId.get(q.reg) ?? null) : null, run));
   body.push({
     k: "p",
     s: [
@@ -2234,6 +2240,33 @@ function partialLeadBlocks(a: LedgerEntry, run: Run): Block[] {
   if (!s) return [];
   const plain = partialPlainWords("partial", s);
   return [{ k: "p", s: [{ b: partsSummaryWords(s) }, ...(plain ? [` Partial as recorded, and ${plain}.`] : [])] }];
+}
+
+/**
+ * The test of what a question presumes (docs/adr/0011, "What a question
+ * presumes"): what it presumes, then each test on the record (the answer's
+ * own, each review's), what it showed and on what; for an established or
+ * partial answer with none, that none is recorded. Nothing on a question
+ * that presumes nothing, unless the answer carries a test of its own.
+ */
+function premiseTestBlocks(a: LedgerEntry, v: QuestionView | null, run: Run): Block[] {
+  const tests = [...(a.premise_tested ? [{ who: `the answer (${a.authors.join(", ")})`, t: a.premise_tested }] : []), ...answerReviews(a, run.attestations).flatMap((x) => (x.answer_review?.premise_tested ? [{ who: `${x.by}'s review`, t: x.answer_review.premise_tested }] : []))];
+  const p = v?.presumption ?? null;
+  if (!p && !tests.length) return [];
+  const result = answerResult(a);
+  return [
+    {
+      k: "p",
+      s: [
+        { b: "Premise tested" },
+        p ? `: the question presumes ${presumptionWords(p)}. ` : ": ",
+        ...(tests.length
+          ? tests.flatMap((x, i): Span[] => [i ? "; " : "", `by ${x.who}, against "the question's premise is not supported": ${x.t.outcome} (`, ...x.t.refs.flatMap((r, j): Span[] => [j ? ", " : "", refSpan(r)]), ")"])
+          : [result === "established" || result === "partial" || result === null ? "No test of that premise is on the record: neither the answer nor a review of it tests whether it happened." : "No test of that premise is on the record."]),
+        tests.length ? "." : "",
+      ],
+    },
+  ];
 }
 
 /** An answer's parts in its §2 chain: a partial answer's plain line, then each part, established on what it rests on or open with what bounds it, with the reviews that mark it not asked. Nothing on an answer without rows. */

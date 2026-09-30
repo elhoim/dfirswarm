@@ -6,6 +6,50 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Added: a question's premise is tested first
+
+In a synthetic calibration case a question asks about an event that did not
+happen; the truth is `premise_not_supported`. Round after round the swarm
+answered it partial, a planted clue that fits the question's frame in the
+headline. Now (ADR 0011, "What a question presumes"):
+
+- **What a question presumes** is on the register: `presumes` said by its
+  asker (`swarm.sh question <run> add|amend --presumes`, the console's
+  question form, `question_open`), by the goal (a front-matter `presumes:`
+  list the kickoff carries into a `## Presumptions` section), or by an agent
+  with a clarification (`question_ask(…, presumes)`, once, never over a
+  recorded word); a person's question presumes the proposition its framing
+  states.
+- **The review tests the premise** against the fixed rival "the question's
+  premise is not supported": `answer_review.premise_tested {outcome, refs}`,
+  never resting on the answer under review. The answer may carry the test
+  itself (`premise_tested`). Both are present only when given: an old entry
+  or review hashes as it did.
+- **An established attest without it is recorded best_candidate**, on an
+  answer that claims established to a material question that presumes an
+  event (the source-first review's code `premise_untested`), and the reply
+  says how to fix it. **A partial answer without it is warned**
+  (`premise_untested`) at its record, the attest's reply and finish status,
+  never held.
+- **The prompt and the tools** (the worker prompt, record, attest,
+  question_open, question_ask) say: before answering a question that
+  presumes an event, test whether the event happened; if the evidence does
+  not support it, the answer is premise_not_supported; a clue that fits the
+  question's frame is a candidate to test against that rival, not an answer.
+- **The calibration generator** (version 3) frames every question's
+  presumption from its words alone: each that asks which, when or how of an
+  event presumes it, whatever the truth, so a presumption says nothing of
+  which premise is false.
+- **Shown** in questions.md, `question show`, the agents' list, the
+  question's post, the console's card and the report (the §2 chain and each
+  answer's premise tests, or that none is on the record).
+- **Measured**: `swarm.sh replay --presumes Q[,Q…]` presumes the named
+  questions in the copy and says what the rule would have warned and
+  capped. s85febc and s704e4b replay with no difference against main; with
+  the generator's presumptions, s85febc's questions 3 and 7 would have been
+  warned, and nothing else changes. Fixtures `premise-untested-capped`,
+  `premise-untested-warned`, `premise-tested-not-supported`.
+
 ### Changed: the report shows each answer's parts, and the metrics count the under-claimed
 
 Complete answers were still recorded partial at medium confidence, their

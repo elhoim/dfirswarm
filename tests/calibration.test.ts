@@ -22,7 +22,7 @@ import { join, relative } from "node:path";
 import { citedSeqs, normaliseResult, parseTruth, questionKey, resultOf, scoreRun, scoreText, type Truth } from "../scripts/calibrate.ts";
 import { patternOf } from "../scripts/score.ts";
 import { ledgerHash, type LedgerEntry } from "../extensions/protocol.ts";
-import { goalPremises } from "../extensions/questions.ts";
+import { goalPremises, goalPresumes } from "../extensions/questions.ts";
 
 const ROOT = join(import.meta.dirname, "..");
 const GEN = join(ROOT, "calibration", "generate.py");
@@ -44,6 +44,13 @@ async function digests(dir: string): Promise<Record<string, string>> {
   };
   await walk(dir);
   return out;
+}
+
+/** A generated goal's front-matter presumes, as the kickoff carries them into a Presumptions section and the register reads them: the question's number and what it takes as happened. */
+function presumesOf(goal: string): Array<{ section: string; text: string; bad?: string }> {
+  const front = /^---\n([\s\S]*?)\n---\n/.exec(goal)?.[1] ?? "";
+  const items = [...(/^presumes:\n((?:[ \t]+-[^\n]*\n?)*)/m.exec(`${front}\n`)?.[1] ?? "").matchAll(/^[ \t]+-[ \t]*(.*?)[ \t]*$/gm)].map((m) => m[1]);
+  return goalPresumes(`## Presumptions\n\n${items.map((x) => `- ${x}`).join("\n")}\n`);
 }
 
 async function truthOf(dir: string, c: string): Promise<Truth & { case: { dir?: string }; seed: string; probes: Array<{ ok: boolean }> }> {
@@ -76,6 +83,9 @@ test("the generator: the same seed gives the same cases and truth, another seed 
     const caseJson = await readFile(join(T, "cases1", "usb-departure", "case.json"), "utf8");
     assert.doesNotMatch(caseJson, /determinism/);
     assert.ok(!Object.keys(one).some((p) => p.includes("truth")));
+    // What each question presumes is framed from its words alone: the same questions presume, whatever the seed.
+    const presumed = async (dir: string, c: string) => presumesOf(await readFile(join(T, dir, c, "goal.md"), "utf8")).map((x) => x.section);
+    assert.deepEqual(await presumed("cases3", "usb-departure"), await presumed("cases1", "usb-departure"), "the presumed questions do not depend on the seed");
     // Refused without --force, replaced with it.
     assert.equal(gen(["--out", join(T, "cases1"), "--truth-dir", join(T, "truth1"), "--seed", "determinism"]).status, 2);
     assert.equal(gen(["--out", join(T, "cases1"), "--truth-dir", join(T, "truth1"), "--seed", "determinism", "--force"]).status, 0);
@@ -148,6 +158,16 @@ test("every case plants each kind of fact, holds it to the bytes, and its goal n
       assert.deepEqual(parsed.filter((x) => x.bad || !x.scope.entities?.length).map((x) => x.text), [], `${c}: every premise names its entities and parses`);
       const numbered = goal.split("\n").filter((l) => /^\d+\. /.test(l)).length;
       assert.equal(numbered, t.questions.length, `${c}: the goal numbers every question of the truth`);
+      // What the questions presume (docs/adr/0011, "What a question presumes"), framed neutrally: every premise-false
+      // question presumes its event, and so do others whose premise holds, so a presumption says nothing of the truth.
+      const presumes = presumesOf(goal);
+      assert.deepEqual(presumes.filter((x) => x.bad), [], `${c}: every presumes item names a question`);
+      assert.ok(presumes.every((x) => Number(x.section) >= 1 && Number(x.section) <= t.questions.length), `${c}: every presumes item names a question the goal numbers`);
+      const presumedIds = new Set(presumes.map((x) => x.section));
+      const premiseFalse = t.questions.filter((q) => q.expected.result === "premise_not_supported").map((q) => q.id);
+      assert.ok(premiseFalse.length && premiseFalse.every((q) => presumedIds.has(q)), `${c}: a premise-false question presumes its event`);
+      assert.ok(presumedIds.size > premiseFalse.length, `${c}: questions whose premise holds presume theirs too`);
+      assert.ok(t.questions.some((q) => q.expected.result !== "premise_not_supported" && presumedIds.has(q.id)), `${c}: a presumption is not a mark of a false premise`);
       assert.ok(t.late.length >= 1 && t.late.every((l) => existsSync(join(T, "cases", c, l.path)) && !existsSync(join(T, "cases", c, "inputs", l.path))));
       for (const q of t.questions) {
         results.add(q.expected.result);

@@ -278,17 +278,31 @@ by attesting or disputing the entry it cites.
 
 
 def goal_document(*, meta: Dict[str, str], goal: str, objectives: List[str], questions: List[str],
-                  existence: List[str], timeline_rows: int, events: int, premises: Optional[List[str]] = None) -> str:
+                  existence: List[str], timeline_rows: int, events: int, premises: Optional[List[str]] = None,
+                  presumes: Optional[Dict[int, str]] = None) -> str:
     """The goal document. `premises`: what the case brief (`goal`) itself states
     as given, each closely restating the brief's own sentence with its scope
     (`[scope: entities ...; questions ...]`), written to the front matter's
     `premises:` list, where the kickoff makes each a given of the premise
     register. Only the brief: never the truth, and never what a question asks
-    or tests."""
+    or tests.
+
+    `presumes`: what each question takes as happened, by its number, written to
+    the front matter's `presumes:` list (docs/adr/0011, "What a question
+    presumes"), where the question register reads it and a review tests that
+    premise first. Framed neutrally from the question's own words, never from
+    the truth: every question that asks which, when or how of an event
+    presumes that event, whether or not it happened, and a question that asks
+    whether (with an "if so") presumes nothing. So the swarm tests every
+    presumption, and a presumption says nothing of which premise is false."""
     n = len(questions)
     heads = ", ".join(f"`## {i}.`" for i in range(1, n + 1))
     sections = ",".join(str(i) for i in range(1, n + 1))
     front = [f"{k}: {v}" for k, v in meta.items()] + (["premises:"] + [f"  - {x}" for x in premises] if premises else [])
+    for q in sorted(presumes or {}):
+        if not 1 <= q <= n:
+            raise ValueError(f"presumes names question {q}, and the goal has {n}")
+    front += (["presumes:"] + [f"  - {q}: {presumes[q]}" for q in sorted(presumes)]) if presumes else []
     lines = ["---"] + front + ["---", "## Goal", "", goal.strip(), ""]
     lines += ["## Objectives", ""] + [f"- O{i}: {o}" for i, o in enumerate(objectives, 1)] + [""]
     lines += ["### Questions the report has to answer", ""]

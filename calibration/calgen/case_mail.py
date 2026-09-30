@@ -390,6 +390,18 @@ the same commands again.""",
             f"The finance clerk {clerk_p['full']} changed the supplier's bank details after an e-mail. [scope: entities {clerk_p['full']}; questions 1]",
             f"The evidence is {clerk_p['full']}'s mailbox, exported by IT, and the browser's history database, copied by IT. [scope: entities {clerk_p['full']}]",
         ],
+        # What each question takes as happened, from its own words, whatever the
+        # truth: which e-mail led to the change (1), which account it gave (2), how
+        # much was paid (4), which password was entered (5), which malware was
+        # installed (6). Question 3 asks whether (with an "if so"), and presumes
+        # nothing; 7 asks for the timeline.
+        presumes={
+            1: "An e-mail led to the change of the supplier's bank details.",
+            2: "That e-mail gave a bank account.",
+            4: "Money was paid to the new account.",
+            5: "The clerk entered a password on the phishing page.",
+            6: "The phishing e-mail installed malware on the clerk's computer.",
+        },
     )
 
     questions = [

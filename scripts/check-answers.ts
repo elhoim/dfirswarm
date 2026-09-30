@@ -404,7 +404,9 @@ export async function checkLedgerAnswers(sandbox: string, wanted: string[], exis
   const underLeads = leads ? await import("../extensions/leads.ts").then((L) => L.questionLeadEntries(leads)) : null;
   // The sources' broad extractions, as the store journal's receipts say them (extensions/preparation.ts): a negative that claims absence over one still under way holds; any other on one not produced is warned.
   const preparation = await import("../extensions/preparation.ts").then((PR) => PR.preparationFacts(S, entries, leads?.leads.values())).catch(() => undefined);
-  const gate = ledgerGate({ entries, attestations, disputes, sections, failed: jobStatuses(statuses, entries), bar, partial: partialOutputCites(entries, producerOf), sweeps, ...(imports.length ? { imports } : {}), moreEvidence, ...(underLeads ? { underLeads } : {}), ...(preparation ? { preparation } : {}), ...(register?.state.premises.size ? { premises: register.state.premises } : {}) });
+  // What each question takes as happened (docs/adr/0011, "What a question presumes"): a partial answer to one whose premise nothing tests is a warning.
+  const presumes = Q ? Q.presumptionsOf(register, leads) : new Map();
+  const gate = ledgerGate({ entries, attestations, disputes, sections, failed: jobStatuses(statuses, entries), bar, partial: partialOutputCites(entries, producerOf), sweeps, ...(imports.length ? { imports } : {}), moreEvidence, ...(underLeads ? { underLeads } : {}), ...(preparation ? { preparation } : {}), ...(register?.state.premises.size ? { premises: register.state.premises } : {}), ...(presumes.size ? { presumes } : {}) });
   const bySeq = new Map(entries.map((e) => [e.seq, e]));
   const replaced = supersededBy(entries);
   const limits = entries.filter((e) => e.kind === "limitation" && !replaced.has(e.seq));
