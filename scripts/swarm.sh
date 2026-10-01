@@ -107,7 +107,7 @@ Commands:
   package <id>       Hand a run over: report, board, trace, hashes (--sign signs it)
   examiner machine review releases timestamp rerun replay verify certify export hold release purge image-for   After a run: adoption and releases, checks, reruns, a rule change replayed, export, retention; the image packs boot (help <command>)
   tools <id>         What the run forged; --save DIR keeps it for the next run; --candidates ranks the code agents wrote into jobs
-  say <id> "<msg>"   Post as the examiner; cap|extend <id> its caps (extend lifts a cap's pause); lead <id> list|note its leads; question <id> add|list … asks it one; net <id> list|grant|deny|revoke its network
+  say <id> "<msg>"   Post as the examiner; cap|extend <id> its caps (extend lifts a cap's pause); lead <id> list|note its leads; question <id> add|list … asks it one; net <id> list|grant|deny|revoke its network; tool-supply <id> add PATH --why W --source S hands it a program no image holds, with its provenance
   stop <id>          Stop a run (stopped, never completed); pause|unpause <id> holds it and lifts a pause; resume <id> [--question TEXT] continues one that ended, on its own chains
   reap [id]          Stop agents that stalled
   ui                 The console, at http://<this-host>:43173 (SWARM_UI_PORT); --inputs-root DIR (repeatable) · --allow-inputs-root-from-ui
@@ -9133,6 +9133,12 @@ cmd_requests() {
 #   evidence <id> list [--json]
 #   material <id> add PATH --why W [--class operator_supplied|case_material] [--sensitive] [--as ID]
 #   material <id> list [--json]
+#   tool-supply <id> add PATH --why W --source TEXT [--built TEXT] [--sha256 HEX]... [--for R-n|L-n]... [--as ID]
+#   tool-supply <id> list [--json]
+# A tool supplied is material (class operator_supplied) with its provenance: where it came
+# from and how it was built (the operator's statement), the hashes the operator checked
+# (held to the bytes), what it is for. The seats are told how to run it: a sealed file has
+# no execute bit, so a job copies it into an executable temporary directory first.
 # Evidence is an inventory revision: imported into the store as import:ev-<n>,
 # catalogued when the catalogue is on, read by jobs, and what rested on the
 # evidence as it was reopened. Every seat's VM mounts the run's directory
@@ -9140,9 +9146,11 @@ cmd_requests() {
 # (store/imports/<id>/out/), and through jobs; its class is its ledger entry's.
 cmd_evidence() { add_material evidence "$@"; }
 cmd_material() { add_material material "$@"; }
-add_material() { # <evidence|material> <id> <add|list> ...
-  local mode="$1" id="${2:-}" sub="${3:-}"
-  [[ -n "$id" && -n "$sub" ]] || { echo "BLOCKER: $mode needs <id> and add PATH --why TEXT, or list (swarm.sh help $mode)." >&2; exit 2; }
+cmd_tool_supply() { add_material tool "$@"; }
+add_material() { # <evidence|material|tool> <id> <add|list> ...
+  local mode="$1" id="${2:-}" sub="${3:-}" name="$1"
+  [[ "$mode" == tool ]] && name=tool-supply
+  [[ -n "$id" && -n "$sub" ]] || { echo "BLOCKER: $name needs <id> and add PATH --why TEXT$([[ "$mode" == tool ]] && printf ' --source TEXT'), or list (swarm.sh help $name)." >&2; exit 2; }
   shift 3
   ensure_registry
   local rec sandbox
@@ -9157,29 +9165,34 @@ add_material() { # <evidence|material> <id> <add|list> ...
       out="$(node --experimental-strip-types --no-warnings "$cli" list "$sandbox" ${admission[@]+"${admission[@]}"})"
       if [[ " $* " == *" --json "* ]]; then printf '%s\n' "$out"; return; fi
       jq -r '(.replayed // []) | if length > 0 then "Recorded now what followed from \(map(.import) | join(", ")), committed before and not applied." else empty end' <<<"$out"
-      jq -r --arg m "$mode" '[.material[] | select((.mode // "") == $m)] | if length == 0 then "No \($m) was added to this run." else .[] | "\(.import) \(.class) at \(.at) by \(.supplied_by)\(if .request then " for \(.request)" else "" end)\(if .inventory_rev then ", inventory revision \(.inventory_rev)" else "" end)\(if .applied == false then " [committed; what follows from it is not all recorded yet]" else "" end): \(.why)\n    " + ([.files[] | "\(.path) (\(.bytes) bytes, sha256 \(.sha256))"] | join("\n    ")) end' <<<"$out"
+      jq -r --arg m "$mode" '[.material[] | select(if $m == "tool" then .tool != null else (.mode // "") == $m end)] | if length == 0 then "No \(if $m == "tool" then "tool was supplied to" else "\($m) was added to" end) this run." else .[] | "\(.import) \(.class) at \(.at) by \(.supplied_by)\(if .request then " for \(.request)" else "" end)\(if .inventory_rev then ", inventory revision \(.inventory_rev)" else "" end)\(if .applied == false then " [committed; what follows from it is not all recorded yet]" else "" end): \(.why)\n    " + ([.files[] | "\(.path) (\(.bytes) bytes, sha256 \(.sha256))"] | join("\n    ")) + (if .tool then "\n    tool, from \(.tool.source)\(if .tool.built then "; built: \(.tool.built)" else "; build not stated" end)\(if (.tool.checked | length) > 0 then "; hashes checked against the sealed bytes: \(.tool.checked | join(", "))" else "" end)\(if (.tool.for // []) | length > 0 then "; for \(.tool.for | join(", "))" else "" end)" else "" end) end' <<<"$out"
       ;;
     add)
-      [[ -n "${1:-}" ]] || { echo "BLOCKER: $mode add needs the path of the file or directory." >&2; exit 2; }
+      [[ -n "${1:-}" ]] || { echo "BLOCKER: $name add needs the path of the file or directory." >&2; exit 2; }
       while IFS= read -r a; do admission+=("$a"); done < <(question_admission_args "$sandbox")
       out="$(SWARM_RUNS_DIR="$RUNS_DIR" node --experimental-strip-types --no-warnings "$cli" "$mode-add" "$sandbox" --via "${SWARM_OPERATOR_VIA:-cli}" ${admission[@]+"${admission[@]}"} "$@")" || status=$?
       OPERATOR_AUDIT_DETAIL="$(jq -c '{material: {ok: (.ok != false), import: (.import // null), class: (.class // null), entry: (.entry // null), reason: (.reason // null)}}' <<<"$out" 2>/dev/null || echo null)" \
-        operator_audit "${mode}_outcome" "$id" add
+        operator_audit "${name//-/_}_outcome" "$id" add
       [[ "$status" -eq 0 ]] || { echo "BLOCKER: $(jq -r '.reason // "nothing was added"' <<<"$out" 2>/dev/null || printf '%s' "$out")" >&2; exit 2; }
-      operator_trace "$sandbox" "$mode" "$id" add "$@"
-      jq -r '
+      operator_trace "$sandbox" "$name" "$id" add "$@"
+      # A hub started by an older harness takes the act as plain material: the file is sealed, and its provenance and the way to run it are not recorded or told.
+      if [[ "$mode" == tool ]] && ! jq -e '.tool != null' >/dev/null 2>&1 <<<"$out"; then
+        echo "WARN: the run's hub did not record the tool's provenance (it runs an older harness than this checkout): the file is sealed as plain operator-supplied material. Its source, build and --for were not recorded, the ledger entry and the board post do not say it is a tool or how to run it. This command held the case policy's rule, the statements and the --sha256 hashes before handing it over; the hub could not hold --for. Tell the seats yourself (swarm.sh say $id ...): a sealed file has no execute bit, so a job copies it into an executable temporary directory first." >&2
+      fi
+      jq -r --arg run "$id" '
         "Added \(.import) (\(.class); \(.files | length) file(s), manifest sha256 \(.manifest_sha256)): sealed in store/imports/\(.import)/, on the store journal (line \(.journal_seq)) and the ledger (E-\(.entry // "pending")) as external material; use: \(.permitted_use)."
         + (if .inventory_rev then " Inventory revision \(.inventory_rev)." else "" end)
         + (if .request then " \(.request.id): " + (if .request.validated then "received and validated." elif .request.received then "received, not validated yet." else "not received yet." end) else "" end)
         + (if .reopened then " Reopened: \((.reopened.leads // []) | if length > 0 then join(", ") else "no lead" end); answers and acceptances of \((.reopened.questions // []) | if length > 0 then join(", ") else "no question" end) held again." else "" end)
         + (if (.reopened.unknown_questions // []) | length > 0 then " Not in the question register: \(.reopened.unknown_questions | join(", "))." else "" end)
         + (if (.stale_answers // []) | length > 0 then " Now stale until examined against it, whatever question it was added for (the finish line holds them): \(.stale_answers | map("\(.section) (E-\(.answer), \(.result | gsub("_"; " "))\(if (.coverage | length) > 0 then "; coverage " + (.coverage | map("E-\(.)") | join(", ")) else "" end))") | join("; "))." else "" end)
+        + (if .tool then " Sealed: \(.files | map("\(.path) (\(.bytes) bytes)") | join(", ")); every seat can read each of them. Tool: source: \(.tool.source); \(if .tool.built then "built: \(.tool.built)" else "build not stated" end); \(.tool.checked | length) hash(es) given, each held to the sealed bytes\(if (.tool.for // []) | length > 0 then "; for \(.tool.for | join(", ")) (this closes neither the request nor the lead: answer them with swarm.sh requests \($run) answer R-n TEXT, or swarm.sh lead \($run) note L-n TEXT)" else "" end). The seats are told on the board that nothing sealed runs where it stands, and how to run it from an executable temporary directory inside a job." else "" end)
         + (if .catalogue then (if (.catalogue | type) == "object" then " Catalogue: \((.catalogue.jobs // []) | length) detect job(s) queued." else " Catalogue: \(.catalogue)." end) else "" end)
         + (if .complete == false then " PENDING (committed; recorded at the next reconciliation, and the finish line waits for it): \((.pending // []) | join("; "))." else "" end)
         + (" The agents can read it now, read-only, at store/imports/\(.import)/out/ (their VMs mount the run live), and in jobs as import:\(.import)/<file>.")' <<<"$out"
       printf '%s\n' "$out"
       ;;
-    *) echo "BLOCKER: $mode takes add or list (got $sub)." >&2; exit 2 ;;
+    *) echo "BLOCKER: $name takes add or list (got $sub)." >&2; exit 2 ;;
   esac
 }
 
@@ -11186,6 +11199,34 @@ EOF
 A question's attachment given as a file (question add --attach FILE) is supplied the same way.
 EOF
       ;;
+    tool-supply) cat <<'EOF'
+  tool-supply <id> add PATH --why W --source TEXT [--built TEXT] [--sha256 HEX]... [--for R-n|L-n]... [--as ID]
+                                                  a program no image holds, for a running (or stopped) run: a file or a
+                                                  directory (a program and the libraries it loads), copied and held
+                                                  to its source's sha256, sealed as import:mat-<n>, on the ledger as
+                                                  external material of class operator_supplied with its provenance.
+                                                  --source says where it came from (a package and its version, a URL,
+                                                  who built it), --built how it was built or made fit (omit when used as
+                                                  published): both are your statement, recorded whole and never cut.
+                                                  --sha256 (repeatable) names hashes you checked: each must be one of the
+                                                  supplied files' sha256, and is held to it; a hash of anything else (a
+                                                  source archive, a signed index) goes in the words. --for names the
+                                                  requests (R-n) and leads (L-n) it is supplied for; a request's own lead
+                                                  is named beside it. Neither is closed by this: answer them.
+                                                  A directory is sealed whole, every file under it, and every seat
+                                                  reads all of it: the reply lists the files, and a directory with a
+                                                  hidden file or directory in it (.env, .git, .netrc) is refused.
+  tool-supply <id> list [--json]                  the tools supplied, with where they came from and what was checked
+The seats are told on the board where it came from as you state it, what the harness checked, that it is
+supplied material to be tested on input with a known answer before they rely on it, and how to run it: a
+sealed file has no execute bit, and nothing in a worker executes from store/, work/extracted/, work/quarantine/,
+inputs/ or its $OUT, so a job copies the program (and the libraries it loads) into an executable temporary
+directory inside the job. A job that tried to run one in place says so in its reason. The case policy's rules for
+material are kept: every preset admits it; one that says operator_supplied=none for material refuses it,
+because nothing recorded on its output could be kept. What rests on it is flagged with its class. The reply
+tells you if the run's hub, started by an older harness, took it as plain material. docs/adr/0014.
+EOF
+      ;;
     *) die_usage "no help for '$topic'" ;;
   esac
 }
@@ -11210,7 +11251,7 @@ main() {
     # A network act (grant, deny, revoke) changes the run; list reads it.
     net) [[ "${2:-}" == list ]] || operator_audit "$cmd" "$@" ;;
     # An act on an operator request, and added evidence or material, change the run; list and show read it.
-    requests|evidence|material) [[ "${2:-}" == list || "${2:-}" == show ]] || operator_audit "$cmd" "$@" ;;
+    requests|evidence|material|tool-supply) [[ "${2:-}" == list || "${2:-}" == show ]] || operator_audit "$cmd" "$@" ;;
   esac
   case "$cmd" in
     start) cmd_start "$@" ;;
@@ -11238,6 +11279,7 @@ main() {
     requests) cmd_requests "$@" ;;
     evidence) cmd_evidence "$@" ;;
     material) cmd_material "$@" ;;
+    tool-supply) cmd_tool_supply "$@" ;;
     netcheck) cmd_netcheck "$@" ;;
     review) cmd_review "$@" ;;
     image-for) cmd_image_for "$@" ;;

@@ -6,6 +6,25 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Added: supplying a tool to a running run, and a job that says it could not execute a program
+
+A live run asked the operator for programs no image held. `swarm.sh material add` was the only way to hand one over: it sealed the file, but said nothing of where it came from or how it was built, and the two jobs that tried to run it in place failed with `exit 126` and with `exit 127: a program it runs is not in its image` before a seat found the way (a copy in an executable temporary directory inside the job).
+
+- **`swarm.sh tool-supply <run> add PATH --why W --source TEXT [--built TEXT] [--sha256 HEX]... [--for R-n|L-n]...`**, and `tool-supply <run> list`.
+  - A tool is material: sealed as `import:mat-<n>`, class `operator_supplied` (never evidence), so the case policy's rules for material are its rules. Every preset admits it; a policy that says `operator_supplied=none` refuses it before anything is sealed, because nothing recorded on its output could be kept.
+  - It adds what only the operator knows, in `material.json` and in the ledger entry's provenance (`provenance.tool`, in the chained core): where it came from and how it was built (the operator's statement, recorded whole, refused rather than cut past 4000 characters), the hashes the operator checked (each must be one of the supplied files' sha256, else nothing is sealed), and the requests and leads it is for (each must exist; neither is closed by it).
+  - The board post tells the seats that the harness vouches for the bytes only, to test the tool on input whose answer they know, and how to run it: a job declares it as an input and copies it, and every library it loads, into an executable temporary directory inside the job.
+  - A directory is sealed whole and read by every seat: the reply lists its files and a hidden file or directory in it (`.env`, `.git`, `.netrc`) is refused. A path that holds the run is refused for every addition.
+  - The harness names no program and knows no format. A hub started by an older harness takes the act as plain material; the command line holds the policy's rule, the statements, the hidden-file refusal and the hashes itself first, and the reply warns that the source, build and `--for` were not recorded.
+- **A job that could not execute a program says so, by where the program stands.** `scripts/job-exec-refused.ts` reads a failed job for the shell's exit 126 (with the shell's own line that names the program, from stdout, stderr or a stderr file it kept), for the dynamic loader's `failed to map segment from shared object` at any status, and, at another status, for a `Permission denied` on an existing file under a directory a worker mounts read-only. A `Permission denied` anywhere else at another status is left alone, since nothing in the line tells a program that could not be run from a file that could not be written. The reason names the path and where the line is, and then:
+  - a supplied program (`store/imports/mat-<n>/`): a copy in an executable temporary directory inside the job;
+  - evidence (`inputs/`, `work/extracted/`, `work/quarantine/`, an evidence import): evidence is read, never run, so ask the operator for a program with `swarm.sh tool-supply` or reimplement the step, as the contract asks for code recovered from evidence;
+  - anywhere else: the rule first, the copy only for a program the operator supplied;
+  - the shell's other reasons for 126 (a file built for another machine, a missing interpreter, a directory): its own line, and no copy.
+
+  It is read before `program_missing` and `write_refused`: the loader's exit 127 is no program missing from the image, and a sealed file's `Permission denied` is no refused write. Recorded as `exec_refused` on the job and `job_exec_refused` on the journal.
+- The worker prompt says the same in a short paragraph, evidence rule included.
+
 ### Changed: the stop proposal waits for the minutes, not for a burst of jobs
 
 The diminishing-returns proposal fired on 20 committed jobs or 30 minutes with nothing yielded. On the 45 recorded runs with ten jobs or more, it proposed 27 times; 26 came on a burst of 20 jobs in one to eight minutes, and every one of those was followed by a yield, 25 within ten minutes. The one stretch that never yielded again had no job, and the minutes caught it. A stop is now proposed after 30 minutes with nothing yielded (`SWARM_YIELD_MINUTES`); `SWARM_YIELD_JOBS=N` adds the job count back, off by default. It is still never a vote and never a stop. See [ADR 0013](docs/adr/0013-a-negative-is-bounded-and-a-cap-pauses.md), "The stop proposal's window".
