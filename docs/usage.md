@@ -1229,6 +1229,13 @@ too, and finish status to the answers check's. A rule change that moves a
 fixture's projection changes its `expect.json` in the same commit, with the
 ADR that says why.
 
+#### A pull request's impact line, and the rule register
+
+`node --experimental-strip-types scripts/replay-impact.ts <base-commit>` replays every contract fixture (`tests/fixtures/contract/`) under the base commit and under this checkout, and prints each difference as a table: a fixture, a section, what differs, and each side. CI runs it on every pull request against its base and writes the table to the job's summary. A difference is what the change reaches, never a failure; the fixtures' own expectations are what the tests hold.
+
+`node --experimental-strip-types scripts/rules.ts --write` regenerates [the rule register](rules.md): every coded rule of the ledger with the functions that raise it, the design that states it, and the tests and fixtures that exercise it. `--check` says whether the committed file is current and names any rule without a test or fixture, a design section or a place it is raised; `tests/rules-register.test.ts` holds both. A change to a rule changes that file, so it shows in the diff.
+
+
 ### `npm` scripts
 
 | Script | Runs |

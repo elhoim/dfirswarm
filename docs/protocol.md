@@ -285,6 +285,18 @@ A standing dispute stays in force on the correction that stands in its entry's p
 
 A summary or a narrative names the questions it sums up as `Q-<n>` (or `question:<id>`): each becomes a symbolic citation, `question_refs: [{q, section, answer, fp}]` in the hashed core, bound to the fingerprint of the answer that stood (its result, the question revision it answers, and the hashes of its support, contrary evidence and limitations), and the answer is not also cited by its seq; an answer to a question that a summary or narrative cites by its seq (`E-<n>`, as the c10 pilot's did) is bound to that question the same way (`question:<n>`, the answer that stands for it now), and the reply says so. The summary keeps standing through a correction of that answer that keeps the fingerprint (a rewording), and no longer stands when the support, the revision or the contrary evidence changes; an answer's contrary evidence is held to its standing as its support is (a contrary entry superseded since the answer weighed it, its correction not weighed with it, or disputed and not qualified, takes the answer down, and with it the summary citing its question, without the answer being recorded again); a question it cites that is withdrawn or re-scoped since is a gate defect. A summary citing a question with no standing answer, or one whose answer no longer stands, is refused.
 
+#### The codes the answers check names
+
+The answers check (`ledgerGate`, run by `scripts/check-answers.ts`, readiness and the finish gate) holds the finish line on a defect, says a warning where the decision is made, and records a capped attest as a best candidate. Every code, with where it is raised, the design that states it and the tests and contract fixtures that exercise it, is in the generated register [docs/rules.md](rules.md) (`scripts/rules.ts`). The oldest defects, named here because the sections above describe them in words:
+
+- `no_answer`: a section the goal requires (a question, `summary`, `narrative`) has no standing answer.
+- `answer_support`: a standing answer no longer stands on its support: an entry it cites is superseded, disputed, gone, or no longer the entry it bound.
+- `answer_disputed`: a standing answer is under a dispute in force, its own or one inherited from the answer it corrects.
+- `no_critic_act`: no seat other than the answer's authors has attested or disputed it, nor reviewed it as a negative.
+- `open_contradiction`: two standing entries contradict each other (`rel contradicts`) and neither is superseded or weighed in an answer.
+- `coverage_missing`: a material negative (a bounded negative, not determinable, or a premise rejected on a search alone) rests on no standing coverage record.
+- `negative_unreviewed`: a material negative, or its coverage record, has no review by a seat that recorded neither.
+
 ### Catalog, toolbox, quarantine (`catalog/`, `toolbox.json`, `work/extracted/`)
 
 Three kickoff options for evidence work, all recorded in the registry:

@@ -115,6 +115,30 @@ jobs:
       - run: npm ci
       - run: npm test
 
+  replay-impact:
+    # A pull request's impact line (scripts/replay-impact.ts): every contract
+    # fixture replayed under the pull request's base and under its head, each
+    # difference named in the job's summary. A difference is what a rule
+    # change reaches, never a failure; the job fails only when nothing could
+    # be replayed.
+    if: github.event_name == 'pull_request'
+    name: replay impact · contract fixtures, base against head
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - run: git config --global init.defaultBranch main
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The base commit is read with git archive, so the history is needed.
+          fetch-depth: 0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Replay the contract fixtures under the base and this change
+        run: node --experimental-strip-types --no-warnings scripts/replay-impact.ts "${{ github.event.pull_request.base.sha }}"
+
   guards-without-namespaces:
     # The host a run meets inside an ordinary container, or on an Ubuntu with
     # its AppArmor restriction left on: no user namespaces, Landlock only.
