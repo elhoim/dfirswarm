@@ -53,9 +53,14 @@ for c in start list status stop ui reap summary package tools say netcheck; do
   printf '%s\n' "$help_out" | awk -v c="$c" '$1 == c { found = 1 } END { exit !found }' \
     || fail "the help does not list the $c command"
 done
-[[ "$(printf '%s\n' "$help_out" | wc -l)" -lt 60 ]] \
-  || fail "the short help grew past 60 lines; the detail belongs in 'help start'"
-pass "--help lists every command, on stderr silence, in under a screen and a half"
+# The limit keeps the option reference in 'help start' (some 500 lines), out
+# of the page printed for every typo. It was 60 until the help reached 59:
+# each branch that added a command then passed alone and the merge of two
+# failed, and commands were being packed onto one line to stay under it. 80
+# is two screens: a new command gets a line of its own.
+[[ "$(printf '%s\n' "$help_out" | wc -l)" -lt 80 ]] \
+  || fail "the short help grew past 80 lines; the detail belongs in 'help start'"
+pass "--help lists every command, on stderr silence, in under two screens"
 
 # Every option start accepts is on its page. A flag added without a line here
 # fails the build rather than going unmentioned for a year.

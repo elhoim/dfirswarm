@@ -60,7 +60,9 @@ These are the ones no contributor can do. In order.
 5. **Decide the version.** `package.json` says 0.3.0 and the changelog's
    `[Unreleased]` section has held every change since. Nothing was ever tagged
    or released, so the first public tag can be 0.3.0 or a new minor; pick one,
-   cut the changelog section to match, then
+   cut the changelog section to match
+   (`node --experimental-strip-types scripts/changelog.ts --fold --release X.Y.Z`
+   folds the `changelog.d/` fragments in, newest first, and cuts it), then
    `git tag -a vX.Y.Z && git push origin vX.Y.Z` and a GitHub release with
    that section as its body.
 6. **Flip the repository to public** (Settings → General → Danger Zone →
