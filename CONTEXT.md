@@ -268,6 +268,16 @@ determinable) for one revision and the answer that stood then. It makes the
 run examination limited, and lapses when the answer changes or new evidence
 arrives for the question.
 
+**Must establish**:
+A question the goal (its `## Must establish` section) or the operator requires
+to be established: partial, not determinable, a bounded negative short of the
+stronger bar and out of scope are no disposition for it. It ends the run
+established, on a premise shown not to hold, on a bounded negative under the
+stronger bar, by the operator's acceptance, or withdrawn; only the operator
+releases the requirement, with why.
+_Avoid_: mandatory, required answer (every material question requires an
+answer; this one requires that answer to establish it)
+
 **Best candidate**:
 An answer a review holds as what the evidence best supports, not shown to
 be the answer: a part not established, a medium or low confidence, or a
@@ -351,7 +361,8 @@ _Avoid_: plugin, extension (those are the harness's own), custom tool
 The `operator` stop policy (`--until-solved` or `--stop operator`): a run with
 no wall clock and advisory caps, which ends as any run does (every question in
 scope with a disposition under the bar; a reviewed not determinable is one), and
-which nobody but the operator can end otherwise.
+which nobody but the operator can end otherwise. A question that must be
+established is held to that, under this policy as under the others.
 When nothing moves the watchdog posts a **regroup**: what is open, blocked,
 waiting on the operator and uncited.
 

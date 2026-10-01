@@ -117,3 +117,50 @@ for g in "$ROOT"/prompts/goals/*.md; do
   grep -q "$WARNED" <<<"$out" && fail "$(basename "$g") has a brief and designates no premises: $out"
 done
 echo "ok - no shipped goal has a brief without premises"
+
+# The questions that must be established (docs/adr/0013, "A question that
+# must be established"): the front matter's must_establish: list is carried
+# into a Must establish section, the register holds the requirement on each
+# question it names, the kickoff says so, and a name the goal does not number
+# is warned about (it requires nothing).
+printf -- '---\nmust_establish: [1, 7]\n---\n## Goal\n\nA case.\n\n### Questions the report has to answer\n\n1. What is the flag?\n2. Which file held it?\n\n## Definition of done\n\n`work/report.md` exists.\n\n## Checks\n\n- `node --experimental-strip-types --no-warnings "$SWARM_HARNESS/scripts/check-answers.ts" --sections 1,2`\n' > "$TMP/required.md"
+out="$(swarm start --model solo/model --n 2 --cap-usd 1 --no-start --goal-file "$TMP/required.md" --label required)"
+sb5="$(sandbox_of "$out")"
+[[ -n "$sb5" && -f "$sb5/SWARM.md" ]] || fail "no sandbox for the goal with must_establish: $out"
+grep -q '^## Must establish$' "$sb5/SWARM.md" || fail "the front matter's must_establish is not in a Must establish section of the contract"
+grep -q '^- 1$' "$sb5/SWARM.md" && grep -q '^- 7$' "$sb5/SWARM.md" || fail "the contract's Must establish section does not name the questions as given"
+grep -q '^must_establish:' "$sb5/SWARM.md" && fail "the front matter leaked into the contract"
+grep -q '^Required:     Q-1 must be established' <<<"$out" || fail "the kickoff does not say which questions must be established: $out"
+grep -q '^WARN: the goal says these must be established and numbers no such question, so nothing is required of them: 7\.' <<<"$out" || fail "a name the goal does not number was not warned about: $out"
+rid="$(jq -r '.runs[] | select(.label == "required") | .id' "$TMP/runs/registry.json")"
+got="$(swarm question "$rid" list --json | jq -c '[.questions[] | {id, required: (.must_establish.required // false)}]')"
+[[ "$got" == '[{"id":"Q-1","required":true},{"id":"Q-2","required":false}]' ]] || fail "the register does not hold the requirement on Q-1 alone: $got"
+out="$(swarm question "$rid" amend Q-2 --expect-rev 1 --must-establish --why "the file is the evidence")" || fail "the operator could not require Q-2: $out"
+[[ "$(swarm question "$rid" list --json | jq -r '.questions[] | select(.id == "Q-2") | .must_establish.required')" == true ]] || fail "the amendment did not require Q-2"
+set +e
+out="$(swarm question "$rid" amend Q-2 --expect-rev 1 --no-must-establish)"; rc=$?
+set -e
+[[ $rc -eq 2 ]] && grep -q 'a release of the requirement says why' <<<"$out" || fail "a release without why was not refused (rc $rc): $out"
+echo "ok - must_establish: in the front matter is carried into the contract's Must establish section, held on its questions, said at the kickoff, and a name the goal does not number is warned about; the operator requires and releases on the record"
+
+# The list's forms, so a typo never quietly lowers the bar: items at column 0
+# are YAML too and are read; a key that names nothing is warned about; a
+# list beside the goal's own Must establish section is merged into it.
+qgoal() { # <file> <front matter lines> <body section lines>
+  printf -- '---\n%b---\n## Goal\n\nA case.\n\n### Questions\n\n1. What is the flag?\n2. Which file held it?\n\n%b## Definition of done\n\n`work/report.md` exists.\n\n## Checks\n\n- `node --experimental-strip-types --no-warnings "$SWARM_HARNESS/scripts/check-answers.ts" --sections 1,2`\n' "$2" "$3" > "$1"
+}
+required_of() { swarm question "$(jq -r --arg l "$1" '.runs[] | select(.label == $l) | .id' "$TMP/runs/registry.json")" list --json | jq -c '[.questions[] | select(.must_establish.required == true) | .id]'; }
+qgoal "$TMP/col0.md" 'must_establish:\n- 1\n- 2\n' ''
+out="$(swarm start --model solo/model --n 2 --cap-usd 1 --no-start --goal-file "$TMP/col0.md" --label col0)"
+grep -q '^Required:     Q-1, Q-2 must be established' <<<"$out" || fail "a list at column 0 was not read: $out"
+[[ "$(required_of col0)" == '["Q-1","Q-2"]' ]] || fail "the register does not hold the column-0 list: $(required_of col0)"
+qgoal "$TMP/empty.md" 'must_establish:\n' ''
+out="$(swarm start --model solo/model --n 2 --cap-usd 1 --no-start --goal-file "$TMP/empty.md" --label emptyreq)"
+grep -q "^WARN: the goal's metadata block has must_establish: and names no question in it" <<<"$out" || fail "a must_establish: key that names nothing was not warned about: $out"
+[[ "$(required_of emptyreq)" == '[]' ]] || fail "an empty key required something: $(required_of emptyreq)"
+qgoal "$TMP/both.md" 'must_establish: [2]\n' '## Must establish\n\n- 1\n\n'
+out="$(swarm start --model solo/model --n 2 --cap-usd 1 --no-start --goal-file "$TMP/both.md" --label bothreq)"
+sbb="$(sandbox_of "$out")"
+[[ "$(grep -c '^## Must establish$' "$sbb/SWARM.md")" -eq 1 ]] || fail "the front matter's list was not merged into the goal's own section"
+[[ "$(required_of bothreq)" == '["Q-1","Q-2"]' ]] || fail "the front matter's list beside the goal's section was dropped: $(required_of bothreq)"
+echo "ok - must_establish: items at column 0 are read, a key that names nothing is warned about, and a list beside the goal's own section is merged into it"

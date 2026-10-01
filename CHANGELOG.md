@@ -6,6 +6,26 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Changed: the stop proposal waits for the minutes, not for a burst of jobs
+
+The diminishing-returns proposal fired on 20 committed jobs or 30 minutes with nothing yielded. On the 45 recorded runs with ten jobs or more, it proposed 27 times; 26 came on a burst of 20 jobs in one to eight minutes, and every one of those was followed by a yield, 25 within ten minutes. The one stretch that never yielded again had no job, and the minutes caught it. A stop is now proposed after 30 minutes with nothing yielded (`SWARM_YIELD_MINUTES`); `SWARM_YIELD_JOBS=N` adds the job count back, off by default. It is still never a vote and never a stop. See [ADR 0013](docs/adr/0013-a-negative-is-bounded-and-a-cap-pauses.md), "The stop proposal's window".
+
+### Changed: a resume refuses a question it cannot admit, before anything moves
+
+`swarm.sh resume --question … --as operator` on an install where nobody is enrolled as `operator` used to move the run's end aside, record the resume and start the continuation, and only then warn that the question was not admitted: the run went on without the question it was resumed for. Each question is now checked first, as its admission would check it (`questions-cli.ts add --dry-run`), and one the register would refuse refuses the resume with nothing changed, naming why. `--skip-refused-questions` resumes without it and says so. See [ADR 0013](docs/adr/0013-a-negative-is-bounded-and-a-cap-pauses.md), "A resume refuses a question it cannot admit".
+
+### Added: a question that must be established
+
+On a flag-only challenge under `--stop operator`, the one question's answer was partial on a reviewed finding, which is a disposition under the bar. The coordinator's done ended the run examination-limited after 23 minutes, without the flag; the operator had to resume it and ask again by hand.
+
+- **The requirement.** A question can now be required to be established. For it, partial, not determinable, a bounded negative short of the stronger bar and out of scope do not end the run, under any stop policy. It ends established (or with its premise shown not to hold, or by a bounded negative under the stronger bar), by the operator's acceptance of its limits, or withdrawn.
+- **Who says so.** The goal, in a `## Must establish` section or `must_establish:` in its metadata block (`[1, 3]`); the kickoff says which questions are required and warns of a name the goal does not number, or of a key that names nothing (a list's items may be indented or not; a list beside the goal's own section is merged into it). The operator or an examiner, with `question add --must-establish` or `question amend Q-n --expect-rev N --must-establish`. Never an agent; never a background question.
+- **The way out stays on the record.** `question accept` disposes it as it disposes any question; `question amend --no-must-establish --why W` releases the requirement, and the register keeps who released it and why.
+- **Where it shows.** The answers check gives such a question no disposition unless it answered it, the finish gate names the requirement first among what blocks it, the done's refusal gives its ways instead of the negative path, readiness holds it, and every seat's header names it until it is established. `questions/questions.md`, `question list|show` and the agents' `questions` view say who required or released it.
+- **Measured.** Five new contract fixtures (`must-establish-partial`, `-not-determinable`, `-accepted`, `-released`, `-established`). The replay impact line against main reads every other fixture the same. `docs/rules.md` does not change: no ledger rule changed.
+
+See [ADR 0013](docs/adr/0013-a-negative-is-bounded-and-a-cap-pauses.md), "A question that must be established".
+
 ### Changed: Pi 0.87.1, on the host and in the VMs
 
 Pi moves from 0.87.0 to 0.87.1 in both places it is pinned: `package.json` (host-mode seats, the tests) and `images/base.Dockerfile` (`PI_VERSION`, every VM seat). 0.87.1:

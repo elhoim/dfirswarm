@@ -82,7 +82,7 @@ const TOOL_PARTS_HELD = [
 
 const QUESTIONS = ["Who logged on, and when?", "Was a remote tool installed?", "What was deleted?", "When did it start?", "Which account ran the tool?", "What left the network?"];
 
-function goal(n: number, existence: string[] = [], premises: string[] = [], presumes: string[] = []): string {
+function goal(n: number, existence: string[] = [], premises: string[] = [], presumes: string[] = [], must: string[] = []): string {
   return [
     "## Goal",
     "",
@@ -96,6 +96,8 @@ function goal(n: number, existence: string[] = [], premises: string[] = [], pres
     ...(premises.length ? ["## Premises", "", ...premises.map((p) => `- ${p}`), ""] : []),
     // What the goal's questions presume (docs/adr/0011, "What a question presumes"): "<n>: <what it takes as happened>".
     ...(presumes.length ? ["## Presumptions", "", ...presumes.map((p) => `- ${p}`), ""] : []),
+    // The goal's questions that must be established (docs/adr/0013, "A question that must be established"): "<n>[: why]".
+    ...(must.length ? ["## Must establish", "", ...must.map((m) => `- ${m}`), ""] : []),
     "## Definition of done",
     "",
     "Every question has a disposition under the bar.",
@@ -116,10 +118,10 @@ async function job(S: string, id: string, file: string, body: string, inputs: st
   await rm(staging, { recursive: true, force: true });
 }
 
-async function newRun(base: string, id: string, questions: number, existence: string[] = [], premises: string[] = [], presumes: string[] = []): Promise<Run> {
+async function newRun(base: string, id: string, questions: number, existence: string[] = [], premises: string[] = [], presumes: string[] = [], must: string[] = []): Promise<Run> {
   const runs = join(base, "runs");
   const S = join(runs, id);
-  await P.initSandbox(S, { swarmId: id, agentIds: ["a0", "a1", "a2", "a3"], capUsd: 5, wallClockMinutes: 30, goal: goal(questions, existence, premises, presumes) });
+  await P.initSandbox(S, { swarmId: id, agentIds: ["a0", "a1", "a2", "a3"], capUsd: 5, wallClockMinutes: 30, goal: goal(questions, existence, premises, presumes, must) });
   await writeFile(join(S, "inputs.json"), `${JSON.stringify({ files: [{ path: "inputs/disk.E01", sha256: sha("disk"), bytes: 10 }, { path: "inputs/logs/a.log", sha256: sha("a"), bytes: 10 }] })}\n`);
   await job(S, "j000001", "hits.txt", "j000001\n", ["input:disk.E01"]);
   await job(S, "j000002", "hits.txt", "j000002\n", ["input:logs/a.log"]);
@@ -1162,6 +1164,87 @@ const CASES: Record<string, (base: string) => Promise<string>> = {
     return r.S;
   },
 };
+
+/**
+ * Question 1 partial on a finding, the part it leaves open bounded by a
+ * limitation, reviewed by another seat that holds that part open as the
+ * answer declares it (partial-every-policy's review): a disposition under the
+ * ordinary bar.
+ */
+async function reviewedPartial(r: Run): Promise<void> {
+  const p = await partial(r, "1");
+  await attest(r.a3, {
+    seq: p.a.seq,
+    how: "re-read line 12 from job:j000002; no account field in the log",
+    ...ESTABLISHED,
+    answer_review: { ...ESTABLISHED.answer_review, parts: [{ id: "when", part: "when the logon happened", established: true, why: "line 12" }, { id: "who", part: "which account logged on", established: false, why: "the log keeps none", declared_open: `E-${p.lim.seq}` }] },
+  });
+}
+
+/**
+ * A question that must be established (docs/adr/0013): the Breadcrumbs run
+ * ended a flag-only challenge on a partial answer, a disposition under the
+ * ordinary bar. These histories are the rule's contract.
+ */
+const MUST_ESTABLISH_CASES: Record<string, (base: string) => Promise<string>> = {
+  /** The goal's Must establish section names question 1; its answer is partial on a reviewed finding; question 2 is established. */
+  "must-establish-partial": async (base) => {
+    const r = await newRun(base, "mep", 2, [], [], [], ["1"]);
+    await Q.seedRegister(r.S);
+    await established(r, "2");
+    await reviewedPartial(r);
+    return r.S;
+  },
+
+  /** The operator requires question 1 to be established (amend --must-establish); its answer is not determinable on a coverage record another seat reviewed; question 2 is established. */
+  "must-establish-not-determinable": async (base) => {
+    const r = await newRun(base, "mnd", 2);
+    await Q.seedRegister(r.S);
+    await established(r, "2");
+    await operatorAct(r.S, "amend", { q: "Q-1", expected_rev: 1, must_establish: true, why: "the account is what the client needs" });
+    const lid = await lead(r.a0, "1", [{ source: "input:logs/a.log", method: "search the log" }]);
+    const abs = (await rec(r.a0, { kind: "absence", value: "an account name for the logon", source: "the log", evidence: "a search", refs: ["job:j000002/hits.txt"], answers: ["1"] })).entry;
+    const cov = (await rec(r.a0, coverage("1", ["input:logs/a.log"], [`E-${abs.seq}`, "job:j000002/hits.txt"], { acquisition_none_why: "no source outside the evidence records it" }))).entry;
+    await rec(r.a1, { kind: "answer", section: "question:1", value: "Who logged on cannot be determined from the log", reasoning: `E-${cov.seq}`, ...A, result: "not_determinable" });
+    await attest(r.a2, { seq: cov.seq, how: "ran the search again from job:j000002", review: REVIEW });
+    await close(r.a0, lid, `E-${cov.seq}`);
+    await SW.awaitSweeps(r.S);
+    return r.S;
+  },
+
+  /** The operator requires question 1 to be established after its partial answer was reviewed, then accepts its limits for that revision and answer; question 2 is established. */
+  "must-establish-accepted": async (base) => {
+    const r = await newRun(base, "mea", 2);
+    await Q.seedRegister(r.S);
+    await established(r, "2");
+    await reviewedPartial(r);
+    await operatorAct(r.S, "amend", { q: "Q-1", expected_rev: 1, must_establish: true, why: "the account is what the client needs" });
+    await SW.awaitSweeps(r.S);
+    await operatorAct(r.S, "accept", { q: "Q-1", as: "bounded", why: "the log keeps no account names, and no other source is in the case", expected_rev: 1 });
+    return r.S;
+  },
+
+  /** The goal requires question 1; its answer is partial on a reviewed finding; the operator releases the requirement, with why. Question 2 is established. */
+  "must-establish-released": async (base) => {
+    const r = await newRun(base, "mer", 2, [], [], [], ["1"]);
+    await Q.seedRegister(r.S);
+    await established(r, "2");
+    await reviewedPartial(r);
+    await SW.awaitSweeps(r.S);
+    await operatorAct(r.S, "amend", { q: "Q-1", expected_rev: 1, must_establish: false, why: "the client takes what the log holds" });
+    return r.S;
+  },
+
+  /** The goal requires question 1, and it is established on a finding another seat attests established; question 2 too. */
+  "must-establish-established": async (base) => {
+    const r = await newRun(base, "mes", 2, [], [], [], ["1"]);
+    await Q.seedRegister(r.S);
+    await established(r, "1");
+    await established(r, "2");
+    return r.S;
+  },
+};
+Object.assign(CASES, MUST_ESTABLISH_CASES);
 
 // ---------------------------------------------------------------------------------------------
 // Writing the fixture
