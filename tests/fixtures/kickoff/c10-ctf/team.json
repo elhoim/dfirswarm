@@ -1,0 +1,25 @@
+{
+  "swarm_id": "<RUN>",
+  "n": 3,
+  "agents": [
+    {
+      "id": "<RUN>00",
+      "role": "worker",
+      "model": "solo/a"
+    },
+    {
+      "id": "<RUN>01",
+      "role": "worker",
+      "model": "solo/a"
+    },
+    {
+      "id": "<RUN>02",
+      "role": "worker",
+      "model": "solo/b"
+    }
+  ],
+  "models": [
+    "solo/a",
+    "solo/b"
+  ]
+}

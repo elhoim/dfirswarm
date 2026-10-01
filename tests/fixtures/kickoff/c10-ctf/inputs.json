@@ -1,0 +1,40 @@
+{
+  "source": "<EVIDENCE>",
+  "copied_at": "<TIME>",
+  "files": [
+    {
+      "path": "inputs/disk.img",
+      "bytes": 17,
+      "sha256": "c9e86bda27cf48f8a5e28710e7eeaeba55bd8f903408fa16783bb7f9acdeee07",
+      "sha1": "9e317fb9fe42df821e7eac096e8bb78302ee9369",
+      "md5": "c83b70491c70c60946e0f91bef7c5b96",
+      "mtime_ms": <MS>,
+      "ctime_ms": <MS>
+    },
+    {
+      "path": "inputs/logs/auth.log",
+      "bytes": 59,
+      "sha256": "569ea8b69556deccda6e55ada9ecb7627bf1710a1a4696be756f78685092d952",
+      "sha1": "6c1e692d7ae912e9b1e8e888eaf19eda4345c01c",
+      "md5": "1f7043ac7b382bf287c60635284aa133",
+      "mtime_ms": <MS>,
+      "ctime_ms": <MS>
+    }
+  ],
+  "bytes": 76,
+  "enforce": "<HOST>",
+  "guard": "<HOST>",
+  "digests": [
+    "sha256",
+    "sha1",
+    "md5"
+  ],
+  "quarantine": false,
+  "source_checked": {
+    "by": "content",
+    "files": 2,
+    "mismatches": 0,
+    "seconds": <S>
+  },
+  "held": "copy"
+}
