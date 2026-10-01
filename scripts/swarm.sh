@@ -107,7 +107,7 @@ Commands:
   package <id>       Hand a run over: report, board, trace, hashes (--sign signs it)
   examiner machine review releases timestamp rerun replay verify certify export hold release purge image-for   After a run: adoption and releases, checks, reruns, a rule change replayed, export, retention; the image packs boot (help <command>)
   tools <id>         What the run forged; --save DIR keeps it for the next run; --candidates ranks the code agents wrote into jobs
-  say <id> "<msg>"   Post as the examiner; cap|extend <id> its caps (extend lifts a cap's pause); lead <id> list|note its leads; question <id> add|list … asks it one; net <id> list|grant|deny|revoke its network
+  say <id> "<msg>"   Post as the examiner; cap|extend <id> its caps (extend lifts a cap's pause); lead <id> list|note its leads; question <id> add|list … asks it one; net <id> list|grant|deny|revoke its network; tool-supply <id> add PATH --why W --source S hands it a program no image holds, with its provenance
   stop <id>          Stop a run (stopped, never completed); pause|unpause <id> holds it and lifts a pause; resume <id> [--question TEXT] continues one that ended, on its own chains
   reap [id]          Stop agents that stalled
   ui                 The console, at http://<this-host>:43173 (SWARM_UI_PORT); --inputs-root DIR (repeatable) · --allow-inputs-root-from-ui
@@ -291,7 +291,8 @@ Limits
                       completed). operator: --until-solved. A metered team without
                       --cap-tokens gets a token cap of 100000000 as a second brake.
                       When nothing has yielded (no new finding, question disposition
-                      or coverage record) for 20 jobs or 30 minutes, a stop is
+                      or coverage record) for 30 minutes (SWARM_YIELD_MINUTES; and
+                      SWARM_YIELD_JOBS committed jobs, when set), a stop is
                       proposed to you as an operator request (kind decision); your
                       silence is never taken for approval. Also set by the goal's
                       metadata block (stop: cap-pause).
@@ -3864,7 +3865,10 @@ cmd_start() {
   # the case takes as given, carried into a `## Premises` section the same
   # way; each is a given of the premise register (P-n). And presumes: what
   # each question takes as happened (`- 7: <what>`), carried into a
-  # `## Presumptions` section; its answer tests that premise first.
+  # `## Presumptions` section; its answer tests that premise first. And
+  # must_establish: the questions only an answer that answers them ends
+  # the run on (`must_establish: [1, 3]`, or a list of `- 1: why`), carried
+  # into a `## Must establish` section (docs/adr/0013).
   # The case policy, from the flags, the goal's metadata block (read before
   # it is stripped) and the preset: refused here when it contradicts itself,
   # never guessed. `network: open` is --no-netguard.
@@ -3967,6 +3971,31 @@ if m:
     if presumes and not re.search(r"^#{2,3}[ \t]*Presumptions[ \t]*$", body, re.M | re.I):
         body = body.rstrip("\n") + "\n\n## Presumptions\n\n" + "".join("- " + x + "\n" for x in presumes)
     out["presumes"] = len(presumes)
+    # The questions that must be established (docs/adr/0013, "A question that
+    # must be established"): an inline list ([1, 3] or 1, 3) or a list of
+    # "- <question>[: why]" lines, indented or not (both are YAML), carried
+    # into a Must establish section, where the question register reads it;
+    # into the section of that name the goal has already, so neither is dropped. A
+    # key that names nothing is said (must_establish_unparsed): a bar quietly
+    # lower than the operator wrote is what this list exists to prevent.
+    required = []
+    rblock = re.search(r"^must_establish:[ \t]*(.*?)\r?\n((?:[ \t]*-(?=[ \t]|\r?\n)[^\n]*\n?)*)", m.group(0), re.M)
+    if rblock:
+        inline = rblock.group(1).strip().strip("[]")
+        required += [x.strip().strip("\"'") for x in inline.split(",") if x.strip().strip("\"'")]
+        for item in re.findall(r"^[ \t]*-(?=[ \t]|\r?$)[ \t]*(.*?)[ \t]*\r?$", rblock.group(2), re.M):
+            if item.strip():
+                required.append(item.strip())
+        if not required:
+            out["must_establish_unparsed"] = True
+    if required:
+        items = "".join("- " + x + "\n" for x in required)
+        heading = re.search(r"^#{2,3}[ \t]*Must establish[ \t]*\r?\n", body, re.M | re.I)
+        if heading:
+            body = body[: heading.end()] + "\n" + items + body[heading.end():]
+        else:
+            body = body.rstrip("\n") + "\n\n## Must establish\n\n" + items
+    out["must_establish"] = len(required)
     with open(path, "w", encoding="utf-8") as f:
         f.write(body)
 # A goal with a case brief and no premises designated (docs/adr/0011,
@@ -3995,6 +4024,10 @@ STRIP
   goal_toolbox="$(jq -r '.toolbox' <<<"$goal_meta")"
   local goal_brief
   goal_brief="$(jq -r '.brief_without_premises // empty' <<<"$goal_meta")"
+  # A must_establish: key that names no question (docs/adr/0013): said, never guessed.
+  if [[ "$(jq -r '.must_establish_unparsed // false' <<<"$goal_meta")" == true ]]; then
+    echo "WARN: the goal's metadata block has must_establish: and names no question in it, so nothing is required by it: write the questions as the goal numbers them, must_establish: [1, 3] or a line each (- 1), indented or not ($goal_source)." >&2
+  fi
   if [[ -n "$goal_brief" ]]; then
     echo "WARN: the goal has a case brief ($goal_brief) and designates no premises: its answers will hold the brief's givens (whose devices these are, who the subject is, the setting) open, as parts still to prove. Designate what the brief states as given with a premises: list in the goal's front matter (a line each: - <the brief's sentence> [scope: questions 1, 2; entities <who or what>]), or once the run exists with: swarm.sh question <run> premise add --text \"<the brief's sentence>\" --locator \"<where it stands>\" [--entity E] [--for-question Q-n]. Never a premise that answers a question, or that a question tests ($goal_source)." >&2
   fi
@@ -5617,8 +5650,16 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
   fi
   # The question register opens with the goal's questions and objectives
   # (extensions/questions.ts): Q-n is question:n from its first event.
-  SWARM_RUNS_DIR="$RUNS_DIR" node --experimental-strip-types --no-warnings "$ROOT/scripts/questions-cli.ts" seed "$sandbox" >/dev/null 2>&1 \
-    || echo "WARN: the question register could not be seeded now; the first act on it seeds it from the goal." >&2
+  # A Must establish section that names what the goal does not number
+  # requires nothing (docs/adr/0013): said, so a typo cannot quietly lower
+  # the bar the run ends on.
+  local seeded_out
+  if seeded_out="$(SWARM_RUNS_DIR="$RUNS_DIR" node --experimental-strip-types --no-warnings "$ROOT/scripts/questions-cli.ts" seed "$sandbox" 2>/dev/null)"; then
+    jq -r 'if (.must_establish // []) | length > 0 then "Required:     \(.must_establish | join(", ")) must be established: only an answer that answers each ends the run on it, or your acceptance of its limits" else empty end' <<<"$seeded_out" 2>/dev/null || true
+    jq -r 'if (.must_establish_unknown // []) | length > 0 then "WARN: the goal says these must be established and numbers no such question, so nothing is required of them: \(.must_establish_unknown | join(", ")). Name a question as the goal numbers it (- 1), or require it once the run exists: swarm.sh question <run> amend Q-n --expect-rev N --must-establish --why \"…\"" else empty end' <<<"$seeded_out" >&2 2>/dev/null || true
+  else
+    echo "WARN: the question register could not be seeded now; the first act on it seeds it from the goal." >&2
+  fi
   # The operator's notify command, outside the run and 0600: a webhook's
   # URL is often its secret, and nothing an agent writes may name what the
   # host runs.
@@ -9092,6 +9133,12 @@ cmd_requests() {
 #   evidence <id> list [--json]
 #   material <id> add PATH --why W [--class operator_supplied|case_material] [--sensitive] [--as ID]
 #   material <id> list [--json]
+#   tool-supply <id> add PATH --why W --source TEXT [--built TEXT] [--sha256 HEX]... [--for R-n|L-n]... [--as ID]
+#   tool-supply <id> list [--json]
+# A tool supplied is material (class operator_supplied) with its provenance: where it came
+# from and how it was built (the operator's statement), the hashes the operator checked
+# (held to the bytes), what it is for. The seats are told how to run it: a sealed file has
+# no execute bit, so a job copies it into an executable temporary directory first.
 # Evidence is an inventory revision: imported into the store as import:ev-<n>,
 # catalogued when the catalogue is on, read by jobs, and what rested on the
 # evidence as it was reopened. Every seat's VM mounts the run's directory
@@ -9099,9 +9146,11 @@ cmd_requests() {
 # (store/imports/<id>/out/), and through jobs; its class is its ledger entry's.
 cmd_evidence() { add_material evidence "$@"; }
 cmd_material() { add_material material "$@"; }
-add_material() { # <evidence|material> <id> <add|list> ...
-  local mode="$1" id="${2:-}" sub="${3:-}"
-  [[ -n "$id" && -n "$sub" ]] || { echo "BLOCKER: $mode needs <id> and add PATH --why TEXT, or list (swarm.sh help $mode)." >&2; exit 2; }
+cmd_tool_supply() { add_material tool "$@"; }
+add_material() { # <evidence|material|tool> <id> <add|list> ...
+  local mode="$1" id="${2:-}" sub="${3:-}" name="$1"
+  [[ "$mode" == tool ]] && name=tool-supply
+  [[ -n "$id" && -n "$sub" ]] || { echo "BLOCKER: $name needs <id> and add PATH --why TEXT$([[ "$mode" == tool ]] && printf ' --source TEXT'), or list (swarm.sh help $name)." >&2; exit 2; }
   shift 3
   ensure_registry
   local rec sandbox
@@ -9116,29 +9165,34 @@ add_material() { # <evidence|material> <id> <add|list> ...
       out="$(node --experimental-strip-types --no-warnings "$cli" list "$sandbox" ${admission[@]+"${admission[@]}"})"
       if [[ " $* " == *" --json "* ]]; then printf '%s\n' "$out"; return; fi
       jq -r '(.replayed // []) | if length > 0 then "Recorded now what followed from \(map(.import) | join(", ")), committed before and not applied." else empty end' <<<"$out"
-      jq -r --arg m "$mode" '[.material[] | select((.mode // "") == $m)] | if length == 0 then "No \($m) was added to this run." else .[] | "\(.import) \(.class) at \(.at) by \(.supplied_by)\(if .request then " for \(.request)" else "" end)\(if .inventory_rev then ", inventory revision \(.inventory_rev)" else "" end)\(if .applied == false then " [committed; what follows from it is not all recorded yet]" else "" end): \(.why)\n    " + ([.files[] | "\(.path) (\(.bytes) bytes, sha256 \(.sha256))"] | join("\n    ")) end' <<<"$out"
+      jq -r --arg m "$mode" '[.material[] | select(if $m == "tool" then .tool != null else (.mode // "") == $m end)] | if length == 0 then "No \(if $m == "tool" then "tool was supplied to" else "\($m) was added to" end) this run." else .[] | "\(.import) \(.class) at \(.at) by \(.supplied_by)\(if .request then " for \(.request)" else "" end)\(if .inventory_rev then ", inventory revision \(.inventory_rev)" else "" end)\(if .applied == false then " [committed; what follows from it is not all recorded yet]" else "" end): \(.why)\n    " + ([.files[] | "\(.path) (\(.bytes) bytes, sha256 \(.sha256))"] | join("\n    ")) + (if .tool then "\n    tool, from \(.tool.source)\(if .tool.built then "; built: \(.tool.built)" else "; build not stated" end)\(if (.tool.checked | length) > 0 then "; hashes checked against the sealed bytes: \(.tool.checked | join(", "))" else "" end)\(if (.tool.for // []) | length > 0 then "; for \(.tool.for | join(", "))" else "" end)" else "" end) end' <<<"$out"
       ;;
     add)
-      [[ -n "${1:-}" ]] || { echo "BLOCKER: $mode add needs the path of the file or directory." >&2; exit 2; }
+      [[ -n "${1:-}" ]] || { echo "BLOCKER: $name add needs the path of the file or directory." >&2; exit 2; }
       while IFS= read -r a; do admission+=("$a"); done < <(question_admission_args "$sandbox")
       out="$(SWARM_RUNS_DIR="$RUNS_DIR" node --experimental-strip-types --no-warnings "$cli" "$mode-add" "$sandbox" --via "${SWARM_OPERATOR_VIA:-cli}" ${admission[@]+"${admission[@]}"} "$@")" || status=$?
       OPERATOR_AUDIT_DETAIL="$(jq -c '{material: {ok: (.ok != false), import: (.import // null), class: (.class // null), entry: (.entry // null), reason: (.reason // null)}}' <<<"$out" 2>/dev/null || echo null)" \
-        operator_audit "${mode}_outcome" "$id" add
+        operator_audit "${name//-/_}_outcome" "$id" add
       [[ "$status" -eq 0 ]] || { echo "BLOCKER: $(jq -r '.reason // "nothing was added"' <<<"$out" 2>/dev/null || printf '%s' "$out")" >&2; exit 2; }
-      operator_trace "$sandbox" "$mode" "$id" add "$@"
-      jq -r '
+      operator_trace "$sandbox" "$name" "$id" add "$@"
+      # A hub started by an older harness takes the act as plain material: the file is sealed, and its provenance and the way to run it are not recorded or told.
+      if [[ "$mode" == tool ]] && ! jq -e '.tool != null' >/dev/null 2>&1 <<<"$out"; then
+        echo "WARN: the run's hub did not record the tool's provenance (it runs an older harness than this checkout): the file is sealed as plain operator-supplied material. Its source, build and --for were not recorded, the ledger entry and the board post do not say it is a tool or how to run it. This command held the case policy's rule, the statements and the --sha256 hashes before handing it over; the hub could not hold --for. Tell the seats yourself (swarm.sh say $id ...): a sealed file has no execute bit, so a job copies it into an executable temporary directory first." >&2
+      fi
+      jq -r --arg run "$id" '
         "Added \(.import) (\(.class); \(.files | length) file(s), manifest sha256 \(.manifest_sha256)): sealed in store/imports/\(.import)/, on the store journal (line \(.journal_seq)) and the ledger (E-\(.entry // "pending")) as external material; use: \(.permitted_use)."
         + (if .inventory_rev then " Inventory revision \(.inventory_rev)." else "" end)
         + (if .request then " \(.request.id): " + (if .request.validated then "received and validated." elif .request.received then "received, not validated yet." else "not received yet." end) else "" end)
         + (if .reopened then " Reopened: \((.reopened.leads // []) | if length > 0 then join(", ") else "no lead" end); answers and acceptances of \((.reopened.questions // []) | if length > 0 then join(", ") else "no question" end) held again." else "" end)
         + (if (.reopened.unknown_questions // []) | length > 0 then " Not in the question register: \(.reopened.unknown_questions | join(", "))." else "" end)
         + (if (.stale_answers // []) | length > 0 then " Now stale until examined against it, whatever question it was added for (the finish line holds them): \(.stale_answers | map("\(.section) (E-\(.answer), \(.result | gsub("_"; " "))\(if (.coverage | length) > 0 then "; coverage " + (.coverage | map("E-\(.)") | join(", ")) else "" end))") | join("; "))." else "" end)
+        + (if .tool then " Sealed: \(.files | map("\(.path) (\(.bytes) bytes)") | join(", ")); every seat can read each of them. Tool: source: \(.tool.source); \(if .tool.built then "built: \(.tool.built)" else "build not stated" end); \(.tool.checked | length) hash(es) given, each held to the sealed bytes\(if (.tool.for // []) | length > 0 then "; for \(.tool.for | join(", ")) (this closes neither the request nor the lead: answer them with swarm.sh requests \($run) answer R-n TEXT, or swarm.sh lead \($run) note L-n TEXT)" else "" end). The seats are told on the board that nothing sealed runs where it stands, and how to run it from an executable temporary directory inside a job." else "" end)
         + (if .catalogue then (if (.catalogue | type) == "object" then " Catalogue: \((.catalogue.jobs // []) | length) detect job(s) queued." else " Catalogue: \(.catalogue)." end) else "" end)
         + (if .complete == false then " PENDING (committed; recorded at the next reconciliation, and the finish line waits for it): \((.pending // []) | join("; "))." else "" end)
         + (" The agents can read it now, read-only, at store/imports/\(.import)/out/ (their VMs mount the run live), and in jobs as import:\(.import)/<file>.")' <<<"$out"
       printf '%s\n' "$out"
       ;;
-    *) echo "BLOCKER: $mode takes add or list (got $sub)." >&2; exit 2 ;;
+    *) echo "BLOCKER: $name takes add or list (got $sub)." >&2; exit 2 ;;
   esac
 }
 
@@ -9297,15 +9351,16 @@ cmd_resume() {
   # As the operator typed it: the run's trace names the resume with these.
   RESUME_ARGS=("$@")
   local id="${1:-}"
-  [[ -n "$id" && "$id" != -* ]] || die_usage "resume requires <id> [--question TEXT]... [--questions FILE] [--why TEXT] [--as ID] [--minutes N] [--tokens N] [--usd N] [--env KEY=VALUE]... [--no-start] [-- START OPTIONS]"
+  [[ -n "$id" && "$id" != -* ]] || die_usage "resume requires <id> [--question TEXT]... [--questions FILE] [--why TEXT] [--as ID] [--skip-refused-questions] [--minutes N] [--tokens N] [--usd N] [--env KEY=VALUE]... [--no-start] [-- START OPTIONS]"
   shift
-  local questions=() qfile="" as="" why="" no_start=0 prep=() given=() sep=0 env_given=()
+  local questions=() qfile="" as="" why="" no_start=0 prep=() given=() sep=0 env_given=() skip_refused=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --question) [[ -n "${2:-}" ]] || die_usage "--question takes the question's text"; questions+=("$2"); shift 2 ;;
       --questions) qfile="${2:-}"; shift 2 ;;
       --as) as="${2:-}"; shift 2 ;;
       --why) why="${2:-}"; shift 2 ;;
+      --skip-refused-questions) skip_refused=1; shift ;;
       --minutes|--tokens|--usd) [[ "${2:-}" =~ ^[0-9]+(\.[0-9]+)?$ ]] || die_usage "$1 takes a number"; prep+=("$1" "$2"); shift 2 ;;
       --no-start) no_start=1; shift ;;
       --env) [[ "${2:-}" == *=* ]] || die_usage "--env takes KEY=VALUE"; env_given+=("$2"); shift 2 ;;
@@ -9345,6 +9400,31 @@ cmd_resume() {
       if (!Array.isArray(list)) list = t.split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("#"));
       for (const x of list) { const s = typeof x === "string" ? x : String(x?.text ?? ""); if (s.trim()) console.log(s.replace(/\n/g, " ").trim()); }
     ' "$qfile")
+  fi
+  # Each question asked for the continuation is checked before anything
+  # moves (docs/adr/0013, "A resume refuses a question it cannot admit"): one
+  # the register would refuse (an --as nobody is enrolled under, words it
+  # refuses, a question it holds already) refuses the resume, naming why,
+  # unless --skip-refused-questions says to go on without it. A WARN after
+  # the run had moved was not enough: the continuation went on without the
+  # question it was resumed for.
+  if ((${#questions[@]})); then
+    local kept_q=() refused_q=0 q qcheck qwhy
+    for q in "${questions[@]}"; do
+      if qcheck="$(SWARM_RUNS_DIR="$RUNS_DIR" node --experimental-strip-types --no-warnings "$ROOT/scripts/questions-cli.ts" add "$sandbox" --dry-run --text "$q" --why "${why:-asked when the run was resumed}" ${as:+--as "$as"} --via "${SWARM_OPERATOR_VIA:-cli}")"; then
+        kept_q+=("$q")
+        continue
+      fi
+      qwhy="$(jq -r '.reason // "refused"' <<<"$qcheck" 2>/dev/null || printf '%s' "$qcheck")"
+      if [[ "$skip_refused" -eq 1 ]]; then
+        echo "WARN: the question \"$q\" cannot be admitted ($qwhy): left out, as --skip-refused-questions says; the resume goes on without it." >&2
+      else
+        echo "BLOCKER: the question \"$q\" cannot be admitted: $qwhy. Nothing was changed. Ask it so the register takes it (--as names a person enrolled with swarm.sh examiner enroll; without --as it is this OS account's, with the operator's authority), or give --skip-refused-questions to resume without it." >&2
+        refused_q=1
+      fi
+    done
+    [[ "$refused_q" -eq 0 ]] || exit 2
+    questions=(${kept_q[@]+"${kept_q[@]}"})
   fi
   # The options it was started with: kept at kickoff, or given after --.
   local start_argv=() a argv_file="$RUNS_DIR/resume/$id.argv.json" dropped_env=() kept_notify=0 k
@@ -10761,7 +10841,7 @@ EOF
 EOF
       ;;
     resume) cat <<'EOF'
-  resume <id> [--question TEXT]... [--questions FILE] [--why TEXT] [--as ID]
+  resume <id> [--question TEXT]... [--questions FILE] [--why TEXT] [--as ID] [--skip-refused-questions]
               [--minutes N] [--tokens N] [--usd N] [--env KEY=VALUE]... [--no-start] [-- START OPTIONS]
       Continue a run that ended (stopped, done, failed): the same run, in the same
       sandbox, on the same ledger, registers, board and trace. What marked its end
@@ -10773,7 +10853,10 @@ EOF
       refused with nothing changed (give --minutes, --tokens or --usd). Questions
       given (--question, or a file of them, one a line or a JSON list) are asked as
       analyst questions, with --why (default: asked when the run was resumed) and
-      --as. The run starts with the options it was started with (kept at kickoff
+      --as; each is checked first, and one the register would refuse (an --as
+      nobody is enrolled under, a question it holds already) refuses the resume
+      with nothing changed, unless --skip-refused-questions leaves it out. The
+      run starts with the options it was started with (kept at kickoff
       outside the run, 0600, denied to the panes where the guard can; the notify
       command is taken from runs/notify/, and an --env value no pane could be kept
       from reading is not kept: give it again with --env KEY=VALUE); a run from
@@ -11116,6 +11199,34 @@ EOF
 A question's attachment given as a file (question add --attach FILE) is supplied the same way.
 EOF
       ;;
+    tool-supply) cat <<'EOF'
+  tool-supply <id> add PATH --why W --source TEXT [--built TEXT] [--sha256 HEX]... [--for R-n|L-n]... [--as ID]
+                                                  a program no image holds, for a running (or stopped) run: a file or a
+                                                  directory (a program and the libraries it loads), copied and held
+                                                  to its source's sha256, sealed as import:mat-<n>, on the ledger as
+                                                  external material of class operator_supplied with its provenance.
+                                                  --source says where it came from (a package and its version, a URL,
+                                                  who built it), --built how it was built or made fit (omit when used as
+                                                  published): both are your statement, recorded whole and never cut.
+                                                  --sha256 (repeatable) names hashes you checked: each must be one of the
+                                                  supplied files' sha256, and is held to it; a hash of anything else (a
+                                                  source archive, a signed index) goes in the words. --for names the
+                                                  requests (R-n) and leads (L-n) it is supplied for; a request's own lead
+                                                  is named beside it. Neither is closed by this: answer them.
+                                                  A directory is sealed whole, every file under it, and every seat
+                                                  reads all of it: the reply lists the files, and a directory with a
+                                                  hidden file or directory in it (.env, .git, .netrc) is refused.
+  tool-supply <id> list [--json]                  the tools supplied, with where they came from and what was checked
+The seats are told on the board where it came from as you state it, what the harness checked, that it is
+supplied material to be tested on input with a known answer before they rely on it, and how to run it: a
+sealed file has no execute bit, and nothing in a worker executes from store/, work/extracted/, work/quarantine/,
+inputs/ or its $OUT, so a job copies the program (and the libraries it loads) into an executable temporary
+directory inside the job. A job that tried to run one in place says so in its reason. The case policy's rules for
+material are kept: every preset admits it; one that says operator_supplied=none for material refuses it,
+because nothing recorded on its output could be kept. What rests on it is flagged with its class. The reply
+tells you if the run's hub, started by an older harness, took it as plain material. docs/adr/0014.
+EOF
+      ;;
     *) die_usage "no help for '$topic'" ;;
   esac
 }
@@ -11140,7 +11251,7 @@ main() {
     # A network act (grant, deny, revoke) changes the run; list reads it.
     net) [[ "${2:-}" == list ]] || operator_audit "$cmd" "$@" ;;
     # An act on an operator request, and added evidence or material, change the run; list and show read it.
-    requests|evidence|material) [[ "${2:-}" == list || "${2:-}" == show ]] || operator_audit "$cmd" "$@" ;;
+    requests|evidence|material|tool-supply) [[ "${2:-}" == list || "${2:-}" == show ]] || operator_audit "$cmd" "$@" ;;
   esac
   case "$cmd" in
     start) cmd_start "$@" ;;
@@ -11168,6 +11279,7 @@ main() {
     requests) cmd_requests "$@" ;;
     evidence) cmd_evidence "$@" ;;
     material) cmd_material "$@" ;;
+    tool-supply) cmd_tool_supply "$@" ;;
     netcheck) cmd_netcheck "$@" ;;
     review) cmd_review "$@" ;;
     image-for) cmd_image_for "$@" ;;

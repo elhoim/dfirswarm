@@ -224,6 +224,13 @@ export type QuestionAct = {
   completeness?: boolean;
   /** What the question takes as happened (docs/adr/0011, "What a question presumes"): on an open, an amend, or an agent's clarification. Present only when given. */
   presumes?: string;
+  /**
+   * Whether the question must be established (docs/adr/0013, "A question
+   * that must be established"): true on an open or an amend by the operator
+   * or an examiner (or the goal's seed), false on an amend that releases it.
+   * Present only when given.
+   */
+  must_establish?: boolean;
   hints?: QuestionHint[];
   attachments?: string[];
   suggested_to?: string;
@@ -338,6 +345,13 @@ export type Question = {
    * said; who, when, at which revision, by which act.
    */
   presumes: { text: string; rev: number; at: string; by: string; origin: QuestionOrigin; seq: number; via: "open" | "amend" | "clarify" } | null;
+  /**
+   * Whether it must be established, and who said so (docs/adr/0013, "A
+   * question that must be established"): required by the goal, the
+   * operator or an examiner, or released by them (`required: false`, with
+   * why); null when nobody has said either. The chain keeps every act.
+   */
+  must_establish: { required: boolean; at: string; by: string; origin: QuestionOrigin; seq: number; rev: number; why: string | null } | null;
   hints: QuestionHint[];
   attachments: string[];
   suggested_to: string | null;
@@ -557,6 +571,35 @@ export function goalPresumes(text: string): Array<{ section: string; text: strin
   return out;
 }
 
+/**
+ * The goal's questions that must be established (docs/adr/0013, "A
+ * question that must be established"): a `## Must establish` section (the
+ * kickoff writes a goal's front-matter `must_establish:` there too), one
+ * bullet or numbered line each, naming a question as the goal names it
+ * (`1`, `Q-1`, `Q1`, `question:1`, or a goal's own id such as `bonus`),
+ * optionally followed by `: why`. The goal owns the definition of done
+ * (docs/adr/0002): for these, partial, not determinable, a bounded negative
+ * short of the stronger bar and out of scope end no run. A line that names
+ * nothing is kept with why (`bad`), and requires nothing.
+ */
+export function goalMustEstablish(text: string): Array<{ section: string; why: string | null; item: number; bad?: string }> {
+  const out: Array<{ section: string; why: string | null; item: number; bad?: string }> = [];
+  const sections = [...text.matchAll(/^#{2,3}[ \t]*Must establish[ \t]*$([\s\S]*?)(?=^#{1,6}[ \t]|(?![\s\S]))/gim)].map((m) => m[1]);
+  for (const body of sections) {
+    for (const line of body.split("\n")) {
+      const item = /^\s*(?:[-*]|\d+[.)])\s+(.*\S)\s*$/.exec(line);
+      if (!item) continue;
+      const m = /^\**\s*(?:question:)?([A-Za-z0-9][A-Za-z0-9_-]{0,31}?)\s*\**\s*[.)]?\s*(?::\s*(.*\S))?\s*$/i.exec(item[1].trim());
+      if (!m) {
+        out.push({ section: "", why: null, item: out.length + 1, bad: "names no question: write it as - <question>, or - <question>: <why>" });
+        continue;
+      }
+      out.push({ section: P.sectionKey(m[1]), why: m[2]?.replace(/^["'\u201c](.*)["'\u201d]$/, "$1").trim() || null, item: out.length + 1 });
+    }
+  }
+  return out;
+}
+
 /** The brief a goal's answers check numbers its questions in (--sections-in), if any. */
 function briefPathOf(goal: string): string | null {
   for (const check of L.goalChecks(goal)) {
@@ -628,6 +671,8 @@ export async function seedDrafts(sandboxRoot: string, goal?: L.GoalQuestions): P
   const ids: string[] = [];
   // What the goal's questions presume, by section: present only when the goal says so, so a goal without it seeds as it always did.
   const presumed = new Map((doc ? goalPresumes(doc.text) : []).filter((x) => !x.bad).map((x) => [x.section, x.text]));
+  // The goal's questions that must be established, by section, and why when it says: the same, present only when the goal names one.
+  const required = new Map((doc ? goalMustEstablish(doc.text) : []).filter((x) => !x.bad).map((x) => [x.section, x.why]));
   for (const section of gq.questions) {
     const n = /^\d+$/.test(section) ? Number(section) : ++next;
     const id = `Q-${n}`;
@@ -647,10 +692,11 @@ export async function seedDrafts(sandboxRoot: string, goal?: L.GoalQuestions): P
         priority: "normal",
         ...(gq.existence.includes(section) ? { expects: "existence" as const } : {}),
         ...(presumed.get(P.sectionKey(section)) ? { presumes: presumed.get(P.sectionKey(section)) } : {}),
+        ...(required.has(P.sectionKey(section)) ? { must_establish: true } : {}),
         ...(String(n) !== section ? { section } : {}),
       },
       origin: { kind: "goal", via: "goal" },
-      decided: { scope: "in_scope", scope_why: "a question of the goal", section, leading_forms: leadingForms(text), ...(completenessWords(text) ? { completeness: true } : {}) },
+      decided: { scope: "in_scope", scope_why: "a question of the goal", section, leading_forms: leadingForms(text), ...(completenessWords(text) ? { completeness: true } : {}), ...(required.get(P.sectionKey(section)) ? { must_establish_why: required.get(P.sectionKey(section)) } : {}) },
     });
   }
   // The goal's premises, each a given (P-<n> in order): present only when the goal has a Premises section, so a goal without one seeds as it always did.
@@ -680,14 +726,26 @@ async function ensureSeededHeld(sandboxRoot: string, held: P.HeldLock): Promise<
   await appendQuestionEvents(sandboxRoot, await seedDrafts(sandboxRoot), held);
 }
 
-/** Put the goal into the register now (the kickoff calls it once the contract is written). Idempotent. */
-export async function seedRegister(sandboxRoot: string): Promise<{ seeded: boolean; questions: string[]; objectives: string[] }> {
+/**
+ * Put the goal into the register now (the kickoff calls it once the contract
+ * is written). Idempotent. It says which questions must be established, and
+ * what the goal's Must establish section names that is not one of its
+ * questions (`must_establish_unknown`): that requires nothing, and the
+ * kickoff warns of it.
+ */
+export async function seedRegister(sandboxRoot: string): Promise<{ seeded: boolean; questions: string[]; objectives: string[]; must_establish?: string[]; must_establish_unknown?: string[] }> {
   return L.withRegisters(sandboxRoot, async (held) => {
     const before = (await readQuestionEvents(sandboxRoot)).events.some((e) => e.ev === "seed");
     await ensureSeededHeld(sandboxRoot, held);
     const snap = await questionsSnapshot(sandboxRoot);
     if (!before) await writeQuestionsMd(sandboxRoot).catch(() => undefined);
-    return { seeded: !before, questions: [...snap.state.questions.keys()], objectives: [...snap.state.objectives.keys()] };
+    const doc = await L.goalDocument(sandboxRoot);
+    const named = doc ? goalMustEstablish(doc.text) : [];
+    const goalSections = new Set([...snap.state.questions.values()].filter((q) => q.origin.kind === "goal").map((q) => q.section));
+    const required = [...snap.state.questions.values()].filter(mustEstablish).map((q) => q.id);
+    const unknown = named.filter((x) => !x.bad && !goalSections.has(x.section)).map((x) => x.section).concat(named.filter((x) => x.bad).map((x) => `item ${x.item}`));
+    // Present only when there is something to say, so a goal that requires nothing seeds as it always did.
+    return { seeded: !before, questions: [...snap.state.questions.keys()], objectives: [...snap.state.objectives.keys()], ...(required.length ? { must_establish: required } : {}), ...(unknown.length ? { must_establish_unknown: unknown } : {}) };
   });
 }
 
@@ -695,7 +753,7 @@ export async function seedRegister(sandboxRoot: string): Promise<{ seeded: boole
 
 function blankQuestion(e: QuestionEvent): Question {
   const act = e.act ?? {};
-  const d = (e.decided ?? {}) as { scope?: Scope; scope_why?: string; section?: string; leading_forms?: string[]; after_done?: boolean; review_query?: boolean; objective_created?: string; completeness?: boolean };
+  const d = (e.decided ?? {}) as { scope?: Scope; scope_why?: string; section?: string; leading_forms?: string[]; after_done?: boolean; review_query?: boolean; objective_created?: string; completeness?: boolean; must_establish_why?: string };
   const n = Number(QUESTION_ID.exec(e.q ?? "")?.[1] ?? 0);
   const origin = e.origin ?? { kind: "goal" as const };
   return {
@@ -721,6 +779,7 @@ function blankQuestion(e: QuestionEvent): Question {
     completeness: typeof act.completeness === "boolean" ? act.completeness : d.completeness === true,
     completeness_by: typeof act.completeness === "boolean" ? "asker" : d.completeness === true ? "words" : null,
     presumes: act.presumes ? { text: act.presumes, rev: e.rev ?? 1, at: e.at, by: e.by, origin, seq: e.seq, via: "open" } : null,
+    must_establish: act.must_establish === true ? { required: true, at: e.at, by: e.by, origin, seq: e.seq, rev: e.rev ?? 1, why: d.must_establish_why ?? null } : null,
     hints: act.hints ?? [],
     attachments: act.attachments ?? [],
     suggested_to: act.suggested_to ?? null,
@@ -789,6 +848,8 @@ export function foldQuestions(events: QuestionEvent[], chain: QuestionsState["ch
           q.completeness_by = d.completeness ? "words" : null;
         }
         if (act.presumes) q.presumes = { text: act.presumes, rev: q.rev, at: e.at, by: e.by, origin: origin ?? q.origin, seq: e.seq, via: "amend" };
+        // Required, or released: the act that changed it, with its why; an act that says what stands already changes nothing.
+        if (typeof act.must_establish === "boolean" && act.must_establish !== mustEstablish(q)) q.must_establish = { required: act.must_establish, at: e.at, by: e.by, origin: origin ?? q.origin, seq: e.seq, rev: q.rev, why: act.why ?? null };
         if (act.hints) q.hints = act.hints;
         if (act.attachments) q.attachments = act.attachments;
         if (act.deadline !== undefined) q.deadline = act.deadline || null;
@@ -1005,6 +1066,8 @@ export type QuestionView = {
    * null when neither.
    */
   presumption: PM.Presumption | null;
+  /** Whether it must be established, and who said so (or released it): docs/adr/0013, "A question that must be established". */
+  must_establish: Question["must_establish"];
   hints: QuestionHint[];
   attachments: string[];
   suggested_to: string | null;
@@ -1163,6 +1226,7 @@ export function viewQuestion(q: Question, ctx: ViewContext): QuestionView {
     completeness_by: q.completeness_by,
     presumes: q.presumes,
     presumption: questionPresumption(q, ctx.leads),
+    must_establish: q.must_establish,
     hints: q.hints,
     attachments: q.attachments,
     suggested_to: q.suggested_to,
@@ -1264,6 +1328,38 @@ export function registerQuestions(snap: QuestionsSnapshot): Question[] {
 export function liveInScope(q: Pick<Question, "scope" | "withdrawn" | "after_done">): boolean {
   return q.scope === "in_scope" && !q.withdrawn && !q.after_done;
 }
+
+// --- a question that must be established (docs/adr/0013) ---------------------------------------
+
+/** Whether a question must be established now: the goal, the operator or an examiner required it, and nobody released it since. */
+export function mustEstablish(q: Pick<Question, "must_establish"> | null | undefined): boolean {
+  return q?.must_establish?.required === true;
+}
+
+/** Who required it, in words: the goal, or the person. */
+export function requiredByWords(q: Pick<Question, "must_establish">): string {
+  return q.must_establish ? originWords(q.must_establish.origin) : "nobody";
+}
+
+/**
+ * Whether an answer, by what it says it is, can meet the requirement:
+ * established, a premise shown not to hold, or a bounded negative that says
+ * the event did not happen (the stronger bar, which the record refuses
+ * without its coverage); an answer from before results that is not marked
+ * inconclusive reads as established. What it rests on is the answers
+ * check's, which holds the rest of the bar (a best candidate, a premise
+ * rejected on a search alone, a negative unreviewed). Readiness and every
+ * seat's header read this; the finish line reads the answers check.
+ */
+export function establishesBy(a: Pick<P.LedgerEntry, "kind" | "result" | "inconclusive" | "asserts_absence">): boolean {
+  const r = NB.answerResult(a);
+  if (!r) return a.inconclusive !== true;
+  return r === "established" || r === "premise_not_supported" || (r === "bounded_negative" && a.asserts_absence === true);
+}
+
+/** What a question that must be established ends on, said wherever it holds: what meets it, and the operator's two ways out, on the record. */
+export const MUST_ESTABLISH_WAYS =
+  "establish it (an answer on a standing finding another seat attests established), show on a finding that its premise does not hold, or settle it by a bounded negative under the stronger bar; partial, not determinable, a bounded negative short of the stronger bar and out of scope do not end the run on it, and only the operator accepts its limits (question accept) or releases the requirement (question amend --no-must-establish)";
 
 // --- who may do what ----------------------------------------------------------------------------
 
@@ -1425,6 +1521,8 @@ export type ActInput = {
   completeness?: boolean | string;
   /** What the question takes as happened ("X happened"): its answer is reviewed against "the question's premise is not supported". */
   presumes?: string;
+  /** true or false (yes, no): the question must be established, or (on an amend, with why) the requirement is released. The operator's or an examiner's. */
+  must_establish?: boolean | string;
   hints?: unknown;
   attachments?: unknown;
   suggested_to?: string;
@@ -1491,6 +1589,24 @@ export async function prepareAct(sandboxRoot: string, actor: Actor, ev: ActKind,
   const presumes = bounded("presumes", input.presumes, QUESTION_PRESUMES_MAX, false);
   if (!presumes.ok) return { ok: false, reason: `${presumes.reason}: what the question takes as happened, in one sentence ("the drive was wiped")` };
   if (presumes.value && !["open", "amend", "clarify_ask"].includes(ev)) return { ok: false, reason: "presumes is said when a question is opened, amended, or (by an agent) with a clarification" };
+  // Whether the question must be established (docs/adr/0013): the definition of done is the goal's and the operator's, never an agent's.
+  const required = ((): { ok: true; value?: boolean } | Fail => {
+    const v = input.must_establish;
+    if (v === undefined || v === null || v === "") return { ok: true };
+    if (typeof v === "boolean") return { ok: true, value: v };
+    const t = String(v).trim().toLowerCase();
+    if (["true", "yes"].includes(t)) return { ok: true, value: true };
+    if (["false", "no"].includes(t)) return { ok: true, value: false };
+    return { ok: false, reason: `must_establish is true or false: whether the question must be established (got ${JSON.stringify(v)})` };
+  })();
+  if (!required.ok) return required;
+  if (required.value !== undefined) {
+    if (ev !== "open" && ev !== "amend") return { ok: false, reason: "must_establish is said when a question is opened or amended" };
+    if (!authority(origin)) return { ok: false, reason: `${originWords(origin)}: requiring a question to be established is the examiner's or the operator's (or the goal's, in its Must establish section), as accepting its limits is` };
+    if (ev === "open" && required.value === false) return { ok: false, reason: "a new question is not required to be established unless you say so: leave must_establish out" };
+    if (ev === "open" && input.materiality === "background") return { ok: false, reason: "a question that must be established is material: the finish line waits for it (materiality material, or leave must_establish out)" };
+    if (ev === "amend" && required.value === false && !String(input.why ?? "").trim()) return { ok: false, reason: "a release of the requirement says why (why): it is on the record beside who required it" };
+  }
   switch (ev) {
     case "open": {
       const text = bounded("text", input.text, QUESTION_TEXT_MAX, true);
@@ -1545,6 +1661,7 @@ export async function prepareAct(sandboxRoot: string, actor: Actor, ev: ActKind,
         ...(expects.value ? { expects: expects.value } : {}),
         ...(completeness.value !== undefined ? { completeness: completeness.value } : {}),
         ...(presumes.value ? { presumes: presumes.value } : {}),
+        ...(required.value ? { must_establish: true } : {}),
         ...(hints.hints.length ? { hints: hints.hints } : {}),
         ...(attachments.attachments.length ? { attachments: attachments.attachments } : {}),
         ...(suggested ? { suggested_to: suggested } : {}),
@@ -1588,13 +1705,14 @@ export async function prepareAct(sandboxRoot: string, actor: Actor, ev: ActKind,
         ...(expects.value ? { expects: expects.value } : {}),
         ...(completeness.value !== undefined ? { completeness: completeness.value } : {}),
         ...(presumes.value ? { presumes: presumes.value } : {}),
+        ...(required.value !== undefined ? { must_establish: required.value } : {}),
         ...(hints?.ok ? { hints: hints.hints } : {}),
         ...(attachments?.ok ? { attachments: attachments.attachments } : {}),
         ...(deadline !== undefined ? { deadline: deadline ? new Date(Date.parse(deadline)).toISOString() : "" } : {}),
         ...(suggested !== undefined ? { suggested_to: suggested } : {}),
       });
       const changes = Object.keys(act).filter((k) => k !== "expected_rev" && k !== "why");
-      if (!changes.length) return { ok: false, reason: "an amendment changes something: text (a new revision), neutral, materiality, expects, completeness, presumes, hints, attachments, deadline or suggested_to" };
+      if (!changes.length) return { ok: false, reason: "an amendment changes something: text (a new revision), neutral, materiality, expects, completeness, presumes, must_establish, hints, attachments, deadline or suggested_to" };
       sensitive.push(["text", act.text], ["why", act.why], ["neutral", act.neutral], ["presumes", act.presumes], ...(hints?.ok ? hints.hints.map((h): [string, string | undefined] => ["a hint's value", h.value]) : []));
       break;
     }
@@ -1884,6 +2002,12 @@ async function commitUnderLock(sandboxRoot: string, p: PreparedAct, snap: Questi
       };
     }
     case "amend": {
+      // Whether it must be established: required or released once; what stands already is said, not recorded again.
+      if (p.act.must_establish !== undefined && p.act.must_establish === mustEstablish(q)) {
+        const others = Object.keys(p.act).filter((k) => !["expected_rev", "why", "must_establish"].includes(k));
+        if (!others.length) return fail(p.act.must_establish ? `${q!.id} must be established already (required by ${requiredByWords(q!)} at ${q!.must_establish!.at})` : `${q!.id} is not required to be established${q!.must_establish ? ` (released by ${originWords(q!.must_establish.origin)} at ${q!.must_establish.at})` : ""}`);
+      }
+      if ((p.act.must_establish ?? mustEstablish(q)) && (p.act.materiality ?? q!.materiality) !== "material") return fail(`a question that must be established is material: the finish line waits for it (${q!.id}${p.act.materiality ? " would be background" : " is background"}; release the requirement first, or make it material)`);
       const bump = p.act.text !== undefined && p.act.text !== q!.text;
       if (p.act.text !== undefined && !bump && Object.keys(p.act).filter((k) => !["expected_rev", "text", "why"].includes(k)).length === 0) return fail(`revision ${q!.rev} of ${q!.id} says this already`);
       if (bump) {
@@ -2169,6 +2293,24 @@ export async function commitAct(sandboxRoot: string, p: PreparedAct, o: { signat
   } catch (err) {
     return { ok: false, reason: (err as Error).message };
   }
+}
+
+/**
+ * Whether an act would be admitted now, by the checks its commit makes
+ * against the register as it stands, with nothing written and nothing
+ * delivered: what a resume asks of each question it is given before
+ * anything of the run moves (docs/adr/0013, "A resume refuses a question it
+ * cannot admit"). A broken chain is refused, as the commit refuses it. What
+ * it does not do, the commit does: it takes no lock, writes no seed (it
+ * reads the goal's, derived), and reconciles nothing an earlier act left
+ * undone, so the register may move before the act is made, and the act is
+ * checked again then.
+ */
+export async function checkAct(sandboxRoot: string, p: PreparedAct): Promise<{ ok: true } | Fail> {
+  const snap = await questionsSnapshot(sandboxRoot);
+  if (!snap.state.chain.ok) return { ok: false, reason: `questions/questions.jsonl's chain is broken at line ${snap.state.chain.broken_at} (${snap.state.chain.reason}): the register takes no act until the operator looks` };
+  const c = await commitUnderLock(sandboxRoot, p, snap);
+  return c.result.ok ? { ok: true } : { ok: false, reason: c.result.reason };
 }
 
 /** Prepare and commit in one step: an agent's act, or a person's that is not signed. */
@@ -2854,6 +2996,12 @@ export function questionsDigest(agent: string, ctx: ViewContext, told: Told): Qu
   const pending = views.flatMap((v) => v.clarifications.filter((c) => !c.answer).map((c) => ({ v, c })));
   const lines: string[] = [];
   if (persons.length) lines.push(`Analyst questions (${persons.length}), each a proposition to test, never a conclusion: ${persons.map(headerItem).join("; ")}.`);
+  // The questions that must be established and are not yet (docs/adr/0013): every seat, every header, while it lasts.
+  const required = live.filter((v) => mustEstablish(v) && !v.accepted?.stands && !(v.answer && !v.answer.stale && establishesBy(ctx.ledger.bySeq.get(v.answer.seq) ?? { kind: "answer", inconclusive: v.answer.inconclusive })));
+  if (required.length) {
+    const state = (v: QuestionView) => (!v.answer ? "no answer yet" : v.answer.stale ? `answer E-${v.answer.seq} is stale (record it again)` : `answer E-${v.answer.seq} is ${NB.resultWords(v.answer.result ?? (v.answer.inconclusive ? "not_determinable" : null))}`);
+    lines.push(`Must be established (${required.length}): ${required.map((v) => `${v.id} (question:${v.section}, required by ${requiredByWords(v)}${v.must_establish?.why ? `: ${v.must_establish.why}` : ""}): ${state(v)}`).join("; ")}. For each, ${MUST_ESTABLISH_WAYS}.`);
+  }
   const staleOthers = live.filter((v) => !HUMAN_ORIGINS.has(v.origin.kind) && v.answer?.stale);
   if (staleOthers.length) lines.push(`Amended after their answer (record the answer again): ${staleOthers.map((v) => `${v.id} rev ${v.rev} (answer E-${v.answer!.seq})`).join(", ")}.`);
   if (proposed.length || triage.length) {
@@ -2899,6 +3047,7 @@ function brief(v: QuestionView): Record<string, unknown> {
     ...(v.expects ? { expects: v.expects } : {}),
     ...(v.completeness ? { completeness: true } : {}),
     ...(v.presumption ? { presumes: v.presumption.text } : {}),
+    ...(mustEstablish(v) ? { must_establish: `required by ${requiredByWords(v)}: ${MUST_ESTABLISH_WAYS}` } : {}),
     ...(v.leading_forms.length ? { leading_forms: v.leading_forms } : {}),
     answer: v.answer ? `E-${v.answer.seq}${v.answer.stale ? ` (stale: answers revision ${v.answer.question_rev} of ${v.rev})` : ""}` : null,
     leads: v.leads.map((l) => `${l.id} ${l.status}${l.holder ? ` (${l.holder})` : ""}`),
@@ -3040,6 +3189,8 @@ export function renderQuestionsMd(ctx: ViewContext): string {
       ].filter(Boolean);
       lines.push(`- ${meta.join("; ")}`);
       if (v.presumption) lines.push(`- Presumes ${PM.presumptionWords(v.presumption)}: its answer tests that premise first, against "the question's premise is not supported"`);
+      if (v.must_establish?.required) lines.push(`- Must be established (required by ${originWords(v.must_establish.origin)} at ${v.must_establish.at}${v.must_establish.why ? `: ${v.must_establish.why}` : ""}): partial, not determinable, a bounded negative short of the stronger bar and out of scope end no run on it`);
+      else if (v.must_establish) lines.push(`- The requirement that it be established was released by ${originWords(v.must_establish.origin)} at ${v.must_establish.at}: ${v.must_establish.why ?? ""}`);
       if (v.hints.length) lines.push(`- Hints: ${v.hints.map((h) => `${h.ref}${h.value ? ` (says: ${h.value})` : ""}`).join("; ")}`);
       if (v.attachments.length) lines.push(`- Attachments: ${v.attachments.join(", ")}`);
       if (v.leading_forms.length) lines.push(`- Leading form: ${v.leading_forms.map((f) => `"${f}"`).join(", ")} (flagged for the critic)`);

@@ -1,0 +1,41 @@
+{
+  "case": "The operator requires question 1 to be established (amend --must-establish, which makes no new revision); its answer is not determinable on a coverage record another seat reviewed, which is a disposition under the ordinary bar; question 2 is established and attested.",
+  "design": [
+    "docs/adr/0013 'A question that must be established': the operator requires it on an existing question by amendment; a reviewed not determinable is no disposition for it, under every stop policy; readiness holds it as the done does.",
+    "docs/adr/0013 'The end of a run, under every stop policy': a reviewed not determinable ends any other question's run examination-limited.",
+    "docs/adr/0017 addendum 'Measuring a rule change': readiness, the answers check and the finish gate never disagree on a question."
+  ],
+  "policies": [
+    "operator",
+    "cap-pause",
+    "cap-stop"
+  ],
+  "expect": {
+    "questions": {
+      "question:1": {
+        "disposition": null,
+        "gate_outcome": "inconclusive",
+        "best_candidate": false,
+        "readiness_holds": true,
+        "readiness_includes": [
+          "must_establish"
+        ],
+        "defects": []
+      },
+      "question:2": {
+        "disposition": "established",
+        "best_candidate": false,
+        "readiness_holds": false,
+        "defects": [],
+        "warnings": []
+      }
+    },
+    "ready": false,
+    "verdict": {
+      "proceed": false,
+      "failing": "question:1"
+    },
+    "done": "held",
+    "agreement": []
+  }
+}

@@ -29,6 +29,45 @@ A run's evidence held an AccessData AD1 logical image (FTK Imager's custom conte
   - So the suite also reads one real FTK Imager image, 2 KB of test data from Fox-IT's dissect.evidence (AGPL-3.0, `tests/fixtures/ad1/`, named in NOTICE).
   - It covers detect, the listing, the time keys, damaged and hostile images, segments and locators, the time limit, the tool's names and failed writes, the census, and the derived chain from an AD1 a job makes to the zip inside it.
 
+### Added: supplying a tool to a running run, and a job that says it could not execute a program
+
+A live run asked the operator for programs no image held. `swarm.sh material add` was the only way to hand one over: it sealed the file, but said nothing of where it came from or how it was built, and the two jobs that tried to run it in place failed with `exit 126` and with `exit 127: a program it runs is not in its image` before a seat found the way (a copy in an executable temporary directory inside the job).
+
+- **`swarm.sh tool-supply <run> add PATH --why W --source TEXT [--built TEXT] [--sha256 HEX]... [--for R-n|L-n]...`**, and `tool-supply <run> list`.
+  - A tool is material: sealed as `import:mat-<n>`, class `operator_supplied` (never evidence), so the case policy's rules for material are its rules. Every preset admits it; a policy that says `operator_supplied=none` refuses it before anything is sealed, because nothing recorded on its output could be kept.
+  - It adds what only the operator knows, in `material.json` and in the ledger entry's provenance (`provenance.tool`, in the chained core): where it came from and how it was built (the operator's statement, recorded whole, refused rather than cut past 4000 characters), the hashes the operator checked (each must be one of the supplied files' sha256, else nothing is sealed), and the requests and leads it is for (each must exist; neither is closed by it).
+  - The board post tells the seats that the harness vouches for the bytes only, to test the tool on input whose answer they know, and how to run it: a job declares it as an input and copies it, and every library it loads, into an executable temporary directory inside the job.
+  - A directory is sealed whole and read by every seat: the reply lists its files and a hidden file or directory in it (`.env`, `.git`, `.netrc`) is refused. A path that holds the run is refused for every addition.
+  - The harness names no program and knows no format. A hub started by an older harness takes the act as plain material; the command line holds the policy's rule, the statements, the hidden-file refusal and the hashes itself first, and the reply warns that the source, build and `--for` were not recorded.
+- **A job that could not execute a program says so, by where the program stands.** `scripts/job-exec-refused.ts` reads a failed job for the shell's exit 126 (with the shell's own line that names the program, from stdout, stderr or a stderr file it kept), for the dynamic loader's `failed to map segment from shared object` at any status, and, at another status, for a `Permission denied` on an existing file under a directory a worker mounts read-only. A `Permission denied` anywhere else at another status is left alone, since nothing in the line tells a program that could not be run from a file that could not be written. The reason names the path and where the line is, and then:
+  - a supplied program (`store/imports/mat-<n>/`): a copy in an executable temporary directory inside the job;
+  - evidence (`inputs/`, `work/extracted/`, `work/quarantine/`, an evidence import): evidence is read, never run, so ask the operator for a program with `swarm.sh tool-supply` or reimplement the step, as the contract asks for code recovered from evidence;
+  - anywhere else: the rule first, the copy only for a program the operator supplied;
+  - the shell's other reasons for 126 (a file built for another machine, a missing interpreter, a directory): its own line, and no copy.
+
+  It is read before `program_missing` and `write_refused`: the loader's exit 127 is no program missing from the image, and a sealed file's `Permission denied` is no refused write. Recorded as `exec_refused` on the job and `job_exec_refused` on the journal.
+- The worker prompt says the same in a short paragraph, evidence rule included.
+
+### Changed: the stop proposal waits for the minutes, not for a burst of jobs
+
+The diminishing-returns proposal fired on 20 committed jobs or 30 minutes with nothing yielded. On the 45 recorded runs with ten jobs or more, it proposed 27 times; 26 came on a burst of 20 jobs in one to eight minutes, and every one of those was followed by a yield, 25 within ten minutes. The one stretch that never yielded again had no job, and the minutes caught it. A stop is now proposed after 30 minutes with nothing yielded (`SWARM_YIELD_MINUTES`); `SWARM_YIELD_JOBS=N` adds the job count back, off by default. It is still never a vote and never a stop. See [ADR 0013](docs/adr/0013-a-negative-is-bounded-and-a-cap-pauses.md), "The stop proposal's window".
+
+### Changed: a resume refuses a question it cannot admit, before anything moves
+
+`swarm.sh resume --question … --as operator` on an install where nobody is enrolled as `operator` used to move the run's end aside, record the resume and start the continuation, and only then warn that the question was not admitted: the run went on without the question it was resumed for. Each question is now checked first, as its admission would check it (`questions-cli.ts add --dry-run`), and one the register would refuse refuses the resume with nothing changed, naming why. `--skip-refused-questions` resumes without it and says so. See [ADR 0013](docs/adr/0013-a-negative-is-bounded-and-a-cap-pauses.md), "A resume refuses a question it cannot admit".
+
+### Added: a question that must be established
+
+On a flag-only challenge under `--stop operator`, the one question's answer was partial on a reviewed finding, which is a disposition under the bar. The coordinator's done ended the run examination-limited after 23 minutes, without the flag; the operator had to resume it and ask again by hand.
+
+- **The requirement.** A question can now be required to be established. For it, partial, not determinable, a bounded negative short of the stronger bar and out of scope do not end the run, under any stop policy. It ends established (or with its premise shown not to hold, or by a bounded negative under the stronger bar), by the operator's acceptance of its limits, or withdrawn.
+- **Who says so.** The goal, in a `## Must establish` section or `must_establish:` in its metadata block (`[1, 3]`); the kickoff says which questions are required and warns of a name the goal does not number, or of a key that names nothing (a list's items may be indented or not; a list beside the goal's own section is merged into it). The operator or an examiner, with `question add --must-establish` or `question amend Q-n --expect-rev N --must-establish`. Never an agent; never a background question.
+- **The way out stays on the record.** `question accept` disposes it as it disposes any question; `question amend --no-must-establish --why W` releases the requirement, and the register keeps who released it and why.
+- **Where it shows.** The answers check gives such a question no disposition unless it answered it, the finish gate names the requirement first among what blocks it, the done's refusal gives its ways instead of the negative path, readiness holds it, and every seat's header names it until it is established. `questions/questions.md`, `question list|show` and the agents' `questions` view say who required or released it.
+- **Measured.** Five new contract fixtures (`must-establish-partial`, `-not-determinable`, `-accepted`, `-released`, `-established`). The replay impact line against main reads every other fixture the same. `docs/rules.md` does not change: no ledger rule changed.
+
+See [ADR 0013](docs/adr/0013-a-negative-is-bounded-and-a-cap-pauses.md), "A question that must be established".
+
 ### Changed: Pi 0.87.1, on the host and in the VMs
 
 Pi moves from 0.87.0 to 0.87.1 in both places it is pinned: `package.json` (host-mode seats, the tests) and `images/base.Dockerfile` (`PI_VERSION`, every VM seat). 0.87.1:
