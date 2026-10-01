@@ -36,7 +36,7 @@ import { createHash } from "node:crypto";
 import { constants, existsSync, lstatSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import { chmod, copyFile, link, lstat, mkdir, open, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { Journal, maybeCrash, publishGeneration, publishRevision, readManifest, resealMoved, sealTree, sha256File, sha256Hex, storePaths, traceLineBytes, traceOrigin, type JournalLine, type Manifest, type TraceOrigin } from "./evidence-store.ts";
+import { hubAlive, Journal, maybeCrash, publishGeneration, publishRevision, readManifest, resealMoved, sealTree, sha256File, sha256Hex, storePaths, traceLineBytes, traceOrigin, type JournalLine, type Manifest, type TraceOrigin } from "./evidence-store.ts";
 import { chooseImage, readImageRecords, type ImageChoice, type ImageRecord } from "./image-choice.ts";
 import { buildView, declaredScope, dropProjected, freeMb, PROJECTED_DIR, resolveScope, ScopeError, scopeKindOf, scopeManifestText, VIEW_DIR, type ScopeKind, type ScopeObject, type ViewEntry } from "./job-scope.ts";
 import { CANARY_NAME, OBSERVE_GUEST, observedRun, observeWanted, readObservation } from "./job-observe.ts";
@@ -389,6 +389,20 @@ export type JobServiceOptions = {
   hostRoom?: (memoryMib: number) => Promise<{ ok: boolean; available_mib: number | null; needed_mib: number }>;
   destroyWorker: (name: string) => Promise<{ ok: boolean; error?: string }>;
   /**
+   * Whether a stop of the run is under way (the hub's `.stop`, which
+   * `swarm.sh stop` writes before it puts the seats away): no new worker is
+   * started and no new job accepted from then on, so the stop is not raced
+   * by a worker started behind it. What waits in the queue is cancelled on
+   * the record by the service's own stop.
+   */
+  holding?: () => boolean;
+  /**
+   * The service's stop asks again, this many times with this long between,
+   * for each worker not confirmed gone when its job ended, and seals it once
+   * it is gone (default 3 tries, 2 s apart).
+   */
+  stopFence?: { tries: number; waitMs: number };
+  /**
    * A running worker's CPU and I/O counters (msb's metrics for its VM),
    * when the host has them; absent or null, the worker's own heartbeat is
    * read instead (job-telemetry.ts).
@@ -474,6 +488,8 @@ export class JobService {
   private readonly waitingForHost = new Map<string, number>();
   private rotation = 0;
   private stopping = false;
+  /** Sealing what a stop left, with no hub and nobody to tell (sealLeft). */
+  private afterRun = false;
   /** One pump at a time: a call while one runs asks it to go round again. */
   private pumping = false;
   private pumpAgain = false;
@@ -819,7 +835,7 @@ export class JobService {
    * once the acceptance is on disk; the work comes after.
    */
   async submit(agent: string, raw: Partial<JobSpec>, o: { watch?: number; seal?: SealSpec } = {}): Promise<{ ok: true; job: JobRecord; similar?: Similar[]; similar_recorded?: boolean } | { ok: false; reason: string }> {
-    if (this.stopping) return { ok: false, reason: "the run is stopping; no new jobs" };
+    if (this.stopping || this.held()) return { ok: false, reason: "the run is stopping; no new jobs" };
     // A seal comes only from sealCited, never in what an agent sends.
     const { seal: _seal, scope: _scope, ...asked } = raw;
     const spec = await this.normalise(asked, o.seal);
@@ -1098,7 +1114,7 @@ export class JobService {
    * on the host. One pump at a time: its checks and its start are one step.
    */
   async pump(): Promise<void> {
-    if (this.stopping) return;
+    if (this.stopping || this.held()) return;
     if (this.pumping) {
       this.pumpAgain = true;
       return;
@@ -1114,9 +1130,29 @@ export class JobService {
     }
   }
 
+  /**
+   * Whether a stop is under way (the `holding` option): said once in the
+   * log, and from then on no worker is started. A check that throws is
+   * taken as no stop.
+   */
+  private holdSaid = false;
+  private held(): boolean {
+    let h = false;
+    try {
+      h = this.o.holding?.() === true;
+    } catch {
+      h = false;
+    }
+    if (h && !this.holdSaid) {
+      this.holdSaid = true;
+      this.log(`a stop is under way: no new worker is started (${this.queue.length} queued)`);
+    }
+    return h;
+  }
+
   private async pumpOnce(): Promise<void> {
     await this.maybeDrainDerived();
-    while (!this.stopping && this.running.size < this.o.workers && this.queue.length) {
+    while (!this.stopping && !this.held() && this.running.size < this.o.workers && this.queue.length) {
       const requesters = [...new Set(this.queue.map((id) => this.jobs.get(id)?.requester.agent ?? ""))];
       // The derived catalogue's work is the lowest lane: one at a time,
       // started only when no other job waits, and only within its budget.
@@ -2398,6 +2434,7 @@ export class JobService {
 
   /** The others who asked for the same job are told as its requester is: after their own wait. */
   private async tellAlso(job: JobRecord): Promise<void> {
+    if (this.afterRun) return;
     for (const [agent, until] of this.alsoTell.get(job.id) ?? []) {
       const key = `${job.id}@${agent}`;
       if (this.delivered.has(key)) continue;
@@ -2417,6 +2454,9 @@ export class JobService {
    * ended without the answer.
    */
   private async tell(job: JobRecord): Promise<void> {
+    // After the run (sealLeft) nobody is there to be told: the job stays
+    // untold on the record, and a resume's recovery tells it.
+    if (this.afterRun) return;
     await this.tellAlso(job);
     // A detect pass is the service's step: its recipes' results are what the agent is told.
     if (this.delivered.has(job.id) || job.requester.agent === "system" || job.requester.agent === DERIVED || (job.spec.kind === "detect" && job.status === "ok")) return;
@@ -2461,7 +2501,96 @@ export class JobService {
       }
     }
     await Promise.allSettled([...this.running.values()]);
+    await this.fenceLeft(this.o.stopFence ?? { tries: 3, waitMs: 2000 });
     await dropProjected(storePaths(this.S).staging);
+  }
+
+  /**
+   * Every job whose worker was not confirmed gone, sealed once it is, or
+   * accounted for on the journal: the backstop run once more as the service
+   * stops, `tries` times with `waitMs` between. On the Breadcrumbs run a
+   * stop's removal of a worker and the job's own raced, msb could not say
+   * whether the worker was gone, and the hub went with the job's staging
+   * directory unsealed and nothing on the record but that one fence.
+   *
+   * A job still `running` here ended without its `job_finished` (its run
+   * threw): sealed as cancelled when the stop asked for that, else stopped.
+   * A `fenced` one whose commit failed is committed. One whose worker still
+   * is not confirmed gone is never read: a `job_unsealed` line names its
+   * staging directory and why, and `swarm.sh stop` seals it once the run's
+   * VMs are gone (sealLeft).
+   */
+  private async fenceLeft(o: { tries: number; waitMs: number }, only?: ReadonlySet<string>, when = "when the job service stopped"): Promise<void> {
+    for (const j of [...this.jobs.values()]) {
+      if (this.running.has(j.id) || (only && !only.has(j.id))) continue;
+      if (!((j.state === "finished" || j.state === "running") && j.worker) && j.state !== "fenced") continue;
+      if (j.state !== "fenced") {
+        let gone = false;
+        let why = "";
+        for (let k = 0; k < Math.max(1, o.tries) && !gone; k += 1) {
+          if (k) await new Promise((r) => setTimeout(r, o.waitMs));
+          const r = await this.o.destroyWorker(j.worker!).catch((err: Error) => ({ ok: false, error: err.message }));
+          gone = r.ok;
+          why = r.error ?? "no reason given";
+        }
+        if (!gone) {
+          await this.journal.append({ type: "job_unsealed", job: j.id, attempt: j.attempt, staging: `${j.id}-${j.attempt}`, why: `its worker ${j.worker} was not confirmed gone ${when}: ${why}` });
+          this.log(`${j.id}: left unsealed, its worker ${j.worker} not confirmed gone: ${why}`);
+          continue;
+        }
+        await this.journal.append({ type: "job_fenced", job: j.id, attempt: j.attempt, fenced: true, late: true, by: "stop" });
+        if (j.state === "running") Object.assign(j, { status: j.cancel_requested ? "cancelled" : "stopped", reason: j.cancel_requested ? `cancelled by ${j.cancel_requested}` : "the run was stopped while it ran", exit: null });
+        j.state = "fenced";
+      }
+      await this.commit(j, { status: j.status ?? "ok", exit: j.exit ?? null, reason: j.reason }).catch((err: Error) => this.log(`${j.id}: not sealed at stop: ${err.message}`));
+    }
+  }
+
+  /**
+   * After the run, with no hub: what a stop left unsealed, sealed or said.
+   * The journal is read as the service reads it at start, nothing is queued
+   * and no worker is made; each job a staging directory belongs to that was
+   * started and never committed has its worker asked to go once more (the
+   * caller's destroyWorker, msb's own answer), and is sealed when it is gone
+   * (`job_fenced` with `by: "stop"`, then its commit, as recovery would) or
+   * accounted for with a `job_unsealed` line when it is not. A staging
+   * directory no such job owns is named and left as it is. Only with no hub
+   * running: the hub is the store's writer while it runs.
+   */
+  async sealLeft(): Promise<{ sealed: Array<{ staging: string; job: string; status: string }>; left: Array<{ staging: string; why: string }> }> {
+    const hub = hubAlive(this.S);
+    if (hub) throw new Error(`the run's hub (pid ${hub}) is the store's writer while it runs: a stop seals what it left once it has gone`);
+    this.stopping = true;
+    this.afterRun = true;
+    this.journal = await Journal.open(this.S);
+    this.replay(this.journal.lines);
+    const P = storePaths(this.S);
+    const names = (await readdir(P.staging).catch(() => [] as string[])).filter((n) => !n.startsWith(".")).sort();
+    const sealed: Array<{ staging: string; job: string; status: string }> = [];
+    const left: Array<{ staging: string; why: string }> = [];
+    const owned = new Map<string, string>();
+    for (const name of names) {
+      const m = /^(j\d{6})-(\d+)$/.exec(name);
+      const j = m ? this.jobs.get(m[1]) : undefined;
+      if (!m || !j || j.attempt !== Number(m[2])) {
+        left.push({ staging: name, why: m ? (j ? `attempt ${m[2]} of ${m[1]} is not the attempt the journal has (${j.attempt})` : `no job ${m[1]} on the journal`) : "not a job's staging directory" });
+        continue;
+      }
+      if (j.state !== "running" && j.state !== "finished" && j.state !== "fenced") {
+        left.push({ staging: name, why: `${j.id} is ${j.state} on the journal: nothing of it is left to seal` });
+        continue;
+      }
+      owned.set(j.id, name);
+    }
+    // Once each: destroyWorker already asks msb three times.
+    await this.fenceLeft({ tries: 1, waitMs: 0 }, new Set(owned.keys()), "after the run");
+    for (const [id, name] of owned) {
+      const after = this.jobs.get(id)!;
+      if (after.state === "committed") sealed.push({ staging: name, job: id, status: after.status ?? "ok" });
+      else left.push({ staging: name, why: this.journal.of("job_unsealed").filter((l) => l.job === id).map((l) => String(l.why)).at(-1) ?? `${id} is ${after.state}` });
+    }
+    await dropProjected(P.staging);
+    return { sealed, left: left.sort((a, b) => a.staging.localeCompare(b.staging)) };
   }
 
   /** Backstop: a worker that did not go when its job ended is asked to go again. */
@@ -2475,6 +2604,33 @@ export class JobService {
       await this.commit(j, { status: j.status ?? "ok", exit: j.exit ?? null, reason: j.reason });
     }
   }
+}
+
+/**
+ * What a stop left unsealed, sealed after the run (JobService.sealLeft),
+ * with msb's own answer for each worker (vm.ts destroyWorker): `vm.ts
+ * seal-left --sandbox DIR`, which `swarm.sh stop` runs once the hub has
+ * gone. Nothing is made, queued or posted.
+ */
+export async function sealLeftStaging(sandbox: string, destroyWorker: JobServiceOptions["destroyWorker"], log?: (line: string) => void): Promise<Awaited<ReturnType<JobService["sealLeft"]>>> {
+  const svc = new JobService({
+    sandbox,
+    run: "",
+    image: "",
+    workers: 0,
+    workerCpus: 1,
+    workerMemoryMib: 0,
+    allowHosts: [],
+    openNet: false,
+    packDirs: [],
+    forging: false,
+    runWorker: async () => ({ code: null, fenced: false, error: "no worker is made after the run" }),
+    destroyWorker,
+    notify: async () => undefined,
+    identity: async () => ({}),
+    ...(log ? { log } : {}),
+  });
+  return svc.sealLeft();
 }
 
 /**

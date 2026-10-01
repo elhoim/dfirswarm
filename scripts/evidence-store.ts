@@ -1128,6 +1128,8 @@ export type StoreCheck = {
   outputs: { files: number; verified: number; mismatched: string[]; missing: string[] };
   manifests_missing: string[];
   staging_left: string[];
+  /** Why each staging directory left was not sealed, from the journal's `job_unsealed` lines (the last for each). */
+  staging_why?: Record<string, string>;
   generations: number;
   revisions: number;
   /**
@@ -1428,7 +1430,25 @@ export async function checkStore(sandbox: string, before = Infinity): Promise<St
   } catch {
     out.staging_left = [];
   }
+  if (out.staging_left.length) {
+    // Each one's account, when the job service gave one: why it was not sealed.
+    const why: Record<string, string> = {};
+    for (const l of checked.lines) if (l.type === "job_unsealed" && typeof l.staging === "string" && out.staging_left.includes(l.staging)) why[l.staging] = String(l.why ?? "");
+    if (Object.keys(why).length) out.staging_why = why;
+  }
   return out;
+}
+
+/** The pid in the run's hub.pid when that process is alive: the store's writer while the run runs; null when there is none. */
+export function hubAlive(sandbox: string): number | null {
+  const pidFile = join(resolve(sandbox), "hub.pid");
+  if (!existsSync(pidFile)) return null;
+  const pid = Number(readFileSync(pidFile, "utf8").trim());
+  try {
+    return Number.isInteger(pid) && pid > 0 && process.kill(pid, 0) ? pid : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -1439,17 +1459,8 @@ export async function checkStore(sandbox: string, before = Infinity): Promise<St
  */
 export async function appendNote(sandbox: string, note: { by: string; text: string; jobs?: string[] }): Promise<number> {
   if (!note.by.trim() || !note.text.trim()) throw new Error("a note needs --by and --text");
-  const pidFile = join(resolve(sandbox), "hub.pid");
-  if (existsSync(pidFile)) {
-    const pid = Number(readFileSync(pidFile, "utf8").trim());
-    let alive = false;
-    try {
-      alive = Number.isInteger(pid) && pid > 0 && process.kill(pid, 0);
-    } catch {
-      alive = false;
-    }
-    if (alive) throw new Error(`the run's hub (pid ${pid}) is the store's writer while it runs: add the note after the run`);
-  }
+  const pid = hubAlive(sandbox);
+  if (pid) throw new Error(`the run's hub (pid ${pid}) is the store's writer while it runs: add the note after the run`);
   const j = await Journal.open(sandbox);
   await j.append({ type: "note", by: note.by, text: note.text, ...(note.jobs?.length ? { jobs: note.jobs } : {}) });
   return j.seq;

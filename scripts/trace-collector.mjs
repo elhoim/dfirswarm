@@ -39,10 +39,23 @@
  *
  * One line of JSON per message, newline-terminated. Anything that is not an
  * event is refused rather than written: this file is the record.
+ *
+ *   node scripts/trace-collector.mjs <sandbox> --gather [--anchor PATH]
+ *
+ * Once a run's collector is down (`swarm.sh stop`), the harness's own lines
+ * it could not take — an operator's command after the stop, the hub's last
+ * words — are in traces/system-spill.jsonl and traces/hub-spill.jsonl. This
+ * mode chains them, the collector's own way, with no daemon: refused while
+ * a collector answers on the socket, each line checked as a live one would
+ * be, written unverified (no token travelled with it) and marked `gathered`
+ * with the spill it came from and its own sha256. The spilled lines
+ * themselves are kept whole beside it (traces/<name>.gathered.jsonl); a
+ * line that is not an event stays in the spill, where custody counts it.
+ * One JSON line on stdout says what was done.
  */
 import { createHash, timingSafeEqual } from "node:crypto";
-import { appendFileSync, chmodSync, mkdirSync, readFileSync, existsSync, statSync, truncateSync, unlinkSync, writeFileSync } from "node:fs";
-import { createServer } from "node:net";
+import { appendFileSync, chmodSync, lstatSync, mkdirSync, readFileSync, renameSync, existsSync, statSync, truncateSync, unlinkSync, writeFileSync } from "node:fs";
+import { connect, createServer } from "node:net";
 import { dirname, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -599,6 +612,169 @@ function start() {
   process.on("SIGINT", shutdown);
 }
 
+/** The harness's own spills, which a gather chains (custody reads them as the harness's). */
+export const GATHERED_SPILLS = ["traces/system-spill.jsonl", "traces/hub-spill.jsonl"];
+
+/** Whether something answers on the collector's socket: a live collector, which takes the lines itself. */
+function collectorAnswers() {
+  if (!existsSync(socketPath)) return Promise.resolve(false);
+  return new Promise((done) => {
+    // Dialled from inside its directory, as the collector binds it (a long path would not fit a socket address).
+    const here = process.cwd();
+    try {
+      process.chdir(dirname(socketPath));
+    } catch {
+      done(false);
+      return;
+    }
+    let settled = false;
+    const finish = (v) => {
+      if (settled) return;
+      settled = true;
+      try {
+        socket.destroy();
+      } catch {
+        // gone already
+      }
+      process.chdir(here);
+      done(v);
+    };
+    const socket = connect(socketPath.slice(dirname(socketPath).length + 1));
+    socket.setTimeout(1000, () => finish(false));
+    socket.on("connect", () => finish(true));
+    socket.on("error", () => finish(false));
+  });
+}
+
+/**
+ * Chain the harness's spilled lines (the --gather mode, in the header).
+ * Safe to run again: a line already gathered (its sha256 on a `gathered`
+ * mark of the chain) is not chained twice, and one the collector took after
+ * its sender gave up (the same sender, sid and seq on the chain) is moved
+ * aside as a duplicate, not written again.
+ */
+async function gather() {
+  if (await collectorAnswers()) {
+    process.stdout.write(`${JSON.stringify({ ok: false, error: `a collector answers on ${socketPath}: it takes the lines itself` })}\n`);
+    return 4;
+  }
+  const lock = join(sandbox, "traces", ".gather.lock");
+  try {
+    writeFileSync(lock, `${process.pid}\n`, { flag: "wx" });
+  } catch {
+    const owner = Number.parseInt(readFileSync(lock, "utf8"), 10);
+    let alive = false;
+    try {
+      alive = Number.isInteger(owner) && owner > 0 && process.kill(owner, 0);
+    } catch {
+      alive = false;
+    }
+    if (alive) {
+      process.stdout.write(`${JSON.stringify({ ok: false, error: `another gather (pid ${owner}) is under way` })}\n`);
+      return 4;
+    }
+    writeFileSync(lock, `${process.pid}\n`);
+  }
+  try {
+    reconcile();
+    // What the chain already holds: every gathered line's sha256, and each numbered sender's lines.
+    const done = new Set();
+    const numbered = new Set();
+    let text = "";
+    try {
+      text = readFileSync(eventsFile, "utf8");
+    } catch {
+      text = "";
+    }
+    for (const line of wholeLines(text)) {
+      try {
+        const o = JSON.parse(line);
+        if (typeof o?.gathered?.sha256 === "string") done.add(o.gathered.sha256);
+        if (typeof o?.sid === "string" && typeof o?.seq === "number") numbered.add(`${o.agent}\u0000${o.sid}\u0000${o.seq}`);
+      } catch {
+        // the chain's own check names a line that does not parse
+      }
+    }
+    const report = { ok: true, gathered: 0, duplicates: 0, already: 0, kept: 0, files: [] };
+    for (const rel of GATHERED_SPILLS) {
+      const spill = join(sandbox, rel);
+      const pending = `${spill}.gathering`;
+      const keptAs = spill.replace(/\.jsonl$/, ".gathered.jsonl");
+      const file = { path: rel, gathered: 0, duplicates: 0, already: 0, kept: 0, kept_as: relative(sandbox, keptAs) };
+      // A spill that is a link or anything but a regular file is not read: named, left where it is.
+      const regular = (p) => {
+        try {
+          return lstatSync(p).isFile();
+        } catch {
+          return false;
+        }
+      };
+      if (existsSync(spill) && !regular(spill)) {
+        report.files.push({ ...file, refused: "not a regular file" });
+        continue;
+      }
+      // An interrupted gather's batch first, then whatever was spilled since.
+      for (let round = 0; round < 2; round += 1) {
+        if (!existsSync(pending)) {
+          if (!regular(spill)) break;
+          renameSync(spill, pending);
+        }
+        const kept = [];
+        const moved = [];
+        for (const raw of readFileSync(pending, "utf8").split("\n")) {
+          if (!raw.trim()) continue;
+          const sha = lineHash(raw);
+          let record;
+          try {
+            record = JSON.parse(raw);
+          } catch {
+            record = null;
+          }
+          if (!record || typeof record !== "object" || Array.isArray(record) || typeof record.tool !== "string" || typeof record.ts !== "string" || Buffer.byteLength(raw) > MAX_LINE_BYTES) {
+            kept.push(raw);
+            file.kept += 1;
+            continue;
+          }
+          moved.push(raw);
+          if (done.has(sha)) {
+            file.already += 1;
+            continue;
+          }
+          if (typeof record.sid === "string" && typeof record.seq === "number" && numbered.has(`${record.agent}\u0000${record.sid}\u0000${record.seq}`)) {
+            file.duplicates += 1;
+            continue;
+          }
+          const { token: _t, gate: _g, agent_unverified: _u, claimed_agent: _c, prev: _p, recv_ts: _r, gathered: _x, ...rest } = record;
+          write({ ...rest, agent_unverified: true, gathered: { from: rel, sha256: sha } });
+          done.add(sha);
+          file.gathered += 1;
+        }
+        // The spilled lines whole beside the chain, then what stays in the spill, then the batch is gone.
+        if (moved.length) appendFileSync(keptAs, `${moved.join("\n")}\n`, { mode: 0o600 });
+        if (kept.length) appendFileSync(spill, `${kept.join("\n")}\n`, { mode: 0o600 });
+        unlinkSync(pending);
+        if (round === 0 && kept.length) break;
+      }
+      if (file.gathered || file.duplicates || file.already || file.kept) report.files.push(file);
+      report.gathered += file.gathered;
+      report.duplicates += file.duplicates;
+      report.already += file.already;
+      report.kept += file.kept;
+    }
+    process.stdout.write(`${JSON.stringify(report)}\n`);
+    return 0;
+  } catch (err) {
+    process.stdout.write(`${JSON.stringify({ ok: false, error: err instanceof Error ? err.message : String(err) })}\n`);
+    return 1;
+  } finally {
+    try {
+      unlinkSync(lock);
+    } catch {
+      // already gone
+    }
+  }
+}
+
 /**
  * Only when run, never when imported.
  *
@@ -612,7 +788,9 @@ function start() {
  * directory is exactly where a space turns up.
  */
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
-  if (wantTokens) {
+  if (args.includes("--gather")) {
+    gather().then((code) => process.exit(code));
+  } else if (wantTokens) {
     // On stdin, because argv is visible to every process of this uid and a file
     // is readable by every pane. A token nobody else can see is the only thing
     // that makes "who sent this" answerable while the panes share a uid.
