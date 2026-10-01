@@ -90,13 +90,15 @@ each fetched by install.py and refused unless its sha256 is the pinned one:
                      into the install step, never copied into a layer.
 
 Every program the packs name must be in the image when its build ends,
-optional or not, unless it is left out on purpose (no build for this
-architecture, `arches`, `not_in_image`): an optional one that could not be
-installed stops the build, so a build that went wrong (apt out of disk space)
-is not tagged, and a builder stage that failed is not cached as a success.
-`build --allow-missing-optional` builds the image without such programs and
-records them; a builder stage it lets fail gets a build id of its own, so it
-is built again every time rather than taken from the cache.
+optional or not, unless it is left out on purpose (a download with no build
+for this architecture, a source or a build pinned for others with `arches`, a
+program no line installs): an optional one that could not be installed stops
+the build, so a build that went wrong (apt out of disk space) is not tagged,
+and a builder stage that failed is not cached as a success. `build
+--allow-missing-optional` builds the image without such programs and records
+them; its spec.json and every builder stage it lets fail carry a build id of
+their own, so the install and those stages run again every time rather than
+being taken from the cache with an earlier build's gaps.
 
 `run` names the interpreter a download's or a source's program needs:
 `python` (the program's own venv, else the image's), or any program the image
@@ -627,8 +629,12 @@ def build(a) -> int:
         # A stage that may now end without its program is never taken from the
         # cache: its file carries this build's own id, so an earlier failure
         # (a full disk) is not handed on to a build made after it was fixed.
+        # The profile's own install may now end with gaps too (apt out of space
+        # for an optional package): spec.json, copied in before it runs,
+        # carries the same id, so that layer is not reused either.
         build_id = uuid.uuid4().hex
         spec["allow_missing_optional"] = True
+        spec["build_id"] = build_id
         for d in spec["builds"]:
             if not d.get("required"):
                 d.update({"may_fail": True, "build_id": build_id})

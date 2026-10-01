@@ -92,9 +92,10 @@ others). The message names each program; nothing is tagged. Free the space
 and build again; no `--no-cache` is needed. `recipe.py build
 --allow-missing-optional` builds an image without such programs on purpose:
 `image.json` names them under `missing_allowed` and says why under
-`not_installed`, `tests/image-programs.sh` skips them and says so, and a
-builder stage it lets fail carries a build id of its own, so it is built
-again every time rather than taken from the cache.
+`not_installed`, `tests/image-programs.sh` skips them and says so, and its
+`spec.json` and every builder stage it lets fail carry a build id of their
+own, so the install and those stages run again every time rather than being
+taken from the cache with an earlier build's gaps.
 
 **`--allow-nonredistributable`.** Every program in the packs is marked
 `redistributable: false` until its licence has been reviewed for

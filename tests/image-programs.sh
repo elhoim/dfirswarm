@@ -17,7 +17,8 @@
 # PATH fails: a build that lost it (apt out of disk space did) is caught here
 # too, not only by install.py at the end of the build. One the build was told
 # it may lack (`missing_allowed`, recipe.py build --allow-missing-optional) is
-# skipped, and says so. Nothing here is evidence, a secret or a challenge: the
+# skipped, and says so; a record that cannot be read fails, since it cannot
+# say which. Nothing here is evidence, a secret or a challenge: the
 # keys and the message are made up and thrown away.
 set -u
 T="$(mktemp -d)"
@@ -32,14 +33,18 @@ import json, os, sys
 try:
     r = json.load(open(os.environ.get("DFIRSWARM_ETC_DIR", "/etc/dfirswarm") + "/image.json"))
 except (OSError, ValueError):
-    r = {}
+    print("unreadable")
+    sys.exit(0)
 name = sys.argv[1]
 print("allowed" if name in (r.get("missing_allowed") or []) else "named" if name in (r.get("binaries") or {}) else "not-named")
 PY
 )" in
     named) no "$1 is named by this image's packs (image.json binaries) and is not on PATH" ;;
     allowed) skip "$1 is missing, as its build allowed (image.json missing_allowed)" ;;
-    *) skip "$1 is not in this image" ;;
+    not-named) skip "$1 is not in this image" ;;
+    # Every image has python3 and its record: one without either cannot say
+    # whether the program should be here, and is not passed as if it did.
+    *) no "$1 is not on PATH, and the image's record (image.json) could not be read to say whether it should be" ;;
   esac
 }
 

@@ -160,8 +160,16 @@ jq -e '(has("may_fail") | not)' "$TMP/ctx-a/build-req-built.json" >/dev/null || 
 jq -e '.allow_missing_optional == true' "$TMP/ctx-a/spec.json" >/dev/null || fail "the spec does not carry the flag into the install"
 [[ "$(jq -r .build_id "$TMP/ctx-a/build-opt-built.json")" != "$(jq -r .build_id "$TMP/ctx-b/build-opt-built.json")" ]] \
   || fail "two builds allowed to miss a program share a stage file, so the second would take the first's result from the cache"
+# The profile's own install can end with gaps under the flag too (apt out of
+# space for an optional package): its spec.json, copied in before it runs,
+# carries the build's id, so that layer is not reused by the next build.
+jq -e '(.build_id | length == 32) and .build_id == input.build_id' "$TMP/ctx-a/spec.json" "$TMP/ctx-a/build-opt-built.json" >/dev/null \
+  || fail "the spec does not carry the build's id under the flag: $(jq -c '{build_id}' "$TMP/ctx-a/spec.json")"
+[[ "$(jq -r .build_id "$TMP/ctx-a/spec.json")" != "$(jq -r .build_id "$TMP/ctx-b/spec.json")" ]] \
+  || fail "two builds allowed to miss a program share a spec.json, so the second would take the first's install, gaps and all, from the cache"
+jq -e '(has("build_id") | not)' "$TMP/ctx/spec.json" >/dev/null || fail "a build without the flag carries a build id, and loses its cache"
 cmp -s "$TMP/ctx/build-req-built.json" "$TMP/ctx-a/build-req-built.json" || fail "a required program's stage file changed with the flag, losing its cache"
-pass "a context allows optional stages to fail only with --allow-missing-optional, and each such stage file is its build's own"
+pass "a context allows optional stages to fail only with --allow-missing-optional, and each such stage file and its spec.json are its build's own"
 
 # --- tests/image-programs.sh reads the record -------------------------------------------
 # Run on this host with a PATH that holds none of the three programs: a program
@@ -179,6 +187,9 @@ grep -q '^skip - gcc is not in this image' <<<"$out" || fail "a program no pack 
 printf '{"binaries": {"aeskeyfind": null}, "missing_allowed": ["aeskeyfind"]}\n' > "$TMP/rec-etc/image.json"
 out="$(progs)" || fail "image-programs.sh failed a program the build was allowed to miss: $out"
 grep -q '^skip - aeskeyfind is missing, as its build allowed' <<<"$out" || fail "an allowed gap is not said: $out"
-pass "image-programs.sh fails a program the image's record names and PATH lacks, and skips the others, saying why"
+printf 'not json\n' > "$TMP/rec-etc/image.json"
+out="$(progs)" && fail "image-programs.sh passed an image whose record it could not read: $out"
+grep -q '^FAIL: gcc is not on PATH, and the image.s record (image.json) could not be read' <<<"$out" || fail "an unreadable record is not said: $out"
+pass "image-programs.sh fails a program the image's record names and PATH lacks, and one it cannot check against an unreadable record, and skips the others, saying why"
 
 echo "image-build-failures: all checks passed"
