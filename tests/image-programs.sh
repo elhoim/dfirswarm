@@ -11,10 +11,14 @@
 #                   planted-key test)
 #   steghide, PIL   embeds a short message in a JPEG made here and extracts it
 #
-# A program the image does not hold is skipped, not failed: the profiles differ
-# (the base and web hold none of these), and the recorded inventory says what
-# each should hold. Nothing here is evidence, a secret or a challenge: the keys
-# and the message are made up and thrown away.
+# A program the image does not hold is skipped when its packs do not name it:
+# the profiles differ (the base and web hold none of these). One its packs
+# name (a key of `binaries` in /etc/dfirswarm/image.json) and that is not on
+# PATH fails: a build that lost it (apt out of disk space did) is caught here
+# too, not only by install.py at the end of the build. One the build was told
+# it may lack (`missing_allowed`, recipe.py build --allow-missing-optional) is
+# skipped, and says so. Nothing here is evidence, a secret or a challenge: the
+# keys and the message are made up and thrown away.
 set -u
 T="$(mktemp -d)"
 trap 'rm -rf "$T"' EXIT
@@ -22,6 +26,22 @@ failed=0
 ok() { echo "ok - $*"; }
 no() { echo "FAIL: $*" >&2; failed=1; }
 skip() { echo "skip - $*"; }
+absent() { # <program>: not on PATH; fail when the image's record says it should be
+  case "$(python3 - "$1" <<'PY' 2>/dev/null
+import json, os, sys
+try:
+    r = json.load(open(os.environ.get("DFIRSWARM_ETC_DIR", "/etc/dfirswarm") + "/image.json"))
+except (OSError, ValueError):
+    r = {}
+name = sys.argv[1]
+print("allowed" if name in (r.get("missing_allowed") or []) else "named" if name in (r.get("binaries") or {}) else "not-named")
+PY
+)" in
+    named) no "$1 is named by this image's packs (image.json binaries) and is not on PATH" ;;
+    allowed) skip "$1 is missing, as its build allowed (image.json missing_allowed)" ;;
+    *) skip "$1 is not in this image" ;;
+  esac
+}
 
 if command -v gcc >/dev/null 2>&1; then
   printf '#include <stdio.h>\nint main(void) { puts("compiled"); return 42; }\n' > "$T/t.c"
@@ -37,7 +57,7 @@ if command -v gcc >/dev/null 2>&1; then
   fi
   if command -v make >/dev/null 2>&1; then ok "make is there ($(make --version | head -1))"; else no "make is not there beside gcc"; fi
 else
-  skip "gcc is not in this image"
+  absent gcc
 fi
 
 if command -v aeskeyfind >/dev/null 2>&1; then
@@ -114,7 +134,7 @@ PY
   done < "$T/planted.txt"
   rm -f "$T/big.bin"
 else
-  skip "aeskeyfind is not in this image"
+  absent aeskeyfind
 fi
 
 if command -v steghide >/dev/null 2>&1; then
@@ -141,6 +161,6 @@ PY
     no "steghide is in this image and Pillow is not"
   fi
 else
-  skip "steghide is not in this image"
+  absent steghide
 fi
 exit $failed

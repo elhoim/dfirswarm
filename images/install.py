@@ -10,8 +10,15 @@ what the image ended up holding.
 
 A package a pack marks required stops the build if it cannot be installed,
 and so does a required program that is not on PATH afterwards. An optional
-one that fails is recorded, not fatal: the image says what it lacks rather
-than failing to exist. The record, /etc/dfirswarm/image.json, is what a run
+one that fails is recorded and the install goes on, but at the end every
+program the packs name must be on PATH unless it was left out on purpose (a
+download with no build for this architecture, a source or a build pinned for
+other architectures, a program no line installs): a program that should be
+here and is not stops the build, so nothing is tagged. A full disk once made
+apt fail for optional programs and the image came out without them, saying so
+only in its record. `recipe.py build --allow-missing-optional` lets such an
+image be built, and it records what it lacks. The record,
+/etc/dfirswarm/image.json, is what a run
 cites for "which tools, at which versions, examined this"; /etc/dfirswarm/
 NOTICE says whose each program is and under which licence; /etc/dfirswarm/
 sbom.json lists every package the image holds (Debian, Python, npm, pinned
@@ -45,8 +52,10 @@ dropped), given a venv of its own there when it names Python requirements —
 one program's pins never move another's — and its entry is put on PATH the
 same way, through its interpreter. A program built from source is checked,
 configured with its prefix under /opt/dfir/tools, made and installed in a
-builder stage; a failure there is recorded beside what it left, and an
-optional program's failure does not stop the image. A source with no
+builder stage; a failure there is recorded beside what it left and fails
+the stage (a stage that ends well is cached, and a cached failure would be
+every later build's), unless the program is not for this architecture or the
+build allows optional programs to be missing. A source with no
 configure script names its steps (`commands`, each an argument list run in the
 unpacked tree, `{prefix}` and `{jobs}` filled in) and the pinned patches to
 apply first (`patches`, each a url and a sha256, applied with `patch -p1`).
@@ -83,6 +92,9 @@ TOOLS = Path(os.environ.get("DFIRSWARM_TOOLS_DIR", "/opt/dfir/tools"))
 SRC = Path(os.environ.get("DFIRSWARM_SRC_DIR", "/opt/dfir/src"))
 BIN = Path(os.environ.get("DFIRSWARM_BIN_DIR", "/usr/local/bin"))
 APT_SOURCES = Path(os.environ.get("DFIRSWARM_APT_SOURCES_DIR", "/etc/apt/sources.list.d"))
+# apt's package lists, emptied once the install is done; a test that runs the
+# whole install on a host points this at its own directory.
+APT_LISTS = Path(os.environ.get("DFIRSWARM_APT_LISTS_DIR", "/var/lib/apt/lists"))
 OS_RELEASE = Path(os.environ.get("DFIRSWARM_OS_RELEASE", "/etc/os-release"))
 # What a build leaves beside its program: whether it built, and from what.
 BUILT = ".dfirswarm-build.json"
@@ -423,14 +435,19 @@ def fetch_data(d: dict) -> tuple:
 
 def build_source(spec_path: str) -> int:
     """A builder stage: compile one program from its pinned source, installed
-    under TOOLS/<name>, and say beside it whether it built. The profile's
-    stage copies that directory whatever happened; a required program that
-    did not build stops the image here."""
+    under TOOLS/<name>, and say beside it whether it built. A program that did
+    not build fails the stage, optional or not: Docker caches a stage that
+    ends well, and a failure kept in the cache (apt out of disk space) would be
+    every later build's, the image silently without the program. Two
+    exceptions end well with the failure recorded, for the profile's stage to
+    copy: a program its pack pins for other architectures, and an optional one
+    the build allows to be missing (`may_fail`, which recipe.py sets with a
+    build id of its own, so that stage is never taken from the cache)."""
     d = json.loads(Path(spec_path).read_text())
     dest = TOOLS / d["name"]
     dest.mkdir(parents=True, exist_ok=True)
 
-    def done(why: str | None) -> int:
+    def done(why: str | None, elsewhere: bool = False) -> int:
         rec = {"kind": "build", "version": d.get("version"), "url": d.get("url"),
                "sha256": str(d.get("sha256", "")).removeprefix("sha256:").lower(), "ok": why is None}
         if d.get("patches"):
@@ -441,11 +458,13 @@ def build_source(spec_path: str) -> int:
         (dest / BUILT).write_text(json.dumps(rec, indent=1) + "\n")
         if why:
             print(f"{d['name']} did not build: {why}", file=sys.stderr)
-            return 1 if d.get("required") else 0
+            if d.get("required"):
+                return 1
+            return 0 if elsewhere or d.get("may_fail") else 1
         return 0
 
     if d.get("arches") and arch() not in d["arches"]:
-        return done(f"not built for {arch()} (its pack builds it for {', '.join(d['arches'])})")
+        return done(f"not built for {arch()} (its pack builds it for {', '.join(d['arches'])})", elsewhere=True)
     if not d.get("url") or not d.get("sha256") or not d.get("bin"):
         return done("no url, sha256 and bin pinned")
     apt = ["apt-get", "install", "-y", "--no-install-recommends"]
@@ -945,6 +964,35 @@ def profile_record(record: dict, spec: dict, downloads: dict, failed: dict) -> d
     return record
 
 
+def missing_programs(spec: dict, record: dict) -> list:
+    """The programs this image was built to hold and does not: every program
+    its packs name that is not on PATH, less those left out on purpose (a
+    download with no build pinned for this architecture, a source or a build
+    its pack pins for other architectures, a program no line installs)."""
+    here = arch()
+    elsewhere = {d["name"] for d in spec.get("downloads", []) if not isinstance(d.get(here), dict)}
+    elsewhere |= {d["name"] for kind in ("sources", "builds") for d in spec.get(kind, [])
+                  if d.get("arches") and here not in d["arches"]}
+    elsewhere |= {m["name"] for m in spec.get("manual", [])}
+    return sorted({b["name"] for b in spec["binaries"]
+                   if not record["binaries"].get(b["name"]) and b["name"] not in elsewhere})
+
+
+def missing_reasons(spec: dict, failed: dict, names: list) -> list:
+    """(program, why) for each missing program, from what the install
+    recorded: the image is not tagged, so its image.json is not there to read."""
+    whys = {e["name"]: e["why"] for kind in ("download", "source", "build") for e in failed.get(kind, [])}
+    out = []
+    for name in names:
+        entry = next((b for b in spec["binaries"] if b["name"] == name), {})
+        apt_lost = [x for x in entry.get("apt") or [] if x in failed["apt"]]
+        pip_lost = [x for x in entry.get("pip") or [] if x in failed["pip"]]
+        out.append((name, whys.get(name) or (f"apt could not install {', '.join(apt_lost)}" if apt_lost else None)
+                    or (f"pip could not install {', '.join(pip_lost)}" if pip_lost else None)
+                    or "not on PATH after its install"))
+    return out
+
+
 def install_apt(spec: dict, apt: list, failed: dict) -> bool:
     """The spec's Debian packages, each from the release its pack names
     (bookworm-backports) or the image's own. False when a required one fails."""
@@ -1052,9 +1100,12 @@ def main(spec_path: str) -> int:
         if not settle("build", d, *link_build(d, apt)):
             return 1
     run(["apt-get", "clean"])
-    shutil.rmtree("/var/lib/apt/lists", ignore_errors=True)
+    shutil.rmtree(APT_LISTS, ignore_errors=True)
 
     record = profile_record(json.loads(RECORD.read_text()) if RECORD.exists() else {}, spec, downloads, failed)
+    missing = missing_programs(spec, record)
+    if missing and spec.get("allow_missing_optional"):
+        record["missing_allowed"] = missing
     here = Path(spec_path).parent / "NOTICE"
     write_record(record, here.read_text() if here.exists() else f"dfirswarm-{spec['profile']}", spec)
     found = sum(1 for v in record["binaries"].values() if v)
@@ -1068,6 +1119,19 @@ def main(spec_path: str) -> int:
     if lacking:
         print(f"required programs missing from the image: {', '.join(lacking)}", file=sys.stderr)
         return 1
+    # The program list, checked at the end: an optional program that should be
+    # here and is not is a build that went wrong (apt out of disk space did
+    # this), not an image to tag. Each is said here with why.
+    if missing and not spec.get("allow_missing_optional"):
+        print(f"programs this image was built to hold and does not: {', '.join(missing)}.", file=sys.stderr)
+        for name, why in missing_reasons(spec, failed, missing):
+            print(f"  {name}: {why}", file=sys.stderr)
+        print("Free disk space for Docker if that is the cause (images/README.md, \"Disk space\") and build again, "
+              "or build with recipe.py build --allow-missing-optional for an image that records them as missing.",
+              file=sys.stderr)
+        return 1
+    if missing:
+        print(f"optional programs missing, as the build allows (--allow-missing-optional): {', '.join(missing)}", file=sys.stderr)
     return 0
 
 

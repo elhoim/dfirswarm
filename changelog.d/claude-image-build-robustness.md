@@ -1,0 +1,9 @@
+### Fixed: an image build that loses a program fails instead of tagging an image without it
+
+With Docker's disk full, apt failed inside the builder stages of two optional programs, bulk_extractor and aeskeyfind. Each stage recorded the failure and still ended well, Docker cached it as it was, and every image built after the disk was freed lacked both programs, saying so only under `not_installed` in its `image.json`, until a `--no-cache` rebuild.
+
+- **A builder stage whose program did not build fails**, optional or not, so Docker caches nothing of it and the next build tries again. A program its pack pins for other architectures (`arches`) still ends its stage well, recorded as not built there.
+- **The program list is checked at the end of the install.** Every program the image's packs name must be on PATH, unless it is left out on purpose (a download with no build for this architecture, a source or a build pinned for others, a program no line installs). Otherwise the install fails, so nothing is tagged, and it names each program with its reason (`apt could not install …`), since the untagged image's own record cannot be read.
+- **`recipe.py build --allow-missing-optional`** builds an image without such optional programs on purpose. Its `image.json` names them under `missing_allowed`, and a builder stage it lets fail carries a build id of its own, so it is built again every time rather than taken from the cache.
+- **`tests/image-programs.sh` fails a program the image's record names and PATH lacks**, rather than skipping it; one the build was allowed to miss is skipped and said.
+- **A disk-space check before a build** is documented in `images/README.md` ("Disk space"), with the sizes the images measured, and `docs/troubleshooting.md` says what the new failure means. `tests/image-build-failures.test.sh` plays the failure with no Docker and no full disk: an apt that fails the way a full disk makes it fail.

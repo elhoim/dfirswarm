@@ -76,6 +76,15 @@ each fetched by install.py and refused unless its sha256 is the pinned one:
                      optional program (`build --allow-missing-data` goes on
                      without it, and the image records what is missing).
 
+Every program the packs name must be in the image when its build ends,
+optional or not, unless it is left out on purpose (no build for this
+architecture, `arches`, `not_in_image`): an optional one that could not be
+installed stops the build, so a build that went wrong (apt out of disk space)
+is not tagged, and a builder stage that failed is not cached as a success.
+`build --allow-missing-optional` builds the image without such programs and
+records them; a builder stage it lets fail gets a build id of its own, so it
+is built again every time rather than taken from the cache.
+
 `run` names the interpreter a download's or a source's program needs:
 `python` (the program's own venv, else the image's), or any program the image
 holds (`perl`, `dotnet`, which a pack may pin as a download of its own). An apt
@@ -93,6 +102,7 @@ import os
 import re
 import shutil
 import sys
+import uuid
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -466,6 +476,15 @@ def build(a) -> int:
     spec = merge([read_pack(a.packs, p) for p in packs])
     for pkg in extra_apt:
         spec["apt"][pkg] = True
+    if a.allow_missing_optional:
+        # A stage that may now end without its program is never taken from the
+        # cache: its file carries this build's own id, so an earlier failure
+        # (a full disk) is not handed on to a build made after it was fixed.
+        build_id = uuid.uuid4().hex
+        spec["allow_missing_optional"] = True
+        for d in spec["builds"]:
+            if not d.get("required"):
+                d.update({"may_fail": True, "build_id": build_id})
     # Programs, and the data a program reads (a symbol pack), that are not
     # cleared for redistribution: the image names each in its record.
     held_back = sorted({b["name"] for b in spec["binaries"] if not b.get("redistributable", True)}
@@ -534,6 +553,9 @@ def main() -> int:
     b.add_argument("--base", default="dfirswarm-base:dev-amd64")
     b.add_argument("--allow-nonredistributable", action="store_true",
                    help="build an image holding programs or data files their packs mark redistributable: false (never publish it)")
+    b.add_argument("--allow-missing-optional", action="store_true",
+                   help="go on when an optional program cannot be installed or built; the image records it (not_installed, "
+                        "missing_allowed), and a builder stage allowed to fail is built again every time, never taken from the cache")
     b.add_argument("--allow-missing-data", action="store_true",
                    help="go on when a pinned data file (a symbol pack) cannot be fetched; the image records it under not_installed.data")
     f = sub.add_parser("profile-for")
