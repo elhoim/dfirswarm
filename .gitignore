@@ -40,3 +40,9 @@ ds-bundle/
 # Deployment secrets: the site deploy reads contact.env from the working tree
 *.env
 contact.env
+
+# Image build contexts (images/recipe.py build --out): a context may hold a
+# local copy of pinned data that is not for redistribution (recipe.py refuses
+# one inside a checkout; this is the second line).
+/ctx/
+/images/ctx/

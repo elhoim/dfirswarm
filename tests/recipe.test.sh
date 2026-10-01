@@ -123,7 +123,8 @@ out="$(python3 "$R" build memory --out "$TMP/ctx" 2>&1)"; rc=$?
 [[ $rc -eq 3 ]] || fail "a build holding programs marked not redistributable should stop without --allow-nonredistributable (rc $rc): $out"
 grep -q 'never publish it' <<<"$out" || fail "the refusal should say what the flag is for: $out"
 [[ ! -e "$TMP/ctx/spec.json" ]] || fail "a refused build wrote its context"
-python3 "$R" build memory --out "$TMP/ctx" --allow-nonredistributable >/dev/null || fail "the build with the flag failed"
+# The broad set alone: the curated one needs the operator's store (below).
+python3 "$R" build memory --out "$TMP/ctx" --allow-nonredistributable --symbol-set broad >/dev/null || fail "the build with the flag failed"
 for f in spec.json Dockerfile install.py NOTICE; do [[ -f "$TMP/ctx/$f" ]] || fail "the context lacks $f"; done
 jq -e '.pack_versions["memory-forensics"].version and (.pack_versions["memory-forensics"].seal | length == 64)' "$TMP/ctx/spec.json" >/dev/null \
   || fail "the spec does not carry each pack's version and seal"
@@ -154,7 +155,7 @@ grep -q '^  vol-windows-symbols data for vol: https://.*  sha256 [0-9a-f]\{64\} 
 jq -e '.data[0].required == true and (.data[0].check | length) == 3 and .data[0].check[0] == "sh"' "$TMP/ctx/spec.json" >/dev/null \
   || fail "the symbol tables are not required of the image (vol is optional, its data was pinned on purpose), or carry no check: $(jq -c '.data[0] | {required, check}' "$TMP/ctx/spec.json")"
 python3 "$R" build memory --out "$TMP/ctx-lenient" --allow-nonredistributable --allow-missing-data >/dev/null || fail "the build with --allow-missing-data failed"
-jq -e '.data[0].required == false' "$TMP/ctx-lenient/spec.json" >/dev/null || fail "--allow-missing-data does not let the build go on without a data file"
+jq -e '[.data[].required] == [false, false]' "$TMP/ctx-lenient/spec.json" >/dev/null || fail "--allow-missing-data does not let the build go on without a data file"
 jq -e '.nonredistributable | index("vol") != null and index("vol-windows-symbols") != null' "$TMP/ctx/spec.json" >/dev/null \
   || fail "the image's record does not name the symbol tables among what is not cleared for redistribution: $(jq -c .nonredistributable "$TMP/ctx/spec.json")"
 grep -q '^    licence of the data: .*Volatility Software License 1.0.*Microsoft Symbol Server' "$TMP/ctx/NOTICE" \
@@ -680,11 +681,13 @@ mk_entry() { # <dir> <binary entry json>
 }
 e='"name": "tool", "why": "Test.", "licence": "MIT", "redistributable": true, "optional": true'
 u='"url": "https://example.org/t.tar.gz", "sha256": "'"$sha"'"'
+# Data pins its size too: a download stops past it.
+ud='"url": "https://example.org/t.tar.gz", "sha256": "'"$sha"'", "bytes": 9'
 for good in '{'"$e"', "install": {"source": {"version": "1", '"$u"', "entry": "bin/t.py", "run": "python", "pip": ["-r", "requirements.txt"], "skip": ["tests"]}}}' \
             '{'"$e"', "install": {"build": {"version": "1", '"$u"', "bin": "bin/t", "configure": ["--disable-x"], "build_deps": ["gcc"], "apt_deps": ["zlib1g"], "env": {"CFLAGS": "-O2"}}}}' \
             '{'"$e"', "install": {"download": {"version": "1", "arm64": {"url": "https://example.org/t_1_arm64.deb", "sha256": "'"$sha"'", "bin": "/opt/t/bin/t"}}}}' \
             '{'"$e"', "install": {"apt": "x", "build": {"version": "1", '"$u"', "bin": "bin/t", "patches": [{'"$u"'}], "commands": [["make"], ["install", "-D", "t", "{prefix}/bin/t"]]}}}' \
-            '{'"$e"', "install": {"apt": "x", "data": {"version": "1", '"$u"', "package": "volatility3", "into": "symbols", "warm": ["vol", "-q", "isfinfo"], "why": "Tables.", "licence": "Terms.", "check": ["true"], "redistributable": false}}}' \
+            '{'"$e"', "install": {"apt": "x", "data": {"version": "1", '"$ud"', "package": "volatility3", "into": "symbols", "warm": ["vol", "-q", "isfinfo"], "why": "Tables.", "licence": "Terms.", "check": ["true"], "redistributable": false}}}' \
             '{'"$e"', "not_in_image": "Only macOS has it."}'; do
   mk_entry "$TMP/p/good-kind" "$good"
   bash "$ROOT/scripts/pack.sh" seal "$TMP/p/good-kind" >/dev/null 2>&1 || fail "a well-formed entry was refused: $good"
@@ -702,20 +705,21 @@ for bad in '{'"$e"', "install": {"source": {"version": "1", '"$u"'}}}' \
            '{'"$e"', "install": {"build": {"version": "1", '"$u"', "bin": "bin/t", "patches": "p.patch"}}}' \
            '{'"$e"', "install": {"build": {"version": "1", '"$u"', "bin": "bin/t", "commands": ["make"]}}}' \
            '{'"$e"', "install": {"build": {"version": "1", '"$u"', "bin": "bin/t", "commands": [[]]}}}' \
-           '{'"$e"', "install": {"apt": "x", "data": {'"$u"', "package": "p", "why": "Tables.", "licence": "Terms.", "check": ["true"], "redistributable": false}}}' \
-           '{'"$e"', "install": {"apt": "x", "data": {"version": "1", "url": "http://example.org/t.zip", "sha256": "'"$sha"'", "package": "p", "why": "Tables.", "licence": "Terms.", "check": ["true"], "redistributable": false}}}' \
-           '{'"$e"', "install": {"apt": "x", "data": {"version": "1", "url": "https://example.org/t.zip", "sha256": "abc", "package": "p", "why": "Tables.", "licence": "Terms.", "check": ["true"], "redistributable": false}}}' \
-           '{'"$e"', "install": {"apt": "x", "data": {"version": "1", '"$u"', "why": "Tables.", "licence": "Terms.", "check": ["true"], "redistributable": false}}}' \
-           '{'"$e"', "install": {"apt": "x", "data": {"version": "1", '"$u"', "package": "p", "why": "Tables.", "check": ["true"], "redistributable": false}}}' \
-           '{'"$e"', "install": {"apt": "x", "data": {"version": "1", '"$u"', "package": "p", "licence": "Terms.", "check": ["true"], "redistributable": false}}}' \
-           '{'"$e"', "install": {"apt": "x", "data": {"version": "1", '"$u"', "package": "p", "into": "../x", "why": "Tables.", "licence": "Terms.", "check": ["true"], "redistributable": false}}}' \
-           '{'"$e"', "install": {"apt": "x", "data": {"version": "1", '"$u"', "package": "p", "into": "/etc", "why": "Tables.", "licence": "Terms.", "check": ["true"], "redistributable": false}}}' \
-           '{'"$e"', "install": {"apt": "x", "data": {"version": "1", '"$u"', "package": "p", "warm": "vol isfinfo", "why": "Tables.", "licence": "Terms.", "check": ["true"], "redistributable": false}}}' \
-           '{'"$e"', "install": {"apt": "x", "data": {"version": "1", '"$u"', "package": "p", "why": "Tables.", "licence": "Terms.", "redistributable": false}}}' \
-           '{'"$e"', "install": {"apt": "x", "data": {"version": "1", '"$u"', "package": "p", "why": "Tables.", "licence": "Terms.", "check": "true", "redistributable": false}}}' \
-           '{'"$e"', "install": {"apt": "x", "data": {"version": "1", '"$u"', "package": "p", "why": "Tables.", "licence": "Terms.", "check": [], "redistributable": false}}}' \
-           '{'"$e"', "install": {"apt": "x", "data": {"version": "1", '"$u"', "package": "p", "why": "Tables.", "licence": "Terms.", "check": ["true"]}}}' \
-           '{'"$e"', "install": {"apt": "x", "data": {"version": "1", '"$u"', "package": "p", "why": "Tables.", "licence": "Terms.", "check": ["true"], "redistributable": "no"}}}' \
+           '{'"$e"', "install": {"apt": "x", "data": {'"$ud"', "package": "p", "why": "Tables.", "licence": "Terms.", "check": ["true"], "redistributable": false}}}' \
+           '{'"$e"', "install": {"apt": "x", "data": {"version": "1", "url": "http://example.org/t.zip", "sha256": "'"$sha"'", "bytes": 9, "package": "p", "why": "Tables.", "licence": "Terms.", "check": ["true"], "redistributable": false}}}' \
+           '{'"$e"', "install": {"apt": "x", "data": {"version": "1", "url": "https://example.org/t.zip", "sha256": "abc", "bytes": 9, "package": "p", "why": "Tables.", "licence": "Terms.", "check": ["true"], "redistributable": false}}}' \
+           '{'"$e"', "install": {"apt": "x", "data": {"version": "1", '"$ud"', "why": "Tables.", "licence": "Terms.", "check": ["true"], "redistributable": false}}}' \
+           '{'"$e"', "install": {"apt": "x", "data": {"version": "1", '"$ud"', "package": "p", "why": "Tables.", "check": ["true"], "redistributable": false}}}' \
+           '{'"$e"', "install": {"apt": "x", "data": {"version": "1", '"$ud"', "package": "p", "licence": "Terms.", "check": ["true"], "redistributable": false}}}' \
+           '{'"$e"', "install": {"apt": "x", "data": {"version": "1", '"$ud"', "package": "p", "into": "../x", "why": "Tables.", "licence": "Terms.", "check": ["true"], "redistributable": false}}}' \
+           '{'"$e"', "install": {"apt": "x", "data": {"version": "1", '"$ud"', "package": "p", "into": "/etc", "why": "Tables.", "licence": "Terms.", "check": ["true"], "redistributable": false}}}' \
+           '{'"$e"', "install": {"apt": "x", "data": {"version": "1", '"$ud"', "package": "p", "warm": "vol isfinfo", "why": "Tables.", "licence": "Terms.", "check": ["true"], "redistributable": false}}}' \
+           '{'"$e"', "install": {"apt": "x", "data": {"version": "1", '"$ud"', "package": "p", "why": "Tables.", "licence": "Terms.", "redistributable": false}}}' \
+           '{'"$e"', "install": {"apt": "x", "data": {"version": "1", '"$ud"', "package": "p", "why": "Tables.", "licence": "Terms.", "check": "true", "redistributable": false}}}' \
+           '{'"$e"', "install": {"apt": "x", "data": {"version": "1", '"$ud"', "package": "p", "why": "Tables.", "licence": "Terms.", "check": [], "redistributable": false}}}' \
+           '{'"$e"', "install": {"apt": "x", "data": {"version": "1", '"$ud"', "package": "p", "why": "Tables.", "licence": "Terms.", "check": ["true"]}}}' \
+           '{'"$e"', "install": {"apt": "x", "data": {"version": "1", '"$ud"', "package": "p", "why": "Tables.", "licence": "Terms.", "check": ["true"], "redistributable": "no"}}}' \
+           '{'"$e"', "install": {"apt": "x", "data": {"version": "1", '"$u"', "package": "p", "why": "Tables.", "licence": "Terms.", "check": ["true"], "redistributable": false}}}' \
            '{"name": "tool", "why": "Test.", "licence": "MIT", "redistributable": true, "not_in_image": "Only macOS has it."}' \
            '{'"$e"', "not_in_image": ""}'; do
   mk_entry "$TMP/p/bad-kind" "$bad"

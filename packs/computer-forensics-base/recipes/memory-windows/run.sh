@@ -11,6 +11,13 @@
 # windows.info.txt and one file per plugin, each step time-boxed
 # (RECIPE_STEP_SECONDS, default 900) with its stderr kept whole beside it,
 # plus index.tsv and coverage.json.
+#
+# When the image holds no symbol table for the kernel, detect and run say so
+# with a `missing` entry naming the kernel (PDB, GUID, age, as Volatility's
+# automagic asked for it): the census writes it to catalog/missing.json and a
+# kickoff stops on it unless --allow-missing-symbols; a generation's post
+# says it. A probe that does not answer in time says that whether the image
+# holds the table is unknown, the same way: the start does not go on blind.
 set -uo pipefail
 
 have() { command -v "$1" >/dev/null 2>&1; }
@@ -67,12 +74,40 @@ run_step() { # run_step <limit> <outfile> <cmd...>
 
 index_row() { [[ -f "$out/$1" ]] && printf '%s\t%s\n' "$1" "$2" >> "$out/index.tsv"; return 0; }
 
+# kernel_missing <stdout> <stderr> <shown> [timeout seconds]: the `missing`
+# list (JSON) for an image whose kernel table this image lacks, the kernel
+# named from the symbol-server address Volatility asked for offline; with a
+# timeout, that it is unknown whether the image holds it.
+kernel_missing() {
+  python3 - "$@" <<'PY'
+import json, re, sys
+out, err, shown = sys.argv[1:4]
+timeout = sys.argv[4] if len(sys.argv) > 4 else ""
+text = ""
+for f in (err, out):
+    try:
+        text += open(f, encoding="utf-8", errors="replace").read()
+    except OSError:
+        pass
+m = re.search(r"/download/symbols/([A-Za-z0-9_.-]+\.pdb)/([0-9A-Fa-f]{32})([0-9A-Fa-f]{1,8})/", text)
+if timeout:
+    print(json.dumps([{"kind": "symbols", "what": f"vol --offline windows.info did not answer within {timeout}s on {shown}: whether this image holds the symbol table of its kernel is unknown, so what reads it may find nothing (raise RECIPE_PROBE_SECONDS, or SWARM_CATALOG_MEMORY_PROBE_TIMEOUT)"}]))
+elif m:
+    pdb, guid, age = m.group(1), m.group(2).upper(), int(m.group(3), 16)
+    print(json.dumps([{"kind": "symbols", "identity": {"pdb": pdb, "guid": guid, "age": age},
+                       "what": f"the symbol table of the Windows kernel {pdb} {guid} age {age}, which {shown} runs: this image does not hold it, so its Windows plugins cannot read it offline (what needs no kernel table still works: strings, YARA, carving)"}]))
+else:
+    print(json.dumps([{"kind": "symbols", "what": f"the symbol table of the Windows kernel {shown} runs: this image does not hold it, and the kernel's identity was not named"}]))
+PY
+}
+
 coverage() {
-  python3 - "$out/coverage.json" "$1" "$2" "${notes[@]+"${notes[@]}"}" <<'PY'
+  python3 - "$out/coverage.json" "$1" "$2" "${missing_json:-[]}" "${notes[@]+"${notes[@]}"}" <<'PY'
 import json, sys
-path, status, covered, *notes = sys.argv[1:]
+path, status, covered, missing, *notes = sys.argv[1:]
 json.dump({"recipe": "memory-windows", "status": status, "covered": covered,
            "not_covered": "every other Volatility plugin; YARA without supplied rules; non-Windows images; unsupported hibernation or crash-dump variants",
+           "missing": json.loads(missing),
            "limits_hit": [note for note in notes if "exit 142" in note],
            "errors": notes}, open(path, "w"), indent=2)
 PY
@@ -110,16 +145,24 @@ case "$cmd" in
     # Volatility can identify and stack a Windows layer before discovering
     # that the exact offline symbol table is absent. That is applicable-but-
     # blocked, not "not Windows"; keep both probe files for diagnosis.
-    if [[ -f "$probe.stderr" ]] && grep -qi "DTB was found" "$probe.stderr" && \
-       grep -qi "symbol_table_name" "$probe" "$probe.stderr" 2>/dev/null; then
+    if { [[ -f "$probe.stderr" ]] && grep -qi "DTB was found" "$probe.stderr" && grep -qi "symbol_table_name" "$probe" "$probe.stderr" 2>/dev/null; } || \
+       grep -qs '/download/symbols/.*\.pdb/' "$probe.stderr"; then
+      miss="$(kernel_missing "$probe" "$probe.stderr" "$shown")"
       [[ -n "$probe_out" ]] || rm -f "$probe" "$probe.stderr"
-      echo '{"applies": true, "why": "Volatility recognized Windows memory, but the matching offline symbol table is absent; run will fail until the image supplies it"}'; exit 0
+      python3 -c 'import json, sys; print(json.dumps({"applies": True, "why": "Volatility recognized Windows memory, but the matching offline symbol table is absent; run will fail until the image supplies it", "missing": json.loads(sys.argv[1])}))' "$miss"
+      exit 0
+    fi
+    if [[ "$rc" -eq 142 ]]; then
+      # Not a pass: whether the image holds the kernel's table is unknown,
+      # and the start says so rather than going on blind.
+      miss="$(kernel_missing "$probe" "$probe.stderr" "$shown" "$PROBE_TIMEOUT")"
+      [[ -s "$probe" ]] || rm -f "$probe"
+      [[ -n "$probe_out" ]] || rm -f "$probe" "$probe.stderr"
+      python3 -c 'import json, sys; print(json.dumps({"applies": False, "why": "offered to Volatility as memory; windows.info did not answer within %ss" % sys.argv[2], "missing": json.loads(sys.argv[1])}))' "$miss" "$PROBE_TIMEOUT"
+      exit 1
     fi
     [[ -s "$probe" ]] || rm -f "$probe"
     [[ -n "$probe_out" ]] || rm -f "$probe" "$probe.stderr"
-    if [[ "$rc" -eq 142 ]]; then
-      echo "{\"applies\": false, \"why\": \"offered to Volatility as memory; windows.info did not answer within ${PROBE_TIMEOUT}s\"}"; exit 1
-    fi
     echo '{"applies": false, "why": "offered to Volatility as memory; windows.info named no Windows memory image"}'; exit 1
     ;;
   run)
@@ -135,6 +178,8 @@ case "$cmd" in
     if { [[ "$r" != ok ]] || ! grep -qi "NTBuildLab\|Kernel Base\|SystemTime" "$out/windows.info.txt" 2>/dev/null; } \
        && grep -qi "symbol" "$out/windows.info.txt" "$out/windows.info.txt.stderr" 2>/dev/null; then
       for f in windows.info.txt windows.info.txt.stderr; do [[ -f "$out/$f" ]] && mv "$out/$f" "$out/offline.$f"; done
+      # The image lacks the table: said in coverage (missing), whatever the symbol server answers.
+      missing_json="$(kernel_missing "$out/offline.windows.info.txt" "$out/offline.windows.info.txt.stderr" "$shown")"
       index_row "offline.windows.info.txt" "vol --offline windows.info: no symbol table for this kernel in the image"
       index_row "offline.windows.info.txt.stderr" "what vol --offline windows.info said on stderr"
       r="$(run_step "$STEP_TIMEOUT" "$out/windows.info.txt" vol -q -f "$img" windows.info)"
