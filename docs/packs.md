@@ -127,6 +127,22 @@ directory named for the pack id is refused.
 `depends` is resolved at install. A pack whose dependency is missing is refused,
 named, with the version it wanted.
 
+### Versions
+
+A change to a pack's files or to its manifest raises its version, the patch at
+least: two different packs never carry one number. The kickoff tells an
+installed pack from the one a checkout ships by version alone (it warns when
+the installed one is older), so a second, different 1.3.5 would run its old
+skills without a word. CI's `pack-versions` job holds the rule: every pack whose
+manifest, its version aside, differs from the base's (the checksums cover every
+file) must carry a version above the base's
+(`python3 scripts/pack-versions.py --base <base>`). Two branches that each
+raise one pack to the same number can still merge without a conflict;
+`scripts/merge-prep.sh`, run when a branch is brought up to date with main,
+raises the later one's patch (CONTRIBUTING.md, "Bringing a branch up to date
+with main"). A version quoted in prose, in a changelog fragment or a skill,
+does not follow such a raise: name the pack, not its number.
+
 ---
 
 ## 4. Secrets
