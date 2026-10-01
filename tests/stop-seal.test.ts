@@ -14,11 +14,14 @@
  *   staging directory and why), custody names it with that why, and
  *   `vm.ts seal-left` seals it after the run once msb says it is gone;
  * - a job the hub left running is sealed as stopped; a staging directory no
- *   job owns is named and left as it is; nothing is sealed while a hub runs.
+ *   job owns is named and left as it is; nothing is sealed while a hub runs,
+ *   found by hub.pid or, when a stop that gave up on it dropped that, by its
+ *   own command line.
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { JobService, sealLeftStaging, type JobServiceOptions } from "../scripts/job-service.ts";
@@ -179,4 +182,30 @@ test("a job the hub left running is sealed as stopped once its worker is gone; a
   assert.equal(committed.status, "stopped");
   assert.equal(committed.reason, "the run was stopped while it ran");
   assert.equal(readFileSync(join(storePaths(S).jobs, r.job.id, "out", "half"), "utf8"), "written before the hub went");
+});
+
+test("seal-left finds a hub still up by its command line when hub.pid is gone, and seals nothing beside it", async () => {
+  const S = sandbox();
+  const { svc } = service(S, { runWorker: localWorker([], { fenced: () => false }), destroyWorker: async () => ({ ok: false, error: "msb could not say" }), stopFence: { tries: 1, waitMs: 0 } });
+  await svc.start();
+  const r = await svc.submit("a1", { kind: "command", command: "printf p > \"$OUT/p\"", inputs: [] });
+  assert.ok(r.ok);
+  await until(svc, r.job.id, ["finished"]);
+  await svc.stop("the run is stopping");
+  const D = mkdtempSync(join(tmpdir(), "dfs-hubdir-"));
+  writeFileSync(join(D, "sandbox"), `${realpathSync(S)}\n`);
+  // A kickoff's hub, then a keeper's: no hub.pid either time.
+  for (const args of [["vm-hub.ts", S, "--dir", D], ["vm-hub.ts", "--resume", D]]) {
+    const hub = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)", ...args], { stdio: "ignore" });
+    try {
+      await new Promise((res) => setTimeout(res, 300));
+      await assert.rejects(sealLeftStaging(S, async () => ({ ok: true })), new RegExp(`hub \\(pid ${hub.pid}\\) is still up.*run swarm.sh stop for this run again`));
+      assert.ok(staged(S, `${r.job.id}-1`), "left as it is beside a live hub");
+    } finally {
+      hub.kill("SIGKILL");
+      await new Promise((res) => hub.on("exit", res));
+    }
+  }
+  const out = await sealLeftStaging(S, async () => ({ ok: true }));
+  assert.deepEqual(out.sealed.map((x) => x.staging), [`${r.job.id}-1`], "sealed once the hub has gone");
 });

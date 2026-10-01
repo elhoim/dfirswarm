@@ -48,7 +48,9 @@
  * mode chains them, the collector's own way, with no daemon: refused while
  * a collector answers on the socket, each line checked as a live one would
  * be, written unverified (no token travelled with it) and marked `gathered`
- * with the spill it came from and its own sha256. The spilled lines
+ * with the spill it came from and its own sha256. Only the harness's own
+ * lines (`agent: "system"`): a line in a spill that names a seat is that
+ * seat's word and stays in the spill, counted as foreign. The spilled lines
  * themselves are kept whole beside it (traces/<name>.gathered.jsonl); a
  * line that is not an event stays in the spill, where custody counts it.
  * One JSON line on stdout says what was done.
@@ -695,12 +697,12 @@ async function gather() {
         // the chain's own check names a line that does not parse
       }
     }
-    const report = { ok: true, gathered: 0, duplicates: 0, already: 0, kept: 0, files: [] };
+    const report = { ok: true, gathered: 0, duplicates: 0, already: 0, kept: 0, foreign: 0, files: [] };
     for (const rel of GATHERED_SPILLS) {
       const spill = join(sandbox, rel);
       const pending = `${spill}.gathering`;
       const keptAs = spill.replace(/\.jsonl$/, ".gathered.jsonl");
-      const file = { path: rel, gathered: 0, duplicates: 0, already: 0, kept: 0, kept_as: relative(sandbox, keptAs) };
+      const file = { path: rel, gathered: 0, duplicates: 0, already: 0, kept: 0, foreign: 0, kept_as: relative(sandbox, keptAs) };
       // A spill that is a link or anything but a regular file is not read: named, left where it is.
       const regular = (p) => {
         try {
@@ -713,12 +715,19 @@ async function gather() {
         report.files.push({ ...file, refused: "not a regular file" });
         continue;
       }
-      // An interrupted gather's batch first, then whatever was spilled since.
+      // An interrupted gather's batch first, then whatever was spilled since
+      // (this stop's own line among it). What stays in the spill is counted
+      // as the last round found it: a line put back and read again is one line.
+      let putBack = 0;
       for (let round = 0; round < 2; round += 1) {
         if (!existsSync(pending)) {
           if (!regular(spill)) break;
+          // Nothing new since the lines the last round put back: done.
+          if (round > 0 && readFileSync(spill, "utf8").split("\n").filter((l) => l.trim()).length <= putBack) break;
           renameSync(spill, pending);
         }
+        file.kept = 0;
+        file.foreign = 0;
         const kept = [];
         const moved = [];
         for (const raw of readFileSync(pending, "utf8").split("\n")) {
@@ -733,6 +742,14 @@ async function gather() {
           if (!record || typeof record !== "object" || Array.isArray(record) || typeof record.tool !== "string" || typeof record.ts !== "string" || Buffer.byteLength(raw) > MAX_LINE_BYTES) {
             kept.push(raw);
             file.kept += 1;
+            continue;
+          }
+          // The harness's own lines only: these files are its spills, and a
+          // line in one naming a seat is that seat's word, never chained as it.
+          if (record.agent !== "system") {
+            kept.push(raw);
+            file.kept += 1;
+            file.foreign += 1;
             continue;
           }
           moved.push(raw);
@@ -767,13 +784,14 @@ async function gather() {
         if (fresh.length) appendFileSync(keptAs, `${fresh.join("\n")}\n`, { mode: 0o600 });
         if (kept.length) appendFileSync(spill, `${kept.join("\n")}\n`, { mode: 0o600 });
         unlinkSync(pending);
-        if (round === 0 && kept.length) break;
+        putBack = kept.length;
       }
       if (file.gathered || file.duplicates || file.already || file.kept) report.files.push(file);
       report.gathered += file.gathered;
       report.duplicates += file.duplicates;
       report.already += file.already;
       report.kept += file.kept;
+      report.foreign += file.foreign;
     }
     process.stdout.write(`${JSON.stringify(report)}\n`);
     return 0;

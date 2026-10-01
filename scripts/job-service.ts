@@ -36,7 +36,7 @@ import { createHash } from "node:crypto";
 import { constants, existsSync, lstatSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import { chmod, copyFile, link, lstat, mkdir, open, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { hubAlive, Journal, maybeCrash, publishGeneration, publishRevision, readManifest, resealMoved, sealTree, sha256File, sha256Hex, storePaths, traceLineBytes, traceOrigin, type JournalLine, type Manifest, type TraceOrigin } from "./evidence-store.ts";
+import { hubAlive, hubProcessFor, Journal, maybeCrash, publishGeneration, publishRevision, readManifest, resealMoved, sealTree, sha256File, sha256Hex, storePaths, traceLineBytes, traceOrigin, type JournalLine, type Manifest, type TraceOrigin } from "./evidence-store.ts";
 import { chooseImage, readImageRecords, type ImageChoice, type ImageRecord } from "./image-choice.ts";
 import { buildView, declaredScope, dropProjected, freeMb, PROJECTED_DIR, resolveScope, ScopeError, scopeKindOf, scopeManifestText, VIEW_DIR, type ScopeKind, type ScopeObject, type ViewEntry } from "./job-scope.ts";
 import { CANARY_NAME, OBSERVE_GUEST, observedRun, observeWanted, readObservation } from "./job-observe.ts";
@@ -2558,8 +2558,10 @@ export class JobService {
    * running: the hub is the store's writer while it runs.
    */
   async sealLeft(): Promise<{ sealed: Array<{ staging: string; job: string; status: string }>; left: Array<{ staging: string; why: string }> }> {
-    const hub = hubAlive(this.S);
-    if (hub) throw new Error(`the run's hub (pid ${hub}) is the store's writer while it runs: a stop seals what it left once it has gone`);
+    // The hub is the store's writer while it lives: by hub.pid, and by its
+    // command line when hub.pid is gone (a stop that gave up waiting for it).
+    const hub = hubAlive(this.S) ?? hubProcessFor(this.S);
+    if (hub) throw new Error(`the run's hub (pid ${hub}) is still up, and it is the store's writer while it runs: nothing is sealed beside it. Once it has gone (or after \`kill ${hub}\` if it hangs), run swarm.sh stop for this run again: it seals what is left`);
     this.stopping = true;
     this.afterRun = true;
     this.journal = await Journal.open(this.S);

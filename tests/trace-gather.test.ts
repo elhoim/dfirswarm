@@ -10,7 +10,8 @@
  * - chains each spilled event, unverified and marked `gathered` with its
  *   spill and its own sha256, the anchor moving with the chain;
  * - keeps the spilled lines whole beside the trace (<name>.gathered.jsonl),
- *   leaves a line that is not an event in the spill, and does not chain twice
+ *   leaves a line that is not an event in the spill, and one that names a seat
+ *   (a seat's word, never the harness's), and does not chain twice
  *   a hub line the collector had already taken;
  * - is safe to run again, and refuses while a collector answers;
  * - leaves custody with nothing outside the chain but the line that is not
@@ -108,7 +109,9 @@ test("the harness's spilled lines are chained once the collector is down, kept w
   // the hub's spill holds the line the collector took after its sender gave up, and one it never took.
   const reapAt = new Date(stopAt.getTime() + 57_000);
   const stop2At = new Date(stopAt.getTime() + 66_000);
-  const spilled = [JSON.stringify(op("reap", ["sgth1", "--stop"], reapAt)), JSON.stringify(op("stop", ["sgth1"], stop2At)), "{not an event"];
+  // A seat's line in the harness's spill (a host pane's shell can append there): not chained as the seat's.
+  const seatLine = JSON.stringify({ ts: reapAt.toISOString(), agent: "sgth100", tool: "bash", args: { command: "true" }, result: { ok: true }, sid: "p-1", seq: 3 });
+  const spilled = [JSON.stringify(op("reap", ["sgth1", "--stop"], reapAt)), JSON.stringify(op("stop", ["sgth1"], stop2At)), "{not an event", seatLine];
   await writeFile(join(S, "traces", "system-spill.jsonl"), `${spilled.join("\n")}\n`);
   const hubDup = JSON.stringify({ ts: new Date().toISOString(), agent: "system", tool: "hub_link", args: { agent: "a0" }, result: { up: false }, sid: "hub-1", seq: 7 });
   const hubNew = JSON.stringify({ ts: new Date().toISOString(), agent: "system", tool: "hub_link", args: { agent: "a1" }, result: { up: false }, sid: "hub-1", seq: 8 });
@@ -122,7 +125,7 @@ test("the harness's spilled lines are chained once the collector is down, kept w
 
   const g = gather(S);
   assert.equal(g.code, 0, JSON.stringify(g.out));
-  assert.deepEqual([g.out.gathered, g.out.duplicates, g.out.kept], [3, 1, 1]);
+  assert.deepEqual([g.out.gathered, g.out.duplicates, g.out.kept, g.out.foreign], [3, 1, 2, 1]);
   const all = lines(S);
   assert.equal(all.length, before + 3);
   const check = verifyEventChain(`${all.join("\n")}\n`, anchor(S));
@@ -140,14 +143,16 @@ test("the harness's spilled lines are chained once the collector is down, kept w
   // Nothing cut: the spilled lines whole beside the trace; the line that is no event stays in the spill.
   assert.equal(readFileSync(join(S, "traces", "system-spill.gathered.jsonl"), "utf8"), `${spilled[0]}\n${spilled[1]}\n`);
   assert.equal(readFileSync(join(S, "traces", "hub-spill.gathered.jsonl"), "utf8"), `${hubDup}\n${hubNew}\n`);
-  assert.equal(readFileSync(join(S, "traces", "system-spill.jsonl"), "utf8"), "{not an event\n");
+  assert.equal(readFileSync(join(S, "traces", "system-spill.jsonl"), "utf8"), `{not an event\n${seatLine}\n`);
+  assert.ok(!lines(S).some((l) => (JSON.parse(l) as { agent?: string }).agent === "sgth100"), "no line chained as the seat's");
   assert.ok(!existsSync(join(S, "traces", "hub-spill.jsonl")));
   assert.ok(!existsSync(join(S, "traces", "system-spill.jsonl.gathering")));
 
   // Again: nothing new is chained.
   const again = gather(S);
   assert.equal(again.code, 0);
-  assert.deepEqual([again.out.gathered, again.out.kept], [0, 1]);
+  assert.deepEqual([again.out.gathered, again.out.kept], [0, 2]);
+  assert.equal(readFileSync(join(S, "traces", "system-spill.jsonl"), "utf8"), `{not an event\n${seatLine}\n`, "what stays is put back once, not twice");
   assert.equal(lines(S).length, all.length);
   // The hub's spill copied in again (the hub copies its whole spill at its finish): nothing chained twice, nothing kept twice.
   await writeFile(join(S, "traces", "hub-spill.jsonl"), `${hubDup}\n${hubNew}\n`);
@@ -159,12 +164,21 @@ test("the harness's spilled lines are chained once the collector is down, kept w
   // Custody: one line outside the chain (the one that is no event), the gathered counted, every operator line on the audit.
   const c = await takeCustody(S, { runsDir: runs });
   assert.equal(c.trace.intact, true, c.trace.detail);
-  assert.deepEqual(c.trace.spilled.map((s) => [s.path, s.lines]), [["traces/system-spill.jsonl", 1]]);
+  assert.deepEqual(c.trace.spilled.map((s) => [s.path, s.lines]), [["traces/system-spill.jsonl", 2]]);
   assert.equal(c.trace.gathered, 3);
   assert.deepEqual(c.trace.clock, [], "a gathered line's recv_ts is when it was chained, not a clock off the host's");
   assert.equal(c.operator?.trace_actions, 2);
   assert.deepEqual(c.operator?.unmatched, [], "each gathered operator line is held to the audit by when the command ran");
   assert.match(c.summary, /3 lines the harness spilled while the collector was down chained by the stop/);
+
+  // An interrupted gather's batch (a line that is no event in it) and a line spilled since: both read in one gather.
+  await writeFile(join(S, "traces", "system-spill.jsonl.gathering"), "{still not an event\n");
+  const later = JSON.stringify(op("say", ["sgth1", "hello"], new Date(stop2At.getTime() + 1000)));
+  await writeFile(join(S, "traces", "system-spill.jsonl"), `${later}\n`, { flag: "a" });
+  const both = gather(S);
+  assert.deepEqual([both.out.gathered, both.out.kept], [1, 3]);
+  assert.equal(readFileSync(join(S, "traces", "system-spill.jsonl"), "utf8").split("\n").filter(Boolean).length, 3);
+  assert.equal((JSON.parse(lines(S).at(-1)!) as { args: { command: string } }).args.command, "say");
 
   // While a collector answers, the gather leaves the lines to it.
   await writeFile(join(S, "traces", "system-spill.jsonl"), `${spilled[0]}\n`, { flag: "a" });

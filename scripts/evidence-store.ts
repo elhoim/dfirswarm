@@ -22,8 +22,9 @@
  *   node scripts/evidence-store.ts note <sandbox> --by NAME --text TEXT [--job ID]...
  *                                                      an examiner's note on the record, after the run
  */
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { createReadStream, existsSync, readFileSync } from "node:fs";
+import { createReadStream, existsSync, readFileSync, realpathSync } from "node:fs";
 import { chmod, copyFile, link, lstat, mkdir, open, readdir, readFile, readlink, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { createInterface } from "node:readline";
@@ -1449,6 +1450,47 @@ export function hubAlive(sandbox: string): number | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * A live hub process for this run, by its command line rather than by
+ * hub.pid: `vm-hub.ts <sandbox> --dir DIR` (a kickoff's) or `vm-hub.ts
+ * --resume DIR` (its keeper's), DIR's `sandbox` file naming this run. A
+ * stop that gave up waiting for its hub used to drop hub.pid and the hub's
+ * directory, and a second stop then took the store for its own while that
+ * hub might still write it. The pid, or null when none is found (or ps
+ * cannot say: then hub.pid is all there is to go by).
+ */
+export function hubProcessFor(sandbox: string): number | null {
+  const S = resolve(sandbox);
+  let real = S;
+  try {
+    real = realpathSync(S);
+  } catch {
+    // a sandbox that is gone has no hub to find by its path
+  }
+  let out = "";
+  try {
+    out = execFileSync("ps", ["-e", "-ww", "-o", "pid=,args="], { encoding: "utf8", timeout: 15_000, maxBuffer: 64 * 1024 * 1024 });
+  } catch {
+    return null;
+  }
+  const names = (dir: string): boolean => {
+    try {
+      const named = readFileSync(join(dir, "sandbox"), "utf8").trim();
+      return named === real || named === S;
+    } catch {
+      return false;
+    }
+  };
+  for (const line of out.split("\n")) {
+    const m = /^\s*(\d+)\s+(.*)$/.exec(line);
+    if (!m || Number(m[1]) === process.pid || !/vm-hub\.ts\b/.test(m[2]!)) continue;
+    const args = m[2]!;
+    const dir = /--(?:dir|resume) (\S+)/.exec(args)?.[1];
+    if (args.includes(` ${S} `) || args.includes(` ${real} `) || args.endsWith(` ${S}`) || args.endsWith(` ${real}`) || (dir && names(dir))) return Number(m[1]);
+  }
+  return null;
 }
 
 /**
