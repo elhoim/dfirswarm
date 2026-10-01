@@ -13,6 +13,10 @@
  * runs it, so CI does. `--release` also turns `[Unreleased]` into the version's
  * section, opens an empty `[Unreleased]` above it and updates the links at the
  * end of the file. Nothing is committed: the owner reads `git diff` and commits.
+ *
+ * The landing order needs git 2.31 or later, where `--first-parent` also diffs
+ * a merge against its first parent; an older git would take a fragment that
+ * arrived in a merge for one not committed yet and put it first.
  */
 import { execFileSync } from "node:child_process";
 import { readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -28,7 +32,7 @@ export function checkFragment(text: string): string[] {
   const lines = text.split("\n");
   const first = lines.find((l) => l.trim() !== "");
   if (first === undefined) return ["it is empty"];
-  if (!/^### \S/.test(first)) problems.push("it does not start with a `### ` heading (`### Added: …`, `### Changed: …`, `### Fixed: …`)");
+  if (!/^### \S/.test(first)) problems.push("it does not start with a `### ` heading (`### Added: …`, `### Fixed: …`, the kinds CHANGELOG.md uses)");
   let fenced = false;
   for (const l of lines) {
     if (/^\s*(```|~~~)/.test(l)) fenced = !fenced;
@@ -113,7 +117,10 @@ function main(argv: string[]): number {
     return argv[i + 1];
   };
   const version = opt("--release");
-  const release = version ? { version, date: opt("--date") ?? new Date().toISOString().slice(0, 10) } : undefined;
+  // The local date: a release cut in the evening east of UTC is not dated tomorrow.
+  const now = new Date();
+  const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+  const release = version ? { version, date: opt("--date") ?? today } : undefined;
   if (!files.length && !release) {
     console.log("changelog: no fragments under changelog.d/; nothing to fold");
     return 0;

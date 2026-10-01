@@ -1326,7 +1326,7 @@ and the diff of `tests/fixtures/kickoff/` is the change, as the agents will read
 
 `node --experimental-strip-types scripts/rules.ts --write` regenerates [the rule register](rules.md): every coded rule of the ledger with the functions that raise it, the design that states it, and the tests and fixtures that exercise it. `--check` says whether the committed file is current and names any rule without a test or fixture, a design section or a place it is raised; `tests/rules-register.test.ts` holds both. A change to a rule changes that file, so it shows in the diff.
 
-`bash scripts/merge-prep.sh` writes the register and the kickoff goldens again, and seals every pack that differs from main, when a branch is brought up to date with main; it resolves a conflict in any of them rather than leaving it to be edited (CONTRIBUTING.md, "Bringing a branch up to date with main").
+`bash scripts/merge-prep.sh` writes the register and the kickoff goldens again, and seals every pack that differs from main, when a branch is brought up to date with main; it resolves a conflict in any of them rather than leaving it to be edited, and stages what it wrote (CONTRIBUTING.md, "Bringing a branch up to date with main").
 
 
 ### `npm` scripts

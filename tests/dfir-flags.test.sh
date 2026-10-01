@@ -504,7 +504,7 @@ pass "inputs.json records whether the quarantine held, and a goal check can read
 if [[ -f "$sb/.fsguard/plan.txt" ]] && ! grep -q '^mode: none' "$sb/.fsguard/plan.txt"; then
   grep -q "^no-exec: $sb/work/extracted\$" "$sb/.fsguard/plan.txt" || fail "the guard plan should list work/extracted as no-exec: $(cat "$sb/.fsguard/plan.txt")"
   grep -q "^no-exec: $sb/work/quarantine\$" "$sb/.fsguard/plan.txt" || fail "the guard plan should list work/quarantine as no-exec"
-  grep -q -- "--noexec $sb/work/extracted" "$sb/.zsh/.zshenv" || fail "the pane hook does not pass --noexec"
+  grep -qF -- "--noexec $(printf '%q' "$sb/work/extracted")" "$sb/.zsh/.zshenv" || fail "the pane hook does not pass --noexec"
   pass "with a kernel guard both quarantine directories are no-exec in the plan and the pane hook"
 else
   echo "skip - kernel no-exec plan (no guard on this host)"
@@ -622,7 +622,7 @@ out="$(start --model solo/model --n 1 --cap-usd 1 --no-start --goal-file "$ROOT/
 sb="$(sandbox_of "$out")"
 [[ -f "$sb/.zsh/.zshrc" ]] || fail "the sandbox should carry a stand-in .zshrc for the pane"
 grep -q 'if \[\[ -f "\$HOME/.zshrc" \]\]' "$sb/.zsh/.zshenv" || fail "the hook should hand ZDOTDIR back to the home only when it has a .zshrc"
-grep -q "export ZDOTDIR=$sb/.zsh" "$sb/.zsh/.zshenv" || fail "the hook should otherwise keep the sandbox's .zsh"
+grep -qF "export ZDOTDIR=$(printf '%q' "$sb/.zsh")" "$sb/.zsh/.zshenv" || fail "the hook should otherwise keep the sandbox's .zsh"
 pass "the pane hook keeps zsh's new-user wizard out of a pane whose home has no .zshrc"
 
 echo "dfir-flags.test.sh: all checks passed"

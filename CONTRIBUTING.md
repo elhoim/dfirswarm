@@ -100,8 +100,10 @@ A pull request writes its entry to `changelog.d/<branch-slug>.md`, the branch
 name with `/` as `-` (`claude/merge-hygiene` → `claude-merge-hygiene.md`),
 never to `CHANGELOG.md`: each branch adds a file of its own, so two branches
 do not conflict at the top of one section. The fragment is one or more
-`### Added: …`, `### Changed: …` or `### Fixed: …` sections, written as the
-entries in `CHANGELOG.md` are; `tests/changelog.test.ts` checks its shape.
+sections under a `### <Kind>: …` heading, the kinds `CHANGELOG.md` uses
+(Added, Changed, Fixed, Security, …), written as its entries are;
+`tests/changelog.test.ts` checks its shape. Name a pack, not its version: a
+version can still be raised when the branch is brought up to date.
 When the owner cuts a release,
 `node --experimental-strip-types scripts/changelog.ts --fold --release X.Y.Z`
 folds every fragment into `[Unreleased]`, newest first (by when each landed),
@@ -119,8 +121,11 @@ behind again is fixed by running it again:
 ```sh
 git fetch origin && git merge origin/main   # stop at the conflicts, if any
 bash scripts/merge-prep.sh                  # --base REF if not origin/main
-git diff                                    # read what it wrote, then commit
+git diff --cached                           # read what is staged, then commit
 ```
+
+In a rebase, run it at each commit that stops on a conflict and once more
+when the rebase has finished.
 
 `scripts/merge-prep.sh` resolves a conflict in a generated file rather than
 asking for it to be edited: a pack's `pack.json` key by key (what the seal
@@ -129,11 +134,15 @@ changed stops it, named), a pack's `skills/INDEX.md`, the goldens and the
 rule register by writing them again. It seals every pack whose files differ
 from main's; a pack that differs from main's while its version is not above
 main's gets main's version with the patch raised, so two different packs
-never carry one version. It writes the kickoff goldens and the rule register
-again, checks the changelog fragments and shows what is staged and what it
-wrote. Any other conflict stops it before it writes anything. It commits
-nothing. CI's own checks stay: `tests/packs.test.sh` verifies every shipped
-pack, `tests/kickoff-goldens.test.sh` compares the goldens and
+never carry one version (`docs/packs.md`, "Versions"). It writes the kickoff
+goldens and the rule register again and checks the changelog fragments. It
+stages everything it wrote, so the commit that ends the merge carries it, and
+lists what is staged and what is not. Any other conflict, or a `pack.json` key
+it cannot merge, stops it before it writes anything. It commits nothing. CI's
+own checks stay: `tests/packs.test.sh` verifies every shipped pack, the
+`pack-versions` job compares a pull request's packs with its base (a clean
+merge can land two packs under one version, so this one catches what nobody
+ran merge-prep for), `tests/kickoff-goldens.test.sh` compares the goldens and
 `tests/rules-register.test.ts` the register.
 
 ## Licence and the name
