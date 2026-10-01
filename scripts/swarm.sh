@@ -393,10 +393,11 @@ Evidence
                       image lacks what it needs to read an input, a memory
                       image's kernel symbol table above all (catalog/missing.json,
                       the census's detect). Without it that is a BLOCKER, at the
-                      start and at start --check: Volatility's Windows plugins
+                      start and at start --check: the program that reads it
                       cannot read the image offline. With it the run goes on with
                       what needs no kernel table (strings, YARA, carving), and the
-                      catalogue says what is missing.
+                      catalogue says what is missing. The verdict names the image
+                      the census ran in.
   --toolbox SETS      Which tools to check for and record in toolbox.json and
                       SWARM.md: dfir, crypto, linux, comma-separated. auto picks
                       dfir when --catalog is on; off checks nothing.
@@ -4787,7 +4788,8 @@ console.log(r.ok ? "" : r.reason);' "$_gp" "$_gk" 2>/dev/null || echo "could not
         [[ -n "$vm_memory" ]] && cargs+=(--memory "$vm_memory")
         if vm_cli catalog --image "$cimg" --sandbox "$ctmp" --cpus "$vm_cpus" --run check --plan-only "${cargs[@]}" >/dev/null 2>&1; then
           if [[ -s "$ctmp/catalog/missing.json" ]]; then
-            catalog_missing_verdict "$ctmp/catalog/missing.json" "$allow_missing_symbols" || { rm -rf "$ctmp"; exit 2; }
+            catalog_missing_verdict "$ctmp/catalog/missing.json" "$allow_missing_symbols" "$cimg" \
+              "$(jq -c --argjson img "$job_images_json" 'with_entries(.value = ($img[.value] // empty))' <<<"$pack_profiles_json" 2>/dev/null || echo '{}')" || { rm -rf "$ctmp"; exit 2; }
           else
             echo "Census:       the recipes' detect found nothing $cimg lacks to read the inputs (a throwaway VM; nothing kept)"
           fi
@@ -5046,7 +5048,9 @@ console.log(r.ok ? "" : r.reason);' "$_gp" "$_gk" 2>/dev/null || echo "could not
   # What the census said the image lacks to read an input (a kernel's symbol
   # table): a BLOCKER unless the operator lets the run go on without it.
   if [[ "$catalog" -eq 1 && -z "$resume_of" && -s "$sandbox/catalog/missing.json" ]]; then
-    catalog_missing_verdict "$sandbox/catalog/missing.json" "$allow_missing_symbols" || exit 2
+    local pack_imgs='{}'
+    [[ "$isolation" == "microvm" ]] && pack_imgs="$(jq -c --argjson img "$job_images_json" 'with_entries(.value = ($img[.value] // empty))' <<<"$pack_profiles_json" 2>/dev/null || echo '{}')"
+    catalog_missing_verdict "$sandbox/catalog/missing.json" "$allow_missing_symbols" "${catalog_image:-}" "$pack_imgs" || exit 2
   fi
   if [[ "$isolation" == "microvm" && "$jobs" -eq 1 && "$start_agents" -eq 1 && ! ( -n "$resume_of" && -f "$sandbox/store/journal.jsonl" ) ]]; then
     # The evidence-work store and its journal, opened by the kickoff (the one
@@ -7356,11 +7360,19 @@ vm_cli() {
 # What the census said the run's images lack to read an input
 # (catalog/missing.json: each line a recipe's own words, the harness knows no
 # format). A missing symbol table is a BLOCKER: a memory image whose kernel the
-# image has no table for cannot be read by Volatility's Windows plugins
-# offline, and a run that finds that out in its first job has started blind.
+# image has no table for cannot be read by the program that needs it offline,
+# and a run that finds that out in its first job has started blind.
 # --allow-missing-symbols goes on, said; any other kind is said as a WARN.
-catalog_missing_verdict() { # <missing.json> <allow 0|1>
-  local file="$1" allow="$2" n
+# The verdict is about the image the census ran in, which it names; when a
+# pack whose recipe reported it runs its jobs in another image, that is said.
+catalog_missing_verdict() { # <missing.json> <allow 0|1> [census image] [{pack id: job image} JSON]
+  local file="$1" allow="$2" cimage="${3:-}" packimgs="${4:-}" n line
+  [[ -n "$packimgs" ]] || packimgs='{}'
+  if [[ -n "$cimage" ]]; then
+    while IFS= read -r line; do
+      [[ -n "$line" ]] && echo "WARN: $line" >&2
+    done < <(jq -r --arg c "$cimage" --argjson m "$packimgs" '[.missing[]? | (.recipe | split("/")[0]) as $p | select(($m[$p] // $c) != $c) | "\(.input): the census read it in \($c); pack \($p)'"'"'s jobs run in \($m[$p]), so what it said holds for \($c)"] | unique[]' "$file" 2>/dev/null)
+  fi
   jq -r '.missing[]? | select(.kind != "symbols") | "WARN: \(.input): \(.what) (\(.recipe))"' "$file" >&2 2>/dev/null || true
   n="$(jq '[.missing[]? | select(.kind == "symbols")] | length' "$file" 2>/dev/null || echo 0)"
   [[ "$n" -gt 0 ]] || return 0
@@ -7368,10 +7380,11 @@ catalog_missing_verdict() { # <missing.json> <allow 0|1>
     jq -r '.missing[] | select(.kind == "symbols") | "WARN: \(.input): \(.what) (\(.recipe)). Going on without it (--allow-missing-symbols): catalog/missing.json says so to every seat."' "$file" >&2
     return 0
   fi
-  jq -r '.missing[] | select(.kind == "symbols") | "BLOCKER: \(.input): \(.what) (\(.recipe))."' "$file" >&2
+  jq -r --arg c "$cimage" '.missing[] | select(.kind == "symbols") | "BLOCKER: \(.input): \(.what) (\(.recipe)\(if $c != "" then ", in " + $c else "" end))."' "$file" >&2
   {
-    echo "  Give the image the table: list the kernel in its pack's curated symbol list, fetch its file (scripts/swarm.sh symbols fetch),"
-    echo "  and rebuild the image (images/README.md, \"Symbol tables\"); or start with --allow-missing-symbols to go on with what needs no kernel table."
+    echo "  Give the image the table: list the kernel in its pack's curated symbol list, fetch its file accepting its terms"
+    echo "  (scripts/swarm.sh symbols fetch --accept-terms --accepted-by NAME), and rebuild the image (images/README.md, \"Symbol tables\");"
+    echo "  or start with --allow-missing-symbols to go on with what needs no kernel table."
   } >&2
   return 1
 }
@@ -11276,18 +11289,24 @@ A question's attachment given as a file (question add --attach FILE) is supplied
 EOF
       ;;
     symbols) cat <<'EOF'
-  symbols fetch [--from DIR] [--name TEXT]... [--packs DIR] [--store DIR]
+  symbols fetch --accept-terms --accepted-by NAME [--from DIR] [--name TEXT]... [--packs DIR] [--store DIR]
                                                   put the files the packs list for the operator to fetch (the PDBs of
                                                   the curated Windows kernels, packs/*/requires/symbols.*.json) into
                                                   the host's symbol store, $DFIRSWARM_HOME/symbols/blobs/sha256/<sha256>,
-                                                  each held to its pinned sha256 and size. --from DIR takes them from a
+                                                  each held to its pinned sha256 and size. They are their supplier's,
+                                                  under its terms, which are printed: storing them is your acceptance,
+                                                  refused without --accept-terms and --accepted-by NAME (nothing stands
+                                                  in for the name). The store's manifest.json records who accepted,
+                                                  when, for which bytes, and how: attended (a terminal on both ends) or
+                                                  not, the account, the host, the command; every earlier acceptance is
+                                                  kept and each is journaled. A build takes an unattended acceptance
+                                                  only with --allow-unattended-acceptance. --from DIR takes them from a
                                                   directory you already have (every file of the pinned size is hashed;
                                                   nothing is downloaded); without it each is downloaded from its url,
                                                   HTTPS on every hop, redirects only to the hosts its list names, no
-                                                  more bytes than pinned, within a time limit, after the supplier's
-                                                  terms are printed: fetching is your acceptance of them. Refused when
-                                                  the store is in a synced folder. --name keeps the entries whose name
-                                                  or version holds TEXT (a GUID).
+                                                  more bytes than pinned, within a time limit. Refused when the store
+                                                  is in a synced folder. --name keeps the entries whose name or version
+                                                  holds TEXT (a GUID). --packs: this checkout's packs by default.
   symbols list [--json] [--packs DIR] [--store DIR]
                                                   every such file, held or missing
 Then images/recipe.py build reads the store (--symbols-from, by default this one) and the build converts the

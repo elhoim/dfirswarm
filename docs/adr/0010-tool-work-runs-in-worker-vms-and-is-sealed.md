@@ -399,7 +399,8 @@ decided the table is baked into the local memory and `full` images:
   never in a synced folder), from a copy the operator holds (`--from`) or from
   Microsoft's symbol server with every hop bounded; it is refused without
   `--accept-terms` and a name, and the store records who accepted
-  Microsoft's terms, when, for which bytes. The image build takes the PDB
+  Microsoft's terms, when, for which bytes, and whether a person at a
+  terminal did (a build takes a process's acceptance only when told to). The image build takes the PDB
   from the store, converts it with no network, checks the content, keeps the
   table where Volatility looks and drops the PDB; a curated PDB or an
   acceptance the store does not have stops the build before Docker. The
@@ -410,9 +411,10 @@ decided the table is baked into the local memory and `full` images:
   chooses, and an omitted set is recorded apart from a failure. CI builds with
   `none` (a pull request) or `broad` (the weekly boot): it never fetches a
   Microsoft PDB and never builds the curated set.
-- **A missing table stops the start.** The memory pack's `kernel-symbols`
-  recipe asks Volatility, offline, which kernel an input runs and whether the
-  image has its table; the census writes what a recipe says is missing to
+- **A missing table stops the start.** The base pack's `memory-windows`
+  recipe, whose detect already asks Volatility offline about each memory
+  input, names the kernel whose table the image lacks, and says when its probe
+  did not answer (one probe and one generation per input, not two); the census writes what a recipe says is missing to
   `catalog/missing.json`, and a missing symbol table is a BLOCKER at
   `start --check` and at the start unless `--allow-missing-symbols`.
 - **Not decided here.** Microsoft's terms grant use for debugging and testing

@@ -251,19 +251,29 @@ carry two sets, pinned in the memory pack (`install.data` of `vol`):
      `$DFIRSWARM_HOME/symbols/blobs/sha256/<sha256>` (refused inside a synced
      folder), held to its pinned sha256 and size, and writes into the store's
      `manifest.json` who accepted Microsoft's symbol-server terms, when, for
-     which bytes. Without `--accept-terms` and a name (or the one enrolled
-     examiner) it refuses. `--from DIR` takes a copy you already hold;
+     which bytes, and how: whether a terminal was on both ends (`attended`),
+     the account, the host, the command. Every earlier acceptance is kept
+     beside the current one, and each is a line of `fetched.jsonl`. Without
+     `--accept-terms` and `--accepted-by` it refuses; nothing stands in for
+     the name. `--from DIR` takes a copy you already hold;
      without it each is downloaded from `msdl.microsoft.com`, HTTPS on every
      hop, at most two redirects and only to `*.blob.core.windows.net` (the
-     signed address is never logged), no more bytes than pinned, within ten
-     minutes.
+     signed address is never logged), no more bytes than pinned, within about
+     ten minutes (600 s, plus one read's socket timeout).
   2. `recipe.py build` reads the store (`--symbols-from`, by default
      `$DFIRSWARM_HOME/symbols`) and stops before Docker when a curated PDB, or
-     the acceptance of its terms, is not there. The build converts each PDB
+     the acceptance of its terms, is not there, and when the acceptance was
+     unattended (a process's, not a person's at a terminal) unless
+     `--allow-unattended-acceptance`; it prints the acceptance it bakes. The
+     context then holds a copy of the PDB under `data/` (bound into the build,
+     never in a layer): `--out` is refused inside a synced folder or a git
+     checkout, and `data/` is removed once the image is built. The build converts each PDB
      with Volatility's own `pdbconv` inside the image, with no network, checks
      the table's content against the pinned hash, puts it where Volatility
      looks (`…/volatility3/symbols/windows/<pdb>/<GUID>-<age>.json.xz`),
-     checks that `vol -q isfinfo` identifies it by that exact identity, and
+     checks that `vol -q isfinfo` lists exactly one table with that identity
+     (Volatility reads the last one its index finds when there are several, in
+     no fixed order, so a second table from a broad set fails the build), and
      drops the PDB. `image.json` records the source, the transform, the table
      (its bytes' sha256, its content hash, its identity) and the acceptance.
   A table's bytes change at every conversion (`pdbconv` writes the time it ran
@@ -295,9 +305,14 @@ Microsoft PDB and never builds the curated set: a pull request builds with
 path, the canonical hash and the refusals are tested with small synthetic
 fixtures (`tests/recipe.test.sh`, `tests/symbols.test.sh`).
 
-**A kernel the image lacks.** The memory pack's `kernel-symbols` recipe asks
-Volatility, offline, which kernel each memory input runs (the PDB its
-automagic names) and whether the image holds its table. With `--catalog`, a
+**A kernel the image lacks.** The base pack's `memory-windows` recipe asks
+Volatility, offline, at the census's detect, about each memory input; when the
+image holds no table for its kernel it names the kernel (the PDB, GUID and age
+Volatility's automagic asked for), and when its probe does not answer within
+`RECIPE_PROBE_SECONDS` (30 s; `SWARM_CATALOG_MEMORY_PROBE_TIMEOUT`) it says
+that whether the table is held is unknown. The verdict is about the image the
+census ran in, which the start names; with one memory pack that is the image
+its jobs run in. With `--catalog`, a
 table the image lacks is written to `catalog/missing.json`, said in the
 catalogue's README, and is a BLOCKER at `start --check` (which runs the
 census's detect in a throwaway VM) and at the start, unless

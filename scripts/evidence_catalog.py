@@ -297,7 +297,9 @@ class Catalog:
             except Exception:
                 answer, why = {}, ""
             # A recipe may say what the image lacks to read this input, in its
-            # own words; the census keeps each, whole, and knows no kind.
+            # own words; the census keeps each, whole, and knows no kind. Kept
+            # whatever the exit code, on purpose: a probe that did not answer
+            # does not apply and still says what it could not tell.
             for m in (answer.get("missing") if isinstance(answer, dict) and isinstance(answer.get("missing"), list) else []):
                 if isinstance(m, dict) and str(m.get("what", "")).strip():
                     self.missing.append({"input": rel_raw, "recipe": r["id"], "kind": str(m.get("kind") or "data"),

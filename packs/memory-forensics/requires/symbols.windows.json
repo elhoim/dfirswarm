@@ -1,5 +1,5 @@
 {
-  "about": "The curated Windows kernel symbol tables the memory and full images carry: one entry per exact kernel (PDB name, GUID, age), with the PDB's sha256 and size, the content hash the table converted from it must have, the converter version that hash holds for, and a note. Public identifiers and hashes only: no Microsoft file is in this repository. The operator fetches each PDB into the host's symbol store (scripts/swarm.sh symbols fetch, which shows Microsoft's terms), and the image build converts it with volatility3's pdbconv, checks the content and keeps the table, never the PDB. recipe.py expands `template` once per entry; a {field} is the entry's field, {file} and {dir} are install.py's (the fetched file, and the directory the program reads). `server_key` is the symbol server's directory name: the GUID and the age in hexadecimal.",
+  "about": "The curated Windows kernel symbol tables the memory and full images carry: one entry per exact kernel (PDB name, GUID, age), with the PDB's sha256 and size, the content hash the table converted from it must have, the converter version that hash holds for, and a note. Public identifiers and hashes only: no Microsoft file is in this repository. The operator fetches each PDB into the host's symbol store (scripts/swarm.sh symbols fetch, which shows Microsoft's terms), and the image build converts it with volatility3's pdbconv, checks the content and keeps the table, never the PDB. recipe.py expands `template` once per entry; a {field} is the entry's field, {file} and {dir} are install.py's (the fetched file, and the directory the program reads). `server_key` is the symbol server's directory name: the GUID and the age in hexadecimal. The check requires exactly one table with the entry's identity in the whole listing (Volatility reads the last one its index finds when there are several, in no fixed order): a second one, from a broad set, fails the build. A redirect may land on any host under *.blob.core.windows.net, a suffix that does not prove whose storage it is; the sha256 and size pins bound what a wrong host can do to wasted bytes and time.",
   "template": {
     "name": "vol-isf-{pdb}-{guid}-{age}",
     "version": "{guid}-{age}",
@@ -63,7 +63,7 @@
     "check": [
       "sh",
       "-c",
-      "vol -q isfinfo --filter {guid}-{age} | grep -qF '{pdb}|{guid}|{age}'"
+      "test \"$(vol -q isfinfo 2>/dev/null | grep -cF '{pdb}|{guid}|{age}')\" -eq 1"
     ],
     "redistributable": false,
     "distribution_policy": "local-only",

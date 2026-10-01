@@ -19,9 +19,9 @@ and age (`ntkrnlmp.pdb`, 32 hexadecimal digits, a number); with `-vv` the
 `Symbols` row of `windows.info` names the table Volatility read
 (`windows/<pdb>/<GUID>-<age>.json.xz`), and without a table its log names the
 symbol-server address it would have fetched, which carries the same identity.
-The kickoff's catalogue does this for every memory input (the `kernel-symbols`
-recipe: `kernel.json`, and `catalog/missing.json` when the image lacks the
-table).
+The kickoff's catalogue does this for every memory input (the base pack's
+`memory-windows` recipe: `catalog/missing.json` names the kernel when the image
+lacks its table).
 
 What the image holds is in `/etc/dfirswarm/tools.md`, under "Data the programs
 read" (a host run has no image, and holds no table unless the operator put one
@@ -33,7 +33,9 @@ and earlier, so a newer kernel is usually not in it. `vol -q isfinfo --filter
 says so in the same file ("left out by the build").
 
 If the error names a PDB plus GUID/age, the image does not hold that symbol.
-Do not switch off `--offline`, and fetch nothing. Close a lead `needs_operator`
+Do not switch off `--offline`, and fetch nothing. Never copy a symbol table into
+a job's output, a thread or the sandbox: it would travel with the report
+package, and the image is the only place it lives. Close a lead `needs_operator`
 that names the PDB, the GUID and the age: the operator adds the kernel to the
 pack's curated list, fetches its PDB on the host (`swarm.sh symbols fetch`) and
 rebuilds the image, or makes the table and supplies it to the run

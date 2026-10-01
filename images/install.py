@@ -65,6 +65,7 @@ Every pinned artefact is in image.json (`downloads`, with its kind), the
 NOTICE and the SBOM.
 """
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -218,6 +219,30 @@ def host_allowed(host: str, allowed: list) -> bool:
     return False
 
 
+# Where a sync client copies what is put there: a store of the operator's
+# files, and a build context holding a copy of one, never go there.
+SYNCED = ("/Library/CloudStorage/", "/Library/Mobile Documents/", "/Dropbox/", "/OneDrive", "/Google Drive/",
+          "/iCloud Drive/", "/Box Sync/")
+
+
+def synced(path: Path) -> str | None:
+    """The marker of a synced folder the path is in, or None."""
+    real = str(Path(path).expanduser().resolve()) + "/"
+    for m in SYNCED:
+        if m in real:
+            return m.strip("/")
+    return None
+
+
+def in_checkout(path: Path) -> str | None:
+    """The git checkout the path is in (a directory above it holding .git), or None."""
+    p = Path(path).expanduser().resolve()
+    for d in (p, *p.parents):
+        if (d / ".git").exists():
+            return str(d)
+    return None
+
+
 def local_copy(sha256: str) -> Path | None:
     """The mirror's file for this sha256, or None."""
     if not DATA_DIR:
@@ -287,7 +312,7 @@ def obtain(url: str, dest: Path, sha256: str, size: int | None = None, offline: 
         print(f"+ fetch {url}" + (f" (attempt {attempt} of {DOWNLOAD_ATTEMPTS})" if attempt > 1 else ""), flush=True)
         try:
             hexd, got, length = fetch_once(url, dest, size)
-        except OSError as e:
+        except (OSError, http.client.HTTPException) as e:
             dest.unlink(missing_ok=True)
             why = f"download failed: {e}"
             # A refusal by the bounds is not cured by asking again.

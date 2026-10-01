@@ -109,8 +109,8 @@ jobs:
               files += [(o["path"], o.get("bytes")) for o in v.get("outputs") or []]
               return not files or any(not os.path.isfile(p) or os.path.getsize(p) != n for p, n in files) or v.get("warm") == "failed" or not v.get("check")
           bad = [k for k, v in data.items() if bad_entry(v)]
-          # Under --symbol-set none nothing is built in, and every set a pack pins is said as omitted, never as a failure.
-          wrong = os.environ.get("SYMBOL_SET") == "none" and bool(data)
+          # Under --symbol-set none no entry of a symbol set is built in, and every set a pack pins is said as omitted, never as a failure.
+          wrong = os.environ.get("SYMBOL_SET") == "none" and any(v.get("set") for v in data.values())
           print("pinned data:", {k: v.get("bytes") for k, v in data.items()}, "left out (failed):", left_out, "omitted:", [o.get("name") for o in omitted], "bad:", bad)
           sys.exit(1 if left_out or bad or wrong else 0)'
           # Each data entry's own check (install.data `check`), run again in a fresh container with

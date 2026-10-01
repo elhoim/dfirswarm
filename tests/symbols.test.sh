@@ -9,8 +9,8 @@
 # recorded as omitted, not as a failure; a download must stay on https, within
 # its pinned size; the operator's store must hold only the pinned bytes, never
 # in a synced folder, and only with the terms accepted; the census must say
-# what a recipe reports missing, and the memory pack's kernel-symbols recipe
-# must name the kernel and whether the image holds its table. Small synthetic
+# what a recipe reports missing, and the base pack's memory-windows recipe
+# must name the kernel whose table the image lacks, or say it could not tell. Small synthetic
 # fixtures only: nothing here fetches a Microsoft file or builds an image.
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -205,9 +205,28 @@ cp "$TMP/k.pdb" "$TMP/store/blobs/sha256/$k_sha"
 out="$(build --out "$TMP/ctx-unaccepted" --symbols-from "$TMP/store" 2>&1)"; rc=$?
 [[ $rc -eq 4 ]] && grep -q 'no store records as accepted' <<<"$out" || fail "a curated build with the file and no acceptance was not refused (rc $rc): $out"
 [[ ! -e "$TMP/ctx-unaccepted/spec.json" ]] || fail "a refused build wrote its context"
-printf '{"version": 1, "files": {"%s": {"acceptance": {"accepted_by": "the suite", "accepted_at": "2026-10-01T00:00:00Z", "sha256": "%s", "terms": {"url": "https://example.org/terms"}}}}}\n' "$k_sha" "$k_sha" > "$TMP/store/manifest.json"
+acc_manifest() { # <attended true|false>
+  printf '{"version": 1, "files": {"%s": {"acceptance": {"accepted_by": "the suite", "accepted_at": "2026-10-01T00:00:00Z", "sha256": "%s", "terms": {"url": "https://example.org/terms"}, "attended": %s, "os_user": "u", "host": "h"}}}}\n' "$k_sha" "$k_sha" "$1" > "$TMP/store/manifest.json"
+}
 mkdir -p "$TMP/mirror"; cp "$TMP/bundle.zip" "$TMP/mirror/bundle.zip"
-build --out "$TMP/ctx" --symbols-from "$TMP/store" --data-from "$TMP/mirror" >/dev/null || fail "a curated build with the store and the acceptance failed"
+# A process's acceptance (no terminal on either end) is not a person's: refused unless the build says it takes it.
+acc_manifest false
+out="$(build --out "$TMP/ctx-unattended" --symbols-from "$TMP/store" --data-from "$TMP/mirror" 2>&1)"; rc=$?
+[[ $rc -eq 4 ]] && grep -q 'accepted unattended' <<<"$out" && grep -q -- '--allow-unattended-acceptance' <<<"$out" || fail "an unattended acceptance was built in without the flag (rc $rc): $out"
+out="$(build --out "$TMP/ctx-unattended" --symbols-from "$TMP/store" --data-from "$TMP/mirror" --allow-unattended-acceptance 2>&1)" || fail "--allow-unattended-acceptance did not take it: $out"
+grep -q 'UNATTENDED, taken because of --allow-unattended-acceptance' <<<"$out" || fail "the build does not say the acceptance it bakes is unattended: $out"
+jq -e '.data[1].acceptance | .attended == false and .unattended_allowed_by_build == true' "$TMP/ctx-unattended/spec.json" >/dev/null || fail "the spec does not record that the build allowed an unattended acceptance"
+# A context that would hold the operator's copy is never in a synced folder or a checkout.
+acc_manifest true
+out="$(build --out "$TMP/Library/CloudStorage/Dropbox/ctx" --symbols-from "$TMP/store" --data-from "$TMP/mirror" 2>&1)"; rc=$?
+[[ $rc -eq 5 ]] && grep -q 'synced folder' <<<"$out" || fail "a context in a synced folder was written (rc $rc): $out"
+[[ ! -e "$TMP/Library/CloudStorage/Dropbox/ctx/data" ]] || fail "the operator's copy reached the synced folder"
+mkdir -p "$TMP/checkout/.git"
+out="$(build --out "$TMP/checkout/ctx" --symbols-from "$TMP/store" --data-from "$TMP/mirror" 2>&1)"; rc=$?
+[[ $rc -eq 5 ]] && grep -q 'inside the git checkout' <<<"$out" || fail "a context inside a checkout was written (rc $rc): $out"
+build --out "$TMP/checkout/ctx-none" --symbol-set none >/dev/null 2>&1 || fail "a context holding no copy was refused in a checkout (CI builds there)"
+out="$(build --out "$TMP/ctx" --symbols-from "$TMP/store" --data-from "$TMP/mirror" 2>&1)" || fail "a curated build with the store and an attended acceptance failed: $out"
+grep -q 'prog-isf-ABCDEF0123456789ABCDEF0123456789-2: terms accepted by the suite at 2026-10-01T00:00:00Z, attended' <<<"$out" || fail "the build does not print the acceptance it bakes: $out"
 S="$TMP/ctx/spec.json"
 jq -e '[.data[].name] == ["prog-bundle", "prog-isf-ABCDEF0123456789ABCDEF0123456789-2"] and .data[1].bytes == 21 and (.data[1].bytes | type) == "number"
        and .data[1].url == "https://symbols.example/k.pdb/ABCDEF0123456789ABCDEF01234567892/k.pdb" and .data[1].acceptance.accepted_by == "the suite"
@@ -228,7 +247,10 @@ jq -e '(.data | length) == 0 and ([.omitted.data[].set] | sort) == ["broad", "cu
 grep -q 'dev.dfirswarm.data' "$TMP/ctx-off/Dockerfile" && fail "an image with no data claims some"
 grep -q 'left out by this build' "$TMP/ctx-off/NOTICE" || fail "the NOTICE does not say what the build left out"
 build --out "$TMP/ctx-bad" --symbol-set curated,everything >/dev/null 2>&1 && fail "an unknown symbol set was accepted"
-pass "recipe.py expands a curated list, takes the operator's file and its acceptance from the store and a bundle from a mirror, binds them into the build, labels and notices the data, records a set left out as omitted, and refuses a curated build without the file or the acceptance"
+grep -qx '/ctx/' "$ROOT/.gitignore" || fail "a build context in the checkout is not ignored by git"
+# The shipped list's check requires exactly one table with the identity: a second one from a broad set fails the build.
+jq -e '.template.check[2] | test("grep -cF .*-eq 1")' "$ROOT/packs/memory-forensics/requires/symbols.windows.json" >/dev/null || fail "the curated check does not require exactly one table per identity"
+pass "recipe.py expands a curated list, takes the operator's file and an attended acceptance from the store (an unattended one only when told, and recorded so), prints what it bakes, keeps the copy out of synced folders and checkouts, binds it into the build, labels and notices the data, records a set left out as omitted, and refuses a curated build without the file or the acceptance"
 
 # --- install.py records the omission apart from a failure ---------------------
 res="$(DFIRSWARM_ETC_DIR="$TMP/etc" python3 - "$ROOT/images" "$TMP/ctx-off/spec.json" <<'EOF'
@@ -277,18 +299,25 @@ out="$("${SY[@]}" fetch --packs "$P" --from "$TMP/have" 2>&1)"; rc=$?
   || fail "a fetch without --accept-terms was not refused naming the terms (rc $rc): $out"
 [[ ! -e "$ST/blobs" ]] || fail "a refused fetch stored something"
 out="$("${SY[@]}" fetch --packs "$P" --from "$TMP/have" --accept-terms 2>&1)"; rc=$?
-[[ $rc -eq 2 ]] && grep -q 'no examiner is enrolled' <<<"$out" || fail "an acceptance with no name was taken (rc $rc): $out"
+[[ $rc -eq 2 ]] && grep -q 'nothing stands in for it' <<<"$out" || fail "an acceptance with no name was taken (rc $rc): $out"
+# Nor does an enrolled examiner stand in for the name: a process could record the owner's acceptance.
+mkdir -p "$TMP/home/examiners"; printf '{"id": "examiner-1"}\n' > "$TMP/home/examiners/examiner-1.json"
+out="$("${SY[@]}" fetch --packs "$P" --from "$TMP/have" --accept-terms 2>&1)"; rc=$?
+[[ $rc -eq 2 && ! -e "$ST/manifest.json" ]] || fail "the enrolled examiner stood in for a name the fetch was not given (rc $rc): $out"
 out="$("${SY[@]}" fetch --packs "$P" --from "$TMP/have" --accept-terms --accepted-by "An Examiner" 2>&1)" || fail "a fetch --from with the terms accepted failed: $out"
 [[ "$(sha "$ST/blobs/sha256/$k_sha")" == "$k_sha" ]] || fail "the store does not hold the pinned bytes under their sha256"
 [[ ! -w "$ST/blobs/sha256/$k_sha" || "$(id -u)" == 0 ]] || fail "a stored file is writable"
-jq -e --arg s "$k_sha" '.files[$s].acceptance | .accepted_by == "An Examiner" and .sha256 == $s and .terms.url == "https://example.org/terms" and (.accepted_at | test("^20"))' "$ST/manifest.json" >/dev/null \
+jq -e --arg s "$k_sha" '.files[$s].acceptance | .accepted_by == "An Examiner" and .sha256 == $s and .terms.url == "https://example.org/terms" and (.accepted_at | test("^20"))
+       and .attended == false and (.os_user | length) > 0 and (.host | length) > 0 and .via == "cli" and (.argv | index("--accepted-by")) != null' "$ST/manifest.json" >/dev/null \
   || fail "the store's manifest does not record who accepted which terms when, for which bytes: $(cat "$ST/manifest.json")"
 jq -e 'select(.how == "from") | .acceptance.accepted_by == "An Examiner"' "$ST/fetched.jsonl" >/dev/null || fail "the fetch is not on the store's journal"
 "${SY[@]}" list --packs "$P" --json | jq -e '.entries[0].held and .entries[0].acceptance.accepted_by == "An Examiner"' >/dev/null || fail "list does not say the file is held and accepted"
-# The examiner enrolled on this install stands for the operator when no name is given.
-mkdir -p "$TMP/home/examiners"; printf '{"id": "examiner-1"}\n' > "$TMP/home/examiners/examiner-1.json"
-"${SY[@]}" fetch --packs "$P" --accept-terms >/dev/null 2>&1 || fail "a fetch with the one enrolled examiner standing for the operator failed"
-jq -e --arg s "$k_sha" '.files[$s].acceptance.accepted_by == "examiner-1"' "$ST/manifest.json" >/dev/null || fail "the enrolled examiner was not recorded as the acceptor"
+# A second acceptance of a held file is added, never written over the first, and journaled.
+"${SY[@]}" fetch --packs "$P" --accept-terms --accepted-by "The Owner" >/dev/null 2>&1 || fail "a second acceptance of a held file failed"
+jq -e --arg s "$k_sha" '.files[$s] | .acceptance.accepted_by == "The Owner" and ([.acceptances[].accepted_by] == ["An Examiner", "The Owner"])' "$ST/manifest.json" >/dev/null \
+  || fail "a re-acceptance erased the earlier one: $(cat "$ST/manifest.json")"
+[[ "$(jq -c 'select(.how == "accept") | .acceptance.accepted_by' "$ST/fetched.jsonl" | paste -sd, -)" == '"An Examiner","The Owner"' ]] || fail "each acceptance is not a line of the store's journal"
+bash "$ROOT/scripts/swarm.sh" help symbols | grep -q -- 'fetch --accept-terms --accepted-by NAME' || fail "help symbols does not say the fetch needs the acceptance and a name"
 # Only the pinned bytes: a file of another content is not taken.
 rm -rf "$TMP/home2"; out="$(DFIRSWARM_HOME="$TMP/home2" "${SY[@]}" fetch --packs "$P" --from "$TMP/have/other" --accept-terms --accepted-by x 2>&1)"; rc=$?
 [[ $rc -eq 1 ]] && grep -q '^missing' <<<"$out" || fail "a file with other bytes was taken, or the miss not said (rc $rc): $out"
@@ -297,7 +326,7 @@ out="$("${SY[@]}" fetch --packs "$P" --store "$TMP/Library/CloudStorage/Dropbox/
 [[ ! -e "$TMP/Library/CloudStorage/Dropbox/symbols/blobs" ]] || fail "the synced store was written"
 grep -q 'symbols fetch' <(bash "$ROOT/scripts/swarm.sh" help symbols) || fail "swarm.sh has no help for symbols"
 bash "$ROOT/scripts/swarm.sh" --help | grep -q 'image-for symbols' || fail "the short help does not name symbols"
-pass "symbols fetch stores only the pinned bytes under their sha256, read-only, never in a synced folder, and only with the terms accepted by a named operator, which the store records"
+pass "symbols fetch stores only the pinned bytes under their sha256, read-only, never in a synced folder, and only with the terms accepted by a name given on its command line, recorded with whether a person at a terminal did it, every acceptance kept and journaled"
 
 # --- the census says what a recipe reports missing -----------------------------
 CS="$TMP/census"
@@ -318,32 +347,35 @@ jq -e '.missing == [{"input": "inputs/m.mem", "recipe": "cpack/needs-table", "ki
 grep -q '^Missing from the images' "$CS/sb/catalog/README.md" && grep -q 'the table of kernel K' "$CS/sb/catalog/README.md" || fail "the catalogue's README does not say it plainly"
 pass "the census writes what a recipe's detect reports missing to catalog/missing.json and its README"
 
-# --- kernel-symbols names the kernel, and whether the image holds its table -----
-KS="$ROOT/packs/memory-forensics/recipes/kernel-symbols/run.py"
+# --- memory-windows names a kernel whose table the image lacks -------------------
+MW="$ROOT/packs/computer-forensics-base/recipes/memory-windows/run.sh"
 mkdir -p "$TMP/volshim"
 cat > "$TMP/volshim/vol" <<'SH'
 #!/bin/sh
+if [ -n "$VOL_STUB_SLOW" ]; then sleep 5; fi
 if [ -n "$VOL_STUB_NO_TABLE" ]; then
+  echo "INFO     volatility3.framework.automagic.windows: DTB was found at: 0x1aa000" >&2
   echo "WARNING  volatility3.framework.plugins: Automagic exception occurred: volatility3.framework.exceptions.OfflineException: Volatility 3 is offline: unable to access http://msdl.microsoft.com/download/symbols/ntkrnlmp.pdb/0123456789ABCDEF0123456789ABCDEFA/ntkrnlmp.pdb" >&2
-  echo "Unsatisfied requirement plugins.Info.kernel.symbol_table_name" >&2; exit 1
+  echo "Unsatisfied requirement plugins.Info.kernel.symbol_table_name"; exit 1
 fi
 printf 'Variable\tValue\nKernel Base\t0xf80000000000\nSymbols\tfile:///opt/v/symbols/windows/ntkrnlmp.pdb/0123456789ABCDEF0123456789ABCDEF-10.json.xz\n'
 SH
 chmod +x "$TMP/volshim/vol"
 : > "$TMP/k.mem"
 T="{\"paths\": [\"$TMP/k.mem\"], \"name\": \"inputs/k.mem\"}"
-held="$(PATH="$TMP/volshim:$PATH" python3 "$KS" detect --target "$T")" || fail "kernel-symbols does not apply to a Windows image whose table is held: $held"
-jq -e '.applies and .identity == {"pdb": "ntkrnlmp.pdb", "guid": "0123456789ABCDEF0123456789ABCDEF", "age": 10, "table": "held", "symbols": "file:///opt/v/symbols/windows/ntkrnlmp.pdb/0123456789ABCDEF0123456789ABCDEF-10.json.xz"} and (has("missing") | not)' <<<"$held" >/dev/null \
-  || fail "a held table is not named with its identity: $held"
-lack="$(VOL_STUB_NO_TABLE=1 PATH="$TMP/volshim:$PATH" python3 "$KS" detect --target "$T")" || fail "kernel-symbols does not apply when the table is missing: $lack"
-jq -e '.applies and .identity.table == "missing" and .identity.age == 10 and .missing[0].kind == "symbols" and .missing[0].identity.guid == "0123456789ABCDEF0123456789ABCDEF" and (.missing[0].what | test("does not hold it"))' <<<"$lack" >/dev/null \
+held="$(PATH="$TMP/volshim:$PATH" bash "$MW" detect --target "$T")" || fail "memory-windows does not apply to a Windows image whose table is held: $held"
+jq -e '.applies and (has("missing") | not)' <<<"$held" >/dev/null || fail "a held table is said to be missing: $held"
+lack="$(VOL_STUB_NO_TABLE=1 PATH="$TMP/volshim:$PATH" bash "$MW" detect --target "$T")" || fail "memory-windows does not apply when the table is missing: $lack"
+jq -e '.applies and .missing[0].kind == "symbols" and .missing[0].identity == {"pdb": "ntkrnlmp.pdb", "guid": "0123456789ABCDEF0123456789ABCDEF", "age": 10} and (.missing[0].what | test("inputs/k.mem runs: this image does not hold it"))' <<<"$lack" >/dev/null \
   || fail "a missing table is not said with the kernel's identity (the age read in hexadecimal): $lack"
-VOL_STUB_NO_TABLE=1 PATH="$TMP/volshim:$PATH" python3 "$KS" run --target "$T" --out "$TMP/ks-out" >/dev/null || fail "kernel-symbols run failed"
-jq -e '.table == "missing" and .guid == "0123456789ABCDEF0123456789ABCDEF"' "$TMP/ks-out/kernel.json" >/dev/null && jq -e '.status == "complete" and (.missing | length) == 1' "$TMP/ks-out/coverage.json" >/dev/null \
-  || fail "the run does not write the identity and what is missing: $(cat "$TMP/ks-out/kernel.json" "$TMP/ks-out/coverage.json")"
-grep -q 'OfflineException' "$TMP/ks-out/windows.info.txt.stderr" || fail "Volatility's stderr is not kept whole"
-printf 'not memory\n' > "$TMP/notes.txt"
-PATH="$TMP/volshim:$PATH" python3 "$KS" detect --target "{\"paths\": [\"$TMP/notes.txt\"]}" >/dev/null && fail "kernel-symbols applied to a text file"
-pass "kernel-symbols names a Windows image's kernel offline and says whether the image holds its table, from Volatility's own words"
+slow="$(VOL_STUB_SLOW=1 RECIPE_PROBE_SECONDS=1 PATH="$TMP/volshim:$PATH" bash "$MW" detect --target "$T")"; rc=$?
+[[ $rc -eq 1 ]] && jq -e '(.applies | not) and .missing[0].kind == "symbols" and (.missing[0].what | test("did not answer within 1s.*unknown"))' <<<"$slow" >/dev/null \
+  || fail "a probe that did not answer passed silently (rc $rc): $slow"
+VOL_STUB_NO_TABLE=1 PATH="$TMP/volshim:$PATH" bash "$MW" run --target "$T" --out "$TMP/mw-out" >/dev/null
+jq -e '.missing[0].identity.guid == "0123456789ABCDEF0123456789ABCDEF"' "$TMP/mw-out/coverage.json" >/dev/null || fail "the run's coverage does not say what is missing: $(cat "$TMP/mw-out/coverage.json")"
+grep -q 'OfflineException' "$TMP/mw-out/offline.windows.info.txt.stderr" || fail "Volatility's stderr is not kept whole"
+jq -e '.auto == ["kickoff", "derived"]' "$ROOT/packs/computer-forensics-base/recipes/memory-windows/recipe.json" >/dev/null || fail "memory-windows is no longer what the census and the derived catalogue ask"
+[[ ! -d "$ROOT/packs/memory-forensics/recipes" ]] || fail "a second recipe probes the same memory image again"
+pass "memory-windows names a Windows image's kernel offline when the image lacks its table, says a probe that did not answer left it unknown, and its run's coverage says what is missing: one probe and one generation per input"
 
 echo "symbols: all checks passed"

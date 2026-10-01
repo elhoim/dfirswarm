@@ -2,7 +2,7 @@
 """The operator's symbol store: what an image build converts into symbol
 tables, fetched by the operator, on the host, as a visible act.
 
-    scripts/swarm.sh symbols fetch --accept-terms [--accepted-by NAME] [--from DIR] [--name TEXT]... [--packs DIR] [--store DIR]
+    scripts/swarm.sh symbols fetch --accept-terms --accepted-by NAME [--from DIR] [--name TEXT]... [--packs DIR] [--store DIR]
     scripts/swarm.sh symbols list  [--packs DIR] [--store DIR] [--json]
 
 A pack lists the exact symbol files its images carry (a data entry with
@@ -23,10 +23,13 @@ hop, at most the entry's `fetch.max_redirects` redirects and only to its
 
 The files are their supplier's, under its terms (the entry's `terms`). A fetch
 is the operator's acceptance of them, so it is refused without
-`--accept-terms` and a name: `--accepted-by NAME`, or the one examiner
-enrolled on this install. The acceptance (who, the terms' name and URL, when,
-the file's sha256) is written into the store's manifest.json for every file
-the fetch puts there or finds there. `images/recipe.py build --symbols-from`
+`--accept-terms` and `--accepted-by NAME`; nothing stands in for the name.
+The acceptance (who, the terms' name and URL, when, the file's sha256, and
+how: whether a terminal was on both ends, the account, the host, the
+command) is written into the store's manifest.json for every file the fetch
+puts there or finds there, every earlier acceptance kept beside it, and each
+is a line of fetched.jsonl. A build takes an unattended acceptance (a
+process, not a person at a terminal) only when told to. `images/recipe.py build --symbols-from`
 (by default this store) then hands the files to the build with their
 acceptance, which the image records beside what it made of them; a file with
 no recorded acceptance is not built in.
@@ -40,10 +43,12 @@ distribute, and a synced folder distributes it.
 Exit: 0 every entry asked for is held, 1 one is not, 2 a refusal or a usage error.
 """
 import argparse
+import getpass
 import hashlib
 import json
 import os
 import shutil
+import socket
 import ssl
 import sys
 import time
@@ -55,9 +60,8 @@ sys.path.insert(0, str(ROOT / "images"))
 import install  # noqa: E402  (images/install.py: the bounded download, the redirect rule)
 import recipe  # noqa: E402  (images/recipe.py: a pack's data entries, its list files expanded)
 
-# Where a sync client copies what is put there.
-SYNCED = ("/Library/CloudStorage/", "/Library/Mobile Documents/", "/Dropbox/", "/OneDrive", "/Google Drive/",
-          "/iCloud Drive/", "/Box Sync/")
+# Where a sync client copies what is put there (images/install.py keeps the list).
+synced = install.synced
 
 
 def store_dir(given: str | None) -> Path:
@@ -65,15 +69,6 @@ def store_dir(given: str | None) -> Path:
         return Path(given)
     home = os.environ.get("DFIRSWARM_HOME") or str(Path.home() / ".dfirswarm")
     return Path(home) / "symbols"
-
-
-def synced(path: Path) -> str | None:
-    """The marker of a synced folder the path is in, or None."""
-    real = str(path.resolve()) + "/"
-    for m in SYNCED:
-        if m in real:
-            return m.strip("/")
-    return None
 
 
 def operator_entries(packs: Path) -> list:
@@ -152,7 +147,7 @@ def download(d: dict, dest: Path) -> tuple:
     install.FETCH_SECONDS = int(fetch.get("timeout_seconds", 600))
     try:
         hexd, got, _ = install.fetch_once(d["url"], dest, d.get("bytes"), opener_handlers=[handler, install.urllib.request.HTTPSHandler(context=tls_context())])
-    except OSError as e:
+    except (OSError, install.http.client.HTTPException) as e:
         dest.unlink(missing_ok=True)
         return f"download failed: {e}", None
     finally:
@@ -185,32 +180,32 @@ def manifest(store: Path) -> dict:
         return {"version": 1, "files": {}}
 
 
-def record_acceptance(store: Path, d: dict, accepted_by: str) -> dict:
-    """Write who accepted the terms of this file, when, for which bytes, into manifest.json."""
+def acceptor_context(argv: list) -> dict:
+    """What tells a person at a terminal from a process: whether both ends are
+    a terminal, the account, the host, how it was called, and the command."""
+    return {"attended": bool(sys.stdin.isatty() and sys.stdout.isatty()),
+            "os_user": getpass.getuser(), "host": socket.gethostname(),
+            "via": os.environ.get("SWARM_OPERATOR_VIA", "cli"), "argv": ["swarm.sh", "symbols", *argv]}
+
+
+def record_acceptance(store: Path, d: dict, accepted_by: str, context: dict) -> dict:
+    """Write who accepted the terms of this file, when, for which bytes, and
+    how (attended or not, account, host, command) into manifest.json: the
+    current acceptance, and every earlier one kept beside it. Journaled too."""
     m = manifest(store)
     terms = d.get("terms") or {}
     acceptance = {"accepted_by": accepted_by, "accepted_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                   "terms": {"supplier": terms.get("supplier"), "name": terms.get("name"), "url": terms.get("url")},
-                  "sha256": pinned_sha(d), "how": "swarm.sh symbols fetch --accept-terms"}
+                  "sha256": pinned_sha(d), "how": "swarm.sh symbols fetch --accept-terms", **context}
+    prev = m["files"].get(pinned_sha(d)) or {}
+    history = list(prev.get("acceptances") or ([prev["acceptance"]] if prev.get("acceptance") else []))
     m["files"][pinned_sha(d)] = {"name": d["name"], "pack": d.get("pack"), "bytes": d.get("bytes"), "url": d.get("url"),
-                                 "acceptance": acceptance}
+                                 "acceptance": acceptance, "acceptances": history + [acceptance]}
     tmp = store / f".manifest-{os.getpid()}.json"
     tmp.write_text(json.dumps(m, indent=1, sort_keys=True) + "\n")
     os.replace(tmp, store / "manifest.json")
+    journal(store, {"how": "accept", "name": d["name"], "sha256": pinned_sha(d), "acceptance": acceptance})
     return acceptance
-
-
-def enrolled_examiner() -> str | None:
-    """The id of the one examiner enrolled on this install, or None."""
-    home = Path(os.environ.get("DFIRSWARM_HOME") or str(Path.home() / ".dfirswarm"))
-    recs = sorted((home / "examiners").glob("*.json"))
-    if len(recs) != 1:
-        return None
-    try:
-        rec = json.loads(recs[0].read_text())
-    except (OSError, ValueError):
-        return None
-    return str(rec.get("id") or rec.get("name") or recs[0].stem) or None
 
 
 def journal(store: Path, line: dict) -> None:
@@ -234,7 +229,7 @@ def cmd_list(a) -> int:
     return 0 if all(r["held"] for r in rows) else 1
 
 
-def cmd_fetch(a) -> int:
+def cmd_fetch(a, argv: list) -> int:
     store = store_dir(a.store)
     mark = synced(store) or synced(store.parent)
     if mark:
@@ -251,7 +246,7 @@ def cmd_fetch(a) -> int:
     # Accepting the supplier's terms is the operator's act, said and named
     # before anything is fetched or stored.
     terms_said = {json.dumps(d.get("terms") or {}, sort_keys=True) for d in entries}
-    accepted_by = (a.accepted_by or "").strip() or enrolled_examiner()
+    accepted_by = (a.accepted_by or "").strip()
     if not a.accept_terms or not accepted_by:
         for t in sorted(terms_said):
             terms = json.loads(t)
@@ -259,10 +254,14 @@ def cmd_fetch(a) -> int:
                   f"({terms.get('url', 'no terms URL given')}).", file=sys.stderr)
         print("symbols: refused: fetching or storing them is your acceptance of those terms, recorded in the store and in every "
               "image built from it. Run again with --accept-terms and --accepted-by NAME"
-              + (" (no examiner is enrolled on this install to stand for you)" if not accepted_by else "") + ".", file=sys.stderr)
+              + (" (whose name: nothing stands in for it)" if a.accept_terms and not accepted_by else "") + ".", file=sys.stderr)
         return 2
     store.mkdir(parents=True, exist_ok=True)
     os.chmod(store, 0o700)
+    context = acceptor_context(argv)
+    if not context["attended"]:
+        print(f"symbols: no terminal on both ends: the acceptance by {accepted_by} is recorded as unattended (a process, not a "
+              "person at a terminal); a build takes it only with --allow-unattended-acceptance.", file=sys.stderr)
     todo = [d for d in entries if not held(store, d)]
     for t in sorted(terms_said):
         terms = json.loads(t)
@@ -271,7 +270,7 @@ def cmd_fetch(a) -> int:
               "for redistribution.")
     for d in entries:
         if d not in todo:
-            record_acceptance(store, d, accepted_by)
+            record_acceptance(store, d, accepted_by, context)
             print(f"held     {d['name']}  (sha256 {pinned_sha(d)}; acceptance recorded)")
     missing = 0
     for d in todo:
@@ -282,7 +281,7 @@ def cmd_fetch(a) -> int:
                 missing += 1
                 continue
             dest = put(store, src, d)
-            acc = record_acceptance(store, d, accepted_by)
+            acc = record_acceptance(store, d, accepted_by, context)
             journal(store, {"name": d["name"], "pack": d["pack"], "sha256": pinned_sha(d), "bytes": dest.stat().st_size,
                             "how": "from", "from": str(src), "url": d["url"], "acceptance": acc})
             print(f"stored   {d['name']}  from {src}")
@@ -296,7 +295,7 @@ def cmd_fetch(a) -> int:
             continue
         dest = put(store, tmp, d)
         tmp.unlink(missing_ok=True)
-        acc = record_acceptance(store, d, accepted_by)
+        acc = record_acceptance(store, d, accepted_by, context)
         journal(store, {"name": d["name"], "pack": d["pack"], "sha256": pinned_sha(d), "bytes": dest.stat().st_size,
                         "how": "download", "url": d["url"], "served_by": host, "seconds": round(time.monotonic() - start, 1),
                         "acceptance": acc})
@@ -316,11 +315,11 @@ def main(argv: list) -> int:
             s.add_argument("--from", dest="from_dir", type=Path, help="a directory that already holds the files: nothing is downloaded")
             s.add_argument("--name", action="append", help="only the entries whose name or version holds TEXT (a GUID); repeatable")
             s.add_argument("--accept-terms", action="store_true", help="accept the supplier's terms for these files (required)")
-            s.add_argument("--accepted-by", help="who accepts them (default: the one examiner enrolled on this install)")
+            s.add_argument("--accepted-by", help="who accepts them, by name (required with --accept-terms; nothing stands in for it)")
         else:
             s.add_argument("--json", action="store_true")
     a = ap.parse_args(argv)
-    return cmd_fetch(a) if a.cmd == "fetch" else cmd_list(a)
+    return cmd_fetch(a, argv) if a.cmd == "fetch" else cmd_list(a)
 
 
 if __name__ == "__main__":

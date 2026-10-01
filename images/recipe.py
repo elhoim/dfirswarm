@@ -524,6 +524,13 @@ def job_profiles(search, wanted: list, images=PACKS) -> dict:
     return out
 
 
+def install_mod():
+    """images/install.py, beside this file: its synced-folder and checkout checks."""
+    sys.path.insert(0, str(HERE))
+    import install
+    return install
+
+
 def symbol_sets(value: str):
     """The sets --symbol-set names, or None when it names one that is not known."""
     names = {x.strip() for x in str(value).split(",") if x.strip()}
@@ -635,7 +642,7 @@ def build(a) -> int:
     # build stops here, before docker, saying how to get it.
     local_dirs = [x for x in (a.data_from or []) + (a.symbols_from or []) if x]
     copies = {}
-    lacking, unaccepted = [], []
+    lacking, unaccepted, unattended = [], [], []
     for d in spec["data"]:
         sha = str(d["sha256"]).removeprefix("sha256:").lower()
         got = local_copy(local_dirs, d)
@@ -643,7 +650,16 @@ def build(a) -> int:
         # recorded acceptance of its terms, which the image then carries.
         if d.get("acquire") == "operator":
             acc = acceptance(local_dirs, sha)
+            # A process's acceptance (no terminal on either end) is not a
+            # person's: taken only when the build says so, and recorded so.
+            if got and acc and acc.get("attended") is not True and not a.allow_unattended_acceptance:
+                got = None
+                if d.get("required"):
+                    unattended.append((d, acc))
+                acc = None
             if got and acc:
+                if acc.get("attended") is not True:
+                    acc = {**acc, "unattended_allowed_by_build": True}
                 d["acceptance"] = acc
             elif got:
                 got = None
@@ -653,6 +669,13 @@ def build(a) -> int:
                 lacking.append(d)
         if got:
             copies[sha] = got
+    if unattended:
+        print(f"recipe: {a.profile} would hold {len(unattended)} data file(s) whose terms were accepted unattended (no terminal on "
+              "either end of the fetch, so a process, not a person at a terminal): "
+              + "; ".join(f"{d['name']} (by {acc.get('accepted_by')}, {acc.get('accepted_at')}, {acc.get('os_user')}@{acc.get('host')})" for d, acc in unattended)
+              + ". The owner accepts at a terminal (scripts/swarm.sh symbols fetch --accept-terms --accepted-by NAME), or this "
+              "build says it takes an unattended acceptance (--allow-unattended-acceptance), which the image then records.", file=sys.stderr)
+        return 4
     if lacking or unaccepted:
         where = (f"no copy is in {', '.join(str(x) for x in local_dirs)}" if local_dirs
                  else "no --symbols-from or --data-from was given, and there is no symbol store at the default place")
@@ -677,6 +700,26 @@ def build(a) -> int:
     # redistributable as its base, whose label it then inherits (the base
     # sets it), and image.json says the same (install.py).
     redistributable = ' \\\n      dev.dfirswarm.redistributable="false"' if held_back else ""
+    # A context that holds a copy of what the operator acquired (a PDB) is
+    # never in a folder a sync client copies, nor in a git checkout, where
+    # `git add -A` would stage it.
+    restricted = [d["name"] for d in spec["data"] if str(d["sha256"]).removeprefix("sha256:").lower() in copies
+                  and (d.get("acquire") == "operator" or d.get("redistributable") is False)]
+    if restricted:
+        where = install_mod().synced(a.out)
+        repo = install_mod().in_checkout(a.out)
+        if where or repo:
+            print(f"recipe: --out {a.out} is {'in a synced folder (' + where + ')' if where else 'inside the git checkout ' + repo}, "
+                  f"and the context would hold a copy of {', '.join(restricted)}, which is not for redistribution. "
+                  "Give --out a directory outside every synced folder and checkout (under $TMPDIR, say), and remove "
+                  "its data/ once the image is built.", file=sys.stderr)
+            return 5
+    for d in spec["data"]:
+        if d.get("acceptance"):
+            acc = d["acceptance"]
+            print(f"recipe: {d['name']}: terms accepted by {acc.get('accepted_by')} at {acc.get('accepted_at')}, "
+                  f"{'attended (a terminal on both ends)' if acc.get('attended') is True else 'UNATTENDED, taken because of --allow-unattended-acceptance'}"
+                  f", {acc.get('os_user')}@{acc.get('host')}: the image records it", file=sys.stderr)
     a.out.mkdir(parents=True, exist_ok=True)
     shutil.rmtree(a.out / "data", ignore_errors=True)
     if copies:
@@ -745,6 +788,9 @@ def main() -> int:
     b.add_argument("--data-from", type=Path, action="append", default=default_data_mirror(),
                    help="a directory of local copies of pinned data, by sha256 or by file name (default $DFIRSWARM_DATA_DIR, "
                         "else $DFIRSWARM_HOME/data when it exists); repeatable")
+    b.add_argument("--allow-unattended-acceptance", action="store_true",
+                   help="take an acceptance of a supplier's terms recorded with no terminal on either end (a process's, not a "
+                        "person's); the image records that this build allowed it")
     b.add_argument("--symbols-from", type=Path, action="append", default=default_symbol_store(),
                    help="the operator's symbol store (scripts/swarm.sh symbols fetch writes it; default $DFIRSWARM_HOME/symbols when it exists); repeatable")
     f = sub.add_parser("profile-for")

@@ -54,9 +54,9 @@ image built from this pack carries two sets (`requires/host.json`,
   newer kernel.
 
 `recipe.py build --symbol-set` chooses (`curated,broad` by default; `none` is
-what CI builds), and an image says which it left out. The `kernel-symbols`
-recipe names the kernel of every memory input at the kickoff and says when the
-image lacks its table, which stops the start unless `--allow-missing-symbols`;
+what CI builds), and an image says which it left out. The base pack's
+`memory-windows` recipe names the kernel of a memory input at the kickoff when
+the image lacks its table, which stops the start unless `--allow-missing-symbols`;
 the skill still shows how to verify the table and fail closed when it is
 absent, since silently fetching a PDB during case work is not an offline proof. The pack states no licence of its own. Our reading, not
 legal advice: the Volatility Software License 1.0 says its "Software" includes
