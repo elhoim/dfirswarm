@@ -75,3 +75,16 @@ anything that is not a plain directory right there.
   instead, and the hook puts the real one back before reading the user's
   own bash configuration. Any other shell ignores both and reports
   `enforced: none`.
+
+## Writable evidence in a VM run is refused (2026-10-01)
+
+In a microVM run the evidence is mounted in place, read-only in every VM;
+nothing on the host holds it. A host-writable folder used that way was a
+warning. In the Breadcrumbs run a helper of the operator's own wrote a
+checksum file into the live run's evidence folder: the seats' sweep caught
+it within seconds, and they then spent an hour asking the operator to tell
+an added name from a changed object. Now such a folder (a writable file, or
+a directory whose names can change, on a volume mounted read-write) is a
+BLOCKER under every stop policy and at `start --check`, naming both ways
+out: `--inputs-copy` (the run's own read-only copy), or making the evidence
+read-only first. `--inputs-copy` is the documented way to start a live run.

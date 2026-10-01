@@ -327,6 +327,13 @@ export type BudgetRecord = {
    *  unmetered team, and an optional second brake for any other. */
   cap_tokens?: number;
   /**
+   * The operator's token marks (`--token-alert`), ascending: as the run's
+   * tokens cross each, the operator is told once (the board, the trace, the
+   * notify hook; the console shows them against the count). Advisory under
+   * every stop policy: nothing pauses or stops for one (claimTokenAlerts).
+   */
+  token_alerts?: number[];
+  /**
    * The run was started until solved (--until-solved, or the goal's
    * `until_solved: true`): no wall clock, every cap advisory (spend is
    * recorded and shown, nothing is stopped for it), no abandon, and done
@@ -1346,6 +1353,11 @@ export function normalizeBudget(raw: Partial<BudgetRecord> | null | undefined): 
     // The same holds for the two fields a free team's brake is made of.
     metered: raw?.metered !== false,
     ...(Number(raw?.cap_tokens) > 0 ? { cap_tokens: Number(raw?.cap_tokens) } : {}),
+    // The operator's token marks: kept by every fold, or the first model call's usage would drop them.
+    ...(() => {
+      const marks = tokenMarks(raw?.token_alerts);
+      return marks.length ? { token_alerts: marks } : {};
+    })(),
     ...(raw?.stop_steer_at ? { stop_steer_at: raw.stop_steer_at } : {}),
     ...(raw?.stop_reason ? { stop_reason: raw.stop_reason } : {}),
     ...(raw?.until_solved === true ? { until_solved: true } : {}),
@@ -1361,6 +1373,31 @@ export function normalizeBudget(raw: Partial<BudgetRecord> | null | undefined): 
     ...(Array.isArray(raw?.resumes) && raw.resumes.length ? { resumes: raw.resumes } : {}),
     agents,
   };
+}
+
+/**
+ * What a provider said answered a call, against the model id asked for: the
+ * same, the asked alias resolved to one of its dated forms (`gpt-4o` answered
+ * as `gpt-4o-2024-08-06`, `claude-x-latest` as `claude-x-20250101`), or
+ * another model (a substitution: Anthropic's fallback models, a router's
+ * choice). Pi reports the answering id as `responseModel` on an assistant
+ * message only when it differs and only for the APIs that carry one (the
+ * Messages and Chat Completions APIs; not the Responses APIs, Codex's
+ * included), so a call it says nothing of is "same" as far as anyone knows.
+ */
+export function modelAnswered(requested: string, reported: string | undefined | null): "same" | "resolved" | "substituted" {
+  const want = String(requested ?? "").trim().toLowerCase().replace(/^[^/]*\//, "");
+  const got = String(reported ?? "").trim().toLowerCase().replace(/^[^/]*\//, "");
+  if (!got || got === want) return "same";
+  const base = want.replace(/[-_.:@]latest$/, "");
+  if (base && got.startsWith(base) && /^[-_.:@]/.test(got.slice(base.length)) && /\d/.test(got.slice(base.length))) return "resolved";
+  return "substituted";
+}
+
+/** The token marks that are real: whole numbers above zero, ascending, each once. */
+export function tokenMarks(raw: unknown): number[] {
+  if (!Array.isArray(raw)) return [];
+  return [...new Set(raw.map(Number).filter((n) => Number.isSafeInteger(n) && n > 0))].sort((a, b) => a - b);
 }
 
 /** The per-model caps that are real: a positive number under a model id. */
@@ -6120,6 +6157,9 @@ export const TOOL_RESERVED_NAMES = new Set([
   "net_request", "net_fetch", "network", "net_fetch_started", "net_fetch_refused", "net_fetch_restarted",
   // The store sweeps read again after a change of the sweep's rules (extensions/store-sweep.ts rereadSweeps).
   "sweep_reread",
+  // The operator's token marks crossed (--token-alert), and the model a
+  // provider said answered a seat's call when it was not the one asked for.
+  "token_alert", "model_reported",
 ]);
 
 const RUNTIME_EXT: Record<ToolRuntime, string> = { python3: "py", node: "mjs", bash: "sh" };
@@ -8185,6 +8225,39 @@ export function verifyLedgerChain(text: string): { ok: boolean; total: number; c
 
 /** The operator's stop of a run with no sentinel (swarm.sh stop): the outcome stopped, by whom, when, why. */
 export const STOPPED_REL = "done/STOPPED";
+
+/**
+ * The operator's token marks (`--token-alert`) the run has crossed and no
+ * process has told yet, each claimed once on disk (traces/token-alerts/<mark>,
+ * created exclusively), so the hub and a host run's watchdog never tell one
+ * twice and a restarted one does not tell it again; each claimed mark is said
+ * on the board. The caller puts it on the trace and gives it to the notify
+ * hook. Advisory: nothing pauses or stops for it, under any stop policy.
+ */
+export async function claimTokenAlerts(sandboxRoot: string, budget: Pick<BudgetRecord, "tokens" | "token_alerts" | "cap_tokens">): Promise<Array<{ mark: number; tokens: number }>> {
+  const marks = tokenMarks(budget.token_alerts).filter((m) => budget.tokens >= m);
+  if (!marks.length) return [];
+  const dir = join(sandboxRoot, "traces", "token-alerts");
+  await mkdir(dir, { recursive: true });
+  const told: Array<{ mark: number; tokens: number }> = [];
+  for (const mark of marks) {
+    const claimed = await writeFile(join(dir, String(mark)), `${new Date().toISOString()} ${budget.tokens}\n`, { encoding: "utf8", flag: "wx" }).then(
+      () => true,
+      () => false,
+    );
+    if (claimed) told.push({ mark, tokens: budget.tokens });
+  }
+  if (!told.length) return [];
+  const top = told[told.length - 1];
+  const next = tokenMarks(budget.token_alerts).find((m) => m > budget.tokens);
+  const cap = Number(budget.cap_tokens) > 0 ? ` The token cap is ${Number(budget.cap_tokens).toLocaleString("en-US")}.` : "";
+  await systemPost(sandboxRoot, {
+    tag: "result",
+    key: `token-alert-${top.mark}`,
+    body: `TOKEN ALERT: the run has used ${top.tokens.toLocaleString("en-US")} tokens, past the operator's mark${told.length > 1 ? "s" : ""} of ${told.map((t) => t.mark.toLocaleString("en-US")).join(", ")} (--token-alert). The operator is told; nothing pauses or stops for it.${cap}${next ? ` The next mark is ${next.toLocaleString("en-US")}.` : ""}`,
+  }).catch(() => undefined);
+  return told;
+}
 
 /**
  * The notice of a pause, claimed once: whichever process sees an

@@ -861,9 +861,35 @@ export function goalChecks(text: string): string[] {
 export async function goalQuestions(sandboxRoot: string): Promise<GoalQuestions> {
   const doc = await goalDocument(sandboxRoot);
   if (!doc) return { questions: [], existence: [], source: null };
+  // The briefs the checks number questions in, read first (the run's own files).
+  const briefs = new Map<string, string>();
+  for (const path of goalBriefPaths(doc.text)) briefs.set(path, await readFile(join(sandboxRoot, path), "utf8").catch(() => ""));
+  const { questions, existence } = goalQuestionsIn(doc.text, (path) => briefs.get(path) ?? "");
+  return { questions, existence, source: doc.source };
+}
+
+/** The briefs a goal's answers check numbers its questions in (--sections-in), as the check names them. */
+export function goalBriefPaths(text: string): string[] {
+  const out: string[] = [];
+  for (const check of goalChecks(text)) {
+    if (!check.includes("check-answers.ts")) continue;
+    const words = shellWords(check);
+    const i = words.indexOf("--sections-in");
+    if (i >= 0 && words[i + 1] && !out.includes(words[i + 1])) out.push(words[i + 1]);
+  }
+  return out;
+}
+
+/**
+ * The goal's questions from its text (goalQuestions' reading, with no run):
+ * a brief is read through `readBrief`, and one it cannot read (null) is
+ * named in `unread`, its questions unknown.
+ */
+export function goalQuestionsIn(text: string, readBrief: (path: string) => string | null): { questions: string[]; existence: string[]; unread: string[] } {
   const questions: string[] = [];
   const existence: string[] = [];
-  for (const check of goalChecks(doc.text)) {
+  const unread: string[] = [];
+  for (const check of goalChecks(text)) {
     if (!check.includes("check-answers.ts")) continue;
     const words = shellWords(check);
     const opt = (name: string) => {
@@ -872,8 +898,9 @@ export async function goalQuestions(sandboxRoot: string): Promise<GoalQuestions>
     };
     const briefPath = opt("--sections-in");
     if (briefPath) {
-      const brief = await readFile(join(sandboxRoot, briefPath), "utf8").catch(() => "");
-      for (const q of P.briefQuestions(brief)) if (!questions.includes(q)) questions.push(q);
+      const brief = readBrief(briefPath);
+      if (brief === null) unread.push(briefPath);
+      for (const q of P.briefQuestions(brief ?? "")) if (!questions.includes(q)) questions.push(q);
     }
     for (const raw of (opt("--sections") ?? "").split(",")) {
       const sec = P.answerSection(raw.trim());
@@ -885,7 +912,7 @@ export async function goalQuestions(sandboxRoot: string): Promise<GoalQuestions>
       if (id && !existence.includes(id)) existence.push(id);
     }
   }
-  return { questions, existence, source: doc.source };
+  return { questions, existence, unread };
 }
 
 // --- jobs ---------------------------------------------------------------------------------------

@@ -7,7 +7,7 @@ tell them apart:
 
 | How | Set up with | What the preflight prints |
 | --- | --- | --- |
-| A Claude or ChatGPT/Codex **subscription** (OAuth) | `pi /login` | `anthropic subscription (OAuth, refreshed by Pi)` |
+| A ChatGPT/Codex **subscription** (OAuth) | `pi /login` | `openai-codex subscription (OAuth, refreshed by Pi): consumer plan; not for customer data` |
 | A stored **API key** | `pi /login` | `deepseek api_key via Pi's own store` |
 | A provider configured in **models.json** (self-hosted, local, a gateway) | edit `models.json` | `mockswarm api_key via Pi's own store` |
 | A key exported into the shell | `--key-from-env` | `$DEEPSEEK_API_KEY passed to each pane` |
@@ -18,6 +18,23 @@ the authenticating; every hand-rolled version of this check grew a bug that
 either waved through a run with no usable credential or refused one that was
 perfectly fine. The check also refreshes an expired OAuth token as a side
 effect, which is what you want *before* the panes go behind netguard.
+
+**A Claude subscription is refused.** Anthropic does not permit Free, Pro or
+Max subscription credentials in a third-party client such as Pi: an
+`anthropic/*` seat on an OAuth login in Pi's store (or on
+`ANTHROPIC_OAUTH_TOKEN` where the store holds no key) is refused at kickoff in
+every run. Log Pi in to Anthropic with an API key from the Anthropic Console
+(`/logout anthropic`, then `/login anthropic`, choosing the key).
+
+**A customer's case takes API keys only.** `--customer-case` refuses every
+subscription seat (`openai-codex/*` whatever the store says: its terms are a
+consumer plan's, with no processor commitments) and asks whose key each
+provider uses (`--key-owner [PROVIDER=]OWNER`: the customer's own, or your
+business account's with the customer told). The record and custody keep it
+per seat. Codex's subscription stays usable for test and CTF runs, and every
+subscription seat is recorded as "consumer plan; not for customer data"
+([ADR 0003](adr/0003-the-provider-key-comes-from-pis-own-store.md), "Whose
+credential, under which terms").
 
 A subscription needs no API key and no `--key-from-env`. It does need its token
 endpoint on the netguard allowlist, because an access token expires mid-run and

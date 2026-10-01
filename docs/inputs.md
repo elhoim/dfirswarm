@@ -43,10 +43,15 @@ mistake, not against a root that means to. `inputs/` is a
 link to it and `inputs.json` records `guard: "microvm"` and `held: "bind"`,
 links inside the evidence recorded as links. A link that leads out of the
 evidence is refused at kickoff, naming it, since no VM could follow it. When
-the examiner's account can write the evidence, the kickoff warns;
-`--inputs-copy` gives the run its own read-only copy instead
-(`held: "copy"`), which lies on the run's read-only floor in each VM and so
-is read-only but not no-exec. The manifest's sha256 is anchored outside the
+the examiner's account can write the evidence (a file, or a directory whose
+names can change, on a volume mounted read-write), the kickoff refuses it,
+under every stop policy and at `start --check`: nothing on the host holds
+evidence used in place, and a helper writing into a live run's evidence
+folder is what the Breadcrumbs run's custody alert came from. Make it
+read-only first (`chmod -R a-w`, or a read-only mount), or pass
+`--inputs-copy`, the way to start a live run: the run gets its own
+read-only copy (`held: "copy"`), which lies on the run's read-only floor in
+each VM and so is read-only but not no-exec. The manifest's sha256 is anchored outside the
 run at kickoff, and custody re-hashes the evidence in full at stop against it
 (a custody that runs out of time says which files it did not re-read).
 `--inputs-image` is macOS-only (`hdiutil`) in either mode: there is no Linux

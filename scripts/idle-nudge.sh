@@ -138,7 +138,7 @@ has_worked() { # <agent id>
 # Rows a seat's harness writes under the seat's id without its model having
 # answered (scripts/provider-limit.ts SEAT_HARNESS_ROWS; a test holds the two
 # lists the same). A seat's last turn is its last row that is none of these.
-SEAT_HARNESS_ROWS='agent_start agent_stop hub_prompt hub_lost hub_lost_stop context thinking tool_loaded toolchain inputs_guard budget_precall_stop pause_hold run_paused harness_stop extension_error watch_truncated agent_cap_steer agent_cap_stop sentinel_nudge repeat_hint job_hint evidence_code forge_hint publish_needed self_compact compact_config compact_notice compact_warning compact_forced compact_hold compact_note compact_start compact_done compact_failed compact_stalled compact_held harness_record'
+SEAT_HARNESS_ROWS='agent_start agent_stop hub_prompt hub_lost hub_lost_stop context thinking tool_loaded toolchain inputs_guard budget_precall_stop pause_hold run_paused harness_stop extension_error watch_truncated agent_cap_steer agent_cap_stop sentinel_nudge repeat_hint job_hint evidence_code forge_hint publish_needed self_compact compact_config compact_notice compact_warning compact_forced compact_hold compact_note compact_start compact_done compact_failed compact_stalled compact_held harness_record model_reported'
 
 # The tool of the agent's own last turn on the trace: its own rows only (a
 # watchdog's row about it is the system's), the harness's rows passed over.
@@ -333,6 +333,34 @@ host_backstop() {
       bash "$ROOT/scripts/notify.sh" "$SANDBOX" budget_cap "$(jq -c '{spent_usd: (.spent_usd // null), cap_usd: (.cap_usd // null)}' "$SANDBOX/budget.json" 2>/dev/null || echo '{}')" >/dev/null 2>&1 </dev/null || true
     fi
   done <<< "$said"
+}
+
+# The operator's token marks (--token-alert) in a host run: each told once
+# (claimTokenAlerts claims it on disk and says it on the board), on the trace
+# and to the notify hook. A VM run's hub tells them; this is the host's.
+# Advisory: nothing pauses or stops for one.
+host_token_alerts() {
+  [[ -z "$HUB_DIR" ]] || return 0
+  # No marks, no node: this runs every interval.
+  jq -e '(.token_alerts // []) | length > 0' "$SANDBOX/budget.json" >/dev/null 2>&1 || return 0
+  local told mark tokens ts line
+  told="$(node --experimental-strip-types --no-warnings -e '
+    const [protocol, S] = process.argv.slice(1);
+    import(protocol).then(async (P) => {
+      const budget = await P.readBudget(S).catch(() => null);
+      if (!budget || !(budget.token_alerts ?? []).length) return;
+      for (const t of await P.claimTokenAlerts(S, budget)) console.log(`${t.mark} ${t.tokens}`);
+    }).catch(() => undefined);
+  ' "$ROOT/extensions/protocol.ts" "$SANDBOX" 2>/dev/null || true)"
+  while read -r mark tokens; do
+    [[ -n "$mark" ]] || continue
+    ts="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+    line="$(jq -cn --arg ts "$ts" --argjson mark "$mark" --argjson tokens "$tokens" \
+      '{ts: $ts, agent: "system", tool: "token_alert", args: {via: "idle-nudge", mark: $mark}, result: {ok: true, tokens: $tokens}}')"
+    trace_emit "$ROOT" "$SANDBOX" "$line"
+    bash "$ROOT/scripts/notify.sh" "$SANDBOX" token_alert "$(jq -nc --argjson mark "$mark" --argjson tokens "$tokens" '{mark: $mark, tokens: $tokens}')" >/dev/null 2>&1 </dev/null || true
+    echo "idle-nudge: the run crossed the operator's token mark $mark ($tokens tokens)" >&2
+  done <<< "$told"
 }
 
 # The operator is told of a pause once, whichever process wrote it: this
@@ -674,6 +702,7 @@ while :; do
   [[ -f "$SANDBOX/done/SWARM_DONE" || -f "$SANDBOX/done/ALL_AGENTS_DEAD" ]] && exit 0
   ensure_hub
   host_backstop
+  host_token_alerts
   provider_limit_check
   pause_notify
   resume_wake

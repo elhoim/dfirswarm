@@ -36,6 +36,8 @@ case "$(uname -m)" in arm64|aarch64) ARCH=arm64 ;; *) ARCH=amd64 ;; esac
 mkdir -p "$TMP/ev/mail"
 printf 'notes\n' > "$TMP/ev/notes.txt"
 printf 'attachment' > "$TMP/ev/mail/a.bin"
+# Read-only, as a VM run's evidence used in place must be (writable is refused).
+chmod -R a-w "$TMP/ev"
 
 # --- refusals, before anything is written ---------------------------------------
 out="$(start --isolation vmware --label bad-iso)"; rc=$?
@@ -193,6 +195,7 @@ grep -q 'case.E01 -> ' <<<"$out" || fail "the refusal does not name the link: $o
 grep -q 'inside-link' <<<"$out" && fail "a link that stays inside the evidence was refused: $out"
 [[ -z "$(jq -r '.runs[]? | select(.label == "bad-link") | .id' "$TMP/runs/registry.json" 2>/dev/null)" ]] || fail "the refused kickoff left a run"
 rm "$TMP/ev-link/case.E01"
+chmod -R a-w "$TMP/ev-link"
 out="$(start --isolation microvm --inputs "$TMP/ev-link" --label vm-inside-link)"; rc=$?
 [[ $rc -eq 0 ]] || fail "evidence whose only link stays inside it was refused: $out"
 pass "evidence with a link leading out of it is refused under microvm, naming the link; a link that stays inside is fine"
@@ -485,26 +488,36 @@ node --experimental-strip-types --no-warnings --input-type=module -e "
 " || fail "the agents' own inputs check does not walk both sets through their links"
 (cd "$sbx" && python3 "$ROOT/packs/computer-forensics-base/tools/check_inputs/run.py" >/dev/null) || fail "the pack's check_inputs takes a set's link for an added name"
 # The files stay as the manifest found them (read-only) until every check has run.
-chmod -R u+w "$TMP/sets"
 # A link out of a set, and into no other, dangles in every VM: refused, naming its set.
+chmod u+w "$TMP/sets/phone"
 ln -s "$TMP/elsewhere/case.E01" "$TMP/sets/phone/out.E01"
+chmod a-w "$TMP/sets/phone"
 out="$(start --isolation microvm --inputs "$TMP/sets/laptop" --inputs "$TMP/sets/phone" --label vm-sets-out)"; rc=$?
 [[ $rc -eq 2 ]] || fail "a set with a link out of the evidence exited $rc under microvm, wanted 2: $out"
 grep -q "BLOCKER: under --isolation microvm, --inputs $phone_real is mounted into each VM as it is" <<<"$out" || fail "the refusal does not name the set: $out"
 grep -q 'from-laptop' <<<"$out" && fail "a link into another set was refused: $out"
+chmod u+w "$TMP/sets/phone"
 rm "$TMP/sets/phone/out.E01"
 pass "two sets in a VM run are a link each under inputs/, each mounted read-only and no-exec, walked by every check; a link out of a set is refused, one into another is not"
 
 chmod u+w "$TMP/ev-mixed/a.txt"
-out="$(start --isolation microvm --inputs "$TMP/ev-mixed" --label vm-writable)"
-grep -q 'is writable by this account' <<<"$out" || fail "writable evidence used in place is not warned about: $out"
+out="$(start --isolation microvm --inputs "$TMP/ev-mixed" --label vm-writable)"; rc=$?
+[[ $rc -eq 2 ]] || fail "writable evidence used in place exited $rc, wanted 2: $out"
+grep -q 'BLOCKER: the evidence in .* is writable by this account (.* and perhaps more' <<<"$out" || fail "writable evidence used in place is not refused, naming what is writable: $out"
+grep -q -- '--inputs-copy' <<<"$out" && grep -q 'chmod -R a-w' <<<"$out" || fail "the refusal does not name both ways out: $out"
+[[ -z "$(jq -r '.runs[]? | select(.label == "vm-writable") | .id' "$TMP/runs/registry.json" 2>/dev/null)" ]] || fail "the refused kickoff left a run"
+out="$(start --isolation microvm --inputs "$TMP/ev-mixed" --label vm-writable-check --check)"; rc=$?
+[[ $rc -eq 2 ]] && grep -q 'is writable by this account' <<<"$out" || fail "start --check does not say the start would be refused over writable evidence ($rc): $out"
+# Under every stop policy: the operator's own as well.
+out="$(start --isolation microvm --inputs "$TMP/ev-mixed" --stop operator --label vm-writable-operator)"; rc=$?
+[[ $rc -eq 2 ]] && grep -q 'is writable by this account' <<<"$out" || fail "writable evidence was let through under --stop operator ($rc): $out"
 out="$(start --isolation microvm --inputs "$TMP/ev-link" --inputs-copy --label vm-copy)"; rc=$?
 [[ $rc -eq 0 ]] || fail "--inputs-copy exited $rc: $out"
 sbx="$(sandbox_of "$out")"
 [[ -d "$sbx/inputs" && ! -L "$sbx/inputs" ]] || fail "--inputs-copy did not copy the evidence into the run"
 [[ "$(jq -r '.held' "$sbx/inputs.json")" == "copy" ]] || fail "the manifest does not say the evidence was copied"
 [[ -z "$(find "$sbx/inputs" -type f -perm -u+w)" ]] || fail "the copy is writable"
-pass "writable evidence used in place is warned about; --inputs-copy gives the run its own read-only copy"
+pass "writable evidence used in place is refused under every stop policy and at --check, naming both ways out; --inputs-copy gives the run its own read-only copy"
 
 # --- a reused sandbox starts clean; a prepared VM run touches no host tool ---------------
 reuse="$TMP/reused"

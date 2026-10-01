@@ -317,3 +317,41 @@ test("every seat's header names the questions that must be established while the
   const plain = await run({ goal: goal([]) });
   assert.ok(!Q.questionsDigest("a0", await Q.viewContext(plain.S), told).lines.some((l) => /Must be established/.test(l)));
 });
+
+test("start --check says what the seed says before the run exists: a question the goal requires and does not number requires nothing (questions-cli goal-check)", async () => {
+  // The goal's questions from its text alone, as goalQuestions reads them from a run.
+  const gq = L.goalQuestionsIn(goal(["1", "7"]), () => null);
+  assert.deepEqual([gq.questions, gq.unread], [["1", "2"], []]);
+  assert.deepEqual(Q.mustEstablishUnknownIn(goal(["1", "7"]), gq.questions), ["7"]);
+  assert.deepEqual(Q.mustEstablishUnknownIn(goal(["Q-2"]), gq.questions), [], "Q-2 is question 2, as the goal numbers it");
+  assert.deepEqual(Q.mustEstablishUnknownIn(goal([]), gq.questions), []);
+  // A brief the check cannot read leaves its questions unknown: named as unread, and nothing called unknown wrongly.
+  const briefGoal = goal(["4"]).replace("--sections 1,2 --existence 2", "--sections-in inputs/brief.md");
+  const unread = L.goalQuestionsIn(briefGoal, () => null);
+  assert.deepEqual(unread.unread, ["inputs/brief.md"]);
+  const read = L.goalQuestionsIn(briefGoal, (p) => (p === "inputs/brief.md" ? "## Question 3\n\nWhat ran?\n\n## Question 4\n\nWho ran it?\n" : null));
+  assert.deepEqual(read.unread, []);
+  assert.ok(read.questions.includes("4"), JSON.stringify(read.questions));
+  assert.deepEqual(Q.mustEstablishUnknownIn(briefGoal, read.questions), []);
+  // The same reading the run's own seed makes.
+  const typo = await run({ goal: goal(["7"]) });
+  assert.deepEqual((await Q.seedRegister(typo.S)).must_establish_unknown, ["7"]);
+});
+
+test("the report says which questions were required to be established, by whom and why, and which requirement the operator released", async () => {
+  const { renderReportBodyMarkdown } = await import("../scripts/report-body.ts");
+  const r = await run({ goal: goal(["1: the flag is the answer"]) });
+  await Q.seedRegister(r.S);
+  const added = await okAct(r.S, OPERATOR, "open", { text: "Which account installed the remote tool?", why: "the client asks", must_establish: true });
+  await okAct(r.S, OPERATOR, "amend", { q: added.q!, expected_rev: 1, must_establish: false, why: "the client takes what the log holds" });
+  const md = await renderReportBodyMarkdown(r.S);
+  const said = md.split("\n").find((l) => l.includes("Must be established."));
+  assert.ok(said, md.slice(0, 4000));
+  assert.match(said!, /Q-1 \(required by the goal: the flag is the answer\)/);
+  assert.match(said!, new RegExp(`The requirement was released on one question: ${added.q}, by ops@lab, operator, claimed, not enrolled, via cli at [0-9T:.Z-]+ \\(the client takes what the log holds\\)`));
+  assert.match(md, /must be established/);
+  // A run that requires nothing says nothing of it.
+  const plain = await run({ goal: goal([]) });
+  await Q.seedRegister(plain.S);
+  assert.doesNotMatch(await renderReportBodyMarkdown(plain.S), /Must be established\./);
+});

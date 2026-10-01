@@ -702,8 +702,15 @@ export type Custody = {
   checks: Check[];
   /** How long each part took, and the evidence read. */
   timing: { phases: Record<string, number>; evidence_bytes: number; evidence_mb_per_s: number | null; total_ms: number };
-  /** The models the run's agents were given (team.json), and the model ids the gateway saw answer, when it had one. */
-  models: { team: Array<{ agent: string; model: string | null }>; gateway_answered: string[] | null };
+  /**
+   * The models the run's agents were given (team.json), and the model ids the
+   * gateway saw answer, when it had one; and whose credential each seat used
+   * and under which terms, as the kickoff anchored it outside the run
+   * (`credentials`: api_key, oauth with its plan, local, other; the owner the
+   * operator named with --key-owner; whether it was a customer's case). Null
+   * credentials for a run from before the kickoff anchored them.
+   */
+  models: { team: Array<{ agent: string; model: string | null }>; gateway_answered: string[] | null; credentials?: AnchoredCredentials | null };
   /** A reference clock's offset from the host's, when the operator named one. */
   time_reference: { url: string; at: string; offset_ms: number | null; precision_ms: number; error?: string } | null;
   /** Parts custody never reached, for a verdict written when it was ended. */
@@ -761,6 +768,9 @@ export type CustodyState = {
   errors?: Record<string, string>;
   timing?: Custody["timing"];
 };
+
+/** Whose credential each seat used, as the kickoff anchored it (swarm.sh credentials_json). */
+export type AnchoredCredentials = { customer_case: boolean; seats: Array<{ seat: string; model: string; provider: string; credential: string; owner: string | null; plan?: string }> };
 
 /** The model gateway's call log and totals, beside the trace (scripts/model-gateway.ts). */
 export const GATEWAY_LOG = "traces/model-gateway.jsonl";
@@ -1068,7 +1078,7 @@ export async function takeCustody(sandboxInput: string, options: CustodyOptions 
     return deadline.over;
   };
   const say = options.progress ?? (() => undefined);
-  let anchor: { inputs_manifest_sha256?: string; case_policy_sha256?: string; run?: string; isolation?: string } | null = null;
+  let anchor: { inputs_manifest_sha256?: string; case_policy_sha256?: string; run?: string; isolation?: string; credentials?: unknown } | null = null;
   const anchorFile = await anchorPathFor(sandbox);
   try {
     anchor = JSON.parse(await readRegularTextOutside(anchorFile));
@@ -1723,7 +1733,7 @@ export async function takeCustody(sandboxInput: string, options: CustodyOptions 
     });
     answered = [...seen].sort();
   }
-  state.models = { team: teamModels, gateway_answered: answered };
+  state.models = { team: teamModels, gateway_answered: answered, credentials: anchoredCredentials(anchor?.credentials) };
 
   // --- the operator's audit -------------------------------------------------------
   // Beside the registry, where no pane writes: its chain, and each operator
@@ -2011,6 +2021,29 @@ export function verdictOf(state: CustodyState, incomplete: string | null): Custo
   return { ...c, summary: summaryOf(c, { traceProblem: state.traceProblem ?? null, traceAnchored: state.traceAnchored ?? false }) };
 }
 
+/** The anchor's credentials, read as what they must be, or null. */
+export function anchoredCredentials(raw: unknown): AnchoredCredentials | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as { customer_case?: unknown; seats?: unknown };
+  if (!Array.isArray(r.seats)) return null;
+  const str = (v: unknown) => (typeof v === "string" ? v : "");
+  const seats = r.seats
+    .filter((x): x is Record<string, unknown> => Boolean(x) && typeof x === "object")
+    .map((x) => ({ seat: str(x.seat), model: str(x.model), provider: str(x.provider), credential: str(x.credential) || "other", owner: str(x.owner) || null, ...(str(x.plan) ? { plan: str(x.plan) } : {}) }));
+  return { customer_case: r.customer_case === true, seats };
+}
+
+/** Whose credential the seats used, in one line: by provider, kind and owner, with how many seats. */
+export function credentialsWords(c: AnchoredCredentials): string {
+  const groups = new Map<string, number>();
+  for (const s of c.seats) {
+    const kind = s.credential === "oauth" ? `subscription (OAuth: ${s.plan ?? "consumer plan; not for customer data"})` : s.credential === "api_key" ? "API key" : s.credential === "local" ? "local model, no key" : "key from the environment or models.json";
+    const key = `${s.provider} ${kind}${s.owner ? `, the key of ${s.owner}` : s.credential === "local" ? "" : ", owner not named"}`;
+    groups.set(key, (groups.get(key) ?? 0) + 1);
+  }
+  return `credentials${c.customer_case ? " (a customer's case: API keys only)" : ""}: ${[...groups].map(([k, n]) => `${k} (${plural(n, "seat")})`).join("; ")}`;
+}
+
 function plural(n: number, one: string, many = `${one}s`): string {
   return `${n} ${n === 1 ? one : many}`;
 }
@@ -2216,6 +2249,7 @@ function summaryOf(c: Omit<Custody, "summary">, t: { traceProblem: string | null
   if (c.not_reached.length) parts.push(`NOT CHECKED BEFORE CUSTODY ENDED: ${c.not_reached.join(", ")}`);
   if (c.incomplete) parts.push(`CUSTODY INCOMPLETE: ${c.incomplete}`);
   if (c.time_reference) parts.push(c.time_reference.offset_ms === null ? `REFERENCE CLOCK NOT READ (${c.time_reference.url}: ${c.time_reference.error ?? "no answer"})` : `the host's clock ${c.time_reference.offset_ms >= 0 ? "behind" : "ahead of"} ${c.time_reference.url} by ${Math.abs(c.time_reference.offset_ms)} ms (± ${c.time_reference.precision_ms} ms)`);
+  if (c.models?.credentials?.seats.length) parts.push(credentialsWords(c.models.credentials));
   parts.push(checksLine(c.checks));
   // What the anchors are: files of the operator's own account beside the run. They hold the agents to account, not the operator.
   parts.push("anchors are the operator's own files beside the run: they hold the agents to account; a signature and an external timestamp hold the verdict itself");

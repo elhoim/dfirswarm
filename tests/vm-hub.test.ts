@@ -2283,3 +2283,82 @@ test("the lead register goes through the hub as the channel's seat, and a wait h
   assert.match(woke.detail, /lead_ready: every need of L-1/);
   assert.ok(existsSync(join(sandbox, "leads", "leads.md")), "the hub renders the register");
 });
+
+test("token alerts under --stop operator: each mark the run crosses is told once (the board, the trace, the notify hook), across a restart of the hub, and nothing pauses or stops for it", async () => {
+  const pre = await mkdtemp(join(tmpdir(), "dfh-tokens-"));
+  cleanups.push(() => rm(pre, { recursive: true, force: true }));
+  const probe = await setup();
+  const fake = await fakeVmCli(pre, probe.sandbox);
+  await probe.hub.stop();
+  const heard = join(pre, "notify.log");
+  await writeFile(join(dirname(fake.cli), "notify.sh"), `printf '%s\\t%s\\n' "$2" "$3" >> ${JSON.stringify(heard)}\n`);
+  const { hub, sandbox, dir, agents, base, lines } = await setup({ extra: { run: "t1", vmCli: fake.cli } });
+  (hub.cfg as { registry?: string }).registry = join(base, "runs", "registry.json");
+  await mkdir(join(base, "runs", "notify"), { recursive: true });
+  await writeFile(join(base, "runs", "notify", "t1.cmd"), "cat > /dev/null\n", { mode: 0o600 });
+  const budgetFile = join(sandbox, "budget.json");
+  const setTokens = async (tokens: number) => {
+    const budget = JSON.parse(await readFile(budgetFile, "utf8")) as Record<string, any>;
+    await writeFile(budgetFile, JSON.stringify({ ...budget, stop_policy: "operator", until_solved: true, wall_clock_minutes: 0, cap_tokens: 10_000, token_alerts: [5_000, 1_000, 1_000], tokens, agents: { ...budget.agents, a0: { ...emptyAgentBudget(), tokens } } }));
+  };
+  const posts = async () => {
+    const out: string[] = [];
+    for (const f of await readdir(join(sandbox, "threads", "main"))) out.push(await readFile(join(sandbox, "threads", "main", f), "utf8"));
+    return out.filter((t) => t.includes("TOKEN ALERT"));
+  };
+  const told = () => (existsSync(heard) ? readFileSync(heard, "utf8").trim().split("\n").filter((l) => l.startsWith("token_alert\t")) : []);
+  await setTokens(500);
+  await hub.backstop();
+  assert.deepEqual(await posts(), [], "below every mark nothing is said");
+  await setTokens(2_000);
+  await hub.backstop();
+  await hub.backstop();
+  await until(() => told().length === 1, "the operator heard the first mark");
+  assert.deepEqual(JSON.parse(told()[0].split("\t")[1]), { mark: 1_000, tokens: 2_000, cap_tokens: 10_000 });
+  const first = await posts();
+  assert.equal(first.length, 1, "one board post for the mark");
+  assert.match(first[0], /past the operator's mark of 1,000 \(--token-alert\)\. The operator is told; nothing pauses or stops for it\. The token cap is 10,000\. The next mark is 5,000\./);
+  assert.ok(lines.some((l) => l.tool === "token_alert" && (l.args as { mark?: number }).mark === 1_000), "on the trace as the harness's line");
+  // Past the cap under --stop operator, and past the last mark: told, and the run neither pauses nor stops.
+  await setTokens(12_000);
+  await hub.backstop();
+  await hub.backstop(Date.now() + 5 * 60_000);
+  await until(() => told().length === 2, "the operator heard the second mark");
+  assert.equal(JSON.parse(told()[1].split("\t")[1]).mark, 5_000);
+  const after = JSON.parse(await readFile(budgetFile, "utf8")) as Record<string, unknown>;
+  assert.equal(after.paused ?? null, null, "no pause");
+  assert.equal(existsSync(join(sandbox, SENTINEL_REL)), false, "no stop");
+  // A hub restarted over the same run tells nothing again.
+  await hub.stop();
+  const again = new Hub({ ...hub.cfg, sandbox, dir, agents });
+  await again.start();
+  cleanups.push(async () => again.stop().catch(() => undefined));
+  await again.backstop();
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(told().length, 2, "each mark told once, whichever hub looks");
+  assert.equal((await posts()).length, 2);
+});
+
+test("a seat's harness that sees the provider answer with another model is heard: the operator's hook is told once per seat and model, by the seat's id; a resolved alias is not told", async () => {
+  const pre = await mkdtemp(join(tmpdir(), "dfh-model-"));
+  cleanups.push(() => rm(pre, { recursive: true, force: true }));
+  const probe = await setup();
+  const fake = await fakeVmCli(pre, probe.sandbox);
+  await probe.hub.stop();
+  const heard = join(pre, "notify.log");
+  await writeFile(join(dirname(fake.cli), "notify.sh"), `printf '%s\\t%s\\n' "$2" "$3" >> ${JSON.stringify(heard)}\n`);
+  const { hub, base, lines } = await setup({ extra: { run: "t1", vmCli: fake.cli } });
+  (hub.cfg as { registry?: string }).registry = join(base, "runs", "registry.json");
+  await mkdir(join(base, "runs", "notify"), { recursive: true });
+  await writeFile(join(base, "runs", "notify", "t1.cmd"), "cat > /dev/null\n", { mode: 0o600 });
+  const reported = (reportedModel: string, answered: string) => exchange(hub.socketFor("a0"), { ts: new Date().toISOString(), agent: "a0", tool: "model_reported", args: { requested: "anthropic/claude-x", reported: reportedModel }, result: { ok: true, answered } });
+  assert.equal((await reported("claude-x-20260101", "resolved")).ok, true);
+  assert.equal((await reported("claude-y", "substituted")).ok, true);
+  assert.equal((await reported("claude-y", "substituted")).ok, true);
+  const told = () => (existsSync(heard) ? readFileSync(heard, "utf8").trim().split("\n").filter((l) => l.startsWith("model_substitution\t")) : []);
+  await until(() => told().length === 1, "the operator heard the substitution");
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(told().length, 1, "once per seat and model");
+  assert.deepEqual(JSON.parse(told()[0].split("\t")[1]), { agent: "a0" });
+  assert.equal(lines.filter((l) => l.tool === "model_reported").length, 3, "every line reaches the trace");
+});
