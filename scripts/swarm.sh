@@ -3864,7 +3864,10 @@ cmd_start() {
   # the case takes as given, carried into a `## Premises` section the same
   # way; each is a given of the premise register (P-n). And presumes: what
   # each question takes as happened (`- 7: <what>`), carried into a
-  # `## Presumptions` section; its answer tests that premise first.
+  # `## Presumptions` section; its answer tests that premise first. And
+  # must_establish: the questions only an answer that answers them ends
+  # the run on (`must_establish: [1, 3]`, or a list of `- 1: why`), carried
+  # into a `## Must establish` section (docs/adr/0013).
   # The case policy, from the flags, the goal's metadata block (read before
   # it is stripped) and the preset: refused here when it contradicts itself,
   # never guessed. `network: open` is --no-netguard.
@@ -3967,6 +3970,21 @@ if m:
     if presumes and not re.search(r"^#{2,3}[ \t]*Presumptions[ \t]*$", body, re.M | re.I):
         body = body.rstrip("\n") + "\n\n## Presumptions\n\n" + "".join("- " + x + "\n" for x in presumes)
     out["presumes"] = len(presumes)
+    # The questions that must be established (docs/adr/0013, "A question that
+    # must be established"): an inline list ([1, 3] or 1, 3) or a list of
+    # "- <question>[: why]" lines, carried the same way into a Must establish
+    # section, where the question register reads it.
+    required = []
+    rblock = re.search(r"^must_establish:[ \t]*(.*?)\r?\n((?:[ \t]+-[^\n]*\n?)*)", m.group(0), re.M)
+    if rblock:
+        inline = rblock.group(1).strip().strip("[]")
+        required += [x.strip().strip("\"'") for x in inline.split(",") if x.strip().strip("\"'")]
+        for item in re.findall(r"^[ \t]+-[ \t]*(.*?)[ \t]*\r?$", rblock.group(2), re.M):
+            if item.strip():
+                required.append(item.strip())
+    if required and not re.search(r"^#{2,3}[ \t]*Must establish[ \t]*$", body, re.M | re.I):
+        body = body.rstrip("\n") + "\n\n## Must establish\n\n" + "".join("- " + x + "\n" for x in required)
+    out["must_establish"] = len(required)
     with open(path, "w", encoding="utf-8") as f:
         f.write(body)
 # A goal with a case brief and no premises designated (docs/adr/0011,
@@ -5617,8 +5635,16 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
   fi
   # The question register opens with the goal's questions and objectives
   # (extensions/questions.ts): Q-n is question:n from its first event.
-  SWARM_RUNS_DIR="$RUNS_DIR" node --experimental-strip-types --no-warnings "$ROOT/scripts/questions-cli.ts" seed "$sandbox" >/dev/null 2>&1 \
-    || echo "WARN: the question register could not be seeded now; the first act on it seeds it from the goal." >&2
+  # A Must establish section that names what the goal does not number
+  # requires nothing (docs/adr/0013): said, so a typo cannot quietly lower
+  # the bar the run ends on.
+  local seeded_out
+  if seeded_out="$(SWARM_RUNS_DIR="$RUNS_DIR" node --experimental-strip-types --no-warnings "$ROOT/scripts/questions-cli.ts" seed "$sandbox" 2>/dev/null)"; then
+    jq -r 'if (.must_establish // []) | length > 0 then "Required:     \(.must_establish | join(", ")) must be established: only an answer that answers each ends the run on it, or your acceptance of its limits" else empty end' <<<"$seeded_out" 2>/dev/null || true
+    jq -r 'if (.must_establish_unknown // []) | length > 0 then "WARN: the goal says these must be established and numbers no such question, so nothing is required of them: \(.must_establish_unknown | join(", ")). Name a question as the goal numbers it (- 1), or require it once the run exists: swarm.sh question <run> amend Q-n --expect-rev N --must-establish --why \"…\"" else empty end' <<<"$seeded_out" >&2 2>/dev/null || true
+  else
+    echo "WARN: the question register could not be seeded now; the first act on it seeds it from the goal." >&2
+  fi
   # The operator's notify command, outside the run and 0600: a webhook's
   # URL is often its secret, and nothing an agent writes may name what the
   # host runs.

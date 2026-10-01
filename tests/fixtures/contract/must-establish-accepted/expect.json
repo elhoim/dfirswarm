@@ -1,0 +1,38 @@
+{
+  "case": "The operator requires question 1 to be established after its partial answer was reviewed, then accepts its limits (bounded) for that revision and the answer standing; question 2 is established and attested.",
+  "design": [
+    "docs/adr/0013 'A question that must be established': the operator's acceptance stays a disposition for a question that must be established: it is the release, on the record, for that revision and that answer; the run ends examination-limited.",
+    "docs/adr/0013 'Decision', 9 (operator acceptance): revision-bound, refused while a lead is open or a negative unreviewed; any acceptance makes the run examination-limited.",
+    "docs/adr/0017 addendum 'Measuring a rule change': readiness, the answers check and the finish gate never disagree on a question."
+  ],
+  "policies": [
+    "operator",
+    "cap-pause",
+    "cap-stop"
+  ],
+  "expect": {
+    "questions": {
+      "question:1": {
+        "gate_outcome": "accepted",
+        "best_candidate": false,
+        "readiness_holds": false,
+        "defects": [],
+        "warnings": []
+      },
+      "question:2": {
+        "disposition": "established",
+        "best_candidate": false,
+        "readiness_holds": false,
+        "defects": [],
+        "warnings": []
+      }
+    },
+    "ready": true,
+    "verdict": {
+      "proceed": true,
+      "outcome": "examination_limited"
+    },
+    "done": "proceeds",
+    "agreement": []
+  }
+}

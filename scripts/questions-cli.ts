@@ -4,12 +4,14 @@
  * the CLI and, through `swarm.sh question`, the console.
  *
  *   questions-cli.ts seed <sandbox>                         put the goal's questions and objectives on the chain
- *   questions-cli.ts add <sandbox> --text T --why W [--presumes P] [...]
+ *   questions-cli.ts add <sandbox> --text T --why W [--presumes P] [--must-establish] [...]
  *                                                           a person's question (analyst, reviewer, observer, examiner);
- *                                                           --presumes: what it takes as happened, tested first
+ *                                                           --presumes: what it takes as happened, tested first;
+ *                                                           --must-establish: only an answer that answers it ends the run
+ *                                                           on it (the operator's or an examiner's)
  *   questions-cli.ts list <sandbox> [--json]                every question: triage and clarifications first
  *   questions-cli.ts show <sandbox> Q-n [--json]            one question whole, with its history and signatures checked
- *   questions-cli.ts amend <sandbox> Q-n --expect-rev N [--text T] [--why W] [--neutral T] [--presumes P] [...]
+ *   questions-cli.ts amend <sandbox> Q-n --expect-rev N [--text T] [--why W] [--neutral T] [--presumes P] [--must-establish | --no-must-establish] [...]
  *   questions-cli.ts priority <sandbox> Q-n urgent|normal [--reason R]
  *   questions-cli.ts scope <sandbox> Q-n|L-n in_scope|excluded --why W
  *   questions-cli.ts withdraw <sandbox> Q-n --why W
@@ -504,6 +506,7 @@ function line(v: Q.QuestionView): string {
     v.parent ? `follows ${v.parent}` : null,
     v.leading_forms.length ? `leading form ${v.leading_forms.map((f) => `"${f}"`).join(", ")}` : null,
     v.after_done ? "after done: a follow-up" : null,
+    v.must_establish?.required ? `must be established (required by ${Q.originWords(v.must_establish.origin)})` : null,
   ].filter(Boolean);
   const state = v.answer ? `answer E-${v.answer.seq}${v.answer.stale ? ` (STALE: before revision ${v.rev})` : ""}${v.answer.parts?.length ? `; parts: ${PM.partsWords(v.answer.parts)}` : ""}${v.answer.premises?.length ? `; premises: ${PM.citationsWords(v.answer.premises)}` : ""}${v.answer.omitted?.length ? `; a review says it leaves out: ${v.answer.omitted.map((x) => `"${x.part}" (${x.by})`).join(", ")}` : ""}` : "no answer";
   const leads = v.leads.length ? `; leads ${v.leads.map((l) => `${l.id} ${l.status}${l.holder ? ` (${l.holder})` : ""}`).join(", ")}` : "";
@@ -582,6 +585,8 @@ export async function showText(sandbox: string, id: string): Promise<string | nu
   if (v.expects) out.push(`    expects: ${v.expects}`);
   if (v.completeness) out.push(`    asks for a complete set (${v.completeness_by === "asker" ? "the asker says so" : "by its words"}): an established or partial answer rests on a coverage record naming the areas searched`);
   if (v.presumption) out.push(`    presumes ${PM.presumptionWords(v.presumption)}: its answer tests that premise first`);
+  if (v.must_establish?.required) out.push(`    must be established: required by ${Q.originWords(v.must_establish.origin)} at ${v.must_establish.at}${v.must_establish.why ? ` (${v.must_establish.why})` : ""}; partial, not determinable, a bounded negative short of the stronger bar and out of scope end no run on it`);
+  else if (v.must_establish) out.push(`    the requirement that it be established was released by ${Q.originWords(v.must_establish.origin)} at ${v.must_establish.at}: ${v.must_establish.why ?? ""}`);
   if (v.hints.length) out.push(`    hints: ${v.hints.map((h) => `${h.ref}${h.value ? ` (says: ${h.value})` : ""}`).join("; ")}`);
   if (v.attachments.length) out.push(`    attachments: ${v.attachments.join(", ")}`);
   if (v.suggested_to) out.push(`    suggested to: ${v.suggested_to}`);
@@ -663,6 +668,8 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     ...(one("--presumes") !== undefined ? { presumes: one("--presumes") } : {}),
     // --completeness: the question asks for a complete set (every one, all, each); --no-completeness: it does not, whatever its words.
     ...(flags.has("--completeness") ? { completeness: true } : flags.has("--no-completeness") ? { completeness: false } : {}),
+    // --must-establish: only an answer that answers it ends the run on it; --no-must-establish (on amend, with --why): the requirement released (docs/adr/0013).
+    ...(flags.has("--must-establish") ? { must_establish: true } : flags.has("--no-must-establish") ? { must_establish: false } : {}),
     ...(opts.has("--hint") ? { hints: hintsFrom(rest) } : {}),
     ...(opts.has("--attach") ? { attachments: opts.get("--attach") } : {}),
     ...(one("--suggest") !== undefined ? { suggested_to: one("--suggest") } : {}),

@@ -1,0 +1,42 @@
+{
+  "case": "Question 1 must be established (the goal's Must establish section); its answer is partial on a finding, reviewed by another seat that holds the open part as the answer declares it, which is a disposition under the ordinary bar; question 2 is established and attested.",
+  "design": [
+    "docs/adr/0013 'A question that must be established': for a question the goal or the operator requires to be established, partial, not determinable, a bounded negative short of the stronger bar and out of scope are no disposition, under every stop policy; the finish gate names the requirement, the done is refused on the question, and readiness holds it as the done does.",
+    "docs/adr/0013 'The end of a run, under every stop policy': done finishes a run only when every question in scope has a disposition under the bar.",
+    "docs/adr/0017 addendum 'Measuring a rule change': readiness, the answers check and the finish gate never disagree on a question."
+  ],
+  "policies": [
+    "operator",
+    "cap-pause",
+    "cap-stop"
+  ],
+  "expect": {
+    "questions": {
+      "question:1": {
+        "disposition": null,
+        "gate_outcome": "limited",
+        "best_candidate": false,
+        "readiness_holds": true,
+        "readiness_includes": [
+          "must_establish"
+        ],
+        "defects": [],
+        "warnings": []
+      },
+      "question:2": {
+        "disposition": "established",
+        "best_candidate": false,
+        "readiness_holds": false,
+        "defects": [],
+        "warnings": []
+      }
+    },
+    "ready": false,
+    "verdict": {
+      "proceed": false,
+      "failing": "question:1"
+    },
+    "done": "held",
+    "agreement": []
+  }
+}

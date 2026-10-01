@@ -731,7 +731,12 @@ Done
   bounded negative that says the event did not happen under the stronger bar); one that rests on a
   not_determinable, a partial, a bounded negative, an acceptance, or a route closed deferred or
   infeasible ends examination-limited, and says so. A cap or the operator may end the run before
-  that; such an end is paused or stopped, never completed.
+  that; such an end is paused or stopped, never completed. A question the goal or the operator
+  requires to be established (your header's "Must be established", and `questions`) takes more:
+  only an answer that establishes it on a standing finding another seat attests, shows its premise
+  does not hold, or settles it by a bounded negative under the stronger bar; partial and not
+  determinable do not end the run on it, so keep working it, and only the operator accepts its
+  limits or releases it.
 - When SWARM.md says the run is until solved (--stop operator), there is no wall clock, the caps are
   advisory and an abandon is refused; it asks nothing more of an answer than any run does, and ends
   on the same dispositions. A provider error or a rate limit is waited out; it never ends the run. When nothing moves, the harness posts a regroup listing what is open:

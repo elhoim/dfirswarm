@@ -58,6 +58,10 @@ const WRITTEN_WITH_PRESUMES = new Set(["premise-untested-capped", "premise-untes
 const BEFORE_LIMITED = "373d3cfd6cdceb944611c201115c8a8103bbb5b2";
 /** The histories written with limited parts or under the rival-area cap: a harness before them has neither. */
 const WRITTEN_WITH_LIMITED = new Set(["limited-part-partial", "rival-area-uncovered"]);
+/** The harness before a question could be required to be established (docs/adr/0013, "A question that must be established"): main when it was built. */
+const BEFORE_MUST_ESTABLISH = "c61bc2b7816de352644db8df6608f48a51e78793";
+/** The histories written for that rule: a harness before it reads no requirement, and disposes what it holds. */
+const WRITTEN_WITH_MUST_ESTABLISH = new Set(["must-establish-partial", "must-establish-not-determinable", "must-establish-accepted"]);
 /**
  * The histories whose recorded reviews locate a value no coverage record
  * covers where a rival could live: the rival-area rule, replayed, would cap
@@ -320,7 +324,7 @@ test("old histories replayed unchanged: every fixture recorded before the source
   const work = await tmp("contract-before-delta-");
   const old = join(work, "harness-c34c6cb");
   await extractCommit(BEFORE_DELTA, old);
-  const names = fixtures.map((f) => f.name).filter((n) => !WRITTEN_WITH_DELTA.has(n) && !WRITTEN_WITH_PREMISES.has(n) && !WRITTEN_FOR_ACCEPTANCE.has(n) && !WRITTEN_WITH_PRESUMES.has(n) && !WRITTEN_WITH_LIMITED.has(n));
+  const names = fixtures.map((f) => f.name).filter((n) => !WRITTEN_WITH_DELTA.has(n) && !WRITTEN_WITH_PREMISES.has(n) && !WRITTEN_FOR_ACCEPTANCE.has(n) && !WRITTEN_WITH_PRESUMES.has(n) && !WRITTEN_WITH_LIMITED.has(n) && !WRITTEN_WITH_MUST_ESTABLISH.has(n));
   // One copy per checkout, each evaluated in one process per checkout (replay's own copy, and the custody anchor beside it).
   const copies = async (label: string) => {
     const out: string[] = [];
@@ -354,7 +358,7 @@ test("old histories replayed unchanged: every fixture recorded before the premis
   const work = await tmp("contract-before-premises-");
   const old = join(work, "harness-be4e6a3");
   await extractCommit(BEFORE_PREMISES, old);
-  const names = fixtures.map((f) => f.name).filter((n) => !WRITTEN_WITH_PREMISES.has(n) && !WRITTEN_FOR_ACCEPTANCE.has(n) && !WRITTEN_WITH_PRESUMES.has(n) && !WRITTEN_WITH_LIMITED.has(n));
+  const names = fixtures.map((f) => f.name).filter((n) => !WRITTEN_WITH_PREMISES.has(n) && !WRITTEN_FOR_ACCEPTANCE.has(n) && !WRITTEN_WITH_PRESUMES.has(n) && !WRITTEN_WITH_LIMITED.has(n) && !WRITTEN_WITH_MUST_ESTABLISH.has(n));
   const copies = async (label: string) => {
     const out: string[] = [];
     for (const n of names) {
@@ -385,7 +389,7 @@ test("old histories replayed unchanged: every fixture recorded before questions 
   const work = await tmp("contract-before-presumes-");
   const old = join(work, "harness-9dd3c7b");
   await extractCommit(BEFORE_PRESUMES, old);
-  const names = fixtures.map((f) => f.name).filter((n) => !WRITTEN_WITH_PRESUMES.has(n) && !WRITTEN_WITH_LIMITED.has(n));
+  const names = fixtures.map((f) => f.name).filter((n) => !WRITTEN_WITH_PRESUMES.has(n) && !WRITTEN_WITH_LIMITED.has(n) && !WRITTEN_WITH_MUST_ESTABLISH.has(n));
   const copies = async (label: string) => {
     const out: string[] = [];
     for (const n of names) {
@@ -416,7 +420,7 @@ test("old histories replayed unchanged: every fixture recorded before limited pa
   const work = await tmp("contract-before-limited-");
   const old = join(work, "harness-373d3cf");
   await extractCommit(BEFORE_LIMITED, old);
-  const names = fixtures.map((f) => f.name).filter((n) => !WRITTEN_WITH_LIMITED.has(n));
+  const names = fixtures.map((f) => f.name).filter((n) => !WRITTEN_WITH_LIMITED.has(n) && !WRITTEN_WITH_MUST_ESTABLISH.has(n));
   const copies = async (label: string) => {
     const out: string[] = [];
     for (const n of names) {
@@ -436,5 +440,34 @@ test("old histories replayed unchanged: every fixture recorded before limited pa
     const b = now[i]!;
     assert.ok(!("error" in a) && !("error" in b), `${n}: ${JSON.stringify("error" in a ? a : b)}`);
     assert.deepEqual(diffProjections(a as Projection, b as Projection), RIVAL_AREA_APPLIES.has(n) ? RIVAL_AREA_DIFF : [], `${n}: a history from before limited parts reads the same, but where the rival-area rule applies`);
+  }
+});
+
+test("the must-establish rule, measured: under main before it (c61bc2b) the partial and the not-determinable question are disposed and the done proceeds; under this checkout each is held, by the requirement alone; the acceptance ends the run the same under both", async (t) => {
+  if (spawnSync("git", ["-C", ROOT, "cat-file", "-e", `${BEFORE_MUST_ESTABLISH}^{commit}`]).status !== 0) {
+    t.skip("c61bc2b is not in this checkout's history (a shallow clone or an archive): the comparison is not run here");
+    return;
+  }
+  const work = await tmp("contract-must-establish-");
+  const old = join(work, "harness-c61bc2b");
+  await extractCommit(BEFORE_MUST_ESTABLISH, old);
+  const held = (disposition: string) => [
+    { section: "question:1", field: "check disposition", a: disposition, b: "none" },
+    { section: "question:1", field: "gate disposition", a: disposition, b: "none" },
+    { section: "question:1", field: "readiness holds", a: "none", b: "must_establish" },
+    { section: null, field: "ready", a: "true", b: "false" },
+    { section: null, field: "readiness items", a: "none", b: "must_establish" },
+    { section: null, field: "verdict", a: "proceeds, examination_limited", b: "held on question:1" },
+    { section: null, field: "done", a: "proceeds", b: "held (verdict:question:1)" },
+  ];
+  const want: Record<string, Array<{ section: string | null; field: string; a: string; b: string }>> = {
+    "must-establish-partial": held("partial"),
+    "must-establish-not-determinable": held("not_determinable"),
+    // The acceptance disposes it under both; only the answers check's own word on the partial answer differs.
+    "must-establish-accepted": [{ section: "question:1", field: "check disposition", a: "partial", b: "none" }],
+  };
+  for (const name of [...WRITTEN_WITH_MUST_ESTABLISH]) {
+    const r = await replay({ run: await resolveRun(join(FIXTURES, name, "run")), targets: [{ label: "c61bc2b", harness: old, how: "c61bc2b, extracted", commit: BEFORE_MUST_ESTABLISH }, HERE], scratch: await tmp(`contract-${name}-`) });
+    assert.deepEqual(r.differences!.map(({ section, field, a, b }) => ({ section, field, a, b })), want[name], `${name}: ${JSON.stringify(r.differences)}`);
   }
 });

@@ -24,7 +24,10 @@
  * established, partial, a bounded negative or not determinable resting on a
  * coverage record another seat reviewed, a premise shown not to hold, out of
  * scope, accepted by the operator, or withdrawn. Each question carries its
- * disposition here. A question with no disposition, a defect a limitation
+ * disposition here. A question the goal, the operator or an examiner
+ * requires to be established takes only an answer that answers it (the
+ * answers check gives none to the rest), its acceptance or its withdrawal:
+ * it is marked `must_establish`, and its first block says so. A question with no disposition, a defect a limitation
  * only names, and a quick negative nobody has attested hold done, each named
  * with what blocks it. The stop policy decides only who else ends the run: a
  * cap pauses or stops it and the operator stops it, whatever the questions'
@@ -40,6 +43,7 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import * as L from "../extensions/leads.ts";
+import * as NB from "../extensions/negative-bar.ts";
 import * as Q from "../extensions/questions.ts";
 import { ACCEPTANCE_NEVER_EXCUSES, type FinishLineRun } from "../extensions/protocol.ts";
 import { checkLedgerAnswers } from "./check-answers.ts";
@@ -49,7 +53,7 @@ import { checkLedgerAnswers } from "./check-answers.ts";
  * limited, inconclusive, unanswered), or the register's (accepted,
  * withdrawn); its disposition under the bar when it has one; what blocks it.
  */
-export type FinishGateQuestion = { id: string; outcome: string; blocks: string[]; disposition?: string };
+export type FinishGateQuestion = { id: string; outcome: string; blocks: string[]; disposition?: string; must_establish?: true };
 
 /** What the question register holds against a done. */
 export type QuestionDefect = { code: "open_question" | "question_answer" | "stale_answer"; question: string; what: string; fix: string };
@@ -93,6 +97,18 @@ export async function untilSolved(sandbox: string): Promise<boolean> {
 }
 
 const OUTCOME_WORDS: Record<string, string> = { limited: "examination-limited", inconclusive: "inconclusive", unanswered: "unanswered", answered: "answered" };
+
+/**
+ * Why a question that must be established holds (docs/adr/0013, "A
+ * question that must be established"): who required it, how its answer
+ * stands, and what ends the run on it.
+ */
+function requirementBlock(q: Q.Question, outcome: string, ledger: L.LedgerView): string {
+  const a = ledger.entries.find((e) => e.kind === "answer" && e.section === `question:${q.section}` && !ledger.replaced.has(e.seq));
+  const result = a ? NB.answerResult(a) : null;
+  const stands = !a ? "it has no standing answer" : `it is ${OUTCOME_WORDS[outcome] ?? outcome} (${result ? NB.resultWords(result) : a.inconclusive ? "inconclusive" : "as recorded"}, E-${a.seq})`;
+  return `it must be established (required by ${Q.requiredByWords(q)}${q.must_establish?.why ? `: ${q.must_establish.why}` : ""}): ${stands}, which ends no run on it. ${Q.MUST_ESTABLISH_WAYS[0]!.toUpperCase()}${Q.MUST_ESTABLISH_WAYS.slice(1)}`;
+}
 
 export async function finishGate(sandbox: string, run: FinishLineRun | null): Promise<FinishGate> {
   const until = await untilSolved(sandbox);
@@ -164,12 +180,15 @@ export async function finishGate(sandbox: string, run: FinishLineRun | null): Pr
         continue;
       }
       const outcome = said !== "answered" && reg && Q.acceptanceStands(reg, snap.ledger) ? "accepted" : said;
+      const required = Q.mustEstablish(reg);
       const blocks: string[] = [];
       // A quick negative holds a question that is not answered outright (an answer that settles it needs no other).
       const held = outcome === "answered" || outcome === "accepted" ? [] : (quick.get(id) ?? []);
       const disposition = outcome === "accepted" || held.length ? undefined : dispositions.get(key);
       for (const h of held) blocks.push(h);
       if (outcome !== "answered" && outcome !== "accepted" && !disposition) {
+        // A question that must be established says so first: what holds it is the requirement, and the way out is not a negative.
+        if (required && reg) blocks.unshift(requirementBlock(reg, outcome, snap.ledger));
         if (best.has(key)) blocks.push("its answer is a best candidate, not established: every review holds it so; take the route that would settle it, or the operator accepts its limits");
         for (const l of snap.state.leads.values()) {
           if (!l.answers.includes(id)) continue;
@@ -184,7 +203,7 @@ export async function finishGate(sandbox: string, run: FinishLineRun | null): Pr
         if (!snap.answered.has(id)) blocks.push("no standing answer entry");
         if (!blocks.length) blocks.push(`its answer is ${OUTCOME_WORDS[outcome] ?? outcome} and no disposition under the bar: it rests on a limitation, a search that only documents one, a coverage record nobody else reviewed or that no longer stands, or is marked inconclusive`);
       }
-      questions.push({ id, outcome, blocks, ...(disposition ? { disposition } : {}) });
+      questions.push({ id, outcome, blocks, ...(disposition ? { disposition } : {}), ...(required ? { must_establish: true as const } : {}) });
     }
     const accepted: string[] = [];
     const register = qs ? await registerGate(sandbox, snap, qs, defects, limited, questions, accepted, holding, quick, warnings) : undefined;
@@ -347,11 +366,13 @@ async function registerGate(
       } else if (outcome !== "answered") limited.push(`${q.id} (${key}) is ${outcome === "limited" ? "examination-limited" : outcome}`);
       const held = outcome === "answered" ? [] : (quick.get(q.section) ?? []);
       const disposition = held.length ? undefined : r.dispositions[key];
+      const required = Q.mustEstablish(q);
       questions.push({
         id: q.section,
         outcome: outcome === "limited" ? "limited" : outcome,
-        blocks: outcome === "answered" && !held.length ? [] : [...held, ...(disposition ? [] : blocksOf(snap, q.section)), ...(outcome === "unanswered" ? ["no standing answer entry"] : [])],
+        blocks: outcome === "answered" && !held.length ? [] : [...(required && !disposition ? [requirementBlock(q, outcome, snap.ledger)] : []), ...held, ...(disposition ? [] : blocksOf(snap, q.section)), ...(outcome === "unanswered" ? ["no standing answer entry"] : [])],
         ...(disposition ? { disposition } : {}),
+        ...(required ? { must_establish: true as const } : {}),
       });
     }
     const bySection = new Map(extra.map((q) => [`question:${q.section}`, q]));

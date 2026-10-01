@@ -299,7 +299,7 @@ async function leadState(S: string): Promise<import("../extensions/leads.ts").Le
  * a question asks whether something exists when the goal's --existence
  * names it or the register's expects says so.
  */
-export async function sectionBars(S: string, existence: readonly string[] = []): Promise<(id: string) => { material: boolean; existence: boolean; completeness: boolean }> {
+export async function sectionBars(S: string, existence: readonly string[] = []): Promise<(id: string) => { material: boolean; existence: boolean; completeness: boolean; must_establish: boolean }> {
   const Q = await import("../extensions/questions.ts").catch(() => null);
   const snap = Q ? await Q.questionsSnapshot(S).catch(() => null) : null;
   const goalIds = new Set((snap?.goal.questions ?? []).map((x) => sectionKey(x)));
@@ -311,6 +311,8 @@ export async function sectionBars(S: string, existence: readonly string[] = []):
       material: goalIds.has(key) || !q ? true : q.materiality === "material",
       existence: asksExistence(existence, key) || asksExistence(goalExistence, key) || q?.expects === "existence",
       completeness: q?.completeness === true,
+      // The goal, the operator or an examiner requires it to be established (docs/adr/0013): only an answer that answers it is its disposition.
+      must_establish: Q ? Q.mustEstablish(q) : false,
     };
   };
 }
@@ -343,7 +345,9 @@ export type ExternalFlag = { seq: number; via: string[]; classes: string[] };
  * claims established, every review of which holds it a best candidate only)
  * is none (B2), and so is anything a defect holds. A partial answer is a
  * disposition whatever its reviews' strength: its review attests the parts
- * it claims, and "best candidate" concerns only an established claim.
+ * it claims, and "best candidate" concerns only an established claim. A
+ * question that must be established takes only an answer that answers it
+ * (docs/adr/0013, "A question that must be established").
  */
 export const DISPOSITIONS = ["established", "partial", "bounded_negative", "not_determinable", "premise_not_supported", "out_of_scope"] as const;
 export type Disposition = (typeof DISPOSITIONS)[number];
@@ -571,7 +575,15 @@ export async function checkLedgerAnswers(sandbox: string, wanted: string[], exis
                 : NEGATIVE_RESULTS.has(result) && negativeReviewed
                   ? (result as Disposition)
                   : null;
-      if (d) dispositions[section] = d;
+      // A question that must be established (docs/adr/0013, "A question that
+      // must be established") is disposed only by an answer that answers it:
+      // established, a premise shown not to hold, or a bounded negative under
+      // the stronger bar. Partial, not determinable, a bounded negative short
+      // of that and out of scope limit the run as they always do, and are no
+      // disposition for it: the finish line holds it until it is established,
+      // or the operator accepts its limits or releases the requirement.
+      if (d && bar(id).must_establish && outcome !== "answered") said += "; it must be established, and this is no disposition for it";
+      else if (d) dispositions[section] = d;
     }
     if (outcome !== "unanswered") {
       outcomes[section] = outcome;

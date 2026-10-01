@@ -407,6 +407,7 @@ export function readinessCode(item: string, known: Map<string, { code: string; s
   if (/^\S+ is a best candidate, not established/.test(item)) return { code: "best_candidate", section: lead };
   if (/'s answer E-\d+ predates revision/.test(item)) return { code: "answer_predates_revision", section: lead };
   if (/'s answer E-\d+ predates new evidence/.test(item)) return { code: "answer_predates_evidence", section: lead };
+  if (/^\S+ must be established \(required by /.test(item)) return { code: "must_establish", section: lead };
   if (/^import:\S+ \((evidence|material) added/.test(item)) return { code: "addition_incomplete", section: null };
   if (/^L-\d+ was closed \w+/.test(item)) return { code: "route_limitation", section: null };
   return { code: "gate_item", section: lead };

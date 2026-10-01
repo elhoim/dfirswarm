@@ -1341,6 +1341,103 @@ presence, not truth.
   So does `reversals.partial_after_cap`, which already counts answers
   recorded partial after a cap.
 
+## A question that must be established
+
+Added 2026-10-01, after the Breadcrumbs run (a flag-only challenge under
+`--stop operator`, nine seats). The one question's answer was partial on a
+reviewed finding, and the part the flag needed was the open part. Under the
+one rule above, partial is a disposition. The coordinator's done therefore
+ended the run examination-limited after 23 minutes, without the flag. The
+operator resumed the run and asked the question again by hand. Nothing let
+the goal or the operator say that this question had to be established.
+
+- **What it is.** A question may be required to be established
+  (`must_establish` on the question register). For such a question, a
+  disposition under the bar is only one of these:
+  - an answer the answers check reads as answering it: established on a
+    standing finding and not a best candidate, a premise shown not to hold
+    on a finding, or a bounded negative under the stronger bar;
+  - the operator's acceptance of its limits;
+  - its withdrawal.
+
+  Partial, not determinable, a bounded negative short of the stronger bar
+  and out of scope still limit the run, as they always did. For this
+  question they are no disposition, so the finish line holds the done on
+  it. This is one rule under every stop policy: a cap still pauses or stops
+  the run and the operator still stops it; under `--stop operator` nothing
+  else ends it.
+- **Who says so.**
+  - The goal, which owns the definition of done ([ADR 0002](0002-the-goal-owns-the-definition-of-done.md)):
+    a `## Must establish` section naming its questions as it numbers them
+    (`- 1`, `- Q-3: why`), or `must_establish:` in its metadata block
+    (`[1, 3]`, or a list), which the kickoff writes into that section. The
+    seed puts the requirement on each named question's `open` act, present
+    only when given, so a goal without it seeds as it always did. A name the
+    goal does not number requires nothing, and the kickoff warns of it.
+  - The operator or an examiner: `question add --must-establish`, and on an
+    existing question `question amend Q-n --expect-rev N --must-establish`,
+    which makes no new revision.
+  - Never an agent, an analyst, a reviewer or an observer: it changes what
+    ends the run, as an acceptance does, and they are refused with why. A
+    background question is refused it too, since the finish line waits only
+    for material questions.
+- **The ways out, on the record.** The mechanism that already took a
+  question's limits stays the way out. An acceptance (`question accept`,
+  bound to the revision and to the answer that stood) disposes a question
+  that must be established as it disposes any other: it is the explicit
+  release for that answer, and it lapses as acceptances do. The requirement
+  itself is released with `question amend Q-n --expect-rev N
+  --no-must-establish --why W`; the register keeps who released it, when and
+  why, beside who required it, and the chain keeps every act. Nothing else
+  releases it: not the stop policy, a review or a vote.
+- **Where it holds.**
+  - The answers check gives such a question no disposition unless its answer
+    answers it (`sectionBars` reads the requirement from the register); its
+    line says "it must be established, and this is no disposition for it".
+    Its `ok` and its defects are unchanged.
+  - The finish gate reads that, marks the question `must_establish`, and
+    names the requirement first among what blocks it: who required it, how
+    its answer stands, and the ways out.
+  - The done's refusal says those ways instead of the negative path (plan
+    the routes, record the coverage, answer not determinable), which would
+    end nothing here.
+  - Readiness holds such a question while its standing answer only limits
+    the run (`establishesBy`, by what the answer says it is; the rest of the
+    bar is the answers check's, and the contract fixtures hold the two
+    together), so readiness and the done agree, as they must ([ADR 0015](0015-one-seat-finishes-and-work-is-offered.md)).
+- **What the agents are told.** Every header, while it lasts, names each such
+  question that is not yet established, who required it, how its answer
+  stands, and what ends the run on it. The `questions` view,
+  `questions/questions.md`, `question list|show` and the contract (the
+  goal's own section, and a sentence in its Questions section) say it too.
+- **Why this shape.**
+  - Not a stricter stop policy. "Until every question is answered" was the
+    ctf12 rule this record replaced: it held every question of a run, so a
+    question the evidence cannot answer had only the operator's acceptance
+    as an end. Per question keeps the generic bar for the rest.
+  - Not a new result or disposition: the bar is the answers check's
+    existing "answered" outcome.
+  - Not a ledger defect. The requirement is a property of the question, read
+    from the register; the answer is not defective. Holding by disposition
+    leaves the answers check's defects as they were, so the rule register
+    (`docs/rules.md`) does not change.
+  - Not a warning on the record ("this answer does not end the run"): the
+    header and readiness say it at every delivery.
+- **Measured.** Three contract fixtures, under every stop policy:
+  `must-establish-partial` (required by the goal; a reviewed partial
+  answer), `must-establish-not-determinable` (required by the operator's
+  amendment; not determinable on a reviewed coverage record) and
+  `must-establish-accepted` (required, then accepted). Replayed against main
+  before the change (c61bc2b), the first two are disposed and their done
+  proceeds examination-limited under main, and are held under this change,
+  readiness holding on `must_establish`. The third ends examination-limited
+  under both; only the answers check's own word on its partial answer
+  differs. Every other contract fixture reads the same
+  (`scripts/replay-impact.ts c61bc2b`).
+- **Not decided here.** The console's question form has no field for it yet
+  (the CLI and the goal have). The report does not yet say that a question
+  was required or released; `questions/questions.md` and `question show` do.
+
 ## Consequences
 
 - Every existing goal and run keeps working: an answer without `result`
