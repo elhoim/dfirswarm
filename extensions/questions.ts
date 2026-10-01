@@ -1602,7 +1602,8 @@ export async function prepareAct(sandboxRoot: string, actor: Actor, ev: ActKind,
   if (!required.ok) return required;
   if (required.value !== undefined) {
     if (ev !== "open" && ev !== "amend") return { ok: false, reason: "must_establish is said when a question is opened or amended" };
-    if (!authority(origin)) return { ok: false, reason: `${originWords(origin)}: requiring a question to be established is the examiner's or the operator's (or the goal's, in its Must establish section), as accepting its limits is` };
+    // Requiring and releasing alike: a question's own asker, an analyst or a reviewer, does neither.
+    if (!authority(origin)) return { ok: false, reason: required.value ? `${originWords(origin)}: requiring a question to be established is the examiner's or the operator's (or the goal's, in its Must establish section), as accepting its limits is` : `${originWords(origin)}: releasing the requirement that a question be established is the examiner's or the operator's, whoever asked the question, as accepting its limits is` };
     if (ev === "open" && required.value === false) return { ok: false, reason: "a new question is not required to be established unless you say so: leave must_establish out" };
     if (ev === "open" && input.materiality === "background") return { ok: false, reason: "a question that must be established is material: the finish line waits for it (materiality material, or leave must_establish out)" };
     if (ev === "amend" && required.value === false && !String(input.why ?? "").trim()) return { ok: false, reason: "a release of the requirement says why (why): it is on the record beside who required it" };

@@ -32,7 +32,7 @@ import { api, ApiError } from "@/lib/api";
 import { clock } from "@/lib/format";
 import { useLive, useResource } from "@/lib/live";
 import type { PartsStanding, PremiseView, QuestionOrigin, QuestionView, QuestionsPanelView, SwarmView } from "@/lib/types";
-import { acceptPayload, amendPayload, baseMoved, formBase, mustEstablishPayload, mustEstablishWords, questionGroups, type FormBase } from "@/lib/question-forms";
+import { acceptPayload, amendPayload, baseMoved, formBase, mayRequireEstablished, mustEstablishPayload, mustEstablishWords, questionGroups, type FormBase } from "@/lib/question-forms";
 import { cn } from "@/lib/utils";
 
 const ORIGIN_TONE: Record<QuestionOrigin["kind"], Tone> = { goal: "slate", agent: "neutral", analyst: "kelp", reviewer: "saffron", observer: "band" };
@@ -98,7 +98,7 @@ type Act = (payload: Record<string, unknown> & { action: string }) => Promise<vo
  * until the operator refreshes it: another person's amendment arriving live
  * is named, never folded into what the form sends (question-forms.ts).
  */
-function CardActions({ q, act, busy }: { q: QuestionView; act: Act; busy: boolean }) {
+function CardActions({ q, act, busy, mayRequire }: { q: QuestionView; act: Act; busy: boolean; mayRequire: boolean }) {
   const [open, setOpen] = useState<null | "amend" | "priority" | "withdraw" | "accept" | "establish">(null);
   const [base, setBase] = useState<FormBase | null>(null);
   const [text, setText] = useState(q.text);
@@ -139,7 +139,8 @@ function CardActions({ q, act, busy }: { q: QuestionView; act: Act; busy: boolea
   return (
     <div className="space-y-2">
       <div className="flex flex-wrap gap-1.5">
-        {(["amend", "priority", "withdraw", ...(q.scope === "in_scope" ? (["accept", "establish"] as const) : [])] as const).map((k) => (
+        {/* Requiring or releasing is the operator's or an examiner's: the action is there only for them. */}
+        {(["amend", "priority", "withdraw", ...(q.scope === "in_scope" ? (["accept"] as const) : []), ...(q.scope === "in_scope" && mayRequire ? (["establish"] as const) : [])] as const).map((k) => (
           <Button key={k} size="sm" variant={open === k ? "default" : "secondary"} onClick={() => toggle(k)}>
             {k === "amend" ? "Amend" : k === "priority" ? (q.priority === "urgent" ? "Priority" : "Mark urgent") : k === "withdraw" ? "Withdraw" : k === "accept" ? "Accept its limits" : required ? "Release the requirement" : "Must be established"}
           </Button>
@@ -210,7 +211,7 @@ function CardActions({ q, act, busy }: { q: QuestionView; act: Act; busy: boolea
   );
 }
 
-function QuestionCard({ q, sigs, act, busy, children }: { q: QuestionView; sigs: QuestionsPanelView["signatures"]; act: Act; busy: boolean; children?: ReactNode }) {
+function QuestionCard({ q, sigs, act, busy, mayRequire, children }: { q: QuestionView; sigs: QuestionsPanelView["signatures"]; act: Act; busy: boolean; mayRequire: boolean; children?: ReactNode }) {
   const [reply, setReply] = useState<Record<string, string>>({});
   const mySigs = sigs.filter((s) => s.q === q.id);
   return (
@@ -355,7 +356,7 @@ function QuestionCard({ q, sigs, act, busy, children }: { q: QuestionView; sigs:
         </div>
       ) : null}
       {children}
-      <CardActions q={q} act={act} busy={busy} />
+      <CardActions q={q} act={act} busy={busy} mayRequire={mayRequire} />
     </li>
   );
 }
@@ -492,7 +493,7 @@ function PremisesSection({ premises, act, busy }: { premises: PremiseView[]; act
 }
 
 /** The add form: a person's question, with everything the register records beside its words. */
-function AddForm({ data, view, act, busy }: { data: QuestionsPanelView; view: SwarmView; act: Act; busy: boolean }) {
+function AddForm({ data, view, act, busy, mayRequire }: { data: QuestionsPanelView; view: SwarmView; act: Act; busy: boolean; mayRequire: boolean }) {
   const [text, setText] = useState("");
   const [why, setWhy] = useState("");
   const [objective, setObjective] = useState("");
@@ -531,7 +532,7 @@ function AddForm({ data, view, act, busy }: { data: QuestionsPanelView; view: Sw
       ...(priority === "urgent" ? { reason } : {}),
       ...(expects ? { expects } : {}),
       ...(presumes.trim() ? { presumes } : {}),
-      ...(mustEstablish && materiality === "material" ? { must_establish: true } : {}),
+      ...(mustEstablish && mayRequire && materiality === "material" ? { must_establish: true } : {}),
       ...(hints.length ? { hints: hints.map((h) => ({ ref: h.ref, ...(h.value.trim() ? { value: h.value } : {}) })) } : {}),
       ...(attachments.trim() ? { attachments: attachments.split(/[\s,]+/).filter(Boolean) } : {}),
       ...(suggested ? { suggested_to: suggested } : {}),
@@ -555,12 +556,14 @@ function AddForm({ data, view, act, busy }: { data: QuestionsPanelView; view: Sw
       <Textarea value={text} onChange={(e) => setText(e.target.value)} placeholder="the question, whole (it is kept verbatim)" aria-label="Question" />
       <Input value={why} onChange={(e) => setWhy(e.target.value)} placeholder="why the case needs it" aria-label="Why" />
       <Input value={presumes} onChange={(e) => setPresumes(e.target.value)} placeholder="what it takes as happened, if it asks which, when or how of an event (optional): its answer tests that first" aria-label="Presumes" />
-      <label className="flex items-start gap-2 text-[12.5px] text-ink-2">
-        <input type="checkbox" className="mt-0.5 accent-kelp" checked={mustEstablish && materiality === "material"} disabled={materiality !== "material"} onChange={(e) => setMustEstablish(e.target.checked)} aria-label="Must be established" />
-        <span>
-          Must be established: only an answer that establishes it ends the run on it (partial, not determinable, a bounded negative short of the stronger bar and out of scope do not). A material question only; you can release it later from its card.
-        </span>
-      </label>
+      {mayRequire ? (
+        <label className="flex items-start gap-2 text-[12.5px] text-ink-2">
+          <input type="checkbox" className="mt-0.5 accent-kelp" checked={mustEstablish && materiality === "material"} disabled={materiality !== "material"} onChange={(e) => setMustEstablish(e.target.checked)} aria-label="Must be established" />
+          <span>
+            Must be established: only an answer that establishes it ends the run on it (partial, not determinable, a bounded negative short of the stronger bar and out of scope do not). A material question only; you can release it later from its card.
+          </span>
+        </label>
+      ) : null}
       <div className="grid gap-2 sm:grid-cols-2">
         <Select value={objective} onChange={setObjective} options={objectives} aria-label="Objective" />
         <Select value={parent} onChange={setParent} options={parents} aria-label="Follows" placeholder="Follows" />
@@ -645,6 +648,7 @@ export function QuestionsPanel({ view, version }: { view: SwarmView; version: nu
     { value: "", label: "Myself, not enrolled", hint: "the operator: this host's OS account, with the operator's authority" },
     ...(people.data?.people ?? []).map((p) => ({ value: p.id, label: `${p.name} (${p.role})`, hint: `${p.organisation}: a claim; signing is the command line's (--sign)` })),
   ];
+  const mayRequire = mayRequireEstablished(as, people.data?.people ?? []);
   const grouped = questionGroups(d.questions);
   const proposed = grouped.find((g) => g.key === "proposed")?.questions ?? [];
   const triage = d.triage.filter((t) => !t.resolved);
@@ -692,7 +696,7 @@ export function QuestionsPanel({ view, version }: { view: SwarmView; version: nu
         <ul className="m-0 list-none space-y-2 p-0">
           {proposed.map((q) => (
             // A proposed question whole: its details, its clarifications (answered here before it is admitted), and the triage.
-            <QuestionCard key={q.id} q={q} sigs={d.signatures} act={act} busy={busy}>
+            <QuestionCard key={q.id} q={q} sigs={d.signatures} act={act} busy={busy} mayRequire={mayRequire}>
               <div className="flex flex-wrap items-center gap-2 rounded-md border border-saffron bg-saffron-soft/30 px-2 py-1.5">
                 <span className="text-ink-2">
                   Triage{q.objective_text ? `; admitting it adds the objective: ${q.objective_text}` : ""}:
@@ -738,7 +742,7 @@ export function QuestionsPanel({ view, version }: { view: SwarmView; version: nu
         </section>
       ) : null}
 
-      <AddForm data={d} view={view} act={act} busy={busy} />
+      <AddForm data={d} view={view} act={act} busy={busy} mayRequire={mayRequire} />
 
       <PremisesSection premises={d.premises ?? []} act={act} busy={busy} />
 
@@ -765,7 +769,7 @@ export function QuestionsPanel({ view, version }: { view: SwarmView; version: nu
               </h3>
               <ul className="m-0 list-none space-y-2 p-0">
                 {list.map((q) => (
-                  <QuestionCard key={q.id} q={q} sigs={d.signatures} act={act} busy={busy} />
+                  <QuestionCard key={q.id} q={q} sigs={d.signatures} act={act} busy={busy} mayRequire={mayRequire} />
                 ))}
               </ul>
             </section>

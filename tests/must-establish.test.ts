@@ -27,7 +27,7 @@ import { A, coverage, ESTABLISHED, F, ok, planned, rec, REVIEW, run } from "./ne
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { questionArgv } from "../scripts/ui/questions.ts";
-import { mustEstablishPayload, mustEstablishWords } from "../ui/src/lib/question-forms.ts";
+import { mayRequireEstablished, mustEstablishPayload, mustEstablishWords } from "../ui/src/lib/question-forms.ts";
 import type { QuestionView } from "../ui/src/lib/types.ts";
 
 /** Two questions; `must` names the ones the goal says must be established, in its own section. */
@@ -361,4 +361,25 @@ test("the console marks a question must be established, shows who required it, a
   assert.equal(released.must_establish?.required, false);
   assert.match(mustEstablishWords(released.must_establish!), /^released by .+: the client takes what the log holds$/);
   assert.match(mustEstablishWords({ required: true, at: "t", by: "goal", origin: { kind: "goal" } as QuestionView["origin"], seq: 1, rev: 1, why: null }), /^required by the goal$/);
+});
+
+test("a question's asker neither requires nor releases it: the operator's requirement on an analyst's question stays until the operator or an examiner releases it, and the console offers the action only to them", async () => {
+  const r = await run({ goal: goal([]) });
+  await Q.seedRegister(r.S);
+  const mine = await okAct(r.S, ANALYST, "open", { text: "Which share did the archive come from?", why: "the timeline" });
+  await okAct(r.S, OPERATOR, "amend", { q: mine.q!, expected_rev: 1, must_establish: true, why: "the client's question" });
+  await refusedAct(r.S, ANALYST, "amend", { q: mine.q!, expected_rev: 1, must_establish: false, why: "mine to release" }, /releasing the requirement that a question be established is the examiner's or the operator's, whoever asked the question/);
+  let snap = await Q.questionsSnapshot(r.S);
+  assert.equal(Q.mustEstablish(snap.state.questions.get(mine.q!)!), true, "still required");
+  await okAct(r.S, OPERATOR, "amend", { q: mine.q!, expected_rev: 1, must_establish: false, why: "the client takes the partial answer" });
+  snap = await Q.questionsSnapshot(r.S);
+  assert.equal(Q.mustEstablish(snap.state.questions.get(mine.q!)!), false);
+  const people = [
+    { id: "ana", role: "analyst" },
+    { id: "rev", role: "reviewer" },
+    { id: "obs", role: "observer" },
+    { id: "exa", role: "examiner" },
+    { id: "ops", role: "operator" },
+  ];
+  assert.deepEqual(["", "ana", "rev", "obs", "exa", "ops", "nobody"].map((as) => mayRequireEstablished(as, people)), [true, false, false, false, true, true, false]);
 });
