@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Turn packs into image recipes, and say which image a run needs.
 
-  recipe.py build PROFILE --out DIR [--base IMAGE] [--packs DIR]
+  recipe.py build PROFILE --out DIR [--base IMAGE] [--packs DIR] [--allow-nonredistributable] [--allow-missing-data]
   recipe.py profile-for [--installed DIR]... [--tools-from DIR]... PACK...
                                        the smallest profile that serves these packs
   recipe.py list                       profiles and the packs each resolves to
@@ -35,10 +35,12 @@ so DIR is a complete build context:
 
   docker build -t dfirswarm-re:dev-amd64 DIR
 
-A program a pack marks `redistributable: false` stops the build unless
-`--allow-nonredistributable` is given: an image that stays on this machine or
-in a private registry, never one published for others to pull. The image then
-says so (image.json, its label, its NOTICE).
+A program or a data file a pack marks `redistributable: false` stops the build
+unless `--allow-nonredistributable` is given: an image that stays on this
+machine or in a private registry, never one published for others to pull, and
+one that carries pinned data (`install.data`) is pushed by no workflow of ours,
+the pro edition's included. The image then says so (image.json, its label, its
+NOTICE).
 
 A program no package manager has may carry a pinned artefact in its pack,
 each fetched by install.py and refused unless its sha256 is the pinned one:
@@ -54,9 +56,25 @@ each fetched by install.py and refused unless its sha256 is the pinned one:
   install.build      a source archive compiled in a builder stage of the
                      image (`./configure --prefix`, `make`, `make install`),
                      so the image carries the program and not the compiler.
-                     `env` is the environment of a source's pip, or of a
-                     build's configure and make; `arches`, the architectures
-                     a source or a build is for (every one when absent).
+                     A source with no configure script names its steps
+                     (`commands`, argument lists run in the tree) and the
+                     pinned `patches` applied first. `env` is the environment
+                     of a source's pip, or of a build's configure and make;
+                     `arches`, the architectures a source or a build is for
+                     (every one when absent).
+  install.data       one file a program reads and that is not a program (a
+                     symbol table pack, a rule set), the same bytes for every
+                     architecture: a url and its sha256, put as named inside
+                     a Python package of the image's venv (`package`, `into`).
+                     `warm` is a command run once it is there, for a program
+                     that indexes what it finds the first time it runs;
+                     `check` one that must then succeed (the images workflow
+                     runs it again with no network). The entry says whether
+                     it is `redistributable` and carries its own `licence`,
+                     which the NOTICE states beside the program's. A data
+                     file that cannot be had fails the build even for an
+                     optional program (`build --allow-missing-data` goes on
+                     without it, and the image records what is missing).
 
 `run` names the interpreter a download's or a source's program needs:
 `python` (the program's own venv, else the image's), or any program the image
@@ -163,7 +181,7 @@ def pack_version(packs, name: str) -> dict:
 
 
 KINDS = ("apt", "pip", "apt_release", "requirements", "binaries", "manual", "downloads", "sources", "builds",
-         "not_applicable", "python_notes")
+         "data", "not_applicable", "python_notes")
 
 
 def empty() -> dict:
@@ -206,6 +224,17 @@ def read_pack(packs, name: str) -> dict:
                     spec["pip"][p] = spec["pip"].get(p, False) or required
             else:
                 spec["manual"].append({"name": b["name"], "pack": name, "how": line or "no install line"})
+            # Data the program reads (symbol tables, rules): its own entry in the
+            # spec, whatever installs the program, named for the program unless
+            # the pack names it.
+            if isinstance(install.get("data"), dict):
+                # Required whatever its program is: the pack pinned it on
+                # purpose (build --allow-missing-data goes on without it). Not
+                # for redistribution when either it or its program says so.
+                spec["data"].append({"program": b["name"], "pack": name,
+                                     "redistributable": b.get("redistributable", True) is not False
+                                     and install["data"].get("redistributable", True) is not False,
+                                     **{"name": f"{b['name']}-data", **install["data"]}, "required": True})
     reqs = pack_dir(packs, name) / "requires" / "python.txt"
     if reqs.exists():
         for raw in reqs.read_text().splitlines():
@@ -231,7 +260,7 @@ def merge(specs: list) -> dict:
         out["python_notes"] += [n for n in s["python_notes"] if not any(x["requirement"] == n["requirement"] for x in out["python_notes"])]
         out["manual"] += s["manual"]
         # A program two packs pin is installed once, as the first pins it.
-        for kind in ("downloads", "sources", "builds", "not_applicable"):
+        for kind in ("downloads", "sources", "builds", "data", "not_applicable"):
             for d in s[kind]:
                 if not any(x["name"] == d["name"] for x in out[kind]):
                     out[kind].append(d)
@@ -258,6 +287,15 @@ def notice(spec: dict) -> str:
     for kind in ("sources", "builds"):
         for d in spec.get(kind, []):
             lines.append(f"  {d['name']} {'source' if kind == 'sources' else 'built from'}: {d.get('url')}  sha256 {d.get('sha256')}")
+            for patch in d.get("patches") or []:
+                lines.append(f"  {d['name']} patch: {patch.get('url')}  sha256 {patch.get('sha256')}")
+    # Data a program reads has its own licence, which is not always the
+    # program's: it is said here, beside where it came from.
+    for d in spec.get("data", []):
+        flag = "" if d.get("redistributable", True) else "  [not for redistribution]"
+        lines.append(f"  {d['name']} data for {d['program']}: {d.get('url')}  sha256 {d.get('sha256')}{flag}")
+        if d.get("licence"):
+            lines.append(f"    licence of the data: {d['licence']}")
     if spec.get("not_applicable"):
         lines += ["", "Named by a pack, and not in this image because they belong to another system:"]
         lines += [f"{d['name']}  ({d['pack']})  {d['why']}" for d in spec["not_applicable"]]
@@ -428,12 +466,18 @@ def build(a) -> int:
     spec = merge([read_pack(a.packs, p) for p in packs])
     for pkg in extra_apt:
         spec["apt"][pkg] = True
-    held_back = sorted({b["name"] for b in spec["binaries"] if not b.get("redistributable", True)})
+    # Programs, and the data a program reads (a symbol pack), that are not
+    # cleared for redistribution: the image names each in its record.
+    held_back = sorted({b["name"] for b in spec["binaries"] if not b.get("redistributable", True)}
+                       | {d["name"] for d in spec["data"] if not d.get("redistributable", True)})
     if held_back and not a.allow_nonredistributable:
-        print(f"recipe: {a.profile} would hold {len(held_back)} program(s) their packs mark redistributable: false "
+        print(f"recipe: {a.profile} would hold {len(held_back)} program(s) or data file(s) their packs mark redistributable: false "
               f"({', '.join(held_back)}). Build with --allow-nonredistributable for an image that stays on this "
               f"machine or in a private registry; never publish it.", file=sys.stderr)
         return 3
+    if a.allow_missing_data:
+        for d in spec["data"]:
+            d["required"] = False
     spec = {"profile": a.profile, "packs": packs, "profile_apt": list(extra_apt),
             "pack_versions": {p: pack_version(a.packs, p) for p in packs},
             "redistributable": not held_back, "nonredistributable": held_back, **spec}
@@ -474,6 +518,7 @@ LABEL org.opencontainers.image.title="dfirswarm-{a.profile}" \\
     print(f"{a.profile}: {len(packs)} pack(s), {len(spec['apt'])} apt ({req_apt} required), {len(spec['pip'])} pip, "
           f"{len(spec['requirements'])} python requirements, {len(spec['downloads'])} pinned downloads, "
           f"{len(spec['sources'])} pinned sources, {len(spec['builds'])} built from source, "
+          f"{len(spec['data'])} pinned data files, "
           f"{len(spec['manual'])} neither, {len(spec['not_applicable'])} not applicable"
           + (f"; NOT for redistribution ({len(held_back)} programs)" if held_back else ""))
     return 0
@@ -488,7 +533,9 @@ def main() -> int:
     b.add_argument("--out", required=True, type=Path)
     b.add_argument("--base", default="dfirswarm-base:dev-amd64")
     b.add_argument("--allow-nonredistributable", action="store_true",
-                   help="build an image holding programs their packs mark redistributable: false (never publish it)")
+                   help="build an image holding programs or data files their packs mark redistributable: false (never publish it)")
+    b.add_argument("--allow-missing-data", action="store_true",
+                   help="go on when a pinned data file (a symbol pack) cannot be fetched; the image records it under not_installed.data")
     f = sub.add_parser("profile-for")
     f.add_argument("packs", nargs="*", help="pack ids, or pack directories")
     f.add_argument("--packs-dir", type=Path, default=PACKS, help="the packs the images are built from")

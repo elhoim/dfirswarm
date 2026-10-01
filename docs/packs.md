@@ -225,11 +225,24 @@ does with it depends on the mode:
 The image profiles are built from the same file (`images/README.md`). A
 program no package manager has says how an image gets it, as data: a pinned
 `download` per architecture (a `.deb` is handed to apt), a tag's `source` with
-its entry and interpreter (`run`), or a `build` from source; an apt line with
-`-t bookworm-backports` comes from Debian's backports. Each is checked by its
-sha256. A program that belongs to another system (Apple's `log`, a collector
-run on the host being collected) is marked `not_in_image` with why: no image
-is asked for it, and a pack may not require it.
+its entry and interpreter (`run`), or a `build` from source (with pinned
+`patches` and its own `commands` where it has no configure script); an apt line
+with `-t bookworm-backports` comes from Debian's backports. Each is checked by
+its sha256. What a program reads and is not a program (a symbol pack, a rule
+set) hangs from its entry as `install.data`: one url and sha256, the Python
+`package` of the image's venv it is put inside and the `into` directory, a
+`warm` command that indexes it once at build time, and the `licence` it carries
+on its own, which the image's NOTICE states beside the program's. The memory
+pack's Volatility entry pins the Foundation's Windows symbol pack this way.
+A program that belongs to another system (Apple's `log`, a collector run on
+the host being collected) is marked `not_in_image` with why: no image is asked
+for it, and a pack may not require it.
+
+**A pack's `requires/host.json` runs code when an image is built:** `configure`
+and `make`, `pip install`, a source's `commands`, the `patches` it applies, a
+data file's `warm` and `check`. Build images only from packs you trust; the
+sha256 pins say the bytes are the ones the pack named, not that the pack is
+harmless.
 
     {
       "binaries": [

@@ -305,6 +305,18 @@
       },
       "licence": "MIT",
       "redistributable": false
+    },
+    {
+      "name": "steghide",
+      "package": "steghide",
+      "optional": true,
+      "why": "Extract data hidden in a JPEG, BMP, WAV or AU file with steghide, given a passphrase the evidence supplies (an empty one included). It cannot tell a file with nothing hidden from one hidden under another passphrase: a negative is about that passphrase, and about steghide only.",
+      "install": {
+        "brew": "brew install steghide",
+        "apt": "apt-get install -y steghide"
+      },
+      "licence": "GPL-2.0-or-later",
+      "redistributable": false
     }
   ]
 }

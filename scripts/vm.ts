@@ -41,6 +41,7 @@
  *   node --experimental-strip-types scripts/vm.ts create --spec FILE
  *   node --experimental-strip-types scripts/vm.ts gateway-plan --spec FILE --out FILE
  *   node --experimental-strip-types scripts/vm.ts image-digest --image REF
+ *   node --experimental-strip-types scripts/vm.ts record-warnings FILE   (what an image.json says is missing of its pinned data)
  *   node --experimental-strip-types scripts/vm.ts finish --run ID --sandbox DIR [--no-snapshot] [--agent ID] [--registry FILE]
  *   node --experimental-strip-types scripts/vm.ts reap   [--run ID] [--registry FILE] [--only ID]
  *   node --experimental-strip-types scripts/vm.ts list   [--run ID]
@@ -801,6 +802,29 @@ export function packNeeds(packDirs: string[]): PackNeed[] {
 }
 
 /**
+ * What an image's own record says about the data its packs pin (a symbol
+ * pack): a file that could not be fetched, one that was not indexed at build.
+ * The program is on PATH and what it reads is not; without this a seat
+ * concludes there is nothing to find where there is nothing to look in.
+ */
+export function imageDataWarnings(record: unknown): string[] {
+  const r = (record && typeof record === "object" ? record : {}) as {
+    profile?: string;
+    not_installed?: { data?: Array<{ name?: string; pack?: string; why?: string }> };
+    downloads?: Record<string, { kind?: string; warm?: string; program?: string }>;
+  };
+  const image = r.profile ? `the ${r.profile} image` : "the image";
+  const out: string[] = [];
+  for (const d of r.not_installed?.data ?? []) {
+    out.push(`${image} lacks the data ${d.name ?? "?"} that pack ${d.pack ?? "?"} pins (${d.why ?? "the build did not say why"}): what reads it will find nothing, which is not an absence in the evidence`);
+  }
+  for (const [name, d] of Object.entries(r.downloads ?? {})) {
+    if (d && d.kind === "data" && d.warm === "failed") out.push(`${image} holds the data ${name} but did not index it at build: the first use in each VM will, and takes minutes`);
+  }
+  return out;
+}
+
+/**
  * Whether the image fits the run's packs. A program a pack requires and the
  * VM does not have is a blocker, unless the agents may install (then they
  * are told). An image built from another version of a pack, or one that
@@ -815,6 +839,7 @@ export function imageFit(probe: Record<string, unknown>, needs: PackNeed[], allo
   if (programsInJobs) return { blockers, warnings };
   const missing = new Set(Array.isArray(probe.missing_binaries) ? (probe.missing_binaries as string[]) : []);
   const image = (probe.image ?? {}) as { pack_versions?: Record<string, { version?: string; seal?: string }> };
+  warnings.push(...imageDataWarnings(probe.image));
   if (needs.length && !image.pack_versions) warnings.push("the image records no pack versions (built before images recorded them): which version of each pack it was built for is unknown");
   for (const need of needs) {
     const lacks = need.required.filter((b) => missing.has(b));
@@ -2859,6 +2884,20 @@ async function main(): Promise<void> {
     case "msb-path":
       console.log(msbBinary());
       return;
+    case "record-warnings": {
+      // What an image record (image.json) says is missing from the data its
+      // packs pin, one line each; read only, nothing when it says nothing.
+      const file = rest[0];
+      if (!file) throw new Error("record-warnings needs FILE (an image.json)");
+      let record: unknown = null;
+      try {
+        record = JSON.parse(readFileSync(file, "utf8"));
+      } catch {
+        // an unreadable record is said by the caller
+      }
+      for (const w of imageDataWarnings(record)) console.log(w);
+      process.exit(0);
+    }
     case "image-digest": {
       // An image's digest as msb holds it here, or null: read only.
       const image = opt("--image");

@@ -28,6 +28,11 @@
  * An image built before its record listed every program on PATH records
  * only its packs' programs: a command that runs a shell utility then finds
  * it in no record, and keeps the default image, as before.
+ *
+ * Among the images that hold what a command runs, one whose record carries
+ * pinned data for a program it runs (a symbol pack a program reads: the
+ * record's `downloads` of kind `data`, each naming its `program`) is
+ * preferred to a smaller image that holds the program and not its data.
  */
 import { spawnSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
@@ -38,7 +43,7 @@ import { basename, join } from "node:path";
  * holds, by name and by where it is; `whole` when the record lists every
  * program on its PATH, not only its packs' ones.
  */
-export type ImageRecord = { profile: string; ref: string; packs: number; programs: Set<string>; paths: Set<string>; whole: boolean };
+export type ImageRecord = { profile: string; ref: string; packs: number; programs: Set<string>; paths: Set<string>; whole: boolean; data?: Set<string> };
 
 /** How a job's image was chosen, and why: on its job_started line. */
 export type ImageChoice = { how: "named" | "pack" | "programs" | "default"; why: string; programs?: string[] };
@@ -47,7 +52,7 @@ export type ImageChoice = { how: "named" | "pack" | "programs" | "default"; why:
 export async function readImageRecords(S: string, images: Record<string, string>): Promise<ImageRecord[]> {
   const out: ImageRecord[] = [];
   for (const [profile, ref] of Object.entries(images)) {
-    let r: { packs?: unknown; binaries?: unknown; on_path?: unknown };
+    let r: { packs?: unknown; binaries?: unknown; on_path?: unknown; downloads?: unknown };
     try {
       r = JSON.parse(await readFile(join(S, "images", profile, "image.json"), "utf8")) as typeof r;
     } catch {
@@ -67,7 +72,11 @@ export async function readImageRecords(S: string, images: Record<string, string>
       paths.add(where);
       programs.add(basename(where));
     }
-    out.push({ profile, ref, packs: Array.isArray(r.packs) ? r.packs.length : 0, programs, paths, whole: Array.isArray(r.on_path) });
+    // The programs this image holds pinned data for (a pack's `install.data`).
+    const data = new Set<string>();
+    const downloads = r.downloads && typeof r.downloads === "object" ? (r.downloads as Record<string, { kind?: unknown; program?: unknown }>) : {};
+    for (const d of Object.values(downloads)) if (d && d.kind === "data" && typeof d.program === "string" && d.program) data.add(d.program);
+    out.push({ profile, ref, packs: Array.isArray(r.packs) ? r.packs.length : 0, programs, paths, whole: Array.isArray(r.on_path), data });
   }
   return out;
 }
@@ -324,9 +333,13 @@ export function chooseImage(text: string, records: ImageRecord[], fallback: { re
   const need = [...new Set([...ran, ...named])].sort();
   const nowhere = [...ran].filter((p) => !records.some((r) => held(r, p))).sort();
   if (nowhere.length) return keep(`${list(nowhere)} ${nowhere.length > 1 ? "are" : "is"} in no job image's record${records.some((r) => r.whole) ? "" : " (these records list only their packs' programs; an image built since lists every program on its PATH)"}`, need);
-  const fits = records.filter((r) => need.every((p) => held(r, p))).sort((a, b) => a.packs - b.packs || a.programs.size - b.programs.size || a.profile.localeCompare(b.profile));
+  // The programs of the command that an image holds pinned data for.
+  const withData = (r: ImageRecord) => need.filter((p) => r.data?.has(p));
+  const fits = records.filter((r) => need.every((p) => held(r, p))).sort((a, b) => withData(b).length - withData(a).length || a.packs - b.packs || a.programs.size - b.programs.size || a.profile.localeCompare(b.profile));
   if (!fits.length) return keep(`no one job image's record holds ${list(need)}`, need);
   const [best, ...also] = fits;
   const what = need.length ? `${list(need)} ${need.length > 1 ? "are" : "is"} in its record` : "the command runs nothing but bash's own builtins";
-  return { profile: best.profile, ref: best.ref, choice: { how: "programs", why: `the smallest job image that holds what the command runs: ${what}${also.length ? ` (also in ${list(also.map((r) => r.profile))})` : ""}`, ...(need.length ? { programs: need } : {}) } };
+  const data = withData(best);
+  const dataNote = data.length ? `; its record carries the data ${list(data)} reads` : "";
+  return { profile: best.profile, ref: best.ref, choice: { how: "programs", why: `the smallest job image that holds what the command runs${data.length ? ", preferring one with the data it reads" : ""}: ${what}${dataNote}${also.length ? ` (also in ${list(also.map((r) => r.profile))})` : ""}`, ...(need.length ? { programs: need } : {}) } };
 }

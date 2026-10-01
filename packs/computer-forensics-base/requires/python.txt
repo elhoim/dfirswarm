@@ -1,1 +1,3 @@
-# The base pack's tools use only the standard library. Nothing to install.
+# The base pack's tools use only the standard library. What follows is for the
+# agents' own scripts, in every image that holds this pack:
+Pillow>=10.0           # MIT-CMU. A photo or a screenshot opened in a script: its pixels, bit planes and EXIF, and a re-saved copy to compare.

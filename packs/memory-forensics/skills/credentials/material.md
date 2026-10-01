@@ -4,7 +4,7 @@ title: Credential material, and how to talk about it
 when: You must say whether credentials were exposed or taken.
 needs: [processes/injection]
 tools: [mem_fs, ioc_scan]
-requires_host: [memprocfs, vol]
+requires_host: [memprocfs, vol, aeskeyfind]
 ---
 
 Memory is where credentials are in the clear, and that is the point for an
@@ -36,3 +36,20 @@ ledger" has said the same thing safely.
 Where the goal explicitly asks for a recovered secret — a container password,
 say — record the hash in the ledger and hand the value over through the channel
 the operator named, not through the report.
+
+**Key schedules.** A cipher that is in use keeps its expanded key in memory: 176
+bytes for AES-128, 240 for AES-256, laid out so that each round key follows from
+the one before it. `aeskeyfind -q IMAGE` tests every position against that
+relation and prints the keys it finds, tolerating a few decayed bits (`-t`
+raises the tolerance and the false positives with it; `-v` adds the offset it
+was found at, `AT BYTE` in hexadecimal, and the expanded key). A hit is a lead
+and nothing more: the schedule may belong to the browser, to
+a library, or to nobody, so say which offset it was at and which tool and
+threshold found it, and call it established only when it decrypts something the
+evidence holds. Its absence is a statement about the layout the tool tests (the
+standard AES-128 and AES-256 schedules, byte for byte), not about whether a key
+was ever in memory.
+
+`aeskeyfind` comes with the memory and `full` images. A host run has it only if
+the operator installed it (Debian packages it for amd64 and i386 only); without
+it this check was not run, and the report says so.

@@ -322,6 +322,47 @@ if os.path.isfile(hj):
                         errors.append("%s: %s must be a list of strings" % (where, key))
                 if "env" in src and not (isinstance(src["env"], dict) and all(isinstance(k, str) and isinstance(v, str) for k, v in src["env"].items())):
                     errors.append("%s: env must map names to strings" % where)
+                if kind == "build":
+                    # A source patched before it is built (a distribution's
+                    # fixes to an old upstream release): each patch is pinned
+                    # like the archive. A source with no configure script
+                    # names its steps, each an argument list, not a shell line.
+                    for i, patch in enumerate(src.get("patches") or []):
+                        if not isinstance(patch, dict):
+                            errors.append("%s: patch %d must be an object with a url and a sha256" % (where, i + 1))
+                        else:
+                            pinned("%s: patch %d" % (where, i + 1), patch, "")
+                    if "patches" in src and not isinstance(src["patches"], list):
+                        errors.append("%s: patches must be a list" % where)
+                    if "commands" in src and not (isinstance(src["commands"], list) and src["commands"]
+                                                  and all(isinstance(c, list) and c and all(isinstance(x, str) for x in c) for c in src["commands"])):
+                        errors.append("%s: commands must be a list of argument lists (strings)" % where)
+            # Data a program reads and that is not a program (symbol tables, a
+            # rule set): pinned like a download, put inside a Python package of
+            # the image's venv, under the licence it carries on its own.
+            data = install.get("data")
+            if data is not None:
+                where = "requires/host.json: %s's data" % b.get("name")
+                if not isinstance(data, dict) or not data.get("version"):
+                    errors.append("%s needs a version" % where)
+                else:
+                    pinned(where, data, "")
+                    for key in ("package", "licence", "why"):
+                        if not (isinstance(data.get(key), str) and data[key].strip()):
+                            errors.append("%s needs %s" % (where, key))
+                    for key in ("into", "file"):
+                        v = data.get(key, "")
+                        if not isinstance(v, str) or v.startswith("/") or ".." in v.split("/"):
+                            errors.append("%s: %s must be a path inside the package" % (where, key))
+                    if "warm" in data and not (isinstance(data["warm"], list) and data["warm"] and all(isinstance(x, str) for x in data["warm"])):
+                        errors.append("%s: warm must be an argument list (strings)" % where)
+                    # What must hold once the file is in the image: the program
+                    # finds it. The images workflow runs it again, offline.
+                    if not (isinstance(data.get("check"), list) and data["check"] and all(isinstance(x, str) for x in data["check"])):
+                        errors.append("%s needs check: an argument list (strings) that succeeds when the program finds the file" % where)
+                    # A file is not redistributable because its program is.
+                    if not isinstance(data.get("redistributable"), bool):
+                        errors.append("%s does not say whether it is redistributable (true or false)" % where)
             # Another system's program (Apple's log, a Windows collector): no
             # image holds it, so no pack may require it of one.
             if "not_in_image" in b:
