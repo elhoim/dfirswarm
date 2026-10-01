@@ -48,8 +48,22 @@ import { sweepHash, type SweepRecord } from "../extensions/store-sweep.ts";
 import { REVIEW_ACTIONS } from "./review.ts";
 import { packageLayout, verifyReleases } from "./release-record.ts";
 import { outputWords, sensitiveEntries, sensitiveIndex, withheldPaths } from "./output-hygiene.ts";
+import { MultiMatch } from "./multi-match.ts";
 
 const sha256 = (b: string | Buffer) => createHash("sha256").update(b).digest("hex");
+
+/** A file's sha256, read 8 MiB at a time: never the whole file in memory. */
+function sha256FileSync(path: string): string {
+  const h = createHash("sha256");
+  const fd = openSync(path, "r");
+  try {
+    const buf = Buffer.allocUnsafe(8 * 1024 * 1024);
+    for (let n = readSync(fd, buf, 0, buf.length, null); n > 0; n = readSync(fd, buf, 0, buf.length, null)) h.update(buf.subarray(0, n));
+  } finally {
+    closeSync(fd);
+  }
+  return h.digest("hex");
+}
 const REDACTED = "[redacted: marked sensitive]";
 
 function walk(dir: string): string[] {
@@ -214,6 +228,14 @@ function redactJsonValue(v: unknown, pointer: string, tokens: SensitiveToken[], 
 }
 
 /**
+ * How much of a file one look holds, beside the overlap that keeps a word
+ * across two looks whole. Its text is decoded and normalised a window at a
+ * time, which costs several copies of the window: 8 MiB keeps the scan of a
+ * 4 GB package under 1 GB of memory, at the same speed as 32 MiB.
+ */
+export const SCAN_WINDOW = 8 * 1024 * 1024;
+
+/**
  * Every packaged file searched for what redaction should have taken out:
  * each sensitive entry's words, normalised (lower case, one kind of path
  * separator, JSON escapes read), in a text file's text, and as UTF-8 and
@@ -222,6 +244,15 @@ function redactJsonValue(v: unknown, pointer: string, tokens: SensitiveToken[], 
  * with `filenames`, a path whose own name holds a sensitive value. A hit is
  * named by the file and a commitment to the word (its sha256, or a keyed id
  * for low-entropy content), never the word.
+ *
+ * Linear in the bytes read: every word and digest is found in one pass of
+ * one automaton per form (multi-match.ts), the file read in windows of
+ * SCAN_WINDOW that overlap by the longest form and the context a short word
+ * is judged by, nothing left unread. Each window is text when no NUL stands
+ * in its first 8 KiB. It used to search for each word and each digest on its
+ * own, over 32 MiB at a time: the Breadcrumbs package (2,700 words, 1,600
+ * digests, 4.2 GB with a 1.37 GB job stderr.log) was still being scanned
+ * after two hours at full CPU; it is scanned in under a minute and a half.
  */
 export function leakScan(dir: string, tokens: ScanToken[], o: { digests?: ReadonlySet<string>; filenames?: boolean } = {}): { files: number; hits: LeakHit[] } {
   const hits: LeakHit[] = [];
@@ -229,7 +260,16 @@ export function leakScan(dir: string, tokens: ScanToken[], o: { digests?: Readon
   const norm = (s: string) => s.replace(/\\"/g, '"').replace(/\\\//g, "/").replace(/\\\\/g, "\\").toLowerCase().replace(/\\/g, "/");
   const wanted = tokens.map((t) => ({ ...t, n: norm(t.token), raw: [Buffer.from(t.token, "utf8"), Buffer.from(t.token, "utf16le"), Buffer.from(t.token.toLowerCase(), "utf8")] }));
   const digests = [...(o.digests ?? [])];
-  const maxLen = Math.max(0, ...wanted.map((w) => w.raw[1].length));
+  // The text forms (each word normalised, then each digest) and the byte forms (UTF-8, UTF-16LE, lower-case UTF-8: word i's at 3i, 3i+1, 3i+2).
+  const textForms = [...wanted.map((w) => Buffer.from(w.n, "utf8")), ...digests.map((d) => Buffer.from(d, "utf8"))];
+  const byteForms = wanted.flatMap((w) => w.raw);
+  const textMatch = new MultiMatch(textForms);
+  const byteMatch = new MultiMatch(byteForms);
+  // A word across two windows is whole in the first: the longest form twice
+  // over (an escaped character takes two bytes in the file for one in the
+  // text), and the context a short word is judged by on both sides.
+  const longest = Math.max(0, ...textForms.map((b) => b.length), ...byteForms.map((b) => b.length));
+  const overlap = 2 * longest + 4 * RUN_WINDOW;
   for (const abs of walk(dir)) {
     const rel = relative(dir, abs).split("\\").join("/");
     if (rel === "REDACTIONS.txt" || rel === "REDACTIONS.json" || rel === "HYGIENE.json" || rel.startsWith("MANIFEST.txt")) continue;
@@ -243,29 +283,73 @@ export function leakScan(dir: string, tokens: ScanToken[], o: { digests?: Readon
     };
     // A filename that itself holds a sensitive word (an agent named an output after the secret).
     if (o.filenames) for (const w of wanted) if (holdsWord(norm(rel), w.n)) note(w.id ?? sha256(w.token), w.seq, "filename", { output: w.output });
-    // Whole, when it can be held; in overlapping chunks when it cannot: nothing is left unread.
-    const chunk = 32 * 1024 * 1024;
+    if (!wanted.length && !digests.length) continue;
     const fd = openSync(abs, "r");
+    const buf = Buffer.allocUnsafe(Math.max(1, Math.min(size, SCAN_WINDOW + overlap)));
     try {
-      for (let off = 0; off < Math.max(size, 1); off += chunk) {
-        const len = Math.min(chunk + maxLen, size - off);
+      for (let off = 0; off < Math.max(size, 1); off += SCAN_WINDOW) {
+        const len = Math.min(SCAN_WINDOW + overlap, size - off);
         if (len <= 0) break;
-        const buf = Buffer.alloc(len);
-        readSync(fd, buf, 0, len, off);
-        // Text when no NUL stands in its first 8 KiB; any file's bytes are searched either way.
-        const text = !buf.subarray(0, 8192).includes(0) ? norm(buf.toString("utf8")) : null;
-        for (const w of wanted) {
-          if (text !== null && holdsWord(text, w.n)) note(w.id ?? sha256(w.token), w.seq, "text", { output: w.output });
-          else if (w.raw.some((b, k) => bytesHoldWord(buf, b, k === 1 ? 2 : 1, w.token.length < SHORT_WORD))) note(w.id ?? sha256(w.token), w.seq, "bytes", { output: w.output });
+        let got = 0;
+        while (got < len) {
+          const n = readSync(fd, buf, got, len - got, off + got);
+          if (n <= 0) break;
+          got += n;
         }
+        const win = buf.subarray(0, got);
+        const inText = new Uint8Array(wanted.length);
+        const inBytes = new Uint8Array(wanted.length);
+        const digestHit = new Uint8Array(digests.length);
+        // Text when no NUL stands in its first 8 KiB; any window's bytes are searched either way.
+        const text = !win.subarray(0, 8192).includes(0) ? Buffer.from(norm(win.toString("utf8")), "utf8") : null;
+        if (text) {
+          textMatch.scan(text, (id, end) => {
+            const n = textMatch.lengths[id]!;
+            for (const k of textMatch.owners[id]!) {
+              if (k >= wanted.length) {
+                digestHit[k - wanted.length] = 1;
+                continue;
+              }
+              if (inText[k]) continue;
+              // The text's classes are ASCII: its UTF-8 bytes tell a longer run as its characters do.
+              if (wanted[k]!.n.length < SHORT_WORD && partOfLongerRun(byteAt(text, end - n, 1), n)) continue;
+              inText[k] = 1;
+            }
+          });
+        }
+        byteMatch.scan(win, (id, end) => {
+          const n = byteMatch.lengths[id]!;
+          for (const k of byteMatch.owners[id]!) {
+            const i = Math.floor(k / 3);
+            if (inText[i] || inBytes[i]) continue;
+            const unit = k % 3 === 1 ? 2 : 1;
+            if (wanted[i]!.token.length < SHORT_WORD && partOfLongerRun(byteAt(win, end - n, unit), n / unit)) continue;
+            inBytes[i] = 1;
+          }
+        });
+        wanted.forEach((w, i) => {
+          if (inText[i]) note(w.id ?? sha256(w.token), w.seq, "text", { output: w.output });
+          else if (inBytes[i]) note(w.id ?? sha256(w.token), w.seq, "bytes", { output: w.output });
+        });
         // A sensitive output's digest left in a record: named, never printed.
-        if (text !== null) for (const d of digests) if (text.includes(d)) note(`digest:${d.slice(0, 12)}`, 0, "digest");
+        if (text) digests.forEach((d, i) => {
+          if (digestHit[i]) note(`digest:${d.slice(0, 12)}`, 0, "digest");
+        });
       }
     } finally {
       closeSync(fd);
     }
   }
   return { files, hits };
+}
+
+/** The character `k` places from `start` in `buf`, read `unit` bytes a character (1 for UTF-8, 2 for UTF-16LE), undefined past either end. */
+function byteAt(buf: Buffer, start: number, unit: 1 | 2): (k: number) => number | undefined {
+  return (k: number) => {
+    const j = start + k * unit;
+    if (j < 0 || j + unit > buf.length) return undefined;
+    return unit === 1 ? buf[j] : buf[j]! | (buf[j + 1]! << 8);
+  };
 }
 
 /**
@@ -650,7 +734,9 @@ export async function hygieneReport(sandbox: string, dir: string): Promise<{ ent
   ];
   const EMPTY = sha256(Buffer.alloc(0));
   const sensitiveDigests = new Set([...index.content.keys()].filter((d) => d !== EMPTY));
-  const carriedPaths = walk(dir).map((abs) => relative(dir, abs).split("\\").join("/")).filter((rel) => index.content.has(sha256(readFileSync(join(dir, rel)))) || withheldPaths(index).some((p) => p.rel.test(rel)));
+  // Each file's digest read as a stream (a job's log can be gigabytes), the paths' patterns made once.
+  const withheldRules = withheldPaths(index);
+  const carriedPaths = walk(dir).map((abs) => relative(dir, abs).split("\\").join("/")).filter((rel) => withheldRules.some((p) => p.rel.test(rel)) || index.content.has(sha256FileSync(join(dir, rel))));
   const scan = tokens.length || sensitiveDigests.size ? leakScan(dir, tokens, { digests: sensitiveDigests, filenames: true }) : { files: 0, hits: [] as LeakHit[] };
   if (derived.size || index.jobs.size) {
     writeFileSync(`${dir.replace(/\/$/, "")}.private.json`, `${JSON.stringify({ v: 1, note: "Kept by the run's owner, NEVER handed over: the keyed ids HYGIENE.json uses, each to the value it stands for.", map: privateMap }, null, 2)}\n`, { mode: 0o600 });
