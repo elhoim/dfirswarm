@@ -24,6 +24,11 @@ import * as Q from "../extensions/questions.ts";
 import { checkLedgerAnswers } from "../scripts/check-answers.ts";
 import { finishGate } from "../scripts/finish-gate.ts";
 import { A, coverage, ESTABLISHED, F, ok, planned, rec, REVIEW, run } from "./negative-bar-fixture.ts";
+import { spawnSync } from "node:child_process";
+import { join } from "node:path";
+import { questionArgv } from "../scripts/ui/questions.ts";
+import { mustEstablishPayload, mustEstablishWords } from "../ui/src/lib/question-forms.ts";
+import type { QuestionView } from "../ui/src/lib/types.ts";
 
 /** Two questions; `must` names the ones the goal says must be established, in its own section. */
 const goal = (must: string[] = ["1"]) =>
@@ -316,4 +321,44 @@ test("every seat's header names the questions that must be established while the
   // A run that requires nothing has no such line.
   const plain = await run({ goal: goal([]) });
   assert.ok(!Q.questionsDigest("a0", await Q.viewContext(plain.S), told).lines.some((l) => /Must be established/.test(l)));
+});
+
+test("the console marks a question must be established, shows who required it, and releases it with why, through the same command line", async () => {
+  const r = await run({ goal: goal([]) });
+  await Q.seedRegister(r.S);
+  const cli = (sub: string, argv: string[]) => {
+    const p = spawnSync(process.execPath, ["--experimental-strip-types", "--no-warnings", join(import.meta.dirname, "..", "scripts", "questions-cli.ts"), sub, r.S, ...argv], { encoding: "utf8" });
+    return { code: p.status, out: `${p.stdout}${p.stderr}` };
+  };
+  // The add form's field.
+  const add = questionArgv({ action: "add", text: "Which account ran the installer?", why: "the client asks", must_establish: true });
+  assert.ok(add.argv.includes("--must-establish"));
+  assert.ok(!questionArgv({ action: "add", text: "t", why: "w" }).argv.includes("--must-establish"), "left out, nothing is required");
+  const opened = cli(add.sub, add.argv);
+  assert.equal(opened.code, 0, opened.out);
+  let snap = await Q.questionsSnapshot(r.S);
+  const asked = [...snap.state.questions.values()].find((q) => q.text === "Which account ran the installer?")!;
+  assert.equal(Q.mustEstablish(asked), true);
+  // A card's action on the goal's question 1: required (no new revision), then released with why.
+  const q1 = () => snap.state.questions.get("Q-1")! as unknown as QuestionView;
+  const require = questionArgv(mustEstablishPayload({ id: "Q-1", rev: 1 }, true, "the flag is the answer"));
+  assert.deepEqual(require, { sub: "amend", argv: ["Q-1", "--expect-rev", "1", "--why", "the flag is the answer", "--must-establish"] });
+  assert.equal(cli(require.sub, require.argv).code, 0);
+  snap = await Q.questionsSnapshot(r.S);
+  assert.equal(q1().rev, 1, "no new revision");
+  const view = Q.viewQuestion(snap.state.questions.get("Q-1")!, await Q.viewContext(r.S)) as unknown as QuestionView;
+  assert.match(mustEstablishWords(view.must_establish!), /^required by .+: the flag is the answer$/);
+  // A release without why is refused by the register, and said.
+  const bare = questionArgv(mustEstablishPayload({ id: "Q-1", rev: 1 }, false, " "));
+  assert.deepEqual(bare.argv, ["Q-1", "--expect-rev", "1", "--no-must-establish"]);
+  const refused = cli(bare.sub, bare.argv);
+  assert.notEqual(refused.code, 0);
+  assert.match(refused.out, /a release of the requirement says why/);
+  const release = questionArgv(mustEstablishPayload({ id: "Q-1", rev: 1 }, false, "the client takes what the log holds"));
+  assert.equal(cli(release.sub, release.argv).code, 0);
+  snap = await Q.questionsSnapshot(r.S);
+  const released = Q.viewQuestion(snap.state.questions.get("Q-1")!, await Q.viewContext(r.S)) as unknown as QuestionView;
+  assert.equal(released.must_establish?.required, false);
+  assert.match(mustEstablishWords(released.must_establish!), /^released by .+: the client takes what the log holds$/);
+  assert.match(mustEstablishWords({ required: true, at: "t", by: "goal", origin: { kind: "goal" } as QuestionView["origin"], seq: 1, rev: 1, why: null }), /^required by the goal$/);
 });

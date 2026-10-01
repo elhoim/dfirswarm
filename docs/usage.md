@@ -754,7 +754,12 @@ amend or accept form keeps the revision it was opened on until you refresh it,
 and a proposed question is a full card, so a clarification on it is answered
 before it is admitted. It shows the premises with the same acts on them, and
 each answer's parts (established, or open with what bounds it), the premises
-it cites and a part a review says it leaves out.
+it cites and a part a review says it leaves out. A question that must be
+established carries a mark and says who required it (the goal, the examiner,
+the operator), when and why, or who released the requirement and why; the add
+form has the field (`--must-establish`, a material question only), and a card
+in scope has the action that requires it or releases it with why
+(`amend --must-establish | --no-must-establish`, no new revision).
 
 While the run's hub is up (a microVM run that is going) it is the register's
 one writer: `swarm.sh` hands each act, prepared and signed here, to the hub's
