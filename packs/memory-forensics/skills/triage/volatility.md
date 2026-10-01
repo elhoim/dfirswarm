@@ -14,8 +14,10 @@ download is not reproducible on an isolated examiner workstation.
       2>work/<your id>/windows.info.stderr
 
 Record `Volatility 3 Framework`'s version line, the plugin, the image hash and
-the symbol identity. The memory image holds the Volatility Foundation's Windows
-symbol pack (`/etc/dfirswarm/tools.md` says where it is and what it covers):
+the symbol identity. The memory and `full` images hold the Volatility
+Foundation's Windows symbol pack (`/etc/dfirswarm/tools.md` says where it is and
+what it covers; a host run has no image, and holds no pack unless the operator
+put one under `volatility3/symbols`):
 3,014 tables for the Windows builds of 2019 and earlier, so a newer kernel is
 usually not in it. `vol -q isfinfo` lists what is there. The kernel you need is
 named by its PDB name and its GUID and age (`ntkrnlmp.pdb`, 32 hexadecimal digits,

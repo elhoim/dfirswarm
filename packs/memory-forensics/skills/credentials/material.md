@@ -49,3 +49,7 @@ threshold found it, and call it established only when it decrypts something the
 evidence holds. Its absence is a statement about the layout the tool tests (the
 standard AES-128 and AES-256 schedules, byte for byte), not about whether a key
 was ever in memory.
+
+`aeskeyfind` comes with the memory and `full` images. A host run has it only if
+the operator installed it (Debian packages it for amd64 and i386 only); without
+it this check was not run, and the report says so.

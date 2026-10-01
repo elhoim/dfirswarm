@@ -16,7 +16,7 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { JobService, type JobRecord, type JobServiceOptions } from "../scripts/job-service.ts";
-import { chooseImage, commandShape, type ImageRecord } from "../scripts/image-choice.ts";
+import { chooseImage, commandShape, readImageRecords, type ImageRecord } from "../scripts/image-choice.ts";
 import { checkStore, storePaths, verifyJournalText } from "../scripts/evidence-store.ts";
 import { localWorker } from "./job-service-worker.ts";
 import type { WorkerSpec } from "../scripts/vm.ts";
@@ -190,6 +190,31 @@ test("a command that names no profile runs in the smallest image whose record ho
   assert.equal(chooseImage("partx -o 2048 inputs/x", old, dflt, new Set()).profile, "disk", "a pack's program alone is still found");
   assert.equal(chooseImage("exec -a x mactime -b body", old, dflt, new Set(["exec"])).ref, "img:full", "a program run by a builtin, on no record: the default");
   assert.match(chooseImage("partx", [], dflt).choice.why, /no job image's record could be read/);
+});
+
+test("among the images that hold a program, one whose record carries pinned data for it is preferred to a smaller one that holds the program alone", async () => {
+  const dflt = { profile: null, ref: "img:full" };
+  const pick = (cmd: string, records: ImageRecord[]) => chooseImage(cmd, records, dflt, new Set(["echo"]));
+  const alone = fake("disk", 3, ["reader"]);
+  const withData = { ...fake("memory", 5, ["reader"]), data: new Set(["reader"]) };
+  const c = pick("reader -f inputs/x | head", [alone, withData]);
+  assert.equal(c.profile, "memory", "the image with the data it reads, though it has more packs");
+  assert.match(c.choice.why, /preferring one with the data it reads: head and reader are in its record; its record carries the data reader reads \(also in disk\)/);
+  assert.equal(pick("reader -f inputs/x", [alone, { ...fake("memory", 5, ["reader"]) }]).profile, "disk", "with no data in either, the smallest");
+  assert.equal(pick("other -f inputs/x", [alone, withData]).ref, "img:full", "a program no record holds still keeps the default");
+  assert.equal(pick("echo hi", [alone, withData]).profile, "disk", "data for a program the command does not run decides nothing");
+  // The record as install.py writes it: downloads of kind data name their program.
+  const S = sandbox();
+  mkdirSync(join(S, "images", "memory"), { recursive: true });
+  writeFileSync(join(S, "images", "memory", "image.json"), JSON.stringify({
+    profile: "memory", packs: ["a", "b"], binaries: { vol: "/opt/dfir/venv/bin/vol" },
+    downloads: { "vol-windows-symbols": { kind: "data", program: "vol", version: "2019" }, memprocfs: { kind: "download", version: "1" }, odd: null },
+  }));
+  mkdirSync(join(S, "images", "disk"), { recursive: true });
+  writeFileSync(join(S, "images", "disk", "image.json"), JSON.stringify({ profile: "disk", packs: ["a"], binaries: { vol: "/opt/dfir/venv/bin/vol" } }));
+  const read = await readImageRecords(S, { memory: "img:memory", disk: "img:disk" });
+  assert.deepEqual(read.map((r) => [r.profile, [...(r.data ?? [])]]).sort(), [["disk", []], ["memory", ["vol"]]]);
+  assert.equal(chooseImage("vol -f inputs/m.raw windows.info", read, dflt, new Set()).profile, "memory", "vol goes where its symbol tables are, though disk has fewer packs");
 });
 
 test("a job that names no profile goes to the image the records choose, the choice and its reason on job_started", async () => {

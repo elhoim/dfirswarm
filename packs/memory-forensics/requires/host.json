@@ -50,8 +50,14 @@
             "-q",
             "isfinfo"
           ],
+          "check": [
+            "sh",
+            "-c",
+            "test \"$(vol -q isfinfo 2>/dev/null | grep -c 'windows.zip!windows/')\" -ge 1000"
+          ],
+          "redistributable": false,
           "why": "Windows kernel symbol tables for `vol`, so a Windows plugin finds its kernel's symbols with no network (run it with `--offline`). The Volatility Foundation's pack as it stood on 2019-10-16: 3,014 tables for the Windows builds of that time, not every one of them. A newer kernel is not in it; `vol -q isfinfo` lists what is.",
-          "licence": "The pack carries no licence text of its own. The Volatility Software License 1.0 counts operating-system profiles distributed with the software as the software, so it is taken to apply. The tables are generated from Microsoft's public symbol (PDB) files, whose Microsoft Symbol Server licence terms allow use for debugging and testing and forbid sharing, publishing or offering them stand-alone: this image is not for redistribution."
+          "licence": "Our reading, not legal advice. The pack carries no licence text of its own. The Volatility Software License 1.0 (https://www.volatilityfoundation.org/license/vsl-v1.0) says its \"Software\" includes \"any data (such as operating system profiles or configuration information)\" provided with the software; we read the tables as such data. The tables are generated from Microsoft's public symbol (PDB) files, whose Microsoft Symbol Server licence terms of June 2022 (https://learn.microsoft.com/en-us/legal/windows-sdk/microsoft-symbol-server-license-terms) allow use \"solely for purposes of performance, security or functional debugging and testing of your software as used with Microsoft software, or as otherwise authorized by Microsoft\" and say that you may not \"share, publish, rent, or lease the Symbol Items, or provide the Symbol Items as stand-alone offerings for others to use\". Whether examining evidence is within that use is not ours to say, so these terms may bear on use as well as on redistribution. This image is not for redistribution."
         }
       },
       "licence": "Volatility Software License 1.0",
@@ -168,7 +174,7 @@
       "name": "gcc",
       "package": "gcc",
       "optional": true,
-      "why": "Compile a small C program in the job's own directory: a scanner over a memory image too large for Python to hold, a decoder for a format no library reads. The source and the build line stay in the record like any other tool.",
+      "why": "Compile a small C program the seat itself writes, in the job's own directory: a scanner over a memory image too large for Python to hold, a decoder for a format no library reads. The source and the build line stay in the record like any other tool. Never a program or a source tree the evidence holds: nothing from the evidence is executed.",
       "install": {
         "brew": "xcode-select --install",
         "apt": "apt-get install -y gcc libc6-dev"
@@ -180,7 +186,7 @@
       "name": "make",
       "package": "make",
       "optional": true,
-      "why": "Build a C project from a source tree a case holds or a tool is distributed as.",
+      "why": "Build a tool distributed as source, from a tree the operator or a pack supplied; never a source tree the evidence holds.",
       "install": {
         "brew": "brew install make",
         "apt": "apt-get install -y make"

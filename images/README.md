@@ -62,8 +62,9 @@ own, while its agents boot the base; name any other with `--image`.
 redistribution (GPL, AGPL, the Volatility Software License, CPL/IPL and the
 rest; the NOTICE lists each with its licence). A build that would hold one
 stops without the flag. With it, the image is for this machine or a private
-registry: its label, its `image.json` and its NOTICE all say it is not for
-redistribution. Never push such an image anywhere public. The base is not for
+registry (an image that carries pinned `install.data` is for the machine that
+built it alone: see below): its label, its `image.json` and its NOTICE all say
+it is not for redistribution. Never push such an image anywhere public. The base is not for
 redistribution either, under the same rule (`base.Dockerfile` says why), and a
 profile carries its base's flag: `web`, whose packs hold nothing, builds
 without the flag and is still marked not for redistribution.
@@ -156,13 +157,21 @@ anything is unpacked, installed or built.
   for it. `warm` is a command run once the file is there, for a program that
   indexes what it finds the first time it runs and would otherwise do it in
   every VM the image boots; a warm that fails is recorded (`warm: failed` in
-  `image.json`) and does not lose the file. `licence` is the data's own and
-  goes in the NOTICE beside the program's. It hangs from a program's entry and
-  is its own record in `image.json` (`downloads`, kind `data`), in the SBOM as
-  a `data` component, and in `tools.md` under "Data the programs read". An
-  optional program's data that cannot be fetched is recorded under
-  `not_installed.data` and does not stop the image. Volatility's Windows symbol
-  tables come this way (next section).
+  `image.json`) and does not lose the file. `check` is a command that must
+  succeed once the file is there (the program finds it): a build whose check
+  fails does not keep the file, and the images workflow runs every data
+  entry's check again with no network. The entry says whether it is
+  `redistributable` (the image is not, when either it or its program is not)
+  and carries its own `licence`, which goes in the NOTICE beside the program's.
+  It hangs from a program's entry and is its own record in `image.json`
+  (`downloads`, kind `data`), in the SBOM as a `data` component, and in
+  `tools.md` under "Data the programs read". A pinned data file that cannot be
+  fetched **fails the build even when its program is optional**: the pack
+  pinned it on purpose, and an image without it would say the program is there
+  while what it reads is not. `recipe.py build --allow-missing-data` goes on
+  without it; the image then records it under `not_installed.data`, and a
+  kickoff says so as a WARN. Volatility's Windows symbol tables come this way
+  (next section).
 - An apt line with `-t bookworm-backports` takes its package from the image's
   own Debian backports, added from the mirror the image already uses and from
   nowhere else: Suricata.
@@ -185,13 +194,13 @@ Volatility 3 helps a memory examination a great deal, and its licence (the
 Volatility Software License 1.0) does not let this project distribute it with
 its work. So we do not: the memory and `full` images hold it because their
 build installs it (`pip install volatility3`, `packs/memory-forensics`), the
-image that results is built by whoever runs it and kept on that machine or in
-a private registry, and its label, `image.json` and NOTICE say it is not for
-redistribution. Nothing of it or its tables is pushed to a public registry:
-the `images` workflow builds and boots, never pushes, and the pro edition's
-prebuilt images live in the private repository. Anyone can build the same
-image from the recipes above; a customer who would rather not is the subject
-of the roadmap's "Images for programs we cannot redistribute".
+image that results is built by whoever runs it, and its label, `image.json` and
+NOTICE say it is not for redistribution. **No image that carries
+`install.data` (the Volatility symbol tables) is pushed from any workflow of
+ours, the pro one included**: we never distribute Volatility or its data,
+whoever runs the images builds their own, and Pro builds those per customer
+(the roadmap's "Images for programs we cannot redistribute"). The `images`
+workflow builds and boots, never pushes.
 
 A Windows plugin needs the symbols of the kernel it reads, and Volatility
 fetches them from Microsoft the first time it sees the kernel: not in a VM
@@ -216,14 +225,21 @@ Foundation's Windows symbol pack, pinned as data in the memory pack
   venv's `volatility3/symbols/windows/`. A run that finds no table says so; the
   memory pack's `triage/volatility` skill makes it a limitation, not a silent
   fetch.
-- **Its licence, in the NOTICE.** The pack ships no licence text. The
-  Volatility Software License 1.0 counts "any data (such as operating system
-  profiles ...) provided with the software" as the software, so it is taken to
-  apply to the tables; and they are generated from Microsoft's public symbol
-  files, whose Microsoft Symbol Server licence terms (June 2022) allow them to
-  be used to debug and test, and forbid sharing, publishing or offering them
-  stand-alone. Either is reason enough for the image not to leave the machine
-  that built it.
+- **Its licence, in the NOTICE.** Our reading, not legal advice. The pack
+  ships no licence text. The Volatility Software License 1.0
+  (<https://www.volatilityfoundation.org/license/vsl-v1.0>) says its "Software"
+  includes "any data (such as operating system profiles or configuration
+  information)" provided with the software, and we read the tables as such
+  data. They are generated from Microsoft's public symbol files, whose
+  Microsoft Symbol Server licence terms of June 2022
+  (<https://learn.microsoft.com/en-us/legal/windows-sdk/microsoft-symbol-server-license-terms>)
+  allow use "solely for purposes of performance, security or functional
+  debugging and testing of your software as used with Microsoft software, or as
+  otherwise authorized by Microsoft" and say you may not "share, publish, rent,
+  or lease the Symbol Items, or provide the Symbol Items as stand-alone
+  offerings for others to use". Whether examining evidence is within that use
+  is not ours to say: those terms may bear on use as well as on
+  redistribution. The NOTICE of the image has both clauses in full.
 
 Other small programs the packs now name, for what a run asked for and no image
 had: `steghide` (the base pack, so in every image), `aeskeyfind` (memory),
@@ -240,7 +256,14 @@ credential artefacts out of Windows memory, which is decided separately.
 The pro edition's prebuilt, digest-pinned images are built in the private
 `dfirswarm-pro` repository and pushed there as private packages: an image
 bundles separately licensed programs, and a package published from this
-public repository is public. Point a kickoff at their lock file:
+public repository is public. **Not the images that carry `install.data`** (the
+memory and `full` images, with Volatility's symbol tables): none of our
+workflows pushes those, the pro one included, since a private registry still
+copies the tables to GitHub and to every customer who pulls; Pro builds them
+per customer, under the customer's own acceptance of the licences. A workflow
+that publishes images checks that `spec.json` of the build context lists no
+`data` before it pushes, and builds no profile that does. Point a kickoff at a
+lock file:
 
 ```bash
 SWARM_IMAGES_LOCK=/path/to/dfirswarm-pro/images.lock.json scripts/swarm.sh start --isolation microvm ...

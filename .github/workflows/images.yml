@@ -3,7 +3,10 @@
 # (measured: the first push of these images could be pulled anonymously),
 # and an image bundles separately licensed programs that are not ours to
 # redistribute until each licence has been reviewed. Prebuilt images are
-# published from the private dfirswarm-pro repository, to private packages.
+# published from the private dfirswarm-pro repository, to private packages,
+# except an image that carries pinned data (install.data: Volatility's symbol
+# tables), which no workflow of ours pushes anywhere; Pro builds those per
+# customer.
 #
 # What this does instead: builds the base and every profile for amd64 from
 # the recipes, `full` included, as a community user would (images/README.md),
@@ -15,7 +18,8 @@
 # package lists a VM's inventory is diffed against at stop, and a fresh
 # container diffs empty against them (scripts/vm.ts INVENTORY_SCRIPT, run
 # as it is); its NOTICE and SBOM are there; data a pack pins (Volatility's
-# Windows symbol tables) is on disk, indexed, and found with no network; and
+# Windows symbol tables) is on disk, was indexed, and passes the check its pack
+# names for it, run again with no network; and
 # the programs a run once lacked work (tests/image-programs.sh: a C compiler,
 # a planted AES key schedule found, a steghide round trip). CI's microVM job
 # boots base and disk on a runner with KVM on every pull request;
@@ -77,7 +81,7 @@ jobs:
           python3 -c 'import json, sys; d = json.loads(sys.argv[1]); sys.exit(0 if d.get("baseline") is True and d.get("apt") == {} and d.get("venv") == {} else 1)' "$out" \
             || { echo "a fresh container is not what its record says it is: $out" >&2; exit 1; }
           docker run --rm "$image" sh -c 'test -s /etc/dfirswarm/NOTICE && python3 -c "import json; b = json.load(open(\"/etc/dfirswarm/sbom.json\")); assert b[\"bomFormat\"] == \"CycloneDX\" and b[\"components\"]; print(\"sbom:\", len(b[\"components\"]), \"components\")"'
-      - name: Pinned data is in the image, indexed, and found with no network
+      - name: Pinned data is in the image, was indexed, and passes its check with no network
         run: |
           image="dfirswarm-${{ matrix.profile }}:$TAG"
           # Every data file a pack pins (a symbol pack) is on disk at the size the build recorded,
@@ -87,17 +91,22 @@ jobs:
           r = json.load(open("/etc/dfirswarm/image.json"))
           data = {k: v for k, v in (r.get("downloads") or {}).items() if v.get("kind") == "data"}
           left_out = (r.get("not_installed") or {}).get("data") or []
-          bad = [k for k, v in data.items() if not os.path.isfile(v["path"]) or os.path.getsize(v["path"]) != v.get("bytes") or v.get("warm") == "failed"]
+          bad = [k for k, v in data.items() if not os.path.isfile(v["path"]) or os.path.getsize(v["path"]) != v.get("bytes") or v.get("warm") == "failed" or not v.get("check")]
           print("pinned data:", {k: v.get("bytes") for k, v in data.items()}, "left out:", left_out, "bad:", bad)
           sys.exit(1 if left_out or bad else 0)'
-          # Where the image pins Volatility's Windows symbol pack (memory, full; the disk image has vol
-          # and no pack), vol lists it with no route out, from the index the build made.
-          if docker run --rm "$image" python3 -c 'import json, sys; r = json.load(open("/etc/dfirswarm/image.json")); sys.exit(0 if any(v.get("kind") == "data" and v.get("program") == "vol" for v in (r.get("downloads") or {}).values()) else 1)'; then
-            start="$(date +%s)"
-            n="$(docker run --rm --network none "$image" sh -c 'vol -q isfinfo 2>/dev/null | grep -c "windows.zip!windows/"' || true)"
-            echo "vol lists $n Windows symbol tables offline in $(( $(date +%s) - start )) s (container start included)"
-            [ "${n:-0}" -ge 1000 ] || { echo "the Windows symbol pack is not found by vol with no network" >&2; exit 1; }
-          fi
+          # Each data entry's own check (install.data `check`), run again in a fresh container with
+          # no route out. A docker error fails the step; so does a check that does not succeed.
+          docker run --rm "$image" python3 -c 'import json; r = json.load(open("/etc/dfirswarm/image.json")); print(json.dumps([[k, v["check"]] for k, v in (r.get("downloads") or {}).items() if v.get("kind") == "data" and v.get("check")]))' > "$RUNNER_TEMP/data-checks.json"
+          python3 - "$image" "$RUNNER_TEMP/data-checks.json" <<'PY'
+          import json, subprocess, sys, time
+          image, path = sys.argv[1:3]
+          for name, argv in json.load(open(path)):
+              start = time.time()
+              r = subprocess.run(["docker", "run", "--rm", "--network", "none", image, *argv])
+              print(f"check of {name}: exit {r.returncode} in {time.time() - start:.0f} s (container start included)")
+              if r.returncode != 0:
+                  sys.exit(1)
+          PY
       - name: The programs a run asked for work in the image
         run: |
           # tests/image-programs.sh: a C program compiles and runs, a planted AES key schedule is found,

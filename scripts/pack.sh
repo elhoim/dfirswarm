@@ -356,6 +356,13 @@ if os.path.isfile(hj):
                             errors.append("%s: %s must be a path inside the package" % (where, key))
                     if "warm" in data and not (isinstance(data["warm"], list) and data["warm"] and all(isinstance(x, str) for x in data["warm"])):
                         errors.append("%s: warm must be an argument list (strings)" % where)
+                    # What must hold once the file is in the image: the program
+                    # finds it. The images workflow runs it again, offline.
+                    if not (isinstance(data.get("check"), list) and data["check"] and all(isinstance(x, str) for x in data["check"])):
+                        errors.append("%s needs check: an argument list (strings) that succeeds when the program finds the file" % where)
+                    # A file is not redistributable because its program is.
+                    if not isinstance(data.get("redistributable"), bool):
+                        errors.append("%s does not say whether it is redistributable (true or false)" % where)
             # Another system's program (Apple's log, a Windows collector): no
             # image holds it, so no pack may require it of one.
             if "not_in_image" in b:

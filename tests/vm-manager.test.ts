@@ -19,6 +19,7 @@ import {
   hostAvailableMib,
   roomForWorker,
   gatewayPorts,
+  imageDataWarnings,
   imageFit,
   interceptPorts,
   packNeeds,
@@ -431,6 +432,23 @@ test("an image that lacks a pack's required program stops the kickoff, unless th
   // not held to them, and nobody is told to install them there.
   assert.deepEqual(imageFit({ missing_binaries: ["fls", "icat"], image: { profile: "base", pack_versions: {} } }, needs, true, true), { blockers: [], warnings: [] });
   assert.deepEqual(imageFit({ missing_binaries: ["fls", "icat"], image: { profile: "base", pack_versions: {} } }, needs, false, true).blockers, [], "nor stopped for it");
+});
+
+test("an image's record that lacks the data its packs pin, or did not index it, is said at kickoff", () => {
+  assert.deepEqual(imageDataWarnings({ profile: "memory", not_installed: { data: [] }, downloads: { "vol-windows-symbols": { kind: "data", warm: "done" } } }), []);
+  assert.deepEqual(imageDataWarnings(null), []);
+  assert.deepEqual(imageDataWarnings("not a record"), []);
+  const lacking = imageDataWarnings({ profile: "memory", not_installed: { data: [{ name: "vol-windows-symbols", pack: "memory-forensics", why: "download failed: timed out" }] } });
+  assert.equal(lacking.length, 1);
+  assert.match(lacking[0], /the memory image lacks the data vol-windows-symbols that pack memory-forensics pins \(download failed: timed out\)/);
+  assert.match(lacking[0], /not an absence in the evidence/);
+  const cold = imageDataWarnings({ profile: "memory", downloads: { "vol-windows-symbols": { kind: "data", warm: "failed" }, memprocfs: { kind: "download" } } });
+  assert.equal(cold.length, 1);
+  assert.match(cold[0], /holds the data vol-windows-symbols but did not index it at build/);
+  // The agent VM's own image is read the same way.
+  const fit = imageFit({ missing_binaries: [], image: { profile: "memory", pack_versions: {}, not_installed: { data: [{ name: "vol-windows-symbols", pack: "memory-forensics", why: "x" }] } } }, [], false);
+  assert.deepEqual(fit.blockers, [], "a missing data file warns, it does not stop the run");
+  assert.ok(fit.warnings.some((w) => /lacks the data vol-windows-symbols/.test(w)), fit.warnings.join("\n"));
 });
 
 test("a host msb does not run on is refused by name, before msb is asked", () => {

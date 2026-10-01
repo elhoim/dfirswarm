@@ -238,6 +238,12 @@ A program that belongs to another system (Apple's `log`, a collector run on
 the host being collected) is marked `not_in_image` with why: no image is asked
 for it, and a pack may not require it.
 
+**A pack's `requires/host.json` runs code when an image is built:** `configure`
+and `make`, `pip install`, a source's `commands`, the `patches` it applies, a
+data file's `warm` and `check`. Build images only from packs you trust; the
+sha256 pins say the bytes are the ones the pack named, not that the pack is
+harmless.
+
     {
       "binaries": [
         { "name": "fls", "package": "sleuthkit",

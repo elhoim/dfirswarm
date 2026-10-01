@@ -48,8 +48,10 @@ Non-goals:
 Not started. Volatility 3 and the Windows symbol tables built from Microsoft's
 files are the first programs the images hold that this project may not hand
 out, and every pack program stays `redistributable: false` until its licence is
-reviewed, so none of our images is published. The Pro service is to build a
-customer's VM images from the pack recipes, with the customer's own acceptance
-of each program's licence (the NOTICE lists them), so that nothing is
-redistributed by us and the customer still has what a memory case needs. Until
-then anyone can build their own from [the recipes](../images/README.md).
+reviewed, so none of our images is published, and no image that carries
+`install.data` (the Volatility symbol tables) is pushed from any workflow of
+ours, the pro one included. The Pro service is to build a customer's VM images
+from the pack recipes, with the customer's own acceptance of each program's
+licence (the NOTICE lists them), so that nothing is redistributed by us and the
+customer still has what a memory case needs. Until then anyone can build their
+own from [the recipes](../images/README.md).

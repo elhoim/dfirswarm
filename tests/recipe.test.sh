@@ -143,13 +143,17 @@ pass "a build context carries pack versions and seals the kickoff computes alike
 # What the memory image is asked to hold beyond the base: Volatility's Windows
 # symbol tables as pinned data (checked, put in the venv's package, warmed, and
 # said in the NOTICE to carry a licence of their own), a Debian source built with
-# its patches, a compiler, and the small programs the Breadcrumbs run lacked.
+# its patches, a compiler, and the small programs a recent memory case lacked.
 jq -e '.data | length == 1 and .[0].name == "vol-windows-symbols" and .[0].program == "vol" and .[0].package == "volatility3"
        and .[0].into == "symbols" and (.[0].sha256 | test("^[0-9a-f]{64}$")) and (.[0].url | startswith("https://"))
        and .[0].warm == ["vol", "-q", "isfinfo"] and .[0].redistributable == false' "$TMP/ctx/spec.json" >/dev/null \
   || fail "the memory image does not pin Volatility's Windows symbol tables as data: $(jq -c .data "$TMP/ctx/spec.json")"
 grep -q '^  vol-windows-symbols data for vol: https://.*  sha256 [0-9a-f]\{64\}  \[not for redistribution\]$' "$TMP/ctx/NOTICE" \
   || fail "the NOTICE does not name the symbol tables, where they come from and that they are not for redistribution"
+jq -e '.data[0].required == true and (.data[0].check | length) == 3 and .data[0].check[0] == "sh"' "$TMP/ctx/spec.json" >/dev/null \
+  || fail "the symbol tables are not required of the image (vol is optional, its data was pinned on purpose), or carry no check: $(jq -c '.data[0] | {required, check}' "$TMP/ctx/spec.json")"
+python3 "$R" build memory --out "$TMP/ctx-lenient" --allow-nonredistributable --allow-missing-data >/dev/null || fail "the build with --allow-missing-data failed"
+jq -e '.data[0].required == false' "$TMP/ctx-lenient/spec.json" >/dev/null || fail "--allow-missing-data does not let the build go on without a data file"
 jq -e '.nonredistributable | index("vol") != null and index("vol-windows-symbols") != null' "$TMP/ctx/spec.json" >/dev/null \
   || fail "the image's record does not name the symbol tables among what is not cleared for redistribution: $(jq -c .nonredistributable "$TMP/ctx/spec.json")"
 grep -q '^    licence of the data: .*Volatility Software License 1.0.*Microsoft Symbol Server' "$TMP/ctx/NOTICE" \
@@ -303,6 +307,28 @@ copy="$(grep -n '^COPY --from=build-built-tool /opt/dfir/tools/built-tool /opt/d
 spec_copy="$(grep -n '^COPY install.py spec.json NOTICE' "$df" | cut -d: -f1)"
 [[ -n "$copy" && -n "$spec_copy" && "$copy" -lt "$spec_copy" ]] || fail "what the builder installed is not copied before the profile's install runs: $(cat "$df")"
 pass "an apt line's backports release, a .deb, a pinned source, a build in its own stage and another system's program each land in the spec and the Dockerfile"
+
+# A file is not redistributable because its program is: a redistributable
+# program with data its pack says is not holds the image back, and one whose
+# data is redistributable too does not.
+mkdir -p "$TMP/fakedata/reverse-engineering/requires" "$TMP/fakedata/ransomware-response/requires"
+printf '{"id": "ransomware-response", "name": "f", "version": "1.0.0", "description": "f", "licence": "MIT", "depends": []}\n' > "$TMP/fakedata/ransomware-response/pack.json"
+printf '{"binaries": []}\n' > "$TMP/fakedata/ransomware-response/requires/host.json"
+printf '{"id": "reverse-engineering", "name": "f", "version": "1.0.0", "description": "f", "licence": "MIT", "depends": []}\n' > "$TMP/fakedata/reverse-engineering/pack.json"
+for flag in false true; do
+  cat > "$TMP/fakedata/reverse-engineering/requires/host.json" <<JSON
+{"binaries": [{"name": "free-tool", "optional": true, "why": "t", "licence": "MIT", "redistributable": true,
+  "install": {"apt": "x", "data": {"name": "free-tables", "version": "1", "url": "https://example.org/t.zip", "sha256": "$sha", "package": "p",
+              "check": ["true"], "why": "t", "licence": "Terms", "redistributable": $flag}}}]}
+JSON
+  python3 "$R" build re --packs "$TMP/fakedata" --out "$TMP/ctx-data-$flag" >/dev/null 2>"$TMP/data-$flag.err"; rc=$?
+  if [[ $flag == false ]]; then
+    [[ $rc -eq 3 ]] && grep -q 'free-tables' "$TMP/data-$flag.err" || fail "an image with non-redistributable data for a redistributable program was not held back (rc $rc): $(cat "$TMP/data-$flag.err")"
+  else
+    [[ $rc -eq 0 ]] && [[ "$(jq -r '.redistributable' "$TMP/ctx-data-$flag/spec.json")" == true ]] || fail "redistributable data for a redistributable program held the image back (rc $rc): $(cat "$TMP/data-$flag.err")"
+  fi
+done
+pass "data is held back by its own redistributable flag as well as its program's"
 
 # install.py on each kind, with apt, the venv, the tools, the sources and bin
 # all in the test's own directories. apt is a script that says what it was asked.
@@ -462,6 +488,21 @@ got, why = install.fetch_data({**d, "into": "../outside"})
 out["escape"] = [bool(got), why, os.path.exists(f"{D}/site/outside")]
 got, why = install.fetch_data({**d, "file": "named.zip"})
 out["named"] = [bool(got), os.path.basename((got or {}).get("path", ""))]
+for bad_name in ("../../escape.bin", "sub/escape.bin", "..", "a\\b"):
+    got, why = install.fetch_data({**d, "file": bad_name, "into": "named"})
+    out.setdefault("bad_names", []).append([bool(got), why])
+out["escaped_file_exists"] = os.path.exists(f"{D}/site/escape.bin") or os.path.exists(f"{D}/escape.bin") or os.path.exists(f"{D}/site/fakepkg/escape.bin")
+got, why = install.fetch_data({**d, "into": "checked", "check": ["true"]})
+out["check_ok"] = [bool(got), (got or {}).get("check")]
+got, why = install.fetch_data({**d, "into": "unchecked", "check": ["false"]})
+out["check_fails"] = [bool(got), why, os.path.exists(f"{D}/site/fakepkg/unchecked/pack.zip")]
+got, why = install.fetch_data({**d, "into": "unchecked2", "check": ["no-such-checker"]})
+out["check_missing"] = [bool(got), why]
+# A pinned artefact that is required and failed stops the image; an optional one is recorded.
+held, left = {}, {"data": [], "download": []}
+out["settle_required"] = [install.settle_artefact("data", {"name": "x", "required": True}, None, "download failed", held, left), left["data"]]
+out["settle_optional"] = [install.settle_artefact("download", {"name": "y", "pack": "p"}, None, "download failed", held, left), [e["name"] for e in left["download"]]]
+out["settle_held"] = [install.settle_artefact("data", {"name": "z", "required": True}, {"kind": "data"}, None, held, left), sorted(held)]
 src = {"name": "tool", "version": "1", "url": f"file://{D}/tool-1.0.tar.gz", "sha256": tool_sha, "bin": "bin/tool",
        "patches": [{"url": f"file://{D}/fix.patch", "sha256": patch_sha}],
        "commands": [["make", "-j{jobs}"], ["mkdir", "-p", "{prefix}/bin"], ["cp", "tool", "{prefix}/bin/tool"]]}
@@ -498,6 +539,13 @@ jq -e '.bad_sha[0] == false and (.bad_sha[1] | test("is not the pinned")) and .b
 jq -e '.no_package[0] == false and (.no_package[1] | test("is not in the image"))' <<<"$res" >/dev/null || fail "data for a package the image lacks was put somewhere: $res"
 jq -e '.escape[0] == false and (.escape[1] | test("leaves the package")) and .escape[2] == false' <<<"$res" >/dev/null || fail "data was put outside its package's directory: $res"
 jq -e '.named == [true, "named.zip"]' <<<"$res" >/dev/null || fail "a data file does not take the name its pack gives it: $res"
+jq -e '.bad_names | length == 4 and all(.[]; .[0] == false and (.[1] | test("not a plain name")))' <<<"$res" >/dev/null || fail "a data file name that climbs out of the directory, or names a path, was accepted: $res"
+jq -e '.escaped_file_exists == false' <<<"$res" >/dev/null || fail "a data file was written outside its directory by its name"
+jq -e '.check_ok == [true, ["true"]]' <<<"$res" >/dev/null || fail "a check that succeeds is not recorded with the data: $res"
+jq -e '.check_fails[0] == false and (.check_fails[1] | test("check .* failed once the file was in place")) and .check_fails[2] == false' <<<"$res" >/dev/null || fail "data whose check fails was kept or not refused: $res"
+jq -e '.check_missing[0] == false and (.check_missing[1] | test("check"))' <<<"$res" >/dev/null || fail "a check whose program is not there passed: $res"
+jq -e '.settle_required == [false, []] and .settle_optional == [true, ["y"]] and .settle_held == [true, ["z"]]' <<<"$res" >/dev/null \
+  || fail "a required artefact that failed does not stop the image, or an optional one is not recorded: $res"
 jq -e '.build_rc == 0 and .build_rec == [true, true] and .patched_runs == 0 and .unpatched_runs == 1' <<<"$res" >/dev/null \
   || fail "a source with a pinned patch and its own steps was not built patched, or the record does not name the patch: $res"
 jq -e '.badsha_rec.ok == false and (.badsha_rec.why | test("patch fix.patch: sha256 .* is not the pinned"))' <<<"$res" >/dev/null || fail "a patch with other bytes was applied: $res"
@@ -559,6 +607,8 @@ jq -e --arg sha "$sha" '[.components[] | select(.name == "tool") | .hashes[0].co
   "$TMP/rec/etc/sbom.json" >/dev/null || fail "a pinned download is not in the SBOM with its sha256"
 jq -e '[.components[] | select(.name == "tool-tables") | .type == "data" and .properties[0].value == "data" and .externalReferences[0].type == "distribution"] == [true]' \
   "$TMP/rec/etc/sbom.json" >/dev/null || fail "pinned data is not in the SBOM as data, with its sha256 and where it was fetched from"
+grep -q '^Not cleared for redistribution: dissect.util. It carries pinned data (tool-tables): no workflow of this project pushes such an image to any registry, the private one included' "$TMP/rec/etc/NOTICE" \
+  || fail "the NOTICE of an image that carries pinned data does not say no workflow of ours pushes it: $(sed -n '/Not cleared/p' "$TMP/rec/etc/NOTICE")"
 pass "every image records its Debian list and venv for the inventory diff, a NOTICE, a CycloneDX SBOM, and the base's redistribution flag carries into a profile"
 
 # tools.md: what an agent reads to learn what its VM holds. The base lists the
@@ -633,7 +683,7 @@ for good in '{'"$e"', "install": {"source": {"version": "1", '"$u"', "entry": "b
             '{'"$e"', "install": {"build": {"version": "1", '"$u"', "bin": "bin/t", "configure": ["--disable-x"], "build_deps": ["gcc"], "apt_deps": ["zlib1g"], "env": {"CFLAGS": "-O2"}}}}' \
             '{'"$e"', "install": {"download": {"version": "1", "arm64": {"url": "https://example.org/t_1_arm64.deb", "sha256": "'"$sha"'", "bin": "/opt/t/bin/t"}}}}' \
             '{'"$e"', "install": {"apt": "x", "build": {"version": "1", '"$u"', "bin": "bin/t", "patches": [{'"$u"'}], "commands": [["make"], ["install", "-D", "t", "{prefix}/bin/t"]]}}}' \
-            '{'"$e"', "install": {"apt": "x", "data": {"version": "1", '"$u"', "package": "volatility3", "into": "symbols", "warm": ["vol", "-q", "isfinfo"], "why": "Tables.", "licence": "Terms."}}}' \
+            '{'"$e"', "install": {"apt": "x", "data": {"version": "1", '"$u"', "package": "volatility3", "into": "symbols", "warm": ["vol", "-q", "isfinfo"], "why": "Tables.", "licence": "Terms.", "check": ["true"], "redistributable": false}}}' \
             '{'"$e"', "not_in_image": "Only macOS has it."}'; do
   mk_entry "$TMP/p/good-kind" "$good"
   bash "$ROOT/scripts/pack.sh" seal "$TMP/p/good-kind" >/dev/null 2>&1 || fail "a well-formed entry was refused: $good"
@@ -651,15 +701,20 @@ for bad in '{'"$e"', "install": {"source": {"version": "1", '"$u"'}}}' \
            '{'"$e"', "install": {"build": {"version": "1", '"$u"', "bin": "bin/t", "patches": "p.patch"}}}' \
            '{'"$e"', "install": {"build": {"version": "1", '"$u"', "bin": "bin/t", "commands": ["make"]}}}' \
            '{'"$e"', "install": {"build": {"version": "1", '"$u"', "bin": "bin/t", "commands": [[]]}}}' \
-           '{'"$e"', "install": {"apt": "x", "data": {'"$u"', "package": "p", "why": "Tables.", "licence": "Terms."}}}' \
-           '{'"$e"', "install": {"apt": "x", "data": {"version": "1", "url": "http://example.org/t.zip", "sha256": "'"$sha"'", "package": "p", "why": "Tables.", "licence": "Terms."}}}' \
-           '{'"$e"', "install": {"apt": "x", "data": {"version": "1", "url": "https://example.org/t.zip", "sha256": "abc", "package": "p", "why": "Tables.", "licence": "Terms."}}}' \
-           '{'"$e"', "install": {"apt": "x", "data": {"version": "1", '"$u"', "why": "Tables.", "licence": "Terms."}}}' \
-           '{'"$e"', "install": {"apt": "x", "data": {"version": "1", '"$u"', "package": "p", "why": "Tables."}}}' \
-           '{'"$e"', "install": {"apt": "x", "data": {"version": "1", '"$u"', "package": "p", "licence": "Terms."}}}' \
-           '{'"$e"', "install": {"apt": "x", "data": {"version": "1", '"$u"', "package": "p", "into": "../x", "why": "Tables.", "licence": "Terms."}}}' \
-           '{'"$e"', "install": {"apt": "x", "data": {"version": "1", '"$u"', "package": "p", "into": "/etc", "why": "Tables.", "licence": "Terms."}}}' \
-           '{'"$e"', "install": {"apt": "x", "data": {"version": "1", '"$u"', "package": "p", "warm": "vol isfinfo", "why": "Tables.", "licence": "Terms."}}}' \
+           '{'"$e"', "install": {"apt": "x", "data": {'"$u"', "package": "p", "why": "Tables.", "licence": "Terms.", "check": ["true"], "redistributable": false}}}' \
+           '{'"$e"', "install": {"apt": "x", "data": {"version": "1", "url": "http://example.org/t.zip", "sha256": "'"$sha"'", "package": "p", "why": "Tables.", "licence": "Terms.", "check": ["true"], "redistributable": false}}}' \
+           '{'"$e"', "install": {"apt": "x", "data": {"version": "1", "url": "https://example.org/t.zip", "sha256": "abc", "package": "p", "why": "Tables.", "licence": "Terms.", "check": ["true"], "redistributable": false}}}' \
+           '{'"$e"', "install": {"apt": "x", "data": {"version": "1", '"$u"', "why": "Tables.", "licence": "Terms.", "check": ["true"], "redistributable": false}}}' \
+           '{'"$e"', "install": {"apt": "x", "data": {"version": "1", '"$u"', "package": "p", "why": "Tables.", "check": ["true"], "redistributable": false}}}' \
+           '{'"$e"', "install": {"apt": "x", "data": {"version": "1", '"$u"', "package": "p", "licence": "Terms.", "check": ["true"], "redistributable": false}}}' \
+           '{'"$e"', "install": {"apt": "x", "data": {"version": "1", '"$u"', "package": "p", "into": "../x", "why": "Tables.", "licence": "Terms.", "check": ["true"], "redistributable": false}}}' \
+           '{'"$e"', "install": {"apt": "x", "data": {"version": "1", '"$u"', "package": "p", "into": "/etc", "why": "Tables.", "licence": "Terms.", "check": ["true"], "redistributable": false}}}' \
+           '{'"$e"', "install": {"apt": "x", "data": {"version": "1", '"$u"', "package": "p", "warm": "vol isfinfo", "why": "Tables.", "licence": "Terms.", "check": ["true"], "redistributable": false}}}' \
+           '{'"$e"', "install": {"apt": "x", "data": {"version": "1", '"$u"', "package": "p", "why": "Tables.", "licence": "Terms.", "redistributable": false}}}' \
+           '{'"$e"', "install": {"apt": "x", "data": {"version": "1", '"$u"', "package": "p", "why": "Tables.", "licence": "Terms.", "check": "true", "redistributable": false}}}' \
+           '{'"$e"', "install": {"apt": "x", "data": {"version": "1", '"$u"', "package": "p", "why": "Tables.", "licence": "Terms.", "check": [], "redistributable": false}}}' \
+           '{'"$e"', "install": {"apt": "x", "data": {"version": "1", '"$u"', "package": "p", "why": "Tables.", "licence": "Terms.", "check": ["true"]}}}' \
+           '{'"$e"', "install": {"apt": "x", "data": {"version": "1", '"$u"', "package": "p", "why": "Tables.", "licence": "Terms.", "check": ["true"], "redistributable": "no"}}}' \
            '{"name": "tool", "why": "Test.", "licence": "MIT", "redistributable": true, "not_in_image": "Only macOS has it."}' \
            '{'"$e"', "not_in_image": ""}'; do
   mk_entry "$TMP/p/bad-kind" "$bad"

@@ -27,7 +27,13 @@ program reads and which are not a program) is fetched and checked the same
 way and put, as named, where the program looks for it: inside a Python package
 of the image's venv (`package`, `into`). Its pack may name a command to run
 once it is there (`warm`), for a program that indexes what it finds on first
-use and would otherwise do it in every VM the image boots.
+use and would otherwise do it in every VM the image boots, and a command that
+must succeed afterwards (`check`; the images workflow runs it again with no
+network). A data file that cannot be had fails the build even when its program
+is optional: the pack pinned it on purpose, and an image without it would say
+the program is there while what it reads is not. `recipe.py build
+--allow-missing-data` goes on without it, and the image then records it under
+`not_installed.data`.
 
 A pinned download is fetched over HTTPS, checked against its sha256 before
 anything is unpacked, unpacked under /opt/dfir/tools/<name>/ and put on PATH
@@ -376,8 +382,11 @@ def fetch_data(d: dict) -> tuple:
     dest_dir = (root / d.get("into", "")).resolve()
     if not (dest_dir == root.resolve() or str(dest_dir).startswith(f"{root.resolve()}/")):
         return None, f"{d.get('into')} leaves the package's directory"
+    name = d.get("file") or Path(urllib.parse.urlparse(d["url"]).path).name
+    if not name or name in (".", "..") or "/" in name or "\\" in name:
+        return None, f"the file name {name!r} is not a plain name"
     dest_dir.mkdir(parents=True, exist_ok=True)
-    dest = dest_dir / (d.get("file") or Path(urllib.parse.urlparse(d["url"]).path).name)
+    dest = dest_dir / name
     why = get(d["url"], dest, d["sha256"])
     if why:
         return None, why
@@ -396,6 +405,19 @@ def fetch_data(d: dict) -> tuple:
             # The program is not there (its own install failed): the data
             # is, and the record says it was not warmed.
             rec["warm"] = "failed"
+    if d.get("check"):
+        # What the pack says must hold once the file is there: the program
+        # finds it. A file the program cannot find is not installed.
+        argv = [str(a) for a in d["check"]]
+        argv[0] = shutil.which(argv[0], path=IMAGE_PATH) or argv[0]
+        try:
+            ok = run(argv)
+        except OSError:
+            ok = False
+        if not ok:
+            dest.unlink(missing_ok=True)
+            return None, f"its check ({' '.join(str(a) for a in d['check'])[:120]}) failed once the file was in place"
+        rec["check"] = [str(a) for a in d["check"]]
     return rec, None
 
 
@@ -696,8 +718,14 @@ def notice(head: str, record: dict, python_rows: list, npm_rows: list, own_rows:
     by pack), then what the whole image holds, the base's part included."""
     lines = [head.rstrip("\n"), ""]
     if record.get("nonredistributable"):
-        lines += ["Not cleared for redistribution: " + ", ".join(record["nonredistributable"])
-                  + ". Keep this image on this machine or in a private registry.", ""]
+        data = sorted(k for k, v in (record.get("downloads") or {}).items() if v.get("kind") == "data")
+        # An image that carries pinned data is built by whoever uses it: no
+        # workflow of this project pushes one anywhere, the pro edition's
+        # included, so "a private registry" is not on offer for it.
+        keep = (f"It carries pinned data ({', '.join(data)}): no workflow of this project pushes such an image to any "
+                "registry, the private one included. Keep it on the machine that built it; whoever needs one builds their own."
+                if data else "Keep this image on this machine or in a private registry.")
+        lines += ["Not cleared for redistribution: " + ", ".join(record["nonredistributable"]) + ". " + keep, ""]
     lines += ["Debian packages: every one in this image, with its version, is in image.json (dpkg_all)",
               "and sbom.json; each one's licence is in /usr/share/doc/<package>/copyright.", ""]
     if npm_rows:
@@ -951,6 +979,22 @@ def install_apt(spec: dict, apt: list, failed: dict) -> bool:
     return True
 
 
+def settle_artefact(kind: str, d: dict, got, why, downloads: dict, failed: dict) -> bool:
+    """Record one pinned artefact: held, or failed. A required one that failed
+    stops the image (False); an optional one is recorded with why. A pinned data
+    file is required whatever its program is (recipe.py), unless the operator
+    built with --allow-missing-data."""
+    if got:
+        downloads[d["name"]] = got
+        return True
+    if d.get("required"):
+        hint = " (recipe.py build --allow-missing-data goes on without it)" if kind == "data" else ""
+        print(f"required {kind} {d['name']} failed: {why}{hint}", file=sys.stderr)
+        return False
+    failed[kind].append({"name": d["name"], "pack": d.get("pack"), "why": why})
+    return True
+
+
 def main(spec_path: str) -> int:
     spec = json.loads(Path(spec_path).read_text())
     failed = {"apt": [], "pip": [], "download": [], "source": [], "build": [], "data": []}
@@ -988,14 +1032,7 @@ def main(spec_path: str) -> int:
     downloads = {}
 
     def settle(kind: str, d: dict, got, why) -> bool:
-        if got:
-            downloads[d["name"]] = got
-            return True
-        if d.get("required"):
-            print(f"required {kind} {d['name']} failed: {why}", file=sys.stderr)
-            return False
-        failed[kind].append({"name": d["name"], "pack": d.get("pack"), "why": why})
-        return True
+        return settle_artefact(kind, d, got, why, downloads, failed)
 
     # A runtime first (dotnet, pinned as a download of its own), then what
     # runs on it.

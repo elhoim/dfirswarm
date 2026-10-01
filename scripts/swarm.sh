@@ -4881,6 +4881,11 @@ console.log(r.ok ? "" : r.reason);' "$_gp" "$_gk" 2>/dev/null || echo "could not
         # wrote tools.md: the agents would be pointed at a file that is not there.
         echo "WARN: job image $jref has no /etc/dfirswarm/tools.md (built before the images listed their programs; rebuild it): images/$jp/ holds only its image.json." >&2
       fi
+      # Data its packs pin that the image lacks, or did not index (a symbol
+      # pack): the program is there and what it reads is not.
+      while IFS= read -r dw; do
+        [[ -n "$dw" ]] && echo "WARN: job image $jref: $dw" >&2
+      done < <(vm_cli record-warnings "$sandbox/images/$jp/image.json" 2>/dev/null)
     done
     chmod -R a-w "$sandbox/images" 2>/dev/null || true
   fi
