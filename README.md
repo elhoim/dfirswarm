@@ -85,7 +85,7 @@ When the evidence cannot answer something a reference service can (a domain's re
 
 | Pack | Skills | Tools | Goals |
 | --- | --- | --- | --- |
-| `computer-forensics-base` | 11 | 13 | — |
+| `computer-forensics-base` | 11 | 14 | — |
 | `windows-forensics` | 24 | 20 | 3 |
 | `linux-forensics` | 10 | 6 | 2 |
 | `macos-forensics` | 8 | 4 | 1 |
@@ -101,7 +101,7 @@ When the evidence cannot answer something a reference service can (a domain's re
 A **pack** is a directory an operator installs once and names at kickoff: skills
 an agent fetches by name, tools seeded into the run, the host binaries the case
 needs, and goal templates with their own checks. **Twelve ship in this
-repository** under the same licence as the harness: 107 skills, 69 tools and 14
+repository** under the same licence as the harness: 107 skills, 70 tools and 14
 goal templates across Windows, Linux, macOS, mobile, memory, network, reverse
 engineering, encrypted containers, cloud, ransomware and triage collections,
 all on one base pack.

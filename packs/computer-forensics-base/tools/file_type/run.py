@@ -47,6 +47,8 @@ MAGIC = [
     (0, b"SCCA", "prefetch record", {"pf"}),
     (0, b"\x1f\x8b\x08", "gzip", {"gz"}),
     (0, b"EVF\x09", "EnCase E01 image", {"e01", "ex01"}),
+    (0, b"ADSEGMENTEDFILE\x00", "AccessData AD1 logical image (a segment)", {"ad%d" % k for k in range(1, 10)}),
+    (0, b"ADCRYPT", "AccessData AD1 logical image, encrypted", {"ad1"}),
     (0, b"AVML", "AVML memory capture", {"lime", "raw", "mem"}),
     (0, b"EMiL", "LiME memory capture", {"lime", "raw", "mem"}),
     (0, b"PAGEDU", "Windows crash dump", {"dmp"}),

@@ -1,9 +1,9 @@
 ---
 id: evidence/collections
 title: A triage collection is not an image
-when: The evidence is a zip or a directory tree of copied files rather than a disk.
+when: The evidence is a zip, a directory tree of copied files or an AD1 logical image rather than a disk.
 needs: [evidence/imaging]
-tools: [catalog_search, check_inputs, file_type]
+tools: [catalog_search, check_inputs, file_type, ad1_extract]
 requires_host: []
 ---
 
@@ -41,6 +41,25 @@ usually the ones that matter. A target that failed is a fact about the case.
 be safe on the examiner's file system: a colon becomes something else, and a
 named stream becomes a separate file with an invented name. Before you claim a
 file lived at `C:\Users\x\y`, check the collector's manifest for the mapping.
+
+**An AD1 image is a collection in a container.** FTK Imager's logical image
+(`.ad1`, further segments `.ad2` and on) holds the files and folders the
+examiner chose, with their times and the MD5 and SHA-1 the imager computed.
+No program in the images opens it; the pack does. The catalogue lists every
+item (`members.tsv` of the `ad1-items` generation: `n`, path, size, times,
+the recorded digests, the SHA-256 of the content and `check`, whether that
+content still matches them). Find what you need with `catalog_search
+which=members`, then write it out as a job:
+
+    job_run tool=ad1_extract args={"image": "inputs/case.ad1", "members": [n]} inputs=["input:case.ad1"]
+
+A folder's `n` takes its subtree; no `members` takes everything. The files
+land in the store, cited as `job:<id>/<path>`, and the derived catalogue
+takes an archive or a disk image inside in turn. A segmented image needs
+every segment in the job's `inputs`. `check` mismatch means the content is
+not what the imager hashed: say so before you rely on the file. An encrypted
+AD1 (`ADCRYPT`) is read only once it is decrypted with its password or
+certificate. Everything above about a logical acquisition holds for it.
 
 Two host tools read these directly, if the host has them: `target-query` from
 dissect, and mac_apt for a macOS or UAC collection. Neither is required, and

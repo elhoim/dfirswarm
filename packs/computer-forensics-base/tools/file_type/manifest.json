@@ -21,6 +21,6 @@
   "example": "{\"path\": \"work/extracted\", \"mismatch_only\": true}",
   "by": "maintainer",
   "at": "2026-09-22T18:00:00.000Z",
-  "version": 1,
-  "sha256": "90aafa1509018ad7ced70076714e4ee73b73a96126b45df338680be66c70d9a4"
+  "version": 2,
+  "sha256": "f7097e3fb8053b6d297d414ac2020f94c2f6de60756a84712b21ab2e50e182e1"
 }

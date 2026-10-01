@@ -6,6 +6,20 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Added: AD1 logical images in the base pack
+
+A run's evidence held an AccessData AD1 logical image (FTK Imager's custom content image). The kickoff's census listed it as not catalogued: no recipe of any pack knew its `ADSEGMENTEDFILE` header, and no image had a reader. A seat decoded the container by hand, a second seat reproduced one file's hash, and nothing else could read it. The format knowledge now lives in the base pack (computer-forensics-base 1.5.0); the harness learns nothing about AD1.
+
+- **The `ad1-items` recipe** (kickoff and derived) lists every item of a version 4 image in `members.tsv`.
+  - archive-members' columns come first, so `catalog_search which=members` and `member:<gen>#<n>` read it the same way.
+  - Then the accessed and changed times, the MD5 and SHA-1 the image records, the SHA-256 of each file's content, and `check`: ok, mismatch, no-stored-hash or not-read. Each file is inflated to check them. Past the time limit, inflating stops and listing does not.
+  - `attributes.tsv` keeps every metadata entry of every item; `image.json` keeps the headers and the data source name.
+  - Nothing is extracted. A segmented image is read across `.ad2`, `.ad3`, … beside the first. A further segment is named as read from its first. An encrypted image (`ADCRYPT`) is named and not read.
+- **The `ad1_extract` tool** writes the tree out, each file inflated, hashed and checked, with a manifest (`ad1_extract.tsv`) of what went where. A name the file system cannot hold is written renamed, and the manifest keeps both. Run as a job, its files are sealed, and the derived catalogue takes an archive or a disk image inside in turn: extraction stays the agents', in jobs (ADR 0010).
+- `file_type` names an AD1 segment and an encrypted AD1 by their first bytes. The `evidence/imaging` and `evidence/collections` skills say what an AD1 image is and how to work it.
+- Both use Python's standard library alone, so no image changes. They run in the job image the run picks for the base pack (`images/recipe.py job-profiles`).
+- `tests/ad1-pack.test.ts` builds its AD1 images in code. It covers detect, the listing, damaged images (a loop, an address outside the image, a chunk past its size, a cut file), segments, the time limit, the tool, the census, and the derived chain from an AD1 a job makes to the zip inside it.
+
 ### Changed: Pi 0.87.1, on the host and in the VMs
 
 Pi moves from 0.87.0 to 0.87.1 in both places it is pinned: `package.json` (host-mode seats, the tests) and `images/base.Dockerfile` (`PI_VERSION`, every VM seat). 0.87.1:
