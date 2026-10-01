@@ -149,6 +149,12 @@ test("the harness's spilled lines are chained once the collector is down, kept w
   assert.equal(again.code, 0);
   assert.deepEqual([again.out.gathered, again.out.kept], [0, 1]);
   assert.equal(lines(S).length, all.length);
+  // The hub's spill copied in again (the hub copies its whole spill at its finish): nothing chained twice, nothing kept twice.
+  await writeFile(join(S, "traces", "hub-spill.jsonl"), `${hubDup}\n${hubNew}\n`);
+  const copied = gather(S);
+  assert.deepEqual([copied.out.gathered, copied.out.already, copied.out.duplicates], [0, 1, 1]);
+  assert.equal(lines(S).length, all.length);
+  assert.equal(readFileSync(join(S, "traces", "hub-spill.gathered.jsonl"), "utf8"), `${hubDup}\n${hubNew}\n`);
 
   // Custody: one line outside the chain (the one that is no event), the gathered counted, every operator line on the audit.
   const c = await takeCustody(S, { runsDir: runs });

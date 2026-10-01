@@ -91,6 +91,8 @@ export const OTHER_JSONL: Readonly<Record<string, string>> = {
   "spill-host.jsonl": "the package's name for work/.trace-spill.jsonl",
   "spill-hub.jsonl": "the package's name for traces/hub-spill.jsonl",
   "spill-system.jsonl": "the package's name for traces/system-spill.jsonl",
+  "spill-system.gathered.jsonl": "the package's name for traces/system-spill.gathered.jsonl",
+  "spill-hub.gathered.jsonl": "the package's name for traces/hub-spill.gathered.jsonl",
   ".jsonl": "a suffix the code joins to a name, not a file",
 };
 

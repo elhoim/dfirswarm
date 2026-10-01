@@ -10024,6 +10024,10 @@ PY
   pkg_copy "$sandbox/work/.trace-spill.jsonl" "$out/trace/spill-host.jsonl" non-empty
   pkg_copy "$sandbox/traces/hub-spill.jsonl" "$out/trace/spill-hub.jsonl" non-empty
   pkg_copy "$sandbox/traces/system-spill.jsonl" "$out/trace/spill-system.jsonl" non-empty
+  # The spilled lines a stop chained (each on the trace marked gathered with
+  # its sha256), whole, so a recipient can hold each mark to its line.
+  pkg_copy "$sandbox/traces/hub-spill.gathered.jsonl" "$out/trace/spill-hub.gathered.jsonl" non-empty
+  pkg_copy "$sandbox/traces/system-spill.gathered.jsonl" "$out/trace/spill-system.gathered.jsonl" non-empty
   local sp
   for sp in "$sandbox"/tool-output/*/trace-spill.jsonl; do
     pkg_copy "$sp" "$out/trace/spill-$(basename "$(dirname "$sp")").jsonl" non-empty

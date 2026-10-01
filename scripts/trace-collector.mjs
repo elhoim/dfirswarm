@@ -749,8 +749,22 @@ async function gather() {
           done.add(sha);
           file.gathered += 1;
         }
-        // The spilled lines whole beside the chain, then what stays in the spill, then the batch is gone.
-        if (moved.length) appendFileSync(keptAs, `${moved.join("\n")}\n`, { mode: 0o600 });
+        // The spilled lines whole beside the chain (each once: a hub's spill
+        // copied in again brings back lines already kept), then what stays in
+        // the spill, then the batch is gone.
+        let keptAlready = new Set();
+        try {
+          keptAlready = new Set(readFileSync(keptAs, "utf8").split("\n").filter(Boolean).map(lineHash));
+        } catch {
+          // none kept yet
+        }
+        const fresh = moved.filter((raw) => {
+          const h = lineHash(raw);
+          if (keptAlready.has(h)) return false;
+          keptAlready.add(h);
+          return true;
+        });
+        if (fresh.length) appendFileSync(keptAs, `${fresh.join("\n")}\n`, { mode: 0o600 });
         if (kept.length) appendFileSync(spill, `${kept.join("\n")}\n`, { mode: 0o600 });
         unlinkSync(pending);
         if (round === 0 && kept.length) break;
