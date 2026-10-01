@@ -44,7 +44,9 @@ link to it and `inputs.json` records `guard: "microvm"` and `held: "bind"`,
 links inside the evidence recorded as links. A link that leads out of the
 evidence is refused at kickoff, naming it, since no VM could follow it. When
 the examiner's account can write the evidence (a file, or a directory whose
-names can change, on a volume mounted read-write), the kickoff refuses it,
+names can change, on a volume mounted read-write, by its permission bits as
+they apply to this account; no ACL and no volume mounted inside the set is
+read), the kickoff refuses it,
 under every stop policy and at `start --check`: nothing on the host holds
 evidence used in place, and a helper writing into a live run's evidence
 folder is what the Breadcrumbs run's custody alert came from. Make it

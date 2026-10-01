@@ -93,6 +93,26 @@ test("custody reads whose credential each seat used from the anchor, and says it
   assert.ok(c);
   assert.equal(credentialsWords(c), "credentials: openai-codex subscription (OAuth: consumer plan; not for customer data), owner not named (2 seats); anthropic API key, the key of ACME Ltd (1 seat); llama.cpp local model, no key (1 seat)");
   assert.equal(credentialsWords({ customer_case: true, seats: [{ seat: "s0", model: "openai/gpt-x", provider: "openai", credential: "api_key", owner: "the customer" }] }), "credentials (a customer's case: API keys only): openai API key, the key of the customer (1 seat)");
+  assert.equal(credentialsWords({ customer_case: false, seats: [{ seat: "s0", model: "anthropic/claude-x", provider: "anthropic", credential: "env", owner: null, variable: "ANTHROPIC_API_KEY" }, { seat: "s1", model: "x/m", provider: "x", credential: "other", owner: null }] }), "credentials: anthropic key from ANTHROPIC_API_KEY, owner not named (1 seat); x key from models.json, owner not named (1 seat)");
   assert.equal(anchoredCredentials(undefined), null);
   assert.equal(anchoredCredentials({ seats: "no" }), null);
+});
+
+test("the operator sets the token marks again while the run goes on: parsed as the kickoff parses them, kept by the folds, the change recorded; a finished run's stay", async () => {
+  assert.deepEqual(P.parseTokenMarks("1.4G, 200M,200M,5000,2k"), [2_000, 5_000, 200_000_000, 1_400_000_000]);
+  assert.deepEqual(P.parseTokenMarks("none"), []);
+  for (const bad of ["", "0", "1.5", "-3", "12x", "2M,,3M", "soon"]) assert.equal(P.parseTokenMarks(bad), null, bad);
+  const S = await sandbox();
+  const b = await P.readBudget(S);
+  await P.writeBudget(S, { ...b, token_alerts: [200_000_000] });
+  const r = await P.setTokenAlerts(S, [1_400_000_000, 1_600_000_000], "operator");
+  assert.deepEqual(r, { before: [200_000_000], after: [1_400_000_000, 1_600_000_000] });
+  await P.applySessionUsage(S, "a0", { ...P.emptyAgentBudget(), tokens: 10, calls: 1 });
+  const now = await P.readBudget(S);
+  assert.deepEqual(now.token_alerts, [1_400_000_000, 1_600_000_000], "a usage fold keeps them");
+  assert.deepEqual(now.token_alert_changes?.map((c) => [c.by, c.marks]), [["operator", [1_400_000_000, 1_600_000_000]]]);
+  await P.setTokenAlerts(S, [], "operator");
+  assert.equal("token_alerts" in (await P.readBudget(S)), false, "none clears them");
+  await writeFile(join(S, "done", "SWARM_DONE"), "---\nby: a0\n---\n");
+  await assert.rejects(P.setTokenAlerts(S, [5], "operator"), /the run is finished/);
 });

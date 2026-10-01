@@ -333,6 +333,8 @@ export type BudgetRecord = {
    * every stop policy: nothing pauses or stops for one (claimTokenAlerts).
    */
   token_alerts?: number[];
+  /** Every change the operator made to the marks while the run went on (swarm.sh cap --token-alert), in order, each with the marks it left. */
+  token_alert_changes?: Array<{ at: string; by: string; marks: number[] }>;
   /**
    * The run was started until solved (--until-solved, or the goal's
    * `until_solved: true`): no wall clock, every cap advisory (spend is
@@ -1358,6 +1360,7 @@ export function normalizeBudget(raw: Partial<BudgetRecord> | null | undefined): 
       const marks = tokenMarks(raw?.token_alerts);
       return marks.length ? { token_alerts: marks } : {};
     })(),
+    ...(Array.isArray(raw?.token_alert_changes) && raw.token_alert_changes.length ? { token_alert_changes: raw.token_alert_changes } : {}),
     ...(raw?.stop_steer_at ? { stop_steer_at: raw.stop_steer_at } : {}),
     ...(raw?.stop_reason ? { stop_reason: raw.stop_reason } : {}),
     ...(raw?.until_solved === true ? { until_solved: true } : {}),
@@ -1392,6 +1395,24 @@ export function modelAnswered(requested: string, reported: string | undefined | 
   const base = want.replace(/[-_.:@]latest$/, "");
   if (base && got.startsWith(base) && /^[-_.:@]/.test(got.slice(base.length)) && /\d/.test(got.slice(base.length))) return "resolved";
   return "substituted";
+}
+
+/**
+ * `--token-alert`'s words as marks: "200M,1.6G,5000" (k, M and G allowed; a
+ * fraction only with one), ascending, each once; "none" is no marks. Null for
+ * anything else. The kickoff's own reading (swarm.sh token_marks) is the same.
+ */
+export function parseTokenMarks(text: string): number[] | null {
+  if (text.trim().toLowerCase() === "none") return [];
+  const out: number[] = [];
+  for (const part of text.split(",")) {
+    const m = /^\s*(\d+(?:\.\d+)?)\s*([kKmMgG]?)\s*$/.exec(part);
+    if (!m || (!m[2] && m[1].includes("."))) return null;
+    const n = Math.round(Number(m[1]) * ({ "": 1, k: 1e3, m: 1e6, g: 1e9 } as Record<string, number>)[m[2].toLowerCase()]);
+    if (!(n > 0) || n > 1e15) return null;
+    out.push(n);
+  }
+  return tokenMarks(out);
 }
 
 /** The token marks that are real: whole numbers above zero, ascending, each once. */
@@ -4860,6 +4881,28 @@ export async function setCaps(
     await held.assertOwned();
     await writeBudget(sandboxRoot, budget);
     return { budget: normalizeBudget(budget), before, withdrawn, ...(resumed ? { resumed } : {}) };
+  });
+}
+
+/**
+ * The operator's token marks set again while the run goes on (`swarm.sh cap
+ * --token-alert`), under the lock the usage folds take, so the next fold
+ * keeps them. A mark already crossed is told at the next round, once
+ * (claimTokenAlerts); a mark taken away was told or never will be. Advisory,
+ * as at kickoff: nothing else in the budget changes.
+ */
+export async function setTokenAlerts(sandboxRoot: string, marks: number[], by: string): Promise<{ before: number[]; after: number[] }> {
+  if (await swarmDoneExists(sandboxRoot)) throw new Error("the run is finished (done/SWARM_DONE exists); its token marks stay as they were");
+  return withTableLock(sandboxRoot, async (held) => {
+    const budget = await readBudget(sandboxRoot);
+    const before = tokenMarks(budget.token_alerts);
+    const after = tokenMarks(marks);
+    if (after.length) budget.token_alerts = after;
+    else delete budget.token_alerts;
+    budget.token_alert_changes = [...(budget.token_alert_changes ?? []), { at: new Date().toISOString(), by, marks: after }];
+    await held.assertOwned();
+    await writeBudget(sandboxRoot, budget);
+    return { before, after };
   });
 }
 

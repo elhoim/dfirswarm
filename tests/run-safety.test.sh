@@ -25,7 +25,8 @@ pass() { echo "ok - $*"; }
 swarm() { SWARM_RUNS_DIR="$TMP/runs" bash "$ROOT/scripts/swarm.sh" "$@" 2>&1; }
 GOAL="$ROOT/prompts/goals/hello.md"
 host() { swarm start --isolation host --model solo/model --provider-host solo=api.solo.example --n 2 --cap-usd 1 --no-start --goal-file "$GOAL" --toolbox off "$@"; }
-vm() { swarm start --isolation microvm --model solo/model --provider-host solo=api.solo.example --n 2 --cap-usd 1 --no-start --goal-file "$GOAL" --toolbox off "$@"; }
+# Small VMs and one worker, so the job service fits on a CI runner (7 GiB): a run with none records no jobs.
+vm() { swarm start --isolation microvm --model solo/model --provider-host solo=api.solo.example --n 2 --cap-usd 1 --no-start --goal-file "$GOAL" --toolbox off --vm-memory 512 --workers 1 --worker-memory 512 "$@"; }
 sandbox_of() { printf '%s\n' "$1" | sed -n 's/^SANDBOX=//p' | tail -1; }
 id_of() { printf '%s\n' "$1" | sed -n 's/^Swarm id: *//p' | tail -1; }
 reg() { jq -r --arg l "$1" ".runs[] | select(.[\"label\"] == \$l) | $2" "$TMP/runs/registry.json"; }
@@ -35,6 +36,7 @@ store() { printf '%s\n' "$1" > "$PI_CODING_AGENT_DIR/auth.json"; }
 # --- the derived catalogue's ceiling ------------------------------------------------
 out="$(vm --label dl-default)"; rc=$?
 [[ $rc -eq 0 ]] || fail "a VM run exited $rc: $out"
+[[ "$(reg dl-default '.isolation.jobs')" != null ]] || fail "the run has no job service on this host: $out"
 [[ "$(reg dl-default '.isolation.jobs.derived_limit')" == 50 ]] || fail "the default ceiling is not recorded: $(reg dl-default '.isolation.jobs')"
 out="$(vm --derived-limit 120 --label dl-given)"; rc=$?
 [[ $rc -eq 0 && "$(reg dl-given '.isolation.jobs.derived_limit')" == 120 ]] || fail "--derived-limit 120 is not recorded ($rc): $out"
@@ -52,6 +54,22 @@ none_for dl-bad && none_for dl-off && none_for dl-host || fail "a refused kickof
 [[ "$(reg dl-default '.isolation.jobs.derived_catalog')" == true ]] || fail "the derived catalogue is not on by default"
 pass "the derived catalogue's ceiling is 50 unless --derived-limit or SWARM_DERIVED_LIMIT says otherwise, recorded; refused when it is not a whole number or there is no catalogue to bound"
 
+# --- writable evidence, as this account's permission bits read ----------------------------
+# The owner's bits decide for the owner: a file its group may write and its
+# owner (this account) may not is not writable by this account. (Evidence
+# another account owns, with its owner's write bit, cannot be made in a
+# suite; it is the case os.access reads rightly and -perm -u+w did not.)
+mkdir -p "$TMP/ev-group/sub"
+printf 'x\n' > "$TMP/ev-group/sub/f.bin"
+chmod 0464 "$TMP/ev-group/sub/f.bin"
+chmod 0555 "$TMP/ev-group/sub" "$TMP/ev-group"
+out="$(vm --inputs "$TMP/ev-group" --label ev-group)"; rc=$?
+[[ $rc -eq 0 ]] || fail "evidence only a group may write was refused as this account's ($rc): $out"
+chmod u+w "$TMP/ev-group/sub"
+out="$(vm --inputs "$TMP/ev-group" --label ev-group-dir)"; rc=$?
+[[ $rc -eq 2 ]] && grep -q 'is writable by this account, by its permission bits (sub and perhaps more' <<<"$out" || fail "a directory this account may write was not refused, named ($rc): $out"
+pass "writable evidence is read as this account's permission bits: a group's write bit is not the owner's; a directory the owner may write is refused, named"
+
 # --- token marks ------------------------------------------------------------------------
 out="$(host --stop operator --token-alert 200M,1.6G --token-alert 5000,200M --label ta)"; rc=$?
 [[ $rc -eq 0 ]] || fail "--token-alert exited $rc: $out"
@@ -68,7 +86,21 @@ for bad in "0" "12x" "1.5" "-3" "2M,,3M"; do
   [[ $rc -eq 2 ]] && grep -q 'BLOCKER: --token-alert takes token counts' <<<"$out" || fail "--token-alert $bad was not refused ($rc): $out"
 done
 none_for ta-bad || fail "a refused kickoff left a run"
-pass "--token-alert's marks (k, M, G allowed) are written ascending to budget.json and the registry and said at kickoff; a mark that is not a count is refused"
+# Set again while the run goes on: swarm.sh cap <id> --token-alert.
+ta_id="$(reg ta '.id')"
+ta_sbx="$(reg ta '.sandbox')"
+out="$(swarm cap "$ta_id" --token-alert 1.4G,1.6G)"; rc=$?
+[[ $rc -eq 0 ]] || fail "cap --token-alert exited $rc: $out"
+[[ "$(jq -c '.token_alerts' "$ta_sbx/budget.json")" == '[1400000000,1600000000]' ]] || fail "cap did not set the marks: $(jq -c '.token_alerts' "$ta_sbx/budget.json")"
+[[ "$(jq -c '.token_alert_changes[-1].marks' "$ta_sbx/budget.json")" == '[1400000000,1600000000]' ]] || fail "the change is not kept in budget.json"
+[[ "$(reg ta '.token_alerts | join(",")')" == "1400000000,1600000000" ]] || fail "the registry does not follow: $(reg ta '.token_alerts')"
+grep -q 'the token alerts from 5,000 · 200,000,000 · 1,600,000,000 to 1,400,000,000 · 1,600,000,000' <<<"$out" || fail "cap does not say what changed: $out"
+grep -rq 'the token alerts from 5,000' "$ta_sbx/threads/main" || fail "the change is not said on the board"
+out="$(swarm cap "$ta_id" --token-alert soon)"; rc=$?
+[[ $rc -eq 2 ]] && grep -q 'takes token counts' <<<"$out" || fail "cap --token-alert soon was not refused ($rc): $out"
+out="$(swarm cap "$ta_id" --token-alert none)" || fail "cap --token-alert none failed: $out"
+jq -e 'has("token_alerts") | not' "$ta_sbx/budget.json" >/dev/null || fail "none did not clear the marks"
+pass "--token-alert's marks (k, M, G allowed) are written ascending to budget.json and the registry and said at kickoff; a mark that is not a count is refused; cap --token-alert sets them again (none clears), kept and said"
 
 # --- the operator, named before the run ----------------------------------------------------
 enrol() { bash "$ROOT/scripts/swarm.sh" examiner enroll --name "$1" --organisation Lab --competence "case work" --role "$2" --id "$3" --generate-key --passphrase-fd 3 3<<<"correct horse battery" 2>&1; }
@@ -131,13 +163,30 @@ out="$(swarm start --isolation host --model anthropic/claude-x --n 1 --cap-usd 1
 store '{}'
 out="$(ANTHROPIC_OAUTH_TOKEN=not-real swarm start --isolation host --model anthropic/claude-x --n 1 --cap-usd 1 --no-start --goal-file "$GOAL" --toolbox off --label an-env)"; rc=$?
 [[ $rc -eq 2 ]] && grep -q 'ANTHROPIC_OAUTH_TOKEN' <<<"$out" || fail "a subscription token in the environment was not refused ($rc): $out"
-pass "an anthropic seat on a Claude subscription login (Pi's store, or ANTHROPIC_OAUTH_TOKEN) is refused in every run, --allow-oauth-in-vm or not, saying why and how; an API key goes through"
+# Pi takes ANTHROPIC_AUTH_TOKEN (a bearer) before the API key: refused, from the shell or --env.
+out="$(ANTHROPIC_AUTH_TOKEN=not-real ANTHROPIC_API_KEY=not-real swarm start --isolation host --model anthropic/claude-x --n 1 --cap-usd 1 --no-start --goal-file "$GOAL" --toolbox off --label an-bearer)"; rc=$?
+[[ $rc -eq 2 ]] && grep -q 'with ANTHROPIC_AUTH_TOKEN, a token rather than an API key (a bearer token' <<<"$out" && grep -q 'unset ANTHROPIC_AUTH_TOKEN' <<<"$out" || fail "a bearer token in the environment was not refused ($rc): $out"
+out="$(swarm start --isolation host --model anthropic/claude-x --n 1 --cap-usd 1 --no-start --goal-file "$GOAL" --toolbox off --env ANTHROPIC_AUTH_TOKEN=not-real --label an-bearer-env)"; rc=$?
+[[ $rc -eq 2 ]] && grep -q 'with ANTHROPIC_AUTH_TOKEN' <<<"$out" || fail "a bearer token given with --env was not refused ($rc): $out"
+none_for an-env && none_for an-bearer && none_for an-bearer-env || fail "a refused kickoff left a run"
+# The API key from the environment: let through, and recorded by the variable's name (never its value).
+out="$(ANTHROPIC_API_KEY=not-real-key-value swarm start --isolation host --model anthropic/claude-x --n 1 --cap-usd 1 --no-start --goal-file "$GOAL" --toolbox off --label an-apikey-env)"; rc=$?
+[[ $rc -eq 0 ]] || fail "an API key in the environment was refused ($rc): $out"
+[[ "$(reg an-apikey-env '.credentials[0] | "\(.credential) \(.variable)"')" == "env ANTHROPIC_API_KEY" ]] || fail "the seat's key is not recorded by its variable: $(reg an-apikey-env '.credentials')"
+grep -q 'not-real-key-value' "$TMP/runs/registry.json" && fail "a key's value reached the registry"
+pass "an anthropic seat on a Claude subscription login (Pi's store, ANTHROPIC_OAUTH_TOKEN, or ANTHROPIC_AUTH_TOKEN's bearer) is refused in every run, --allow-oauth-in-vm or not, saying why and how; an API key goes through, recorded by where it came from"
 
 store '{"openai-codex": {"type": "oauth", "access": "not-real", "refresh": "not-real", "expires": 1}}'
 out="$(swarm start --isolation host --model openai-codex/gpt-x --n 2 --cap-tokens 1000000 --no-start --goal-file "$GOAL" --toolbox off --label codex-ctf)"; rc=$?
 [[ $rc -eq 0 ]] || fail "a Codex subscription in a test run was refused ($rc): $out"
 [[ "$(reg codex-ctf '[.credentials[] | .plan] | unique | join(",")')" == "consumer plan; not for customer data" ]] || fail "the subscription seats are not recorded as a consumer plan: $(reg codex-ctf '.credentials')"
 [[ "$(reg codex-ctf '.customer_case')" == false ]] || fail "a test run is recorded as a customer's case"
+# Another provider's subscription is a subscription login, not called a consumer plan.
+store '{"solo": {"type": "oauth", "access": "not-real", "refresh": "not-real", "expires": 1}}'
+out="$(host --cap-tokens 1000000 --label sub-other)"; rc=$?
+[[ $rc -eq 0 ]] || fail "a solo subscription run exited $rc: $out"
+[[ "$(reg sub-other '[.credentials[] | .plan] | unique | join(",")')" == "subscription login; not for customer data" ]] || fail "another provider's subscription is not labelled a subscription login: $(reg sub-other '.credentials')"
+store '{"openai-codex": {"type": "oauth", "access": "not-real", "refresh": "not-real", "expires": 1}}'
 out="$(swarm start --isolation host --model openai-codex/gpt-x --n 2 --cap-tokens 1000000 --no-start --goal-file "$GOAL" --toolbox off --customer-case --key-owner ACME --label cc-codex)"; rc=$?
 [[ $rc -eq 2 ]] && grep -q 'BLOCKER: --customer-case: openai-codex/gpt-x runs on a subscription (openai-codex is a ChatGPT login by design)' <<<"$out" || fail "a Codex seat in a customer's case was not refused ($rc): $out"
 store '{"openai": {"type": "api_key", "key": "not-real"}}'

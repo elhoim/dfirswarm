@@ -88,3 +88,9 @@ a directory whose names can change, on a volume mounted read-write) is a
 BLOCKER under every stop policy and at `start --check`, naming both ways
 out: `--inputs-copy` (the run's own read-only copy), or making the evidence
 read-only first. `--inputs-copy` is the documented way to start a live run.
+The check reads what the kernel's permission bits allow this account
+(`os.access`, nothing written) and the set's mount flag; it does not read
+ACLs or a volume mounted below the set's top, which a copy holds against
+too. Clearing a reused sandbox no longer gives evidence held in place its
+write bits back: it removes the link, where GNU `chmod -R` on the link had
+changed the evidence itself on Linux.

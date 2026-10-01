@@ -770,7 +770,7 @@ export type CustodyState = {
 };
 
 /** Whose credential each seat used, as the kickoff anchored it (swarm.sh credentials_json). */
-export type AnchoredCredentials = { customer_case: boolean; seats: Array<{ seat: string; model: string; provider: string; credential: string; owner: string | null; plan?: string }> };
+export type AnchoredCredentials = { customer_case: boolean; seats: Array<{ seat: string; model: string; provider: string; credential: string; owner: string | null; variable?: string; plan?: string }> };
 
 /** The model gateway's call log and totals, beside the trace (scripts/model-gateway.ts). */
 export const GATEWAY_LOG = "traces/model-gateway.jsonl";
@@ -2029,7 +2029,7 @@ export function anchoredCredentials(raw: unknown): AnchoredCredentials | null {
   const str = (v: unknown) => (typeof v === "string" ? v : "");
   const seats = r.seats
     .filter((x): x is Record<string, unknown> => Boolean(x) && typeof x === "object")
-    .map((x) => ({ seat: str(x.seat), model: str(x.model), provider: str(x.provider), credential: str(x.credential) || "other", owner: str(x.owner) || null, ...(str(x.plan) ? { plan: str(x.plan) } : {}) }));
+    .map((x) => ({ seat: str(x.seat), model: str(x.model), provider: str(x.provider), credential: str(x.credential) || "other", owner: str(x.owner) || null, ...(str(x.variable) ? { variable: str(x.variable) } : {}), ...(str(x.plan) ? { plan: str(x.plan) } : {}) }));
   return { customer_case: r.customer_case === true, seats };
 }
 
@@ -2037,7 +2037,7 @@ export function anchoredCredentials(raw: unknown): AnchoredCredentials | null {
 export function credentialsWords(c: AnchoredCredentials): string {
   const groups = new Map<string, number>();
   for (const s of c.seats) {
-    const kind = s.credential === "oauth" ? `subscription (OAuth: ${s.plan ?? "consumer plan; not for customer data"})` : s.credential === "api_key" ? "API key" : s.credential === "local" ? "local model, no key" : "key from the environment or models.json";
+    const kind = s.credential === "oauth" ? `subscription (OAuth: ${s.plan ?? "subscription login; not for customer data"})` : s.credential === "api_key" ? "API key" : s.credential === "local" ? "local model, no key" : s.credential === "env" ? `key from ${s.variable ?? "the environment"}` : "key from models.json";
     const key = `${s.provider} ${kind}${s.owner ? `, the key of ${s.owner}` : s.credential === "local" ? "" : ", owner not named"}`;
     groups.set(key, (groups.get(key) ?? 0) + 1);
   }

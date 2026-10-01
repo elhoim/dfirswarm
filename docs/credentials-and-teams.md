@@ -22,8 +22,8 @@ effect, which is what you want *before* the panes go behind netguard.
 **A Claude subscription is refused.** Anthropic does not permit Free, Pro or
 Max subscription credentials in a third-party client such as Pi: an
 `anthropic/*` seat on an OAuth login in Pi's store (or on
-`ANTHROPIC_OAUTH_TOKEN` where the store holds no key) is refused at kickoff in
-every run. Log Pi in to Anthropic with an API key from the Anthropic Console
+`ANTHROPIC_AUTH_TOKEN` or `ANTHROPIC_OAUTH_TOKEN` where the store holds no key:
+Pi takes those before `ANTHROPIC_API_KEY`) is refused at kickoff in every run. Log Pi in to Anthropic with an API key from the Anthropic Console
 (`/logout anthropic`, then `/login anthropic`, choosing the key).
 
 **A customer's case takes API keys only.** `--customer-case` refuses every
@@ -32,7 +32,7 @@ consumer plan's, with no processor commitments) and asks whose key each
 provider uses (`--key-owner [PROVIDER=]OWNER`: the customer's own, or your
 business account's with the customer told). The record and custody keep it
 per seat. Codex's subscription stays usable for test and CTF runs, and every
-subscription seat is recorded as "consumer plan; not for customer data"
+subscription seat is recorded as "consumer plan; not for customer data" (another provider's as "subscription login; not for customer data")
 ([ADR 0003](adr/0003-the-provider-key-comes-from-pis-own-store.md), "Whose
 credential, under which terms").
 

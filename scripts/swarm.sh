@@ -554,7 +554,8 @@ Isolation
                       account can write is refused in place (a BLOCKER, under
                       every stop policy): pass this, or make it read-only first
                       (chmod -R a-w, or a read-only mount). The way to start a
-                      live run.
+                      live run. The check reads permission bits and the mount
+                      flag, not ACLs or volumes mounted inside the evidence.
   --brains-with-packs  Boot the agents' own VMs from the image that holds the run's packs.
                       By default, in a microVM run with jobs, the agents boot the base
                       image (a shell, Python, the tool library) and the forensic
@@ -688,7 +689,9 @@ Credentials
                       business account's); OWNER alone for every provider.
                       Repeatable. Required for each provider under
                       --customer-case, recorded in any run. A subscription seat is
-                      recorded as "consumer plan; not for customer data".
+                      recorded as "consumer plan; not for customer data" (a
+                      ChatGPT/Codex or Claude login; another provider's is a
+                      "subscription login; not for customer data").
 
 Other
   --playwright        Add the browser tools, for a goal that must render something.
@@ -1909,12 +1912,19 @@ inputs_guard_label() {
 }
 
 # Remove a previous run's inputs from a reused sandbox. The copy has no write
-# bits, so give them back first or rm cannot empty the directories.
+# bits, so give them back first or rm cannot empty the directories. A link is
+# the evidence held in place (one set): only the link goes. GNU chmod follows
+# a link named on its command line, so `chmod -R u+w inputs` gave the
+# operator's own evidence its write bits back on Linux, under the next run's
+# writable-evidence check; BSD chmod -R does not follow it, which is why
+# only the Linux suite saw it.
 clear_inputs() {
   detach_inputs_image "$1"
   local sandbox="$1" d
   for d in "$sandbox/inputs" "$sandbox/.inputs-pristine"; do
-    if [[ -d "$d" ]]; then
+    if [[ -L "$d" ]]; then
+      rm -f "$d"
+    elif [[ -d "$d" ]]; then
       chmod -R u+w "$d" 2>/dev/null || true
       rm -rf "$d"
     fi
@@ -3280,7 +3290,7 @@ start_check_credentials() {
       echo "Model:        $one_model -> local endpoint $(provider_base_url "$one_model") (no metered cost)"
     else
       case "$auth_type" in
-        oauth) echo "Key:          $one_model -> $auth_provider subscription (OAuth, refreshed by Pi): consumer plan; not for customer data" ;;
+        oauth) echo "Key:          $one_model -> $auth_provider subscription (OAuth, refreshed by Pi): $(subscription_words "$auth_provider")" ;;
         *) echo "Key:          $one_model -> $auth_provider $auth_type via Pi's own store$([[ -n "$(key_owner_of "${one_model%%/*}")" ]] && echo ", the key of $(key_owner_of "${one_model%%/*}")")" ;;
       esac
     fi
@@ -3936,20 +3946,35 @@ cmd_start() {
           echo "Point --inputs at the directory that holds the files, put the files themselves (not links) in $set_real, or pass --inputs-copy to copy what the links at its top point at into the run (links deeper in the tree are the evidence's own and are copied as links)." >&2
           exit 2
         fi
-        # Writable is a file's bit, or a directory's (a name can be added,
-        # removed or renamed in it), on a volume that is not mounted read-only.
-        local ro_fs writable
-        ro_fs="$(python3 -c 'import os, sys; print(1 if os.statvfs(sys.argv[1]).f_flag & os.ST_RDONLY else 0)' "$set_real" 2>/dev/null || echo 0)"
-        writable="$(find "$set_real" \( -type f -o -type d \) -perm -u+w -print -quit 2>/dev/null)"
+        # Writable is a file, or a directory (a name can be added, removed or
+        # renamed in it), this account may write as the kernel reads its
+        # permission bits (owner, group, other: os.access, nothing written),
+        # on a volume not mounted read-only. Not read: ACLs, and a volume
+        # mounted below the set's top; --inputs-copy is the way past both.
+        local writable=""
+        if [[ "$inputs_bind" -eq 1 ]]; then
+          writable="$(python3 - "$set_real" <<'PY' 2>/dev/null || true
+import os, sys
+top = sys.argv[1]
+if os.statvfs(top).f_flag & os.ST_RDONLY:
+    sys.exit(0)
+for root, dirs, files in os.walk(top):
+    for path in [root] + [os.path.join(root, f) for f in files]:
+        if not os.path.islink(path) and os.access(path, os.W_OK):
+            print(path)
+            sys.exit(0)
+PY
+)"
+        fi
         # Refused, under every stop policy: in the Breadcrumbs run a helper
         # of the operator's own wrote a file into the live run's evidence
         # folder, and the custody alert that followed cost the seats an hour
         # telling an added name from a changed object. Two ways out, both the
         # operator's: a copy the run owns, or evidence nothing here can write.
-        if [[ "$inputs_bind" -eq 1 && "$ro_fs" != 1 && -n "$writable" ]]; then
+        if [[ -n "$writable" ]]; then
           local writable_what="${writable#"$set_real"/}"
           [[ "$writable" == "$set_real" ]] && writable_what="the directory itself"
-          echo "BLOCKER: the evidence in $set_real is writable by this account ($writable_what and perhaps more: a file, or a directory whose names can change), on a volume mounted read-write. Used in place, it is held by the VMs' read-only mount and nothing else: the host (you, a helper, a sync client) can still change it under the live run. Either pass --inputs-copy (the run gets its own read-only copy; the source is never touched), or make the evidence read-only first (chmod -R a-w $set_real, or mount its volume read-only)." >&2
+          echo "BLOCKER: the evidence in $set_real is writable by this account, by its permission bits ($writable_what and perhaps more: a file, or a directory whose names can change), on a volume mounted read-write. Used in place, it is held by the VMs' read-only mount and nothing else: the host (you, a helper, a sync client) can still change it under the live run. Either pass --inputs-copy (the run gets its own read-only copy; the source is never touched), or make the evidence read-only first (chmod -R a-w $set_real, or mount its volume read-only). ACLs and volumes mounted inside it are not read here: --inputs-copy holds against those too." >&2
           exit 2
         fi
       done
@@ -4684,7 +4709,7 @@ sys.exit(0 if t(sys.argv[1]) < t(sys.argv[2]) else 1)' "$_have" "$_ship" 2>/dev/
     local kept_marks
     kept_marks="$(jq -r '(.token_alerts // []) | map(tostring) | join(",")' "$sandbox/budget.json" 2>/dev/null || true)"
     if [[ "$token_alerts" != "$kept_marks" ]]; then
-      [[ -n "$token_alerts_given" ]] && echo "WARN: a resume keeps the token marks the run started with (${kept_marks:-none}); --token-alert $token_alerts_given changes nothing." >&2
+      [[ -n "$token_alerts_given" ]] && echo "WARN: a resume keeps the run's token marks (${kept_marks:-none}); --token-alert $token_alerts_given changes nothing here: swarm.sh cap $resume_of --token-alert LIST sets them once the run goes on." >&2
       token_alerts="$kept_marks"
     fi
   else
@@ -5030,7 +5055,11 @@ console.log(r.ok ? "" : r.reason);' "$_gp" "$_gk" 2>/dev/null || echo "could not
   # and custody holds network/policy.json to it at every stop.
   write_case_policy_record "$sandbox"
   # The anchor the run started with stays: it names every verdict, release and resume since.
-  [[ -n "$resume_of" ]] || CUSTODY_CREDENTIALS_JSON="$(jq -nc --argjson seats "$(credentials_json "${agent_ids[@]}" 2>/dev/null || echo '[]')" --argjson cc "$customer_case" '{customer_case: ($cc == 1), seats: $seats}')" write_custody_anchor "$sandbox" "$swarm_id" "$isolation" "$time_reference"
+  # Whose credential each seat uses, once: the anchor, the record and the kickoff's words.
+  local seat_credentials
+  seat_credentials="$(credentials_json "${agent_ids[@]}" 2>/dev/null || echo '[]')"
+  jq -e 'type == "array"' >/dev/null 2>&1 <<<"$seat_credentials" || seat_credentials='[]'
+  [[ -n "$resume_of" ]] || CUSTODY_CREDENTIALS_JSON="$(jq -nc --argjson seats "$seat_credentials" --argjson cc "$customer_case" '{customer_case: ($cc == 1), seats: $seats}')" write_custody_anchor "$sandbox" "$swarm_id" "$isolation" "$time_reference"
   # Where the VMs' disks are kept: beside the run by default, or where the
   # operator says (a link beside the run names it, so every reader — stop,
   # custody, the package, reap — finds them where it always looks).
@@ -5623,7 +5652,7 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
     --arg case_id "$case_id" \
     --arg examiner "$examiner" \
     --argjson operator "$operator_json" \
-    --argjson credentials "$(credentials_json "${agent_ids[@]}" 2>/dev/null || echo '[]')" \
+    --argjson credentials "$seat_credentials" \
     --argjson customer_case "$customer_case" \
     --argjson model_identity "$(model_identity_json)" \
     --arg inputs_manifest_sha "$([[ -f "$sandbox/inputs.json" ]] && sha256_of "$sandbox/inputs.json" || true)" \
@@ -5894,7 +5923,7 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
     operator) echo "Stop policy:  operator: no wall clock, caps advisory; only you stop the run (swarm.sh stop $swarm_id)" ;;
   esac
   if [[ "$customer_case" -eq 1 ]]; then
-    echo "Customer case: API keys only, no subscription; whose key each seat uses is in the record and custody: $(credentials_json "${agent_ids[@]}" | jq -r 'map(select(.credential != "local")) | group_by(.provider) | map("\(.[0].provider) \(.[0].owner // "?")") | join("; ")')"
+    echo "Customer case: API keys only, no subscription; whose key each seat uses is in the record and custody: $(jq -r 'map(select(.credential != "local")) | group_by(.provider) | map("\(.[0].provider) \(.[0].owner // "?")") | join("; ")' <<<"$seat_credentials")"
   fi
   if [[ -n "$token_alerts" ]]; then
     echo "Token alerts: ${token_alerts//,/ · } tokens: as the run crosses each you are told (the board, the trace, the console and your notify hook); advisory, nothing stops for it"
@@ -6666,10 +6695,20 @@ provider_credentials_check() {
     seen+=" $provider"
     provider_is_local "$model" && continue
     kind="$(pi_store_kind "$provider")"
-    if [[ "$provider" == anthropic ]] && { [[ "$kind" == oauth ]] || [[ "$kind" != api_key && -n "${ANTHROPIC_OAUTH_TOKEN:-}" ]] || printf '%s\n' ${extra_env[@]+"${extra_env[@]}"} | grep -q '^ANTHROPIC_OAUTH_TOKEN='; }; then
+    # Pi's order for Anthropic: its store, then ANTHROPIC_AUTH_TOKEN (a
+    # bearer), ANTHROPIC_OAUTH_TOKEN, ANTHROPIC_API_KEY. Where the store holds
+    # no key, a token variable is what the seat would use.
+    local env_var=""
+    [[ "$kind" == api_key ]] || env_var="$(pi_env_credential "$provider")"
+    if [[ "$provider" == anthropic ]] && [[ "$kind" == oauth || "$env_var" == ANTHROPIC_AUTH_TOKEN || "$env_var" == ANTHROPIC_OAUTH_TOKEN ]]; then
       {
-        echo "BLOCKER: $model would reach Anthropic on a Claude subscription login (OAuth$([[ "$kind" == oauth ]] && echo ", Pi's store" || echo ", ANTHROPIC_OAUTH_TOKEN")). Anthropic does not permit Free, Pro or Max subscription credentials in a third-party client such as Pi; a product or service that calls Claude uses an API key under its Commercial Terms, and Anthropic says it may enforce that without notice, against the account that also carries your Claude apps."
-        echo "  Use an API key from the Anthropic Console instead: in pi, /logout anthropic, then /login anthropic and choose the API key (or ANTHROPIC_API_KEY with --key-from-env on a host run)$([[ "$kind" != oauth ]] && echo "; and unset ANTHROPIC_OAUTH_TOKEN")."
+        if [[ "$kind" == oauth ]]; then
+          echo "BLOCKER: $model would reach Anthropic on a Claude subscription login (OAuth, Pi's store)."
+        else
+          echo "BLOCKER: $model would reach Anthropic with $env_var, a token rather than an API key$([[ "$env_var" == ANTHROPIC_AUTH_TOKEN ]] && echo " (a bearer token: what a Claude subscription's token is sent as, and Pi cannot tell what it is)")."
+        fi
+        echo "  Anthropic does not permit Free, Pro or Max subscription credentials in a third-party client such as Pi; a product or service that calls Claude uses an API key under its Commercial Terms, and Anthropic says it may enforce that without notice, against the account that also carries your Claude apps."
+        echo "  Use an API key from the Anthropic Console instead: in pi, /logout anthropic, then /login anthropic and choose the API key (or ANTHROPIC_API_KEY with --key-from-env on a host run)$([[ -n "$env_var" ]] && echo "; and unset $env_var")."
       } >&2
       bad=1
       continue
@@ -6689,13 +6728,50 @@ provider_credentials_check() {
   [[ "$bad" -eq 0 ]]
 }
 
+# Whether a variable is set for the seats: in this environment, or given with --env.
+env_given() { # <name>
+  local n="$1" e
+  [[ -n "${!n:-}" ]] && return 0
+  for e in ${extra_env[@]+"${extra_env[@]}"} ${provider_env[@]+"${provider_env[@]}"}; do
+    [[ "$e" == "$n="* ]] && return 0
+  done
+  return 1
+}
+
+# The variable Pi would take a provider's credential from when its store
+# holds none, by name (never its value), or nothing: Anthropic's three in
+# Pi's order, else <PROVIDER>_API_KEY.
+pi_env_credential() { # <provider>
+  local p="$1" n
+  if [[ "$p" == anthropic ]]; then
+    for n in ANTHROPIC_AUTH_TOKEN ANTHROPIC_OAUTH_TOKEN ANTHROPIC_API_KEY; do
+      if env_given "$n"; then printf '%s' "$n"; return 0; fi
+    done
+    return 0
+  fi
+  n="$(printf '%s' "$p" | tr 'a-z.-' 'A-Z__')_API_KEY"
+  if env_given "$n"; then printf '%s' "$n"; fi
+  return 0
+}
+
+# What a subscription seat is, in the record and the Key line: a consumer
+# plan for the providers whose subscription logins are consumer plans
+# (ChatGPT/Codex, a Claude plan), a subscription login for any other (a
+# business plan of another provider may be one), never for customer data.
+subscription_words() { # <provider>
+  case "$1" in
+    openai-codex|anthropic) printf 'consumer plan; not for customer data' ;;
+    *) printf 'subscription login; not for customer data' ;;
+  esac
+}
+
 # Each seat's credential, for the record and custody: the seat, its model,
-# the provider, how the key reaches Pi (api_key, oauth, local, or other: the
-# environment or models.json), whose it is when the operator said
-# (--key-owner), and for a subscription what it is. The summary model, when
-# no seat runs it, is a line of its own (seat "summary").
+# the provider, how the key reaches Pi (api_key or oauth in Pi's store, env
+# with the variable's name, local, or other: models.json), whose it is when
+# the operator said (--key-owner), and for a subscription what it is. The
+# summary model, when no seat runs it, is a line of its own (seat "summary").
 credentials_json() { # <agent ids...>
-  local i id model provider kind owner rows=""
+  local i id model provider kind owner var rows=""
   local ids=("$@")
   for ((i = 0; i < ${#ids[@]}; i++)); do
     id="${ids[$i]}"
@@ -6706,11 +6782,17 @@ credentials_json() { # <agent ids...>
   printf '%s' "$rows" | while IFS=$'\t' read -r id model; do
     [[ -n "$id" ]] || continue
     provider="${model%%/*}"
-    if provider_is_local "$model"; then kind=local; else kind="$(pi_store_kind "$provider")"; [[ -n "$kind" ]] || kind=other; fi
+    var=""
+    if provider_is_local "$model"; then kind=local
+    else
+      kind="$(pi_store_kind "$provider")"
+      if [[ -z "$kind" ]]; then var="$(pi_env_credential "$provider")"; if [[ -n "$var" ]]; then kind=env; else kind=other; fi; fi
+    fi
     owner="$(key_owner_of "$provider")"
-    jq -nc --arg seat "$id" --arg model "$model" --arg provider "$provider" --arg kind "$kind" --arg owner "$owner" \
+    jq -nc --arg seat "$id" --arg model "$model" --arg provider "$provider" --arg kind "$kind" --arg owner "$owner" --arg var "$var" --arg plan "$(subscription_words "$provider")" \
       '{seat: $seat, model: $model, provider: $provider, credential: $kind, owner: (if $owner == "" then null else $owner end)}
-       + (if $kind == "oauth" then {plan: "consumer plan; not for customer data"} else {} end)'
+       + (if $var != "" then {variable: $var} else {} end)
+       + (if $kind == "oauth" then {plan: $plan} else {} end)'
   done | jq -sc .
 }
 
@@ -6728,7 +6810,8 @@ model_identity_json() {
   while IFS= read -r m; do
     [[ -n "$m" ]] || continue
     requested+=("$m")
-    floating_model "$m" && floating+=("$m")
+    # A local server's tag (ollama's :latest) is no provider's to change.
+    floating_model "$m" && ! provider_is_local "$m" && floating+=("$m")
   done < <(credential_models)
   jq -nc --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     --argjson requested "$(printf '%s\n' ${requested[@]+"${requested[@]}"} | jq -R . | jq -sc 'map(select(. != ""))')" \
@@ -6740,6 +6823,7 @@ model_slug_warnings() {
   while IFS= read -r m; do
     [[ -n "$m" ]] || continue
     floating_model "$m" || continue
+    provider_is_local "$m" && continue
     echo "WARN: $m names no dated model (latest): the provider can change what answers under it between one run and the next, or within a run. For a run you will compare or repeat, name a dated model id; the record keeps the ids asked for and the date (model_identity), and a seat the provider answers with another model is said on the board and to you (model_reported)." >&2
   done < <(credential_models)
 }
@@ -9543,9 +9627,9 @@ add_material() { # <evidence|material|tool> <id> <add|list> ...
 # board; a stop the run is no longer over is withdrawn.
 cmd_cap() {
   local id="${1:-}"
-  [[ -n "$id" && "$id" != -* ]] || { echo "BLOCKER: cap needs <id> and at least one of --usd, --tokens, --per-agent-usd, --per-agent-tokens, --wall-clock." >&2; exit 2; }
+  [[ -n "$id" && "$id" != -* ]] || { echo "BLOCKER: cap needs <id> and at least one of --usd, --tokens, --per-agent-usd, --per-agent-tokens, --wall-clock, --token-alert." >&2; exit 2; }
   shift
-  [[ $# -gt 0 ]] || { echo "BLOCKER: cap needs at least one of --usd, --tokens, --per-agent-usd, --per-agent-tokens, --wall-clock." >&2; exit 2; }
+  [[ $# -gt 0 ]] || { echo "BLOCKER: cap needs at least one of --usd, --tokens, --per-agent-usd, --per-agent-tokens, --wall-clock, --token-alert." >&2; exit 2; }
   ensure_registry
   local rec sandbox state
   rec="$(json_get "$id")"
@@ -11390,11 +11474,13 @@ EOF
     export) echo "  export <id> --format csv|timesketch [--out FILE] [--redact]   the ledger as CSV or a Timesketch CSV import (default: <sandbox>/exports/); --redact replaces what a sensitive entry says" ;;
     hold|release) echo "  hold <id> [--reason TEXT] / release <id>   a held run's material is kept from purge and from a new run in its sandbox" ;;
     cap) cat <<'EOF'
-  cap <id> [--usd N] [--tokens N] [--per-agent-usd N] [--per-agent-tokens N] [--wall-clock MIN]
+  cap <id> [--usd N] [--tokens N] [--per-agent-usd N] [--per-agent-tokens N] [--wall-clock MIN] [--token-alert N[,M...] | none]
 Changes a running swarm's caps, under the lock every fold of usage takes. Kept in budget.json's
 cap_changes, on the trace as the operator's, in the run record, and said on the board. A stop the
 run is no longer over is withdrawn. The run keeps its brake: a dollar cap above zero where dollars
-are charged, a token cap where they are not (a subscription, local models).
+are charged, a token cap where they are not (a subscription, local models). --token-alert sets the
+token marks again (advisory; none clears them; kept in budget.json's token_alert_changes): a mark
+the run has crossed already is told once, at the next round.
 EOF
       ;;
     purge) echo "  purge <id> --yes   delete a finished run's sandbox, kept VM disks and hub directory; the registry keeps it as purged, and runs/operator-audit.jsonl gets the destruction record" ;;

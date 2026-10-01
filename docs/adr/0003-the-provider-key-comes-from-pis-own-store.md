@@ -29,8 +29,10 @@ legal advice, and a lawyer has not seen it) found:
   credentials in a third-party client such as Pi; a product or service that
   calls Claude uses an API key under its Commercial Terms, and Anthropic may
   enforce that without notice. So an `anthropic/*` seat on a subscription
-  login (an `oauth` entry in Pi's store, or `ANTHROPIC_OAUTH_TOKEN` where the
-  store holds no key) is refused at kickoff in every run, whatever
+  login (an `oauth` entry in Pi's store, or `ANTHROPIC_AUTH_TOKEN` or
+  `ANTHROPIC_OAUTH_TOKEN` where the store holds no key: Pi's order is the
+  store, then those two, then `ANTHROPIC_API_KEY`, and a bearer token is not
+  an API key) is refused at kickoff in every run, whatever
   `--allow-oauth-in-vm` says, with how to log Pi in with an API key.
 - **OpenAI's Codex** subscription is a ChatGPT consumer login. Its terms do
   not today forbid a third-party client, so a test or CTF run may still use

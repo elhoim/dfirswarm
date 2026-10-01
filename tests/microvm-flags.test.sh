@@ -503,7 +503,7 @@ pass "two sets in a VM run are a link each under inputs/, each mounted read-only
 chmod u+w "$TMP/ev-mixed/a.txt"
 out="$(start --isolation microvm --inputs "$TMP/ev-mixed" --label vm-writable)"; rc=$?
 [[ $rc -eq 2 ]] || fail "writable evidence used in place exited $rc, wanted 2: $out"
-grep -q 'BLOCKER: the evidence in .* is writable by this account (.* and perhaps more' <<<"$out" || fail "writable evidence used in place is not refused, naming what is writable: $out"
+grep -q 'BLOCKER: the evidence in .* is writable by this account, by its permission bits (.* and perhaps more' <<<"$out" || fail "writable evidence used in place is not refused, naming what is writable: $out"
 grep -q -- '--inputs-copy' <<<"$out" && grep -q 'chmod -R a-w' <<<"$out" || fail "the refusal does not name both ways out: $out"
 [[ -z "$(jq -r '.runs[]? | select(.label == "vm-writable") | .id' "$TMP/runs/registry.json" 2>/dev/null)" ]] || fail "the refused kickoff left a run"
 out="$(start --isolation microvm --inputs "$TMP/ev-mixed" --label vm-writable-check --check)"; rc=$?
@@ -641,8 +641,13 @@ out="$(start --isolation microvm --inputs "$TMP/ev" --vm-snapshot-dir "$TMP/disk
 [[ $rc -eq 2 ]] && grep -q "already holds an earlier run's disks" <<<"$out" || fail "a disks' place holding an earlier run's disks was not refused ($rc): $out"
 [[ -f "$sbx.vm-snapshots/old.msb" ]] || fail "the earlier run's disk was touched"
 rm -rf "$sbx.vm-snapshots"
+# Clearing a reused sandbox removes the link to evidence held in place and
+# never changes the evidence through it (GNU chmod -R follows a link named on
+# its command line: the evidence got its write bits back on Linux).
+[[ -z "$(find "$TMP/ev" -perm -u+w -print -quit)" ]] || fail "clearing a reused sandbox made the evidence it linked to writable: $(find "$TMP/ev" -perm -u+w | head -3)"
 # The manifest and the custody anchor are read-only on disk.
 out="$(start --isolation microvm --inputs "$TMP/ev" --label vm-ro-record)"; rc=$?
+[[ $rc -eq 0 ]] || fail "a VM run on read-only evidence exited $rc: $out"
 sbx="$(sandbox_of "$out")"
 [[ -f "$sbx/inputs.json" && ! -w "$sbx/inputs.json" ]] || fail "inputs.json is writable on disk"
 anchor="$(dirname "$sbx")/$(basename "$sbx").custody-anchor.json"
