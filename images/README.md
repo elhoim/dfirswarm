@@ -275,14 +275,17 @@ carry two sets, pinned in the memory pack (`install.data` of `vol`):
   `canonical_sha256`). A kernel a case needs is one more entry in the list.
 - **broad**: the Volatility Foundation's `windows.zip` from
   `downloads.volatilityfoundation.org`, a bundle of 2019 (last changed
-  2019-10-16), 839,727,133 bytes; `vol -q isfinfo` lists what it holds. The
+  2019-10-16), 839,727,133 bytes; `vol -q isfinfo` reports 3,014 tables from
+  it (the arm64 build of 2026-10-01). The
   build checks its sha256 (the one the Foundation publishes in its
   `SHA256SUMS`), puts it as named in the venv's `volatility3/symbols/` and
   lists it once (`vol -q isfinfo`). Volatility indexes every table it finds
   the first time it runs, which took 3 minutes 22 seconds for this pack on a
   fast machine and would be repeated in every VM; the index is built at image
-  build time and a fresh container lists the pack in well under a second. It
-  covers the Windows builds of 2019 and earlier, not every one of them.
+  build time and a fresh container lists the pack in well under a second; in
+  a worker VM, whose `HOME` is `/root`, the index the build left is found and
+  `vol -q isfinfo` answers in 0.2 seconds (measured 2026-10-01). It covers the
+  Windows builds of 2019 and earlier, not every one of them.
 
 `recipe.py build --symbol-set` chooses: `curated,broad` by default, either one,
 or `none`. A set left out is recorded as omitted (`image.json` `omitted.data`,
