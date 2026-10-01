@@ -43,8 +43,9 @@ run's trace under the calling agent's name.
 file, a path list and a MAC timeline) and `archive-members` (an archive's
 member list) inventory: they read no file's contents. `ad1-items` inventories
 an AccessData AD1 logical image (FTK Imager's custom content image, found by
-its `ADSEGMENTEDFILE` header): every item with its size, times and the
-digests the image records, each file inflated to check them, nothing
+its `ADSEGMENTEDFILE` header): every item with its size, times, the
+digests the image records and a locator, each file inflated to check them,
+every claim the image makes bounded before it is followed, nothing
 extracted; `ad1_extract` writes the files out. `memory-windows` is a
 broad extraction of a Windows memory image, Volatility's standard views of
 the whole of it. `disk-timeline` is a broad extraction of a disk image,

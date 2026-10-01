@@ -56,6 +56,13 @@ record is this project's work and the licence above covers it. The scenarios,
 the questions and the challenge text it quotes are not, and stay with the
 authors named here.
 
+Test data. `tests/fixtures/ad1/compressed.ad1` is a 2,197-byte AD1 logical
+image FTK Imager wrote, taken unchanged from Fox-IT's dissect.evidence
+(`tests/_data/ad1/compressed.ad1`, https://github.com/fox-it/dissect.evidence),
+which its authors license under the GNU AGPL v3. It holds two short text
+files they made for their own tests and is no case's evidence. The suite
+reads it to hold the base pack's AD1 reader to what FTK Imager writes.
+
 Brand. The marks in `brand/` and the name "DFIR Swarm" are not licensed
 under the AGPL. TRADEMARK.md sets out what you may do with them without
 asking, which is most things.
