@@ -17,7 +17,7 @@ import * as P from "../extensions/protocol.ts";
 import * as Q from "../extensions/questions.ts";
 import { refusalFor } from "../scripts/model-gateway.ts";
 import { untilSolved } from "../scripts/finish-gate.ts";
-import { yieldCheck, lastYield } from "../scripts/stop-policy.ts";
+import { yieldCheck, lastYield, yieldWindow } from "../scripts/stop-policy.ts";
 
 const dirs: string[] = [];
 after(async () => {
@@ -175,4 +175,31 @@ test("diminishing returns: a stop proposed to the operator after a window with n
   // A paused run proposes nothing: the operator is asked already.
   await P.writeBudget(S, { ...(await P.readBudget(S)), paused: { at: new Date().toISOString(), reason: "cap", detail: "d" } });
   assert.match(String((await yieldCheck(S, { jobs: 1, minutes: 1, now: Date.now() + 10 * 60 * 60_000 })).why), /paused/);
+});
+
+test("the stop proposal's window is time: a burst of committed jobs with nothing yielded yet proposes nothing by default (the Breadcrumbs run's D-1 came 20 jobs and 8 minutes after its last finding, minutes before the next); SWARM_YIELD_JOBS puts the job count back beside it", async () => {
+  assert.deepEqual(yieldWindow({}), { jobs: 0, minutes: 30 }, "by default only the minutes propose");
+  assert.deepEqual(yieldWindow({ SWARM_YIELD_JOBS: "20", SWARM_YIELD_MINUTES: "45" }), { jobs: 20, minutes: 45 });
+  assert.deepEqual(yieldWindow({ SWARM_YIELD_JOBS: "0" }), { jobs: 0, minutes: 30 }, "zero is off, as unset is");
+  const { S } = await run({ stop_policy: "operator", started_at: ago(8 * 60_000) });
+  // 20 committed jobs in the 8 minutes since the start, nothing yielded.
+  for (let i = 1; i <= 20; i++) {
+    const id = `j${String(i).padStart(6, "0")}`;
+    await mkdir(join(S, "store", "jobs", id), { recursive: true });
+    await writeFile(join(S, "store", "jobs", id, "job.json"), JSON.stringify({ id, state: "committed", requester: { agent: "a1" }, spec: { kind: "command" }, status: "ok", finished_at: ago((20 - i) * 20_000) }));
+  }
+  const quiet = await yieldCheck(S, {});
+  assert.equal(quiet.proposed, false, JSON.stringify(quiet));
+  assert.deepEqual([quiet.jobs, quiet.minutes], [20, 8]);
+  assert.deepEqual(quiet.window, { jobs: 0, minutes: 30 });
+  // The operator who wants the count asks for it.
+  const counted = await yieldCheck(S, { jobs: 20 });
+  assert.equal(counted.proposed, true);
+  const req = (await readFile(join(S, "operator-requests.jsonl"), "utf8")).trim().split("\n").map((l) => JSON.parse(l)).at(-1);
+  assert.match(req.request, /the window being 30 minutes or 20 committed jobs/);
+  // Past the minutes with nothing yielded since the proposal, the time proposes by itself; its words name the minutes alone.
+  const timed = await yieldCheck(S, { now: Date.now() + 31 * 60_000 });
+  assert.equal(timed.proposed, true, JSON.stringify(timed));
+  const last = (await readFile(join(S, "operator-requests.jsonl"), "utf8")).trim().split("\n").map((l) => JSON.parse(l)).at(-1);
+  assert.match(last.request, /the window being 30 minutes\. /);
 });

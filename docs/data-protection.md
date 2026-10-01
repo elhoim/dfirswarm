@@ -96,7 +96,7 @@ models.
   `operator-requests.jsonl`) hold what each request asked in the agents'
   words, which can name the case's subjects. Evidence added after the
   kickoff (`swarm.sh evidence add`) and material the operator supplied
-  (`swarm.sh material add`, a question's attachment) are copied into the
+  (`swarm.sh material add`, `swarm.sh tool-supply` for a program, a question's attachment) are copied into the
   store (`store/imports/ev-<n>/`, `mat-<n>/`) and are evidence content like
   `inputs/`; each record says who supplied it, when and from where. Material
   added with `--sensitive` is held to the same rule as a sensitive entry: no

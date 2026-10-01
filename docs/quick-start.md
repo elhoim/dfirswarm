@@ -251,6 +251,13 @@ scripts/swarm.sh requests <id> answer R-3 "the key is in the second envelope"
 scripts/swarm.sh evidence <id> add /evidence/phone.tar --why "the phone" --for R-4
 scripts/swarm.sh material <id> add memo.pdf --why "the client's timeline"
 
+# a program no image holds, for a running run: sealed as material with where it
+# came from, how it was built and the hashes you checked; the seats are told
+# how to run it (a copy in an executable temporary directory inside a job)
+scripts/swarm.sh tool-supply <id> add ./detector --why "a key detector, asked for in R-4" \
+  --source "Debian bookworm source package 1.0-11" --built "make, debian:bookworm-slim arm64" \
+  --sha256 <sha256 of ./detector> --for R-4
+
 # the dynamic network: what was asked, decided and granted; grant or deny
 scripts/swarm.sh net <id> list
 scripts/swarm.sh net <id> grant NR-2 --why "the geocoder is needed for Q5"

@@ -1,0 +1,38 @@
+{
+  "case": "The goal requires question 1 to be established; its answer is partial on a finding another seat reviewed; the operator releases the requirement (amend --no-must-establish, with why). Question 2 is established and attested.",
+  "design": [
+    "docs/adr/0013 'A question that must be established': the requirement is released by the operator's amendment, with why, on the record; released, the question is held to the ordinary bar, where partial is a disposition.",
+    "docs/adr/0013 'The end of a run, under every stop policy': a partial answer on a finding ends the run examination-limited.",
+    "docs/adr/0017 addendum 'Measuring a rule change': readiness, the answers check and the finish gate never disagree on a question."
+  ],
+  "policies": [
+    "operator",
+    "cap-pause",
+    "cap-stop"
+  ],
+  "expect": {
+    "questions": {
+      "question:1": {
+        "disposition": "partial",
+        "best_candidate": false,
+        "readiness_holds": false,
+        "defects": [],
+        "warnings": []
+      },
+      "question:2": {
+        "disposition": "established",
+        "best_candidate": false,
+        "readiness_holds": false,
+        "defects": [],
+        "warnings": []
+      }
+    },
+    "ready": true,
+    "verdict": {
+      "proceed": true,
+      "outcome": "examination_limited"
+    },
+    "done": "proceeds",
+    "agreement": []
+  }
+}

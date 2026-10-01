@@ -3,7 +3,7 @@
 Fetch a body with `skill("<id>")`. A body may name others; fetch those the same way.
 
 - `evidence/catalog` Read the catalogue before you spend a token: At the start, and whenever you are about to run a broad listing yourself.
-- `evidence/collections` A triage collection is not an image: The evidence is a zip or a directory tree of copied files rather than a disk.
+- `evidence/collections` A triage collection is not an image: The evidence is a zip, a directory tree of copied files or an AD1 logical image rather than a disk.
 - `evidence/imaging` What you were handed, and the offset every other command needs: Before your first listing, and any time a command says the image has no file system.
 - `evidence/verify` Prove the evidence is what you were handed, and that it stays that way: Before the first command of any case, and again before you write the report.
 - `filesystem/carving` Find structure where there is no file system: Unallocated space, a memory dump, slack, or a volume the toolkit cannot read.

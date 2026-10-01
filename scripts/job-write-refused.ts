@@ -74,7 +74,7 @@ export function pathIn(line: string, error: string): string | null {
 }
 
 /** Whether `p` is `dir` or inside it. */
-function within(p: string, dir: string): boolean {
+export function within(p: string, dir: string): boolean {
   const r = relative(normalize(dir), normalize(p));
   return r === "" || (!r.startsWith("..") && !isAbsolute(r));
 }
@@ -94,7 +94,7 @@ export function refusedIn(line: string, o: { cwd: string; writable: string[] }):
 }
 
 /** Every line of a file, read whole through a descriptor that does not follow a link; nothing when it cannot be opened. */
-async function eachLine(path: string, visit: (line: string, n: number) => void): Promise<void> {
+export async function eachLine(path: string, visit: (line: string, n: number) => void): Promise<void> {
   const fh = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW).catch(() => null);
   if (!fh) return;
   try {
@@ -119,7 +119,7 @@ async function eachLine(path: string, visit: (line: string, n: number) => void):
 }
 
 /** The stderr files a job kept under its output directory, by path relative to it; links are not followed. */
-async function keptStderr(out: string): Promise<string[]> {
+export async function keptStderr(out: string): Promise<string[]> {
   const found: string[] = [];
   const walk = async (rel: string) => {
     const dir = await opendir(join(out, rel)).catch(() => null);

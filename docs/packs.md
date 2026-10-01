@@ -288,12 +288,12 @@ result.
 ## 7. The packs in this repository
 
 Twelve, all under the same AGPL-3.0-or-later as the harness, in `packs/`:
-107 skills, 69 tools and 14 goal templates. Every one of them is sealed,
+107 skills, 70 tools and 14 goal templates. Every one of them is sealed,
 checksummed, and installs and verifies in the test suite.
 
 | Pack | Skills | Tools | Goals | What it is for |
 | --- | --- | --- | --- | --- |
-| `computer-forensics-base` | 11 | 13 | — | the method true of any platform; everything else depends on it |
+| `computer-forensics-base` | 11 | 14 | — | the method true of any platform; everything else depends on it |
 | `windows-forensics` | 24 | 20 | 3 | ten artefact families, from `$MFT` to what anti-forensics leaves behind |
 | `linux-forensics` | 10 | 6 | 2 | auth logs, the journal, accounts, systemd and cron, ext4, containers |
 | `macos-forensics` | 8 | 4 | 1 | property lists, the unified log, FSEvents, KnowledgeC, APFS |

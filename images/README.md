@@ -208,23 +208,29 @@ with no network. The memory and `full` images therefore carry the Volatility
 Foundation's Windows symbol pack, pinned as data in the memory pack
 (`install.data` of `vol`):
 
-- **What it is.** `windows.zip` from `downloads.volatilityfoundation.org`, last
-  changed 2019-10-16, 839,727,133 bytes, 3,014 tables. The build checks its
-  sha256 (the one the Foundation publishes in its `SHA256SUMS`), puts it as
-  named in the venv's `volatility3/symbols/` and lists it once
-  (`vol -q isfinfo`). Volatility indexes every table it finds the first time it
+- **What it is.** `windows.zip` from `downloads.volatilityfoundation.org`, a
+  bundle of 2019 (last changed 2019-10-16), 839,727,133 bytes. Its listing has
+  3,019 entries: 3,014 table files and five directories; `vol -q isfinfo`
+  reports 3,014 tables from it. The build checks its sha256 (the one the
+  Foundation publishes in its `SHA256SUMS`), puts it as named in the venv's
+  `volatility3/symbols/` and lists it once (`vol -q isfinfo`). Volatility indexes every table it finds the first time it
   runs, which took 3 minutes 22 seconds for this pack on a fast machine and
   would be repeated in every VM; the index is built at image build time and a
   fresh container lists the pack in well under a second.
-- **What it covers.** The Windows builds of 2019 and earlier, not every one. It is a
-  snapshot: a kernel from a later Windows build is not in it, and
-  `vol -q isfinfo` says which are. For those the options are what they were:
-  the run's `--allow-host msdl.microsoft.com:80 --allow-host '*.blob.core.windows.net'`
-  (Volatility then fetches the one table it needs), or a table made on a connected machine
-  (`pdbconv.py`, in Volatility) and added in a layer of your own under the
-  venv's `volatility3/symbols/windows/`. A run that finds no table says so; the
-  memory pack's `triage/volatility` skill makes it a limitation, not a silent
-  fetch.
+- **What it covers.** The Windows builds of 2019 and earlier, not every one. It
+  is a bundle of 2019: a kernel from a later Windows build is not in it, and
+  `vol -q isfinfo` says which are. For a kernel it lacks, the seat does not
+  fetch anything: a run under the CTF case policy grants no sockets, and
+  [ADR 0012](../docs/adr/0012-a-dynamic-network-decided-by-rules-and-made-on-the-host.md)
+  has the operator's rules decide what a run may reach. The seat asks through a
+  lead it closes `needs_operator`, naming the PDB, the GUID and the age
+  (`ntkrnlmp.pdb`, 32 hexadecimal digits, a number). The operator makes the
+  table on a connected machine (`pdbconv.py`, in Volatility) and supplies it to
+  the run (`swarm.sh tool-supply <run> add <dir> --source …`, or `material
+  add`), and the seat points Volatility at it with `-s`. For a table every run
+  of an image needs, add it in a layer of your own under the venv's
+  `volatility3/symbols/windows/`. A run that finds no table says so; the memory
+  pack's `triage/volatility` skill makes it a limitation, not a silent fetch.
 - **Its licence, in the NOTICE.** Our reading, not legal advice. The pack
   ships no licence text. The Volatility Software License 1.0
   (<https://www.volatilityfoundation.org/license/vsl-v1.0>) says its "Software"
@@ -285,8 +291,9 @@ on it: `msb save <ref> -o image.tar` (or `docker save`) on a machine that has
 it, carry the file across, `msb load -i image.tar`, and start with `--image
 <ref>`. The kickoff then finds the image and pulls nothing. Two things still
 want the network: the Windows symbol tables of a kernel newer than the 2019
-pack the memory image carries (fetched from `msdl.microsoft.com` the first time
-a kernel is seen; build them into a layer of your own under the venv's
-`volatility3/symbols/` from a connected machine) and capa's rules (`capa
---rules` with a directory you carried across). A model the run calls has to be reachable too, or local
+bundle the memory image carries (Volatility would fetch them from Microsoft the
+first time a kernel is seen; make them on a connected machine and supply them to
+the run, or build them into a layer of your own under the venv's
+`volatility3/symbols/`) and capa's rules (`capa --rules` with a directory you
+carried across). A model the run calls has to be reachable too, or local
 (`--local-only`).

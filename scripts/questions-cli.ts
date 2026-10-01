@@ -4,12 +4,14 @@
  * the CLI and, through `swarm.sh question`, the console.
  *
  *   questions-cli.ts seed <sandbox>                         put the goal's questions and objectives on the chain
- *   questions-cli.ts add <sandbox> --text T --why W [--presumes P] [...]
+ *   questions-cli.ts add <sandbox> --text T --why W [--presumes P] [--must-establish] [...]
  *                                                           a person's question (analyst, reviewer, observer, examiner);
- *                                                           --presumes: what it takes as happened, tested first
+ *                                                           --presumes: what it takes as happened, tested first;
+ *                                                           --must-establish: only an answer that answers it ends the run
+ *                                                           on it (the operator's or an examiner's)
  *   questions-cli.ts list <sandbox> [--json]                every question: triage and clarifications first
  *   questions-cli.ts show <sandbox> Q-n [--json]            one question whole, with its history and signatures checked
- *   questions-cli.ts amend <sandbox> Q-n --expect-rev N [--text T] [--why W] [--neutral T] [--presumes P] [...]
+ *   questions-cli.ts amend <sandbox> Q-n --expect-rev N [--text T] [--why W] [--neutral T] [--presumes P] [--must-establish | --no-must-establish] [...]
  *   questions-cli.ts priority <sandbox> Q-n urgent|normal [--reason R]
  *   questions-cli.ts scope <sandbox> Q-n|L-n in_scope|excluded --why W
  *   questions-cli.ts withdraw <sandbox> Q-n --why W
@@ -31,7 +33,12 @@
  *                                                           every signed act, its signature checked; fails on
  *                                                           bad, wrong-principal, or a signed act with none
  *
- * Every act takes [--as ID] (an enrolled person: a claim), [--sign] (the act
+ * The register's acts (add, amend, priority, scope, withdraw, clarify-reply,
+ * accept, premise add|revise|admit|withdraw) take [--dry-run]: checked as the
+ * admission would check it, against the register as it stands, and nothing
+ * signed, written or delivered (what a resume asks of each question before
+ * anything moves). `direct`, `deliver` and `seed` write by what they are and
+ * refuse it. Every act takes [--as ID] (an enrolled person: a claim), [--sign] (the act
  * signed with that person's enrolled key, namespace dfirswarm-question; the
  * passphrase or PIN on the terminal, or on the descriptor --secret-fd N
  * names, never in argv or the environment) and [--via cli|console]. Without
@@ -61,8 +68,13 @@ import { fingerprintOf, keyNeeds, loadPerson, signAs, verifyAs, type Person, typ
 
 const sha256 = (b: string | Buffer) => createHash("sha256").update(b).digest("hex");
 
-/** How an act is made: who (--as), signed or not, and where the secret comes from (a descriptor, the terminal, or a caller in this process). */
-export type Flags = { as?: string; sign?: boolean; secretFd?: number; via?: "cli" | "console"; secret?: Buffer | null };
+/**
+ * How an act is made: who (--as), signed or not, and where the secret comes
+ * from (a descriptor, the terminal, or a caller in this process). A dry run
+ * (--dry-run) checks the act as its admission would, against the register as
+ * it stands, and writes, signs, supplies and delivers nothing.
+ */
+export type Flags = { as?: string; sign?: boolean; secretFd?: number; via?: "cli" | "console"; secret?: Buffer | null; dryRun?: boolean };
 
 /** Who acts: the enrolled person named (a claim, or signed), or this host's OS account, not enrolled, as the operator. */
 export function actorFor(flags: Flags, home?: string): { actor: Q.Actor; person: Person | null } | { why: string } {
@@ -353,8 +365,15 @@ export async function admit(sandbox: string, hubAdmin: string | undefined, body:
  * under the registers' lock. Acknowledged only once the chain holds it.
  */
 export async function operatorAct(sandbox: string, ev: Q.ActKind, input: Q.ActInput, flags: Flags, home?: string, o: { hubAdmin?: string } = {}): Promise<Record<string, unknown>> {
-  const who = actorFor(flags, home);
-  if ("why" in who) return { ok: false, reason: who.why };
+  const who = actorFor({ ...flags, ...(flags.dryRun ? { sign: false } : {}) }, home);
+  if ("why" in who) return { ok: false, reason: who.why, ...(flags.dryRun ? { dry_run: true } : {}) };
+  // A dry run: the act checked as its admission would check it, with nothing supplied, signed, written or delivered.
+  if (flags.dryRun) {
+    const { attachments: _a, ...words } = input;
+    const prepared = await Q.prepareAct(sandbox, who.actor, ev, words);
+    if (!prepared.ok) return { ...prepared, dry_run: true };
+    return { ...(await Q.checkAct(sandbox, prepared.prepared)), dry_run: true };
+  }
   // An attachment given as a file on this host is supplied as material first; the act carries its import.
   if ((ev === "open" || ev === "amend") && Array.isArray(input.attachments) && input.attachments.length) {
     // The act's other words are checked first: nothing is supplied for an act that would be refused.
@@ -379,6 +398,7 @@ export async function operatorAct(sandbox: string, ev: Q.ActKind, input: Q.ActIn
 
 /** A directive from the operator's side, handed to the admission as an act is (operatorAct). `--sign` is refused: a directive is not signed. */
 export async function operatorDirective(sandbox: string, req: Omit<DirectiveRequest, "actor">, flags: Flags, home?: string, o: { hubAdmin?: string } = {}): Promise<Record<string, unknown>> {
+  if (flags.dryRun) return { ok: false, reason: DRY_RUN_REFUSED };
   if (flags.sign) return { ok: false, reason: "a directive is not signed: sign the question it serves (question add --sign), then direct it without --sign" };
   const who = actorFor(flags, home);
   if ("why" in who) return { ok: false, reason: who.why };
@@ -504,6 +524,7 @@ function line(v: Q.QuestionView): string {
     v.parent ? `follows ${v.parent}` : null,
     v.leading_forms.length ? `leading form ${v.leading_forms.map((f) => `"${f}"`).join(", ")}` : null,
     v.after_done ? "after done: a follow-up" : null,
+    v.must_establish?.required ? `must be established (required by ${Q.originWords(v.must_establish.origin)})` : null,
   ].filter(Boolean);
   const state = v.answer ? `answer E-${v.answer.seq}${v.answer.stale ? ` (STALE: before revision ${v.rev})` : ""}${v.answer.parts?.length ? `; parts: ${PM.partsWords(v.answer.parts)}` : ""}${v.answer.premises?.length ? `; premises: ${PM.citationsWords(v.answer.premises)}` : ""}${v.answer.omitted?.length ? `; a review says it leaves out: ${v.answer.omitted.map((x) => `"${x.part}" (${x.by})`).join(", ")}` : ""}` : "no answer";
   const leads = v.leads.length ? `; leads ${v.leads.map((l) => `${l.id} ${l.status}${l.holder ? ` (${l.holder})` : ""}`).join(", ")}` : "";
@@ -582,6 +603,8 @@ export async function showText(sandbox: string, id: string): Promise<string | nu
   if (v.expects) out.push(`    expects: ${v.expects}`);
   if (v.completeness) out.push(`    asks for a complete set (${v.completeness_by === "asker" ? "the asker says so" : "by its words"}): an established or partial answer rests on a coverage record naming the areas searched`);
   if (v.presumption) out.push(`    presumes ${PM.presumptionWords(v.presumption)}: its answer tests that premise first`);
+  if (v.must_establish?.required) out.push(`    must be established: required by ${Q.originWords(v.must_establish.origin)} at ${v.must_establish.at}${v.must_establish.why ? ` (${v.must_establish.why})` : ""}; partial, not determinable, a bounded negative short of the stronger bar and out of scope end no run on it`);
+  else if (v.must_establish) out.push(`    the requirement that it be established was released by ${Q.originWords(v.must_establish.origin)} at ${v.must_establish.at}: ${v.must_establish.why ?? ""}`);
   if (v.hints.length) out.push(`    hints: ${v.hints.map((h) => `${h.ref}${h.value ? ` (says: ${h.value})` : ""}`).join("; ")}`);
   if (v.attachments.length) out.push(`    attachments: ${v.attachments.join(", ")}`);
   if (v.suggested_to) out.push(`    suggested to: ${v.suggested_to}`);
@@ -596,6 +619,9 @@ export async function showText(sandbox: string, id: string): Promise<string | nu
 }
 
 // --- the command line ----------------------------------------------------------------------------
+
+/** Why --dry-run is refused where it cannot be honoured: a directive is a lead, and a delivery or a seed is a write by what it is. */
+export const DRY_RUN_REFUSED = "--dry-run checks an act on the question register (add, amend, priority, scope, withdraw, clarify-reply, accept, premise …); direct, deliver and seed write by what they are, and take no dry run: nothing was done";
 
 function parseArgs(rest: string[]): { pos: string[]; opts: Map<string, string[]>; flags: Set<string> } {
   const pos: string[] = [];
@@ -637,6 +663,8 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   if (!cmd || !sandboxArg) usage();
   const sandbox = resolve(sandboxArg);
   const { pos, opts, flags } = parseArgs(rest);
+  // A dry run only where an act can be checked without being made.
+  if (flags.has("--dry-run") && ["direct", "deliver", "seed"].includes(cmd)) emit({ ok: false, reason: DRY_RUN_REFUSED });
   const one = (k: string) => opts.get(k)?.at(-1);
   const fdRaw = one("--secret-fd");
   const via = one("--via");
@@ -652,7 +680,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const person = asValues.filter((v) => v !== acceptAs).at(-1);
   // The run's hub, when one runs: the register's writer (swarm.sh names its admin socket).
   const admission = one("--hub-admin") ? { hubAdmin: one("--hub-admin") } : {};
-  const f: Flags = { ...(person ? { as: person } : {}), ...(flags.has("--sign") ? { sign: true } : {}), ...(fdRaw !== undefined ? { secretFd: Number(fdRaw) } : {}), ...(via === "console" || via === "cli" ? { via } : {}) };
+  const f: Flags = { ...(person ? { as: person } : {}), ...(flags.has("--sign") ? { sign: true } : {}), ...(fdRaw !== undefined ? { secretFd: Number(fdRaw) } : {}), ...(via === "console" || via === "cli" ? { via } : {}), ...(flags.has("--dry-run") ? { dryRun: true } : {}) };
   const shared = (): Q.ActInput => ({
     ...(one("--text") !== undefined ? { text: one("--text") } : {}),
     ...(one("--why") !== undefined ? { why: one("--why") } : {}),
@@ -663,6 +691,8 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     ...(one("--presumes") !== undefined ? { presumes: one("--presumes") } : {}),
     // --completeness: the question asks for a complete set (every one, all, each); --no-completeness: it does not, whatever its words.
     ...(flags.has("--completeness") ? { completeness: true } : flags.has("--no-completeness") ? { completeness: false } : {}),
+    // --must-establish: only an answer that answers it ends the run on it; --no-must-establish (on amend, with --why): the requirement released (docs/adr/0013).
+    ...(flags.has("--must-establish") ? { must_establish: true } : flags.has("--no-must-establish") ? { must_establish: false } : {}),
     ...(opts.has("--hint") ? { hints: hintsFrom(rest) } : {}),
     ...(opts.has("--attach") ? { attachments: opts.get("--attach") } : {}),
     ...(one("--suggest") !== undefined ? { suggested_to: one("--suggest") } : {}),

@@ -535,7 +535,8 @@ resume_wake() {
   return 0
 }
 # Diminishing returns: when nothing has yielded (no new finding, question
-# disposition or coverage record) across a window of jobs or minutes, the
+# disposition or coverage record) for a window of minutes (and of jobs, when
+# SWARM_YIELD_JOBS sets one), the
 # operator is asked, once per window, whether to stop (an operator request of
 # kind decision). Never an agent's vote; nothing is stopped here.
 yield_check() {

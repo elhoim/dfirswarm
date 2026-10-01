@@ -1270,8 +1270,9 @@ const READINESS_ATTEMPTS = 3;
  * confirmation), no lead's job waiting for an interpretation, every
  * question in scope answered with nothing the ledger gate holds against it
  * (a negative unreviewed, a dispute, a stale answer) and no answer that
- * claims established held a best candidate only, and under the operator's
- * stop policy no route limitation left.
+ * claims established held a best candidate only, no question that must be
+ * established resting on an answer that only limits the run, and under the
+ * operator's stop policy no route limitation left.
  * What would still limit the run is listed apart. Cheap and generic: the
  * goal's own checks run only at the coordinator's done. One result per
  * revision, shared by every reader in this process, and only for the
@@ -1472,6 +1473,15 @@ async function computeReadiness(sandboxRoot: string, s: L.LeadsSnapshot, revisio
     const arrived = q?.evidence.find((x) => a.seq <= x.ledger_seq);
     if (q && arrived) {
       items.push(`${sec}'s answer E-${a.seq} predates new evidence for ${q.id} (${arrived.import})`);
+      continue;
+    }
+    // A question that must be established (docs/adr/0013): an answer that
+    // only limits the run is no disposition for it, so it holds readiness
+    // as it holds the done, under every stop policy, until it is
+    // established, or the operator accepts its limits (above) or releases it.
+    const QM = await import("./questions.ts");
+    if (q && QM.mustEstablish(q) && !QM.establishesBy(a)) {
+      items.push(`${sec} must be established (required by ${QM.requiredByWords(q)}): its answer E-${a.seq} is ${NB.resultWords(result ?? "not_determinable")}, which ends no run on it: ${QM.MUST_ESTABLISH_WAYS}`);
       continue;
     }
     if (result && result !== "established" && result !== "premise_not_supported") limited.push(`${sec} is ${NB.resultWords(result)}`);

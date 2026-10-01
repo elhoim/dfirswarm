@@ -241,7 +241,7 @@ grep -q $'^1\tfile\ta\\\\nb\t' "$COV/sb/catalog/phone.tar/members.tsv" || fail "
 [[ "$(cov_row "$tsv" inputs/CASE.md)" == "10|not probed|smaller than any recipe of this run asks about"* ]] || fail "a small input is named as not probed"
 # (awk -v reads escapes, so the literal backslash-t is written \\t here.)
 [[ "$(cov_row "$tsv" 'inputs/notes/odd\\tname.txt')" == "2|not probed|"* ]] || fail "a tab in a file name is written escaped, on one row: $(grep odd "$tsv")"
-grep -q '^Summary: 1 disk image(s), 0 memory image(s), 1 archive(s), [0-9]* catalog file(s); 26 input file(s): 1 catalogued, 1 partial, 0 planned, 1 segment(s) of a set, 1 not catalogued, 22 not probed$' "$readme" \
+grep -q '^Summary: 1 disk image(s), 0 memory image(s), 1 archive(s), 0 AD1 logical image(s), [0-9]* catalog file(s); 26 input file(s): 1 catalogued, 1 partial, 0 planned, 1 segment(s) of a set, 1 not catalogued, 22 not probed$' "$readme" \
   || fail "the summary line should count by what the recipes catalogue and the inputs by status: $(head -1 "$readme")"
 grep -q '^- `inputs/blob.bin` (97.7 KB): no recipe of this run applies' "$readme" || fail "the index should name blob.bin under Not catalogued"
 grep -q '^- and 2 more, every one in `catalog/coverage.tsv`$' "$readme" || fail "past twenty, the index names how many more and where they all are"

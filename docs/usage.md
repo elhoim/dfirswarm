@@ -33,12 +33,13 @@ scripts/swarm.sh stop <id> [--no-custody] [--custody-timeout SEC]
 scripts/swarm.sh extend <id> [--minutes N] [--tokens N] [--usd N]
 scripts/swarm.sh pause <id> [--why TEXT]
 scripts/swarm.sh unpause <id>
-scripts/swarm.sh resume <id> [--question TEXT]... [--questions FILE] [--why TEXT] [--as ID]
+scripts/swarm.sh resume <id> [--question TEXT]... [--questions FILE] [--why TEXT] [--as ID] [--skip-refused-questions]
     [--minutes N] [--tokens N] [--usd N] [--env KEY=VALUE]... [--no-start] [-- START OPTIONS]
 scripts/swarm.sh requests <id> list [--open] [--json] | show R-n [--json]
 scripts/swarm.sh requests <id> ack|answer|decline|withdraw|authorise|collecting|unavailable R-n [TEXT | --why TEXT] [--as ID]
 scripts/swarm.sh evidence <id> add PATH --why TEXT [--for R-n] [--question Q-n]... [--sha256 HEX] [--as ID] | list [--json]
 scripts/swarm.sh material <id> add PATH --why TEXT [--class operator_supplied|case_material] [--sensitive] [--as ID] | list [--json]
+scripts/swarm.sh tool-supply <id> add PATH --why TEXT --source TEXT [--built TEXT] [--sha256 HEX]... [--for R-n|L-n]... [--as ID] | list [--json]
 scripts/swarm.sh summary <id>
 scripts/swarm.sh context <id> [--json]
 scripts/swarm.sh package <id> [--sign [--key FILE]] [--redact [--redact-leaks list]] [--with-outputs]
@@ -122,7 +123,7 @@ it. A wrong command line prints the mistake and where to read, not the manual.
 | `--inputs DIR` | no | — | Hand the swarm a read-only copy of `DIR` as `inputs/`: the tools refuse to write it, a shell write is detected and healed from a pristine copy, and where the host can (macOS `sandbox-exec`, Linux mount namespace) the panes run with it read-only at the kernel. Recorded as `inputs` in the registry. Repeatable: several sets each land at `inputs/<name>/` (the directory's name as given), and every other `--inputs` flag applies to all of them. See [inputs.md](inputs.md). |
 | `--inputs-enforce M` | no | `auto` | `auto`: kernel guard when the host has one, otherwise a `WARN`; `on`: refuse to start without one (exit 3); `off`: detection and healing only. |
 | `--inputs-max-mb N`, `--inputs-max-files N` | no | none | Refuse an inputs directory larger than N MB, or with more than N files, before anything is copied (several sets: together). Unset by default: evidence is as large as the case is. `SWARM_INPUTS_MAX_MB` and `SWARM_INPUTS_MAX_FILES` set the same limits from the environment. |
-| `--catalog` | no | off | Before the agents start, run the standard first pass over the inputs once (`scripts/evidence-catalog.sh`): for a disk image the partition table, per partition a body file, a MAC timeline and a path list (a logical volume image with no partition table is catalogued from sector 0); for a memory image Volatility's info, pslist, psscan, cmdline, netscan, malfind and dlllist. What an input is and how it is catalogued are the packs' recipes (`recipes/<name>/` in a pack; computer-forensics-base ships disk volumes, Windows memory and archive members); the harness takes the census: every input gets a row in `catalog/coverage.tsv` — catalogued, in part, planned, a further segment of a set, not catalogued, or smaller than any recipe asks about — with why, and the index names those not catalogued, so an input this pass could not read is named rather than missing. In a microVM run with the job service (the default) the census only plans the recipes (`catalog/plan.json`); they run as jobs once the hub is up, while the agents work, each result a generation under `catalog/gen/` and each change a revision under `catalog/revisions/<n>/`, announced on the board. What a step wrote to stderr is kept whole beside its output (`<file>.stderr`). A recipe a pack declares a broad extraction (a parse of the whole source into a searchable form, where the rest of the catalogue inventories it: the mobile pack's iOS and Android parsers over a full file-system acquisition, the base pack's super timeline of a disk image) is asked about every input too; each that applies is listed in `catalog/plan.json`'s `preparations` and in the README, run by the kickoff where its pack marks it so and otherwise offered as a lead once the run is up, and its receipts are kept on the store journal ([ADR 0013](adr/0013-a-negative-is-bounded-and-a-cap-pauses.md), "A source's broad extraction before a negative on it"). Lands in `catalog/`, harness-owned and read-only, indexed in `catalog/README.md` and rendered into `SWARM.md`. Needs `--inputs`; implies `--quarantine` and `--toolbox dfir`. Under `--isolation microvm` it runs with the image's tools, not the host's. |
+| `--catalog` | no | off | Before the agents start, run the standard first pass over the inputs once (`scripts/evidence-catalog.sh`): for a disk image the partition table, per partition a body file, a MAC timeline and a path list (a logical volume image with no partition table is catalogued from sector 0); for a memory image Volatility's info, pslist, psscan, cmdline, netscan, malfind and dlllist. What an input is and how it is catalogued are the packs' recipes (`recipes/<name>/` in a pack; computer-forensics-base ships disk volumes, Windows memory, archive members and AD1 logical images); the harness takes the census: every input gets a row in `catalog/coverage.tsv` — catalogued, in part, planned, a further segment of a set, not catalogued, or smaller than any recipe asks about — with why, and the index names those not catalogued, so an input this pass could not read is named rather than missing. In a microVM run with the job service (the default) the census only plans the recipes (`catalog/plan.json`); they run as jobs once the hub is up, while the agents work, each result a generation under `catalog/gen/` and each change a revision under `catalog/revisions/<n>/`, announced on the board. What a step wrote to stderr is kept whole beside its output (`<file>.stderr`). A recipe a pack declares a broad extraction (a parse of the whole source into a searchable form, where the rest of the catalogue inventories it: the mobile pack's iOS and Android parsers over a full file-system acquisition, the base pack's super timeline of a disk image) is asked about every input too; each that applies is listed in `catalog/plan.json`'s `preparations` and in the README, run by the kickoff where its pack marks it so and otherwise offered as a lead once the run is up, and its receipts are kept on the store journal ([ADR 0013](adr/0013-a-negative-is-bounded-and-a-cap-pauses.md), "A source's broad extraction before a negative on it"). Lands in `catalog/`, harness-owned and read-only, indexed in `catalog/README.md` and rendered into `SWARM.md`. Needs `--inputs`; implies `--quarantine` and `--toolbox dfir`. Under `--isolation microvm` it runs with the image's tools, not the host's. |
 | `--toolbox M` | no | `off` | `dfir`: check the forensic toolbox on this host (`scripts/toolbox.sh`: Sleuth Kit, Volatility 3, regipy, python-evtx, yara, exiftool, sqlite3, strings, python3) into `toolbox.json` and a Toolbox section of `SWARM.md`, with install commands for what is missing; `auto`: `dfir` when `--catalog` is set, plus the sets a `--goal-file`'s metadata block names in `toolbox:` (without the key, the sets its words suggest), and `crypto` when a VHD(X), VMDK, QCOW2 or encrypted container is under the inputs; `off`. `crypto` adds the volume readers (libbde, libvhdi, libluksde, libvshadow, dfvfs, qemu-img), `linux` the journal, XFS (xfsprogs) and LVM (libvslvm) readers. |
 | `--toolbox-required` | no | off | A missing tool is a `BLOCKER` (exit 3) instead of a `WARN`. |
 | `--quarantine` | no | off | `work/extracted/` and `work/quarantine/` cannot execute: no-exec at the kernel where the host can (`fsguard.sh --noexec`), and the harness strips execute bits from anything written there. Evidence pulled out of an image is for reading, never for running. |
@@ -248,7 +249,7 @@ msb records one refusal: a placeholder on its way to a host its secret is not bo
 
 Which connections msb decrypts. A VM with no secret bound (a keyless local model and no pack secret) has none intercepted. Once one secret is bound, msb terminates TLS on port 443 and on every port a secret's host is reached on, for every connection except those to a host name or suffix on the VM's allowlist that is not a secret's host and does not cover one. So these are intercepted: a secret's own hosts (that is where the placeholder is swapped); an allowed suffix that covers a secret's host; an `--allow-host` entry given as an address or a CIDR block on one of those ports (msb's bypass takes names only); and under `--no-netguard` every public host on those ports. The allowed host names that receive no secret keep their own TLS end to end: msb never reads what is sent there, and a placeholder can reach them, the value it stands for cannot. A client with its own trust store, not the guest's (Chromium's NSS store, Java's keystore), fails on an intercepted connection.
 
-The memory and `full` images carry the Volatility Foundation's Windows symbol pack (a 2019 snapshot, 3,014 tables: `images/README.md`), so a kernel it covers needs no network. For a newer kernel, Volatility's symbol downloads are not cached across runs under microvm: each VM fetches what it needs through `msdl.microsoft.com:80` and `*.blob.core.windows.net` again. A shared cache would be a writable directory common to every VM, which is what the per-seat layout exists to avoid.
+The memory and `full` images carry the Volatility Foundation's Windows symbol pack (a bundle of 2019: `images/README.md`), so a kernel it covers needs no network. For a newer kernel, Volatility's symbol downloads are not cached across runs under microvm: each VM fetches what it needs through `msdl.microsoft.com:80` and `*.blob.core.windows.net` again. A shared cache would be a writable directory common to every VM, which is what the per-seat layout exists to avoid.
 
 Three decisions about a VM's network, said so nobody assumes otherwise:
 
@@ -397,6 +398,59 @@ watchdog had notified it.
   lists the evidence and material added (§3), and `release.json` binds them
   (`external`, `acquisitions`). A record citing material whose class the policy
   says `none` for is refused.
+- `tool-supply <id> add PATH --why W --source TEXT [--built TEXT] [--sha256 HEX]...
+  [--for R-n|L-n]... [--as ID]` hands a running (or stopped) run a program no
+  image holds: a file, or a directory when the program loads libraries. It is
+  material, sealed the same way as `import:mat-<n>` and recorded as external of
+  class `operator_supplied`, never as evidence, with what an operator knows of a
+  tool and the harness cannot: `--source`, where it came from (a package and its
+  version, a URL, who built it; required), `--built`, how it was built or made
+  fit for the run (leave it out for a program used as published), and
+  `--sha256`, hashes you checked, each of which must be one of the supplied
+  files' sha256 and is held to it (a hash of anything else, a source archive or
+  a signed index, goes in the words). `--for` names the requests (`R-n`) and
+  leads (`L-n`) it is supplied for, each of which must exist; a request's own
+  lead is named beside it. The words are your statement and are recorded as
+  such, whole (at most 4000 characters each: a longer one is refused, never
+  cut); the ledger's entry carries them in its chained core
+  (`provenance.tool`: `source`, `built`, `checked`, `for`), and
+  `material.json` keeps them. The case policy's rules for material are kept:
+  every preset (`standard`, `live_adversary`, `internal`, `ctf`) admits it
+  (`more_evidence: no` refuses evidence, not material), and a policy that says
+  `operator_supplied=none` for material refuses it before anything is sealed,
+  since nothing recorded on its output could be kept; what rests on it, a job's
+  output included, is flagged with its class like any material. **A directory is
+  sealed whole**, every file under it, and every seat reads all of it: the
+  reply lists the files, and a directory with a hidden file or directory in it
+  (`.env`, `.git`, `.netrc`) is refused (give the files themselves; a hidden
+  file named as the path is your choice). A path that holds the run (its
+  parent, the runs directory) is refused.
+  The board post tells the seats where it came from as you state it, what the
+  harness checked, that they test it on input whose answer they know before
+  relying on it, and **how to run it**: a sealed file has no execute bit, and
+  nothing in a worker executes from `store/`, `work/extracted/`,
+  `work/quarantine/`, `inputs/` or its own `$OUT`, so a job declares it as an
+  input (`job_run` with `inputs: ["import:mat-<n>/<file>"]`) and copies it, and
+  every library it loads, into an executable temporary directory inside the job
+  (for example one made with `mktemp -d` under `/tmp`) before running it from
+  there. In a base-image VM (msb 0.7.2, as root) a copy made that way under
+  `/tmp` executed: `/tmp` is on the VM's overlay root, not a separate no-exec
+  mount; a worker VM, which also mounts the run, was not tested. This is for a
+  program you supply, never for evidence: evidence is read, not run (a job that
+  runs code recovered from it is flagged), and a job that tried to run a program
+  from `inputs/`, `work/extracted/` or `work/quarantine/` is told so, and sent
+  to `tool-supply` or a reimplementation. A job that tried to run a program in
+  place says so in its reason (`exit 126`, and the places nothing runs from), and
+  the shell's other reasons for 126 (a file built for another machine, a missing
+  interpreter, a directory) are quoted, not met with a copy. Supplying does not
+  close the request or the lead: answer them (`requests <id> answer R-n TEXT`,
+  `lead <id> note L-n TEXT`). `tool-supply <id> list [--json]` lists the tools
+  supplied with their source, build, hashes and requests; `material list` shows
+  them as material. If the run's hub was started by an older harness it takes
+  the act as plain material (no provenance, `--for` not recorded, no
+  instructions to the seats); this command holds the policy's rule, the
+  statements, the hidden files and the `--sha256` hashes itself before handing
+  it over, and the reply warns that the rest was not recorded.
 
 The report's §8 carries "Evidence gaps and acquisition requests", generated
 from the records: every acquisition with its stage and outcome, and each gap
@@ -504,7 +558,15 @@ scope; accepted by the operator; or withdrawn. A limitation that only names a
 question is none, and neither is a best candidate (an answer that claims
 established, every review of which holds it a best candidate only) or a quick
 negative nobody attested: the finish line refuses `done` on them and says the
-way to a disposition. Partial is a disposition whatever its reviews' strength. The stop policy decides who else ends the run: a cap pauses or
+way to a disposition. Partial is a disposition whatever its reviews' strength. A question that must be established (the goal's `## Must establish`
+section or `must_establish:` list, or `question add|amend --must-establish`;
+see Questions below) takes only an answer that answers it (established, a
+premise shown not to hold, or a bounded negative under the stronger bar),
+your acceptance of its limits, or its withdrawal: partial, not determinable
+and the rest do not end the run on it. Under `cap-pause` and `cap-stop` the
+agents may still abandon the run (two seats' `abandon`, ending it
+`abandoned`, never completed), so the requirement binds them fully only
+under `--stop operator`. The stop policy decides who else ends the run: a cap pauses or
 stops it and you stop it, whatever the questions' state.
 
 A run ends one of six ways (`runOutcome`, `stop-policy.ts outcome`):
@@ -563,13 +625,15 @@ report and the console say which.
   "stopped", by, at, why}`) before custody seals it: a stopped run is never
   read as completed.
 - When nothing has yielded (no new finding, question disposition or coverage
-  record) for 20 committed jobs or 30 minutes (`SWARM_YIELD_JOBS`,
-  `SWARM_YIELD_MINUTES`), the watchdog proposes a stop: an operator request of
+  record) for 30 minutes (`SWARM_YIELD_MINUTES`), the watchdog proposes a stop
+  (`SWARM_YIELD_JOBS=N` adds a count: N committed jobs with nothing yielded
+  propose too; off by default, since on the recorded runs a burst of 20 jobs
+  without a yield was ordinary work that yielded within minutes): an operator request of
   kind `decision` (`D-n`, with its `R-n`), with what is still open,
   on the trace (`stop_proposed`) and to the notify command. Nothing stops unless
   you act; another proposal comes only after a further window with nothing
   yielded. It is never an agent's vote.
-- `resume <id> [--question TEXT]... [--questions FILE] [--why TEXT] [--as ID]
+- `resume <id> [--question TEXT]... [--questions FILE] [--why TEXT] [--as ID] [--skip-refused-questions]
   [--minutes N] [--tokens N] [--usd N] [--env KEY=VALUE]... [--no-start] [-- START OPTIONS]`
   continues a run that ended, the same run in the same sandbox on the same
   chains. It is refused for a running run (that is `extend`), a purged one, and
@@ -584,7 +648,13 @@ report and the console say which.
   first; and the resume is recorded in `budget.json` (`resumes`), the registry,
   the operator's record, the trace and the custody anchor beside the run (with
   each chain's length and head). The questions given are asked as analyst
-  questions (`--why` defaults to "asked when the run was resumed"). The run
+  questions (`--why` defaults to "asked when the run was resumed"). Each is
+  checked before anything moves, as its admission would check it: one the
+  register would refuse (an `--as` nobody is enrolled under on this install,
+  a question it holds already word for word, words it refuses) refuses the
+  resume with nothing changed, naming the question and why;
+  `--skip-refused-questions` resumes without it and says so. Without `--as`
+  a question is this OS account's, with the operator's authority. The run
   restarts with the options it was started with, which the kickoff keeps outside
   the run (`runs/resume/<id>.argv.json`, 0600, removed by `purge`; `runs/resume`
   and `runs/notify` are denied to a host run's panes wherever the guard can
@@ -643,12 +713,23 @@ as the goal numbers it): its answer tests that premise first, against "the
 question's premise is not supported", and a review names that test
 ([ADR 0011](adr/0011-questions-are-a-register-with-their-askers.md), "What a
 question presumes"). The calibration generator marks every question that
-asks which, when or how of an event, whatever its truth.
+asks which, when or how of an event, whatever its truth. The questions that
+must be established go in a `## Must establish` section or the metadata
+block's `must_establish:` list (`[1, 3]`, or a line each, `- 1: why`, the
+question as the goal numbers it): for each, partial, not determinable, a
+bounded negative short of the stronger bar and out of scope do not end the
+run, under any stop policy ([ADR 0013](adr/0013-a-negative-is-bounded-and-a-cap-pauses.md),
+"A question that must be established"). The kickoff says which questions are
+required (`Required:`), and warns of a name the goal does not number, which
+requires nothing, and of a `must_establish:` key that names nothing. Its
+items may be indented or not, and a list beside the goal's own section is
+merged into it. A flag-only challenge is the case for it: its one question
+is answered by the flag, never by a partial answer.
 
-- `question <run> add --text T --why W [--objective O-n | --objective new --objective-text T] [--parent Q-n] [--materiality material|background] [--priority urgent --reason R] [--expects existence|value|narrative|timeline|list] [--completeness] [--presumes P] [--hint REF [--hint-value V]]... [--attach REF]... [--suggest SEAT] [--deadline ISO] [--neutral T] [--submission TOKEN]`
-  asks the running swarm a question. `--presumes` says what it takes as happened ("the drive was wiped"): its answer tests that premise first, an established review of an established answer without that test is recorded best_candidate, and a partial answer without it is warned (`premise_untested`), never held; the console's question form has the same field. `--completeness` says it asks for a complete set (every file, all connections, a complete list); a question whose words say so ("every", "all", "each", "complete list") is marked so without it, and `amend --no-completeness` takes the mark off. Its established or partial answer rests on a coverage record naming the areas searched (allocated, deleted, unallocated, slack, secondary), or the finish line holds it. It is written to the chain first and acknowledged after (the last line printed is the JSON of the act: `q`, `rev`, `scope`, the event's `seq` and `hash`, and what was delivered); then posted from `analyst:<you>`, offered to the suggested seat for its first minute (`SWARM_QUESTION_OFFER_SEC`) or to the most suited idle seat, and ranked first in every agent's header. A hint says where to look (a ref such as `input:<path>`, or a path in the run); `--hint-value` after it records what the hint says as an open hypothesis in the ledger. `--submission` makes a retry the same question.
+- `question <run> add --text T --why W [--objective O-n | --objective new --objective-text T] [--parent Q-n] [--materiality material|background] [--priority urgent --reason R] [--expects existence|value|narrative|timeline|list] [--completeness] [--presumes P] [--must-establish] [--hint REF [--hint-value V]]... [--attach REF]... [--suggest SEAT] [--deadline ISO] [--neutral T] [--submission TOKEN]`
+  asks the running swarm a question. `--must-establish` (yours or an examiner's; refused on a background question) says only an answer that answers it ends the run on it: partial, not determinable, a bounded negative short of the stronger bar and out of scope do not, and every seat's header names it until it is established. `--presumes` says what it takes as happened ("the drive was wiped"): its answer tests that premise first, an established review of an established answer without that test is recorded best_candidate, and a partial answer without it is warned (`premise_untested`), never held; the console's question form has the same field. `--completeness` says it asks for a complete set (every file, all connections, a complete list); a question whose words say so ("every", "all", "each", "complete list") is marked so without it, and `amend --no-completeness` takes the mark off. Its established or partial answer rests on a coverage record naming the areas searched (allocated, deleted, unallocated, slack, secondary), or the finish line holds it. It is written to the chain first and acknowledged after (the last line printed is the JSON of the act: `q`, `rev`, `scope`, the event's `seq` and `hash`, and what was delivered); then posted from `analyst:<you>`, offered to the suggested seat for its first minute (`SWARM_QUESTION_OFFER_SEC`) or to the most suited idle seat, and ranked first in every agent's header. A hint says where to look (a ref such as `input:<path>`, or a path in the run); `--hint-value` after it records what the hint says as an open hypothesis in the ledger. `--submission` makes a retry the same question.
 - `question <run> list [--json]` and `show Q-n [--json]`: every question, the triage queue and the clarifications waiting first; one question whole, with every revision, its offers, its leads, its answer and each signed act checked.
-- `question <run> amend Q-n --expect-rev N [--text T] [--why W] [--neutral T] [--completeness | --no-completeness] [--presumes P] ...`: `--presumes` alone changes what the question takes as happened and makes no new revision; otherwise a new verbatim revision, refused unless N is the revision now; the standing answer, which names the revision it answers (`question_rev`), is stale until it is recorded again for the new one.
+- `question <run> amend Q-n --expect-rev N [--text T] [--why W] [--neutral T] [--completeness | --no-completeness] [--presumes P] [--must-establish | --no-must-establish] ...`: `--presumes` alone changes what the question takes as happened and makes no new revision; otherwise a new verbatim revision, refused unless N is the revision now; the standing answer, which names the revision it answers (`question_rev`), is stale until it is recorded again for the new one. `--must-establish` requires an existing question to be established (a goal's too: after a run ended on a partial answer, require it, then `resume`); `--no-must-establish --why W` releases the requirement, and the register keeps who released it and why beside who required it. Neither makes a new revision. Your acceptance (`accept`, below) also disposes a question that must be established, for that revision and the answer that stood: the release for that answer, on the record.
 - `question <run> priority Q-n urgent|normal [--reason R]`, `withdraw Q-n --why W`, `clarify-reply Q-n C-n TEXT`, `scope Q-n|L-n in_scope|excluded --why W`, `accept Q-n --as bounded|not_determinable --why W --expect-rev N`, `verify [--allowed-signers FILE] [--ca FILE]`. An acceptance takes a question's limits as they stand for that revision; it is refused while a lead under the question is still open (a route not yet closed) or its answer is a negative no other seat has reviewed, and any acceptance makes the run's outcome `examination_limited`. It excuses a partial store sweep, and evidence added before it (`evidence_stale`), never evidence added after it or the rest of the negative bar; its reply (`still_held`, and a line from `swarm.sh`) names what the finish line still holds on the question.
 - `question <run> premise add --text T [--locator L] [--class given|supplied_assertion|proposition_under_test] [--entity E]... [--time FROM..TO]... [--for-question Q-n]... [--why W]`: a premise the case takes, its words verbatim, where they stand, and what it is about (entities, time ranges, the questions it applies to; each optional, none meaning everything). A given unless `--class` says otherwise: a given is not proved again and is never an open part; a supplied assertion (a client's or a witness's statement) is assumed as asserted, and the report says so; a proposition under test is examined like any claim. `premise revise P-n --expect-rev N --why W [--text T] [--locator L] [scope flags | --no-scope]` makes a new revision (answers citing the earlier one are warned, never rewritten); `premise admit P-n --as given|supplied_assertion --why W` admits an agent's proposal (`premise_propose`: a proposition under test until then); `premise withdraw P-n --why W`; `premise list [--json]` and `premise show P-n [--json]` read them, with the answers that cite each. Two standing answers that assume and contradict one premise revision over scopes that overlap hold the run (`premise_inconsistent`) until they are reconciled on the record: one revised, the finding that rebuts the premise named (the premise then comes to you as a request of kind `premise`: revise it, withdraw it, or `requests <run> answer R-n "the premise stands, and why"`; nothing waits on your answer), a scope narrowed, or an answer made conditional ("assuming P-n"). Neither side is forced.
 - `lead <run> direct (--question Q-n | --new-question T --new-why W) --title T --why W --product P --acceptance A`: a directive, an unheld lead under a question with the product it is to make and what makes that acceptable. A directive is not signed (`--sign` is refused; sign the question it serves). Under a person's question no lead has framed yet, the first agent to claim it states the proposition and its negation.

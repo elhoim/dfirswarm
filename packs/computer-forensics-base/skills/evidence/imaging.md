@@ -23,6 +23,7 @@ rediscover it.
     E01, Ex01, L01           EnCase: compressed, with an acquisition record
     AFF4, AFM                open forensic format, sometimes logical
     VHD, VHDX, VMDK, QCOW2   a virtual disk, with its own header and possibly snapshots
+    AD1 (.ad1, .ad2, ...)    FTK Imager's logical image: chosen files and folders, no volume
     a directory or a zip     a triage collection, not an image at all
 
 The Sleuth Kit reads raw and E01 directly and may also open VHD/VHDX or other
@@ -78,4 +79,4 @@ so there is nothing to weigh before using it.
 
 If the volume is there and the toolkit still refuses it, it is probably
 encrypted. See `filesystem/encrypted` before you conclude the image is damaged.
-If it is not a disk at all, see `evidence/collections`.
+If it is not a disk at all, an AD1 included, see `evidence/collections`.

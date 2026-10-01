@@ -320,6 +320,12 @@ Tool jobs (only when `job_run` is in your tool list)
 - A job starts in the run's directory and runs with the run read-only, so a program that writes its
   log or temp files to its working directory must be given a path under $OUT (its log, temp or
   output option), or run after cd "$OUT". A job that failed on such a write says so in its reason.
+- A job cannot run a program where it stands in store/, work/extracted/, work/quarantine/, inputs/
+  or $OUT (sealed files have no execute bit and the others are no-exec). Evidence is read, never
+  run: code recovered from it is not run in a job, so reimplement the step or ask the operator for a
+  program you trust (swarm.sh tool-supply). A program the operator supplied (import:mat-<n>) is run
+  from a copy: copy it, and every library it loads, into an executable temporary directory inside
+  the job and run it from there. A job that failed on this says so in its reason.
 - Everything a job reads is read-only: open a SQLite database as
   sqlite3.connect('file:<path>?mode=ro&immutable=1', uri=True) (or with the sqlite_query tool), or
   copy it into $OUT first; a plain connect fails there ("unable to open database file").
@@ -731,7 +737,12 @@ Done
   bounded negative that says the event did not happen under the stronger bar); one that rests on a
   not_determinable, a partial, a bounded negative, an acceptance, or a route closed deferred or
   infeasible ends examination-limited, and says so. A cap or the operator may end the run before
-  that; such an end is paused or stopped, never completed.
+  that; such an end is paused or stopped, never completed. A question the goal or the operator
+  requires to be established (your header's "Must be established", and `questions`) takes more:
+  only an answer that establishes it on a standing finding another seat attests, shows its premise
+  does not hold, or settles it by a bounded negative under the stronger bar; partial and not
+  determinable do not end the run on it, so keep working it, and only the operator accepts its
+  limits or releases it.
 - When SWARM.md says the run is until solved (--stop operator), there is no wall clock, the caps are
   advisory and an abandon is refused; it asks nothing more of an answer than any run does, and ends
   on the same dispositions. A provider error or a rate limit is waited out; it never ends the run. When nothing moves, the harness posts a regroup listing what is open:

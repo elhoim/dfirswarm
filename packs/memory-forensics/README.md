@@ -39,9 +39,9 @@ directly and to record the version and plugin with every result.
 
 A production-ready memory image needs an offline Windows ISF symbol pack. The
 image built from this pack pins one (`requires/host.json`, `install.data` of
-`vol`): the Volatility Foundation's `windows.zip`, a snapshot of 2019-10-16 with
-3,014 tables, downloaded at build time against its sha256 and indexed once so no
-VM does it again. It covers the Windows builds of that time and no newer kernel,
+`vol`): the Volatility Foundation's `windows.zip`, a bundle of 2019 (last
+changed 2019-10-16), downloaded at build time against its sha256 and indexed
+once so no VM does it again. It covers the Windows builds of that time and no newer kernel,
 which is why the skill still shows how to verify the cache and fail closed when
 the matching symbol is absent; silently fetching a PDB during case work is not
 an offline proof. The pack states no licence of its own. Our reading, not
