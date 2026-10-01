@@ -33,7 +33,7 @@ scripts/swarm.sh stop <id> [--no-custody] [--custody-timeout SEC]
 scripts/swarm.sh extend <id> [--minutes N] [--tokens N] [--usd N]
 scripts/swarm.sh pause <id> [--why TEXT]
 scripts/swarm.sh unpause <id>
-scripts/swarm.sh resume <id> [--question TEXT]... [--questions FILE] [--why TEXT] [--as ID]
+scripts/swarm.sh resume <id> [--question TEXT]... [--questions FILE] [--why TEXT] [--as ID] [--skip-refused-questions]
     [--minutes N] [--tokens N] [--usd N] [--env KEY=VALUE]... [--no-start] [-- START OPTIONS]
 scripts/swarm.sh requests <id> list [--open] [--json] | show R-n [--json]
 scripts/swarm.sh requests <id> ack|answer|decline|withdraw|authorise|collecting|unavailable R-n [TEXT | --why TEXT] [--as ID]
@@ -574,7 +574,7 @@ report and the console say which.
   on the trace (`stop_proposed`) and to the notify command. Nothing stops unless
   you act; another proposal comes only after a further window with nothing
   yielded. It is never an agent's vote.
-- `resume <id> [--question TEXT]... [--questions FILE] [--why TEXT] [--as ID]
+- `resume <id> [--question TEXT]... [--questions FILE] [--why TEXT] [--as ID] [--skip-refused-questions]
   [--minutes N] [--tokens N] [--usd N] [--env KEY=VALUE]... [--no-start] [-- START OPTIONS]`
   continues a run that ended, the same run in the same sandbox on the same
   chains. It is refused for a running run (that is `extend`), a purged one, and
@@ -589,7 +589,13 @@ report and the console say which.
   first; and the resume is recorded in `budget.json` (`resumes`), the registry,
   the operator's record, the trace and the custody anchor beside the run (with
   each chain's length and head). The questions given are asked as analyst
-  questions (`--why` defaults to "asked when the run was resumed"). The run
+  questions (`--why` defaults to "asked when the run was resumed"). Each is
+  checked before anything moves, as its admission would check it: one the
+  register would refuse (an `--as` nobody is enrolled under on this install,
+  a question it holds already word for word, words it refuses) refuses the
+  resume with nothing changed, naming the question and why;
+  `--skip-refused-questions` resumes without it and says so. Without `--as`
+  a question is this OS account's, with the operator's authority. The run
   restarts with the options it was started with, which the kickoff keeps outside
   the run (`runs/resume/<id>.argv.json`, 0600, removed by `purge`; `runs/resume`
   and `runs/notify` are denied to a host run's panes wherever the guard can

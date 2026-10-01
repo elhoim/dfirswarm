@@ -1438,6 +1438,28 @@ the goal or the operator say that this question had to be established.
   (the CLI and the goal have). The report does not yet say that a question
   was required or released; `questions/questions.md` and `question show` do.
 
+## A resume refuses a question it cannot admit
+
+Added 2026-10-01, from the same run. The operator resumed it with the
+question again and `--as operator`, an id nobody is enrolled under on that
+install. The resume admitted its questions only after it had moved the
+run's end aside and recorded itself, so the refusal came as a `WARN` after
+the run had already gone on, without the question it was resumed for. A
+seat noticed and asked.
+
+- **Checked first.** Before anything moves, each question given
+  (`--question`, `--questions FILE`) is checked as its admission would check
+  it, against the register as it stands: who `--as` names, the words, a
+  question the register already holds word for word (`questions-cli.ts add
+  --dry-run`, `checkAct`: the commit's own checks, with nothing written,
+  signed, supplied or delivered). One it would refuse refuses the resume
+  with nothing changed, naming the question and the reason.
+- **Going on without it is said.** `--skip-refused-questions` leaves such a
+  question out and resumes, with a `WARN` naming it and why.
+- **Checked again.** The question is admitted after the move, as before;
+  the register may have moved in between, and a refusal then is still
+  warned of.
+
 ## Consequences
 
 - Every existing goal and run keeps working: an answer without `result`

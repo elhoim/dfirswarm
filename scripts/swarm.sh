@@ -9323,15 +9323,16 @@ cmd_resume() {
   # As the operator typed it: the run's trace names the resume with these.
   RESUME_ARGS=("$@")
   local id="${1:-}"
-  [[ -n "$id" && "$id" != -* ]] || die_usage "resume requires <id> [--question TEXT]... [--questions FILE] [--why TEXT] [--as ID] [--minutes N] [--tokens N] [--usd N] [--env KEY=VALUE]... [--no-start] [-- START OPTIONS]"
+  [[ -n "$id" && "$id" != -* ]] || die_usage "resume requires <id> [--question TEXT]... [--questions FILE] [--why TEXT] [--as ID] [--skip-refused-questions] [--minutes N] [--tokens N] [--usd N] [--env KEY=VALUE]... [--no-start] [-- START OPTIONS]"
   shift
-  local questions=() qfile="" as="" why="" no_start=0 prep=() given=() sep=0 env_given=()
+  local questions=() qfile="" as="" why="" no_start=0 prep=() given=() sep=0 env_given=() skip_refused=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --question) [[ -n "${2:-}" ]] || die_usage "--question takes the question's text"; questions+=("$2"); shift 2 ;;
       --questions) qfile="${2:-}"; shift 2 ;;
       --as) as="${2:-}"; shift 2 ;;
       --why) why="${2:-}"; shift 2 ;;
+      --skip-refused-questions) skip_refused=1; shift ;;
       --minutes|--tokens|--usd) [[ "${2:-}" =~ ^[0-9]+(\.[0-9]+)?$ ]] || die_usage "$1 takes a number"; prep+=("$1" "$2"); shift 2 ;;
       --no-start) no_start=1; shift ;;
       --env) [[ "${2:-}" == *=* ]] || die_usage "--env takes KEY=VALUE"; env_given+=("$2"); shift 2 ;;
@@ -9371,6 +9372,31 @@ cmd_resume() {
       if (!Array.isArray(list)) list = t.split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("#"));
       for (const x of list) { const s = typeof x === "string" ? x : String(x?.text ?? ""); if (s.trim()) console.log(s.replace(/\n/g, " ").trim()); }
     ' "$qfile")
+  fi
+  # Each question asked for the continuation is checked before anything
+  # moves (docs/adr/0013, "A resume refuses a question it cannot admit"): one
+  # the register would refuse (an --as nobody is enrolled under, words it
+  # refuses, a question it holds already) refuses the resume, naming why,
+  # unless --skip-refused-questions says to go on without it. A WARN after
+  # the run had moved was not enough: the continuation went on without the
+  # question it was resumed for.
+  if ((${#questions[@]})); then
+    local kept_q=() refused_q=0 q qcheck qwhy
+    for q in "${questions[@]}"; do
+      if qcheck="$(SWARM_RUNS_DIR="$RUNS_DIR" node --experimental-strip-types --no-warnings "$ROOT/scripts/questions-cli.ts" add "$sandbox" --dry-run --text "$q" --why "${why:-asked when the run was resumed}" ${as:+--as "$as"} --via "${SWARM_OPERATOR_VIA:-cli}")"; then
+        kept_q+=("$q")
+        continue
+      fi
+      qwhy="$(jq -r '.reason // "refused"' <<<"$qcheck" 2>/dev/null || printf '%s' "$qcheck")"
+      if [[ "$skip_refused" -eq 1 ]]; then
+        echo "WARN: the question \"$q\" cannot be admitted ($qwhy): left out, as --skip-refused-questions says; the resume goes on without it." >&2
+      else
+        echo "BLOCKER: the question \"$q\" cannot be admitted: $qwhy. Nothing was changed. Ask it so the register takes it (--as names a person enrolled with swarm.sh examiner enroll; without --as it is this OS account's, with the operator's authority), or give --skip-refused-questions to resume without it." >&2
+        refused_q=1
+      fi
+    done
+    [[ "$refused_q" -eq 0 ]] || exit 2
+    questions=(${kept_q[@]+"${kept_q[@]}"})
   fi
   # The options it was started with: kept at kickoff, or given after --.
   local start_argv=() a argv_file="$RUNS_DIR/resume/$id.argv.json" dropped_env=() kept_notify=0 k
@@ -10787,7 +10813,7 @@ EOF
 EOF
       ;;
     resume) cat <<'EOF'
-  resume <id> [--question TEXT]... [--questions FILE] [--why TEXT] [--as ID]
+  resume <id> [--question TEXT]... [--questions FILE] [--why TEXT] [--as ID] [--skip-refused-questions]
               [--minutes N] [--tokens N] [--usd N] [--env KEY=VALUE]... [--no-start] [-- START OPTIONS]
       Continue a run that ended (stopped, done, failed): the same run, in the same
       sandbox, on the same ledger, registers, board and trace. What marked its end
@@ -10799,7 +10825,10 @@ EOF
       refused with nothing changed (give --minutes, --tokens or --usd). Questions
       given (--question, or a file of them, one a line or a JSON list) are asked as
       analyst questions, with --why (default: asked when the run was resumed) and
-      --as. The run starts with the options it was started with (kept at kickoff
+      --as; each is checked first, and one the register would refuse (an --as
+      nobody is enrolled under, a question it holds already) refuses the resume
+      with nothing changed, unless --skip-refused-questions leaves it out. The
+      run starts with the options it was started with (kept at kickoff
       outside the run, 0600, denied to the panes where the guard can; the notify
       command is taken from runs/notify/, and an --env value no pane could be kept
       from reading is not kept: give it again with --env KEY=VALUE); a run from

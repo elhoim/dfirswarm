@@ -6,6 +6,10 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Changed: a resume refuses a question it cannot admit, before anything moves
+
+`swarm.sh resume --question … --as operator` on an install where nobody is enrolled as `operator` used to move the run's end aside, record the resume and start the continuation, and only then warn that the question was not admitted: the run went on without the question it was resumed for. Each question is now checked first, as its admission would check it (`questions-cli.ts add --dry-run`), and one the register would refuse refuses the resume with nothing changed, naming why. `--skip-refused-questions` resumes without it and says so. See [ADR 0013](docs/adr/0013-a-negative-is-bounded-and-a-cap-pauses.md), "A resume refuses a question it cannot admit".
+
 ### Added: a question that must be established
 
 On a flag-only challenge under `--stop operator`, the one question's answer was partial on a reviewed finding, which is a disposition under the bar. The coordinator's done ended the run examination-limited after 23 minutes, without the flag; the operator had to resume it and ask again by hand.

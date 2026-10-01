@@ -193,3 +193,25 @@ test("a signed v1 stays as it is after the continuation, and the continuation's 
   assert.equal(check.ok, true, check.lines.join("\n"));
   assert.deepEqual(check.signatures.map((s) => [s.version, s.kind, s.adopted]), [[0, "machine", false], [1, "examiner", true], [2, "machine", false], [3, "examiner", true]]);
 });
+
+test("a question asked for the continuation is checked before anything moves: the dry run of the operator's act says why the register would refuse it, and writes nothing", async () => {
+  const QC = await import("../scripts/questions-cli.ts");
+  const r = await stoppedRun({ id: "sres-dry" });
+  await asEnded(r);
+  await Q.seedRegister(r.root);
+  const asked = await QC.operatorAct(r.root, "open", { text: "Which account ran the tool?", why: "the client asks" }, {}, r.home);
+  assert.equal(asked.ok, true, JSON.stringify(asked));
+  const before = await readFile(join(r.root, Q.QUESTIONS_LOG), "utf8");
+  // An --as nobody is enrolled under: the reason the resume's admission would have given after the run had moved.
+  const nobody = await QC.operatorAct(r.root, "open", { text: "Was the host reached again?", why: "asked when the run was resumed" }, { as: "operator", dryRun: true }, r.home);
+  assert.equal(nobody.ok, false);
+  assert.match(String(nobody.reason), /^--as operator: no one is enrolled on this install under operator \(swarm\.sh examiner enroll\)/);
+  // Words the register refuses: a question it holds already, word for word.
+  const twin = await QC.operatorAct(r.root, "open", { text: "Which account ran the tool?", why: "again" }, { dryRun: true }, r.home);
+  assert.equal(twin.ok, false);
+  assert.match(String(twin.reason), /asks this already, word for word/);
+  // One it would admit: said so, as a dry run, and nothing is written.
+  const fine = await QC.operatorAct(r.root, "open", { text: "Was the host reached again?", why: "asked when the run was resumed" }, { dryRun: true }, r.home);
+  assert.deepEqual([fine.ok, fine.dry_run], [true, true], JSON.stringify(fine));
+  assert.equal(await readFile(join(r.root, Q.QUESTIONS_LOG), "utf8"), before, "a dry run writes nothing");
+});

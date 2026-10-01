@@ -2296,6 +2296,19 @@ export async function commitAct(sandboxRoot: string, p: PreparedAct, o: { signat
 }
 
 /** Prepare and commit in one step: an agent's act, or a person's that is not signed. */
+/**
+ * Whether an act would be admitted now, by the checks its commit makes
+ * against the register as it stands, with nothing written and nothing
+ * delivered: what a resume asks of each question it is given before
+ * anything of the run moves (docs/adr/0013, "A resume refuses a question it
+ * cannot admit"). The register may move before the act is made; the act is
+ * checked again then.
+ */
+export async function checkAct(sandboxRoot: string, p: PreparedAct): Promise<{ ok: true } | Fail> {
+  const c = await commitUnderLock(sandboxRoot, p, await questionsSnapshot(sandboxRoot));
+  return c.result.ok ? { ok: true } : { ok: false, reason: c.result.reason };
+}
+
 export async function act(sandboxRoot: string, actor: Actor, ev: ActKind, input: ActInput): Promise<ActResult | Fail> {
   const prepared = await prepareAct(sandboxRoot, actor, ev, input);
   if (!prepared.ok) return prepared;

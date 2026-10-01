@@ -120,6 +120,25 @@ set -e
 [[ $rc -eq 2 ]] && grep -q 'a resume continues the same seats (give --n 2)' <<<"$out" || fail "a resume with other seats was not refused (rc $rc): $out"
 pass "a run with no kept options is resumed with them given after --, and with the same seats only"
 
+echo "# a question the register would refuse refuses the resume before anything moves"
+out="$(kick --cap-usd 5 --label r5)" || fail "the fifth kickoff was refused: $out"
+id5="$(id_of r5)"; sb5="$(sandbox_of r5)"
+set_state "$id5" running
+swarm stop "$id5" --no-custody >/dev/null || fail "the fifth run's stop failed"
+set +e
+out="$(swarm resume "$id5" --no-start --question "Was the host reached again after the first day?" --as operator)"; rc=$?
+set -e
+[[ $rc -eq 2 ]] || fail "a resume whose question cannot be admitted was not refused (rc $rc): $out"
+grep -q 'BLOCKER: the question "Was the host reached again after the first day?" cannot be admitted: --as operator: no one is enrolled on this install under operator' <<<"$out" || fail "the refusal does not name the question and why: $out"
+grep -q 'Nothing was changed' <<<"$out" && grep -q -- '--skip-refused-questions' <<<"$out" || fail "the refusal does not say nothing moved and how to go on without it: $out"
+[[ -f "$sb5/done/STOPPED" && ! -d "$sb5/done/history" ]] || fail "a refused resume moved the stop"
+jq -e '(.resumes // []) | length == 0' "$sb5/budget.json" >/dev/null || fail "a refused resume was recorded in the budget"
+out="$(swarm resume "$id5" --no-start --question "Was the host reached again after the first day?" --as operator --skip-refused-questions)" || fail "a resume told to go on without the refused question was refused: $out"
+grep -q 'WARN: the question "Was the host reached again after the first day?" cannot be admitted (--as operator: no one is enrolled' <<<"$out" || fail "the question left out is not said: $out"
+[[ -f "$sb5/done/history/1/STOPPED" ]] || fail "the resume with --skip-refused-questions did not go on"
+grep -q 'Was the host reached again' "$sb5/questions/questions.jsonl" 2>/dev/null && fail "the refused question was admitted after all"
+pass "a question the register would refuse refuses the resume before anything moves, naming why; --skip-refused-questions goes on without it, and says so"
+
 echo "# the start options kept for a resume hold no secret a pane could read"
 # A typed target's delivery (an ntfy push) goes to a stand-in curl, never out.
 mkdir -p "$TMP/fake-bin"

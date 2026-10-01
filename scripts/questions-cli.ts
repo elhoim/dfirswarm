@@ -33,7 +33,9 @@
  *                                                           every signed act, its signature checked; fails on
  *                                                           bad, wrong-principal, or a signed act with none
  *
- * Every act takes [--as ID] (an enrolled person: a claim), [--sign] (the act
+ * Every act takes [--dry-run] (checked as its admission would check it, against
+ * the register as it stands; nothing is signed, written or delivered: what a
+ * resume asks of each question before anything moves), [--as ID] (an enrolled person: a claim), [--sign] (the act
  * signed with that person's enrolled key, namespace dfirswarm-question; the
  * passphrase or PIN on the terminal, or on the descriptor --secret-fd N
  * names, never in argv or the environment) and [--via cli|console]. Without
@@ -63,8 +65,13 @@ import { fingerprintOf, keyNeeds, loadPerson, signAs, verifyAs, type Person, typ
 
 const sha256 = (b: string | Buffer) => createHash("sha256").update(b).digest("hex");
 
-/** How an act is made: who (--as), signed or not, and where the secret comes from (a descriptor, the terminal, or a caller in this process). */
-export type Flags = { as?: string; sign?: boolean; secretFd?: number; via?: "cli" | "console"; secret?: Buffer | null };
+/**
+ * How an act is made: who (--as), signed or not, and where the secret comes
+ * from (a descriptor, the terminal, or a caller in this process). A dry run
+ * (--dry-run) checks the act as its admission would, against the register as
+ * it stands, and writes, signs, supplies and delivers nothing.
+ */
+export type Flags = { as?: string; sign?: boolean; secretFd?: number; via?: "cli" | "console"; secret?: Buffer | null; dryRun?: boolean };
 
 /** Who acts: the enrolled person named (a claim, or signed), or this host's OS account, not enrolled, as the operator. */
 export function actorFor(flags: Flags, home?: string): { actor: Q.Actor; person: Person | null } | { why: string } {
@@ -355,8 +362,15 @@ export async function admit(sandbox: string, hubAdmin: string | undefined, body:
  * under the registers' lock. Acknowledged only once the chain holds it.
  */
 export async function operatorAct(sandbox: string, ev: Q.ActKind, input: Q.ActInput, flags: Flags, home?: string, o: { hubAdmin?: string } = {}): Promise<Record<string, unknown>> {
-  const who = actorFor(flags, home);
-  if ("why" in who) return { ok: false, reason: who.why };
+  const who = actorFor({ ...flags, ...(flags.dryRun ? { sign: false } : {}) }, home);
+  if ("why" in who) return { ok: false, reason: who.why, ...(flags.dryRun ? { dry_run: true } : {}) };
+  // A dry run: the act checked as its admission would check it, with nothing supplied, signed, written or delivered.
+  if (flags.dryRun) {
+    const { attachments: _a, ...words } = input;
+    const prepared = await Q.prepareAct(sandbox, who.actor, ev, words);
+    if (!prepared.ok) return { ...prepared, dry_run: true };
+    return { ...(await Q.checkAct(sandbox, prepared.prepared)), dry_run: true };
+  }
   // An attachment given as a file on this host is supplied as material first; the act carries its import.
   if ((ev === "open" || ev === "amend") && Array.isArray(input.attachments) && input.attachments.length) {
     // The act's other words are checked first: nothing is supplied for an act that would be refused.
@@ -657,7 +671,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const person = asValues.filter((v) => v !== acceptAs).at(-1);
   // The run's hub, when one runs: the register's writer (swarm.sh names its admin socket).
   const admission = one("--hub-admin") ? { hubAdmin: one("--hub-admin") } : {};
-  const f: Flags = { ...(person ? { as: person } : {}), ...(flags.has("--sign") ? { sign: true } : {}), ...(fdRaw !== undefined ? { secretFd: Number(fdRaw) } : {}), ...(via === "console" || via === "cli" ? { via } : {}) };
+  const f: Flags = { ...(person ? { as: person } : {}), ...(flags.has("--sign") ? { sign: true } : {}), ...(fdRaw !== undefined ? { secretFd: Number(fdRaw) } : {}), ...(via === "console" || via === "cli" ? { via } : {}), ...(flags.has("--dry-run") ? { dryRun: true } : {}) };
   const shared = (): Q.ActInput => ({
     ...(one("--text") !== undefined ? { text: one("--text") } : {}),
     ...(one("--why") !== undefined ? { why: one("--why") } : {}),

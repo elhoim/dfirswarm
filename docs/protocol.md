@@ -701,7 +701,13 @@ start options kept for the resume (`runs/resume/<id>.argv.json`: `{argv,
 dropped_env, notify}`) never hold the notify command or its typed targets
 (kept once, in `runs/notify/`, and given to the kickoff again from there) and
 hold an `--env` value only where no pane can read it; elsewhere its name, and
-the resume asks for the value again.
+the resume asks for the value again. Each question given to the resume is
+checked first, as its admission would check it against the register as it
+stands (`questions-cli.ts add --dry-run`, `checkAct`: who `--as` names, the
+words, a question the register holds already); one it would refuse refuses
+the resume before anything moves, naming the question and why, unless
+`--skip-refused-questions` leaves it out (a `WARN` says so). The question is
+admitted after the move, as before, and is checked again then.
 
 ### A microVM seat's socket (`<hub dir>/<agent>.sock`)
 
