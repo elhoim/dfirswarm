@@ -6,6 +6,29 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Added: AD1 logical images in the base pack
+
+A run's evidence held an AccessData AD1 logical image (FTK Imager's custom content image). The kickoff's census listed it as not catalogued: no recipe of any pack knew its `ADSEGMENTEDFILE` header. The job images that hold the base pack also hold dissect, which reads AD1, but nothing pointed a seat at it. A seat decoded the container by hand, a second seat reproduced one file's hash, and nothing else read it. The format knowledge now lives in the base pack (computer-forensics-base 1.5.0); the harness learns nothing about AD1.
+
+- **The `ad1-items` recipe** (kickoff and derived) lists every item of a version 4 image in `members.tsv`.
+  - archive-members' columns come first, so `catalog_search which=members` and `member:<gen>#<n>` read it the same way.
+  - Then the times as dissect reads the keys (`mtime` modified 0x9, `atime` accessed 0x7, `btime` created 0x8), the MD5 and SHA-1 the image records, the SHA-256 of each file's content, and `check`: ok, mismatch, no-stored-hash or not-read. Each file is inflated to check them. Past the time limit, inflating stops and listing does not.
+  - `locator` (`ad1:item=<address>`) names an item alike in a partial and a whole read; `n` after a break does not.
+  - `attributes.tsv` keeps every metadata entry of every item, labelled; `image.json` keeps the headers and the data source name the paths are under.
+  - Nothing is extracted. A segmented image is read across `.ad2`, `.ad3`, … beside the first. A further segment is named as read from its first. An encrypted image (`ADCRYPT`) and other versions are named and not read.
+  - Every claim the image makes is bounded before it is followed: segments (4096), the chunk size (512 B to 16 MiB), a chunk's compressed length, a chunk table (by what the image can hold, read a batch at a time), a name (64 KiB), a metadata text (1 MiB), the tree's depth (1024), every chain to one visit an address. A damaged image is listed as far as it reads, each break named.
+- **The `ad1_extract` tool** writes the tree out, each file inflated, hashed and checked, with a manifest (`ad1_extract.tsv`) of what went where.
+  - It takes items by locator or `n`.
+  - A name the file system cannot hold is written renamed, and the manifest keeps both.
+  - A file whose content breaks, or whose write fails (a full disk), is kept as `.partial` and named; no truncated file keeps its own name.
+  - In a job it writes only inside `$OUT`. Run as a job, its files are sealed, and the derived catalogue takes an archive or a disk image inside in turn: extraction stays the agents', in jobs (ADR 0010).
+- `file_type` names an AD1 segment (`.ad1` to `.ad<n>`) and an encrypted AD1 by their first bytes. The `evidence/imaging` and `evidence/collections` skills say what an AD1 image is and how to work it, with dissect's `target-query` as a second reader.
+- Both use Python's standard library alone, so no image changes. They run in the job image the run picks for the base pack (`images/recipe.py job-profiles`). Images built before record the pack as 1.4.1, and the kickoff says so (`image_fit`) until they are built again.
+- Tests:
+  - `tests/ad1-pack.test.ts` builds its synthetic AD1 images in code. They mirror the reader's own assumptions.
+  - So the suite also reads one real FTK Imager image, 2 KB of test data from Fox-IT's dissect.evidence (AGPL-3.0, `tests/fixtures/ad1/`, named in NOTICE).
+  - It covers detect, the listing, the time keys, damaged and hostile images, segments and locators, the time limit, the tool's names and failed writes, the census, and the derived chain from an AD1 a job makes to the zip inside it.
+
 ### Added: supplying a tool to a running run, and a job that says it could not execute a program
 
 A live run asked the operator for programs no image held. `swarm.sh material add` was the only way to hand one over: it sealed the file, but said nothing of where it came from or how it was built, and the two jobs that tried to run it in place failed with `exit 126` and with `exit 127: a program it runs is not in its image` before a seat found the way (a copy in an executable temporary directory inside the job).

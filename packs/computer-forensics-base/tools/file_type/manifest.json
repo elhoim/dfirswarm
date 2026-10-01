@@ -20,7 +20,7 @@
   "timeout_seconds": 120,
   "example": "{\"path\": \"work/extracted\", \"mismatch_only\": true}",
   "by": "maintainer",
-  "at": "2026-09-22T18:00:00.000Z",
-  "version": 1,
-  "sha256": "90aafa1509018ad7ced70076714e4ee73b73a96126b45df338680be66c70d9a4"
+  "at": "2026-10-01T12:00:00.000Z",
+  "version": 2,
+  "sha256": "500909af160275d5d2c86e1b25f34a1f9a2938b77a481ce0aec52b27a52fa960"
 }

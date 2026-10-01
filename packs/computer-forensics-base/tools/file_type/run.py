@@ -14,6 +14,18 @@ import json
 import os
 import sys
 
+class _AdSegments:
+    """.ad1, .ad2, ... .ad10 and on: FTK Imager numbers an AD1 image's segments without end."""
+
+    def __contains__(self, ext):
+        return len(ext) > 2 and ext[:2] == "ad" and ext[2:].isdigit()
+
+    def __bool__(self):
+        return True
+
+
+AD_SEGMENTS = _AdSegments()
+
 MAGIC = [
     (0, b"MZ", "PE or DOS executable", {"exe", "dll", "sys", "scr", "ocx", "cpl", "efi", "mui", "msi"}),
     (0, b"\x7fELF", "ELF executable or object", {"so", "o", "elf", "bin", ""}),
@@ -47,6 +59,8 @@ MAGIC = [
     (0, b"SCCA", "prefetch record", {"pf"}),
     (0, b"\x1f\x8b\x08", "gzip", {"gz"}),
     (0, b"EVF\x09", "EnCase E01 image", {"e01", "ex01"}),
+    (0, b"ADSEGMENTEDFILE\x00", "AccessData AD1 logical image (a segment)", AD_SEGMENTS),
+    (0, b"ADCRYPT", "AccessData AD1 logical image, encrypted", {"ad1"}),
     (0, b"AVML", "AVML memory capture", {"lime", "raw", "mem"}),
     (0, b"EMiL", "LiME memory capture", {"lime", "raw", "mem"}),
     (0, b"PAGEDU", "Windows crash dump", {"dmp"}),

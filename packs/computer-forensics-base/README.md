@@ -27,19 +27,26 @@ Platform-specific artefact knowledge lives in the packs that depend on this one.
 | `reporting/citations` | every claim cites something a reviewer can re-run |
 | `reporting/disagreement` | disagreeing, vetoing, and correcting after a sign-off |
 
-**Thirteen tools**: `image_layout`, `check_inputs`, `catalog_search`,
+**Fourteen tools**: `image_layout`, `check_inputs`, `catalog_search`,
 `icat_extract`, `sig_carve`, `file_carver`, `ioc_scan`, `chunk_needles`,
 `file_type`, `sqlite_query`, `feature_scan`, `timeline_super`,
-`timestamp_decode`. The last four arrived with the packs that depend on this
-one: a tool every pack would have carried belongs here once, not in each of
-them.
+`timestamp_decode`, `ad1_extract`. `file_type` to `timestamp_decode` arrived
+with the packs that depend on this one: a tool every pack would have carried
+belongs here once, not in each of them. `ad1_extract` writes an AccessData
+AD1 logical image's files out, checked against the digests the image
+records; run as a job, what it writes is catalogued in turn.
 Every one takes JSON on stdin and returns JSON, and every call lands on the
 run's trace under the calling agent's name.
 
-**Four recipes**, each saying what it prepares (`purpose` in its
+**Five recipes**, each saying what it prepares (`purpose` in its
 `recipe.json`). `disk-volumes` (the partition table, and per filesystem a body
 file, a path list and a MAC timeline) and `archive-members` (an archive's
-member list) inventory: they read no file's contents. `memory-windows` is a
+member list) inventory: they read no file's contents. `ad1-items` inventories
+an AccessData AD1 logical image (FTK Imager's custom content image, found by
+its `ADSEGMENTEDFILE` header): every item with its size, times, the
+digests the image records and a locator, each file inflated to check them,
+every claim the image makes bounded before it is followed, nothing
+extracted; `ad1_extract` writes the files out. `memory-windows` is a
 broad extraction of a Windows memory image, Volatility's standard views of
 the whole of it. `disk-timeline` is a broad extraction of a disk image,
 Plaso's log2timeline over every partition and volume and a psort CSV timeline;
