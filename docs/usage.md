@@ -1348,12 +1348,14 @@ and the diff of `tests/fixtures/kickoff/` is the change, as the agents will read
 
 `node --experimental-strip-types scripts/rules.ts --write` regenerates [the rule register](rules.md): every coded rule of the ledger with the functions that raise it, the design that states it, and the tests and fixtures that exercise it. `--check` says whether the committed file is current and names any rule without a test or fixture, a design section or a place it is raised; `tests/rules-register.test.ts` holds both. A change to a rule changes that file, so it shows in the diff.
 
+`bash scripts/merge-prep.sh` writes the register and the kickoff goldens again, and seals every pack that differs from main, when a branch is brought up to date with main; it resolves a conflict in any of them rather than leaving it to be edited, and stages what it wrote (CONTRIBUTING.md, "Bringing a branch up to date with main").
+
 
 ### `npm` scripts
 
 | Script | Runs |
 | --- | --- |
-| `npm test` | the protocol, plan, summary, web API and extension-import suites, plus the Pi loader suite, which skips where Pi is not installed |
+| `npm test` | every node suite under `tests/` (`scripts/test-node.ts` finds them by name; `tests/node-tests.skip` names the few it leaves out, the VM suites), the Pi loader suite among them, which skips where Pi is not installed |
 | `npm run test:bash` | every shell suite through `scripts/test-bash.sh`, one verdict per suite (`scripts/test-bash.sh reap inputs` runs a subset) |
 | `npm run test:server` | web API tests only |
 | `npm run typecheck` | `tsc -p tsconfig.json` (the extension against Pi's own types, the scripts, every node test) then `tsc -p ui/tsconfig.json` (the React client) |

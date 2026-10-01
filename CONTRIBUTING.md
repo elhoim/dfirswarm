@@ -18,7 +18,7 @@ git clone https://github.com/halilozturkci/dfirswarm && cd dfirswarm
 nvm use            # .nvmrc → Node 22
 npm ci
 npm run typecheck  # server + UI
-npm test           # protocol + web API suites, no key, no Herdr
+npm test           # every node suite under tests/, no key, no Herdr
 npm run test:bash  # every shell suite: certification, preflight, model teams, reaper, netguard, images, packs, microVM flags
 npm run ui:build
 # on a host that can boot a microVM (Apple silicon, or Linux with /dev/kvm) and has the base image loaded:
@@ -55,7 +55,11 @@ panes and no key is possible with the scripted provider
 ## Rules of the house
 
 - **Tests live in `tests/`.** Node suites are `node:test` with
-  `--experimental-strip-types`; shell suites are plain bash. A change to the
+  `--experimental-strip-types`; shell suites are plain bash. A new
+  `tests/<name>.test.ts` or `tests/<name>.test.sh` runs by its name: nothing
+  lists the suites (`scripts/test-node.ts`, `scripts/test-bash.sh`), and the
+  few node suites `npm test` must leave out are in `tests/node-tests.skip`,
+  each with its reason. A change to the
   protocol needs a case in `tests/dry-run.test.ts`; a change to the web API
   needs one in `tests/ui-server.test.ts`; a change to `swarm.sh` usually needs
   one in `tests/swarm-preflight.test.sh` or `tests/model-teams.test.sh`,
@@ -89,6 +93,57 @@ against real runs; refresh them when the design changes.
   a live run, which swarm id proved it (`scripts/swarm.sh status <id>`).
 - Do not commit anything from `runs/`, `.pi-sessions/` or a real
   provider key. `.gitignore` covers the usual places; look anyway.
+
+### The changelog
+
+A pull request writes its entry to `changelog.d/<branch-slug>.md`, the branch
+name with `/` as `-` (`claude/merge-hygiene` → `claude-merge-hygiene.md`),
+never to `CHANGELOG.md`: each branch adds a file of its own, so two branches
+do not conflict at the top of one section. The fragment is one or more
+sections under a `### <Kind>: …` heading, the kinds `CHANGELOG.md` uses
+(Added, Changed, Fixed, Security, …), written as its entries are;
+`tests/changelog.test.ts` checks its shape. Name a pack, not its version: a
+version can still be raised when the branch is brought up to date.
+When the owner cuts a release,
+`node --experimental-strip-types scripts/changelog.ts --fold --release X.Y.Z`
+folds every fragment into `[Unreleased]`, newest first (by when each landed),
+turns that section into the version's, and removes the fragments; without
+`--release` it only folds. Read `git diff`, then commit.
+
+### Bringing a branch up to date with main
+
+Packs carry their own checksums and version, and the kickoff goldens and
+`docs/rules.md` are generated, so two branches that touch the same pack or
+the kickoff conflict there even when their sources merge cleanly. Whoever
+merges brings the branch up to date in one step, and a branch that falls
+behind again is fixed by running it again:
+
+```sh
+git fetch origin && git merge origin/main   # stop at the conflicts, if any
+bash scripts/merge-prep.sh                  # --base REF if not origin/main
+git diff --cached                           # read what is staged, then commit
+```
+
+In a rebase, run it at each commit that stops on a conflict and once more
+when the rebase has finished.
+
+`scripts/merge-prep.sh` resolves a conflict in a generated file rather than
+asking for it to be edited: a pack's `pack.json` key by key (what the seal
+writes and the version are written again; a hand-written key both sides
+changed stops it, named), a pack's `skills/INDEX.md`, the goldens and the
+rule register by writing them again. It seals every pack whose files differ
+from main's; a pack that differs from main's while its version is not above
+main's gets main's version with the patch raised, so two different packs
+never carry one version (`docs/packs.md`, "Versions"). It writes the kickoff
+goldens and the rule register again and checks the changelog fragments. It
+stages everything it wrote, so the commit that ends the merge carries it, and
+lists what is staged and what is not. Any other conflict, or a `pack.json` key
+it cannot merge, stops it before it writes anything. It commits nothing. CI's
+own checks stay: `tests/packs.test.sh` verifies every shipped pack, the
+`pack-versions` job compares a pull request's packs with its base (a clean
+merge can land two packs under one version, so this one catches what nobody
+ran merge-prep for), `tests/kickoff-goldens.test.sh` compares the goldens and
+`tests/rules-register.test.ts` the register.
 
 ## Licence and the name
 
