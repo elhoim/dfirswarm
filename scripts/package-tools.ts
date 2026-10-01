@@ -265,11 +265,8 @@ export function leakScan(dir: string, tokens: ScanToken[], o: { digests?: Readon
   const byteForms = wanted.flatMap((w) => w.raw);
   const textMatch = new MultiMatch(textForms);
   const byteMatch = new MultiMatch(byteForms);
-  // A word across two windows is whole in the first: the longest form twice
-  // over (an escaped character takes two bytes in the file for one in the
-  // text), and the context a short word is judged by on both sides.
   const longest = Math.max(0, ...textForms.map((b) => b.length), ...byteForms.map((b) => b.length));
-  const overlap = 2 * longest + 4 * RUN_WINDOW;
+  const overlap = scanOverlap(longest);
   for (const abs of walk(dir)) {
     const rel = relative(dir, abs).split("\\").join("/");
     if (rel === "REDACTIONS.txt" || rel === "REDACTIONS.json" || rel === "HYGIENE.json" || rel.startsWith("MANIFEST.txt")) continue;
@@ -297,6 +294,15 @@ export function leakScan(dir: string, tokens: ScanToken[], o: { digests?: Readon
           got += n;
         }
         const win = buf.subarray(0, got);
+        // A short word is judged only where its context is whole in this
+        // window: the file's own start or end, or RUN_WINDOW characters on
+        // each side. One cut by the window's edge is judged in the window
+        // where it is whole (the overlap gives every occurrence one): judged
+        // cut, a PIN at the start of a hash that ran on past the edge read
+        // as a leak, and a redacted package was refused for it.
+        const first = off === 0;
+        const last = off + got >= size;
+        const whole = (b: Buffer, start: number, end: number, unit: 1 | 2) => (first || start >= RUN_WINDOW * unit) && (last || end + RUN_WINDOW * unit <= b.length);
         const inText = new Uint8Array(wanted.length);
         const inBytes = new Uint8Array(wanted.length);
         const digestHit = new Uint8Array(digests.length);
@@ -312,7 +318,7 @@ export function leakScan(dir: string, tokens: ScanToken[], o: { digests?: Readon
               }
               if (inText[k]) continue;
               // The text's classes are ASCII: its UTF-8 bytes tell a longer run as its characters do.
-              if (wanted[k]!.n.length < SHORT_WORD && partOfLongerRun(byteAt(text, end - n, 1), n)) continue;
+              if (wanted[k]!.n.length < SHORT_WORD && (!whole(text, end - n, end, 1) || partOfLongerRun(byteAt(text, end - n, 1), n))) continue;
               inText[k] = 1;
             }
           });
@@ -323,7 +329,7 @@ export function leakScan(dir: string, tokens: ScanToken[], o: { digests?: Readon
             const i = Math.floor(k / 3);
             if (inText[i] || inBytes[i]) continue;
             const unit = k % 3 === 1 ? 2 : 1;
-            if (wanted[i]!.token.length < SHORT_WORD && partOfLongerRun(byteAt(win, end - n, unit), n / unit)) continue;
+            if (wanted[i]!.token.length < SHORT_WORD && (!whole(win, end - n, end, unit) || partOfLongerRun(byteAt(win, end - n, unit), n / unit))) continue;
             inBytes[i] = 1;
           }
         });
@@ -341,6 +347,19 @@ export function leakScan(dir: string, tokens: ScanToken[], o: { digests?: Readon
     }
   }
   return { files, hits };
+}
+
+/**
+ * How far one window of the scan runs past the next one's start, for forms
+ * at most `longest` bytes: a form whole in some window (twice its length: an
+ * escaped character takes two bytes in the file for one in the text), and a
+ * short word's context whole there on both sides (RUN_WINDOW characters,
+ * with room for UTF-16, escapes and case folding that shortens a character).
+ * An occurrence starting at p is whole in the window that starts at the
+ * last multiple of SCAN_WINDOW at or before p minus that context.
+ */
+export function scanOverlap(longest: number): number {
+  return 2 * longest + 16 * RUN_WINDOW;
 }
 
 /** The character `k` places from `start` in `buf`, read `unit` bytes a character (1 for UTF-8, 2 for UTF-16LE), undefined past either end. */

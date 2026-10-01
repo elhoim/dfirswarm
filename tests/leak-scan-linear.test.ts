@@ -8,8 +8,10 @@
  * - on random small packages it finds exactly what the old word-by-word
  *   search found (that search is kept below as the reference): text, bytes,
  *   UTF-16, JSON escapes, case, the short-word rule, binary files, digests;
- * - a word across a window boundary is found, and a short word whose longer
- *   run continues past the boundary is still judged by its context;
+ * - a word across a window boundary is found, and a short word is judged
+ *   only where its context is whole: a window's edge that cuts the run
+ *   making it something else (a hash, a longer number) never makes it a hit
+ *   (which refused a redacted package), and a lone one at the edge is found;
  * - a 64 MiB synthetic log with as many words and digests as that package
  *   had is scanned within a bound the old search could not meet (it took
  *   minutes for this much), and only the planted words are found.
@@ -21,7 +23,7 @@ import { closeSync, lstatSync, openSync, readdirSync, readSync, writeSync } from
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
-import { leakScan, SCAN_WINDOW, type LeakHit, type ScanToken } from "../scripts/package-tools.ts";
+import { leakScan, SCAN_WINDOW, scanOverlap, type LeakHit, type ScanToken } from "../scripts/package-tools.ts";
 import { MultiMatch } from "../scripts/multi-match.ts";
 
 const dirs: string[] = [];
@@ -210,17 +212,57 @@ function logFile(path: string, size: number, planted: Array<[number, string]>): 
   }
 }
 
-test("a word across a window boundary is found; a short word's run past it still decides", async () => {
+test("a word across a window boundary is found", async () => {
   const d = await mkdtemp(join(tmpdir(), "leak-edge-"));
   dirs.push(d);
   const W = SCAN_WINDOW;
   const long = "Kq7-vault-recovery-phrase-41d2";
+  logFile(join(d, "stderr.log"), W + 4096, [[W - 10, ` ${long} `]]);
+  const hits = leakScan(d, [{ token: long, seq: 7 }]).hits.map((h) => [h.path, h.entry, h.as]);
+  assert.deepEqual(hits, [["stderr.log", 7, "text"]]);
+});
+
+/** A file of `size` bytes of plain words (no digit, no hex run of note), `planted` written at their offsets; `binary` puts a NUL at the start of each window so every window is read as bytes. */
+function plainFile(path: string, size: number, planted: Array<[number, string | Buffer]>, binary = false): void {
+  const block = Buffer.from("the quick brown fox jumps over the lazy dog, then it rests a while\n".repeat(1024));
+  const fd = openSync(path, "w");
+  try {
+    for (let off = 0; off < size; off += block.length) writeSync(fd, block, 0, Math.min(block.length, size - off), off);
+    if (binary) for (let off = 0; off < size; off += SCAN_WINDOW) writeSync(fd, Buffer.from([0]), 0, 1, off + 1);
+    for (const [at, what] of planted) {
+      const b = Buffer.isBuffer(what) ? what : Buffer.from(what);
+      writeSync(fd, b, 0, b.length, at);
+    }
+  } finally {
+    closeSync(fd);
+  }
+}
+
+test("a short word is judged only where its context is whole: a window's edge never cuts the run that makes it something else", async () => {
+  const W = SCAN_WINDOW;
   const pin = "4821";
-  // The long word straddles the boundary; the PIN sits right before it as the start of a hex run that continues past it.
-  logFile(join(d, "stderr.log"), W + 4096, [[W - 10, ` ${long} `], [W - 200, ` ${pin}abcdef0123456789abcdef `]]);
-  const tokens: ScanToken[] = [{ token: long, seq: 7 }, { token: pin, seq: 8 }];
-  const hits = leakScan(d, tokens).hits.map((h) => [h.path, h.entry, h.as]);
-  assert.deepEqual(hits, [["stderr.log", 7, "text"]], "the long word across the boundary, never the PIN inside a hex run");
+  // The PIN's longest form is its UTF-16 (8 bytes): window 0 ends at W + overlap.
+  const end0 = W + scanOverlap(Buffer.byteLength(pin, "utf16le"));
+  const HEX = "abcdef0123456789abcdef";
+  const cases: Array<{ name: string; planted: Array<[number, string]>; hit: string | null; binary?: boolean }> = [
+    // Fable's four, and the lone word that must still be found at the edge.
+    { name: "starts-a-hex-run-past-the-end", planted: [[end0 - 10, ` ${pin}${HEX} `]], hit: null },
+    { name: "a-digit-just-past-the-end", planted: [[end0 - 5, ` ${pin}9 `]], hit: null },
+    { name: "ends-a-hex-run-from-the-window-before", planted: [[W - HEX.length - 1, ` ${HEX}${pin} `]], hit: null },
+    { name: "the-same-run-inside-one-window", planted: [[5000, ` ${pin}${HEX} `]], hit: null },
+    { name: "alone-at-the-end", planted: [[end0 - 5, ` ${pin} `]], hit: "text" },
+    { name: "alone-at-the-next-start", planted: [[W - 1, ` ${pin} `]], hit: "text" },
+    { name: "bytes-a-digit-just-past-the-end", planted: [[end0 - 5, ` ${pin}9 `]], hit: null, binary: true },
+    { name: "bytes-ends-a-hex-run-from-the-window-before", planted: [[W - HEX.length - 1, ` ${HEX}${pin} `]], hit: null, binary: true },
+    { name: "bytes-alone-at-the-end", planted: [[end0 - 5, ` ${pin} `]], hit: "bytes", binary: true },
+  ];
+  for (const c of cases) {
+    const d = await mkdtemp(join(tmpdir(), "leak-cut-"));
+    dirs.push(d);
+    plainFile(join(d, `${c.name}.log`), W + 64 * 1024, c.planted, c.binary);
+    const hits = leakScan(d, [{ token: pin, seq: 8 }]).hits.map((h) => h.as);
+    assert.deepEqual(hits, c.hit ? [c.hit] : [], c.name);
+  }
 });
 
 test("a 64 MiB log with 2,700 words and 1,600 digests is scanned within the bound, and only the planted ones are found", async () => {
