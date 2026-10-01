@@ -201,6 +201,10 @@ class Catalog:
         self.index, self.notes, self.coverage, self.plan = [], [], [], []
         self.preparations = []
         self.collections = []
+        # What a recipe's detect said the job images lack for an input (a
+        # kernel's symbol table): catalog/missing.json, and a kickoff stops on
+        # it unless the operator lets it go on (swarm.sh start --allow-missing-symbols).
+        self.missing = []
         self.objects = {}
         for r in self.recipes:
             self.objects.setdefault(r["object"], 0)
@@ -288,9 +292,16 @@ class Catalog:
             rc, verdict = run_limited(recipe_argv(r, "detect", target, ["--probe-out", probe]), 300, os.path.join(probe, "detect.stderr"))
             drop_if_empty(os.path.join(probe, "detect.stderr"))
             try:
-                why = str(json.loads(verdict.strip().splitlines()[-1]).get("why", "")) if verdict.strip() else ""
+                answer = json.loads(verdict.strip().splitlines()[-1]) if verdict.strip() else {}
+                why = str(answer.get("why", ""))
             except Exception:
-                why = ""
+                answer, why = {}, ""
+            # A recipe may say what the image lacks to read this input, in its
+            # own words; the census keeps each, whole, and knows no kind.
+            for m in (answer.get("missing") if isinstance(answer, dict) and isinstance(answer.get("missing"), list) else []):
+                if isinstance(m, dict) and str(m.get("what", "")).strip():
+                    self.missing.append({"input": rel_raw, "recipe": r["id"], "kind": str(m.get("kind") or "data"),
+                                         "what": str(m["what"]), **({"identity": m["identity"]} if isinstance(m.get("identity"), dict) else {})})
             if rc == 0:
                 applied.append(r)
                 rmdir_quiet(probe)
@@ -391,6 +402,11 @@ class Catalog:
                 json.dump({"recipes": self.plan, "collections": self.collections, "preparations": self.preparations}, fh, indent=2, ensure_ascii=False)
                 fh.write("\n")
             self.add_index("plan.json", "what the job service runs once the run is up: recipe, input, target; and every broad extraction that applies (preparations)")
+        if self.missing:
+            with open(os.path.join(self.out, "missing.json"), "w", encoding="utf-8") as fh:
+                json.dump({"missing": self.missing}, fh, indent=2, ensure_ascii=False)
+                fh.write("\n")
+            self.add_index("missing.json", "what the run's images lack to read an input, as each recipe said it: input, recipe, kind, what")
         objects = "".join("%d %s(s), " % (n, obj) for obj, n in self.objects.items())
         lines = ["Summary: %s%d catalog file(s); %d input file(s): %d catalogued, %d partial, %d planned, %d segment(s) of a set, %d not catalogued, %d not probed"
                  % (objects, len(self.index), len(self.coverage), self.count("catalogued"), self.count("partial"), self.count("planned"),
@@ -398,6 +414,9 @@ class Catalog:
         if segments_skipped:
             lines += ["", "Segmented images: %d further segment(s) belong to the set(s) catalogued above (%s) and were not catalogued separately — libewf and The Sleuth Kit read the whole set from the first segment, so pass that one to every tool."
                       % (segments_skipped, ", ".join(segment_sets))]
+        if self.missing:
+            lines += ["", "Missing from the images (`catalog/missing.json`): what a recipe said the run's images lack to read an input. It is a limit of the tools, not an absence in the evidence:"]
+            lines += ["- `%s` (%s): %s" % (shown(m["input"]), m["recipe"], shown(m["what"])) for m in self.missing]
         lines += ["", "Coverage: every input has a row in `catalog/coverage.tsv` with its status and why. An input that is not catalogued has no file list or timeline here: open it with other tools. Missing from the catalog is not missing from the evidence."]
         if self.plan_only and self.count("planned"):
             lines += ["", "Being built: the inputs marked planned are catalogued by the job service once the run is up; each recipe's result is a generation under `catalog/gen/`, each change a new numbered revision under `catalog/revisions/`, announced on the board."]

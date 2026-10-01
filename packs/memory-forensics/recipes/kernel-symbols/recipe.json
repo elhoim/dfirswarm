@@ -1,0 +1,55 @@
+{
+  "id": "kernel-symbols",
+  "version": "1.0.0",
+  "description": "Which Windows kernel a memory image runs (PDB name, GUID, age, as Volatility's automagic names it) and whether this image holds its symbol table; offline, nothing fetched. A missing table is said plainly and stops a kickoff unless --allow-missing-symbols.",
+  "object": "memory image",
+  "order": 10,
+  "min_bytes": 67108864,
+  "suffixes": [
+    ".mem",
+    ".dmp",
+    ".vmem",
+    ".raw",
+    ".lime",
+    ".crash",
+    ".dump",
+    ".core",
+    "hiberfil.sys",
+    "pagefile.sys"
+  ],
+  "magic": [
+    {
+      "offset": 0,
+      "hex": "5041474544553634"
+    },
+    {
+      "offset": 0,
+      "hex": "5041474544554d50"
+    },
+    {
+      "offset": 0,
+      "hex": "48494252"
+    },
+    {
+      "offset": 0,
+      "hex": "68696272"
+    }
+  ],
+  "runtime": "python3",
+  "entry": "run.py",
+  "auto": [
+    "kickoff",
+    "derived"
+  ],
+  "limits": {
+    "seconds": 1200
+  },
+  "outputs": [
+    "kernel.json",
+    "windows.info.txt",
+    "index.tsv",
+    "coverage.json"
+  ],
+  "covers": "The identity of a Windows memory image's kernel (the PDB Volatility's automagic names) and whether the image holds its symbol table, from one offline windows.info. Not covered: what any other plugin reports, Linux and macOS images, and a capture Volatility cannot stack a Windows layer on.",
+  "sha256": "cfb1920f9076fbb0df35c13aac73471a05190e4aa5879200f2d5604e701eeee9"
+}

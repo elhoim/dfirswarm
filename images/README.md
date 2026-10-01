@@ -41,6 +41,9 @@ launcher and probe scripts are written into each VM by the SDK.
 
 ```bash
 docker build -f images/base.Dockerfile -t dfirswarm-base:dev-arm64 images
+# memory and full only: the PDBs of the curated kernels, into the host's store,
+# accepting their supplier's terms (see "Symbol tables" below)
+scripts/swarm.sh symbols fetch --accept-terms --accepted-by "Your Name"
 python3 images/recipe.py build memory --out /tmp/img-memory --base dfirswarm-base:dev-arm64 --allow-nonredistributable
 docker build -t dfirswarm-memory:dev-arm64 /tmp/img-memory
 docker save dfirswarm-memory:dev-arm64 -o /tmp/memory.tar
@@ -53,7 +56,13 @@ compiles a C program, finds an AES key schedule planted in random bytes (one of
 them past 4 GiB) and round-trips a message through steghide, for each of those
 programs the image holds; the `images` workflow runs it on every profile it
 builds. The memory image downloads 840 MB of symbol tables and indexes them
-once, which adds several minutes to its build. A kickoff with `--pack
+once, which adds several minutes to its build; with `DFIRSWARM_DATA_DIR` (or
+`--data-from DIR`, or `$DFIRSWARM_HOME/data` when it exists) naming a directory
+that holds a copy, by its sha256 or its file name, a rebuild takes it from there
+and downloads nothing (the copy is
+bound into the build step, never copied into a layer). `--symbol-set` chooses
+which symbol sets the image takes: `curated,broad` (the default), one of
+them, or `none`. A kickoff with `--pack
 memory-forensics` then runs its jobs in `dfirswarm-memory:dev-<arch>` on its
 own, while its agents boot the base; name any other with `--image`.
 
@@ -151,7 +160,11 @@ anything is unpacked, installed or built.
   Debian's four pinned patches (files over 4 GB among them), built with `make`
   on every architecture.
 - `install.data` — a file a program reads and that is not a program: a
-  symbol pack, a rule set. One url and its sha256 for every architecture, put
+  symbol pack, a rule set. One entry, a list of them, or `{"list": FILE}`: a
+  file of the pack holding a `template` (an entry with `{field}` placeholders)
+  and `entries` (one object of fields each), expanded entry by entry, so a
+  curated list carries identities and hashes and no copy of the same install
+  steps. One url, its sha256 and its size (`bytes`, a download stops past it) for every architecture, put
   under the name it has at its url (or `file`) in `into` inside the directory
   of a Python package of the image's venv (`package`), where the program looks
   for it. `warm` is a command run once the file is there, for a program that
@@ -170,8 +183,23 @@ anything is unpacked, installed or built.
   pinned it on purpose, and an image without it would say the program is there
   while what it reads is not. `recipe.py build --allow-missing-data` goes on
   without it; the image then records it under `not_installed.data`, and a
-  kickoff says so as a WARN. Volatility's Windows symbol tables come this way
-  (next section).
+  kickoff says so as a WARN. An entry may name a `set`; `recipe.py build
+  --symbol-set` leaves out the sets it does not name, and the image records
+  each under `omitted.data`, apart from a failure (a kickoff says that too).
+  An entry with `commands` is a source the build turns into what the program
+  reads: fetched into a work directory, each command run (an argument list,
+  `{file}` the source, `{dir}` where the program looks), every file in
+  `outputs` then required, hashed and, with `canonical`, compared by its
+  content with the pinned `canonical_sha256` (json-canon/1, below); `converter`
+  pins the version of the package that converts, `keep: false` drops the
+  source. An entry with `acquire: "operator"` is never fetched by the build:
+  it comes from the operator's store (`--symbols-from`) with the operator's
+  recorded acceptance of its terms, or the build stops before Docker. The
+  record keeps source and outputs apart: `source` (url, sha256, bytes, where
+  it came from), `transform` (the commands, the converter, the package's and
+  Python's versions), `outputs` (path, sha256, bytes, content hash and rule,
+  identity), `distribution_policy`, `acceptance`. Volatility's Windows symbol
+  tables come this way (next section).
 - An apt line with `-t bookworm-backports` takes its package from the image's
   own Debian backports, added from the mirror the image already uses and from
   nowhere else: Suricata.
@@ -193,59 +221,111 @@ today.
 Volatility 3 helps a memory examination a great deal, and its licence (the
 Volatility Software License 1.0) does not let this project distribute it with
 its work. So we do not: the memory and `full` images hold it because their
-build installs it (`pip install volatility3`, `packs/memory-forensics`), the
-image that results is built by whoever runs it, and its label, `image.json` and
-NOTICE say it is not for redistribution. **No image that carries
+build installs it (`pip install volatility3==2.28.2`, `packs/memory-forensics`,
+pinned because a table's content hash holds for one converter version), the
+image that results is built by whoever runs it, and its label, `image.json`
+and NOTICE say it is not for redistribution. **No image that carries
 `install.data` (the Volatility symbol tables) is pushed from any workflow of
 ours, the pro one included**: we never distribute Volatility or its data,
 whoever runs the images builds their own, and Pro builds those per customer
 (the roadmap's "Images for programs we cannot redistribute"). The `images`
-workflow builds and boots, never pushes.
+workflow builds and boots, never pushes. Each data entry says
+`distribution_policy: "local-only"`, and the image's label
+`dev.dfirswarm.data` names what it carries, so a pusher can refuse it by
+inspecting the image. A label is not a legal clearance.
 
-A Windows plugin needs the symbols of the kernel it reads, and Volatility
-fetches them from Microsoft the first time it sees the kernel: not in a VM
-with no network. The memory and `full` images therefore carry the Volatility
-Foundation's Windows symbol pack, pinned as data in the memory pack
-(`install.data` of `vol`):
+### Symbol tables
 
-- **What it is.** `windows.zip` from `downloads.volatilityfoundation.org`, a
-  bundle of 2019 (last changed 2019-10-16), 839,727,133 bytes. Its listing has
-  3,019 entries: 3,014 table files and five directories; `vol -q isfinfo`
-  reports 3,014 tables from it. The build checks its sha256 (the one the
-  Foundation publishes in its `SHA256SUMS`), puts it as named in the venv's
-  `volatility3/symbols/` and lists it once (`vol -q isfinfo`). Volatility indexes every table it finds the first time it
-  runs, which took 3 minutes 22 seconds for this pack on a fast machine and
-  would be repeated in every VM; the index is built at image build time and a
-  fresh container lists the pack in well under a second.
-- **What it covers.** The Windows builds of 2019 and earlier, not every one. It
-  is a bundle of 2019: a kernel from a later Windows build is not in it, and
-  `vol -q isfinfo` says which are. For a kernel it lacks, the seat does not
-  fetch anything: a run under the CTF case policy grants no sockets, and
-  [ADR 0012](../docs/adr/0012-a-dynamic-network-decided-by-rules-and-made-on-the-host.md)
-  has the operator's rules decide what a run may reach. The seat asks through a
-  lead it closes `needs_operator`, naming the PDB, the GUID and the age
-  (`ntkrnlmp.pdb`, 32 hexadecimal digits, a number). The operator makes the
-  table on a connected machine (`pdbconv.py`, in Volatility) and supplies it to
-  the run (`swarm.sh tool-supply <run> add <dir> --source …`, or `material
-  add`), and the seat points Volatility at it with `-s`. For a table every run
-  of an image needs, add it in a layer of your own under the venv's
-  `volatility3/symbols/windows/`. A run that finds no table says so; the memory
-  pack's `triage/volatility` skill makes it a limitation, not a silent fetch.
-- **Its licence, in the NOTICE.** Our reading, not legal advice. The pack
-  ships no licence text. The Volatility Software License 1.0
-  (<https://www.volatilityfoundation.org/license/vsl-v1.0>) says its "Software"
-  includes "any data (such as operating system profiles or configuration
-  information)" provided with the software, and we read the tables as such
-  data. They are generated from Microsoft's public symbol files, whose
-  Microsoft Symbol Server licence terms of June 2022
-  (<https://learn.microsoft.com/en-us/legal/windows-sdk/microsoft-symbol-server-license-terms>)
-  allow use "solely for purposes of performance, security or functional
-  debugging and testing of your software as used with Microsoft software, or as
-  otherwise authorized by Microsoft" and say you may not "share, publish, rent,
-  or lease the Symbol Items, or provide the Symbol Items as stand-alone
-  offerings for others to use". Whether examining evidence is within that use
-  is not ours to say: those terms may bear on use as well as on
-  redistribution. The NOTICE of the image has both clauses in full.
+A Windows plugin needs the symbol table of the exact kernel it reads, and
+Volatility would fetch the PDB from Microsoft the first time it sees a kernel:
+not in a VM with no network, and never by a seat. The memory and `full` images
+carry two sets, pinned in the memory pack (`install.data` of `vol`):
+
+- **curated**: the exact kernels `packs/memory-forensics/requires/symbols.windows.json`
+  lists. Each entry is a public identity (PDB name, GUID, age) with the PDB's
+  sha256 and size, the content hash the table converted from it must have, the
+  converter version that hash holds for, and a note: identifiers and hashes,
+  no Microsoft file. Acquisition is two steps, the first the operator's own:
+  1. `scripts/swarm.sh symbols fetch --accept-terms --accepted-by NAME [--from DIR]`
+     puts each PDB into the host's store,
+     `$DFIRSWARM_HOME/symbols/blobs/sha256/<sha256>` (refused inside a synced
+     folder), held to its pinned sha256 and size, and writes into the store's
+     `manifest.json` who accepted Microsoft's symbol-server terms, when, for
+     which bytes. Without `--accept-terms` and a name (or the one enrolled
+     examiner) it refuses. `--from DIR` takes a copy you already hold;
+     without it each is downloaded from `msdl.microsoft.com`, HTTPS on every
+     hop, at most two redirects and only to `*.blob.core.windows.net` (the
+     signed address is never logged), no more bytes than pinned, within ten
+     minutes.
+  2. `recipe.py build` reads the store (`--symbols-from`, by default
+     `$DFIRSWARM_HOME/symbols`) and stops before Docker when a curated PDB, or
+     the acceptance of its terms, is not there. The build converts each PDB
+     with Volatility's own `pdbconv` inside the image, with no network, checks
+     the table's content against the pinned hash, puts it where Volatility
+     looks (`…/volatility3/symbols/windows/<pdb>/<GUID>-<age>.json.xz`),
+     checks that `vol -q isfinfo` identifies it by that exact identity, and
+     drops the PDB. `image.json` records the source, the transform, the table
+     (its bytes' sha256, its content hash, its identity) and the acceptance.
+  A table's bytes change at every conversion (`pdbconv` writes the time it ran
+  into `metadata.producer.datetime`), so the pin is on its content:
+  **json-canon/1** decompresses it (xz or gzip), parses the JSON refusing a
+  duplicate key and a non-finite number, removes the paths the pin names (that
+  one field) and hashes `json.dumps(sort_keys=True, ensure_ascii=True)` with
+  the default separators, UTF-8, no trailing newline (`images/install.py`,
+  `canonical_sha256`). A kernel a case needs is one more entry in the list.
+- **broad**: the Volatility Foundation's `windows.zip` from
+  `downloads.volatilityfoundation.org`, a bundle of 2019 (last changed
+  2019-10-16), 839,727,133 bytes; `vol -q isfinfo` lists what it holds. The
+  build checks its sha256 (the one the Foundation publishes in its
+  `SHA256SUMS`), puts it as named in the venv's `volatility3/symbols/` and
+  lists it once (`vol -q isfinfo`). Volatility indexes every table it finds
+  the first time it runs, which took 3 minutes 22 seconds for this pack on a
+  fast machine and would be repeated in every VM; the index is built at image
+  build time and a fresh container lists the pack in well under a second. It
+  covers the Windows builds of 2019 and earlier, not every one of them.
+
+`recipe.py build --symbol-set` chooses: `curated,broad` by default, either one,
+or `none`. A set left out is recorded as omitted (`image.json` `omitted.data`,
+`tools.md`), never as a failure, and a kickoff says so. CI never fetches a
+Microsoft PDB and never builds the curated set: a pull request builds with
+`none` and checks the omission, the weekly boot with `broad`; the curated
+path, the canonical hash and the refusals are tested with small synthetic
+fixtures (`tests/recipe.test.sh`, `tests/symbols.test.sh`).
+
+**A kernel the image lacks.** The memory pack's `kernel-symbols` recipe asks
+Volatility, offline, which kernel each memory input runs (the PDB its
+automagic names) and whether the image holds its table. With `--catalog`, a
+table the image lacks is written to `catalog/missing.json`, said in the
+catalogue's README, and is a BLOCKER at `start --check` (which runs the
+census's detect in a throwaway VM) and at the start, unless
+`--allow-missing-symbols`: the run then goes on with what needs no kernel
+table (strings, YARA, carving), and every seat reads what is missing. A seat
+fetches nothing: a run under the CTF case policy grants no sockets, and
+[ADR 0012](../docs/adr/0012-a-dynamic-network-decided-by-rules-and-made-on-the-host.md)
+has the operator's rules decide what a run may reach. It closes a lead
+`needs_operator` naming the PDB, the GUID and the age; the operator adds the
+kernel to the curated list and rebuilds, or makes the table and supplies it
+to the run (`swarm.sh tool-supply <run> add <dir> --source …`), and the seat
+points Volatility at it with `-s`.
+
+**Their licences, in the NOTICE.** Our reading, not legal advice. Each data
+entry's NOTICE lines name its supplier, source, terms, derivation and
+restriction. The Volatility Software License 1.0
+(<https://www.volatilityfoundation.org/license/vsl-v1.0>) says its "Software"
+includes "any data (such as operating system profiles or configuration
+information)" provided with the software, and we read the Foundation's tables
+as such data. Every table, the Foundation's and ours, is generated from
+Microsoft's public symbol files, whose Microsoft Symbol Server licence terms of
+June 2022
+(<https://learn.microsoft.com/en-us/legal/windows-sdk/microsoft-symbol-server-license-terms>)
+allow use "solely for purposes of performance, security or functional
+debugging and testing of your software as used with Microsoft software, or as
+otherwise authorized by Microsoft" and say you may not "share, publish, rent,
+or lease the Symbol Items, or provide the Symbol Items as stand-alone
+offerings for others to use". Microsoft's terms grant use for debugging and
+testing your software; whether examining a third party's memory image falls
+inside that is not decided here. The NOTICE of the image has both clauses in
+full.
 
 Other small programs the packs now name, for what a run asked for and no image
 had: `steghide` (the base pack, so in every image), `aeskeyfind` (memory),
@@ -290,10 +370,10 @@ An examiner's machine with no route out can still run VMs, once the image is
 on it: `msb save <ref> -o image.tar` (or `docker save`) on a machine that has
 it, carry the file across, `msb load -i image.tar`, and start with `--image
 <ref>`. The kickoff then finds the image and pulls nothing. Two things still
-want the network: the Windows symbol tables of a kernel newer than the 2019
-bundle the memory image carries (Volatility would fetch them from Microsoft the
-first time a kernel is seen; make them on a connected machine and supply them to
-the run, or build them into a layer of your own under the venv's
-`volatility3/symbols/`) and capa's rules (`capa --rules` with a directory you
-carried across). A model the run calls has to be reachable too, or local
+want the network: the Windows symbol table of a kernel neither the curated list
+nor the 2019 bundle holds (fetch its PDB on a connected machine, carry it across,
+`swarm.sh symbols fetch --from DIR --accept-terms`, and rebuild; or make the
+table there and supply it to the run) and capa's rules (`capa --rules` with a
+directory you carried across). A rebuild on a machine with no route out takes
+the Foundation's bundle from `DFIRSWARM_DATA_DIR`. A model the run calls has to be reachable too, or local
 (`--local-only`).

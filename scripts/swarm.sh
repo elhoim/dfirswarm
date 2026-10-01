@@ -105,7 +105,7 @@ Commands:
   context <id>       Each agent's context history from the trace: peaks, lines crossed, hand-offs, summary cost; metrics <id> the process, from its registers
   report <id>        One self-contained report.html; --pdf prints it, --lint checks its citations
   package <id>       Hand a run over: report, board, trace, hashes (--sign signs it)
-  examiner machine review releases timestamp rerun replay verify certify export hold release purge image-for   After a run: adoption and releases, checks, reruns, a rule change replayed, export, retention; the image packs boot (help <command>)
+  examiner machine review releases timestamp rerun replay verify certify export hold release purge image-for symbols   After a run: adoption and releases, checks, reruns, a rule change replayed, export, retention; the image packs boot, and the symbol files its build converts (help <command>)
   tools <id>         What the run forged; --save DIR keeps it for the next run; --candidates ranks the code agents wrote into jobs
   say <id> "<msg>"   Post as the examiner; cap|extend <id> its caps (extend lifts a cap's pause); lead <id> list|note its leads; question <id> add|list … asks it one; net <id> list|grant|deny|revoke its network; tool-supply <id> add PATH --why W --source S hands it a program no image holds, with its provenance
   stop <id>          Stop a run (stopped, never completed); pause|unpause <id> holds it and lifts a pause; resume <id> [--question TEXT] continues one that ended, on its own chains
@@ -175,7 +175,7 @@ swarm.sh start — prepare a sandbox, write the contract, launch the agents.
       [--compact-prompt-file FILE] [--compact-model P/ID] [--inbox-page-chars N]
       [--allow-install] [--no-pypi] [--no-read DIR]... [--accept-signer-exposure]
       [--tools-from DIR] [--inputs DIR]... [--inputs-enforce auto|on|off]
-      [--inputs-max-mb N] [--inputs-max-files N] [--catalog] [--toolbox SETS|auto|off] [--toolbox-required]
+      [--inputs-max-mb N] [--inputs-max-files N] [--catalog] [--allow-missing-symbols] [--toolbox SETS|auto|off] [--toolbox-required]
       [--quarantine] [--case-id ID] [--examiner NAME] [--allow-host HOST]...
       [--no-netguard] [--local-only] [--playwright] [--probe-violation]
       [--network closed|dynamic|open] [--policy standard|live_adversary|internal|ctf]
@@ -388,6 +388,15 @@ Evidence
                       body file and MAC timeline for a disk image; process, command
                       line, network and injection lists for a memory image; and a
                       coverage row for every input, catalogued or not, with why.
+  --allow-missing-symbols
+                      With --catalog: start although a recipe says the run's
+                      image lacks what it needs to read an input, a memory
+                      image's kernel symbol table above all (catalog/missing.json,
+                      the census's detect). Without it that is a BLOCKER, at the
+                      start and at start --check: Volatility's Windows plugins
+                      cannot read the image offline. With it the run goes on with
+                      what needs no kernel table (strings, YARA, carving), and the
+                      catalogue says what is missing.
   --toolbox SETS      Which tools to check for and record in toolbox.json and
                       SWARM.md: dfir, crypto, linux, comma-separated. auto picks
                       dfir when --catalog is on; off checks nothing.
@@ -3310,6 +3319,9 @@ cmd_start() {
   # only one, for one set), and says whether there is evidence at all.
   local inputs_dirs=() inputs_names=()
   local allow_hosts="" tools_from="" catalog=0 toolbox="off" toolbox_required=0 quarantine=0 cap_per_agent="" cap_per_agent_tokens="" case_id="" examiner=""
+  # A memory input whose kernel table the image lacks stops the start
+  # (catalog/missing.json) unless the operator lets the run go on without it.
+  local allow_missing_symbols=0
   local packs=""
   local allow_synced=0 custody_timeout="${SWARM_CUSTODY_TIMEOUT:-14400}"
   local notify_cmd="" notify_targets="" allow_root=0 verify_copy=1 ledger_from="" synced_allowed_by="" disk_encryption="unknown" model_gateway=0
@@ -3432,6 +3444,7 @@ cmd_start() {
         [[ -z "$inputs_image" ]] || { echo "BLOCKER: --inputs-image takes one image; it was given twice ($inputs_image, ${2:-})." >&2; exit 2; }
         inputs_image="$2"; shift 2 ;;
       --catalog) catalog=1; shift ;;
+      --allow-missing-symbols) allow_missing_symbols=1; shift ;;
       --toolbox) toolbox="$2"; shift 2 ;;
       --tools-from) tools_from="$2"; shift 2 ;;
       # Repeated, the packs add up (as in image-for): a second --pack used to
@@ -4754,6 +4767,36 @@ console.log(r.ok ? "" : r.reason);' "$_gp" "$_gk" 2>/dev/null || echo "could not
       signer_guard "$(predicted_write_guard_mode "$write_guard")" "$accept_signer_exposure" "$custody_sign_key" \
         "rw:$sandbox" "rw:$(pi_agent_dir)" "${sg_keep[@]}" >/dev/null || exit 2
     fi
+    # The census's detect over the inputs, as the start runs it, in a
+    # throwaway VM and a directory removed after: a recipe that says the image
+    # lacks what an input needs (a memory image's kernel symbol table) is the
+    # start's BLOCKER, so the check says it too. Nothing of the run is written.
+    if [[ "$catalog" -eq 1 && "$isolation" == "microvm" && "$start_agents" -eq 1 && ${#inputs_dirs[@]} -gt 0 && -n "$pack_dirs" ]]; then
+      local cimg="${job_image:-$vm_image}" ctmp ci creal cargs=() cpd
+      if [[ -z "$(vm_cli image-digest --image "$cimg" 2>/dev/null | jq -r '.digest // empty' 2>/dev/null)" ]]; then
+        echo "Census:       not run by this check: $cimg is not on this host (the start runs it, and stops on a symbol table the image lacks)"
+      else
+        ctmp="$(mktemp -d "${TMPDIR:-/tmp}/dfs-check-census.XXXXXX")"
+        [[ ${#inputs_dirs[@]} -gt 1 ]] && mkdir "$ctmp/inputs"
+        for ((ci = 0; ci < ${#inputs_dirs[@]}; ci++)); do
+          creal="$(cd "${inputs_dirs[$ci]}" && pwd -P)"
+          cargs+=(--evidence "$creal")
+          if [[ ${#inputs_dirs[@]} -eq 1 ]]; then ln -s "$creal" "$ctmp/inputs"; else ln -s "$creal" "$ctmp/inputs/${inputs_names[$ci]}"; fi
+        done
+        while IFS= read -r cpd; do [[ -n "$cpd" ]] && cargs+=(--pack-dir "$cpd"); done <<<"$pack_dirs"
+        [[ -n "$vm_memory" ]] && cargs+=(--memory "$vm_memory")
+        if vm_cli catalog --image "$cimg" --sandbox "$ctmp" --cpus "$vm_cpus" --run check --plan-only "${cargs[@]}" >/dev/null 2>&1; then
+          if [[ -s "$ctmp/catalog/missing.json" ]]; then
+            catalog_missing_verdict "$ctmp/catalog/missing.json" "$allow_missing_symbols" || { rm -rf "$ctmp"; exit 2; }
+          else
+            echo "Census:       the recipes' detect found nothing $cimg lacks to read the inputs (a throwaway VM; nothing kept)"
+          fi
+        else
+          echo "WARN: this check could not run the census in $cimg; the start runs it, and stops on a symbol table the image lacks." >&2
+        fi
+        rm -rf "$ctmp"
+      fi
+    fi
     echo "Check:        the start would go ahead ($isolation, $n agent(s), sandbox $sandbox); nothing was written"
     exit 0
   fi
@@ -4999,6 +5042,11 @@ console.log(r.ok ? "" : r.reason);' "$_gp" "$_gk" 2>/dev/null || echo "could not
     else
       chmod -R a-w "$sandbox/catalog" 2>/dev/null || true
     fi
+  fi
+  # What the census said the image lacks to read an input (a kernel's symbol
+  # table): a BLOCKER unless the operator lets the run go on without it.
+  if [[ "$catalog" -eq 1 && -z "$resume_of" && -s "$sandbox/catalog/missing.json" ]]; then
+    catalog_missing_verdict "$sandbox/catalog/missing.json" "$allow_missing_symbols" || exit 2
   fi
   if [[ "$isolation" == "microvm" && "$jobs" -eq 1 && "$start_agents" -eq 1 && ! ( -n "$resume_of" && -f "$sandbox/store/journal.jsonl" ) ]]; then
     # The evidence-work store and its journal, opened by the kickoff (the one
@@ -7303,6 +7351,29 @@ start_netguard_sidecar() {
 
 vm_cli() {
   node --experimental-strip-types --no-warnings "$ROOT/scripts/vm.ts" "$@"
+}
+
+# What the census said the run's images lack to read an input
+# (catalog/missing.json: each line a recipe's own words, the harness knows no
+# format). A missing symbol table is a BLOCKER: a memory image whose kernel the
+# image has no table for cannot be read by Volatility's Windows plugins
+# offline, and a run that finds that out in its first job has started blind.
+# --allow-missing-symbols goes on, said; any other kind is said as a WARN.
+catalog_missing_verdict() { # <missing.json> <allow 0|1>
+  local file="$1" allow="$2" n
+  jq -r '.missing[]? | select(.kind != "symbols") | "WARN: \(.input): \(.what) (\(.recipe))"' "$file" >&2 2>/dev/null || true
+  n="$(jq '[.missing[]? | select(.kind == "symbols")] | length' "$file" 2>/dev/null || echo 0)"
+  [[ "$n" -gt 0 ]] || return 0
+  if [[ "$allow" -eq 1 ]]; then
+    jq -r '.missing[] | select(.kind == "symbols") | "WARN: \(.input): \(.what) (\(.recipe)). Going on without it (--allow-missing-symbols): catalog/missing.json says so to every seat."' "$file" >&2
+    return 0
+  fi
+  jq -r '.missing[] | select(.kind == "symbols") | "BLOCKER: \(.input): \(.what) (\(.recipe))."' "$file" >&2
+  {
+    echo "  Give the image the table: list the kernel in its pack's curated symbol list, fetch its file (scripts/swarm.sh symbols fetch),"
+    echo "  and rebuild the image (images/README.md, \"Symbol tables\"); or start with --allow-missing-symbols to go on with what needs no kernel table."
+  } >&2
+  return 1
 }
 
 vm_arch() {
@@ -11204,6 +11275,25 @@ EOF
 A question's attachment given as a file (question add --attach FILE) is supplied the same way.
 EOF
       ;;
+    symbols) cat <<'EOF'
+  symbols fetch [--from DIR] [--name TEXT]... [--packs DIR] [--store DIR]
+                                                  put the files the packs list for the operator to fetch (the PDBs of
+                                                  the curated Windows kernels, packs/*/requires/symbols.*.json) into
+                                                  the host's symbol store, $DFIRSWARM_HOME/symbols/blobs/sha256/<sha256>,
+                                                  each held to its pinned sha256 and size. --from DIR takes them from a
+                                                  directory you already have (every file of the pinned size is hashed;
+                                                  nothing is downloaded); without it each is downloaded from its url,
+                                                  HTTPS on every hop, redirects only to the hosts its list names, no
+                                                  more bytes than pinned, within a time limit, after the supplier's
+                                                  terms are printed: fetching is your acceptance of them. Refused when
+                                                  the store is in a synced folder. --name keeps the entries whose name
+                                                  or version holds TEXT (a GUID).
+  symbols list [--json] [--packs DIR] [--store DIR]
+                                                  every such file, held or missing
+Then images/recipe.py build reads the store (--symbols-from, by default this one) and the build converts the
+files with no network. Each fetch is a line of the store's fetched.jsonl. images/README.md, "Symbol tables".
+EOF
+      ;;
     tool-supply) cat <<'EOF'
   tool-supply <id> add PATH --why W --source TEXT [--built TEXT] [--sha256 HEX]... [--for R-n|L-n]... [--as ID]
                                                   a program no image holds, for a running (or stopped) run: a file or a
@@ -11257,6 +11347,8 @@ main() {
     net) [[ "${2:-}" == list ]] || operator_audit "$cmd" "$@" ;;
     # An act on an operator request, and added evidence or material, change the run; list and show read it.
     requests|evidence|material|tool-supply) [[ "${2:-}" == list || "${2:-}" == show ]] || operator_audit "$cmd" "$@" ;;
+    # A fetch is the operator's act of acquiring a supplier's files under its terms; list reads the store.
+    symbols) [[ "${1:-}" == fetch ]] && operator_audit "$cmd" "$@" ;;
   esac
   case "$cmd" in
     start) cmd_start "$@" ;;
@@ -11285,6 +11377,7 @@ main() {
     evidence) cmd_evidence "$@" ;;
     material) cmd_material "$@" ;;
     tool-supply) cmd_tool_supply "$@" ;;
+    symbols) python3 "$ROOT/scripts/symbols.py" "$@" ;;
     netcheck) cmd_netcheck "$@" ;;
     review) cmd_review "$@" ;;
     image-for) cmd_image_for "$@" ;;

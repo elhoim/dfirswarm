@@ -2,6 +2,7 @@
 """Turn packs into image recipes, and say which image a run needs.
 
   recipe.py build PROFILE --out DIR [--base IMAGE] [--packs DIR] [--allow-nonredistributable] [--allow-missing-data]
+                 [--symbol-set curated,broad|curated|broad|none] [--data-from DIR]... [--symbols-from DIR]...
   recipe.py profile-for [--installed DIR]... [--tools-from DIR]... PACK...
                                        the smallest profile that serves these packs
   recipe.py list                       profiles and the packs each resolves to
@@ -75,6 +76,18 @@ each fetched by install.py and refused unless its sha256 is the pinned one:
                      file that cannot be had fails the build even for an
                      optional program (`build --allow-missing-data` goes on
                      without it, and the image records what is missing).
+                     It may be a list, or {"list": FILE}: a template and
+                     entries in a file of the pack, expanded entry by entry.
+                     `set` (curated, broad) is what --symbol-set selects; a
+                     set left out is recorded as omitted. `commands` and
+                     `outputs` convert a source in the build, each output's
+                     content pinned (`canonical`, `canonical_sha256`) for one
+                     `converter` version; `acquire: "operator"` is never
+                     fetched by the build, only taken from the operator's
+                     store (--symbols-from) with the recorded acceptance of
+                     its terms, and the build stops before Docker without it.
+                     Local copies (--data-from, $DFIRSWARM_DATA_DIR) are bound
+                     into the install step, never copied into a layer.
 
 `run` names the interpreter a download's or a source's program needs:
 `python` (the program's own venv, else the image's), or any program the image
@@ -180,6 +193,93 @@ def pack_version(packs, name: str) -> dict:
     return {"version": manifest.get("version", "?"), "seal": seal}
 
 
+# A template's placeholder: {field}, filled from a pinned list's entry.
+PLACEHOLDER = re.compile(r"\{([a-z_][a-z0-9_]*)\}")
+# What recipe.py build --symbol-set may name: the sets a data entry declares.
+SYMBOL_SETS = ("curated", "broad")
+
+
+def fill_template(t, row: dict):
+    """A template with each {field} of row filled in: a string that is one
+    placeholder takes the field's value as it is (a number stays a number);
+    a placeholder row does not name is left for install.py ({file}, {dir})."""
+    if isinstance(t, str):
+        m = PLACEHOLDER.fullmatch(t)
+        if m and m.group(1) in row:
+            return row[m.group(1)]
+        return PLACEHOLDER.sub(lambda m: str(row[m.group(1)]) if m.group(1) in row else m.group(0), t)
+    if isinstance(t, list):
+        return [fill_template(x, row) for x in t]
+    if isinstance(t, dict):
+        return {k: fill_template(v, row) for k, v in t.items()}
+    return t
+
+
+def data_entries(pack: Path, data) -> list:
+    """A program's install.data as a list of entries: one object, a list of
+    them, or {"list": FILE}, a file of the pack holding a `template` (an
+    install.data entry with {field} placeholders) and `entries` (one object of
+    fields each), expanded into one entry per row. The harness knows the
+    template's kinds, never what the fields mean."""
+    if data is None:
+        return []
+    out = []
+    for item in data if isinstance(data, list) else [data]:
+        if isinstance(item, dict) and "list" in item:
+            root = pack.resolve()
+            path = (pack / str(item["list"])).resolve()
+            if not str(path).startswith(f"{root}/"):
+                raise SystemExit(f"recipe: {pack.name}: data list {item['list']} is not inside the pack")
+            doc = json.loads(path.read_text())
+            for row in doc.get("entries") or []:
+                out.append({**fill_template(doc.get("template") or {}, row), "listed_in": str(item["list"])})
+        elif isinstance(item, dict):
+            out.append(item)
+    return out
+
+
+def local_copy(dirs: list, d: dict) -> Path | None:
+    """A local copy of a data entry's pinned bytes in one of dirs: by its
+    sha256 (DIR/<sha256>, DIR/sha256/<sha256>, DIR/blobs/sha256/<sha256>, the
+    layout scripts/symbols.py keeps), else by its file name, checked."""
+    want = str(d.get("sha256", "")).removeprefix("sha256:").lower()
+    name = d.get("file") or Path(d.get("url", "")).name
+    for root in dirs:
+        root = Path(root)
+        for p in (root / want, root / "sha256" / want, root / "blobs" / "sha256" / want, root / name):
+            if p.is_file() and not p.is_symlink():
+                h = hashlib.sha256()
+                with open(p, "rb") as f:
+                    while chunk := f.read(1 << 20):
+                        h.update(chunk)
+                if h.hexdigest() == want:
+                    return p
+    return None
+
+
+def acceptance(dirs: list, sha256: str) -> dict | None:
+    """The operator's recorded acceptance of the terms for these bytes, from
+    a symbol store's manifest.json (scripts/symbols.py writes it), or None."""
+    for root in dirs:
+        try:
+            files = json.loads((Path(root) / "manifest.json").read_text()).get("files") or {}
+        except (OSError, ValueError, AttributeError):
+            continue
+        acc = (files.get(sha256) or {}).get("acceptance")
+        if isinstance(acc, dict) and acc.get("accepted_by") and acc.get("sha256") == sha256:
+            return acc
+    return None
+
+
+def place_copy(src: Path, dest: Path) -> None:
+    """dest as a hard link to src where the file system allows, else a copy."""
+    dest.unlink(missing_ok=True)
+    try:
+        os.link(src, dest)
+    except OSError:
+        shutil.copyfile(src, dest)
+
+
 KINDS = ("apt", "pip", "apt_release", "requirements", "binaries", "manual", "downloads", "sources", "builds",
          "data", "not_applicable", "python_notes")
 
@@ -226,15 +326,16 @@ def read_pack(packs, name: str) -> dict:
                 spec["manual"].append({"name": b["name"], "pack": name, "how": line or "no install line"})
             # Data the program reads (symbol tables, rules): its own entry in the
             # spec, whatever installs the program, named for the program unless
-            # the pack names it.
-            if isinstance(install.get("data"), dict):
+            # the pack names it. One entry, a list of them, or a pack's pinned
+            # list file expanded entry by entry (data_entries).
+            for item in data_entries(pack_dir(packs, name), install.get("data")):
                 # Required whatever its program is: the pack pinned it on
                 # purpose (build --allow-missing-data goes on without it). Not
                 # for redistribution when either it or its program says so.
                 spec["data"].append({"program": b["name"], "pack": name,
                                      "redistributable": b.get("redistributable", True) is not False
-                                     and install["data"].get("redistributable", True) is not False,
-                                     **{"name": f"{b['name']}-data", **install["data"]}, "required": True})
+                                     and item.get("redistributable", True) is not False,
+                                     **{"name": f"{b['name']}-data", **item}, "required": True})
     reqs = pack_dir(packs, name) / "requires" / "python.txt"
     if reqs.exists():
         for raw in reqs.read_text().splitlines():
@@ -291,11 +392,24 @@ def notice(spec: dict) -> str:
                 lines.append(f"  {d['name']} patch: {patch.get('url')}  sha256 {patch.get('sha256')}")
     # Data a program reads has its own licence, which is not always the
     # program's: it is said here, beside where it came from.
+    licences_said = set()
     for d in spec.get("data", []):
         flag = "" if d.get("redistributable", True) else "  [not for redistribution]"
         lines.append(f"  {d['name']} data for {d['program']}: {d.get('url')}  sha256 {d.get('sha256')}{flag}")
-        if d.get("licence"):
+        n = d.get("notice") if isinstance(d.get("notice"), dict) else {}
+        for key in ("supplier", "source", "terms", "derivation", "restriction"):
+            if n.get(key):
+                lines.append(f"    {key}: {n[key]}")
+        if d.get("distribution_policy"):
+            lines.append(f"    distribution: {d['distribution_policy']} (a label, not a legal clearance)")
+        # One licence text said once, however many entries share it.
+        if d.get("licence") and d["licence"] not in licences_said:
+            licences_said.add(d["licence"])
             lines.append(f"    licence of the data: {d['licence']}")
+        elif d.get("licence"):
+            lines.append("    licence of the data: as above")
+    for d in (spec.get("omitted") or {}).get("data", []):
+        lines.append(f"  {d['name']} data for {d.get('program', '?')}: left out by this build ({d.get('why', '')})")
     if spec.get("not_applicable"):
         lines += ["", "Named by a pack, and not in this image because they belong to another system:"]
         lines += [f"{d['name']}  ({d['pack']})  {d['why']}" for d in spec["not_applicable"]]
@@ -410,6 +524,32 @@ def job_profiles(search, wanted: list, images=PACKS) -> dict:
     return out
 
 
+def symbol_sets(value: str):
+    """The sets --symbol-set names, or None when it names one that is not known."""
+    names = {x.strip() for x in str(value).split(",") if x.strip()}
+    if names == {"none"}:
+        return set()
+    if not names or not names <= set(SYMBOL_SETS):
+        return None
+    return names
+
+
+def default_data_mirror() -> list:
+    """$DFIRSWARM_DATA_DIR, else $DFIRSWARM_HOME/data when it exists: local copies of pinned data."""
+    if os.environ.get("DFIRSWARM_DATA_DIR"):
+        return [Path(os.environ["DFIRSWARM_DATA_DIR"])]
+    home = os.environ.get("DFIRSWARM_HOME") or str(Path.home() / ".dfirswarm")
+    mirror = Path(home) / "data"
+    return [mirror] if mirror.is_dir() else []
+
+
+def default_symbol_store() -> list:
+    """$DFIRSWARM_HOME/symbols, where scripts/symbols.py keeps what it fetched, when it exists."""
+    home = os.environ.get("DFIRSWARM_HOME") or str(Path.home() / ".dfirswarm")
+    store = Path(home) / "symbols"
+    return [store] if store.is_dir() else []
+
+
 def installed_dirs() -> list:
     """Where scripts/pack.sh installs packs: $DFIRSWARM_HOME/packs."""
     home = os.environ.get("DFIRSWARM_HOME") or str(Path.home() / ".dfirswarm")
@@ -475,18 +615,74 @@ def build(a) -> int:
               f"({', '.join(held_back)}). Build with --allow-nonredistributable for an image that stays on this "
               f"machine or in a private registry; never publish it.", file=sys.stderr)
         return 3
+    # The symbol sets this build takes (--symbol-set): an entry that names a
+    # set not chosen is left out on purpose and recorded as omitted, never as
+    # a failure. An entry naming no set is always taken.
+    chosen = symbol_sets(a.symbol_set)
+    if chosen is None:
+        print(f"recipe: --symbol-set {a.symbol_set}: name {', '.join(SYMBOL_SETS)} (comma-separated), or none", file=sys.stderr)
+        return 2
+    omitted = [{"name": d["name"], "pack": d["pack"], "program": d["program"], "set": d["set"],
+                "why": f"--symbol-set {a.symbol_set}: the {d['set']} set is left out"}
+               for d in spec["data"] if d.get("set") and d["set"] not in chosen]
+    spec["data"] = [d for d in spec["data"] if not d.get("set") or d["set"] in chosen]
     if a.allow_missing_data:
         for d in spec["data"]:
             d["required"] = False
+    # Local copies of the pinned bytes (a data mirror, the operator's symbol
+    # store), by sha256: the build then fetches nothing it was given. An entry
+    # the operator acquires is never fetched by a build: without its copy the
+    # build stops here, before docker, saying how to get it.
+    local_dirs = [x for x in (a.data_from or []) + (a.symbols_from or []) if x]
+    copies = {}
+    lacking, unaccepted = [], []
+    for d in spec["data"]:
+        sha = str(d["sha256"]).removeprefix("sha256:").lower()
+        got = local_copy(local_dirs, d)
+        # What the operator acquires is built in only with the operator's
+        # recorded acceptance of its terms, which the image then carries.
+        if d.get("acquire") == "operator":
+            acc = acceptance(local_dirs, sha)
+            if got and acc:
+                d["acceptance"] = acc
+            elif got:
+                got = None
+                if d.get("required"):
+                    unaccepted.append(d)
+            elif d.get("required"):
+                lacking.append(d)
+        if got:
+            copies[sha] = got
+    if lacking or unaccepted:
+        where = (f"no copy is in {', '.join(str(x) for x in local_dirs)}" if local_dirs
+                 else "no --symbols-from or --data-from was given, and there is no symbol store at the default place")
+        if lacking:
+            print(f"recipe: {a.profile} would hold {len(lacking)} data file(s) the operator acquires, and {where}: "
+                  + "; ".join(f"{d['name']} (sha256 {d['sha256']}, {d['url']})" for d in lacking)
+                  + ".", file=sys.stderr)
+        if unaccepted:
+            print(f"recipe: {a.profile} would hold {len(unaccepted)} data file(s) the operator acquires whose terms no store "
+                  "records as accepted: " + "; ".join(f"{d['name']} (sha256 {d['sha256']})" for d in unaccepted)
+                  + ". Nothing is built in without that acceptance.", file=sys.stderr)
+        print("Fetch them first, accepting their terms (scripts/swarm.sh symbols fetch --accept-terms --accepted-by NAME, "
+              "with --from DIR for a copy you have), or build with --symbol-set naming the sets you want "
+              "(none leaves every symbol set out).", file=sys.stderr)
+        return 4
     spec = {"profile": a.profile, "packs": packs, "profile_apt": list(extra_apt),
             "pack_versions": {p: pack_version(a.packs, p) for p in packs},
-            "redistributable": not held_back, "nonredistributable": held_back, **spec}
+            "redistributable": not held_back, "nonredistributable": held_back,
+            "symbol_set": sorted(chosen), "omitted": {"data": omitted}, **spec}
 
     # Only ever "false" from here: with nothing held back, the image is as
     # redistributable as its base, whose label it then inherits (the base
     # sets it), and image.json says the same (install.py).
     redistributable = ' \\\n      dev.dfirswarm.redistributable="false"' if held_back else ""
     a.out.mkdir(parents=True, exist_ok=True)
+    shutil.rmtree(a.out / "data", ignore_errors=True)
+    if copies:
+        (a.out / "data").mkdir()
+        for sha, src in copies.items():
+            place_copy(src, a.out / "data" / sha)
     (a.out / "spec.json").write_text(json.dumps(spec, indent=1) + "\n")
     (a.out / "NOTICE").write_text(notice(spec))
     shutil.copy(HERE / "install.py", a.out / "install.py")
@@ -494,7 +690,7 @@ def build(a) -> int:
     # same base, and only what `make install` put under its prefix is copied
     # across: the compiler and the -dev packages stay behind. Each stage reads
     # its own file, so every profile that builds the program shares its cache.
-    stages, copies = [], []
+    stages, copy_lines = [], []
     for d in spec["builds"]:
         stage = "build-" + re.sub(r"[^a-z0-9]+", "-", d["name"].lower()).strip("-")
         (a.out / f"{stage}.json").write_text(json.dumps(d, indent=1) + "\n")
@@ -502,23 +698,30 @@ def build(a) -> int:
 COPY install.py {stage}.json /tmp/dfirswarm-build/
 RUN python3 /tmp/dfirswarm-build/install.py --build /tmp/dfirswarm-build/{stage}.json
 """)
-        copies.append(f"COPY --from={stage} /opt/dfir/tools/{d['name']} /opt/dfir/tools/{d['name']}\n")
+        copy_lines.append(f"COPY --from={stage} /opt/dfir/tools/{d['name']} /opt/dfir/tools/{d['name']}\n")
+    # The local copies are bound into the install step, not copied into a
+    # layer: an 840 MB file copied in and deleted after still weighs 840 MB.
+    install = ("RUN --mount=type=bind,source=data,target=/tmp/dfirswarm-data \\\n"
+               " DFIRSWARM_DATA_DIR=/tmp/dfirswarm-data python3 /tmp/dfirswarm-build/install.py /tmp/dfirswarm-build/spec.json \\\n"
+               if copies else "RUN python3 /tmp/dfirswarm-build/install.py /tmp/dfirswarm-build/spec.json \\\n")
+    # What data the image carries, on the image itself: a pusher can refuse it
+    # by inspecting the image, not only its build context.
+    data_label = f' \\\n      dev.dfirswarm.data="{",".join(d["name"] for d in spec["data"])}"' if spec["data"] else ""
     (a.out / "Dockerfile").write_text(f"""# Generated by images/recipe.py from packs: {", ".join(packs) or "none"}. Do not edit.
 ARG BASE={a.base}
 {"".join(s + chr(10) for s in stages)}FROM ${{BASE}}
-{"".join(copies)}COPY install.py spec.json NOTICE /tmp/dfirswarm-build/
-RUN python3 /tmp/dfirswarm-build/install.py /tmp/dfirswarm-build/spec.json \\
- && rm -rf /tmp/dfirswarm-build
+{"".join(copy_lines)}COPY install.py spec.json NOTICE /tmp/dfirswarm-build/
+{install} && rm -rf /tmp/dfirswarm-build
 ENV PATH=/opt/dfir/venv/bin:$PATH
 LABEL org.opencontainers.image.title="dfirswarm-{a.profile}" \\
       dev.dfirswarm.profile="{a.profile}" \\
-      dev.dfirswarm.packs="{",".join(packs)}"{redistributable}
+      dev.dfirswarm.packs="{",".join(packs)}"{redistributable}{data_label}
 """)
     req_apt = sum(spec["apt"].values())
     print(f"{a.profile}: {len(packs)} pack(s), {len(spec['apt'])} apt ({req_apt} required), {len(spec['pip'])} pip, "
           f"{len(spec['requirements'])} python requirements, {len(spec['downloads'])} pinned downloads, "
           f"{len(spec['sources'])} pinned sources, {len(spec['builds'])} built from source, "
-          f"{len(spec['data'])} pinned data files, "
+          f"{len(spec['data'])} pinned data files ({len(copies)} from local copies, {len(omitted)} left out by --symbol-set), "
           f"{len(spec['manual'])} neither, {len(spec['not_applicable'])} not applicable"
           + (f"; NOT for redistribution ({len(held_back)} programs)" if held_back else ""))
     return 0
@@ -536,6 +739,14 @@ def main() -> int:
                    help="build an image holding programs or data files their packs mark redistributable: false (never publish it)")
     b.add_argument("--allow-missing-data", action="store_true",
                    help="go on when a pinned data file (a symbol pack) cannot be fetched; the image records it under not_installed.data")
+    b.add_argument("--symbol-set", default=os.environ.get("DFIRSWARM_SYMBOL_SET", "curated,broad"),
+                   help="the symbol sets the image takes: curated (the exact tables a pack lists, from the operator's store), "
+                        "broad (bulk collections), both comma-separated (the default), or none; a set left out is recorded as omitted")
+    b.add_argument("--data-from", type=Path, action="append", default=default_data_mirror(),
+                   help="a directory of local copies of pinned data, by sha256 or by file name (default $DFIRSWARM_DATA_DIR, "
+                        "else $DFIRSWARM_HOME/data when it exists); repeatable")
+    b.add_argument("--symbols-from", type=Path, action="append", default=default_symbol_store(),
+                   help="the operator's symbol store (scripts/swarm.sh symbols fetch writes it; default $DFIRSWARM_HOME/symbols when it exists); repeatable")
     f = sub.add_parser("profile-for")
     f.add_argument("packs", nargs="*", help="pack ids, or pack directories")
     f.add_argument("--packs-dir", type=Path, default=PACKS, help="the packs the images are built from")

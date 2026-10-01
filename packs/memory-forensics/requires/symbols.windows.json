@@ -1,0 +1,94 @@
+{
+  "about": "The curated Windows kernel symbol tables the memory and full images carry: one entry per exact kernel (PDB name, GUID, age), with the PDB's sha256 and size, the content hash the table converted from it must have, the converter version that hash holds for, and a note. Public identifiers and hashes only: no Microsoft file is in this repository. The operator fetches each PDB into the host's symbol store (scripts/swarm.sh symbols fetch, which shows Microsoft's terms), and the image build converts it with volatility3's pdbconv, checks the content and keeps the table, never the PDB. recipe.py expands `template` once per entry; a {field} is the entry's field, {file} and {dir} are install.py's (the fetched file, and the directory the program reads). `server_key` is the symbol server's directory name: the GUID and the age in hexadecimal.",
+  "template": {
+    "name": "vol-isf-{pdb}-{guid}-{age}",
+    "version": "{guid}-{age}",
+    "url": "https://msdl.microsoft.com/download/symbols/{pdb}/{server_key}/{pdb}",
+    "sha256": "{pdb_sha256}",
+    "bytes": "{pdb_bytes}",
+    "set": "curated",
+    "acquire": "operator",
+    "fetch": {
+      "redirect_hosts": [
+        "*.blob.core.windows.net"
+      ],
+      "max_redirects": 2,
+      "timeout_seconds": 600
+    },
+    "terms": {
+      "supplier": "Microsoft",
+      "name": "Microsoft Symbol Server licence terms (June 2022)",
+      "url": "https://learn.microsoft.com/en-us/legal/windows-sdk/microsoft-symbol-server-license-terms"
+    },
+    "package": "volatility3",
+    "into": "symbols",
+    "converter": {
+      "package": "volatility3",
+      "version": "{converter_version}"
+    },
+    "commands": [
+      [
+        "python3",
+        "-m",
+        "volatility3.framework.symbols.windows.pdbconv",
+        "-f",
+        "{file}",
+        "-o",
+        "{dir}/windows/{pdb}/{guid}-{age}.json.xz"
+      ]
+    ],
+    "outputs": [
+      {
+        "path": "windows/{pdb}/{guid}-{age}.json.xz",
+        "canonical": {
+          "rule": "json-canon/1",
+          "drop": [
+            "metadata.producer.datetime"
+          ]
+        },
+        "canonical_sha256": "{isf_canonical_sha256}",
+        "identity": {
+          "pdb": "{pdb}",
+          "guid": "{guid}",
+          "age": "{age}"
+        }
+      }
+    ],
+    "keep": false,
+    "warm": [
+      "vol",
+      "-q",
+      "isfinfo"
+    ],
+    "check": [
+      "sh",
+      "-c",
+      "vol -q isfinfo --filter {guid}-{age} | grep -qF '{pdb}|{guid}|{age}'"
+    ],
+    "redistributable": false,
+    "distribution_policy": "local-only",
+    "why": "The exact symbol table of the Windows kernel {pdb} {guid} age {age} ({os}), made from Microsoft's PDB by this image's build, so Volatility's Windows plugins read a memory image of that kernel with no network (run them with `--offline`). {note}",
+    "licence": "Our reading, not legal advice. The table is converted by Volatility (Volatility Software License 1.0, https://www.volatilityfoundation.org/license/vsl-v1.0) from a PDB Microsoft publishes on its symbol server under the Microsoft Symbol Server licence terms of June 2022 (https://learn.microsoft.com/en-us/legal/windows-sdk/microsoft-symbol-server-license-terms), which allow use \"solely for purposes of performance, security or functional debugging and testing of your software as used with Microsoft software, or as otherwise authorized by Microsoft\" and say that you may not \"share, publish, rent, or lease the Symbol Items, or provide the Symbol Items as stand-alone offerings for others to use\". Microsoft's terms grant use for debugging and testing your software; whether examining a third party's memory image falls inside that is not decided here. This image is not for redistribution.",
+    "notice": {
+      "supplier": "Microsoft Corporation (the PDB {pdb} {guid} age {age})",
+      "source": "https://msdl.microsoft.com/download/symbols/{pdb}/{server_key}/{pdb}, {pdb_bytes} bytes, sha256 {pdb_sha256}, fetched by the operator into the host's symbol store",
+      "terms": "Microsoft Symbol Server licence terms (June 2022), https://learn.microsoft.com/en-us/legal/windows-sdk/microsoft-symbol-server-license-terms",
+      "derivation": "converted by volatility3 {converter_version} (pdbconv) during this image's build into windows/{pdb}/{guid}-{age}.json.xz; its content, json-canon/1 without metadata.producer.datetime, is sha256 {isf_canonical_sha256}; the PDB is not kept",
+      "restriction": "local-only: built on this machine for its own use, never pushed, published or shared. A label is not a legal clearance."
+    }
+  },
+  "entries": [
+    {
+      "pdb": "ntkrnlmp.pdb",
+      "guid": "D9424FC4861E47C10FAD1B35DEC6DCC8",
+      "age": 1,
+      "server_key": "D9424FC4861E47C10FAD1B35DEC6DCC81",
+      "pdb_sha256": "2bf496537d9e1e5da9e038096146e6b4b23b8b09ef6c49c72a04f92d5d454f32",
+      "pdb_bytes": 8547328,
+      "isf_canonical_sha256": "7ca9379f6b8bc1c8cc750dc3692f6635848fb713f6f9e548d3f7cb581171c25f",
+      "converter_version": "2.28.2",
+      "os": "Windows 10 x64, build 19041 family",
+      "note": "First listed for a public CTF memory image (DFIR-Labs) whose kernel is in neither the Foundation's bundle nor JPCERT/CC's collection."
+    }
+  ]
+}

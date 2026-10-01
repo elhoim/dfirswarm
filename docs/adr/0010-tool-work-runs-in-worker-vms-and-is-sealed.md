@@ -375,3 +375,51 @@ the design:
 
 Deliberately not built: an event bus (the commit is the event), recipe-declared
 costs, extraction recipes, and autonomous recursion.
+
+## The kernel's symbol table is in the job image, made by the operator's build (2026-10-01)
+
+A Windows memory image of a CTF run had a kernel (Windows 10, build 19041
+family) that neither the Volatility Foundation's 2019 bundle nor JPCERT/CC's
+collection holds; in a worker with no network, Volatility's Windows plugins
+could not read it. Claude, Fable and Astra agreed the design, and the owner
+decided the table is baked into the local memory and `full` images:
+
+- **Pinned input and pinned content, never pinned table bytes.** A pack lists
+  the exact kernels (`packs/memory-forensics/requires/symbols.windows.json`):
+  PDB name, GUID, age, the PDB's sha256 and size, the converter version
+  (`volatility3` 2.28.2, pinned in the pack), and the content hash the
+  converted table must have. `pdbconv` writes the time it ran into the table,
+  so its bytes differ at every conversion; the content is compared by a
+  versioned rule, json-canon/1 (decompress, refuse duplicate keys and
+  non-finite numbers, remove `metadata.producer.datetime`, sorted keys,
+  ASCII, default separators). The repository holds identifiers and hashes,
+  never a Microsoft file.
+- **Two steps, the first the operator's act.** `swarm.sh symbols fetch`
+  puts each PDB into the host's store (`$DFIRSWARM_HOME/symbols`, by sha256,
+  never in a synced folder), from a copy the operator holds (`--from`) or from
+  Microsoft's symbol server with every hop bounded; it is refused without
+  `--accept-terms` and a name, and the store records who accepted
+  Microsoft's terms, when, for which bytes. The image build takes the PDB
+  from the store, converts it with no network, checks the content, keeps the
+  table where Volatility looks and drops the PDB; a curated PDB or an
+  acceptance the store does not have stops the build before Docker. The
+  image records the source, the transform, the table and the acceptance.
+- **Generic in the harness.** `install.data` gained `commands`, `outputs`
+  (with `canonical`), `converter`, `set`, `acquire` and list files expanded
+  from a template; the harness knows no PDB. `--symbol-set curated|broad|none`
+  chooses, and an omitted set is recorded apart from a failure. CI builds with
+  `none` (a pull request) or `broad` (the weekly boot): it never fetches a
+  Microsoft PDB and never builds the curated set.
+- **A missing table stops the start.** The memory pack's `kernel-symbols`
+  recipe asks Volatility, offline, which kernel an input runs and whether the
+  image has its table; the census writes what a recipe says is missing to
+  `catalog/missing.json`, and a missing symbol table is a BLOCKER at
+  `start --check` and at the start unless `--allow-missing-symbols`.
+- **Not decided here.** Microsoft's terms grant use for debugging and testing
+  your software; whether examining a third party's memory image falls inside
+  that is not decided here. Building locally reduces exposure to the sharing
+  clause and is not a permission to use.
+
+Deliberately not built: a seat or job that fetches symbols, a socket grant
+or adapter for the symbol server, a per-run symbol import as case material,
+Linux and macOS tables, and a CI cache of the Foundation's bundle.

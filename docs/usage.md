@@ -40,6 +40,7 @@ scripts/swarm.sh requests <id> ack|answer|decline|withdraw|authorise|collecting|
 scripts/swarm.sh evidence <id> add PATH --why TEXT [--for R-n] [--question Q-n]... [--sha256 HEX] [--as ID] | list [--json]
 scripts/swarm.sh material <id> add PATH --why TEXT [--class operator_supplied|case_material] [--sensitive] [--as ID] | list [--json]
 scripts/swarm.sh tool-supply <id> add PATH --why TEXT --source TEXT [--built TEXT] [--sha256 HEX]... [--for R-n|L-n]... [--as ID] | list [--json]
+scripts/swarm.sh symbols fetch --accept-terms [--accepted-by NAME] [--from DIR] [--name TEXT]... [--packs DIR] [--store DIR] | list [--json]
 scripts/swarm.sh summary <id>
 scripts/swarm.sh context <id> [--json]
 scripts/swarm.sh package <id> [--sign [--key FILE]] [--redact [--redact-leaks list]] [--with-outputs]
@@ -124,6 +125,7 @@ it. A wrong command line prints the mistake and where to read, not the manual.
 | `--inputs-enforce M` | no | `auto` | `auto`: kernel guard when the host has one, otherwise a `WARN`; `on`: refuse to start without one (exit 3); `off`: detection and healing only. |
 | `--inputs-max-mb N`, `--inputs-max-files N` | no | none | Refuse an inputs directory larger than N MB, or with more than N files, before anything is copied (several sets: together). Unset by default: evidence is as large as the case is. `SWARM_INPUTS_MAX_MB` and `SWARM_INPUTS_MAX_FILES` set the same limits from the environment. |
 | `--catalog` | no | off | Before the agents start, run the standard first pass over the inputs once (`scripts/evidence-catalog.sh`): for a disk image the partition table, per partition a body file, a MAC timeline and a path list (a logical volume image with no partition table is catalogued from sector 0); for a memory image Volatility's info, pslist, psscan, cmdline, netscan, malfind and dlllist. What an input is and how it is catalogued are the packs' recipes (`recipes/<name>/` in a pack; computer-forensics-base ships disk volumes, Windows memory, archive members and AD1 logical images); the harness takes the census: every input gets a row in `catalog/coverage.tsv` — catalogued, in part, planned, a further segment of a set, not catalogued, or smaller than any recipe asks about — with why, and the index names those not catalogued, so an input this pass could not read is named rather than missing. In a microVM run with the job service (the default) the census only plans the recipes (`catalog/plan.json`); they run as jobs once the hub is up, while the agents work, each result a generation under `catalog/gen/` and each change a revision under `catalog/revisions/<n>/`, announced on the board. What a step wrote to stderr is kept whole beside its output (`<file>.stderr`). A recipe a pack declares a broad extraction (a parse of the whole source into a searchable form, where the rest of the catalogue inventories it: the mobile pack's iOS and Android parsers over a full file-system acquisition, the base pack's super timeline of a disk image) is asked about every input too; each that applies is listed in `catalog/plan.json`'s `preparations` and in the README, run by the kickoff where its pack marks it so and otherwise offered as a lead once the run is up, and its receipts are kept on the store journal ([ADR 0013](adr/0013-a-negative-is-bounded-and-a-cap-pauses.md), "A source's broad extraction before a negative on it"). Lands in `catalog/`, harness-owned and read-only, indexed in `catalog/README.md` and rendered into `SWARM.md`. Needs `--inputs`; implies `--quarantine` and `--toolbox dfir`. Under `--isolation microvm` it runs with the image's tools, not the host's. |
+| `--allow-missing-symbols` | no | off | With `--catalog`: start although a recipe's detect says the image lacks what it needs to read an input — a memory image's kernel symbol table above all (the memory pack's `kernel-symbols` recipe asks Volatility, offline, which kernel the image runs and whether the image holds its table). Without it that is a BLOCKER, at the start and at `start --check` (which runs the census's detect in a throwaway VM of the census's image and keeps nothing): Volatility's Windows plugins cannot read the image offline. With it the run goes on with what needs no kernel table, said as a WARN; either way the census writes `catalog/missing.json` and says it in the catalogue's README, and the generation's post says it to every seat. Any other kind of missing data is a WARN. |
 | `--toolbox M` | no | `off` | `dfir`: check the forensic toolbox on this host (`scripts/toolbox.sh`: Sleuth Kit, Volatility 3, regipy, python-evtx, yara, exiftool, sqlite3, strings, python3) into `toolbox.json` and a Toolbox section of `SWARM.md`, with install commands for what is missing; `auto`: `dfir` when `--catalog` is set, plus the sets a `--goal-file`'s metadata block names in `toolbox:` (without the key, the sets its words suggest), and `crypto` when a VHD(X), VMDK, QCOW2 or encrypted container is under the inputs; `off`. `crypto` adds the volume readers (libbde, libvhdi, libluksde, libvshadow, dfvfs, qemu-img), `linux` the journal, XFS (xfsprogs) and LVM (libvslvm) readers. |
 | `--toolbox-required` | no | off | A missing tool is a `BLOCKER` (exit 3) instead of a `WARN`. |
 | `--quarantine` | no | off | `work/extracted/` and `work/quarantine/` cannot execute: no-exec at the kernel where the host can (`fsguard.sh --noexec`), and the harness strips execute bits from anything written there. Evidence pulled out of an image is for reading, never for running. |
@@ -398,6 +400,23 @@ watchdog had notified it.
   lists the evidence and material added (§3), and `release.json` binds them
   (`external`, `acquisitions`). A record citing material whose class the policy
   says `none` for is refused.
+- `symbols fetch --accept-terms [--accepted-by NAME] [--from DIR]` puts the
+  files the packs list for the operator to acquire (the PDBs of the curated
+  Windows kernels, `packs/memory-forensics/requires/symbols.windows.json`) into
+  the host's symbol store, `$DFIRSWARM_HOME/symbols/blobs/sha256/<sha256>`, each
+  held to its pinned sha256 and size, refused inside a synced folder. The files
+  are Microsoft's under its symbol-server terms; the fetch is the operator's
+  acceptance of them, refused without `--accept-terms` and a name
+  (`--accepted-by`, or the one examiner enrolled on this install), and the
+  acceptance (who, the terms, when, the sha256) is written into the store's
+  `manifest.json`. `--from DIR` takes copies you hold (every file of a pinned
+  size is hashed; nothing is downloaded); without it each is downloaded over
+  HTTPS on every hop, redirected at most twice and only to the hosts its list
+  names, no more bytes than pinned, within a time limit. `symbols list` says
+  which are held and accepted. `images/recipe.py build` takes them from the
+  store, with their acceptance, and refuses a curated build without either
+  (`images/README.md`, "Symbol tables"); the image records the acceptance
+  beside the table it made. Each fetch is on the operator's record.
 - `tool-supply <id> add PATH --why W --source TEXT [--built TEXT] [--sha256 HEX]...
   [--for R-n|L-n]... [--as ID]` hands a running (or stopped) run a program no
   image holds: a file, or a directory when the program loads libraries. It is

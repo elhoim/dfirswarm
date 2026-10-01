@@ -61,8 +61,8 @@
       "optional": true,
       "why": "Memory analysis, when the host has it. Not shipped with this pack: the Volatility Software License and AGPL-3.0 do not combine in one work, so it is invoked as an executable or not at all. The Windows symbol tables it needs for a kernel are in the memory image (memory-forensics), not in this one: a seat that needs `vol` on Windows memory runs it there.",
       "install": {
-        "brew": "python3 -m pip install volatility3",
-        "apt": "python3 -m pip install volatility3"
+        "brew": "python3 -m pip install volatility3==2.28.2",
+        "apt": "python3 -m pip install volatility3==2.28.2"
       },
       "licence": "Volatility Software License 1.0",
       "redistributable": false

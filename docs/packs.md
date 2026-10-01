@@ -229,11 +229,21 @@ its entry and interpreter (`run`), or a `build` from source (with pinned
 `patches` and its own `commands` where it has no configure script); an apt line
 with `-t bookworm-backports` comes from Debian's backports. Each is checked by
 its sha256. What a program reads and is not a program (a symbol pack, a rule
-set) hangs from its entry as `install.data`: one url and sha256, the Python
-`package` of the image's venv it is put inside and the `into` directory, a
-`warm` command that indexes it once at build time, and the `licence` it carries
-on its own, which the image's NOTICE states beside the program's. The memory
-pack's Volatility entry pins the Foundation's Windows symbol pack this way.
+set) hangs from its entry as `install.data`: one url, sha256 and size
+(`bytes`), the Python `package` of the image's venv it is put inside and the
+`into` directory, a `warm` command that indexes it once at build time, a
+`check` that must succeed, and the `licence` it carries on its own, which the
+image's NOTICE states beside the program's (with `notice`: supplier, source,
+terms, derivation, restriction). It may be a list of entries, or
+`{"list": FILE}`: a file of the pack with a `template` and `entries`, one
+expanded entry each. An entry with `commands` and `outputs` is a source the
+build converts, each output's content pinned (`canonical`, `canonical_sha256`)
+for one `converter` version; `set` is what `recipe.py build --symbol-set`
+selects; `acquire: "operator"` is never fetched by a build, only taken from
+the operator's store (`swarm.sh symbols fetch --accept-terms`) with the
+recorded acceptance of its terms. The memory pack's Volatility entry pins the
+Foundation's Windows symbol pack this way, and the curated kernels
+(`requires/symbols.windows.json`) as a list.
 A program that belongs to another system (Apple's `log`, a collector run on
 the host being collected) is marked `not_in_image` with why: no image is asked
 for it, and a pack may not require it.

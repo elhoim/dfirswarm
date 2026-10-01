@@ -33,7 +33,18 @@ network). A data file that cannot be had fails the build even when its program
 is optional: the pack pinned it on purpose, and an image without it would say
 the program is there while what it reads is not. `recipe.py build
 --allow-missing-data` goes on without it, and the image then records it under
-`not_installed.data`.
+`not_installed.data`; one its build left out on purpose (`--symbol-set`) is
+under `omitted.data`. An entry with `commands` is a source converted in the
+build (fetch_data): the outputs are hashed, compared by content where pinned
+(json-canon/1, canonical_sha256), and recorded apart from the source. An entry
+the operator acquires is never downloaded here, and needs the operator's
+recorded acceptance of its terms.
+
+Every download is bounded: HTTPS on every redirect hop (at most five), no more
+bytes than pinned (`bytes`, else DFIRSWARM_FETCH_MAX_BYTES), within
+DFIRSWARM_FETCH_SECONDS in all. A local copy by sha256 in DFIRSWARM_DATA_DIR
+(recipe.py build --data-from, --symbols-from) is used, still checked, instead
+of the network.
 
 A pinned download is fetched over HTTPS, checked against its sha256 before
 anything is unpacked, unpacked under /opt/dfir/tools/<name>/ and put on PATH
@@ -61,6 +72,8 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import time
+import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
@@ -159,44 +172,144 @@ def safe_members(t: tarfile.TarFile, dest: Path, strip: bool = False, skip: list
 
 
 DOWNLOAD_ATTEMPTS = 3
+# A download's bounds: no more redirects than this, every hop over HTTPS, no
+# more bytes than its pin says (or this many when it pins none), and no longer
+# than this in all. A pack's URL is https (pack.sh); file:// and a loopback
+# http:// are a test's.
+MAX_REDIRECTS = 5
+MAX_BYTES = int(os.environ.get("DFIRSWARM_FETCH_MAX_BYTES", str(4 << 30)))
+FETCH_SECONDS = int(os.environ.get("DFIRSWARM_FETCH_SECONDS", "3600"))
+# A local copy of what a pin names, by its sha256 (recipe.py build --data-from
+# and --symbols-from put them here): used instead of the network, still checked.
+DATA_DIR = os.environ.get("DFIRSWARM_DATA_DIR", "")
 
 
-def get(url: str, dest: Path, sha256: str) -> str | None:
-    """Fetch url to dest and check it against the pinned sha256. Returns why
-    it failed, or None; bytes that are not the pinned ones are deleted. A
-    download that fails or ends short is tried again: a runtime that arrived
-    cut off after twelve slow minutes, with the right bytes at that URL a
-    minute later, took three programs that need it out of an image."""
+class HttpsRedirects(urllib.request.HTTPRedirectHandler):
+    """Follows a redirect only to https and only MAX_REDIRECTS times; the
+    host it lands on is said, never the query (a signed URL is a credential
+    of sorts). Any other scheme is refused."""
+    max_redirections = MAX_REDIRECTS
+
+    def __init__(self, allowed_hosts: list | None = None):
+        super().__init__()
+        self.allowed_hosts = allowed_hosts
+        self.last_host = None
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        u = urllib.parse.urlparse(newurl)
+        if u.scheme != "https":
+            raise urllib.error.URLError(f"a redirect to {u.scheme or 'no scheme'}:// was refused: every hop must be https")
+        if u.port not in (None, 443):
+            raise urllib.error.URLError(f"a redirect to port {u.port} was refused: every hop must be https on 443")
+        if self.allowed_hosts is not None and not host_allowed(u.hostname or "", self.allowed_hosts):
+            raise urllib.error.URLError(f"a redirect to {u.hostname} was refused: not one of {', '.join(self.allowed_hosts)}")
+        print(f"+ redirected to {u.hostname}", flush=True)
+        self.last_host = u.hostname
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def host_allowed(host: str, allowed: list) -> bool:
+    """host is one of allowed, where `*.example.org` stands for any name under it."""
+    host = host.lower().rstrip(".")
+    for a in allowed:
+        a = a.lower()
+        if host == a or (a.startswith("*.") and host.endswith(a[1:]) and len(host) > len(a) - 1):
+            return True
+    return False
+
+
+def local_copy(sha256: str) -> Path | None:
+    """The mirror's file for this sha256, or None."""
+    if not DATA_DIR:
+        return None
+    p = Path(DATA_DIR) / sha256
+    return p if p.is_file() else None
+
+
+def fetch_once(url: str, dest: Path, size: int | None, allowed_hosts: list | None = None, opener_handlers: list | None = None) -> tuple:
+    """One bounded download of url to dest: (sha256 hex, bytes got,
+    Content-Length or None). Raises OSError (URLError among them) when it
+    cannot, or when it passes its bounds. opener_handlers replace the
+    redirect rule (an HttpsRedirects of the caller's) and add others."""
+    u = urllib.parse.urlparse(url)
+    # A pack's URL is https (pack.sh refuses any other); file:// and a
+    # loopback http:// server are a test's.
+    if not (u.scheme in ("https", "file") or (u.scheme == "http" and u.hostname in ("127.0.0.1", "localhost", "::1"))):
+        raise urllib.error.URLError(f"{u.scheme}:// is not fetched: a pinned URL is https")
+    cap = size if size is not None else MAX_BYTES
+    deadline = time.monotonic() + FETCH_SECONDS
+    digest = hashlib.sha256()
+    got = 0
+    # Named: a host behind a bot filter (Eric Zimmerman's) refuses Python's
+    # own User-Agent with a 403, and says so in no other way.
+    req = urllib.request.Request(url, headers={"User-Agent": "dfirswarm-image-build (+https://github.com/halilozturkci/dfirswarm)"})
+    opener = urllib.request.build_opener(*(opener_handlers or [HttpsRedirects(allowed_hosts)]))
+    with opener.open(req, timeout=300) as r, open(dest, "wb") as out:
+        length = r.headers.get("Content-Length")
+        if length and length.isdigit() and int(length) > cap:
+            raise urllib.error.URLError(f"the server offers {length} bytes, more than the {cap} this pin allows")
+        while chunk := r.read(1 << 20):
+            got += len(chunk)
+            if got > cap:
+                raise urllib.error.URLError(f"more than the {cap} bytes this pin allows")
+            if time.monotonic() > deadline:
+                raise urllib.error.URLError(f"not done within {FETCH_SECONDS} s")
+            digest.update(chunk)
+            out.write(chunk)
+    return digest.hexdigest(), got, length
+
+
+def obtain(url: str, dest: Path, sha256: str, size: int | None = None, offline: bool = False) -> tuple:
+    """Put the pinned bytes at dest: from the local mirror when it holds them
+    (DFIRSWARM_DATA_DIR), else from url unless `offline`. Returns (why it
+    failed or None, how: "local copy" | "download"). Bytes that are not the
+    pinned ones are deleted. A download that fails or ends short is tried
+    again: a runtime that arrived cut off after twelve slow minutes, with the
+    right bytes at that URL a minute later, took three programs that need it
+    out of an image."""
     want = sha256.removeprefix("sha256:").lower()
+    mirror = local_copy(want)
+    if mirror:
+        print(f"+ copy {mirror} (the local copy of {url})", flush=True)
+        digest = hashlib.sha256()
+        with open(mirror, "rb") as src, open(dest, "wb") as out:
+            while chunk := src.read(1 << 20):
+                digest.update(chunk)
+                out.write(chunk)
+        if digest.hexdigest() == want and (size is None or dest.stat().st_size == size):
+            return None, "local copy"
+        dest.unlink(missing_ok=True)
+        return f"the local copy {mirror} is not the pinned bytes (sha256 {digest.hexdigest()})", "local copy"
+    if offline:
+        return "it is not fetched by the build, and no local copy of it was given", "local copy"
     why = None
     for attempt in range(1, DOWNLOAD_ATTEMPTS + 1):
         print(f"+ fetch {url}" + (f" (attempt {attempt} of {DOWNLOAD_ATTEMPTS})" if attempt > 1 else ""), flush=True)
-        digest = hashlib.sha256()
-        got = 0
-        # Named: a host behind a bot filter (Eric Zimmerman's) refuses Python's
-        # own User-Agent with a 403, and says so in no other way.
-        req = urllib.request.Request(url, headers={"User-Agent": "dfirswarm-image-build (+https://github.com/halilozturkci/dfirswarm)"})
         try:
-            with urllib.request.urlopen(req, timeout=300) as r, open(dest, "wb") as out:
-                length = r.headers.get("Content-Length")
-                while chunk := r.read(1 << 20):
-                    digest.update(chunk)
-                    out.write(chunk)
-                    got += len(chunk)
+            hexd, got, length = fetch_once(url, dest, size)
         except OSError as e:
             dest.unlink(missing_ok=True)
             why = f"download failed: {e}"
+            # A refusal by the bounds is not cured by asking again.
+            if "refused" in str(e) or "more than" in str(e) or "is not fetched" in str(e):
+                break
             continue
-        if digest.hexdigest() == want:
-            return None
+        if hexd == want and (size is None or got == size):
+            return None, "download"
         dest.unlink(missing_ok=True)
         short = f" after {got} of {length} bytes" if length and length.isdigit() and int(length) != got else ""
-        why = f"sha256 {digest.hexdigest()}{short} is not the pinned {want}"
+        why = f"sha256 {hexd}{short} is not the pinned {want}" if hexd != want else f"{got} bytes, not the pinned {size}"
         # The whole length and other bytes: the file at the URL changed, and
         # another attempt fetches the same wrong bytes.
         if not short and length:
             break
-    return why
+    return why, "download"
+
+
+def get(url: str, dest: Path, sha256: str, size: int | None = None) -> str | None:
+    """Fetch url to dest and check it against the pinned sha256 (and size).
+    Returns why it failed, or None."""
+    return obtain(url, dest, sha256, size)[0]
 
 
 def wrapper(name: str, program: Path, run_with: str | None = None, run_from_dir: bool = False,
@@ -369,11 +482,124 @@ def package_dir(package: str) -> Path | None:
     return Path(out) if out else None
 
 
+# The rule a derived file's content is compared by, versioned: a converter
+# that writes the time it ran into its output (Volatility's pdbconv does, in
+# metadata.producer.datetime) makes new bytes every time from the same input,
+# so its output is pinned by content, never by its bytes.
+#
+# json-canon/1: decompress (xz or gzip, by their magic; at most
+# CANON_MAX_BYTES), decode UTF-8 strictly, parse JSON refusing a duplicate key
+# and a number that is not finite, remove the dotted paths the pin names (only
+# those), and hash json.dumps(sort_keys=True, ensure_ascii=True) with the
+# default separators, UTF-8, no trailing newline.
+CANON_RULES = ("json-canon/1",)
+CANON_MAX_BYTES = 1 << 30
+
+
+class CanonError(ValueError):
+    pass
+
+
+def inflate(path: Path, limit: int = CANON_MAX_BYTES) -> bytes:
+    """A file's bytes, decompressed when it is xz or gzip, refused past limit."""
+    import gzip
+    import lzma
+    with open(path, "rb") as f:
+        head = f.read(6)
+    opener = lzma.open if head.startswith(b"\xfd7zXZ\x00") else gzip.open if head[:2] == b"\x1f\x8b" else open
+    out = bytearray()
+    with opener(path, "rb") as f:
+        while chunk := f.read(1 << 20):
+            out += chunk
+            if len(out) > limit:
+                raise CanonError(f"more than {limit} bytes once decompressed")
+    return bytes(out)
+
+
+def canonical_json(raw: bytes, drop: list) -> bytes:
+    """The canonical form of a JSON document (json-canon/1), less the dotted paths in drop."""
+    def pairs(items):
+        d = {}
+        for k, v in items:
+            if k in d:
+                raise CanonError(f"duplicate key {k!r}")
+            d[k] = v
+        return d
+
+    def finite(text):
+        v = float(text)
+        if v != v or v in (float("inf"), float("-inf")):
+            raise CanonError(f"a number that is not finite ({text})")
+        return v
+
+    def constant(name):
+        raise CanonError(f"a number that is not finite ({name})")
+
+    try:
+        obj = json.loads(raw.decode("utf-8"), object_pairs_hook=pairs, parse_float=finite, parse_constant=constant)
+    except UnicodeDecodeError as e:
+        raise CanonError(f"not UTF-8: {e}") from None
+    except json.JSONDecodeError as e:
+        raise CanonError(f"not JSON: {e}") from None
+    for path in drop:
+        *parents, last = path.split(".")
+        node = obj
+        for part in parents:
+            node = node.get(part) if isinstance(node, dict) else None
+        if isinstance(node, dict):
+            node.pop(last, None)
+    return json.dumps(obj, sort_keys=True, ensure_ascii=True).encode("utf-8")
+
+
+def canonical_sha256(path: Path, rule: str, drop: list) -> str:
+    if rule not in CANON_RULES:
+        raise CanonError(f"no canonical rule {rule!r} (known: {', '.join(CANON_RULES)})")
+    return hashlib.sha256(canonical_json(inflate(path), drop)).hexdigest()
+
+
+def sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while chunk := f.read(1 << 20):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def venv_answer(code: str, *args: str) -> str:
+    """What the image's venv Python prints for code, or ""."""
+    py = VENV / "bin" / "python"
+    if not py.exists():
+        return ""
+    return subprocess.run([str(py), "-c", code, *args], capture_output=True, text=True).stdout.strip()
+
+
+def placeholders(argv: list, fill: dict) -> list:
+    """argv with {file} and {dir} filled in; every other brace left as it is."""
+    return [re.sub(r"\{(file|dir)\}", lambda m: fill[m.group(1)], str(a)) for a in argv]
+
+
+def resolve_argv(argv: list) -> list:
+    argv = list(argv)
+    argv[0] = shutil.which(argv[0], path=IMAGE_PATH) or argv[0]
+    return argv
+
+
 def fetch_data(d: dict) -> tuple:
-    """Install one pinned data file a program reads: checked against its sha256,
-    then put, under the name it has at its URL (or `file`), in `into` inside the
-    directory of the Python package `package`, where the program looks for it.
-    The same bytes for every architecture. Returns (record, failure reason)."""
+    """Install one pinned data file a program reads: checked against its sha256
+    (and `bytes`), then put, under the name it has at its URL (or `file`), in
+    `into` inside the directory of the Python package `package`, where the
+    program looks for it. The same bytes for every architecture.
+
+    An entry with `commands` is a source the build turns into what the program
+    reads: it is fetched into a work directory, each command (an argument list,
+    {file} the source and {dir} where the program looks) is run, every file in
+    `outputs` must then be there, each is hashed, and one with `canonical` is
+    compared by its content (json-canon/1) with the pinned `canonical_sha256`;
+    the source is kept only with `keep`. `converter` pins the version of the
+    package that converts, since a content hash holds for one version alone.
+    An entry acquired by the operator (`acquire: "operator"`) is never fetched
+    here: it comes from the local copy the build was given, or not at all.
+    Returns (record, failure reason)."""
     if not d.get("url") or not d.get("sha256") or not d.get("package"):
         return None, "no url, sha256 and package pinned"
     root = package_dir(d["package"])
@@ -385,22 +611,144 @@ def fetch_data(d: dict) -> tuple:
     name = d.get("file") or Path(urllib.parse.urlparse(d["url"]).path).name
     if not name or name in (".", "..") or "/" in name or "\\" in name:
         return None, f"the file name {name!r} is not a plain name"
+    conv = d.get("converter") if isinstance(d.get("converter"), dict) else None
+    if conv and conv.get("package") and conv.get("version"):
+        have = venv_answer("import importlib.metadata as m, sys; print(m.version(sys.argv[1]))", conv["package"])
+        if have != conv["version"]:
+            return None, (f"its converter {conv['package']} is {have or 'not installed'}, not the pinned {conv['version']}: "
+                          "the content of what it makes is pinned for that version alone")
+    # What the operator acquires is built in only with the operator's recorded
+    # acceptance of its terms (recipe.py copies it from the symbol store).
+    if d.get("acquire") == "operator" and not (isinstance(d.get("acceptance"), dict) and d["acceptance"].get("accepted_by")):
+        return None, ("no recorded acceptance of its terms: the operator fetches it accepting them "
+                      "(scripts/swarm.sh symbols fetch --accept-terms), then recipe.py build --symbols-from")
+    commands = d.get("commands") or []
     dest_dir.mkdir(parents=True, exist_ok=True)
-    dest = dest_dir / name
-    why = get(d["url"], dest, d["sha256"])
+    work = None
+    if commands:
+        # A source to be converted is not put where the program looks.
+        work = TOOLS / ".data-work" / d["name"]
+        shutil.rmtree(work, ignore_errors=True)
+        work.mkdir(parents=True)
+        dest = work / name
+    else:
+        dest = dest_dir / name
+    why, how = obtain(d["url"], dest, d["sha256"], d.get("bytes"), offline=d.get("acquire") == "operator")
     if why:
+        if work:
+            shutil.rmtree(work, ignore_errors=True)
+        if d.get("acquire") == "operator":
+            why += " (the operator fetches it: scripts/swarm.sh symbols fetch, then recipe.py build --symbols-from)"
         return None, why
-    dest.chmod(0o644)
     rec = {"kind": "data", "version": d.get("version"), "url": d["url"],
            "sha256": d["sha256"].removeprefix("sha256:").lower(), "path": str(dest),
-           "bytes": dest.stat().st_size, "program": d.get("program")}
+           "bytes": dest.stat().st_size, "program": d.get("program"), "from": how}
+    for key in ("set", "acquire", "identity", "distribution_policy", "redistributable", "terms"):
+        if key in d:
+            rec[key] = d[key]
+    made: list = []
+
+    def undo(reason: str) -> tuple:
+        for f in made:
+            Path(f).unlink(missing_ok=True)
+        if work:
+            shutil.rmtree(work, ignore_errors=True)
+        else:
+            dest.unlink(missing_ok=True)
+        return None, reason
+
+    if commands:
+        fill = {"file": str(dest), "dir": str(dest_dir)}
+        # Where each output goes exists before the commands run: a converter
+        # writes a file, not the directories above it.
+        for o in d.get("outputs") or []:
+            rel = str(o.get("path", ""))
+            if rel and not rel.startswith("/") and ".." not in rel.split("/"):
+                (dest_dir / rel).parent.mkdir(parents=True, exist_ok=True)
+        # What the commands say is kept whole in the image, named in the
+        # record: a converter's progress runs to megabytes, past what a build
+        # log shows.
+        log = ETC / "data-logs" / f"{d['name']}.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.unlink(missing_ok=True)
+        ran = []
+        for argv in commands:
+            argv = placeholders(argv, fill)
+            ran.append(argv)
+            print("+", " ".join(argv), f"(its output: {log})", flush=True)
+            try:
+                with open(log, "ab") as lf:
+                    lf.write(("+ " + " ".join(argv) + "\n").encode())
+                    lf.flush()
+                    ok = subprocess.run(resolve_argv(argv), cwd=work, stdout=lf, stderr=subprocess.STDOUT).returncode == 0
+            except OSError as e:
+                with open(log, "ab") as lf:
+                    lf.write(f"could not run: {e}\n".encode())
+                ok = False
+            if not ok:
+                # The build that fails keeps no image: the end of what it said is shown here.
+                tail = log.read_bytes()[-8192:].decode("utf-8", "replace")
+                print(f"--- the last {len(tail)} of {log.stat().st_size} bytes of {log} ---\n{tail}", file=sys.stderr, flush=True)
+                return undo(f"its command ({' '.join(argv)}) failed")
+        outputs = []
+        for o in d.get("outputs") or []:
+            rel = str(o.get("path", ""))
+            p = (dest_dir / rel).resolve()
+            if not rel or rel.startswith("/") or ".." in rel.split("/") or not str(p).startswith(f"{dest_dir}/"):
+                return undo(f"the output {rel!r} is not a path inside {dest_dir}")
+            if not p.is_file():
+                return undo(f"its commands left no {rel}")
+            made.append(str(p))
+            p.chmod(0o644)
+            orec = {"path": str(p), "sha256": sha256_file(p), "bytes": p.stat().st_size}
+            canon = o.get("canonical") if isinstance(o.get("canonical"), dict) else None
+            if canon:
+                drop = [str(x) for x in canon.get("drop") or []]
+                try:
+                    got = canonical_sha256(p, str(canon.get("rule")), drop)
+                except (CanonError, OSError, EOFError) as e:
+                    return undo(f"{rel}: its content could not be read by {canon.get('rule')}: {e}")
+                orec.update({"canonical_rule": canon.get("rule"), "canonical_drop": drop, "canonical_sha256": got})
+                want = str(o.get("canonical_sha256") or "").lower()
+                if want and got != want:
+                    return undo(f"{rel}: its content ({canon.get('rule')}) is sha256 {got}, not the pinned {want}: "
+                                "another converter, or another source, made it")
+            if isinstance(o.get("identity"), dict):
+                orec["identity"] = o["identity"]
+            outputs.append(orec)
+        keep = bool(d.get("keep", False))
+        rec["source"] = {"url": d["url"], "sha256": rec["sha256"], "bytes": rec["bytes"], "from": how, "kept": keep}
+        rec["transform"] = {"commands": [[a.replace(str(dest), name) for a in argv] for argv in ran],
+                            "package": d["package"],
+                            "package_version": venv_answer("import importlib.metadata as m, sys; print(m.version(sys.argv[1]))", d["package"]) or None,
+                            "python": venv_answer("import platform; print(platform.python_version())") or None}
+        if conv:
+            rec["transform"]["converter"] = conv
+        rec["transform"]["log"] = {"path": str(log), "sha256": sha256_file(log), "bytes": log.stat().st_size}
+        rec["outputs"] = outputs
+        if keep:
+            kept = dest_dir / name
+            shutil.move(str(dest), kept)
+            kept.chmod(0o644)
+            rec["path"] = str(kept)
+        else:
+            rec["path"] = None
+        shutil.rmtree(work, ignore_errors=True)
+        work = None
+    else:
+        dest.chmod(0o644)
+    if isinstance(d.get("acceptance"), dict):
+        # Who accepted the supplier's terms, when, for which bytes, and what
+        # this image made of them: the acceptance travels with the table.
+        rec["acceptance"] = {**d["acceptance"], "source_sha256": rec["sha256"],
+                             "outputs": [{k: o[k] for k in ("path", "sha256", "canonical_rule", "canonical_sha256") if k in o}
+                                         for o in rec.get("outputs") or []]}
+    fill = {"file": rec["path"] or "", "dir": str(dest_dir)}
     if d.get("warm"):
         # A program that indexes what it finds the first time it runs is run
         # once here, so the image holds the index and no VM builds it again.
-        argv = [str(a) for a in d["warm"]]
-        argv[0] = shutil.which(argv[0], path=IMAGE_PATH) or argv[0]
         try:
-            rec["warm"] = "done" if run(argv) else "failed"
+            rec["warm"] = "done" if run(resolve_argv(placeholders(d["warm"], fill))) else "failed"
         except OSError:
             # The program is not there (its own install failed): the data
             # is, and the record says it was not warmed.
@@ -408,16 +756,16 @@ def fetch_data(d: dict) -> tuple:
     if d.get("check"):
         # What the pack says must hold once the file is there: the program
         # finds it. A file the program cannot find is not installed.
-        argv = [str(a) for a in d["check"]]
-        argv[0] = shutil.which(argv[0], path=IMAGE_PATH) or argv[0]
+        argv = placeholders(d["check"], fill)
         try:
-            ok = run(argv)
+            ok = run(resolve_argv(argv))
         except OSError:
             ok = False
         if not ok:
-            dest.unlink(missing_ok=True)
-            return None, f"its check ({' '.join(str(a) for a in d['check'])[:120]}) failed once the file was in place"
-        rec["check"] = [str(a) for a in d["check"]]
+            if rec["path"]:
+                Path(rec["path"]).unlink(missing_ok=True)
+            return undo(f"its check ({' '.join(argv)[:160]}) failed once the file was in place")
+        rec["check"] = argv
     return rec, None
 
 
@@ -689,7 +1037,11 @@ def sbom(record: dict, python_rows: list, npm_rows: list, own_rows: dict | None 
              "purl": ref, "hashes": [{"alg": "SHA-256", "content": d.get("sha256")}],
              "externalReferences": [{"type": "distribution" if kind in ("download", "deb", "data")
                                      else "source-distribution", "url": d.get("url")}],
-             "properties": [{"name": "dfirswarm:kind", "value": kind}]})
+             "properties": [{"name": "dfirswarm:kind", "value": kind}]
+             + [{"name": "dfirswarm:output", "value": f"{o.get('path')} sha256 {o.get('sha256')}"
+                 + (f" content-sha256 {o['canonical_sha256']} ({o.get('canonical_rule')})" if o.get("canonical_sha256") else "")}
+                for o in d.get("outputs") or []]
+             + ([{"name": "dfirswarm:distribution", "value": d["distribution_policy"]}] if d.get("distribution_policy") else [])})
     profile = record.get("profile", "?")
     return {
         "bomFormat": "CycloneDX",
@@ -835,15 +1187,22 @@ def tools_md(record: dict, spec: dict | None) -> str:
     if data_in:
         lines += ["## Data the programs read", ""]
         for d in sorted(data_in, key=lambda x: x["name"].lower()):
-            lines.append(f"- `{d['name']}` — {d.get('why') or 'no description'} ({d.get('pack', '?')}; for `{d.get('program', '?')}`; at {held[d['name']].get('path', '?')})")
+            h = held[d["name"]]
+            where = ", ".join(o["path"] for o in h.get("outputs") or []) or h.get("path") or "?"
+            ident = "; ".join(" ".join(f"{k} {v}" for k, v in o["identity"].items()) for o in h.get("outputs") or [] if o.get("identity"))
+            lines.append(f"- `{d['name']}` — {d.get('why') or 'no description'} ({d.get('pack', '?')}; for `{d.get('program', '?')}`; "
+                         f"{'identity ' + ident + '; ' if ident else ''}at {where})")
         lines.append("")
     na = (spec or {}).get("not_applicable") or record.get("not_applicable") or []
-    if gone or na or data_out:
+    omitted = (record.get("omitted") or {}).get("data") or []
+    if gone or na or data_out or omitted:
         lines += ["## Named by a pack, not in this image", ""]
         for b in sorted(gone, key=lambda x: x["name"].lower()):
             lines.append(f"- `{b['name']}` ({', '.join(b['packs'])}) — not found after the build ({b.get('source') or 'no install line'})")
         for n, x in sorted(data_out.items()):
             lines.append(f"- `{n}` ({x.get('pack', '')}) — data not installed: {x.get('why', 'the build did not say why')}")
+        for x in sorted(omitted, key=lambda x: x.get("name", "")):
+            lines.append(f"- `{x.get('name', '?')}` ({x.get('pack', '')}) — data left out by the build on purpose: {x.get('why', 'the build did not say why')}")
         for d in na:
             lines.append(f"- `{d['name']}` ({d.get('pack', '')}) — {d.get('why', 'another system')}")
         lines.append("")
@@ -909,6 +1268,7 @@ def base() -> int:
         "downloads": {},
         "binaries": {},
         "not_installed": {"apt": [], "pip": [], "download": [], "data": [], "manual": []},
+        "omitted": {"data": []},
         # What the tool library imports, with the note on each line: every
         # image's tools.md lists them, a profile's after its own packs'.
         "python_library": requirement_notes(Path(__file__).parent / "library-python.txt"),
@@ -941,6 +1301,9 @@ def profile_record(record: dict, spec: dict, downloads: dict, failed: dict) -> d
                           "data": failed.get("data", []), "manual": spec["manual"]},
         # Named by a pack, and another system's: not missing from this image.
         "not_applicable": spec.get("not_applicable", []),
+        # Data a pack pins that this build left out on purpose (recipe.py
+        # build --symbol-set): said apart from what could not be had.
+        "omitted": {"data": spec.get("omitted", {}).get("data", [])},
     })
     return record
 
