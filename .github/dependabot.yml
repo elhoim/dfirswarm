@@ -10,6 +10,14 @@ updates:
       # newer major would let code use APIs Node 22 does not have.
       - dependency-name: "@types/node"
         update-types: ["version-update:semver-major"]
+      # Pinned on purpose and moved by hand. Pi is also pinned in
+      # images/base.Dockerfile (PI_VERSION), which the VMs run, so a bump
+      # here alone splits host-mode seats from VM seats. The VM isolation
+      # was measured on this microsandbox (scripts/swarm.sh warns on any
+      # other), and 0.7.3 turned on a strict hostname policy that leaves a
+      # VM no allowed host.
+      - dependency-name: "@earendil-works/pi-coding-agent"
+      - dependency-name: "microsandbox"
   - package-ecosystem: github-actions
     directory: /
     schedule:
