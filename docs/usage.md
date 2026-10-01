@@ -1229,6 +1229,16 @@ too, and finish status to the answers check's. A rule change that moves a
 fixture's projection changes its `expect.json` in the same commit, with the
 ADR that says why.
 
+#### Kickoff goldens
+
+`tests/kickoff-goldens.test.sh` runs `swarm.sh start --no-start` for three goals and compares what the kickoff writes with the files under `tests/fixtures/kickoff/<case>/`: `SWARM.md`, the system prompt, the budget, the team, the case policy, the inputs manifest and the questions. Before the comparison it replaces what only the machine or the moment decides with a placeholder: the run's id, the paths, the times, and the host's guard and facts. A change to the kickoff, whether to the template, a goal, the prompt or the policy, therefore fails it until the goldens are written again in the same pull request:
+
+```
+GOLDENS=update bash tests/kickoff-goldens.test.sh
+```
+
+and the diff of `tests/fixtures/kickoff/` is the change, as the agents will read it.
+
 #### A pull request's impact line, and the rule register
 
 `node --experimental-strip-types scripts/replay-impact.ts <base-commit>` replays every contract fixture (`tests/fixtures/contract/`) under the base commit and under this checkout, and prints each difference as a table: a fixture, a section, what differs, and each side. CI runs it on every pull request against its base and writes the table to the job's summary. A difference is what the change reaches, never a failure; the fixtures' own expectations are what the tests hold.

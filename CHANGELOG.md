@@ -6,6 +6,15 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Added: kickoff goldens
+
+`tests/kickoff-goldens.test.sh` compares what `swarm.sh start --no-start` writes for three goals with `tests/fixtures/kickoff/`:
+- the contract and the system prompt;
+- the budget, the team and the case policy;
+- the inputs manifest and the questions.
+
+The machine and the moment are written as placeholders. A change to the kickoff fails it until `GOLDENS=update` writes the files again, so the change shows as a readable diff of what the agents will read. With it, the refactoring plan's steps are done: the protocol split into modules, the inputs manifest and the contract in TypeScript, the rule register, the replay impact line, and these goldens.
+
 ### Added: the rule register and a pull request's replay impact line
 
 The first impact tools of the refactoring plan, for reading what a change reaches before reading the code.
