@@ -34,9 +34,9 @@ Third-party material in this repository
 ---------------------------------------
 
 The licence above covers this program. It cannot cover work somebody else
-wrote, and some of that is here. Nothing in this section is licensed under
-the AGPL, and redistributing this repository passes on no right its authors
-have not themselves given.
+wrote, and some of that is here. Nothing in this section is licensed by this
+project; each item stays under its own authors' terms, and redistributing
+this repository passes on no right its authors have not themselves given.
 
 Fonts. `.design-sync/fonts/` holds IBM Plex Sans and IBM Plex Mono
 (Copyright IBM Corp., https://github.com/IBM/plex) and Instrument Serif
