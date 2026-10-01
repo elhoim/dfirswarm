@@ -1341,6 +1341,200 @@ presence, not truth.
   So does `reversals.partial_after_cap`, which already counts answers
   recorded partial after a cap.
 
+## A question that must be established
+
+Added 2026-10-01, after the Breadcrumbs run (a flag-only challenge under
+`--stop operator`, nine seats). The one question's answer was partial on a
+reviewed finding, and the part the flag needed was the open part. Under the
+one rule above, partial is a disposition. The coordinator's done therefore
+ended the run examination-limited after 23 minutes, without the flag. The
+operator resumed the run and asked the question again by hand. Nothing let
+the goal or the operator say that this question had to be established.
+
+- **What it is.** A question may be required to be established
+  (`must_establish` on the question register). For such a question, a
+  disposition under the bar is only one of these:
+  - an answer the answers check reads as answering it: established on a
+    standing finding and not a best candidate, a premise shown not to hold
+    on a finding, or a bounded negative under the stronger bar;
+  - the operator's acceptance of its limits;
+  - its withdrawal.
+
+  Partial, not determinable, a bounded negative short of the stronger bar
+  and out of scope still limit the run, as they always did. For this
+  question they are no disposition, so the finish line holds the done on
+  it. This is one rule under every stop policy: a cap still pauses or stops
+  the run and the operator still stops it; under `--stop operator` nothing
+  else ends it. Under `cap-pause` and `cap-stop` the agents may still
+  abandon a run, as they may abandon any run there (`done` with `abandon:
+  true`, a vote of two seats); that end is `abandoned`, never completed or
+  examination-limited, but it does end the run with the question open. So
+  the requirement binds the agents' done under every policy, and binds them
+  fully only under `--stop operator`, where nobody abandons.
+- **Who says so.**
+  - The goal, which owns the definition of done ([ADR 0002](0002-the-goal-owns-the-definition-of-done.md)):
+    a `## Must establish` section naming its questions as it numbers them
+    (`- 1`, `- Q-3: why`), or `must_establish:` in its metadata block
+    (`[1, 3]`, or a list), which the kickoff writes into that section. The
+    seed puts the requirement on each named question's `open` act, present
+    only when given, so a goal without it seeds as it always did. A name the
+    goal does not number requires nothing, and the kickoff warns of it; so
+    does a `must_establish:` key that names nothing. The list's items may be
+    indented or not, and a list beside the goal's own section is merged into
+    it: neither is dropped quietly, since a bar lower than the one written is
+    what this exists to prevent.
+  - The operator or an examiner: `question add --must-establish`, and on an
+    existing question `question amend Q-n --expect-rev N --must-establish`,
+    which makes no new revision.
+  - Never an agent, an analyst, a reviewer or an observer: it changes what
+    ends the run, as an acceptance does, and they are refused with why. A
+    background question is refused it too, since the finish line waits only
+    for material questions.
+- **The ways out, on the record.** The mechanism that already took a
+  question's limits stays the way out. An acceptance (`question accept`,
+  bound to the revision and to the answer that stood) disposes a question
+  that must be established as it disposes any other: it is the explicit
+  release for that answer, and it lapses as acceptances do. The requirement
+  itself is released with `question amend Q-n --expect-rev N
+  --no-must-establish --why W`; the register keeps who released it, when and
+  why, beside who required it, and the chain keeps every act. Nothing else
+  releases it: not the stop policy, a review or a vote. A withdrawal of the
+  question is a disposition for it, as for any question ([ADR 0011](0011-questions-are-a-register-with-their-askers.md),
+  item 9): a person's act on the record, with who and why. The requirement
+  does not change who may withdraw: the operator, an examiner, or the person
+  who asked it (an analyst, a reviewer or an observer, their own question
+  only). So an analyst who withdraws their own question ends its requirement
+  with it, on the record; a goal's question is withdrawn only by the operator
+  or an examiner, and an agent withdraws none.
+- **Where it holds.**
+  - The answers check gives such a question no disposition unless its answer
+    answers it (`sectionBars` reads the requirement from the register); its
+    line says "it must be established, and this is no disposition for it".
+    Its `ok` and its defects are unchanged.
+  - The finish gate reads that, marks the question `must_establish`, and
+    names the requirement first among what blocks it: who required it, how
+    its answer stands, and the ways out.
+  - The done's refusal says those ways instead of the negative path (plan
+    the routes, record the coverage, answer not determinable), which would
+    end nothing here.
+  - Readiness holds such a question while its standing answer only limits
+    the run (`establishesBy`, by what the answer says it is; the rest of the
+    bar is the answers check's, and the contract fixtures hold the two
+    together), so readiness and the done agree, as they must ([ADR 0015](0015-one-seat-finishes-and-work-is-offered.md)).
+- **What the agents are told.** Every header, while it lasts, names each such
+  question that is not yet established, who required it, how its answer
+  stands, and what ends the run on it. The `questions` view,
+  `questions/questions.md`, `question list|show` and the contract (the
+  goal's own section, and a sentence in its Questions section) say it too.
+- **Why this shape.**
+  - Not a stricter stop policy. "Until every question is answered" was the
+    ctf12 rule this record replaced: it held every question of a run, so a
+    question the evidence cannot answer had only the operator's acceptance
+    as an end. Per question keeps the generic bar for the rest.
+  - Not a new result or disposition: the bar is the answers check's
+    existing "answered" outcome.
+  - Not a ledger defect. The requirement is a property of the question, read
+    from the register; the answer is not defective. Holding by disposition
+    leaves the answers check's defects as they were, so the rule register
+    (`docs/rules.md`) does not change.
+  - Not a warning on the record ("this answer does not end the run"): the
+    header and readiness say it at every delivery.
+- **Measured.** Five contract fixtures, under every stop policy:
+  `must-establish-partial` (required by the goal; a reviewed partial
+  answer), `must-establish-not-determinable` (required by the operator's
+  amendment; not determinable on a reviewed coverage record),
+  `must-establish-accepted` (required, then accepted),
+  `must-establish-released` (required by the goal, then released) and
+  `must-establish-established` (required, and established). Replayed
+  against main before the change (c61bc2b), the first two are disposed and
+  their done proceeds examination-limited under main, and are held under
+  this change, readiness holding on `must_establish`. The accepted one ends
+  examination-limited under both; only the answers check's own word on its
+  partial answer differs. The released and the established ones read the
+  same under both, and so does every other contract fixture
+  (`scripts/replay-impact.ts c61bc2b`).
+- **Not decided here.** The console's question form has no field for it yet
+  (the CLI and the goal have). The report does not yet say that a question
+  was required or released; `questions/questions.md` and `question show` do.
+
+## A resume refuses a question it cannot admit
+
+Added 2026-10-01, from the same run. The operator resumed it with the
+question again and `--as operator`, an id nobody is enrolled under on that
+install. The resume admitted its questions only after it had moved the
+run's end aside and recorded itself, so the refusal came as a `WARN` after
+the run had already gone on, without the question it was resumed for. A
+seat noticed and asked.
+
+- **Checked first.** Before anything moves, each question given
+  (`--question`, `--questions FILE`) is checked as its admission would check
+  it, against the register as it stands: who `--as` names, the words, a
+  question the register already holds word for word (`questions-cli.ts add
+  --dry-run`, `checkAct`: the commit's own checks, with nothing written,
+  signed, supplied or delivered). One it would refuse refuses the resume
+  with nothing changed, naming the question and the reason. A broken
+  question chain is refused as the admission refuses it. What the dry run
+  does not do, the admission does: it takes no lock, writes no seed (it
+  reads the goal's, derived) and reconciles nothing an earlier act left
+  undone. `direct`, `deliver` and `seed` write by what they are, and refuse
+  `--dry-run`.
+- **Going on without it is said.** `--skip-refused-questions` leaves such a
+  question out and resumes, with a `WARN` naming it and why.
+- **Checked again.** The question is admitted after the move, as before;
+  the register may have moved in between, and a refusal then is still
+  warned of.
+
+## The stop proposal's window
+
+Added 2026-10-01, from the same run. Its stop proposal (item 11 above: 20
+committed jobs or 30 minutes with nothing yielded) fired 8 minutes and 20
+jobs after the last finding, two minutes before the breakthrough. That was
+harmless, since silence approves nothing, but it was noise on work whose
+progress comes in jumps. The question was whether the two arms should be
+joined (both), or the count scaled with the run.
+
+The answer comes from the recorded runs. They are not in this repository:
+they are the owner's own run histories on the machine the runs were made on
+(microVM runs from 2026-09-24 to 2026-10-01, the live Breadcrumbs run among
+them), and the measure was made on copies of their timing files only (the
+budget, the ledger's entries, the question chain, each job's `job.json`,
+`done/`, the team), with a one-off script that is not kept either. So the
+numbers below can be checked against those histories, not from this tree.
+The 45 runs with ten committed jobs or more (5,227 jobs by agents, 4,541
+yields: findings, coverage records, answers, dispositions and acceptances),
+each segment of a resumed run taken apart, were replayed against the rule
+minute by minute and at every committed job:
+
+- The stretches between two yields (each yield counted when it was
+  recorded): half lasted 0.2 minutes or less with no job; 99 in 100 lasted
+  under 7.2 minutes, and 99 in 100 held 13 jobs or fewer. The longest that
+  still ended in a yield ran 22 minutes; the largest held 47 jobs. No stretch
+  of 30 minutes or more ended in a yield; 23 stretches of 20 jobs or more
+  did, every one within 30 minutes.
+- The rule as it was (20 jobs or 30 minutes) proposed 27 times in 10 runs.
+  26 of those came on the job count, 20 jobs in one to eight minutes, and
+  every one of them was followed by a yield, 25 within ten minutes. The
+  27th came on the minutes, in a run whose seats had run no job for 30
+  minutes; nothing yielded again, and the operator stopped it a minute
+  later. That "nothing yielded again" is partly the operator's doing: the
+  stop came before the run could show whether it would recover, so this
+  one stall is a weak positive. The case for the change rests on the 26
+  proposals that the work went on to answer, not on it.
+- Both arms (20 jobs and 30 minutes) would have proposed nothing at all,
+  and would have missed that stall, which had no job. A count scaled to the
+  seats (five a seat, 50 at ten seats) proposed only the stall, but by a
+  margin of three jobs over the largest stretch that still yielded. The
+  minutes alone proposed only the stall.
+
+So the minutes decide: a stop is proposed after `SWARM_YIELD_MINUTES` (30)
+with nothing yielded. The job count proposes nothing by default;
+`SWARM_YIELD_JOBS=N` puts it back beside the minutes for an operator who
+wants it. Everything else stands: the proposal is the operator's request,
+never an agent's vote, never a stop by itself, and silence approves nothing.
+The count of jobs is still said in the proposal. This is a measure of what
+the rule would have done on recorded histories; whether 30 minutes is the
+right length for runs much larger than these is for later runs to show.
+
 ## Consequences
 
 - Every existing goal and run keeps working: an answer without `result`

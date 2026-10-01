@@ -106,6 +106,14 @@ then ends examination-limited, which is a proper end. A cap or the operator
 may end the run before that; such an end is stopped or paused, never
 completed.
 
+A question the goal (its Must establish section) or the operator requires to
+be established, named in your header and in `questions`, is held to more:
+only an answer that establishes it on a standing finding another seat
+attests, shows its premise does not hold, or settles it by a bounded negative
+under the stronger bar ends the run on it. Partial, not determinable and the
+rest do not; keep working it by another route, another source or another
+reading. Only the operator accepts its limits or releases it.
+
 ## Caps
 
 - Spend: $1 USD across the swarm

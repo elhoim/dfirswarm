@@ -291,7 +291,8 @@ Limits
                       completed). operator: --until-solved. A metered team without
                       --cap-tokens gets a token cap of 100000000 as a second brake.
                       When nothing has yielded (no new finding, question disposition
-                      or coverage record) for 20 jobs or 30 minutes, a stop is
+                      or coverage record) for 30 minutes (SWARM_YIELD_MINUTES; and
+                      SWARM_YIELD_JOBS committed jobs, when set), a stop is
                       proposed to you as an operator request (kind decision); your
                       silence is never taken for approval. Also set by the goal's
                       metadata block (stop: cap-pause).
@@ -3864,7 +3865,10 @@ cmd_start() {
   # the case takes as given, carried into a `## Premises` section the same
   # way; each is a given of the premise register (P-n). And presumes: what
   # each question takes as happened (`- 7: <what>`), carried into a
-  # `## Presumptions` section; its answer tests that premise first.
+  # `## Presumptions` section; its answer tests that premise first. And
+  # must_establish: the questions only an answer that answers them ends
+  # the run on (`must_establish: [1, 3]`, or a list of `- 1: why`), carried
+  # into a `## Must establish` section (docs/adr/0013).
   # The case policy, from the flags, the goal's metadata block (read before
   # it is stripped) and the preset: refused here when it contradicts itself,
   # never guessed. `network: open` is --no-netguard.
@@ -3967,6 +3971,31 @@ if m:
     if presumes and not re.search(r"^#{2,3}[ \t]*Presumptions[ \t]*$", body, re.M | re.I):
         body = body.rstrip("\n") + "\n\n## Presumptions\n\n" + "".join("- " + x + "\n" for x in presumes)
     out["presumes"] = len(presumes)
+    # The questions that must be established (docs/adr/0013, "A question that
+    # must be established"): an inline list ([1, 3] or 1, 3) or a list of
+    # "- <question>[: why]" lines, indented or not (both are YAML), carried
+    # into a Must establish section, where the question register reads it;
+    # into the section of that name the goal has already, so neither is dropped. A
+    # key that names nothing is said (must_establish_unparsed): a bar quietly
+    # lower than the operator wrote is what this list exists to prevent.
+    required = []
+    rblock = re.search(r"^must_establish:[ \t]*(.*?)\r?\n((?:[ \t]*-(?=[ \t]|\r?\n)[^\n]*\n?)*)", m.group(0), re.M)
+    if rblock:
+        inline = rblock.group(1).strip().strip("[]")
+        required += [x.strip().strip("\"'") for x in inline.split(",") if x.strip().strip("\"'")]
+        for item in re.findall(r"^[ \t]*-(?=[ \t]|\r?$)[ \t]*(.*?)[ \t]*\r?$", rblock.group(2), re.M):
+            if item.strip():
+                required.append(item.strip())
+        if not required:
+            out["must_establish_unparsed"] = True
+    if required:
+        items = "".join("- " + x + "\n" for x in required)
+        heading = re.search(r"^#{2,3}[ \t]*Must establish[ \t]*\r?\n", body, re.M | re.I)
+        if heading:
+            body = body[: heading.end()] + "\n" + items + body[heading.end():]
+        else:
+            body = body.rstrip("\n") + "\n\n## Must establish\n\n" + items
+    out["must_establish"] = len(required)
     with open(path, "w", encoding="utf-8") as f:
         f.write(body)
 # A goal with a case brief and no premises designated (docs/adr/0011,
@@ -3995,6 +4024,10 @@ STRIP
   goal_toolbox="$(jq -r '.toolbox' <<<"$goal_meta")"
   local goal_brief
   goal_brief="$(jq -r '.brief_without_premises // empty' <<<"$goal_meta")"
+  # A must_establish: key that names no question (docs/adr/0013): said, never guessed.
+  if [[ "$(jq -r '.must_establish_unparsed // false' <<<"$goal_meta")" == true ]]; then
+    echo "WARN: the goal's metadata block has must_establish: and names no question in it, so nothing is required by it: write the questions as the goal numbers them, must_establish: [1, 3] or a line each (- 1), indented or not ($goal_source)." >&2
+  fi
   if [[ -n "$goal_brief" ]]; then
     echo "WARN: the goal has a case brief ($goal_brief) and designates no premises: its answers will hold the brief's givens (whose devices these are, who the subject is, the setting) open, as parts still to prove. Designate what the brief states as given with a premises: list in the goal's front matter (a line each: - <the brief's sentence> [scope: questions 1, 2; entities <who or what>]), or once the run exists with: swarm.sh question <run> premise add --text \"<the brief's sentence>\" --locator \"<where it stands>\" [--entity E] [--for-question Q-n]. Never a premise that answers a question, or that a question tests ($goal_source)." >&2
   fi
@@ -5617,8 +5650,16 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
   fi
   # The question register opens with the goal's questions and objectives
   # (extensions/questions.ts): Q-n is question:n from its first event.
-  SWARM_RUNS_DIR="$RUNS_DIR" node --experimental-strip-types --no-warnings "$ROOT/scripts/questions-cli.ts" seed "$sandbox" >/dev/null 2>&1 \
-    || echo "WARN: the question register could not be seeded now; the first act on it seeds it from the goal." >&2
+  # A Must establish section that names what the goal does not number
+  # requires nothing (docs/adr/0013): said, so a typo cannot quietly lower
+  # the bar the run ends on.
+  local seeded_out
+  if seeded_out="$(SWARM_RUNS_DIR="$RUNS_DIR" node --experimental-strip-types --no-warnings "$ROOT/scripts/questions-cli.ts" seed "$sandbox" 2>/dev/null)"; then
+    jq -r 'if (.must_establish // []) | length > 0 then "Required:     \(.must_establish | join(", ")) must be established: only an answer that answers each ends the run on it, or your acceptance of its limits" else empty end' <<<"$seeded_out" 2>/dev/null || true
+    jq -r 'if (.must_establish_unknown // []) | length > 0 then "WARN: the goal says these must be established and numbers no such question, so nothing is required of them: \(.must_establish_unknown | join(", ")). Name a question as the goal numbers it (- 1), or require it once the run exists: swarm.sh question <run> amend Q-n --expect-rev N --must-establish --why \"…\"" else empty end' <<<"$seeded_out" >&2 2>/dev/null || true
+  else
+    echo "WARN: the question register could not be seeded now; the first act on it seeds it from the goal." >&2
+  fi
   # The operator's notify command, outside the run and 0600: a webhook's
   # URL is often its secret, and nothing an agent writes may name what the
   # host runs.
@@ -9310,15 +9351,16 @@ cmd_resume() {
   # As the operator typed it: the run's trace names the resume with these.
   RESUME_ARGS=("$@")
   local id="${1:-}"
-  [[ -n "$id" && "$id" != -* ]] || die_usage "resume requires <id> [--question TEXT]... [--questions FILE] [--why TEXT] [--as ID] [--minutes N] [--tokens N] [--usd N] [--env KEY=VALUE]... [--no-start] [-- START OPTIONS]"
+  [[ -n "$id" && "$id" != -* ]] || die_usage "resume requires <id> [--question TEXT]... [--questions FILE] [--why TEXT] [--as ID] [--skip-refused-questions] [--minutes N] [--tokens N] [--usd N] [--env KEY=VALUE]... [--no-start] [-- START OPTIONS]"
   shift
-  local questions=() qfile="" as="" why="" no_start=0 prep=() given=() sep=0 env_given=()
+  local questions=() qfile="" as="" why="" no_start=0 prep=() given=() sep=0 env_given=() skip_refused=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --question) [[ -n "${2:-}" ]] || die_usage "--question takes the question's text"; questions+=("$2"); shift 2 ;;
       --questions) qfile="${2:-}"; shift 2 ;;
       --as) as="${2:-}"; shift 2 ;;
       --why) why="${2:-}"; shift 2 ;;
+      --skip-refused-questions) skip_refused=1; shift ;;
       --minutes|--tokens|--usd) [[ "${2:-}" =~ ^[0-9]+(\.[0-9]+)?$ ]] || die_usage "$1 takes a number"; prep+=("$1" "$2"); shift 2 ;;
       --no-start) no_start=1; shift ;;
       --env) [[ "${2:-}" == *=* ]] || die_usage "--env takes KEY=VALUE"; env_given+=("$2"); shift 2 ;;
@@ -9358,6 +9400,31 @@ cmd_resume() {
       if (!Array.isArray(list)) list = t.split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("#"));
       for (const x of list) { const s = typeof x === "string" ? x : String(x?.text ?? ""); if (s.trim()) console.log(s.replace(/\n/g, " ").trim()); }
     ' "$qfile")
+  fi
+  # Each question asked for the continuation is checked before anything
+  # moves (docs/adr/0013, "A resume refuses a question it cannot admit"): one
+  # the register would refuse (an --as nobody is enrolled under, words it
+  # refuses, a question it holds already) refuses the resume, naming why,
+  # unless --skip-refused-questions says to go on without it. A WARN after
+  # the run had moved was not enough: the continuation went on without the
+  # question it was resumed for.
+  if ((${#questions[@]})); then
+    local kept_q=() refused_q=0 q qcheck qwhy
+    for q in "${questions[@]}"; do
+      if qcheck="$(SWARM_RUNS_DIR="$RUNS_DIR" node --experimental-strip-types --no-warnings "$ROOT/scripts/questions-cli.ts" add "$sandbox" --dry-run --text "$q" --why "${why:-asked when the run was resumed}" ${as:+--as "$as"} --via "${SWARM_OPERATOR_VIA:-cli}")"; then
+        kept_q+=("$q")
+        continue
+      fi
+      qwhy="$(jq -r '.reason // "refused"' <<<"$qcheck" 2>/dev/null || printf '%s' "$qcheck")"
+      if [[ "$skip_refused" -eq 1 ]]; then
+        echo "WARN: the question \"$q\" cannot be admitted ($qwhy): left out, as --skip-refused-questions says; the resume goes on without it." >&2
+      else
+        echo "BLOCKER: the question \"$q\" cannot be admitted: $qwhy. Nothing was changed. Ask it so the register takes it (--as names a person enrolled with swarm.sh examiner enroll; without --as it is this OS account's, with the operator's authority), or give --skip-refused-questions to resume without it." >&2
+        refused_q=1
+      fi
+    done
+    [[ "$refused_q" -eq 0 ]] || exit 2
+    questions=(${kept_q[@]+"${kept_q[@]}"})
   fi
   # The options it was started with: kept at kickoff, or given after --.
   local start_argv=() a argv_file="$RUNS_DIR/resume/$id.argv.json" dropped_env=() kept_notify=0 k
@@ -10774,7 +10841,7 @@ EOF
 EOF
       ;;
     resume) cat <<'EOF'
-  resume <id> [--question TEXT]... [--questions FILE] [--why TEXT] [--as ID]
+  resume <id> [--question TEXT]... [--questions FILE] [--why TEXT] [--as ID] [--skip-refused-questions]
               [--minutes N] [--tokens N] [--usd N] [--env KEY=VALUE]... [--no-start] [-- START OPTIONS]
       Continue a run that ended (stopped, done, failed): the same run, in the same
       sandbox, on the same ledger, registers, board and trace. What marked its end
@@ -10786,7 +10853,10 @@ EOF
       refused with nothing changed (give --minutes, --tokens or --usd). Questions
       given (--question, or a file of them, one a line or a JSON list) are asked as
       analyst questions, with --why (default: asked when the run was resumed) and
-      --as. The run starts with the options it was started with (kept at kickoff
+      --as; each is checked first, and one the register would refuse (an --as
+      nobody is enrolled under, a question it holds already) refuses the resume
+      with nothing changed, unless --skip-refused-questions leaves it out. The
+      run starts with the options it was started with (kept at kickoff
       outside the run, 0600, denied to the panes where the guard can; the notify
       command is taken from runs/notify/, and an --env value no pane could be kept
       from reading is not kept: give it again with --env KEY=VALUE); a run from

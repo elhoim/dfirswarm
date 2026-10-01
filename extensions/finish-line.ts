@@ -460,8 +460,8 @@ export type FinishLineRun = {
 export type FinishGateView = {
   defects: Array<{ code: string; lead?: string; job?: string; question?: string; what: string; fix: string }>;
   limited: string[];
-  /** Each question, how it stands, what blocks it, and its disposition under the bar when it has one (established, partial, bounded_negative, not_determinable, premise_not_supported, out_of_scope). */
-  questions?: Array<{ id: string; outcome: string; blocks: string[]; disposition?: string }>;
+  /** Each question, how it stands, what blocks it, and its disposition under the bar when it has one (established, partial, bounded_negative, not_determinable, premise_not_supported, out_of_scope); `must_establish` when it takes only an answer that answers it (docs/adr/0013). */
+  questions?: Array<{ id: string; outcome: string; blocks: string[]; disposition?: string; must_establish?: boolean }>;
   until_solved?: boolean;
   /** The lines of `limited` that are the operator's acceptances. */
   accepted?: string[];
@@ -551,6 +551,15 @@ export const DISPOSITION_WORDS =
   "every question in scope has a disposition under the bar: established; partial; a bounded negative or not determinable, each resting on a coverage record another seat has reviewed; a premise shown not to hold; out of scope; accepted by the operator; or withdrawn";
 export const NEGATIVE_PATH_WORDS =
   "When the evidence cannot answer a question, that is an answer too: plan its routes (lead_open or lead_link with routes); when it needs a source the evidence does not hold, ask for it first (lead_close needs_operator with ask {kind: acquisition, source, where, expected_value, urgency}); record a coverage record (kind=coverage: what was searched, over which objects, how, what was covered, skipped and failed, the results, what is still open, whether the event would have left a trace, and the acquisition ask as acquisition_ask R-<n>, or why none in acquisition_none_why), have another seat review it (attest with review {detection, reproduced, other_route}), then answer not_determinable, or bounded_negative when nothing was found in that scope";
+
+/**
+ * The way to a disposition for a question that must be established (docs/adr/0013,
+ * "A question that must be established"): never a negative, and never a vote.
+ */
+export const MUST_ESTABLISH_PATH_WORDS =
+  "A question that must be established (the goal's Must establish section, or the operator's word) ends the run only established, on a standing finding another seat attests established, with its premise shown not to hold on a finding, or settled by a bounded negative under the stronger bar: partial, not determinable and the rest do not end the run on it, and only the operator accepts its limits (question accept) or releases the requirement (question amend --no-must-establish). " +
+  "The stronger bar is for a question that asks whether something exists: plan its routes, record a coverage record (kind=coverage) over the objects the event would have touched, which the hub finds complete and which says the event would have left a trace there (trace_expected yes), have another seat review it (attest with review {detection, reproduced, other_route}), then answer bounded_negative with asserts_absence: true, saying the event did not happen. " +
+  "Short of that, keep working it: another route, another source, another reading of what the run holds";
 
 /** The refusal of an abandon in an until-solved run: only the operator ends it. */
 export const UNTIL_SOLVED_NO_ABANDON =
@@ -648,6 +657,9 @@ export function finishLineVerdict(run: FinishLineRun | null, abandon: boolean, o
         // Giving up is still a way out where the operator is not the only one who ends the run.
         if (abandon && !until) return { proceed: true, outcome: "abandoned", reasonPrefix: ABANDON_PREFIX, note: `the goal's checks pass, and ${open.length ? `${open.length} question(s) have no disposition under the bar` : "a defect a limitation only names stands"}; abandoned on purpose` };
         const qs = open.map((q) => `- question:${q.id} is ${q.outcome}, with no disposition under the bar: ${q.blocks.join("; ")}`).join("\n");
+        // A question that must be established is never ended by a negative: its way is said instead of the negative path, or beside it.
+        const required = open.filter((q) => q.must_establish);
+        const path = required.length && required.length === open.length && !holding.length ? MUST_ESTABLISH_PATH_WORDS : `${NEGATIVE_PATH_WORDS}${required.length ? `. ${MUST_ESTABLISH_PATH_WORDS} (${required.map((q) => `question:${q.id}`).join(", ")})` : ""}`;
         return {
           proceed: false,
           failing: open[0] ? `question:${open[0].id}` : "(a defect a limitation names)",
@@ -656,7 +668,7 @@ export function finishLineVerdict(run: FinishLineRun | null, abandon: boolean, o
               ? `This run's stop is the operator's (--stop operator): no caps, no wall clock, and it ends when ${DISPOSITION_WORDS}; with no material lead open and no defect. `
               : `done finishes a run, whatever its stop policy, only when ${DISPOSITION_WORDS}; with no material lead open and no defect. A cap pauses or stops the run whatever the questions' state, and the operator may stop it: that end is stopped, never completed. `) +
             `${open.length ? `No disposition yet:\n${qs}\n` : ""}${holding.length ? `A defect is fixed, never only named:\n${holding.map((l) => `- ${l}`).join("\n")}\n` : ""}` +
-            `${NEGATIVE_PATH_WORDS}. Otherwise take another route (lead_open), or close a lead needs_operator when only the operator can unblock it. ` +
+            `${path}. Otherwise take another route (lead_open), or close a lead needs_operator when only the operator can unblock it. ` +
             (until ? "Only the operator can stop this run." : "If the goal cannot be met at all, call done again with abandon: true and say why on the board."),
         };
       }
