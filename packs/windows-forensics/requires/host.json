@@ -64,7 +64,7 @@
         "brew": "python3 -m pip install volatility3",
         "apt": "python3 -m pip install volatility3"
       },
-      "licence": "Volatility Software License 1.0",
+      "licence": "Volatility Software License 1.0 (https://github.com/volatilityfoundation/volatility3/blob/develop/LICENSE.txt)",
       "redistributable": false
     },
     {

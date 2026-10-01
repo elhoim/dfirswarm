@@ -134,7 +134,8 @@ python3 "$R" build web --out "$TMP/ctx-web" >/dev/null || fail "web holds no pac
 grep -q 'dev.dfirswarm.redistributable' "$TMP/ctx-web/Dockerfile" && fail "a profile with nothing held back must inherit the base's label, not claim its own"
 grep -q 'dev.dfirswarm.redistributable="${REDISTRIBUTABLE}"' "$ROOT/images/base.Dockerfile" || fail "the base image does not carry the redistributable label"
 grep -q 'COPY install.py spec.json NOTICE' "$TMP/ctx/Dockerfile" || fail "the NOTICE does not go into the image"
-grep -q '^vol  (memory-forensics)  Volatility Software License 1.0' "$TMP/ctx/NOTICE" || fail "the NOTICE does not name vol's licence"
+grep -qF 'vol  (memory-forensics)  Volatility Software License 1.0 (https://github.com/volatilityfoundation/volatility3/blob/develop/LICENSE.txt)' "$TMP/ctx/NOTICE" \
+  || fail "the NOTICE does not name vol's licence with the link to its text"
 seal_py="$(jq -r '.pack_versions["memory-forensics"].seal' "$TMP/ctx/spec.json")"
 seal_ts="$(cd "$ROOT" && node --experimental-strip-types -e 'import("./scripts/vm.ts").then(m => console.log(m.packNeeds(["packs/memory-forensics"])[0].seal))')"
 [[ "$seal_py" == "$seal_ts" ]] || fail "the recipe's seal ($seal_py) and the kickoff's ($seal_ts) differ"

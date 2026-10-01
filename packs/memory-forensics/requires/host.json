@@ -60,7 +60,7 @@
           "licence": "Our reading, not legal advice. The pack carries no licence text of its own. The Volatility Software License 1.0 (https://www.volatilityfoundation.org/license/vsl-v1.0) says its \"Software\" includes \"any data (such as operating system profiles or configuration information)\" provided with the software; we read the tables as such data. The tables are generated from Microsoft's public symbol (PDB) files, whose Microsoft Symbol Server licence terms of June 2022 (https://learn.microsoft.com/en-us/legal/windows-sdk/microsoft-symbol-server-license-terms) allow use \"solely for purposes of performance, security or functional debugging and testing of your software as used with Microsoft software, or as otherwise authorized by Microsoft\" and say that you may not \"share, publish, rent, or lease the Symbol Items, or provide the Symbol Items as stand-alone offerings for others to use\". Whether examining evidence is within that use is not ours to say, so these terms may bear on use as well as on redistribution. This image is not for redistribution."
         }
       },
-      "licence": "Volatility Software License 1.0",
+      "licence": "Volatility Software License 1.0 (https://github.com/volatilityfoundation/volatility3/blob/develop/LICENSE.txt)",
       "redistributable": false
     },
     {

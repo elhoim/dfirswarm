@@ -21,6 +21,14 @@ This program depends on, and does not include, Herdr (Apache License 2.0)
 and Pi (MIT). Their terms are their own. The npm packages it builds against
 are not in this repository either; each carries its own licence.
 
+Two of its packs, memory-forensics and windows-forensics, name Volatility 3
+(`vol`), which this repository does not include either. An image built from
+them installs it, under the Volatility Software License 1.0 of the Volatility
+Foundation, whose text is at
+https://github.com/volatilityfoundation/volatility3/blob/develop/LICENSE.txt
+The image's own NOTICE (/etc/dfirswarm/NOTICE) gives the same link beside
+the program.
+
 
 Third-party material in this repository
 ---------------------------------------
@@ -48,20 +56,26 @@ forensic challenges other people made:
     an edition's `challenges.md` is quoted from the challenge board as the
     site states it. https://belkasoft.com/ctf
 
+Each case folder's SOURCE.md names the challenge's author, its link, and the
+licence its source states ("unknown, see link" where the source states none).
+
 No evidence file from either source is in this repository, and none should be
 added: the images are large, their authors publish them, and each case README
 says where to get them. What is here is the swarm's own record of working
 them — the board, the ledger, the trace, the report and the screenshots. That
 record is this project's work and the licence above covers it. The scenarios,
-the questions and the challenge text it quotes are not, and stay with the
-authors named here.
+the questions and the challenge text it quotes (in the case folders and in
+the copies of their goal documents under `prompts/goals/`) are not, and stay
+with the authors named here.
 
 Test data. `tests/fixtures/ad1/compressed.ad1` is a 2,197-byte AD1 logical
 image FTK Imager wrote, taken unchanged from Fox-IT's dissect.evidence
 (`tests/_data/ad1/compressed.ad1`, https://github.com/fox-it/dissect.evidence),
-which its authors license under the GNU AGPL v3. It holds two short text
-files they made for their own tests and is no case's evidence. The suite
-reads it to hold the base pack's AD1 reader to what FTK Imager writes.
+whose pyproject.toml declares the licence AGPL-3.0-or-later.
+Copyright Fox-IT (part of NCC Group Plc); made by its Dissect Team,
+dissect@fox-it.com. It holds two short text files they made for their own
+tests and is no case's evidence. The suite reads it to hold the base pack's
+AD1 reader to what FTK Imager writes.
 
 Brand. The marks in `brand/` and the name "DFIR Swarm" are not licensed
 under the AGPL. TRADEMARK.md sets out what you may do with them without
