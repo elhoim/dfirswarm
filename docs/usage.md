@@ -568,8 +568,10 @@ report and the console say which.
   "stopped", by, at, why}`) before custody seals it: a stopped run is never
   read as completed.
 - When nothing has yielded (no new finding, question disposition or coverage
-  record) for 20 committed jobs or 30 minutes (`SWARM_YIELD_JOBS`,
-  `SWARM_YIELD_MINUTES`), the watchdog proposes a stop: an operator request of
+  record) for 30 minutes (`SWARM_YIELD_MINUTES`), the watchdog proposes a stop
+  (`SWARM_YIELD_JOBS=N` adds a count: N committed jobs with nothing yielded
+  propose too; off by default, since on the recorded runs a burst of 20 jobs
+  without a yield was ordinary work that yielded within minutes): an operator request of
   kind `decision` (`D-n`, with its `R-n`), with what is still open,
   on the trace (`stop_proposed`) and to the notify command. Nothing stops unless
   you act; another proposal comes only after a further window with nothing

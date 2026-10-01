@@ -291,7 +291,8 @@ Limits
                       completed). operator: --until-solved. A metered team without
                       --cap-tokens gets a token cap of 100000000 as a second brake.
                       When nothing has yielded (no new finding, question disposition
-                      or coverage record) for 20 jobs or 30 minutes, a stop is
+                      or coverage record) for 30 minutes (SWARM_YIELD_MINUTES; and
+                      SWARM_YIELD_JOBS committed jobs, when set), a stop is
                       proposed to you as an operator request (kind decision); your
                       silence is never taken for approval. Also set by the goal's
                       metadata block (stop: cap-pause).

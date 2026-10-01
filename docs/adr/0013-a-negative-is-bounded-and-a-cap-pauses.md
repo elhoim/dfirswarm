@@ -1460,6 +1460,48 @@ seat noticed and asked.
   the register may have moved in between, and a refusal then is still
   warned of.
 
+## The stop proposal's window
+
+Added 2026-10-01, from the same run. Its stop proposal (item 11 above: 20
+committed jobs or 30 minutes with nothing yielded) fired 8 minutes and 20
+jobs after the last finding, two minutes before the breakthrough. That was
+harmless, since silence approves nothing, but it was noise on work whose
+progress comes in jumps. The question was whether the two arms should be
+joined (both), or the count scaled with the run.
+
+The answer comes from the recorded runs. Copies of the 45 runs on this
+install with ten committed jobs or more (5,227 jobs, 4,541 yields: findings,
+coverage records, answers, dispositions and acceptances), each segment of a
+resumed run taken apart, were replayed against the rule minute by minute and
+at every committed job:
+
+- The stretches between two yields (each yield counted when it was
+  recorded): half lasted 0.2 minutes or less with no job; 99 in 100 lasted
+  under 7.2 minutes, and 99 in 100 held 13 jobs or fewer. The longest that
+  still ended in a yield ran 22 minutes; the largest held 47 jobs. No stretch
+  of 30 minutes or more ended in a yield; 23 stretches of 20 jobs or more
+  did, every one within 30 minutes.
+- The rule as it was (20 jobs or 30 minutes) proposed 27 times in 10 runs.
+  26 of those came on the job count, 20 jobs in one to eight minutes, and
+  every one of them was followed by a yield, 25 within ten minutes. The
+  27th came on the minutes, in a run whose seats had run no job for 30
+  minutes; nothing yielded again, and the operator stopped it a minute
+  later.
+- Both arms (20 jobs and 30 minutes) would have proposed nothing at all,
+  and would have missed that stall, which had no job. A count scaled to the
+  seats (five a seat, 50 at ten seats) proposed only the stall, but by a
+  margin of three jobs over the largest stretch that still yielded. The
+  minutes alone proposed only the stall.
+
+So the minutes decide: a stop is proposed after `SWARM_YIELD_MINUTES` (30)
+with nothing yielded. The job count proposes nothing by default;
+`SWARM_YIELD_JOBS=N` puts it back beside the minutes for an operator who
+wants it. Everything else stands: the proposal is the operator's request,
+never an agent's vote, never a stop by itself, and silence approves nothing.
+The count of jobs is still said in the proposal. This is a measure of what
+the rule would have done on recorded histories; whether 30 minutes is the
+right length for runs much larger than these is for later runs to show.
+
 ## Consequences
 
 - Every existing goal and run keeps working: an answer without `result`

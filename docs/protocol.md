@@ -647,8 +647,10 @@ died (`done/ALL_AGENTS_DEAD`, no sentinel) has none, paused or not; a
 
 When nothing yields (no new finding, question disposition, acceptance or
 coverage record since the later of the stretch's start and the last one)
-across `SWARM_YIELD_JOBS` (20) committed jobs or `SWARM_YIELD_MINUTES` (30)
-minutes, the watchdog writes an operator request of kind `decision` (`D-<n>`,
+for `SWARM_YIELD_MINUTES` (30) minutes, or across `SWARM_YIELD_JOBS`
+committed jobs when that is set (unset or 0, the default, the count proposes
+nothing: [ADR 0013](adr/0013-a-negative-is-bounded-and-a-cap-pauses.md), "The
+stop proposal's window"), the watchdog writes an operator request of kind `decision` (`D-<n>`,
 with the leads open and the questions unanswered) and `stop_proposed` on the
 trace (`traces/stop-policy.yield.json` keeps the proposals). It stops nothing.
 

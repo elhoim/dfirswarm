@@ -6,6 +6,10 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Changed: the stop proposal waits for the minutes, not for a burst of jobs
+
+The diminishing-returns proposal fired on 20 committed jobs or 30 minutes with nothing yielded. On the 45 recorded runs with ten jobs or more, it proposed 27 times; 26 came on a burst of 20 jobs in one to eight minutes, and every one of those was followed by a yield, 25 within ten minutes. The one stretch that never yielded again had no job, and the minutes caught it. A stop is now proposed after 30 minutes with nothing yielded (`SWARM_YIELD_MINUTES`); `SWARM_YIELD_JOBS=N` adds the job count back, off by default. It is still never a vote and never a stop. See [ADR 0013](docs/adr/0013-a-negative-is-bounded-and-a-cap-pauses.md), "The stop proposal's window".
+
 ### Changed: a resume refuses a question it cannot admit, before anything moves
 
 `swarm.sh resume --question … --as operator` on an install where nobody is enrolled as `operator` used to move the run's end aside, record the resume and start the continuation, and only then warn that the question was not admitted: the run went on without the question it was resumed for. Each question is now checked first, as its admission would check it (`questions-cli.ts add --dry-run`), and one the register would refuse refuses the resume with nothing changed, naming why. `--skip-refused-questions` resumes without it and says so. See [ADR 0013](docs/adr/0013-a-negative-is-bounded-and-a-cap-pauses.md), "A resume refuses a question it cannot admit".
