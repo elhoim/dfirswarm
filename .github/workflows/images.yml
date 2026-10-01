@@ -90,8 +90,9 @@ jobs:
           bad = [k for k, v in data.items() if not os.path.isfile(v["path"]) or os.path.getsize(v["path"]) != v.get("bytes") or v.get("warm") == "failed"]
           print("pinned data:", {k: v.get("bytes") for k, v in data.items()}, "left out:", left_out, "bad:", bad)
           sys.exit(1 if left_out or bad else 0)'
-          # Volatility lists the Windows symbol pack with no route out, from the index the build made.
-          if docker run --rm "$image" sh -c 'command -v vol' >/dev/null 2>&1; then
+          # Where the image pins Volatility's Windows symbol pack (memory, full; the disk image has vol
+          # and no pack), vol lists it with no route out, from the index the build made.
+          if docker run --rm "$image" python3 -c 'import json, sys; r = json.load(open("/etc/dfirswarm/image.json")); sys.exit(0 if any(v.get("kind") == "data" and v.get("program") == "vol" for v in (r.get("downloads") or {}).values()) else 1)'; then
             start="$(date +%s)"
             n="$(docker run --rm --network none "$image" sh -c 'vol -q isfinfo 2>/dev/null | grep -c "windows.zip!windows/"' || true)"
             echo "vol lists $n Windows symbol tables offline in $(( $(date +%s) - start )) s (container start included)"
