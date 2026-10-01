@@ -45,6 +45,7 @@ import type { Mount, WorkerSpec } from "./vm.ts";
 import { jobNetworkHosts } from "./net-grants.ts";
 import { indexOutputs, objectsMatch, opMatch, rankSimilar, reuseOf, sameAsOf, sameAsView, type Reuse, type SameAs, type Similar } from "./job-reuse.ts";
 import { derivedFrom, derivedSensitivity, ownSensitivity, sensitiveIndex, snapshotObjects, type Sensitivity } from "./output-hygiene.ts";
+import { execRefused, execRefusedWords, type ExecRefused } from "./job-exec-refused.ts";
 import { writeRefused, writeRefusedWords, type WriteRefused } from "./job-write-refused.ts";
 
 export type JobKind = "tool" | "command" | "recipe" | "detect" | "import";
@@ -283,6 +284,14 @@ export type JobRecord = {
    * says so, names $OUT, and says what to do; generic, never a tool's own.
    */
   write_refused?: WriteRefused;
+  /**
+   * A program its worker could not execute (job-exec-refused.ts): exit 126,
+   * with the line that names the program when there is one, or the loader's
+   * refusal to map a segment. Its reason says so, names the places nothing
+   * runs from, and says to run a copy from an executable directory inside
+   * the job; generic, never a tool's own.
+   */
+  exec_refused?: ExecRefused;
   /** Its outputs are sensitive, decided when they were sealed (output-hygiene.ts): run with secret_output, or made from a sensitive output. */
   sensitive?: Sensitivity;
 };
@@ -1503,8 +1512,18 @@ export class JobService {
     }
     const cancelled = job.cancel_requested ? `cancelled by ${job.cancel_requested}` : undefined;
     const stopped = (job as JobRecord & { stopped?: string }).stopped;
+    const failed = !cancelled && !stopped && exit !== null && exit !== 0 && exit !== 124 && exit !== 137;
+    // A program its worker could not execute: nothing runs where it stands in
+    // store/, work/extracted/, inputs/ or $OUT (job-exec-refused.ts). Read
+    // first: the loader's refusal to map a segment ends in exit 127, which is
+    // no program missing from the image.
+    const unexecuted = failed ? await execRefused({ ctl: st.ctl, out: st.out, cwd: this.S, exit }).catch(() => null) : null;
+    if (unexecuted) {
+      job.exec_refused = unexecuted;
+      await this.journal.append({ type: "job_exec_refused", job: job.id, attempt: job.attempt, exit, ...unexecuted });
+    }
     // A program its image does not hold (B17): exit 127, or the shell's own words for it.
-    const missing = !cancelled && !stopped && exit !== 0 ? await programMissing(st.ctl, exit) : null;
+    const missing = !cancelled && !stopped && !unexecuted && exit !== 0 ? await programMissing(st.ctl, exit) : null;
     if (missing) {
       job.program_missing = { program: missing, profile: chosen.profile ?? job.spec.profile ?? null, image: chosen.ref };
       await this.journal.append({ type: "job_program_missing", job: job.id, attempt: job.attempt, exit, ...job.program_missing });
@@ -1512,7 +1531,7 @@ export class JobService {
     // A write its worker refused: the run is read-only there, only $OUT (and
     // its control directory) writable, as the worker and the host name them.
     const writable = [...new Set([this.outPath(job), st.out, st.ctl, ...accessible.filter((a) => a.access.startsWith("read-write")).map((a) => a.path)])];
-    const refused = !cancelled && !stopped && !missing && exit !== null && exit !== 0 && exit !== 124 && exit !== 137 ? await writeRefused({ ctl: st.ctl, out: st.out, cwd: this.S, writable }).catch(() => null) : null;
+    const refused = failed && !unexecuted && !missing ? await writeRefused({ ctl: st.ctl, out: st.out, cwd: this.S, writable }).catch(() => null) : null;
     if (refused) {
       job.write_refused = refused;
       await this.journal.append({ type: "job_write_refused", job: job.id, attempt: job.attempt, exit, ...refused });
@@ -1527,13 +1546,15 @@ export class JobService {
           ? result.error ?? "the worker did not report an exit status"
           : job.spec.kind === "import" && exit === 3
             ? "the source changed while it was copied (stdout.log names each file): import it again once it is still"
-            : missing
-              ? `exit ${exit}: a program it runs is not in its image${job.program_missing?.profile ? ` (profile ${job.program_missing.profile})` : ""}: ${missing === "?" ? "exit 127" : missing}`
-              : refused
-                ? `exit ${exit}: ${writeRefusedWords(refused, { job: job.id, out: this.outPath(job) })}`
-                : exit !== 0
-                  ? `exit ${exit}`
-                  : undefined);
+            : unexecuted
+              ? `exit ${exit}: ${execRefusedWords(unexecuted, { job: job.id, out: this.outPath(job) })}`
+              : missing
+                ? `exit ${exit}: a program it runs is not in its image${job.program_missing?.profile ? ` (profile ${job.program_missing.profile})` : ""}: ${missing === "?" ? "exit 127" : missing}`
+                : refused
+                  ? `exit ${exit}: ${writeRefusedWords(refused, { job: job.id, out: this.outPath(job) })}`
+                  : exit !== 0
+                    ? `exit ${exit}`
+                    : undefined);
     if (job.requester.agent === DERIVED) this.derivedSpent.push({ at: Date.now(), s: (Date.now() - started) / 1000 });
     await this.journal.append({ type: "job_finished", job: job.id, attempt: job.attempt, exit, status, ...(reason ? { reason } : {}), duration_ms: Date.now() - started, ...(result.digest ? { image_digest: result.digest } : {}), ...(result.boot_retry ? { boot_retry: result.boot_retry } : {}), ...(result.create_ms !== undefined ? { create_ms: result.create_ms } : {}) });
     Object.assign(job, { state: "finished", exit, status, reason, finished_at: new Date().toISOString(), ...(result.digest ? { image_digest: result.digest } : {}) });

@@ -309,6 +309,15 @@ What entered the run from outside its evidence: a capture, material the
 operator supplied, evidence added later. On the ledger as `kind=external`
 with its provenance; it proves nothing by itself.
 
+**Supplied tool**:
+A program no image holds, handed to a running run by the operator with
+`swarm.sh tool-supply`: external material of class `operator_supplied`
+(`import:mat-<n>`) whose provenance says where it came from and how it was
+built (the operator's statement) and which hashes were checked (held to the
+bytes). The seats run a copy of it from an executable temporary directory
+inside a job, since a sealed file cannot be executed where it stands.
+_Avoid_: forged tool (an agent wrote that), pack tool (a pack ships that)
+
 **Grant**:
 One bounded lookup the hub allowed by the case policy's rules alone: an
 adapter, a method and URL, uses and bytes, a lifetime. Its answer is a

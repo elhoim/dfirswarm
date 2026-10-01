@@ -182,6 +182,29 @@ policy" only where the policy says no more evidence comes.
    lineage reaches such material is a `material_use` defect, fixed and never
    named away by a limitation.
 
+   *A tool is material too (amended 2026-10-01).* A run that needs a program
+   no image holds is handed one with `swarm.sh tool-supply <run> add PATH
+   --why W --source TEXT [--built TEXT] [--sha256 HEX]... [--for R-n|L-n]...`.
+   It goes the material path (`import:mat-<n>`, class `operator_supplied`,
+   never evidence), so the rules above are its rules: every preset admits
+   it, a policy that says `operator_supplied=none` refuses it up front (a
+   record resting on its output would be refused anyway), and what rests on it
+   is flagged with its class. What it adds is what only the operator knows,
+   recorded as `tool: {source, built?, checked, for?}` in `material.json` and
+   in the external entry's provenance (in the chained core): where it came
+   from and how it was built, which are the operator's statement and are
+   recorded as such, whole; the hashes the operator checked, which the harness
+   does check against the sealed bytes (a hash that is none of the supplied
+   files' is refused); the requests and leads it is for, which must exist and
+   are not closed by it. The seats are told on the board that the harness
+   vouches for the bytes only, to test the tool on input with a known answer,
+   and that a sealed file has no execute bit and no place a worker reads it
+   from executes, so a job copies it into an executable temporary directory
+   inside the job. A job that tried to run a program in place says so in its
+   reason (`scripts/job-exec-refused.ts`), as a refused write does. The
+   harness knows no program and no format; the file is what the operator says
+   it is, and a seat that relies on it says so in its record.
+
 7. **The report says where the evidence ends.** Section 8 gains "Evidence
    gaps and acquisition requests", generated from the records, never written:
    every acquisition with its stage and outcome, and the gaps told apart as

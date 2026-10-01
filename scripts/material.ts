@@ -45,6 +45,20 @@
  * round, the next addition, `swarm.sh evidence <run> list`), and the finish
  * line refuses a done while an addition's effects are not all recorded.
  *
+ * A tool is material too (`swarm.sh tool-supply <run> add`): a program no image
+ * holds, handed to a running run by the operator with what the harness cannot
+ * know and the seats need to weigh it by: where it came from, how it was built
+ * (both the operator's statement, recorded as such), and hashes the operator
+ * checked, which the harness does check against the bytes it seals (a hash of
+ * anything else goes in the words). It is sealed as `operator_supplied`, never
+ * as evidence; its ledger entry carries that provenance in the chained core
+ * (`provenance.tool`) and the board post tells the seats that a sealed file has
+ * no execute bit and how to run it (a copy in an executable temporary directory
+ * inside a job). The case policy's rules are the material's own: a policy that
+ * says `operator_supplied=none` refuses it, because nothing recorded on its
+ * output could be kept. The harness names no program and knows no format: the
+ * file is whatever the operator says it is.
+ *
  * Evidence is an inventory revision: its journal line counts it
  * (`inventory_rev`), and the negative bar's inventory revision moves with
  * it. Under the case policy's `more_evidence: no` it is refused: the case
@@ -57,6 +71,8 @@
  *        [--sha256 HEX] [--as ID] [--via cli|console] [--hub-admin SOCKET]
  *   material.ts material-add <sandbox> PATH --why W [--class operator_supplied|case_material]
  *        [--sensitive] [--as ID] [--via cli|console] [--hub-admin SOCKET]
+ *   material.ts tool-add <sandbox> PATH --why W --source TEXT [--built TEXT] [--sha256 HEX]...
+ *        [--for R-n|L-n]... [--as ID] [--via cli|console] [--hub-admin SOCKET]
  *   material.ts list <sandbox> [--json] [--hub-admin SOCKET]
  *
  * Prints one JSON line.
@@ -76,6 +92,23 @@ import { Journal, sealTree, storePaths, type JournalLine } from "./evidence-stor
 
 export type MaterialMode = "evidence" | "material";
 
+/** What the operator says of a tool they supply (swarm.sh tool-supply). */
+export type ToolSupply = {
+  /** Where it came from, in words: a package and its version, a URL, who built it. Required, never cut. */
+  source: string;
+  /** How it was built or made fit for the run, in words; none when it is used as published. */
+  built?: string;
+  /** Hashes the operator checked: each must be one of the supplied files' sha256, and is held to it. */
+  sha256?: string[];
+  /** The requests (R-n) and leads (L-n) it was supplied for. */
+  for?: string[];
+};
+
+/** A tool as its record keeps it: the statements whole, the hashes checked against the sealed bytes, the requests and leads (a request's own lead beside it). */
+export type ToolProvenance = { source: string; built?: string; checked: string[]; for?: string[] };
+
+export const TOOL_TEXT_MAX = 4000;
+
 export type MaterialRequest = {
   mode: MaterialMode;
   /** The host path: a file or a directory, outside the run. */
@@ -91,6 +124,8 @@ export type MaterialRequest = {
   cls?: "operator_supplied" | "case_material";
   /** Material: what it says is sensitive (names, labels and questions may not carry it). */
   sensitive?: boolean;
+  /** Material: a tool supplied to be run (always operator_supplied): what the operator says of it. */
+  tool?: ToolSupply;
   /** Who supplied it, in words (an enrolled person as a claim, or the OS account on this host). */
   supplied_by: string;
   via: string;
@@ -116,6 +151,8 @@ export type MaterialRecord = {
   questions?: string[];
   inventory_rev?: number;
   sensitive?: boolean;
+  /** A tool supplied to be run (swarm.sh tool-supply): where it came from, how it was built, the hashes checked, what for. */
+  tool?: ToolProvenance;
   /** The ledger's last entry when the addition was committed: the answers up to it were recorded without it. */
   ledger_seq?: number;
   /** The lead register's length when it was committed: a close up to it was made without it. */
@@ -270,6 +307,55 @@ function canonicalQuestion(qs: Q.QuestionsSnapshot | null, raw: string): string 
 }
 
 /**
+ * What the operator says of a tool they supply, held before anything is
+ * copied: it is material (never evidence added later) of the class the
+ * operator supplies, the policy must let a record rest on that class, it says
+ * where it came from, what it says is not cut, the hashes are hashes, and the
+ * requests and leads it is for exist. The words are the operator's statement
+ * and are recorded as such; only the hashes are checked, later, against the
+ * bytes.
+ */
+async function readToolSupply(S: string, req: MaterialRequest, policy: ReturnType<typeof readCasePolicy>): Promise<{ ok: true; source: string; built?: string; hashes: string[]; for: string[] } | { ok: false; reason: string }> {
+  const t = req.tool!;
+  if (req.mode !== "material") return { ok: false, reason: "a tool is supplied as material (swarm.sh tool-supply), never as evidence added after the kickoff" };
+  if (req.cls !== undefined && req.cls !== "operator_supplied") return { ok: false, reason: "a tool is operator-supplied material: --class is not for it" };
+  if (policy.material_use.operator_supplied === "none") {
+    return { ok: false, reason: `case policy ${policy.policy} does not let a record cite or rest on material of class operator_supplied (material_use operator_supplied=none): a tool supplied under it could be run but nothing recorded on its output could be kept; nothing was added` };
+  }
+  const source = String(t.source ?? "").trim();
+  if (!source) return { ok: false, reason: "tool supply says where the tool came from (--source): a package and its version, a URL, who built it" };
+  if (source.length > TOOL_TEXT_MAX) return { ok: false, reason: `--source is at most ${TOOL_TEXT_MAX} characters: nothing is cut, so a longer one is refused` };
+  const built = t.built === undefined ? "" : String(t.built).trim();
+  if (built.length > TOOL_TEXT_MAX) return { ok: false, reason: `--built is at most ${TOOL_TEXT_MAX} characters: nothing is cut, so a longer one is refused` };
+  const hashes: string[] = [];
+  for (const raw of t.sha256 ?? []) {
+    const h = String(raw).trim().toLowerCase();
+    if (!/^[0-9a-f]{64}$/.test(h)) return { ok: false, reason: `--sha256 is a file's sha256, 64 hex characters (got ${JSON.stringify(raw)})` };
+    if (!hashes.includes(h)) hashes.push(h);
+  }
+  const forWhat: string[] = [];
+  const add = (id: string) => {
+    if (!forWhat.includes(id)) forWhat.push(id);
+  };
+  for (const raw of t.for ?? []) {
+    const m = /^([RL])-?([1-9]\d{0,6})$/i.exec(String(raw).trim());
+    if (!m) return { ok: false, reason: `--for names a request or a lead, R-<n> or L-<n> (got ${JSON.stringify(raw)})` };
+    const id = `${m[1]!.toUpperCase()}-${Number(m[2])}`;
+    if (id.startsWith("R-")) {
+      await R.reconcileRequests(S).catch(() => undefined);
+      const request = (await R.requestsSnapshot(S)).requests.get(id);
+      if (!request) return { ok: false, reason: `${id} is not a request of this run (swarm.sh requests <run> list)` };
+      add(id);
+      if (request.lead) add(request.lead);
+    } else {
+      if (!(await L.leadsSnapshot(S)).state.leads.has(id)) return { ok: false, reason: `${id} is not a lead of this run (swarm.sh lead <run> list)` };
+      add(id);
+    }
+  }
+  return { ok: true, source, ...(built ? { built } : {}), hashes, for: forWhat };
+}
+
+/**
  * The addition: checked, copied into a staging directory of its own and
  * held to its source, then, under the run's material lock, an id reserved,
  * sealed, committed (material.json, the store journal line) and what follows
@@ -281,11 +367,13 @@ export async function admitMaterial(sandbox: string, req: MaterialRequest, o: Ad
   const S = resolve(sandbox);
   if (req.mode !== "evidence" && req.mode !== "material") return { ok: false, reason: "an addition is evidence or material" };
   const why = String(req.why ?? "").trim();
-  if (!why) return { ok: false, reason: `${req.mode === "evidence" ? "evidence add" : "material add"} says why (--why): what it is and what it is for` };
+  if (!why) return { ok: false, reason: `${req.tool ? "tool supply" : req.mode === "evidence" ? "evidence add" : "material add"} says why (--why): what it is and what it is for` };
   if (why.length > 4000) return { ok: false, reason: "--why is at most 4000 characters: nothing is cut, so a longer one is refused" };
   const policy = readCasePolicy(S);
   const cls: SourceClass = req.mode === "evidence" ? "acquired_evidence" : (req.cls ?? "operator_supplied");
   if (req.mode === "material" && !["operator_supplied", "case_material"].includes(cls)) return { ok: false, reason: "--class is operator_supplied or case_material" };
+  const tool = req.tool ? await readToolSupply(S, req, policy) : null;
+  if (tool && !tool.ok) return tool;
   if (req.mode === "evidence" && policy.more_evidence === "no") {
     return { ok: false, reason: `this case admits no evidence after its kickoff (case policy ${policy.policy}, more_evidence: no): nothing was added. An agent's acquisition is answered "${R.NO_MORE_EVIDENCE}"; a case that must take this evidence is a new run, or material supplied for reference (swarm.sh material <run> add)` };
   }
@@ -332,6 +420,13 @@ export async function admitMaterial(sandbox: string, req: MaterialRequest, o: Ad
       }
     } catch (err) {
       return { ok: false, reason: `the copy failed (${(err as Error).message}): nothing was added` };
+    }
+    // A tool's hashes, each held to the files copied: the harness vouches for what it checked, and for nothing else.
+    if (tool?.ok) {
+      const stray = tool.hashes.find((h) => !files.some((f) => f.sha256 === h));
+      if (stray) {
+        return { ok: false, reason: `the hash ${stray} is none of the supplied files' sha256 (${files.map((f) => `${f.path} is ${f.sha256}`).join("; ")}): a hash of anything else, a source archive or a signed index, goes in --source or --built; nothing was added` };
+      }
     }
     let locked: MaterialResult;
     try {
@@ -380,6 +475,7 @@ export async function admitMaterial(sandbox: string, req: MaterialRequest, o: Ad
           ...(questions.length ? { questions } : {}),
           ...(inventoryRev !== null ? { inventory_rev: inventoryRev } : {}),
           ...(req.sensitive ? { sensitive: true } : {}),
+          ...(tool?.ok ? { tool: { source: tool.source, ...(tool.built ? { built: tool.built } : {}), checked: tool.hashes, ...(tool.for.length ? { for: tool.for } : {}) } } : {}),
           ledger_seq: ledgerSeq,
           lead_seq: leadSeq,
         };
@@ -447,6 +543,29 @@ function withReason(head: string, why: string, max: number, id: string): string 
 }
 
 /**
+ * What the seats are told of a tool supplied: what it is and what the
+ * operator says of it (as their statement), what the harness checked, that it
+ * is material and is weighed as such, and how to run it, since a sealed file
+ * has no execute bit and no place a job can read it from executes.
+ */
+function toolPostBody(rec: MaterialRecord, tool: ToolProvenance, entry: number | null, use: string): string {
+  const id = rec.import;
+  const files = rec.files;
+  const inputs = files.length === 1 ? `import:${id}/${files[0]!.path}` : `import:${id}`;
+  const cite = files.length === 1 ? `import:${id}/${files[0]!.path}` : `import:${id}/<file>`;
+  return [
+    `TOOL SUPPLIED as import:${id} (${rec.class}; use: ${use}), ${files.length} file(s): ${files.map((f) => `${f.path} (${f.bytes} bytes, sha256 ${f.sha256})`).join("; ")}, by ${rec.supplied_by}: ${rec.why}.`,
+    `Where it came from, as the operator states it: ${tool.source}.`,
+    tool.built ? `How it was built, as the operator states it: ${tool.built}.` : "How it was built: not stated by the operator.",
+    tool.checked.length ? `Hashes the operator gave, each checked against the bytes sealed: ${tool.checked.join(", ")}.` : "Hashes the operator gave: none; the harness holds the bytes to the sha256 each had before it was copied.",
+    tool.for?.length ? `It was supplied for ${tool.for.join(", ")}.` : "",
+    "It is supplied material, and the harness vouches for the bytes only: where it came from and how it was built are the operator's statement. Test it on input whose answer you know before you rely on it, and say in the record that you did.",
+    `It is readable now, read-only, at store/imports/${id}/out/. Nothing in the store can be executed where it stands (sealed files have no execute bit), so run it in a job: job_run with inputs ["${inputs}"], copy it, and every library it loads, into an executable temporary directory inside the job (for example one made with mktemp -d under /tmp), make it executable there (chmod +x) and run it from the copy.`,
+    `A finding that rests on its output cites the job and ${cite}, and says what the tool is; what rests on it is flagged with its class. It is on the ledger as E-${entry ?? "?"} (kind external).`,
+  ].filter(Boolean).join(" ");
+}
+
+/**
  * What follows from a committed addition, derived from its record, each
  * step found again by the addition's id and made once: the external entry,
  * the acquisition's stages, the leads reopened, the questions' arrivals,
@@ -480,10 +599,10 @@ export async function applyAddition(sandbox: string, id: string, o: AdditionOpti
   const why = rec.why;
   // On the ledger: external material, with its provenance in the chained core. Recorded once, by its refs and class.
   const refs = files.length <= P.LEDGER_MAX_REFS - 1 ? files.map((f) => `import:${id}/${f.path}`) : [`import:${id}`];
-  const head = rec.mode === "evidence" ? `Evidence added after the kickoff (inventory revision ${inventoryRev}): ${files.length} file(s) as import:${id}${rec.request ? `, for ${rec.request}` : ""}` : `Material supplied (${cls}): ${files.length} file(s) as import:${id}`;
+  const head = rec.mode === "evidence" ? `Evidence added after the kickoff (inventory revision ${inventoryRev}): ${files.length} file(s) as import:${id}${rec.request ? `, for ${rec.request}` : ""}` : `${rec.tool ? "Tool" : "Material"} supplied (${cls}): ${files.length} file(s) as import:${id}`;
   const external = await P.recordExternal(S, {
     value: withReason(head, why, P.LEDGER_VALUE_MAX_CHARS, id),
-    source: `swarm.sh ${rec.mode} add, by ${rec.supplied_by} (${rec.via})`,
+    source: `swarm.sh ${rec.tool ? "tool-supply" : rec.mode} add, by ${rec.supplied_by} (${rec.via})`,
     evidence: `store/imports/${id}/material.json and manifest.json; store journal line ${line.seq}`,
     refs,
     source_class: cls,
@@ -498,12 +617,13 @@ export async function applyAddition(sandbox: string, id: string, o: AdditionOpti
       ...(files.length > 1 ? { sha256_of: "the import's manifest" } : {}),
       ...(rec.request ? { request: rec.request } : {}),
       ...(inventoryRev !== null ? { inventory_rev: inventoryRev } : {}),
+      ...(rec.tool ? { tool: rec.tool } : {}),
     },
     ...(rec.sensitive ? { sensitive: true } : {}),
   }).catch((err: Error) => ({ ok: false as const, reason: err.message }));
   if (!external.ok) pending.push(`its external entry on the ledger (${external.reason})`);
   const entry = external.ok ? external.entry.seq : null;
-  const out: MaterialResult = { ok: true, import: id, mode: rec.mode, class: cls, files, manifest_sha256: rec.manifest_sha256, journal_seq: line.seq, ...(inventoryRev !== null ? { inventory_rev: inventoryRev } : {}), entry, permitted_use: rec.permitted_use ?? permittedUse(policy, cls) };
+  const out: MaterialResult = { ok: true, import: id, mode: rec.mode, class: cls, files, manifest_sha256: rec.manifest_sha256, journal_seq: line.seq, ...(inventoryRev !== null ? { inventory_rev: inventoryRev } : {}), entry, permitted_use: rec.permitted_use ?? permittedUse(policy, cls), ...(rec.tool ? { tool: rec.tool } : {}) };
   if (rec.mode === "evidence") {
     // The acquisition answered: received, then validated against the hashes the copy was held to; each stage once, by the import.
     if (rec.request) {
@@ -602,6 +722,8 @@ export async function applyAddition(sandbox: string, id: string, o: AdditionOpti
       ].filter(Boolean).join(" "),
     }).catch((err: Error) => pending.push(`the board post (${err.message})`));
     await R.renderViews(S).catch(() => undefined);
+  } else if (rec.tool) {
+    await P.systemPost(S, { tag: "ask", key: `addition:${id}`, body: toolPostBody(rec, rec.tool, entry, rec.permitted_use ?? permittedUse(policy, cls)) }).catch((err: Error) => pending.push(`the board post (${err.message})`));
   } else {
     await P.systemPost(S, { tag: "ask", key: `addition:${id}`, body: `MATERIAL SUPPLIED as import:${id} (${cls}; use: ${rec.permitted_use ?? permittedUse(policy, cls)}), ${files.length} file(s): ${files.map((f) => `${f.path} (sha256 ${f.sha256})`).join(", ")}, by ${rec.supplied_by}: ${why}. It is supplied material and proves nothing by itself: it is readable now, read-only, at store/imports/${id}/out/; cite it as import:${id}/<file> and say what it establishes, with its limits; it is on the ledger as E-${entry ?? "?"} (kind external).` }).catch((err: Error) => pending.push(`the board post (${err.message})`));
   }
@@ -646,7 +768,7 @@ export async function reconcileAdditions(sandbox: string, o: AdditionOptions = {
 async function main(argv: string[]): Promise<void> {
   const [cmd, sandboxArg, ...rest] = argv;
   if (!cmd || !sandboxArg) {
-    process.stderr.write("usage: material.ts evidence-add|material-add|list <sandbox> ...\n");
+    process.stderr.write("usage: material.ts evidence-add|material-add|tool-add|list <sandbox> ...\n");
     process.exit(2);
   }
   const S = resolve(sandboxArg);
@@ -654,7 +776,7 @@ async function main(argv: string[]): Promise<void> {
     process.stdout.write(`${JSON.stringify(r)}\n`);
     process.exit(r.ok === false ? 1 : 0);
   };
-  const valued = new Set(["--why", "--for", "--question", "--sha256", "--class", "--as", "--via", "--hub-admin"]);
+  const valued = new Set(["--why", "--for", "--question", "--sha256", "--class", "--source", "--built", "--as", "--via", "--hub-admin"]);
   if (cmd === "list") {
     // What a crash left committed and not applied is applied first: by the hub when one runs (the journal's one writer), else here.
     const i = rest.indexOf("--hub-admin");
@@ -681,24 +803,29 @@ async function main(argv: string[]): Promise<void> {
     else pos.push(a);
   }
   const one = (k: string) => opts.get(k)?.at(-1);
-  if (cmd !== "evidence-add" && cmd !== "material-add") {
-    process.stderr.write("usage: material.ts evidence-add|material-add|list <sandbox> ...\n");
+  if (cmd !== "evidence-add" && cmd !== "material-add" && cmd !== "tool-add") {
+    process.stderr.write("usage: material.ts evidence-add|material-add|tool-add|list <sandbox> ...\n");
     process.exit(2);
   }
-  if (!pos[0]) emit({ ok: false, reason: `${cmd === "evidence-add" ? "evidence add" : "material add"} needs the path of the file or directory` });
+  if (!pos[0]) emit({ ok: false, reason: `${cmd === "evidence-add" ? "evidence add" : cmd === "tool-add" ? "tool supply" : "material add"} needs the path of the file or directory` });
   // Who supplies it: an enrolled person (a claim), or this host's OS account.
   const QC = await import("./questions-cli.ts");
   const via = one("--via") === "console" ? "console" : "cli";
   const who = QC.actorFor({ ...(one("--as") ? { as: one("--as") } : {}), via });
   if ("why" in who) emit({ ok: false, reason: who.why });
   const actor = (who as { actor: Q.Actor }).actor;
+  const tool: ToolSupply | null =
+    cmd === "tool-add"
+      ? { source: one("--source") ?? "", ...(one("--built") !== undefined ? { built: one("--built") } : {}), ...(opts.get("--sha256")?.length ? { sha256: opts.get("--sha256") } : {}), ...(opts.get("--for")?.length ? { for: opts.get("--for") } : {}) }
+      : null;
   const req: MaterialRequest = {
     mode: cmd === "evidence-add" ? "evidence" : "material",
     path: resolve(pos[0]),
     why: one("--why") ?? "",
-    ...(one("--for") ? { for: one("--for") } : {}),
+    ...(tool ? { tool } : {}),
+    ...(!tool && one("--for") ? { for: one("--for") } : {}),
     ...(opts.get("--question")?.length ? { questions: opts.get("--question") } : {}),
-    ...(one("--sha256") ? { sha256: one("--sha256") } : {}),
+    ...(!tool && one("--sha256") ? { sha256: one("--sha256") } : {}),
     ...(one("--class") ? { cls: one("--class") as MaterialRequest["cls"] } : {}),
     ...(flags.has("--sensitive") ? { sensitive: true } : {}),
     supplied_by: Q.originWords(Q.originOf(actor)),

@@ -129,10 +129,11 @@ test("through the service: a job that ended non-zero on a refused write has it i
   // A step's stderr kept in $OUT, as a recipe keeps it.
   const kept = await run(`echo "PermissionError: [Errno 13] Permission denied: 'notes.txt'" > "$OUT/step.stderr"; exit 2`);
   assert.match(kept.reason ?? "", new RegExp(`^exit 2: a write outside \\$OUT was refused \\("Permission denied" on ${S}/notes\\.txt, job:${kept.id}/step\\.stderr line 1\\)\\.`));
-  // Denied inside $OUT (it is no-exec), or a failure that is not a write: the reason is the exit status.
+  // Denied inside $OUT (it is no-exec) is no refused write: it is a program that could not be executed (job-exec-refused.ts).
   const inside = await run(`echo "bash: $OUT/tool: Permission denied" >&2; exit 126`);
-  assert.equal(inside.reason, "exit 126");
+  assert.match(inside.reason ?? "", /^exit 126: a program it ran could not be executed \("Permission denied" on /);
   assert.equal(inside.write_refused, undefined);
+  // A failure that is not a write: the reason is the exit status.
   const other = await run(`echo "KeyError: 'entries'" >&2; exit 1`);
   assert.equal(other.reason, "exit 1");
   // A job that succeeded is not read for it.

@@ -6,6 +6,18 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Added: supplying a tool to a running run, and a job that says it could not execute a program
+
+A live run asked the operator for programs no image held. `swarm.sh material add` was the only way to hand one over: it sealed the file, but said nothing of where it came from or how it was built, and the two jobs that tried to run it in place failed with `exit 126` and with `exit 127: a program it runs is not in its image` before a seat found the way (a copy in an executable temporary directory inside the job).
+
+- **`swarm.sh tool-supply <run> add PATH --why W --source TEXT [--built TEXT] [--sha256 HEX]... [--for R-n|L-n]...`**, and `tool-supply <run> list`.
+  - A tool is material: sealed as `import:mat-<n>`, class `operator_supplied` (never evidence), so the case policy's rules for material are its rules. Every preset admits it; a policy that says `operator_supplied=none` refuses it before anything is sealed, because nothing recorded on its output could be kept.
+  - It adds what only the operator knows, in `material.json` and in the ledger entry's provenance (`provenance.tool`, in the chained core): where it came from and how it was built (the operator's statement, recorded whole, refused rather than cut past 4000 characters), the hashes the operator checked (each must be one of the supplied files' sha256, else nothing is sealed), and the requests and leads it is for (each must exist; neither is closed by it).
+  - The board post tells the seats that the harness vouches for the bytes only, to test the tool on input whose answer they know, and how to run it: a job declares it as an input and copies it, and every library it loads, into an executable temporary directory inside the job.
+  - The harness names no program and knows no format. A hub started by an older harness takes the act as plain material; the reply says so.
+- **A job that could not execute a program says so.** `scripts/job-exec-refused.ts` reads a failed job for the shell's exit 126 (with the `Permission denied` line that names the program, from stdout, stderr or a stderr file it kept) and for the dynamic loader's `failed to map segment from shared object` at any status. A `Permission denied` at another status is left alone, since nothing in the line tells a program that could not be run from a file that could not be written. The reason names the path, where the line is, the places nothing in a worker runs from (`store/`, `work/extracted/`, `work/quarantine/`, `inputs/`, `$OUT`) and the way (a copy in an executable temporary directory inside the job). It is read before `program_missing` and `write_refused`: the loader's exit 127 is no program missing from the image, and a sealed file's `Permission denied` at 126 is no refused write. Recorded as `exec_refused` on the job and `job_exec_refused` on the journal.
+- The worker prompt says the same in one sentence.
+
 ### Changed: Pi 0.87.1, on the host and in the VMs
 
 Pi moves from 0.87.0 to 0.87.1 in both places it is pinned: `package.json` (host-mode seats, the tests) and `images/base.Dockerfile` (`PI_VERSION`, every VM seat). 0.87.1:
