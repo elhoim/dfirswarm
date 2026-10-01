@@ -81,6 +81,7 @@ export const OTHER_JSONL: Readonly<Record<string, string>> = {
   "hub-spill.gathered.jsonl": "traces/hub-spill.jsonl's lines kept whole beside the trace once the stop chained them into it, and carried by the package: not a chain of its own",
   "telemetry.jsonl": "a running job's samples, kept beside it by the job service: not a record custody seals",
   "replies.jsonl": "the hub's answers kept for request-id resends: not a record",
+  "fetched.jsonl": "the operator's symbol store's log of what swarm.sh symbols fetch put there, on the host outside every run ($DFIRSWARM_HOME/symbols): not a run's register",
   "trace.jsonl": "the name a download of traces/events.jsonl takes (the dossier, the console), not a register of its own",
   "ledger.jsonl": "the package's name for ledger/entries.jsonl",
   "ledger-attestations.jsonl": "the package's name for ledger/attestations.jsonl",

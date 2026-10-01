@@ -812,12 +812,18 @@ export function imageDataWarnings(record: unknown): string[] {
   const r = (record && typeof record === "object" ? record : {}) as {
     profile?: string;
     not_installed?: { data?: Array<{ name?: string; pack?: string; why?: string }> };
+    omitted?: { data?: Array<{ name?: string; pack?: string; why?: string }> };
     downloads?: Record<string, { kind?: string; warm?: string; program?: string }>;
   };
   const image = r.profile ? `the ${r.profile} image` : "the image";
   const out: string[] = [];
   for (const d of r.not_installed?.data ?? []) {
     out.push(`${image} lacks the data ${d.name ?? "?"} that pack ${d.pack ?? "?"} pins (${d.why ?? "the build did not say why"}): what reads it will find nothing, which is not an absence in the evidence`);
+  }
+  // Left out on purpose by its build (recipe.py build --symbol-set): said
+  // apart from a failure, with the same consequence for what reads it.
+  for (const d of r.omitted?.data ?? []) {
+    out.push(`${image} was built without the data ${d.name ?? "?"} that pack ${d.pack ?? "?"} pins (${d.why ?? "left out on purpose"}): what reads it will find nothing, which is not an absence in the evidence`);
   }
   for (const [name, d] of Object.entries(r.downloads ?? {})) {
     if (d && d.kind === "data" && d.warm === "failed") out.push(`${image} holds the data ${name} but did not index it at build: the first use in each VM will, and takes minutes`);

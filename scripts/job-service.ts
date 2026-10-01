@@ -349,6 +349,16 @@ export type DerivedLimits = { pairsPerPass: number; windowMs: number; windowSeco
  */
 export const DERIVED_LIMITS: DerivedLimits = { pairsPerPass: 32, windowMs: 10 * 60 * 1000, windowSeconds: 300, generationsMax: 50, outputBytesMax: 2 * 1024 * 1024 * 1024, retries: 1 };
 
+/**
+ * What a recipe's coverage says the images lack to read its object
+ * (`missing: [{kind, what}]`, the recipe's own words), one sentence each.
+ */
+export function missingOf(coverage: unknown): string[] {
+  const m = (coverage && typeof coverage === "object" ? (coverage as { missing?: unknown }).missing : undefined) as unknown;
+  if (!Array.isArray(m)) return [];
+  return m.map((x) => (x && typeof x === "object" ? String((x as { what?: unknown }).what ?? "").trim() : "")).filter(Boolean);
+}
+
 /** An object offered to the derived recipes: one file of the store, by content, and the recipes whose prefilter it met. */
 type Candidate = { sha256: string; job: string; path: string; bytes: number; recipes: string[]; tries: number; parent_status: string };
 
@@ -1829,19 +1839,24 @@ export class JobService {
       if (trigger === "derived") this.derivedOutputBytes += job.outputs?.bytes ?? 0;
       const where = `Files: catalog/gen/${generation.id}/${generation.alias ? ` (also ${generation.alias}/)` : ""}; index: catalog/revisions/${revision}/index.md.`;
       const what = `${generation.id} ${generation.recipe} over ${generation.target.name ?? generation.target.ref ?? "an object"}`;
+      // What the recipe says the run's images lack to read the object (a
+      // kernel's symbol table), in its own words: said in the post, plainly,
+      // to whoever the post goes to. A sensitive generation's detail is withheld.
+      const lacks = generation.sensitive ? [] : missingOf(generation.coverage);
+      const lackNote = lacks.length ? ` Missing from the images: ${lacks.join("; ")}.` : "";
       if (trigger === "kickoff") {
-        await this.o.notify("all", `Catalogue revision ${revision}: ${what} — ${generation.status}${generation.experimental ? " (experimental recipe)" : ""}. ${where}`).catch(() => undefined);
+        await this.o.notify("all", `Catalogue revision ${revision}: ${what} — ${generation.status}${generation.experimental ? " (experimental recipe)" : ""}.${lackNote} ${where}`).catch(() => undefined);
       } else if (trigger === "derived") {
         // A complete catalogue of something a job made is everyone's news;
         // a partial or failed one is its maker's, with the recipe's reasons.
         const maker = job.spec.parent ? this.originOf(job.spec.parent) : null;
         if (generation.status === "complete") {
-          await this.o.notify("all", `Catalogue revision ${revision}: ${what}, made by job ${job.spec.parent ?? "?"}${maker ? ` (${maker})` : ""} and catalogued on its own — complete. ${where}`).catch(() => undefined);
+          await this.o.notify("all", `Catalogue revision ${revision}: ${what}, made by job ${job.spec.parent ?? "?"}${maker ? ` (${maker})` : ""} and catalogued on its own — complete.${lackNote} ${where}`).catch(() => undefined);
         } else if (maker) {
           const cov = generation.coverage as { errors?: unknown[]; limits_hit?: unknown[]; why?: string } | null;
           // A sensitive generation's coverage detail may carry the secret: the notification says it is withheld, never the reasons.
           const why = generation.sensitive ? [] : [...(cov?.errors ?? []), ...(cov?.limits_hit ?? []), ...(cov?.why ? [cov.why] : [])].map(String);
-          await this.o.notify(maker, `Catalogue revision ${revision}: ${what}, made by your job ${job.spec.parent}, is ${generation.status}${why.length ? `: ${why.join("; ")}` : generation.sensitive ? " (its coverage detail is withheld: a sensitive output)" : ""}. ${where} When a readable form of it appears in a job's output, it is offered to the recipes again.`).catch(() => undefined);
+          await this.o.notify(maker, `Catalogue revision ${revision}: ${what}, made by your job ${job.spec.parent}, is ${generation.status}${why.length ? `: ${why.join("; ")}` : generation.sensitive ? " (its coverage detail is withheld: a sensitive output)" : ""}.${lackNote} ${where} When a readable form of it appears in a job's output, it is offered to the recipes again.`).catch(() => undefined);
         }
       }
       if (generation.status === "complete") await this.relateReadable(generation);

@@ -339,13 +339,39 @@ if os.path.isfile(hj):
                         errors.append("%s: commands must be a list of argument lists (strings)" % where)
             # Data a program reads and that is not a program (symbol tables, a
             # rule set): pinned like a download, put inside a Python package of
-            # the image's venv, under the licence it carries on its own.
+            # the image's venv, under the licence it carries on its own. One
+            # entry, a list of them, or a list file of the pack expanded entry
+            # by entry (images/recipe.py data_entries, which the build uses).
             data = install.get("data")
             if data is not None:
-                where = "requires/host.json: %s's data" % b.get("name")
-                if not isinstance(data, dict) or not data.get("version"):
-                    errors.append("%s needs a version" % where)
-                else:
+                where0 = "requires/host.json: %s's data" % b.get("name")
+                items = []
+                try:
+                    sys.path.insert(0, os.environ.get("DFIRSWARM_IMAGES_DIR") or os.path.join(os.path.dirname(os.path.abspath(root)), "..", "images"))
+                    import recipe as _recipe
+                    for it in (data if isinstance(data, list) else [data]):
+                        if isinstance(it, dict) and "list" in it:
+                            lf = str(it["list"])
+                            if lf.startswith("/") or ".." in lf.split("/") or not os.path.isfile(p(lf)):
+                                errors.append("%s: list %s must be a file inside the pack" % (where0, lf))
+                                continue
+                            doc = json.load(open(p(lf)))
+                            if not isinstance(doc.get("template"), dict) or not isinstance(doc.get("entries"), list) or not doc["entries"]:
+                                errors.append("%s: list %s needs a template and its entries" % (where0, lf))
+                                continue
+                            for row in doc["entries"]:
+                                items.append(("%s (%s: %s)" % (where0, lf, row.get("guid") or row.get("name") or "an entry"), _recipe.fill_template(doc["template"], row)))
+                        else:
+                            items.append((where0, it))
+                except Exception as e:
+                    errors.append("%s could not be read: %s" % (where0, e))
+                names = [it.get("name") for _w, it in items if isinstance(it, dict)]
+                if len(items) > 1 and (None in names or len(set(names)) != len(names)):
+                    errors.append("%s: several data entries need a distinct name each" % where0)
+                for where, data in items:
+                    if not isinstance(data, dict) or not data.get("version"):
+                        errors.append("%s needs a version" % where)
+                        continue
                     pinned(where, data, "")
                     for key in ("package", "licence", "why"):
                         if not (isinstance(data.get(key), str) and data[key].strip()):
@@ -354,15 +380,51 @@ if os.path.isfile(hj):
                         v = data.get(key, "")
                         if not isinstance(v, str) or v.startswith("/") or ".." in v.split("/"):
                             errors.append("%s: %s must be a path inside the package" % (where, key))
-                    if "warm" in data and not (isinstance(data["warm"], list) and data["warm"] and all(isinstance(x, str) for x in data["warm"])):
-                        errors.append("%s: warm must be an argument list (strings)" % where)
+                    # Its size, pinned: a download stops past it.
+                    if not (isinstance(data.get("bytes"), int) and data["bytes"] > 0):
+                        errors.append("%s needs bytes: the size of what the url serves" % where)
+                    for key in ("warm", "check"):
+                        if key in data and not (isinstance(data[key], list) and data[key] and all(isinstance(x, str) for x in data[key])):
+                            errors.append("%s: %s must be an argument list (strings)" % (where, key))
                     # What must hold once the file is in the image: the program
                     # finds it. The images workflow runs it again, offline.
-                    if not (isinstance(data.get("check"), list) and data["check"] and all(isinstance(x, str) for x in data["check"])):
+                    if not (isinstance(data.get("check"), list) and data["check"]):
                         errors.append("%s needs check: an argument list (strings) that succeeds when the program finds the file" % where)
                     # A file is not redistributable because its program is.
                     if not isinstance(data.get("redistributable"), bool):
                         errors.append("%s does not say whether it is redistributable (true or false)" % where)
+                    if "set" in data and data["set"] not in _recipe.SYMBOL_SETS:
+                        errors.append("%s: set is one of %s" % (where, ", ".join(_recipe.SYMBOL_SETS)))
+                    if data.get("acquire", "build") not in ("build", "operator"):
+                        errors.append("%s: acquire is build (the image build fetches it) or operator (scripts/swarm.sh symbols fetch)" % where)
+                    if "distribution_policy" in data and data["distribution_policy"] not in ("local-only",):
+                        errors.append("%s: distribution_policy is local-only" % where)
+                    # A source the build converts: argument lists, and what they
+                    # leave named as paths inside the package, each content
+                    # pinned by a known rule.
+                    cmds = data.get("commands")
+                    if cmds is not None and not (isinstance(cmds, list) and cmds and all(isinstance(c, list) and c and all(isinstance(x, str) for x in c) for c in cmds)):
+                        errors.append("%s: commands must be a list of argument lists (strings)" % where)
+                    outs = data.get("outputs")
+                    if cmds and not (isinstance(outs, list) and outs):
+                        errors.append("%s: commands need outputs, the files they leave" % where)
+                    for o in outs or []:
+                        op = str(o.get("path", "")) if isinstance(o, dict) else ""
+                        if not op or op.startswith("/") or ".." in op.split("/"):
+                            errors.append("%s: an output must be a path inside the package" % where)
+                            continue
+                        canon = o.get("canonical")
+                        if canon is not None:
+                            if not isinstance(canon, dict) or canon.get("rule") not in ("json-canon/1",):
+                                errors.append("%s: %s: canonical needs a known rule (json-canon/1)" % (where, op))
+                            if not re.fullmatch(r"[0-9a-f]{64}", str(o.get("canonical_sha256", ""))):
+                                errors.append("%s: %s: canonical_sha256 must be a whole sha256" % (where, op))
+                    conv = data.get("converter")
+                    if conv is not None and not (isinstance(conv, dict) and conv.get("package") and re.fullmatch(r"[0-9][0-9A-Za-z.+-]*", str(conv.get("version", "")))):
+                        errors.append("%s: converter names a package and its exact version" % where)
+                    left = sorted(set(re.findall(r"\{([a-z_][a-z0-9_]*)\}", json.dumps(data))) - {"file", "dir"})
+                    if left:
+                        errors.append("%s: a placeholder no entry fills: %s" % (where, ", ".join(left)))
             # Another system's program (Apple's log, a Windows collector): no
             # image holds it, so no pack may require it of one.
             if "not_in_image" in b:
@@ -519,7 +581,7 @@ PYEOF
 
 validate() { # <dir> <mode> -> prints the json summary, non-zero on error
   local dir="$1" mode="${2:-check}" out rc=0
-  out="$("$PY" -c "$(validate_py)" "$dir" "$mode" 2>&1)" || rc=$?
+  out="$(DFIRSWARM_IMAGES_DIR="$SELF/../images" "$PY" -c "$(validate_py)" "$dir" "$mode" 2>&1)" || rc=$?
   printf '%s\n' "$out"
   return $rc
 }
