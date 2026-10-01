@@ -74,7 +74,7 @@ export function pathIn(line: string, error: string): string | null {
 }
 
 /** Whether `p` is `dir` or inside it. */
-function within(p: string, dir: string): boolean {
+export function within(p: string, dir: string): boolean {
   const r = relative(normalize(dir), normalize(p));
   return r === "" || (!r.startsWith("..") && !isAbsolute(r));
 }

@@ -321,9 +321,11 @@ Tool jobs (only when `job_run` is in your tool list)
   log or temp files to its working directory must be given a path under $OUT (its log, temp or
   output option), or run after cd "$OUT". A job that failed on such a write says so in its reason.
 - A job cannot run a program where it stands in store/, work/extracted/, work/quarantine/, inputs/
-  or $OUT (sealed files have no execute bit and the others are no-exec): copy the program, and every
-  library it loads, into an executable temporary directory inside the job and run it from the copy.
-  A job that failed on this says so in its reason.
+  or $OUT (sealed files have no execute bit and the others are no-exec). Evidence is read, never
+  run: code recovered from it is not run in a job, so reimplement the step or ask the operator for a
+  program you trust (swarm.sh tool-supply). A program the operator supplied (import:mat-<n>) is run
+  from a copy: copy it, and every library it loads, into an executable temporary directory inside
+  the job and run it from there. A job that failed on this says so in its reason.
 - Everything a job reads is read-only: open a SQLite database as
   sqlite3.connect('file:<path>?mode=ro&immutable=1', uri=True) (or with the sqlite_query tool), or
   copy it into $OUT first; a plain connect fails there ("unable to open database file").

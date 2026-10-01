@@ -416,24 +416,41 @@ watchdog had notified it.
   (`provenance.tool`: `source`, `built`, `checked`, `for`), and
   `material.json` keeps them. The case policy's rules for material are kept:
   every preset (`standard`, `live_adversary`, `internal`, `ctf`) admits it
-  (`more_evidence: no` refuses evidence, not material), and a policy that says `operator_supplied=none` for
-  material refuses it before anything is sealed, since nothing recorded on its
-  output could be kept; what rests on it is flagged with its class like any
-  material. The board post tells the seats where it came from as you state it,
-  what the harness checked, that they test it on input whose answer they know
-  before relying on it, and **how to run it**: a sealed file has no execute
-  bit, and nothing in a worker executes from `store/`, `work/extracted/`,
+  (`more_evidence: no` refuses evidence, not material), and a policy that says
+  `operator_supplied=none` for material refuses it before anything is sealed,
+  since nothing recorded on its output could be kept; what rests on it, a job's
+  output included, is flagged with its class like any material. **A directory is
+  sealed whole**, every file under it, and every seat reads all of it: the
+  reply lists the files, and a directory with a hidden file or directory in it
+  (`.env`, `.git`, `.netrc`) is refused (give the files themselves; a hidden
+  file named as the path is your choice). A path that holds the run (its
+  parent, the runs directory) is refused.
+  The board post tells the seats where it came from as you state it, what the
+  harness checked, that they test it on input whose answer they know before
+  relying on it, and **how to run it**: a sealed file has no execute bit, and
+  nothing in a worker executes from `store/`, `work/extracted/`,
   `work/quarantine/`, `inputs/` or its own `$OUT`, so a job declares it as an
   input (`job_run` with `inputs: ["import:mat-<n>/<file>"]`) and copies it, and
   every library it loads, into an executable temporary directory inside the job
   (for example one made with `mktemp -d` under `/tmp`) before running it from
-  there. A job that tried to run a program in place says so in its reason
-  (`exit 126` and the paths nothing runs from). Supplying does not close the
-  request or the lead: answer them (`requests <id> answer R-n TEXT`, `lead <id>
-  note L-n TEXT`). `tool-supply <id> list [--json]` lists the tools supplied
-  with their source, build, hashes and requests; `material list` shows them as
-  material. If the run's hub was started by an older harness it takes the act as
-  plain material (no provenance, no instructions to the seats); the reply says so.
+  there. In a base-image VM (msb 0.7.2, as root) a copy made that way under
+  `/tmp` executed: `/tmp` is on the VM's overlay root, not a separate no-exec
+  mount; a worker VM, which also mounts the run, was not tested. This is for a
+  program you supply, never for evidence: evidence is read, not run (a job that
+  runs code recovered from it is flagged), and a job that tried to run a program
+  from `inputs/`, `work/extracted/` or `work/quarantine/` is told so, and sent
+  to `tool-supply` or a reimplementation. A job that tried to run a program in
+  place says so in its reason (`exit 126`, and the places nothing runs from), and
+  the shell's other reasons for 126 (a file built for another machine, a missing
+  interpreter, a directory) are quoted, not met with a copy. Supplying does not
+  close the request or the lead: answer them (`requests <id> answer R-n TEXT`,
+  `lead <id> note L-n TEXT`). `tool-supply <id> list [--json]` lists the tools
+  supplied with their source, build, hashes and requests; `material list` shows
+  them as material. If the run's hub was started by an older harness it takes
+  the act as plain material (no provenance, `--for` not recorded, no
+  instructions to the seats); this command holds the policy's rule, the
+  statements, the hidden files and the `--sha256` hashes itself before handing
+  it over, and the reply warns that the rest was not recorded.
 
 The report's §8 carries "Evidence gaps and acquisition requests", generated
 from the records: every acquisition with its stage and outcome, and each gap

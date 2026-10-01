@@ -9136,7 +9136,7 @@ add_material() { # <evidence|material|tool> <id> <add|list> ...
       operator_trace "$sandbox" "$name" "$id" add "$@"
       # A hub started by an older harness takes the act as plain material: the file is sealed, and its provenance and the way to run it are not recorded or told.
       if [[ "$mode" == tool ]] && ! jq -e '.tool != null' >/dev/null 2>&1 <<<"$out"; then
-        echo "WARN: the run's hub did not record the tool's provenance (it runs an older harness than this checkout): the file is sealed as plain operator-supplied material and the board post did not say how to run it. Tell the seats yourself (swarm.sh say $id ...): a sealed file has no execute bit, so a job copies it into an executable temporary directory first." >&2
+        echo "WARN: the run's hub did not record the tool's provenance (it runs an older harness than this checkout): the file is sealed as plain operator-supplied material. Its source, build and --for were not recorded, the ledger entry and the board post do not say it is a tool or how to run it. This command held the case policy's rule, the statements and the --sha256 hashes before handing it over; the hub could not hold --for. Tell the seats yourself (swarm.sh say $id ...): a sealed file has no execute bit, so a job copies it into an executable temporary directory first." >&2
       fi
       jq -r --arg run "$id" '
         "Added \(.import) (\(.class); \(.files | length) file(s), manifest sha256 \(.manifest_sha256)): sealed in store/imports/\(.import)/, on the store journal (line \(.journal_seq)) and the ledger (E-\(.entry // "pending")) as external material; use: \(.permitted_use)."
@@ -9145,7 +9145,7 @@ add_material() { # <evidence|material|tool> <id> <add|list> ...
         + (if .reopened then " Reopened: \((.reopened.leads // []) | if length > 0 then join(", ") else "no lead" end); answers and acceptances of \((.reopened.questions // []) | if length > 0 then join(", ") else "no question" end) held again." else "" end)
         + (if (.reopened.unknown_questions // []) | length > 0 then " Not in the question register: \(.reopened.unknown_questions | join(", "))." else "" end)
         + (if (.stale_answers // []) | length > 0 then " Now stale until examined against it, whatever question it was added for (the finish line holds them): \(.stale_answers | map("\(.section) (E-\(.answer), \(.result | gsub("_"; " "))\(if (.coverage | length) > 0 then "; coverage " + (.coverage | map("E-\(.)") | join(", ")) else "" end))") | join("; "))." else "" end)
-        + (if .tool then " Tool: source: \(.tool.source); \(if .tool.built then "built: \(.tool.built)" else "build not stated" end); \(.tool.checked | length) hash(es) given, each held to the sealed bytes\(if (.tool.for // []) | length > 0 then "; for \(.tool.for | join(", ")) (this closes neither the request nor the lead: answer them with swarm.sh requests \($run) answer R-n TEXT, or swarm.sh lead \($run) note L-n TEXT)" else "" end). The seats are told on the board that nothing sealed runs where it stands, and how to run it from an executable temporary directory inside a job." else "" end)
+        + (if .tool then " Sealed: \(.files | map("\(.path) (\(.bytes) bytes)") | join(", ")); every seat can read each of them. Tool: source: \(.tool.source); \(if .tool.built then "built: \(.tool.built)" else "build not stated" end); \(.tool.checked | length) hash(es) given, each held to the sealed bytes\(if (.tool.for // []) | length > 0 then "; for \(.tool.for | join(", ")) (this closes neither the request nor the lead: answer them with swarm.sh requests \($run) answer R-n TEXT, or swarm.sh lead \($run) note L-n TEXT)" else "" end). The seats are told on the board that nothing sealed runs where it stands, and how to run it from an executable temporary directory inside a job." else "" end)
         + (if .catalogue then (if (.catalogue | type) == "object" then " Catalogue: \((.catalogue.jobs // []) | length) detect job(s) queued." else " Catalogue: \(.catalogue)." end) else "" end)
         + (if .complete == false then " PENDING (committed; recorded at the next reconciliation, and the finish line waits for it): \((.pending // []) | join("; "))." else "" end)
         + (" The agents can read it now, read-only, at store/imports/\(.import)/out/ (their VMs mount the run live), and in jobs as import:\(.import)/<file>.")' <<<"$out"
@@ -11143,6 +11143,9 @@ EOF
                                                   source archive, a signed index) goes in the words. --for names the
                                                   requests (R-n) and leads (L-n) it is supplied for; a request's own lead
                                                   is named beside it. Neither is closed by this: answer them.
+                                                  A directory is sealed whole, every file under it, and every seat
+                                                  reads all of it: the reply lists the files, and a directory with a
+                                                  hidden file or directory in it (.env, .git, .netrc) is refused.
   tool-supply <id> list [--json]                  the tools supplied, with where they came from and what was checked
 The seats are told on the board where it came from as you state it, what the harness checked, that it is
 supplied material to be tested on input with a known answer before they rely on it, and how to run it: a

@@ -107,7 +107,8 @@ export type ToolSupply = {
 /** A tool as its record keeps it: the statements whole, the hashes checked against the sealed bytes, the requests and leads (a request's own lead beside it). */
 export type ToolProvenance = { source: string; built?: string; checked: string[]; for?: string[] };
 
-export const TOOL_TEXT_MAX = 4000;
+/** The longest reason or statement an operator gives (--why, --source, --built): longer is refused, never cut. */
+export const TEXT_MAX = 4000;
 
 export type MaterialRequest = {
   mode: MaterialMode;
@@ -306,16 +307,26 @@ function canonicalQuestion(qs: Q.QuestionsSnapshot | null, raw: string): string 
   return q?.id ?? R.questionId(raw);
 }
 
+/** Why a path cannot be added to the run: it is inside the run (cited as it is, never added again) or holds it (the run, and every run beside it, would be copied); null when it is neither. */
+export async function runPathRefusal(S: string, src: string, shown: string): Promise<string | null> {
+  const realSrc = await realpath(src).catch(() => src);
+  const realS = await realpath(S).catch(() => S);
+  if (within(src, S) || within(realSrc, realS)) return `${shown} is inside the run: what is in the run is cited as it is (input:, job:, import:), never added again`;
+  if (within(S, src) || within(realS, realSrc)) return `${shown} holds the run (${S}): adding it would copy the run, and every run beside it if it is the runs directory; give the files themselves`;
+  return null;
+}
+
 /**
  * What the operator says of a tool they supply, held before anything is
- * copied: it is material (never evidence added later) of the class the
- * operator supplies, the policy must let a record rest on that class, it says
- * where it came from, what it says is not cut, the hashes are hashes, and the
- * requests and leads it is for exist. The words are the operator's statement
- * and are recorded as such; only the hashes are checked, later, against the
- * bytes.
+ * copied and without reading the registers (the CLI holds it too, before it
+ * hands the act to a hub that may be older than this checkout): it is
+ * material (never evidence added later) of the class the operator supplies,
+ * the policy must let a record rest on that class, it says where it came
+ * from, what it says is not cut, and the hashes are hashes. The words are the
+ * operator's statement and are recorded as such; only the hashes are checked
+ * against the bytes.
  */
-async function readToolSupply(S: string, req: MaterialRequest, policy: ReturnType<typeof readCasePolicy>): Promise<{ ok: true; source: string; built?: string; hashes: string[]; for: string[] } | { ok: false; reason: string }> {
+export function checkToolStatements(req: MaterialRequest, policy: ReturnType<typeof readCasePolicy>): { ok: true; source: string; built?: string; hashes: string[] } | { ok: false; reason: string } {
   const t = req.tool!;
   if (req.mode !== "material") return { ok: false, reason: "a tool is supplied as material (swarm.sh tool-supply), never as evidence added after the kickoff" };
   if (req.cls !== undefined && req.cls !== "operator_supplied") return { ok: false, reason: "a tool is operator-supplied material: --class is not for it" };
@@ -324,20 +335,36 @@ async function readToolSupply(S: string, req: MaterialRequest, policy: ReturnTyp
   }
   const source = String(t.source ?? "").trim();
   if (!source) return { ok: false, reason: "tool supply says where the tool came from (--source): a package and its version, a URL, who built it" };
-  if (source.length > TOOL_TEXT_MAX) return { ok: false, reason: `--source is at most ${TOOL_TEXT_MAX} characters: nothing is cut, so a longer one is refused` };
+  if (source.length > TEXT_MAX) return { ok: false, reason: `--source is at most ${TEXT_MAX} characters: nothing is cut, so a longer one is refused` };
   const built = t.built === undefined ? "" : String(t.built).trim();
-  if (built.length > TOOL_TEXT_MAX) return { ok: false, reason: `--built is at most ${TOOL_TEXT_MAX} characters: nothing is cut, so a longer one is refused` };
+  if (built.length > TEXT_MAX) return { ok: false, reason: `--built is at most ${TEXT_MAX} characters: nothing is cut, so a longer one is refused` };
   const hashes: string[] = [];
   for (const raw of t.sha256 ?? []) {
     const h = String(raw).trim().toLowerCase();
     if (!/^[0-9a-f]{64}$/.test(h)) return { ok: false, reason: `--sha256 is a file's sha256, 64 hex characters (got ${JSON.stringify(raw)})` };
     if (!hashes.includes(h)) hashes.push(h);
   }
+  return { ok: true, source, ...(built ? { built } : {}), hashes };
+}
+
+/** The first hash given that is none of the files' sha256, said with every file's; null when each is one of them. */
+export function strayHash(hashes: string[], files: Array<{ path: string; sha256: string }>): string | null {
+  const stray = hashes.find((h) => !files.some((f) => f.sha256 === h));
+  return stray ? `the hash ${stray} is none of the supplied files' sha256 (${files.map((f) => `${f.path} is ${f.sha256}`).join("; ")}): a hash of anything else, a source archive or a signed index, goes in --source or --built; nothing was added` : null;
+}
+
+/** The hidden files and directories (a name beginning with a dot) among the files of a supplied directory, in the way they are said: a .env, a .git/config, a .netrc go with a directory sealed whole. */
+export function hiddenIn(files: Array<{ rel: string }>): string[] {
+  return files.filter((f) => f.rel.split("/").some((c) => c.startsWith("."))).map((f) => f.rel);
+}
+
+/** The requests (R-n) and leads (L-n) a tool is for, each read from its register: the ids as named, a request's own lead beside it. */
+async function readToolFor(S: string, ids: string[] | undefined): Promise<{ ok: true; for: string[] } | { ok: false; reason: string }> {
   const forWhat: string[] = [];
   const add = (id: string) => {
     if (!forWhat.includes(id)) forWhat.push(id);
   };
-  for (const raw of t.for ?? []) {
+  for (const raw of ids ?? []) {
     const m = /^([RL])-?([1-9]\d{0,6})$/i.exec(String(raw).trim());
     if (!m) return { ok: false, reason: `--for names a request or a lead, R-<n> or L-<n> (got ${JSON.stringify(raw)})` };
     const id = `${m[1]!.toUpperCase()}-${Number(m[2])}`;
@@ -352,7 +379,7 @@ async function readToolSupply(S: string, req: MaterialRequest, policy: ReturnTyp
       add(id);
     }
   }
-  return { ok: true, source, ...(built ? { built } : {}), hashes, for: forWhat };
+  return { ok: true, for: forWhat };
 }
 
 /**
@@ -368,18 +395,22 @@ export async function admitMaterial(sandbox: string, req: MaterialRequest, o: Ad
   if (req.mode !== "evidence" && req.mode !== "material") return { ok: false, reason: "an addition is evidence or material" };
   const why = String(req.why ?? "").trim();
   if (!why) return { ok: false, reason: `${req.tool ? "tool supply" : req.mode === "evidence" ? "evidence add" : "material add"} says why (--why): what it is and what it is for` };
-  if (why.length > 4000) return { ok: false, reason: "--why is at most 4000 characters: nothing is cut, so a longer one is refused" };
+  if (why.length > TEXT_MAX) return { ok: false, reason: `--why is at most ${TEXT_MAX} characters: nothing is cut, so a longer one is refused` };
   const policy = readCasePolicy(S);
   const cls: SourceClass = req.mode === "evidence" ? "acquired_evidence" : (req.cls ?? "operator_supplied");
   if (req.mode === "material" && !["operator_supplied", "case_material"].includes(cls)) return { ok: false, reason: "--class is operator_supplied or case_material" };
-  const tool = req.tool ? await readToolSupply(S, req, policy) : null;
-  if (tool && !tool.ok) return tool;
+  const stated = req.tool ? checkToolStatements(req, policy) : null;
+  if (stated && !stated.ok) return stated;
+  const toolFor = stated?.ok ? await readToolFor(S, req.tool!.for) : null;
+  if (toolFor && !toolFor.ok) return toolFor;
+  const tool = stated?.ok && toolFor?.ok ? { ...stated, for: toolFor.for } : null;
   if (req.mode === "evidence" && policy.more_evidence === "no") {
     return { ok: false, reason: `this case admits no evidence after its kickoff (case policy ${policy.policy}, more_evidence: no): nothing was added. An agent's acquisition is answered "${R.NO_MORE_EVIDENCE}"; a case that must take this evidence is a new run, or material supplied for reference (swarm.sh material <run> add)` };
   }
   const src = resolve(String(req.path ?? ""));
   if (!req.path) return { ok: false, reason: "name the file or directory to add" };
-  if (within(src, S) || within(await realpath(src).catch(() => src), await realpath(S).catch(() => S))) return { ok: false, reason: `${req.path} is inside the run: what is in the run is cited as it is (input:, job:, import:), never added again` };
+  const placed = await runPathRefusal(S, src, req.path);
+  if (placed) return { ok: false, reason: placed };
   // The acquisition it answers, asked now and again under the lock.
   const requestRefusal = async (): Promise<{ request: R.OperatorRequest | null; reason?: string }> => {
     if (!req.for) return { request: null };
@@ -399,6 +430,10 @@ export async function admitMaterial(sandbox: string, req: MaterialRequest, o: Ad
   if (expected && !/^[0-9a-f]{64}$/.test(expected)) return { ok: false, reason: "--sha256 is the file's sha256, 64 hex characters" };
   const walked = await walkSource(src);
   if (!walked.ok) return walked;
+  if (tool && walked.top === "dir") {
+    const hidden = hiddenIn(walked.files);
+    if (hidden.length) return { ok: false, reason: `${req.path} holds hidden files or directories (${hidden.join(", ")}): a directory supplied as a tool is sealed whole and every seat reads all of it, so a .env, a .git/config or a .netrc would go with it; remove them or give the files themselves; nothing was added` };
+  }
   if (expected && walked.files.length !== 1) return { ok: false, reason: "--sha256 holds one file to its acquisition hash; a directory's files are each held to their own sha256 as they are copied" };
   const P_ = storePaths(S);
   // A staging directory of this addition's own: no other addition writes or removes it.
@@ -422,11 +457,9 @@ export async function admitMaterial(sandbox: string, req: MaterialRequest, o: Ad
       return { ok: false, reason: `the copy failed (${(err as Error).message}): nothing was added` };
     }
     // A tool's hashes, each held to the files copied: the harness vouches for what it checked, and for nothing else.
-    if (tool?.ok) {
-      const stray = tool.hashes.find((h) => !files.some((f) => f.sha256 === h));
-      if (stray) {
-        return { ok: false, reason: `the hash ${stray} is none of the supplied files' sha256 (${files.map((f) => `${f.path} is ${f.sha256}`).join("; ")}): a hash of anything else, a source archive or a signed index, goes in --source or --built; nothing was added` };
-      }
+    if (tool) {
+      const stray = strayHash(tool.hashes, files);
+      if (stray) return { ok: false, reason: stray };
     }
     let locked: MaterialResult;
     try {
@@ -475,7 +508,7 @@ export async function admitMaterial(sandbox: string, req: MaterialRequest, o: Ad
           ...(questions.length ? { questions } : {}),
           ...(inventoryRev !== null ? { inventory_rev: inventoryRev } : {}),
           ...(req.sensitive ? { sensitive: true } : {}),
-          ...(tool?.ok ? { tool: { source: tool.source, ...(tool.built ? { built: tool.built } : {}), checked: tool.hashes, ...(tool.for.length ? { for: tool.for } : {}) } } : {}),
+          ...(tool ? { tool: { source: tool.source, ...(tool.built ? { built: tool.built } : {}), checked: tool.hashes, ...(tool.for.length ? { for: tool.for } : {}) } } : {}),
           ledger_seq: ledgerSeq,
           lead_seq: leadSeq,
         };
@@ -551,7 +584,7 @@ function withReason(head: string, why: string, max: number, id: string): string 
 function toolPostBody(rec: MaterialRecord, tool: ToolProvenance, entry: number | null, use: string): string {
   const id = rec.import;
   const files = rec.files;
-  const inputs = files.length === 1 ? `import:${id}/${files[0]!.path}` : `import:${id}`;
+  const inputs = JSON.stringify([files.length === 1 ? `import:${id}/${files[0]!.path}` : `import:${id}`]);
   const cite = files.length === 1 ? `import:${id}/${files[0]!.path}` : `import:${id}/<file>`;
   return [
     `TOOL SUPPLIED as import:${id} (${rec.class}; use: ${use}), ${files.length} file(s): ${files.map((f) => `${f.path} (${f.bytes} bytes, sha256 ${f.sha256})`).join("; ")}, by ${rec.supplied_by}: ${rec.why}.`,
@@ -560,7 +593,7 @@ function toolPostBody(rec: MaterialRecord, tool: ToolProvenance, entry: number |
     tool.checked.length ? `Hashes the operator gave, each checked against the bytes sealed: ${tool.checked.join(", ")}.` : "Hashes the operator gave: none; the harness holds the bytes to the sha256 each had before it was copied.",
     tool.for?.length ? `It was supplied for ${tool.for.join(", ")}.` : "",
     "It is supplied material, and the harness vouches for the bytes only: where it came from and how it was built are the operator's statement. Test it on input whose answer you know before you rely on it, and say in the record that you did.",
-    `It is readable now, read-only, at store/imports/${id}/out/. Nothing in the store can be executed where it stands (sealed files have no execute bit), so run it in a job: job_run with inputs ["${inputs}"], copy it, and every library it loads, into an executable temporary directory inside the job (for example one made with mktemp -d under /tmp), make it executable there (chmod +x) and run it from the copy.`,
+    `It is readable now, read-only, at store/imports/${id}/out/. Nothing in the store can be executed where it stands (sealed files have no execute bit), so run it in a job: job_run with inputs ${inputs}, copy it, and every library it loads, into an executable temporary directory inside the job (for example one made with mktemp -d under /tmp), make it executable there (chmod +x) and run it from the copy.`,
     `A finding that rests on its output cites the job and ${cite}, and says what the tool is; what rests on it is flagged with its class. It is on the ledger as E-${entry ?? "?"} (kind external).`,
   ].filter(Boolean).join(" ");
 }
@@ -831,6 +864,32 @@ async function main(argv: string[]): Promise<void> {
     supplied_by: Q.originWords(Q.originOf(actor)),
     via,
   };
+  // A tool's statements, hashes and files are held here too, before the act is handed to a hub that may be older than this checkout and would take it as plain material, with none of them applied.
+  if (tool) {
+    const stated = checkToolStatements(req, readCasePolicy(S));
+    if (!stated.ok) {
+      emit(stated);
+      return;
+    }
+    const placed = await runPathRefusal(S, req.path, req.path);
+    if (placed) {
+      emit({ ok: false, reason: placed });
+      return;
+    }
+    const walked = await walkSource(req.path);
+    if (walked.ok) {
+      const hidden = walked.top === "dir" ? hiddenIn(walked.files) : [];
+      if (hidden.length) {
+        emit({ ok: false, reason: `${req.path} holds hidden files or directories (${hidden.join(", ")}): a directory supplied as a tool is sealed whole and every seat reads all of it, so a .env, a .git/config or a .netrc would go with it; remove them or give the files themselves; nothing was added` });
+        return;
+      }
+      const stray = strayHash(stated.hashes, await Promise.all(walked.files.map(async (f) => ({ path: f.rel, sha256: await fileSha(f.abs) }))));
+      if (stray) {
+        emit({ ok: false, reason: stray });
+        return;
+      }
+    }
+  }
   // With no hub running the addition is made here, and this process exits once it has answered: its reverse sweep runs as a step of its own.
   const r = await QC.admit(S, one("--hub-admin"), { op: "material", request: req }, () => admitMaterial(S, req, { reverse: "detached" }));
   emit(r);

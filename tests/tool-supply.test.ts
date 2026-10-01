@@ -10,11 +10,12 @@
  * flagged with its class.
  */
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { createServer } from "node:net";
 import { createHash } from "node:crypto";
 import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { after, test } from "node:test";
 import * as L from "../extensions/leads.ts";
 import * as P from "../extensions/protocol.ts";
@@ -22,8 +23,10 @@ import * as Q from "../extensions/questions.ts";
 import { resolveCasePolicy, type CasePolicy } from "../scripts/case-policy.ts";
 import { checkLedgerAnswers } from "../scripts/check-answers.ts";
 import { admitMaterial, listMaterial, type MaterialRequest } from "../scripts/material.ts";
+import { Journal, sealTree, storePaths } from "../scripts/evidence-store.ts";
 import { externalLineage } from "../scripts/net-broker.ts";
 
+const ROOT = resolve(import.meta.dirname, "..");
 const dirs: string[] = [];
 after(async () => {
   // The store's sealed imports are read-only: made writable again to be removed.
@@ -215,6 +218,100 @@ test("a directory is a tool too: a program and the libraries it loads are sealed
   const post = (await posts(S)).find((x) => /TOOL SUPPLIED/.test(x))!;
   assert.match(post, /job_run with inputs \["import:mat-0001"\]/);
   assert.ok(post.includes(`prog (20 bytes, sha256 ${progSha})`) && post.includes(`lib/libx.so.1 (14 bytes, sha256 ${libSha})`));
+});
+
+test("what rests on the output of a job that ran the supplied tool is marked operator_supplied through the lineage: the job's file, the finding that cites it, the answer", async () => {
+  const { S, base, a0 } = await run();
+  const p = await program(base);
+  added(await admitMaterial(S, req(p.path, { source: "built by the operator from a public source tree" })));
+  // A committed job that declared the tool among its inputs, and the file it wrote.
+  const stg = join(base, "job-out");
+  await mkdir(stg, { recursive: true });
+  await writeFile(join(stg, "found.txt"), "three candidates\n");
+  await sealTree(S, stg, join(storePaths(S).jobs, "j000001", "out"), "j000001", 1);
+  await writeFile(join(storePaths(S).jobs, "j000001", "job.json"), JSON.stringify({ id: "j000001", state: "committed", requester: { agent: "a0" }, status: "ok", exit: 0, spec: { kind: "command", scope: "declared", inputs: ["import:mat-0001/detector"], command: "run the tool" } }));
+  await (await Journal.open(S)).append({ type: "job_started", job: "j000001", attempt: 1, declared: ["import:mat-0001/detector"], scope: { kind: "declared" } });
+  const f = ok(await P.recordEntry(a0, { kind: "finding", basis: "observed", confidence: "high", indicates: "What the observation shows, and the step to it.", confidence_why: "Read directly from the object it cites.", value: "The tool reports three candidates", source: "the job's output", evidence: "found.txt", refs: ["job:j000001/found.txt"], answers: ["1"] } as P.LedgerInput));
+  ok(await P.recordEntry(a0, { kind: "answer", result: "established", confidence: "high", confidence_why: "The finding is read from the object.", alternatives_open: "none remains open", would_change: "a record that disagrees", section: "question:1", value: "Three candidates", reasoning: `E-${f.entry.seq} shows it` } as unknown as P.LedgerInput));
+  const lin = await externalLineage(S);
+  assert.deepEqual(lin.classes.get(f.entry.seq), ["operator_supplied"], "the finding that cites the job's file rests on the supplied tool");
+  assert.ok((lin.jobs.get("j000001") ?? []).some((v) => v.startsWith("import:mat-0001")), "the job is tainted by the import it read");
+  const check = await checkLedgerAnswers(S, ["question:1"]);
+  assert.deepEqual(check.external["question:1"]?.classes, ["operator_supplied"]);
+});
+
+test("a directory is sealed whole, so hidden files in it are refused and a path that holds the run is refused; a file named directly is its own choice", async () => {
+  const { S, base } = await run();
+  const dir = join(base, "bundle2");
+  await mkdir(join(dir, ".git"), { recursive: true });
+  await writeFile(join(dir, "prog"), "#!/bin/sh\necho prog\n");
+  await writeFile(join(dir, ".env"), "TOKEN=abc\n");
+  await writeFile(join(dir, ".git", "config"), "[remote]\n");
+  refused(await admitMaterial(S, req(dir, { source: "s" })), /holds hidden files or directories \(\.env, \.git\/config\): a directory supplied as a tool is sealed whole and every seat reads all of it, so a \.env, a \.git\/config or a \.netrc would go with it; remove them or give the files themselves; nothing was added/);
+  assert.deepEqual(await readdir(join(S, "store", "imports")).catch(() => []), [], "nothing was sealed");
+  // Plain material is unchanged: a directory with a hidden file is sealed as it always was.
+  added(await admitMaterial(S, { mode: "material", path: dir, why: "a bundle", supplied_by: WHO, via: "cli" }));
+  // A hidden file given as the file itself is the operator's choice.
+  const lone = join(base, ".tool");
+  await writeFile(lone, "#!/bin/sh\n");
+  added(await admitMaterial(S, req(lone, { source: "s" })));
+  // The run's parent holds the run: every run beside it would be copied.
+  refused(await admitMaterial(S, req(dirname(S), { source: "s" })), /holds the run \(.*\): adding it would copy the run, and every run beside it if it is the runs directory; give the files themselves/);
+  refused(await admitMaterial(S, { mode: "material", path: dirname(S), why: "all", supplied_by: WHO, via: "cli" }), /holds the run/);
+  refused(await admitMaterial(S, { mode: "evidence", path: dirname(S), why: "all", supplied_by: WHO, via: "cli" }), /holds the run|admits no evidence/);
+});
+
+test("the command line holds the policy's rule, the statements, the hashes and the directory's hidden files before it hands the act to a hub, which may be older than this checkout and apply none of them", async () => {
+  const out = await mkdtemp("/tmp/tsc.");
+  dirs.push(out);
+  const S = join(out, "run");
+  await P.initSandbox(S, { swarmId: "c1", agentIds: ["a0"], capUsd: 5, wallClockMinutes: 30, goal: GOAL });
+  await mkdir(join(S, "network"), { recursive: true });
+  await writeFile(join(S, "network", "policy.json"), JSON.stringify(policyOf({})));
+  const p = await program(out);
+  // A hub from an older harness: it takes any act, says ok, and records nothing of a tool.
+  const received: Array<Record<string, unknown>> = [];
+  const sock = join(out, "h.sock");
+  const hub = createServer((c) => {
+    let buf = "";
+    c.on("data", (d) => {
+      buf += String(d);
+      if (!buf.includes("\n")) return;
+      received.push(JSON.parse(buf.split("\n")[0]!) as Record<string, unknown>);
+      c.end(`${JSON.stringify({ ok: true, import: "mat-0001", mode: "material", class: "operator_supplied", files: [], manifest_sha256: "m", journal_seq: 1, entry: 1, permitted_use: "reference", complete: true })}\n`);
+    });
+  });
+  await new Promise<void>((done) => hub.listen(sock, done));
+  const cli = (args: string[]) =>
+    new Promise<{ ok: boolean; reason?: string }>((done) => {
+      const c = spawn("node", ["--experimental-strip-types", "--no-warnings", join(ROOT, "scripts", "material.ts"), "tool-add", S, ...args, "--hub-admin", sock], { env: { ...process.env, SWARM_RUNS_DIR: join(out, "runs") } });
+      let text = "";
+      c.stdout.on("data", (d) => (text += String(d)));
+      c.on("close", () => done(JSON.parse(text.trim().split("\n").at(-1) ?? "{}")));
+    });
+  try {
+    // Refused by the command line: the hub is never asked.
+    assert.match((await cli([p.path, "--why", "a tool", "--source", "s", "--sha256", "0".repeat(64)])).reason ?? "", /is none of the supplied files' sha256/);
+    assert.match((await cli([p.path, "--why", "a tool"])).reason ?? "", /says where the tool came from/);
+    assert.match((await cli([p.path, "--why", "a tool", "--source", "s", "--sha256", "abc"])).reason ?? "", /64 hex characters/);
+    const dir = join(out, "bundle3");
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, ".netrc"), "machine x\n");
+    await writeFile(join(dir, "prog"), "x\n");
+    assert.match((await cli([dir, "--why", "a tool", "--source", "s"])).reason ?? "", /holds hidden files or directories \(\.netrc\)/);
+    await writeFile(join(S, "network", "policy.json"), JSON.stringify(policyOf({ material_use: "operator_supplied=none" })));
+    assert.match((await cli([p.path, "--why", "a tool", "--source", "s"])).reason ?? "", /material_use operator_supplied=none/);
+    assert.equal(received.length, 0, "no refused act reached the hub");
+    // A good one is handed over, with the tool in it (an old hub ignores it; the shell reply says so).
+    await writeFile(join(S, "network", "policy.json"), JSON.stringify(policyOf({})));
+    const good = await cli([p.path, "--why", "a tool", "--source", "s", "--sha256", p.sha256]);
+    assert.equal(good.ok, true);
+    assert.equal(received.length, 1);
+    const sent = received[0]!.request as { tool?: { source?: string; sha256?: string[] } };
+    assert.deepEqual([sent.tool?.source, sent.tool?.sha256], ["s", [p.sha256]]);
+  } finally {
+    hub.close();
+  }
 });
 
 function ok<T extends { ok: boolean }>(r: T): Extract<T, { ok: true }> {

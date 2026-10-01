@@ -286,10 +286,12 @@ export type JobRecord = {
   write_refused?: WriteRefused;
   /**
    * A program its worker could not execute (job-exec-refused.ts): exit 126,
-   * with the line that names the program when there is one, or the loader's
-   * refusal to map a segment. Its reason says so, names the places nothing
-   * runs from, and says to run a copy from an executable directory inside
-   * the job; generic, never a tool's own.
+   * with the shell's line that names the program when there is one, the
+   * loader's refusal to map a segment, or a denied existing file under a
+   * read-only mount. Its reason says so and, by where the program stands,
+   * what to do: a copy run from an executable directory inside the job for a
+   * supplied program, the operator's tool-supply for evidence; generic, never
+   * a tool's own.
    */
   exec_refused?: ExecRefused;
   /** Its outputs are sensitive, decided when they were sealed (output-hygiene.ts): run with secret_output, or made from a sensitive output. */
@@ -1547,7 +1549,7 @@ export class JobService {
           : job.spec.kind === "import" && exit === 3
             ? "the source changed while it was copied (stdout.log names each file): import it again once it is still"
             : unexecuted
-              ? `exit ${exit}: ${execRefusedWords(unexecuted, { job: job.id, out: this.outPath(job) })}`
+              ? `exit ${exit}: ${execRefusedWords(unexecuted, { job: job.id, out: this.outPath(job), cwd: this.S })}`
               : missing
                 ? `exit ${exit}: a program it runs is not in its image${job.program_missing?.profile ? ` (profile ${job.program_missing.profile})` : ""}: ${missing === "?" ? "exit 127" : missing}`
                 : refused

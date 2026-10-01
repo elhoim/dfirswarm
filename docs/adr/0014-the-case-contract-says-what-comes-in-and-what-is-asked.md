@@ -201,7 +201,13 @@ policy" only where the policy says no more evidence comes.
    and that a sealed file has no execute bit and no place a worker reads it
    from executes, so a job copies it into an executable temporary directory
    inside the job. A job that tried to run a program in place says so in its
-   reason (`scripts/job-exec-refused.ts`), as a refused write does. The
+   reason (`scripts/job-exec-refused.ts`), as a refused write does, and what
+   it says depends on where the program stands: a supplied program is run from
+   a copy, evidence is read and never run (the reply sends the seat to the
+   operator's `tool-supply` or to a reimplementation, as the contract does for
+   code recovered from evidence), and the shell's other reasons for status 126
+   are quoted, with no copy suggested. A directory supplied as a tool is sealed
+   whole and read by every seat, so one with hidden files in it is refused. The
    harness knows no program and no format; the file is what the operator says
    it is, and a seat that relies on it says so in its record.
 
