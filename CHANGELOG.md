@@ -6,6 +6,17 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Changed: Pi 0.87.1, on the host and in the VMs
+
+Pi moves from 0.87.0 to 0.87.1 in both places it is pinned: `package.json` (host-mode seats, the tests) and `images/base.Dockerfile` (`PI_VERSION`, every VM seat). 0.87.1:
+- adds GPT-6 Sol and GPT-6 Luna for OpenAI Codex subscriptions and API keys;
+- adds Claude Opus 5.5;
+- fixes split-turn compaction summaries that Claude Fable 5.1 refused.
+
+A base image built before this change still runs 0.87.0 until it is built again.
+
+Dependabot now leaves Pi and `microsandbox` alone. Both are moved by hand: Pi in its two places together, and `microsandbox` only after the VM isolation is measured again. 0.7.3 turned on a strict hostname policy by default, under which a VM reached none of its allowed hosts in CI.
+
 ### Added: kickoff goldens
 
 `tests/kickoff-goldens.test.sh` compares what `swarm.sh start --no-start` writes for three goals with `tests/fixtures/kickoff/`:
