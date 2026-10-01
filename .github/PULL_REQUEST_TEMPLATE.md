@@ -14,6 +14,7 @@
 - [ ] Shell changes run on bash 3.2
 - [ ] Nothing from `runs/`, `.pi-sessions/` or a real key is included
 - [ ] Docs updated where the behaviour is described (README, `docs/`, `CONTEXT.md` for new terms)
+- [ ] The changelog entry is in `changelog.d/<branch-slug>.md`, not in `CHANGELOG.md`
 - [ ] If an agent could now write a harness-owned file, this PR says so and why
 
 ## Contributor License Agreement

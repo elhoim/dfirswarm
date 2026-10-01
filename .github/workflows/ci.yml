@@ -139,6 +139,25 @@ jobs:
       - name: Replay the contract fixtures under the base and this change
         run: node --experimental-strip-types --no-warnings scripts/replay-impact.ts "${{ github.event.pull_request.base.sha }}"
 
+  pack-versions:
+    # A pack whose content differs from the base's carries a version above it
+    # (docs/packs.md, "Versions"). Two branches that changed one pack can merge
+    # without a conflict and land two different packs under one number, and
+    # the seal and packs.test.sh hold for both: only a comparison with the base
+    # sees it. A pull request against its base; a push to main against the
+    # commit before it.
+    name: pack versions · base against head
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: git config --global init.defaultBranch main
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The base's pack.json files are read with git show, so the history is needed.
+          fetch-depth: 0
+      - name: Every changed pack's version is above the base's
+        run: python3 scripts/pack-versions.py --base "${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}"
+
   guards-without-namespaces:
     # The host a run meets inside an ordinary container, or on an Ubuntu with
     # its AppArmor restriction left on: no user namespaces, Landlock only.
