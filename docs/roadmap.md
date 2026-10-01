@@ -53,5 +53,10 @@ reviewed, so none of our images is published, and no image that carries
 ours, the pro one included. The Pro service is to build a customer's VM images
 from the pack recipes, with the customer's own acceptance of each program's
 licence (the NOTICE lists them), so that nothing is redistributed by us and the
-customer still has what a memory case needs. Until then anyone can build their
-own from [the recipes](../images/README.md).
+customer still has what a memory case needs. The pieces for that exist: the
+curated kernel tables are fetched on the customer's host, with the customer's
+acceptance of Microsoft's terms recorded in the store and in the image
+(`swarm.sh symbols fetch --accept-terms`), and the build that converts them runs
+there too; a build run by us and handed over would be sharing, which counsel has
+not answered. Until then anyone can build their own from
+[the recipes](../images/README.md).
