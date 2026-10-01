@@ -1365,7 +1365,12 @@ the goal or the operator say that this question had to be established.
   question they are no disposition, so the finish line holds the done on
   it. This is one rule under every stop policy: a cap still pauses or stops
   the run and the operator still stops it; under `--stop operator` nothing
-  else ends it.
+  else ends it. Under `cap-pause` and `cap-stop` the agents may still
+  abandon a run, as they may abandon any run there (`done` with `abandon:
+  true`, a vote of two seats); that end is `abandoned`, never completed or
+  examination-limited, but it does end the run with the question open. So
+  the requirement binds the agents' done under every policy, and binds them
+  fully only under `--stop operator`, where nobody abandons.
 - **Who says so.**
   - The goal, which owns the definition of done ([ADR 0002](0002-the-goal-owns-the-definition-of-done.md)):
     a `## Must establish` section naming its questions as it numbers them
@@ -1373,7 +1378,11 @@ the goal or the operator say that this question had to be established.
     (`[1, 3]`, or a list), which the kickoff writes into that section. The
     seed puts the requirement on each named question's `open` act, present
     only when given, so a goal without it seeds as it always did. A name the
-    goal does not number requires nothing, and the kickoff warns of it.
+    goal does not number requires nothing, and the kickoff warns of it; so
+    does a `must_establish:` key that names nothing. The list's items may be
+    indented or not, and a list beside the goal's own section is merged into
+    it: neither is dropped quietly, since a bar lower than the one written is
+    what this exists to prevent.
   - The operator or an examiner: `question add --must-establish`, and on an
     existing question `question amend Q-n --expect-rev N --must-establish`,
     which makes no new revision.
@@ -1389,7 +1398,14 @@ the goal or the operator say that this question had to be established.
   itself is released with `question amend Q-n --expect-rev N
   --no-must-establish --why W`; the register keeps who released it, when and
   why, beside who required it, and the chain keeps every act. Nothing else
-  releases it: not the stop policy, a review or a vote.
+  releases it: not the stop policy, a review or a vote. A withdrawal of the
+  question is a disposition for it, as for any question ([ADR 0011](0011-questions-are-a-register-with-their-askers.md),
+  item 9): a person's act on the record, with who and why. The requirement
+  does not change who may withdraw: the operator, an examiner, or the person
+  who asked it (an analyst, a reviewer or an observer, their own question
+  only). So an analyst who withdraws their own question ends its requirement
+  with it, on the record; a goal's question is withdrawn only by the operator
+  or an examiner, and an agent withdraws none.
 - **Where it holds.**
   - The answers check gives such a question no disposition unless its answer
     answers it (`sectionBars` reads the requirement from the register); its
@@ -1423,16 +1439,19 @@ the goal or the operator say that this question had to be established.
     (`docs/rules.md`) does not change.
   - Not a warning on the record ("this answer does not end the run"): the
     header and readiness say it at every delivery.
-- **Measured.** Three contract fixtures, under every stop policy:
+- **Measured.** Five contract fixtures, under every stop policy:
   `must-establish-partial` (required by the goal; a reviewed partial
   answer), `must-establish-not-determinable` (required by the operator's
-  amendment; not determinable on a reviewed coverage record) and
-  `must-establish-accepted` (required, then accepted). Replayed against main
-  before the change (c61bc2b), the first two are disposed and their done
-  proceeds examination-limited under main, and are held under this change,
-  readiness holding on `must_establish`. The third ends examination-limited
-  under both; only the answers check's own word on its partial answer
-  differs. Every other contract fixture reads the same
+  amendment; not determinable on a reviewed coverage record),
+  `must-establish-accepted` (required, then accepted),
+  `must-establish-released` (required by the goal, then released) and
+  `must-establish-established` (required, and established). Replayed
+  against main before the change (c61bc2b), the first two are disposed and
+  their done proceeds examination-limited under main, and are held under
+  this change, readiness holding on `must_establish`. The accepted one ends
+  examination-limited under both; only the answers check's own word on its
+  partial answer differs. The released and the established ones read the
+  same under both, and so does every other contract fixture
   (`scripts/replay-impact.ts c61bc2b`).
 - **Not decided here.** The console's question form has no field for it yet
   (the CLI and the goal have). The report does not yet say that a question
@@ -1453,7 +1472,12 @@ seat noticed and asked.
   question the register already holds word for word (`questions-cli.ts add
   --dry-run`, `checkAct`: the commit's own checks, with nothing written,
   signed, supplied or delivered). One it would refuse refuses the resume
-  with nothing changed, naming the question and the reason.
+  with nothing changed, naming the question and the reason. A broken
+  question chain is refused as the admission refuses it. What the dry run
+  does not do, the admission does: it takes no lock, writes no seed (it
+  reads the goal's, derived) and reconciles nothing an earlier act left
+  undone. `direct`, `deliver` and `seed` write by what they are, and refuse
+  `--dry-run`.
 - **Going on without it is said.** `--skip-refused-questions` leaves such a
   question out and resumes, with a `WARN` naming it and why.
 - **Checked again.** The question is admitted after the move, as before;
@@ -1469,11 +1493,17 @@ harmless, since silence approves nothing, but it was noise on work whose
 progress comes in jumps. The question was whether the two arms should be
 joined (both), or the count scaled with the run.
 
-The answer comes from the recorded runs. Copies of the 45 runs on this
-install with ten committed jobs or more (5,227 jobs, 4,541 yields: findings,
-coverage records, answers, dispositions and acceptances), each segment of a
-resumed run taken apart, were replayed against the rule minute by minute and
-at every committed job:
+The answer comes from the recorded runs. They are not in this repository:
+they are the owner's own run histories on the machine the runs were made on
+(microVM runs from 2026-09-24 to 2026-10-01, the live Breadcrumbs run among
+them), and the measure was made on copies of their timing files only (the
+budget, the ledger's entries, the question chain, each job's `job.json`,
+`done/`, the team), with a one-off script that is not kept either. So the
+numbers below can be checked against those histories, not from this tree.
+The 45 runs with ten committed jobs or more (5,227 jobs by agents, 4,541
+yields: findings, coverage records, answers, dispositions and acceptances),
+each segment of a resumed run taken apart, were replayed against the rule
+minute by minute and at every committed job:
 
 - The stretches between two yields (each yield counted when it was
   recorded): half lasted 0.2 minutes or less with no job; 99 in 100 lasted
@@ -1486,7 +1516,10 @@ at every committed job:
   every one of them was followed by a yield, 25 within ten minutes. The
   27th came on the minutes, in a run whose seats had run no job for 30
   minutes; nothing yielded again, and the operator stopped it a minute
-  later.
+  later. That "nothing yielded again" is partly the operator's doing: the
+  stop came before the run could show whether it would recover, so this
+  one stall is a weak positive. The case for the change rests on the 26
+  proposals that the work went on to answer, not on it.
 - Both arms (20 jobs and 30 minutes) would have proposed nothing at all,
   and would have missed that stall, which had no job. A count scaled to the
   seats (five a seat, 50 at ten seats) proposed only the stall, but by a

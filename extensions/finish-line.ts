@@ -557,7 +557,9 @@ export const NEGATIVE_PATH_WORDS =
  * "A question that must be established"): never a negative, and never a vote.
  */
 export const MUST_ESTABLISH_PATH_WORDS =
-  "A question that must be established (the goal's Must establish section, or the operator's word) ends the run only established, on a standing finding another seat attests established, with its premise shown not to hold on a finding, or settled by a bounded negative under the stronger bar: partial, not determinable and the rest do not end the run on it, and only the operator accepts its limits (question accept) or releases the requirement (question amend --no-must-establish). Keep working it: another route, another source, another reading of what the run holds";
+  "A question that must be established (the goal's Must establish section, or the operator's word) ends the run only established, on a standing finding another seat attests established, with its premise shown not to hold on a finding, or settled by a bounded negative under the stronger bar: partial, not determinable and the rest do not end the run on it, and only the operator accepts its limits (question accept) or releases the requirement (question amend --no-must-establish). " +
+  "The stronger bar is for a question that asks whether something exists: plan its routes, record a coverage record (kind=coverage) over the objects the event would have touched, which the hub finds complete and which says the event would have left a trace there (trace_expected yes), have another seat review it (attest with review {detection, reproduced, other_route}), then answer bounded_negative with asserts_absence: true, saying the event did not happen. " +
+  "Short of that, keep working it: another route, another source, another reading of what the run holds";
 
 /** The refusal of an abandon in an until-solved run: only the operator ends it. */
 export const UNTIL_SOLVED_NO_ABANDON =

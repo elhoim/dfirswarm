@@ -709,7 +709,10 @@ stands (`questions-cli.ts add --dry-run`, `checkAct`: who `--as` names, the
 words, a question the register holds already); one it would refuse refuses
 the resume before anything moves, naming the question and why, unless
 `--skip-refused-questions` leaves it out (a `WARN` says so). The question is
-admitted after the move, as before, and is checked again then.
+admitted after the move, as before, and is checked again then. The dry run
+refuses a broken chain as the admission does, and takes no lock, writes no
+seed and reconciles nothing; it is offered on the register's acts only
+(`direct`, `deliver` and `seed` refuse `--dry-run`).
 
 ### A microVM seat's socket (`<hub dir>/<agent>.sock`)
 

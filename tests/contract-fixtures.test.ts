@@ -61,7 +61,7 @@ const WRITTEN_WITH_LIMITED = new Set(["limited-part-partial", "rival-area-uncove
 /** The harness before a question could be required to be established (docs/adr/0013, "A question that must be established"): main when it was built. */
 const BEFORE_MUST_ESTABLISH = "c61bc2b7816de352644db8df6608f48a51e78793";
 /** The histories written for that rule: a harness before it reads no requirement, and disposes what it holds. */
-const WRITTEN_WITH_MUST_ESTABLISH = new Set(["must-establish-partial", "must-establish-not-determinable", "must-establish-accepted"]);
+const WRITTEN_WITH_MUST_ESTABLISH = new Set(["must-establish-partial", "must-establish-not-determinable", "must-establish-accepted", "must-establish-released", "must-establish-established"]);
 /**
  * The histories whose recorded reviews locate a value no coverage record
  * covers where a rival could live: the rival-area rule, replayed, would cap
@@ -443,7 +443,7 @@ test("old histories replayed unchanged: every fixture recorded before limited pa
   }
 });
 
-test("the must-establish rule, measured: under main before it (c61bc2b) the partial and the not-determinable question are disposed and the done proceeds; under this checkout each is held, by the requirement alone; the acceptance ends the run the same under both", async (t) => {
+test("the must-establish rule, measured: under main before it (c61bc2b) the partial and the not-determinable question are disposed and the done proceeds; under this checkout each is held, by the requirement alone; the acceptance, the release and an established answer end the run the same under both", async (t) => {
   if (spawnSync("git", ["-C", ROOT, "cat-file", "-e", `${BEFORE_MUST_ESTABLISH}^{commit}`]).status !== 0) {
     t.skip("c61bc2b is not in this checkout's history (a shallow clone or an archive): the comparison is not run here");
     return;
@@ -465,6 +465,9 @@ test("the must-establish rule, measured: under main before it (c61bc2b) the part
     "must-establish-not-determinable": held("not_determinable"),
     // The acceptance disposes it under both; only the answers check's own word on the partial answer differs.
     "must-establish-accepted": [{ section: "question:1", field: "check disposition", a: "partial", b: "none" }],
+    // Released, or established: the same under both.
+    "must-establish-released": [],
+    "must-establish-established": [],
   };
   for (const name of [...WRITTEN_WITH_MUST_ESTABLISH]) {
     const r = await replay({ run: await resolveRun(join(FIXTURES, name, "run")), targets: [{ label: "c61bc2b", harness: old, how: "c61bc2b, extracted", commit: BEFORE_MUST_ESTABLISH }, HERE], scratch: await tmp(`contract-${name}-`) });

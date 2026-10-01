@@ -1184,7 +1184,7 @@ async function reviewedPartial(r: Run): Promise<void> {
 /**
  * A question that must be established (docs/adr/0013): the Breadcrumbs run
  * ended a flag-only challenge on a partial answer, a disposition under the
- * ordinary bar. These three histories are the rule's contract.
+ * ordinary bar. These histories are the rule's contract.
  */
 const MUST_ESTABLISH_CASES: Record<string, (base: string) => Promise<string>> = {
   /** The goal's Must establish section names question 1; its answer is partial on a reviewed finding; question 2 is established. */
@@ -1221,6 +1221,26 @@ const MUST_ESTABLISH_CASES: Record<string, (base: string) => Promise<string>> = 
     await operatorAct(r.S, "amend", { q: "Q-1", expected_rev: 1, must_establish: true, why: "the account is what the client needs" });
     await SW.awaitSweeps(r.S);
     await operatorAct(r.S, "accept", { q: "Q-1", as: "bounded", why: "the log keeps no account names, and no other source is in the case", expected_rev: 1 });
+    return r.S;
+  },
+
+  /** The goal requires question 1; its answer is partial on a reviewed finding; the operator releases the requirement, with why. Question 2 is established. */
+  "must-establish-released": async (base) => {
+    const r = await newRun(base, "mer", 2, [], [], [], ["1"]);
+    await Q.seedRegister(r.S);
+    await established(r, "2");
+    await reviewedPartial(r);
+    await SW.awaitSweeps(r.S);
+    await operatorAct(r.S, "amend", { q: "Q-1", expected_rev: 1, must_establish: false, why: "the client takes what the log holds" });
+    return r.S;
+  },
+
+  /** The goal requires question 1, and it is established on a finding another seat attests established; question 2 too. */
+  "must-establish-established": async (base) => {
+    const r = await newRun(base, "mes", 2, [], [], [], ["1"]);
+    await Q.seedRegister(r.S);
+    await established(r, "1");
+    await established(r, "2");
     return r.S;
   },
 };

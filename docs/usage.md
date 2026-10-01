@@ -509,7 +509,10 @@ section or `must_establish:` list, or `question add|amend --must-establish`;
 see Questions below) takes only an answer that answers it (established, a
 premise shown not to hold, or a bounded negative under the stronger bar),
 your acceptance of its limits, or its withdrawal: partial, not determinable
-and the rest do not end the run on it. The stop policy decides who else ends the run: a cap pauses or
+and the rest do not end the run on it. Under `cap-pause` and `cap-stop` the
+agents may still abandon the run (two seats' `abandon`, ending it
+`abandoned`, never completed), so the requirement binds them fully only
+under `--stop operator`. The stop policy decides who else ends the run: a cap pauses or
 stops it and you stop it, whatever the questions' state.
 
 A run ends one of six ways (`runOutcome`, `stop-policy.ts outcome`):
@@ -664,7 +667,9 @@ bounded negative short of the stronger bar and out of scope do not end the
 run, under any stop policy ([ADR 0013](adr/0013-a-negative-is-bounded-and-a-cap-pauses.md),
 "A question that must be established"). The kickoff says which questions are
 required (`Required:`), and warns of a name the goal does not number, which
-requires nothing. A flag-only challenge is the case for it: its one question
+requires nothing, and of a `must_establish:` key that names nothing. Its
+items may be indented or not, and a list beside the goal's own section is
+merged into it. A flag-only challenge is the case for it: its one question
 is answered by the flag, never by a partial answer.
 
 - `question <run> add --text T --why W [--objective O-n | --objective new --objective-text T] [--parent Q-n] [--materiality material|background] [--priority urgent --reason R] [--expects existence|value|narrative|timeline|list] [--completeness] [--presumes P] [--must-establish] [--hint REF [--hint-value V]]... [--attach REF]... [--suggest SEAT] [--deadline ISO] [--neutral T] [--submission TOKEN]`

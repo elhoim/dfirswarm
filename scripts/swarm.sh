@@ -3973,18 +3973,28 @@ if m:
     out["presumes"] = len(presumes)
     # The questions that must be established (docs/adr/0013, "A question that
     # must be established"): an inline list ([1, 3] or 1, 3) or a list of
-    # "- <question>[: why]" lines, carried the same way into a Must establish
-    # section, where the question register reads it.
+    # "- <question>[: why]" lines, indented or not (both are YAML), carried
+    # into a Must establish section, where the question register reads it;
+    # into the section of that name the goal has already, so neither is dropped. A
+    # key that names nothing is said (must_establish_unparsed): a bar quietly
+    # lower than the operator wrote is what this list exists to prevent.
     required = []
-    rblock = re.search(r"^must_establish:[ \t]*(.*?)\r?\n((?:[ \t]+-[^\n]*\n?)*)", m.group(0), re.M)
+    rblock = re.search(r"^must_establish:[ \t]*(.*?)\r?\n((?:[ \t]*-(?=[ \t]|\r?\n)[^\n]*\n?)*)", m.group(0), re.M)
     if rblock:
         inline = rblock.group(1).strip().strip("[]")
         required += [x.strip().strip("\"'") for x in inline.split(",") if x.strip().strip("\"'")]
-        for item in re.findall(r"^[ \t]+-[ \t]*(.*?)[ \t]*\r?$", rblock.group(2), re.M):
+        for item in re.findall(r"^[ \t]*-(?=[ \t]|\r?$)[ \t]*(.*?)[ \t]*\r?$", rblock.group(2), re.M):
             if item.strip():
                 required.append(item.strip())
-    if required and not re.search(r"^#{2,3}[ \t]*Must establish[ \t]*$", body, re.M | re.I):
-        body = body.rstrip("\n") + "\n\n## Must establish\n\n" + "".join("- " + x + "\n" for x in required)
+        if not required:
+            out["must_establish_unparsed"] = True
+    if required:
+        items = "".join("- " + x + "\n" for x in required)
+        heading = re.search(r"^#{2,3}[ \t]*Must establish[ \t]*\r?\n", body, re.M | re.I)
+        if heading:
+            body = body[: heading.end()] + "\n" + items + body[heading.end():]
+        else:
+            body = body.rstrip("\n") + "\n\n## Must establish\n\n" + items
     out["must_establish"] = len(required)
     with open(path, "w", encoding="utf-8") as f:
         f.write(body)
@@ -4014,6 +4024,10 @@ STRIP
   goal_toolbox="$(jq -r '.toolbox' <<<"$goal_meta")"
   local goal_brief
   goal_brief="$(jq -r '.brief_without_premises // empty' <<<"$goal_meta")"
+  # A must_establish: key that names no question (docs/adr/0013): said, never guessed.
+  if [[ "$(jq -r '.must_establish_unparsed // false' <<<"$goal_meta")" == true ]]; then
+    echo "WARN: the goal's metadata block has must_establish: and names no question in it, so nothing is required by it: write the questions as the goal numbers them, must_establish: [1, 3] or a line each (- 1), indented or not ($goal_source)." >&2
+  fi
   if [[ -n "$goal_brief" ]]; then
     echo "WARN: the goal has a case brief ($goal_brief) and designates no premises: its answers will hold the brief's givens (whose devices these are, who the subject is, the setting) open, as parts still to prove. Designate what the brief states as given with a premises: list in the goal's front matter (a line each: - <the brief's sentence> [scope: questions 1, 2; entities <who or what>]), or once the run exists with: swarm.sh question <run> premise add --text \"<the brief's sentence>\" --locator \"<where it stands>\" [--entity E] [--for-question Q-n]. Never a premise that answers a question, or that a question tests ($goal_source)." >&2
   fi

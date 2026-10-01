@@ -196,6 +196,7 @@ test("a partial answer on a reviewed finding is no disposition for a question th
       assert.match(f.verdict.reason, /- question:1 is limited, with no disposition under the bar: it must be established/);
       assert.match(f.verdict.reason, /only the operator accepts its limits \(question accept\) or releases the requirement \(question amend --no-must-establish\)/);
       assert.doesNotMatch(f.verdict.reason, /then answer not_determinable/, "the way to not determinable is not offered for a question that must be established");
+      assert.match(f.verdict.reason, /answer bounded_negative with asserts_absence: true/, "the stronger bar's steps are, for a question that asks whether something exists");
     }
     const ready = await FIN.readiness(r.S);
     assert.equal(ready.ready, false, policy);
@@ -268,6 +269,37 @@ test("a person's question the operator requires to be established holds the fini
   assert.match(q.blocks[0]!, /^it must be established \(required by ops@lab/);
   assert.equal(fin.verdict.proceed, false);
   assert.equal((await FIN.readiness(r.S)).ready, false);
+});
+
+test("an answered question that must be established is never told it must be, whatever else stands on it: a quick negative nobody attested beside its established answer, a goal's or a person's", async () => {
+  const r = await run({ goal: goal(["1"]) });
+  await established(r, "2");
+  const asked = await okAct(r.S, OPERATOR, "open", { text: "Which account installed the remote tool?", why: "the client asks", must_establish: true });
+  const section = asked.q!.slice(2);
+  // On each required question: a quick negative (one job over one object, closed at once), nobody attesting it, then an established answer by another lead.
+  for (const [q, frame] of [["1", false], [section, true]] as const) {
+    const framing = frame ? { proposition: "an account the log names did it", negation: "no account the log names did it" } : {};
+    const quick = await L.openLead(r.a0, { title: `A first look at ${q}`, why: "it is asked", answers: [q], take: true, routes: [{ source: "input:disk.E01", method: "search the disk" }], ...framing });
+    assert.ok(quick.ok, (quick as { reason?: string }).reason);
+    const qid = (quick as { lead: { id: string } }).lead.id;
+    await L.attachJob(r.S, "a0", "j000001", qid);
+    const abs = ok(await rec(r.a0, { kind: "absence", value: `nothing for ${q}`, source: "inputs/disk.E01", evidence: "a search", completion: "complete", refs: ["job:j000001/hits.txt"], answers: [q] })).entry;
+    assert.ok((await L.recordInterpretations(r.S, "a0", abs.seq, [{ job: "j000001" }])).ok);
+    const closed = await L.closeLead(r.a0, qid, { disposition: "negative", ref: `E-${abs.seq}` });
+    assert.ok(closed.ok && (closed as { lead: L.LeadView }).lead.quick_negative, "a quick negative");
+    const f = ok(await rec(r.a0, { kind: "finding", ...F, value: `the record for ${q}`, source: "the disk", evidence: "a registry key", refs: ["job:j000001/hits.txt"], answers: [q] })).entry;
+    const a = ok(await rec(r.a1, { kind: "answer", section: `question:${q}`, value: `Established for ${q}`, reasoning: `E-${f.seq}`, ...A, confidence: "high", result: "established", ...(frame ? { contrary_none_why: "nothing points elsewhere" } : {}) })).entry;
+    // A person's question presumes its framing (docs/adr/0011): its established review tests that premise.
+    const review = frame ? { ...ESTABLISHED, answer_review: { ...ESTABLISHED.answer_review, premise_tested: { outcome: "the record names the account that did it", refs: ["job:j000001/hits.txt"] } } } : ESTABLISHED;
+    const att = await P.attestEntry(r.a2, { seq: a.seq, how: "re-read the key from job:j000001", ...review });
+    assert.ok(att.ok && (att as { line: P.LedgerAttestation }).line.strength === "established", JSON.stringify(att));
+  }
+  const f = await finish(r.S);
+  for (const id of ["1", section]) {
+    const g = f.gate.questions.find((q) => q.id === id)!;
+    assert.equal(g.outcome, "answered", `${id}: ${JSON.stringify(g)}`);
+    assert.ok(!g.blocks.some((b) => /must be established/.test(b)), `${id}: an answered question is not told it must be established: ${JSON.stringify(g.blocks)}`);
+  }
 });
 
 test("every seat's header names the questions that must be established while they are not, and says what ends the run on them", async () => {

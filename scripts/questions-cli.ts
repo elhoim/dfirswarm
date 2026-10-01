@@ -33,9 +33,12 @@
  *                                                           every signed act, its signature checked; fails on
  *                                                           bad, wrong-principal, or a signed act with none
  *
- * Every act takes [--dry-run] (checked as its admission would check it, against
- * the register as it stands; nothing is signed, written or delivered: what a
- * resume asks of each question before anything moves), [--as ID] (an enrolled person: a claim), [--sign] (the act
+ * The register's acts (add, amend, priority, scope, withdraw, clarify-reply,
+ * accept, premise add|revise|admit|withdraw) take [--dry-run]: checked as the
+ * admission would check it, against the register as it stands, and nothing
+ * signed, written or delivered (what a resume asks of each question before
+ * anything moves). `direct`, `deliver` and `seed` write by what they are and
+ * refuse it. Every act takes [--as ID] (an enrolled person: a claim), [--sign] (the act
  * signed with that person's enrolled key, namespace dfirswarm-question; the
  * passphrase or PIN on the terminal, or on the descriptor --secret-fd N
  * names, never in argv or the environment) and [--via cli|console]. Without
@@ -395,6 +398,7 @@ export async function operatorAct(sandbox: string, ev: Q.ActKind, input: Q.ActIn
 
 /** A directive from the operator's side, handed to the admission as an act is (operatorAct). `--sign` is refused: a directive is not signed. */
 export async function operatorDirective(sandbox: string, req: Omit<DirectiveRequest, "actor">, flags: Flags, home?: string, o: { hubAdmin?: string } = {}): Promise<Record<string, unknown>> {
+  if (flags.dryRun) return { ok: false, reason: DRY_RUN_REFUSED };
   if (flags.sign) return { ok: false, reason: "a directive is not signed: sign the question it serves (question add --sign), then direct it without --sign" };
   const who = actorFor(flags, home);
   if ("why" in who) return { ok: false, reason: who.why };
@@ -616,6 +620,9 @@ export async function showText(sandbox: string, id: string): Promise<string | nu
 
 // --- the command line ----------------------------------------------------------------------------
 
+/** Why --dry-run is refused where it cannot be honoured: a directive is a lead, and a delivery or a seed is a write by what it is. */
+export const DRY_RUN_REFUSED = "--dry-run checks an act on the question register (add, amend, priority, scope, withdraw, clarify-reply, accept, premise …); direct, deliver and seed write by what they are, and take no dry run: nothing was done";
+
 function parseArgs(rest: string[]): { pos: string[]; opts: Map<string, string[]>; flags: Set<string> } {
   const pos: string[] = [];
   const opts = new Map<string, string[]>();
@@ -656,6 +663,8 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   if (!cmd || !sandboxArg) usage();
   const sandbox = resolve(sandboxArg);
   const { pos, opts, flags } = parseArgs(rest);
+  // A dry run only where an act can be checked without being made.
+  if (flags.has("--dry-run") && ["direct", "deliver", "seed"].includes(cmd)) emit({ ok: false, reason: DRY_RUN_REFUSED });
   const one = (k: string) => opts.get(k)?.at(-1);
   const fdRaw = one("--secret-fd");
   const via = one("--via");

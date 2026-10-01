@@ -2295,20 +2295,25 @@ export async function commitAct(sandboxRoot: string, p: PreparedAct, o: { signat
   }
 }
 
-/** Prepare and commit in one step: an agent's act, or a person's that is not signed. */
 /**
  * Whether an act would be admitted now, by the checks its commit makes
  * against the register as it stands, with nothing written and nothing
  * delivered: what a resume asks of each question it is given before
  * anything of the run moves (docs/adr/0013, "A resume refuses a question it
- * cannot admit"). The register may move before the act is made; the act is
+ * cannot admit"). A broken chain is refused, as the commit refuses it. What
+ * it does not do, the commit does: it takes no lock, writes no seed (it
+ * reads the goal's, derived), and reconciles nothing an earlier act left
+ * undone, so the register may move before the act is made, and the act is
  * checked again then.
  */
 export async function checkAct(sandboxRoot: string, p: PreparedAct): Promise<{ ok: true } | Fail> {
-  const c = await commitUnderLock(sandboxRoot, p, await questionsSnapshot(sandboxRoot));
+  const snap = await questionsSnapshot(sandboxRoot);
+  if (!snap.state.chain.ok) return { ok: false, reason: `questions/questions.jsonl's chain is broken at line ${snap.state.chain.broken_at} (${snap.state.chain.reason}): the register takes no act until the operator looks` };
+  const c = await commitUnderLock(sandboxRoot, p, snap);
   return c.result.ok ? { ok: true } : { ok: false, reason: c.result.reason };
 }
 
+/** Prepare and commit in one step: an agent's act, or a person's that is not signed. */
 export async function act(sandboxRoot: string, actor: Actor, ev: ActKind, input: ActInput): Promise<ActResult | Fail> {
   const prepared = await prepareAct(sandboxRoot, actor, ev, input);
   if (!prepared.ok) return prepared;

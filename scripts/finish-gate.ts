@@ -103,10 +103,10 @@ const OUTCOME_WORDS: Record<string, string> = { limited: "examination-limited", 
  * question that must be established"): who required it, how its answer
  * stands, and what ends the run on it.
  */
-function requirementBlock(q: Q.Question, outcome: string, ledger: L.LedgerView): string {
+function requirementBlock(q: Q.Question, outcome: string, ledger: L.LedgerView, best = false): string {
   const a = ledger.entries.find((e) => e.kind === "answer" && e.section === `question:${q.section}` && !ledger.replaced.has(e.seq));
   const result = a ? NB.answerResult(a) : null;
-  const stands = !a ? "it has no standing answer" : `it is ${OUTCOME_WORDS[outcome] ?? outcome} (${result ? NB.resultWords(result) : a.inconclusive ? "inconclusive" : "as recorded"}, E-${a.seq})`;
+  const stands = !a ? "it has no standing answer" : best ? `its answer E-${a.seq} claims established and is a best candidate, not established (every review holds it so)` : `it is ${OUTCOME_WORDS[outcome] ?? outcome} (${result ? NB.resultWords(result) : a.inconclusive ? "inconclusive" : "as recorded"}, E-${a.seq})`;
   return `it must be established (required by ${Q.requiredByWords(q)}${q.must_establish?.why ? `: ${q.must_establish.why}` : ""}): ${stands}, which ends no run on it. ${Q.MUST_ESTABLISH_WAYS[0]!.toUpperCase()}${Q.MUST_ESTABLISH_WAYS.slice(1)}`;
 }
 
@@ -188,7 +188,7 @@ export async function finishGate(sandbox: string, run: FinishLineRun | null): Pr
       for (const h of held) blocks.push(h);
       if (outcome !== "answered" && outcome !== "accepted" && !disposition) {
         // A question that must be established says so first: what holds it is the requirement, and the way out is not a negative.
-        if (required && reg) blocks.unshift(requirementBlock(reg, outcome, snap.ledger));
+        if (required && reg) blocks.unshift(requirementBlock(reg, outcome, snap.ledger, best.has(key)));
         if (best.has(key)) blocks.push("its answer is a best candidate, not established: every review holds it so; take the route that would settle it, or the operator accepts its limits");
         for (const l of snap.state.leads.values()) {
           if (!l.answers.includes(id)) continue;
@@ -370,7 +370,7 @@ async function registerGate(
       questions.push({
         id: q.section,
         outcome: outcome === "limited" ? "limited" : outcome,
-        blocks: outcome === "answered" && !held.length ? [] : [...(required && !disposition ? [requirementBlock(q, outcome, snap.ledger)] : []), ...held, ...(disposition ? [] : blocksOf(snap, q.section)), ...(outcome === "unanswered" ? ["no standing answer entry"] : [])],
+        blocks: outcome === "answered" && !held.length ? [] : [...(required && !disposition && outcome !== "answered" ? [requirementBlock(q, outcome, snap.ledger, r.best_candidate.includes(key))] : []), ...held, ...(disposition ? [] : blocksOf(snap, q.section)), ...(outcome === "unanswered" ? ["no standing answer entry"] : [])],
         ...(disposition ? { disposition } : {}),
         ...(required ? { must_establish: true as const } : {}),
       });
