@@ -13,7 +13,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlink
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
-import { boundInputSets, DERIVED, JobService, SHORT_JOB_SECONDS, type JobServiceOptions } from "../scripts/job-service.ts";
+import { boundInputSets, DERIVED, JobService, missingOf, SHORT_JOB_SECONDS, type JobServiceOptions } from "../scripts/job-service.ts";
 import { storePaths, verifyJournalText } from "../scripts/evidence-store.ts";
 import { listInputs, localWorker, mountedWorker } from "./job-service-worker.ts";
 import type { WorkerSpec } from "../scripts/vm.ts";
@@ -635,3 +635,10 @@ for (const [step, expect] of [
   });
 }
 
+
+test("a recipe's coverage says what the images lack, in its own words, and nothing else is taken for it", () => {
+  assert.deepEqual(missingOf({ status: "complete", missing: [{ kind: "symbols", what: "the symbol table of kernel K" }, { kind: "symbols" }, "x", null] }), ["the symbol table of kernel K"]);
+  assert.deepEqual(missingOf({ status: "complete" }), []);
+  assert.deepEqual(missingOf(null), []);
+  assert.deepEqual(missingOf({ missing: "not a list" }), []);
+});

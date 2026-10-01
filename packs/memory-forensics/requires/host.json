@@ -36,29 +36,44 @@
       "optional": true,
       "why": "The plugin framework most reports cite. Kept at an executable boundary rather than imported or vendored, under its own Volatility Software License 1.0.",
       "install": {
-        "brew": "python3 -m pip install volatility3",
-        "apt": "python3 -m pip install volatility3",
-        "data": {
-          "name": "vol-windows-symbols",
-          "version": "2019-10-16",
-          "url": "https://downloads.volatilityfoundation.org/volatility3/symbols/windows.zip",
-          "sha256": "231d69735b9a5482b16bdbf1ec356e0a95574c44079e68dfb02ebddb34d55f3e",
-          "package": "volatility3",
-          "into": "symbols",
-          "warm": [
-            "vol",
-            "-q",
-            "isfinfo"
-          ],
-          "check": [
-            "sh",
-            "-c",
-            "test \"$(vol -q isfinfo 2>/dev/null | grep -c 'windows.zip!windows/')\" -ge 1000"
-          ],
-          "redistributable": false,
-          "why": "Windows kernel symbol tables for `vol`, so a Windows plugin finds its kernel's symbols with no network (run it with `--offline`). The Volatility Foundation's `windows.zip`, a bundle of 2019 (last changed 2019-10-16): tables for the Windows builds of that time, not every one of them. A newer kernel is not in it; `vol -q isfinfo` lists the tables there are.",
-          "licence": "Our reading, not legal advice. The pack carries no licence text of its own. The Volatility Software License 1.0 (https://www.volatilityfoundation.org/license/vsl-v1.0) says its \"Software\" includes \"any data (such as operating system profiles or configuration information)\" provided with the software; we read the tables as such data. The tables are generated from Microsoft's public symbol (PDB) files, whose Microsoft Symbol Server licence terms of June 2022 (https://learn.microsoft.com/en-us/legal/windows-sdk/microsoft-symbol-server-license-terms) allow use \"solely for purposes of performance, security or functional debugging and testing of your software as used with Microsoft software, or as otherwise authorized by Microsoft\" and say that you may not \"share, publish, rent, or lease the Symbol Items, or provide the Symbol Items as stand-alone offerings for others to use\". Whether examining evidence is within that use is not ours to say, so these terms may bear on use as well as on redistribution. This image is not for redistribution."
-        }
+        "brew": "python3 -m pip install volatility3==2.28.2",
+        "apt": "python3 -m pip install volatility3==2.28.2",
+        "data": [
+          {
+            "name": "vol-windows-symbols",
+            "version": "2019-10-16",
+            "url": "https://downloads.volatilityfoundation.org/volatility3/symbols/windows.zip",
+            "sha256": "231d69735b9a5482b16bdbf1ec356e0a95574c44079e68dfb02ebddb34d55f3e",
+            "bytes": 839727133,
+            "set": "broad",
+            "package": "volatility3",
+            "into": "symbols",
+            "warm": [
+              "vol",
+              "-q",
+              "isfinfo"
+            ],
+            "check": [
+              "sh",
+              "-c",
+              "test \"$(vol -q isfinfo 2>/dev/null | grep -c 'windows.zip!windows/')\" -ge 1000"
+            ],
+            "redistributable": false,
+            "distribution_policy": "local-only",
+            "why": "Windows kernel symbol tables for `vol`, so a Windows plugin finds its kernel's symbols with no network (run it with `--offline`). The Volatility Foundation's `windows.zip`, a bundle of 2019 (last changed 2019-10-16): tables for the Windows builds of that time, not every one of them. A newer kernel is not in it; `vol -q isfinfo` lists the tables there are.",
+            "licence": "Our reading, not legal advice. The pack carries no licence text of its own. The Volatility Software License 1.0 (https://www.volatilityfoundation.org/license/vsl-v1.0) says its \"Software\" includes \"any data (such as operating system profiles or configuration information)\" provided with the software; we read the tables as such data. The tables are generated from Microsoft's public symbol (PDB) files, whose Microsoft Symbol Server licence terms of June 2022 (https://learn.microsoft.com/en-us/legal/windows-sdk/microsoft-symbol-server-license-terms) allow use \"solely for purposes of performance, security or functional debugging and testing of your software as used with Microsoft software, or as otherwise authorized by Microsoft\" and say that you may not \"share, publish, rent, or lease the Symbol Items, or provide the Symbol Items as stand-alone offerings for others to use\". Microsoft's terms grant use for debugging and testing your software; whether examining a third party's memory image falls inside that is not decided here, so these terms may bear on use as well as on redistribution. This image is not for redistribution.",
+            "notice": {
+              "supplier": "The Volatility Foundation (tables generated from Microsoft's public symbol files)",
+              "source": "https://downloads.volatilityfoundation.org/volatility3/symbols/windows.zip, 839,727,133 bytes, sha256 as above (the Foundation's SHA256SUMS)",
+              "terms": "Volatility Software License 1.0; Microsoft Symbol Server licence terms (June 2022) for what the tables are made from",
+              "derivation": "as published, unchanged",
+              "restriction": "local-only: built on this machine for its own use, never pushed, published or shared. A label is not a legal clearance."
+            }
+          },
+          {
+            "list": "requires/symbols.windows.json"
+          }
+        ]
       },
       "licence": "Volatility Software License 1.0",
       "redistributable": false

@@ -469,6 +469,36 @@ else
   echo "skip - kernel guard plan for the catalog (no guard on this host)"
 fi
 
+# A recipe whose detect says the image lacks what an input needs (a memory
+# image's kernel symbol table) stops the start; --allow-missing-symbols goes
+# on, said, and the catalogue keeps what is missing.
+mkdir -p "$TMP/needs/recipes/needs-table" "$TMP/src-mem"
+printf '{"id": "needs", "name": "n", "version": "1.0.0"}\n' > "$TMP/needs/pack.json"
+cat > "$TMP/needs/recipes/needs-table/recipe.json" <<'EOF'
+{"id": "needs-table", "version": "1.0.0", "description": "d", "object": "memory image", "runtime": "python3", "entry": "run.py",
+ "auto": ["kickoff"], "limits": {"seconds": 60}, "outputs": ["coverage.json"], "covers": "c", "min_bytes": 1}
+EOF
+cat > "$TMP/needs/recipes/needs-table/run.py" <<'EOF'
+import json, os, sys
+if sys.argv[1] == "detect":
+    print(json.dumps({"applies": True, "why": "w", "missing": [{"kind": "symbols", "what": "the symbol table of kernel K, which the image does not hold"}]}))
+else:
+    out = sys.argv[sys.argv.index("--out") + 1]
+    json.dump({"status": "complete", "covered": "the kernel"}, open(os.path.join(out, "coverage.json"), "w"))
+    print(json.dumps({"ok": True}))
+EOF
+printf 'memory, for the suite\n' > "$TMP/src-mem/k.mem"
+out="$(SWARM_PACK_DIRS="$TMP/needs" start --model solo/model --n 1 --cap-usd 1 --no-start --goal-file "$HELLO" --label needs-table --inputs "$TMP/src-mem" --catalog)"; rc=$?
+[[ $rc -eq 2 ]] || fail "a memory image whose kernel table the image lacks did not stop the start (rc $rc): $out"
+grep -q 'BLOCKER: inputs/k.mem: the symbol table of kernel K, which the image does not hold (needs/needs-table)' <<<"$out" || fail "the BLOCKER does not say what is missing, for which input, by which recipe: $out"
+grep -q 'allow-missing-symbols' <<<"$out" || fail "the BLOCKER does not say how to go on: $out"
+out="$(SWARM_PACK_DIRS="$TMP/needs" start --model solo/model --n 1 --cap-usd 1 --no-start --goal-file "$HELLO" --label needs-table-ok --inputs "$TMP/src-mem" --catalog --allow-missing-symbols)"; rc=$?
+[[ $rc -eq 0 ]] || fail "--allow-missing-symbols did not let the start go on (rc $rc): $out"
+grep -q '^WARN: inputs/k.mem: the symbol table of kernel K.*--allow-missing-symbols' <<<"$out" || fail "going on without the table is not said: $out"
+sb="$(sandbox_of "$out")"
+jq -e '.missing[0].kind == "symbols" and .missing[0].input == "inputs/k.mem"' "$sb/catalog/missing.json" >/dev/null || fail "the catalogue does not keep what is missing: $(cat "$sb/catalog/missing.json" 2>&1)"
+pass "a missing symbol table the census finds is a BLOCKER unless --allow-missing-symbols, which goes on, says so and keeps catalog/missing.json"
+
 # --- quarantine ----------------------------------------------------------------------
 out="$(start --model solo/model --n 1 --cap-usd 1 --no-start --goal-file "$HELLO" --label quarantine --inputs "$TMP/src" --quarantine)"
 sb="$(sandbox_of "$out")"

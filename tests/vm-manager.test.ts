@@ -442,6 +442,9 @@ test("an image's record that lacks the data its packs pin, or did not index it, 
   assert.equal(lacking.length, 1);
   assert.match(lacking[0], /the memory image lacks the data vol-windows-symbols that pack memory-forensics pins \(download failed: timed out\)/);
   assert.match(lacking[0], /not an absence in the evidence/);
+  const omitted = imageDataWarnings({ profile: "memory", not_installed: { data: [] }, omitted: { data: [{ name: "vol-isf-x", pack: "memory-forensics", why: "--symbol-set none: the curated set is left out" }] } });
+  assert.equal(omitted.length, 1);
+  assert.match(omitted[0], /built without the data vol-isf-x that pack memory-forensics pins \(--symbol-set none: the curated set is left out\)/);
   const cold = imageDataWarnings({ profile: "memory", downloads: { "vol-windows-symbols": { kind: "data", warm: "failed" }, memprocfs: { kind: "download" } } });
   assert.equal(cold.length, 1);
   assert.match(cold[0], /holds the data vol-windows-symbols but did not index it at build/);

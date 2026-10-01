@@ -20,7 +20,11 @@
 # container diffs empty against them (scripts/vm.ts INVENTORY_SCRIPT, run
 # as it is); its NOTICE and SBOM are there; data a pack pins (Volatility's
 # Windows symbol tables) is on disk, was indexed, and passes the check its pack
-# names for it, run again with no network; and
+# names for it, run again with no network (a pull request builds with
+# --symbol-set none, so the record must say every symbol set was left out on
+# purpose, apart from any failure; a manual run may name `broad`, the
+# Foundation's 840 MB bundle; CI never fetches a Microsoft PDB and never
+# builds the curated set); and
 # the programs a run once lacked work (tests/image-programs.sh: a C compiler,
 # a planted AES key schedule found, a steghide round trip). CI's microVM job
 # boots base and disk on a runner with KVM on every pull request;
@@ -37,6 +41,12 @@ on:
       - tests/image-programs.sh
       - .github/workflows/images.yml
   workflow_dispatch:
+    inputs:
+      symbol_set:
+        description: "recipe.py build --symbol-set: none (a pull request's), or broad (the Foundation's windows.zip, 840 MB); never curated here"
+        default: none
+        type: choice
+        options: [none, broad]
 
 permissions:
   contents: read
@@ -56,6 +66,7 @@ jobs:
     timeout-minutes: 90
     env:
       TAG: dev-${{ matrix.arch }}
+      SYMBOL_SET: ${{ inputs.symbol_set || 'none' }}
     steps:
       - run: git config --global init.defaultBranch main
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -68,7 +79,7 @@ jobs:
           docker build -f images/base.Dockerfile -t "dfirswarm-base:$TAG" images
           if [ "${{ matrix.profile }}" != base ]; then
             # Built here, never pushed: the flag is for this runner's copy.
-            python3 images/recipe.py build "${{ matrix.profile }}" --out ctx --base "dfirswarm-base:$TAG" --allow-nonredistributable
+            python3 images/recipe.py build "${{ matrix.profile }}" --out ctx --base "dfirswarm-base:$TAG" --allow-nonredistributable --symbol-set "$SYMBOL_SET"
             docker build -t "dfirswarm-${{ matrix.profile }}:$TAG" ctx
           fi
       - name: What the image holds, and that a fresh one diffs empty against its record
@@ -87,14 +98,22 @@ jobs:
           image="dfirswarm-${{ matrix.profile }}:$TAG"
           # Every data file a pack pins (a symbol pack) is on disk at the size the build recorded,
           # was warmed, and none a pack asked for was left out.
-          docker run --rm "$image" python3 -c '
+          docker run --rm -e SYMBOL_SET "$image" python3 -c '
           import json, os, sys
           r = json.load(open("/etc/dfirswarm/image.json"))
           data = {k: v for k, v in (r.get("downloads") or {}).items() if v.get("kind") == "data"}
           left_out = (r.get("not_installed") or {}).get("data") or []
-          bad = [k for k, v in data.items() if not os.path.isfile(v["path"]) or os.path.getsize(v["path"]) != v.get("bytes") or v.get("warm") == "failed" or not v.get("check")]
-          print("pinned data:", {k: v.get("bytes") for k, v in data.items()}, "left out:", left_out, "bad:", bad)
-          sys.exit(1 if left_out or bad else 0)'
+          omitted = (r.get("omitted") or {}).get("data") or []
+          # A kept source is on disk at its size; a converted one is gone and its outputs are there instead.
+          def bad_entry(v):
+              files = [(v["path"], v.get("bytes"))] if v.get("path") else []
+              files += [(o["path"], o.get("bytes")) for o in v.get("outputs") or []]
+              return not files or any(not os.path.isfile(p) or os.path.getsize(p) != n for p, n in files) or v.get("warm") == "failed" or not v.get("check")
+          bad = [k for k, v in data.items() if bad_entry(v)]
+          # Under --symbol-set none no entry of a symbol set is built in, and every set a pack pins is said as omitted, never as a failure.
+          wrong = os.environ.get("SYMBOL_SET") == "none" and any(v.get("set") for v in data.values())
+          print("pinned data:", {k: v.get("bytes") for k, v in data.items()}, "left out (failed):", left_out, "omitted:", [o.get("name") for o in omitted], "bad:", bad)
+          sys.exit(1 if left_out or bad or wrong else 0)'
           # Each data entry's own check (install.data `check`), run again in a fresh container with
           # no route out. A docker error fails the step; so does a check that does not succeed.
           docker run --rm "$image" python3 -c 'import json; r = json.load(open("/etc/dfirswarm/image.json")); print(json.dumps([[k, v["check"]] for k, v in (r.get("downloads") or {}).items() if v.get("kind") == "data" and v.get("check")]))' > "$RUNNER_TEMP/data-checks.json"
