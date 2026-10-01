@@ -42,3 +42,14 @@ Non-goals:
   identity system: the mutating routes carry a shared token, which is a guard
   against a stray LAN request. A managed deployment is scoped per engagement
   under Pro and is not built here.
+
+## Images for programs we cannot redistribute
+
+Not started. Volatility 3 and the Windows symbol tables built from Microsoft's
+files are the first programs the images hold that this project may not hand
+out, and every pack program stays `redistributable: false` until its licence is
+reviewed, so none of our images is published. The Pro service is to build a
+customer's VM images from the pack recipes, with the customer's own acceptance
+of each program's licence (the NOTICE lists them), so that nothing is
+redistributed by us and the customer still has what a memory case needs. Until
+then anyone can build their own from [the recipes](../images/README.md).

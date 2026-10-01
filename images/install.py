@@ -22,6 +22,13 @@ Every image, the base included, records its whole Debian package list
 them (scripts/vm.ts INVENTORY_SCRIPT), so an install outside the image is
 named and the image's own packages are not.
 
+A pinned data file (`install.data`: a program's tables or rules, which the
+program reads and which are not a program) is fetched and checked the same
+way and put, as named, where the program looks for it: inside a Python package
+of the image's venv (`package`, `into`). Its pack may name a command to run
+once it is there (`warm`), for a program that indexes what it finds on first
+use and would otherwise do it in every VM the image boots.
+
 A pinned download is fetched over HTTPS, checked against its sha256 before
 anything is unpacked, unpacked under /opt/dfir/tools/<name>/ and put on PATH
 by a wrapper in /usr/local/bin. An architecture with no entry is recorded,
@@ -33,8 +40,12 @@ one program's pins never move another's — and its entry is put on PATH the
 same way, through its interpreter. A program built from source is checked,
 configured with its prefix under /opt/dfir/tools, made and installed in a
 builder stage; a failure there is recorded beside what it left, and an
-optional program's failure does not stop the image. Every pinned artefact is
-in image.json (`downloads`, with its kind), the NOTICE and the SBOM.
+optional program's failure does not stop the image. A source with no
+configure script names its steps (`commands`, each an argument list run in the
+unpacked tree, `{prefix}` and `{jobs}` filled in) and the pinned patches to
+apply first (`patches`, each a url and a sha256, applied with `patch -p1`).
+Every pinned artefact is in image.json (`downloads`, with its kind), the
+NOTICE and the SBOM.
 """
 import hashlib
 import json
@@ -336,6 +347,58 @@ def fetch_source(d: dict, apt: list) -> tuple:
     return rec, None
 
 
+PACKAGE_DIR = """
+import importlib.util, os, sys
+spec = importlib.util.find_spec(sys.argv[1])
+print(os.path.dirname(spec.origin) if spec and spec.origin else "")
+"""
+
+
+def package_dir(package: str) -> Path | None:
+    """The directory of a Python package in the image's venv, or None."""
+    py = VENV / "bin" / "python"
+    if not py.exists():
+        return None
+    out = subprocess.run([str(py), "-c", PACKAGE_DIR, package], capture_output=True, text=True).stdout.strip()
+    return Path(out) if out else None
+
+
+def fetch_data(d: dict) -> tuple:
+    """Install one pinned data file a program reads: checked against its sha256,
+    then put, under the name it has at its URL (or `file`), in `into` inside the
+    directory of the Python package `package`, where the program looks for it.
+    The same bytes for every architecture. Returns (record, failure reason)."""
+    if not d.get("url") or not d.get("sha256") or not d.get("package"):
+        return None, "no url, sha256 and package pinned"
+    root = package_dir(d["package"])
+    if not root:
+        return None, f"its program's Python package {d['package']} is not in the image"
+    dest_dir = (root / d.get("into", "")).resolve()
+    if not (dest_dir == root.resolve() or str(dest_dir).startswith(f"{root.resolve()}/")):
+        return None, f"{d.get('into')} leaves the package's directory"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / (d.get("file") or Path(urllib.parse.urlparse(d["url"]).path).name)
+    why = get(d["url"], dest, d["sha256"])
+    if why:
+        return None, why
+    dest.chmod(0o644)
+    rec = {"kind": "data", "version": d.get("version"), "url": d["url"],
+           "sha256": d["sha256"].removeprefix("sha256:").lower(), "path": str(dest),
+           "bytes": dest.stat().st_size, "program": d.get("program")}
+    if d.get("warm"):
+        # A program that indexes what it finds the first time it runs is run
+        # once here, so the image holds the index and no VM builds it again.
+        argv = [str(a) for a in d["warm"]]
+        argv[0] = shutil.which(argv[0], path=IMAGE_PATH) or argv[0]
+        try:
+            rec["warm"] = "done" if run(argv) else "failed"
+        except OSError:
+            # The program is not there (its own install failed): the data
+            # is, and the record says it was not warmed.
+            rec["warm"] = "failed"
+    return rec, None
+
+
 def build_source(spec_path: str) -> int:
     """A builder stage: compile one program from its pinned source, installed
     under TOOLS/<name>, and say beside it whether it built. The profile's
@@ -348,6 +411,9 @@ def build_source(spec_path: str) -> int:
     def done(why: str | None) -> int:
         rec = {"kind": "build", "version": d.get("version"), "url": d.get("url"),
                "sha256": str(d.get("sha256", "")).removeprefix("sha256:").lower(), "ok": why is None}
+        if d.get("patches"):
+            rec["patches"] = [{"url": p.get("url"), "sha256": str(p.get("sha256", "")).removeprefix("sha256:").lower()}
+                              for p in d["patches"]]
         if why:
             rec["why"] = why
         (dest / BUILT).write_text(json.dumps(rec, indent=1) + "\n")
@@ -376,14 +442,36 @@ def build_source(spec_path: str) -> int:
         return done(f"could not unpack: {e}")
     jobs = str(os.cpu_count() or 2)
     env = d.get("env")
-    if not run(["./configure", f"--prefix={dest}", *d.get("configure", [])], cwd=work, env=env):
-        return done("./configure failed")
-    if not run(["make", f"-j{jobs}"], cwd=work, env=env):
-        return done("make failed")
-    # install-strip where the build has it: a program's debug symbols are
-    # most of its size and no examination reads them.
-    if not (run(["make", "install-strip"], cwd=work, env=env) or run(["make", "install"], cwd=work, env=env)):
-        return done("make install failed")
+    # A pack that patches its source (a distribution's fixes to an old
+    # upstream release) pins each patch like the archive: checked first, then
+    # applied in order.
+    for patch in d.get("patches") or []:
+        if not patch.get("url") or not patch.get("sha256"):
+            return done("a patch with no url and sha256 pinned")
+        pname = Path(urllib.parse.urlparse(patch["url"]).path).name
+        file = work.parent / f".{d['name']}.patch.{pname}"
+        why = get(patch["url"], file, patch["sha256"])
+        if why:
+            return done(f"patch {pname}: {why}")
+        applied = run(["patch", "-p1", "--batch", "-i", str(file)], cwd=work)
+        file.unlink(missing_ok=True)
+        if not applied:
+            return done(f"patch {pname} did not apply")
+    if d.get("commands"):
+        # A source with no configure script: the pack names its steps.
+        for argv in d["commands"]:
+            argv = [str(a).replace("{prefix}", str(dest)).replace("{jobs}", jobs) for a in argv]
+            if not run(argv, cwd=work, env=env):
+                return done(f"{argv[0]} failed")
+    else:
+        if not run(["./configure", f"--prefix={dest}", *d.get("configure", [])], cwd=work, env=env):
+            return done("./configure failed")
+        if not run(["make", f"-j{jobs}"], cwd=work, env=env):
+            return done("make failed")
+        # install-strip where the build has it: a program's debug symbols are
+        # most of its size and no examination reads them.
+        if not (run(["make", "install-strip"], cwd=work, env=env) or run(["make", "install"], cwd=work, env=env)):
+            return done("make install failed")
     shutil.rmtree(work, ignore_errors=True)
     if not (dest / d["bin"]).is_file():
         return done(f"{d['bin']} is not what make install put under {dest}")
@@ -405,7 +493,7 @@ def link_build(d: dict, apt: list) -> tuple:
     why = wrapper(d["name"], dest / d["bin"], d.get("run"))
     if why:
         return None, why
-    return {k: rec[k] for k in ("kind", "version", "url", "sha256")}, None
+    return {k: rec[k] for k in ("kind", "version", "url", "sha256", "patches") if k in rec}, None
 
 
 def enable_release(release: str) -> str | None:
@@ -573,11 +661,13 @@ def sbom(record: dict, python_rows: list, npm_rows: list, own_rows: dict | None 
     for name, d in sorted((record.get("downloads") or {}).items()):
         ref = purl("generic", name, d.get("version") or "unknown", download_url=d.get("url"),
                    checksum=f"sha256:{d.get('sha256')}")
-        add({"type": "application", "bom-ref": ref, "name": name, "version": d.get("version") or "unknown",
+        kind = d.get("kind", "download")
+        add({"type": "data" if kind == "data" else "application", "bom-ref": ref, "name": name,
+             "version": d.get("version") or "unknown",
              "purl": ref, "hashes": [{"alg": "SHA-256", "content": d.get("sha256")}],
-             "externalReferences": [{"type": "distribution" if d.get("kind", "download") in ("download", "deb")
+             "externalReferences": [{"type": "distribution" if kind in ("download", "deb", "data")
                                      else "source-distribution", "url": d.get("url")}],
-             "properties": [{"name": "dfirswarm:kind", "value": d.get("kind", "download")}]})
+             "properties": [{"name": "dfirswarm:kind", "value": kind}]})
     profile = record.get("profile", "?")
     return {
         "bomFormat": "CycloneDX",
@@ -709,11 +799,23 @@ def tools_md(record: dict, spec: dict | None) -> str:
         for p in extra:
             lines.append(f"- `{p}` {apt.get(p) or '(not installed)'} — installed for the {record.get('profile', '?')} profile itself, in no pack")
         lines.append("")
+    # Data a program reads and is not a program (symbol tables, rules): where
+    # it is, and what it covers, in the pack's words.
+    held = record.get("downloads") or {}
+    data_in = [d for d in (spec or {}).get("data", []) if held.get(d["name"])]
+    data_out = {x["name"]: x for x in (record.get("not_installed") or {}).get("data") or []}
+    if data_in:
+        lines += ["## Data the programs read", ""]
+        for d in sorted(data_in, key=lambda x: x["name"].lower()):
+            lines.append(f"- `{d['name']}` — {d.get('why') or 'no description'} ({d.get('pack', '?')}; for `{d.get('program', '?')}`; at {held[d['name']].get('path', '?')})")
+        lines.append("")
     na = (spec or {}).get("not_applicable") or record.get("not_applicable") or []
-    if gone or na:
+    if gone or na or data_out:
         lines += ["## Named by a pack, not in this image", ""]
         for b in sorted(gone, key=lambda x: x["name"].lower()):
             lines.append(f"- `{b['name']}` ({', '.join(b['packs'])}) — not found after the build ({b.get('source') or 'no install line'})")
+        for n, x in sorted(data_out.items()):
+            lines.append(f"- `{n}` ({x.get('pack', '')}) — data not installed: {x.get('why', 'the build did not say why')}")
         for d in na:
             lines.append(f"- `{d['name']}` ({d.get('pack', '')}) — {d.get('why', 'another system')}")
         lines.append("")
@@ -778,7 +880,7 @@ def base() -> int:
         "apt": {},
         "downloads": {},
         "binaries": {},
-        "not_installed": {"apt": [], "pip": [], "download": [], "manual": []},
+        "not_installed": {"apt": [], "pip": [], "download": [], "data": [], "manual": []},
         # What the tool library imports, with the note on each line: every
         # image's tools.md lists them, a profile's after its own packs'.
         "python_library": requirement_notes(Path(__file__).parent / "library-python.txt"),
@@ -808,7 +910,7 @@ def profile_record(record: dict, spec: dict, downloads: dict, failed: dict) -> d
         "binaries": {b["name"]: shutil.which(b["name"], path=path) for b in spec["binaries"]},
         "not_installed": {"apt": failed["apt"], "pip": failed["pip"], "download": failed["download"],
                           "source": failed.get("source", []), "build": failed.get("build", []),
-                          "manual": spec["manual"]},
+                          "data": failed.get("data", []), "manual": spec["manual"]},
         # Named by a pack, and another system's: not missing from this image.
         "not_applicable": spec.get("not_applicable", []),
     })
@@ -851,7 +953,7 @@ def install_apt(spec: dict, apt: list, failed: dict) -> bool:
 
 def main(spec_path: str) -> int:
     spec = json.loads(Path(spec_path).read_text())
-    failed = {"apt": [], "pip": [], "download": [], "source": [], "build": []}
+    failed = {"apt": [], "pip": [], "download": [], "source": [], "build": [], "data": []}
     apt = ["apt-get", "install", "-y", "--no-install-recommends"]
     if not install_apt(spec, apt, failed):
         return 1
@@ -903,6 +1005,10 @@ def main(spec_path: str) -> int:
     for d in sources:
         if not settle("source", d, *fetch_source(d, apt)):
             return 1
+    # Data goes in after the venv, since it is put inside a package of it.
+    for d in spec.get("data", []):
+        if not settle("data", d, *fetch_data(d)):
+            return 1
     if compiles:
         run(["apt-get", "purge", "-y", "--auto-remove", *build_deps])
     for d in spec.get("builds", []):
@@ -917,7 +1023,7 @@ def main(spec_path: str) -> int:
     found = sum(1 for v in record["binaries"].values() if v)
     print(f"image.json: {found}/{len(record['binaries'])} binaries on PATH, "
           f"{len(failed['apt'])} apt, {len(failed['pip'])} pip, {len(failed['download'])} download, "
-          f"{len(failed['source'])} source and {len(failed['build'])} build optional failures, "
+          f"{len(failed['source'])} source, {len(failed['build'])} build and {len(failed['data'])} data optional failures, "
           f"{len(spec['manual'])} manual, {len(spec.get('not_applicable', []))} not applicable")
     # A program a pack requires and the image does not have is a broken
     # image, whatever the package manager said: the run would find out first.

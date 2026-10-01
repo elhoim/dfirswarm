@@ -142,6 +142,30 @@
       },
       "licence": "GPL-2.0-or-later with the UPX exception",
       "redistributable": false
+    },
+    {
+      "name": "gcc",
+      "package": "gcc",
+      "optional": true,
+      "why": "Compile a small C program in the job's own directory: a scanner over a memory image too large for Python to hold, a decoder for a format no library reads. The source and the build line stay in the record like any other tool.",
+      "install": {
+        "brew": "xcode-select --install",
+        "apt": "apt-get install -y gcc libc6-dev"
+      },
+      "licence": "GPL-3.0-or-later with the GCC Runtime Library Exception",
+      "redistributable": false
+    },
+    {
+      "name": "make",
+      "package": "make",
+      "optional": true,
+      "why": "Build a C project from a source tree a case holds or a tool is distributed as.",
+      "install": {
+        "brew": "brew install make",
+        "apt": "apt-get install -y make"
+      },
+      "licence": "GPL-3.0-or-later",
+      "redistributable": false
     }
   ]
 }

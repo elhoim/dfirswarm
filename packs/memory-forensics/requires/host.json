@@ -37,7 +37,22 @@
       "why": "The plugin framework most reports cite. Kept at an executable boundary rather than imported or vendored, under its own Volatility Software License 1.0.",
       "install": {
         "brew": "python3 -m pip install volatility3",
-        "apt": "python3 -m pip install volatility3"
+        "apt": "python3 -m pip install volatility3",
+        "data": {
+          "name": "vol-windows-symbols",
+          "version": "2019-10-16",
+          "url": "https://downloads.volatilityfoundation.org/volatility3/symbols/windows.zip",
+          "sha256": "231d69735b9a5482b16bdbf1ec356e0a95574c44079e68dfb02ebddb34d55f3e",
+          "package": "volatility3",
+          "into": "symbols",
+          "warm": [
+            "vol",
+            "-q",
+            "isfinfo"
+          ],
+          "why": "Windows kernel symbol tables for `vol`, so a Windows plugin finds its kernel's symbols with no network (run it with `--offline`). The Volatility Foundation's pack as it stood on 2019-10-16: 3,014 tables for the Windows builds of that time, not every one of them. A newer kernel is not in it; `vol -q isfinfo` lists what is.",
+          "licence": "The pack carries no licence text of its own. The Volatility Software License 1.0 counts operating-system profiles distributed with the software as the software, so it is taken to apply. The tables are generated from Microsoft's public symbol (PDB) files, whose Microsoft Symbol Server licence terms allow use for debugging and testing and forbid sharing, publishing or offering them stand-alone: this image is not for redistribution."
+        }
       },
       "licence": "Volatility Software License 1.0",
       "redistributable": false
@@ -87,6 +102,90 @@
         "apt": "apt-get install -y yara"
       },
       "licence": "BSD-3-Clause",
+      "redistributable": false
+    },
+    {
+      "name": "aeskeyfind",
+      "package": "aeskeyfind",
+      "optional": true,
+      "why": "Find AES-128 and AES-256 key schedules in a memory image by testing each position against the key-expansion constraints; it tolerates a few decayed bits. A candidate is a lead, and is established only by decrypting something the evidence holds with it. Debian packages it for amd64 and i386 only: this one is built from Debian's source and patches (files over 4 GB among them) on every architecture.",
+      "install": {
+        "brew": "https://citp.princeton.edu/our-work/memory/code/",
+        "apt": "built from source 1.0-11 (install.build): Debian packages it for amd64 and i386 only",
+        "build": {
+          "version": "1.0-11",
+          "url": "https://deb.debian.org/debian/pool/main/a/aeskeyfind/aeskeyfind_1.0.orig.tar.gz",
+          "sha256": "1417e5c1b61e86bb9527db1f5bee1995a0eea82475db3cbc880e04bf706083e4",
+          "patches": [
+            {
+              "url": "https://sources.debian.org/data/main/a/aeskeyfind/1%3A1.0-11/debian/patches/10_add-GCC-hardening.patch",
+              "sha256": "899497306b2120581c579b204caf545b2fcad675dd159b1848121fc4a6e4cd21"
+            },
+            {
+              "url": "https://sources.debian.org/data/main/a/aeskeyfind/1%3A1.0-11/debian/patches/20_sbox-size.patch",
+              "sha256": "3cbfbd3e36da89bc6f37e644088da05385b91397adf8af0e2c9c69eefe8ec111"
+            },
+            {
+              "url": "https://sources.debian.org/data/main/a/aeskeyfind/1%3A1.0-11/debian/patches/30_big-files-support.patch",
+              "sha256": "1f60c68352c116ae6151d43c4d7c15256fa3976d255a648283d0ecf0a8da5508"
+            },
+            {
+              "url": "https://sources.debian.org/data/main/a/aeskeyfind/1%3A1.0-11/debian/patches/40_fix-undefined-left-shift.patch",
+              "sha256": "5ac8f53839aa862c42687d84ffef70bc39024ecde940853e1bdd20d0f2ee28a1"
+            }
+          ],
+          "commands": [
+            [
+              "make",
+              "-j{jobs}"
+            ],
+            [
+              "install",
+              "-D",
+              "-m",
+              "0755",
+              "aeskeyfind",
+              "{prefix}/bin/aeskeyfind"
+            ]
+          ],
+          "bin": "bin/aeskeyfind",
+          "build_deps": [
+            "gcc",
+            "libc6-dev",
+            "make",
+            "patch"
+          ],
+          "env": {
+            "CFLAGS": "-O2 -fstack-protector-strong -D_FORTIFY_SOURCE=2",
+            "LDFLAGS": "-Wl,-z,relro -Wl,-z,now"
+          }
+        }
+      },
+      "licence": "BSD-3-Clause; Debian's patches GPL-2.0-or-later",
+      "redistributable": false
+    },
+    {
+      "name": "gcc",
+      "package": "gcc",
+      "optional": true,
+      "why": "Compile a small C program in the job's own directory: a scanner over a memory image too large for Python to hold, a decoder for a format no library reads. The source and the build line stay in the record like any other tool.",
+      "install": {
+        "brew": "xcode-select --install",
+        "apt": "apt-get install -y gcc libc6-dev"
+      },
+      "licence": "GPL-3.0-or-later with the GCC Runtime Library Exception",
+      "redistributable": false
+    },
+    {
+      "name": "make",
+      "package": "make",
+      "optional": true,
+      "why": "Build a C project from a source tree a case holds or a tool is distributed as.",
+      "install": {
+        "brew": "brew install make",
+        "apt": "apt-get install -y make"
+      },
+      "licence": "GPL-3.0-or-later",
       "redistributable": false
     }
   ]

@@ -6,6 +6,20 @@ All notable changes to this project. The format follows
 
 ## [Unreleased]
 
+### Added: the programs a memory case asked for, and Volatility's Windows symbol tables, in the images
+
+A run on a Windows memory image, a capture and a logical disk image asked for programs no image held: a steganography extractor, an AES key-schedule finder, a compiler, and the symbol tables that Volatility's Windows plugins need when a VM has no network. All four are in the images now; the symbol tables only for kernels of 2019 and earlier.
+
+- **Windows symbol tables.** The memory and `full` images pin the Volatility Foundation's `windows.zip` (3,014 tables, last changed 2019-10-16) as data of the `vol` entry in `packs/memory-forensics/requires/host.json`. The build checks its sha256, puts it in the venv's `volatility3/symbols/`, and lists it once so that no VM spends three minutes indexing it on first use.
+  - It is **not** redistributed by us. The image that holds it is built by whoever runs it and marked not for redistribution, as every image already is; its NOTICE says the tables carry the Volatility Software License 1.0 (which counts operating-system profiles as the software) and come from Microsoft's public symbol files, whose licence terms forbid sharing them. CI builds and boots, never pushes.
+  - **It does not cover a recent kernel.** It is a 2019 snapshot. The kernel of the run that asked for it is in neither this pack nor the community collection last updated in 2024, so `windows.netscan` on that image would still need the table fetched or made. The memory pack's skill and `images/README.md` say so, and what to do.
+- **`install.data`**, a new kind for a pack's `requires/host.json`: a file a program reads and that is not a program, pinned by url and sha256, put inside a Python package of the venv, with an optional `warm` command and a `licence` of its own for the NOTICE. It is recorded in `image.json` (`downloads`, kind `data`), the SBOM (a `data` component), `tools.md` and, when it cannot be fetched, `not_installed.data`.
+- **`install.build` with `patches` and `commands`.** A source with no configure script names its steps, and may be patched by pinned patches first. `aeskeyfind` (Debian ships it for amd64 and i386 only) is built from Debian's upstream tarball and Debian's four patches, among them the one for files over 4 GB, on both architectures.
+- **`gcc` and `make`** in the memory and `re` images, **`steghide`** and the Python library **Pillow** in every image (the base pack). Packs: computer-forensics-base 1.5.0, memory-forensics 1.2.0 (a skill note on key schedules and one on the symbol pack), reverse-engineering 1.2.0.
+- `tests/image-programs.sh`, run inside a built image (CI runs it on every profile, and it is how the local arm64 images were checked, in a container and in a microVM): the compiler compiles, a key schedule planted in random bytes is found at the offset it was planted, one of them past 4 GiB (which the unpatched upstream does not reach), and a message goes through steghide and back. The `images` workflow also checks that every pinned data file is on disk at its recorded size and was indexed, and that `vol` lists the symbol tables with no network.
+- `pack.sh` checks the new fields before it seals: a patch needs an https url and a whole sha256, commands are argument lists, data needs its package, licence and a path inside it.
+- `docs/roadmap.md` has a heading, "Images for programs we cannot redistribute": the Pro service to build a customer's images from the recipes with the customer's acceptance of each licence.
+
 ### Changed: Pi 0.87.1, on the host and in the VMs
 
 Pi moves from 0.87.0 to 0.87.1 in both places it is pinned: `package.json` (host-mode seats, the tests) and `images/base.Dockerfile` (`PI_VERSION`, every VM seat). 0.87.1:
