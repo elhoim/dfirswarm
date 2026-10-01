@@ -49,7 +49,7 @@ import { DENIED, eachLine, keptStderr, pathIn, within } from "./job-write-refuse
 
 /** The dynamic loader's refusal to map a segment of a program or library from a file system that cannot execute (it says it too when the worker has no memory left to map it). */
 export const LOADER_REFUSAL = "failed to map segment from shared object";
-/** The shell's other reasons for status 126, none of them about where a program stands. */
+/** The shell's other reasons for status 126 (127 for a missing interpreter on Linux), none of them about where a program stands. */
 export const FORMAT_REFUSAL = "Exec format error";
 export const INTERPRETER_REFUSAL = "bad interpreter";
 export const DIRECTORY_REFUSAL = "Is a directory";
@@ -103,7 +103,7 @@ export function placeOf(path: string | null, cwd: string): Place {
 /**
  * Whether a line says a program could not be executed: the error and the
  * path it names (resolved from `cwd` when relative), or null. `exit` is the
- * job's status: the shell's lines count at 126; the loader's refusal at any
+ * job's status: the shell's lines count at 126 (a missing interpreter at 127 too); the loader's refusal at any
  * status; a "Permission denied" at another status only when it names an
  * existing file under a directory a worker mounts read-only (`isFile` says
  * whether a path is one, the host's by default).
@@ -115,10 +115,14 @@ export function execRefusedIn(line: string, o: { cwd: string; exit: number | nul
     const named = /error while loading shared libraries: (.+?): failed to map segment from shared object/.exec(line)?.[1];
     return { error: LOADER_REFUSAL, path: resolved(named) };
   }
+  // A missing interpreter is 126 in bash 3.2 and 127 in bash 5 on Linux (the kernel says ENOENT); the line says "No such file or directory" either way, and at 127 it is no missing program.
+  // bash 5.1 and later on Linux say "cannot execute: required file not found" (and 127) for the same.
+  if ((o.exit === 126 || o.exit === 127) && (line.includes(INTERPRETER_REFUSAL) || line.includes("cannot execute: required file not found"))) {
+    return { error: INTERPRETER_REFUSAL, path: resolved(/(?:^|: )([^\s:]+): [^:]*: bad interpreter/.exec(line)?.[1] ?? /(?:^|: )([^\s:]+): cannot execute: required file not found/.exec(line)?.[1]) };
+  }
   if (o.exit === 126) {
     // bash 3.2 says "cannot execute binary file" alone; bash 5 adds ": Exec format error".
     if (line.includes("cannot execute binary file")) return { error: FORMAT_REFUSAL, path: resolved(/(?:^|: )(\S+): cannot execute binary file/.exec(line)?.[1]) };
-    if (line.includes(INTERPRETER_REFUSAL)) return { error: INTERPRETER_REFUSAL, path: resolved(/(?:^|: )([^\s:]+): [^:]*: bad interpreter/.exec(line)?.[1]) };
     // bash 5 on Linux says "Is a directory" (strerror), bash 3.2 says "is a directory".
     if (/is a directory/i.test(line)) return { error: DIRECTORY_REFUSAL, path: resolved(/(?:^|: )([^\s:]+): [Ii]s a directory/.exec(line)?.[1]) };
     if (line.includes(DENIED)) return { error: DENIED, path: resolved(pathIn(line, DENIED)) };
@@ -187,7 +191,7 @@ export function execRefusedWords(x: ExecRefused, o: { job: string; out: string; 
       x.error === FORMAT_REFUSAL
         ? "the file is not a program this worker's CPU can run (built for another architecture, or not a program at all): compare what it is built for with what the worker is (uname -m)"
         : x.error === INTERPRETER_REFUSAL
-          ? "the interpreter named on its first line is not in the worker, or that line ends in a carriage return (a file written on Windows): read its first line"
+          ? "the interpreter named on its first line (or, for a compiled program, its dynamic loader) is not in the worker, or that line ends in a carriage return (a file written on Windows): read its first line"
           : "a directory was named where a program was meant: name the file inside it";
     return `a program it ran could not be executed (${said}, ${where} line ${x.line}${more}). That is not a matter of where it stands, and copying it elsewhere will not change it: ${what}`;
   }

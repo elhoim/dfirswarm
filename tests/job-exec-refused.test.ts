@@ -49,6 +49,10 @@ test("what counts: the shell's status 126 with its own line, the loader's refusa
   assert.deepEqual(execRefusedIn(`bash: ${OUT}/run.sh: /usr/bin/env python3^M: bad interpreter: No such file or directory`, { ...at, exit: 126 }), { error: "bad interpreter", path: `${OUT}/run.sh` });
   assert.deepEqual(execRefusedIn(`bash: ${OUT}/d: Is a directory`, { ...at, exit: 126 }), { error: "Is a directory", path: `${OUT}/d` });
   assert.deepEqual(execRefusedIn(`/job/command.sh: line 3: ${OUT}/d: is a directory`, { ...at, exit: 126 }), { error: "Is a directory", path: `${OUT}/d` });
+  // A missing interpreter is 127 in bash 5 on Linux, and it is no missing program.
+  assert.deepEqual(execRefusedIn(`bash: ${OUT}/run.sh: /usr/bin/foo: bad interpreter: No such file or directory`, { ...at, exit: 127 }), { error: "bad interpreter", path: `${OUT}/run.sh` });
+  assert.deepEqual(execRefusedIn(`/job/command.sh: line 4: ${OUT}/script: cannot execute: required file not found`, { ...at, exit: 127 }), { error: "bad interpreter", path: `${OUT}/script` });
+  assert.equal(execRefusedIn(`bash: ${OUT}/run.sh: /usr/bin/foo: bad interpreter: No such file or directory`, { ...at, exit: 1 }), null);
   // Those lines at another status are the program's own words, not the shell's.
   assert.equal(execRefusedIn(`bash: ${OUT}/d: Is a directory`, { ...at, exit: 1 }), null);
   assert.equal(execRefusedIn("tool: cannot execute binary file", { ...at, exit: 2 }), null);
@@ -138,7 +142,7 @@ test("the words: a supplied program is run from a copy; evidence is read and nev
   // The shell's other reasons: its own line, and it is not about where the program stands.
   for (const [error, text, re] of [
     ["Exec format error", `bash: ${OUT}/tool: cannot execute binary file`, /another architecture, or not a program at all\): compare what it is built for with what the worker is \(uname -m\)$/],
-    ["bad interpreter", `bash: ${OUT}/run.sh: /bin/foo^M: bad interpreter: No such file or directory`, /carriage return \(a file written on Windows\): read its first line$/],
+    ["bad interpreter", `bash: ${OUT}/run.sh: /bin/foo^M: bad interpreter: No such file or directory`, /\(or, for a compiled program, its dynamic loader\) is not in the worker, or that line ends in a carriage return \(a file written on Windows\): read its first line$/],
     ["Is a directory", `bash: ${OUT}/d: Is a directory`, /name the file inside it$/],
   ] as const) {
     const w = execRefusedWords({ ...base, error, text, path: `${OUT}/x`, lines: 1, files: 1 }, o);
@@ -234,9 +238,10 @@ test("through the service: a job that could not execute a program has it in its 
   assert.match(format.reason ?? "", /^exit 126: a program it ran could not be executed \(the shell says ".*cannot execute binary file.*", store\/jobs\/j\d+\/stderr\.log line 1\)\. That is not a matter of where it stands/);
   assert.doesNotMatch(format.reason ?? "", /mktemp|temporary directory/);
   const interp = await run(`printf '#!/no/such/interpreter\\n' > "$OUT/script"; chmod +x "$OUT/script"; "$OUT/script"`);
-  assert.equal(interp.exit, 126);
+  assert.ok([126, 127].includes(interp.exit ?? 0), `bash says 126 or 127 for a missing interpreter: ${interp.exit}`);
+  assert.equal(interp.program_missing, undefined, "a missing interpreter is no program missing from the image");
   assert.equal(interp.exec_refused?.error, "bad interpreter");
-  assert.match(interp.reason ?? "", /bad interpreter.*That is not a matter of where it stands.*first line$/);
+  assert.match(interp.reason ?? "", /(bad interpreter|required file not found).*That is not a matter of where it stands.*first line$/);
   const dir = await run(`mkdir "$OUT/d"; "$OUT/d"`);
   assert.equal(dir.exit, 126);
   assert.equal(dir.exec_refused?.error, "Is a directory");
