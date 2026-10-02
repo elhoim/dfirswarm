@@ -34,7 +34,7 @@ import json, os
 r = json.load(open(os.environ.get("DFIRSWARM_ETC_DIR", "/etc/dfirswarm") + "/image.json"))
 if not isinstance(r, dict):
     raise ValueError("image.json is not an object")
-if not isinstance(r.get("binaries", {}), dict) or not isinstance(r.get("missing_allowed", []), list):
+if not isinstance(r.get("binaries"), dict) or not isinstance(r.get("missing_allowed", []), list):
     raise ValueError("image.json has an invalid program list")
 PY
 then

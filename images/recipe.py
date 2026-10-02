@@ -97,8 +97,9 @@ the build, so a build that went wrong (apt out of disk space) is not tagged,
 and a builder stage that failed is not cached as a success. `build
 --allow-missing-optional` builds the image without such programs and records
 them; its spec.json and every builder stage it lets fail carry a build id of
-their own, so the install and those stages run again every time rather than
-being taken from the cache with an earlier build's gaps.
+their own. Regenerating the context changes that id and reruns the install
+and those stages; reusing an existing context needs `docker build --no-cache`
+to avoid taking an earlier build's gaps from the cache.
 
 `run` names the interpreter a download's or a source's program needs:
 `python` (the program's own venv, else the image's), or any program the image
