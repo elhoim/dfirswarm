@@ -1458,8 +1458,8 @@ export function hubAlive(sandbox: string): number | null {
  * --resume DIR` (its keeper's), DIR's `sandbox` file naming this run. A
  * stop that gave up waiting for its hub used to drop hub.pid and the hub's
  * directory, and a second stop then took the store for its own while that
- * hub might still write it. The pid, or null when none is found (or ps
- * cannot say: then hub.pid is all there is to go by).
+ * hub might still write it. The pid, or null when none is found. A failed
+ * process lookup throws: it cannot establish that the writer has gone.
  */
 export function hubProcessFor(sandbox: string): number | null {
   const S = resolve(sandbox);
@@ -1473,7 +1473,7 @@ export function hubProcessFor(sandbox: string): number | null {
   try {
     out = execFileSync("ps", ["-e", "-ww", "-o", "pid=,args="], { encoding: "utf8", timeout: 15_000, maxBuffer: 64 * 1024 * 1024 });
   } catch {
-    return null;
+    throw new Error("could not check whether the run's hub is up (ps failed)");
   }
   const names = (dir: string): boolean => {
     try {

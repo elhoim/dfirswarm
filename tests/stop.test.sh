@@ -445,6 +445,22 @@ for pid_state in missing stale; do
   [[ -f "$HS/inputs.device" && -d "$HHD" && ! -f "$HS/done/STOPPED" && ! -d "$HS/release" ]] || hung_fail "a $pid_state hub pid file let the stop finalise: $out"
   [[ "$(jq -r '.at' "$HS/custody.json")" == "2020-01-01T00:00:00.000Z" ]] || hung_fail "custody ran with a $pid_state hub pid file: $out"
 done
+# A failed process lookup cannot establish that the writer has gone.
+mkdir -p "$TMP/no-ps"
+printf '#!/bin/sh\nexit 1\n' > "$TMP/no-ps/ps"
+chmod +x "$TMP/no-ps/ps"
+rm -f "$HS/hub.pid"
+set +e
+out="$(PATH="$TMP/no-ps:$PATH" SWARM_MSB_BIN="$TMP/msb" SWARM_RUNS_DIR="$RUNS" bash "$ROOT/scripts/swarm.sh" stop shng1 --custody-timeout 30 2>&1)"
+rc=$?
+set -e
+[[ $rc -eq 3 ]] || hung_fail "a failed hub process lookup allowed finalisation (rc $rc): $out"
+grep -q "the run's hub could not be checked" <<<"$out" || hung_fail "a failed hub lookup was not said: $out"
+kill -0 "$HCP" 2>/dev/null || hung_fail "a failed hub process lookup ended its collector: $out"
+[[ -f "$HS/inputs.device" && -d "$HHD" && ! -f "$HS/done/STOPPED" && ! -d "$HS/release" ]] || hung_fail "a failed hub process lookup finalised the run: $out"
+[[ "$(jq -r '.at' "$HS/custody.json")" == "2020-01-01T00:00:00.000Z" ]] || hung_fail "custody ran after a failed hub process lookup: $out"
+sl="$(PATH="$TMP/no-ps:$PATH" SWARM_MSB_BIN="$TMP/msb" node --experimental-strip-types --no-warnings "$ROOT/scripts/vm.ts" seal-left --sandbox "$HS" 2>/dev/null)" && hung_fail "seal-left allowed a failed hub lookup: $sl"
+grep -q "ps failed" <<<"$sl" || hung_fail "seal-left did not report its failed hub lookup: $sl"
 # seal-left on its own refuses too, whatever hub.pid says.
 rm -f "$HS/hub.pid"
 sl="$(SWARM_MSB_BIN="$TMP/msb" node --experimental-strip-types --no-warnings "$ROOT/scripts/vm.ts" seal-left --sandbox "$HS" 2>/dev/null)" && { kill -9 "$HHP"; fail "seal-left sealed beside a live hub: $sl"; }
