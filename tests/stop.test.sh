@@ -381,7 +381,7 @@ chmod +x "$TMP/msb"
 HHD="$(cd "$SWARM_HUBS_DIR" && pwd -P)/dfs-shng1.x1"
 mkdir -p "$HHD/fake"
 (cd "$HS" && pwd -P) > "$HHD/sandbox"
-printf '{"finished":false}\n' > "$HHD/status.json"
+printf '{"finished":true,"finish_done":false}\n' > "$HHD/status.json"
 printf '%s\n' "$HHD" > "$HS/hub.dir"
 # A hub that does not go when asked (its job service stuck on msb).
 cat > "$HHD/fake/vm-hub.ts" <<'HUB'
@@ -409,7 +409,7 @@ printf '{"at":"2020-01-01T00:00:00.000Z","summary":"earlier verdict"}\n' > "$HS/
 hung_fail() { kill -9 "$HHP" "$HCP" 2>/dev/null || true; fail "$*"; }
 sleep 0.3
 set +e
-out="$(SWARM_MSB_BIN="$TMP/msb" SWARM_RUNS_DIR="$RUNS" SWARM_STOP_HUB_EXIT_SEC=1 bash "$ROOT/scripts/swarm.sh" stop shng1 --custody-timeout 30 2>&1)"
+out="$(SWARM_MSB_BIN="$TMP/msb" SWARM_RUNS_DIR="$RUNS" SWARM_STOP_HUB_WAIT_SEC=1 SWARM_STOP_HUB_EXIT_SEC=1 bash "$ROOT/scripts/swarm.sh" stop shng1 --custody-timeout 30 2>&1)"
 rc=$?
 set -e
 kill -0 "$HCP" 2>/dev/null || hung_fail "the incomplete stop ended the live hub's collector: $out"
@@ -417,6 +417,7 @@ kill -0 "$HCP" 2>/dev/null || hung_fail "the incomplete stop ended the live hub'
 [[ "$(jq -r '.at' "$HS/custody.json")" == "2020-01-01T00:00:00.000Z" ]] || hung_fail "custody ran beside a live hub: $out"
 [[ ! -f "$HS/done/STOPPED" ]] || hung_fail "the incomplete stop wrote a stopped outcome"
 [[ ! -d "$HS/release" ]] || hung_fail "a draft release was sealed beside the live hub"
+grep -q "the hub is putting the VMs away itself; waiting for it" <<<"$out" || hung_fail "the stop did not wait for a hub already finishing: $out"
 grep -q 'Custody:.*re-hashing\|sealing the draft\|Trace:.*chained' <<<"$out" && hung_fail "the incomplete stop ran finalisation: $out"
 kill -0 "$HHP" 2>/dev/null || fail "the stand-in hub went (it should not have): $out"
 [[ $rc -eq 3 ]] || { kill -9 "$HHP"; fail "a stop whose hub stayed up exited $rc, wanted 3: $out"; }
@@ -424,6 +425,26 @@ grep -q "did not exit within 1s of being asked" <<<"$out" || { kill -9 "$HHP"; f
 [[ "$(jq -r '.runs[0].state' "$RUNS/registry.json")" == "stop_incomplete" ]] || { kill -9 "$HHP"; fail "the record says $(jq -r '.runs[0].state' "$RUNS/registry.json")"; }
 [[ -f "$HS/hub.pid" && -f "$HS/hub.dir" && -d "$HHD" ]] || { kill -9 "$HHP"; fail "the hub's files were dropped while it may still write: $out"; }
 [[ -d "$HS.staging/j000001-1" ]] || { kill -9 "$HHP"; fail "the staging was sealed beside a live hub: $out"; }
+# A missing or stale pid file is not proof that the hub has gone. Find it
+# by its process command line even when there is no staging to seal.
+printf '{"finished":false}\n' > "$HHD/status.json"
+for pid_state in missing stale; do
+  if [[ "$pid_state" == missing ]]; then
+    rm -f "$HS/hub.pid"
+    mv "$HS.staging" "$HS.saved-staging"
+  else
+    printf '99999999\n' > "$HS/hub.pid"
+  fi
+  set +e
+  out="$(SWARM_MSB_BIN="$TMP/msb" SWARM_RUNS_DIR="$RUNS" SWARM_STOP_HUB_EXIT_SEC=1 bash "$ROOT/scripts/swarm.sh" stop shng1 --custody-timeout 30 2>&1)"
+  rc=$?
+  set -e
+  [[ "$pid_state" == missing ]] && mv "$HS.saved-staging" "$HS.staging"
+  [[ $rc -eq 3 ]] || hung_fail "a live hub with a $pid_state pid file was finalised (rc $rc): $out"
+  kill -0 "$HCP" 2>/dev/null || hung_fail "a $pid_state hub pid file let the stop end its collector: $out"
+  [[ -f "$HS/inputs.device" && -d "$HHD" && ! -f "$HS/done/STOPPED" && ! -d "$HS/release" ]] || hung_fail "a $pid_state hub pid file let the stop finalise: $out"
+  [[ "$(jq -r '.at' "$HS/custody.json")" == "2020-01-01T00:00:00.000Z" ]] || hung_fail "custody ran with a $pid_state hub pid file: $out"
+done
 # seal-left on its own refuses too, whatever hub.pid says.
 rm -f "$HS/hub.pid"
 sl="$(SWARM_MSB_BIN="$TMP/msb" node --experimental-strip-types --no-warnings "$ROOT/scripts/vm.ts" seal-left --sandbox "$HS" 2>/dev/null)" && { kill -9 "$HHP"; fail "seal-left sealed beside a live hub: $sl"; }
@@ -439,5 +460,19 @@ kill -0 "$HCP" 2>/dev/null && hung_fail "the second stop left its collector runn
 [[ ! -d "$HHD" && ! -f "$HS/hub.dir" ]] || fail "the hub's directory outlived the hub: $out"
 HHP="" HCP=""
 pass "a hub that stays up keeps its pid file and directory, the run is stop_incomplete, seal-left refuses beside it, and the stop after it seals the staging"
+
+echo "# an error sealing staging cannot be swallowed before finalisation"
+BS="$RUNS/sbad1"
+mkdir -p "$BS/traces" "$BS/store/journal.jsonl" "$BS.staging/unsealed"
+printf 'partial\n' > "$BS.staging/unsealed/out"
+jq -n --arg sb "$BS" '{runs: [{id: "sbad1", state: "running", sandbox: $sb, isolation: {mode: "microvm", snapshot: false}}]}' > "$RUNS/registry.json"
+set +e
+out="$(SWARM_MSB_BIN="$TMP/msb" SWARM_RUNS_DIR="$RUNS" bash "$ROOT/scripts/swarm.sh" stop sbad1 --custody-timeout 30 2>&1)"
+rc=$?
+set -e
+[[ $rc -eq 3 ]] || fail "an unreadable journal was finalised (rc $rc): $out"
+[[ "$(jq -r '.runs[0].state' "$RUNS/registry.json")" == "stop_incomplete" ]] || fail "a failed seal did not record stop_incomplete"
+[[ ! -f "$BS/custody.json" && ! -d "$BS/release" && ! -f "$BS/done/STOPPED" ]] || fail "a failed seal ran finalisation: $out"
+pass "a seal-left error defers finalisation and keeps staging for a retry"
 
 echo "stop.test.sh: all checks passed"

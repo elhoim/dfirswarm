@@ -3,7 +3,8 @@
 - Hold the hub's jobs before closing Herdr panes. When a hub or VM cannot be
   stopped, keep the collector and evidence mount, record `stop_incomplete`,
   and defer trace gathering, custody, release and the stopped outcome until
-  the next successful stop.
+  the next successful stop. Check for a live hub even with a lost pid file,
+  and defer finalisation when leftover staging cannot be sealed.
 - Seed the Questions tab's required and released states and cover requiring,
   releasing and reinstating a requirement through the web API.
 - Attribute BelkaCTF #6's scenario and challenges to TODO: security alongside
