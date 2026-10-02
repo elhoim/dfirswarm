@@ -59,7 +59,10 @@ panes and no key is possible with the scripted provider
   `tests/<name>.test.ts` or `tests/<name>.test.sh` runs by its name: nothing
   lists the suites (`scripts/test-node.ts`, `scripts/test-bash.sh`), and the
   few node suites `npm test` must leave out are in `tests/node-tests.skip`,
-  each with its reason. A change to the
+  each with its reason. `npm test` gives each test five minutes, so a test
+  that waits forever fails by name instead of hanging CI; a wait in a test is
+  set up before the event it waits for can happen (listen for a child's
+  `exit` when it is spawned, not after). A change to the
   protocol needs a case in `tests/dry-run.test.ts`; a change to the web API
   needs one in `tests/ui-server.test.ts`; a change to `swarm.sh` usually needs
   one in `tests/swarm-preflight.test.sh` or `tests/model-teams.test.sh`,
