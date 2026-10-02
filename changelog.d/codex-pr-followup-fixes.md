@@ -6,6 +6,9 @@
   the next successful stop. Check for a live hub even with a lost pid file,
   and defer finalisation when the process lookup fails or leftover staging
   cannot be sealed.
+- Exercise an incomplete stop and its retry with a real hub, collector and
+  worker VM: defer custody and release while the hub is unresponsive, then
+  seal its partial output and take custody once it exits.
 - Seed the Questions tab's required and released states and cover requiring,
   releasing and reinstating a requirement through the web API.
 - Attribute BelkaCTF #6's scenario and challenges to TODO: security alongside
