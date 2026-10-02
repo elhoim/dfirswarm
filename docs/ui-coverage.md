@@ -102,6 +102,15 @@ Not built, on purpose: a blue "viewport" marker on the activity strip (a brush w
 
 ## microVM runs and the examiner's record
 
+The Questions tab also has two operator questions in the `s7a1c` fixture:
+"Which account uploaded the web shell?" must be established, and "Did the
+same account reach a second host?" has its requirement released. Their cards
+show who required or released it and why. `tests/ui-server.test.ts` reads both
+states, then adds a required question through HTTP, releases it with why,
+refuses a release without why, and reinstates the requirement. The amendment
+keeps the question's revision. `npm run ui:fixture` shows the same records
+without a model or a live run.
+
 The fixture has a microVM run, `svm1d` (`web-server-vm`, three VMs, done): VM records with the whole probe, kept disks, msb's database state and logs; hub events with a refusal, a hub and a collector restart and a cap stop; a post a seat's harness code sent from its VM; inputs with md5/sha1; `custody.json`; chained operator-audit lines; ledger entries with a correction and a searched-not-found; one review line; a job store (a command that ran, a tool that failed and was sealed all the same, one cancelled before it ran, and an examiner's note added after custody). `tests/ui-server.test.ts` and the screenshot pass exercise every row below against it, plus synthetic records for the variants (a keeper that gave up, a hub that finished and exited, a FIFO spill).
 
 | Surface | Where in our app |
