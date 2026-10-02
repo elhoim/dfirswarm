@@ -4,6 +4,8 @@
  * the CLI and, through `swarm.sh question`, the console.
  *
  *   questions-cli.ts seed <sandbox>                         put the goal's questions and objectives on the chain
+ *   questions-cli.ts goal-check <goal file> [--inputs DIR]  before the run exists (start --check): what the goal's
+ *                                                           Must establish names that none of its questions is
  *   questions-cli.ts add <sandbox> --text T --why W [--presumes P] [--must-establish] [...]
  *                                                           a person's question (analyst, reviewer, observer, examiner);
  *                                                           --presumes: what it takes as happened, tested first;
@@ -661,6 +663,26 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     process.exit(2);
   };
   if (!cmd || !sandboxArg) usage();
+  if (cmd === "goal-check") {
+    // start --check, before the run exists: what the goal's Must establish
+    // names that none of its questions is (the kickoff's seed says the same
+    // once the run exists). A brief the check reads under inputs/ is found in
+    // the one --inputs DIR; one it cannot read leaves its questions unknown,
+    // and nothing is said rather than a question called unknown wrongly.
+    const at = rest.indexOf("--inputs");
+    const inputsDir = at >= 0 ? rest[at + 1] : undefined;
+    const text = readFileSync(resolve(sandboxArg), "utf8");
+    const gq = L.goalQuestionsIn(text, (path) => {
+      const rel = path.replace(/^\.\//, "");
+      if (!inputsDir || !rel.startsWith("inputs/")) return null;
+      try {
+        return readFileSync(join(resolve(inputsDir), rel.slice("inputs/".length)), "utf8");
+      } catch {
+        return null;
+      }
+    });
+    emit({ ok: true, questions: gq.questions, unread: gq.unread, must_establish_unknown: gq.unread.length ? [] : Q.mustEstablishUnknownIn(text, gq.questions) });
+  }
   const sandbox = resolve(sandboxArg);
   const { pos, opts, flags } = parseArgs(rest);
   // A dry run only where an act can be checked without being made.

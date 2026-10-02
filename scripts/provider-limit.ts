@@ -126,6 +126,8 @@ export const SEAT_HARNESS_ROWS: ReadonlySet<string> = new Set([
   "compact_note", "compact_start", "compact_done", "compact_failed", "compact_stalled", "compact_held",
   // A ledger entry the harness authored while it made the seat's header (a person's hint as a hypothesis).
   "harness_record",
+  // The model a provider said answered a message (a resolved alias, or a substitution): bookkeeping beside the thinking row.
+  "model_reported",
 ]);
 
 /**

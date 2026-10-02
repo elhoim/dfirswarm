@@ -31,7 +31,10 @@
 # provider named, `until`, when it named one), extended (the operator gave it
 # room), operator_request (the operator requests' outbox: a lead needs the
 # operator, an acquisition, a clarification, a network item, a stop proposed
-# when nothing yields), evidence_changed, chain_broken, agent_dead,
+# when nothing yields), token_alert (the run's tokens crossed one of the
+# operator's --token-alert marks: the mark and the count; advisory),
+# model_substitution (a provider said a model other than the one asked for
+# answered a seat: the seat), evidence_changed, chain_broken, agent_dead,
 # collector_unreachable, hub_down. Each target gets 30 seconds. What one
 # said on failure goes to <sandbox>/traces/notify.log. This script never
 # blocks its caller and never fails it: a notification is a courtesy, not a
@@ -113,6 +116,10 @@ line="$(jq -nc --arg e "$EVENT" --arg r "$run" --arg at "$at" --arg id "$event_i
 words="$(jq -r --arg r "$run" '
   if .event == "operator_request" then
     "operator request \(.detail.request // "?") (\(.detail.kind // "request")\(if .detail.lead then "; lead \(.detail.lead)" else "" end)\(if .detail.question then "; question \(.detail.question)" else "" end)\(if .detail.item then "; item \(.detail.item)" else "" end)\(if .detail.urgency and .detail.urgency != "normal" then "; \(.detail.urgency)" else "" end)): swarm.sh requests \($r) show \(.detail.request // "")"
+  elif .event == "token_alert" then
+    "token alert: \(.detail.tokens // "?") tokens, past your mark of \(.detail.mark // "?") (advisory: nothing pauses or stops for it): swarm.sh status \($r)"
+  elif .event == "model_substitution" then
+    "model substitution: the provider answered \(.detail.agent // "a seat") with a model other than the one asked for (the board and the trace name both): swarm.sh status \($r)"
   elif .event == "paused" and .detail.reason == "provider_limit" then
     "paused: the model provider refused every seat\(if .detail.until then " until \(.detail.until)" else "" end). Every VM is held while it waits; to free the machine, swarm.sh stop \($r) now and swarm.sh resume \($r) after the limit lifts"
   else (.event | gsub("_"; " ")) end' <<<"$line")"

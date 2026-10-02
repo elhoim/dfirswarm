@@ -327,6 +327,15 @@ export type BudgetRecord = {
    *  unmetered team, and an optional second brake for any other. */
   cap_tokens?: number;
   /**
+   * The operator's token marks (`--token-alert`), ascending: as the run's
+   * tokens cross each, the operator is told once (the board, the trace, the
+   * notify hook; the console shows them against the count). Advisory under
+   * every stop policy: nothing pauses or stops for one (claimTokenAlerts).
+   */
+  token_alerts?: number[];
+  /** Every change the operator made to the marks while the run went on (swarm.sh cap --token-alert), in order, each with the marks it left. */
+  token_alert_changes?: Array<{ at: string; by: string; marks: number[] }>;
+  /**
    * The run was started until solved (--until-solved, or the goal's
    * `until_solved: true`): no wall clock, every cap advisory (spend is
    * recorded and shown, nothing is stopped for it), no abandon, and done
@@ -1346,6 +1355,12 @@ export function normalizeBudget(raw: Partial<BudgetRecord> | null | undefined): 
     // The same holds for the two fields a free team's brake is made of.
     metered: raw?.metered !== false,
     ...(Number(raw?.cap_tokens) > 0 ? { cap_tokens: Number(raw?.cap_tokens) } : {}),
+    // The operator's token marks: kept by every fold, or the first model call's usage would drop them.
+    ...(() => {
+      const marks = tokenMarks(raw?.token_alerts);
+      return marks.length ? { token_alerts: marks } : {};
+    })(),
+    ...(Array.isArray(raw?.token_alert_changes) && raw.token_alert_changes.length ? { token_alert_changes: raw.token_alert_changes } : {}),
     ...(raw?.stop_steer_at ? { stop_steer_at: raw.stop_steer_at } : {}),
     ...(raw?.stop_reason ? { stop_reason: raw.stop_reason } : {}),
     ...(raw?.until_solved === true ? { until_solved: true } : {}),
@@ -1361,6 +1376,49 @@ export function normalizeBudget(raw: Partial<BudgetRecord> | null | undefined): 
     ...(Array.isArray(raw?.resumes) && raw.resumes.length ? { resumes: raw.resumes } : {}),
     agents,
   };
+}
+
+/**
+ * What a provider said answered a call, against the model id asked for: the
+ * same, the asked alias resolved to one of its dated forms (`gpt-4o` answered
+ * as `gpt-4o-2024-08-06`, `claude-x-latest` as `claude-x-20250101`), or
+ * another model (a substitution: Anthropic's fallback models, a router's
+ * choice). Pi reports the answering id as `responseModel` on an assistant
+ * message only when it differs and only for the APIs that carry one (the
+ * Messages and Chat Completions APIs; not the Responses APIs, Codex's
+ * included), so a call it says nothing of is "same" as far as anyone knows.
+ */
+export function modelAnswered(requested: string, reported: string | undefined | null): "same" | "resolved" | "substituted" {
+  const want = String(requested ?? "").trim().toLowerCase().replace(/^[^/]*\//, "");
+  const got = String(reported ?? "").trim().toLowerCase().replace(/^[^/]*\//, "");
+  if (!got || got === want) return "same";
+  const base = want.replace(/[-_.:@]latest$/, "");
+  if (base && got.startsWith(base) && /^[-_.:@]/.test(got.slice(base.length)) && /\d/.test(got.slice(base.length))) return "resolved";
+  return "substituted";
+}
+
+/**
+ * `--token-alert`'s words as marks: "200M,1.6G,5000" (k, M and G allowed; a
+ * fraction only with one), ascending, each once; "none" is no marks. Null for
+ * anything else. The kickoff's own reading (swarm.sh token_marks) is the same.
+ */
+export function parseTokenMarks(text: string): number[] | null {
+  if (text.trim().toLowerCase() === "none") return [];
+  const out: number[] = [];
+  for (const part of text.split(",")) {
+    const m = /^\s*(\d+(?:\.\d+)?)\s*([kKmMgG]?)\s*$/.exec(part);
+    if (!m || (!m[2] && m[1].includes("."))) return null;
+    const n = Math.round(Number(m[1]) * ({ "": 1, k: 1e3, m: 1e6, g: 1e9 } as Record<string, number>)[m[2].toLowerCase()]);
+    if (!(n > 0) || n > 1e15) return null;
+    out.push(n);
+  }
+  return tokenMarks(out);
+}
+
+/** The token marks that are real: whole numbers above zero, ascending, each once. */
+export function tokenMarks(raw: unknown): number[] {
+  if (!Array.isArray(raw)) return [];
+  return [...new Set(raw.map(Number).filter((n) => Number.isSafeInteger(n) && n > 0))].sort((a, b) => a - b);
 }
 
 /** The per-model caps that are real: a positive number under a model id. */
@@ -4827,6 +4885,28 @@ export async function setCaps(
 }
 
 /**
+ * The operator's token marks set again while the run goes on (`swarm.sh cap
+ * --token-alert`), under the lock the usage folds take, so the next fold
+ * keeps them. A mark already crossed is told at the next round, once
+ * (claimTokenAlerts); a mark taken away was told or never will be. Advisory,
+ * as at kickoff: nothing else in the budget changes.
+ */
+export async function setTokenAlerts(sandboxRoot: string, marks: number[], by: string): Promise<{ before: number[]; after: number[] }> {
+  if (await swarmDoneExists(sandboxRoot)) throw new Error("the run is finished (done/SWARM_DONE exists); its token marks stay as they were");
+  return withTableLock(sandboxRoot, async (held) => {
+    const budget = await readBudget(sandboxRoot);
+    const before = tokenMarks(budget.token_alerts);
+    const after = tokenMarks(marks);
+    if (after.length) budget.token_alerts = after;
+    else delete budget.token_alerts;
+    budget.token_alert_changes = [...(budget.token_alert_changes ?? []), { at: new Date().toISOString(), by, marks: after }];
+    await held.assertOwned();
+    await writeBudget(sandboxRoot, budget);
+    return { before, after };
+  });
+}
+
+/**
  * End the pause in force, whatever its cause: the wall clock's stretch up to
  * the pause is kept, a new one starts now, and the pause goes to the history
  * with who lifted it and what they gave. Mutates `budget`; the caller holds
@@ -6120,6 +6200,9 @@ export const TOOL_RESERVED_NAMES = new Set([
   "net_request", "net_fetch", "network", "net_fetch_started", "net_fetch_refused", "net_fetch_restarted",
   // The store sweeps read again after a change of the sweep's rules (extensions/store-sweep.ts rereadSweeps).
   "sweep_reread",
+  // The operator's token marks crossed (--token-alert), and the model a
+  // provider said answered a seat's call when it was not the one asked for.
+  "token_alert", "model_reported",
 ]);
 
 const RUNTIME_EXT: Record<ToolRuntime, string> = { python3: "py", node: "mjs", bash: "sh" };
@@ -8185,6 +8268,39 @@ export function verifyLedgerChain(text: string): { ok: boolean; total: number; c
 
 /** The operator's stop of a run with no sentinel (swarm.sh stop): the outcome stopped, by whom, when, why. */
 export const STOPPED_REL = "done/STOPPED";
+
+/**
+ * The operator's token marks (`--token-alert`) the run has crossed and no
+ * process has told yet, each claimed once on disk (traces/token-alerts/<mark>,
+ * created exclusively), so the hub and a host run's watchdog never tell one
+ * twice and a restarted one does not tell it again; each claimed mark is said
+ * on the board. The caller puts it on the trace and gives it to the notify
+ * hook. Advisory: nothing pauses or stops for it, under any stop policy.
+ */
+export async function claimTokenAlerts(sandboxRoot: string, budget: Pick<BudgetRecord, "tokens" | "token_alerts" | "cap_tokens">): Promise<Array<{ mark: number; tokens: number }>> {
+  const marks = tokenMarks(budget.token_alerts).filter((m) => budget.tokens >= m);
+  if (!marks.length) return [];
+  const dir = join(sandboxRoot, "traces", "token-alerts");
+  await mkdir(dir, { recursive: true });
+  const told: Array<{ mark: number; tokens: number }> = [];
+  for (const mark of marks) {
+    const claimed = await writeFile(join(dir, String(mark)), `${new Date().toISOString()} ${budget.tokens}\n`, { encoding: "utf8", flag: "wx" }).then(
+      () => true,
+      () => false,
+    );
+    if (claimed) told.push({ mark, tokens: budget.tokens });
+  }
+  if (!told.length) return [];
+  const top = told[told.length - 1];
+  const next = tokenMarks(budget.token_alerts).find((m) => m > budget.tokens);
+  const cap = Number(budget.cap_tokens) > 0 ? ` The token cap is ${Number(budget.cap_tokens).toLocaleString("en-US")}.` : "";
+  await systemPost(sandboxRoot, {
+    tag: "result",
+    key: `token-alert-${top.mark}`,
+    body: `TOKEN ALERT: the run has used ${top.tokens.toLocaleString("en-US")} tokens, past the operator's mark${told.length > 1 ? "s" : ""} of ${told.map((t) => t.mark.toLocaleString("en-US")).join(", ")} (--token-alert). The operator is told; nothing pauses or stops for it.${cap}${next ? ` The next mark is ${next.toLocaleString("en-US")}.` : ""}`,
+  }).catch(() => undefined);
+  return told;
+}
 
 /**
  * The notice of a pause, claimed once: whichever process sees an

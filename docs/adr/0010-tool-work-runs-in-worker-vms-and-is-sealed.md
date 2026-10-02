@@ -354,7 +354,12 @@ the design:
     ceilings count what the catalogue costs, not the objects it asked about
     (a replay of the trial showed 477 gzip media blobs spending a 400-object
     ceiling before the decrypted vault came). What waits is named in the
-    journal, and a ceiling is told to all.
+    journal, and a ceiling is told to all. The generations' ceiling is the
+    operator's since 2026-10-01 (`--derived-limit N`, `SWARM_DERIVED_LIMIT`,
+    recorded as `isolation.jobs.derived_limit`): the Breadcrumbs run reached
+    it. It is checked before each pass, so a pass in flight finishes past it
+    (that run made 52 against 50); bounding a pass to what is left was not
+    done, since what waits stays offered and named either way.
 - **Nothing is lost.** A pass's answers are read whatever its status; a pair
   it did not answer is asked once more, then named. Replay rebuilds the
   queue, and recovery reads a committed pass or offers a committed job that

@@ -1260,7 +1260,7 @@ function summarySection(run: Run, memo: Map<number, EntryState>): BodySection {
         const plain = partialPlainWords(ans, standing);
         return [
           [c.q ? { a: `#${questionAnchor(c.q.id)}`, text: questionName(c.q) } : { a: `#${chainAnchor(chainName(c))}`, text: chainName(c) }],
-          [{ chip: state ?? st.status }, ...(plain && !state ? [` ${plain}`] : []), ...(c.v?.answer?.stale ? [" ", { chip: { text: "stale", tone: "brick" } } as Span] : [])],
+          [{ chip: state ?? st.status }, ...(plain && !state ? [` ${plain}`] : []), ...(c.v?.answer?.stale ? [" ", { chip: { text: "stale", tone: "brick" } } as Span] : []), ...(c.v?.must_establish?.required ? [" ", { chip: { text: "must be established", tone: "saffron" } } as Span] : [])],
           [...(c.v ? [`${c.v.id} · `] : []), ...askerSpans(c.v, c.q)],
           st.answer ? [{ e: st.answer.seq }, ` ${ans ? resultWords(ans) : st.answer.inconclusive ? "inconclusive" : "no result stated"}`, ...(standing ? [`. ${partsSummaryWords(standing)}`] : [])] : named.length ? [`none; ${plural(named.length, "entry", "entries")}: `, ...named.flatMap((e, i): Span[] => [...(i ? [", " as Span] : []), { e: e.seq }])] : ["none"],
           [leads.length ? `${leads.length}: ${[...tally].map(([k, n]) => `${n} ${k}`).join(", ")}` : "0"],
@@ -1270,11 +1270,37 @@ function summarySection(run: Run, memo: Map<number, EntryState>): BodySection {
       }),
     });
     blocks.push({ k: "p", s: ["Each question's chain (who asked it, every revision, the leads that worked it, the result, the acceptance and how the tokens are counted) is in ", { a: "#chains", text: "§2" }, "; each answer, with how it was reached, in §5; the whole register in Appendix F."] });
+    const held = mustEstablishWords(chains.map((c) => c.v).filter((v): v is QuestionView => Boolean(v)));
+    if (held) blocks.push({ k: "p", s: held });
   }
   const narrative = standingAnswer(run, "narrative");
   if (narrative) blocks.push({ k: "p", s: ["What happened, in order, is in §6 (", { e: narrative.seq }, ")."] });
   blocks.push({ k: "p", s: [reviewSentence(run)] });
   return { id: "s1", n: "1", title: "Summary for decision makers", desc: "the answer in brief, and where each question stands", blocks };
+}
+
+/**
+ * What the run was held to (docs/adr/0013, "A question that must be
+ * established"): each question required, by whom and why, and each
+ * requirement released, by whom, when and why. Null when the run required
+ * nothing.
+ */
+export function mustEstablishWords(views: readonly QuestionView[]): Span[] | null {
+  const required = views.filter((v) => v.must_establish?.required);
+  const released = views.filter((v) => v.must_establish && !v.must_establish.required);
+  if (!required.length && !released.length) return null;
+  const out: Span[] = [{ b: "Must be established. " }];
+  if (required.length) {
+    out.push(`${required.length === 1 ? "This question was" : "These questions were"} required to be established: only an answer that answers ${required.length === 1 ? "it" : "each"} ends the run on it, or the operator's acceptance of its limits. `);
+    out.push(required.map((v) => `${v.id} (required by ${originWords(v.must_establish!.origin)}${v.must_establish!.why ? `: ${v.must_establish!.why}` : ""})`).join("; "));
+    out.push(released.length ? ". " : ".");
+  } else out.push("No question is required to be established now. ");
+  if (released.length) {
+    out.push(`The requirement was released on ${released.length === 1 ? "one question" : `${released.length} questions`}: `);
+    out.push(released.map((v) => `${v.id}, by ${originWords(v.must_establish!.origin)} at ${v.must_establish!.at}${v.must_establish!.why ? ` (${v.must_establish!.why})` : ""}`).join("; "));
+    out.push(".");
+  }
+  return out;
 }
 
 function questionName(q: Question): string {

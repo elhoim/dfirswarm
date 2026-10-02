@@ -145,6 +145,11 @@ export function BudgetPanel({ view, elapsedMs }: { view: SwarmView; elapsedMs: n
             {capTokens > 0 && !unmetered ? <Badge variant="outline">token cap {compact(capTokens)}</Badge> : null}
             {over ? <Badge variant="brick">{overTokens && !overUsd ? "token cap hit" : "cap hit"} — agents are told to call done cannot_complete</Badge> : null}
             {advisory && b.cap_usd > 0 && b.spent_usd >= b.cap_usd ? <Badge variant="outline">past the advisory cap: nothing is stopped for it</Badge> : null}
+            {(b.token_alerts ?? []).map((mark) => (
+              <Badge key={mark} variant={b.tokens >= mark ? "saffron" : "outline"} title="--token-alert: you are told once as the run crosses it (the board, the trace, your notify hook); nothing pauses or stops for it">
+                token alert {compact(mark)}{b.tokens >= mark ? ": crossed" : ""}
+              </Badge>
+            ))}
           </div>
         </section>
         <section className="card p-4">
