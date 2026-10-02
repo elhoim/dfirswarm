@@ -9087,8 +9087,17 @@ cmd_stop() {
   # A stop can take minutes (snapshots, custody). Interrupted, it says where
   # it was and that running it again finishes the job: every step is safe to
   # repeat.
-  local stop_step="closing the panes"
+  local stop_step="holding the jobs"
   trap 'echo >&2; echo "stop interrupted while ${stop_step}. Nothing is lost: scripts/swarm.sh stop '"$id"' again finishes it (every step is safe to repeat)." >&2; exit 130' INT TERM
+  local sandbox stop_hub_dir
+  sandbox="$(jq -r '.sandbox // empty' <<<"$rec")"
+  # Hold jobs before closing panes: Herdr may take time to answer, and the
+  # hub must not accept a job or start a worker during that wait.
+  if [[ -n "$sandbox" ]] && stop_hub_dir="$(hub_dir_of "$sandbox" 2>/dev/null)"; then
+    : > "$stop_hub_dir/.stop"
+  fi
+  operator_trace "$sandbox" stop ${stop_args[@]+"${stop_args[@]}"}
+  stop_step="closing the panes"
   if command -v herdr >/dev/null 2>&1; then
     while read -r ws; do
       [[ -z "$ws" ]] && continue
@@ -9098,16 +9107,6 @@ cmd_stop() {
       ((.workspace_ids // []) + [(.workspace_id // empty)]) | unique | .[]
     ' <<<"$rec")
   fi
-  local sandbox
-  sandbox="$(jq -r '.sandbox // empty' <<<"$rec")"
-  # From here on the hub's job service starts no worker and takes no job
-  # (vm-hub.ts holding); a stop interrupted after this leaves it so until
-  # the next stop.
-  local stop_hub_dir
-  if [[ -n "$sandbox" ]] && stop_hub_dir="$(hub_dir_of "$sandbox" 2>/dev/null)"; then
-    : > "$stop_hub_dir/.stop"
-  fi
-  operator_trace "$sandbox" stop ${stop_args[@]+"${stop_args[@]}"}
   # A run recorded as running whose every process is gone did not end by
   # itself: the host restarted, or the run crashed. Said, with the last line
   # the trace has, before this stop records it as stopped.
@@ -9122,6 +9121,16 @@ cmd_stop() {
     echo "VMs:          stopping$( [[ "$snap" -eq 1 ]] && printf ', each disk kept as a snapshot beside the run (a few minutes a VM)')..."
     stop_step="putting the VMs away"
     stop_vm_run "$sandbox" "$id" "$snap" || vms_left=1
+  fi
+  if [[ "$vms_left" -eq 1 ]]; then
+    # A live hub or VM may still write and use its evidence. Keep the
+    # collector and mounts, and defer gather, custody and release until a
+    # later stop confirms that every writer has gone.
+    registry_update_state "$id" "stop_incomplete"
+    echo "NOT STOPPED: $id still has VMs or its hub up (above); finalisation is deferred and the record says stop_incomplete. Look, then run stop again or \`swarm.sh reap $id\`." >&2
+    notify_run "$sandbox" stop_incomplete '{"state":"stop_incomplete"}'
+    trap - INT TERM
+    exit 3
   fi
   stop_step="stopping the run's daemons"
   stop_sandbox_daemons "$sandbox" keep-record
@@ -9185,13 +9194,7 @@ cmd_stop() {
   trap - INT TERM
   local was
   was="$(jq -r '.state // empty' <<<"$rec")"
-  if [[ "$vms_left" -eq 1 ]]; then
-    # A run whose VMs are still up is not stopped, and its record says so.
-    registry_update_state "$id" "stop_incomplete"
-    echo "NOT STOPPED: $id still has VMs or its hub up (above); the record says stop_incomplete. Look, then run stop again or \`swarm.sh reap $id\`." >&2
-    notify_run "$sandbox" stop_incomplete '{"state":"stop_incomplete"}'
-    exit 3
-  elif [[ "$after_hub" -eq 1 && ( "$was" == "finished" || "$was" == "finish_failed" ) ]]; then
+  if [[ "$after_hub" -eq 1 && ( "$was" == "finished" || "$was" == "finish_failed" ) ]]; then
     # The hub told the operator when it finished the run.
     registry_update_state "$id" "$was"
     echo "Cleared $id after the hub finished it (recorded as $was)"

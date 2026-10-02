@@ -12,7 +12,14 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/stop-test.XXXXXX")"
 # A stop seals a draft release with the machine key: this suite's, in its own home.
 export SWARM_SIGNERS_HOME="$TMP/signers"
-trap 'chmod -R u+w "$TMP" 2>/dev/null; rm -rf "$TMP"' EXIT
+cleanup() {
+  for p in "${HHP:-}" "${HCP:-}"; do
+    [[ -n "$p" ]] && kill -9 "$p" 2>/dev/null || true
+  done
+  chmod -R u+w "$TMP" 2>/dev/null
+  rm -rf "$TMP"
+}
+trap cleanup EXIT
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 pass() { echo "ok - $*"; }
@@ -22,7 +29,7 @@ pass() { echo "ok - $*"; }
 # directory of the user's own.
 export MSB_HOME="$TMP/msb-home"
 export SWARM_HUBS_DIR="$TMP/dfirswarm-hubs"
-mkdir -p "$MSB_HOME"
+mkdir -p "$MSB_HOME" "$SWARM_HUBS_DIR"
 
 RUNS="$TMP/runs"
 SB="$RUNS/sstp1"
@@ -44,6 +51,26 @@ case "\$1" in
 esac
 EOF
 chmod +x "$TMP/msb"
+
+echo "# jobs are held before Herdr starts closing the panes"
+ES="$RUNS/searly1"
+EHD="$(cd "$SWARM_HUBS_DIR" && pwd -P)/dfs-searly1.x1"
+mkdir -p "$ES/traces" "$EHD" "$TMP/control-bin"
+(cd "$ES" && pwd -P) > "$EHD/sandbox"
+printf '%s\n' "$EHD" > "$ES/hub.dir"
+jq -n --arg sb "$ES" '{runs: [{id: "searly1", state: "running", sandbox: $sb, workspace_ids: ["pane-1"], isolation: {mode: "host"}}]}' > "$RUNS/registry.json"
+cat > "$TMP/control-bin/herdr" <<EOF
+#!/bin/sh
+if [ "\$1 \$2" = "workspace close" ]; then
+  test -f "$EHD/.stop" || touch "$TMP/panes-before-hold"
+  touch "$TMP/panes-closed"
+fi
+EOF
+chmod +x "$TMP/control-bin/herdr"
+out="$(PATH="$TMP/control-bin:$PATH" SWARM_RUNS_DIR="$RUNS" bash "$ROOT/scripts/swarm.sh" stop searly1 --no-custody 2>&1)" || fail "the early hold stop failed: $out"
+[[ -f "$TMP/panes-closed" ]] || fail "the stand-in Herdr was not called"
+[[ ! -f "$TMP/panes-before-hold" ]] || fail "Herdr closed panes before the hub's jobs were held: $out"
+pass "the job hold exists before a potentially slow workspace close"
 
 echo "# a VM that is still up after stop: not stopped, and said so"
 record running
@@ -367,11 +394,30 @@ bash "$HHD/fake/vm-hub.ts" "$HS" --dir "$HHD" &
 HHP=$!
 disown "$HHP" 2>/dev/null || true
 echo "$HHP" > "$HS/hub.pid"
+# The collector and mounted evidence must outlive an incomplete stop too.
+cat > "$HHD/fake/trace-collector.mjs" <<'COLLECTOR'
+#!/usr/bin/env bash
+trap 'exit 0' TERM
+while :; do sleep 0.1; done
+COLLECTOR
+bash "$HHD/fake/trace-collector.mjs" "$HS" &
+HCP=$!
+disown "$HCP" 2>/dev/null || true
+echo "$HCP" > "$HS/collector.pid"
+printf 'test-evidence-device\n' > "$HS/inputs.device"
+printf '{"at":"2020-01-01T00:00:00.000Z","summary":"earlier verdict"}\n' > "$HS/custody.json"
+hung_fail() { kill -9 "$HHP" "$HCP" 2>/dev/null || true; fail "$*"; }
 sleep 0.3
 set +e
-out="$(SWARM_MSB_BIN="$TMP/msb" SWARM_RUNS_DIR="$RUNS" SWARM_STOP_HUB_EXIT_SEC=1 bash "$ROOT/scripts/swarm.sh" stop shng1 --no-custody 2>&1)"
+out="$(SWARM_MSB_BIN="$TMP/msb" SWARM_RUNS_DIR="$RUNS" SWARM_STOP_HUB_EXIT_SEC=1 bash "$ROOT/scripts/swarm.sh" stop shng1 --custody-timeout 30 2>&1)"
 rc=$?
 set -e
+kill -0 "$HCP" 2>/dev/null || hung_fail "the incomplete stop ended the live hub's collector: $out"
+[[ -f "$HS/collector.pid" && -f "$HS/inputs.device" ]] || hung_fail "the incomplete stop removed its collector or evidence mount record: $out"
+[[ "$(jq -r '.at' "$HS/custody.json")" == "2020-01-01T00:00:00.000Z" ]] || hung_fail "custody ran beside a live hub: $out"
+[[ ! -f "$HS/done/STOPPED" ]] || hung_fail "the incomplete stop wrote a stopped outcome"
+[[ ! -d "$HS/release" ]] || hung_fail "a draft release was sealed beside the live hub"
+grep -q 'Custody:.*re-hashing\|sealing the draft\|Trace:.*chained' <<<"$out" && hung_fail "the incomplete stop ran finalisation: $out"
 kill -0 "$HHP" 2>/dev/null || fail "the stand-in hub went (it should not have): $out"
 [[ $rc -eq 3 ]] || { kill -9 "$HHP"; fail "a stop whose hub stayed up exited $rc, wanted 3: $out"; }
 grep -q "did not exit within 1s of being asked" <<<"$out" || { kill -9 "$HHP"; fail "the stop did not say the hub stayed: $out"; }
@@ -386,9 +432,12 @@ echo "$HHP" > "$HS/hub.pid"
 kill -9 "$HHP"
 sleep 0.3
 out="$(SWARM_MSB_BIN="$TMP/msb" SWARM_RUNS_DIR="$RUNS" bash "$ROOT/scripts/swarm.sh" stop shng1 --no-custody 2>&1)" || fail "the second stop failed: $out"
+kill -0 "$HCP" 2>/dev/null && hung_fail "the second stop left its collector running: $out"
+[[ ! -f "$HS/inputs.device" ]] || fail "the second stop did not detach its evidence"
 [[ "$(jq -r '.runs[0].state' "$RUNS/registry.json")" == "stopped" ]] || fail "the second stop's record says $(jq -r '.runs[0].state' "$RUNS/registry.json"): $out"
 [[ ! -e "$HS.staging/j000001-1" && "$(cat "$HS/store/jobs/j000001/out/x")" == partial ]] || fail "the second stop did not seal the staging: $out"
 [[ ! -d "$HHD" && ! -f "$HS/hub.dir" ]] || fail "the hub's directory outlived the hub: $out"
+HHP="" HCP=""
 pass "a hub that stays up keeps its pid file and directory, the run is stop_incomplete, seal-left refuses beside it, and the stop after it seals the staging"
 
 echo "stop.test.sh: all checks passed"
