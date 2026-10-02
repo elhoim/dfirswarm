@@ -5,7 +5,9 @@
 AD1 logical image that FTK Imager wrote: two short text files under
 `E:\AD1_test`. It is taken unchanged from Fox-IT's dissect.evidence
 (`tests/_data/ad1/compressed.ad1`, https://github.com/fox-it/dissect.evidence),
-which its authors license under the GNU AGPL v3; NOTICE says so too.
+whose pyproject.toml declares the licence AGPL-3.0-or-later. Copyright
+Fox-IT (part of NCC Group Plc); made by its Dissect Team, dissect@fox-it.com.
+NOTICE says so too.
 
 It is test data the dissect authors made, not any case's evidence.
 `tests/ad1-pack.test.ts` reads it with the base pack's `ad1-items` recipe

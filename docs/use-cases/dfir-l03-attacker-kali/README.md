@@ -1,6 +1,6 @@
 # Use case: Linux #3, The Attacker's Kali System
 
-The swarm on this case: what was asked, who did what, what the harness did, what it cost, and everything the agents wrote, with the console and the terminals captured while they worked. The case is [https://www.ashemery.com/dfir.html#Linux3](https://www.ashemery.com/dfir.html#Linux3) (Ali Hadi, Digital Forensic Challenge Images); the evidence files are not in this repository.
+The swarm on this case: what was asked, who did what, what the harness did, what it cost, and everything the agents wrote, with the console and the terminals captured while they worked. The case is [https://www.ashemery.com/dfir.html#LinuxForensics](https://www.ashemery.com/dfir.html#LinuxForensics) (Ali Hadi, Digital Forensic Challenge Images; the case files are at https://linuxdfir.ashemery.com/); the evidence files are not in this repository.
 
 | | |
 | --- | --- |

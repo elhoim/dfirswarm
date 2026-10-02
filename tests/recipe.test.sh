@@ -135,7 +135,8 @@ python3 "$R" build web --out "$TMP/ctx-web" >/dev/null || fail "web holds no pac
 grep -q 'dev.dfirswarm.redistributable' "$TMP/ctx-web/Dockerfile" && fail "a profile with nothing held back must inherit the base's label, not claim its own"
 grep -q 'dev.dfirswarm.redistributable="${REDISTRIBUTABLE}"' "$ROOT/images/base.Dockerfile" || fail "the base image does not carry the redistributable label"
 grep -q 'COPY install.py spec.json NOTICE' "$TMP/ctx/Dockerfile" || fail "the NOTICE does not go into the image"
-grep -q '^vol  (memory-forensics)  Volatility Software License 1.0' "$TMP/ctx/NOTICE" || fail "the NOTICE does not name vol's licence"
+grep -qF 'vol  (memory-forensics)  Volatility Software License 1.0 (https://github.com/volatilityfoundation/volatility3/blob/develop/LICENSE.txt)' "$TMP/ctx/NOTICE" \
+  || fail "the NOTICE does not name vol's licence with the link to its text"
 seal_py="$(jq -r '.pack_versions["memory-forensics"].seal' "$TMP/ctx/spec.json")"
 seal_ts="$(cd "$ROOT" && node --experimental-strip-types -e 'import("./scripts/vm.ts").then(m => console.log(m.packNeeds(["packs/memory-forensics"])[0].seal))')"
 [[ "$seal_py" == "$seal_ts" ]] || fail "the recipe's seal ($seal_py) and the kickoff's ($seal_ts) differ"
@@ -562,26 +563,26 @@ pass "install.py puts pinned data inside its program's package only when its byt
 # built on it keeps the base's flag. A fake venv and npm stand in here.
 mkdir -p "$TMP/rec/venv/bin" "$TMP/rec/fakebin" "$TMP/rec/npm/@earendil-works/pi-coding-agent/node_modules/left-pad" "$TMP/rec/npm/@earendil-works/pi-coding-agent/dist"
 printf '#!/bin/sh\necho %s\n' "'[{\"name\": \"dissect.util\", \"version\": \"3.20\"}, {\"name\": \"pip\", \"version\": \"23.0.1\"}]'" > "$TMP/rec/venv/bin/pip"
-printf '#!/bin/sh\necho %s\n' "'[[\"dissect.util\", \"3.20\", \"AGPL-3.0\"], [\"pip\", \"23.0.1\", \"MIT\"]]'" > "$TMP/rec/venv/bin/python"
+printf '#!/bin/sh\necho %s\n' "'[[\"dissect.util\", \"3.20\", \"Apache-2.0\"], [\"pip\", \"23.0.1\", \"MIT\"]]'" > "$TMP/rec/venv/bin/python"
 printf '#!/bin/sh\necho %s\n' "$TMP/rec/npm" > "$TMP/rec/fakebin/npm"
 chmod +x "$TMP/rec/venv/bin/pip" "$TMP/rec/venv/bin/python" "$TMP/rec/fakebin/npm"
 printf '{"name": "@earendil-works/pi-coding-agent", "version": "0.87.0", "license": "MIT"}\n' > "$TMP/rec/npm/@earendil-works/pi-coding-agent/package.json"
 printf '{"name": "left-pad", "version": "1.3.0", "license": "WTFPL"}\n' > "$TMP/rec/npm/@earendil-works/pi-coding-agent/node_modules/left-pad/package.json"
 printf '{"type": "module"}\n' > "$TMP/rec/npm/@earendil-works/pi-coding-agent/dist/package.json"
 ( export PATH="$TMP/rec/fakebin:$PATH" DFIRSWARM_VENV="$TMP/rec/venv" DFIRSWARM_ETC_DIR="$TMP/rec/etc" \
-         NONREDISTRIBUTABLE="dissect.util" REDISTRIBUTABLE=false
+         NONREDISTRIBUTABLE="debian-gpl-packages" REDISTRIBUTABLE=false
   python3 "$ROOT/images/install.py" --base >/dev/null ) || fail "install.py --base failed"
 rec="$TMP/rec/etc/image.json"
 jq -e '.profile == "base" and (.dpkg_all | type == "object") and .pip == {"dissect.util": "3.20", "pip": "23.0.1"}' "$rec" >/dev/null \
   || fail "the base does not record its whole Debian list and its venv as pip lists it: $(cat "$rec")"
-jq -e '.redistributable == false and .nonredistributable == ["dissect.util"] and .pi == "0.87.0"' "$rec" >/dev/null \
+jq -e '.redistributable == false and .nonredistributable == ["debian-gpl-packages"] and .pi == "0.87.0"' "$rec" >/dev/null \
   || fail "the base does not say it is not for redistribution, or which Pi it holds: $(cat "$rec")"
 # Every program on the image's PATH, the venv's first, by where it is: what
 # the job service matches a job's programs against.
 jq -e '(.on_path[0] | endswith("/rec/venv/bin/pip")) and (.on_path | all(startswith("/")))' "$rec" >/dev/null \
   || fail "the base does not record every program on its PATH, the venv's first: $(jq -c '.on_path[:5]' "$rec")"
-grep -q '^Not cleared for redistribution: dissect.util' "$TMP/rec/etc/NOTICE" || fail "the base NOTICE does not say what holds it back"
-grep -q '^dissect.util 3.20  AGPL-3.0' "$TMP/rec/etc/NOTICE" || fail "the base NOTICE does not give the Python licences"
+grep -q '^Not cleared for redistribution: debian-gpl-packages' "$TMP/rec/etc/NOTICE" || fail "the base NOTICE does not say what holds it back"
+grep -q '^dissect.util 3.20  Apache-2.0' "$TMP/rec/etc/NOTICE" || fail "the base NOTICE does not give the Python licences"
 grep -q '^left-pad 1.3.0  WTFPL' "$TMP/rec/etc/NOTICE" || fail "the base NOTICE does not give the npm licences, nested ones included"
 jq -e '.bomFormat == "CycloneDX" and .specVersion == "1.5"
        and ([.components[].purl] | index("pkg:pypi/dissect-util@3.20") != null)
@@ -602,13 +603,13 @@ record = install.profile_record(json.loads(install.RECORD.read_text()), spec,
 install.write_record(record, "dfirswarm-web")
 EOF
 ) || fail "a profile record could not be written over the base's"
-jq -e '.profile == "web" and .redistributable == false and .nonredistributable == ["dissect.util"] and .pip["dissect.util"] == "3.20"' "$rec" >/dev/null \
+jq -e '.profile == "web" and .redistributable == false and .nonredistributable == ["debian-gpl-packages"] and .pip["dissect.util"] == "3.20"' "$rec" >/dev/null \
   || fail "a profile over a base not for redistribution claimed it was, or lost the venv: $(cat "$rec")"
 jq -e --arg sha "$sha" '[.components[] | select(.name == "tool") | .hashes[0].content == $sha and (.purl | startswith("pkg:generic/tool@1.0?"))] == [true]' \
   "$TMP/rec/etc/sbom.json" >/dev/null || fail "a pinned download is not in the SBOM with its sha256"
 jq -e '[.components[] | select(.name == "tool-tables") | .type == "data" and .properties[0].value == "data" and .externalReferences[0].type == "distribution"] == [true]' \
   "$TMP/rec/etc/sbom.json" >/dev/null || fail "pinned data is not in the SBOM as data, with its sha256 and where it was fetched from"
-grep -q '^Not cleared for redistribution: dissect.util. It carries pinned data (tool-tables): no workflow of this project pushes such an image to any registry, the private one included' "$TMP/rec/etc/NOTICE" \
+grep -q '^Not cleared for redistribution: debian-gpl-packages. It carries pinned data (tool-tables): no workflow of this project pushes such an image to any registry, the private one included' "$TMP/rec/etc/NOTICE" \
   || fail "the NOTICE of an image that carries pinned data does not say no workflow of ours pushes it: $(sed -n '/Not cleared/p' "$TMP/rec/etc/NOTICE")"
 pass "every image records its Debian list and venv for the inventory diff, a NOTICE, a CycloneDX SBOM, and the base's redistribution flag carries into a profile"
 
@@ -618,7 +619,7 @@ pass "every image records its Debian list and venv for the inventory diff, a NOT
 # the package records hold, and says what a pack names that is not there.
 tm="$TMP/rec/etc/tools.md"
 [[ -f "$tm" ]] || fail "an image wrote no tools.md"
-grep -q '^- `dissect.util` 3.20 — AGPL-3.0, Fox-IT. lzxpress_huffman' "$tm" || fail "tools.md does not list the base's libraries with version and note: $(cat "$tm")"
+grep -q '^- `dissect.util` 3.20 — Apache-2.0 (from 3.5; AGPL-3.0 before), Fox-IT. lzxpress_huffman' "$tm" || fail "tools.md does not list the base's libraries with version and note: $(cat "$tm")"
 ( export PATH="$TMP/rec/fakebin:$PATH" DFIRSWARM_VENV="$TMP/rec/venv" DFIRSWARM_ETC_DIR="$TMP/rec/etc"
   python3 - "$ROOT/images" <<'EOF'
 import json, sys
