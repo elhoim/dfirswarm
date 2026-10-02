@@ -55,6 +55,9 @@ forensic challenges other people made:
   - Belkasoft's BelkaCTF series, for the `belkactf` cases. The task text in
     an edition's `challenges.md` is quoted from the challenge board as the
     site states it. https://belkasoft.com/ctf
+    Edition 6 credits TODO: security for the scenario and challenges,
+    and Belkasoft for the lore, prizes and forensic tools:
+    https://belkasoft.com/belkactf6/credits
 
 Each case folder's SOURCE.md names the challenge's author, its link, and the
 licence its source states ("unknown, see link" where the source states none).
