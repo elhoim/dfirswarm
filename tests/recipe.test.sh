@@ -429,14 +429,14 @@ grep -q 'deb-bad' "$K/apt.log" && fail "apt was handed a .deb whose sha256 is no
 [[ "$(jq -r '.build_rc' <<<"$res")" == 0 && "$(jq -r '.build[0]' <<<"$res")" == true ]] || fail "a source that builds was not built and linked: $res"
 [[ "$("$TMP/bin/built-tool")" == "built-tool ran with its env" ]] || fail "a built program is not on PATH, or its env did not reach its configure: $("$TMP/bin/built-tool")"
 jq -e '.ok == true and .kind == "build"' "$K/tools/built-tool/.dfirswarm-build.json" >/dev/null || fail "a build does not say beside its program that it built"
-[[ "$(jq -r '.bad_optional_rc' <<<"$res")" == 0 ]] || fail "an optional program that does not build stopped the image: $res"
+[[ "$(jq -r '.bad_optional_rc' <<<"$res")" == 1 ]] || fail "an optional program that does not build ended its stage well, which Docker would cache: $res"
 jq -r '.bad_link[1]' <<<"$res" | grep -q 'configure failed' || fail "an optional program that did not build is not recorded with why: $res"
 [[ "$(jq -r '.bad_required_rc' <<<"$res")" == 1 ]] || fail "a required program that does not build did not stop the image: $res"
 [[ "$(jq -r '.backports' <<<"$res")" == null ]] || fail "the image's own backports were refused: $res"
 grep -q '^URIs: http://mirror.example/debian$' "$K/apt-sources/dfirswarm-bookworm-backports.sources" && grep -q '^Suites: bookworm-backports$' "$K/apt-sources/dfirswarm-bookworm-backports.sources" \
   || fail "backports do not come from the image's own mirror: $(cat "$K/apt-sources/dfirswarm-bookworm-backports.sources")"
 jq -r '.other_release' <<<"$res" | grep -q "is not this image's backports" || fail "a release other than the image's backports was added: $res"
-pass "install.py puts a pinned source, a .deb and a built program on PATH only when their bytes are the pinned ones, gives a source's requirements a venv of its own, builds with the pack's env, records a failed build, and adds only its own backports"
+pass "install.py puts a pinned source, a .deb and a built program on PATH only when their bytes are the pinned ones, gives a source's requirements a venv of its own, builds with the pack's env, records a failed build and fails its stage, and adds only its own backports"
 
 # --- pinned data, and a source built from patches and its own steps ----------
 # Data a program reads (a symbol pack): checked against its sha256, put as named
@@ -551,7 +551,7 @@ jq -e '.build_rc == 0 and .build_rec == [true, true] and .patched_runs == 0 and 
   || fail "a source with a pinned patch and its own steps was not built patched, or the record does not name the patch: $res"
 jq -e '.badsha_rec.ok == false and (.badsha_rec.why | test("patch fix.patch: sha256 .* is not the pinned"))' <<<"$res" >/dev/null || fail "a patch with other bytes was applied: $res"
 jq -e '.noapply_rec.ok == false and (.noapply_rec.why | test("patch bad.patch did not apply"))' <<<"$res" >/dev/null || fail "a patch that does not apply was not recorded as the reason: $res"
-jq -e '.failstep_rc == 0 and .failstep_rec.ok == false and (.failstep_rec.why == "false failed")' <<<"$res" >/dev/null || fail "a failed step of a source's own commands is not the recorded reason: $res"
+jq -e '.failstep_rc == 1 and .failstep_rec.ok == false and (.failstep_rec.why == "false failed")' <<<"$res" >/dev/null || fail "a failed step of a source's own commands is not the recorded reason, or did not fail its stage: $res"
 pass "install.py puts pinned data inside its program's package only when its bytes are the pinned ones, runs the warm command, records a warm that fails, and builds a source from pinned patches and its own steps"
 
 # --- what an image records ------------------------------------------------------
