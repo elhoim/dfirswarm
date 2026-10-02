@@ -52,6 +52,7 @@ import {
   STOP_GRACE_MS,
   capAct,
   capSteerText,
+  modelAnswered,
   isPaused,
   stopPolicyOf,
   appendEvent,
@@ -2016,13 +2017,40 @@ export default function (pi: ExtensionAPI) {
   });
 
   /**
+   * The model a provider said answered this seat, when it is not the one
+   * asked for (Pi's `responseModel`; protocol.ts modelAnswered): an alias
+   * resolved to a dated id is put on the trace; another model altogether is
+   * a substitution, on the trace and the board, and the hub tells the
+   * operator (notify model_substitution). Each once per model a seat.
+   */
+  const modelsReported = new Set<string>();
+  async function reportAnsweringModel(cwd: string, m: { model?: string; provider?: string; responseModel?: string }): Promise<void> {
+    const reported = typeof m.responseModel === "string" ? m.responseModel.trim() : "";
+    if (!reported || !m.model) return;
+    const answered = modelAnswered(m.model, reported);
+    if (answered === "same") return;
+    const requested = `${m.provider ? `${m.provider}/` : ""}${m.model}`;
+    if (modelsReported.has(`${requested} ${reported}`)) return;
+    modelsReported.add(`${requested} ${reported}`);
+    await logEvent(cwd, agentId, "model_reported", { requested, reported }, { ok: true, answered });
+    if (answered === "substituted") {
+      await systemPost(cwd, {
+        tag: "veto",
+        body: `MODEL SUBSTITUTION: ${agentId} asked for ${requested}, and the provider answered as ${reported}. The operator is told; whether the run goes on with it is the operator's decision (a run meant to be compared or repeated stops on it).`,
+      });
+    }
+  }
+
+  /**
    * One line of the model's reasoning per message, shown in the trace next
    * to the tool calls; the full text stays in the Pi session file.
    */
   pi.on("message_end", async (event, ctx) => {
     if (!agentId) return;
-    const message = (event as { message?: { role?: string; content?: unknown } }).message;
-    if (!message || message.role !== "assistant" || !Array.isArray(message.content)) return;
+    const message = (event as { message?: { role?: string; content?: unknown; model?: string; provider?: string; responseModel?: string } }).message;
+    if (!message || message.role !== "assistant") return;
+    await reportAnsweringModel(ctx.cwd, message).catch(() => undefined);
+    if (!Array.isArray(message.content)) return;
     const thinking = message.content
       .filter((block): block is { type: string; thinking?: string } =>
         Boolean(block) && typeof block === "object" && (block as { type?: string }).type === "thinking",

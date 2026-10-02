@@ -15,7 +15,7 @@ already installed, plus one image build.
 | **bash 3.2+ (macOS's own is enough), jq 1.6+, python3, curl; zsh if it is the login shell** | `swarm.sh` renders the contract with python3 and manages the registry with jq; the pane hook runs in the login shell, which has to be zsh or bash; `netcheck` uses curl. | `jq --version && python3 --version`; the login shell: `getent passwd "$(id -un)" \| cut -d: -f7` on Linux, `dscl . -read "/Users/$(id -un)" UserShell` on macOS |
 | **Herdr** | Panes, workspaces, `herdr agent start --kind pi`. Live runs used Herdr 0.9.0. There is **no** `herdr swarm` command; do not install `pi-herdsman`, `pi-herdr` or `@gjczone/pi-swarm` expecting this demo. | `herdr --version` |
 | **Pi** (`@earendil-works/pi-coding-agent`) | The agent harness. Verified against 0.85.1 and 0.87.0, the version `package.json` pins and the tests load; the extension APIs it uses date from 0.74. | `pi --version` |
-| **A provider login for Pi** | `pi /login` once: an API key **or a Claude / ChatGPT subscription**; see [Credentials](credentials-and-teams.md). `swarm.sh start` passes no credential to an agent; Pi on the host reads its own store, and a VM gets a placeholder the host swaps for the key on the way out. A subscription goes into a VM only with `--allow-oauth-in-vm`. A host run on a host with no persistent home can take an exported key with `--key-from-env` instead (see [ADR 0003](adr/0003-the-provider-key-comes-from-pis-own-store.md)). | `pi auth check --model <provider/id>` |
+| **A provider login for Pi** | `pi /login` once: an API key, **or a ChatGPT/Codex subscription** for test and CTF runs (a consumer plan, never for a customer's data; `--customer-case` takes API keys only), never a Claude subscription, which Anthropic does not permit in a third-party client such as Pi; see [Credentials](credentials-and-teams.md). `swarm.sh start` passes no credential to an agent; Pi on the host reads its own store, and a VM gets a placeholder the host swaps for the key on the way out. A subscription goes into a VM only with `--allow-oauth-in-vm`. A host run on a host with no persistent home can take an exported key with `--key-from-env` instead (see [ADR 0003](adr/0003-the-provider-key-comes-from-pis-own-store.md)). | `pi auth check --model <provider/id>` |
 | **A host that boots microVMs** | Every agent runs in its own microVM (microsandbox) unless the run says `--isolation host`: a Mac on Apple silicon, or Linux with KVM (`/dev/kvm` this user can open) and glibc. msb comes with `npm install`. `sqlite3` on the host, so that a stop can clear a removed VM's secrets out of msb's database (it warns when it cannot). A host without them is refused at kickoff, with what it lacks. | `ls -l /dev/kvm` on Linux; `sqlite3 --version` |
 | **Docker, once** | Builds the agents' VM image and the job images a case's packs need ([below](#the-agents-vm-image)); a machine that pulls them from a registry does not need it. | `docker --version` |
 | Only for `--isolation host`: **a kernel guard** | A host run is unisolated: every agent is a process on this machine, held by the host guards. macOS has `sandbox-exec` built in. On Linux the write allowlist and the clean room need Landlock (kernel 5.13+, `python3`), and the socket mask and the fail-closed egress guard need unprivileged user namespaces (`unshare -rm`, `unshare -rn`); bubblewrap adds a read-only root when present. The kickoff measures what the host has and records it, so a host that lacks one still runs, and the record says so. | `unshare -rn true`; `python3 scripts/landlock.py --dry-run -- true` |
@@ -322,7 +322,7 @@ scripts/swarm.sh start \
   --models "openai/gpt-5.4=4,deepseek/deepseek-v4-pro=3" --n 7 \
   --goal-file library/windows/host-intrusion.md \
   --pack computer-forensics-base,windows-forensics \
-  --inputs /evidence/case-42 \          # hashed, read-only in every VM
+  --inputs /evidence/case-42 --inputs-copy \   # the run's own read-only copy
   --catalog --toolbox dfir --quarantine \
   --allow-tool-forging \
   --cap-usd 60 --cap-per-agent 12 --wall-clock 90 \
@@ -339,7 +339,8 @@ scripts/swarm.sh start \
   by itself.
 - **Evidence.** `--inputs DIR` hashes every file and mounts the directory
   read-only into every VM (`--inputs-copy` gives the run its own read-only
-  copy), and `work/extracted/` and `work/quarantine/` are no-exec in every VM
+  copy: the way to start a live run, since evidence your account can write is
+  refused in place until it is copied or made read-only), and `work/extracted/` and `work/quarantine/` are no-exec in every VM
   whatever `--quarantine` says. In a host run `--inputs DIR` copies the directory into
   the run and holds it read-only in every pane; for evidence too large to
   copy, `--inputs-bind` guards the source directory in place; on macOS

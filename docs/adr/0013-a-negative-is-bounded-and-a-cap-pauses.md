@@ -1535,6 +1535,40 @@ The count of jobs is still said in the proposal. This is a measure of what
 the rule would have done on recorded histories; whether 30 minutes is the
 right length for runs much larger than these is for later runs to show.
 
+## What the operator is told under `--stop operator`
+
+Added 2026-10-01, from the same run, before it is run again. Under
+`--stop operator` every cap is advisory and says nothing: the run spent 790 M
+tokens with nothing told to anyone. Three things for the rerun's protocol
+(its first tranche of tokens, its stop rules), each telling and none
+stopping:
+
+- **Token marks.** `--token-alert N[,M…]` names marks in tokens; as the run
+  crosses each, the operator is told once, on the board, the trace
+  (`token_alert`), the console's Budget tab and the notify hook
+  (`token_alert`, the mark and the count). The claim is a file per mark
+  (`traces/token-alerts/<mark>`, created exclusively), so the hub of a VM run
+  and the watchdog of a host run never tell one twice, across restarts and
+  resumes. Advisory under every stop policy: the decision stays the
+  operator's, as with the stop proposal.
+- **The operator, named before the run.** The first resume's question was
+  refused because `--as operator` named nobody enrolled. `--operator ID`
+  names an enrolled examiner or analyst at kickoff (refused otherwise,
+  before anything is written) and records them; on the run's acts `--as
+  operator` names them. A run that names none keeps the old reading (a
+  person enrolled under the id `operator`, or the refusal above).
+- **The model asked for, and the model that answered.** The record keeps the
+  model ids asked for and the date (`model_identity`), and the kickoff warns
+  of an id that names no dated model (`latest`). When a provider says
+  another model answered a seat, the seat's harness says so: an alias
+  resolved to one of its dated ids is put on the trace (`model_reported`,
+  resolved); any other model is a substitution, on the trace, the board and,
+  through the hub, the notify hook (`model_substitution`). It is the
+  operator's to act on; for a run meant to be compared it is a stop rule.
+  What a provider does not report (the Responses APIs, Codex's included,
+  carry no answering model in Pi's message) is not compared, and the record
+  says only what was asked.
+
 ## Consequences
 
 - Every existing goal and run keeps working: an answer without `result`

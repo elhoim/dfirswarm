@@ -289,6 +289,8 @@ export type BudgetRecord = {
   /** False when no model on the team bills; the brake is then cap_tokens. */
   metered?: boolean;
   cap_tokens?: number;
+  /** The operator's token marks (--token-alert), ascending: told once each as the run crosses it; advisory. */
+  token_alerts?: number[];
   agents: Record<string, AgentBudget>;
 };
 

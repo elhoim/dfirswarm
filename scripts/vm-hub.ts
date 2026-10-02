@@ -305,6 +305,8 @@ export type JobsConfig = {
   packDirs: string[];
   minFreeMb?: number;
   derived?: boolean;
+  /** The derived catalogue's ceiling of generations a run (the kickoff's --derived-limit; the job service's own default when absent). */
+  derivedGenerations?: number;
   /** The run's job images by profile, and each pack's profile (the kickoff's). */
   images?: Record<string, string>;
   packProfiles?: Record<string, string>;
@@ -325,6 +327,7 @@ export function parseJobsConfig(raw: unknown): JobsConfig | undefined {
     ...(typeof raw.minFreeMb === "number" ? { minFreeMb: num(raw.minFreeMb, 4096, 0, 1 << 30) } : {}),
     // On unless the kickoff said off (--no-derived-catalog).
     derived: raw.derived !== false,
+    ...(typeof raw.derivedGenerations === "number" && Number.isInteger(raw.derivedGenerations) && raw.derivedGenerations > 0 ? { derivedGenerations: raw.derivedGenerations } : {}),
     ...(isObject(raw.images) ? { images: Object.fromEntries(Object.entries(raw.images).filter(([k, v]) => /^[a-z0-9-]{1,32}$/.test(k) && typeof v === "string" && v.length > 0 && v.length < 512)) as Record<string, string> } : {}),
     ...(isObject(raw.packProfiles) ? { packProfiles: Object.fromEntries(Object.entries(raw.packProfiles).filter(([k, v]) => typeof k === "string" && typeof v === "string")) as Record<string, string> } : {}),
   };
@@ -1459,6 +1462,7 @@ export class Hub {
       forging: this.cfg.forging === true,
       ...(jobs.minFreeMb !== undefined ? { minFreeMb: jobs.minFreeMb } : {}),
       ...(jobs.derived ? { derived: true } : {}),
+      ...(jobs.derivedGenerations ? { derivedLimits: { generationsMax: jobs.derivedGenerations } } : {}),
       runWorker,
       destroyWorker,
       // `swarm.sh stop` writes .stop in this directory before it puts the
@@ -2190,7 +2194,20 @@ export class Hub {
     if (wait > 0) await new Promise((r) => setTimeout(r, Math.min(wait, window)));
   }
 
+  /** The seats and models a substitution was told to the operator for, so each is told once. */
+  private substitutionsTold = new Set<string>();
+
   private forwardTrace(agent: string, record: Record<string, unknown>): Promise<boolean> {
+    // A seat's extension saw the provider answer with a model other than
+    // the one asked for (model_reported, substituted): the operator is told,
+    // once a seat and model, by its ids; the board has the words already.
+    if (record.tool === "model_reported" && isObject(record.result) && record.result.answered === "substituted") {
+      const key = `${agent} ${String(isObject(record.args) ? record.args.reported ?? "" : "")}`;
+      if (!this.substitutionsTold.has(key)) {
+        this.substitutionsTold.add(key);
+        this.notify("model_substitution", { agent });
+      }
+    }
     const { token: _t, gate: _g, ...rest } = record;
     const token = this.cfg.tokens[agent];
     const line = `${JSON.stringify(token ? { ...rest, token } : rest)}\n`;
@@ -2573,6 +2590,7 @@ export class Hub {
       await this.foldGatewaySpend().catch((err: Error) => this.log(`gateway fold: ${err.message}`));
       const budget = await P.readBudget(S).catch(() => null);
       if (!budget) return;
+      await this.tellTokenAlerts(budget);
       await this.seatBackstop(budget, now);
       // A paused run: no seat is prompted (prompt() holds them) until the pause's cause is gone or the operator stops it.
       this.pausedAt = budget.paused?.at ?? null;
@@ -2639,6 +2657,23 @@ export class Hub {
     this.writeStatus();
     this.finishing = this.finishVms(allOut);
     await this.finishing;
+  }
+
+  /**
+   * The operator's token marks (`--token-alert`) the run has crossed: each
+   * told once (claimTokenAlerts holds the claim on disk and says it on the
+   * board), on the trace and to the notify hook. Advisory: nothing pauses or
+   * stops for it, under any stop policy.
+   */
+  private async tellTokenAlerts(budget: P.BudgetRecord): Promise<void> {
+    const told = await P.claimTokenAlerts(this.cfg.sandbox, budget).catch((err: Error) => {
+      this.log(`token alerts: ${err.message}`);
+      return [] as Array<{ mark: number; tokens: number }>;
+    });
+    for (const t of told) {
+      await this.event("token_alert", { via: "hub", mark: t.mark }, { ok: true, tokens: t.tokens, ...(budget.cap_tokens ? { cap_tokens: budget.cap_tokens } : {}) });
+      this.notify("token_alert", { mark: t.mark, tokens: t.tokens, ...(budget.cap_tokens ? { cap_tokens: budget.cap_tokens } : {}) });
+    }
   }
 
   /** Tell the operator of a pause, when this process claims its notice (the same words the watchdog would use: pauseNotice). */
