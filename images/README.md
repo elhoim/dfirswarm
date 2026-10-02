@@ -94,8 +94,14 @@ and build again; no `--no-cache` is needed. `recipe.py build
 `image.json` names them under `missing_allowed` and says why under
 `not_installed`, `tests/image-programs.sh` skips them and says so, and its
 `spec.json` and every builder stage it lets fail carry a build id of their
-own, so the install and those stages run again every time rather than being
-taken from the cache with an earlier build's gaps.
+own. Each invocation of `recipe.py build` generates a fresh id, so a newly
+generated context reruns the install and those stages. **Before retrying an
+image built with this flag, run `recipe.py build` again with the same options.**
+If you reuse the existing context instead, run `docker build --no-cache -t
+dfirswarm-memory:dev-arm64 /tmp/img-memory`. Repeating plain `docker build`
+with the same context can reuse its earlier gaps: the context's id has not
+changed. The normal build without this flag fails on an unexpected absence
+and can be retried with its existing context and cache.
 
 **`--allow-nonredistributable`.** Every program in the packs is marked
 `redistributable: false` until its licence has been reviewed for

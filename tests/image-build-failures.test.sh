@@ -16,7 +16,7 @@
 #     image is never tagged; --allow-missing-optional builds it anyway and the
 #     record names what is missing (missing_allowed);
 #   - a stage allowed to fail carries a build id of its own, different in every
-#     context, so no build takes an earlier failure from the cache;
+#     regenerated context; retrying the same context needs --no-cache;
 #   - tests/image-programs.sh fails a program the image's record names and
 #     PATH lacks, rather than skipping it.
 set -uo pipefail
@@ -178,7 +178,7 @@ pass "a context allows optional stages to fail only with --allow-missing-optiona
 mkdir -p "$TMP/minbin" "$TMP/rec-etc"
 py="$(python3 -c 'import os, sys; print(os.path.realpath(sys.executable))')"
 ln -s "$py" "$TMP/minbin/python3"
-for p in mktemp rm; do ln -s "$(command -v "$p")" "$TMP/minbin/$p"; done
+for p in mktemp rm touch; do ln -s "$(command -v "$p")" "$TMP/minbin/$p"; done
 progs() { DFIRSWARM_ETC_DIR="$TMP/rec-etc" PATH="$TMP/minbin" /bin/sh "$ROOT/tests/image-programs.sh" 2>&1; }
 printf '{"binaries": {"aeskeyfind": null}}\n' > "$TMP/rec-etc/image.json"
 out="$(progs)" && fail "image-programs.sh passed an image whose record names aeskeyfind and whose PATH lacks it: $out"
@@ -189,7 +189,23 @@ out="$(progs)" || fail "image-programs.sh failed a program the build was allowed
 grep -q '^skip - aeskeyfind is missing, as its build allowed' <<<"$out" || fail "an allowed gap is not said: $out"
 printf 'not json\n' > "$TMP/rec-etc/image.json"
 out="$(progs)" && fail "image-programs.sh passed an image whose record it could not read: $out"
-grep -q '^FAIL: gcc is not on PATH, and the image.s record (image.json) could not be read' <<<"$out" || fail "an unreadable record is not said: $out"
+grep -q '^FAIL:.*record (image.json) could not be read' <<<"$out" || fail "an unreadable record is not said: $out"
+# A profile holding all three programs never called absent(), so an unreadable
+# record escaped the old check. Refuse it before running any program probe.
+for p in gcc aeskeyfind steghide; do
+  printf '#!/bin/sh\ntouch "%s"\nexit 1\n' "$TMP/program-probe-ran" > "$TMP/minbin/$p"
+  chmod +x "$TMP/minbin/$p"
+done
+out="$(progs)" && fail "image-programs.sh passed an unreadable record with every program on PATH: $out"
+grep -q '^FAIL:.*record (image.json) could not be read' <<<"$out" || fail "with every program present, the unreadable record was not named: $out"
+[[ ! -f "$TMP/program-probe-ran" ]] || fail "program probes ran before the record was validated"
+printf '{}\n' > "$TMP/rec-etc/image.json"
+out="$(progs)" && fail "image-programs.sh passed a record without its mandatory binaries map: $out"
+grep -q '^FAIL:.*record (image.json) could not be read' <<<"$out" || fail "the missing binaries map was not named: $out"
+[[ ! -f "$TMP/program-probe-ran" ]] || fail "program probes ran with no binaries map"
+rm "$TMP/rec-etc/image.json"
+out="$(progs)" && fail "image-programs.sh passed a missing record with every program on PATH: $out"
+grep -q '^FAIL:.*record (image.json) could not be read' <<<"$out" || fail "a missing record was not named: $out"
 pass "image-programs.sh fails a program the image's record names and PATH lacks, and one it cannot check against an unreadable record, and skips the others, saying why"
 
 echo "image-build-failures: all checks passed"

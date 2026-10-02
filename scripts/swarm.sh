@@ -8398,40 +8398,65 @@ stop_wait_gone() { # <pid> <seconds>
   ! kill -0 "$1" 2>/dev/null
 }
 
+# A lost or stale pid file is not proof that the run's writer has gone.
+# Reuse the store's process lookup, including the keeper's --resume form.
+stop_hub_pid() { # <sandbox>: a pid, or empty when no hub is found
+  local pid
+  pid="$(cat "$1/hub.pid" 2>/dev/null || true)"
+  if hub_pid_ours "$1" "$pid"; then
+    printf '%s\n' "$pid"
+    return 0
+  fi
+  node --experimental-strip-types --no-warnings --input-type=module -e '
+    const { hubProcessFor } = await import(process.argv[2]);
+    const pid = hubProcessFor(process.argv[3]);
+    if (pid !== null) console.log(pid);
+  ' -- stop-hub "$ROOT/scripts/evidence-store.ts" "$1"
+}
+
 # A job's staging directory the hub left unsealed (its worker not confirmed
 # gone when the hub stopped), sealed by `vm.ts seal-left` once msb says the
 # worker is gone, or named with why: nothing is left unsealed unsaid. Only
 # with the hub gone. <sandbox>
 stop_seal_staging() {
-  local sandbox="$1" out
+  local sandbox="$1" out seal_rc=0
   [[ -d "$sandbox.staging" ]] || return 0
   [[ -n "$(ls -A "$sandbox.staging" 2>/dev/null | grep -v '^\.' || true)" ]] || return 0
-  out="$(vm_cli seal-left --sandbox "$sandbox" 2>>"$sandbox/traces/vm-finish.log")" || true
+  out="$(vm_cli seal-left --sandbox "$sandbox" 2>>"$sandbox/traces/vm-finish.log")" || seal_rc=$?
   printf '%s\n' "$out" >> "$sandbox/traces/vm-finish.log"
   jq -r '.sealed[]? | "              job staging \(.staging): sealed (\(.job), \(.status)) once its worker was confirmed gone"' <<<"$out" 2>/dev/null || true
   jq -r '.left[]? | "WARN: job staging \(.staging) left unsealed: \(.why)"' <<<"$out" 2>/dev/null >&2 || true
   local err
   err="$(jq -r '.error // empty' <<<"$out" 2>/dev/null || true)"
   [[ -n "$err" || -z "$out" ]] && echo "WARN: the job staging the hub left could not be sealed: ${err:-no answer} (see $sandbox/traces/vm-finish.log; stop again seals it)" >&2
+  # Exit 1 names unowned or unconfirmed staging for custody; exit 2 means
+  # sealing could not run at all (a live hub, or an unreadable journal).
+  [[ "$seal_rc" -ge 2 ]] && return 3
   return 0
 }
 
 # Put a run's VMs away, then its hub: snapshot (unless told not to), stop and
 # remove every VM carrying the run's label. Safe to run twice.
-stop_vm_run() { # <sandbox> <run id> <snapshot 0|1>  (returns 3 when a VM of the run is still there)
+stop_vm_run() { # <sandbox> <run id> <snapshot 0|1>  (returns 3 when finalisation is unsafe)
   local sandbox="$1" run="$2" snap="${3:-1}" args=(--registry "$REGISTRY") pid dir out left rc=0
   [[ "$snap" -eq 1 ]] || args+=(--no-snapshot)
+  pid="$(stop_hub_pid "$sandbox")" || { echo "WARN: the run's hub could not be checked; stop again once it can be." >&2; return 3; }
+  if [[ -n "$pid" ]] && ! hub_pid_ours "$sandbox" "$pid"; then
+    echo "WARN: the run's hub (pid $pid) is still up, but its directory record cannot confirm which process to stop; finalisation is deferred." >&2
+    return 3
+  fi
   if dir="$(hub_dir_of "$sandbox")"; then
     # The keeper first, or it brings back the hub this stop is ending.
     : > "$dir/.stop"
-    pid="$(cat "$dir/supervisor.pid" 2>/dev/null || true)"
-    if [[ -n "$pid" ]] && ps -o command= -p "$pid" 2>/dev/null | grep -q "hub-supervise.sh"; then kill "$pid" 2>/dev/null || true; fi
+    local keeper_pid
+    keeper_pid="$(cat "$dir/supervisor.pid" 2>/dev/null || true)"
+    if [[ -n "$keeper_pid" ]] && ps -o command= -p "$keeper_pid" 2>/dev/null | grep -q "hub-supervise.sh"; then kill "$keeper_pid" 2>/dev/null || true; fi
     # A hub that is putting the VMs away itself is let finish: a second
     # finish would only wait for its lock, and custody taken twice at once
     # writes one verdict over the other.
     local waited=0
     while [[ "$(jq -r 'if .finished == true and (.finish_done // false) == false then "busy" else "" end' "$dir/status.json" 2>/dev/null)" == "busy" ]] \
-      && hub_pid_ours "$sandbox" "$(cat "$sandbox/hub.pid" 2>/dev/null)" && (( waited < ${SWARM_STOP_HUB_WAIT_SEC:-1800} )); do
+      && hub_pid_ours "$sandbox" "$pid" && (( waited < ${SWARM_STOP_HUB_WAIT_SEC:-1800} )); do
       (( waited % 30 == 0 )) && echo "              the hub is putting the VMs away itself; waiting for it (${waited}s)"
       sleep 5
       waited=$((waited + 5))
@@ -8464,11 +8489,13 @@ stop_vm_run() { # <sandbox> <run id> <snapshot 0|1>  (returns 3 when a VM of the
   [[ "$hub_exit_sec" =~ ^[0-9]+$ ]] || hub_exit_sec=180
   [[ "$job_vm_wait_sec" =~ ^[0-9]+$ ]] || job_vm_wait_sec=60
   local hub_gone=1
-  if [[ -f "$sandbox/hub.pid" ]]; then
-    pid="$(cat "$sandbox/hub.pid" 2>/dev/null || true)"
+  pid="$(stop_hub_pid "$sandbox")" || { echo "WARN: the run's hub could not be checked; finalisation is deferred." >&2; return 3; }
+  if [[ -n "$pid" ]]; then
     if hub_pid_ours "$sandbox" "$pid"; then
       kill "$pid" 2>/dev/null || true
       stop_wait_gone "$pid" "$hub_exit_sec" || hub_gone=0
+    else
+      hub_gone=0
     fi
     if [[ "$hub_gone" -eq 1 ]]; then
       rm -f "$sandbox/hub.pid"
@@ -8476,6 +8503,8 @@ stop_vm_run() { # <sandbox> <run id> <snapshot 0|1>  (returns 3 when a VM of the
       echo "WARN: the hub (pid $pid) did not exit within ${hub_exit_sec}s of being asked: its pid file, its directory and its jobs' staging are kept as they are, and the run is not stopped. Run stop again once it has gone (or after \`kill $pid\` if it hangs): that stop waits for it and seals what it left." >&2
       rc=3
     fi
+  else
+    rm -f "$sandbox/hub.pid"
   fi
   local listed waited=0
   while :; do
@@ -8507,7 +8536,7 @@ stop_vm_run() { # <sandbox> <run id> <snapshot 0|1>  (returns 3 when a VM of the
   # confirm gone), sealed now with msb's own answer for each worker, or
   # named with why. Only once the hub, the store's writer, has gone.
   if [[ "$hub_gone" -eq 1 ]]; then
-    stop_seal_staging "$sandbox"
+    stop_seal_staging "$sandbox" || return 3
   fi
   if dir="$(hub_dir_of "$sandbox")"; then
     # The hub's own lines the collector did not take stay with the run.
@@ -9087,8 +9116,17 @@ cmd_stop() {
   # A stop can take minutes (snapshots, custody). Interrupted, it says where
   # it was and that running it again finishes the job: every step is safe to
   # repeat.
-  local stop_step="closing the panes"
+  local stop_step="holding the jobs"
   trap 'echo >&2; echo "stop interrupted while ${stop_step}. Nothing is lost: scripts/swarm.sh stop '"$id"' again finishes it (every step is safe to repeat)." >&2; exit 130' INT TERM
+  local sandbox stop_hub_dir
+  sandbox="$(jq -r '.sandbox // empty' <<<"$rec")"
+  # Hold jobs before closing panes: Herdr may take time to answer, and the
+  # hub must not accept a job or start a worker during that wait.
+  if [[ -n "$sandbox" ]] && stop_hub_dir="$(hub_dir_of "$sandbox" 2>/dev/null)"; then
+    : > "$stop_hub_dir/.stop"
+  fi
+  operator_trace "$sandbox" stop ${stop_args[@]+"${stop_args[@]}"}
+  stop_step="closing the panes"
   if command -v herdr >/dev/null 2>&1; then
     while read -r ws; do
       [[ -z "$ws" ]] && continue
@@ -9098,16 +9136,6 @@ cmd_stop() {
       ((.workspace_ids // []) + [(.workspace_id // empty)]) | unique | .[]
     ' <<<"$rec")
   fi
-  local sandbox
-  sandbox="$(jq -r '.sandbox // empty' <<<"$rec")"
-  # From here on the hub's job service starts no worker and takes no job
-  # (vm-hub.ts holding); a stop interrupted after this leaves it so until
-  # the next stop.
-  local stop_hub_dir
-  if [[ -n "$sandbox" ]] && stop_hub_dir="$(hub_dir_of "$sandbox" 2>/dev/null)"; then
-    : > "$stop_hub_dir/.stop"
-  fi
-  operator_trace "$sandbox" stop ${stop_args[@]+"${stop_args[@]}"}
   # A run recorded as running whose every process is gone did not end by
   # itself: the host restarted, or the run crashed. Said, with the last line
   # the trace has, before this stop records it as stopped.
@@ -9122,6 +9150,16 @@ cmd_stop() {
     echo "VMs:          stopping$( [[ "$snap" -eq 1 ]] && printf ', each disk kept as a snapshot beside the run (a few minutes a VM)')..."
     stop_step="putting the VMs away"
     stop_vm_run "$sandbox" "$id" "$snap" || vms_left=1
+  fi
+  if [[ "$vms_left" -eq 1 ]]; then
+    # A live hub or VM may still write and use its evidence. Keep the
+    # collector and mounts, and defer gather, custody and release until a
+    # later stop confirms that every writer has gone.
+    registry_update_state "$id" "stop_incomplete"
+    echo "NOT STOPPED: $id still has VMs or its hub up (above); finalisation is deferred and the record says stop_incomplete. Look, then run stop again or \`swarm.sh reap $id\`." >&2
+    notify_run "$sandbox" stop_incomplete '{"state":"stop_incomplete"}'
+    trap - INT TERM
+    exit 3
   fi
   stop_step="stopping the run's daemons"
   stop_sandbox_daemons "$sandbox" keep-record
@@ -9185,13 +9223,7 @@ cmd_stop() {
   trap - INT TERM
   local was
   was="$(jq -r '.state // empty' <<<"$rec")"
-  if [[ "$vms_left" -eq 1 ]]; then
-    # A run whose VMs are still up is not stopped, and its record says so.
-    registry_update_state "$id" "stop_incomplete"
-    echo "NOT STOPPED: $id still has VMs or its hub up (above); the record says stop_incomplete. Look, then run stop again or \`swarm.sh reap $id\`." >&2
-    notify_run "$sandbox" stop_incomplete '{"state":"stop_incomplete"}'
-    exit 3
-  elif [[ "$after_hub" -eq 1 && ( "$was" == "finished" || "$was" == "finish_failed" ) ]]; then
+  if [[ "$after_hub" -eq 1 && ( "$was" == "finished" || "$was" == "finish_failed" ) ]]; then
     # The hub told the operator when it finished the run.
     registry_update_state "$id" "$was"
     echo "Cleared $id after the hub finished it (recorded as $was)"

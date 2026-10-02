@@ -27,6 +27,20 @@ failed=0
 ok() { echo "ok - $*"; }
 no() { echo "FAIL: $*" >&2; failed=1; }
 skip() { echo "skip - $*"; }
+# Read the record even when every program is present: otherwise none of the
+# absent() calls below checks it, and an unreadable record can pass.
+if ! python3 - <<'PY' >/dev/null 2>&1
+import json, os
+r = json.load(open(os.environ.get("DFIRSWARM_ETC_DIR", "/etc/dfirswarm") + "/image.json"))
+if not isinstance(r, dict):
+    raise ValueError("image.json is not an object")
+if not isinstance(r.get("binaries"), dict) or not isinstance(r.get("missing_allowed", []), list):
+    raise ValueError("image.json has an invalid program list")
+PY
+then
+  no "the image's record (image.json) could not be read to check its programs"
+  exit "$failed"
+fi
 absent() { # <program>: not on PATH; fail when the image's record says it should be
   case "$(python3 - "$1" <<'PY' 2>/dev/null
 import json, os, sys

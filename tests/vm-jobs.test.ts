@@ -8,9 +8,10 @@
  * failed instead when DFIRSWARM_VM_TESTS=1.
  */
 import assert from "node:assert/strict";
-import { execFileSync, spawn } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { execFileSync, spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { once } from "node:events";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { after, before, test } from "node:test";
@@ -18,6 +19,8 @@ import { fileURLToPath } from "node:url";
 import { JobService, type JobRecord } from "../scripts/job-service.ts";
 import { destroyWorker, finishRun, imageCatalog, msbBinary, probeHost, runWorker } from "../scripts/vm.ts";
 import { initStore, storePaths } from "../scripts/evidence-store.ts";
+import { callBoard, closeBoardClients } from "../extensions/board.ts";
+import { initSandbox } from "../extensions/protocol.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const ARCH = process.arch === "arm64" ? "arm64" : "amd64";
@@ -191,6 +194,96 @@ await new Promise(() => {});
   assert.deepEqual(workerNames(run), []);
   assert.ok(!existsSync(join(`${S}.vm-snapshots`, "job-j999999.msb")), "a worker is never snapshotted as a seat");
   await svc.stop("over");
+});
+
+test("stop defers finalisation beside an unresponsive hub with a real worker, then a retry seals the partial output", async (t) => {
+  if (skip) return t.skip(skip);
+  const { S, run } = await sandbox();
+  await initSandbox(S, { swarmId: run, agentIds: ["a1"], capUsd: 1, wallClockMinutes: 30 });
+  const runsDir = dirname(S);
+  const registry = join(runsDir, "registry.json");
+  await writeFile(registry, JSON.stringify({ runs: [{ id: run, state: "running", sandbox: S, n: 1, isolation: { mode: "microvm", snapshot: false } }] }));
+  // Short socket paths, and a parent owned by this test: hub_dir_of must
+  // vouch for the directory before the stop can signal its process.
+  const hubs = realpathSync(await mkdtemp("/tmp/vj-hubs-"));
+  const dir = await mkdtemp(join(hubs, `dfs-${run}.`));
+  await writeFile(join(dir, "sandbox"), realpathSync(S));
+  await writeFile(join(S, "hub.dir"), dir);
+  const anchor = join(runsDir, `${run}.trace-anchor.json`);
+  const env = { ...process.env, SWARM_RUNS_DIR: runsDir, SWARM_HUBS_DIR: hubs, SWARM_SIGNERS_HOME: join(dirname(runsDir), "signers") };
+  let collectorProcess: ChildProcess | undefined;
+  let hubProcess: ChildProcess | undefined;
+  let hubLog = "";
+  const waitFor = async (check: () => boolean, what: string, ms = 120_000) => {
+    const end = Date.now() + ms;
+    while (!check()) {
+      assert.ok(Date.now() < end, `${what}: ${hubLog}`);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  };
+  const stop = (exitSeconds: number) => spawnSync("bash", [join(ROOT, "scripts", "swarm.sh"), "stop", run, "--custody-timeout", "30"], { env: { ...env, SWARM_STOP_HUB_EXIT_SEC: String(exitSeconds) }, encoding: "utf8", timeout: 120_000 });
+  const earlierCustody = '{"at":"2020-01-01T00:00:00.000Z"}\n';
+  try {
+    const collector = spawn(process.execPath, [join(ROOT, "scripts", "trace-collector.mjs"), S, "--anchor", anchor, "--quiet"], { stdio: "ignore" });
+    collectorProcess = collector;
+    await once(collector, "spawn");
+    await writeFile(join(S, "collector.pid"), `${collector.pid}\n`);
+    const hub = spawn(process.execPath, ["--experimental-strip-types", join(ROOT, "scripts", "vm-hub.ts"), S, "--dir", dir, "--run", run, "--registry", registry, "--no-snapshot", "--quiet"], { env, stdio: ["pipe", "ignore", "pipe"] });
+    hubProcess = hub;
+    hub.stderr.on("data", (chunk) => (hubLog += chunk));
+    await once(hub, "spawn");
+    hub.stdin.end(JSON.stringify({ agents: ["a1"], tokens: {}, jobs: { image: IMAGE, workers: 1, cpus: 1, memoryMib: 1024, packDirs: [], minFreeMb: 64, derived: false } }));
+    await waitFor(() => hubLog.includes("vm-hub: up") && existsSync(join(dir, "a1.sock")), "the real hub's job service is ready");
+    const submitted = await callBoard(join(dir, "a1.sock"), "jobSubmit", [S, { command: 'uname -s > "$OUT/kernel.txt"; printf "partial from the VM\\n" > "$OUT/partial.txt"; sleep 300', inputs: [], timeout_seconds: 600 }]) as { ok: boolean; job: { job: string }; reason?: string };
+    assert.equal(submitted.ok, true, JSON.stringify(submitted));
+    const job = submitted.job.job;
+    assert.match(job, /^j\d{6}$/);
+    const partial = join(storePaths(S).staging, `${job}-1`, "out", "partial.txt");
+    await waitFor(() => existsSync(partial), "the real worker wrote its output");
+    const worker = workerNames(run)[0];
+    assert.ok(worker, "msb lists the real worker");
+    assert.equal(readFileSync(join(dirname(partial), "kernel.txt"), "utf8").trim(), "Linux");
+    closeBoardClients();
+    await writeFile(join(S, "custody.json"), earlierCustody);
+    const journalBefore = readFileSync(storePaths(S).journal, "utf8");
+    hub.kill("SIGSTOP");
+    await waitFor(() => execFileSync("ps", ["-o", "state=", "-p", String(hub.pid)], { encoding: "utf8" }).includes("T"), "the hub is unresponsive");
+    // The process lookup must still find the real hub without its pid file.
+    await rm(join(S, "hub.pid"), { force: true });
+    const first = stop(1);
+    const firstOut = `${first.stdout}${first.stderr}`;
+    assert.equal(first.status, 3, firstOut);
+    assert.equal(JSON.parse(readFileSync(registry, "utf8")).runs[0].state, "stop_incomplete");
+    assert.ok(existsSync(join(dir, ".stop")), "jobs are held");
+    assert.equal(collector.exitCode, null, "the real collector is kept");
+    process.kill(collector.pid!, 0);
+    assert.equal(readFileSync(join(S, "custody.json"), "utf8"), earlierCustody);
+    assert.equal(readFileSync(storePaths(S).journal, "utf8"), journalBefore, "no journal write beside the unresponsive hub");
+    assert.ok(existsSync(partial), "staging stays unsealed");
+    assert.ok(!existsSync(join(S, "done", "STOPPED")) && !existsSync(join(S, "release")), "no stopped outcome or release");
+    assert.deepEqual(workerNames(run), [], "the real worker was put away");
+    hub.kill("SIGCONT");
+    const second = stop(30);
+    assert.equal(second.status, 0, `${second.stdout}${second.stderr}`);
+    await waitFor(() => hub.exitCode !== null && collector.exitCode !== null, "hub and collector exited");
+    assert.equal(JSON.parse(readFileSync(registry, "utf8")).runs[0].state, "stopped");
+    assert.ok(existsSync(join(S, "done", "STOPPED")));
+    assert.notEqual(JSON.parse(readFileSync(join(S, "custody.json"), "utf8")).at, "2020-01-01T00:00:00.000Z", "the retry takes a fresh custody verdict");
+    assert.ok(existsSync(join(S, "release", "v0", "release.json")), "the retry seals the draft release");
+    assert.equal(readFileSync(join(storePaths(S).jobs, job, "out", "partial.txt"), "utf8"), "partial from the VM\n");
+    assert.ok(!existsSync(partial) && !existsSync(dir), "staging is sealed and the hub directory removed");
+    assert.deepEqual(workerNames(run), []);
+    t.diagnostic(`real run ${run}, worker ${worker}: first stop=3, retry=0, partial output sealed, fresh custody and draft release`);
+  } finally {
+    closeBoardClients();
+    hubProcess?.kill("SIGCONT");
+    hubProcess?.kill("SIGKILL");
+    collectorProcess?.kill("SIGKILL");
+    const exited = (child?: ChildProcess) => !child?.pid || child.exitCode !== null || child.signalCode !== null;
+    await waitFor(() => exited(hubProcess) && exited(collectorProcess), "test processes exited during cleanup", 10_000);
+    for (const worker of workerNames(run)) await destroyWorker(worker);
+    await rm(hubs, { recursive: true, force: true });
+  }
 });
 
 /** Processes still making or running a worker of this run (runWorker's children). */

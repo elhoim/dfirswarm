@@ -97,8 +97,9 @@ the build, so a build that went wrong (apt out of disk space) is not tagged,
 and a builder stage that failed is not cached as a success. `build
 --allow-missing-optional` builds the image without such programs and records
 them; its spec.json and every builder stage it lets fail carry a build id of
-their own, so the install and those stages run again every time rather than
-being taken from the cache with an earlier build's gaps.
+their own. Regenerating the context changes that id and reruns the install
+and those stages; reusing an existing context needs `docker build --no-cache`
+to avoid taking an earlier build's gaps from the cache.
 
 `run` names the interpreter a download's or a source's program needs:
 `python` (the program's own venv, else the image's), or any program the image
@@ -626,9 +627,9 @@ def build(a) -> int:
     for pkg in extra_apt:
         spec["apt"][pkg] = True
     if a.allow_missing_optional:
-        # A stage that may now end without its program is never taken from the
-        # cache: its file carries this build's own id, so an earlier failure
-        # (a full disk) is not handed on to a build made after it was fixed.
+        # Regenerating a context invalidates optional stages and the profile
+        # install. Reusing this context for docker build still uses its cache:
+        # that retry needs --no-cache, or a newly generated context.
         # The profile's own install may now end with gaps too (apt out of space
         # for an optional package): spec.json, copied in before it runs,
         # carries the same id, so that layer is not reused either.
@@ -792,6 +793,10 @@ LABEL org.opencontainers.image.title="dfirswarm-{a.profile}" \\
           f"{len(spec['data'])} pinned data files ({len(copies)} from local copies, {len(omitted)} left out by --symbol-set), "
           f"{len(spec['manual'])} neither, {len(spec['not_applicable'])} not applicable"
           + (f"; NOT for redistribution ({len(held_back)} programs)" if held_back else ""))
+    if a.allow_missing_optional:
+        print("recipe: optional programs may be missing. Before retrying, regenerate this context with recipe.py build, "
+              "or use docker build --no-cache when reusing it; its build id changes only when the context is generated.",
+              file=sys.stderr)
     return 0
 
 
@@ -807,7 +812,7 @@ def main() -> int:
                    help="build an image holding programs or data files their packs mark redistributable: false (never publish it)")
     b.add_argument("--allow-missing-optional", action="store_true",
                    help="go on when an optional program cannot be installed or built; the image records it (not_installed, "
-                        "missing_allowed), and a builder stage allowed to fail is built again every time, never taken from the cache")
+                        "missing_allowed); regenerate the context before each retry, or use docker build --no-cache")
     b.add_argument("--allow-missing-data", action="store_true",
                    help="go on when a pinned data file (a symbol pack) cannot be fetched; the image records it under not_installed.data")
     b.add_argument("--symbol-set", default=os.environ.get("DFIRSWARM_SYMBOL_SET", "curated,broad"),
