@@ -8,7 +8,8 @@
  * failed instead when DFIRSWARM_VM_TESTS=1.
  */
 import assert from "node:assert/strict";
-import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { once } from "node:events";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -209,13 +210,10 @@ test("stop defers finalisation beside an unresponsive hub with a real worker, th
   await writeFile(join(dir, "sandbox"), realpathSync(S));
   await writeFile(join(S, "hub.dir"), dir);
   const anchor = join(runsDir, `${run}.trace-anchor.json`);
-  const collector = spawn(process.execPath, [join(ROOT, "scripts", "trace-collector.mjs"), S, "--anchor", anchor, "--quiet"], { stdio: "ignore" });
-  await writeFile(join(S, "collector.pid"), `${collector.pid}\n`);
   const env = { ...process.env, SWARM_RUNS_DIR: runsDir, SWARM_HUBS_DIR: hubs, SWARM_SIGNERS_HOME: join(dirname(runsDir), "signers") };
-  const hub = spawn(process.execPath, ["--experimental-strip-types", join(ROOT, "scripts", "vm-hub.ts"), S, "--dir", dir, "--run", run, "--registry", registry, "--no-snapshot", "--quiet"], { env, stdio: ["pipe", "ignore", "pipe"] });
+  let collectorProcess: ChildProcess | undefined;
+  let hubProcess: ChildProcess | undefined;
   let hubLog = "";
-  hub.stderr.on("data", (chunk) => (hubLog += chunk));
-  hub.stdin.end(JSON.stringify({ agents: ["a1"], tokens: {}, jobs: { image: IMAGE, workers: 1, cpus: 1, memoryMib: 1024, packDirs: [], minFreeMb: 64, derived: false } }));
   const waitFor = async (check: () => boolean, what: string, ms = 120_000) => {
     const end = Date.now() + ms;
     while (!check()) {
@@ -226,6 +224,15 @@ test("stop defers finalisation beside an unresponsive hub with a real worker, th
   const stop = (exitSeconds: number) => spawnSync("bash", [join(ROOT, "scripts", "swarm.sh"), "stop", run, "--custody-timeout", "30"], { env: { ...env, SWARM_STOP_HUB_EXIT_SEC: String(exitSeconds) }, encoding: "utf8", timeout: 120_000 });
   const earlierCustody = '{"at":"2020-01-01T00:00:00.000Z"}\n';
   try {
+    const collector = spawn(process.execPath, [join(ROOT, "scripts", "trace-collector.mjs"), S, "--anchor", anchor, "--quiet"], { stdio: "ignore" });
+    collectorProcess = collector;
+    await once(collector, "spawn");
+    await writeFile(join(S, "collector.pid"), `${collector.pid}\n`);
+    const hub = spawn(process.execPath, ["--experimental-strip-types", join(ROOT, "scripts", "vm-hub.ts"), S, "--dir", dir, "--run", run, "--registry", registry, "--no-snapshot", "--quiet"], { env, stdio: ["pipe", "ignore", "pipe"] });
+    hubProcess = hub;
+    hub.stderr.on("data", (chunk) => (hubLog += chunk));
+    await once(hub, "spawn");
+    hub.stdin.end(JSON.stringify({ agents: ["a1"], tokens: {}, jobs: { image: IMAGE, workers: 1, cpus: 1, memoryMib: 1024, packDirs: [], minFreeMb: 64, derived: false } }));
     await waitFor(() => hubLog.includes("vm-hub: up") && existsSync(join(dir, "a1.sock")), "the real hub's job service is ready");
     const submitted = await callBoard(join(dir, "a1.sock"), "jobSubmit", [S, { command: 'uname -s > "$OUT/kernel.txt"; printf "partial from the VM\\n" > "$OUT/partial.txt"; sleep 300', inputs: [], timeout_seconds: 600 }]) as { ok: boolean; job: { job: string }; reason?: string };
     assert.equal(submitted.ok, true, JSON.stringify(submitted));
@@ -269,9 +276,11 @@ test("stop defers finalisation beside an unresponsive hub with a real worker, th
     t.diagnostic(`real run ${run}, worker ${worker}: first stop=3, retry=0, partial output sealed, fresh custody and draft release`);
   } finally {
     closeBoardClients();
-    hub.kill("SIGCONT");
-    hub.kill("SIGKILL");
-    collector.kill();
+    hubProcess?.kill("SIGCONT");
+    hubProcess?.kill("SIGKILL");
+    collectorProcess?.kill("SIGKILL");
+    const exited = (child?: ChildProcess) => !child?.pid || child.exitCode !== null || child.signalCode !== null;
+    await waitFor(() => exited(hubProcess) && exited(collectorProcess), "test processes exited during cleanup", 10_000);
     for (const worker of workerNames(run)) await destroyWorker(worker);
     await rm(hubs, { recursive: true, force: true });
   }
