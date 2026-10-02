@@ -44,6 +44,7 @@
  *   node --experimental-strip-types scripts/vm.ts record-warnings FILE   (what an image.json says is missing of its pinned data)
  *   node --experimental-strip-types scripts/vm.ts finish --run ID --sandbox DIR [--no-snapshot] [--agent ID] [--registry FILE]
  *   node --experimental-strip-types scripts/vm.ts reap   [--run ID] [--registry FILE] [--only ID]
+ *   node --experimental-strip-types scripts/vm.ts seal-left --sandbox DIR   (after a stop: job staging the hub left unsealed, sealed or said)
  *   node --experimental-strip-types scripts/vm.ts list   [--run ID]
  *   node --experimental-strip-types scripts/vm.ts capacity --n N --cpus N --memory MIB
  *   node --experimental-strip-types scripts/vm.ts netcheck --image REF [--allow-host H]...
@@ -3029,6 +3030,24 @@ async function main(): Promise<void> {
       console.log(JSON.stringify({ ok, vms: out }));
       process.exit(ok ? 0 : 1);
     }
+    case "seal-left": {
+      // What a stop left unsealed in the run's job staging, sealed now that
+      // the hub is gone, each worker held to msb's own answer first
+      // (job-service.ts sealLeft). One JSON line: what was sealed, and what
+      // was left with why; exit 1 when something was left, 2 when nothing
+      // could be done (the hub still up, the journal unreadable).
+      const sandbox = opt("--sandbox");
+      if (!sandbox) throw new Error("seal-left needs --sandbox DIR");
+      const { sealLeftStaging } = await import("./job-service.ts");
+      try {
+        const r = await sealLeftStaging(resolve(sandbox), destroyWorker, (line) => process.stderr.write(`${line}\n`));
+        console.log(JSON.stringify({ ok: r.left.length === 0, ...r }));
+        process.exit(r.left.length ? 1 : 0);
+      } catch (err) {
+        console.log(JSON.stringify({ ok: false, error: err instanceof Error ? err.message : String(err) }));
+        process.exit(2);
+      }
+    }
     case "image-digest": {
       // An image by its digest, when this host holds it; null when it does not.
       const image = opt("--image");
@@ -3120,7 +3139,7 @@ async function main(): Promise<void> {
       return;
     }
     default:
-      console.error("usage: vm.ts probe|pull|create|finish|reap|toolbox|catalog|netcheck|check-allow|msb-path (see the header)");
+      console.error("usage: vm.ts probe|pull|create|finish|reap|seal-left|toolbox|catalog|netcheck|check-allow|msb-path (see the header)");
       process.exit(2);
   }
 }

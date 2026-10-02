@@ -7399,7 +7399,12 @@ stop_sandbox_daemons() {
   rm -f "$sandbox/netguard.pid" "$sandbox/netguard.port" "$sandbox/netguard.only" "$sandbox/idle-nudge.pid" \
         "$sandbox/collector.pid" "$sandbox/traces/.collector.sock" \
         "$sandbox/nudge.pid" "$sandbox/traces/.nudge.sock" \
-        "$sandbox/gate.pid" "$sandbox/traces/.collector-gate.sock" "$sandbox/hub.pid"
+        "$sandbox/gate.pid" "$sandbox/traces/.collector-gate.sock"
+  # hub.pid only once its hub has gone: one still up (asked to go and not
+  # gone yet) is the store's writer, and the next stop must find it.
+  if [[ -f "$sandbox/hub.pid" ]]; then
+    hub_pid_ours "$sandbox" "$(cat "$sandbox/hub.pid" 2>/dev/null)" || rm -f "$sandbox/hub.pid"
+  fi
   # `netguard.allow` is not a runtime file, it is the record of what this run
   # could reach — a chain-of-custody line the report prints. Teardown used to
   # delete it with the pid and the port, so every report written after
@@ -8354,6 +8359,63 @@ vm_providers_json() {
   done < <(credential_models) | jq -s -c .
 }
 
+# The harness's own trace lines the collector could not take — an
+# operator's command after the collector stopped, the hub's last words —
+# chained by the collector's own code once no collector is up
+# (trace-collector.mjs --gather), each marked `gathered` and unverified,
+# the spilled lines kept whole in traces/<name>.gathered.jsonl. On the
+# Breadcrumbs run a reap and a second stop after the first stop left two
+# lines outside the chain. Only a trace a collector anchored. <sandbox>
+trace_gather() {
+  local sandbox="$1" out anchor f any=0
+  [[ -n "$sandbox" && -d "$sandbox/traces" ]] || return 0
+  for f in system-spill.jsonl hub-spill.jsonl system-spill.jsonl.gathering hub-spill.jsonl.gathering; do
+    [[ -s "$sandbox/traces/$f" ]] && any=1
+  done
+  [[ "$any" -eq 1 ]] || return 0
+  anchor="$(trace_anchor_path "$sandbox")"
+  if [[ ! -f "$anchor" ]]; then
+    echo "WARN: the harness spilled trace lines (traces/system-spill.jsonl, traces/hub-spill.jsonl) and no collector anchored this run's trace, so they are not chained: custody counts them outside the chain." >&2
+    return 0
+  fi
+  out="$(node "$ROOT/scripts/trace-collector.mjs" "$sandbox" --gather --anchor "$anchor" 2>>"$sandbox/traces/collector.log" </dev/null)" || true
+  if [[ "$(jq -r '.ok // false' <<<"$out" 2>/dev/null)" == true ]]; then
+    [[ "$(jq -r '.gathered + .duplicates' <<<"$out")" != 0 ]] && echo "Trace:        $(jq -r '"\(.gathered) spilled line(s) chained (\([.files[] | .path] | join(", ")))\(if .duplicates > 0 then "; \(.duplicates) already on the chain" else "" end)"' <<<"$out")"
+    [[ "$(jq -r '.kept' <<<"$out")" != 0 ]] && echo "WARN: $(jq -r '.kept' <<<"$out") spilled line(s) stay outside the chain: not events, or not the harness's own ($(jq -r '.foreign // 0' <<<"$out") naming another sender); custody counts them" >&2
+  else
+    echo "WARN: the spilled trace lines were not chained: $(jq -r '.error // "no answer"' <<<"$out" 2>/dev/null || printf 'no answer') (custody counts them outside the chain; stop again chains them)" >&2
+  fi
+  return 0
+}
+
+# Whether a process has gone within so many seconds of being asked to.
+stop_wait_gone() { # <pid> <seconds>
+  local i
+  for ((i = 0; i < $2 * 5; i++)); do
+    kill -0 "$1" 2>/dev/null || return 0
+    sleep 0.2
+  done
+  ! kill -0 "$1" 2>/dev/null
+}
+
+# A job's staging directory the hub left unsealed (its worker not confirmed
+# gone when the hub stopped), sealed by `vm.ts seal-left` once msb says the
+# worker is gone, or named with why: nothing is left unsealed unsaid. Only
+# with the hub gone. <sandbox>
+stop_seal_staging() {
+  local sandbox="$1" out
+  [[ -d "$sandbox.staging" ]] || return 0
+  [[ -n "$(ls -A "$sandbox.staging" 2>/dev/null | grep -v '^\.' || true)" ]] || return 0
+  out="$(vm_cli seal-left --sandbox "$sandbox" 2>>"$sandbox/traces/vm-finish.log")" || true
+  printf '%s\n' "$out" >> "$sandbox/traces/vm-finish.log"
+  jq -r '.sealed[]? | "              job staging \(.staging): sealed (\(.job), \(.status)) once its worker was confirmed gone"' <<<"$out" 2>/dev/null || true
+  jq -r '.left[]? | "WARN: job staging \(.staging) left unsealed: \(.why)"' <<<"$out" 2>/dev/null >&2 || true
+  local err
+  err="$(jq -r '.error // empty' <<<"$out" 2>/dev/null || true)"
+  [[ -n "$err" || -z "$out" ]] && echo "WARN: the job staging the hub left could not be sealed: ${err:-no answer} (see $sandbox/traces/vm-finish.log; stop again seals it)" >&2
+  return 0
+}
+
 # Put a run's VMs away, then its hub: snapshot (unless told not to), stop and
 # remove every VM carrying the run's label. Safe to run twice.
 stop_vm_run() { # <sandbox> <run id> <snapshot 0|1>  (returns 3 when a VM of the run is still there)
@@ -8392,28 +8454,70 @@ stop_vm_run() { # <sandbox> <run id> <snapshot 0|1>  (returns 3 when a VM of the
   if [[ "$(jq -r '(.vms // []) | length' <<<"$out" 2>/dev/null || echo 0)" == "0" ]]; then
     echo "              none left to stop (the hub had put them away, or none was made)"
   fi
-  local listed
-  if ! listed="$(vm_cli list --run "$run" 2>/dev/null)"; then
-    echo "WARN: could not list run $run's VMs afterwards ($(jq -r '.error // "no answer"' <<<"$listed" 2>/dev/null)); check with \`swarm.sh status $run\`." >&2
-    rc=3
+  # The hub goes before the VMs are counted, and is waited for: its job
+  # service cancels what waits, removes each worker it runs and seals its
+  # staging. On the Breadcrumbs run a job started while the seats were put
+  # away, the stop counted its worker while the hub was removing it, said
+  # stop_incomplete, and the hub went with that job's staging unsealed.
+  # Whole seconds, or the defaults: a stray value must not end the stop half-way.
+  local hub_exit_sec="${SWARM_STOP_HUB_EXIT_SEC:-180}" job_vm_wait_sec="${SWARM_STOP_JOB_VM_WAIT_SEC:-60}"
+  [[ "$hub_exit_sec" =~ ^[0-9]+$ ]] || hub_exit_sec=180
+  [[ "$job_vm_wait_sec" =~ ^[0-9]+$ ]] || job_vm_wait_sec=60
+  local hub_gone=1
+  if [[ -f "$sandbox/hub.pid" ]]; then
+    pid="$(cat "$sandbox/hub.pid" 2>/dev/null || true)"
+    if hub_pid_ours "$sandbox" "$pid"; then
+      kill "$pid" 2>/dev/null || true
+      stop_wait_gone "$pid" "$hub_exit_sec" || hub_gone=0
+    fi
+    if [[ "$hub_gone" -eq 1 ]]; then
+      rm -f "$sandbox/hub.pid"
+    else
+      echo "WARN: the hub (pid $pid) did not exit within ${hub_exit_sec}s of being asked: its pid file, its directory and its jobs' staging are kept as they are, and the run is not stopped. Run stop again once it has gone (or after \`kill $pid\` if it hangs): that stop waits for it and seals what it left." >&2
+      rc=3
+    fi
   fi
-  left="$(jq -r '.vms[]?.name' <<<"$listed" 2>/dev/null || true)"
+  local listed waited=0
+  while :; do
+    if ! listed="$(vm_cli list --run "$run" 2>/dev/null)"; then
+      echo "WARN: could not list run $run's VMs afterwards ($(jq -r '.error // "no answer"' <<<"$listed" 2>/dev/null)); check with \`swarm.sh status $run\`." >&2
+      rc=3
+      break
+    fi
+    left="$(jq -r '.vms[]?.name' <<<"$listed" 2>/dev/null || true)"
+    [[ -z "$left" ]] && break
+    # A job's worker still listed once its hub has gone: removed by a
+    # second finish (nothing is left to make another), then the list is
+    # asked again, for a bounded time, before anything is called left up.
+    [[ "$hub_gone" -eq 1 && -n "$(jq -r '.vms[]? | select(.kind == "worker") | .name' <<<"$listed" 2>/dev/null)" ]] || break
+    (( waited >= job_vm_wait_sec )) && break
+    if [[ "$waited" -eq 0 ]]; then
+      echo "              a job's worker is still listed: removing it now that the hub has gone (up to ${job_vm_wait_sec}s)"
+      out="$(vm_cli finish --run "$run" --sandbox "$sandbox" ${args[@]+"${args[@]}"} 2>>"$sandbox/traces/vm-finish.log")" || true
+      printf '%s\n' "$out" >> "$sandbox/traces/vm-finish.log"
+    fi
+    sleep 2
+    waited=$((waited + 2))
+  done
   if [[ -n "$left" ]]; then
     echo "WARN: these VMs of run $run are still there: $(tr '\n' ' ' <<<"$left")— see $sandbox/traces/vm-finish.log; \`swarm.sh reap $run\` removes them once you have looked." >&2
     rc=3
   fi
-  if [[ -f "$sandbox/hub.pid" ]]; then
-    pid="$(cat "$sandbox/hub.pid" 2>/dev/null || true)"
-    if hub_pid_ours "$sandbox" "$pid"; then kill "$pid" 2>/dev/null || true; fi
-    rm -f "$sandbox/hub.pid"
+  # What the hub left unsealed in the job staging (a worker it could not
+  # confirm gone), sealed now with msb's own answer for each worker, or
+  # named with why. Only once the hub, the store's writer, has gone.
+  if [[ "$hub_gone" -eq 1 ]]; then
+    stop_seal_staging "$sandbox"
   fi
   if dir="$(hub_dir_of "$sandbox")"; then
     # The hub's own lines the collector did not take stay with the run.
     [[ -f "$dir/hub-spill.jsonl" && ! -L "$dir/hub-spill.jsonl" && -s "$dir/hub-spill.jsonl" ]] && cp -P "$dir/hub-spill.jsonl" "$sandbox/traces/hub-spill.jsonl" 2>/dev/null
-    # Only a directory this run could have made.
-    [[ "$dir" == */dfs-"$run".* ]] && rm -rf "$dir"
+    # Only a directory this run could have made, and only once its hub has
+    # gone: a hub still up keeps it (and hub.dir, hub.pid), so the next stop
+    # finds the hub, waits for it and seals after it, never beside it.
+    [[ "$hub_gone" -eq 1 && "$dir" == */dfs-"$run".* ]] && rm -rf "$dir"
   fi
-  rm -f "$sandbox/hub.dir"
+  [[ "$hub_gone" -eq 1 ]] && rm -f "$sandbox/hub.dir"
   return "$rc"
 }
 
@@ -8996,6 +9100,13 @@ cmd_stop() {
   fi
   local sandbox
   sandbox="$(jq -r '.sandbox // empty' <<<"$rec")"
+  # From here on the hub's job service starts no worker and takes no job
+  # (vm-hub.ts holding); a stop interrupted after this leaves it so until
+  # the next stop.
+  local stop_hub_dir
+  if [[ -n "$sandbox" ]] && stop_hub_dir="$(hub_dir_of "$sandbox" 2>/dev/null)"; then
+    : > "$stop_hub_dir/.stop"
+  fi
   operator_trace "$sandbox" stop ${stop_args[@]+"${stop_args[@]}"}
   # A run recorded as running whose every process is gone did not end by
   # itself: the host restarted, or the run crashed. Said, with the last line
@@ -9014,6 +9125,11 @@ cmd_stop() {
   fi
   stop_step="stopping the run's daemons"
   stop_sandbox_daemons "$sandbox" keep-record
+  # The harness's own lines the collector could not take, chained now that
+  # it is down (this stop's own line among them when the collector had gone
+  # before it): custody below finds none outside the chain.
+  stop_step="chaining the spilled lines"
+  trace_gather "$sandbox"
   # A run the operator stops with no sentinel is stopped, never completed:
   # done/STOPPED says so (the stop policy's outcome), before custody seals it.
   if [[ -n "$sandbox" && -d "$sandbox" && ! -f "$sandbox/done/SWARM_DONE" && "$after_hub" -eq 0 ]]; then
@@ -9072,7 +9188,7 @@ cmd_stop() {
   if [[ "$vms_left" -eq 1 ]]; then
     # A run whose VMs are still up is not stopped, and its record says so.
     registry_update_state "$id" "stop_incomplete"
-    echo "NOT STOPPED: $id still has VMs up (above); the record says stop_incomplete. Look, then run stop again or \`swarm.sh reap $id\`." >&2
+    echo "NOT STOPPED: $id still has VMs or its hub up (above); the record says stop_incomplete. Look, then run stop again or \`swarm.sh reap $id\`." >&2
     notify_run "$sandbox" stop_incomplete '{"state":"stop_incomplete"}'
     exit 3
   elif [[ "$after_hub" -eq 1 && ( "$was" == "finished" || "$was" == "finish_failed" ) ]]; then
@@ -10194,6 +10310,18 @@ cmd_package() {
   local sandbox
   sandbox="$(json_get "$id" | jq -r '.sandbox // empty')"
   [[ -n "$sandbox" && -d "$sandbox" ]] || { echo "Unknown swarm id or missing sandbox: $id" >&2; exit 1; }
+  # A record the stop has not finished: a job's staging not sealed, or the
+  # harness's trace lines outside the chain. The package goes out as the
+  # record stands, and says so; `stop` again seals and chains them.
+  local unsealed spilled_lines=0 sp_f sp_n
+  unsealed="$(ls -A "$sandbox.staging" 2>/dev/null | grep -v '^\.' | tr '\n' ' ' || true)"
+  for sp_f in "$sandbox/traces/system-spill.jsonl" "$sandbox/traces/hub-spill.jsonl"; do
+    [[ -f "$sp_f" && ! -L "$sp_f" ]] || continue
+    sp_n="$(grep -c . "$sp_f" 2>/dev/null || true)"
+    [[ "$sp_n" =~ ^[0-9]+$ ]] && spilled_lines=$((spilled_lines + sp_n))
+  done
+  [[ -n "$unsealed" ]] && echo "WARN: job staging left unsealed (${unsealed% }): the package carries no output of those jobs; \`swarm.sh stop $id\` again seals them first." >&2
+  [[ "$spilled_lines" -gt 0 ]] && echo "WARN: $spilled_lines harness trace line(s) are outside the chain (traces/system-spill.jsonl and traces/hub-spill.jsonl, carried as trace/spill-system.jsonl and trace/spill-hub.jsonl); \`swarm.sh stop $id\` again chains them first." >&2
   local out="$sandbox/package"
   rm -rf "$out"
   mkdir -p "$out/work" "$out/board" "$out/trace"
@@ -10435,6 +10563,10 @@ PY
   pkg_copy "$sandbox/work/.trace-spill.jsonl" "$out/trace/spill-host.jsonl" non-empty
   pkg_copy "$sandbox/traces/hub-spill.jsonl" "$out/trace/spill-hub.jsonl" non-empty
   pkg_copy "$sandbox/traces/system-spill.jsonl" "$out/trace/spill-system.jsonl" non-empty
+  # The spilled lines a stop chained (each on the trace marked gathered with
+  # its sha256), whole, so a recipient can hold each mark to its line.
+  pkg_copy "$sandbox/traces/hub-spill.gathered.jsonl" "$out/trace/spill-hub.gathered.jsonl" non-empty
+  pkg_copy "$sandbox/traces/system-spill.gathered.jsonl" "$out/trace/spill-system.gathered.jsonl" non-empty
   local sp
   for sp in "$sandbox"/tool-output/*/trace-spill.jsonl; do
     pkg_copy "$sp" "$out/trace/spill-$(basename "$(dirname "$sp")").jsonl" non-empty

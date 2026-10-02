@@ -12,7 +12,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/stop-test.XXXXXX")"
 # A stop seals a draft release with the machine key: this suite's, in its own home.
 export SWARM_SIGNERS_HOME="$TMP/signers"
-trap 'rm -rf "$TMP"' EXIT
+trap 'chmod -R u+w "$TMP" 2>/dev/null; rm -rf "$TMP"' EXIT
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 pass() { echo "ok - $*"; }
@@ -222,5 +222,173 @@ jq '.runs[0].hold = null' "$HR/registry.json" > "$HR/r" && mv "$HR/r" "$HR/regis
 out="$(SWARM_MSB_BIN="$TMP/msb" node --experimental-strip-types --no-warnings "$ROOT/scripts/vm.ts" reap --registry "$HR/registry.json" 2>&1)" || true
 grep -q '^rm dfs-shd1-shd100\|^snapshot' "$TMP/msb-hold.log" || fail "a released run's VM was not reaped: $(cat "$TMP/msb-hold.log")"
 pass "a held run's VM is left alone by the reaper, and reaped once released"
+
+echo "# a job's worker started behind the stop: the hub is waited for, the worker removed, its staging sealed, and the run not stop_incomplete"
+# The Breadcrumbs run: a job's worker was up when the stop counted the VMs,
+# the hub was removing it, and the stop said stop_incomplete; the hub went
+# with that job's staging unsealed. <case> is "hub" (the hub removes the
+# worker on its way out) or "stop" (it leaves it; the stop's second finish does).
+job_race() { # <run id> <case>
+  local id="$1" how="$2" JS JD HUBP out
+  JS="$RUNS/$id"
+  rm -rf "$JS" "$JS.staging"
+  mkdir -p "$JS/traces" "$JS/done/agents" "$JS/vm"
+  printf '{"swarm_id":"%s","n":1,"agents":[{"id":"%s00","role":"worker"}]}\n' "$id" "$id" > "$JS/team.json"
+  jq -n --arg sb "$JS" --arg id "$id" '{runs: [{id: $id, label: "job race", state: "running", sandbox: $sb, n: 1, isolation: {mode: "microvm", snapshot: false}}]}' > "$RUNS/registry.json"
+  # The journal as the hub left it: the job finished, its worker not confirmed gone.
+  node --experimental-strip-types --no-warnings --input-type=module -e "
+    import { Journal } from '$ROOT/scripts/evidence-store.ts';
+    const j = await Journal.open(process.argv[1]);
+    await j.append({ type: 'job_accepted', job: 'j000001', spec: { kind: 'command', command: 'printf x', inputs: [], timeout_seconds: 60, network: 'off' }, requester: { agent: '${id}00' } });
+    await j.append({ type: 'job_started', job: 'j000001', attempt: 1, worker: 'dfs-$id-job-j000001-1', image: 'img:test' });
+    await j.append({ type: 'job_finished', job: 'j000001', attempt: 1, exit: null, status: 'cancelled', reason: 'cancelled by the harness' });
+    await j.append({ type: 'job_fenced', job: 'j000001', attempt: 1, fenced: false, error: 'msb could not say whether dfs-$id-job-j000001-1 is gone: exit 1' });
+  " "$JS" || fail "the journal could not be written"
+  mkdir -p "$JS.staging/j000001-1/out" "$JS.staging/j000001-1/job"
+  printf 'partial' > "$JS.staging/j000001-1/out/x"
+  printf 'its log\n' > "$JS.staging/j000001-1/job/stderr.log"
+  : > "$JS.staging/j000001-1/job/stdout.log"
+  # The worker, up until something removes it, and made just after the stop's
+  # first finish looked (msb's first list is that finish's): behind it.
+  printf 'up' > "$TMP/$id.worker"
+  rm -f "$TMP/$id.lists"
+  cat > "$TMP/msb" <<MSB
+#!/usr/bin/env bash
+W="$TMP/$id.worker"
+case "\$1" in
+  list) n=\$(( \$(cat "$TMP/$id.lists" 2>/dev/null || echo 0) + 1 )); echo "\$n" > "$TMP/$id.lists"
+    if [[ "\$n" -gt 1 && -f "\$W" ]]; then printf '[{"name":"dfs-$id-job-j000001-1","status":"running","labels":{"dev.dfirswarm.run":"$id","dev.dfirswarm.agent":"job-j000001","dev.dfirswarm.kind":"worker"}}]\\n'; else printf '[]\\n'; fi ;;
+  inspect) if [[ -f "\$W" ]]; then printf '{"config":{"labels":{"dev.dfirswarm.run":"$id","dev.dfirswarm.kind":"worker"}}}\\n'; else echo "error: sandbox not found" >&2; exit 1; fi ;;
+  rm) rm -f "\$W" ;;
+  --version) echo "msb 0.7.2" ;;
+  *) exit 0 ;;
+esac
+MSB
+  chmod +x "$TMP/msb"
+  # The hub: asked to go, it takes a moment (its job service at work), and in the "hub" case removes the worker.
+  JD="$(cd "$SWARM_HUBS_DIR" && pwd -P)/dfs-$id.x1"
+  mkdir -p "$JD/fake"
+  (cd "$JS" && pwd -P) > "$JD/sandbox"
+  printf '{"finished":false}\n' > "$JD/status.json"
+  printf '%s\n' "$JD" > "$JS/hub.dir"
+  cat > "$JD/fake/vm-hub.ts" <<HUB
+#!/usr/bin/env bash
+trap 'sleep 1; [[ "$how" == hub ]] && rm -f "$TMP/$id.worker"; exit 0' TERM
+while :; do sleep 0.1; done
+HUB
+  chmod +x "$JD/fake/vm-hub.ts"
+  bash "$JD/fake/vm-hub.ts" "$JD" &
+  HUBP=$!
+  disown "$HUBP" 2>/dev/null || true
+  echo "$HUBP" > "$JS/hub.pid"
+  sleep 0.3
+  out="$(SWARM_MSB_BIN="$TMP/msb" SWARM_RUNS_DIR="$RUNS" SWARM_STOP_JOB_VM_WAIT_SEC=10 bash "$ROOT/scripts/swarm.sh" stop "$id" --no-custody 2>&1)" || fail "the stop ($how) failed: $out"
+  kill -0 "$HUBP" 2>/dev/null && { kill "$HUBP"; fail "the stop ($how) did not wait for the hub to go: $out"; }
+  grep -q "NOT STOPPED" <<<"$out" && fail "the stop ($how) said NOT STOPPED for a worker that went: $out"
+  [[ "$(jq -r '.runs[0].state' "$RUNS/registry.json")" == "stopped" ]] || fail "the record ($how) says $(jq -r '.runs[0].state' "$RUNS/registry.json"): $out"
+  [[ ! -e "$JS.staging/j000001-1" ]] || fail "the job's staging ($how) is left unsealed: $out"
+  grep -q "job staging j000001-1: sealed (j000001, cancelled)" <<<"$out" || fail "the stop ($how) did not say it sealed the staging: $out"
+  [[ "$(cat "$JS/store/jobs/j000001/out/x")" == partial ]] || fail "the partial output ($how) is not in the store"
+  [[ "$(cat "$JS/store/jobs/j000001/stderr.log")" == "its log" ]] || fail "the job's log ($how) is not kept"
+  node --experimental-strip-types --no-warnings "$ROOT/scripts/evidence-store.ts" verify "$JS" >/dev/null || fail "the journal ($how) does not verify"
+  [[ "$(jq -sr '[.[] | select(.job == "j000001") | .type + (if .by then ":" + .by else "" end)] | join(",")' "$JS/store/journal.jsonl")" == "job_accepted,job_started,job_finished,job_fenced,job_fenced:stop,job_committed" ]] \
+    || fail "the journal ($how) says: $(jq -sc '[.[] | select(.job == "j000001") | .type]' "$JS/store/journal.jsonl")"
+  if [[ "$how" == stop ]]; then
+    grep -q "a job's worker is still listed: removing it now that the hub has gone" <<<"$out" || fail "the stop did not say it removed the worker the hub left: $out"
+  fi
+  return 0
+}
+job_race sjrh1 hub
+pass "a worker the hub removes on its way out is waited for, not called left up; its staging is sealed after the hub has gone"
+job_race sjrs1 stop
+pass "a worker the hub leaves is removed by the stop's second finish within the bound; its staging is sealed"
+
+echo "# the harness's lines spilled once the collector was down are chained by the stop, its own line among them"
+GS="$RUNS/sgat1"
+mkdir -p "$GS/traces" "$GS/done/agents"
+printf '{"swarm_id":"sgat1","n":1,"agents":[{"id":"sgat100","role":"worker"}]}\n' > "$GS/team.json"
+jq -n --arg sb "$GS" '{runs: [{id: "sgat1", label: "gather", state: "stopped", sandbox: $sb, n: 1, isolation: {mode: "host"}}]}' > "$RUNS/registry.json"
+: > "$GS/traces/events.jsonl"
+GA="$(cd "$RUNS" && pwd -P)/sgat1.trace-anchor.json"
+jq -nc --arg sb "$GS" '{sandbox: $sb, lines: 0, head: "", prev_head: "", pending: false}' > "$GA"
+# A reap after the collector had gone, as on the Breadcrumbs run.
+printf '{"ts":"2026-10-01T16:17:50.000Z","agent":"system","tool":"operator_action","args":{"command":"reap","argv":["sgat1","--stop"],"via":"cli"},"result":{"ok":true}}\n' > "$GS/traces/system-spill.jsonl"
+out="$(SWARM_RUNS_DIR="$RUNS" bash "$ROOT/scripts/swarm.sh" stop sgat1 --no-custody 2>&1)" || fail "the stop failed: $out"
+grep -q "Trace: *2 spilled line(s) chained (traces/system-spill.jsonl)" <<<"$out" || fail "the stop did not chain the spilled lines: $out"
+[[ ! -s "$GS/traces/system-spill.jsonl" ]] || fail "lines are left outside the chain: $(cat "$GS/traces/system-spill.jsonl")"
+[[ "$(jq -sr '[.[] | .args.command + ":" + (.gathered.from // "")] | join(",")' "$GS/traces/events.jsonl")" == "reap:traces/system-spill.jsonl,stop:traces/system-spill.jsonl" ]] \
+  || fail "the chain does not hold the reap and this stop: $(cat "$GS/traces/events.jsonl")"
+[[ "$(wc -l < "$GS/traces/system-spill.gathered.jsonl" | tr -d ' ')" == 2 ]] || fail "the spilled lines are not kept whole beside the trace"
+[[ "$(jq -r '.lines' "$GA")" == 2 ]] || fail "the anchor did not move with the chain: $(cat "$GA")"
+pass "a stop chains the lines spilled while the collector was down, its own line among them, and keeps them whole beside the trace"
+
+echo "# a hub that does not go within the bound keeps its files, the run is not stopped, and the next stop seals after it"
+# A stop that gave up on its hub used to drop hub.pid, hub.dir and the hub's
+# directory: the next stop then could not see the hub and sealed the job's
+# staging beside it, two writers on the journal.
+HS="$RUNS/shng1"
+rm -rf "$HS" "$HS.staging"
+mkdir -p "$HS/traces" "$HS/done/agents" "$HS/vm"
+printf '{"swarm_id":"shng1","n":1,"agents":[{"id":"shng100","role":"worker"}]}\n' > "$HS/team.json"
+jq -n --arg sb "$HS" '{runs: [{id: "shng1", label: "hung hub", state: "running", sandbox: $sb, n: 1, isolation: {mode: "microvm", snapshot: false}}]}' > "$RUNS/registry.json"
+node --experimental-strip-types --no-warnings --input-type=module -e "
+  import { Journal } from '$ROOT/scripts/evidence-store.ts';
+  const j = await Journal.open(process.argv[1]);
+  await j.append({ type: 'job_accepted', job: 'j000001', spec: { kind: 'command', command: 'printf x', inputs: [], timeout_seconds: 60, network: 'off' }, requester: { agent: 'shng100' } });
+  await j.append({ type: 'job_started', job: 'j000001', attempt: 1, worker: 'dfs-shng1-job-j000001-1', image: 'img:test' });
+  await j.append({ type: 'job_finished', job: 'j000001', attempt: 1, exit: null, status: 'cancelled', reason: 'cancelled by the harness' });
+  await j.append({ type: 'job_fenced', job: 'j000001', attempt: 1, fenced: false, error: 'msb could not say' });
+" "$HS" || fail "the journal could not be written"
+mkdir -p "$HS.staging/j000001-1/out" "$HS.staging/j000001-1/job"
+printf 'partial' > "$HS.staging/j000001-1/out/x"
+cat > "$TMP/msb" <<'MSB'
+#!/usr/bin/env bash
+case "$1" in
+  list) printf '[]\n' ;;
+  inspect) echo "error: sandbox not found" >&2; exit 1 ;;
+  --version) echo "msb 0.7.2" ;;
+  *) exit 0 ;;
+esac
+MSB
+chmod +x "$TMP/msb"
+HHD="$(cd "$SWARM_HUBS_DIR" && pwd -P)/dfs-shng1.x1"
+mkdir -p "$HHD/fake"
+(cd "$HS" && pwd -P) > "$HHD/sandbox"
+printf '{"finished":false}\n' > "$HHD/status.json"
+printf '%s\n' "$HHD" > "$HS/hub.dir"
+# A hub that does not go when asked (its job service stuck on msb).
+cat > "$HHD/fake/vm-hub.ts" <<'HUB'
+#!/usr/bin/env bash
+trap '' TERM
+while :; do sleep 0.1; done
+HUB
+chmod +x "$HHD/fake/vm-hub.ts"
+bash "$HHD/fake/vm-hub.ts" "$HS" --dir "$HHD" &
+HHP=$!
+disown "$HHP" 2>/dev/null || true
+echo "$HHP" > "$HS/hub.pid"
+sleep 0.3
+set +e
+out="$(SWARM_MSB_BIN="$TMP/msb" SWARM_RUNS_DIR="$RUNS" SWARM_STOP_HUB_EXIT_SEC=1 bash "$ROOT/scripts/swarm.sh" stop shng1 --no-custody 2>&1)"
+rc=$?
+set -e
+kill -0 "$HHP" 2>/dev/null || fail "the stand-in hub went (it should not have): $out"
+[[ $rc -eq 3 ]] || { kill -9 "$HHP"; fail "a stop whose hub stayed up exited $rc, wanted 3: $out"; }
+grep -q "did not exit within 1s of being asked" <<<"$out" || { kill -9 "$HHP"; fail "the stop did not say the hub stayed: $out"; }
+[[ "$(jq -r '.runs[0].state' "$RUNS/registry.json")" == "stop_incomplete" ]] || { kill -9 "$HHP"; fail "the record says $(jq -r '.runs[0].state' "$RUNS/registry.json")"; }
+[[ -f "$HS/hub.pid" && -f "$HS/hub.dir" && -d "$HHD" ]] || { kill -9 "$HHP"; fail "the hub's files were dropped while it may still write: $out"; }
+[[ -d "$HS.staging/j000001-1" ]] || { kill -9 "$HHP"; fail "the staging was sealed beside a live hub: $out"; }
+# seal-left on its own refuses too, whatever hub.pid says.
+rm -f "$HS/hub.pid"
+sl="$(SWARM_MSB_BIN="$TMP/msb" node --experimental-strip-types --no-warnings "$ROOT/scripts/vm.ts" seal-left --sandbox "$HS" 2>/dev/null)" && { kill -9 "$HHP"; fail "seal-left sealed beside a live hub: $sl"; }
+grep -q "is still up" <<<"$sl" || { kill -9 "$HHP"; fail "seal-left did not say the hub is up: $sl"; }
+echo "$HHP" > "$HS/hub.pid"
+kill -9 "$HHP"
+sleep 0.3
+out="$(SWARM_MSB_BIN="$TMP/msb" SWARM_RUNS_DIR="$RUNS" bash "$ROOT/scripts/swarm.sh" stop shng1 --no-custody 2>&1)" || fail "the second stop failed: $out"
+[[ "$(jq -r '.runs[0].state' "$RUNS/registry.json")" == "stopped" ]] || fail "the second stop's record says $(jq -r '.runs[0].state' "$RUNS/registry.json"): $out"
+[[ ! -e "$HS.staging/j000001-1" && "$(cat "$HS/store/jobs/j000001/out/x")" == partial ]] || fail "the second stop did not seal the staging: $out"
+[[ ! -d "$HHD" && ! -f "$HS/hub.dir" ]] || fail "the hub's directory outlived the hub: $out"
+pass "a hub that stays up keeps its pid file and directory, the run is stop_incomplete, seal-left refuses beside it, and the stop after it seals the staging"
 
 echo "stop.test.sh: all checks passed"

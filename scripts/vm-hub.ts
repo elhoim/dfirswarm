@@ -1465,6 +1465,9 @@ export class Hub {
       ...(jobs.derivedGenerations ? { derivedLimits: { generationsMax: jobs.derivedGenerations } } : {}),
       runWorker,
       destroyWorker,
+      // `swarm.sh stop` writes .stop in this directory before it puts the
+      // seats away: from then on no worker is started behind it.
+      holding: () => existsSync(join(this.cfg.dir, ".stop")),
       // A running worker's CPU and I/O for the job's progress (B11); its heartbeat when msb cannot say.
       metrics: (worker) => workerMetrics(worker),
       hostRoom: async (mib) => roomForWorker(mib),

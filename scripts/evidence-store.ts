@@ -22,8 +22,9 @@
  *   node scripts/evidence-store.ts note <sandbox> --by NAME --text TEXT [--job ID]...
  *                                                      an examiner's note on the record, after the run
  */
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { createReadStream, existsSync, readFileSync } from "node:fs";
+import { createReadStream, existsSync, readFileSync, realpathSync } from "node:fs";
 import { chmod, copyFile, link, lstat, mkdir, open, readdir, readFile, readlink, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { createInterface } from "node:readline";
@@ -1128,6 +1129,8 @@ export type StoreCheck = {
   outputs: { files: number; verified: number; mismatched: string[]; missing: string[] };
   manifests_missing: string[];
   staging_left: string[];
+  /** Why each staging directory left was not sealed, from the journal's `job_unsealed` lines (the last for each). */
+  staging_why?: Record<string, string>;
   generations: number;
   revisions: number;
   /**
@@ -1428,7 +1431,66 @@ export async function checkStore(sandbox: string, before = Infinity): Promise<St
   } catch {
     out.staging_left = [];
   }
+  if (out.staging_left.length) {
+    // Each one's account, when the job service gave one: why it was not sealed.
+    const why: Record<string, string> = {};
+    for (const l of checked.lines) if (l.type === "job_unsealed" && typeof l.staging === "string" && out.staging_left.includes(l.staging)) why[l.staging] = String(l.why ?? "");
+    if (Object.keys(why).length) out.staging_why = why;
+  }
   return out;
+}
+
+/** The pid in the run's hub.pid when that process is alive: the store's writer while the run runs; null when there is none. */
+export function hubAlive(sandbox: string): number | null {
+  const pidFile = join(resolve(sandbox), "hub.pid");
+  if (!existsSync(pidFile)) return null;
+  const pid = Number(readFileSync(pidFile, "utf8").trim());
+  try {
+    return Number.isInteger(pid) && pid > 0 && process.kill(pid, 0) ? pid : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * A live hub process for this run, by its command line rather than by
+ * hub.pid: `vm-hub.ts <sandbox> --dir DIR` (a kickoff's) or `vm-hub.ts
+ * --resume DIR` (its keeper's), DIR's `sandbox` file naming this run. A
+ * stop that gave up waiting for its hub used to drop hub.pid and the hub's
+ * directory, and a second stop then took the store for its own while that
+ * hub might still write it. The pid, or null when none is found (or ps
+ * cannot say: then hub.pid is all there is to go by).
+ */
+export function hubProcessFor(sandbox: string): number | null {
+  const S = resolve(sandbox);
+  let real = S;
+  try {
+    real = realpathSync(S);
+  } catch {
+    // a sandbox that is gone has no hub to find by its path
+  }
+  let out = "";
+  try {
+    out = execFileSync("ps", ["-e", "-ww", "-o", "pid=,args="], { encoding: "utf8", timeout: 15_000, maxBuffer: 64 * 1024 * 1024 });
+  } catch {
+    return null;
+  }
+  const names = (dir: string): boolean => {
+    try {
+      const named = readFileSync(join(dir, "sandbox"), "utf8").trim();
+      return named === real || named === S;
+    } catch {
+      return false;
+    }
+  };
+  for (const line of out.split("\n")) {
+    const m = /^\s*(\d+)\s+(.*)$/.exec(line);
+    if (!m || Number(m[1]) === process.pid || !/vm-hub\.ts\b/.test(m[2]!)) continue;
+    const args = m[2]!;
+    const dir = /--(?:dir|resume) (\S+)/.exec(args)?.[1];
+    if (args.includes(` ${S} `) || args.includes(` ${real} `) || args.endsWith(` ${S}`) || args.endsWith(` ${real}`) || (dir && names(dir))) return Number(m[1]);
+  }
+  return null;
 }
 
 /**
@@ -1439,17 +1501,8 @@ export async function checkStore(sandbox: string, before = Infinity): Promise<St
  */
 export async function appendNote(sandbox: string, note: { by: string; text: string; jobs?: string[] }): Promise<number> {
   if (!note.by.trim() || !note.text.trim()) throw new Error("a note needs --by and --text");
-  const pidFile = join(resolve(sandbox), "hub.pid");
-  if (existsSync(pidFile)) {
-    const pid = Number(readFileSync(pidFile, "utf8").trim());
-    let alive = false;
-    try {
-      alive = Number.isInteger(pid) && pid > 0 && process.kill(pid, 0);
-    } catch {
-      alive = false;
-    }
-    if (alive) throw new Error(`the run's hub (pid ${pid}) is the store's writer while it runs: add the note after the run`);
-  }
+  const pid = hubAlive(sandbox);
+  if (pid) throw new Error(`the run's hub (pid ${pid}) is the store's writer while it runs: add the note after the run`);
   const j = await Journal.open(sandbox);
   await j.append({ type: "note", by: note.by, text: note.text, ...(note.jobs?.length ? { jobs: note.jobs } : {}) });
   return j.seq;
