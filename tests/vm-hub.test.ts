@@ -6,6 +6,7 @@
  */
 import assert from "node:assert/strict";
 import { createHash, randomBytes } from "node:crypto";
+import { once } from "node:events";
 import { existsSync, readFileSync } from "node:fs";
 import { mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { connect, createServer, type Server, Socket } from "node:net";
@@ -486,6 +487,12 @@ test("the harness's reads refuse a directory swapped for a link while they read"
     try { fs.unlinkSync(d); } catch {}
     try { fs.renameSync(parked, d); } catch {}
   `]);
+  // Listened for from the spawn: the swapper's 2.5 s starts once its node is
+  // up, only tens of milliseconds after the reads below start theirs, so a
+  // read that overruns their end by more than that lets the exit come first,
+  // and a once("exit") added after it waits for an event already gone while
+  // the hubs' sockets keep the process alive.
+  const swapped = once(swapper, "exit");
   let leaks = 0;
   let reads = 0;
   let refused = 0;
@@ -496,7 +503,7 @@ test("the harness's reads refuse a directory swapped for a link while they read"
     if (got === null) refused += 1;
     if (got && got.bytes.toString() === "SECRET") leaks += 1;
   }
-  await new Promise((r) => swapper.once("exit", r));
+  await swapped;
   assert.equal(leaks, 0, `${leaks} of ${reads} reads returned the outside file`);
   // The race was run: reads happened, and some met the swapped directory.
   assert.ok(reads > 100, `only ${reads} reads`);

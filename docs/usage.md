@@ -1373,7 +1373,7 @@ and the diff of `tests/fixtures/kickoff/` is the change, as the agents will read
 
 | Script | Runs |
 | --- | --- |
-| `npm test` | every node suite under `tests/` (`scripts/test-node.ts` finds them by name; `tests/node-tests.skip` names the few it leaves out, the VM suites), the Pi loader suite among them, which skips where Pi is not installed |
+| `npm test` | every node suite under `tests/` (`scripts/test-node.ts` finds them by name; `tests/node-tests.skip` names the few it leaves out, the VM suites), the Pi loader suite among them, which skips where Pi is not installed. Each test has five minutes (`--test-timeout`; on Node 22 each suite file as well), so a test that waits forever fails by name; `npm test -- --test-timeout=N` sets another |
 | `npm run test:bash` | every shell suite through `scripts/test-bash.sh`, one verdict per suite (`scripts/test-bash.sh reap inputs` runs a subset) |
 | `npm run test:server` | web API tests only |
 | `npm run typecheck` | `tsc -p tsconfig.json` (the extension against Pi's own types, the scripts, every node test) then `tsc -p ui/tsconfig.json` (the React client) |

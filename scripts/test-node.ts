@@ -12,6 +12,11 @@
  *
  * Options are handed to `node --test` before the files
  * (`npm test -- --test-name-pattern=…`).
+ *
+ * Every test and hook gets TEST_TIMEOUT_MS (`--test-timeout`) unless the
+ * options set their own: a test that waits forever fails by name in
+ * minutes, rather than holding the run until CI's job limit cancels it with
+ * no word of which test it was.
  */
 import { spawnSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
@@ -23,6 +28,25 @@ const ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)));
 /** The skip list: `<path relative to the repo>  # why`, blank lines and `#` lines ignored. */
 export function readSkipList(text: string): string[] {
   return text.split("\n").map((line) => line.replace(/#.*$/, "").trim()).filter(Boolean);
+}
+
+/**
+ * The `--test-timeout` `npm test` runs under. Node 24 reads it per test and
+ * per hook: a test that waits on something that never comes fails by name
+ * after it, instead of holding the run until the CI job's own limit cancels
+ * it unnamed (tests/vm-hub.test.ts did, twice, on the 20-minute Node 24
+ * job). Node 22 (the host's, and the engines floor) also holds each whole
+ * suite file to it, and fails the file by name. So it sits well above the
+ * slowest file, not only the slowest test: on a hosted runner the slowest
+ * test takes about 30 s and the slowest files (ui-server, vm-hub) up to
+ * about 75 s on macOS.
+ */
+export const TEST_TIMEOUT_MS = 300_000;
+
+/** The options handed to `node --test`: the caller's, led by the per-test timeout unless they set one. */
+export function nodeTestOptions(argv: string[], timeoutMs: number = TEST_TIMEOUT_MS): string[] {
+  const own = argv.some((a) => a === "--test-timeout" || a.startsWith("--test-timeout="));
+  return own ? [...argv] : [`--test-timeout=${timeoutMs}`, ...argv];
 }
 
 /** The node suites `npm test` runs, sorted, and the skip list's paths; throws on a skip entry that names no suite. */
@@ -51,7 +75,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     console.error("test-node: no node suites found under tests/");
     process.exit(2);
   }
-  const r = spawnSync(process.execPath, ["--experimental-strip-types", "--test", ...process.argv.slice(2), ...suites.run], { cwd: ROOT, stdio: "inherit" });
+  const r = spawnSync(process.execPath, ["--experimental-strip-types", "--test", ...nodeTestOptions(process.argv.slice(2)), ...suites.run], { cwd: ROOT, stdio: "inherit" });
   if (r.error) {
     console.error(`test-node: ${r.error.message}`);
     process.exit(2);
