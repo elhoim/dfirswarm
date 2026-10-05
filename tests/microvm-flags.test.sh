@@ -517,7 +517,16 @@ sbx="$(sandbox_of "$out")"
 [[ -d "$sbx/inputs" && ! -L "$sbx/inputs" ]] || fail "--inputs-copy did not copy the evidence into the run"
 [[ "$(jq -r '.held' "$sbx/inputs.json")" == "copy" ]] || fail "the manifest does not say the evidence was copied"
 [[ -z "$(find "$sbx/inputs" -type f -perm -u+w)" ]] || fail "the copy is writable"
-pass "writable evidence used in place is refused under every stop policy and at --check, naming both ways out; --inputs-copy gives the run its own read-only copy"
+# Each VM holds the copy exactly like evidence in place: inputs/ and
+# .inputs-pristine/ are each its own read-only, no-exec share after the
+# floor (run s8760fa: on the floor's share alone, read-only but not no-exec,
+# every seat's probe refused its VM), and a copy names no sets to the VMs.
+for d in "$sbx/inputs" "$sbx/.inputs-pristine"; do
+  jq -e --arg d "$d" '.mounts | any(.host == $d and .readonly == true and .noexec == true)' "$sbx/vm-spec.json" >/dev/null \
+    || fail "the copy at $d is not mounted read-only and no-exec into every VM: $(jq -c '.mounts' "$sbx/vm-spec.json")"
+done
+jq -e '.env | has("SWARM_INPUT_SETS") | not' "$sbx/vm-spec.json" >/dev/null || fail "a copy tells its VMs about sets: $(jq -c '.env.SWARM_INPUT_SETS' "$sbx/vm-spec.json")"
+pass "writable evidence used in place is refused under every stop policy and at --check, naming both ways out; --inputs-copy gives the run its own read-only copy, mounted read-only and no-exec into every VM with its pristine clone"
 
 # --- a reused sandbox starts clean; a prepared VM run touches no host tool ---------------
 reuse="$TMP/reused"

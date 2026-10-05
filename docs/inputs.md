@@ -52,8 +52,12 @@ evidence used in place, and a helper writing into a live run's evidence
 folder is what the Breadcrumbs run's custody alert came from. Make it
 read-only first (`chmod -R a-w`, or a read-only mount), or pass
 `--inputs-copy`, the way to start a live run: the run gets its own
-read-only copy (`held: "copy"`), which lies on the run's read-only floor in
-each VM and so is read-only but not no-exec. The manifest's sha256 is anchored outside the
+read-only copy (`held: "copy"`), held in each VM exactly like evidence in
+place: `inputs/` and its pristine clone `.inputs-pristine/` are each their
+own read-only, no-exec mount over the run's floor, and each VM's probe reads
+both flags from the mount that holds the files (on the floor's share alone,
+read-only but not no-exec, the probe refused every seat's VM; found by a
+kickoff on 2026-10-05). The manifest's sha256 is anchored outside the
 run at kickoff, and custody re-hashes the evidence in full at stop against it
 (a custody that runs out of time says which files it did not re-read).
 `--inputs-image` is macOS-only (`hdiutil`) in either mode: there is no Linux
@@ -91,7 +95,7 @@ image and is not combined with `--inputs`.
 | Held in place | `inputs/` is a link to the source | `inputs/` is the run's own directory, read-only, holding a link per set at `inputs/<name>` |
 | Ceilings | `--inputs-max-mb`, `--inputs-max-files` | the same ceilings, for the sets together |
 | Kernel guard (host run) | one `--ro` rule on `inputs/` | the rule on `inputs/`, and one per set held in place; the guard recorded is the weakest any set got |
-| Each VM | the source mounted read-only and no-exec where the link leads | each set's source mounted so; a link from one set into another stays within the evidence |
+| Each VM | the source mounted read-only and no-exec where the link leads; a copy (`--inputs-copy`): `inputs/` and `.inputs-pristine/` each mounted so, over the run's floor | each set's source mounted so (a copy: `inputs/` and `.inputs-pristine/` whole, every set inside); a link from one set into another stays within the evidence |
 | `inputs.json` | `source`, `files`, … | the same, with every set's files under `inputs/<name>/`, `source` naming every set's source (comma-separated, for a reader that shows one line), and `sets: [{name, path, source, files, bytes}]` in the order given |
 
 A citation of an input names its set: `input:laptop/Users/…/NTUSER.DAT`

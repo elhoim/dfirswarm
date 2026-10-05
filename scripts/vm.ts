@@ -667,7 +667,9 @@ if os.path.exists(inputs):
     # Several sets held in place: inputs/ holds a link per set, each to its
     # own mount, and the kickoff names them (SWARM_INPUT_SETS, from
     # inputs.json, which is not read here: it can be hundreds of megabytes).
-    # Each is probed and walked; one set, or a copy, is inputs/ alone.
+    # Each is probed and walked; one set, or a copy, is inputs/ alone, on
+    # its own mount over the floor (the kickoff's vm_build_spec), which is
+    # the mount whose flags are read below.
     try:
         listed = json.loads(os.environ.get("SWARM_INPUT_SETS") or "[]")
     except ValueError:
@@ -686,6 +688,13 @@ if os.path.exists(inputs):
     out["inputs_files"] = n
     execs = [mount_noexec(os.path.join(r, ".probe")) for r in (held or [top])]
     out["inputs_exec"] = next((e for e in execs if e != "noexec"), "noexec")
+    # A copy's pristine clone (.inputs-pristine/, the bytes the harness heals
+    # a host run from): the same evidence, held here exactly like inputs/.
+    clone = os.path.join(S, ".inputs-pristine")
+    if os.path.isdir(clone) and not os.path.islink(clone):
+        pristine = os.path.realpath(clone)
+        out["inputs_pristine"] = can_write(os.path.join(pristine, ".vm-probe"))
+        out["inputs_pristine_exec"] = mount_noexec(os.path.join(pristine, ".probe"))
 else:
     out["inputs"] = "absent"
 # The model's hosts, reached the way Pi will: a TCP connection through the
@@ -895,6 +904,9 @@ export function probeChecks(probe: Record<string, unknown>, expectInputs: boolea
   if (expectInputs) {
     add("inputs/", "ro", probe.inputs, probe.inputs === "ro", "the evidence is read-only in the VM", `inputs/ is ${String(probe.inputs)}, not read-only`);
     if (probe.inputs_exec !== undefined) add("the evidence executes", "noexec", probe.inputs_exec, probe.inputs_exec === "noexec", "nothing in the evidence can run", `the evidence can execute in the VM (${String(probe.inputs_exec)})`);
+    // A copy's pristine clone, measured only where there is one (never in place).
+    if (probe.inputs_pristine !== undefined) add(".inputs-pristine/", "ro", probe.inputs_pristine, probe.inputs_pristine === "ro", "the copy's pristine clone is read-only in the VM", `.inputs-pristine/ is ${String(probe.inputs_pristine)}, not read-only`);
+    if (probe.inputs_pristine_exec !== undefined) add("the pristine clone executes", "noexec", probe.inputs_pristine_exec, probe.inputs_pristine_exec === "noexec", "nothing in the copy's pristine clone can run", `the pristine clone can execute in the VM (${String(probe.inputs_pristine_exec)})`);
   }
   for (const r of Array.isArray(probe.reach) ? (probe.reach as Array<{ target?: unknown; ok?: unknown; error?: unknown }>) : []) {
     const ok = r.ok === true;
