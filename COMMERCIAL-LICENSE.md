@@ -44,11 +44,19 @@ disclaims.
 
 ## How this is possible
 
-Every line here is the copyright of Halil Öztürkci, and contributions arrive
-under [CLA.md](CLA.md), which keeps that true. A copyright holder may license
-their own work more than once. The AGPL version and the commercial version
-are the same software offered on two sets of terms; you choose which one you
-are using, and nothing you do under one affects the other.
+Halil Öztürkci holds the copyright in what he wrote here, and every
+contribution arrives under [CLA.md](CLA.md), which grants him a licence to
+offer it on any terms. A copyright holder may license their own work more
+than once. The AGPL version and the commercial version are the same software
+offered on two sets of terms; you choose which one you are using, and nothing
+you do under one affects the other.
+
+Some of what this repository holds is neither his nor a contribution. The
+third-party material [NOTICE](NOTICE) lists (the fonts, the AD1 test image
+taken from Fox-IT's dissect.evidence, and the text quoted from the public
+forensic challenges under `docs/use-cases/`, each case's source named in its
+`SOURCE.md`) stays under its own authors' terms. A commercial licence covers
+the software without that material, and passes on no right to it.
 
 ## Asking
 

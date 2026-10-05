@@ -25,6 +25,23 @@ npm run ui:build
 DFIRSWARM_VM_TESTS=1 npm run test:vm   # real VMs, one run end to end with a scripted model
 ```
 
+On an Apple-silicon Mac, run the VM suite locally: the hosted macOS CI
+runner cannot boot one. With `dfirswarm-base:dev-arm64` and
+`dfirswarm-disk:dev-arm64` loaded into msb, require the prerequisites and
+include the disk-catalog cases:
+
+```sh
+DFIRSWARM_VM_TESTS=1 VM_TEST_CATALOG_IMAGE=dfirswarm-disk:dev-arm64 npm run test:vm
+```
+
+`DFIRSWARM_VM_TESTS=1` turns a missing runtime or base image into a failure
+instead of a skipped suite. `VM_TEST_CATALOG_IMAGE` makes the named image's
+Sleuth Kit tools and the resulting disk catalogue mandatory.
+`node --experimental-strip-types scripts/vm.ts probe --image IMAGE`
+checks the prerequisites; `msb-path` prints the bundled executable, so no
+global `msb` installation is needed. See `images/README.md` to build and load
+the images. The tests use synthetic inputs and a scripted local model.
+
 That is everything CI runs, and none of it needs a model, a key, Herdr or a
 Pi login. CI runs the typecheck, the node suites and the shell suites on
 amd64 Linux and on macOS (Apple silicon), and the VM suite on amd64 Linux,

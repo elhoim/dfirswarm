@@ -102,6 +102,15 @@ Not built, on purpose: a blue "viewport" marker on the activity strip (a brush w
 
 ## microVM runs and the examiner's record
 
+The Questions tab also has two operator questions in the `s7a1c` fixture:
+"Which account uploaded the web shell?" must be established, and "Did the
+same account reach a second host?" has its requirement released. Their cards
+show who required or released it and why. `tests/ui-server.test.ts` reads both
+states, then adds a required question through HTTP, releases it with why,
+refuses a release without why, and reinstates the requirement. The amendment
+keeps the question's revision. `npm run ui:fixture` shows the same records
+without a model or a live run.
+
 The fixture has a microVM run, `svm1d` (`web-server-vm`, three VMs, done): VM records with the whole probe, kept disks, msb's database state and logs; hub events with a refusal, a hub and a collector restart and a cap stop; a post a seat's harness code sent from its VM; inputs with md5/sha1; `custody.json`; chained operator-audit lines; ledger entries with a correction and a searched-not-found; one review line; a job store (a command that ran, a tool that failed and was sealed all the same, one cancelled before it ran, and an examiner's note added after custody). `tests/ui-server.test.ts` and the screenshot pass exercise every row below against it, plus synthetic records for the variants (a keeper that gave up, a hub that finished and exited, a FIFO spill).
 
 | Surface | Where in our app |
@@ -116,7 +125,7 @@ The fixture has a microVM run, `svm1d` (`web-server-vm`, three VMs, done): VM re
 | Custody tab (Output group) | The verdict, evidence digests compared (sha256, md5, sha1), the artifact index, each VM's finding joined to its record, the source check of the copy, provenance and host clock, the custody timeout, and who did what from the operator's record, its chain checked |
 | Inputs per VM | How the evidence is held (in place or copied, read-only and no-exec in every VM), how the copy was checked against its source, each file's md5/sha1, links and special files marked, a name that is not UTF-8 shown as escaped bytes |
 | Goal: how this run was started | Provenance (commit, Pi, Node, msb, image digest, OS), host clock, disks kept at, OAuth allowed, pack-secret consent, custody deadline, idle nudge, disk size and encryption, notify, a prior run's ledger, synced folder allowed |
-| Budget | For a VM run the spend is what each VM reported through the hub, not metered by the host; seats stopped at their own cap are named |
+| Budget | For a VM run the spend is what each VM reported through the hub, not metered by the host; seats stopped at their own cap are named. Each `--token-alert` mark is a badge, saffron once the run's tokens crossed it (`budget.json` `token_alerts`; advisory, nothing stops for it) |
 | Report and dossier | The dossier adds the court set: `custody.json`, the custody anchor, `inputs.json`, each `vm/<id>.json` and this run's operator-audit lines, each with sha256 and a download. Each row is two-level: the description full width, the meta and the download below |
 | Ledger | Examiner review: accept, reject or amend an entry with a note, and sign the ledger as it stands, through `swarm.sh review` (token required); the review file is read by `scripts/review.ts`'s own reader and its chain is checked and shown; a link or a FIFO in its place is an error on screen, never "not reviewed". Corrections (`supersedes`) are marked both ways; searched-not-found entries are their own list; the inputs no command named are listed as that and never as “covered”; the time as written shows when it was not UTC |
 | Open with scripts | An HTML artifact is framed with no scripts; **Open with scripts** runs that one file once, after a warning, and the grant is recorded on the run's trace as an operator action, shown in the Artifacts tab |

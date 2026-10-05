@@ -76,6 +76,9 @@ export const OTHER_JSONL: Readonly<Record<string, string>> = {
   "trace-spill.jsonl": "a seat's spilled trace lines under tool-output/<seat>/, gathered into the trace",
   "system-spill.jsonl": "the harness's spilled trace lines, gathered into the trace",
   "hub-spill.jsonl": "the hub's spilled trace lines, gathered into the trace",
+  ".gathered.jsonl": "the suffix of a harness spill's lines kept whole once `swarm.sh stop` chained them into the trace (trace-collector.mjs --gather), each line on the chain marked gathered with its sha256",
+  "system-spill.gathered.jsonl": "traces/system-spill.jsonl's lines kept whole beside the trace once the stop chained them into it, and carried by the package: not a chain of its own",
+  "hub-spill.gathered.jsonl": "traces/hub-spill.jsonl's lines kept whole beside the trace once the stop chained them into it, and carried by the package: not a chain of its own",
   "telemetry.jsonl": "a running job's samples, kept beside it by the job service: not a record custody seals",
   "replies.jsonl": "the hub's answers kept for request-id resends: not a record",
   "fetched.jsonl": "the operator's symbol store's log of what swarm.sh symbols fetch put there, on the host outside every run ($DFIRSWARM_HOME/symbols): not a run's register",
@@ -89,6 +92,8 @@ export const OTHER_JSONL: Readonly<Record<string, string>> = {
   "spill-host.jsonl": "the package's name for work/.trace-spill.jsonl",
   "spill-hub.jsonl": "the package's name for traces/hub-spill.jsonl",
   "spill-system.jsonl": "the package's name for traces/system-spill.jsonl",
+  "spill-system.gathered.jsonl": "the package's name for traces/system-spill.gathered.jsonl",
+  "spill-hub.gathered.jsonl": "the package's name for traces/hub-spill.gathered.jsonl",
   ".jsonl": "a suffix the code joins to a name, not a file",
 };
 

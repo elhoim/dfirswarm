@@ -289,6 +289,8 @@ export type BudgetRecord = {
   /** False when no model on the team bills; the brake is then cap_tokens. */
   metered?: boolean;
   cap_tokens?: number;
+  /** The operator's token marks (--token-alert), ascending: told once each as the run crosses it; advisory. */
+  token_alerts?: number[];
   agents: Record<string, AgentBudget>;
 };
 
@@ -575,6 +577,8 @@ export type QuestionView = {
   attachments: string[];
   suggested_to: string | null;
   deadline: string | null;
+  /** Whether only an answer that establishes it ends the run on it: who required it (the goal, the examiner, the operator) or released it, when, and why; mirrors `must_establish` in `extensions/questions.ts`. */
+  must_establish?: { required: boolean; at: string; by: string; origin: QuestionOrigin; seq: number; rev: number; why: string | null } | null;
   scope: "in_scope" | "proposed" | "excluded";
   scope_why: string;
   scope_history: Array<{ at: string; scope: string; why: string; origin: QuestionOrigin | null }>;

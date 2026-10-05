@@ -39,6 +39,35 @@ export function amendPayload(id: string, base: FormBase, draft: { text: string; 
   };
 }
 
+/**
+ * Require a question to be established, or release the requirement: an
+ * amendment against the revision the card shows, which makes no new
+ * revision. A release says why (the register refuses one without); a
+ * requirement may.
+ */
+export function mustEstablishPayload(q: Pick<QuestionView, "id" | "rev">, required: boolean, why: string): Record<string, unknown> & { action: "amend" } {
+  return { action: "amend", q: q.id, expected_rev: q.rev, must_establish: required, ...(why.trim() ? { why: why.trim() } : {}) };
+}
+
+/**
+ * Whether the person this console session acts as may require a question to
+ * be established or release that requirement: the operator (the session
+ * acting as itself) or an enrolled examiner or operator, as the register
+ * holds it (extensions/questions.ts); never an analyst, a reviewer or an
+ * observer, whoever asked the question.
+ */
+export function mayRequireEstablished(as: string, people: ReadonlyArray<{ id: string; role: string }>): boolean {
+  if (!as) return true;
+  const role = people.find((p) => p.id === as)?.role;
+  return role === "operator" || role === "examiner";
+}
+
+/** Who required a question to be established, or released it, in words: the goal, or the person or agent the register names. */
+export function mustEstablishWords(m: NonNullable<QuestionView["must_establish"]>): string {
+  const who = m.origin.kind === "goal" ? "the goal" : (m.origin.name ?? m.origin.person ?? m.origin.agent ?? m.origin.kind);
+  return m.required ? `required by ${who}${m.why ? `: ${m.why}` : ""}` : `released by ${who}: ${m.why ?? ""}`;
+}
+
 /** An acceptance of the form's base revision: it holds for that revision only. */
 export function acceptPayload(id: string, base: FormBase, as: string, why: string): Record<string, unknown> & { action: "accept" } {
   return { action: "accept", q: id, accept_as: as, why, expected_rev: base.rev };

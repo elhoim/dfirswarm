@@ -92,6 +92,8 @@ export function questionArgv(body: Record<string, unknown>): { sub: string; argv
       opt(argv, "--expects", text(body, "expects", 20));
       if (body.completeness === true) argv.push("--completeness");
       opt(argv, "--presumes", text(body, "presumes", 2000));
+      // Only an answer that establishes it ends the run on it (docs/adr/0013).
+      if (body.must_establish === true) argv.push("--must-establish");
       opt(argv, "--suggest", text(body, "suggested_to", 64));
       opt(argv, "--deadline", text(body, "deadline", 64));
       opt(argv, "--neutral", text(body, "neutral", 4000));
@@ -123,6 +125,9 @@ export function questionArgv(body: Record<string, unknown>): { sub: string; argv
       opt(argv, "--presumes", text(body, "presumes", 2000));
       if (body.completeness === true) argv.push("--completeness");
       else if (body.completeness === false) argv.push("--no-completeness");
+      // Required, or released (a release says why; the register refuses one without).
+      if (body.must_establish === true) argv.push("--must-establish");
+      else if (body.must_establish === false) argv.push("--no-must-establish");
       break;
     }
     case "priority":

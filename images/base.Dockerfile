@@ -41,11 +41,13 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 
 # Not for redistribution until its licences have been reviewed, the rule the
-# packs' programs follow too (images/README.md): the venv holds dissect.util,
-# which is AGPL-3.0, and Debian's GPL programs want a written source offer.
-# Every profile built on this image carries the flag on (install.py).
+# packs' programs follow too (images/README.md): Debian's GPL programs want a
+# written source offer, and none is written yet. NONREDISTRIBUTABLE names what
+# holds the image back, in its record and its NOTICE; every profile built on
+# this image carries both on (install.py). (The venv's dissect.util is
+# Apache-2.0 from 3.5, the floor library-python.txt pins.)
 ARG REDISTRIBUTABLE=false
-ARG NONREDISTRIBUTABLE="dissect.util"
+ARG NONREDISTRIBUTABLE="debian-gpl-packages"
 
 # The tool library's Python imports, in a venv every profile builds on: a
 # library tool reaches a run through --tools-from whatever its packs, so a

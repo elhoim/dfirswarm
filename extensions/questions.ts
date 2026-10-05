@@ -727,6 +727,18 @@ async function ensureSeededHeld(sandboxRoot: string, held: P.HeldLock): Promise<
 }
 
 /**
+ * What a goal's Must establish section names that is none of the goal's
+ * questions (`sections`, as the goal numbers them), and each line that names
+ * nothing (`item <n>`): that requires nothing, and the kickoff warns of it,
+ * at start --check too, before the run exists (questions-cli goal-check).
+ */
+export function mustEstablishUnknownIn(text: string, sections: readonly string[]): string[] {
+  const known = new Set(sections.flatMap((x) => [x, P.sectionKey(x)]));
+  const named = goalMustEstablish(text);
+  return named.filter((x) => !x.bad && !known.has(x.section)).map((x) => x.section).concat(named.filter((x) => x.bad).map((x) => `item ${x.item}`));
+}
+
+/**
  * Put the goal into the register now (the kickoff calls it once the contract
  * is written). Idempotent. It says which questions must be established, and
  * what the goal's Must establish section names that is not one of its
@@ -740,10 +752,9 @@ export async function seedRegister(sandboxRoot: string): Promise<{ seeded: boole
     const snap = await questionsSnapshot(sandboxRoot);
     if (!before) await writeQuestionsMd(sandboxRoot).catch(() => undefined);
     const doc = await L.goalDocument(sandboxRoot);
-    const named = doc ? goalMustEstablish(doc.text) : [];
-    const goalSections = new Set([...snap.state.questions.values()].filter((q) => q.origin.kind === "goal").map((q) => q.section));
+    const goalSections = [...snap.state.questions.values()].filter((q) => q.origin.kind === "goal").map((q) => q.section);
     const required = [...snap.state.questions.values()].filter(mustEstablish).map((q) => q.id);
-    const unknown = named.filter((x) => !x.bad && !goalSections.has(x.section)).map((x) => x.section).concat(named.filter((x) => x.bad).map((x) => `item ${x.item}`));
+    const unknown = doc ? mustEstablishUnknownIn(doc.text, goalSections) : [];
     // Present only when there is something to say, so a goal that requires nothing seeds as it always did.
     return { seeded: !before, questions: [...snap.state.questions.keys()], objectives: [...snap.state.objectives.keys()], ...(required.length ? { must_establish: required } : {}), ...(unknown.length ? { must_establish_unknown: unknown } : {}) };
   });
@@ -1602,7 +1613,8 @@ export async function prepareAct(sandboxRoot: string, actor: Actor, ev: ActKind,
   if (!required.ok) return required;
   if (required.value !== undefined) {
     if (ev !== "open" && ev !== "amend") return { ok: false, reason: "must_establish is said when a question is opened or amended" };
-    if (!authority(origin)) return { ok: false, reason: `${originWords(origin)}: requiring a question to be established is the examiner's or the operator's (or the goal's, in its Must establish section), as accepting its limits is` };
+    // Requiring and releasing alike: a question's own asker, an analyst or a reviewer, does neither.
+    if (!authority(origin)) return { ok: false, reason: required.value ? `${originWords(origin)}: requiring a question to be established is the examiner's or the operator's (or the goal's, in its Must establish section), as accepting its limits is` : `${originWords(origin)}: releasing the requirement that a question be established is the examiner's or the operator's, whoever asked the question, as accepting its limits is` };
     if (ev === "open" && required.value === false) return { ok: false, reason: "a new question is not required to be established unless you say so: leave must_establish out" };
     if (ev === "open" && input.materiality === "background") return { ok: false, reason: "a question that must be established is material: the finish line waits for it (materiality material, or leave must_establish out)" };
     if (ev === "amend" && required.value === false && !String(input.why ?? "").trim()) return { ok: false, reason: "a release of the requirement says why (why): it is on the record beside who required it" };

@@ -24,6 +24,11 @@ import * as Q from "../extensions/questions.ts";
 import { checkLedgerAnswers } from "../scripts/check-answers.ts";
 import { finishGate } from "../scripts/finish-gate.ts";
 import { A, coverage, ESTABLISHED, F, ok, planned, rec, REVIEW, run } from "./negative-bar-fixture.ts";
+import { spawnSync } from "node:child_process";
+import { join } from "node:path";
+import { questionArgv } from "../scripts/ui/questions.ts";
+import { mayRequireEstablished, mustEstablishPayload, mustEstablishWords } from "../ui/src/lib/question-forms.ts";
+import type { QuestionView } from "../ui/src/lib/types.ts";
 
 /** Two questions; `must` names the ones the goal says must be established, in its own section. */
 const goal = (must: string[] = ["1"]) =>
@@ -316,4 +321,103 @@ test("every seat's header names the questions that must be established while the
   // A run that requires nothing has no such line.
   const plain = await run({ goal: goal([]) });
   assert.ok(!Q.questionsDigest("a0", await Q.viewContext(plain.S), told).lines.some((l) => /Must be established/.test(l)));
+});
+
+test("the console marks a question must be established, shows who required it, and releases it with why, through the same command line", async () => {
+  const r = await run({ goal: goal([]) });
+  await Q.seedRegister(r.S);
+  const cli = (sub: string, argv: string[]) => {
+    const p = spawnSync(process.execPath, ["--experimental-strip-types", "--no-warnings", join(import.meta.dirname, "..", "scripts", "questions-cli.ts"), sub, r.S, ...argv], { encoding: "utf8" });
+    return { code: p.status, out: `${p.stdout}${p.stderr}` };
+  };
+  // The add form's field.
+  const add = questionArgv({ action: "add", text: "Which account ran the installer?", why: "the client asks", must_establish: true });
+  assert.ok(add.argv.includes("--must-establish"));
+  assert.ok(!questionArgv({ action: "add", text: "t", why: "w" }).argv.includes("--must-establish"), "left out, nothing is required");
+  const opened = cli(add.sub, add.argv);
+  assert.equal(opened.code, 0, opened.out);
+  let snap = await Q.questionsSnapshot(r.S);
+  const asked = [...snap.state.questions.values()].find((q) => q.text === "Which account ran the installer?")!;
+  assert.equal(Q.mustEstablish(asked), true);
+  // A card's action on the goal's question 1: required (no new revision), then released with why.
+  const q1 = () => snap.state.questions.get("Q-1")! as unknown as QuestionView;
+  const require = questionArgv(mustEstablishPayload({ id: "Q-1", rev: 1 }, true, "the flag is the answer"));
+  assert.deepEqual(require, { sub: "amend", argv: ["Q-1", "--expect-rev", "1", "--why", "the flag is the answer", "--must-establish"] });
+  assert.equal(cli(require.sub, require.argv).code, 0);
+  snap = await Q.questionsSnapshot(r.S);
+  assert.equal(q1().rev, 1, "no new revision");
+  const view = Q.viewQuestion(snap.state.questions.get("Q-1")!, await Q.viewContext(r.S)) as unknown as QuestionView;
+  assert.match(mustEstablishWords(view.must_establish!), /^required by .+: the flag is the answer$/);
+  // A release without why is refused by the register, and said.
+  const bare = questionArgv(mustEstablishPayload({ id: "Q-1", rev: 1 }, false, " "));
+  assert.deepEqual(bare.argv, ["Q-1", "--expect-rev", "1", "--no-must-establish"]);
+  const refused = cli(bare.sub, bare.argv);
+  assert.notEqual(refused.code, 0);
+  assert.match(refused.out, /a release of the requirement says why/);
+  const release = questionArgv(mustEstablishPayload({ id: "Q-1", rev: 1 }, false, "the client takes what the log holds"));
+  assert.equal(cli(release.sub, release.argv).code, 0);
+  snap = await Q.questionsSnapshot(r.S);
+  const released = Q.viewQuestion(snap.state.questions.get("Q-1")!, await Q.viewContext(r.S)) as unknown as QuestionView;
+  assert.equal(released.must_establish?.required, false);
+  assert.match(mustEstablishWords(released.must_establish!), /^released by .+: the client takes what the log holds$/);
+  assert.match(mustEstablishWords({ required: true, at: "t", by: "goal", origin: { kind: "goal" } as QuestionView["origin"], seq: 1, rev: 1, why: null }), /^required by the goal$/);
+});
+
+test("a question's asker neither requires nor releases it: the operator's requirement on an analyst's question stays until the operator or an examiner releases it, and the console offers the action only to them", async () => {
+  const r = await run({ goal: goal([]) });
+  await Q.seedRegister(r.S);
+  const mine = await okAct(r.S, ANALYST, "open", { text: "Which share did the archive come from?", why: "the timeline" });
+  await okAct(r.S, OPERATOR, "amend", { q: mine.q!, expected_rev: 1, must_establish: true, why: "the client's question" });
+  await refusedAct(r.S, ANALYST, "amend", { q: mine.q!, expected_rev: 1, must_establish: false, why: "mine to release" }, /releasing the requirement that a question be established is the examiner's or the operator's, whoever asked the question/);
+  let snap = await Q.questionsSnapshot(r.S);
+  assert.equal(Q.mustEstablish(snap.state.questions.get(mine.q!)!), true, "still required");
+  await okAct(r.S, OPERATOR, "amend", { q: mine.q!, expected_rev: 1, must_establish: false, why: "the client takes the partial answer" });
+  snap = await Q.questionsSnapshot(r.S);
+  assert.equal(Q.mustEstablish(snap.state.questions.get(mine.q!)!), false);
+  const people = [
+    { id: "ana", role: "analyst" },
+    { id: "rev", role: "reviewer" },
+    { id: "obs", role: "observer" },
+    { id: "exa", role: "examiner" },
+    { id: "ops", role: "operator" },
+  ];
+  assert.deepEqual(["", "ana", "rev", "obs", "exa", "ops", "nobody"].map((as) => mayRequireEstablished(as, people)), [true, false, false, false, true, true, false]);
+});
+
+test("start --check says what the seed says before the run exists: a question the goal requires and does not number requires nothing (questions-cli goal-check)", async () => {
+  // The goal's questions from its text alone, as goalQuestions reads them from a run.
+  const gq = L.goalQuestionsIn(goal(["1", "7"]), () => null);
+  assert.deepEqual([gq.questions, gq.unread], [["1", "2"], []]);
+  assert.deepEqual(Q.mustEstablishUnknownIn(goal(["1", "7"]), gq.questions), ["7"]);
+  assert.deepEqual(Q.mustEstablishUnknownIn(goal(["Q-2"]), gq.questions), [], "Q-2 is question 2, as the goal numbers it");
+  assert.deepEqual(Q.mustEstablishUnknownIn(goal([]), gq.questions), []);
+  // A brief the check cannot read leaves its questions unknown: named as unread, and nothing called unknown wrongly.
+  const briefGoal = goal(["4"]).replace("--sections 1,2 --existence 2", "--sections-in inputs/brief.md");
+  const unread = L.goalQuestionsIn(briefGoal, () => null);
+  assert.deepEqual(unread.unread, ["inputs/brief.md"]);
+  const read = L.goalQuestionsIn(briefGoal, (p) => (p === "inputs/brief.md" ? "## Question 3\n\nWhat ran?\n\n## Question 4\n\nWho ran it?\n" : null));
+  assert.deepEqual(read.unread, []);
+  assert.ok(read.questions.includes("4"), JSON.stringify(read.questions));
+  assert.deepEqual(Q.mustEstablishUnknownIn(briefGoal, read.questions), []);
+  // The same reading the run's own seed makes.
+  const typo = await run({ goal: goal(["7"]) });
+  assert.deepEqual((await Q.seedRegister(typo.S)).must_establish_unknown, ["7"]);
+});
+
+test("the report says which questions were required to be established, by whom and why, and which requirement the operator released", async () => {
+  const { renderReportBodyMarkdown } = await import("../scripts/report-body.ts");
+  const r = await run({ goal: goal(["1: the flag is the answer"]) });
+  await Q.seedRegister(r.S);
+  const added = await okAct(r.S, OPERATOR, "open", { text: "Which account installed the remote tool?", why: "the client asks", must_establish: true });
+  await okAct(r.S, OPERATOR, "amend", { q: added.q!, expected_rev: 1, must_establish: false, why: "the client takes what the log holds" });
+  const md = await renderReportBodyMarkdown(r.S);
+  const said = md.split("\n").find((l) => l.includes("Must be established."));
+  assert.ok(said, md.slice(0, 4000));
+  assert.match(said!, /Q-1 \(required by the goal: the flag is the answer\)/);
+  assert.match(said!, new RegExp(`The requirement was released on one question: ${added.q}, by ops@lab, operator, claimed, not enrolled, via cli at [0-9T:.Z-]+ \\(the client takes what the log holds\\)`));
+  assert.match(md, /must be established/);
+  // A run that requires nothing says nothing of it.
+  const plain = await run({ goal: goal([]) });
+  await Q.seedRegister(plain.S);
+  assert.doesNotMatch(await renderReportBodyMarkdown(plain.S), /Must be established\./);
 });

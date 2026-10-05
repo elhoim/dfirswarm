@@ -30,6 +30,7 @@ import {
   systemContext,
 } from "../extensions/protocol.ts";
 import { checkStore, Journal, sealTree, sha256File, storePaths, type StoreCheck } from "./evidence-store.ts";
+import * as Q from "../extensions/questions.ts";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -280,6 +281,19 @@ const PNG_1X1 = Buffer.from(
 );
 
 async function seedWebServer(root: string, spec: RunSpec): Promise<void> {
+  await Q.seedRegister(root);
+  const operator: Q.Actor = { kind: "human", role: "operator", person: "fixture-operator", name: "Fixture operator", enrolled: false, os_user: "fixture", host: "fixture-host", via: "console", identity: "claimed" };
+  for (const [text, why, release] of [
+    ["Which account uploaded the web shell?", "the attribution must be established", false],
+    ["Did the same account reach a second host?", "the client initially required cross-host attribution", true],
+  ] as const) {
+    const opened = await Q.act(root, operator, "open", { text, why, materiality: "material", must_establish: true });
+    if (!opened.ok) throw new Error(`fixture question: ${opened.reason}`);
+    if (release) {
+      const released = await Q.act(root, operator, "amend", { q: opened.q, expected_rev: 1, must_establish: false, why: "the supplied evidence covers only the web server" });
+      if (!released.ok) throw new Error(`fixture question release: ${released.reason}`);
+    }
+  }
   const [a0, a1, a2, a3, a4, a5] = ids(spec).map((id) => createContext(root, id));
   const m = spec.started_min_ago;
   await event(root, a0.agentId, "agent_start", {}, { ok: true }, m);

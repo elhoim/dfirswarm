@@ -170,20 +170,20 @@ swarm.sh start — prepare a sandbox, write the contract, launch the agents.
       [--models "<provider/id>=<k>[@USD],..."] [--goal-file FILE | --goal "<markdown>"]
       [--sandbox DIR] [--allow-synced-folder] [--custody-timeout SEC] [--label NAME] [--wall-clock MIN] [--stop cap-pause|cap-stop|operator] [--until-solved] [--stall-minutes N] [--hard-kill] [--no-start]
       [--notify CMD] [--ledger-from RUN] [--no-verify-copy] [--allow-root] [--model-gateway] [--check]
-      [--cap-per-agent USD] [--cap-per-agent-tokens N] [--cap-tokens N] [--idle-nudge-sec N] [--allow-tool-forging]
+      [--cap-per-agent USD] [--cap-per-agent-tokens N] [--cap-tokens N] [--token-alert N[,M...]] [--idle-nudge-sec N] [--allow-tool-forging]
       [--no-self-compact] [--compact-at SPEC] [--compact-warn-at SPEC] [--compact-notice-at SPEC]
       [--compact-prompt-file FILE] [--compact-model P/ID] [--inbox-page-chars N]
       [--allow-install] [--no-pypi] [--no-read DIR]... [--accept-signer-exposure]
       [--tools-from DIR] [--inputs DIR]... [--inputs-enforce auto|on|off]
       [--inputs-max-mb N] [--inputs-max-files N] [--catalog] [--allow-missing-symbols] [--toolbox SETS|auto|off] [--toolbox-required]
-      [--quarantine] [--case-id ID] [--examiner NAME] [--allow-host HOST]...
+      [--quarantine] [--case-id ID] [--examiner NAME] [--operator ID] [--allow-host HOST]...
       [--no-netguard] [--local-only] [--playwright] [--probe-violation]
       [--network closed|dynamic|open] [--policy standard|live_adversary|internal|ctf]
       [--lookups none|reference|evidence_linked|any] [--contact passive|active] [--disclosure CLASSES]
       [--more-evidence no|ask|yes] [--material-use CLASS=USE,...] [--legal TEXT] [--provider-retention TEXT]
-      [--key-from-env] [--env KEY=VALUE]...
+      [--key-from-env] [--env KEY=VALUE]... [--customer-case] [--key-owner [PROVIDER=]OWNER]...
       [--isolation host|microvm] [--image REF] [--vm-cpus N] [--vm-memory MIB] [--vm-disk MIB] [--no-vm-snapshot] [--vm-snapshot-dir DIR] [--allow-oauth-in-vm]
-      [--workers N] [--worker-cpus N] [--worker-memory MIB] [--no-jobs] [--no-derived-catalog]
+      [--workers N] [--worker-cpus N] [--worker-memory MIB] [--no-jobs] [--no-derived-catalog] [--derived-limit N]
 
 The team
   --model P/ID        One model for every agent.
@@ -224,7 +224,9 @@ The team
                       Events: finished, finish_failed, stop_incomplete,
                       budget_cap, wall_clock, paused, extended,
                       operator_request (fired by the hub when a request is
-                      committed), evidence_changed, chain_broken, agent_dead,
+                      committed), token_alert (a --token-alert mark crossed),
+                      model_substitution (a provider answered a seat with
+                      another model), evidence_changed, chain_broken, agent_dead,
                       collector_unreachable, hub_down. A command gets one JSON
                       line on stdin ({event, run, at, event_id, detail}), its
                       detail identifiers, numbers and counts only (the whole
@@ -280,6 +282,13 @@ Limits
                       each turn, so a small goal on two agents is a few million;
                       the ten-agent BelkaCTF #6 run on a subscription used 277M.
                       Every cap can be changed while the run goes on: swarm.sh cap.
+  --token-alert N[,M...]
+                      Marks in tokens (200M,400M,1.6G; k, M and G allowed) you are
+                      told of as the run's tokens cross each: once each, on the
+                      board, the trace (token_alert), the console's Budget tab and
+                      your notify hook (event token_alert). Advisory under every
+                      stop policy: nothing pauses or stops for it. Made for
+                      --stop operator, where the caps act on nothing.
   --wall-clock MIN    How long the run may take (default 8, 15 at ten agents, 20 at twenty).
   --stop POLICY       What reaching a cap or the wall clock does. cap-pause (the
                       default): the agents are told, and two minutes later the run
@@ -445,6 +454,13 @@ Evidence
   --case-id ID        Case identifier, recorded in the registry, the contract and
                       the summary.
   --examiner NAME     Who is running it, recorded alongside.
+  --operator ID       The run's operator: a person enrolled on this install before
+                      the run (swarm.sh examiner enroll --id ID, role examiner or
+                      analyst), refused otherwise. Recorded with the run; on this
+                      run's acts (question, resume --question, requests), --as
+                      operator names them, a claim unless --sign. Without it,
+                      --as operator is whoever is enrolled under the id operator,
+                      and refused when nobody is.
 
 Tools the agents write
   --allow-tool-forging  Let agents write tools with make_tool and share them: a
@@ -537,9 +553,19 @@ Isolation
                       lowest lane (one worker, only when no agent job waits),
                       within 300 worker-seconds each 10 minutes, at most 50
                       generations and 2 GiB of catalogue a run, nothing dropped.
+  --derived-limit N   The derived catalogue's ceiling of generations a run (default
+                      50, or SWARM_DERIVED_LIMIT); recorded with the run. Checked
+                      before each pass, so a pass in flight finishes past it. At
+                      the ceiling what waits stays offered and named, and
+                      catalog_request still catalogues any object.
   --inputs-copy       Under --isolation microvm, copy --inputs into the run (read-only)
                       instead of mounting it in place: a second layer when the
-                      examiner's account can write the evidence.
+                      examiner's account can write the evidence. Evidence this
+                      account can write is refused in place (a BLOCKER, under
+                      every stop policy): pass this, or make it read-only first
+                      (chmod -R a-w, or a read-only mount). The way to start a
+                      live run. The check reads permission bits and the mount
+                      flag, not ACLs or volumes mounted inside the evidence.
   --brains-with-packs  Boot the agents' own VMs from the image that holds the run's packs.
                       By default, in a microVM run with jobs, the agents boot the base
                       image (a shell, Python, the tool library) and the forensic
@@ -659,6 +685,23 @@ Credentials
   --env KEY=VALUE     Extra environment for every pane; repeatable. Points Pi
                       elsewhere (PI_CODING_AGENT_DIR=...) or at a local provider.
                       Values are visible in the process list, so keep secrets out.
+  --customer-case     A customer's case: API keys only. Every subscription (OAuth)
+                      login is refused, openai-codex/* (a ChatGPT login by design)
+                      among them, as is --allow-oauth-in-vm and --policy ctf; and
+                      each provider's key must have its owner named (--key-owner).
+                      The record and custody keep whose key each seat used.
+                      Whatever this says, an anthropic/* seat on a Claude
+                      subscription login is refused in every run: Anthropic does
+                      not permit Free, Pro or Max credentials in a third-party
+                      client such as Pi; log Pi in with an API key.
+  --key-owner [PROVIDER=]OWNER
+                      Whose API key a provider uses (the customer's, or your own
+                      business account's); OWNER alone for every provider.
+                      Repeatable. Required for each provider under
+                      --customer-case, recorded in any run. A subscription seat is
+                      recorded as "consumer plan; not for customer data" (a
+                      ChatGPT/Codex or Claude login; another provider's is a
+                      "subscription login; not for customer data").
 
 Other
   --playwright        Add the browser tools, for a goal that must render something.
@@ -1879,12 +1922,19 @@ inputs_guard_label() {
 }
 
 # Remove a previous run's inputs from a reused sandbox. The copy has no write
-# bits, so give them back first or rm cannot empty the directories.
+# bits, so give them back first or rm cannot empty the directories. A link is
+# the evidence held in place (one set): only the link goes. GNU chmod follows
+# a link named on its command line, so `chmod -R u+w inputs` gave the
+# operator's own evidence its write bits back on Linux, under the next run's
+# writable-evidence check; BSD chmod -R does not follow it, which is why
+# only the Linux suite saw it.
 clear_inputs() {
   detach_inputs_image "$1"
   local sandbox="$1" d
   for d in "$sandbox/inputs" "$sandbox/.inputs-pristine"; do
-    if [[ -d "$d" ]]; then
+    if [[ -L "$d" ]]; then
+      rm -f "$d"
+    elif [[ -d "$d" ]]; then
       chmod -R u+w "$d" 2>/dev/null || true
       rm -rf "$d"
     fi
@@ -2769,6 +2819,7 @@ write_team_budget() {
   SWARM_CAP_PER_MODEL="$(printf '%s\n' ${MODEL_CAPS[@]+"${MODEL_CAPS[@]}"})" \
   SWARM_METERED="${metered:-1}" \
   SWARM_CAP_TOKENS="${cap_tokens:-}" \
+  SWARM_TOKEN_ALERTS="${token_alerts:-}" \
   SWARM_UNTIL_SOLVED="${until_solved:-0}" \
   SWARM_STOP_POLICY="${stop_policy:-cap-pause}" \
   SWARM_STALL_MINUTES="${stall_minutes:-}" \
@@ -2819,6 +2870,9 @@ budget = {
     # USD cap cannot fire, and cap_tokens is the brake.
     "metered": metered,
     **({"cap_tokens": int(cap_tokens)} if cap_tokens else {}),
+    # The operator's token marks (--token-alert): each told once as the run
+    # crosses it, on the board, the trace and the notify hook; advisory.
+    **({"token_alerts": [int(x) for x in os.environ["SWARM_TOKEN_ALERTS"].split(",")]} if os.environ.get("SWARM_TOKEN_ALERTS") else {}),
     # Until solved: no wall clock, every cap advisory, done on every question
     # with a disposition under the bar (as any run), and the watchdog's
     # regroup after stall_minutes.
@@ -3145,7 +3199,8 @@ start_check_key_from_env() {
 start_check_credentials() {
   # One gate, and it is Pi's own. An OAuth subscription, a stored API key and a
   # models.json provider all come back "ready" here, which is why a swarm runs
-  # on a Claude or ChatGPT plan with nothing special asked of the operator.
+  # on a ChatGPT plan with nothing special asked of the operator (a Claude
+  # plan is refused before this: provider_credentials_check).
   # Every distinct model is checked: a mixed team that can only authenticate
   # half of itself should fail at kickoff, not three agents into the run.
   local one_model auth_report auth_status auth_type auth_provider auth_reason
@@ -3215,7 +3270,7 @@ start_check_credentials() {
         echo
         echo "Log in once and Pi keeps the credential itself:"
         echo
-        echo "  pi /login          # an API key, or a Claude / ChatGPT subscription"
+        echo "  pi /login          # an API key, or a ChatGPT subscription (Anthropic: an API key only)"
         echo
         echo "A subscription login needs no API key and no --key-from-env."
         if models_json_declares_key "$models_json" "${one_model%%/*}" &&
@@ -3245,11 +3300,32 @@ start_check_credentials() {
       echo "Model:        $one_model -> local endpoint $(provider_base_url "$one_model") (no metered cost)"
     else
       case "$auth_type" in
-        oauth) echo "Key:          $one_model -> $auth_provider subscription (OAuth, refreshed by Pi)" ;;
-        *) echo "Key:          $one_model -> $auth_provider $auth_type via Pi's own store" ;;
+        oauth) echo "Key:          $one_model -> $auth_provider subscription (OAuth, refreshed by Pi): $(subscription_words "$auth_provider")" ;;
+        *) echo "Key:          $one_model -> $auth_provider $auth_type via Pi's own store$([[ -n "$(key_owner_of "${one_model%%/*}")" ]] && echo ", the key of $(key_owner_of "${one_model%%/*}")")" ;;
       esac
     fi
   done < <(credential_models)
+}
+
+# --token-alert's marks: "200M,1.6G,5000000" as whole token counts, ascending,
+# each once, comma-separated; nothing printed and a failure for anything else.
+token_marks() { # <list>
+  python3 - "$1" <<'PY'
+import re, sys
+out = set()
+for part in sys.argv[1].split(","):
+    m = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*([kKmMgG]?)\s*", part)
+    if not m:
+        sys.exit(1)
+    mult = {"": 1, "k": 10**3, "m": 10**6, "g": 10**9}[m.group(2).lower()]
+    if not m.group(2) and "." in m.group(1):
+        sys.exit(1)
+    n = round(float(m.group(1)) * mult)
+    if n <= 0 or n > 10**15:
+        sys.exit(1)
+    out.add(n)
+print(",".join(str(n) for n in sorted(out)))
+PY
 }
 
 cmd_start() {
@@ -3320,6 +3396,9 @@ cmd_start() {
   # only one, for one set), and says whether there is evidence at all.
   local inputs_dirs=() inputs_names=()
   local allow_hosts="" tools_from="" catalog=0 toolbox="off" toolbox_required=0 quarantine=0 cap_per_agent="" cap_per_agent_tokens="" case_id="" examiner=""
+  # The run's operator (--operator ID): a person enrolled on this install,
+  # recorded with the run; `--as operator` on the run's acts names them.
+  local operator_id="" operator_json="null"
   # A memory input whose kernel table the image lacks stops the start
   # (catalog/missing.json) unless the operator lets the run go on without it.
   local allow_missing_symbols=0
@@ -3344,6 +3423,10 @@ cmd_start() {
   # operator named it, so a refusal can say how to choose the other.
   local isolation="${SWARM_ISOLATION:-microvm}" isolation_given=$([[ -n "${SWARM_ISOLATION:-}" ]] && echo 1 || echo 0) vm_image="${SWARM_VM_IMAGE:-}" vm_image_named=$([[ -n "${SWARM_VM_IMAGE:-}" ]] && echo 1 || echo 0) vm_image_digest="" vm_cpus=2 vm_memory="" vm_disk=8192 vm_snapshot=1 vm_snapshot_dir="" allow_oauth_in_vm=0 inputs_copy=0 jobs=1 workers=2 workers_given=0 worker_cpus=2 worker_memory="" derived_catalog=1 inputs_hashes="" custody_sign_key="" custody_tsa="" custody_tsa_ca="" time_reference="" anchor_mirror="" require_technical_review=0 brain_base=1 job_image="" job_images_json='{}' pack_profiles_json='{}'
   local seal_herdr=1
+  # The derived catalogue's ceiling of generations a run (--derived-limit;
+  # SWARM_DERIVED_LIMIT the default, 50 without either): recorded with the
+  # run, and given was the operator's, said so.
+  local derived_limit="${SWARM_DERIVED_LIMIT:-}" derived_limit_given=0
   # Directories the panes may not read. Reads are open by design, so this is
   # narrow on purpose: material about the case the agents must derive rather
   # than find — a previous run's findings on the same evidence, above all.
@@ -3355,6 +3438,13 @@ cmd_start() {
   local herdr_sealed=0
   local no_read_applied=0
   local cap_tokens="" local_only=0 metered=1 all_local=0 local_models_csv="" cloud_models_csv="" subscription_models_csv=""
+  # Token marks the operator is told of as the run crosses each
+  # (--token-alert): advisory, they stop nothing (budget.json token_alerts).
+  local token_alerts="" token_alerts_given=""
+  # Provider credentials (docs/adr/0003, "Whose credential, under which
+  # terms"): a customer's case takes API keys only, each provider's owner
+  # named (--key-owner [PROVIDER=]OWNER), and refuses every subscription.
+  local customer_case=0 key_owners=()
   local idle_nudge_sec="${SWARM_IDLE_SEC:-180}"
   # Self-compaction is the default: each agent watches its own context and
   # hands off to itself at the compact line (extensions/self-compact.ts). The
@@ -3460,6 +3550,7 @@ cmd_start() {
       --cap-per-agent) cap_per_agent="$2"; shift 2 ;;
       --cap-per-agent-tokens) cap_per_agent_tokens="$2"; shift 2 ;;
       --cap-tokens) cap_tokens="$2"; shift 2 ;;
+      --token-alert) token_alerts_given="${token_alerts_given:+$token_alerts_given,}${2:-}"; shift 2 ;;
       --local-only) local_only=1; shift ;;
       --allow-host) allow_hosts+="${allow_hosts:+,}$2"; shift 2 ;;
       --network) network_mode="${2:-}"; shift 2 ;;
@@ -3488,6 +3579,7 @@ cmd_start() {
       --inbox-page-chars) inbox_page_chars="$2"; shift 2 ;;
       --case-id) case_id="$2"; shift 2 ;;
       --examiner) examiner="$2"; shift 2 ;;
+      --operator) operator_id="${2:-}"; shift 2 ;;
       --inputs-enforce) inputs_enforce="$2"; shift 2 ;;
       --inputs-max-mb) inputs_max_mb="$2"; shift 2 ;;
       --inputs-max-files) inputs_max_files="$2"; shift 2 ;;
@@ -3512,10 +3604,15 @@ cmd_start() {
       --worker-memory) worker_memory="$2"; shift 2 ;;
       --no-jobs) jobs=0; shift ;;
       --no-derived-catalog) derived_catalog=0; shift ;;
+      --derived-limit) derived_limit="${2:-}"; derived_limit_given=1; shift 2 ;;
       --vm-disk) vm_disk="$2"; shift 2 ;;
       --no-vm-snapshot) vm_snapshot=0; shift ;;
       --vm-snapshot-dir) vm_snapshot_dir="$2"; shift 2 ;;
       --allow-oauth-in-vm) allow_oauth_in_vm=1; shift ;;
+      --customer-case) customer_case=1; shift ;;
+      --key-owner)
+        [[ "${2:-}" =~ ^([a-z0-9][a-z0-9._-]*=)?[^=[:cntrl:]]{1,120}$ && "${2:-}" != *=  ]] || { echo "BLOCKER: --key-owner takes OWNER (every provider's key) or PROVIDER=OWNER, one line of at most 120 characters (got ${2:-nothing})." >&2; exit 2; }
+        key_owners+=("$2"); shift 2 ;;
       --inputs-copy) inputs_copy=1; shift ;;
       --inputs-hashes) inputs_hashes="$2"; shift 2 ;;
       --brains-with-packs) brain_base=0; shift ;;
@@ -3577,6 +3674,35 @@ cmd_start() {
   esac
   # Workers are VMs: a host run has no job service.
   [[ "$isolation" == "host" ]] && jobs=0
+  # The derived catalogue's ceiling: a whole number of generations, given
+  # only where there is a derived catalogue to bound (refused otherwise, so
+  # a flag never reads as if it did something).
+  if [[ -n "$derived_limit" ]] && ! [[ "$derived_limit" =~ ^[1-9][0-9]{0,5}$ ]]; then
+    echo "BLOCKER: --derived-limit (or SWARM_DERIVED_LIMIT) takes a whole number of generations, 1 to 999999 (got $derived_limit)." >&2
+    exit 2
+  fi
+  if [[ "$derived_limit_given" -eq 1 && ( "$derived_catalog" -eq 0 || "$jobs" -eq 0 ) ]]; then
+    echo "BLOCKER: --derived-limit bounds the derived catalogue, and this run has none ($([[ "$derived_catalog" -eq 0 ]] && echo "--no-derived-catalog" || echo "no job service: $([[ "$isolation" == "host" ]] && echo "a host run" || echo "--no-jobs")")). Drop one of them." >&2
+    exit 2
+  fi
+  derived_limit="${derived_limit:-50}"
+  # The operator, enrolled before the run (swarm.sh examiner enroll): an act
+  # made --as operator on this run is theirs. Refused before anything is
+  # written when nobody is enrolled under the id, or the person cannot ask
+  # the run a question that is admitted (a reviewer's and an observer's are not).
+  if [[ -n "$operator_id" ]]; then
+    local op_out op_role
+    if ! op_out="$(node --experimental-strip-types --no-warnings "$ROOT/scripts/signers.ts" show "$operator_id" --json 2>&1)"; then
+      echo "BLOCKER: --operator $operator_id: ${op_out:-no such enrolment}. Enrol the operator first: swarm.sh examiner enroll --id $operator_id --name NAME --organisation ORG --competence TEXT --role examiner (--generate-key | --key FILE | --fido | --pkcs11-module PATH ...)." >&2
+      exit 2
+    fi
+    op_role="$(jq -r '.role // empty' <<<"$op_out")"
+    case "$op_role" in
+      examiner|analyst) ;;
+      *) echo "BLOCKER: --operator $operator_id is enrolled as ${op_role:-nothing known}: an operator's questions must be admitted, and a ${op_role:-person}'s are not the operator's (a reviewer reviews; an observer's are proposed into triage). Name an examiner or an analyst." >&2; exit 2 ;;
+    esac
+    operator_json="$(jq -c '{id, name, role, fingerprint: (.key.fingerprint // null)}' <<<"$op_out")"
+  fi
   if [[ "$isolation" == "microvm" ]]; then
     [[ "$vm_cpus" =~ ^[1-9][0-9]?$ ]] || { echo "BLOCKER: --vm-cpus must be 1..99 (got $vm_cpus)." >&2; exit 2; }
     [[ "$workers" =~ ^([1-9]|1[0-6])$ ]] || { echo "BLOCKER: --workers must be 1..16 (got $workers)." >&2; exit 2; }
@@ -3825,14 +3951,6 @@ cmd_start() {
           done
           [[ "$within" -eq 1 ]] || outside+=("${link#"$set_real"/} -> $target")
         done < <(find "$set_real" -type l -print0)
-        # Writable is a file's bit, or a directory's (a name can be added,
-        # removed or renamed in it), on a volume that is not mounted read-only.
-        local ro_fs writable
-        ro_fs="$(python3 -c 'import os, sys; print(1 if os.statvfs(sys.argv[1]).f_flag & os.ST_RDONLY else 0)' "$set_real" 2>/dev/null || echo 0)"
-        writable="$(find "$set_real" \( -type f -o -type d \) -perm -u+w -print -quit 2>/dev/null)"
-        if [[ "$inputs_bind" -eq 1 && "$ro_fs" != 1 && -n "$writable" ]]; then
-          echo "WARN: the evidence in $set_real is writable by this account (${writable#"$set_real"/} and perhaps more: a file, or a directory whose names can change), on a volume mounted read-write. In a VM run it is held by the VMs' read-only mount and nothing else: the host (you, a tool, a sync client) can still change it. Make it read-only (chmod -R a-w), mount its volume read-only, or pass --inputs-copy to give the run its own read-only copy." >&2
-        fi
         # A copy follows only the links at the top of --inputs (the
         # operator's); deeper ones are the evidence's own and stay links, as
         # the copy's own NOTE says.
@@ -3840,6 +3958,37 @@ cmd_start() {
           echo "BLOCKER: under --isolation microvm, --inputs $set_real is mounted into each VM as it is, and these links lead out of it, so no VM could read them:" >&2
           printf '  %s\n' "${outside[@]}" >&2
           echo "Point --inputs at the directory that holds the files, put the files themselves (not links) in $set_real, or pass --inputs-copy to copy what the links at its top point at into the run (links deeper in the tree are the evidence's own and are copied as links)." >&2
+          exit 2
+        fi
+        # Writable is a file, or a directory (a name can be added, removed or
+        # renamed in it), this account may write as the kernel reads its
+        # permission bits (owner, group, other: os.access, nothing written),
+        # on a volume not mounted read-only. Not read: ACLs, and a volume
+        # mounted below the set's top; --inputs-copy is the way past both.
+        local writable=""
+        if [[ "$inputs_bind" -eq 1 ]]; then
+          writable="$(python3 - "$set_real" <<'PY' 2>/dev/null || true
+import os, sys
+top = sys.argv[1]
+if os.statvfs(top).f_flag & os.ST_RDONLY:
+    sys.exit(0)
+for root, dirs, files in os.walk(top):
+    for path in [root] + [os.path.join(root, f) for f in files]:
+        if not os.path.islink(path) and os.access(path, os.W_OK):
+            print(path)
+            sys.exit(0)
+PY
+)"
+        fi
+        # Refused, under every stop policy: in the Breadcrumbs run a helper
+        # of the operator's own wrote a file into the live run's evidence
+        # folder, and the custody alert that followed cost the seats an hour
+        # telling an added name from a changed object. Two ways out, both the
+        # operator's: a copy the run owns, or evidence nothing here can write.
+        if [[ -n "$writable" ]]; then
+          local writable_what="${writable#"$set_real"/}"
+          [[ "$writable" == "$set_real" ]] && writable_what="the directory itself"
+          echo "BLOCKER: the evidence in $set_real is writable by this account, by its permission bits ($writable_what and perhaps more: a file, or a directory whose names can change), on a volume mounted read-write. Used in place, it is held by the VMs' read-only mount and nothing else: the host (you, a helper, a sync client) can still change it under the live run. Either pass --inputs-copy (the run gets its own read-only copy; the source is never touched), or make the evidence read-only first (chmod -R a-w $set_real, or mount its volume read-only). ACLs and volumes mounted inside it are not read here: --inputs-copy holds against those too." >&2
           exit 2
         fi
       done
@@ -4041,6 +4190,14 @@ STRIP
   # A must_establish: key that names no question (docs/adr/0013): said, never guessed.
   if [[ "$(jq -r '.must_establish_unparsed // false' <<<"$goal_meta")" == true ]]; then
     echo "WARN: the goal's metadata block has must_establish: and names no question in it, so nothing is required by it: write the questions as the goal numbers them, must_establish: [1, 3] or a line each (- 1), indented or not ($goal_source)." >&2
+  fi
+  # start --check says what the start's seed says once the run exists: a
+  # question the goal requires and does not number requires nothing.
+  if [[ "$CHECK_ONLY" -eq 1 ]]; then
+    local gc_out
+    if gc_out="$(node --experimental-strip-types --no-warnings "$ROOT/scripts/questions-cli.ts" goal-check "$goal_file" ${inputs_dir:+--inputs "$inputs_dir"} 2>/dev/null)"; then
+      jq -r 'if (.must_establish_unknown // []) | length > 0 then "WARN: the goal says these must be established and numbers no such question, so nothing is required of them: \(.must_establish_unknown | join(", ")). Name a question as the goal numbers it (- 1), or require it once the run exists: swarm.sh question <run> amend Q-n --expect-rev N --must-establish --why \"…\"" else empty end' <<<"$gc_out" >&2 2>/dev/null || true
+    fi
   fi
   if [[ -n "$goal_brief" ]]; then
     echo "WARN: the goal has a case brief ($goal_brief) and designates no premises: its answers will hold the brief's givens (whose devices these are, who the subject is, the setting) open, as parts still to prove. Designate what the brief states as given with a premises: list in the goal's front matter (a line each: - <the brief's sentence> [scope: questions 1, 2; entities <who or what>]), or once the run exists with: swarm.sh question <run> premise add --text \"<the brief's sentence>\" --locator \"<where it stands>\" [--entity E] [--for-question Q-n]. Never a premise that answers a question, or that a question tests ($goal_source)." >&2
@@ -4264,6 +4421,10 @@ sys.exit(0 if t(sys.argv[1]) < t(sys.argv[2]) else 1)' "$_have" "$_ship" 2>/dev/
       AGENT_MODELS+=("$model")
     done
   fi
+  # Whose credential each seat uses, and under which terms (docs/adr/0003):
+  # refused here, before anything is written, whatever the isolation.
+  provider_credentials_check || exit 2
+  model_slug_warnings
   if [[ "$isolation" == "microvm" && "$allow_oauth_in_vm" -eq 0 ]]; then
     # A subscription token is a bearer token for the operator's whole
     # account at the provider, and a VM that holds its placeholder can send
@@ -4317,6 +4478,12 @@ sys.exit(0 if t(sys.argv[1]) < t(sys.argv[2]) else 1)' "$_have" "$_ship" 2>/dev/
   if [[ -n "$cap_tokens" ]] && ! [[ "$cap_tokens" =~ ^[1-9][0-9]*$ ]]; then
     echo "BLOCKER: --cap-tokens must be a whole number of tokens above zero (got $cap_tokens)." >&2
     exit 2
+  fi
+  if [[ -n "$token_alerts_given" ]]; then
+    token_alerts="$(token_marks "$token_alerts_given")" || {
+      echo "BLOCKER: --token-alert takes token counts, comma-separated, each a whole number or one with k, M or G (200M,400M,1.6G; got $token_alerts_given)." >&2
+      exit 2
+    }
   fi
   if [[ -n "$stall_minutes" && "$until_solved" -ne 1 ]]; then
     echo "BLOCKER: --stall-minutes is for a run started --until-solved or --stop operator (the watchdog's regroup)." >&2
@@ -4550,6 +4717,14 @@ sys.exit(0 if t(sys.argv[1]) < t(sys.argv[2]) else 1)' "$_have" "$_ship" 2>/dev/
     if [[ "$prev_n" != "$n" ]]; then
       echo "BLOCKER: run $resume_of had $prev_n agent(s) and these options give $n: a resume continues the same seats (give --n $prev_n)." >&2
       exit 2
+    fi
+    # The token marks are the run's own (budget.json, kept by a resume, with
+    # those it has told): options given again cannot move them, and say so.
+    local kept_marks
+    kept_marks="$(jq -r '(.token_alerts // []) | map(tostring) | join(",")' "$sandbox/budget.json" 2>/dev/null || true)"
+    if [[ "$token_alerts" != "$kept_marks" ]]; then
+      [[ -n "$token_alerts_given" ]] && echo "WARN: a resume keeps the run's token marks (${kept_marks:-none}); --token-alert $token_alerts_given changes nothing here: swarm.sh cap $resume_of --token-alert LIST sets them once the run goes on." >&2
+      token_alerts="$kept_marks"
     fi
   else
     swarm_id="$(alloc_prefix)"
@@ -4925,7 +5100,11 @@ console.log(r.ok ? "" : r.reason);' "$_gp" "$_gk" 2>/dev/null || echo "could not
   # and custody holds network/policy.json to it at every stop.
   write_case_policy_record "$sandbox"
   # The anchor the run started with stays: it names every verdict, release and resume since.
-  [[ -n "$resume_of" ]] || write_custody_anchor "$sandbox" "$swarm_id" "$isolation" "$time_reference"
+  # Whose credential each seat uses, once: the anchor, the record and the kickoff's words.
+  local seat_credentials
+  seat_credentials="$(credentials_json "${agent_ids[@]}" 2>/dev/null || echo '[]')"
+  jq -e 'type == "array"' >/dev/null 2>&1 <<<"$seat_credentials" || seat_credentials='[]'
+  [[ -n "$resume_of" ]] || CUSTODY_CREDENTIALS_JSON="$(jq -nc --argjson seats "$seat_credentials" --argjson cc "$customer_case" '{customer_case: ($cc == 1), seats: $seats}')" write_custody_anchor "$sandbox" "$swarm_id" "$isolation" "$time_reference"
   # Where the VMs' disks are kept: beside the run by default, or where the
   # operator says (a link beside the run names it, so every reader — stop,
   # custody, the package, reap — finds them where it always looks).
@@ -5524,6 +5703,10 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
     --argjson cap_per_model "$(model_caps_json)" \
     --arg case_id "$case_id" \
     --arg examiner "$examiner" \
+    --argjson operator "$operator_json" \
+    --argjson credentials "$seat_credentials" \
+    --argjson customer_case "$customer_case" \
+    --argjson model_identity "$(model_identity_json)" \
     --arg inputs_manifest_sha "$([[ -f "$sandbox/inputs.json" ]] && sha256_of "$sandbox/inputs.json" || true)" \
     --arg allow_hosts "$allow_hosts" \
     --argjson case_policy "${CASE_POLICY_JSON:-null}" \
@@ -5558,6 +5741,7 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
     --arg inbox_page_chars "${inbox_page_chars:-40000}" \
     --argjson metered "$metered" \
     --arg cap_tokens "$cap_tokens" \
+    --arg token_alerts "$token_alerts" \
     --arg local_models "$local_models_csv" \
     --argjson local_only "$local_only" \
     --argjson packs "$packs_json" \
@@ -5568,7 +5752,7 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
     --arg isolation "$isolation" \
     --arg vm_image "$vm_image" --arg vm_image_digest "${vm_image_digest:-}" \
     --argjson vm_cpus "$vm_cpus" \
-    --argjson jobs "$jobs" --argjson workers "$workers" --argjson worker_cpus "$worker_cpus" --argjson worker_memory "${worker_memory:-0}" --argjson derived_catalog "${derived_catalog:-1}" \
+    --argjson jobs "$jobs" --argjson workers "$workers" --argjson worker_cpus "$worker_cpus" --argjson worker_memory "${worker_memory:-0}" --argjson derived_catalog "${derived_catalog:-1}" --argjson derived_limit "${derived_limit:-50}" \
     --argjson job_images "$job_images_json" --argjson pack_profiles "$pack_profiles_json" --arg job_image "${job_image:-}" \
     --argjson vm_memory "${vm_memory:-2048}" --argjson vm_disk "$vm_disk" \
     --argjson vm_snapshot "$vm_snapshot" \
@@ -5613,6 +5797,10 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
       cap_per_model_usd: (if ($cap_per_model | length) == 0 then null else $cap_per_model end),
       case_id: $case_id,
       examiner: $examiner,
+      operator: $operator,
+      credentials: $credentials,
+      customer_case: ($customer_case == 1),
+      model_identity: $model_identity,
       allow_hosts: $allow_hosts,
       case_policy: $case_policy,
       inputs_manifest_sha256: (if $inputs_manifest_sha == "" then null else $inputs_manifest_sha end),
@@ -5645,12 +5833,13 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
       inbox_page_chars: ($inbox_page_chars | tonumber),
       metered: ($metered == 1),
       cap_tokens: (if $cap_tokens == "" then null else ($cap_tokens | tonumber) end),
+      token_alerts: (if $token_alerts == "" then null else ($token_alerts | split(",") | map(tonumber)) end),
       local_models: (if $local_models == "" then [] else ($local_models | split(",")) end),
       goal: $goal,
       agents: $agents,
       agent_models: $agent_models,
       isolation: (if $isolation == "microvm"
-        then {mode: "microvm", runtime: "microsandbox", image: $vm_image, image_digest: (if $vm_image_digest == "" then null else $vm_image_digest end), cpus: $vm_cpus, memory_mib: $vm_memory, disk_mib: $vm_disk, snapshot: ($vm_snapshot == 1), oauth_allowed: ($allow_oauth_in_vm == 1), jobs: (if $jobs == 1 then {workers: $workers, cpus: $worker_cpus, memory_mib: $worker_memory, derived_catalog: ($derived_catalog == 1)} + (if ($job_images | length) > 0 then {images: $job_images, pack_profiles: $pack_profiles, image: $job_image} else {} end) else null end)}
+        then {mode: "microvm", runtime: "microsandbox", image: $vm_image, image_digest: (if $vm_image_digest == "" then null else $vm_image_digest end), cpus: $vm_cpus, memory_mib: $vm_memory, disk_mib: $vm_disk, snapshot: ($vm_snapshot == 1), oauth_allowed: ($allow_oauth_in_vm == 1), jobs: (if $jobs == 1 then {workers: $workers, cpus: $worker_cpus, memory_mib: $worker_memory, derived_catalog: ($derived_catalog == 1)} + (if $derived_catalog == 1 then {derived_limit: $derived_limit} else {} end) + (if ($job_images | length) > 0 then {images: $job_images, pack_profiles: $pack_profiles, image: $job_image} else {} end) else null end)}
           + (if $model_gateway == 1 then {model_gateway: {on: true}} else {} end)
         else {mode: "host"} end),
       provenance: $provenance,
@@ -5673,6 +5862,7 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
   if [[ -n "$resume_of" ]]; then
     rec="$(jq -c --argjson old "$resume_rec" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
       $old * . | .started_at = $old.started_at | .hold = $old.hold | .ledger_from = $old.ledger_from
+      | .model_identity = (if ($old.model_identity.requested // null) == (.model_identity.requested // null) then $old.model_identity else .model_identity end)
       | .resumes = (if $old.state == "prepared" and (($old.resumes // []) | length) > 0 then $old.resumes
           else (($old.resumes // []) + [{at: $at, from: ($old.state // null)}]) end)
       | .resumed_at = (if $old.state == "prepared" and (($old.resumes // []) | length) > 0 then $old.resumed_at else $at end)' <<<"$rec")"
@@ -5735,7 +5925,7 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
 
   echo "Swarm id:     $swarm_id"
   echo "Label:        $label"
-  [[ -n "$notify_cmd" ]] && echo "Notify:       your command runs on finished, finish_failed, stop_incomplete, budget_cap, wall_clock, paused, extended, operator_request, evidence_changed, chain_broken, agent_dead, collector_unreachable, hub_down (kept in $RUNS_DIR/notify/, 0600)"
+  [[ -n "$notify_cmd" ]] && echo "Notify:       your command runs on finished, finish_failed, stop_incomplete, budget_cap, wall_clock, paused, extended, operator_request, token_alert, model_substitution, evidence_changed, chain_broken, agent_dead, collector_unreachable, hub_down (kept in $RUNS_DIR/notify/, 0600)"
   [[ -n "$notify_targets" ]] && echo "Notify:       $(printf '%s\n' "$notify_targets" | sed 's/:.*//' | sort -u | paste -sd, - | sed 's/,/, /g') told of the same events, by ids only: an operator request by its R-n, never what it asks (kept in $RUNS_DIR/notify/, 0600)"
   local disk_words="of unknown encryption (the host did not say)"
   [[ "$disk_encryption" == on ]] && disk_words="encrypted at rest"
@@ -5784,10 +5974,19 @@ print(json.dumps({"id":m["id"],"version":m["version"],"manifest_sha256":hashlib.
     cap-stop) echo "Stop policy:  cap-stop: at a cap the run stops (the harness writes the sentinel after the grace period), recorded as stopped" ;;
     operator) echo "Stop policy:  operator: no wall clock, caps advisory; only you stop the run (swarm.sh stop $swarm_id)" ;;
   esac
+  if [[ "$customer_case" -eq 1 ]]; then
+    echo "Customer case: API keys only, no subscription; whose key each seat uses is in the record and custody: $(jq -r 'map(select(.credential != "local")) | group_by(.provider) | map("\(.[0].provider) \(.[0].owner // "?")") | join("; ")' <<<"$seat_credentials")"
+  fi
+  if [[ -n "$token_alerts" ]]; then
+    echo "Token alerts: ${token_alerts//,/ · } tokens: as the run crosses each you are told (the board, the trace, the console and your notify hook); advisory, nothing stops for it"
+  fi
   echo "Goal:         $goal_source"
   echo "DoD:          from the goal document; checks run by scripts/await-done.sh"
   echo "Operator:     what the run asks of you (a lead's needs, evidence it does not have, a clarification, a network item, a stop proposed) is an operator request with an id: swarm.sh requests $swarm_id list, and the console's Requests tab; a lead's is answered with swarm.sh lead $swarm_id note L-<n> \"<answer>\", evidence with swarm.sh evidence $swarm_id add PATH --for R-<n> --why TEXT"
   echo "Questions:    the goal's are Q-n in questions/questions.md; ask the swarm one while it runs with swarm.sh question $swarm_id add --text \"<question>\" --why \"<why>\" [--as ID], or the console's Questions tab"
+  if [[ "$operator_json" != null ]]; then
+    echo "Operator id:  $(jq -r '"\(.id) (\(.name), \(.role))"' <<<"$operator_json"): --as operator on this run's acts (question, resume --question, requests) is theirs, a claim unless --sign"
+  fi
   echo "Panes:        Herdr right/down grid; tab then workspace fallback if a split fails"
   if [[ "$forging" -eq 1 ]]; then
     echo "Tools:        forging on (make_tool / tools; scripts under tools/<name>/ run as subprocesses)"
@@ -6500,6 +6699,187 @@ credential_models() {
   } | awk '!seen[$0]++'
 }
 
+# How a provider's credential reaches Pi, by Pi's own store: oauth (a
+# subscription login), api_key, or "" when the store does not hold one
+# (models.json, the environment, a local server).
+pi_store_kind() { # <provider>
+  local auth_file
+  auth_file="$(pi_auth_file)"
+  [[ -f "$auth_file" ]] || return 0
+  jq -r --arg p "$1" '.[$p].type // empty' "$auth_file" 2>/dev/null || true
+}
+
+# The owner the operator named for a provider's key (--key-owner
+# PROVIDER=OWNER, or OWNER for every provider), or nothing.
+key_owner_of() { # <provider>
+  local e owner=""
+  for e in ${key_owners[@]+"${key_owners[@]}"}; do
+    if [[ "$e" == "$1="* ]]; then printf '%s' "${e#*=}"; return 0; fi
+    [[ "$e" != *=* ]] && owner="$e"
+  done
+  printf '%s' "$owner"
+}
+
+# Whose credential, under which terms (docs/adr/0003; the legal review of
+# 2026-10-01). Anthropic does not permit a Claude Free, Pro or Max
+# subscription login (OAuth) in a third-party client such as Pi: an
+# anthropic/* seat is refused on one, in every run, and takes an API key.
+# A customer's case (--customer-case) takes no subscription at all
+# (openai-codex/* is one by design: a ChatGPT login, whose consumer terms
+# carry no processor commitments) and names whose API key each provider
+# uses (--key-owner), which the record and custody keep. A test or CTF run
+# may still use Codex's subscription; its record says what that is.
+provider_credentials_check() {
+  local model provider kind owner bad=0 seen="" policy=""
+  [[ "$customer_case" -eq 1 ]] && policy="$(jq -r '.policy // empty' <<<"${CASE_POLICY_JSON:-null}" 2>/dev/null)"
+  if [[ "$customer_case" -eq 1 && "$policy" == ctf ]]; then
+    echo "BLOCKER: --customer-case with --policy ctf: a published case is not a customer's. Drop one of them." >&2
+    return 1
+  fi
+  if [[ "$customer_case" -eq 1 && "$allow_oauth_in_vm" -eq 1 ]]; then
+    echo "BLOCKER: --customer-case refuses every subscription (OAuth) login, and --allow-oauth-in-vm lets one into the VMs. Drop --allow-oauth-in-vm." >&2
+    return 1
+  fi
+  while IFS= read -r model; do
+    [[ -n "$model" ]] || continue
+    provider="${model%%/*}"
+    case " $seen " in *" $provider "*) continue ;; esac
+    seen+=" $provider"
+    provider_is_local "$model" && continue
+    kind="$(pi_store_kind "$provider")"
+    # Pi's order for Anthropic: its store, then ANTHROPIC_AUTH_TOKEN (a
+    # bearer), ANTHROPIC_OAUTH_TOKEN, ANTHROPIC_API_KEY. Where the store holds
+    # no key, a token variable is what the seat would use.
+    local env_var=""
+    [[ "$kind" == api_key ]] || env_var="$(pi_env_credential "$provider")"
+    if [[ "$provider" == anthropic ]] && [[ "$kind" == oauth || "$env_var" == ANTHROPIC_AUTH_TOKEN || "$env_var" == ANTHROPIC_OAUTH_TOKEN ]]; then
+      {
+        if [[ "$kind" == oauth ]]; then
+          echo "BLOCKER: $model would reach Anthropic on a Claude subscription login (OAuth, Pi's store)."
+        else
+          echo "BLOCKER: $model would reach Anthropic with $env_var, a token rather than an API key$([[ "$env_var" == ANTHROPIC_AUTH_TOKEN ]] && echo " (a bearer token: what a Claude subscription's token is sent as, and Pi cannot tell what it is)")."
+        fi
+        echo "  Anthropic does not permit Free, Pro or Max subscription credentials in a third-party client such as Pi; a product or service that calls Claude uses an API key under its Commercial Terms, and Anthropic says it may enforce that without notice, against the account that also carries your Claude apps."
+        echo "  Use an API key from the Anthropic Console instead: in pi, /logout anthropic, then /login anthropic and choose the API key (or ANTHROPIC_API_KEY with --key-from-env on a host run)$([[ -n "$env_var" ]] && echo "; and unset $env_var")."
+      } >&2
+      bad=1
+      continue
+    fi
+    [[ "$customer_case" -eq 1 ]] || continue
+    if [[ "$provider" == openai-codex || "$kind" == oauth ]]; then
+      echo "BLOCKER: --customer-case: $model runs on a subscription ($([[ "$provider" == openai-codex ]] && echo "openai-codex is a ChatGPT login by design" || echo "an OAuth login in Pi's store")). A consumer plan's terms carry no processor commitments, and may let the provider train on what it is sent: a customer's evidence goes only through an API key under business terms (the customer's own, or yours with the customer told). Use an API-key provider for it (openai/…, anthropic/…), logged in to Pi with a key." >&2
+      bad=1
+      continue
+    fi
+    owner="$(key_owner_of "$provider")"
+    if [[ -z "$owner" ]]; then
+      echo "BLOCKER: --customer-case: name whose API key $provider uses: --key-owner $provider=OWNER (the customer, or your own business account), or --key-owner OWNER for every provider. The record and custody keep it beside each seat." >&2
+      bad=1
+    fi
+  done < <(credential_models)
+  [[ "$bad" -eq 0 ]]
+}
+
+# Whether a variable is set for the seats: in this environment, or given with --env.
+env_given() { # <name>
+  local n="$1" e
+  [[ -n "${!n:-}" ]] && return 0
+  for e in ${extra_env[@]+"${extra_env[@]}"} ${provider_env[@]+"${provider_env[@]}"}; do
+    [[ "$e" == "$n="* ]] && return 0
+  done
+  return 1
+}
+
+# The variable Pi would take a provider's credential from when its store
+# holds none, by name (never its value), or nothing: Anthropic's three in
+# Pi's order, else <PROVIDER>_API_KEY.
+pi_env_credential() { # <provider>
+  local p="$1" n
+  if [[ "$p" == anthropic ]]; then
+    for n in ANTHROPIC_AUTH_TOKEN ANTHROPIC_OAUTH_TOKEN ANTHROPIC_API_KEY; do
+      if env_given "$n"; then printf '%s' "$n"; return 0; fi
+    done
+    return 0
+  fi
+  n="$(printf '%s' "$p" | tr 'a-z.-' 'A-Z__')_API_KEY"
+  if env_given "$n"; then printf '%s' "$n"; fi
+  return 0
+}
+
+# What a subscription seat is, in the record and the Key line: a consumer
+# plan for the providers whose subscription logins are consumer plans
+# (ChatGPT/Codex, a Claude plan), a subscription login for any other (a
+# business plan of another provider may be one), never for customer data.
+subscription_words() { # <provider>
+  case "$1" in
+    openai-codex|anthropic) printf 'consumer plan; not for customer data' ;;
+    *) printf 'subscription login; not for customer data' ;;
+  esac
+}
+
+# Each seat's credential, for the record and custody: the seat, its model,
+# the provider, how the key reaches Pi (api_key or oauth in Pi's store, env
+# with the variable's name, local, or other: models.json), whose it is when
+# the operator said (--key-owner), and for a subscription what it is. The
+# summary model, when no seat runs it, is a line of its own (seat "summary").
+credentials_json() { # <agent ids...>
+  local i id model provider kind owner var rows=""
+  local ids=("$@")
+  for ((i = 0; i < ${#ids[@]}; i++)); do
+    id="${ids[$i]}"
+    model="${AGENT_MODELS[$i]:-}"
+    rows+="$id"$'\t'"$model"$'\n'
+  done
+  if [[ -n "${compact_model:-}" ]] && ! distinct_models | grep -qxF "$compact_model"; then rows+="summary"$'\t'"$compact_model"$'\n'; fi
+  printf '%s' "$rows" | while IFS=$'\t' read -r id model; do
+    [[ -n "$id" ]] || continue
+    provider="${model%%/*}"
+    var=""
+    if provider_is_local "$model"; then kind=local
+    else
+      kind="$(pi_store_kind "$provider")"
+      if [[ -z "$kind" ]]; then var="$(pi_env_credential "$provider")"; if [[ -n "$var" ]]; then kind=env; else kind=other; fi; fi
+    fi
+    owner="$(key_owner_of "$provider")"
+    jq -nc --arg seat "$id" --arg model "$model" --arg provider "$provider" --arg kind "$kind" --arg owner "$owner" --arg var "$var" --arg plan "$(subscription_words "$provider")" \
+      '{seat: $seat, model: $model, provider: $provider, credential: $kind, owner: (if $owner == "" then null else $owner end)}
+       + (if $var != "" then {variable: $var} else {} end)
+       + (if $kind == "oauth" then {plan: $plan} else {} end)'
+  done | jq -sc .
+}
+
+# The model ids the run asked for, and when (the record's model_identity):
+# a provider can change what it serves under an id, an alias above all, and
+# a run read later is compared by what was asked on that day. Ids that name
+# no dated model (`-latest`, `latest`) are listed as floating; the kickoff
+# warns of them (model_slug_warnings). What answered is the trace's
+# model_reported line, when a provider says it was another model.
+floating_model() { # <provider/id>
+  [[ "${1#*/}" =~ (^|[-_.:@])latest($|[-_.:@]) ]]
+}
+model_identity_json() {
+  local m requested=() floating=()
+  while IFS= read -r m; do
+    [[ -n "$m" ]] || continue
+    requested+=("$m")
+    # A local server's tag (ollama's :latest) is no provider's to change.
+    floating_model "$m" && ! provider_is_local "$m" && floating+=("$m")
+  done < <(credential_models)
+  jq -nc --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --argjson requested "$(printf '%s\n' ${requested[@]+"${requested[@]}"} | jq -R . | jq -sc 'map(select(. != ""))')" \
+    --argjson floating "$(printf '%s\n' ${floating[@]+"${floating[@]}"} | jq -R . | jq -sc 'map(select(. != ""))')" \
+    '{requested: $requested, recorded_at: $at, floating: $floating}'
+}
+model_slug_warnings() {
+  local m
+  while IFS= read -r m; do
+    [[ -n "$m" ]] || continue
+    floating_model "$m" || continue
+    provider_is_local "$m" && continue
+    echo "WARN: $m names no dated model (latest): the provider can change what answers under it between one run and the next, or within a run. For a run you will compare or repeat, name a dated model id; the record keeps the ids asked for and the date (model_identity), and a seat the provider answers with another model is said on the board and to you (model_reported)." >&2
+  done < <(credential_models)
+}
+
 # The team's subscription (OAuth) providers, by Pi's store, one per line.
 vm_oauth_providers() {
   local auth_file model provider seen=""
@@ -7019,7 +7399,12 @@ stop_sandbox_daemons() {
   rm -f "$sandbox/netguard.pid" "$sandbox/netguard.port" "$sandbox/netguard.only" "$sandbox/idle-nudge.pid" \
         "$sandbox/collector.pid" "$sandbox/traces/.collector.sock" \
         "$sandbox/nudge.pid" "$sandbox/traces/.nudge.sock" \
-        "$sandbox/gate.pid" "$sandbox/traces/.collector-gate.sock" "$sandbox/hub.pid"
+        "$sandbox/gate.pid" "$sandbox/traces/.collector-gate.sock"
+  # hub.pid only once its hub has gone: one still up (asked to go and not
+  # gone yet) is the store's writer, and the next stop must find it.
+  if [[ -f "$sandbox/hub.pid" ]]; then
+    hub_pid_ours "$sandbox" "$(cat "$sandbox/hub.pid" 2>/dev/null)" || rm -f "$sandbox/hub.pid"
+  fi
   # `netguard.allow` is not a runtime file, it is the record of what this run
   # could reach — a chain-of-custody line the report prints. Teardown used to
   # delete it with the pid and the port, so every report written after
@@ -7594,7 +7979,8 @@ write_custody_anchor() { # <sandbox> <run id> [isolation] [time reference url]
   # How the agents were held is part of what custody must not take from
   # inside the run: which files an agent could write depends on it.
   jq -n --arg run "$run" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg m "$manifest_sha" --arg iso "$isolation" --argjson tref "$tref_json" --arg cp "$policy_sha" \
-    '{run: $run, started_at: $at, isolation: $iso} + (if $m == "" then {} else {inputs_manifest_sha256: $m} end) + (if $cp == "" then {} else {case_policy_sha256: $cp} end) + (if $tref == null then {} else {time_reference: $tref} end)' > "$anchor"
+    --argjson creds "${CUSTODY_CREDENTIALS_JSON:-null}" \
+    '{run: $run, started_at: $at, isolation: $iso} + (if $m == "" then {} else {inputs_manifest_sha256: $m} end) + (if $cp == "" then {} else {case_policy_sha256: $cp} end) + (if $tref == null then {} else {time_reference: $tref} end) + (if $creds == null then {} else {credentials: $creds} end)' > "$anchor"
 }
 
 # Where every run's hub lives: one parent, so a host-mode pane can be denied
@@ -7699,6 +8085,38 @@ hub_send() { # <admin socket> <json>
 # hub, when one runs, is the register's one writer, and the operator's acts
 # go to it on its admin socket; with no hub (host isolation, or a run that is
 # not going) the CLI admits them itself under the registers' lock.
+# The run's operator (start --operator ID), an enrolled person kept in the
+# run's record: `--as operator` on an act of that run names them. A run that
+# names none leaves `operator` as it is, a person enrolled under that id or
+# a refusal naming nobody (the Breadcrumbs run's first resume asked its
+# question --as operator, and the register, finding nobody enrolled under
+# it, refused it: start --operator is the way to have it taken).
+resolve_operator_as() { # <record json> <as>: prints the --as value to use
+  local rec="$1" as="$2" op
+  if [[ "$as" != operator ]]; then printf '%s' "$as"; return 0; fi
+  op="$(jq -r '.operator.id // empty' <<<"$rec" 2>/dev/null)"
+  printf '%s' "${op:-operator}"
+}
+
+# The arguments of an act with each `--as operator` resolved (resolve_operator_as), in OP_ARGS.
+OP_ARGS=()
+operator_args() { # <record json> <args...>
+  local rec="$1" a next=0 v
+  shift
+  OP_ARGS=()
+  for a in "$@"; do
+    if [[ "$next" -eq 1 ]]; then
+      next=0
+      OP_ARGS+=(--as "$(resolve_operator_as "$rec" "$a")")
+      continue
+    fi
+    if [[ "$a" == --as ]]; then next=1; continue; fi
+    OP_ARGS+=("$a")
+  done
+  [[ "$next" -eq 1 ]] && OP_ARGS+=(--as)
+  return 0
+}
+
 question_admission_args() { # <sandbox>
   local dir
   if dir="$(hub_dir_of "$1" 2>/dev/null)" && [[ -S "$dir/admin.sock" ]]; then
@@ -7941,22 +8359,104 @@ vm_providers_json() {
   done < <(credential_models) | jq -s -c .
 }
 
+# The harness's own trace lines the collector could not take — an
+# operator's command after the collector stopped, the hub's last words —
+# chained by the collector's own code once no collector is up
+# (trace-collector.mjs --gather), each marked `gathered` and unverified,
+# the spilled lines kept whole in traces/<name>.gathered.jsonl. On the
+# Breadcrumbs run a reap and a second stop after the first stop left two
+# lines outside the chain. Only a trace a collector anchored. <sandbox>
+trace_gather() {
+  local sandbox="$1" out anchor f any=0
+  [[ -n "$sandbox" && -d "$sandbox/traces" ]] || return 0
+  for f in system-spill.jsonl hub-spill.jsonl system-spill.jsonl.gathering hub-spill.jsonl.gathering; do
+    [[ -s "$sandbox/traces/$f" ]] && any=1
+  done
+  [[ "$any" -eq 1 ]] || return 0
+  anchor="$(trace_anchor_path "$sandbox")"
+  if [[ ! -f "$anchor" ]]; then
+    echo "WARN: the harness spilled trace lines (traces/system-spill.jsonl, traces/hub-spill.jsonl) and no collector anchored this run's trace, so they are not chained: custody counts them outside the chain." >&2
+    return 0
+  fi
+  out="$(node "$ROOT/scripts/trace-collector.mjs" "$sandbox" --gather --anchor "$anchor" 2>>"$sandbox/traces/collector.log" </dev/null)" || true
+  if [[ "$(jq -r '.ok // false' <<<"$out" 2>/dev/null)" == true ]]; then
+    [[ "$(jq -r '.gathered + .duplicates' <<<"$out")" != 0 ]] && echo "Trace:        $(jq -r '"\(.gathered) spilled line(s) chained (\([.files[] | .path] | join(", ")))\(if .duplicates > 0 then "; \(.duplicates) already on the chain" else "" end)"' <<<"$out")"
+    [[ "$(jq -r '.kept' <<<"$out")" != 0 ]] && echo "WARN: $(jq -r '.kept' <<<"$out") spilled line(s) stay outside the chain: not events, or not the harness's own ($(jq -r '.foreign // 0' <<<"$out") naming another sender); custody counts them" >&2
+  else
+    echo "WARN: the spilled trace lines were not chained: $(jq -r '.error // "no answer"' <<<"$out" 2>/dev/null || printf 'no answer') (custody counts them outside the chain; stop again chains them)" >&2
+  fi
+  return 0
+}
+
+# Whether a process has gone within so many seconds of being asked to.
+stop_wait_gone() { # <pid> <seconds>
+  local i
+  for ((i = 0; i < $2 * 5; i++)); do
+    kill -0 "$1" 2>/dev/null || return 0
+    sleep 0.2
+  done
+  ! kill -0 "$1" 2>/dev/null
+}
+
+# A lost or stale pid file is not proof that the run's writer has gone.
+# Reuse the store's process lookup, including the keeper's --resume form.
+stop_hub_pid() { # <sandbox>: a pid, or empty when no hub is found
+  local pid
+  pid="$(cat "$1/hub.pid" 2>/dev/null || true)"
+  if hub_pid_ours "$1" "$pid"; then
+    printf '%s\n' "$pid"
+    return 0
+  fi
+  node --experimental-strip-types --no-warnings --input-type=module -e '
+    const { hubProcessFor } = await import(process.argv[2]);
+    const pid = hubProcessFor(process.argv[3]);
+    if (pid !== null) console.log(pid);
+  ' -- stop-hub "$ROOT/scripts/evidence-store.ts" "$1"
+}
+
+# A job's staging directory the hub left unsealed (its worker not confirmed
+# gone when the hub stopped), sealed by `vm.ts seal-left` once msb says the
+# worker is gone, or named with why: nothing is left unsealed unsaid. Only
+# with the hub gone. <sandbox>
+stop_seal_staging() {
+  local sandbox="$1" out seal_rc=0
+  [[ -d "$sandbox.staging" ]] || return 0
+  [[ -n "$(ls -A "$sandbox.staging" 2>/dev/null | grep -v '^\.' || true)" ]] || return 0
+  out="$(vm_cli seal-left --sandbox "$sandbox" 2>>"$sandbox/traces/vm-finish.log")" || seal_rc=$?
+  printf '%s\n' "$out" >> "$sandbox/traces/vm-finish.log"
+  jq -r '.sealed[]? | "              job staging \(.staging): sealed (\(.job), \(.status)) once its worker was confirmed gone"' <<<"$out" 2>/dev/null || true
+  jq -r '.left[]? | "WARN: job staging \(.staging) left unsealed: \(.why)"' <<<"$out" 2>/dev/null >&2 || true
+  local err
+  err="$(jq -r '.error // empty' <<<"$out" 2>/dev/null || true)"
+  [[ -n "$err" || -z "$out" ]] && echo "WARN: the job staging the hub left could not be sealed: ${err:-no answer} (see $sandbox/traces/vm-finish.log; stop again seals it)" >&2
+  # Exit 1 names unowned or unconfirmed staging for custody; exit 2 means
+  # sealing could not run at all (a live hub, or an unreadable journal).
+  [[ "$seal_rc" -ge 2 ]] && return 3
+  return 0
+}
+
 # Put a run's VMs away, then its hub: snapshot (unless told not to), stop and
 # remove every VM carrying the run's label. Safe to run twice.
-stop_vm_run() { # <sandbox> <run id> <snapshot 0|1>  (returns 3 when a VM of the run is still there)
+stop_vm_run() { # <sandbox> <run id> <snapshot 0|1>  (returns 3 when finalisation is unsafe)
   local sandbox="$1" run="$2" snap="${3:-1}" args=(--registry "$REGISTRY") pid dir out left rc=0
   [[ "$snap" -eq 1 ]] || args+=(--no-snapshot)
+  pid="$(stop_hub_pid "$sandbox")" || { echo "WARN: the run's hub could not be checked; stop again once it can be." >&2; return 3; }
+  if [[ -n "$pid" ]] && ! hub_pid_ours "$sandbox" "$pid"; then
+    echo "WARN: the run's hub (pid $pid) is still up, but its directory record cannot confirm which process to stop; finalisation is deferred." >&2
+    return 3
+  fi
   if dir="$(hub_dir_of "$sandbox")"; then
     # The keeper first, or it brings back the hub this stop is ending.
     : > "$dir/.stop"
-    pid="$(cat "$dir/supervisor.pid" 2>/dev/null || true)"
-    if [[ -n "$pid" ]] && ps -o command= -p "$pid" 2>/dev/null | grep -q "hub-supervise.sh"; then kill "$pid" 2>/dev/null || true; fi
+    local keeper_pid
+    keeper_pid="$(cat "$dir/supervisor.pid" 2>/dev/null || true)"
+    if [[ -n "$keeper_pid" ]] && ps -o command= -p "$keeper_pid" 2>/dev/null | grep -q "hub-supervise.sh"; then kill "$keeper_pid" 2>/dev/null || true; fi
     # A hub that is putting the VMs away itself is let finish: a second
     # finish would only wait for its lock, and custody taken twice at once
     # writes one verdict over the other.
     local waited=0
     while [[ "$(jq -r 'if .finished == true and (.finish_done // false) == false then "busy" else "" end' "$dir/status.json" 2>/dev/null)" == "busy" ]] \
-      && hub_pid_ours "$sandbox" "$(cat "$sandbox/hub.pid" 2>/dev/null)" && (( waited < ${SWARM_STOP_HUB_WAIT_SEC:-1800} )); do
+      && hub_pid_ours "$sandbox" "$pid" && (( waited < ${SWARM_STOP_HUB_WAIT_SEC:-1800} )); do
       (( waited % 30 == 0 )) && echo "              the hub is putting the VMs away itself; waiting for it (${waited}s)"
       sleep 5
       waited=$((waited + 5))
@@ -7979,28 +8479,74 @@ stop_vm_run() { # <sandbox> <run id> <snapshot 0|1>  (returns 3 when a VM of the
   if [[ "$(jq -r '(.vms // []) | length' <<<"$out" 2>/dev/null || echo 0)" == "0" ]]; then
     echo "              none left to stop (the hub had put them away, or none was made)"
   fi
-  local listed
-  if ! listed="$(vm_cli list --run "$run" 2>/dev/null)"; then
-    echo "WARN: could not list run $run's VMs afterwards ($(jq -r '.error // "no answer"' <<<"$listed" 2>/dev/null)); check with \`swarm.sh status $run\`." >&2
-    rc=3
+  # The hub goes before the VMs are counted, and is waited for: its job
+  # service cancels what waits, removes each worker it runs and seals its
+  # staging. On the Breadcrumbs run a job started while the seats were put
+  # away, the stop counted its worker while the hub was removing it, said
+  # stop_incomplete, and the hub went with that job's staging unsealed.
+  # Whole seconds, or the defaults: a stray value must not end the stop half-way.
+  local hub_exit_sec="${SWARM_STOP_HUB_EXIT_SEC:-180}" job_vm_wait_sec="${SWARM_STOP_JOB_VM_WAIT_SEC:-60}"
+  [[ "$hub_exit_sec" =~ ^[0-9]+$ ]] || hub_exit_sec=180
+  [[ "$job_vm_wait_sec" =~ ^[0-9]+$ ]] || job_vm_wait_sec=60
+  local hub_gone=1
+  pid="$(stop_hub_pid "$sandbox")" || { echo "WARN: the run's hub could not be checked; finalisation is deferred." >&2; return 3; }
+  if [[ -n "$pid" ]]; then
+    if hub_pid_ours "$sandbox" "$pid"; then
+      kill "$pid" 2>/dev/null || true
+      stop_wait_gone "$pid" "$hub_exit_sec" || hub_gone=0
+    else
+      hub_gone=0
+    fi
+    if [[ "$hub_gone" -eq 1 ]]; then
+      rm -f "$sandbox/hub.pid"
+    else
+      echo "WARN: the hub (pid $pid) did not exit within ${hub_exit_sec}s of being asked: its pid file, its directory and its jobs' staging are kept as they are, and the run is not stopped. Run stop again once it has gone (or after \`kill $pid\` if it hangs): that stop waits for it and seals what it left." >&2
+      rc=3
+    fi
+  else
+    rm -f "$sandbox/hub.pid"
   fi
-  left="$(jq -r '.vms[]?.name' <<<"$listed" 2>/dev/null || true)"
+  local listed waited=0
+  while :; do
+    if ! listed="$(vm_cli list --run "$run" 2>/dev/null)"; then
+      echo "WARN: could not list run $run's VMs afterwards ($(jq -r '.error // "no answer"' <<<"$listed" 2>/dev/null)); check with \`swarm.sh status $run\`." >&2
+      rc=3
+      break
+    fi
+    left="$(jq -r '.vms[]?.name' <<<"$listed" 2>/dev/null || true)"
+    [[ -z "$left" ]] && break
+    # A job's worker still listed once its hub has gone: removed by a
+    # second finish (nothing is left to make another), then the list is
+    # asked again, for a bounded time, before anything is called left up.
+    [[ "$hub_gone" -eq 1 && -n "$(jq -r '.vms[]? | select(.kind == "worker") | .name' <<<"$listed" 2>/dev/null)" ]] || break
+    (( waited >= job_vm_wait_sec )) && break
+    if [[ "$waited" -eq 0 ]]; then
+      echo "              a job's worker is still listed: removing it now that the hub has gone (up to ${job_vm_wait_sec}s)"
+      out="$(vm_cli finish --run "$run" --sandbox "$sandbox" ${args[@]+"${args[@]}"} 2>>"$sandbox/traces/vm-finish.log")" || true
+      printf '%s\n' "$out" >> "$sandbox/traces/vm-finish.log"
+    fi
+    sleep 2
+    waited=$((waited + 2))
+  done
   if [[ -n "$left" ]]; then
     echo "WARN: these VMs of run $run are still there: $(tr '\n' ' ' <<<"$left")— see $sandbox/traces/vm-finish.log; \`swarm.sh reap $run\` removes them once you have looked." >&2
     rc=3
   fi
-  if [[ -f "$sandbox/hub.pid" ]]; then
-    pid="$(cat "$sandbox/hub.pid" 2>/dev/null || true)"
-    if hub_pid_ours "$sandbox" "$pid"; then kill "$pid" 2>/dev/null || true; fi
-    rm -f "$sandbox/hub.pid"
+  # What the hub left unsealed in the job staging (a worker it could not
+  # confirm gone), sealed now with msb's own answer for each worker, or
+  # named with why. Only once the hub, the store's writer, has gone.
+  if [[ "$hub_gone" -eq 1 ]]; then
+    stop_seal_staging "$sandbox" || return 3
   fi
   if dir="$(hub_dir_of "$sandbox")"; then
     # The hub's own lines the collector did not take stay with the run.
     [[ -f "$dir/hub-spill.jsonl" && ! -L "$dir/hub-spill.jsonl" && -s "$dir/hub-spill.jsonl" ]] && cp -P "$dir/hub-spill.jsonl" "$sandbox/traces/hub-spill.jsonl" 2>/dev/null
-    # Only a directory this run could have made.
-    [[ "$dir" == */dfs-"$run".* ]] && rm -rf "$dir"
+    # Only a directory this run could have made, and only once its hub has
+    # gone: a hub still up keeps it (and hub.dir, hub.pid), so the next stop
+    # finds the hub, waits for it and seals after it, never beside it.
+    [[ "$hub_gone" -eq 1 && "$dir" == */dfs-"$run".* ]] && rm -rf "$dir"
   fi
-  rm -f "$sandbox/hub.dir"
+  [[ "$hub_gone" -eq 1 ]] && rm -f "$sandbox/hub.dir"
   return "$rc"
 }
 
@@ -8250,15 +8796,17 @@ launch_vm_agents() {
     [[ "$allow_install" -eq 1 && "$install_hosts" -eq 1 && "${local_only:-0}" -eq 0 ]] && job_hosts="${job_hosts}${job_hosts:+,}pypi.org,files.pythonhosted.org"
     JOBS_JSON="$(jq -nc --arg image "${job_image:-$vm_image}" --argjson workers "$workers" --argjson cpus "$worker_cpus" --argjson mem "$worker_memory" \
       --arg hosts "$job_hosts" --argjson open "$([[ "$use_netguard" -eq 0 ]] && echo true || echo false)" --arg packs "$pack_dirs" \
-      --argjson derived "$([[ "$derived_catalog" -eq 1 ]] && echo true || echo false)" \
+      --argjson derived "$([[ "$derived_catalog" -eq 1 ]] && echo true || echo false)" --argjson derived_limit "${derived_limit:-50}" \
       --argjson images "$job_images_json" --argjson pack_profiles "$pack_profiles_json" \
-      '{image: $image, workers: $workers, cpus: $cpus, memoryMib: $mem, allowHosts: ($hosts | split(",") | map(select(length > 0))), openNet: $open, packDirs: ($packs | split("\n") | map(select(length > 0)))} + {derived: $derived} + (if ($images | length) > 0 then {images: $images, packProfiles: $pack_profiles} else {} end)')"
+      '{image: $image, workers: $workers, cpus: $cpus, memoryMib: $mem, allowHosts: ($hosts | split(",") | map(select(length > 0))), openNet: $open, packDirs: ($packs | split("\n") | map(select(length > 0)))} + {derived: $derived, derivedGenerations: $derived_limit} + (if ($images | length) > 0 then {images: $images, packProfiles: $pack_profiles} else {} end)')"
     echo "Jobs:         up to $workers worker VM(s) at a time$([[ "$workers" -ge 3 ]] && printf ', one kept for short jobs'), ${worker_cpus} vCPU and ${worker_memory} MiB each, no network unless a job asks for the run's allowlist"
     if [[ "$(jq 'length' <<<"$job_images_json")" -gt 0 ]]; then
       echo "              job images: $(jq -r 'to_entries | map("\(.key) \(.value)") | join("; ")' <<<"$job_images_json"); a job names one with profile=, a pack tool or a recipe runs in its pack's, and one with none in ${job_image}"
     fi
     if [[ "$derived_catalog" -eq 1 ]]; then
-      echo "              derived catalogue on: what jobs make is offered to the recipes by content, in the lowest lane (one worker), within 300 worker-s each 10 min, at most 50 generations and 2 GiB a run (--no-derived-catalog: off)"
+      local derived_said="--derived-limit N sets it"
+      if [[ "${derived_limit_given:-0}" -eq 1 ]]; then derived_said="--derived-limit"; elif [[ -n "${SWARM_DERIVED_LIMIT:-}" ]]; then derived_said="SWARM_DERIVED_LIMIT"; fi
+      echo "              derived catalogue on: what jobs make is offered to the recipes by content, in the lowest lane (one worker), within 300 worker-s each 10 min, at most ${derived_limit:-50} generations ($derived_said) and 2 GiB a run (--no-derived-catalog: off)"
     else
       echo "              derived catalogue off (--no-derived-catalog): an object a job makes is catalogued only by catalog_request"
     fi
@@ -8568,8 +9116,17 @@ cmd_stop() {
   # A stop can take minutes (snapshots, custody). Interrupted, it says where
   # it was and that running it again finishes the job: every step is safe to
   # repeat.
-  local stop_step="closing the panes"
+  local stop_step="holding the jobs"
   trap 'echo >&2; echo "stop interrupted while ${stop_step}. Nothing is lost: scripts/swarm.sh stop '"$id"' again finishes it (every step is safe to repeat)." >&2; exit 130' INT TERM
+  local sandbox stop_hub_dir
+  sandbox="$(jq -r '.sandbox // empty' <<<"$rec")"
+  # Hold jobs before closing panes: Herdr may take time to answer, and the
+  # hub must not accept a job or start a worker during that wait.
+  if [[ -n "$sandbox" ]] && stop_hub_dir="$(hub_dir_of "$sandbox" 2>/dev/null)"; then
+    : > "$stop_hub_dir/.stop"
+  fi
+  operator_trace "$sandbox" stop ${stop_args[@]+"${stop_args[@]}"}
+  stop_step="closing the panes"
   if command -v herdr >/dev/null 2>&1; then
     while read -r ws; do
       [[ -z "$ws" ]] && continue
@@ -8579,9 +9136,6 @@ cmd_stop() {
       ((.workspace_ids // []) + [(.workspace_id // empty)]) | unique | .[]
     ' <<<"$rec")
   fi
-  local sandbox
-  sandbox="$(jq -r '.sandbox // empty' <<<"$rec")"
-  operator_trace "$sandbox" stop ${stop_args[@]+"${stop_args[@]}"}
   # A run recorded as running whose every process is gone did not end by
   # itself: the host restarted, or the run crashed. Said, with the last line
   # the trace has, before this stop records it as stopped.
@@ -8597,8 +9151,23 @@ cmd_stop() {
     stop_step="putting the VMs away"
     stop_vm_run "$sandbox" "$id" "$snap" || vms_left=1
   fi
+  if [[ "$vms_left" -eq 1 ]]; then
+    # A live hub or VM may still write and use its evidence. Keep the
+    # collector and mounts, and defer gather, custody and release until a
+    # later stop confirms that every writer has gone.
+    registry_update_state "$id" "stop_incomplete"
+    echo "NOT STOPPED: $id still has VMs or its hub up (above); finalisation is deferred and the record says stop_incomplete. Look, then run stop again or \`swarm.sh reap $id\`." >&2
+    notify_run "$sandbox" stop_incomplete '{"state":"stop_incomplete"}'
+    trap - INT TERM
+    exit 3
+  fi
   stop_step="stopping the run's daemons"
   stop_sandbox_daemons "$sandbox" keep-record
+  # The harness's own lines the collector could not take, chained now that
+  # it is down (this stop's own line among them when the collector had gone
+  # before it): custody below finds none outside the chain.
+  stop_step="chaining the spilled lines"
+  trace_gather "$sandbox"
   # A run the operator stops with no sentinel is stopped, never completed:
   # done/STOPPED says so (the stop policy's outcome), before custody seals it.
   if [[ -n "$sandbox" && -d "$sandbox" && ! -f "$sandbox/done/SWARM_DONE" && "$after_hub" -eq 0 ]]; then
@@ -8654,13 +9223,7 @@ cmd_stop() {
   trap - INT TERM
   local was
   was="$(jq -r '.state // empty' <<<"$rec")"
-  if [[ "$vms_left" -eq 1 ]]; then
-    # A run whose VMs are still up is not stopped, and its record says so.
-    registry_update_state "$id" "stop_incomplete"
-    echo "NOT STOPPED: $id still has VMs up (above); the record says stop_incomplete. Look, then run stop again or \`swarm.sh reap $id\`." >&2
-    notify_run "$sandbox" stop_incomplete '{"state":"stop_incomplete"}'
-    exit 3
-  elif [[ "$after_hub" -eq 1 && ( "$was" == "finished" || "$was" == "finish_failed" ) ]]; then
+  if [[ "$after_hub" -eq 1 && ( "$was" == "finished" || "$was" == "finish_failed" ) ]]; then
     # The hub told the operator when it finished the run.
     registry_update_state "$id" "$was"
     echo "Cleared $id after the hub finished it (recorded as $was)"
@@ -9092,6 +9655,8 @@ cmd_question() {
   rec="$(json_get "$id")"
   sandbox="$(jq -r '.sandbox // empty' <<<"$rec")"
   [[ -n "$sandbox" && -d "$sandbox" ]] || { echo "Unknown swarm id or missing sandbox: $id" >&2; exit 1; }
+  operator_args "$rec" "$@"
+  set -- ${OP_ARGS[@]+"${OP_ARGS[@]}"}
   local cli="$ROOT/scripts/questions-cli.ts"
   case "$sub" in
     list|show|verify)
@@ -9167,6 +9732,8 @@ cmd_requests() {
   rec="$(json_get "$id")"
   sandbox="$(jq -r '.sandbox // empty' <<<"$rec")"
   [[ -n "$sandbox" && -d "$sandbox" ]] || { echo "Unknown swarm id or missing sandbox: $id" >&2; exit 1; }
+  operator_args "$rec" "$@"
+  set -- ${OP_ARGS[@]+"${OP_ARGS[@]}"}
   local cli="$ROOT/scripts/requests-cli.ts" out status=0 admission=() a
   case "$sub" in
     list|show)
@@ -9292,9 +9859,9 @@ add_material() { # <evidence|material|tool> <id> <add|list> ...
 # board; a stop the run is no longer over is withdrawn.
 cmd_cap() {
   local id="${1:-}"
-  [[ -n "$id" && "$id" != -* ]] || { echo "BLOCKER: cap needs <id> and at least one of --usd, --tokens, --per-agent-usd, --per-agent-tokens, --wall-clock." >&2; exit 2; }
+  [[ -n "$id" && "$id" != -* ]] || { echo "BLOCKER: cap needs <id> and at least one of --usd, --tokens, --per-agent-usd, --per-agent-tokens, --wall-clock, --token-alert." >&2; exit 2; }
   shift
-  [[ $# -gt 0 ]] || { echo "BLOCKER: cap needs at least one of --usd, --tokens, --per-agent-usd, --per-agent-tokens, --wall-clock." >&2; exit 2; }
+  [[ $# -gt 0 ]] || { echo "BLOCKER: cap needs at least one of --usd, --tokens, --per-agent-usd, --per-agent-tokens, --wall-clock, --token-alert." >&2; exit 2; }
   ensure_registry
   local rec sandbox state
   rec="$(json_get "$id")"
@@ -9478,6 +10045,8 @@ cmd_resume() {
     exit 2
   fi
   [[ -n "$sandbox" && -d "$sandbox" && -f "$sandbox/team.json" && -f "$sandbox/budget.json" ]] || { echo "BLOCKER: run $id's sandbox, team or budget is not there." >&2; exit 2; }
+  # --as operator: the run's operator (start --operator), resolve_operator_as.
+  [[ -n "$as" ]] && as="$(resolve_operator_as "$rec" "$as")"
   # The questions asked for the continuation: --question, and a file of them (one a line, or a JSON list).
   if [[ -n "$qfile" ]]; then
     [[ -f "$qfile" ]] || { echo "BLOCKER: --questions $qfile is not a file." >&2; exit 2; }
@@ -9508,7 +10077,7 @@ cmd_resume() {
       if [[ "$skip_refused" -eq 1 ]]; then
         echo "WARN: the question \"$q\" cannot be admitted ($qwhy): left out, as --skip-refused-questions says; the resume goes on without it." >&2
       else
-        echo "BLOCKER: the question \"$q\" cannot be admitted: $qwhy. Nothing was changed. Ask it so the register takes it (--as names a person enrolled with swarm.sh examiner enroll; without --as it is this OS account's, with the operator's authority), or give --skip-refused-questions to resume without it." >&2
+        echo "BLOCKER: the question \"$q\" cannot be admitted: $qwhy. Nothing was changed. Ask it so the register takes it (--as names a person enrolled with swarm.sh examiner enroll, or --as operator the run's operator, start --operator; without --as it is this OS account's, with the operator's authority), or give --skip-refused-questions to resume without it." >&2
         refused_q=1
       fi
     done
@@ -9773,6 +10342,18 @@ cmd_package() {
   local sandbox
   sandbox="$(json_get "$id" | jq -r '.sandbox // empty')"
   [[ -n "$sandbox" && -d "$sandbox" ]] || { echo "Unknown swarm id or missing sandbox: $id" >&2; exit 1; }
+  # A record the stop has not finished: a job's staging not sealed, or the
+  # harness's trace lines outside the chain. The package goes out as the
+  # record stands, and says so; `stop` again seals and chains them.
+  local unsealed spilled_lines=0 sp_f sp_n
+  unsealed="$(ls -A "$sandbox.staging" 2>/dev/null | grep -v '^\.' | tr '\n' ' ' || true)"
+  for sp_f in "$sandbox/traces/system-spill.jsonl" "$sandbox/traces/hub-spill.jsonl"; do
+    [[ -f "$sp_f" && ! -L "$sp_f" ]] || continue
+    sp_n="$(grep -c . "$sp_f" 2>/dev/null || true)"
+    [[ "$sp_n" =~ ^[0-9]+$ ]] && spilled_lines=$((spilled_lines + sp_n))
+  done
+  [[ -n "$unsealed" ]] && echo "WARN: job staging left unsealed (${unsealed% }): the package carries no output of those jobs; \`swarm.sh stop $id\` again seals them first." >&2
+  [[ "$spilled_lines" -gt 0 ]] && echo "WARN: $spilled_lines harness trace line(s) are outside the chain (traces/system-spill.jsonl and traces/hub-spill.jsonl, carried as trace/spill-system.jsonl and trace/spill-hub.jsonl); \`swarm.sh stop $id\` again chains them first." >&2
   local out="$sandbox/package"
   rm -rf "$out"
   mkdir -p "$out/work" "$out/board" "$out/trace"
@@ -10014,6 +10595,10 @@ PY
   pkg_copy "$sandbox/work/.trace-spill.jsonl" "$out/trace/spill-host.jsonl" non-empty
   pkg_copy "$sandbox/traces/hub-spill.jsonl" "$out/trace/spill-hub.jsonl" non-empty
   pkg_copy "$sandbox/traces/system-spill.jsonl" "$out/trace/spill-system.jsonl" non-empty
+  # The spilled lines a stop chained (each on the trace marked gathered with
+  # its sha256), whole, so a recipient can hold each mark to its line.
+  pkg_copy "$sandbox/traces/hub-spill.gathered.jsonl" "$out/trace/spill-hub.gathered.jsonl" non-empty
+  pkg_copy "$sandbox/traces/system-spill.gathered.jsonl" "$out/trace/spill-system.gathered.jsonl" non-empty
   local sp
   for sp in "$sandbox"/tool-output/*/trace-spill.jsonl; do
     pkg_copy "$sp" "$out/trace/spill-$(basename "$(dirname "$sp")").jsonl" non-empty
@@ -11137,11 +11722,13 @@ EOF
     export) echo "  export <id> --format csv|timesketch [--out FILE] [--redact]   the ledger as CSV or a Timesketch CSV import (default: <sandbox>/exports/); --redact replaces what a sensitive entry says" ;;
     hold|release) echo "  hold <id> [--reason TEXT] / release <id>   a held run's material is kept from purge and from a new run in its sandbox" ;;
     cap) cat <<'EOF'
-  cap <id> [--usd N] [--tokens N] [--per-agent-usd N] [--per-agent-tokens N] [--wall-clock MIN]
+  cap <id> [--usd N] [--tokens N] [--per-agent-usd N] [--per-agent-tokens N] [--wall-clock MIN] [--token-alert N[,M...] | none]
 Changes a running swarm's caps, under the lock every fold of usage takes. Kept in budget.json's
 cap_changes, on the trace as the operator's, in the run record, and said on the board. A stop the
 run is no longer over is withdrawn. The run keeps its brake: a dollar cap above zero where dollars
-are charged, a token cap where they are not (a subscription, local models).
+are charged, a token cap where they are not (a subscription, local models). --token-alert sets the
+token marks again (advisory; none clears them; kept in budget.json's token_alert_changes): a mark
+the run has crossed already is told once, at the next round.
 EOF
       ;;
     purge) echo "  purge <id> --yes   delete a finished run's sandbox, kept VM disks and hub directory; the registry keeps it as purged, and runs/operator-audit.jsonl gets the destruction record" ;;

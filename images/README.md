@@ -12,11 +12,11 @@ launcher and probe scripts are written into each VM by the SDK.
 
 | File | What it is |
 |---|---|
-| `base.Dockerfile` | The agent runtime every seat boots: Node, Pi, Python with a venv at `/opt/dfir/venv` holding what the tool library imports (`library-python.txt`), and the small tools an examiner's shell has (`strings`, `hexdump`, `file`, `xxd`, `sqlite3`, `jq`, the archive tools), plus `socat` for the hub link, and `seekfix.c` preloaded (on a macOS host msb swaps `SEEK_DATA` and `SEEK_HOLE` on a mount, and GNU grep then calls a large text file binary; the shim swaps them back only where it sees the swapped answers). It records itself as a profile image does (`install.py --base`): the whole package inventory, a NOTICE, an SBOM, and that it is not for redistribution (it holds `dissect.util`, AGPL-3.0, and Debian's GPL programs, whose source offer is not written yet). |
+| `base.Dockerfile` | The agent runtime every seat boots: Node, Pi, Python with a venv at `/opt/dfir/venv` holding what the tool library imports (`library-python.txt`), and the small tools an examiner's shell has (`strings`, `hexdump`, `file`, `xxd`, `sqlite3`, `jq`, the archive tools), plus `socat` for the hub link, and `seekfix.c` preloaded (on a macOS host msb swaps `SEEK_DATA` and `SEEK_HOLE` on a mount, and GNU grep then calls a large text file binary; the shim swaps them back only where it sees the swapped answers). It records itself as a profile image does (`install.py --base`): the whole package inventory, a NOTICE, an SBOM, and that it is not for redistribution (it holds Debian's GPL programs, whose source offer is not written yet; its record and NOTICE name that as `debian-gpl-packages`). |
 | `library-python.txt` | The Python packages the tool library's tools import. In the base, so a library tool handed to any run with `--tools-from` works whatever the run's packs; `tests/recipe.test.sh` keeps it in step with the tools' imports. |
 | `profiles.json` | A profile is a set of packs: `disk`, `memory`, `re`, `network`, `linux`, `mobile`, `full` — and `web`, the base with Chromium, which `--playwright` boots (the browser tools drive it with this repository's Playwright, mounted read-only). |
 | `recipe.py` | Turns a profile's packs — every `requires/host.json` and `requires/python.txt`, with each pack's dependencies — into a Dockerfile (with a builder stage per program built from source), a spec and a NOTICE. `profile-for PACK...` names the smallest profile that serves a run's packs: one that holds them, or one whose packs name every program they name and install every library their tools import (the ransomware pack runs on `re`). `full` only when nothing smaller serves. It reads each pack where a run does: a path as given, an id from `$DFIRSWARM_HOME/packs` and then this repository, so an installed pro or third-party pack is matched by what it names. `--tools-from DIR` adds the programs a tool directory's manifests name (`requires`): an image smaller than `full` that has them all is preferred. `check-lock FILE` refuses an images lock entry that is not pinned by digest. |
-| `install.py` | Runs inside the build: installs what the spec names, fetches each pinned artefact (download, `.deb`, source, a source a builder stage compiles, or a data file a program reads) and checks its sha256, fails on a required package it cannot install and on a required program that is not on PATH afterwards, and writes `/etc/dfirswarm/image.json` — every program it found, every package version (the image's whole Debian list and its venv too), each pack's version and seal, and what it could not install — `/etc/dfirswarm/NOTICE`, `/etc/dfirswarm/sbom.json` and `/etc/dfirswarm/tools.md`, the list an agent greps. |
+| `install.py` | Runs inside the build: installs what the spec names, fetches each pinned artefact (download, `.deb`, source, a source a builder stage compiles, or a data file a program reads) and checks its sha256, fails on a required package it cannot install and, at the end, on any program the packs name that is not on PATH, optional ones too, unless it is left out on purpose (no build for this architecture) or the build says `--allow-missing-optional` (see "Disk space"), and writes `/etc/dfirswarm/image.json` — every program it found, every package version (the image's whole Debian list and its venv too), each pack's version and seal, and what it could not install — `/etc/dfirswarm/NOTICE`, `/etc/dfirswarm/sbom.json` and `/etc/dfirswarm/tools.md`, the list an agent greps. |
 
 ## What a run checks
 
@@ -66,6 +66,43 @@ them, or `none`. A kickoff with `--pack
 memory-forensics` then runs its jobs in `dfirswarm-memory:dev-<arch>` on its
 own, while its agents boot the base; name any other with `--image`.
 
+**Disk space.** Docker Desktop keeps every image, layer and build cache in one
+virtual disk of a fixed size, and a build needs room there beyond the image it
+makes: its layers, the build cache, and what apt and pip download while it
+runs. Images built on an arm64 Mac on 2026-10-01 measured 1.3 GB (the base)
+to 4.8 GB (`full`), and a memory image holding Volatility's symbol tables
+4.0 GB; how much more a build needs at its peak was not measured (UNKNOWN).
+Look before you build:
+
+```bash
+docker system df                                              # images, build cache, what could be reclaimed
+docker run --rm --entrypoint df dfirswarm-base:dev-arm64 -h /  # Avail: the free space in Docker's disk
+```
+
+(Any image you have answers the second as well: it is the same disk.) When it
+is short, apt fails inside the build. That used to cost programs silently: an
+optional program's builder stage recorded the failure and ended well, Docker
+cached the stage as it was, and the images built after the disk was freed
+lacked bulk_extractor and aeskeyfind until a `--no-cache` rebuild, saying so
+only in `image.json`. Now a builder stage whose program did not build fails,
+so Docker caches nothing of it, and the install fails at its end when any
+program the packs name is not on PATH and was not left out on purpose (a
+download with no build for this architecture, a source or a build pinned for
+others). The message names each program; nothing is tagged. Free the space
+and build again; no `--no-cache` is needed. `recipe.py build
+--allow-missing-optional` builds an image without such programs on purpose:
+`image.json` names them under `missing_allowed` and says why under
+`not_installed`, `tests/image-programs.sh` skips them and says so, and its
+`spec.json` and every builder stage it lets fail carry a build id of their
+own. Each invocation of `recipe.py build` generates a fresh id, so a newly
+generated context reruns the install and those stages. **Before retrying an
+image built with this flag, run `recipe.py build` again with the same options.**
+If you reuse the existing context instead, run `docker build --no-cache -t
+dfirswarm-memory:dev-arm64 /tmp/img-memory`. Repeating plain `docker build`
+with the same context can reuse its earlier gaps: the context's id has not
+changed. The normal build without this flag fails on an unexpected absence
+and can be retried with its existing context and cache.
+
 **`--allow-nonredistributable`.** Every program in the packs is marked
 `redistributable: false` until its licence has been reviewed for
 redistribution (GPL, AGPL, the Volatility Software License, CPL/IPL and the
@@ -82,9 +119,10 @@ without the flag and is still marked not for redistribution.
 in every image:
 
 - `image.json` — the profile, its packs with their versions and seals, every
-  program found and where, what could not be installed and why, the whole
-  Debian package list (`dpkg_all`) and the venv (`pip`), and whether the
-  image may be redistributed.
+  program found and where, what could not be installed and why (and, in an
+  image built with `--allow-missing-optional`, which programs it lacks:
+  `missing_allowed`), the whole Debian package list (`dpkg_all`) and the venv
+  (`pip`), and whether the image may be redistributed.
 - `NOTICE` — every pack program with its pack, its licence and where it came
   from; then every global npm package and every Python package in the venv
   with the licence its metadata states. Debian's packages keep theirs in
@@ -150,8 +188,9 @@ anything is unpacked, installed or built.
   image, so the compiler and the `-dev` packages are not in it, and every
   profile that builds the program shares the stage's cache; `env` is the
   environment of its configure and make. A build that
-  fails is recorded beside what it left, and an optional program's failure
-  does not stop the image. bulk_extractor (not packaged for Debian 12) comes
+  fails is recorded beside what it left and fails its stage, optional or not
+  (see "Disk space"); one pinned for other architectures (`arches`) ends its
+  stage well, recorded as not built here. bulk_extractor (not packaged for Debian 12) comes
   this way. A source with no configure script names its own steps
   (`commands`, each an argument list run in the unpacked tree, with `{prefix}`
   and `{jobs}` filled in) and may be patched first (`patches`, each a url and

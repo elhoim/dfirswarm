@@ -12,9 +12,10 @@
 # the recipes, `full` included, as a community user would (images/README.md),
 # and memory and re for arm64 as well, on GitHub's arm64 runner: the arm64
 # pins and the wheels arm64 has to compile are exercised nowhere else. A
-# build fails when a program a pack requires is not in the image
-# (install.py), and when a pinned download's sha256 is not what its pack
-# says. Then each image is checked from the inside: its record holds the
+# build fails when a program its packs name is not in the image, optional
+# or not, unless it is left out on purpose (install.py), and when a pinned
+# download's sha256 is not what its pack says. Then each image is checked
+# from the inside: its record holds the
 # package lists a VM's inventory is diffed against at stop, and a fresh
 # container diffs empty against them (scripts/vm.ts INVENTORY_SCRIPT, run
 # as it is); its NOTICE and SBOM are there; data a pack pins (Volatility's
@@ -129,5 +130,6 @@ jobs:
       - name: The programs a run asked for work in the image
         run: |
           # tests/image-programs.sh: a C program compiles and runs, a planted AES key schedule is found,
-          # a message embedded with steghide comes back; a program the profile does not hold is skipped.
+          # a message embedded with steghide comes back; one the image's packs name and PATH lacks fails, one
+          # the profile does not hold is skipped.
           docker run --rm -v "$PWD/tests:/t:ro" "dfirswarm-${{ matrix.profile }}:$TAG" sh /t/image-programs.sh

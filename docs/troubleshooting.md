@@ -25,6 +25,18 @@ The refusal prints the three commands for the base (`docker build`,
 ([images/README.md](../images/README.md)). `--image REF` names one this host
 has (`msb image list`), and `--isolation host` runs without VMs.
 
+**An image build stops with `programs this image was built to hold and does not: …`, or with `<program> did not build`.**
+A program the image's packs name could not be installed, and the build
+stopped rather than tag an image without it; nothing of the failure was
+cached. The build's output names each program with its reason. The usual
+cause is a Docker disk that is full: apt reports too little free space, or a
+package that will not unpack.
+Look with `docker system df` and with `docker run --rm --entrypoint df
+<any image you have> -h /`, free space, and build again; no `--no-cache` is
+needed. `python3 images/recipe.py build … --allow-missing-optional` builds the
+image without the optional ones, and its `image.json` names them
+(`missing_allowed`). [images/README.md](../images/README.md), "Disk space".
+
 **`BLOCKER: msb could not list its VMs`.**
 The kickoff checks a new run id against msb's VMs, even with `--no-start`,
 and msb did not answer. Check `"$(node --experimental-strip-types scripts/vm.ts msb-path)" list`;

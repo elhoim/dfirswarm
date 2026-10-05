@@ -4,7 +4,7 @@
 # its own licence stays with its own package.
 python-evtx>=0.8.0     # Apache-2.0. Evtx: Windows event log records.
 regipy>=5.0.0          # MIT. Registry hives, Amcache and ShimCache, without Windows.
-dissect.util>=3.0      # AGPL-3.0, Fox-IT. lzxpress_huffman, for compressed prefetch.
+dissect.util>=3.5      # Apache-2.0 (from 3.5; AGPL-3.0 before), Fox-IT. lzxpress_huffman, for compressed prefetch.
 olefile>=0.46          # BSD-2-Clause. The compound file a jump list is stored in.
 libfwsi-python         # LGPL-3.0-or-later. pyfwsi: a shell item read from its documented layout. A library, no program.
 impacket               # Apache-2.0 (modified). DPAPI, the Credential Manager, Windows Vault and SAM/LSA secrets read offline; its dpapi.py and secretsdump.py are in the venv.

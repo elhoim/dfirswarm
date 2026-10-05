@@ -562,6 +562,8 @@ export type Custody = {
     /** `operator_action` lines from a shell outside the run (stop, reap, say): the operator's, carried with no pane's token by design; each is also on runs/operator-audit.jsonl. */
     operator_actions: number;
     disputed: number;
+    /** Lines the harness spilled while no collector was up, chained afterwards by `swarm.sh stop` (trace-collector.mjs --gather): each marked `gathered` with its spill and its own sha256. */
+    gathered?: number;
     /** `unauthenticated`: a host run's shared spill, which any pane can write and whose lines carry no token (only the collector ever sees one). */
     spilled: Array<{ path: string; lines: number; agent: string | null; bad: number; duplicates: number; refused?: string; unauthenticated?: true; after_close?: number }>;
     /** Per sending process, how many of its numbered lines are in neither the chain nor a spill. */
@@ -702,8 +704,15 @@ export type Custody = {
   checks: Check[];
   /** How long each part took, and the evidence read. */
   timing: { phases: Record<string, number>; evidence_bytes: number; evidence_mb_per_s: number | null; total_ms: number };
-  /** The models the run's agents were given (team.json), and the model ids the gateway saw answer, when it had one. */
-  models: { team: Array<{ agent: string; model: string | null }>; gateway_answered: string[] | null };
+  /**
+   * The models the run's agents were given (team.json), and the model ids the
+   * gateway saw answer, when it had one; and whose credential each seat used
+   * and under which terms, as the kickoff anchored it outside the run
+   * (`credentials`: api_key, oauth with its plan, local, other; the owner the
+   * operator named with --key-owner; whether it was a customer's case). Null
+   * credentials for a run from before the kickoff anchored them.
+   */
+  models: { team: Array<{ agent: string; model: string | null }>; gateway_answered: string[] | null; credentials?: AnchoredCredentials | null };
   /** A reference clock's offset from the host's, when the operator named one. */
   time_reference: { url: string; at: string; offset_ms: number | null; precision_ms: number; error?: string } | null;
   /** Parts custody never reached, for a verdict written when it was ended. */
@@ -761,6 +770,9 @@ export type CustodyState = {
   errors?: Record<string, string>;
   timing?: Custody["timing"];
 };
+
+/** Whose credential each seat used, as the kickoff anchored it (swarm.sh credentials_json). */
+export type AnchoredCredentials = { customer_case: boolean; seats: Array<{ seat: string; model: string; provider: string; credential: string; owner: string | null; variable?: string; plan?: string }> };
 
 /** The model gateway's call log and totals, beside the trace (scripts/model-gateway.ts). */
 export const GATEWAY_LOG = "traces/model-gateway.jsonl";
@@ -1068,7 +1080,7 @@ export async function takeCustody(sandboxInput: string, options: CustodyOptions 
     return deadline.over;
   };
   const say = options.progress ?? (() => undefined);
-  let anchor: { inputs_manifest_sha256?: string; case_policy_sha256?: string; run?: string; isolation?: string } | null = null;
+  let anchor: { inputs_manifest_sha256?: string; case_policy_sha256?: string; run?: string; isolation?: string; credentials?: unknown } | null = null;
   const anchorFile = await anchorPathFor(sandbox);
   try {
     anchor = JSON.parse(await readRegularTextOutside(anchorFile));
@@ -1274,6 +1286,7 @@ export async function takeCustody(sandboxInput: string, options: CustodyOptions 
   let unverified = 0;
   let operatorActions = 0;
   let disputed = 0;
+  let gathered = 0;
   // Numbered lines, per sender: (agent, sid) and the seqs seen. Keyed by the
   // agent the line is attributed to as well as its sid, so a seat that
   // writes lines under another's sid cannot fill that sender's gaps.
@@ -1340,6 +1353,8 @@ export async function takeCustody(sandboxInput: string, options: CustodyOptions 
   // is far from it is said, because a reader of `ts` would be misled.
   const skewed = new Map<string, { lines: number; max: number }>();
   const clockOf = (parsed: Record<string, unknown>) => {
+    // A gathered line's recv_ts is when the stop chained it, not when it was sent.
+    if (parsed.gathered) return;
     if (typeof parsed.ts !== "string" || typeof parsed.recv_ts !== "string") return;
     const skew = (Date.parse(parsed.ts) - Date.parse(parsed.recv_ts)) / 1000;
     if (!Number.isFinite(skew) || Math.abs(skew) <= CLOCK_FLAG_SEC) return;
@@ -1378,9 +1393,11 @@ export async function takeCustody(sandboxInput: string, options: CustodyOptions 
       noteRefs(parsed);
       noteRecord(parsed);
       noteLost(parsed);
+      if (parsed.gathered) gathered += 1;
       if (parsed.tool === "operator_action") {
         const a = (parsed.args ?? {}) as { command?: unknown; argv?: unknown };
-        operatorLines.push({ at: String(parsed.recv_ts ?? parsed.ts ?? ""), command: String(a.command ?? ""), argv: Array.isArray(a.argv) ? a.argv.map(String) : [] });
+        // A gathered line was chained after the fact: its own time is when the command ran.
+        operatorLines.push({ at: String((parsed.gathered ? parsed.ts : parsed.recv_ts) ?? parsed.ts ?? ""), command: String(a.command ?? ""), argv: Array.isArray(a.argv) ? a.argv.map(String) : [] });
       }
       if (parsed.agent_unverified === true) {
         if (parsed.tool === "operator_action") operatorActions += 1;
@@ -1475,6 +1492,7 @@ export async function takeCustody(sandboxInput: string, options: CustodyOptions 
     unverified,
     operator_actions: operatorActions,
     disputed,
+    ...(gathered ? { gathered } : {}),
     spilled: spills,
     gaps,
     clock,
@@ -1723,7 +1741,7 @@ export async function takeCustody(sandboxInput: string, options: CustodyOptions 
     });
     answered = [...seen].sort();
   }
-  state.models = { team: teamModels, gateway_answered: answered };
+  state.models = { team: teamModels, gateway_answered: answered, credentials: anchoredCredentials(anchor?.credentials) };
 
   // --- the operator's audit -------------------------------------------------------
   // Beside the registry, where no pane writes: its chain, and each operator
@@ -2011,6 +2029,29 @@ export function verdictOf(state: CustodyState, incomplete: string | null): Custo
   return { ...c, summary: summaryOf(c, { traceProblem: state.traceProblem ?? null, traceAnchored: state.traceAnchored ?? false }) };
 }
 
+/** The anchor's credentials, read as what they must be, or null. */
+export function anchoredCredentials(raw: unknown): AnchoredCredentials | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as { customer_case?: unknown; seats?: unknown };
+  if (!Array.isArray(r.seats)) return null;
+  const str = (v: unknown) => (typeof v === "string" ? v : "");
+  const seats = r.seats
+    .filter((x): x is Record<string, unknown> => Boolean(x) && typeof x === "object")
+    .map((x) => ({ seat: str(x.seat), model: str(x.model), provider: str(x.provider), credential: str(x.credential) || "other", owner: str(x.owner) || null, ...(str(x.variable) ? { variable: str(x.variable) } : {}), ...(str(x.plan) ? { plan: str(x.plan) } : {}) }));
+  return { customer_case: r.customer_case === true, seats };
+}
+
+/** Whose credential the seats used, in one line: by provider, kind and owner, with how many seats. */
+export function credentialsWords(c: AnchoredCredentials): string {
+  const groups = new Map<string, number>();
+  for (const s of c.seats) {
+    const kind = s.credential === "oauth" ? `subscription (OAuth: ${s.plan ?? "subscription login; not for customer data"})` : s.credential === "api_key" ? "API key" : s.credential === "local" ? "local model, no key" : s.credential === "env" ? `key from ${s.variable ?? "the environment"}` : "key from models.json";
+    const key = `${s.provider} ${kind}${s.owner ? `, the key of ${s.owner}` : s.credential === "local" ? "" : ", owner not named"}`;
+    groups.set(key, (groups.get(key) ?? 0) + 1);
+  }
+  return `credentials${c.customer_case ? " (a customer's case: API keys only)" : ""}: ${[...groups].map(([k, n]) => `${k} (${plural(n, "seat")})`).join("; ")}`;
+}
+
 function plural(n: number, one: string, many = `${one}s`): string {
   return `${n} ${n === 1 ? one : many}`;
 }
@@ -2071,7 +2112,7 @@ function summaryOf(c: Omit<Custody, "summary">, t: { traceProblem: string | null
       const opText = tr.operator_actions
         ? `, ${plural(tr.operator_actions, "operator action")} from a shell outside the run${op ? (op.unmatched.length ? ` (${op.unmatched.length} NOT ON THE OPERATOR AUDIT)` : `, each on the operator audit`) : ""}`
         : "";
-      parts.push(`trace ${tr.lines} lines, chain intact${t.traceAnchored ? "" : " (no anchor)"}, sealed at line ${c.seal.trace.lines}${tr.unverified ? `, ${tr.unverified} unverified` : ""}${opText}${tr.disputed ? `, ${tr.disputed} disputed` : ""}`);
+      parts.push(`trace ${tr.lines} lines, chain intact${t.traceAnchored ? "" : " (no anchor)"}, sealed at line ${c.seal.trace.lines}${tr.unverified ? `, ${tr.unverified} unverified` : ""}${opText}${tr.disputed ? `, ${tr.disputed} disputed` : ""}${tr.gathered ? `, ${plural(tr.gathered, "line")} the harness spilled while the collector was down chained by the stop (marked gathered)` : ""}`);
     }
     else if (!tr.detail.startsWith("chain broken")) parts.push(`TRACE UNCHAINED (${tr.lines} lines)`);
     else parts.push("TRACE CHAIN BROKEN");
@@ -2169,7 +2210,10 @@ function summaryOf(c: Omit<Custody, "summary">, t: { traceProblem: string | null
     if (st.outputs.missing.length) bits.push(`${st.outputs.missing.length} OUTPUT FILE(S) MISSING`);
     if (st.manifests_missing.length) bits.push(`${st.manifests_missing.length} MANIFEST(S) MISSING`);
     if (j.repaired || j.anchor_mismatch) bits.push(`the journal recorded ${j.repaired} repair(s) and ${j.anchor_mismatch} anchor mismatch(es)`);
-    if (st.staging_left.length) bits.push(`${st.staging_left.length} job staging director${st.staging_left.length === 1 ? "y" : "ies"} left unsealed (${some(st.staging_left, 5, "store.staging_left")})`);
+    if (st.staging_left.length) {
+      const why = st.staging_why ?? {};
+      bits.push(`${st.staging_left.length} job staging director${st.staging_left.length === 1 ? "y" : "ies"} left unsealed (${some(st.staging_left.map((n) => (why[n] ? `${n}: ${why[n]}` : `${n}: no account on the journal`)), 5, "store.staging_left")})`);
+    }
     bits.push(`${plural(st.generations, "catalogue generation")}, ${plural(st.revisions, "revision")}`);
     if (st.findings.total) {
       const f = st.findings;
@@ -2216,6 +2260,7 @@ function summaryOf(c: Omit<Custody, "summary">, t: { traceProblem: string | null
   if (c.not_reached.length) parts.push(`NOT CHECKED BEFORE CUSTODY ENDED: ${c.not_reached.join(", ")}`);
   if (c.incomplete) parts.push(`CUSTODY INCOMPLETE: ${c.incomplete}`);
   if (c.time_reference) parts.push(c.time_reference.offset_ms === null ? `REFERENCE CLOCK NOT READ (${c.time_reference.url}: ${c.time_reference.error ?? "no answer"})` : `the host's clock ${c.time_reference.offset_ms >= 0 ? "behind" : "ahead of"} ${c.time_reference.url} by ${Math.abs(c.time_reference.offset_ms)} ms (± ${c.time_reference.precision_ms} ms)`);
+  if (c.models?.credentials?.seats.length) parts.push(credentialsWords(c.models.credentials));
   parts.push(checksLine(c.checks));
   // What the anchors are: files of the operator's own account beside the run. They hold the agents to account, not the operator.
   parts.push("anchors are the operator's own files beside the run: they hold the agents to account; a signature and an external timestamp hold the verdict itself");

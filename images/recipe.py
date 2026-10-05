@@ -89,6 +89,18 @@ each fetched by install.py and refused unless its sha256 is the pinned one:
                      Local copies (--data-from, $DFIRSWARM_DATA_DIR) are bound
                      into the install step, never copied into a layer.
 
+Every program the packs name must be in the image when its build ends,
+optional or not, unless it is left out on purpose (a download with no build
+for this architecture, a source or a build pinned for others with `arches`, a
+program no line installs): an optional one that could not be installed stops
+the build, so a build that went wrong (apt out of disk space) is not tagged,
+and a builder stage that failed is not cached as a success. `build
+--allow-missing-optional` builds the image without such programs and records
+them; its spec.json and every builder stage it lets fail carry a build id of
+their own. Regenerating the context changes that id and reruns the install
+and those stages; reusing an existing context needs `docker build --no-cache`
+to avoid taking an earlier build's gaps from the cache.
+
 `run` names the interpreter a download's or a source's program needs:
 `python` (the program's own venv, else the image's), or any program the image
 holds (`perl`, `dotnet`, which a pack may pin as a download of its own). An apt
@@ -106,6 +118,7 @@ import os
 import re
 import shutil
 import sys
+import uuid
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -613,6 +626,19 @@ def build(a) -> int:
     spec = merge([read_pack(a.packs, p) for p in packs])
     for pkg in extra_apt:
         spec["apt"][pkg] = True
+    if a.allow_missing_optional:
+        # Regenerating a context invalidates optional stages and the profile
+        # install. Reusing this context for docker build still uses its cache:
+        # that retry needs --no-cache, or a newly generated context.
+        # The profile's own install may now end with gaps too (apt out of space
+        # for an optional package): spec.json, copied in before it runs,
+        # carries the same id, so that layer is not reused either.
+        build_id = uuid.uuid4().hex
+        spec["allow_missing_optional"] = True
+        spec["build_id"] = build_id
+        for d in spec["builds"]:
+            if not d.get("required"):
+                d.update({"may_fail": True, "build_id": build_id})
     # Programs, and the data a program reads (a symbol pack), that are not
     # cleared for redistribution: the image names each in its record.
     held_back = sorted({b["name"] for b in spec["binaries"] if not b.get("redistributable", True)}
@@ -767,6 +793,10 @@ LABEL org.opencontainers.image.title="dfirswarm-{a.profile}" \\
           f"{len(spec['data'])} pinned data files ({len(copies)} from local copies, {len(omitted)} left out by --symbol-set), "
           f"{len(spec['manual'])} neither, {len(spec['not_applicable'])} not applicable"
           + (f"; NOT for redistribution ({len(held_back)} programs)" if held_back else ""))
+    if a.allow_missing_optional:
+        print("recipe: optional programs may be missing. Before retrying, regenerate this context with recipe.py build, "
+              "or use docker build --no-cache when reusing it; its build id changes only when the context is generated.",
+              file=sys.stderr)
     return 0
 
 
@@ -780,6 +810,9 @@ def main() -> int:
     b.add_argument("--base", default="dfirswarm-base:dev-amd64")
     b.add_argument("--allow-nonredistributable", action="store_true",
                    help="build an image holding programs or data files their packs mark redistributable: false (never publish it)")
+    b.add_argument("--allow-missing-optional", action="store_true",
+                   help="go on when an optional program cannot be installed or built; the image records it (not_installed, "
+                        "missing_allowed); regenerate the context before each retry, or use docker build --no-cache")
     b.add_argument("--allow-missing-data", action="store_true",
                    help="go on when a pinned data file (a symbol pack) cannot be fetched; the image records it under not_installed.data")
     b.add_argument("--symbol-set", default=os.environ.get("DFIRSWARM_SYMBOL_SET", "curated,broad"),

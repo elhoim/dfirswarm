@@ -14,7 +14,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { access, chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
@@ -402,6 +402,51 @@ test("Pi loader: a pack tool gets its manifest's timeout, and a failed call reac
     assert.ok(results.some((r) => (r as { isError?: boolean } | undefined)?.isError === true), `the failed call is not flagged as an error: ${JSON.stringify(results)}`);
   } finally {
     if (saved === undefined) delete process.env.SWARM_TOOL_FORGING; else process.env.SWARM_TOOL_FORGING = saved;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Pi loader: a provider that answers with another model is said; an alias resolved to a dated id is only recorded", async (t) => {
+  // The Breadcrumbs rerun's stop rule: a model substitution. Pi reports the
+  // answering model as `responseModel` on the assistant message.
+  const loaderPath = await findLoader();
+  if (!loaderPath) {
+    t.skip("Pi package not found (set PI_PACKAGE_DIR or npm install -g @earendil-works/pi-coding-agent)");
+    return;
+  }
+  const { loadExtensions } = (await import(loaderPath)) as {
+    loadExtensions: (paths: string[], cwd: string) => Promise<{ extensions: LoadedExtension[]; errors: unknown[] }>;
+  };
+  const root = await mkdtemp(join(tmpdir(), "pi-load-model-"));
+  try {
+    await initSandbox(root, { reset: true });
+    process.env.AGENT_ID = "agent00";
+    const loaded = await loadExtensions([join(REPO, "extensions", "agent-swarm.ts")], root);
+    assert.deepEqual(loaded.errors, []);
+    const [swarm] = loaded.extensions;
+    const ctx = { cwd: root, hasUI: false, ui: {} };
+    const end = async (message: Record<string, unknown>) => {
+      for (const handler of (swarm.handlers.get("message_end") ?? []) as Array<(e: unknown, c: unknown) => Promise<unknown>>) await handler({ type: "message_end", message }, ctx);
+    };
+    const said = { role: "assistant", provider: "anthropic", model: "claude-x-latest", content: [{ type: "text", text: "ok" }] };
+    await end(said);
+    await end({ ...said, responseModel: "claude-x-20260101" });
+    await end({ ...said, responseModel: "claude-y-20260101" });
+    await end({ ...said, responseModel: "claude-y-20260101" });
+    const rows = (await readFile(join(root, EVENTS_REL), "utf8")).trim().split("\n").map((l) => JSON.parse(l)).filter((e) => e.tool === "model_reported");
+    assert.deepEqual(
+      rows.map((r) => [r.args.requested, r.args.reported, r.result.answered]),
+      [
+        ["anthropic/claude-x-latest", "claude-x-20260101", "resolved"],
+        ["anthropic/claude-x-latest", "claude-y-20260101", "substituted"],
+      ],
+      "each answering model once a seat; a message that names none is not a row",
+    );
+    const post = (await readdir(join(root, "threads", "main"))).find((f) => f.endsWith("-system.md"));
+    assert.ok(post, "the substitution is on the board");
+    const board = await readFile(join(root, "threads", "main", post), "utf8");
+    assert.match(board, /MODEL SUBSTITUTION: agent00 asked for anthropic\/claude-x-latest, and the provider answered as claude-y-20260101/);
+  } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
