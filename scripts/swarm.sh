@@ -2211,6 +2211,25 @@ inputs_bound_dirs() { # <sandbox>
   done < <(jq -r '.sets[]?.name' "$sandbox/inputs.json")
 }
 
+# The directories every VM mounts as evidence, one per line, each its own
+# read-only, no-exec share over the run's floor: the sets held in place
+# (inputs_bound_dirs), an attached image at inputs/, and a copy's inputs/
+# and .inputs-pristine/. The copy used to lie on the floor's share alone,
+# read-only but not no-exec, and every seat's probe (vm.ts, which reads the
+# flag from the guest's mount table over the mount that holds the files)
+# refused the VM for it (run s8760fa, 2026-10-05). The probe's roots and
+# this list agree: inputs/ itself for a copy, each set's own directory in
+# place. The seat spec (vm_build_spec) and the catalog VM read this.
+inputs_mount_dirs() { # <sandbox>
+  local sandbox="$1"
+  inputs_bound_dirs "$sandbox"
+  if [[ -f "$sandbox/inputs.device" ]]; then
+    printf '%s\n' "$sandbox/inputs"
+  elif [[ -d "$sandbox/inputs" && ! -L "$sandbox/inputs" && -d "$sandbox/.inputs-pristine" && ! -L "$sandbox/.inputs-pristine" ]]; then
+    printf '%s\n' "$sandbox/inputs" "$sandbox/.inputs-pristine"
+  fi
+}
+
 # The manifest for an attached image. Same shape as install_inputs writes, so
 # every reader downstream is unchanged; what is missing is the pristine clone,
 # because there is nothing to heal from and nothing that can change.
@@ -5171,8 +5190,7 @@ console.log(r.ok ? "" : r.reason);' "$_gp" "$_gk" 2>/dev/null || echo "could not
     # first pass calls are the image's, not this host's; it reaches only the
     # hosts the operator allowed for the run.
     local catalog_evidence=() bound
-    while IFS= read -r bound; do catalog_evidence+=(--evidence "$bound"); done < <(inputs_bound_dirs "$sandbox")
-    [[ -f "$sandbox/inputs.device" ]] && catalog_evidence+=(--evidence "$sandbox/inputs")
+    while IFS= read -r bound; do [[ -n "$bound" ]] && catalog_evidence+=(--evidence "$bound"); done < <(inputs_mount_dirs "$sandbox")
     [[ -n "$allow_hosts" ]] && catalog_evidence+=(--allow-host "$allow_hosts")
     [[ "$use_netguard" -eq 0 ]] && catalog_evidence+=(--open-net)
     # The catalog is The Sleuth Kit and Volatility over the evidence. A run
@@ -8606,16 +8624,16 @@ vm_build_spec() { # <hub dir> <out file>
     chmod 444 "$sandbox/compact-prompt.md"
     compact_prompt_vm="$sandbox/compact-prompt.md"
   fi
-  # The evidence in place: its directory, or each set's, at its own path,
-  # where the link (inputs/, or inputs/<name>) leads.
+  # The evidence, each directory its own read-only, no-exec share after the
+  # floor (vm.ts mountsFor puts the floor first): in place, its directory or
+  # each set's at its own path, where the link (inputs/, or inputs/<name>)
+  # leads; an attached image, its own filesystem on the host, shared as
+  # itself rather than trusted to show through the sandbox's share; a copy
+  # (--inputs-copy), inputs/ and .inputs-pristine/ over the floor, so the
+  # mount that holds the files is the no-exec one the probe reads.
   while IFS= read -r real; do
     [[ -n "$real" ]] && mounts+=("$(jq -nc --arg h "$real" '{host: $h, readonly: true, noexec: true}')")
-  done < <(inputs_bound_dirs "$sandbox")
-  if [[ -f "$sandbox/inputs.device" ]]; then
-    # An attached image is its own filesystem on the host; it is shared as
-    # itself rather than trusted to show through the sandbox's share.
-    mounts+=("$(jq -nc --arg h "$sandbox/inputs" '{host: $h, readonly: true, noexec: true}')")
-  fi
+  done < <(inputs_mount_dirs "$sandbox")
   # The no-exec holes are each seat's own (vm.ts mountsFor); nothing is
   # mounted late over the shared work/, which is read-only in every VM.
   local late=()

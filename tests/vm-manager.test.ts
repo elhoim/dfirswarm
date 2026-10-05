@@ -148,6 +148,20 @@ test("a local server's address becomes the host gateway, and nothing else change
   assert.equal(hostGatewayUrl("not a url"), "not a url");
 });
 
+test("a copy of the evidence in the spec's mounts comes after the floor with its flags kept: the mount that holds the files is the read-only, no-exec one", () => {
+  // As the kickoff's vm_build_spec writes a --inputs-copy run (inputs_mount_dirs).
+  const s = spec();
+  const S = s.sandbox;
+  const copy = [`${S}/inputs`, `${S}/.inputs-pristine`];
+  const m = mountsFor({ ...s, mounts: [...s.mounts, ...copy.map((host) => ({ host, readonly: true, noexec: true }))] }, "s1a2b00");
+  assert.deepEqual(m[0], { host: S, readonly: true }, "the floor comes first");
+  for (const host of copy) {
+    const at = m.findIndex((x) => x.host === host);
+    assert.ok(at > 0, `${host} is mounted after the floor, over it`);
+    assert.deepEqual(m[at], { host, readonly: true, noexec: true }, `${host} keeps read-only and no-exec`);
+  }
+});
+
 test("a VM's mounts: the run's floor read-only first, then the agent's own writable holes, and nothing shared writable", () => {
   const m = mountsFor(spec(), "s1a2b00");
   assert.deepEqual(m[0], { host: "/runs/s1a2b", readonly: true }, "the floor comes first, read-only");
@@ -255,6 +269,11 @@ test("the kickoff goes on only when a VM's own probe says what the run needs", (
   assert.deepEqual(probeVerdict({ ...good, inputs_files: 4 }, true, 4), [], "the VM sees every name the manifest lists");
   assert.match(probeVerdict({ ...good, peers_extracted_exec: "exec" }, true).join(), /a peer's work\/extracted\/ can execute/);
   assert.match(probeVerdict({ ...good, inputs_exec: "exec" }, true).join(), /the evidence can execute/);
+  // A copy's pristine clone, when the probe measured one: never writable, never executable.
+  assert.deepEqual(probeVerdict({ ...good, inputs_exec: "noexec", inputs_pristine: "ro", inputs_pristine_exec: "noexec" }, true), []);
+  assert.match(probeVerdict({ ...good, inputs_pristine: "rw" }, true).join(), /\.inputs-pristine\/ is rw, not read-only/);
+  assert.match(probeVerdict({ ...good, inputs_pristine_exec: "exec" }, true).join(), /the pristine clone can execute in the VM \(exec\)/);
+  assert.deepEqual(probeVerdict({ ...good, inputs_pristine: "rw", inputs_pristine_exec: "exec" }, false), [], "no evidence expected, the clone is not judged");
   assert.deepEqual(probeVerdict({ ...good, peers_extracted_exec: "noexec", peers_quarantine_exec: "noexec", inputs_exec: "noexec", reach: [{ target: "api.openai.com:443", ok: true }] }, true), []);
   assert.match(probeVerdict({ ...good, reach: [{ target: "api.openai.com:443", ok: false, error: "getaddrinfo ENOTFOUND" }] }, true).join(), /model's host api\.openai\.com:443 is not reachable from the VM/);
   assert.match(probeVerdict({ ...good, inputs_files: 3 }, true, 4).join(), /sees 3 evidence name\(s\) where the manifest lists 4/);
@@ -657,7 +676,7 @@ test("the VM's probe walks each set held in place through its link, probes each 
   await writeFile(join(ev, "laptop", "users", "ntuser.dat"), "hive");
   await symlink("users/ntuser.dat", join(ev, "laptop", "hive-link"));
   await writeFile(join(ev, "phone", "sms.db"), "sqlite");
-  const probe = async (S: string, sets?: string[]): Promise<{ out: { inputs?: string; inputs_files?: number; inputs_exec?: string }; probed: Array<[string, string]> }> => {
+  const probe = async (S: string, sets?: string[]): Promise<{ out: { inputs?: string; inputs_files?: number; inputs_exec?: string; inputs_pristine?: string; inputs_pristine_exec?: string }; probed: Array<[string, string]> }> => {
     const py = `import json, os\nS = ${JSON.stringify(S)}\nout = {}\nprobed = []\ndef can_write(path):\n    probed.append(["w", path])\n    return "ro"\ndef mount_noexec(path):\n    probed.append(["x", path])\n    return "noexec"\n${block![0]}print(json.dumps({"out": out, "probed": probed}))\n`;
     const env = { ...process.env, SWARM_INPUT_SETS: sets ? JSON.stringify(sets) : "" };
     return JSON.parse(execFileSync("python3", ["-c", py], { encoding: "utf8", env }));
@@ -677,13 +696,37 @@ test("the VM's probe walks each set held in place through its link, probes each 
   for (const want of [["w", join(laptop, ".vm-probe")], ["w", join(phone, ".vm-probe")], ["x", join(laptop, ".probe")], ["x", join(phone, ".probe")]]) {
     assert.ok(got.probed.some((p) => p[0] === want[0] && p[1] === want[1]), `the probe did not ask about ${want.join(" ")}: ${JSON.stringify(got.probed)}`);
   }
-  // One set held in place: inputs/ is the link, as it always was.
+  // One set held in place: inputs/ is the link, as it always was, and
+  // there is no pristine clone to ask about.
   const one = join(dir, "one");
   await mkdir(one, { recursive: true });
   await symlink(join(ev, "laptop"), join(one, "inputs"));
   const single = await probe(one);
   assert.equal(single.out.inputs_files, 2);
   assert.deepEqual(single.probed, [["w", join(laptop, ".vm-probe")], ["x", join(laptop, ".probe")]]);
+  assert.ok(!("inputs_pristine" in single.out) && !("inputs_pristine_exec" in single.out), "in place, nothing is measured for a clone that is not there");
+  // A copy (--inputs-copy): inputs/ is the run's own directory and
+  // .inputs-pristine/ its clone, each its own mount over the floor (run
+  // s8760fa: the probe asked about the floor's mount, which is not no-exec,
+  // and every seat was refused). The probe asks about the mount that holds
+  // each, and about the clone as well.
+  const copy = join(dir, "copy");
+  await mkdir(join(copy, "inputs", "users"), { recursive: true });
+  await mkdir(join(copy, ".inputs-pristine", "users"), { recursive: true });
+  for (const d of ["inputs", ".inputs-pristine"]) await writeFile(join(copy, d, "users", "ntuser.dat"), "hive");
+  const copied = await probe(copy);
+  const copyReal = await realpath(copy);
+  assert.equal(copied.out.inputs_files, 1, "the clone is not counted among the evidence's names");
+  assert.equal(copied.out.inputs, "ro");
+  assert.equal(copied.out.inputs_exec, "noexec");
+  assert.deepEqual(copied.probed, [
+    ["w", join(copyReal, "inputs", ".vm-probe")],
+    ["x", join(copyReal, "inputs", ".probe")],
+    ["w", join(copyReal, ".inputs-pristine", ".vm-probe")],
+    ["x", join(copyReal, ".inputs-pristine", ".probe")],
+  ], "the copy's own mount and the clone's are the ones asked about, not the floor's");
+  assert.equal(copied.out.inputs_pristine, "ro");
+  assert.equal(copied.out.inputs_pristine_exec, "noexec");
 });
 
 test("the VM's probe shows its seat's token before anything else on the hub socket, and nothing when the run has none", async () => {

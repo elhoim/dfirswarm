@@ -11,6 +11,9 @@
  *   - guest root cannot write the run's floor, the evidence or the trace, by
  *     writing, remounting or unmounting — and unmounting a writable hole
  *     leaves the read-only floor, not the host;
+ *   - a copy of the evidence (--inputs-copy), inputs/ and .inputs-pristine/,
+ *     is held like evidence in place: each its own read-only, no-exec mount
+ *     over the floor, which the probe reads and the kickoff holds a VM to;
  *   - a VM reaches its allowed host and nothing else, by name or by address,
  *     and a local model's port on the host but no other port;
  *   - a secret never enters the guest, only its placeholder, and is in no
@@ -33,7 +36,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, readlinkSync, realpathSync } from "node:fs";
-import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
@@ -113,8 +116,14 @@ async function fingerprint(root: string, skipDirs: string[]): Promise<Map<string
 
 type Rig = { run: string; sandbox: string; hub: Hub; hubDir: string; spec: VmSpec; lines: Record<string, unknown>[]; evidence: string };
 
-/** A sandbox, its evidence, a hub and a stand-in collector; the VMs are made by the test. */
-async function rig(run: string, agents: string[], extra: Partial<VmSpec> = {}, hubOptions: { settleMs?: number; forging?: boolean } = {}): Promise<Rig> {
+/**
+ * A sandbox, its evidence, a hub and a stand-in collector; the VMs are made
+ * by the test. The evidence is held in place (inputs/ a link to it, its
+ * directory mounted) unless `held` says copy: then inputs/ is the run's own
+ * directory and .inputs-pristine/ its clone, each mounted on its own, as
+ * --inputs-copy leaves a run.
+ */
+async function rig(run: string, agents: string[], extra: Partial<VmSpec> = {}, hubOptions: { settleMs?: number; forging?: boolean } = {}, held: "bind" | "copy" = "bind"): Promise<Rig> {
   const base = await mkdtemp(join(tmpdir(), "vmit-"));
   const sandbox = join(base, "runs", run);
   await mkdir(sandbox, { recursive: true });
@@ -124,7 +133,15 @@ async function rig(run: string, agents: string[], extra: Partial<VmSpec> = {}, h
   await writeFile(join(evidence, "notes.txt"), "case notes\n");
   await writeFile(join(evidence, "mail", "a.bin"), "suspect bytes");
   const { symlink } = await import("node:fs/promises");
-  await symlink(evidence, join(sandbox, "inputs"));
+  if (held === "copy") {
+    // The modes stay the host's defaults, a file executable by its own mode
+    // among them, so that what refuses a write or a run below is the share's
+    // flag, which the probe reads, and never a mode bit.
+    await writeFile(join(evidence, "run.sh"), "#!/bin/sh\necho ran\n", { mode: 0o755 });
+    for (const d of ["inputs", ".inputs-pristine"]) await cp(evidence, join(sandbox, d), { recursive: true });
+  } else {
+    await symlink(evidence, join(sandbox, "inputs"));
+  }
   for (const a of agents) {
     await mkdir(join(sandbox, "tool-output", a), { recursive: true });
     await mkdir(join(sandbox, ".pi-sessions", a), { recursive: true });
@@ -161,7 +178,15 @@ async function rig(run: string, agents: string[], extra: Partial<VmSpec> = {}, h
     hub_dir: hubDir,
     mounts: [
       { host: join(ROOT, "extensions"), readonly: true },
-      { host: evidence, readonly: true, noexec: true },
+      // As the kickoff writes them (swarm.sh inputs_mount_dirs): in place,
+      // the source where inputs/ leads; a copy, inputs/ and .inputs-pristine/
+      // each its own share after the floor.
+      ...(held === "copy"
+        ? [
+            { host: join(sandbox, "inputs"), readonly: true, noexec: true },
+            { host: join(sandbox, ".inputs-pristine"), readonly: true, noexec: true },
+          ]
+        : [{ host: evidence, readonly: true, noexec: true }]),
     ],
     env: { SWARM_ID: run },
     agents: agents.map((id) => ({ id, model: "none/none" })),
@@ -198,12 +223,20 @@ test("guest root cannot change the run's floor, the evidence or the trace, by an
   const created = await createVms(r.spec);
   assert.deepEqual(created.failures, [], JSON.stringify(created.failures));
   const name = vmName(r.run, "vmt100");
+  // In place: the probe read the evidence's own mount as no-exec, and had
+  // no pristine clone to measure.
+  const probe = created.records[0]?.probe ?? {};
+  assert.equal(probe.inputs, "ro");
+  assert.equal(probe.inputs_exec, "noexec", "the evidence in place is on a no-exec mount");
+  assert.ok(!("inputs_pristine" in probe) && !("inputs_pristine_exec" in probe), "in place there is no clone, and nothing is measured for one");
   const floorBefore = await fingerprint(r.sandbox, ["work", "tool-output", ".pi-sessions", "vm"]);
   const evidenceBefore = await fingerprint(r.evidence, []);
   const S = r.sandbox;
   const out = inVm(name, `
     w() { if ( printf x >> "$1" ) 2>/dev/null; then echo "WROTE $1"; else echo "refused $1"; fi; }
     w "${S}/traces/events.jsonl"; w "${S}/SWARM.md"; w "${S}/inputs/notes.txt"; w "${S}/budget.json"
+    # The evidence's own mount, by the guest kernel's table, before anything is remounted.
+    echo "evidence-mount: $(awk -v p="${r.evidence}" '$5 == p { print $6 }' /proc/self/mountinfo | tail -1)"
     mount -o remount,rw "${S}" 2>/dev/null; mount -o remount,rw "${r.evidence}" 2>/dev/null
     grep -q " ${S} virtiofs rw" /proc/mounts && echo "floor-flag: rw" || echo "floor-flag: ro"
     printf 'remounted: '; w "${S}/SWARM.md"
@@ -223,6 +256,8 @@ test("guest root cannot change the run's floor, the evidence or the trace, by an
   assert.match(out, /refused .*events\.jsonl/);
   assert.match(out, /refused .*SWARM\.md/);
   assert.match(out, /refused .*inputs\/notes\.txt/);
+  assert.match(out, /^evidence-mount: ro(,|$)/m, `the evidence in place is mounted read-only: ${out}`);
+  assert.match(out, /^evidence-mount: [^\n]*\bnoexec\b/m, `the evidence in place is mounted no-exec: ${out}`);
   // The guest kernel may flip its own flag (it does, measured: "rw" after
   // the remount); the share is read-only on the host side, and that is what
   // refuses the write. The flag is read so the case is known, not assumed.
@@ -246,6 +281,67 @@ test("guest root cannot change the run's floor, the evidence or the trace, by an
   assert.deepEqual([...evidenceAfter], [...evidenceBefore], "the host's evidence did not change, in bytes or mode");
   assert.ok(!existsSync(join(r.sandbox, "work", "vmt100", "after-umount.txt")));
   assert.ok(!existsSync(join(r.sandbox, ".pi-sessions", "vmt100", "planted")), "a write after unmounting the session hole never reached the host");
+});
+
+test("a copy of the evidence (--inputs-copy) is held in a VM like evidence in place: inputs/ and .inputs-pristine/ each its own read-only, no-exec mount over the floor, read so by the probe", async (t) => {
+  if (skip) return t.skip(skip);
+  // Run s8760fa (2026-10-05): the copy lay on the floor's share alone,
+  // read-only but not no-exec, and every seat's probe refused its VM. The
+  // kickoff now gives inputs/ and .inputs-pristine/ their own shares after
+  // the floor (the rig mounts them as it does), so the mount that holds the
+  // files is the one whose flags the probe reads.
+  const r = await rig("vmtc", ["vmtc00"], {}, {}, "copy");
+  const created = await createVms(r.spec);
+  assert.deepEqual(created.failures, [], JSON.stringify(created.failures));
+  const probe = created.records[0]?.probe ?? {};
+  assert.equal(probe.inputs, "ro");
+  assert.equal(probe.inputs_exec, "noexec", "the copy's own mount is no-exec");
+  assert.equal(probe.inputs_pristine, "ro", "the clone is read-only");
+  assert.equal(probe.inputs_pristine_exec, "noexec", "the clone's own mount is no-exec");
+  const S = r.sandbox;
+  const copyBefore = await fingerprint(join(S, "inputs"), []);
+  const cloneBefore = await fingerprint(join(S, ".inputs-pristine"), []);
+  const out = inVm(vmName(r.run, "vmtc00"), `
+    opts() { awk -v p="$1" '$5 == p { print $6 }' /proc/self/mountinfo | tail -1; }
+    echo "inputs-mount: $(opts "${S}/inputs")"
+    echo "pristine-mount: $(opts "${S}/.inputs-pristine")"
+    w() { if ( printf x >> "$1" ) 2>/dev/null; then echo "WROTE $1"; else echo "refused $1"; fi; }
+    w "${S}/inputs/notes.txt"; w "${S}/inputs/new.txt"; w "${S}/.inputs-pristine/notes.txt"; w "${S}/.inputs-pristine/new.txt"
+    chmod 777 "${S}/inputs/notes.txt" 2>/dev/null && echo "CHMOD inputs" || echo "refused chmod inputs"
+    rm -f "${S}/.inputs-pristine/notes.txt" 2>/dev/null && echo "REMOVED pristine" || echo "refused rm pristine"
+    # test -x asks access(X_OK), which a no-exec mount refuses: the mode bits are asked instead.
+    stat -c %A "${S}/inputs/run.sh" | grep -q x && echo "run.sh executable by its mode"
+    "${S}/inputs/run.sh" 2>/dev/null && echo "INPUTS EXECUTED" || echo "inputs noexec held"
+    "${S}/.inputs-pristine/run.sh" 2>/dev/null && echo "PRISTINE EXECUTED" || echo "pristine noexec held"
+    # The same bytes run off the mount: the flag, not the file, refused it.
+    cp "${S}/inputs/run.sh" /tmp/run.sh && /tmp/run.sh 2>/dev/null | grep -q ran && echo "the same bytes run elsewhere"
+  `);
+  for (const which of ["inputs", "pristine"]) {
+    assert.match(out, new RegExp(`^${which}-mount: ro(,|$)`, "m"), `${which}/ is its own read-only mount: ${out}`);
+    assert.match(out, new RegExp(`^${which}-mount: [^\n]*\\bnoexec\\b`, "m"), `${which}/ is its own no-exec mount: ${out}`);
+  }
+  assert.match(out, /refused .*inputs\/notes\.txt/, out);
+  assert.match(out, /refused .*inputs\/new\.txt/, out);
+  assert.match(out, /refused .*\.inputs-pristine\/notes\.txt/, out);
+  assert.match(out, /refused .*\.inputs-pristine\/new\.txt/, out);
+  assert.match(out, /refused chmod inputs/, out);
+  assert.match(out, /refused rm pristine/, out);
+  assert.match(out, /run\.sh executable by its mode/, `the file under test is executable by its mode: ${out}`);
+  assert.match(out, /inputs noexec held/, "nothing in the copy runs");
+  assert.match(out, /pristine noexec held/, "nothing in the clone runs");
+  assert.match(out, /the same bytes run elsewhere/, `the flag refused the run, not the file: ${out}`);
+  assert.doesNotMatch(out, /EXECUTED|WROTE|CHMOD|REMOVED/, out);
+  assert.deepEqual([...(await fingerprint(join(S, "inputs"), []))], [...copyBefore], "the host's copy did not change, in bytes or mode");
+  assert.deepEqual([...(await fingerprint(join(S, ".inputs-pristine"), []))], [...cloneBefore], "the host's clone did not change, in bytes or mode");
+
+  // The control: the same copy with only the floor's share, as run s8760fa
+  // was given it. The probe reads the floor's mount, which allows execution,
+  // and the VM is refused for it: the check was never weakened, the mounts
+  // were what was missing.
+  const bare = await rig("vmtd", ["vmtd00"], { mounts: [{ host: join(ROOT, "extensions"), readonly: true }] }, {}, "copy");
+  const refused = await createVms(bare.spec);
+  assert.equal(refused.failures.length, 1, JSON.stringify(refused.failures));
+  assert.match(refused.failures[0]!.reasons.join("; "), /the evidence can execute in the VM \(exec\)/, "a copy on the floor's share alone is refused");
 });
 
 test("a VM reaches its allowed host and the names under an allowed suffix, and no other name or address", async (t) => {

@@ -81,8 +81,11 @@ building on it, on an M3 Max and on the DigitalOcean droplet with nested KVM:
   let any seat rewrite any other's findings without a record. The evidence
   is mounted read-only from where it is, with no copy: the host side of that
   read-only share is the one layer, and `--inputs-copy` adds a read-only copy
-  in the run for evidence the examiner's own account can write. Everything is
-  mounted at its host path, so no path is ever translated. The harness code
+  in the run for evidence the examiner's own account can write, held the same
+  way: `inputs/` and `.inputs-pristine/` are each their own read-only, no-exec
+  share over the run's floor, whose share alone is not no-exec (the probe
+  refused every seat of a copy-mode run that had only the floor). Everything
+  is mounted at its host path, so no path is ever translated. The harness code
   (extensions, scripts, prompts, packs) is mounted read-only; the repository
   is not, because `runs/registry.json` and `docs/use-cases/` would come with
   it; a `--compact-prompt-file` is copied into the run rather than mounted
