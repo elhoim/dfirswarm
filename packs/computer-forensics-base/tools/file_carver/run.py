@@ -136,7 +136,7 @@ def carve_png(src, off, limit):
         length, kind = struct.unpack(">I4s", head)
         end = pos + 12 + length
         if end > limit:
-            raise Refuse("a PNG chunk (%r, %d bytes) runs past max_size or the source; the file is longer than max_size or damaged" % (kind, length), required_at_least=end - off)
+            raise Refuse("complete file is larger than max_size: a PNG chunk (%r, %d bytes) runs past max_size or the source; the file is longer than max_size or damaged" % (kind, length), required_at_least=end - off)
         # The CRC covers the chunk type and data; it is taken a block at a time, so a chunk of any size is never held whole.
         crc, at, left = zlib.crc32(kind), pos + 8, length
         while left:
@@ -186,7 +186,7 @@ def carve_jpeg(src, off, limit):
             raise Refuse("a JPEG segment says it is %d bytes long" % seg)
         pos += seg
         if pos > limit:
-            raise Refuse("a JPEG segment runs past max_size or the source", required_at_least=pos - off)
+            raise Refuse("complete file is larger than max_size: a JPEG segment runs past max_size or the source", required_at_least=pos - off)
         if code == 0xDA:                      # SOS: entropy-coded data follows, up to the next real marker
             while True:
                 block = src.read(pos, CHUNK)
@@ -208,7 +208,7 @@ def carve_jpeg(src, off, limit):
                     break
                 pos += max(1, len(block) - 1)
                 if pos > limit:
-                    raise Refuse("the JPEG's image data runs past max_size", required_at_least=pos - off)
+                    raise Refuse("complete file is larger than max_size: the JPEG's image data runs past max_size", required_at_least=pos - off)
 
 
 def carve_gif(src, off, limit):
@@ -228,7 +228,7 @@ def carve_gif(src, off, limit):
                 raise Refuse("a GIF data block runs off the end of the source")
             p += 1 + n[0]
             if p > limit:
-                raise Refuse("a GIF data block runs past max_size", required_at_least=p - off)
+                raise Refuse("complete file is larger than max_size: a GIF data block runs past max_size", required_at_least=p - off)
             if n[0] == 0:
                 return p
 
@@ -351,8 +351,6 @@ def carve_sqlite(src, off, limit):
     counter, valid_for = struct.unpack(">I", h[24:28])[0], struct.unpack(">I", h[92:96])[0]
     if pages < 1:
         raise Refuse("the SQLite header's page count is 0")
-    if page * pages > limit - off:
-        raise Refuse("the database is larger than max_size or the source", required_at_least=page * pages)
     checks, notes = [], []
     structure_ok = h[21:24] == bytes([64, 32, 32]) and h[18] in (1, 2) and h[19] in (1, 2) and struct.unpack(">I", h[56:60])[0] in (1, 2, 3)
     if not structure_ok:
@@ -377,8 +375,6 @@ def carve_regf(src, off, limit):
     if bins == 0 or bins % 4096:
         raise Refuse("the base block's hive bins data size (%d) is not a positive multiple of 4096" % bins)
     total = 4096 + bins
-    if off + total > limit:
-        raise Refuse("the hive is larger than max_size or the source", required_at_least=total)
     x = 0
     for (word,) in struct.iter_unpack("<I", base[:508]):
         x ^= word
@@ -388,6 +384,10 @@ def carve_regf(src, off, limit):
     (checks if sums else notes).append("base block checksum %s" % ("matches" if sums else "does NOT match (%08x stored, %08x computed): a damaged or edited base block" % (stored, x)))
     # the hive bins: a chain of hbin headers, each at its stated offset, adding up to the size the base block states
     pos, walked, ok = 0, 0, True
+    if off + total > limit:
+        ok = False
+        notes.append("the hive bins run past max_size or the end of the source, so the hive-bin chain was not walked")
+        pos = bins
     while pos < bins:
         h = src.read(off + 4096 + pos, 32)
         if len(h) < 32 or h[:4] != b"hbin":
@@ -446,8 +446,6 @@ def carve_pe(src, off, limit):
         end = max(end, raw_off + raw_sz)
     if end <= 0:
         raise Refuse("the PE's section table gives no data")
-    if off + end > limit:
-        raise Refuse("the executable is larger than max_size or the source", required_at_least=end)
     checks.append("end = the furthest of the section raw extents%s" % (", the headers and the certificate table" if magic in (0x10B, 0x20B) else ""))
     after = src.read(off + end, 4096)
     overlay = any(after)
@@ -523,7 +521,7 @@ def carve(path, offset, sig_type, max_size, dest=None):
         if size < 4:
             raise Refuse("the boundary check gave a size of %d bytes" % size)
         if size > max_size:
-            raise Refuse("the candidate is larger than max_size", required_size=size, max_size=max_size,
+            raise Refuse("complete file is larger than max_size", required_size=size, max_size=max_size,
                          hint="retry with max_size at least required_size; no partial output was written")
         if offset + size > src.size:
             raise Refuse("the source ends before the candidate's end", wanted=size, available=src.size - offset)

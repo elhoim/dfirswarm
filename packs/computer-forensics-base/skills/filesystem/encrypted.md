@@ -14,7 +14,8 @@ separate hypotheses, recording the exact failure of each: a wrong
 offset or sector size, missing or truncated segments, a mapping layer (LVM,
 RAID, Storage Spaces), a format or feature the installed reader does not
 handle, damage or overwriting, and encryption. Rule the cheap ones out first
-with `evidence/imaging`. Unreadability alone establishes none of them.
+with `evidence/imaging`. Unreadability alone establishes none of them. A volume
+`fls` lists is readable at the volume level; encryption of single files is below.
 
 **Identify encryption from metadata, not from absence.** A signature is a lead
 to the parser that reads that scheme's header:
@@ -46,32 +47,34 @@ request (`lead_close needs_operator` with `ask: acquisition`), not a finding.
 LUKS: `cryptsetup luksDump` or `luksdeinfo` give the version, header source,
 key slots and tokens; note whether the header is detached. A slot count does not
 show how many passphrases exist, whose they are, or that nothing can open the
-volume. FileVault: `fvdeinfo` reads the legacy CoreStorage form (encryption
-method, key material references). It is not an APFS reader. An APFS container is
-read with `fsapfsinfo`, whose declaration here says snapshots, Fusion drives and
-T2-based encryption are not supported: a failure on those is the reader's
-limit, not damage and not absence. For APFS structure see `filesystem/apfs` of
-the macOS pack, when it is loaded.
+volume. FileVault: `fvdeinfo` reads the encryption metadata of the legacy
+CoreStorage form (encryption method, key material references) and is not assumed
+to read APFS. An APFS container is read with `fsapfsinfo`, whose declaration here
+says snapshots, Fusion drives and T2-based encryption are not supported: a
+failure on those is the reader's limit, not damage and not absence. APFS
+structure is the macOS pack's `filesystem/apfs`, when it is loaded; the route
+into an encrypted APFS volume is the encrypted-containers pack's.
 
-**Using a key the case supplies.** The key is a secret. A key found in the
-evidence is used only where a question asks for the artefact to be opened, and
-offline. It never goes on a command line, because argv is recorded in the trace,
-which travels with the package. Pass a file (a BitLocker `.BEK` key file, a LUKS
-`--key-file`) and run the job with `secret_output: true`. A program that takes a
-recovery password only as an argument value (`dislocker` does) cannot be given a
-file: then the traced command line holds the key, so say so in the report, and
-the trace is redacted before it is shared. Record where the key was found, its
-kind and its length, never its value or any hash or fragment of it.
+**Unlocking is the encrypted-containers pack's method.** With a key the case
+supplies, `dislocker` (BitLocker) and `cryptsetup` (LUKS) open a volume as a file
+or a mapping; how, with which key source and under which job is that pack's
+`volumes/bitlocker` and `volumes/luks-filevault`, when it is loaded (check the
+run's tool inventory). What holds in every pack:
 
-Unlock to a file the job writes, not in place and not as a mounted view alone:
-
-    dislocker -V part.img -c -- "$OUT/bde/"    # a clear-key protector; needs FUSE: check the job image has it
-    fls -r "$OUT/bde/dislocker-file"           # then treat the file as a volume
-
-`dislocker-file` is a view of the original. Stream it, or the files you need,
-into `$OUT` before the job ends so the decrypted bytes are sealed and the next
-job can read them, and record the protector, the source and the transformation.
-The job is `secret_output: true`: its outputs are decrypted content.
+- The key is a secret. A key found in the evidence is used only where a question
+  asks for the artefact to be opened, and offline.
+- It never goes on a command line: argv is recorded in the trace, which travels
+  with the package. Pass a file the case holds (a BitLocker `.BEK` key file, a
+  LUKS `--key-file`), in a job run with `secret_output: true`. A program that
+  takes a recovery password only as an argument value (`dislocker` does) cannot
+  be given a file: the traced command line then holds the key, so say so in the
+  report, and the trace is redacted before it is shared.
+- A mounted view is not a sealed output. Stream the decrypted volume, or the
+  files you need, into `$OUT` before the job ends, and record the protector, the
+  source and the transformation. The job's outputs are decrypted content, hence
+  `secret_output: true`.
+- Record where the key was found, its kind and its length, never its value or
+  any hash or fragment of it.
 
 **Encrypted at the file.** The volume reads and individual files do not: office
 documents, archives, containers. That is an ordinary extract and a different
