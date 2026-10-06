@@ -64,6 +64,10 @@ For removable media read the actual metadata. A legacy discovery volume (a plain
 FAT header) may be present, and neither its presence nor its absence decides
 whether BitLocker To Go protects the contents.
 
+**Does not show.** That a located or escrowed value opens this volume; why protection
+was suspended, or by whom; that a protector list is complete; that a TPM-only volume
+can be opened from an image; what the contents are before a validated opening.
+
 If opening fails, separate: material unavailable; a candidate that did not
 validate; a reader that does not support this version; an incomplete acquisition;
 damaged metadata. Say which contents were not examined. Do not call the volume

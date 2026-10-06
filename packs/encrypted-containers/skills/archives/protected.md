@@ -69,5 +69,10 @@ recovered values runs with `secret_output: true` and keeps them sealed. An attem
 that fails shows only that the authorised method did not succeed within its scope:
 not that the document is plain, empty or permanently inaccessible.
 
-**Sensitive output.** Archive and document names can be sensitive: cite them from the
-job's output. Never write a password, a fragment of one, or a hash of one.
+**Does not show.** That a member list means anything was copied; that the data is
+intact or openable; that a PDF or Office file with no marker is plain; who encrypted it,
+or why.
+
+**Sensitive output.** `archive_probe` reaches no secret value. A job that handles a
+password, a candidate list or a decrypted derivative runs with `secret_output: true`.
+Never write a password, a fragment of one, or a hash of one.

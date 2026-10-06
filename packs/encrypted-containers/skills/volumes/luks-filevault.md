@@ -45,6 +45,13 @@ different routes; which applies depends on hardware and configuration. The login
 keychain and the volume are separate protected objects: opening the volume does not
 show that every keychain item can be decrypted.
 
+**Does not show.** Who added a slot or when; that a slot opens the data; that no usable
+key exists; anything about an APFS volume's encryption from a reader that does not
+support it.
+
+**Sensitive output.** `cryptsetup luksDump`'s volume-key option and `crypto_id`'s
+`include_head_hex` print key material: leave them off for a metadata job.
+
 **Both routes.** Use material the case supplies, within the recorded authority. Jobs
 that handle secret material run with `secret_output: true`; the ledger and the report
 carry source locators, non-secret identifiers, sealed references and results, never

@@ -17,12 +17,13 @@ Use `file_type` and `crypto_id` to triage, then check the proposed format with a
 reader that supports the version you see. Record the reader and its version, the
 fields it read, and any damaged, missing or unsupported structure.
 
-What `crypto_id` shows: a recognised signature at the offset, the header fields at
-fixed places (LUKS1 slot table; LUKS2 version, label, UUID), the basis of the call,
-the next reader, and what is not determined. What it does not show: BitLocker
-protectors, LUKS2 keyslots, whether an APFS volume is encrypted, document
-encryption, or whether any data is intact or openable. "No scheme recognised" is not
-"not encrypted".
+`crypto_id` shows a recognised signature at the offset, the header fields at fixed
+places (LUKS1 slot table; LUKS2 version, label, UUID), the basis of the call, the next
+reader, and what is not determined.
+
+**Does not show.** BitLocker protectors, LUKS2 keyslots, whether an APFS volume is
+encrypted, document encryption, or whether any data is intact or openable. "No scheme
+recognised" is not "not encrypted".
 
 - BitLocker: an FVE signature is a lead for a metadata reader (`volumes/bitlocker`).
   An `MSWIN4.1` OEM string alone does not make a volume BitLocker To Go.
