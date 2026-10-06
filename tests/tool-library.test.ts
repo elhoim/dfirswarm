@@ -949,7 +949,7 @@ test("icat_extract and chunk_needles find an image by its catalogue when it has 
     assert.notEqual(r.code, 0);
     assert.match(r.stdout + r.stderr, /several filesystems in inputs\/s4a-challenge4; pass offset=/);
     assert.match(r.stdout + r.stderr, /\[2048, 409600\]/);
-    r = await runPy(join(tools, "icat_extract", "run.py"), cwd, { inode: 12, output: "work/x.bin", offset: 0 }, bin);
+    r = await runPy(join(tools, "icat_extract", "run.py"), cwd, { inode: 12, output: "work/x0.bin", offset: 0 }, bin);
     assert.equal(r.code, 0, r.stderr + r.stdout);
     assert.equal(await readFile(join(cwd, "icat-args.txt"), "utf8"), "-o\n0\ninputs/s4a-challenge4\n12\n");
   });

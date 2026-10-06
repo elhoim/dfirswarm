@@ -1,0 +1,114 @@
+"""icat_extract: streamed with bounded memory, a sector size that reaches icat, exact attribute attribution, and a partial that is not a file.
+
+icat is a stand-in that records its arguments and writes a stream: from a file, or
+generated (dd from /dev/zero) when the stream is too big to keep.
+"""
+import hashlib
+import os
+import resource
+import subprocess
+import sys
+import unittest
+
+from support import Case, run_tool, stand_in, tool_path
+
+MIB = 1024 * 1024
+
+
+class IcatExtract(Case):
+    def icat(self, body):
+        d = self.path("bin")
+        os.makedirs(d, exist_ok=True)
+        self.argv_file = self.path("icat-args.txt")
+        stand_in(d, "icat", 'printf "%%s\\n" "$@" > "%s"\n%s' % (self.argv_file, body))
+        self.write("inputs/disk.E01", b"x")
+        return d
+
+    def extract(self, bin_dir, **kw):
+        args = {"inode": "168-128-4", "output": "work/out.bin", "image": "inputs/disk.E01", "offset": 2048}
+        args.update(kw)
+        return run_tool("icat_extract", args, self.dir, [bin_dir])
+
+    def test_the_sector_size_is_passed_to_icat_as_b_and_not_otherwise(self):
+        bin_dir = self.icat('printf data\n')
+        r = self.extract(bin_dir, sector_size=4096)
+        self.assertEqual(r.code, 0, r.stdout)
+        self.assertEqual(self.read(self.argv_file).split(), ["-b", "4096", "-o", "2048", "inputs/disk.E01", "168-128-4"])
+        self.assertEqual((r.json["sector_size"], r.json["inode"], r.json["status"], r.json["icat_exit"]), (4096, "168-128-4", "complete", 0))
+        self.extract(bin_dir, output="work/two.bin")
+        self.assertEqual(self.read(self.argv_file).split(), ["-o", "2048", "inputs/disk.E01", "168-128-4"])
+        for bad in (1000, 0, 100, True):
+            self.assertEqual(self.extract(bin_dir, output="work/b%s.bin" % bad, sector_size=bad).code, 1, bad)
+
+    def test_a_large_extract_is_streamed_and_hashed_without_holding_it(self):
+        total = 256
+        bin_dir = self.icat('dd if=/dev/zero bs=1048576 count=%d 2>/dev/null\n' % total)
+        before = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
+        r = self.extract(bin_dir)
+        after = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
+        self.assertEqual(r.code, 0, r.stdout)
+        h = hashlib.sha256()
+        zero = bytes(MIB)
+        for _ in range(total):
+            h.update(zero)
+        self.assertEqual((r.json["size"], r.json["sha256"]), (total * MIB, h.hexdigest()))
+        self.assertEqual(os.path.getsize(self.path("work/out.bin")), total * MIB)
+        # ru_maxrss is bytes on macOS and kilobytes on Linux; the children's peak, the tool and its dd, is far below the stream's size.
+        peak = (after if after > before else after) * (1 if sys.platform == "darwin" else 1024)
+        self.assertLess(peak, 120 * MIB, "the children's peak was %d bytes for a %d MiB stream" % (peak, total))
+
+    def test_the_output_budget_keeps_a_partial_and_says_so(self):
+        bin_dir = self.icat('dd if=/dev/zero bs=1048576 count=64 2>/dev/null\n')
+        r = self.extract(bin_dir, max_bytes=10 * MIB)
+        self.assertEqual(r.code, 1)
+        self.assertEqual((r.json["status"], r.json["size"], r.json["path"]), ("partial", 10 * MIB, "work/out.bin.partial"))
+        self.assertIn("budget", r.json["problem"])
+        self.assertFalse(os.path.exists(self.path("work/out.bin")), "no truncated file keeps its own name")
+        self.assertEqual(os.path.getsize(self.path("work/out.bin.partial")), 10 * MIB)
+
+    def test_an_icat_that_fails_part_way_is_partial_and_one_that_wrote_nothing_is_an_error(self):
+        bin_dir = self.icat('printf half\necho "Error reading block" >&2\nexit 1\n')
+        r = self.extract(bin_dir)
+        self.assertEqual((r.code, r.json["status"], r.json["size"], r.json["icat_exit"]), (1, "partial", 4, 1))
+        self.assertIn("Error reading block", r.json["stderr_head"])
+        self.assertFalse(os.path.exists(self.path("work/out.bin")))
+        self.assertEqual(self.read("work/out.bin.partial"), "half")
+        bin_dir = self.icat('echo "Cannot determine file system type" >&2\nexit 1\n')
+        r = self.extract(bin_dir, output="work/none.bin")
+        self.assertEqual(r.code, 1)
+        self.assertIn("Cannot determine file system type", r.json["error"])
+        self.assertFalse(os.path.exists(self.path("work/none.bin.partial")))
+
+    def test_an_existing_output_is_never_replaced(self):
+        bin_dir = self.icat('printf new\n')
+        keep = self.write("work/out.bin", b"earlier extract")
+        r = self.extract(bin_dir)
+        self.assertEqual(r.code, 1)
+        self.assertIn("never replaces", r.json["error"])
+        self.assertEqual(self.read(keep, "rb"), b"earlier extract")
+        os.symlink(self.path("elsewhere"), self.path("work/link.bin"))
+        self.assertEqual(self.extract(bin_dir, output="work/link.bin").code, 1)
+        self.assertFalse(os.path.exists(self.path("elsewhere")))
+
+    def test_the_address_asked_for_selects_the_stream_named_in_the_catalogue(self):
+        bin_dir = self.icat('printf data\n')
+        self.write("catalog/disk.E01/partitions.txt", "002:  000:000   0000002048   ...   NTFS\n")
+        self.write("catalog/disk.E01/p2048/filelist.txt",
+                   "r/r 168-128-1:\tUsers/a/doc.txt\n"
+                   "r/r 168-128-4:\tUsers/a/doc.txt:hidden\n"
+                   "r/r 1680-128-1:\tUsers/other.txt\n")
+        r = self.extract(bin_dir, inode="168-128-4")
+        self.assertEqual(r.json["catalog_path"], "Users/a/doc.txt:hidden")
+        self.assertEqual([e["address"] for e in r.json["catalog_paths"]], ["168-128-4"])
+        r = self.extract(bin_dir, inode="168", output="work/b.bin")
+        self.assertEqual(sorted(e["address"] for e in r.json["catalog_paths"]), ["168-128-1", "168-128-4"])
+
+    def test_an_inode_that_is_not_an_address_never_reaches_icat(self):
+        bin_dir = self.icat('printf data\n')
+        for bad in ("12; rm -rf x", "-5", "1-2-3-4", "abc", True, -1, 2.5):
+            self.assertEqual(self.extract(bin_dir, inode=bad, output="work/%s.bin" % abs(hash(str(bad)))).code, 1, bad)
+        self.assertFalse(os.path.exists(self.argv_file))
+
+
+if __name__ == "__main__":
+    unittest.main()
