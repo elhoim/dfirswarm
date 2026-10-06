@@ -26,19 +26,19 @@
       "tools/mem_fs/manifest.json": "1a17e8f5bca09150c4cc3975f62f6a6b67446cd8d168661c29c803fa70aa20e3",
       "tools/mem_fs/run.py": "24c96688638fda6d8c3c7b5d81697593fb21def68a58e9627f45aa2b2b72b13b",
       "goals/memory-triage.md": "2e27e156c48a7e5279d257e33aeefd2b4189cee0986e9580dddae75ac9c4c5f5",
-      "skills/strings/discipline.md": "0514bdcd974e43c094df4c2020dc70509a8b1e8e179a4de4a23e559dd91285b2",
+      "skills/strings/discipline.md": "066032bcaab3b2e3bfd50431324135a80f1b9b6918f7472475c6a3d5390daecb",
       "skills/patterns/yara.md": "341b1c5a24f580dddad01404fe8d44fbb7013ff094443a3868835e378c056d6b",
       "skills/processes/injection.md": "5237ab1fc602e470eb38c0704753cc712b1336c59c9eee88ee697130c82660cd",
       "skills/network/state.md": "35df980b0e7a6c7d64147b83fab2efb4bb6f82782ee8f669e8a849cb0d6c6c49",
-      "skills/triage/no-framework.md": "57b2e5268935017d736e22e87cf4a683c02e63c4349f164108928a1f950d706a",
+      "skills/triage/no-framework.md": "49446e55b27718815a56e756234f19ac1af6c20616a6de1f6289ab5f1cae8bb4",
       "skills/triage/volatility.md": "d2eb821b2203355f1842add2cf6edfe7e011a23d7029eb3e15e865d7fced043f",
-      "skills/triage/what-you-have.md": "c3f0df6f83609d15b3f1e0d92ca9ba1ac0e76939f9aefe27feb8315749900999",
+      "skills/triage/what-you-have.md": "cda4f338c865760ccebf5ce81e2e774ac3f306e1daebe69e9e2a8e831e7d99f2",
       "skills/acquire/images.md": "79b95ef985d1972c8179c99cc75959b5f2dd23059ff92a021269e9d3a4823651",
       "skills/credentials/material.md": "70c996fc926d5719864ed276dbbbe0cf64ed9e28aadb6f8f4007a78774f4b16f",
       "requires/host.json": "8d525797d6c06f4a5103bda4f22e8a3fcc0586ef92883181c11b0b83918ae19b",
       "requires/python.txt": "a0587a37c3cf6bfaf2947f4b8c6f56ba6f79a2e83f7141cfb1de950bb23a2fd0",
       "requires/symbols.windows.json": "d94b7dfa6ef6014bdf0f82952488e774a0f590500a872b87149f75256bddb105",
-      "skills/INDEX.md": "747dc59336240042046fff727cf54ff7089020c9655ec715015b021b2faaf395"
+      "skills/INDEX.md": "9f379abb3ad951427276ee812ec7b04a3aea636d3b9a8c3219e91f46c4c4381b"
     }
   },
   "tools": [
