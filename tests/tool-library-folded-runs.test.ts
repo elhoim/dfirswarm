@@ -433,7 +433,7 @@ test("encoded_literal_scan finds a literal across chunk boundaries once, and car
       assert.ok(r.next_start! > next);
       next = r.next_start!;
     }
-    assert.equal(calls, 8, "one chunk a call");
+    assert.ok(calls >= 8, "a call ends after a chunk or between two hits, never later");
     assert.deepEqual(seen.sort((a, b) => a - b), lit.map((h) => h.offset).sort((a, b) => a - b));
   });
 });
@@ -504,6 +504,66 @@ test("encoded_literal_scan takes any marker and closer, only the encodings asked
     assert.match(String((await bad({ marker: "abcd", out_dir: "../x" })).error), /out_dir/);
     assert.match(String((await bad({ marker: "abcd", start: 99999 })).error), /past the end/);
     assert.match(String(refused(await runPy(LITERAL_TOOL, cwd, { path: "inputs/none.raw", marker: "abcd" }, undefined, PY_ENV)).error), /regular file/);
+  });
+});
+
+test("encoded_literal_scan stops inside a chunk that holds more hits than it was told to take, and loses none by going on", async () => {
+  await inTemp(async (cwd) => {
+    const unit = Buffer.from(Buffer.from(`${MARKER}pathological body}`).toString("base64"));
+    const repeat = (bytes: number) => Buffer.concat(Array.from({ length: Math.ceil(bytes / unit.length) }, () => unit)).subarray(0, bytes);
+    // One mebibyte of base64 text that is the marker's text over and over: tens of thousands of hits in one chunk.
+    await writeFile(join(cwd, "inputs", "everywhere.raw"), repeat(1024 * 1024));
+    for (const chunk_bytes of [1024 * 1024, undefined]) {
+      const began = Date.now();
+      const r = ok<LitResult>(await runPy(LITERAL_TOOL, cwd, { path: "inputs/everywhere.raw", marker: MARKER, encodings: ["base64"], max_hits: 10, chunk_bytes }, undefined, PY_ENV));
+      assert.ok(Date.now() - began < 30_000, `the call came back in ${Date.now() - began} ms, not after every hit of the chunk`);
+      assert.equal(r.complete, false);
+      assert.equal(r.stopped_by, "max_hits");
+      assert.ok(r.hit_count >= 10 && r.hit_count < 10 + 8, `${r.hit_count} hits held for a cap of 10`);
+      assert.ok(r.next_start! > 0 && r.next_start! < 4096, "it stops between two hits, near where it began");
+      assert.match(String((r as unknown as { stopped_hint: string }).stopped_hint), /start=next_start/);
+      assert.ok((await stat(join(cwd, r.result_file))).size > 0, "the partial result is on disk and named");
+    }
+    // The budget is kept inside a chunk too.
+    const began = Date.now();
+    const b = ok<LitResult>(await runPy(LITERAL_TOOL, cwd, { path: "inputs/everywhere.raw", marker: MARKER, encodings: ["base64"], budget_seconds: 0.0000001, chunk_bytes: 1024 * 1024 }, undefined, PY_ENV));
+    assert.ok(Date.now() - began < 30_000);
+    assert.equal(b.complete, false);
+    assert.equal(b.stopped_by, "budget_seconds");
+    assert.ok(b.hit_count >= 1, "a call that stops on its budget has still made progress");
+
+    // Going on from each stop reaches the end, and the hits together are the single pass's, none twice.
+    await writeFile(join(cwd, "inputs", "dense.raw"), repeat(40_000));
+    const every = async (extra: Record<string, unknown>) => {
+      const offsets: number[] = [];
+      let next = 0, calls = 0;
+      for (;;) {
+        const r = ok<LitResult>(await runPy(LITERAL_TOOL, cwd, { path: "inputs/dense.raw", marker: MARKER, encodings: ["base64"], start: next, ...extra }, undefined, PY_ENV));
+        offsets.push(...(await wholeResult(cwd, r)).hits.map((h) => h.offset));
+        calls++;
+        if (r.complete) return { offsets, calls };
+        assert.ok(r.next_start! > next, "every call makes progress");
+        next = r.next_start!;
+      }
+    };
+    const single = await every({});
+    const stepped = await every({ max_hits: 100, chunk_bytes: 8192 });
+    assert.equal(single.calls, 1);
+    assert.ok(stepped.calls > 3, `${stepped.calls} calls`);
+    assert.ok(single.offsets.length > 500);
+    assert.deepEqual(stepped.offsets.sort((a, c) => a - c), single.offsets.sort((a, c) => a - c));
+    assert.equal(new Set(stepped.offsets).size, stepped.offsets.length, "no hit twice");
+  });
+});
+
+test("encoded_literal_scan finds a marker whose fixed characters are + or / in the URL-safe alphabet too", async () => {
+  await inTemp(async (cwd) => {
+    const lit = ">>>>?? body;";
+    for (const [name, text] of [["standard", Buffer.from(lit).toString("base64")], ["url", Buffer.from(lit).toString("base64url")]]) {
+      await writeFile(join(cwd, "inputs", `${name}.raw`), plant(4000, name, [[300, Buffer.from(text)]]));
+      const r = ok<LitResult>(await runPy(LITERAL_TOOL, cwd, { path: `inputs/${name}.raw`, marker: ">>>>", closer: ";", encodings: ["base64"] }, undefined, PY_ENV));
+      assert.deepEqual(r.candidates, [lit], name);
+    }
   });
 });
 

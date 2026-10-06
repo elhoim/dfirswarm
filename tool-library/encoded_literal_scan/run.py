@@ -40,11 +40,12 @@ Args, JSON on stdin:
   out_dir         where the whole result goes (default work/<agent>/encoded_literal_scan)
   start, length   a byte window of the file, by where a hit begins
   chunk_bytes     the read size (default 8 MiB)
-  budget_seconds  stop after this long at a chunk boundary and say where to
+  budget_seconds  stop after this long, between two hits, and say where to
                   go on (default 90)
-  max_hits        stop at a chunk boundary once this many marker hits are
-                  held (default 50000), and say where to go on: a marker
-                  that is everywhere is not a search
+  max_hits        stop once this many marker hits are held (default 50000),
+                  between two hits, and say where to go on: a marker that is
+                  everywhere is not a search; give a more specific marker or
+                  fewer encodings
   limit           the candidates shown in the answer (default 100)
 """
 import base64
@@ -63,8 +64,10 @@ ALL_ENCODINGS = ("base64", "base32", "hex", "rot13", "wide")
 CONTEXT = 8192          # each side of a hit, for the encodings that decode a run
 WIDE = ("utf-16le", "utf-16be", "utf-32le", "utf-32be")
 B64 = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+B64URL = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
 B32 = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
 HEX = b"0123456789abcdefABCDEF"
+SUB = 256 * 1024         # the window a chunk is worked in, so that a stop can come between two hits
 PLAIN_ENCODINGS = ("utf-8", "utf-16le", "utf-16be")   # what the decoded bytes may be text in
 
 
@@ -160,8 +163,14 @@ def build_specs(marker, encodings):
     for plain in PLAIN_ENCODINGS:
         raw = marker.encode(plain)
         if "base64" in encodings:
-            for p in packed_pattern(raw, B64, 6, 3):
-                specs.append({"kind": "base64", "plain": plain, "fold": None, **p})
+            standard = packed_pattern(raw, B64, 6, 3)
+            for p in standard:
+                specs.append({"kind": "base64", "plain": plain, "fold": None, "alphabet": "standard", **p})
+            # The URL-safe alphabet writes + and / as - and _: a marker whose fixed
+            # characters include one of them is another needle there.
+            for p, q in zip(standard, packed_pattern(raw, B64URL, 6, 3)):
+                if (p["needle"], p["check"].pattern) != (q["needle"], q["check"].pattern):
+                    specs.append({"kind": "base64", "plain": plain, "fold": None, "alphabet": "url", **q})
         if "base32" in encodings:
             for p in packed_pattern(raw, B32, 5, 5):
                 specs.append({"kind": "base32", "plain": plain, "fold": "upper", **p})
@@ -266,6 +275,8 @@ def inspect_hit(fd, size, spec, begin, marker, closer, max_body, literal):
     """One marker hit at `begin`: what it decodes to, and whether its context was cut short."""
     kind = spec["kind"]
     row = {"encoding": kind, "text_encoding": spec["plain"], "phase": spec["phase"], "offset": begin, "candidates": []}
+    if spec.get("alphabet") == "url":
+        row["alphabet"] = "url"
     if kind in ("base64", "base32", "hex"):
         alphabet = set({"base64": B64 + b"=_-", "base32": B32 + b"=", "hex": HEX}[kind])
         left = max(0, begin - CONTEXT)
@@ -351,38 +362,63 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
 
     hits = []
-    seen = set()
     stopped = None
     began = time.monotonic()
     pos = start
     fd = os.open(path, os.O_RDONLY)
+
+    def spent():
+        """Why this call should stop now, or None."""
+        if time.monotonic() - began >= budget:
+            return "budget_seconds"
+        if len(hits) >= max_hits:
+            return "max_hits"
+        return None
+
     try:
-        while pos < end:
-            if pos > start and time.monotonic() - began >= budget:
-                stopped = "budget_seconds"
-                break
-            if pos > start and len(hits) >= max_hits:
-                stopped = "max_hits"
+        while pos < end and stopped is None:
+            if pos > start and spent():
+                stopped = spent()
                 break
             scan_end = min(end, pos + chunk)
             buf = read_at(fd, min(size, scan_end + overlap) - pos, pos)
             folded = {"upper": buf.upper(), "lower": buf.lower()}
-            for spec in specs:
-                hay = folded.get(spec["fold"], buf)
-                needle, back = spec["needle"], spec["back"]
-                at = hay.find(needle)
-                while at >= 0:
-                    rel = at - back
-                    if 0 <= rel < scan_end - pos:
-                        begin = pos + rel
-                        tag = (spec["kind"], spec["plain"], spec["phase"], begin)
-                        # The place the pattern begins must be the whole pattern here too.
-                        whole_here = spec["check"] is None or spec["check"].match(hay, rel)
-                        if tag not in seen and whole_here:
-                            seen.add(tag)
-                            hits.append(inspect_hit(fd, size, spec, begin, marker, closer, max_body, literal))
-                    at = hay.find(needle, at + 1)
-            pos = scan_end
+            # A chunk is worked in windows of SUB bytes, and each window's hits in the order they
+            # lie: a stop is checked after every place a hit begins, so one chunk full of them
+            # cannot hold a call past its budget or its hit count, and what was done is exactly
+            # what lies before next_start.
+            sub = pos
+            while sub < scan_end and stopped is None:
+                sub_end = min(scan_end, sub + SUB)
+                found = set()
+                for index, spec in enumerate(specs):
+                    hay = folded.get(spec["fold"], buf)
+                    needle, back = spec["needle"], spec["back"]
+                    hi = sub_end - pos + back + len(needle)
+                    at = hay.find(needle, sub - pos + back, hi)
+                    while at >= 0:
+                        rel = at - back
+                        if rel < sub_end - pos:
+                            # The place the pattern begins must be the whole pattern here too.
+                            if spec["check"] is None or spec["check"].match(hay, rel):
+                                found.add((pos + rel, index))
+                        at = hay.find(needle, at + 1, hi)
+                ordered = sorted(found)
+                i = 0
+                while i < len(ordered):
+                    begin = ordered[i][0]
+                    while i < len(ordered) and ordered[i][0] == begin:
+                        hits.append(inspect_hit(fd, size, specs[ordered[i][1]], begin, marker, closer, max_body, literal))
+                        i += 1
+                    why = spent()
+                    nxt = ordered[i][0] if i < len(ordered) else sub_end
+                    if why and nxt < end:
+                        stopped, pos = why, nxt
+                        break
+                if stopped is None:
+                    sub = sub_end
+            if stopped is None:
+                pos = scan_end
     finally:
         os.close(fd)
 
@@ -399,11 +435,15 @@ def main():
         "window": {"start": start, "end": end},
         "scanned_to": pos,
         "complete": complete,
-        **({} if complete else {"next_start": pos, "stopped_by": stopped}),
+        **({} if complete else {
+            "next_start": pos,
+            "stopped_by": stopped,
+            "stopped_hint": "every hit that begins before next_start is in this result; call again with start=next_start" + (", and a more specific marker or fewer encodings if it stops at once again" if stopped == "max_hits" else ""),
+        }),
         "encodings": encodings,
         "chunk_bytes": chunk,
         "context_each_side": CONTEXT,
-        "patterns": [{"encoding": s["kind"], "text_encoding": s["plain"], "phase": s["phase"], "anchor_hex": s["needle"].hex()} for s in specs],
+        "patterns": [{"encoding": s["kind"], **({"alphabet": s["alphabet"]} if s.get("alphabet") else {}), "text_encoding": s["plain"], "phase": s["phase"], "anchor_hex": s["needle"].hex()} for s in specs],
         "hit_count": len(hits),
         "hits_by_encoding": {k: sum(1 for h in hits if h["encoding"] == k) for k in sorted({h["encoding"] for h in hits})},
         "literal_hits": sum(1 for h in hits if h["candidates"]),

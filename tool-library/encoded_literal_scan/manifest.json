@@ -42,11 +42,11 @@
     },
     "budget_seconds": {
       "type": "number",
-      "description": "Stop at a chunk boundary after this long and say complete=false with next_start (default 90)"
+      "description": "Stop after this long, between two hits, and say complete=false with next_start (default 90)"
     },
     "max_hits": {
       "type": "integer",
-      "description": "Stop at a chunk boundary once this many marker hits are held (default 50000) and say where to go on: a marker that is everywhere is not a search"
+      "description": "Stop once this many marker hits are held (default 50000), between two hits, and say where to go on: a marker that is everywhere is not a search"
     },
     "limit": {
       "type": "integer",
@@ -60,5 +60,5 @@
   "by": "s3472f0",
   "at": "2026-10-01T08:37:08.645Z",
   "version": 1,
-  "sha256": "ae33fca1ddc2578de1027a6ee1ace2272972fe0ab6b4b572a224cf0030f5cbb4"
+  "sha256": "1e674989880bd9eefc24ca9623c1336e6215c52e5809f7ef68d958155984bf4e"
 }
