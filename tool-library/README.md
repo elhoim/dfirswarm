@@ -194,10 +194,10 @@ run (the first named, where a tool is made from several).
   only listed a root.
 - `aes_schedule_scan` and `aes_inverse_scan` — two Node scanners made with
   `make_tool` in run `s3472f0` (seat `s3472f003`, versions 2 and 1) to look
-  for AES key schedules in a 7 GB Windows memory image after `aeskeyfind`,
-  which tests the plain layout byte for byte, found nothing. The run's copies
-  took one path, wrote candidate keys to a directory and printed offsets;
-  the inverse one knew AES-256 only. Now both do AES-128 and AES-256; the
+  for AES key schedules in a 7 GB Windows memory image, in layouts that
+  `aeskeyfind`, which tests the plain schedule byte for byte, does not read.
+  The run's copies took one path, wrote candidate keys to a directory and
+  printed offsets; the inverse one knew AES-256 only. Now both do AES-128 and AES-256; the
   first reads the schedule as the standard lays it out or with the bytes of
   each 32-bit word reversed, the second as a decryption routine keeps it
   (InvMixColumns on the middle rounds, rounds in either order, either byte
