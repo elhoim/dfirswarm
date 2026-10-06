@@ -72,7 +72,8 @@ A tool lives in its sandbox. Carrying a good one forward is an operator's act,
 and there is a path for it: `swarm.sh tools <id> --save DIR` copies a run's
 tools into a library, `--tools-from DIR` seeds the next run from one with the
 author and version kept, and [`tool-library/`](../tool-library/README.md) in
-this repository holds the thirty-two written during the forensic cases.
+this repository holds forty-six: thirty-two written during the forensic
+cases, eight folded in from later runs, and six written for the gaps.
 `make_tool` also answers a near-duplicate of a tool already on disk with that
 tool's name and author rather than forging the same capability twice.
 

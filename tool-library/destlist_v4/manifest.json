@@ -1,0 +1,36 @@
+{
+  "name": "destlist_v4",
+  "description": "Read the DestList stream of a Windows jump list, version 4 (the 130-byte entry layout): for each entry its place in the stream, entry id, host name, last access (FILETIME and UTC), pin state and target path. The stream, not the compound file around it; another version is refused, not guessed. A cut-short stream is read as far as it goes and says so; entries beyond a page go to a file.",
+  "use": {
+    "names": [
+      "DestList"
+    ]
+  },
+  "params": {
+    "path": {
+      "type": "string",
+      "description": "The DestList stream, as a file (read only)",
+      "required": true
+    },
+    "offset": {
+      "type": "integer",
+      "description": "Where the stream starts in the file (default 0)"
+    },
+    "limit": {
+      "type": "integer",
+      "description": "Entries in the answer (default 500); the whole list goes to a file when there are more"
+    },
+    "max_bytes": {
+      "type": "integer",
+      "description": "The largest stream read (default 64 MiB)"
+    }
+  },
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 30,
+  "example": "{\"path\": \"work/s01/DestList\"}",
+  "by": "sd29252",
+  "at": "2026-10-06T02:51:13.937Z",
+  "version": 1,
+  "sha256": "c7d46007bdd295412d3a624ce52efb1f2205a36f60c47fe098a6ba56100d7e4b"
+}

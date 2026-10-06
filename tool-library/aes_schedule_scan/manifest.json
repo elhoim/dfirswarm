@@ -1,0 +1,50 @@
+{
+  "name": "aes_schedule_scan",
+  "description": "Find AES-128 and AES-256 expanded key schedules in a file or memory image, at every byte alignment, in standard byte order or with each 32-bit word reversed. Each whole, checked schedule's key goes to a private file in out_dir, never to the answer; the answer gives offset, key size, byte order and the key's sha256. A hit is a lead, not a finding. Not AES-192, not decayed or fragmented keys, not the decryption layout (aes_inverse_scan). Windows over a large image through start, length and budget_seconds.",
+  "use": {
+    "extensions": [
+      ".mem",
+      ".vmem",
+      ".lime",
+      ".dmp"
+    ]
+  },
+  "params": {
+    "path": {
+      "type": "string",
+      "description": "The file or memory image to scan (read only)",
+      "required": true
+    },
+    "out_dir": {
+      "type": "string",
+      "description": "Where the key files and the whole result go, inside the run directory and not under inputs/ (default work/<agent>/aes_schedule_scan)"
+    },
+    "start": {
+      "type": "integer",
+      "description": "First byte to test (default 0). A schedule is reported by where it starts, so successive windows never lose or double one"
+    },
+    "length": {
+      "type": "integer",
+      "description": "How many bytes to test from start (default: to the end of the file)"
+    },
+    "chunk_bytes": {
+      "type": "integer",
+      "description": "Read size in bytes (default 16 MiB)"
+    },
+    "budget_seconds": {
+      "type": "number",
+      "description": "Stop at a chunk boundary after this long and say complete=false with next_start; call again with start=next_start (default 240)"
+    }
+  },
+  "runtime": "node",
+  "entry": "run.mjs",
+  "timeout_seconds": 300,
+  "example": "{\"path\": \"inputs/memory.raw\", \"out_dir\": \"work/s01/aes\"}",
+  "requires": [
+    "node"
+  ],
+  "by": "s3472f0",
+  "at": "2026-10-01T08:59:03.079Z",
+  "version": 1,
+  "sha256": "c17af09d97eebfbe6ce8e429ec4904589cbc11eb60d7c0c909e5e0ab8b77ffa9"
+}

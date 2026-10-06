@@ -1,7 +1,7 @@
 {
   "id": "memory-forensics",
   "name": "Memory Forensics Pack",
-  "version": "1.3.1",
+  "version": "1.3.2",
   "description": "Method and tooling for a memory image: what the container is before anything else, what can be read with no framework at all, processes and injection, network state, credential material, and the discipline that keeps a string in memory from becoming a claim about behaviour.",
   "licence": "AGPL-3.0-or-later",
   "authors": [
@@ -34,7 +34,7 @@
       "skills/triage/volatility.md": "a8631c1717da28e6ceae2aa1ed6eb556e071617aad32e89e10a4f41956ca74b1",
       "skills/triage/what-you-have.md": "c3f0df6f83609d15b3f1e0d92ca9ba1ac0e76939f9aefe27feb8315749900999",
       "skills/acquire/images.md": "79b95ef985d1972c8179c99cc75959b5f2dd23059ff92a021269e9d3a4823651",
-      "skills/credentials/material.md": "714fd8723d19b41dfb94126f4fa6a2936b1231f71440cf3f09f5c8023c8e5cef",
+      "skills/credentials/material.md": "ca02e5ae90c19ce6ce25b4a08f1dc52fa22d59d5b751d95706deb47eacee62f4",
       "requires/host.json": "8d525797d6c06f4a5103bda4f22e8a3fcc0586ef92883181c11b0b83918ae19b",
       "requires/python.txt": "a0587a37c3cf6bfaf2947f4b8c6f56ba6f79a2e83f7141cfb1de950bb23a2fd0",
       "requires/symbols.windows.json": "d94b7dfa6ef6014bdf0f82952488e774a0f590500a872b87149f75256bddb105",
