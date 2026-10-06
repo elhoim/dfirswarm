@@ -390,7 +390,7 @@ def main():
         fail("path is required: the file holding the marshal stream")
     if not os.path.isfile(path):
         fail("path is not a readable regular file", path=path)
-    max_bytes = whole(args, "max_bytes", 64 * 1024 * 1024, 16, 1 << 32)
+    max_bytes = whole(args, "max_bytes", 64 * 1024 * 1024, 16, 512 * 1024 * 1024)
     preview = whole(args, "preview", 160, 8, 1 << 20)
     limit = whole(args, "limit", 50, 1, 1 << 20)
     bytecode = args.get("bytecode", True)

@@ -17,7 +17,7 @@
     },
     "out_dir": {
       "type": "string",
-      "description": "Where the key files and the whole result go, inside the run directory and not under inputs/ (default work/<agent>/aes_inverse_scan)"
+      "description": "Where the key files and the whole result go, inside the run directory and not under inputs/ (default work/quarantine/<agent>/aes_inverse_scan, which a handover package leaves in the sandbox; anywhere else, and a job's other outputs, travel with it unless the hit is a sensitive ledger entry citing key_file, or the job ran with secret_output)"
     },
     "start": {
       "type": "integer",
@@ -33,18 +33,18 @@
     },
     "budget_seconds": {
       "type": "number",
-      "description": "Stop at a chunk boundary after this long and say complete=false with next_start; call again with start=next_start (default 90)"
+      "description": "Stop at a chunk boundary after this long (at most 110) and say complete=false with next_start; call again with start=next_start (default 90)"
     }
   },
   "runtime": "node",
   "entry": "run.mjs",
   "timeout_seconds": 120,
-  "example": "{\"path\": \"inputs/memory.raw\", \"out_dir\": \"work/s01/aes\"}",
+  "example": "{\"path\": \"inputs/memory.raw\"}",
   "requires": [
     "node"
   ],
   "by": "s3472f0",
   "at": "2026-10-01T09:26:51.132Z",
   "version": 1,
-  "sha256": "447b09da0984d14de2bce3125d9d271b7ad4120b4068c2712b5dbebe7cf7a216"
+  "sha256": "11916d3745945117a2e0be04064fec44d6724105c264c39c0b549199f3fb0be9"
 }

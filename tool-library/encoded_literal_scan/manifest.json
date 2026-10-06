@@ -42,7 +42,7 @@
     },
     "budget_seconds": {
       "type": "number",
-      "description": "Stop after this long, between two hits, and say complete=false with next_start (default 90)"
+      "description": "Stop after this long (at most 110), between two hits, and say complete=false with next_start (default 90)"
     },
     "max_hits": {
       "type": "integer",
@@ -60,5 +60,5 @@
   "by": "s3472f0",
   "at": "2026-10-01T08:37:08.645Z",
   "version": 1,
-  "sha256": "1e674989880bd9eefc24ca9623c1336e6215c52e5809f7ef68d958155984bf4e"
+  "sha256": "b77de624ef034ffa2cda2c2fbf44964ed2f9937cdcd49e3f43612820ba026fc7"
 }

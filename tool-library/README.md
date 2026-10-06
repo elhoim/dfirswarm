@@ -4,12 +4,16 @@ Forty-six tools. Forty were written by agents: thirty-two during the
 forensic cases in [docs/use-cases](../docs/use-cases/README.md), and eight in
 later runs, folded in and made general ([below](#folded-from-later-runs));
 six were written for gaps those cases left, and are marked `maintainer` in
-the table. Each is a directory with a manifest and a script. A tool folded
-from a later run also carries the `provenance.json` that `tools --save`
-wrote for it: the run, the seat and the moment it was forged, and the image
-and packs the run had (a tool made from several carries each one's, as
-`provenance-<name>.json`). A `provenance.json` describes the run's own
-script, so its `sha256` is that script's, not this library's.
+the table. Each is a directory with a manifest and a script. The five
+folded from `s3472f0` and `sd29252` (`aes_inverse_scan`, `aes_schedule_scan`,
+`destlist_v4`, `encoded_literal_scan`, `marshal_inspect`) also carry the
+`provenance.json` that `tools --save` wrote for them (the three folded
+earlier, `ledger_timeline`, `contact_sheet` and `nested_vdi`, carry none):
+the run, the seat and the moment it was forged, the image and packs the run
+had, and the run's own label for its case (`case_id`). A tool made from
+several carries each one's, as `provenance-<name>.json`. A `provenance.json`
+describes the run's own script, so its `sha256` is that script's, not this
+library's.
 
 Hand it to a run and every agent has them from its first turn:
 
@@ -92,7 +96,8 @@ The scanners that read a large image (`aes_schedule_scan`, `aes_inverse_scan`,
 result as one JSON file in their `out_dir` and name it in `result_file`; the
 answer carries the counts and the first hits. A scanner works a byte window
 (`start`, `length`) and stops at a chunk boundary when its `budget_seconds`
-(and, for `encoded_literal_scan`, `max_hits`) run out, saying `complete: false`
+(and, for `encoded_literal_scan`, `max_hits`, checked between two hits, so a
+chunk full of them cannot hold a call past its time) run out, saying `complete: false`
 and the `next_start` to call again with, so a 7 GB image is covered by calls
 that each fit the tool's timeout, and none of them loses or doubles a hit.
 `out_dir` must lie inside the run directory, never under `inputs/`, `ledger/`
@@ -204,8 +209,12 @@ run (the first named, where a tool is made from several).
   order). Each checks its S-box, MixColumns and key expansion against
   FIPS-197 before it reads a byte, tests every alignment, and works a byte
   window with a time budget. A key is never printed: it goes to a private
-  file in `out_dir` and the answer gives the offset, size, layout and the
-  key's sha256 for the ledger. A hit is a lead, and the tools say so.
+  file in `out_dir` (by default `work/quarantine/<agent>/`, which a handover
+  package leaves in the sandbox; a key file anywhere else travels with the
+  package unless the hit is a sensitive ledger entry citing it, or the scan
+  ran as a `secret_output` job) and the answer gives the offset, size,
+  layout and the key's sha256 for the ledger. A hit is a lead, and the tools
+  say so.
 - `encoded_literal_scan` — three Python scanners made in run `s3472f0`
   (`encoded_flag_scan`, `base32_flag_literals`, seat `s3472f003`, and
   `utf32_flag_literals`, seat `s3472f004`), each with the opening of the

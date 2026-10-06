@@ -144,6 +144,12 @@ function verify(b, p, keyBytes, reverseRounds, reversedWords) {
       for (let i = 0; i < 4; i++) key[16 + j + i] = c[i];
     }
   }
+  // The first word the expansion derives, w[Nk], lies in the stored round Nk/4: it must
+  // match before the whole schedule is worked out, which almost always ends it here.
+  const base = (reverseRounds ? rounds - keyBytes / 16 : keyBytes / 16) * 16;
+  const word = mixColumn([at(base), at(base + 1), at(base + 2), at(base + 3)], false);
+  const l = keyBytes - 4;
+  if (word[0] !== (key[0] ^ SBOX[key[l + 1]] ^ 1) || word[1] !== (key[1] ^ SBOX[key[l + 2]]) || word[2] !== (key[2] ^ SBOX[key[l + 3]]) || word[3] !== (key[3] ^ SBOX[key[l]])) return null;
   const z = expandKey(key);
   for (let q = 16; q < (rounds) * 16; q += 4) {
     const c = mixColumn([z[q], z[q + 1], z[q + 2], z[q + 3]], true);
@@ -158,12 +164,21 @@ function verify(b, p, keyBytes, reverseRounds, reversedWords) {
 
 /** The hits in b at positions [from, to). */
 function scanBuffer(b, from, to, counters, found) {
+  let zeroEnd = -1; // the first non-zero byte at or after p, once it is known
   for (let p = from; p < to; p++) {
+    if (zeroEnd < p) {
+      zeroEnd = p;
+      while (zeroEnd < b.length && b[zeroEnd] === 0) zeroEnd++;
+    }
+    // A span of zeros is no schedule (the expansion of any key has non-zero bytes), so a run
+    // of zeros is crossed in one step; only a window that reaches a non-zero byte is looked at.
+    if (zeroEnd - p >= SCHEDULE[16]) {
+      p = zeroEnd - SCHEDULE[16];
+      continue;
+    }
     for (const rel of RELATIONS) {
       if (p + SCHEDULE[rel.keyBytes] > b.length) continue;
       const a = p + rel.a, bb = p + rel.b, c = p + rel.c;
-      // The three words all zero satisfy the relation and say nothing.
-      if ((b[a] | b[a + 1] | b[a + 2] | b[a + 3] | b[bb] | b[bb + 1] | b[bb + 2] | b[bb + 3] | b[c] | b[c + 1] | b[c + 2] | b[c + 3]) === 0) continue;
       if (b[c] !== (b[a] ^ b[bb]) || b[c + 1] !== (b[a + 1] ^ b[bb + 1]) || b[c + 2] !== (b[a + 2] ^ b[bb + 2]) || b[c + 3] !== (b[a + 3] ^ b[bb + 3])) continue;
       counters.prefilter++;
       for (const reversedWords of [false, true]) {
@@ -199,8 +214,10 @@ try {
 const chunk = whole("chunk_bytes", 16 * 1024 * 1024, MAX_REACH * 2, 1 << 30);
 const start = whole("start", 0, 0, Number.MAX_SAFE_INTEGER);
 const end = Math.min(size, start + whole("length", Math.max(0, size - start), 0, Number.MAX_SAFE_INTEGER));
-const budget = args.budget_seconds ?? 90;
-if (typeof budget !== "number" || !(budget > 0)) fail("budget_seconds must be a positive number", { got: budget });
+// The tool's own timeout is 120 s: a budget past 110 could not be kept, so it is 110.
+const asked = args.budget_seconds ?? 90;
+if (typeof asked !== "number" || !(asked > 0)) fail("budget_seconds must be a positive number", { got: asked });
+const budget = Math.min(asked, 110);
 if (start > size) fail("start is past the end of the file", { start, size });
 
 /** A path with the links of its nearest existing part resolved, for a place that may not exist yet. */
@@ -219,7 +236,9 @@ function resolveOutput(given) {
   const root = fs.realpathSync(process.cwd());
   const job = process.env.JOB_ID && process.env.OUT;
   const agent = (process.env.AGENT_ID || "tool").replace(/[^A-Za-z0-9_.-]/g, "_");
-  const want = given ?? (job ? path.join(process.env.OUT, TOOL) : path.join("work", agent, TOOL));
+  // The keys are live material from the evidence: by default they go where a handover
+  // package leaves things in the sandbox (work/quarantine/<agent>/, in a job $OUT/quarantine/).
+  const want = given ?? (job ? path.join(process.env.OUT, "quarantine", TOOL) : path.join("work", "quarantine", agent, TOOL));
   if (typeof want !== "string" || !want) fail("out_dir must be a path", { got: want });
   const dest = realish(path.resolve(root, want));
   if (dest === root || !dest.startsWith(root + path.sep)) fail("out_dir must be a directory inside the run directory", { out_dir: want });
@@ -289,6 +308,8 @@ const result = {
   complete,
   ...(complete ? {} : { next_start: pos }),
   chunk_bytes: chunk,
+  budget_seconds: budget,
+  out_dir: path.relative(process.cwd(), outDir),
   all_byte_alignments: true,
   supported: "complete AES-128 and AES-256 equivalent-inverse schedules: InvMixColumns on the middle rounds, the first and last round as they are, rounds in forward or reverse order, bytes of each 32-bit word as they are or reversed",
   not_supported: "AES-192, decayed or fragmented schedules, the plain encryption layout (aes_schedule_scan)",
@@ -297,7 +318,7 @@ const result = {
   seconds: (performance.now() - started) / 1000,
   hit_count: hits.length,
   hits,
-  note: "A key is never printed. Each key_file holds the raw key bytes (mode 0600); key_sha256 is what to record in the ledger. A hit is a lead until it decrypts something the evidence holds.",
+  note: "A key is never printed. Each key_file holds the raw key bytes (mode 0600); key_sha256 is what to record in the ledger. A hit is a lead until it decrypts something the evidence holds. A key file is live material from the evidence: out_dir by default is under work/quarantine/<agent>/ (in a job, $OUT/quarantine/), which a handover package leaves in the sandbox. A key file anywhere else, and a job's outputs in a package that carries outputs, travel with it unless the hit is recorded as a sensitive ledger entry that cites key_file (a redacted package then withholds the file) or the scan ran as a secret_output job.",
 };
 const resultFile = path.join(outDir, `${TOOL}.${start}.json`);
 fs.writeFileSync(resultFile, JSON.stringify(result, null, 2));

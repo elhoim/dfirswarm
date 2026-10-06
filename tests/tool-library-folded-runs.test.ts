@@ -20,7 +20,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
-  decryptBlockEquivalent, encryptBlock, expandKey, inverseSchedule, keyFor, mixState, noise, roundKeys, reverseWords,
+  decryptBlockEquivalent, encryptBlock, expandKey, inverseSchedule, keyFor, mixState, noise, roundKeys, reverseWords, SBOX,
 } from "./aes-fixture.ts";
 import { LIB, runPy } from "./tool-library-harness.ts";
 
@@ -217,9 +217,9 @@ test("aes_schedule_scan and aes_inverse_scan refuse what they must: no file, a d
       assert.match(String(refused(await runNode(tool, cwd, { path: "inputs/x.raw", out_dir: "work/a", chunk_bytes: 10 })).error), /chunk_bytes/);
       assert.match(String(refused(await runNode(tool, cwd, "not an object" as unknown as object)).error), /path is required|arguments/);
     }
-    // Where nothing is said, the output goes under work/<agent>/.
+    // Where nothing is said, the output goes under work/quarantine/<agent>/.
     const r = ok<Scan>(await runNode(SCHEDULE_TOOL, cwd, { path: "inputs/x.raw" }));
-    assert.match(r.result_file, /^work\/t1\/aes_schedule_scan\/aes_schedule_scan\.0\.json$/);
+    assert.match(r.result_file, /^work\/quarantine\/t1\/aes_schedule_scan\/aes_schedule_scan\.0\.json$/, "keys go where a handover package leaves things in the sandbox");
   });
 });
 
@@ -278,6 +278,67 @@ test("aes_inverse_scan says no to a schedule with a byte wrong, to an encryption
     assert.equal(ok<Scan>(await runNode(INVERSE_TOOL, cwd, { path: "inputs/zero.raw", out_dir: "work/t1/z" })).hit_count, 0);
     await writeFile(join(cwd, "inputs", "noise.raw"), noise(300000, "noise for the inverse"));
     assert.equal(ok<Scan>(await runNode(INVERSE_TOOL, cwd, { path: "inputs/noise.raw", out_dir: "work/t1/n" })).hit_count, 0);
+  });
+});
+
+test("both AES scanners say what to do about a key file in a handover, and keep their budget under the tool's own timeout", async () => {
+  await inTemp(async (cwd) => {
+    const key = keyFor(16, "note");
+    await writeFile(join(cwd, "inputs", "n.raw"), plant(2000, "note", [[100, expandKey(key)], [900, inverseSchedule(keyFor(16, "note2"), { reverseRounds: true, reverseWords: false })]]));
+    for (const tool of [SCHEDULE_TOOL, INVERSE_TOOL]) {
+      const r = ok<Scan & { note: string; budget_seconds: number; out_dir: string }>(await runNode(tool, cwd, { path: "inputs/n.raw", budget_seconds: 100000 }));
+      assert.equal(r.hit_count, 1);
+      assert.equal(r.budget_seconds, 110, "a budget past the tool's 120 s timeout is brought down to what can be kept");
+      assert.match(r.out_dir, /^work\/quarantine\/t1\//);
+      assert.match(r.note, /work\/quarantine\/<agent>/);
+      assert.match(r.note, /sensitive ledger entry that cites key_file/);
+      assert.match(r.note, /secret_output/);
+      // In a job the keys go to $OUT/quarantine/, which is where work/quarantine/<id>/ maps to.
+      await mkdir(join(cwd, "store", "jobs", "j1", "out"), { recursive: true });
+      const job = await new Promise<Run>((resolve, reject) => {
+        const child = spawn(process.execPath, [tool], { cwd, env: { ...process.env, JOB_ID: "j1", OUT: join(cwd, "store", "jobs", "j1", "out"), AGENT_ID: "t1" } });
+        const out: Buffer[] = [];
+        child.stdout.on("data", (c: Buffer) => out.push(c));
+        child.on("error", reject);
+        child.on("close", (code) => resolve({ code, stdout: Buffer.concat(out).toString("utf8"), stderr: "" }));
+        child.stdin.end(JSON.stringify({ path: "inputs/n.raw" }));
+      });
+      assert.match(ok<Scan>(job).result_file, /^store\/jobs\/j1\/out\/quarantine\//);
+    }
+  });
+});
+
+test("aes_inverse_scan finds the schedule of a key built to zero the words its filter once skipped, and crosses zeros and sparse memory fast", async () => {
+  await inTemp(async (cwd) => {
+    // A key whose expansion has w5 = w8 = w9 = 0 (w1 = g2(w2^w3), w0 = w1 ^ g1(w3)): the three words of the AES-128
+    // relation are all zero, which a zero-skip on those words would have taken for empty memory.
+    const g = (w: number[], rcon: number) => [SBOX[w[1]] ^ rcon, SBOX[w[2]], SBOX[w[3]], SBOX[w[0]]];
+    const xor = (a: number[], b: number[]) => a.map((v, i) => v ^ b[i]);
+    const w2 = [0x11, 0x22, 0x33, 0x44], w3 = [0x55, 0x66, 0x77, 0x88];
+    const w1 = g(xor(w2, w3), 2);
+    const w0 = xor(w1, g(w3, 1));
+    const crafted = Buffer.from([...w0, ...w1, ...w2, ...w3]);
+    const sched = expandKey(crafted);
+    for (const w of [5, 8, 9]) assert.deepEqual([...sched.subarray(4 * w, 4 * w + 4)], [0, 0, 0, 0], `w${w} of the crafted schedule`);
+    await writeFile(join(cwd, "inputs", "crafted.raw"), plant(3000, "crafted", [[500, inverseSchedule(crafted, { reverseRounds: true, reverseWords: false })], [1500, inverseSchedule(crafted, { reverseRounds: false, reverseWords: true })]]));
+    const r = ok<Scan>(await runNode(INVERSE_TOOL, cwd, { path: "inputs/crafted.raw", out_dir: "work/t1/c" }));
+    assert.deepEqual(r.hits.map((h) => [h.offset, h.key_sha256]), [[500, sha256(crafted)], [1500, sha256(crafted)]]);
+    await writeFile(join(cwd, "inputs", "plain.raw"), plant(3000, "craftedp", [[700, sched]]));
+    assert.deepEqual(ok<Scan>(await runNode(SCHEDULE_TOOL, cwd, { path: "inputs/plain.raw", out_dir: "work/t1/p" })).hits.map((h) => h.offset), [700]);
+
+    // Zeros are crossed, and memory that is zeros but for a byte now and then costs no more than noise does.
+    const sparse = Buffer.alloc(4 * 1024 * 1024);
+    for (let i = 7; i < sparse.length; i += 301) sparse[i] = 1 + (i % 251);
+    const keyed = Buffer.from(sparse);
+    inverseSchedule(keyFor(32, "sparse"), { reverseRounds: true, reverseWords: false }).copy(keyed, 2_000_003);
+    await writeFile(join(cwd, "inputs", "zeros.raw"), Buffer.alloc(32 * 1024 * 1024));
+    await writeFile(join(cwd, "inputs", "sparse.raw"), keyed);
+    for (const [name, want] of [["zeros", []], ["sparse", [2_000_003]]] as const) {
+      const began = Date.now();
+      const z = ok<Scan>(await runNode(INVERSE_TOOL, cwd, { path: `inputs/${name}.raw`, out_dir: `work/t1/${name}` }));
+      assert.deepEqual(z.hits.map((h) => h.offset), want, name);
+      assert.ok(Date.now() - began < 20_000, `${name}: ${Date.now() - began} ms`);
+    }
   });
 });
 

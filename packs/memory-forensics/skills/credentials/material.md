@@ -52,9 +52,16 @@ was ever in memory. Two layouts it does not test are in the tool library
 (`--tools-from tool-library`): `aes_schedule_scan` also reads the schedule with
 the bytes of each 32-bit word reversed, and `aes_inverse_scan` reads one stored
 as a decryption routine keeps it (the middle round keys transformed, the rounds
-in either order). Neither prints a key: it goes to a file under `work/`, and
-the answer gives the offset, the layout and the key's sha256 to record in the
-ledger.
+in either order). Neither prints a key: it goes to a private file in the
+tool's `out_dir`, which by default is `work/quarantine/<your id>/` (in a job,
+`$OUT/quarantine/`), and the answer gives the offset, the layout and the key's
+sha256 to record in the ledger. A key file is live material from the evidence
+and a handover package leaves `work/quarantine/` in the sandbox; a key file
+anywhere else, and a job's outputs in a package that carries outputs, travel
+with it unless the hit is recorded as a sensitive ledger entry that cites the
+file (a redacted package then withholds it) or the scan ran as a
+`secret_output` job. Record where the key was found and its hash, and hand
+the value over through the channel the operator named.
 
 `aeskeyfind` comes with the memory and `full` images. A host run has it only if
 the operator installed it (Debian packages it for amd64 and i386 only); without

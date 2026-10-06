@@ -353,6 +353,7 @@ def main():
     budget = args.get("budget_seconds", 90)
     if isinstance(budget, bool) or not isinstance(budget, (int, float)) or budget <= 0:
         fail("budget_seconds must be a positive number", got=budget)
+    budget = min(budget, 110)   # the tool's own timeout is 120 s; a longer budget could not be kept
     out_dir = resolve_output(args.get("out_dir"))
 
     literal = re.compile(re.escape(marker) + r"[^\x00\r\n�]{0,%d}?" % max_body + re.escape(closer))

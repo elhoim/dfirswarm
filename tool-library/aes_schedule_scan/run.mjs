@@ -153,8 +153,10 @@ try {
 const chunk = whole("chunk_bytes", 16 * 1024 * 1024, MAX_REACH * 2, 1 << 30);
 const start = whole("start", 0, 0, Number.MAX_SAFE_INTEGER);
 const end = Math.min(size, start + whole("length", Math.max(0, size - start), 0, Number.MAX_SAFE_INTEGER));
-const budget = args.budget_seconds ?? 90;
-if (typeof budget !== "number" || !(budget > 0)) fail("budget_seconds must be a positive number", { got: budget });
+// The tool's own timeout is 120 s: a budget past 110 could not be kept, so it is 110.
+const asked = args.budget_seconds ?? 90;
+if (typeof asked !== "number" || !(asked > 0)) fail("budget_seconds must be a positive number", { got: asked });
+const budget = Math.min(asked, 110);
 if (start > size) fail("start is past the end of the file", { start, size });
 
 /** A path with the links of its nearest existing part resolved, for a place that may not exist yet. */
@@ -173,7 +175,9 @@ function resolveOutput(given) {
   const root = fs.realpathSync(process.cwd());
   const job = process.env.JOB_ID && process.env.OUT;
   const agent = (process.env.AGENT_ID || "tool").replace(/[^A-Za-z0-9_.-]/g, "_");
-  const want = given ?? (job ? path.join(process.env.OUT, TOOL) : path.join("work", agent, TOOL));
+  // The keys are live material from the evidence: by default they go where a handover
+  // package leaves things in the sandbox (work/quarantine/<agent>/, in a job $OUT/quarantine/).
+  const want = given ?? (job ? path.join(process.env.OUT, "quarantine", TOOL) : path.join("work", "quarantine", agent, TOOL));
   if (typeof want !== "string" || !want) fail("out_dir must be a path", { got: want });
   const dest = realish(path.resolve(root, want));
   if (dest === root || !dest.startsWith(root + path.sep)) fail("out_dir must be a directory inside the run directory", { out_dir: want });
@@ -243,6 +247,8 @@ const result = {
   complete,
   ...(complete ? {} : { next_start: pos }),
   chunk_bytes: chunk,
+  budget_seconds: budget,
+  out_dir: path.relative(process.cwd(), outDir),
   all_byte_alignments: true,
   supported: "complete forward AES-128 and AES-256 schedules, standard byte order or each 32-bit word reversed",
   not_supported: "AES-192, decayed or fragmented schedules, the decryption (equivalent inverse) layout (aes_inverse_scan)",
@@ -251,7 +257,7 @@ const result = {
   seconds: (performance.now() - started) / 1000,
   hit_count: hits.length,
   hits,
-  note: "A key is never printed. Each key_file holds the raw key bytes (mode 0600); key_sha256 is what to record in the ledger. A hit is a lead until it decrypts something the evidence holds.",
+  note: "A key is never printed. Each key_file holds the raw key bytes (mode 0600); key_sha256 is what to record in the ledger. A hit is a lead until it decrypts something the evidence holds. A key file is live material from the evidence: out_dir by default is under work/quarantine/<agent>/ (in a job, $OUT/quarantine/), which a handover package leaves in the sandbox. A key file anywhere else, and a job's outputs in a package that carries outputs, travel with it unless the hit is recorded as a sensitive ledger entry that cites key_file (a redacted package then withholds the file) or the scan ran as a secret_output job.",
 };
 const resultFile = path.join(outDir, `${TOOL}.${start}.json`);
 fs.writeFileSync(resultFile, JSON.stringify(result, null, 2));
