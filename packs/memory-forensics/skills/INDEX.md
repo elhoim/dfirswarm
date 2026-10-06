@@ -2,7 +2,7 @@
 
 Fetch a body with `skill("<id>")`. A body may name others; fetch those the same way.
 
-- `acquire/images` Acquiring memory, and what the method costs you: The operator is deciding how to capture memory, or you must judge how a capture was made.
+- `acquire/images` Memory acquisition methods and their limits: The operator is deciding how to capture memory, or you must judge how a capture was made, what it covers and whether it can be trusted.
 - `credentials/material` Credential material in memory, and how to handle and report it: An examination may expose credentials, keys, tokens or cookies in memory, or you must say whether credentials were exposed or taken.
 - `network/state` Network objects, ownership and timestamp limits: You need connections, listeners or an address from memory, or an address to tie to a host artefact.
 - `patterns/yara` YARA over files and reconstructed memory regions: You have case rules or a precise byte pattern to test against a memory image or a dumped process region.

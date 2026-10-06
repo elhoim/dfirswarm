@@ -33,12 +33,12 @@
       "skills/triage/no-framework.md": "49446e55b27718815a56e756234f19ac1af6c20616a6de1f6289ab5f1cae8bb4",
       "skills/triage/volatility.md": "d2eb821b2203355f1842add2cf6edfe7e011a23d7029eb3e15e865d7fced043f",
       "skills/triage/what-you-have.md": "cda4f338c865760ccebf5ce81e2e774ac3f306e1daebe69e9e2a8e831e7d99f2",
-      "skills/acquire/images.md": "79b95ef985d1972c8179c99cc75959b5f2dd23059ff92a021269e9d3a4823651",
+      "skills/acquire/images.md": "cc8a2ae5b61854e1ad0be0de631078bc655ad96ac1c42dc7a4b157b6138db247",
       "skills/credentials/material.md": "70c996fc926d5719864ed276dbbbe0cf64ed9e28aadb6f8f4007a78774f4b16f",
       "requires/host.json": "8d525797d6c06f4a5103bda4f22e8a3fcc0586ef92883181c11b0b83918ae19b",
       "requires/python.txt": "a0587a37c3cf6bfaf2947f4b8c6f56ba6f79a2e83f7141cfb1de950bb23a2fd0",
       "requires/symbols.windows.json": "d94b7dfa6ef6014bdf0f82952488e774a0f590500a872b87149f75256bddb105",
-      "skills/INDEX.md": "9f379abb3ad951427276ee812ec7b04a3aea636d3b9a8c3219e91f46c4c4381b"
+      "skills/INDEX.md": "b4ef916f32550b5912b9f6cc741374b4756f6e2547e7ac58c16c3957c5547e84"
     }
   },
   "tools": [
