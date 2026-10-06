@@ -3,7 +3,7 @@
 Fetch a body with `skill("<id>")`. A body may name others; fetch those the same way.
 
 - `acquire/images` Acquiring memory, and what the method costs you: The operator is deciding how to capture memory, or you must judge how a capture was made.
-- `credentials/material` Credential material, and how to talk about it: You must say whether credentials were exposed or taken.
+- `credentials/material` Credential material in memory, and how to handle and report it: An examination may expose credentials, keys, tokens or cookies in memory, or you must say whether credentials were exposed or taken.
 - `network/state` Network state, and what it proves about when: You need connections, listeners, or an address to tie to a host artefact.
 - `patterns/yara` YARA over memory without turning a match into a verdict: You have case rules or a precise byte pattern to test against memory or a dumped process region.
 - `processes/injection` Processes, and code that is not where it should be: You need what was running, or whether something was injected into it.

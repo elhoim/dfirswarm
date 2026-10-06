@@ -75,10 +75,6 @@ memory-forensics closure skills/triage/no-framework.md evtx_carve
 memory-forensics closure skills/triage/no-framework.md mam_scan
 memory-forensics closure skills/triage/no-framework.md regkv
 memory-forensics unlisted skills/triage/what-you-have.md check_inputs
-memory-forensics unused skills/credentials/material.md ioc_scan
-memory-forensics unused skills/credentials/material.md mem_fs
-memory-forensics unused skills/credentials/material.md memprocfs
-memory-forensics unused skills/credentials/material.md vol
 memory-forensics unused skills/network/state.md ioc_scan
 memory-forensics unused skills/network/state.md mem_fs
 memory-forensics unused skills/network/state.md memprocfs
