@@ -351,14 +351,22 @@ jq -e '.volumes == 1 and .candidate_volumes == 1' "$H/out-lvm.json" >/dev/null |
 jq -e '.status == "partial" and ([.errors[] | select(test("LVM physical volume at sector 1062912"))] | length == 1) and ([.errors[] | select(test("1050624|1052672"))] | length == 0)' "$H/out-lvm/coverage.json" >/dev/null || fail "the LVM layer is named and nothing else: $(cat "$H/out-lvm/coverage.json")"
 pass "disk-volumes takes no extended container or swap for a filesystem, names an LVM volume as a layer, and counts the row fsstat reads"
 
-# memory-windows reads with the image's symbols first, and asks the symbol
-# server only when the image has none for the kernel: coverage says which, and
-# the offline attempt is kept. A stub vol, so this runs on any host.
+# memory-windows reads the symbol tables the image holds and fetches nothing:
+# every Volatility call carries --offline. An image with no table for its
+# kernel stops the run after one windows.info call, with the kernel named as
+# missing and coverage partial, and no plugin is run. A stub vol that logs every
+# call, so this runs on any host. The stub answers a call WITHOUT --offline as
+# a reachable symbol server would (success), so a recipe that retried online
+# would show as a second call and as a complete run.
 mkdir -p "$H/vol-shim"
 cat > "$H/vol-shim/vol" <<'SH'
 #!/bin/sh
+[ -n "$VOL_STUB_LOG" ] && printf '%s\n' "$*" >> "$VOL_STUB_LOG"
 offline=0; for a in "$@"; do [ "$a" = --offline ] && offline=1; last="$a"; done
 if [ "$offline" = 1 ] && [ -n "$VOL_STUB_NO_SYMBOLS" ]; then
+  # What Volatility prints offline for a kernel whose table the image lacks (the
+  # PDB, GUID and age are the ones in its automagic message).
+  echo "WARNING  volatility3.framework.plugins: Automagic exception occurred: volatility3.framework.exceptions.OfflineException: Volatility 3 is offline: unable to access http://msdl.microsoft.com/download/symbols/ntkrnlmp.pdb/0123456789ABCDEF0123456789ABCDEFA/ntkrnlmp.pdb" >&2
   echo "Unsatisfied requirement plugins.Info.kernel.symbol_table_name" >&2; exit 1
 fi
 case "$last" in windows.info) printf 'Variable\tValue\nKernel Base\t0xf80000000000\n' ;; *) printf 'PID\tImageFileName\n4\tSystem\n' ;; esac
@@ -366,13 +374,18 @@ SH
 chmod +x "$H/vol-shim/vol"
 : > "$H/win.mem"
 MW="$ROOT/packs/computer-forensics-base/recipes/memory-windows/run.sh"
-PATH="$H/vol-shim:$PATH" bash "$MW" run --target "{\"paths\": [\"$H/win.mem\"], \"name\": \"win.mem\"}" --out "$H/out-mw" >/dev/null || fail "memory-windows with the image's symbols should run"
-jq -e '.status == "complete" and (.covered | test("symbols held in the image"))' "$H/out-mw/coverage.json" >/dev/null || fail "with the image's symbols, coverage says so: $(cat "$H/out-mw/coverage.json")"
-VOL_STUB_NO_SYMBOLS=1 PATH="$H/vol-shim:$PATH" bash "$MW" run --target "{\"paths\": [\"$H/win.mem\"], \"name\": \"win.mem\"}" --out "$H/out-mw2" >/dev/null || fail "memory-windows without the image's symbols should fall back to the symbol server"
-jq -e '.status == "complete" and (.covered | test("fetched from the symbol server"))' "$H/out-mw2/coverage.json" >/dev/null || fail "a fetched symbol table is said: $(cat "$H/out-mw2/coverage.json")"
-grep -q symbol_table_name "$H/out-mw2/offline.windows.info.txt.stderr" && grep -q '^offline.windows.info.txt.stderr' "$H/out-mw2/index.tsv" || fail "the offline attempt is kept and indexed"
-grep -q 'System' "$H/out-mw2/pslist.txt" || fail "the plugins ran with the fetched symbols"
-pass "memory-windows uses the image's symbols first, falls back to the symbol server when it has none, and says which"
+VOL_STUB_LOG="$H/vol-calls-1.log" PATH="$H/vol-shim:$PATH" bash "$MW" run --target "{\"paths\": [\"$H/win.mem\"], \"name\": \"win.mem\"}" --out "$H/out-mw" >/dev/null || fail "memory-windows with the image's symbols should run"
+jq -e '.status == "complete" and (.covered | test("symbols held in the image")) and (.steps | length == 12) and ([.steps[].exit] | all(. == 0))' "$H/out-mw/coverage.json" >/dev/null || fail "with the image's symbols, coverage says so and has one record per step: $(cat "$H/out-mw/coverage.json")"
+[[ "$(wc -l < "$H/vol-calls-1.log")" -eq 12 ]] && ! grep -v -- '--offline' "$H/vol-calls-1.log" | grep -q . || fail "every Volatility call carries --offline: $(cat "$H/vol-calls-1.log")"
+jq -e '(.steps[0].step == "windows.info.txt") and (.steps[0].argv | index("--offline")) and (.steps[0] | has("seconds") and has("limit_seconds") and has("output"))' "$H/out-mw/coverage.json" >/dev/null || fail "a step's record names its command, duration and output: $(cat "$H/out-mw/coverage.json")"
+VOL_STUB_NO_SYMBOLS=1 VOL_STUB_LOG="$H/vol-calls-2.log" PATH="$H/vol-shim:$PATH" bash "$MW" run --target "{\"paths\": [\"$H/win.mem\"], \"name\": \"win.mem\"}" --out "$H/out-mw2" > "$H/out-mw2.json" || fail "memory-windows without the image's symbols should end partial, not fail: $(cat "$H/out-mw2.json")"
+[[ "$(wc -l < "$H/vol-calls-2.log")" -eq 1 ]] || fail "without the image's symbols there is exactly one Volatility call, the offline windows.info; a second one is an online retry: $(cat "$H/vol-calls-2.log")"
+grep -q -- '--offline' "$H/vol-calls-2.log" && grep -q 'windows.info' "$H/vol-calls-2.log" || fail "the one call is the offline windows.info: $(cat "$H/vol-calls-2.log")"
+jq -e '.status == "partial" and (.covered | test("no symbol table for this kernel in the image")) and .missing[0].kind == "symbols" and .missing[0].identity == {"pdb": "ntkrnlmp.pdb", "guid": "0123456789ABCDEF0123456789ABCDEF", "age": 10} and (.errors | length >= 1) and (.steps | length == 1) and .steps[0].exit == 1' "$H/out-mw2/coverage.json" >/dev/null || fail "an image with no table is partial and names the kernel's PDB, GUID and age: $(cat "$H/out-mw2/coverage.json")"
+jq -e '.ok == true and .status == "partial" and .missing[0].identity.pdb == "ntkrnlmp.pdb"' "$H/out-mw2.json" >/dev/null || fail "the run says partial and names what is missing: $(cat "$H/out-mw2.json")"
+grep -q symbol_table_name "$H/out-mw2/windows.info.txt.stderr" && grep -q '^windows.info.txt.stderr' "$H/out-mw2/index.tsv" || fail "the offline attempt is kept and indexed"
+[[ ! -e "$H/out-mw2/pslist.txt" && ! -e "$H/out-mw2/offline.windows.info.txt.stderr" ]] || fail "no plugin ran and nothing was fetched into the output"
+pass "memory-windows reads the image's symbol tables offline at every step, never retries online, ends partial with the kernel named as missing when the image has none, and keeps one record per step"
 
 # 7z, read as its listing streams, with the member limit applied as it goes.
 SEVEN="$(command -v 7z || command -v 7zz || true)"
