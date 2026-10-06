@@ -398,3 +398,169 @@ test("recovery_key_scan refuses what it cannot answer for, loudly", async () => 
     assert.match(refused(await tool(SCAN, cwd, { path: "work", write_values: "yes" })).error, /write_values/);
   });
 });
+
+// --- crypto_id ----------------------------------------------------------------
+
+const ID = join(ENC, "crypto_id", "run.py");
+
+function field(buf: Buffer, at: number, text: string, width: number): void {
+  Buffer.from(text, "latin1").copy(buf, at, 0, width);
+}
+
+/** A LUKS1 header as the LUKS1 on-disk specification lays it out: 592 bytes. */
+function luks1Header(): Buffer {
+  const h = Buffer.alloc(592);
+  Buffer.from("LUKS\xba\xbe", "latin1").copy(h, 0);
+  h.writeUInt16BE(1, 6);
+  field(h, 8, "aes", 32); // cipher name
+  field(h, 40, "xts-plain64", 32); // cipher mode
+  field(h, 72, "sha256", 32); // hash spec
+  h.writeUInt32BE(4096, 104); // payload offset, in sectors
+  h.writeUInt32BE(64, 108); // key bytes
+  for (let i = 0; i < 20; i++) h[112 + i] = 0x11; // master key digest
+  for (let i = 0; i < 32; i++) h[132 + i] = 0x22; // master key digest salt
+  h.writeUInt32BE(77777, 164); // master key digest iterations
+  field(h, 168, "2f4a8e0c-1b5d-4c3a-9e7f-0a1b2c3d4e5f", 40); // uuid
+  // Eight key slots of 48 bytes: active, iterations, salt[32], key material offset, stripes.
+  const slots = [
+    { active: 0x00ac71f3, iterations: 111111, offset: 8, stripes: 4000 },
+    { active: 0x00ac71f3, iterations: 222222, offset: 264, stripes: 4000 },
+    { active: 0x0000dead, iterations: 0, offset: 520, stripes: 4000 },
+    { active: 0x00ac71f3, iterations: 333333, offset: 776, stripes: 4000 },
+    { active: 0x0000dead, iterations: 0, offset: 1032, stripes: 4000 },
+    { active: 0x0000dead, iterations: 0, offset: 1288, stripes: 4000 },
+    { active: 0x0000dead, iterations: 0, offset: 1544, stripes: 4000 },
+    { active: 0x0000dead, iterations: 0, offset: 1800, stripes: 4000 },
+  ];
+  slots.forEach((s, i) => {
+    const at = 208 + i * 48;
+    h.writeUInt32BE(s.active, at);
+    h.writeUInt32BE(s.iterations, at + 4);
+    for (let b = 0; b < 32; b++) h[at + 8 + b] = 0xa0 + i; // a salt that is not a number anyone would mistake
+    h.writeUInt32BE(s.offset, at + 40);
+    h.writeUInt32BE(s.stripes, at + 44);
+  });
+  return h;
+}
+
+/** A LUKS2 binary header as cryptsetup's `struct luks2_hdr_disk` lays it out: 4096 bytes. */
+function luks2Header(version = 2): Buffer {
+  const h = Buffer.alloc(4096);
+  Buffer.from("LUKS\xba\xbe", "latin1").copy(h, 0);
+  h.writeUInt16BE(version, 6);
+  h.writeBigUInt64BE(16384n, 8); // hdr_size, with the JSON area
+  h.writeBigUInt64BE(7n, 16); // seqid
+  field(h, 24, "label", 48);
+  field(h, 72, "sha256", 32); // checksum_alg
+  for (let i = 0; i < 64; i++) h[104 + i] = 0x5a; // salt
+  field(h, 168, "9b1d6a32-4c5e-4f70-8a91-b2c3d4e5f607", 40); // uuid
+  field(h, 208, "subsys", 48);
+  h.writeBigUInt64BE(0n, 256); // hdr_offset
+  return h;
+}
+
+type Id = Record<string, unknown> & {
+  scheme: string;
+  version?: number;
+  uuid?: string;
+  label?: string;
+  key_slots?: { slot: number; state: string; iterations: number; key_material_offset_sectors: number; stripes: number }[];
+  enabled_slots?: number;
+  supported?: boolean;
+  header_problem?: string;
+  next_reader?: string;
+  not_determined?: string[];
+  head_hex?: string;
+};
+
+test("crypto_id reads each LUKS1 key slot from the specification's field offsets", async () => {
+  // It read four adjacent integers from the start of each 48-byte slot, so
+  // `stripes` was taken from inside the salt (4000 came back as 2694881440).
+  await withCwd(async (cwd) => {
+    await writeFile(join(cwd, "work", "luks1.img"), luks1Header());
+    const out = body<Id>(await tool(ID, cwd, { path: "work/luks1.img" }));
+    assert.equal(out.scheme, "LUKS1");
+    assert.equal(out.uuid, "2f4a8e0c-1b5d-4c3a-9e7f-0a1b2c3d4e5f");
+    assert.equal(out.cipher, "aes");
+    assert.equal(out.cipher_mode, "xts-plain64");
+    assert.equal(out.hash, "sha256");
+    assert.equal(out.key_bytes, 64);
+    assert.equal(out.enabled_slots, 3);
+    const slots = out.key_slots!;
+    assert.equal(slots.length, 8);
+    assert.deepEqual(slots.map((s) => s.state), ["enabled", "enabled", "disabled", "enabled", "disabled", "disabled", "disabled", "disabled"]);
+    assert.deepEqual(slots.map((s) => s.stripes), Array(8).fill(4000));
+    assert.equal(out.payload_offset_sectors, 4096);
+    assert.deepEqual(slots.map((s) => s.key_material_offset_sectors), [8, 264, 520, 776, 1032, 1288, 1544, 1800]);
+    assert.deepEqual(slots.slice(0, 4).map((s) => s.iterations), [111111, 222222, 0, 333333]);
+    assert.ok(out.next_reader && /cryptsetup/.test(out.next_reader));
+    assert.ok(Array.isArray(out.not_determined) && out.not_determined.length > 0);
+  });
+});
+
+test("crypto_id says a LUKS1 header cut short is cut short, and reads no slot table from it", async () => {
+  await withCwd(async (cwd) => {
+    await writeFile(join(cwd, "work", "cut.img"), luks1Header().subarray(0, 300));
+    const out = body<Id>(await tool(ID, cwd, { path: "work/cut.img" }));
+    assert.equal(out.scheme, "LUKS1");
+    assert.match(out.header_problem ?? "", /300 of 592 bytes/);
+    assert.equal(out.key_slots, undefined);
+    assert.equal(out.enabled_slots, undefined);
+    assert.ok(out.not_determined?.some((n) => /key slot/i.test(n)));
+    // A file that ends inside the version field is named too, not a struct.error.
+    await writeFile(join(cwd, "work", "stub.img"), Buffer.from("LUKS\xba\xbe\x00", "latin1"));
+    const stub = body<Id>(await tool(ID, cwd, { path: "work/stub.img" }));
+    assert.match(stub.header_problem ?? "", /7 bytes/);
+  });
+});
+
+test("crypto_id reads the LUKS2 UUID from byte 168 and the label from byte 24", async () => {
+  // It returned bytes 24-63, the label, as the UUID.
+  await withCwd(async (cwd) => {
+    await writeFile(join(cwd, "work", "luks2.img"), luks2Header());
+    const out = body<Id>(await tool(ID, cwd, { path: "work/luks2.img" }));
+    assert.equal(out.scheme, "LUKS2");
+    assert.equal(out.uuid, "9b1d6a32-4c5e-4f70-8a91-b2c3d4e5f607");
+    assert.equal(out.label, "label");
+    assert.equal(out.header_size_bytes, 16384);
+    assert.equal(out.sequence_id, 7);
+    assert.equal(out.checksum_alg, "sha256");
+    assert.equal(out.key_slots, undefined, "the keyslots are JSON after the binary header: not read here");
+    assert.ok(out.not_determined?.some((n) => /keyslot/i.test(n)));
+    assert.match(out.next_reader ?? "", /cryptsetup luksDump/);
+  });
+});
+
+test("crypto_id does not read a LUKS version it does not handle as LUKS2", async () => {
+  await withCwd(async (cwd) => {
+    await writeFile(join(cwd, "work", "luks3.img"), luks2Header(3));
+    const out = body<Id>(await tool(ID, cwd, { path: "work/luks3.img" }));
+    assert.equal(out.supported, false);
+    assert.equal(out.version, 3);
+    assert.match(out.scheme, /unsupported/i);
+    assert.equal(out.uuid, undefined);
+    assert.equal(out.label, undefined);
+  });
+});
+
+test("crypto_id prints no raw bytes unless asked, bounds its sample, and says what it did not determine", async () => {
+  await withCwd(async (cwd) => {
+    // A file that could be a key file: crypto_id must not echo its first bytes.
+    const key = Buffer.from("00112233445566778899aabbccddeeff102132435465768798a9bacbdcedfe0f", "hex");
+    await writeFile(join(cwd, "work", "key.bin"), Buffer.concat([key, Buffer.alloc(2048)]));
+    const plain = await tool(ID, cwd, { path: "work/key.bin" });
+    assert.ok(!plain.stdout.includes(key.subarray(0, 32).toString("hex")), "head_hex is opt-in");
+    assert.equal(body<Id>(plain).head_hex, undefined);
+    const asked = body<Id>(await tool(ID, cwd, { path: "work/key.bin", include_head_hex: true }));
+    assert.equal(asked.head_hex, key.toString("hex"));
+    assert.match(String(asked.head_hex_note), /key material/i);
+    // The entropy sample has an upper bound as well as a lower one.
+    assert.match(refused(await tool(ID, cwd, { path: "work/key.bin", entropy_sample: 1 << 30 })).error, /at most/);
+    assert.match(refused(await tool(ID, cwd, { path: "work/key.bin", entropy_sample: 10 })).error, /at least/);
+    // A file no branch matches is not called unencrypted.
+    await writeFile(join(cwd, "work", "text.txt"), "just some text\n".repeat(100));
+    const text = body<Id>(await tool(ID, cwd, { path: "work/text.txt" }));
+    assert.doesNotMatch(text.scheme, /^not encrypted/);
+    assert.ok(text.not_determined?.some((n) => /encrypted/i.test(n)));
+  });
+});
