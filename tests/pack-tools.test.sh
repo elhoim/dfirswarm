@@ -360,7 +360,13 @@ EOF
 pass "image_layout reads an mmls table in sectors and marks the meta row and the gap"
 
 printf 'not an image' > "$WORK/plain"
-echo "{\"image\":\"$WORK/plain\"}" | run_tool "$BASE/tools/image_layout" | "$PY" -c '
+# mmls and fsstat as they answer a file that is no image: exit 1, and fsstat says it
+# cannot determine the type. Stand-ins, so the answer does not depend on the host's Sleuth Kit.
+mkdir -p "$WORK/tsk-none"
+printf '#!/bin/sh\nexit 1\n' > "$WORK/tsk-none/mmls"
+printf '#!/bin/sh\necho "Cannot determine file system type" >&2\nexit 1\n' > "$WORK/tsk-none/fsstat"
+chmod +x "$WORK/tsk-none/mmls" "$WORK/tsk-none/fsstat"
+(cd "$WORK" && echo "{\"image\":\"$WORK/plain\"}" | PATH="$WORK/tsk-none:$PATH" run_tool "$BASE/tools/image_layout") | "$PY" -c '
 import json, sys
 d = json.load(sys.stdin)
 assert d["partition_table"] is False, d
