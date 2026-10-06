@@ -780,7 +780,8 @@ const filetime = (iso: string) => (BigInt(Date.parse(iso)) + 11644473600000n) * 
 function destEntry(o: { id: number; host?: string; time?: string; pin?: number; path: string }): Buffer {
   const fixed = Buffer.alloc(130);
   fixed.write(o.host ?? "WS-TEST-01", 72, "ascii");
-  fixed.writeBigUInt64LE(BigInt(o.id), 88);
+  fixed.writeUInt32LE(o.id, 88);
+  fixed.writeUInt32LE(0xdeadbeef, 92); // the dword after the entry number is not part of it
   fixed.writeBigUInt64LE(o.time ? filetime(o.time) : 0n, 100);
   fixed.writeInt32LE(o.pin ?? -1, 108);
   fixed.writeUInt16LE(o.path.length, 128);

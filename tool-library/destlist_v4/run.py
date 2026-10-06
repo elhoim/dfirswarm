@@ -5,7 +5,7 @@ An automaticDestinations-ms file is an OLE compound file; its DestList stream
 is the index of the jump list: one entry for each target the user opened with
 the application, in the order of use. This reads that stream once it is out of
 the compound file, and says for every entry where it lies in the stream, its
-entry number, the host's NetBIOS name it records, the last time the target was
+entry number (a 32-bit value; the dword after it is not read), the host's NetBIOS name it records, the last time the target was
 accessed (a FILETIME, shown in UTC and as the raw number), whether it is
 pinned, and the target's path.
 
@@ -113,7 +113,7 @@ MAX_PATH_CHARS = 32767
 
 
 def fail(message, **extra):
-    print(json.dumps({"error": message, **extra}))
+    print(json.dumps({"ok": False, "error": message, **extra}))
     raise SystemExit(1)
 
 
@@ -192,7 +192,7 @@ def main():
             entries.add({
                 "n": read + 1,
                 "offset": offset + pos,
-                "entry_id": struct.unpack_from("<Q", data, pos + 88)[0],
+                "entry_id": struct.unpack_from("<I", data, pos + 88)[0],
                 "hostname": data[pos + 72:pos + 88].split(b"\x00", 1)[0].decode("ascii", "replace"),
                 "last_access": filetime(ft),
                 "filetime": ft,
@@ -211,7 +211,7 @@ def main():
     page = entries.finish()
     out.update(page)
     out["entries"] = entries.page
-    out["fields_not_read"] = "the checksum, the volume and file identifiers, and the header and entry fields whose meaning is not settled"
+    out["fields_not_read"] = "the checksum, the volume and file identifiers, the dword after the entry number (offset 92), and the header and entry fields whose meaning is not settled"
     print(json.dumps(out, indent=2, ensure_ascii=False))
 
 
