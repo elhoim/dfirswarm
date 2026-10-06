@@ -141,7 +141,7 @@ def identify(head, sample):
     if head[0:2] == b"\x43\x53" or head[88:96] == b"CS\x00\x00\x00\x00\x00\x00":
         return {"scheme": "Apple Core Storage (the layout of legacy FileVault 2), possibly encrypted",
                 "basis": "a Core Storage signature",
-                "next_reader": "fvdeinfo (libfvde) reads Core Storage encryption metadata; it is not an APFS reader",
+                "next_reader": "fvdeinfo (libfvde), for the Core Storage layout; whether it reads an APFS volume is not established here",
                 "not_determined": ["whether the logical volume is encrypted", "which recovery routes exist"]}
     if head[32:36] == b"NXSB":
         return {"scheme": "APFS container", "basis": "\"NXSB\" at offset 32",

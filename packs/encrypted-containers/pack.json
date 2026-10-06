@@ -15,6 +15,32 @@
     "python": "requires/python.txt"
   },
   "secrets": [],
+  "unreferenced_ok": [
+    {
+      "name": "john",
+      "why": "declared for a recovery capability the owner has not decided on; no skill instructs its use (archives/protected states only the recovery gate, without a program)"
+    },
+    {
+      "name": "gpg",
+      "why": "declared for agents' own offline OpenPGP work; the skill that names it (messages/openpgp) is planned for a later change to this pack"
+    },
+    {
+      "name": "libvhdi-python",
+      "why": "imported by an agent's own scripts (pyvhdi); the layered-reading skill that names it is planned for a later change to this pack"
+    },
+    {
+      "name": "libluksde-python",
+      "why": "imported by an agent's own scripts (pyluksde); the LUKS skill that names it is planned for a later change to this pack"
+    },
+    {
+      "name": "pytsk3",
+      "why": "imported by an agent's own scripts and by dfvfs; the layered-reading skill that names it is planned for a later change to this pack"
+    },
+    {
+      "name": "pyAesCrypt",
+      "why": "imported by an agent's own scripts; the AES Crypt skill that names it is planned for a later change to this pack"
+    }
+  ],
   "checksums": {
     "sha256": {
       "LICENCE": "5b94f18424dbef1e77eda33a465e946c2c8eb715fa5236afe2c6ec6763af80d3",
@@ -23,17 +49,17 @@
       "tools/recovery_key_scan/run.py": "009beaaa7dd17fb3eecb01dbcecef343ecb282f5de9cdbc7c64091f1ea68164a",
       "tools/archive_probe/manifest.json": "d45fd7446b62dd9226e8be7ebb6917610c0534dd1b12f75d245ccc4a8543e12f",
       "tools/archive_probe/run.py": "8a722ca4e0c4934079f330c9ccb92fc5d9cfb2d85f87b91ea4e8e20acfbe9d2e",
-      "tools/crypto_id/manifest.json": "8f9ee18b1e8e956499f66a69e84f68f276e3df0f7503c95e34fa1308cf042759",
-      "tools/crypto_id/run.py": "d6a39d12113e31c02a3be5ebfc73d6b3a962599b0ebeea60c1cd2a516b853729",
+      "tools/crypto_id/manifest.json": "7f80fe10182c3ae23c527f94e48f18d427d6a9ba55b1d2eef9017711b137d921",
+      "tools/crypto_id/run.py": "d82a04d319fc2ed5e81fa4448e5a0dff00ae22c178da2c967f99fff2401ec59f",
       "goals/what-is-locked.md": "407cea503deb73d0c9766797fa2939f782166a9a3f2c949bf2a8f3ddce9a2105",
-      "skills/identify/headers.md": "21b56131a8da41921a789080a23d3a8a24eca9091b277d65fc3043b19d2e5d99",
-      "skills/archives/protected.md": "d925ad74f223314103fa39eaa4ddc65025261060ecfe80e642a70fb65ef4856f",
+      "skills/identify/headers.md": "a54ad3c40e36a9ca0db4ab33230609b7e02a2d7227372d896744f3b24fa31601",
+      "skills/archives/protected.md": "6b89e5c96b17d3ed40d26438ff9b85ce71da1c5fb8161e1f78c0dde77ecb517d",
       "skills/keys/where-they-hide.md": "eabe46d79c3a475308921cf2480141ec97a7b12728fdb517b256c3849294cd3c",
       "skills/volumes/bitlocker.md": "3732c875abca42a55b589c52d7380244f4ade9cd0b64f9a13a55d40cbe63c994",
-      "skills/volumes/luks-filevault.md": "f3c021bed99dcafd15089b3394ca40a227a5d8da16885f40c326552f2ab0a2fa",
-      "requires/host.json": "91933040b9ed188d0882eb94f1259179bf29cee9339ac62137d7a0aad5910729",
-      "requires/python.txt": "58b4ff1925c2c96d0982a45e73cb1c1f7b9dd7f07074662ac560747f68522070",
-      "skills/INDEX.md": "84944cb1752bf686941060e3bf9e48a4dadcaf0568e223428a88b7ae63fee62b"
+      "skills/volumes/luks-filevault.md": "1363e7093e0f32c9a1c7ad94357be5fd4adcb29e0512ecb5799163d5f42cb440",
+      "requires/host.json": "73102d1c5f2e6b8e5d040592183c303be717ffd1fe6bc71182b4f418513bf6fc",
+      "requires/python.txt": "5f0b11bd01ea0400f7948b789c74181bf5f9b226c5afe61733deb25e0287a239",
+      "skills/INDEX.md": "0369b25d658c12a57271fe914faeef77a58320b69952814003fcc43e9f72ff88"
     }
   },
   "tools": [
