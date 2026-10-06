@@ -18,22 +18,22 @@
   "checksums": {
     "sha256": {
       "LICENCE": "5b94f18424dbef1e77eda33a465e946c2c8eb715fa5236afe2c6ec6763af80d3",
-      "README.md": "2e490621f179767d0b5a0a86ecbf0cd0c69b32bb70fc36c69a8430257920f758",
+      "README.md": "e7b15368c91ca8a233e6db0d9a2af335fcab3ea04e072cea08c1b8d48effa600",
       "tools/recovery_key_scan/manifest.json": "fb8c1769c50960126b347bfc51a3cc0b9c9ca08a32c7708001132cf2c0ad803a",
       "tools/recovery_key_scan/run.py": "009beaaa7dd17fb3eecb01dbcecef343ecb282f5de9cdbc7c64091f1ea68164a",
       "tools/archive_probe/manifest.json": "1f8648da3a3ee8a9b09e76b63c52fd626d05c3f020ed377b82270d5ead9ebacc",
       "tools/archive_probe/run.py": "a09c56755070563bb6e52c59b0efcfdc5774922220ff587cdff9670480013239",
       "tools/crypto_id/manifest.json": "f7e59445d55e8c96f8a3ffc2c37b473f9a5be0b555c6542289888de4b986e117",
       "tools/crypto_id/run.py": "fa3952a5f83112baeab2eb1e0c2e5b8883378c92e136e38fbabfc40a6583d4b2",
-      "goals/what-is-locked.md": "577941d5cccce6d5895f3b159e4f1b2b99ae76de7d7a500a2f30dc287b07a26a",
+      "goals/what-is-locked.md": "407cea503deb73d0c9766797fa2939f782166a9a3f2c949bf2a8f3ddce9a2105",
       "skills/identify/headers.md": "21b56131a8da41921a789080a23d3a8a24eca9091b277d65fc3043b19d2e5d99",
       "skills/archives/protected.md": "d925ad74f223314103fa39eaa4ddc65025261060ecfe80e642a70fb65ef4856f",
-      "skills/keys/where-they-hide.md": "925b2ddf294240834268cb51b60d6f343289a3b45e9dbc2c59574ecbb4e7210b",
-      "skills/volumes/bitlocker.md": "70734cc51e280f19256f9220b8798408075366ec28fe819e735d628a9536e189",
+      "skills/keys/where-they-hide.md": "eabe46d79c3a475308921cf2480141ec97a7b12728fdb517b256c3849294cd3c",
+      "skills/volumes/bitlocker.md": "3732c875abca42a55b589c52d7380244f4ade9cd0b64f9a13a55d40cbe63c994",
       "skills/volumes/luks-filevault.md": "f3c021bed99dcafd15089b3394ca40a227a5d8da16885f40c326552f2ab0a2fa",
       "requires/host.json": "91933040b9ed188d0882eb94f1259179bf29cee9339ac62137d7a0aad5910729",
       "requires/python.txt": "58b4ff1925c2c96d0982a45e73cb1c1f7b9dd7f07074662ac560747f68522070",
-      "skills/INDEX.md": "4cd78a06bb4b2259cf40767049037c450bab73c7941c0b2ac3a14b64392b068c"
+      "skills/INDEX.md": "84944cb1752bf686941060e3bf9e48a4dadcaf0568e223428a88b7ae63fee62b"
     }
   },
   "tools": [
