@@ -84,6 +84,11 @@ class Case(unittest.TestCase):
     def path(self, *parts):
         return os.path.join(self.dir, *parts)
 
+    def read(self, rel, mode="r"):
+        """A file's content (a path relative to the scratch directory, or absolute), closed again."""
+        with open(rel if os.path.isabs(rel) else self.path(rel), mode) as fh:
+            return fh.read()
+
     def write(self, rel, data):
         full = self.path(rel)
         os.makedirs(os.path.dirname(full), exist_ok=True)

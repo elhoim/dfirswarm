@@ -23,10 +23,6 @@ class SqliteQuery(Case):
         conn.close()
         return path
 
-    def read(self, rel, mode="r"):
-        with open(self.path(rel) if not os.path.isabs(rel) else rel, mode) as fh:
-            return fh.read()
-
     def query(self, db, sql, **kw):
         return run_tool("sqlite_query", dict({"db_path": db, "sql": sql}, **kw), self.dir)
 
