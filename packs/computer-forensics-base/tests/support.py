@@ -49,8 +49,13 @@ def run_tool(name, args, cwd, path_dirs=(), env=None, timeout=120, raw_input=Non
         e.pop(k, None)
     e.update(env or {})
     data = raw_input if raw_input is not None else json.dumps(args)
-    proc = subprocess.run([sys.executable, tool_path(name)], input=data, capture_output=True, text=True,
-                          cwd=cwd, env=e, timeout=timeout)
+    # TOOL_TEST_TIMEOUT shortens the wait when a test is pointed at code that never answers.
+    timeout = min(timeout, int(os.environ.get("TOOL_TEST_TIMEOUT", timeout)))
+    try:
+        proc = subprocess.run([sys.executable, tool_path(name)], input=data, capture_output=True, text=True,
+                              cwd=cwd, env=e, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        proc = subprocess.CompletedProcess(exc.cmd, 124, exc.stdout or "", "timed out after %ds" % timeout)
     return Run(proc)
 
 
