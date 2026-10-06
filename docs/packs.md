@@ -52,13 +52,18 @@ Front matter, then a short imperative body.
     requires_host: []
     ---
 
-`needs` names skills this one assumes. `tools` names tools that should already
-be loaded. `requires_host` names binaries the body's commands call. Install
-validates all three against the pack and warns about anything it does not carry:
-a warning rather than a refusal, because a Windows skill is expected to call the
-base pack's `icat_extract` and the set is resolved across the dependency chain
-at kickoff. A reference that no pack in the resolved set carries is a bug, and
-`tests/pack-tools.test.sh` fails the build on one.
+`needs` names skills this one assumes. `tools` lists the tools the body names,
+and `requires_host` the host programs it names (the binaries its commands call):
+a name the body uses is in the list, and a name in the list is in the body.
+`mentions` lists names the body discusses and cannot depend on, such as a tool
+that exists only when another pack is loaded; it is in neither of the other two
+lists (section 8, "Links"). Install validates `needs`, `tools` and `requires_host`
+against the pack and warns about anything it does not carry: a warning rather
+than a refusal, because a Windows skill is expected to call the base pack's
+`icat_extract` and the set is resolved across the dependency chain at kickoff.
+A reference that no pack in the resolved set carries is a bug, and
+`tests/pack-tools.test.sh` fails the build on one; `tests/pack-links.test.sh`
+holds the lists against the body, and `mentions` too.
 
 ### Tool help stays out of the context window
 
@@ -116,6 +121,9 @@ directory named for the pack id is refused.
           "path": "vendor/python-evtx" }
       ],
       "requires": { "host": "requires/host.json", "python": "requires/python.txt" },
+      "unreferenced_ok": [
+        { "name": "olefile", "why": "imported by a tool of the pack; no skill runs it" }
+      ],
       "secrets": [
         { "name": "VT_API_KEY", "title": "VirusTotal API key", "required": false,
           "why": "Reputation lookups on hashes the case finds.",
@@ -125,7 +133,9 @@ directory named for the pack id is refused.
     }
 
 `depends` is resolved at install. A pack whose dependency is missing is refused,
-named, with the version it wanted.
+named, with the version it wanted. `unreferenced_ok` is optional: a program or
+Python package the pack requires and no skill names, with the reason (section 8,
+"Requires and images").
 
 ### Versions
 
@@ -465,8 +475,11 @@ hold the parts a test can hold; the rest is for the author.
    `docs/protocol.md`), and the tool writes the value only to a file output,
    never to standard output and never into a field an agent might paste.
 3. **A secret never goes on a command line**, because the argument list is
-   recorded in the trace. The tool takes a reference to a file, and that file
-   is a sealed secret output.
+   recorded in the trace. A bundled tool takes a reference to a file, and that
+   file is a sealed secret output. Where a skill sends the agent to a program
+   that can take its passphrase only on the command line, the skill says so and
+   tells the agent to say it in the report, so that the trace can be redacted
+   before it is shared.
 4. **A skill that names such a tool says so**, in a "Sensitive output" line.
 
 ### The tool contract
@@ -531,13 +544,22 @@ header says how it matches a name and where that is wrong.
 1. **What a skill names is what its front matter lists, and it resolves.**
    Every tool named in a skill's body is in its `tools:`, and every program in
    its `requires_host:`. Each resolves in the pack's dependency closure (the
-   pack, its `depends` and theirs). A front matter entry the body never names
-   is wrong the other way round.
-2. **Everything a pack ships is reached.** Every bundled tool is named by at
+   pack, its `depends` and theirs): a tool of a pack outside it is not named,
+   and an entry of `requires_host:` is a program some pack of the closure
+   requires. A front matter entry the body never names is wrong the other way
+   round.
+2. **A name the skill discusses and cannot depend on is a `mentions:` entry.**
+   A base skill that says what a tool of the Windows pack reads, where that
+   tool exists only when the Windows pack is loaded, lists the tool under
+   `mentions:` and in no other list. Each entry is a tool, a program or a Python
+   package some pack of the repository carries or requires, and none is also in
+   `tools:` or `requires_host:`. A mention is no use: it is exempt from the rules
+   above, and it satisfies none of the next.
+3. **Everything a pack ships is reached.** Every bundled tool is named by at
    least one skill of its pack, or of a pack that depends on it. Every skill
    that depends on a capability names the tool that provides it. A capability
    a skill needs and no tool provides is either added as a tool or taken out
    of the skill.
-3. **The pack that owns a tool ships it.** Another pack names the tool and
+4. **The pack that owns a tool ships it.** Another pack names the tool and
    lists the owner in `depends`; it does not carry a copy (see "Two rules the
    set holds to").
