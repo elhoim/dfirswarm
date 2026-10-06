@@ -13,6 +13,7 @@
  * digest, in the answer and in every file the answer names.
  */
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { chmod, mkdir, readFile, readdir, stat, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -562,5 +563,472 @@ test("crypto_id prints no raw bytes unless asked, bounds its sample, and says wh
     const text = body<Id>(await tool(ID, cwd, { path: "work/text.txt" }));
     assert.doesNotMatch(text.scheme, /^not encrypted/);
     assert.ok(text.not_determined?.some((n) => /encrypted/i.test(n)));
+  });
+});
+
+// --- archive_probe ------------------------------------------------------------
+
+const PROBE = join(ENC, "archive_probe", "run.py");
+
+type ZipEntry = { name: string; data?: Buffer; flags?: number; method?: number; extra?: Buffer };
+
+const DOS_DATE = ((2026 - 1980) << 9) | (3 << 5) | 14; // 2026-03-14
+const DOS_TIME = (9 << 11) | (30 << 5) | (44 / 2); // 09:30:44
+
+/** A ZIP built from the APPNOTE's record layouts: local headers, central directory, End Of Central Directory. */
+function buildZip(entries: ZipEntry[], opts: { prefix?: Buffer; comment?: Buffer } = {}): Buffer {
+  const parts: Buffer[] = [];
+  const central: Buffer[] = [];
+  let at = 0;
+  for (const e of entries) {
+    const name = Buffer.from(e.name, "utf8");
+    const data = e.data ?? Buffer.from("x");
+    const extra = e.extra ?? Buffer.alloc(0);
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0);
+    local.writeUInt16LE(20, 4);
+    local.writeUInt16LE(e.flags ?? 0, 6);
+    local.writeUInt16LE(e.method ?? 0, 8);
+    local.writeUInt16LE(DOS_TIME, 10);
+    local.writeUInt16LE(DOS_DATE, 12);
+    local.writeUInt32LE(data.length, 18);
+    local.writeUInt32LE(data.length, 22);
+    local.writeUInt16LE(name.length, 26);
+    local.writeUInt16LE(extra.length, 28);
+    const record = Buffer.concat([local, name, extra, data]);
+    const c = Buffer.alloc(46);
+    c.writeUInt32LE(0x02014b50, 0);
+    c.writeUInt16LE(20, 4);
+    c.writeUInt16LE(20, 6);
+    c.writeUInt16LE(e.flags ?? 0, 8);
+    c.writeUInt16LE(e.method ?? 0, 10);
+    c.writeUInt16LE(DOS_TIME, 12);
+    c.writeUInt16LE(DOS_DATE, 14);
+    c.writeUInt32LE(data.length, 20);
+    c.writeUInt32LE(data.length, 24);
+    c.writeUInt16LE(name.length, 28);
+    c.writeUInt16LE(extra.length, 30);
+    c.writeUInt32LE(at, 42);
+    central.push(Buffer.concat([c, name, extra]));
+    parts.push(record);
+    at += record.length;
+  }
+  const cd = Buffer.concat(central);
+  const comment = opts.comment ?? Buffer.alloc(0);
+  const eocd = Buffer.alloc(22);
+  eocd.writeUInt32LE(0x06054b50, 0);
+  eocd.writeUInt16LE(entries.length, 8);
+  eocd.writeUInt16LE(entries.length, 10);
+  eocd.writeUInt32LE(cd.length, 12);
+  eocd.writeUInt32LE(at, 16);
+  eocd.writeUInt16LE(comment.length, 20);
+  return Buffer.concat([opts.prefix ?? Buffer.alloc(0), ...parts, cd, eocd, comment]);
+}
+
+function extraField(id: number, data: Buffer): Buffer {
+  const h = Buffer.alloc(4);
+  h.writeUInt16LE(id, 0);
+  h.writeUInt16LE(data.length, 2);
+  return Buffer.concat([h, data]);
+}
+
+const UNIX_TIME = Math.floor(Date.UTC(2026, 2, 14, 9, 30, 45) / 1000);
+const NTFS_FILETIME = (BigInt(UNIX_TIME) + 11644473600n) * 10_000_000n + 1234567n;
+
+function aesExtra(strength: number, version = 2): Buffer {
+  const d = Buffer.alloc(7);
+  d.writeUInt16LE(version, 0);
+  d.write("AE", 2, "latin1");
+  d[4] = strength;
+  d.writeUInt16LE(8, 5);
+  return extraField(0x9901, d);
+}
+
+function utExtra(): Buffer {
+  const d = Buffer.alloc(5);
+  d[0] = 1;
+  d.writeInt32LE(UNIX_TIME, 1);
+  return extraField(0x5455, d);
+}
+
+function ntfsExtra(): Buffer {
+  const d = Buffer.alloc(32);
+  d.writeUInt16LE(1, 4); // tag 1
+  d.writeUInt16LE(24, 6);
+  d.writeBigUInt64LE(NTFS_FILETIME, 8);
+  d.writeBigUInt64LE(NTFS_FILETIME, 16);
+  d.writeBigUInt64LE(NTFS_FILETIME, 24);
+  return extraField(0x000a, d);
+}
+
+type Probe = Record<string, any>;
+
+test("archive_probe reads a ZIP structurally: each member's scheme, the AES extra field, DOS time raw and unzoned", async () => {
+  await withCwd(async (cwd) => {
+    await writeFile(join(cwd, "work", "mixed.zip"), buildZip([
+      { name: "plain.txt" },
+      { name: "legacy.bin", flags: 0x0001, method: 8 },
+      { name: "aes.bin", flags: 0x0001, method: 99, extra: aesExtra(3, 2) },
+      { name: "aes128.bin", flags: 0x0001, method: 99, extra: aesExtra(1, 1) },
+      { name: "strong.bin", flags: 0x0041, method: 8 },
+      { name: "timed.txt", extra: Buffer.concat([utExtra(), ntfsExtra()]) },
+      { name: "unix-time.txt", extra: utExtra() },
+    ]));
+    const out = body<Probe>(await tool(PROBE, cwd, { path: "work/mixed.zip" }));
+    assert.equal(out.container, "ZIP");
+    assert.equal(out.entry_count, 7);
+    assert.equal(out.entry_count_matches_declared, true);
+    assert.equal(out.encrypted_entries, 4);
+    assert.equal(out.protected, true);
+    const byName = Object.fromEntries((out.entries as Probe[]).map((e) => [e.name, e]));
+    assert.equal(byName["plain.txt"].encrypted, false);
+    assert.equal(byName["legacy.bin"].scheme, "ZipCrypto (legacy, weak)");
+    assert.equal(byName["aes.bin"].scheme, "WinZip AES-256 (AE-2)");
+    assert.deepEqual(byName["aes.bin"].aes, { ae_version: 2, strength_bits: 256, method: 8 });
+    assert.equal(byName["aes128.bin"].scheme, "WinZip AES-128 (AE-1)");
+    assert.equal(byName["strong.bin"].scheme, "strong encryption");
+    // The DOS time is the archiving machine's local clock with no zone, and its raw words are kept.
+    assert.equal(byName["plain.txt"].modified, "2026-03-14T09:30:44");
+    assert.equal(byName["plain.txt"].timezone_unknown, true);
+    assert.equal(byName["plain.txt"].modified_raw, `dos_date=0x${DOS_DATE.toString(16).padStart(4, "0")} dos_time=0x${DOS_TIME.toString(16).padStart(4, "0")}`);
+    assert.equal(byName["plain.txt"].modified_utc, undefined);
+    // A recorded UTC time is a separate field, with its source and resolution; NTFS keeps its 100 ns fraction.
+    assert.equal(byName["unix-time.txt"].modified_utc, "2026-03-14T09:30:45Z");
+    assert.match(byName["unix-time.txt"].modified_utc_source, /0x5455/);
+    assert.equal(byName["timed.txt"].modified_utc, "2026-03-14T09:30:45.1234567Z");
+    assert.match(byName["timed.txt"].modified_utc_source, /0x000a/);
+    assert.match(out.time_note, /no zone/);
+    assert.equal(out.entries[0].header_offset, 0);
+  });
+});
+
+test("archive_probe reads an empty ZIP and a self-extracting ZIP, found from the end of the file", async () => {
+  // It dispatched on a local file header at byte zero, so an empty archive
+  // and any archive behind an executable stub were "not a container".
+  await withCwd(async (cwd) => {
+    const empty = Buffer.alloc(22);
+    empty.writeUInt32LE(0x06054b50, 0);
+    await writeFile(join(cwd, "work", "empty.zip"), empty);
+    const e = body<Probe>(await tool(PROBE, cwd, { path: "work/empty.zip" }));
+    assert.equal(e.container, "ZIP");
+    assert.equal(e.entry_count, 0);
+    assert.equal(e.protected, false);
+
+    const stub = Buffer.concat([Buffer.from("MZ"), Buffer.alloc(4094, 0x90)]);
+    await writeFile(join(cwd, "work", "sfx.exe"), buildZip([{ name: "inside.docx" }, { name: "locked.bin", flags: 1, method: 8 }], { prefix: stub }));
+    const s = body<Probe>(await tool(PROBE, cwd, { path: "work/sfx.exe" }));
+    assert.equal(s.container, "ZIP");
+    assert.deepEqual((s.entries as Probe[]).map((x) => x.name), ["inside.docx", "locked.bin"]);
+    assert.equal(s.protected, true);
+  });
+});
+
+test("archive_probe does not load a central directory above its budget, and says what it did not list", async () => {
+  await withCwd(async (cwd) => {
+    const eocd = Buffer.alloc(22);
+    eocd.writeUInt32LE(0x06054b50, 0);
+    eocd.writeUInt16LE(0xfffe, 8);
+    eocd.writeUInt16LE(0xfffe, 10);
+    eocd.writeUInt32LE(1 << 30, 12); // a central directory of 1 GiB in a file of 22 bytes
+    await writeFile(join(cwd, "work", "huge.zip"), eocd);
+    const out = body<Probe>(await tool(PROBE, cwd, { path: "work/huge.zip" }));
+    assert.equal(out.listing, "not attempted");
+    assert.equal(out.partial, true);
+    assert.equal(out.protected, null);
+    assert.equal(out.central_directory_bytes, 1 << 30);
+    assert.match(out.reason, /max_metadata_bytes/);
+    // A truncated archive (no End Of Central Directory) is named, not "not a container".
+    await writeFile(join(cwd, "work", "cut.zip"), buildZip([{ name: "a.txt" }]).subarray(0, 40));
+    const cut = body<Probe>(await tool(PROBE, cwd, { path: "work/cut.zip" }));
+    assert.equal(cut.container, "ZIP");
+    assert.equal(cut.listing, "failed");
+    assert.equal(cut.protected, null);
+  });
+});
+
+const PDF_OLD_REVISION = [
+  "%PDF-1.7\n",
+  "1 0 obj\n<< /Type /Catalog >>\nendobj\n",
+  "5 0 obj\n<< /Filter /Standard /V 2 /R 3 /P -44 >>\nendobj\n",
+  "trailer\n<< /Root 1 0 R /Encrypt 5 0 R >>\nstartxref\n10\n%%EOF\n",
+  // An incremental update: its trailer names no /Encrypt and a reader decides what that means.
+  "trailer\n<< /Root 1 0 R /Prev 10 >>\nstartxref\n300\n%%EOF\n",
+].join("");
+
+test("archive_probe never turns a byte search over a PDF into a verdict", async () => {
+  // It said "opens with nothing" for a PDF without the marker, "protected" for
+  // one with the marker anywhere, and told the reader not to report a file that
+  // opens with an empty password as protected: a file can be encrypted and
+  // still open with an empty user password.
+  await withCwd(async (cwd) => {
+    await writeFile(join(cwd, "work", "revisions.pdf"), PDF_OLD_REVISION);
+    const out = await tool(PROBE, cwd, { path: "work/revisions.pdf" });
+    const probe = body<Probe>(out);
+    assert.match(probe.protection, /^heuristic/);
+    assert.equal(probe.protected, null);
+    assert.equal(probe.encrypt_marker.found, true);
+    assert.equal(probe.encrypt_marker.count, 1);
+    assert.deepEqual(probe.encrypt_marker.first_offsets, [PDF_OLD_REVISION.indexOf("/Encrypt")]);
+    assert.ok(probe.not_determined.some((n: string) => /current trailer/.test(n)));
+    assert.match(probe.next_reader, /not available yet/);
+    assert.doesNotMatch(out.stdout, /opens with nothing|not protected|not encrypted|do not report/i);
+    // The first /V /R /P are offered only as unresolved hints.
+    assert.equal(probe.unresolved_hints.r, 3);
+    assert.match(probe.unresolved_hints.note, /not read through the trailer/);
+
+    await writeFile(join(cwd, "work", "plain.pdf"), "%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n");
+    const plain = await tool(PROBE, cwd, { path: "work/plain.pdf" });
+    const p = body<Probe>(plain);
+    assert.equal(p.encrypt_marker.found, false);
+    assert.equal(p.protected, null, "no marker is not a finding that the file is unencrypted");
+    assert.doesNotMatch(plain.stdout, /opens with nothing|not protected|not encrypted/i);
+
+    // A marker in the trailer of a file past 8 MiB is found, with its offset.
+    const big = Buffer.concat([Buffer.from("%PDF-1.7\n"), Buffer.alloc(9 * 1024 * 1024, 0x20), Buffer.from("\ntrailer\n<< /Encrypt 5 0 R >>\n%%EOF\n")]);
+    await writeFile(join(cwd, "work", "big.pdf"), big);
+    const b = body<Probe>(await tool(PROBE, cwd, { path: "work/big.pdf" }));
+    assert.deepEqual(b.encrypt_marker.first_offsets, [big.indexOf("/Encrypt")]);
+  });
+});
+
+const OLE_MAGIC = Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]);
+
+test("archive_probe reports Office markers as markers, and never says a document is not encrypted", async () => {
+  // It said "not encrypted" when no EncryptionInfo string was found. A binary
+  // Word file with legacy encryption has none.
+  await withCwd(async (cwd) => {
+    const dirEntry = (name: string) => Buffer.concat([Buffer.from(name + "\u0000", "utf16le"), Buffer.alloc(64 - (name.length + 1) * 2)]);
+    const legacy = Buffer.concat([OLE_MAGIC, Buffer.alloc(504), dirEntry("WordDocument"), dirEntry("1Table")]);
+    await writeFile(join(cwd, "work", "legacy.doc"), legacy);
+    const out = await tool(PROBE, cwd, { path: "work/legacy.doc" });
+    const probe = body<Probe>(out);
+    assert.equal(probe.container, "OLE compound file");
+    assert.equal(probe.protected, null);
+    assert.match(probe.protection, /^heuristic/);
+    assert.deepEqual(probe.markers_found, []);
+    assert.ok(probe.not_determined.some((n: string) => /binary Word, Excel and PowerPoint/.test(n)));
+    assert.doesNotMatch(out.stdout, /this document is not encrypted|No EncryptionInfo stream/);
+    assert.match(probe.note, /does not mean the document is not encrypted/);
+
+    const modern = Buffer.concat([OLE_MAGIC, Buffer.alloc(504), dirEntry("EncryptionInfo"), dirEntry("EncryptedPackage")]);
+    await writeFile(join(cwd, "work", "modern.docx"), modern);
+    const m = body<Probe>(await tool(PROBE, cwd, { path: "work/modern.docx" }));
+    assert.deepEqual(m.markers_found.map((x: Probe) => [x.name, x.encoding, x.first_offsets[0]]),
+      [["EncryptionInfo", "UTF-16LE", 512], ["EncryptedPackage", "UTF-16LE", 576]]);
+    assert.equal(m.protected, null, "a marker is a lead for a structural reader, not a verdict");
+  });
+});
+
+test("archive_probe identifies a RAR and leaves its protection undetermined", async () => {
+  await withCwd(async (cwd) => {
+    await writeFile(join(cwd, "work", "a.rar"), Buffer.concat([Buffer.from([0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x01, 0x00]), Buffer.alloc(64)]));
+    const out = await tool(PROBE, cwd, { path: "work/a.rar" });
+    const probe = body<Probe>(out);
+    assert.equal(probe.container, "RAR5");
+    assert.equal(probe.protected, null);
+    assert.equal(probe.listing, "not attempted");
+    assert.doesNotMatch(out.stdout, /enough to verify a password/);
+  });
+});
+
+test("archive_probe refuses a file that is no container without printing its bytes", async () => {
+  await withCwd(async (cwd) => {
+    await writeFile(join(cwd, "work", "key.bin"), Buffer.from("00112233445566778899aabbccddeeff", "hex"));
+    const out = await tool(PROBE, cwd, { path: "work/key.bin" });
+    const err = refused(out);
+    assert.match(err.error, /not a container this tool reads/);
+    assert.doesNotMatch(out.stdout, /00112233|head_hex/);
+  });
+});
+
+// --- archive_probe: 7-Zip ------------------------------------------------------
+
+// Real 7-Zip 26.00 archives (`7zz a`, -mhe=on for the header-encrypted one), and what `7zz l -slt -y -p<dummy>` printed for each.
+const SEVEN = {
+  none: {
+    archive: "N3q8ryccAAQqIBjMhQAAAAAAAAAgAAAAAAAAAAwa/mQBACJhbHBoYSBjb250ZW50CmJyYXZvIGNvbnRlbnQgbG9uZ2VyCgAAAIEzB64P0Hif/J8/R0EFh4ajQDx9Fv5JCP11Nh2Qet7V2ytx1YB2ubBAsByu1ktrICmll2FWDKK4gAdOAWHa6KsOzwPr7CRChc52YS9079Rgw4FB2mMiFaIBIAAAFwYnAQleAAcLAQABIwMBAQVdABAAAAxuCgFo2ORNAAA=",
+    stdout: "\n7-Zip (z) 26.00 (arm64) : Copyright (c) 1999-2026 Igor Pavlov : 2026-02-12\n 64-bit arm_v:8.5-A locale=C.UTF-8 Threads:16 OPEN_MAX:1048576, ASM\n\nScanning the drive for archives:\n1 file, 197 bytes (1 KiB)\n\nListing archive: none.7z\n\n--\nPath = none.7z\nType = 7z\nPhysical Size = 197\nHeaders Size = 158\nMethod = LZMA2:12\nSolid = +\nBlocks = 1\n\n----------\nPath = a.txt\nSize = 14\nPacked Size = 39\nModified = 2026-10-07 01:56:54.3793106\nAttributes = A -rw-r--r--\nCRC = DEA868DF\nEncrypted = -\nMethod = LZMA2:12\nBlock = 0\n\nPath = b b.txt\nSize = 21\nPacked Size = \nModified = 2026-10-07 01:56:54.3843867\nAttributes = A -rw-r--r--\nCRC = 7C874C5B\nEncrypted = -\nMethod = LZMA2:12\nBlock = 0\n\n",
+    stderr: "",
+    code: 0,
+  },
+  plain: {
+    archive: "N3q8ryccAATC2VWuqgAAAAAAAAAhAAAAAAAAAMPoJob1ch0aXtgMq+vhRuz8luFWVWLSD54FFKqaXSxRFMerbK0NfTCZDA5ayNiYvRJzsvkAAIEzB64P0QDUPKCKabDjxAD69FhUvaOuLav8QBpoQK3j7DicVKAUgsIPSnIYO8SO8EV57iMcaFQLhoyXsSrC2KNNkQHo7n03rowtwinLyqJzarVHjUn4SvB+I+tk30FvZFC03gBBpprgcamc133Vl7YymHZgnQAAABcGMAEJegAHCwEAASMDAQEFXQAQAAAMgI4KAR1BaiUAAA==",
+    stdout: "\n7-Zip (z) 26.00 (arm64) : Copyright (c) 1999-2026 Igor Pavlov : 2026-02-12\n 64-bit arm_v:8.5-A locale=C.UTF-8 Threads:16 OPEN_MAX:1048576, ASM\n\nScanning the drive for archives:\n1 file, 235 bytes (1 KiB)\n\nListing archive: plain.7z\n\n--\nPath = plain.7z\nType = 7z\nPhysical Size = 235\nHeaders Size = 187\nMethod = LZMA2:12 7zAES\nSolid = +\nBlocks = 1\n\n----------\nPath = a.txt\nSize = 14\nPacked Size = 48\nModified = 2026-10-07 01:56:54.3793106\nAttributes = A -rw-r--r--\nCRC = DEA868DF\nEncrypted = +\nMethod = LZMA2:12 7zAES:19\nBlock = 0\n\nPath = b b.txt\nSize = 21\nPacked Size = \nModified = 2026-10-07 01:56:54.3843867\nAttributes = A -rw-r--r--\nCRC = 7C874C5B\nEncrypted = +\nMethod = LZMA2:12 7zAES:19\nBlock = 0\n\n",
+    stderr: "",
+    code: 0,
+  },
+  hdr: {
+    archive: "N3q8ryccAARMd/ycsAAAAAAAAAA9AAAAAAAAAHwzuGJJgg7Aqtf8mOXD8Es0DzqFsKWhqD1GF4KY8vXKdGs9zXEyU+d3AX4sKlDObdj4H3bu3dSI3IA5OJnm+HrPMureT2KT7/IXt9jEeiFbUiPpEqQEhf9EDmvWTdAKBNROWDrZlnktblzTeYpxE8kC7kQkkHpPvvq8d3GU/SyFY1lTRYm49yrzjw1Kmd4CWTASrQ66hfwulrHP/bgG53DcBNaYKnUP4aUmUy96siU29G11fhcGMAEJgIAABwsBAAIkBvEHARJTD0FjP7qaeY1bH7RuLJIUM24jAwEBBV0AEAAAAQAMeoCOCgG3zPbiAAA=",
+    stdout: "\n7-Zip (z) 26.00 (arm64) : Copyright (c) 1999-2026 Igor Pavlov : 2026-02-12\n 64-bit arm_v:8.5-A locale=C.UTF-8 Threads:16 OPEN_MAX:1048576, ASM\n\nScanning the drive for archives:\n1 file, 269 bytes (1 KiB)\n\nListing archive: hdr.7z\n\n\nErrors: 1\n",
+    stderr: "\nERROR: hdr.7z : Cannot open encrypted archive. Wrong password?\n\n\n",
+    code: 2,
+  },
+} as const;
+
+/** A 7z stand-in on PATH that replays what the real 7-Zip printed for the three archives, and records its arguments. */
+async function sevenStub(bin: string): Promise<void> {
+  for (const [name, v] of Object.entries(SEVEN)) {
+    await writeFile(join(bin, `${name}.stdout`), v.stdout);
+    await writeFile(join(bin, `${name}.stderr`), v.stderr);
+  }
+  const script = `#!/bin/sh
+here="$(dirname "$0")"
+printf '%s\\n' "$@" > "$here/7z-args.txt"
+last=""
+for a in "$@"; do last="$a"; done
+name="$(basename "$last" .7z)"
+case "$name" in
+  none|plain|hdr)
+    cat "$here/$name.stdout"
+    cat "$here/$name.stderr" >&2
+    case "$name" in hdr) exit 2 ;; *) exit 0 ;; esac ;;
+  *)
+    echo "ERROR: $last : Cannot open the file as archive" >&2
+    echo "Errors: 1"
+    exit 2 ;;
+esac
+`;
+  await writeFile(join(bin, "7z"), script, "utf8");
+  await chmod(join(bin, "7z"), 0o755);
+}
+
+/** A sitecustomize that makes shutil.which find no 7-Zip program, wherever the test runs. */
+const NO_7Z_SITE = String.raw`
+import shutil
+_which = shutil.which
+shutil.which = lambda cmd, *a, **k: None if str(cmd) in ("7z", "7zz", "7za") else _which(cmd, *a, **k)
+`;
+
+async function withoutSeven(cwd: string): Promise<Record<string, string>> {
+  await mkdir(join(cwd, "nosite"), { recursive: true });
+  await writeFile(join(cwd, "nosite", "sitecustomize.py"), NO_7Z_SITE);
+  return { PYTHONPATH: join(cwd, "nosite") };
+}
+
+async function putSeven(cwd: string): Promise<void> {
+  for (const [name, v] of Object.entries(SEVEN)) await writeFile(join(cwd, "work", `${name}.7z`), Buffer.from(v.archive, "base64"));
+}
+
+test("archive_probe lists a 7-Zip archive through 7z: members, each one's flag, header not encrypted", async () => {
+  await withCwd(async (cwd, bin) => {
+    await sevenStub(bin);
+    await putSeven(cwd);
+    const out = body<Probe>(await tool(PROBE, cwd, { path: "work/plain.7z" }, {}, bin));
+    assert.equal(out.container, "7-Zip");
+    assert.equal(out.listing.status, "listed");
+    assert.equal(out.names_readable, true);
+    assert.equal(out.header_encrypted, false);
+    assert.equal(out.payload_encrypted, true);
+    assert.equal(out.protected, true);
+    assert.deepEqual((out.members as Probe[]).map((m) => [m.name, m.bytes, m.encrypted]), [["a.txt", 14, true], ["b b.txt", 21, true]]);
+    assert.equal(out.members[0].timezone_unknown, true);
+    assert.equal(out.members[0].modified_as_printed, "2026-10-07 01:56:54.3793106");
+    // The structure of the real archive: start header and header checksums hold.
+    assert.equal(out.start_header.crc_ok, true);
+    assert.equal(out.start_header.header_crc_ok, true);
+    // 7z was run without a password prompt and with a literal that is no secret.
+    const args = (await readFile(join(bin, "7z-args.txt"), "utf8")).trimEnd().split("\n");
+    assert.deepEqual(args.slice(0, 3), ["l", "-slt", "-y"]);
+    assert.match(args[3], /^-pdfirswarm-no-password$/);
+    assert.equal(args[4], "--");
+    assert.equal(args[5], "work/plain.7z");
+
+    const none = body<Probe>(await tool(PROBE, cwd, { path: "work/none.7z" }, {}, bin));
+    assert.equal(none.payload_encrypted, false);
+    assert.equal(none.protected, false);
+    assert.equal(none.names_readable, true);
+  });
+});
+
+test("archive_probe says a 7-Zip archive's header is encrypted when 7z cannot open it without a password", async () => {
+  await withCwd(async (cwd, bin) => {
+    await sevenStub(bin);
+    await putSeven(cwd);
+    const out = body<Probe>(await tool(PROBE, cwd, { path: "work/hdr.7z" }, {}, bin));
+    assert.equal(out.listing.status, "header_encrypted");
+    assert.equal(out.listing.exit_code, 2);
+    assert.equal(out.header_encrypted, true);
+    assert.equal(out.names_readable, false);
+    assert.equal(out.protected, true);
+    assert.equal(out.payload_encrypted, null, "whether the data is encrypted is not read from an unlistable archive");
+    assert.equal(out.members, undefined);
+  });
+});
+
+test("archive_probe keeps its byte search as a hint when 7z is absent, and gives no verdict from it", async () => {
+  await withCwd(async (cwd) => {
+    await putSeven(cwd);
+    const env = await withoutSeven(cwd);
+    const hdr = body<Probe>(await tool(PROBE, cwd, { path: "work/hdr.7z" }, env));
+    assert.equal(hdr.listing.status, "unavailable");
+    assert.equal(hdr.protected, null);
+    assert.equal(hdr.names_readable, null);
+    assert.match(hdr.protection, /^heuristic/);
+    assert.equal(hdr.hints.header_kind, "encoded");
+    assert.equal(hdr.hints.header_encrypted, true);
+    // An archive whose data is encrypted behind a readable header shows no AES coder in the header's own
+    // coder list: the hint says "no", and that is why it is only a hint.
+    const plain = body<Probe>(await tool(PROBE, cwd, { path: "work/plain.7z" }, env));
+    assert.equal(plain.hints.header_encrypted, false);
+    assert.equal(plain.protected, null);
+    assert.equal(plain.payload_encrypted, undefined);
+    assert.match(plain.header_strings_note, /not a member list/);
+  });
+});
+
+test("archive_probe reports 7z that fails on a file as a failed listing, never as a clean one", async () => {
+  await withCwd(async (cwd, bin) => {
+    await sevenStub(bin);
+    const fake = Buffer.alloc(64);
+    Buffer.from([0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c, 0x00, 0x04]).copy(fake, 0);
+    await writeFile(join(cwd, "work", "fake.7z"), fake);
+    const out = body<Probe>(await tool(PROBE, cwd, { path: "work/fake.7z" }, {}, bin));
+    assert.equal(out.listing.status, "failed");
+    assert.equal(out.listing.exit_code, 2);
+    assert.equal(out.protected, null);
+    assert.equal(out.start_header.crc_ok, false, "the start header's checksum does not hold");
+  });
+});
+
+test("archive_probe bounds what it searches in a 7-Zip header and names a header placed past the end", async () => {
+  await withCwd(async (cwd) => {
+    const env = await withoutSeven(cwd);
+    const sevenZip = (header: Buffer): Buffer => {
+      const packed = Buffer.from("packed-stream-bytes");
+      const start = Buffer.alloc(32);
+      Buffer.from([0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c, 0x00, 0x04]).copy(start, 0);
+      start.writeBigUInt64LE(BigInt(packed.length), 12);
+      start.writeBigUInt64LE(BigInt(header.length), 20);
+      return Buffer.concat([start, packed, header]);
+    };
+    const header = Buffer.concat([Buffer.from([0x01]), Buffer.alloc(20000, 0x41)]);
+    await writeFile(join(cwd, "work", "big-header.7z"), sevenZip(header));
+    const big = body<Probe>(await tool(PROBE, cwd, { path: "work/big-header.7z", max_metadata_bytes: 4096 }, env));
+    assert.equal(big.start_header.header_bytes, header.length);
+    assert.equal(big.start_header.search_truncated, true);
+    assert.match(big.start_header.search_note, /first 4096/);
+    const whole = sevenZip(header);
+    await writeFile(join(cwd, "work", "short.7z"), whole.subarray(0, whole.length - 10));
+    const short = body<Probe>(await tool(PROBE, cwd, { path: "work/short.7z" }, env));
+    assert.match(short.header_problem, /past the end of the file/);
+    assert.equal(short.names_readable, null);
+    assert.equal(short.protected, null);
+    assert.match(refused(await tool(PROBE, cwd, { path: "work/short.7z", max_metadata_bytes: 10 })).error, /at least 4096/);
+  });
+});
+
+test("archive_probe agrees with a real 7-Zip on the three archives, where one is installed", async (t) => {
+  const real = ["7zz", "7z"].map((n) => spawnSync("which", [n], { encoding: "utf8" }).stdout.trim()).find(Boolean);
+  if (!real) return t.skip("no upstream 7zz on PATH; the stub replays what 7-Zip 26.00 printed");
+  await withCwd(async (cwd, bin) => {
+    await symlink(real, join(bin, "7z"));
+    await putSeven(cwd);
+    const got = async (name: string) => body<Probe>(await tool(PROBE, cwd, { path: `work/${name}.7z` }, {}, bin));
+    const plain = await got("plain");
+    assert.deepEqual([plain.listing.status, plain.header_encrypted, plain.payload_encrypted, plain.names_readable], ["listed", false, true, true]);
+    const hdr = await got("hdr");
+    assert.deepEqual([hdr.listing.status, hdr.header_encrypted, hdr.protected, hdr.names_readable], ["header_encrypted", true, true, false]);
+    const none = await got("none");
+    assert.deepEqual([none.listing.status, none.payload_encrypted, none.protected], ["listed", false, false]);
   });
 });
