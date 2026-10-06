@@ -185,6 +185,41 @@ env PATH=/usr/bin:/bin "$PY3" "$DT" run --target "{\"paths\": [\"$T/x.E01\"]}" -
 jq -e '.status == "failed" and (.errors[0] | test("log2timeline and psort not on PATH"))' "$T/dt-none/coverage.json" >/dev/null || fail "disk-timeline with no Plaso should say which program is missing: $(cat "$T/dt-none/coverage.json")"
 pass "disk-timeline takes a disk image by its signature, writes the timeline and each step's log under --out from a read-only directory, and says failed and why with no Plaso"
 
+# disk-timeline: the evidence's timezone reaches log2timeline when given, an output directory that holds a
+# timeline from an earlier run is refused and its files are not taken for this run's, Plaso's own
+# processing report is kept when pinfo is there, and `complete` says the pipeline finished.
+mkdir -p "$T/bin2"
+cp "$T/bin/log2timeline" "$T/bin2/log2timeline"
+sed -i.bak 's|^while \[\[ \$# -gt 0 \]\]; do case "\$1" in --storage-file|echo "$*" > "$CALLS_L2T"\nwhile [[ $# -gt 0 ]]; do case "$1" in --storage-file|' "$T/bin2/log2timeline" && rm -f "$T/bin2/log2timeline.bak"
+cp "$T/bin/psort" "$T/bin2/psort"
+cat > "$T/bin2/pinfo" <<'PINFO'
+#!/usr/bin/env bash
+echo "Plaso Storage Information"
+echo "Warnings generated: 3"
+PINFO
+chmod +x "$T/bin2/"*
+CALLS_L2T="$T/l2t-args.txt" PATH="$T/bin2:$PATH" python3 "$DT" run --target "{\"paths\": [\"$T/x.E01\"], \"timezone\": \"Europe/Istanbul\"}" --out "$T/dt-zone" >/dev/null || fail "disk-timeline with a timezone should run: $(cat "$T/dt-zone/coverage.json" 2>/dev/null)"
+grep -q -- '--timezone Europe/Istanbul' "$T/l2t-args.txt" || fail "the evidence's timezone reaches log2timeline: $(cat "$T/l2t-args.txt")"
+jq -e '.status == "complete" and .timezone == "Europe/Istanbul" and (.coverage_note | test("does not say every parser read every source"))' "$T/dt-zone/coverage.json" >/dev/null || fail "complete says the pipeline finished, and the zone is stated: $(cat "$T/dt-zone/coverage.json")"
+grep -q 'Warnings generated: 3' "$T/dt-zone/pinfo.txt" && cut -f1 "$T/dt-zone/index.tsv" | grep -qx 'pinfo.txt' || fail "Plaso's processing report is kept and indexed"
+CALLS_L2T="$T/l2t-args2.txt" PATH="$T/bin2:$PATH" python3 "$DT" run --target "{\"paths\": [\"$T/x.E01\"]}" --out "$T/dt-nozone" >/dev/null
+jq -e '.timezone == "not given" and (.timezone_note | test("none given"))' "$T/dt-nozone/coverage.json" >/dev/null || fail "no zone given is said, not assumed to be UTC: $(cat "$T/dt-nozone/coverage.json")"
+grep -q -- '--timezone' "$T/l2t-args2.txt" && fail "a zone nobody gave was passed to log2timeline"
+# A timeline already in the output directory is not this run's.
+mkdir -p "$T/dt-stale" && printf 'old storage' > "$T/dt-stale/timeline.plaso"
+CALLS_L2T="$T/l2t-args3.txt" PATH="$T/bin2:$PATH" python3 "$DT" run --target "{\"paths\": [\"$T/x.E01\"]}" --out "$T/dt-stale" >/dev/null && fail "disk-timeline should refuse an output directory that holds an earlier timeline"
+jq -e '.status == "failed" and (.errors[0] | test("already in the output directory"))' "$T/dt-stale/coverage.json" >/dev/null || fail "a stale output directory is refused and said: $(cat "$T/dt-stale/coverage.json")"
+[[ ! -e "$T/l2t-args3.txt" ]] || fail "log2timeline ran over a stale output directory"
+[[ "$(cat "$T/dt-stale/timeline.plaso")" == "old storage" ]] || fail "the earlier storage file was touched"
+# A log2timeline that exits 0 and writes no storage file leaves no timeline to be taken for the run's.
+cat > "$T/bin2/log2timeline" <<'L2T'
+#!/usr/bin/env bash
+exit 0
+L2T
+PATH="$T/bin2:$PATH" python3 "$DT" run --target "{\"paths\": [\"$T/x.E01\"]}" --out "$T/dt-nostore" >/dev/null && fail "disk-timeline with no storage file should not be complete"
+jq -e '.status == "failed"' "$T/dt-nostore/coverage.json" >/dev/null || fail "no storage file is failed: $(cat "$T/dt-nostore/coverage.json")"
+pass "disk-timeline passes the evidence's timezone, says when none was given, keeps Plaso's processing report, refuses a stale output directory and says complete only for a finished pipeline"
+
 # Every recipe of every pack answers detect the two ways the harness asks: the
 # kickoff's census gives the target as JSON with a --probe-out directory
 # (scripts/evidence_catalog.py), a detect job gives it as a file
@@ -350,6 +385,85 @@ jq -e '.volumes == 1 and .candidate_volumes == 1' "$H/out-lvm.json" >/dev/null |
 [[ ! -d "$H/out-lvm/p1050624" && ! -d "$H/out-lvm/p1052672" ]] || fail "the extended container and swap were read as filesystems"
 jq -e '.status == "partial" and ([.errors[] | select(test("LVM physical volume at sector 1062912"))] | length == 1) and ([.errors[] | select(test("1050624|1052672"))] | length == 0)' "$H/out-lvm/coverage.json" >/dev/null || fail "the LVM layer is named and nothing else: $(cat "$H/out-lvm/coverage.json")"
 pass "disk-volumes takes no extended container or swap for a filesystem, names an LVM volume as a layer, and counts the row fsstat reads"
+
+# disk-volumes inventories every allocated partition entry and what became of it. A description that
+# was on no list used to be skipped without a word and the run said complete; it is tried now, and
+# fsstat says whether a file system is there. What holds no file system by definition (an extended
+# partition, swap, a Microsoft reserved or BIOS boot partition) is named and not counted against
+# coverage. mactime gets the zone the timeline says (UTC), and coverage is partial before any step ends.
+mkdir -p "$H/tsk-shim2" "$H/mt-shim"
+cat > "$H/tsk-shim2/mmls" <<'SH'
+#!/bin/sh
+cat <<'T'
+GUID Partition Table (EFI)
+Offset Sector: 0
+Units are in 512-byte sectors
+
+      Slot      Start        End          Length       Description
+000:  Meta      0000000000   0000000000   0000000001   Safety Table
+001:  -------   0000000000   0000002047   0000002048   Unallocated
+002:  000       0000002048   0001050623   0001048576   Basic data partition
+003:  001       0001050624   0001083391   0000032768   Microsoft reserved partition
+004:  002       0001083392   0001100000   0000016609   Unknown Type (0x99)
+005:  003       0001100001   0001200000   0000100000   BIOS Boot Partition
+T
+SH
+cat > "$H/tsk-shim2/fsstat" <<'SH'
+#!/bin/sh
+echo "fsstat $*" >> "$TSK_CALLS"
+[ -f "$OUT_COVERAGE" ] && [ ! -f "$FIRST_COVERAGE" ] && cp "$OUT_COVERAGE" "$FIRST_COVERAGE"
+[ "$2" = 2048 ] || { echo "Cannot determine file system type" >&2; exit 1; }
+echo "File System Type: NTFS"
+SH
+cat > "$H/tsk-shim2/fls" <<'SH'
+#!/bin/sh
+case "$1" in -m) echo "0|/a.txt|12|r/rrw-r--r--|0|0|9|1700000000|1700000000|1700000000|1700000000" ;; *) printf 'r/r 12:\ta.txt\n' ;; esac
+SH
+cat > "$H/mt-shim/mactime" <<'SH'
+#!/bin/sh
+echo "mactime TZ=$TZ $*" >> "$TSK_CALLS"
+echo "Date,Size,Type,Mode,UID,GID,Meta,File Name"
+SH
+chmod +x "$H/tsk-shim2/"* "$H/mt-shim/"*
+: > "$H/gpt.img"
+DVR="$ROOT/packs/computer-forensics-base/recipes/disk-volumes/run.sh"
+TSK_CALLS="$H/tsk-calls.log" OUT_COVERAGE="$H/out-gpt/coverage.json" FIRST_COVERAGE="$H/first-coverage.json" PATH="$H/tsk-shim2:$H/mt-shim:$PATH" \
+  bash "$DVR" run --target "{\"paths\": [\"$H/gpt.img\"], \"name\": \"gpt.img\"}" --out "$H/out-gpt" > "$H/out-gpt.json" || true
+jq -e '.status == "partial" and ([.inventory[] | {(.description): .outcome}] | add) == {"Basic data partition": "read", "Microsoft reserved partition": "structural", "Unknown Type (0x99)": "failed", "BIOS Boot Partition": "structural"}' "$H/out-gpt/coverage.json" >/dev/null \
+  || fail "every allocated entry is in the inventory with what became of it, an unlisted description is tried (and fails here), and what holds no file system is structural: $(cat "$H/out-gpt/coverage.json")"
+jq -e '[.errors[] | select(test("1083392"))] | length == 1' "$H/out-gpt/coverage.json" >/dev/null || fail "the entry that could not be read is named once in the errors: $(cat "$H/out-gpt/coverage.json")"
+[[ "$(grep -c '^fsstat -o 1083392 ' "$H/tsk-calls.log")" -ge 1 ]] || fail "an unlisted description is tried with fsstat, not skipped: $(cat "$H/tsk-calls.log")"
+grep -q -- '-o 1050624 \|-o 1100001 ' "$H/tsk-calls.log" && fail "a structural entry was read as a file system"
+jq -e '.status == "partial" and (.covered | test("started"))' "$H/first-coverage.json" >/dev/null || fail "coverage says partial before the first step finishes: $(cat "$H/first-coverage.json")"
+grep -q 'mactime TZ=UTC .* -z UTC' "$H/tsk-calls.log" || fail "mactime is given the zone its timeline says: $(cat "$H/tsk-calls.log")"
+# With nothing left unread the same table is complete, and a missing mactime is said, not skipped.
+sed -i.bak '/Unknown Type/d' "$H/tsk-shim2/mmls" && rm -f "$H/tsk-shim2/mmls.bak"
+TSK_CALLS="$H/tsk-calls2.log" OUT_COVERAGE=/nonexistent FIRST_COVERAGE=/nonexistent PATH="$H/tsk-shim2:$H/mt-shim:$PATH" \
+  bash "$DVR" run --target "{\"paths\": [\"$H/gpt.img\"], \"name\": \"gpt.img\"}" --out "$H/out-gpt2" >/dev/null || fail "disk-volumes with nothing unread should run"
+[[ "$(jq -r .status "$H/out-gpt2/coverage.json")" == complete ]] || fail "a table whose every entry was read or is structural is complete: $(cat "$H/out-gpt2/coverage.json")"
+rm -f "$H/mt-shim/mactime"
+TSK_CALLS="$H/tsk-calls3.log" OUT_COVERAGE=/nonexistent FIRST_COVERAGE=/nonexistent PATH="$H/tsk-shim2:$H/mt-shim:/usr/bin:/bin" \
+  bash "$DVR" run --target "{\"paths\": [\"$H/gpt.img\"], \"name\": \"gpt.img\"}" --out "$H/out-gpt3" >/dev/null || true
+if ! PATH="$H/mt-shim:/usr/bin:/bin" command -v mactime >/dev/null; then
+  jq -e '.status == "partial" and ([.errors[] | select(test("mactime missing"))] | length == 1)' "$H/out-gpt3/coverage.json" >/dev/null || fail "a missing mactime is said: $(cat "$H/out-gpt3/coverage.json")"
+fi
+pass "disk-volumes inventories every allocated entry, tries what no list names, names what holds no file system, sets the zone its timeline says, and writes coverage before its first step"
+
+# A 7z that exits nonzero is an error whether or not it said anything on stderr (it was recorded only when it had),
+# and the recipe no longer advertises .tar.zst, which it cannot read. A stub 7z, so this runs on any host.
+mkdir -p "$H/seven-stub"
+cat > "$H/seven-stub/7z" <<'SH'
+#!/bin/sh
+printf 'Path = a.txt\nSize = 1\nPacked Size = 1\n\n'
+exit 2
+SH
+chmod +x "$H/seven-stub/7z"
+printf '7z\274\257\047\034' > "$H/silent.7z"; head -c 4096 /dev/zero >> "$H/silent.7z"
+PATH="$H/seven-stub:$PATH" python3 "$AM" run --target "{\"paths\": [\"$H/silent.7z\"]}" --out "$H/out-7z-silent" >/dev/null || true
+jq -e '.status == "partial" and (.errors | length == 1) and (.errors[0] | test("^7z exited 2 with nothing on stderr"))' "$H/out-7z-silent/coverage.json" >/dev/null || fail "a 7z that exits nonzero with nothing on stderr is an error: $(cat "$H/out-7z-silent/coverage.json")"
+jq -e '(.suffixes | index(".tar.zst")) == null' "$CFB/recipes/archive-members/recipe.json" >/dev/null || fail "archive-members advertises .tar.zst, which it cannot read"
+grep -rn "archive_extract takes\|is extracted with archive_extract" "$CFB/recipes/archive-members" >/dev/null && fail "archive-members still promises an extractor the pack does not ship"
+pass "archive-members records a silent nonzero 7z exit, advertises no .tar.zst and promises no extractor the pack does not ship"
 
 # memory-windows reads the symbol tables the image holds and fetches nothing:
 # every Volatility call carries --offline. An image with no table for its

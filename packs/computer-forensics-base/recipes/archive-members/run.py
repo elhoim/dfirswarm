@@ -11,8 +11,10 @@ the archive is paths[0]. Every member is one row of members.tsv:
 
 `path` and `link` are shown with control characters, tabs, newlines and
 backslashes escaped; `path_b64` is the name's exact bytes. `n` counts from 0
-in archive order and is what archive_extract takes, so two members with the
-same name are still two rows. A tar's times are UTC; a zip's DOS times carry
+in archive order, so two members with the same name are still two rows, and
+is the number a member extractor takes: the base pack ships none yet (an
+archive_extract tool is planned), so a member is read until then with the
+archive's own program (tar, unzip, 7z) run as a job. A tar's times are UTC; a zip's DOS times carry
 no zone (`tz` is `unknown`) unless the member has an extended timestamp.
 `flags` names what an examiner should know before extracting: escapes-root,
 encrypted, ratio>1000, and name-not-utf8 (macOS refuses such a name, so an
@@ -364,11 +366,12 @@ def list_7z(path, w, deadline, max_members, cov, out_dir):
     rc = proc.wait()
     err.close()
     size = os.path.getsize(err_path)
+    text = open(err_path, "rb").read(65536).decode("utf-8", "replace").strip() if size else ""
     if size == 0:
         os.remove(err_path)
-    elif rc != 0 and not stopped:
-        text = open(err_path, "rb").read(65536).decode("utf-8", "replace").strip()
-        cov["errors"].append("7z exited %d: %s%s" % (rc, text, " (the whole of it, %d bytes, is 7z.stderr)" % size if size > 65536 else ""))
+    if rc != 0 and not stopped:
+        # Any nonzero exit is an error entry, whether or not 7z said anything on stderr.
+        cov["errors"].append("7z exited %d%s%s" % (rc, ": " + text if text else " with nothing on stderr", " (the whole of it, %d bytes, is 7z.stderr)" % size if size > 65536 else ""))
     return n
 
 
@@ -402,7 +405,7 @@ def run(path, out_dir):
     cov["status"] = status
     json.dump(cov, open(os.path.join(out_dir, "coverage.json"), "w"), indent=2)
     with open(os.path.join(out_dir, "index.tsv"), "w", encoding="utf-8") as fh:
-        fh.write("members.tsv\t%s member list (%d): n, type, path, path_b64, size, packed, mtime, tz, mode, uid, gid, link, locator, flags; archive_extract takes n\n"
+        fh.write("members.tsv\t%s member list (%d): n, type, path, path_b64, size, packed, mtime, tz, mode, uid, gid, link, locator, flags; n is the member's number in archive order\n"
                  % (cov.get("format") or "archive", n))
     print(json.dumps({"ok": status in ("complete", "partial"), "status": status, "format": cov["format"], "members": n}))
     return 0 if status in ("complete", "partial") else 2
