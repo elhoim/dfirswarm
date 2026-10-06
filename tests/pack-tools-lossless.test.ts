@@ -881,20 +881,21 @@ test("mem_profile reads a 64-bit crash dump's physical-memory descriptor at its 
     head.writeBigUInt64LE(0x200n, 0xa8);
     head.writeBigUInt64LE(0x80n, 0xb0);
     head.writeUInt32LE(1, 0xf98);
-    await writeFile(join(cwd, "work", "memory.dmp"), head);
+    // The runs' 0x180 pages follow the header, one run after the other.
+    await writeFile(join(cwd, "work", "memory.dmp"), Buffer.concat([head, Buffer.alloc(0x180 * 4096)]));
     const out = body<{ container: Record<string, unknown>; notes: string[] }>(
       await tool(join(MEM, "mem_profile", "run.py"), cwd, { path: "work/memory.dmp", scan_mb: 1 }),
     );
     const c = out.container;
     assert.equal(c.format, "Windows crash dump");
     assert.equal(c.bits, 64);
-    assert.equal(c.header_problem, undefined);
+    assert.equal(c.problems, undefined);
     assert.equal(c.run_count, 2);
     assert.equal(c.pages_total, 0x180);
     assert.equal(c.runs_pages_total, 0x180);
     assert.deepEqual(c.memory_runs, [
-      { start_page: 1, pages: 0x100, start_byte: 0x1000, bytes: 0x100000 },
-      { start_page: 0x200, pages: 0x80, start_byte: 0x200000, bytes: 0x80000 },
+      { start_page: 1, pages: 0x100, physical_start: 0x1000, bytes: 0x100000, file_offset: 0x2000 },
+      { start_page: 0x200, pages: 0x80, physical_start: 0x200000, bytes: 0x80000, file_offset: 0x2000 + 0x100000 },
     ]);
     assert.equal(c.contiguous, false);
     assert.ok(out.notes.some((n) => /not contiguous: 2 memory runs/.test(n)));

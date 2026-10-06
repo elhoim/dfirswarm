@@ -274,6 +274,212 @@ test("mem_carve says whether each header is plausible, truncated or only a signa
   });
 });
 
+// --- mem_profile ----------------------------------------------------------------
+
+type Profile = {
+  bytes: number;
+  file_pages_4k_estimate?: number;
+  pages_4k?: number;
+  container: {
+    format: string;
+    endian?: string;
+    bits?: number;
+    recognition_basis?: string;
+    interpretation?: string;
+    contiguous?: boolean;
+    run_count?: number;
+    memory_runs?: { start_page: number; pages: number; physical_start: number; bytes: number; file_offset: number }[];
+    ranges?: { physical_start: number; physical_end: number; bytes: number; file_offset: number }[];
+    range_count?: number;
+    problems?: string[];
+    version?: number;
+  };
+  structures_in_sample: Record<string, number>;
+  sampled_ranges: { offset: number; bytes: number }[];
+  bytes_sampled: number;
+  problems?: string[];
+  operating_system_hints: string[];
+  kernel_build: string | null;
+};
+
+const MIB = 1 << 20;
+
+/** DUMP_HEADER64: "PAGE" "DU64", the descriptor at 0x88 (runs, padding, pages, run list at 0x98), dump type at 0xF98. */
+function crashDump64(runs: [bigint, bigint][], pagesField: bigint | null, payloadPages: number | null): Buffer {
+  const head = Buffer.alloc(0x2000);
+  head.write("PAGEDU64", 0, "latin1");
+  head.writeUInt32LE(10, 0x08);
+  head.writeUInt32LE(19041, 0x0c);
+  head.writeUInt32LE(runs.length, 0x88);
+  const total = runs.reduce((n, [, count]) => n + count, 0n);
+  head.writeBigUInt64LE(pagesField ?? total, 0x90);
+  runs.forEach(([base, count], i) => {
+    head.writeBigUInt64LE(base, 0x98 + i * 16);
+    head.writeBigUInt64LE(count, 0xa0 + i * 16);
+  });
+  head.writeUInt32LE(1, 0xf98); // DumpType: a full dump
+  const pages = payloadPages ?? Number(total);
+  return Buffer.concat([head, Buffer.alloc(pages * 4096)]);
+}
+
+/** LiME: magic 0x4C694D45 (the bytes "EMiL"), version 1, the inclusive start and end of a physical range, 8 reserved bytes, then the range. */
+function limeRange(start: bigint, end: bigint, payload: Buffer): Buffer {
+  const header = Buffer.alloc(32);
+  header.writeUInt32LE(0x4c694d45, 0);
+  header.writeUInt32LE(1, 4);
+  header.writeBigUInt64LE(start, 8);
+  header.writeBigUInt64LE(end, 16);
+  return Buffer.concat([header, payload]);
+}
+
+test("mem_profile counts a structure once, in a file smaller than its sample windows", async () => {
+  // The head, middle and tail windows of a 12-byte file are the same 12 bytes;
+  // they were concatenated and the one "regf" was counted three times.
+  await withCwd(async (cwd) => {
+    await writeFile(join(cwd, "work", "tiny.raw"), Buffer.from("xxxxregfxxxx", "latin1"));
+    const out = body<Profile>(await tool(PROFILE, cwd, { path: "work/tiny.raw" }));
+    assert.equal(out.structures_in_sample["registry hive"], 1);
+    assert.deepEqual(out.sampled_ranges, [{ offset: 0, bytes: 12 }]);
+    assert.equal(out.bytes_sampled, 12);
+  });
+});
+
+test("mem_profile counts a structure once when it sits at, inside or across the edge of its read block", async () => {
+  await withCwd(async (cwd) => {
+    const BLOCK = 4 * MIB; // the size it reads a range in
+    const blob = Buffer.alloc(8 * MIB);
+    for (const at of [BLOCK - 20, BLOCK - 15, BLOCK - 2, BLOCK + 3]) blob.write("regf", at, "latin1");
+    await writeFile(join(cwd, "work", "edge.raw"), blob);
+    const out = body<Profile & { structure_first_offsets: Record<string, number[]> }>(await tool(PROFILE, cwd, { path: "work/edge.raw" }));
+    assert.equal(out.structures_in_sample["registry hive"], 4);
+    assert.deepEqual(out.structure_first_offsets["registry hive"], [BLOCK - 20, BLOCK - 15, BLOCK - 2, BLOCK + 3]);
+  });
+});
+
+test("mem_profile does not join the end of one sampled window to the start of the next", async () => {
+  await withCwd(async (cwd) => {
+    const blob = Buffer.alloc(12 * MIB);
+    blob.write("reg", MIB - 3, "latin1"); // the last three bytes of the head window
+    blob.write("f", 5 * MIB + MIB / 2, "latin1"); // the first byte of the middle window
+    await writeFile(join(cwd, "work", "image.raw"), blob);
+    const out = body<Profile>(await tool(PROFILE, cwd, { path: "work/image.raw", scan_mb: 3 }));
+    assert.equal(out.structures_in_sample["registry hive"], undefined, "a match invented across two windows");
+    assert.equal(out.sampled_ranges.length, 3);
+    assert.equal(out.bytes_sampled, 3 * MIB);
+    for (const r of out.sampled_ranges) assert.equal(r.bytes, MIB);
+  });
+});
+
+test("mem_profile says a file with no container header is unknown, not flat physical memory", async () => {
+  await withCwd(async (cwd) => {
+    await writeFile(join(cwd, "work", "notes.bin"), Buffer.from("this could be anything at all\n".repeat(200), "latin1"));
+    const out = body<Profile>(await tool(PROFILE, cwd, { path: "work/notes.bin" }));
+    assert.equal(out.container.format, "unrecognised");
+    assert.match(out.container.recognition_basis as string, /no known container header/);
+    assert.doesNotMatch(JSON.stringify(out), /flat physical memory \(no container header\)/);
+    assert.equal(out.pages_4k, undefined, "the file length over 4096 is not a page count");
+    assert.equal(out.file_pages_4k_estimate, Math.floor(out.bytes / 4096));
+  });
+});
+
+test("mem_profile refuses an empty file and a scan size beyond its bound", async () => {
+  await withCwd(async (cwd) => {
+    await writeFile(join(cwd, "work", "empty.raw"), Buffer.alloc(0));
+    assert.match(refused(await tool(PROFILE, cwd, { path: "work/empty.raw" })).error, /empty/);
+    await writeFile(join(cwd, "work", "some.raw"), Buffer.alloc(4096));
+    assert.match(refused(await tool(PROFILE, cwd, { path: "work/some.raw", scan_mb: 100000 })).error, /scan_mb/);
+  });
+});
+
+test("mem_profile reads an ELF core's byte order from e_ident, and a short ELF header without crashing", async () => {
+  // EI_DATA (byte 5): 1 little-endian, 2 big-endian; e_type (offset 16) is in that
+  // byte order, so a big-endian core reads 0x0004 as 1024 if read little-endian.
+  await withCwd(async (cwd) => {
+    const core = Buffer.alloc(64);
+    core.write("\x7fELF", 0, "latin1");
+    core[4] = 2; // ELFCLASS64
+    core[5] = 2; // ELFDATA2MSB
+    core[6] = 1;
+    core.writeUInt16BE(4, 16); // ET_CORE
+    core.writeUInt16BE(0x15, 18); // EM_PPC64
+    await writeFile(join(cwd, "work", "be.core"), core);
+    const out = body<Profile>(await tool(PROFILE, cwd, { path: "work/be.core" }));
+    assert.equal(out.container.format, "ELF core");
+    assert.equal(out.container.endian, "big");
+    assert.equal(out.container.bits, 64);
+
+    const little = Buffer.from(core);
+    little[5] = 1;
+    little.writeUInt16LE(4, 16);
+    await writeFile(join(cwd, "work", "le.core"), little);
+    assert.equal(body<Profile>(await tool(PROFILE, cwd, { path: "work/le.core" })).container.endian, "little");
+
+    // Six bytes of an ELF header: no e_type to read.
+    await writeFile(join(cwd, "work", "short.core"), Buffer.from("\x7fELF\x02\x01", "latin1"));
+    const short = body<Profile>(await tool(PROFILE, cwd, { path: "work/short.core" }));
+    assert.match((short.container.problems ?? []).join(" "), /shorter than/);
+  });
+});
+
+test("mem_profile finds a physical-memory run table that overlaps, and one that is adjacent", async () => {
+  await withCwd(async (cwd) => {
+    // Runs 1..0x101 and 0x80..0x180 overlap; the descriptor's total is their sum.
+    await writeFile(join(cwd, "work", "overlap.dmp"), crashDump64([[1n, 0x100n], [0x80n, 0x100n]], null, null));
+    const overlap = body<Profile>(await tool(PROFILE, cwd, { path: "work/overlap.dmp" }));
+    assert.equal(overlap.container.format, "Windows crash dump");
+    assert.match((overlap.container.problems ?? []).join(" "), /overlap/);
+
+    // Pages 1..0x100 then 0x101..0x200: adjacent, so contiguous, and the file offsets follow the runs.
+    await writeFile(join(cwd, "work", "adjacent.dmp"), crashDump64([[1n, 0x100n], [0x101n, 0x100n]], null, null));
+    const adjacent = body<Profile>(await tool(PROFILE, cwd, { path: "work/adjacent.dmp" }));
+    assert.equal(adjacent.container.problems, undefined);
+    assert.equal(adjacent.container.contiguous, true);
+    assert.deepEqual(adjacent.container.memory_runs, [
+      { start_page: 1, pages: 0x100, physical_start: 0x1000, bytes: 0x100000, file_offset: 0x2000 },
+      { start_page: 0x101, pages: 0x100, physical_start: 0x101000, bytes: 0x100000, file_offset: 0x2000 + 0x100000 },
+    ]);
+
+    // A descriptor whose runs promise more than the file holds.
+    await writeFile(join(cwd, "work", "short.dmp"), crashDump64([[1n, 0x100n]], null, 0x40));
+    const shortPayload = body<Profile>(await tool(PROFILE, cwd, { path: "work/short.dmp" }));
+    assert.match((shortPayload.container.problems ?? []).join(" "), /payload|file holds|shorter/);
+
+    // A run list that is out of order.
+    await writeFile(join(cwd, "work", "order.dmp"), crashDump64([[0x200n, 0x10n], [0x10n, 0x10n]], null, null));
+    const order = body<Profile>(await tool(PROFILE, cwd, { path: "work/order.dmp" }));
+    assert.match((order.container.problems ?? []).join(" "), /ascending order/);
+  });
+});
+
+test("mem_profile lists a LiME file's ranges with their physical addresses and file offsets", async () => {
+  await withCwd(async (cwd) => {
+    const first = Buffer.alloc(0x1000, 1);
+    const second = Buffer.alloc(0x1000, 2);
+    await writeFile(join(cwd, "work", "capture.lime"), Buffer.concat([limeRange(0x1000n, 0x1fffn, first), limeRange(0x100000n, 0x100fffn, second)]));
+    const out = body<Profile>(await tool(PROFILE, cwd, { path: "work/capture.lime" }));
+    assert.equal(out.container.format, "LiME");
+    assert.equal(out.container.version, 1);
+    assert.equal(out.container.range_count, 2);
+    assert.deepEqual(out.container.ranges, [
+      { physical_start: 0x1000, physical_end: 0x1fff, bytes: 0x1000, file_offset: 32 },
+      { physical_start: 0x100000, physical_end: 0x100fff, bytes: 0x1000, file_offset: 32 + 0x1000 + 32 },
+    ]);
+    assert.equal(out.container.problems, undefined);
+
+    // The second range promises 4096 bytes and the file holds 100 of them.
+    await writeFile(join(cwd, "work", "cut.lime"), Buffer.concat([limeRange(0x1000n, 0x1fffn, first), limeRange(0x100000n, 0x100fffn, second.subarray(0, 100))]));
+    const cut = body<Profile>(await tool(PROFILE, cwd, { path: "work/cut.lime" }));
+    assert.equal(cut.container.range_count, 2);
+    assert.match((cut.container.problems ?? []).join(" "), /ends|truncated|holds/);
+
+    // A byte of the file after the last range that is not a LiME header.
+    await writeFile(join(cwd, "work", "tail.lime"), Buffer.concat([limeRange(0x1000n, 0x1fffn, first), Buffer.alloc(40, 7)]));
+    const tail = body<Profile>(await tool(PROFILE, cwd, { path: "work/tail.lime" }));
+    assert.equal(tail.container.range_count, 1);
+    assert.match((tail.container.problems ?? []).join(" "), /no LiME magic/);
+  });
+});
+
 // --- mem_fs ---------------------------------------------------------------------
 
 const SECRET_TOKEN = "Planted-Token-4f9aQ2-do-not-print";
