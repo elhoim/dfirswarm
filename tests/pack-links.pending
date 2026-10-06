@@ -1,0 +1,18 @@
+# Packs whose skills still disagree with their front matter, or name something
+# outside their dependency closure (tests/pack-links.test.sh, the bug checks).
+# One pack id per line. A listed pack's findings are counted and do not fail;
+# a pack listed with nothing left to find fails, so a pack's own change takes
+# its line out. PACK_LINKS_VERBOSE=1 lists every finding of a listed pack, and
+# PACK_LINKS_STRICT=1 ignores this file.
+cloud-forensics
+computer-forensics-base
+encrypted-containers
+linux-forensics
+macos-forensics
+memory-forensics
+mobile-forensics
+network-forensics
+ransomware-response
+reverse-engineering
+triage-collection
+windows-forensics

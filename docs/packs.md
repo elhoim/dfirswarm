@@ -404,3 +404,140 @@ temp files to its working directory by default is given a path under the
 output (Plaso's and Zircolite's `--logfile`) or run there (Hayabusa, Zeek, the
 disk-timeline recipe's Plaso steps), and its test runs it from a read-only
 directory with a stand-in that writes where the real program does.
+
+---
+
+## 8. Writing a pack that holds up
+
+A pack is read by an agent in the middle of a case, with nothing to go on but
+what a skill says and what a tool prints. What follows is what every skill,
+tool and requirements file in a pack is held to, so that a result built on a
+pack's word is one a reader can check. `tests/pack-tools.test.sh`,
+`tests/pack-links.test.sh`, `tests/packs.test.sh` and `tests/recipe.test.sh`
+hold the parts a test can hold; the rest is for the author.
+
+### Voice and method in skills
+
+1. **Observation, inference and conclusion stay apart.** A skill says what an
+   artefact shows, what it does not show, and what else has to corroborate it.
+   Every skill about an artefact has a short "Does not show" part.
+2. **A system artefact does not name a person, an intent, a copy, a tampering
+   or an exfiltration by itself.** Attribution, intent and "the logs were
+   cleared" are conclusions, not readings. A skill says which corroboration
+   each of them needs.
+3. **A negative is bounded.** It says what was searched, in which source, over
+   which period. The absence of an artefact is not the absence of the event.
+   A skill never writes "cannot be recovered" after one failed route: it names
+   the routes tried.
+4. **Time says which clock, which zone, which epoch and what resolution.** A
+   current zone offset is not applied to a past date without checking the
+   zone's daylight-saving history. Grouping by clock change or by boot does
+   not remove drift.
+5. **A version fact is dated** ("as of March 2026") and names the system or
+   tool versions it holds for. A version fact the author cannot source stays
+   out of the skill.
+6. **Examination wording is the defender's.** For credential, malware and
+   encryption topics a skill says how to identify, preserve and use what the
+   case lawfully supplies, and on what basis. It gives no attack or evasion
+   walkthrough, and no recovery by guessing beyond naming the authorised
+   route.
+7. **Density.** A skill is for an agent in the middle of a case: decision rules
+   (if X, then Y), what to record, what would disprove the reading. No padding,
+   and no list of a tool's options: it names the command that prints them
+   (see "Tool help stays out of the context window"). The front matter keeps
+   the format in "Skill file format".
+
+### Secrets and sensitive output
+
+1. **The hash of a secret is never written**, in a post, the ledger, a report
+   or a tool's output: an unsalted hash of a weak secret is reversed in
+   seconds. Nor are characters of a password, a PIN or any short secret. Of a
+   random secret of 16 characters or more, at most the first four and the last
+   four. A "shape" of a secret, such as the first two digits of each group of a
+   recovery key, counts as characters of it.
+2. **A tool that can reach secret material reports presence, kind, location,
+   length and offsets, not values, fragments or digests.** That covers
+   credential stores, keys, tokens, cookies, password verifiers, recovery keys,
+   browser stores, property lists that hold a verifier, command lines and
+   environments that may hold a secret, the bytes a YARA or `strings` match
+   prints, and decrypted content. Where a value has to be produced, the skill
+   says the job runs with `secret_output: true` (a `job_run` parameter; see
+   `docs/protocol.md`), and the tool writes the value only to a file output,
+   never to standard output and never into a field an agent might paste.
+3. **A secret never goes on a command line**, because the argument list is
+   recorded in the trace. The tool takes a reference to a file, and that file
+   is a sealed secret output.
+4. **A skill that names such a tool says so**, in a "Sensitive output" line.
+
+### The tool contract
+
+Every tool a pack bundles holds to this.
+
+1. **Fail loudly.** A tool never turns an error, a skipped block, a malformed
+   line, a failed export or an unsupported version into a clean or empty
+   result. It reports counts (parsed, empty, unsupported, failed, not attempted)
+   and names the first failures. Exit code 0 means the engine ran, not that the
+   examination is complete: completeness is judged from artefact coverage.
+2. **Bound resources, and say so.** Stream. Cap what expands (archives,
+   containers, compressed streams, recursion, regular-expression time). A
+   result that is cut says `truncated: true`, the cap, and where the whole is
+   kept: nothing is cut without the whole being kept. A tool never holds a
+   whole image or a whole output in memory.
+3. **Detect the format version**, and refuse or flag the ones the tool does not
+   handle. A layout is not guessed from a sample.
+4. **Every record carries its provenance:** the source object (a path or an
+   id), the offset or record number, and the parser's name and version. A
+   timestamp carries the raw value beside the decoded one, says its epoch and
+   zone, is written as ISO 8601 in UTC and keeps its fractions of a second.
+5. **Evidence is hostile input.** A tool executes none of it, follows no path
+   out of the directory it was given, writes only to its output directory,
+   uses no network and bounds decompression.
+6. **The manifest's description says exactly what is and is not measured.** A
+   survey is described as a survey and a heuristic as a heuristic. A candidate
+   is named a candidate; a score is not a verdict.
+7. **Each fix has a regression test**, with a fixture built independently of
+   the parser, from the format's specification or a known-good sample, never
+   from the parser's own output. A test that shares the parser's wrong
+   assumption proves nothing.
+
+### Requires and images
+
+1. **Every dependency is pinned.** A pip requirement with `==`; a host binary
+   with its version; a download with its sha256. The licence label is read from
+   the package's own metadata, not remembered. Each entry says whether it is
+   redistributable, and whether it is available for arm64, amd64 or both.
+2. **A program a skill tells the agent to run is in the pack's `requires`, or
+   in a dependency's.** A program or Python package in `requires` that no skill
+   names needs either a skill that names it, or a reason in `pack.json`:
+
+       "unreferenced_ok": [
+         { "name": "somelib", "why": "imported by a tool of the pack; no skill runs it" }
+       ]
+
+   The field is optional and written by hand; `name` is one of the pack's own
+   `requires/host.json` binaries or `requires/python.txt` packages, and `why`
+   says why no skill names it. Sealing keeps it, and, being part of the
+   manifest, changing it raises the pack's version like any other change.
+3. **A new program goes in through `images/recipe.py`**, and
+   `tests/recipe.test.sh` passes. Rebuilding an image is not part of a change
+   to a pack: images are rebuilt once the packs' changes have settled.
+
+### Links
+
+Skills, tools and programs refer to one another by name, and the names have to
+agree in both directions. `tests/pack-links.test.sh` holds these rules; its
+header says how it matches a name and where that is wrong.
+
+1. **What a skill names is what its front matter lists, and it resolves.**
+   Every tool named in a skill's body is in its `tools:`, and every program in
+   its `requires_host:`. Each resolves in the pack's dependency closure (the
+   pack, its `depends` and theirs). A front matter entry the body never names
+   is wrong the other way round.
+2. **Everything a pack ships is reached.** Every bundled tool is named by at
+   least one skill of its pack, or of a pack that depends on it. Every skill
+   that depends on a capability names the tool that provides it. A capability
+   a skill needs and no tool provides is either added as a tool or taken out
+   of the skill.
+3. **The pack that owns a tool ships it.** Another pack names the tool and
+   lists the owner in `depends`; it does not carry a copy (see "Two rules the
+   set holds to").
