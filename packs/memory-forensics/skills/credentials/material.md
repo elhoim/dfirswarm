@@ -48,7 +48,20 @@ a library, or to nobody, so say which offset it was at and which tool and
 threshold found it, and call it established only when it decrypts something the
 evidence holds. Its absence is a statement about the layout the tool tests (the
 standard AES-128 and AES-256 schedules, byte for byte), not about whether a key
-was ever in memory.
+was ever in memory. Two layouts it does not test are in the tool library
+(`--tools-from tool-library`): `aes_schedule_scan` also reads the schedule with
+the bytes of each 32-bit word reversed, and `aes_inverse_scan` reads one stored
+as a decryption routine keeps it (the middle round keys transformed, the rounds
+in either order). Neither prints a key: it goes to a private file in the
+tool's `out_dir`, which by default is `work/quarantine/<your id>/` (in a job,
+`$OUT/quarantine/`), and the answer gives the offset, the layout and the key's
+sha256 to record in the ledger. A key file is live material from the evidence
+and a handover package leaves `work/quarantine/` in the sandbox; a key file
+anywhere else, and a job's outputs in a package that carries outputs, travel
+with it unless the hit is recorded as a sensitive ledger entry that cites the
+file (a redacted package then withholds it) or the scan ran as a
+`secret_output` job. Record where the key was found and its hash, and hand
+the value over through the channel the operator named.
 
 `aeskeyfind` comes with the memory and `full` images. A host run has it only if
 the operator installed it (Debian packages it for amd64 and i386 only); without

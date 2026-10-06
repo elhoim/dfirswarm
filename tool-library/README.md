@@ -1,10 +1,19 @@
 # The tool library
 
-Forty-one tools. Thirty-five were written by agents: thirty-two during the
-forensic cases in [docs/use-cases](../docs/use-cases/README.md), and three in
+Forty-six tools. Forty were written by agents: thirty-two during the
+forensic cases in [docs/use-cases](../docs/use-cases/README.md), and eight in
 later runs, folded in and made general ([below](#folded-from-later-runs));
 six were written for gaps those cases left, and are marked `maintainer` in
-the table. Each is a directory with a manifest and a script.
+the table. Each is a directory with a manifest and a script. The five
+folded from `s3472f0` and `sd29252` (`aes_inverse_scan`, `aes_schedule_scan`,
+`destlist_v4`, `encoded_literal_scan`, `marshal_inspect`) also carry the
+`provenance.json` that `tools --save` wrote for them (the three folded
+earlier, `ledger_timeline`, `contact_sheet` and `nested_vdi`, carry none):
+the run, the seat and the moment it was forged, the image and packs the run
+had, and the run's own label for its case (`case_id`). A tool made from
+several carries each one's, as `provenance-<name>.json`. A `provenance.json`
+describes the run's own script, so its `sha256` is that script's, not this
+library's.
 
 Hand it to a run and every agent has them from its first turn:
 
@@ -39,7 +48,8 @@ against the library rather than for it.
 
 **A tool says which programs it runs.** A manifest's `requires` lists the
 programs the script calls (`icat`, `fls`, `img_stat`, `esedbexport`, `yara`,
-`vol`, `sqlite3`); the Python it imports is in
+`vol`, `sqlite3`, and `node` for the two AES scanners, which every image
+has); the Python it imports is in
 [images/library-python.txt](../images/library-python.txt), which every VM
 image installs. Only `sqlite3` of those is in the base image, so
 `images/recipe.py profile-for --tools-from tool-library` names an image
@@ -73,16 +83,30 @@ compares what the manifests wrote, and knows no format.
 `browser_history`, `catalog_grep`, `csearch`, `esedb_query`,
 `chunk_needles`, `evtx_filter`, `evtx_query`, `ftk_csv`,
 `guest_syslog`, `ioc_scan`, `lnk_parse`, `mam_scan`, `nested_vdi` (its
-`ls`), `prefetch_mam`, `recyclebin_i`, `sig_carve`, `sigscan_e01`,
-`usn_journal`, and `utf16_urls`) still scan the whole source. They return the requested first
+`ls`), `destlist_v4`, `prefetch_mam`, `recyclebin_i`, `sig_carve`,
+`sigscan_e01`, `usn_journal`, and `utf16_urls`) still scan the whole source. They return the requested first
 page and, when more matches exist, atomically keep the complete result as JSON
 Lines under `work/<agent>/tool-output/`; `all_results` (or the corresponding
 nested page record) names that file. A result's `matched` count is therefore
 the whole set, while `returned` is only the inline page. The shared
 implementation is `_output.py`.
 
+The scanners that read a large image (`aes_schedule_scan`, `aes_inverse_scan`,
+`encoded_literal_scan`) and the stream reader `marshal_inspect` keep the whole
+result as one JSON file in their `out_dir` and name it in `result_file`; the
+answer carries the counts and the first hits. A scanner works a byte window
+(`start`, `length`) and stops at a chunk boundary when its `budget_seconds`
+(and, for `encoded_literal_scan`, `max_hits`, checked between two hits, so a
+chunk full of them cannot hold a call past its time) run out, saying `complete: false`
+and the `next_start` to call again with, so a 7 GB image is covered by calls
+that each fit the tool's timeout, and none of them loses or doubles a hit.
+`out_dir` must lie inside the run directory, never under `inputs/`, `ledger/`
+or `tools/`.
+
 | Tool | Runtime | Written by | v | What it does |
 | --- | --- | --- | --- | --- |
+| `aes_inverse_scan` | node | `s3472f0` | 1 | Find AES-128 and AES-256 key schedules stored as a decryption routine keeps them (InvMixColumns on the middle… |
+| `aes_schedule_scan` | node | `s3472f0` | 1 | Find AES-128 and AES-256 key schedules in a file or memory image, at every byte alignment, as the standard la… |
 | `aescrypt_v2_decrypt` | python3 | `s864a02` | 3 | Decrypt AES Crypt 3.10 Windows GUI v2 files (KDF: SHA256(IV||zeros16||UTF16LE pw)×8192). Returns plaintext pa… |
 | `amcache_apps` | python3 | `maintainer` | 1 | Program execution from Amcache.hve: path, SHA-1, publisher and link date, from whichever of the Windows 7/8 a… |
 | `browser_history` | python3 | `maintainer` | 2 | Query a browser history database, copying it and any -wal beside it first so the write-ahead log is replayed … |
@@ -92,6 +116,8 @@ implementation is `_output.py`.
 | `chunk_needles` | python3 | `sd1d102` | 3 | Scan a local file (or icat an inode from the E01) for ASCII/UTF-16 needles; return hit counts and nearby snip… |
 | `contact_sheet` | python3 | `s10d40e` | 1 | Tile many images into labelled contact sheets to look at: a directory, a list of paths or a tar read in place… |
 | `csearch` | python3 | `sf6df06` | 2 | Search the kickoff catalog files (filelist/timeline/bodyfile/pslist/cmdline/netscan/malfind/dlllist/psscan) f… |
+| `destlist_v4` | python3 | `sd29252` | 1 | Read the DestList stream of a Windows jump list, version 4 (the 130-byte entry layout): for each entry its pl… |
+| `encoded_literal_scan` | python3 | `s3472f0` | 1 | Find a literal you know the start and end of (marker ... closer) hidden in base64, base32, hex, rot13 or as U… |
 | `esedb_query` | python3 | `maintainer` | 3 | Read an ESE database (WebCacheV01.dat, SRUDB.dat, spartan.edb) as tables via esedbexport. Lists the tables, o… |
 | `evtx_filter` | python3 | `sd1d101` | 1 | Parse a local EVTX; return EventID/TimeCreated/EventData for matching IDs or a time prefix |
 | `evtx_query` | python3 | `sbe1801` | 1 | Parse an EVTX file and return filtered events with timestamp, event_id, channel, computer, record_id, and nam… |
@@ -110,6 +136,7 @@ implementation is `_output.py`.
 | `lnk_parse` | python3 | `s183902` | 2 | Parse a Windows LNK (or a dump slice) and return flags, FILETIME timestamps, local/common paths, arguments, a… |
 | `mam_pf_parse` | python3 | `s2f6600` | 1 | Decompress a MAM-wrapped Windows prefetch file and return executable name, version, run count, and non-zero l… |
 | `mam_scan` | python3 | `s183901` | 1 | Scan a raw dump for MAM\x04 prefetch, decompress LZXPRESS Huffman, return name, run count, last-run FILETIMEs… |
+| `marshal_inspect` | python3 | `sd29252` | 1 | Read a Python marshal stream (a .pyc, or a stream carved from a packed executable or memory) as data and neve… |
 | `master_icat` | bash | `s9a5f06` | 3 | Extract a file by inode from an E01 with icat. The HDFS master image and sector offset 2048 are the defaults;… |
 | `nested_vdi` | python3 | `sae6e7d` | 1 | Read a VirtualBox VDI that lies inside an E01 or raw image, in place: found by its NTFS data runs (a deleted … |
 | `prefetch_mam` | python3 | `sbe1803` | 2 | Decompresses MAM-compressed or plain Windows Prefetch files and returns header fields, last-run FILETIMEs, an… |
@@ -127,10 +154,12 @@ implementation is `_output.py`.
 
 ## Folded from later runs
 
-Three tools an agent wrote in a run after the use cases, each made general
-before it came in: the parameters say what the run's copy assumed, and
-nothing of that case (its image, offsets, names or wording) is left in the
-script. "Written by" is the run.
+Eight tools, made from eleven that agents wrote in runs after the use cases
+(where several seats or runs had written the same thing, one tool came of
+them), each made general before it came in: the
+parameters say what the run's copy assumed, and nothing of that case (its
+image, offsets, names or wording) is left in the script. "Written by" is the
+run (the first named, where a tool is made from several).
 
 - `ledger_timeline` — made with `make_tool` in run `se5fdcd` (seat
   `se5fdcd05`) to render one case's events, with that case's title and
@@ -168,6 +197,57 @@ script. "Written by" is the run.
   refused, blocks stored past the runs given are counted, and it lists
   (paged, recursive), extracts one file, or reads guest bytes, where the job
   only listed a root.
+- `aes_schedule_scan` and `aes_inverse_scan` — two Node scanners made with
+  `make_tool` in run `s3472f0` (seat `s3472f003`, versions 2 and 1) to look
+  for AES key schedules in a 7 GB Windows memory image, in layouts that
+  `aeskeyfind`, which tests the plain schedule byte for byte, does not read.
+  The run's copies took one path, wrote candidate keys to a directory and
+  printed offsets; the inverse one knew AES-256 only. Now both do AES-128 and AES-256; the
+  first reads the schedule as the standard lays it out or with the bytes of
+  each 32-bit word reversed, the second as a decryption routine keeps it
+  (InvMixColumns on the middle rounds, rounds in either order, either byte
+  order). Each checks its S-box, MixColumns and key expansion against
+  FIPS-197 before it reads a byte, tests every alignment, and works a byte
+  window with a time budget. A key is never printed: it goes to a private
+  file in `out_dir` (by default `work/quarantine/<agent>/`, which a handover
+  package leaves in the sandbox; a key file anywhere else travels with the
+  package unless the hit is a sensitive ledger entry citing it, or the scan
+  ran as a `secret_output` job) and the answer gives the offset, size,
+  layout and the key's sha256 for the ledger. A hit is a lead, and the tools
+  say so.
+- `encoded_literal_scan` — three Python scanners made in run `s3472f0`
+  (`encoded_flag_scan`, `base32_flag_literals`, seat `s3472f003`, and
+  `utf32_flag_literals`, seat `s3472f004`), each with the opening of the
+  case's flag written into the script and named for it. Now one tool: the
+  caller gives `marker` (4 to 64 printable ASCII characters), `closer`
+  (default `}`), `max_body` and the `encodings` to try (base64 at three
+  phases and base32 at five, over UTF-8, UTF-16LE or UTF-16BE text; hex;
+  rot13; the literal as UTF-16 or UTF-32 text). It reads a hit's own
+  surroundings from the file, decodes the encoded run at every alignment
+  without running anything, and reports only a literal of the shape
+  marker, up to `max_body` characters, closer; a marker with no such
+  literal is listed by offset alone, and a context cut at 8192 bytes a side
+  says `context_capped`. Its `provenance.json` is `encoded_flag_scan`'s; the
+  other two are beside it.
+- `marshal_inspect` — two parsers of one thing, a Python marshal stream
+  carved from a packed program: `marshal_constants` (run `s3472f0`, seat
+  `s3472f003`, bounded, with an offset, writing the whole tree) and
+  `marshal_inspect` (run `sd29252`, seat `sd2925200`, with the bytecode and
+  short previews). Now one reader of its own that never calls
+  `marshal.loads` and builds no code object: depth, object and count limits,
+  a reference to a container named and not followed, a stream that stops
+  short answered with the offset where it did and the code objects whole
+  before it, a `.pyc` header recognised, dated and skipped (an older magic
+  number refused, since 3.10 and earlier lay a code object out otherwise),
+  the whole tree and every code object's bytecode in `out_dir`. Its
+  `provenance.json` is the later run's `marshal_inspect`; `marshal_constants`'s
+  is beside it.
+- `destlist_v4` — a sixteen-line reader of one stream version, made in run
+  `sd29252` (seat `sd2925204`) for a jump list's DestList. Now the stream at
+  an `offset`, bounded by `max_bytes`; a stream cut short or claiming more
+  entries than it holds is read as far as it goes and says so; the entries
+  are paged without cutting; and a stream of another version, or the OLE
+  compound file around it, is refused by name instead of read as version 4.
 
 ## Harvesting candidates from a run
 
@@ -200,9 +280,12 @@ written on:
    what only some images carry, and `use` (what it reads).
 3. Keep nothing cut: a paged result keeps the whole under `tool-output/`
    (`_output.py`), as the query tools here do.
-4. Add a test under `tests/` (`tests/tool-library-folded.test.ts` for the
-   folded ones), a row to the table above, and a line to "Folded from later
-   runs" naming the run, the job and the seat it came from.
+4. Add a test under `tests/` (`tests/tool-library-folded*.test.ts` for the
+   folded ones) that builds its own fixture and asserts what the tool says to
+   a good input and to a bad one, a row to the table above, and a line to
+   "Folded from later runs" naming the run and the seat (and, for a job's
+   script, the job) it came from. A tool that came from `tools --save`
+   keeps its `provenance.json`.
 
 ## Candidates kept out of Community
 

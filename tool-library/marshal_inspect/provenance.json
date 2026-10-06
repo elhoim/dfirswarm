@@ -1,0 +1,42 @@
+{
+  "saved_from_run": "sd29252",
+  "saved_at": "2026-10-06T07:14:48Z",
+  "case_id": "breadcrumbs",
+  "isolation": "microvm",
+  "image": "dfirswarm-base:dev-arm64",
+  "image_digest": "sha256:b8c5b1cf1640d328f1631da1e6c278cc0ef08f97677252765ebd3b7a79820968",
+  "forged_by": "sd2925200",
+  "forged_at": "2026-10-06T03:07:14.935Z",
+  "version": 1,
+  "sha256": "728d83106e173de33978691596d2ce73d75b06da275cf33a82f186af398e95b3",
+  "from_pack": null,
+  "runtime": "python3",
+  "packs": [
+    {
+      "id": "computer-forensics-base",
+      "version": "1.6.0",
+      "manifest_sha256": "c94b77d27cf59915b4af67dd6ea990f3daf5c1d04dbb4523a58995b2fa526960"
+    },
+    {
+      "id": "windows-forensics",
+      "version": "1.3.6",
+      "manifest_sha256": "3c76539614ed4ca47eb0445877caa404a2f8d147cb8e4d20a7a25835dda866fd"
+    },
+    {
+      "id": "memory-forensics",
+      "version": "1.3.1",
+      "manifest_sha256": "939e628a9380dbe444073bc1467cb04fba9412003a9fc371047e4e56749ee830"
+    },
+    {
+      "id": "network-forensics",
+      "version": "1.1.3",
+      "manifest_sha256": "c8c743e878defe8d6fb19e434d29aad82d00b6b69f588df88fa769c93b936c9f"
+    },
+    {
+      "id": "reverse-engineering",
+      "version": "1.2.0",
+      "manifest_sha256": "544863ae7a961e868553f31e968ecb5fe5db8447d4a461d2561783d58db29730"
+    }
+  ],
+  "installed_during_the_run": []
+}
