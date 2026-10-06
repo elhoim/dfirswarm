@@ -41,7 +41,7 @@ Args, JSON on stdin:
   start, length   a byte window of the file, by where a hit begins
   chunk_bytes     the read size (default 8 MiB)
   budget_seconds  stop after this long at a chunk boundary and say where to
-                  go on (default 100)
+                  go on (default 90)
   max_hits        stop at a chunk boundary once this many marker hits are
                   held (default 50000), and say where to go on: a marker
                   that is everywhere is not a search
@@ -336,7 +336,7 @@ def main():
     if start > size:
         fail("start is past the end of the file", start=start, size=size)
     end = min(size, start + whole(args, "length", size - start, 0, 1 << 62))
-    budget = args.get("budget_seconds", 100)
+    budget = args.get("budget_seconds", 90)
     if isinstance(budget, bool) or not isinstance(budget, (int, float)) or budget <= 0:
         fail("budget_seconds must be a positive number", got=budget)
     out_dir = resolve_output(args.get("out_dir"))

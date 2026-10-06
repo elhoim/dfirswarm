@@ -18,7 +18,7 @@
     },
     "limit": {
       "type": "integer",
-      "description": "Entries in the answer (default 500); the whole list goes to a file when there are more"
+      "description": "Entries in the answer (default 200); the whole list goes to a file when there are more"
     },
     "max_bytes": {
       "type": "integer",
@@ -32,5 +32,5 @@
   "by": "sd29252",
   "at": "2026-10-06T02:51:13.937Z",
   "version": 1,
-  "sha256": "c7d46007bdd295412d3a624ce52efb1f2205a36f60c47fe098a6ba56100d7e4b"
+  "sha256": "b183a01d62c38941fc5a0372b742bdcc70b93d98c062a31a87f8d7ad8a655d5d"
 }

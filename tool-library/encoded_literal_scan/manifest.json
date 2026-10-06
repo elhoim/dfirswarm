@@ -42,7 +42,7 @@
     },
     "budget_seconds": {
       "type": "number",
-      "description": "Stop at a chunk boundary after this long and say complete=false with next_start (default 100)"
+      "description": "Stop at a chunk boundary after this long and say complete=false with next_start (default 90)"
     },
     "max_hits": {
       "type": "integer",
@@ -55,10 +55,10 @@
   },
   "runtime": "python3",
   "entry": "run.py",
-  "timeout_seconds": 300,
+  "timeout_seconds": 120,
   "example": "{\"path\": \"inputs/memory.raw\", \"marker\": \"token=\", \"closer\": \";\", \"max_body\": 120, \"out_dir\": \"work/s01/literals\"}",
   "by": "s3472f0",
   "at": "2026-10-01T08:37:08.645Z",
   "version": 1,
-  "sha256": "811efbd0141dbb9c68d6d898173b6aa5ccc4d2d34a066dbc74e456f9b670657d"
+  "sha256": "e17570efc419d83c5580e130ff855790881a9b4a880470bbf31e27bc1e502ad7"
 }

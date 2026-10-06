@@ -153,7 +153,7 @@ try {
 const chunk = whole("chunk_bytes", 16 * 1024 * 1024, MAX_REACH * 2, 1 << 30);
 const start = whole("start", 0, 0, Number.MAX_SAFE_INTEGER);
 const end = Math.min(size, start + whole("length", Math.max(0, size - start), 0, Number.MAX_SAFE_INTEGER));
-const budget = args.budget_seconds ?? 240;
+const budget = args.budget_seconds ?? 90;
 if (typeof budget !== "number" || !(budget > 0)) fail("budget_seconds must be a positive number", { got: budget });
 if (start > size) fail("start is past the end of the file", { start, size });
 

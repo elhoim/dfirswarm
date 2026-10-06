@@ -33,7 +33,7 @@ Args, JSON on stdin:
               answer (default 160); the result file holds them whole
   bytecode    put each code object's bytecode, as hex, in the result file
               (default true)
-  limit       code objects shown in the answer (default 200)
+  limit       code objects shown in the answer (default 50)
 """
 import hashlib
 import json
@@ -373,7 +373,7 @@ def main():
         fail("path is not a readable regular file", path=path)
     max_bytes = whole(args, "max_bytes", 64 * 1024 * 1024, 16, 1 << 32)
     preview = whole(args, "preview", 160, 8, 1 << 20)
-    limit = whole(args, "limit", 200, 1, 1 << 20)
+    limit = whole(args, "limit", 50, 1, 1 << 20)
     bytecode = args.get("bytecode", True)
     if not isinstance(bytecode, bool):
         fail("bytecode is true or false", got=bytecode)

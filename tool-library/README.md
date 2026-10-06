@@ -100,8 +100,8 @@ or `tools/`.
 
 | Tool | Runtime | Written by | v | What it does |
 | --- | --- | --- | --- | --- |
-| `aes_inverse_scan` | node | `s3472f0` | 1 | Find AES-128 and AES-256 schedules stored as a decryption routine keeps them (InvMixColumns on the middle rou… |
-| `aes_schedule_scan` | node | `s3472f0` | 1 | Find AES-128 and AES-256 expanded key schedules in a file or memory image, at every byte alignment, in standa… |
+| `aes_inverse_scan` | node | `s3472f0` | 1 | Find AES-128 and AES-256 key schedules stored as a decryption routine keeps them (InvMixColumns on the middle… |
+| `aes_schedule_scan` | node | `s3472f0` | 1 | Find AES-128 and AES-256 key schedules in a file or memory image, at every byte alignment, as the standard la… |
 | `aescrypt_v2_decrypt` | python3 | `s864a02` | 3 | Decrypt AES Crypt 3.10 Windows GUI v2 files (KDF: SHA256(IV||zeros16||UTF16LE pw)×8192). Returns plaintext pa… |
 | `amcache_apps` | python3 | `maintainer` | 1 | Program execution from Amcache.hve: path, SHA-1, publisher and link date, from whichever of the Windows 7/8 a… |
 | `browser_history` | python3 | `maintainer` | 2 | Query a browser history database, copying it and any -wal beside it first so the write-ahead log is replayed … |
@@ -218,7 +218,8 @@ run (the first named, where a tool is made from several).
   without running anything, and reports only a literal of the shape
   marker, up to `max_body` characters, closer; a marker with no such
   literal is listed by offset alone, and a context cut at 8192 bytes a side
-  says `context_capped`.
+  says `context_capped`. Its `provenance.json` is `encoded_flag_scan`'s; the
+  other two are beside it.
 - `marshal_inspect` — two parsers of one thing, a Python marshal stream
   carved from a packed program: `marshal_constants` (run `s3472f0`, seat
   `s3472f003`, bounded, with an offset, writing the whole tree) and
@@ -229,7 +230,9 @@ run (the first named, where a tool is made from several).
   short answered with the offset where it did and the code objects whole
   before it, a `.pyc` header recognised, dated and skipped (an older magic
   number refused, since 3.10 and earlier lay a code object out otherwise),
-  the whole tree and every code object's bytecode in `out_dir`.
+  the whole tree and every code object's bytecode in `out_dir`. Its
+  `provenance.json` is the later run's `marshal_inspect`; `marshal_constants`'s
+  is beside it.
 - `destlist_v4` — a sixteen-line reader of one stream version, made in run
   `sd29252` (seat `sd2925204`) for a jump list's DestList. Now the stream at
   an `offset`, bounded by `max_bytes`; a stream cut short or claiming more

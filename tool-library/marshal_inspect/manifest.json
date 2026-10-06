@@ -35,7 +35,7 @@
     },
     "limit": {
       "type": "integer",
-      "description": "Code objects shown in the answer (default 200); all are in the result file"
+      "description": "Code objects shown in the answer (default 50); all are in the result file"
     }
   },
   "runtime": "python3",
@@ -45,5 +45,5 @@
   "by": "sd29252",
   "at": "2026-10-06T03:07:14.935Z",
   "version": 1,
-  "sha256": "7d976618e7ef7a721d9b5a35422c8e4a1b6002f6037d0a9d855f12be9a4e2415"
+  "sha256": "497317bf7d5ff708fb1de88015db7f405d2f76e47479ed61a09db1d19e68bb86"
 }

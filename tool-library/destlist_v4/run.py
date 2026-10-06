@@ -19,7 +19,7 @@ entries than it holds is read as far as it goes, and says so under `problems`.
 Args, JSON on stdin:
   path       the DestList stream, as a file
   offset     where it starts in that file (default 0)
-  limit      entries in the answer (default 500); when there are more the whole
+  limit      entries in the answer (default 200); when there are more the whole
              list is written as JSON Lines and named in all_results
   max_bytes  the largest stream read (default 64 MiB)
 """
@@ -145,7 +145,7 @@ def main():
     path = args.get("path")
     if not isinstance(path, str) or not path:
         fail("path is required: the DestList stream, as a file")
-    limit = whole(args, "limit", 500, 1, 1_000_000)
+    limit = whole(args, "limit", 200, 1, 1_000_000)
     offset = whole(args, "offset", 0, 0, 1 << 62)
     max_bytes = whole(args, "max_bytes", 64 * 1024 * 1024, HEADER, 1 << 32)
     try:
