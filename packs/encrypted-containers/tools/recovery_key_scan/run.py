@@ -40,6 +40,13 @@ copies `SecretValues` below and follows the same four rules.
      names the same `finding_id`, file and offset as the answer. The answer
      names the file and says `contains_secret_values: true`.
   4. A secret is never on a command line. This tool takes a path and flags only.
+  5. A path is printed with any component shaped like the secret withheld (a file or a
+     directory named after a recovery password would otherwise print it), in the answer,
+     in the files it names and in the digest that names a paging file. The values file
+     keeps the real path.
+
+A value is found when it is not glued to more digits: "key_<value>" and "(<value>)" are
+found, "<value>7" and "7<value>" are not (a group of seven digits is no group).
 """
 import errno
 import json
@@ -143,23 +150,34 @@ class SecretValues:
         self._fh = None
         self.job = os.environ.get("JOB_ID") or ""
         self.out = os.environ.get("OUT") or ""
-        if enabled and not (self.job and self.out):
+        self.path = None
+        self.shown = None
+        if not enabled:
+            return
+        if not (self.job and self.out):
             raise SecretValuesRefused(
                 "write_values is refused outside a job: a value written here would be an ordinary "
                 "file, not a sealed secret output. Run this as job_run tool=recovery_key_scan with "
                 "secret_output: true, and ask again there. Nothing was written."
             )
-        self.path = Path(self.out) / self.NAME if enabled else None
-        self.shown = ("store/jobs/%s/out/%s" % (re.sub(r"[^A-Za-z0-9_.-]", "_", self.job), self.NAME)) if enabled else None
+        self.path = Path(self.out) / self.NAME
+        self.shown = "store/jobs/%s/out/%s" % (re.sub(r"[^A-Za-z0-9_.-]", "_", self.job), self.NAME)
+        # Created now, before anything is scanned: a file or a link already at that name is
+        # refused by name at once (O_EXCL does not follow a link, a dangling one included),
+        # instead of failing, or writing through it, after the scan. With nothing found it
+        # stays as an empty file, mode 0600, and the answer says written: 0.
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(str(self.path), os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        except FileExistsError:
+            raise SecretValuesRefused("the values file already exists: %s" % self.path)
+        except OSError as exc:
+            raise SecretValuesRefused("the values file could not be created: %s (%s)" % (self.path, describe(exc)))
+        self._fh = os.fdopen(fd, "w", encoding="utf-8")
 
     def add(self, finding_id: str, locator: dict, value: str) -> None:
         if not self.enabled:
             return
-        if self._fh is None:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            # Exclusively and private: a second run never overwrites a first's file.
-            fd = os.open(str(self.path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            self._fh = os.fdopen(fd, "w", encoding="utf-8")
         self._fh.write(json.dumps({"finding_id": finding_id, **locator, "value": value}, ensure_ascii=False))
         self._fh.write("\n")
         self.written += 1
@@ -175,9 +193,9 @@ class SecretValues:
         return {
             "requested": self.enabled,
             "written": self.written,
-            "values_file": self.shown if self.written else None,
+            "values_file": self.shown if self.enabled else None,
             "contains_secret_values": self.written > 0,
-            "format": "JSON Lines, mode 0600: finding_id, file, offset, encoding, value" if self.written else None,
+            "format": "JSON Lines, mode 0600: finding_id, file (the real path), offset, encoding, value" if self.enabled else None,
         }
 
 
@@ -194,7 +212,10 @@ DEFAULT_BUDGET = 8 << 20
 # F000001" without saying the value; the comparison is held in memory, and capped.
 DUPLICATE_CAP = 50000
 
-RECOVERY = re.compile(rb"\b(\d{6})-(\d{6})-(\d{6})-(\d{6})-(\d{6})-(\d{6})-(\d{6})-(\d{6})\b")
+# Bounded by "not a digit" on each side, as the UTF-16LE pattern is: \b is no boundary between an
+# underscore or a letter and a digit, so "key_<value>" would be missed. What is let in that is not a
+# value is left to groups_passing_check.
+RECOVERY = re.compile(rb"(?<![0-9])(\d{6})-(\d{6})-(\d{6})-(\d{6})-(\d{6})-(\d{6})-(\d{6})-(\d{6})(?![0-9])")
 UTF16_GROUP = rb"((?:[0-9]\x00){6})"
 RECOVERY_UTF16LE = re.compile(
     rb"(?<![0-9]\x00)" + (rb"-\x00".join([UTF16_GROUP] * 8)) + rb"(?![0-9]\x00)"
@@ -219,8 +240,36 @@ SKIP_TOP_DIRS = {"proc", "sys", "dev"}
 
 
 def fail(message, **extra):
-    print(json.dumps({"error": message, **extra}))
+    print(json.dumps({"error": scrub(message), **extra}))
     raise SystemExit(1)
+
+
+WITHHELD = "<recovery-password-shaped name withheld>"
+PATHS_WITHHELD = [0]
+RECOVERY_TEXT = re.compile(RECOVERY.pattern.decode("ascii"))
+
+
+def shown(path, count=True):
+    """A path as it may be printed: any component shaped like a recovery password is withheld.
+
+    The component is tested with the same patterns the scan uses, as ASCII and as
+    UTF-16LE text. A file or a directory named after the key would otherwise put the
+    key in every row that names it. The values file keeps the real path.
+    """
+    if not isinstance(path, str):
+        return path
+    parts = path.split("/")
+    for i, part in enumerate(parts):
+        if RECOVERY.search(part.encode("utf-8", "replace")) or RECOVERY_UTF16LE.search(part.encode("utf-16-le", "replace")):
+            parts[i] = WITHHELD
+            if count:
+                PATHS_WITHHELD[0] += 1
+    return "/".join(parts)
+
+
+def scrub(text):
+    """Text that may quote a path, with anything shaped like a recovery password withheld."""
+    return RECOVERY_TEXT.sub(WITHHELD, text)
 
 
 def valid_group(value):
@@ -297,19 +346,19 @@ def walk(top, exceptions, counters):
                 entries = sorted(it, key=lambda e: e.name)
         except OSError as exc:
             counters["directories_failed"] += 1
-            exceptions.add({"path": directory, "status": "failed", "what": "directory", "reason": "the directory could not be listed", "error": describe(exc)})
+            exceptions.add({"path": shown(directory), "status": "failed", "what": "directory", "reason": "the directory could not be listed", "error": describe(exc)})
             continue
         subdirs = []
         for entry in entries:
             try:
                 if entry.is_symlink():
                     counters["entries_skipped"] += 1
-                    exceptions.add({"path": entry.path, "status": "skipped", "reason": "a symbolic link: links are not followed, and the target is read where it lies if it is in the tree"})
+                    exceptions.add({"path": shown(entry.path), "status": "skipped", "reason": "a symbolic link: links are not followed, and the target is read where it lies if it is in the tree"})
                     continue
                 if entry.is_dir(follow_symlinks=False):
                     if is_top and entry.name in SKIP_TOP_DIRS:
                         counters["entries_skipped"] += 1
-                        exceptions.add({"path": entry.path, "status": "skipped", "reason": "a top-level %s directory of a Linux root: its contents were not scanned; name it as the path to scan it" % entry.name})
+                        exceptions.add({"path": shown(entry.path), "status": "skipped", "reason": "a top-level %s directory of a Linux root: its contents were not scanned; name it as the path to scan it" % entry.name})
                         continue
                     subdirs.append(entry.path)
                     continue
@@ -317,11 +366,11 @@ def walk(top, exceptions, counters):
             except OSError as exc:
                 counters["files_attempted"] += 1
                 counters["files_failed"] += 1
-                exceptions.add({"path": entry.path, "status": "failed", "reason": "the entry could not be examined", "error": describe(exc)})
+                exceptions.add({"path": shown(entry.path), "status": "failed", "reason": "the entry could not be examined", "error": describe(exc)})
                 continue
             if not stat.S_ISREG(mode):
                 counters["entries_skipped"] += 1
-                exceptions.add({"path": entry.path, "status": "skipped", "reason": "not a regular file (%s)" % kind_of(mode)})
+                exceptions.add({"path": shown(entry.path), "status": "skipped", "reason": "not a regular file (%s)" % kind_of(mode)})
                 continue
             yield entry.path, entry.stat(follow_symlinks=False).st_size
         stack.extend((d, False) for d in reversed(subdirs))
@@ -337,7 +386,7 @@ def kind_of(mode):
 
 def describe(exc):
     code = errno.errorcode.get(exc.errno, "") if getattr(exc, "errno", None) else ""
-    return "%s%s: %s" % (type(exc).__name__, " " + code if code else "", getattr(exc, "strerror", None) or str(exc))
+    return scrub("%s%s: %s" % (type(exc).__name__, " " + code if code else "", getattr(exc, "strerror", None) or str(exc)))
 
 
 def optional_bool(args, key):
@@ -358,7 +407,7 @@ def main():
     if not isinstance(path, str) or not path:
         fail("path is required: a directory to walk or a blob to sweep")
     if not os.path.exists(path):
-        fail("no such file or directory", path=path)
+        fail("no such file or directory", path=shown(path))
     budget = args.get("max_bytes_per_file", DEFAULT_BUDGET)
     if not isinstance(budget, int) or isinstance(budget, bool) or budget < 1024:
         fail("max_bytes_per_file must be an integer of at least 1024")
@@ -371,7 +420,7 @@ def main():
     except SecretValuesRefused as exc:
         fail(str(exc), write_values="refused", written=False)
 
-    real = os.path.realpath(path)
+    real = shown(os.path.realpath(path), count=False)
     findings = LosslessPage("recovery_key_scan", [real, "findings"], limit)
     named = LosslessPage("recovery_key_scan", [real, "files worth opening"], limit)
     exceptions = LosslessPage("recovery_key_scan", [real, "files not read, or not read whole"], limit)
@@ -388,14 +437,14 @@ def main():
     elif os.path.isfile(path):
         targets = iter([(path, os.stat(path).st_size)])
     else:
-        fail("path is neither a directory nor a regular file", path=path)
+        fail("path is neither a directory nor a regular file", path=shown(path))
 
     try:
         for target, size in targets:
             base = os.path.basename(target)
             for pattern, meaning in NAME_HINTS:
                 if pattern.search(base):
-                    named.add({"file": target, "bytes": size, "why": meaning})
+                    named.add({"file": shown(target), "bytes": size, "why": meaning})
                     break
             counters["files_attempted"] += 1
             stats = FileStats()
@@ -412,7 +461,7 @@ def main():
                         serial += 1
                         finding_id = "F%06d" % serial
                         if kind == "pem":
-                            findings.add({"finding_id": finding_id, "file": target, "offset": start,
+                            findings.add({"finding_id": finding_id, "file": shown(target), "offset": start,
                                           "kind": "private key", "key_type": m.group(1).decode("ascii", "replace"),
                                           "parser": PARSER})
                             continue
@@ -422,7 +471,7 @@ def main():
                             groups = [g.replace(b"\x00", b"").decode("ascii") for g in m.groups()]
                         canonical = "-".join(groups)
                         good = sum(1 for g in groups if valid_group(g))
-                        row = {"finding_id": finding_id, "file": target, "offset": start,
+                        row = {"finding_id": finding_id, "file": shown(target), "offset": start,
                                "kind": "BitLocker recovery password",
                                "encoding": "ASCII" if kind == "ascii" else "UTF-16LE",
                                "length": len(canonical), "groups_passing_check": good,
@@ -442,21 +491,21 @@ def main():
             totals["bytes_read"] += stats.bytes_read
             if stats.error is not None:
                 counters["files_failed"] += 1
-                exceptions.add({"path": target, "status": "failed", "reason": "the file could not be read whole up to its budget",
+                exceptions.add({"path": shown(target), "status": "failed", "reason": "the file could not be read whole up to its budget",
                                 "error": describe(stats.error), "bytes": size, "bytes_read": stats.bytes_read})
                 continue
             counters["files_read"] += 1
             if size > budget:
                 counters["files_partial"] += 1
                 totals["bytes_unread_in_partial_files"] += size - stats.bytes_read
-                exceptions.add({"path": target, "status": "partial", "reason": "read up to max_bytes_per_file; the rest was not read",
+                exceptions.add({"path": shown(target), "status": "partial", "reason": "read up to max_bytes_per_file; the rest was not read",
                                 "bytes": size, "bytes_read": stats.bytes_read, "bytes_unread": size - stats.bytes_read})
     finally:
         values.close()
 
     pages = {"findings": findings.finish(), "files_worth_opening": named.finish(), "exceptions": exceptions.finish()}
     print(json.dumps({
-        "path": path,
+        "path": shown(path),
         "parser": PARSER,
         "findings": findings.page,
         "finding_count": pages["findings"]["matched"],
@@ -467,6 +516,11 @@ def main():
         "exceptions": exceptions.page,
         "pages": pages,
         "secret_values": values.summary(),
+        "paths_withheld": PATHS_WITHHELD[0],
+        **({"paths_note": "A path component shaped like a recovery password is withheld from every path in this answer and in "
+                          "the files it names, so a file or directory named after the key does not print it. The real path "
+                          "of a finding is in the values file when write_values was asked for; otherwise list the directory."}
+           if PATHS_WITHHELD[0] else {}),
         "truncated": any(p["truncated"] for p in pages.values()),
         "note": "Locator output: no recovery value, fragment, masked shape or digest is in this answer or in any file "
                 "it names, except the values file when write_values was asked for in a secret_output job. "

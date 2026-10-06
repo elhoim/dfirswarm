@@ -11,7 +11,7 @@ signature found" into "not encrypted".
     BitLocker        "-FVE-FS-" at offset 3 of the volume
     BitLocker To Go  a FAT header ("MSWIN4.1") with an FVE block in its first 4 KiB
     LUKS1 / LUKS2    "LUKS\\xba\\xbe" at offset 0, then the version (1 and 2 only)
-    Core Storage     the two signature checks in identify()
+    Core Storage     the signature at offset 88
     APFS container   "NXSB" at offset 32 (whether any volume is encrypted is not read)
     ZIP, 7-Zip, PDF, OLE compound file: recognised, with archive_probe as the reader
     no signature     high entropy over the sample is a lead, never an identification
@@ -138,9 +138,9 @@ def identify(head, sample):
                 "next_reader": "bdeinfo (libbde) on the BitLocker volume; the plain FAT discovery volume is why a "
                                "stick can look unencrypted",
                 "not_determined": ["the key protectors", "whether the data area is the volume this header describes"]}
-    if head[0:2] == b"\x43\x53" or head[88:96] == b"CS\x00\x00\x00\x00\x00\x00":
+    if head[88:96] == b"CS\x00\x00\x00\x00\x00\x00":
         return {"scheme": "Apple Core Storage (the layout of legacy FileVault 2), possibly encrypted",
-                "basis": "a Core Storage signature",
+                "basis": "the Core Storage signature at offset 88",
                 "next_reader": "fvdeinfo (libfvde), for the Core Storage layout; whether it reads an APFS volume is not established here",
                 "not_determined": ["whether the logical volume is encrypted", "which recovery routes exist"]}
     if head[32:36] == b"NXSB":
@@ -214,6 +214,8 @@ def main():
         fail("include_head_hex must be true or false")
 
     size = os.path.getsize(path)
+    if size == 0:
+        fail("the file is empty", path=path, bytes=0)
     if offset >= size:
         fail("the offset is past the end of the file", offset=offset, bytes=size)
     with open(path, "rb") as fh:

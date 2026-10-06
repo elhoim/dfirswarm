@@ -31,6 +31,7 @@ What it establishes, and how:
 Evidence is hostile input: nothing is extracted or executed, only metadata is read,
 and what is read is bounded (`max_metadata_bytes`); a result that is cut says so.
 """
+import heapq
 import json
 import mmap
 import os
@@ -134,6 +135,8 @@ SEVENZIP_TIMEOUT = 60
 # Given to 7z so that it never stops to ask for one: an archive whose header is
 # encrypted then fails to open, which is the answer wanted. It is not a secret.
 NO_PASSWORD = "dfirswarm-no-password"
+ASCII_RUN = re.compile(rb"[\x20-\x7e]{6,}")
+WIDE_RUN = re.compile(rb"(?:[\x20-\x7e]\x00){3,}")
 ENCRYPTED_ARCHIVE = re.compile(r"(?i)(can ?not|can't) open encrypted archive|wrong password")
 MARKER_OFFSETS = 20
 MARKER_COUNT_CAP = 10000
@@ -392,7 +395,9 @@ def probe_7z(view, path, limit, max_metadata):
     """
     out = {"container": "7-Zip", "names_readable": None, "protected": None,
            "protection": "7z's own listing where it could read the archive; otherwise a heuristic from the start header"}
-    region = b""
+    # The header is read in place, through the mapping: nothing of it is copied,
+    # and what is searched is the first `searched` bytes from `at`.
+    at, searched = 0, 0
     out["start_header"] = {}
     sh = out["start_header"]
     if len(view) < 32:
@@ -405,26 +410,30 @@ def probe_7z(view, path, limit, max_metadata):
         sh["header_offset"], sh["header_bytes"] = at, next_size
         out["header_offset"], out["header_bytes"] = at, next_size
         if next_size and at + next_size <= len(view):
-            take = min(next_size, max_metadata)
-            region = view[at:at + take]
-            if take < next_size:
+            searched = min(next_size, max_metadata)
+            if searched < next_size:
                 sh["search_truncated"] = True
-                sh["search_note"] = "the header is %d bytes: only the first %d (max_metadata_bytes) were searched" % (next_size, take)
+                sh["search_note"] = "the header is %d bytes: only the first %d (max_metadata_bytes) were searched" % (next_size, searched)
             else:
-                sh["header_crc_ok"] = zlib.crc32(region) == next_crc
+                crc = 0
+                for chunk_at in range(at, at + next_size, 1 << 20):
+                    crc = zlib.crc32(view[chunk_at:min(chunk_at + (1 << 20), at + next_size)], crc)
+                sh["header_crc_ok"] = crc == next_crc
         else:
+            at = 0
             sh["problem"] = ("the start header places the header past the end of the file: the archive is truncated "
                              "or was carved short")
             out["header_problem"] = sh["problem"]
     hint = {}
-    if region:
-        kind = region[0]
+    if searched:
+        kind = view[at]
+        has_aes = view.find(SEVENZIP_AES, at, at + searched) >= 0
         if kind == 0x01:
             hint["header_kind"] = "plain"
-            hint["data_encryption_coder_in_header"] = SEVENZIP_AES in region
+            hint["data_encryption_coder_in_header"] = has_aes
         elif kind == 0x17:
             hint["header_kind"] = "encoded"
-            hint["header_encrypted"] = SEVENZIP_AES in region
+            hint["header_encrypted"] = has_aes
             hint["basis"] = ("the AES coder id appears in the encoded header's own coder list: a byte search, not a "
                              "parse of the coder graph")
         else:
@@ -459,12 +468,13 @@ def probe_7z(view, path, limit, max_metadata):
         out["protection"] = "heuristic: 7z gave no listing (%s)" % status
         out["hints"] = hint
         strings = LosslessPage("archive_probe", [os.path.realpath(path), "7z header strings (hint)"], limit)
-        found = [(m.start(), m.group().decode("ascii", "replace"))
-                 for m in re.finditer(rb"[\x20-\x7e]{6,}", region)]
-        found += [(m.start(), m.group().decode("utf-16-le", "replace"))
-                  for m in re.finditer(rb"(?:[\x20-\x7e]\x00){3,}", region)]
-        for _at, text in sorted(found):
-            strings.add(text)
+        # Both patterns are walked lazily over the mapped header and merged by
+        # offset, straight into the paging file: no match is collected first.
+        ascii_runs = ((m.start(), m.group().decode("ascii", "replace")) for m in ASCII_RUN.finditer(view, at, at + searched))
+        wide_runs = ((m.start(), m.group().decode("utf-16-le", "replace")) for m in WIDE_RUN.finditer(view, at, at + searched))
+        if searched:
+            for _start, text in heapq.merge(ascii_runs, wide_runs, key=lambda found: found[0]):
+                strings.add(text)
         page = strings.finish()
         out["header_strings_hint"] = strings.page
         out["header_strings_hint_count"] = page["matched"]
@@ -498,6 +508,14 @@ def markers(blob, needle):
     return {"found": count > 0, "count": count, "count_capped": at >= 0, "first_offsets": offsets}
 
 
+def whole_search(blob):
+    """What a byte search over a PDF or an OLE file covered: all of it, bounded only by the tool's timeout."""
+    return {"bytes_searched": len(blob), "search_complete": True,
+            "search_note": "the whole file was searched, in a linear pass per marker: max_metadata_bytes does not bound "
+                           "it (a PDF's marker sits in its trailer, at the end), and a file too large to search within "
+                           "the tool's timeout fails with no partial answer"}
+
+
 def probe_pdf(blob):
     encrypt = markers(blob, b"/Encrypt")
     out = {"container": "PDF", "protected": None, "protection": "heuristic: a byte search for the /Encrypt marker",
@@ -516,6 +534,7 @@ def probe_pdf(blob):
             "p": int(permissions.group(1)) if permissions else None,
             "note": "the first /V, /R and /P anywhere in the file, not read through the trailer: they may belong to "
                     "another object or revision"}
+    out.update(whole_search(blob))
     out["note"] = ("A PDF can be encrypted and still open with an empty user password; encryption, the opening password "
                    "and the permission restrictions are three separate facts, and none is read here.")
     return out
@@ -531,7 +550,7 @@ def probe_ole(blob):
             m = markers(blob, needle)
             if m["found"]:
                 found.append({"name": name, "encoding": encoding, "meaning": meaning, **m})
-    return {"container": "OLE compound file", "protected": None,
+    return {**whole_search(blob), "container": "OLE compound file", "protected": None,
             "protection": "heuristic: a byte search for stream names that mark an encrypted OOXML package",
             "markers_found": found, "marker_names_searched": [n for n, _ in wanted],
             "next_reader": NEXT_DOCUMENT_READER,

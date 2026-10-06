@@ -19,7 +19,8 @@ located and safeguarded.
 4. Key material already in the evidence: where it is, what it was found to open
    (if anything was tried, and by whom authorised), and how you found it, with the
    coverage of the search. Do not put values in the report.
-5. What was opened, with which key, and the hash of the unlocked image.
+5. What was opened, by which protector route (with the sealed reference of the material
+   used, never the material), and the hash of the unlocked image.
 6. What could not be opened, and exactly what would be needed to open it.
 
 ## How to divide the work

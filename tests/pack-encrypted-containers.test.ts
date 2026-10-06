@@ -17,7 +17,7 @@ import { spawnSync } from "node:child_process";
 import { chmod, mkdir, readFile, readdir, stat, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
-import { ROOT, runPy, withCwd } from "./tool-library-harness.ts";
+import { ROOT, runPy, runPySnippet, withCwd } from "./tool-library-harness.ts";
 
 const ENC = join(ROOT, "packs", "encrypted-containers", "tools");
 const SCAN = join(ENC, "recovery_key_scan", "run.py");
@@ -794,13 +794,17 @@ test("archive_probe never turns a byte search over a PDF into a verdict", async 
 const OLE_MAGIC = Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]);
 
 test("archive_probe reports Office markers as markers, and never says a document is not encrypted", async () => {
-  // It said "not encrypted" when no EncryptionInfo string was found. A binary
-  // Word file with legacy encryption has none.
+  // It said "not encrypted" when no EncryptionInfo string was found, and a
+  // binary Word file with legacy encryption has none. The "legacy" fixture is
+  // NOT a real encrypted .doc: it is a compound-file header with the Word
+  // stream names and no marker, so it proves the tool no longer turns the
+  // absence of a marker into a verdict, and nothing about the binary format.
+  // (A real FIB, with fEncrypted 0x0100 at FIB offset 0x0A, is for the structural reader.)
   await withCwd(async (cwd) => {
     const dirEntry = (name: string) => Buffer.concat([Buffer.from(name + "\u0000", "utf16le"), Buffer.alloc(64 - (name.length + 1) * 2)]);
-    const legacy = Buffer.concat([OLE_MAGIC, Buffer.alloc(504), dirEntry("WordDocument"), dirEntry("1Table")]);
-    await writeFile(join(cwd, "work", "legacy.doc"), legacy);
-    const out = await tool(PROBE, cwd, { path: "work/legacy.doc" });
+    const noMarker = Buffer.concat([OLE_MAGIC, Buffer.alloc(504), dirEntry("WordDocument"), dirEntry("1Table")]);
+    await writeFile(join(cwd, "work", "no-marker.doc"), noMarker);
+    const out = await tool(PROBE, cwd, { path: "work/no-marker.doc" });
     const probe = body<Probe>(out);
     assert.equal(probe.container, "OLE compound file");
     assert.equal(probe.protected, null);
@@ -1030,5 +1034,221 @@ test("archive_probe agrees with a real 7-Zip on the three archives, where one is
     assert.deepEqual([hdr.listing.status, hdr.header_encrypted, hdr.protected, hdr.names_readable], ["header_encrypted", true, true, false]);
     const none = await got("none");
     assert.deepEqual([none.listing.status, none.payload_encrypted, none.protected], ["listed", false, false]);
+  });
+});
+
+// --- review follow-ups ---------------------------------------------------------
+
+/** The rows of the file a page names: the whole result, in order. */
+async function allRows<T>(cwd: string, page: Page): Promise<T[]> {
+  assert.ok(page.all_results, "the output must name the file holding the whole result");
+  const text = await readFile(join(cwd, page.all_results), "utf8");
+  return text.trimEnd().split("\n").map((line) => JSON.parse(line) as T);
+}
+
+test("crypto_id does not read a file that merely starts with CS as Apple Core Storage", async () => {
+  // It tested the first two bytes of the file, so any CSV or text file that
+  // began with "CS" was called Core Storage. Only the signature at offset 88 counts.
+  await withCwd(async (cwd) => {
+    await writeFile(join(cwd, "work", "data.csv"), "CSV,name,value\n".repeat(200));
+    await writeFile(join(cwd, "work", "cs-zeros.bin"), Buffer.concat([Buffer.from("CS"), Buffer.alloc(2000)]));
+    for (const name of ["data.csv", "cs-zeros.bin"]) {
+      const out = body<Id>(await tool(ID, cwd, { path: `work/${name}` }));
+      assert.equal(out.scheme, "no scheme this tool recognises", name);
+    }
+    // A header with the signature at offset 88 is still read as Core Storage, and says where it saw it.
+    const header = Buffer.alloc(4096);
+    Buffer.from("CS", "latin1").copy(header, 88);
+    await writeFile(join(cwd, "work", "cs.img"), header);
+    const cs = body<Id>(await tool(ID, cwd, { path: "work/cs.img" }));
+    assert.match(cs.scheme, /Core Storage/);
+    assert.match(String(cs.basis), /Core Storage signature at offset 88/);
+  });
+});
+
+test("crypto_id says an empty file is empty", async () => {
+  await withCwd(async (cwd) => {
+    await writeFile(join(cwd, "work", "empty.img"), "");
+    assert.equal(refused(await tool(ID, cwd, { path: "work/empty.img" })).error, "the file is empty");
+  });
+});
+
+const KEY_NAME = `${KEY}`;
+
+test("recovery_key_scan withholds a path component shaped like a recovery password, wherever a path is printed", async () => {
+  // A file or directory named after the key put the key into exceptions[].path,
+  // findings[].file and the error answer, and into the digest naming the paging file.
+  await withCwd(async (cwd) => {
+    await mkdir(join(cwd, "work", "ev", KEY_NAME), { recursive: true });
+    await mkdir(join(cwd, "pystub"), { recursive: true });
+    await writeFile(join(cwd, "pystub", "sitecustomize.py"), EIO_SITE);
+    await writeFile(join(cwd, "work", "ev", KEY_NAME, "inside.txt"), `the key ${KEY}\n`);
+    await writeFile(join(cwd, "work", "ev", `key_${KEY}.txt`), "an ordinary note\n");
+    await writeFile(join(cwd, "work", "ev", `${KEY}-unreadable.bin`), "x");
+    await symlink(join(cwd, "work", "ev", "key_" + KEY + ".txt"), join(cwd, "work", "ev", `${KEY}.lnk`));
+    const out = await tool(SCAN, cwd, { path: "work/ev", limit: 1 }, { PYTHONPATH: join(cwd, "pystub") });
+    const scan = body<Scan & { paths_withheld: number; paths_note: string }>(out);
+    assertNoSecret(await everythingPrinted(cwd, out.stdout));
+    const WITHHELD = "<recovery-password-shaped name withheld>";
+    assert.ok(out.stdout.includes(WITHHELD));
+    // The unreadable file, the link, and the finding inside the directory named after the key.
+    assert.equal(scan.paths_withheld, 3);
+    assert.match(scan.paths_note, /withheld/);
+    // The finding still says which file, with the rest of its path intact.
+    assert.equal(scan.findings[0].file, `work/ev/${WITHHELD}/inside.txt`);
+    // The paging file's name does not derive from the real path either.
+    for (const page of Object.values(scan.pages)) {
+      if (page.all_results) assert.ok(!page.all_results.includes(GROUPS[0]));
+    }
+    // The error answer for a path that is not there.
+    const missing = await tool(SCAN, cwd, { path: `work/${KEY}` });
+    const err = refused(missing) as { error: string; path: string };
+    assert.equal(err.path, `work/${WITHHELD}`);
+    assertNoSecret(missing.stdout);
+
+    // The sealed values file, and only it, keeps the real path.
+    const outDir = join(cwd, "out");
+    await mkdir(outDir);
+    const loud = await tool(SCAN, cwd, { path: "work/ev", write_values: true }, { JOB_ID: "j000002", OUT: outDir, PYTHONPATH: join(cwd, "pystub") });
+    assertNoSecret(await everythingPrinted(cwd, loud.stdout).catch(() => loud.stdout));
+    const rows = (await readFile(join(outDir, "recovery-passwords.jsonl"), "utf8")).trimEnd().split("\n").map((l) => JSON.parse(l) as { file: string });
+    assert.ok(rows.some((r) => r.file.includes(KEY_NAME)), "the real path is in the sealed file");
+  });
+});
+
+test("recovery_key_scan finds a value glued to a letter, an underscore or punctuation, and not one that continues a digit run", async () => {
+  // It matched on \b, which is no boundary between an underscore or a letter
+  // and a digit: "key_<value>" and "pw<value>" were not found.
+  await withCwd(async (cwd) => {
+    await mkdir(join(cwd, "work", "ev"), { recursive: true });
+    await writeFile(join(cwd, "work", "ev", "glued.txt"), [`pw${KEY}x`, `key_${KEY}_end`, `(${KEY})`].join("\n") + "\n");
+    await writeFile(join(cwd, "work", "ev", "digits.txt"), [`${KEY}7`, `7${KEY}`].join("\n") + "\n");
+    const out = await tool(SCAN, cwd, { path: "work/ev" });
+    const scan = body<Scan>(out);
+    const byFile = (name: string) => scan.findings.filter((f) => f.file.endsWith(name));
+    assert.equal(byFile("glued.txt").length, 3);
+    assert.ok(byFile("glued.txt").every((f) => f.passes_structure_check && f.length === 55));
+    assert.equal(byFile("digits.txt").length, 0, "a seventh digit makes the first or last group no group");
+    assertNoSecret(out.stdout);
+  });
+});
+
+test("recovery_key_scan opens its values file first: a file or link already there is refused by name, before any scan", async () => {
+  // The file was created at the first value written, after the scan: a
+  // pre-existing file or link made the tool fail at the end, or write through it.
+  await withCwd(async (cwd) => {
+    await plant(cwd);
+    const outDir = join(cwd, "out");
+    await mkdir(outDir);
+    const job = { JOB_ID: "j000003", OUT: outDir };
+    const target = join(outDir, "recovery-passwords.jsonl");
+    await writeFile(target, "already here\n");
+    const exists = refused(await tool(SCAN, cwd, { path: "work/ev", write_values: true }, job)) as { error: string };
+    assert.match(exists.error, /^the values file already exists: /);
+    assert.ok(exists.error.includes(target));
+    assert.equal(await readFile(target, "utf8"), "already here\n");
+    assert.deepEqual((await readdir(outDir)).sort(), ["recovery-passwords.jsonl"], "nothing was scanned or paged");
+
+    // A link at that name, to a file outside $OUT, is refused and its target is not written.
+    const outside = join(cwd, "outside.txt");
+    await writeFile(outside, "outside\n");
+    const out2 = join(cwd, "out2");
+    await mkdir(out2);
+    await symlink(outside, join(out2, "recovery-passwords.jsonl"));
+    const linked = refused(await tool(SCAN, cwd, { path: "work/ev", write_values: true }, { JOB_ID: "j000004", OUT: out2 })) as { error: string };
+    assert.match(linked.error, /^the values file already exists: /);
+    assert.equal(await readFile(outside, "utf8"), "outside\n");
+    // So is a dangling link.
+    const out3 = join(cwd, "out3");
+    await mkdir(out3);
+    await symlink(join(cwd, "nowhere.txt"), join(out3, "recovery-passwords.jsonl"));
+    refused(await tool(SCAN, cwd, { path: "work/ev", write_values: true }, { JOB_ID: "j000005", OUT: out3 }));
+    assert.deepEqual(await readdir(cwd).then((n) => n.includes("nowhere.txt")), false);
+
+    // Asked for and nothing found: an empty file, mode 0600, named, and written: 0.
+    await mkdir(join(cwd, "work", "clean"), { recursive: true });
+    await writeFile(join(cwd, "work", "clean", "a.txt"), "nothing\n");
+    const out4 = join(cwd, "out4");
+    await mkdir(out4);
+    const none = body<Scan>(await tool(SCAN, cwd, { path: "work/clean", write_values: true }, { JOB_ID: "j000006", OUT: out4 }));
+    assert.equal(none.secret_values.written, 0);
+    assert.equal(none.secret_values.contains_secret_values, false);
+    assert.equal(none.secret_values.values_file, "store/jobs/j000006/out/recovery-passwords.jsonl");
+    const file = join(out4, "recovery-passwords.jsonl");
+    assert.equal((await stat(file)).size, 0);
+    assert.equal((await stat(file)).mode & 0o777, 0o600);
+  });
+});
+
+test("archive_probe searches a PDF or an Office file whole, whatever max_metadata_bytes says, and says so", async () => {
+  // max_metadata_bytes bounds what is loaded (a ZIP central directory, a 7-Zip
+  // header). A PDF's marker sits in its trailer, at the end: bounding the
+  // search by it would miss it. The search is a linear pass bounded by the timeout.
+  await withCwd(async (cwd) => {
+    const pdf = Buffer.concat([Buffer.from("%PDF-1.7\n"), Buffer.alloc(9 * 1024 * 1024, 0x20), Buffer.from("\ntrailer\n<< /Encrypt 5 0 R >>\n%%EOF\n")]);
+    await writeFile(join(cwd, "work", "tail.pdf"), pdf);
+    const p = body<Probe>(await tool(PROBE, cwd, { path: "work/tail.pdf", max_metadata_bytes: 4096 }));
+    assert.deepEqual(p.encrypt_marker.first_offsets, [pdf.indexOf("/Encrypt")]);
+    assert.equal(p.bytes_searched, pdf.length);
+    assert.equal(p.search_complete, true);
+    assert.match(p.search_note, /whole file/);
+    const ole = Buffer.concat([OLE_MAGIC, Buffer.alloc(9 * 1024 * 1024), Buffer.from("EncryptedPackage", "utf16le")]);
+    await writeFile(join(cwd, "work", "tail.docx"), ole);
+    const o = body<Probe>(await tool(PROBE, cwd, { path: "work/tail.docx", max_metadata_bytes: 4096 }));
+    assert.equal(o.markers_found[0].name, "EncryptedPackage");
+    assert.equal(o.bytes_searched, ole.length);
+    assert.equal(o.search_complete, true);
+  });
+});
+
+test("archive_probe streams a 7-Zip header's printable strings in offset order, ASCII and UTF-16LE together, without holding them", async () => {
+  // It collected every match of both patterns into lists (up to the 32 MiB
+  // budget's worth of tuples) and sorted them before the first was written.
+  await withCwd(async (cwd) => {
+    await mkdir(join(cwd, "nosite"), { recursive: true });
+    await writeFile(join(cwd, "nosite", "sitecustomize.py"), NO_7Z_SITE);
+    // Two NULs after an ASCII run: a lone one would read as the first half of a UTF-16 pair.
+    const unit = (i: number) => [Buffer.from(`ascii-${i}\u0000\u0000`, "latin1"), Buffer.from(`wide-${i}\u0000`, "utf16le")];
+    const header = Buffer.concat([Buffer.from([0x01]), ...[0, 1, 2, 3, 4].flatMap(unit)]);
+    const start = Buffer.alloc(32);
+    Buffer.from([0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c, 0x00, 0x04]).copy(start, 0);
+    start.writeBigUInt64LE(0n, 12);
+    start.writeBigUInt64LE(BigInt(header.length), 20);
+    await writeFile(join(cwd, "work", "mixed.7z"), Buffer.concat([start, header]));
+    const out = body<Probe>(await tool(PROBE, cwd, { path: "work/mixed.7z", limit: 2 }, { PYTHONPATH: join(cwd, "nosite") }));
+    assert.equal(out.header_strings_hint_count, 10);
+    assert.deepEqual(out.header_strings_hint, ["ascii-0", "wide-0"]);
+    assert.deepEqual(await allRows<string>(cwd, out.header_strings_hint_page), [0, 1, 2, 3, 4].flatMap((i) => [`ascii-${i}`, `wide-${i}`]));
+  });
+});
+
+const MEMORY_DRIVER = String.raw`
+import json, os, resource, subprocess, sys
+tool, cwd, path = sys.argv[1], sys.argv[2], sys.argv[3]
+env = dict(os.environ, AGENT_ID="s1", PYTHONPATH=os.path.join(cwd, "nosite"))
+p = subprocess.run([sys.executable, tool], input=json.dumps({"path": path, "limit": 3, "max_metadata_bytes": 33554432}),
+                   capture_output=True, text=True, cwd=cwd, env=env)
+rss = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
+if sys.platform != "darwin":
+    rss *= 1024
+out = json.loads(p.stdout)
+print(json.dumps({"code": p.returncode, "rss_mib": rss / 2**20, "count": out.get("header_strings_hint_count")}))
+`;
+
+test("archive_probe keeps its memory flat over a 16 MiB 7-Zip header with two million strings", async () => {
+  await withCwd(async (cwd) => {
+    await mkdir(join(cwd, "nosite"), { recursive: true });
+    await writeFile(join(cwd, "nosite", "sitecustomize.py"), NO_7Z_SITE);
+    const header = Buffer.concat([Buffer.from([0x01]), Buffer.from("abcdefg\u0000".repeat(2_097_151), "latin1")]);
+    const start = Buffer.alloc(32);
+    Buffer.from([0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c, 0x00, 0x04]).copy(start, 0);
+    start.writeBigUInt64LE(BigInt(header.length), 20);
+    await writeFile(join(cwd, "work", "big.7z"), Buffer.concat([start, header]));
+    const run = await runPySnippet(MEMORY_DRIVER, [PROBE, cwd, "work/big.7z"], null);
+    assert.equal(run.code, 0, run.stderr);
+    const got = JSON.parse(run.stdout) as { code: number; rss_mib: number; count: number };
+    assert.equal(got.code, 0);
+    assert.equal(got.count, 2_097_151);
+    assert.ok(got.rss_mib < 150, `peak ${got.rss_mib.toFixed(0)} MiB: the matches were held`);
   });
 });

@@ -4,9 +4,8 @@
       "name": "bdeinfo",
       "package": "libbde",
       "optional": true,
-      "why": "Read a BitLocker volume header and the key protectors it can interpret, before any key is known. What it lists is what the installed build parsed for that metadata version; say which.",
+      "why": "Read a BitLocker volume header and the key protectors it can interpret, before any key is known. What it lists is what the installed build parsed for that metadata version; say which. No macOS install route is declared.",
       "install": {
-        "brew": "brew install libbde",
         "apt": "apt-get install -y libbde-utils"
       },
       "licence": "LGPL-3.0-or-later",
@@ -39,9 +38,8 @@
       "name": "cryptsetup",
       "package": "cryptsetup",
       "optional": true,
-      "why": "Read a LUKS header (luksDump: version, UUID, data offset, cipher, keyslots) and, where a key is supplied, open the volume. Reading metadata and opening through the device mapper are different runtime capabilities; opening needs facilities a worker may not have.",
+      "why": "Read a LUKS header (luksDump: version, UUID, data offset, cipher, keyslots) and, where a key is supplied, open the volume. Reading metadata and opening through the device mapper are different runtime capabilities; opening needs facilities a worker may not have. No macOS install route is declared.",
       "install": {
-        "brew": "brew install cryptsetup",
         "apt": "apt-get install -y cryptsetup-bin"
       },
       "licence": "GPL-2.0-or-later with an OpenSSL exception",

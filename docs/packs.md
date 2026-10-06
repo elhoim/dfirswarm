@@ -496,10 +496,16 @@ import each other), and holds to this:
 - *A value is produced only on an explicit flag, in a job, in a file.* The flag
   is `write_values: true` (default false). The tool honours it only when it
   runs as a job (`JOB_ID` and `OUT` are set) and writes only under `$OUT`:
-  JSON Lines, mode 0600, created exclusively, each row carrying the answer's
-  `finding_id`, file and offset beside the `value`. Outside a job the request
-  is refused, with exit 1 and nothing written, because a file in `work/` is not
-  a sealed output.
+  JSON Lines, mode 0600, each row carrying the answer's `finding_id`, file and
+  offset beside the `value`. The file is created exclusively at the start of
+  the run, before anything is scanned: a file or link already at that name is
+  refused by name, and with nothing found it stays an empty file and the answer
+  says `written: 0`. Outside a job the request is refused, with exit 1 and
+  nothing written, because a file in `work/` is not a sealed output.
+- *A name shaped like the secret is withheld.* A path component that matches the
+  secret's own pattern (a file named after the key) is replaced in every printed
+  path, in the files the answer names and in the digest that names a paging file;
+  only the values file keeps the real path.
 - *The answer says where the values are, not what they are:*
   `secret_values.values_file` and `contains_secret_values: true`. The skill
   that names the tool has its "Sensitive output" line say the job runs with

@@ -1,6 +1,6 @@
 {
   "name": "recovery_key_scan",
-  "description": "Locate key material a case can use and say where it is, not what it is: BitLocker 48-digit recovery passwords (ASCII and UTF-16LE text) by file, offset, length and a structure check; private-key headers by type and offset; and the names key files and credential stores are saved under (a name is a lead, not a read of the file). No value, fragment, masked shape or digest of a value is ever in the answer or in the files it names. A heuristic locator, not a verdict: passes_structure_check means eight groups divisible by 11 (a plausible transcription), not that the value opens any volume; a file is read up to max_bytes_per_file (default 8 MiB, streamed) and coverage lists every file that failed, was skipped (links, special files, a top-level proc, sys or dev) or was read only in part, with the bytes not read. It is not OCR, does not unpack archives or containers and does not read key stores. SENSITIVE: it reaches secret material, so run it as a job with secret_output: true. write_values: true (refused outside a job) writes the values to $OUT/recovery-passwords.jsonl, mode 0600, and nowhere else.",
+  "description": "Locate key material a case can use and say where it is, not what it is: BitLocker 48-digit recovery passwords (ASCII and UTF-16LE text) by file, offset, length and a structure check; private-key headers by type and offset; and the names key files and credential stores are saved under (a name is a lead, not a read of the file). No value, fragment, masked shape or digest of a value is ever in the answer or in the files it names, and a path component shaped like a recovery password (a file named after the key) is withheld from every printed path. A heuristic locator, not a verdict: a value is found unless it is glued to more digits (\"key_<value>\" is found, \"<value>7\" is not); passes_structure_check means eight groups divisible by 11 (a plausible transcription), not that the value opens any volume; a file is read up to max_bytes_per_file (default 8 MiB, streamed) and coverage lists every file that failed, was skipped (links, special files, a top-level proc, sys or dev) or was read only in part, with the bytes not read. It is not OCR, does not unpack archives or containers and does not read key stores. SENSITIVE: it reaches secret material, so run it as a job with secret_output: true. write_values: true (refused outside a job) creates $OUT/recovery-passwords.jsonl, mode 0600, before it scans (a file or link already there is refused by name) and writes the values, and the real paths, to it and nowhere else; with nothing found it stays empty and the answer says written: 0.",
   "params": {
     "path": {
       "type": "string",
@@ -16,7 +16,7 @@
     },
     "write_values": {
       "type": "boolean",
-      "description": "Write each recovery password found to $OUT/recovery-passwords.jsonl (default false). Refused unless the tool runs as a job, which must be run with secret_output: true; the answer never carries a value"
+      "description": "Write each recovery password found to $OUT/recovery-passwords.jsonl (default false). Refused unless the tool runs as a job, which must be run with secret_output: true; the file is created first and a file or link already there is refused; the answer never carries a value"
     }
   },
   "runtime": "python3",
@@ -26,7 +26,7 @@
   "by": "maintainer",
   "at": "2026-10-07T12:00:00.000Z",
   "version": 2,
-  "sha256": "009beaaa7dd17fb3eecb01dbcecef343ecb282f5de9cdbc7c64091f1ea68164a",
+  "sha256": "2c6b6d0567efa945b70a88e3982f611cf6c2089869118616f848f3305c0c147c",
   "use": {
     "extensions": [
       ".bek"

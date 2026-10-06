@@ -2,7 +2,7 @@
   "id": "encrypted-containers",
   "name": "Encrypted Containers Pack",
   "version": "1.3.0",
-  "description": "Telling one kind of encryption from another before spending anything on it: volume headers and their key protectors, LUKS key slots, the container that has no signature at all, password-protected archives and documents, and where the key material a case needs is usually found.",
+  "description": "Telling one kind of encryption from another: volume headers and their key protectors, LUKS key slots, the container that has no signature at all, password-protected archives and documents, and where key material the case supplies may already be.",
   "licence": "AGPL-3.0-or-later",
   "authors": [
     "DFIR Swarm"
@@ -45,19 +45,19 @@
     "sha256": {
       "LICENCE": "5b94f18424dbef1e77eda33a465e946c2c8eb715fa5236afe2c6ec6763af80d3",
       "README.md": "e7b15368c91ca8a233e6db0d9a2af335fcab3ea04e072cea08c1b8d48effa600",
-      "tools/recovery_key_scan/manifest.json": "fb8c1769c50960126b347bfc51a3cc0b9c9ca08a32c7708001132cf2c0ad803a",
-      "tools/recovery_key_scan/run.py": "009beaaa7dd17fb3eecb01dbcecef343ecb282f5de9cdbc7c64091f1ea68164a",
-      "tools/archive_probe/manifest.json": "d45fd7446b62dd9226e8be7ebb6917610c0534dd1b12f75d245ccc4a8543e12f",
-      "tools/archive_probe/run.py": "8a722ca4e0c4934079f330c9ccb92fc5d9cfb2d85f87b91ea4e8e20acfbe9d2e",
-      "tools/crypto_id/manifest.json": "7f80fe10182c3ae23c527f94e48f18d427d6a9ba55b1d2eef9017711b137d921",
-      "tools/crypto_id/run.py": "d82a04d319fc2ed5e81fa4448e5a0dff00ae22c178da2c967f99fff2401ec59f",
-      "goals/what-is-locked.md": "407cea503deb73d0c9766797fa2939f782166a9a3f2c949bf2a8f3ddce9a2105",
+      "tools/recovery_key_scan/manifest.json": "0c569711003656dc5ad90d5f30b4c730962e9d19381af42c15cec52b0fcf6f14",
+      "tools/recovery_key_scan/run.py": "2c6b6d0567efa945b70a88e3982f611cf6c2089869118616f848f3305c0c147c",
+      "tools/archive_probe/manifest.json": "a82c4732bb8c18169d839c9ca51404b98924f2eb0b3091929422794ca956e987",
+      "tools/archive_probe/run.py": "b2af6e12e7f27e835003af4c458a5980947e60609a32f0ee768d2aeeab178d6e",
+      "tools/crypto_id/manifest.json": "5817332c72e356f8388e2f7e75363f7563c605bee6ffac75c060cbc3e7257d8c",
+      "tools/crypto_id/run.py": "9a76104010171d123a015ccc115a09c2752d61d64cc32c8c9c0cb4c2f874049e",
+      "goals/what-is-locked.md": "3ed28eab04f82469872e34d729384e19b1e4f057ec27baa42ffcda0f72ff8687",
       "skills/identify/headers.md": "cedb82c745405d33a780fd08a694da35f57e1795641f3375a8d918b86a3a5da3",
       "skills/archives/protected.md": "daf2dc4a4b4b897eca410cad25d1d3a69744aca9621fe48e55ab980d1ccc8ebf",
-      "skills/keys/where-they-hide.md": "eabe46d79c3a475308921cf2480141ec97a7b12728fdb517b256c3849294cd3c",
+      "skills/keys/where-they-hide.md": "b9b6d2ed1d0a3579a1c71fa2d63be3cc897d572a207179b4db7b5f3fadf3e815",
       "skills/volumes/bitlocker.md": "3aee3b08626d82fb7cdf156fc67e3e3115529b717050a7833a18b95984cb0b4e",
       "skills/volumes/luks-filevault.md": "557669a1519b4111d9660890eeaf82a09b36c301509e11abc102c7c16668a27e",
-      "requires/host.json": "73102d1c5f2e6b8e5d040592183c303be717ffd1fe6bc71182b4f418513bf6fc",
+      "requires/host.json": "edb236cf6608a7b000196ac78d14ce5a464dbfac39749b72bbb1e07d9d7b4256",
       "requires/python.txt": "5f0b11bd01ea0400f7948b789c74181bf5f9b226c5afe61733deb25e0287a239",
       "skills/INDEX.md": "0369b25d658c12a57271fe914faeef77a58320b69952814003fcc43e9f72ff88"
     }
