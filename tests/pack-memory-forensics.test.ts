@@ -58,6 +58,222 @@ async function exists(path: string): Promise<boolean> {
   return stat(path).then(() => true, () => false);
 }
 
+// --- mem_carve ------------------------------------------------------------------
+
+type Hit = {
+  kind: string;
+  signature_offset: number;
+  object_offset: number | null;
+  page_aligned: boolean;
+  validation: string;
+  declared_bytes?: number;
+  requested_bytes: number;
+  available_bytes: number;
+  extracted_to?: string;
+  extracted_bytes?: number;
+  extract_status?: string;
+  sha256?: string;
+};
+type Carve = {
+  hits: Hit[];
+  hit_count: number;
+  by_kind: Record<string, number>;
+  extracted: number;
+  extraction?: { max_extract: number; extracted: number; not_extracted: number; refused: number; failed: number };
+  preview_limited: boolean;
+  truncated?: boolean;
+  complete_results?: string;
+  coverage: { start: number; end: number; bytes_read: number; file_bytes: number; ended: string; address_space: string };
+  problems: { offset: number; kind: string; problem: string }[];
+};
+
+/** A plain Prefetch file as libscca describes it: version, "SCCA", ..., file size, name. */
+function plainPrefetch(version: number, name: string, runCount: number, lastRun: bigint): Buffer {
+  const file = Buffer.alloc(0x130);
+  file.writeUInt32LE(version, 0);
+  file.write("SCCA", 4, "latin1");
+  file.writeUInt32LE(0x0f, 8);
+  file.writeUInt32LE(file.length, 0x0c);
+  file.write(name, 0x10, "utf16le");
+  file.writeUInt32LE(0xdeadbeef, 0x4c);
+  file.writeBigUInt64LE(lastRun, 0x80);
+  file.writeUInt32LE(runCount, 0xd0);
+  return file;
+}
+
+/** The registry hive's base block fields the tool reads: "regf", major 1 at 0x14, minor at 0x18. */
+function hiveBaseBlock(minor: number): Buffer {
+  const block = Buffer.alloc(4096);
+  block.write("regf", 0, "latin1");
+  block.writeUInt32LE(1, 0x14);
+  block.writeUInt32LE(minor, 0x18);
+  return block;
+}
+
+test("mem_carve cuts a plain Prefetch record from its version field, which prefetch_mam needs", async () => {
+  // The record's SCCA signature is at bytes 4-7. Cutting at the signature drops
+  // the version field, and prefetch_mam's `data[4:8] == b"SCCA"` then fails on
+  // every plain record the carve hands over.
+  await withCwd(async (cwd) => {
+    const FILETIME = 133_000_000_000_000_000n;
+    const pf = plainPrefetch(30, "CALC.EXE", 7, FILETIME);
+    const blob = Buffer.alloc(0x6000);
+    pf.copy(blob, 0x3000);
+    await writeFile(join(cwd, "work", "memory.raw"), blob);
+    const out = body<Carve>(
+      await tool(CARVE, cwd, { path: "work/memory.raw", kinds: ["prefetch record"], extract_to: "work/s1/carved" }),
+    );
+    assert.equal(out.hit_count, 1);
+    const hit = out.hits[0];
+    assert.equal(hit.signature_offset, 0x3004);
+    assert.equal(hit.object_offset, 0x3000);
+    assert.equal(hit.page_aligned, true, "the structure starts on a page boundary");
+    assert.equal(hit.validation, "header plausible");
+    assert.equal(hit.declared_bytes, 0x130);
+    const cut = await readFile(hit.extracted_to as string);
+    assert.deepEqual(cut.subarray(0, 8), pf.subarray(0, 8), "the extract begins with the version field and the signature");
+    assert.deepEqual(cut.subarray(0, pf.length), pf);
+    assert.equal(hit.sha256, sha256(cut));
+
+    // The Windows pack's own Prefetch parser accepts it. (Its decompression
+    // library is a stub: a plain record is never decompressed.)
+    const stub = join(cwd, "pystub");
+    await mkdir(join(stub, "dissect", "util", "compression"), { recursive: true });
+    for (const init of ["dissect/__init__.py", "dissect/util/__init__.py", "dissect/util/compression/__init__.py"]) {
+      await writeFile(join(stub, init), "", "utf8");
+    }
+    await writeFile(join(stub, "dissect", "util", "compression", "lzxpress_huffman.py"), "def decompress(data):\n    raise SystemExit('stub')\n", "utf8");
+    const parsed = body<{ version: number; exe_name: string; run_count: number; compressed: boolean }>(
+      await tool(join(WIN, "prefetch_mam", "run.py"), cwd, { path: hit.extracted_to as string }, { PYTHONPATH: stub }),
+    );
+    assert.equal(parsed.version, 30);
+    assert.equal(parsed.exe_name, "CALC.EXE");
+    assert.equal(parsed.run_count, 7);
+    assert.equal(parsed.compressed, false);
+  });
+});
+
+test("mem_carve does not claim a structure start for a Prefetch signature with no known version before it", async () => {
+  await withCwd(async (cwd) => {
+    const blob = Buffer.alloc(0x3000);
+    blob.write("SCCA", 0x1004, "latin1"); // four bytes of zeros before it: not a Prefetch version
+    blob.write("SCCA", 2, "latin1"); // too close to the start for a version field to precede it
+    await writeFile(join(cwd, "work", "memory.raw"), blob);
+    const out = body<Carve>(await tool(CARVE, cwd, { path: "work/memory.raw", kinds: ["prefetch record"] }));
+    assert.deepEqual(out.hits.map((h) => [h.signature_offset, h.object_offset, h.validation]), [
+      [2, null, "unknown"],
+      [0x1004, null, "unknown"],
+    ]);
+  });
+});
+
+test("mem_carve extracts the earliest candidates when max_extract is smaller than the hit count", async () => {
+  // The extraction walked the signature table, so a hive at 0x1000 took the one
+  // extract before a PE header at 0x200 that the sweep met first.
+  await withCwd(async (cwd) => {
+    const blob = Buffer.alloc(0x4000);
+    hiveBaseBlock(5).copy(blob, 0x1000);
+    blob.write("MZ\x90\x00\x03", 0x200, "latin1");
+    await writeFile(join(cwd, "work", "memory.raw"), blob);
+    const out = body<Carve>(
+      await tool(CARVE, cwd, { path: "work/memory.raw", extract_to: "work/s1/carved", max_extract: 1 }),
+    );
+    assert.deepEqual(out.hits.map((h) => [h.kind, h.signature_offset]), [["PE header", 0x200], ["registry hive", 0x1000]]);
+    assert.equal(out.hits[0].extracted_bytes, 0x4000 - 0x200);
+    assert.equal(out.hits[1].extracted_to, undefined);
+    assert.equal(out.extracted, 1);
+    assert.deepEqual(out.extraction, { max_extract: 1, extracted: 1, not_extracted: 1, refused: 0, failed: 0 });
+  });
+});
+
+test("mem_carve keeps a bounded preview and every hit in a file, by default, for a dense image", async () => {
+  // 100,000 hits at 16-byte spacing. results_to without limit used to keep every
+  // hit in the answer and in memory.
+  await withCwd(async (cwd) => {
+    const COUNT = 100_000;
+    const blob = Buffer.alloc(COUNT * 16);
+    for (let i = 0; i < COUNT; i++) blob.write("regf", i * 16, "latin1");
+    await writeFile(join(cwd, "work", "memory.raw"), blob);
+    const out = body<Carve>(await tool(CARVE, cwd, { path: "work/memory.raw", results_to: "work/s1/hits.jsonl" }));
+    assert.equal(out.hit_count, COUNT);
+    assert.ok(out.hits.length <= 200, "the preview is bounded (%d)".replace("%d", String(out.hits.length)));
+    assert.equal(out.preview_limited, true);
+    const rows = (await readFile(join(cwd, "work", "s1", "hits.jsonl"), "utf8")).trimEnd().split("\n");
+    assert.equal(rows.length, COUNT);
+    const offsets = rows.map((row) => (JSON.parse(row) as Hit).signature_offset);
+    assert.ok(offsets.every((o, i) => o === i * 16), "every hit, in offset order");
+
+    // With neither results_to nor limit the whole is kept all the same, and named.
+    const implicit = body<Carve>(await tool(CARVE, cwd, { path: "work/memory.raw" }));
+    assert.equal(implicit.hit_count, COUNT);
+    assert.ok(implicit.hits.length <= 200);
+    assert.equal(implicit.truncated, true);
+    assert.match(implicit.complete_results as string, /^work\/s1\/tool-output\/mem_carve-[0-9a-f]+\.jsonl$/);
+    const whole = (await readFile(join(cwd, implicit.complete_results as string), "utf8")).trimEnd().split("\n");
+    assert.equal(whole.length, COUNT);
+  });
+});
+
+test("mem_carve refuses to write through a link or over a file in the extract directory, and says so", async () => {
+  await withCwd(async (cwd) => {
+    const blob = Buffer.alloc(0x2000);
+    hiveBaseBlock(5).copy(blob, 0x1000);
+    await writeFile(join(cwd, "work", "memory.raw"), blob);
+    await mkdir(join(cwd, "work", "s1", "carved"), { recursive: true });
+    await writeFile(join(cwd, "work", "s1", "victim.txt"), "do not touch");
+    const name = "000000001000-registry_hive.bin";
+    await symlink(join(cwd, "work", "s1", "victim.txt"), join(cwd, "work", "s1", "carved", name));
+    const out = body<Carve>(await tool(CARVE, cwd, { path: "work/memory.raw", extract_to: "work/s1/carved" }));
+    assert.equal(await readFile(join(cwd, "work", "s1", "victim.txt"), "utf8"), "do not touch");
+    assert.equal(out.hit_count, 1);
+    assert.equal(out.hits[0].extracted_to, undefined);
+    assert.match(out.hits[0].extract_status as string, /^refused: /);
+    assert.equal(out.extraction?.refused, 1);
+    assert.equal(out.extraction?.extracted, 0);
+    assert.equal(out.problems.length, 1);
+
+    // A second run into a directory that already holds the first one's extract refuses it too.
+    await mkdir(join(cwd, "work", "s1", "again"), { recursive: true });
+    await writeFile(join(cwd, "work", "s1", "again", name), "an earlier extract");
+    const second = body<Carve>(await tool(CARVE, cwd, { path: "work/memory.raw", extract_to: "work/s1/again" }));
+    assert.equal(second.extraction?.refused, 1);
+    assert.equal(await readFile(join(cwd, "work", "s1", "again", name), "utf8"), "an earlier extract");
+  });
+});
+
+test("mem_carve says whether each header is plausible, truncated or only a signature, with the lengths", async () => {
+  await withCwd(async (cwd) => {
+    const SIZE = 0x20000;
+    const blob = Buffer.alloc(SIZE);
+    hiveBaseBlock(5).copy(blob, 0x0000); // minor version 5: plausible
+    hiveBaseBlock(99).copy(blob, 0x1000); // minor version 99: not a registry hive version
+    blob.write("ElfChnk\u0000", 0x2000, "latin1");
+    blob.writeUInt32LE(128, 0x2000 + 0x28); // EVTX chunk header size
+    blob.write("bplist00", 0x13000, "latin1"); // no structural check: a signature only
+    blob.write("regf", SIZE - 8, "latin1"); // eight bytes before the end of the file
+    blob.write("ElfChnk\u0000", SIZE - 0x3000, "latin1"); // a chunk is 64 KiB; 12 KiB are left
+    blob.writeUInt32LE(128, SIZE - 0x3000 + 0x28);
+    await writeFile(join(cwd, "work", "memory.raw"), blob);
+    const out = body<Carve>(await tool(CARVE, cwd, { path: "work/memory.raw" }));
+    const byOffset = Object.fromEntries(out.hits.map((h) => [h.signature_offset, h]));
+    assert.equal(byOffset[0].validation, "header plausible");
+    assert.equal(byOffset[0x1000].validation, "header implausible");
+    assert.equal(byOffset[0x2000].validation, "header plausible");
+    assert.equal(byOffset[0x2000].declared_bytes, 65536);
+    assert.equal(byOffset[0x13000].validation, "unknown");
+    assert.equal(byOffset[SIZE - 8].validation, "truncated");
+    assert.equal(byOffset[SIZE - 8].requested_bytes, 1 << 20);
+    assert.equal(byOffset[SIZE - 8].available_bytes, 8);
+    assert.equal(byOffset[SIZE - 0x3000].validation, "truncated", "the header declares more than the file holds");
+    assert.equal(byOffset[SIZE - 0x3000].declared_bytes, 65536);
+    assert.equal(byOffset[SIZE - 0x3000].available_bytes, 0x3000);
+    assert.equal(out.coverage.ended, "end of range");
+    assert.equal(out.coverage.bytes_read, SIZE);
+    assert.equal(out.coverage.start, 0);
+    assert.equal(out.coverage.end, SIZE);
+  });
+});
+
 // --- mem_fs ---------------------------------------------------------------------
 
 const SECRET_TOKEN = "Planted-Token-4f9aQ2-do-not-print";

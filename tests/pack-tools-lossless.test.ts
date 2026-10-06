@@ -916,13 +916,13 @@ test("mem_carve neither double-counts nor loses a hit at its 4 MiB block boundar
     blob.write("ElfChnk\u0000", 2 * CARVE_WINDOW - 3, "latin1"); // straddles the second boundary
     await writeFile(join(cwd, "work", "memory.raw"), blob);
     const out = body<{
-      hits: { kind: string; offset: number }[];
+      hits: { kind: string; signature_offset: number }[];
       hit_count: number;
       by_kind: Record<string, number>;
       complete_results: string;
       preview_limited: boolean;
     }>(await tool(join(MEM, "mem_carve", "run.py"), cwd, { path: "work/memory.raw", results_to: "work/s1/hits.jsonl" }));
-    assert.deepEqual(out.hits.map((h) => [h.kind, h.offset]), [
+    assert.deepEqual(out.hits.map((h) => [h.kind, h.signature_offset]), [
       ["registry hive", CARVE_WINDOW - 14],
       ["MFT record", CARVE_WINDOW - 5],
       ["event log chunk", 2 * CARVE_WINDOW - 3],
@@ -933,10 +933,10 @@ test("mem_carve neither double-counts nor loses a hit at its 4 MiB block boundar
     assert.equal(lines.length, 3);
 
     // One kind alone has a shorter overlap; the split signature is still found once.
-    const one = body<{ hit_count: number; hits: { offset: number }[] }>(
+    const one = body<{ hit_count: number; hits: { signature_offset: number }[] }>(
       await tool(join(MEM, "mem_carve", "run.py"), cwd, { path: "work/memory.raw", kinds: ["event log chunk"] }),
     );
-    assert.deepEqual(one.hits.map((h) => h.offset), [2 * CARVE_WINDOW - 3]);
+    assert.deepEqual(one.hits.map((h) => h.signature_offset), [2 * CARVE_WINDOW - 3]);
     assert.equal(one.hit_count, 1);
 
     // A bounded preview keeps every hit in the file it names.
@@ -961,7 +961,6 @@ test("mem_carve refuses an output path outside work/<id>/", async () => {
       [{ results_to: "work/hits.jsonl" }, /inside work\/<your id>\/, not work\/ itself/],
       [{ extract_to: "../carved" }, /output must stay inside the run directory/],
       [{ extract_to: "inputs/carved" }, /under your own work\/<your id>\//],
-      [{ limit: 5 }, /results_to is required/],
     ];
     for (const [extra, message] of cases) {
       const r = refused(await tool(join(MEM, "mem_carve", "run.py"), cwd, { path: "inputs/memory.raw", ...extra }));
