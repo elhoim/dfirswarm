@@ -85,7 +85,6 @@ memory-forensics unused skills/strings/discipline.md chunk_needles
 memory-forensics unused skills/strings/discipline.md strings
 memory-forensics unused skills/triage/no-framework.md sig_carve
 memory-forensics unused skills/triage/no-framework.md strings
-memory-forensics unused skills/triage/volatility.md mem_profile
 mobile-forensics unlisted skills/ios/artifacts.md protobuf_peek
 mobile-forensics unlisted skills/ios/artifacts.md timestamp_decode
 mobile-forensics unlisted skills/ios/biome-segb.md protobuf_peek

@@ -27,18 +27,18 @@
       "tools/mem_fs/run.py": "24c96688638fda6d8c3c7b5d81697593fb21def68a58e9627f45aa2b2b72b13b",
       "goals/memory-triage.md": "2e27e156c48a7e5279d257e33aeefd2b4189cee0986e9580dddae75ac9c4c5f5",
       "skills/strings/discipline.md": "0514bdcd974e43c094df4c2020dc70509a8b1e8e179a4de4a23e559dd91285b2",
-      "skills/patterns/yara.md": "4ca2a2c8a8ae40865d86eb6946145762559aff92d9a77625e1104638428c6c54",
+      "skills/patterns/yara.md": "341b1c5a24f580dddad01404fe8d44fbb7013ff094443a3868835e378c056d6b",
       "skills/processes/injection.md": "97323de52a6486b7ccd13f522dd282576dd2603c872701630aa88b9838a8ea2b",
       "skills/network/state.md": "5bf4ff19ce13916b22ead18ac62e7f05519824515d988c3a12834e52e58d9dce",
       "skills/triage/no-framework.md": "57b2e5268935017d736e22e87cf4a683c02e63c4349f164108928a1f950d706a",
-      "skills/triage/volatility.md": "a8631c1717da28e6ceae2aa1ed6eb556e071617aad32e89e10a4f41956ca74b1",
+      "skills/triage/volatility.md": "d2eb821b2203355f1842add2cf6edfe7e011a23d7029eb3e15e865d7fced043f",
       "skills/triage/what-you-have.md": "c3f0df6f83609d15b3f1e0d92ca9ba1ac0e76939f9aefe27feb8315749900999",
       "skills/acquire/images.md": "79b95ef985d1972c8179c99cc75959b5f2dd23059ff92a021269e9d3a4823651",
       "skills/credentials/material.md": "70c996fc926d5719864ed276dbbbe0cf64ed9e28aadb6f8f4007a78774f4b16f",
       "requires/host.json": "8d525797d6c06f4a5103bda4f22e8a3fcc0586ef92883181c11b0b83918ae19b",
       "requires/python.txt": "a0587a37c3cf6bfaf2947f4b8c6f56ba6f79a2e83f7141cfb1de950bb23a2fd0",
       "requires/symbols.windows.json": "d94b7dfa6ef6014bdf0f82952488e774a0f590500a872b87149f75256bddb105",
-      "skills/INDEX.md": "28b69ba73c403bd21bd41f349b98b5109ea861f350f259917178c8b86bfedd09"
+      "skills/INDEX.md": "b688995db50ad726395efd6e33b3aa30f190b464d704f9ca1b265f44230e82b5"
     }
   },
   "tools": [
