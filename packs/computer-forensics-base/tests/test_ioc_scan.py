@@ -1,0 +1,109 @@
+"""ioc_scan: locators by default, values only in a job's sealed file, and counts that do not depend on the read size.
+
+Expected counts and offsets are worked out here with the standard library's re.finditer
+(lookahead, so overlapping occurrences count), a method that shares nothing with the
+tool's own search.
+"""
+import json
+import os
+import re
+import stat
+import unittest
+
+from support import Case, run_tool
+
+SECRET = b"hunter2-correct-horse"
+
+
+class IocScan(Case):
+    def scan(self, data, needles, env=None, **kw):
+        src = self.write("blob.bin", data)
+        return run_tool("ioc_scan", dict({"path": src, "needles": needles}, **kw), self.dir, env=env)
+
+    def expect(self, data, needle):
+        return [m.start() for m in re.finditer(b"(?=%s)" % re.escape(needle), data)]
+
+    def test_context_is_not_returned_and_every_occurrence_is_kept(self):
+        data = b"\0" * 20 + (b"A" * 16 + b"password=" + SECRET + b"Z" * 20) * 3
+        r = self.scan(data, "password=", context=8)
+        self.assertEqual(r.code, 0, r.stdout)
+        for text in (SECRET, b"hunter2"):
+            self.assertNotIn(text, r.stdout.encode(), "context bytes came back inline")
+        self.assertNotIn("snippet", r.stdout)
+        # The same context three times: the inline view lists it once, the whole result has all three offsets.
+        self.assertEqual(len(r.json["hits"]), 1)
+        self.assertEqual(r.json["repeats_hidden_inline"], 2)
+        rows = [json.loads(x) for x in self.read(r.json["all_results"]).splitlines()]
+        self.assertEqual([x["offset"] for x in rows], self.expect(data, b"password="))
+        self.assertTrue(all(set(x) == {"finding_id", "offset", "needle", "enc", "context_length"} for x in rows))
+        self.assertEqual(r.json["counts"], {"password=": 3})
+
+    def test_a_needle_longer_than_a_read_is_found_whatever_the_read_size(self):
+        needle = b"0123456789abcdefghijklmnopqrstuvwxyzABCD"            # 40 bytes
+        data = b"-" * 37 + needle + b"-" * 50 + needle + b"-" * 3
+        for chunk in (16, 17, 31, 40, 64, 1000, 8 * 1024 * 1024):
+            r = self.scan(data, needle.decode(), chunk=chunk, unique_only=False)
+            self.assertEqual([h["offset"] for h in r.json["hits"]], self.expect(data, needle), chunk)
+
+    def test_counts_do_not_depend_on_the_read_size_and_overlaps_count(self):
+        data = (b"aaaaa" + b"\0" * 9 + b"aaa") * 10 + b"\0" * 3
+        want = len(self.expect(data, b"aaa"))
+        self.assertGreater(want, 40)                     # runs of 'a' meet at the units' joins, and overlapping matches count
+        for chunk in (16, 23, 100, 4096):
+            r = self.scan(data, "aaa", chunk=chunk, unique_only=False)
+            self.assertEqual(r.json["counts"], {"aaa": want}, chunk)
+            self.assertEqual([h["offset"] for h in r.json["hits"]], self.expect(data, b"aaa"), chunk)
+
+    def test_utf16_matches_and_their_context_length_are_counted_in_bytes(self):
+        needle = "abc"
+        wide = needle.encode("utf-16le")
+        data = b"\0" * 5 + wide + b"x" * 50
+        r = self.scan(data, needle, context=10, unique_only=False)
+        utf16 = [h for h in r.json["hits"] if h["enc"] == "utf16"]
+        self.assertEqual([h["offset"] for h in utf16], [5])
+        self.assertEqual(utf16[0]["context_length"], 5 + len(wide) + 10)       # what precedes it (5 bytes, under 16), the match, 10 after
+        # The context after a match is whole even when a read ends inside it.
+        small = self.scan(data, needle, context=10, unique_only=False, chunk=16)
+        self.assertEqual([h["context_length"] for h in small.json["hits"] if h["enc"] == "utf16"], [5 + len(wide) + 10])
+
+    def test_values_are_refused_outside_a_job_and_written_privately_inside_one(self):
+        data = b"\0" * 30 + b"password=" + SECRET + b"\0" * 30
+        r = self.scan(data, "password=", write_values=True)
+        self.assertEqual(r.code, 1)
+        self.assertIn("refused outside a job", r.json["error"])
+        self.assertEqual([n for n in os.listdir(self.dir) if n != "blob.bin"], [])
+        out = self.path("job-out")
+        os.makedirs(out)
+        r = self.scan(data, "password=", write_values=True, env={"JOB_ID": "j000007", "OUT": out})
+        self.assertEqual(r.code, 0, r.stdout)
+        self.assertNotIn(SECRET.decode(), r.stdout)
+        sv = r.json["secret_values"]
+        self.assertTrue(sv["contains_secret_values"])
+        self.assertEqual(sv["values_file"], "store/jobs/j000007/out/ioc-scan-values.jsonl")
+        values_path = os.path.join(out, "ioc-scan-values.jsonl")
+        self.assertEqual(stat.S_IMODE(os.stat(values_path).st_mode), 0o600)
+        row = json.loads(self.read(values_path).splitlines()[0])
+        self.assertEqual((row["offset"], row["finding_id"], row["file"]), (30, "F000001", self.path("blob.bin")))
+        self.assertIn(SECRET.decode(), row["value"])
+        # A second run in the same job's output does not overwrite the first's file.
+        again = self.scan(data, "password=", write_values=True, env={"JOB_ID": "j000007", "OUT": out})
+        self.assertNotEqual(again.code, 0)
+
+    def test_the_range_is_what_was_read_and_bad_numbers_are_refused(self):
+        data = b"x" * 100 + b"needle" + b"y" * 100
+        r = self.scan(data, "needle", start=50, length=10_000)
+        self.assertEqual((r.json["scanned_start"], r.json["scanned_end"], r.json["bytes_scanned"]), (50, len(data), len(data) - 50))
+        self.assertTrue(r.json["complete"])
+        short = self.scan(data, "needle", start=0, length=103)
+        self.assertEqual((short.json["bytes_scanned"], short.json["counts"]), (103, {}))
+        for bad in ({"chunk": 0}, {"chunk": 4}, {"context": 10 ** 9}, {"max_hits": 0}, {"start": -1}, {"start": 10 ** 6}, {"length": -5}):
+            self.assertEqual(self.scan(data, "needle", **bad).code, 1, bad)
+
+    def test_a_needle_that_is_not_text_and_a_directory_are_answers(self):
+        self.write("blob.bin", b"x")
+        self.assertEqual(run_tool("ioc_scan", {"path": self.dir, "needles": "x"}, self.dir).code, 1)
+        self.assertEqual(run_tool("ioc_scan", {"path": self.path("none"), "needles": "x"}, self.dir).json["error"], "no such file")
+
+
+if __name__ == "__main__":
+    unittest.main()

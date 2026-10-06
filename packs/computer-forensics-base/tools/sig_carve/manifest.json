@@ -1,22 +1,27 @@
 {
   "name": "sig_carve",
-  "description": "Scan a binary file for multiple file signatures (magic bytes) and return offsets, context, and estimated sizes. Signatures defined inline.",
+  "description": "A signature scan: find where known file headers (magic bytes) occur in a binary file, in one pass over it, and return every offset with a short preview. It carves nothing and estimates no size: a hit is where the bytes occur, not a file, so cut a decisive hit with file_carver (or read it in place) and check it with a parser of that format. Each header is found once, at its true offset, whatever the read size; an unknown signature name is an error, not an empty result. SCCA hits name candidate_start (the hit minus 4). The answer says which file and what range were scanned. The file is read as given: an E01 or other container is its container bytes, not the disk inside.",
   "params": {
     "path": {
       "type": "string",
-      "description": "Path to binary file to scan"
+      "description": "Path to the binary file to scan",
+      "required": true
     },
     "sig": {
       "type": "string",
-      "description": "Signature name (MZ,PK,regf,MAM,SCCA,EVTX,OLE,LNK,SQLite,RAR,7z,GZ,BZ2,PDF,PNG,JFIF,PCH) or 'all'"
+      "description": "Signature name (MZ,PK,regf,MAM,SCCA,EVTX,OLE,LNK,SQLite,RAR,7z,GZ,BZ2,PDF,PNG,JFIF,PCH) or 'all' (default)"
     },
     "context": {
       "type": "integer",
-      "description": "Context bytes to show (default 64)"
+      "description": "Preview bytes from each hit (0 to 4096, default 64)"
     },
     "max_hits": {
       "type": "integer",
-      "description": "Max hits per signature (default 500)"
+      "description": "Hits returned inline per signature (default 500); every hit is in all_results when there are more"
+    },
+    "window_bytes": {
+      "type": "integer",
+      "description": "Read block size (16 to 256 MiB, default 8 MiB); results do not depend on it"
     }
   },
   "runtime": "python3",
@@ -25,6 +30,6 @@
   "example": "{\"path\": \"inputs/[UNALLOCATED]\", \"sig\": \"all\", \"max_hits\": 10}",
   "by": "s183906",
   "at": "2026-09-18T22:13:29.602Z",
-  "version": 1,
-  "sha256": "bfa35a1fe1c14e645ff881dcf662f8c5e72697540a71b7da7fee5ceb37925c95"
+  "version": 2,
+  "sha256": "d268bca1320603bb17d6bc0370047f0afafdd651ddac48f283c580943ddff495"
 }
