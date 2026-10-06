@@ -204,7 +204,8 @@ class Reader:
             digits = [struct.unpack("<H", self.take(2))[0] for _ in range(self.count(abs(n), 2))]
             if any(d >= 32768 for d in digits):
                 raise StreamError("a digit of a long at offset %d is out of range" % start)
-            v = sum(d << (15 * j) for j, d in enumerate(digits)) * (-1 if n < 0 else 1)
+            # Built from its bits, so a long of a million digits costs a million steps, not their square.
+            v = int("".join(format(d, "015b") for d in reversed(digits)) or "0", 2) * (-1 if n < 0 else 1)
         elif t == "g":
             v = struct.unpack("<d", self.take(8))[0]
         elif t == "y":
@@ -270,10 +271,24 @@ class Reader:
 
 # --- views -------------------------------------------------------------------------------------
 
+VIEW_BUDGET = 64 * 1024 * 1024    # characters one result may hold: shared text shown where it is used stops here
+INT_BITS_SHOWN = 13000            # an integer longer than this is shown in hex (json will not print 4300 digits of one)
+_spent = [0]
+
+
+def spend(n):
+    _spent[0] += n
+    if _spent[0] > VIEW_BUDGET:
+        raise StreamError("the stream shares text or numbers so that shown where they are used they come to more than %d characters" % VIEW_BUDGET)
+
+
 def view(x, preview=None, depth=0):
     """A JSON form of an object; `preview` shortens text and bytes (None: whole)."""
     if depth > MAX_DEPTH + 4:
         return {"depth_limit": True}
+    if isinstance(x, (str, Raw)):
+        n = len(x) if isinstance(x, str) else 2 * len(x.data)
+        spend(n if preview is None else min(n, 2 * preview))
     if isinstance(x, Special):
         if x.name in ("None", "False", "True"):
             return {"None": None, "False": False, "True": True}[x.name]
@@ -304,6 +319,9 @@ def view(x, preview=None, depth=0):
         return {x[0]: list(x[1:])}
     if isinstance(x, float) and (x != x or x in (float("inf"), float("-inf"))):
         return {"float": repr(x)}
+    if isinstance(x, int) and not isinstance(x, bool) and x.bit_length() > INT_BITS_SHOWN:
+        spend(x.bit_length() // 4)
+        return {"int_bits": x.bit_length(), "hex": hex(x)}
     return x
 
 
@@ -360,6 +378,7 @@ def pyc_header(head):
 
 
 def main():
+    sys.stdin.reconfigure(encoding="utf-8")
     try:
         args = json.load(sys.stdin)
     except ValueError as e:
@@ -405,8 +424,12 @@ def main():
     except RecursionError:
         error = "the stream nests deeper than this reader can follow"
     out_dir.mkdir(parents=True, exist_ok=True)
-    rows = [code_row(c, None, bytecode) for c in reader.codes if hasattr(c, "end")]
-    shown = [code_row(c, preview, False) for c in reader.codes[:limit] if hasattr(c, "end")]
+    try:
+        rows = [code_row(c, None, bytecode) for c in reader.codes if hasattr(c, "end")]
+        shown = [code_row(c, preview, False) for c in reader.codes[:limit] if hasattr(c, "end")]
+        whole_root = view(root)
+    except StreamError as e:
+        fail(str(e), objects=reader.objects, references=len(reader.refs))
     summary = {
         "ok": error is None,
         "tool": TOOL,
@@ -421,10 +444,10 @@ def main():
         "code_objects": len(rows),
         **({"error": error, "stopped_at": reader.at()} if error else {}),
     }
-    result = dict(summary, root=view(root), codes=rows)
+    result = dict(summary, root=whole_root, codes=rows)
     key = json.dumps([path, offset, bytecode], sort_keys=True)
     result_file = out_dir / ("%s-%s.json" % (TOOL, hashlib.sha256(key.encode()).hexdigest()[:12]))
-    result_file.write_text(json.dumps(result, indent=2, ensure_ascii=True))
+    result_file.write_text(json.dumps(result, indent=2, ensure_ascii=True), encoding="ascii")
     answer = dict(summary, root_type=type_name(root))
     answer["root"] = view(root, preview)
     answer["codes"] = shown

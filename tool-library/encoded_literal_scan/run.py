@@ -311,6 +311,9 @@ def inspect_hit(fd, size, spec, begin, marker, closer, max_body, literal):
 # --- the scan ----------------------------------------------------------------------------
 
 def main():
+    # The answer carries the literal as it was written, in whatever locale the VM has.
+    sys.stdin.reconfigure(encoding="utf-8")
+    sys.stdout.reconfigure(encoding="utf-8")
     try:
         args = json.load(sys.stdin)
     except ValueError as e:
@@ -413,7 +416,7 @@ def main():
     }
     key = json.dumps([path, marker, closer, max_body, encodings, start, end], sort_keys=True)
     result_file = out_dir / ("%s-%s.json" % (TOOL, hashlib.sha256(key.encode()).hexdigest()[:12]))
-    result_file.write_text(json.dumps(result, indent=2, ensure_ascii=False))
+    result_file.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
     shown = {k: v for k, v in result.items() if k not in ("hits", "candidates", "patterns")}
     shown["candidates"] = candidates[:limit]
     if len(candidates) > limit:

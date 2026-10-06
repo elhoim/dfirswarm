@@ -136,6 +136,9 @@ def whole(args, name, default, low, high):
 
 
 def main():
+    # A path is printed as it was written, in whatever locale the VM has.
+    sys.stdin.reconfigure(encoding="utf-8")
+    sys.stdout.reconfigure(encoding="utf-8")
     try:
         args = json.load(sys.stdin)
     except ValueError as e:

@@ -746,6 +746,23 @@ sys.stdout.buffer.write(marshal.dumps(obj, 4))
     await writeFile(join(cwd, "inputs", "laughs.bin"), Buffer.concat([Buffer.from("("), u32(levels.length), ...levels]));
     const laughs = ok<MResult>(await runPy(MARSHAL_TOOL, cwd, { path: "inputs/laughs.bin" }, undefined, PY_ENV));
     assert.ok((await stat(join(cwd, laughs.result_file))).size < 200_000, "forty doublings did not become a trillion nodes");
+    // One long text referred to two thousand times shows as two thousand copies of it: refused, not written.
+    const text = "x".repeat(100_000);
+    const shared = Buffer.concat([
+      Buffer.from("("), u32(2001),
+      Buffer.from([0x80 | "u".charCodeAt(0)]), u32(text.length), Buffer.from(text),
+      ...Array.from({ length: 2000 }, () => Buffer.concat([Buffer.from("r"), u32(0)])),
+    ]);
+    await writeFile(join(cwd, "inputs", "shared.bin"), shared);
+    assert.match(String(refused(await runPy(MARSHAL_TOOL, cwd, { path: "inputs/shared.bin" }, undefined, PY_ENV)).error), /shares text or numbers/);
+    // A long integer of many digits is built in a step a digit and shown in hex; it does not hang or fail on the digit limit.
+    const digits = 20_000;
+    const longInt = Buffer.concat([Buffer.from("l"), u32(digits), Buffer.concat(Array.from({ length: digits }, (_, i) => { const b = Buffer.alloc(2); b.writeUInt16LE(i % 2 ? 0x7fff : 0x0001); return b; }))]);
+    await writeFile(join(cwd, "inputs", "longint.bin"), longInt);
+    const li = ok<MResult>(await runPy(MARSHAL_TOOL, cwd, { path: "inputs/longint.bin" }, undefined, PY_ENV));
+    const shownInt = li.root as { int_bits: number; hex: string };
+    assert.equal(shownInt.int_bits, 15 * digits, "the top digit is 0x7fff, which fills its fifteen bits");
+    assert.match(shownInt.hex, /^0x[0-9a-f]+$/);
     // Refusals before reading: no file, a bad out_dir, bad numbers.
     assert.match(String(refused(await runPy(MARSHAL_TOOL, cwd, {}, undefined, PY_ENV)).error), /path is required/);
     assert.match(String(refused(await runPy(MARSHAL_TOOL, cwd, { path: "inputs/data.bin", out_dir: "inputs/o" }, undefined, PY_ENV)).error), /out_dir/);
