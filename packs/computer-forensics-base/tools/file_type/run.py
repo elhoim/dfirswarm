@@ -8,11 +8,38 @@ header and then compares the answer with what the name claimed.
 
 The hash comes back with it, because the first thing a sample needs is an
 identity the report can refer to for the rest of the case.
+
+What it identifies with: a table of signatures that carry forensic weight
+(executables, archives, registry hives, event logs, prefetch at offset 4 and
+its compressed MAM form, shortcuts, AD1 and E01 containers, memory captures) and,
+for a file the table does not know, the installed `file` (libmagic) when there
+is one. An identification is a reading of the first bytes, not a validation; a
+type no source knows is `unrecognised` and its extension is neither a match nor a
+mismatch (`extension_matches` is null).
+
+What it covers: a directory is walked in sorted order, a file at a time; every
+regular file looked at is in the whole result, whatever `limit` or `mismatch_only`
+show inline, and `examined` counts the files actually opened. Symbolic links and
+files that are not regular (devices, pipes, sockets) are listed and never opened
+or followed. A file that could not be read is an error entry, reported whatever
+`mismatch_only` says.
 """
 import hashlib
 import json
 import os
+import re
+import shutil
+import stat
+import subprocess
 import sys
+import tempfile
+import time
+from pathlib import Path
+
+TOOL = {"name": "file_type", "version": 3}
+BUDGET_SECONDS = 100          # under the manifest's 120
+LIBMAGIC_TIMEOUT = 10
+ERRORS_SHOWN = 50
 
 class _AdSegments:
     """.ad1, .ad2, ... .ad10 and on: FTK Imager numbers an AD1 image's segments without end."""
@@ -29,7 +56,6 @@ AD_SEGMENTS = _AdSegments()
 MAGIC = [
     (0, b"MZ", "PE or DOS executable", {"exe", "dll", "sys", "scr", "ocx", "cpl", "efi", "mui", "msi"}),
     (0, b"\x7fELF", "ELF executable or object", {"so", "o", "elf", "bin", ""}),
-    (0, b"\xca\xfe\xba\xbe", "Mach-O universal binary", {"dylib", "bundle", ""}),
     (0, b"\xcf\xfa\xed\xfe", "Mach-O 64-bit", {"dylib", "bundle", "o", ""}),
     (0, b"\xce\xfa\xed\xfe", "Mach-O 32-bit", {"dylib", "bundle", "o", ""}),
     (0, b"PK\x03\x04", "ZIP container", {"zip", "docx", "xlsx", "pptx", "docm", "xlsm", "pptm",
@@ -56,8 +82,7 @@ MAGIC = [
     (0, b"#!", "script with a shebang", {"sh", "py", "pl", "rb", ""}),
     (0, b"\x4c\x00\x00\x00\x01\x14\x02\x00", "Windows shortcut", {"lnk"}),
     (0, b"MAM\x04", "compressed prefetch record", {"pf"}),
-    (0, b"SCCA", "prefetch record", {"pf"}),
-    (0, b"\x1f\x8b\x08", "gzip", {"gz"}),
+    (4, b"SCCA", "prefetch record", {"pf"}),
     (0, b"EVF\x09", "EnCase E01 image", {"e01", "ex01"}),
     (0, b"ADSEGMENTEDFILE\x00", "AccessData AD1 logical image (a segment)", AD_SEGMENTS),
     (0, b"ADCRYPT", "AccessData AD1 logical image, encrypted", {"ad1"}),
@@ -70,11 +95,25 @@ TEXTY = bytes(range(0x20, 0x7f)) + b"\r\n\t\f\b"
 
 
 def fail(message, **extra):
-    print(json.dumps({"error": message, **extra}))
+    print(json.dumps({"error": message, "tool": TOOL, **extra}))
     raise SystemExit(1)
 
 
+def class_or_fat(head):
+    """0xCAFEBABE opens both a Mach-O universal binary (a big-endian count of architectures) and a
+    Java class file (a minor and a major version). The count is small; Java's major starts at 45."""
+    count = int.from_bytes(head[4:8], "big")
+    major = int.from_bytes(head[6:8], "big")
+    if 1 <= count < 45:
+        return "Mach-O universal binary", {"dylib", "bundle", ""}
+    if 45 <= major <= 90:
+        return "Java class file", {"class"}
+    return "0xCAFEBABE header (a Mach-O universal binary or a Java class file; neither layout fits)", set()
+
+
 def identify(head):
+    if head[:4] == b"\xca\xfe\xba\xbe" and len(head) >= 8:
+        return class_or_fat(head)
     for offset, signature, name, extensions in MAGIC:
         if head[offset:offset + len(signature)] == signature:
             return name, extensions
@@ -87,7 +126,41 @@ def identify(head):
     return "unrecognised", set()
 
 
+_libmagic = {"state": None}
+
+
+def libmagic(path):
+    """The installed `file`'s description of a file, or None (and why, in _libmagic)."""
+    if _libmagic["state"] is None:
+        _libmagic["state"] = shutil.which("file") or False
+    if not _libmagic["state"]:
+        return None
+    try:
+        p = subprocess.run([_libmagic["state"], "-b", "--", path], capture_output=True, timeout=LIBMAGIC_TIMEOUT,
+                           env=dict(os.environ, LC_ALL="C"))
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    text = p.stdout.decode("utf-8", "replace").strip()
+    return text[:200] if p.returncode == 0 and text else None
+
+
 def look(path):
+    """One entry for one directory entry. Links and non-regular files are named and not opened."""
+    try:
+        st = os.lstat(path)
+    except OSError as exc:
+        return {"file": path, "error": exc.strerror or str(exc)}
+    claimed = os.path.splitext(path)[1].lstrip(".").lower()
+    if stat.S_ISLNK(st.st_mode):
+        try:
+            target = os.readlink(path)
+        except OSError:
+            target = None
+        return {"file": path, "kind": "symbolic link", "link_target": target, "type": "not opened: a link is listed, never followed",
+                "extension": claimed or None, "extension_matches": None}
+    if not stat.S_ISREG(st.st_mode):
+        return {"file": path, "kind": "not a regular file", "mode": stat.filemode(st.st_mode), "type": "not opened",
+                "extension": claimed or None, "extension_matches": None}
     try:
         with open(path, "rb") as fh:
             head = fh.read(4096)
@@ -99,14 +172,78 @@ def look(path):
                     break
                 digest.update(block)
     except OSError as exc:
-        return {"file": path, "error": str(exc)}
+        return {"file": path, "error": exc.strerror or str(exc)}
     name, extensions = identify(head)
-    claimed = os.path.splitext(path)[1].lstrip(".").lower()
-    mismatch = bool(extensions) and claimed not in extensions
-    return {"file": path, "bytes": os.path.getsize(path), "type": name,
-            "extension": claimed or None, "extension_matches": not mismatch,
-            "sha256": digest.hexdigest(),
-            "head_hex": head[:16].hex()}
+    source = "signature table" if name != "unrecognised" else None
+    entry = {"file": path, "bytes": st.st_size, "type": name, "type_source": source}
+    if name == "unrecognised":
+        described = libmagic(path)
+        if described and described != "data":
+            entry["type"], entry["type_source"] = described, "libmagic (the installed file command)"
+        elif described == "data":
+            entry["type_source"] = "none: libmagic calls it data, which is its word for no type"
+        else:
+            entry["type_source"] = "none: neither the table nor libmagic names it" if _libmagic["state"] else "none: the table does not name it and `file` is not installed"
+    # An extension can only be compared with a type whose extensions are known; an unknown type is neither a match nor a mismatch.
+    known = bool(extensions)
+    entry["extension"] = claimed or None
+    entry["extension_matches"] = (claimed in extensions) if known else None
+    entry["sha256"] = digest.hexdigest()
+    entry["head_hex"] = head[:16].hex()
+    return entry
+
+
+def walk(path):
+    """Every entry under `path`, in sorted order, directories sorted too; a link to a directory is an entry, not a place to go."""
+    if not os.path.isdir(path) or os.path.islink(path):
+        yield path
+        return
+    for dirpath, dirs, names in os.walk(path, followlinks=False):
+        dirs.sort()
+        linked = [d for d in dirs if os.path.islink(os.path.join(dirpath, d))]
+        for name in sorted(names + linked):
+            yield os.path.join(dirpath, name)
+        dirs[:] = [d for d in dirs if d not in linked]
+
+
+class Results:
+    """Every result goes to a file as it is made; the inline page is the filtered, limited view of them."""
+
+    def __init__(self, key):
+        digest = hashlib.sha256(json.dumps(key, sort_keys=True).encode()).hexdigest()[:16]
+        name = "file_type-%s.jsonl" % digest
+        job, out = os.environ.get("JOB_ID"), os.environ.get("OUT")
+        if job and out:
+            self.path = Path(out) / "tool-output" / name
+            self.shown = "store/jobs/%s/out/tool-output/%s" % (re.sub(r"[^A-Za-z0-9_.-]", "_", job), name)
+        else:
+            agent = re.sub(r"[^A-Za-z0-9_.-]", "_", os.environ.get("AGENT_ID") or "tool")
+            self.path = Path("work") / agent / "tool-output" / name
+            self.shown = str(self.path)
+        self.tmp, self.fh, self.error = None, None, None
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            fd, tmp = tempfile.mkstemp(dir=self.path.parent, prefix=".file_type-")
+            self.tmp, self.fh = Path(tmp), os.fdopen(fd, "w", encoding="utf-8")
+        except OSError as exc:
+            self.error = "the whole result could not be kept (%s: %s)" % (self.path.parent, exc.strerror or exc)
+
+    def add(self, entry):
+        if self.fh:
+            self.fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+    def finish(self, keep):
+        """Publish the file when the inline page is not the whole result; drop it when it is."""
+        if not self.fh:
+            return None
+        self.fh.flush()
+        os.fsync(self.fh.fileno())
+        self.fh.close()
+        if keep:
+            os.replace(self.tmp, self.path)
+            return self.shown
+        os.unlink(self.tmp)
+        return None
 
 
 def main():
@@ -114,45 +251,84 @@ def main():
         args = json.load(sys.stdin)
     except ValueError as exc:
         fail("arguments are not valid JSON", reason=str(exc))
+    if not isinstance(args, dict):
+        fail("arguments are a JSON object")
     path = args.get("path")
     if not isinstance(path, str) or not path:
         fail("path is required: a file or a directory to walk")
-    if not os.path.exists(path):
+    if not os.path.lexists(path):
         fail("no such file or directory", path=path)
     limit = args.get("limit", 500)
     if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
         fail("limit must be a positive integer")
+    mismatch_only = args.get("mismatch_only", False)
+    if not isinstance(mismatch_only, bool):
+        fail("mismatch_only is true or false")
 
-    targets = []
-    if os.path.isdir(path):
-        for dirpath, _dirs, names in os.walk(path):
-            for name in sorted(names):
-                targets.append(os.path.join(dirpath, name))
-    else:
-        targets = [path]
-
-    files, mismatches = [], 0
-    for target in targets:
-        entry = look(target)
-        if entry.get("extension_matches") is False:
-            mismatches += 1
-        elif args.get("mismatch_only"):
+    deadline = time.monotonic() + BUDGET_SECONDS
+    results = Results([path, mismatch_only, limit])
+    page, errors = [], []
+    counts = {"discovered": 0, "examined": 0, "mismatches": 0, "unrecognised": 0, "links": 0, "not_regular": 0, "errors": 0, "not_attempted": 0}
+    inline_total = 0
+    stopped = None
+    for target in walk(path):
+        counts["discovered"] += 1
+        if time.monotonic() > deadline:
+            stopped = stopped or "the %d-second time budget was used" % BUDGET_SECONDS
+            counts["not_attempted"] += 1
             continue
-        if len(files) >= limit:
-            break
-        files.append(entry)
-
-    print(json.dumps({
+        entry = look(target)
+        results.add(entry)
+        if "error" in entry:
+            counts["errors"] += 1
+            if len(errors) < ERRORS_SHOWN:
+                errors.append({"file": entry["file"], "error": entry["error"]})
+            continue
+        counts["examined"] += entry.get("kind") is None
+        counts["links"] += entry.get("kind") == "symbolic link"
+        counts["not_regular"] += entry.get("kind") == "not a regular file"
+        counts["unrecognised"] += entry.get("type") == "unrecognised" or str(entry.get("type_source", "")).startswith("none")
+        mismatch = entry.get("extension_matches") is False
+        counts["mismatches"] += mismatch
+        if mismatch_only and not mismatch:
+            continue
+        inline_total += 1
+        if len(page) < limit:
+            page.append(entry)
+    whole = results.finish(keep=inline_total > len(page) or (mismatch_only and counts["discovered"] > inline_total))
+    out = {
+        "tool": TOOL,
         "path": path,
-        "files": files,
-        "file_count": len(files),
-        "examined": len(targets),
-        "extension_mismatches": mismatches,
+        "files": page,
+        "file_count": len(page),
+        "matching_the_filter": inline_total,
+        "discovered": counts["discovered"],
+        "examined": counts["examined"],
+        "not_attempted": counts["not_attempted"],
+        "extension_mismatches": counts["mismatches"],
+        "unrecognised": counts["unrecognised"],
+        "links_listed": counts["links"],
+        "not_regular_listed": counts["not_regular"],
+        "error_count": counts["errors"],
+        "errors": errors,
+        "truncated": inline_total > len(page),
+        "complete": stopped is None and counts["errors"] == 0,
         "note": "A mismatch is a lead, not a finding: plenty of legitimate files carry an "
                 "unexpected extension, and a container type such as ZIP covers a dozen document "
                 "formats. What matters is the direction — an executable named .txt is worth a "
-                "sentence, a .docx that is a ZIP is simply what a .docx is.",
-    }, indent=2))
+                "sentence, a .docx that is a ZIP is simply what a .docx is. A type read from the first "
+                "bytes is an identification, not a validation of the file.",
+    }
+    if whole:
+        out["all_results"] = whole
+        out["all_results_format"] = "JSON Lines, one complete entry per file looked at, whatever limit and mismatch_only show"
+    if results.error:
+        out["all_results_error"] = results.error
+    if stopped:
+        out["stopped"] = stopped
+    if counts["errors"] > ERRORS_SHOWN:
+        out["errors_note"] = "%d errors; the first %d are listed, the rest are in all_results" % (counts["errors"], ERRORS_SHOWN)
+    print(json.dumps(out, indent=2))
 
 
 if __name__ == "__main__":
