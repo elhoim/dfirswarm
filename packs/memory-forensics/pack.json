@@ -28,8 +28,8 @@
       "goals/memory-triage.md": "2e27e156c48a7e5279d257e33aeefd2b4189cee0986e9580dddae75ac9c4c5f5",
       "skills/strings/discipline.md": "0514bdcd974e43c094df4c2020dc70509a8b1e8e179a4de4a23e559dd91285b2",
       "skills/patterns/yara.md": "341b1c5a24f580dddad01404fe8d44fbb7013ff094443a3868835e378c056d6b",
-      "skills/processes/injection.md": "97323de52a6486b7ccd13f522dd282576dd2603c872701630aa88b9838a8ea2b",
-      "skills/network/state.md": "5bf4ff19ce13916b22ead18ac62e7f05519824515d988c3a12834e52e58d9dce",
+      "skills/processes/injection.md": "5237ab1fc602e470eb38c0704753cc712b1336c59c9eee88ee697130c82660cd",
+      "skills/network/state.md": "35df980b0e7a6c7d64147b83fab2efb4bb6f82782ee8f669e8a849cb0d6c6c49",
       "skills/triage/no-framework.md": "57b2e5268935017d736e22e87cf4a683c02e63c4349f164108928a1f950d706a",
       "skills/triage/volatility.md": "d2eb821b2203355f1842add2cf6edfe7e011a23d7029eb3e15e865d7fced043f",
       "skills/triage/what-you-have.md": "c3f0df6f83609d15b3f1e0d92ca9ba1ac0e76939f9aefe27feb8315749900999",
@@ -38,7 +38,7 @@
       "requires/host.json": "8d525797d6c06f4a5103bda4f22e8a3fcc0586ef92883181c11b0b83918ae19b",
       "requires/python.txt": "a0587a37c3cf6bfaf2947f4b8c6f56ba6f79a2e83f7141cfb1de950bb23a2fd0",
       "requires/symbols.windows.json": "d94b7dfa6ef6014bdf0f82952488e774a0f590500a872b87149f75256bddb105",
-      "skills/INDEX.md": "b688995db50ad726395efd6e33b3aa30f190b464d704f9ca1b265f44230e82b5"
+      "skills/INDEX.md": "747dc59336240042046fff727cf54ff7089020c9655ec715015b021b2faaf395"
     }
   },
   "tools": [
