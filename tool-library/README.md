@@ -111,7 +111,7 @@ or `tools/`.
 | `amcache_apps` | python3 | `maintainer` | 1 | Program execution from Amcache.hve: path, SHA-1, publisher and link date, from whichever of the Windows 7/8 a… |
 | `browser_history` | python3 | `maintainer` | 2 | Query a browser history database, copying it and any -wal beside it first so the write-ahead log is replayed … |
 | `catalog_grep` | python3 | `s864a02` | 1 | Grep catalog/AF-Case2.E01/p0/filelist.txt for a pattern; return matching lines. |
-| `catalog_search` | python3 | `sd1d100` | 9 | Search the evidence catalogue with a regex: a disk's filelist, timeline, bodyfile, fsstat or partitions, or a… |
+| `catalog_search` | python3 | `sd1d100` | 10 | Search the evidence catalogue with a regex: a disk's filelist, timeline, bodyfile, fsstat or partitions, or a… |
 | `check_inputs` | python3 | `sfcc304` | 2 | Diff inputs/ against inputs.json (size and sha256). Fails if the manifest is missing or any file differs. |
 | `chunk_needles` | python3 | `sd1d102` | 3 | Scan a local file (or icat an inode from the E01) for ASCII/UTF-16 needles; return hit counts and nearby snip… |
 | `contact_sheet` | python3 | `s10d40e` | 1 | Tile many images into labelled contact sheets to look at: a directory, a list of paths or a tar read in place… |
