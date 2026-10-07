@@ -851,13 +851,14 @@ test("browser_history keeps two result columns of one name apart, and says which
   });
 });
 
-test("browser_history names a file that is not a database, with its first bytes and size, instead of an empty answer", async () => {
+test("browser_history names a file that is not a database, with whether it has the SQLite header and its size, never its bytes", async () => {
   await withCwd(async (cwd) => {
     await writeFile(join(cwd, "work", "History"), Buffer.from("this is not sqlite, it is only text padded out to a page".padEnd(4096, " ")));
     const err = failed(await tool("browser_history", cwd, { path: "work/History", query: "tables" }));
     assert.match(err.error, /not a SQLite database/);
     assert.equal(err.size, 4096);
-    assert.equal(typeof err.first_bytes_hex, "string");
+    assert.equal(err.sqlite_header, false);
+    assert.equal(err.first_bytes_hex, undefined, "the first bytes of a file can be a secret and are not echoed");
   });
 });
 
@@ -2024,7 +2025,7 @@ test("utf16_urls returns a URL of any length whole and keeps every occurrence wi
   // The ASCII pattern stopped after 300 characters without marking it, and a `seen` set dropped every
   // occurrence after the first, with its offset.
   await withCwd(async (cwd) => {
-    const long = "https://example.test/" + "segment/".repeat(75) + "end?token=1";
+    const long = "https://example.test/" + "segment/".repeat(75) + "end?page=1";
     assert.ok(long.length > 600);
     const filler = Buffer.alloc(3000, 0xff);
     const file = Buffer.concat([filler, Buffer.from(long), filler, Buffer.from(long), filler]);
