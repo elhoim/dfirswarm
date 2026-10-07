@@ -1,6 +1,6 @@
 {
   "name": "suricata_run",
-  "description": "Run a named local Suricata rules file over a capture, enable JA3/JA4 TLS metadata, keep the complete EVE JSON and return bounded alert/metadata summaries that name the full output.",
+  "description": "Run a local Suricata rules file over a capture offline and record what ran: the engine's version (suricata --build-info, kept whole), the configuration with its SHA-256, the rules file's SHA-256, size and rule-line count, the checksum mode and the command. By default the tool writes an explicit suricata.yaml into out_dir (eve-log types by name with tls extended, the TLS fingerprint settings by key; nothing addressed by list position; everything it does not set is the engine's own default, not your distribution's suricata.yaml) or uses `config`, a local file of yours (never one from inputs/). The configuration is tested with `suricata -T` BEFORE the run; if that fails nothing is run and the diagnostic is returned whole. Rule-load numbers are read from Suricata's own output when it prints them (None is not zero) and a rule that failed to load fails the run. JA3/JA4 are three separate numbers: what the configuration asks for, the TLS events logged (the traffic that could carry a fingerprint) and the events that carry one; none is evidence about what the build supports. EVE lines that are not JSON, not objects or without an event_type are counted with their line numbers. eve.json is the whole result; inline alerts are bounded. An alert is a rule match, not a finding, and no ruleset ships with the pack. SENSITIVE: EVE can carry URLs, host names, SNI, DNS names and file names. The directory is private (0700/0600, Suricata's own files too); run it as a job with secret_output: true.",
   "params": {
     "path": {
       "type": "string",
@@ -8,23 +8,27 @@
     },
     "rules": {
       "type": "string",
-      "description": "A local Suricata rules file; no network rule download is performed"
+      "description": "A local Suricata rules file, passed with -S so only it is loaded; nothing is downloaded"
     },
     "out_dir": {
       "type": "string",
-      "description": "An empty directory under work/ for eve.json and Suricata logs"
+      "description": "An empty directory under work/ (in a job, under $OUT) for eve.json, Suricata's logs, the configuration and the build information. It is private (0700, files 0600)"
+    },
+    "config": {
+      "type": "string",
+      "description": "A local suricata.yaml of your own, used instead of the one this tool writes (default: the tool writes one). A configuration from inputs/ is refused. It is tested with -T before the run, and its fingerprint settings are not read"
     },
     "return_alerts": {
       "type": "integer",
-      "description": "Alerts returned inline (default 100); every alert remains in eve.json"
+      "description": "Alerts returned inline (default 100, 0 for none); every alert remains in eve.json and alerts_omitted says how many were left out"
     },
     "checksum_mode": {
       "type": "string",
-      "description": "none (default, tolerates capture-offload checksums) or all (validate every packet checksum)"
+      "description": "none (default, tolerates capture-offload checksums) or all (validate every packet checksum); passed as -k and recorded"
     },
     "timeout_seconds": {
       "type": "integer",
-      "description": "Offline analysis timeout (default 900)"
+      "description": "Kill the run, and everything it started, after this long (default 900, at least 10); the configuration test has its own 120 seconds"
     }
   },
   "requires": [
@@ -35,7 +39,36 @@
   "timeout_seconds": 1200,
   "example": "{\"path\": \"inputs/capture.pcap\", \"rules\": \"work/case.rules\", \"out_dir\": \"work/suricata\"}",
   "by": "maintainer",
-  "at": "2026-09-26T18:00:00.000Z",
-  "version": 2,
-  "sha256": "4aa97d8254a636def222f1bcc1c93704af00573ad70bfbb14a59a19b5c69ffc0"
+  "at": "2026-10-07T12:00:00.000Z",
+  "version": 3,
+  "sha256": "db618fd2b11c23c06b6aa2302b50a9e5870844ff5e7ed2b128fc8a7c0010dee8",
+  "use": {
+    "extensions": [
+      ".pcap",
+      ".pcapng",
+      ".cap"
+    ],
+    "magic": [
+      {
+        "offset": 0,
+        "hex": "d4c3b2a1"
+      },
+      {
+        "offset": 0,
+        "hex": "a1b2c3d4"
+      },
+      {
+        "offset": 0,
+        "hex": "4d3cb2a1"
+      },
+      {
+        "offset": 0,
+        "hex": "a1b23c4d"
+      },
+      {
+        "offset": 0,
+        "hex": "0a0d0d0a"
+      }
+    ]
+  }
 }

@@ -111,6 +111,8 @@ exit 7
 SH
 cat >"$TMP/fake-bin/suricata" <<'SH'
 #!/bin/sh
+# the configuration test (-T) and --build-info succeed; the run itself fails with a long diagnostic
+case " $* " in *" --build-info "*|*" -T "*) echo "This is Suricata version stand-in"; exit 0;; esac
 awk 'BEGIN { for (i = 0; i < 5000; i++) printf "S" > "/dev/stderr" }'
 exit 8
 SH
