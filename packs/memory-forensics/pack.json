@@ -15,10 +15,20 @@
     "python": "requires/python.txt"
   },
   "secrets": [],
+  "unreferenced_ok": [
+    {
+      "name": "gcc",
+      "why": "declared for a scanner or decoder a seat writes and builds in its own job when no library tool covers a layout; no skill walks through compiling one, and nothing from the evidence is ever built or run"
+    },
+    {
+      "name": "make",
+      "why": "declared for building a tool distributed as source from a tree the operator or a pack supplied; no skill names it, and nothing from the evidence is ever built or run"
+    }
+  ],
   "checksums": {
     "sha256": {
       "LICENCE": "5b94f18424dbef1e77eda33a465e946c2c8eb715fa5236afe2c6ec6763af80d3",
-      "README.md": "230acd5816088639883063b52913b48023169b1bb1d421d1e2c626cad865c85f",
+      "README.md": "5138edb8bb525b5229840e79e97ee2efe33402165eb74b17ac686366a1156d5f",
       "tools/mem_carve/manifest.json": "b493b206583b67420b18eb348b8964ed2ec84634625bfdeb69598fe7aafd348e",
       "tools/mem_carve/run.py": "433cca6031e2103ad16c5fa0d632bab84164431fae93b324b47029870125e4cb",
       "tools/mem_profile/manifest.json": "b1bacb82949615b3a4a2779539a1790931ba0e860ad29c4413af58559bd5c9ab",
@@ -35,7 +45,7 @@
       "skills/triage/what-you-have.md": "cda4f338c865760ccebf5ce81e2e774ac3f306e1daebe69e9e2a8e831e7d99f2",
       "skills/acquire/images.md": "cc8a2ae5b61854e1ad0be0de631078bc655ad96ac1c42dc7a4b157b6138db247",
       "skills/credentials/material.md": "70c996fc926d5719864ed276dbbbe0cf64ed9e28aadb6f8f4007a78774f4b16f",
-      "requires/host.json": "8d525797d6c06f4a5103bda4f22e8a3fcc0586ef92883181c11b0b83918ae19b",
+      "requires/host.json": "30964776820986c3bd16bd5a99f16545dfd9ea2984d43e680e7a97d8aba1de40",
       "requires/python.txt": "a0587a37c3cf6bfaf2947f4b8c6f56ba6f79a2e83f7141cfb1de950bb23a2fd0",
       "requires/symbols.windows.json": "d94b7dfa6ef6014bdf0f82952488e774a0f590500a872b87149f75256bddb105",
       "skills/INDEX.md": "b4ef916f32550b5912b9f6cc741374b4756f6e2547e7ac58c16c3957c5547e84"
