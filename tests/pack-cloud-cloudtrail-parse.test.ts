@@ -510,3 +510,29 @@ test("a link left where the values file would go is refused by name, and nothing
     assert.equal(await exists(join(cwd, "nowhere")), false);
   });
 });
+
+test("the time limit ends the read, keeps what was read, and names the files that were not reached", async () => {
+  await withDir(async (cwd) => {
+    const records = Array.from({ length: 150000 }, (_, i) => ct({ eventID: `t-${i}`, userIdentity: { ...ALICE, arn: `arn:aws:iam::999988887777:user/u${i % 30}` }, requestParameters: { n: i } }));
+    await put(cwd, "work/ev/a-big.json", JSON.stringify({ Records: records }));
+    await put(cwd, "work/ev/b-small.json", trail(ct({ eventID: "b-1" })));
+    const out = body(await tool(TRAIL, cwd, { path: "work/ev", time_limit_seconds: 1, limit: 5 }));
+    assert.equal(out.status, "partial");
+    assert.equal(out.coverage.stopped_by_time_limit, true);
+    assert.ok(out.coverage.records_read > 0 && out.coverage.records_read < 150000, `kept what was read: ${out.coverage.records_read}`);
+    assert.equal(out.coverage.files_not_attempted, 1);
+    assert.deepEqual(out.files_not_attempted_named.map((f: string) => f.split("/").pop()), ["b-small.json"]);
+    assert.equal(out.session_links.index_complete, false, "the session index stopped at its share of the time and says so");
+    const census = await rowsOf(cwd, out, "file_census");
+    assert.equal(census[0].status, "partial");
+    assert.match(census[0].problems.join(" "), /the time limit ended the read inside this file/);
+  });
+});
+
+test("link_sessions: false skips the session index and says so", async () => {
+  await withDir(async (cwd) => {
+    const out = await run(cwd, { "a.json": trail(goodAssume(), action()) }, { link_sessions: false });
+    assert.equal(origin(out, "act-1"), undefined);
+    assert.deepEqual(out.session_links, { performed: false, why: "link_sessions was false" });
+  });
+});
