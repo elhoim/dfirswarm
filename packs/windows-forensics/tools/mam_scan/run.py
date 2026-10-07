@@ -334,15 +334,16 @@ def read_candidate(path, offset, declared):
     with open(path, "rb") as fh:
         fh.seek(offset + MAM_HEADER)
         payload = fh.read(declared + declared // 4 + 4096)
+    attempted = [offset + MAM_HEADER, offset + MAM_HEADER + len(payload)]
     try:
         dec = bounded_decompress(payload, declared, soft=True)
     except Exception as exc:                                   # the decoder's own errors on rubbish
-        return None, "decompress_failed: %s" % type(exc).__name__
+        return None, "decompress_failed: %s" % type(exc).__name__, attempted
     if len(dec) < declared:
-        return None, "stream_ended_before_declared_size"
+        return None, "stream_ended_before_declared_size", attempted
     if dec[4:8] != SCCA:
-        return None, "not_prefetch"
-    return dec[:declared], None
+        return None, "not_prefetch", attempted
+    return dec[:declared], None, attempted
 
 
 def main():
@@ -400,16 +401,17 @@ def main():
                 counts["candidates"] += 1
                 rec = {"offset": off, "uncomp": declared}
                 if parse:
-                    dec, why = read_candidate(path, off, declared)
+                    dec, why, attempted = read_candidate(path, off, declared)
                     if dec is None:
                         failed_by_reason[why] = failed_by_reason.get(why, 0) + 1
-                        failures.add({"offset": off, "uncomp": declared, "reason": why})
+                        failures.add({"offset": off, "uncomp": declared, "reason": why, "attempted_range": attempted})
                         continue
                     scca = parse_scca(dec)
                     scca.pop("scca", None)
                     rec.update(scca)
                     rec["name"] = rec.get("exe_name")
                     rec["dec_len"] = len(dec)
+                    rec["attempted_range"] = attempted
                     counts["parsed"] += 1
                     if needle and needle not in (rec.get("exe_name") or "").upper() and \
                             needle not in " ".join(rec.get("filename_strings") or []).upper():
