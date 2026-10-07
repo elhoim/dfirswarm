@@ -75,7 +75,7 @@
   "by": "maintainer",
   "at": "2026-10-07T12:00:00.000Z",
   "version": 4,
-  "sha256": "6553e11815fe6e2ccc324dfa7781519d98181302e724982ded17a5c7381565b4",
+  "sha256": "1e98fd0c7417318c80fc657867f168915a8bd50f9c917b4d4c0fbbcf4259b6d1",
   "use": {
     "names": [
       "*signin*",

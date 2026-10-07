@@ -1085,8 +1085,8 @@ def remove_temp_db(db, directory):
 
 # ---- reading files: a bounded stream of JSON values -------------------------------------------------------------
 
-BOM = "﻿"
-REPLACEMENT = "�"
+BOM = "\ufeff"
+REPLACEMENT = "\ufffd"
 _SPACE = re.compile(r"\s*")
 ARCHIVE_EXT = (".zip", ".7z", ".rar", ".tar", ".tgz", ".bz2", ".xz", ".zst", ".lz4")
 ARCHIVE_MAGIC = ((b"PK\x03\x04", "a ZIP archive"), (b"PK\x05\x06", "a ZIP archive"), (b"PK\x07\x08", "a ZIP archive"),
@@ -1278,13 +1278,14 @@ class Source:
                     self._pending = b""
                     break
                 self._pending = self._d.unconsumed_tail
+                if self._d.eof:
+                    self._pending = self._d.unused_data      # at the end of the stream the tail repeats what is already here
                 if piece:
                     out.append(piece)
                     got += len(piece)
                     self._crc = zlib.crc32(piece, self._crc)
                     self._isize += len(piece)
                 if self._d.eof:
-                    self._pending = self._d.unused_data + self._pending
                     self._state = "trailer"
             else:
                 take = self._pending[:8 - len(self._tr)]

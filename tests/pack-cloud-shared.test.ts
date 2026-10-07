@@ -6,11 +6,12 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { readFile } from "node:fs/promises";
+import { chmod, readFile, readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
-import { SIGNIN, TOOLS, TRAIL, UAL, body, put, refused, tool, withDir } from "./cloud-pack-harness.ts";
+import { ALICE, SIGNIN, TOOLS, TRAIL, UAL, asJob, body, ct, everythingBut, exists, filesUnder, put, refused, rowsOf, spawnTool, tool, trail, withDir } from "./cloud-pack-harness.ts";
 import type { Json } from "./cloud-pack-harness.ts";
+import { CONTROLS, JWT, NAMED_CASES, TEXT_CASES, leaked } from "./cloud-pack-secrets.ts";
 
 const NAMES = ["cloudtrail_parse", "signin_analyse", "ual_parse"] as const;
 const SCRIPTS: Record<(typeof NAMES)[number], string> = { cloudtrail_parse: TRAIL, signin_analyse: SIGNIN, ual_parse: UAL };
@@ -178,4 +179,235 @@ test("the tables say how many distinct values they could not count, and the sign
     const si: Json = body(await tool(SIGNIN, cwd, { path: "work/ev/s.json" }));
     assert.deepEqual([si.coverage.users_not_analysed_over_cap, si.coverage.users_not_analysed_named], [0, []]);
   });
+});
+
+
+// ---- what is withheld: one test for every credential format ------------------------------------------------------------------
+
+/** One input per tool that carries `fields` where the tool prints free text and named fields (CloudTrail's request, the audit event's
+ *  parameters, the sign-in's raw record). */
+const carriers: Record<string, { script: string; file: string; text: (t: string) => string; named: (k: string, v: unknown) => string; args?: Json }> = {
+  cloudtrail_parse: {
+    script: TRAIL, file: "t.json", args: { link_sessions: false },
+    text: (t) => trail(ct({ eventID: "s-1", eventSource: "ec2.amazonaws.com", eventName: "RunInstances", userIdentity: ALICE, userAgent: t, errorMessage: t, requestParameters: { description: t }, responseElements: { note: t } })),
+    named: (k, v) => trail(ct({ eventID: "s-1", eventSource: "ec2.amazonaws.com", eventName: "RunInstances", userIdentity: ALICE, requestParameters: { [k]: v }, responseElements: { [k]: v }, additionalEventData: { [k]: v } })),
+  },
+  ual_parse: {
+    script: UAL, file: "u.json",
+    text: (t) => JSON.stringify([{ Id: "u-1", Operation: "Set-Mailbox", UserId: "alice@example.org", CreationTime: "2026-02-14T09:00:00Z", RecordType: 1, Workload: "Exchange", ClientInfoString: t, Parameters: [{ Name: "Note", Value: t }], ExtendedProperties: [{ Name: "Note", Value: t }] }]),
+    named: (k, v) => JSON.stringify([{ Id: "u-1", Operation: "Set-Mailbox", UserId: "alice@example.org", CreationTime: "2026-02-14T09:00:00Z", RecordType: 1, Workload: "Exchange", [k]: v, Parameters: [{ Name: k, Value: v }] }]),
+  },
+  signin_analyse: {
+    script: SIGNIN, file: "s.json",
+    text: (t) => JSON.stringify({ value: [{ id: "g-1", createdDateTime: "2026-02-14T09:00:00Z", userPrincipalName: "alice@example.org", userId: "u-1", appDisplayName: "App", ipAddress: "198.51.100.1", userAgent: t, status: { errorCode: 50126, failureReason: t, additionalDetails: t } }] }),
+    named: (k, v) => JSON.stringify({ value: [{ id: "g-1", createdDateTime: "2026-02-14T09:00:00Z", userPrincipalName: "alice@example.org", userId: "u-1", appDisplayName: "App", ipAddress: "198.51.100.1", status: { errorCode: 0 }, [k]: v }] }),
+  },
+};
+
+async function leakIn(name: string, input: string, secrets: string[]): Promise<string | undefined> {
+  const c = carriers[name];
+  let found: string | undefined;
+  await withDir(async (cwd) => {
+    await put(cwd, `work/ev/${c.file}`, input);
+    const run = await asJob(c.script, cwd, { path: `work/ev/${c.file}`, limit: 1, ...c.args });
+    const parsed = body(run);
+    const everything = await everythingBut(cwd, run.stdout + run.stderr, []);
+    assert.ok(parsed.values_withheld.count >= 1, `${name}: something was withheld: ${JSON.stringify(parsed.values_withheld.by_reason)}`);
+    for (const secret of secrets) {
+      const hit = leaked(secret, everything);
+      if (hit) found = `${name} printed ${hit} of ${secret.slice(0, 6)}...`;
+    }
+  });
+  return found;
+}
+
+for (const [label, secret, text] of TEXT_CASES) {
+  test(`a credential in free text is withheld from every channel by all three tools: ${label}`, async () => {
+    for (const name of Object.keys(carriers)) assert.equal(await leakIn(name, carriers[name].text(text), [secret]), undefined);
+  });
+}
+
+for (const [field, value] of NAMED_CASES) {
+  test(`a field named ${field} is withheld whatever its value looks like`, async () => {
+    const secret = String(value);
+    for (const name of Object.keys(carriers)) {
+      let marker = "";
+      await withDir(async (cwd) => {
+        const c = carriers[name];
+        await put(cwd, `work/ev/${c.file}`, c.named(field, value));
+        const run = await asJob(c.script, cwd, { path: `work/ev/${c.file}`, limit: 1, ...c.args });
+        body(run);
+        const everything = await everythingBut(cwd, run.stdout + run.stderr, []);
+        marker = everything;
+        if (typeof value === "string" && value.length >= 6) assert.equal(leaked(secret, everything), undefined, `${name} printed the value of ${field}`);
+        else assert.doesNotMatch(everything, new RegExp(`"${field}": ${secret}[,}\\s]`), `${name} printed the value of ${field}`);
+      });
+      assert.match(marker, /credential-named field/, `${name} says it withheld ${field}`);
+    }
+  });
+}
+
+test("what is evidence and only looks a little like a secret is printed as it is: an access key id, an ARN that names a secret, a GUID, a hash, a client token", async () => {
+  for (const name of Object.keys(carriers)) {
+    await withDir(async (cwd) => {
+      const c = carriers[name];
+      const input = c.text("x");
+      const note = CONTROLS.map(([, v]) => v);
+      const filled =
+        name === "cloudtrail_parse"
+          ? trail(ct({ eventID: "k-1", eventSource: "ec2.amazonaws.com", eventName: "RunInstances", userIdentity: ALICE, requestParameters: { hints: note, clientToken: "a1b2c3d4-0000-1111-2222-333344445555", secretId: note[1] }, resources: [{ ARN: note[1] }] }))
+          : name === "ual_parse"
+            ? JSON.stringify([{ Id: "u-1", Operation: "Set-Mailbox", UserId: "alice@example.org", CreationTime: "2026-02-14T09:00:00Z", RecordType: 1, Parameters: [{ Name: "Hint", Value: note.join(" ") }] }])
+            : JSON.stringify({ value: [{ id: "g-1", createdDateTime: "2026-02-14T09:00:00Z", userPrincipalName: "alice@example.org", userId: "u-1", appDisplayName: "App", ipAddress: "198.51.100.1", status: { errorCode: 0 }, userAgent: note.join(" ") }] });
+      assert.ok(input.length > 0);
+      await put(cwd, `work/ev/${c.file}`, filled);
+      const out = body(await tool(c.script, cwd, { path: `work/ev/${c.file}`, ...c.args }));
+      const text = JSON.stringify(out);
+      for (const [label, value] of CONTROLS) assert.ok(text.includes(value), `${name} withheld ${label}`);
+      if (name === "cloudtrail_parse") assert.ok(text.includes("a1b2c3d4-0000-1111-2222-333344445555"), "a client token that is an idempotency key is evidence");
+    });
+  }
+});
+
+// ---- a filter is not an oracle on a withheld value ---------------------------------------------------------------------------------
+
+test("a filter is matched against the text as printed: the right prefix of a withheld value and a wrong one give the same answer", async () => {
+  const token = JWT;
+  await withDir(async (cwd) => {
+    const trailText = trail(ct({ eventID: "o-1", eventSource: "s3.amazonaws.com", eventName: "GetObject", userIdentity: { type: "IAMUser", userName: token } }));
+    await put(cwd, "work/ev/t.json", trailText);
+    const right = body(await tool(TRAIL, cwd, { path: "work/ev/t.json", identity: "^" + token.slice(0, 8), link_sessions: false }));
+    const wrong = body(await tool(TRAIL, cwd, { path: "work/ev/t.json", identity: "^zzzzzzzz", link_sessions: false }));
+    assert.equal(right.record_count, wrong.record_count, "cloudtrail_parse: identity");
+    assert.equal(right.record_count, 0);
+    const marker = body(await tool(TRAIL, cwd, { path: "work/ev/t.json", identity: "withheld", link_sessions: false }));
+    assert.equal(marker.record_count, 1, "the printed marker can be filtered on, which says nothing about the original");
+
+    await put(cwd, "work/ev/u.json", JSON.stringify([{ Id: "u-1", Operation: "Send", UserId: token, CreationTime: "2026-02-14T09:00:00Z" }]));
+    const uRight = body(await tool(UAL, cwd, { path: "work/ev/u.json", user: "^" + token.slice(0, 8) }));
+    const uWrong = body(await tool(UAL, cwd, { path: "work/ev/u.json", user: "^zzzzzzzz" }));
+    assert.equal(uRight.record_count, uWrong.record_count, "ual_parse: user");
+
+    await put(cwd, "work/ev/s.json", JSON.stringify({ value: [{ id: "g-1", createdDateTime: "2026-02-14T09:00:00Z", userPrincipalName: token, appDisplayName: "App", ipAddress: "198.51.100.1", status: { errorCode: 0 } }] }));
+    const sRight = body(await tool(SIGNIN, cwd, { path: "work/ev/s.json", user: "^" + token.slice(0, 8) }));
+    const sWrong = body(await tool(SIGNIN, cwd, { path: "work/ev/s.json", user: "^zzzzzzzz" }));
+    assert.equal(sRight.event_count, sWrong.event_count, "signin_analyse: user");
+    assert.equal(sRight.coverage.events_filtered_out, 1);
+  });
+});
+
+test("a filter pattern that can take exponential or very long time is refused or stopped, named, and the call returns", async () => {
+  await withDir(async (cwd) => {
+    await put(cwd, "work/ev/t.json", trail(ct({ eventID: "r-1", userIdentity: { type: "IAMUser", arn: "arn:aws:iam::1:user/" + "a".repeat(41) } })));
+    await put(cwd, "work/ev/u.json", JSON.stringify([{ Id: "u-1", Operation: "Send", UserId: "a".repeat(41), CreationTime: "2026-02-14T09:00:00Z" }]));
+    await put(cwd, "work/ev/s.json", JSON.stringify({ value: [{ id: "g-1", createdDateTime: "2026-02-14T09:00:00Z", userPrincipalName: "a".repeat(41), status: { errorCode: 0 } }] }));
+    const cases: Array<[string, string, string, string]> = [[TRAIL, "identity", "t.json", "link_sessions"], [UAL, "user", "u.json", ""], [SIGNIN, "user", "s.json", ""]];
+    for (const [script, key, file] of cases.map((c) => [c[0], c[1], c[2]])) {
+      for (const pattern of ["(a+)+$", "(a|aa)+$", "(a*)*b", "(.*)\\1", ".*.*.*.*.*.*x"]) {
+        const started = Date.now();
+        const out = refused(await tool(script, cwd, { path: `work/ev/${file}`, [key]: pattern, time_limit_seconds: 5 }));
+        assert.equal(out.status, "failed");
+        assert.match(out.error, /refused|took longer/, `${script.split("/").slice(-2)[0]} ${pattern}`);
+        assert.ok(Date.now() - started < 20_000, `${pattern} returned in ${Date.now() - started} ms`);
+      }
+      // A pattern with a few repeats that does finish quickly is accepted.
+      const ok = await tool(script, cwd, { path: `work/ev/${file}`, [key]: "^a.*$|arn:aws:iam::\\d+:user/.*" });
+      assert.equal(ok.code, 0, ok.stdout);
+    }
+  });
+});
+
+test("an argument the tool does not take is refused, naming it and the ones it takes", async () => {
+  await withDir(async (cwd) => {
+    await put(cwd, "work/ev/a.json", "{}");
+    for (const script of Object.values(SCRIPTS)) {
+      const out = refused(await tool(script, cwd, { path: "work/ev/a.json", identiy: "alice", usr: "x" }));
+      assert.equal(out.status, "failed");
+      assert.match(out.error, /unknown argument\(s\): identiy, usr\. This tool takes: .*path/);
+    }
+  });
+});
+
+// ---- the process ends cleanly ---------------------------------------------------------------------------------------------------------
+
+test("SIGTERM, which is what a job's timeout sends first, leaves no temporary result, no index and no half-written file behind", async (t) => {
+  for (const [name, script, file, make] of [
+    ["cloudtrail_parse", TRAIL, "big.json", (n: number) => JSON.stringify({ Records: Array.from({ length: n }, (_, i) => ct({ eventID: `g-${i}`, eventSource: "s3.amazonaws.com", eventName: "GetObject", userIdentity: ALICE })) })],
+    ["ual_parse", UAL, "big.json", (n: number) => JSON.stringify(Array.from({ length: n }, (_, i) => ({ Id: `u-${i}`, Operation: "Send", UserId: "a@b.c", CreationTime: "2026-02-14T09:00:00Z" })))],
+    ["signin_analyse", SIGNIN, "big.json", (n: number) => JSON.stringify({ value: Array.from({ length: n }, (_, i) => ({ id: `g-${i}`, createdDateTime: "2026-02-14T09:00:00Z", userPrincipalName: `u${i % 50}@example.org`, userId: `id-${i % 50}`, ipAddress: "198.51.100.1", status: { errorCode: 0 } })) })],
+  ] as Array<[string, string, string, (n: number) => string]>) {
+    let skipped: string | undefined;
+    await withDir(async (cwd) => {
+      await put(cwd, `work/ev/${file}`, make(300_000));
+      await asJob(script, cwd, { path: "work/ev/missing" }); // makes the job output directory
+      const { child, done } = spawnTool(script, cwd, { path: `work/ev/${file}`, out_file: "out/all.jsonl", time_limit_seconds: 300 }, { JOB_ID: "jterm", OUT: join(cwd, "out") });
+      let temp: string | undefined;
+      for (let i = 0; i < 400 && !temp; i++) {
+        await new Promise((r) => setTimeout(r, 25));
+        temp = (await readdir(join(cwd, "out"))).find((f) => f.startsWith(".") && f !== ".");
+      }
+      if (!temp) {
+        skipped = `${name} finished before it could be signalled`;
+        child.kill("SIGKILL");
+        await done;
+        return;
+      }
+      child.kill("SIGTERM");
+      const run = await done;
+      assert.equal(run.signal ?? null, null, `${name} exited by itself`);
+      assert.equal(run.code, 143, `${name} exit code after SIGTERM: ${run.stderr}`);
+      const left = (await filesUnder(join(cwd, "out"))).concat(await filesUnder(join(cwd, "work", "s1")));
+      assert.deepEqual(left.filter((f) => !f.endsWith("/")), [], `${name} left files behind`);
+      assert.equal(await exists(join(cwd, "out", "all.jsonl")), false, "the requested name only ever holds a finished result");
+    });
+    if (skipped) t.diagnostic(skipped);
+  }
+});
+
+test("a job writes only under $OUT: with the run directory read-only, each tool still answers and leaves its files in $OUT", async (t) => {
+  if (process.getuid?.() === 0) return t.skip("running as root: a read-only directory does not stop a write");
+  const trees: Array<[string, string, string]> = [
+    [TRAIL, "t.json", trail(ct({ eventID: "ro-1", eventSource: "sts.amazonaws.com", eventName: "AssumeRole" }), ct({ eventID: "ro-2", eventSource: "s3.amazonaws.com", eventName: "GetObject", userIdentity: ALICE }))],
+    [UAL, "u.json", JSON.stringify([{ Id: "u-1", Operation: "Send", UserId: "a@b.c", CreationTime: "2026-02-14T09:00:00Z" }])],
+    [SIGNIN, "s.json", JSON.stringify({ value: [{ id: "g-1", createdDateTime: "2026-02-14T09:00:00Z", userPrincipalName: "a@b.c", status: { errorCode: 0 } }] })],
+  ];
+  for (const [script, file, text] of trees) {
+    await withDir(async (cwd) => {
+      await put(cwd, `work/ev/${file}`, text);
+      const outDir = join(cwd, "out");
+      await asJob(script, cwd, { path: `work/ev/${file}` }, {}, "out", "jprime");
+      const locked = [cwd, join(cwd, "work"), join(cwd, "work", "ev"), join(cwd, "work", "s1"), join(cwd, "inputs")];
+      try {
+        for (const d of locked) await chmod(d, 0o555);
+        const run = await asJob(script, cwd, { path: `work/ev/${file}`, limit: 1, out_file: join(outDir, "all.jsonl") }, {}, "out", "jro");
+        assert.equal(run.code, 0, run.stderr + run.stdout);
+        const answer = JSON.parse(run.stdout);
+        assert.equal(answer.status, "complete");
+        assert.ok((await stat(outDir)).isDirectory());
+      } finally {
+        for (const d of locked) await chmod(d, 0o755);
+      }
+    });
+  }
+});
+
+// ---- the code itself ---------------------------------------------------------------------------------------------------------------------
+
+test("the shared block is the only place a shared name is bound: nothing after its end marker re-binds one of its names", async () => {
+  for (const name of NAMES) {
+    const text = await readFile(SCRIPTS[name], "utf8");
+    const [shared, rest] = [text.slice(0, text.indexOf(END)), text.slice(text.indexOf(END))];
+    const bound = new Set([...shared.matchAll(/^([A-Za-z_][A-Za-z0-9_]*)\s*=(?!=)/gm), ...shared.matchAll(/^(?:def|class)\s+([A-Za-z_][A-Za-z0-9_]*)/gm)].map((m) => m[1]));
+    const again = [...rest.matchAll(/^([A-Za-z_][A-Za-z0-9_]*)\s*=(?!=)/gm), ...rest.matchAll(/^(?:def|class)\s+([A-Za-z_][A-Za-z0-9_]*)/gm)].map((m) => m[1]).filter((n) => bound.has(n));
+    assert.deepEqual(again, [], `${name} re-binds a name of the shared block`);
+  }
+});
+
+test("a source file holds no invisible or direction-changing character, and no non-ASCII character at all", async () => {
+  for (const name of NAMES) {
+    const text = await readFile(SCRIPTS[name], "utf8");
+    // eslint-disable-next-line no-control-regex
+    const bad = [...text.matchAll(/[^\x09\x0a\x20-\x7e]/g)].map((m) => `U+${m[0].codePointAt(0)!.toString(16).padStart(4, "0")} at ${m.index}`);
+    assert.deepEqual(bad.slice(0, 5), [], `${name} has characters a reviewer cannot see`);
+  }
 });
