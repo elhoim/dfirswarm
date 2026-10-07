@@ -199,7 +199,7 @@ export function pcapClassic(packets: Pkt[], o: { snaplen?: number; nano?: boolea
   head.writeUInt16LE(4, 6);
   head.writeUInt32LE(o.snaplen ?? 65535, 16);
   head.writeUInt32LE(o.link ?? 1, 20);
-  const parts = [head];
+  const parts: Buffer[] = [head];
   for (const p of packets) {
     const rec = Buffer.alloc(16);
     rec.writeUInt32LE(p.sec, 0);
