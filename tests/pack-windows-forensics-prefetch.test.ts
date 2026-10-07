@@ -334,12 +334,16 @@ test("mam_scan refuses arguments that are not a JSON object, as JSON", async () 
 
 // --- memory ------------------------------------------------------------------------
 
-const PEAK_RSS = [
-  "import resource, runpy, sys",
+// The peak of what the tool allocates through Python's allocators (tracemalloc), not the process's resident size: the same code
+// peaks at a very different resident size on macOS and on Linux (the C allocator keeps or returns freed windows differently), and
+// what this holds the tool to is that it keeps one window at a time.
+const PEAK_ALLOCATED = [
+  "import runpy, sys, tracemalloc",
+  "tracemalloc.start()",
   "try:",
   "    runpy.run_path(sys.argv[1], run_name='__main__')",
   "finally:",
-  "    sys.stderr.write('PEAK_RSS=%d\\n' % (resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * (1 if sys.platform == 'darwin' else 1024)))",
+  "    sys.stderr.write('PEAK_ALLOCATED=%d\\n' % tracemalloc.get_traced_memory()[1])",
 ].join("\n");
 
 test("mam_scan reads a window into one buffer: three windows of 32 MiB peak well under twice a window, not at a copy or two of each", async () => {
@@ -348,7 +352,7 @@ test("mam_scan reads a window into one buffer: three windows of 32 MiB peak well
   await withCwd(async (cwd) => {
     const MiB = 1024 * 1024;
     await writeFile(join(cwd, "work", "big.raw"), Buffer.alloc(96 * MiB, 0x2e));
-    const run = spawnSync("python3", ["-c", PEAK_RSS, join(WIN, "mam_scan", "run.py")], {
+    const run = spawnSync("python3", ["-c", PEAK_ALLOCATED, join(WIN, "mam_scan", "run.py")], {
       cwd,
       input: JSON.stringify({ path: "work/big.raw", chunk: 32 * MiB }),
       env: { ...process.env, ...AGENT },
@@ -358,7 +362,7 @@ test("mam_scan reads a window into one buffer: three windows of 32 MiB peak well
     const answer = JSON.parse(run.stdout) as { scanned_to: number; count: number; status: string };
     assert.equal(answer.scanned_to, 96 * MiB);
     assert.equal(answer.status, "complete");
-    const peak = Number(/PEAK_RSS=(\d+)/.exec(run.stderr)![1]);
-    assert.ok(peak < 1.5 * 32 * MiB + 24 * MiB, `the scan peaked at ${(peak / MiB).toFixed(0)} MiB`);
+    const peak = Number(/PEAK_ALLOCATED=(\d+)/.exec(run.stderr)![1]);
+    assert.ok(peak < 1.5 * 32 * MiB + 24 * MiB, `the scan allocated ${(peak / MiB).toFixed(0)} MiB at its peak`);
   });
 });
