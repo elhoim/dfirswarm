@@ -57,6 +57,7 @@
       "tests/test_icat_extract.py": "2f599c6f12a423df874e23bfc6d9cdc91f48f440a68a2d65eb52f3a2a9d61fb0",
       "tests/test_image_layout.py": "68214cfd2144e0730b0fdb8e6d75d66909a23587a81e29c703985e817d5e0ec7",
       "tests/test_ioc_scan.py": "c581b5b05693e00557a61d7d56b2d6c14e6db76857c85a6ee12daedc4b3cabb3",
+      "tests/test_manifests.py": "3d1b4dbdacdc8a11553320ca621c6f9b859570f03f2292f49a368c326a04a50f",
       "tests/test_sig_carve.py": "e06abae2107142121cf298e6dc53fc70b3322e461816d8110d3c2811a06f4c39",
       "tests/test_sqlite_query.py": "21998a02fed123d3b0beb77f3bd5c1503aaf2e23e4f2806b1597100c0bde2e44",
       "tests/test_timeline_super.py": "2da96da1f7969b3ca709a54e60c72547bf7d35288abf9f722d56bbb4a138ad74",
@@ -71,20 +72,20 @@
       "recipes/disk-volumes/run.sh": "117b3997c5bac4f77f75001895c6d31fa9033625cfca7ed35252af545b2005fd",
       "recipes/archive-members/recipe.json": "27643c9aea073936051e6c60ef04113f9dbbdfc04aedaac823f8d54835f873e2",
       "recipes/archive-members/run.py": "ac7b90fb8d739dab7808bdf8036c9c9471a321a98e25a77f99b168a23a0ee744",
-      "skills/reporting/citations.md": "b8e4ce786be10c0cc734232314f1ef2bd1208ebabf7ed0f41cfb7d8ee48694d9",
-      "skills/reporting/disagreement.md": "1e454010c3dbc6feadd4128ad23363fb2e1f0b0097f72906c3c4841c84507b77",
-      "skills/evidence/catalog.md": "4c580bfd30548f9d449fe2104b4a3a6c5abc5010452935fee7e57e82b0cea0d8",
-      "skills/evidence/collections.md": "98c940896bfe205cbbb43677b6eea37cddf95d8ec7c96ee1aabcb770bf7fdf31",
-      "skills/evidence/imaging.md": "a3604e30af88fe2ac1221a187e902b186a7539bf9e411a3885c4b01b2ee3a5c1",
-      "skills/evidence/verify.md": "f5f965df1eec7e6ab43b427a4dfe6bb331009a6761dd2d108cb92775c0bcf9e9",
-      "skills/filesystem/carving.md": "2f0e7da0d228dcea968c38055877f9dac06bb89a4b3006b2172b708567d048cd",
-      "skills/filesystem/encrypted.md": "6f1703237a00438c371328cba3b0e7da55e658ba83a8dc9b18ff67658aeeb1de",
+      "skills/reporting/citations.md": "49c1f131b6354dfe89acc03aa9b9882e66e504de0cd586b82a562ea4f0876ef7",
+      "skills/reporting/disagreement.md": "9fea6e4863818248ea2080520208c8120d6d5335240cdd82e46ac74fd5458a72",
+      "skills/evidence/catalog.md": "5511f21e3584907322c77dfb1c4472df8972b3183b66c8d3c16649ea8b7730b0",
+      "skills/evidence/collections.md": "1ecf61565a886fc7304ba70cee9e6eb241128ccb875263eb03b219174a892800",
+      "skills/evidence/imaging.md": "c49bef5ad2c886e5cca4226e79a8aeda5f9c74000ad717fdedaf7fbdc0ad9dc4",
+      "skills/evidence/verify.md": "40f355a05dbf2e93d8fa91031fafec84d519ccfd0dcc7516d17a2e884caf68fe",
+      "skills/filesystem/carving.md": "c4c45ad426b89c3f85f9b10049d6363dd9abd0b72c7cc8f0969a322cb10b0bb1",
+      "skills/filesystem/encrypted.md": "b50fc08b58f2eefacdd5056ad29fa5adee44a75f957796790856c951d77522f7",
       "skills/filesystem/extract.md": "77bb848fdb1e22748756b13ae75337ad08526b4c40efc690ec0d927298bc4cb7",
-      "skills/timeline/build.md": "05d3ec7c58f647b4e869b1a61e5f17022f391a1071ff8aa0935c8407345d2271",
-      "skills/timeline/super.md": "8efb20d4e54241bfdb6a740af1eee0c5ac908bfb42d8a8cbfc3f1a4be5a9ed69",
+      "skills/timeline/build.md": "183f4672ad13c22acaf64c85fa9fa7422cdc87b84c0175dc3b07bb99cf7a3223",
+      "skills/timeline/super.md": "d6f5ca391d960ba8702c81df57ff3a4420928e371b40c1d0138b4aa12c6d7153",
       "requires/host.json": "e5f22a37450ad26a463a4235541357b21c46eead6ddeab82ada4e97bf332cfef",
       "requires/python.txt": "e045dd44c9347ec21afa34ac093ea33e15085d64744758eb3d5b6b970884ab24",
-      "skills/INDEX.md": "bba208189f453808346a2cfbc7b69fb143c5e040d0e00092a408c6a890bb2cf1"
+      "skills/INDEX.md": "e34958f6e8a9fa33139d0a8ea362ea86cbe7e1f517dc633158594d1c50720984"
     }
   },
   "tools": [
@@ -110,5 +111,23 @@
     "computer-forensics-base/disk-timeline",
     "computer-forensics-base/disk-volumes",
     "computer-forensics-base/memory-windows"
+  ],
+  "unreferenced_ok": [
+    {
+      "name": "pdftotext",
+      "why": "declared for the document-content skill planned for the next change; no skill of this pack names it yet"
+    },
+    {
+      "name": "steghide",
+      "why": "declared for the document-content skill planned for the next change; no skill of this pack names it yet"
+    },
+    {
+      "name": "Pillow",
+      "why": "for an agent's own scripts over an image (requires/python.txt); the document-content skill planned for the next change will name it"
+    },
+    {
+      "name": "ccl_indexeddb_dump",
+      "why": "declared for the browser structured-storage wrapper and skill planned for a later change; no skill of this pack names it yet"
+    }
   ]
 }

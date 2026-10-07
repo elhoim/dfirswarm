@@ -1,7 +1,7 @@
 ---
 id: filesystem/encrypted
-title: A volume the toolkit cannot read
-when: fsstat refuses a partition, or the listing is one file you cannot open.
+title: Distinguish encryption from other causes of unreadability
+when: A supported reader cannot open a source, or validated metadata identifies encryption.
 needs: [evidence/imaging]
 tools: []
 requires_host: [fsstat, fls, bdeinfo, dislocker, cryptsetup, luksdeinfo, fvdeinfo, fsapfsinfo]
