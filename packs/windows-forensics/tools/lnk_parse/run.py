@@ -345,11 +345,16 @@ def utf16_runs(data, start):
         yield run
 
 
+LETTER_CANDIDATE = re.compile(r"[^\W\d_]")
+
+
 def run_has_letter(data, start, a, b):
+    """Whether the run holds a letter (str.isalpha). The regular expression finds the candidates at C speed, a run of
+    digits or punctuation costs a pass and no Python loop, and each candidate is confirmed by isalpha itself."""
     step = 1 << 16
     for u in range(a, b, step):
         chunk = data[start + 2 * u:start + 2 * min(u + step, b)]
-        if any(c.isalpha() for c in chunk.decode("utf-16-le", "replace")):
+        if any(m.group().isalpha() for m in LETTER_CANDIDATE.finditer(chunk.decode("utf-16-le", "replace"))):
             return True
     return False
 
