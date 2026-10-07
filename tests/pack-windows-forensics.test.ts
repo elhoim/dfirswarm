@@ -1575,3 +1575,357 @@ test("indx_carve returns the raw FILETIMEs beside the dates and no longer says s
     assert.match(out.note, /not evidence that they were left unaltered/);
   });
 });
+
+// --- prefetch_mam and mam_scan --------------------------------------------------
+
+/**
+ * A Prefetch (SCCA) file as the libscca layout notes lay it out: the version at 0, "SCCA" at 4,
+ * the file size at 0x0C, the executable name (UTF-16LE, 60 bytes) at 0x10, the hash at 0x4C; the file
+ * information from 0x54 (metrics offset and entries, trace chains offset and entries, filename strings
+ * offset and size, volume information offset, entries and size); the last-run FILETIMEs (0x78 in version 17,
+ * 0x80 after, one slot in 17 and 23, eight from 26) and the run count (0x90, 0x98, 0xD0) by version;
+ * the filename strings as one UTF-16LE list of NUL-terminated names; and a volume entry (device path
+ * offset and character count, creation FILETIME, serial number, then the path itself).
+ */
+type Scca = { version: number; exe: string; hash: number; runCount: number; lastRuns: bigint[]; names: string[]; device?: string; serial?: number; created?: bigint };
+
+function scca(o: Scca): Buffer {
+  const layout: Record<number, { lastAt: number; slots: number; countAt: number }> = {
+    17: { lastAt: 0x78, slots: 1, countAt: 0x90 },
+    23: { lastAt: 0x80, slots: 1, countAt: 0x98 },
+    26: { lastAt: 0x80, slots: 8, countAt: 0xd0 },
+    30: { lastAt: 0x80, slots: 8, countAt: 0xd0 },
+  };
+  const l = layout[o.version] ?? layout[30];
+  const names = Buffer.concat(o.names.map((n) => u16z(n)));
+  const namesAt = 0x200;
+  const volsAt = namesAt + Math.ceil(names.length / 8) * 8;
+  const device = o.device === undefined ? Buffer.alloc(0) : u16z(o.device);
+  const b = Buffer.alloc(volsAt + 0x68 + device.length + 8);
+  b.writeUInt32LE(o.version, 0);
+  b.write("SCCA", 4, "latin1");
+  b.writeUInt32LE(0x0f, 8);
+  b.writeUInt32LE(b.length, 12);
+  Buffer.from(o.exe, "utf16le").copy(b, 0x10);
+  b.writeUInt32LE(o.hash, 0x4c);
+  b.writeUInt32LE(0x138, 0x54);
+  b.writeUInt32LE(o.names.length, 0x58);
+  b.writeUInt32LE(0x138, 0x5c);
+  b.writeUInt32LE(0, 0x60);
+  b.writeUInt32LE(namesAt, 0x64);
+  b.writeUInt32LE(names.length, 0x68);
+  b.writeUInt32LE(volsAt, 0x6c);
+  b.writeUInt32LE(o.device === undefined ? 0 : 1, 0x70);
+  b.writeUInt32LE(0x68 + device.length, 0x74);
+  o.lastRuns.slice(0, l.slots).forEach((t, i) => b.writeBigUInt64LE(t, l.lastAt + i * 8));
+  b.writeUInt32LE(o.runCount, l.countAt);
+  names.copy(b, namesAt);
+  if (o.device !== undefined) {
+    b.writeUInt32LE(0x68, volsAt);
+    b.writeUInt32LE(o.device.length + 1, volsAt + 4);
+    b.writeBigUInt64LE(o.created ?? 0n, volsAt + 8);
+    b.writeUInt32LE(o.serial ?? 0, volsAt + 16);
+    device.copy(b, volsAt + 0x68);
+  }
+  return b;
+}
+
+/**
+ * Xpress Huffman (the MS-XCA LZ77+Huffman format MAM uses): chunks of up to 65536 output bytes, each a
+ * 256-byte table of 512 four-bit code lengths and then a bit stream read as little-endian 16-bit words, most
+ * significant bit first. Every symbol is given a 9-bit code here (a complete code: 512 symbols of length 9), so
+ * symbol s has code s: literals are 0..255 and a match (offset 1, 3 to 17 bytes) is 256 + length - 3. A chunk
+ * ends after the symbol that takes it to 65536 bytes and is followed by one zero word; the last by two.
+ */
+function xpressHuffman(ops: Array<number | { match: number }>): Buffer {
+  const out: Buffer[] = [];
+  let i = 0;
+  while (i < ops.length) {
+    let size = 0;
+    const words: number[] = [];
+    let acc = 0;
+    let nbits = 0;
+    const put = (symbol: number): void => {
+      for (let b = 8; b >= 0; b--) {
+        acc = (acc << 1) | ((symbol >> b) & 1);
+        if (++nbits === 16) {
+          words.push(acc);
+          acc = 0;
+          nbits = 0;
+        }
+      }
+    };
+    while (i < ops.length && size < 65536) {
+      const op = ops[i++];
+      if (typeof op === "number") {
+        put(op);
+        size += 1;
+      } else {
+        put(256 + op.match - 3);
+        size += op.match;
+      }
+    }
+    if (nbits) words.push(acc << (16 - nbits));
+    words.push(0);
+    if (i >= ops.length) words.push(0);
+    out.push(Buffer.alloc(256, 0x99));
+    const w = Buffer.alloc(words.length * 2);
+    words.forEach((v, k) => w.writeUInt16LE(v, k * 2));
+    out.push(w);
+  }
+  return Buffer.concat(out);
+}
+
+/** A MAM container: "MAM", the method byte, the declared uncompressed size, the compressed data. */
+function mam(declared: number, compressed: Buffer, method = 4): Buffer {
+  const head = Buffer.alloc(8);
+  head.write("MAM", 0, "latin1");
+  head[3] = method;
+  head.writeUInt32LE(declared, 4);
+  return Buffer.concat([head, compressed]);
+}
+
+const mamOf = (plain: Buffer): Buffer => mam(plain.length, xpressHuffman([...plain]));
+
+type PrefetchOut = {
+  status: string;
+  container: { mam: boolean; declared_uncompressed_size?: number; decompressed_size?: number; bytes_past_declared_size?: number; why?: string; method?: number };
+  version?: number;
+  supported?: boolean;
+  exe_name?: string;
+  prefetch_hash?: string;
+  run_count?: number | null;
+  last_runs?: string[];
+  last_runs_detail?: Array<{ slot: number; filetime: string; utc: string }>;
+  filename_strings?: string[];
+  volumes_decoded?: Array<{ device_path: string | null; serial_number: string; created_utc: string | null }>;
+  volumes_claimed?: number;
+  file_size_matches?: boolean;
+  problems: string[];
+  all_strings?: unknown;
+};
+
+const RUN_1 = 133_443_104_001_234_567n; // 2023-11-13T00:53:20.1234567Z
+const SAMPLE_NAMES = [
+  "\\VOLUME{01d9aaaabbbb0000-1a2b3c4d}\\WINDOWS\\SYSTEM32\\NTDLL.DLL",
+  "\\VOLUME{01d9aaaabbbb0000-1a2b3c4d}\\USERS\\ÖZGÜR\\DOCUMENTS\\RAPOR-ÇALIŞMA.DOCX",
+  "\\VOLUME{01d9aaaabbbb0000-1a2b3c4d}\\PROGRAM FILES\\EXAMPLE\\EXAMPLE.EXE",
+];
+
+function sample(version: number): Buffer {
+  return scca({
+    version,
+    exe: "EXAMPLE.EXE",
+    hash: 0xa1b2c3d4,
+    runCount: 7,
+    lastRuns: [RUN_1, RUN_1 + 10_000_000n, 0n, 0n, 0n, 0n, 0n, 0n],
+    names: SAMPLE_NAMES,
+    device: "\\VOLUME{01d9aaaabbbb0000-1a2b3c4d}",
+    serial: 0x1a2b3c4d,
+    created: RUN_1 - 5_000_000_000n,
+  });
+}
+
+test("prefetch_mam reads a version 30 file by its layout: the run count, last runs by integer arithmetic, every filename string whole, and the first volume", async () => {
+  // The strings were found by a regular expression that matched ASCII-range UTF-16 only, so a path with a
+  // non-ASCII character was missed; the last-run fraction was rounded through a float.
+  await withCwd(async (cwd) => {
+    await writeFile(join(cwd, "work", "EXAMPLE.EXE-A1B2C3D4.pf"), sample(30));
+    const out = body<PrefetchOut>(await tool("prefetch_mam", cwd, { path: "work/EXAMPLE.EXE-A1B2C3D4.pf" }));
+    assert.equal(out.status, "complete");
+    assert.equal(out.container.mam, false);
+    assert.equal(out.version, 30);
+    assert.equal(out.exe_name, "EXAMPLE.EXE");
+    assert.equal(out.prefetch_hash, "A1B2C3D4");
+    assert.equal(out.run_count, 7);
+    assert.deepEqual(out.last_runs, ["2023-11-13T00:53:20.1234567Z", "2023-11-13T00:53:21.1234567Z"]);
+    assert.equal(out.last_runs_detail?.[0].filetime, String(RUN_1));
+    assert.deepEqual(out.filename_strings, SAMPLE_NAMES, "the section the header locates, every name whole, non-ASCII included");
+    assert.equal(out.volumes_decoded?.[0].device_path, "\\VOLUME{01d9aaaabbbb0000-1a2b3c4d}");
+    assert.equal(out.volumes_decoded?.[0].serial_number, "1A2B3C4D");
+    assert.equal(out.file_size_matches, true);
+    assert.deepEqual(out.problems, []);
+    assert.equal(out.all_strings, undefined, "the printable-run search is gone");
+  });
+});
+
+test("prefetch_mam reads a version 23 file at its own offsets: the run count at 0x98 and one last-run slot", async () => {
+  await withCwd(async (cwd) => {
+    await writeFile(join(cwd, "work", "a.pf"), sample(23));
+    const out = body<PrefetchOut>(await tool("prefetch_mam", cwd, { path: "work/a.pf" }));
+    assert.equal(out.version, 23);
+    assert.equal(out.run_count, 7);
+    assert.deepEqual(out.last_runs, ["2023-11-13T00:53:20.1234567Z"]);
+  });
+});
+
+test("prefetch_mam returns unsupported for a version it does not read, and interprets none of its version-dependent fields", async () => {
+  // Version 99 was read as if it were 30: a last-run time and a run count came out of bytes that mean something else.
+  await withCwd(async (cwd) => {
+    const odd = sample(30);
+    odd.writeUInt32LE(99, 0);
+    await writeFile(join(cwd, "work", "odd.pf"), odd);
+    const out = body<PrefetchOut>(await tool("prefetch_mam", cwd, { path: "work/odd.pf" }));
+    assert.equal(out.status, "unsupported");
+    assert.equal(out.supported, false);
+    assert.equal(out.version, 99);
+    assert.equal(out.exe_name, "EXAMPLE.EXE", "the version-independent header is still read");
+    assert.equal(out.last_runs, undefined);
+    assert.equal(out.run_count, undefined);
+    assert.equal(out.filename_strings, undefined);
+    assert.match(out.problems[0], /version 99 is not one this parser reads/);
+  });
+});
+
+test("prefetch_mam inflates a MAM-compressed file to the same reading as the plain one, and says what the container held", async () => {
+  await withCwd(async (cwd) => {
+    const plain = sample(30);
+    await writeFile(join(cwd, "work", "c.pf"), mamOf(plain));
+    const out = body<PrefetchOut>(await tool("prefetch_mam", cwd, { path: "work/c.pf" }));
+    assert.equal(out.status, "complete");
+    assert.equal(out.container.mam, true);
+    assert.equal(out.container.declared_uncompressed_size, plain.length);
+    assert.equal(out.container.decompressed_size! - out.container.bytes_past_declared_size!, plain.length);
+    assert.ok(out.container.bytes_past_declared_size! < 64, "a few bytes past the declared size are the stream's own end");
+    assert.deepEqual(out.filename_strings, SAMPLE_NAMES);
+    assert.equal(out.run_count, 7);
+    // A file larger than one 64 KiB chunk: several chunks of literals, each with its own table.
+    const big = Buffer.concat([sample(30), Buffer.alloc(200_000, 0x5a)]);
+    big.writeUInt32LE(big.length, 12);
+    await writeFile(join(cwd, "work", "big.pf"), mamOf(big));
+    const bigOut = body<PrefetchOut>(await tool("prefetch_mam", cwd, { path: "work/big.pf" }));
+    assert.equal(bigOut.container.declared_uncompressed_size, big.length);
+    assert.deepEqual(bigOut.filename_strings, SAMPLE_NAMES);
+  });
+});
+
+test("prefetch_mam refuses a MAM method it does not read, by name, and inflates nothing", async () => {
+  await withCwd(async (cwd) => {
+    await writeFile(join(cwd, "work", "v.pf"), mam(1000, Buffer.alloc(300), 0x84));
+    const out = body<PrefetchOut>(await tool("prefetch_mam", cwd, { path: "work/v.pf" }));
+    assert.equal(out.status, "unsupported");
+    assert.equal(out.container.method, 0x84);
+    assert.match(out.container.why ?? "", /method byte 0x84 is not the Xpress Huffman method/);
+    assert.match(out.problems[0], /checksum/);
+  });
+});
+
+test("prefetch_mam stops a stream that inflates past its declared size at the cap, and does not hold the whole output", async () => {
+  // The whole payload was decompressed before its size was looked at: a stream declared as 1 MiB could grow
+  // to any size, since the decoder runs until its input ends. This one is declared 1 MiB and would inflate to
+  // about 100 MiB: seven thousand matches of 17 bytes, repeated.
+  await withCwd(async (cwd) => {
+    const ops: Array<number | { match: number }> = [0x41];
+    for (let i = 0; i < 6_000_000; i++) ops.push({ match: 17 });
+    const bomb = mam(1024 * 1024, xpressHuffman(ops));
+    await writeFile(join(cwd, "work", "bomb.pf"), bomb);
+    const started = Date.now();
+    const err = failed(await tool("prefetch_mam", cwd, { path: "work/bomb.pf" }));
+    assert.match(err.error, /inflates past its declared size of 1048576 bytes plus 65536/);
+    assert.equal(err.cap, 1048576 + 65536);
+    assert.ok(Date.now() - started < 60_000, "the decoder was stopped at the cap, not run to the end of its input");
+  });
+});
+
+test("prefetch_mam fails on a stream shorter than its declared size, and on a declared size past the cap", async () => {
+  await withCwd(async (cwd) => {
+    await writeFile(join(cwd, "work", "short.pf"), mam(5000, xpressHuffman([...Buffer.alloc(100, 0x41)])));
+    assert.match(failed(await tool("prefetch_mam", cwd, { path: "work/short.pf" })).error, /ended before its declared uncompressed size/);
+    await writeFile(join(cwd, "work", "huge.pf"), mam(0xffffffff, Buffer.alloc(300)));
+    const huge = body<PrefetchOut>(await tool("prefetch_mam", cwd, { path: "work/huge.pf" }));
+    assert.equal(huge.status, "unsupported");
+    assert.match(huge.container.why ?? "", /past the 67108864 this tool will inflate/);
+  });
+});
+
+type ScanOut = {
+  status: string;
+  count: number;
+  hits: Array<{ offset: number; uncomp: number; version?: number; supported?: boolean; name?: string; run_count?: number; filename_strings?: string[]; last_runs?: string[]; problems?: string[] }>;
+  candidates: number;
+  parsed: number;
+  failed: number;
+  failed_by_reason: Record<string, number>;
+  failures: Array<{ offset: number; reason: string }>;
+  filtered_by_name: number;
+  size_out_of_range: number;
+  unsupported_variant_signatures: number;
+};
+
+test("mam_scan finds a record that straddles a scan window once, with the right offset, and reads it by its layout", async () => {
+  await withCwd(async (cwd) => {
+    const record = mamOf(sample(30));
+    const junk = Buffer.alloc(4090, 0x2e);
+    const dump = Buffer.concat([junk, record, Buffer.alloc(5000, 0x2e)]);
+    await writeFile(join(cwd, "work", "mem.raw"), dump);
+    // chunk 4096: the record begins 6 bytes before the first window ends, so its header straddles it.
+    const out = body<ScanOut>(await tool("mam_scan", cwd, { path: "work/mem.raw", chunk: 4096, min_uncomp: 256 }));
+    assert.equal(out.count, 1);
+    assert.equal(out.hits[0].offset, 4090);
+    assert.equal(out.hits[0].name, "EXAMPLE.EXE");
+    assert.equal(out.hits[0].run_count, 7);
+    assert.deepEqual(out.hits[0].filename_strings, SAMPLE_NAMES);
+    assert.equal(out.candidates, 1);
+    assert.equal(out.failed, 0);
+    assert.equal(out.status, "complete");
+  });
+});
+
+test("mam_scan counts an unsupported version as parsed and unsupported, and every failure before the name filter drops anything", async () => {
+  // A candidate that failed to decompress had no name, so a name filter dropped it without a trace; the
+  // fixed 0x80 and 0xD0 offsets were applied to every version.
+  await withCwd(async (cwd) => {
+    const v99 = sample(30);
+    v99.writeUInt32LE(99, 0);
+    const rubbish = mam(2048, Buffer.from("this is not an xpress huffman stream at all".repeat(20)));
+    const other = scca({ version: 30, exe: "OTHER.EXE", hash: 1, runCount: 2, lastRuns: [RUN_1], names: ["\\VOLUME{x}\\OTHER.EXE"] });
+    const pad = (n: number): Buffer => Buffer.alloc(n, 0x2e);
+    const dump = Buffer.concat([pad(100), mamOf(sample(30)), pad(60), mamOf(v99), pad(60), rubbish, pad(60), mamOf(other), pad(60), Buffer.from("MAM\x84\x00\x10\x00\x00", "latin1"), pad(100)]);
+    await writeFile(join(cwd, "work", "mem.raw"), dump);
+    const all = body<ScanOut>(await tool("mam_scan", cwd, { path: "work/mem.raw", min_uncomp: 200 }));
+    assert.equal(all.candidates, 4);
+    assert.equal(all.parsed, 3);
+    assert.equal(all.failed, 1);
+    assert.equal(Object.keys(all.failed_by_reason).length, 1);
+    assert.equal(all.failures.length, 1);
+    assert.match(all.failures[0].reason, /^(decompress_failed|stream_ended_before_declared_size|not_prefetch)/);
+    assert.equal(all.unsupported_variant_signatures, 1);
+    assert.equal(all.status, "partial");
+    const unsupported = all.hits.find((h) => h.version === 99);
+    assert.ok(unsupported, "an unsupported version is a hit, not a drop");
+    assert.equal(unsupported.supported, false);
+    assert.equal(unsupported.run_count, undefined);
+    assert.equal(unsupported.last_runs, undefined);
+    // With a name filter, the failure is still counted.
+    const filtered = body<ScanOut>(await tool("mam_scan", cwd, { path: "work/mem.raw", min_uncomp: 200, name_filter: "OTHER.EXE" }));
+    assert.deepEqual(filtered.hits.map((h) => h.name), ["OTHER.EXE"]);
+    assert.equal(filtered.parsed, 3);
+    assert.equal(filtered.failed, 1, "the record that could not be read is counted, not lost to the filter");
+    assert.equal(filtered.filtered_by_name, 2);
+  });
+});
+
+test("mam_scan stops a candidate whose payload inflates past its declared size at that size", async () => {
+  await withCwd(async (cwd) => {
+    const ops: Array<number | { match: number }> = [0x41];
+    for (let i = 0; i < 2_000_000; i++) ops.push({ match: 17 });
+    await writeFile(join(cwd, "work", "mem.raw"), Buffer.concat([Buffer.alloc(64, 0x2e), mam(4096, xpressHuffman(ops)), Buffer.alloc(64, 0x2e)]));
+    const started = Date.now();
+    const out = body<ScanOut>(await tool("mam_scan", cwd, { path: "work/mem.raw", min_uncomp: 256 }));
+    assert.equal(out.candidates, 1);
+    assert.deepEqual(out.failed_by_reason, { not_prefetch: 1 });
+    assert.ok(Date.now() - started < 30_000);
+  });
+});
+
+test("prefetch_mam and mam_scan carry the same MAM, decompression and SCCA code", async () => {
+  // The tools are standalone, so the shared reader is a copy; this holds the two copies identical.
+  const mark = "# ---- Shared by prefetch_mam and mam_scan";
+  const a = await readFile(join(WIN, "prefetch_mam", "run.py"), "utf8");
+  const b = await readFile(join(WIN, "mam_scan", "run.py"), "utf8");
+  const shared = (text: string, end: string): string => text.slice(text.indexOf(mark), text.indexOf(end)).trimEnd();
+  const one = shared(a, "\n\n\ndef fail(");
+  const two = shared(b, "\n\n\nSIG4 =");
+  assert.ok(one.length > 3000, "the shared block was found");
+  assert.ok(one === two, "the shared MAM and SCCA code differs between prefetch_mam and mam_scan");
+});

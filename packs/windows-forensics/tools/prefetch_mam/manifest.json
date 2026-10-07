@@ -1,6 +1,6 @@
 {
   "name": "prefetch_mam",
-  "description": "Decompresses MAM-compressed or plain Windows Prefetch files and returns header fields, last-run FILETIMEs, and extracted UTF-16 paths/strings.",
+  "description": "Read a Windows Prefetch file, MAM-compressed (MAM\\x04) or plain (SCCA), field by field by the layout of its SCCA version (17, 23, 26, 30 and 31; version 31 is read with version 30's layout, an assumption said in the answer; any other version is reported unsupported and no version-dependent field is interpreted): executable name, hash, run count, last-run FILETIMEs (raw decimal and ISO 8601 UTC with seven fractional digits), the filename strings section as the header locates it (every string whole, non-ASCII included), and the first volume entry (device path, serial, creation time); the file metrics, trace chains and later volume entries are located and counted, not decoded. MAM framing is checked before inflating: the method byte must be 4 (any other, a checksum-bearing variant included, is refused by name) and the declared size at most 64 MiB; the decompressor, dissect.util's, has no output bound of its own, so it is run with one (the declared size plus 64 KiB), past which the run fails, and a stream that ends short fails too. The decoder is the one mam_scan uses, so the two tools do not check each other. A Prefetch file does not say who ran a program, that it finished, or where it was started from.",
   "params": {
     "path": {
       "type": "string",
@@ -12,7 +12,23 @@
   "timeout_seconds": 60,
   "example": "{\"path\":\"work/extracted/prefetch/sample.pf\"}",
   "by": "sbe1803",
-  "at": "2026-09-18T12:59:41.662Z",
-  "version": 2,
-  "sha256": "f2eaa9eef30f54aeee5e3cff0ad92ae1964885e4bbe5052b19e4f31013392d8c"
+  "at": "2026-10-07T12:00:00.000Z",
+  "version": 3,
+  "sha256": "56ee5a5cf2ff574e3faba2ca6f5d761a4f3c07868618cf419e27b1ce023bb173",
+  "use": {
+    "extensions": [
+      ".pf"
+    ],
+    "magic": [
+      {
+        "offset": 0,
+        "hex": "4d414d04"
+      },
+      {
+        "offset": 4,
+        "hex": "53434341"
+      }
+    ]
+  },
+  "requires": []
 }
