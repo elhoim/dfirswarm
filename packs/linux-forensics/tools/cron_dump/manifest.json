@@ -1,14 +1,26 @@
 {
   "name": "cron_dump",
-  "description": "Collect every scheduled job on a Linux host into one list: /etc/crontab, /etc/cron.d, the per-user spool, the hourly to monthly drop directories, and systemd timers with the unit each one triggers.",
+  "description": "Inventory the scheduling candidates of an extracted Linux root, with what it looked in, what it did not, and what it could not read: /etc/crontab, /etc/cron.d, the cron.hourly to monthly directories (with each script's mode), the per-user spools, and systemd timers in the system and user unit directories and in each account's ~/.config/systemd/user and ~/.local/share/systemd/user (accounts from the evidence's etc/passwd, else home/* and root). A cron line keeps its physical line number, the schedule, the user (a table's user field, or a spool file's name) and the command as the exact substring of the line; a timer keeps every assignment in the file in order with its section and line, the empty ones included, plus a naive reading (first schedule, last Unit=) that says it applies no reset, drop-in or override. It is a candidate inventory and not every scheduling mechanism: at jobs, anacron, .service units' ExecStart, generator output and runtime units are not read (named in `unsupported`), systemd drop-ins are listed and not merged, links (aliases, masks, enablement) are listed and not followed, and a listed job is not evidence that it ran. Coverage (read errors, walk errors, links) is computed before `contains` filters anything, so a filtered-out error still shows; a cron line that matches no table shape is counted and located. A file's modification time is a lead to explain, not a conclusion. SENSITIVE: a cron command, an environment value and a unit's Environment= can hold a secret; the answer carries the schedule, user, locators, the command's length and the environment variables' names, and never the command, the values or the raw line. write_text: true (refused outside a job) creates $OUT/cron-text.jsonl, mode 0600; preview_text: true (refused outside a job) puts a cron command in the answer; run it as a job with secret_output: true.",
   "params": {
     "root": {
       "type": "string",
-      "description": "The root of an extracted file system, or / on a live host"
+      "description": "The root of an extracted file system (a link is refused; links inside it are listed and not followed)"
     },
     "contains": {
       "type": "string",
-      "description": "Case-insensitive regex over the command or unit"
+      "description": "Case-insensitive regex over the command, the unit and the script path; it filters what is returned, never what is counted as looked at"
+    },
+    "limit": {
+      "type": "integer",
+      "description": "Entries and unparsed lines shown inline (default 200 each); all are counted and, when there are more, the whole list is written as JSON Lines and named in pages.<list>.all_results"
+    },
+    "write_text": {
+      "type": "boolean",
+      "description": "Write the raw line, the command and the environment of each cron entry, and each timer's complete assignments, to $OUT/cron-text.jsonl (default false). Refused unless the tool runs as a job, which must be run with secret_output: true; a file already there is refused"
+    },
+    "preview_text": {
+      "type": "boolean",
+      "description": "Put each cron entry's raw line, command and environment values in the answer (default false). Refused unless the tool runs as a job, which must be run with secret_output: true"
     }
   },
   "runtime": "python3",
@@ -16,7 +28,13 @@
   "timeout_seconds": 60,
   "example": "{\"root\": \"work/extracted\"}",
   "by": "maintainer",
-  "at": "2026-09-22T15:00:00.000Z",
-  "version": 4,
-  "sha256": "617b3e2a20f7370bba216b12ecff07bb07ab35815047ce0203ed6cc68d060b73"
+  "at": "2026-10-07T12:00:00.000Z",
+  "version": 5,
+  "sha256": "47afcd29b35a171dc8810490e9494886d41b7fb1935d8a7d0d0ea2ca0fc63608",
+  "use": {
+    "names": [
+      "crontab",
+      "*.timer"
+    ]
+  }
 }
