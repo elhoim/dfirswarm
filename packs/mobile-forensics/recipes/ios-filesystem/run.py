@@ -4,12 +4,26 @@
 The recipe is deliberately structural. It reads every tar header and no member
 body, so the catalogue says which parser targets exist without turning a path
 into a finding or extracting protected content.
+
+Names are kept as the archive spelled them. A member name is never trimmed
+(a leading dot or slash is part of it): `path` shows it with tabs, newlines,
+backslashes and bytes that are not UTF-8 escaped, and `path_b64` is its exact
+bytes. `n` is the member's position in the archive, from 0, so two members of
+one name are two rows, and a database that occurs twice keeps both sizes and
+both positions (sqlite.tsv: sizes joined with `|`, `members` listing
+role=position). The classification of a name reads a lower-cased copy; the copy
+is never what is written.
+
+The database families are grouped in a scratch SQLite file under the output
+(deleted when the run ends), so a very large archive does not hold them in
+memory, and the artefact rows are written as they are met.
 """
 import argparse
+import base64
 import datetime
 import json
 import os
-import re
+import sqlite3
 import sys
 import tarfile
 
@@ -20,6 +34,7 @@ IOS_MARKERS = (
     "system/library/coreservices/systemversion.plist",
 )
 SQLITE_SUFFIXES = (".db", ".sqlite", ".sqlite3", ".sqlitedb", ".storedata")
+ROLES = ("db", "wal", "shm", "journal")
 
 
 def target_of(value):
@@ -32,8 +47,29 @@ def target_of(value):
 
 
 def escaped(value):
-    return (value.replace("\\", "\\\\").replace("\t", "\\t")
-            .replace("\r", "\\r").replace("\n", "\\n"))
+    """One line, one field, nothing hidden; a byte that is not UTF-8 shows as \\xNN."""
+    out = []
+    for ch in value:
+        o = ord(ch)
+        if 0xDC80 <= o <= 0xDCFF:
+            out.append("\\x%02x" % (o - 0xDC00))
+        elif ch == "\\":
+            out.append("\\\\")
+        elif ch == "\t":
+            out.append("\\t")
+        elif ch == "\r":
+            out.append("\\r")
+        elif ch == "\n":
+            out.append("\\n")
+        elif o < 0x20 or o == 0x7F:
+            out.append("\\x%02x" % o)
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def b64(value):
+    return base64.b64encode(value.encode("utf-8", "surrogateescape")).decode("ascii")
 
 
 def utc(value):
@@ -90,13 +126,17 @@ def tar_mode(path):
     return "r:"
 
 
+def open_tar(path):
+    return tarfile.open(path, tar_mode(path), encoding="utf-8", errors="surrogateescape")
+
+
 def detect(path):
     if not os.path.isfile(path):
         return False, "not a readable file"
     try:
-        with tarfile.open(path, tar_mode(path)) as archive:
+        with open_tar(path) as archive:
             for member in archive:
-                low = member.name.lower().lstrip("./")
+                low = member.name.lower()
                 if any(marker in low for marker in IOS_MARKERS):
                     return True, "tar members have an iOS full file-system root"
     except (tarfile.TarError, OSError) as exc:
@@ -108,48 +148,69 @@ def run(path, out):
     os.makedirs(out, exist_ok=True)
     artifacts_path = os.path.join(out, "artifacts.tsv")
     sqlite_path = os.path.join(out, "sqlite.tsv")
-    artifacts = []
-    databases = {}
+    scratch = os.path.join(out, "sqlite-families.work.db")
+    if os.path.lexists(scratch):
+        os.unlink(scratch)
+    work = sqlite3.connect(scratch)
+    work.execute("CREATE TABLE m (base BLOB NOT NULL, role TEXT NOT NULL, size INTEGER NOT NULL, n INTEGER NOT NULL)")
     members = 0
+    families_rows = 0
+    categories = {}
+    artifact_rows = 0
     errors = []
     try:
-        with tarfile.open(path, tar_mode(path)) as archive:
-            for member in archive:
-                members += 1
-                name = member.name.lstrip("./")
-                category = classify(name)
-                if category:
-                    artifacts.append((category, name, member.size, utc(member.mtime), "file" if member.isfile() else "other"))
-                base, role = sqlite_base(name)
-                if base:
-                    item = databases.setdefault(base, {"db": "", "wal": "", "shm": "", "journal": ""})
-                    item[role] = str(member.size)
-                archive.members = []
-    except (tarfile.TarError, EOFError, OSError) as exc:
-        errors.append("tar traversal stopped: %s" % exc)
-
-    with open(artifacts_path, "w", encoding="utf-8", newline="\n") as handle:
-        handle.write("category\tpath\tbytes\tmtime_utc\ttype\n")
-        for category, name, size, mtime, kind in artifacts:
-            handle.write("%s\t%s\t%d\t%s\t%s\n" % (category, escaped(name), size, mtime, kind))
-    with open(sqlite_path, "w", encoding="utf-8", newline="\n") as handle:
-        handle.write("path\tdb_bytes\twal_bytes\tshm_bytes\tjournal_bytes\n")
-        for name in sorted(databases):
-            item = databases[name]
-            handle.write("%s\t%s\t%s\t%s\t%s\n" % (
-                escaped(name), item["db"], item["wal"], item["shm"], item["journal"]))
+        with open(artifacts_path, "w", encoding="utf-8", newline="\n") as artifacts:
+            artifacts.write("category\tpath\tbytes\tmtime_utc\ttype\tn\tpath_b64\n")
+            try:
+                with open_tar(path) as archive:
+                    for member in archive:
+                        name = member.name
+                        category = classify(name)
+                        if category:
+                            categories[category] = categories.get(category, 0) + 1
+                            artifact_rows += 1
+                            artifacts.write("%s\t%s\t%d\t%s\t%s\t%d\t%s\n" % (
+                                category, escaped(name), member.size, utc(member.mtime),
+                                "file" if member.isfile() else "other", members, b64(name)))
+                        base, role = sqlite_base(name)
+                        if base is not None:
+                            work.execute("INSERT INTO m VALUES (?,?,?,?)", (base.encode("utf-8", "surrogateescape"), role, member.size, members))
+                            families_rows += 1
+                        members += 1
+                        archive.members = []
+            except (tarfile.TarError, EOFError, OSError) as exc:
+                errors.append("tar traversal stopped: %s" % exc)
+        work.execute("CREATE INDEX m_base ON m (base, n)")
+        work.commit()
+        databases = 0
+        with open(sqlite_path, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write("path\tdb_bytes\twal_bytes\tshm_bytes\tjournal_bytes\tpath_b64\tmembers\n")
+            bases = [row[0] for row in work.execute("SELECT DISTINCT base FROM m ORDER BY base")]
+            for base in bases:
+                sizes = {role: [] for role in ROLES}
+                where = []
+                for role, size, n in work.execute("SELECT role, size, n FROM m WHERE base = ? ORDER BY n", (base,)):
+                    sizes[role].append(str(size))
+                    where.append("%s=%d" % (role, n))
+                name = base.decode("utf-8", "surrogateescape")
+                handle.write("%s\t%s\t%s\t%s\t%s\t%s\t%s\n" % (
+                    escaped(name), "|".join(sizes["db"]), "|".join(sizes["wal"]), "|".join(sizes["shm"]),
+                    "|".join(sizes["journal"]), base_to_b64(base), ",".join(where)))
+                databases += 1
+    finally:
+        work.close()
+        try:
+            os.unlink(scratch)
+        except OSError:
+            pass
     with open(os.path.join(out, "index.tsv"), "w", encoding="utf-8", newline="\n") as handle:
         handle.write("file\twhat\n")
-        handle.write("artifacts.tsv\tiOS forensic structures by category, path, size and archive mtime\n")
-        handle.write("sqlite.tsv\tSQLite-family files grouped with WAL, SHM and rollback-journal companions\n")
-    categories = {}
-    for category, *_ in artifacts:
-        categories[category] = categories.get(category, 0) + 1
+        handle.write("artifacts.tsv\tiOS forensic structures by category, path, size, archive mtime and member position (path_b64 is the exact name)\n")
+        handle.write("sqlite.tsv\tSQLite-family files grouped with WAL, SHM and rollback-journal companions: every occurrence's size and member position (| joins repeats)\n")
     coverage = {
         "recipe": "ios-filesystem",
         "status": "partial" if errors else "complete",
-        "covered": "%d tar members; %d forensic structures; %d SQLite families" % (
-            members, len(artifacts), len(databases)),
+        "covered": "%d tar members; %d forensic structures; %d SQLite families" % (members, artifact_rows, databases),
         "categories": dict(sorted(categories.items())),
         "not_covered": "artifact contents, deleted data, decryption, semantic findings, nested archives",
         "limits_hit": [],
@@ -159,6 +220,10 @@ def run(path, out):
         json.dump(coverage, handle, indent=2, sort_keys=True)
         handle.write("\n")
     return coverage
+
+
+def base_to_b64(base):
+    return base64.b64encode(base).decode("ascii")
 
 
 def main():

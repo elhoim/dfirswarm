@@ -3,14 +3,36 @@
 
 The ios-filesystem recipe only inventories the tar: it reads headers and
 parses no artefact content. This one hands the whole acquisition (a tar,
-plain or compressed, or a zip) to iLEAPP, which runs every one of its
-artefact modules over it and writes a report per artefact: TSV files, a
-timeline database and an HTML report. The TSVs and databases are the
-searchable form; they are listed in index.tsv, and every file iLEAPP wrote is
-kept under ileapp/.
+plain or compressed, or a zip) to iLEAPP, which runs its artefact modules
+over it and writes a report per artefact: TSV files, a timeline database and
+an HTML report. The TSVs and databases are the searchable form; they are
+listed in index.tsv, and every file iLEAPP wrote is kept under ileapp/.
 
     run.py detect --target T [--probe-out DIR]   exit 0 applies, 1 does not
     run.py run --target T --out DIR
+
+WHAT `complete` MEANS. iLEAPP exiting 0 with a TSV in its output says the
+program ran and wrote something; it does not say that every module ran, and a
+module that failed while others wrote their reports leaves the same trace. So
+the run reads iLEAPP's own log (the stdout and stderr it keeps whole) for one
+outcome per module, and writes them to modules.tsv:
+
+    completed   the log says the module started and completed, and a TSV named
+                for the artefact was written
+    no_record   it started and completed and no TSV named for the artefact was
+                written: no records parsed, or a report named otherwise. It is
+                never read as "the artefact is absent from the phone"
+    errored     the log says "Reading <artefact> artifact had errors!"
+    unknown     it started and the log says nothing more (the program ended, or
+                printed something this reader does not know)
+
+The status is `complete` only when iLEAPP exited 0, wrote at least one TSV, the
+log was recognised (at least one module started) and no module is errored or
+unknown and nothing printed a traceback on stderr. An `unsupported` outcome (a
+module that skips a release or an acquisition it cannot read) is not something
+the log lines read here show: it is not counted, and a module that skipped
+itself appears as completed or no_record. A release that logs differently
+leaves every module unknown and the run partial, and the receipt says so.
 
 A run that is stopped before its end leaves coverage.json saying partial, so
 what it wrote is read as partial and never as complete.
@@ -18,6 +40,7 @@ what it wrote is read as partial and never as complete.
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -30,7 +53,130 @@ IOS_MARKERS = (
     "system/library/coreservices/systemversion.plist",
 )
 NOT_COVERED = ("artefacts no module of the pinned iLEAPP release parses; deleted records beyond what a module reads "
-               "itself (no carving); protected data that needs a key it does not have; archives nested inside the acquisition")
+               "itself (no carving); protected data that needs a key it does not have; archives nested inside the acquisition; "
+               "a module the log does not account for as completed")
+
+# --- the module receipt: held equal to the one in the Android recipe by a test ----------------------------
+# The log lines a LEAPP program is expected to print for each artefact module; a release that prints other lines leaves its modules unknown.
+LOG_START = re.compile(r"^(?P<name>.+?) \[(?P<module>[^\[\]]+)\] artifact started\s*$")
+LOG_DONE = re.compile(r"^(?P<name>.+?) \[(?P<module>[^\[\]]+)\] artifact completed\s*$")
+LOG_ERROR = re.compile(r"^Reading (?P<name>.+?) artifact had errors!\s*$")
+LOG_LINE_BOUND = 4000
+FIRST_UNATTRIBUTED = 20
+
+
+def tsv_escape(value):
+    """One line, one field, nothing hidden: backslash, tab, newline, return and other controls escaped."""
+    out = []
+    for ch in str(value):
+        o = ord(ch)
+        if 0xDC80 <= o <= 0xDCFF:
+            out.append("\\x%02x" % (o - 0xDC00))
+        elif ch == "\\":
+            out.append("\\\\")
+        elif ch == "\t":
+            out.append("\\t")
+        elif ch == "\n":
+            out.append("\\n")
+        elif ch == "\r":
+            out.append("\\r")
+        elif o < 0x20 or o == 0x7F:
+            out.append("\\x%02x" % o)
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def normal(name):
+    return re.sub(r"[^a-z0-9]+", "", name.lower())
+
+
+def read_log(path, source, events):
+    """Append (kind, artefact, module, source, line number) for each module line of a kept log; count tracebacks."""
+    tracebacks = 0
+    try:
+        with open(path, "rb") as fh:
+            for number, raw in enumerate(fh, 1):
+                line = raw[:LOG_LINE_BOUND].decode("utf-8", "replace").rstrip("\r\n")
+                found = LOG_START.match(line)
+                if found:
+                    events.append(("start", found.group("name"), found.group("module"), source, number))
+                    continue
+                found = LOG_DONE.match(line)
+                if found:
+                    events.append(("done", found.group("name"), found.group("module"), source, number))
+                    continue
+                found = LOG_ERROR.match(line)
+                if found:
+                    events.append(("error", found.group("name"), None, source, number))
+                    continue
+                if line.startswith("Traceback (most recent call last):"):
+                    tracebacks += 1
+    except OSError:
+        pass
+    return tracebacks
+
+
+def receipt(events, reports):
+    """One row per module the log names, in the order they started, and what could not be attributed.
+
+    `reports` is the list of TSV file names written (relative paths): a module is `completed` only when one
+    of them is named for its artefact.
+    """
+    order, modules, last, unattributed = [], {}, None, []
+    for kind, name, module, source, line in events:
+        if kind == "start":
+            key = (module, name)
+            if key not in modules:
+                modules[key] = {"artefact": name, "module": module, "state": "started", "log": source, "line": line}
+                order.append(key)
+            else:
+                modules[key]["state"] = "started"
+            last = key
+        elif kind == "done":
+            row = modules.get((module, name))
+            if row is None:
+                unattributed.append({"what": "a completion line with no start", "artefact": name, "log": source, "line": line})
+            elif row["state"] != "errored":
+                row["state"] = "done"
+        else:
+            key = last if last is not None and modules[last]["artefact"] == name else None
+            if key is None:
+                for candidate in reversed(order):
+                    if modules[candidate]["artefact"] == name:
+                        key = candidate
+                        break
+            if key is None:
+                unattributed.append({"what": "an error line for an artefact that never started", "artefact": name, "log": source, "line": line})
+            else:
+                modules[key]["state"] = "errored"
+                modules[key]["error_log"], modules[key]["error_line"] = source, line
+    names = [(normal(os.path.splitext(os.path.basename(r))[0]), r) for r in reports]
+    rows = []
+    for key in order:
+        row = modules[key]
+        wanted = normal(row["artefact"])
+        report = next((r for n, r in names if wanted and (n == wanted or n.startswith(wanted))), None)
+        if row["state"] == "errored":
+            status = "errored"
+        elif row["state"] == "done":
+            status = "completed" if report else "no_record"
+        else:
+            status = "unknown"
+        rows.append({**row, "status": status, "report": report if status == "completed" else None})
+    counts = {"completed": 0, "no_record": 0, "errored": 0, "unknown": 0}
+    for row in rows:
+        counts[row["status"]] += 1
+    return rows, counts, unattributed
+
+
+def write_modules(out, rows):
+    with open(os.path.join(out, "modules.tsv"), "w", encoding="utf-8", newline="\n") as handle:
+        handle.write("n\tstatus\tartefact\tmodule\treport\tlog\tline\n")
+        for n, row in enumerate(rows):
+            handle.write("%d\t%s\t%s\t%s\t%s\t%s\t%d\n" % (n, row["status"], tsv_escape(row["artefact"]), tsv_escape(row["module"]),
+                                                          tsv_escape(row["report"] or ""), row["log"], row["line"]))
+# --- end of the module receipt -------------------------------------------------------------------------
 
 
 def target_of(value):
@@ -54,15 +200,27 @@ def tar_mode(path):
 
 
 def ios_name(name):
-    low = name.lower().lstrip("./")
+    low = name.lower()
     return any(marker in low for marker in IOS_MARKERS)
+
+
+def zip_signature(path):
+    """A zip by its own signature (a local file header, or the end record of an empty one), not by
+    zipfile.is_zipfile, whose answer changed between Python 3.11 and 3.14 for an archive whose
+    end-of-central-directory record is damaged: dispatch does not depend on a library's verdict."""
+    with open(path, "rb") as fh:
+        return fh.read(4) in (b"PK\x03\x04", b"PK\x05\x06")
 
 
 def detect(path):
     """(applies, why, kind): kind is iLEAPP's input type, tar or zip."""
     if not os.path.isfile(path):
         return False, "not a readable file", None
-    if zipfile.is_zipfile(path):
+    try:
+        is_zip = zip_signature(path)
+    except OSError as exc:
+        return False, "not a readable file: %s" % (exc.strerror or exc), None
+    if is_zip:
         try:
             with zipfile.ZipFile(path) as archive:
                 for name in archive.namelist():
@@ -82,10 +240,10 @@ def detect(path):
     return False, "tar has no iOS full file-system marker", None
 
 
-def write_coverage(out, status, covered, errors, limits=()):
+def write_coverage(out, status, covered, errors, limits=(), **more):
     with open(os.path.join(out, "coverage.json"), "w", encoding="utf-8") as handle:
         json.dump({"recipe": "ios-ileapp", "status": status, "covered": covered, "not_covered": NOT_COVERED,
-                   "limits_hit": list(limits), "errors": list(errors)}, handle, indent=2, sort_keys=True)
+                   "limits_hit": list(limits), "errors": list(errors), **more}, handle, indent=2, sort_keys=True)
         handle.write("\n")
 
 
@@ -93,7 +251,7 @@ def program():
     for name in ("ileapp", "ileapp.py"):
         found = shutil.which(name)
         if found:
-            return found
+            return os.path.abspath(found)
     return None
 
 
@@ -111,10 +269,19 @@ def index(out, report):
                 rows.append((rel, "iLEAPP database %s (SQLite: the timeline, or every artefact's rows)" % name))
             elif low.endswith(".kml"):
                 rows.append((rel, "iLEAPP locations %s (KML)" % name))
+    return rows
+
+
+def write_index(out, rows):
     with open(os.path.join(out, "index.tsv"), "w", encoding="utf-8", newline="\n") as handle:
         for rel, what in rows:
             handle.write("%s\t%s\n" % (rel.replace("\t", " "), what))
-    return rows
+        handle.write("modules.tsv\tone row per module the iLEAPP log names: completed, no_record, errored or unknown, with the log line\n")
+
+
+def child_files(directory):
+    """How many files a program left in a directory this recipe gave it: kept, never deleted."""
+    return sum(len(files) for _dirpath, _dirs, files in os.walk(directory))
 
 
 def run(path, kind, out):
@@ -125,26 +292,83 @@ def run(path, kind, out):
     if not prog:
         write_coverage(out, "failed", "nothing: iLEAPP is not in this image", ["ileapp is not on PATH in this job image"])
         return 1
-    scratch = os.path.join(out, "ileapp-run")
-    os.makedirs(scratch, exist_ok=True)
-    with open(os.path.join(out, "ileapp.stdout"), "wb") as so, open(os.path.join(out, "ileapp.stderr"), "wb") as se:
-        rc = subprocess.run([prog, "-t", kind, "-i", path, "-o", scratch], stdout=so, stderr=se).returncode
-    made = [d for d in sorted(os.listdir(scratch)) if os.path.isdir(os.path.join(scratch, d))]
     report = os.path.join(out, "ileapp")
+    if os.path.lexists(report):
+        write_coverage(out, "failed", "nothing: the output directory already holds ileapp/",
+                       ["ileapp/ exists: the recipe does not write over an earlier run's report"])
+        return 1
+    path = os.path.abspath(path)
+    scratch = os.path.join(out, "ileapp-run")
+    # The run directory is read-only in a job: the program's working directory and its temporary files
+    # are under the output, and every file it leaves there is kept and counted.
+    cwd = os.path.join(out, "ileapp-cwd")
+    temp = os.path.join(out, "ileapp-tmp")
+    for directory in (scratch, cwd, temp):
+        os.makedirs(directory, exist_ok=True)
+    env = dict(os.environ, TMPDIR=temp)
+    with open(os.path.join(out, "ileapp.stdout"), "wb") as so, open(os.path.join(out, "ileapp.stderr"), "wb") as se:
+        rc = subprocess.run([prog, "-t", kind, "-i", path, "-o", scratch], stdout=so, stderr=se, cwd=cwd, env=env).returncode
+    made = [d for d in sorted(os.listdir(scratch)) if os.path.isdir(os.path.join(scratch, d))]
+    layout, siblings = "whole output directory", False
     if len(made) == 1:
         os.rename(os.path.join(scratch, made[0]), report)
-        shutil.rmtree(scratch, ignore_errors=True)
+        left = sorted(os.listdir(scratch))
+        if left:
+            # Files the program wrote beside its report folder are kept, whole, in a directory of their own.
+            os.rename(scratch, os.path.join(out, "ileapp-run-files"))
+            siblings = True
+            layout = "one report folder; %d file(s) beside it kept in ileapp-run-files/" % len(left)
+        else:
+            os.rmdir(scratch)
+            layout = "one report folder"
     else:
         os.rename(scratch, report)
+    kept = {}
+    for name, directory in (("ileapp-cwd", cwd), ("ileapp-tmp", temp)):
+        files = child_files(directory)
+        if files:
+            kept[name] = files
+        else:
+            for dirpath, _dirs, _files in os.walk(directory, topdown=False):
+                os.rmdir(dirpath)
     rows = index(out, report)
-    tsvs = sum(1 for rel, _ in rows if rel.lower().endswith(".tsv"))
+    tsv_names = [rel for rel, _ in rows if rel.lower().endswith(".tsv")]
+    tsvs = len(tsv_names)
+
+    events = []
+    read_log(os.path.join(out, "ileapp.stdout"), "ileapp.stdout", events)
+    tracebacks = read_log(os.path.join(out, "ileapp.stderr"), "ileapp.stderr", events)
+    modules, counts, unattributed = receipt(events, tsv_names)
+    write_modules(out, modules)
+    write_index(out, rows)
+    recognised = bool(modules)
+    receipt_json = {"log_format_recognised": recognised, "counts": counts, "modules_listed_in": "modules.tsv",
+                    "unsupported": "not observable in the log lines read: a module that skipped itself appears as completed or no_record",
+                    "tracebacks_on_stderr": tracebacks, "unattributed_log_lines": unattributed[:FIRST_UNATTRIBUTED],
+                    "report_layout": layout, **({"files_beside_the_report": "ileapp-run-files/"} if siblings else {}),
+                    **({"files_left_in_program_directories": kept} if kept else {})}
     errors = [] if rc == 0 else ["iLEAPP exited %d; its output is kept whole in ileapp.stdout and ileapp.stderr" % rc]
-    if rc == 0 and tsvs:
-        write_coverage(out, "complete", "iLEAPP ran every module over the %s: %d artefact report(s) with records" % (kind, tsvs), errors)
+    problems = []
+    if counts["errored"]:
+        first = [m["artefact"] for m in modules if m["status"] == "errored"][:5]
+        problems.append("%d module(s) errored: %s%s; see modules.tsv and ileapp.stdout" % (counts["errored"], ", ".join(first), " and others" if counts["errored"] > 5 else ""))
+    if counts["unknown"]:
+        problems.append("%d module(s) started and the log says nothing more about them" % counts["unknown"])
+    if tracebacks:
+        problems.append("%d traceback(s) on stderr" % tracebacks)
+    if unattributed:
+        problems.append("%d log line(s) about a module that did not start" % len(unattributed))
+    if rc == 0 and tsvs and not recognised:
+        problems.append("the log has no module lines this recipe reads: per-module outcome is unknown for all of them")
+    if rc == 0 and tsvs and not problems:
+        write_coverage(out, "complete", "iLEAPP exited 0 over the %s and its log accounts for %d module(s): %d completed with a report, %d completed with no report named for them; %d TSV report(s)"
+                       % (kind, len(modules), counts["completed"], counts["no_record"], tsvs), errors, modules=receipt_json)
     elif rows:
-        write_coverage(out, "partial", "iLEAPP wrote %d report(s) before it ended" % len(rows), errors or ["iLEAPP wrote no TSV report"])
+        write_coverage(out, "partial", "iLEAPP wrote %d report(s); %d module(s) in its log: %d completed, %d no_record, %d errored, %d unknown"
+                       % (len(rows), len(modules), counts["completed"], counts["no_record"], counts["errored"], counts["unknown"]),
+                       (errors + problems) or ["iLEAPP wrote no TSV report"], modules=receipt_json)
     else:
-        write_coverage(out, "failed", "nothing parsed", errors or ["iLEAPP wrote no report"])
+        write_coverage(out, "failed", "nothing parsed", errors or ["iLEAPP wrote no report"], modules=receipt_json)
     return 0 if rc == 0 else 1
 
 

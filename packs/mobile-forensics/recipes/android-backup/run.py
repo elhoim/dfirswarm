@@ -1,6 +1,37 @@
 #!/usr/bin/env python3
-"""Catalogue an Android adb backup without extracting it."""
+"""Catalogue an Android adb backup without extracting it.
+
+An `.ab` file is a text header (the signature `ANDROID BACKUP`, a format version, a
+compression flag and an encryption scheme) followed by a tar, compressed with zlib when the flag
+says so, and encrypted when the scheme is not `none`. This reads the header and, for a payload
+that is not encrypted, lists every member of the embedded tar; it extracts nothing.
+
+    run.py detect --target T [--probe-out DIR]
+    run.py run --target T --out DIR [--max-decompressed-bytes N]
+
+What it does and does not read:
+
+  Versions. Header versions 1 to 5 are read; any other version is `unsupported`, and nothing but
+  the header is reported (status partial). The versions are those the format is known to have; the
+  payload of an unencrypted backup is a plain tar after the header whichever it is.
+
+  Encryption. `none` is listed. `AES-256` is the one scheme with a documented header layout (user
+  salt, checksum salt, rounds, IV, master key blob); its header is parsed for its shape and its
+  payload is NOT opened (no password is read or accepted). Any other scheme is `unsupported`. The
+  salts, the IV and the master key blob are what an offline password attack starts from: backup.json
+  reports their lengths and the rounds, never their values.
+
+  Decompression is bounded. A zlib stream is read in pieces with an output budget
+  (`--max-decompressed-bytes`, default 32 GiB): a payload that expands past it stops the listing and
+  the run says partial, names the budget and the number of members listed. After the tar's end the
+  rest of the zlib stream is read, within the same budget, so that its end marker and checksum are
+  verified: `payload_stream` says reached, not_reached (the budget) or truncated.
+
+  A member name is kept as the tar gave it: tabs, newlines, backslashes and bytes that are not
+  UTF-8 are escaped in `path`, and `path_b64` is the exact bytes.
+"""
 import argparse
+import base64
 import datetime
 import io
 import json
@@ -9,16 +40,26 @@ import sys
 import tarfile
 import zlib
 
-
 MAGIC = b"ANDROID BACKUP\n"
+SUPPORTED_VERSIONS = (1, 2, 3, 4, 5)
+DEFAULT_BUDGET = 32 << 30
+PIECE = 1 << 20
 
 
 class ZlibReader(io.RawIOBase):
-    def __init__(self, source):
+    """A zlib stream as a file: read in pieces, with an output budget, and its end checked."""
+
+    def __init__(self, source, budget):
         self.source = source
         self.decoder = zlib.decompressobj()
+        self.budget = budget
+        self.produced = 0
         self.buffer = bytearray()
+        self.pending = b""
         self.finished = False
+        self.exceeded = False
+        self.truncated = False
+        self.trailing = 0
 
     def readable(self):
         return True
@@ -26,16 +67,36 @@ class ZlibReader(io.RawIOBase):
     def readinto(self, target):
         wanted = len(target)
         while len(self.buffer) < wanted and not self.finished:
-            chunk = self.source.read(1 << 20)
-            if chunk:
-                self.buffer.extend(self.decoder.decompress(chunk))
-            else:
-                self.buffer.extend(self.decoder.flush())
+            if self.produced >= self.budget:
+                self.exceeded = True
+                self.finished = True
+                break
+            if not self.pending and not self.decoder.eof:
+                chunk = self.source.read(PIECE)
+                if not chunk:
+                    self.truncated = not self.decoder.eof
+                    self.finished = True
+                    break
+                self.pending = chunk
+            produced = self.decoder.decompress(self.pending, min(PIECE, self.budget - self.produced))
+            self.pending = self.decoder.unconsumed_tail
+            self.produced += len(produced)
+            self.buffer.extend(produced)
+            if self.decoder.eof:
+                # The end marker, and with it the Adler-32 checksum, was read: zlib raises on a mismatch.
+                self.trailing = len(self.decoder.unused_data) + len(self.pending)
                 self.finished = True
         count = min(wanted, len(self.buffer))
         target[:count] = self.buffer[:count]
         del self.buffer[:count]
         return count
+
+    def drain(self):
+        """Read the stream to its end (within the budget), so that its end marker is verified."""
+        sink = bytearray(PIECE)
+        while not self.finished:
+            self.readinto(memoryview(sink))
+            self.buffer.clear()
 
 
 def target_of(value):
@@ -54,6 +115,13 @@ def line(handle, label):
     return raw[:-1].decode("ascii", "strict")
 
 
+def label(text):
+    """A header word that is printed: a short printable word, or a refusal to print it."""
+    if len(text) <= 64 and text.isprintable():
+        return text
+    return "<not a printable word of at most 64 characters>"
+
+
 def header(handle):
     if handle.read(len(MAGIC)) != MAGIC:
         raise ValueError("no Android backup signature")
@@ -64,22 +132,48 @@ def header(handle):
         raise ValueError("Android backup version is not numeric")
     if compressed not in ("0", "1"):
         raise ValueError("Android backup compression flag is not 0 or 1")
-    details = {"version": int(version), "compressed": compressed == "1", "encryption": encryption}
-    if encryption != "none":
+    details = {"version": int(version), "compressed": compressed == "1", "encryption": label(encryption)}
+    details["version_supported"] = details["version"] in SUPPORTED_VERSIONS
+    if encryption == "AES-256":
+        # What an offline attack on the password starts from: the shape is reported, the values are not.
+        fields = {"user_salt": line(handle, "user salt"), "checksum_salt": line(handle, "checksum salt"),
+                  "rounds": line(handle, "rounds"), "user_iv": line(handle, "user IV"),
+                  "master_key_blob": line(handle, "master key blob")}
         details["encryption_header"] = {
-            "user_salt": line(handle, "user salt"),
-            "checksum_salt": line(handle, "checksum salt"),
-            "rounds": line(handle, "rounds"),
-            "user_iv": line(handle, "user IV"),
-            "master_key_blob": line(handle, "master key blob"),
+            "layout": "user salt, checksum salt, rounds, IV, master key blob (as the format documents it)",
+            "user_salt_chars": len(fields["user_salt"]), "checksum_salt_chars": len(fields["checksum_salt"]),
+            "rounds": int(fields["rounds"]) if fields["rounds"].isdigit() else None,
+            "user_iv_chars": len(fields["user_iv"]), "master_key_blob_chars": len(fields["master_key_blob"]),
+            "values_printed": False,
         }
     details["payload_offset"] = handle.tell()
     return details
 
 
 def escaped(value):
-    return (value.replace("\\", "\\\\").replace("\t", "\\t")
-            .replace("\r", "\\r").replace("\n", "\\n"))
+    """One line, one field, nothing hidden; a byte that is not UTF-8 shows as \\xNN."""
+    out = []
+    for ch in value:
+        o = ord(ch)
+        if 0xDC80 <= o <= 0xDCFF:
+            out.append("\\x%02x" % (o - 0xDC00))
+        elif ch == "\\":
+            out.append("\\\\")
+        elif ch == "\t":
+            out.append("\\t")
+        elif ch == "\r":
+            out.append("\\r")
+        elif ch == "\n":
+            out.append("\\n")
+        elif o < 0x20 or o == 0x7F:
+            out.append("\\x%02x" % o)
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def b64(value):
+    return base64.b64encode(value.encode("utf-8", "surrogateescape")).decode("ascii")
 
 
 def utc(value):
@@ -105,54 +199,82 @@ def detect(path):
     try:
         with open(path, "rb") as handle:
             details = header(handle)
-        return True, "Android backup header version %d, encryption %s" % (
-            details["version"], details["encryption"])
+        return True, "Android backup header version %d, encryption %s" % (details["version"], details["encryption"])
     except (OSError, UnicodeError, ValueError) as exc:
         return False, str(exc)
 
 
-def run(path, out):
+def run(path, out, budget):
     os.makedirs(out, exist_ok=True)
-    errors = []
+    errors, limits_hit = [], []
     member_count = 0
+    stream = "not_applicable"
+    produced = 0
     with open(path, "rb") as source:
         details = header(source)
         with open(os.path.join(out, "backup.json"), "w", encoding="utf-8") as handle:
             json.dump(details, handle, indent=2, sort_keys=True)
             handle.write("\n")
+        listable = details["encryption"] == "none" and details["version_supported"]
         members_path = os.path.join(out, "members.tsv")
         with open(members_path, "w", encoding="utf-8", newline="\n") as listing:
-            listing.write("n\ttype\tpath\tbytes\tmtime_utc\tmode\tlink\n")
-            if details["encryption"] == "none":
-                stream = io.BufferedReader(ZlibReader(source)) if details["compressed"] else source
+            listing.write("n\ttype\tpath\tbytes\tmtime_utc\tmode\tlink\tpath_b64\n")
+            if listable:
+                reader = ZlibReader(source, budget) if details["compressed"] else None
+                payload = io.BufferedReader(reader) if reader else source
                 try:
-                    with tarfile.open(fileobj=stream, mode="r|") as archive:
+                    with tarfile.open(fileobj=payload, mode="r|", encoding="utf-8", errors="surrogateescape") as archive:
                         for member in archive:
-                            listing.write("%d\t%s\t%s\t%d\t%s\t%o\t%s\n" % (
+                            listing.write("%d\t%s\t%s\t%d\t%s\t%o\t%s\t%s\n" % (
                                 member_count, member_type(member), escaped(member.name), member.size,
-                                utc(member.mtime), member.mode, escaped(member.linkname or "")))
+                                utc(member.mtime), member.mode, escaped(member.linkname or ""), b64(member.name)))
                             member_count += 1
                             archive.members = []
                 except (tarfile.TarError, EOFError, OSError, zlib.error) as exc:
                     errors.append("embedded tar traversal stopped: %s" % exc)
+                if reader is not None:
+                    try:
+                        reader.drain()
+                    except zlib.error as exc:
+                        errors.append("the zlib stream is damaged after the tar's end: %s" % exc)
+                    produced = reader.produced
+                    if reader.exceeded:
+                        stream = "not_reached"
+                        limits_hit.append("decompressed output budget of %d bytes (the listing stopped after %d members)" % (budget, member_count))
+                    elif reader.truncated:
+                        stream = "truncated"
+                        errors.append("the zlib stream ends before its end marker: the backup is cut short")
+                    else:
+                        stream = "reached"
+                else:
+                    stream = "not_compressed"
     with open(os.path.join(out, "index.tsv"), "w", encoding="utf-8", newline="\n") as handle:
         handle.write("file\twhat\n")
-        handle.write("backup.json\tAndroid backup header fields and payload offset\n")
-        handle.write("members.tsv\tevery embedded tar member when the payload is not encrypted\n")
-    if details["encryption"] != "none":
+        handle.write("backup.json\tAndroid backup header fields and payload offset (key-derivation values are not printed)\n")
+        handle.write("members.tsv\tevery embedded tar member when the payload is unencrypted and the version is supported\n")
+    if not details["version_supported"]:
+        status = "partial"
+        covered = "header only; version %d is not one this recipe reads (1 to 5)" % details["version"]
+        errors.append("unsupported: header version %d" % details["version"])
+    elif details["encryption"] != "none":
         status = "partial"
         covered = "header only; encrypted payload not opened"
-        errors.append("payload encryption is %s; a password is required" % details["encryption"])
+        if details["encryption"] == "AES-256":
+            errors.append("payload encryption is AES-256; opening it needs a password, and this recipe reads none")
+        else:
+            errors.append("unsupported: payload encryption scheme %s" % details["encryption"])
     else:
-        status = "partial" if errors else "complete"
+        status = "partial" if errors or limits_hit else "complete"
         covered = "%d embedded tar members" % member_count
     coverage = {
         "recipe": "android-backup",
         "status": status,
         "covered": covered,
         "not_covered": "files excluded by adb backup policy, deleted data, artifact contents, password recovery",
-        "limits_hit": [],
+        "limits_hit": limits_hit,
         "errors": errors,
+        "payload_stream": stream,
+        "decompressed_bytes": produced,
     }
     with open(os.path.join(out, "coverage.json"), "w", encoding="utf-8") as handle:
         json.dump(coverage, handle, indent=2, sort_keys=True)
@@ -171,6 +293,7 @@ def main():
     # tar was catalogued as a member list only. Detect reads the backup's header
     # and keeps nothing, so the directory is taken and left empty.
     parser.add_argument("--probe-out")
+    parser.add_argument("--max-decompressed-bytes", type=int, default=DEFAULT_BUDGET)
     args = parser.parse_args()
     try:
         path = target_of(args.target)
@@ -184,12 +307,15 @@ def main():
     if not args.out:
         print(json.dumps({"ok": False, "error": "run needs --out DIR"}))
         return 2
+    if args.max_decompressed_bytes < 1:
+        print(json.dumps({"ok": False, "error": "--max-decompressed-bytes must be positive"}))
+        return 2
     applies, why = detect(path)
     if not applies:
         print(json.dumps({"ok": False, "status": "unsupported", "why": why}))
         return 2
     try:
-        coverage, members = run(path, args.out)
+        coverage, members = run(path, args.out, args.max_decompressed_bytes)
     except (OSError, UnicodeError, ValueError) as exc:
         print(json.dumps({"ok": False, "error": str(exc)}))
         return 2
