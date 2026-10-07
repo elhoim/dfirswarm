@@ -542,6 +542,10 @@ cat > "$H/tsk-notable/fsstat" <<'SH'
 echo "File System Type: Ext4"
 SH
 cp "$H/tsk-shim/fls" "$H/tsk-hang/fls"; cp "$H/tsk-shim/fls" "$H/tsk-notable/fls"
+# mactime too: the recipe runs it over the body file, and a host without The Sleuth Kit (CI) has none to run.
+for d in tsk-hang tsk-notable; do
+  printf '#!/bin/sh\necho "Date,Size,Type,Mode,UID,GID,Meta,File Name"\n' > "$H/$d/mactime"
+done
 chmod +x "$H/tsk-hang/"* "$H/tsk-notable/"*
 : > "$H/hang.img"
 began=$SECONDS
