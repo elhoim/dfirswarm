@@ -293,3 +293,17 @@ test("a time far outside the range of a 64-bit nanosecond count is an unparseabl
     assert.equal(out.records[0].time_utc, null);
   });
 });
+
+test("a UTF-16 export, as PowerShell writes it with a byte order mark, is read, and its encoding is said", async () => {
+  await withDir(async (cwd) => {
+    const csv = portalCsv([{ id: "rec-1", date: "2026-02-14T09:00:00Z", type: "ExchangeAdmin", op: "Set-Mailbox", user: "bob@example.org", data: JSON.stringify(audit({ Id: "rec-1", Operation: "Set-Mailbox", UserId: "bob@\u00fcnic\u00f6de.example" })) }]);
+    const utf16 = Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(csv, "utf16le")]);
+    const out = await run(cwd, { "utf16.csv": utf16 });
+    assert.equal(out.status, "complete");
+    assert.equal(out.records[0].record_id, "rec-1");
+    assert.match(out.records[0].user, /^bob@\u00fcnic\u00f6de\.example$/);
+    const census = await rowsOf(cwd, out, "file_census");
+    assert.equal(census[0].encoding, "utf-16");
+    assert.equal(out.coverage.replacement_characters, 0);
+  });
+});

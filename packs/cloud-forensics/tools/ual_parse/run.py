@@ -852,7 +852,7 @@ def walk_inputs(top, wanted, skipped):
 
 class Source:
     """One file as a stream of text. Gzip is recognised by its magic bytes (not its name) and expanded as it is read, at most
-    `cap` bytes of expansion; bytes that are not UTF-8 become U+FFFD and are counted in `replaced`; a read that fails (a
+    `cap` bytes of expansion; UTF-8 is assumed, UTF-16 where a byte order mark says so; bytes that do not decode become U+FFFD and are counted in `replaced`; a read that fails (a
     truncated gzip, a failed CRC) is kept in `error` with everything read before it."""
 
     def __init__(self, path, cap):
@@ -867,6 +867,7 @@ class Source:
         self.line = 1
         self.chars_before = 0
         self._dec = codecs.getincrementaldecoder("utf-8")("replace")
+        self.encoding = "utf-8"
         self._first = True
         self.fh = self._raw = None
         try:
@@ -909,6 +910,10 @@ class Source:
             self.eof = True
         elif not data:
             self.eof = True
+        if self._first and data[:2] in (b"\xff\xfe", b"\xfe\xff"):
+            # A byte order mark: the export is UTF-16 (PowerShell's Export-Csv -Encoding Unicode writes it), not UTF-8.
+            self._dec = codecs.getincrementaldecoder("utf-16")("replace")
+            self.encoding = "utf-16"
         self.bytes_read += len(data)
         text = self._dec.decode(data, final=self.eof)
         if self._first and text:
@@ -1615,7 +1620,7 @@ def main():
                     rejected, first_reject[0], first_reject[1], first_reject[2]))
             if payload_bad:
                 problems.append("%d record(s) have no readable AuditData payload (kept with their outer columns; listed in rejected_records)" % payload_bad)
-            row.update({"format": fmt, "format_basis": basis, "compressed": src.compressed, "records": records, "rejected": rejected,
+            row.update({"format": fmt, "format_basis": basis, "compressed": src.compressed, "encoding": src.encoding, "records": records, "rejected": rejected,
                         "payloads_rejected": payload_bad, "bytes_read": src.bytes_read, "shape": getattr(src, "mode", None)})
             if stopped_early:
                 row["status"] = "partial"

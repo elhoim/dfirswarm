@@ -536,3 +536,14 @@ test("link_sessions: false skips the session index and says so", async () => {
     assert.deepEqual(out.session_links, { performed: false, why: "link_sessions was false" });
   });
 });
+
+test("bytes that are not UTF-8 are replaced and counted, and the read is partial, not complete", async () => {
+  await withDir(async (cwd) => {
+    const text = Buffer.concat([Buffer.from('{"Records":[{"eventName":"X","eventSource":"s3.amazonaws.com","eventTime":"2026-02-14T09:00:00Z","eventID":"b-1","userAgent":"ag'), Buffer.from([0xff, 0xfe, 0xfd]), Buffer.from('ent"}]}')]);
+    await put(cwd, "work/ev/bad.json", text);
+    const out = await run(cwd, {});
+    assert.equal(out.status, "partial");
+    assert.equal(out.coverage.replacement_characters, 3);
+    assert.equal(out.records[0].event_id, "b-1");
+  });
+});
