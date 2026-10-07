@@ -191,7 +191,8 @@ def stripped_hash(raw):
 
 def legacy_row(volume_name, sub):
     row = {"layout": "File", "volume": volume_name}
-    for v in sub.iter_values():
+    # trim_values=False: regipy's default cuts a string to 256 characters and a binary value to 128 bytes.
+    for v in sub.iter_values(trim_values=False):
         name = LEGACY_VALUES.get(str(v.name).lower(), str(v.name))
         row[name] = render(v.value)
     if "linker_compile_time" in row:
@@ -209,7 +210,7 @@ def legacy_row(volume_name, sub):
 
 def modern_row(sub):
     row = {"layout": "InventoryApplicationFile"}
-    for v in sub.iter_values():
+    for v in sub.iter_values(trim_values=False):
         row[str(v.name)] = render(v.value)
     if "FileId" in row:
         row["file_id_sha1"] = stripped_hash(row["FileId"])

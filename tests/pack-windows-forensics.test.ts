@@ -636,6 +636,21 @@ test("amcache_apps reads both layouts when a hive has both, each row naming its 
   });
 });
 
+test("amcache_apps returns a path past 256 characters whole: regipy's default cut is not taken", async () => {
+  await withCwd(async (cwd) => {
+    const long = "c:\\users\\someone\\" + "nested\\".repeat(60) + "tool.exe";
+    await writeFile(join(cwd, "work", "Amcache.hve"), hive({ name: "{r}", children: [{ name: "Root", children: [
+      { name: "InventoryApplicationFile", children: [{ name: "tool.exe|1", values: [{ name: "LowerCaseLongPath", type: "sz", value: long }] }] },
+      { name: "File", children: [{ name: "{vol}", children: [{ name: "9", values: [{ name: "15", type: "sz", value: long }] }] }] },
+    ] }] }));
+    const out = body<AmcacheOut>(await tool("amcache_apps", cwd, { hive: "work/Amcache.hve" }));
+    const by = Object.fromEntries(out.entries.map((r) => [r.layout as string, r]));
+    assert.ok(long.length > 256);
+    assert.equal(by.InventoryApplicationFile.LowerCaseLongPath, long);
+    assert.equal(by.File.full_path, long);
+  });
+});
+
 test("amcache_apps says a hive is dirty, names the transaction logs beside it, and does not claim to have replayed them", async () => {
   await withCwd(async (cwd) => {
     const bytes = hive(
@@ -2128,5 +2143,170 @@ test("utf16_urls keeps a UTF-16LE run only where it holds an anchor, applies `co
     const only = body<UrlOut>(await tool("utf16_urls", cwd, { path: "work/WebCacheV01.dat", contains: "192.168" }));
     assert.deepEqual(only.candidates.map((c) => c.text), ["http://192.168.4.7/admin/panel"]);
     assert.equal(only.filtered_out_by_contains, 2);
+  });
+});
+
+// --- regkv ----------------------------------------------------------------------
+
+type RegkvOut = {
+  status: string;
+  hive: string;
+  key: string;
+  values: Record<string, unknown>;
+  value_types: Record<string, string>;
+  value_lengths: Record<string, number | null>;
+  subkeys: Array<{ name: string; subkeys: number; values: number; last_modified?: string; last_modified_filetime?: string; subkey_list?: Array<{ name: string }> }>;
+  last_modified?: string;
+  last_modified_filetime?: string;
+  problems: Array<{ where: string; what: string; error: string }>;
+  stopped_branches: Array<{ path: string; reason: string }>;
+  stopped_branch_count: number;
+  tree_complete: boolean;
+  nodes?: Array<{ path: string; depth: number }>;
+  node_count?: number;
+  all_nodes?: string;
+  hive_dirty: boolean;
+  transaction_logs_beside_hive: string[];
+  transaction_logs_replayed: boolean;
+  sensitive_values_withheld: Array<{ key: string; name: string; type: string; length: number | null }>;
+  hive_type: string | null;
+};
+
+test("regkv returns a value whole with its type and length: a binary value past 128 bytes, a string past 256 characters, a multi-string and a qword", async () => {
+  // regipy trims a value to 256 characters by default, so a binary value came back cut at 128 bytes and a long
+  // string at 256 characters, without a word; types were dropped.
+  await withCwd(async (cwd) => {
+    const blob = Buffer.from(Array.from({ length: 700 }, (_, i) => i % 251));
+    const longText = "C:\\Program Files\\" + "Directory\\".repeat(60) + "tool.exe";
+    await writeFile(join(cwd, "work", "NTUSER.DAT"), hive({
+      name: "ROOT",
+      children: [{ name: "Software", children: [{
+        name: "Vendor",
+        lastWritten: 133_443_104_001_234_567n,
+        values: [
+          { name: "Blob", type: "binary", value: blob },
+          { name: "LongPath", type: "sz", value: longText },
+          { name: "List", type: "multi_sz", value: ["alpha", "beta"] },
+          { name: "Big", type: "qword", value: 0x1234_5678_9abc_def0n },
+          { name: "Count", type: "dword", value: 7 },
+        ],
+      }] }],
+    }));
+    const out = body<RegkvOut>(await tool("regkv", cwd, { hive: "work/NTUSER.DAT", key: "Software\\Vendor" }));
+    assert.equal(out.status, "complete");
+    assert.equal(out.values.Blob, blob.toString("hex"), "700 bytes, all of them");
+    assert.equal(out.value_lengths.Blob, 700);
+    assert.equal(out.value_types.Blob, "REG_BINARY");
+    assert.equal(out.values.LongPath, longText);
+    assert.equal(out.value_lengths.LongPath, longText.length);
+    assert.deepEqual(out.values.List, ["alpha", "beta"]);
+    assert.equal(out.value_types.List, "REG_MULTI_SZ");
+    assert.equal(out.value_types.Big, "REG_QWORD");
+    assert.equal(out.value_types.Count, "REG_DWORD");
+    assert.equal(out.values.Count, 7);
+    assert.equal(out.last_modified, "2023-11-13T00:53:20.1234567Z");
+    assert.equal(out.last_modified_filetime, "133443104001234567");
+  });
+});
+
+test("regkv says a hive is dirty and names the logs beside it, and does not claim to have replayed them", async () => {
+  await withCwd(async (cwd) => {
+    await writeFile(join(cwd, "work", "SYSTEM"), hive({ name: "ROOT", children: [{ name: "Select", values: [{ name: "Current", type: "dword", value: 1 }] }] }, { primarySeq: 12, secondarySeq: 11 }));
+    await writeFile(join(cwd, "work", "SYSTEM.LOG1"), Buffer.alloc(512));
+    await writeFile(join(cwd, "work", "SYSTEM.LOG2"), Buffer.alloc(512));
+    const out = body<RegkvOut>(await tool("regkv", cwd, { hive: "work/SYSTEM", key: "Select" }));
+    assert.equal(out.hive_dirty, true);
+    assert.deepEqual(out.transaction_logs_beside_hive, ["work/SYSTEM.LOG1", "work/SYSTEM.LOG2"]);
+    assert.equal(out.transaction_logs_replayed, false);
+    assert.equal(out.hive, "work/SYSTEM");
+  });
+});
+
+test("regkv lists every node of a recursive walk, names the branches it did not enter and why, and keeps the whole listing in a file past the inline page", async () => {
+  // `walk()` returned [] for any key it could not open, and nothing said a branch had been left out.
+  await withCwd(async (cwd) => {
+    const wide = Array.from({ length: 30 }, (_, i) => ({ name: `Leaf${String(i).padStart(2, "0")}`, children: [{ name: "Deep", children: [{ name: "Deeper" }] }] }));
+    await writeFile(join(cwd, "work", "SOFTWARE"), hive({ name: "ROOT", children: [{ name: "Tree", children: wide }] }));
+    const out = body<RegkvOut>(await tool("regkv", cwd, { hive: "work/SOFTWARE", key: "Tree", recurse: true, depth: 1, limit: 10 }));
+    assert.equal(out.node_count, 60, "30 leaves and the 30 keys below them; the third level is not entered");
+    assert.equal(out.nodes!.length, 10);
+    assert.ok(out.all_nodes, "the whole listing is in a file the answer names");
+    assert.equal(out.stopped_branch_count, 30, "each Deep with a child of its own was not entered");
+    assert.match(out.stopped_branches[0].reason, /depth limit \(1\)/);
+    assert.equal(out.status, "partial");
+    assert.equal(out.tree_complete, true);
+    const rows = (await readFile(join(cwd, out.all_nodes as string), "utf8")).trimEnd().split("\n").map((l) => JSON.parse(l) as { path: string; depth: number });
+    assert.equal(rows.length, 60);
+    assert.deepEqual(rows.slice(0, 2).map((r) => r.path), ["Tree\\Leaf00", "Tree\\Leaf01"]);
+  });
+});
+
+test("regkv withholds the values that can be secrets, by name and by place, and says what it withheld", async () => {
+  await withCwd(async (cwd) => {
+    const pw = "Summer2024!hunter2";
+    await writeFile(join(cwd, "work", "SOFTWARE"), hive({
+      name: "ROOT",
+      children: [{ name: "Winlogon", values: [
+        { name: "DefaultUserName", type: "sz", value: "alice" },
+        { name: "DefaultPassword", type: "sz", value: pw },
+        { name: "AutoAdminLogon", type: "sz", value: "1" },
+        { name: "PasswordExpiryWarning", type: "dword", value: 5 },
+        { name: "Vpn_Token", type: "binary", value: Buffer.from("tok-" + pw) },
+      ] }],
+    }));
+    const run = await tool("regkv", cwd, { hive: "work/SOFTWARE", key: "Winlogon" });
+    const out = body<RegkvOut>(run);
+    for (const piece of [pw, "hunter2", Buffer.from(pw).toString("hex"), Buffer.from(pw, "utf16le").toString("hex"), Buffer.from("tok-" + pw).toString("hex")]) {
+      assert.equal(run.stdout.includes(piece), false, piece);
+    }
+    assert.equal(out.values.DefaultUserName, "alice");
+    assert.equal(out.values.AutoAdminLogon, "1");
+    assert.equal(out.values.PasswordExpiryWarning, 5, "a DWORD is not text or bytes: not withheld");
+    assert.equal(out.values.DefaultPassword, `[withheld: ${pw.length} characters]`);
+    assert.deepEqual(out.sensitive_values_withheld.map((w) => [w.name, w.type, w.length]).sort(), [
+      ["DefaultPassword", "REG_SZ", pw.length],
+      ["Vpn_Token", "REG_BINARY", pw.length + 4],
+    ]);
+  });
+});
+
+test("regkv withholds the V value of a SAM user and the secrets of a SECURITY hive, whatever their names", async () => {
+  await withCwd(async (cwd) => {
+    const verifier = Buffer.from("planted-verifier-material-0123456789abcdef");
+    await writeFile(join(cwd, "work", "SAM"), hive({
+      name: "ROOT",
+      children: [{ name: "SAM", children: [{ name: "Domains", children: [{ name: "Account", children: [{ name: "Users", children: [
+        { name: "000003E9", values: [{ name: "F", type: "binary", value: Buffer.alloc(80, 1) }, { name: "V", type: "binary", value: verifier }] },
+      ] }] }] }] }],
+    }));
+    const run = await tool("regkv", cwd, { hive: "work/SAM", key: "SAM\\Domains\\Account\\Users\\000003E9" });
+    const out = body<RegkvOut>(run);
+    assert.equal(run.stdout.includes(verifier.toString("hex")), false);
+    assert.equal(out.values.F, Buffer.alloc(80, 1).toString("hex"), "F is account metadata, returned");
+    assert.match(String(out.values.V), /^\[withheld: \d+ bytes\]$/);
+    assert.deepEqual(out.sensitive_values_withheld.map((w) => w.name), ["V"]);
+    // A SECURITY hive's LSA secret and a cached logon, by where they are and what they are called.
+    const lsa = Buffer.from("planted-lsa-secret-material-0123456789");
+    await writeFile(join(cwd, "work", "SECURITY"), hive({
+      name: "ROOT",
+      children: [
+        { name: "Policy", children: [{ name: "Secrets", children: [{ name: "DPAPI_SYSTEM", children: [{ name: "CurrVal", values: [{ name: "", type: "binary", value: lsa }] }] }] }] },
+        { name: "Cache", values: [{ name: "NL$1", type: "binary", value: lsa }, { name: "NL$Control", type: "binary", value: Buffer.alloc(4, 1) }] },
+      ],
+    }));
+    const secrets = await tool("regkv", cwd, { hive: "work/SECURITY", key: "Policy\\Secrets\\DPAPI_SYSTEM\\CurrVal" });
+    assert.equal(secrets.stdout.includes(lsa.toString("hex")), false);
+    assert.equal(body<RegkvOut>(secrets).sensitive_values_withheld.length, 1);
+    const cache = await tool("regkv", cwd, { hive: "work/SECURITY", key: "Cache" });
+    assert.equal(cache.stdout.includes(lsa.toString("hex")), false);
+    assert.deepEqual(body<RegkvOut>(cache).sensitive_values_withheld.map((w) => w.name), ["NL$1", "NL$Control"]);
+  });
+});
+
+test("regkv reports a file that is not a hive as an error with a non-zero exit, not a traceback", async () => {
+  await withCwd(async (cwd) => {
+    await writeFile(join(cwd, "work", "junk"), Buffer.alloc(8192, 0x41));
+    const err = failed(await tool("regkv", cwd, { hive: "work/junk", key: "x" }));
+    assert.match(err.error, /could not read the hive/);
   });
 });
