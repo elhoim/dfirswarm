@@ -24,16 +24,16 @@
       "tools/encrypted_survey/manifest.json": "e2af7a021208e862ccc07898929c198f0a935dc06925495779c37f4e4ea2ebc9",
       "tools/encrypted_survey/run.py": "3105ceefede30c5f782165689a2fa6a3e4a5a9a519493710c85b3a9ab0db56c4",
       "goals/ransomware-case.md": "f0cd01d8c8527dfcf11485869e1fae76142549f72d073297e7b02fff285f1b32",
-      "skills/identify/family.md": "9b524e3cd1e8667760cb3a1a5220942f1876e8efe18c5f1ec5b8b1905fb91d90",
+      "skills/identify/family.md": "ced4d413faddbc8dffe5611d63be4cb968c6535a97cb15b06a7e5e3d44947192",
       "skills/reporting/for-regulators.md": "0195dc0613589530ca9cb5cb83c1a8188788d08752d4f0c380ac2a82bf4271fa",
-      "skills/exfil/before-encryption.md": "938fc1e5ba71912f755f474e85667b7802f098e76d5f36b1ff6672cacac59040",
-      "skills/encryptor/destroyed-backups.md": "36d28e277cfc5b1b94e4e022db3b917c189f2ab60316a583a06a3c462d3439b5",
-      "skills/encryptor/traces.md": "90f7c142f4fbed5cc3bb671c2f0cc599a8883de1385c17f1d8876dc768144549",
-      "skills/recovery/what-is-possible.md": "1bb70aadcdbd1c8a7205c6da27131503220ab163704db908dbcb1d43328ef663",
-      "skills/scope/first-hour.md": "499b7bcee8822e5fb048f74c44fa098d2c4678b27a2cf209e07b4b3a5edddab0",
+      "skills/exfil/before-encryption.md": "e491b456277f87144dcc1a8a111c48f8def5b856b4fbf8b309f6afa9052c8b7a",
+      "skills/encryptor/destroyed-backups.md": "b6d453ada5110f474f8591e232ee4fc26b9bf29a2f1cdefd8a3b4ed4dbd6d535",
+      "skills/encryptor/traces.md": "3137b6ed9062829e314390fa523b16e338dcef0ddba413775bf4324cd2ac45ad",
+      "skills/recovery/what-is-possible.md": "4162ae8bdc0bbcc950a4e677bbecbea5c3971b4197470f756611021ce68f29f2",
+      "skills/scope/first-hour.md": "453227c37057ce9b639d0cc6a91f3253e8455ef0dd89b7b4c99548ac013c15a4",
       "requires/host.json": "59d527f2da5ee751fc2672758a2908e49dcba4f1138b345ec92bc6b873090d1e",
       "requires/python.txt": "5a396319de276d1ea51953493ef8e4f2dd0d7cb87c67aac6fbd0e63c096d63b6",
-      "skills/INDEX.md": "bffed478651e59c85ee00b416672330308cc42df35e6617f4182901129d0586b"
+      "skills/INDEX.md": "ccba54d7f54a69caf0f0cfa757e3ec2cd5f7e7937fcbc7941d567c964175cfd7"
     }
   },
   "tools": [
