@@ -1,7 +1,7 @@
 {
   "id": "ransomware-response",
   "name": "Ransomware Response Pack",
-  "version": "1.0.3",
+  "version": "1.1.0",
   "description": "The order a ransomware case has to be worked in: scope before anything else, the exfiltration that came before the encryption, what the encryptor itself left, the destroyed shadow copies, identifying the family from the note and the file marker, what recovery is actually possible, and the report a regulator and a negotiator will both ask for.",
   "licence": "AGPL-3.0-or-later",
   "authors": [
@@ -25,7 +25,7 @@
       "tools/encrypted_survey/run.py": "6b927ef96707f6c6f21535fee50fb125e8ac47d8574ffa134477447069de5fe3",
       "goals/ransomware-case.md": "f0cd01d8c8527dfcf11485869e1fae76142549f72d073297e7b02fff285f1b32",
       "skills/identify/family.md": "9b524e3cd1e8667760cb3a1a5220942f1876e8efe18c5f1ec5b8b1905fb91d90",
-      "skills/reporting/for-regulators.md": "3cfa5dcfe23fe91c7b4b022af4e2a2db3c4569608f92b9c752523e2134400644",
+      "skills/reporting/for-regulators.md": "0195dc0613589530ca9cb5cb83c1a8188788d08752d4f0c380ac2a82bf4271fa",
       "skills/exfil/before-encryption.md": "938fc1e5ba71912f755f474e85667b7802f098e76d5f36b1ff6672cacac59040",
       "skills/encryptor/destroyed-backups.md": "36d28e277cfc5b1b94e4e022db3b917c189f2ab60316a583a06a3c462d3439b5",
       "skills/encryptor/traces.md": "90f7c142f4fbed5cc3bb671c2f0cc599a8883de1385c17f1d8876dc768144549",
@@ -33,7 +33,7 @@
       "skills/scope/first-hour.md": "499b7bcee8822e5fb048f74c44fa098d2c4678b27a2cf209e07b4b3a5edddab0",
       "requires/host.json": "59d527f2da5ee751fc2672758a2908e49dcba4f1138b345ec92bc6b873090d1e",
       "requires/python.txt": "5a396319de276d1ea51953493ef8e4f2dd0d7cb87c67aac6fbd0e63c096d63b6",
-      "skills/INDEX.md": "46b73536f7610ef8631c20ddeefd58e7df2177b0f22c11d1b88ddf48a208cdab"
+      "skills/INDEX.md": "bffed478651e59c85ee00b416672330308cc42df35e6617f4182901129d0586b"
     }
   },
   "tools": [

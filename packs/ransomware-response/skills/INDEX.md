@@ -7,5 +7,5 @@ Fetch a body with `skill("<id>")`. A body may name others; fetch those the same 
 - `exfil/before-encryption` What left before anything was encrypted: Always, and early: this is the question with the deadline attached.
 - `identify/family` Identifying the family, and what that is worth: You need to name what this is, for a decryptor, a negotiation or attribution.
 - `recovery/what-is-possible` What can actually be recovered: The organisation is deciding what to restore, and what is gone.
-- `reporting/for-regulators` The report a regulator, an insurer and a negotiator will each ask for: Writing up a ransomware case.
+- `reporting/for-regulators` Evidence-led reporting and notification assessment: Preparing incident findings for legal, regulatory, insurance or executive review.
 - `scope/first-hour` The first hour, and the order it has to be done in: A ransomware case starts.
