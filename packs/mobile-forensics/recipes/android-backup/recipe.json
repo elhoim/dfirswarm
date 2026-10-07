@@ -31,5 +31,5 @@
   ],
   "purpose": "inventory",
   "covers": "The adb-backup header (version, compression, encryption scheme; the key-derivation values of an encrypted one are not printed) and every member name, type, size and tar timestamp when encryption is none and the version is supported. It extracts nothing, does not bypass app backup exclusions, and cannot list an encrypted payload: no password is read or accepted. A payload that expands past its decompression budget, a stream cut off before its end marker, a version outside 1 to 5 and an unknown scheme are each said (status partial, with the reason), and what was listed before is kept.",
-  "sha256": "b4677a71f574e73017442c906badba138b571622227a15a1e47034b3db08cfff"
+  "sha256": "3177e0064274ff5cd49559932e95cb0ec8a0c8858f0f9c1ff8eec4266840cbbe"
 }

@@ -20,9 +20,11 @@ a field number of 0 or above 536870911, a wire type of 6 or 7 and a field that r
 are structural errors, named with the offset where they were met. A message that holds a group is
 `unsupported`: it is not parsed past the group and it is never reported as valid.
 
-A length-delimited field is read as a nested message only when every field number in it is at most
-300: real messages use small numbers, and the bytes of a string or a token that happen to parse as fields
-mostly do not (what such a reading shows of itself is derived from those bytes).
+A length-delimited field whose bytes are printable text is text, never a nested message (a nested
+reading of a string would show its characters as field numbers, wire types and lengths: a tag byte is a
+printable character), and any other is read as a nested message only when it parses whole and every field
+number in it is at most 300. A binary value that does parse that way shows that structure, which is derived
+from its bytes: rare for a key or a token, and not impossible.
 
 THE SHAPE IS NOT THE MEANING. A length-delimited field is ambiguous by design: each is tried as a
 nested message, then as text, and `read_as` says which reading was taken and `also_reads_as` the others
@@ -39,8 +41,8 @@ MiB), and what lies past it is counted and the offset to continue at is named.
 THE SECRET-SAFE OUTPUT PATTERN. A protobuf blob can hold message text, a token or any other string.
 A top-level varint is printed (a timestamp, a counter and an enum are what it is read for). Nothing
 else that holds a value is: not the text of a string field, not the bytes of a bytes field, not a
-number under a length-delimited field (the bytes of a string or a token parse as a nested message
-now and then, and their "numbers" are its content) and not a fixed-width value, which is raw bytes.
+number under a length-delimited field (binary bytes parse as a nested message now and then, and their
+"numbers" are its content) and not a fixed-width value, which is raw bytes.
 The answer carries each one's offset, length and reading, and the value goes only to the values
 file, on `write_values: true` in a job run with `secret_output: true`. `hex` (a message passed in the call) is recorded in the trace: use it only for
 a few bytes that are not sensitive, and a file for anything else.
@@ -401,9 +403,9 @@ DEFAULT_LIMIT = 200
 INLINE_BYTES = 1 << 20
 DEFAULT_SECONDS = 60
 # What a number field carries. A top-level varint is printed; every other number is held back (see emit).
-# A length-delimited field is read as a nested message only when every field in it has a number up to this.
-# Real messages use small numbers; the bytes of a string or a token that happen to parse as fields mostly
-# do not, and what such a reading shows (field numbers, wire types, lengths) is derived from those bytes.
+# A length-delimited field is read as a nested message only when its bytes are not printable text and every
+# field in it has a number up to this. Real messages use small numbers; binary bytes that happen to parse as
+# fields rarely do, and what such a reading shows (field numbers, wire types, lengths) is derived from them.
 NESTED_FIELD_MAX = 300
 NUMBER_KEYS = ("value", "as_bool", "zigzag_reading", "twos_complement_reading", "hex", "float_reading", "double_reading")
 
@@ -520,36 +522,39 @@ def parse(ctx, start, end, depth, path):
             body = ctx.blob[at:at + length]
             row["payload_offset"] = ctx.base + at
             row["payload_bytes"] = length
-            nested, text = None, None
+            nested, text, rejected = None, None, False
             if length:
                 if depth < ctx.max_depth:
                     inner, state, _ = parse(ctx, at, at + length, depth + 1, field_path)
                     if ctx.stopped:
                         return rows, "stopped", {"offset": ctx.base + field_start, "reason": ctx.stopped}
-                    if state == "ok" and inner and all(r["field"] <= NESTED_FIELD_MAX for r in inner):
-                        nested = inner
+                    if state == "ok" and inner:
+                        if all(r["field"] <= NESTED_FIELD_MAX for r in inner):
+                            nested = inner
+                        else:
+                            rejected = True
                 text = printable(body)
-            readings = []
-            if nested:
-                readings.append("nested message")
+            # Printable text is text, never a nested message: a nested reading of a string would show its
+            # characters as field numbers, wire types and lengths (a tag byte is a printable character).
             if text is not None:
-                readings.append("text")
-            if nested and not (text is not None and length < 64):
-                row["read_as"] = "nested message"
-                row["children"] = len(nested)
-                row["_children"] = nested
-            elif text is not None:
                 row["read_as"] = "text"
                 row["characters"] = len(text)
                 row["_value"] = ("text", text)
+                alternatives = ["nested message"] if (nested or rejected) else []
+            elif nested:
+                row["read_as"] = "nested message"
+                row["children"] = len(nested)
+                row["_children"] = nested
+                alternatives = []
             elif length == 0:
                 row["read_as"] = "empty"
+                alternatives = []
             else:
                 row["read_as"] = "bytes"
                 row["_value"] = ("bytes", body.hex())
-            others = [r for r in readings if r != row["read_as"]]
-            if others:
-                row["also_reads_as"] = others
+                alternatives = ["nested message (a field number above %d)" % NESTED_FIELD_MAX] if rejected else []
+            if alternatives:
+                row["also_reads_as"] = alternatives
             at += length
         rows.append(row)
     return rows, "ok", None
@@ -696,8 +701,10 @@ def main():
                 "length-delimited field (it may be the content of a string that parsed as a nested message), not a "
                 "fixed-width value. Each has its offset, length and reading, and a finding id; the value is in the values "
                 "file only when write_values was asked for in a job run with secret_output: true. read_as is a guess between a nested message, text and bytes "
-                "(also_reads_as lists the others it could be), and a nested reading needs every field number in it to be at most 300 "
-                "(what a misread string would show of itself is derived from its bytes). A group makes the message `unsupported`, and any "
+                "(also_reads_as lists the others it could be): printable text is always text, and a nested reading needs every "
+                "field number in it to be at most 300. A binary value that parses as a small nested message shows that "
+                "structure (field numbers, wire types, lengths), which is derived from its bytes, and its numbers are "
+                "withheld; its payload as a whole is not in the values file. A group makes the message `unsupported`, and any "
                 "structural error names its offset: consistent_with_protobuf_wire_format means the whole window parsed, "
                 "and a short or ordinary blob can parse by chance. Offsets are absolute in the file.",
     })

@@ -157,6 +157,13 @@ for (const [recipeName, program, marker, label] of [
       assert.equal(logged.coverage.modules?.counts.errors_logged, 1);
       assert.match(logged.tsv[2], /^1\terrors_logged\tTelegram\ttelegram\t0\t1\t/);
       assert.doesNotMatch(JSON.stringify(logged.coverage) + logged.tsv.join("\n"), /SECRET-TABLE/);
+      // The words a module uses for a failure it goes past are many: each of these, in a module that completes, is not "completed".
+      for (const [i, line] of ["Could not open database file", "The database is malformed, skipping it", "Invalid schema version 9", "Database is corrupt", "Permission denied reading the file",
+        "cannot decode attributedBody", "No such table: message", "unsupported schema"].entries()) {
+        const odd = await run(`odd${i}`, [LOG.header(1), `echo "[1/1] Messages [messages] artifact started at 09:29:44 UTC"; echo "${line}"; echo "Found 0 records for Messages"; echo "Messages [messages] artifact completed in 0.0s"`, LOG.end]);
+        assert.equal(odd.coverage.status, "partial", line);
+        assert.equal(odd.coverage.modules?.counts.errors_logged, 1, line);
+      }
       // A module that started and said nothing more is unknown, and a log that stops short of the modules it announced is not complete.
       const cut = await run("cut", [LOG.header(2), LOG.found(1, 2, "Messages", "messages", 2), LOG.started(2, 2, "Notes", "notes")]);
       assert.equal(cut.coverage.status, "partial");
@@ -408,6 +415,82 @@ test("android-backup is complete only when the tar's end-of-archive block came, 
   });
 });
 
+/** An adb backup whose tar is built block by block, as the formats lay it out (ustar header, pax records, GNU sparse extension blocks). */
+const RAWTAR = String.raw`
+import json, random, sys, zlib
+path, spec = sys.argv[1], json.loads(sys.argv[2])
+def block(name, size_field, flag=b"0"):
+    b = bytearray(512)
+    b[0:len(name)] = name
+    b[100:108] = b"0000644\0"; b[108:116] = b"0000000\0"; b[116:124] = b"0000000\0"
+    b[124:136] = size_field; b[136:148] = b"14000000000\0"; b[148:156] = b"        "; b[156:157] = flag; b[257:265] = b"ustar  \0"
+    b[148:156] = b"%06o\0 " % (sum(b) & 0o777777)
+    return bytes(b)
+def pad(d): return d + b"\0" * (-len(d) % 512)
+def record(k, v):
+    body = b" %s=%s\n" % (k, v); n = len(body) + 1
+    while len(str(n)) + len(body) != n: n = len(str(n)) + len(body)
+    return b"%d%s" % (n, body)
+rnd = random.Random(7)
+def data(n): return bytes(rnd.getrandbits(8) for _ in range(n)) if n < 100000 else (bytes(rnd.getrandbits(8) for _ in range(4096)) * (n // 4096 + 1))[:n]
+out = b""
+for m in spec["members"]:
+    kind = m["kind"]
+    if kind == "plain":
+        d = data(m["size"]); out += block(m["name"].encode(), b"%011o\0" % len(d)) + pad(d)
+    elif kind == "pax_size":
+        # the real size is in the pax record, the ustar size is 0 (POSIX pax: the record wins)
+        rec = record(b"size", b"%d" % m["size"])
+        d = b"\0" * m["size"] if m.get("zeros") else data(m["size"])
+        out += block(b"PaxHeaders/x", b"%011o\0" % len(rec), b"x") + pad(rec) + block(m["name"].encode(), b"%011o\0" % 0) + pad(d)
+    elif kind == "pax_big":
+        rec = b"".join(record(b"SCHILY.xattr.user.k%d" % i, b"v" * 200) for i in range(m["records"]))
+        out += block(b"PaxHeaders/y", b"%011o\0" % len(rec), b"x") + pad(rec) + block(m["name"].encode(), b"%011o\0" % 10) + pad(b"0123456789")
+    elif kind == "sparse":
+        d = data(m["size"])
+        b = bytearray(block(m["name"].encode(), b"%011o\0" % len(d), b"S"))
+        b[482] = 1; b[483:495] = b"%011o\0" % (1 << 20); b[148:156] = b"        "; b[148:156] = b"%06o\0 " % (sum(b) & 0o777777)
+        out += bytes(b) + bytes(512) + pad(d)   # one extension block (its isextended byte is 0), then the data
+out += b"\0" * 1024
+header = b"ANDROID BACKUP\n5\n%d\nnone\n" % (1 if spec.get("compress", True) else 0)
+open(path, "wb").write(header + (zlib.compress(out) if spec.get("compress", True) else out))
+`;
+
+test("android-backup follows the sizes the tar reader follows: a pax size record, GNU sparse extension blocks, a pax header of megabytes", async () => {
+  // The watch read only the ustar size: a valid pax archive whose entry size is in the pax record was read as cut short,
+  // a sparse entry with extension blocks as damaged, and a long pax header as too large.
+  await withCwd(async (cwd) => {
+    const cases: [string, Record<string, unknown>[], string[]][] = [
+      ["pax-size", [{ kind: "pax_size", name: "apps/a/f/big.bin", size: 200000 }, { kind: "plain", name: "apps/a/db/after.db", size: 10 }], ["apps/a/f/big.bin", "apps/a/db/after.db"]],
+      ["pax-zeros", [{ kind: "pax_size", name: "apps/a/f/zero.bin", size: 200000, zeros: true }, { kind: "plain", name: "apps/a/db/after.db", size: 10 }], ["apps/a/f/zero.bin", "apps/a/db/after.db"]],
+      ["sparse", [{ kind: "sparse", name: "apps/a/f/sparse.bin", size: 3000 }, { kind: "plain", name: "apps/a/db/after.db", size: 10 }], ["apps/a/f/sparse.bin", "apps/a/db/after.db"]],
+      ["pax-big", [{ kind: "pax_big", name: "apps/a/f/xattr.bin", records: 9000 }, { kind: "plain", name: "apps/a/db/after.db", size: 10 }], ["apps/a/f/xattr.bin", "apps/a/db/after.db"]],
+    ];
+    for (const compress of [false, true]) {
+      for (const [name, members, expected] of cases) {
+        const ab = join(cwd, "work", `${name}-${compress}.ab`);
+        await build(RAWTAR, ab, JSON.stringify({ compress, members }));
+        const out = join(cwd, `${name}-${compress}`);
+        const result = await recipe("android-backup", ["run", "--target", target(ab), "--out", out], cwd);
+        assert.equal(result.code, 0, result.stdout + result.stderr);
+        const cov = await coverage(out);
+        assert.equal(cov.status, "complete", `${name} compress=${compress}: ${JSON.stringify(cov)}`);
+        assert.equal(cov.tar_end, "reached", name);
+        const listed = (await readFile(join(out, "members.tsv"), "utf8")).trimEnd().split("\n").slice(1).map((l) => l.split("\t")[2]);
+        assert.deepEqual(listed, expected, name);
+      }
+    }
+    // Truncated inside the pax-sized data: partial, never "reached" from a wrong position.
+    const ab = join(cwd, "work", "pax-size-false.ab");
+    const data = await readFile(ab.replace("pax-size-false", "pax-size-false"));
+    await writeFile(join(cwd, "work", "pax-cut.ab"), data.subarray(0, data.length - 100000));
+    await recipe("android-backup", ["run", "--target", target(join(cwd, "work", "pax-cut.ab")), "--out", join(cwd, "pax-cut")], cwd);
+    const cut = await coverage(join(cwd, "pax-cut"));
+    assert.equal(cut.status, "partial");
+    assert.notEqual(cut.tar_end, "reached");
+  });
+});
+
 test("android-backup does not read an extended header that declares more than it will hold, and says so", async () => {
   // The tar library reads a GNU long name or a pax header whole into memory: 300 MiB declared in a 600-byte header.
   await withCwd(async (cwd) => {
@@ -420,7 +503,7 @@ test("android-backup does not read an extended header that declares more than it
       assert.equal(result.code, 0, result.stdout + result.stderr);
       const cov = await coverage(out);
       assert.equal(cov.status, "partial", JSON.stringify(cov));
-      assert.ok(cov.limits_hit.some((l) => /extended header declares 314572800 bytes, over the limit of 1048576/.test(l)), JSON.stringify(cov.limits_hit));
+      assert.ok(cov.limits_hit.some((l) => /extended header declares 314572800 bytes, over the limit of 16777216/.test(l)), JSON.stringify(cov.limits_hit));
       assert.equal((await readFile(join(out, "members.tsv"), "utf8")).trimEnd().split("\n").length, 2, "the member before the header is listed");
     }
   });

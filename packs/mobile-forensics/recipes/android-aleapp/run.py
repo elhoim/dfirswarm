@@ -81,7 +81,11 @@ LOG_FOUND = re.compile(r"^Found (?P<n>\d+) records? for ")
 LOG_NO_FILE = re.compile(r"^No files? found\s*$")
 LOG_NO_DATA = re.compile(r"^No data found for ")
 LOG_EXPECTED = re.compile(r"^Artifact to parse: (?P<n>\d+)\s*$")
-LOG_PROBLEM = re.compile(r"\b(error|errors|exception|traceback|unable to|failed)\b", re.I)
+# Words a module uses when it could not do what it set out to do and went on. A line that holds one, inside a
+# module that then completed, makes the module errors_logged: a missed word makes a run complete that is not,
+# a needless one makes it partial, and the second costs a look at the log.
+LOG_PROBLEM = re.compile(r"\b(errors?|exceptions?|traceback|unable|failed|failures?|could not|couldn't|cannot|can't|corrupt(ed)?|"
+                         r"malformed|invalid|permission denied|no such (table|column|file)|not a database|unsupported|skipping|skipped)\b", re.I)
 LOG_LINE_BOUND = 4000
 FIRST_UNATTRIBUTED = 20
 STATUSES = ("completed", "no_record", "errored", "errors_logged", "unknown")

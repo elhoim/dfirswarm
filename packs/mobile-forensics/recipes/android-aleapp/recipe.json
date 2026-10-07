@@ -49,5 +49,5 @@
     "coverage.json"
   ],
   "covers": "What ALEAPP's modules parse from the whole acquisition: one TSV per artefact that has records, its timeline and every file it wrote, kept under aleapp/, and modules.tsv with the outcome of each module its log names. A module that finds nothing writes no report (no_record), which does not show the artefact never existed; files no module targets are not read; a module that errored or whose end the log does not show is not covered, however many reports the others wrote. The report contains the phone's own content and is a sensitive output.",
-  "sha256": "1750b2d4eecced2aaa1fe05ae08b9c433140b39f94f297135b05b6f4de9d872c"
+  "sha256": "1740de980b98f118e97abcd0e1ad53eeab6c52cd998a4d1a1da4c965b7d4bee1"
 }

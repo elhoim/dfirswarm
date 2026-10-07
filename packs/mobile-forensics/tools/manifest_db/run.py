@@ -465,8 +465,9 @@ def pick(tree, keys):
 
 
 def entropy(data):
-    if not data:
-        return 0.0
+    """Bits per byte of a sample of at least 256 bytes; None for a shorter one (its statistics are its content)."""
+    if len(data) < 256:
+        return None
     counts = [0] * 256
     for byte in data:
         counts[byte] += 1
@@ -722,6 +723,7 @@ def main():
         sample = fh.read(4096)
     head = sample[:16]
     observations = []
+    skipped_companions = 0
     # A companion that is a link is not followed: it is said, and not copied.
     companions = []
     for suffix in ("-wal", "-journal"):
@@ -731,10 +733,11 @@ def main():
             continue
         if stat.S_ISLNK(info.st_mode):
             observations.append("%s%s is a symbolic link: not followed, not copied, and not applied" % (os.path.basename(db), suffix))
+            skipped_companions += 1
         elif stat.S_ISREG(info.st_mode) and info.st_size > 0:
             companions.append(suffix)
     db_file = {"bytes": db_bytes, "format": "SQLite" if head == SQLITE_MAGIC else "not a plaintext SQLite database",
-               **({} if head == SQLITE_MAGIC else {"entropy_bits_per_byte_of_first_4096": round(entropy(sample), 2),
+               **({} if head == SQLITE_MAGIC else {"entropy_bits_per_byte_of_first_4096": None if entropy(sample) is None else round(entropy(sample), 2),
                                                     "entropy_note": "what the file starts with is not printed; high entropy is one explanation among others (encryption, compression), not an identification"}),
                "companions": {s: os.lstat(db + s).st_size for s in ("-wal", "-shm", "-journal") if os.path.lexists(db + s)}}
     listing = {"available": False, "reason": None}
@@ -848,7 +851,7 @@ def main():
     for name, span in sorted(extra["times"].items()):
         time_range[name] = {"earliest": span["low"][1] if span["low"] else None, "latest": span["high"][1] if span["high"] else None,
                             "values": span["values"], "zero_values_left_out": span["zero"]}
-    complete = listing["available"] and stopped_at_row is None and read_error is None
+    complete = listing["available"] and stopped_at_row is None and read_error is None and not skipped_companions
     if state == "encrypted" and not listing["available"]:
         complete = False
     status = "complete" if complete else "partial"
@@ -900,7 +903,7 @@ def main():
                 "recorded it, not when it was backed up. blob says whether the file named by an id is in the backup "
                 "(present), absent (missing), a directory, a link (never followed), not applicable (the manifest entry "
                 "is a directory or a link) or refused (an id that is not 40 hexadecimal digits). status is partial "
-                "when the listing is not available, a damaged page ended it (read_error), or the time limit stopped it.",
+                "when the listing is not available, a damaged page ended it (read_error), the time limit stopped it, or a companion that is a link was not applied.",
     }
     send(result)
 

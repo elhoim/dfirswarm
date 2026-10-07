@@ -411,9 +411,12 @@ _BLOCKS = [  # (letter, high bytes, accepted low bytes, wide)
     ("C", [0x02], range(0x00, 0x50), False),                                               # Latin Extended-B, IPA
     ("D", [0x03], range(0x70, 0x100), False),                                              # Greek
     ("E", [0x04], _ALL, False),                                                            # Cyrillic
-    ("F", [0x05], range(0x91, 0x100), False),                                              # Hebrew
+    ("F", [0x05], range(0x31, 0x100), False),                                              # Armenian, Hebrew
     ("G", [0x06], _ALL, False),                                                            # Arabic
-    ("H", [0x20], [0x13, 0x14, 0x18, 0x19, 0x1c, 0x1d, 0x26, 0xac], False),                # common punctuation
+    ("H", [0x20], [0x13, 0x14, 0x18, 0x19, 0x1c, 0x1d, 0x22, 0x26, 0xac], False),          # common punctuation, bullet, euro
+    ("I", [0x09], range(0x00, 0x80), False),                                               # Devanagari
+    ("J", [0x0e], range(0x01, 0x80), False),                                               # Thai
+    ("K", [0x10, 0x1e, 0x1f], _ALL, False),                                                # Georgian, Latin Additional, Greek Extended
     ("W", [0x30, *range(0x4e, 0xa0), *range(0xac, 0xd8)], _ALL, True),                     # kana, ideographs, Hangul
     ("X", [0xff], range(0x00, 0xf0), True),                                                # fullwidth forms
     ("U", range(0xd8, 0xdc), _ALL, True),                                                  # high surrogate
@@ -537,8 +540,9 @@ class Problems:
 
 
 def entropy(data):
-    if not data:
-        return 0.0
+    """Bits per byte of a sample of at least 256 bytes; None for a shorter one (its statistics are its content)."""
+    if len(data) < 256:
+        return None
     counts = [0] * 256
     for byte in data:
         counts[byte] += 1
@@ -610,7 +614,7 @@ def main():
             sample = scan.read(4096 - len(head)) if len(head) < 4096 else b""
             values.close()
             fail("this is not a SQLite database: its first 16 bytes are not the SQLite header string",
-                 db=shown(db), bytes=file_bytes, entropy_bits_per_byte_of_first_4096=round(entropy(head + sample), 2),
+                 db=shown(db), bytes=file_bytes, entropy_bits_per_byte_of_first_4096=(None if entropy(head + sample) is None else round(entropy(head + sample), 2)),
                  note="High entropy is one explanation among others (encryption, compression); it is not an identification.")
         h = header_of(head)
         page_size, usable = h["page_size"], h["usable_size"]

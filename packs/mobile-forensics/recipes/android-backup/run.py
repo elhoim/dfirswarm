@@ -28,7 +28,7 @@ What it does and does not read:
   verified: `payload_stream` says reached, not_reached (the budget) or truncated.
 
   The tar is followed as it flows past, header by header, apart from the library that reads it: an
-  extended header (a GNU long name, a pax header) that declares more than 1 MiB is not read, since the
+  extended header (a GNU long name, a pax header) that declares more than 16 MiB is not read, since the
   library would hold it whole in memory; and the archive is complete only when its end-of-archive
   block was seen (`tar_end`: reached or missing), so a backup cut at a member boundary is partial.
 
@@ -51,7 +51,7 @@ MAGIC = b"ANDROID BACKUP\n"
 SUPPORTED_VERSIONS = (1, 2, 3, 4, 5)
 DEFAULT_BUDGET = 32 << 30
 PIECE = 1 << 20
-EXTENDED_HEADER_LIMIT = 1 << 20
+EXTENDED_HEADER_LIMIT = 16 << 20
 SCHEME_WORD = re.compile(r"[A-Za-z0-9._-]{1,16}\Z")
 # Typeflags whose size is not followed by data: hard link, symbolic link, character and block device,
 # directory, fifo. Every other flag (a regular file, a long name, a pax header, a vendor type) is followed
@@ -62,8 +62,10 @@ NO_DATA_TYPES = set(b"123456")
 class TarWatch:
     """Follows a tar stream header by header as its bytes flow past, apart from the library that reads it.
 
-    It bounds what the library holds in memory (an extended header declaring more than the limit) and sees
-    whether the end-of-archive block came: the library stops quietly at a cut header or a garbled one.
+    It bounds what the library holds in memory (an extended header declaring more than the limit), sees
+    whether the end-of-archive block came (the library stops quietly at a cut header or a garbled one), and
+    follows the sizes the library follows: a pax `size` record overrides the header's, and a GNU sparse
+    header may be followed by extension blocks before its data.
     """
 
     def __init__(self):
@@ -73,10 +75,27 @@ class TarWatch:
         self.ended = False
         self.end_at = None
         self.violation = None
+        self.collect = 0           # bytes of a pax header still to gather
+        self.collecting = None
+        self.acc = bytearray()
+        self.collect_padding = 0
+        self.next_size = None      # a pax `size` for the next entry
+        self.global_size = None    # one from a global pax header
+        self.in_ext = False        # inside the extension blocks of a GNU sparse header
+        self.after_ext = 0
 
     def feed(self, data):
         i, n = 0, len(data)
         while i < n and not self.ended and self.violation is None:
+            if self.collect:
+                take = min(self.collect, n - i)
+                self.acc += data[i:i + take]
+                self.collect -= take
+                i += take
+                self.position += take
+                if not self.collect:
+                    self.finish_pax()
+                continue
             if self.skip:
                 step = min(self.skip, n - i)
                 self.skip -= step
@@ -93,7 +112,44 @@ class TarWatch:
         if self.ended:
             self.position += n - i
 
+    @staticmethod
+    def pax_size(data):
+        """The `size` of a pax header's records ("<length> <key>=<value>\\n"), or None."""
+        size, pos = None, 0
+        while pos < len(data):
+            space = data.find(b" ", pos)
+            if space < 0:
+                break
+            try:
+                length = int(data[pos:space])
+            except ValueError:
+                break
+            if length <= 0 or pos + length > len(data):
+                break
+            key, _, value = data[space + 1:pos + length - 1].partition(b"=")
+            if key == b"size":
+                try:
+                    size = int(value)
+                except ValueError:
+                    pass
+            pos += length
+        return size
+
+    def finish_pax(self):
+        size = self.pax_size(bytes(self.acc))
+        if self.collecting == ord("x"):
+            self.next_size = size
+        elif size is not None:
+            self.global_size = size
+        self.acc.clear()
+        self.skip = self.collect_padding
+
     def header(self, block):
+        if self.in_ext:
+            if not block[504]:
+                self.in_ext = False
+                self.skip = self.after_ext
+            return
         if block == b"\0" * 512:
             self.ended = True
             self.end_at = self.position - 512
@@ -104,11 +160,32 @@ class TarWatch:
             size = int.from_bytes(bytes([raw[0] & 0x7F]) + raw[1:], "big") if raw[0] & 0x80 else int(raw.strip(b"\0 ") or b"0", 8)
         except ValueError:
             size = 0
-        if flag in b"LKxgX" and size > EXTENDED_HEADER_LIMIT:
+        if flag in b"xg":
+            if size > EXTENDED_HEADER_LIMIT:
+                self.violation = size
+                return
+            self.collecting, self.collect, self.collect_padding = flag, size, -size % 512
+            if not size:
+                self.finish_pax()
+            return
+        if flag in b"LKX" and size > EXTENDED_HEADER_LIMIT:
             self.violation = size
             return
-        if flag not in NO_DATA_TYPES:
-            self.skip = -(-size // 512) * 512
+        if flag in NO_DATA_TYPES:
+            self.next_size = None
+            return
+        if flag not in b"LK":
+            # A pax `size` record is the size of the entry it precedes, over the header's own.
+            if self.next_size is not None:
+                size = self.next_size
+            elif self.global_size is not None:
+                size = self.global_size
+            self.next_size = None
+        padded = -(-size // 512) * 512
+        if flag == ord("S") and block[482]:
+            self.in_ext, self.after_ext = True, padded
+        else:
+            self.skip = padded
 
 
 class ZlibReader(io.RawIOBase):

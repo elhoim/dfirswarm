@@ -499,6 +499,22 @@ test("sqlite_freespace reads UTF-16 text at either byte parity in LE and BE, and
   });
 });
 
+test("sqlite_freespace reads Armenian, Georgian, Devanagari, Thai and Vietnamese UTF-16 text too", async () => {
+  await withCwd(async (cwd) => {
+    const texts: [string, string][] = [
+      ["armenian", "Բարեւ աշխարհ սա փորձնական տեքստ է"], ["georgian", "გამარჯობა მსოფლიო ეს სატესტო ტექსტია"],
+      ["devanagari", "नमस्ते दुनिया यह एक परीक्षण संदेश है"], ["thai", "สวัสดีชาวโลก นี่คือข้อความทดสอบ"],
+      ["vietnamese", "Xin chào thế giới đây là một thông điệp thử nghiệm ề ệ ố"],
+    ];
+    for (const [name, text] of texts) {
+      const db = join(cwd, "work", `${name}.db`);
+      await build(FREEBLOCK_DB, db, text, "UTF-16le");
+      const { values } = await freespace(cwd, db, {}, `out-${name}`);
+      assert.ok(values.some((v) => v.value.includes(text)), `${name} is recovered whole`);
+    }
+  });
+});
+
 test("sqlite_freespace says partial while a -wal or a -journal that holds bytes is not read", async () => {
   await withCwd(async (cwd) => {
     const db = join(cwd, "work", "wal.db");
@@ -525,6 +541,10 @@ test("sqlite_freespace prints none of a file that is not SQLite, only its size a
     for (const form of ["password", Buffer.from("password").toString("hex"), "Tr0ub4"]) assert.equal(text.includes(form), false, form);
     assert.equal(err.head_hex, undefined);
     assert.equal(typeof err.entropy_bits_per_byte_of_first_4096, "number");
+    // A file too short for the figure to be more than a statistic of its content gets none.
+    const tiny = join(cwd, "work", "tiny.txt");
+    await writeFile(tiny, "aaaaaaaaaaab");
+    assert.equal(refused(await tool(FREESPACE, cwd, { db: tiny })).entropy_bits_per_byte_of_first_4096, null);
     assert.equal(err.bytes, 80 * 40 + 0 === 0 ? 0 : (await stat(file)).size);
   });
 });
@@ -956,6 +976,7 @@ test("manifest_db does not follow a Manifest.db that is a link, or a -wal that i
     await symlink(outside, join(dir, "Manifest.db-wal"));
     const { answer } = await manifest(cwd, dir);
     assert.ok(answer.observations.some((o) => /Manifest\.db-wal is a symbolic link: not followed/.test(o)));
+    assert.equal(answer.status, "partial", "a companion that was not applied makes the listing partial");
     assert.equal(answer.manifest_db_file.snapshot?.startsWith("the main file only"), true);
     assert.equal(answer.entry_count, 1);
     // A Manifest.db that is a link: refused, and nothing of the target is printed.
@@ -1046,7 +1067,7 @@ const varintField = (field: number, v: bigint | number): Buffer => Buffer.concat
 type PbField = {
   field_path: string; field: number; wire_type: string; depth: number; offset: number; value?: number; as_bool?: boolean;
   zigzag_reading?: number; twos_complement_reading?: number; hex?: string; payload_offset?: number; payload_bytes?: number;
-  read_as?: string; also_reads_as?: string[]; children?: number; characters?: number; finding_id?: string; as_signed?: unknown; text?: unknown; value_withheld?: string;
+  read_as?: string; also_reads_as?: string[] | string; children?: number; characters?: number; finding_id?: string; as_signed?: unknown; text?: unknown; value_withheld?: string;
 };
 type Pb = {
   source: string; parser: string;
@@ -1202,6 +1223,30 @@ test("protobuf_peek prints no text and no bytes of a string or bytes field, and 
     // Refused outside a job, and a second run in the same job.
     assert.match(refused(await tool(PROTOBUF, cwd, { path: "work/m.bin", write_values: true })).error, /refused outside a job/);
     assert.match(refused(await asJob(PROTOBUF, cwd, { path: "work/m.bin", write_values: true }, "pb-job")).error, /already exists/);
+  });
+});
+
+test("protobuf_peek reads printable text as text, so a string's characters are never field numbers, wire types or lengths", async () => {
+  // A 72-character token parsed as a nested message (a printable tag byte is a field number 4 to 15), and its first
+  // characters were the keys and the length of the rows printed for it.
+  await withCwd(async (cwd) => {
+    const token = "5useUj3kKVJjBUD9Px9KiNx3t31cJIyXX4uDl45U6pMpIAymiDaRf7mQpBM4aT6q3dF7z4rJ";
+    const english = "The quick brown fox jumps over the lazy dog while the committee reads the long minutes of the meeting aloud";
+    for (const value of [token, english]) {
+      const { answer, run } = await peek(cwd, { hex: lenDelimited(1, value).toString("hex") });
+      assert.equal(answer.fields.length, 1, "no row is printed for the characters of a string");
+      assert.equal(answer.fields[0].read_as, "text");
+      assert.equal(answer.fields[0].characters, value.length);
+      for (const form of forms(value.slice(0, 12))) assert.equal(Buffer.from(run.stdout).indexOf(form), -1);
+    }
+    // The value is in the values file whole, as the text, in a job.
+    const job = await peek(cwd, { hex: lenDelimited(1, token).toString("hex") }, "token");
+    assert.equal(job.values.find((v) => v.field_path === "1")?.value, token);
+    // Binary bytes that parse as a nested message with a field number above 300 are bytes, and the answer says what else they could be.
+    const big = Buffer.concat([key(1000, 0), varint(5)]);
+    const rejected = (await peek(cwd, { hex: lenDelimited(1, big).toString("hex") })).answer.fields[0];
+    assert.equal(rejected.read_as, "bytes");
+    assert.match(String(rejected.also_reads_as), /nested message \(a field number above 300\)/);
   });
 });
 
