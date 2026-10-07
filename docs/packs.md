@@ -28,7 +28,7 @@ of them never need, and spends it again on every turn for the whole run.
 So a pack's skills are small files, and an agent loads one when it needs it:
 
 - The index is small and sits in every agent's system prompt, in a section the
-  kickoff renders from the loaded packs' `skills/INDEX.md` (`scripts/skills-section.ts`)
+  kickoff renders from the loaded packs' `skills/INDEX.md` (`scripts/seat-prompt.ts`)
   into `.pi/APPEND_SYSTEM.md`, which Pi appends to its own prompt sections:
   one line per skill, its id, a title and one line saying when to reach for it.
   Pi keeps those sections across a compaction, and for the run a hand-off starts,
