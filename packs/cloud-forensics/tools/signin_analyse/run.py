@@ -1,65 +1,209 @@
 #!/usr/bin/env python3
-"""Read a sign-in log and surface the four things that decide a cloud case.
+"""Read a sign-in export offline (Entra, or a Google Workspace login audit), keep what each record says, and surface leads.
 
-**A success that records a single-factor requirement** where multi-factor was
-expected. This is a lead: applied conditional-access policies, authentication
-details, client and token context distinguish an exemption or prior claim from
-legacy authentication or token theft.
+Shapes it reads: a Microsoft Graph signIns response (`{"value": [...]}`, an array, JSON Lines), a Google Reports API
+activities response (`{"items": [...]}`, whose nested `events` become one event each), and CSV, chosen by the file's own
+content and not its name. Every record is kept: its id, correlation id, authentication details, applied conditional access
+policies and device and token context beside the fields lifted out of it, with the raw record, a locator (file, record,
+line, and the nested event's position) and the parser's name. A malformed line or row, a record that is not an object, a
+response page that names a next page, a truncated gzip: each is counted, located, and listed in a file the answer names.
 
-**Failures then a success.** A run of multi-factor prompts followed by an
-acceptance is consistent with an MFA-fatigue hypothesis; a run of
-wrong passwords followed by a success is a different story with the same shape.
-Both are worth surfacing and neither is a conclusion.
+Time is not guessed. A time with no zone is refused unless `assume_utc` says it is UTC (the answer then records the
+assumption and how many records it covered); a day/month/year string whose two leading fields are both 12 or less needs a
+`date_order`, or the file's own unambiguous rows must prove one. Raw and decoded times are both kept.
 
-**An address or a client seen nowhere else** for that account, against its own
-history rather than against a global idea of "unusual".
+Outcome is not guessed. `success` is true for a success code or word, false for a non-zero error code or a failure word,
+and null for anything else (an `Interrupted` status is not a success and is not counted as a failure). The provider's own
+words (`failure_reason`, `additional_details`) are kept as written.
 
-**Impossible travel**, which is a hypothesis and not a conclusion. Two sign-ins
-from distant countries minutes apart is also what a VPN, a mobile carrier's
-routing and a cloud-hosted mail client look like. The implied speed is computed
-so the claim is measurable, and the output says what would turn it into a
-finding.
+What the leads are, and are not:
+  - `single_factor_successes`: a success whose authentication requirement says single factor. A lead: the applied
+    policies, the authentication details and the client say whether it is an exemption, a prior claim or something else.
+  - `failure_bursts_before_success`: three or more consecutive failures followed by a success for the same account and
+    application, with every failure inside `burst_window_seconds` of the success. Failures of one account across days are
+    not a burst. Password failures and multi-factor prompts have the same shape; the result codes are listed.
+  - `addresses_seen_once`: a success from an address that occurs once among the supplied events for that account. It
+    says nothing about the account's earlier history, which this export may not hold.
+  - `impossible_travel`: adjacent successes whose coordinates imply a speed above `max_speed_kmh`, or, with a country and no
+    coordinates, a country change within an hour (marked coarse, with no speed). A hypothesis: a VPN, a carrier's routing and
+    a cloud-hosted client all produce it, and a location is the provider's estimate for an address.
+An empty list excludes nothing: the export may be a slice of the account's activity.
 
-Coordinates are used where the export carries them; where it carries only a
-country, pairs are flagged on the country change alone and marked as coarse.
+SECRET-SAFE OUTPUT (docs/packs.md, "Secrets and sensitive output"). A field whose name says it is a secret, and any text
+shaped like one, is withheld in every channel; the original goes to `signin-values.jsonl` under $OUT (mode 0600, created
+first) only when `write_values: true` is asked, in a job, which the skill says to run with `secret_output: true`. Names,
+addresses, locations and device identifiers are personal data, not secrets: they are in the answer; the case's own rules
+say where such output may go.
 """
+# ---- BEGIN SHARED BLOCK ----------------------------------------------------------------------------------------------
+# Identical in cloudtrail_parse, signin_analyse and ual_parse. A tool is standalone, so what the three share is copied,
+# as LosslessPage is in every pack tool, and tests/pack-cloud-shared.test.ts holds the three copies equal. Edit it in all
+# three, never in one. It holds: the answer's error form, typed arguments, where an output may be written and published
+# without replacing another, the lossless page, the secret-safe values file (the SecretValues of recovery_key_scan), the
+# withholding of anything shaped like a credential, timestamps, and a bounded streaming reader for JSON and JSON Lines.
+import atexit
+import calendar
+import codecs
 import csv
 import datetime
+import errno
+import gzip
 import json
-import math
 import os
 import re
+import secrets
+import sqlite3
+import stat
 import sys
+import tempfile
+import time
+import zlib
 from pathlib import Path
 
-SINGLE = "singlefactorauthentication"
-CODES = {
-    "0": "success", "50053": "account locked", "50055": "password expired",
-    "50056": "invalid or null password", "50074": "a second factor was required",
-    "50076": "multi-factor required, user prompted",
-    "50079": "multi-factor enrolment required",
-    "50126": "wrong user name or password", "50158": "conditional access failed",
-    "53003": "blocked by conditional access", "65001": "no consent for the application",
-    "700016": "application not found in the directory",
-}
+DEFAULT_LIMIT = 500
+FIRST_PROBLEMS = 25               # how many failures an answer names inline; every one is in the file the page names
+MAX_RECORD_BYTES = 16 << 20       # one record (a JSON Lines line, an array element, a CSV field) larger than this is rejected, named
+MAX_DOCUMENT_BYTES = 256 << 20    # a JSON document read whole (it names no array first) larger than this is unsupported, named
+MAX_EXPANDED_BYTES = 4 << 30      # per file, after decompression
+MAX_SCAN_CHARS = 1 << 20          # a string longer than this is withheld whole, not scanned
+MAX_DEPTH = 200                   # a value nested deeper than this is withheld whole
+INLINE_BUDGET = 4 << 20           # bytes of rows an answer carries inline; the rest of a page is in its file
+MAX_DISTINCT = 1000000            # distinct values a summary table counts; beyond it they are counted as uncounted
+MAX_FIELD_BYTES = 64 << 20        # one CSV line (a field may span lines) longer than this stops the file, named
+CHUNK = 1 << 20
+DEADLINE = [None]
+
+
+def in_job():
+    return bool(os.environ.get("JOB_ID") and os.environ.get("OUT"))
+
+
+def describe(exc):
+    code = errno.errorcode.get(exc.errno, "") if getattr(exc, "errno", None) else ""
+    return scrub("%s%s: %s" % (type(exc).__name__, " " + code if code else "", getattr(exc, "strerror", None) or str(exc)))
+
+
+def scrub_all(value):
+    if isinstance(value, str):
+        return scrub(value)
+    if isinstance(value, dict):
+        return {k: scrub_all(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [scrub_all(v) for v in value]
+    return value
 
 
 def fail(message, **extra):
-    print(json.dumps({"error": message, **extra}))
+    """An error answer: JSON, exit 1, the same `status` every answer of this pack carries. A name in it that is shaped
+    like a credential is withheld like any other output."""
+    print(json.dumps({"error": scrub(str(message)), "status": "failed",
+                      "status_basis": "the tool stopped with an error (see error)", **scrub_all(extra)}, default=str))
     raise SystemExit(1)
 
 
-def resolve_output(out, what="output"):
-    """Where `out` really lands, as a path under the run directory; a place
-    outside it, the run directory itself, or anything under inputs/ is refused.
+def read_args():
+    try:
+        args = json.load(sys.stdin)
+    except (ValueError, RecursionError) as exc:
+        fail("arguments are not valid JSON", reason=type(exc).__name__)
+    if not isinstance(args, dict):
+        fail("arguments must be a JSON object")
+    return args
 
-    A string check is not enough: `work/../inputs/x`, an absolute path and a
-    symlink that points out all name a place the tool must not write, and none
-    of them starts with "inputs/". Resolving first and comparing directories
-    is what actually holds, and the read-only inputs are the one place
-    extracted bytes must never appear -- a later integrity check would report
-    the evidence as modified. In a job $OUT is inside the run directory.
-    """
+
+def want_str(args, key, required=None):
+    value = args.get(key)
+    if value is None:
+        if required:
+            fail(required)
+        return None
+    if not isinstance(value, str) or not value or "\0" in value:
+        fail("%s must be a non-empty string" % key)
+    return value
+
+
+def want_bool(args, key, default=False):
+    value = args.get(key, default)
+    if not isinstance(value, bool):
+        fail("%s must be true or false" % key)
+    return value
+
+
+def want_int(args, key, default, minimum=1, maximum=None):
+    value = args.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, int) or value < minimum or (maximum is not None and value > maximum):
+        fail("%s must be an integer of at least %d%s" % (key, minimum, "" if maximum is None else " and at most %d" % maximum))
+    return value
+
+
+def want_str_list(args, key):
+    value = args.get(key)
+    if value is None:
+        return []
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list) or not all(isinstance(v, (str, int)) and not isinstance(v, bool) for v in value):
+        fail("%s must be a list of strings" % key)
+    return [str(v) for v in value]
+
+
+def want_regex(args, key):
+    text = want_str(args, key)
+    if text is None:
+        return None
+    if len(text) > 2000:
+        fail("%s is longer than 2000 characters" % key)
+    try:
+        return re.compile(text, re.I)
+    except re.error as exc:
+        fail("%s is not a valid regex" % key, reason=str(exc))
+
+
+def start_clock(args, default=540, maximum=580):
+    seconds = args.get("time_limit_seconds", default)
+    if isinstance(seconds, bool) or not isinstance(seconds, (int, float)) or seconds < 1 or seconds > maximum:
+        fail("time_limit_seconds must be a number from 1 to %d" % maximum)
+    DEADLINE[0] = time.monotonic() + seconds
+    return seconds
+
+
+def out_of_time():
+    return DEADLINE[0] is not None and time.monotonic() > DEADLINE[0]
+
+
+_PAGINATION = re.compile(r"(?i)next.?(page.?)?(token|link)|continuation")
+
+
+def pagination_key(name):
+    """A key of an API response that names the next page: the export is one page of more (the key's value is a token, and is
+    never printed)."""
+    return bool(_PAGINATION.search(str(name)))
+
+
+def compact(row, keep=("success", "time_utc")):
+    """A row without its empty fields; an unknown that means something (a null success, a time that could not be decoded) stays."""
+    return {k: v for k, v in row.items() if k in keep or v not in (None, "", {}, [])}
+
+
+def status_of(failed, complete, basis_complete, basis_partial, basis_failed):
+    """`status`, with the reason: complete (every record of the supplied files was read, nothing was left out), partial
+    (some were, and the answer names what was not) or failed. Complete says nothing about the export's own coverage."""
+    if failed:
+        return {"status": "failed", "status_basis": basis_failed}
+    if complete:
+        return {"status": "complete", "status_basis": basis_complete}
+    return {"status": "partial", "status_basis": basis_partial}
+
+
+# ---- where an output may be written ------------------------------------------------------------------------------
+
+
+def resolve_output(out, what="output"):
+    """Where `out` really lands, as a path under the run directory; a place outside it, the run directory itself, or
+    anything under inputs/ is refused. A string check is not enough: `work/../inputs/x`, an absolute path and a symlink
+    that points out all name a place the tool must not write, so the path is resolved first and directories compared.
+    In a job the run directory is read-only and only $OUT is written, so a place outside $OUT is refused with the way
+    to name one (work/<your agent id>/..., which the harness maps to $OUT), not left to fail on a read-only file system."""
     root = Path.cwd().resolve()
     dest = (root / out).resolve() if not Path(out).is_absolute() else Path(out).resolve()
     if dest == root or root not in dest.parents:
@@ -67,34 +211,1091 @@ def resolve_output(out, what="output"):
     inputs = root / "inputs"
     if dest == inputs or inputs in dest.parents:
         fail("%s cannot be under inputs/" % what, **{what: str(out)})
+    if in_job():
+        base = Path(os.environ["OUT"]).resolve()
+        if dest == base or base not in dest.parents:
+            fail("%s is not under this job's output directory: a job writes only $OUT, and the run directory is read-only. "
+                 "Name a place under work/<your agent id>/ and the harness maps it there, or leave %s out." % (what, what),
+                 **{what: str(out)})
     return str(dest.relative_to(root))
 
 
-def get(row, *names):
-    for name in names:
-        for key in row:
-            if key and key.replace(" ", "").lower() == name.replace(" ", "").lower():
-                value = row[key]
-                if value not in (None, ""):
-                    return value
+def shown_output(path):
+    """How an output is named in an answer: a job's $OUT is sealed as store/jobs/<job>/out, so a place under it is
+    shown as it will be cited."""
+    try:
+        rel = Path(path).resolve().relative_to(Path(os.environ["OUT"]).resolve())
+        return "store/jobs/%s/out/%s" % (re.sub(r"[^A-Za-z0-9_.-]", "_", os.environ["JOB_ID"]), rel.as_posix())
+    except (KeyError, ValueError, OSError):
+        return str(path)
+
+
+def same_bytes(a, b):
+    try:
+        if os.path.getsize(a) != os.path.getsize(b):
+            return False
+        with open(a, "rb") as fa, open(b, "rb") as fb:
+            while True:
+                x, y = fa.read(CHUNK), fb.read(CHUNK)
+                if x != y:
+                    return False
+                if not x:
+                    return True
+    except OSError:
+        return False
+
+
+def publish(tmp, path):
+    """Move a finished file to `path` without replacing what is there: a file at the name is an earlier answer (a
+    complete one, perhaps, where this run was cut short by a lower limit) and stays; this one is kept beside it as
+    name.2.ext, unless it holds the same bytes, when the file already there is it. Returns the path it has."""
+    stem, ext = os.path.splitext(str(path))
+    k = 1
+    while True:
+        candidate = Path(stem + ("" if k == 1 else ".%d" % k) + ext)
+        try:
+            os.link(tmp, candidate)
+        except FileExistsError:
+            if same_bytes(tmp, candidate):
+                os.unlink(tmp)
+                return candidate
+            k += 1
+            continue
+        except OSError:                                   # a file system with no hard links: a look, then a rename
+            if os.path.lexists(candidate):
+                if same_bytes(tmp, candidate):
+                    os.unlink(tmp)
+                    return candidate
+                k += 1
+                continue
+            os.rename(tmp, candidate)
+            return candidate
+        os.unlink(tmp)
+        return candidate
+
+
+_TEMPS = set()
+
+
+def _drop_unpublished():
+    """A refused or failed run leaves no half-written result behind: only a finished file is published."""
+    for path in list(_TEMPS):
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
+atexit.register(_drop_unpublished)
+
+
+class LosslessPage:
+    """The page an answer carries, and the whole in a file it names. Rows past `limit` (or past the inline byte budget)
+    go to a JSON Lines file, so nothing is cut: under $OUT/tool-output in a job, work/<agent>/tool-output otherwise, with a
+    random name (never a digest of the request). With `dest` the whole is always written there (never over a file that is
+    already there: it is kept and this one named beside it). Rows are written with ASCII escapes, so a lone surrogate
+    from a non-UTF-8 name survives and no row can raise."""
+
+    def __init__(self, tool, limit, dest=None, budget=INLINE_BUDGET):
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            raise ValueError("limit must be a positive integer")
+        self.tool = re.sub(r"[^A-Za-z0-9_.-]", "_", tool)
+        self.limit, self.budget, self.dest = limit, budget, dest
+        self.page, self.total, self.bytes = [], 0, 0
+        self._out = self._tmp = None
+        if dest:
+            self.path = Path(dest)
+            self._open_tmp(self.path.parent)
+        else:
+            name = "%s-%s.jsonl" % (self.tool, secrets.token_hex(8))
+            job, out = os.environ.get("JOB_ID"), os.environ.get("OUT")
+            if job and out:
+                self.path = Path(out) / "tool-output" / name
+            else:
+                agent = re.sub(r"[^A-Za-z0-9_.-]", "_", os.environ.get("AGENT_ID") or "tool")
+                self.path = Path("work") / agent / "tool-output" / name
+
+    def _open_tmp(self, directory):
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+            fd, name = tempfile.mkstemp(dir=directory, prefix=".%s-" % self.tool)
+            self._tmp = Path(name)
+            _TEMPS.add(name)
+            self._out = os.fdopen(fd, "w", encoding="utf-8", errors="backslashreplace")
+        except OSError as exc:
+            fail("the whole result could not be written: %s cannot be created (%s)" % (shown_output(directory), describe(exc)))
+
+    def _write(self, text):
+        try:
+            self._out.write(text)
+            self._out.write("\n")
+        except OSError as exc:
+            fail("the whole result could not be written to %s: %s" % (shown_output(self.path), describe(exc)))
+
+    def add(self, row):
+        text = json.dumps(row, default=str)
+        self.total += 1
+        if self._out is None and (len(self.page) >= self.limit or self.bytes + len(text) > self.budget):
+            self._open_tmp(self.path.parent)
+            for kept in self.page:
+                self._write(json.dumps(kept, default=str))
+        if self._out is not None:
+            self._write(text)
+        if len(self.page) < self.limit and self.bytes + len(text) <= self.budget:
+            self.page.append(row)
+            self.bytes += len(text)
+
+    def finish(self):
+        result = {"matched": self.total, "returned": len(self.page), "truncated": self.total > len(self.page)}
+        if self._out is not None:
+            try:
+                self._out.flush()
+                os.fsync(self._out.fileno())
+                self._out.close()
+                final = publish(self._tmp, self.path)
+                _TEMPS.discard(str(self._tmp))
+            except OSError as exc:
+                fail("the whole result could not be written to %s: %s" % (shown_output(self.path), describe(exc)))
+            result["all_results"] = shown_output(final)
+            result["all_results_format"] = "JSON Lines, one complete result per line"
+            if str(final) != str(self.path):
+                result["all_results_note"] = "a different file was already at %s and was kept; this result is beside it" % shown_output(self.path)
+        return result
+
+
+class SecretValuesRefused(Exception):
+    pass
+
+
+class SecretValues:
+    """Where a value goes when, and only when, the caller asked for it.
+
+    The secret-safe output pattern of recovery_key_scan (docs/packs.md, "Secrets and sensitive output"), copied
+    unchanged but for the file's name and the tool named in the refusal. With `enabled` false it writes nothing and
+    `summary()` says so. Enabled, it is refused outside a job; inside one the file is created at once, before anything
+    is read (mode 0600, O_EXCL and O_NOFOLLOW: a file or a link already at that name is refused by name, a dangling link
+    included), so with nothing withheld it stays an empty file and the answer says written: 0.
+    """
+
+    def __init__(self, enabled, name, tool):
+        self.enabled = enabled
+        self.written = 0
+        self._fh = None
+        self.job = os.environ.get("JOB_ID") or ""
+        self.out = os.environ.get("OUT") or ""
+        self.path = None
+        self.shown = None
+        if not enabled:
+            return
+        if not (self.job and self.out):
+            raise SecretValuesRefused(
+                "write_values is refused outside a job: a value written here would be an ordinary "
+                "file, not a sealed secret output. Run this as job_run tool=%s with "
+                "secret_output: true, and ask again there. Nothing was written." % tool
+            )
+        self.path = Path(self.out) / name
+        self.shown = "store/jobs/%s/out/%s" % (re.sub(r"[^A-Za-z0-9_.-]", "_", self.job), name)
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(str(self.path), os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        except FileExistsError:
+            raise SecretValuesRefused("the values file already exists: %s" % self.shown)
+        except OSError as exc:
+            raise SecretValuesRefused("the values file could not be created: %s (%s)" % (self.shown, describe(exc)))
+        self._fh = os.fdopen(fd, "w", encoding="utf-8", errors="backslashreplace")
+
+    def add(self, finding_id, locator, value):
+        if not self.enabled:
+            return
+        self._fh.write(json.dumps({"finding_id": finding_id, **locator, "value": value}, default=str))
+        self._fh.write("\n")
+        self.written += 1
+
+    def close(self):
+        if self._fh is not None:
+            self._fh.flush()
+            os.fsync(self._fh.fileno())
+            self._fh.close()
+            self._fh = None
+
+    def summary(self):
+        return {
+            "requested": self.enabled,
+            "written": self.written,
+            "values_file": self.shown if self.enabled else None,
+            "contains_secret_values": self.written > 0,
+            "format": "JSON Lines, mode 0600: finding_id, file (the real path), record, line, pointer, why, value" if self.enabled else None,
+        }
+
+
+# ---- withholding: nothing shaped like a credential is printed ----------------------------------------------------
+# The values a cloud log can carry that are secrets are named, or they are shaped, or neither. A name or a shape is a
+# way to recognise some of them and never all, so the skill says to run the tool as a job with secret_output: true
+# whenever the export may hold request parameters or properties; what the two rules catch is withheld regardless, in
+# every channel (rows, paths, error messages, the files the answer names), the same strings in all three tools.
+
+REDACTED = re.compile(r"^\W*(?:hidden_due_to_security_reasons|redacted|masked|removed|\*+|x{3,}|\[\])\W*$", re.I)
+SENSITIVE_EXACT = {
+    "password", "newpassword", "oldpassword", "currentpassword", "passwd", "pwd", "passphrase", "passcode", "pin", "otp",
+    "secret", "clientsecret", "secretkey", "secretaccesskey", "secretstring", "secretbinary", "accesskeysecret",
+    "sessiontoken", "securitytoken", "accesstoken", "refreshtoken", "idtoken", "bearertoken", "authtoken", "token",
+    "authorization", "proxyauthorization", "cookie", "setcookie", "apikey", "privatekey", "privatekeypem",
+    "sharedaccesskey", "accountkey", "connectionstring", "credential", "credentials", "assertion", "samlresponse",
+    "mfasecret", "verificationcode", "authorizationcode", "sastoken", "sassignature", "signature",
+}
+SENSITIVE_SUFFIX = ("password", "passwd", "passphrase", "secret", "apikey", "privatekey", "sessiontoken", "securitytoken",
+                    "accesstoken", "refreshtoken", "clientsecret", "token")
+NOT_SECRET_TOKEN = ("nexttoken", "pagetoken", "continuationtoken", "paginationtoken", "nextpagetoken", "pagingtoken",
+                    "startingtoken", "nextmarkertoken")
+CONTAINERS = ("credential", "credentials")
+_NAME_CACHE = {}
+
+
+def is_container_name(name):
+    """`credentials` names a group of fields (an access key id, an expiry, a token): each is judged by its own name."""
+    return re.sub(r"[^a-z0-9]", "", str(name).lower()) in CONTAINERS
+
+
+def name_is_sensitive(name):
+    hit = _NAME_CACHE.get(name)
+    if hit is None:
+        flat = re.sub(r"[^a-z0-9]", "", str(name).lower())
+        hit = flat in SENSITIVE_EXACT or (len(flat) > 6 and flat.endswith(SENSITIVE_SUFFIX) and not flat.endswith(NOT_SECRET_TOKEN))
+        if len(_NAME_CACHE) < 20000:
+            _NAME_CACHE[name] = hit
+    return hit
+
+
+_B64_RUN = re.compile(r"(?<![A-Za-z0-9+/_-])[A-Za-z0-9+/_-]{128,}={0,2}(?![A-Za-z0-9+/_-])")
+TOKEN_RULES = [
+    ("a JSON Web Token", re.compile(r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]*"), 0),
+    ("a private key block", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----(?:[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----|[\s\S]*)"), 0),
+    ("an authorization header value", re.compile(r"(?i)\b(?:bearer|basic)\s+([A-Za-z0-9._~+/=-]{16,})"), 1),
+    ("a value assigned to a credential name", re.compile(
+        r"(?i)(?<![A-Za-z0-9])(?:password|passwd|pwd|passphrase|secret|client[_-]?secret|api[_-]?key|access[_-]?token|"
+        r"refresh[_-]?token|id[_-]?token|session[_-]?token|security[_-]?token|auth[_-]?token|token|sig|signature|"
+        r"sas[_-]?token|authorization|aws[_-]?secret[_-]?access[_-]?key|secret[_-]?access[_-]?key)"
+        r"[\"']?\s*[:=]\s*[\"']?([^\s\"'&;,<>{}\[\]]{4,})"), 1),
+    ("a token of a known family", re.compile(
+        r"\b(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{50,}|xox[abprs]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{35}\b|"
+        r"ya29\.[0-9A-Za-z_-]{20,}|1//0[0-9A-Za-z_-]{30,}|(?:IQoJb3JpZ2lu|FQoGZXIvYXdz|FwoGZXIvYXdz)[A-Za-z0-9+/=]{40,}|"
+        r"[A-Za-z0-9_.-]{3}[0-9]Q~[A-Za-z0-9_.~-]{30,}|[01]\.A[A-Za-z0-9_-]{50,}|[sr]k_(?:live|test)_[A-Za-z0-9]{16,})"), 0),
+]
+WITHHELD_TEXT = "[withheld: %s, %d characters]"
+LOCAL = {"paths": 0, "text": 0}
+
+
+def _random_like(run):
+    """A long run that looks like random base64 and not like a path or a name: mixed case and digits in the proportions
+    random text has (a long path is mostly lower case with few capitals)."""
+    n = len(run)
+    upper = sum(1 for ch in run if "A" <= ch <= "Z")
+    lower = sum(1 for ch in run if "a" <= ch <= "z")
+    digit = sum(1 for ch in run if "0" <= ch <= "9")
+    return upper * 100 >= 15 * n and lower * 100 >= 15 * n and digit * 100 >= 5 * n
+
+
+def token_spans(text):
+    """(start, end, why) of each stretch of `text` shaped like a credential, in order and not overlapping."""
+    spans = []
+    for why, rx, group in TOKEN_RULES:
+        for m in rx.finditer(text):
+            start, end = m.span(group)
+            if group and (REDACTED.match(text[start:end]) or text[start:end].lower() in ("bearer", "basic", "digest", "negotiate")):
+                continue
+            spans.append((start, end, why))
+    for m in _B64_RUN.finditer(text):
+        if _random_like(m.group(0)):
+            spans.append((m.start(), m.end(), "a long unbroken base64-like run"))
+    spans.sort()
+    merged = []
+    for s in spans:
+        if merged and s[0] < merged[-1][1]:
+            if s[1] > merged[-1][1]:
+                merged[-1] = (merged[-1][0], s[1], merged[-1][2])
+            continue
+        merged.append(s)
+    return merged
+
+
+def scrub(text):
+    """`text` with each stretch shaped like a credential replaced by a marker that holds only its length."""
+    if not isinstance(text, str) or len(text) < 8:
+        return text
+    if len(text) > MAX_SCAN_CHARS:
+        LOCAL["text"] += 1
+        return WITHHELD_TEXT % ("text longer than 1 MiB", len(text))
+    spans = token_spans(text)
+    if not spans:
+        return text
+    out, at = [], 0
+    for start, end, why in spans:
+        out.append(text[at:start])
+        out.append(WITHHELD_TEXT % (why, end - start))
+        LOCAL["text"] += 1
+        at = end
+    out.append(text[at:])
+    return "".join(out)
+
+
+def shown_path(path):
+    """A path as it may be printed: a component shaped like a credential (a file named after a token) is withheld."""
+    if not isinstance(path, str):
+        return path
+    parts = path.split("/")
+    for i, part in enumerate(parts):
+        clean = scrub(part)
+        if clean != part:
+            parts[i] = clean
+            LOCAL["paths"] += 1
+    return "/".join(parts)
+
+
+class Withheld:
+    """Cleans values on their way into an answer, counts what was withheld, lists where, and hands the originals to the
+    values file when the caller asked for it (write_values, in a job). A row's `locator` says which record it came from."""
+
+    VALUE_KEYS = ("Value", "NewValue", "OldValue", "value", "newValue", "oldValue")
+
+    def __init__(self, vault, limit):
+        self.vault = vault
+        self.count = 0
+        self.reasons = {}
+        self.page = LosslessPage("withheld", limit)
+
+    def note(self, locator, pointer, why, length, original):
+        self.count += 1
+        self.reasons[why] = self.reasons.get(why, 0) + 1
+        fid = "W%06d" % self.count
+        shown = {k: (shown_path(v) if k == "file" else v) for k, v in locator.items()}
+        self.page.add({"finding_id": fid, **shown, "pointer": scrub(pointer), "why": why, "length": length})
+        if self.vault is not None:
+            self.vault.add(fid, {**locator, "pointer": pointer, "why": why}, original)
+
+    @staticmethod
+    def size_of(value):
+        if isinstance(value, str):
+            return "%d characters" % len(value)
+        if isinstance(value, dict):
+            return "object with %d keys" % len(value)
+        if isinstance(value, list):
+            return "list of %d items" % len(value)
+        return "a number"
+
+    def clean(self, value, locator, pointer="", depth=0):
+        if isinstance(value, str):
+            return self.clean_text(value, locator, pointer)
+        if depth > MAX_DEPTH and isinstance(value, (dict, list)):
+            self.note(locator, pointer, "nested deeper than %d levels" % MAX_DEPTH, len(json.dumps(value, default=str)), value)
+            return "[withheld: nested deeper than %d levels, %s]" % (MAX_DEPTH, self.size_of(value))
+        if isinstance(value, dict):
+            named = None
+            for key in ("Name", "name"):
+                if isinstance(value.get(key), str):
+                    named = value[key]
+                    break
+            pair_secret = named is not None and name_is_sensitive(named)
+            out = {}
+            for k, v in value.items():
+                ks = str(k)
+                point = "%s/%s" % (pointer, ks.replace("~", "~0").replace("/", "~1"))
+                safe_key = scrub(ks)
+                if safe_key in out:
+                    safe_key = "%s#%d" % (safe_key, len(out))
+                sensitive = name_is_sensitive(ks) or (pair_secret and ks in self.VALUE_KEYS)
+                if sensitive and is_container_name(ks) and isinstance(v, (dict, list)):
+                    sensitive = False
+                if sensitive and v not in (None, "", True, False) and not (isinstance(v, str) and REDACTED.match(v)):
+                    self.note(locator, point, "credential-named field", len(v) if isinstance(v, str) else len(json.dumps(v, default=str)), v)
+                    out[safe_key] = "[withheld: credential-named field, %s]" % self.size_of(v)
+                else:
+                    out[safe_key] = self.clean(v, locator, point, depth + 1)
+            return out
+        if isinstance(value, list):
+            return [self.clean(v, locator, "%s/%d" % (pointer, i), depth + 1) for i, v in enumerate(value)]
+        return value
+
+    def clean_text(self, text, locator, pointer):
+        if len(text) < 8:
+            return text
+        if len(text) > MAX_SCAN_CHARS:
+            self.note(locator, pointer, "text longer than 1 MiB", len(text), text)
+            return WITHHELD_TEXT % ("text longer than 1 MiB", len(text))
+        spans = token_spans(text)
+        if not spans:
+            return text
+        out, at = [], 0
+        for start, end, why in spans:
+            out.append(text[at:start])
+            out.append(WITHHELD_TEXT % (why, end - start))
+            self.note(locator, "%s@%d" % (pointer, start), why, end - start, text[start:end])
+            at = end
+        out.append(text[at:])
+        return "".join(out)
+
+    def summary(self):
+        page = self.page.finish()
+        return {"count": self.count, "by_reason": self.reasons, "locators": self.page.page, "page": page,
+                "text_withheld_from_paths_and_messages": LOCAL["paths"] + LOCAL["text"]}
+
+
+# ---- timestamps -------------------------------------------------------------------------------------------------
+
+_EPOCH = datetime.datetime(1970, 1, 1)
+ISO_STAMP = re.compile(r"^\s*(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2})(?:[.,](\d{1,9}))?)?\s*(Z|z|[+-]\d{2}(?::?\d{2})?)?\s*$")
+SLASH_STAMP = re.compile(r"^\s*(\d{1,2})/(\d{1,2})/(\d{4})[ ,T]+(\d{1,2}):(\d{2})(?::(\d{2})(?:[.,](\d{1,9}))?)?\s*([AaPp][Mm])?\s*(Z|z|[+-]\d{2}(?::?\d{2})?)?\s*$")
+
+
+def _clock_ok(y, mo, d, h, mi, s):
+    return 1 <= mo <= 12 and 1 <= d <= calendar.monthrange(y, mo)[1] and 0 <= h <= 23 and 0 <= mi <= 59 and 0 <= s <= 59
+
+
+def slash_order(raw):
+    """'mdy', 'dmy', 'either' (the two fields are equal) or 'ambiguous' for a day/month/year string; None if it is not one."""
+    m = SLASH_STAMP.match(raw) if isinstance(raw, str) else None
+    if not m:
+        return None
+    a, b = int(m.group(1)), int(m.group(2))
+    if a == b:
+        return "either"
+    if a > 12 >= b:
+        return "dmy"
+    if b > 12 >= a:
+        return "mdy"
+    return "ambiguous" if a <= 12 and b <= 12 else None
+
+
+def parse_stamp(raw, order=None, assume_utc=False):
+    """A time as the export wrote it, decoded without a guess.
+
+    Returns {utc, ns, status, basis}. `utc` is ISO 8601 UTC with the fractions as written; `ns` is nanoseconds from the
+    1970 epoch (for sorting and differences). `status` is zoned (the string carried an offset or Z), assumed_utc (it carried
+    none and the caller said to read it as UTC), no_zone (it carried none and nothing was assumed), ambiguous_date_order
+    (a day/month/year string with both fields up to 12 and no declared order), unparseable or missing. Nothing is
+    assumed unless asked: a clock with no zone is not UTC because it is convenient, and 03/04/2026 is not March because
+    a program was written in one country."""
+    if raw is None or raw == "":
+        return {"utc": None, "ns": None, "status": "missing", "basis": "no time in the record"}
+    if not isinstance(raw, str):
+        return {"utc": None, "ns": None, "status": "unparseable", "basis": "the time is not a string (%s)" % type(raw).__name__}
+    m = ISO_STAMP.match(raw)
+    if m:
+        y, mo, d, h, mi = (int(m.group(i)) for i in (1, 2, 3, 4, 5))
+        s, frac, zone = int(m.group(6) or 0), m.group(7) or "", m.group(8)
+        am = None
+    else:
+        m = SLASH_STAMP.match(raw)
+        if not m:
+            return {"utc": None, "ns": None, "status": "unparseable", "basis": "not an ISO 8601 or day/month/year time"}
+        got = slash_order(raw)
+        use = order if order in ("mdy", "dmy") else ("mdy" if got == "mdy" else "dmy" if got == "dmy" else "mdy" if got == "either" else None)
+        if use is None:
+            return {"utc": None, "ns": None, "status": "ambiguous_date_order",
+                    "basis": "both leading fields are 12 or less and no date_order was declared or proved by other rows"}
+        if got in ("mdy", "dmy") and got != use:
+            return {"utc": None, "ns": None, "status": "unparseable", "basis": "the field order contradicts date_order %s" % use}
+        a, b, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        mo, d = (a, b) if use == "mdy" else (b, a)
+        h, mi, s, frac, am, zone = int(m.group(4)), int(m.group(5)), int(m.group(6) or 0), m.group(7) or "", m.group(8), m.group(9)
+        if am:
+            if not 1 <= h <= 12:
+                return {"utc": None, "ns": None, "status": "unparseable", "basis": "an hour outside 1-12 beside AM or PM"}
+            h = h % 12 + (12 if am.lower() == "pm" else 0)
+    if not _clock_ok(y, mo, d, h, mi, s):
+        return {"utc": None, "ns": None, "status": "unparseable", "basis": "a date or clock value out of range"}
+    offset = 0
+    if zone and zone not in ("Z", "z"):
+        digits = zone[1:].replace(":", "")
+        offset = (int(digits[:2]) * 3600 + int(digits[2:4] or 0) * 60) * (1 if zone[0] == "+" else -1)
+        status, basis = "zoned", "the string carries the offset %s" % zone
+    elif zone:
+        status, basis = "zoned", "the string carries Z"
+    elif assume_utc:
+        status, basis = "assumed_utc", "the string carries no zone; read as UTC because assume_utc was set"
+    else:
+        return {"utc": None, "ns": None, "status": "no_zone", "basis": "the string carries no zone and assume_utc was not set"}
+    try:
+        secs = calendar.timegm((y, mo, d, h, mi, s, 0, 0, 0)) - offset
+        base = (_EPOCH + datetime.timedelta(seconds=secs)).strftime("%Y-%m-%dT%H:%M:%S")
+    except (ValueError, OverflowError):
+        return {"utc": None, "ns": None, "status": "unparseable", "basis": "a date outside the years 1 to 9999"}
+    ns = secs * 1000000000 + (int(frac.ljust(9, "0")) if frac else 0)
+    if not -(1 << 63) < ns < (1 << 63):
+        return {"utc": None, "ns": None, "status": "unparseable", "basis": "a date outside 1678-2261, the range of nanoseconds a 64-bit integer holds"}
+    return {"utc": base + ("." + frac if frac else "") + "Z", "ns": ns, "status": status, "basis": basis}
+
+
+def ns_to_utc(ns):
+    if ns is None:
+        return None
+    secs, rest = divmod(ns, 1000000000)
+    try:
+        base = (_EPOCH + datetime.timedelta(seconds=secs)).strftime("%Y-%m-%dT%H:%M:%S")
+    except (ValueError, OverflowError):
+        return None
+    return base + ("." + ("%09d" % rest).rstrip("0") if rest else "") + "Z"
+
+
+class Tally:
+    """A count of each distinct value, bounded: past MAX_DISTINCT a new value is counted in `uncounted`, never lost
+    silently (the records themselves are in the whole-result file)."""
+
+    def __init__(self):
+        self.counts = {}
+        self.uncounted = 0
+
+    def add(self, key):
+        if key in self.counts:
+            self.counts[key] += 1
+        elif len(self.counts) < MAX_DISTINCT:
+            self.counts[key] = 1
+        else:
+            self.uncounted += 1
+
+    def rows(self):
+        return [{"value": k, "count": v} for k, v in sorted(self.counts.items(), key=lambda kv: (-kv[1], str(kv[0])))]
+
+def dbtext(value):
+    """A string for SQLite: a lone surrogate (a JSON escape such as \\ud800, or a name that is not UTF-8) cannot be stored as text, so
+    it is kept as its escape; every other character is unchanged."""
+    return value.encode("utf-8", "backslashreplace").decode("utf-8") if isinstance(value, str) else value
+
+
+class Skips:
+    """What a directory walk did not read: the first rows are kept for the answer, every one is counted."""
+
+    def __init__(self, keep=100):
+        self.items, self.total, self.by_name, self.keep = [], 0, 0, keep
+
+    def append(self, row):
+        self.total += 1
+        if row["reason"].startswith("its name"):
+            self.by_name += 1
+        if len(self.items) < self.keep:
+            self.items.append(row)
+
+    @property
+    def unreadable(self):
+        return self.total - self.by_name
+
+
+def named(items, limit=FIRST_PROBLEMS):
+    """The first `limit` of a list, for an answer that also gives the count."""
+    return list(items[:limit])
+
+
+def open_temp_db(prefix):
+    """A SQLite database on disk (in $OUT in a job, where only $OUT is writable; the temporary directory otherwise), so a
+    large export does not have to fit in memory. Returns (db, directory, where); in memory only if no directory can be made."""
+    try:
+        directory = tempfile.mkdtemp(prefix=prefix, dir=os.environ["OUT"] if in_job() else None)
+        return sqlite3.connect(os.path.join(directory, "work.sqlite")), directory, "a temporary file"
+    except (OSError, sqlite3.Error):
+        return sqlite3.connect(":memory:"), None, "memory (no temporary directory could be created)"
+
+
+def remove_temp_db(db, directory):
+    try:
+        db.close()
+    except sqlite3.Error:
+        pass
+    if directory:
+        for name in os.listdir(directory):
+            try:
+                os.unlink(os.path.join(directory, name))
+            except OSError:
+                pass
+        try:
+            os.rmdir(directory)
+        except OSError:
+            pass
+
+
+# ---- reading files: a bounded stream of JSON values -------------------------------------------------------------
+
+BOM = "﻿"
+REPLACEMENT = "�"
+_SPACE = re.compile(r"\s*")
+_DEC = json.JSONDecoder()
+
+
+def walk_inputs(top, wanted, skipped):
+    """The regular files under `top`: the files of a directory in name order, then its subdirectories in name order. A link,
+    a special file (a pipe is never opened) and an unlistable directory are named in `skipped`, and so is a file whose name
+    `wanted` refuses."""
+    stack = [top]
+    found = []
+    while stack:
+        directory = stack.pop()
+        try:
+            with os.scandir(directory) as it:
+                entries = sorted(it, key=lambda e: e.name)
+        except OSError as exc:
+            skipped.append({"path": shown_path(directory), "reason": "the directory could not be listed", "error": describe(exc)})
+            continue
+        subdirs = []
+        for entry in entries:
+            try:
+                if entry.is_symlink():
+                    skipped.append({"path": shown_path(entry.path), "reason": "a symbolic link: links are not followed"})
+                elif entry.is_dir(follow_symlinks=False):
+                    subdirs.append(entry.path)
+                elif not stat.S_ISREG(entry.stat(follow_symlinks=False).st_mode):
+                    skipped.append({"path": shown_path(entry.path), "reason": "not a regular file: it is not opened"})
+                elif wanted(entry.name):
+                    found.append(entry.path)
+                else:
+                    skipped.append({"path": shown_path(entry.path), "reason": "its name is not one this tool reads"})
+            except OSError as exc:
+                skipped.append({"path": shown_path(entry.path), "reason": "the entry could not be examined", "error": describe(exc)})
+        stack.extend(reversed(subdirs))
+    return found
+
+
+class Source:
+    """One file as a stream of text. Gzip is recognised by its magic bytes (not its name) and expanded as it is read, at most
+    `cap` bytes of expansion; bytes that are not UTF-8 become U+FFFD and are counted in `replaced`; a read that fails (a
+    truncated gzip, a failed CRC) is kept in `error` with everything read before it."""
+
+    def __init__(self, path, cap):
+        self.path, self.cap = path, cap
+        self.buf, self.pos = "", 0
+        self.eof = False
+        self.bytes_read = 0
+        self.compressed = False
+        self.error = None
+        self.capped = False
+        self.replaced = 0
+        self.line = 1
+        self.chars_before = 0
+        self._dec = codecs.getincrementaldecoder("utf-8")("replace")
+        self._first = True
+        self.fh = self._raw = None
+        try:
+            if not stat.S_ISREG(os.stat(path).st_mode):
+                raise OSError(errno.EINVAL, "not a regular file")
+            self._raw = open(path, "rb")
+            magic = self._raw.read(2)
+            self._raw.seek(0)
+            if magic == b"\x1f\x8b":
+                self.compressed = True
+                self.fh = gzip.GzipFile(fileobj=self._raw)
+            else:
+                self.fh = self._raw
+        except OSError as exc:
+            self.error = describe(exc)
+            self.eof = True
+
+    def close(self):
+        for h in (self.fh, self._raw):
+            try:
+                if h is not None:
+                    h.close()
+            except OSError:
+                pass
+
+    def fill(self):
+        """Read one more chunk into the buffer; False at the end."""
+        if self.eof:
+            return False
+        room = self.cap - self.bytes_read
+        try:
+            data = self.fh.read(min(CHUNK, room + 1))
+        except (OSError, EOFError, zlib.error) as exc:
+            self.error = "%s while reading%s" % (describe(exc), " the compressed stream" if self.compressed else "")
+            self.eof = True
+            data = b""
+        if len(data) > room:
+            data = data[:room]
+            self.capped = True
+            self.eof = True
+        elif not data:
+            self.eof = True
+        self.bytes_read += len(data)
+        text = self._dec.decode(data, final=self.eof)
+        if self._first and text:
+            self._first = False
+            if text[0] == BOM:
+                text = text[1:]
+        self.replaced += text.count(REPLACEMENT)
+        self.buf += text
+        return bool(data)
+
+    def advance(self, new_pos):
+        self.line += self.buf.count("\n", self.pos, new_pos)
+        self.pos = new_pos
+        if self.pos > 4 * CHUNK:
+            self.chars_before += self.pos
+            self.buf = self.buf[self.pos:]
+            self.pos = 0
+
+    def ensure(self, n):
+        while len(self.buf) - self.pos < n and self.fill():
+            pass
+
+    def skip_ws(self):
+        while True:
+            end = _SPACE.match(self.buf, self.pos).end()
+            self.advance(end)
+            if self.pos < len(self.buf) or not self.fill():
+                return
+
+    def offset(self):
+        return self.chars_before + self.pos
+
+
+class TooLong(Exception):
+    pass
+
+
+def _decode_at(src, limit, lead=""):
+    """One JSON value at the read position (with `lead` put in front of the text, to read the rest of an object whose
+    first key was already consumed), reading more while it is incomplete; `limit` bounds the text held while waiting for it
+    to end. Returns the value and the buffer index after it. The position is not moved."""
+    while True:
+        text = lead + src.buf[src.pos:] if lead else src.buf
+        at = 0 if lead else src.pos
+        try:
+            value, end = _DEC.raw_decode(text, at)
+            if not isinstance(value, (dict, list)) and end >= len(text) and not src.eof:
+                raise json.JSONDecodeError("a value that may continue", text, end)
+            return value, (src.pos + end - len(lead)) if lead else end
+        except json.JSONDecodeError as exc:
+            if src.eof:
+                raise
+            # An error well inside the text is a real one; at its end, or in an unterminated string, the record may only be
+            # incomplete, and more is read (within `limit`).
+            if exc.pos < len(text) - 16 and not exc.msg.startswith("Unterminated string"):
+                raise
+            if len(src.buf) - src.pos > limit:
+                raise TooLong()
+            src.fill()
+        except RecursionError:
+            raise json.JSONDecodeError("nested too deeply", text, at)
+
+
+_PAIR = re.compile(r'\s*"((?:[^"\\]|\\.)*)"\s*:\s*(?:"(?:[^"\\]|\\.)*"|-?[0-9.eE+-]+|true|false|null)\s*,')
+
+
+def envelope_start(env_rx, buf, pos):
+    """If the object at `pos` is `{` then scalar members (an @odata.context, a kind, an etag) then a named array of records:
+    (the array's key, the buffer index after its `[`, the names of the members before it); otherwise None."""
+    at = pos + 1
+    leading = []
+    while True:
+        m = env_rx.match(buf, at)
+        if m:
+            return m.group(1), m.end(), leading
+        p = _PAIR.match(buf, at)
+        if not p or len(leading) > 64:
+            return None
+        leading.append(p.group(1))
+        at = p.end()
+
+
+def read_units(src, envelope_keys, record_cap=MAX_RECORD_BYTES, document_cap=MAX_DOCUMENT_BYTES):
+    """Yield the records of a JSON file as ("item", info, value) or ("reject", info, reason), one by one, whatever the
+    shape: an array, an object whose first key is a named array of records (streamed, with the object's other keys
+    read after it), JSON Lines (a bad line is rejected and the next is read), or one pretty-printed document (read
+    whole, within `document_cap`); several arrays or envelopes one after another are read in turn. `info` is {record,
+    line, offset, chars, envelope}. After the last unit `src.mode` names the shape, `src.extra_keys` the other top-level
+    keys of the envelopes (names only) and `src.stopped` says why reading ended before the end of the file, if it did."""
+    src.mode, src.extra_keys, src.stopped, src.envelope = "empty", [], None, None
+    count, modes, extra = [0], [], set()
+    env_rx = re.compile(r'\s*"(%s)"\s*:\s*\[' % "|".join(re.escape(k) for k in envelope_keys)) if envelope_keys else None
+
+    def info(line, offset, chars, envelope):
+        count[0] += 1
+        return {"record": count[0], "line": line, "offset": offset, "chars": chars, "envelope": envelope}
+
+    def finish():
+        src.extra_keys = sorted(extra)
+        src.mode = modes[0] if len(set(modes)) == 1 else ("mixed" if modes else "empty")
+
+    while True:
+        src.ensure(4096)
+        src.skip_ws()
+        src.ensure(4096)
+        if src.pos >= len(src.buf):
+            break
+        first = src.buf[src.pos]
+        env = envelope_start(env_rx, src.buf, src.pos) if env_rx and first == "{" else None
+        if first == "[" or env:
+            modes.append("envelope" if env else "array")
+            key = env[0] if env else None
+            if key:
+                src.envelope = src.envelope or key
+                extra.update(env[2])
+            src.advance(env[1] if env else src.pos + 1)
+            src.skip_ws()
+            expecting_item = True
+            while True:
+                while src.pos >= len(src.buf):
+                    if not src.fill():
+                        src.stopped = "the array was not closed: the file ends inside it"
+                        finish()
+                        return
+                here = src.buf[src.pos]
+                if here == "]":
+                    src.advance(src.pos + 1)
+                    break
+                if here == ",":
+                    if expecting_item:
+                        src.stopped = "an unexpected comma at line %d: the rest of the array was not read" % src.line
+                        yield "reject", info(src.line, src.offset(), None, key), "malformed JSON: an unexpected comma"
+                        finish()
+                        return
+                    src.advance(src.pos + 1)
+                    src.skip_ws()
+                    expecting_item = True
+                    continue
+                if not expecting_item:
+                    src.stopped = "no comma between records at line %d: the rest of the array was not read" % src.line
+                    yield "reject", info(src.line, src.offset(), None, key), "malformed JSON: no comma between records"
+                    finish()
+                    return
+                start_line, start_off, start_pos = src.line, src.offset(), src.pos
+                try:
+                    value, end = _decode_at(src, record_cap)
+                except TooLong:
+                    src.stopped = "a record larger than max_record_bytes at line %d: the rest of the array was not read" % start_line
+                    yield "reject", info(start_line, start_off, None, key), "a record larger than max_record_bytes (%d)" % record_cap
+                    finish()
+                    return
+                except json.JSONDecodeError as exc:
+                    src.stopped = "the JSON stopped being valid at line %d (%s): the rest was not read" % (start_line, exc.msg)
+                    yield "reject", info(start_line, start_off, None, key), "malformed JSON: %s" % exc.msg
+                    finish()
+                    return
+                src.advance(end)
+                yield "item", info(start_line, start_off, end - start_pos, key), value
+                expecting_item = False
+                src.skip_ws()
+            if key:
+                # the rest of the envelope object: its other keys, names only (a next-page token is a token)
+                src.skip_ws()
+                if src.pos < len(src.buf) and src.buf[src.pos] == ",":
+                    src.advance(src.pos + 1)
+                try:
+                    obj, end = _decode_at(src, record_cap, lead="{")
+                except (TooLong, json.JSONDecodeError):
+                    src.stopped = "the object around the records does not end validly: its other keys were not read"
+                    finish()
+                    return
+                src.advance(end)
+                extra.update(str(k) for k in obj)
+            continue
+        # not an array: one pretty-printed document, or JSON Lines to the end of the file
+        line_end = src.buf.find("\n", src.pos)
+        if src.buf[src.pos: line_end if line_end >= 0 else len(src.buf)].strip() == "{":
+            modes.append("document")
+            start_line, start_off, start_pos = src.line, src.offset(), src.pos
+            try:
+                value, end = _decode_at(src, document_cap)
+            except TooLong:
+                src.stopped = ("a JSON document larger than max_document_bytes (%d) that does not start with a named array of records: "
+                               "it was not read" % document_cap)
+                yield "reject", info(start_line, start_off, None, None), src.stopped
+                finish()
+                return
+            except json.JSONDecodeError as exc:
+                src.stopped = "the JSON stopped being valid at line %d (%s): the rest was not read" % (start_line, exc.msg)
+                yield "reject", info(start_line, start_off, None, None), "malformed JSON: %s" % exc.msg
+                finish()
+                return
+            src.advance(end)
+            yield from _expand(value, envelope_keys, info, start_line, start_off, src, extra)
+            continue
+        modes.append("lines")
+        while True:
+            i = src.buf.find("\n", src.pos)
+            while i < 0 and not src.eof and len(src.buf) - src.pos <= record_cap:
+                src.fill()
+                i = src.buf.find("\n", src.pos)
+            if i < 0 and src.pos >= len(src.buf):
+                break
+            start_line, start_off = src.line, src.offset()
+            if (i if i >= 0 else len(src.buf)) - src.pos > record_cap:
+                size = 0
+                while True:
+                    i = src.buf.find("\n", src.pos)
+                    if i >= 0:
+                        size += i - src.pos
+                        src.advance(i + 1)
+                        break
+                    size += len(src.buf) - src.pos
+                    src.advance(len(src.buf))
+                    if not src.fill():
+                        break
+                yield "reject", info(start_line, start_off, size, None), "a line larger than max_record_bytes (%d)" % record_cap
+                continue
+            text = src.buf[src.pos: i if i >= 0 else len(src.buf)]
+            src.advance(i + 1 if i >= 0 else len(src.buf))
+            stripped = text.strip()
+            if not stripped:
+                continue
+            try:
+                value = json.loads(stripped)
+            except (ValueError, RecursionError) as exc:
+                yield "reject", info(start_line, start_off, len(text), None), "malformed JSON: %s" % getattr(exc, "msg", type(exc).__name__)
+                continue
+            yield from _expand(value, envelope_keys, info, start_line, start_off, src, extra)
+        break
+    finish()
+
+
+def _expand(value, envelope_keys, info, line, offset, src, extra):
+    """A parsed top-level value of a lines or document file: an envelope object yields its records, a list its elements."""
+    if isinstance(value, dict):
+        for key in envelope_keys:
+            if isinstance(value.get(key), list):
+                src.envelope = src.envelope or key
+                extra.update(str(k) for k in value if k != key)
+                for element in value[key]:
+                    yield "item", info(line, offset, None, key), element
+                return
+        yield "item", info(line, offset, None, None), value
+    elif isinstance(value, list):
+        for element in value:
+            yield "item", info(line, offset, None, None), element
+    else:
+        yield "reject", info(line, offset, None, None), "a JSON %s, not a record" % type(value).__name__
+
+
+# ---- CSV and what both CSV and JSON rows need ------------------------------------------------------------------------
+
+
+def csv_lines(src):
+    """The lines of a CSV file, newline kept, one at a time (a quoted field may span several)."""
+    while True:
+        i = src.buf.find("\n", src.pos)
+        while i < 0 and not src.eof and len(src.buf) - src.pos <= MAX_FIELD_BYTES:
+            src.fill()
+            i = src.buf.find("\n", src.pos)
+        if i < 0 and src.pos >= len(src.buf):
+            return
+        end = i + 1 if i >= 0 else len(src.buf)
+        if end - src.pos > MAX_FIELD_BYTES:
+            raise TooLong()
+        line = src.buf[src.pos:end]
+        src.advance(end)
+        yield line
+
+
+def csv_rows(src, delimiter, field_limit):
+    """Yield ("row", info, dict) / ("reject", info, reason) for a CSV file; a bad row is rejected and the next is read; a failure
+    of the reader itself stops the file, says where, and keeps what was read."""
+    src.mode, src.stopped, src.extra_keys, src.envelope = "csv", None, [], None
+    csv.field_size_limit(field_limit)
+    reader = csv.reader(csv_lines(src), delimiter=delimiter)
+    header, count = None, 0
+    while True:
+        before = reader.line_num
+        try:
+            row = next(reader)
+        except StopIteration:
+            return
+        except TooLong:
+            src.stopped = "a line longer than %d characters at line %d: the rest of the file was not read" % (MAX_FIELD_BYTES, before + 1)
+            yield "reject", {"record": count + 1, "line": before + 1, "offset": src.offset(), "chars": None, "envelope": None}, src.stopped
+            return
+        except csv.Error as exc:
+            src.stopped = "the CSV reader stopped at line %d (%s): the rest of the file was not read" % (before + 1, exc)
+            yield "reject", {"record": count + 1, "line": before + 1, "offset": src.offset(), "chars": None, "envelope": None}, "CSV error: %s" % exc
+            return
+        if not row:
+            continue
+        if header is None:
+            header = row
+            src.header = header
+            if len(header) == 1 and re.search(r"[;\t|]", header[0]):
+                src.stopped = "the header is one column that contains ';', a tab or '|': the file may use another delimiter (pass delimiter)"
+                yield "reject", {"record": 0, "line": before + 1, "offset": 0, "chars": None, "envelope": None}, src.stopped
+                return
+            continue
+        count += 1
+        info = {"record": count, "line": before + 1, "offset": None, "chars": None, "envelope": None}
+        if len(row) != len(header):
+            yield "reject", info, "the row has %d fields and the header %d" % (len(row), len(header))
+            continue
+        yield "row", info, dict(zip(header, row))
+
+
+def sniff(path):
+    """'json' or 'csv', from the first characters of the file's own content (decompressed if it is gzip), never its name."""
+    src = Source(path, MAX_EXPANDED_BYTES)
+    try:
+        src.ensure(4096)
+        head = src.buf[src.pos:].lstrip()
+    finally:
+        src.close()
+    return "json" if head[:1] in ("{", "[") else "csv"
+
+
+def key_map(item):
+    return {k.strip().lower(): k for k in item if isinstance(k, str)}
+
+
+def first_of(item, keys, *names):
+    for n in names:
+        k = keys.get(n.lower())
+        if k is not None and item.get(k) not in (None, ""):
+            return item[k]
     return None
 
 
-def when(value):
-    if not value:
-        return None
-    try:
-        parsed = datetime.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    except ValueError:
-        for form in ("%m/%d/%Y %H:%M:%S", "%Y-%m-%d %H:%M:%S", "%d/%m/%Y, %H:%M:%S"):
-            try:
-                parsed = datetime.datetime.strptime(str(value), form)
-                break
-            except ValueError:
-                continue
-        else:
-            return None
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=datetime.timezone.utc)
+# ---- END SHARED BLOCK -------------------------------------------------------------------------------------------
+
+
+TOOL = "signin_analyse"
+PARSER = "signin_analyse/3"
+VALUES_NAME = "signin-values.jsonl"
+ENVELOPE_KEYS = ("value", "items", "Records")
+SINGLE = "singlefactorauthentication"
+SERIES_CAP = 1000000
+# The tool's own glosses for a few result codes: a convenience, not the provider's text. `failure_reason` is the provider's.
+CODES = {
+    "0": "success", "50053": "account locked", "50055": "password expired",
+    "50056": "invalid or null password", "50074": "a second factor was required",
+    "50076": "multi-factor required, user prompted",
+    "50079": "multi-factor enrolment required",
+    "50126": "invalid user name or password", "50158": "external security challenge",
+    "53003": "blocked by conditional access", "65001": "no consent for the application",
+    "700016": "application not found in the directory",
+}
+SUCCESS_WORDS = ("success", "succeeded", "login_success", "login_successful")
+FAILURE_WORDS = ("failure", "failed", "login_failure")
+
+
+import itertools
+import math
+
+TIME_KEYS = ("createdDateTime", "Date (UTC)", "time", "Timestamp", "date")
+UTC_NAMED = ("date(utc)",)
+
+
+def get(row, *names):
+    """The first non-empty value among the named fields, names compared without case or spaces. Returns (value, name)."""
+    flat = {k.replace(" ", "").lower(): k for k in row if isinstance(k, str)}
+    for name in names:
+        k = flat.get(name.replace(" ", "").lower())
+        if k is not None and row[k] not in (None, ""):
+            return row[k], k
+    return None, None
+
+
+def val(row, *names):
+    return get(row, *names)[0]
+
+
+def maybe_json(value):
+    """A CSV cell that holds JSON text (an export writes arrays this way) as the structure it holds; anything else as it is."""
+    if isinstance(value, str) and value.strip()[:1] in ("[", "{"):
+        try:
+            return json.loads(value)
+        except (ValueError, RecursionError):
+            return value
+    return value
 
 
 def distance(a, b):
@@ -105,23 +1306,6 @@ def distance(a, b):
     return 6371.0 * 2 * math.asin(min(1.0, math.sqrt(h)))
 
 
-def rows_from(path):
-    if path.lower().endswith(".json"):
-        with open(path, "r", encoding="utf-8-sig", errors="replace") as fh:
-            try:
-                loaded = json.load(fh)
-            except ValueError:
-                fh.seek(0)
-                return [json.loads(l) for l in fh if l.strip()]
-        if isinstance(loaded, dict) and "value" in loaded:
-            return loaded["value"]
-        if isinstance(loaded, dict) and "items" in loaded:
-            return loaded["items"]
-        return loaded if isinstance(loaded, list) else [loaded]
-    with open(path, "r", encoding="utf-8-sig", errors="replace", newline="") as fh:
-        return list(csv.DictReader(fh))
-
-
 def flatten(row):
     out = dict(row)
     actor = row.get("actor")
@@ -130,16 +1314,20 @@ def flatten(row):
     identifier = row.get("id")
     if isinstance(identifier, dict):
         out["time"] = identifier.get("time")
+        out["activity_id"] = identifier
+        out.pop("id", None)
     location = row.get("location")
     if isinstance(location, dict):
         out["city"] = location.get("city")
         out["country"] = location.get("countryOrRegion")
         point = location.get("geoCoordinates") or {}
-        out["latitude"], out["longitude"] = point.get("latitude"), point.get("longitude")
+        if isinstance(point, dict):
+            out["latitude"], out["longitude"] = point.get("latitude"), point.get("longitude")
     status = row.get("status")
     if isinstance(status, dict):
         out["errorcode"] = status.get("errorCode")
-        out["failurereason"] = status.get("failureReason")
+        out["failure_reason"] = status.get("failureReason")
+        out["additional_details"] = status.get("additionalDetails")
     device = row.get("deviceDetail")
     if isinstance(device, dict):
         out["device"] = device.get("displayName") or device.get("deviceId")
@@ -148,205 +1336,454 @@ def flatten(row):
     return out
 
 
-def expanded(rows):
-    """Expand Google Reports API activities, whose events are nested."""
-    for row in rows:
-        if not isinstance(row, dict):
+def events_of(item):
+    """Yield (event_index, flat dict, params) for each event of a record: a Google activity's nested events one by one, any
+    other record once; a nested event that is not an object is yielded as (index, None, reason)."""
+    nested = item.get("events")
+    if not isinstance(nested, list):
+        yield None, flatten(item), {}
+        return
+    for i, event in enumerate(nested):
+        if not isinstance(event, dict):
+            yield i, None, "a nested event that is a JSON %s, not an object" % type(event).__name__
             continue
-        nested = row.get("events")
-        if not isinstance(nested, list):
-            yield row
-            continue
-        for event in nested:
-            if not isinstance(event, dict):
-                continue
-            merged = dict(row)
-            merged.pop("events", None)
-            merged["event_name"] = event.get("name")
-            parameters = {}
-            for item in event.get("parameters") or []:
-                if not isinstance(item, dict) or not item.get("name"):
-                    continue
-                parameters[item["name"]] = next((item.get(k) for k in
-                    ("value", "intValue", "boolValue", "multiValue") if item.get(k) is not None), None)
-            merged.update(parameters)
-            yield merged
+        merged = dict(item)
+        merged.pop("events", None)
+        merged["event_name"] = event.get("name")
+        merged["event_type"] = event.get("type")
+        params = {}
+        for p in event.get("parameters") or []:
+            if isinstance(p, dict) and p.get("name"):
+                params[p["name"]] = next((p.get(k) for k in ("value", "intValue", "boolValue", "multiValue") if p.get(k) is not None), None)
+        yield i, flatten(merged), params
+
+
+def time_of(flat):
+    raw, key = get(flat, *TIME_KEYS)
+    named_utc = bool(key) and key.replace(" ", "").lower() in UTC_NAMED
+    return raw, key, named_utc
 
 
 def outcome(flat):
-    raw = get(flat, "errorcode", "Status", "resultType")
+    """(code, success, basis): true for a success, false for an error code or a failure word, null for anything else."""
+    raw, key = get(flat, "errorcode", "Sign-in error code")
+    if raw is None:
+        raw, key = get(flat, "Status", "resultType")
     if raw is not None:
-        code = str(raw)
-        return code, code in ("0", "Success", "success")
-    name = str(get(flat, "event_name", "Event Name") or "").lower()
-    if name in ("login_success", "login_successful"):
-        return name, True
+        code = str(raw).strip()
+        if code in ("0", "Success", "success"):
+            return code, True, "the %s is a success value" % key
+        if re.fullmatch(r"-?\d+", code):
+            return code, False, "a non-zero error code in %s" % key
+        if code.lower() in SUCCESS_WORDS:
+            return code, True, "the %s is a success word" % key
+        if code.lower() in FAILURE_WORDS:
+            return code, False, "the %s is a failure word" % key
+        return code, None, "the %s value is neither a success nor a failure value this tool knows (kept as written)" % key
+    name = str(val(flat, "event_name", "Event Name") or "").lower()
+    if name in SUCCESS_WORDS:
+        return name, True, "the event name is a success name"
     if "failure" in name:
-        return name, False
-    return name or None, None
+        return name, False, "the event name says failure"
+    return (name or None), None, "no outcome field in the record" if not name else "an event name that says neither success nor failure"
+
+
+class FileState:
+    def __init__(self):
+        self.statuses = {}
+        self.first_bad = {}
+        self.order = {"dmy": 0, "mdy": 0}
+        self.named_utc = 0
+
+
+def survey(path, fmt_arg, delimiter, max_expanded, field_limit, record_cap):
+    """A first pass over the times only: how many records carry a time with no zone, how many are day/month ambiguous, and
+    what the unambiguous day/month/year strings prove about the date order. Nothing is kept."""
+    state = FileState()
+    src, rows, fmt, _ = open_rows(path, fmt_arg, delimiter, max_expanded, field_limit, record_cap)
+    try:
+        for kind, info, item in rows:
+            if out_of_time():
+                break
+            if kind == "reject" or not isinstance(item, dict):
+                continue
+            for _idx, flat, _p in events_of(item):
+                if flat is None:
+                    continue
+                raw, _key, named_utc = time_of(flat)
+                if named_utc:
+                    state.named_utc += 1
+                    continue
+                st = parse_stamp(raw, None, False)
+                state.statuses[st["status"]] = state.statuses.get(st["status"], 0) + 1
+                if st["status"] in ("no_zone", "ambiguous_date_order"):
+                    state.first_bad.setdefault(st["status"], (info["record"], info["line"], raw))
+                got = slash_order(raw) if isinstance(raw, str) else None
+                if got in state.order:
+                    state.order[got] += 1
+    finally:
+        src.close()
+    return state
+
+
+def open_rows(path, fmt_arg, delimiter, max_expanded, field_limit, record_cap):
+    """(source, row iterator, format, basis) for the file; the format comes from its content."""
+    seen = sniff(path)
+    fmt = seen if fmt_arg == "auto" else ("json" if fmt_arg in ("json", "jsonl") else "csv")
+    basis = "the content" if fmt_arg == "auto" else "the format argument"
+    src = Source(path, max_expanded)
+    if fmt == "json":
+        return src, read_units(src, ENVELOPE_KEYS, record_cap, max(MAX_DOCUMENT_BYTES, record_cap)), fmt, basis
+    return src, csv_rows(src, delimiter, field_limit), fmt, basis
 
 
 def main():
-    try:
-        args = json.load(sys.stdin)
-    except ValueError as exc:
-        fail("arguments are not valid JSON", reason=str(exc))
-    path = args.get("path")
-    if not isinstance(path, str) or not path:
-        fail("path is required: a sign-in log export")
+    args = read_args()
+    path = want_str(args, "path", "path is required: a sign-in log export")
+    if not os.path.exists(path):
+        fail("no such file", path=shown_path(path))
     if not os.path.isfile(path):
-        fail("no such file", path=path)
-    limit = args.get("limit", 500)
-    if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
-        fail("limit must be a positive integer")
-    out_file = args.get("out_file")
-    if out_file is not None and (not isinstance(out_file, str) or not out_file):
-        fail("out_file must be a non-empty string")
+        fail("path must be a regular file (one export per call)", path=shown_path(path))
+    limit = want_int(args, "limit", DEFAULT_LIMIT)
+    out_file = want_str(args, "out_file")
+    pattern = want_regex(args, "user")
+    ceiling = args.get("max_speed_kmh", 900)
+    if isinstance(ceiling, bool) or not isinstance(ceiling, (int, float)) or ceiling <= 0:
+        fail("max_speed_kmh must be a positive number")
+    window = args.get("burst_window_seconds", 3600)
+    if isinstance(window, bool) or not isinstance(window, (int, float)) or window <= 0:
+        fail("burst_window_seconds must be a positive number")
+    min_failures = want_int(args, "burst_min_failures", 3, 2)
+    assume_utc = want_bool(args, "assume_utc")
+    date_order = want_str(args, "date_order")
+    if date_order is not None and date_order not in ("mdy", "dmy"):
+        fail("date_order must be mdy or dmy")
+    fmt_arg = want_str(args, "format") or "auto"
+    if fmt_arg not in ("auto", "csv", "json", "jsonl"):
+        fail("format must be auto, csv, json or jsonl")
+    delimiter = want_str(args, "delimiter") or ","
+    if len(delimiter) != 1:
+        fail("delimiter must be one character")
+    max_expanded = want_int(args, "max_expanded_bytes", MAX_EXPANDED_BYTES, 1024)
+    record_cap = want_int(args, "max_record_bytes", MAX_RECORD_BYTES, 1024, 1 << 30)
+    field_limit = MAX_FIELD_BYTES
+    write_values = want_bool(args, "write_values")
+    seconds = start_clock(args)
     if out_file is not None:
         out_file = resolve_output(out_file, "out_file")
-    ceiling = args.get("max_speed_kmh", 900)
-    if not isinstance(ceiling, (int, float)) or isinstance(ceiling, bool) or ceiling <= 0:
-        fail("max_speed_kmh must be a positive number")
-    pattern = None
-    if args.get("user"):
-        try:
-            pattern = re.compile(args["user"], re.I)
-        except re.error as exc:
-            fail("user is not a valid regex", reason=str(exc))
-
     try:
-        raw = rows_from(path)
-    except (OSError, ValueError) as exc:
-        fail("that export could not be read", path=path, reason=str(exc))
+        vault = SecretValues(write_values, VALUES_NAME, TOOL)
+    except SecretValuesRefused as exc:
+        fail(str(exc), write_values="refused", written=False)
 
-    events = []
-    for row in expanded(raw):
-        flat = flatten(row)
-        account = get(flat, "userPrincipalName", "user", "User", "userDisplayName",
-                      "Username", "email", "actor_email")
-        if pattern and not pattern.search(str(account or "")):
+    # A first pass over the times: nothing is guessed, and a refusal comes before anything is written.
+    state = survey(path, fmt_arg, delimiter, max_expanded, field_limit, record_cap)
+    order, order_basis = date_order, "declared" if date_order else None
+    if not order and state.order["dmy"] != state.order["mdy"] and (state.order["dmy"] == 0 or state.order["mdy"] == 0):
+        order = "dmy" if state.order["dmy"] else "mdy"
+        order_basis = "detected from %d unambiguous strings and none that contradict it" % max(state.order.values())
+    if state.statuses.get("no_zone") and not assume_utc:
+        r = state.first_bad["no_zone"]
+        fail("%d record(s) carry a time with no zone (the first is record %d at line %s: %s); this tool does not assume one. If the export's own documentation or "
+             "collection record says its times are UTC, say so with assume_utc: true (the answer records the assumption); otherwise convert the times first." % (
+                 state.statuses["no_zone"], r[0], r[1], r[2]), record=r[0], line=r[1], records_without_a_zone=state.statuses["no_zone"])
+    if state.statuses.get("ambiguous_date_order") and not order:
+        r = state.first_bad["ambiguous_date_order"]
+        fail("%d record(s) carry a day/month/year time whose two leading fields are both 12 or less, and no unambiguous string in the file proves the order "
+             "(the first is record %d at line %s: %s). Say which with date_order: dmy or mdy." % (state.statuses["ambiguous_date_order"], r[0], r[1], r[2]),
+             record=r[0], line=r[1], ambiguous_records=state.statuses["ambiguous_date_order"])
+
+    census_files = LosslessPage("file_census", limit)
+    rejected = LosslessPage("rejected_records", limit)
+    withheld = Withheld(vault, limit)
+    events_page = LosslessPage(TOOL, limit, dest=out_file or None)
+    db, db_dir, db_where = open_temp_db(".signin-events-")
+    db.execute("CREATE TABLE ev(ord INTEGER PRIMARY KEY, user TEXT, app TEXT, ns INTEGER, time TEXT, success INTEGER, address TEXT, country TEXT, "
+               "city TEXT, lat REAL, lon REAL, client TEXT, auth TEXT, ca TEXT, code TEXT, result TEXT, event_id TEXT, corr TEXT, record INTEGER, "
+               "line INTEGER, eidx INTEGER)")
+    row = {"file": shown_path(path), "status": "read", "format": None, "compressed": False, "records": 0, "rejected": 0, "bytes_read": 0}
+    counts = {"records_read": 0, "events": 0, "records_rejected": 0, "events_without_user": 0, "successes": 0, "failures": 0, "unknown_outcome": 0}
+    time_statuses = {}
+    assumed = {"assume_utc_applied_to": 0, "column_named_utc": 0}
+    problems, pagination, stopped_early = [], [], False
+    first_reject = None
+    ordinal = 0
+    batch = []
+    try:
+        src, rows, fmt, basis = open_rows(path, fmt_arg, delimiter, max_expanded, field_limit, record_cap)
+        try:
+            for kind, info, item in rows:
+                if out_of_time():
+                    stopped_early = True
+                    break
+                locator = {"file": path, "record": info["record"], "line": info["line"]}
+                if kind == "reject":
+                    counts["records_rejected"] += 1
+                    first_reject = first_reject or (info["record"], info["line"], item)
+                    rejected.add({"file": row["file"], "record": info["record"], "line": info["line"], "reason": scrub(item)})
+                    continue
+                if not isinstance(item, dict):
+                    counts["records_rejected"] += 1
+                    first_reject = first_reject or (info["record"], info["line"], "a JSON %s, not a record" % type(item).__name__)
+                    rejected.add({"file": row["file"], "record": info["record"], "line": info["line"], "reason": "a JSON %s, not a record" % type(item).__name__})
+                    continue
+                counts["records_read"] += 1
+                for idx, flat, params in events_of(item):
+                    if flat is None:
+                        counts["records_rejected"] += 1
+                        rejected.add({"file": row["file"], "record": info["record"], "line": info["line"], "event_index": idx, "reason": params})
+                        first_reject = first_reject or (info["record"], info["line"], params)
+                        continue
+                    account = val(flat, "userPrincipalName", "user", "User", "userDisplayName", "Username", "email", "actor_email")
+                    raw_time, time_key, named_utc = time_of(flat)
+                    code, success, success_basis = outcome(flat)
+                    address = val(flat, "ipAddress", "IP address", "ip", "sourceIP", "ip_address")
+                    if account is None and raw_time is None and address is None and code is None:
+                        counts["records_rejected"] += 1
+                        reason = "not a sign-in record: none of a user, a time, an address or a result"
+                        first_reject = first_reject or (info["record"], info["line"], reason)
+                        rejected.add({"file": row["file"], "record": info["record"], "line": info["line"], "event_index": idx, "reason": reason})
+                        continue
+                    if pattern and not pattern.search(str(account or "")):
+                        continue
+                    st = parse_stamp(raw_time, order, assume_utc or named_utc)
+                    basis_note = st["basis"]
+                    if named_utc and st["status"] == "assumed_utc":
+                        basis_note = "the column is named Date (UTC)"
+                        assumed["column_named_utc"] += 1
+                    elif st["status"] == "assumed_utc":
+                        assumed["assume_utc_applied_to"] += 1
+                    time_statuses[st["status"]] = time_statuses.get(st["status"], 0) + 1
+                    loc = {**locator, "event_index": idx}
+                    lat, lon = val(flat, "latitude"), val(flat, "longitude")
+                    try:
+                        flat_lat, flat_lon = (float(lat), float(lon)) if lat is not None and lon is not None else (None, None)
+                    except (TypeError, ValueError):
+                        flat_lat = flat_lon = None
+                    authentication = val(flat, "authenticationRequirement", "Authentication requirement")
+                    ca_status = val(flat, "conditionalAccessStatus", "Conditional Access")
+                    app = val(flat, "appDisplayName", "Application", "resourceDisplayName", "application_name")
+                    country, city = val(flat, "country", "Location", "location"), val(flat, "city")
+                    client = val(flat, "clientAppUsed", "Client app", "userAgent", "User agent", "browser", "login_type") or params.get("login_type")
+                    event_id = val(flat, "id", "Request ID", "requestId")
+                    event = {
+                        "time": raw_time, "time_utc": st["utc"], "time_status": st["status"], "time_basis": basis_note,
+                        "user": account, "user_id": val(flat, "userId", "User ID"), "application": app, "application_id": val(flat, "appId", "Application ID"),
+                        "resource": val(flat, "resourceDisplayName", "Resource"), "resource_id": val(flat, "resourceId", "Resource ID"),
+                        "address": address, "country": country, "city": city, "latitude": lat, "longitude": lon,
+                        "client": client, "user_agent": val(flat, "userAgent", "User agent"), "device": val(flat, "device", "deviceDetail"),
+                        "device_detail": item.get("deviceDetail") if isinstance(item.get("deviceDetail"), dict) else None,
+                        "is_interactive": val(flat, "isInteractive", "Interactive"),
+                        "authentication": authentication, "conditional_access": ca_status,
+                        "conditional_access_policies": maybe_json(val(flat, "appliedConditionalAccessPolicies", "Applied Conditional Access Policies", "Conditional Access Policies")),
+                        "authentication_details": maybe_json(val(flat, "authenticationDetails", "Authentication Details")),
+                        "token_issuer_type": val(flat, "tokenIssuerType", "Token issuer type"), "unique_token_identifier": val(flat, "uniqueTokenIdentifier"),
+                        "risk_level": val(flat, "riskLevelAggregated"), "risk_state": val(flat, "riskState"), "risk_detail": val(flat, "riskDetail"),
+                        "result_code": code, "result": CODES.get(code, "code %s" % code) if code is not None else "outcome not present",
+                        "failure_reason": val(flat, "failure_reason", "Failure reason"), "additional_details": val(flat, "additional_details", "Additional Details"),
+                        "success": success, "outcome_basis": success_basis,
+                        "event_id": event_id, "correlation_id": val(flat, "correlationId", "Correlation ID"),
+                        "activity_id": flat.get("activity_id"), "event_parameters": params or None,
+                        "source_file": row["file"], "record": info["record"], "line": info["line"], "event_index": idx, "parser": PARSER,
+                    }
+                    event = {k: withheld.clean(v, loc, "/" + k) for k, v in event.items()}
+                    event["raw_record"] = withheld.clean(item, loc, "")
+                    counts["events"] += 1
+                    counts["successes" if success is True else "failures" if success is False else "unknown_outcome"] += 1
+                    if not account:
+                        counts["events_without_user"] += 1
+                    events_page.add(compact(event))
+                    ordinal += 1
+                    batch.append(tuple(dbtext(v) for v in (
+                        ordinal, scrub(str(account)) if account else None, scrub(str(app)) if app else None, st["ns"], st["utc"],
+                        None if success is None else int(success), scrub(str(address)) if address else None, scrub(str(country)) if country else None,
+                        scrub(str(city)) if city else None, flat_lat, flat_lon, scrub(str(client)) if client else None,
+                        scrub(str(authentication)) if authentication else None, scrub(str(ca_status)) if ca_status else None, code, event["result"],
+                        event_id if isinstance(event_id, (str, int)) else None, event["correlation_id"] if isinstance(event["correlation_id"], (str, int)) else None,
+                        info["record"], info["line"], idx)))
+                    if len(batch) >= 5000:
+                        db.executemany("INSERT INTO ev VALUES (%s)" % ",".join("?" * 21), batch)
+                        batch = []
+        finally:
+            src.close()
+        if batch:
+            db.executemany("INSERT INTO ev VALUES (%s)" % ",".join("?" * 21), batch)
+        db.commit()
+        envelope_markers = [k for k in getattr(src, "extra_keys", []) if pagination_key(k)]
+        if envelope_markers:
+            pagination.append({"file": row["file"], "keys": envelope_markers})
+        if src.error:
+            problems.append(src.error)
+        if src.capped:
+            problems.append("the expansion reached max_expanded_bytes (%d): the rest of the file was not read" % max_expanded)
+        if getattr(src, "stopped", None):
+            problems.append(src.stopped)
+        if stopped_early:
+            problems.append("the time limit ended the read inside this file")
+        if counts["records_rejected"]:
+            problems.append("%d record(s) were not read (the first, record %d at line %s: %s); every one is in rejected_records" % (
+                counts["records_rejected"], first_reject[0], first_reject[1], first_reject[2]))
+        row.update({"format": fmt, "format_basis": basis, "compressed": src.compressed, "records": counts["records_read"],
+                    "rejected": counts["records_rejected"], "bytes_read": src.bytes_read, "shape": getattr(src, "mode", None)})
+        if src.replaced:
+            row["replacement_characters"] = src.replaced
+        if stopped_early:
+            row["status"] = "partial"
+        elif src.bytes_read == 0 and not src.error:
+            row["status"] = "empty"
+        elif counts["events"] == 0 and src.error:
+            row["status"] = "failed"
+        elif counts["events"] == 0 and (counts["records_rejected"] or problems):
+            row["status"] = "unsupported"
+        elif counts["events"] == 0 and getattr(src, "mode", "empty") == "empty":
+            row["status"] = "empty"
+        elif problems:
+            row["status"] = "partial"
+        if problems:
+            row["problems"] = [scrub(p) for p in problems]
+        census_files.add(row)
+
+        analysis = analyse(db, limit, ceiling, window, min_failures, withheld)
+    finally:
+        vault.close()
+        remove_temp_db(db, db_dir)
+
+    pages = {"events": events_page.finish(), "file_census": census_files.finish(), "rejected_records": rejected.finish(), **analysis["pages"]}
+    withheld_summary = withheld.summary()
+    replaced = row.get("replacement_characters", 0)
+    complete = (row["status"] == "read" and not pagination and replaced == 0)
+    status = status_of(row["status"] in ("failed", "unsupported", "empty") and counts["events"] == 0, complete,
+                       "every record of the supplied file was read and nothing was left out; that says nothing about whether the export holds every sign-in the tenant logged",
+                       "part of the file was not read as sign-in records, or the export names a next page that was not supplied (see coverage, file_problems, rejected_records and pagination_markers)",
+                       "no sign-in record could be read from the file (see file_problems)")
+    answer = {
+        "parser": PARSER, **status, "path": shown_path(path),
+        "coverage": {**counts, "files_found": 1, "time_limit_seconds": seconds, "stopped_by_time_limit": stopped_early, "max_expanded_bytes": max_expanded,
+                     "time_statuses": time_statuses, "bytes_read": row["bytes_read"], "replacement_characters": replaced,
+                     "analysis_kept_in": db_where, "users_analysed": analysis["users"], "users_not_analysed_over_cap": analysis["over_cap"]},
+        "assumptions": [a for a in (
+            ("times with no zone were read as UTC because assume_utc was set: %d event(s)" % assumed["assume_utc_applied_to"]) if assumed["assume_utc_applied_to"] else None,
+            ("times in a column named Date (UTC) were read as UTC on the column's own say-so: %d event(s)" % assumed["column_named_utc"]) if assumed["column_named_utc"] else None,
+            ("day/month/year strings were read as %s (%s)" % (order, order_basis)) if order and (state.order["dmy"] or state.order["mdy"] or date_order) else None) if a],
+        "file_census": census_files.page, "rejected_records": rejected.page,
+        "file_problems": [scrub(p) for p in problems],
+        "pagination_markers": pagination,
+        "events": events_page.page, "event_count": counts["events"], "events_inline": len(events_page.page),
+        "complete_events": pages["events"].get("all_results"),
+        "inline_limited": pages["events"]["truncated"],
+        "accounts": analysis["users"],
+        "successes": counts["successes"], "failures": counts["failures"], "unknown_outcome": counts["unknown_outcome"],
+        "single_factor_successes": analysis["single_factor"], "failure_bursts_before_success": analysis["bursts"],
+        "addresses_seen_once": analysis["seen_once"], "impossible_travel": analysis["travel"],
+        "values_withheld": {"count": withheld_summary["count"], "by_reason": withheld_summary["by_reason"], "locators": withheld_summary["locators"],
+                            "page": withheld_summary["page"], "text_withheld_from_paths_and_messages": withheld_summary["text_withheld_from_paths_and_messages"]},
+        "secret_values": vault.summary(),
+        "sensitive_output": {"payloads_inline": True, "personal_data": "user names, addresses, locations and device identifiers are in the answer",
+                             "withholding": "credential-named fields and credential-shaped text are withheld; other secrets are not recognised",
+                             "advice": "run this tool as a job with secret_output: true when the case treats the export as sensitive"},
+        "pages": pages,
+        "truncated": any(p["truncated"] for p in pages.values()),
+        "note": "Every list above is a lead, not a detection, and an empty list excludes nothing: the export may be a slice of the account's activity. Impossible travel is a "
+                "hypothesis: a VPN, a carrier's routing and a cloud-hosted client all produce it, and a location is the provider's estimate for an address. A burst needs three or "
+                "more consecutive failures within burst_window_seconds of a success for the same account and application; password failures and multi-factor prompts have the "
+                "same shape, so the result codes are listed. An address seen once says only that it occurs once in these events. A success recorded as single-factor is a lead: "
+                "read the applied policies, the authentication details and the client before calling it a bypass. result is this tool's gloss for a code; failure_reason is the provider's.",
+    }
+    if status["status"] == "failed":
+        answer["error"] = "no sign-in record could be read from the file"
+    print(json.dumps(answer, indent=2, default=str))
+    if status["status"] == "failed":
+        raise SystemExit(1)
+
+
+def analyse(db, limit, ceiling, window, min_failures, withheld):
+    """The leads, one account at a time in time order, read back from the database: memory follows one account's events."""
+    single = LosslessPage("single_factor_successes", limit)
+    bursts = LosslessPage("failure_bursts_before_success", limit)
+    seen_once = LosslessPage("addresses_seen_once", limit)
+    travel = LosslessPage("impossible_travel", limit)
+    cur = db.execute("SELECT user, app, ns, time, success, address, country, city, lat, lon, client, auth, ca, code, result, event_id, corr, record, line, eidx "
+                     "FROM ev WHERE user IS NOT NULL ORDER BY user, ns IS NULL, ns, ord")
+    users = over_cap = 0
+    window_ns = int(window * 1000000000)
+
+    def ref(r):
+        return {k: v for k, v in (("event_id", r[15]), ("correlation_id", r[16]), ("record", r[17]), ("line", r[18]), ("event_index", r[19]), ("time", r[3])) if v is not None}
+
+    for user, group in itertools.groupby(cur, key=lambda r: r[0]):
+        series = list(itertools.islice(group, SERIES_CAP + 1))
+        users += 1
+        if len(series) > SERIES_CAP:
+            over_cap += 1
+            for _ in group:
+                pass
             continue
-        stamp = when(get(flat, "createdDateTime", "Date (UTC)", "time", "Timestamp", "date"))
-        code, success = outcome(flat)
-        events.append({
-            "time": stamp.isoformat().replace("+00:00", "Z") if stamp else None,
-            "_when": stamp,
-            "user": account,
-            "application": get(flat, "appDisplayName", "Application", "resourceDisplayName", "application_name"),
-            "address": get(flat, "ipAddress", "IP address", "ip", "sourceIP", "ip_address"),
-            "country": get(flat, "country", "Location", "location"),
-            "city": get(flat, "city"),
-            "latitude": get(flat, "latitude"), "longitude": get(flat, "longitude"),
-            "client": get(flat, "clientAppUsed", "Client app", "userAgent", "browser", "login_type"),
-            "device": get(flat, "device", "deviceDetail"),
-            "authentication": get(flat, "authenticationRequirement", "Authentication requirement"),
-            "conditional_access": get(flat, "conditionalAccessStatus"),
-            "result_code": code,
-            "result": CODES.get(code, "code %s" % code) if code is not None else "outcome not present",
-            "success": success,
-        })
-
-    by_user = {}
-    for event in events:
-        by_user.setdefault(event["user"], []).append(event)
-
-    single_factor, bursts, travel, unfamiliar = [], [], [], []
-    for user, series in by_user.items():
-        series.sort(key=lambda e: e["_when"] or datetime.datetime.min.replace(
-            tzinfo=datetime.timezone.utc))
-        for event in series:
-            if event["success"] and str(event.get("authentication") or "").replace(
-                    " ", "").lower() == SINGLE:
-                single_factor.append(event)
-        # failures immediately before a success
-        run = 0
-        for event in series:
-            if event["success"] is False:
-                run += 1
+        # single factor
+        for r in series:
+            if r[4] == 1 and str(r[11] or "").replace(" ", "").lower() == SINGLE:
+                single.add({"user": user, "application": r[1], "address": r[5], "client": r[10], "authentication": r[11], "conditional_access": r[12],
+                            "time": r[3], **ref(r)})
+        # bursts: per account and application, consecutive failures within the window before a success
+        runs = {}
+        for r in series:
+            if r[2] is None:
                 continue
-            if event["success"] is True and run >= 3:
-                bursts.append({"user": user, "failures_before": run,
-                               "succeeded_at": event["time"], "address": event["address"],
-                               "result": event["result"]})
-            run = 0
-        seen_addresses, seen_clients = {}, {}
-        for event in series:
-            if event["address"]:
-                seen_addresses[event["address"]] = seen_addresses.get(event["address"], 0) + 1
-            if event["client"]:
-                seen_clients[event["client"]] = seen_clients.get(event["client"], 0) + 1
-        for event in series:
-            if event["success"] and seen_addresses.get(event["address"], 0) == 1 and len(seen_addresses) > 2:
-                unfamiliar.append({"user": user, "time": event["time"],
-                                   "address": event["address"], "country": event["country"],
-                                   "client": event["client"],
-                                   "why": "this address appears once in this account's history"})
+            if r[4] == 0:
+                runs.setdefault(r[1], []).append(r)
+            elif r[4] == 1:
+                fails = [f for f in runs.get(r[1], []) if r[2] - f[2] <= window_ns]
+                if len(fails) >= min_failures:
+                    codes, addrs = {}, {}
+                    for f in fails:
+                        codes[f[13]] = codes.get(f[13], 0) + 1
+                        addrs[f[5]] = addrs.get(f[5], 0) + 1
+                    bursts.add({"user": user, "application": r[1], "failures_before": len(fails), "first_failure_at": fails[0][3], "last_failure_at": fails[-1][3],
+                                "succeeded_at": r[3], "success_address": r[5], "success_result": r[14],
+                                "failure_addresses": addrs, "success_address_among_failure_addresses": r[5] in addrs, "failure_result_codes": codes,
+                                "window_seconds": window, "success": ref(r), "failure_events": [ref(f) for f in fails[:10]]})
+                runs[r[1]] = []
+            else:
+                runs[r[1]] = []
+        # addresses seen once among this account's events in this export
+        seen = {}
+        for r in series:
+            if r[5]:
+                seen[r[5]] = seen.get(r[5], 0) + 1
+        for r in series:
+            if r[4] == 1 and r[5] and seen.get(r[5]) == 1 and len(seen) > 2:
+                seen_once.add({"user": user, "time": r[3], "address": r[5], "country": r[6], "client": r[10], "distinct_addresses_for_account": len(seen),
+                               "why": "this address occurs once among this account's events in this export; the export may not hold the account's earlier history",
+                               **ref(r)})
+        # travel: adjacent successes
         previous = None
-        for event in series:
-            if not event["success"] or not event["_when"]:
+        for r in series:
+            if r[4] != 1 or r[2] is None:
                 continue
-            if previous:
-                seconds = (event["_when"] - previous["_when"]).total_seconds()
+            if previous is not None:
+                seconds = (r[2] - previous[2]) / 1e9
                 if 0 < seconds < 86400:
                     pair = None
-                    if all(previous.get(k) is not None for k in ("latitude", "longitude")) and \
-                       all(event.get(k) is not None for k in ("latitude", "longitude")):
-                        try:
-                            km = distance((float(previous["latitude"]), float(previous["longitude"])),
-                                          (float(event["latitude"]), float(event["longitude"])))
-                        except (TypeError, ValueError):
-                            km = None
-                        if km is not None and seconds > 0:
-                            speed = km / (seconds / 3600)
-                            if speed > ceiling and km > 100:
-                                pair = {"kilometres": round(km, 1),
-                                        "implied_speed_kmh": round(speed, 1), "coarse": False}
-                    elif previous.get("country") and event.get("country") and \
-                            previous["country"] != event["country"] and seconds < 3600:
-                        pair = {"coarse": True,
-                                "why": "the export carries a country but no coordinates"}
+                    if None not in (previous[8], previous[9], r[8], r[9]):
+                        km = distance((previous[8], previous[9]), (r[8], r[9]))
+                        speed = km / (seconds / 3600)
+                        if speed > ceiling and km > 100:
+                            pair = {"kilometres": round(km, 1), "implied_speed_kmh": round(speed, 1), "coarse": False, "basis": "coordinates"}
+                    elif previous[6] and r[6] and previous[6] != r[6] and seconds < 3600:
+                        pair = {"coarse": True, "basis": "country change only", "why": "the export carries a country but no coordinates"}
                     if pair:
-                        travel.append({"user": user, "from": {
-                            "time": previous["time"], "address": previous["address"],
-                            "country": previous["country"], "city": previous.get("city")},
-                            "to": {"time": event["time"], "address": event["address"],
-                                   "country": event["country"], "city": event.get("city")},
-                            "seconds_apart": round(seconds, 1), **pair})
-            previous = event
-
-    for event in events:
-        event.pop("_when", None)
-    if out_file:
-        with open(out_file, "w", encoding="utf-8", newline="\n") as fh:
-            for event in events:
-                fh.write(json.dumps(event, default=str, sort_keys=True) + "\n")
-        inline = events[:limit]
-    else:
-        inline = events
-    print(json.dumps({
-        "path": path,
-        "events": inline,
-        "event_count": len(events),
-        "events_inline": len(inline),
-        "complete_events": out_file,
-        "inline_limited": bool(out_file and len(events) > len(inline)),
-        "accounts": len(by_user),
-        "successes": sum(1 for e in events if e["success"] is True),
-        "failures": sum(1 for e in events if e["success"] is False),
-        "unknown_outcome": sum(1 for e in events if e["success"] is None),
-        "single_factor_successes": single_factor,
-        "failure_bursts_before_success": bursts,
-        "addresses_seen_once": unfamiliar,
-        "impossible_travel": travel,
-        "note": "Impossible travel is a hypothesis. A VPN, a mobile carrier's routing and a "
-                "cloud-hosted mail client all produce it, and the implied speed is given so the "
-                "claim is measurable rather than asserted. What turns it into a finding is the "
-                "rest: an unfamiliar device, a legacy client, a new application, a consent granted "
-                "in the same window. A success recorded as single-factor where multi-factor was "
-                "expected is a lead in the first list above; verify applied policies, authentication "
-                "details and token context before calling it a bypass.",
-    }, indent=2, default=str))
+                        travel.add({"user": user, "from": {"time": previous[3], "address": previous[5], "country": previous[6], "city": previous[7], **ref(previous)},
+                                    "to": {"time": r[3], "address": r[5], "country": r[6], "city": r[7], **ref(r)}, "seconds_apart": round(seconds, 1), **pair})
+            previous = r
+    pages = {"single_factor_successes": single.finish(), "failure_bursts_before_success": bursts.finish(),
+             "addresses_seen_once": seen_once.finish(), "impossible_travel": travel.finish()}
+    return {"pages": pages, "users": users, "over_cap": over_cap, "single_factor": single.page, "bursts": bursts.page, "seen_once": seen_once.page,
+            "travel": travel.page}
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except SystemExit:
+        raise
+    except Exception as exc:  # never an empty or clean answer for a failure
+        fail("unexpected failure: %s: %s" % (type(exc).__name__, scrub(str(exc))))
