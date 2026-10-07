@@ -1,18 +1,39 @@
 {
   "name": "collection_id",
-  "description": "Recognise which collector produced a tree — KAPE, UAC, Velociraptor, CyLR or none — read its own log and manifest, and report the artefact families present, the targets that failed, and what a logical acquisition of this shape cannot contain.",
+  "description": "Survey a delivered directory: classify every object in it (copied files, disk containers, memory captures, archives) from its first bytes and its name, and say which of the two each class rests on. A delivery with a disk container or a memory capture beside copied files is mixed, not a physical image; a name that says image or raw with no signature behind it is unknown (a raw memory capture has none either); an 8 KiB boot sector is a copied file. It reads only the first 4 KiB of an object, never opens a container or lists an archive. Collectors are named by the paths of their records, more than one may be present and one may have run more than once; a top-level C, C$ or Windows directory is a layout clue that names no collector. Logs read whole and streamed: KAPE copy, skip and console logs (per run; columns and row counts, malformed rows located, each skip row kept whole with the collector's own words, a version only where the console log states one), UAC uac.log (lines that start with a date, a time and an upper-case level word; UAC's own format is not verified here, so a line that matches nothing is counted and kept unlabelled, and a summary saying 0 errors is not a failure) and Velociraptor uploads.json (JSON Lines, every index; a non-empty Error field is a failure; a JSON array is unsupported). A log whose columns or lines are not recognised is partial or unsupported and failed_target_count is then null: no count is never zero. A recorded skip or error is the collector's own outcome, never explained or judged. Not measured: what the collector was asked to copy, that it finished, whether a digest matches the delivered file, source paths (collection_index), what a log omits. delivery.not_observed lists the kinds of object not seen among the files walked: a limit of the delivery, no finding about the source; there is no fixed list of what a delivery cannot contain. Paths and log text shaped like a recovery password, an access key, a token, a private-key header or URL user-info are withheld (other secrets in a log can still appear: run it as a job with secret_output: true); write_values: true (jobs only) writes the real strings to $OUT/collection-id-values.jsonl, mode 0600, created first, a second run in the same job refused. A table longer than limit is whole in a file the answer names.",
   "params": {
     "root": {
       "type": "string",
-      "description": "The collection directory"
+      "description": "The collection directory (an archive is not opened: extract it into a job's output first)"
+    },
+    "limit": {
+      "type": "integer",
+      "description": "Rows of each table shown inline (default 200); a longer table is whole in the file its *_table entry names"
+    },
+    "time_limit_seconds": {
+      "type": "integer",
+      "description": "Stop the walk and the log reads after this long (default 1500, at most 3400): the answer then says it stopped, status partial, and what was not listed"
+    },
+    "write_values": {
+      "type": "boolean",
+      "description": "Write the real strings that were withheld to $OUT/collection-id-values.jsonl (default false). Refused unless the tool runs as a job, which must be run with secret_output: true; the file is created first and one already there is refused"
     }
   },
   "runtime": "python3",
   "entry": "run.py",
-  "timeout_seconds": 300,
+  "timeout_seconds": 3600,
   "example": "{\"root\": \"inputs/collection\"}",
   "by": "maintainer",
-  "at": "2026-09-22T23:30:00.000Z",
-  "version": 1,
-  "sha256": "9efd5ef70e5a07387258797864b2055c775b8c16744394526b3e7fb4eca33e73"
+  "at": "2026-10-07T12:00:00.000Z",
+  "version": 2,
+  "sha256": "8975bea88f5679022b5e53e0c7a2208903640c951fdef9ddb80883d8376f9d0f",
+  "use": {
+    "names": [
+      "*_CopyLog.csv",
+      "*_SkipLog.csv",
+      "*_ConsoleLog.txt",
+      "uac.log",
+      "uploads.json"
+    ]
+  }
 }
