@@ -2,7 +2,7 @@
   "id": "ransomware-response",
   "name": "Ransomware Response Pack",
   "version": "1.1.0",
-  "description": "The order a ransomware case has to be worked in: scope before anything else, the exfiltration that came before the encryption, what the encryptor itself left, the destroyed shadow copies, identifying the family from the note and the file marker, what recovery is actually possible, and the report a regulator and a negotiator will both ask for.",
+  "description": "Evidence-led ransomware examination: preserve and scope the incident, reconstruct its phases, assess possible exfiltration and recovery impairment, identify supported family candidates, validate recovery options, and prepare qualified findings for notification and response decisions.",
   "licence": "AGPL-3.0-or-later",
   "authors": [
     "DFIR Swarm"
@@ -18,12 +18,12 @@
   "checksums": {
     "sha256": {
       "LICENCE": "5b94f18424dbef1e77eda33a465e946c2c8eb715fa5236afe2c6ec6763af80d3",
-      "README.md": "e50d856172181353278440618e05a2feaae86c1b3c057995ab4c41a328f5c496",
+      "README.md": "2d5733aff874a3877e0097ed180d806ab2697c9dd66ba7faf1bb4726c37fc551",
       "tools/ransom_note_scan/manifest.json": "e5ae0531676745260c676c23a994a5159a7379fc9c5edc4fa27d6797914288fc",
       "tools/ransom_note_scan/run.py": "88f991d6ff7a7d03c89633cbd8f7dfd81efff9c3be4227db39554dce6c7227c5",
       "tools/encrypted_survey/manifest.json": "e2af7a021208e862ccc07898929c198f0a935dc06925495779c37f4e4ea2ebc9",
       "tools/encrypted_survey/run.py": "3105ceefede30c5f782165689a2fa6a3e4a5a9a519493710c85b3a9ab0db56c4",
-      "goals/ransomware-case.md": "f0cd01d8c8527dfcf11485869e1fae76142549f72d073297e7b02fff285f1b32",
+      "goals/ransomware-case.md": "ba768dac4d662c50cc9409feb9555a06176ce79d0a600f937911f46e5ebbe899",
       "skills/identify/family.md": "ced4d413faddbc8dffe5611d63be4cb968c6535a97cb15b06a7e5e3d44947192",
       "skills/reporting/for-regulators.md": "0195dc0613589530ca9cb5cb83c1a8188788d08752d4f0c380ac2a82bf4271fa",
       "skills/exfil/before-encryption.md": "e491b456277f87144dcc1a8a111c48f8def5b856b4fbf8b309f6afa9052c8b7a",
@@ -31,7 +31,7 @@
       "skills/encryptor/traces.md": "3137b6ed9062829e314390fa523b16e338dcef0ddba413775bf4324cd2ac45ad",
       "skills/recovery/what-is-possible.md": "4162ae8bdc0bbcc950a4e677bbecbea5c3971b4197470f756611021ce68f29f2",
       "skills/scope/first-hour.md": "453227c37057ce9b639d0cc6a91f3253e8455ef0dd89b7b4c99548ac013c15a4",
-      "requires/host.json": "59d527f2da5ee751fc2672758a2908e49dcba4f1138b345ec92bc6b873090d1e",
+      "requires/host.json": "d5e732d918bec998617a63372b8e801afef1a3b20e842c233d29bdec92261d77",
       "requires/python.txt": "5a396319de276d1ea51953493ef8e4f2dd0d7cb87c67aac6fbd0e63c096d63b6",
       "skills/INDEX.md": "ccba54d7f54a69caf0f0cfa757e3ec2cd5f7e7937fcbc7941d567c964175cfd7"
     }
