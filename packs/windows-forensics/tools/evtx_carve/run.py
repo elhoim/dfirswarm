@@ -17,12 +17,19 @@ was carved from is usually not a log file at all.
 Anti-forensics note worth keeping in view: an examiner who reports "the log was
 cleared, so there is nothing" has stopped one command early.
 
-Nothing found is dropped. Every matching record is kept: the page returned
-inline is `limit` long, and when there are more the whole list is written to a
-file the output names. A chunk cut short by the end of the file is still read
-for the records it holds. `chunk_limit` bounds the work of one call, not the
-result: the sweep stops before the next chunk, and resume_start is the offset
-to pass as start to carry on from there.
+Nothing found is dropped. Every matching record is kept, with its whole XML, in
+a file the output names (always written when anything was found); the page
+returned inline is `limit` long and carries the summary, without the XML unless
+`with_xml` is true. A chunk cut short by the end of the file is still read for the
+records it holds. `chunk_limit` (chunks parsed) and `candidate_limit` (places where
+the chunk magic was found, whether or not it is a chunk) bound the work of one call,
+not the result: the sweep stops before the next one, and resume_start is the offset
+to pass as start to carry on from there. The answer says the range asked for and the
+range examined; `sweep_complete` means the range asked for was swept.
+
+A repeated field name in a record's EventData is kept as a list, not overwritten, and
+the XML in the result file is the whole record. A chunk is "verified" when its own
+checksums hold; a record in an unverified chunk may still be sound, and is marked.
 """
 import json
 import os
@@ -107,6 +114,33 @@ class LosslessPage:
 CHUNK_MAGIC = b"ElfChnk\x00"
 CHUNK_SIZE = 65536
 NS = {"e": "http://schemas.microsoft.com/win/2004/08/events/event"}
+PARSER = "evtx_carve/2"
+
+
+class CompletePage(LosslessPage):
+    """A page whose whole result is ALWAYS kept in a file (LosslessPage writes the file only when there are more
+    rows than the page). The rows hold the whole XML; what is shown inline is made from them afterwards."""
+
+    def finish(self) -> dict:
+        if self._out is None and self.page:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            fd, name = tempfile.mkstemp(dir=self.path.parent, prefix=f".{self.path.name}-")
+            self._tmp = Path(name)
+            self._out = os.fdopen(fd, "w", encoding="utf-8")
+            for kept in self.page:
+                self._write(kept)
+        return super().finish()
+
+
+def keep(out, name, value):
+    """Add a value under `name`; a name seen again becomes a list, never an overwrite."""
+    if name in out:
+        if isinstance(out[name], list):
+            out[name].append(value)
+        else:
+            out[name] = [out[name], value]
+    else:
+        out[name] = value
 
 
 def fail(message, **extra):
@@ -143,15 +177,27 @@ def summarise(xml, offset, chunk_offset, verified):
     data = {}
     for node in root.iterfind(".//e:EventData/e:Data", NS):
         name = node.get("Name") or "Data%d" % len(data)
-        data[name] = (node.text or "").strip()
+        keep(data, name, (node.text or "").strip())
     if data:
         out["data"] = data
     user = root.find(".//e:UserData", NS)
     if user is not None and not data:
-        out["user_data"] = {c.tag.rsplit("}", 1)[-1] if isinstance(c.tag, str) else str(c.tag):
-                            (c.text or "").strip()
-                            for c in user.iter() if c is not user}
+        flat = {}
+        for c in user.iter():
+            if c is user:
+                continue
+            keep(flat, c.tag.rsplit("}", 1)[-1] if isinstance(c.tag, str) else str(c.tag), (c.text or "").strip())
+        out["user_data"] = flat
     return out
+
+
+def whole(args, name, default, low):
+    v = args.get(name)
+    if v is None:
+        return default
+    if isinstance(v, bool) or not isinstance(v, int) or v < low:
+        fail("%s must be a whole number of at least %d" % (name, low), **{name: args.get(name)})
+    return v
 
 
 def main():
@@ -159,6 +205,8 @@ def main():
         args = json.load(sys.stdin)
     except ValueError as exc:
         fail("arguments are not valid JSON", reason=str(exc))
+    if not isinstance(args, dict):
+        fail("the arguments must be a JSON object")
 
     path = args.get("path")
     if not isinstance(path, str) or not path:
@@ -166,31 +214,43 @@ def main():
     if not os.path.isfile(path):
         fail("no such file", path=path)
 
+    limit = whole(args, "limit", 300, 1)
+    chunk_limit = whole(args, "chunk_limit", 200, 1)
+    candidate_limit = whole(args, "candidate_limit", 20000, 1)
+    start = whole(args, "start", 0, 0)
+    max_bytes = whole(args, "max_bytes", None, 1)
+    raw_ids = args.get("event_ids") or []
+    if not isinstance(raw_ids, list) or any(isinstance(e, bool) or not isinstance(e, int) for e in raw_ids):
+        fail("event_ids must be a list of whole numbers", event_ids=args.get("event_ids"))
+    wanted = set(raw_ids)
+    contains = args.get("contains")
+    if contains is not None and not isinstance(contains, str):
+        fail("contains must be a string")
+    contains_l = contains.lower() if contains else None
+    with_xml = bool(args.get("with_xml"))
+
     try:
         from Evtx.Evtx import ChunkHeader
     except ImportError as exc:
         fail("python-evtx is not installed: python3 -m pip install python-evtx", reason=str(exc))
 
-    limit = int(args.get("limit", 300) or 300)
-    chunk_limit = int(args.get("chunk_limit", 200) or 200)
-    start = int(args.get("start", 0) or 0)
-    max_bytes = args.get("max_bytes")
-    wanted = {int(e) for e in (args.get("event_ids") or [])}
-    contains = args.get("contains")
-    contains_l = contains.lower() if contains else None
-    with_xml = bool(args.get("with_xml"))
-    if limit < 1 or chunk_limit < 1:
-        fail("limit and chunk_limit must be positive integers")
-
     size = os.path.getsize(path)
-    end = size if not max_bytes else min(size, start + int(max_bytes))
+    if start > size:
+        fail("start is past the end of the file", start=start, size=size)
+    end = size if not max_bytes else min(size, start + max_bytes)
 
-    records = LosslessPage(
-        "evtx_carve", [path, start, end, sorted(wanted), contains, with_xml], limit)
+    records = CompletePage(
+        "evtx_carve", [path, start, end, sorted(wanted), contains], limit)
+    problems = LosslessPage("evtx_carve-problems", [path, start, end], 40)
     channels = set()
-    chunks_seen, chunks_parsed, chunks_verified = 0, 0, 0
-    problems = []
+    chunks_seen, chunks_parsed, chunks_verified, candidates = 0, 0, 0, 0
+    problem_count = 0
     resume_start = None
+
+    def problem(offset, why):
+        nonlocal problem_count
+        problem_count += 1
+        problems.add({"offset": offset, "why": why})
 
     # A chunk whose magic starts before `end` is found even when the magic
     # itself runs over it.
@@ -216,30 +276,29 @@ def main():
                 absolute = base + hit
                 if absolute >= end:
                     break
-                if chunks_parsed >= chunk_limit:
-                    # Stop before this chunk, and say where: nothing is skipped.
+                if chunks_parsed >= chunk_limit or candidates >= candidate_limit:
+                    # Stop before this one, and say where: nothing is skipped.
                     resume_start = absolute
                     break
+                candidates += 1
                 chunks_seen += 1
                 fh.seek(absolute)
                 raw = fh.read(CHUNK_SIZE)
                 fh.seek(position + len(block))
                 if len(raw) < CHUNK_SIZE:
-                    problems.append({"offset": absolute,
-                                     "why": "the chunk runs past the end of the file: %d of its "
-                                            "%d bytes are there, and the records in them are read"
-                                            % (len(raw), CHUNK_SIZE)})
+                    problem(absolute, "the chunk runs past the end of the file: %d of its "
+                                      "%d bytes are there, and the records in them are read"
+                                      % (len(raw), CHUNK_SIZE))
                 try:
                     chunk = ChunkHeader(raw, 0)
                 except Exception as exc:                      # a false positive on the magic
-                    problems.append({"offset": absolute, "why": "not a readable chunk: %s" % exc})
+                    problem(absolute, "not a readable chunk: %s" % exc)
                     continue
                 try:
                     verified = bool(chunk.verify())
                 except Exception as exc:
                     verified = False
-                    problems.append({"offset": absolute,
-                                     "why": "the checksums could not be computed: %s" % exc})
+                    problem(absolute, "the checksums could not be computed: %s" % exc)
                 chunks_parsed += 1
                 if verified:
                     chunks_verified += 1
@@ -248,50 +307,63 @@ def main():
                         try:
                             xml = record.xml()
                         except Exception as exc:
-                            problems.append({"offset": absolute, "why": "a record did not parse: %s" % exc})
+                            problem(absolute, "a record did not parse: %s" % exc)
                             continue
                         if contains_l and contains_l not in xml.lower():
                             continue
                         try:
                             entry = summarise(xml, absolute + record.offset(), absolute, verified)
                         except ET.ParseError as exc:
-                            problems.append({"offset": absolute, "why": "record XML is malformed: %s" % exc})
+                            problem(absolute, "record XML is malformed: %s" % exc)
                             continue
                         if wanted and entry.get("event_id") not in wanted:
                             continue
-                        if with_xml:
-                            entry["xml"] = xml
+                        # The whole XML goes in the result file; the page shown inline drops it unless asked.
+                        entry["xml"] = xml
                         records.add(entry)
                         if entry.get("channel"):
                             channels.add(entry["channel"])
                 except Exception as exc:
-                    problems.append({"offset": absolute, "why": "the record list ended early: %s" % exc})
+                    problem(absolute, "the record list ended early: %s" % exc)
             tail = buf[-(len(CHUNK_MAGIC) - 1):] if len(buf) >= len(CHUNK_MAGIC) else buf
             tail_at = base + len(buf) - len(tail)
             position += len(block)
 
     swept_to = resume_start if resume_start is not None else max(start, min(end, size))
     page = records.finish()
-    print(json.dumps({
+    problem_page = problems.finish()
+    inline = records.page if with_xml else [{k: v for k, v in r.items() if k != "xml"} for r in records.page]
+    out = {
+        "parser": PARSER,
+        "status": "complete" if resume_start is None and not problem_count else "partial",
         "path": path,
+        "range_requested": {"start": start, "end": end, "file_bytes": size},
+        "range_examined": {"start": start, "end": swept_to},
         "bytes_swept": max(0, swept_to - start),
+        "candidates": candidates,
         "chunks_found": chunks_seen,
         "chunks_parsed": chunks_parsed,
         "chunks_checksum_ok": chunks_verified,
-        "records": records.page,
+        "records": inline,
         "record_count": page["matched"],
         "channels": sorted(channels),
         **page,
         "sweep_complete": resume_start is None,
         "resume_start": resume_start,
-        "problems": problems,
+        "problems": problems.page,
+        "problem_count": problem_count,
         "note": "Cite the Channel on the record, not the file this was carved from: a chunk "
                 "in a pagefile or in unallocated space no longer belongs to any file. A chunk "
-                "whose checksum does not verify may still hold sound records, but say so."
+                "whose checksum does not verify may still hold sound records, but say so. "
+                "sweep_complete means the range asked for was swept, not that every log record "
+                "that ever existed was recovered."
                 + ("" if resume_start is None else
-                   " The sweep stopped at chunk_limit: run again with start=%d to read on "
-                   "from the next chunk." % resume_start),
-    }, indent=2))
+                   " The sweep stopped at chunk_limit or candidate_limit: run again with start=%d to read on "
+                   "from there." % resume_start),
+    }
+    if problem_page.get("all_results"):
+        out["all_problems"] = problem_page["all_results"]
+    print(json.dumps(out, indent=2))
 
 
 if __name__ == "__main__":

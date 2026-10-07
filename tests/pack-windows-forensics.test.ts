@@ -2310,3 +2310,310 @@ test("regkv reports a file that is not a hive as an error with a non-zero exit, 
     assert.match(err.error, /could not read the hive/);
   });
 });
+
+// --- evtx_query -----------------------------------------------------------------
+
+// python-evtx on a JSON description of chunks and records, with the calls evtx_query makes of it:
+// Evtx(path) as a context manager; .chunks(); chunk.offset() and chunk.records(); record.offset(), .xml()
+// and .unpack_qword(0x10) (the FILETIME in the record header).
+const EVTX_QUERY_STUB = String.raw`
+import json
+
+
+class _Rec:
+    def __init__(self, spec):
+        self.spec = spec
+
+    def offset(self):
+        return self.spec["offset"]
+
+    def xml(self):
+        if "xml_error" in self.spec:
+            raise ValueError(self.spec["xml_error"])
+        return self.spec["xml"]
+
+    def unpack_qword(self, off):
+        assert off == 0x10
+        return int(self.spec["filetime"])
+
+
+class _Chunk:
+    def __init__(self, spec):
+        self.spec = spec
+
+    def offset(self):
+        return self.spec["offset"]
+
+    def records(self):
+        def gen():
+            for r in self.spec["records"]:
+                if "chain_error" in r:
+                    raise ValueError(r["chain_error"])
+                yield _Rec(r)
+        return gen()
+
+
+class Evtx:
+    def __init__(self, path):
+        with open(path, encoding="utf-8") as fh:
+            self.spec = json.load(fh)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def chunks(self):
+        for c in self.spec["chunks"]:
+            if "enumeration_error" in c:
+                raise ValueError(c["enumeration_error"])
+            yield _Chunk(c)
+`;
+
+function eventXml(o: { eid: number; rec: number; time: string; channel?: string; data?: Record<string, string> }): string {
+  const data = Object.entries(o.data ?? {}).map(([k, v]) => `<Data Name="${k}">${v}</Data>`).join("");
+  return `<?xml version="1.0" encoding="utf-8" standalone="yes"?><Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event"><System><Provider Name="Microsoft-Windows-Security-Auditing"></Provider><EventID>${o.eid}</EventID><TimeCreated SystemTime="${o.time}"></TimeCreated><EventRecordID>${o.rec}</EventRecordID><Channel>${o.channel ?? "Security"}</Channel><Computer>WS01</Computer></System><EventData>${data}</EventData></Event>`;
+}
+
+type EvtxRec = { offset: number; xml?: string; xml_error?: string; filetime?: string; chain_error?: string };
+type EvtxSpec = { chunks: Array<{ offset: number; records: EvtxRec[]; enumeration_error?: string }> };
+
+const goodRec = (offset: number, eid: number, rec: number, time: string, data: Record<string, string> = {}): EvtxRec => ({
+  offset,
+  xml: eventXml({ eid, rec, time, data }),
+  filetime: "133443104001234567",
+});
+
+type EvtxQueryOut = {
+  status: string;
+  records_examined: number;
+  events_matched: number;
+  parse_errors: number;
+  count: number;
+  events: Array<{ event_id: number; record_id: number; record_offset: number; chunk_offset: number; timestamp: string; record_filetime: string | null; record_time_utc: string | null; data: Record<string, string>; xml?: string }>;
+  errors: Array<{ parse_error: string; record_offset?: number | null; chunk_offset?: number | null }>;
+  problems: string[];
+  result_file: string;
+};
+
+async function evtxCase(cwd: string, spec: EvtxSpec, args: Record<string, unknown> = {}): Promise<Run> {
+  const env = await stubModule(cwd, { "Evtx/__init__.py": "", "Evtx/Evtx.py": EVTX_QUERY_STUB });
+  await writeFile(join(cwd, "work", "Security.evtx"), JSON.stringify(spec), "utf8");
+  return tool("evtx_query", cwd, { path: "work/Security.evtx", ...args }, env);
+}
+
+test("evtx_query counts what matched apart from what it could not read: a record that does not parse is a parse error, not a match", async () => {
+  // matched += 1 ran for broken and parse-error records alike, so `count` mixed evidence with failures.
+  await withCwd(async (cwd) => {
+    const out = body<EvtxQueryOut>(await evtxCase(cwd, {
+      chunks: [{ offset: 4096, records: [
+        goodRec(4608, 4624, 11, "2026-09-01 10:00:00.123456", { TargetUserName: "alice" }),
+        { offset: 5000, xml_error: "BinXML template could not be expanded" },
+        goodRec(5400, 4625, 13, "2026-09-01 10:00:02.000000", { TargetUserName: "bob" }),
+      ] }],
+    }));
+    assert.equal(out.records_examined, 3);
+    assert.equal(out.events_matched, 2);
+    assert.equal(out.parse_errors, 1);
+    assert.equal(out.count, 2, "count is the events that matched");
+    assert.equal(out.status, "partial");
+    assert.deepEqual(out.events.map((e) => [e.event_id, e.record_id, e.record_offset, e.chunk_offset]), [[4624, 11, 4608, 4096], [4625, 13, 5400, 4096]]);
+    assert.equal(out.events[0].data.TargetUserName, "alice");
+    assert.equal(out.errors.length, 1);
+    assert.match(out.errors[0].parse_error, /^BinXML template could not be expanded/);
+    assert.equal(out.errors[0].record_offset, 5000);
+    assert.equal(out.events[0].xml, undefined, "the XML is in the result file, not inline");
+    const rows = (await readFile(join(cwd, out.result_file), "utf8")).trimEnd().split("\n").map((l) => JSON.parse(l) as { xml?: string; parse_error?: string; record_offset: number });
+    assert.equal(rows.length, 3);
+    assert.deepEqual(rows.map((r) => r.record_offset), [4608, 5000, 5400]);
+    assert.ok(rows[0].xml?.includes("<EventID>4624</EventID>"));
+  });
+});
+
+test("evtx_query keeps the raw FILETIME of the record header beside its time, and the SystemTime the XML carries", async () => {
+  await withCwd(async (cwd) => {
+    const out = body<EvtxQueryOut>(await evtxCase(cwd, { chunks: [{ offset: 4096, records: [goodRec(4608, 4624, 11, "2026-09-01 10:00:00.123456")] }] }));
+    assert.equal(out.events[0].record_filetime, "133443104001234567");
+    assert.equal(out.events[0].record_time_utc, "2023-11-13T00:53:20.1234567Z");
+    assert.equal(out.events[0].timestamp, "2026-09-01 10:00:00.123456");
+    assert.equal(out.status, "complete");
+  });
+});
+
+test("evtx_query ends a broken record chain with a row naming its chunk and goes on to the next chunk, and says when the chunks themselves could not be enumerated", async () => {
+  await withCwd(async (cwd) => {
+    const out = body<EvtxQueryOut>(await evtxCase(cwd, {
+      chunks: [
+        { offset: 4096, records: [goodRec(4608, 4624, 1, "2026-09-01 10:00:00.000000"), { offset: 4700, chain_error: "record length points past the chunk" }] },
+        { offset: 69632, records: [goodRec(70144, 4624, 5, "2026-09-01 11:00:00.000000")] },
+        { offset: 135168, records: [], enumeration_error: "unexpected end of file at chunk 3" },
+      ],
+    }));
+    assert.deepEqual(out.events.map((e) => e.record_id), [1, 5], "the chunk after the broken chain is still read");
+    assert.equal(out.parse_errors, 2);
+    assert.match(out.errors[0].parse_error, /record chain of this chunk broke: record length points past the chunk/);
+    assert.equal(out.errors[0].chunk_offset, 4096);
+    assert.match(out.errors[1].parse_error, /chunk enumeration failed after offset 69632/);
+    assert.ok(out.problems.some((p) => /could not be enumerated past offset 69632/.test(p)));
+    assert.equal(out.status, "partial");
+  });
+});
+
+test("evtx_query filters by event id, record range and a time prefix, and validates every argument before it opens an output file", async () => {
+  // The skill said events could be "filtered by id or by a time prefix", and the tool had no time filter; a `limit`
+  // of 0 was found only after the result file had been created.
+  await withCwd(async (cwd) => {
+    const spec: EvtxSpec = { chunks: [{ offset: 4096, records: [
+      goodRec(4608, 4624, 1, "2026-09-01 09:59:59.000000"),
+      goodRec(5000, 4624, 2, "2026-09-01 10:00:00.500000"),
+      goodRec(5400, 4672, 3, "2026-09-01 10:05:00.000000"),
+      goodRec(5800, 4624, 4, "2026-09-02 08:00:00.000000"),
+    ] }] };
+    const day = body<EvtxQueryOut>(await evtxCase(cwd, spec, { start_time: "2026-09-01", end_time: "2026-09-01" }));
+    assert.deepEqual(day.events.map((e) => e.record_id), [1, 2, 3], "a date is a prefix: the whole of 2026-09-01");
+    const window = body<EvtxQueryOut>(await evtxCase(cwd, spec, { start_time: "2026-09-01T10:00", end_time: "2026-09-01T10:00", event_ids: [4624] }));
+    assert.deepEqual(window.events.map((e) => e.record_id), [2]);
+    const range = body<EvtxQueryOut>(await evtxCase(cwd, spec, { start_record: 3, end_record: 4 }));
+    assert.deepEqual(range.events.map((e) => e.record_id), [3, 4]);
+    assert.equal(range.records_examined, 4, "records outside the filters are still examined, and counted");
+    const bad = failed(await evtxCase(cwd, spec, { limit: 0, out_file: "work/s1/never.jsonl" }));
+    assert.match(bad.error, /limit must be a whole number of at least 1/);
+    assert.equal(await exists(join(cwd, "work", "s1", "never.jsonl")), false, "no output file was made for a refused call");
+    assert.match(failed(await evtxCase(cwd, spec, { event_ids: ["4624"] })).error, /event_ids must be a list of whole numbers/);
+  });
+});
+
+test("evtx_query says a file it cannot open is an error, not a traceback", async () => {
+  await withCwd(async (cwd) => {
+    const env = await stubModule(cwd, { "Evtx/__init__.py": "", "Evtx/Evtx.py": EVTX_QUERY_STUB });
+    await writeFile(join(cwd, "work", "junk.evtx"), "this is not an event log");
+    const err = failed(await tool("evtx_query", cwd, { path: "work/junk.evtx" }, env));
+    assert.match(err.error, /could not open the event log/);
+  });
+});
+
+// --- evtx_carve -----------------------------------------------------------------
+
+// python-evtx's ChunkHeader as evtx_carve calls it: ChunkHeader(buffer, 0), .verify(), .records() yielding records with
+// .offset() and .xml(). A chunk here is the magic, then a first record number (u32 at 8) and a count (u32 at 12); a
+// "chunk" whose first number is 0 is not one (the constructor refuses it, as python-evtx does a chunk it cannot read).
+// The record's template, from the byte at 16, picks the XML: 1 holds two <Data Name="Path"> elements.
+const CARVE_STUB = String.raw`
+import struct
+
+
+class _Record:
+    def __init__(self, number, offset, variant):
+        self._number, self._offset, self._variant = number, offset, variant
+
+    def offset(self):
+        return self._offset
+
+    def xml(self):
+        data = '<Data Name="Path">C:\\first.exe</Data><Data Name="Path">C:\\second.exe</Data><Data Name="User">svc</Data>' if self._variant == 1 else '<Data Name="n">%d</Data>' % self._number
+        return ('<Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event"><System>'
+                '<Provider Name="Stub"/><EventID>4688</EventID><EventRecordID>%d</EventRecordID>'
+                '<Channel>Security</Channel><Computer>HOST</Computer></System>'
+                '<EventData>%s</EventData></Event>' % (self._number, data))
+
+
+class ChunkHeader:
+    def __init__(self, buf, offset):
+        self._first, self._count = struct.unpack_from("<II", buf, offset + 8)
+        self._variant = buf[offset + 16]
+        if self._first == 0:
+            raise ValueError("bad chunk header")
+
+    def verify(self):
+        return True
+
+    def records(self):
+        for i in range(self._count):
+            yield _Record(self._first + i, 0x200 + i * 0x100, self._variant)
+`;
+
+type CarveOut = {
+  status: string;
+  records: Array<{ record_id: number; chunk_offset: number; data?: Record<string, string | string[]>; xml?: string }>;
+  record_count: number;
+  candidates: number;
+  chunks_parsed: number;
+  sweep_complete: boolean;
+  resume_start: number | null;
+  range_requested: { start: number; end: number; file_bytes: number };
+  range_examined: { start: number; end: number };
+  problems: Array<{ offset: number; why: string }>;
+  problem_count: number;
+  all_problems?: string;
+  all_results?: string;
+};
+
+function carveChunk(buf: Buffer, at: number, first: number, count: number, variant = 0): void {
+  buf.write("ElfChnk\u0000", at, "latin1");
+  buf.writeUInt32LE(first, at + 8);
+  buf.writeUInt32LE(count, at + 12);
+  buf[at + 16] = variant;
+}
+
+test("evtx_carve keeps a repeated EventData name as a list and the whole XML in the result file even when the result is small", async () => {
+  // `data[name] = ...` overwrote the first of two <Data Name="Path"> elements, and the XML was in the file only when
+  // with_xml was set or the result overflowed the page.
+  await withCwd(async (cwd) => {
+    const env = await stubModule(cwd, { "Evtx/__init__.py": "", "Evtx/Evtx.py": CARVE_STUB });
+    const blob = Buffer.alloc(70000, 0x2e);
+    carveChunk(blob, 100, 1, 2, 1);
+    await writeFile(join(cwd, "work", "blob.bin"), blob);
+    const out = body<CarveOut>(await tool("evtx_carve", cwd, { path: "work/blob.bin" }, env));
+    assert.equal(out.record_count, 2);
+    assert.deepEqual(out.records[0].data, { Path: ["C:\\first.exe", "C:\\second.exe"], User: "svc" });
+    assert.equal(out.records[0].xml, undefined, "the inline summary has no XML unless asked");
+    assert.ok(out.all_results, "the whole result is in a file even though it fits the page");
+    const rows = (await readFile(join(cwd, out.all_results as string), "utf8")).trimEnd().split("\n").map((l) => JSON.parse(l) as { xml: string; record_id: number });
+    assert.equal(rows.length, 2);
+    assert.ok(rows[0].xml.includes("C:\\first.exe") && rows[0].xml.includes("C:\\second.exe"));
+    const withXml = body<CarveOut>(await tool("evtx_carve", cwd, { path: "work/blob.bin", with_xml: true }, env));
+    assert.ok(withXml.records[0].xml?.includes("C:\\second.exe"));
+  });
+});
+
+test("evtx_carve stops a sweep over thousands of false signatures at candidate_limit, names where to resume, and pages its problems", async () => {
+  // chunk_limit counted chunks that were built, so a blob of magic-shaped noise that never built one was swept
+  // whole, with no bound on the work and every refusal in one list.
+  await withCwd(async (cwd) => {
+    const env = await stubModule(cwd, { "Evtx/__init__.py": "", "Evtx/Evtx.py": CARVE_STUB });
+    const blob = Buffer.alloc(10_000 * 64);
+    for (let i = 0; i < 10_000; i++) blob.write("ElfChnk\u0000", i * 64, "latin1");
+    carveChunk(blob, 9990 * 64, 1, 1);   // a signature near the end is a real chunk
+    await writeFile(join(cwd, "work", "noise.bin"), blob);
+    const first = body<CarveOut>(await tool("evtx_carve", cwd, { path: "work/noise.bin", candidate_limit: 500 }, env));
+    assert.equal(first.candidates, 500);
+    assert.equal(first.sweep_complete, false);
+    assert.equal(first.resume_start, 500 * 64);
+    assert.equal(first.status, "partial");
+    assert.equal(first.problem_count, 500);
+    assert.equal(first.problems.length, 40, "problems are a page");
+    const spilled = (await readFile(join(cwd, first.all_problems as string), "utf8")).trimEnd().split("\n");
+    assert.equal(spilled.length, 500);
+    assert.deepEqual(first.range_examined, { start: 0, end: 500 * 64 });
+    assert.equal(first.range_requested.end, 10_000 * 64);
+    // Carrying on from resume_start reads the rest, and the real chunk at the end is found.
+    const rest = body<CarveOut>(await tool("evtx_carve", cwd, { path: "work/noise.bin", start: first.resume_start as number, candidate_limit: 20000 }, env));
+    assert.equal(rest.sweep_complete, true);
+    assert.equal(rest.record_count, 1);
+  });
+});
+
+test("evtx_carve refuses a negative or empty range and a start past the file, and says the range it was asked to sweep", async () => {
+  await withCwd(async (cwd) => {
+    const env = await stubModule(cwd, { "Evtx/__init__.py": "", "Evtx/Evtx.py": CARVE_STUB });
+    await writeFile(join(cwd, "work", "blob.bin"), Buffer.alloc(5000, 0x2e));
+    assert.match(failed(await tool("evtx_carve", cwd, { path: "work/blob.bin", start: -5 }, env)).error, /start must be a whole number of at least 0/);
+    assert.match(failed(await tool("evtx_carve", cwd, { path: "work/blob.bin", max_bytes: 0 }, env)).error, /max_bytes must be a whole number of at least 1/);
+    assert.match(failed(await tool("evtx_carve", cwd, { path: "work/blob.bin", limit: 0 }, env)).error, /limit must be a whole number of at least 1/);
+    assert.match(failed(await tool("evtx_carve", cwd, { path: "work/blob.bin", start: 6000 }, env)).error, /start is past the end of the file/);
+    const part = body<CarveOut>(await tool("evtx_carve", cwd, { path: "work/blob.bin", start: 1000, max_bytes: 2000 }, env));
+    assert.deepEqual(part.range_requested, { start: 1000, end: 3000, file_bytes: 5000 });
+    assert.deepEqual(part.range_examined, { start: 1000, end: 3000 });
+  });
+});
