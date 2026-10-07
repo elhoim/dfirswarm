@@ -1,19 +1,19 @@
 {
   "name": "cloudtrail_parse",
-  "description": "Read AWS CloudTrail records offline (a file, a directory, gzip batches: Records files, arrays, single events, JSON Lines, lookup-events pages) one record at a time, and normalise each event with its identity, request, response and additional event data (access key id, source identity, shared event id, MFAUsed kept). `status` and `status_basis` say whether every record of every supplied file was read: a malformed line, a record that is not an event, a file that is not CloudTrail, a gzip that ends early, a next-page marker and files not reached before the time limit are counted, located (file, record, line) and listed; complete says nothing about what the account logged, and a digest file is named (digest_files) and read as no events. `session_origin` links an AssumedRole session to the successful AssumeRole-family calls in the records that could have issued it (the returned access key id, else the returned or request-derived session ARN, narrowed by creationDate): a candidate with its basis, unresolved when several match, not_found when none does; never attribution to a person, and a failed call is never a source. Error codes are classified by name (a heuristic); only authorisation denials are refusals. NOT measured: what a trail recorded (a missing data event is not evidence nothing was read), digest-chain or log-file integrity (no validation is performed), whether a call took effect. SENSITIVE: a field named or shaped like a credential is withheld from every channel and its original written only with write_values, in a job, to a mode 0600 file under $OUT; other secrets are not recognised, so run it as a job with secret_output: true when requests may hold secrets. An out_file is never replaced by a smaller result: the earlier file is kept, the new one named beside it.",
+  "description": "Read AWS CloudTrail records offline (a file, a directory, gzip batches: Records files, arrays, single events, JSON Lines, lookup-events pages) one record at a time, and normalise each event with its identity, request, response and additional event data (access key id, source identity, shared event id, MFAUsed, eventVersion, requestID, addendum, tlsDetails and any other top-level key kept). `status` and `status_basis` say whether every record of every supplied file was read: a malformed line, a record that is not an event, a file that is not CloudTrail, a gzip that ends early (every record before the break is kept), an archive (.zip, tar: named, not read, so the read is partial), a next-page marker and files not reached before the time limit are counted, located (file, record, line) and listed; complete says nothing about what the account logged, and a digest file is named (digest_files) and read as no events. `session_origin` links an AssumedRole session to the successful AssumeRole-family calls in the records that could have issued it (the returned access key id, else the returned or request-derived session ARN; a call that returned a different access key id is disproved, and the session's creationDate narrows to calls within 5 seconds): a candidate with its basis, unresolved when several distinct calls match (listed up to a cap, with their count), not_found when none does; copies of one call (one eventID, or one sharedEventID with the same key or ARN, as in two exports or two accounts) count as one; never attribution to a person, and a failed call is never a source. Error codes are classified by name (a heuristic: authorisation_denied, authentication, throttling, validation, not_found, service); only authorisation denials are refusals. `identity` and `events` are matched against the text as it is printed, never against a withheld original; `identity` is a regex of at most 200 characters, a pattern that can take exponential time is refused, and one test of it that takes more than a quarter of a second fails the call, named. An argument the tool does not have is refused. NOT measured: what a trail recorded (a missing data event is not evidence nothing was read), digest-chain or log-file integrity (no validation is performed), whether a call took effect. SENSITIVE: a field named or shaped like a credential is withheld from every channel and its original written only with write_values, in a job, to a mode 0600 file under $OUT; other secrets are not recognised, so run it as a job with secret_output: true when requests may hold secrets. An out_file is never replaced by a smaller result: the earlier file is kept, the new one named beside it; a read that ended early publishes it as <name>.partial<ext>, and SIGTERM leaves no temporary file.",
   "params": {
     "path": {
       "type": "string",
-      "description": "A CloudTrail file or a directory of them (.json, .json.gz, .gz, .jsonl, .ndjson; the shape is read from the content)",
+      "description": "A CloudTrail file or a directory of them (.json, .json.gz, .gz, .jsonl, .ndjson; the shape is read from the content; an archive is named and not read)",
       "required": true
     },
     "events": {
       "type": "array",
-      "description": "Keep only these eventName values"
+      "description": "Keep only these eventName values (exact, as printed)"
     },
     "identity": {
       "type": "string",
-      "description": "Case-insensitive regex over the identity ARN or user name"
+      "description": "Case-insensitive regex (at most 200 characters) over the identity ARN or user name as printed; a pattern that can take exponential time is refused"
     },
     "errors_only": {
       "type": "boolean",
@@ -58,8 +58,8 @@
   "example": "{\"path\": \"inputs/cloudtrail\", \"notable_only\": true}",
   "by": "maintainer",
   "at": "2026-10-07T12:00:00.000Z",
-  "version": 3,
-  "sha256": "0814a6c7a391ea1003157a8924afaac8645f8498985feb02eca29b47cd7d2ea7",
+  "version": 4,
+  "sha256": "772221051eb80751b1e8d4970f9f3bdd8e921c65af40b8726f65f11985104ef7",
   "use": {
     "names": [
       "*cloudtrail*",

@@ -70,7 +70,8 @@ test("two successful calls that could have issued a session are named and none i
     const ambiguous = await run(cwd, { "a.json": trail(goodAssume(), second, noKey()) });
     const link = origin(ambiguous, "act-1");
     assert.equal(link.label, "unresolved");
-    assert.deepEqual([...link.candidate_event_ids].sort(), ["good-1", "good-2"]);
+    assert.deepEqual(link.candidates.map((c: Json) => c.source_event_id).sort(), ["good-1", "good-2"]);
+    assert.equal(link.candidate_count, 2);
     assert.equal("source_event_id" in link, false, "none is chosen");
     // creationDate 09:30:02 is within five seconds of the second call only.
     const narrowed = await run(cwd, { "a.json": trail(goodAssume(), second, noKey("2026-02-14T09:30:02Z")) });
@@ -78,9 +79,11 @@ test("two successful calls that could have issued a session are named and none i
     assert.equal(one.label, "candidate");
     assert.equal(one.source_event_id, "good-2");
     assert.equal(one.basis, "session_arn_returned_by_the_call_and_session_creationDate");
-    // A creationDate that matches none of them is unresolved, not the nearest.
+    // A creationDate that matches none of them is not_found (the calls outside the window are listed), never the nearest.
     const none = await run(cwd, { "a.json": trail(goodAssume(), second, noKey("2026-02-14T09:15:00Z")) });
-    assert.equal(origin(none, "act-1").label, "unresolved");
+    assert.equal(origin(none, "act-1").label, "not_found");
+    assert.match(origin(none, "act-1").reason, /none was logged within 5 seconds/);
+    assert.deepEqual(origin(none, "act-1").calls_outside_the_window.sort(), ["good-1", "good-2"]);
   });
 });
 
@@ -211,7 +214,7 @@ test("a Records file read as a stream gives every record its file, record number
     assert.deepEqual(out.records.map((r: Json) => [r.event_id, r.record, r.line]), [["s-1", 1, 3], ["s-2", 2, 4], ["s-3", 3, 5]]);
     assert.equal(out.records[2].time, "2026-02-14T09:00:00.1234567Z");
     assert.equal(out.records[2].time_utc, "2026-02-14T09:00:00.1234567Z", "the fractions are kept");
-    assert.equal(out.records[0].parser, "cloudtrail_parse/3");
+    assert.equal(out.records[0].parser, "cloudtrail_parse/4");
     assert.equal(out.first_event, "2026-02-14T09:00:00.1234567Z");
     assert.equal(out.last_event, "2026-02-14T09:00:02Z");
   });
@@ -250,7 +253,7 @@ test("an error code is classified by its name: only authorisation denials are re
         ct({ eventID: "login-fail", eventSource: "signin.amazonaws.com", eventName: "ConsoleLogin", userIdentity: { ...ALICE, arn: "arn:aws:iam::1:user/denied" }, responseElements: { ConsoleLogin: "Failure" }, errorMessage: "Failed authentication" }),
       ),
     });
-    assert.deepEqual(out.error_classes, { authorisation_denied: 1, throttling: 1, validation: 1, service: 1, none: 1 });
+    assert.deepEqual(out.error_classes, { authorisation_denied: 1, throttling: 1, validation: 1, service: 1, authentication: 1 });
     assert.deepEqual(out.refusals_by_identity.map((r: Json) => [r.identity, r.total]), [["arn:aws:iam::1:user/denied", 1]]);
     const busy = out.errors_by_identity.find((e: Json) => e.identity === "arn:aws:iam::1:user/busy");
     assert.deepEqual(busy.classes, { throttling: 1 });
@@ -535,7 +538,7 @@ test("the time limit ends the read, keeps what was read, and names the files tha
     assert.equal(out.session_links.index_complete, false, "the session index stopped at its share of the time and says so");
     const census = await rowsOf(cwd, out, "file_census");
     assert.equal(census[0].status, "partial");
-    assert.match(census[0].problems.join(" "), /the time limit ended the read inside this file/);
+    assert.match(census[0].problems.join(" "), /the time limit ended the read/);
   });
 });
 

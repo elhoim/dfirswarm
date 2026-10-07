@@ -56,12 +56,12 @@ const portalCsv = (...rows: string[][]): string => [csvLine(PORTAL), ...rows.map
 
 test("a status that is neither a success nor a failure is an unknown outcome, not a failure", async () => {
   await withDir(async (cwd) => {
-    const csv = portalCsv(portalRow(1, "2026-02-14T09:00:00Z", "Success", "0"), portalRow(2, "2026-02-14T09:01:00Z", "Interrupted", ""), portalRow(3, "2026-02-14T09:02:00Z", "Failure", "50126"));
+    const csv = portalCsv(portalRow(1, "2026-02-14T09:00:00Z", "Success", "0"), portalRow(2, "2026-02-14T09:01:00Z", "Pending", ""), portalRow(3, "2026-02-14T09:02:00Z", "Failure", "50126"));
     const out = await run(cwd, "s.csv", csv);
     assert.deepEqual(out.events.map((e: Json) => e.success), [true, null, false], "success is present and null for the unknown one");
     assert.deepEqual([out.successes, out.failures, out.unknown_outcome], [1, 1, 1]);
     const unknown = out.events[1];
-    assert.equal(unknown.result_code, "Interrupted");
+    assert.equal(unknown.result_code, "Pending");
     assert.match(unknown.outcome_basis, /neither a success nor a failure value/);
   });
 });
@@ -74,7 +74,8 @@ test("a result code is glossed by the tool and the provider's own words are kept
     assert.equal(e.additional_details, "details as written");
     assert.equal(e.result, "external security challenge");
     assert.doesNotMatch(JSON.stringify(out), /conditional access failed/i);
-    assert.equal(e.success, false);
+    assert.equal(e.success, null, "50158 is a prompt of a flow, not the end of one");
+    assert.equal(e.outcome_class, "interrupt");
   });
 });
 
@@ -188,13 +189,13 @@ test("three failures thirty days before a success are not a burst; three within 
     assert.deepEqual(dflt.failure_bursts_before_success, [], "the default window is an hour");
 
     const close = graph(
-      signIn(1, "2026-02-14T09:00:00Z", 50126, { ipAddress: "192.0.2.10" }), signIn(2, "2026-02-14T09:01:00Z", 50076, { ipAddress: "192.0.2.10" }), signIn(3, "2026-02-14T09:02:00Z", 50126, { ipAddress: "192.0.2.10" }),
+      signIn(1, "2026-02-14T09:00:00Z", 50126, { ipAddress: "192.0.2.10" }), signIn(2, "2026-02-14T09:01:00Z", 50053, { ipAddress: "192.0.2.10" }), signIn(3, "2026-02-14T09:02:00Z", 50126, { ipAddress: "192.0.2.10" }),
       signIn(4, "2026-02-14T09:03:00Z", 0, { ipAddress: "203.0.113.5" }),
     );
     const burst = await run(cwd, "close.json", close);
     assert.equal(burst.failure_bursts_before_success.length, 1);
     const b = burst.failure_bursts_before_success[0];
-    assert.deepEqual([b.failures_before, b.failure_result_codes, b.failure_addresses, b.success_address_among_failure_addresses], [3, { 50126: 2, 50076: 1 }, { "192.0.2.10": 3 }, false]);
+    assert.deepEqual([b.failures_before, b.failure_result_codes, b.failure_addresses, b.success_address_among_failure_addresses], [3, { 50126: 2, 50053: 1 }, { "192.0.2.10": 3 }, false]);
     assert.equal(b.success.event_id, "signin-4");
     assert.deepEqual(b.failure_events.map((f: Json) => f.event_id), ["signin-1", "signin-2", "signin-3"]);
   });
@@ -227,7 +228,7 @@ test("every field a lead depends on is kept: ids, correlation id, authentication
     assert.deepEqual([e.token_issuer_type, e.unique_token_identifier], ["AzureAD", "abcDEF123_uniq"]);
     assert.equal(e.device_detail.operatingSystem, "Windows 11");
     assert.equal(e.raw_record.id, "signin-1");
-    assert.deepEqual([e.record, e.line, e.event_index ?? null, e.parser], [1, 1, null, "signin_analyse/3"]);
+    assert.deepEqual([e.record, e.line, e.event_index ?? null, e.parser], [1, 1, null, "signin_analyse/4"]);
     assert.equal(e.source_file.endsWith("s.json"), true);
     assert.equal(out.single_factor_successes.length, 1);
     assert.equal(out.single_factor_successes[0].event_id, "signin-1");
@@ -249,7 +250,7 @@ test("impossible travel carries the speed and the two events, and a record with 
   await withDir(async (cwd) => {
     const geo = (lat: number, lon: number, country: string): Json => ({ location: { city: "x", countryOrRegion: country, geoCoordinates: { latitude: lat, longitude: lon } } });
     const rows = [signIn(1, "2026-02-14T09:00:00Z", 0, geo(41.0, 29.0, "TR")), signIn(2, "2026-02-14T09:20:00Z", 0, { ...geo(52.5, 13.4, "DE"), ipAddress: "192.0.2.9" }),
-      signIn(3, "2026-02-14T09:10:00Z", 0, { userPrincipalName: null, ...geo(0, 0, "XX") }), signIn(4, "2026-02-14T09:11:00Z", 0, { userPrincipalName: null, ...geo(60, 60, "RU") })];
+      signIn(3, "2026-02-14T09:10:00Z", 0, { userPrincipalName: null, userId: null, ...geo(0, 0, "XX") }), signIn(4, "2026-02-14T09:11:00Z", 0, { userPrincipalName: null, userId: null, ...geo(60, 60, "RU") })];
     const out = await run(cwd, "t.json", graph(...rows));
     assert.equal(out.impossible_travel.length, 1);
     const t = out.impossible_travel[0];
@@ -264,7 +265,7 @@ test("impossible travel carries the speed and the two events, and a record with 
 
 test("a large export is analysed from a database on disk and every event is kept", async () => {
   await withDir(async (cwd) => {
-    const rows = Array.from({ length: 30000 }, (_, i) => signIn(i, new Date(Date.UTC(2026, 1, 14, 0, 0, i % 86000)).toISOString().replace(".000Z", "Z"), i % 7 === 0 ? 50126 : 0, { userPrincipalName: `user${i % 40}@example.org`, ipAddress: `198.51.100.${i % 200}` }));
+    const rows = Array.from({ length: 30000 }, (_, i) => signIn(i, new Date(Date.UTC(2026, 1, 14, 0, 0, i % 86000)).toISOString().replace(".000Z", "Z"), i % 7 === 0 ? 50126 : 0, { userPrincipalName: `user${i % 40}@example.org`, userId: `guid-${i % 40}`, ipAddress: `198.51.100.${i % 200}` }));
     const out = await run(cwd, "many.json", graph(...rows), { limit: 20 });
     assert.equal(out.event_count, 30000);
     assert.equal(out.accounts, 40);
