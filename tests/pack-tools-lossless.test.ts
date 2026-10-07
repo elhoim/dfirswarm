@@ -1119,15 +1119,19 @@ test("evtx_query answers a malformed record chain with an error row and keeps th
   }
   await withCwd(async (cwd) => {
     await build(EVTX_BUILDER, join(cwd, "work", "broken.evtx"));
-    const out = body<{ count: number; events: { parse_error?: string; chunk_offset?: number; record_offset?: number }[] }>(
+    const out = body<{ status: string; count: number; parse_errors: number; events: unknown[]; errors: { parse_error?: string; chunk_offset?: number; record_offset?: number }[] }>(
       await tool(join(LIB, "evtx_query", "run.py"), cwd, { path: "work/broken.evtx" }),
     );
-    assert.equal(out.count, 3);
-    assert.equal(out.events.length, 3);
-    assert.ok(out.events.every((e) => e.parse_error), JSON.stringify(out.events));
-    assert.deepEqual(out.events.map((e) => e.record_offset ?? null), [4096 + 0x200, 4096 + 65536 + 0x200, null]);
-    assert.equal(out.events[2].chunk_offset, 4096 + 65536);
-    assert.match(out.events[2].parse_error ?? "", /record chain of this chunk broke/);
+    // The fixed tool keeps a record it could not read apart from the events that matched: an error row, never a match.
+    assert.equal(out.count, 0);
+    assert.equal(out.events.length, 0);
+    assert.equal(out.parse_errors, 3);
+    assert.equal(out.status, "partial");
+    assert.equal(out.errors.length, 3);
+    assert.ok(out.errors.every((e) => e.parse_error), JSON.stringify(out.errors));
+    assert.deepEqual(out.errors.map((e) => e.record_offset ?? null), [4096 + 0x200, 4096 + 65536 + 0x200, null]);
+    assert.equal(out.errors[2].chunk_offset, 4096 + 65536);
+    assert.match(out.errors[2].parse_error ?? "", /record chain of this chunk broke/);
   });
 });
 
