@@ -16,7 +16,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { chmod, mkdir, readFile, readdir, stat, symlink, utimes, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
-import { withCwd } from "./tool-library-harness.ts";
+import { runPySnippet, withCwd } from "./tool-library-harness.ts";
 import { EIO_SITE, NOTES, allRows, body, exists, filesUnder, refused, tool } from "./ransomware-pack-harness.ts";
 import type { Page } from "./ransomware-pack-harness.ts";
 
@@ -490,6 +490,53 @@ test("ransom_note_scan does not decode a binary file as text and says so", async
     assert.deepEqual(byName["readme_dropper.exe.txt"].indicator_counts, {});
     assert.equal(byName["README.html"].format_hint, "html");
     assert.equal(byName["README.html"].indicator_counts.onion, 1);
+  });
+});
+
+test("ransom_note_scan goes on over a note that holds a byte that is not UTF-8, and keeps the bytes' offsets", async () => {
+  // A stray byte in a URL: a lone surrogate cannot be written to a UTF-8 file as it is.
+  await withCwd(async (cwd) => {
+    const dir = join(cwd, "work", "ev");
+    await mkdir(dir, { recursive: true });
+    const note = Buffer.concat([Buffer.from("decrypt your files\nportal http://exa"), Buffer.from([0xff]), Buffer.from(`mple.example/chat?k=${ACCESS_KEY}\nPay ${BTC_LEGACY}\n`)]);
+    await writeFile(join(dir, "readme_stray.txt"), note);
+    const outDir = join(cwd, "out");
+    await mkdir(outDir);
+    const out = await tool(NOTES, cwd, { root: "work/ev", limit: 1, write_values: true }, { JOB_ID: "j000004", OUT: outDir });
+    const scan = body<NoteScan>(out);
+    assert.equal(scan.candidate_count, 1);
+    assert.equal(scan.notes[0].decode_errors, 1, "one byte that is not UTF-8");
+    const rows = (await readFile(join(outDir, "ransom-note-values.jsonl"), "utf8")).trimEnd().split("\n").map((l) => JSON.parse(l) as { kind: string; offset: number; value: string });
+    const url = rows.find((r) => r.kind === "url");
+    assert.ok(url);
+    assert.equal(url.offset, note.indexOf("http://exa"));
+    const btc = rows.find((r) => r.kind === "bitcoin");
+    assert.equal(btc?.value, BTC_LEGACY);
+    assert.equal(btc?.offset, note.indexOf(BTC_LEGACY), "an offset past the invalid byte is still a byte offset");
+    assert.doesNotMatch(out.stdout, new RegExp(ACCESS_KEY));
+  });
+});
+
+test("ransom_note_scan's pager and values file take a path with a lone surrogate, as a file name that is not UTF-8 gives", async () => {
+  // A name from an old system reaches Python as lone surrogates (APFS refuses to create one, so the
+  // components are driven directly): written as UTF-8 they raise, written as JSON escapes they do not.
+  await withCwd(async (cwd) => {
+    const probe = await runPySnippet(
+      `import importlib.util, json, os, sys
+spec = importlib.util.spec_from_file_location("scan", sys.argv[1])
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+os.environ["AGENT_ID"] = "s1"
+page = m.LosslessPage("t", ["k"], 1)
+for i in range(3):
+    page.add({"path": "dir/readme_\udcff\udcfe_%d.txt" % i})
+done = page.finish()
+rows = [json.loads(l) for l in open(done["all_results"], encoding="utf-8")]
+print(json.dumps([done["matched"], len(rows), rows[2]["path"] == "dir/readme_\udcff\udcfe_2.txt"]))`,
+      [NOTES],
+      null,
+    );
+    assert.equal(probe.code, 0, probe.stderr);
+    assert.deepEqual(JSON.parse(probe.stdout), [3, 3, true]);
   });
 });
 

@@ -366,6 +366,32 @@ test("encrypted_survey lists the files whose name looks like a note, as names, a
   });
 });
 
+test("encrypted_survey's census and pager take a path with a lone surrogate, as a file name that is not UTF-8 gives", async () => {
+  // A name from an old system reaches Python as lone surrogates (APFS refuses to create one, so the
+  // components are driven directly): written as UTF-8 they raise, written as JSON escapes they do not.
+  await withCwd(async (cwd) => {
+    const probe = await runPySnippet(
+      `import importlib.util, json, os, sys
+spec = importlib.util.spec_from_file_location("survey", sys.argv[1])
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+os.environ["AGENT_ID"] = "s1"
+census = m.Census(["k", "census"])
+census.add({"record": "file", "file": "dir/budget_\udcff\udcfe.xlsx.locked"})
+census.finish({"complete": "complete"})
+rows = [json.loads(l) for l in open(census.shown, encoding="utf-8")]
+page = m.LosslessPage("t", ["k"], 1)
+for i in range(2):
+    page.add({"file": "dir/b_\udcff_%d" % i})
+done = page.finish()
+print(json.dumps([len(rows), rows[0]["file"] == "dir/budget_\udcff\udcfe.xlsx.locked", rows[1]["record"], done["matched"]]))`,
+      [SURVEY],
+      null,
+    );
+    assert.equal(probe.code, 0, probe.stderr);
+    assert.deepEqual(JSON.parse(probe.stdout), [2, true, "receipt", 2]);
+  });
+});
+
 test("a permissions refusal is a read failure too, where the user is not root", async (t) => {
   if (process.getuid?.() === 0) return t.skip("root reads a mode-000 file; the read failure is covered by the EIO case");
   await withCwd(async (cwd) => {

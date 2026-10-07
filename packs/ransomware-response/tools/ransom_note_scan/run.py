@@ -72,6 +72,8 @@ NAME_VALUES_CAP = 5000
 # agent reads stays small, and when there are more rows the whole result is
 # written as JSON Lines under work/<agent>/tool-output (in a job, $OUT/tool-output)
 # and named. The file name is a digest of the page's key (a path), never of a value.
+# Rows are written with ensure_ascii: a file name that is not UTF-8 reaches Python as lone
+# surrogates, which a UTF-8 file cannot hold and a JSON escape can.
 class LosslessPage:
     def __init__(self, tool: str, key: object, limit: int):
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
@@ -101,7 +103,7 @@ class LosslessPage:
 
     def _write(self, row: object) -> None:
         assert self._out is not None
-        self._out.write(json.dumps(row, ensure_ascii=False, default=str))
+        self._out.write(json.dumps(row, ensure_ascii=True, default=str))
         self._out.write("\n")
 
     def add(self, row: object) -> None:
@@ -186,7 +188,7 @@ class SecretValues:
     def add(self, finding_id: str, locator: dict, value: str) -> None:
         if not self.enabled:
             return
-        self._fh.write(json.dumps({"finding_id": finding_id, **locator, "value": value}, ensure_ascii=False))
+        self._fh.write(json.dumps({"finding_id": finding_id, **locator, "value": value}, ensure_ascii=True))
         self._fh.write("\n")
         self.written += 1
 
