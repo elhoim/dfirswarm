@@ -41,6 +41,7 @@ import base64
 import datetime
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -167,10 +168,13 @@ def quote(name):
 
 
 def cell(value):
-    """A SQLite value as JSON: a BLOB as base64 (up to BLOB_MAX bytes, with its whole length), text as it is."""
+    """A SQLite value as JSON: a BLOB as base64 (up to BLOB_MAX bytes, with its whole length), an infinite
+    REAL as its name (JSON has none), text as it is."""
     if isinstance(value, (bytes, bytearray)):
         head = bytes(value[:BLOB_MAX])
         return {"_blob_bytes": len(value), "_base64": base64.b64encode(head).decode("ascii"), "_truncated": len(value) > len(head)}
+    if isinstance(value, float) and not math.isfinite(value):
+        return {"_float": repr(value)}
     return value
 
 
@@ -367,7 +371,8 @@ def main():
             o = {n[2:]: v for n, v in row.items() if n.startswith("o|")}
             start_raw, end_raw, created_raw = o.get("ZSTARTDATE"), o.get("ZENDDATE"), o.get("ZCREATIONDATE")
             duration = None
-            if isinstance(start_raw, (int, float)) and isinstance(end_raw, (int, float)):
+            if (isinstance(start_raw, (int, float)) and isinstance(end_raw, (int, float))
+                    and math.isfinite(start_raw) and math.isfinite(end_raw)):
                 duration = round(float(end_raw) - float(start_raw), 3)
             for r in (start_raw, end_raw, created_raw):
                 if r is not None and when(r) is None:
@@ -377,7 +382,7 @@ def main():
                 "parser": PARSER, "source_table": "ZOBJECT", "z_pk": o.get("Z_PK"), "stream": o.get("ZSTREAMNAME"),
                 "value_string": cell(o.get("ZVALUESTRING")), "value_integer": cell(o.get("ZVALUEINTEGER")),
                 "value_double": cell(o.get("ZVALUEDOUBLE")), "value_type_code": cell(o.get("ZVALUETYPECODE")),
-                "start_raw": start_raw, "end_raw": end_raw, "created_raw": created_raw,
+                "start_raw": cell(start_raw), "end_raw": cell(end_raw), "created_raw": cell(created_raw),
                 "start": when(start_raw), "end": when(end_raw), "created": when(created_raw),
                 "duration_seconds": duration, "utc_offset_seconds": o.get("ZSECONDSFROMGMT"),
                 "uuid": uuid.hex() if isinstance(uuid, (bytes, bytearray)) else uuid,
@@ -401,7 +406,7 @@ def main():
         start_col = "ZSTARTDATE" if "ZSTARTDATE" in columns else "NULL"
         for name, n, first, last in connection.execute(
                 "SELECT ZSTREAMNAME, COUNT(*), MIN(%s), MAX(%s) FROM ZOBJECT GROUP BY 1 ORDER BY 2 DESC, 1" % (start_col, start_col)):
-            streams.add({"stream": name, "count": n, "first_start_raw": first, "last_start_raw": last,
+            streams.add({"stream": name, "count": n, "first_start_raw": cell(first), "last_start_raw": cell(last),
                          "first_start": when(first), "last_start": when(last)})
         streams_page = streams.finish()
         connection.close()

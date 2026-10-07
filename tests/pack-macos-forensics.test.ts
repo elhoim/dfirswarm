@@ -957,6 +957,29 @@ c.commit()
   });
 });
 
+test("knowledgec_query keeps its answer valid JSON when a REAL is infinite", async () => {
+  await withCwd(async (cwd) => {
+    const db = join(cwd, "work", "inf.db");
+    await build(
+      `
+import sqlite3, sys
+c = sqlite3.connect(sys.argv[1])
+c.execute("CREATE TABLE ZOBJECT (Z_PK INTEGER PRIMARY KEY, ZSTREAMNAME VARCHAR, ZVALUEDOUBLE FLOAT, ZSTARTDATE TIMESTAMP, ZENDDATE TIMESTAMP)")
+c.execute("INSERT INTO ZOBJECT VALUES (1, '/s', 9e999, 700, 9e999)")
+c.commit()
+`,
+      db,
+    );
+    const out = await tool(KC, cwd, { db: "work/inf.db" });
+    assert.doesNotMatch(out.stdout, /\bInfinity\b/);
+    const answer = body<KcAnswer>(out);
+    assert.deepEqual(answer.entries[0].value_double, { _float: "inf" });
+    assert.equal(answer.entries[0].duration_seconds, null);
+    assert.equal(answer.entries[0].end, null);
+    assert.equal(answer.status, "partial", "a time that could not be converted is said");
+  });
+});
+
 test("knowledgec_query refuses a file that is not a knowledgeC database, and says what it found", async () => {
   await withCwd(async (cwd) => {
     await writeFile(join(cwd, "work", "text.db"), "not a database at all, just text\n");
@@ -1145,6 +1168,15 @@ test("unified_log refuses a link in the tree it would stage, and names it", asyn
     assert.match(String(err.link), /uuidtext\/escape$/);
     assert.equal(await exists(join(cwd, "work", "u5", ".logarchive-input")), false, "the staging was removed");
     assert.equal(await exists(join(cwd, "work", "u5", "unifiedlogs.jsonl")), false, "the reader did not run");
+    // A link as the root of one of the two trees is refused too.
+    const linked = await dbCopy(cwd);
+    const { rm } = await import("node:fs/promises");
+    await rm(join(cwd, "work", "vardb", "uuidtext", "escape"));
+    await rm(join(cwd, "work", "vardb", "uuidtext"), { recursive: true });
+    await symlink("/etc", join(cwd, "work", "vardb", "uuidtext"));
+    const root = await ul(cwd, bin, { path: linked, out_dir: "work/u5b" });
+    assert.equal(root.code, 1);
+    assert.match((JSON.parse(root.stdout) as { error: string }).error, /itself a link/);
   });
 });
 

@@ -139,6 +139,9 @@ def stage(path, scratch, max_files, max_bytes):
     a special file or a member that is in both trees with different bytes. Nothing is cut: over a bound it refuses."""
     diagnostics = os.path.join(path, "diagnostics")
     uuidtext = os.path.join(path, "uuidtext")
+    for root in (diagnostics, uuidtext):
+        if os.path.islink(root):
+            fail("diagnostics or uuidtext is itself a link: the reader would be handed a way out of the tree, so nothing was staged", link=root)
     totals = {"files": 0, "bytes": 0}
     held = {}
     plan = []
