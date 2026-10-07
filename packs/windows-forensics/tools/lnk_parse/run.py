@@ -16,10 +16,10 @@ link points to.
 Args, JSON on stdin: path (or dump), offset, size, scan, each, max. A read that ends
 inside the structure says so under `problems` and `structure_complete`.
 """
-import json, sys, struct, datetime, os
+import json, sys, struct, datetime, os, stat
 from pathlib import Path
 
-PARSER = "lnk_parse/3"
+PARSER = "lnk_parse/4"
 MAX_READ = 256 * 1024 * 1024
 
 # Lossless paging (the same in every library tool that pages): the page an
@@ -139,26 +139,236 @@ def ft(raw):
         return None
 
 
-def u16z(data, off, maxlen=None):
-    """A NUL-terminated UTF-16 string, read to its NUL or to the end of data."""
-    end = len(data) if maxlen is None else min(len(data), off+maxlen)
-    i = off
-    out = []
-    while i+1 < end:
-        w = data[i] | (data[i+1]<<8)
-        i += 2
-        if w == 0:
-            break
-        if 32 <= w < 0xD800:
-            out.append(chr(w))
-        elif w < 32:
-            out.append(' ')
-        else:
-            try:
-                out.append(chr(w))
-            except Exception:
-                break
-    return ''.join(out), i
+class SecretValuesRefused(Exception):
+    pass
+
+
+def describe(exc):
+    if isinstance(exc, OSError):
+        return "%s: %s" % (type(exc).__name__, exc.strerror or exc)
+    return "%s: %s" % (type(exc).__name__, exc)
+
+
+class SecretValues:
+    """Where a value goes when, and only when, the caller asked for it.
+
+    The secret-safe output pattern of docs/packs.md ("Secrets and sensitive output"),
+    copied from its reference implementation (recovery_key_scan, encrypted-containers)
+    and parameterised by the tool, the flag and the file's name. Call `add` once per
+    finding with the finding's id, its locator and the value. With `enabled` false it
+    writes nothing and `summary()` says so.
+    """
+
+    def __init__(self, enabled, tool, flag, name):
+        self.enabled = enabled
+        self.tool = tool
+        self.flag = flag
+        self.name = name
+        self.written = 0
+        self._fh = None
+        self.job = os.environ.get("JOB_ID") or ""
+        self.out = os.environ.get("OUT") or ""
+        self.path = None
+        self.shown = None
+        if not enabled:
+            return
+        if not (self.job and self.out):
+            raise SecretValuesRefused(
+                "%s is refused outside a job: a value written here would be an ordinary "
+                "file, not a sealed secret output. Run this as job_run tool=%s with "
+                "secret_output: true, and ask again there. Nothing was written." % (flag, tool)
+            )
+        self.path = Path(self.out) / name
+        self.shown = "store/jobs/%s/out/%s" % (re.sub(r"[^A-Za-z0-9_.-]", "_", self.job), name)
+        # Created now, before anything is scanned: a file or a link already at that name is
+        # refused by name at once (O_EXCL does not follow a link, a dangling one included),
+        # instead of failing, or writing through it, after the scan. With nothing found it
+        # stays as an empty file, mode 0600, and the answer says written: 0.
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(str(self.path), os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        except FileExistsError:
+            raise SecretValuesRefused("the values file already exists: %s" % self.path)
+        except OSError as exc:
+            raise SecretValuesRefused("the values file could not be created: %s (%s)" % (self.path, describe(exc)))
+        self._fh = os.fdopen(fd, "w", encoding="utf-8")
+
+    def add(self, finding_id, locator, value):
+        if not self.enabled:
+            return
+        text = json.dumps({"finding_id": finding_id, **locator, "value": value}, ensure_ascii=False)
+        try:
+            text.encode("utf-8")
+        except UnicodeEncodeError:
+            text = json.dumps({"finding_id": finding_id, **locator, "value": value}, ensure_ascii=True)
+        self._fh.write(text)
+        self._fh.write("\n")
+        self.written += 1
+
+    def close(self):
+        if self._fh is not None:
+            self._fh.flush()
+            os.fsync(self._fh.fileno())
+            self._fh.close()
+            self._fh = None
+
+    def summary(self, format_note):
+        return {
+            "requested": self.enabled,
+            "written": self.written,
+            "values_file": self.shown if self.enabled else None,
+            "contains_secret_values": self.written > 0,
+            "format": format_note if self.enabled else None,
+        }
+
+
+# --- what a link can carry that the answer must not print ---------------------------------------------------
+#
+# A link carries free text a person or a program wrote: its arguments, a description, a working directory, a path. Any of
+# it can hold a secret (`-u admin --password Hunter2`, `https://user:pw@host/`, a token in a path). Arguments and the
+# string scan are never printed inline (only their length, whether there are any and, for the arguments, a first word that
+# can only be a switch name or a program). A path-like field is printed unless it has the shape of a secret, when a marker
+# holding only its length stands in its place. The values themselves go, when `write_strings` asks for them and only in a job,
+# to a 0600 file under $OUT, each under a finding id the answer cites.
+SECRET_SHAPES = re.compile(
+    r"(?i)(?:pass(?:word|wd|phrase)?|pwd|secret|token|api[-_]?key|access[-_]?key|client[-_]?secret|credential|private[-_]?key|bearer|authorization)s?\s*[=:]\s*\S"
+    r"|[a-z][a-z0-9+.-]*://[^/\s:@]+:[^/\s@]+@"
+    r"|\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"
+    r"|\bAKIA[0-9A-Z]{16}\b|\bgh[pousr]_[A-Za-z0-9]{20,}|\bxox[abprs]-[A-Za-z0-9-]{10,}"
+    r"|-----BEGIN [A-Z ]*PRIVATE KEY"
+    r"|(?:^|\s)--?(?:p|pw|pass|passw|password|passwd|pwd|token|secret|apikey|api-key)\s+\S"
+)
+SWITCH = re.compile(r"^[-/]{1,2}[A-Za-z][A-Za-z0-9_-]{0,31}$")
+PROGRAM_FILE = re.compile(r"^[A-Za-z0-9_.:\\ -]{1,80}\.(?:exe|com|bat|cmd|ps1|vbs|vbe|js|jse|wsf|hta|dll|msi|msc|cpl|scr|py|jar|lnk)$", re.I)
+PROGRAM_WORDS = {"cmd", "powershell", "pwsh", "wscript", "cscript", "mshta", "rundll32", "regsvr32", "msiexec", "explorer",
+                 "python", "perl", "node", "java", "bash", "sh", "wsl", "schtasks", "sc", "net", "reg", "start"}
+
+
+def withheld_marker(text):
+    return "[withheld: %d characters]" % len(text)
+
+
+class Held:
+    """What the answer withholds, and where it goes when the caller asked: one finding id each, in order. With the
+    values file off nothing is written, and the ids still say which locator is which."""
+
+    def __init__(self, values):
+        self.values = values
+        self.count = 0
+
+    def _next(self):
+        self.count += 1
+        return "L%06d" % self.count
+
+    def hold(self, locator, value):
+        finding = self._next()
+        self.values.add(finding, locator, value)
+        return finding
+
+    def hold_text(self, locator, pieces):
+        """A long text, written (when asked) in pieces, a surrogate pair never split; `pieces` is not iterated otherwise."""
+        finding = self._next()
+        if self.values.enabled:
+            previous, index = None, 0
+            for piece in pieces():
+                if previous is not None:
+                    self.values.add(finding, {**locator, "piece": index - 1, "continued_in_next": True}, previous)
+                previous, index = piece, index + 1
+            if previous is not None:
+                self.values.add(finding, {**locator, "piece": index - 1, "continued_in_next": False}, previous)
+        return finding
+
+
+def guard(held, sink, locator, text):
+    """A string of the link as the answer may show it: itself, or, when it has the shape of a secret, a marker."""
+    if isinstance(text, str) and SECRET_SHAPES.search(text):
+        finding = held.hold(locator, text)
+        sink.append({"field": locator["field"], "chars": len(text), "finding_id": finding})
+        return withheld_marker(text)
+    return text
+
+
+def guard_keys(held, sink, base_off, container, keys, prefix=""):
+    for key in keys:
+        if key in container:
+            container[key] = guard(held, sink, {"link_offset": base_off, "field": prefix + key}, container[key])
+
+
+def first_token(arguments):
+    """The first word of the arguments when it can only be a switch's name, a program or a script (the value of a
+    `--switch=value` is cut off), else None: any other first word may be the secret itself."""
+    text = arguments.strip()
+    if not text:
+        return None
+    if text[0] in "\"'":
+        end = text.find(text[0], 1)
+        token = text[1:end] if end > 0 else text[1:]
+    else:
+        token = text.split(None, 1)[0]
+    token = token.split("=", 1)[0]
+    if SECRET_SHAPES.search(token):
+        return None
+    if SWITCH.match(token) or PROGRAM_FILE.match(token) or token.lower() in PROGRAM_WORDS:
+        return token
+    return None
+
+
+# --- the UTF-16 string scan, a window at a time ---------------------------------------------------------------------
+UNIT_WINDOW = 1 << 20
+NONZERO_UNITS = re.compile(rb"[^\x00]+")
+MIN_STRING_UNITS = 6
+
+
+def utf16_runs(data, start):
+    """The runs of non-zero 16-bit units in data[start:], even-aligned to `start`, as (first unit, end unit). One
+    window of units is looked at at a time: a unit is non-zero when either of its two bytes is, found by one
+    OR over the two halves, so a file of zeros or of one repeated byte costs a pass, not a Python loop per unit."""
+    units = (len(data) - start) // 2
+    run = None
+    pos = 0
+    while pos < units:
+        take = min(UNIT_WINDOW, units - pos)
+        base = start + 2 * pos
+        low = data[base:base + 2 * take:2]
+        high = data[base + 1:base + 2 * take:2]
+        mask = (int.from_bytes(low, "little") | int.from_bytes(high, "little")).to_bytes(take, "little")
+        for m in NONZERO_UNITS.finditer(mask):
+            a, b = pos + m.start(), pos + m.end()
+            if run is not None and run[1] == a:
+                run = (run[0], b)
+            else:
+                if run is not None:
+                    yield run
+                run = (a, b)
+        pos += take
+    if run is not None:
+        yield run
+
+
+LETTER_CANDIDATE = re.compile(r"[^\W\d_]")
+
+
+def run_has_letter(data, start, a, b):
+    """Whether the run holds a letter (str.isalpha). The regular expression finds the candidates at C speed, a run of
+    digits or punctuation costs a pass and no Python loop, and each candidate is confirmed by isalpha itself."""
+    step = 1 << 16
+    for u in range(a, b, step):
+        chunk = data[start + 2 * u:start + 2 * min(u + step, b)]
+        if any(m.group().isalpha() for m in LETTER_CANDIDATE.finditer(chunk.decode("utf-16-le", "replace"))):
+            return True
+    return False
+
+
+def run_pieces(data, start, a, b, size=1 << 16):
+    """The text of a run in pieces of at most `size` units (a high surrogate takes its pair with it)."""
+    u = a
+    while u < b:
+        e = min(u + size, b)
+        if e < b and 0xD8 <= data[start + 2 * (e - 1) + 1] <= 0xDB:
+            e += 1
+        yield data[start + 2 * u:start + 2 * e].decode("utf-16-le", "replace")
+        u = e
+
 
 DRIVE_TYPES = {0: "unknown", 1: "no root directory", 2: "removable", 3: "fixed", 4: "remote", 5: "CD-ROM", 6: "RAM disk"}
 # WNNC_NET_* values MS-SHLLINK lists; only the one every SMB share carries is named here,
@@ -299,7 +509,7 @@ def parse_idlist(data, off, size):
         p += sz
     return items
 
-def parse_lnk(data, base_off=0):
+def parse_lnk(data, base_off, held, strings):
     if len(data) < 0x4C or data[0:4] != b'L\x00\x00\x00' or data[4:20] != bytes.fromhex('0114020000000000c000000000000046'):
         return {'ok': False, 'error': 'not a LNK header'}
     flags = struct.unpack_from('<I', data, 0x14)[0]
@@ -308,6 +518,7 @@ def parse_lnk(data, base_off=0):
     flen, icon_idx, show, hot = struct.unpack_from('<IIII', data, 0x34)
     p = 0x4C
     problems = []
+    sink = []          # what this link's answer withholds: field, characters, finding id
     stop_reading = False
     out = {
         'ok': True,
@@ -335,7 +546,7 @@ def parse_lnk(data, base_off=0):
             problems.append("the shell item list declares %d bytes and %d were read; read more bytes (size)" % (id_size, len(data) - p))
             stop_reading = True
         blob = data[p:p+id_size]
-        out['idlist_ascii'] = ''.join(chr(b) if 32<=b<127 else '.' for b in blob)
+        out['idlist_ascii'] = guard(held, sink, {'link_offset': base_off, 'field': 'idlist_ascii'}, ''.join(chr(b) if 32<=b<127 else '.' for b in blob))
         # extract path-like utf16/ascii from extra
         paths = []
         # SHELL_ITEM file entries often have utf16 name at end
@@ -359,7 +570,7 @@ def parse_lnk(data, base_off=0):
             except Exception:
                 pass
             q += isz
-        out['idlist_paths'] = paths
+        out['idlist_paths'] = [guard(held, sink, {'link_offset': base_off, 'field': 'idlist_paths[%d]' % n}, x) for n, x in enumerate(paths)]
         p += id_size
     if flags & 0x2:
         if p + 4 > len(data):
@@ -373,7 +584,14 @@ def parse_lnk(data, base_off=0):
                 problems.append("LinkInfo declares %d bytes and %d were read from it; read more bytes (size)" % (li_size, len(data) - p))
                 stop_reading = True
             else:
-                out.update(parse_linkinfo(data[p:p + li_size], problems))
+                info = parse_linkinfo(data[p:p + li_size], problems)
+                guard_keys(held, sink, base_off, info, ('local_base_path_ansi', 'local_base_path_unicode', 'local_base_path',
+                                                         'common_path_suffix_ansi', 'common_path_suffix_unicode', 'common_path', 'linkinfo_target'))
+                if isinstance(info.get('volume'), dict):
+                    guard_keys(held, sink, base_off, info['volume'], ('label', 'label_ansi', 'label_unicode'), 'volume.')
+                if isinstance(info.get('network'), dict):
+                    guard_keys(held, sink, base_off, info['network'], ('net_name', 'net_name_unicode', 'device_name', 'device_name_unicode'), 'network.')
+                out.update(info)
                 p += li_size
     # string data in order based on flags
     def read_str(pp, nm, unicode=bool(flags & 0x80)):
@@ -394,11 +612,25 @@ def parse_lnk(data, base_off=0):
         return s, pp
     names = []
     bit_names = [(0x4,'name'),(0x8,'relative_path'),(0x10,'working_dir'),(0x20,'arguments'),(0x40,'icon_location')]
+    out['arguments_present'] = False
     for bit, nm in bit_names:
         if flags & bit and not stop_reading:
             s, p = read_str(p, nm)
-            out[nm] = s
-            names.append((nm,s))
+            if nm == 'arguments':
+                # Never printed: its length, whether there are any, and a first word only when that can only be a
+                # switch name or a program. The text goes to the values file when it was asked for.
+                out['arguments_present'] = True
+                out['arguments_chars'] = len(s) if s is not None else 0
+                token = first_token(s) if s else None
+                out['arguments_first_token'] = token
+                if s:
+                    out['arguments_finding_id'] = held.hold({'link_offset': base_off, 'field': 'arguments'}, s)
+                    if token is None:
+                        out['arguments_first_token_withheld'] = True
+                    sink.append({'field': 'arguments', 'chars': len(s), 'finding_id': out['arguments_finding_id']})
+            else:
+                out[nm] = guard(held, sink, {'link_offset': base_off, 'field': nm}, s)
+            names.append((nm, s))
     # extra blocks, up to the terminal block. When the bytes read end first the
     # structure runs past them, and structure_complete says so.
     extras = []
@@ -414,22 +646,32 @@ def parse_lnk(data, base_off=0):
         blk = data[p:p+bsz]
         rec = {'size': bsz, 'sig': hex(sig)}
         if sig == 0xA0000001:  # environment
-            rec['env_ascii'] = blk[8:8+260].split(b'\x00',1)[0].decode('latin1','replace')
-            rec['env_u16'] = blk[8+260:].decode('utf-16le','replace').split('\x00',1)[0] if len(blk)>268 else None
+            rec['env_ascii'] = guard(held, sink, {'link_offset': base_off, 'field': 'extra[%d].env_ascii' % len(extras)}, blk[8:8+260].split(b'\x00',1)[0].decode('latin1','replace'))
+            rec['env_u16'] = guard(held, sink, {'link_offset': base_off, 'field': 'extra[%d].env_u16' % len(extras)}, blk[8+260:].decode('utf-16le','replace').split('\x00',1)[0] if len(blk)>268 else None)
         elif sig == 0xA0000003:  # tracker
-            rec['tracker'] = blk[8:64].decode('latin1','replace',).split('\x00')[0] if len(blk)>16 else None
+            rec['tracker'] = guard(held, sink, {'link_offset': base_off, 'field': 'extra[%d].tracker' % len(extras)}, blk[8:64].decode('latin1','replace',).split('\x00')[0] if len(blk)>16 else None)
             # machine name at +16 typically
-            rec['machine'] = blk[16:16+16].split(b'\x00',1)[0].decode('latin1','replace') if len(blk)>32 else None
+            rec['machine'] = guard(held, sink, {'link_offset': base_off, 'field': 'extra[%d].machine' % len(extras)}, blk[16:16+16].split(b'\x00',1)[0].decode('latin1','replace') if len(blk)>32 else None)
             # the two 32-byte droid pairs (volume and object identifiers), whole
             if len(blk) >= 96:
                 rec['droid_hex'] = blk[32:64].hex()
                 rec['droid_birth_hex'] = blk[64:96].hex()
         elif sig == 0xA0000007:  # icon environment: the same two paths as the environment block
-            rec['hex'] = blk.hex()
-            rec['icon_env_ascii'] = blk[8:8+260].split(b'\x00',1)[0].decode('latin1','replace')
-            rec['icon_env_u16'] = blk[8+260:].decode('utf-16le','replace').split('\x00',1)[0] if len(blk)>268 else None
+            icon_ascii = blk[8:8+260].split(b'\x00',1)[0].decode('latin1','replace')
+            icon_u16 = blk[8+260:].decode('utf-16le','replace').split('\x00',1)[0] if len(blk)>268 else None
+            rec['icon_env_ascii'] = guard(held, sink, {'link_offset': base_off, 'field': 'extra[%d].icon_env_ascii' % len(extras)}, icon_ascii)
+            rec['icon_env_u16'] = guard(held, sink, {'link_offset': base_off, 'field': 'extra[%d].icon_env_u16' % len(extras)}, icon_u16)
+            if rec['icon_env_ascii'] == icon_ascii and rec['icon_env_u16'] == icon_u16:
+                rec['hex'] = blk.hex()          # the hex would give a withheld path back
         else:
-            rec['ascii'] = ''.join(chr(b) if 32<=b<127 else '.' for b in blk)
+            # A block this reader does not know can hold anything: the first characters inline (their shape judged
+            # like any other field), its length, and the whole of it in the values file when it was asked for.
+            printable = ''.join(chr(b) if 32<=b<127 else '.' for b in blk[:128])
+            rec['ascii'] = guard(held, sink, {'link_offset': base_off, 'field': 'extra[%d].ascii' % len(extras)}, printable)
+            rec['ascii_chars'] = len(blk)
+            if len(blk) > 128:
+                rec['ascii_inline_cut'] = True
+                rec['ascii_finding_id'] = held.hold({'link_offset': base_off, 'field': 'extra[%d].block_hex' % len(extras)}, blk.hex())
         extras.append(rec)
         p += bsz
         if bsz == 0:
@@ -439,20 +681,22 @@ def parse_lnk(data, base_off=0):
     if not complete and not problems:
         problems.append("the read ends before the terminal block; read more bytes (size) to complete the structure")
     out['problems'] = problems
-    out['heuristic_fields'] = ['idlist_ascii', 'idlist_paths', 'utf16_strings', 'extra[].ascii', 'extra[].tracker', 'extra[].machine']
+    out['heuristic_fields'] = ['idlist_ascii', 'idlist_paths', 'utf16_strings (locators; the text is in the values file)', 'extra[].ascii', 'extra[].tracker', 'extra[].machine']
     out['bytes_read'] = len(data)
-    # collect utf16 strings from everything read, each one whole. A string is
-    # read to its NUL; the next one starts right after it. A run that is too
-    # short or has no letter is passed over whole, since no tail of it can
-    # qualify either.
-    strs = []
-    i = 0x4C
-    while i+4 < len(data):
-        s, ni = u16z(data, i)
-        if len(s) >= 6 and any(c.isalpha() for c in s):
-            strs.append(s)
-        i = max(ni, i + 2)
-    out['utf16_strings'] = strs
+    # The UTF-16 string scan: a run of at least six non-zero units with a letter in it, even-aligned from the end of
+    # the header. The text is never in the answer: its offset and length are (the page `strings`), and the text is
+    # in the values file under the finding id when write_strings asked for it.
+    found = 0
+    for a, b in utf16_runs(data, 0x4C):
+        if b - a >= MIN_STRING_UNITS and run_has_letter(data, 0x4C, a, b):
+            found += 1
+            at = 0x4C + 2 * a
+            finding = held.hold_text({'link_offset': base_off, 'field': 'utf16_string', 'offset': at},
+                                     lambda a=a, b=b: run_pieces(data, 0x4C, a, b))
+            strings.add({'link_offset': base_off, 'offset': at, 'file_offset': base_off + at, 'chars': b - a, 'finding_id': finding})
+    out['utf16_string_count'] = found
+    if sink:
+        out['sensitive_fields_withheld'] = sink
     return out
 
 def fail(message, **extra):
@@ -479,21 +723,63 @@ def main():
     path = args.get('path')
     offset = whole(args, 'offset', 0)
     size = whole(args, 'size', 4096, 1, MAX_READ)
+    limit = whole(args, 'limit', 50, 1)
+    write_strings = args.get('write_strings', False)
+    if not isinstance(write_strings, bool):
+        fail('write_strings must be true or false')
     dump = args.get('dump')  # if set, read from dump at offset
     src = dump or path
     if not src:
-        print(json.dumps({'error':'need path or dump'})); sys.exit(1)
+        fail('need path or dump')
+    if not isinstance(src, str):
+        fail('path and dump must be file paths', got=src)
     if not os.path.isfile(src):
-        print(json.dumps({'error':'no such file', 'path': src})); sys.exit(1)
-    with open(src,'rb') as f:
-        f.seek(offset)
-        data = f.read(size)
+        if os.path.exists(src):
+            fail('not a regular file (a directory, a FIFO, a socket or a device is not opened)', path=src, not_attempted=1)
+        fail('no such file', path=src)
+
+    values = None
+    for number in range(1, 1000):
+        name = 'lnk-strings.jsonl' if number == 1 else 'lnk-strings-%d.jsonl' % number
+        try:
+            values = SecretValues(write_strings, 'lnk_parse', 'write_strings', name)
+            break
+        except SecretValuesRefused as exc:
+            # A values file of an earlier run in this job is never replaced and never a reason not to read the link:
+            # the next free number is this run's file, and the answer names it.
+            if write_strings and 'already exists' in str(exc):
+                continue
+            fail(str(exc))
+    if values is None:
+        fail('no free name for the values file after 999 tries')
+    held = Held(values)
+
+    try:
+        with open(src, 'rb') as f:
+            f.seek(offset)
+            data = f.read(size)
+    except OSError as exc:
+        values.close()
+        fail('the file could not be read', path=src, reason=describe(exc))
+    strings = LosslessPage("lnk_parse", [src, offset, size, 'strings'], limit)
+    summary = lambda: {
+        'secret_values': values.summary('JSON Lines, mode 0600: finding_id, link_offset, field, [offset, piece, continued_in_next,] value'),
+        'findings_held': held.count,
+    }
+
+    def string_paging(answer):
+        page = strings.finish()
+        answer['utf16_strings'] = strings.page
+        answer['utf16_strings_page'] = page
+        answer['utf16_strings_note'] = ('offsets and lengths of the UTF-16 text found by search (runs of six or more non-zero units with a letter); '
+                                        'the text is not in this answer: write_strings, in a job, writes it to the values file under each finding_id')
+
     if args.get('scan'):
-        limit = whole(args, 'max', 50, 1)
+        limit_hits = whole(args, 'max', 50, 1)
         each = args.get('each')
         if each is not None:
             each = whole(args, 'each', 0, 1)
-        hits = LosslessPage("lnk_parse", [src, offset, size, each], limit)
+        hits = LosslessPage("lnk_parse", [src, offset, size, each], limit_hits)
         magic = bytes.fromhex('4c0000000114020000000000c000000000000046')
         starts = []
         i = 0
@@ -508,27 +794,37 @@ def main():
             # Without `each`, a link runs to the next header or to the end of
             # what was read, never to a fixed cut.
             stop = j + each if each else (starts[n+1] if n+1 < len(starts) else len(data))
-            rec = parse_lnk(data[j:stop], offset+j)
+            rec = parse_lnk(data[j:stop], offset+j, held, strings)
             rec['rel'] = j
             rec['source'] = src
             if not rec.get('structure_complete'):
                 incomplete += 1
             hits.add(rec)
         page = hits.finish()
-        print(json.dumps({'parser': PARSER, 'source': src, 'count': page['matched'], 'hits': hits.page, **page,
-                          'structures_incomplete': incomplete,
-                          'offset': offset, 'bytes_read': len(data),
-                          'note': 'a scan finds link structures by their 20-byte header signature (carving); a hit is a candidate, and `structure_complete` and `problems` say how much of it was read'},
-                         indent=2))
+        values.close()
+        answer = {'parser': PARSER, 'source': src, 'count': page['matched'], 'hits': hits.page, **page,
+                  'structures_incomplete': incomplete,
+                  'offset': offset, 'bytes_read': len(data),
+                  **summary(),
+                  'note': 'a scan finds link structures by their 20-byte header signature (carving); a hit is a candidate, and `structure_complete` and `problems` say how much of it was read. Arguments and the string scan are not printed: see arguments_chars, utf16_strings and secret_values'}
+        string_paging(answer)
+        print(json.dumps(answer, indent=2))
         return
-    rec = parse_lnk(data, offset)
+    rec = parse_lnk(data, offset, held, strings)
     rec['source'] = src
+    values.close()
     if not rec.get('ok'):
+        # Not what it was read as: how many bytes, and nothing of their content (it can be anything).
         rec['bytes_read'] = len(data)
-        rec['first_bytes_hex'] = data[:20].hex()
+        rec['starts_with_link_header'] = False
         print(json.dumps(rec, indent=2))
         sys.exit(1)
+    rec.update(summary())
+    string_paging(rec)
     print(json.dumps(rec, indent=2))
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except OSError as exc:
+        fail('a file operation failed: %s' % describe(exc), reason=type(exc).__name__)

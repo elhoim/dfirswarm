@@ -417,7 +417,7 @@ test("jumplist refuses a DestList version it does not read, with a problem and n
 test("jumplist reports a file it could not read as a failure with a count, and exits non-zero when none could be read", async () => {
   await withCwd(async (cwd) => {
     await writeFile(join(cwd, "work", "x.automaticDestinations-ms"), "not a compound file");
-    // No olefile on this PYTHONPATH: every automaticDestinations file fails, loudly.
+    // An olefile that says this is not a compound file: every automaticDestinations file fails, loudly.
     const env = await stubModule(cwd, { "olefile.py": "def isOleFile(p):\n    return False\n" });
     const out = await tool("jumplist", cwd, { path: "work/x.automaticDestinations-ms" }, env);
     assert.notEqual(out.code, 0);
@@ -791,7 +791,7 @@ test("yara_scan writes the matched bytes only on write_matches, only in a job, o
     assert.equal(out.secret_values.written, 3);
     assert.equal(out.secret_values.values_file, "store/jobs/j000007/out/yara-matched-strings.jsonl");
     assert.equal(out.secret_values.contains_secret_values, true);
-    assert.equal(run.stdout.includes("Summer2024"), false, "even then the answer itself has no value");
+    for (const piece of yaraPieces()) assert.equal((run.stdout + run.stderr).includes(piece), false, `even then the answer itself has no ${piece}`);
     const file = join(outDir, "yara-matched-strings.jsonl");
     assert.equal((await stat(file)).mode & 0o777, 0o600);
     const rows = (await readFile(file, "utf8")).trimEnd().split("\n").map((l) => JSON.parse(l) as { finding_id: string; value: string; offset: number; length: number; identifier: string });
@@ -799,11 +799,29 @@ test("yara_scan writes the matched bytes only on write_matches, only in a job, o
     assert.equal(rows[0].value, PLANTED);
     assert.equal(rows[0].offset, 6);
     assert.equal(rows[0].length, 20);
-    // A values file already there is refused by name before anything is scanned.
-    const again = failed(await tool("yara_scan", cwd, { rules: "work/rules.yar", target: "work/sample.bin", write_matches: true }, { JOB_ID: "j000008", OUT: outDir }, bin));
-    assert.match(again.error, /already exists/);
+    // Nothing else the tool wrote holds the value, in any form: only the sealed values file does.
+    for (const other of (await everyFileUnder(cwd)).filter((f) => f !== file && !f.endsWith("sample.bin") && !f.endsWith("rules.yar") && !f.includes("/bin/"))) {
+      const text = (await readFile(other)).toString("latin1");
+      for (const piece of yaraPieces()) assert.equal(text.includes(piece), false, `${other} holds ${piece}`);
+    }
+    // A second run in the same job, the values file already there: it scans all the same, writes the next
+    // numbered file, names it, and the first file is as it was (it was refused without scanning).
+    const before = await readFile(file);
+    const again = body<YaraOut>(await tool("yara_scan", cwd, { rules: "work/rules.yar", target: "work/sample.bin", write_matches: true }, { JOB_ID: "j000007", OUT: outDir }, bin));
+    assert.equal(again.status, "complete");
+    assert.equal(again.string_match_count, 3);
+    assert.equal(again.secret_values.values_file, "store/jobs/j000007/out/yara-matched-strings-2.jsonl");
+    assert.equal(again.secret_values.written, 3);
+    assert.deepEqual(await readFile(file), before);
+    assert.equal((await stat(join(outDir, "yara-matched-strings-2.jsonl"))).mode & 0o777, 0o600);
   });
 });
+
+/** The planted value in every form an answer could carry it: whole, its words, its fragments, hex and base64 of each. */
+function yaraPieces(): string[] {
+  const raw = ["Summer2024!", "Summer2024", "password=Summer2024!", "password=", "Summer", "2024!"];
+  return [...raw, ...raw.map((r) => Buffer.from(r).toString("hex")), ...raw.map((r) => Buffer.from(r).toString("base64").replace(/=+$/, "")), "4D 5A 90 00"].filter((x) => x.length >= 5 || x === "2024!");
+}
 
 test("yara_scan keeps the whole of a run it had to stop: status partial, complete false, the matches read before the time limit and the stderr file", async () => {
   // A timeout threw away everything yara had printed, and the answer was "did not finish".
@@ -1907,21 +1925,22 @@ test("extract_stream never overwrites a file, never writes under inputs/ or outs
   await withCwd(async (cwd, bin) => {
     await stub(bin, "icat", ICAT_STUB(`printf 'x'`));
     await writeFile(join(cwd, "work", "disk.raw"), Buffer.alloc(1024));
+    await mkdir(join(cwd, "work", "s1"), { recursive: true });
     const env = { ICAT_ARGS: join(cwd, "icat-args") };
-    await writeFile(join(cwd, "work", "taken.bin"), "evidence");
-    assert.match(failed(await tool("extract_stream", cwd, { image: "work/disk.raw", inode: "5", output: "work/taken.bin" }, env, bin)).error, /already exists/);
-    assert.equal(await readFile(join(cwd, "work", "taken.bin"), "utf8"), "evidence");
+    await writeFile(join(cwd, "work", "s1", "taken.bin"), "evidence");
+    assert.match(failed(await tool("extract_stream", cwd, { image: "work/disk.raw", inode: "5", output: "work/s1/taken.bin" }, env, bin)).error, /already exists/);
+    assert.equal(await readFile(join(cwd, "work", "s1", "taken.bin"), "utf8"), "evidence");
     assert.match(failed(await tool("extract_stream", cwd, { image: "work/disk.raw", inode: "5", output: "inputs/x.bin" }, env, bin)).error, /cannot be under inputs/);
     assert.match(failed(await tool("extract_stream", cwd, { image: "work/disk.raw", inode: "5", output: "work/../inputs/y.bin" }, env, bin)).error, /cannot be under inputs/);
     assert.match(failed(await tool("extract_stream", cwd, { image: "work/disk.raw", inode: "5", output: "/tmp/outside-the-run.bin" }, env, bin)).error, /inside the run directory/);
     // A link in the run that points out of it is resolved first, and refused as the place it leads to.
-    await symlink("../../elsewhere/planted", join(cwd, "work", "link.bin"));
-    assert.match(failed(await tool("extract_stream", cwd, { image: "work/disk.raw", inode: "5", output: "work/link.bin" }, env, bin)).error, /inside the run directory/);
-    await symlink("taken.bin", join(cwd, "work", "samedir.bin"));
-    assert.match(failed(await tool("extract_stream", cwd, { image: "work/disk.raw", inode: "5", output: "work/samedir.bin" }, env, bin)).error, /already exists/);
-    assert.equal(await readFile(join(cwd, "work", "taken.bin"), "utf8"), "evidence", "nothing was written through the link");
+    await symlink("../../../elsewhere/planted", join(cwd, "work", "s1", "link.bin"));
+    assert.match(failed(await tool("extract_stream", cwd, { image: "work/disk.raw", inode: "5", output: "work/s1/link.bin" }, env, bin)).error, /inside the run directory/);
+    await symlink("taken.bin", join(cwd, "work", "s1", "samedir.bin"));
+    assert.match(failed(await tool("extract_stream", cwd, { image: "work/disk.raw", inode: "5", output: "work/s1/samedir.bin" }, env, bin)).error, /already exists/);
+    assert.equal(await readFile(join(cwd, "work", "s1", "taken.bin"), "utf8"), "evidence", "nothing was written through the link");
     for (const inode of ["5; rm -rf /", "1-2-3-4", "abc", "-5", ""]) {
-      assert.match(failed(await tool("extract_stream", cwd, { image: "work/disk.raw", inode, output: "work/z.bin" }, env, bin)).error, /inode must be an address/, inode);
+      assert.match(failed(await tool("extract_stream", cwd, { image: "work/disk.raw", inode, output: "work/s1/z.bin" }, env, bin)).error, /inode must be an address/, inode);
     }
     assert.equal(await exists(join(cwd, "icat-args")), false, "a refused call never reaches icat");
   });
