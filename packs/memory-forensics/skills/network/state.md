@@ -11,16 +11,17 @@ Memory may preserve current network structures and remnants of earlier ones,
 observed across the acquisition interval rather than at one instant (the capture is
 a smear: `acquire/images`).
 
-**Which view.** On a supported Windows image compare `windows.netstat.NetStat`, which
-walks the kernel's network tracking structures, with `windows.netscan.NetScan`, which
-scans for network objects (both run through `vol`; `triage/volatility` has the
-symbols they need). A scan result alone does not say an object was live or freed.
-On Linux use `linux.sockstat.Sockstat` where the installed plugin supports the
-captured kernel. With MemProcFS (`memprocfs`) the network tables are files; `mem_fs` can list and
-export them (`processes/injection` has the lifecycle). For each object record the
-method, the object's address and layer, the protocol and address family, both
-endpoints, the state, the owning process and what the engine could not validate. A
-live-or-freed statement needs a view that says it.
+**Which view.** On a supported Windows image compare `windows.netstat.NetStat`,
+which walks the kernel's network tracking structures, with
+`windows.netscan.NetScan`, which scans for network objects (both run through
+`vol`; `triage/volatility` has the symbols they need). A scan result alone does
+not say an object was live or freed. On Linux use `linux.sockstat.Sockstat` where
+the installed plugin supports the captured kernel. With MemProcFS (`memprocfs`)
+the network tables are files; `mem_fs` can list and export them
+(`processes/injection` has the lifecycle). For each object record the method, the
+object's address and layer, the protocol and address family, both endpoints, the
+state, the owning process and what the engine could not validate. A live-or-freed
+statement needs a view that says it.
 
     established connections   endpoints, state, owning process
     listeners                 a port bound by something unexpected is a lead

@@ -7,8 +7,7 @@ tools: [ioc_scan, chunk_needles]
 requires_host: [strings]
 ---
 
-This is the most common way a memory finding fails review, and it has happened in
-the published runs.
+This is the most common way a memory finding fails review.
 
 The same bytes arrive in memory from at least five places that have nothing to do
 with a process doing anything:

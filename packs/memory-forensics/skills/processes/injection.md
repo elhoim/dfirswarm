@@ -58,9 +58,10 @@ expose, and its export mode to copy chosen files byte for byte into the job's
       "paths": ["<a virtual path from the listing>"]})
 
 The answer names each file and its status, never its content or digest; the sizes
-and digests are in `export-manifest.jsonl` beside the files. With Volatility (`vol`) the same questions are plugins (`triage/volatility`,
-which also gives the dump option of each OS); record the version and the plugin
-name beside every result, since plugin output changes between versions.
+and digests are in `export-manifest.jsonl` beside the files. With Volatility
+(`vol`) the same questions are plugins (`triage/volatility`, which also gives the
+dump option of each OS); record the version and the plugin name beside every
+result, since plugin output changes between versions.
 
 **Preserve before you rely.** Take the bytes you will argue from into a sealed job
 output before you call anything injected: `mem_fs` export, or a plugin's dump, run

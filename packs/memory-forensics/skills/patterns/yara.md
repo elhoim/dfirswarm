@@ -36,12 +36,12 @@ image correction, or use the standalone scanner and conclude from file offsets o
 Verify the options of the plugin you run (`vol windows.vadyarascan.VadYaraScan
 --help`), since they change between versions.
 
-**Coverage.** In 2.28.2 (as of October 2026) these scanners skip a region larger than 1 GiB, read the
-regions they scan with padding (an unavailable page reads as padding), and see only
-the processes and mappings their enumeration finds. Record the processes and
-regions excluded, pages unavailable or padded, and failures; a successful exit is
-not a complete scan. A rule that matched over one region need not behave the same
-over a whole file.
+**Coverage.** In 2.28.2 (as of October 2026) these scanners skip a region larger
+than 1 GiB, read the regions they scan with padding (an unavailable page reads as
+padding), and see only the processes and mappings their enumeration finds. Record
+the processes and regions excluded, pages unavailable or padded, and failures; a
+successful exit is not a complete scan. A rule that matched over one region need
+not behave the same over a whole file.
 
 **Region and attribution.** Keep a matched region as a sealed derivative with its
 process, virtual range, protection, extraction method and unreadable or padded

@@ -22,19 +22,20 @@ read (`windows/<pdb>/<GUID>-<age>.json.xz`), and without a table its log names t
 symbol-server address it would have fetched, which carries the same identity. Keep
 the selected table's URI and provenance, not only the identity you asked for.
 
-**What the image holds.** `/etc/dfirswarm/tools.md`, under "Data the programs read",
-names the data the image carries (a host run has no image, and holds no table unless
-the operator put one under `volatility3/symbols`): the exact tables the operator's
-build made for the kernels its pack lists (`grep <GUID> /etc/dfirswarm/tools.md`),
-and the Volatility Foundation's bundle of 2019, which covers the Windows builds of
-2019 and earlier, so a newer kernel is usually not in it. The curated list is a
-set of exact kernels, not a coverage claim for any Windows release (Windows 11 and
-the Server releases included); the GUID is the check. In Volatility 3 2.28.2 (as of
-October 2026) `vol -q isfinfo` lists every table the cache knows, and its
-`--filter` applies only with `--live`, which opens every table: search the listing
-for the GUID (`vol -q isfinfo | grep -i <GUID>`). A listing without it covers the
-symbol directories this `vol` searched; it is a bounded result. An image built without its symbol sets says so in the same file ("left out
-by the build").
+**What the image holds.** `/etc/dfirswarm/tools.md`, under "Data the programs
+read", names the data the image carries (a host run has no image, and holds no
+table unless the operator put one under `volatility3/symbols`): the exact tables
+the operator's build made for the kernels its pack lists (`grep <GUID>
+/etc/dfirswarm/tools.md`), and the Volatility Foundation's bundle of 2019, which
+covers the Windows builds of 2019 and earlier, so a newer kernel is usually not in
+it. The curated list is a set of exact kernels, not a coverage claim for any
+Windows release (Windows 11 and the Server releases included); the GUID is the
+check. In Volatility 3 2.28.2 (as of October 2026) `vol -q isfinfo` lists every
+table the cache knows, and its `--filter` applies only with `--live`, which opens
+every table: search the listing for the GUID (`vol -q isfinfo | grep -i <GUID>`).
+A listing without it covers the symbol directories this `vol` searched; it is a
+bounded result. An image built without its symbol sets says so in the same file
+("left out by the build").
 
 **If the error names a PDB, GUID and age**, the tables this `vol` could see do not
 include it. Do not switch off `--offline`, and fetch nothing. Never copy a symbol
@@ -78,26 +79,27 @@ offline, and say when it was not.
     windows.svcscan    registered and residual services
 
 As of October 2026, in 2.28.2, the older `windows.malfind` and `linux.malfind`
-names are deprecated forwarding classes of the `.malware.malfind` plugins (a receipt that names the old
-one ran the alias); the plugin lists a candidate, not proof of injection, and its
-Windows option for writing the regions it finds is `--dump`. Verify the options of a
-plugin in the image you have (`vol windows.malware.malfind.Malfind --help`, and
-`vol --help` for the plugin list it carries): plugin output and options change
-between versions.
+names are deprecated forwarding classes of the `.malware.malfind` plugins (a
+receipt that names the old one ran the alias); the plugin lists a candidate, not
+proof of injection, and its Windows option for writing the regions it finds is
+`--dump`. Verify the options of a plugin in the image you have (`vol
+windows.malware.malfind.Malfind --help`, and `vol --help` for the plugin list it
+carries): plugin output and options change between versions.
 
-**Linux.** There is no exhaustive public cache: the ISF must match the exact kernel
-build, with its architecture, and a nearby distribution version is not a substitute.
-Establish the kernel banner and a matching ISF before any symbol-dependent analysis;
-as of October 2026, in 2.28.2, the plugins include `linux.pslist.PsList`, `linux.pstree.PsTree`,
-`linux.lsof.Lsof`, `linux.sockstat.Sockstat`, `linux.envars.Envars`,
-`linux.bash.Bash` and `linux.malware.malfind.Malfind`, whose option for writing
-regions is `--dump-regions` (not the Windows `--dump`; it has its own `--dump-maxsize`,
-1 GB by default). This pack supplies no Linux or macOS ISF set and no converter:
+**Linux.** There is no exhaustive public cache: the ISF must match the exact
+kernel build, with its architecture, and a nearby distribution version is not a
+substitute. Establish the kernel banner and a matching ISF before any
+symbol-dependent analysis; as of October 2026, in 2.28.2, the plugins include
+`linux.pslist.PsList`, `linux.pstree.PsTree`, `linux.lsof.Lsof`,
+`linux.sockstat.Sockstat`, `linux.envars.Envars`, `linux.bash.Bash` and
+`linux.malware.malfind.Malfind`, whose option for writing regions is
+`--dump-regions` (not the Windows `--dump`; it has its own `--dump-maxsize`, 1 GB
+by default). This pack supplies no Linux or macOS ISF set and no converter:
 require an ISF made from matching kernel debug material that the case or the
 operator supplies, record its provenance, and validate the captured kernel's
 identity and architecture. Where the matching table is absent, symbol-dependent
-Linux analysis was not performed, and the report says so. A plugin being listed does
-not show that the captured kernel is supported. For macOS this pack makes no
+Linux analysis was not performed, and the report says so. A plugin being listed
+does not show that the captured kernel is supported. For macOS this pack makes no
 support claim for any version: the same rule applies, and an unsupported target is
 reported as unexamined.
 
