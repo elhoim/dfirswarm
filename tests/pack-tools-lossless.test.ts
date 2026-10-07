@@ -363,13 +363,15 @@ open(sys.argv[1], "wb").write(out)
 test("mft_records reads every record past the page, past a zeroed first MiB, and past a record it cannot parse", async () => {
   // It stopped at `limit`, looked for the first FILE magic in the first
   // MiB only, and a record whose attribute ran off its end raised
-  // struct.error and ended the whole run with a traceback.
+  // struct.error and ended the whole run with a traceback. Such a record
+  // is now an entry of its own, marked unreliable with what was wrong, and
+  // a problem of the run with its offset.
   await withCwd(async (cwd) => {
     await build(MFT_BUILDER, join(cwd, "work", "MFT"));
     const out = body<Page & {
       record_size: number;
       records_scanned: number;
-      entries: { entry: number; primary_name: string }[];
+      entries: { entry: number; primary_name: string; unreliable?: boolean; structural_errors?: string[] }[];
       entry_count: number;
       problems: { record: number; offset: number; why: string }[];
       problem_count: number;
@@ -377,10 +379,12 @@ test("mft_records reads every record past the page, past a zeroed first MiB, and
     assert.equal(out.record_size, 1024);
     assert.equal(out.records_scanned, 1025 + 8);
     assert.deepEqual(out.entries.map((e) => e.entry), [40, 41, 42]);
-    assert.equal(out.entry_count, 7);
-    const rows = await allRows<{ entry: number; primary_name: string }>(cwd, out);
-    assert.deepEqual(rows.map((r) => r.entry), [40, 41, 42, 43, 44, 45, 46]);
-    assert.deepEqual(rows.map((r) => r.primary_name), [40, 41, 42, 43, 44, 45, 46].map((n) => `file-${n}.txt`));
+    assert.equal(out.entry_count, 8);
+    const rows = await allRows<{ entry: number; primary_name: string; unreliable?: boolean; structural_errors?: string[] }>(cwd, out);
+    assert.deepEqual(rows.map((r) => r.entry), [40, 41, 42, 43, 44, 45, 46, 47]);
+    assert.deepEqual(rows.slice(0, 7).map((r) => r.primary_name), [40, 41, 42, 43, 44, 45, 46].map((n) => `file-${n}.txt`));
+    assert.equal(rows[7].unreliable, true, "the damaged record is kept, marked");
+    assert.match((rows[7].structural_errors ?? []).join(" | "), /non-resident \$DATA header at offset 1008 is 16 bytes/);
     assert.equal(out.problem_count, 1);
     assert.equal(out.problems[0].record, 1025 + 7);
     assert.equal(out.problems[0].offset, (1025 + 7) * 1024);

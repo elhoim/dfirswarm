@@ -207,7 +207,7 @@ a, b = d["entries"]
 assert d["record_size"] == 1024, d["record_size"]
 assert a["entry"] == 40 and a["in_use"], a
 assert a["primary_name"] == "notes.txt", a["primary_name"]
-assert a["standard_information"]["modified"] == "2026-03-02T11:00:00Z", a["standard_information"]
+assert a["standard_information"]["modified"] == "2026-03-02T11:00:00.0000000Z", a["standard_information"]
 import base64
 assert base64.b64decode(a["data_streams"][0]["content_base64"]).startswith(b"a resident note"), a["data_streams"]
 assert b["entry"] == 41 and not b["in_use"], b

@@ -29,6 +29,18 @@ Every record is read. The page returned inline is `limit` long, and when more
 records match the whole list is written to a file the output names. A record
 too damaged to parse is listed as a problem with its offset, and the sweep goes
 on to the next one.
+
+Every nested range is checked against the attribute that holds it, and the attribute chain against the
+record's used size: a $STANDARD_INFORMATION shorter than its times, a $FILE_NAME whose name runs past its
+attribute, a resident $DATA past its attribute, a non-resident header shorter than the sizes it carries, a
+chain that ends without its end marker. None is read as if it were whole: the record keeps what was
+sound and says what was not under `structural_errors` (and is `unreliable`), and the record is also a
+problem of the run, with its offset.
+
+What it does NOT do: it does not resolve $ATTRIBUTE_LIST (a record that has one says so, and its other
+attributes live in extension records this tool reads as records of their own, with `base_record`), and it
+does not rebuild a parent path (each name carries its parent entry and sequence; join them with another
+reading of the volume). Each name and stream carries its attribute `instance` id.
 """
 import base64
 import datetime
@@ -143,11 +155,13 @@ def fail(message, **extra):
 
 
 def filetime(value):
+    """ISO 8601 UTC with seven fractional digits, by integer arithmetic; None for 0 or past year 9999."""
     if not value:
         return None
     try:
-        return (FILETIME_EPOCH + datetime.timedelta(microseconds=value // 10)).isoformat().replace("+00:00", "Z")
-    except (OverflowError, OSError):
+        whole, ticks = divmod(value, 10_000_000)
+        return (FILETIME_EPOCH + datetime.timedelta(seconds=whole)).strftime("%Y-%m-%dT%H:%M:%S") + ".%07dZ" % ticks
+    except (OverflowError, ValueError, OSError):
         return None
 
 
@@ -180,29 +194,53 @@ def apply_fixup(record):
     return bytes(out), None
 
 
-def attributes(record, first):
-    """Walk the attribute chain, stopping on anything that does not advance."""
+def attributes(record, first, errors, used=None):
+    """Walk the attribute chain. It ends at the end marker; anything else that ends it (a header that does not fit,
+    a length that is not a multiple of 8 or runs past the used part of the record, running out of record before
+    the marker) is appended to `errors`, not passed over."""
+    end = len(record)
+    if used and first < used <= len(record):
+        end = used
     offset = first
-    while offset + 4 <= len(record):
+    while True:
+        if offset + 4 > end:
+            errors.append("the attribute chain runs out at offset %d without an end marker" % offset)
+            return
         atype = struct.unpack_from("<I", record, offset)[0]
         if atype == END:
             return
-        if offset + 16 > len(record):
+        if offset + 16 > end:
+            errors.append("the attribute header at offset %d does not fit the record" % offset)
             return
         length = struct.unpack_from("<I", record, offset + 4)[0]
-        if length < 16 or offset + length > len(record):
+        if length < 16 or length % 8 or offset + length > end:
+            errors.append("the attribute at offset %d (type 0x%x) has an invalid length %d" % (offset, atype, length))
             return
         yield atype, offset, length
         offset += length
 
 
-def attribute_name(record, offset):
+def attribute_name(record, offset, length, errors):
     name_len = record[offset + 9]
     if not name_len:
         return ""
     name_off = struct.unpack_from("<H", record, offset + 0x0A)[0]
+    if name_off + name_len * 2 > length:
+        errors.append("the attribute name at offset %d does not fit its attribute" % offset)
+        return ""
     raw = record[offset + name_off:offset + name_off + name_len * 2]
     return raw.decode("utf-16-le", "replace")
+
+
+def resident(record, offset, length, errors, what, minimum=0):
+    """(content offset, content length) of a resident attribute, checked against the attribute's own length;
+    None, with an error, when it does not fit."""
+    content_len, content_off = struct.unpack_from("<IH", record, offset + 0x10)
+    if content_off < 0x18 or content_off + content_len > length or content_len < minimum:
+        errors.append("the resident %s at offset %d declares %d bytes at %d, which does not fit its %d-byte attribute (or is shorter than the %d it needs)"
+                      % (what, offset, content_len, content_off, length, minimum))
+        return None
+    return offset + content_off, content_len
 
 
 def parse_record(record, number_hint, want_resident):
@@ -225,6 +263,7 @@ def parse_record(record, number_hint, want_resident):
         "used_bytes": used,
         "allocated_bytes": allocated,
         "base_record": (base_ref & 0xFFFFFFFFFFFF) if base_ref else None,
+        "base_sequence": (base_ref >> 48) if base_ref else None,
         "names": [],
         "data_streams": [],
         "flags": [],
@@ -236,22 +275,29 @@ def parse_record(record, number_hint, want_resident):
         entry["fixup_problem"] = fixup_problem
         entry["unreliable"] = True
 
-    for atype, offset, length in attributes(fixed, first_attr):
+    errors = []
+    for atype, offset, length in attributes(fixed, first_attr, errors, used):
         non_resident = fixed[offset + 8]
+        instance = struct.unpack_from("<H", fixed, offset + 0x0E)[0]
         if atype == STANDARD_INFORMATION and not non_resident:
-            content = struct.unpack_from("<H", fixed, offset + 0x14)[0]
-            if offset + content + 0x24 <= len(fixed):
-                entry["standard_information"] = times(fixed, offset + content)
-                dos, = struct.unpack_from("<I", fixed, offset + content + 0x20)
+            got = resident(fixed, offset, length, errors, "$STANDARD_INFORMATION", 0x24)
+            if got:
+                base, _ = got
+                entry["standard_information"] = times(fixed, base)
+                dos, = struct.unpack_from("<I", fixed, base + 0x20)
                 entry["standard_information"]["attributes"] = [n for bit, n in SI_FLAGS if dos & bit]
+                entry["standard_information"]["instance"] = instance
         elif atype == FILE_NAME and not non_resident:
-            content = struct.unpack_from("<H", fixed, offset + 0x14)[0]
-            base = offset + content
-            if base + 0x42 > len(fixed):
+            got = resident(fixed, offset, length, errors, "$FILE_NAME", 0x42)
+            if not got:
                 continue
+            base, content_len = got
             parent, = struct.unpack_from("<Q", fixed, base)
             name_chars = fixed[base + 0x40]
             namespace = fixed[base + 0x41]
+            if 0x42 + name_chars * 2 > content_len:
+                errors.append("the $FILE_NAME at offset %d declares a %d-character name, which runs past its content (%d bytes)" % (offset, name_chars, content_len))
+                continue
             raw = fixed[base + 0x42:base + 0x42 + name_chars * 2]
             fn = times(fixed, base + 0x08)
             alloc, real = struct.unpack_from("<QQ", fixed, base + 0x28)
@@ -262,26 +308,38 @@ def parse_record(record, number_hint, want_resident):
                 "parent_sequence": parent >> 48,
                 "allocated_size": alloc,
                 "real_size": real,
+                "instance": instance,
             })
             entry["names"].append(fn)
         elif atype == DATA:
-            stream = {"name": attribute_name(fixed, offset), "resident": not non_resident}
+            stream = {"name": attribute_name(fixed, offset, length, errors), "resident": not non_resident, "instance": instance}
             if non_resident:
-                alloc, real, init = struct.unpack_from("<QQQ", fixed, offset + 0x28)
-                stream.update({"allocated_size": alloc, "real_size": real, "initialised_size": init})
-                if real and not init:
-                    entry["flags"].append("zero_initialised_size")
+                if length < 0x40:
+                    errors.append("the non-resident $DATA header at offset %d is %d bytes, shorter than the 64 that hold its sizes" % (offset, length))
+                else:
+                    alloc, real, init = struct.unpack_from("<QQQ", fixed, offset + 0x28)
+                    stream.update({"allocated_size": alloc, "real_size": real, "initialised_size": init})
+                    if real and not init:
+                        entry["flags"].append("zero_initialised_size")
             else:
-                size, content = struct.unpack_from("<IH", fixed, offset + 0x10)
-                stream["real_size"] = size
-                if want_resident and offset + content + size <= len(fixed):
-                    data = fixed[offset + content:offset + content + size]
-                    stream["content_base64"] = base64.b64encode(data).decode("ascii")
+                got = resident(fixed, offset, length, errors, "$DATA")
+                if got:
+                    base, size = got
+                    stream["real_size"] = size
+                    if want_resident:
+                        stream["content_base64"] = base64.b64encode(fixed[base:base + size]).decode("ascii")
             entry["data_streams"].append(stream)
         elif atype in (INDEX_ROOT, INDEX_ALLOCATION):
-            entry.setdefault("index_attributes", []).append(attribute_name(fixed, offset) or "$I30")
+            entry.setdefault("index_attributes", []).append(attribute_name(fixed, offset, length, errors) or "$I30")
         elif atype == ATTRIBUTE_LIST:
             entry["flags"].append("has_attribute_list")
+            entry["attribute_list_resolved"] = False
+    if errors:
+        entry["structural_errors"] = errors
+        entry["flags"].append("structural_error")
+        entry["unreliable"] = True
+    if entry["base_record"]:
+        entry["is_extension_record"] = True
 
     entry["ads"] = [s["name"] for s in entry["data_streams"] if s["name"]]
     si = entry.get("standard_information")
@@ -304,11 +362,12 @@ def parse_record(record, number_hint, want_resident):
 
 
 def detect_record_size(fh, size):
-    """Records are 1024 on almost every volume; measure rather than assume.
+    """Records are 1024 on almost every volume; measure rather than assume. Returns (size, how it was found).
 
-    The first two FILE magics are looked for through the whole file, not a
-    first window: a slice of an $MFT can open with a run of zeroed records.
-    """
+    The first two FILE magics are looked for through the whole file, not a first window: a slice of an $MFT
+    can open with a run of zeroed records. The first record's own allocated size (its header, at 0x1C) is the
+    primary evidence; the gap between the first two magics is the second, and when they disagree the header's
+    value is used and the disagreement said by the caller."""
     fh.seek(0)
     hits, carry, base = [], b"", 0
     while len(hits) < 2:
@@ -324,11 +383,16 @@ def detect_record_size(fh, size):
         carry = buf[-3:]
         base += len(buf) - len(carry)
     if not hits:
-        return None
-    if len(hits) < 2:
-        return 1024
-    gap = hits[1] - hits[0]
-    return gap if gap in (256, 512, 1024, 2048, 4096) else 1024
+        return None, None, None
+    fh.seek(hits[0] + 0x1C)
+    raw = fh.read(4)
+    declared = struct.unpack("<I", raw)[0] if len(raw) == 4 else None
+    gap = (hits[1] - hits[0]) if len(hits) > 1 else None
+    if declared in (256, 512, 1024, 2048, 4096):
+        return declared, "the allocated size in the first record's header", gap
+    if gap in (256, 512, 1024, 2048, 4096):
+        return gap, "the gap between the first two FILE signatures", gap
+    return 1024, "the default (neither the header nor the gap gave a record size)", gap
 
 
 def main():
@@ -360,17 +424,19 @@ def main():
 
     size = os.path.getsize(path)
     with open(path, "rb") as fh:
-        record_size = args.get("record_size") or detect_record_size(fh, size)
+        given = args.get("record_size")
+        if given is not None and (not isinstance(given, int) or isinstance(given, bool) or given < 256):
+            fail("record_size must be an integer of at least 256", record_size=given)
+        record_size, record_size_from, gap = (given, "the record_size argument", None) if given else detect_record_size(fh, size)
         if not record_size:
             fail("no FILE record found; this does not look like an $MFT", path=path, bytes=size)
-        if not isinstance(record_size, int) or isinstance(record_size, bool) or record_size < 256:
-            fail("record_size must be an integer of at least 256", record_size=record_size)
 
         key = [path, record_size, args.get("name"), want_entry, bool(args.get("deleted_only")),
                bool(args.get("streams_only")), bool(args.get("timestomp_only")),
                bool(args.get("with_resident"))]
         entries = LosslessPage("mft_records", key, limit)
         problems = LosslessPage("mft_records-problems", key, 40)
+        structural = 0
         scanned, parsed = 0, 0
         trailing = 0
         fh.seek(0)
@@ -392,6 +458,10 @@ def main():
             if entry is None:
                 continue
             parsed += 1
+            if entry.get("structural_errors"):
+                structural += 1
+                problems.add({"record": index, "offset": index * record_size,
+                              "why": "the record did not parse cleanly: %s" % "; ".join(entry["structural_errors"])})
             if want_entry is not None:
                 if entry["entry"] != want_entry:
                     continue
@@ -409,18 +479,23 @@ def main():
     page = entries.finish()
     problem_page = problems.finish()
     out = {
+        "parser": "mft_records/2",
+        "status": "partial" if problem_page["matched"] else "complete",
         "path": path,
         "record_size": record_size,
+        "record_size_from": record_size_from,
         "records_scanned": scanned,
         "records_parsed": parsed,
+        "records_with_structural_errors": structural,
         "entries": entries.page,
         "entry_count": page["matched"],
         **page,
         "problems": problems.page,
         "problem_count": problem_page["matched"],
-        "note": "A flag beginning si_ is an indicator, not proof. $FN can be made to "
-                "follow $SI by creating, stomping and then renaming; the defensible "
-                "confirmation is $LogFile, which records when the driver wrote the value.",
+        "note": "A flag beginning si_ is an indicator, not proof: $SI and $FN times can each be changed by software, and a "
+                "disagreement between them has more than one cause. Corroborate with the USN journal and other sources; the pack does "
+                "not read $LogFile. $ATTRIBUTE_LIST is not resolved and no parent path is rebuilt (each name carries its parent entry "
+                "and sequence). A record with structural_errors kept what was sound and is unreliable.",
     }
     if problem_page.get("all_results"):
         out["all_problems"] = problem_page["all_results"]

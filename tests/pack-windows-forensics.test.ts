@@ -26,6 +26,7 @@
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { chmod, mkdir, readFile, readdir, stat, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -2901,5 +2902,266 @@ test("shellbags reads a shell item longer than 128 bytes whole, and refuses a ma
     assert.equal(out.entries[0].item.long_name, long);
     assert.equal(out.entries[0].item.long_name_from, "layout");
     assert.match(failed(await tool("shellbags", cwd, { hive: "work/UsrClass.dat", max_depth: 100000 })).error, /max_depth must be a whole number from 1 to 128/);
+  });
+});
+
+// --- mft_records ----------------------------------------------------------------
+
+/**
+ * An $MFT record as the tool's documentation lays it out: "FILE", the update sequence array at 0x04/0x06, the
+ * sequence number at 0x10, the first attribute at 0x14, flags at 0x16 (1 in use), the used and allocated sizes at 0x18
+ * and 0x1C, the base record reference at 0x20 and the record number at 0x2C; a resident attribute is its type, length,
+ * resident flag, name length and offset, attribute id (0x0E), content length (0x10) and offset (0x14), then the content;
+ * $STANDARD_INFORMATION holds four FILETIMEs and the flags at 0x20, $FILE_NAME a parent reference, four FILETIMEs, sizes,
+ * flags, the name length (0x40) and namespace (0x41) and the name from 0x42. The last two bytes of every 512-byte
+ * sector hold the update sequence number, the real bytes being in the array.
+ */
+const MFT_TIME = 133_500_000_000_000_001n;
+
+function mftAttr(type: number, content: Buffer, o: { id?: number; name?: string; declaredContentLength?: number } = {}): Buffer {
+  const nameBytes = Buffer.from(o.name ?? "", "utf16le");
+  const nameOffset = 0x18;
+  let contentOffset = nameOffset + nameBytes.length;
+  contentOffset += (8 - (contentOffset % 8)) % 8;
+  let total = contentOffset + content.length;
+  total += (8 - (total % 8)) % 8;
+  const b = Buffer.alloc(total);
+  b.writeUInt32LE(type, 0);
+  b.writeUInt32LE(total, 4);
+  b[8] = 0;
+  b[9] = (o.name ?? "").length;
+  b.writeUInt16LE(nameBytes.length ? nameOffset : 0, 10);
+  b.writeUInt16LE(o.id ?? 0, 0x0e);
+  b.writeUInt32LE(o.declaredContentLength ?? content.length, 0x10);
+  b.writeUInt16LE(contentOffset, 0x14);
+  nameBytes.copy(b, nameOffset);
+  content.copy(b, contentOffset);
+  return b;
+}
+
+const mftStandardInfo = (t: bigint, flags = 0x20): Buffer => {
+  const b = Buffer.alloc(0x48);
+  for (let i = 0; i < 4; i++) b.writeBigUInt64LE(t, i * 8);
+  b.writeUInt32LE(flags, 0x20);
+  return b;
+};
+
+function mftFileName(parent: bigint, parentSeq: bigint, name: string, t: bigint): Buffer {
+  const b = Buffer.alloc(0x42 + name.length * 2);
+  b.writeBigUInt64LE(parent | (parentSeq << 48n), 0);
+  for (let i = 0; i < 4; i++) b.writeBigUInt64LE(t, 8 + i * 8);
+  b.writeBigUInt64LE(4096n, 0x28);
+  b.writeBigUInt64LE(10n, 0x30);
+  b.writeUInt32LE(0x20, 0x38);
+  b[0x40] = name.length;
+  b[0x41] = 1;
+  Buffer.from(name, "utf16le").copy(b, 0x42);
+  return b;
+}
+
+function mftRecord(number: number, attrs: Buffer[], o: { sequence?: number; flags?: number; base?: bigint; endMarker?: boolean } = {}): Buffer {
+  const size = 1024;
+  const b = Buffer.alloc(size);
+  b.write("FILE", 0, "latin1");
+  const usaOffset = 0x30;
+  const usaCount = size / 512 + 1;
+  b.writeUInt16LE(usaOffset, 4);
+  b.writeUInt16LE(usaCount, 6);
+  b.writeUInt16LE(o.sequence ?? 1, 0x10);
+  let first = usaOffset + usaCount * 2;
+  first += (8 - (first % 8)) % 8;
+  b.writeUInt16LE(first, 0x14);
+  b.writeUInt16LE(o.flags ?? 1, 0x16);
+  if (o.base !== undefined) b.writeBigUInt64LE(o.base, 0x20);
+  b.writeUInt32LE(number, 0x2c);
+  let at = first;
+  for (const a of attrs) {
+    a.copy(b, at);
+    at += a.length;
+  }
+  if (o.endMarker !== false) b.writeUInt32LE(0xffffffff, at);
+  b.writeUInt32LE(at + 8, 0x18);
+  b.writeUInt32LE(size, 0x1c);
+  const sequence = Buffer.from([0x0b, 0x00]);
+  sequence.copy(b, usaOffset);
+  for (let i = 1; i < usaCount; i++) {
+    const end = i * 512 - 2;
+    b.copy(b, usaOffset + i * 2, end, end + 2);
+    sequence.copy(b, end);
+  }
+  return b;
+}
+
+type MftOut = {
+  status: string;
+  record_size: number;
+  record_size_from: string;
+  records_with_structural_errors: number;
+  entries: Array<{
+    entry: number;
+    primary_name?: string;
+    unreliable?: boolean;
+    structural_errors?: string[];
+    flags: string[];
+    names: Array<{ name: string; instance: number; parent_entry: number; parent_sequence: number; created: string | null }>;
+    data_streams: Array<{ name: string; instance: number; resident: boolean; real_size?: number }>;
+    standard_information?: { created: string | null; instance: number };
+    attribute_list_resolved?: boolean;
+    base_record: number | null;
+    base_sequence: number | null;
+    is_extension_record?: boolean;
+  }>;
+  problems: Array<{ record: number; why: string }>;
+  note: string;
+};
+
+test("mft_records checks every nested range against its own attribute: a $FILE_NAME whose name runs past the attribute is an error, not a decoded name", async () => {
+  // Nested ranges were checked against the whole record, so a damaged length let a name be read from the bytes of the
+  // attribute after it.
+  await withCwd(async (cwd) => {
+    const good = mftRecord(40, [mftAttr(0x10, mftStandardInfo(MFT_TIME)), mftAttr(0x30, mftFileName(5n, 5n, "ok.txt", MFT_TIME)), mftAttr(0x80, Buffer.from("hello"))]);
+    // The $FILE_NAME claims a 40-character name and its content holds only the 8 characters it was built with; the
+    // attribute after it is a $DATA whose bytes would complete the name if the range ran into it.
+    const short = mftAttr(0x30, mftFileName(5n, 5n, "abcdefgh", MFT_TIME));
+    short[0x40 + 0x18] = 40;
+    const spill = mftAttr(0x80, Buffer.from("x".repeat(60), "utf16le"));
+    const bad = mftRecord(41, [mftAttr(0x10, mftStandardInfo(MFT_TIME)), short, spill]);
+    // A $STANDARD_INFORMATION whose content is only 16 bytes, shorter than the times it should hold.
+    const stub = mftRecord(42, [mftAttr(0x10, Buffer.alloc(16)), mftAttr(0x30, mftFileName(5n, 5n, "z.txt", MFT_TIME))]);
+    await writeFile(join(cwd, "work", "MFT"), Buffer.concat([good, bad, stub]));
+    const out = body<MftOut>(await tool("mft_records", cwd, { path: "work/MFT" }));
+    assert.equal(out.record_size, 1024);
+    assert.equal(out.record_size_from, "the allocated size in the first record's header");
+    const [a, b, c] = out.entries;
+    assert.equal(a.unreliable, undefined);
+    assert.equal(a.primary_name, "ok.txt");
+    assert.equal(b.names.length, 0, "no name was decoded from a range that does not fit");
+    assert.equal(b.unreliable, true);
+    assert.ok((b.structural_errors ?? []).some((e) => /declares a 40-character name, which runs past its content/.test(e)), JSON.stringify(b.structural_errors));
+    assert.equal(c.standard_information, undefined, "no times were read from a short $STANDARD_INFORMATION");
+    assert.ok((c.structural_errors ?? []).some((e) => /\$STANDARD_INFORMATION .* shorter than the 36 it needs/.test(e)));
+    assert.equal(c.names[0].name, "z.txt", "what was sound is kept");
+    assert.equal(out.records_with_structural_errors, 2);
+    assert.equal(out.problems.length, 2);
+    assert.equal(out.status, "partial");
+  });
+});
+
+test("mft_records says when an attribute chain does not end with its marker, gives every name and stream its instance id, and keeps the base record's sequence", async () => {
+  await withCwd(async (cwd) => {
+    const ads = mftRecord(50, [
+      mftAttr(0x10, mftStandardInfo(MFT_TIME), { id: 0 }),
+      mftAttr(0x30, mftFileName(5n, 3n, "host.txt", MFT_TIME), { id: 1 }),
+      mftAttr(0x80, Buffer.from("main"), { id: 2 }),
+      mftAttr(0x80, Buffer.from("MZ payload"), { id: 4, name: "payload.exe" }),
+    ]);
+    const listed = mftRecord(51, [mftAttr(0x10, mftStandardInfo(MFT_TIME)), mftAttr(0x20, Buffer.alloc(32)), mftAttr(0x30, mftFileName(5n, 5n, "big.bin", MFT_TIME))]);
+    const extension = mftRecord(52, [mftAttr(0x80, Buffer.alloc(8), { id: 9 })], { base: 51n | (7n << 48n), flags: 1 });
+    const open = mftRecord(53, [mftAttr(0x10, mftStandardInfo(MFT_TIME))], { endMarker: false });
+    await writeFile(join(cwd, "work", "MFT"), Buffer.concat([ads, listed, extension, open]));
+    const out = body<MftOut>(await tool("mft_records", cwd, { path: "work/MFT" }));
+    const [r50, r51, r52, r53] = out.entries;
+    assert.deepEqual(r50.data_streams.map((s) => [s.name, s.instance]), [["", 2], ["payload.exe", 4]]);
+    assert.equal(r50.names[0].instance, 1);
+    assert.equal(r50.names[0].parent_sequence, 3);
+    assert.equal(r50.standard_information?.instance, 0);
+    assert.ok(r51.flags.includes("has_attribute_list"));
+    assert.equal(r51.attribute_list_resolved, false);
+    assert.equal(r52.base_record, 51);
+    assert.equal(r52.base_sequence, 7);
+    assert.equal(r52.is_extension_record, true);
+    assert.ok((r53.structural_errors ?? []).some((e) => /(runs out at offset \d+ without an end marker|attribute header at offset \d+ does not fit the record)/.test(e)), JSON.stringify(r53.structural_errors));
+    assert.match(out.note, /\$ATTRIBUTE_LIST is not resolved and no parent path is rebuilt/);
+    assert.doesNotMatch(out.note, /defensible confirmation is \$LogFile/);
+  });
+});
+
+// --- extract_stream -------------------------------------------------------------
+
+type StreamOut = {
+  status: string;
+  output?: string;
+  size?: number;
+  sha256?: string;
+  image: string;
+  offset_sectors: number;
+  inode: string;
+  entry: number;
+  attribute_type: number | null;
+  attribute_id: number | null;
+  icat_exit_status: number;
+  stderr_file: string | null;
+  stderr_bytes: number;
+  partial_output?: string;
+  partial_bytes?: number;
+  error?: string;
+};
+
+/** icat as the Sleuth Kit has it: `icat -o <sector offset> <image> <inode>` writes the stream to stdout. */
+const ICAT_STUB = (body: string): string => `
+# record the arguments, one to a line
+printf '%s\\n' "$@" > "$ICAT_ARGS"
+${body}
+`;
+
+test("extract_stream writes the stream to a named file under the run with its size and sha256, and prints none of it", async () => {
+  // It printed the whole stream as base64 on stdout (a 30 second limit, no digest, no size), and a large stream
+  // could not be returned at all.
+  await withCwd(async (cwd, bin) => {
+    await stub(bin, "icat", ICAT_STUB(`i=0; while [ $i -lt 5 ]; do head -c 1048576 /dev/zero | tr '\\0' 'A'; i=$((i+1)); done; echo "icat: warning: slack space ignored" >&2`));
+    await writeFile(join(cwd, "work", "disk.raw"), Buffer.alloc(1024));
+    const args = join(cwd, "icat-args");
+    const run = await tool("extract_stream", cwd, { image: "work/disk.raw", inode: "168-128-4", offset: 2048, output: "work/s1/168-128-4.bin" }, { ICAT_ARGS: args }, bin);
+    const out = body<StreamOut>(run);
+    assert.equal(out.status, "complete");
+    assert.equal(out.size, 5 * 1048576);
+    const written = await readFile(join(cwd, "work", "s1", "168-128-4.bin"));
+    assert.equal(written.length, 5 * 1048576);
+    assert.equal(out.sha256, createHash("sha256").update(written).digest("hex"));
+    assert.ok(run.stdout.length < 2000, "the answer is a record, not the bytes");
+    assert.deepEqual([out.entry, out.attribute_type, out.attribute_id, out.offset_sectors], [168, 128, 4, 2048]);
+    assert.equal(out.stderr_bytes > 0, true);
+    assert.match(await readFile(join(cwd, out.stderr_file as string), "utf8"), /slack space ignored/);
+    assert.deepEqual((await readFile(args, "utf8")).trim().split("\n"), ["-o", "2048", "work/disk.raw", "168-128-4"]);
+  });
+});
+
+test("extract_stream calls a failed icat a failure: what it wrote is kept as .partial, its whole stderr is kept, and the exit is non-zero", async () => {
+  await withCwd(async (cwd, bin) => {
+    await stub(bin, "icat", ICAT_STUB(`printf 'partial bytes'\necho "Error looking up inode: 9999" >&2\necho "second line of the message" >&2\nexit 1`));
+    await writeFile(join(cwd, "work", "disk.raw"), Buffer.alloc(1024));
+    const failure = await tool("extract_stream", cwd, { image: "work/disk.raw", inode: "9999", output: "work/s1/x.bin" }, { ICAT_ARGS: join(cwd, "icat-args") }, bin);
+    const out = failed(failure) as unknown as StreamOut;
+    assert.equal(out.status, "failed");
+    assert.equal(out.icat_exit_status, 1);
+    assert.equal(out.partial_output, "work/s1/x.bin.partial");
+    assert.equal(out.partial_bytes, 13);
+    assert.equal(await exists(join(cwd, "work", "s1", "x.bin")), false, "no file passes for an extraction");
+    assert.equal(await readFile(join(cwd, "work", "s1", "x.bin.partial"), "utf8"), "partial bytes");
+    assert.equal(await readFile(join(cwd, out.stderr_file as string), "utf8"), "Error looking up inode: 9999\nsecond line of the message\n");
+  });
+});
+
+test("extract_stream never overwrites a file, never writes under inputs/ or outside the run, and refuses an inode it cannot read before it runs icat", async () => {
+  await withCwd(async (cwd, bin) => {
+    await stub(bin, "icat", ICAT_STUB(`printf 'x'`));
+    await writeFile(join(cwd, "work", "disk.raw"), Buffer.alloc(1024));
+    const env = { ICAT_ARGS: join(cwd, "icat-args") };
+    await writeFile(join(cwd, "work", "taken.bin"), "evidence");
+    assert.match(failed(await tool("extract_stream", cwd, { image: "work/disk.raw", inode: "5", output: "work/taken.bin" }, env, bin)).error, /already exists/);
+    assert.equal(await readFile(join(cwd, "work", "taken.bin"), "utf8"), "evidence");
+    assert.match(failed(await tool("extract_stream", cwd, { image: "work/disk.raw", inode: "5", output: "inputs/x.bin" }, env, bin)).error, /cannot be under inputs/);
+    assert.match(failed(await tool("extract_stream", cwd, { image: "work/disk.raw", inode: "5", output: "work/../inputs/y.bin" }, env, bin)).error, /cannot be under inputs/);
+    assert.match(failed(await tool("extract_stream", cwd, { image: "work/disk.raw", inode: "5", output: "/tmp/outside-the-run.bin" }, env, bin)).error, /inside the run directory/);
+    // A link in the run that points out of it is resolved first, and refused as the place it leads to.
+    await symlink("../../elsewhere/planted", join(cwd, "work", "link.bin"));
+    assert.match(failed(await tool("extract_stream", cwd, { image: "work/disk.raw", inode: "5", output: "work/link.bin" }, env, bin)).error, /inside the run directory/);
+    await symlink("taken.bin", join(cwd, "work", "samedir.bin"));
+    assert.match(failed(await tool("extract_stream", cwd, { image: "work/disk.raw", inode: "5", output: "work/samedir.bin" }, env, bin)).error, /already exists/);
+    assert.equal(await readFile(join(cwd, "work", "taken.bin"), "utf8"), "evidence", "nothing was written through the link");
+    for (const inode of ["5; rm -rf /", "1-2-3-4", "abc", "-5", ""]) {
+      assert.match(failed(await tool("extract_stream", cwd, { image: "work/disk.raw", inode, output: "work/z.bin" }, env, bin)).error, /inode must be an address/, inode);
+    }
+    assert.equal(await exists(join(cwd, "icat-args")), false, "a refused call never reaches icat");
   });
 });
