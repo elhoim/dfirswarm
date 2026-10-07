@@ -140,8 +140,23 @@ test("the claims the review removed do not come back", () => {
     [/(say|state) (that )?none was read|say that no [A-Za-z ]+ reader was available/i, "a boundary worded as 'do not examine it'"],
     [/names every candidate/i, "an unresolved link that lists every candidate (it lists to a cap, with the count)"],
     [/first sign-in that was not (the )?(account owner|user)/i, "initial access presumed"],
+    // The same claims in other words: a verb of proof or meaning joined to a conclusion the evidence cannot carry.
+    [/\b(proves?|confirms?|demonstrates?|establishes)\b[^.]{0,40}\b(access|accessed|read|exfiltrat\w*|stolen|theft|compromis\w*|took effect|was used)\b/i, "a conclusion stated as proven"],
+    [/\b(means|indicates|signals|marks|denotes)\b[^.]{0,30}\b(anonymous|public|reconnaissance|lateral movement|exfiltrat\w*|persistence|an intrusion|compromise)\b/i, "a name or a pattern read as a stage of an intrusion"],
+    [/\b(shows?|proves?|reveals?)\b[^.]{0,25}\bwho (did|read|accessed|took|sent|logged)\b/i, "an artefact read as naming the person"],
+    [/\b(guarantees?|definitely|certainly|undoubtedly|beyond doubt)\b/i, "certainty about what an export cannot show"],
+    [/\b\d{5,6}\b[^.]{0,30}\b(means|indicates|denotes|is returned when)\b/i, "an error code with one stated meaning"],
+    [/\b(attacker|intruder|adversary|threat actor)s?\b[^.]{0,50}\b(window|period|duration)\b/i, "an adversary's window or period"],
+    [/\b(wipe[sd]?|erase[sd]?|clear(s|ed)?|delete[sd]?|destroy(s|ed)?) (the |that |all )?(trail|logs?|evidence)\b/i, "a logging call read as destroying evidence"],
+    [/\b(an?|one|per) (hour|day|week|month|year)s?\b|\bweek\b|\bhourly\b|\bdaily\b/i, "a retention, delay or window figure in other words"],
+    [/\b(free|premium|business|enterprise|E3|E5|P1|P2) (tier|plan|edition|licen[cs]e)s?\b/i, "a licence tier stated as deciding what is kept"],
+    [/\b(will|always|never)\b[^.]{0,30}\b(be logged|appear in the (log|export)|leave a (record|trace))\b/i, "what a log always or never holds"],
   ];
-  for (const { id, text } of all) for (const [rx, what] of gone) assert.doesNotMatch(text, rx, `${id}: ${what}`);
+  // A figure a skill quotes from the tool (`a 5 second window`, in backticks) is a tool fact, not a retention or delay claim.
+  for (const { id, text } of all) {
+    const plain = text.replace(/`[^`]*`/g, "``");
+    for (const [rx, what] of gone) assert.doesNotMatch(/figure/.test(what) ? plain : text, rx, `${id}: ${what}`);
+  }
   const signins = all.find((s) => s.id === "entra/signins")!.text;
   assert.doesNotMatch(signins, /50126[^.]*wrong password|50158[^.]*conditional access failure/i, "result codes are the provider's words, not a narrowed gloss");
   // What the review put right stays right: Interrupted is null even with a code, and the tool's cap and counts are stated.
