@@ -678,3 +678,293 @@ test("fsevents_parse pages records losslessly and writes each to out_file", asyn
   });
 });
 
+// --- knowledgec_query -------------------------------------------------------------
+
+const KC = join(MAC, "knowledgec_query", "run.py");
+
+/**
+ * A knowledgeC.db as Core Data lays it out: ZOBJECT with its typed value columns and two foreign keys,
+ * ZSTRUCTUREDMETADATA (one column per metadata key the OS wrote) and ZSOURCE. The dates are Apple-epoch seconds.
+ * Built with the sqlite3 library from DDL written by hand here.
+ */
+const KC_BUILD = `
+import os, shutil, sqlite3, sys
+target, mode = sys.argv[1], sys.argv[2]
+con = sqlite3.connect(target)
+if mode == "wal":
+    con.execute("PRAGMA journal_mode=WAL")
+    con.execute("PRAGMA wal_autocheckpoint=0")
+con.executescript("""
+CREATE TABLE ZSOURCE (Z_PK INTEGER PRIMARY KEY, Z_ENT INTEGER, Z_OPT INTEGER, ZBUNDLEID VARCHAR, ZDEVICEID VARCHAR, ZGROUPID VARCHAR, ZITEMID VARCHAR, ZSOURCEID VARCHAR);
+CREATE TABLE ZSTRUCTUREDMETADATA (Z_PK INTEGER PRIMARY KEY, Z_ENT INTEGER, Z_OPT INTEGER,
+  Z_DKSAFARIHISTORYMETADATAKEY__TITLE VARCHAR, Z_DKDIGITALHEALTHMETADATAKEY__WEBDOMAIN VARCHAR, Z_DKAPPLICATIONMETADATAKEY__LAUNCHREASON VARCHAR);
+CREATE TABLE ZOBJECT (Z_PK INTEGER PRIMARY KEY, Z_ENT INTEGER, Z_OPT INTEGER, ZSECONDSFROMGMT INTEGER, ZSOURCE INTEGER, ZSTRUCTUREDMETADATA INTEGER,
+  ZVALUEINTEGER INTEGER, ZVALUETYPECODE INTEGER, ZCREATIONDATE TIMESTAMP, ZENDDATE TIMESTAMP, ZSTARTDATE TIMESTAMP, ZUUID BLOB,
+  ZVALUESTRING VARCHAR, ZVALUEDOUBLE FLOAT, ZSTREAMNAME VARCHAR);
+INSERT INTO ZSOURCE VALUES (1, 4, 1, 'com.apple.Safari', 'DEVICE-ONE', 'grp', 'item', 'src');
+INSERT INTO ZSOURCE VALUES (2, 4, 1, NULL, 'DEVICE-TWO', NULL, NULL, NULL);
+INSERT INTO ZSTRUCTUREDMETADATA VALUES (1, 2, 1, 'Quarterly report', 'example.com', NULL);
+INSERT INTO ZSTRUCTUREDMETADATA VALUES (2, 2, 1, NULL, NULL, 'user');
+INSERT INTO ZOBJECT VALUES (1, 3, 1, 3600, 1, 2, NULL, NULL, 760000000.5, 760000060.25, 760000000.25, x'00112233445566778899aabbccddeeff', 'com.apple.Terminal', NULL, '/app/inFocus');
+INSERT INTO ZOBJECT VALUES (2, 3, 1, 3600, 2, NULL, 1, 0, 760000100, 760000200, 760000100, NULL, NULL, NULL, '/display/isBacklit');
+INSERT INTO ZOBJECT VALUES (3, 3, 1, 3600, 2, NULL, 0, 0, 760000300, 760000400, 760000300, NULL, NULL, NULL, '/display/isBacklit');
+INSERT INTO ZOBJECT VALUES (4, 3, 1, 3600, 2, NULL, 1, 0, 760000500, 760000600, 760000500, NULL, NULL, NULL, '/device/isLocked');
+INSERT INTO ZOBJECT VALUES (5, 3, 1, 3600, 1, 1, NULL, NULL, 760000700, 760000760, 760000700, NULL, 'https://example.com/a', NULL, '/safari/history');
+INSERT INTO ZOBJECT VALUES (6, 3, 1, 3600, 1, NULL, NULL, NULL, 760000800, 760000860, 760000800, NULL, NULL, 3.5, '/app/webUsage');
+""")
+con.commit()
+if mode == "wal":
+    con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    # A row that exists only in the write-ahead log: committed, never checkpointed.
+    con.execute("INSERT INTO ZOBJECT VALUES (7, 3, 1, 3600, 1, NULL, NULL, NULL, 760000900, 760000960, 760000900, NULL, 'com.walonly.app', NULL, '/app/inFocus')")
+    con.commit()
+    os.makedirs(sys.argv[3], exist_ok=True)
+    shutil.copy(target, os.path.join(sys.argv[3], "knowledgeC.db"))
+    shutil.copy(target + "-wal", os.path.join(sys.argv[3], "knowledgeC.db-wal"))
+con.close()
+`;
+
+type KcEntry = {
+  parser: string;
+  z_pk: number;
+  source_table: string;
+  stream: string;
+  value_string: string | null;
+  value_integer: number | null;
+  value_double: number | null;
+  value_type_code: number | null;
+  start_raw: number | null;
+  end_raw: number | null;
+  created_raw: number | null;
+  start: string | null;
+  end: string | null;
+  created: string | null;
+  duration_seconds: number | null;
+  utc_offset_seconds: number | null;
+  uuid: string | null;
+  metadata?: Record<string, unknown>;
+  source?: Record<string, unknown>;
+  value?: unknown;
+};
+type KcAnswer = {
+  status: string;
+  entries: KcEntry[];
+  entry_count: number;
+  complete_entries: string | null;
+  inline_limited: boolean;
+  filters_applied?: string[];
+  filters_unapplied?: string[];
+  schema: { tables: string[]; fingerprint: string; joins: { ZSTRUCTUREDMETADATA: boolean; ZSOURCE: boolean } };
+  source_used: { database: string; staged: boolean; sidecars: Record<string, { bytes: number }>; wal?: { frames_valid?: number; frames_committed?: number }; wal_checkpoint?: { log: number; checkpointed: number } };
+  streams: { stream: string; count: number; first_start_raw: number | null; last_start_raw: number | null }[];
+  streams_total: number;
+  streams_pages: { all_results?: string };
+  parser: string;
+  note: string;
+};
+
+async function kcDb(cwd: string, name: string, mode: "plain" | "wal" = "plain"): Promise<string> {
+  const dir = join(cwd, "work");
+  const live = join(dir, `${name}-live.db`);
+  const out = await runPySnippet(KC_BUILD, [live, mode, join(dir, name)], null);
+  assert.equal(out.code, 0, out.stderr);
+  if (mode === "plain") {
+    await mkdir(join(dir, name), { recursive: true });
+    const { copyFile } = await import("node:fs/promises");
+    await copyFile(live, join(dir, name, "knowledgeC.db"));
+  }
+  return `work/${name}/knowledgeC.db`;
+}
+
+test("knowledgec_query joins ZSTRUCTUREDMETADATA and ZSOURCE and exports the typed values, with the row it came from", async () => {
+  // It read ZOBJECT only: the metadata and the source were never joined, ZVALUEINTEGER was never exported (so /device/isLocked
+  // and /display/isBacklit could not be decoded) and the row id was discarded.
+  await withCwd(async (cwd) => {
+    const db = await kcDb(cwd, "plain");
+    const answer = body<KcAnswer>(await tool(KC, cwd, { db }));
+    assert.equal(answer.status, "complete");
+    assert.equal(answer.entry_count, 6);
+    const byPk = Object.fromEntries(answer.entries.map((e) => [e.z_pk, e]));
+    const focus = byPk[1];
+    assert.equal(focus.stream, "/app/inFocus");
+    assert.equal(focus.value_string, "com.apple.Terminal");
+    assert.equal(focus.source_table, "ZOBJECT");
+    assert.equal(focus.parser, "knowledgec_query/3");
+    assert.equal(focus.start_raw, 760000000.25);
+    assert.equal(focus.start, "2025-01-31T07:06:40.250000Z");
+    assert.equal(focus.end, "2025-01-31T07:07:40.250000Z");
+    assert.equal(focus.duration_seconds, 60);
+    assert.equal(focus.utc_offset_seconds, 3600);
+    assert.equal(focus.uuid, "00112233445566778899aabbccddeeff");
+    // The joined metadata: only the columns that are set, under their own names; the row's Z_PK with them.
+    assert.deepEqual(focus.metadata, { Z_PK: 2, Z_ENT: 2, Z_OPT: 1, Z_DKAPPLICATIONMETADATAKEY__LAUNCHREASON: "user" });
+    assert.equal((focus.source as Record<string, unknown>).ZDEVICEID, "DEVICE-ONE");
+    assert.equal((focus.source as Record<string, unknown>).ZBUNDLEID, "com.apple.Safari");
+    // The numeric state: lock and backlight values are integers, and a duration of use can be a double.
+    assert.equal(byPk[2].value_integer, 1);
+    assert.equal(byPk[3].value_integer, 0);
+    assert.equal(byPk[4].stream, "/device/isLocked");
+    assert.equal(byPk[4].value_integer, 1);
+    assert.equal(byPk[2].value_type_code, 0);
+    assert.equal(byPk[6].value_double, 3.5);
+    assert.equal(byPk[5].value_string, "https://example.com/a");
+    assert.equal((byPk[5].metadata as Record<string, unknown>).Z_DKSAFARIHISTORYMETADATAKEY__TITLE, "Quarterly report");
+    assert.equal((byPk[5].metadata as Record<string, unknown>).Z_DKDIGITALHEALTHMETADATAKEY__WEBDOMAIN, "example.com");
+    assert.equal((byPk[2].source as Record<string, unknown>).ZDEVICEID, "DEVICE-TWO");
+    // No legacy `bundle` that was the value string again.
+    assert.equal((byPk[1] as unknown as Record<string, unknown>).bundle, undefined);
+    assert.deepEqual(answer.schema.joins, { ZSTRUCTUREDMETADATA: true, ZSOURCE: true });
+    assert.match(answer.schema.fingerprint, /^[0-9a-f]{64}$/);
+    assert.ok(answer.schema.tables.includes("ZOBJECT"));
+  });
+});
+
+test("knowledgec_query reads a record that is only in the write-ahead log, from a read-only directory, and does not touch the evidence", async () => {
+  // Opened mode=ro beside the evidence, it failed on a read-only directory with 'not a SQLite database', and in a writable one it created a -shm next to the evidence.
+  await withCwd(async (cwd) => {
+    const dir = join(cwd, "work", "walcase");
+    await build(KC_BUILD, join(cwd, "work", "walcase-live.db"), "wal", dir);
+    const names = await readdir(dir);
+    assert.deepEqual(names.sort(), ["knowledgeC.db", "knowledgeC.db-wal"]);
+    const before = await Promise.all(names.map(async (n) => sha256(await readFile(join(dir, n)))));
+    const { chmod } = await import("node:fs/promises");
+    await chmod(dir, 0o555);
+    try {
+      const answer = body<KcAnswer>(await tool(KC, cwd, { db: "work/walcase/knowledgeC.db" }));
+      assert.equal(answer.entry_count, 7);
+      assert.ok(answer.entries.some((e) => e.value_string === "com.walonly.app" && e.z_pk === 7), "the row only the WAL holds");
+      assert.equal(answer.source_used.staged, true);
+      assert.equal(answer.source_used.sidecars["-wal"].bytes > 0, true);
+      assert.ok((answer.source_used.wal?.frames_committed ?? 0) > 0);
+      assert.ok((answer.source_used.wal_checkpoint?.checkpointed ?? 0) > 0, "the frames SQLite applied are counted");
+      assert.match(answer.note, /write-ahead log/i);
+    } finally {
+      await chmod(dir, 0o755);
+    }
+    assert.deepEqual((await readdir(dir)).sort(), names.sort(), "nothing was added beside the evidence");
+    const after = await Promise.all(names.map(async (n) => sha256(await readFile(join(dir, n)))));
+    assert.deepEqual(after, before);
+    // No staged copy is left behind in work/.
+    const left = await readdir(join(cwd, "work", "s1")).catch(() => [] as string[]);
+    assert.deepEqual(left.filter((n) => n.startsWith("knowledgec-")), []);
+  });
+});
+
+test("knowledgec_query says it did not apply a time filter the database has no column for, and does not drop the filter silently", async () => {
+  await withCwd(async (cwd) => {
+    const db = join(cwd, "work", "nodate.db");
+    await build(
+      `
+import sqlite3, sys
+c = sqlite3.connect(sys.argv[1])
+c.execute("CREATE TABLE ZOBJECT (Z_PK INTEGER PRIMARY KEY, ZSTREAMNAME VARCHAR, ZVALUESTRING VARCHAR)")
+c.executemany("INSERT INTO ZOBJECT VALUES (?,?,?)", [(1, "/app/inFocus", "a"), (2, "/app/inFocus", "b")])
+c.commit()
+`,
+      db,
+    );
+    const answer = body<KcAnswer>(await tool(KC, cwd, { db: "work/nodate.db", since: "2025-01-01T00:00:00Z" }));
+    assert.deepEqual(answer.filters_unapplied, ["since"]);
+    assert.equal(answer.entry_count, 2, "the rows are returned, and the answer says they are not filtered");
+    assert.equal(answer.status, "partial");
+    assert.deepEqual(answer.schema.joins, { ZSTRUCTUREDMETADATA: false, ZSOURCE: false });
+    assert.equal(answer.entries[0].start, null);
+    // With a date column the filter applies, and the answer says so.
+    const real = await kcDb(cwd, "plain2");
+    const win = body<KcAnswer>(await tool(KC, cwd, { db: real, since: "2025-01-31T07:08:10Z", until: "2025-01-31T07:15:50Z" }));
+    assert.deepEqual(win.filters_applied, ["since", "until"]);
+    assert.equal(win.filters_unapplied, undefined);
+    assert.deepEqual(win.entries.map((e) => e.z_pk), [2, 3, 4]);
+  });
+});
+
+test("knowledgec_query lists every stream in the database, not the thirty most numerous", async () => {
+  await withCwd(async (cwd) => {
+    const db = join(cwd, "work", "streams.db");
+    await build(
+      `
+import sqlite3, sys
+c = sqlite3.connect(sys.argv[1])
+c.execute("CREATE TABLE ZOBJECT (Z_PK INTEGER PRIMARY KEY, ZSTREAMNAME VARCHAR, ZVALUESTRING VARCHAR, ZSTARTDATE TIMESTAMP)")
+rows = []
+pk = 0
+for n in range(int(sys.argv[2])):
+    for k in range(1 + n % 3):
+        pk += 1
+        rows.append((pk, "/stream/%03d" % n, "v", 700000000 + pk))
+c.executemany("INSERT INTO ZOBJECT VALUES (?,?,?,?)", rows)
+c.commit()
+`,
+      db,
+      "40",
+    );
+    const answer = body<KcAnswer>(await tool(KC, cwd, { db: "work/streams.db" }));
+    assert.equal(answer.streams_total, 40);
+    assert.equal(answer.streams.length, 40);
+    assert.deepEqual(answer.streams.map((s) => s.stream).sort(), Array.from({ length: 40 }, (_, i) => `/stream/${String(i).padStart(3, "0")}`));
+    const first = answer.streams.find((s) => s.stream === "/stream/001");
+    assert.equal(first?.count, 2);
+    assert.equal(typeof first?.first_start_raw, "number");
+    // Past the inline page the whole inventory is in a file the answer names.
+    const many = join(cwd, "work", "streams250.db");
+    await build(
+      `
+import sqlite3, sys
+c = sqlite3.connect(sys.argv[1])
+c.execute("CREATE TABLE ZOBJECT (Z_PK INTEGER PRIMARY KEY, ZSTREAMNAME VARCHAR, ZVALUESTRING VARCHAR, ZSTARTDATE TIMESTAMP)")
+c.executemany("INSERT INTO ZOBJECT VALUES (?,?,?,?)", [(i + 1, "/s/%04d" % i, "v", 700000000 + i) for i in range(250)])
+c.commit()
+`,
+      many,
+    );
+    const big = body<KcAnswer>(await tool(KC, cwd, { db: "work/streams250.db" }));
+    assert.equal(big.streams_total, 250);
+    assert.ok(big.streams_pages.all_results);
+    const rows = (await readFile(join(cwd, big.streams_pages.all_results as string), "utf8")).trimEnd().split("\n");
+    assert.equal(rows.length, 250);
+  });
+});
+
+test("knowledgec_query writes every row to an out_file as it reads it, in start order with the row id as the tie-break, and does not overwrite", async () => {
+  await withCwd(async (cwd) => {
+    const db = join(cwd, "work", "ties.db");
+    await build(
+      `
+import sqlite3, sys
+c = sqlite3.connect(sys.argv[1])
+c.execute("CREATE TABLE ZOBJECT (Z_PK INTEGER PRIMARY KEY, ZSTREAMNAME VARCHAR, ZVALUESTRING VARCHAR, ZSTARTDATE TIMESTAMP)")
+# Three rows share one start; the physical order is not the key order.
+c.executemany("INSERT INTO ZOBJECT VALUES (?,?,?,?)", [(30, "/s", "c", 700), (10, "/s", "a", 700), (20, "/s", "b", 700), (5, "/s", "z", 900)])
+c.commit()
+`,
+      db,
+    );
+    const answer = body<KcAnswer>(await tool(KC, cwd, { db: "work/ties.db", limit: 2, out_file: "work/kc.jsonl" }));
+    assert.equal(answer.entries.length, 2);
+    assert.equal(answer.entry_count, 4);
+    assert.equal(answer.inline_limited, true);
+    assert.equal(answer.complete_entries, "work/kc.jsonl");
+    const rows = (await readFile(join(cwd, "work", "kc.jsonl"), "utf8")).trimEnd().split("\n").map((l) => JSON.parse(l) as KcEntry);
+    assert.deepEqual(rows.map((r) => r.z_pk), [10, 20, 30, 5]);
+    const clash = refused(await tool(KC, cwd, { db: "work/ties.db", out_file: "work/kc.jsonl" }));
+    assert.match(clash.error, /already exists/);
+    // A path with characters a file: URI would end on is read as the file it names.
+    await mkdir(join(cwd, "work", "odd#dir?x"), { recursive: true });
+    const { copyFile } = await import("node:fs/promises");
+    await copyFile(join(cwd, "work", "ties.db"), join(cwd, "work", "odd#dir?x", "knowledgeC.db"));
+    const odd = body<KcAnswer>(await tool(KC, cwd, { db: "work/odd#dir?x/knowledgeC.db" }));
+    assert.equal(odd.entry_count, 4);
+  });
+});
+
+test("knowledgec_query refuses a file that is not a knowledgeC database, and says what it found", async () => {
+  await withCwd(async (cwd) => {
+    await writeFile(join(cwd, "work", "text.db"), "not a database at all, just text\n");
+    assert.match(refused(await tool(KC, cwd, { db: "work/text.db" })).error, /not a SQLite database/);
+    await build(`import sqlite3, sys\nc = sqlite3.connect(sys.argv[1]); c.execute("CREATE TABLE other (a)"); c.commit()`, join(cwd, "work", "other.db"));
+    const other = refused(await tool(KC, cwd, { db: "work/other.db" }));
+    assert.match(other.error, /no ZOBJECT/);
+    assert.deepEqual(other.tables, ["other"]);
+  });
+});
+

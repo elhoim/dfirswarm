@@ -1,10 +1,10 @@
 {
   "name": "knowledgec_query",
-  "description": "Read knowledgeC.db: which application was in the foreground and for how long, when the screen was on, when the device was locked, and what was browsed. Joins ZOBJECT to its metadata and converts every time from the Apple epoch.",
+  "description": "Read knowledgeC.db, the application and device-state records macOS keeps for its own features (not an audit log): for each ZOBJECT row its stream, typed values (value_string, value_integer, value_double, value_type_code: the lock and backlight states are integers), raw and converted start, end and creation times (Apple epoch, 2001-01-01 UTC, to ISO 8601 UTC with the raw value kept), UUID, the other non-null ZOBJECT columns and, joined on the row's own foreign keys, every non-null column of its ZSTRUCTUREDMETADATA and ZSOURCE rows under their own names. The joins are made from the schema the file has; the answer says which tables joined, lists the tables and columns and carries a fingerprint of the three tables' columns. A stream's meaning, and whether it exists, depends on the build and the device: every stream in the file is inventoried (count, first and last start) whatever the filters, and none is assumed. since and until filter by start time (a record that began earlier and overlapped the window is not selected); a filter the database has no column for is listed in filters_unapplied and the answer is partial. A write-ahead log or hot journal beside the database holds committed rows the main file lacks: with one, the files are copied to a private directory, SQLite applies them there, the frames applied are counted and the copy is removed, so the evidence directory is never written to; without one the file is opened read-only and immutable. What it does not measure: Biome streams, other databases, whether a screen or focus state shows a person at the keyboard (it does not), or whether the stream was complete (retention varies). Every row carries its Z_PK and parser; rows are ordered by start then Z_PK; they are written to out_file as they are read (an existing file or link there is refused), or paged losslessly to a file the answer names.",
   "params": {
     "db": {
       "type": "string",
-      "description": "A knowledgeC.db, copied out with any -wal beside it"
+      "description": "A knowledgeC.db; any -wal, -shm or -journal beside it is used (in a private copy), so copy them out together"
     },
     "stream": {
       "type": "string",
@@ -12,19 +12,23 @@
     },
     "since": {
       "type": "string",
-      "description": "Only entries starting at or after this ISO 8601 UTC time"
+      "description": "Only entries starting at or after this ISO 8601 UTC time (needs a ZSTARTDATE column; otherwise listed in filters_unapplied)"
     },
     "until": {
       "type": "string",
-      "description": "Only entries starting at or before this ISO 8601 UTC time"
+      "description": "Only entries starting at or before this ISO 8601 UTC time (same)"
     },
     "limit": {
       "type": "integer",
-      "description": "Maximum rows returned inline when out_file is set (default 500); every matching row is written to out_file"
+      "description": "Entries shown inline (default 500). All are counted; the whole result is in out_file, or, when that is omitted, in a file under work/<your id>/tool-output/ (in a job, $OUT/tool-output/) that the answer names"
     },
     "out_file": {
       "type": "string",
-      "description": "Optional JSONL path for every matching row; when absent every row is returned inline"
+      "description": "JSONL path for every matching entry, written as each is read. The tool does not overwrite: an existing file or link at that name is refused"
+    },
+    "max_stage_bytes": {
+      "type": "integer",
+      "description": "The database and its sidecars are copied only up to this many bytes in all (default 2147483648); over it nothing is read and the answer says so"
     }
   },
   "runtime": "python3",
@@ -33,6 +37,11 @@
   "example": "{\"db\": \"work/extracted/knowledgeC.db\", \"stream\": \"/app/inFocus\", \"out_file\": \"work/knowledgec.jsonl\"}",
   "by": "maintainer",
   "at": "2026-09-22T16:00:00.000Z",
-  "version": 2,
-  "sha256": "e666132e5fccd9f8c885c1e045eae929ed7cb4aa49502d95f62d0bb319283af7"
+  "version": 3,
+  "sha256": "56c383fae7299899be119347ee56b29445aadeb4b5bf814160bdcb97343187e2",
+  "use": {
+    "names": [
+      "knowledgeC.db"
+    ]
+  }
 }
