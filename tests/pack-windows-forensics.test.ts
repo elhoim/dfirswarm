@@ -30,60 +30,12 @@ import { createHash } from "node:crypto";
 import { chmod, mkdir, readFile, readdir, stat, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
-import { ROOT, runPy, withCwd } from "./tool-library-harness.ts";
+import { ROOT, withCwd } from "./tool-library-harness.ts";
+import {
+  AGENT, DISSECT, REGIPY, WIN, asciiz, body, everyFileUnder, exists, failed, py, pythonCanImport, stub, stubModule, tool, u16, u16z,
+  type Run,
+} from "./windows-pack-harness.ts";
 import { hive } from "./windows-hive.ts";
-
-/**
- * These tests run the tools against the real libraries they import. A host that does not have a library (CI installs only
- * the apt packages, the images install the pip ones) skips them with the reason; everything else in this file uses stand-ins.
- */
-const pythonCanImport = (module: string): boolean => spawnSync("python3", ["-c", "import " + module], { stdio: "ignore" }).status === 0;
-const REGIPY = pythonCanImport("regipy.registry") ? false : "regipy is not installed on this host";
-const DISSECT = pythonCanImport("dissect.util.compression.lzxpress_huffman") ? false : "dissect.util is not installed on this host";
-
-const WIN = process.env.WINDOWS_PACK_TOOLS ?? join(ROOT, "packs", "windows-forensics", "tools");
-const AGENT = { AGENT_ID: "s1" };
-
-type Run = { code: number | null; stdout: string; stderr: string };
-
-async function tool(name: string, cwd: string, args: unknown, env: Record<string, string> = {}, bin?: string): Promise<Run> {
-  return runPy(join(WIN, name, "run.py"), cwd, args, bin, { ...AGENT, ...env });
-}
-
-function body<T>(out: Run): T {
-  assert.equal(out.code, 0, out.stderr + out.stdout);
-  assert.doesNotMatch(out.stderr, /Traceback/);
-  return JSON.parse(out.stdout) as T;
-}
-
-/** A refusal or a failure: a non-zero exit and a JSON answer with an `error`. */
-function failed(out: Run): { error: string; [key: string]: unknown } {
-  assert.notEqual(out.code, 0, out.stdout);
-  assert.doesNotMatch(out.stderr, /Traceback/);
-  return JSON.parse(out.stdout) as { error: string };
-}
-
-async function exists(path: string): Promise<boolean> {
-  return stat(path).then(() => true, () => false);
-}
-
-async function stub(bin: string, name: string, script: string): Promise<void> {
-  await mkdir(bin, { recursive: true });
-  const path = join(bin, name);
-  await writeFile(path, `#!/bin/sh\n${script}\n`, "utf8");
-  await chmod(path, 0o755);
-}
-
-/** Run python3 with code, for fixtures a Buffer is awkward for. */
-function py(code: string, ...args: string[]): string {
-  const out = spawnSync("python3", ["-c", code, ...args], { encoding: "utf8" });
-  assert.equal(out.status, 0, out.stderr);
-  return out.stdout;
-}
-
-const u16 = (text: string): Buffer => Buffer.from(text, "utf16le");
-const asciiz = (text: string): Buffer => Buffer.concat([Buffer.from(text, "latin1"), Buffer.from([0])]);
-const u16z = (text: string): Buffer => Buffer.concat([u16(text), Buffer.from([0, 0])]);
 
 // --- lnk_parse ------------------------------------------------------------------
 
@@ -348,15 +300,6 @@ class OleFileIO:
         pass
 `;
 
-async function stubModule(cwd: string, files: Record<string, string>): Promise<Record<string, string>> {
-  const dir = join(cwd, "pystub");
-  for (const [name, text] of Object.entries(files)) {
-    await mkdir(join(dir, name, ".."), { recursive: true });
-    await writeFile(join(dir, name), text, "utf8");
-  }
-  return { PYTHONPATH: dir };
-}
-
 type DestEntry = { number: number; host: string; filetime: bigint; pin: number; path: string };
 
 /** A DestList stream: a 32-byte header, then entries by their version's layout (114-byte fixed part in version 1; 130 bytes and a 4-byte trailer in 3 and 4). */
@@ -474,7 +417,7 @@ test("jumplist refuses a DestList version it does not read, with a problem and n
 test("jumplist reports a file it could not read as a failure with a count, and exits non-zero when none could be read", async () => {
   await withCwd(async (cwd) => {
     await writeFile(join(cwd, "work", "x.automaticDestinations-ms"), "not a compound file");
-    // No olefile on this PYTHONPATH: every automaticDestinations file fails, loudly.
+    // An olefile that says this is not a compound file: every automaticDestinations file fails, loudly.
     const env = await stubModule(cwd, { "olefile.py": "def isOleFile(p):\n    return False\n" });
     const out = await tool("jumplist", cwd, { path: "work/x.automaticDestinations-ms" }, env);
     assert.notEqual(out.code, 0);
@@ -529,160 +472,7 @@ test("the hive fixture is a hive regipy opens, with the keys and typed values wr
 
 // --- amcache_apps ---------------------------------------------------------------
 
-type AmcacheOut = {
-  status: string;
-  layouts_found: string[];
-  rows_by_layout: Record<string, number>;
-  entries: Array<Record<string, unknown>>;
-  entry_count: number;
-  hive_dirty: boolean;
-  transaction_logs_beside_hive: string[];
-  transaction_logs_replayed: boolean;
-  rows_failed: number;
-};
-
-const SHA1 = "da39a3ee5e6b4b0d3255bfef95601890afd80709";
-
-test("amcache_apps names the numbered values as regipy's Amcache plugin does, and reads the linker time as a Unix-epoch value, not a FILETIME", { skip: REGIPY }, async () => {
-  // `c` was labelled file_version (it is the file description; the version is `5`), and the linker
-  // timestamp, a 32-bit Unix-epoch value from the PE header, was converted as a FILETIME: 1700000000
-  // came out as 1601-01-01T00:02:50Z.
-  await withCwd(async (cwd) => {
-    const file = (name: string, values: Array<{ name: string; type: "sz" | "dword" | "qword"; value: string | number | bigint }>): { name: string; values: typeof values } => ({ name, values });
-    const bytes = hive({
-      name: "{11111111-2222-3333-4444-555555555555}",
-      children: [
-        {
-          name: "Root",
-          children: [
-            {
-              name: "File",
-              children: [
-                {
-                  name: "{aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee}",
-                  children: [
-                    file("1a2b", [
-                      { name: "0", type: "sz", value: "Fixture Suite" },
-                      { name: "1", type: "sz", value: "Fixture Corp" },
-                      { name: "5", type: "sz", value: "1.2.3.4" },
-                      { name: "c", type: "sz", value: "The fixture application" },
-                      { name: "f", type: "dword", value: 1700000000 },
-                      { name: "11", type: "qword", value: 133_443_104_001_234_567n },
-                      { name: "15", type: "sz", value: "C:\\Fixtures\\app.exe" },
-                      { name: "100", type: "sz", value: "0000" + "ab".repeat(16) },
-                      { name: "101", type: "sz", value: "0000" + SHA1 },
-                    ]),
-                  ],
-                },
-              ],
-            },
-          ],
-        },
-      ],
-    });
-    await writeFile(join(cwd, "work", "Amcache.hve"), bytes);
-    const out = body<AmcacheOut>(await tool("amcache_apps", cwd, { hive: "work/Amcache.hve" }));
-    assert.deepEqual(out.layouts_found, ["File"]);
-    const row = out.entries[0];
-    assert.equal(row.layout, "File");
-    assert.equal(row.file_version, "1.2.3.4", "value 5 is the file version");
-    assert.equal(row.file_description, "The fixture application", "value c is the file description");
-    assert.notEqual(row.file_version, row.file_description);
-    assert.equal(row.linker_compile_time, 1700000000);
-    assert.equal(row.linker_compile_time_utc, "2023-11-14T22:13:20Z", "a Unix-epoch value: 1700000000 is 2023, not 1601");
-    assert.equal(row.last_modified_timestamp_filetime, "133443104001234567");
-    assert.equal(row.last_modified_timestamp_utc, "2023-11-13T00:53:20.1234567Z");
-    assert.equal(row.full_path, "C:\\Fixtures\\app.exe");
-    assert.equal(row.sha1_raw, "0000" + SHA1, "the value as stored is kept");
-    assert.equal(row.sha1, SHA1, "stripped of its four leading zeros only where it has that shape");
-    assert.equal(row.link_date, undefined);
-  });
-});
-
-test("amcache_apps reads both layouts when a hive has both, each row naming its own", { skip: REGIPY }, async () => {
-  // The older layout was read only when the Windows 10 tree was absent, so a hive that carried both
-  // listed one tree and said nothing of the other.
-  await withCwd(async (cwd) => {
-    const bytes = hive({
-      name: "{11111111-2222-3333-4444-555555555555}",
-      children: [
-        {
-          name: "Root",
-          children: [
-            { name: "File", children: [{ name: "{vol}", children: [{ name: "7", values: [{ name: "15", type: "sz", value: "C:\\old\\legacy.exe" }] }] }] },
-            {
-              name: "InventoryApplicationFile",
-              children: [
-                {
-                  name: "modern.exe|0123456789abcdef",
-                  values: [
-                    { name: "LowerCaseLongPath", type: "sz", value: "c:\\new\\modern.exe" },
-                    { name: "FileId", type: "sz", value: "0000" + SHA1.toUpperCase() },
-                    { name: "Publisher", type: "sz", value: "Modern Corp" },
-                    { name: "LinkDate", type: "sz", value: "10/24/2023 10:14:55" },
-                    { name: "OriginalFileName", type: "sz", value: "modern.exe" },
-                  ],
-                },
-              ],
-            },
-          ],
-        },
-      ],
-    });
-    await writeFile(join(cwd, "work", "Amcache.hve"), bytes);
-    const out = body<AmcacheOut>(await tool("amcache_apps", cwd, { hive: "work/Amcache.hve" }));
-    assert.deepEqual([...out.layouts_found].sort(), ["File", "InventoryApplicationFile"]);
-    assert.deepEqual(out.rows_by_layout, { File: 1, InventoryApplicationFile: 1 });
-    assert.equal(out.entry_count, 2);
-    const byLayout = Object.fromEntries(out.entries.map((r) => [r.layout as string, r]));
-    assert.equal(byLayout.File.full_path, "C:\\old\\legacy.exe");
-    assert.equal(byLayout.InventoryApplicationFile.LowerCaseLongPath, "c:\\new\\modern.exe");
-    assert.equal(byLayout.InventoryApplicationFile.OriginalFileName, "modern.exe", "every named value is kept, not a chosen few");
-    assert.equal(byLayout.InventoryApplicationFile.file_id_sha1, SHA1, "lower-cased, four zeros stripped");
-    assert.equal(byLayout.InventoryApplicationFile.FileId, "0000" + SHA1.toUpperCase(), "and the value as stored is kept");
-    assert.equal(out.status, "complete");
-    assert.equal(out.hive_dirty, false);
-  });
-});
-
-test("amcache_apps returns a path past 256 characters whole: regipy's default cut is not taken", { skip: REGIPY }, async () => {
-  await withCwd(async (cwd) => {
-    const long = "c:\\users\\someone\\" + "nested\\".repeat(60) + "tool.exe";
-    await writeFile(join(cwd, "work", "Amcache.hve"), hive({ name: "{r}", children: [{ name: "Root", children: [
-      { name: "InventoryApplicationFile", children: [{ name: "tool.exe|1", values: [{ name: "LowerCaseLongPath", type: "sz", value: long }] }] },
-      { name: "File", children: [{ name: "{vol}", children: [{ name: "9", values: [{ name: "15", type: "sz", value: long }] }] }] },
-    ] }] }));
-    const out = body<AmcacheOut>(await tool("amcache_apps", cwd, { hive: "work/Amcache.hve" }));
-    const by = Object.fromEntries(out.entries.map((r) => [r.layout as string, r]));
-    assert.ok(long.length > 256);
-    assert.equal(by.InventoryApplicationFile.LowerCaseLongPath, long);
-    assert.equal(by.File.full_path, long);
-  });
-});
-
-test("amcache_apps says a hive is dirty, names the transaction logs beside it, and does not claim to have replayed them", { skip: REGIPY }, async () => {
-  await withCwd(async (cwd) => {
-    const bytes = hive(
-      { name: "{r}", children: [{ name: "Root", children: [{ name: "InventoryApplicationFile", children: [{ name: "a.exe|1", values: [{ name: "Name", type: "sz", value: "a.exe" }] }] }] }] },
-      { primarySeq: 9, secondarySeq: 8 },
-    );
-    await writeFile(join(cwd, "work", "Amcache.hve"), bytes);
-    await writeFile(join(cwd, "work", "Amcache.hve.LOG1"), Buffer.alloc(512));
-    const out = body<AmcacheOut>(await tool("amcache_apps", cwd, { hive: "work/Amcache.hve" }));
-    assert.equal(out.hive_dirty, true);
-    assert.deepEqual(out.transaction_logs_beside_hive, ["work/Amcache.hve.LOG1"]);
-    assert.equal(out.transaction_logs_replayed, false);
-  });
-});
-
-test("amcache_apps fails with the layouts it looked for when the hive holds neither", { skip: REGIPY }, async () => {
-  await withCwd(async (cwd) => {
-    await writeFile(join(cwd, "work", "Other.hve"), hive({ name: "r", children: [{ name: "Root", children: [{ name: "Elsewhere" }] }] }));
-    const err = failed(await tool("amcache_apps", cwd, { hive: "work/Other.hve" }));
-    assert.match(err.error, /neither Amcache layout/);
-    assert.deepEqual(err.looked_for, ["\\Root\\InventoryApplicationFile", "\\Root\\File"]);
-  });
-});
+// Its tests are in tests/pack-windows-forensics-registry.test.ts, each run against a stand-in for regipy and against the real library.
 
 // --- browser_history ------------------------------------------------------------
 
@@ -851,15 +641,6 @@ const LOGIN_FIXTURE = [
   "c.commit()",
 ].join("\n");
 
-async function everyFileUnder(dir: string): Promise<string[]> {
-  const out: string[] = [];
-  for (const entry of await readdir(dir, { withFileTypes: true })) {
-    const full = join(dir, entry.name);
-    if (entry.isDirectory()) out.push(...(await everyFileUnder(full)));
-    else out.push(full);
-  }
-  return out;
-}
 
 test("browser_history never echoes a password, a cookie value or an encrypted blob from Login Data or Cookies, in any query, and says which columns it withheld", async () => {
   // A SELECT * over `logins` and `cookies` printed password_value and the cookie values whole,
@@ -917,13 +698,14 @@ test("browser_history keeps two result columns of one name apart, and says which
   });
 });
 
-test("browser_history names a file that is not a database, with its first bytes and size, instead of an empty answer", async () => {
+test("browser_history names a file that is not a database, with whether it has the SQLite header and its size, never its bytes", async () => {
   await withCwd(async (cwd) => {
     await writeFile(join(cwd, "work", "History"), Buffer.from("this is not sqlite, it is only text padded out to a page".padEnd(4096, " ")));
     const err = failed(await tool("browser_history", cwd, { path: "work/History", query: "tables" }));
     assert.match(err.error, /not a SQLite database/);
     assert.equal(err.size, 4096);
-    assert.equal(typeof err.first_bytes_hex, "string");
+    assert.equal(err.sqlite_header, false);
+    assert.equal(err.first_bytes_hex, undefined, "the first bytes of a file can be a secret and are not echoed");
   });
 });
 
@@ -1009,7 +791,7 @@ test("yara_scan writes the matched bytes only on write_matches, only in a job, o
     assert.equal(out.secret_values.written, 3);
     assert.equal(out.secret_values.values_file, "store/jobs/j000007/out/yara-matched-strings.jsonl");
     assert.equal(out.secret_values.contains_secret_values, true);
-    assert.equal(run.stdout.includes("Summer2024"), false, "even then the answer itself has no value");
+    for (const piece of yaraPieces()) assert.equal((run.stdout + run.stderr).includes(piece), false, `even then the answer itself has no ${piece}`);
     const file = join(outDir, "yara-matched-strings.jsonl");
     assert.equal((await stat(file)).mode & 0o777, 0o600);
     const rows = (await readFile(file, "utf8")).trimEnd().split("\n").map((l) => JSON.parse(l) as { finding_id: string; value: string; offset: number; length: number; identifier: string });
@@ -1017,11 +799,29 @@ test("yara_scan writes the matched bytes only on write_matches, only in a job, o
     assert.equal(rows[0].value, PLANTED);
     assert.equal(rows[0].offset, 6);
     assert.equal(rows[0].length, 20);
-    // A values file already there is refused by name before anything is scanned.
-    const again = failed(await tool("yara_scan", cwd, { rules: "work/rules.yar", target: "work/sample.bin", write_matches: true }, { JOB_ID: "j000008", OUT: outDir }, bin));
-    assert.match(again.error, /already exists/);
+    // Nothing else the tool wrote holds the value, in any form: only the sealed values file does.
+    for (const other of (await everyFileUnder(cwd)).filter((f) => f !== file && !f.endsWith("sample.bin") && !f.endsWith("rules.yar") && !f.includes("/bin/"))) {
+      const text = (await readFile(other)).toString("latin1");
+      for (const piece of yaraPieces()) assert.equal(text.includes(piece), false, `${other} holds ${piece}`);
+    }
+    // A second run in the same job, the values file already there: it scans all the same, writes the next
+    // numbered file, names it, and the first file is as it was (it was refused without scanning).
+    const before = await readFile(file);
+    const again = body<YaraOut>(await tool("yara_scan", cwd, { rules: "work/rules.yar", target: "work/sample.bin", write_matches: true }, { JOB_ID: "j000007", OUT: outDir }, bin));
+    assert.equal(again.status, "complete");
+    assert.equal(again.string_match_count, 3);
+    assert.equal(again.secret_values.values_file, "store/jobs/j000007/out/yara-matched-strings-2.jsonl");
+    assert.equal(again.secret_values.written, 3);
+    assert.deepEqual(await readFile(file), before);
+    assert.equal((await stat(join(outDir, "yara-matched-strings-2.jsonl"))).mode & 0o777, 0o600);
   });
 });
+
+/** The planted value in every form an answer could carry it: whole, its words, its fragments, hex and base64 of each. */
+function yaraPieces(): string[] {
+  const raw = ["Summer2024!", "Summer2024", "password=Summer2024!", "password=", "Summer", "2024!"];
+  return [...raw, ...raw.map((r) => Buffer.from(r).toString("hex")), ...raw.map((r) => Buffer.from(r).toString("base64").replace(/=+$/, "")), "4D 5A 90 00"].filter((x) => x.length >= 5 || x === "2024!");
+}
 
 test("yara_scan keeps the whole of a run it had to stop: status partial, complete false, the matches read before the time limit and the stderr file", async () => {
   // A timeout threw away everything yara had printed, and the answer was "did not finish".
@@ -1210,152 +1010,7 @@ test("esedb_query keeps what a time-limited export wrote and says it was stopped
 });
 
 // --- sigma_hunt -----------------------------------------------------------------
-
-type Detection = { rule: string; level: string | null; level_rank: number | null; record_id: number | null; time: string | null };
-type HuntOut = {
-  status: string;
-  complete: boolean;
-  exit_code: number;
-  timed_out: boolean;
-  run_dir: string;
-  engine: string;
-  engine_detections_read: number;
-  detections: Detection[];
-  detection_count: number;
-  below_min_level: number;
-  unknown_levels: Record<string, number>;
-  malformed_lines: number;
-  malformed_file: { path: string; bytes: number } | null;
-  ruleset: { source: string; kind?: string; files?: number; digest: string | null };
-  all_detections: { path: string; rows: number };
-  engine_stderr: { path: string; bytes: number };
-};
-
-/** Hayabusa as it is called here: `hayabusa json-timeline -f|-d <input> -o <out> -w -q`, writing one JSON object per line to <out>. */
-const HAYABUSA_STUB = (lines: string[], tail = ""): string => `
-out=""
-while [ $# -gt 0 ]; do case "$1" in -o) out="$2"; shift;; esac; shift; done
-cat > "$out" <<'JSONL'
-${lines.join("\n")}
-JSONL
-${tail}
-`;
-
-const hb = (title: string, level: string | undefined, id: number, time = "2026-09-01T10:00:00Z"): string =>
-  JSON.stringify({ RuleTitle: title, ...(level === undefined ? {} : { Level: level }), Timestamp: time, EventID: 4688, Channel: "Security", Computer: "WS01", RecordID: id, Details: { Cmd: "x" } });
-
-test("sigma_hunt ranks the level words Hayabusa writes (crit, med, info), and keeps a level it does not know instead of dropping it", async () => {
-  // rank() was 0 for any word but the five full names, so a `crit` or `med` detection was filtered out
-  // by min_level without a word.
-  await withCwd(async (cwd, bin) => {
-    await stub(bin, "hayabusa", HAYABUSA_STUB([
-      hb("Critical rule", "crit", 1, "2026-09-01T10:00:01Z"),
-      hb("Medium rule", "med", 2, "2026-09-01T10:00:02Z"),
-      hb("High rule", "high", 3, "2026-09-01T10:00:03Z"),
-      hb("Info rule", "info", 4),
-      hb("Low rule", "low", 5),
-      hb("Odd rule", "evil", 6, "2026-09-01T10:00:06Z"),
-      hb("Levelless rule", undefined, 7, "2026-09-01T10:00:07Z"),
-    ]));
-    await writeFile(join(cwd, "work", "Security.evtx"), "evtx");
-    const out = body<HuntOut>(await tool("sigma_hunt", cwd, { path: "work/Security.evtx", out_dir: "work/hunt", engine: "hayabusa", min_level: "medium" }, {}, bin));
-    assert.equal(out.status, "complete");
-    assert.equal(out.engine_detections_read, 7);
-    assert.deepEqual(out.detections.map((d) => d.rule), ["Odd rule", "Levelless rule", "Critical rule", "High rule", "Medium rule"], "unknown levels first, then critical down, nothing dropped but what min_level names");
-    assert.deepEqual(out.detections.map((d) => d.level_rank), [null, null, 4, 3, 2]);
-    assert.equal(out.below_min_level, 2, "info and low are below medium, and counted");
-    assert.deepEqual(out.unknown_levels, { evil: 1, "(no level)": 1 });
-    assert.equal(out.detection_count, 5);
-    assert.equal(out.all_detections.rows, 5);
-  });
-});
-
-test("sigma_hunt marks a run whose engine exited non-zero partial, and never reads an earlier run's result in its place", async () => {
-  // It accepted any result file in out_dir whatever the engine's exit status, so an engine that failed
-  // could be answered with the file an earlier invocation left.
-  await withCwd(async (cwd, bin) => {
-    await writeFile(join(cwd, "work", "Security.evtx"), "evtx");
-    await stub(bin, "hayabusa", HAYABUSA_STUB([hb("First run", "high", 1)]));
-    const first = body<HuntOut>(await tool("sigma_hunt", cwd, { path: "work/Security.evtx", out_dir: "work/hunt", engine: "hayabusa" }, {}, bin));
-    assert.equal(first.status, "complete");
-    // The engine now writes nothing and exits 0: the old result is not this run's.
-    await stub(bin, "hayabusa", "exit 0");
-    const stale = failed(await tool("sigma_hunt", cwd, { path: "work/Security.evtx", out_dir: "work/hunt", engine: "hayabusa" }, {}, bin));
-    assert.match(stale.error, /wrote no result file/);
-    // An engine that leaves a result and then fails is a partial run, with its exit status.
-    await stub(bin, "hayabusa", HAYABUSA_STUB([hb("Second run", "high", 2)], `echo "engine: could not read channel Microsoft-Windows-X" >&2\nexit 3`));
-    const partial = body<HuntOut>(await tool("sigma_hunt", cwd, { path: "work/Security.evtx", out_dir: "work/hunt", engine: "hayabusa" }, {}, bin));
-    assert.equal(partial.status, "partial");
-    assert.equal(partial.complete, false);
-    assert.equal(partial.exit_code, 3);
-    assert.deepEqual(partial.detections.map((d) => d.rule), ["Second run"]);
-    assert.notEqual(partial.run_dir, first.run_dir, "each invocation has a directory of its own");
-    assert.match(await readFile(join(cwd, partial.engine_stderr.path), "utf8"), /could not read channel/);
-  });
-});
-
-test("sigma_hunt counts a line of the engine's result it cannot read, keeps it whole in a file, and says the run is partial", async () => {
-  // A malformed JSON Lines row was passed over with `continue`: the detection it held was never counted.
-  await withCwd(async (cwd, bin) => {
-    const broken = '{"RuleTitle": "Cut off", "Level": "high", "Timestamp": "2026-09-01T1';
-    await stub(bin, "hayabusa", HAYABUSA_STUB([hb("Good one", "high", 1), broken, hb("Good two", "high", 2, "2026-09-01T10:00:02Z")]));
-    await writeFile(join(cwd, "work", "Security.evtx"), "evtx");
-    const out = body<HuntOut>(await tool("sigma_hunt", cwd, { path: "work/Security.evtx", out_dir: "work/hunt", engine: "hayabusa" }, {}, bin));
-    assert.equal(out.status, "partial");
-    assert.equal(out.malformed_lines, 1);
-    assert.equal(out.engine_detections_read, 2);
-    assert.ok(out.malformed_file);
-    assert.match(await readFile(join(cwd, out.malformed_file.path), "utf8"), /line 2\t\{"RuleTitle": "Cut off"/);
-  });
-});
-
-test("sigma_hunt reads Hayabusa's pretty-printed objects as a stream, and records the ruleset's digest", async () => {
-  await withCwd(async (cwd, bin) => {
-    await writeFile(join(cwd, "work", "Security.evtx"), "evtx");
-    // Objects written one after another across lines (Hayabusa's default JSON timeline), not one per line.
-    const pretty = [hb("A", "high", 1), hb("B", "critical", 2)].map((o) => JSON.stringify(JSON.parse(o), null, 2)).join("\n");
-    await stub(bin, "hayabusa", HAYABUSA_STUB([pretty]));
-    await mkdir(join(cwd, "work", "rules", "sub"), { recursive: true });
-    await writeFile(join(cwd, "work", "rules", "a.yml"), "title: a\n");
-    await writeFile(join(cwd, "work", "rules", "sub", "b.yml"), "title: b\n");
-    const run = body<HuntOut>(await tool("sigma_hunt", cwd, { path: "work/Security.evtx", out_dir: "work/hunt", engine: "hayabusa", rules: "work/rules" }, {}, bin));
-    assert.deepEqual(run.detections.map((d) => d.rule), ["B", "A"]);
-    assert.equal(run.status, "complete");
-    assert.equal(run.ruleset.kind, "directory");
-    assert.equal(run.ruleset.files, 2);
-    assert.match(run.ruleset.digest ?? "", /^[0-9a-f]{64}$/);
-    const noRules = body<HuntOut>(await tool("sigma_hunt", cwd, { path: "work/Security.evtx", out_dir: "work/hunt", engine: "hayabusa" }, {}, bin));
-    assert.equal(noRules.ruleset.digest, null);
-    assert.match(noRules.ruleset.source, /bundled rules/);
-  });
-});
-
-test("sigma_hunt's merge sort orders detections by level and time across runs of rows spilled to disk", async () => {
-  // The normalised detections were built and sorted whole in memory; they are now a bounded-memory merge.
-  await withCwd(async (cwd) => {
-    const out = py(
-      [
-        "import importlib.util, json, os, sys, random",
-        "spec = importlib.util.spec_from_file_location('sh', sys.argv[1]); sh = importlib.util.module_from_spec(spec); spec.loader.exec_module(sh)",
-        "sh.SORT_RUN_BYTES = 300",
-        "random.seed(3)",
-        "rows = [(random.choice([None, 0, 1, 2, 3, 4]), '2026-09-01T10:%02d:00Z' % random.randrange(60), i) for i in range(400)]",
-        "s = sh.Sorted(sys.argv[2])",
-        "for lvl, t, i in rows: s.add({'rule': 'r%d' % i, 'time': t, 'level_rank': lvl}, lvl)",
-        "first, count = s.write(os.path.join(sys.argv[2], 'out.jsonl'), 5)",
-        "got = [json.loads(l) for l in open(os.path.join(sys.argv[2], 'out.jsonl'))]",
-        "want = sorted(rows, key=lambda r: (0 if r[0] is None else 1 + (4 - r[0]), r[1], r[2]))",
-        "assert count == 400 and len(got) == 400 and len(first) == 5",
-        "assert [g['rule'] for g in got] == ['r%d' % w[2] for w in want]",
-        "assert len([n for n in os.listdir(sys.argv[2]) if n.startswith('.sort-')]) == 0",
-        "print('ok')",
-      ].join("\n"),
-      join(WIN, "sigma_hunt", "run.py"),
-      join(cwd, "work"),
-    );
-    assert.equal(out.trim(), "ok");
-  });
-});
+// These tests are in tests/pack-windows-forensics-evtx.test.ts.
 
 // --- vss_stores -----------------------------------------------------------------
 
@@ -1602,153 +1257,9 @@ test("indx_carve returns the raw FILETIMEs beside the dates and no longer says s
 
 // --- prefetch_mam and mam_scan --------------------------------------------------
 
-/**
- * A Prefetch (SCCA) file as the libscca layout notes lay it out: the version at 0, "SCCA" at 4,
- * the file size at 0x0C, the executable name (UTF-16LE, 60 bytes) at 0x10, the hash at 0x4C; the file
- * information from 0x54 (metrics offset and entries, trace chains offset and entries, filename strings
- * offset and size, volume information offset, entries and size); the last-run FILETIMEs (0x78 in version 17,
- * 0x80 after, one slot in 17 and 23, eight from 26) and the run count (0x90, 0x98, 0xD0) by version;
- * the filename strings as one UTF-16LE list of NUL-terminated names; and a volume entry (device path
- * offset and character count, creation FILETIME, serial number, then the path itself).
- */
-type Scca = { version: number; exe: string; hash: number; runCount: number; lastRuns: bigint[]; names: string[]; device?: string; serial?: number; created?: bigint };
-
-function scca(o: Scca): Buffer {
-  const layout: Record<number, { lastAt: number; slots: number; countAt: number }> = {
-    17: { lastAt: 0x78, slots: 1, countAt: 0x90 },
-    23: { lastAt: 0x80, slots: 1, countAt: 0x98 },
-    26: { lastAt: 0x80, slots: 8, countAt: 0xd0 },
-    30: { lastAt: 0x80, slots: 8, countAt: 0xd0 },
-  };
-  const l = layout[o.version] ?? layout[30];
-  const names = Buffer.concat(o.names.map((n) => u16z(n)));
-  const namesAt = 0x200;
-  const volsAt = namesAt + Math.ceil(names.length / 8) * 8;
-  const device = o.device === undefined ? Buffer.alloc(0) : u16z(o.device);
-  const b = Buffer.alloc(volsAt + 0x68 + device.length + 8);
-  b.writeUInt32LE(o.version, 0);
-  b.write("SCCA", 4, "latin1");
-  b.writeUInt32LE(0x0f, 8);
-  b.writeUInt32LE(b.length, 12);
-  Buffer.from(o.exe, "utf16le").copy(b, 0x10);
-  b.writeUInt32LE(o.hash, 0x4c);
-  b.writeUInt32LE(0x138, 0x54);
-  b.writeUInt32LE(o.names.length, 0x58);
-  b.writeUInt32LE(0x138, 0x5c);
-  b.writeUInt32LE(0, 0x60);
-  b.writeUInt32LE(namesAt, 0x64);
-  b.writeUInt32LE(names.length, 0x68);
-  b.writeUInt32LE(volsAt, 0x6c);
-  b.writeUInt32LE(o.device === undefined ? 0 : 1, 0x70);
-  b.writeUInt32LE(0x68 + device.length, 0x74);
-  o.lastRuns.slice(0, l.slots).forEach((t, i) => b.writeBigUInt64LE(t, l.lastAt + i * 8));
-  b.writeUInt32LE(o.runCount, l.countAt);
-  names.copy(b, namesAt);
-  if (o.device !== undefined) {
-    b.writeUInt32LE(0x68, volsAt);
-    b.writeUInt32LE(o.device.length + 1, volsAt + 4);
-    b.writeBigUInt64LE(o.created ?? 0n, volsAt + 8);
-    b.writeUInt32LE(o.serial ?? 0, volsAt + 16);
-    device.copy(b, volsAt + 0x68);
-  }
-  return b;
-}
-
-/**
- * Xpress Huffman (the MS-XCA LZ77+Huffman format MAM uses): chunks of up to 65536 output bytes, each a
- * 256-byte table of 512 four-bit code lengths and then a bit stream read as little-endian 16-bit words, most
- * significant bit first. Every symbol is given a 9-bit code here (a complete code: 512 symbols of length 9), so
- * symbol s has code s: literals are 0..255 and a match (offset 1, 3 to 17 bytes) is 256 + length - 3. A chunk
- * ends after the symbol that takes it to 65536 bytes and is followed by one zero word; the last by two.
- */
-function xpressHuffman(ops: Array<number | { match: number }>): Buffer {
-  const out: Buffer[] = [];
-  let i = 0;
-  while (i < ops.length) {
-    let size = 0;
-    const words: number[] = [];
-    let acc = 0;
-    let nbits = 0;
-    const put = (symbol: number): void => {
-      for (let b = 8; b >= 0; b--) {
-        acc = (acc << 1) | ((symbol >> b) & 1);
-        if (++nbits === 16) {
-          words.push(acc);
-          acc = 0;
-          nbits = 0;
-        }
-      }
-    };
-    while (i < ops.length && size < 65536) {
-      const op = ops[i++];
-      if (typeof op === "number") {
-        put(op);
-        size += 1;
-      } else {
-        put(256 + op.match - 3);
-        size += op.match;
-      }
-    }
-    if (nbits) words.push(acc << (16 - nbits));
-    words.push(0);
-    if (i >= ops.length) words.push(0);
-    out.push(Buffer.alloc(256, 0x99));
-    const w = Buffer.alloc(words.length * 2);
-    words.forEach((v, k) => w.writeUInt16LE(v, k * 2));
-    out.push(w);
-  }
-  return Buffer.concat(out);
-}
-
-/** A MAM container: "MAM", the method byte, the declared uncompressed size, the compressed data. */
-function mam(declared: number, compressed: Buffer, method = 4): Buffer {
-  const head = Buffer.alloc(8);
-  head.write("MAM", 0, "latin1");
-  head[3] = method;
-  head.writeUInt32LE(declared, 4);
-  return Buffer.concat([head, compressed]);
-}
-
-const mamOf = (plain: Buffer): Buffer => mam(plain.length, xpressHuffman([...plain]));
-
-type PrefetchOut = {
-  status: string;
-  container: { mam: boolean; declared_uncompressed_size?: number; decompressed_size?: number; bytes_past_declared_size?: number; why?: string; method?: number };
-  version?: number;
-  supported?: boolean;
-  exe_name?: string;
-  prefetch_hash?: string;
-  run_count?: number | null;
-  last_runs?: string[];
-  last_runs_detail?: Array<{ slot: number; filetime: string; utc: string }>;
-  filename_strings?: string[];
-  volumes_decoded?: Array<{ device_path: string | null; serial_number: string; created_utc: string | null }>;
-  volumes_claimed?: number;
-  file_size_matches?: boolean;
-  problems: string[];
-  all_strings?: unknown;
-};
-
-const RUN_1 = 133_443_104_001_234_567n; // 2023-11-13T00:53:20.1234567Z
-const SAMPLE_NAMES = [
-  "\\VOLUME{01d9aaaabbbb0000-1a2b3c4d}\\WINDOWS\\SYSTEM32\\NTDLL.DLL",
-  "\\VOLUME{01d9aaaabbbb0000-1a2b3c4d}\\USERS\\ÖZGÜR\\DOCUMENTS\\RAPOR-ÇALIŞMA.DOCX",
-  "\\VOLUME{01d9aaaabbbb0000-1a2b3c4d}\\PROGRAM FILES\\EXAMPLE\\EXAMPLE.EXE",
-];
-
-function sample(version: number): Buffer {
-  return scca({
-    version,
-    exe: "EXAMPLE.EXE",
-    hash: 0xa1b2c3d4,
-    runCount: 7,
-    lastRuns: [RUN_1, RUN_1 + 10_000_000n, 0n, 0n, 0n, 0n, 0n, 0n],
-    names: SAMPLE_NAMES,
-    device: "\\VOLUME{01d9aaaabbbb0000-1a2b3c4d}",
-    serial: 0x1a2b3c4d,
-    created: RUN_1 - 5_000_000_000n,
-  });
-}
+// The builders (an SCCA file in its layouts, an Xpress Huffman stream, a MAM container) and the answer types are shared with
+// tests/pack-windows-forensics-prefetch.test.ts: tests/windows-prefetch-fixtures.ts.
+import { RUN_1, SAMPLE_NAMES, mam, sample, scca, type PrefetchOut } from "./windows-prefetch-fixtures.ts";
 
 test("prefetch_mam reads a version 30 file by its layout: the run count, last runs by integer arithmetic, every filename string whole, and the first volume", async () => {
   // The strings were found by a regular expression that matched ASCII-range UTF-16 only, so a path with a
@@ -1801,28 +1312,6 @@ test("prefetch_mam returns unsupported for a version it does not read, and inter
   });
 });
 
-test("prefetch_mam inflates a MAM-compressed file to the same reading as the plain one, and says what the container held", { skip: DISSECT }, async () => {
-  await withCwd(async (cwd) => {
-    const plain = sample(30);
-    await writeFile(join(cwd, "work", "c.pf"), mamOf(plain));
-    const out = body<PrefetchOut>(await tool("prefetch_mam", cwd, { path: "work/c.pf" }));
-    assert.equal(out.status, "complete");
-    assert.equal(out.container.mam, true);
-    assert.equal(out.container.declared_uncompressed_size, plain.length);
-    assert.equal(out.container.decompressed_size! - out.container.bytes_past_declared_size!, plain.length);
-    assert.ok(out.container.bytes_past_declared_size! < 64, "a few bytes past the declared size are the stream's own end");
-    assert.deepEqual(out.filename_strings, SAMPLE_NAMES);
-    assert.equal(out.run_count, 7);
-    // A file larger than one 64 KiB chunk: several chunks of literals, each with its own table.
-    const big = Buffer.concat([sample(30), Buffer.alloc(200_000, 0x5a)]);
-    big.writeUInt32LE(big.length, 12);
-    await writeFile(join(cwd, "work", "big.pf"), mamOf(big));
-    const bigOut = body<PrefetchOut>(await tool("prefetch_mam", cwd, { path: "work/big.pf" }));
-    assert.equal(bigOut.container.declared_uncompressed_size, big.length);
-    assert.deepEqual(bigOut.filename_strings, SAMPLE_NAMES);
-  });
-});
-
 test("prefetch_mam refuses a MAM method it does not read, by name, and inflates nothing", async () => {
   await withCwd(async (cwd) => {
     await writeFile(join(cwd, "work", "v.pf"), mam(1000, Buffer.alloc(300), 0x84));
@@ -1831,114 +1320,6 @@ test("prefetch_mam refuses a MAM method it does not read, by name, and inflates 
     assert.equal(out.container.method, 0x84);
     assert.match(out.container.why ?? "", /method byte 0x84 is not the Xpress Huffman method/);
     assert.match(out.problems[0], /checksum/);
-  });
-});
-
-test("prefetch_mam stops a stream that inflates past its declared size at the cap, and does not hold the whole output", { skip: DISSECT }, async () => {
-  // The whole payload was decompressed before its size was looked at: a stream declared as 1 MiB could grow
-  // to any size, since the decoder runs until its input ends. This one is declared 1 MiB and would inflate to
-  // about 100 MiB: seven thousand matches of 17 bytes, repeated.
-  await withCwd(async (cwd) => {
-    const ops: Array<number | { match: number }> = [0x41];
-    for (let i = 0; i < 6_000_000; i++) ops.push({ match: 17 });
-    const bomb = mam(1024 * 1024, xpressHuffman(ops));
-    await writeFile(join(cwd, "work", "bomb.pf"), bomb);
-    const started = Date.now();
-    const err = failed(await tool("prefetch_mam", cwd, { path: "work/bomb.pf" }));
-    assert.match(err.error, /inflates past its declared size of 1048576 bytes plus 65536/);
-    assert.equal(err.cap, 1048576 + 65536);
-    assert.ok(Date.now() - started < 60_000, "the decoder was stopped at the cap, not run to the end of its input");
-  });
-});
-
-test("prefetch_mam fails on a stream shorter than its declared size, and on a declared size past the cap", { skip: DISSECT }, async () => {
-  await withCwd(async (cwd) => {
-    await writeFile(join(cwd, "work", "short.pf"), mam(5000, xpressHuffman([...Buffer.alloc(100, 0x41)])));
-    assert.match(failed(await tool("prefetch_mam", cwd, { path: "work/short.pf" })).error, /ended before its declared uncompressed size/);
-    await writeFile(join(cwd, "work", "huge.pf"), mam(0xffffffff, Buffer.alloc(300)));
-    const huge = body<PrefetchOut>(await tool("prefetch_mam", cwd, { path: "work/huge.pf" }));
-    assert.equal(huge.status, "unsupported");
-    assert.match(huge.container.why ?? "", /past the 67108864 this tool will inflate/);
-  });
-});
-
-type ScanOut = {
-  status: string;
-  count: number;
-  hits: Array<{ offset: number; uncomp: number; version?: number; supported?: boolean; name?: string; run_count?: number; filename_strings?: string[]; last_runs?: string[]; problems?: string[] }>;
-  candidates: number;
-  parsed: number;
-  failed: number;
-  failed_by_reason: Record<string, number>;
-  failures: Array<{ offset: number; reason: string }>;
-  filtered_by_name: number;
-  size_out_of_range: number;
-  unsupported_variant_signatures: number;
-};
-
-test("mam_scan finds a record that straddles a scan window once, with the right offset, and reads it by its layout", { skip: DISSECT }, async () => {
-  await withCwd(async (cwd) => {
-    const record = mamOf(sample(30));
-    const junk = Buffer.alloc(4090, 0x2e);
-    const dump = Buffer.concat([junk, record, Buffer.alloc(5000, 0x2e)]);
-    await writeFile(join(cwd, "work", "mem.raw"), dump);
-    // chunk 4096: the record begins 6 bytes before the first window ends, so its header straddles it.
-    const out = body<ScanOut>(await tool("mam_scan", cwd, { path: "work/mem.raw", chunk: 4096, min_uncomp: 256 }));
-    assert.equal(out.count, 1);
-    assert.equal(out.hits[0].offset, 4090);
-    assert.equal(out.hits[0].name, "EXAMPLE.EXE");
-    assert.equal(out.hits[0].run_count, 7);
-    assert.deepEqual(out.hits[0].filename_strings, SAMPLE_NAMES);
-    assert.equal(out.candidates, 1);
-    assert.equal(out.failed, 0);
-    assert.equal(out.status, "complete");
-  });
-});
-
-test("mam_scan counts an unsupported version as parsed and unsupported, and every failure before the name filter drops anything", { skip: DISSECT }, async () => {
-  // A candidate that failed to decompress had no name, so a name filter dropped it without a trace; the
-  // fixed 0x80 and 0xD0 offsets were applied to every version.
-  await withCwd(async (cwd) => {
-    const v99 = sample(30);
-    v99.writeUInt32LE(99, 0);
-    const rubbish = mam(2048, Buffer.from("this is not an xpress huffman stream at all".repeat(20)));
-    const other = scca({ version: 30, exe: "OTHER.EXE", hash: 1, runCount: 2, lastRuns: [RUN_1], names: ["\\VOLUME{x}\\OTHER.EXE"] });
-    const pad = (n: number): Buffer => Buffer.alloc(n, 0x2e);
-    const dump = Buffer.concat([pad(100), mamOf(sample(30)), pad(60), mamOf(v99), pad(60), rubbish, pad(60), mamOf(other), pad(60), Buffer.from("MAM\x84\x00\x10\x00\x00", "latin1"), pad(100)]);
-    await writeFile(join(cwd, "work", "mem.raw"), dump);
-    const all = body<ScanOut>(await tool("mam_scan", cwd, { path: "work/mem.raw", min_uncomp: 200 }));
-    assert.equal(all.candidates, 4);
-    assert.equal(all.parsed, 3);
-    assert.equal(all.failed, 1);
-    assert.equal(Object.keys(all.failed_by_reason).length, 1);
-    assert.equal(all.failures.length, 1);
-    assert.match(all.failures[0].reason, /^(decompress_failed|stream_ended_before_declared_size|not_prefetch)/);
-    assert.equal(all.unsupported_variant_signatures, 1);
-    assert.equal(all.status, "partial");
-    const unsupported = all.hits.find((h) => h.version === 99);
-    assert.ok(unsupported, "an unsupported version is a hit, not a drop");
-    assert.equal(unsupported.supported, false);
-    assert.equal(unsupported.run_count, undefined);
-    assert.equal(unsupported.last_runs, undefined);
-    // With a name filter, the failure is still counted.
-    const filtered = body<ScanOut>(await tool("mam_scan", cwd, { path: "work/mem.raw", min_uncomp: 200, name_filter: "OTHER.EXE" }));
-    assert.deepEqual(filtered.hits.map((h) => h.name), ["OTHER.EXE"]);
-    assert.equal(filtered.parsed, 3);
-    assert.equal(filtered.failed, 1, "the record that could not be read is counted, not lost to the filter");
-    assert.equal(filtered.filtered_by_name, 2);
-  });
-});
-
-test("mam_scan stops a candidate whose payload inflates past its declared size at that size", { skip: DISSECT }, async () => {
-  await withCwd(async (cwd) => {
-    const ops: Array<number | { match: number }> = [0x41];
-    for (let i = 0; i < 2_000_000; i++) ops.push({ match: 17 });
-    await writeFile(join(cwd, "work", "mem.raw"), Buffer.concat([Buffer.alloc(64, 0x2e), mam(4096, xpressHuffman(ops)), Buffer.alloc(64, 0x2e)]));
-    const started = Date.now();
-    const out = body<ScanOut>(await tool("mam_scan", cwd, { path: "work/mem.raw", min_uncomp: 256 }));
-    assert.equal(out.candidates, 1);
-    assert.deepEqual(out.failed_by_reason, { not_prefetch: 1 });
-    assert.ok(Date.now() - started < 30_000);
   });
 });
 
@@ -2090,7 +1471,7 @@ test("utf16_urls returns a URL of any length whole and keeps every occurrence wi
   // The ASCII pattern stopped after 300 characters without marking it, and a `seen` set dropped every
   // occurrence after the first, with its offset.
   await withCwd(async (cwd) => {
-    const long = "https://example.test/" + "segment/".repeat(75) + "end?token=1";
+    const long = "https://example.test/" + "segment/".repeat(75) + "end?page=1";
     assert.ok(long.length > 600);
     const filler = Buffer.alloc(3000, 0xff);
     const file = Buffer.concat([filler, Buffer.from(long), filler, Buffer.from(long), filler]);
@@ -2157,475 +1538,10 @@ test("utf16_urls keeps a UTF-16LE run only where it holds an anchor, applies `co
 
 // --- regkv ----------------------------------------------------------------------
 
-type RegkvOut = {
-  status: string;
-  hive: string;
-  key: string;
-  values: Record<string, unknown>;
-  value_types: Record<string, string>;
-  value_lengths: Record<string, number | null>;
-  subkeys: Array<{ name: string; subkeys: number; values: number; last_modified?: string; last_modified_filetime?: string; subkey_list?: Array<{ name: string }> }>;
-  last_modified?: string;
-  last_modified_filetime?: string;
-  problems: Array<{ where: string; what: string; error: string }>;
-  stopped_branches: Array<{ path: string; reason: string }>;
-  stopped_branch_count: number;
-  tree_complete: boolean;
-  nodes?: Array<{ path: string; depth: number }>;
-  node_count?: number;
-  all_nodes?: string;
-  hive_dirty: boolean;
-  transaction_logs_beside_hive: string[];
-  transaction_logs_replayed: boolean;
-  sensitive_values_withheld: Array<{ key: string; name: string; type: string; length: number | null }>;
-  hive_type: string | null;
-};
+// Its tests are in tests/pack-windows-forensics-registry.test.ts, each run against a stand-in for regipy and against the real library.
 
-test("regkv returns a value whole with its type and length: a binary value past 128 bytes, a string past 256 characters, a multi-string and a qword", { skip: REGIPY }, async () => {
-  // regipy trims a value to 256 characters by default, so a binary value came back cut at 128 bytes and a long
-  // string at 256 characters, without a word; types were dropped.
-  await withCwd(async (cwd) => {
-    const blob = Buffer.from(Array.from({ length: 700 }, (_, i) => i % 251));
-    const longText = "C:\\Program Files\\" + "Directory\\".repeat(60) + "tool.exe";
-    await writeFile(join(cwd, "work", "NTUSER.DAT"), hive({
-      name: "ROOT",
-      children: [{ name: "Software", children: [{
-        name: "Vendor",
-        lastWritten: 133_443_104_001_234_567n,
-        values: [
-          { name: "Blob", type: "binary", value: blob },
-          { name: "LongPath", type: "sz", value: longText },
-          { name: "List", type: "multi_sz", value: ["alpha", "beta"] },
-          { name: "Big", type: "qword", value: 0x1234_5678_9abc_def0n },
-          { name: "Count", type: "dword", value: 7 },
-        ],
-      }] }],
-    }));
-    const out = body<RegkvOut>(await tool("regkv", cwd, { hive: "work/NTUSER.DAT", key: "Software\\Vendor" }));
-    assert.equal(out.status, "complete");
-    assert.equal(out.values.Blob, blob.toString("hex"), "700 bytes, all of them");
-    assert.equal(out.value_lengths.Blob, 700);
-    assert.equal(out.value_types.Blob, "REG_BINARY");
-    assert.equal(out.values.LongPath, longText);
-    assert.equal(out.value_lengths.LongPath, longText.length);
-    assert.deepEqual(out.values.List, ["alpha", "beta"]);
-    assert.equal(out.value_types.List, "REG_MULTI_SZ");
-    assert.equal(out.value_types.Big, "REG_QWORD");
-    assert.equal(out.value_types.Count, "REG_DWORD");
-    assert.equal(out.values.Count, 7);
-    assert.equal(out.last_modified, "2023-11-13T00:53:20.1234567Z");
-    assert.equal(out.last_modified_filetime, "133443104001234567");
-  });
-});
-
-test("regkv says a hive is dirty and names the logs beside it, and does not claim to have replayed them", { skip: REGIPY }, async () => {
-  await withCwd(async (cwd) => {
-    await writeFile(join(cwd, "work", "SYSTEM"), hive({ name: "ROOT", children: [{ name: "Select", values: [{ name: "Current", type: "dword", value: 1 }] }] }, { primarySeq: 12, secondarySeq: 11 }));
-    await writeFile(join(cwd, "work", "SYSTEM.LOG1"), Buffer.alloc(512));
-    await writeFile(join(cwd, "work", "SYSTEM.LOG2"), Buffer.alloc(512));
-    const out = body<RegkvOut>(await tool("regkv", cwd, { hive: "work/SYSTEM", key: "Select" }));
-    assert.equal(out.hive_dirty, true);
-    assert.deepEqual(out.transaction_logs_beside_hive, ["work/SYSTEM.LOG1", "work/SYSTEM.LOG2"]);
-    assert.equal(out.transaction_logs_replayed, false);
-    assert.equal(out.hive, "work/SYSTEM");
-  });
-});
-
-test("regkv lists every node of a recursive walk, names the branches it did not enter and why, and keeps the whole listing in a file past the inline page", { skip: REGIPY }, async () => {
-  // `walk()` returned [] for any key it could not open, and nothing said a branch had been left out.
-  await withCwd(async (cwd) => {
-    const wide = Array.from({ length: 30 }, (_, i) => ({ name: `Leaf${String(i).padStart(2, "0")}`, children: [{ name: "Deep", children: [{ name: "Deeper" }] }] }));
-    await writeFile(join(cwd, "work", "SOFTWARE"), hive({ name: "ROOT", children: [{ name: "Tree", children: wide }] }));
-    const out = body<RegkvOut>(await tool("regkv", cwd, { hive: "work/SOFTWARE", key: "Tree", recurse: true, depth: 1, limit: 10 }));
-    assert.equal(out.node_count, 60, "30 leaves and the 30 keys below them; the third level is not entered");
-    assert.equal(out.nodes!.length, 10);
-    assert.ok(out.all_nodes, "the whole listing is in a file the answer names");
-    assert.equal(out.stopped_branch_count, 30, "each Deep with a child of its own was not entered");
-    assert.match(out.stopped_branches[0].reason, /depth limit \(1\)/);
-    assert.equal(out.status, "partial");
-    assert.equal(out.tree_complete, true);
-    const rows = (await readFile(join(cwd, out.all_nodes as string), "utf8")).trimEnd().split("\n").map((l) => JSON.parse(l) as { path: string; depth: number });
-    assert.equal(rows.length, 60);
-    assert.deepEqual(rows.slice(0, 2).map((r) => r.path), ["Tree\\Leaf00", "Tree\\Leaf01"]);
-  });
-});
-
-test("regkv withholds the values that can be secrets, by name and by place, and says what it withheld", { skip: REGIPY }, async () => {
-  await withCwd(async (cwd) => {
-    const pw = "Summer2024!hunter2";
-    await writeFile(join(cwd, "work", "SOFTWARE"), hive({
-      name: "ROOT",
-      children: [{ name: "Winlogon", values: [
-        { name: "DefaultUserName", type: "sz", value: "alice" },
-        { name: "DefaultPassword", type: "sz", value: pw },
-        { name: "AutoAdminLogon", type: "sz", value: "1" },
-        { name: "PasswordExpiryWarning", type: "dword", value: 5 },
-        { name: "Vpn_Token", type: "binary", value: Buffer.from("tok-" + pw) },
-      ] }],
-    }));
-    const run = await tool("regkv", cwd, { hive: "work/SOFTWARE", key: "Winlogon" });
-    const out = body<RegkvOut>(run);
-    for (const piece of [pw, "hunter2", Buffer.from(pw).toString("hex"), Buffer.from(pw, "utf16le").toString("hex"), Buffer.from("tok-" + pw).toString("hex")]) {
-      assert.equal(run.stdout.includes(piece), false, piece);
-    }
-    assert.equal(out.values.DefaultUserName, "alice");
-    assert.equal(out.values.AutoAdminLogon, "1");
-    assert.equal(out.values.PasswordExpiryWarning, 5, "a DWORD is not text or bytes: not withheld");
-    assert.equal(out.values.DefaultPassword, `[withheld: ${pw.length} characters]`);
-    assert.deepEqual(out.sensitive_values_withheld.map((w) => [w.name, w.type, w.length]).sort(), [
-      ["DefaultPassword", "REG_SZ", pw.length],
-      ["Vpn_Token", "REG_BINARY", pw.length + 4],
-    ]);
-  });
-});
-
-test("regkv withholds the V value of a SAM user and the secrets of a SECURITY hive, whatever their names", { skip: REGIPY }, async () => {
-  await withCwd(async (cwd) => {
-    const verifier = Buffer.from("planted-verifier-material-0123456789abcdef");
-    await writeFile(join(cwd, "work", "SAM"), hive({
-      name: "ROOT",
-      children: [{ name: "SAM", children: [{ name: "Domains", children: [{ name: "Account", children: [{ name: "Users", children: [
-        { name: "000003E9", values: [{ name: "F", type: "binary", value: Buffer.alloc(80, 1) }, { name: "V", type: "binary", value: verifier }] },
-      ] }] }] }] }],
-    }));
-    const run = await tool("regkv", cwd, { hive: "work/SAM", key: "SAM\\Domains\\Account\\Users\\000003E9" });
-    const out = body<RegkvOut>(run);
-    assert.equal(run.stdout.includes(verifier.toString("hex")), false);
-    assert.equal(out.values.F, Buffer.alloc(80, 1).toString("hex"), "F is account metadata, returned");
-    assert.match(String(out.values.V), /^\[withheld: \d+ bytes\]$/);
-    assert.deepEqual(out.sensitive_values_withheld.map((w) => w.name), ["V"]);
-    // A SECURITY hive's LSA secret and a cached logon, by where they are and what they are called.
-    const lsa = Buffer.from("planted-lsa-secret-material-0123456789");
-    await writeFile(join(cwd, "work", "SECURITY"), hive({
-      name: "ROOT",
-      children: [
-        { name: "Policy", children: [{ name: "Secrets", children: [{ name: "DPAPI_SYSTEM", children: [{ name: "CurrVal", values: [{ name: "", type: "binary", value: lsa }] }] }] }] },
-        { name: "Cache", values: [{ name: "NL$1", type: "binary", value: lsa }, { name: "NL$Control", type: "binary", value: Buffer.alloc(4, 1) }] },
-      ],
-    }));
-    const secrets = await tool("regkv", cwd, { hive: "work/SECURITY", key: "Policy\\Secrets\\DPAPI_SYSTEM\\CurrVal" });
-    assert.equal(secrets.stdout.includes(lsa.toString("hex")), false);
-    assert.equal(body<RegkvOut>(secrets).sensitive_values_withheld.length, 1);
-    const cache = await tool("regkv", cwd, { hive: "work/SECURITY", key: "Cache" });
-    assert.equal(cache.stdout.includes(lsa.toString("hex")), false);
-    assert.deepEqual(body<RegkvOut>(cache).sensitive_values_withheld.map((w) => w.name), ["NL$1", "NL$Control"]);
-  });
-});
-
-test("regkv reports a file that is not a hive as an error with a non-zero exit, not a traceback", { skip: REGIPY }, async () => {
-  await withCwd(async (cwd) => {
-    await writeFile(join(cwd, "work", "junk"), Buffer.alloc(8192, 0x41));
-    const err = failed(await tool("regkv", cwd, { hive: "work/junk", key: "x" }));
-    assert.match(err.error, /could not read the hive/);
-  });
-});
-
-// --- evtx_query -----------------------------------------------------------------
-
-// python-evtx on a JSON description of chunks and records, with the calls evtx_query makes of it:
-// Evtx(path) as a context manager; .chunks(); chunk.offset() and chunk.records(); record.offset(), .xml()
-// and .unpack_qword(0x10) (the FILETIME in the record header).
-const EVTX_QUERY_STUB = String.raw`
-import json
-
-
-class _Rec:
-    def __init__(self, spec):
-        self.spec = spec
-
-    def offset(self):
-        return self.spec["offset"]
-
-    def xml(self):
-        if "xml_error" in self.spec:
-            raise ValueError(self.spec["xml_error"])
-        return self.spec["xml"]
-
-    def unpack_qword(self, off):
-        assert off == 0x10
-        return int(self.spec["filetime"])
-
-
-class _Chunk:
-    def __init__(self, spec):
-        self.spec = spec
-
-    def offset(self):
-        return self.spec["offset"]
-
-    def records(self):
-        def gen():
-            for r in self.spec["records"]:
-                if "chain_error" in r:
-                    raise ValueError(r["chain_error"])
-                yield _Rec(r)
-        return gen()
-
-
-class Evtx:
-    def __init__(self, path):
-        with open(path, encoding="utf-8") as fh:
-            self.spec = json.load(fh)
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *a):
-        return False
-
-    def chunks(self):
-        for c in self.spec["chunks"]:
-            if "enumeration_error" in c:
-                raise ValueError(c["enumeration_error"])
-            yield _Chunk(c)
-`;
-
-function eventXml(o: { eid: number; rec: number; time: string; channel?: string; data?: Record<string, string> }): string {
-  const data = Object.entries(o.data ?? {}).map(([k, v]) => `<Data Name="${k}">${v}</Data>`).join("");
-  return `<?xml version="1.0" encoding="utf-8" standalone="yes"?><Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event"><System><Provider Name="Microsoft-Windows-Security-Auditing"></Provider><EventID>${o.eid}</EventID><TimeCreated SystemTime="${o.time}"></TimeCreated><EventRecordID>${o.rec}</EventRecordID><Channel>${o.channel ?? "Security"}</Channel><Computer>WS01</Computer></System><EventData>${data}</EventData></Event>`;
-}
-
-type EvtxRec = { offset: number; xml?: string; xml_error?: string; filetime?: string; chain_error?: string };
-type EvtxSpec = { chunks: Array<{ offset: number; records: EvtxRec[]; enumeration_error?: string }> };
-
-const goodRec = (offset: number, eid: number, rec: number, time: string, data: Record<string, string> = {}): EvtxRec => ({
-  offset,
-  xml: eventXml({ eid, rec, time, data }),
-  filetime: "133443104001234567",
-});
-
-type EvtxQueryOut = {
-  status: string;
-  records_examined: number;
-  events_matched: number;
-  parse_errors: number;
-  count: number;
-  events: Array<{ event_id: number; record_id: number; record_offset: number; chunk_offset: number; timestamp: string; record_filetime: string | null; record_time_utc: string | null; data: Record<string, string>; xml?: string }>;
-  errors: Array<{ parse_error: string; record_offset?: number | null; chunk_offset?: number | null }>;
-  problems: string[];
-  result_file: string;
-};
-
-async function evtxCase(cwd: string, spec: EvtxSpec, args: Record<string, unknown> = {}): Promise<Run> {
-  const env = await stubModule(cwd, { "Evtx/__init__.py": "", "Evtx/Evtx.py": EVTX_QUERY_STUB });
-  await writeFile(join(cwd, "work", "Security.evtx"), JSON.stringify(spec), "utf8");
-  return tool("evtx_query", cwd, { path: "work/Security.evtx", ...args }, env);
-}
-
-test("evtx_query counts what matched apart from what it could not read: a record that does not parse is a parse error, not a match", async () => {
-  // matched += 1 ran for broken and parse-error records alike, so `count` mixed evidence with failures.
-  await withCwd(async (cwd) => {
-    const out = body<EvtxQueryOut>(await evtxCase(cwd, {
-      chunks: [{ offset: 4096, records: [
-        goodRec(4608, 4624, 11, "2026-09-01 10:00:00.123456", { TargetUserName: "alice" }),
-        { offset: 5000, xml_error: "BinXML template could not be expanded" },
-        goodRec(5400, 4625, 13, "2026-09-01 10:00:02.000000", { TargetUserName: "bob" }),
-      ] }],
-    }));
-    assert.equal(out.records_examined, 3);
-    assert.equal(out.events_matched, 2);
-    assert.equal(out.parse_errors, 1);
-    assert.equal(out.count, 2, "count is the events that matched");
-    assert.equal(out.status, "partial");
-    assert.deepEqual(out.events.map((e) => [e.event_id, e.record_id, e.record_offset, e.chunk_offset]), [[4624, 11, 4608, 4096], [4625, 13, 5400, 4096]]);
-    assert.equal(out.events[0].data.TargetUserName, "alice");
-    assert.equal(out.errors.length, 1);
-    assert.match(out.errors[0].parse_error, /^BinXML template could not be expanded/);
-    assert.equal(out.errors[0].record_offset, 5000);
-    assert.equal(out.events[0].xml, undefined, "the XML is in the result file, not inline");
-    const rows = (await readFile(join(cwd, out.result_file), "utf8")).trimEnd().split("\n").map((l) => JSON.parse(l) as { xml?: string; parse_error?: string; record_offset: number });
-    assert.equal(rows.length, 3);
-    assert.deepEqual(rows.map((r) => r.record_offset), [4608, 5000, 5400]);
-    assert.ok(rows[0].xml?.includes("<EventID>4624</EventID>"));
-  });
-});
-
-test("evtx_query keeps the raw FILETIME of the record header beside its time, and the SystemTime the XML carries", async () => {
-  await withCwd(async (cwd) => {
-    const out = body<EvtxQueryOut>(await evtxCase(cwd, { chunks: [{ offset: 4096, records: [goodRec(4608, 4624, 11, "2026-09-01 10:00:00.123456")] }] }));
-    assert.equal(out.events[0].record_filetime, "133443104001234567");
-    assert.equal(out.events[0].record_time_utc, "2023-11-13T00:53:20.1234567Z");
-    assert.equal(out.events[0].timestamp, "2026-09-01 10:00:00.123456");
-    assert.equal(out.status, "complete");
-  });
-});
-
-test("evtx_query ends a broken record chain with a row naming its chunk and goes on to the next chunk, and says when the chunks themselves could not be enumerated", async () => {
-  await withCwd(async (cwd) => {
-    const out = body<EvtxQueryOut>(await evtxCase(cwd, {
-      chunks: [
-        { offset: 4096, records: [goodRec(4608, 4624, 1, "2026-09-01 10:00:00.000000"), { offset: 4700, chain_error: "record length points past the chunk" }] },
-        { offset: 69632, records: [goodRec(70144, 4624, 5, "2026-09-01 11:00:00.000000")] },
-        { offset: 135168, records: [], enumeration_error: "unexpected end of file at chunk 3" },
-      ],
-    }));
-    assert.deepEqual(out.events.map((e) => e.record_id), [1, 5], "the chunk after the broken chain is still read");
-    assert.equal(out.parse_errors, 2);
-    assert.match(out.errors[0].parse_error, /record chain of this chunk broke: record length points past the chunk/);
-    assert.equal(out.errors[0].chunk_offset, 4096);
-    assert.match(out.errors[1].parse_error, /chunk enumeration failed after offset 69632/);
-    assert.ok(out.problems.some((p) => /could not be enumerated past offset 69632/.test(p)));
-    assert.equal(out.status, "partial");
-  });
-});
-
-test("evtx_query filters by event id, record range and a time prefix, and validates every argument before it opens an output file", async () => {
-  // The skill said events could be "filtered by id or by a time prefix", and the tool had no time filter; a `limit`
-  // of 0 was found only after the result file had been created.
-  await withCwd(async (cwd) => {
-    const spec: EvtxSpec = { chunks: [{ offset: 4096, records: [
-      goodRec(4608, 4624, 1, "2026-09-01 09:59:59.000000"),
-      goodRec(5000, 4624, 2, "2026-09-01 10:00:00.500000"),
-      goodRec(5400, 4672, 3, "2026-09-01 10:05:00.000000"),
-      goodRec(5800, 4624, 4, "2026-09-02 08:00:00.000000"),
-    ] }] };
-    const day = body<EvtxQueryOut>(await evtxCase(cwd, spec, { start_time: "2026-09-01", end_time: "2026-09-01" }));
-    assert.deepEqual(day.events.map((e) => e.record_id), [1, 2, 3], "a date is a prefix: the whole of 2026-09-01");
-    const window = body<EvtxQueryOut>(await evtxCase(cwd, spec, { start_time: "2026-09-01T10:00", end_time: "2026-09-01T10:00", event_ids: [4624] }));
-    assert.deepEqual(window.events.map((e) => e.record_id), [2]);
-    const range = body<EvtxQueryOut>(await evtxCase(cwd, spec, { start_record: 3, end_record: 4 }));
-    assert.deepEqual(range.events.map((e) => e.record_id), [3, 4]);
-    assert.equal(range.records_examined, 4, "records outside the filters are still examined, and counted");
-    const bad = failed(await evtxCase(cwd, spec, { limit: 0, out_file: "work/s1/never.jsonl" }));
-    assert.match(bad.error, /limit must be a whole number of at least 1/);
-    assert.equal(await exists(join(cwd, "work", "s1", "never.jsonl")), false, "no output file was made for a refused call");
-    assert.match(failed(await evtxCase(cwd, spec, { event_ids: ["4624"] })).error, /event_ids must be a list of whole numbers/);
-  });
-});
-
-test("evtx_query says a file it cannot open is an error, not a traceback", async () => {
-  await withCwd(async (cwd) => {
-    const env = await stubModule(cwd, { "Evtx/__init__.py": "", "Evtx/Evtx.py": EVTX_QUERY_STUB });
-    await writeFile(join(cwd, "work", "junk.evtx"), "this is not an event log");
-    const err = failed(await tool("evtx_query", cwd, { path: "work/junk.evtx" }, env));
-    assert.match(err.error, /could not open the event log/);
-  });
-});
-
-// --- evtx_carve -----------------------------------------------------------------
-
-// python-evtx's ChunkHeader as evtx_carve calls it: ChunkHeader(buffer, 0), .verify(), .records() yielding records with
-// .offset() and .xml(). A chunk here is the magic, then a first record number (u32 at 8) and a count (u32 at 12); a
-// "chunk" whose first number is 0 is not one (the constructor refuses it, as python-evtx does a chunk it cannot read).
-// The record's template, from the byte at 16, picks the XML: 1 holds two <Data Name="Path"> elements.
-const CARVE_STUB = String.raw`
-import struct
-
-
-class _Record:
-    def __init__(self, number, offset, variant):
-        self._number, self._offset, self._variant = number, offset, variant
-
-    def offset(self):
-        return self._offset
-
-    def xml(self):
-        data = '<Data Name="Path">C:\\first.exe</Data><Data Name="Path">C:\\second.exe</Data><Data Name="User">svc</Data>' if self._variant == 1 else '<Data Name="n">%d</Data>' % self._number
-        return ('<Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event"><System>'
-                '<Provider Name="Stub"/><EventID>4688</EventID><EventRecordID>%d</EventRecordID>'
-                '<Channel>Security</Channel><Computer>HOST</Computer></System>'
-                '<EventData>%s</EventData></Event>' % (self._number, data))
-
-
-class ChunkHeader:
-    def __init__(self, buf, offset):
-        self._first, self._count = struct.unpack_from("<II", buf, offset + 8)
-        self._variant = buf[offset + 16]
-        if self._first == 0:
-            raise ValueError("bad chunk header")
-
-    def verify(self):
-        return True
-
-    def records(self):
-        for i in range(self._count):
-            yield _Record(self._first + i, 0x200 + i * 0x100, self._variant)
-`;
-
-type CarveOut = {
-  status: string;
-  records: Array<{ record_id: number; chunk_offset: number; data?: Record<string, string | string[]>; xml?: string }>;
-  record_count: number;
-  candidates: number;
-  chunks_parsed: number;
-  sweep_complete: boolean;
-  resume_start: number | null;
-  range_requested: { start: number; end: number; file_bytes: number };
-  range_examined: { start: number; end: number };
-  problems: Array<{ offset: number; why: string }>;
-  problem_count: number;
-  all_problems?: string;
-  all_results?: string;
-};
-
-function carveChunk(buf: Buffer, at: number, first: number, count: number, variant = 0): void {
-  buf.write("ElfChnk\u0000", at, "latin1");
-  buf.writeUInt32LE(first, at + 8);
-  buf.writeUInt32LE(count, at + 12);
-  buf[at + 16] = variant;
-}
-
-test("evtx_carve keeps a repeated EventData name as a list and the whole XML in the result file even when the result is small", async () => {
-  // `data[name] = ...` overwrote the first of two <Data Name="Path"> elements, and the XML was in the file only when
-  // with_xml was set or the result overflowed the page.
-  await withCwd(async (cwd) => {
-    const env = await stubModule(cwd, { "Evtx/__init__.py": "", "Evtx/Evtx.py": CARVE_STUB });
-    const blob = Buffer.alloc(70000, 0x2e);
-    carveChunk(blob, 100, 1, 2, 1);
-    await writeFile(join(cwd, "work", "blob.bin"), blob);
-    const out = body<CarveOut>(await tool("evtx_carve", cwd, { path: "work/blob.bin" }, env));
-    assert.equal(out.record_count, 2);
-    assert.deepEqual(out.records[0].data, { Path: ["C:\\first.exe", "C:\\second.exe"], User: "svc" });
-    assert.equal(out.records[0].xml, undefined, "the inline summary has no XML unless asked");
-    assert.ok(out.all_results, "the whole result is in a file even though it fits the page");
-    const rows = (await readFile(join(cwd, out.all_results as string), "utf8")).trimEnd().split("\n").map((l) => JSON.parse(l) as { xml: string; record_id: number });
-    assert.equal(rows.length, 2);
-    assert.ok(rows[0].xml.includes("C:\\first.exe") && rows[0].xml.includes("C:\\second.exe"));
-    const withXml = body<CarveOut>(await tool("evtx_carve", cwd, { path: "work/blob.bin", with_xml: true }, env));
-    assert.ok(withXml.records[0].xml?.includes("C:\\second.exe"));
-  });
-});
-
-test("evtx_carve stops a sweep over thousands of false signatures at candidate_limit, names where to resume, and pages its problems", async () => {
-  // chunk_limit counted chunks that were built, so a blob of magic-shaped noise that never built one was swept
-  // whole, with no bound on the work and every refusal in one list.
-  await withCwd(async (cwd) => {
-    const env = await stubModule(cwd, { "Evtx/__init__.py": "", "Evtx/Evtx.py": CARVE_STUB });
-    const blob = Buffer.alloc(10_000 * 64);
-    for (let i = 0; i < 10_000; i++) blob.write("ElfChnk\u0000", i * 64, "latin1");
-    carveChunk(blob, 9990 * 64, 1, 1);   // a signature near the end is a real chunk
-    await writeFile(join(cwd, "work", "noise.bin"), blob);
-    const first = body<CarveOut>(await tool("evtx_carve", cwd, { path: "work/noise.bin", candidate_limit: 500 }, env));
-    assert.equal(first.candidates, 500);
-    assert.equal(first.sweep_complete, false);
-    assert.equal(first.resume_start, 500 * 64);
-    assert.equal(first.status, "partial");
-    assert.equal(first.problem_count, 500);
-    assert.equal(first.problems.length, 40, "problems are a page");
-    const spilled = (await readFile(join(cwd, first.all_problems as string), "utf8")).trimEnd().split("\n");
-    assert.equal(spilled.length, 500);
-    assert.deepEqual(first.range_examined, { start: 0, end: 500 * 64 });
-    assert.equal(first.range_requested.end, 10_000 * 64);
-    // Carrying on from resume_start reads the rest, and the real chunk at the end is found.
-    const rest = body<CarveOut>(await tool("evtx_carve", cwd, { path: "work/noise.bin", start: first.resume_start as number, candidate_limit: 20000 }, env));
-    assert.equal(rest.sweep_complete, true);
-    assert.equal(rest.record_count, 1);
-  });
-});
-
-test("evtx_carve refuses a negative or empty range and a start past the file, and says the range it was asked to sweep", async () => {
-  await withCwd(async (cwd) => {
-    const env = await stubModule(cwd, { "Evtx/__init__.py": "", "Evtx/Evtx.py": CARVE_STUB });
-    await writeFile(join(cwd, "work", "blob.bin"), Buffer.alloc(5000, 0x2e));
-    assert.match(failed(await tool("evtx_carve", cwd, { path: "work/blob.bin", start: -5 }, env)).error, /start must be a whole number of at least 0/);
-    assert.match(failed(await tool("evtx_carve", cwd, { path: "work/blob.bin", max_bytes: 0 }, env)).error, /max_bytes must be a whole number of at least 1/);
-    assert.match(failed(await tool("evtx_carve", cwd, { path: "work/blob.bin", limit: 0 }, env)).error, /limit must be a whole number of at least 1/);
-    assert.match(failed(await tool("evtx_carve", cwd, { path: "work/blob.bin", start: 6000 }, env)).error, /start is past the end of the file/);
-    const part = body<CarveOut>(await tool("evtx_carve", cwd, { path: "work/blob.bin", start: 1000, max_bytes: 2000 }, env));
-    assert.deepEqual(part.range_requested, { start: 1000, end: 3000, file_bytes: 5000 });
-    assert.deepEqual(part.range_examined, { start: 1000, end: 3000 });
-  });
-});
+// --- evtx_query and evtx_carve -------------------------------------------------
+// These tests are in tests/pack-windows-forensics-evtx.test.ts, with the stand-ins in tests/windows-stub-evtx.ts.
 
 // --- usn_journal ----------------------------------------------------------------
 
@@ -2744,174 +1660,7 @@ test("usn_journal counts bytes it could not read as a record, in ranges and apar
 
 // --- shellbags ------------------------------------------------------------------
 
-/**
- * Shell items as the libfwsi notes lay them out: every item starts with its size (2 bytes) and a class byte. A root
- * folder item (0x1F) has a GUID at 4 (Data1-3 little-endian, Data4 as stored); a volume item (0x2F) a NUL-terminated
- * ASCII name at 3; a file entry (0x30 | 0x01 folder, 0x32 file) a file size at 4, a FAT modification time at 8, attributes
- * at 12 and the ASCII short name at 14, then, after padding to an even offset, extension blocks. The 0xBEEF0004 block is
- * its size (2), version (2), the signature (4), the FAT creation and access times (4 each) and then fields by version:
- * version 3 has the UTF-16 long name at 0x12; version 7 a file reference and the name at 0x26 after a 2-byte string size;
- * versions 8 and 9 add fields before the name.
- */
-const fat = (y: number, mo: number, d: number, h: number, mi: number, s: number): number => (((y - 1980) << 9) | (mo << 5) | d) | (((h << 11) | (mi << 5) | (s >> 1)) << 16);
-
-function shellItem(parts: Buffer[]): Buffer {
-  const body = Buffer.concat(parts);
-  const size = Buffer.alloc(2);
-  size.writeUInt16LE(body.length + 2);
-  return Buffer.concat([size, body]);
-}
-
-// My Computer's GUID {20D04FE0-3AEA-1069-A2D8-08002B30309D}: Data1, Data2 and Data3 little-endian, Data4 as written.
-const rootFolderItem = (): Buffer => shellItem([Buffer.from([0x1f, 0x50]), Buffer.from("e04fd0203aea6910a2d808002b30309d", "hex")]);
-const volumeItem = (name: string): Buffer => shellItem([Buffer.from([0x2f]), Buffer.from(name + "\0", "latin1"), Buffer.alloc(18)]);
-
-function extensionBlock(version: number, longName: string, wrongAt26?: string): Buffer {
-  const head = Buffer.alloc(0x12);
-  head.writeUInt16LE(version, 2);
-  head.writeUInt32LE(0xbeef0004, 4);
-  head.writeUInt32LE(fat(2024, 3, 5, 9, 30, 0), 8);
-  head.writeUInt32LE(fat(2024, 3, 6, 10, 0, 2), 12);
-  head.writeUInt16LE(0x14, 0x10);
-  let rest: Buffer;
-  if (version === 3) rest = u16z(longName);
-  else if (version === 7) rest = Buffer.concat([Buffer.alloc(0x26 - 0x12 - 2), (() => { const b = Buffer.alloc(2); b.writeUInt16LE(longName.length + 1); return b; })(), u16z(longName)]);
-  else {
-    // versions 8 and later: more fields before the name; 0x26 holds something printable that is not the name.
-    const decoy = u16z(wrongAt26 ?? "WRONG");
-    rest = Buffer.concat([Buffer.alloc(0x26 - 0x12), decoy, Buffer.alloc(8), u16z(longName)]);
-  }
-  const block = Buffer.concat([head, rest]);
-  block.writeUInt16LE(block.length, 0);
-  return block;
-}
-
-function folderItem(shortName: string, ext: Buffer): Buffer {
-  // After the size and the class (0x31, a folder) and a sort byte: file size (4, at 4), FAT modification time (4, at 8),
-  // attributes (2, at 12), then the ASCII short name from 14, padded so the extension block starts on an even offset.
-  const fixed = Buffer.alloc(10);
-  fixed.writeUInt32LE(fat(2024, 3, 4, 12, 0, 0), 4);
-  fixed.writeUInt16LE(0x10, 8);
-  const primary = Buffer.from(shortName + "\0", "latin1");
-  return shellItem([Buffer.from([0x31, 0x00]), fixed, primary, Buffer.alloc((14 + primary.length) % 2), ext]);
-}
-
-const mruList = (...order: number[]): Buffer => {
-  const b = Buffer.alloc((order.length + 1) * 4);
-  order.forEach((v, i) => b.writeInt32LE(v, i * 4));
-  b.writeInt32LE(-1, order.length * 4);
-  return b;
-};
-
-type BagOut = {
-  status: string;
-  roots_walked: string[];
-  entry_count: number;
-  entries: Array<{ root: string; path: string; name: string; slot: string; depth: number; mru_position: number | null; item_bytes?: number; no_subkey?: boolean; item: { type: string; decoded: string; name: string; long_name?: string; long_name_from?: string; extension_version?: number; extension_layout?: string; created?: string | null; accessed?: string | null; guid?: string } }>;
-  values_without_subkey: Array<{ slot: string; no_subkey: boolean; item: { name: string } }>;
-  values_without_subkey_count: number;
-};
-
-const BAG_PATH = ["Local Settings", "Software", "Microsoft", "Windows", "Shell", "BagMRU"];
-function nest(path: string[], leaf: Parameters<typeof hive>[0]): Parameters<typeof hive>[0] {
-  return path.reduceRight((child, name) => ({ name, children: [child] }), leaf);
-}
-
-test("shellbags names a long name from its layout only for the extension versions it applies (3 and 7), and offers a string candidate, labelled, for the rest", { skip: REGIPY }, async () => {
-  // One name offset (0x26) was applied to every version from 7, so a version 9 block yielded whatever printable text
-  // sat there and the answer called it a decoded layout.
-  await withCwd(async (cwd) => {
-    const long = "Quarterly Reports 2024 ÖZET";
-    const bag: Parameters<typeof hive>[0] = {
-      name: "BagMRU",
-      values: [{ name: "0", type: "binary", value: rootFolderItem() }, { name: "MRUListEx", type: "binary", value: mruList(0) }],
-      children: [{ name: "0", values: [
-        { name: "0", type: "binary", value: volumeItem("C:\\") },
-        { name: "1", type: "binary", value: folderItem("QUARTE~1", extensionBlock(7, long)) },
-        { name: "2", type: "binary", value: folderItem("PROJEC~1", extensionBlock(9, "Project Files and Archive Material", "WRONG")) },
-        { name: "3", type: "binary", value: folderItem("OLDVER~1", extensionBlock(3, "Old Version Three Folder")) },
-        { name: "MRUListEx", type: "binary", value: mruList(2, 1, 0, 3) },
-      ], children: [{ name: "0" }, { name: "1" }, { name: "2" }, { name: "3" }] }],
-    };
-    await writeFile(join(cwd, "work", "UsrClass.dat"), hive({ name: "ROOT", children: [nest(BAG_PATH.slice(0, -1), bag)] }));
-    const out = body<BagOut>(await tool("shellbags", cwd, { hive: "work/UsrClass.dat" }));
-    const by = Object.fromEntries(out.entries.map((e) => [e.slot + "@" + e.depth, e]));
-    const v7 = by["1@2"];
-    assert.equal(v7.item.long_name, long);
-    assert.equal(v7.item.long_name_from, "layout");
-    assert.equal(v7.item.extension_version, 7);
-    assert.equal(v7.item.created, "2024-03-05T09:30:00 (local)");
-    assert.equal(v7.item.accessed, "2024-03-06T10:00:02 (local)");
-    const v3 = by["3@2"];
-    assert.equal(v3.item.long_name, "Old Version Three Folder");
-    assert.equal(v3.item.long_name_from, "layout");
-    const v9 = by["2@2"];
-    assert.equal(v9.item.extension_version, 9);
-    assert.equal(v9.item.extension_layout, "not decoded for this version");
-    assert.equal(v9.item.long_name_from, "strings", "a version this reader does not apply is a candidate found by search");
-    assert.equal(v9.item.long_name, "Project Files and Archive Material", "the longest string in the block, not what sat at 0x26");
-    assert.equal(out.status, "complete");
-    assert.equal(v7.mru_position, 1);
-  });
-});
-
-test("shellbags walks every BagMRU root the hive has, names them, and lists a numbered value that has no key under it", { skip: REGIPY }, async () => {
-  // It stopped at the first root that opened, so a hive with the Shell and the ShellNoRoam trees both populated
-  // answered for one; a value with no child key was never looked at.
-  await withCwd(async (cwd) => {
-    const classes: Parameters<typeof hive>[0] = {
-      name: "BagMRU",
-      values: [{ name: "0", type: "binary", value: volumeItem("E:\\") }, { name: "MRUListEx", type: "binary", value: mruList(0) }],
-      children: [{ name: "0" }],
-    };
-    const older: Parameters<typeof hive>[0] = {
-      name: "BagMRU",
-      values: [
-        { name: "0", type: "binary", value: volumeItem("F:\\") },
-        { name: "5", type: "binary", value: folderItem("GHOST~1", extensionBlock(7, "A Folder With No Bag")) },
-        { name: "NodeSlot", type: "dword", value: 9 },
-      ],
-      children: [{ name: "0" }],
-    };
-    await writeFile(join(cwd, "work", "NTUSER.DAT"), hive({
-      name: "ROOT",
-      children: [
-        nest(["Local Settings", "Software", "Microsoft", "Windows", "Shell"], classes),
-        nest(["Software", "Microsoft", "Windows", "ShellNoRoam"], older),
-      ],
-    }));
-    const out = body<BagOut>(await tool("shellbags", cwd, { hive: "work/NTUSER.DAT" }));
-    assert.deepEqual(out.roots_walked, [
-      "Local Settings\\Software\\Microsoft\\Windows\\Shell\\BagMRU",
-      "Software\\Microsoft\\Windows\\ShellNoRoam\\BagMRU",
-    ]);
-    const roots = new Set(out.entries.map((e) => e.root));
-    assert.equal(roots.size, 2, "entries come from both roots");
-    assert.deepEqual(out.entries.filter((e) => e.root.startsWith("Software")).map((e) => e.name).sort(), ["A Folder With No Bag", "F:\\"]);
-    assert.equal(out.values_without_subkey_count, 1);
-    assert.equal(out.values_without_subkey[0].slot, "5");
-    assert.equal(out.values_without_subkey[0].no_subkey, true);
-    assert.equal(out.values_without_subkey[0].item.name, "A Folder With No Bag");
-  });
-});
-
-test("shellbags reads a shell item longer than 128 bytes whole, and refuses a max_depth that would exhaust the stack", { skip: REGIPY }, async () => {
-  // regipy's default read cut a binary value to 128 bytes, so a long item was decoded from its first 128.
-  await withCwd(async (cwd) => {
-    const long = "a-very-long-folder-name-".repeat(14) + "end";
-    const bag: Parameters<typeof hive>[0] = {
-      name: "BagMRU",
-      values: [{ name: "0", type: "binary", value: folderItem("LONGFO~1", extensionBlock(7, long)) }, { name: "MRUListEx", type: "binary", value: mruList(0) }],
-      children: [{ name: "0" }],
-    };
-    await writeFile(join(cwd, "work", "UsrClass.dat"), hive({ name: "ROOT", children: [nest(BAG_PATH.slice(0, -1), bag)] }));
-    const out = body<BagOut>(await tool("shellbags", cwd, { hive: "work/UsrClass.dat" }));
-    assert.ok((out.entries[0].item_bytes ?? 0) > 128);
-    assert.equal(out.entries[0].item.long_name, long);
-    assert.equal(out.entries[0].item.long_name_from, "layout");
-    assert.match(failed(await tool("shellbags", cwd, { hive: "work/UsrClass.dat", max_depth: 100000 })).error, /max_depth must be a whole number from 1 to 128/);
-  });
-});
+// Its tests are in tests/pack-windows-forensics-registry.test.ts, each run against a stand-in for regipy and against the real library.
 
 // --- mft_records ----------------------------------------------------------------
 
@@ -3176,21 +1925,22 @@ test("extract_stream never overwrites a file, never writes under inputs/ or outs
   await withCwd(async (cwd, bin) => {
     await stub(bin, "icat", ICAT_STUB(`printf 'x'`));
     await writeFile(join(cwd, "work", "disk.raw"), Buffer.alloc(1024));
+    await mkdir(join(cwd, "work", "s1"), { recursive: true });
     const env = { ICAT_ARGS: join(cwd, "icat-args") };
-    await writeFile(join(cwd, "work", "taken.bin"), "evidence");
-    assert.match(failed(await tool("extract_stream", cwd, { image: "work/disk.raw", inode: "5", output: "work/taken.bin" }, env, bin)).error, /already exists/);
-    assert.equal(await readFile(join(cwd, "work", "taken.bin"), "utf8"), "evidence");
+    await writeFile(join(cwd, "work", "s1", "taken.bin"), "evidence");
+    assert.match(failed(await tool("extract_stream", cwd, { image: "work/disk.raw", inode: "5", output: "work/s1/taken.bin" }, env, bin)).error, /already exists/);
+    assert.equal(await readFile(join(cwd, "work", "s1", "taken.bin"), "utf8"), "evidence");
     assert.match(failed(await tool("extract_stream", cwd, { image: "work/disk.raw", inode: "5", output: "inputs/x.bin" }, env, bin)).error, /cannot be under inputs/);
     assert.match(failed(await tool("extract_stream", cwd, { image: "work/disk.raw", inode: "5", output: "work/../inputs/y.bin" }, env, bin)).error, /cannot be under inputs/);
     assert.match(failed(await tool("extract_stream", cwd, { image: "work/disk.raw", inode: "5", output: "/tmp/outside-the-run.bin" }, env, bin)).error, /inside the run directory/);
     // A link in the run that points out of it is resolved first, and refused as the place it leads to.
-    await symlink("../../elsewhere/planted", join(cwd, "work", "link.bin"));
-    assert.match(failed(await tool("extract_stream", cwd, { image: "work/disk.raw", inode: "5", output: "work/link.bin" }, env, bin)).error, /inside the run directory/);
-    await symlink("taken.bin", join(cwd, "work", "samedir.bin"));
-    assert.match(failed(await tool("extract_stream", cwd, { image: "work/disk.raw", inode: "5", output: "work/samedir.bin" }, env, bin)).error, /already exists/);
-    assert.equal(await readFile(join(cwd, "work", "taken.bin"), "utf8"), "evidence", "nothing was written through the link");
+    await symlink("../../../elsewhere/planted", join(cwd, "work", "s1", "link.bin"));
+    assert.match(failed(await tool("extract_stream", cwd, { image: "work/disk.raw", inode: "5", output: "work/s1/link.bin" }, env, bin)).error, /inside the run directory/);
+    await symlink("taken.bin", join(cwd, "work", "s1", "samedir.bin"));
+    assert.match(failed(await tool("extract_stream", cwd, { image: "work/disk.raw", inode: "5", output: "work/s1/samedir.bin" }, env, bin)).error, /already exists/);
+    assert.equal(await readFile(join(cwd, "work", "s1", "taken.bin"), "utf8"), "evidence", "nothing was written through the link");
     for (const inode of ["5; rm -rf /", "1-2-3-4", "abc", "-5", ""]) {
-      assert.match(failed(await tool("extract_stream", cwd, { image: "work/disk.raw", inode, output: "work/z.bin" }, env, bin)).error, /inode must be an address/, inode);
+      assert.match(failed(await tool("extract_stream", cwd, { image: "work/disk.raw", inode, output: "work/s1/z.bin" }, env, bin)).error, /inode must be an address/, inode);
     }
     assert.equal(await exists(join(cwd, "icat-args")), false, "a refused call never reaches icat");
   });

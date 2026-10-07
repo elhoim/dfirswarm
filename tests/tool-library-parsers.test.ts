@@ -6,10 +6,30 @@
  * tool at all.
  */
 import assert from "node:assert/strict";
-import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
 import { LIB, runPy, runPySnippet, withCwd } from "./tool-library-harness.ts";
+
+test("every tool of the Windows pack that has a copy in the library is byte-identical to it, manifest included", async () => {
+  // A run started with `--tools-from tool-library` installs the library's copy; one that had drifted from the pack's fixed tool
+  // would hand a run the defect the pack fixed (a credential printed, a stream cut, a count missing).
+  const packTools = join(LIB, "..", "packs", "windows-forensics", "tools");
+  const shared: string[] = [];
+  for (const entry of await readdir(packTools)) {
+    const copy = join(LIB, entry);
+    if (!(await stat(copy).then((s) => s.isDirectory(), () => false))) continue;
+    shared.push(entry);
+    assert.deepEqual(await readFile(join(copy, "run.py")), await readFile(join(packTools, entry, "run.py")), `${entry}: run.py has drifted from the pack's`);
+    assert.deepEqual(
+      JSON.parse(await readFile(join(copy, "manifest.json"), "utf8")),
+      JSON.parse(await readFile(join(packTools, entry, "manifest.json"), "utf8")),
+      `${entry}: manifest.json has drifted from the pack's`,
+    );
+    assert.equal(await stat(join(copy, "run.sh")).then(() => true, () => false), false, `${entry}: a run.sh beside run.py would be what a run executes`);
+  }
+  assert.ok(shared.length >= 13, `the Windows pack's shared tools: ${shared.join(", ")}`);
+});
 
 test("recyclebin_i parses $I metadata and refuses to guess at an unknown header", async () => {
   await withCwd(async (cwd) => {
@@ -40,7 +60,7 @@ test("recyclebin_i parses $I metadata and refuses to guess at an unknown header"
     const good = body.entries.find((e) => String(e.file).includes("ABCDEF"))!;
     assert.equal(good.original_path, path);
     assert.equal(good.original_size, 439);
-    assert.equal(good.deleted_at, "2019-02-15T05:03:25Z");
+    assert.equal(good.deleted_at, "2019-02-15T05:03:25.0000000Z");
     const unknown = body.entries.find((e) => String(e.file).includes("BADHDR"))!;
     assert.match(String(unknown.error), /unknown header version 9/);
     assert.equal(unknown.original_path, undefined, "an unknown layout must not produce a path");
@@ -239,14 +259,16 @@ test("browser_history replays the write-ahead log instead of reading around it",
     const wal = await readFile(`${db}-wal`).catch(() => null);
     assert.ok(wal && wal.length > 0, "the fixture must leave an unplayed WAL beside the database");
 
-    const out = await runPy(join(LIB, "browser_history", "run.py"), cwd, { path: "work/History", query: "chrome_history" });
+    const out = await runPy(join(LIB, "browser_history", "run.py"), cwd, { path: "work/History", query: "chrome_url_summary" });
     assert.equal(out.code, 0, out.stderr);
     const body = JSON.parse(out.stdout) as {
       rows: Array<{ url: string; last_visit_utc: string }>;
       sidecars_copied: string[];
-      wal_replayed: boolean;
+      wal_present: boolean;
+      wal_frames_replayed: number;
     };
-    assert.equal(body.wal_replayed, true);
+    assert.equal(body.wal_present, true);
+    assert.ok(body.wal_frames_replayed > 0, "the frames SQLite found and checkpointed are counted, not claimed");
     assert.ok(body.sidecars_copied.includes("History-wal"));
     assert.deepEqual(body.rows.map((r) => r.url), [
       "http://203.0.113.24/upload.aspx",

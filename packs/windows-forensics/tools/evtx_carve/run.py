@@ -10,8 +10,12 @@ overwrite, discard and what was acquired; this tool reads the bytes it is given 
 stored (a hibernation file is compressed and is not decompressed here). A chunk needs
 no file header to be read.
 
-So the sweep is: find every ElfChnk\\x00, hand the 64 KiB that follows to the
-chunk parser, check its checksums, and read the records. A record carries its
+So the sweep is: find every ElfChnk\\x00, check that the 128 bytes after it are a chunk header
+(header size 0x80, the record offsets inside the 64 KiB, the first record number not past
+the last), hand the 64 KiB that follows to the chunk parser, check its checksums, and read the
+records. The library's ChunkHeader does not refuse garbage: a signature that fails the header
+check is a problem line and counts only under `candidates` and `signatures_rejected`, never as
+a chunk found or parsed. A record carries its
 own Channel, so a carved record can be attributed without knowing which file it
 came from — and that is the thing to quote in the report, because the file it
 was carved from is usually not a log file at all.
@@ -35,6 +39,7 @@ checksums hold; a record in an unverified chunk may still be sound, and is marke
 """
 import json
 import os
+import struct
 import sys
 import xml.etree.ElementTree as ET
 
@@ -76,10 +81,29 @@ class LosslessPage:
             self.path = Path("work") / agent / "tool-output" / name
             self.shown = str(self.path)
 
+    def _cannot_write(self, exc: BaseException) -> None:
+        """The whole result cannot be kept: say so as JSON and stop, never a traceback."""
+        import sys as _sys
+        _sys.stdout.write(json.dumps({
+            "error": "the whole result (%d rows so far) cannot be written to %s: %s. Outside a job the place is your own "
+                     "work/<your id>/ directory; in a job it is $OUT." % (self.total, self.shown, exc),
+            "status": "failed",
+        }) + "\n")
+        _sys.exit(1)
+
     def _write(self, row: object) -> None:
         assert self._out is not None
-        self._out.write(json.dumps(row, ensure_ascii=False, default=str))
-        self._out.write("\n")
+        text = json.dumps(row, ensure_ascii=False, default=str)
+        try:
+            text.encode("utf-8")
+        except UnicodeEncodeError:
+            # A lone surrogate (a file name that is not UTF-8): escape it, lose nothing.
+            text = json.dumps(row, ensure_ascii=True, default=str)
+        try:
+            self._out.write(text)
+            self._out.write("\n")
+        except OSError as exc:
+            self._cannot_write(exc)
 
     def add(self, row: object) -> None:
         self.total += 1
@@ -87,12 +111,15 @@ class LosslessPage:
             self.page.append(row)
             return
         if self._out is None:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            fd, name = tempfile.mkstemp(
-                dir=self.path.parent, prefix=f".{self.path.name}-"
-            )
-            self._tmp = Path(name)
-            self._out = os.fdopen(fd, "w", encoding="utf-8")
+            try:
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                fd, name = tempfile.mkstemp(
+                    dir=self.path.parent, prefix=f".{self.path.name}-"
+                )
+                self._tmp = Path(name)
+                self._out = os.fdopen(fd, "w", encoding="utf-8")
+            except OSError as exc:
+                self._cannot_write(exc)
             for kept in self.page:
                 self._write(kept)
         self._write(row)
@@ -104,11 +131,14 @@ class LosslessPage:
             "truncated": self.total > len(self.page),
         }
         if self._out is not None:
-            self._out.flush()
-            os.fsync(self._out.fileno())
-            self._out.close()
-            assert self._tmp is not None
-            os.replace(self._tmp, self.path)
+            try:
+                self._out.flush()
+                os.fsync(self._out.fileno())
+                self._out.close()
+                assert self._tmp is not None
+                os.replace(self._tmp, self.path)
+            except OSError as exc:
+                self._cannot_write(exc)
             result["all_results"] = self.shown
             result["all_results_format"] = "JSON Lines, one complete result per line"
         return result
@@ -116,7 +146,8 @@ class LosslessPage:
 CHUNK_MAGIC = b"ElfChnk\x00"
 CHUNK_SIZE = 65536
 NS = {"e": "http://schemas.microsoft.com/win/2004/08/events/event"}
-PARSER = "evtx_carve/2"
+PARSER = "evtx_carve/3"
+HEADER_BYTES = 0x80
 
 
 class CompletePage(LosslessPage):
@@ -125,10 +156,13 @@ class CompletePage(LosslessPage):
 
     def finish(self) -> dict:
         if self._out is None and self.page:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            fd, name = tempfile.mkstemp(dir=self.path.parent, prefix=f".{self.path.name}-")
-            self._tmp = Path(name)
-            self._out = os.fdopen(fd, "w", encoding="utf-8")
+            try:
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                fd, name = tempfile.mkstemp(dir=self.path.parent, prefix=f".{self.path.name}-")
+                self._tmp = Path(name)
+                self._out = os.fdopen(fd, "w", encoding="utf-8")
+            except OSError as exc:
+                self._cannot_write(exc)
             for kept in self.page:
                 self._write(kept)
         return super().finish()
@@ -148,6 +182,26 @@ def keep(out, name, value):
 def fail(message, **extra):
     print(json.dumps({"error": message, **extra}))
     raise SystemExit(1)
+
+
+def reject_signature(head):
+    """Why the 128 bytes after an ElfChnk signature are not a chunk header, or None when they could be one. The
+    layout is the format's (the libevtx notes on the EVTX chunk header): the first and last record numbers at 0x08 and
+    0x10, the header size (0x80) at 0x28, the offset of the last record at 0x2C and of the free space at 0x30, each
+    inside the 64 KiB chunk. python-evtx's ChunkHeader reads whatever it is given without complaint, so this check is
+    the tool's own."""
+    if len(head) < HEADER_BYTES:
+        return "the file ends %d bytes after the signature and a chunk header is %d bytes" % (len(head), HEADER_BYTES)
+    first, last = struct.unpack_from("<QQ", head, 0x08)
+    header_size, last_offset, next_offset = struct.unpack_from("<III", head, 0x28)
+    if header_size != HEADER_BYTES:
+        return "its header size is %d, not %d" % (header_size, HEADER_BYTES)
+    if last_offset > CHUNK_SIZE or next_offset > CHUNK_SIZE:
+        return ("its record offsets (last %d, free space %d) lie outside a %d-byte chunk"
+                % (last_offset, next_offset, CHUNK_SIZE))
+    if next_offset > 0x200 and first > last:
+        return "its first record number %d is after its last, %d" % (first, last)
+    return None
 
 
 def summarise(xml, offset, chunk_offset, verified):
@@ -245,7 +299,7 @@ def main():
         "evtx_carve", [path, start, end, sorted(wanted), contains], limit)
     problems = LosslessPage("evtx_carve-problems", [path, start, end], 40)
     channels = set()
-    chunks_seen, chunks_parsed, chunks_verified, candidates = 0, 0, 0, 0
+    chunks_seen, chunks_parsed, chunks_verified, candidates, rejected = 0, 0, 0, 0, 0
     problem_count = 0
     resume_start = None
 
@@ -257,79 +311,91 @@ def main():
     # A chunk whose magic starts before `end` is found even when the magic
     # itself runs over it.
     read_end = min(size, end + len(CHUNK_MAGIC) - 1)
-    with open(path, "rb") as fh:
-        window = 1 << 22                    # read in 4 MiB steps, overlapping by a magic
-        position = start
-        tail = b""
-        tail_at = start
-        while position < read_end and resume_start is None:
-            fh.seek(position)
-            block = fh.read(min(window, read_end - position))
-            if not block:
-                break
-            buf = tail + block
-            base = tail_at
-            search = 0
-            while True:
-                hit = buf.find(CHUNK_MAGIC, search)
-                if hit < 0:
+    position = start
+    try:
+        with open(path, "rb") as fh:
+            window = 1 << 22                    # read in 4 MiB steps, overlapping by a magic
+            position = start
+            tail = b""
+            tail_at = start
+            while position < read_end and resume_start is None:
+                fh.seek(position)
+                block = fh.read(min(window, read_end - position))
+                if not block:
                     break
-                search = hit + 1
-                absolute = base + hit
-                if absolute >= end:
-                    break
-                if chunks_parsed >= chunk_limit or candidates >= candidate_limit:
-                    # Stop before this one, and say where: nothing is skipped.
-                    resume_start = absolute
-                    break
-                candidates += 1
-                chunks_seen += 1
-                fh.seek(absolute)
-                raw = fh.read(CHUNK_SIZE)
-                fh.seek(position + len(block))
-                if len(raw) < CHUNK_SIZE:
-                    problem(absolute, "the chunk runs past the end of the file: %d of its "
-                                      "%d bytes are there, and the records in them are read"
-                                      % (len(raw), CHUNK_SIZE))
-                try:
-                    chunk = ChunkHeader(raw, 0)
-                except Exception as exc:                      # a false positive on the magic
-                    problem(absolute, "not a readable chunk: %s" % exc)
-                    continue
-                try:
-                    verified = bool(chunk.verify())
-                except Exception as exc:
-                    verified = False
-                    problem(absolute, "the checksums could not be computed: %s" % exc)
-                chunks_parsed += 1
-                if verified:
-                    chunks_verified += 1
-                try:
-                    for record in chunk.records():
-                        try:
-                            xml = record.xml()
-                        except Exception as exc:
-                            problem(absolute, "a record did not parse: %s" % exc)
-                            continue
-                        if contains_l and contains_l not in xml.lower():
-                            continue
-                        try:
-                            entry = summarise(xml, absolute + record.offset(), absolute, verified)
-                        except ET.ParseError as exc:
-                            problem(absolute, "record XML is malformed: %s" % exc)
-                            continue
-                        if wanted and entry.get("event_id") not in wanted:
-                            continue
-                        # The whole XML goes in the result file; the page shown inline drops it unless asked.
-                        entry["xml"] = xml
-                        records.add(entry)
-                        if entry.get("channel"):
-                            channels.add(entry["channel"])
-                except Exception as exc:
-                    problem(absolute, "the record list ended early: %s" % exc)
-            tail = buf[-(len(CHUNK_MAGIC) - 1):] if len(buf) >= len(CHUNK_MAGIC) else buf
-            tail_at = base + len(buf) - len(tail)
-            position += len(block)
+                buf = tail + block
+                base = tail_at
+                search = 0
+                while True:
+                    hit = buf.find(CHUNK_MAGIC, search)
+                    if hit < 0:
+                        break
+                    search = hit + 1
+                    absolute = base + hit
+                    if absolute >= end:
+                        break
+                    if chunks_parsed >= chunk_limit or candidates >= candidate_limit:
+                        # Stop before this one, and say where: nothing is skipped.
+                        resume_start = absolute
+                        break
+                    candidates += 1
+                    fh.seek(absolute)
+                    refusal = reject_signature(fh.read(HEADER_BYTES))
+                    if refusal is not None:
+                        rejected += 1
+                        problem(absolute, "an ElfChnk signature that is not a chunk: %s" % refusal)
+                        fh.seek(position + len(block))
+                        continue
+                    chunks_seen += 1
+                    fh.seek(absolute)
+                    raw = fh.read(CHUNK_SIZE)
+                    fh.seek(position + len(block))
+                    if len(raw) < CHUNK_SIZE:
+                        problem(absolute, "the chunk runs past the end of the file: %d of its "
+                                          "%d bytes are there, and the records in them are read"
+                                          % (len(raw), CHUNK_SIZE))
+                    try:
+                        chunk = ChunkHeader(raw, 0)
+                    except Exception as exc:                      # a false positive on the magic
+                        problem(absolute, "not a readable chunk: %s" % exc)
+                        continue
+                    try:
+                        verified = bool(chunk.verify())
+                    except Exception as exc:
+                        verified = False
+                        problem(absolute, "the checksums could not be computed: %s" % exc)
+                    chunks_parsed += 1
+                    if verified:
+                        chunks_verified += 1
+                    try:
+                        for record in chunk.records():
+                            try:
+                                xml = record.xml()
+                            except Exception as exc:
+                                problem(absolute, "a record did not parse: %s" % exc)
+                                continue
+                            if contains_l and contains_l not in xml.lower():
+                                continue
+                            try:
+                                entry = summarise(xml, absolute + record.offset(), absolute, verified)
+                            except ET.ParseError as exc:
+                                problem(absolute, "record XML is malformed: %s" % exc)
+                                continue
+                            if wanted and entry.get("event_id") not in wanted:
+                                continue
+                            # The whole XML goes in the result file; the page shown inline drops it unless asked.
+                            entry["xml"] = xml
+                            records.add(entry)
+                            if entry.get("channel"):
+                                channels.add(entry["channel"])
+                    except Exception as exc:
+                        problem(absolute, "the record list ended early: %s" % exc)
+                tail = buf[-(len(CHUNK_MAGIC) - 1):] if len(buf) >= len(CHUNK_MAGIC) else buf
+                tail_at = base + len(buf) - len(tail)
+                position += len(block)
+    except OSError as exc:
+        fail("the sweep could not read %s (or write its result): %s" % (path, exc), status="failed", candidates=candidates,
+             signatures_rejected=rejected, chunks_parsed=chunks_parsed, swept_to=position)
 
     swept_to = resume_start if resume_start is not None else max(start, min(end, size))
     page = records.finish()
@@ -343,6 +409,7 @@ def main():
         "range_examined": {"start": start, "end": swept_to},
         "bytes_swept": max(0, swept_to - start),
         "candidates": candidates,
+        "signatures_rejected": rejected,
         "chunks_found": chunks_seen,
         "chunks_parsed": chunks_parsed,
         "chunks_checksum_ok": chunks_verified,

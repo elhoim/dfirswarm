@@ -9,7 +9,7 @@ and the hive's state. The key layout differs between Windows versions and BOTH a
 read when both are present, each row naming its layout:
 
   Root\\File\\<volume>\\<id>                  the older layout; values are numbered
-  Root\\InventoryApplicationFile\\<id>        the Windows 10 and later layout; values are named
+  Root\\InventoryApplicationFile\\<id>        the newer layout; values are named
 
 The numbered values are named by the published research regipy's own Amcache plugin
 follows (`5` file version, `c` file description, `f` the PE linker timestamp, `11`,
@@ -25,6 +25,7 @@ import datetime
 import json
 import os
 import re
+import stat
 import sys
 from pathlib import Path
 
@@ -66,10 +67,29 @@ class LosslessPage:
             self.path = Path("work") / agent / "tool-output" / name
             self.shown = str(self.path)
 
+    def _cannot_write(self, exc: BaseException) -> None:
+        """The whole result cannot be kept: say so as JSON and stop, never a traceback."""
+        import sys as _sys
+        _sys.stdout.write(json.dumps({
+            "error": "the whole result (%d rows so far) cannot be written to %s: %s. Outside a job the place is your own "
+                     "work/<your id>/ directory; in a job it is $OUT." % (self.total, self.shown, exc),
+            "status": "failed",
+        }) + "\n")
+        _sys.exit(1)
+
     def _write(self, row: object) -> None:
         assert self._out is not None
-        self._out.write(json.dumps(row, ensure_ascii=False, default=str))
-        self._out.write("\n")
+        text = json.dumps(row, ensure_ascii=False, default=str)
+        try:
+            text.encode("utf-8")
+        except UnicodeEncodeError:
+            # A lone surrogate (a file name that is not UTF-8): escape it, lose nothing.
+            text = json.dumps(row, ensure_ascii=True, default=str)
+        try:
+            self._out.write(text)
+            self._out.write("\n")
+        except OSError as exc:
+            self._cannot_write(exc)
 
     def add(self, row: object) -> None:
         self.total += 1
@@ -77,12 +97,15 @@ class LosslessPage:
             self.page.append(row)
             return
         if self._out is None:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            fd, name = tempfile.mkstemp(
-                dir=self.path.parent, prefix=f".{self.path.name}-"
-            )
-            self._tmp = Path(name)
-            self._out = os.fdopen(fd, "w", encoding="utf-8")
+            try:
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                fd, name = tempfile.mkstemp(
+                    dir=self.path.parent, prefix=f".{self.path.name}-"
+                )
+                self._tmp = Path(name)
+                self._out = os.fdopen(fd, "w", encoding="utf-8")
+            except OSError as exc:
+                self._cannot_write(exc)
             for kept in self.page:
                 self._write(kept)
         self._write(row)
@@ -94,11 +117,14 @@ class LosslessPage:
             "truncated": self.total > len(self.page),
         }
         if self._out is not None:
-            self._out.flush()
-            os.fsync(self._out.fileno())
-            self._out.close()
-            assert self._tmp is not None
-            os.replace(self._tmp, self.path)
+            try:
+                self._out.flush()
+                os.fsync(self._out.fileno())
+                self._out.close()
+                assert self._tmp is not None
+                os.replace(self._tmp, self.path)
+            except OSError as exc:
+                self._cannot_write(exc)
             result["all_results"] = self.shown
             result["all_results_format"] = "JSON Lines, one complete result per line"
         return result
@@ -231,6 +257,13 @@ def main():
         fail("limit must be a positive integer", limit=args.get("limit"))
 
     try:
+        hive_mode = os.stat(hive).st_mode
+    except OSError:
+        fail("no such hive", hive=hive)
+    if not stat.S_ISREG(hive_mode):
+        # A named pipe or a device would be opened and waited on: it is not read.
+        fail("the hive is not a regular file, so it was not opened", hive=hive, not_attempted=1)
+    try:
         h = RegistryHive(hive)
     except Exception as exc:
         fail("could not open the hive", hive=hive, reason=str(exc))
@@ -239,6 +272,7 @@ def main():
     counts = {}
     problems = []
     failed = [0]
+    unlisted = [0]
 
     def add(row, sub):
         last = getattr(getattr(sub, "header", None), "last_modified", 0)
@@ -248,42 +282,59 @@ def main():
         counts[row["layout"]] = counts.get(row["layout"], 0) + 1
         entries.add(row)
 
+    def note(label, exc):
+        failed[0] += 1
+        if len(problems) < 20:
+            problems.append("%s: %s: %s" % (label, type(exc).__name__, exc))
+        else:
+            unlisted[0] += 1
+
     def guarded(label, fn):
         try:
             fn()
         except Exception as exc:
-            failed[0] += 1
-            if len(problems) < 20:
-                problems.append("%s: %s: %s" % (label, type(exc).__name__, exc))
+            note(label, exc)
+
+    def children(label, node):
+        """The subkeys of `node`: a list that cannot be read is said (it is a row lost), never a traceback."""
+        try:
+            return list(node.iter_subkeys() or [])
+        except Exception as exc:
+            note(label, exc)
+            return []
+
+    def key_at(path):
+        """The key at `path`, or None when the hive has no such key; any other failure is a problem of the run."""
+        try:
+            return h.get_key(path)
+        except Exception as exc:
+            if type(exc).__name__ not in ("RegistryKeyNotFoundException", "NoRegistrySubkeysException"):
+                note("looking for %s" % path, exc)
+            return None
 
     layouts = []
 
-    # Windows 10 and later.
-    try:
-        inventory = h.get_key("\\Root\\InventoryApplicationFile")
-    except Exception:
-        inventory = None
+    # The newer layout.
+    inventory = key_at("\\Root\\InventoryApplicationFile")
     if inventory is not None:
         layouts.append("InventoryApplicationFile")
-        for sub in inventory.iter_subkeys():
+        for sub in children("InventoryApplicationFile", inventory):
             guarded("InventoryApplicationFile\\%s" % getattr(sub, "name", "?"), lambda sub=sub: add(modern_row(sub), sub))
 
-    # Windows 7 and 8: read as well when it is there, never instead.
-    try:
-        files = h.get_key("\\Root\\File")
-    except Exception:
-        files = None
+    # The older layout: read as well when it is there, never instead.
+    files = key_at("\\Root\\File")
     if files is not None:
         layouts.append("File")
-        for volume in files.iter_subkeys():
-            for sub in volume.iter_subkeys():
-                guarded("File\\%s\\%s" % (volume.name, getattr(sub, "name", "?")), lambda volume=volume, sub=sub: add(legacy_row(volume.name, sub), sub))
+        for volume in children("File", files):
+            for sub in children("File\\%s" % getattr(volume, "name", "?"), volume):
+                guarded("File\\%s\\%s" % (getattr(volume, "name", "?"), getattr(sub, "name", "?")), lambda volume=volume, sub=sub: add(legacy_row(volume.name, sub), sub))
 
     if not layouts:
         fail(
             "neither Amcache layout is present in this hive",
             hive=hive,
             looked_for=["\\Root\\InventoryApplicationFile", "\\Root\\File"],
+            problems=problems,
         )
 
     header = h.header
@@ -300,6 +351,7 @@ def main():
         "entry_count": page["matched"],
         "rows_failed": failed[0],
         "problems": problems,
+        "problems_not_listed": unlisted[0],
         "hive_dirty": dirty,
         "hive_sequence_numbers": [header.primary_sequence_num, header.secondary_sequence_num],
         "transaction_logs_beside_hive": logs,
@@ -312,4 +364,10 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except SystemExit:
+        raise
+    except Exception as exc:                                  # whatever hostile input does, the answer is JSON
+        print(json.dumps({"error": "the read failed", "reason": "%s: %s" % (type(exc).__name__, exc)}))
+        raise SystemExit(1)

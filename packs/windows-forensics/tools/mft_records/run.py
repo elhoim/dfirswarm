@@ -28,6 +28,12 @@ match is still parsed, flagged `fixup_failed` and `unreliable`, and counted unde
 that holds neither FILE nor BAAD (zeroed or damaged) is not a record and is not
 listed: it is counted under `slots_without_signature`.
 
+The slots are counted from the first record that looks like one (a FILE signature with an
+update sequence array of the size the record size implies): a file that does not begin on a
+record boundary is read at its own alignment, which is reported as `alignment_offset`. A
+slot of zeros is counted under `slots_zeroed`; one that holds data and neither signature is a
+problem and is counted under `slots_unrecognised`.
+
 Every record is read. The page returned inline is `limit` long, and when more
 records match the whole list is written to a file the output names. A record
 too damaged to parse is listed as a problem with its offset, and the sweep goes
@@ -91,10 +97,29 @@ class LosslessPage:
             self.path = Path("work") / agent / "tool-output" / name
             self.shown = str(self.path)
 
+    def _cannot_write(self, exc: BaseException) -> None:
+        """The whole result cannot be kept: say so as JSON and stop, never a traceback."""
+        import sys as _sys
+        _sys.stdout.write(json.dumps({
+            "error": "the whole result (%d rows so far) cannot be written to %s: %s. Outside a job the place is your own "
+                     "work/<your id>/ directory; in a job it is $OUT." % (self.total, self.shown, exc),
+            "status": "failed",
+        }) + "\n")
+        _sys.exit(1)
+
     def _write(self, row: object) -> None:
         assert self._out is not None
-        self._out.write(json.dumps(row, ensure_ascii=False, default=str))
-        self._out.write("\n")
+        text = json.dumps(row, ensure_ascii=False, default=str)
+        try:
+            text.encode("utf-8")
+        except UnicodeEncodeError:
+            # A lone surrogate (a file name that is not UTF-8): escape it, lose nothing.
+            text = json.dumps(row, ensure_ascii=True, default=str)
+        try:
+            self._out.write(text)
+            self._out.write("\n")
+        except OSError as exc:
+            self._cannot_write(exc)
 
     def add(self, row: object) -> None:
         self.total += 1
@@ -102,12 +127,15 @@ class LosslessPage:
             self.page.append(row)
             return
         if self._out is None:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            fd, name = tempfile.mkstemp(
-                dir=self.path.parent, prefix=f".{self.path.name}-"
-            )
-            self._tmp = Path(name)
-            self._out = os.fdopen(fd, "w", encoding="utf-8")
+            try:
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                fd, name = tempfile.mkstemp(
+                    dir=self.path.parent, prefix=f".{self.path.name}-"
+                )
+                self._tmp = Path(name)
+                self._out = os.fdopen(fd, "w", encoding="utf-8")
+            except OSError as exc:
+                self._cannot_write(exc)
             for kept in self.page:
                 self._write(kept)
         self._write(row)
@@ -119,11 +147,14 @@ class LosslessPage:
             "truncated": self.total > len(self.page),
         }
         if self._out is not None:
-            self._out.flush()
-            os.fsync(self._out.fileno())
-            self._out.close()
-            assert self._tmp is not None
-            os.replace(self._tmp, self.path)
+            try:
+                self._out.flush()
+                os.fsync(self._out.fileno())
+                self._out.close()
+                assert self._tmp is not None
+                os.replace(self._tmp, self.path)
+            except OSError as exc:
+                self._cannot_write(exc)
             result["all_results"] = self.shown
             result["all_results_format"] = "JSON Lines, one complete result per line"
         return result
@@ -252,6 +283,7 @@ def parse_record(record, number_hint, want_resident):
     if record[:4] not in (b"FILE", b"BAAD"):
         return None
     fixed, fixup_problem = apply_fixup(record)
+    errors = []
     sequence, = struct.unpack_from("<H", fixed, 0x10)
     first_attr, flags = struct.unpack_from("<HH", fixed, 0x14)
     used, allocated = struct.unpack_from("<II", fixed, 0x18)
@@ -278,7 +310,10 @@ def parse_record(record, number_hint, want_resident):
         entry["fixup_problem"] = fixup_problem
         entry["unreliable"] = True
 
-    errors = []
+    if used > len(fixed):
+        errors.append("the record's used size (%d) is larger than the record (%d bytes); its attribute chain was read to the end of the record, not to the used size" % (used, len(fixed)))
+    elif used < first_attr + 4:
+        errors.append("the record's used size (%d) does not reach past its first attribute at %d; its attribute chain was read to the end of the record, not to the used size" % (used, first_attr))
     for atype, offset, length in attributes(fixed, first_attr, errors, used):
         non_resident = fixed[offset + 8]
         instance = struct.unpack_from("<H", fixed, offset + 0x0E)[0]
@@ -398,16 +433,40 @@ def detect_record_size(fh, size):
     return 1024, "the default (neither the header nor the gap gave a record size)", gap
 
 
-def main():
-    try:
-        args = json.load(sys.stdin)
-    except ValueError as exc:
-        fail("arguments are not valid JSON", reason=str(exc))
+def first_record_offset(fh, record_size):
+    """Where the first record that looks like one begins: a FILE signature followed by an update sequence array
+    of the size the record size implies. Slots are counted from here, so a file that opens with a part of a
+    record (or with bytes that are not records) is read at its own alignment instead of as slots that match
+    nothing. At most 4096 candidate signatures are looked at; None when none qualifies."""
+    fh.seek(0)
+    carry, base, tried = b"", 0, 0
+    wanted = record_size // 512 + 1 if record_size >= 512 else None
+    while True:
+        block = fh.read(1 << 20)
+        if not block:
+            return None
+        buf = carry + block
+        at = buf.find(b"FILE")
+        while at >= 0 and at + 8 <= len(buf):
+            tried += 1
+            usa_offset, usa_count = struct.unpack_from("<HH", buf, at + 4)
+            if 0x28 <= usa_offset <= 0x80 and 1 <= usa_count <= 17 and (wanted is None or usa_count == wanted):
+                return base + at
+            if tried >= 4096:
+                return None
+            at = buf.find(b"FILE", at + 1)
+        keep = 7 if len(buf) >= 7 else len(buf)
+        carry = buf[-keep:]
+        base += len(buf) - len(carry)
 
+
+def run(args):
     path = args.get("path")
     if not isinstance(path, str) or not path:
         fail("path is required: an extracted $MFT")
     if not os.path.isfile(path):
+        if os.path.exists(path):
+            fail("not a regular file: it is not opened", path=path, not_attempted=1)
         fail("no such file", path=path)
 
     limit = args.get("limit", 200)
@@ -425,14 +484,23 @@ def main():
     if want_entry is not None and (not isinstance(want_entry, int) or isinstance(want_entry, bool)):
         fail("entry must be a record number")
 
-    size = os.path.getsize(path)
-    with open(path, "rb") as fh:
+    try:
+        size = os.path.getsize(path)
+        fh = open(path, "rb")
+    except OSError as exc:
+        fail("could not read the $MFT", path=path, reason=str(exc))
+    with fh:
         given = args.get("record_size")
         if given is not None and (not isinstance(given, int) or isinstance(given, bool) or given < 256):
             fail("record_size must be an integer of at least 256", record_size=given)
-        record_size, record_size_from, gap = (given, "the record_size argument", None) if given else detect_record_size(fh, size)
-        if not record_size:
-            fail("no FILE record found; this does not look like an $MFT", path=path, bytes=size)
+        try:
+            record_size, record_size_from, gap = (given, "the record_size argument", None) if given else detect_record_size(fh, size)
+            if not record_size:
+                fail("no FILE record found; this does not look like an $MFT", path=path, bytes=size)
+            first_at = first_record_offset(fh, record_size)
+        except OSError as exc:
+            fail("could not read the $MFT", path=path, reason=str(exc))
+        alignment = (first_at % record_size) if first_at is not None else 0
 
         key = [path, record_size, args.get("name"), want_entry, bool(args.get("deleted_only")),
                bool(args.get("streams_only")), bool(args.get("timestomp_only")),
@@ -441,34 +509,52 @@ def main():
         problems = LosslessPage("mft_records-problems", key, 40)
         structural = 0
         fixup_failed = 0
-        unsigned = 0
+        zeroed = unrecognised = 0
         scanned, parsed = 0, 0
         trailing = 0
-        fh.seek(0)
+        if alignment:
+            problems.add({"offset": 0, "why": "the first record begins at byte %d, which is not a multiple of the %d-byte record size: the %d bytes before byte %d are not read as records, and the slots are counted from there" % (first_at, record_size, alignment, alignment)})
+        try:
+            fh.seek(alignment)
+        except OSError as exc:
+            fail("could not read the $MFT", path=path, reason=str(exc))
         while True:
-            chunk = fh.read(record_size)
+            try:
+                chunk = fh.read(record_size)
+            except OSError as exc:
+                problems.add({"offset": alignment + scanned * record_size, "why": "the read failed here and the scan stopped: %s" % exc})
+                break
             if not chunk:
                 break
-            if len(chunk) < 42:
+            if len(chunk) < 48:
                 trailing = len(chunk)
                 break
             index = scanned
+            offset = alignment + index * record_size
             scanned += 1
+            if len(chunk) < record_size:
+                problems.add({"record": index, "offset": offset,
+                              "why": "the file ends inside this record: %d of its %d bytes are there" % (len(chunk), record_size)})
             try:
                 entry = parse_record(chunk, index, bool(args.get("with_resident")))
-            except (struct.error, IndexError, ValueError) as exc:
-                problems.add({"record": index, "offset": index * record_size,
+            except Exception as exc:        # a hostile record must not end the sweep
+                problems.add({"record": index, "offset": offset,
                               "why": "the record did not parse: %s" % exc})
                 continue
             if entry is None:
-                unsigned += 1
+                if not chunk.strip(b"\0"):
+                    zeroed += 1
+                else:
+                    unrecognised += 1
+                    problems.add({"record": index, "offset": offset,
+                                  "why": "the slot holds data but neither a FILE nor a BAAD signature (it begins %s)" % chunk[:4].hex()})
                 continue
             parsed += 1
             if "fixup_failed" in entry["flags"]:
                 fixup_failed += 1
             if entry.get("structural_errors"):
                 structural += 1
-                problems.add({"record": index, "offset": index * record_size,
+                problems.add({"record": index, "offset": offset,
                               "why": "the record did not parse cleanly: %s" % "; ".join(entry["structural_errors"])})
             if want_entry is not None:
                 if entry["entry"] != want_entry:
@@ -484,10 +570,12 @@ def main():
                     continue
             entries.add(entry)
 
+    if scanned and not parsed:
+        problems.add({"offset": alignment, "why": "no record was read: %d slot(s) of %d bytes were looked at and none holds a FILE or BAAD signature at its start (is the record size right, or is this an $MFT?)" % (scanned, record_size)})
     page = entries.finish()
     problem_page = problems.finish()
     out = {
-        "parser": "mft_records/2",
+        "parser": "mft_records/3",
         "status": "partial" if problem_page["matched"] else "complete",
         "path": path,
         "record_size": record_size,
@@ -496,7 +584,10 @@ def main():
         "records_parsed": parsed,
         "records_with_structural_errors": structural,
         "records_fixup_failed": fixup_failed,
-        "slots_without_signature": unsigned,
+        "slots_zeroed": zeroed,
+        "slots_unrecognised": unrecognised,
+        "slots_without_signature": zeroed + unrecognised,
+        "alignment_offset": alignment,
         "entries": entries.page,
         "entry_count": page["matched"],
         **page,
@@ -507,7 +598,10 @@ def main():
                 "not read $LogFile. $ATTRIBUTE_LIST is not resolved and no parent path is rebuilt (each name carries its parent entry "
                 "and sequence). A record with structural_errors kept what was sound and is unreliable. A record whose update sequence "
                 "fixup failed is parsed, flagged fixup_failed and unreliable and counted in records_fixup_failed, and does not make the "
-                "run partial; a slot with neither a FILE nor a BAAD signature is not listed and is counted in slots_without_signature.",
+                "run partial. A slot with neither a FILE nor a BAAD signature is not listed as a record: an all-zero one is counted in "
+                "slots_zeroed (an unused slot, ordinary at the end of an $MFT) and one that holds data in slots_unrecognised, which is also "
+                "a problem; slots_without_signature is their sum. alignment_offset is where the first record begins modulo the record size "
+                "(0 when the file is aligned); a file that does not begin on a record boundary is read from there and is partial.",
     }
     if problem_page.get("all_results"):
         out["all_problems"] = problem_page["all_results"]
@@ -516,6 +610,19 @@ def main():
         out["trailing_note"] = ("the file ends %d bytes into a record, too few to hold a record "
                                 "header" % trailing)
     print(json.dumps(out, indent=2))
+
+
+def main():
+    try:
+        args = json.load(sys.stdin)
+    except ValueError as exc:
+        fail("arguments are not valid JSON", reason=str(exc))
+    if not isinstance(args, dict):
+        fail("arguments must be a JSON object")
+    try:
+        run(args)
+    except OSError as exc:
+        fail("the $MFT could not be read", reason=str(exc))
 
 
 if __name__ == "__main__":

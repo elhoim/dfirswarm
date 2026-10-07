@@ -53,6 +53,30 @@ def tool_output_dir():
     return d, d
 
 
+def new_pair(outdir, digest):
+    """Two new files, stdout and stderr, named by the arguments' digest and, when an earlier run holds that name, by
+    the next free number. Exclusive and never through a link. Returns both descriptors, both paths and the earlier
+    files of the same digest, which are left as they are."""
+    earlier = sorted(n for n in os.listdir(outdir) if n.startswith("vss_stores-%s" % digest))
+    for n in range(1, 1000):
+        stem = "vss_stores-%s" % digest + ("" if n == 1 else "-%d" % n)
+        out_path = os.path.join(outdir, stem + ".stdout.txt")
+        err_path = os.path.join(outdir, stem + ".stderr.txt")
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            out_fd = os.open(out_path, flags, 0o644)
+        except FileExistsError:
+            continue
+        try:
+            err_fd = os.open(err_path, flags, 0o644)
+        except FileExistsError:
+            os.close(out_fd)
+            os.unlink(out_path)
+            continue
+        return out_fd, err_fd, out_path, err_path, earlier
+    raise OSError("no free name for the vshadowinfo output files after 999 tries")
+
+
 def main():
     try:
         args = json.load(sys.stdin)
@@ -86,15 +110,22 @@ def main():
     if offset is not None:
         argv += ["-o", str(offset)]
     argv.append(image)
-    with open(image, "rb") as fh:
-        head = fh.read(8)
+    try:
+        with open(image, "rb") as fh:
+            head = fh.read(8)
+    except OSError as exc:
+        fail("the image could not be read", image=image, reason=str(exc))
     outdir, shown = tool_output_dir()
     digest = hashlib.sha256(json.dumps(argv).encode("utf-8")).hexdigest()[:16]
-    os.makedirs(outdir, exist_ok=True)
-    out_path = os.path.join(outdir, "vss_stores-%s.stdout.txt" % digest)
-    err_path = os.path.join(outdir, "vss_stores-%s.stderr.txt" % digest)
+    try:
+        os.makedirs(outdir, exist_ok=True)
+        # Created, never opened over: a run with the same arguments keeps its own pair of files, and an earlier
+        # run's stay as they were (the next free number names the new pair).
+        out_fd, err_fd, out_path, err_path, earlier = new_pair(outdir, digest)
+    except OSError as exc:
+        fail("the files for vshadowinfo's output could not be created in %s" % shown, reason=str(exc))
     timed_out = False
-    with open(out_path, "wb") as so, open(err_path, "wb") as se:
+    with os.fdopen(out_fd, "wb") as so, os.fdopen(err_fd, "wb") as se:
         proc = subprocess.Popen(argv, stdout=so, stderr=se, stdin=subprocess.DEVNULL, start_new_session=True)
         try:
             rc = proc.wait(timeout=TIMEOUT)
@@ -155,7 +186,7 @@ def main():
         status = "complete"
 
     out = {
-        "parser": "vss_stores/2",
+        "parser": "vss_stores/3",
         "status": status,
         "image": image,
         "offset_bytes": offset,
@@ -170,6 +201,7 @@ def main():
         "command": shlex.join(argv),
         "stdout_file": "%s/%s" % (shown, os.path.basename(out_path)),
         "stderr_file": "%s/%s" % (shown, os.path.basename(err_path)),
+        "earlier_output_files": ["%s/%s" % (shown, n) for n in earlier],
         "vshadowinfo_stderr_lines": len(stderr.splitlines()),
         "vshadowinfo_said": stderr.splitlines()[:5],
     }
@@ -199,4 +231,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except OSError as exc:
+        fail("a file operation failed: %s" % exc, reason=type(exc).__name__)

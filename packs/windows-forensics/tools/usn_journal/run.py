@@ -61,6 +61,7 @@ import json
 import mmap
 import os
 import re
+import stat
 import struct
 import sys
 from pathlib import Path
@@ -103,10 +104,29 @@ class LosslessPage:
             self.path = Path("work") / agent / "tool-output" / name
             self.shown = str(self.path)
 
+    def _cannot_write(self, exc: BaseException) -> None:
+        """The whole result cannot be kept: say so as JSON and stop, never a traceback."""
+        import sys as _sys
+        _sys.stdout.write(json.dumps({
+            "error": "the whole result (%d rows so far) cannot be written to %s: %s. Outside a job the place is your own "
+                     "work/<your id>/ directory; in a job it is $OUT." % (self.total, self.shown, exc),
+            "status": "failed",
+        }) + "\n")
+        _sys.exit(1)
+
     def _write(self, row: object) -> None:
         assert self._out is not None
-        self._out.write(json.dumps(row, ensure_ascii=False, default=str))
-        self._out.write("\n")
+        text = json.dumps(row, ensure_ascii=False, default=str)
+        try:
+            text.encode("utf-8")
+        except UnicodeEncodeError:
+            # A lone surrogate (a file name that is not UTF-8): escape it, lose nothing.
+            text = json.dumps(row, ensure_ascii=True, default=str)
+        try:
+            self._out.write(text)
+            self._out.write("\n")
+        except OSError as exc:
+            self._cannot_write(exc)
 
     def add(self, row: object) -> None:
         self.total += 1
@@ -114,12 +134,15 @@ class LosslessPage:
             self.page.append(row)
             return
         if self._out is None:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            fd, name = tempfile.mkstemp(
-                dir=self.path.parent, prefix=f".{self.path.name}-"
-            )
-            self._tmp = Path(name)
-            self._out = os.fdopen(fd, "w", encoding="utf-8")
+            try:
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                fd, name = tempfile.mkstemp(
+                    dir=self.path.parent, prefix=f".{self.path.name}-"
+                )
+                self._tmp = Path(name)
+                self._out = os.fdopen(fd, "w", encoding="utf-8")
+            except OSError as exc:
+                self._cannot_write(exc)
             for kept in self.page:
                 self._write(kept)
         self._write(row)
@@ -131,11 +154,14 @@ class LosslessPage:
             "truncated": self.total > len(self.page),
         }
         if self._out is not None:
-            self._out.flush()
-            os.fsync(self._out.fileno())
-            self._out.close()
-            assert self._tmp is not None
-            os.replace(self._tmp, self.path)
+            try:
+                self._out.flush()
+                os.fsync(self._out.fileno())
+                self._out.close()
+                assert self._tmp is not None
+                os.replace(self._tmp, self.path)
+            except OSError as exc:
+                self._cannot_write(exc)
             result["all_results"] = self.shown
             result["all_results_format"] = "JSON Lines, one complete result per line"
         return result
@@ -222,7 +248,7 @@ def record_at(data, offset, end):
     there are not a plausible v2, v3 or v4 record."""
     if offset + 8 > end:
         return None
-    length, major = struct.unpack_from("<IH", data, offset)
+    length, major, minor = struct.unpack_from("<IHH", data, offset)
     head = HEAD.get(major)
     if head is None or not (head <= length <= MAX_RECORD) or length % 8 or offset + length > end:
         return None
@@ -234,7 +260,7 @@ def record_at(data, offset, end):
         extents = [dict(zip(("offset", "length"), struct.unpack_from("<qq", data, offset + 0x40 + i * 16)))
                    for i in range(count)]
         return {"length": length, "row": {
-            "version": 4, "usn": usn, "name": None,
+            "version": 4, "minor_version": minor, "usn": usn, "name": None,
             "file_reference": ref.get("entry"), "file_sequence": ref.get("sequence"), "file_id": ref["id"],
             "parent_reference": parent.get("entry"), "parent_sequence": parent.get("sequence"), "parent_id": parent["id"],
             "reason": flags(reason, REASONS), "reason_raw": reason, "source_info": source,
@@ -246,13 +272,13 @@ def record_at(data, offset, end):
     name = data[offset + name_off:offset + name_off + name_len].decode("utf-16-le", "replace")
     if major == 2:
         ref, parent, usn, stamp, reason, source, sec, attrs = struct.unpack_from("<QQQqIIII", data, offset + 0x08)
-        row = {"version": 2, "usn": usn, "timestamp": filetime(stamp), "timestamp_filetime": str(stamp), "name": name,
+        row = {"version": 2, "minor_version": minor, "usn": usn, "timestamp": filetime(stamp), "timestamp_filetime": str(stamp), "name": name,
                "file_reference": ref & 0x0000FFFFFFFFFFFF, "file_sequence": ref >> 48,
                "parent_reference": parent & 0x0000FFFFFFFFFFFF, "parent_sequence": parent >> 48}
     else:
         ref, parent = reference(data[offset + 0x08:offset + 0x18]), reference(data[offset + 0x18:offset + 0x28])
         usn, stamp, reason, source, sec, attrs = struct.unpack_from("<QqIIII", data, offset + 0x28)
-        row = {"version": 3, "usn": usn, "timestamp": filetime(stamp), "timestamp_filetime": str(stamp), "name": name,
+        row = {"version": 3, "minor_version": minor, "usn": usn, "timestamp": filetime(stamp), "timestamp_filetime": str(stamp), "name": name,
                "file_reference": ref.get("entry"), "file_sequence": ref.get("sequence"), "file_id": ref["id"],
                "parent_reference": parent.get("entry"), "parent_sequence": parent.get("sequence"), "parent_id": parent["id"]}
     row.update({"reason": flags(reason, REASONS), "reason_raw": reason, "source_info": source, "security_id": sec,
@@ -260,11 +286,28 @@ def record_at(data, offset, end):
     return {"length": length, "row": row}
 
 
+def unsupported_header(data, offset, end):
+    """A record whose major version this tool does not read, when it still has the shape of one: a length that is a
+    multiple of 8 and fits, and after it the end of the journal, zeros or a record this tool reads. Returns its
+    offset, versions and length, or None (then the bytes are stepped over 8 at a time, as unrecognised)."""
+    if offset + 8 > end:
+        return None
+    length, major, minor = struct.unpack_from("<IHH", data, offset)
+    if major in HEAD or length % 8 or not (0x20 <= length <= MAX_RECORD) or offset + length > end:
+        return None
+    after = offset + length
+    if after < end and any(data[after:min(after + 8, end)]) and record_at(data, after, end) is None:
+        return None
+    return {"offset": offset, "major_version": major, "minor_version": minor, "length": length}
+
+
 def main():
     try:
         args = json.load(sys.stdin)
     except ValueError as exc:
         fail("arguments are not valid JSON", reason=str(exc))
+    if not isinstance(args, dict):
+        fail("arguments must be a JSON object")
 
     path = args.get("path")
     if not isinstance(path, str) or not path:
@@ -287,6 +330,8 @@ def main():
             fail("name is not a valid regex", name=name_filter, reason=str(exc))
 
     try:
+        if not stat.S_ISREG(os.stat(path).st_mode):
+            fail("not a regular file: it is not opened", path=path, not_attempted=1)
         fh = open(path, "rb")
         size = os.fstat(fh.fileno()).st_size
     except OSError as exc:
@@ -300,6 +345,9 @@ def main():
 
     records = LosslessPage("usn_journal", [path, name_filter, include_nameless], limit)
     unrecognised = LosslessPage("usn_journal-unrecognised", [path], 40)
+    unsupported = LosslessPage("usn_journal-unsupported", [path], 40)
+    unsupported_by_major = {}
+    unsupported_bytes = 0
     versions = {}
     start = None
     read = zeros = 0
@@ -318,6 +366,12 @@ def main():
             # Before the first record this is the search for it; after it, a
             # stretch that is not a record, counted in bytes and kept as a range.
             step = min(8, size - offset)
+            odd = unsupported_header(data, offset, size)
+            if odd is not None:
+                step = odd["length"]
+                unsupported.add(odd)
+                unsupported_bytes += step
+                unsupported_by_major[str(odd["major_version"])] = unsupported_by_major.get(str(odd["major_version"]), 0) + 1
             if start is not None:
                 unrecognised_bytes += step
                 if open_range is not None and open_range[0] + open_range[1] == offset:
@@ -328,7 +382,7 @@ def main():
                     open_range = [offset, step]
             else:
                 prefix_unrecognised += step
-            offset += 8
+            offset += step if odd is not None else 8
             continue
         if open_range is not None:
             unrecognised.add({"offset": open_range[0], "bytes": open_range[1]})
@@ -355,9 +409,11 @@ def main():
 
     if start is None:
         fail("no USN record (v2, v3 or v4) found", bytes=size, zero_bytes=zeros,
-             hint="is this the $J stream rather than $Max?")
+             unsupported_version_records=sum(unsupported_by_major.values()), unsupported_versions=unsupported_by_major,
+             hint="is this the $J stream rather than $Max? A record of another major version is listed under unsupported_versions, not read.")
 
     page = records.finish()
+    unsupported_page = unsupported.finish()
     unrecognised_page = unrecognised.finish()
     result = {
         "path": path,
@@ -375,11 +431,17 @@ def main():
         "prefix_unrecognised_bytes": prefix_unrecognised,
         "nameless_excluded_by_filter": nameless_excluded,
         "include_nameless": include_nameless,
-        "parser": "usn_journal/3",
+        "unsupported_version_records": sum(unsupported_by_major.values()),
+        "unsupported_version_bytes": unsupported_bytes,
+        "unsupported_versions": unsupported_by_major,
+        "unsupported_version_list": unsupported.page,
+        "parser": "usn_journal/4",
         **page,
     }
     if unrecognised_page.get("all_results"):
         result["all_unrecognised_ranges"] = unrecognised_page["all_results"]
+    if unsupported_page.get("all_results"):
+        result["all_unsupported_version_list"] = unsupported_page["all_results"]
     if pattern is not None and not page["matched"]:
         result["note"] = ("%d records were read and none has a file name matching %r "
                           "(a case-insensitive regex); the journal is not empty" % (read, name_filter))

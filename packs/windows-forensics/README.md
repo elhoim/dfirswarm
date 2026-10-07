@@ -32,9 +32,11 @@ and `mam_scan`, `amcache_apps`, `usn_journal`, `shellbags`, `jumplist`,
 `esedb_query`, `extract_stream`, `utf16_urls`, `yara_scan`.
 
 What a tool measures, and what it does not, is in its manifest, and a tool says
-`partial` or `failed` rather than hand back a clean answer for a run that did
-not read everything (an exit status of 0 means the engine ran, not that the
-examination is complete). Three of them can reach secret material and print none
+what it did not read rather than hand back a clean answer for a run that did not
+read everything: `partial` or `failed` in a `status` where it has one, and
+otherwise its own counts (`structure_complete`, `unrecognised_bytes`,
+`records_examined` against `parse_errors`). An exit status of 0 means the engine
+ran, not that the examination is complete. Three of them can reach secret material and print none
 of it: `browser_history` replaces the credential cells of Login Data, Cookies and
 Firefox's key database by their length, `regkv` does the same for values that can
 be secrets, and `yara_scan` returns where a rule matched, never the bytes it

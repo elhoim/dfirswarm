@@ -217,7 +217,8 @@ class _Record:
 
 class ChunkHeader:
     def __init__(self, buf, offset):
-        self._first, self._count = struct.unpack_from("<II", buf, offset + 8)
+        self._first, = struct.unpack_from("<I", buf, offset + 8)
+        self._count, = struct.unpack_from("<I", buf, offset + 0x34)
 
     def verify(self):
         return True
@@ -241,9 +242,16 @@ async function carveBlob(path: string): Promise<number[]> {
     [size - 1000, 13, 2],
   ];
   for (const [at, first, count] of chunks) {
+    // The chunk header as the format has it: the first and last record numbers (u64 at 0x08 and 0x10), the header size
+    // 0x80 at 0x28, the offsets of the last record and of the free space at 0x2C and 0x30. The count the stub reads sits
+    // at 0x34, where the format keeps a checksum the stub's verify() does not look at.
     blob.write("ElfChnk\u0000", at, "latin1");
-    blob.writeUInt32LE(first, at + 8);
-    blob.writeUInt32LE(count, at + 12);
+    blob.writeBigUInt64LE(BigInt(first), at + 8);
+    blob.writeBigUInt64LE(BigInt(first + count - 1), at + 0x10);
+    blob.writeUInt32LE(0x80, at + 0x28);
+    blob.writeUInt32LE(0x200, at + 0x2c);
+    blob.writeUInt32LE(0x400, at + 0x30);
+    blob.writeUInt32LE(count, at + 0x34);
   }
   await writeFile(path, blob);
   return chunks.map(([at]) => at);
@@ -822,25 +830,47 @@ open(sys.argv[2], "wb").write(junk + one + junk[:50] + lnk(name + "-2") + junk[:
 type Lnk = {
   ok: boolean;
   name: string;
-  utf16_strings: string[];
+  utf16_strings: { link_offset: number; offset: number; chars: number; finding_id: string }[];
+  utf16_string_count: number;
   structure_complete: boolean;
   bytes_read: number;
+  secret_values: { values_file: string | null; written: number };
   extra: { sig: string; hex?: string; icon_env_ascii?: string; icon_env_u16?: string }[];
 };
 
-test("lnk_parse reads every UTF-16 string whole, past the first 8 KiB, and a whole icon block", async () => {
+/** The text of every finding the values file holds, its pieces joined in order. */
+async function findings(outDir: string, file: string): Promise<Map<string, string>> {
+  const text = await readFile(join(outDir, file), "utf8");
+  const out = new Map<string, string>();
+  for (const line of text.trimEnd().split("\n")) {
+    const row = JSON.parse(line) as { finding_id: string; value: string };
+    out.set(row.finding_id, (out.get(row.finding_id) ?? "") + row.value);
+  }
+  return out;
+}
+
+test("lnk_parse reads every UTF-16 string whole, past the first 8 KiB, and a whole icon block: the text goes to the values file, in a job", async () => {
   // Strings were cut at 256 characters, the sweep stopped at 8192 bytes,
   // the character after a string's NUL was skipped, and the icon
-  // environment block was reported as its first 32 bytes.
+  // environment block was reported as its first 32 bytes. The strings are text a link
+  // carries (a command line can hold a secret), so the answer holds their places and
+  // lengths and the text is in the values file a job writes.
   await withCwd(async (cwd) => {
     await build(LNK_BUILDER, join(cwd, "work", "one.lnk"), join(cwd, "work", "dump.bin"));
     const name = "LongName-" + "abcdefghij".repeat(30);
-    const out = body<Lnk>(await tool(join(WIN, "lnk_parse", "run.py"), cwd, { path: "work/one.lnk", size: 16384 }));
+    const outDir = join(cwd, "out");
+    await mkdir(outDir, { recursive: true });
+    const run = await tool(join(WIN, "lnk_parse", "run.py"), cwd, { path: "work/one.lnk", size: 16384, write_strings: true }, { JOB_ID: "j000001", OUT: outDir });
+    const out = body<Lnk>(run);
     assert.equal(out.ok, true);
     assert.equal(out.name, name);
-    assert.ok(out.utf16_strings.some((s) => s.includes(name)), "the 309-character name is read whole");
-    assert.ok(out.utf16_strings.includes("BeyondTheFirstWindow"), "a string past 8192 bytes is found");
-    assert.ok(out.utf16_strings.includes("SecondString"), "the next string keeps its first character");
+    assert.equal(out.secret_values.values_file, "store/jobs/j000001/out/lnk-strings.jsonl");
+    const text = [...(await findings(outDir, "lnk-strings.jsonl")).values()];
+    assert.ok(text.some((s) => s.includes(name)), "the 309-character name is read whole");
+    assert.ok(text.includes("BeyondTheFirstWindow"), "a string past 8192 bytes is found");
+    assert.ok(text.includes("SecondString"), "the next string keeps its first character");
+    assert.equal(out.utf16_string_count, out.utf16_strings.length);
+    assert.equal(run.stdout.includes("BeyondTheFirstWindow"), false, "the answer carries the places of the strings, not their text");
     assert.equal(out.structure_complete, true);
     const icon = out.extra.find((e) => e.sig === "0xa0000007");
     assert.ok(icon);
@@ -861,19 +891,22 @@ test("lnk_parse scans every link whole, each up to the next header, and keeps th
   await withCwd(async (cwd) => {
     await build(LNK_BUILDER, join(cwd, "work", "one.lnk"), join(cwd, "work", "dump.bin"));
     const size = (await stat(join(cwd, "work", "dump.bin"))).size;
-    const out = body<Page & { count: number; hits: Lnk[]; bytes_read: number }>(
-      await tool(join(WIN, "lnk_parse", "run.py"), cwd, { dump: "work/dump.bin", size, scan: true, max: 2 }),
+    const outDir = join(cwd, "out");
+    await mkdir(outDir, { recursive: true });
+    const out = body<Page & { count: number; hits: Lnk[]; bytes_read: number; secret_values: { values_file: string } }>(
+      await tool(join(WIN, "lnk_parse", "run.py"), cwd, { dump: "work/dump.bin", size, scan: true, max: 2, write_strings: true }, { JOB_ID: "j000002", OUT: outDir }),
     );
     assert.equal(out.count, 3);
     assert.equal(out.hits.length, 2);
     assert.equal(out.bytes_read, size);
-    const rows = await allRows<Lnk>(cwd, out);
+    // In a job the whole result is under $OUT, named as the sealed job's output.
+    assert.equal(out.all_results?.startsWith("store/jobs/j000002/out/tool-output/"), true);
+    const rows = (await readFile(join(outDir, out.all_results!.slice("store/jobs/j000002/out/".length)), "utf8")).trimEnd().split("\n").map((l) => JSON.parse(l) as Lnk);
     assert.equal(rows.length, 3);
-    for (const row of rows) {
-      assert.equal(row.structure_complete, true);
-      assert.ok(row.utf16_strings.includes("BeyondTheFirstWindow"));
-    }
+    for (const row of rows) assert.equal(row.structure_complete, true);
     assert.deepEqual(rows.map((r) => r.name.slice(-2)), ["ij", "-2", "-3"]);
+    const text = [...(await findings(outDir, "lnk-strings.jsonl")).values()];
+    assert.equal(text.filter((s) => s === "BeyondTheFirstWindow").length, 3, "every link's far string is in the values file");
   });
 });
 
