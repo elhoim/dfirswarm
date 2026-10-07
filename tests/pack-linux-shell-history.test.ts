@@ -1,0 +1,154 @@
+/**
+ * The Linux pack: shell_history, against Bash's HISTTIMEFORMAT file (a `#<epoch>` line before each entry, an
+ * entry running until the next stamp), zsh's EXTENDED_HISTORY (`: <epoch>:<elapsed>;<command>`, a newline
+ * inside a command written after a backslash), fish's history (`- cmd:` and `  when:`) and plain client
+ * histories.
+ * Every fixture is built by the test from the format's own layout, never from a tool's output.
+ *
+ * The tools that read command lines, messages or environments follow the secret-safe output pattern of
+ * recovery_key_scan (docs/packs.md, "Secrets and sensitive output"): the answer is locators and structured
+ * fields, and the text is written only on request, only in a job, only to a file under $OUT. What the answer
+ * and the files it names hold is checked here for a planted secret.
+ */
+import assert from "node:assert/strict";
+import { chmod, readFile, stat } from "node:fs/promises";
+import { join } from "node:path";
+import { test } from "node:test";
+import { IS_ROOT, SHELL, asJob, body, everythingBut, lines, put, refused, rowsOf, tool, withCwd } from "./linux-pack-harness.ts";
+import type { Json } from "./linux-pack-harness.ts";
+
+const HIST_SECRET = "HistoryPw12345";
+
+test("shell_history keeps a multi-line bash entry whole, stamped once, and says where its physical lines are", async () => {
+  await withCwd(async (cwd) => {
+    const root = join(cwd, "work", "ev");
+    await put(root, "home/alice/.bash_history", lines("#1700000000", "ls -la", "#1700000005", "for i in 1 2; do", "  echo $i", "done", "#1700000010", "uname -a"));
+    const out = body(await asJob(SHELL, cwd, { root: "work/ev" }));
+    const rows = await rowsOf(cwd, out);
+    assert.equal(rows.length, 3);
+    assert.deepEqual(rows.map((r) => r.command_lines), [1, 3, 1]);
+    assert.equal(rows[1].time, "2023-11-14T22:13:25Z");
+    assert.equal(rows[1].time_raw, "1700000005");
+    assert.deepEqual([rows[1].line_start, rows[1].line_end], [3, 6]);
+    assert.equal(rows[1].boundary_basis, "bash timestamp line");
+    assert.equal(out.files[0].format, "bash");
+    assert.equal(out.files[0].physical_lines, 8);
+  });
+});
+
+test("shell_history reads a zsh extended entry with a continuation as one command, and fish and client histories in their own forms", async () => {
+  await withCwd(async (cwd) => {
+    const root = join(cwd, "work", "ev");
+    await put(root, "home/bob/.zsh_history", lines(": 1700000000:3;echo one", ": 1700000100:0;for i in 1 2; do\\", "echo $i\\", "done", ": 1700000200:1;pwd"));
+    await put(root, "home/bob/.local/share/fish/fish_history", lines("- cmd: ls -la", "  when: 1700000300", "- cmd: echo a\\nb", "  when: 1700000400", "  paths:", "    - a"));
+    await put(root, "home/bob/.mysql_history", lines("select\\0401;", "show\\040tables;"));
+    await put(root, "home/bob/.lesshst", lines(".less-history-file:", ".search", '"needle'));
+    const out = body(await asJob(SHELL, cwd, { root: "work/ev" }));
+    const rows = await rowsOf(cwd, out);
+    const zsh = rows.filter((r) => r.format === "zsh");
+    assert.equal(zsh.length, 3);
+    assert.deepEqual(zsh.map((r) => r.command_lines), [1, 3, 1]);
+    assert.equal(zsh[1].time, "2023-11-14T22:15:00Z");
+    assert.equal(zsh[0].elapsed_seconds, 3);
+    assert.deepEqual([zsh[1].line_start, zsh[1].line_end], [2, 4]);
+    const fish = rows.filter((r) => r.format === "fish");
+    assert.equal(fish.length, 2);
+    assert.equal(fish[1].command_lines, 2, "fish writes a newline inside a command as \\n");
+    assert.equal(fish[1].time, "2023-11-14T22:20:00Z");
+    const client = rows.filter((r) => r.format === "plain");
+    assert.equal(client.length, 2);
+    assert.ok(client.every((r) => r.time === null && r.boundary_basis === "physical line"));
+    assert.ok(out.not_parsed_files.some((f: Json) => String(f.file).endsWith(".lesshst")), "less's state file is named, not read as commands");
+  });
+});
+
+test("shell_history does not take a directory name for an account", async () => {
+  await withCwd(async (cwd) => {
+    const root = join(cwd, "work", "ev");
+    await put(root, "root/.bash_history", lines("whoami"));
+    await put(root, "home/alice/.bash_history", lines("id"));
+    await put(root, "home/ghost/.bash_history", lines("id"));
+    // With no account database the owner is unknown, and the directory's name is the only thing said.
+    const bare = body(await asJob(SHELL, cwd, { root: "work/ev" }));
+    const rootRow = (await rowsOf(cwd, bare)).find((r) => r.home === join(cwd, "work", "ev", "root") || String(r.home).endsWith("/root"));
+    assert.equal(rootRow.user, "unknown");
+    assert.equal(rootRow.home_basename, "root");
+    assert.ok((await rowsOf(cwd, bare)).every((r) => r.user === "unknown"));
+    // With the evidence's passwd, a home path that an account owns names it, and says where from.
+    await put(root, "etc/passwd", "root:x:0:0:root:/root:/bin/bash\nalice:x:1000:1000::/home/alice:/bin/bash\n");
+    const resolved = body(await asJob(SHELL, cwd, { root: "work/ev" }, undefined, {}, "out2"));
+    const rows = await rowsOf(cwd, resolved);
+    const user = (name: string): string => rows.find((r) => String(r.home).endsWith(`/${name}`)).user;
+    assert.equal(user("root"), "root");
+    assert.equal(user("alice"), "alice");
+    assert.equal(user("ghost"), "unknown", "a home no account owns has no owner");
+    assert.match(rows.find((r) => String(r.home).endsWith("/alice")).user_source, /etc\/passwd:2$/);
+  });
+});
+
+test("shell_history answers without command text, and the text goes to a job's file only on request", async () => {
+  await withCwd(async (cwd) => {
+    const root = join(cwd, "work", "ev");
+    await put(root, "home/alice/.bash_history", lines("#1700000000", `mysql -uroot -p${HIST_SECRET}`, "#1700000001", "ls", "#1700000002", "id"));
+    await put(root, "home/alice/.mysql_history", lines(`alter user root identified by '${HIST_SECRET}x';`));
+    for (const run of [await tool(SHELL, cwd, { root: "work/ev", limit: 1 }), await asJob(SHELL, cwd, { root: "work/ev", limit: 1 })]) {
+      const out = body(run);
+      assert.ok(out.records.length === 1 && !("command" in out.records[0]));
+      assert.ok(out.records[0].command_bytes > 0);
+      assert.equal(out.text.written, 0);
+      assert.ok(!(await everythingBut(cwd, run.stdout, [])).includes(HIST_SECRET), "no command text reaches the answer or any file it names");
+    }
+    assert.match(refused(await tool(SHELL, cwd, { root: "work/ev", write_commands: true })).error, /outside a job/);
+    assert.match(refused(await tool(SHELL, cwd, { root: "work/ev", preview_commands: true })).error, /outside a job/);
+    const job = await asJob(SHELL, cwd, { root: "work/ev", write_commands: true, limit: 1 });
+    const out = body(job);
+    assert.ok(!job.stdout.includes(HIST_SECRET));
+    assert.match(out.text.file, /out\/shell-history-commands\.jsonl$/);
+    assert.equal((await stat(join(cwd, "out", "shell-history-commands.jsonl"))).mode & 0o777, 0o600);
+    const text = (await readFile(join(cwd, "out", "shell-history-commands.jsonl"), "utf8")).trimEnd().split("\n").map((l) => JSON.parse(l));
+    assert.equal(text.length, 4);
+    assert.ok(text.some((t) => String(t.command).includes(`-p${HIST_SECRET}`)));
+    assert.equal(text.find((t) => t.id === out.records[0].id).command, text[0].command);
+    // The preview carries the text in the answer, in a job.
+    const preview = body(await asJob(SHELL, cwd, { root: "work/ev", preview_commands: true, limit: 2 }, undefined, {}, "out3"));
+    assert.ok(preview.records.some((r: Json) => String(r.command).includes(HIST_SECRET)));
+  });
+});
+
+test("shell_history walks into a directory called dev or proc below the top, names what it left out, and names what it could not open", async () => {
+  await withCwd(async (cwd) => {
+    const root = join(cwd, "work", "ev");
+    await put(root, "proc/1/.bash_history", lines("not evidence"));
+    await put(root, "home/alice/dev/.bash_history", lines("a project directory called dev"));
+    await put(root, "home/alice/.bash_history", lines("id"));
+    if (!IS_ROOT) {
+      await put(root, "home/locked/.bash_history", lines("id"));
+      await chmod(join(root, "home", "locked"), 0o000);
+    }
+    try {
+      const out = body(await asJob(SHELL, cwd, { root: "work/ev" }));
+      const files = out.files.map((f: Json) => String(f.file).replace(/^.*work\/ev\//, ""));
+      assert.ok(files.includes("home/alice/dev/.bash_history"), `a dev directory below the top is read: ${files.join(", ")}`);
+      assert.ok(!files.some((f: string) => f.startsWith("proc/")));
+      assert.deepEqual(out.excluded_dirs.map((d: Json) => d.path.replace(/^.*work\/ev\//, "")), ["proc"]);
+      if (!IS_ROOT) {
+        assert.ok(out.walk_errors.some((e: Json) => String(e.path).endsWith("home/locked")), JSON.stringify(out.walk_errors));
+        assert.equal(out.all_files_read, false);
+      }
+    } finally {
+      if (!IS_ROOT) await chmod(join(root, "home", "locked"), 0o755);
+    }
+  });
+});
+
+test("shell_history flags a bash entry that ends in a backslash and a file whose content is another shell's format", async () => {
+  await withCwd(async (cwd) => {
+    const root = join(cwd, "work", "ev");
+    await put(root, "home/alice/.bash_history", lines("echo one \\", "two", ": 1700000000:0;this is a zsh header"));
+    const out = body(await asJob(SHELL, cwd, { root: "work/ev" }));
+    const rows = await rowsOf(cwd, out);
+    assert.equal(rows[0].continuation_uncertain, true);
+    assert.equal(rows[0].boundary_basis, "physical line");
+    assert.equal(out.files[0].looks_like_other_format, "zsh extended history");
+  });
+});

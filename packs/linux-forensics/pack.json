@@ -1,7 +1,7 @@
 {
   "id": "linux-forensics",
   "name": "Linux Forensics Pack",
-  "version": "1.1.3",
+  "version": "1.2.0",
   "description": "Artefact-by-artefact method and tooling for a Linux host: the system profile, the authentication and journal logs, accounts and keys, persistence across systemd and cron, ext4's own timestamps, containers, and the package database that says which binary was changed.",
   "licence": "AGPL-3.0-or-later",
   "authors": [
@@ -27,8 +27,8 @@
       "tools/journal_export/run.py": "251be2035e381df4223d482932f2b64addde4655d727c924096c75057d59628f",
       "tools/utmp_parse/manifest.json": "739222adcfb50477f8d26cf5c9c9734692a8cf8ba0ee018235187f6c98747aba",
       "tools/utmp_parse/run.py": "d2ce332ad9673fe800d160c002f21e8b3b533953046e685a9073866e4a0a542a",
-      "tools/shell_history/manifest.json": "bbc51dde963a6730425ee03cf41ec089920bf48e64c1f6122a12db4f35d7e264",
-      "tools/shell_history/run.py": "eee2d4a94f17ccd1a7f0eb0f617e332cde0d07654cb3a5bc25b7a62b39bf4a53",
+      "tools/shell_history/manifest.json": "857861247b4b0e4486a31816a80070a322e391d362f195152d23d726fa812882",
+      "tools/shell_history/run.py": "780659964145d96a6c5c5155466f332917038bd47ce4b012dcb019c8497c22ac",
       "tools/cron_dump/manifest.json": "66f19641a2abcf62b3f45a3885e7d5bd8661402ae49befd1a15772a7cd47456e",
       "tools/cron_dump/run.py": "617b3e2a20f7370bba216b12ecff07bb07ab35815047ce0203ed6cc68d060b73",
       "goals/server-compromise.md": "cc9782ee7c8e8e0115acf3a571373f620b11f6cca2fe8862f2318b391eb66f7d",
