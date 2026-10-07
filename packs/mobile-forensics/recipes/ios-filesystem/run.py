@@ -5,10 +5,10 @@ The recipe is deliberately structural. It reads every tar header and no member
 body, so the catalogue says which parser targets exist without turning a path
 into a finding or extracting protected content.
 
-Names are kept as the archive spelled them. A member name is never trimmed
-(a leading dot or slash is part of it): `path` shows it with tabs, newlines,
-backslashes and bytes that are not UTF-8 escaped, and `path_b64` is its exact
-bytes. `n` is the member's position in the archive, from 0, so two members of
+Names are kept as the tar reader returned them. A member name is never trimmed
+here (a leading dot or slash is part of it; the reader itself drops the trailing
+slash of a directory's name): `path` shows it with tabs, newlines, backslashes
+and bytes that are not UTF-8 escaped, and `path_b64` is its exact bytes. `n` is the member's position in the archive, from 0, so two members of
 one name are two rows, and a database that occurs twice keeps both sizes and
 both positions (sqlite.tsv: sizes joined with `|`, `members` listing
 role=position). The classification of a name reads a lower-cased copy; the copy

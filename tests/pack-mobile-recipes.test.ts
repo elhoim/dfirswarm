@@ -69,8 +69,8 @@ const target = (path: string): string => JSON.stringify({ paths: [path] });
 
 type Coverage = {
   recipe: string; status: string; covered: string; not_covered: string; limits_hit: string[]; errors: string[];
-  modules?: { log_format_recognised: boolean; counts: Record<string, number>; tracebacks_on_stderr: number; report_layout: string; files_beside_the_report?: string; files_left_in_program_directories?: Record<string, number> };
-  payload_stream?: string; decompressed_bytes?: number; categories?: Record<string, number>;
+  modules?: { log_format_recognised: boolean; counts: Record<string, number>; records_reported_by_modules: number; tracebacks_on_stderr: number; report_layout: string; files_beside_the_report?: string; files_left_in_program_directories?: Record<string, number> };
+  payload_stream?: string; tar_end?: string; decompressed_bytes?: number; categories?: Record<string, number>;
 };
 
 async function coverage(out: string): Promise<Coverage> {
@@ -98,6 +98,25 @@ async function standin(bin: string, name: string, script: string): Promise<void>
 
 const REPORT = String.raw`d="$out/Reports_2026-10-01"; mkdir -p "$d/_TSV Exports" "$d/_Timeline" "$d/_HTML"; : > "$d/_Timeline/tl.db"; : > "$d/_HTML/index.html"`;
 
+/** Log lines in the shape iLEAPP v2026.4.1 prints, for a stand-in: a module that found records, one that found nothing, one that failed. */
+const LOG = {
+  header: (n: number): string => `echo "Artifact to parse: ${n}"`,
+  found: (i: number, n: number, name: string, mod: string, records: number): string =>
+    `echo "[${i}/${n}] ${name} [${mod}] artifact started at 09:29:44 UTC"; printf 'a\\tb\\n1\\t2\\n' > "$d/_TSV Exports/${name}.tsv"; echo "Found ${records} records for ${name}"; echo "${name} [${mod}] artifact completed in 0.0s"`,
+  nofile: (i: number, n: number, name: string, mod: string): string =>
+    `echo "[${i}/${n}] ${name} [${mod}] artifact started at 09:29:44 UTC"; echo "No file found"; echo "${name} [${mod}] artifact completed in 0.0s"`,
+  nodata: (i: number, n: number, name: string, mod: string): string =>
+    `echo "[${i}/${n}] ${name} [${mod}] artifact started at 09:29:44 UTC"; echo "No data found for ${name}"; echo "${name} [${mod}] artifact completed in 0.0s"`,
+  failed: (i: number, n: number, name: string, mod: string): string =>
+    `echo "[${i}/${n}] ${name} [${mod}] artifact started at 09:29:44 UTC"; echo "Error with /some/path/${name}.sqlite:"; echo " - unable to open database: file:None?mode=ro"
+echo "Reading ${name} artifact had errors!"; echo "Error was list index out of range"; echo "Exception Traceback: Traceback (most recent call last):"; echo "  File \\"x.py\\", line 1, in ${name}"
+echo "${name} [${mod}] artifact failed after 0.0s"`,
+  readerror: (i: number, n: number, name: string, mod: string): string =>
+    `echo "[${i}/${n}] ${name} [${mod}] artifact started at 09:29:44 UTC"; echo "${name}: error reading /case/path/db: no such table: t54-SECRET-TABLE"; echo "No data found for ${name}"; echo "${name} [${mod}] artifact completed in 0.0s"`,
+  started: (i: number, n: number, name: string, mod: string): string => `echo "[${i}/${n}] ${name} [${mod}] artifact started at 09:29:44 UTC"`,
+  end: `echo "Processes completed."`,
+};
+
 for (const [recipeName, program, marker, label] of [
   ["ios-ileapp", "ileapp", "private/var/mobile/Library/SMS/sms.db", "iLEAPP"],
   ["android-aleapp", "aleapp", "data/system/packages.xml", "ALEAPP"],
@@ -106,93 +125,113 @@ for (const [recipeName, program, marker, label] of [
     await withCwd(async (cwd, bin) => {
       const tar = join(cwd, "work", "acq.tar");
       await build(TAR, tar, JSON.stringify([[marker, 16], ["data/data/com.example/databases/x.db", 4]]));
-      const run = async (out: string, lines: string): Promise<{ result: RecipeRun; coverage: Coverage }> => {
-        await standin(bin, program, `${REPORT}\n${lines}`);
+      const run = async (out: string, lines: string[]): Promise<{ result: RecipeRun; coverage: Coverage; tsv: string[] }> => {
+        await standin(bin, program, `${REPORT}\n${lines.join("\n")}`);
         const result = await recipe(recipeName, ["run", "--target", target(tar), "--out", join(cwd, out)], cwd, {}, bin);
-        return { result, coverage: await coverage(join(cwd, out)) };
+        const tsv = (await exists(join(cwd, out, "modules.tsv"))) ? (await readFile(join(cwd, out, "modules.tsv"), "utf8")).trimEnd().split("\n") : [];
+        return { result, coverage: await coverage(join(cwd, out)), tsv };
       };
-      // A module that errored while another wrote its report, exit status 0: partial, and which module.
-      const bad = await run("bad", String.raw`echo "Messages [messages] artifact started"; printf 'a\tb\n1\t2\n' > "$d/_TSV Exports/Messages.tsv"; echo "Messages [messages] artifact completed"
-echo "Safari History [safariHistory] artifact started"; echo "Reading Safari History artifact had errors!"; echo "Error was boom"`);
+      // A module failed while another wrote its report, and the program exited 0: partial, and which module.
+      const bad = await run("bad", [LOG.header(2), LOG.found(1, 2, "Messages", "messages", 2), LOG.failed(2, 2, "addressBook", "addressBook"), LOG.end]);
       assert.equal(bad.result.code, 0);
       assert.equal(bad.coverage.status, "partial", "exit 0 and a TSV said complete before");
-      assert.deepEqual(bad.coverage.modules?.counts, { completed: 1, no_record: 0, errored: 1, unknown: 0 });
-      assert.ok(bad.coverage.errors.some((e) => /1 module\(s\) errored: Safari History/.test(e)), JSON.stringify(bad.coverage.errors));
-      assert.match(await readFile(join(cwd, "bad", "modules.tsv"), "utf8"), /\n1\terrored\tSafari History\tsafariHistory\t\t/);
+      assert.deepEqual(bad.coverage.modules?.counts, { completed: 1, no_record: 0, errored: 1, errors_logged: 0, unknown: 0 });
+      assert.ok(bad.coverage.errors.some((e) => /1 module\(s\) errored: addressBook/.test(e)), JSON.stringify(bad.coverage.errors));
+      assert.match(bad.tsv[2], /^1\terrored\taddressBook\taddressBook\t0\t\d+\t/);
       assert.doesNotMatch(bad.coverage.covered, /ran every module/);
-      assert.doesNotMatch(JSON.stringify(bad.coverage), /boom/, "the module's error text is in the kept log, not in the receipt");
-      // Every module started and completed, and one wrote a report named for it.
-      const good = await run("good", String.raw`echo "Messages [messages] artifact started"; printf 'a\tb\n1\t2\n' > "$d/_TSV Exports/Messages.tsv"; echo "Messages [messages] artifact completed"
-echo "Notes [notes] artifact started"; echo "Notes [notes] artifact completed"`);
+      assert.doesNotMatch(JSON.stringify(bad.coverage) + bad.tsv.join("\n"), /list index out of range|unable to open/, "the module's error text is in the kept log, not in the receipt");
+      // Every module completed: complete, with what each says it found. A module that found nothing is no_record, never "absent".
+      const good = await run("good", [LOG.header(3), LOG.found(1, 3, "Messages", "messages", 2), LOG.nofile(2, 3, "Notes", "notes"), LOG.nodata(3, 3, "Mail", "mail"), LOG.end]);
       assert.equal(good.coverage.status, "complete", JSON.stringify(good.coverage));
-      assert.deepEqual(good.coverage.modules?.counts, { completed: 1, no_record: 1, errored: 0, unknown: 0 });
+      assert.deepEqual(good.coverage.modules?.counts, { completed: 1, no_record: 2, errored: 0, errors_logged: 0, unknown: 0 });
       assert.equal(good.coverage.modules?.log_format_recognised, true);
-      const table = (await readFile(join(cwd, "good", "modules.tsv"), "utf8")).trimEnd().split("\n");
-      assert.equal(table[0], "n\tstatus\tartefact\tmodule\treport\tlog\tline");
-      assert.match(table[1], new RegExp(`^0\\tcompleted\\tMessages\\tmessages\\t${recipeName === "ios-ileapp" ? "ileapp" : "aleapp"}/_TSV Exports/Messages.tsv\\t${program}.stdout\\t1$`));
-      assert.match(table[2], /^1\tno_record\tNotes\tnotes\t\t/);
+      assert.equal(good.coverage.modules?.records_reported_by_modules, 2);
+      assert.equal(good.tsv[0], "n\tstatus\tartefact\tmodule\trecords\tlogged_error_lines\tlog\tline");
+      assert.match(good.tsv[1], new RegExp(`^0\\tcompleted\\tMessages\\tmessages\\t2\\t0\\t${program}.stdout\\t\\d+$`));
+      assert.match(good.tsv[2], /^1\tno_record\tNotes\tnotes\t0\t0\t/);
+      assert.match(good.tsv[3], /^2\tno_record\tMail\tmail\t0\t0\t/);
       assert.match(await readFile(join(cwd, "good", "index.tsv"), "utf8"), /^modules\.tsv\t/m);
-      // A module that started and said nothing more is unknown, and so is every module when the log has no module lines.
-      const cut = await run("cut", String.raw`echo "Messages [messages] artifact started"; printf 'a\tb\n1\t2\n' > "$d/_TSV Exports/Messages.tsv"`);
+      // A module that completed but wrote error lines (it could not read a table and said so): not complete, and its text is not copied.
+      const logged = await run("logged", [LOG.header(2), LOG.found(1, 2, "Messages", "messages", 2), LOG.readerror(2, 2, "Telegram", "telegram"), LOG.end]);
+      assert.equal(logged.coverage.status, "partial");
+      assert.equal(logged.coverage.modules?.counts.errors_logged, 1);
+      assert.match(logged.tsv[2], /^1\terrors_logged\tTelegram\ttelegram\t0\t1\t/);
+      assert.doesNotMatch(JSON.stringify(logged.coverage) + logged.tsv.join("\n"), /SECRET-TABLE/);
+      // A module that started and said nothing more is unknown, and a log that stops short of the modules it announced is not complete.
+      const cut = await run("cut", [LOG.header(2), LOG.found(1, 2, "Messages", "messages", 2), LOG.started(2, 2, "Notes", "notes")]);
       assert.equal(cut.coverage.status, "partial");
       assert.equal(cut.coverage.modules?.counts.unknown, 1);
-      const silent = await run("silent", String.raw`printf 'a\tb\n1\t2\n' > "$d/_TSV Exports/Messages.tsv"`);
+      const short = await run("short", [LOG.header(3), LOG.found(1, 3, "Messages", "messages", 2), LOG.nofile(2, 3, "Notes", "notes"), LOG.end]);
+      assert.equal(short.coverage.status, "partial");
+      assert.ok(short.coverage.errors.some((e) => /says 3 modules would be parsed and 2 started/.test(e)), JSON.stringify(short.coverage.errors));
+      const noend = await run("noend", [LOG.header(1), LOG.found(1, 1, "Messages", "messages", 2)]);
+      assert.equal(noend.coverage.status, "partial");
+      assert.ok(noend.coverage.errors.some((e) => /does not end with its processing-completed line/.test(e)));
+      // No module lines at all (a release that logs another way): every module is unknown, and the run is partial.
+      const silent = await run("silent", [String.raw`printf 'a\tb\n1\t2\n' > "$d/_TSV Exports/Messages.tsv"`]);
       assert.equal(silent.coverage.status, "partial");
       assert.equal(silent.coverage.modules?.log_format_recognised, false);
       assert.ok(silent.coverage.errors.some((e) => /no module lines/.test(e)));
       // A traceback on stderr is a problem even if the exit status is 0.
-      const trace = await run("trace", String.raw`echo "Messages [messages] artifact started"; printf 'a\tb\n1\t2\n' > "$d/_TSV Exports/Messages.tsv"; echo "Messages [messages] artifact completed"
-echo "Traceback (most recent call last):" >&2; echo "  boom" >&2`);
+      const trace = await run("trace", [LOG.header(1), LOG.found(1, 1, "Messages", "messages", 2), LOG.end, `echo "Traceback (most recent call last):" >&2; echo "  boom" >&2`]);
       assert.equal(trace.coverage.status, "partial");
       assert.equal(trace.coverage.modules?.tracebacks_on_stderr, 1);
       assert.match(await readFile(join(cwd, "trace", `${program}.stderr`), "utf8"), /Traceback/, `${label}'s stderr is kept whole`);
     });
   });
 
-  test(`${recipeName} keeps every file the program leaves in its scratch tree, runs it from a directory under the output and never writes the run directory`, async () => {
+  test(`${recipeName} keeps every file the program leaves in its scratch tree, runs it from a directory under the output (a relative one too) and never writes the run directory`, async () => {
     await withCwd(async (cwd, bin) => {
       const tar = join(cwd, "work", "acq.tar");
       await build(TAR, tar, JSON.stringify([[marker, 16]]));
-      // The program writes a log beside its report folder, a file in its working directory and one in its temp directory.
-      await standin(bin, program, `${REPORT}\necho "Messages [messages] artifact started"; printf 'a\\tb\\n' > "$d/_TSV Exports/Messages.tsv"; echo "Messages [messages] artifact completed"
-echo "log beside the report" > "$out/run-log.txt"; pwd > "$out/../cwd-seen.txt"; echo "left in cwd" > ./left-in-cwd.txt; echo "temp" > "$TMPDIR/left-in-tmp.txt"`);
-      // A read-only run directory: the recipe is started from it, as a job's worker is.
+      // The program writes a log beside its report folder, a file in its working directory, one in its temp directory and a link in its working directory.
+      await standin(bin, program, `${REPORT}\n${LOG.header(1)}\n${LOG.found(1, 1, "Messages", "messages", 2)}\n${LOG.end}
+echo "log beside the report" > "$out/run-log.txt"; pwd > "$out/../cwd-seen.txt"; echo "left in cwd" > ./left-in-cwd.txt; echo "temp" > "$TMPDIR/left-in-tmp.txt"; ln -s /tmp ./linked-directory; mkdir -p "$TMPDIR/sub/deeper"`);
+      // A read-only run directory: the recipe is started from it, as a job's worker is. The output is given relative to it, as a caller may.
       const runDir = join(cwd, "ro-run");
       await mkdir(runDir);
+      await mkdir(join(cwd, "rel"));
+      const out = join(cwd, "rel", "out-dir");
       await chmod(runDir, 0o555);
-      const out = join(cwd, "out-dir");
-      const result = await recipe(recipeName, ["run", "--target", target(tar), "--out", out], runDir, {}, bin);
+      const result = await recipe(recipeName, ["run", "--target", target(tar), "--out", "../rel/out-dir"], runDir, {}, bin);
       assert.equal(result.code, 0, result.stdout + result.stderr);
       const cov = await coverage(out);
       assert.equal(cov.status, "complete", JSON.stringify(cov));
       // The sibling file is kept, whole, beside the report; the report is where it was.
-      assert.equal(await readFile(join(out, "ileapp-run-files".replace("ileapp", program), "run-log.txt"), "utf8"), "log beside the report\n");
+      assert.equal(await readFile(join(out, `${program}-run-files`, "run-log.txt"), "utf8"), "log beside the report\n");
       assert.equal(await exists(join(out, program, "_TSV Exports", "Messages.tsv")), true, "the one report folder is the report");
       assert.equal(cov.modules?.report_layout.startsWith("one report folder; 1 file(s) beside it"), true, JSON.stringify(cov.modules));
-      // The program ran with its working directory and TMPDIR under the output, and what it left there is counted and kept.
+      // The program ran with its working directory and TMPDIR under the output, and what it left there is counted and kept (a link too).
       assert.equal((await readFile(join(out, "cwd-seen.txt"), "utf8")).trim().endsWith(`${program}-cwd`), true);
       assert.equal(await readFile(join(out, `${program}-cwd`, "left-in-cwd.txt"), "utf8"), "left in cwd\n");
       assert.equal(await readFile(join(out, `${program}-tmp`, "left-in-tmp.txt"), "utf8"), "temp\n");
-      assert.deepEqual(cov.modules?.files_left_in_program_directories, { [`${program}-cwd`]: 1, [`${program}-tmp`]: 1 });
+      assert.deepEqual(cov.modules?.files_left_in_program_directories, { [`${program}-cwd`]: 2, [`${program}-tmp`]: 1 });
       // Nothing was written to the run directory, and the scratch directory is gone.
       assert.deepEqual(await readdir(runDir), []);
       assert.equal(await exists(join(out, `${program}-run`)), false);
-      // A second run into the same output does not write over the first one's report.
-      const again = await recipe(recipeName, ["run", "--target", target(tar), "--out", out], runDir, {}, bin);
-      assert.notEqual(again.code, 0);
-      assert.match((await coverage(out)).errors.join(), /does not write over/);
+      // A second run into the same output leaves the first run's coverage and report as they are.
+      const before = (await readFile(join(out, "coverage.json"))).toString();
+      const again = await recipe(recipeName, ["run", "--target", target(tar), "--out", "../rel/out-dir"], runDir, {}, bin);
+      assert.equal(again.code, 2);
+      assert.equal(JSON.parse(again.stdout).status, "refused");
+      assert.equal((await readFile(join(out, "coverage.json"))).toString(), before, "the earlier coverage.json is untouched");
+      assert.equal(await exists(join(out, program, "_TSV Exports", "Messages.tsv")), true);
     });
   });
 
-  test(`${recipeName} dispatches a zip by its signature, and says a damaged one is not readable`, async () => {
+  test(`${recipeName} dispatches a zip by its signature or its end record, and says a damaged one is not readable`, async () => {
     await withCwd(async (cwd) => {
       const good = join(cwd, "work", "good.zip");
       await build(`import sys, zipfile\nz = zipfile.ZipFile(sys.argv[1], "w")\nz.writestr(sys.argv[2], b"x")\nz.close()\n`, good, marker);
       const detect = await recipe(recipeName, ["detect", "--target", target(good)], cwd);
       assert.equal(detect.code, 0, detect.stdout);
       assert.equal(JSON.parse(detect.stdout).applies, true);
-      // The end-of-central-directory record is cut off: whatever this Python's is_zipfile says, a zip that cannot be read is said so.
+      // Data before the first local header (a self-extracting archive): still a zip.
       const data = await readFile(good);
+      const prefixed = join(cwd, "work", "prefixed.zip");
+      await writeFile(prefixed, Buffer.concat([Buffer.alloc(100, 0x41), data]));
+      assert.equal(JSON.parse((await recipe(recipeName, ["detect", "--target", target(prefixed)], cwd)).stdout).applies, true);
+      // The end-of-central-directory record is cut off: whatever this Python's is_zipfile says, a zip that cannot be read is said so.
       const broken = join(cwd, "work", "broken.zip");
       await writeFile(broken, data.subarray(0, data.length - 12));
       const bad = await recipe(recipeName, ["detect", "--target", target(broken)], cwd);
@@ -237,7 +276,14 @@ with open(path, "wb") as out:
         pad = (-size) % 512
         if pad:
             emit(b"\0" * pad)
-    emit(b"\0" * 1024)
+    if spec.get("long_header"):
+        # An extended header (GNU long name) that declares a size it does not carry.
+        info = tarfile.TarInfo("././@LongLink")
+        info.type = tarfile.GNUTYPE_LONGNAME
+        info.size = spec["long_header"]
+        emit(info.tobuf(tarfile.GNU_FORMAT, "utf-8", "surrogateescape"))
+    if spec.get("end", True):
+        emit(b"\0" * 1024)
     if comp:
         tail = comp.flush()
         if spec.get("truncate_stream"):
@@ -275,6 +321,7 @@ test("android-backup stops a payload that expands past its budget, says partial,
     const done = await coverage(ok);
     assert.equal(done.status, "complete");
     assert.equal(done.payload_stream, "reached");
+    assert.equal(done.tar_end, "reached");
     assert.equal(done.covered, "2 embedded tar members");
     // A stream cut off before its end marker is not complete.
     const cut = join(cwd, "work", "cut.ab");
@@ -324,6 +371,72 @@ test("android-backup reports a version or a scheme it does not read as unsupport
     assert.ok(aesCov.errors.some((e) => /AES-256; opening it needs a password/.test(e)));
     // detect still applies: the preparation of every adb backup is on the record.
     assert.equal(JSON.parse((await recipe("android-backup", ["detect", "--target", target(odd)], cwd)).stdout).applies, true);
+  });
+});
+
+test("android-backup is complete only when the tar's end-of-archive block came, compressed or not", async () => {
+  // A backup cut at a member boundary, or in the middle of a header, ended the listing quietly and was complete.
+  await withCwd(async (cwd) => {
+    for (const compress of [false, true]) {
+      const name = compress ? "zlib" : "plain";
+      const whole = join(cwd, "work", `${name}.ab`);
+      await build(AB, whole, JSON.stringify({ compress, members: [["apps/a/db/x.db", 600], ["apps/a/db/y.db", 700], ["apps/a/db/z.db", 800]] }));
+      const full = join(cwd, `${name}-full`);
+      await recipe("android-backup", ["run", "--target", target(whole), "--out", full], cwd);
+      const done = await coverage(full);
+      assert.equal(done.status, "complete", JSON.stringify(done));
+      assert.equal(done.tar_end, "reached");
+      // No end block (the member list is whole, the marker is not): partial.
+      const open = join(cwd, "work", `${name}-noend.ab`);
+      await build(AB, open, JSON.stringify({ compress, end: false, members: [["apps/a/db/x.db", 600], ["apps/a/db/y.db", 700]] }));
+      const noEnd = join(cwd, `${name}-noend`);
+      await recipe("android-backup", ["run", "--target", target(open), "--out", noEnd], cwd);
+      const c = await coverage(noEnd);
+      assert.equal(c.status, "partial", `${name}: ${JSON.stringify(c)}`);
+      assert.equal(c.tar_end, "missing");
+      assert.ok(c.errors.some((e) => /without its end-of-archive block/.test(e)));
+    }
+    // An uncompressed file cut 200 bytes into the third member's header.
+    const plain = join(cwd, "work", "plain.ab");
+    const data = await readFile(plain);
+    const cutAt = data.indexOf(Buffer.from("apps/a/db/z.db"));
+    await writeFile(join(cwd, "work", "cut-header.ab"), data.subarray(0, cutAt + 200));
+    await recipe("android-backup", ["run", "--target", target(join(cwd, "work", "cut-header.ab")), "--out", join(cwd, "cut-header")], cwd);
+    const cut = await coverage(join(cwd, "cut-header"));
+    assert.equal(cut.status, "partial");
+    assert.equal(cut.tar_end, "missing");
+  });
+});
+
+test("android-backup does not read an extended header that declares more than it will hold, and says so", async () => {
+  // The tar library reads a GNU long name or a pax header whole into memory: 300 MiB declared in a 600-byte header.
+  await withCwd(async (cwd) => {
+    for (const compress of [false, true]) {
+      const name = compress ? "zlib" : "plain";
+      const ab = join(cwd, "work", `${name}-long.ab`);
+      await build(AB, ab, JSON.stringify({ compress, long_header: 300 * 1024 * 1024, members: [["apps/a/db/x.db", 100]] }));
+      const out = join(cwd, `${name}-long`);
+      const result = await recipe("android-backup", ["run", "--target", target(ab), "--out", out], cwd);
+      assert.equal(result.code, 0, result.stdout + result.stderr);
+      const cov = await coverage(out);
+      assert.equal(cov.status, "partial", JSON.stringify(cov));
+      assert.ok(cov.limits_hit.some((l) => /extended header declares 314572800 bytes, over the limit of 1048576/.test(l)), JSON.stringify(cov.limits_hit));
+      assert.equal((await readFile(join(out, "members.tsv"), "utf8")).trimEnd().split("\n").length, 2, "the member before the header is listed");
+    }
+  });
+});
+
+test("android-backup prints only a scheme word from the header, and a line that is not one only as a length", async () => {
+  await withCwd(async (cwd) => {
+    const ab = join(cwd, "work", "secretish.ab");
+    await build(AB, ab, JSON.stringify({ encryption: "deadbeef".repeat(8) }));
+    const out = join(cwd, "secretish");
+    const run = await recipe("android-backup", ["run", "--target", target(ab), "--out", out], cwd);
+    const detect = await recipe("android-backup", ["detect", "--target", target(ab)], cwd);
+    for (const f of await filesUnder(out)) assert.equal(f.data.includes(Buffer.from("deadbeef")), false, f.path);
+    assert.equal(run.stdout.includes("deadbeef"), false);
+    assert.equal(detect.stdout.includes("deadbeef"), false);
+    assert.match(JSON.stringify(await coverage(out)), /not a scheme word: 64 characters, not printed/);
   });
 });
 

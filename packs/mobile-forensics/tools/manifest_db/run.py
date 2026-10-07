@@ -127,8 +127,44 @@ def describe(exc):
     return scrub("%s%s: %s" % (type(exc).__name__, " " + code if code else "", getattr(exc, "strerror", None) or str(exc)))
 
 
+def clean(value):
+    """The value as strict JSON: a float that is not finite (JSON has no NaN or Infinity) is its text."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return {"_float": repr(value)}
+    if isinstance(value, dict):
+        return {k: clean(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [clean(v) for v in value]
+    return value
+
+
+def dumps(value, **kwargs):
+    return json.dumps(clean(value), allow_nan=False, default=str, **kwargs)
+
+
+# What is open when a run fails: the pages and the values file are closed and named in the error, so a
+# result read before the failure is kept, whole, and never left as a hidden temporary file.
+OPEN_PAGES = []
+OPEN_VALUES = []
+NONCE = "%d-%d" % (os.getpid(), time.time_ns())
+
+
 def fail(message, **extra):
-    print(json.dumps({"error": scrub(str(message)), **{k: (scrub(v) if isinstance(v, str) else v) for k, v in extra.items()}}, default=str))
+    kept = []
+    for page in OPEN_PAGES:
+        if page._out is not None:
+            try:
+                kept.append(page.finish().get("all_results"))
+            except Exception:
+                pass
+    answer = {"error": scrub(str(message)), **{k: (scrub(v) if isinstance(v, str) else v) for k, v in extra.items()}}
+    if kept:
+        answer["rows_read_before_the_failure_kept_in"] = kept
+    for values in OPEN_VALUES:
+        values.close()
+        if values.written:
+            answer["values_written_before_the_failure"] = {"file": values.shown, "rows": values.written}
+    print(dumps(answer))
     raise SystemExit(1)
 
 
@@ -183,7 +219,11 @@ class LosslessPage:
         self.total = 0
         self._out = None
         self._tmp = None
-        digest = hashlib.sha256(json.dumps(key, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16]
+        OPEN_PAGES.append(self)
+        # The key is the question (a path as it may be printed, a filter), plus this call's own nonce: two
+        # questions that print alike (two files in directories whose names are withheld, two messages passed
+        # in the call) never share a file, and a rerun never replaces an earlier result.
+        digest = hashlib.sha256(dumps([key, NONCE], sort_keys=True).encode("utf-8")).hexdigest()[:16]
         name = "%s-%s.jsonl" % (self.tool, digest)
         job, out = os.environ.get("JOB_ID"), os.environ.get("OUT")
         if job and out:
@@ -197,13 +237,13 @@ class LosslessPage:
             self.shown = str(self.path)
 
     def _write(self, row):
-        self._out.write(json.dumps(row, default=str))
+        self._out.write(dumps(row))
         self._out.write("\n")
 
     def add(self, row):
         self.total += 1
         if not self.full and len(self.page) < self.limit:
-            size = len(json.dumps(row, default=str)) if self.byte_limit is not None else 0
+            size = len(dumps(row)) if self.byte_limit is not None else 0
             if self.byte_limit is None or self.page_bytes + size <= self.byte_limit:
                 self.page.append(row)
                 self.page_bytes += size
@@ -287,13 +327,14 @@ class SecretValues:
         except OSError as exc:
             raise SecretValuesRefused("the values file could not be created: %s (%s)" % (self.path, describe(exc)))
         self._fh = os.fdopen(fd, "w", encoding="utf-8")
+        OPEN_VALUES.append(self)
 
     def add(self, finding_id, locator, value):
         if not self.enabled:
             return
         # ensure_ascii: a file name that is not UTF-8 is a lone surrogate to Python; an escape
         # reads back, a raw write cannot.
-        self._fh.write(json.dumps({"finding_id": finding_id, **locator, "value": value}))
+        self._fh.write(dumps({"finding_id": finding_id, **locator, "value": value}))
         self._fh.write("\n")
         self.written += 1
 
@@ -342,6 +383,10 @@ def read_args():
     if not isinstance(args, dict):
         fail("arguments must be a JSON object")
     return args
+
+
+def send(result):
+    print(dumps(result, indent=2))
 
 
 def run_main(main):
@@ -419,6 +464,15 @@ def pick(tree, keys):
     return {k: plain(tree[k]) for k in keys if isinstance(tree, dict) and k in tree}
 
 
+def entropy(data):
+    if not data:
+        return 0.0
+    counts = [0] * 256
+    for byte in data:
+        counts[byte] += 1
+    return -sum(c / len(data) * math.log2(c / len(data)) for c in counts if c)
+
+
 def key_material(tree):
     out = {}
     for name in KEY_MATERIAL:
@@ -482,7 +536,7 @@ class Archive:
         return self.deref(self.root[key]), True
 
 
-def number(value):
+def numeric(value):
     """A number of the archive as JSON: a float that is not finite (JSON has no NaN) is its text."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return plain(value)
@@ -519,19 +573,28 @@ def metadata(blob, base, extra):
         for source, name in META_NUMBERS:
             value, found = archive.get(source)
             if found:
-                out[name] = number(value)
+                out[name] = numeric(value)
         for source, name in META_TIMES:
             value, found = archive.get(source)
             if found:
-                out[name + "_raw"] = number(value)
+                out[name + "_raw"] = numeric(value)
                 stamp, why = when(value, base)
                 out[name] = stamp
                 if why:
                     out[name + "_status"] = why
                 elif stamp:
-                    extra["times"].setdefault(name, []).append((value + base, stamp))
+                    span = extra["times"].setdefault(name, {"values": 0, "zero": 0, "low": None, "high": None})
+                    if value == 0:
+                        span["zero"] += 1       # a zero is an unset time: converted and returned, left out of the range
+                    else:
+                        span["values"] += 1
+                        point = value + base
+                        if span["low"] is None or point < span["low"][0]:
+                            span["low"] = (point, stamp)
+                        if span["high"] is None or point > span["high"][0]:
+                            span["high"] = (point, stamp)
         key, found = archive.get("EncryptionKey")
-        out["has_wrapped_file_key"] = bool(found and key is not None)
+        out["has_wrapped_file_key"] = bool(found and key is not None and key != "$null")
         cls, found = archive.get("$class")
         if found and isinstance(cls, dict) and isinstance(cls.get("$classname"), str):
             out["archive_class"] = scrub(cls["$classname"])
@@ -613,6 +676,9 @@ def main():
 
     root = path if os.path.isdir(path) else os.path.dirname(os.path.abspath(path))
     db = os.path.join(path, "Manifest.db") if os.path.isdir(path) else path
+    if os.path.islink(db):
+        fail("Manifest.db is a symbolic link: it is not followed", looked_at=shown(db, False),
+             note="Read the file it points to by its own path if the case calls for it.")
     if not os.path.isfile(db):
         fail("no Manifest.db there", looked_at=shown(db, False),
              note="A backup made by iOS 9 or earlier keeps Manifest.mbdb instead, which this tool does not read; "
@@ -627,7 +693,7 @@ def main():
     flag = None
     if status_m == "ok" and isinstance(manifest, dict):
         manifest_out.update(pick(manifest, MANIFEST_KEYS))
-        manifest_out["top_level_keys"] = sorted(str(k) for k in manifest)[:100]
+        manifest_out["top_level_keys"] = sorted(str(k) for k in manifest)
         flag = manifest.get("IsEncrypted", "absent")
         if isinstance(flag, bool):
             state = "encrypted" if flag else "not_encrypted"
@@ -645,7 +711,7 @@ def main():
     info_out = {"status": status_i, **({"reason": why_i} if why_i else {})}
     if status_i == "ok" and isinstance(info, dict):
         info_out.update(pick(info, INFO_KEYS))
-        info_out["top_level_keys"] = sorted(str(k) for k in info)[:100]
+        info_out["top_level_keys"] = sorted(str(k) for k in info)
     status_out = {"status": status_s, **({"reason": why_s} if why_s else {})}
     if status_s == "ok" and isinstance(snapshot, dict):
         status_out.update(pick(snapshot, STATUS_KEYS))
@@ -653,11 +719,24 @@ def main():
     # --- Manifest.db: what it is, before anything is read from it ------------------------
     db_bytes = os.path.getsize(db)
     with open(db, "rb") as fh:
-        head = fh.read(16)
-    companions = [s for s in ("-wal", "-journal") if os.path.isfile(db + s) and os.path.getsize(db + s) > 0]
-    db_file = {"bytes": db_bytes, "format": "SQLite" if head == SQLITE_MAGIC else "not a plaintext SQLite database",
-               "head_hex": head.hex(), "companions": {s: os.path.getsize(db + s) for s in ("-wal", "-shm", "-journal") if os.path.isfile(db + s)}}
+        sample = fh.read(4096)
+    head = sample[:16]
     observations = []
+    # A companion that is a link is not followed: it is said, and not copied.
+    companions = []
+    for suffix in ("-wal", "-journal"):
+        try:
+            info = os.lstat(db + suffix)
+        except OSError:
+            continue
+        if stat.S_ISLNK(info.st_mode):
+            observations.append("%s%s is a symbolic link: not followed, not copied, and not applied" % (os.path.basename(db), suffix))
+        elif stat.S_ISREG(info.st_mode) and info.st_size > 0:
+            companions.append(suffix)
+    db_file = {"bytes": db_bytes, "format": "SQLite" if head == SQLITE_MAGIC else "not a plaintext SQLite database",
+               **({} if head == SQLITE_MAGIC else {"entropy_bits_per_byte_of_first_4096": round(entropy(sample), 2),
+                                                    "entropy_note": "what the file starts with is not printed; high entropy is one explanation among others (encryption, compression), not an identification"}),
+               "companions": {s: os.lstat(db + s).st_size for s in ("-wal", "-shm", "-journal") if os.path.lexists(db + s)}}
     listing = {"available": False, "reason": None}
     counts = {"files_in_manifest": None, "rows_read": 0, "rows_matching": 0, "invalid_file_ids": 0,
               "metadata": {}, "blobs": {}, "layouts": {}, "wrapped_file_keys": 0}
@@ -665,6 +744,7 @@ def main():
     domains = {}
     extra = {"times": {}}
     stopped_at_row = None
+    read_error = None
     work_dir = None
 
     if head != SQLITE_MAGIC:
@@ -688,7 +768,9 @@ def main():
             uri = "file:%s?%s" % (opened.replace("%", "%25").replace("?", "%3f").replace("#", "%23"),
                                   "mode=rw" if companions else "mode=ro&immutable=1")
             connection = sqlite3.connect(uri, uri=True)
-            connection.row_factory = sqlite3.Row
+            # A TEXT cell that is not UTF-8 is read with its bytes as lone surrogates (JSON escapes them) and
+            # does not stop the listing.
+            connection.text_factory = lambda raw: raw.decode("utf-8", "surrogateescape")
             tables = [r[0] for r in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")]
         except (sqlite3.Error, OSError) as exc:
             fail("Manifest.db would not open as SQLite", db=shown(db), reason=describe(exc) if isinstance(exc, OSError) else scrub(str(exc)),
@@ -706,7 +788,16 @@ def main():
             cursor = connection.execute("SELECT fileID, domain, relativePath, flags, file FROM Files ORDER BY fileID")
             with_rowid = False
         listing = {"available": True, "reason": None}
-        for row in cursor:
+        rows = iter(cursor)
+        while True:
+            try:
+                row = next(rows)
+            except StopIteration:
+                break
+            except sqlite3.Error as exc:
+                # A damaged page: what was read is kept, and the rest is not listed.
+                read_error = "%s%s after %d rows" % (type(exc).__name__, " (" + exc.sqlite_errorname + ")" if getattr(exc, "sqlite_errorname", None) else "", counts["rows_read"])
+                break
             if counts["rows_read"] % 500 == 0 and time.monotonic() - started > max_seconds:
                 stopped_at_row = counts["rows_read"]
                 break
@@ -738,8 +829,8 @@ def main():
             counts["metadata"][meta["metadata_status"]] = counts["metadata"].get(meta["metadata_status"], 0) + 1
             if meta.get("has_wrapped_file_key"):
                 counts["wrapped_file_keys"] += 1
-            record = {"file_id": file_id, "file_id_valid": valid, "domain": shown(domain), "relative_path": shown(relative),
-                      "flags": flags, "kind": kind, "blob": state_b,
+            record = {"file_id": scrub(file_id), "file_id_valid": valid, "domain": shown(domain), "relative_path": shown(relative),
+                      "flags": numeric(flags), "kind": numeric(kind), "blob": state_b,
                       **({"blob_layout": layout, "blob_bytes": size_b,
                           "on_disk": (file_id[:2] + "/" + file_id) if layout == "sharded" else file_id} if state_b == "present" else {}),
                       **meta, "payload_encrypted": True if state == "encrypted" else (False if state == "not_encrypted" else None),
@@ -754,9 +845,10 @@ def main():
         domain_page.add({"domain": shown(name), "entries": number})
     paging = {"entries": entries.finish(), "domains": domain_page.finish()}
     time_range = {}
-    for name, items in sorted(extra["times"].items()):
-        time_range[name] = {"earliest": min(items)[1], "latest": max(items)[1], "values": len(items)}
-    complete = listing["available"] and stopped_at_row is None
+    for name, span in sorted(extra["times"].items()):
+        time_range[name] = {"earliest": span["low"][1] if span["low"] else None, "latest": span["high"][1] if span["high"] else None,
+                            "values": span["values"], "zero_values_left_out": span["zero"]}
+    complete = listing["available"] and stopped_at_row is None and read_error is None
     if state == "encrypted" and not listing["available"]:
         complete = False
     status = "complete" if complete else "partial"
@@ -785,6 +877,7 @@ def main():
                   "range_of_values_read": time_range},
         "counts": counts,
         "stopped_at_row": stopped_at_row,
+        "read_error": read_error,
         "entries": entries.page,
         "entry_count": counts["rows_matching"],
         "files_in_manifest": counts["files_in_manifest"],
@@ -807,9 +900,9 @@ def main():
                 "recorded it, not when it was backed up. blob says whether the file named by an id is in the backup "
                 "(present), absent (missing), a directory, a link (never followed), not applicable (the manifest entry "
                 "is a directory or a link) or refused (an id that is not 40 hexadecimal digits). status is partial "
-                "when the listing is not available or the time limit stopped it.",
+                "when the listing is not available, a damaged page ended it (read_error), or the time limit stopped it.",
     }
-    print(json.dumps(result, indent=2, default=str))
+    send(result)
 
 
 if __name__ == "__main__":

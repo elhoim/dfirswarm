@@ -35,5 +35,5 @@
   ],
   "purpose": "inventory",
   "covers": "The paths, sizes and archive timestamps of mobile-forensic structures in one iOS full file-system tar, plus SQLite companion presence. Member names are kept as the archive spelled them (path_b64 is the exact bytes), every occurrence of a duplicated name is its own row with its position, and a database that occurs twice keeps both sizes. It extracts nothing, parses no artifact content, decrypts no protected data and does not claim that a listed path contains responsive records.",
-  "sha256": "6f56a3611af504167f146863d419dd4f78f33b8e108c97ca7b25d4590dc0a5fd"
+  "sha256": "8cb645612667af7ee71f0a19e06e5cfb8ea2949a1e8fbbc24877e609aa4626bf"
 }

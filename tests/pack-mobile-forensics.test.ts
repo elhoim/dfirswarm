@@ -457,6 +457,92 @@ test("sqlite_freespace withholds a path component shaped like a recovery passwor
   });
 });
 
+test("sqlite_freespace reads UTF-16 text at either byte parity in LE and BE, and does not report ASCII text as CJK", async () => {
+  // Pairs were read from the start of the region only: a text that began on an odd byte was read as CJK units, and the
+  // genuine word was in no fragment. Greek, Hebrew and Arabic were not found in a UTF-16BE database at all.
+  await withCwd(async (cwd) => {
+    const greek = "Καλημέρα κόσμε αυτό είναι δοκιμή";
+    for (let pad = 0; pad < 4; pad++) {
+      const text = greek + "x".repeat(pad);
+      const db = join(cwd, "work", `le${pad}.db`);
+      await build(FREEBLOCK_DB, db, text, "UTF-16le");
+      const file = await readFile(db);
+      const { values } = await freespace(cwd, db, {}, `out-le${pad}`);
+      const found = values.find((v) => v.value.includes(text));
+      assert.ok(found, `pad ${pad}: the Greek text is recovered whole, got ${JSON.stringify(values.map((v) => v.value))}`);
+      assert.equal(found.encoding, "utf-16le");
+      assert.equal(file.subarray(found.offset, found.offset + found.bytes).toString("utf16le"), found.value);
+    }
+    for (const [name, text] of [["greek", greek], ["hebrew", "שלום עולם זה מבחן של הטקסט"], ["arabic", "مرحبا بالعالم هذا اختبار للنص"], ["cyrillic", "Привет мир это проверка текста"]]) {
+      const db = join(cwd, "work", `be-${name}.db`);
+      await build(FREEBLOCK_DB, db, text, "UTF-16be");
+      const file = await readFile(db);
+      assert.equal(file.readUInt32BE(56), 3);
+      const { answer, values } = await freespace(cwd, db, {}, `out-be-${name}`);
+      assert.deepEqual(answer.encodings_scanned, ["utf-8", "utf-16be"]);
+      const found = values.find((v) => v.value.includes(text));
+      assert.ok(found, `${name}: recovered whole, got ${JSON.stringify(values.map((v) => v.value))}`);
+      assert.equal(found.encoding, "utf-16be");
+      assert.equal(Buffer.from(file.subarray(found.offset, found.offset + found.bytes)).swap16().toString("utf16le"), found.value);
+    }
+    // ASCII text in a UTF-16 database: found as ASCII, and no fragment of it is read as CJK or Hangul.
+    const ascii = "plain ascii message text in a utf sixteen database";
+    const db = join(cwd, "work", "ascii16.db");
+    await build(FREEBLOCK_DB, db, ascii, "UTF-16le");
+    const { values } = await freespace(cwd, db, { min_length: 4 }, "out-ascii16");
+    assert.ok(values.some((v) => v.value.includes(ascii)));
+    for (const v of values) {
+      // A header byte beside the text may decode as one stray character; a fragment that is mostly CJK is a misreading.
+      const cjk = [...v.value].filter((c) => /[\u3000-\u9fff\uac00-\ud7af]/.test(c)).length;
+      assert.ok(cjk <= 2 && cjk < [...v.value].length / 4, `a CJK reading of ASCII bytes: ${v.value}`);
+    }
+  });
+});
+
+test("sqlite_freespace says partial while a -wal or a -journal that holds bytes is not read", async () => {
+  await withCwd(async (cwd) => {
+    const db = join(cwd, "work", "wal.db");
+    await build(FREEBLOCK_DB, db, "COMPANION-MARKER", "utf-8");
+    assert.equal((await freespace(cwd, db, {}, "plain")).answer.status, "complete");
+    await writeFile(db + "-wal", Buffer.alloc(64));
+    const { answer } = await freespace(cwd, db, {}, "with-wal");
+    assert.equal(answer.status, "partial");
+    assert.ok(answer.problem_kinds["companion not examined"] >= 1);
+    assert.deepEqual(answer.companions, { "-wal": { bytes: 64, examined: false } });
+    // A companion with no bytes holds nothing to examine.
+    await writeFile(db + "-wal", Buffer.alloc(0));
+    assert.equal((await freespace(cwd, db, {}, "empty-wal")).answer.status, "complete");
+  });
+});
+
+test("sqlite_freespace prints none of a file that is not SQLite, only its size and the entropy of its start", async () => {
+  await withCwd(async (cwd) => {
+    const file = join(cwd, "work", "notes.txt");
+    await writeFile(file, "password=Tr0ub4dor&3 and the rest of a text file that is long enough to be a sample\n".repeat(40));
+    const err = refused(await tool(FREESPACE, cwd, { db: file }));
+    assert.match(err.error, /not a SQLite database/);
+    const text = JSON.stringify(err);
+    for (const form of ["password", Buffer.from("password").toString("hex"), "Tr0ub4"]) assert.equal(text.includes(form), false, form);
+    assert.equal(err.head_hex, undefined);
+    assert.equal(typeof err.entropy_bits_per_byte_of_first_4096, "number");
+    assert.equal(err.bytes, 80 * 40 + 0 === 0 ? 0 : (await stat(file)).size);
+  });
+});
+
+test("sqlite_freespace stops at max_seconds even when a filter that backtracks runs on every fragment", async () => {
+  // The regular expression was bounded per fragment and the clock only between pages: 7 fragments of a runaway
+  // expression took 35 seconds against a limit of 1.
+  await withCwd(async (cwd) => {
+    const db = join(cwd, "work", "regex.db");
+    await build(FREELIST_DB, db, "REGEX-MARKER");
+    const started = Date.now();
+    const { answer } = await freespace(cwd, db, { contains: "(w+)+z", max_seconds: 1, min_length: 20 });
+    assert.ok(Date.now() - started < 12000, `took ${Date.now() - started} ms`);
+    assert.equal(answer.status, "partial");
+    assert.ok(answer.stopped_before_page !== null || answer.scanned.contains_timeouts >= 1);
+  });
+});
+
 test("sqlite_freespace filters with contains, counts what it found before the filter, and lists a -wal without reading it", async () => {
   await withCwd(async (cwd) => {
     const db = join(cwd, "work", "wal.db");
@@ -484,6 +570,9 @@ import datetime, json, os, plistlib, shutil, sqlite3, sys
 UID = plistlib.UID
 dest, spec = sys.argv[1], json.loads(sys.argv[2])
 
+def conv(v):
+    return float(v["float"]) if isinstance(v, dict) and "float" in v else v
+
 def archive(e):
     objects = ["$null"]
     root = {"$class": UID(2), "Size": e.get("size", 10), "Mode": 33188, "UserID": 501, "GroupID": 501,
@@ -491,12 +580,14 @@ def archive(e):
     for key, name in (("birth", "Birth"), ("modified", "LastModified"), ("changed", "LastStatusChange")):
         if key in e:
             root[name] = e[key]
-    if e.get("wrapped_key"):
+    if e.get("wrapped_key") or e.get("null_key"):
         root["EncryptionKey"] = UID(3)
     objects.append(root)
     objects.append({"$classname": "MBFile", "$classes": ["MBFile", "NSObject"]})
     if e.get("wrapped_key"):
         objects.append({"NS.data": bytes.fromhex(e["wrapped_key"])})
+    elif e.get("null_key"):
+        objects.append("$null")
     if e.get("decoy"):
         # An object with a Size that comes before the root: the first object holding Size is not the root.
         objects.insert(1, {"Size": 1, "Mode": 1})
@@ -514,6 +605,8 @@ manifest = {"Version": "10.0", "Date": datetime.datetime(2025, 3, 1, 12, 0, 0), 
             "Lockdown": {"ProductVersion": "17.4", "SerialNumber": "SERIAL-FIXTURE", "DeviceName": "Fixture Phone"}}
 if spec.get("encrypted") != "absent":
     manifest["IsEncrypted"] = spec.get("encrypted", False)
+for k, v in spec.get("manifest_extra", {}).items():
+    manifest[k] = conv(v)
 if spec.get("keybag"):
     manifest["BackupKeyBag"] = bytes.fromhex(spec["keybag"])
     manifest["ManifestKey"] = bytes.fromhex(spec["manifest_key"])
@@ -522,7 +615,9 @@ if spec.get("manifest_plist", True):
         plistlib.dump(manifest, fh)
 if spec.get("info", True):
     with open(os.path.join(dest, "Info.plist"), "wb") as fh:
-        plistlib.dump({"Device Name": "Fixture Phone", "Product Version": "17.4", "Serial Number": "SERIAL-FIXTURE", "Installed Applications": ["com.example.a"]}, fh)
+        info = {"Device Name": "Fixture Phone", "Product Version": "17.4", "Serial Number": "SERIAL-FIXTURE", "Installed Applications": ["com.example.a"]}
+        info.update({k: conv(v) for k, v in spec.get("info_extra", {}).items()})
+        plistlib.dump(info, fh)
 with open(os.path.join(dest, "Status.plist"), "wb") as fh:
     plistlib.dump({"BackupState": "new", "IsFullBackup": True, "SnapshotState": spec.get("snapshot", "finished"), "UUID": "FIXTURE-UUID"}, fh)
 
@@ -540,7 +635,11 @@ else:
     con.execute("CREATE TABLE Properties (key TEXT PRIMARY KEY, value BLOB)")
     def add(e):
         blob = None if e.get("nometa") else archive(e)
-        con.execute("INSERT INTO Files VALUES (?,?,?,?,?)", (e["id"], e.get("domain", "HomeDomain"), e["path"], e.get("flags", 1), blob))
+        if e.get("rawpath_hex"):
+            # TEXT whose bytes are not UTF-8 (CAST keeps the bytes as they are)
+            con.execute("INSERT INTO Files VALUES (?,?,CAST(? AS TEXT),?,?)", (e["id"], e.get("domain", "HomeDomain"), bytes.fromhex(e["rawpath_hex"]), e.get("flags", 1), blob))
+        else:
+            con.execute("INSERT INTO Files VALUES (?,?,?,?,?)", (e["id"], e.get("domain", "HomeDomain"), e["path"], e.get("flags", 1), blob))
     for e in spec["entries"]:
         add(e)
         layout = e.get("blob", "sharded")
@@ -585,9 +684,9 @@ type Manifest = {
   path: string; parser: string; status: string; encrypted: boolean | null;
   encryption: { state: string; basis: string; payload_encrypted: boolean | null; key_material_in_manifest_plist: Record<string, { present: boolean; bytes: number | null; printed: boolean }>; decryption: string };
   manifest_plist: Record<string, unknown>; info_plist: Record<string, unknown>; status_plist: Record<string, unknown>; device: Record<string, unknown>;
-  manifest_db_file: { bytes: number; format: string; head_hex: string; companions: Record<string, number>; snapshot?: string; working_copy?: string };
-  listing: { available: boolean; reason: string | null }; observations: string[];
-  epoch: { applied: string; range_of_values_read: Record<string, { earliest: string; latest: string; values: number }> };
+  manifest_db_file: { bytes: number; format: string; entropy_bits_per_byte_of_first_4096?: number; companions: Record<string, number>; snapshot?: string; working_copy?: string };
+  listing: { available: boolean; reason: string | null }; observations: string[]; read_error: string | null;
+  epoch: { applied: string; range_of_values_read: Record<string, { earliest: string | null; latest: string | null; values: number; zero_values_left_out: number }> };
   counts: { files_in_manifest: number | null; rows_read: number; rows_matching: number; invalid_file_ids: number; metadata: Record<string, number>; blobs: Record<string, number>; layouts: Record<string, number> };
   stopped_at_row: number | null; entries: Entry[]; entry_count: number; files_in_manifest: number | null; domains: { domain: string; entries: number }[];
   pages: { entries: Paged; domains: Paged }; truncated: boolean; paths_withheld: number;
@@ -768,7 +867,7 @@ test("manifest_db prints no key material: the key bag and the manifest key are p
     const manifestKey = Buffer.from(Array.from({ length: 44 }, (_, i) => (i * 17 + 9) % 253));
     const wrapped = Buffer.from(Array.from({ length: 40 }, (_, i) => (i * 29 + 5) % 247));
     const dir = await backup(cwd, "keys", { encrypted: true, keybag: keybag.toString("hex"), manifest_key: manifestKey.toString("hex"),
-      entries: [{ id: ID_A, path: "Library/a.db", wrapped_key: wrapped.toString("hex") }] });
+      entries: [{ id: ID_A, path: "Library/a.db", wrapped_key: wrapped.toString("hex") }, { id: ID_B, path: "Library/b.db", wrapped_key: wrapped.toString("hex") }] });
     const { answer, run } = await manifest(cwd, dir, { limit: 1 });
     assert.deepEqual(answer.encryption.key_material_in_manifest_plist, {
       BackupKeyBag: { present: true, bytes: 96, printed: false },
@@ -781,11 +880,109 @@ test("manifest_db prints no key material: the key bag and the manifest key are p
       }
     }
     assert.doesNotMatch(run.stdout, /[0-9a-f]{64}/i, "no digest");
+    // And in the file that holds the whole listing: the answer names it, and it holds every entry.
+    for (const secret of [keybag, manifestKey, wrapped]) {
+      for (const text of [secret.toString("hex"), secret.toString("base64")]) await assertNowhere(text, run.stdout, join(cwd, "work", "s1"), []);
+    }
+    assert.equal((await jsonl<Entry>(join(cwd, answer.pages.entries.all_results!))).length, 2);
     // The device identity that Manifest.plist and Info.plist carry in the clear is there.
     assert.equal(answer.device.SerialNumber, "SERIAL-FIXTURE");
     assert.equal(answer.info_plist["Device Name"], "Fixture Phone");
     assert.equal(answer.status_plist.SnapshotState, "finished");
     assert.equal(answer.manifest_plist.WasPasscodeSet, true);
+  });
+});
+
+test("manifest_db prints strict JSON whatever the plists hold, and one row it cannot decode does not stop the listing", async () => {
+  // NaN and Infinity in a plist reached the answer as NaN and Infinity, which JSON does not have; a TEXT cell that is
+  // not UTF-8 stopped the whole listing with an error that quoted the path.
+  await withCwd(async (cwd) => {
+    const dir = await backup(cwd, "strict", {
+      manifest_extra: { Version: { float: "nan" } },
+      info_extra: { "Phone Number": { float: "nan" }, "Serial Number": { float: "inf" } },
+      entries: [
+        { id: ID_A, path: "Library/ok.db", blob: "none", birth: 0, modified: 1700000000 },
+        { id: ID_B, path: "unused", rawpath_hex: Buffer.from("Library/caf\xff/notes.txt", "latin1").toString("hex"), blob: "none", flags: 1 },
+        { id: ID_C, path: "Library/odd.db", blob: "none" },
+      ],
+    });
+    const { answer, run } = await manifest(cwd, dir);
+    assert.doesNotThrow(() => JSON.parse(run.stdout));
+    assert.doesNotMatch(run.stdout, /\bNaN\b|Infinity/);
+    assert.deepEqual(answer.manifest_plist.Version, { _float: "nan" });
+    assert.deepEqual(answer.info_plist["Serial Number"], { _float: "inf" });
+    assert.equal(answer.entry_count, 3, "every row is listed");
+    assert.ok(answer.entries.some((e) => e.relative_path === "Library/caf\udcff/notes.txt"), JSON.stringify(answer.entries.map((e) => e.relative_path)));
+    assert.equal(answer.status, "complete");
+    // A zero time is converted and returned, and left out of the range that shows a wrong epoch.
+    assert.equal(answer.epoch.range_of_values_read.created.zero_values_left_out, 1);
+    assert.equal(answer.epoch.range_of_values_read.created.values, 0);
+    assert.equal(answer.epoch.range_of_values_read.modified.earliest, "2023-11-14T22:13:20Z");
+  });
+});
+
+test("manifest_db says partial, with what it read, when a page of Manifest.db is damaged", async () => {
+  await withCwd(async (cwd) => {
+    const entries = Array.from({ length: 1500 }, (_, i) => ({ id: i.toString(16).padStart(40, "0"), path: `Library/p${String(i).padStart(5, "0")}`, blob: "none", size: i }));
+    const dir = await backup(cwd, "damaged", { entries });
+    const file = await readFile(join(dir, "Manifest.db"));
+    const pageSize = file.readUInt16BE(16) === 1 ? 65536 : file.readUInt16BE(16);
+    // The third leaf page of the table (type 13) is overwritten with a byte that is no page type.
+    let leaves = 0;
+    for (let p = 2; p <= file.length / pageSize; p++) {
+      if (file[(p - 1) * pageSize] === 13 && ++leaves === 3) file.fill(0xff, (p - 1) * pageSize, (p - 1) * pageSize + 64);
+    }
+    assert.ok(leaves >= 3, "the fixture has several leaf pages");
+    await writeFile(join(dir, "Manifest.db"), file);
+    const run = await tool(MANIFEST, cwd, { path: dir });
+    const answer = body<Manifest>(run);
+    assert.equal(answer.status, "partial");
+    assert.match(answer.read_error ?? "", /DatabaseError|OperationalError/);
+    assert.ok(answer.counts.rows_read < 1500 && answer.counts.rows_read > 0, `rows_read ${answer.counts.rows_read}`);
+    assert.equal(answer.entries.length + 0 > 0, true);
+    assert.doesNotMatch(run.stdout, /Library\/p\d+.*malformed/s, "the error does not quote a row");
+    // No hidden temporary file is left in the tool-output directory: every file is named in the answer.
+    const kept = join(cwd, "work", "s1", "tool-output");
+    const names = (await exists(kept)) ? await readdir(kept) : [];
+    assert.ok(names.every((n) => !n.startsWith(".")), names.join());
+  });
+});
+
+test("manifest_db does not follow a Manifest.db that is a link, or a -wal that is one", async () => {
+  await withCwd(async (cwd) => {
+    const outside = join(cwd, "work", "outside.txt");
+    await writeFile(outside, "root:x:0:0:secret text that is not a database\n".repeat(30));
+    const dir = await backup(cwd, "links", { entries: [{ id: ID_A, path: "Library/a.db", blob: "none" }] });
+    await symlink(outside, join(dir, "Manifest.db-wal"));
+    const { answer } = await manifest(cwd, dir);
+    assert.ok(answer.observations.some((o) => /Manifest\.db-wal is a symbolic link: not followed/.test(o)));
+    assert.equal(answer.manifest_db_file.snapshot?.startsWith("the main file only"), true);
+    assert.equal(answer.entry_count, 1);
+    // A Manifest.db that is a link: refused, and nothing of the target is printed.
+    const linked = await backup(cwd, "links2", { entries: [] });
+    await (await import("node:fs/promises")).rm(join(linked, "Manifest.db"));
+    await symlink(outside, join(linked, "Manifest.db"));
+    const err = refused(await tool(MANIFEST, cwd, { path: linked }));
+    assert.match(err.error, /symbolic link/);
+    assert.equal(JSON.stringify(err).includes("root:x"), false);
+    assert.equal(JSON.stringify(err).includes(Buffer.from("root:x").toString("hex")), false);
+  });
+});
+
+test("manifest_db prints no byte of a Manifest.db that is not SQLite, and a key id shaped like a recovery password is withheld", async () => {
+  await withCwd(async (cwd) => {
+    const dir = await backup(cwd, "notsql", { encrypted: true, manifest_db: "notsqlite", entries: [] });
+    const { answer, run } = await manifest(cwd, dir);
+    assert.equal(answer.manifest_db_file.format, "not a plaintext SQLite database");
+    assert.equal(typeof answer.manifest_db_file.entropy_bits_per_byte_of_first_4096, "number");
+    assert.doesNotMatch(run.stdout, /head_hex/);
+    const named = await backup(cwd, "shaped", { entries: [{ id: RECOVERY_NAME, path: "Library/x.db", blob: "none" }, { id: ID_A, path: "Library/y.db", blob: "none", null_key: true }] });
+    const got = await manifest(cwd, named, { limit: 1 });
+    assert.equal(got.run.stdout.includes(RECOVERY_NAME), false);
+    for (const f of await filesUnder(join(cwd, "work", "s1"))) assert.equal(f.data.includes(Buffer.from(RECOVERY_NAME)), false, f.path);
+    // A key that is a reference to $null is no key.
+    const rows = await jsonl<Entry>(join(cwd, got.answer.pages.entries.all_results!));
+    assert.equal(rows.find((r) => r.relative_path === "Library/y.db")?.has_wrapped_file_key, false);
   });
 });
 
@@ -849,7 +1046,7 @@ const varintField = (field: number, v: bigint | number): Buffer => Buffer.concat
 type PbField = {
   field_path: string; field: number; wire_type: string; depth: number; offset: number; value?: number; as_bool?: boolean;
   zigzag_reading?: number; twos_complement_reading?: number; hex?: string; payload_offset?: number; payload_bytes?: number;
-  read_as?: string; also_reads_as?: string[]; children?: number; characters?: number; finding_id?: string; as_signed?: unknown; text?: unknown;
+  read_as?: string; also_reads_as?: string[]; children?: number; characters?: number; finding_id?: string; as_signed?: unknown; text?: unknown; value_withheld?: string;
 };
 type Pb = {
   source: string; parser: string;
@@ -859,7 +1056,7 @@ type Pb = {
   secret_values: { requested: boolean; written: number; values_file: string | null; contains_secret_values: boolean };
   pages: { fields: Paged }; truncated: boolean; looks_like_protobuf?: unknown; strings?: unknown; paths_withheld: number;
 };
-type PbValue = { finding_id: string; source: string; field_path: string; offset: number; payload_offset: number; kind: string; bytes: number; value: string };
+type PbValue = { finding_id: string; source: string; field_path: string; offset: number; payload_offset: number; kind: string; bytes: number; value: string | Record<string, unknown> };
 
 async function peek(cwd: string, args: Record<string, unknown>, name?: string): Promise<{ answer: Pb; run: Run; values: PbValue[] }> {
   const run = name ? await asJob(PROTOBUF, cwd, { write_values: true, ...args }, name) : await tool(PROTOBUF, cwd, args);
@@ -891,9 +1088,21 @@ test("protobuf_peek reads a nested message with absolute offsets and full field 
     assert.equal(byPath["3.2"].offset, innerStart + 2 + lenDelimited(1, "abc").length);
     // The key of every field is where it says: the byte at its offset is (field << 3) | wire type.
     for (const f of answer.fields) assert.equal(file[f.offset] >> 3, f.field, `field ${f.field_path} at ${f.offset}`);
-    assert.equal(byPath["4"].value, 0x3f800000);
+    // A top-level varint is printed, with its zigzag reading named as one. A fixed-width value and anything under a
+    // length-delimited field is not printed: it may be the content of a string or of bytes.
+    assert.equal(byPath["1"].value, 150);
     assert.equal(byPath["1"].zigzag_reading, 75);
     assert.equal(byPath["1"].as_signed, undefined, "the zigzag reading is named as one");
+    assert.equal(byPath["4"].value, undefined);
+    assert.equal(byPath["4"].hex, undefined);
+    assert.match(byPath["4"].value_withheld ?? "", /raw bytes/);
+    assert.equal(byPath["3.2"].value, undefined);
+    assert.match(byPath["3.2"].value_withheld ?? "", /inside a length-delimited field/);
+    const job = await peek(cwd, { path: "work/blob.bin", offset: 100 }, "pb-numbers");
+    const held = Object.fromEntries(job.values.map((v) => [v.field_path, v]));
+    assert.deepEqual(held["4"].value, { value: 0x3f800000, hex: "0000803f", float_reading: 1 });
+    assert.equal(held["4"].kind, "number");
+    assert.equal((held["3.2"].value as unknown as { value: number }).value, 5);
   });
 });
 
@@ -996,6 +1205,31 @@ test("protobuf_peek prints no text and no bytes of a string or bytes field, and 
   });
 });
 
+test("protobuf_peek does not print a token's bytes as the numbers of a nested message", async () => {
+  // A 16-byte key that happened to parse as fields printed 12 of its bytes as 32- and 64-bit values.
+  await withCwd(async (cwd) => {
+    const key = Buffer.from("a577f43bbb49a9711d5ce74ae04c88d6", "hex");
+    const message = lenDelimited(1, key);
+    const { answer, run } = await peek(cwd, { hex: message.toString("hex") });
+    for (const form of ["f43bbb49", "1d5ce74ae04c88d6", "a577f43b", "49a9711d"]) assert.equal(run.stdout.includes(form), false, form);
+    assert.notEqual(answer.fields[0].read_as, "nested message", "field numbers above 300 are not a message");
+    // Bytes that do read as a small nested message: the structure is shown, the numbers in it are not.
+    const inner = Buffer.concat([varintField(1, 7), key.subarray(0, 0), key_fixed(2, 0x11223344)]);
+    const nested = (await peek(cwd, { hex: lenDelimited(1, inner).toString("hex") }, "nested-key")).answer;
+    const child = nested.fields.find((f) => f.field_path === "1.1");
+    assert.equal(child?.value, undefined);
+    assert.equal(nested.counts.number_values_withheld, 2);
+    assert.equal(nested.counts.bytes_values_withheld, 0);
+    for (const form of ["44332211", "0x11223344", String(0x11223344)]) assert.equal(JSON.stringify(nested).includes(form), false, form);
+  });
+});
+
+function key_fixed(field: number, v: number): Buffer {
+  const b = Buffer.alloc(4);
+  b.writeUInt32LE(v);
+  return Buffer.concat([key(field, 5), b]);
+}
+
 test("protobuf_peek holds to its depth, field and time budgets and says so, and refuses a depth it will not honour", async () => {
   await withCwd(async (cwd) => {
     const many = Buffer.concat(Array.from({ length: 500 }, (_, i) => varintField(1, i)));
@@ -1035,6 +1269,29 @@ test("protobuf_peek withholds a path shaped like a recovery password on every ch
     const gone = await tool(PROTOBUF, cwd, { path: "work/b\udcff.bin" });
     refused(gone);
     assert.ok(/^[\x00-\x7f]*$/.test(gone.stdout), "a lone surrogate is escaped, not raised");
+  });
+});
+
+test("protobuf_peek and the other tools give each call its own paging file, so a later call never replaces an earlier answer's rows", async () => {
+  // Two calls with `hex` shared one file name, and the second call's rows were in the first call's named file.
+  await withCwd(async (cwd) => {
+    const a = Buffer.concat(Array.from({ length: 5 }, (_, i) => varintField(1, i)));
+    const b = Buffer.concat(Array.from({ length: 6 }, (_, i) => varintField(2, 100 + i)));
+    const first = (await peek(cwd, { hex: a.toString("hex"), limit: 2 })).answer;
+    const second = (await peek(cwd, { hex: b.toString("hex"), limit: 2 })).answer;
+    assert.notEqual(first.pages.fields.all_results, second.pages.fields.all_results);
+    assert.deepEqual((await jsonl<PbField>(join(cwd, first.pages.fields.all_results!))).map((r) => r.value), [0, 1, 2, 3, 4]);
+    assert.deepEqual((await jsonl<PbField>(join(cwd, second.pages.fields.all_results!))).map((r) => r.value), [100, 101, 102, 103, 104, 105]);
+    // Two databases whose directories print alike (both withheld) do not share a file either.
+    const dirs = ["123456-654321-111111-222222-333333-444444-555555-666666", "123456-654321-111111-222222-333333-444444-555555-777777"];
+    const answers: Free[] = [];
+    for (const [i, name] of dirs.entries()) {
+      await mkdir(join(cwd, "work", name), { recursive: true });
+      const db = join(cwd, "work", name, "a.db");
+      await build(FREEBLOCK_DB, db, `MARKER-IN-DIRECTORY-${i}`, "utf-8");
+      answers.push((await freespace(cwd, db, { limit: 1, min_length: 4 }, `out-dir${i}`)).answer);
+    }
+    assert.notEqual(answers[0].pages.fragments.all_results, answers[1].pages.fragments.all_results);
   });
 });
 

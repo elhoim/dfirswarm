@@ -15,27 +15,32 @@ WHAT `complete` MEANS. iLEAPP exiting 0 with a TSV in its output says the
 program ran and wrote something; it does not say that every module ran, and a
 module that failed while others wrote their reports leaves the same trace. So
 the run reads iLEAPP's own log (the stdout and stderr it keeps whole) for one
-outcome per module, and writes them to modules.tsv:
+outcome per module, and writes them to modules.tsv (the text of a log line is
+not copied into any of the run's files except as the kept log itself):
 
-    completed   the log says the module started and completed, and a TSV named
-                for the artefact was written
-    no_record   it started and completed and no TSV named for the artefact was
-                written: no records parsed, or a report named otherwise. It is
-                never read as "the artefact is absent from the phone"
-    errored     the log says "Reading <artefact> artifact had errors!"
-    unknown     it started and the log says nothing more (the program ended, or
-                printed something this reader does not know)
+    completed      started, completed, and does not say it found nothing
+    no_record      started, completed, and said "No file found" or "No data
+                   found": it is never read as "the artefact is absent from the
+                   phone", only as what that module found in this acquisition
+    errored        the log says the module failed ("artifact failed after", or
+                   "Reading <artefact> artifact had errors!")
+    errors_logged  completed, and wrote lines that speak of an error (a module
+                   that cannot read a table says so and completes)
+    unknown        started, and the log does not say how it ended
 
 The status is `complete` only when iLEAPP exited 0, wrote at least one TSV, the
-log was recognised (at least one module started) and no module is errored or
-unknown and nothing printed a traceback on stderr. An `unsupported` outcome (a
-module that skips a release or an acquisition it cannot read) is not something
-the log lines read here show: it is not counted, and a module that skipped
-itself appears as completed or no_record. A release that logs differently
+log was recognised (at least one module started), every module is completed or
+no_record, nothing printed a traceback on stderr, the number of modules started
+is the number the log says it will parse, and the log ends with "Processes
+completed.". An `unsupported` outcome is not something the log lines read here
+show: a module that skips itself appears as completed or no_record. The log
+shape is that of a real iLEAPP v2026.4.1 run; a release that logs differently
 leaves every module unknown and the run partial, and the receipt says so.
 
 A run that is stopped before its end leaves coverage.json saying partial, so
-what it wrote is read as partial and never as complete.
+what it wrote is read as partial and never as complete. A run never writes over
+an earlier run's output: if the output directory already holds ileapp/ or a
+coverage.json, it refuses and leaves them as they are.
 """
 import argparse
 import json
@@ -57,12 +62,25 @@ NOT_COVERED = ("artefacts no module of the pinned iLEAPP release parses; deleted
                "a module the log does not account for as completed")
 
 # --- the module receipt: held equal to the one in the Android recipe by a test ----------------------------
-# The log lines a LEAPP program is expected to print for each artefact module; a release that prints other lines leaves its modules unknown.
-LOG_START = re.compile(r"^(?P<name>.+?) \[(?P<module>[^\[\]]+)\] artifact started\s*$")
-LOG_DONE = re.compile(r"^(?P<name>.+?) \[(?P<module>[^\[\]]+)\] artifact completed\s*$")
+# The log lines a LEAPP program prints for each artefact module, as iLEAPP v2026.4.1 prints them:
+#   [12/1139] name [module] artifact started at 09:29:44 UTC
+#   Found 3 records for X | No file found | No data found for X     (what the module says it did)
+#   name [module] artifact completed in 0.0s   |   name [module] artifact failed after 0.0s
+#   Reading name artifact had errors!          (before a failure, with the module's own error text)
+#   Artifact to parse: 1139   ...   Processes completed.
+# A release that prints other lines leaves its modules unknown, and the run partial.
+LOG_START = re.compile(r"^(?:\[\d+/(?P<total>\d+)\] )?(?P<name>.+?) \[(?P<module>[^\[\]]+)\] artifact started(?: at .+)?\s*$")
+LOG_DONE = re.compile(r"^(?P<name>.+?) \[(?P<module>[^\[\]]+)\] artifact completed(?: in .+)?\s*$")
+LOG_FAILED = re.compile(r"^(?P<name>.+?) \[(?P<module>[^\[\]]+)\] artifact failed(?: after .+)?\s*$")
 LOG_ERROR = re.compile(r"^Reading (?P<name>.+?) artifact had errors!\s*$")
+LOG_FOUND = re.compile(r"^Found (?P<n>\d+) records? for ")
+LOG_NO_FILE = re.compile(r"^No files? found\s*$")
+LOG_NO_DATA = re.compile(r"^No data found for ")
+LOG_EXPECTED = re.compile(r"^Artifact to parse: (?P<n>\d+)\s*$")
+LOG_PROBLEM = re.compile(r"\b(error|errors|exception|traceback|unable to|failed)\b", re.I)
 LOG_LINE_BOUND = 4000
 FIRST_UNATTRIBUTED = 20
+STATUSES = ("completed", "no_record", "errored", "errors_logged", "unknown")
 
 
 def tsv_escape(value):
@@ -87,12 +105,9 @@ def tsv_escape(value):
     return "".join(out)
 
 
-def normal(name):
-    return re.sub(r"[^a-z0-9]+", "", name.lower())
-
-
-def read_log(path, source, events):
-    """Append (kind, artefact, module, source, line number) for each module line of a kept log; count tracebacks."""
+def read_log(path, source, events, facts):
+    """Append (kind, artefact, module, source, line number, extra) for each module line of a kept log, and
+    note what the log says about the run itself; count tracebacks. The text of a log line is never kept."""
     tracebacks = 0
     try:
         with open(path, "rb") as fh:
@@ -100,47 +115,79 @@ def read_log(path, source, events):
                 line = raw[:LOG_LINE_BOUND].decode("utf-8", "replace").rstrip("\r\n")
                 found = LOG_START.match(line)
                 if found:
-                    events.append(("start", found.group("name"), found.group("module"), source, number))
+                    events.append(("start", found.group("name"), found.group("module"), source, number, None))
+                    if found.group("total"):
+                        facts["total"] = int(found.group("total"))
                     continue
                 found = LOG_DONE.match(line)
                 if found:
-                    events.append(("done", found.group("name"), found.group("module"), source, number))
+                    events.append(("done", found.group("name"), found.group("module"), source, number, None))
+                    continue
+                found = LOG_FAILED.match(line)
+                if found:
+                    events.append(("failed", found.group("name"), found.group("module"), source, number, None))
                     continue
                 found = LOG_ERROR.match(line)
                 if found:
-                    events.append(("error", found.group("name"), None, source, number))
+                    events.append(("error", found.group("name"), None, source, number, None))
+                    continue
+                found = LOG_FOUND.match(line)
+                if found:
+                    events.append(("found", None, None, source, number, int(found.group("n"))))
+                    continue
+                if LOG_NO_FILE.match(line):
+                    events.append(("nofile", None, None, source, number, None))
+                    continue
+                if LOG_NO_DATA.match(line):
+                    events.append(("nodata", None, None, source, number, None))
+                    continue
+                found = LOG_EXPECTED.match(line)
+                if found:
+                    facts["expected"] = int(found.group("n"))
+                    continue
+                if line.startswith("Processes completed."):
+                    facts["end"] = True
                     continue
                 if line.startswith("Traceback (most recent call last):"):
                     tracebacks += 1
+                if LOG_PROBLEM.search(line):
+                    events.append(("problem", None, None, source, number, None))
     except OSError:
         pass
     return tracebacks
 
 
-def receipt(events, reports):
+def receipt(events):
     """One row per module the log names, in the order they started, and what could not be attributed.
 
-    `reports` is the list of TSV file names written (relative paths): a module is `completed` only when one
-    of them is named for its artefact.
+    A module's lines are those between its start and its completed or failed line. errored: the log says
+    it failed. errors_logged: it completed, and wrote lines that speak of an error (a module that could
+    not read a table says so and completes). no_record: it completed and said it found no file, or no
+    data. completed: it completed and does not say it found nothing. unknown: it started and the log
+    does not say how it ended.
     """
-    order, modules, last, unattributed = [], {}, None, []
-    for kind, name, module, source, line in events:
+    order, modules, current, unattributed = [], {}, None, []
+    for kind, name, module, source, line, extra in events:
         if kind == "start":
             key = (module, name)
             if key not in modules:
-                modules[key] = {"artefact": name, "module": module, "state": "started", "log": source, "line": line}
+                modules[key] = {"artefact": name, "module": module, "state": "started", "log": source, "line": line,
+                                "records": 0, "nofile": False, "nodata": False, "notes": 0, "errored": False}
                 order.append(key)
-            else:
-                modules[key]["state"] = "started"
-            last = key
-        elif kind == "done":
+            elif modules[key]["state"] in ("done", "failed"):
+                modules[key]["state"] = "started"        # started again: an error already seen stays
+            current = key
+        elif kind in ("done", "failed"):
             row = modules.get((module, name))
             if row is None:
-                unattributed.append({"what": "a completion line with no start", "artefact": name, "log": source, "line": line})
-            elif row["state"] != "errored":
-                row["state"] = "done"
-        else:
-            key = last if last is not None and modules[last]["artefact"] == name else None
+                unattributed.append({"what": "a %s line with no start" % ("completed" if kind == "done" else "failed"), "artefact": name, "log": source, "line": line})
+                continue
+            row["state"] = "done" if kind == "done" else "failed"
+            if kind == "failed":
+                row["errored"] = True
+            current = None
+        elif kind == "error":
+            key = current if current is not None and modules[current]["artefact"] == name else None
             if key is None:
                 for candidate in reversed(order):
                     if modules[candidate]["artefact"] == name:
@@ -149,22 +196,33 @@ def receipt(events, reports):
             if key is None:
                 unattributed.append({"what": "an error line for an artefact that never started", "artefact": name, "log": source, "line": line})
             else:
-                modules[key]["state"] = "errored"
+                modules[key]["errored"] = True
                 modules[key]["error_log"], modules[key]["error_line"] = source, line
-    names = [(normal(os.path.splitext(os.path.basename(r))[0]), r) for r in reports]
+        elif current is not None:
+            row = modules[current]
+            if kind == "found":
+                row["records"] += extra
+            elif kind == "nofile":
+                row["nofile"] = True
+            elif kind == "nodata":
+                row["nodata"] = True
+            elif kind == "problem":
+                row["notes"] += 1
     rows = []
     for key in order:
         row = modules[key]
-        wanted = normal(row["artefact"])
-        report = next((r for n, r in names if wanted and (n == wanted or n.startswith(wanted))), None)
-        if row["state"] == "errored":
+        if row["errored"]:
             status = "errored"
-        elif row["state"] == "done":
-            status = "completed" if report else "no_record"
-        else:
+        elif row["state"] != "done":
             status = "unknown"
-        rows.append({**row, "status": status, "report": report if status == "completed" else None})
-    counts = {"completed": 0, "no_record": 0, "errored": 0, "unknown": 0}
+        elif row["notes"]:
+            status = "errors_logged"
+        elif row["records"] == 0 and (row["nofile"] or row["nodata"]):
+            status = "no_record"
+        else:
+            status = "completed"
+        rows.append({**row, "status": status, "reason": ("no source file" if row["nofile"] else "no data") if status == "no_record" else None})
+    counts = {name: 0 for name in STATUSES}
     for row in rows:
         counts[row["status"]] += 1
     return rows, counts, unattributed
@@ -172,10 +230,10 @@ def receipt(events, reports):
 
 def write_modules(out, rows):
     with open(os.path.join(out, "modules.tsv"), "w", encoding="utf-8", newline="\n") as handle:
-        handle.write("n\tstatus\tartefact\tmodule\treport\tlog\tline\n")
+        handle.write("n\tstatus\tartefact\tmodule\trecords\tlogged_error_lines\tlog\tline\n")
         for n, row in enumerate(rows):
-            handle.write("%d\t%s\t%s\t%s\t%s\t%s\t%d\n" % (n, row["status"], tsv_escape(row["artefact"]), tsv_escape(row["module"]),
-                                                          tsv_escape(row["report"] or ""), row["log"], row["line"]))
+            handle.write("%d\t%s\t%s\t%s\t%d\t%d\t%s\t%d\n" % (n, row["status"], tsv_escape(row["artefact"]), tsv_escape(row["module"]),
+                                                              row["records"], row["notes"], row["log"], row["line"]))
 # --- end of the module receipt -------------------------------------------------------------------------
 
 
@@ -207,9 +265,17 @@ def ios_name(name):
 def zip_signature(path):
     """A zip by its own signature (a local file header, or the end record of an empty one), not by
     zipfile.is_zipfile, whose answer changed between Python 3.11 and 3.14 for an archive whose
-    end-of-central-directory record is damaged: dispatch does not depend on a library's verdict."""
+    end-of-central-directory record is damaged: dispatch does not depend on a library's verdict. A file
+    that does not start so is still a zip when zipfile opens it (data before the first header, as in a
+    self-extracting archive); that can only add a zip, never refuse one."""
     with open(path, "rb") as fh:
-        return fh.read(4) in (b"PK\x03\x04", b"PK\x05\x06")
+        if fh.read(4) in (b"PK\x03\x04", b"PK\x05\x06"):
+            return True
+    try:
+        with zipfile.ZipFile(path):
+            return True
+    except (zipfile.BadZipFile, OSError):
+        return False
 
 
 def detect(path):
@@ -276,26 +342,30 @@ def write_index(out, rows):
     with open(os.path.join(out, "index.tsv"), "w", encoding="utf-8", newline="\n") as handle:
         for rel, what in rows:
             handle.write("%s\t%s\n" % (rel.replace("\t", " "), what))
-        handle.write("modules.tsv\tone row per module the iLEAPP log names: completed, no_record, errored or unknown, with the log line\n")
+        handle.write("modules.tsv\tone row per module the iLEAPP log names: completed, no_record, errored, errors_logged or unknown, with the records it reports and the log line\n")
 
 
 def child_files(directory):
-    """How many files a program left in a directory this recipe gave it: kept, never deleted."""
-    return sum(len(files) for _dirpath, _dirs, files in os.walk(directory))
+    """How many files and links a program left in a directory this recipe gave it: kept, never deleted."""
+    count = 0
+    for _dirpath, dirs, files in os.walk(directory):
+        count += len(files) + sum(1 for d in dirs if os.path.islink(os.path.join(_dirpath, d)))
+    return count
 
 
 def run(path, kind, out):
+    out = os.path.abspath(out)       # the program runs from a directory under out: nothing here may be relative
+    report = os.path.join(out, "ileapp")
+    if os.path.lexists(report) or os.path.lexists(os.path.join(out, "coverage.json")):
+        # Before anything is written: an earlier run's coverage and report stay as they are.
+        print(json.dumps({"ok": False, "status": "refused", "why": "the output directory already holds ileapp/ or coverage.json: the recipe does not write over an earlier run"}))
+        return 2
     os.makedirs(out, exist_ok=True)
     # Said before iLEAPP starts: a run stopped at its limit leaves this, and is read as partial.
     write_coverage(out, "partial", "started; iLEAPP did not finish (stopped before its end)", ["the run ended before iLEAPP did"])
     prog = program()
     if not prog:
         write_coverage(out, "failed", "nothing: iLEAPP is not in this image", ["ileapp is not on PATH in this job image"])
-        return 1
-    report = os.path.join(out, "ileapp")
-    if os.path.lexists(report):
-        write_coverage(out, "failed", "nothing: the output directory already holds ileapp/",
-                       ["ileapp/ exists: the recipe does not write over an earlier run's report"])
         return 1
     path = os.path.abspath(path)
     scratch = os.path.join(out, "ileapp-run")
@@ -308,7 +378,7 @@ def run(path, kind, out):
     env = dict(os.environ, TMPDIR=temp)
     with open(os.path.join(out, "ileapp.stdout"), "wb") as so, open(os.path.join(out, "ileapp.stderr"), "wb") as se:
         rc = subprocess.run([prog, "-t", kind, "-i", path, "-o", scratch], stdout=so, stderr=se, cwd=cwd, env=env).returncode
-    made = [d for d in sorted(os.listdir(scratch)) if os.path.isdir(os.path.join(scratch, d))]
+    made = [d for d in sorted(os.listdir(scratch)) if os.path.isdir(os.path.join(scratch, d)) and not os.path.islink(os.path.join(scratch, d))]
     layout, siblings = "whole output directory", False
     if len(made) == 1:
         os.rename(os.path.join(scratch, made[0]), report)
@@ -330,45 +400,57 @@ def run(path, kind, out):
             kept[name] = files
         else:
             for dirpath, _dirs, _files in os.walk(directory, topdown=False):
-                os.rmdir(dirpath)
+                try:
+                    os.rmdir(dirpath)
+                except OSError:
+                    pass
     rows = index(out, report)
-    tsv_names = [rel for rel, _ in rows if rel.lower().endswith(".tsv")]
-    tsvs = len(tsv_names)
+    tsvs = sum(1 for rel, _ in rows if rel.lower().endswith(".tsv"))
 
-    events = []
-    read_log(os.path.join(out, "ileapp.stdout"), "ileapp.stdout", events)
-    tracebacks = read_log(os.path.join(out, "ileapp.stderr"), "ileapp.stderr", events)
-    modules, counts, unattributed = receipt(events, tsv_names)
+    events, facts = [], {}
+    read_log(os.path.join(out, "ileapp.stdout"), "ileapp.stdout", events, facts)
+    tracebacks = read_log(os.path.join(out, "ileapp.stderr"), "ileapp.stderr", events, {})
+    modules, counts, unattributed = receipt(events)
     write_modules(out, modules)
     write_index(out, rows)
     recognised = bool(modules)
     receipt_json = {"log_format_recognised": recognised, "counts": counts, "modules_listed_in": "modules.tsv",
+                    "records_reported_by_modules": sum(m["records"] for m in modules),
+                    "modules_the_log_says_it_will_parse": facts.get("expected", facts.get("total")),
+                    "log_says_processing_completed": bool(facts.get("end")),
                     "unsupported": "not observable in the log lines read: a module that skipped itself appears as completed or no_record",
                     "tracebacks_on_stderr": tracebacks, "unattributed_log_lines": unattributed[:FIRST_UNATTRIBUTED],
                     "report_layout": layout, **({"files_beside_the_report": "ileapp-run-files/"} if siblings else {}),
                     **({"files_left_in_program_directories": kept} if kept else {})}
     errors = [] if rc == 0 else ["iLEAPP exited %d; its output is kept whole in ileapp.stdout and ileapp.stderr" % rc]
     problems = []
+    named = lambda status: [m["artefact"] for m in modules if m["status"] == status][:5]
     if counts["errored"]:
-        first = [m["artefact"] for m in modules if m["status"] == "errored"][:5]
-        problems.append("%d module(s) errored: %s%s; see modules.tsv and ileapp.stdout" % (counts["errored"], ", ".join(first), " and others" if counts["errored"] > 5 else ""))
+        problems.append("%d module(s) errored: %s%s; see modules.tsv and ileapp.stdout" % (counts["errored"], ", ".join(named("errored")), " and others" if counts["errored"] > 5 else ""))
+    if counts["errors_logged"]:
+        problems.append("%d module(s) completed but logged error lines: %s%s; see modules.tsv and ileapp.stdout" % (counts["errors_logged"], ", ".join(named("errors_logged")), " and others" if counts["errors_logged"] > 5 else ""))
     if counts["unknown"]:
         problems.append("%d module(s) started and the log says nothing more about them" % counts["unknown"])
     if tracebacks:
         problems.append("%d traceback(s) on stderr" % tracebacks)
     if unattributed:
         problems.append("%d log line(s) about a module that did not start" % len(unattributed))
+    expected = facts.get("expected", facts.get("total"))
+    if recognised and expected is not None and len(modules) != expected:
+        problems.append("the log says %d modules would be parsed and %d started" % (expected, len(modules)))
+    if recognised and expected is not None and not facts.get("end"):
+        problems.append("the log does not end with its processing-completed line")
     if rc == 0 and tsvs and not recognised:
         problems.append("the log has no module lines this recipe reads: per-module outcome is unknown for all of them")
     if rc == 0 and tsvs and not problems:
-        write_coverage(out, "complete", "iLEAPP exited 0 over the %s and its log accounts for %d module(s): %d completed with a report, %d completed with no report named for them; %d TSV report(s)"
+        write_coverage(out, "complete", "iLEAPP exited 0 over the %s and its log accounts for %d module(s): %d completed, %d with no record (no source file or no data); %d TSV report(s)"
                        % (kind, len(modules), counts["completed"], counts["no_record"], tsvs), errors, modules=receipt_json)
     elif rows:
-        write_coverage(out, "partial", "iLEAPP wrote %d report(s); %d module(s) in its log: %d completed, %d no_record, %d errored, %d unknown"
-                       % (len(rows), len(modules), counts["completed"], counts["no_record"], counts["errored"], counts["unknown"]),
+        write_coverage(out, "partial", "iLEAPP wrote %d report(s); %d module(s) in its log: %d completed, %d no_record, %d errored, %d errors_logged, %d unknown"
+                       % (len(rows), len(modules), counts["completed"], counts["no_record"], counts["errored"], counts["errors_logged"], counts["unknown"]),
                        (errors + problems) or ["iLEAPP wrote no TSV report"], modules=receipt_json)
     else:
-        write_coverage(out, "failed", "nothing parsed", errors or ["iLEAPP wrote no report"], modules=receipt_json)
+        write_coverage(out, "failed", "nothing parsed", (errors + problems) or ["iLEAPP wrote no report"], modules=receipt_json)
     return 0 if rc == 0 else 1
 
 
@@ -396,7 +478,9 @@ def main():
         print(json.dumps({"ok": False, "status": "unsupported", "why": why}))
         return 2
     rc = run(path, kind, args.out)
-    status = json.load(open(os.path.join(args.out, "coverage.json"), encoding="utf-8")).get("status")
+    if rc == 2:
+        return rc
+    status = json.load(open(os.path.join(os.path.abspath(args.out), "coverage.json"), encoding="utf-8")).get("status")
     print(json.dumps({"ok": rc == 0, "status": status}))
     return rc
 

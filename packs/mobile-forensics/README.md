@@ -15,8 +15,9 @@ needed for much of what an iPhone stores.
 
 **Three tools.** Each says in its manifest what it measures and what it does
 not, and each returns its whole result: an inline page and, when there is more,
-a file the answer names. None of them decrypts anything, reads a password or
-reads a `-wal` or a `-journal`.
+a file the answer names. None of them decrypts anything or reads a password.
+`sqlite_freespace` and `protobuf_peek` read no `-wal` or `-journal`; `manifest_db`
+opens a `Manifest.db`'s in a working copy.
 
 - `manifest_db` lists an iOS backup's map: for each file id its domain, relative
   path, kind, the metadata of its keyed archive, and the state of the blob the id
@@ -37,14 +38,16 @@ reads a `-wal` or a `-journal`.
   the file and compared), length and encoding. It does not return a row, a column,
   a table or a time, and it does not return the text: the text is written only on
   `write_values: true`, in a job run with `secret_output: true`, to a file that job
-  seals. It reads UTF-8 and UTF-16LE text and says so. A `-wal` or a `-journal`
-  beside the file is listed and not read, so what only the WAL holds is absent.
+  seals. It reads UTF-8 and UTF-16 text (the byte order the header declares) and
+  says so. A `-wal` or a `-journal` beside the file is listed and not read, so what
+  only the WAL holds is absent, and the status is partial while one holds bytes.
 - `protobuf_peek` reads the wire structure of a protobuf message without its
   schema: field numbers, wire types, absolute offsets and field paths, numbers
   raw with their zigzag reading. It does not say what a field means. A group makes
   a message `unsupported`, a structural error names its offset, and a bounded
-  window is read, not a whole file. The text of a string field and the bytes of a
-  bytes field are not printed; they go to the job's sealed values file on request.
+  window is read, not a whole file. Only a top-level varint is printed: the text of
+  a string, the bytes of a bytes field, a number under a length-delimited field and
+  a fixed-width value go to the job's sealed values file on request.
 
 **Five recipes**, each saying what it prepares (`purpose` in its `recipe.json`).
 Two inventories: `ios-filesystem` turns a full-file-system tar into a structural
@@ -86,7 +89,7 @@ operator for what the case lawfully supplies.
 backup has no unallocated space of the device, but the files in it can still hold
 deleted records in their own free pages, which `sqlite_freespace` reads for the
 main file only. A WAL or a journal beside a database is evidence of its own and is
-copied with it; none of the three tools reads one.
+copied with it; `sqlite_freespace` and `protobuf_peek` read neither.
 
 ## Install and use
 

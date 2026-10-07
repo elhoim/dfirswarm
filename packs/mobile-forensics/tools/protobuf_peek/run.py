@@ -20,6 +20,10 @@ a field number of 0 or above 536870911, a wire type of 6 or 7 and a field that r
 are structural errors, named with the offset where they were met. A message that holds a group is
 `unsupported`: it is not parsed past the group and it is never reported as valid.
 
+A length-delimited field is read as a nested message only when every field number in it is at most
+300: real messages use small numbers, and the bytes of a string or a token that happen to parse as fields
+mostly do not (what such a reading shows of itself is derived from those bytes).
+
 THE SHAPE IS NOT THE MEANING. A length-delimited field is ambiguous by design: each is tried as a
 nested message, then as text, and `read_as` says which reading was taken and `also_reads_as` the others
 that were possible. A varint is returned raw, with its zigzag reading and, where it has the top bit
@@ -33,10 +37,12 @@ window read), for a nested field as much as a top-level one, with the full field
 MiB), and what lies past it is counted and the offset to continue at is named.
 
 THE SECRET-SAFE OUTPUT PATTERN. A protobuf blob can hold message text, a token or any other string.
-Numbers are printed (a timestamp, a counter and an enum are what they are read for); the text of a
-string field and the bytes of a bytes field are NOT: the answer carries their offset, length and
-reading, and the value goes only to the values file, on `write_values: true` in a job run with
-`secret_output: true`. `hex` (a message passed in the call) is recorded in the trace: use it only for
+A top-level varint is printed (a timestamp, a counter and an enum are what it is read for). Nothing
+else that holds a value is: not the text of a string field, not the bytes of a bytes field, not a
+number under a length-delimited field (the bytes of a string or a token parse as a nested message
+now and then, and their "numbers" are its content) and not a fixed-width value, which is raw bytes.
+The answer carries each one's offset, length and reading, and the value goes only to the values
+file, on `write_values: true` in a job run with `secret_output: true`. `hex` (a message passed in the call) is recorded in the trace: use it only for
 a few bytes that are not sensitive, and a file for anything else.
 """
 import binascii
@@ -57,7 +63,7 @@ PARSER = "protobuf_peek/2"
 TOOL = "protobuf_peek"
 VALUES_NAME = "protobuf-values.jsonl"
 VALUES_FORMAT = ("JSON Lines, mode 0600: finding_id, source (the real file), field_path, offset, payload_offset, "
-                 "kind (text or bytes), bytes, value (the text, or the bytes as hexadecimal)")
+                 "kind (text, bytes or number), bytes, value (the text, the bytes as hexadecimal, or the number's readings)")
 
 
 # --- shared with the pack's other tools: begin ---------------------------------------------
@@ -113,8 +119,44 @@ def describe(exc):
     return scrub("%s%s: %s" % (type(exc).__name__, " " + code if code else "", getattr(exc, "strerror", None) or str(exc)))
 
 
+def clean(value):
+    """The value as strict JSON: a float that is not finite (JSON has no NaN or Infinity) is its text."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return {"_float": repr(value)}
+    if isinstance(value, dict):
+        return {k: clean(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [clean(v) for v in value]
+    return value
+
+
+def dumps(value, **kwargs):
+    return json.dumps(clean(value), allow_nan=False, default=str, **kwargs)
+
+
+# What is open when a run fails: the pages and the values file are closed and named in the error, so a
+# result read before the failure is kept, whole, and never left as a hidden temporary file.
+OPEN_PAGES = []
+OPEN_VALUES = []
+NONCE = "%d-%d" % (os.getpid(), time.time_ns())
+
+
 def fail(message, **extra):
-    print(json.dumps({"error": scrub(str(message)), **{k: (scrub(v) if isinstance(v, str) else v) for k, v in extra.items()}}, default=str))
+    kept = []
+    for page in OPEN_PAGES:
+        if page._out is not None:
+            try:
+                kept.append(page.finish().get("all_results"))
+            except Exception:
+                pass
+    answer = {"error": scrub(str(message)), **{k: (scrub(v) if isinstance(v, str) else v) for k, v in extra.items()}}
+    if kept:
+        answer["rows_read_before_the_failure_kept_in"] = kept
+    for values in OPEN_VALUES:
+        values.close()
+        if values.written:
+            answer["values_written_before_the_failure"] = {"file": values.shown, "rows": values.written}
+    print(dumps(answer))
     raise SystemExit(1)
 
 
@@ -169,7 +211,11 @@ class LosslessPage:
         self.total = 0
         self._out = None
         self._tmp = None
-        digest = hashlib.sha256(json.dumps(key, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16]
+        OPEN_PAGES.append(self)
+        # The key is the question (a path as it may be printed, a filter), plus this call's own nonce: two
+        # questions that print alike (two files in directories whose names are withheld, two messages passed
+        # in the call) never share a file, and a rerun never replaces an earlier result.
+        digest = hashlib.sha256(dumps([key, NONCE], sort_keys=True).encode("utf-8")).hexdigest()[:16]
         name = "%s-%s.jsonl" % (self.tool, digest)
         job, out = os.environ.get("JOB_ID"), os.environ.get("OUT")
         if job and out:
@@ -183,13 +229,13 @@ class LosslessPage:
             self.shown = str(self.path)
 
     def _write(self, row):
-        self._out.write(json.dumps(row, default=str))
+        self._out.write(dumps(row))
         self._out.write("\n")
 
     def add(self, row):
         self.total += 1
         if not self.full and len(self.page) < self.limit:
-            size = len(json.dumps(row, default=str)) if self.byte_limit is not None else 0
+            size = len(dumps(row)) if self.byte_limit is not None else 0
             if self.byte_limit is None or self.page_bytes + size <= self.byte_limit:
                 self.page.append(row)
                 self.page_bytes += size
@@ -273,13 +319,14 @@ class SecretValues:
         except OSError as exc:
             raise SecretValuesRefused("the values file could not be created: %s (%s)" % (self.path, describe(exc)))
         self._fh = os.fdopen(fd, "w", encoding="utf-8")
+        OPEN_VALUES.append(self)
 
     def add(self, finding_id, locator, value):
         if not self.enabled:
             return
         # ensure_ascii: a file name that is not UTF-8 is a lone surrogate to Python; an escape
         # reads back, a raw write cannot.
-        self._fh.write(json.dumps({"finding_id": finding_id, **locator, "value": value}))
+        self._fh.write(dumps({"finding_id": finding_id, **locator, "value": value}))
         self._fh.write("\n")
         self.written += 1
 
@@ -330,6 +377,10 @@ def read_args():
     return args
 
 
+def send(result):
+    print(dumps(result, indent=2))
+
+
 def run_main(main):
     try:
         main()
@@ -349,6 +400,12 @@ DEFAULT_FIELDS, HARD_FIELDS = 100000, 500000
 DEFAULT_LIMIT = 200
 INLINE_BYTES = 1 << 20
 DEFAULT_SECONDS = 60
+# What a number field carries. A top-level varint is printed; every other number is held back (see emit).
+# A length-delimited field is read as a nested message only when every field in it has a number up to this.
+# Real messages use small numbers; the bytes of a string or a token that happen to parse as fields mostly
+# do not, and what such a reading shows (field numbers, wire types, lengths) is derived from those bytes.
+NESTED_FIELD_MAX = 300
+NUMBER_KEYS = ("value", "as_bool", "zigzag_reading", "twos_complement_reading", "hex", "float_reading", "double_reading")
 
 
 class Stop(Exception):
@@ -469,7 +526,7 @@ def parse(ctx, start, end, depth, path):
                     inner, state, _ = parse(ctx, at, at + length, depth + 1, field_path)
                     if ctx.stopped:
                         return rows, "stopped", {"offset": ctx.base + field_start, "reason": ctx.stopped}
-                    if state == "ok" and inner:
+                    if state == "ok" and inner and all(r["field"] <= NESTED_FIELD_MAX for r in inner):
                         nested = inner
                 text = printable(body)
             readings = []
@@ -563,7 +620,7 @@ def main():
 
     fields = LosslessPage(TOOL, [source, offset, length, max_depth], limit, INLINE_BYTES)
     counters = {"fields": 0, "varint": 0, "64-bit": 0, "32-bit": 0, "length-delimited": 0, "nested_messages": 0,
-                "text_values_withheld": 0, "bytes_values_withheld": 0, "deepest": 0}
+                "text_values_withheld": 0, "bytes_values_withheld": 0, "number_values_withheld": 0, "deepest": 0}
     serial = [0]
 
     def emit(items):
@@ -574,6 +631,19 @@ def main():
             counters[row["wire_type"]] += 1
             counters["deepest"] = max(counters["deepest"], row["depth"])
             row["source"] = source
+            # A number is printed only when it is a top-level varint. Under a length-delimited field it may be
+            # the content of a string or of bytes read as a nested message (a token's bytes parse as fields about
+            # one time in a few hundred), and a fixed-width value is raw bytes: those go to the values file.
+            if row["wire_type"] in ("varint", "64-bit", "32-bit") and (row["depth"] >= 1 or row["wire_type"] != "varint"):
+                numbers = {k: row.pop(k) for k in NUMBER_KEYS if k in row}
+                serial[0] += 1
+                finding = "V%06d" % serial[0]
+                row["finding_id"] = finding
+                row["value_withheld"] = ("inside a length-delimited field, so it may be the content of a string or of bytes"
+                                         if row["depth"] >= 1 else "a fixed-width value is raw bytes")
+                counters["number_values_withheld"] += 1
+                values.add(finding, {"source": source_real, "field_path": row["field_path"], "offset": row["offset"],
+                                     "payload_offset": None, "kind": "number", "bytes": None}, numbers)
             if held:
                 serial[0] += 1
                 finding = "V%06d" % serial[0]
@@ -604,7 +674,7 @@ def main():
         structure["problem_offset"] = problem["offset"]
     structure["bytes_in_window"] = len(blob)
     structure["consistent_with_protobuf_wire_format"] = bool(state == "ok" and rows)
-    print(json.dumps({
+    send({
         "source": source,
         "parser": PARSER,
         "window": window,
@@ -620,15 +690,17 @@ def main():
         "secret_values": values.summary(),
         "paths_withheld": PATHS_WITHHELD[0],
         "note": "This is wire structure, not meaning: no field name, unit, enum or signedness is known without the .proto "
-                "file. Numbers are printed raw, with their zigzag reading (and, where the top bit is set, the two's-"
-                "complement reading) beside them; which one is meant is the schema's to say. The text of a string field "
-                "and the bytes of a bytes field are NOT printed (they may be message text or a credential): each has an "
-                "offset, a length and a reading, and its value is in the values file only when write_values was asked "
-                "for in a job run with secret_output: true. read_as is a guess between a nested message, text and bytes "
-                "(also_reads_as lists the others it could be). A group makes the message `unsupported`, and any "
+                "file. A top-level varint is printed raw, with its zigzag reading (and, where the top bit is set, the two's-"
+                "complement reading) beside it; which one is meant is the schema's to say. Nothing else that holds a "
+                "value is printed: not the text of a string field, not the bytes of a bytes field, not a number under a "
+                "length-delimited field (it may be the content of a string that parsed as a nested message), not a "
+                "fixed-width value. Each has its offset, length and reading, and a finding id; the value is in the values "
+                "file only when write_values was asked for in a job run with secret_output: true. read_as is a guess between a nested message, text and bytes "
+                "(also_reads_as lists the others it could be), and a nested reading needs every field number in it to be at most 300 "
+                "(what a misread string would show of itself is derived from its bytes). A group makes the message `unsupported`, and any "
                 "structural error names its offset: consistent_with_protobuf_wire_format means the whole window parsed, "
                 "and a short or ordinary blob can parse by chance. Offsets are absolute in the file.",
-    }, indent=2, default=str))
+    })
 
 
 if __name__ == "__main__":

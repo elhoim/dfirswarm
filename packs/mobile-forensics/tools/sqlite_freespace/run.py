@@ -19,10 +19,12 @@ lists and does not read, nor about a database that was vacuumed or created with 
 
 Encodings. UTF-8 text (ASCII, and the multi-byte sequences of any language) and UTF-16LE text
 (ASCII range, Latin, Greek, Cyrillic, Hebrew, Arabic, common punctuation, and, as a lower
-confidence reading that needs a longer run, CJK, kana, Hangul and emoji). A database that
-declares UTF-16BE is also read as UTF-16BE. A UTF-16 candidate that mostly covers bytes already
-read as a UTF-8 run is not reported twice. Text in any other encoding, in a binary column or in
-a compressed or encrypted value is not found: absence of a hit is not absence of the content.
+confidence reading that needs a longer run, CJK, kana, Hangul and emoji), read at either byte
+parity because a text can start on any byte. A database that declares UTF-16BE is read as UTF-16BE
+instead of UTF-16LE (a text read in the other byte order at the other parity is the same letters). A UTF-16 candidate whose bytes are mostly in a run already taken (printable ASCII read
+at the wrong parity is a run of CJK units) is not reported. Text in any other encoding, in a
+binary column or in a compressed or encrypted value is not found: absence of a hit is not
+absence of the content.
 
 Every offset is the byte position in the file, and every reported fragment was read back from
 the file at that offset and compared with what was found before it was reported.
@@ -38,6 +40,7 @@ The file is read-only to this tool: it is opened for reading, as bytes, and neve
 import errno
 import hashlib
 import json
+import math
 import os
 import re
 import signal
@@ -107,8 +110,44 @@ def describe(exc):
     return scrub("%s%s: %s" % (type(exc).__name__, " " + code if code else "", getattr(exc, "strerror", None) or str(exc)))
 
 
+def clean(value):
+    """The value as strict JSON: a float that is not finite (JSON has no NaN or Infinity) is its text."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return {"_float": repr(value)}
+    if isinstance(value, dict):
+        return {k: clean(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [clean(v) for v in value]
+    return value
+
+
+def dumps(value, **kwargs):
+    return json.dumps(clean(value), allow_nan=False, default=str, **kwargs)
+
+
+# What is open when a run fails: the pages and the values file are closed and named in the error, so a
+# result read before the failure is kept, whole, and never left as a hidden temporary file.
+OPEN_PAGES = []
+OPEN_VALUES = []
+NONCE = "%d-%d" % (os.getpid(), time.time_ns())
+
+
 def fail(message, **extra):
-    print(json.dumps({"error": scrub(str(message)), **{k: (scrub(v) if isinstance(v, str) else v) for k, v in extra.items()}}, default=str))
+    kept = []
+    for page in OPEN_PAGES:
+        if page._out is not None:
+            try:
+                kept.append(page.finish().get("all_results"))
+            except Exception:
+                pass
+    answer = {"error": scrub(str(message)), **{k: (scrub(v) if isinstance(v, str) else v) for k, v in extra.items()}}
+    if kept:
+        answer["rows_read_before_the_failure_kept_in"] = kept
+    for values in OPEN_VALUES:
+        values.close()
+        if values.written:
+            answer["values_written_before_the_failure"] = {"file": values.shown, "rows": values.written}
+    print(dumps(answer))
     raise SystemExit(1)
 
 
@@ -163,7 +202,11 @@ class LosslessPage:
         self.total = 0
         self._out = None
         self._tmp = None
-        digest = hashlib.sha256(json.dumps(key, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16]
+        OPEN_PAGES.append(self)
+        # The key is the question (a path as it may be printed, a filter), plus this call's own nonce: two
+        # questions that print alike (two files in directories whose names are withheld, two messages passed
+        # in the call) never share a file, and a rerun never replaces an earlier result.
+        digest = hashlib.sha256(dumps([key, NONCE], sort_keys=True).encode("utf-8")).hexdigest()[:16]
         name = "%s-%s.jsonl" % (self.tool, digest)
         job, out = os.environ.get("JOB_ID"), os.environ.get("OUT")
         if job and out:
@@ -177,13 +220,13 @@ class LosslessPage:
             self.shown = str(self.path)
 
     def _write(self, row):
-        self._out.write(json.dumps(row, default=str))
+        self._out.write(dumps(row))
         self._out.write("\n")
 
     def add(self, row):
         self.total += 1
         if not self.full and len(self.page) < self.limit:
-            size = len(json.dumps(row, default=str)) if self.byte_limit is not None else 0
+            size = len(dumps(row)) if self.byte_limit is not None else 0
             if self.byte_limit is None or self.page_bytes + size <= self.byte_limit:
                 self.page.append(row)
                 self.page_bytes += size
@@ -267,13 +310,14 @@ class SecretValues:
         except OSError as exc:
             raise SecretValuesRefused("the values file could not be created: %s (%s)" % (self.path, describe(exc)))
         self._fh = os.fdopen(fd, "w", encoding="utf-8")
+        OPEN_VALUES.append(self)
 
     def add(self, finding_id, locator, value):
         if not self.enabled:
             return
         # ensure_ascii: a file name that is not UTF-8 is a lone surrogate to Python; an escape
         # reads back, a raw write cannot.
-        self._fh.write(json.dumps({"finding_id": finding_id, **locator, "value": value}))
+        self._fh.write(dumps({"finding_id": finding_id, **locator, "value": value}))
         self._fh.write("\n")
         self.written += 1
 
@@ -324,6 +368,10 @@ def read_args():
     return args
 
 
+def send(result):
+    print(dumps(result, indent=2))
+
+
 def run_main(main):
     try:
         main()
@@ -338,9 +386,10 @@ LOCK_BYTE_OFFSET = 1 << 30
 DEFAULT_LIMIT = 200
 DEFAULT_MAX_SECONDS = 240
 INLINE_BYTES = 1 << 20
-REGEX_SECONDS = 5.0
+REGEX_SECONDS = 2.0
 PROBLEMS_INLINE = 200
 TEXT_ENCODINGS = {1: "UTF-8", 2: "UTF-16LE", 3: "UTF-16BE"}
+WIDE_MINIMUM = 8
 
 # One character of UTF-8 text: printable ASCII with tab and the line ends, or a well-formed
 # multi-byte sequence (no overlong form, no surrogate, no C1 control).
@@ -348,29 +397,71 @@ UTF8_CHAR = (rb"(?:[\x09\x0a\x0d\x20-\x7e]|\xc2[\xa0-\xbf]|[\xc3-\xdf][\x80-\xbf
              rb"|\xe0[\xa0-\xbf][\x80-\xbf]|[\xe1-\xec\xee\xef][\x80-\xbf]{2}|\xed[\x80-\x9f][\x80-\xbf]"
              rb"|\xf0[\x90-\xbf][\x80-\xbf]{2}|[\xf1-\xf3][\x80-\xbf]{3}|\xf4[\x80-\x8f][\x80-\xbf]{2})")
 
-# One UTF-16 code unit as (low byte, high byte), little-endian. NARROW units are the scripts
-# whose byte pairs are rarely met in binary data; WIDE units (CJK, kana, Hangul, fullwidth forms,
-# surrogate pairs for emoji) are met in random bytes about as often as in text, so a run that
-# holds one has to be longer to be reported.
-NARROW16 = (rb"(?:[\x09\x0a\x0d\x20-\x7e\xa0-\xff]\x00|[\x00-\xff]\x01|[\x00-\x4f]\x02|[\x70-\xff]\x03"
-            rb"|[\x00-\xff]\x04|[\x91-\xff]\x05|[\x00-\xff]\x06|[\x13\x14\x18\x19\x1c\x1d\x26\xac]\x20)")
-WIDE16 = (rb"(?:[\x00-\xff]\x30|[\x00-\xff][\x4e-\x9f]|[\x00-\xff][\xac-\xd7]|[\x00-\xef]\xff"
-          rb"|[\x00-\xff][\xd8-\xdb][\x00-\xff][\xdc-\xdf])")
-WIDE_MINIMUM = 8
+# UTF-16 text is found one code unit at a time, at either parity (a text can start on any byte). A unit is
+# two bytes; the HIGH byte says which Unicode block it can be in and the LOW byte which characters of that
+# block are accepted. Both bytes are translated to letters (upper case for a high byte, lower case for a
+# low one) and a run is a regular expression over the interleaved letters, so a run can only start on a
+# unit boundary of the parity being read. NARROW blocks are scripts whose byte pairs are rarely met in
+# binary data; WIDE blocks (CJK, kana, Hangul, fullwidth forms, surrogate pairs for emoji) are met in
+# random bytes about as often as in text, so a run that holds one has to be longer to be reported.
+_ALL = range(256)
+_BLOCKS = [  # (letter, high bytes, accepted low bytes, wide)
+    ("A", [0x00], [0x09, 0x0a, 0x0d, *range(0x20, 0x7f), *range(0xa0, 0x100)], False),   # ASCII, Latin-1
+    ("B", [0x01], _ALL, False),                                                            # Latin Extended-A
+    ("C", [0x02], range(0x00, 0x50), False),                                               # Latin Extended-B, IPA
+    ("D", [0x03], range(0x70, 0x100), False),                                              # Greek
+    ("E", [0x04], _ALL, False),                                                            # Cyrillic
+    ("F", [0x05], range(0x91, 0x100), False),                                              # Hebrew
+    ("G", [0x06], _ALL, False),                                                            # Arabic
+    ("H", [0x20], [0x13, 0x14, 0x18, 0x19, 0x1c, 0x1d, 0x26, 0xac], False),                # common punctuation
+    ("W", [0x30, *range(0x4e, 0xa0), *range(0xac, 0xd8)], _ALL, True),                     # kana, ideographs, Hangul
+    ("X", [0xff], range(0x00, 0xf0), True),                                                # fullwidth forms
+    ("U", range(0xd8, 0xdc), _ALL, True),                                                  # high surrogate
+    ("V", range(0xdc, 0xe0), _ALL, True),                                                  # low surrogate
+]
+HIGH_TABLE = bytearray(b"Z" * 256)
+for _letter, _highs, _lows, _wide in _BLOCKS:
+    for _h in _highs:
+        HIGH_TABLE[_h] = ord(_letter)
+HIGH_TABLE = bytes(HIGH_TABLE)
+_signature = {b: tuple(b in set(lows) for _l, _h, lows, _w in _BLOCKS) for b in range(256)}
+_letters = {}
+for _b in range(256):
+    _letters.setdefault(_signature[_b], chr(ord("a") + len(_letters)))
+LOW_TABLE = bytes(ord(_letters[_signature[_b]]) for _b in range(256))
+assert len(_letters) <= 26
+_ACCEPT = {}
+for _i, (_letter, _h, _lows, _w) in enumerate(_BLOCKS):
+    _ACCEPT[_letter] = "".join(sorted({_letters[_signature[_b]] for _b in range(256) if _signature[_b][_i]}))
+_UNIT = "|".join("%s[%s]" % (_l, _ACCEPT[_l]) for _l, _h, _lo, _w in _BLOCKS if _l not in "UV")
+_UNIT += "|U[a-z]V[a-z]"
+WIDE_LETTERS = re.compile(rb"[WXUV]")
 
 
 def compile_runs(minimum):
     count = b"{%d,}" % minimum
     return {
         "utf-8": re.compile(b"(?:" + UTF8_CHAR + b")" + count),
-        "utf-16le": re.compile(b"(?:" + NARROW16 + b"|" + WIDE16 + b")" + count),
+        "utf-16": re.compile(("(?:" + _UNIT + "){%d,}" % minimum).encode("ascii")),
     }
 
 
-def be_runs(minimum):
-    """UTF-16BE runs for a database that declares it: the ASCII range and Latin, only."""
-    unit = rb"(?:\x00[\x09\x0a\x0d\x20-\x7e\xa0-\xff]|\x01[\x00-\xff]|\x04[\x00-\xff])"
-    return re.compile(b"(?:" + unit + b"){%d,}" % minimum)
+def tokens(region, parity, little):
+    """The units of `region` read from byte `parity`, as interleaved letters (high class, low class)."""
+    data = region[parity:]
+    n = len(data) // 2
+    if n == 0:
+        return b""
+    pairs = data[:2 * n]
+    low, high = (pairs[0::2], pairs[1::2]) if little else (pairs[1::2], pairs[0::2])
+    out = bytearray(2 * n)
+    out[0::2] = high.translate(HIGH_TABLE)
+    out[1::2] = low.translate(LOW_TABLE)
+    return bytes(out)
+
+
+class OutOfTime(Exception):
+    pass
 
 
 def decode(raw, encoding):
@@ -379,42 +470,48 @@ def decode(raw, encoding):
     return raw.decode("utf-16-le" if encoding == "utf-16le" else "utf-16-be", "replace")
 
 
-# The high bytes (second byte of a little-endian pair) of the narrow blocks above.
-NARROW_HIGH = bytes([0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x20])
+def covered_by(accepted, start, end):
+    inside = sum(max(0, min(end, e) - max(start, s)) for s, e in accepted)
+    return inside * 2 >= end - start
 
 
-def runs_in(region, patterns, wide_minimum):
-    """(start, end, encoding) of the text runs in `region`, UTF-8 first.
+def runs_in(region, patterns, encodings, wide_minimum):
+    """(start, end, encoding) of the text runs in `region`, and how many candidates were dropped.
 
-    A UTF-16 candidate whose bytes are mostly inside a UTF-8 run is that run read the wrong way
-    (printable ASCII pairs read as CJK units) and is dropped, and a UTF-16LE run that holds a
-    wide unit has to be at least `wide_minimum` units long.
+    UTF-8 runs are taken first. A UTF-16 run is then taken when it is at least minimum units (a run that
+    holds a wide unit must be wide_minimum), narrow runs before wide ones, and is dropped when half or more
+    of its bytes are already in a run taken: printable ASCII read at the wrong parity is a run of wide
+    units, and a UTF-8 text read as UTF-16 is the same.
     """
-    found, covered = [], []
+    found, accepted = [], []
     for run in patterns["utf-8"].finditer(region):
         found.append((run.start(), run.end(), "utf-8"))
-        covered.append((run.start(), run.end()))
+        accepted.append((run.start(), run.end()))
+    narrow, wide = [], []
+    for encoding in encodings:
+        for parity in (0, 1):
+            letters = tokens(region, parity, encoding == "utf-16le")
+            for run in patterns["utf-16"].finditer(letters):
+                start, end = parity + run.start(), parity + run.end()
+                candidate = (start, end, encoding)
+                if WIDE_LETTERS.search(letters[run.start():run.end():2]):
+                    if (run.end() - run.start()) // 2 >= wide_minimum:
+                        wide.append(candidate)
+                else:
+                    narrow.append(candidate)
     dropped = 0
-    for encoding in ("utf-16le", "utf-16be"):
-        pattern = patterns.get(encoding)
-        if pattern is None:
+    for candidate in sorted(narrow) + sorted(wide):
+        if covered_by(accepted, candidate[0], candidate[1]):
+            dropped += 1
             continue
-        for run in pattern.finditer(region):
-            start, end = run.start(), run.end()
-            if encoding == "utf-16le" and (end - start) // 2 < wide_minimum:
-                if region[start + 1:end:2].translate(None, NARROW_HIGH):
-                    continue
-            inside = sum(max(0, min(end, e) - max(start, s)) for s, e in covered)
-            if inside * 2 >= end - start:
-                dropped += 1
-                continue
-            found.append((start, end, encoding))
+        found.append(candidate)
+        accepted.append((candidate[0], candidate[1]))
     found.sort(key=lambda f: (f[0], f[2]))
     return found, dropped
 
 
 # Problems that say the file's structure disagrees with itself. Any of them makes the status `corrupt`
-# (the fragments found are still reported); a limit or a page not examined makes it `partial`.
+# (the fragments found are still reported); a limit or a page or file not examined makes it `partial`.
 CORRUPT_KINDS = {
     "file shorter than its header says", "partial last page", "freelist cycle", "freelist page outside the file",
     "freelist trunk page truncated", "freelist trunk count too large", "freelist page listed twice",
@@ -437,6 +534,15 @@ class Problems:
         if not examined:
             self.unexamined += 1
         self.page.add({"kind": kind, "detail": detail, "region_or_page_examined": examined, **where})
+
+
+def entropy(data):
+    if not data:
+        return 0.0
+    counts = [0] * 256
+    for byte in data:
+        counts[byte] += 1
+    return -sum(c / len(data) * math.log2(c / len(data)) for c in counts if c)
 
 
 def header_of(head):
@@ -487,19 +593,25 @@ def main():
     max_seconds = args.get("max_seconds", DEFAULT_MAX_SECONDS)
     if not isinstance(max_seconds, (int, float)) or isinstance(max_seconds, bool) or max_seconds <= 0:
         fail("max_seconds must be a positive number")
+    deadline = started + max_seconds
     values = open_values(args)
 
     file_bytes = os.path.getsize(db)
     real = shown(os.path.realpath(db), False)
+    source = shown(db, False)
     problems = Problems(LosslessPage(TOOL, [real, "problems"], PROBLEMS_INLINE))
     fragments = LosslessPage(TOOL, [real, "fragments", contains or "", minimum], limit, INLINE_BYTES)
 
     with open(db, "rb") as scan, open(db, "rb") as walk, open(db, "rb") as verify:
         head = scan.read(100)
         if len(head) < 100 or head[:16] != MAGIC:
+            # What the file starts with is not printed: it may be content, or a salt. Its size and the entropy of
+            # its first 4 KiB say whether it looks encrypted or compressed.
+            sample = scan.read(4096 - len(head)) if len(head) < 4096 else b""
             values.close()
             fail("this is not a SQLite database: its first 16 bytes are not the SQLite header string",
-                 db=shown(db), head_hex=head[:16].hex(), bytes=file_bytes)
+                 db=shown(db), bytes=file_bytes, entropy_bits_per_byte_of_first_4096=round(entropy(head + sample), 2),
+                 note="High entropy is one explanation among others (encryption, compression); it is not an identification.")
         h = header_of(head)
         page_size, usable = h["page_size"], h["usable_size"]
         if page_size < 512 or page_size & (page_size - 1):
@@ -524,11 +636,21 @@ def main():
         if h["text_encoding"] not in TEXT_ENCODINGS:
             problems.add("unusual header field", "the text encoding field is %d (1 UTF-8, 2 UTF-16LE, 3 UTF-16BE)" % h["text_encoding"], True)
 
+        # A companion that is not read is a part of the database that is not examined.
+        companions = {}
+        for suffix in ("-wal", "-shm", "-journal"):
+            try:
+                size = os.lstat(db + suffix).st_size
+            except OSError:
+                continue
+            companions[suffix] = {"bytes": size, "examined": False}
+            if suffix != "-shm" and size > 0:
+                problems.add("companion not examined", "%s%s is %d bytes and is not read by this tool: what it holds (committed changes, earlier page images) is absent from this answer" % (os.path.basename(db), suffix, size), False)
+
         patterns = compile_runs(minimum)
-        encodings = ["utf-8", "utf-16le"]
-        if h["text_encoding"] == 3:
-            patterns["utf-16be"] = be_runs(minimum)
-            encodings.append("utf-16be")
+        # One UTF-16 byte order, the database's own: a Greek text read in the other order at the other parity is
+        # Greek again, so scanning both would report the one text twice, each time cut.
+        encodings = ["utf-16be"] if h["text_encoding"] == 3 else ["utf-16le"]
         wide_minimum = max(minimum, WIDE_MINIMUM)
 
         # The freelist: each trunk page names the leaves that follow it. A trunk seen twice, a page
@@ -568,22 +690,23 @@ def main():
         if len(free) != h["freelist_declared"]:
             problems.add("freelist count differs from the header", "the header declares %d freelist pages and the chain holds %d" % (h["freelist_declared"], len(free)), True)
 
-        # Pages that are not b-tree pages and not free: the lock-byte page of a file past 1 GiB and,
-        # in an auto-vacuum database, the pointer-map pages.
+        # Pages that are neither b-tree pages nor free: the lock-byte page of a file past 1 GiB and, in an
+        # auto-vacuum database, the pointer-map pages (SQLite puts a pointer-map page one page later when it
+        # would fall on the lock-byte page).
         lock_page = LOCK_BYTE_OFFSET // page_size + 1
         pointer_maps = set()
         if h["largest_root"]:
             span = usable // 5 + 1
             page_no = 2
-            while page_no <= in_file:
-                pointer_maps.add(page_no)
+            while page_no <= in_file + 1:
+                pointer_maps.add(page_no + 1 if page_no == lock_page else page_no)
                 page_no += span
 
         counts = {"pages_in_file": in_file, "pages_examined": 0, "pages_not_btree": 0, "pages_corrupt": 0,
                   "pages_partial": 0, "lock_byte_pages_skipped": 0, "pointer_map_pages_skipped": 0,
                   "freelist_trunk_pages": 0, "freelist_leaf_pages": 0, "freeblocks": 0, "unallocated_gaps": 0,
                   "regions_scanned": 0, "bytes_scanned": 0, "fragments_found": 0, "fragments_matching": 0,
-                  "fragments_unverified": 0, "utf16_candidates_dropped_as_utf8": 0, "pages_not_reached": 0,
+                  "fragments_unverified": 0, "candidates_dropped_as_overlapping": 0, "pages_not_reached": 0,
                   "contains_timeouts": 0}
         stopped_at = None
         serial = 0
@@ -592,19 +715,21 @@ def main():
             nonlocal serial
             counts["regions_scanned"] += 1
             counts["bytes_scanned"] += len(region)
-            found, dropped = runs_in(region, patterns, wide_minimum)
-            counts["utf16_candidates_dropped_as_utf8"] += dropped
+            found, dropped = runs_in(region, patterns, encodings, wide_minimum)
+            counts["candidates_dropped_as_overlapping"] += dropped
             for start, end, encoding in found:
+                if time.monotonic() > deadline:
+                    raise OutOfTime()
                 raw = region[start:end]
                 text = decode(raw, encoding)
                 characters = len(text)
                 counts["fragments_found"] += 1
                 if pattern is not None:
                     try:
-                        hit = timed_search(pattern, text, REGEX_SECONDS)
+                        hit = timed_search(pattern, text, max(0.01, min(REGEX_SECONDS, deadline - time.monotonic())))
                     except Timeout:
                         counts["contains_timeouts"] += 1
-                        problems.add("contains took too long", "the expression ran past %s seconds on one fragment (page %d): that fragment is counted and not matched" % (REGEX_SECONDS, number), False, page=number)
+                        problems.add("contains took too long", "the expression ran past its time on one fragment (page %d): that fragment is counted and not matched" % number, False, page=number)
                         continue
                     if not hit:
                         continue
@@ -618,7 +743,7 @@ def main():
                 if not verified:
                     counts["fragments_unverified"] += 1
                     problems.add("fragment not found at its offset", "the bytes at offset %d are not the bytes found in the page: not trusted" % absolute, False, page=number, finding_id=finding)
-                row = {"finding_id": finding, "page": number, "where": where, "encoding": encoding,
+                row = {"finding_id": finding, "source": source, "page": number, "where": where, "encoding": encoding,
                        "offset": absolute, "offset_verified": verified, "bytes": len(raw),
                        "characters": characters, "parser": PARSER, **extra}
                 fragments.add(row)
@@ -626,68 +751,70 @@ def main():
                                      "offset": absolute, "bytes": len(raw), "characters": characters}, text)
 
         scan.seek(0)
-        for number in range(1, in_file + 1):
-            if time.monotonic() - started > max_seconds:
-                stopped_at = number
-                counts["pages_not_reached"] = in_file - number + 1
-                problems.add("time limit", "max_seconds (%s) passed before page %d: pages %d to %d are not examined" % (max_seconds, number, number, in_file), False, page=number)
-                break
-            page = scan.read(page_size)
-            if number == lock_page and number <= in_file and file_bytes > LOCK_BYTE_OFFSET:
-                counts["lock_byte_pages_skipped"] += 1
-                continue
-            if number in pointer_maps:
-                counts["pointer_map_pages_skipped"] += 1
-                continue
-            if len(page) < page_size:
-                counts["pages_partial"] += 1
-                continue
-            counts["pages_examined"] += 1
-            beyond = h["declared_size_valid"] and number > h["pages_declared"]
-            if beyond:
-                region_fragments(number, 0, page, "page beyond the header's declared size", {})
-                continue
-            if number in free:
-                data_start, description = free[number]
-                counts["freelist_trunk_pages" if description.endswith("trunk page") else "freelist_leaf_pages"] += 1
-                region_fragments(number, data_start, page[data_start:], description, {})
-                continue
-            offset = 100 if number == 1 else 0
-            kind = page[offset]
-            if kind not in (2, 5, 10, 13):
-                counts["pages_not_btree"] += 1
-                continue
-            first_free = struct.unpack_from(">H", page, offset + 1)[0]
-            cells = struct.unpack_from(">H", page, offset + 3)[0]
-            content = struct.unpack_from(">H", page, offset + 5)[0] or 65536
-            header_size = 12 if kind in (2, 5) else 8
-            gap_from = offset + header_size + cells * 2
-            if gap_from > usable or content > usable or content < gap_from:
-                counts["pages_corrupt"] += 1
-                problems.add("b-tree page header inconsistent", "page %d: %d cells end at %d, the cell content area starts at %d, the usable size is %d: not examined" % (number, cells, gap_from, content, usable), False, page=number)
-                continue
-            if content > gap_from:
-                counts["unallocated_gaps"] += 1
-                region_fragments(number, gap_from, page[gap_from:content], "unallocated space in page", {})
-            block, previous, guard = first_free, 0, 0
-            while block:
-                guard += 1
-                if block < content or block + 4 > usable or guard > usable // 4:
-                    problems.add("freeblock chain corrupt", "page %d: the chain reaches offset %d (cell content starts at %d, usable size %d): the rest of the chain is not followed" % (number, block, content, usable), False, page=number)
-                    break
-                following, size = struct.unpack_from(">HH", page, block)
-                if size < 4 or block + size > usable:
-                    problems.add("freeblock chain corrupt", "page %d: the freeblock at %d declares %d bytes (usable size %d): not read, the rest of the chain is not followed" % (number, block, size, usable), False, page=number)
-                    break
-                if following and following <= block:
-                    problems.add("freeblock chain corrupt", "page %d: the freeblock at %d points back to %d: a loop or an unordered chain, not followed past it" % (number, block, following), True, page=number)
-                    following = 0
-                counts["freeblocks"] += 1
-                # The freeblock's own header is its first four bytes (next offset, size): the
-                # deleted cell's bytes start after it, and so does the offset reported.
-                region_fragments(number, block + 4, page[block + 4:block + size], "freeblock in page", {"block_offset": block})
-                previous, block = block, following
-
+        number = 0
+        try:
+            for number in range(1, in_file + 1):
+                if time.monotonic() > deadline:
+                    raise OutOfTime()
+                page = scan.read(page_size)
+                if number == lock_page and file_bytes > LOCK_BYTE_OFFSET:
+                    counts["lock_byte_pages_skipped"] += 1
+                    continue
+                if number in pointer_maps:
+                    counts["pointer_map_pages_skipped"] += 1
+                    continue
+                if len(page) < page_size:
+                    counts["pages_partial"] += 1
+                    continue
+                counts["pages_examined"] += 1
+                beyond = h["declared_size_valid"] and number > h["pages_declared"]
+                if beyond:
+                    region_fragments(number, 0, page[:usable], "page beyond the header's declared size", {})
+                    continue
+                if number in free:
+                    data_start, description = free[number]
+                    counts["freelist_trunk_pages" if description.endswith("trunk page") else "freelist_leaf_pages"] += 1
+                    region_fragments(number, data_start, page[data_start:usable], description, {})
+                    continue
+                offset = 100 if number == 1 else 0
+                kind = page[offset]
+                if kind not in (2, 5, 10, 13):
+                    counts["pages_not_btree"] += 1
+                    continue
+                first_free = struct.unpack_from(">H", page, offset + 1)[0]
+                cells = struct.unpack_from(">H", page, offset + 3)[0]
+                content = struct.unpack_from(">H", page, offset + 5)[0] or 65536
+                header_size = 12 if kind in (2, 5) else 8
+                gap_from = offset + header_size + cells * 2
+                if gap_from > usable or content > usable or content < gap_from:
+                    counts["pages_corrupt"] += 1
+                    problems.add("b-tree page header inconsistent", "page %d: %d cells end at %d, the cell content area starts at %d, the usable size is %d: not examined" % (number, cells, gap_from, content, usable), False, page=number)
+                    continue
+                if content > gap_from:
+                    counts["unallocated_gaps"] += 1
+                    region_fragments(number, gap_from, page[gap_from:content], "unallocated space in page", {})
+                block, guard = first_free, 0
+                while block:
+                    guard += 1
+                    if block < content or block + 4 > usable or guard > usable // 4:
+                        problems.add("freeblock chain corrupt", "page %d: the chain reaches offset %d (cell content starts at %d, usable size %d): the rest of the chain is not followed" % (number, block, content, usable), False, page=number)
+                        break
+                    following, size = struct.unpack_from(">HH", page, block)
+                    if size < 4 or block + size > usable:
+                        problems.add("freeblock chain corrupt", "page %d: the freeblock at %d declares %d bytes (usable size %d): not read, the rest of the chain is not followed" % (number, block, size, usable), False, page=number)
+                        break
+                    if following and following <= block:
+                        problems.add("freeblock chain corrupt", "page %d: the freeblock at %d points back to %d: a loop or an unordered chain, not followed past it" % (number, block, following), True, page=number)
+                        following = 0
+                    counts["freeblocks"] += 1
+                    # The freeblock's own header is its first four bytes (next offset, size): the
+                    # deleted cell's bytes start after it, and so does the offset reported.
+                    region_fragments(number, block + 4, page[block + 4:block + size], "freeblock in page", {"block_offset": block})
+                    block = following
+        except OutOfTime:
+            stopped_at = number
+            counts["pages_not_reached"] = in_file - number + 1
+            problems.add("time limit", "max_seconds (%s) passed in page %d: that page may be partly read, and pages %d to %d are not examined" % (max_seconds, number, number, in_file), False, page=number)
         if counts["pages_not_btree"] and any(k.startswith("freelist") for k in problems.kinds):
             problems.add("pages not read after a freelist problem",
                          "%d pages are neither b-tree pages nor on the freelist as walked. Overflow pages hold live content "
@@ -699,13 +826,7 @@ def main():
     corrupt = any(kind in CORRUPT_KINDS for kind in problems.kinds)
     complete = problems.unexamined == 0 and stopped_at is None
     status = "corrupt" if corrupt else ("complete" if complete else "partial")
-    companions = {}
-    for suffix in ("-wal", "-shm", "-journal"):
-        try:
-            companions[suffix] = {"bytes": os.lstat(db + suffix).st_size, "examined": False}
-        except OSError:
-            pass
-    print(json.dumps({
+    send({
         "db": shown(db),
         "parser": PARSER,
         "status": status,
@@ -721,7 +842,7 @@ def main():
         },
         "freelist": {"declared": h["freelist_declared"], "walked": len(free), "trunk_pages": trunks},
         "scanned": counts,
-        "encodings_scanned": encodings,
+        "encodings_scanned": ["utf-8"] + encodings,
         "stopped_before_page": stopped_at,
         "problems": problems.page.page,
         "problem_kinds": problems.kinds,
@@ -744,12 +865,16 @@ def main():
                 "secret_output. Offsets were read back from the file and compared (offset_verified). Only the main "
                 "file is read: a -wal or -journal listed under companions is NOT examined (its frames and page "
                 "images are not read), so what it holds, including the newest committed changes, is absent from "
-                "this answer. Encodings are UTF-8 and UTF-16LE (and UTF-16BE where the header declares it); a "
-                "negative covers only those encodings, only the regions counted under scanned, and says nothing "
-                "about a vacuumed database or one that used secure_delete. A partial status says which pages or "
-                "regions were not examined (problems, problem_kinds); a fragment is a candidate to corroborate, "
+                "this answer, and a non-empty one makes the status partial. Encodings are UTF-8 and UTF-16LE "
+                "(UTF-16BE instead of it where the header declares UTF-16BE); a negative covers only those encodings, only the regions "
+                "counted under scanned, and says nothing about a vacuumed database or one that used secure_delete. "
+                "A contains filter shows whether text you name is present; it is not a way to read what you do not "
+                "name. Status is complete (every page examined, nothing inconsistent, no companion left unread), "
+                "partial (a limit, a companion not read, or pages or regions not examined) or corrupt (the file's "
+                "structure disagreed with itself where problems says; the fragments found are still reported, and "
+                "a corrupt chain means text beyond it was not reached). A fragment is a candidate to corroborate, "
                 "never a message.",
-    }, indent=2))
+    })
 
 
 if __name__ == "__main__":

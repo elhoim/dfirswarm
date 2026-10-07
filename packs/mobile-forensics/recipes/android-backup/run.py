@@ -27,8 +27,14 @@ What it does and does not read:
   rest of the zlib stream is read, within the same budget, so that its end marker and checksum are
   verified: `payload_stream` says reached, not_reached (the budget) or truncated.
 
-  A member name is kept as the tar gave it: tabs, newlines, backslashes and bytes that are not
-  UTF-8 are escaped in `path`, and `path_b64` is the exact bytes.
+  The tar is followed as it flows past, header by header, apart from the library that reads it: an
+  extended header (a GNU long name, a pax header) that declares more than 1 MiB is not read, since the
+  library would hold it whole in memory; and the archive is complete only when its end-of-archive
+  block was seen (`tar_end`: reached or missing), so a backup cut at a member boundary is partial.
+
+  A member name is kept as the tar reader returned it: tabs, newlines, backslashes and bytes that are
+  not UTF-8 are escaped in `path`, and `path_b64` is the exact bytes of that name. The reader drops the
+  trailing slash of a directory's name; `type` says it is a directory.
 """
 import argparse
 import base64
@@ -36,6 +42,7 @@ import datetime
 import io
 import json
 import os
+import re
 import sys
 import tarfile
 import zlib
@@ -44,13 +51,70 @@ MAGIC = b"ANDROID BACKUP\n"
 SUPPORTED_VERSIONS = (1, 2, 3, 4, 5)
 DEFAULT_BUDGET = 32 << 30
 PIECE = 1 << 20
+EXTENDED_HEADER_LIMIT = 1 << 20
+SCHEME_WORD = re.compile(r"[A-Za-z0-9._-]{1,16}\Z")
+# Typeflags of a header whose size is followed by that many bytes of data (others' size is not data).
+DATA_TYPES = set(b"0\x007LKxgXS") | set(range(ord("A"), ord("Z") + 1))
+
+
+class TarWatch:
+    """Follows a tar stream header by header as its bytes flow past, apart from the library that reads it.
+
+    It bounds what the library holds in memory (an extended header declaring more than the limit) and sees
+    whether the end-of-archive block came: the library stops quietly at a cut header or a garbled one.
+    """
+
+    def __init__(self):
+        self.block = bytearray()
+        self.skip = 0
+        self.position = 0
+        self.ended = False
+        self.end_at = None
+        self.violation = None
+
+    def feed(self, data):
+        i, n = 0, len(data)
+        while i < n and not self.ended and self.violation is None:
+            if self.skip:
+                step = min(self.skip, n - i)
+                self.skip -= step
+                i += step
+                self.position += step
+                continue
+            take = min(512 - len(self.block), n - i)
+            self.block += data[i:i + take]
+            i += take
+            self.position += take
+            if len(self.block) == 512:
+                self.header(bytes(self.block))
+                self.block.clear()
+        if self.ended:
+            self.position += n - i
+
+    def header(self, block):
+        if block == b"\0" * 512:
+            self.ended = True
+            self.end_at = self.position - 512
+            return
+        flag = block[156]
+        raw = block[124:136]
+        try:
+            size = int.from_bytes(bytes([raw[0] & 0x7F]) + raw[1:], "big") if raw[0] & 0x80 else int(raw.strip(b"\0 ") or b"0", 8)
+        except ValueError:
+            size = 0
+        if flag in b"LKxgX" and size > EXTENDED_HEADER_LIMIT:
+            self.violation = size
+            return
+        if flag in DATA_TYPES:
+            self.skip = -(-size // 512) * 512
 
 
 class ZlibReader(io.RawIOBase):
     """A zlib stream as a file: read in pieces, with an output budget, and its end checked."""
 
-    def __init__(self, source, budget):
+    def __init__(self, source, budget, watch):
         self.source = source
+        self.watch = watch
         self.decoder = zlib.decompressobj()
         self.budget = budget
         self.produced = 0
@@ -81,6 +145,12 @@ class ZlibReader(io.RawIOBase):
             produced = self.decoder.decompress(self.pending, min(PIECE, self.budget - self.produced))
             self.pending = self.decoder.unconsumed_tail
             self.produced += len(produced)
+            self.watch.feed(produced)
+            if self.watch.violation is not None:
+                # What the library would read next is an extended header too large to hold: the stream ends here.
+                self.buffer.extend(produced)
+                self.finished = True
+                break
             self.buffer.extend(produced)
             if self.decoder.eof:
                 # The end marker, and with it the Adler-32 checksum, was read: zlib raises on a mismatch.
@@ -97,6 +167,33 @@ class ZlibReader(io.RawIOBase):
         while not self.finished:
             self.readinto(memoryview(sink))
             self.buffer.clear()
+
+
+class Tap(io.RawIOBase):
+    """An uncompressed payload as a file, followed by the same watch."""
+
+    def __init__(self, source, watch):
+        self.source = source
+        self.watch = watch
+
+    def readable(self):
+        return True
+
+    def readinto(self, target):
+        if self.watch.violation is not None:
+            return 0
+        data = self.source.read(len(target))
+        self.watch.feed(data)
+        target[:len(data)] = data
+        return len(data)
+
+    def drain(self):
+        """The rest of the payload after the library stopped, so that the watch sees it."""
+        while self.watch.violation is None and not self.watch.ended:
+            data = self.source.read(PIECE)
+            if not data:
+                break
+            self.watch.feed(data)
 
 
 def target_of(value):
@@ -116,10 +213,11 @@ def line(handle, label):
 
 
 def label(text):
-    """A header word that is printed: a short printable word, or a refusal to print it."""
-    if len(text) <= 64 and text.isprintable():
+    """A header word that is printed: a short word of letters, digits and . _ - (a scheme name), and
+    otherwise only its length: the line is evidence, and may hold anything."""
+    if SCHEME_WORD.match(text):
         return text
-    return "<not a printable word of at most 64 characters>"
+    return "<not a scheme word: %d characters, not printed>" % len(text)
 
 
 def header(handle):
@@ -208,7 +306,7 @@ def run(path, out, budget):
     os.makedirs(out, exist_ok=True)
     errors, limits_hit = [], []
     member_count = 0
-    stream = "not_applicable"
+    stream, tar_end = "not_applicable", "not_applicable"
     produced = 0
     with open(path, "rb") as source:
         details = header(source)
@@ -220,8 +318,10 @@ def run(path, out, budget):
         with open(members_path, "w", encoding="utf-8", newline="\n") as listing:
             listing.write("n\ttype\tpath\tbytes\tmtime_utc\tmode\tlink\tpath_b64\n")
             if listable:
-                reader = ZlibReader(source, budget) if details["compressed"] else None
-                payload = io.BufferedReader(reader) if reader else source
+                watch = TarWatch()
+                reader = ZlibReader(source, budget, watch) if details["compressed"] else None
+                tap = Tap(source, watch) if reader is None else None
+                payload = io.BufferedReader(reader if reader is not None else tap)
                 try:
                     with tarfile.open(fileobj=payload, mode="r|", encoding="utf-8", errors="surrogateescape") as archive:
                         for member in archive:
@@ -232,11 +332,12 @@ def run(path, out, budget):
                             archive.members = []
                 except (tarfile.TarError, EOFError, OSError, zlib.error) as exc:
                     errors.append("embedded tar traversal stopped: %s" % exc)
-                if reader is not None:
+                if watch.violation is None:
                     try:
-                        reader.drain()
+                        (reader or tap).drain()
                     except zlib.error as exc:
                         errors.append("the zlib stream is damaged after the tar's end: %s" % exc)
+                if reader is not None:
                     produced = reader.produced
                     if reader.exceeded:
                         stream = "not_reached"
@@ -244,10 +345,21 @@ def run(path, out, budget):
                     elif reader.truncated:
                         stream = "truncated"
                         errors.append("the zlib stream ends before its end marker: the backup is cut short")
-                    else:
+                    elif watch.violation is None:
                         stream = "reached"
                 else:
                     stream = "not_compressed"
+                if watch.violation is not None:
+                    tar_end = "not_reached"
+                    limits_hit.append("a tar extended header declares %d bytes, over the limit of %d: it is not read, and the listing stopped after %d members"
+                                      % (watch.violation, EXTENDED_HEADER_LIMIT, member_count))
+                elif watch.ended:
+                    tar_end = "reached"
+                elif not reader or not reader.exceeded:
+                    tar_end = "missing"
+                    errors.append("the tar ends without its end-of-archive block (after %d bytes of payload): the backup is cut short or damaged" % watch.position)
+                else:
+                    tar_end = "not_reached"
     with open(os.path.join(out, "index.tsv"), "w", encoding="utf-8", newline="\n") as handle:
         handle.write("file\twhat\n")
         handle.write("backup.json\tAndroid backup header fields and payload offset (key-derivation values are not printed)\n")
@@ -274,6 +386,7 @@ def run(path, out, budget):
         "limits_hit": limits_hit,
         "errors": errors,
         "payload_stream": stream,
+        "tar_end": tar_end,
         "decompressed_bytes": produced,
     }
     with open(os.path.join(out, "coverage.json"), "w", encoding="utf-8") as handle:
