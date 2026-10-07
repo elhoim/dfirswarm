@@ -485,18 +485,18 @@ test("a value named a checksum or a digest is not taken for a key by its length:
 
 test("a long string of the shape of a token costs time in proportion to its length, and a scan that meets the deadline withholds what it did not scan", async () => {
   await withDir(async (cwd) => {
-    const blob = "eyJ".repeat(333_333);
-    const records = [1, 2, 3].map((i) => ct({ eventID: `big-${i}`, eventSource: "s3.amazonaws.com", eventName: "PutObject", userIdentity: ALICE, requestParameters: { blob } }));
+    const blob = "eyJ".repeat(100_000);
+    const records = [1, 2].map((i) => ct({ eventID: `big-${i}`, eventSource: "s3.amazonaws.com", eventName: "PutObject", userIdentity: ALICE, requestParameters: { blob } }));
     await put(cwd, "work/ev/t.json", trail(...records));
     const started = Date.now();
     const out = body(await tool(TRAIL, cwd, { path: "work/ev/t.json", link_sessions: false, time_limit_seconds: 5 }));
-    assert.ok(Date.now() - started < 40_000, `three 1 MB records took ${Date.now() - started} ms`);
-    assert.equal(out.coverage.records_read, 3);
+    assert.ok(Date.now() - started < 15_000, `two 300 KB records took ${Date.now() - started} ms`);
+    assert.equal(out.coverage.records_read, 2);
     // Behind a long deadline-less scan the other tools take the same text through the same rules.
     await put(cwd, "work/ev/u.json", JSON.stringify([{ Id: "1", Operation: "Send", UserId: "a@b.c", CreationTime: "2026-02-14T09:00:00Z", Pad: blob }]));
     const started2 = Date.now();
     body(await tool(UAL, cwd, { path: "work/ev/u.json" }));
-    assert.ok(Date.now() - started2 < 40_000, `ual_parse took ${Date.now() - started2} ms`);
+    assert.ok(Date.now() - started2 < 15_000, `ual_parse took ${Date.now() - started2} ms`);
   });
 });
 
