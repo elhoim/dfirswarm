@@ -11,13 +11,7 @@ cloud-forensics unused skills/aws/cloudtrail.md aws
 cloud-forensics unused skills/identity/tokens.md signin_analyse
 cloud-forensics unused skills/identity/tokens.md ual_parse
 cloud-forensics unused skills/m365/unified-audit-log.md pwsh
-encrypted-containers unlisted skills/volumes/bitlocker.md bdemount
-encrypted-containers unlisted skills/volumes/bitlocker.md fls
-encrypted-containers unused skills/archives/protected.md file_type
-encrypted-containers unused skills/identify/headers.md file_type
-encrypted-containers unused skills/keys/where-they-hide.md ioc_scan
-encrypted-containers unused skills/volumes/bitlocker.md crypto_id
-encrypted-containers unused skills/volumes/luks-filevault.md crypto_id
+encrypted-containers unlisted skills/archives/protected.md 7z
 linux-forensics unlisted skills/containers/docker.md journalctl
 linux-forensics unlisted skills/filesystem/ext.md icat
 linux-forensics unlisted skills/triage/system-profile.md fsstat
