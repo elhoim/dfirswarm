@@ -1,41 +1,70 @@
 ---
 id: execution/overview
-title: Proving a program ran, and how much each artefact is worth
-when: Any claim that something was executed.
+title: Assessing evidence of program execution
+when: You need to distinguish file presence, launch, account context and completed activity.
 needs: [registry/overview]
 tools: []
 requires_host: []
 ---
 
-No single artefact proves execution. Each one answers a slightly different
-question, and the published runs got their sharpest answers by making three or
-four agree to the second.
+This is a method skill and names no tool: the readers are in the skills it points
+to. Its job is to make you say which claim a source supports before you cite it.
 
-| Artefact | What it actually says | Skill |
+**Name the claim first.** "The file was on the machine", "a process started", "it
+ran to completion", "it did something", "an account's session started it", "a
+person chose to" are six claims, and each source below supports some of them and
+not the others. Write the claim, then the source, then the step between them.
+
+| Source | What it records | Skill |
 | --- | --- | --- |
-| Prefetch | it ran, how many times, when last, what it loaded | `execution/prefetch` |
-| UserAssist | a user launched it from the shell, with a run count | `execution/userassist` |
-| Amcache | the binary was present, with its SHA-1 and link date | `execution/amcache` |
-| ShimCache | the file was seen by the compatibility cache | `execution/amcache` |
-| BAM and DAM | the last time a program ran, per user SID | `execution/userassist` |
-| SRUM | how much network and CPU a program used, per hour | `execution/srum` |
-| Event 4688 | a process started, if the policy was on | `logs/security` |
-| PowerShell 4104 | the code that ran, as it was compiled | `logs/powershell` |
-| Sysmon 1 | a process started, with its hashes and parent, where it is installed | `logs/remote-access` |
-| A shadow copy | any of the above, as it was before a cleanup | `filesystem/shadowcopies` |
+| Prefetch | an application-launch record for one executable path, with files the prefetcher referenced | `execution/prefetch` |
+| UserAssist | shell-associated activity in one profile's hive | `execution/userassist` |
+| BAM and DAM | per-SID last-execution values, where the build keeps them | `execution/userassist` |
+| Amcache | an inventory of applications and files (presence) | `execution/amcache` |
+| ShimCache | an observation by the compatibility cache | `execution/amcache` |
+| SRUM | aggregated resource accounting | `execution/srum` |
+| Event 4688, Sysmon 1 | process creation, when collected and configured | `logs/security` |
+| PowerShell 4104 | script-block content that was logged | `logs/powershell` |
+| A shadow copy | an earlier state of a source, not another execution mechanism | `filesystem/shadowcopies` |
 
-Read that table as a ladder of confidence. Prefetch and UserAssist are the
-strongest; ShimCache is the weakest, because a file can enter it without ever
-running.
+The pack has no decoder for UserAssist, BAM/DAM or ShimCache values: read them as
+bytes and say the method (`execution/userassist`, `execution/amcache`).
 
-Two traps worth naming before you start:
+Event 4688 and Sysmon event 1 exist only where auditing or the Sysmon service was
+installed and configured before the event: record the provider, its version and its
+configuration with the record (`logs/security`).
 
-- Absence is not absence of execution. Prefetch is disabled on servers and on
-  some SSD configurations, and a deleted prefetch file leaves only its record.
-- Presence with a run count of one and no other corroboration is worth a
-  sentence, not a conclusion.
+**Weigh evidence by what it can support, not by a fixed ranking or a count.** A
+valid process-creation record that parsed cleanly can establish that a process
+started; it does not establish that its intended action completed. One well-supported
+record can stand. Three artefacts that share an origin (the same hive, a copy in a
+shadow copy, parsers that share a decoder) are one source. When a conclusion is
+material, look for a source that does not depend on the first, and say what the
+two do and do not have in common.
 
-A renamed binary breaks the naive path match. Match on hash and on the prefetch
-hash suffix, not on the name. In the published workshop case a tool had been
-renamed before it was run, which is why no prefetch existed under its real name
-and why the answer was found under the new one.
+**Their clocks differ.** Each source has its own epoch, zone, resolution and event: a
+launch recorded by the prefetcher, a shell launch, a per-SID last-run value and an
+inventory write are not one moment. Do not reconcile them to the second without
+saying what each timestamp is. Say the clock and zone of each.
+
+**A renamed or relocated executable.** Identify a binary by its content hash where
+the bytes exist, and correlate file references, rename history, cached paths and
+process records. A name or a path in an artefact is a label the artefact carries.
+If the bytes are gone, say the identification is an inference and keep the
+alternatives.
+
+**Say which mechanism you are claiming** (started from the shell, by a service, by a
+task, by another process) and which account: an account or SID is a context, not a
+person (`accounts/logons`).
+
+**Absence is bounded.** Write "No evidence of execution of X was found in <sources>,
+<interval>", and say the detection opportunity: was the source enabled and
+configured, does its retained interval cover the time, was it acquired whole and
+parsed without partial results (`status`), and could it have been altered or
+cleared. A missing Prefetch file is not an execution negative until the build, the
+prefetcher's configuration, its service state and the collection are established;
+do not infer them from a Server edition or an SSD.
+
+**Does not show.** From any single execution artefact: who operated the machine,
+that the program finished or had an effect, that it was the only run, or that a
+program with no entry did not run.
