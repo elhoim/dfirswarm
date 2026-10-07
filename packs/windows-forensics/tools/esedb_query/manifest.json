@@ -1,6 +1,6 @@
 {
   "name": "esedb_query",
-  "description": "Read an ESE database (WebCacheV01.dat, SRUDB.dat, spartan.edb) as tables via esedbexport. Lists the tables, or returns the rows of one.",
+  "description": "Read an ESE database (WebCacheV01.dat, SRUDB.dat, spartan.edb) as TABLES through esedbexport: list the tables, or return the rows of one, each row numbered by its position in the exported file. It exports tables as text and decodes nothing: a SRUM table is not joined to the application or user it names, a WebCache container is not resolved, and an ESE log is not read. The export is made once per database into esedb-export/<db sha256, first 16 hex>/ under the job's $OUT (or the agent's work directory), with the exporter's whole stdout and stderr in files beside it and an export-manifest.json (database digest, exporter version, argv, exit status, every table file); a complete export is reused by later calls. An exporter that exits non-zero or is stopped by export_timeout_seconds leaves a PARTIAL export: status partial, complete false, the tables listed only as tables_in_partial_export, never as the database's tables. A table name that matches more than one export file is refused with the candidates. A column name that repeats is numbered, and a cell of any size is kept whole.",
   "params": {
     "path": {
       "type": "string",
@@ -12,15 +12,38 @@
     },
     "limit": {
       "type": "integer",
-      "description": "Maximum rows to return (default 200, cap 20000)"
+      "description": "Rows shown inline (default 200, at most 20000, an inline page size); every row is kept, and when there are more the whole list is written as JSON Lines and named in all_results"
+    },
+    "export_timeout_seconds": {
+      "type": "integer",
+      "description": "How long to let esedbexport run (default 240); a run that is stopped keeps what it wrote and the answer says partial"
     }
   },
   "runtime": "python3",
   "entry": "run.py",
-  "timeout_seconds": 120,
+  "timeout_seconds": 300,
   "example": "{\"path\": \"work/extracted/WebCacheV01.dat\", \"table\": \"Containers\", \"limit\": 50}",
   "by": "maintainer",
-  "at": "2026-09-20T12:00:00.000Z",
-  "version": 3,
-  "sha256": "d85fe7283d3c62636ece8e7247cc9fcb79bee3bcb15bd306d03572b129a8969d"
+  "at": "2026-10-07T12:00:00.000Z",
+  "version": 4,
+  "sha256": "017f6cae1158cb168465e5e6811023dbeb22bdfa5828469089ff299bcd062740",
+  "use": {
+    "extensions": [
+      ".edb"
+    ],
+    "magic": [
+      {
+        "offset": 4,
+        "hex": "efcdab89"
+      }
+    ],
+    "names": [
+      "WebCacheV01.dat",
+      "SRUDB.dat",
+      "spartan.edb"
+    ]
+  },
+  "requires": [
+    "esedbexport"
+  ]
 }

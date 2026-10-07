@@ -1062,3 +1062,273 @@ test("yara_scan against the installed yara: the matched bytes stay out of the an
     assert.equal(run.stdout.includes("Summer2024"), false);
   });
 });
+
+// --- esedb_query ----------------------------------------------------------------
+
+type EseOut = {
+  status: string;
+  complete: boolean;
+  exporter_exit_status: number;
+  exporter_version: string | null;
+  timed_out: boolean;
+  export_reused: boolean;
+  stdout_file: string;
+  stderr_file: string;
+  tables?: string[];
+  tables_in_partial_export?: string[];
+  warning?: string;
+  table?: string;
+  columns?: string[];
+  duplicate_columns_renamed?: string[];
+  rows?: Array<Record<string, string | number>>;
+  row_count?: number;
+  candidates?: string[];
+  db_sha256: string;
+};
+
+/** esedbexport as libesedb's utility behaves: `esedbexport -t <root> <db>` writes <root>.export/<table>.<index>, tab separated, and `-V` prints a version. */
+const ESEDBEXPORT_STUB = (body: string): string => `
+if [ "$1" = "-V" ]; then echo "esedbexport 20231020"; exit 0; fi
+root="$2"
+echo run >> "$COUNT_FILE"
+mkdir -p "$root.export"
+${body}
+`;
+
+test("esedb_query does not turn a failed export into a clean table listing: status partial, the exporter's output kept whole in files", async () => {
+  // An export directory that existed was taken for success whatever the exporter's exit status, so a
+  // run that died after one table listed that table as the database's contents.
+  await withCwd(async (cwd, bin) => {
+    await stub(bin, "esedbexport", ESEDBEXPORT_STUB(`printf 'ContainerId\\tName\\n1\\tContent\\n' > "$root.export/Containers.4"\necho "libesedb: unable to open table 7: page checksum mismatch" >&2\necho "exporting table 1 of 12" \nexit 1`));
+    await writeFile(join(cwd, "work", "WebCacheV01.dat"), "ESE stand-in");
+    const out = body<EseOut>(await tool("esedb_query", cwd, { path: "work/WebCacheV01.dat" }, { COUNT_FILE: join(cwd, "count") }, bin));
+    assert.equal(out.status, "partial");
+    assert.equal(out.complete, false);
+    assert.equal(out.exporter_exit_status, 1);
+    assert.equal(out.exporter_version, "esedbexport 20231020");
+    assert.equal(out.tables, undefined, "a partial export is never listed as the database's tables");
+    assert.deepEqual(out.tables_in_partial_export, ["Containers"]);
+    assert.match(out.warning ?? "", /PARTIAL export/);
+    assert.match(await readFile(join(cwd, out.stderr_file), "utf8"), /page checksum mismatch/);
+    assert.match(await readFile(join(cwd, out.stdout_file), "utf8"), /exporting table 1 of 12/);
+    // Reading from it is allowed, and says so on every answer.
+    const one = body<EseOut>(await tool("esedb_query", cwd, { path: "work/WebCacheV01.dat", table: "Containers" }, { COUNT_FILE: join(cwd, "count") }, bin));
+    assert.equal(one.status, "partial");
+    assert.equal(one.rows?.[0].Name, "Content");
+  });
+});
+
+test("esedb_query refuses a table name that matches two export files and lists them, and reads one by its file name", async () => {
+  // `hits[0]` took the first of the matches without a word.
+  await withCwd(async (cwd, bin) => {
+    await stub(bin, "esedbexport", ESEDBEXPORT_STUB(`printf 'Id\\tName\\n1\\tfirst\\n' > "$root.export/Containers.4"\nprintf 'Id\\tName\\n2\\tsecond\\n' > "$root.export/Containers.12"`));
+    await writeFile(join(cwd, "work", "WebCacheV01.dat"), "ESE stand-in");
+    const env = { COUNT_FILE: join(cwd, "count") };
+    const err = failed(await tool("esedb_query", cwd, { path: "work/WebCacheV01.dat", table: "Containers" }, env, bin));
+    assert.match(err.error, /more than one export file/);
+    assert.deepEqual(err.candidates, ["Containers.12", "Containers.4"]);
+    const second = body<EseOut>(await tool("esedb_query", cwd, { path: "work/WebCacheV01.dat", table: "Containers.12" }, env, bin));
+    assert.equal(second.rows?.[0].Name, "second");
+  });
+});
+
+test("esedb_query exports a database once, keeps the export under its digest, and reuses it for the next call", async () => {
+  // The whole database was exported into a temp directory on every call, even to list the tables, and deleted.
+  await withCwd(async (cwd, bin) => {
+    await stub(bin, "esedbexport", ESEDBEXPORT_STUB(`printf 'Id\\tName\\n1\\ta\\n' > "$root.export/T.0"`));
+    await writeFile(join(cwd, "work", "SRUDB.dat"), "ESE stand-in");
+    const env = { COUNT_FILE: join(cwd, "count") };
+    const first = body<EseOut>(await tool("esedb_query", cwd, { path: "work/SRUDB.dat" }, env, bin));
+    const second = body<EseOut>(await tool("esedb_query", cwd, { path: "work/SRUDB.dat", table: "T" }, env, bin));
+    assert.equal(first.export_reused, false);
+    assert.equal(second.export_reused, true);
+    assert.equal((await readFile(join(cwd, "count"), "utf8")).trim().split("\n").length, 1, "the exporter ran once");
+    assert.match(first.db_sha256, /^[0-9a-f]{64}$/);
+    const manifest = JSON.parse(await readFile(join(cwd, "work", "s1", "esedb-export", first.db_sha256.slice(0, 16), "export-manifest.json"), "utf8")) as { db_sha256: string; exporter_exit_status: number; files: Record<string, unknown> };
+    assert.equal(manifest.db_sha256, first.db_sha256);
+    assert.equal(manifest.exporter_exit_status, 0);
+    assert.deepEqual(Object.keys(manifest.files), ["T.0"]);
+    // Changed bytes are another export.
+    await writeFile(join(cwd, "work", "SRUDB.dat"), "ESE stand-in, changed");
+    const third = body<EseOut>(await tool("esedb_query", cwd, { path: "work/SRUDB.dat" }, env, bin));
+    assert.equal(third.export_reused, false);
+  });
+});
+
+test("esedb_query numbers every row, keeps columns that share a name apart, and keeps a cell of any size whole", async () => {
+  await withCwd(async (cwd, bin) => {
+    const big = "x".repeat(2_000_000);
+    await stub(bin, "esedbexport", ESEDBEXPORT_STUB(`printf 'Id\\tName\\tName\\n1\\ta\\tb\\n2\\tc\\t${big}\\n' > "$root.export/Dup.2"`));
+    await writeFile(join(cwd, "work", "x.edb"), "ESE stand-in");
+    const out = body<EseOut>(await tool("esedb_query", cwd, { path: "work/x.edb", table: "Dup" }, { COUNT_FILE: join(cwd, "count") }, bin));
+    assert.deepEqual(out.columns, ["Id", "Name", "Name"]);
+    assert.deepEqual(out.duplicate_columns_renamed, ["Name_2"]);
+    assert.deepEqual(out.rows?.map((r) => r._row), [1, 2]);
+    assert.equal(out.rows?.[0].Name_2, "b");
+    assert.equal((out.rows?.[1].Name_2 as string).length, 2_000_000);
+  });
+});
+
+test("esedb_query keeps what a time-limited export wrote and says it was stopped", async () => {
+  await withCwd(async (cwd, bin) => {
+    await stub(bin, "esedbexport", ESEDBEXPORT_STUB(`printf 'Id\\n1\\n' > "$root.export/Part.0"\nsleep 30`));
+    await writeFile(join(cwd, "work", "x.edb"), "ESE stand-in");
+    const started = Date.now();
+    const out = body<EseOut>(await tool("esedb_query", cwd, { path: "work/x.edb", export_timeout_seconds: 1 }, { COUNT_FILE: join(cwd, "count") }, bin));
+    assert.ok(Date.now() - started < 20_000);
+    assert.equal(out.status, "partial");
+    assert.equal(out.timed_out, true);
+    assert.deepEqual(out.tables_in_partial_export, ["Part"]);
+    // A partial export is not reused as a complete one: the next call exports again.
+    const again = body<EseOut>(await tool("esedb_query", cwd, { path: "work/x.edb", export_timeout_seconds: 1 }, { COUNT_FILE: join(cwd, "count") }, bin));
+    assert.equal(again.export_reused, false);
+  });
+});
+
+// --- sigma_hunt -----------------------------------------------------------------
+
+type Detection = { rule: string; level: string | null; level_rank: number | null; record_id: number | null; time: string | null };
+type HuntOut = {
+  status: string;
+  complete: boolean;
+  exit_code: number;
+  timed_out: boolean;
+  run_dir: string;
+  engine: string;
+  engine_detections_read: number;
+  detections: Detection[];
+  detection_count: number;
+  below_min_level: number;
+  unknown_levels: Record<string, number>;
+  malformed_lines: number;
+  malformed_file: { path: string; bytes: number } | null;
+  ruleset: { source: string; kind?: string; files?: number; digest: string | null };
+  all_detections: { path: string; rows: number };
+  engine_stderr: { path: string; bytes: number };
+};
+
+/** Hayabusa as it is called here: `hayabusa json-timeline -f|-d <input> -o <out> -w -q`, writing one JSON object per line to <out>. */
+const HAYABUSA_STUB = (lines: string[], tail = ""): string => `
+out=""
+while [ $# -gt 0 ]; do case "$1" in -o) out="$2"; shift;; esac; shift; done
+cat > "$out" <<'JSONL'
+${lines.join("\n")}
+JSONL
+${tail}
+`;
+
+const hb = (title: string, level: string | undefined, id: number, time = "2026-09-01T10:00:00Z"): string =>
+  JSON.stringify({ RuleTitle: title, ...(level === undefined ? {} : { Level: level }), Timestamp: time, EventID: 4688, Channel: "Security", Computer: "WS01", RecordID: id, Details: { Cmd: "x" } });
+
+test("sigma_hunt ranks the level words Hayabusa writes (crit, med, info), and keeps a level it does not know instead of dropping it", async () => {
+  // rank() was 0 for any word but the five full names, so a `crit` or `med` detection was filtered out
+  // by min_level without a word.
+  await withCwd(async (cwd, bin) => {
+    await stub(bin, "hayabusa", HAYABUSA_STUB([
+      hb("Critical rule", "crit", 1, "2026-09-01T10:00:01Z"),
+      hb("Medium rule", "med", 2, "2026-09-01T10:00:02Z"),
+      hb("High rule", "high", 3, "2026-09-01T10:00:03Z"),
+      hb("Info rule", "info", 4),
+      hb("Low rule", "low", 5),
+      hb("Odd rule", "evil", 6, "2026-09-01T10:00:06Z"),
+      hb("Levelless rule", undefined, 7, "2026-09-01T10:00:07Z"),
+    ]));
+    await writeFile(join(cwd, "work", "Security.evtx"), "evtx");
+    const out = body<HuntOut>(await tool("sigma_hunt", cwd, { path: "work/Security.evtx", out_dir: "work/hunt", engine: "hayabusa", min_level: "medium" }, {}, bin));
+    assert.equal(out.status, "complete");
+    assert.equal(out.engine_detections_read, 7);
+    assert.deepEqual(out.detections.map((d) => d.rule), ["Odd rule", "Levelless rule", "Critical rule", "High rule", "Medium rule"], "unknown levels first, then critical down, nothing dropped but what min_level names");
+    assert.deepEqual(out.detections.map((d) => d.level_rank), [null, null, 4, 3, 2]);
+    assert.equal(out.below_min_level, 2, "info and low are below medium, and counted");
+    assert.deepEqual(out.unknown_levels, { evil: 1, "(no level)": 1 });
+    assert.equal(out.detection_count, 5);
+    assert.equal(out.all_detections.rows, 5);
+  });
+});
+
+test("sigma_hunt marks a run whose engine exited non-zero partial, and never reads an earlier run's result in its place", async () => {
+  // It accepted any result file in out_dir whatever the engine's exit status, so an engine that failed
+  // could be answered with the file an earlier invocation left.
+  await withCwd(async (cwd, bin) => {
+    await writeFile(join(cwd, "work", "Security.evtx"), "evtx");
+    await stub(bin, "hayabusa", HAYABUSA_STUB([hb("First run", "high", 1)]));
+    const first = body<HuntOut>(await tool("sigma_hunt", cwd, { path: "work/Security.evtx", out_dir: "work/hunt", engine: "hayabusa" }, {}, bin));
+    assert.equal(first.status, "complete");
+    // The engine now writes nothing and exits 0: the old result is not this run's.
+    await stub(bin, "hayabusa", "exit 0");
+    const stale = failed(await tool("sigma_hunt", cwd, { path: "work/Security.evtx", out_dir: "work/hunt", engine: "hayabusa" }, {}, bin));
+    assert.match(stale.error, /wrote no result file/);
+    // An engine that leaves a result and then fails is a partial run, with its exit status.
+    await stub(bin, "hayabusa", HAYABUSA_STUB([hb("Second run", "high", 2)], `echo "engine: could not read channel Microsoft-Windows-X" >&2\nexit 3`));
+    const partial = body<HuntOut>(await tool("sigma_hunt", cwd, { path: "work/Security.evtx", out_dir: "work/hunt", engine: "hayabusa" }, {}, bin));
+    assert.equal(partial.status, "partial");
+    assert.equal(partial.complete, false);
+    assert.equal(partial.exit_code, 3);
+    assert.deepEqual(partial.detections.map((d) => d.rule), ["Second run"]);
+    assert.notEqual(partial.run_dir, first.run_dir, "each invocation has a directory of its own");
+    assert.match(await readFile(join(cwd, partial.engine_stderr.path), "utf8"), /could not read channel/);
+  });
+});
+
+test("sigma_hunt counts a line of the engine's result it cannot read, keeps it whole in a file, and says the run is partial", async () => {
+  // A malformed JSON Lines row was passed over with `continue`: the detection it held was never counted.
+  await withCwd(async (cwd, bin) => {
+    const broken = '{"RuleTitle": "Cut off", "Level": "high", "Timestamp": "2026-09-01T1';
+    await stub(bin, "hayabusa", HAYABUSA_STUB([hb("Good one", "high", 1), broken, hb("Good two", "high", 2, "2026-09-01T10:00:02Z")]));
+    await writeFile(join(cwd, "work", "Security.evtx"), "evtx");
+    const out = body<HuntOut>(await tool("sigma_hunt", cwd, { path: "work/Security.evtx", out_dir: "work/hunt", engine: "hayabusa" }, {}, bin));
+    assert.equal(out.status, "partial");
+    assert.equal(out.malformed_lines, 1);
+    assert.equal(out.engine_detections_read, 2);
+    assert.ok(out.malformed_file);
+    assert.match(await readFile(join(cwd, out.malformed_file.path), "utf8"), /line 2\t\{"RuleTitle": "Cut off"/);
+  });
+});
+
+test("sigma_hunt reads Hayabusa's pretty-printed objects as a stream, and records the ruleset's digest", async () => {
+  await withCwd(async (cwd, bin) => {
+    await writeFile(join(cwd, "work", "Security.evtx"), "evtx");
+    // Objects written one after another across lines (Hayabusa's default JSON timeline), not one per line.
+    const pretty = [hb("A", "high", 1), hb("B", "critical", 2)].map((o) => JSON.stringify(JSON.parse(o), null, 2)).join("\n");
+    await stub(bin, "hayabusa", HAYABUSA_STUB([pretty]));
+    await mkdir(join(cwd, "work", "rules", "sub"), { recursive: true });
+    await writeFile(join(cwd, "work", "rules", "a.yml"), "title: a\n");
+    await writeFile(join(cwd, "work", "rules", "sub", "b.yml"), "title: b\n");
+    const run = body<HuntOut>(await tool("sigma_hunt", cwd, { path: "work/Security.evtx", out_dir: "work/hunt", engine: "hayabusa", rules: "work/rules" }, {}, bin));
+    assert.deepEqual(run.detections.map((d) => d.rule), ["B", "A"]);
+    assert.equal(run.status, "complete");
+    assert.equal(run.ruleset.kind, "directory");
+    assert.equal(run.ruleset.files, 2);
+    assert.match(run.ruleset.digest ?? "", /^[0-9a-f]{64}$/);
+    const noRules = body<HuntOut>(await tool("sigma_hunt", cwd, { path: "work/Security.evtx", out_dir: "work/hunt", engine: "hayabusa" }, {}, bin));
+    assert.equal(noRules.ruleset.digest, null);
+    assert.match(noRules.ruleset.source, /bundled rules/);
+  });
+});
+
+test("sigma_hunt's merge sort orders detections by level and time across runs of rows spilled to disk", async () => {
+  // The normalised detections were built and sorted whole in memory; they are now a bounded-memory merge.
+  await withCwd(async (cwd) => {
+    const out = py(
+      [
+        "import importlib.util, json, os, sys, random",
+        "spec = importlib.util.spec_from_file_location('sh', sys.argv[1]); sh = importlib.util.module_from_spec(spec); spec.loader.exec_module(sh)",
+        "sh.SORT_RUN_BYTES = 300",
+        "random.seed(3)",
+        "rows = [(random.choice([None, 0, 1, 2, 3, 4]), '2026-09-01T10:%02d:00Z' % random.randrange(60), i) for i in range(400)]",
+        "s = sh.Sorted(sys.argv[2])",
+        "for lvl, t, i in rows: s.add({'rule': 'r%d' % i, 'time': t, 'level_rank': lvl}, lvl)",
+        "first, count = s.write(os.path.join(sys.argv[2], 'out.jsonl'), 5)",
+        "got = [json.loads(l) for l in open(os.path.join(sys.argv[2], 'out.jsonl'))]",
+        "want = sorted(rows, key=lambda r: (0 if r[0] is None else 1 + (4 - r[0]), r[1], r[2]))",
+        "assert count == 400 and len(got) == 400 and len(first) == 5",
+        "assert [g['rule'] for g in got] == ['r%d' % w[2] for w in want]",
+        "assert len([n for n in os.listdir(sys.argv[2]) if n.startswith('.sort-')]) == 0",
+        "print('ok')",
+      ].join("\n"),
+      join(WIN, "sigma_hunt", "run.py"),
+      join(cwd, "work"),
+    );
+    assert.equal(out.trim(), "ok");
+  });
+});

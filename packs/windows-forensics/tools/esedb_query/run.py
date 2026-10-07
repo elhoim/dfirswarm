@@ -9,9 +9,20 @@ SRUDB.dat (the System Resource Usage Monitor) and Edge's database, so one
 tool covers three artefacts that a Windows case asks for every time.
 
 Backed by `esedbexport` (libesedb), which writes one TSV per table into a
-directory. This wraps it: list the tables, or read one with a row cap, and
-return JSON either way. It never leaves its export behind in a place the
-caller did not ask for.
+directory. This wraps it: list the tables, or read one, and return JSON either
+way. It exports TABLES, as text: it does not decode what a table means (a SRUM
+table is not joined to the application or user it names, a WebCache container
+is not resolved to a browser), and it does not read an ESE log.
+
+The export is made once per database, into `esedb-export/<sha256 of the database,
+first 16 hex>/` under the job's $OUT (or the agent's own work directory), with the
+exporter's whole standard output and standard error in files beside it and an
+`export-manifest.json` that records the database's digest, the exporter's version, argv
+and exit status and every table file. A later call with the same database reuses a
+complete export. An exporter that exits non-zero, or is stopped by its time limit, leaves a
+PARTIAL export: the answer says status: partial, never lists it as the database's tables,
+and keeps the logs. A table name that matches more than one export file is refused with
+the candidates, never resolved by taking the first.
 """
 import csv
 import json
@@ -99,9 +110,105 @@ class LosslessPage:
         return result
 
 
+PARSER = "esedb_query/4"
+
+
 def fail(message, **extra):
     print(json.dumps({"error": message, **extra}))
     raise SystemExit(1)
+
+
+def work_root():
+    """Where exports live, and the name they are cited by: $OUT/esedb-export in a job, else the agent's own directory."""
+    out, job = os.environ.get("OUT"), os.environ.get("JOB_ID")
+    if job and out:
+        return Path(out) / "esedb-export", "store/jobs/%s/out/esedb-export" % re.sub(r"[^A-Za-z0-9_.-]", "_", job)
+    d = Path("work") / re.sub(r"[^A-Za-z0-9_.-]", "_", os.environ.get("AGENT_ID") or "tool") / "esedb-export"
+    return d, str(d)
+
+
+def sha256_of(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def exporter_version():
+    try:
+        p = subprocess.run(["esedbexport", "-V"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=10)
+        lines = p.stdout.decode("utf-8", "replace").strip().splitlines()
+        return lines[0].strip() if p.returncode == 0 and lines else None
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+def table_files(export):
+    """The export's files, by table name. libesedb names each export file <table>.<its index>
+    (Containers.4, Container_1.6): the table is the part before the index, the name an agent
+    knows it by."""
+    files = {}
+    for f in sorted(os.listdir(export)):
+        if os.path.isfile(os.path.join(export, f)):
+            base = f[: -len(".csv")] if f.endswith(".csv") else f
+            m = re.fullmatch(r"(.+)\.(\d+)", base)
+            files[f] = m.group(1) if m else base
+    return files
+
+
+def make_export(path, digest, timeout, root):
+    """Run esedbexport once into root/<digest[:16]>/, or reuse a complete export of the same bytes.
+    Returns (record, reused). The record is the export-manifest.json content."""
+    base = root / digest[:16]
+    manifest_path = base / "export-manifest.json"
+    if manifest_path.is_file():
+        try:
+            record = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if record.get("db_sha256") == digest and record.get("exporter_exit_status") == 0 and not record.get("timed_out") \
+                    and os.path.isdir(str(base / "db.export")):
+                return record, True
+        except (OSError, ValueError):
+            pass
+        shutil.rmtree(base, ignore_errors=True)       # a partial or unreadable earlier export is made again
+    base.mkdir(parents=True, exist_ok=True)
+    target = str(base / "db")
+    out_file, err_file = base / "esedbexport.stdout.txt", base / "esedbexport.stderr.txt"
+    # -t names the export root; libesedb appends ".export". No -q: the esedbexport Debian
+    # ships (20181229) has none, and refused the call.
+    argv = ["esedbexport", "-t", target, path]
+    timed_out = False
+    with open(out_file, "wb") as so, open(err_file, "wb") as se:
+        proc = subprocess.Popen(argv, stdout=so, stderr=se, stdin=subprocess.DEVNULL, start_new_session=True)
+        try:
+            rc = proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            try:
+                os.killpg(proc.pid, 9)
+            except (OSError, ProcessLookupError):
+                pass
+            rc = proc.wait()
+    export = target + ".export"
+    files = {}
+    if os.path.isdir(export):
+        files = {f: {"table": t, "bytes": os.path.getsize(os.path.join(export, f))} for f, t in table_files(export).items()}
+    record = {
+        "parser": PARSER,
+        "db": path,
+        "db_bytes": os.path.getsize(path),
+        "db_sha256": digest,
+        "exporter_argv": argv,
+        "exporter_version": exporter_version(),
+        "exporter_exit_status": rc,
+        "timed_out": timed_out,
+        "export_dir": "db.export" if os.path.isdir(export) else None,
+        "stdout_file": out_file.name,
+        "stderr_file": err_file.name,
+        "files": files,
+    }
+    manifest_path.write_text(json.dumps(record, indent=2), encoding="utf-8")
+    return record, False
 
 
 def main():
@@ -123,6 +230,9 @@ def main():
     if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
         fail("limit must be a positive integer", limit=args.get("limit"))
     limit = min(limit, 20000)
+    timeout = args.get("export_timeout_seconds", 240)
+    if not isinstance(timeout, int) or isinstance(timeout, bool) or timeout < 1:
+        fail("export_timeout_seconds must be a positive integer", export_timeout_seconds=args.get("export_timeout_seconds"))
 
     if shutil.which("esedbexport") is None:
         fail(
@@ -131,74 +241,102 @@ def main():
             "scripts/toolbox.sh reports it with the dfir set",
         )
 
-    out = tempfile.mkdtemp(prefix="esedb-")
-    try:
-        # -t names the export root; libesedb appends ".export". No -q: the
-        # esedbexport Debian ships (20181229) has none, and refused the call.
-        target = os.path.join(out, "db")
-        proc = subprocess.run(
-            ["esedbexport", "-t", target, path],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        export = target + ".export"
-        if not os.path.isdir(export):
-            fail(
-                "esedbexport produced no tables",
-                status=proc.returncode,
-                stderr=proc.stderr.decode("utf-8", "replace").strip()[:2000],
-            )
+    root, shown_root = work_root()
+    full = sha256_of(path)
+    digest = full[:16]
+    # The directory is named by the first 16 hex digits; the manifest holds the whole digest.
+    record, reused = make_export(path, full, timeout, root)
+    base = root / digest
+    export = base / "db.export"
+    shown = "%s/%s" % (shown_root, digest)
+    complete = record["exporter_exit_status"] == 0 and not record["timed_out"]
+    logs = {"stdout_file": "%s/%s" % (shown, record["stdout_file"]), "stderr_file": "%s/%s" % (shown, record["stderr_file"])}
+    stderr_text = (base / record["stderr_file"]).read_text(encoding="utf-8", errors="replace")
+    common = {
+        "parser": PARSER,
+        "path": path,
+        "db_sha256": full,
+        "exporter_version": record["exporter_version"],
+        "exporter_exit_status": record["exporter_exit_status"],
+        "timed_out": record["timed_out"],
+        "export_reused": reused,
+        "export_manifest": "%s/export-manifest.json" % shown,
+        "export_dir": "%s/db.export" % shown,
+        **logs,
+    }
+    if not os.path.isdir(str(export)) or not record["files"]:
+        fail("esedbexport produced no tables",
+             **{**common, "status": "failed", "stderr_first_lines": stderr_text.strip().splitlines()[:10]})
 
-        # libesedb names each export file <table>.<its index> (Containers.4,
-        # Container_1.6): the table is the part before the index, the name
-        # an agent knows it by. Taking the whole file name made every
-        # table=Container_1 "no such table" in a real run.
-        files = {}
-        for f in os.listdir(export):
-            if os.path.isfile(os.path.join(export, f)):
-                base = f[: -len(".csv")] if f.endswith(".csv") else f
-                m = re.fullmatch(r"(.+)\.(\d+)", base)
-                files[f] = m.group(1) if m else base
-        names = sorted(set(files.values()))
-        if table is None:
-            sizes = {}
-            for f, name in files.items():
-                sizes[name] = sizes.get(name, 0) + os.path.getsize(os.path.join(export, f))
-            print(json.dumps({
-                "path": path,
-                "tables": names,
-                "table_count": len(names),
-                "bytes_per_table": sizes,
-                "hint": "call again with table=<name> to read one",
-            }, indent=2))
-            return
+    files = {f: v["table"] for f, v in record["files"].items()}
+    names = sorted(set(files.values()))
+    if not complete:
+        common.update({
+            "status": "partial",
+            "complete": False,
+            "warning": "esedbexport %s: this is a PARTIAL export, and a table missing from it, or short, is not absent from the database; "
+                       "the exporter's own output is in stdout_file and stderr_file" % ("was stopped by its time limit" if record["timed_out"] else "exited with status %s" % record["exporter_exit_status"]),
+            "stderr_first_lines": stderr_text.strip().splitlines()[:10],
+        })
+    else:
+        common.update({"status": "complete", "complete": True})
 
-        # By its name, or by the export file's own name (index and all).
-        wanted = table.lower()
-        hits = sorted(f for f, name in files.items() if wanted in (name.lower(), f.lower(), f.lower().removesuffix(".csv")))
-        if not hits:
-            fail("no such table", table=table, tables=names)
-        chosen = files[hits[0]]
-        # Tab-separated, whatever the extension says.
-        src = os.path.join(export, hits[0])
-
-        rows = LosslessPage("esedb_query", [path, table, hits[0]], limit)
-        with open(src, "r", encoding="utf-8", errors="replace", newline="") as fh:
-            reader = csv.reader(fh, delimiter="\t")
-            header = next(reader, [])
-            for row in reader:
-                rows.add({header[i] if i < len(header) else f"col{i}": v for i, v in enumerate(row)})
-        page = rows.finish()
+    if table is None:
+        sizes = {}
+        for f, name in files.items():
+            sizes[name] = sizes.get(name, 0) + record["files"][f]["bytes"]
+        listing = {"tables_in_partial_export" if not complete else "tables": names}
         print(json.dumps({
-            "path": path,
-            "table": chosen,
-            "columns": header,
-            "rows": rows.page,
-            "row_count": page["matched"],
-            **page,
+            **common,
+            **listing,
+            "table_count": len(names),
+            "bytes_per_table": sizes,
+            "files": {f: v["bytes"] for f, v in record["files"].items()},
+            "hint": "call again with table=<name> to read one; the export is kept and reused",
         }, indent=2))
-    finally:
-        shutil.rmtree(out, ignore_errors=True)
+        return
+
+    # By its name, or by the export file's own name (index and all).
+    wanted = table.lower()
+    exact = sorted(f for f in files if wanted in (f.lower(), f.lower().removesuffix(".csv")))
+    hits = exact or sorted(f for f, name in files.items() if name.lower() == wanted)
+    if not hits:
+        fail("no such table", table=table, tables=names, **{k: common[k] for k in ("status", "complete")})
+    if len(hits) > 1:
+        fail("the table name matches more than one export file; name one of them", table=table, candidates=hits)
+    chosen = files[hits[0]]
+    # Tab-separated, whatever the extension says.
+    src = str(export / hits[0])
+
+    # A cell can be megabytes (a SRUM or WebCache blob): the reader's default field limit would stop on it.
+    csv.field_size_limit(min(sys.maxsize, 2 ** 31 - 1))
+    rows = LosslessPage("esedb_query", [path, table, hits[0], full], limit)
+    with open(src, "r", encoding="utf-8", errors="replace", newline="") as fh:
+        reader = csv.reader(fh, delimiter="\t")
+        header = next(reader, [])
+        # Two columns of one name would overwrite each other in a row; the later ones are numbered.
+        names_seen, columns = {}, []
+        for h in header:
+            names_seen[h] = names_seen.get(h, 0) + 1
+            columns.append(h if names_seen[h] == 1 else "%s_%d" % (h, names_seen[h]))
+        renamed = [c for c, h in zip(columns, header) if c != h]
+        ordinal = 0
+        for row in reader:
+            ordinal += 1
+            cells = {columns[i] if i < len(columns) else "col%d" % i: v for i, v in enumerate(row)}
+            rows.add({"_row": ordinal, **cells})
+    page = rows.finish()
+    print(json.dumps({
+        **common,
+        "table": chosen,
+        "export_file": hits[0],
+        "columns": header,
+        "duplicate_columns_renamed": renamed,
+        "rows": rows.page,
+        "row_count": page["matched"],
+        "row_ordinals": "_row is the 1-based position of the row in the exported table file",
+        **page,
+    }, indent=2))
 
 
 if __name__ == "__main__":

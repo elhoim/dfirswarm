@@ -1,6 +1,6 @@
 {
   "name": "sigma_hunt",
-  "description": "Run a Sigma ruleset over event logs with whichever engine the host has (Zircolite or Hayabusa) and return normalised detections: rule, level, time, event id, channel and the matching record. A detection is a hypothesis; the record it points at is the evidence.",
+  "description": "Run a Sigma ruleset over event logs with one engine the host has (Zircolite or Hayabusa; either is enough) and return normalised detections: rule, level, time, event id, channel, record id and the matching record. A detection is a hypothesis; the record it points at is the evidence. Each invocation writes to a directory of its own under out_dir (hunt-<UTC time>-<id>), so an earlier run's result is never read as this one's. The engine's exit status is judged: a non-zero status, a stop by timeout_seconds, or a line of its result that cannot be read makes the run PARTIAL (status, complete, exit_code, malformed_lines with the lines kept whole in a file). The result is read as a stream and normalised into detections.jsonl, sorted by level and time with a bounded-memory merge. The level words each engine writes are ranked (Hayabusa's crit, med and info among them); a detection whose level is not known is kept, shown first and counted under unknown_levels, never dropped by min_level. The ruleset you name is recorded by digest and the engine's version is recorded where it prints one; without a ruleset the engine's bundled rules are used and not recorded. The engine's whole stdout, stderr and logs are kept in files it names.",
   "params": {
     "path": {
       "type": "string",
@@ -8,7 +8,7 @@
     },
     "engine": {
       "type": "string",
-      "description": "auto (default), zircolite or hayabusa"
+      "description": "auto (default; Zircolite when both are present), zircolite or hayabusa"
     },
     "rules": {
       "type": "string",
@@ -16,15 +16,15 @@
     },
     "min_level": {
       "type": "string",
-      "description": "informational, low, medium, high or critical (default medium)"
+      "description": "informational, low, medium, high or critical (default medium); a detection with a level that is not one of these (or none) is kept and counted under unknown_levels"
     },
     "out_dir": {
       "type": "string",
-      "description": "Where the engine's own output, its whole stdout and stderr, and every detection are kept, under work/"
+      "description": "A directory under work/; each run writes into hunt-<UTC time>-<id> inside it: the engine's result, its whole stdout and stderr, its logs, every detection (detections.jsonl) and any unreadable line"
     },
     "limit": {
       "type": "integer",
-      "description": "Detections to return inline (default 200); all of them, normalised, are in detections.jsonl in out_dir, named in all_detections"
+      "description": "Detections to return inline (default 200, an inline page size); all of them, normalised, are in detections.jsonl in the run directory, named in all_detections"
     },
     "timeout_seconds": {
       "type": "integer",
@@ -36,7 +36,19 @@
   "timeout_seconds": 1200,
   "example": "{\"path\": \"work/extracted/winevt\", \"min_level\": \"high\", \"out_dir\": \"work/hunt\"}",
   "by": "maintainer",
-  "at": "2026-09-22T14:00:00.000Z",
-  "version": 3,
-  "sha256": "2d5dd9088024b6ca46e6ddbec0e4ba3bb1fe7441856a5ebf71696c54496811b7"
+  "at": "2026-10-07T12:00:00.000Z",
+  "version": 4,
+  "sha256": "c3e098338c5942170813a0cb42ba4bb5c24c6f85ffdca45222f3019d926deaaa",
+  "use": {
+    "extensions": [
+      ".evtx"
+    ],
+    "magic": [
+      {
+        "offset": 0,
+        "hex": "456c6646696c6500"
+      }
+    ]
+  },
+  "requires": []
 }

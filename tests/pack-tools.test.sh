@@ -591,13 +591,19 @@ assert "--noexternal" not in d.get("command", ""), d
 det = d["detections"][0]
 assert det["rule"] == "Bitsadmin Download" and det["record_id"] == 7 and det["level"] == "high", det
 ' "$out" || fail "sigma_hunt did not read what Zircolite matched: $out"
-# The engine writes its result inside out_dir: a link left there under the
-# result's name is followed to where it lands, and refused under inputs/.
+# Each run writes into a directory of its own inside out_dir, so a link left in
+# out_dir under the result's old name is never written through (the engine writes
+# beside it, in a name nobody could plant), and an out_dir that is itself a link
+# to a place under inputs/ is refused.
 mkdir -p "$SH/run/inputs" "$SH/run/work/hunt2"; ln -s ../../inputs/planted.json "$SH/run/work/hunt2/zircolite.json"
 out="$(cd "$SH/run" && printf '{"path": "Security.evtx", "out_dir": "work/hunt2", "engine": "zircolite"}' | PATH="$SH/bin:$PATH" "$PY" "$WIN/tools/sigma_hunt/run.py" 2>&1)" \
-  && fail "sigma_hunt let its engine write through a link in out_dir: $out"
-grep -q 'cannot be under inputs/' <<<"$out" && [[ ! -e "$SH/run/inputs/planted.json" ]] || fail "sigma_hunt should refuse a result a link sends under inputs/: $out"
-pass "sigma_hunt runs Zircolite without --noexternal, which Zircolite 3 and later refuse, and reads its detections, and never through a link out of out_dir"
+  || fail "sigma_hunt should run in a directory of its own beside a planted link: $out"
+[[ ! -e "$SH/run/inputs/planted.json" ]] || fail "sigma_hunt let its engine write through a link in out_dir: $out"
+ln -s ../inputs "$SH/run/work/hunt3"
+out="$(cd "$SH/run" && printf '{"path": "Security.evtx", "out_dir": "work/hunt3", "engine": "zircolite"}' | PATH="$SH/bin:$PATH" "$PY" "$WIN/tools/sigma_hunt/run.py" 2>&1)" \
+  && fail "sigma_hunt accepted an out_dir that is a link under inputs/: $out"
+grep -q 'cannot be under inputs/' <<<"$out" || fail "sigma_hunt should refuse an out_dir a link sends under inputs/: $out"
+pass "sigma_hunt runs Zircolite without --noexternal, which Zircolite 3 and later refuse, and reads its detections, in a directory of its own, and never through a link out of out_dir"
 
 # Nothing cut: every field of a matched record (it kept the first 12), every
 # rule that fired (it kept 25), and the engine's own stdout and stderr whole
@@ -669,8 +675,10 @@ chmod u+w "$SH/run"
 "$PY" - "$zc" "$hb" "$SH/run" <<'EOF' || fail "sigma_hunt should keep each engine's log in out_dir and name it: $zc $hb"
 import json, os, sys
 z, h, run = json.loads(sys.argv[1]), json.loads(sys.argv[2]), sys.argv[3]
-assert z["engine_logs"] == ["work/ro-z/zircolite.log"] and os.path.isfile(os.path.join(run, z["engine_logs"][0])), z
-assert h["engine_logs"] == ["work/ro-h/logs/errorlog-20260929_120000.log"], h
+# Each run has a directory of its own under out_dir, and its logs are in it.
+assert z["run_dir"].startswith("work/ro-z/hunt-"), z["run_dir"]
+assert z["engine_logs"] == [z["run_dir"] + "/zircolite.log"] and os.path.isfile(os.path.join(run, z["engine_logs"][0])), z
+assert h["engine_logs"] == [h["run_dir"] + "/logs/errorlog-20260929_120000.log"], h
 assert h["detections"][0]["rule"] == "Hayabusa rule" and h["detections"][0]["record_id"] == 9, h
 EOF
 pass "sigma_hunt keeps Zircolite's log (--logfile) and Hayabusa's error log (run in out_dir) in out_dir, and runs with the run directory read-only"
