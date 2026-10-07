@@ -1,42 +1,75 @@
 {
   "name": "pcap_summary",
-  "description": "Read a pcap or pcapng with no external dependency and return the shape of it: link type, snap length, time range, conversations with bytes and packets each way, grouped per session or per endpoint, top talkers, ports and protocols, and the connection start times a beacon check needs.",
+  "description": "Read a pcap or pcapng with no external dependency and return a census of it: the format and version, an interface table (link type, snap length and time resolution per interface), the pcapng interface statistics blocks (the capturing interface's own drop counters, when the file carries them), the time range (exact to the capture's own tick, raw value beside it), tuple aggregates or endpoint aggregates with bytes_original and bytes_captured kept apart, top talkers and ports, SYN observations (syn_observations counts SYN-only packets; syn_unique removes a SYN sent again with the same sequence number), and the truncation each packet really had (captured shorter than on the wire, by protocol, and the payload bytes that survived). Not measured: TCP connections or sessions (a tuple used again later merges with its earlier use, and a SYN says nothing about a completed handshake), application data delivered, UDP/QUIC or persistent connections as events, packet loss in a classic pcap, the correctness of the capture clock. Blocks of unsupported types, malformed options and frames that are not IP are counted, never dropped silently. A capture that is cut off or corrupt is an error naming the packets read, not a short result. Aggregates spill to SQLite past max_memory_tuples, so memory does not follow the capture; the whole result is kept on disk and named when a page is shorter.",
   "params": {
     "path": {
       "type": "string",
-      "description": "A .pcap or .pcapng file"
+      "description": "A classic pcap or a pcapng file (not a pcapng compressed or packed in another container)"
     },
     "top": {
       "type": "integer",
-      "description": "How many conversations to return inline. When this omits rows, out_dir is required and keeps the complete conversations.tsv. By default every conversation is returned."
+      "description": "Rows shown inline per table (default 200). When more exist the whole table is written as JSON Lines under $OUT/tool-output (work/<agent>/tool-output outside a job) and named in pages.<table>.all_results"
     },
     "host": {
       "type": "string",
-      "description": "Only conversations involving this address"
+      "description": "Only aggregates involving this address, written in any form (IPv6 is compared as an address, not as text)"
     },
     "port": {
       "type": "integer",
-      "description": "Only conversations involving this port"
+      "description": "Only aggregates involving this port"
     },
     "out_dir": {
       "type": "string",
-      "description": "Optional empty directory under work/ for a complete conversations.tsv"
+      "description": "Optional empty directory under work/ (in a job, under $OUT) for the complete tuple_conversations.tsv or endpoint_aggregates.tsv"
     },
-    "with_starts": {
+    "with_syn_times": {
       "type": "boolean",
-      "description": "Include each conversation's connection start times, for beacon_score"
+      "description": "Include every SYN observation's time on each aggregate, for beacon_score (with_starts is accepted as an old name). They are SYN observations, not connection starts"
     },
     "group": {
       "type": "string",
-      "description": "session (default, one row per TCP session) or endpoint (one row per source, destination and service port, which is what a beacon check needs)"
+      "description": "tuple (default; session is the old name for it): one row per sorted pair of (address, port) and protocol; endpoint: one row per pair of addresses and a service port, the port taken from a SYN or a SYN/ACK, or guessed (service_port_basis says which)"
+    },
+    "max_memory_tuples": {
+      "type": "integer",
+      "description": "Aggregates kept in memory before they move to a temporary SQLite file (default 200000); the answer says spilled_to_disk"
     }
   },
   "runtime": "python3",
   "entry": "run.py",
   "timeout_seconds": 600,
-  "example": "{\"path\": \"inputs/capture.pcap\", \"top\": 20, \"out_dir\": \"work/pcap-summary\", \"with_starts\": true}",
+  "example": "{\"path\": \"inputs/capture.pcap\", \"top\": 20, \"out_dir\": \"work/pcap-summary\", \"group\": \"endpoint\", \"with_syn_times\": true}",
   "by": "maintainer",
-  "at": "2026-09-22T19:00:00.000Z",
-  "version": 2,
-  "sha256": "e8e6a66c6fa7c5657141d117d74b8bbf2fe7d0d13afc97a4a306260c4211f49b"
+  "at": "2026-10-07T12:00:00.000Z",
+  "version": 3,
+  "sha256": "045b7819b43c93ed3a2b4bb1d6b9aa3fb7a4cd909d93e73fdabee9e261a92d01",
+  "use": {
+    "extensions": [
+      ".pcap",
+      ".pcapng",
+      ".cap"
+    ],
+    "magic": [
+      {
+        "offset": 0,
+        "hex": "d4c3b2a1"
+      },
+      {
+        "offset": 0,
+        "hex": "a1b2c3d4"
+      },
+      {
+        "offset": 0,
+        "hex": "4d3cb2a1"
+      },
+      {
+        "offset": 0,
+        "hex": "a1b23c4d"
+      },
+      {
+        "offset": 0,
+        "hex": "0a0d0d0a"
+      }
+    ]
+  }
 }

@@ -64,11 +64,11 @@ PY
 summary="$PACK/tools/pcap_summary/run.py"
 for capture in one.pcap little.pcapng big.pcapng; do
   out="$(printf '{"path":"%s/%s","with_starts":true}' "$TMP" "$capture" | python3 "$summary")"
-  jq -e '.packets == 1 and .conversation_count == 1 and .conversations[0].connection_starts == 1' <<<"$out" >/dev/null \
+  jq -e '.packets == 1 and .tuple_conversation_count == 1 and .tuple_conversations[0].syn_observations == 1' <<<"$out" >/dev/null \
     || fail "$capture was not parsed as one TCP SYN: $out"
 done
 little="$(printf '{"path":"%s/little.pcapng"}' "$TMP" | python3 "$summary")"
-jq -e '.first_packet == "2023-11-14T22:13:22.500000Z"' <<<"$little" >/dev/null \
+jq -e '.first_packet == "2023-11-14T22:13:22.500000000Z"' <<<"$little" >/dev/null \
   || fail "pcapng time resolution and offset were not applied: $little"
 if printf '{"path":"%s/one.pcap","top":1}' "$TMP" | python3 "$summary" >/dev/null 2>&1; then
   : # one conversation, so nothing was omitted
@@ -80,10 +80,10 @@ if printf '{"path":"%s/truncated.pcap"}' "$TMP" | python3 "$summary" >/dev/null 
   fail "truncated packet bodies must make pcap_summary fail"
 fi
 same_ip="$(printf '{"path":"%s/same-ip.pcap"}' "$TMP" | python3 "$summary")"
-jq -e '.conversation_count == 1 and .conversations[0].a_to_b_bytes == 54 and .conversations[0].b_to_a_bytes == 54' <<<"$same_ip" >/dev/null \
+jq -e '.tuple_conversation_count == 1 and .tuple_conversations[0].a_to_b_bytes_original == 54 and .tuple_conversations[0].b_to_a_bytes_original == 54' <<<"$same_ip" >/dev/null \
   || fail "same-IP session direction was not distinguished by port: $same_ip"
 same_ip_endpoint="$(printf '{"path":"%s/same-ip.pcap","group":"endpoint"}' "$TMP" | python3 "$summary")"
-jq -e '.conversation_count == 1 and .conversations[0].a_to_b_bytes == 54 and .conversations[0].b_to_a_bytes == 54' <<<"$same_ip_endpoint" >/dev/null \
+jq -e '.endpoint_aggregate_count == 1 and .endpoint_aggregates[0].a_to_b_bytes_original == 54 and .endpoint_aggregates[0].b_to_a_bytes_original == 54' <<<"$same_ip_endpoint" >/dev/null \
   || fail "same-IP endpoint-group direction was not distinguished by port: $same_ip_endpoint"
 simple="$(printf '{"path":"%s/simple-truncated.pcapng"}' "$TMP" | python3 "$summary")"
 jq -e '.packets == 1 and (.notes | any(test("captured shorter")))' <<<"$simple" >/dev/null \
