@@ -1,34 +1,53 @@
 {
   "name": "collection_index",
-  "description": "Build the index the rest of the work needs: every file in a collection with its size, its sha256, the path it has now and the path it had on the machine, undoing the rewrites collectors make — a drive letter turned into a directory, a named stream's colon replaced, a reserved name escaped.",
+  "description": "List every object of a delivered collection: size, modified time (UTC, to the nanosecond the file system holds, with the raw epoch value), the SHA-256 of the whole file, and a hypothesis for the path the file had on the source machine. source_path_hypothesis is a convention's reading of the path in the collection (path, method, confidence low, medium or none, the components it could not explain, the other readings): a guess about a layout, never called the original path; a real root directory is kept, and a wrapper that needs the collector's own index (uploads/<accessor>/...) is not decoded. source_path_observed is filled only from a collector's own record: a KAPE copy log in the tree, when exactly one row's DestinationFile ends with the file's path in the collection (with the log, the row and the log's ModifiedOnUtc raw beside the delivered time); two rows are ambiguous, none is nothing, and no other collector's records are read. A disk image, a memory capture or an archive in the root is indexed like any file and says what it looks like (object_class, from its first bytes and name; nothing is opened). Symbolic links are recorded and never followed, special files are recorded and not read, and every object that could not be listed, examined or read is a row with its error and makes the status partial. The complete census is always in a file (always in a job, with out_file, with a contains filter, and when the inline page cannot hold it); a file already at the name is never replaced (this one is kept beside it as name.2.jsonl and named) and an out_file inside the collection is refused. contains filters the inline page and the hashing only: the file holds every object with matches_filter, and files outside the filter say not_attempted. More than 90% of more than 20 files on one UTC date is reported as mtime_distribution_anomaly with counts and no cause; the collector's recorded times, archive member times and the acquisition time are other clocks, not read here. possible_renamed_streams is a guess from file-name shape; a dropped stream leaves nothing to find. Not measured: whether the tree is complete, whether a time is the source's or the copy's. A name that marks a credential store (may_hold_secrets, a name hint only) is not hashed unless hash_credential_stores is true, refused outside a job: run it as a job with secret_output: true. Paths shaped like a recovery password, an access key, a token, a private-key header or URL user-info are withheld; write_values: true (jobs only) writes the real strings to $OUT/collection-index-values.jsonl, mode 0600, created first, a second run in the same job refused.",
   "params": {
     "root": {
       "type": "string",
-      "description": "The collection directory"
+      "description": "The collection directory (an archive is not opened: extract it into a job's output first)"
     },
     "contains": {
       "type": "string",
-      "description": "Case-insensitive regex over either path"
+      "description": "Case-insensitive regex (at most 2000 characters) over the path in the collection and over the hypothesis path. It filters the inline page and the hashing; the complete index file holds every object"
     },
     "hash": {
       "type": "boolean",
-      "description": "Hash every file (default true; false is much faster on a large tree)"
+      "description": "Hash every matching file (default true; false is much faster on a large tree, and each row then says it was not attempted)"
+    },
+    "hash_credential_stores": {
+      "type": "boolean",
+      "description": "Hash the files whose names mark a credential store too (default false). Refused unless the tool runs as a job, which must be run with secret_output: true; never copy such a digest into a post, a report or an indicator list"
     },
     "limit": {
       "type": "integer",
-      "description": "Maximum entries to return inline when out_file is set (default 2000); the complete index is written to out_file"
+      "description": "Rows shown inline (default 200); the complete index is in the file complete_index names"
     },
     "out_file": {
       "type": "string",
-      "description": "Optional JSONL path for the complete index; when absent every entry is returned inline"
+      "description": "Optional JSONL path for the complete index, under work/ (in a job, under $OUT); refused inside the collection, outside the run directory or under inputs/, and never replacing a file that is there (the result is kept beside it and named)"
+    },
+    "time_limit_seconds": {
+      "type": "integer",
+      "description": "Stop the census after this long (default 3000, at most 3400): the answer then says it stopped, status partial, and how many directories were not listed"
+    },
+    "write_values": {
+      "type": "boolean",
+      "description": "Write the real strings that were withheld to $OUT/collection-index-values.jsonl (default false). Refused unless the tool runs as a job, which must be run with secret_output: true; the file is created first and one already there is refused"
     }
   },
   "runtime": "python3",
   "entry": "run.py",
-  "timeout_seconds": 900,
+  "timeout_seconds": 3600,
   "example": "{\"root\": \"inputs/collection\", \"contains\": \"NTUSER\", \"out_file\": \"work/collection-index.jsonl\"}",
   "by": "maintainer",
-  "at": "2026-09-22T23:30:00.000Z",
-  "version": 2,
-  "sha256": "6c6d753950f582f4f0ef58f1b1df548d8bbce24ff0cc8eaa7b3695ae582a09bc"
+  "at": "2026-10-07T12:00:00.000Z",
+  "version": 3,
+  "sha256": "99f181a797a07882df7ca6aa36cb871dc06e0d86d241a4aca07ceee326187a87",
+  "use": {
+    "names": [
+      "*_CopyLog.csv",
+      "uac.log",
+      "uploads.json"
+    ]
+  }
 }
