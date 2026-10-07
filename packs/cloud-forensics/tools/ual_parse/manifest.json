@@ -78,7 +78,7 @@
   },
   "runtime": "python3",
   "entry": "run.py",
-  "timeout_seconds": 300,
+  "timeout_seconds": 600,
   "example": "{\"path\": \"inputs/ual.csv\", \"notable_only\": true}",
   "by": "maintainer",
   "at": "2026-10-07T12:00:00.000Z",

@@ -19,9 +19,9 @@
     "sha256": {
       "LICENCE": "5b94f18424dbef1e77eda33a465e946c2c8eb715fa5236afe2c6ec6763af80d3",
       "README.md": "81dc48734ae5f548c3d41b3afdd234f2f859913ca57b4379b9b668a115207d4f",
-      "tools/ual_parse/manifest.json": "c33ea96277b4df6c914d1b8ce93cc626d76a65c0dda2517b6d5c0251edd5ec50",
+      "tools/ual_parse/manifest.json": "0bee1d420ea05ca133803269e65b652e8a65944d9c2c77ca5d9e3727bae52c81",
       "tools/ual_parse/run.py": "8a89a83150091ef5c3a3589fc92e09bba64980246f3b61a3a2bb66f74c51f6af",
-      "tools/signin_analyse/manifest.json": "b7bf7dc3d2ea125d98d8de8f95cc5bd1de574151d5307efc576d155a83ae6792",
+      "tools/signin_analyse/manifest.json": "c3f3a95a7ab4035ad8e4186b99d2022c54179a2869f1071c5a384af4ba74c475",
       "tools/signin_analyse/run.py": "a77fd4ada43ce5b904c9f45a658108b698b670287fe0ce89416c6a5c5af114be",
       "tools/cloudtrail_parse/manifest.json": "c939f54590484d831d135055fd551c0a9015c02d924012790ffc932af3d35891",
       "tools/cloudtrail_parse/run.py": "9c5037eb3fbf2a03baa9d6bb4e5fb232d3a90c6ca743ae25d6dff6602cb52f4e",
