@@ -24,13 +24,13 @@
   "checksums": {
     "sha256": {
       "LICENCE": "5b94f18424dbef1e77eda33a465e946c2c8eb715fa5236afe2c6ec6763af80d3",
-      "README.md": "72169557c2af6ef9825fd0b6630e9446c44f338cb439589afad99116923e85dd",
-      "tools/ual_parse/manifest.json": "a2b3f50b994ead5b85121ee7705d64ebdeeea8e003f3dd75a493f7e6fae828ba",
-      "tools/ual_parse/run.py": "285c7da6cc4cf65bcc5418be8bbbccc99f8e8d247d6a6d45046f05f1564255e2",
-      "tools/signin_analyse/manifest.json": "550a813138445d6fe5081aca26520f3a095838edf094869afcbe8f0a1ec66c26",
-      "tools/signin_analyse/run.py": "7c1b16e5d91c30c43a483b1d250b03d972d34b77b867cf4e60ebe46518f34077",
-      "tools/cloudtrail_parse/manifest.json": "d1db8b90ef37a420e7eb05c6c91a8460da532c345739105792e884acd8544eb4",
-      "tools/cloudtrail_parse/run.py": "804a4f05b6ffe16963952b67adb502740623123b07b0f1f78b53a06eb1621a69",
+      "README.md": "455666925d16f4c77c520c68ad8fa581743c867438412e19dbbdbdc924d5cd0e",
+      "tools/ual_parse/manifest.json": "3e7e20e4a64091ab21544ebe43c54535afbc8d4d67c872092f11d14217a0ecd2",
+      "tools/ual_parse/run.py": "c2c57b644e5e13c75ac7c81abbfe7244937489871e818a749d9eb6b0a406f1b1",
+      "tools/signin_analyse/manifest.json": "e4813a141a10711e3482194cca9ca288919f2d428d966751e5145a6ce228d2e7",
+      "tools/signin_analyse/run.py": "4ee79ced34eab2ee337e500e4cb3b29e799fd27e22806e142836c38683904dff",
+      "tools/cloudtrail_parse/manifest.json": "bce65dd5d9b92483c24502e49e50d4b74b09673a6cc845cfb7e589ebd386e51d",
+      "tools/cloudtrail_parse/run.py": "5f01ad12111bef32cb50e62ff3e2e1007bef2b3a83e4a569a3a4f73ebdc943d2",
       "goals/tenant-compromise.md": "23d33f06f833f653b07bc41e3f00e69e1fff658ff4d5f0db0450058efaba7ff6",
       "skills/identity/grants.md": "5ad1f09753d9a2991cc51e8a144e68a5d8536da3b7c8246e42c9dec231bb170d",
       "skills/identity/tokens.md": "0ec4e60540a503476d7f5dcb10032116b5b6de7433b54f4180c45abc05598325",
@@ -39,11 +39,11 @@
       "skills/logs/sources.md": "1ff58fa6b521168b1a1d439cfd2275cb636ce2dc2593f7861eb93829d02c92ff",
       "skills/logs/what-exists.md": "2def802d9184698d9b9119dc2bf5816a1dc3d1f6468dbd5499b063e6cfdbbd16",
       "skills/m365/unified-audit-log.md": "04ba5c0035ac630d1274dc377ae9f8b93ac56845ba01713737353ec618bafe53",
-      "skills/aws/cloudtrail.md": "d8c9ba0953f9dfaad4e982aeb93aa1b4218bd1402ed451fd2d29af7e2bc3d8d9",
-      "skills/entra/signins.md": "34ef5777d6b9ac9ccb0d8a26af811f5068c99150e7dc5c113343d948ae55b8e9",
+      "skills/aws/cloudtrail.md": "fd40e09cdff829feed25a5a53e6b45c7ff783baf1bb91719f1ce1583bf6e4988",
+      "skills/entra/signins.md": "068452016ed964aa2a61fb0634b92f71845bb0364b386b6b8d5a88d813ecb2f5",
       "requires/host.json": "fa29166ae2652d2a487c863b8e2e4cf4b52dc41750356fb424f0a4e42e261a2e",
       "requires/python.txt": "eb9148a62031d80af4795335b759dbe15552ed2df3b5b97648fbcda6b32b64de",
-      "skills/INDEX.md": "98d26a40d090288d1f8e99c273b2ca01888a8a3b93ab647b49d09e2b9cbb0f1d"
+      "skills/INDEX.md": "fffb50706e626faef529c636aafa17db505691d5e4c0d15aae8e880071532baa"
     }
   },
   "tools": [

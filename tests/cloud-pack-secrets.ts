@@ -72,6 +72,10 @@ const STRIPE = "sk" + "_live_" + rnd(24, 34);
 const PEM_BODY = Array.from({ length: 6 }, (_, i) => b64(bytes(35 + i, 48))).join("\n");
 const PEM = "-----BEGIN RSA PRIVATE KEY-----\n" + PEM_BODY + "\n-----END RSA PRIVATE KEY-----";
 const NTLM = hex("z", "md5");
+const URL_PASSWORD = "Pg" + rnd(10, 40) + "!x9";
+const GOOGLE_CLIENT_SECRET = "GOC" + "SPX" + "-" + rnd(28, 41, URLSAFE);
+const FUNCTION_KEY = rnd(54, 42, URLSAFE) + "==";
+const JWE = [b64u('{"alg":"RSA-OAEP","enc":"A256GCM"}'), rnd(120, 43, URLSAFE), rnd(16, 44, URLSAFE), rnd(60, 45, URLSAFE), rnd(22, 46, URLSAFE)].join(".");
 
 /** [label, the secret itself, the text it sits in]. */
 export const TEXT_CASES: Array<[string, string, string]> = [
@@ -125,6 +129,12 @@ export const TEXT_CASES: Array<[string, string, string]> = [
   ["private key block", PEM_BODY.split("\n")[2], PEM],
   ["key block without its header line", PEM_BODY.split("\n")[2], PEM_BODY + "\n-----END RSA PRIVATE KEY-----"],
   ["ntlm hash pair", NTLM, `aad3b435b51404eeaad3b435b51404ee:${NTLM}`],
+  ["a password in a connection URL", URL_PASSWORD, `DATABASE_URL=postgres://app:${URL_PASSWORD}@db.internal:5432/app`],
+  ["a password in an amqps URL", URL_PASSWORD, `amqps://guest:${URL_PASSWORD}@rabbit.example.com`],
+  ["a Google OAuth client secret", GOOGLE_CLIENT_SECRET, `client_id=123-abc.apps.googleusercontent.com secret ${GOOGLE_CLIENT_SECRET}`],
+  ["an Azure Functions key in the query", FUNCTION_KEY, `https://func.azurewebsites.net/api/run?code=${FUNCTION_KEY}&name=a`],
+  ["an Azure Functions key in the header", FUNCTION_KEY, `x-functions-key: ${FUNCTION_KEY}`],
+  ["a JWE with five parts", JWE.split(".")[3], `token ${JWE}`],
 ];
 
 /** [field name, its value]: a credential under a name that says so, with no shape to give it away. */
@@ -147,6 +157,9 @@ export const CONTROLS: Array<[string, string]> = [
   ["a SHA-1 in hex", hex("a", "sha1")],
   ["a CloudFormation client request token", "Console-CreateStack-7f2d"],
   ["a role session name", "arn:aws:sts::111122223333:assumed-role/Admin/alice-session-20260214"],
+  ["a pagination token in a query", "nextToken=AbCdEf123456"],
+  ["prose that uses the word pass", "pass: 3 attempts remain"],
+  ["a URL with a port and no user", "https://example.com:8443/path"],
 ];
 
 /** The windows of a secret an output must not contain: every 8 characters, or the whole value when it is shorter. */

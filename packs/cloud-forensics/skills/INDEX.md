@@ -3,7 +3,7 @@
 Fetch a body with `skill("<id>")`. A body may name others; fetch those the same way.
 
 - `aws/cloudtrail` CloudTrail records, coverage and session origin: Supplied AWS CloudTrail exports need event interpretation or identity correlation.
-- `entra/signins` Entra sign-ins and their evidential limits: Supplied sign-in exports need authentication, client, policy or account-activity analysis.
+- `entra/signins` Entra sign-ins and their evidential limits: Supplied Entra sign-in exports need authentication, client, policy or account-activity analysis.
 - `google/workspace` Google Workspace exported audit evidence: Supplied Google Workspace logs concern account access, administration, OAuth grants, Drive or Gmail.
 - `google/workspace-access` Workspace grants, delegation, sharing and forwarding: You must reconstruct delegated access, Drive sharing or mailbox forwarding from Workspace evidence.
 - `identity/grants` Consents, application credentials and mailbox rules as durable state: Evidence holds application consents, delegations, mailbox rules or account changes that can outlive a session.

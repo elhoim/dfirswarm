@@ -420,6 +420,8 @@ def _drop_unpublished():
 
 
 def _on_signal(signum, _frame):
+    if hasattr(signal, "setitimer"):
+        signal.setitimer(signal.ITIMER_REAL, 0)       # a pattern timer must not fire inside the cleanup
     _drop_unpublished()
     os._exit(128 + signum)
 
@@ -554,6 +556,7 @@ class SecretValues:
         except OSError as exc:
             raise SecretValuesRefused("the values file could not be created: %s (%s)" % (self.shown, describe(exc)))
         self._fh = os.fdopen(fd, "w", encoding="utf-8", errors="backslashreplace")
+        CLEANUP.append(self.close)          # a signal flushes what was written, so the originals the answer never named are not lost unannounced
 
     def add(self, finding_id, locator, value):
         if not self.enabled:
@@ -587,6 +590,8 @@ class SecretValues:
 # A filter a caller gives (identity, user, events, operations) is matched against the text as it is printed, never
 # against a withheld original: a count of matches would tell the caller one bit of it per call.
 
+# a value under such a name is a digest of something, not a key: the length rules do not apply to it (x-amz-checksum-sha256)
+CHECKSUM_NAME = re.compile(r"(?i)checksum|digest|sha[0-9]|md5|etag|crc[0-9]")
 REDACTED = re.compile(r"^\W*(?:hidden_due_to_security_reasons|redacted|masked|removed|\*+|x{3,}|\[\])\W*$", re.I)
 NOT_A_VALUE = frozenset(("true", "false", "null", "none", "nil", "undefined", "required", "optional", "enabled", "disabled"))
 SENSITIVE_EXACT = {
@@ -641,28 +646,34 @@ _STRONG = (r"password|passwd|passphrase|secret|api[_-]?key|access[_-]?token|refr
            r"lm[_-]?hash|client[_-]?secret|secret[_-]?access[_-]?key|secret[_-]?key|secret[_-]?text|secret[_-]?value|token|signature|plaintext")
 _SHORT = r"(?<![A-Za-z0-9])(?:pwd|pass|sig|pin|otp|sas)"
 _SEP = r"""(?:\\*["']|["'])?\s*(?:[:=]|%3[dD]|%3[aA])\s*"""
-_NAME = r"(?:%s|%s)" % (_STRONG, _SHORT)
+# a short name is a name only as `pwd=value` or `pass:value`: "pass: 3 attempts" is prose
+_SEPS = r"""(?:\\*["']|["'])?(?:\s*(?:=|%3[dD])\s*|:(?=\S))"""
+_NAME = r"(?:(?:%s)%s|%s%s)" % (_STRONG, _SEP, _SHORT, _SEPS)
 ARN_TAIL = re.compile(r"arn:[A-Za-z0-9-]+:[A-Za-z0-9-]+:[A-Za-z0-9-]*:[0-9]*:$")
 SCHEMES = ("bearer", "basic", "digest", "negotiate", "ntlm")
 TOKEN_RULES = [
-    ("a JSON Web Token", re.compile(r"eyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{2,}(?:\.[A-Za-z0-9_-]*)?"), 0),
+    # anchored at the start of a run and possessive, so that a megabyte of `eyJ` is read once, not once per `eyJ`
+    ("a JSON Web Token", re.compile(r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{6,}+\.[A-Za-z0-9_-]{2,}+(?:\.[A-Za-z0-9_-]*+)?"), 0),
+    ("a JSON Web Encryption token", re.compile(r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{6,}+(?:\.[A-Za-z0-9_-]*+){4}"), 0),
+    ("a password in a URL", re.compile(r"(?i)(?<![A-Za-z0-9+.-])[a-z][a-z0-9+.-]{1,20}://[^\s:/@\"'<>\\]{0,256}:([^\s/\"'<>\\]{1,1024})@(?=[^\s/@\"'<>]{1,255})"), 1),
+    ("an Azure Functions key", re.compile(r"""(?i)(?:x-functions-key["']?\s*[:=]\s*(?:\\*["'])?|[?&;]code=)([A-Za-z0-9_/+=-]{16,512})"""), 1),
     ("a private key block", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----(?:[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----|[\s\S]*)"), 0),
     ("a base64 block of key lines", re.compile(r"(?:[A-Za-z0-9+/]{60,80}={0,2}\r?\n){2,}[A-Za-z0-9+/]{2,80}={0,2}"), 0),
     ("an authorization header value", re.compile(
         r"""(?i)authorization["']?\s*[:=]\s*(?:\\*["'])?(?:(?:bearer|basic|digest|negotiate|ntlm|token)\s+)?([^\s"'&,;\\]{1,4096})"""), 1),
     ("a cookie header value", re.compile(r"""(?i)cookie["']?\s*[:=]\s*(?:\\*["'])?([^\r\n"'\\]{1,4096})"""), 1),
-    ("a scheme and its credential", re.compile(r"(?i)\b(?:bearer|basic|digest|negotiate|ntlm)\s+([A-Za-z0-9._~+/=-]{3,4096})"), 1),
+    ("a scheme and its credential", re.compile(r"(?i)\b(?:bearer|basic)\s+([A-Za-z0-9._~+/=-]{3,4096})|\b(?:negotiate|ntlm|digest)\s+([A-Za-z0-9._~+/=-]{24,4096})"), -2),
     ("a value assigned to a credential name (quoted)", re.compile(
-        r"""(?i)%s%s\\*(["'])(.{1,4096}?)(?=\\*\1)""" % (_NAME, _SEP)), 2),
+        r"""(?i)%s\\*(["'])(.{1,4096}?)(?=\\*\1)""" % _NAME), 2),
     ("a value assigned to a credential name", re.compile(
-        r"""(?i)%s%s((?:(?!%%26)[^\s"'&<>\\]){1,4096})""" % (_NAME, _SEP)), 1),
+        r"""(?i)%s((?:(?!%%26)[^\s"'&<>\\]){1,4096})""" % _NAME), 1),
     ("a value given to a credential switch", re.compile(
         r"""(?i)(?<![A-Za-z0-9_])-(?:password|pass|pwd|passphrase|secret|clientsecret|apikey|accesstoken|token)\s+(?:\\*(["'])(.{1,4096}?)(?=\\*\1)|([^\s"'-][^\s"']{0,4095}))"""), -1),
     ("a secret given to ConvertTo-SecureString", re.compile(
         r"""(?i)ConvertTo-SecureString\s+(?:\\*(["'])(.{1,4096}?)(?=\\*\1)|([^\s"'-][^\s"']{0,4095}))"""), -1),
     ("a hash pair of an account database", re.compile(r"(?<![0-9a-fA-F])[0-9a-fA-F]{32}:([0-9a-fA-F]{32})(?![0-9a-fA-F])"), 1),
     ("a token of a known family", re.compile(
-        r"(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{50,}|xox[abprs]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z_-])|"
+        r"(?:GOCSPX-[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{50,}|xox[abprs]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z_-])|"
         r"ya29\.[0-9A-Za-z_-]{20,}|1//0[0-9A-Za-z_-]{30,}|(?:IQoJb3JpZ2lu|FQoGZXIvYXdz|FwoGZXIvYXdz)[A-Za-z0-9+/=]{40,}|"
         r"[A-Za-z0-9_.~-]{3}[0-9]Q~[A-Za-z0-9_.~-]{30,}|[01]\.A[A-Za-z0-9_-]{50,}|[sr]k_(?:live|test)_[A-Za-z0-9]{16,})"), 0),
 ]
@@ -689,37 +700,51 @@ def _random_like(run):
 # alternative is a necessary condition of at least one rule; tests/pack-cloud-shared.test.ts holds the two paths equal.
 _QUICK = re.compile(r"eyJ|-----BEGIN|\n|authorization|cookie|bearer|basic|digest|negotiate|ntlm|pass|pwd|secret|token|key|signature|sig|"
                     r"plaintext|hash|pin|otp|sas|securestring|gh[pousr]_|github_pat_|xox|AIza|ya29\.|1//0|IQoJb|FQoG|FwoG|Q~|[01]\.A|[sr]k_|"
+                    r"://|gocspx|functions|code=|"
                     r"[A-Za-z0-9+/]{32}|[A-Za-z0-9+/_-]{128}", re.I)
 
 
 _CLEAN = set()                    # short texts already judged to hold nothing (names, addresses and ids repeat across a log)
+LONG_TEXT = 1 << 16               # a text this long is scanned with the deadline in view
 
 
-def token_spans(text):
-    """(start, end, why) of each stretch of `text` shaped like a credential, in order and not overlapping."""
-    if text in _CLEAN:
+def token_spans(text, shapes=True):
+    """(start, end, why) of each stretch of `text` shaped like a credential, in order and not overlapping. `shapes` False leaves
+    out the rules that recognise a key by its length alone (a value that is named a checksum or a digest is not scanned for them)."""
+    if shapes and text in _CLEAN:
         return []
-    spans = _spans(text) if _QUICK.search(text) else []
-    if not spans and len(text) <= 256 and len(_CLEAN) < 100000:
+    spans = _spans(text, shapes) if _QUICK.search(text) else []
+    if shapes and not spans and len(text) <= 256 and len(_CLEAN) < 100000:
         _CLEAN.add(text)
     return spans
 
 
-def _spans(text):
+def _name_before(text, start, at):
+    """The letters and digits of the name an assigned value follows (`nextToken=` gives `nexttoken`)."""
+    return re.sub(r"[^a-z0-9]", "", text[max(0, at - 64):at].lower())
+
+
+def _spans(text, shapes=True):
     spans = []
+    big = len(text) > LONG_TEXT
     for why, rx, group in TOKEN_RULES:
+        if big and out_of_time():
+            return [(0, len(text), "text not scanned: the time limit ended the scan")]      # fail closed
         for m in rx.finditer(text):
-            if "assigned to a credential name" in why and ARN_TAIL.search(text[max(0, m.start() - 120):m.start()]):
-                continue                                  # arn:aws:secretsmanager:...:secret:NAME is a name, not a value
-            groups = (1, 2, 3) if group == -1 else (group,)
+            if "assigned to a credential name" in why:
+                if ARN_TAIL.search(text[max(0, m.start() - 120):m.start()]):
+                    continue                              # arn:aws:secretsmanager:...:secret:NAME is a name, not a value
+                if _name_before(text, m.start(), m.start(m.lastindex or 0)).endswith(NOT_SECRET_TOKEN):
+                    continue                              # nextToken=, pageToken=, clientToken=: a position or an idempotency key
+            groups = (1, 2, 3) if group == -1 else ((1, 2) if group == -2 else (group,))
             for g in groups:
                 if g and m.group(g) is None:
                     continue
                 start, end = m.span(g)
                 value = text[start:end]
-                if g and (REDACTED.match(value) or value.lower() in NOT_A_VALUE):
+                if g and (REDACTED.match(value) or value.lower() in NOT_A_VALUE or value.startswith(("${", "{{"))):
                     continue
-                if why == "a scheme and its credential" and not (re.search(r"[0-9+/=_.~-]", value) or len(value) >= 16):
+                if why == "a scheme and its credential" and g == 1 and not (re.search(r"[0-9+/=_.~-]", value) or len(value) >= 16):
                     continue                              # "basic authentication" is prose, "Basic dXNlcjpwYXNz" is not
                 if g == 1 and group == -1 and len(m.groups()) >= 2 and m.group(1) in ("'", '"'):
                     continue                              # group 1 of the switch rules is the quote
@@ -727,10 +752,11 @@ def _spans(text):
     for m in _B64_RUN.finditer(text):
         if _random_like(m.group(0)):
             spans.append((m.start(), m.end(), "a long unbroken base64-like run"))
-    for why, rx, check in SHAPES:
-        for m in rx.finditer(text):
-            if not check or _random_like(m.group(0)):
-                spans.append((m.start(), m.end(), why))
+    if shapes:
+        for why, rx, check in SHAPES:
+            for m in rx.finditer(text):
+                if not check or _random_like(m.group(0)):
+                    spans.append((m.start(), m.end(), why))
     spans.sort()
     merged = []
     for s in spans:
@@ -811,9 +837,9 @@ class Withheld:
             return "list of %d items" % len(value)
         return "a number"
 
-    def clean(self, value, locator, pointer="", depth=0):
+    def clean(self, value, locator, pointer="", depth=0, shapes=True):
         if isinstance(value, str):
-            return self.clean_text(value, locator, pointer)
+            return self.clean_text(value, locator, pointer, shapes)
         if depth > MAX_DEPTH and isinstance(value, (dict, list)):
             self.note(locator, pointer, "nested deeper than %d levels" % MAX_DEPTH, len(json.dumps(value, default=str)), value)
             return "[withheld: nested deeper than %d levels, %s]" % (MAX_DEPTH, self.size_of(value))
@@ -838,19 +864,19 @@ class Withheld:
                     self.note(locator, point, "credential-named field", len(v) if isinstance(v, str) else len(json.dumps(v, default=str)), v)
                     out[safe_key] = "[withheld: credential-named field, %s]" % self.size_of(v)
                 else:
-                    out[safe_key] = self.clean(v, locator, point, depth + 1)
+                    out[safe_key] = self.clean(v, locator, point, depth + 1, shapes and not CHECKSUM_NAME.search(ks))
             return out
         if isinstance(value, list):
-            return [self.clean(v, locator, "%s/%d" % (pointer, i), depth + 1) for i, v in enumerate(value)]
+            return [self.clean(v, locator, "%s/%d" % (pointer, i), depth + 1, shapes) for i, v in enumerate(value)]
         return value
 
-    def clean_text(self, text, locator, pointer):
+    def clean_text(self, text, locator, pointer, shapes=True):
         if len(text) < 5:
             return text
         if len(text) > MAX_SCAN_CHARS:
             self.note(locator, pointer, "text longer than 1 MiB", len(text), text)
             return WITHHELD_TEXT % ("text longer than 1 MiB", len(text))
-        spans = token_spans(text)
+        spans = token_spans(text, shapes)
         if not spans:
             return text
         out, at = [], 0
@@ -1251,6 +1277,10 @@ class Source:
         out = []
         got = 0
         while got < want and not self._ended:
+            if out_of_time():                 # millions of empty members are many steps and no output: the deadline is checked here too
+                self.timed_out = True
+                self._ended = True
+                break
             if not self._pending:
                 raw = self._raw.read(1 << 18)
                 if not raw:
@@ -1790,6 +1820,8 @@ def first_of(item, keys, *names):
 
 # ---- END SHARED BLOCK -------------------------------------------------------------------------------------------
 
+import bisect
+
 TOOL = "cloudtrail_parse"
 PARSER = "cloudtrail_parse/4"
 VALUES_NAME = "cloudtrail-values.jsonl"
@@ -1908,6 +1940,7 @@ class SessionIndex:
             "sess_arn TEXT, derived_arn TEXT, caller TEXT, file TEXT, record INTEGER, shared TEXT, has_response INTEGER);")
         self.indexed = 0
         self.failed = 0
+        self.cache, self.keyed = {}, {}
 
     def add(self, row, who, stamp, file, record):
         if row.get("errorCode"):
@@ -1926,45 +1959,82 @@ class SessionIndex:
         self.indexed += 1
 
     def finish_indexing(self):
-        self.db.executescript("CREATE INDEX k ON assume(key_id); CREATE INDEX s ON assume(sess_arn); CREATE INDEX d ON assume(derived_arn);")
+        self.db.executescript(
+            "CREATE INDEX k ON assume(key_id, ns); CREATE INDEX s ON assume(sess_arn, ns); CREATE INDEX d ON assume(derived_arn, ns); "
+            "CREATE INDEX sk ON assume(sess_arn, key_id); CREATE INDEX dk ON assume(derived_arn, key_id);")
         self.db.commit()
+        self.cache = {}
+        self.keyed = {}
 
-    def matching(self, column, value, use_ns, key=None, creation_ns=None):
-        """The distinct calls whose `column` is `value`, logged at or before the use, narrowed in SQL by the session's returned key
-        (a call that returned a different key did not issue this session) and by the session's creationDate. Copies of one call
-        (the same eventID in two exports, or one cross-account call delivered to both accounts: the same sharedEventID and the
-        same returned key or session ARN) are collapsed and listed under `copies`. Returns (calls, total, excluded_by_key)."""
-        sql = ("SELECT event_id, name, ns, time, caller, file, record, key_id, sess_arn, shared FROM assume WHERE %s = ?" % column)
-        args = [dbtext(value)]
-        if use_ns is not None:
-            sql += " AND (ns IS NULL OR ns <= ?)"
-            args.append(use_ns)
+    def _load(self, column, value, key, creation_ns):
+        """Every distinct call whose `column` is `value`, narrowed in SQL by the session's returned key (a call that returned a
+        different key did not issue this session) and by the session's creationDate, once for all the uses that ask the same
+        question. Copies of one call (the same eventID in two exports, or one cross-account call delivered to both accounts: the
+        same sharedEventID and the same returned key or session ARN) are collapsed under `copies`; copies that disagree on the
+        caller or the returned key are flagged, and their call is not chosen. Returns (calls, excluded_by_key, cut)."""
+        base = "SELECT id, event_id, name, ns, time, caller, file, record, key_id, sess_arn, shared FROM assume WHERE %s = ?" % column
+        tail = ""
+        window = []
+        if creation_ns is not None and column != "key_id":
+            tail = " AND ns IS NOT NULL AND ns BETWEEN ? AND ?"
+            window = [creation_ns - CREATION_TOLERANCE_NS, creation_ns + CREATION_TOLERANCE_NS]
         excluded = 0
         if key is not None and column != "key_id":
-            excluded = self.db.execute("SELECT COUNT(*) FROM assume WHERE %s = ? AND key_id IS NOT NULL AND key_id <> ?" % column, (dbtext(value), dbtext(key))).fetchone()[0]
-            sql += " AND (key_id IS NULL OR key_id = ?)"
-            args.append(dbtext(key))
-        if creation_ns is not None and column != "key_id":
-            sql += " AND ns IS NOT NULL AND ns BETWEEN ? AND ?"
-            args += [creation_ns - CREATION_TOLERANCE_NS, creation_ns + CREATION_TOLERANCE_NS]
-        sql += " ORDER BY id"
-        calls, by_event, by_shared = [], {}, {}
-        for row in self.db.execute(sql, args):
+            # the calls that returned a key, less those that returned this one: the first count is made once for every use of the ARN
+            keyed = self.keyed.get((column, value))
+            if keyed is None:
+                keyed = self.keyed[(column, value)] = self.db.execute("SELECT COUNT(*) FROM assume WHERE %s = ? AND key_id IS NOT NULL" % column, (dbtext(value),)).fetchone()[0]
+            same = self.db.execute("SELECT COUNT(*) FROM assume WHERE %s = ? AND key_id = ?" % column, (dbtext(value), dbtext(key))).fetchone()[0]
+            excluded = keyed - same
+            # two lookups on the (column, key) index, not one scan of every call of the ARN with an OR
+            rows = sorted(self.db.execute(base + " AND key_id = ?" + tail, [dbtext(value), dbtext(key)] + window).fetchall()
+                          + self.db.execute(base + " AND key_id IS NULL" + tail, [dbtext(value)] + window).fetchall())
+        else:
+            rows = self.db.execute(base + tail + " ORDER BY id", [dbtext(value)] + window)
+        calls, by_event, by_shared, cut = [], {}, {}, False
+        for row in rows:
+            row = row[1:]
             event_id, shared, anchor = row[0], row[9], row[7] or row[8]
             at = by_event.get(event_id) if event_id else None
             if at is None and shared:
                 at = by_shared.get((shared, anchor))
             if at is not None:
-                calls[at]["copies"].append({"event_id": row[0], "source_file": row[5], "source_record": row[6]})
+                call = calls[at]
+                first = call["row"]
+                differs = row[4] != first[4] or bool(row[7] and first[7] and row[7] != first[7])
+                call["copies"].append({"event_id": row[0], "source_file": row[5], "source_record": row[6], "differs": differs})
+                call["disagree"] = call["disagree"] or differs
+                if row[2] is not None and (call["ns"] is None or row[2] < call["ns"]):
+                    call["ns"] = row[2]
                 continue
             if len(calls) >= MAX_TRACKED_CALLS:
-                return calls, None, excluded
+                cut = True
+                break
             if event_id:
                 by_event[event_id] = len(calls)
             if shared:
                 by_shared[(shared, anchor)] = len(calls)
-            calls.append({"row": row, "copies": []})
-        return calls, len(calls), excluded
+            calls.append({"row": row, "copies": [], "ns": row[2], "disagree": False})
+        return calls, excluded, cut
+
+    def matching(self, column, value, use_ns, key=None, creation_ns=None):
+        """The distinct calls whose `column` is `value`, logged at or before the use (some copy of the call was), narrowed by the
+        returned key and the creationDate. Returns (calls, total, excluded_by_key): `calls` the first CANDIDATE_CAP of them, `total` how
+        many there are (None when the index holds more than MAX_TRACKED_CALLS)."""
+        cache_key = (column, value, key, creation_ns)
+        entry = self.cache.get(cache_key)
+        if entry is None:
+            calls, excluded, cut = self._load(column, value, key, creation_ns)
+            untimed = [c for c in calls if c["ns"] is None]
+            timed = sorted((c for c in calls if c["ns"] is not None), key=lambda c: c["ns"])
+            if len(self.cache) > 5000:
+                self.cache.clear()
+            entry = self.cache[cache_key] = (untimed, timed, [c["ns"] for c in timed], excluded, cut)
+        untimed, timed, stamps, excluded, cut = entry
+        upto = len(timed) if use_ns is None else bisect.bisect_right(stamps, use_ns)
+        total = len(untimed) + upto
+        chosen = (untimed + timed[:upto])[:CANDIDATE_CAP]
+        return chosen, (None if cut else total), excluded
 
     def count_unfiltered(self, column, value, use_ns):
         sql, args = "SELECT COUNT(*) FROM assume WHERE %s = ?" % column, [dbtext(value)]
@@ -1981,7 +2051,8 @@ def call_summary(call):
     row = call["row"]
     out = {"source_event_id": row[0], "source_event": row[1], "source_time": row[3], "source_file": shown_path(row[5]), "source_record": row[6]}
     if call["copies"]:
-        out["copies"] = [{"event_id": c["event_id"], "source_file": shown_path(c["source_file"]), "source_record": c["source_record"]} for c in call["copies"][:CANDIDATE_CAP]]
+        out["copies"] = [{"event_id": c["event_id"], "source_file": shown_path(c["source_file"]), "source_record": c["source_record"], **({"differs_from_the_first": True} if c["differs"] else {})}
+                         for c in call["copies"][:CANDIDATE_CAP]]
         out["copies_total"] = len(call["copies"])
     return out
 
@@ -2007,7 +2078,9 @@ def session_link(index, who, use_ns, creation_ns, index_note):
                                                             wide_total if wide_total is not None else "more than %d" % MAX_TRACKED_CALLS, len(shown), index_note),
                         "calls_outside_the_window": shown}
         if column != "key_id" and excluded and not calls:
-            tried.append("%d call(s) match the session ARN but returned a different access key id, so they did not issue this session" % excluded)
+            said = "%d call(s) match the session ARN but returned a different access key id, so they did not issue this session" % excluded
+            if said not in tried:
+                tried.append(said)
         if not calls:
             continue
         if creation_ns is not None and column != "key_id":
@@ -2019,6 +2092,10 @@ def session_link(index, who, use_ns, creation_ns, index_note):
                     "candidates": [call_summary(c) for c in calls[:CANDIDATE_CAP]]}
         call = calls[0]
         row = call["row"]
+        if call["disagree"]:
+            return {"label": "unresolved", "basis": basis, "candidate_count": 1,
+                    "reason": "the copies of one call disagree on the caller or the returned access key id; none was chosen (the order of the files must not decide who the caller was)",
+                    "candidates": [call_summary(call)]}
         link = {"label": "candidate", "basis": basis, **call_summary(call), "caller": json.loads(row[4])}
         if row[8]:
             link["session_arn_agrees"] = row[8] == arn
@@ -2431,7 +2508,7 @@ def main():
         "integrity": {"digest_chain_validated": False, "performed": False, "digest_files_seen": len(census.digest_files),
                       "note": "No integrity validation of the log files or of a digest chain was performed (digest files are named in digest_files, read as no events, and do not make the read partial); a file hash from the case's own custody record is byte identity from when it was taken, not CloudTrail's validation."},
         "records": complete_target.page, "record_count": matched, "records_inline": len(complete_target.page),
-        "complete_records": pages["records"].get("all_results"),
+        ("partial_records" if records_cut else "complete_records"): pages["records"].get("all_results"),
         "records_file_status": ("partial: the read ended early or part of an input was not read (see status)" if records_cut else "holds every matched record that was read"),
         "first_event": ns_to_utc(first_ns), "last_event": ns_to_utc(last_ns),
         "table_scope": "the matched records (after events, identity, errors_only and notable_only); first_event and last_event cover every event read",
@@ -2453,6 +2530,7 @@ def main():
                 "issued it and on what basis (a candidate, never attribution; unresolved lists the matching calls up to a cap, with their count, and picks none; "
                 "not_found means none in the records read). Copies of one call (the same eventID in two exports, a cross-account call delivered to both accounts) count as one call there; "
                 "everywhere else every copy is kept and counted, so count distinct event_id. "
+                "A session from GetSessionToken or GetFederationToken (an IAM user's temporary credentials) has no AssumeRole call and no session_origin: that is not a gap in the records. "
                 "outcome says what the record carries (an error recorded or not), not whether a change took effect. Error classes are by the code's name, a heuristic, "
                 "and only authorisation_denied is in refusals_by_identity. A call that is not in the records (data events, other regions, other accounts, "
                 "an export that stopped) is not evidence that it did not happen. A filter looks at the text as it is printed.",

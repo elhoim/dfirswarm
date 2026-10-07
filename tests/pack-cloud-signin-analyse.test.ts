@@ -543,3 +543,12 @@ test("a service principal has its own account name, an archive is named and not 
     assert.match(JSON.stringify(zip), /ZIP|zip/);
   });
 });
+
+
+test("the nil object id is no id: two people whose records carry it are two accounts", async () => {
+  await withDir(async (cwd) => {
+    const nil = "00000000-0000-0000-0000-000000000000";
+    const out = await run(cwd, "g.json", graph(signIn(1, "2026-02-14T09:00:00Z", 0, { userId: nil, userPrincipalName: "a@example.org" }), signIn(2, "2026-02-14T09:01:00Z", 0, { userId: nil, userPrincipalName: "b@example.org" })));
+    assert.equal(out.accounts, 2);
+  });
+});

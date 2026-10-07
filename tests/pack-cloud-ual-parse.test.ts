@@ -321,9 +321,12 @@ test("record_type matches by number and by name, in the shape the portal writes 
     }
     const none = await run(cwd, { "p.csv": csv }, { record_type: [2, "ExchangeAdmin"], operations: ["Set-Mailbox", "Remove-Mailbox"] });
     assert.deepEqual(none.filter_values_that_matched_no_row, { operations: ["Remove-Mailbox"], record_type: ["2"] });
+    // A number with leading zeros or white space, and an operation in another case, are the same value; a miss is reported as it was given.
+    assert.equal((await run(cwd, { "p.csv": csv }, { record_type: [" 01 "], operations: ["set-MAILBOX"] })).record_count, 1);
+    assert.equal((await run(cwd, { "p.csv": csv }, { record_type: ["0001"] })).record_count, 1);
     const typo = await run(cwd, { "p.csv": csv }, { record_type: ["ExchangeAdmn"] });
     assert.equal(typo.record_count, 0);
-    assert.deepEqual(typo.filter_values_that_matched_no_row, { record_type: ["exchangeadmn"] });
+    assert.deepEqual(typo.filter_values_that_matched_no_row, { record_type: ["ExchangeAdmn"] });
     const pairs = await rowsOf(cwd, typo, "record_types_all_rows");
     assert.deepEqual(pairs.map((r: Json) => [r.audit_data, r.outer_column]), [["1", "ExchangeAdmin"]], "the export's own pairing of number and name is shown");
   });

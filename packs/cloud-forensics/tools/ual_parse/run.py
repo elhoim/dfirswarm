@@ -416,6 +416,8 @@ def _drop_unpublished():
 
 
 def _on_signal(signum, _frame):
+    if hasattr(signal, "setitimer"):
+        signal.setitimer(signal.ITIMER_REAL, 0)       # a pattern timer must not fire inside the cleanup
     _drop_unpublished()
     os._exit(128 + signum)
 
@@ -550,6 +552,7 @@ class SecretValues:
         except OSError as exc:
             raise SecretValuesRefused("the values file could not be created: %s (%s)" % (self.shown, describe(exc)))
         self._fh = os.fdopen(fd, "w", encoding="utf-8", errors="backslashreplace")
+        CLEANUP.append(self.close)          # a signal flushes what was written, so the originals the answer never named are not lost unannounced
 
     def add(self, finding_id, locator, value):
         if not self.enabled:
@@ -583,6 +586,8 @@ class SecretValues:
 # A filter a caller gives (identity, user, events, operations) is matched against the text as it is printed, never
 # against a withheld original: a count of matches would tell the caller one bit of it per call.
 
+# a value under such a name is a digest of something, not a key: the length rules do not apply to it (x-amz-checksum-sha256)
+CHECKSUM_NAME = re.compile(r"(?i)checksum|digest|sha[0-9]|md5|etag|crc[0-9]")
 REDACTED = re.compile(r"^\W*(?:hidden_due_to_security_reasons|redacted|masked|removed|\*+|x{3,}|\[\])\W*$", re.I)
 NOT_A_VALUE = frozenset(("true", "false", "null", "none", "nil", "undefined", "required", "optional", "enabled", "disabled"))
 SENSITIVE_EXACT = {
@@ -637,28 +642,34 @@ _STRONG = (r"password|passwd|passphrase|secret|api[_-]?key|access[_-]?token|refr
            r"lm[_-]?hash|client[_-]?secret|secret[_-]?access[_-]?key|secret[_-]?key|secret[_-]?text|secret[_-]?value|token|signature|plaintext")
 _SHORT = r"(?<![A-Za-z0-9])(?:pwd|pass|sig|pin|otp|sas)"
 _SEP = r"""(?:\\*["']|["'])?\s*(?:[:=]|%3[dD]|%3[aA])\s*"""
-_NAME = r"(?:%s|%s)" % (_STRONG, _SHORT)
+# a short name is a name only as `pwd=value` or `pass:value`: "pass: 3 attempts" is prose
+_SEPS = r"""(?:\\*["']|["'])?(?:\s*(?:=|%3[dD])\s*|:(?=\S))"""
+_NAME = r"(?:(?:%s)%s|%s%s)" % (_STRONG, _SEP, _SHORT, _SEPS)
 ARN_TAIL = re.compile(r"arn:[A-Za-z0-9-]+:[A-Za-z0-9-]+:[A-Za-z0-9-]*:[0-9]*:$")
 SCHEMES = ("bearer", "basic", "digest", "negotiate", "ntlm")
 TOKEN_RULES = [
-    ("a JSON Web Token", re.compile(r"eyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{2,}(?:\.[A-Za-z0-9_-]*)?"), 0),
+    # anchored at the start of a run and possessive, so that a megabyte of `eyJ` is read once, not once per `eyJ`
+    ("a JSON Web Token", re.compile(r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{6,}+\.[A-Za-z0-9_-]{2,}+(?:\.[A-Za-z0-9_-]*+)?"), 0),
+    ("a JSON Web Encryption token", re.compile(r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{6,}+(?:\.[A-Za-z0-9_-]*+){4}"), 0),
+    ("a password in a URL", re.compile(r"(?i)(?<![A-Za-z0-9+.-])[a-z][a-z0-9+.-]{1,20}://[^\s:/@\"'<>\\]{0,256}:([^\s/\"'<>\\]{1,1024})@(?=[^\s/@\"'<>]{1,255})"), 1),
+    ("an Azure Functions key", re.compile(r"""(?i)(?:x-functions-key["']?\s*[:=]\s*(?:\\*["'])?|[?&;]code=)([A-Za-z0-9_/+=-]{16,512})"""), 1),
     ("a private key block", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----(?:[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----|[\s\S]*)"), 0),
     ("a base64 block of key lines", re.compile(r"(?:[A-Za-z0-9+/]{60,80}={0,2}\r?\n){2,}[A-Za-z0-9+/]{2,80}={0,2}"), 0),
     ("an authorization header value", re.compile(
         r"""(?i)authorization["']?\s*[:=]\s*(?:\\*["'])?(?:(?:bearer|basic|digest|negotiate|ntlm|token)\s+)?([^\s"'&,;\\]{1,4096})"""), 1),
     ("a cookie header value", re.compile(r"""(?i)cookie["']?\s*[:=]\s*(?:\\*["'])?([^\r\n"'\\]{1,4096})"""), 1),
-    ("a scheme and its credential", re.compile(r"(?i)\b(?:bearer|basic|digest|negotiate|ntlm)\s+([A-Za-z0-9._~+/=-]{3,4096})"), 1),
+    ("a scheme and its credential", re.compile(r"(?i)\b(?:bearer|basic)\s+([A-Za-z0-9._~+/=-]{3,4096})|\b(?:negotiate|ntlm|digest)\s+([A-Za-z0-9._~+/=-]{24,4096})"), -2),
     ("a value assigned to a credential name (quoted)", re.compile(
-        r"""(?i)%s%s\\*(["'])(.{1,4096}?)(?=\\*\1)""" % (_NAME, _SEP)), 2),
+        r"""(?i)%s\\*(["'])(.{1,4096}?)(?=\\*\1)""" % _NAME), 2),
     ("a value assigned to a credential name", re.compile(
-        r"""(?i)%s%s((?:(?!%%26)[^\s"'&<>\\]){1,4096})""" % (_NAME, _SEP)), 1),
+        r"""(?i)%s((?:(?!%%26)[^\s"'&<>\\]){1,4096})""" % _NAME), 1),
     ("a value given to a credential switch", re.compile(
         r"""(?i)(?<![A-Za-z0-9_])-(?:password|pass|pwd|passphrase|secret|clientsecret|apikey|accesstoken|token)\s+(?:\\*(["'])(.{1,4096}?)(?=\\*\1)|([^\s"'-][^\s"']{0,4095}))"""), -1),
     ("a secret given to ConvertTo-SecureString", re.compile(
         r"""(?i)ConvertTo-SecureString\s+(?:\\*(["'])(.{1,4096}?)(?=\\*\1)|([^\s"'-][^\s"']{0,4095}))"""), -1),
     ("a hash pair of an account database", re.compile(r"(?<![0-9a-fA-F])[0-9a-fA-F]{32}:([0-9a-fA-F]{32})(?![0-9a-fA-F])"), 1),
     ("a token of a known family", re.compile(
-        r"(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{50,}|xox[abprs]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z_-])|"
+        r"(?:GOCSPX-[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{50,}|xox[abprs]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z_-])|"
         r"ya29\.[0-9A-Za-z_-]{20,}|1//0[0-9A-Za-z_-]{30,}|(?:IQoJb3JpZ2lu|FQoGZXIvYXdz|FwoGZXIvYXdz)[A-Za-z0-9+/=]{40,}|"
         r"[A-Za-z0-9_.~-]{3}[0-9]Q~[A-Za-z0-9_.~-]{30,}|[01]\.A[A-Za-z0-9_-]{50,}|[sr]k_(?:live|test)_[A-Za-z0-9]{16,})"), 0),
 ]
@@ -685,37 +696,51 @@ def _random_like(run):
 # alternative is a necessary condition of at least one rule; tests/pack-cloud-shared.test.ts holds the two paths equal.
 _QUICK = re.compile(r"eyJ|-----BEGIN|\n|authorization|cookie|bearer|basic|digest|negotiate|ntlm|pass|pwd|secret|token|key|signature|sig|"
                     r"plaintext|hash|pin|otp|sas|securestring|gh[pousr]_|github_pat_|xox|AIza|ya29\.|1//0|IQoJb|FQoG|FwoG|Q~|[01]\.A|[sr]k_|"
+                    r"://|gocspx|functions|code=|"
                     r"[A-Za-z0-9+/]{32}|[A-Za-z0-9+/_-]{128}", re.I)
 
 
 _CLEAN = set()                    # short texts already judged to hold nothing (names, addresses and ids repeat across a log)
+LONG_TEXT = 1 << 16               # a text this long is scanned with the deadline in view
 
 
-def token_spans(text):
-    """(start, end, why) of each stretch of `text` shaped like a credential, in order and not overlapping."""
-    if text in _CLEAN:
+def token_spans(text, shapes=True):
+    """(start, end, why) of each stretch of `text` shaped like a credential, in order and not overlapping. `shapes` False leaves
+    out the rules that recognise a key by its length alone (a value that is named a checksum or a digest is not scanned for them)."""
+    if shapes and text in _CLEAN:
         return []
-    spans = _spans(text) if _QUICK.search(text) else []
-    if not spans and len(text) <= 256 and len(_CLEAN) < 100000:
+    spans = _spans(text, shapes) if _QUICK.search(text) else []
+    if shapes and not spans and len(text) <= 256 and len(_CLEAN) < 100000:
         _CLEAN.add(text)
     return spans
 
 
-def _spans(text):
+def _name_before(text, start, at):
+    """The letters and digits of the name an assigned value follows (`nextToken=` gives `nexttoken`)."""
+    return re.sub(r"[^a-z0-9]", "", text[max(0, at - 64):at].lower())
+
+
+def _spans(text, shapes=True):
     spans = []
+    big = len(text) > LONG_TEXT
     for why, rx, group in TOKEN_RULES:
+        if big and out_of_time():
+            return [(0, len(text), "text not scanned: the time limit ended the scan")]      # fail closed
         for m in rx.finditer(text):
-            if "assigned to a credential name" in why and ARN_TAIL.search(text[max(0, m.start() - 120):m.start()]):
-                continue                                  # arn:aws:secretsmanager:...:secret:NAME is a name, not a value
-            groups = (1, 2, 3) if group == -1 else (group,)
+            if "assigned to a credential name" in why:
+                if ARN_TAIL.search(text[max(0, m.start() - 120):m.start()]):
+                    continue                              # arn:aws:secretsmanager:...:secret:NAME is a name, not a value
+                if _name_before(text, m.start(), m.start(m.lastindex or 0)).endswith(NOT_SECRET_TOKEN):
+                    continue                              # nextToken=, pageToken=, clientToken=: a position or an idempotency key
+            groups = (1, 2, 3) if group == -1 else ((1, 2) if group == -2 else (group,))
             for g in groups:
                 if g and m.group(g) is None:
                     continue
                 start, end = m.span(g)
                 value = text[start:end]
-                if g and (REDACTED.match(value) or value.lower() in NOT_A_VALUE):
+                if g and (REDACTED.match(value) or value.lower() in NOT_A_VALUE or value.startswith(("${", "{{"))):
                     continue
-                if why == "a scheme and its credential" and not (re.search(r"[0-9+/=_.~-]", value) or len(value) >= 16):
+                if why == "a scheme and its credential" and g == 1 and not (re.search(r"[0-9+/=_.~-]", value) or len(value) >= 16):
                     continue                              # "basic authentication" is prose, "Basic dXNlcjpwYXNz" is not
                 if g == 1 and group == -1 and len(m.groups()) >= 2 and m.group(1) in ("'", '"'):
                     continue                              # group 1 of the switch rules is the quote
@@ -723,10 +748,11 @@ def _spans(text):
     for m in _B64_RUN.finditer(text):
         if _random_like(m.group(0)):
             spans.append((m.start(), m.end(), "a long unbroken base64-like run"))
-    for why, rx, check in SHAPES:
-        for m in rx.finditer(text):
-            if not check or _random_like(m.group(0)):
-                spans.append((m.start(), m.end(), why))
+    if shapes:
+        for why, rx, check in SHAPES:
+            for m in rx.finditer(text):
+                if not check or _random_like(m.group(0)):
+                    spans.append((m.start(), m.end(), why))
     spans.sort()
     merged = []
     for s in spans:
@@ -807,9 +833,9 @@ class Withheld:
             return "list of %d items" % len(value)
         return "a number"
 
-    def clean(self, value, locator, pointer="", depth=0):
+    def clean(self, value, locator, pointer="", depth=0, shapes=True):
         if isinstance(value, str):
-            return self.clean_text(value, locator, pointer)
+            return self.clean_text(value, locator, pointer, shapes)
         if depth > MAX_DEPTH and isinstance(value, (dict, list)):
             self.note(locator, pointer, "nested deeper than %d levels" % MAX_DEPTH, len(json.dumps(value, default=str)), value)
             return "[withheld: nested deeper than %d levels, %s]" % (MAX_DEPTH, self.size_of(value))
@@ -834,19 +860,19 @@ class Withheld:
                     self.note(locator, point, "credential-named field", len(v) if isinstance(v, str) else len(json.dumps(v, default=str)), v)
                     out[safe_key] = "[withheld: credential-named field, %s]" % self.size_of(v)
                 else:
-                    out[safe_key] = self.clean(v, locator, point, depth + 1)
+                    out[safe_key] = self.clean(v, locator, point, depth + 1, shapes and not CHECKSUM_NAME.search(ks))
             return out
         if isinstance(value, list):
-            return [self.clean(v, locator, "%s/%d" % (pointer, i), depth + 1) for i, v in enumerate(value)]
+            return [self.clean(v, locator, "%s/%d" % (pointer, i), depth + 1, shapes) for i, v in enumerate(value)]
         return value
 
-    def clean_text(self, text, locator, pointer):
+    def clean_text(self, text, locator, pointer, shapes=True):
         if len(text) < 5:
             return text
         if len(text) > MAX_SCAN_CHARS:
             self.note(locator, pointer, "text longer than 1 MiB", len(text), text)
             return WITHHELD_TEXT % ("text longer than 1 MiB", len(text))
-        spans = token_spans(text)
+        spans = token_spans(text, shapes)
         if not spans:
             return text
         out, at = [], 0
@@ -1247,6 +1273,10 @@ class Source:
         out = []
         got = 0
         while got < want and not self._ended:
+            if out_of_time():                 # millions of empty members are many steps and no output: the deadline is checked here too
+                self.timed_out = True
+                self._ended = True
+                break
             if not self._pending:
                 raw = self._raw.read(1 << 18)
                 if not raw:
@@ -1903,9 +1933,15 @@ def lifted(audit, outer, o_keys):
     return out
 
 
+def norm_type(value):
+    """A record type as compared: without white space or case, and a number without leading zeros ("015" and " 15" are 15)."""
+    text = str(value).strip().lower()
+    return str(int(text)) if text.isdigit() else text
+
+
 def type_forms(fields):
     """The forms a record's type can be asked for by: the payload's value and the outer column's, as text, lower case."""
-    return {str(v).lower() for v in (fields.get("record_type"), fields.get("record_type_outer")) if v is not None}
+    return {norm_type(v) for v in (fields.get("record_type"), fields.get("record_type_outer")) if v is not None}
 
 
 def time_candidates(audit, outer, o_keys):
@@ -1995,8 +2031,8 @@ def main():
         fail("no such file or directory", path=shown_path(path))
     limit = want_int(args, "limit", DEFAULT_LIMIT)
     out_file = want_str(args, "out_file")
-    wanted_ops = set(want_str_list(args, "operations"))
-    record_types = {t.lower() for t in want_str_list(args, "record_type")}
+    wanted_ops = {o.strip().lower(): o for o in want_str_list(args, "operations")}          # compared without case, reported as given
+    record_types = {norm_type(t): t for t in want_str_list(args, "record_type")}
     pattern = want_regex(args, "user")
     notable_only = want_bool(args, "notable_only")
     assume_utc = want_bool(args, "assume_utc")
@@ -2142,14 +2178,14 @@ def main():
                     note = NOTABLE.get(operation)
                     # every filter looks at the text as it will be printed, never at a value that is withheld
                     shown_user = scrub(str(fields.get("user") or ""))
-                    if wanted_ops and operation in wanted_ops:
-                        ops_hit.add(operation)
-                    types_hit.update(record_types & forms)
-                    if wanted_ops and operation not in wanted_ops:
+                    if wanted_ops and operation.strip().lower() in wanted_ops:
+                        ops_hit.add(operation.strip().lower())
+                    types_hit.update(record_types.keys() & forms)
+                    if wanted_ops and operation.strip().lower() not in wanted_ops:
                         continue
                     if notable_only and not note:
                         continue
-                    if record_types and not (record_types & forms):
+                    if record_types and not (record_types.keys() & forms):
                         continue
                     if pattern and not hits(pattern, shown_user):
                         continue
@@ -2270,7 +2306,7 @@ def main():
     c = census.counts
     ambiguous = time_statuses.get("ambiguous_date_order", 0)
     no_zone = time_statuses.get("no_zone", 0)
-    unmatched = {"operations": sorted(wanted_ops - ops_hit), "record_type": sorted(record_types - types_hit)}
+    unmatched = {"operations": sorted(v for k, v in wanted_ops.items() if k not in ops_hit), "record_type": sorted(v for k, v in record_types.items() if k not in types_hit)}
     complete = (not stop_all and c["files_partial"] == c["files_failed"] == c["files_unsupported"] == c["files_empty"] == 0
                 and c["rows_rejected"] == 0 and c["payloads_rejected"] == 0 and not skipped.unreadable and c["files_not_attempted"] == 0
                 and c["replacement_characters"] == 0 and not census.pagination and not excluded_unknown_time)
@@ -2299,7 +2335,7 @@ def main():
                                                                 "these times as UTC, run again with assume_utc: true; a since or until filter excludes them until then."} if no_zone else None),
         "filter_values_that_matched_no_row": {k: v for k, v in unmatched.items() if v} or None,
         "records": complete_target.page, "record_count": matched, "records_inline": len(complete_target.page),
-        "complete_records": pages["records"].get("all_results"),
+        ("partial_records" if records_cut else "complete_records"): pages["records"].get("all_results"),
         "records_file_status": ("partial: the read ended early or part of an input was not read (see status)" if records_cut else "holds every matched record that was read"),
         "first_record": ns_to_utc(first_ns), "last_record": ns_to_utc(last_ns),
         "table_scope": "by_operation, by_user and by_address describe the records that matched the filters; operations_all_rows and record_types_all_rows are every row read; first_record and last_record cover every row read whose time could be read",
