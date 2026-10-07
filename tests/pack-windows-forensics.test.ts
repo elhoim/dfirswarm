@@ -902,3 +902,163 @@ test("browser_history names a file that is not a database, with its first bytes 
     assert.equal(typeof err.first_bytes_hex, "string");
   });
 });
+
+// --- yara_scan ------------------------------------------------------------------
+
+type YaraOut = {
+  status: string;
+  complete: boolean;
+  timed_out: boolean;
+  yara_exit_status: number;
+  yara_argv: string[];
+  rules_sha256: string;
+  matches: Array<{ rule: string; file: string; string_matches: number }>;
+  match_count: number;
+  string_matches: Array<{ finding_id: string; rule: string; file: string; identifier: string; offset: number; offset_hex: string; length: number | null }>;
+  string_match_count: number;
+  string_matches_page: { all_results?: string };
+  stderr_file: string | null;
+  stderr_line_count: number;
+  warnings: string[];
+  secret_values: { requested: boolean; written: number; values_file: string | null; contains_secret_values: boolean };
+};
+
+const PLANTED = "password=Summer2024!";
+
+/** A yara stand-in: it prints what yara 4.x prints for `-s -L` (`rule file`, then `0x<offset>:<length>:$id: <data>`). */
+const YARA_STUB = (extra = ""): string => `
+case "$1" in
+  --version) echo 4.5.8; exit 0;;
+  --help) printf '%s\\n' '  -s,  --print-strings   print matching strings' '  -L,  --print-string-length   print length of matched strings' '  -N,  --no-follow-symlinks   do not follow symlinks'; exit 0;;
+esac
+for last; do :; done
+${extra}
+echo "pw $last"
+echo '0x6:20:$a: ${PLANTED}'
+echo '0x21:4:$m: 4D 5A 90 00'
+echo "other $last"
+echo '0x40:3:$k: abc'
+`;
+
+test("yara_scan reports the rule, file, string identifier, offset and length of a match and never the matched bytes", async () => {
+  // `-s` prints the matched bytes, and they went into the answer: a rule that found `password=` put
+  // the password in stdout and in the job log.
+  await withCwd(async (cwd, bin) => {
+    await stub(bin, "yara", YARA_STUB());
+    await writeFile(join(cwd, "work", "rules.yar"), "rule pw { condition: true }");
+    await writeFile(join(cwd, "work", "sample.bin"), `xxxxxx${PLANTED}`);
+    const run = await tool("yara_scan", cwd, { rules: "work/rules.yar", target: "work/sample.bin" }, {}, bin);
+    const out = body<YaraOut>(run);
+    assert.equal(out.status, "complete");
+    assert.equal(out.match_count, 2);
+    assert.deepEqual(out.matches.map((m) => [m.rule, m.string_matches]), [["pw", 2], ["other", 1]]);
+    assert.deepEqual(out.string_matches[0], { finding_id: "S000001", rule: "pw", file: "work/sample.bin", identifier: "$a", offset: 6, offset_hex: "0x6", length: 20 });
+    assert.equal(out.string_match_count, 3);
+    for (const piece of [PLANTED, "Summer2024", "password=", Buffer.from(PLANTED).toString("hex"), Buffer.from(PLANTED).toString("base64"), "4D 5A 90 00"]) {
+      assert.equal((run.stdout + run.stderr).includes(piece), false, piece);
+    }
+    assert.equal(out.secret_values.requested, false);
+    assert.equal(out.secret_values.written, 0);
+    // Nothing the tool wrote holds them either: yara's text is read as a stream and dropped.
+    const files = await everyFileUnder(join(cwd, "work"));
+    for (const file of files) assert.equal((await readFile(file)).toString("latin1").includes("Summer2024") && !file.endsWith("sample.bin"), false, file);
+    assert.ok(out.yara_argv.includes("-s") && out.yara_argv.includes("-L"));
+    assert.match(out.rules_sha256, /^[0-9a-f]{64}$/);
+  });
+});
+
+test("yara_scan writes the matched bytes only on write_matches, only in a job, only to a 0600 file under $OUT, with the finding ids of the answer", async () => {
+  await withCwd(async (cwd, bin) => {
+    await stub(bin, "yara", YARA_STUB());
+    await writeFile(join(cwd, "work", "rules.yar"), "rule pw { condition: true }");
+    await writeFile(join(cwd, "work", "sample.bin"), "x");
+    // Outside a job the request is refused and nothing is written.
+    const refused = failed(await tool("yara_scan", cwd, { rules: "work/rules.yar", target: "work/sample.bin", write_matches: true }, {}, bin));
+    assert.match(refused.error, /refused outside a job/);
+    assert.deepEqual((await everyFileUnder(join(cwd, "work"))).filter((f) => f.includes("yara-matched")), []);
+    // In a job.
+    const outDir = join(cwd, "out");
+    await mkdir(outDir, { recursive: true });
+    const run = await tool("yara_scan", cwd, { rules: "work/rules.yar", target: "work/sample.bin", write_matches: true }, { JOB_ID: "j000007", OUT: outDir }, bin);
+    const out = body<YaraOut>(run);
+    assert.equal(out.secret_values.requested, true);
+    assert.equal(out.secret_values.written, 3);
+    assert.equal(out.secret_values.values_file, "store/jobs/j000007/out/yara-matched-strings.jsonl");
+    assert.equal(out.secret_values.contains_secret_values, true);
+    assert.equal(run.stdout.includes("Summer2024"), false, "even then the answer itself has no value");
+    const file = join(outDir, "yara-matched-strings.jsonl");
+    assert.equal((await stat(file)).mode & 0o777, 0o600);
+    const rows = (await readFile(file, "utf8")).trimEnd().split("\n").map((l) => JSON.parse(l) as { finding_id: string; value: string; offset: number; length: number; identifier: string });
+    assert.deepEqual(rows.map((r) => r.finding_id), out.string_matches.map((m) => m.finding_id));
+    assert.equal(rows[0].value, PLANTED);
+    assert.equal(rows[0].offset, 6);
+    assert.equal(rows[0].length, 20);
+    // A values file already there is refused by name before anything is scanned.
+    const again = failed(await tool("yara_scan", cwd, { rules: "work/rules.yar", target: "work/sample.bin", write_matches: true }, { JOB_ID: "j000008", OUT: outDir }, bin));
+    assert.match(again.error, /already exists/);
+  });
+});
+
+test("yara_scan keeps the whole of a run it had to stop: status partial, complete false, the matches read before the time limit and the stderr file", async () => {
+  // A timeout threw away everything yara had printed, and the answer was "did not finish".
+  await withCwd(async (cwd, bin) => {
+    await stub(bin, "yara", YARA_STUB(`echo "warning: rule slow" >&2\n`).replace(`echo "other $last"`, `echo "other $last"\nsleep 30`));
+    await writeFile(join(cwd, "work", "rules.yar"), "rule pw { condition: true }");
+    await writeFile(join(cwd, "work", "sample.bin"), "x");
+    const started = Date.now();
+    const out = body<YaraOut>(await tool("yara_scan", cwd, { rules: "work/rules.yar", target: "work/sample.bin", timeout_seconds: 2 }, {}, bin));
+    assert.ok(Date.now() - started < 20_000, "the stub's sleep must have been killed, not waited for");
+    assert.equal(out.status, "partial");
+    assert.equal(out.complete, false);
+    assert.equal(out.timed_out, true);
+    assert.equal(out.match_count, 2, "the matches printed before the stop are kept");
+    assert.deepEqual(out.warnings, ["warning: rule slow"], "warnings are kept, not suppressed with -w");
+    assert.ok(out.stderr_file);
+    assert.equal((await readFile(join(cwd, out.stderr_file as string), "utf8")).trim(), "warning: rule slow");
+  });
+});
+
+test("yara_scan reports a yara that fails with a rule error as failed with its stderr, and a non-zero exit after matches as partial", async () => {
+  await withCwd(async (cwd, bin) => {
+    await writeFile(join(cwd, "work", "rules.yar"), "rule pw { condition: true }");
+    await writeFile(join(cwd, "work", "sample.bin"), "x");
+    await stub(bin, "yara", `case "$1" in --version) echo 4.5.8; exit 0;; --help) echo '  -L, --print-string-length'; exit 0;; esac\necho 'rules.yar(1): error: syntax error, unexpected identifier' >&2\nexit 1`);
+    const bad = JSON.parse((await tool("yara_scan", cwd, { rules: "work/rules.yar", target: "work/sample.bin" }, {}, bin)).stdout) as YaraOut;
+    assert.equal(bad.status, "failed");
+    assert.equal(bad.yara_exit_status, 1);
+    assert.match(bad.warnings[0], /syntax error/);
+    await stub(bin, "yara", YARA_STUB(`echo 'error scanning b: could not open file' >&2`).replace("\necho '0x40:3:$k: abc'", "\necho '0x40:3:$k: abc'\nexit 1"));
+    const part = body<YaraOut>(await tool("yara_scan", cwd, { rules: "work/rules.yar", target: "work/sample.bin" }, {}, bin));
+    assert.equal(part.status, "partial");
+    assert.equal(part.complete, false);
+    assert.equal(part.match_count, 2);
+  });
+});
+
+test("yara_scan pages its string matches past limit and keeps every one in the file the page names", async () => {
+  await withCwd(async (cwd, bin) => {
+    await stub(bin, "yara", `case "$1" in --version) echo 4.5.8; exit 0;; --help) echo '  -L, --print-string-length'; exit 0;; esac\nfor last; do :; done\necho "bulk $last"\ni=0; while [ $i -lt 450 ]; do printf '0x%x:4:$s: abcd\\n' $((i*16)); i=$((i+1)); done`);
+    await writeFile(join(cwd, "work", "rules.yar"), "rule bulk { condition: true }");
+    await writeFile(join(cwd, "work", "sample.bin"), "x");
+    const out = body<YaraOut>(await tool("yara_scan", cwd, { rules: "work/rules.yar", target: "work/sample.bin", limit: 100 }, {}, bin));
+    assert.equal(out.string_match_count, 450);
+    assert.equal(out.string_matches.length, 100);
+    const all = (await readFile(join(cwd, out.string_matches_page.all_results as string), "utf8")).trimEnd().split("\n").map((l) => JSON.parse(l) as { offset: number });
+    assert.equal(all.length, 450);
+    assert.equal(all[449].offset, 449 * 16);
+  });
+});
+
+test("yara_scan against the installed yara: the matched bytes stay out of the answer", async (t) => {
+  if (spawnSync("yara", ["--version"]).status !== 0) return t.skip("yara is not installed on this host");
+  await withCwd(async (cwd) => {
+    await writeFile(join(cwd, "work", "rules.yar"), 'rule pw { strings: $a = /password=[A-Za-z0-9!]+/ $w = "world" wide ascii nocase condition: any of them }');
+    await writeFile(join(cwd, "work", "sample.bin"), `hello ${PLANTED} world`);
+    const run = await tool("yara_scan", cwd, { rules: "work/rules.yar", target: "work/sample.bin" });
+    const out = body<YaraOut>(run);
+    assert.equal(out.status, "complete");
+    assert.equal(out.string_match_count, 2);
+    assert.deepEqual(out.string_matches.map((m) => [m.identifier, m.offset, m.length]), [["$a", 6, 20], ["$w", 27, 5]]);
+    assert.equal(run.stdout.includes("Summer2024"), false);
+  });
+});
