@@ -52,6 +52,7 @@ OLE = datetime.datetime(1899, 12, 30)
 DEFAULT_FROM = "1990-01-01"
 DEFAULT_TO = "2040-01-01"
 MAX_DIGITS = 40
+MAX_SIGNIFICANT = 60
 SHOWN_DIGITS = 9
 
 
@@ -79,15 +80,16 @@ def parse_value(raw, as_hex):
     """The value as an exact decimal. Booleans and anything that is not a number are refused."""
     if isinstance(raw, bool) or raw is None:
         fail("value is required: the number to read as a date", value=raw)
-    text = str(raw).strip().replace("_", "").replace(",", "")
+    text = str(raw).strip().replace("_", "")
     if not text:
         fail("value is empty")
+    if "," in text:
+        fail("a comma is ambiguous (a thousands separator or a decimal comma): write the number without one", value=raw)
     try:
-        if text.lower().startswith(("0x", "-0x", "+0x")) or as_hex:
-            body = text.lower().replace("0x", "", 1)
-            if not re.fullmatch(r"[+-]?[0-9a-f]+", body):
-                raise ValueError(text)
-            number = D(int(body, 16))
+        if re.fullmatch(r"[+-]?0[xX][0-9a-fA-F]+", text) or (as_hex and re.fullmatch(r"[+-]?[0-9a-fA-F]+", text)):
+            number = D(int(text, 16))
+        elif as_hex:
+            raise ValueError(text)
         elif re.fullmatch(r"[+-]?(\d+(\.\d*)?|\.\d+)", text):
             number = CTX.create_decimal(text)
         elif re.fullmatch(r"[+-]?(\d+(\.\d*)?|\.\d+)[eE][+-]?\d{1,3}", text):
@@ -96,8 +98,10 @@ def parse_value(raw, as_hex):
             raise ValueError(text)
     except (ValueError, decimal.InvalidOperation):
         fail("value is not a number: a decimal, a decimal with a fraction, or hexadecimal", value=raw)
-    if number.adjusted() > MAX_DIGITS or (number != 0 and number.adjusted() < -MAX_DIGITS):
+    if number != 0 and (number.adjusted() > MAX_DIGITS or number.adjusted() < -MAX_DIGITS):
         fail("value is outside what this tool reads (more than %d digits)" % MAX_DIGITS, value=raw)
+    if len(number.as_tuple().digits) > MAX_SIGNIFICANT:
+        fail("value has more than %d significant digits: the arithmetic here is exact up to that and no further" % MAX_SIGNIFICANT, value=raw)
     return text, number
 
 
@@ -117,7 +121,6 @@ def stamp(base, seconds, utc, min_digits):
     except OverflowError:
         return None, "outside the years 1 to 9999 that a date can hold"
     shown, beyond = fraction_digits(frac)
-    shown = shown.ljust(min_digits, "0")
     when = moment.replace(microsecond=0).isoformat() + ("." + shown if shown else "") + ("Z" if utc else "")
     # What lies beyond the ninth digit, as the decimal number of seconds it is.
     return when, ("0." + "0" * SHOWN_DIGITS + beyond if beyond else "0")
@@ -176,17 +179,23 @@ def parse_day(text, name):
 
 def main():
     try:
-        args = json.load(sys.stdin)
+        # A JSON number is kept as the text it was written in, never read through a float.
+        args = json.load(sys.stdin, parse_float=str, parse_int=int)
     except ValueError as exc:
         fail("arguments are not valid JSON", reason=str(exc))
     if not isinstance(args, dict):
         fail("arguments are a JSON object")
+    as_hex = args.get("hex", False)
+    if not isinstance(as_hex, bool):
+        fail("hex is true or false")
 
-    text, number = parse_value(args.get("value"), bool(args.get("hex")))
+    text, number = parse_value(args.get("value"), as_hex)
     low = parse_day(args.get("plausible_from", DEFAULT_FROM), "plausible_from")
-    high = parse_day(args.get("plausible_to", DEFAULT_TO), "plausible_to")
-    if low >= high:
+    high_day = parse_day(args.get("plausible_to", DEFAULT_TO), "plausible_to")
+    if low >= high_day:
         fail("plausible_from must be before plausible_to", plausible_from=args.get("plausible_from"), plausible_to=args.get("plausible_to"))
+    high = high_day + datetime.timedelta(days=1)          # plausible_to is a day, and the whole day is inside
+    explicit_range = "plausible_from" in args or "plausible_to" in args
     plausible_only = args.get("plausible_only", False)
     if not isinstance(plausible_only, bool):
         fail("plausible_only is true or false")
@@ -216,7 +225,8 @@ def main():
         moment, base = r.pop("_moment"), r.pop("_base")
         # A reading that lands within a year of its own epoch means the value was far
         # too small for that clock: it is arithmetic, not a date, and it drowns the real answer.
-        near = not r["epoch"].startswith("DOS") and abs((moment - base).total_seconds()) < 86400 * 366
+        # (Only with the default range: a caller who names a range decides what is plausible.)
+        near = (not explicit_range) and not r["epoch"].startswith("DOS") and abs((moment - base).total_seconds()) < 86400 * 366
         r["plausible"] = bool(low <= moment <= high and not near)
         if near:
             r["why_not_plausible"] = "within a year of its own epoch: the value is too small for this clock"
@@ -228,7 +238,7 @@ def main():
         "tool": TOOL,
         "value": text,
         "hex": hex(int(number)) if number == number.to_integral_value() else None,
-        "reference_range": {"from": low.date().isoformat(), "to": high.date().isoformat(),
+        "reference_range": {"from": low.date().isoformat(), "to": high_day.date().isoformat(),
                             "meaning": "a ranking aid supplied by the caller or defaulted, not evidence: a date outside it can still be right"},
         "readings": kept,
         "reading_count": len(kept),

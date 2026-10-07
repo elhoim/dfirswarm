@@ -107,6 +107,45 @@ class CatalogSearch(Case):
         self.assertEqual(r.json["lines_not_searched"], 1)
         self.assertIs(r.json["complete"], False)
 
+    def test_a_generation_id_with_an_unreadable_index_is_that_error_not_no_catalogue(self):
+        self.gen("g0001")
+        self.revision(1, None, index_text="{this is not json")
+        r = run_tool("catalog_search", {"pattern": "x", "catalog": "g0001"}, self.dir)
+        self.assertEqual(r.code, 1)
+        self.assertEqual(answer(r)["error"], "revision_unavailable")
+
+    def test_a_listed_generation_whose_directory_is_gone_is_an_answer_not_a_traceback(self):
+        self.revision(1, [{"id": "g0007", "recipe": "r", "status": "complete"}])
+        r = run_tool("catalog_search", {"pattern": "x", "catalog": "g0007"}, self.dir)
+        self.assertEqual(r.code, 1)
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertIn("g0007 is listed by revision 1 but its directory", answer(r)["error"])
+
+    def test_a_generations_search_is_under_the_budget_too(self):
+        self.revision(1, [{"id": "g0001", "recipe": "r", "status": "complete", "target": {"name": "x" * 40 + "!"}}])
+        r = run_tool("catalog_search", {"pattern": "(x+x+)+y", "which": "generations", "ignore_case": False, "max_seconds": 1}, self.dir, timeout=60)
+        self.assertEqual(r.code, 0, r.stdout + r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertIs(r.json["complete"], False)
+        self.assertIn("lower bound", r.json["interrupted"])
+
+    def test_a_row_ending_in_crlf_matches_its_own_end_and_is_returned_without_it(self):
+        self.write("catalog/Disk.E01/p2048/filelist.txt", b"r/r 1:\tUsers/a/one.log\r\nr/r 2:\tUsers/a/two.txt\r\n")
+        self.write("catalog/Disk.E01/partitions.txt", "p\n")
+        r = run_tool("catalog_search", {"pattern": "log$"}, self.dir)
+        self.assertEqual((r.json["matched"], r.json["hits"][0]["line"]), (1, "r/r 1:\tUsers/a/one.log"))
+
+    def test_a_limit_outside_its_bounds_is_refused_and_an_agent_id_cannot_leave_work(self):
+        self.catalogue(3000)
+        for limit in (0, -1, 1001):
+            r = run_tool("catalog_search", {"pattern": "file", "limit": limit}, self.dir)
+            self.assertEqual(r.code, 1, limit)
+            self.assertIn("from 1 to 1000", r.json["error"])
+        r = run_tool("catalog_search", {"pattern": "file", "limit": 5}, self.dir, env={"AGENT_ID": "../../escape"})
+        self.assertEqual(r.code, 0, r.stdout + r.stderr)
+        self.assertTrue(os.path.realpath(self.path(r.json["all_matches"])).startswith(os.path.realpath(self.path("work")) + os.sep))
+        self.assertFalse(os.path.exists(os.path.join(os.path.dirname(self.dir), "escape")))
+
 
 if __name__ == "__main__":
     unittest.main()

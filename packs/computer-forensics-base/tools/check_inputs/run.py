@@ -33,7 +33,7 @@ MANIFEST = "inputs.json"
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 SPECIALS = {"fifo": stat.S_ISFIFO, "socket": stat.S_ISSOCK, "char": stat.S_ISCHR, "block": stat.S_ISBLK}
 DEFAULT_SECONDS = 1500
-SECONDS_MAX = 7200
+SECONDS_MAX = 1700                     # the tool's own time limit is 1800 seconds: a budget beyond it would be killed, not reported
 LISTED = 200
 
 
@@ -69,8 +69,15 @@ def sha256_file(path, deadline):
 
 
 class Receipts:
+    """One new file per run, written row by row in place: a run that is killed leaves the rows it had.
+
+    The name carries the time and the process, so a second check in the same run directory does not
+    replace the first one's record; the file is created exclusively and never opened over.
+    """
+
     def __init__(self):
-        name = "check_inputs-receipts.jsonl"
+        stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+        name = "check_inputs-receipts-%s-%d.jsonl" % (stamp, os.getpid())
         job, out = os.environ.get("JOB_ID"), os.environ.get("OUT")
         if job and out:
             self.path = Path(out) / "tool-output" / name
@@ -79,26 +86,33 @@ class Receipts:
             agent = re.sub(r"[^A-Za-z0-9_.-]", "_", os.environ.get("AGENT_ID") or "tool")
             self.path = Path("work") / agent / "tool-output" / name
             self.shown = str(self.path)
-        self.fh, self.error, self.count = None, None, 0
+        self.fh, self.error, self.count, self.created = None, None, 0, False
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            fd, self.tmp = tempfile.mkstemp(dir=self.path.parent, prefix=".check_inputs-")
-            self.fh = os.fdopen(fd, "w", encoding="utf-8")
+            fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+            self.fh = os.fdopen(fd, "w", encoding="ascii")
+            self.created = True
         except OSError as exc:
             self.error = "the receipts could not be written (%s: %s)" % (self.path.parent, exc.strerror or exc)
 
     def add(self, row):
         if self.fh:
-            self.fh.write(json.dumps(row, ensure_ascii=False) + "\n")
-            self.fh.flush()                       # a receipt is on disk before the next file is read
-            self.count += 1
+            try:
+                self.fh.write(json.dumps(row) + "\n")       # ASCII escapes: a name that is not UTF-8 is written, not lost
+                self.fh.flush()                                # a receipt is on disk before the next file is read
+                self.count += 1
+            except OSError as exc:
+                self.error = "the receipts stopped being written after %d rows (%s)" % (self.count, exc.strerror or exc)
+                self.fh = None
 
     def finish(self):
         if self.fh:
-            self.fh.flush()
-            os.fsync(self.fh.fileno())
-            self.fh.close()
-            os.replace(self.tmp, self.path)
+            try:
+                self.fh.flush()
+                os.fsync(self.fh.fileno())
+                self.fh.close()
+            except OSError as exc:
+                self.error = "the receipts were not synced (%s)" % (exc.strerror or exc)
 
 
 if not os.path.isfile(MANIFEST):
@@ -230,7 +244,10 @@ if os.path.isdir("inputs"):
     top = os.path.realpath("inputs")
     held = [n for n in sets if "/" not in n and os.path.islink(os.path.join(top, n))]
     for walked, under in [(top, "inputs/")] + [(os.path.realpath(os.path.join(top, n)), "inputs/" + n + "/") for n in held]:
-        for root, dirs, names in os.walk(walked):
+        def unreadable_dir(exc, walked=walked, under=under):
+            where = os.path.relpath(os.fsdecode(exc.filename or walked), walked).replace("\\", "/")
+            unreadable.append({"path": under if where == "." else under + where, "why": "a directory under inputs/ could not be listed: %s" % (exc.strerror or exc)})
+        for root, dirs, names in os.walk(walked, onerror=unreadable_dir):
             # A directory link is a name of its own, not a place to walk into.
             for name in names + [d for d in dirs if os.path.islink(os.path.join(root, d)) and not (root == top and d in held)]:
                 rel = under + os.path.relpath(os.path.join(root, name), walked).replace("\\", "/")
@@ -252,7 +269,7 @@ result = {
     "unreadable": unreadable[:LISTED],
     "not_checked": not_checked[:LISTED],
     "bytes_hashed": bytes_hashed,
-    "receipts_file": receipts.shown if receipts.fh is not None or receipts.count else None,
+    "receipts_file": receipts.shown if receipts.created else None,
     "receipts": receipts.count,
     "does_not_show": "that the evidence is authentic or complete, or that the manifest was right when it was made: a pass is agreement with the baseline",
 }

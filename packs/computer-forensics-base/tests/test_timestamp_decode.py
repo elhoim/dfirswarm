@@ -140,8 +140,32 @@ class TimestampDecode(Case):
         narrow = self.decode(value="1700000000", plausible_from="2024-01-01", plausible_to="2025-01-01", plausible_only=True)
         self.assertEqual([x for x in narrow.json["readings"] if x["epoch"] == "Unix seconds"], [])
 
+    def test_a_json_number_is_not_read_through_a_float(self):
+        r = run_tool("timestamp_decode", {}, self.dir, raw_input='{"value": 1700000000.123456789}')
+        self.assertEqual(reading(r.json, "Unix seconds")["when"], "2023-11-14T22:13:20.123456789Z")
+
+    def test_hex_is_strict_and_the_hex_flag_is_a_boolean(self):
+        for args in ({"value": "a0x1", "hex": True}, {"value": "0x-5"}, {"value": "10", "hex": "false"}, {"value": "xyz", "hex": True}):
+            self.assertEqual(self.decode(**args).code, 1, args)
+        self.assertEqual(reading(self.decode(value="-0x10").json, "Unix seconds")["when"], "1969-12-31T23:59:44Z")
+
+    def test_a_comma_is_not_a_thousands_separator(self):
+        r = self.decode(value="1,5")
+        self.assertEqual(r.code, 1)
+        self.assertIn("comma", r.json["error"])
+
+    def test_plausible_to_includes_its_whole_day_and_a_named_range_decides(self):
+        # 2023-05-05T14:00:00Z is 1683295200
+        r = self.decode(value="1683295200", plausible_to="2023-05-05")
+        self.assertTrue(reading(r.json, "Unix seconds")["plausible"])
+        # 5000000 is inside the caller's range as an Apple reading (2001-02-27) even though it is near that epoch.
+        r = self.decode(value="5000000", plausible_from="1995-01-01", plausible_to="2003-01-01")
+        self.assertTrue(reading(r.json, "Apple absolute (s)")["plausible"])
+        default = self.decode(value="5000000")
+        self.assertFalse(reading(default.json, "Apple absolute (s)")["plausible"])
+
     def test_not_a_number_and_a_boolean_are_errors(self):
-        for bad in ("12 pm", "", "0xZZ", "1e9999", True):
+        for bad in ("12 pm", "", "0xZZ", "1e9999", True, "9" * 70):
             r = self.decode(value=bad)
             self.assertEqual(r.code, 1, bad)
             self.assertIn("error", r.json)

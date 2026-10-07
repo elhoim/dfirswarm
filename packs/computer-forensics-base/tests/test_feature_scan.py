@@ -111,6 +111,41 @@ class FeatureScan(Case):
         for bad in (["--help"], ["email;rm"], [3]):
             self.assertEqual(self.scan(only=bad).code, 1, bad)
 
+    def test_a_run_that_wrote_nothing_but_its_own_words_is_failed_not_partial(self):
+        r = self.scan('while [ $# -gt 0 ]; do case "$1" in -o) mkdir -p "$2";; esac; shift; done\necho "cannot read the image" >&2\nexit 4\n')
+        self.assertEqual(r.code, 1)
+        self.assertEqual((r.json["status"], r.json["exit_code"], r.json["files_written_by_bulk_extractor"]), ("failed", 4, 0))
+        self.assertIn("cannot read the image", self.read(r.json["stderr_file"]))
+
+    def test_an_out_dir_that_is_a_file_or_cannot_be_made_is_an_answer_not_a_traceback(self):
+        self.write("work/afile", b"x")
+        r = self.scan(out_dir="work/afile")
+        self.assertEqual(r.code, 1)
+        self.assertIn("exists and is not a directory", r.json["error"])
+        self.assertNotIn("Traceback", r.stderr)
+        if os.geteuid() != 0:
+            locked = self.path("work/locked")
+            os.makedirs(locked)
+            os.chmod(locked, 0o555)
+            try:
+                r = self.scan(out_dir="work/locked/features")
+            finally:
+                os.chmod(locked, 0o755)
+            self.assertEqual(r.code, 1)
+            self.assertIn("cannot be written", r.json["error"])
+            self.assertNotIn("Traceback", r.stderr)
+
+    def test_in_a_job_out_dir_must_be_under_out(self):
+        out = self.path("job-out")
+        os.makedirs(out)
+        r = self.scan(env={"JOB_ID": "j000010", "OUT": out}, out_dir="work/features")
+        self.assertEqual(r.code, 1)
+        self.assertIn("under $OUT", r.json["error"])
+        self.assertFalse(os.path.exists(self.path("work/features")))
+        r = self.scan(env={"JOB_ID": "j000010", "OUT": out}, out_dir=out)
+        self.assertEqual(r.code, 1)
+        self.assertIn("under $OUT", r.json["error"])
+
 
 if __name__ == "__main__":
     unittest.main()

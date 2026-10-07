@@ -101,6 +101,58 @@ class LosslessPage:
         return result
 
 
+class SafePage(LosslessPage):
+    """The pager, with a whole-result file that may not be writable (a read-only run directory, a full disk).
+
+    The count and the page stay whole; the answer says the file was not written (all_results_error) and no
+    half file is left. LosslessPage itself is the pager every library tool carries, byte for byte.
+    """
+
+    error = None
+
+    def _give_up(self, exc):
+        self.error = "%s: %s" % (self.path.parent, exc.strerror or exc)
+        if self._out is not None:
+            try:
+                self._out.close()
+            except OSError:
+                pass
+            self._out = None
+        if self._tmp is not None:
+            try:
+                self._tmp.unlink()
+            except OSError:
+                pass
+            self._tmp = None
+
+    def add(self, row):
+        if self.error is not None:
+            self.total += 1
+            if len(self.page) < self.limit:
+                self.page.append(row)
+            return
+        try:
+            super().add(row)
+        except OSError as exc:
+            self._give_up(exc)
+
+    def finish(self):
+        if self.error is None:
+            try:
+                return super().finish()
+            except OSError as exc:
+                self._give_up(exc)
+        return {
+            "matched": self.total,
+            "returned": len(self.page),
+            "truncated": self.total > len(self.page),
+            "all_results_error": (
+                "the whole result could not be written (%s); the hits past the page are counted, not listed: "
+                "run again with a larger max_hits, or in a place that can be written" % self.error
+            ),
+        }
+
+
 # File signatures: name -> (header_hex, where the candidate file starts relative to the hit, note)
 SIGS = {
     "MZ":    ("4D5A", 0, "PE or DOS executable: two bytes, so many hits are not executables"),
@@ -151,13 +203,15 @@ def main():
         fail("path is required: the binary file to scan")
     if not os.path.isfile(path):
         fail("no such file", path=path)
+    if not isinstance(sig_name, str):
+        fail("sig is a signature name or all", sig=sig_name, signatures=sorted(SIGS))
     if sig_name != "all" and sig_name not in SIGS:
         fail("no such signature", sig=sig_name, signatures=sorted(SIGS), hint="sig is one of these names, or all")
     chosen = SIGS if sig_name == "all" else {sig_name: SIGS[sig_name]}
     headers = {name: bytes.fromhex(h) for name, (h, _a, _n) in chosen.items()}
     carry_len = max(len(h) for h in headers.values()) - 1
     size = os.path.getsize(path)
-    pages = {name: LosslessPage("sig_carve-" + name, [path, name, size, context], max_hits) for name in chosen}
+    pages = {name: SafePage("sig_carve-" + name, [path, name, size, context], max_hits) for name in chosen}
     totals = {name: 0 for name in chosen}
     capped = {}
 

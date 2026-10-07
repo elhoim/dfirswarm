@@ -13,7 +13,7 @@ What it finds, exactly: every occurrence of each needle, overlapping ones includ
 loses a match nor cuts its context. `source` names the stream: the file, or the image, the
 volume offset, the inode, and any sector size given. The stream is read once and never held whole.
 """
-import json, re, sys, subprocess, os
+import json, re, shutil, sys, subprocess, os
 
 TOOL = {"name": "chunk_needles", "version": 6}
 CHUNK_DEFAULT = 8 * 1024 * 1024
@@ -23,6 +23,7 @@ HITS_MAX = 1_000_000
 NEEDLES_MAX = 1000
 NEEDLE_BYTES_MAX = 4096
 ROW_CAP = 20_000_000
+SLICE = 256 * 1024                 # positions searched, sorted and emitted together: hits come out in offset order, whatever chunk is
 SECTOR_MAX = 65536
 INODE = re.compile(r"^\d+(-\d+(-\d+)?)?$")
 
@@ -247,7 +248,10 @@ def whole(args, key, default, low, high):
     return value
 
 
-args = json.load(sys.stdin)
+try:
+    args = json.load(sys.stdin)
+except ValueError as exc:
+    fail("arguments are not valid JSON", reason=str(exc))
 if not isinstance(args, dict):
     fail("arguments are a JSON object")
 needles = args.get("needles") or ""
@@ -269,6 +273,7 @@ if sector_size is not None and (not isinstance(sector_size, int) or isinstance(s
 write_values = args.get("write_values", False)
 if not isinstance(write_values, bool):
     fail("write_values is true or false")
+need_list = list(dict.fromkeys(need_list))          # a needle given twice is one needle
 if not need_list:
     fail("needles required, pipe-separated")
 if len(need_list) > NEEDLES_MAX:
@@ -320,12 +325,21 @@ def scan_fh(fh, source):
         process_end = have if at_end else have - (longest + context)
         if process_end > done:
             lo, hi = done - base, process_end - base
-            for name, enc, nb in variants:
-                stop = min(len(buf), hi + len(nb) - 1)
-                j = buf.find(nb, lo, stop)
-                while j >= 0:
+            a = lo
+            while a < hi:
+                b = min(hi, a + SLICE)
+                found = []
+                for vi, (name, enc, nb) in enumerate(variants):
+                    stop = min(len(buf), b + len(nb) - 1)
+                    j = buf.find(nb, a, stop)
+                    while j >= 0:
+                        found.append((j, vi))
+                        j = buf.find(nb, j + 1, stop)
+                found.sort()                          # by offset, then by needle order: the same list for any chunk
+                for j, vi in found:
+                    name, enc, nb = variants[vi]
                     emit(base + j, name, enc, nb, buf, base)
-                    j = buf.find(nb, j + 1, stop)
+                a = b
             done = process_end
         if at_end:
             break
@@ -356,7 +370,13 @@ else:
     if not os.path.isfile(image):
         print(json.dumps({"error": f"image not found: {image}"}))
         sys.exit(1)
-    offset = _resolve_offset(image, args.get("offset"))
+    given_offset = args.get("offset")
+    if given_offset is not None and (isinstance(given_offset, bool) or not isinstance(given_offset, int) or given_offset < 0):
+        fail("offset is a volume offset in sectors, a whole number", offset=given_offset)
+    if not shutil.which("icat"):
+        fail("icat is not on PATH", install="brew install sleuthkit, or apt-get install -y sleuthkit")
+    offset = _resolve_offset(image, given_offset)
+    inode = "-".join(str(int(p)) for p in str(inode).split("-"))      # 084284 is address 84284
     cmd = ["icat"] + (["-b", str(sector_size)] if sector_size else []) + ["-o", str(offset), image, str(inode)]
     source = {"kind": "icat", "image": image, "volume_offset_sectors": offset, "inode": str(inode),
               "sector_size": sector_size, "command": " ".join(cmd)}
@@ -372,7 +392,10 @@ else:
         errf.seek(0)
         err_text = errf.read().decode("utf-8", "replace").strip()
     if rc != 0:
-        print(json.dumps({"error": err_text or f"icat exit {rc}", "image": image, "inode": inode, "offset": offset, "scanned_bytes": scanned}))
+        secret.close()
+        print(json.dumps({"error": err_text or f"icat exit {rc}", "image": image, "inode": inode, "offset": offset, "scanned_bytes": scanned,
+                          "note": "what was found before icat failed is not a result; any locator or values file written meanwhile is partial",
+                          "secret_values": secret.summary()}))
         sys.exit(1)
 secret.close()
 print(json.dumps({

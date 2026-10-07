@@ -111,6 +111,27 @@ class ChunkNeedles(Case):
         self.assertEqual(r.code, 0, r.stdout + r.stderr)
         self.assertEqual(r.json["source"]["image"], "inputs/set/disk.E01")
 
+    def test_ids_order_and_the_inline_page_do_not_depend_on_the_chunk_and_a_needle_given_twice_is_one(self):
+        data = b"x" * 10 + "ab".encode("utf-16le") + b"-" * 40 + b"ab" + b"-" * 20
+        pages = {}
+        for chunk in (16, 33, 1000, 1 << 20):
+            r = self.file_run(data, "ab|ab", chunk=chunk, context=0, max_hits=3)
+            pages[chunk] = [(x["finding_id"], x["off"], x["enc"]) for x in r.json["hits"]["ab"]["locations"]]
+            self.assertEqual((r.json["hits"]["ab"]["ascii"], r.json["hits"]["ab"]["utf16le"]), (1, 1), chunk)
+        self.assertEqual(len({str(v) for v in pages.values()}), 1, pages)
+        self.assertEqual(pages[16], [("F000001", 10, "utf16le"), ("F000002", 54, "ascii")])
+
+    def test_a_leading_zero_is_the_same_address_and_icat_must_exist(self):
+        bin_dir = self.icat(b"needle")
+        r = self.inode_run(b"needle", "needle", inode="084284-128-4")
+        self.assertEqual(self.read(self.argv_file).split()[-1], "84284-128-4")
+        self.write("inputs/disk.E01", b"x")
+        empty = self.path("empty")
+        os.makedirs(empty)
+        r = run_tool("chunk_needles", {"needles": "n", "inode": 5, "image": "inputs/disk.E01"}, self.dir, only_path=empty)
+        self.assertEqual(r.code, 1)
+        self.assertIn("icat is not on PATH", r.json["error"])
+
 
 if __name__ == "__main__":
     unittest.main()

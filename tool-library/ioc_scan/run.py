@@ -37,6 +37,7 @@ NEEDLES_MAX = 1000
 NEEDLE_BYTES_MAX = 4096
 SEEN_CAP = 100_000                 # distinct contexts remembered for the inline view
 ROW_CAP = 20_000_000               # rows in the whole-result file; counting goes on past it
+SLICE = 256 * 1024                 # positions searched, sorted and emitted together: hits come out in offset order, whatever chunk is
 
 
 class SecretValuesRefused(Exception):
@@ -204,6 +205,7 @@ def main():
         fail("needles is a pipe-separated string or a list of strings")
     if not needles:
         needles = DEFAULT_NEEDLES
+    needles = list(dict.fromkeys(needles))          # a needle given twice is one needle
     if len(needles) > NEEDLES_MAX:
         fail("at most %d needles" % NEEDLES_MAX, given=len(needles))
     max_hits = whole(args, "max_hits", 80, 1, HITS_MAX)
@@ -291,11 +293,21 @@ def main():
             process_end = have if at_end else have - (longest + context)
             if process_end > done:
                 lo, hi = done - base, process_end - base
-                for kind, name, nb in variants:
-                    j = buf.find(nb, lo, min(len(buf), hi + len(nb) - 1))
-                    while j >= 0:
+                a = lo
+                while a < hi:
+                    b = min(hi, a + SLICE)
+                    found = []
+                    for vi, (kind, name, nb) in enumerate(variants):
+                        stop = min(len(buf), b + len(nb) - 1)
+                        j = buf.find(nb, a, stop)
+                        while j >= 0:
+                            found.append((j, vi))
+                            j = buf.find(nb, j + 1, stop)
+                    found.sort()                      # by offset, then by needle order: the same list for any chunk
+                    for j, vi in found:
+                        kind, name, nb = variants[vi]
                         emit(base + j, kind, name, nb, buf, base)
-                        j = buf.find(nb, j + 1, min(len(buf), hi + len(nb) - 1))
+                    a = b
                 done = process_end
             if at_end:
                 break

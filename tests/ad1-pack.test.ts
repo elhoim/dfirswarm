@@ -573,6 +573,54 @@ test("the item budget and the byte budget stop ad1_extract, keep what it wrote, 
   }
 });
 
+test("an item the walk did not reach before a budget stop is not claimed absent", async () => {
+  const cwd = runDir();
+  const r = await runPy(TOOL, cwd, { image: "inputs/case.ad1", members: [3, 5, 11], max_items: 1 }, undefined, { AGENT_ID: "s1" });
+  assert.equal(r.code, 1);
+  const res = JSON.parse(r.stdout);
+  assert.match(res.stopped_by_budget, /item budget of 1 items/);
+  const text = res.errors.join("\n");
+  assert.match(text, /item 11 was not reached before the call stopped/);
+  assert.doesNotMatch(text, /no item 11 in this read of the image/, "an item after the stop is not an item that is not there");
+});
+
+test("a locator with a digit that is not a decimal digit is refused with a message, not a traceback", async () => {
+  const cwd = runDir();
+  for (const bad of ["ad1:item=\u00b2", "ad1:item=\u0663", "ad1:item="]) {
+    const r = await runPy(TOOL, cwd, { image: "inputs/case.ad1", members: [bad] }, undefined, { AGENT_ID: "s1" });
+    assert.equal(r.code, 1, bad);
+    assert.doesNotMatch(r.stderr, /Traceback/, bad);
+    assert.match(JSON.parse(r.stdout).error, /an item number \(n\) or a locator/, bad);
+  }
+});
+
+test("a partial is kept by a rename where the file system holds no hard links", () => {
+  const cwd = dir("ad1-nolink-");
+  mkdirSync(join(cwd, "inputs"));
+  mkdirSync(join(cwd, "shim"));
+  writeFileSync(join(cwd, "shim", "sitecustomize.py"), "import os\n\ndef _no(*a, **k):\n    raise OSError(1, 'Operation not permitted')\n\nos.link = _no\n");
+  writeFileSync(join(cwd, "inputs", "big.ad1"), ad1Image([{ name: "big.bin", content: randomBytes(100000) }]));
+  const r = spawnSync("bash", ["-c", `ulimit -f 32; exec python3 '${TOOL}'`], { cwd, input: JSON.stringify({ image: "inputs/big.ad1" }), encoding: "utf8", env: { ...process.env, AGENT_ID: "s1", PYTHONPATH: join(cwd, "shim") } });
+  assert.equal(r.status, 1, r.stdout + r.stderr);
+  const base = join(cwd, "work", "s1", "ad1", "big");
+  assert.ok(existsSync(join(base, "big.bin.partial")), "what was written is kept, not removed because link() is refused");
+  assert.ok(!existsSync(join(base, "big.bin")));
+  const row = tsv(join(base, "ad1_extract.tsv"))[0];
+  assert.equal(Number(row.size), readFileSync(join(base, "big.bin.partial")).length);
+  assert.match(row.note, /partial: \d+ of 100000 bytes kept/);
+});
+
+test("the recipe does not call an image verified when a file in it records no digest", () => {
+  const d = dir("ad1-nohash-");
+  writeFileSync(join(d, "nohash.ad1"), ad1Image([{ name: "r.txt", content: B("no digests"), meta: [[2, 2, "1"]] }, { name: "ok.txt", content: B("fine") }]));
+  const { cov } = runRecipe([join(d, "nohash.ad1")]);
+  assert.equal(cov.status, "complete");
+  assert.equal((cov as Record<string, unknown>).integrity_status, "unverified");
+  assert.equal((cov as Record<string, unknown>).no_stored_hash, 1);
+  writeFileSync(join(d, "clean.ad1"), ad1Image([{ name: "a.txt", content: B("fine") }]));
+  assert.equal((runRecipe([join(d, "clean.ad1")]).cov as Record<string, unknown>).integrity_status, "verified");
+});
+
 test("the recipe's coverage says a mismatch apart from whether every item was processed, and a metadata chain longer than the reader allows is named", () => {
   const d = dir("ad1-integrity-");
   writeFileSync(join(d, "case.ad1"), ad1Image(tree()));

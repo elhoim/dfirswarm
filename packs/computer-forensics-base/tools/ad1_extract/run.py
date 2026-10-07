@@ -447,7 +447,7 @@ def parse_members(members):
     for m in members:
         if isinstance(m, int) and not isinstance(m, bool) and m >= 0:
             ns.add(m)
-        elif isinstance(m, str) and m.startswith("ad1:item=") and m[9:].isdigit():
+        elif isinstance(m, str) and m.startswith("ad1:item=") and m[9:].isascii() and m[9:].isdecimal() and len(m) <= 40:
             addrs.add(int(m[9:]))
         else:
             fail("members holds %s: an item number (n) or a locator (ad1:item=<address>) from members.tsv" % json.dumps(m))
@@ -497,8 +497,16 @@ def write_file(img, item, dest, notes, used, stop):
         part = dest.with_name(kept_name)
     kept = part.name
     try:
-        os.link(dest, part)            # fails where the name is taken: never over another file
-        os.unlink(dest)
+        try:
+            os.link(dest, part)        # fails where the name is taken: never over another file
+            os.unlink(dest)
+        except FileExistsError:
+            raise
+        except OSError:
+            # A file system with no hard links (exFAT, a mounted share): a rename, once the name is seen to be free.
+            if part.exists() or part.is_symlink():
+                raise
+            os.rename(dest, part)
         try:
             kept_size = os.path.getsize(part)
         except OSError:
@@ -597,6 +605,12 @@ def main():
         try:
             for item in img.walk():
                 n = item["n"]
+                if time.monotonic() > deadline and not reached[0]:
+                    reached[0] = "the time budget of %d seconds was reached" % budgets["max_seconds"]
+                if reached[0]:
+                    # Checked for every item, wanted or not: a long walk past the last wanted item is not free either.
+                    errors.append("stopped: %s; item %d (%s) and every item after it in the image's order were not examined" % (reached[0], n, esc(item["path"])))
+                    break
                 seen_n.add(n)
                 seen_addr.add(item["addr"])
                 parent_dir = children_of.get(item["parent"], "") if item["parent"] is not None else ""
@@ -680,10 +694,15 @@ def main():
     errors += img.walk_errors
     absent = sorted(want_n - seen_n) if want_n is not None else []
     gone = sorted(want_addr - seen_addr) if want_addr is not None else []
+    # After a stop (a budget, a manifest that could not be written) the walk did not reach the end of the image: an item not
+    # seen is not an item that is not there, and is not claimed to be absent.
+    walked_all = not (reached[0] or stopped)
     if absent:
-        errors.append("no item %s in this read of the image (it listed %d items)" % (", ".join(map(str, absent)), len(seen_n)))
+        errors.append(("no item %s in this read of the image (it listed %d items)" if walked_all else
+                       "item %s was not reached before the call stopped (it had looked at %d items): it is not claimed absent") % (", ".join(map(str, absent)), len(seen_n)))
     if gone:
-        errors.append("no item at %s in this read of the image" % ", ".join("ad1:item=%d" % a for a in gone))
+        errors.append(("no item at %s in this read of the image" if walked_all else
+                       "the item at %s was not reached before the call stopped: it is not claimed absent") % ", ".join("ad1:item=%d" % a for a in gone))
     if stopped:
         errors.insert(0, stopped)
     processing = "complete" if not errors else ("partial" if counts["files"] or counts["folders"] else "failed")

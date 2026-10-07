@@ -66,10 +66,12 @@ def resolve_output(out):
     never appear -- a later integrity check would report the evidence as
     modified.
     """
+    if not isinstance(out, str) or not out or "\x00" in out:
+        fail("output is a path under the run directory")
     root = Path.cwd().resolve()
     dest = (root / out).resolve() if not Path(out).is_absolute() else Path(out).resolve()
-    if dest != root and root not in dest.parents:
-        fail("output must stay inside the run directory", output=str(out))
+    if dest == root or root not in dest.parents:
+        fail("output must stay inside the run directory, not be the run directory itself", output=str(out))
     inputs = root / "inputs"
     if dest == inputs or inputs in dest.parents:
         fail("output cannot be under inputs/", output=str(out))
@@ -96,7 +98,7 @@ class Src:
         self.size = os.fstat(self.fh.fileno()).st_size
 
     def read(self, offset, n):
-        if offset < 0 or n < 0:
+        if offset < 0 or n < 0 or offset > self.size:
             return b""
         self.fh.seek(offset)
         return self.fh.read(n)
@@ -267,16 +269,18 @@ def carve_zip(src, off, limit):
         rel = pos - off
         if first is None:
             first = (end - off, n_total)
-        if 0xFFFFFFFF in (cd_size, cd_off) or n_total == 0xFFFF:
+        if cd_size == 0xFFFFFFFF or cd_off == 0xFFFFFFFF:
+            # ZIP64: the real directory offset and size are in the ZIP64 end record the locator before this one names.
             loc = src.read(pos - 20, 20)
             if len(loc) == 20 and loc[:4] == b"PK\x06\x07":
                 z64_rel = struct.unpack("<Q", loc[8:16])[0]
-                z = src.read(off + z64_rel, 56)
+                z = src.read(off + z64_rel, 56) if z64_rel <= limit - off else b""
                 if len(z) == 56 and z[:4] == b"PK\x06\x06":
-                    z_size, z_cd_size, z_cd_off = struct.unpack("<Q", z[4:12])[0], struct.unpack("<Q", z[40:48])[0], struct.unpack("<Q", z[48:56])[0]
+                    z_cd_size, z_cd_off = struct.unpack("<Q", z[40:48])[0], struct.unpack("<Q", z[48:56])[0]
                     if z_cd_off + z_cd_size == z64_rel and src.read(off + z_cd_off, 4) in (b"PK\x01\x02", b""):
                         return end - off, "validated", "ZIP64 end-of-central-directory record", ["the ZIP64 record's directory offset and size agree with where it stands"], notes
             continue
+        # n_total == 0xFFFF is an ordinary count of 65535 entries unless the sizes above say ZIP64.
         if cd_off + cd_size == rel and (cd_size == 0 or src.read(off + cd_off, 4) == b"PK\x01\x02"):
             return end - off, "validated", "end-of-central-directory record", [
                 "the directory (%d entries, %d bytes at +%d) ends where the end record starts, and begins with a central file header" % (n_total, cd_size, cd_off)], notes
@@ -305,6 +309,8 @@ def pdf_candidates(src, off, limit):
 
 def carve_pdf(src, off, limit):
     cands = pdf_candidates(src, off, limit)
+    capped = len(cands) >= PDF_EOF_LIMIT
+    cut = limit < src.size           # the source goes on past the window: a later revision may lie beyond it
     if not cands:
         raise Refuse("no %%EOF in the window: the PDF is longer than max_size, truncated, or this is not a PDF here")
     chosen, notes = None, []
@@ -328,6 +334,12 @@ def carve_pdf(src, off, limit):
         later = [c for c in cands if c["eof"] > chosen["eof"]]
         if later:
             notes.append("%d further %%EOF marker(s) lie after the end chosen (at +%s): bytes that belong to another object, or to a revision whose xref this check could not confirm" % (len(later), ", +".join(str(c["eof"]) for c in later[:5])))
+    if capped:
+        boundary = "heuristic"
+        notes.append("%d %%EOF markers were examined, the most this tool takes, so the revisions beyond them were not seen" % PDF_EOF_LIMIT)
+    if cut:
+        boundary = "heuristic"
+        notes.append("the window ended at max_size and the source goes on: a later revision beyond it was not seen; raise max_size to look")
     # trailing end-of-line bytes after the marker belong to the line
     tail = src.read(end, 2)
     for ch in tail:
@@ -564,7 +576,7 @@ def main():
     try:
         result = carve(path, offset, sig_type, max_size, dest)
     except Refuse as exc:
-        fail(str(exc), sig_type=sig_type, **exc.extra)
+        fail(str(exc), **{"sig_type": sig_type, **exc.extra})
     except OSError as exc:
         fail("the source could not be read: %s" % (exc.strerror or exc), path=path)
     except (struct.error, ValueError, OverflowError) as exc:

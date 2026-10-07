@@ -5,6 +5,7 @@ log's "ElfFile", the SQLite header string); each test places one at, and either
 side of, a read-block boundary and asks for it in files read with different block
 sizes, so a header cut by a boundary, or counted twice for it, shows as a wrong count.
 """
+import os
 import unittest
 
 from support import Case, run_tool
@@ -80,6 +81,31 @@ class SigCarve(Case):
         self.assertEqual((png["count"], png["returned"], png["truncated"]), (40, 5, True))
         rows = self.read(png["all_results"]).splitlines()
         self.assertEqual(len(rows), 40)
+
+    def test_a_signature_name_that_is_not_a_string_is_an_answer_not_a_traceback(self):
+        for bad in (["PNG"], {"a": 1}, 7):
+            r = self.scan(b"\x00" * 64, 64, bad)
+            self.assertEqual(r.code, 1, bad)
+            self.assertNotIn("Traceback", r.stderr)
+            self.assertIn("signature name", r.json["error"])
+
+    def test_a_whole_result_file_that_cannot_be_written_is_said_and_the_count_stays_whole(self):
+        if os.geteuid() == 0:
+            self.skipTest("root writes everywhere")
+        data = b"".join(b"\x00" * 30 + PNG for _ in range(40))
+        src = self.write("inputs/blob.bin", data)
+        os.makedirs(self.path("work"))
+        os.chmod(self.path("work"), 0o555)                    # work/ cannot be made into: the tool-output directory cannot be created
+        try:
+            r = run_tool("sig_carve", {"path": src, "sig": "PNG", "max_hits": 5}, self.dir)
+        finally:
+            os.chmod(self.path("work"), 0o755)
+        self.assertEqual(r.code, 0, r.stdout + r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+        png = r.json["signatures"]["PNG"]
+        self.assertEqual((png["count"], png["returned"], png["truncated"]), (40, 5, True))
+        self.assertNotIn("all_results", png)
+        self.assertIn("could not be written", png["all_results_error"])
 
 
 if __name__ == "__main__":

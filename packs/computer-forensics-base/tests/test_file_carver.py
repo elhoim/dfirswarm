@@ -257,6 +257,73 @@ class FileCarver(Case):
         struct.pack_into(">I", guess, 92, 0)
         self.assertEqual(self.carve(bytes(guess), "SQLite").json["boundary"], "heuristic")
 
+    # --- found by review: refusals, windows, counts ----------------------------------
+
+    def test_an_unsupported_type_and_a_missing_signature_are_json_refusals(self):
+        src = self.write("a.bin", b"\0" * 64)
+        r = run_tool("file_carver", {"path": src, "offset": 0, "sig_type": "ELF"}, self.dir)
+        self.assertEqual(r.code, 1)
+        self.assertEqual(r.json["sig_type"], "ELF")
+        self.assertIn("PNG", r.json["supported"])
+        r = run_tool("file_carver", {"path": src, "offset": 0, "sig_type": "PE"}, self.dir)
+        self.assertEqual((r.code, r.json["sig_type"]), (1, "PE"))
+        self.assertIn("not at the offset", r.json["error"])
+        self.assertNotIn("Traceback", r.stderr)
+
+    def test_an_output_that_is_the_run_directory_writes_nothing_anywhere(self):
+        run = self.path("run")
+        os.makedirs(run)
+        src = self.write("run/pic.png", png())
+        before = set(os.listdir(self.dir))
+        for bad in (".", "work/..", "a\x00b", ["x"], 5):
+            r = run_tool("file_carver", {"path": src, "offset": 0, "sig_type": "PNG", "output": bad}, run)
+            self.assertEqual(r.code, 1, bad)
+            self.assertNotIn("Traceback", r.stderr)
+        self.assertEqual(set(os.listdir(self.dir)), before, "something was written beside the run directory")
+        self.assertEqual([n for n in os.listdir(run) if n != "pic.png"], [])
+
+    def test_a_pdf_with_very_many_revisions_is_not_called_validated_past_the_cap(self):
+        body = b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\n"
+        xref_at = len(body)
+        body += b"xref\n0 2\n0000000000 65535 f \n0000000009 00000 n \ntrailer\n<< /Size 2 /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % xref_at
+        prev = xref_at
+        for i in range(1200):
+            obj = b"%d 0 obj\n<< >>\nendobj\n" % (i + 2)
+            at = len(body) + len(obj)
+            body += obj + b"xref\n%d 1\n%010d 00000 n \ntrailer\n<< /Size %d /Root 1 0 R /Prev %d >>\nstartxref\n%d\n%%%%EOF\n" % (i + 2, len(body), i + 3, prev, at)
+            prev = at
+        r = self.carve(body, "PDF")
+        self.assertEqual(r.code, 0, r.stdout)
+        self.assertEqual(r.json["boundary"], "heuristic")
+        self.assertTrue(any("most this tool takes" in n for n in r.json["notes"]), r.json["notes"])
+
+    def test_a_pdf_whose_window_is_cut_by_max_size_says_a_later_revision_may_lie_beyond(self):
+        data, first_len = pdf_two_revisions()
+        r = self.carve(data, "PDF", max_size=first_len + 20)
+        self.assertEqual(r.code, 0, r.stdout)
+        self.assertEqual(r.json["size"], first_len)
+        self.assertEqual(r.json["boundary"], "heuristic")
+        self.assertTrue(any("window ended at max_size" in n for n in r.json["notes"]), r.json["notes"])
+
+    def test_a_zip_with_65535_entries_is_validated_and_a_garbage_zip64_locator_is_skipped(self):
+        big = io.BytesIO()
+        with zipfile.ZipFile(big, "w", zipfile.ZIP_STORED) as z:
+            for i in range(65535):
+                z.writestr("f%d" % i, b"")
+        data = big.getvalue()
+        r = self.carve(data, "ZIP")
+        self.assertEqual((r.json["size"], r.json["boundary"]), (len(data), "validated"))
+        # A stored member that holds a ZIP64 locator with an absurd offset, then an end record that cannot be this archive's.
+        decoy = b"PK\x06\x07" + struct.pack("<IQI", 0, 0xFFFFFFFFFFFFFFF0, 1) + b"PK\x05\x06" + struct.pack("<HHHHIIH", 0, 0, 1, 1, 0xFFFFFFFF, 0xFFFFFFFF, 0)
+        outer = io.BytesIO()
+        with zipfile.ZipFile(outer, "w", zipfile.ZIP_STORED) as z:
+            z.writestr("decoy.bin", decoy)
+            z.writestr("tail.txt", "t" * 50)
+        raw = outer.getvalue()
+        r = self.carve(raw, "ZIP")
+        self.assertEqual(r.code, 0, r.stdout)
+        self.assertEqual((r.json["size"], r.json["boundary"]), (len(raw), "validated"))
+
     # --- the contract --------------------------------------------------------------
 
     def test_an_existing_output_is_not_overwritten(self):

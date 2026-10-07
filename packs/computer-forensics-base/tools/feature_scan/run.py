@@ -204,8 +204,21 @@ def main():
     if not isinstance(out_dir, str) or not out_dir:
         fail("out_dir is required: a directory under work/ that does not exist yet")
     out_dir = resolve_output(out_dir, "out_dir")
-    if os.path.exists(out_dir) and os.listdir(out_dir):
-        fail("out_dir already holds files; bulk_extractor refuses to write into one", out_dir=out_dir)
+    job_out = os.environ.get("OUT") if os.environ.get("JOB_ID") else None
+    if job_out:
+        # A job writes in one place, $OUT: a directory elsewhere would fail halfway, or leave bytes outside the sealed output.
+        out_root = Path(job_out).resolve()
+        if out_root not in (Path.cwd().resolve() / out_dir).resolve().parents:
+            fail("in a job out_dir is a directory under $OUT, the one place a job writes", out_dir=out_dir, out=str(out_root))
+    if os.path.lexists(out_dir):
+        if not os.path.isdir(out_dir):
+            fail("out_dir exists and is not a directory", out_dir=out_dir)
+        try:
+            holds = bool(os.listdir(out_dir))
+        except OSError as exc:
+            fail("out_dir cannot be listed (%s)" % (exc.strerror or exc), out_dir=out_dir)
+        if holds:
+            fail("out_dir already holds files; bulk_extractor refuses to write into one", out_dir=out_dir)
 
     binary = shutil.which("bulk_extractor")
     if not binary:
@@ -245,9 +258,12 @@ def main():
     # The child's words go to files beside out_dir while it runs (bulk_extractor makes out_dir itself and
     # refuses one that has files), and move into it after.
     parent = Path(out_dir).parent
-    parent.mkdir(parents=True, exist_ok=True)
-    tmp_out = tempfile.NamedTemporaryFile(dir=parent, prefix=".feature_scan-", suffix=".stdout", delete=False)
-    tmp_err = tempfile.NamedTemporaryFile(dir=parent, prefix=".feature_scan-", suffix=".stderr", delete=False)
+    try:
+        parent.mkdir(parents=True, exist_ok=True)
+        tmp_out = tempfile.NamedTemporaryFile(dir=parent, prefix=".feature_scan-", suffix=".stdout", delete=False)
+        tmp_err = tempfile.NamedTemporaryFile(dir=parent, prefix=".feature_scan-", suffix=".stderr", delete=False)
+    except OSError as exc:
+        fail("the directory out_dir would be made in cannot be written (%s)" % (exc.strerror or exc), out_dir=out_dir, parent=str(parent))
     timed_out = False
     try:
         proc = subprocess.run(argv, stdout=tmp_out, stderr=tmp_err, timeout=timeout)
@@ -315,7 +331,8 @@ def main():
     secret.close()
     features.sort(key=lambda f: -(f.get("lines") or 0))
     exit_ok = code == 0 and not timed_out
-    status = "complete" if exit_ok else ("partial" if files else "failed")
+    written = [f for f in files if f["file"] not in (stdout_file, stderr_file)]        # the child's own words are not what it wrote
+    status = "complete" if exit_ok else ("partial" if written else "failed")
     result = {
         "tool": TOOL,
         "path": path,
@@ -335,6 +352,7 @@ def main():
         "secret_values": secret.summary(),
         "files": files[:INVENTORY_SHOWN],
         "file_count": len(files),
+        "files_written_by_bulk_extractor": len(written),
         "empty_features_omitted": True,
         "note": "No feature value is returned: the feature files hold what the evidence held (addresses, account names, card numbers, "
                 "secrets), so read them in a job run with secret_output: true. Each line starts with the byte offset it was found at, and that "

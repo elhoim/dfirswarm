@@ -104,6 +104,17 @@ class IocScan(Case):
         self.assertEqual(run_tool("ioc_scan", {"path": self.dir, "needles": "x"}, self.dir).code, 1)
         self.assertEqual(run_tool("ioc_scan", {"path": self.path("none"), "needles": "x"}, self.dir).json["error"], "no such file")
 
+    def test_ids_order_and_the_inline_page_do_not_depend_on_the_chunk_and_a_needle_given_twice_is_one(self):
+        data = b"x" * 10 + b"AAA" + b"-" * 40 + b"BBB" + b"-" * 40 + b"AAA" + b"-" * 40 + b"BBB"
+        pages = {}
+        for chunk in (16, 33, 1000, 1 << 20):
+            r = self.scan(data, "AAA|BBB|AAA", chunk=chunk, context=0, max_hits=3, unique_only=False)
+            pages[chunk] = [(h["finding_id"], h["offset"], h["needle"]) for h in r.json["hits"]]
+            self.assertEqual(r.json["counts"], {"AAA": 2, "BBB": 2}, chunk)
+            self.assertEqual(r.json["matched"], 4, chunk)
+        self.assertEqual(len({str(v) for v in pages.values()}), 1, pages)
+        self.assertEqual(pages[16], [("F000001", 10, "AAA"), ("F000002", 53, "BBB"), ("F000003", 96, "AAA")])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -126,9 +126,14 @@ def _resolve_catalog(explicit=None, rev=None):
     import os
     root = "catalog"
     subs = sorted(d for d in os.listdir(root) if os.path.isdir(os.path.join(root, d)) and d not in RESERVED) if os.path.isdir(root) else []
+    if explicit and rev is not None and re.fullmatch(r"g\d{4}", str(explicit)):
+        _index(rev, strict=True)              # a generation id is looked up in the index, and an index that cannot be read is said so
     gens = _generations(rev)
     if explicit:
         if explicit in gens:
+            if not os.path.isdir(gens[explicit]):
+                raise SystemExit(json.dumps({"ok": False, "error": "generation %s is listed by revision %s but its directory %s is not here" % (explicit, rev, gens[explicit]),
+                                             "hint": "the catalogue was copied without it, or it was removed; nothing here says what it held"}))
             return gens[explicit]
         for cand in (explicit, os.path.join(root, explicit)):
             if os.path.isdir(cand) and os.path.basename(os.path.normpath(cand)) not in RESERVED:
@@ -159,11 +164,15 @@ args = json.load(sys.stdin)
 pattern = args.get("pattern") or ""
 which = args.get("which") or "filelist"
 flags = re.IGNORECASE if args.get("ignore_case", True) else 0
+LIMIT_MAX = 1000
 try:
-    limit = max(1, int(args.get("limit") or 50))
-    offset = max(0, int(args.get("offset") or 0))
+    limit = 50 if args.get("limit") is None else int(args["limit"])
+    offset = 0 if args.get("offset") is None else int(args["offset"])
 except (TypeError, ValueError):
     print(json.dumps({"ok": False, "error": "limit and offset must be whole numbers"}))
+    sys.exit(1)
+if not 1 <= limit <= LIMIT_MAX or offset < 0:
+    print(json.dumps({"ok": False, "error": "limit is a whole number from 1 to %d (every match is kept in a file when the page is not all of them) and offset is not negative" % LIMIT_MAX}))
     sys.exit(1)
 exclude = args.get("exclude") or ""
 if not isinstance(pattern, str) or not isinstance(exclude, str):
@@ -210,10 +219,23 @@ if which == "generations":
     # Every generation of the revision read, what it is and how far it got;
     # pattern filters by recipe, object and status; paged like any search.
     rows = [_about(g) for g in _index(revision, strict=True)]
-    rows = [r for r in rows if rx.search(" ".join(str(r.get(k) or "") for k in ("id", "recipe", "object", "status", "trigger")))]
-    page = rows[offset:offset + limit]
-    result = {"which": "generations", "revision": revision, "pattern": pattern, "matched": len(rows), "offset": offset, "returned": len(page), "generations": page}
-    if offset + len(page) < len(rows):
+    kept, interrupted = [], False
+    try:
+        for r in rows:
+            if rx.search(" ".join(str(r.get(k) or "") for k in ("id", "recipe", "object", "status", "trigger"))):
+                kept.append(r)
+    except _Budget:
+        interrupted = True
+    finally:
+        if hasattr(signal, "setitimer"):
+            signal.setitimer(signal.ITIMER_REAL, 0)
+    page = kept[offset:offset + limit]
+    result = {"which": "generations", "revision": revision, "pattern": pattern, "matched": len(kept), "offset": offset, "returned": len(page), "generations": page,
+              "complete": not interrupted}
+    if interrupted:
+        result["interrupted"] = ("the search stopped at its %d-second budget: the generations listed are those matched up to there, so matched is a lower bound "
+                                 "(a pattern that backtracks badly does this; simplify it)" % budget)
+    if offset + len(page) < len(kept):
         result["next_offset"] = offset + len(page)
     print(json.dumps(result))
     sys.exit(0)
@@ -283,7 +305,7 @@ if job and job_out:
     keep_dir = os.path.join(job_out, "catalog-search")
     shown_dir = "store/jobs/%s/out/catalog-search" % re.sub(r"[^A-Za-z0-9_.-]", "_", job)
 else:
-    keep_dir = os.path.join("work", os.environ.get("AGENT_ID") or "catalog-search", "catalog-search")
+    keep_dir = os.path.join("work", re.sub(r"[^A-Za-z0-9_.-]", "_", os.environ.get("AGENT_ID") or "catalog-search").strip(".") or "catalog-search", "catalog-search")
     shown_dir = keep_dir
 keep = os.path.join(keep_dir, "%s-%s.txt" % (which, key))
 shown = os.path.join(shown_dir, "%s-%s.txt" % (which, key))
@@ -317,11 +339,12 @@ try:
                 too_long += 1
                 continue
             line = raw.decode("utf-8", "replace")
+            line = line[:-2] if line.endswith("\r\n") else line[:-1] if line.endswith("\n") else line      # the line's own terminator, CRLF or LF, is not part of it
             if rx.search(line):
                 if ex and ex.search(line):
                     continue
                 total += 1
-                text = line.rstrip("\n")
+                text = line
                 if all_out:
                     all_out.write("%d\t%s\n" % (i, text))
                 if total > offset and len(hits) < limit:

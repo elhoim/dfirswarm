@@ -9,7 +9,7 @@
     },
     "out_dir": {
       "type": "string",
-      "description": "Where the feature files land, under work/. Must not already exist.",
+      "description": "Where the feature files land: a directory under work/ (in a job, under $OUT, the one place a job writes). It must not already hold files.",
       "required": true
     },
     "only": {
@@ -43,5 +43,5 @@
   "by": "maintainer",
   "at": "2026-09-22T14:00:00.000Z",
   "version": 3,
-  "sha256": "6d07f300e6b15693b379e105bf2a5b1f178c48ee85ad329f5f3ad2439258b4c3"
+  "sha256": "6994cd25fd9df0cff4502536b3bc82943f621cfa09fc3a0921aed894de54c254"
 }

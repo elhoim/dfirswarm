@@ -1,6 +1,6 @@
 {
   "name": "sig_carve",
-  "description": "A signature scan: find where known file headers (magic bytes) occur in a binary file, in one pass over it, and return every offset with a short preview. It carves nothing and estimates no size: a hit is where the bytes occur, not a file, so cut a decisive hit with file_carver (or read it in place) and check it with a parser of that format. Each header is found once, at its true offset, whatever the read size; an unknown signature name is an error, not an empty result. SCCA hits name candidate_start (the hit minus 4). The answer says which file and what range were scanned. The file is read as given: an E01 or other container is its container bytes, not the disk inside.",
+  "description": "A signature scan: find where known file headers (magic bytes) occur in a binary file, in one pass over it, and count every offset: the first max_hits of each signature come back with a preview (up to 32 bytes in hex and 64 as ASCII, none when context is 0), and every hit is in all_results when there are more. It carves nothing and estimates no size: a hit is where the bytes occur, not a file, so cut a decisive hit with file_carver (or read it in place) and check it with a parser of that format. Each header is found once, at its true offset, whatever the read size; an unknown signature name is an error, not an empty result. SCCA hits name candidate_start (the hit minus 4). The answer says which file and what range were scanned. The file is read as given: an E01 or other container is its container bytes, not the disk inside.",
   "params": {
     "path": {
       "type": "string",
@@ -17,7 +17,7 @@
     },
     "max_hits": {
       "type": "integer",
-      "description": "Hits returned inline per signature (default 500); every hit is in all_results when there are more"
+      "description": "Hits returned inline per signature (default 500); every hit is in all_results when there are more (a file that cannot be written is said in all_results_error, and the count stays whole)"
     },
     "window_bytes": {
       "type": "integer",
@@ -31,5 +31,5 @@
   "by": "s183906",
   "at": "2026-09-18T22:13:29.602Z",
   "version": 2,
-  "sha256": "d268bca1320603bb17d6bc0370047f0afafdd651ddac48f283c580943ddff495"
+  "sha256": "b8df9f31f8d96e5055a83b8a5c58340da60cac8fc9c3b01d8cc8c9a2a496261f"
 }

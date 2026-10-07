@@ -490,6 +490,7 @@ def row_of(img, item, w, deadline, cov, escapes):
                     sha256 = hs[2].hexdigest()
                     if not md5 and not sha1:
                         check = "no-stored-hash"
+                        cov["no_stored_hash"] += 1
                     elif (md5 and md5 != hs[0].hexdigest()) or (sha1 and sha1 != hs[1].hexdigest()):
                         check = "mismatch"
                         flags.append("hash-mismatch")
@@ -527,7 +528,7 @@ def run(target, paths, out_dir):
     deadline = time.monotonic() + limits() * 0.9      # past this, no further file's content is inflated
     os.makedirs(out_dir, exist_ok=True)
     cov = {"recipe": "ad1-items", "target": paths[0], "format": "AD1", "items": 0, "files": 0, "folders": 0, "checked": 0,
-           "mismatches": [], "unread_at_limit": 0, "segments_missing": [],
+           "mismatches": [], "no_stored_hash": 0, "unread_at_limit": 0, "segments_missing": [],
            "covered": "every item of the image's tree, with its metadata, and each file's content inflated and checked against the digests the image records",
            "not_covered": "anything the imager did not put in the image (a logical image holds no unallocated space, and slack only where it was taken as an item); files inside the files; an encrypted (ADCRYPT) image",
            "limits_hit": [], "errors": []}
@@ -539,7 +540,7 @@ def run(target, paths, out_dir):
     def finish(status, code):
         cov["status"] = status
         if "integrity_status" not in cov:
-            cov["integrity_status"] = "mismatch" if cov["mismatches"] else "unverified" if cov["files"] > cov["checked"] else "verified" if cov["files"] else "not_applicable"
+            cov["integrity_status"] = "mismatch" if cov["mismatches"] else "unverified" if cov["files"] > cov["checked"] or cov["no_stored_hash"] else "verified" if cov["files"] else "not_applicable"
         write_cov()
         print(json.dumps({"ok": code == 0, "status": status, "format": "AD1", "items": cov["items"]}))
         return code

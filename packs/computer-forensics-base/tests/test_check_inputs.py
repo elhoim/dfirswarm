@@ -127,6 +127,45 @@ class CheckInputs(Case):
         r = self.check()
         self.assertEqual((r.code, r.json["error"]), (1, "inputs.json not found"))
 
+    def test_a_name_that_is_not_utf8_does_not_stop_the_receipts_and_is_reported(self):
+        raw = b"inputs/caf\xe9.txt"
+        self.manifest([{"path": raw.decode("utf-8", "replace"), "path_b64": base64.b64encode(raw).decode(), "bytes": 11, "sha256": sha(b"x")}])
+        r = self.check()
+        self.assertEqual(r.code, 1)
+        self.assertEqual(len(r.json["missing"]), 1)
+        rows = [json.loads(x) for x in self.read(r.json["receipts_file"]).splitlines()]
+        self.assertEqual([x["result"] for x in rows], ["missing"])
+
+    def test_two_checks_in_one_directory_keep_two_receipt_files(self):
+        self.write("inputs/a.bin", b"alpha")
+        self.manifest([{"path": "inputs/a.bin", "bytes": 5, "sha256": sha(b"alpha")}])
+        first = self.check().json["receipts_file"]
+        second = self.check().json["receipts_file"]
+        self.assertNotEqual(first, second)
+        self.assertEqual(len(self.read(first).splitlines()), 1)
+        self.assertEqual(len(self.read(second).splitlines()), 1)
+
+    def test_a_directory_that_cannot_be_listed_is_unreadable_and_not_a_pass(self):
+        if os.geteuid() == 0:
+            self.skipTest("root lists every directory")
+        self.write("inputs/a.bin", b"alpha")
+        locked = self.path("inputs/locked")
+        os.makedirs(locked)
+        self.manifest([{"path": "inputs/a.bin", "bytes": 5, "sha256": sha(b"alpha")}])
+        os.chmod(locked, 0)
+        try:
+            r = self.check()
+        finally:
+            os.chmod(locked, 0o755)
+        self.assertEqual((r.code, r.json["ok"]), (1, False))
+        self.assertEqual([u["path"] for u in r.json["unreadable"]], ["inputs/locked"])
+
+    def test_a_budget_beyond_the_tools_own_time_limit_is_refused(self):
+        self.manifest([])
+        r = self.check(max_seconds=7200)
+        self.assertEqual(r.code, 1)
+        self.assertIn("from 1 to 1700", r.json["error"])
+
 
 if __name__ == "__main__":
     unittest.main()
