@@ -521,6 +521,12 @@ pass "feature_scan, zeek_run, sigma_hunt, unified_log and doc_probe write under 
 # caller's naming wrote there unchecked as well: cloud, macOS, triage, network
 # and Linux. The same refusals, before anything is read or run.
 more() { # <run.py> <key> <path>
+  # The cloud tools refuse an argument they do not take (a typo would otherwise return an unfiltered answer that looks filtered),
+  # so they get only the path and the output key; the others take the one bag of every name.
+  if [[ "$1" == */cloud-forensics/* ]]; then
+    (cd "$OUT/run" && printf '{"path":"inputs/blob.bin","%s":"%s"}' "$2" "$3" | PATH="$OUT/pyonly" "$OUT/pyonly/python3" "$1")
+    return
+  fi
   (cd "$OUT/run" && printf '{"path":"inputs/blob.bin","source":"inputs/blob.bin","db":"inputs/blob.bin","rules":"inputs/blob.bin","root":"inputs","%s":"%s"}' "$2" "$3" \
     | PATH="$OUT/pyonly" "$OUT/pyonly/python3" "$1")
 }
