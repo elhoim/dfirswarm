@@ -183,7 +183,7 @@ test("the goal's check on answer 6 is one awk, so that no pipe can be closed ear
   };
   assert.equal(run(report("Sessions were revoked at 14:00 (E-4).")), 0);
   assert.equal(run(report("Revocation of sessions is not established.")), 0);
-  assert.equal(run(report("Only the reset time is evidenced."), "## 8.\nSessions were revoked.\n"), 1, "a word in another section does not count");
+  assert.equal(run(report("Only the reset time is evidenced.", "## 8.\nSessions were revoked.\n")), 1, "a word in another section does not count");
 });
 
 test("pwsh and aws are said to be an operator's acquisition tools, in requires and not in a skill", () => {
