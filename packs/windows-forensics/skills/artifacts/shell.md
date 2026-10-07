@@ -11,9 +11,9 @@ Use when a path, volume or share must be traced through what the shell kept. Not
 
 These are references the shell kept, not records that something was done. They outlive the file they name, and none names a person. For each, say what it holds, which clock its times are on, and what else would have to be true for the claim you want.
 
-- Links: `Users/<u>/AppData/Roaming/Microsoft/Windows/Recent/*.lnk` and any link an application wrote elsewhere. A link's own file times are separate from the times stored inside it. Read `artifacts/links` for `lnk_parse`.
-- Jump Lists: the `AutomaticDestinations` and `CustomDestinations` folders beside Recent; the file name is an application id, which this pack does not map. Read `artifacts/jumplists` for `jumplist`.
-- ShellBags: the BagMRU trees of `UsrClass.dat` (`Local Settings\Software\Microsoft\Windows\Shell`) and `NTUSER.DAT` (`Software\Microsoft\Windows\Shell`, `ShellNoRoam` in older hives). Read `artifacts/shellbags` for `shellbags`.
+- Links: `Users/<u>/AppData/Roaming/Microsoft/Windows/Recent/*.lnk` and any link an application wrote elsewhere. A link's own file times are separate from the times stored inside it. Open `artifacts/links` (`lnk_parse`) only if you read a link.
+- Jump Lists: the `AutomaticDestinations` and `CustomDestinations` folders beside Recent; the file name is an application id, which this pack does not map. Open `artifacts/jumplists` (`jumplist`) only if you read one.
+- ShellBags: the BagMRU trees of `UsrClass.dat` (`Local Settings\Software\Microsoft\Windows\Shell`) and `NTUSER.DAT` (`Software\Microsoft\Windows\Shell`, `ShellNoRoam` in older hives). Open `artifacts/shellbags` (`shellbags`) only if you read BagMRU or the recent-document keys.
 
 Collect the set per profile, with each hive's logs beside it (hive state: `registry/overview`). A profile that was not collected is a gap, not an empty profile.
 

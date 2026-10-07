@@ -17,3 +17,5 @@ Use when you read BagMRU, RecentDocs or OpenSavePidlMRU. Not for links (`artifac
 - RecentDocs (by extension) and `ComDlg32\OpenSavePidlMRU` come back from `regkv` as hex, nothing decoded. `MRUListEx` is 32-bit little-endian slot numbers, most recent first, ended by FFFFFFFF; registry enumeration order is not recency. A name read by eye from hex is a candidate.
 
 Shows: that a shell component opened that folder on this account, including folders on devices and shares that are gone. Does not show: who, that a file in it was opened, that the folder still exists, or when it was first or last viewed. Record: the root, full BagMRU path, value slot, MRU position, item type, and whether the name was decoded or found by strings.
+
+Sensitive output: `regkv` withholds secret-bearing values by name or place only; a shell item name is a path, not a credential.

@@ -18,4 +18,4 @@ Four things must agree before a provenance sentence is written: the browser's re
 
 Shows: the browser's account of a transfer. Does not show: that it finished, that the file is the one on disk now, that it was opened or run, or an origin that no record or stream names. Record: download id, URL chain (secrets withheld), state, bytes received and total, target path, Zone.Identifier content, the file's hash.
 
-Sensitive output: URLs in a download row can carry tokens; `browser_history` masks them as it does for visits (`browser/artefacts`).
+Sensitive output: URLs in a download row can carry tokens; `browser_history` withholds them as it does for visits (`browser/artefacts`).
