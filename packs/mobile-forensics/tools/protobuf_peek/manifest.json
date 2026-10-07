@@ -1,30 +1,50 @@
 {
   "name": "protobuf_peek",
-  "description": "Decode a protobuf blob without its schema: field numbers, wire types and values, with nested messages unwrapped and length-delimited fields read as text where they are text. For the Android and iOS artefacts that stopped being SQLite.",
+  "description": "Read the wire structure of a protobuf message without its schema: for each field its number, wire type, absolute byte offset and full field-number path (3.1.2), with nested messages unwrapped. WIRE STRUCTURE, NOT MEANING: no field name, unit, enum or signedness is known without the .proto file; a varint is returned raw with its zigzag reading (and its two's-complement reading where the top bit is set), a length-delimited field is a guess between a nested message, text and bytes (read_as, with also_reads_as for the other readings it could be). A message is checked as the encoding defines it: a varint is at most ten bytes, a field number is 1 to 536870911, wire types 6 and 7 do not exist, and a field that runs past its message is an error with its offset; a group (wire types 3 and 4, deprecated) makes the message unsupported and nothing after it is read. consistent_with_protobuf_wire_format means the whole window parsed, which a short or ordinary blob can do by chance. SENSITIVE: a string or bytes field can hold message text or a credential, so the answer carries numbers but never the text of a string or the bytes of a bytes field (offset, length and reading only); those values are written only on write_values: true, in a job run with secret_output: true, to $OUT/protobuf-values.jsonl (mode 0600, created first, refused if it exists; refused outside a job). hex puts the message in the call, and a call is recorded in the trace: use a path for anything that may be sensitive (hex is limited to 64 KiB). Only a bounded window is read (length, default 8 MiB, at most 64 MiB): what lies past it is counted and next_offset says where to continue. Budgets: max_depth (default 6, at most 32), max_fields including those tried as a nested message (default 100000, at most 500000) and max_seconds; a budget that ends the parse is reported (partial), never silent. There is no universal protobuf signature, so this tool declares no automatic file match.",
   "params": {
     "path": {
       "type": "string",
-      "description": "A file holding one protobuf message"
+      "description": "A file holding one protobuf message (or a message at `offset` in it)"
     },
     "hex": {
       "type": "string",
-      "description": "The message as hex, instead of a file"
+      "description": "The message as hexadecimal instead of a file (at most 64 KiB; the call, and so the message, is recorded in the trace)"
     },
     "offset": {
       "type": "integer",
-      "description": "Start decoding at this byte offset"
+      "description": "Start decoding at this byte offset of the file (offsets in the answer are absolute)"
+    },
+    "length": {
+      "type": "integer",
+      "description": "Bytes to decode from offset (default: up to 8 MiB; at most 64 MiB); the answer says what lies after the window"
     },
     "max_depth": {
       "type": "integer",
-      "description": "How deep to unwrap nested messages (default 6)"
+      "description": "How deep to try fields as nested messages (default 6, at most 32)"
+    },
+    "max_fields": {
+      "type": "integer",
+      "description": "Fields to parse, tentative nested readings included (default 100000, at most 500000)"
+    },
+    "max_seconds": {
+      "type": "number",
+      "description": "Stop parsing after this long (default 60)"
+    },
+    "limit": {
+      "type": "integer",
+      "description": "Fields in the inline answer (default 200, and at most 1 MiB of rows); the whole list is in the file the answer names"
+    },
+    "write_values": {
+      "type": "boolean",
+      "description": "Write the text of string fields and the hexadecimal of bytes fields to $OUT/protobuf-values.jsonl (default false). Refused unless the tool runs as a job, which must be run with secret_output: true; the answer never carries them"
     }
   },
   "runtime": "python3",
   "entry": "run.py",
-  "timeout_seconds": 60,
-  "example": "{\"path\": \"work/extracted/usagestats/0/daily/1771070000\"}",
+  "timeout_seconds": 120,
+  "example": "{\"path\": \"work/extracted/usagestats/0/daily/1771070000\", \"limit\": 100}",
   "by": "maintainer",
   "at": "2026-09-22T20:00:00.000Z",
-  "version": 1,
-  "sha256": "ba7b8b401c22e223c8bdac0262b5b5cdecc4c40eb04a27417fc15156f42fef62"
+  "version": 2,
+  "sha256": "ca7befb247150ed5f2b9374a81a4a11faf8b3c3e1a363e195e67443b05b5a67e"
 }

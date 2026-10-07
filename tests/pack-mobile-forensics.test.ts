@@ -1,0 +1,1069 @@
+/**
+ * The mobile pack's three tools and its recipes, against fixtures the test builds from the formats' own
+ * layouts and never from a tool's output.
+ *
+ * SQLite (sqlite_freespace): the file format's own layout. Page 1 starts with a 100-byte header (the page
+ * size is the big-endian u16 at 16, 1 meaning 65536; the freelist's first trunk page is the u32 at 32 and
+ * its length the u32 at 36; the text encoding the u32 at 56). A b-tree page's header sits at byte 0 of the
+ * page (byte 100 of page 1): type at +0 (2, 5, 10, 13), the first freeblock at +1 (u16), the cell count at
+ * +3, the start of the cell content at +5. A freeblock is a u16 next offset and a u16 size, then the freed
+ * bytes; the offsets are from the start of the page. A freelist trunk page holds a u32 next trunk, a u32 leaf
+ * count and that many u32 leaf page numbers. The databases themselves are made by Python's sqlite3, the
+ * reference writer of the format here, and every expected position is found by walking the file with the
+ * rules above or by searching the bytes, never by asking the tool.
+ *
+ * Backups (manifest_db): Manifest.db's Files table, with the keyed archive Apple's NSKeyedArchiver writes in
+ * `file` ($archiver, $version, $top with a root UID, and $objects: "$null", the root dictionary, its class).
+ * plistlib builds them.
+ *
+ * Protobuf (protobuf_peek): the wire format by hand: key = (field << 3) | type, base-128 varints, type 2
+ * followed by a length.
+ *
+ * To see that a test fails on the code it was written against, point MOBILE_PACK at a copy of the pack as it
+ * was before the fixes:
+ *
+ *   git archive origin/claude/pack-standard-and-links packs/mobile-forensics | tar -x -C /tmp/old
+ *   MOBILE_PACK=/tmp/old/packs/mobile-forensics node --experimental-strip-types --test tests/pack-mobile-forensics.test.ts
+ *
+ * The tools follow the secret-safe output pattern of recovery_key_scan (docs/packs.md, "Secrets and
+ * sensitive output"): what they print and write is checked for a value, a fragment and a digest, in the
+ * answer and in every file the answer names.
+ */
+import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { mkdir, readFile, readdir, stat, symlink, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { test } from "node:test";
+import { ROOT, runPy, runPySnippet, withCwd } from "./tool-library-harness.ts";
+
+const PACK = process.env.MOBILE_PACK ?? join(ROOT, "packs", "mobile-forensics");
+const TOOLS = join(PACK, "tools");
+const FREESPACE = join(TOOLS, "sqlite_freespace", "run.py");
+const MANIFEST = join(TOOLS, "manifest_db", "run.py");
+const PROTOBUF = join(TOOLS, "protobuf_peek", "run.py");
+const AGENT = { AGENT_ID: "s1" };
+const RECOVERY_NAME = "123456-654321-111111-222222-333333-444444-555555-666666";
+
+type Run = { code: number | null; stdout: string; stderr: string };
+
+async function tool(script: string, cwd: string, args: unknown, env: Record<string, string> = {}, bin?: string): Promise<Run> {
+  return runPy(script, cwd, args, bin, { ...AGENT, ...env });
+}
+
+/** The tool as a job runs it: JOB_ID and OUT set, OUT inside the run directory. `name` keeps two runs apart. */
+async function asJob(script: string, cwd: string, args: unknown, name = "out", job = "j-1"): Promise<Run> {
+  await mkdir(join(cwd, name), { recursive: true });
+  return tool(script, cwd, args, { JOB_ID: job, OUT: join(cwd, name) });
+}
+
+function body<T>(out: Run): T {
+  assert.equal(out.code, 0, out.stderr + out.stdout);
+  assert.doesNotMatch(out.stderr, /Traceback/);
+  return JSON.parse(out.stdout) as T;
+}
+
+function refused(out: Run): { error: string; [key: string]: unknown } {
+  assert.notEqual(out.code, 0, out.stdout);
+  assert.doesNotMatch(out.stderr, /Traceback/);
+  return JSON.parse(out.stdout) as { error: string };
+}
+
+const sha256 = (data: Buffer | string): string => createHash("sha256").update(data).digest("hex");
+
+async function exists(path: string): Promise<boolean> {
+  return stat(path).then(() => true, () => false);
+}
+
+/** Run a Python fixture builder; its argv follows the code. */
+async function build(code: string, ...args: string[]): Promise<void> {
+  const out = await runPySnippet(code, args, null);
+  assert.equal(out.code, 0, out.stderr);
+}
+
+/** Every regular file under a directory (not following links), with its bytes. */
+async function filesUnder(dir: string): Promise<{ path: string; data: Buffer }[]> {
+  const found: { path: string; data: Buffer }[] = [];
+  const walk = async (d: string): Promise<void> => {
+    for (const entry of await readdir(d, { withFileTypes: true })) {
+      const p = join(d, entry.name);
+      if (entry.isDirectory()) await walk(p);
+      else if (entry.isFile()) found.push({ path: p, data: await readFile(p) });
+    }
+  };
+  await walk(dir);
+  return found;
+}
+
+/** A needle as every encoding a tool could print it in. */
+function forms(text: string): Buffer[] {
+  const utf8 = Buffer.from(text, "utf8");
+  return [utf8, Buffer.from(text, "utf16le"), Buffer.from(utf8.toString("base64"), "ascii"), Buffer.from(utf8.toString("hex"), "ascii"),
+    Buffer.from(sha256(utf8), "ascii")];
+}
+
+/** Everything a tool wrote or printed, except the one file that is allowed to hold the values. */
+async function assertNowhere(text: string, stdout: string, dir: string, allowed: string[]): Promise<void> {
+  for (const form of forms(text)) {
+    assert.equal(Buffer.from(stdout, "utf8").indexOf(form), -1, "the answer holds " + JSON.stringify(text) + " (or an encoding or digest of it)");
+    for (const file of await filesUnder(dir)) {
+      if (allowed.some((a) => file.path.endsWith(a))) continue;
+      assert.equal(file.data.indexOf(form), -1, file.path + " holds " + JSON.stringify(text) + " (or an encoding or digest of it)");
+    }
+  }
+}
+
+async function jsonl<T>(path: string): Promise<T[]> {
+  const text = await readFile(path, "utf8");
+  return text.split("\n").filter(Boolean).map((l) => JSON.parse(l) as T);
+}
+
+// --- SQLite fixtures ---------------------------------------------------------------
+
+/** A database with 16 rows in one table, the ninth and the fifteenth deleted: their cells are on page 2's freeblock chain. */
+const FREEBLOCK_DB = String.raw`
+import sqlite3, sys
+path, marker, encoding = sys.argv[1:4]
+db = sqlite3.connect(path)
+if encoding != "utf-8":
+    db.execute("PRAGMA encoding = '%s'" % encoding)
+db.execute("PRAGMA secure_delete = OFF")
+db.execute("CREATE TABLE message (id INTEGER PRIMARY KEY, body TEXT)")
+rows = [(i, "keep-%02d-" % i + "k" * 30) for i in range(1, 9)]
+rows.append((9, marker + "-" + "x" * 30))
+rows += [(i, "tail-%02d-" % i + "t" * 30) for i in range(10, 14)]
+rows.append((14, "keep-14-" + "k" * 30))
+rows.append((15, "SECOND-DELETED-ROW-" + "y" * 30))
+rows.append((16, "keep-16-" + "k" * 30))
+db.executemany("INSERT INTO message VALUES (?, ?)", rows)
+db.commit()
+db.execute("DELETE FROM message WHERE id IN (9, 15)")
+db.commit()
+db.close()
+`;
+
+/** A database whose deleted rows free whole pages: the freelist has a trunk and leaves. */
+const FREELIST_DB = String.raw`
+import sqlite3, sys
+path, marker = sys.argv[1:3]
+db = sqlite3.connect(path)
+db.execute("PRAGMA secure_delete = OFF")
+db.execute("CREATE TABLE message (id INTEGER PRIMARY KEY, body TEXT)")
+db.executemany("INSERT INTO message VALUES (?, ?)", [(i, marker + "-%03d-" % i + "w" * 900) for i in range(1, 41)])
+db.commit()
+db.execute("DELETE FROM message")
+db.commit()
+db.close()
+`;
+
+type Fragment = {
+  finding_id: string; page: number; where: string; encoding: string; offset: number; offset_verified: boolean;
+  bytes: number; characters: number; block_offset?: number; text?: string; value?: string;
+};
+type Paged = { matched: number; returned: number; truncated: boolean; all_results?: string };
+type Free = {
+  db: string; parser: string; status: string; fragments: Fragment[]; fragment_count: number; fragments_found_before_filter: number;
+  problems: { kind: string; detail: string }[]; problem_kinds: Record<string, number>; stopped_before_page: number | null;
+  database: { page_size: number; text_encoding: string; bytes: number; pages_in_file: number; journal_mode_on_disk: string };
+  freelist: { declared: number; walked: number; trunk_pages: number };
+  scanned: Record<string, number>; encodings_scanned: string[];
+  companions: Record<string, { bytes: number; examined: boolean }>;
+  secret_values: { requested: boolean; written: number; values_file: string | null; contains_secret_values: boolean };
+  pages: { fragments: Paged; problems: Paged }; paths_withheld: number; truncated: boolean;
+};
+type Value = { finding_id: string; file: string; page: number; where: string; encoding: string; offset: number; bytes: number; characters: number; value: string };
+
+/** The freeblocks of every b-tree page, by walking the file with the format's own rules. */
+function freeblocks(file: Buffer): { page: number; block: number; size: number; base: number }[] {
+  let pageSize = file.readUInt16BE(16);
+  if (pageSize === 1) pageSize = 65536;
+  const out: { page: number; block: number; size: number; base: number }[] = [];
+  for (let p = 1; p <= file.length / pageSize; p++) {
+    const base = (p - 1) * pageSize;
+    const at = base + (p === 1 ? 100 : 0);
+    if (![2, 5, 10, 13].includes(file[at])) continue;
+    let block = file.readUInt16BE(at + 1);
+    for (let guard = 0; block && guard < 100; guard++) {
+      const size = file.readUInt16BE(base + block + 2);
+      out.push({ page: p, block, size, base });
+      block = file.readUInt16BE(base + block);
+    }
+  }
+  return out;
+}
+
+async function freespace(cwd: string, db: string, args: Record<string, unknown> = {}, name = "out"): Promise<{ answer: Free; values: Value[]; out: string; run: Run }> {
+  const run = await asJob(FREESPACE, cwd, { db, write_values: true, ...args }, name);
+  const answer = body<Free>(run);
+  const valuesFile = join(cwd, name, "sqlite-freespace-values.jsonl");
+  let values = (await exists(valuesFile)) ? await jsonl<Value>(valuesFile) : [];
+  if (!values.length && answer.fragments.some((f) => f.text !== undefined)) {
+    // The tool as it was before the fix printed each fragment's text in the answer: read it from there, so that a
+    // test run against that code fails on the assertion that names the defect.
+    values = answer.fragments.map((f, i) => ({ finding_id: `old${i}`, file: db, page: f.page, where: f.where, encoding: f.encoding, offset: f.offset,
+      bytes: Buffer.byteLength(f.text ?? ""), characters: [...(f.text ?? "")].length, value: f.text ?? "" }));
+  }
+  return { answer, values, out: join(cwd, name), run };
+}
+
+// --- sqlite_freespace ----------------------------------------------------------------
+
+test("sqlite_freespace reports a freeblock fragment at the byte position of its text, 4 bytes past the freeblock's own header", async () => {
+  // It sliced the region from block + 4 and recorded block as its base, so every "freeblock in page" offset was 4 too early.
+  await withCwd(async (cwd) => {
+    const marker = "FREEBLOCK-MARKER-ALPHA";
+    const db = join(cwd, "work", "sms.db");
+    await build(FREEBLOCK_DB, db, marker, "utf-8");
+    const file = await readFile(db);
+    const { answer, values } = await freespace(cwd, db);
+    // Where the format puts the deleted cell: on a freeblock of page 2.
+    const spec = freeblocks(file);
+    assert.ok(spec.length >= 1, "the fixture has a freeblock");
+    const hit = values.find((v) => v.value.includes(marker));
+    assert.ok(hit, "the deleted row's text is recovered");
+    assert.equal(hit.where, "freeblock in page");
+    const block = spec.find((b) => hit.offset >= b.base + b.block + 4 && hit.offset < b.base + b.block + b.size);
+    assert.ok(block, "the fragment lies after a freeblock's 4-byte header and inside its size, by the format's own walk");
+    assert.equal(hit.page, block.page);
+    // The offset is where the bytes are: the file's bytes at it are the text.
+    assert.equal(file.subarray(hit.offset, hit.offset + hit.bytes).toString("utf8"), hit.value);
+    assert.ok(file.indexOf(Buffer.from(marker)) >= hit.offset && file.indexOf(Buffer.from(marker)) < hit.offset + hit.bytes);
+    assert.equal(answer.status, "complete", JSON.stringify(answer.problems));
+    const row = answer.fragments.find((f) => f.finding_id === hit.finding_id);
+    assert.ok(row);
+    assert.equal(row.offset_verified, true);
+    assert.equal(row.block_offset, block.block);
+    assert.equal(row.bytes, Buffer.byteLength(hit.value));
+    assert.equal(row.characters, [...hit.value].length);
+    assert.equal(row.text, undefined, "the answer carries no text");
+  });
+});
+
+test("sqlite_freespace reads UTF-8 text in any language, and UTF-16LE text, and says which", async () => {
+  // The pattern was printable ASCII and ASCII-range UTF-16: Turkish and Chinese text in a deleted row was a hole.
+  await withCwd(async (cwd) => {
+    const turkish = "Merhaba çok güzel şğı İstanbul";
+    const chinese = "你好，世界。这是一个测试消息";
+    for (const [name, text] of [["tr", turkish], ["zh", chinese]]) {
+      const db = join(cwd, "work", `${name}.db`);
+      await build(FREEBLOCK_DB, db, text, "utf-8");
+      const { answer, values } = await freespace(cwd, db, {}, `out-${name}`);
+      const found = values.find((v) => v.value.includes(text));
+      assert.ok(found, `${name}: the text is recovered whole`);
+      assert.equal(found.encoding, "utf-8");
+      assert.equal((await readFile(db)).subarray(found.offset, found.offset + found.bytes).toString("utf8"), found.value);
+      assert.deepEqual(answer.encodings_scanned.slice(0, 2), ["utf-8", "utf-16le"]);
+    }
+    // A database that stores its text as UTF-16LE (header field at 56 is 2).
+    const wide = "你好，世界。这是一个测试消息 and ASCII";
+    const db = join(cwd, "work", "wide.db");
+    await build(FREEBLOCK_DB, db, wide, "UTF-16le");
+    const file = await readFile(db);
+    assert.equal(file.readUInt32BE(56), 2);
+    const { answer, values } = await freespace(cwd, db, {}, "out-wide");
+    assert.equal(answer.database.text_encoding, "UTF-16LE");
+    const found = values.find((v) => v.value.includes("你好，世界。这是一个测试消息"));
+    assert.ok(found, "UTF-16LE text with CJK characters is recovered");
+    assert.equal(found.encoding, "utf-16le");
+    assert.equal(file.subarray(found.offset, found.offset + found.bytes).toString("utf16le"), found.value);
+  });
+});
+
+test("sqlite_freespace keeps a freeblock chain that loops from being read again and again, and says corrupt", async () => {
+  // A guard of 4096 steps ended a loop in silence: the same block was read 4096 times and listed as 4096 fragments.
+  await withCwd(async (cwd) => {
+    const marker = "LOOPING-FREEBLOCK";
+    const db = join(cwd, "work", "loop.db");
+    await build(FREEBLOCK_DB, db, marker, "utf-8");
+    const file = await readFile(db);
+    const spec = freeblocks(file).find((b) => file.indexOf(Buffer.from(marker)) >= b.base + b.block && file.indexOf(Buffer.from(marker)) < b.base + b.block + b.size);
+    assert.ok(spec);
+    // The freeblock's next pointer is its own offset: the chain never ends.
+    file.writeUInt16BE(spec.block, spec.base + spec.block);
+    await writeFile(db, file);
+    const { answer, values } = await freespace(cwd, db);
+    assert.equal(answer.status, "corrupt");
+    assert.ok(answer.problem_kinds["freeblock chain corrupt"] >= 1, JSON.stringify(answer.problem_kinds));
+    assert.equal(values.filter((v) => v.value.includes(marker)).length, 1, "the looping block is read once");
+    assert.ok(answer.problems.some((p) => /points back|loop/.test(p.detail)));
+  });
+});
+
+test("sqlite_freespace walks the freelist once, compares it with the header and names a cycle", async () => {
+  await withCwd(async (cwd) => {
+    const marker = "FREELIST-PAGE-MARKER";
+    const db = join(cwd, "work", "freelist.db");
+    await build(FREELIST_DB, db, marker);
+    const file = await readFile(db);
+    const pageSize = file.readUInt16BE(16) === 1 ? 65536 : file.readUInt16BE(16);
+    const trunk = file.readUInt32BE(32);
+    const declared = file.readUInt32BE(36);
+    assert.ok(trunk >= 2 && declared >= 3, "the fixture has a freelist");
+    const clean = await freespace(cwd, db, { min_length: 20 }, "out-clean");
+    assert.equal(clean.answer.status, "complete", JSON.stringify(clean.answer.problems));
+    assert.equal(clean.answer.freelist.declared, declared);
+    assert.equal(clean.answer.freelist.walked, declared);
+    const inPages = clean.values.filter((v) => v.value.includes(marker));
+    const onFreelist = inPages.filter((v) => v.where.startsWith("freelist"));
+    assert.ok(onFreelist.length >= 10, "the deleted rows are read out of freelist pages, got " + onFreelist.length);
+    // Every fragment, wherever it was found, is at the byte position it reports.
+    for (const v of clean.values) assert.equal(file.subarray(v.offset, v.offset + v.bytes).toString("utf8"), v.value);
+    // The trunk page lists itself as the next trunk: a cycle.
+    const cyclic = Buffer.from(file);
+    cyclic.writeUInt32BE(trunk, (trunk - 1) * pageSize);
+    const bad = join(cwd, "work", "cycle.db");
+    await writeFile(bad, cyclic);
+    const cycle = await freespace(cwd, bad, { min_length: 20 }, "out-cycle");
+    assert.equal(cycle.answer.status, "corrupt");
+    assert.ok(cycle.answer.problem_kinds["freelist cycle"] >= 1, JSON.stringify(cycle.answer.problem_kinds));
+    // The header says one more free page than the chain holds.
+    const counted = Buffer.from(file);
+    counted.writeUInt32BE(declared + 5, 36);
+    const wrong = join(cwd, "work", "count.db");
+    await writeFile(wrong, counted);
+    const count = await freespace(cwd, wrong, { min_length: 20 }, "out-count");
+    assert.equal(count.answer.status, "corrupt");
+    assert.ok(count.answer.problem_kinds["freelist count differs from the header"] >= 1);
+  });
+});
+
+test("sqlite_freespace validates the header: a short file, a bad page size and a truncated last page are named, never a traceback", async () => {
+  await withCwd(async (cwd) => {
+    const magic = Buffer.from("SQLite format 3\0", "latin1");
+    const short = join(cwd, "work", "short.db");
+    await writeFile(short, Buffer.concat([magic, Buffer.alloc(30)]));
+    assert.match(refused(await tool(FREESPACE, cwd, { db: short })).error, /not a SQLite database/);
+    const odd = Buffer.alloc(8192);
+    magic.copy(odd);
+    odd.writeUInt16BE(3000, 16);
+    odd[18] = 1; odd[19] = 1;
+    const oddPath = join(cwd, "work", "odd.db");
+    await writeFile(oddPath, odd);
+    assert.match(refused(await tool(FREESPACE, cwd, { db: oddPath })).error, /page size/);
+    const future = Buffer.from(odd);
+    future.writeUInt16BE(4096, 16);
+    future[19] = 9;
+    const futurePath = join(cwd, "work", "future.db");
+    await writeFile(futurePath, future);
+    assert.match(refused(await tool(FREESPACE, cwd, { db: futurePath })).error, /read format version is 9/);
+    // A real database cut 100 bytes short: the last page is partial, and the answer says it was not examined.
+    const db = join(cwd, "work", "cut.db");
+    await build(FREEBLOCK_DB, db, "CUT-FILE-MARKER", "utf-8");
+    const file = await readFile(db);
+    await writeFile(db, file.subarray(0, file.length - 100));
+    const { answer } = await freespace(cwd, db);
+    assert.equal(answer.status, "corrupt");
+    assert.ok(answer.problem_kinds["partial last page"] >= 1, JSON.stringify(answer.problem_kinds));
+    assert.ok(answer.scanned.pages_partial >= 1);
+  });
+});
+
+test("sqlite_freespace stops at its time limit and says which pages it did not reach", async () => {
+  await withCwd(async (cwd) => {
+    const db = join(cwd, "work", "slow.db");
+    await build(FREELIST_DB, db, "TIME-LIMIT-MARKER");
+    const { answer } = await freespace(cwd, db, { max_seconds: 1e-9 });
+    assert.equal(answer.status, "partial");
+    assert.equal(answer.stopped_before_page, 1);
+    assert.ok(answer.scanned.pages_not_reached >= 3);
+    assert.ok(answer.problem_kinds["time limit"] === 1);
+  });
+});
+
+test("sqlite_freespace prints no fragment text and writes it only to a 0600 file of a job, created before the scan", async () => {
+  await withCwd(async (cwd) => {
+    const marker = "PRIVATE-DELETED-MESSAGE-TEXT";
+    const db = join(cwd, "work", "private.db");
+    await build(FREELIST_DB, db, marker);
+    // One fragment is inline at limit 1, so the whole list is in a paging file too.
+    const { answer, values, out, run } = await freespace(cwd, db, { limit: 1, min_length: 20 });
+    assert.ok(answer.fragment_count >= 2, "the fixture has more than one fragment: " + answer.fragment_count);
+    assert.equal(answer.pages.fragments.truncated, true);
+    assert.match(answer.pages.fragments.all_results ?? "", /^store\/jobs\/j-1\/out\/tool-output\/sqlite_freespace-[0-9a-f]{16}\.jsonl$/);
+    assert.equal(answer.secret_values.values_file, "store/jobs/j-1/out/sqlite-freespace-values.jsonl");
+    assert.equal(answer.secret_values.contains_secret_values, true);
+    assert.equal(answer.secret_values.written, answer.fragment_count);
+    assert.equal((await stat(join(out, "sqlite-freespace-values.jsonl"))).mode & 0o777, 0o600);
+    // Every text is in the values file, and nowhere else: not the answer, not the paging file.
+    for (const v of values) await assertNowhere(v.value, run.stdout, out, ["sqlite-freespace-values.jsonl"]);
+    assert.ok(values.some((v) => v.value.includes(marker)));
+    // The paging file names the same fragments by id, offset and length, with no text field.
+    const rows = await jsonl<Fragment>(join(out, "tool-output", answer.pages.fragments.all_results!.split("/").pop()!));
+    assert.equal(rows.length, answer.fragment_count);
+    assert.ok(rows.every((r) => r.text === undefined && r.value === undefined));
+    assert.deepEqual(rows.map((r) => r.finding_id).sort(), values.map((v) => v.finding_id).sort());
+    // Nothing was written outside $OUT: no work/ directory in the run directory.
+    assert.equal(await exists(join(cwd, "work", "s1")), false);
+  });
+});
+
+test("sqlite_freespace refuses write_values outside a job, and a second run in the same job, as JSON", async () => {
+  await withCwd(async (cwd) => {
+    const db = join(cwd, "work", "once.db");
+    await build(FREEBLOCK_DB, db, "ONCE-MARKER", "utf-8");
+    const outside = refused(await tool(FREESPACE, cwd, { db, write_values: true }));
+    assert.match(outside.error, /refused outside a job/);
+    assert.equal(await exists(join(cwd, "sqlite-freespace-values.jsonl")), false);
+    const first = await freespace(cwd, db, {}, "job-out");
+    assert.ok(first.values.length >= 1);
+    const again = refused(await asJob(FREESPACE, cwd, { db, write_values: true }, "job-out"));
+    assert.match(again.error, /values file already exists/);
+    // The first run's values are untouched.
+    assert.deepEqual(await jsonl<Value>(join(cwd, "job-out", "sqlite-freespace-values.jsonl")), first.values);
+    // A link at the name is refused too, dangling or not, and not written through.
+    await mkdir(join(cwd, "linked"), { recursive: true });
+    await symlink(join(cwd, "elsewhere.jsonl"), join(cwd, "linked", "sqlite-freespace-values.jsonl"));
+    refused(await asJob(FREESPACE, cwd, { db, write_values: true }, "linked"));
+    assert.equal(await exists(join(cwd, "elsewhere.jsonl")), false);
+    // Nothing to find: the file is made, empty, 0600, and the answer says written 0.
+    const clean = join(cwd, "work", "clean.db");
+    await build(`import sqlite3, sys\ndb = sqlite3.connect(sys.argv[1])\ndb.execute("CREATE TABLE t (a TEXT)")\ndb.execute("INSERT INTO t VALUES ('live row text')")\ndb.commit()\n`, clean);
+    const none = await freespace(cwd, clean, {}, "none");
+    assert.equal(none.answer.secret_values.written, 0);
+    assert.equal(none.answer.secret_values.contains_secret_values, false);
+    assert.equal((await stat(join(none.out, "sqlite-freespace-values.jsonl"))).size, 0);
+  });
+});
+
+test("sqlite_freespace withholds a path component shaped like a recovery password on every channel, and survives a name that is not UTF-8", async () => {
+  await withCwd(async (cwd) => {
+    const dir = join(cwd, "work", RECOVERY_NAME);
+    await mkdir(dir, { recursive: true });
+    const db = join(dir, "keyed.db");
+    await build(FREEBLOCK_DB, db, "NAMED-DIR-MARKER", "utf-8");
+    const { answer, run } = await freespace(cwd, db, { limit: 1, min_length: 4 });
+    assert.equal(answer.db.includes(RECOVERY_NAME), false);
+    assert.ok(answer.paths_withheld >= 1);
+    assert.equal(run.stdout.includes(RECOVERY_NAME), false);
+    for (const f of await filesUnder(join(cwd, "out"))) if (!f.path.endsWith("-values.jsonl")) assert.equal(f.data.includes(Buffer.from(RECOVERY_NAME)), false, f.path);
+    // A missing file in that directory: the error does not print the name either.
+    const missing = refused(await tool(FREESPACE, cwd, { db: join(dir, "nothing.db") }));
+    assert.equal(JSON.stringify(missing).includes(RECOVERY_NAME), false);
+    // A file name that is not UTF-8 reaches Python as a lone surrogate; nothing raises, and the output is plain ASCII.
+    const odd = join(cwd, "work", "b\udcff.db");
+    // A name that does not exist: the error prints the name as an escape, and the answer is plain ASCII JSON.
+    const gone = await tool(FREESPACE, cwd, { db: odd });
+    assert.equal(refused(gone).error, "no such file");
+    assert.ok(/^[\x00-\x7f]*$/.test(gone.stdout), "a lone surrogate is escaped, not raised");
+    // A name that does exist, where the filesystem takes such a name (macOS refuses it).
+    const raw = Buffer.concat([Buffer.from(join(cwd, "work") + "/"), Buffer.from([0x62, 0xff, 0x2e, 0x64, 0x62])]);
+    const made = await writeFile(raw, await readFile(db)).then(() => true, (e: NodeJS.ErrnoException) => { assert.equal(e.code, "EILSEQ"); return false; });
+    if (made) {
+      const out = await asJob(FREESPACE, cwd, { db: odd, write_values: true, limit: 1, min_length: 4 }, "out-odd");
+      const oddAnswer = body<Free>(out);
+      assert.match(oddAnswer.db, /b\\udcff\.db/);
+      assert.ok(oddAnswer.fragment_count >= 1);
+      assert.ok(/^[\x00-\x7f]*$/.test(out.stdout), "the answer is ASCII: a lone surrogate is escaped");
+    }
+  });
+});
+
+test("sqlite_freespace filters with contains, counts what it found before the filter, and lists a -wal without reading it", async () => {
+  await withCwd(async (cwd) => {
+    const db = join(cwd, "work", "wal.db");
+    await build(FREEBLOCK_DB, db, "FILTER-MARKER-ONE", "utf-8");
+    await writeFile(db + "-wal", Buffer.alloc(32));
+    const all = await freespace(cwd, db, { min_length: 4 }, "all");
+    const some = await freespace(cwd, db, { contains: "FILTER-MARKER", min_length: 4 }, "some");
+    assert.ok(all.answer.fragment_count > some.answer.fragment_count);
+    assert.equal(some.answer.fragments_found_before_filter, all.answer.fragment_count);
+    assert.ok(some.values.every((v) => /FILTER-MARKER/i.test(v.value)));
+    assert.deepEqual(some.answer.companions, { "-wal": { bytes: 32, examined: false } });
+    assert.match(refused(await tool(FREESPACE, cwd, { db, contains: "(" })).error, /not a valid regex/);
+  });
+});
+
+// --- manifest_db ----------------------------------------------------------------------
+
+/**
+ * A backup directory from a JSON spec. The Files table is Apple's (fileID, domain, relativePath, flags, file);
+ * `file` is an NSKeyedArchiver archive: $archiver, $version, $top.root, and $objects ("$null", the root
+ * dictionary with the metadata and a class UID, the class dictionary).
+ */
+const BACKUP = String.raw`
+import datetime, json, os, plistlib, shutil, sqlite3, sys
+UID = plistlib.UID
+dest, spec = sys.argv[1], json.loads(sys.argv[2])
+
+def archive(e):
+    objects = ["$null"]
+    root = {"$class": UID(2), "Size": e.get("size", 10), "Mode": 33188, "UserID": 501, "GroupID": 501,
+            "ProtectionClass": 4, "InodeNumber": 7}
+    for key, name in (("birth", "Birth"), ("modified", "LastModified"), ("changed", "LastStatusChange")):
+        if key in e:
+            root[name] = e[key]
+    if e.get("wrapped_key"):
+        root["EncryptionKey"] = UID(3)
+    objects.append(root)
+    objects.append({"$classname": "MBFile", "$classes": ["MBFile", "NSObject"]})
+    if e.get("wrapped_key"):
+        objects.append({"NS.data": bytes.fromhex(e["wrapped_key"])})
+    if e.get("decoy"):
+        # An object with a Size that comes before the root: the first object holding Size is not the root.
+        objects.insert(1, {"Size": 1, "Mode": 1})
+        objects[2]["$class"] = UID(3)
+        if e.get("wrapped_key"):
+            objects[2]["EncryptionKey"] = UID(4)
+        top = UID(2)
+    else:
+        top = UID(1)
+    return plistlib.dumps({"$archiver": "NSKeyedArchiver", "$version": 100000, "$top": {"root": top}, "$objects": objects},
+                          fmt=plistlib.FMT_BINARY)
+
+os.makedirs(dest, exist_ok=True)
+manifest = {"Version": "10.0", "Date": datetime.datetime(2025, 3, 1, 12, 0, 0), "WasPasscodeSet": True,
+            "Lockdown": {"ProductVersion": "17.4", "SerialNumber": "SERIAL-FIXTURE", "DeviceName": "Fixture Phone"}}
+if spec.get("encrypted") != "absent":
+    manifest["IsEncrypted"] = spec.get("encrypted", False)
+if spec.get("keybag"):
+    manifest["BackupKeyBag"] = bytes.fromhex(spec["keybag"])
+    manifest["ManifestKey"] = bytes.fromhex(spec["manifest_key"])
+if spec.get("manifest_plist", True):
+    with open(os.path.join(dest, "Manifest.plist"), "wb") as fh:
+        plistlib.dump(manifest, fh)
+if spec.get("info", True):
+    with open(os.path.join(dest, "Info.plist"), "wb") as fh:
+        plistlib.dump({"Device Name": "Fixture Phone", "Product Version": "17.4", "Serial Number": "SERIAL-FIXTURE", "Installed Applications": ["com.example.a"]}, fh)
+with open(os.path.join(dest, "Status.plist"), "wb") as fh:
+    plistlib.dump({"BackupState": "new", "IsFullBackup": True, "SnapshotState": spec.get("snapshot", "finished"), "UUID": "FIXTURE-UUID"}, fh)
+
+db_path = os.path.join(dest, "Manifest.db")
+if spec.get("manifest_db") == "notsqlite":
+    # Deterministic bytes that are not a SQLite header: a counter pattern, not random bytes.
+    with open(db_path, "wb") as fh:
+        fh.write(bytes((i * 131 + 7) % 256 for i in range(8192)))
+else:
+    con = sqlite3.connect(db_path)
+    if spec.get("wal"):
+        con.execute("PRAGMA journal_mode = WAL")
+        con.execute("PRAGMA wal_autocheckpoint = 0")
+    con.execute("CREATE TABLE Files (fileID TEXT PRIMARY KEY, domain TEXT, relativePath TEXT, flags INTEGER, file BLOB)")
+    con.execute("CREATE TABLE Properties (key TEXT PRIMARY KEY, value BLOB)")
+    def add(e):
+        blob = None if e.get("nometa") else archive(e)
+        con.execute("INSERT INTO Files VALUES (?,?,?,?,?)", (e["id"], e.get("domain", "HomeDomain"), e["path"], e.get("flags", 1), blob))
+    for e in spec["entries"]:
+        add(e)
+        layout = e.get("blob", "sharded")
+        if layout == "sharded":
+            os.makedirs(os.path.join(dest, e["id"][:2]), exist_ok=True)
+            with open(os.path.join(dest, e["id"][:2], e["id"]), "wb") as fh:
+                fh.write(b"x" * e.get("size", 10))
+        elif layout == "flat":
+            with open(os.path.join(dest, e["id"]), "wb") as fh:
+                fh.write(b"x" * e.get("size", 10))
+        elif layout == "dir":
+            os.makedirs(os.path.join(dest, e["id"][:2], e["id"]), exist_ok=True)
+        elif layout.startswith("symlink:"):
+            os.makedirs(os.path.join(dest, e["id"][:2]), exist_ok=True)
+            os.symlink(layout[8:], os.path.join(dest, e["id"][:2], e["id"]))
+    con.commit()
+    if spec.get("wal"):
+        # The rest is committed only in the WAL: copy the main file and the WAL while the connection is open.
+        con.execute("PRAGMA wal_checkpoint(FULL)")
+        for e in spec["wal"]:
+            add(e)
+        con.commit()
+        shutil.copy(db_path, db_path + ".main")
+        shutil.copy(db_path + "-wal", db_path + ".walcopy")
+        con.close()
+        for suffix in ("", "-wal", "-shm"):
+            if os.path.exists(db_path + suffix):
+                os.remove(db_path + suffix)
+        os.rename(db_path + ".main", db_path)
+        os.rename(db_path + ".walcopy", db_path + "-wal")
+    else:
+        con.close()
+`;
+
+type Entry = {
+  file_id: string; file_id_valid: boolean; domain: string; relative_path: string; flags: number; kind: string; blob: string;
+  blob_layout?: string; blob_bytes?: number; on_disk?: string; metadata_status: string; metadata_reason?: string;
+  size?: number; created?: string | null; created_raw?: number; modified?: string | null; modified_raw?: number;
+  changed?: string | null; has_wrapped_file_key?: boolean; payload_encrypted: boolean | null; manifest_rowid?: number;
+};
+type Manifest = {
+  path: string; parser: string; status: string; encrypted: boolean | null;
+  encryption: { state: string; basis: string; payload_encrypted: boolean | null; key_material_in_manifest_plist: Record<string, { present: boolean; bytes: number | null; printed: boolean }>; decryption: string };
+  manifest_plist: Record<string, unknown>; info_plist: Record<string, unknown>; status_plist: Record<string, unknown>; device: Record<string, unknown>;
+  manifest_db_file: { bytes: number; format: string; head_hex: string; companions: Record<string, number>; snapshot?: string; working_copy?: string };
+  listing: { available: boolean; reason: string | null }; observations: string[];
+  epoch: { applied: string; range_of_values_read: Record<string, { earliest: string; latest: string; values: number }> };
+  counts: { files_in_manifest: number | null; rows_read: number; rows_matching: number; invalid_file_ids: number; metadata: Record<string, number>; blobs: Record<string, number>; layouts: Record<string, number> };
+  stopped_at_row: number | null; entries: Entry[]; entry_count: number; files_in_manifest: number | null; domains: { domain: string; entries: number }[];
+  pages: { entries: Paged; domains: Paged }; truncated: boolean; paths_withheld: number;
+};
+
+const ID_A = "3d0d7e5fb2ce288813306e4d4636395e047a3d28";
+const ID_B = "aa" + "0".repeat(38);
+const ID_C = "bb" + "1".repeat(38);
+
+async function backup(cwd: string, name: string, spec: Record<string, unknown>): Promise<string> {
+  const dir = join(cwd, "work", name);
+  await build(BACKUP, dir, JSON.stringify(spec));
+  return dir;
+}
+
+async function manifest(cwd: string, path: string, args: Record<string, unknown> = {}): Promise<{ answer: Manifest; run: Run }> {
+  const run = await tool(MANIFEST, cwd, { path, ...args });
+  return { answer: body<Manifest>(run), run };
+}
+
+test("manifest_db converts times by the epoch it is told, never by a window that moves with the calendar", async () => {
+  // It tried the Unix epoch and then the Apple one and kept the first whose year was in 2005..now+2: a Unix time
+  // from 2004 read as null, and the same value read differently as the years passed.
+  await withCwd(async (cwd) => {
+    const dir = await backup(cwd, "times", { entries: [
+      { id: ID_A, path: "Library/a.db", birth: 1100000000, modified: 700000000, changed: 1700000000 },
+    ] });
+    const unix = (await manifest(cwd, dir)).answer;
+    const a = unix.entries[0];
+    assert.equal(a.created, "2004-11-09T11:33:20Z", "a Unix time before 2005 is still a Unix time");
+    assert.equal(a.created_raw, 1100000000);
+    assert.equal(a.modified, "1992-03-07T20:26:40Z");
+    assert.equal(a.changed, "2023-11-14T22:13:20Z");
+    assert.equal(unix.epoch.applied, "unix");
+    assert.equal(unix.epoch.range_of_values_read.modified.earliest, "1992-03-07T20:26:40Z");
+    // Told the Apple epoch, it counts from 2001-01-01: 700000000 s is 2023-03-08T20:26:40Z.
+    const apple = (await manifest(cwd, dir, { epoch: "apple" })).answer.entries[0];
+    assert.equal(apple.modified, "2023-03-08T20:26:40Z");
+    assert.equal(apple.modified_raw, 700000000);
+    assert.match(refused(await tool(MANIFEST, cwd, { path: dir, epoch: "windows" })).error, /epoch must be/);
+  });
+});
+
+test("manifest_db reads the keyed archive's root, not the first object that has a Size", async () => {
+  await withCwd(async (cwd) => {
+    const dir = await backup(cwd, "root", { entries: [
+      { id: ID_A, path: "Library/sms.db", size: 1234, modified: 1710000000, decoy: true },
+    ] });
+    const { answer } = await manifest(cwd, dir);
+    const e = answer.entries[0];
+    assert.equal(e.size, 1234, "the root's Size, not the decoy's 1");
+    assert.equal(e.metadata_status, "ok");
+    assert.equal(e.modified, "2024-03-09T16:00:00Z");
+  });
+});
+
+test("manifest_db says unknown when Manifest.plist has no IsEncrypted, and never reads it as unencrypted", async () => {
+  await withCwd(async (cwd) => {
+    const entries = [{ id: ID_A, path: "Library/sms.db" }];
+    const noFlag = (await manifest(cwd, await backup(cwd, "noflag", { encrypted: "absent", entries }))).answer;
+    assert.equal(noFlag.encrypted, null, "a missing flag is not false");
+    assert.equal(noFlag.encryption.state, "unknown");
+    assert.match(noFlag.encryption.basis, /no IsEncrypted/);
+    assert.equal(noFlag.entries[0].payload_encrypted, null);
+    const noPlist = (await manifest(cwd, await backup(cwd, "noplist", { manifest_plist: false, entries }))).answer;
+    assert.equal(noPlist.encryption.state, "unknown");
+    assert.match(noPlist.encryption.basis, /missing/);
+    assert.equal(noPlist.manifest_plist.status, "missing");
+    const clear = (await manifest(cwd, await backup(cwd, "clear", { encrypted: false, entries }))).answer;
+    assert.equal(clear.encryption.state, "not_encrypted");
+    assert.equal(clear.encrypted, false);
+  });
+});
+
+test("manifest_db lists an encrypted backup's manifest instead of reporting it empty, and says what is encrypted", async () => {
+  await withCwd(async (cwd) => {
+    const dir = await backup(cwd, "enc", { encrypted: true, entries: [
+      { id: ID_A, path: "Library/SMS/sms.db", size: 4096, wrapped_key: "00112233445566778899aabbccddeeff" },
+      { id: ID_B, path: "Library/Notes/notes.sqlite", size: 77 },
+    ] });
+    const { answer } = await manifest(cwd, dir);
+    assert.equal(answer.entry_count, 2, "an encrypted backup's manifest is listed, not reported empty");
+    assert.equal(answer.encrypted, true);
+    assert.equal(answer.encryption.state, "encrypted");
+    assert.equal(answer.encryption.payload_encrypted, true);
+    assert.match(answer.encryption.decryption, /not provided/);
+    assert.equal(answer.listing.available, true);
+    assert.ok(answer.entries.every((e) => e.payload_encrypted === true));
+    assert.equal(answer.entries.find((e) => e.file_id === ID_A)?.has_wrapped_file_key, true);
+    assert.equal(answer.status, "complete");
+  });
+});
+
+test("manifest_db says so when an encrypted backup's Manifest.db is not SQLite: nothing listed, and not an empty phone", async () => {
+  await withCwd(async (cwd) => {
+    const dir = await backup(cwd, "encdb", { encrypted: true, manifest_db: "notsqlite", entries: [] });
+    const { answer } = await manifest(cwd, dir);
+    assert.equal(answer.status, "partial");
+    assert.equal(answer.encrypted, true);
+    assert.equal(answer.listing.available, false);
+    assert.match(answer.listing.reason ?? "", /not a plaintext SQLite database/);
+    assert.equal(answer.files_in_manifest, null, "not 0: the count is unknown");
+    assert.equal(answer.manifest_db_file.format, "not a plaintext SQLite database");
+    assert.ok(answer.observations.some((o) => /consistent with an encrypted backup/.test(o)));
+    // The flag says unencrypted and the file is not SQLite: the two disagree, and it is said.
+    const odd = (await manifest(cwd, await backup(cwd, "disagree", { encrypted: false, manifest_db: "notsqlite", entries: [] }))).answer;
+    assert.ok(odd.observations.some((o) => /disagree/.test(o)));
+    assert.equal(odd.status, "partial");
+  });
+});
+
+test("manifest_db never joins a file id that is not 40 hex digits to a path, and reports the blob states without following a link", async () => {
+  // fileID "../x" became <root>/../../x, and a file there was reported as the entry's on_disk.
+  await withCwd(async (cwd) => {
+    const outside = join(cwd, "work", "outside-secret-file");
+    await writeFile(outside, "outside the backup");
+    const dir = await backup(cwd, "ids", { entries: [
+      { id: ID_A, path: "Library/present.db", blob: "sharded" },
+      { id: ID_B, path: "Library/flat.db", blob: "flat" },
+      { id: ID_C, path: "Library/missing.db", blob: "none" },
+      { id: "cc" + "2".repeat(38), path: "Library/dir.db", blob: "dir" },
+      { id: "dd" + "3".repeat(38), path: "Library/link.db", blob: "symlink:" + outside },
+      { id: "../x", path: "Library/evil.db", blob: "none" },
+      { id: "ee" + "4".repeat(38), path: "Library", flags: 2, blob: "none" },
+    ] });
+    // The id "../x" joined as <root>/../../x is <run dir>/x: a file there is where the old code said the blob was.
+    await writeFile(join(cwd, "x"), "decoy");
+    const { answer } = await manifest(cwd, dir);
+    const by = Object.fromEntries(answer.entries.map((e) => [e.relative_path, e]));
+    assert.equal(by["Library/evil.db"].on_disk, undefined, "an id of ../x is never joined to a path");
+    assert.equal(by["Library/evil.db"].blob, "refused");
+    assert.equal(by["Library/present.db"].blob, "present");
+    assert.equal(by["Library/present.db"].blob_layout, "sharded");
+    assert.equal(by["Library/present.db"].on_disk, `${ID_A.slice(0, 2)}/${ID_A}`);
+    assert.equal(by["Library/flat.db"].blob, "present");
+    assert.equal(by["Library/flat.db"].blob_layout, "flat");
+    assert.equal(by["Library/flat.db"].on_disk, ID_B);
+    assert.equal(by["Library/missing.db"].blob, "missing");
+    assert.equal(by["Library/dir.db"].blob, "directory");
+    assert.equal(by["Library/link.db"].blob, "symlink");
+    assert.equal(by["Library/evil.db"].blob, "refused");
+    assert.equal(by["Library/evil.db"].file_id_valid, false);
+    assert.equal(by["Library/evil.db"].on_disk, undefined);
+    assert.equal(by["Library"].blob, "not_applicable");
+    assert.equal(answer.counts.invalid_file_ids, 1);
+    assert.equal(answer.counts.layouts.sharded, 1);
+    assert.equal(answer.counts.layouts.flat, 1);
+  });
+});
+
+test("manifest_db opens a Manifest.db with a -wal in a working copy, so a row only the WAL holds is listed, and leaves the original alone", async () => {
+  await withCwd(async (cwd) => {
+    const dir = await backup(cwd, "wal", {
+      entries: [{ id: ID_A, path: "Library/in-main.db" }],
+      wal: [{ id: ID_B, path: "Library/only-in-wal.db" }],
+    });
+    const before = [sha256(await readFile(join(dir, "Manifest.db"))), sha256(await readFile(join(dir, "Manifest.db-wal")))];
+    const { answer } = await manifest(cwd, dir);
+    const paths = answer.entries.map((e) => e.relative_path).sort();
+    assert.deepEqual(paths, ["Library/in-main.db", "Library/only-in-wal.db"]);
+    assert.match(answer.manifest_db_file.snapshot ?? "", /working directory/);
+    assert.ok(answer.manifest_db_file.working_copy);
+    assert.deepEqual([sha256(await readFile(join(dir, "Manifest.db"))), sha256(await readFile(join(dir, "Manifest.db-wal")))], before);
+    assert.equal(await exists(join(dir, "Manifest.db-shm")), false, "the original has no -shm made beside it");
+    // As a job the working copy is under $OUT, the only place a job writes.
+    const before2 = await readdir(join(cwd, "work", "s1", "tool-output"));
+    const run = await asJob(MANIFEST, cwd, { path: dir }, "job-wal");
+    const inJob = body<Manifest>(run);
+    assert.deepEqual(await readdir(join(cwd, "work", "s1", "tool-output")), before2, "a job writes nothing outside $OUT");
+    assert.ok((inJob.manifest_db_file.working_copy ?? "").startsWith(join(cwd, "job-wal", "tool-output")), "the working copy is under $OUT");
+    assert.equal(inJob.entry_count, 2);
+  });
+});
+
+test("manifest_db prints no key material: the key bag and the manifest key are presence and a length", async () => {
+  await withCwd(async (cwd) => {
+    const keybag = Buffer.from(Array.from({ length: 96 }, (_, i) => (i * 41 + 3) % 251));
+    const manifestKey = Buffer.from(Array.from({ length: 44 }, (_, i) => (i * 17 + 9) % 253));
+    const wrapped = Buffer.from(Array.from({ length: 40 }, (_, i) => (i * 29 + 5) % 247));
+    const dir = await backup(cwd, "keys", { encrypted: true, keybag: keybag.toString("hex"), manifest_key: manifestKey.toString("hex"),
+      entries: [{ id: ID_A, path: "Library/a.db", wrapped_key: wrapped.toString("hex") }] });
+    const { answer, run } = await manifest(cwd, dir, { limit: 1 });
+    assert.deepEqual(answer.encryption.key_material_in_manifest_plist, {
+      BackupKeyBag: { present: true, bytes: 96, printed: false },
+      ManifestKey: { present: true, bytes: 44, printed: false },
+    });
+    for (const secret of [keybag, manifestKey, wrapped]) {
+      for (const form of [secret.toString("hex"), secret.toString("base64"), sha256(secret)]) {
+        assert.equal(run.stdout.includes(form), false, "key material (or an encoding or digest of it) is in the answer");
+        assert.equal(run.stdout.includes(form.slice(0, 16)), false, "a head of key material is in the answer");
+      }
+    }
+    assert.doesNotMatch(run.stdout, /[0-9a-f]{64}/i, "no digest");
+    // The device identity that Manifest.plist and Info.plist carry in the clear is there.
+    assert.equal(answer.device.SerialNumber, "SERIAL-FIXTURE");
+    assert.equal(answer.info_plist["Device Name"], "Fixture Phone");
+    assert.equal(answer.status_plist.SnapshotState, "finished");
+    assert.equal(answer.manifest_plist.WasPasscodeSet, true);
+  });
+});
+
+test("manifest_db keeps the whole listing: a page inline, every entry in the file the answer names, in a stable order", async () => {
+  await withCwd(async (cwd) => {
+    const entries = Array.from({ length: 450 }, (_, i) => ({ id: i.toString(16).padStart(40, "0"), path: `Library/p${String(i).padStart(4, "0")}`, domain: `Domain-${String(i % 9).padStart(2, "0")}`, blob: "none" }));
+    const dir = await backup(cwd, "many", { entries });
+    const { answer } = await manifest(cwd, dir, { limit: 100 });
+    assert.equal(answer.entry_count, 450);
+    assert.equal(answer.entries.length, 100);
+    assert.equal(answer.truncated, true);
+    assert.equal(answer.pages.entries.truncated, true);
+    const rows = await jsonl<Entry>(join(cwd, answer.pages.entries.all_results!));
+    assert.equal(rows.length, 450);
+    assert.deepEqual(rows.map((r) => r.file_id), [...rows.map((r) => r.file_id)].sort());
+    assert.equal(answer.domains.length, 9);
+    assert.equal(answer.counts.blobs.missing, 450);
+    // A filter reports its own matches, and the manifest's total beside them.
+    const some = (await manifest(cwd, dir, { contains: "p000[0-4]$", limit: 100 })).answer;
+    assert.equal(some.entry_count, 5);
+    assert.equal(some.files_in_manifest, 450);
+    assert.equal((await manifest(cwd, dir, { domain: "Domain-03", limit: 1000 })).answer.entry_count, 50);
+  });
+});
+
+test("manifest_db withholds a path shaped like a recovery password, and a time limit says partial", async () => {
+  await withCwd(async (cwd) => {
+    const dir = await backup(cwd, "named", { entries: [{ id: ID_A, path: `Documents/${RECOVERY_NAME}/key.txt`, blob: "none" }] });
+    const { answer, run } = await manifest(cwd, dir);
+    assert.equal(run.stdout.includes(RECOVERY_NAME), false);
+    assert.equal(answer.entries[0].relative_path.includes(RECOVERY_NAME), false);
+    assert.ok(answer.paths_withheld >= 1);
+    const slow = (await manifest(cwd, dir, { max_seconds: 1e-9 })).answer;
+    assert.equal(slow.status, "partial");
+    assert.equal(slow.stopped_at_row, 0);
+    // A file that is not a backup is refused in JSON, and no traceback.
+    assert.match(refused(await tool(MANIFEST, cwd, { path: join(cwd, "work") })).error, /no Manifest.db/);
+  });
+});
+
+// --- protobuf_peek ---------------------------------------------------------------------
+
+function varint(n: bigint | number): Buffer {
+  let v = BigInt(n);
+  const out: number[] = [];
+  do {
+    let byte = Number(v & 0x7fn);
+    v >>= 7n;
+    if (v) byte |= 0x80;
+    out.push(byte);
+  } while (v);
+  return Buffer.from(out);
+}
+const key = (field: number, wire: number): Buffer => varint((field << 3) | wire);
+const lenDelimited = (field: number, data: Buffer | string): Buffer => {
+  const d = typeof data === "string" ? Buffer.from(data, "utf8") : data;
+  return Buffer.concat([key(field, 2), varint(d.length), d]);
+};
+const varintField = (field: number, v: bigint | number): Buffer => Buffer.concat([key(field, 0), varint(v)]);
+
+type PbField = {
+  field_path: string; field: number; wire_type: string; depth: number; offset: number; value?: number; as_bool?: boolean;
+  zigzag_reading?: number; twos_complement_reading?: number; hex?: string; payload_offset?: number; payload_bytes?: number;
+  read_as?: string; also_reads_as?: string[]; children?: number; characters?: number; finding_id?: string; as_signed?: unknown; text?: unknown;
+};
+type Pb = {
+  source: string; parser: string;
+  window: { offset: number; bytes: number; file_bytes: number | null; bytes_after_window: number; next_offset?: number };
+  structure: { status: string; reason: string; problem_offset?: number; bytes_in_window: number; consistent_with_protobuf_wire_format: boolean };
+  fields: PbField[]; field_count: number; top_level_fields: number; counts: Record<string, number>;
+  secret_values: { requested: boolean; written: number; values_file: string | null; contains_secret_values: boolean };
+  pages: { fields: Paged }; truncated: boolean; looks_like_protobuf?: unknown; strings?: unknown; paths_withheld: number;
+};
+type PbValue = { finding_id: string; source: string; field_path: string; offset: number; payload_offset: number; kind: string; bytes: number; value: string };
+
+async function peek(cwd: string, args: Record<string, unknown>, name?: string): Promise<{ answer: Pb; run: Run; values: PbValue[] }> {
+  const run = name ? await asJob(PROTOBUF, cwd, { write_values: true, ...args }, name) : await tool(PROTOBUF, cwd, args);
+  const answer = body<Pb>(run);
+  const file = name ? join(cwd, name, "protobuf-values.jsonl") : "";
+  return { answer, run, values: file && (await exists(file)) ? await jsonl<PbValue>(file) : [] };
+}
+
+test("protobuf_peek reads a nested message with absolute offsets and full field paths", async () => {
+  // Nested offsets were relative to the nested buffer, and `offset` shifted nothing in the answer.
+  await withCwd(async (cwd) => {
+    const inner = Buffer.concat([lenDelimited(1, "abc"), varintField(2, 5)]);
+    const message = Buffer.concat([varintField(1, 150), lenDelimited(2, "testing"), lenDelimited(3, inner), key(4, 5), Buffer.from("0000803f", "hex")]);
+    const prefix = Buffer.alloc(100, 0xaa);
+    await writeFile(join(cwd, "work", "blob.bin"), Buffer.concat([prefix, message]));
+    const { answer } = await peek(cwd, { path: "work/blob.bin", offset: 100 });
+    assert.equal(answer.structure.status, "valid");
+    assert.equal(answer.structure.consistent_with_protobuf_wire_format, true);
+    const paths = answer.fields.map((f) => f.field_path);
+    assert.deepEqual(paths, ["1", "2", "3", "3.1", "3.2", "4"]);
+    const file = Buffer.concat([prefix, message]);
+    const innerStart = 100 + varintField(1, 150).length + lenDelimited(2, "testing").length;
+    const byPath = Object.fromEntries(answer.fields.map((f) => [f.field_path, f]));
+    assert.equal(byPath["1"].offset, 100);
+    assert.equal(byPath["3"].offset, innerStart);
+    assert.equal(byPath["3"].payload_offset, innerStart + 2);
+    assert.equal(byPath["3"].read_as, "nested message");
+    assert.equal(byPath["3.1"].offset, innerStart + 2, "a nested field's offset is in the file, not in its parent's buffer");
+    assert.equal(byPath["3.2"].offset, innerStart + 2 + lenDelimited(1, "abc").length);
+    // The key of every field is where it says: the byte at its offset is (field << 3) | wire type.
+    for (const f of answer.fields) assert.equal(file[f.offset] >> 3, f.field, `field ${f.field_path} at ${f.offset}`);
+    assert.equal(byPath["4"].value, 0x3f800000);
+    assert.equal(byPath["1"].zigzag_reading, 75);
+    assert.equal(byPath["1"].as_signed, undefined, "the zigzag reading is named as one");
+  });
+});
+
+test("protobuf_peek reads a bounded window of a large file, and says what lies after it", async () => {
+  // It read the whole file and then sliced from the offset.
+  await withCwd(async (cwd) => {
+    const big = join(cwd, "work", "big.bin");
+    const message = Buffer.concat([varintField(1, 7), lenDelimited(2, "hello")]);
+    await writeFile(big, Buffer.concat([Buffer.alloc(100), message]));
+    // 200 MiB, sparse: only the message and the end of the file hold bytes.
+    const fd = await import("node:fs/promises").then((m) => m.open(big, "r+"));
+    await fd.truncate(200 * 1024 * 1024);
+    await fd.close();
+    const started = Date.now();
+    const { answer } = await peek(cwd, { path: "work/big.bin", offset: 100, length: message.length });
+    assert.equal(answer.structure.status, "valid");
+    assert.equal(answer.window.bytes, message.length);
+    assert.equal(answer.window.file_bytes, 200 * 1024 * 1024);
+    assert.equal(answer.window.bytes_after_window, 200 * 1024 * 1024 - 100 - message.length);
+    assert.equal(answer.window.next_offset, 100 + message.length);
+    assert.ok(Date.now() - started < 20000);
+    // Without a length the window is bounded too (8 MiB), never the whole file.
+    const dflt = (await peek(cwd, { path: "work/big.bin", offset: 100 })).answer;
+    assert.equal(dflt.window.bytes, 8 * 1024 * 1024);
+    assert.ok(dflt.window.next_offset);
+    assert.match(refused(await tool(PROTOBUF, cwd, { path: "work/big.bin", length: 65 * 1024 * 1024 })).error, /at most/);
+    assert.match(refused(await tool(PROTOBUF, cwd, { path: "work/big.bin", offset: 300 * 1024 * 1024 })).error, /past the end/);
+  });
+});
+
+test("protobuf_peek does not call a message with a group valid, and names every structural error with its offset", async () => {
+  // Groups were noted and the parse went on: looks_like_protobuf stayed true over bytes it had not understood.
+  await withCwd(async (cwd) => {
+    const group = Buffer.concat([varintField(1, 1), key(5, 3), varintField(1, 2), key(5, 4), varintField(2, 3)]);
+    const { answer } = await peek(cwd, { hex: group.toString("hex") });
+    assert.equal(answer.structure.status, "unsupported");
+    assert.equal(answer.structure.consistent_with_protobuf_wire_format, false);
+    assert.equal(answer.structure.problem_offset, 2, "the offset of the group's start");
+    assert.match(answer.structure.reason, /group/);
+    assert.equal(answer.looks_like_protobuf, undefined);
+    const cases: [string, Buffer, RegExp, number][] = [
+      ["field number 0", Buffer.from([0x00, 0x01]), /field number 0/, 0],
+      ["wire type 7", Buffer.concat([varintField(1, 1), Buffer.from([(2 << 3) | 7])]), /wire type 7/, 2],
+      ["a varint of eleven bytes", Buffer.concat([key(1, 0), Buffer.from([0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x01])]), /ten bytes|64-bit/, 0],
+      ["a tenth byte above 1", Buffer.concat([key(1, 0), Buffer.from([0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x02])]), /64-bit/, 0],
+      ["a length past the message", Buffer.concat([key(1, 2), varint(50), Buffer.from("short")]), /runs past/, 0],
+      ["a truncated fixed32", Buffer.concat([key(1, 5), Buffer.from([1, 2])]), /32-bit field runs past/, 0],
+      ["a field number above 2^29-1", varint(((1n << 29n) << 3n) | 0n), /field number/, 0],
+    ];
+    for (const [name, message, why, at] of cases) {
+      const r = (await peek(cwd, { hex: message.toString("hex") })).answer;
+      assert.equal(r.structure.status, "invalid", name);
+      assert.equal(r.structure.consistent_with_protobuf_wire_format, false, name);
+      assert.match(r.structure.reason, why, name);
+      assert.equal(r.structure.problem_offset, at, name);
+    }
+    // A ten-byte varint of all ones is -1 as a two's-complement 64-bit integer.
+    const minusOne = Buffer.concat([key(1, 0), Buffer.from([0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01])]);
+    const m = (await peek(cwd, { hex: minusOne.toString("hex") })).answer;
+    assert.equal(m.structure.status, "valid");
+    assert.equal(m.fields[0].twos_complement_reading, -1);
+  });
+});
+
+test("protobuf_peek prints no text and no bytes of a string or bytes field, and writes them only to a sealed job file", async () => {
+  await withCwd(async (cwd) => {
+    const text = "SECRET-TOKEN-value-9f3a";
+    const blob = Buffer.from(Array.from({ length: 30 }, (_, i) => 0x80 + ((i * 7) % 100)));
+    const message = Buffer.concat([lenDelimited(1, text), lenDelimited(2, blob), varintField(3, 1710000000), lenDelimited(4, lenDelimited(1, "nested-private-text"))]);
+    await writeFile(join(cwd, "work", "m.bin"), message);
+    const plain = await peek(cwd, { path: "work/m.bin" });
+    for (const needle of [text, "nested-private-text", blob.toString("hex")]) {
+      for (const form of forms(needle)) assert.equal(Buffer.from(plain.run.stdout).indexOf(form), -1, needle);
+    }
+    assert.equal(plain.answer.secret_values.requested, false);
+    const num = plain.answer.fields.find((f) => f.field_path === "3");
+    assert.equal(num?.value, 1710000000, "a number is printed");
+    const asText = plain.answer.fields.find((f) => f.field_path === "1");
+    assert.equal(asText?.read_as, "text");
+    assert.equal(asText?.characters, text.length);
+    assert.equal(asText?.payload_bytes, text.length);
+    // As a job with write_values: the values are in the 0600 file, once each, with the offsets the answer gives.
+    const job = await peek(cwd, { path: "work/m.bin", limit: 2 }, "pb-job");
+    assert.equal(job.answer.secret_values.values_file, "store/jobs/j-1/out/protobuf-values.jsonl");
+    assert.equal((await stat(join(cwd, "pb-job", "protobuf-values.jsonl"))).mode & 0o777, 0o600);
+    const byPath = Object.fromEntries(job.values.map((v) => [v.field_path, v]));
+    assert.equal(byPath["1"].value, text);
+    assert.equal(byPath["1"].kind, "text");
+    assert.equal(byPath["2"].kind, "bytes");
+    assert.equal(byPath["2"].value, blob.toString("hex"));
+    assert.equal(byPath["4.1"].value, "nested-private-text");
+    for (const v of job.values) assert.equal(message.subarray(v.payload_offset, v.payload_offset + v.bytes).length, v.bytes);
+    await assertNowhere(text, job.run.stdout, join(cwd, "pb-job"), ["protobuf-values.jsonl"]);
+    await assertNowhere(blob.toString("hex"), job.run.stdout, join(cwd, "pb-job"), ["protobuf-values.jsonl"]);
+    // The whole field list is in the paging file, with no text in it either.
+    assert.equal(job.answer.truncated, true);
+    // Refused outside a job, and a second run in the same job.
+    assert.match(refused(await tool(PROTOBUF, cwd, { path: "work/m.bin", write_values: true })).error, /refused outside a job/);
+    assert.match(refused(await asJob(PROTOBUF, cwd, { path: "work/m.bin", write_values: true }, "pb-job")).error, /already exists/);
+  });
+});
+
+test("protobuf_peek holds to its depth, field and time budgets and says so, and refuses a depth it will not honour", async () => {
+  await withCwd(async (cwd) => {
+    const many = Buffer.concat(Array.from({ length: 500 }, (_, i) => varintField(1, i)));
+    const cut = (await peek(cwd, { hex: many.toString("hex"), max_fields: 20 })).answer;
+    assert.equal(cut.structure.status, "partial");
+    assert.match(cut.structure.reason, /max_fields/);
+    assert.equal(cut.field_count, 20);
+    assert.equal(cut.structure.consistent_with_protobuf_wire_format, false);
+    // Nesting: a message nested 10 deep is unwrapped to max_depth and read as bytes below it.
+    let nested = lenDelimited(1, "q");
+    for (let i = 0; i < 9; i++) nested = lenDelimited(1, nested);
+    const shallow = (await peek(cwd, { hex: nested.toString("hex"), max_depth: 3 })).answer;
+    assert.equal(shallow.counts.deepest, 3);
+    const deep = (await peek(cwd, { hex: nested.toString("hex"), max_depth: 20 })).answer;
+    assert.equal(deep.counts.deepest, 9);
+    assert.match(refused(await tool(PROTOBUF, cwd, { hex: "0801", max_depth: 1000 })).error, /max_depth/);
+    assert.match(refused(await tool(PROTOBUF, cwd, { hex: "0801", max_fields: 99999999 })).error, /at most/);
+    assert.match(refused(await tool(PROTOBUF, cwd, { hex: "00".repeat(70000) })).error, /limited to/);
+    assert.match(refused(await tool(PROTOBUF, cwd, { hex: "zz" })).error, /hex/);
+    assert.match(refused(await tool(PROTOBUF, cwd, {})).error, /path or hex/);
+    assert.match(refused(await tool(PROTOBUF, cwd, { path: "work/nothing.bin" })).error, /cannot read/);
+  });
+});
+
+test("protobuf_peek withholds a path shaped like a recovery password on every channel, and survives a name that is not UTF-8", async () => {
+  await withCwd(async (cwd) => {
+    const dir = join(cwd, "work", RECOVERY_NAME);
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, "m.bin"), Buffer.concat([varintField(1, 5), lenDelimited(2, "text-in-a-named-dir")]));
+    const { answer, run } = await peek(cwd, { path: join("work", RECOVERY_NAME, "m.bin"), limit: 1 }, "named");
+    assert.equal(answer.source.includes(RECOVERY_NAME), false);
+    assert.ok(answer.paths_withheld >= 1);
+    assert.equal(run.stdout.includes(RECOVERY_NAME), false);
+    for (const f of await filesUnder(join(cwd, "named"))) if (!f.path.endsWith("-values.jsonl")) assert.equal(f.data.includes(Buffer.from(RECOVERY_NAME)), false, f.path);
+    const missing = refused(await tool(PROTOBUF, cwd, { path: join("work", RECOVERY_NAME, "nothing.bin") }));
+    assert.equal(JSON.stringify(missing).includes(RECOVERY_NAME), false);
+    const gone = await tool(PROTOBUF, cwd, { path: "work/b\udcff.bin" });
+    refused(gone);
+    assert.ok(/^[\x00-\x7f]*$/.test(gone.stdout), "a lone surrogate is escaped, not raised");
+  });
+});
+
+test("protobuf_peek reports an ambiguous field as what it could be, and keeps every field of a long message", async () => {
+  await withCwd(async (cwd) => {
+    // "abc" is text; "\n\x03abc" is both a nested message (field 1 = "abc") and a string of 5 bytes (not printable): the nested reading.
+    const message = Buffer.concat([lenDelimited(1, "abc"), lenDelimited(2, Buffer.concat([lenDelimited(1, "xyz")]))]);
+    const { answer } = await peek(cwd, { hex: message.toString("hex") });
+    const second = answer.fields.find((f) => f.field_path === "2");
+    assert.equal(second?.read_as, "nested message");
+    const long = Buffer.concat(Array.from({ length: 700 }, (_, i) => varintField(2, i)));
+    const all = (await peek(cwd, { hex: long.toString("hex"), limit: 50 })).answer;
+    assert.equal(all.field_count, 700);
+    assert.equal(all.fields.length, 50);
+    assert.equal(all.truncated, true);
+    const rows = await jsonl<PbField>(join(cwd, all.pages.fields.all_results!));
+    assert.equal(rows.length, 700);
+    assert.deepEqual(rows.map((r) => r.value).slice(0, 5), [0, 1, 2, 3, 4]);
+  });
+});
+
+test("the shared helper block of the three tools is byte for byte one", async () => {
+  const blocks = await Promise.all(["sqlite_freespace", "manifest_db", "protobuf_peek"].map(async (t) => {
+    const text = await readFile(join(TOOLS, t, "run.py"), "utf8");
+    const a = text.indexOf("# --- shared with the pack's other tools: begin");
+    const b = text.indexOf("# --- shared with the pack's other tools: end");
+    assert.ok(a >= 0 && b > a, `${t} has the shared block`);
+    return text.slice(a, b);
+  }));
+  assert.equal(blocks[0], blocks[1]);
+  assert.equal(blocks[0], blocks[2]);
+});
