@@ -30,15 +30,15 @@
       "goals/mac-compromise.md": "1bf10e79d270f935e8b5220f66b301ea0d9ea65a6900da80444d615406307012",
       "skills/artifacts/fsevents.md": "ff372a7ec6ba4d0891d57c19b997028caeed593abe73ab70e7ce622a8bddbb4f",
       "skills/artifacts/knowledgec.md": "2bf2d2ac8fc6e10740e4d25ddcfccc4dce140c7318e735627c40e1950c7b14c5",
-      "skills/artifacts/plists.md": "edf4fea6a2b72adc67e16a86c606a663e04cc0ade75c659b4a04336edd8b827a",
-      "skills/triage/system-profile.md": "1a692dea851c4284dab48a5bfa95c4c9d985b0542fa6dbed56c1f84e66b59937",
+      "skills/artifacts/plists.md": "5656b32b87853632f016e51bfdd7ec11190e4e2ea28ab53f745a1b131f89819e",
+      "skills/triage/system-profile.md": "4f2272e03bf80cf21777d1580e7235ed10f7a2c846fb089fb57939d902634455",
       "skills/filesystem/apfs.md": "e5e01773e7a1391f83a3a8c3888fb1e069448716171f1b96f368b39c63782586",
       "skills/logs/unified.md": "9c3eb052ebb354c0b644aa5fb06aee36a7d3c0e8e6e86b222553088795b5c0b0",
-      "skills/accounts/users.md": "6b76cb4ecd245b516eb638015ab29221f9187c3e658d086d3c5880a3151fa7e0",
+      "skills/accounts/users.md": "314fa7471c5696e665e6a01d858429bde9c04465888df371641cbaeabfe250ec",
       "skills/persistence/mechanisms.md": "e088649f78065ba28b2201aeb9f3ebc897be8700df5493e3c080f6a5bab7259d",
       "requires/host.json": "7f82dc435bdce4138c31457fd8a7b293039b885e362e066887c5e7ca0dfd520f",
       "requires/python.txt": "45bf903d28379de232cca57282d4dfba38654cd026f95243752642caaa333461",
-      "skills/INDEX.md": "d97f983c4e2816df653a5652eed3b81bd69471eefbd0f5d54602a224d5ff7d10"
+      "skills/INDEX.md": "f0141c2b3a56f039fc7233e13ce871f27468396a4e411273ec81f9d7ef268a8c"
     }
   },
   "tools": [
