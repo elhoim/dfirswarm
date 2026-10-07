@@ -85,6 +85,10 @@ the same bytes, not a second copy that survived. Reading a snapshot depends on t
 source volume and the difference data both being in the image; an unavailable or
 incomplete store cannot support a claim that something was absent.
 
+**Sensitive output.** Hives, logs and files read from a snapshot can hold secrets. Work in
+a job with `secret_output: true` where they may, and describe a secret by where it sits,
+its kind and length, never its value, a fragment of it or a hash of it.
+
 **Does not show.** A snapshot does not show what happened between two states, who
 changed or deleted anything, that the volume was ever in a state other than the
 ones listed, or, when none is found, that none existed.

@@ -80,6 +80,12 @@ not recovered from <sources>: <routes and results>. This does not show that it
 cannot be recovered from sources that were not supplied." Record when a secondary
 source was not acquired or could not be opened.
 
+**Sensitive output.** Recovered content (from `icat_extract`, `tsk_recover`, a carve) can
+hold credentials, keys or messages, and a Recycle Bin path can name one. Extract in a
+job with `secret_output: true`, read the content and never run it, and record the
+location, the kind of content, its length and what it would grant: never a value, a
+fragment or a hash of a secret in a note or a report.
+
 **Does not show.** A deleted record, a `$I` or a carved hit does not show who deleted
 the file, why, whether it was deleted deliberately, whether the content was ever
 copied elsewhere, or that the content that came back is the content the file had.
