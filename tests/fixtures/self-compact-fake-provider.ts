@@ -28,6 +28,10 @@
  *                        let two summaries run on to 128,000 output tokens (default 0)
  *   SC_FAKE_SUMMARY_HANG summary calls, after those, that answer nothing until aborted (default 0)
  *   SC_FAKE_TRACE        JSONL file that records every model request
+ *   SC_FAKE_PROMPTS      1 puts the whole system prompt of every model request on that trace
+ *   SC_FAKE_PRE_STEPS    JSON array of {name, arguments}: tool calls made one per turn before the
+ *                        filler steps and the hand-off (a seat meeting its packs' skills)
+ *   SC_FAKE_AFTER_STEPS  the same, made after the hand-off, before the result is written
  */
 import { appendFileSync } from "node:fs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -45,6 +49,10 @@ const SUMMARY_HANG = Number(env("SC_FAKE_SUMMARY_HANG", "0"));
 /** One chunk of a runaway summary; the harness's bound is 48,000 characters. */
 const RUNAWAY_CHUNK = "- the same line again, as a looping summarizer writes it\n".repeat(80);
 const TRACE = process.env.SC_FAKE_TRACE;
+const PROMPTS = env("SC_FAKE_PROMPTS", "") === "1";
+type ScriptedCall = { name: string; arguments: Record<string, unknown> };
+const PRE_STEPS: ScriptedCall[] = JSON.parse(env("SC_FAKE_PRE_STEPS", "[]"));
+const AFTER_STEPS: ScriptedCall[] = JSON.parse(env("SC_FAKE_AFTER_STEPS", "[]"));
 const NOTE = env(
   "SC_FAKE_NOTE",
   [
@@ -61,6 +69,8 @@ let summaryCalls = 0;
 let stepCounter = 0;
 let taskDone = false;
 let handoffsSeen = 0;
+let preIndex = 0;
+let afterIndex = 0;
 
 type Plan = {
   text?: string;
@@ -101,6 +111,10 @@ function fillerStep(usageTotal: number): Plan {
     usageTotal,
     stopReason: "toolUse",
   };
+}
+
+function scripted(list: ScriptedCall[], index: number, usageTotal: number): Plan {
+  return { toolCall: list[index]!, usageTotal, stopReason: "toolUse" };
 }
 
 function handoffPlan(usageTotal: number): Plan {
@@ -146,6 +160,16 @@ function decide(messages: Msg[]): Plan {
       return handoffPlan(usageTotal);
     }
     if (last.toolName === "write") return { text: "Task complete.", usageTotal: BASE, stopReason: "stop" };
+    // A scripted skill call came back: the next one, else on with the flow.
+    if (last.toolName === "skill" || last.toolName === "skill_done") {
+      if (handoffsSeen === 0 && preIndex < PRE_STEPS.length) return scripted(PRE_STEPS, preIndex++, usageTotal);
+      if (handoffsSeen >= CYCLES && afterIndex < AFTER_STEPS.length) return scripted(AFTER_STEPS, afterIndex++, usageTotal);
+      if (handoffsSeen >= CYCLES) {
+        taskDone = true;
+        return { toolCall: { name: "write", arguments: { path: RESULT_PATH, content: "done" } }, usageTotal, stopReason: "toolUse" };
+      }
+      return fillerStep(usageTotal);
+    }
   }
 
   if (guidance && SCENARIO === "obey-warning" && /self-compact · WARNING/.test(guidance)) return handoffPlan(usageTotal);
@@ -154,10 +178,12 @@ function decide(messages: Msg[]): Plan {
     if (/^\[self-compact · handoff\]/.test(lastText.trim())) {
       handoffsSeen += 1;
       if (handoffsSeen < CYCLES) return fillerStep(usageTotal);
+      if (afterIndex < AFTER_STEPS.length) return scripted(AFTER_STEPS, afterIndex++, usageTotal);
       taskDone = true;
       return { toolCall: { name: "write", arguments: { path: RESULT_PATH, content: "done" } }, usageTotal, stopReason: "toolUse" };
     }
     if (/^Compact now:/.test(lastText)) return handoffPlan(usageTotal);
+    if (handoffsSeen === 0 && preIndex < PRE_STEPS.length) return scripted(PRE_STEPS, preIndex++, usageTotal);
   }
 
   return fillerStep(usageTotal);
@@ -226,28 +252,47 @@ function makeStream() {
 
 /**
  * Pi 0.85.1 hands a provider `{ systemPrompt, messages, tools }`; 0.87.0 hands
- * a transcript whose leading system messages carry the prompt (`content`) and
- * the tool declarations (`toolsAdded`). Read both, so the same fake proves
- * the cycle on the pinned version and on whatever a host has installed.
+ * a transcript whose leading system messages carry the prompt (`content`, and
+ * `sections` patched by name) and the tool declarations (`toolsAdded`). Read
+ * both, so the same fake proves the cycle on the pinned version and on
+ * whatever a host has installed. A run a user prompt starts has the forced
+ * prompt in `content`; a run a hand-off starts has Pi's own sections.
  */
 function promptAndTools(context: { systemPrompt?: string; messages: Msg[]; tools?: unknown[] }): { systemPrompt: string; tools: unknown[]; messages: Msg[] } {
-  let systemPrompt = context.systemPrompt ?? "";
   const tools: unknown[] = [...(context.tools ?? [])];
   const messages: Msg[] = [];
+  // Every system message replays into one prompt, the way Pi's own transcript
+  // helpers do it: `content` is appended, `sections` are patched by name (null
+  // removes one), and the prompt is the content and the sections, joined.
+  const content: string[] = [];
+  const sections = new Map<string, string>();
   for (const m of context.messages) {
     if (m.role !== "system") {
       messages.push(m);
       continue;
     }
     const sys = m as Msg & { toolsAdded?: unknown[]; sections?: Record<string, string | null> };
-    if (!systemPrompt) systemPrompt = textOf(sys.content);
+    const text = textOf(sys.content);
+    if (text) content.push(text);
+    for (const [name, value] of Object.entries(sys.sections ?? {})) {
+      if (value === null) sections.delete(name);
+      else sections.set(name, value);
+    }
     for (const added of sys.toolsAdded ?? []) tools.push(added);
   }
-  return { systemPrompt, tools, messages };
+  const replayed = [...content, ...sections.values()].filter((part) => part.length > 0).join("\n\n");
+  return { systemPrompt: context.systemPrompt || replayed, tools, messages };
 }
 
 function streamScripted(model: { api: string; provider: string; id: string }, rawContext: { systemPrompt?: string; messages: Msg[]; tools?: unknown[] }, options?: { signal?: AbortSignal }) {
   const context = promptAndTools(rawContext);
+  if (PROMPTS) {
+    trace({
+      kind: "raw",
+      topSystemPrompt: typeof rawContext.systemPrompt === "string" ? rawContext.systemPrompt.length : null,
+      shape: rawContext.messages.map((m) => ({ role: m.role, keys: Object.keys(m), chars: textOf(m.content).length, sections: Object.keys((m as { sections?: object }).sections ?? {}), toolsAdded: ((m as { toolsAdded?: unknown[] }).toolsAdded ?? []).length })),
+    });
+  }
   const stream = makeStream();
   const output: Record<string, unknown> & { content: Array<Record<string, unknown>>; usage: Usage; stopReason: string; errorMessage?: string } = {
     role: "assistant",
@@ -308,7 +353,7 @@ function streamScripted(model: { api: string; provider: string; id: string }, ra
       } else {
         const plan = decide(context.messages);
         const lastMessage = context.messages[context.messages.length - 1];
-        trace({ kind: "turn", plan, lastRole: lastMessage?.role, lastText: lastMessage ? textOf(lastMessage.content).slice(0, 400) : "", messages: context.messages.length });
+        trace({ kind: "turn", plan, lastRole: lastMessage?.role, lastText: lastMessage ? textOf(lastMessage.content).slice(0, 400) : "", messages: context.messages.length, ...(PROMPTS ? { systemPrompt: context.systemPrompt } : {}) });
         let index = 0;
         if (plan.text) {
           output.content.push({ type: "text", text: "" });
