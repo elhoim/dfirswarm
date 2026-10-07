@@ -33,13 +33,15 @@ chosen files byte for byte into the job's output, and stops it; the mount is gon
 when it returns.
 
 **Sensitive output.** Memory holds whatever the machine held. `mem_fs` writes file
-content only as a job run with `secret_output: true`, only on `write_values: true`,
-under `$OUT/mem_fs`, and its answer carries the locator of each file, never its
-content or a digest of it (`recovery_key_scan` of the encrypted-containers pack is
-the reference implementation of that pattern). The skills say the same of
-`aeskeyfind`, the Volatility plugins that print command lines, environments or shell
-history, and YARA and `strings` match bytes, and none of them writes a secret, a
-fragment of one or a hash of one into a post, the ledger or the report.
+content only when it runs as a job, only on `write_values: true`, and only under
+`$OUT/mem_fs`; its answer carries the locator of each file, never its content or a
+digest of it (`recovery_key_scan` of the encrypted-containers pack is the reference
+implementation of that pattern). The tool cannot see whether the job was run with
+`secret_output: true`, which seals every output of the job as sensitive: the skills
+say to run it that way, and to run `aeskeyfind`, the Volatility plugins that print
+command lines, environments or shell history, and YARA and `strings` match bytes
+that way too. None of them writes a secret, a fragment of one or a hash of one into
+a post, the ledger or the report.
 
 **One goal template**: `memory-triage.md`.
 

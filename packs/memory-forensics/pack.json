@@ -28,12 +28,12 @@
   "checksums": {
     "sha256": {
       "LICENCE": "5b94f18424dbef1e77eda33a465e946c2c8eb715fa5236afe2c6ec6763af80d3",
-      "README.md": "5138edb8bb525b5229840e79e97ee2efe33402165eb74b17ac686366a1156d5f",
+      "README.md": "454f207667e7c94f2d871e1370ac8e911d9228784ad13abac992dd6fb3c3c8fc",
       "tools/mem_carve/manifest.json": "b493b206583b67420b18eb348b8964ed2ec84634625bfdeb69598fe7aafd348e",
       "tools/mem_carve/run.py": "433cca6031e2103ad16c5fa0d632bab84164431fae93b324b47029870125e4cb",
       "tools/mem_profile/manifest.json": "b1bacb82949615b3a4a2779539a1790931ba0e860ad29c4413af58559bd5c9ab",
       "tools/mem_profile/run.py": "b96c91c56c06f05b071159c6000d0e979040ebda6068928855e86f0349a43b1e",
-      "tools/mem_fs/manifest.json": "1a17e8f5bca09150c4cc3975f62f6a6b67446cd8d168661c29c803fa70aa20e3",
+      "tools/mem_fs/manifest.json": "1b3af3184196c344cb563100e092707294630439b04b90d3446f56d2da940358",
       "tools/mem_fs/run.py": "24c96688638fda6d8c3c7b5d81697593fb21def68a58e9627f45aa2b2b72b13b",
       "goals/memory-triage.md": "2e27e156c48a7e5279d257e33aeefd2b4189cee0986e9580dddae75ac9c4c5f5",
       "skills/strings/discipline.md": "066032bcaab3b2e3bfd50431324135a80f1b9b6918f7472475c6a3d5390daecb",
