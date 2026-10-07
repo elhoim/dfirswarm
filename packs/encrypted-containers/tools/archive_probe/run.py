@@ -210,7 +210,7 @@ def read_eocd(path, size):
             return None
         _sig, _disk, _cd_disk, n_disk, n_total, cd_size, cd_offset, comment_len = struct.unpack_from("<IHHHHIIH", tail, at)
         out = {"entries": n_total, "cd_bytes": cd_size, "cd_offset": cd_offset, "comment_bytes": comment_len,
-               "zip64": False}
+               "zip64": False, "eocd_at": size - tail_len + at}
         if n_total == 0xFFFF or cd_size == 0xFFFFFFFF or cd_offset == 0xFFFFFFFF:
             if at >= 20 and tail[at - 20:at - 16] == b"PK\x06\x07":
                 where = struct.unpack_from("<Q", tail, at - 20 + 8)[0]
@@ -226,13 +226,35 @@ def read_eocd(path, size):
         return out
 
 
+def zip_behind_a_prefix(path, size):
+    """Whether the end of the file is a ZIP's, though the file does not start like one (a self-extracting stub).
+
+    zipfile.is_zipfile decides this too, and newer Pythons (3.14) refuse an End Of
+    Central Directory record whose declared directory does not fit the file, so a
+    ZIP is not recognised by it alone: this reads the record and looks for the
+    central directory's first header where it says it is, or for an empty archive
+    whose record ends the file.
+    """
+    eocd = read_eocd(path, size)
+    if eocd is None:
+        return False
+    if eocd["cd_bytes"] == 0:
+        return eocd["entries"] == 0 and eocd["eocd_at"] + 22 + eocd["comment_bytes"] == size
+    at = eocd["eocd_at"] - eocd["cd_bytes"]
+    if at < 0 or eocd["zip64"]:
+        return False
+    with open(path, "rb") as fh:
+        fh.seek(at)
+        return fh.read(4) == b"PK\x01\x02"
+
+
 def probe_zip(path, size, limit, max_metadata):
     out = {"container": "ZIP", "protection": "structural: the central directory's flags and extra fields"}
     eocd = read_eocd(path, size)
     if eocd is None:
-        return {**out, "listing": "not attempted", "protected": None,
-                "reason": "no End Of Central Directory record in the last 64 KiB, so the central directory's size cannot be checked against the budget",
-                "next_reader": "7z l -slt (archive_probe's 7-Zip branch does not read ZIP)",
+        return {**out, "listing": "failed", "protected": None,
+                "error": "a ZIP signature but no End Of Central Directory record in the last 64 KiB: the archive is "
+                         "truncated, damaged or carved short",
                 "not_determined": ["the member list", "which members are encrypted"]}
     out["entry_count_declared"] = eocd["entries"]
     out["central_directory_bytes"] = eocd["cd_bytes"]
@@ -600,13 +622,11 @@ def main():
                     body = probe_pdf(view)
                 else:
                     body = probe_ole(view)
-    if body is None and zipfile.is_zipfile(path):
+    if body is None and (head[:4] in (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08") or zipfile.is_zipfile(path)
+                         or zip_behind_a_prefix(path, size)):
+        # Whatever zipfile.is_zipfile says of a file that starts with a ZIP signature: the answer
+        # about it (listed, not attempted over budget, or failed) comes from probe_zip.
         body = probe_zip(path, size, limit, max_metadata)
-    elif body is None and head[:4] in (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08"):
-        body = {"container": "ZIP", "protected": None, "listing": "failed",
-                "error": "a ZIP signature at offset 0 but no End Of Central Directory record: the archive is "
-                         "truncated, damaged or carved short",
-                "not_determined": ["the member list", "which members are encrypted"]}
     if body is None:
         fail("this is not a container this tool reads", path=path, bytes=size,
              reads=["ZIP (found from its end, so empty and self-extracting archives count)", "7-Zip", "RAR", "PDF",

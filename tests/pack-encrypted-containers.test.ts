@@ -1022,7 +1022,9 @@ test("archive_probe bounds what it searches in a 7-Zip header and names a header
 });
 
 test("archive_probe agrees with a real 7-Zip on the three archives, where one is installed", async (t) => {
-  const real = ["7zz", "7z"].map((n) => spawnSync("which", [n], { encoding: "utf8" }).stdout.trim()).find(Boolean);
+  // Only an upstream 7zz: a p7zip `7z` (which a CI image may carry) prints other messages, and
+  // this test was captured against 7-Zip 26.00. The stub tests above cover the rest.
+  const real = spawnSync("which", ["7zz"], { encoding: "utf8" }).stdout.trim();
   if (!real) return t.skip("no upstream 7zz on PATH; the stub replays what 7-Zip 26.00 printed");
   await withCwd(async (cwd, bin) => {
     await symlink(real, join(bin, "7z"));
@@ -1250,5 +1252,56 @@ test("archive_probe keeps its memory flat over a 16 MiB 7-Zip header with two mi
     assert.equal(got.code, 0);
     assert.equal(got.count, 2_097_151);
     assert.ok(got.rss_mib < 150, `peak ${got.rss_mib.toFixed(0)} MiB: the matches were held`);
+  });
+});
+
+/** A sitecustomize for one condition: no 7-Zip program on PATH, and/or a zipfile.is_zipfile as strict as Python 3.14's. */
+function siteFor(opts: { no7z?: boolean; strictIsZipfile?: boolean }): string {
+  return [
+    "import shutil, zipfile",
+    opts.no7z ? '_w = shutil.which\nshutil.which = lambda c, *a, **k: None if str(c) in ("7z", "7zz", "7za") else _w(c, *a, **k)' : "",
+    // Python 3.14 refuses an End Of Central Directory record whose directory does not fit the file; this is the extreme.
+    opts.strictIsZipfile ? "zipfile.is_zipfile = lambda *a, **k: False" : "",
+  ].join("\n") + "\n";
+}
+
+test("archive_probe answers a ZIP the same whether 7z is installed or not, and whether zipfile.is_zipfile is strict (Python 3.14) or not", async () => {
+  // On a runner whose python3 is 3.14 the 22-byte file below was "failed": is_zipfile
+  // said no to a record that declares a directory bigger than the file, and the tool
+  // took its answer for "not a ZIP". The ZIP is recognised from its own end now.
+  await withCwd(async (cwd, bin) => {
+    await sevenStub(bin);
+    const eocd = Buffer.alloc(22);
+    eocd.writeUInt32LE(0x06054b50, 0);
+    eocd.writeUInt16LE(0xfffe, 8);
+    eocd.writeUInt16LE(0xfffe, 10);
+    eocd.writeUInt32LE(1 << 30, 12);
+    await writeFile(join(cwd, "work", "huge.zip"), eocd);
+    const real = buildZip([{ name: "inside.docx" }, { name: "locked.bin", flags: 1, method: 8 }]);
+    await writeFile(join(cwd, "work", "plain.zip"), real);
+    await writeFile(join(cwd, "work", "sfx.exe"), buildZip([{ name: "inside.docx" }, { name: "locked.bin", flags: 1, method: 8 }], { prefix: Buffer.concat([Buffer.from("MZ"), Buffer.alloc(4094, 0x90)]) }));
+    await writeFile(join(cwd, "work", "cut.zip"), real.subarray(0, 40));
+    for (const [label, no7z] of [["7z stub present", false], ["7z absent", true]] as const) {
+      for (const strictIsZipfile of [false, true]) {
+        const where = `${label}, strict is_zipfile ${strictIsZipfile}`;
+        await mkdir(join(cwd, "site"), { recursive: true });
+        await writeFile(join(cwd, "site", "sitecustomize.py"), siteFor({ no7z, strictIsZipfile }));
+        const env = { PYTHONPATH: join(cwd, "site") };
+        const run = (name: string) => tool(PROBE, cwd, { path: `work/${name}` }, env, no7z ? undefined : bin).then(body<Probe>);
+        const huge = await run("huge.zip");
+        assert.equal(huge.listing, "not attempted", where);
+        assert.equal(huge.partial, true, where);
+        assert.equal(huge.container, "ZIP", where);
+        assert.match(huge.reason, /max_metadata_bytes/, where);
+        const plain = await run("plain.zip");
+        assert.deepEqual([plain.container, plain.entry_count, plain.encrypted_entries, plain.protected], ["ZIP", 2, 1, true], where);
+        const sfx = await run("sfx.exe");
+        assert.deepEqual((sfx.entries as Probe[]).map((e) => e.name), ["inside.docx", "locked.bin"], where);
+        const cut = await run("cut.zip");
+        assert.deepEqual([cut.container, cut.listing, cut.protected], ["ZIP", "failed", null], where);
+      }
+    }
+    // The 7z stand-in is never run for a ZIP: its argument record was not written.
+    assert.equal(await stat(join(bin, "7z-args.txt")).then(() => true, () => false), false);
   });
 });
