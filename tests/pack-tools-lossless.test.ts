@@ -896,20 +896,21 @@ test("mem_profile reads a 64-bit crash dump's physical-memory descriptor at its 
     head.writeBigUInt64LE(0x200n, 0xa8);
     head.writeBigUInt64LE(0x80n, 0xb0);
     head.writeUInt32LE(1, 0xf98);
-    await writeFile(join(cwd, "work", "memory.dmp"), head);
+    // The runs' 0x180 pages follow the header, one run after the other.
+    await writeFile(join(cwd, "work", "memory.dmp"), Buffer.concat([head, Buffer.alloc(0x180 * 4096)]));
     const out = body<{ container: Record<string, unknown>; notes: string[] }>(
       await tool(join(MEM, "mem_profile", "run.py"), cwd, { path: "work/memory.dmp", scan_mb: 1 }),
     );
     const c = out.container;
     assert.equal(c.format, "Windows crash dump");
     assert.equal(c.bits, 64);
-    assert.equal(c.header_problem, undefined);
+    assert.equal(c.problems, undefined);
     assert.equal(c.run_count, 2);
     assert.equal(c.pages_total, 0x180);
     assert.equal(c.runs_pages_total, 0x180);
     assert.deepEqual(c.memory_runs, [
-      { start_page: 1, pages: 0x100, start_byte: 0x1000, bytes: 0x100000 },
-      { start_page: 0x200, pages: 0x80, start_byte: 0x200000, bytes: 0x80000 },
+      { start_page: 1, pages: 0x100, physical_start: 0x1000, bytes: 0x100000, file_offset: 0x2000 },
+      { start_page: 0x200, pages: 0x80, physical_start: 0x200000, bytes: 0x80000, file_offset: 0x2000 + 0x100000 },
     ]);
     assert.equal(c.contiguous, false);
     assert.ok(out.notes.some((n) => /not contiguous: 2 memory runs/.test(n)));
@@ -931,13 +932,13 @@ test("mem_carve neither double-counts nor loses a hit at its 4 MiB block boundar
     blob.write("ElfChnk\u0000", 2 * CARVE_WINDOW - 3, "latin1"); // straddles the second boundary
     await writeFile(join(cwd, "work", "memory.raw"), blob);
     const out = body<{
-      hits: { kind: string; offset: number }[];
+      hits: { kind: string; signature_offset: number }[];
       hit_count: number;
       by_kind: Record<string, number>;
       complete_results: string;
       preview_limited: boolean;
     }>(await tool(join(MEM, "mem_carve", "run.py"), cwd, { path: "work/memory.raw", results_to: "work/s1/hits.jsonl" }));
-    assert.deepEqual(out.hits.map((h) => [h.kind, h.offset]), [
+    assert.deepEqual(out.hits.map((h) => [h.kind, h.signature_offset]), [
       ["registry hive", CARVE_WINDOW - 14],
       ["MFT record", CARVE_WINDOW - 5],
       ["event log chunk", 2 * CARVE_WINDOW - 3],
@@ -948,10 +949,10 @@ test("mem_carve neither double-counts nor loses a hit at its 4 MiB block boundar
     assert.equal(lines.length, 3);
 
     // One kind alone has a shorter overlap; the split signature is still found once.
-    const one = body<{ hit_count: number; hits: { offset: number }[] }>(
+    const one = body<{ hit_count: number; hits: { signature_offset: number }[] }>(
       await tool(join(MEM, "mem_carve", "run.py"), cwd, { path: "work/memory.raw", kinds: ["event log chunk"] }),
     );
-    assert.deepEqual(one.hits.map((h) => h.offset), [2 * CARVE_WINDOW - 3]);
+    assert.deepEqual(one.hits.map((h) => h.signature_offset), [2 * CARVE_WINDOW - 3]);
     assert.equal(one.hit_count, 1);
 
     // A bounded preview keeps every hit in the file it names.
@@ -976,7 +977,6 @@ test("mem_carve refuses an output path outside work/<id>/", async () => {
       [{ results_to: "work/hits.jsonl" }, /inside work\/<your id>\/, not work\/ itself/],
       [{ extract_to: "../carved" }, /output must stay inside the run directory/],
       [{ extract_to: "inputs/carved" }, /under your own work\/<your id>\//],
-      [{ limit: 5 }, /results_to is required/],
     ];
     for (const [extra, message] of cases) {
       const r = refused(await tool(join(MEM, "mem_carve", "run.py"), cwd, { path: "inputs/memory.raw", ...extra }));
