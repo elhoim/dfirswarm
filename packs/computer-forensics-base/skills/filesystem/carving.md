@@ -47,11 +47,13 @@ signature-recovery engine for unallocated space, and its output is candidates to
   files, which hold the values. A scanner's name does not guarantee a complete
   record or file.
 
-Work in this order: structures that carry time first (prefetch records, event log
-records, registry hives, browser databases, link files); for each hit, cut a slice
-large enough to hold the record, parse it with the right tool and only then report
-it; hash every carved artefact and record where it came from. The offset is part
-of its provenance, with the address space it belongs to; there is no path.
+Work in the order the question sets: the structures that bear on it first, and
+among them those that carry time (on Windows prefetch records, event log records,
+registry hives and link files; on macOS and iOS property lists and databases; on
+Linux journals and logs). For each hit, cut a slice large enough to hold the
+record, parse it with the right tool and only then report it; hash every carved
+artefact and record where it came from. The offset is part of its provenance, with
+the address space it belongs to; there is no path.
 
 A scan with no hit says that these bytes, this signature set and these encodings
 produced none. Compressed or encrypted regions, other encodings and a file split
@@ -67,9 +69,16 @@ from an antivirus signature file as easily as from a sample. Attribute it to a
 process or a mapped region only where memory structures support that mapping;
 otherwise report the source image and offset with ownership unknown.
 
+**Does not show.** A hit shows where bytes occur and a validated boundary that a
+format's own structure reached its end. Neither shows that a file existed at that
+place, was whole, was ever opened or by whom. A string shows that bytes were
+there, not who wrote them or what used them.
+
 **Sensitive output.** The bytes around a hit are where passwords, tokens and card
 numbers sit. `ioc_scan` and `chunk_needles` return none by default, and
 `write_values: true` (in a job, run with `secret_output: true`) writes them to a
 sealed file you cite by file and offset, never by value. A needle is recorded in
-the trace: never put a secret in one. The feature files `feature_scan` leaves hold
-the values the evidence held: run it as a `secret_output: true` job too.
+the trace: never put a secret in one. The files `feature_scan` leaves in `out_dir`
+are bulk_extractor's own and hold the values the evidence held (`alerts.txt` can
+hold a whole recovery key): the answer says `out_dir_contains_secret_values` and
+which kinds hold them, `out_dir` is private, and the job runs with `secret_output: true`.

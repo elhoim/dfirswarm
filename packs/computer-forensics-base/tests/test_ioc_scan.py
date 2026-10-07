@@ -139,6 +139,32 @@ class IocScan(Case):
         path = os.path.join(out, "ioc-scan-values.jsonl")
         self.assertEqual((os.path.getsize(path), stat.S_IMODE(os.stat(path).st_mode)), (0, 0o600))
 
+    def test_a_results_file_is_never_replaced_by_a_later_scan_of_the_same_question(self):
+        # Same question, same size, other bytes: the key (file, needles, range, size) is the same and the answer is not.
+        data = b"\0" * 10 + b"needle" * 40
+        other = b"needle" * 40 + b"\0" * 10
+        first = self.scan(data, "needle", max_hits=2, unique_only=False).json["all_results"]
+        kept = self.read(first)
+        self.assertEqual(self.scan(data, "needle", max_hits=2, unique_only=False).json["all_results"], first, "the same answer again is the file that is there")
+        second = self.scan(other, "needle", max_hits=2, unique_only=False).json["all_results"]
+        self.assertNotEqual(first, second)
+        self.assertTrue(second.endswith(".2.jsonl"), second)
+        self.assertEqual(self.read(first), kept, "the first answer was replaced")
+        self.assertNotEqual(self.read(second), kept)
+
+    def test_the_needles_that_ran_are_named_and_an_empty_list_is_not_the_default_set(self):
+        data = b"\0" * 10 + b"password=" + SECRET
+        r = self.scan(data, "password=|token=")
+        self.assertEqual((r.json["needles_that_ran"], r.json["needles_source"]), (["password=", "token="], "given"))
+        absent = run_tool("ioc_scan", {"path": self.write("blob.bin", data)}, self.dir)
+        self.assertEqual(absent.code, 0, absent.stdout)
+        self.assertIn("password", absent.json["needles_that_ran"])
+        self.assertIn("default set", absent.json["needles_source"])
+        for empty in ("", [], "|"):
+            r = self.scan(data, empty)
+            self.assertEqual(r.code, 1, empty)
+            self.assertIn("needles is empty", r.json["error"])
+
 
 if __name__ == "__main__":
     unittest.main()

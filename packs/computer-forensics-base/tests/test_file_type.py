@@ -189,6 +189,90 @@ class FileType(Case):
             os.chdir(here)
         self.assertEqual(json.loads(self.read(shown).splitlines()[0])["file"], "d/caf\udce9.txt")
 
+    def test_a_results_file_is_never_replaced_by_a_later_walk_of_the_same_directory(self):
+        for i in range(8):
+            self.write("d/f%d.txt" % i, "text %d\n" % i)
+        first = self.look(limit=2).json["all_results"]
+        kept = self.read(first)
+        self.assertEqual(self.look(limit=2).json["all_results"], first, "the same answer again is the file that is there")
+        self.write("d/f3.txt", "other bytes\n")                      # the same walk, a different answer
+        second = self.look(limit=2).json["all_results"]
+        self.assertNotEqual(first, second)
+        self.assertTrue(second.endswith(".2.jsonl"), second)
+        self.assertEqual(self.read(first), kept)
+
+    def test_a_path_that_is_a_link_to_a_directory_is_followed_once_and_a_walk_of_only_links_is_not_complete(self):
+        self.write("real/a.txt", "alpha\n")
+        self.write("real/sub/b.bin", b"\0" * 64)
+        os.symlink(self.path("real"), self.path("held"))              # how a set held in place sits under inputs/
+        r = self.look(path="held")
+        self.assertEqual(r.code, 0, r.stdout)
+        self.assertEqual((r.json["examined"], sorted(os.path.basename(f["file"]) for f in r.json["files"])), (2, ["a.txt", "b.bin"]))
+        self.assertTrue(all(f["file"].startswith("held/") for f in r.json["files"]), "entries are named under the path the caller gave")
+        self.assertEqual(r.json["path_is_a_link"]["link"], "held")
+        self.assertIs(r.json["complete"], True)
+        # Links inside are listed and never followed, and a directory of nothing but links did not examine anything.
+        os.makedirs(self.path("only"))
+        os.symlink(self.path("real/a.txt"), self.path("only/l1"))
+        os.symlink(self.path("real"), self.path("only/l2"))
+        r = self.look(path="only")
+        self.assertIs(r.json["complete"], False)
+        self.assertEqual((r.json["examined"], r.json["links_listed"]), (0, 2))
+        self.assertIn("nothing was opened", " ".join(r.json["why_not_complete"]))
+        os.symlink(self.path("nowhere"), self.path("dangling"))
+        self.assertEqual(self.look(path="dangling").code, 1)
+
+    def test_what_the_time_budget_left_unlooked_at_is_named_and_kept(self):
+        import importlib.util
+        import io
+        import contextlib
+        import types
+        from support import tool_path
+        for i in range(60):
+            self.write("d/f%02d.txt" % i, "x\n")
+        spec = importlib.util.spec_from_file_location("ft3", tool_path("file_type"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        calls = [0]
+
+        def fake():
+            calls[0] += 1
+            return 0 if calls[0] <= 21 else 10 ** 6          # one call sets the deadline, two go to each file: the budget runs out after ten
+        mod.time = types.SimpleNamespace(monotonic=fake)
+        import sys
+        sys.stdin = io.StringIO(json.dumps({"path": "d", "limit": 5}))
+        out = io.StringIO()
+        here = os.getcwd()
+        os.chdir(self.dir)
+        try:
+            with contextlib.redirect_stdout(out):
+                mod.main()
+        finally:
+            os.chdir(here)
+            sys.stdin = sys.__stdin__
+        got = json.loads(out.getvalue())
+        self.assertEqual((got["examined"], got["not_attempted"]), (10, 50))
+        self.assertIs(got["complete"], False)
+        self.assertEqual(len(got["not_attempted_files"]), 50)
+        self.assertTrue(all(n.startswith("d/f") for n in got["not_attempted_files"]))
+        rows = [json.loads(x) for x in self.read(got["all_results"]).splitlines()]
+        self.assertEqual(len(rows), 60)
+        self.assertEqual(len([r for r in rows if "not_attempted" in r]), 50)
+
+    def test_the_first_bytes_are_returned_only_when_asked_for(self):
+        self.write("d/key.bin", bytes(range(32)))
+        self.assertNotIn("head_hex", self.look().json["files"][0])
+        self.assertEqual(self.look(head_hex=True).json["files"][0]["head_hex"], bytes(range(16)).hex())
+        self.assertEqual(self.look(head_hex="yes").code, 1)
+
+    def test_an_lx01_logical_evidence_file_is_named_and_matches_its_extension(self):
+        self.write("d/a.Lx01", b"LVF2\x0d\x0a\x81\x00" + b"\0" * 64)
+        self.write("d/a.L01", b"LVF\x09\x0d\x0a\xff\x00" + b"\0" * 64)
+        by = {os.path.basename(f["file"]): f for f in self.look().json["files"]}
+        self.assertIn("Lx01", by["a.Lx01"]["type"])
+        self.assertIs(by["a.Lx01"]["extension_matches"], True)
+        self.assertIs(by["a.L01"]["extension_matches"], True)
+
 
 if __name__ == "__main__":
     unittest.main()

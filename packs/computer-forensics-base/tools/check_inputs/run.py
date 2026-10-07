@@ -143,6 +143,13 @@ for i, entry in enumerate(files):
     if rel is None:
         malformed.append({"index": i, "why": "no readable path (path, or a path_b64 that is not base64)"})
         continue
+    # Where the entry really points: `inputs/../x`, `inputs//a/./b` and `/etc/passwd` are named by their normal form, and a
+    # place that is not under inputs/ is not the evidence's: it is not hashed, and it is reported as malformed.
+    orig = rel
+    rel = os.path.normpath(rel) if rel else rel
+    if not rel or os.path.isabs(rel) or rel == "inputs" or not rel.startswith("inputs" + os.sep) or ".." in rel.split(os.sep):
+        malformed.append({"index": i, "path": orig, "why": "the path is outside inputs/ (as written, or once ../ and ./ are resolved: %s)" % rel})
+        continue
     if rel in known:
         duplicates.append(rel)
         continue

@@ -35,6 +35,23 @@ def _catalogue_slug(path):
     return os.fsdecode(re.sub(rb"[^A-Za-z0-9._-]", b"_", rel))
 
 
+def _inputs_roots():
+    """inputs/, and each set held in place as a link directly under it (inputs.json names the sets): the only links followed.
+    Any other link under inputs/ is a name and not a place to walk: following one could leave the evidence for the rest of the file system."""
+    import json, os
+    roots = ["inputs"]
+    try:
+        with open("inputs.json", encoding="utf-8") as fh:
+            sets = json.load(fh).get("sets") or []
+    except (OSError, ValueError, AttributeError):
+        sets = []
+    for entry in sets:
+        name = entry.get("name") if isinstance(entry, dict) else None
+        if isinstance(name, str) and name and "/" not in name and os.path.islink(os.path.join("inputs", name)):
+            roots.append(os.path.join("inputs", name))
+    return roots
+
+
 def _resolve_image(explicit=None):
     """A pack tool belongs to no case: find the image under inputs/ instead of
     baking one in. One candidate is used; several mean the caller must say which.
@@ -48,17 +65,12 @@ def _resolve_image(explicit=None):
     for ext in ("*.E01", "*.e01", "*.raw", "*.dd", "*.001", "*.img", "*.vhd", "*.vhdx"):
         cands += glob.glob(os.path.join("inputs", ext))
     seen = set()
-    for base, _dirs, files in os.walk("inputs", followlinks=True):
-        # A link back up the tree is a place already walked, not another one.
-        real = os.path.realpath(base)
-        if real in seen:
-            _dirs[:] = []
-            continue
-        seen.add(real)
-        for f in files:
-            p = os.path.join(base, f)
-            if os.path.isfile(os.path.join("catalog", _catalogue_slug(p), "partitions.txt")):
-                cands.append(p)
+    for root_dir in _inputs_roots():
+        for base, _dirs, files in os.walk(root_dir, followlinks=False):
+            for f in files:
+                p = os.path.join(base, f)
+                if os.path.isfile(os.path.join("catalog", _catalogue_slug(p), "partitions.txt")):
+                    cands.append(p)
     cands = sorted(set(cands))
     if len(cands) == 1:
         return cands[0]
@@ -190,6 +202,54 @@ class SecretValues:
         }
 
 
+def same_bytes(a, b):
+    """Two files with the same bytes (compared in blocks, never whole)."""
+    try:
+        if os.path.getsize(a) != os.path.getsize(b):
+            return False
+        with open(a, "rb") as fa, open(b, "rb") as fb:
+            while True:
+                x, y = fa.read(1 << 20), fb.read(1 << 20)
+                if x != y:
+                    return False
+                if not x:
+                    return True
+    except OSError:
+        return False
+
+
+def publish(tmp, path, shown):
+    """Move a finished file to `path` without replacing what is there: a file at the name is an earlier answer (a complete
+    one, perhaps, where this run was cut short) and stays; this one is kept beside it as name.2.ext, unless it is the
+    same bytes, when the file already there is it. Returns the path it has
+    and the name to show for it."""
+    stem, ext = os.path.splitext(str(path))
+    shown_stem, _ = os.path.splitext(shown)
+    k = 1
+    while True:
+        suffix = "" if k == 1 else ".%d" % k
+        candidate = Path(stem + suffix + ext)
+        try:
+            os.link(tmp, candidate)
+        except FileExistsError:
+            if same_bytes(tmp, candidate):                # the same answer again (a page of the same search): the file is already there
+                os.unlink(tmp)
+                return candidate, shown_stem + suffix + ext
+            k += 1
+            continue
+        except OSError:                                   # a file system with no hard links: a look, then a rename
+            if os.path.lexists(candidate):
+                if same_bytes(tmp, candidate):
+                    os.unlink(tmp)
+                    return candidate, shown_stem + suffix + ext
+                k += 1
+                continue
+            os.rename(tmp, candidate)
+            return candidate, shown_stem + suffix + ext
+        os.unlink(tmp)
+        return candidate, shown_stem + suffix + ext
+
+
 class Locators:
     """One needle's locators: an inline page, and the whole list in a file once it is more than the page."""
 
@@ -253,7 +313,8 @@ class Locators:
             self.fh.flush()
             os.fsync(self.fh.fileno())
             self.fh.close()
-            os.replace(self.tmp, self.path)
+            self.path, self.shown = publish(self.tmp, self.path, self.shown)
+            self.tmp = None
             info["all_results"] = self.shown
             info["all_results_format"] = "JSON Lines, one locator per occurrence: finding_id, off, enc, context_length"
             if self.stopped_at is not None:

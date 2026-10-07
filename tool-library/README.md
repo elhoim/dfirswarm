@@ -24,6 +24,14 @@ scripts/swarm.sh start … --tools-from tool-library
 and put a finished run's own tools back with
 `scripts/swarm.sh tools <id> --save tool-library`.
 
+**Copies of the computer-forensics-base pack's tools.** `file_carver`, `catalog_search`,
+`sig_carve`, `ioc_scan` and `sqlite_query` here are the pack's own, byte for byte (a test
+holds them equal), and so they answer as the pack's do. Run as a job, a tool that writes
+(`file_carver`, and the scanners' result files) writes only under `$OUT` and refuses
+a path outside it: give `{OUT}/<name>`, or a path under your own `work/<you>/`, which the
+harness maps there. `ioc_scan` and the other scanners return locators, and write the bytes
+around a hit only with `write_values: true`, in a job run with `secret_output: true`.
+
 **Read them before you use them.** The agent-written ones were written by a
 model in the middle of a case, they were useful enough to be called and to
 survive into the next run, and nobody reviewed them line by line. Inside a

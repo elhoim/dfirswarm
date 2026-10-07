@@ -221,6 +221,58 @@ class SqliteQuery(Case):
         r = self.query(self.path("link.db"), "select 1")
         self.assertTrue([s for s in r.json["sidecars"] if s["name"] == "a.db-journal"][0]["present"])
 
+    def test_a_rows_file_is_never_replaced_by_a_later_answer_to_the_same_query(self):
+        db = self.db()
+        sql = "with recursive c(n) as (select 1 union all select n+1 from c where n<1000000) select n from c"
+        first = self.query(db, sql, limit=5)
+        self.assertEqual(first.json["row_count"], 1000000)
+        whole = self.path(first.json["rows_file"])
+        size = os.path.getsize(whole)
+        # The same query with a clock of one second is cut short: a different answer under the same name.
+        cut = self.query(db, sql, limit=5, max_seconds=1)
+        kept = cut.json["rows_read_before_the_stop"]
+        self.assertLess(kept["row_count"], 1000000)
+        self.assertTrue(kept["rows_file"].endswith("-0.2.jsonl"), kept["rows_file"])
+        self.assertEqual(os.path.getsize(whole), size, "the complete answer was replaced by the partial one")
+        self.assertEqual(len(self.read(whole).splitlines()), 1000001)
+        self.assertEqual(len(self.read(self.path(kept["rows_file"])).splitlines()), kept["row_count"] + 1)
+        # The same complete answer again is the file that is there, not a copy of it.
+        again = self.query(db, sql, limit=5)
+        self.assertEqual(again.json["rows_file"], first.json["rows_file"])
+
+    def test_a_value_past_the_limit_is_refused_by_name_and_one_below_it_is_streamed(self):
+        db = self.path("big.db")
+        conn = sqlite3.connect(db)
+        conn.execute("create table t(d)")
+        conn.execute("insert into t values(zeroblob(?))", (50 * 1024 * 1024,))
+        conn.execute("insert into t values(zeroblob(?))", (66 * 1024 * 1024,))
+        conn.commit()
+        conn.close()
+        wrapper = ("import json, resource, subprocess, sys\n"
+                   "p = subprocess.run([sys.executable, sys.argv[1]], input=sys.argv[2], capture_output=True, text=True)\n"
+                   "print(json.dumps({'out': p.stdout, 'peak': resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss}))\n")
+        env = {k: v for k, v in os.environ.items() if k not in ("JOB_ID", "OUT", "AGENT_ID")}
+
+        def go(sql):
+            proc = subprocess.run([sys.executable, "-c", wrapper, tool_path("sqlite_query"), json.dumps({"db_path": db, "sql": sql})], capture_output=True, text=True, cwd=self.dir, env=env)
+            got = json.loads(proc.stdout)
+            return json.loads(got["out"]), got["peak"] * (1 if sys.platform == "darwin" else 1024)
+
+        ok, peak = go("select d from t where rowid = 1")
+        self.assertEqual(ok["row_count"], 1)
+        line = json.loads(self.read(ok["rows_file"]).splitlines()[1])["values"][0]
+        self.assertEqual((line["length"], line["sha256"]), (50 * 1024 * 1024, hashlib.sha256(bytes(50 * 1024 * 1024)).hexdigest()))
+        self.assertEqual(len(base64.b64decode(line["blob_b64"])), 50 * 1024 * 1024)
+        self.assertLess(peak, 240 * 1024 * 1024, "peak %d bytes for one 50 MiB value (the earlier code needed 350 MB)" % peak)
+        refused, peak = go("select d from t where rowid = 2")
+        self.assertIs(refused["ok"], False)
+        self.assertEqual(refused["reason"], "value_too_long")
+        self.assertIn("substr()", refused["error"])
+        self.assertLess(peak, 120 * 1024 * 1024, "peak %d bytes for a refused 66 MiB value" % peak)
+        huge, peak = go("select zeroblob(999999999)")
+        self.assertEqual(huge["reason"], "value_too_long")
+        self.assertLess(peak, 120 * 1024 * 1024)
+
 
 if __name__ == "__main__":
     unittest.main()

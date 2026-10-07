@@ -184,7 +184,12 @@ def carve_jpeg(src, off, limit):
         if code == 0xD9:                      # EOI at the top level
             checks.append("segments walked to EOI; a thumbnail's own EOI inside an APPn segment is skipped by its length")
             return pos - off, "validated", "marker walk to EOI", checks, ["the entropy-coded image data is not decoded"]
-        if code in (0x01,) or 0xD0 <= code <= 0xD8:      # no length: TEM, RSTn, SOI
+        if code == 0xD8:
+            # A start-of-image where a segment or an EOI should be: this image never reached its own EOI, and the bytes that follow
+            # are another JPEG's. The candidate ends where that one begins, and its boundary is a guess.
+            return pos - 2 - off, "heuristic", "the next JPEG's start-of-image", checks, [
+                "no EOI was found before another JPEG's start-of-image: the image is truncated, overwritten or this window ends at the next header"]
+        if code in (0x01,) or 0xD0 <= code <= 0xD7:      # no length: TEM, RSTn
             continue
         ln = src.read(pos, 2)
         if len(ln) < 2:
@@ -275,17 +280,22 @@ def carve_zip(src, off, limit):
         rel = pos - off
         if first is None:
             first = (end - off, n_total)
-        if cd_size == 0xFFFFFFFF or cd_off == 0xFFFFFFFF:
-            # ZIP64: the real directory offset and size are in the ZIP64 end record the locator before this one names.
-            loc = src.read(pos - 20, 20)
-            if len(loc) == 20 and loc[:4] == b"PK\x06\x07":
+        # ZIP64: a locator right before this end record names the ZIP64 end record, which holds the real directory offset and size. It is
+        # looked for whenever there is a locator (an archive of 65536 entries or more has one although its end record's size and offset fit),
+        # and always when the end record's size or offset are the placeholder 0xFFFFFFFF; a count of 0xFFFF alone is an ordinary 65535 entries.
+        loc = src.read(pos - 20, 20) if pos - 20 >= off else b""
+        has_locator = len(loc) == 20 and loc[:4] == b"PK\x06\x07"
+        placeholder = cd_size == 0xFFFFFFFF or cd_off == 0xFFFFFFFF
+        if has_locator or placeholder:
+            if has_locator:
                 z64_rel = struct.unpack("<Q", loc[8:16])[0]
                 z = src.read(off + z64_rel, 56) if z64_rel <= limit - off else b""
                 if len(z) == 56 and z[:4] == b"PK\x06\x06":
                     z_cd_size, z_cd_off = struct.unpack("<Q", z[40:48])[0], struct.unpack("<Q", z[48:56])[0]
-                    if z_cd_off + z_cd_size == z64_rel and src.read(off + z_cd_off, 4) in (b"PK\x01\x02", b""):
+                    if z_cd_off + z_cd_size == z64_rel and (z_cd_size == 0 or src.read(off + z_cd_off, 4) == b"PK\x01\x02"):
                         return end - off, "validated", "ZIP64 end-of-central-directory record", ["the ZIP64 record's directory offset and size agree with where it stands"], notes
-            continue
+            if placeholder:
+                continue
         # n_total == 0xFFFF is an ordinary count of 65535 entries unless the sizes above say ZIP64.
         if cd_off + cd_size == rel and (cd_size == 0 or src.read(off + cd_off, 4) == b"PK\x01\x02"):
             return end - off, "validated", "end-of-central-directory record", [

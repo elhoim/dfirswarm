@@ -47,6 +47,10 @@ every line. Search the path part (`catalog_search pattern=":\t[^\t]*:"`), confir
 candidate with `istat`, and extract the stream by its full address
 (`filesystem/extract`). A partial listing cannot show there are no other streams.
 
+**Does not show.** The catalogue shows what the preparation listed and parsed, as
+of its revision. It does not show that the exhibit holds nothing else, that a
+partial generation is the whole, or that a file was ever opened.
+
 If the catalogue is missing or empty, say so on the board once and build only the
 part you need. Do not rebuild the whole thing in every pane. An input the catalogue
 did not cover is open for you to read with other tools.

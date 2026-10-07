@@ -47,8 +47,9 @@ A live collection is not one instant. Record the collection's interval and each
 object's acquisition details, and keep companion files (database journals,
 registry transaction logs) with the file they belong to.
 
-**Say what the collection cannot show, per area, in the report.** State each
-excluded area separately (whole-volume unallocated space, slack outside the
+**Does not show.** A collection shows the objects the collector copied, as it
+copied them, and nothing of what it left. In the report state each excluded area
+separately (whole-volume unallocated space, slack outside the
 objects collected, files the target list did not name) and do not answer a
 deleted-data question from the collection's label alone. "No whole-volume
 carving was possible: the evidence is a KAPE collection, not an image" is a

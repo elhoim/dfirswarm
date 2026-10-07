@@ -70,7 +70,8 @@ class _EwfSegments:
 
 EWF1_SEGMENTS = _EwfSegments(r"[es]\d\d|e[a-z]{2}")
 EWF2_SEGMENTS = _EwfSegments(r"ex\d\d|ex[a-z]{2}")
-EWF_LOGICAL_SEGMENTS = _EwfSegments(r"l\d\d|l[a-z]{2}|lx\d\d")
+EWF_LOGICAL_SEGMENTS = _EwfSegments(r"l\d\d|l[a-z]{2}")
+EWF2_LOGICAL_SEGMENTS = _EwfSegments(r"lx\d\d|lx[a-z]{2}")
 # What a plain text file is not named: the extensions of formats that are not text. A text file given one of these
 # is worth a sentence; a text file named .ps1, .vbs, .js, .reg or .conf is not, and an extension no table lists is no mismatch.
 BINARY_EXTENSIONS = {
@@ -113,6 +114,7 @@ MAGIC = [
     (0, b"EVF\x09\x0d\x0a\xff\x00", "EnCase E01 image (EWF, a segment)", EWF1_SEGMENTS),
     (0, b"EVF2\x0d\x0a\x81\x00", "EnCase Ex01 image (EWF2, a segment)", EWF2_SEGMENTS),
     (0, b"LVF\x09\x0d\x0a\xff\x00", "EnCase L01 logical evidence file (EWF, a segment)", EWF_LOGICAL_SEGMENTS),
+    (0, b"LVF2\x0d\x0a\x81\x00", "EnCase Lx01 logical evidence file (EWF2, a segment)", EWF2_LOGICAL_SEGMENTS),
     (0, b"EVF\x09", "an EWF header that is not a whole E01 file header", set()),
     (0, b"ADSEGMENTEDFILE\x00", "AccessData AD1 logical image (a segment)", AD_SEGMENTS),
     (0, b"ADCRYPT", "AccessData AD1 logical image, encrypted", {"ad1"}),
@@ -174,7 +176,7 @@ def libmagic(path):
     return text[:200] if p.returncode == 0 and text else None
 
 
-def look(path, deadline=None):
+def look(path, deadline=None, with_head=False):
     """One entry for one directory entry. Links and non-regular files are named and not opened.
     The hash is of the whole file unless the time budget runs out in it: the entry then says so, with how far it got."""
     try:
@@ -232,7 +234,8 @@ def look(path, deadline=None):
     else:
         entry["sha256"] = None
         entry["hashing"] = "stopped at the time budget after %d of %d bytes: no digest for this file" % (hashed_to, st.st_size)
-    entry["head_hex"] = head[:16].hex()
+    if with_head:
+        entry["head_hex"] = head[:16].hex()           # opt-in: the first bytes of a key file or a credential store are the secret
     return entry
 
 
@@ -255,6 +258,54 @@ def walk(path):
     while problems:                          # the last directory walked may be the one that failed
         exc = problems.pop(0)
         yield os.fsdecode(exc.filename or path), "the directory could not be listed: %s" % (exc.strerror or exc)
+
+
+def same_bytes(a, b):
+    """Two files with the same bytes (compared in blocks, never whole)."""
+    try:
+        if os.path.getsize(a) != os.path.getsize(b):
+            return False
+        with open(a, "rb") as fa, open(b, "rb") as fb:
+            while True:
+                x, y = fa.read(1 << 20), fb.read(1 << 20)
+                if x != y:
+                    return False
+                if not x:
+                    return True
+    except OSError:
+        return False
+
+
+def publish(tmp, path, shown):
+    """Move a finished file to `path` without replacing what is there: a file at the name is an earlier answer (a complete
+    one, perhaps, where this run was cut short) and stays; this one is kept beside it as name.2.ext, unless it is the
+    same bytes, when the file already there is it. Returns the path it has
+    and the name to show for it."""
+    stem, ext = os.path.splitext(str(path))
+    shown_stem, _ = os.path.splitext(shown)
+    k = 1
+    while True:
+        suffix = "" if k == 1 else ".%d" % k
+        candidate = Path(stem + suffix + ext)
+        try:
+            os.link(tmp, candidate)
+        except FileExistsError:
+            if same_bytes(tmp, candidate):                # the same answer again (a page of the same search): the file is already there
+                os.unlink(tmp)
+                return candidate, shown_stem + suffix + ext
+            k += 1
+            continue
+        except OSError:                                   # a file system with no hard links: a look, then a rename
+            if os.path.lexists(candidate):
+                if same_bytes(tmp, candidate):
+                    os.unlink(tmp)
+                    return candidate, shown_stem + suffix + ext
+                k += 1
+                continue
+            os.rename(tmp, candidate)
+            return candidate, shown_stem + suffix + ext
+        os.unlink(tmp)
+        return candidate, shown_stem + suffix + ext
 
 
 class Results:
@@ -291,7 +342,8 @@ class Results:
         os.fsync(self.fh.fileno())
         self.fh.close()
         if keep:
-            os.replace(self.tmp, self.path)
+            self.path, self.shown = publish(self.tmp, self.path, self.shown)
+            self.tmp = None
             return self.shown
         os.unlink(self.tmp)
         return None
@@ -315,26 +367,47 @@ def main():
     mismatch_only = args.get("mismatch_only", False)
     if not isinstance(mismatch_only, bool):
         fail("mismatch_only is true or false")
+    head_hex = args.get("head_hex", False)
+    if not isinstance(head_hex, bool):
+        fail("head_hex is true or false")
+
+    # A path the caller named that is itself a link (a set held in place under inputs/ is one) is followed once: it is where they
+    # asked to look. Links found inside it are listed, never followed.
+    root, top = path, None
+    if os.path.islink(path):
+        real = os.path.realpath(path)
+        if not os.path.exists(real):
+            fail("the link at path points nowhere", path=path, target=os.readlink(path))
+        root, top = real, {"path": path, "target": real}
+
+    def shown(p):
+        return path + p[len(root):] if top and (p == root or p.startswith(root.rstrip(os.sep) + os.sep)) else p
 
     deadline = time.monotonic() + BUDGET_SECONDS
-    results = Results([path, mismatch_only, limit])
+    results = Results([path, mismatch_only, limit, head_hex])
+    not_attempted = []
     page, errors = [], []
     counts = {"discovered": 0, "examined": 0, "mismatches": 0, "unrecognised": 0, "links": 0, "not_regular": 0, "errors": 0, "not_attempted": 0, "not_hashed": 0}
     inline_total = 0
     stopped = None
-    for target, problem in walk(path):
+    for target, problem in walk(root):
         counts["discovered"] += 1
         if problem:
             entry = {"file": target, "error": problem}
         elif time.monotonic() > deadline:
             stopped = stopped or "the %d-second time budget was used" % BUDGET_SECONDS
             counts["not_attempted"] += 1
+            # Named, not just counted: the entry is in the whole result, and the first ones are in the answer.
+            results.add({"file": shown(target), "not_attempted": "the time budget was used before this was looked at"})
+            if len(not_attempted) < ERRORS_SHOWN:
+                not_attempted.append(shown(target))
             continue
         else:
-            entry = look(target, deadline)
+            entry = look(target, deadline, head_hex)
             if entry.get("hashing"):
-                stopped = stopped or "the %d-second time budget was used while hashing %s" % (BUDGET_SECONDS, target)
+                stopped = stopped or "the %d-second time budget was used while hashing %s" % (BUDGET_SECONDS, shown(target))
                 counts["not_hashed"] += 1
+        entry["file"] = shown(entry["file"])
         results.add(entry)
         if "error" in entry:
             counts["errors"] += 1
@@ -352,7 +425,15 @@ def main():
         inline_total += 1
         if len(page) < limit:
             page.append(entry)
-    whole = results.finish(keep=inline_total > len(page) or (mismatch_only and counts["discovered"] > inline_total) or counts["errors"] > ERRORS_SHOWN)
+    whole = results.finish(keep=inline_total > len(page) or (mismatch_only and counts["discovered"] > inline_total) or counts["errors"] > ERRORS_SHOWN
+                           or counts["not_attempted"] > ERRORS_SHOWN)
+    why_not_complete = []
+    if stopped:
+        why_not_complete.append(stopped)
+    if counts["errors"]:
+        why_not_complete.append("%d entries could not be read or listed (errors)" % counts["errors"])
+    if counts["discovered"] and not counts["examined"]:
+        why_not_complete.append("nothing was opened: every entry found was a link or not a regular file, and a link is listed, never followed")
     out = {
         "tool": TOOL,
         "path": path,
@@ -362,6 +443,7 @@ def main():
         "discovered": counts["discovered"],
         "examined": counts["examined"],
         "not_attempted": counts["not_attempted"],
+        "not_attempted_files": not_attempted,
         "not_hashed": counts["not_hashed"],
         "extension_mismatches": counts["mismatches"],
         "unrecognised": counts["unrecognised"],
@@ -370,7 +452,7 @@ def main():
         "error_count": counts["errors"],
         "errors": errors,
         "truncated": inline_total > len(page),
-        "complete": stopped is None and counts["errors"] == 0,
+        "complete": not why_not_complete,
         "note": "A mismatch is a lead, not a finding: plenty of legitimate files carry an "
                 "unexpected extension, and a container type such as ZIP covers a dozen document "
                 "formats. What matters is the direction — an executable named .txt is worth a "
@@ -384,6 +466,12 @@ def main():
         out["all_results_error"] = results.error
     if stopped:
         out["stopped"] = stopped
+    if why_not_complete:
+        out["why_not_complete"] = why_not_complete
+    if top:
+        out["path_is_a_link"] = {"link": top["path"], "followed_to": top["target"], "note": "the path named is a link, followed once; links inside it are listed, never followed"}
+    if counts["not_attempted"] > ERRORS_SHOWN:
+        out["not_attempted_note"] = "%d entries were not looked at; the first %d are named, every one is in all_results" % (counts["not_attempted"], ERRORS_SHOWN)
     if counts["errors"] > ERRORS_SHOWN:
         out["errors_note"] = "%d errors; the first %d are listed, the rest are in all_results" % (counts["errors"], ERRORS_SHOWN)
     print(json.dumps(out, indent=2))

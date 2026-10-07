@@ -324,6 +324,31 @@ class FileCarver(Case):
         self.assertEqual(r.code, 0, r.stdout)
         self.assertEqual((r.json["size"], r.json["boundary"]), (len(raw), "validated"))
 
+    def test_a_zip_of_65536_entries_is_validated_by_its_zip64_record(self):
+        # Python writes a ZIP64 end record and locator once there are more than 65535 entries, with the end record's count at 0xFFFF and
+        # its directory size and offset as they are: the plain rule (the directory ends where the end record starts) does not hold, the
+        # ZIP64 record's does.
+        big = io.BytesIO()
+        with zipfile.ZipFile(big, "w", zipfile.ZIP_STORED) as z:
+            for i in range(65536):
+                z.writestr("f%d" % i, b"")
+        data = big.getvalue()
+        self.assertEqual(data[-22 - 20 - 56:-22 - 20 - 56 + 4], b"PK\x06\x06")
+        r = self.carve(data, "ZIP")
+        self.assertEqual(r.code, 0, r.stdout)
+        self.assertEqual((r.json["size"], r.json["boundary"]), (len(data), "validated"))
+        self.assertEqual(r.json["boundary_basis"], "ZIP64 end-of-central-directory record")
+
+    def test_a_truncated_jpeg_followed_by_another_ends_where_the_next_begins_and_is_a_guess(self):
+        first = jpeg_with_thumbnail()
+        truncated = first[:-2 - 30]                          # its EOI and the last of its entropy-coded bytes are gone
+        data = truncated + first                              # the next file follows at once
+        r = self.carve(data, "JPEG")
+        self.assertEqual(r.code, 0, r.stdout)
+        self.assertEqual(r.json["size"], len(truncated))
+        self.assertEqual(r.json["boundary"], "heuristic")
+        self.assertIn("start-of-image", json.dumps(r.json))
+
     # --- the contract --------------------------------------------------------------
 
     def test_an_existing_output_is_not_overwritten(self):

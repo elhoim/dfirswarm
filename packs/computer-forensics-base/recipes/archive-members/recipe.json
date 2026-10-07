@@ -50,5 +50,5 @@
   ],
   "purpose": "inventory",
   "covers": "The archive's own list of members. It opens no member, searches no contents and lists no archive inside the archive: a member is extracted separately (the base pack ships no member extractor yet; an archive_extract tool is planned) and catalogued on its own.",
-  "sha256": "ac7b90fb8d739dab7808bdf8036c9c9471a321a98e25a77f99b168a23a0ee744"
+  "sha256": "b04d22238705f631009f9f65ecb7e61eabcb76e08c5d615d633ae323d0973dfd"
 }

@@ -55,6 +55,10 @@ again collects everything again. Filter syntax is the installed `psort`'s, for
 example `date > '2026-02-14 00:00:00' AND date < '2026-02-16 00:00:00'`: check it
 against that version's help.
 
+**Does not show.** A row shows what a parser read from an artefact, in UTC. It does
+not show that the event happened when the artefact's own clock says, who caused it,
+that every source was read, or that an event with no row did not happen.
+
 Three habits that separate a useful timeline from a wall of rows:
 
 1. **Find the window first, then work the artefacts.** Bracket the hours that

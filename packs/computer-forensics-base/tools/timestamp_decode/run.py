@@ -53,6 +53,7 @@ DEFAULT_FROM = "1990-01-01"
 DEFAULT_TO = "2040-01-01"
 MAX_DIGITS = 40
 MAX_SIGNIFICANT = 60
+TEXT_MAX = 80                    # characters of the value as written (an exponent or a hexadecimal run included)
 SHOWN_DIGITS = 9
 
 
@@ -83,6 +84,8 @@ def parse_value(raw, as_hex):
     text = str(raw).strip().replace("_", "")
     if not text:
         fail("value is empty")
+    if len(text) > TEXT_MAX:
+        fail("value is longer than %d characters: no clock here is written with more" % TEXT_MAX, length=len(text))
     if "," in text:
         fail("a comma is ambiguous (a thousands separator or a decimal comma): write the number without one", value=raw)
     try:
@@ -90,13 +93,13 @@ def parse_value(raw, as_hex):
             number = D(int(text, 16))
         elif as_hex:
             raise ValueError(text)
-        elif re.fullmatch(r"[+-]?(\d+(\.\d*)?|\.\d+)", text):
+        elif re.fullmatch(r"[+-]?([0-9]+(\.[0-9]*)?|\.[0-9]+)", text):
             number = CTX.create_decimal(text)
-        elif re.fullmatch(r"[+-]?(\d+(\.\d*)?|\.\d+)[eE][+-]?\d{1,3}", text):
+        elif re.fullmatch(r"[+-]?([0-9]+(\.[0-9]*)?|\.[0-9]+)[eE][+-]?[0-9]{1,3}", text):
             number = CTX.create_decimal(text)
         else:
             raise ValueError(text)
-    except (ValueError, decimal.InvalidOperation):
+    except (ValueError, decimal.DecimalException):
         fail("value is not a number: a decimal, a decimal with a fraction, or hexadecimal", value=raw)
     if number != 0 and (number.adjusted() > MAX_DIGITS or number.adjusted() < -MAX_DIGITS):
         fail("value is outside what this tool reads (more than %d digits)" % MAX_DIGITS, value=raw)

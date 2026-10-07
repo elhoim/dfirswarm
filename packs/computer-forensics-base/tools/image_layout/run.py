@@ -37,6 +37,8 @@ CHILD_TIMEOUT = 120
 TOTAL_BUDGET = 270          # seconds, under the manifest's 300
 SECTOR_MAX = 65536
 VIRTUAL_DISKS = ("vhd", "vhdx", "vmdk", "qcow", "aff")
+# The image type img_stat prints for what the Sleuth Kit has a reader for; a container with none is read as "raw" if at all.
+TSK_IMAGE_TYPES = {"ewf": "ewf", "vmdk": "vmdk", "vhd": "vhd", "aff": "aff"}
 
 
 def fail(message, **extra):
@@ -229,9 +231,10 @@ def acquisition_record(image, deadline, keep):
 
 def split_raw_note(image):
     """A first segment of a split raw set (x.001 with x.002 beside it)."""
-    m = re.match(r"^(.*)\.(0*1)$", image)
+    m = re.match(r"^(.*)\.(0*1)$", image) or re.match(r"^(.*)\.(0+)$", image)       # .001 first, or .000 (some imagers start there)
     if m:
-        nxt = m.group(1) + "." + (m.group(2)[:-1] + "2")
+        digits = m.group(2)
+        nxt = m.group(1) + "." + (digits[:-1] + ("2" if digits.endswith("1") else "1"))
         if os.path.isfile(nxt):
             return ("%s has a second segment beside it (%s). This tool reads one path: the offsets and "
                     "volumes below cover that segment alone, not the whole image. Assemble the set in order "
@@ -287,13 +290,40 @@ def main():
     res = run(probe, deadline)
     keep.save("mmls", "$ %s\n%s%s" % (shlex.join(probe), res["stdout"], ("\n[stderr]\n" + res["stderr"]) if res["stderr"] else ""), probe)
     out["mmls_command"] = shlex.join(probe)
-    if res["kind"] == "ok":
+    opened_as = None
+    if res["kind"] == "ok" and out["container"] != "raw":
+        # mmls succeeding says the Sleuth Kit read bytes, not which reader it used: a VHD or a QCOW2 TSK cannot open is read as
+        # a raw disk, and the offsets then belong to the container's bytes and mean nothing for the disk inside. img_stat names the
+        # image type TSK opened it as.
+        st_argv = ["img_stat"] + (["-b", str(forced)] if forced else []) + [arg]
+        st = run(st_argv, deadline)
+        if st["stdout"] or st["stderr"]:
+            keep.save("img_stat", "$ %s\n%s%s" % (shlex.join(st_argv), st["stdout"], ("\n[stderr]\n" + st["stderr"]) if st["stderr"] else ""), st_argv)
+        m = re.search(r"^Image Type:[ \t]*(\S+)", st["stdout"], re.M)
+        opened_as = m.group(1).lower() if m else None
+        out["image_type_opened_by_sleuth_kit"] = opened_as
+        expected = TSK_IMAGE_TYPES.get(out["container"])
+        if opened_as is not None and opened_as != expected:
+            out["partition_table"] = "unknown"
+            out["partition_table_basis"] = ("mmls printed a table, but img_stat says the Sleuth Kit opened this %s container as %s%s: its offsets belong to "
+                                            "the container's bytes, not to the disk inside, and are not given here" % (out["container"], opened_as, " (it has no reader for %s)" % out["container"] if not expected else ""))
+            out["sector_size"] = forced or 512
+            out["sector_size_source"] = "given by the caller (-b)" if forced else "the default: the offsets were not used"
+            out["partitions"] = []
+            out["volumes_readable"] = out["volumes_refused"] = out["volumes_not_attempted"] = 0
+            out["notes"].append(
+                "The Sleuth Kit opened this %s container as %s, so no offset or file system is read from it: convert or attach it (qemu-img, a "
+                "mount of the virtual disk) and run this tool on the result, or use a reader of the container." % (out["container"], opened_as))
+            res = {"kind": "container-not-opened", "stdout": "", "stderr": "", "code": None}
+    if res["kind"] == "container-not-opened":
+        pass
+    elif res["kind"] == "ok":
         if out["container"] in VIRTUAL_DISKS:
             out["notes"].append(
-                "The Sleuth Kit opened this %s container directly. The offsets below are "
-                "sectors in the virtual disk and are valid for Sleuth Kit commands against "
-                "this container; convert it only for a tool that cannot open the container."
-                % out["container"]
+                ("The Sleuth Kit opened this %s container as %s (img_stat). " % (out["container"], opened_as) if opened_as else
+                 "img_stat did not say which image type the Sleuth Kit opened this %s container as, so that it read the container and not its raw bytes "
+                 "is not confirmed. " % out["container"])
+                + "The offsets below are sectors in the virtual disk, valid for Sleuth Kit commands against this container."
             )
         unit, slots = parse_mmls(res["stdout"])
         if forced and unit != forced:

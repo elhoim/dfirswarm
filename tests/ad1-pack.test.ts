@@ -584,6 +584,43 @@ test("an item the walk did not reach before a budget stop is not claimed absent"
   assert.doesNotMatch(text, /no item 11 in this read of the image/, "an item after the stop is not an item that is not there");
 });
 
+test("the walk budget stops ad1_extract, and a wanted item it never reached is not called absent", async () => {
+  const cwd = runDir();
+  const r = await runPy(TOOL, cwd, { image: "inputs/case.ad1", max_walk: 5 }, undefined, { AGENT_ID: "s1" });
+  assert.equal(r.code, 1);
+  const res = JSON.parse(r.stdout);
+  assert.equal(res.processing_status, "partial");
+  assert.match(res.stopped_by_budget, /walk budget of 5 items/);
+  assert.equal(res.items, 5);
+  const some = await runPy(TOOL, cwd, { image: "inputs/case.ad1", members: [11], max_walk: 5, out_dir: "work/s1/walk2" }, undefined, { AGENT_ID: "s1" });
+  const text = JSON.parse(some.stdout).errors.join("\n");
+  assert.match(text, /item 11 was not reached before the call stopped/);
+  assert.doesNotMatch(text, /no item 11 in this read/);
+  const bad = await runPy(TOOL, cwd, { image: "inputs/case.ad1", max_walk: 0, out_dir: "work/s1/walk3" }, undefined, { AGENT_ID: "s1" });
+  assert.equal(bad.code, 1);
+});
+
+test("what ad1_extract holds while it walks is the depth of the tree, not the number of items", () => {
+  const d = dir("ad1-memory-");
+  mkdirSync(join(d, "inputs"));
+  const dirs: Ad1Node[] = [];
+  for (let k = 0; k < 100; k++) {
+    const kids: Ad1Node[] = [];
+    for (let i = 0; i < 1000; i++) kids.push({ name: `f${i}.txt`, content: Buffer.alloc(0) });
+    dirs.push({ name: `d${k}`, folder: true, children: kids });
+  }
+  writeFileSync(join(d, "inputs", "big.ad1"), ad1Image(dirs));
+  const wrapper = "import json, resource, subprocess, sys\n" +
+    "p = subprocess.run([sys.executable, sys.argv[1]], input=sys.argv[2], capture_output=True, text=True)\n" +
+    "print(json.dumps({'out': p.stdout, 'peak': resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss}))\n";
+  const r = spawnSync("python3", ["-c", wrapper, TOOL, JSON.stringify({ image: "inputs/big.ad1" })], { cwd: d, encoding: "utf8", env: { ...process.env, AGENT_ID: "s1" } });
+  const got = JSON.parse(r.stdout) as { out: string; peak: number };
+  const res = JSON.parse(got.out);
+  assert.deepEqual([res.processing_status, res.items, res.files, res.folders], ["complete", 100100, 100000, 100]);
+  const peak = got.peak * (process.platform === "darwin" ? 1 : 1024);
+  assert.ok(peak < 60 * 1024 * 1024, `the peak was ${peak} bytes for 100,100 items (the earlier code needed 100 MB)`);
+});
+
 test("a locator with a digit that is not a decimal digit is refused with a message, not a traceback", async () => {
   const cwd = runDir();
   for (const bad of ["ad1:item=\u00b2", "ad1:item=\u0663", "ad1:item="]) {

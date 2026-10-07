@@ -116,6 +116,54 @@ class SecretValues:
         }
 
 
+def same_bytes(a, b):
+    """Two files with the same bytes (compared in blocks, never whole)."""
+    try:
+        if os.path.getsize(a) != os.path.getsize(b):
+            return False
+        with open(a, "rb") as fa, open(b, "rb") as fb:
+            while True:
+                x, y = fa.read(1 << 20), fb.read(1 << 20)
+                if x != y:
+                    return False
+                if not x:
+                    return True
+    except OSError:
+        return False
+
+
+def publish(tmp, path, shown):
+    """Move a finished file to `path` without replacing what is there: a file at the name is an earlier answer (a complete
+    one, perhaps, where this run was cut short) and stays; this one is kept beside it as name.2.ext, unless it is the
+    same bytes, when the file already there is it. Returns the path it has
+    and the name to show for it."""
+    stem, ext = os.path.splitext(str(path))
+    shown_stem, _ = os.path.splitext(shown)
+    k = 1
+    while True:
+        suffix = "" if k == 1 else ".%d" % k
+        candidate = Path(stem + suffix + ext)
+        try:
+            os.link(tmp, candidate)
+        except FileExistsError:
+            if same_bytes(tmp, candidate):                # the same answer again (a page of the same search): the file is already there
+                os.unlink(tmp)
+                return candidate, shown_stem + suffix + ext
+            k += 1
+            continue
+        except OSError:                                   # a file system with no hard links: a look, then a rename
+            if os.path.lexists(candidate):
+                if same_bytes(tmp, candidate):
+                    os.unlink(tmp)
+                    return candidate, shown_stem + suffix + ext
+                k += 1
+                continue
+            os.rename(tmp, candidate)
+            return candidate, shown_stem + suffix + ext
+        os.unlink(tmp)
+        return candidate, shown_stem + suffix + ext
+
+
 class Locators:
     """Every locator goes to a file as it is found; the inline page is the view of them the caller asked for.
     The file is published when the page is not the whole (more rows than the page, or repeats hidden from it)."""
@@ -175,7 +223,8 @@ class Locators:
             os.fsync(self.fh.fileno())
             self.fh.close()
             if self.total > len(self.page):
-                os.replace(self.tmp, self.path)
+                self.path, self.shown = publish(self.tmp, self.path, self.shown)
+                self.tmp = None
                 info["all_results"] = self.shown
                 info["all_results_format"] = "JSON Lines, one locator per occurrence: finding_id, offset, needle, enc, context_length"
                 if self.stopped_at is not None:
@@ -233,6 +282,9 @@ def main():
         needles = [n for n in needles.split("|") if n]
     if needles is not None and (not isinstance(needles, list) or not all(isinstance(n, str) for n in needles)):
         fail("needles is a pipe-separated string or a list of strings")
+    if "needles" in args and args["needles"] is not None and not needles:
+        fail("needles is empty: give at least one needle, or leave needles out for the default set (the answer lists which ran)")
+    needles_source = "given" if needles else "the default set: no needles were given"
     if not needles:
         needles = DEFAULT_NEEDLES
     needles = list(dict.fromkeys(needles))          # a needle given twice is one needle
@@ -369,6 +421,8 @@ def main():
         "context": {"after_bytes": context, "before_bytes": BEFORE, "returned_inline": False,
                     "note": "context bytes are not returned: they are where a secret sits. write_values: true, in a job run with secret_output: true, writes them to a file under $OUT."},
         "hit_count_returned": page["returned"],
+        "needles_that_ran": needles,
+        "needles_source": needles_source,
         "counts": dict(sorted(counts.items(), key=lambda kv: -kv[1])),
         "hits": locators.page,
         **page,

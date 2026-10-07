@@ -15,12 +15,15 @@ import hashlib
 import json
 import os
 import re
+import signal
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 TOOL = {"name": "sig_carve", "version": 2}
 WINDOW = 8 * 1024 * 1024
+BUDGET_SECONDS = 100              # inside the manifest's 120: past it the scan stops, says so, and names where to continue
 CONTEXT_MAX = 4096
 HITS_MAX = 1_000_000
 ROWS_PER_SIGNATURE = 2_000_000       # rows kept in the whole-result file per signature; counting goes on past it
@@ -125,6 +128,21 @@ class SafePage(LosslessPage):
                 pass
             self._tmp = None
 
+    def discard(self):
+        """Close and remove the file being written: a scan that did not end keeps no half file."""
+        if self._out is not None:
+            try:
+                self._out.close()
+            except OSError:
+                pass
+            self._out = None
+        if self._tmp is not None:
+            try:
+                self._tmp.unlink()
+            except OSError:
+                pass
+            self._tmp = None
+
     def add(self, row):
         if self.error is not None:
             self.total += 1
@@ -139,6 +157,16 @@ class SafePage(LosslessPage):
     def finish(self):
         if self.error is None:
             try:
+                # The base class moves its file to self.path: the name is chosen here so that nothing already there is replaced.
+                if self._out is not None and os.path.lexists(self.path):
+                    self._out.flush()
+                    stem, ext = os.path.splitext(str(self.path))
+                    shown_stem, _ = os.path.splitext(self.shown)
+                    k = 1
+                    while os.path.lexists(self.path if k == 1 else "%s.%d%s" % (stem, k, ext)) and not _same_bytes(self._tmp, self.path if k == 1 else "%s.%d%s" % (stem, k, ext)):
+                        k += 1
+                    if k > 1:
+                        self.path, self.shown = Path("%s.%d%s" % (stem, k, ext)), "%s.%d%s" % (shown_stem, k, ext)
                 return super().finish()
             except OSError as exc:
                 self._give_up(exc)
@@ -175,6 +203,31 @@ SIGS = {
 }
 
 
+def _same_bytes(a, b):
+    """Two files with the same bytes (compared in blocks, never whole)."""
+    try:
+        if os.path.getsize(a) != os.path.getsize(b):
+            return False
+        with open(a, "rb") as fa, open(b, "rb") as fb:
+            while True:
+                x, y = fa.read(1 << 20), fb.read(1 << 20)
+                if x != y:
+                    return False
+                if not x:
+                    return True
+    except OSError:
+        return False
+
+
+PAGES = []                         # the pages being written: a SIGTERM removes their half files before the scan ends
+
+
+def _terminated(signum, _frame):
+    for page in PAGES:
+        page.discard()
+    raise SystemExit(128 + signum)
+
+
 def fail(message, **extra):
     print(json.dumps({"ok": False, "error": message, "tool": TOOL, **extra}))
     raise SystemExit(1)
@@ -199,10 +252,15 @@ def main():
     context = whole_number(args, "context", 64, 0, CONTEXT_MAX)
     max_hits = whole_number(args, "max_hits", 500, 1, HITS_MAX)
     window = whole_number(args, "window_bytes", WINDOW, 16, 256 * 1024 * 1024)
-    if not isinstance(path, str) or not path:
+    if not isinstance(path, str) or not path or "\0" in path:
         fail("path is required: the binary file to scan")
     if not os.path.isfile(path):
         fail("no such file", path=path)
+    try:
+        size = os.path.getsize(path)
+    except OSError as exc:
+        fail("the file cannot be read: %s" % (exc.strerror or exc), path=path)
+    start = whole_number(args, "start", 0, 0, size)
     if not isinstance(sig_name, str):
         fail("sig is a signature name or all", sig=sig_name, signatures=sorted(SIGS))
     if sig_name != "all" and sig_name not in SIGS:
@@ -210,8 +268,11 @@ def main():
     chosen = SIGS if sig_name == "all" else {sig_name: SIGS[sig_name]}
     headers = {name: bytes.fromhex(h) for name, (h, _a, _n) in chosen.items()}
     carry_len = max(len(h) for h in headers.values()) - 1
-    size = os.path.getsize(path)
-    pages = {name: SafePage("sig_carve-" + name, [path, name, size, context], max_hits) for name in chosen}
+    pages = {name: SafePage("sig_carve-" + name, [path, name, size, context, start], max_hits) for name in chosen}
+    PAGES.extend(pages.values())
+    for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+        signal.signal(sig, _terminated)
+    deadline = time.monotonic() + BUDGET_SECONDS
     totals = {name: 0 for name in chosen}
     capped = {}
 
@@ -223,12 +284,34 @@ def main():
         fh.seek(at)
         return fh.read(context)
 
-    scanned = 0
-    with open(path, "rb") as fh:
+    scanned = start
+    stopped, read_error = None, None
+    try:
+        fh = open(path, "rb")
+    except OSError as exc:
+        fail("the file cannot be opened: %s" % (exc.strerror or exc), path=path)
+    with fh:
+        # From `start` on. The bytes just before it are read as the carry, so a header that begins before `start` and ends after it
+        # is found once (one wholly before it is not this scan's); a continuation of a stopped scan loses no seam and repeats no hit.
         carry = b""
-        pos = 0
+        if start and carry_len:
+            try:
+                fh.seek(max(0, start - carry_len))
+                carry = fh.read(min(carry_len, start))
+            except OSError as exc:
+                fail("the file could not be read at offset %d: %s" % (start, exc.strerror or exc), path=path)
+        fh.seek(start)
+        pos = start
         while pos < size:
-            block = fh.read(min(window, size - pos))
+            if time.monotonic() > deadline:
+                stopped = ("the %d-second time budget was used after %d bytes of the file: the counts and hits are for [%d, %d) only; "
+                           "run again with start=%d to go on" % (BUDGET_SECONDS, pos - start, start, pos, pos))
+                break
+            try:
+                block = fh.read(min(window, size - pos))
+            except OSError as exc:
+                read_error = "the file could not be read at offset %d: %s" % (pos, exc.strerror or exc)
+                break
             if not block:
                 break
             buf = carry + block
@@ -251,7 +334,13 @@ def main():
                         elif name not in capped:
                             capped[name] = at
                     i = buf.find(header, i + 1)
-            fh.seek(pos + len(block))          # a preview may have moved the file position
+            try:
+                fh.seek(pos + len(block))          # a preview may have moved the file position
+            except OSError as exc:
+                read_error = "the file could not be read at offset %d: %s" % (pos + len(block), exc.strerror or exc)
+                pos += len(block)
+                scanned = pos
+                break
             carry = buf[-carry_len:] if carry_len else b""
             pos += len(block)
             scanned = pos
@@ -264,16 +353,23 @@ def main():
             entry["rows_file_stopped_at_offset"] = capped[name]
             entry["rows_file_cap"] = ROWS_PER_SIGNATURE
         results[name] = entry
+    complete = scanned == size and stopped is None and read_error is None
+    scan = {"start": start, "end": scanned, "bytes": scanned - start, "complete": complete, "passes": 1,
+            "window_bytes": window, "carry_bytes": carry_len}
+    if stopped:
+        scan["stopped"] = stopped
+    if read_error:
+        scan["read_error"] = read_error
     print(json.dumps({
         "tool": TOOL,
         "source": {"path": path, "bytes": size, "address_space": "the bytes of this file as given; a container (E01, VMDK) is not decoded"},
-        "scanned": {"start": 0, "end": scanned, "bytes": scanned, "complete": scanned == size, "passes": 1,
-                    "window_bytes": window, "carry_bytes": carry_len},
+        "scanned": scan,
         "context_bytes": context,
         "signatures": results,
         "note": "A hit is where a header's bytes occur, not a file: cut it with file_carver or read it in place and check it with a parser of that format. "
                 "A signature that is not listed here, an encrypted or compressed region and a file split across the scan's source are not found by this scan.",
     }, indent=2))
+    sys.exit(0 if complete else 1)
 
 
 if __name__ == "__main__":

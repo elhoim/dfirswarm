@@ -5,7 +5,9 @@ log's "ElfFile", the SQLite header string); each test places one at, and either
 side of, a read-block boundary and asks for it in files read with different block
 sizes, so a header cut by a boundary, or counted twice for it, shows as a wrong count.
 """
+import json
 import os
+import sys
 import unittest
 
 from support import Case, run_tool
@@ -106,6 +108,115 @@ class SigCarve(Case):
         self.assertEqual((png["count"], png["returned"], png["truncated"]), (40, 5, True))
         self.assertNotIn("all_results", png)
         self.assertIn("could not be written", png["all_results_error"])
+
+    def test_a_header_across_the_64_mib_seam_is_one_hit_at_its_own_offset(self):
+        # The old default window was 64 MiB: a MAM whose M ends one window and whose AM begins the next, and one that begins the next, are
+        # each counted once, at the offset the bytes are at.
+        mib64 = 64 * 1024 * 1024
+        path = self.path("seam2.bin")
+        with open(path, "wb") as fh:
+            fh.truncate(mib64 + 4096)
+            fh.seek(mib64 - 1)
+            fh.write(b"MAM")                 # straddles: M | AM
+            fh.seek(mib64 + 100)
+            fh.write(b"MAM")                 # wholly in the second window
+            fh.seek(mib64 - 3)               # "MAM" at mib64-3 would overlap the straddler; it is not written
+        r = run_tool("sig_carve", {"path": path, "sig": "MAM", "window_bytes": mib64}, self.dir)
+        mam = r.json["signatures"]["MAM"]
+        self.assertEqual((mam["count"], [h["offset"] for h in mam["hits"]]), (2, [mib64 - 1, mib64 + 100]))
+
+    def test_a_scan_stopped_at_its_budget_is_continued_with_start_without_a_lost_seam_or_a_repeated_hit(self):
+        import importlib.util
+        import io
+        import contextlib
+        import signal
+        import types
+        from support import tool_path
+        data = bytearray(b"\0" * 400)
+        for at in (10, 60, 125, 140, 190, 255, 300):           # 60 and 125 straddle the 64-byte seams (125 the one the first scan stops at)
+            data[at:at + len(PNG)] = PNG
+        src = self.write("dump.bin", bytes(data))
+
+        def scan(**kw):
+            spec = importlib.util.spec_from_file_location("sc", tool_path("sig_carve"))
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            ticks = kw.pop("stop_after", None)
+            if ticks is not None:
+                calls = [0]
+
+                def fake():
+                    calls[0] += 1
+                    return 0 if calls[0] <= ticks else 10 ** 6
+                mod.time = types.SimpleNamespace(monotonic=fake)
+            sys.stdin = io.StringIO(json.dumps(dict({"path": src, "sig": "PNG", "window_bytes": 64, "context": 0}, **kw)))
+            out = io.StringIO()
+            old_handlers = [signal.getsignal(s) for s in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)]
+            try:
+                with contextlib.redirect_stdout(out):
+                    try:
+                        mod.main()
+                    except SystemExit as exc:
+                        code = exc.code
+            finally:
+                for s, h in zip((signal.SIGTERM, signal.SIGHUP, signal.SIGINT), old_handlers):
+                    signal.signal(s, h)
+                sys.stdin = sys.__stdin__
+            return code, json.loads(out.getvalue())
+
+        code, whole = scan()
+        self.assertEqual(code, 0)
+        want = [h["offset"] for h in whole["signatures"]["PNG"]["hits"]]
+        self.assertEqual(want, [10, 60, 125, 140, 190, 255, 300])
+        code, first = scan(stop_after=3)                      # the clock runs out after the second window: 128 bytes
+        self.assertEqual(code, 1)
+        self.assertIs(first["scanned"]["complete"], False)
+        self.assertEqual(first["scanned"]["end"], 128)
+        self.assertIn("start=128", first["scanned"]["stopped"])
+        code, rest = scan(start=128)
+        self.assertEqual(code, 0)
+        self.assertEqual((rest["scanned"]["start"], rest["scanned"]["end"]), (128, 400))
+        got = [h["offset"] for h in first["signatures"]["PNG"]["hits"]] + [h["offset"] for h in rest["signatures"]["PNG"]["hits"]]
+        self.assertEqual(got, want)
+
+    def test_a_results_file_is_never_replaced_by_a_later_scan_of_the_same_question(self):
+        data = b"".join(b"\0" * 30 + PNG for _ in range(20))
+        other = b"".join(PNG + b"\0" * 30 for _ in range(20))            # the same size, the headers elsewhere
+        first = self.scan(data, 64, "PNG", max_hits=2).json["signatures"]["PNG"]["all_results"]
+        kept = self.read(first)
+        self.assertEqual(self.scan(data, 64, "PNG", max_hits=2).json["signatures"]["PNG"]["all_results"], first)
+        second = self.scan(other, 64, "PNG", max_hits=2).json["signatures"]["PNG"]["all_results"]
+        self.assertNotEqual(first, second)
+        self.assertTrue(second.endswith(".2.jsonl"), second)
+        self.assertEqual(self.read(first), kept)
+        self.assertNotEqual(self.read(second), kept)
+
+    def test_a_sigterm_removes_the_half_written_results_file(self):
+        import signal
+        import subprocess
+        import sys
+        import time
+        from support import tool_path
+        data = b"".join(b"\0" * 30 + PNG for _ in range(50)) + b"\0" * (6 * 1024 * 1024)
+        src = self.write("dump.bin", data)
+        proc = subprocess.Popen([sys.executable, tool_path("sig_carve")], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=self.dir,
+                                env={k: v for k, v in os.environ.items() if k not in ("JOB_ID", "OUT")})
+        proc.stdin.write(json.dumps({"path": src, "sig": "PNG", "max_hits": 1, "window_bytes": 16}).encode())
+        proc.stdin.close()
+        folder = self.path("work/tool/tool-output")
+        for _ in range(100):
+            if os.path.isdir(folder) and [n for n in os.listdir(folder) if n.startswith(".")]:
+                break
+            time.sleep(0.05)
+        else:
+            proc.kill()
+            self.fail("the scan never opened its results file")
+        proc.send_signal(signal.SIGTERM)
+        proc.wait(timeout=20)
+        proc.stdout.close()
+        proc.stderr.close()
+        self.assertEqual(proc.returncode, 143)
+        self.assertEqual(os.listdir(folder), [], "a half-written results file was left behind")
 
 
 if __name__ == "__main__":

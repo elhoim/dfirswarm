@@ -146,6 +146,30 @@ class CatalogSearch(Case):
         self.assertTrue(os.path.realpath(self.path(r.json["all_matches"])).startswith(os.path.realpath(self.path("work")) + os.sep))
         self.assertFalse(os.path.exists(os.path.join(os.path.dirname(self.dir), "escape")))
 
+    def test_a_matches_file_is_never_replaced_by_a_later_answer_to_the_same_search(self):
+        self.catalogue(300)
+        first = run_tool("catalog_search", {"pattern": "file", "limit": 5}, self.dir).json["all_matches"]
+        kept = self.read(first)
+        self.assertEqual(run_tool("catalog_search", {"pattern": "file", "limit": 5, "offset": 5}, self.dir).json["all_matches"], first,
+                         "a page of the same search is the file that is there")
+        self.write("catalog/Disk.E01/p2048/filelist.txt", "".join("r/r %d-128-1:\tUsers/b/file%04d.log\n" % (i, i) for i in range(300)))   # the same search, a different answer
+        second = run_tool("catalog_search", {"pattern": "file", "limit": 5}, self.dir).json["all_matches"]
+        self.assertNotEqual(first, second)
+        self.assertTrue(second.endswith(".2.txt"), second)
+        self.assertEqual(self.read(first), kept)
+
+    def test_catalog_must_name_a_directory_under_catalog_not_any_directory(self):
+        self.catalogue(3)
+        self.write("outside/p2048/filelist.txt", "r/r 1:\tsecret/place.txt\n")
+        self.write("outside/partitions.txt", "p\n")
+        os.symlink(self.path("outside"), self.path("catalog/hop"))
+        for spelling in (self.path("outside"), "../outside", "catalog/../outside", "hop", "catalog/hop"):
+            r = run_tool("catalog_search", {"pattern": "secret", "catalog": spelling}, self.dir)
+            self.assertEqual(r.code, 1, spelling)
+            self.assertIn("no catalogue", answer(r)["error"], spelling)
+        ok = run_tool("catalog_search", {"pattern": "file0001", "catalog": "Disk.E01"}, self.dir)
+        self.assertEqual((ok.code, ok.json["matched"]), (0, 1))
+
 
 if __name__ == "__main__":
     unittest.main()

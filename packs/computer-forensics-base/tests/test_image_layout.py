@@ -215,6 +215,45 @@ Units are in 512-byte sectors
         self.assertTrue([c for c in calls if c.startswith("fsstat") and c.endswith(" ./-rf.img")], calls)
         self.assertIn("./-rf.img", r.json["use"][0]["example"])
 
+    def test_a_container_the_sleuth_kit_read_as_raw_has_no_offsets_to_give(self):
+        mmls = "cat <<'EOF'\n%sEOF\n" % MMLS_4K
+        fsstat = "cat <<'EOF'\n%sEOF\n" % FSSTAT_NTFS
+        vhd = self.write("disk.vhd", b"\0" * 8192 + vhd_footer())
+        # TSK 4.15 does not open a VHD: img_stat says raw, and mmls read the container's bytes.
+        bin_dir, log = self.stubs(mmls, fsstat, img_stat="printf 'IMAGE FILE INFORMATION\\nImage Type: raw\\n'\n")
+        r = run_tool("image_layout", {"image": vhd}, self.dir, [bin_dir])
+        self.assertEqual(r.json["container"], "vhd")
+        self.assertEqual(r.json["partition_table"], "unknown")
+        self.assertIn("opened this vhd container as raw", r.json["partition_table_basis"])
+        self.assertEqual((r.json["partitions"], r.json["use"], r.json["image_type_opened_by_sleuth_kit"]), ([], [], "raw"))
+        self.assertFalse([c for c in self.calls(log) if c.startswith("fsstat")], "no file system was asked of offsets that mean nothing")
+        # The same container opened as vhd: the table is the disk's.
+        bin_dir, _ = self.stubs(mmls, fsstat, img_stat="printf 'IMAGE FILE INFORMATION\\nImage Type: vhd\\n'\n")
+        r = run_tool("image_layout", {"image": vhd}, self.dir, [bin_dir])
+        self.assertIs(r.json["partition_table"], True)
+        self.assertIn("opened this vhd container as vhd", " ".join(r.json["notes"]))
+        # An E01 read as ewf is the common case; a QCOW2 has no TSK reader, so raw is wrong for it too.
+        e01 = self.write("a.E01", b"EVF\x09\x0d\x0a\xff\x00" + b"\0" * 4096)
+        bin_dir, _ = self.stubs(mmls, fsstat, img_stat="printf 'Image Type: ewf\\n'\n")
+        self.assertIs(run_tool("image_layout", {"image": e01}, self.dir, [bin_dir]).json["partition_table"], True)
+        qcow = self.write("a.qcow2", b"QFI\xfb\x00\x00\x00\x03" + b"\0" * 4096)
+        bin_dir, _ = self.stubs(mmls, fsstat, img_stat="printf 'Image Type: raw\\n'\n")
+        r = run_tool("image_layout", {"image": qcow}, self.dir, [bin_dir])
+        self.assertEqual(r.json["partition_table"], "unknown")
+        self.assertIn("no reader for qcow", r.json["partition_table_basis"])
+        # No answer from img_stat is not a confirmation.
+        bin_dir, _ = self.stubs(mmls, fsstat, img_stat="exit 1\n")
+        r = run_tool("image_layout", {"image": vhd}, self.dir, [bin_dir])
+        self.assertIs(r.json["partition_table"], True)
+        self.assertIn("not confirmed", " ".join(r.json["notes"]))
+
+    def test_a_split_raw_set_starting_at_000_is_one_segment_too(self):
+        bin_dir, _ = self.stubs()
+        first = self.write("disk.000", b"\0" * 1024)
+        self.write("disk.001", b"\0" * 1024)
+        r = run_tool("image_layout", {"image": first}, self.dir, [bin_dir])
+        self.assertTrue(any("one path" in n and "disk.001" in n for n in r.json["notes"]), r.json["notes"])
+
     @unittest.skipUnless(have("mmls"), "mmls is not on this host")
     def test_the_real_mmls_agrees_on_a_hand_built_mbr(self):
         # An MBR as the DOS partition table specification lays it out: four 16-byte entries at 446,

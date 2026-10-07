@@ -8,7 +8,7 @@
     },
     "needles": {
       "type": "string",
-      "description": "Pipe-separated needles, searched as given and as UTF-16LE; never a secret"
+      "description": "Pipe-separated needles, searched as given and as UTF-16LE; never a secret. Left out, a default set runs; an empty value is refused. The answer lists the needles that ran (needles_that_ran) and where they came from"
     },
     "max_hits": {
       "type": "integer",
@@ -50,5 +50,5 @@
   "by": "s183900",
   "at": "2026-09-18T22:16:43.028Z",
   "version": 4,
-  "sha256": "558dbff98060f17a802c6e9cabba0e12f3f62eab5794f0285e013dcd85c5fcd7"
+  "sha256": "bbc80a8fb71cbd521f79017346467043f6db5df0f2cbb332bdd315dac10dd735"
 }

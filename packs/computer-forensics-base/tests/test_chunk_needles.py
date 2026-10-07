@@ -154,6 +154,40 @@ class ChunkNeedles(Case):
         self.assertEqual((r.code, r.json["secret_values"]["written"], r.json["secret_values"]["values_file"]), (0, 0, "store/jobs/j000012/out/chunk-needles-values.jsonl"))
         self.assertEqual(os.path.getsize(os.path.join(out, "chunk-needles-values.jsonl")), 0)
 
+    def test_a_results_file_is_never_replaced_by_a_later_scan_of_the_same_question(self):
+        data = b"\0" * 10 + b"needle" * 40
+        other = b"needle" * 40 + b"\0" * 10
+        first = self.file_run(data, "needle", max_hits=2).json["hits"]["needle"]["all_results"]
+        kept = self.read(first)
+        self.assertEqual(self.file_run(data, "needle", max_hits=2).json["hits"]["needle"]["all_results"], first)
+        second = self.file_run(other, "needle", max_hits=2).json["hits"]["needle"]["all_results"]
+        self.assertNotEqual(first, second)
+        self.assertTrue(second.endswith(".2.jsonl"), second)
+        self.assertEqual(self.read(first), kept)
+        self.assertNotEqual(self.read(second), kept)
+
+    def test_image_discovery_does_not_walk_a_link_out_of_inputs_unless_the_manifest_names_it_as_a_set(self):
+        bin_dir = self.icat(b"..needle..")
+        self.write("outside/disk.bin", b"x")
+        self.write("catalog/ext_disk.bin/partitions.txt", "p\n")
+        os.makedirs(self.path("inputs"), exist_ok=True)
+        os.symlink(self.path("outside"), self.path("inputs/ext"))
+        r = run_tool("chunk_needles", {"needles": "needle", "inode": 12}, self.dir, [bin_dir])
+        self.assertEqual(r.code, 1)
+        self.assertIn("no disk image under inputs/", r.stdout + r.stderr)
+        # A set held in place is a link directly under inputs/ and the manifest names it: that one is walked.
+        self.write("inputs.json", json.dumps({"files": [], "sets": [{"name": "ext"}]}))
+        r = run_tool("chunk_needles", {"needles": "needle", "inode": 12}, self.dir, [bin_dir])
+        self.assertEqual(r.code, 0, r.stdout + r.stderr)
+        self.assertEqual(r.json["source"]["image"], "inputs/ext/disk.bin")
+        # A link inside the set is still a name, not a place.
+        self.write("outside/deeper_target/more.bin", b"y")
+        self.write("catalog/ext_hop_more.bin/partitions.txt", "p\n")
+        os.symlink(self.path("outside/deeper_target"), self.path("outside/hop"))
+        r = run_tool("chunk_needles", {"needles": "needle", "inode": 12}, self.dir, [bin_dir])
+        self.assertEqual(r.code, 0, r.stdout + r.stderr)
+        self.assertEqual(r.json["source"]["image"], "inputs/ext/disk.bin")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -16,6 +16,23 @@ def _catalogue_slug(path):
     return os.fsdecode(re.sub(rb"[^A-Za-z0-9._-]", b"_", rel))
 
 
+def _inputs_roots():
+    """inputs/, and each set held in place as a link directly under it (inputs.json names the sets): the only links followed.
+    Any other link under inputs/ is a name and not a place to walk: following one could leave the evidence for the rest of the file system."""
+    import json, os
+    roots = ["inputs"]
+    try:
+        with open("inputs.json", encoding="utf-8") as fh:
+            sets = json.load(fh).get("sets") or []
+    except (OSError, ValueError, AttributeError):
+        sets = []
+    for entry in sets:
+        name = entry.get("name") if isinstance(entry, dict) else None
+        if isinstance(name, str) and name and "/" not in name and os.path.islink(os.path.join("inputs", name)):
+            roots.append(os.path.join("inputs", name))
+    return roots
+
+
 def _resolve_image(explicit=None):
     """A pack tool belongs to no case: find the image under inputs/ instead of
     baking one in. One candidate is used; several mean the caller must say which.
@@ -28,11 +45,12 @@ def _resolve_image(explicit=None):
     cands = []
     for ext in ("*.E01", "*.e01", "*.raw", "*.dd", "*.001", "*.img", "*.vhd", "*.vhdx"):
         cands += glob.glob(os.path.join("inputs", ext))
-    for base, _dirs, files in os.walk("inputs", followlinks=True):
-        for f in files:
-            p = os.path.join(base, f)
-            if os.path.isfile(os.path.join("catalog", _catalogue_slug(p), "partitions.txt")):
-                cands.append(p)
+    for root_dir in _inputs_roots():
+        for base, _dirs, files in os.walk(root_dir, followlinks=False):
+            for f in files:
+                p = os.path.join(base, f)
+                if os.path.isfile(os.path.join("catalog", _catalogue_slug(p), "partitions.txt")):
+                    cands.append(p)
     cands = sorted(set(cands))
     if len(cands) == 1:
         return cands[0]
@@ -135,8 +153,11 @@ def _resolve_catalog(explicit=None, rev=None):
                 raise SystemExit(json.dumps({"ok": False, "error": "generation %s is listed by revision %s but its directory %s is not here" % (explicit, rev, gens[explicit]),
                                              "hint": "the catalogue was copied without it, or it was removed; nothing here says what it held"}))
             return gens[explicit]
+        catalog_real = os.path.realpath(root)
         for cand in (explicit, os.path.join(root, explicit)):
-            if os.path.isdir(cand) and os.path.basename(os.path.normpath(cand)) not in RESERVED:
+            # A catalogue is a directory under catalog/: a path to anywhere else is not one, whatever it holds.
+            inside = os.path.realpath(cand) == catalog_real or os.path.realpath(cand).startswith(catalog_real + os.sep)
+            if os.path.isdir(cand) and inside and os.path.basename(os.path.normpath(cand)) not in RESERVED:
                 # A generation is read only when the revision read lists it, whatever the
                 # directory is called: an absolute path, a ./ spelling or a link is held to
                 # the generation it resolves to.
@@ -199,6 +220,22 @@ try:
 except re.error as e:
     print(json.dumps({"ok": False, "error": "exclude is not a regular expression: %s" % e}))
     sys.exit(1)
+
+
+def _same_bytes(a, b):
+    """Two files with the same bytes (compared in blocks, never whole)."""
+    try:
+        if os.path.getsize(a) != os.path.getsize(b):
+            return False
+        with open(a, "rb") as fa, open(b, "rb") as fb:
+            while True:
+                x, y = fa.read(1 << 20), fb.read(1 << 20)
+                if x != y:
+                    return False
+                if not x:
+                    return True
+    except OSError:
+        return False
 
 
 class _Budget(Exception):
@@ -368,8 +405,33 @@ result["next_offset"] = offset + len(hits) if more else None
 if all_out:
     all_out.close()
     if more or offset or stopped_at is not None:
-        os.replace(tmp, keep)
-        result["all_matches"] = shown
+        # Nothing already at the name is replaced: an earlier answer to this search, complete, stays when this one was cut short.
+        keep_stem, keep_ext = os.path.splitext(keep)
+        shown_stem, _ = os.path.splitext(shown)
+        k = 1
+        while True:
+            suffix = "" if k == 1 else ".%d" % k
+            held = keep_stem + suffix + keep_ext
+            try:
+                os.link(tmp, held)
+            except FileExistsError:
+                if _same_bytes(tmp, held):                # the same answer again (a page of the same search): the file is already there
+                    os.unlink(tmp)
+                    break
+                k += 1
+                continue
+            except OSError:
+                if os.path.lexists(held):
+                    if _same_bytes(tmp, held):
+                        os.unlink(tmp)
+                        break
+                    k += 1
+                    continue
+                os.rename(tmp, held)
+            else:
+                os.unlink(tmp)
+            break
+        result["all_matches"] = shown_stem + suffix + keep_ext
         result["all_matches_format"] = "one match per line: the line number in the catalogue file, a tab, the line"
     else:
         os.unlink(tmp)

@@ -16,10 +16,12 @@ Args, JSON on stdin:
             ($OUT set) $OUT/<image name less .ad1>, and in a job it must be
             inside $OUT; called directly, work/<AGENT_ID>/ad1/<image name
             less .ad1>
-  max_items, max_bytes, max_seconds
-            budgets for the whole call (items taken, bytes written, wall
-            clock): defaults 5,000,000, 256 GiB and 1500 s. A call that
-            reaches one stops, keeps what it wrote, and says it was partial
+  max_items, max_walk, max_bytes, max_seconds
+            budgets for the whole call (items taken, items looked at, bytes
+            written, wall clock): defaults 5,000,000, 5,000,000, 256 GiB and
+            1500 s. A call that reaches one stops, keeps what it wrote, and
+            says it was partial. What is held while it walks is the depth of
+            the tree, not the number of items
 
 Run it as a job (job_run tool=ad1_extract): what it writes is then sealed
 into the store, citable as job:<id>/<path>, and the derived catalogue offers
@@ -70,6 +72,7 @@ MANIFEST = "ad1_extract.tsv"
 ERRORS = "ad1_extract.errors.txt"
 COVERAGE = "ad1_extract.coverage.json"
 ITEMS_DEFAULT, ITEMS_CEILING = 5_000_000, 100_000_000
+WALK_DEFAULT, WALK_CEILING = 5_000_000, 100_000_000       # items looked at, taken or not
 BYTES_DEFAULT, BYTES_CEILING = 256 * 1024 ** 3, 1024 ** 4
 SECONDS_DEFAULT, SECONDS_CEILING = 1500, 1700          # the ceiling is inside the manifest's own 1800-second limit
 
@@ -538,7 +541,7 @@ def main():
         fail("image is required: the AD1 image's first segment (.ad1)")
     want_n, want_addr = parse_members(args.get("members"))
     budgets = {}
-    for key, default, ceiling in (("max_items", ITEMS_DEFAULT, ITEMS_CEILING), ("max_bytes", BYTES_DEFAULT, BYTES_CEILING), ("max_seconds", SECONDS_DEFAULT, SECONDS_CEILING)):
+    for key, default, ceiling in (("max_items", ITEMS_DEFAULT, ITEMS_CEILING), ("max_walk", WALK_DEFAULT, WALK_CEILING), ("max_bytes", BYTES_DEFAULT, BYTES_CEILING), ("max_seconds", SECONDS_DEFAULT, SECONDS_CEILING)):
         v = args.get(key, default)
         if not isinstance(v, int) or isinstance(v, bool) or not 1 <= v <= ceiling:
             fail("%s is a whole number from 1 to %d" % (key, ceiling), **{key: v})
@@ -564,11 +567,13 @@ def main():
         names = img.missing if len(img.missing) <= 5 else img.missing[:2] + ["...", img.missing[-1]]
         errors.append("the image has %d segments and %d of them (%s) %s not there, beside the first or in this job's view (declare every segment in inputs): what lies in them is not read"
                       % (img.segment["count"], len(img.missing), ", ".join(names), "is" if len(img.missing) == 1 else "are"))
-    children_of = {}   # item n -> where its children go under out (relative)
+    # The names and places of the directories the walk is inside, and nothing else: the walk is depth first, so when it leaves a
+    # subtree that subtree's state is dropped, and what is held is the depth of the tree, not the number of items.
+    chain = []         # [{n, selected, placed_rel, dir_of, children_dir, is_dir}], the ancestors of the item being looked at
     # The manifest's own names, at the top of out_dir, are not an item's.
     taken = {"": {fold(MANIFEST), fold(ERRORS), fold(COVERAGE)}}  # directory (relative) -> folded names already used there
-    selected = {}      # item n -> whether it is taken
-    seen_n, seen_addr = set(), set()
+    walked = 0
+    seen_n, seen_addr = set(), set()       # the wanted numbers and addresses that were met, not every item's
     counts = {"items": 0, "files": 0, "folders": 0, "bytes": 0, "renamed": 0, "mismatches": 0, "checked": 0}
     tally = {"no_stored_hash": 0, "not_read": 0}
     reached = [None]                      # the budget that stopped the call, if one did
@@ -611,20 +616,36 @@ def main():
                     # Checked for every item, wanted or not: a long walk past the last wanted item is not free either.
                     errors.append("stopped: %s; item %d (%s) and every item after it in the image's order were not examined" % (reached[0], n, esc(item["path"])))
                     break
-                seen_n.add(n)
-                seen_addr.add(item["addr"])
-                parent_dir = children_of.get(item["parent"], "") if item["parent"] is not None else ""
+                walked += 1
+                if walked > budgets["max_walk"]:
+                    reached[0] = "the walk budget of %d items was reached" % budgets["max_walk"]
+                    errors.append("stopped: %s; item %d (%s) and every item after it in the image's order were not examined" % (reached[0], n, esc(item["path"])))
+                    break
+                if want_n is not None and n in want_n:
+                    seen_n.add(n)
+                if want_addr is not None and item["addr"] in want_addr:
+                    seen_addr.add(item["addr"])
+                # Leaving a subtree: the chain is cut back to this item's parent, and the state of what was left goes with it.
+                while chain and chain[-1]["n"] != item["parent"]:
+                    left = chain.pop()
+                    if left["children_dir"] is not None and left["children_dir"] != "":
+                        taken.pop(left["children_dir"], None)
+                if item["parent"] is None:
+                    parent_dir, parent_selected = "", False
+                else:
+                    owner = chain[-1]
+                    if owner["children_dir"] is None:
+                        # A file's children (a stream, say) go beside it, in a directory of their own, named when the first one arrives.
+                        owner["children_dir"] = os.path.join(owner["dir_of"], unique(taken[owner["dir_of"]], owner["placed"] + ".ad1-children", owner["n"]))
+                    parent_dir, parent_selected = owner["children_dir"], owner["selected"]
                 used = taken.setdefault(parent_dir, set())
                 name, changed = safe_name(item["name"])
                 placed = unique(used, name, n)
                 changed = changed or placed != name
                 rel = os.path.join(parent_dir, placed) if parent_dir else placed
                 is_dir = item["type"] == AD1_FOLDER
-                # A file's children (a stream, say) go beside it, in a directory of their own.
-                children_of[n] = rel if is_dir else os.path.join(parent_dir, unique(used, placed + ".ad1-children", n))
-                take = (want_n is None or n in want_n or item["addr"] in want_addr
-                        or (item["parent"] is not None and selected.get(item["parent"], False)))
-                selected[n] = take
+                take = (want_n is None or n in want_n or item["addr"] in want_addr or (item["parent"] is not None and parent_selected))
+                chain.append({"n": n, "selected": take, "placed": placed, "dir_of": parent_dir, "children_dir": rel if is_dir else None})
                 if not take:
                     continue
                 if counts["items"] >= budgets["max_items"]:
@@ -699,7 +720,7 @@ def main():
     walked_all = not (reached[0] or stopped)
     if absent:
         errors.append(("no item %s in this read of the image (it listed %d items)" if walked_all else
-                       "item %s was not reached before the call stopped (it had looked at %d items): it is not claimed absent") % (", ".join(map(str, absent)), len(seen_n)))
+                       "item %s was not reached before the call stopped (it had looked at %d items): it is not claimed absent") % (", ".join(map(str, absent)), walked))
     if gone:
         errors.append(("no item at %s in this read of the image" if walked_all else
                        "the item at %s was not reached before the call stopped: it is not claimed absent") % ", ".join("ad1:item=%d" % a for a in gone))

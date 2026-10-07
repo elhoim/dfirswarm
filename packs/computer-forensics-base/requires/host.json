@@ -369,7 +369,7 @@
       "name": "7z",
       "package": "p7zip-full",
       "optional": true,
-      "why": "List and read a 7z, RAR or other archive the archive-members recipe lists (it takes 7z or 7zz). Installed by the base image.",
+      "why": "List the members of a 7z archive for the archive-members recipe, which calls `7z` and nothing else. Installed by the base image as p7zip-full, whose package carries no RAR codec: a RAR is not read by it.",
       "install": {
         "brew": "brew install p7zip",
         "apt": "apt-get install -y p7zip-full"

@@ -30,11 +30,9 @@ agents that used the same parser on the same source is not independent
 corroboration, and neither is a second wrapper over the same library. A material
 disagreement you cannot resolve is preserved, with its effect on confidence.
 
-**A correction after sign-off.** In one published run a download address was
-corrected after the critic had signed off, three more posts corrected the timeline
-and the indicator file, and the report was never revised: the board carried the
-right answer and the report the wrong one. A board post and a reopened report
-resolve nothing by themselves. Trace the correction through the entries, the
+**A correction after sign-off.** When a conclusion changes after sign-off, the
+board can carry the right answer while the report keeps the wrong one: a board
+post and a reopened report resolve nothing by themselves. Trace the correction through the entries, the
 indicators, the coverage records, the answers, the timeline and the report sections
 that rest on it, re-record the conclusions that changed on standing evidence, and
 get the reviews the changed result needs: an answer resting on an entry that was

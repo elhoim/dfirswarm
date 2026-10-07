@@ -66,7 +66,7 @@ run's tool inventory). What holds in every pack:
 - It never goes on a command line: argv is recorded in the trace, which travels
   with the package. Pass a file the case holds (a BitLocker `.BEK` key file, a
   LUKS `--key-file`), in a job run with `secret_output: true`. A program that
-  takes a recovery password only as an argument value (`dislocker` does) cannot
+  takes a recovery password only as an argument value cannot
   be given a file: the traced command line then holds the key, so say so in the
   report, and the trace is redacted before it is shared.
 - A mounted view is not a sealed output. Stream the decrypted volume, or the

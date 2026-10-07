@@ -174,6 +174,14 @@ class TimestampDecode(Case):
         r = self.decode(value="99999999999999999999")
         self.assertTrue(any("outside the years 1 to 9999" in x for x in r.json["refused"]), r.json["refused"])
 
+    def test_a_value_too_long_or_not_in_ascii_digits_is_an_answer_not_a_traceback_or_a_reading(self):
+        for bad in ("9" * 81, "0x" + "f" * 200, "1" + "0" * 5000, "\u0663\u0664\u0665", "1.5e999999999999999999999", "٣٤٥", "1e+9999"):
+            r = self.decode(value=bad)
+            self.assertEqual(r.code, 1, bad[:30])
+            self.assertNotIn("Traceback", r.stderr, bad[:30])
+            self.assertIn("error", r.json, bad[:30])
+        self.assertEqual(self.decode(value="1700000000").code, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

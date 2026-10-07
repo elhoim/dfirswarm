@@ -46,6 +46,9 @@ BUDGET_MAX = 110
 SQL_MAX = 64 * 1024               # bytes of UTF-8
 HASH_MAX = 256 * 1024 * 1024
 BLOB_INLINE = 256                 # a BLOB longer than this shows its head inline; the file holds all of it
+VALUE_MAX = 64 * 1024 * 1024      # the longest string or BLOB (or whole row) read: sqlite refuses a longer one before it is in memory
+STREAM_AT = 1024 * 1024           # a BLOB longer than this is hashed and encoded to the file in slices, never as one more copy
+SLICE_BYTES = 3 * 256 * 1024      # a multiple of 3, so each slice's base64 joins the next without padding
 
 # What a statement may do. SELECT and READ are reading; FUNCTION is a call to a
 # built-in; RECURSIVE is a recursive CTE. Everything else is refused, whatever
@@ -255,6 +258,66 @@ def text_cell(value, csv_mode):
     return str(value)
 
 
+def blob_json(fh, value):
+    """A BLOB as {blob_b64, length, sha256}, written to `fh` in slices: the digest is taken first over views of the value,
+    then the base64 is written slice by slice, so a large value costs no second copy of itself in memory."""
+    digest = hashlib.sha256()
+    view = memoryview(value)
+    for at in range(0, len(view), SLICE_BYTES):
+        digest.update(view[at:at + SLICE_BYTES])
+    fh.write('{"blob_b64": "')
+    for at in range(0, len(view), SLICE_BYTES):
+        fh.write(base64.b64encode(view[at:at + SLICE_BYTES]).decode("ascii"))
+    fh.write('", "length": %d, "sha256": "%s"}' % (len(value), digest.hexdigest()))
+
+
+def same_bytes(a, b):
+    """Two files with the same bytes (compared in blocks, never whole)."""
+    try:
+        if os.path.getsize(a) != os.path.getsize(b):
+            return False
+        with open(a, "rb") as fa, open(b, "rb") as fb:
+            while True:
+                x, y = fa.read(1 << 20), fb.read(1 << 20)
+                if x != y:
+                    return False
+                if not x:
+                    return True
+    except OSError:
+        return False
+
+
+def publish(tmp, path, shown):
+    """Move a finished file to `path` without replacing what is there: a file at the name is an earlier answer (a complete one,
+    perhaps, where this run was cut short) and stays; this one is kept beside it as name.2.ext. Returns the name it has and
+    the name to show for it."""
+    stem, ext = os.path.splitext(str(path))
+    shown_stem, _ = os.path.splitext(shown)
+    k = 1
+    while True:
+        suffix = "" if k == 1 else ".%d" % k
+        candidate = Path(stem + suffix + ext)
+        try:
+            os.link(tmp, candidate)
+        except FileExistsError:
+            if same_bytes(tmp, candidate):                # the same answer again (a page of the same search): the file is already there
+                os.unlink(tmp)
+                return candidate, shown_stem + suffix + ext
+            k += 1
+            continue
+        except OSError:                                   # a file system with no hard links: a look, then a rename
+            if os.path.lexists(candidate):
+                if same_bytes(tmp, candidate):
+                    os.unlink(tmp)
+                    return candidate, shown_stem + suffix + ext
+                k += 1
+                continue
+            os.rename(tmp, candidate)
+            return candidate, shown_stem + suffix + ext
+        os.unlink(tmp)
+        return candidate, shown_stem + suffix + ext
+
+
 def raw_size(row):
     return sum(len(v) if isinstance(v, (bytes, str)) else 8 for v in row)
 
@@ -294,12 +357,30 @@ class Rows:
     def _write(self, n, row):
         if self.file_stopped:
             return
-        line = json.dumps({"n": n, "values": [cell(v) for v in row]}, ensure_ascii=False) + "\n"
-        if self.written + len(line) > FILE_BYTES:
+        big = any(isinstance(v, bytes) and len(v) > STREAM_AT for v in row)
+        if not big:
+            line = json.dumps({"n": n, "values": [cell(v) for v in row]}, ensure_ascii=False) + "\n"
+            if self.written + len(line) > FILE_BYTES:
+                self.file_stopped = n
+                return
+            self.fh.write(line)
+            self.written += len(line)
+            return
+        # A row with a large BLOB: its size is known before it is written, and the BLOB is encoded in slices.
+        size = sum(4 * ((len(v) + 2) // 3) + 120 if isinstance(v, bytes) else len(json.dumps(cell(v), ensure_ascii=False)) + 2 for v in row) + 40
+        if self.written + size > FILE_BYTES:
             self.file_stopped = n
             return
-        self.fh.write(line)
-        self.written += len(line)
+        self.fh.write('{"n": %d, "values": [' % n)
+        for i, v in enumerate(row):
+            if i:
+                self.fh.write(", ")
+            if isinstance(v, bytes) and len(v) > STREAM_AT:
+                blob_json(self.fh, v)
+            else:
+                self.fh.write(json.dumps(cell(v), ensure_ascii=False))
+        self.fh.write("]}\n")
+        self.written += size
 
     def _drop_file(self, exc):
         """The whole-result file cannot be written (a full disk, a read-only directory): said, and no half file left."""
@@ -348,7 +429,8 @@ class Rows:
                 self.fh.flush()
                 os.fsync(self.fh.fileno())
                 self.fh.close()
-                os.replace(self.tmp, self.path)
+                self.path, self.shown = publish(self.tmp, self.path, self.shown)
+                self.tmp = None
                 info["rows_file"] = self.shown
                 info["rows_file_format"] = "JSON Lines: a header line {columns}, then one {n, values} per row; NULL is null, a BLOB is {blob_b64, length, sha256}"
                 if self.file_stopped:
@@ -445,10 +527,15 @@ def main():
     except sqlite3.Error as exc:
         say({"ok": False, "error": "cannot open the database: %s" % exc, "db_path": db}, 1)
     conn.text_factory = text_factory
+    value_limit = "%d bytes" % VALUE_MAX
+    if hasattr(conn, "setlimit") and hasattr(sqlite3, "SQLITE_LIMIT_LENGTH"):
+        conn.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, VALUE_MAX)
+    else:
+        value_limit = "not enforced (Python before 3.11 has no setlimit)"
     conn.set_authorizer(authorizer)
     conn.set_progress_handler(lambda: 1 if time.monotonic() - started > budget else 0, 20000)
     base = {"tool": TOOL, "db_path": db, "database_bytes": size, "sidecars": side, "snapshot_status": status,
-            "sqlite_library": sqlite3.sqlite_version, "opened": "read-only, immutable, through an authorizer that allows reading only"}
+            "sqlite_library": sqlite3.sqlite_version, "opened": "read-only, immutable, through an authorizer that allows reading only", "value_limit": value_limit}
     if size <= HASH_MAX:
         base["database_sha256"] = sha256_file(db)
     else:
@@ -461,6 +548,7 @@ def main():
             failure = {"error": "statement refused: this tool reads; a %s statement is not allowed" % (word.upper() or "?"), "statement": stmt}
             break
         rows = None
+        failure_kind = None
         try:
             cur = conn.execute(stmt)
             columns = [d[0] for d in (cur.description or [])]
@@ -471,11 +559,17 @@ def main():
             msg = str(exc)
             if "not authorized" in msg:
                 msg = "statement refused: it is not a plain read (%s)" % msg
+            elif "too big" in msg:
+                msg = ("a value or row in this result is longer than %d bytes, which this tool will not read into memory (sqlite: %s): select its length(), "
+                       "or a piece of it with substr(), hex(substr(...)) or a range, in several queries" % (VALUE_MAX, msg))
+                failure_kind = "value_too_long"
             elif "interrupted" in msg:
                 msg = "stopped at the %d-second time budget; the rows before it are in rows_file when there is one" % budget
             elif isinstance(exc, MemoryError):
                 msg = "out of memory reading a row"
             failure = {"error": msg, "statement": stmt}
+            if failure_kind:
+                failure["reason"] = failure_kind
             if "interrupted" in str(exc):
                 failure["timed_out"] = True
             if rows is not None and rows.total:

@@ -166,6 +166,24 @@ class CheckInputs(Case):
         self.assertEqual(r.code, 1)
         self.assertIn("from 1 to 1700", r.json["error"])
 
+    def test_an_entry_that_points_outside_inputs_is_malformed_and_is_never_hashed(self):
+        self.write("inputs/a.bin", b"alpha")
+        self.write("outside.txt", b"not evidence")
+        good = {"path": "inputs/a.bin", "bytes": 5, "sha256": sha(b"alpha")}
+        self.manifest([good, {"path": "inputs/../outside.txt", "bytes": 12, "sha256": sha(b"not evidence")},
+                       {"path": self.path("outside.txt"), "bytes": 12, "sha256": sha(b"not evidence")},
+                       {"path": "../outside.txt", "bytes": 12, "sha256": sha(b"not evidence")},
+                       {"path": "inputs", "bytes": 0, "sha256": sha(b"")},
+                       {"path": "inputs//./a.bin", "bytes": 5, "sha256": sha(b"alpha")}])
+        r = self.check()
+        self.assertEqual(r.code, 1)
+        whys = {m["path"]: m["why"] for m in r.json["malformed"]}
+        for bad in ("inputs/../outside.txt", self.path("outside.txt"), "../outside.txt", "inputs"):
+            self.assertIn("outside inputs/", whys[bad], bad)
+        self.assertEqual(r.json["duplicates"], ["inputs/a.bin"], "inputs//./a.bin is inputs/a.bin")
+        rows = [json.loads(x)["path"] for x in self.read(r.json["receipts_file"]).splitlines()]
+        self.assertEqual(rows, ["inputs/a.bin"], "nothing outside inputs/ was opened")
+
 
 if __name__ == "__main__":
     unittest.main()

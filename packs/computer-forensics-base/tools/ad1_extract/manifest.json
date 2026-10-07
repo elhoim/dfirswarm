@@ -1,6 +1,6 @@
 {
   "name": "ad1_extract",
-  "description": "Write the files and folders of an AccessData AD1 logical image (version 4, unencrypted) out as a tree, each file inflated, hashed (SHA-256) and checked against the MD5 and SHA-1 the image records, with a manifest (ad1_extract.tsv) of what went where and ad1_extract.coverage.json (written as incomplete before the first item). Two statuses, kept apart: processing_status (complete, partial, failed: were all items written) and integrity_status (verified, mismatch, unverified, not_applicable: does what was written match the recorded digests); ok is true only for a complete extraction with no mismatch, while the exit status is 0 for a complete one (the files were written, and a mismatch is a finding about the image). Budgets (max_items, max_bytes, max_seconds) bound the call; one that is reached stops it, keeps what it wrote, and says so. A broken or cut file is kept as <name>.partial under a name no other item of its directory holds, and its row's size and sha256 are of the bytes kept. Extracted files carry the host's timestamps, not the item's recorded ones (the manifest and the catalogue's members.tsv have those, with no zone the image records). Run it as a job (job_run tool=ad1_extract) so the files are sealed into the store and the derived catalogue takes them in turn (an archive or a disk image inside). The catalogue's members.tsv for the image (recipe ad1-items) gives the item numbers.",
+  "description": "Write the files and folders of an AccessData AD1 logical image (version 4, unencrypted) out as a tree, each file inflated, hashed (SHA-256) and checked against the MD5 and SHA-1 the image records, with a manifest (ad1_extract.tsv) of what went where and ad1_extract.coverage.json (written as incomplete before the first item). Two statuses, kept apart: processing_status (complete, partial, failed: were all items written) and integrity_status (verified, mismatch, unverified, not_applicable: does what was written match the recorded digests); ok is true only for a complete extraction with no mismatch, while the exit status is 0 for a complete one (the files were written, and a mismatch is a finding about the image). Budgets (max_items, max_walk, max_bytes, max_seconds) bound the call; one that is reached stops it, keeps what it wrote, and says so. A broken or cut file is kept as <name>.partial under a name no other item of its directory holds, and its row's size and sha256 are of the bytes kept. Extracted files carry the host's timestamps, not the item's recorded ones (the manifest and the catalogue's members.tsv have those, with no zone the image records). Run it as a job (job_run tool=ad1_extract) so the files are sealed into the store and the derived catalogue takes them in turn (an archive or a disk image inside). The catalogue's members.tsv for the image (recipe ad1-items) gives the item numbers.",
   "params": {
     "image": {
       "type": "string",
@@ -18,6 +18,10 @@
     "max_items": {
       "type": "integer",
       "description": "Most items taken in this call (default 5,000,000); past it the call stops and says so"
+    },
+    "max_walk": {
+      "type": "integer",
+      "description": "Most items looked at in this call, taken or not (default 5,000,000); past it the call stops, names the item it stopped at, and does not call an item it never reached absent"
     },
     "max_bytes": {
       "type": "integer",
@@ -46,5 +50,5 @@
   "by": "maintainer",
   "at": "2026-10-01T12:00:00.000Z",
   "version": 2,
-  "sha256": "4f1725071bdc7e8bcfa9cf7cde4a522c474bfe77ada8d6ae7990e7d10f71de38"
+  "sha256": "e00d028e0c40500247f28a0084027a1cb74aa5f563a3c84dcba802ccea2bf830"
 }
