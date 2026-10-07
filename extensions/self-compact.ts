@@ -37,6 +37,7 @@ import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext, SessionBeforeCompactEvent, SessionEntry } from "@earendil-works/pi-coding-agent";
 import { convertToLlm, findCutPoint, serializeConversation, sessionEntryToContextMessages, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { SELF_COMPACT_PROMPT_LINE } from "./seat-prompt.ts";
 import {
   KEEP_RECENT_TOKENS,
   LEVEL_ORDER,
@@ -154,6 +155,13 @@ export type HandoffFacts = {
    * which to load again if it still needs them.
    */
   skills?: string;
+  /**
+   * The rules that change during a run and that only the forced prompt used to
+   * carry, so that the run a hand-off starts has them: the instruction that
+   * follows a cap that was hit, and the tools forged so far.
+   */
+  capHit?: string;
+  forged?: string;
 };
 
 export type SelfCompactDeps = {
@@ -392,6 +400,8 @@ export function handoffHeader(agentId: string, cycle: number, facts: HandoffFact
     `Ledger: ${facts.ledgerTotal} entries, ${facts.ledgerMine} yours. Sentinel: ${sentinel}. Spend: ${spend}.`,
     ...(facts.leads ? [`The lead register now (your leads are yours: go on with them, or release them):\n${facts.leads}`] : []),
     ...(facts.skills ? [facts.skills] : []),
+    ...(facts.capHit ? [facts.capHit] : []),
+    ...(facts.forged ? [facts.forged] : []),
   ];
   // On run 6 all four agents answered this message, a few tool calls later,
   // with a status update to "the user" and ended their turns; three sat idle
@@ -1207,8 +1217,7 @@ export function registerSelfCompact(pi: ExtensionAPI, deps: SelfCompactDeps): Se
 
   // --------------------------------------------------------------- the handle
 
-  const systemPromptLine =
-    `\n\nSelf-compaction is on. Your context has a ceiling for this model and three lines under it: a notice, a warning, and the compact line, where every tool except self_compact, budget and done is blocked. When you cross one you receive a transient [self-compact · …] message with the live numbers; budget shows them at any time. At the warning line finish only the current atomic step, then write your note_to_self and call self_compact alone. After a [self-compact · handoff] message, your own note is returned verbatim under a header with your live claims, unread posts and ledger totals: resume its NEXT ACTION without waiting for anyone and never restart work the note marks as done. The hand-off message is the harness, not a person: never answer it with a status and never end your turn on it; when you are waiting on a peer call wait and keep it open. done is not the end of a slice: it ends the swarm for everyone and belongs only to the swarm's finish, the coordinator's call when SWARM.md's definition of done is met.`;
+  const systemPromptLine = `\n\n${SELF_COMPACT_PROMPT_LINE}`;
 
   return {
     systemPromptLine,

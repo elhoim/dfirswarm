@@ -30,6 +30,7 @@ import { Type, type TSchema } from "typebox";
 import { specsFromEnv } from "./context-ceiling.ts";
 import { registerSelfCompact, type HandoffFacts, type SelfCompactHandle } from "./self-compact.ts";
 import { packDirsFromEnv, registerSkills, type SkillsHandle } from "./skills.ts";
+import { forgedSoFarLine, FORGE_PROMPT_LINE, inputsPromptLine, measuredInputsLine, seatPromptLine } from "./seat-prompt.ts";
 import {
   type FinishLineRun,
   type FinishOutcome,
@@ -1211,13 +1212,19 @@ export default function (pi: ExtensionAPI) {
       readInputsManifest(cwd),
       forging ? listForgedTools(cwd).catch(() => [] as ForgedToolManifest[]) : ([] as ForgedToolManifest[]),
     ]);
-    const capLine =
-      status?.over_budget
-        ? `\n\nSwarm spend cap hit (spent_usd=${status.budget.spent_usd} cap_usd=${status.budget.cap_usd}). Call done(reason=cannot_complete) now.`
-        : "";
+    const capLine = status?.over_budget ? `\n\n${capHitLine(status)}` : "";
+    // What holds for the whole run is in Pi's own prompt (the kickoff's .pi/APPEND_SYSTEM.md and .pi/seat-<id>.md),
+    // so the run a hand-off starts has it too. A line the prompt already carries is not said twice; one it lacks
+    // (a manual start, a sandbox from before the files) is added here, as it always was.
+    const carries = (line: string) => event.systemPrompt.includes(line);
+    const seatCarried = agentId !== "" && carries(seatPromptLine(agentId));
     const stop = done
-      ? `\n\n${idLine}\n\ndone/SWARM_DONE exists. Call done(reason, output_file) now and stop. Do not start new work.`
-      : `\n\n${idLine}\n\nIf done/SWARM_DONE exists on this turn, call done and stop.`;
+      ? `\n\n${seatCarried ? "" : `${idLine}\n\n`}done/SWARM_DONE exists. Call done(reason, output_file) now and stop. Do not start new work.`
+      : seatCarried
+        ? ""
+        : agentId
+          ? `\n\n${seatPromptLine(agentId)}`
+          : `\n\n${idLine}\n\nIf done/SWARM_DONE exists on this turn, call done and stop.`;
     let nameLine = "";
     if (agentId) {
       if (mine) {
@@ -1227,28 +1234,18 @@ export default function (pi: ExtensionAPI) {
           "\n\nNobody has given you a job. Read the goal, see what your peers have taken, decide what you are going to do, and call name(name, doing) to say what to call you and what you are taking on. The board is where that is agreed.";
       }
     }
+    // The rule is the run's; what this pane measured about its guard is the pane's, said to the first run.
     let inputsLine = "";
     if (inputs) {
-      const kb = Math.max(1, Math.round(inputs.bytes / 1024));
-      const consequence = inputsEnforced === "kernel" ? "refused by the kernel" : "refused, or detected and undone";
-      // Several sets, each at inputs/<name>/: every one named.
-      const where = inputs.sets?.length
-        ? `in ${inputs.sets.length} sets, ${inputs.sets.map((set) => `${set.path}/ (from ${set.source || "the operator"})`).join(", ")}`
-        : `under inputs/ (from ${inputs.source || "the operator"})`;
-      inputsLine =
-        `\n\nRead-only inputs: ${inputs.files.length} file(s), ${kb} KB ${where}. ` +
-        `Read them with read, grep or bash as much as you like. Never write, delete, move or chmod anything under inputs/: every such write is ${consequence} and announced on the board. ` +
-        `Put every result in work/ (claim first); copy an input there if you need a version you can change. Call \`inputs\` to list them.`;
+      const rule = inputsPromptLine(inputs);
+      inputsLine = carries(rule) ? `\n\n${measuredInputsLine(inputsEnforced)}` : `\n\n${rule} ${measuredInputsLine(inputsEnforced)}`;
     }
     let forgeLine = "";
     if (forging) {
-      const have = onDisk.length ? ` Forged so far: ${onDisk.map((m) => `${m.name} (by ${m.by}, v${m.version})`).join(", ")}.` : " Nothing has been forged yet.";
-      forgeLine =
-        "\n\nTool forging is on for this swarm. If the goal needs a tool nobody has — a parser, a checker, a converter — write it once with make_tool (python3, node or bash; the arguments arrive as one JSON object on stdin; print the result to stdout) and it becomes a real tool for every agent after their next inbox or wait. Call `tools` first to see what peers have forged. A forged tool runs in this directory with the same limits as bash; keep it small and free of network calls." +
-        have;
+      forgeLine = `${carries(FORGE_PROMPT_LINE) ? "" : `\n\n${FORGE_PROMPT_LINE}`}\n\n${forgedSoFarLine(onDisk)}`;
     }
     // Static, so the prompt-cache prefix stays the same from one call to the next.
-    const compactLine = selfCompact?.systemPromptLine ?? "";
+    const compactLine = selfCompact && !carries(selfCompact.systemPromptLine.trim()) ? selfCompact.systemPromptLine : "";
     // The index of the run's packs. The kickoff wrote it into .pi/APPEND_SYSTEM.md,
     // so Pi's own prompt (event.systemPrompt) carries it for every run, the ones a
     // hand-off starts too; only a prompt that does not carry it is given it here.
@@ -4255,6 +4252,11 @@ export default function (pi: ExtensionAPI) {
     return Number(raw) * 1000;
   }
 
+  /** The instruction that follows a spend cap that was hit; the forced prompt and the hand-off header both say it. */
+  function capHitLine(status: { budget: { spent_usd: number; cap_usd: number } }): string {
+    return `Swarm spend cap hit (spent_usd=${status.budget.spent_usd} cap_usd=${status.budget.cap_usd}). Call done(reason=cannot_complete) now.`;
+  }
+
   /**
    * What the harness knows at hand-off time, from files rather than from the
    * model's memory: the header the returned note travels under. Every read is
@@ -4286,6 +4288,9 @@ export default function (pi: ExtensionAPI) {
       capUsd: status?.budget.cap_per_agent_usd ?? undefined,
       ...(leads ? { leads: leads.text } : {}),
       ...(skills?.handoffLine() ? { skills: skills.handoffLine() } : {}),
+      // What the prompt of the run a hand-off starts cannot say, because it changes: a cap that was hit, the tools forged so far.
+      ...(status?.over_budget ? { capHit: capHitLine(status) } : {}),
+      ...(forging ? { forged: `Tool forging is on. ${forgedSoFarLine(await listForgedTools(cwd).catch(() => [] as ForgedToolManifest[]))} Call \`tools\` to see them.` } : {}),
     };
   }
 

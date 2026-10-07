@@ -28,7 +28,7 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 pass() { echo "ok - $*"; }
 
 # The files a kickoff writes that say what the run is, by the name each is kept under.
-FILES=("SWARM.md:SWARM.md" ".pi/SYSTEM.md:SYSTEM.md" ".pi/settings.json:settings.json" "budget.json:budget.json" "team.json:team.json" "network/policy.json:policy.json" "inputs.json:inputs.json" "questions/questions.md:questions.md")
+FILES=("SWARM.md:SWARM.md" ".pi/SYSTEM.md:SYSTEM.md" ".pi/APPEND_SYSTEM.md:APPEND_SYSTEM.md" ".pi/settings.json:settings.json" "budget.json:budget.json" "team.json:team.json" "network/policy.json:policy.json" "inputs.json:inputs.json" "questions/questions.md:questions.md")
 
 # The evidence: small, and the same bytes every time.
 EV="$TMP/evidence"
@@ -80,6 +80,11 @@ kickoff() { # <case> <args...>
     cp "$sb/$src" "$TMP/got/$name/$dst"; chmod u+w "$TMP/got/$name/$dst"
     normalize "$TMP/got/$name/$dst" "$sb" "$id" "$EV"
   done
+  # The first seat's own prompt line (its id is the run's id and a number, so it is kept under a fixed name).
+  if [[ -f "$sb/.pi/seat-${id}00.md" ]]; then
+    cp "$sb/.pi/seat-${id}00.md" "$TMP/got/$name/seat-00.md"; chmod u+w "$TMP/got/$name/seat-00.md"
+    normalize "$TMP/got/$name/seat-00.md" "$sb" "$id" "$EV"
+  fi
   if [[ "${GOLDENS:-}" == update ]]; then
     rm -rf "$GOLD/$name"; mkdir -p "$GOLD"; cp -R "$TMP/got/$name" "$GOLD/$name"
     pass "$name: goldens written ($(ls "$GOLD/$name" | wc -l | tr -d ' ') files)"
