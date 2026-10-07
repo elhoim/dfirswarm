@@ -6,11 +6,6 @@
 # up to the standard empties that pack's lines; the last one deletes this file
 # and makes PACK_LINKS_STRICT=1 the default. PACK_LINKS_VERBOSE=1 prints each
 # finding with its reason.
-cloud-forensics unlisted skills/google/workspace.md cloudtrail_parse
-cloud-forensics unused skills/aws/cloudtrail.md aws
-cloud-forensics unused skills/identity/tokens.md signin_analyse
-cloud-forensics unused skills/identity/tokens.md ual_parse
-cloud-forensics unused skills/m365/unified-audit-log.md pwsh
 computer-forensics-base closure skills/evidence/collections.md CyLR
 computer-forensics-base closure skills/evidence/collections.md evtx_query
 computer-forensics-base closure skills/evidence/collections.md mft_records
