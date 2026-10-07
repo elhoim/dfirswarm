@@ -61,7 +61,7 @@ WEB = re.compile(
     r'(?:\s+"(?P<ref>[^"]*)"\s+"(?P<ua>[^"]*)")?.*$')
 KV = re.compile(r'\b([A-Z][A-Z0-9_]*)=("[^"]*"|\S*)')
 WEB_TIME = re.compile(r"^(\d{1,2})/([A-Za-z]{3})/(\d{4}):(\d{2}):(\d{2}):(\d{2}) ([+-])(\d{2})(\d{2})$")
-ISO_PREFIX = re.compile(r"^\s*(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?)(Z|[+-]\d{2}:?\d{2})(?=\s|$)")
+ISO_PREFIX = re.compile(r"^\s*(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?(Z|[+-]\d{2}:?\d{2})(?=\s|$)")
 MONTHS = {m: i for i, m in enumerate(("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"), 1)}
 
 # BEGIN SHARED WITHHOLDING
@@ -318,6 +318,20 @@ def web_time(text):
         return ""
 
 
+def iso_to_utc(m):
+    """An ISO 8601 time with a zone, matched by ISO_PREFIX, as UTC with its fraction digits kept; empty when it does not parse.
+    Done by hand: the standard library's fromisoformat accepts different forms in different Python versions."""
+    year, mon, day, hh, mm, ss, frac, zone = m.groups()
+    try:
+        sign = -1 if zone.startswith("-") else 1
+        digits = zone.lstrip("Z+-").replace(":", "")
+        offset = datetime.timedelta(hours=int(digits[:2] or 0), minutes=int(digits[2:] or 0)) * sign
+        local = datetime.datetime(int(year), int(mon), int(day), int(hh), int(mm), int(ss), tzinfo=datetime.timezone(offset))
+        return local.astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S") + ("." + frac if frac else "") + "Z"
+    except (ValueError, OverflowError):
+        return ""
+
+
 def web(line):
     m = WEB.match(line)
     if not m:
@@ -363,13 +377,8 @@ def firewall(line):
     derived, source = "", "none in the line: a syslog stamp has no year and no zone"
     m = ISO_PREFIX.match(prefix)
     if m:
-        zone = m.group(2)
-        try:
-            stamp = datetime.datetime.fromisoformat(m.group(1).replace(" ", "T") + ("+00:00" if zone == "Z" else (zone if ":" in zone else zone[:3] + ":" + zone[3:])))
-            derived = stamp.astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S") + ("." + m.group(1).split(".")[1] if "." in m.group(1) else "") + "Z"
-            source = "the zone written in the line"
-        except ValueError:
-            source = "a zone is written but the time did not parse"
+        derived = iso_to_utc(m)
+        source = "the zone written in the line" if derived else "a zone is written but the time did not parse"
 
     def first(*names):
         return next((pairs[name] for name in names if pairs.get(name)), "")
