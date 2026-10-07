@@ -906,17 +906,35 @@ test("the harness's own skill events are reserved against forged tools", () => {
   for (const name of ["skill", "skill_done", "skills_index"]) assert.ok(TOOL_RESERVED_NAMES.has(name), `${name} is reserved`);
 });
 
-test("every place the kickoff starts Pi passes --no-skills, and the allowlist names both skill tools", async () => {
+test("every place the kickoff starts Pi passes --no-skills and the seat's prompt files, in that order, and the allowlist names both skill tools", async () => {
   const sh = await readFile(join(REPO, "scripts", "swarm.sh"), "utf8");
   const lines = sh.split("\n");
   const launches = lines.map((l, i) => ({ l, i })).filter(({ l }) => /--session-dir "\$sandbox\/\.pi-sessions\//.test(l));
   assert.equal(launches.length, 3, "a seat's Pi is started in three places: the host panes, the probe, a VM's launch script");
   for (const { i } of launches) {
-    const around = lines.slice(Math.max(0, i - 4), i + 1).join("\n");
+    const around = lines.slice(Math.max(0, i - 6), i + 1).join("\n");
     assert.ok(around.includes("--no-skills"), `the Pi launch at swarm.sh:${i + 1} does not pass --no-skills:\n${around}`);
-    // The run's lines and the seat's own: two explicit sources, which also replace Pi's discovery of an operator's global file.
-    assert.equal(around.split("--append-system-prompt").length - 1, 2, `the Pi launch at swarm.sh:${i + 1} does not pass the run's file and the seat's:\n${around}`);
-    assert.ok(around.includes('$sandbox/.pi/APPEND_SYSTEM.md') && /\$sandbox\/\.pi\/seat-/.test(around));
+    // The prompt files come from one function, called for this seat just before, and sit between --no-skills/--name and --session-dir.
+    assert.match(around, /seat_prompt_args "\$sandbox" "[^"]+"/, `the Pi launch at swarm.sh:${i + 1} does not build the seat's prompt arguments:\n${around}`);
+    assert.ok(around.indexOf("--no-skills") < around.indexOf('"${SEAT_PROMPT_ARGS[@]}"') && around.indexOf('"${SEAT_PROMPT_ARGS[@]}"') < around.indexOf("--session-dir"), `the Pi launch at swarm.sh:${i + 1} passes the prompt files in another place:\n${around}`);
   }
   assert.match(sh, /\[\[ -n "\$pack_dirs" \]\] && PI_TOOLS\+=",skill,skill_done"/);
+});
+
+test("seat_prompt_args: the run's file and then the seat's, as explicit sources; the run's file left out when it is empty; paths with spaces, quotes and $ kept whole", async () => {
+  const sh = await readFile(join(REPO, "scripts", "swarm.sh"), "utf8");
+  const fn = /^seat_prompt_args\(\) \{[\s\S]*?^\}/m.exec(sh)![0];
+  const root = await mkdtemp(join(tmpdir(), "seat args "));
+  try {
+    const sandbox = join(root, "My Cases", "çase $HOME 'q' [x]");
+    await mkdir(join(sandbox, ".pi"), { recursive: true });
+    const args = (id: string) => execFileSync("bash", ["-c", `${fn}\nseat_prompt_args "$1" "$2"\nprintf '%s\\0' "\${SEAT_PROMPT_ARGS[@]}"`, "_", sandbox, id], { encoding: "utf8" }).split("\0").slice(0, -1);
+    // Empty run file (nothing applies): only the seat's own file is given, and that alone replaces Pi's discovery of a global one.
+    await writeFile(join(sandbox, ".pi", "APPEND_SYSTEM.md"), "");
+    assert.deepEqual(args("s1234500"), ["--append-system-prompt", join(sandbox, ".pi", "seat-s1234500.md")]);
+    await writeFile(join(sandbox, ".pi", "APPEND_SYSTEM.md"), "Self-compaction is on.\n");
+    assert.deepEqual(args("s1234501"), ["--append-system-prompt", join(sandbox, ".pi", "APPEND_SYSTEM.md"), "--append-system-prompt", join(sandbox, ".pi", "seat-s1234501.md")]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });

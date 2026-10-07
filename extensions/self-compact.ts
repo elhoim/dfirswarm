@@ -162,6 +162,11 @@ export type HandoffFacts = {
    */
   capHit?: string;
   forged?: string;
+  /**
+   * The lines above order the seat to stop (the sentinel stands, or a cap-stop run's cap was hit), so the
+   * header's last paragraph must not tell it to work on until the definition of done is met.
+   */
+  stopping?: boolean;
 };
 
 export type SelfCompactDeps = {
@@ -407,7 +412,12 @@ export function handoffHeader(agentId: string, cycle: number, facts: HandoffFact
   // with a status update to "the user" and ended their turns; three sat idle
   // for ten minutes until the watchdog spoke. The message has to say what
   // it is not.
-  lines.push("This message is the harness, not a person: do not answer it with a status or a summary, and do not end your turn. Work on until SWARM.md's definition of done is met; when you are waiting on a peer, call wait and keep it open, because a turn that ends is not waiting and nothing prompts you again.");
+  // Not when the lines above order the seat to stop: "work on until done is met" would contradict "call done now".
+  lines.push(
+    facts.stopping
+      ? "This message is the harness, not a person: do not answer it with a status or a summary. The swarm is ending, as the lines above say: do what they say and start nothing new."
+      : "This message is the harness, not a person: do not answer it with a status or a summary, and do not end your turn. Work on until SWARM.md's definition of done is met; when you are waiting on a peer, call wait and keep it open, because a turn that ends is not waiting and nothing prompts you again.",
+  );
   lines.push(hadNote ? "Your note follows verbatim; continue from its NEXT ACTION and never restart work it marks as done:\n---" : "No note was saved before this compaction (it was Pi's own recovery, not a hand-off). Read the summary above, call inbox, then continue.");
   return lines.join("\n");
 }

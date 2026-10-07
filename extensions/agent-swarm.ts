@@ -30,7 +30,7 @@ import { Type, type TSchema } from "typebox";
 import { specsFromEnv } from "./context-ceiling.ts";
 import { registerSelfCompact, type HandoffFacts, type SelfCompactHandle } from "./self-compact.ts";
 import { packDirsFromEnv, registerSkills, type SkillsHandle } from "./skills.ts";
-import { forgedSoFarLine, FORGE_PROMPT_LINE, inputsPromptLine, measuredInputsLine, seatPromptLine } from "./seat-prompt.ts";
+import { forgedHandoffLine, forgedSoFarLine, FORGE_PROMPT_LINE, inputsPromptLine, measuredInputsLine, seatPromptLine } from "./seat-prompt.ts";
 import {
   type FinishLineRun,
   type FinishOutcome,
@@ -1213,6 +1213,8 @@ export default function (pi: ExtensionAPI) {
       forging ? listForgedTools(cwd).catch(() => [] as ForgedToolManifest[]) : ([] as ForgedToolManifest[]),
     ]);
     const capLine = status?.over_budget ? `\n\n${capHitLine(status)}` : "";
+    // The prompt files the kickoff passes: Pi takes the path of one that is not there as the text of the prompt.
+    await reportMissingPromptFiles(cwd, event.systemPrompt);
     // What holds for the whole run is in Pi's own prompt (the kickoff's .pi/APPEND_SYSTEM.md and .pi/seat-<id>.md),
     // so the run a hand-off starts has it too. A line the prompt already carries is not said twice; one it lacks
     // (a manual start, a sandbox from before the files) is added here, as it always was.
@@ -1238,7 +1240,8 @@ export default function (pi: ExtensionAPI) {
     let inputsLine = "";
     if (inputs) {
       const rule = inputsPromptLine(inputs);
-      inputsLine = carries(rule) ? `\n\n${measuredInputsLine(inputsEnforced)}` : `\n\n${rule} ${measuredInputsLine(inputsEnforced)}`;
+      const measured = measuredInputsLine(inputsEnforced, inputs.held);
+      inputsLine = carries(rule) ? `\n\n${measured}` : `\n\n${rule} ${measured}`;
     }
     let forgeLine = "";
     if (forging) {
@@ -4252,9 +4255,39 @@ export default function (pi: ExtensionAPI) {
     return Number(raw) * 1000;
   }
 
-  /** The instruction that follows a spend cap that was hit; the forced prompt and the hand-off header both say it. */
-  function capHitLine(status: { budget: { spent_usd: number; cap_usd: number } }): string {
-    return `Swarm spend cap hit (spent_usd=${status.budget.spent_usd} cap_usd=${status.budget.cap_usd}). Call done(reason=cannot_complete) now.`;
+  /**
+   * What the seat is told when the run's cap is reached, by the run's stop policy: the live steer's words,
+   * so the forced prompt, the steer and the hand-off header cannot disagree. Under cap-pause (the default)
+   * the run pauses for the operator to extend it and the seat is told not to call done; under cap-stop it
+   * is told to stop; a token cap is worded as one.
+   */
+  function capHitLine(status: { budget: BudgetRecord }): string {
+    return capSteerText(status.budget, budgetPressure(status.budget));
+  }
+
+  let promptFilesReported = false;
+  /**
+   * Pi takes a --append-system-prompt argument that is not a file as the text itself, so a file that is gone
+   * (a seat's relaunch after .pi/ lost one, a pane that deleted it) puts its path into the prompt and the
+   * lines out of it. The kickoff stops before it starts a seat without the files; this is the seat saying so
+   * when it finds them gone later.
+   */
+  async function reportMissingPromptFiles(cwd: string, prompt: string): Promise<void> {
+    if (promptFilesReported || !agentId) return;
+    const gone = [`/.pi/seat-${agentId}.md`, "/.pi/APPEND_SYSTEM.md"].filter((suffix) => prompt.includes(suffix));
+    if (!gone.length) return;
+    promptFilesReported = true;
+    const reason = `Pi was given ${gone.map((g) => `.pi${g.slice(4)}`).join(" and ")} as the text of the prompt: the file is not there`;
+    await logEvent(cwd, agentId, "extension_error", { where: "prompt files" }, { ok: false, reason }).catch(() => undefined);
+    await systemPost(cwd, {
+      tag: "veto",
+      body: `HARNESS FAULT: ${agentId} was started without its prompt files (${reason}). Its id, the stop rule and the rules that hold for the whole run are not in its prompt from the next hand-off on, and the path stands in the prompt as plain text. Tell the operator; do not treat the contract as optional.`,
+    }).catch(() => undefined);
+  }
+
+  /** The tools forged so far, as the hand-off header says them. */
+  async function forgedForHandoff(cwd: string): Promise<string> {
+    return forgedHandoffLine(await listForgedTools(cwd).catch(() => [] as ForgedToolManifest[]));
   }
 
   /**
@@ -4290,7 +4323,9 @@ export default function (pi: ExtensionAPI) {
       ...(skills?.handoffLine() ? { skills: skills.handoffLine() } : {}),
       // What the prompt of the run a hand-off starts cannot say, because it changes: a cap that was hit, the tools forged so far.
       ...(status?.over_budget ? { capHit: capHitLine(status) } : {}),
-      ...(forging ? { forged: `Tool forging is on. ${forgedSoFarLine(await listForgedTools(cwd).catch(() => [] as ForgedToolManifest[]))} Call \`tools\` to see them.` } : {}),
+      // Told to stop: the sentinel stands, or a cap-stop run's cap was hit. The header's last paragraph says "work on" otherwise.
+      ...(sentinel || (status?.over_budget && stopPolicyOf(status.budget) === "cap-stop") ? { stopping: true } : {}),
+      ...(forging ? { forged: await forgedForHandoff(cwd) } : {}),
     };
   }
 

@@ -2437,6 +2437,17 @@ measured_guard() {
 # fsguard hook re-runs it under sandbox-exec — and `herdr agent start` refuses
 # a pane that is not yet at a prompt (`agent_pane_busy`). Wait for it rather
 # than fail the whole kickoff on the first pane.
+# The prompt files Pi is started with for one seat, in SEAT_PROMPT_ARGS: the run's
+# (the packs' index, the run-wide rules; left out when empty, so the prompt does not
+# start with blank lines) and then the seat's own. An explicit source replaces Pi's
+# discovery of an operator's own ~/.pi/agent/APPEND_SYSTEM.md, so the seat's file is
+# always given. Written by scripts/seat-prompt.ts.
+seat_prompt_args() { # <sandbox> <seat id>
+  SEAT_PROMPT_ARGS=()
+  if [[ -s "$1/.pi/APPEND_SYSTEM.md" ]]; then SEAT_PROMPT_ARGS+=(--append-system-prompt "$1/.pi/APPEND_SYSTEM.md"); fi
+  SEAT_PROMPT_ARGS+=(--append-system-prompt "$1/.pi/seat-$2.md")
+}
+
 start_agent_when_shell_ready() {
   local name="$1" pane="$2"
   shift 2
@@ -5680,6 +5691,9 @@ console.log(r.ok ? "" : r.reason);' "$_gp" "$_gk" 2>/dev/null || echo "could not
     echo "Prior claims: $(jq -r '.entries' <<<"$LEDGER_FROM_RECORD") entr$([[ "$(jq -r '.entries' <<<"$LEDGER_FROM_RECORD")" == 1 ]] && echo y || echo ies) of run $ledger_from in prior/ledger.md, as hypotheses ($([[ "$(jq -r '.reviewed' <<<"$LEDGER_FROM_RECORD")" == true ]] && echo 'examiner-accepted only' || echo 'unreviewed'))"
   fi
   mkdir -p "$sandbox/.pi"
+  # Removed first, like every file here the kickoff writes into .pi/: a host pane's shell can write the
+  # sandbox, and a resume runs this again in it, so a link planted at the name would be written through.
+  rm -f "$sandbox/.pi/SYSTEM.md" "$sandbox/.pi/settings.json"
   cp "$ROOT/prompts/worker-system.md" "$sandbox/.pi/SYSTEM.md"
   # What holds for the whole run goes into every seat's prompt through two files Pi
   # appends to its own prompt sections, which the runs a hand-off starts keep (the
@@ -6432,13 +6446,13 @@ EOF
   fi
   # --no-skills: Pi's own skill directories (~/.pi/agent/skills, ~/.agents/skills,
   # .pi/skills, the `skills` setting) stay out of every seat's prompt. It does not
-  # reach a skill path an operator's extension adds, context files (AGENTS.md) or,
-  # in a run with no pack, ~/.pi/agent/APPEND_SYSTEM.md (docs/usage.md says what).
-  # The packs' skills are the harness's `skill` tool.
+  # reach a skill path an operator's extension adds or context files (AGENTS.md)
+  # (docs/usage.md says what). The packs' skills are the harness's `skill` tool.
   for ((idx = 0; idx < n; idx++)); do
+    seat_prompt_args "$sandbox" "${agent_ids[$idx]}"
     start_agent_when_shell_ready "${agent_ids[$idx]}" "${panes[$idx]}" \
       --approve --no-skills --name "${agent_ids[$idx]}" \
-      --append-system-prompt "$sandbox/.pi/APPEND_SYSTEM.md" --append-system-prompt "$sandbox/.pi/seat-${agent_ids[$idx]}.md" \
+      "${SEAT_PROMPT_ARGS[@]}" \
       --session-dir "$sandbox/.pi-sessions/${agent_ids[$idx]}" \
       -e "$EXT" \
       ${tool_args[@]+"${tool_args[@]}"} \
@@ -6464,9 +6478,10 @@ EOF
     probe_tools="read,bash,edit,write,post,inbox,list_team,budget,done"
     echo "Probe:        $probe_id (no claim_file) on $probe_pane"
     node --experimental-strip-types --no-warnings "$ROOT/scripts/seat-prompt.ts" --sandbox "$sandbox" --seats-only --seat "$probe_id" >/dev/null || { echo "BLOCKER: the probe's prompt line could not be written." >&2; exit 1; }
+    seat_prompt_args "$sandbox" "$probe_id"
     herdr agent start "$probe_id" --kind pi --pane "$probe_pane" --timeout 120000 -- \
       --approve --no-skills --name "$probe_id" \
-      --append-system-prompt "$sandbox/.pi/APPEND_SYSTEM.md" --append-system-prompt "$sandbox/.pi/seat-$probe_id.md" \
+      "${SEAT_PROMPT_ARGS[@]}" \
       --session-dir "$sandbox/.pi-sessions/$probe_id" \
       -e "$EXT" \
       --tools "$probe_tools" \
@@ -8947,8 +8962,9 @@ launch_vm_agents() {
     launch="$hub_dir/launch-${agent_ids[$idx]}.sh"
     {
       printf '#!/bin/sh\n# %s in its microVM\nexec %q exec -t %q --' "${agent_ids[$idx]}" "$msb" "dfs-${swarm_id}-${agent_ids[$idx]}"
+      seat_prompt_args "$sandbox" "${agent_ids[$idx]}"
       printf ' %q' /.msb/scripts/dfirswarm-pi --approve --no-skills --name "${agent_ids[$idx]}" \
-        --append-system-prompt "$sandbox/.pi/APPEND_SYSTEM.md" --append-system-prompt "$sandbox/.pi/seat-${agent_ids[$idx]}.md" \
+        "${SEAT_PROMPT_ARGS[@]}" \
         --session-dir "$sandbox/.pi-sessions/${agent_ids[$idx]}" -e "$ext" \
         ${vm_tools[@]+"${vm_tools[@]}"} --model "${AGENT_MODELS[$idx]}"
       printf '\n'

@@ -35,11 +35,24 @@ export function seatPromptLine(agentId: string): string {
 }
 
 /**
- * The read-only inputs rule. Worded for what holds in every pane: a write is
- * refused, or detected and undone, and announced. Whether this pane's kernel
- * does the refusing is measured when the pane starts (`measuredInputsLine`).
+ * What becomes of a write to inputs/ that gets through, by how the evidence is
+ * held: a copied run has a pristine copy to restore from; evidence held in
+ * place (bind, or an attached image) has none, and the change stands for the
+ * host's custody check to name.
  */
-export function inputsPromptLine(inputs: Pick<InputsManifest, "files" | "bytes" | "source" | "sets">): string {
+function afterAWrite(held: string | undefined): string {
+  return held === "bind" || held === "image"
+    ? "detected and announced on the board (there is no copy to restore it from)"
+    : "detected, undone from the pristine copy and announced on the board";
+}
+
+/**
+ * The read-only inputs rule. Worded for what holds in every pane: a write is
+ * refused, or, where it gets through, detected and dealt with as the evidence
+ * is held. Whether this pane's kernel does the refusing is measured when the
+ * pane starts (`measuredInputsLine`).
+ */
+export function inputsPromptLine(inputs: Pick<InputsManifest, "files" | "bytes" | "source" | "sets" | "held">): string {
   const kb = Math.max(1, Math.round(inputs.bytes / 1024));
   // Several sets, each at inputs/<name>/: every one named.
   const where = inputs.sets?.length
@@ -47,16 +60,16 @@ export function inputsPromptLine(inputs: Pick<InputsManifest, "files" | "bytes" 
     : `under inputs/ (from ${inputs.source || "the operator"})`;
   return (
     `Read-only inputs: ${inputs.files.length} file(s), ${kb} KB ${where}. ` +
-    `Read them with read, grep or bash as much as you like. Never write, delete, move or chmod anything under inputs/: every such write is refused, or detected and undone, and announced on the board. ` +
+    `Read them with read, grep or bash as much as you like. Never write, delete, move or chmod anything under inputs/: a write is refused or, where it gets through, ${afterAWrite(inputs.held)}. ` +
     `Put every result in work/ (claim first); copy an input there if you need a version you can change. Call \`inputs\` to list them.`
   );
 }
 
 /** What this pane measured about its guard on inputs/ when it started: a fact about the pane, said to the first run only. */
-export function measuredInputsLine(enforced: "kernel" | "mode" | "none"): string {
+export function measuredInputsLine(enforced: "kernel" | "mode" | "none", held?: string): string {
   return enforced === "kernel"
     ? "In this pane the kernel refuses a write to inputs/ (measured when it started)."
-    : "This pane has no kernel guard on inputs/ (measured when it started): a write is caught by the tool guard, or detected and undone.";
+    : `This pane has no kernel guard on inputs/ (measured when it started): the tools refuse a write through write or edit, and a write that gets through a shell is ${afterAWrite(held)}.`;
 }
 
 /** The forging inventory: what has been forged so far, which changes. */
@@ -64,8 +77,13 @@ export function forgedSoFarLine(forged: Array<{ name: string; by: string; versio
   return forged.length ? `Forged so far: ${forged.map((m) => `${m.name} (by ${m.by}, v${m.version})`).join(", ")}.` : "Nothing has been forged yet.";
 }
 
+/** The forging line of the hand-off header: the prompt of the run a hand-off starts cannot carry the inventory, which changes. */
+export function forgedHandoffLine(forged: Array<{ name: string; by: string; version: number | string }>): string {
+  return `Tool forging is on. ${forgedSoFarLine(forged)} ${forged.length ? "Call `tools` to see them." : "Call `tools` before you forge one, in case a peer has."}`;
+}
+
 /** The run-wide lines, in the order they are written; the index of the packs comes first in the file (scripts/seat-prompt.ts). */
-export function runPromptLines(opts: { inputs: Pick<InputsManifest, "files" | "bytes" | "source" | "sets"> | null; forging: boolean; selfCompact: boolean }): string[] {
+export function runPromptLines(opts: { inputs: Pick<InputsManifest, "files" | "bytes" | "source" | "sets" | "held"> | null; forging: boolean; selfCompact: boolean }): string[] {
   return [
     ...(opts.selfCompact ? [SELF_COMPACT_PROMPT_LINE] : []),
     ...(opts.inputs ? [inputsPromptLine(opts.inputs)] : []),

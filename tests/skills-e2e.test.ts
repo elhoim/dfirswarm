@@ -23,7 +23,7 @@
  */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { copyFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -64,7 +64,9 @@ async function makeSandbox(name: string): Promise<Dir> {
 
 /** The Pi arguments of a seat as the kickoff starts it: the run's file and the seat's own, when the kickoff wrote them. */
 function args(d: Dir, { noSkills = true, extra = [] as string[], forging = false } = {}): string[] {
-  const files = existsSync(join(d.root, ".pi", "seat-agent00.md")) ? ["--append-system-prompt", join(d.root, ".pi", "APPEND_SYSTEM.md"), "--append-system-prompt", join(d.root, ".pi", "seat-agent00.md")] : [];
+  // As seat_prompt_args does: the run's file when it has anything in it, then the seat's own.
+  const run = join(d.root, ".pi", "APPEND_SYSTEM.md");
+  const files = existsSync(join(d.root, ".pi", "seat-agent00.md")) ? [...(existsSync(run) && statSync(run).size > 0 ? ["--append-system-prompt", run] : []), "--append-system-prompt", join(d.root, ".pi", "seat-agent00.md")] : [];
   return ["--no-extensions", ...(noSkills ? ["--no-skills"] : []), "--no-prompt-templates", "--no-context-files", "-a", ...files, "-e", EXTENSION, "-e", FAKE, "--model", "fake/scripted", "--session-dir", d.sessionDir, ...(forging ? [] : ["--tools", TOOLS]), ...extra];
 }
 
@@ -107,11 +109,11 @@ async function cleanup(d: Dir): Promise<void> {
  * The kickoff's own files, from the kickoff's own script: the worker prompt as .pi/SYSTEM.md, the run's lines (and the packs'
  * index) as .pi/APPEND_SYSTEM.md, the seat's id as .pi/seat-agent00.md, over an inputs manifest like a run with evidence has.
  */
-function kickoffFiles(d: Dir, packDirs: string[], { files = true, forging = false } = {}): string {
+function kickoffFiles(d: Dir, packDirs: string[], { files = true, forging = false, bare = false } = {}): string {
   copyFileSync(join(REPO, "prompts", "worker-system.md"), join(d.root, ".pi", "SYSTEM.md"));
   if (!files) return "";
-  writeFileSync(join(d.root, "inputs.json"), JSON.stringify({ source: "/cases/evidence", copied_at: "2026-10-07T00:00:00.000Z", files: [{ path: "inputs/a.txt", bytes: 5, sha256: "0".repeat(64) }], bytes: 5, enforce: "auto", guard: "none" }));
-  const out = execFileSync("node", ["--experimental-strip-types", "--no-warnings", join(REPO, "scripts", "seat-prompt.ts"), "--sandbox", d.root, "--self-compact", ...(forging ? ["--forging"] : []), "--seat", "agent00", ...packDirs.flatMap((p) => ["--pack-dir", p])], { encoding: "utf8" });
+  if (!bare) writeFileSync(join(d.root, "inputs.json"), JSON.stringify({ source: "/cases/evidence", copied_at: "2026-10-07T00:00:00.000Z", files: [{ path: "inputs/a.txt", bytes: 5, sha256: "0".repeat(64) }], bytes: 5, enforce: "auto", guard: "none" }));
+  const out = execFileSync("node", ["--experimental-strip-types", "--no-warnings", join(REPO, "scripts", "seat-prompt.ts"), "--sandbox", d.root, ...(bare ? [] : ["--self-compact"]), ...(forging ? ["--forging"] : []), "--seat", "agent00", ...packDirs.flatMap((p) => ["--pack-dir", p])], { encoding: "utf8" });
   assert.equal(JSON.parse(out).written, packDirs.length > 0, out);
   return out;
 }
@@ -321,6 +323,93 @@ test("tool forging: the rule is in every request once, what has been forged so f
   } finally {
     await cleanup(d);
     await rm(packsRoot, { recursive: true, force: true });
+  }
+});
+
+/** The run's budget with its cap already passed (a token cap: the scripted model reports tokens, not dollars), under a stop policy. */
+function passCap(d: Dir, policy: "cap-pause" | "cap-stop"): void {
+  const file = join(d.root, "budget.json");
+  const budget = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
+  writeFileSync(file, JSON.stringify({ ...budget, stop_policy: policy, cap_usd: 0, cap_tokens: 1 }));
+}
+
+test("a cap that was hit reaches the run a hand-off starts in the words of the run's stop policy: under cap-pause the seat is not told to call done", async (t) => {
+  if (!haveCli()) {
+    t.skip("pi is not on PATH");
+    return;
+  }
+  const d = await makeSandbox("cap-pause");
+  const packsRoot = await mkdtemp(join(tmpdir(), "skills-e2e-packs-"));
+  const { a, b } = await twoPacks(packsRoot);
+  try {
+    kickoffFiles(d, [a, b]);
+    passCap(d, "cap-pause");
+    const { events, handoff } = await runCycle(d, [a, b]);
+    const header = messageText(handoff.message);
+    // The steer the seat was given by the harness when the cap was reached, and the header: the same words.
+    const steer = eventsOfType(events, "message_start").map((e) => messageText(e.message)).find((m) => /^The run's token cap \(.* of 1\) is reached: it pauses in 2 minutes/.test(m));
+    assert.ok(steer, "the harness steered the seat for the cap it passed (cap-pause)");
+    // The same words; the figure in the parentheses is the one when each was said.
+    const words = (m: string) => m.replace(/\(.*? of 1\)/, "(N of 1)");
+    const said = /The run's token cap \(.*? of 1\) is reached:[^\n]*/.exec(header)?.[0];
+    assert.ok(said, `the hand-off header carries the cap rule:\n${header}`);
+    assert.equal(words(said!), words(steer!), "the hand-off header says what the steer said");
+    assert.match(header, /do not call done unless the finish line is met/);
+    assert.ok(!header.includes("Call done with reason cannot_complete") && !header.includes("cannot_complete"), "no order to call done");
+    assert.match(header, /do not end your turn\. Work on until SWARM\.md's definition of done is met/, "the seat works on while the run waits for its operator");
+  } finally {
+    await cleanup(d);
+    await rm(packsRoot, { recursive: true, force: true });
+  }
+});
+
+test("under cap-stop the header orders the stop and does not also say to work on", async (t) => {
+  if (!haveCli()) {
+    t.skip("pi is not on PATH");
+    return;
+  }
+  const d = await makeSandbox("cap-stop");
+  const packsRoot = await mkdtemp(join(tmpdir(), "skills-e2e-packs-"));
+  const { a, b } = await twoPacks(packsRoot);
+  try {
+    kickoffFiles(d, [a, b]);
+    passCap(d, "cap-stop");
+    const { handoff } = await runCycle(d, [a, b]);
+    const header = messageText(handoff.message);
+    assert.ok(header.includes("Swarm token cap hit. Call done with reason cannot_complete and stop. Do not start new work."), header);
+    assert.ok(!header.includes("spent_usd="), "no dollar figures for a token cap");
+    assert.match(header, /The swarm is ending, as the lines above say: do what they say and start nothing new\./);
+    assert.ok(!header.includes("Work on until") && !header.includes("do not end your turn"));
+  } finally {
+    await cleanup(d);
+    await rm(packsRoot, { recursive: true, force: true });
+  }
+});
+
+test("when nothing applies the run's file is empty and not passed: the prompt carries the seat's line and no blank lines before it", async (t) => {
+  if (!haveCli()) {
+    t.skip("pi is not on PATH");
+    return;
+  }
+  const d = await makeSandbox("bare");
+  const agentDir = await mkdtemp(join(tmpdir(), "skills-e2e-agentdir-"));
+  writeFileSync(join(agentDir, "APPEND_SYSTEM.md"), "OPERATOR-GLOBAL-APPEND: be brief.\n");
+  try {
+    kickoffFiles(d, [], { bare: true });
+    assert.equal(statSync(join(d.root, ".pi", "APPEND_SYSTEM.md")).size, 0, "the run's file is there and empty");
+    const client = new RpcClient({ args: args(d), cwd: d.root, env: { ...ENV, SWARM_SELF_COMPACT: "", PI_CODING_AGENT_DIR: agentDir, SC_FAKE_TRACE: d.traceFile }, logFile: d.logFile });
+    try {
+      await client.request({ type: "prompt", message: "Start the scripted work." });
+      for (let i = 0; i < 100 && fakeTurns(d).length === 0; i++) await new Promise((r) => setTimeout(r, 100));
+      const prompt = fakeTurns(d)[0]?.systemPrompt ?? "";
+      assert.ok(prompt.includes("<addendum>\nYour assigned id is agent00."), `the addendum opens with the seat's line:\n${prompt.slice(prompt.indexOf("<addendum>"), prompt.indexOf("<addendum>") + 200)}`);
+      assert.ok(!prompt.includes("OPERATOR-GLOBAL-APPEND"), "and the operator's global file, which an explicit source replaces, is not in it");
+    } finally {
+      await client.close();
+    }
+  } finally {
+    await cleanup(d);
+    await rm(agentDir, { recursive: true, force: true });
   }
 });
 

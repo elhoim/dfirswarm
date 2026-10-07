@@ -24,7 +24,7 @@
  * report: the skills section's (what it shows, what is over budget, which pack
  * could not be read) and `lines`, the run-wide lines written.
  */
-import { mkdirSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { readInputsManifest } from "../extensions/protocol-core.ts";
 import { runPromptLines, seatPromptLine } from "../extensions/seat-prompt.ts";
@@ -49,23 +49,44 @@ function parse(argv: string[]): Options | string {
   return o;
 }
 
+/**
+ * A file written fresh: the name is removed first and the file made with `wx`, so a link planted at the name
+ * (a host pane's bash can write the whole sandbox, and a resume runs the kickoff again in it) is replaced and
+ * never written through.
+ */
+function writeFresh(path: string, text: string): void {
+  rmSync(path, { force: true });
+  writeFileSync(path, text, { flag: "wx", mode: 0o644 });
+}
+
+async function write(o: Options): Promise<number> {
+  const dir = join(o.sandbox, ".pi");
+  if (lstatSync(dir, { throwIfNoEntry: false })?.isSymbolicLink()) throw new Error(`${dir} is a link`);
+  mkdirSync(dir, { recursive: true });
+  const skills = o.packDirs.length && !o.seatsOnly ? renderSkillsSection(await readPackIndexes(o.packDirs)) : null;
+  const inputs = o.seatsOnly ? null : await readInputsManifest(o.sandbox);
+  const lines = runPromptLines({ inputs, forging: o.forging, selfCompact: o.selfCompact });
+  const parts = [...(skills?.text ? [skills.text] : []), ...lines];
+  if (!o.seatsOnly) writeFresh(join(dir, "APPEND_SYSTEM.md"), parts.length ? `${parts.join("\n\n")}\n` : "");
+  for (const seat of o.seats) writeFresh(join(dir, `seat-${seat}.md`), `${seatPromptLine(seat)}\n`);
+  const names = [...(o.selfCompact ? ["self_compact"] : []), ...(inputs ? ["inputs"] : []), ...(o.forging ? ["forging"] : [])];
+  process.stdout.write(`${JSON.stringify({ written: Boolean(skills?.text), ...(skills?.report ?? {}), lines: names, seats: o.seats })}\n`);
+  return 0;
+}
+
 async function main(argv: string[]): Promise<number> {
   const o = parse(argv);
   if (typeof o === "string") {
     process.stderr.write(`seat-prompt.ts: ${o}\nusage: seat-prompt.ts --sandbox DIR [--self-compact] [--forging] [--seat ID]... [--pack-dir DIR]... [--seats-only]\n`);
     return 2;
   }
-  const dir = join(o.sandbox, ".pi");
-  mkdirSync(dir, { recursive: true });
-  const skills = o.packDirs.length && !o.seatsOnly ? renderSkillsSection(await readPackIndexes(o.packDirs)) : null;
-  const inputs = o.seatsOnly ? null : await readInputsManifest(o.sandbox);
-  const lines = runPromptLines({ inputs, forging: o.forging, selfCompact: o.selfCompact });
-  const parts = [...(skills?.text ? [skills.text] : []), ...lines];
-  if (!o.seatsOnly) writeFileSync(join(dir, "APPEND_SYSTEM.md"), parts.length ? `${parts.join("\n\n")}\n` : "", { mode: 0o644 });
-  for (const seat of o.seats) writeFileSync(join(dir, `seat-${seat}.md`), `${seatPromptLine(seat)}\n`, { mode: 0o644 });
-  const names = [...(o.selfCompact ? ["self_compact"] : []), ...(inputs ? ["inputs"] : []), ...(o.forging ? ["forging"] : [])];
-  process.stdout.write(`${JSON.stringify({ written: Boolean(skills?.text), ...(skills?.report ?? {}), lines: names, seats: o.seats })}\n`);
-  return 0;
+  try {
+    return await write(o);
+  } catch (err) {
+    // The kickoff says this line: a file it could not write is named, not "Node.js v24".
+    process.stderr.write(`seat-prompt.ts: ${err instanceof Error ? err.message : String(err)}\n`);
+    return 1;
+  }
 }
 
 if (process.argv[1] && /seat-prompt\.ts$/.test(process.argv[1])) {

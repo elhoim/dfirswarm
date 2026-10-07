@@ -448,6 +448,33 @@ sn_sb="$(sandbox_of "$out")"
 grep -q '^Skills:' <<<"$out" && fail "a run with no pack talks of skills: $out"
 pass "every seat has its id and the stop rule in a file of its own and the run's lines in another (the packs' index, the self-compaction mechanics, the inputs rule and the forging rule where they apply); the run's file exists, empty, when nothing applies"
 
+# A link planted under .pi/ is replaced, never written through: a host pane's shell can write the sandbox, and a
+# resume (or a reused sandbox) runs the kickoff again in it. Four files the kickoff writes there, four targets outside.
+lk="$TMP/linked-sandbox"
+out="$(start --isolation host --pack keyed-pack --sandbox "$lk" --label link1)"; rc=$?
+[[ $rc -eq 0 ]] || fail "a kickoff into a new sandbox exited $rc: $out"
+lk_id="$(reg link1 '.id')"
+mkdir -p "$TMP/outside"
+for f in SYSTEM.md settings.json APPEND_SYSTEM.md "seat-${lk_id}00.md"; do
+  printf 'outside: keep me\n' > "$TMP/outside/$f"
+  rm -f "$lk/.pi/$f"; ln -s "$TMP/outside/$f" "$lk/.pi/$f"
+done
+out="$(start --isolation host --pack keyed-pack --sandbox "$lk" --label link2)"; rc=$?
+[[ $rc -eq 0 ]] || fail "a kickoff into a sandbox with links under .pi exited $rc: $out"
+lk_id2="$(reg link2 '.id')"
+for f in SYSTEM.md settings.json APPEND_SYSTEM.md "seat-${lk_id}00.md"; do
+  [[ "$(cat "$TMP/outside/$f")" == "outside: keep me" ]] || fail "the kickoff wrote through a link planted at .pi/$f: $(cat "$TMP/outside/$f")"
+done
+for f in SYSTEM.md settings.json APPEND_SYSTEM.md "seat-${lk_id2}00.md"; do
+  [[ -f "$lk/.pi/$f" && ! -L "$lk/.pi/$f" ]] || fail ".pi/$f is not a file of its own after the second kickoff"
+done
+# The BLOCKER says why when a file cannot be written (here a directory stands where the run's file goes).
+rm -f "$lk/.pi/APPEND_SYSTEM.md"; mkdir "$lk/.pi/APPEND_SYSTEM.md"
+out="$(start --isolation host --pack keyed-pack --sandbox "$lk" --label link3)"; rc=$?
+rmdir "$lk/.pi/APPEND_SYSTEM.md" 2>/dev/null || true
+[[ $rc -ne 0 ]] && grep -q "BLOCKER: the lines every agent's prompt carries could not be written (seat-prompt.ts: .*APPEND_SYSTEM.md" <<<"$out" || fail "a file the kickoff cannot write was not named: rc $rc: $out"
+pass "a link planted under .pi/ is replaced, never written through (SYSTEM.md, settings.json and both prompt files), and a file the kickoff cannot write is named in its BLOCKER"
+
 # --- a credential cannot ride in on --env; a subscription needs an explicit yes ---------
 out="$(start --isolation microvm --env FOO_API_KEY=abc --label bad-env)"; rc=$?
 [[ $rc -eq 2 ]] || fail "--env FOO_API_KEY under microvm exited $rc, wanted 2: $out"
