@@ -1,6 +1,6 @@
 {
   "name": "recyclebin_i",
-  "description": "Parse $Recycle.Bin $I metadata: original path, original size and deletion time, for one file or every $I under a directory.",
+  "description": "Parse $Recycle.Bin $I metadata (version 1 and 2 records, unsigned fields): the original path, original size and deletion time (raw FILETIME and ISO 8601 UTC with seven fractional digits), for one file or every $I under a directory in sorted order. Every length is checked against the bytes the file has: a record shorter than its layout needs is reported truncated with the bytes it has and the path decoded from them as far as it goes, never as a complete one; a longer one carries trailing_bytes; a file over 1 MiB is not read (it is not a $I); an unknown header is not guessed at. The whole record is read, not a fixed 4096 bytes. Each entry names its $R counterpart where present and the SID of the bin directory it sits in. The bin's SID is the account whose bin received the item; it does not say who deleted the file or from where.",
   "params": {
     "path": {
       "type": "string",
@@ -8,7 +8,7 @@
     },
     "limit": {
       "type": "integer",
-      "description": "Maximum files to parse (default 500)"
+      "description": "Entries shown inline (default 500, an inline page size); every entry is kept, and when there are more the whole list is written as JSON Lines and named in all_results"
     }
   },
   "runtime": "python3",
@@ -16,7 +16,13 @@
   "timeout_seconds": 60,
   "example": "{\"path\": \"work/extracted/$Recycle.Bin\"}",
   "by": "maintainer",
-  "at": "2026-09-20T12:00:00.000Z",
-  "version": 1,
-  "sha256": "2c1847cdea157a5530c54671977a2846bc5f2923bf457ff85b4cd536301e09ea"
+  "at": "2026-10-07T12:00:00.000Z",
+  "version": 2,
+  "sha256": "5ed82e4941abf1ba66752e7c09e2a9b903c8a1021921615b5758f655c7fb27e4",
+  "use": {
+    "names": [
+      "$I*"
+    ]
+  },
+  "requires": []
 }

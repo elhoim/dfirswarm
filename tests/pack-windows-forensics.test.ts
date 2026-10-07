@@ -1929,3 +1929,204 @@ test("prefetch_mam and mam_scan carry the same MAM, decompression and SCCA code"
   assert.ok(one.length > 3000, "the shared block was found");
   assert.ok(one === two, "the shared MAM and SCCA code differs between prefetch_mam and mam_scan");
 });
+
+// --- recyclebin_i ---------------------------------------------------------------
+
+type RecycleEntry = {
+  file: string;
+  file_bytes?: number;
+  header_version?: number;
+  original_size?: number;
+  deleted_at?: string | null;
+  deleted_filetime?: string;
+  original_path?: string;
+  path_characters_declared?: number;
+  truncated: boolean;
+  trailing_bytes?: number;
+  note?: string;
+  error?: string;
+  r_file: string | null;
+  bin_directory_sid?: string;
+};
+type RecycleOut = { status: string; entries: RecycleEntry[]; entry_count: number; found: number; parsed: number; records_truncated: number; unknown_header: number; unreadable: number };
+
+/** $I as documented: header (8), original size (8), deletion FILETIME (8); version 1 then holds 520 bytes of UTF-16LE path (544 in all); version 2 a 4-byte character count (the NUL included) and that many characters. */
+function recycleV2(path: string, size: bigint, filetime: bigint, declared?: number): Buffer {
+  const text = u16z(path);
+  const b = Buffer.alloc(0x1c + text.length);
+  b.writeBigUInt64LE(2n, 0);
+  b.writeBigUInt64LE(size, 8);
+  b.writeBigUInt64LE(filetime, 0x10);
+  b.writeUInt32LE(declared ?? path.length + 1, 0x18);
+  text.copy(b, 0x1c);
+  return b;
+}
+
+function recycleV1(path: string, size: bigint, filetime: bigint): Buffer {
+  const b = Buffer.alloc(544);
+  b.writeBigUInt64LE(1n, 0);
+  b.writeBigUInt64LE(size, 8);
+  b.writeBigUInt64LE(filetime, 0x10);
+  Buffer.from(path, "utf16le").copy(b, 0x18);
+  return b;
+}
+
+test("recyclebin_i reads a complete version 2 and version 1 record, with the deletion time exact, the $R counterpart and the bin's SID", async () => {
+  await withCwd(async (cwd) => {
+    const sid = "S-1-5-21-1111111111-2222222222-3333333333-1001";
+    const dir = join(cwd, "work", "recycle", sid);
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, "$IABCDEF.rtf"), recycleV2("C:\\Users\\joker\\Confidential.rtf", 439n, RUN_1));
+    await writeFile(join(dir, "$RABCDEF.rtf"), "content");
+    await writeFile(join(dir, "$IGHIJKL.txt"), recycleV1("C:\\Users\\joker\\notes-ğüşiöç.txt", 12n, RUN_1 + 10_000_000n));
+    const out = body<RecycleOut>(await tool("recyclebin_i", cwd, { path: "work/recycle" }));
+    assert.equal(out.status, "complete");
+    assert.equal(out.found, 2);
+    assert.equal(out.parsed, 2);
+    const [v2, v1] = out.entries;
+    assert.equal(v2.original_path, "C:\\Users\\joker\\Confidential.rtf");
+    assert.equal(v2.original_size, 439);
+    assert.equal(v2.deleted_at, "2023-11-13T00:53:20.1234567Z");
+    assert.equal(v2.deleted_filetime, String(RUN_1));
+    assert.equal(v2.truncated, false);
+    assert.equal(v2.r_file, "$RABCDEF.rtf");
+    assert.equal(v2.bin_directory_sid, sid);
+    assert.equal(v1.original_path, "C:\\Users\\joker\\notes-ğüşiöç.txt");
+    assert.equal(v1.header_version, 1);
+    assert.equal(v1.r_file, null, "no $R beside it");
+    assert.deepEqual(out.entries.map((e) => e.file.split("/").pop()), ["$IABCDEF.rtf", "$IGHIJKL.txt"], "sorted traversal");
+  });
+});
+
+test("recyclebin_i reports a truncated record as truncated, with the bytes it has, and does not return a short path as a whole one", async () => {
+  // A 24-byte header returned an empty path with no error, and a record that claimed 100 characters and
+  // supplied one returned "A" as if it were the whole path.
+  await withCwd(async (cwd) => {
+    const dir = join(cwd, "work", "recycle");
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, "$IHEADER.bin"), recycleV1("", 5n, RUN_1).subarray(0, 24));
+    const oneChar = recycleV2("A", 5n, RUN_1, 100);
+    await writeFile(join(dir, "$ICLAIMS.bin"), oneChar);
+    const out = body<RecycleOut>(await tool("recyclebin_i", cwd, { path: "work/recycle" }));
+    assert.equal(out.status, "partial");
+    assert.equal(out.records_truncated, 2);
+    const claims = out.entries.find((e) => e.file.endsWith("$ICLAIMS.bin"))!;
+    assert.equal(claims.truncated, true);
+    assert.equal(claims.path_characters_declared, 100);
+    assert.equal(claims.original_path, "A");
+    assert.match(claims.note ?? "", /declares 100 path characters \(228 bytes in all\) and this file has 32 bytes/);
+    const header = out.entries.find((e) => e.file.endsWith("$IHEADER.bin"))!;
+    assert.equal(header.truncated, true);
+    assert.match(header.note ?? "", /a version 1 record is 544 bytes and this file has 24/);
+  });
+});
+
+test("recyclebin_i reads the whole of a long path, past the 4096 bytes it used to read, and names an unknown header and an oversize file", async () => {
+  await withCwd(async (cwd) => {
+    const dir = join(cwd, "work", "recycle");
+    await mkdir(dir, { recursive: true });
+    const long = "C:\\" + "d".repeat(3000) + "\\end.txt";
+    await writeFile(join(dir, "$ILONG.txt"), recycleV2(long, 1n, RUN_1));
+    const odd = Buffer.alloc(64);
+    odd.writeBigUInt64LE(9n, 0);
+    await writeFile(join(dir, "$IODD.bin"), odd);
+    await writeFile(join(dir, "$IHUGE.bin"), Buffer.alloc(1024 * 1024 + 10));
+    const out = body<RecycleOut>(await tool("recyclebin_i", cwd, { path: "work/recycle" }));
+    const byName = Object.fromEntries(out.entries.map((e) => [e.file.split("/").pop(), e]));
+    assert.equal(byName["$ILONG.txt"].original_path, long);
+    assert.equal(byName["$ILONG.txt"].truncated, false);
+    assert.match(byName["$IODD.bin"].error ?? "", /unknown header version 9/);
+    assert.equal(byName["$IODD.bin"].original_path, undefined);
+    assert.match(byName["$IHUGE.bin"].error ?? "", /not a \$I|a few hundred bytes/);
+    assert.equal(out.unknown_header, 1);
+    assert.equal(out.unreadable, 1);
+    assert.equal(out.status, "partial");
+  });
+});
+
+// --- utf16_urls -----------------------------------------------------------------
+
+type UrlOut = {
+  status: string;
+  candidates: Array<{ encoding: string; offset: number; length_bytes: number; text: string; continued?: boolean; piece_of_a_longer_run?: boolean }>;
+  candidate_count: number;
+  by_encoding: { ascii: number; utf16le: number };
+  groups: Array<{ text: string; encoding: string; occurrences: number; first_offset: number }>;
+  distinct_count: number;
+  groups_complete: boolean;
+  filtered_out_by_contains: number;
+  pieces: number;
+  all_results?: string;
+  urls?: unknown;
+};
+
+const wide = (text: string): Buffer => Buffer.from(text, "utf16le");
+
+test("utf16_urls returns a URL of any length whole and keeps every occurrence with its own offset", async () => {
+  // The ASCII pattern stopped after 300 characters without marking it, and a `seen` set dropped every
+  // occurrence after the first, with its offset.
+  await withCwd(async (cwd) => {
+    const long = "https://example.test/" + "segment/".repeat(75) + "end?token=1";
+    assert.ok(long.length > 600);
+    const filler = Buffer.alloc(3000, 0xff);
+    const file = Buffer.concat([filler, Buffer.from(long), filler, Buffer.from(long), filler]);
+    await writeFile(join(cwd, "work", "mem.raw"), file);
+    const out = body<UrlOut>(await tool("utf16_urls", cwd, { path: "work/mem.raw" }));
+    assert.equal(out.candidate_count, 2);
+    assert.deepEqual(out.candidates.map((c) => c.offset), [3000, 3000 + long.length + 3000]);
+    assert.ok(out.candidates.every((c) => c.text === long && c.encoding === "ascii" && c.length_bytes === long.length));
+    assert.equal(out.urls, undefined, "the field is `candidates` now");
+    assert.equal(out.distinct_count, 1);
+    assert.deepEqual(out.groups.map((g) => [g.occurrences, g.first_offset]), [[2, 3000]]);
+  });
+});
+
+test("utf16_urls finds a URL that straddles a read window once, in ASCII and in UTF-16LE, and keeps a run longer than the carry whole in pieces", async () => {
+  await withCwd(async (cwd) => {
+    const chunk = 131072;
+    const ascii = "http://straddle.test/path/to/a/page?id=7";
+    const utf16 = wide("https://wide.test/visited/entry?x=1");
+    const file = Buffer.alloc(chunk * 3, 0xff);
+    Buffer.from(ascii).copy(file, chunk - 15);
+    utf16.copy(file, chunk * 2 - 21);
+    const big = "http://long.test/" + "a".repeat(200_000);
+    const withBig = Buffer.concat([file, Buffer.from(big), Buffer.alloc(100, 0xff)]);
+    await writeFile(join(cwd, "work", "mem.raw"), withBig);
+    const out = body<UrlOut>(await tool("utf16_urls", cwd, { path: "work/mem.raw", chunk }));
+    const small = out.candidates.filter((c) => !c.piece_of_a_longer_run);
+    assert.deepEqual(small.map((c) => [c.encoding, c.offset, c.text]), [
+      ["ascii", chunk - 15, ascii],
+      ["utf16le", chunk * 2 - 21, "https://wide.test/visited/entry?x=1"],
+    ]);
+    const pieces = out.candidates.filter((c) => c.piece_of_a_longer_run);
+    assert.ok(pieces.length >= 2, "a run past the carry is returned in pieces");
+    assert.equal(pieces.map((p) => p.text).join(""), big, "every character of it is kept");
+    assert.deepEqual(pieces.map((p) => p.continued), pieces.map((_, i) => i < pieces.length - 1));
+    assert.equal(pieces[0].offset, chunk * 3);
+    for (let i = 1; i < pieces.length; i++) assert.equal(pieces[i].offset, pieces[i - 1].offset + pieces[i - 1].length_bytes, "pieces are adjacent");
+  });
+});
+
+test("utf16_urls keeps a UTF-16LE run only where it holds an anchor, applies `contains`, and counts what it filtered", async () => {
+  await withCwd(async (cwd) => {
+    const file = Buffer.concat([
+      Buffer.alloc(50, 0xff),
+      wide("Visited: someone@file:///C:/Users/x/report.docx"),
+      Buffer.alloc(20, 0xff),
+      wide("a long run of printable text in two byte characters that names no address at all"),
+      Buffer.alloc(20, 0xff),
+      wide("http://192.168.4.7/admin/panel"),
+      Buffer.from("http://other.test/page-one"),
+    ]);
+    await writeFile(join(cwd, "work", "WebCacheV01.dat"), file);
+    const all = body<UrlOut>(await tool("utf16_urls", cwd, { path: "work/WebCacheV01.dat" }));
+    assert.deepEqual(all.candidates.map((c) => [c.encoding, c.text]), [
+      ["ascii", "http://other.test/page-one"],
+      ["utf16le", "Visited: someone@file:///C:/Users/x/report.docx"],
+      ["utf16le", "http://192.168.4.7/admin/panel"],
+    ], "the ASCII scan reports first, then the UTF-16LE scan; no run without an anchor is a candidate");
+    const only = body<UrlOut>(await tool("utf16_urls", cwd, { path: "work/WebCacheV01.dat", contains: "192.168" }));
+    assert.deepEqual(only.candidates.map((c) => c.text), ["http://192.168.4.7/admin/panel"]);
+    assert.equal(only.filtered_out_by_contains, 2);
+  });
+});

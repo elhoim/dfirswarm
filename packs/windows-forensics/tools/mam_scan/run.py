@@ -101,7 +101,6 @@ class LosslessPage:
             result["all_results_format"] = "JSON Lines, one complete result per line"
         return result
 
-FILETIME_EPOCH = datetime.datetime(1601, 1, 1, tzinfo=datetime.timezone.utc)
 
 # ---- Shared by prefetch_mam and mam_scan: the same text in both (the tools are standalone; a test holds
 # ---- the two copies identical). MAM framing, bounded LZXPRESS-Huffman decompression, and the SCCA
