@@ -296,7 +296,7 @@ def out_of_time():
     return DEADLINE[0] is not None and time.monotonic() > DEADLINE[0]
 
 
-_PAGINATION = re.compile(r"(?i)next.?(page.?)?(token|link)|continuation")
+_PAGINATION = re.compile(r"(?i)next.?(page.?)?(token|link|uri|url)|continuation")
 
 
 def pagination_key(name):
@@ -1721,7 +1721,7 @@ def csv_rows(src, delimiter, field_limit):
     """Yield ("row", info, dict) / ("reject", info, reason) for a CSV file; a bad row is rejected and the next is read; a failure
     of the reader itself stops the file, says where, and keeps what was read. A header name that repeats keeps every column
     (the second is `name#2`)."""
-    src.mode, src.stopped, src.extra_keys, src.envelope = "csv", None, [], None
+    src.mode, src.stopped, src.extra_keys, src.envelope, src.header = "csv", None, [], None, None
     csv.field_size_limit(field_limit)
     reader = csv.reader(csv_lines(src), delimiter=delimiter)
     header, count = None, 0
@@ -2215,6 +2215,8 @@ def main():
     args = read_args()
     refuse_unknown(args, ARGS)
     path = want_str(args, "path", "path is required: a CloudTrail file or a directory of them")
+    if os.path.islink(path) and not os.path.exists(path):
+        fail("the path is a link that does not lead to a file (a loop or a missing target)", path=shown_path(path))
     if not os.path.exists(path):
         fail("no such file or directory", path=shown_path(path))
     limit = want_int(args, "limit", DEFAULT_LIMIT)

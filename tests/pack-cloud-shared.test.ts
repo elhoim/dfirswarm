@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { gzipSync } from "node:zlib";
 import { execFileSync } from "node:child_process";
-import { chmod, readFile, readdir, stat } from "node:fs/promises";
+import { chmod, readFile, readdir, stat, symlink } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
 import { ALICE, SIGNIN, TOOLS, TRAIL, UAL, asJob, body, ct, everythingBut, exists, filesUnder, put, refused, rowsOf, spawnTool, tool, trail, withDir } from "./cloud-pack-harness.ts";
@@ -439,4 +439,31 @@ test("a read that ended early publishes out_file as <name>.partial in all three 
       assert.match(full.complete_records ?? full.complete_events, /full\.jsonl$/, name);
     });
   }
+});
+
+
+test("a file of nothing but white space is empty and not a complete read of nothing, a link that leads nowhere says so, and a NextPageUri is a next page", async () => {
+  await withDir(async (cwd) => {
+    await put(cwd, "work/ev/empty.json", "");
+    await put(cwd, "work/ev/white.json", "  \n\n \t\n");
+    await symlink("loop-b", join(cwd, "work", "ev", "loop-a"));
+    await symlink("loop-a", join(cwd, "work", "ev", "loop-b"));
+    for (const script of Object.values(SCRIPTS)) {
+      for (const file of ["empty.json", "white.json"]) {
+        const out = refused(await tool(script, cwd, { path: `work/ev/${file}` }));
+        assert.equal(out.status, "failed", `${script.split("/").slice(-2)[0]} ${file}`);
+      }
+      assert.match(refused(await tool(script, cwd, { path: "work/ev/loop-a" })).error, /link that does not lead to a file/);
+    }
+    const page = (name: string, text: string): Promise<Json> => put(cwd, `work/ev/${name}`, text).then(() => ({}));
+    await page("ct.json", JSON.stringify({ Records: [{ eventName: "X", eventSource: "s3.amazonaws.com", eventTime: "2026-02-14T09:00:00Z", eventID: "1" }], NextPageUri: "https://example.invalid/page2" }));
+    await page("ual.json", JSON.stringify({ value: [{ Id: "1", Operation: "Send", UserId: "a@b.c", CreationTime: "2026-02-14T09:00:00Z" }], NextPageUri: "https://example.invalid/page2" }));
+    await page("si.json", JSON.stringify({ value: [{ id: "1", createdDateTime: "2026-02-14T09:00:00Z", userPrincipalName: "a@b.c", status: { errorCode: 0 } }], NextPageUri: "https://example.invalid/page2" }));
+    for (const [script, file] of [[TRAIL, "ct.json"], [UAL, "ual.json"], [SIGNIN, "si.json"]] as Array<[string, string]>) {
+      const out = body(await tool(script, cwd, { path: `work/ev/${file}` }));
+      assert.equal(out.status, "partial", file);
+      assert.deepEqual(out.pagination_markers.flatMap((m: Json) => m.keys), ["NextPageUri"], file);
+      assert.ok(!JSON.stringify(out).includes("example.invalid"), "a next-page link is never printed");
+    }
+  });
 });
