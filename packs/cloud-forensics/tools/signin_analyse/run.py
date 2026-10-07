@@ -12,21 +12,30 @@ Time is not guessed. A time with no zone is refused unless `assume_utc` says it 
 assumption and how many records it covered); a day/month/year string whose two leading fields are both 12 or less needs a
 `date_order`, or the file's own unambiguous rows must prove one. Raw and decoded times are both kept.
 
-Outcome is not guessed. `success` is true for a success code or word, false for a non-zero error code or a failure word,
-and null for anything else (an `Interrupted` status is not a success and is not counted as a failure). The provider's own
-words (`failure_reason`, `additional_details`) are kept as written.
+Outcome is not guessed. `success` is true for a success code or word, false for a non-zero error code that is not a prompt or a
+failure word, and null for anything else. A portal `Status` of Interrupted is null whatever the code beside it says, and a code the
+tool lists as a prompt in a sign-in flow (50074, 50076, 50079, 50125, 50140, 50158) is null with `outcome_class: interrupt`: an
+interrupted sign-in is one step of a flow whose end is a later event, so it is counted apart (`interrupts`), never in `failures` and
+never in a burst. The provider's own words (`failure_reason`, `additional_details`) are kept as written.
+
+Accounts are told apart by their object id (`userId`), else by their user name folded to lower case; a display name is never the key
+(two people can share one). A `user` filter is matched against the user name and the display name as they are printed.
 
 What the leads are, and are not:
   - `single_factor_successes`: a success whose authentication requirement says single factor. A lead: the applied
     policies, the authentication details and the client say whether it is an exemption, a prior claim or something else.
-  - `failure_bursts_before_success`: three or more consecutive failures followed by a success for the same account and
-    application, with every failure inside `burst_window_seconds` of the success. Failures of one account across days are
-    not a burst. Password failures and multi-factor prompts have the same shape; the result codes are listed.
+  - `failure_bursts_before_success`: `burst_min_failures` (default 3) or more consecutive failures followed by a success for the
+    same account and application, with every failure inside `burst_window_seconds` of the success. Failures of one account across
+    days are not a burst. Every failure is listed (in `burst_members` past ten), with its code and address.
+  - `prompts_before_success`: `prompt_min_count` (default 5) or more interrupted sign-ins in a row before a success for the same
+    account and application inside the window: what a multi-factor prompt flood followed by an acceptance looks like, and also what
+    a slow user looks like.
   - `addresses_seen_once`: a success from an address that occurs once among the supplied events for that account. It
     says nothing about the account's earlier history, which this export may not hold.
   - `impossible_travel`: adjacent successes whose coordinates imply a speed above `max_speed_kmh`, or, with a country and no
-    coordinates, a country change within an hour (marked coarse, with no speed). A hypothesis: a VPN, a carrier's routing and
-    a cloud-hosted client all produce it, and a location is the provider's estimate for an address.
+    coordinates, a country change within an hour (marked coarse, with no speed). Two successes at one recorded second far apart
+    are listed with no speed. A hypothesis: a VPN, a carrier's routing and a cloud-hosted client all produce it, and a location is
+    the provider's estimate for an address. The portal writes one `City, State, Country` string; its last component is the country.
 An empty list excludes nothing: the export may be a slice of the account's activity.
 
 SECRET-SAFE OUTPUT (docs/packs.md, "Secrets and sensitive output"). A field whose name says it is a secret, and any text
@@ -47,13 +56,14 @@ import codecs
 import csv
 import datetime
 import errno
-import gzip
 import json
 import os
 import re
 import secrets
+import signal
 import sqlite3
 import stat
+import struct
 import sys
 import tempfile
 import time
@@ -63,13 +73,16 @@ from pathlib import Path
 DEFAULT_LIMIT = 500
 FIRST_PROBLEMS = 25               # how many failures an answer names inline; every one is in the file the page names
 MAX_RECORD_BYTES = 16 << 20       # one record (a JSON Lines line, an array element, a CSV field) larger than this is rejected, named
-MAX_DOCUMENT_BYTES = 256 << 20    # a JSON document read whole (it names no array first) larger than this is unsupported, named
+MAX_DOCUMENT_BYTES = 64 << 20     # what may sit in front of a document's array of records, or a document with none, larger than this is refused, named
 MAX_EXPANDED_BYTES = 4 << 30      # per file, after decompression
 MAX_SCAN_CHARS = 1 << 20          # a string longer than this is withheld whole, not scanned
 MAX_DEPTH = 200                   # a value nested deeper than this is withheld whole
 INLINE_BUDGET = 4 << 20           # bytes of rows an answer carries inline; the rest of a page is in its file
 MAX_DISTINCT = 1000000            # distinct values a summary table counts; beyond it they are counted as uncounted
 MAX_FIELD_BYTES = 64 << 20        # one CSV line (a field may span lines) longer than this stops the file, named
+FIRST_REJECTS = 1000              # a file whose first records are all rejected is not an export this tool reads: it stops after this many
+LIST_REJECTS = 100000             # rejected records one file lists; the rest are counted
+MAX_FILTER_CHARS = 1024           # a caller's regular expression is matched against at most this many characters of a value
 CHUNK = 1 << 20
 DEADLINE = [None]
 
@@ -147,16 +160,135 @@ def want_str_list(args, key):
     return [str(v) for v in value]
 
 
+def unsafe_regex(pattern):
+    """Why a caller's pattern is refused, or None: a group that repeats and itself repeats or branches, or a back reference,
+    can take time that grows exponentially with the text; the tool cannot interrupt a match, so it does not start one."""
+    stack, i, n, repeats, in_class = [], 0, len(pattern), 0, False
+    quant = re.compile(r"[*+?]|\{\d*,?\d*\}")
+
+    def repeating(q):
+        """A quantifier that can repeat without a bound: *, + and {n,}; ? and {n,m} cannot."""
+        return q in ("*", "+") or (q.startswith("{") and q.endswith(",}")) or q == "{}"
+
+    while i < n:
+        c = pattern[i]
+        if c == "\\":
+            if i + 1 < n and pattern[i + 1] in "123456789":
+                return "a back reference"
+            i += 2
+            continue
+        if in_class:
+            in_class = c != "]"
+            i += 1
+            continue
+        if c == "[":
+            in_class = True
+            i += 1
+            if pattern[i:i + 1] == "^":
+                i += 1
+            if pattern[i:i + 1] == "]":
+                i += 1
+            continue
+        if c == "(":
+            stack.append(False)
+            i += 1
+            if pattern[i:i + 1] == "?":
+                i += 1
+            continue
+        if c == "|":
+            if stack:
+                stack[-1] = True
+            i += 1
+            continue
+        if c == ")":
+            inner = stack.pop() if stack else False
+            i += 1
+            m = quant.match(pattern, i)
+            if m and repeating(m.group(0)):
+                if inner:
+                    return "a repeated group that itself repeats or branches"
+                repeats += 1
+                if stack:
+                    stack[-1] = True
+            elif stack and inner:
+                stack[-1] = True
+            i = m.end() if m else i
+            continue
+        m = quant.match(pattern, i)
+        if m:
+            if repeating(m.group(0)):
+                repeats += 1
+                if stack:
+                    stack[-1] = True
+            i = m.end()
+        else:
+            i += 1
+    return "more than six repeats" if repeats > 6 else None
+
+
+FILTER_SECONDS = 0.25             # one test of a caller's pattern against one value may take this long; past it the call fails, named
+
+
+class FilterTooSlow(Exception):
+    pass
+
+
+def _filter_alarm(_signum, _frame):
+    raise FilterTooSlow()
+
+
+class Filter:
+    """A caller's regular expression. Its text is limited, a pattern that can take exponential time is refused before it is
+    compiled, and every test of it against a value is timed: the re module checks for signals while it matches, so a pattern that
+    takes polynomial time on a long value (`.*.*.*.*x`) is stopped at FILTER_SECONDS and the call fails, named, instead of hanging."""
+
+    def __init__(self, rx, key):
+        self.rx, self.key = rx, key
+        self.timed = hasattr(signal, "setitimer") and len(re.findall(r"(?<!\\)(?:[*+]|\{\d*,\})", rx.pattern)) > 1
+
+    def __bool__(self):
+        return True
+
+    def test(self, text):
+        if not self.timed:
+            return self.rx.search(text) is not None
+        try:
+            signal.setitimer(signal.ITIMER_REAL, FILTER_SECONDS)
+            found = self.rx.search(text) is not None
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            return found
+        except FilterTooSlow:
+            fail("the %s pattern took longer than %s seconds to test one value (%d characters); use a simpler pattern" % (self.key, FILTER_SECONDS, len(text)))
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+
+
 def want_regex(args, key):
     text = want_str(args, key)
     if text is None:
         return None
-    if len(text) > 2000:
-        fail("%s is longer than 2000 characters" % key)
+    if len(text) > 200:
+        fail("%s is longer than 200 characters" % key)
+    why = unsafe_regex(text)
+    if why:
+        fail("%s is refused (%s): a pattern that can take exponential time cannot be interrupted. Use a simpler one." % (key, why))
     try:
-        return re.compile(text, re.I)
+        return Filter(re.compile(text, re.I), key)
     except re.error as exc:
         fail("%s is not a valid regex" % key, reason=str(exc))
+
+
+def hits(rx, text):
+    """Whether a caller's pattern matches the text AS IT IS PRINTED, and only its first MAX_FILTER_CHARS characters: a count of
+    matches against a withheld original would tell the caller one bit of it per call."""
+    return rx.test(text[:MAX_FILTER_CHARS])
+
+
+def refuse_unknown(args, allowed):
+    """An argument the tool does not have is a typo that would return an unfiltered answer that looks filtered."""
+    extra = sorted(str(k) for k in args if k not in allowed)
+    if extra:
+        fail("unknown argument(s): %s. This tool takes: %s" % (", ".join(extra), ", ".join(sorted(allowed))))
 
 
 def start_clock(args, default=540, maximum=580):
@@ -275,15 +407,35 @@ def publish(tmp, path):
 
 
 _TEMPS = set()
+CLEANUP = []        # what to undo when the run ends early: a temporary index, above all
 
 
 def _drop_unpublished():
-    """A refused or failed run leaves no half-written result behind: only a finished file is published."""
+    """A refused, failed or signalled run leaves no half-written result and no temporary index behind: only a finished file is
+    published. (A SIGKILL cannot be caught: what it leaves is hidden, named .<tool>-..., and holds no unwithheld value.)"""
+    while CLEANUP:
+        try:
+            CLEANUP.pop()()
+        except Exception:  # noqa: BLE001 - best effort, and never a second failure over the first
+            pass
     for path in list(_TEMPS):
         try:
             os.unlink(path)
         except OSError:
             pass
+        _TEMPS.discard(path)
+
+
+def _on_signal(signum, _frame):
+    _drop_unpublished()
+    os._exit(128 + signum)
+
+
+def install_signal_handlers():
+    for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(signum, _on_signal)
+    if hasattr(signal, "setitimer"):
+        signal.signal(signal.SIGALRM, _filter_alarm)
 
 
 atexit.register(_drop_unpublished)
@@ -345,13 +497,19 @@ class LosslessPage:
             self.page.append(row)
             self.bytes += len(text)
 
-    def finish(self):
+    def finish(self, partial=False):
+        """Close the page. With `dest` and `partial`, the file is published as <name>.partial<ext>: the requested name only ever
+        holds a result that read everything it was given."""
         result = {"matched": self.total, "returned": len(self.page), "truncated": self.total > len(self.page)}
         if self._out is not None:
             try:
                 self._out.flush()
                 os.fsync(self._out.fileno())
                 self._out.close()
+                if partial and self.dest:
+                    stem, ext = os.path.splitext(str(self.path))
+                    self.path = Path(stem + ".partial" + ext)
+                    result["all_results_partial"] = True
                 final = publish(self._tmp, self.path)
                 _TEMPS.discard(str(self._tmp))
             except OSError as exc:
@@ -428,25 +586,37 @@ class SecretValues:
         }
 
 
-# ---- withholding: nothing shaped like a credential is printed ----------------------------------------------------
+# ---- withholding: nothing named or shaped like a credential is printed -------------------------------------------
 # The values a cloud log can carry that are secrets are named, or they are shaped, or neither. A name or a shape is a
 # way to recognise some of them and never all, so the skill says to run the tool as a job with secret_output: true
-# whenever the export may hold request parameters or properties; what the two rules catch is withheld regardless, in
+# whenever the export may hold request parameters or properties; what the rules below catch is withheld regardless, in
 # every channel (rows, paths, error messages, the files the answer names), the same strings in all three tools.
+# A filter a caller gives (identity, user, events, operations) is matched against the text as it is printed, never
+# against a withheld original: a count of matches would tell the caller one bit of it per call.
 
 REDACTED = re.compile(r"^\W*(?:hidden_due_to_security_reasons|redacted|masked|removed|\*+|x{3,}|\[\])\W*$", re.I)
+NOT_A_VALUE = frozenset(("true", "false", "null", "none", "nil", "undefined", "required", "optional", "enabled", "disabled"))
 SENSITIVE_EXACT = {
     "password", "newpassword", "oldpassword", "currentpassword", "passwd", "pwd", "passphrase", "passcode", "pin", "otp",
-    "secret", "clientsecret", "secretkey", "secretaccesskey", "secretstring", "secretbinary", "accesskeysecret",
+    "pass", "dbpass", "userpass", "adminpass", "rootpass", "plaintext",
+    "secret", "clientsecret", "secretkey", "secretaccesskey", "awssecretaccesskey", "awssecretkey", "secretstring",
+    "secretbinary", "secrettext", "secretvalue", "accesskeysecret",
     "sessiontoken", "securitytoken", "accesstoken", "refreshtoken", "idtoken", "bearertoken", "authtoken", "token",
+    "tokencode", "mfacode", "verificationcode", "authorizationcode",
     "authorization", "proxyauthorization", "cookie", "setcookie", "apikey", "privatekey", "privatekeypem",
-    "sharedaccesskey", "accountkey", "connectionstring", "credential", "credentials", "assertion", "samlresponse",
-    "mfasecret", "verificationcode", "authorizationcode", "sastoken", "sassignature", "signature",
+    "sharedaccesskey", "sharedaccesssignature", "accountkey", "primarykey", "secondarykey", "keyvalue", "masterkey",
+    "storagekey", "subscriptionkey", "ocpapimsubscriptionkey",
+    "connectionstring", "credential", "credentials", "assertion", "samlresponse", "mfasecret",
+    "sastoken", "sassignature", "signature", "sig",
+    "passwordhash", "nthash", "ntlmhash", "lmhash",
 }
 SENSITIVE_SUFFIX = ("password", "passwd", "passphrase", "secret", "apikey", "privatekey", "sessiontoken", "securitytoken",
-                    "accesstoken", "refreshtoken", "clientsecret", "token")
+                    "accesstoken", "refreshtoken", "clientsecret", "token", "secrettext", "secretkey", "secretaccesskey",
+                    "primarykey", "secondarykey", "accountkey", "sharedaccesskey", "subscriptionkey", "passwordhash",
+                    "ntlmhash", "nthash", "passcode", "signature", "cookie")
 NOT_SECRET_TOKEN = ("nexttoken", "pagetoken", "continuationtoken", "paginationtoken", "nextpagetoken", "pagingtoken",
-                    "startingtoken", "nextmarkertoken")
+                    "startingtoken", "nextmarkertoken", "clienttoken", "clientrequesttoken", "idempotencytoken",
+                    "nextforwardtoken", "nextbackwardtoken", "requesttoken")
 CONTAINERS = ("credential", "credentials")
 _NAME_CACHE = {}
 
@@ -466,28 +636,54 @@ def name_is_sensitive(name):
     return hit
 
 
-_B64_RUN = re.compile(r"(?<![A-Za-z0-9+/_-])[A-Za-z0-9+/_-]{128,}={0,2}(?![A-Za-z0-9+/_-])")
+_B64 = "A-Za-z0-9+/_-"
+_B64_RUN = re.compile(r"(?<![%s])[%s]{128,}={0,2}(?![%s])" % (_B64, _B64, _B64))
+_B64_EDGE = "(?<![A-Za-z0-9+/=_-])"
+_B64_END = "(?![A-Za-z0-9+/=_-])"
+# The names an assignment is recognised by. A long compound name may carry any prefix (dbPassword=, apiToken=, adminSecret:);
+# a short one needs the edge of a word (sig= is not design=).
+_STRONG = (r"password|passwd|passphrase|secret|api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token|session[_-]?token|"
+           r"security[_-]?token|auth[_-]?token|bearer[_-]?token|account[_-]?key|shared[_-]?access[_-]?key|primary[_-]?key|"
+           r"secondary[_-]?key|private[_-]?key|subscription[_-]?key|sas[_-]?token|password[_-]?hash|nt[_-]?hash|ntlm[_-]?hash|"
+           r"lm[_-]?hash|client[_-]?secret|secret[_-]?access[_-]?key|secret[_-]?key|secret[_-]?text|secret[_-]?value|token|signature|plaintext")
+_SHORT = r"(?<![A-Za-z0-9])(?:pwd|pass|sig|pin|otp|sas)"
+_SEP = r"""(?:\\*["']|["'])?\s*(?:[:=]|%3[dD]|%3[aA])\s*"""
+_NAME = r"(?:%s|%s)" % (_STRONG, _SHORT)
+ARN_TAIL = re.compile(r"arn:[A-Za-z0-9-]+:[A-Za-z0-9-]+:[A-Za-z0-9-]*:[0-9]*:$")
+SCHEMES = ("bearer", "basic", "digest", "negotiate", "ntlm")
 TOKEN_RULES = [
-    ("a JSON Web Token", re.compile(r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]*"), 0),
+    ("a JSON Web Token", re.compile(r"eyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{2,}(?:\.[A-Za-z0-9_-]*)?"), 0),
     ("a private key block", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----(?:[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----|[\s\S]*)"), 0),
-    ("an authorization header value", re.compile(r"(?i)\b(?:bearer|basic)\s+([A-Za-z0-9._~+/=-]{16,})"), 1),
+    ("a base64 block of key lines", re.compile(r"(?:[A-Za-z0-9+/]{60,80}={0,2}\r?\n){2,}[A-Za-z0-9+/]{2,80}={0,2}"), 0),
+    ("an authorization header value", re.compile(
+        r"""(?i)authorization["']?\s*[:=]\s*(?:\\*["'])?(?:(?:bearer|basic|digest|negotiate|ntlm|token)\s+)?([^\s"'&,;\\]{1,4096})"""), 1),
+    ("a cookie header value", re.compile(r"""(?i)cookie["']?\s*[:=]\s*(?:\\*["'])?([^\r\n"'\\]{1,4096})"""), 1),
+    ("a scheme and its credential", re.compile(r"(?i)\b(?:bearer|basic|digest|negotiate|ntlm)\s+([A-Za-z0-9._~+/=-]{3,4096})"), 1),
+    ("a value assigned to a credential name (quoted)", re.compile(
+        r"""(?i)%s%s\\*(["'])(.{1,4096}?)(?=\\*\1)""" % (_NAME, _SEP)), 2),
     ("a value assigned to a credential name", re.compile(
-        r"(?i)(?<![A-Za-z0-9])(?:password|passwd|pwd|passphrase|secret|client[_-]?secret|api[_-]?key|access[_-]?token|"
-        r"refresh[_-]?token|id[_-]?token|session[_-]?token|security[_-]?token|auth[_-]?token|token|sig|signature|"
-        r"sas[_-]?token|authorization|aws[_-]?secret[_-]?access[_-]?key|secret[_-]?access[_-]?key)"
-        r"[\"']?\s*[:=]\s*[\"']?([^\s\"'&;,<>{}\[\]]{4,})"), 1),
+        r"""(?i)%s%s((?:(?!%%26)[^\s"'&<>\\]){1,4096})""" % (_NAME, _SEP)), 1),
+    ("a value given to a credential switch", re.compile(
+        r"""(?i)(?<![A-Za-z0-9_])-(?:password|pass|pwd|passphrase|secret|clientsecret|apikey|accesstoken|token)\s+(?:\\*(["'])(.{1,4096}?)(?=\\*\1)|([^\s"'-][^\s"']{0,4095}))"""), -1),
+    ("a secret given to ConvertTo-SecureString", re.compile(
+        r"""(?i)ConvertTo-SecureString\s+(?:\\*(["'])(.{1,4096}?)(?=\\*\1)|([^\s"'-][^\s"']{0,4095}))"""), -1),
+    ("a hash pair of an account database", re.compile(r"(?<![0-9a-fA-F])[0-9a-fA-F]{32}:([0-9a-fA-F]{32})(?![0-9a-fA-F])"), 1),
     ("a token of a known family", re.compile(
-        r"\b(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{50,}|xox[abprs]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{35}\b|"
+        r"(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{50,}|xox[abprs]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z_-])|"
         r"ya29\.[0-9A-Za-z_-]{20,}|1//0[0-9A-Za-z_-]{30,}|(?:IQoJb3JpZ2lu|FQoGZXIvYXdz|FwoGZXIvYXdz)[A-Za-z0-9+/=]{40,}|"
-        r"[A-Za-z0-9_.-]{3}[0-9]Q~[A-Za-z0-9_.~-]{30,}|[01]\.A[A-Za-z0-9_-]{50,}|[sr]k_(?:live|test)_[A-Za-z0-9]{16,})"), 0),
+        r"[A-Za-z0-9_.~-]{3}[0-9]Q~[A-Za-z0-9_.~-]{30,}|[01]\.A[A-Za-z0-9_-]{50,}|[sr]k_(?:live|test)_[A-Za-z0-9]{16,})"), 0),
+]
+# A random-looking run of an exact length that keys have: 32, 40 (an AWS secret access key), 43 + "=" and 86 + "==" (a base64 key).
+SHAPES = [
+    ("a key-length base64 string", re.compile(_B64_EDGE + r"(?:[A-Za-z0-9+/]{32}|[A-Za-z0-9+/]{40}|[A-Za-z0-9+/]{43}=|[A-Za-z0-9+/]{86}==)" + _B64_END), True),
 ]
 WITHHELD_TEXT = "[withheld: %s, %d characters]"
 LOCAL = {"paths": 0, "text": 0}
 
 
 def _random_like(run):
-    """A long run that looks like random base64 and not like a path or a name: mixed case and digits in the proportions
-    random text has (a long path is mostly lower case with few capitals)."""
+    """A run that looks like random base64 and not like a path, a name or a hash: mixed case and digits in the proportions
+    random text has (a long path is mostly lower case with few capitals; a hex digest has no case to mix)."""
     n = len(run)
     upper = sum(1 for ch in run if "A" <= ch <= "Z")
     lower = sum(1 for ch in run if "a" <= ch <= "z")
@@ -495,18 +691,53 @@ def _random_like(run):
     return upper * 100 >= 15 * n and lower * 100 >= 15 * n and digit * 100 >= 5 * n
 
 
+# What a text must hold for any rule below to match it: a literal one of them looks for, or a run long enough for a shape. A text
+# with none of these is judged clean without running the rules (most values of a log: names, ids, times, addresses). Each
+# alternative is a necessary condition of at least one rule; tests/pack-cloud-shared.test.ts holds the two paths equal.
+_QUICK = re.compile(r"eyJ|-----BEGIN|\n|authorization|cookie|bearer|basic|digest|negotiate|ntlm|pass|pwd|secret|token|key|signature|sig|"
+                    r"plaintext|hash|pin|otp|sas|securestring|gh[pousr]_|github_pat_|xox|AIza|ya29\.|1//0|IQoJb|FQoG|FwoG|Q~|[01]\.A|[sr]k_|"
+                    r"[A-Za-z0-9+/]{32}|[A-Za-z0-9+/_-]{128}", re.I)
+
+
+_CLEAN = set()                    # short texts already judged to hold nothing (names, addresses and ids repeat across a log)
+
+
 def token_spans(text):
     """(start, end, why) of each stretch of `text` shaped like a credential, in order and not overlapping."""
+    if text in _CLEAN:
+        return []
+    spans = _spans(text) if _QUICK.search(text) else []
+    if not spans and len(text) <= 256 and len(_CLEAN) < 100000:
+        _CLEAN.add(text)
+    return spans
+
+
+def _spans(text):
     spans = []
     for why, rx, group in TOKEN_RULES:
         for m in rx.finditer(text):
-            start, end = m.span(group)
-            if group and (REDACTED.match(text[start:end]) or text[start:end].lower() in ("bearer", "basic", "digest", "negotiate")):
-                continue
-            spans.append((start, end, why))
+            if "assigned to a credential name" in why and ARN_TAIL.search(text[max(0, m.start() - 120):m.start()]):
+                continue                                  # arn:aws:secretsmanager:...:secret:NAME is a name, not a value
+            groups = (1, 2, 3) if group == -1 else (group,)
+            for g in groups:
+                if g and m.group(g) is None:
+                    continue
+                start, end = m.span(g)
+                value = text[start:end]
+                if g and (REDACTED.match(value) or value.lower() in NOT_A_VALUE):
+                    continue
+                if why == "a scheme and its credential" and not (re.search(r"[0-9+/=_.~-]", value) or len(value) >= 16):
+                    continue                              # "basic authentication" is prose, "Basic dXNlcjpwYXNz" is not
+                if g == 1 and group == -1 and len(m.groups()) >= 2 and m.group(1) in ("'", '"'):
+                    continue                              # group 1 of the switch rules is the quote
+                spans.append((start, end, why))
     for m in _B64_RUN.finditer(text):
         if _random_like(m.group(0)):
             spans.append((m.start(), m.end(), "a long unbroken base64-like run"))
+    for why, rx, check in SHAPES:
+        for m in rx.finditer(text):
+            if not check or _random_like(m.group(0)):
+                spans.append((m.start(), m.end(), why))
     spans.sort()
     merged = []
     for s in spans:
@@ -520,7 +751,7 @@ def token_spans(text):
 
 def scrub(text):
     """`text` with each stretch shaped like a credential replaced by a marker that holds only its length."""
-    if not isinstance(text, str) or len(text) < 8:
+    if not isinstance(text, str) or len(text) < 5:
         return text
     if len(text) > MAX_SCAN_CHARS:
         LOCAL["text"] += 1
@@ -553,17 +784,22 @@ def shown_path(path):
 
 class Withheld:
     """Cleans values on their way into an answer, counts what was withheld, lists where, and hands the originals to the
-    values file when the caller asked for it (write_values, in a job). A row's `locator` says which record it came from."""
+    values file when the caller asked for it (write_values, in a job). A row's `locator` says which record it came from.
+    `quiet` cleans without recording (for a value that is stored on the way, such as an index entry)."""
 
     VALUE_KEYS = ("Value", "NewValue", "OldValue", "value", "newValue", "oldValue")
+    NAME_KEYS = ("Name", "name", "Key", "key")
 
-    def __init__(self, vault, limit):
+    def __init__(self, vault, limit, quiet=False):
         self.vault = vault
+        self.quiet = quiet
         self.count = 0
         self.reasons = {}
-        self.page = LosslessPage("withheld", limit)
+        self.page = None if quiet else LosslessPage("withheld", limit)
 
     def note(self, locator, pointer, why, length, original):
+        if self.quiet:
+            return
         self.count += 1
         self.reasons[why] = self.reasons.get(why, 0) + 1
         fid = "W%06d" % self.count
@@ -590,7 +826,7 @@ class Withheld:
             return "[withheld: nested deeper than %d levels, %s]" % (MAX_DEPTH, self.size_of(value))
         if isinstance(value, dict):
             named = None
-            for key in ("Name", "name"):
+            for key in self.NAME_KEYS:
                 if isinstance(value.get(key), str):
                     named = value[key]
                     break
@@ -605,7 +841,7 @@ class Withheld:
                 sensitive = name_is_sensitive(ks) or (pair_secret and ks in self.VALUE_KEYS)
                 if sensitive and is_container_name(ks) and isinstance(v, (dict, list)):
                     sensitive = False
-                if sensitive and v not in (None, "", True, False) and not (isinstance(v, str) and REDACTED.match(v)):
+                if sensitive and v not in (None, "", True, False) and not (isinstance(v, str) and (REDACTED.match(v) or v.lower() in NOT_A_VALUE)):
                     self.note(locator, point, "credential-named field", len(v) if isinstance(v, str) else len(json.dumps(v, default=str)), v)
                     out[safe_key] = "[withheld: credential-named field, %s]" % self.size_of(v)
                 else:
@@ -616,7 +852,7 @@ class Withheld:
         return value
 
     def clean_text(self, text, locator, pointer):
-        if len(text) < 8:
+        if len(text) < 5:
             return text
         if len(text) > MAX_SCAN_CHARS:
             self.note(locator, pointer, "text longer than 1 MiB", len(text), text)
@@ -663,6 +899,14 @@ def slash_order(raw):
     if b > 12 >= a:
         return "mdy"
     return "ambiguous" if a <= 12 and b <= 12 else None
+
+
+def proven_order(raw):
+    """'dmy' or 'mdy' when the day/month/year string can be read only that way and read that way it is a real date; else None."""
+    got = slash_order(raw)
+    if got in ("dmy", "mdy") and parse_stamp(raw, got, True)["ns"] is not None:
+        return got
+    return None
 
 
 def parse_stamp(raw, order=None, assume_utc=False):
@@ -755,6 +999,38 @@ class Tally:
     def rows(self):
         return [{"value": k, "count": v} for k, v in sorted(self.counts.items(), key=lambda kv: (-kv[1], str(kv[0])))]
 
+class RejectLog:
+    """The rejected records of a read, listed in a file (a LosslessPage) with at most LIST_REJECTS per file (the rest are counted, and
+    the answer says so), and a file whose first FIRST_REJECTS records were all rejected is stopped: it is not an export this tool
+    reads, and listing five million rows of it would fill the output."""
+
+    def __init__(self, page):
+        self.page = page
+        self.listed = self.unlisted = self.accepted = self.run = 0
+        self.total_unlisted = 0
+
+    def start_file(self):
+        self.listed = self.accepted = self.run = 0
+
+    def accept(self):
+        self.accepted += 1
+        self.run = 0
+
+    def note(self, row):
+        """List a row (up to the cap) that is not a rejected record: a record read whose payload is not."""
+        if self.listed < LIST_REJECTS:
+            self.page.add(row)
+            self.listed += 1
+        else:
+            self.total_unlisted += 1
+
+    def reject(self, row):
+        """List the row; True when the file should be stopped."""
+        self.run += 1
+        self.note(row)
+        return self.accepted == 0 and self.run >= FIRST_REJECTS
+
+
 def dbtext(value):
     """A string for SQLite: a lone surrogate (a JSON escape such as \\ud800, or a name that is not UTF-8) cannot be stored as text, so
     it is kept as its escape; every other character is unchanged."""
@@ -789,7 +1065,10 @@ def open_temp_db(prefix):
     large export does not have to fit in memory. Returns (db, directory, where); in memory only if no directory can be made."""
     try:
         directory = tempfile.mkdtemp(prefix=prefix, dir=os.environ["OUT"] if in_job() else None)
-        return sqlite3.connect(os.path.join(directory, "work.sqlite")), directory, "a temporary file"
+        db = sqlite3.connect(os.path.join(directory, "work.sqlite"))
+        os.chmod(os.path.join(directory, "work.sqlite"), 0o600)
+        CLEANUP.append(lambda: remove_temp_db(db, directory))
+        return db, directory, "a temporary file"
     except (OSError, sqlite3.Error):
         return sqlite3.connect(":memory:"), None, "memory (no temporary directory could be created)"
 
@@ -800,7 +1079,11 @@ def remove_temp_db(db, directory):
     except sqlite3.Error:
         pass
     if directory:
-        for name in os.listdir(directory):
+        try:
+            names = os.listdir(directory)
+        except OSError:
+            return
+        for name in names:
             try:
                 os.unlink(os.path.join(directory, name))
             except OSError:
@@ -813,16 +1096,49 @@ def remove_temp_db(db, directory):
 
 # ---- reading files: a bounded stream of JSON values -------------------------------------------------------------
 
-BOM = "﻿"
-REPLACEMENT = "�"
+BOM = "\ufeff"
+REPLACEMENT = "\ufffd"
 _SPACE = re.compile(r"\s*")
-_DEC = json.JSONDecoder()
+ARCHIVE_EXT = (".zip", ".7z", ".rar", ".tar", ".tgz", ".bz2", ".xz", ".zst", ".lz4")
+ARCHIVE_MAGIC = ((b"PK\x03\x04", "a ZIP archive"), (b"PK\x05\x06", "a ZIP archive"), (b"PK\x07\x08", "a ZIP archive"),
+                 (b"BZh", "a bzip2 file"), (b"\xfd7zXZ\x00", "an xz file"), (b"\x28\xb5\x2f\xfd", "a Zstandard file"),
+                 (b"7z\xbc\xaf\x27\x1c", "a 7-Zip archive"), (b"Rar!", "a RAR archive"), (b"\x04\x22\x4d\x18", "an LZ4 file"))
+
+
+def _no_constant(name):
+    raise json.JSONDecodeError("%s is not JSON" % name, "", 0)
+
+
+_DEC = json.JSONDecoder(parse_constant=_no_constant)
+DECODE_ERRORS = [0]
+
+
+def _count_replace(exc):
+    DECODE_ERRORS[0] += exc.end - exc.start
+    return (REPLACEMENT * (exc.end - exc.start), exc.end)
+
+
+codecs.register_error("cloud_replace", _count_replace)
+
+
+def loads_strict(text):
+    """json.loads that refuses NaN, Infinity and -Infinity (an answer holding one is not JSON to the next reader)."""
+    return _DEC.decode(text)
+
+
+def archive_kind(head):
+    for magic, name in ARCHIVE_MAGIC:
+        if head.startswith(magic):
+            return name
+    if head[257:262] == b"ustar":
+        return "a tar archive"
+    return None
 
 
 def walk_inputs(top, wanted, skipped):
     """The regular files under `top`: the files of a directory in name order, then its subdirectories in name order. A link,
-    a special file (a pipe is never opened) and an unlistable directory are named in `skipped`, and so is a file whose name
-    `wanted` refuses."""
+    a special file (a pipe is never opened), an unlistable directory and an archive are named in `skipped`, and so is a file
+    whose name `wanted` refuses."""
     stack = [top]
     found = []
     while stack:
@@ -844,6 +1160,8 @@ def walk_inputs(top, wanted, skipped):
                     skipped.append({"path": shown_path(entry.path), "reason": "not a regular file: it is not opened"})
                 elif wanted(entry.name):
                     found.append(entry.path)
+                elif entry.name.lower().endswith(ARCHIVE_EXT):
+                    skipped.append({"path": shown_path(entry.path), "reason": "an archive: extract it first; it was not read"})
                 else:
                     skipped.append({"path": shown_path(entry.path), "reason": "its name is not one this tool reads"})
             except OSError as exc:
@@ -852,10 +1170,40 @@ def walk_inputs(top, wanted, skipped):
     return found
 
 
+def gzip_header_length(buf):
+    """The length of the gzip member header at the start of `buf`, None if `buf` ends inside it; ValueError if it is not one."""
+    if len(buf) < 2:
+        if buf[:1] and buf[:1] != b"\x1f":
+            raise ValueError("not gzip")
+        return None
+    if buf[:2] != b"\x1f\x8b":
+        raise ValueError("not gzip")
+    if len(buf) < 10:
+        return None
+    if buf[2] != 8:
+        raise ValueError("not deflate")
+    flags, pos = buf[3], 10
+    if flags & 4:
+        if len(buf) < pos + 2:
+            return None
+        pos += 2 + int.from_bytes(buf[pos:pos + 2], "little")
+    for bit in (8, 16):
+        if flags & bit:
+            end = buf.find(b"\x00", pos)
+            if end < 0:
+                return None
+            pos = end + 1
+    if flags & 2:
+        pos += 2
+    return pos if len(buf) >= pos else None
+
+
 class Source:
     """One file as a stream of text. Gzip is recognised by its magic bytes (not its name) and expanded as it is read, at most
-    `cap` bytes of expansion; UTF-8 is assumed, UTF-16 where a byte order mark says so; bytes that do not decode become U+FFFD and are counted in `replaced`; a read that fails (a
-    truncated gzip, a failed CRC) is kept in `error` with everything read before it."""
+    `cap` bytes of expansion, every byte up to a break kept (a gzip that ends early, or fails its check, gives what came before
+    it and says so in `error`); an archive (ZIP, tar, bzip2, xz, 7-Zip...) is named and not read. UTF-8 is assumed, UTF-16
+    where a byte order mark says so; each byte that does not decode becomes U+FFFD and is counted in `replaced`. The read
+    ends at the deadline (`timed_out`)."""
 
     def __init__(self, path, cap):
         self.path, self.cap = path, cap
@@ -864,25 +1212,33 @@ class Source:
         self.bytes_read = 0
         self.compressed = False
         self.error = None
+        self.archive = None
         self.capped = False
+        self.timed_out = False
         self.replaced = 0
         self.line = 1
         self.chars_before = 0
-        self._dec = codecs.getincrementaldecoder("utf-8")("replace")
         self.encoding = "utf-8"
+        self._dec = codecs.getincrementaldecoder("utf-8")("cloud_replace")
         self._first = True
+        self._pending = b""
+        self._ended = False
+        self._state, self._hdr, self._tr, self._d, self._crc, self._isize = "header", b"", b"", None, 0, 0
         self.fh = self._raw = None
         try:
             if not stat.S_ISREG(os.stat(path).st_mode):
                 raise OSError(errno.EINVAL, "not a regular file")
             self._raw = open(path, "rb")
-            magic = self._raw.read(2)
+            head = self._raw.read(512)
             self._raw.seek(0)
-            if magic == b"\x1f\x8b":
+            kind = archive_kind(head)
+            if kind:
+                self.archive = kind
+                self.error = "%s: extract it first; it was not read" % kind
+                self.eof = True
+            elif head[:2] == b"\x1f\x8b":
                 self.compressed = True
-                self.fh = gzip.GzipFile(fileobj=self._raw)
-            else:
-                self.fh = self._raw
+            self.fh = self._raw
         except OSError as exc:
             self.error = describe(exc)
             self.eof = True
@@ -895,17 +1251,89 @@ class Source:
             except OSError:
                 pass
 
+    def _expand(self, want):
+        """Up to `want` bytes of expansion of a gzip file (members one after another), bounded in memory by `want`. The members are
+        read here, header, deflate data and trailer, so that a break or a failed check costs only the step it happened in: every
+        byte before it is returned."""
+        out = []
+        got = 0
+        while got < want and not self._ended:
+            if not self._pending:
+                raw = self._raw.read(1 << 18)
+                if not raw:
+                    if self._state != "header" or self._hdr:
+                        self.error = "the compressed stream ends early, after %d bytes of expansion: what came before it was read" % (self.bytes_read + got)
+                    self._ended = True
+                    break
+                self._pending = raw
+            if self._state == "header":
+                buf = self._hdr + self._pending
+                try:
+                    n = gzip_header_length(buf)
+                except ValueError:
+                    self.error = "%d bytes follow the end of the compressed stream and are not another member: they were not read" % len(buf)
+                    self._ended = True
+                    self._pending = b""
+                    break
+                if n is None:
+                    self._hdr, self._pending = buf, b""
+                    continue
+                self._pending, self._hdr = buf[n:], b""
+                self._d, self._crc, self._isize, self._state = zlib.decompressobj(-15), 0, 0, "body"
+            elif self._state == "body":
+                try:
+                    piece = self._d.decompress(self._pending, min(want - got, 32768))
+                except zlib.error as exc:
+                    self.error = "the compressed stream is damaged after %d bytes of expansion (%s): what came before it was read" % (self.bytes_read + got, exc)
+                    self._ended = True
+                    self._pending = b""
+                    break
+                self._pending = self._d.unconsumed_tail
+                if self._d.eof:
+                    self._pending = self._d.unused_data      # at the end of the stream the tail repeats what is already here
+                if piece:
+                    out.append(piece)
+                    got += len(piece)
+                    self._crc = zlib.crc32(piece, self._crc)
+                    self._isize += len(piece)
+                if self._d.eof:
+                    self._state = "trailer"
+            else:
+                take = self._pending[:8 - len(self._tr)]
+                self._tr += take
+                self._pending = self._pending[len(take):]
+                if len(self._tr) == 8:
+                    crc, size = struct.unpack("<II", self._tr)
+                    self._tr = b""
+                    if crc != self._crc & 0xFFFFFFFF or size != self._isize & 0xFFFFFFFF:
+                        self.error = "a member of the compressed stream fails its own check (CRC-32 or length): its bytes were read and may be wrong"
+                    self._state = "header"
+        return b"".join(out)
+
+
     def fill(self):
         """Read one more chunk into the buffer; False at the end."""
         if self.eof:
             return False
+        if out_of_time():
+            self.timed_out = True
+            self.eof = True
+            return False
         room = self.cap - self.bytes_read
+        want = min(CHUNK, room + 1)
         try:
-            data = self.fh.read(min(CHUNK, room + 1))
-        except (OSError, EOFError, zlib.error) as exc:
-            self.error = "%s while reading%s" % (describe(exc), " the compressed stream" if self.compressed else "")
+            data = self._expand(want) if self.compressed else self.fh.read(want)
+        except OSError as exc:
+            self.error = describe(exc)
             self.eof = True
             data = b""
+        if self._first and self.compressed and data[257:262] == b"ustar":
+            self.archive = "a tar archive"
+            self.error = "a tar archive (gzip-compressed): extract it first; it was not read"
+            self.eof = True
+            data = b""
+        if self._ended:
+            self.eof = True
         if len(data) > room:
             data = data[:room]
             self.capped = True
@@ -914,15 +1342,16 @@ class Source:
             self.eof = True
         if self._first and data[:2] in (b"\xff\xfe", b"\xfe\xff"):
             # A byte order mark: the export is UTF-16 (PowerShell's Export-Csv -Encoding Unicode writes it), not UTF-8.
-            self._dec = codecs.getincrementaldecoder("utf-16")("replace")
+            self._dec = codecs.getincrementaldecoder("utf-16")("cloud_replace")
             self.encoding = "utf-16"
         self.bytes_read += len(data)
+        before = DECODE_ERRORS[0]
         text = self._dec.decode(data, final=self.eof)
+        self.replaced += DECODE_ERRORS[0] - before
         if self._first and text:
             self._first = False
             if text[0] == BOM:
                 text = text[1:]
-        self.replaced += text.count(REPLACEMENT)
         self.buf += text
         return bool(data)
 
@@ -979,35 +1408,126 @@ def _decode_at(src, limit, lead=""):
             raise json.JSONDecodeError("nested too deeply", text, at)
 
 
-_PAIR = re.compile(r'\s*"((?:[^"\\]|\\.)*)"\s*:\s*(?:"(?:[^"\\]|\\.)*"|-?[0-9.eE+-]+|true|false|null)\s*,')
+_STRING = re.compile(r'"(?:[^"\\]|\\.)*"', re.S)
+_TOKEN = re.compile(r'["{}\[\]]')
+_BARE = re.compile(r'[^\s,}\]"\[{:]+')
 
 
-def envelope_start(env_rx, buf, pos):
-    """If the object at `pos` is `{` then scalar members (an @odata.context, a kind, an etag) then a named array of records:
-    (the array's key, the buffer index after its `[`, the names of the members before it); otherwise None."""
-    at = pos + 1
-    leading = []
+def _more(src, i, limit):
+    """Make buffer index `i` exist, reading as needed; False when the file ends first. Raises TooLong past `limit`."""
+    while i >= len(src.buf):
+        if len(src.buf) - src.pos > limit:
+            raise TooLong()
+        if not src.fill():
+            return False
+    return True
+
+
+def _skip_ws_at(src, i, limit):
     while True:
-        m = env_rx.match(buf, at)
-        if m:
-            return m.group(1), m.end(), leading
-        p = _PAIR.match(buf, at)
-        if not p or len(leading) > 64:
-            return None
-        leading.append(p.group(1))
-        at = p.end()
+        if not _more(src, i, limit):
+            return i
+        i = _SPACE.match(src.buf, i).end()
+        if i < len(src.buf) or not _more(src, i, limit):
+            return i
+
+
+def _skip_value(src, i, limit):
+    """The buffer index after the JSON value that starts at `i` (a scalar, a string, or a balanced object or array), found without
+    parsing it; None if the file ends or the text is not JSON."""
+    i = _skip_ws_at(src, i, limit)
+    if not _more(src, i, limit):
+        return None
+    c = src.buf[i]
+    if c == '"':
+        while True:
+            m = _STRING.match(src.buf, i)
+            if m:
+                return m.end()
+            if not _more(src, len(src.buf), limit):
+                return None
+    if c in "{[":
+        depth, j = 0, i
+        while True:
+            m = _TOKEN.search(src.buf, j)
+            if not m:
+                j = len(src.buf)
+                if not _more(src, j, limit):
+                    return None
+                continue
+            ch = m.group(0)
+            if ch == '"':
+                s = _STRING.match(src.buf, m.start())
+                if not s:
+                    if not _more(src, len(src.buf), limit):
+                        return None
+                    j = m.start()
+                    continue
+                j = s.end()
+                continue
+            depth += 1 if ch in "{[" else -1
+            j = m.end()
+            if depth == 0:
+                return j
+            if depth < 0:
+                return None
+    m = _BARE.match(src.buf, i)
+    while m and m.end() >= len(src.buf) and not src.eof:
+        if not _more(src, len(src.buf), limit):
+            break
+        m = _BARE.match(src.buf, i)
+    return m.end() if m else None
+
+
+def envelope_scan(src, envelope_keys, limit):
+    """For an object that starts at the read position: ("envelope", key, index after its `[`, names of the members before it)
+    if a member named in `envelope_keys` holds an array, with the members in front of it skipped whatever they hold;
+    ("plain", None, None, names) if the object ends without one; ("bad", reason, None, names) if it is not JSON. Nothing
+    is consumed: the buffer only grows."""
+    i = src.pos + 1
+    names = []
+    while True:
+        i = _skip_ws_at(src, i, limit)
+        if not _more(src, i, limit):
+            return "bad", "the object is not closed", None, names
+        c = src.buf[i]
+        if c == "}":
+            return "plain", None, i + 1, names
+        if c == ",":
+            i += 1
+            continue
+        if c != '"':
+            return "bad", "a member name was expected", None, names
+        while True:
+            m = _STRING.match(src.buf, i)
+            if m or not _more(src, len(src.buf), limit):
+                break
+        if not m:
+            return "bad", "a member name is not closed", None, names
+        key = m.group(0)[1:-1]
+        i = _skip_ws_at(src, m.end(), limit)
+        if not _more(src, i, limit) or src.buf[i] != ":":
+            return "bad", "a colon was expected after a member name", None, names
+        i = _skip_ws_at(src, i + 1, limit)
+        if key in envelope_keys and _more(src, i, limit) and src.buf[i] == "[":
+            return "envelope", key, i + 1, names
+        names.append(key)
+        j = _skip_value(src, i, limit)
+        if j is None:
+            return "bad", "the value of a member is not JSON or is not closed", None, names
+        i = j
 
 
 def read_units(src, envelope_keys, record_cap=MAX_RECORD_BYTES, document_cap=MAX_DOCUMENT_BYTES):
     """Yield the records of a JSON file as ("item", info, value) or ("reject", info, reason), one by one, whatever the
-    shape: an array, an object whose first key is a named array of records (streamed, with the object's other keys
-    read after it), JSON Lines (a bad line is rejected and the next is read), or one pretty-printed document (read
-    whole, within `document_cap`); several arrays or envelopes one after another are read in turn. `info` is {record,
-    line, offset, chars, envelope}. After the last unit `src.mode` names the shape, `src.extra_keys` the other top-level
-    keys of the envelopes (names only) and `src.stopped` says why reading ended before the end of the file, if it did."""
+    shape: an array, an object with a named array of records (streamed, however much sits in front of it, and the object's
+    other keys read after it), JSON Lines (a bad line is rejected and the next is read), or one pretty-printed document
+    (read whole, within `document_cap`, and parsed once); several arrays or envelopes one after another are read in turn.
+    `info` is {record, line, offset, chars, envelope}. After the last unit (or when the reader is closed early)
+    `src.mode` names the shape, `src.extra_keys` the other top-level keys of the envelopes (names only) and `src.stopped`
+    says why reading ended before the end of the file, if it did."""
     src.mode, src.extra_keys, src.stopped, src.envelope = "empty", [], None, None
     count, modes, extra = [0], [], set()
-    env_rx = re.compile(r'\s*"(%s)"\s*:\s*\[' % "|".join(re.escape(k) for k in envelope_keys)) if envelope_keys else None
 
     def info(line, offset, chars, envelope):
         count[0] += 1
@@ -1016,137 +1536,147 @@ def read_units(src, envelope_keys, record_cap=MAX_RECORD_BYTES, document_cap=MAX
     def finish():
         src.extra_keys = sorted(extra)
         src.mode = modes[0] if len(set(modes)) == 1 else ("mixed" if modes else "empty")
+        if src.timed_out and not src.stopped:
+            src.stopped = "the time limit ended the read"
 
-    while True:
-        src.ensure(4096)
-        src.skip_ws()
-        src.ensure(4096)
-        if src.pos >= len(src.buf):
-            break
-        first = src.buf[src.pos]
-        env = envelope_start(env_rx, src.buf, src.pos) if env_rx and first == "{" else None
-        if first == "[" or env:
-            modes.append("envelope" if env else "array")
-            key = env[0] if env else None
-            if key:
-                src.envelope = src.envelope or key
-                extra.update(env[2])
-            src.advance(env[1] if env else src.pos + 1)
-            src.skip_ws()
-            expecting_item = True
-            while True:
-                while src.pos >= len(src.buf):
-                    if not src.fill():
-                        src.stopped = "the array was not closed: the file ends inside it"
-                        finish()
-                        return
-                here = src.buf[src.pos]
-                if here == "]":
-                    src.advance(src.pos + 1)
-                    break
-                if here == ",":
-                    if expecting_item:
-                        src.stopped = "an unexpected comma at line %d: the rest of the array was not read" % src.line
-                        yield "reject", info(src.line, src.offset(), None, key), "malformed JSON: an unexpected comma"
-                        finish()
-                        return
-                    src.advance(src.pos + 1)
-                    src.skip_ws()
-                    expecting_item = True
-                    continue
-                if not expecting_item:
-                    src.stopped = "no comma between records at line %d: the rest of the array was not read" % src.line
-                    yield "reject", info(src.line, src.offset(), None, key), "malformed JSON: no comma between records"
-                    finish()
-                    return
-                start_line, start_off, start_pos = src.line, src.offset(), src.pos
-                try:
-                    value, end = _decode_at(src, record_cap)
-                except TooLong:
-                    src.stopped = "a record larger than max_record_bytes at line %d: the rest of the array was not read" % start_line
-                    yield "reject", info(start_line, start_off, None, key), "a record larger than max_record_bytes (%d)" % record_cap
-                    finish()
-                    return
-                except json.JSONDecodeError as exc:
-                    src.stopped = "the JSON stopped being valid at line %d (%s): the rest was not read" % (start_line, exc.msg)
-                    yield "reject", info(start_line, start_off, None, key), "malformed JSON: %s" % exc.msg
-                    finish()
-                    return
-                src.advance(end)
-                yield "item", info(start_line, start_off, end - start_pos, key), value
-                expecting_item = False
-                src.skip_ws()
-            if key:
-                # the rest of the envelope object: its other keys, names only (a next-page token is a token)
-                src.skip_ws()
-                if src.pos < len(src.buf) and src.buf[src.pos] == ",":
-                    src.advance(src.pos + 1)
-                try:
-                    obj, end = _decode_at(src, record_cap, lead="{")
-                except (TooLong, json.JSONDecodeError):
-                    src.stopped = "the object around the records does not end validly: its other keys were not read"
-                    finish()
-                    return
-                src.advance(end)
-                extra.update(str(k) for k in obj)
-            continue
-        # not an array: one pretty-printed document, or JSON Lines to the end of the file
-        line_end = src.buf.find("\n", src.pos)
-        if src.buf[src.pos: line_end if line_end >= 0 else len(src.buf)].strip() == "{":
-            modes.append("document")
-            start_line, start_off, start_pos = src.line, src.offset(), src.pos
-            try:
-                value, end = _decode_at(src, document_cap)
-            except TooLong:
-                src.stopped = ("a JSON document larger than max_document_bytes (%d) that does not start with a named array of records: "
-                               "it was not read" % document_cap)
-                yield "reject", info(start_line, start_off, None, None), src.stopped
-                finish()
-                return
-            except json.JSONDecodeError as exc:
-                src.stopped = "the JSON stopped being valid at line %d (%s): the rest was not read" % (start_line, exc.msg)
-                yield "reject", info(start_line, start_off, None, None), "malformed JSON: %s" % exc.msg
-                finish()
-                return
-            src.advance(end)
-            yield from _expand(value, envelope_keys, info, start_line, start_off, src, extra)
-            continue
-        modes.append("lines")
+    try:
         while True:
-            i = src.buf.find("\n", src.pos)
-            while i < 0 and not src.eof and len(src.buf) - src.pos <= record_cap:
-                src.fill()
-                i = src.buf.find("\n", src.pos)
-            if i < 0 and src.pos >= len(src.buf):
+            src.ensure(4096)
+            src.skip_ws()
+            src.ensure(65536)
+            if src.pos >= len(src.buf):
                 break
-            start_line, start_off = src.line, src.offset()
-            if (i if i >= 0 else len(src.buf)) - src.pos > record_cap:
-                size = 0
+            first = src.buf[src.pos]
+            key, names, bracket, one_line = None, [], None, ""
+            if first == "{":
+                line_end = src.buf.find("\n", src.pos)
+                one_line = src.buf[src.pos: line_end if line_end >= 0 else len(src.buf)].strip()
+                if one_line == "{" or line_end < 0 or line_end - src.pos > 65536:
+                    # a pretty-printed object, or one too long to be a JSON Lines record: look for the array of records in it
+                    try:
+                        kind, key, bracket, names = envelope_scan(src, envelope_keys, document_cap)
+                    except TooLong:
+                        src.stopped = ("the object around the records is larger than %d characters before its array of records: it was not read" % document_cap)
+                        yield "reject", info(src.line, src.offset(), None, None), src.stopped
+                        return
+                    if kind != "envelope":
+                        key, bracket = None, None
+            if first == "[" or bracket is not None:
+                modes.append("envelope" if bracket is not None else "array")
+                if key:
+                    src.envelope = src.envelope or key
+                    extra.update(names)
+                src.advance(bracket if bracket is not None else src.pos + 1)
+                src.skip_ws()
+                expecting_item = True
                 while True:
+                    while src.pos >= len(src.buf):
+                        if not src.fill():
+                            src.stopped = src.stopped or "the array was not closed: the file ends inside it"
+                            return
+                    here = src.buf[src.pos]
+                    if here == "]":
+                        src.advance(src.pos + 1)
+                        break
+                    if here == ",":
+                        if expecting_item:
+                            src.stopped = "an unexpected comma at line %d: the rest of the array was not read" % src.line
+                            yield "reject", info(src.line, src.offset(), None, key), "malformed JSON: an unexpected comma"
+                            return
+                        src.advance(src.pos + 1)
+                        src.skip_ws()
+                        expecting_item = True
+                        continue
+                    if not expecting_item:
+                        src.stopped = "no comma between records at line %d: the rest of the array was not read" % src.line
+                        yield "reject", info(src.line, src.offset(), None, key), "malformed JSON: no comma between records"
+                        return
+                    start_line, start_off, start_pos = src.line, src.offset(), src.pos
+                    try:
+                        value, end = _decode_at(src, record_cap)
+                    except TooLong:
+                        src.stopped = "a record larger than max_record_bytes at line %d: the rest of the array was not read" % start_line
+                        yield "reject", info(start_line, start_off, None, key), "a record larger than max_record_bytes (%d)" % record_cap
+                        return
+                    except json.JSONDecodeError as exc:
+                        src.stopped = "the JSON stopped being valid at line %d (%s): the rest was not read" % (start_line, exc.msg)
+                        yield "reject", info(start_line, start_off, None, key), "malformed JSON: %s" % exc.msg
+                        return
+                    src.advance(end)
+                    yield "item", info(start_line, start_off, end - start_pos, key), value
+                    expecting_item = False
+                    src.skip_ws()
+                    if src.timed_out:
+                        return
+                if key:
+                    # the rest of the envelope object: its other keys, names only (a next-page token is a token)
+                    src.skip_ws()
+                    if src.pos < len(src.buf) and src.buf[src.pos] == ",":
+                        src.advance(src.pos + 1)
+                    try:
+                        obj, end = _decode_at(src, record_cap, lead="{")
+                    except (TooLong, json.JSONDecodeError):
+                        src.stopped = "the object around the records does not end validly: its other keys were not read"
+                        return
+                    src.advance(end)
+                    extra.update(str(k) for k in obj)
+                continue
+            # not an array, not an envelope: one pretty-printed document, or JSON Lines to the end of the file
+            if first == "{" and one_line == "{":
+                modes.append("document")
+                start_line, start_off = src.line, src.offset()
+                try:
+                    value, end = _DEC.raw_decode(src.buf, src.pos)
+                except (json.JSONDecodeError, RecursionError) as exc:
+                    src.stopped = "the JSON stopped being valid near line %d (%s): the rest was not read" % (start_line, getattr(exc, "msg", "nested too deeply"))
+                    yield "reject", info(start_line, start_off, None, None), "malformed JSON: %s" % getattr(exc, "msg", "nested too deeply")
+                    return
+                src.advance(end)
+                yield from _expand(value, envelope_keys, info, start_line, start_off, src, extra)
+                continue
+            modes.append("lines")
+            while True:
+                src.skip_ws()
+                if src.pos >= len(src.buf):
+                    break
+                i = src.buf.find("\n", src.pos)
+                while i < 0 and not src.eof and len(src.buf) - src.pos <= record_cap:
+                    src.fill()
                     i = src.buf.find("\n", src.pos)
-                    if i >= 0:
-                        size += i - src.pos
-                        src.advance(i + 1)
-                        break
-                    size += len(src.buf) - src.pos
-                    src.advance(len(src.buf))
-                    if not src.fill():
-                        break
-                yield "reject", info(start_line, start_off, size, None), "a line larger than max_record_bytes (%d)" % record_cap
-                continue
-            text = src.buf[src.pos: i if i >= 0 else len(src.buf)]
-            src.advance(i + 1 if i >= 0 else len(src.buf))
-            stripped = text.strip()
-            if not stripped:
-                continue
-            try:
-                value = json.loads(stripped)
-            except (ValueError, RecursionError) as exc:
-                yield "reject", info(start_line, start_off, len(text), None), "malformed JSON: %s" % getattr(exc, "msg", type(exc).__name__)
-                continue
-            yield from _expand(value, envelope_keys, info, start_line, start_off, src, extra)
-        break
-    finish()
+                start_line, start_off = src.line, src.offset()
+                if (i if i >= 0 else len(src.buf)) - src.pos > record_cap:
+                    size = 0
+                    while True:
+                        i = src.buf.find("\n", src.pos)
+                        if i >= 0:
+                            size += i - src.pos
+                            src.advance(i + 1)
+                            break
+                        size += len(src.buf) - src.pos
+                        src.advance(len(src.buf))
+                        if not src.fill():
+                            break
+                    yield "reject", info(start_line, start_off, size, None), "a line larger than max_record_bytes (%d)" % record_cap
+                    continue
+                text = src.buf[src.pos: i if i >= 0 else len(src.buf)]
+                src.advance(i + 1 if i >= 0 else len(src.buf))
+                stripped = text.strip()
+                if not stripped:
+                    continue
+                try:
+                    value = loads_strict(stripped)
+                except (ValueError, RecursionError) as exc:
+                    reason = "malformed JSON: %s" % getattr(exc, "msg", type(exc).__name__)
+                    if i < 0 and src.eof and (src.error or src.capped or src.timed_out):
+                        reason = "the last record is cut off where the read ended (%s)" % (src.error or "the expansion cap" if not src.timed_out else "the time limit")
+                    yield "reject", info(start_line, start_off, len(text), None), reason
+                    continue
+                yield from _expand(value, envelope_keys, info, start_line, start_off, src, extra)
+                if src.timed_out:
+                    return
+            break
+    finally:
+        finish()
 
 
 def _expand(value, envelope_keys, info, line, offset, src, extra):
@@ -1189,7 +1719,8 @@ def csv_lines(src):
 
 def csv_rows(src, delimiter, field_limit):
     """Yield ("row", info, dict) / ("reject", info, reason) for a CSV file; a bad row is rejected and the next is read; a failure
-    of the reader itself stops the file, says where, and keeps what was read."""
+    of the reader itself stops the file, says where, and keeps what was read. A header name that repeats keeps every column
+    (the second is `name#2`)."""
     src.mode, src.stopped, src.extra_keys, src.envelope = "csv", None, [], None
     csv.field_size_limit(field_limit)
     reader = csv.reader(csv_lines(src), delimiter=delimiter)
@@ -1199,7 +1730,7 @@ def csv_rows(src, delimiter, field_limit):
         try:
             row = next(reader)
         except StopIteration:
-            return
+            break
         except TooLong:
             src.stopped = "a line longer than %d characters at line %d: the rest of the file was not read" % (MAX_FIELD_BYTES, before + 1)
             yield "reject", {"record": count + 1, "line": before + 1, "offset": src.offset(), "chars": None, "envelope": None}, src.stopped
@@ -1211,7 +1742,11 @@ def csv_rows(src, delimiter, field_limit):
         if not row:
             continue
         if header is None:
-            header = row
+            seen = {}
+            header = []
+            for name in row:
+                seen[name] = seen.get(name, 0) + 1
+                header.append(name if seen[name] == 1 else "%s#%d" % (name, seen[name]))
             src.header = header
             if len(header) == 1 and re.search(r"[;\t|]", header[0]):
                 src.stopped = "the header is one column that contains ';', a tab or '|': the file may use another delimiter (pass delimiter)"
@@ -1224,6 +1759,10 @@ def csv_rows(src, delimiter, field_limit):
             yield "reject", info, "the row has %d fields and the header %d" % (len(row), len(header))
             continue
         yield "row", info, dict(zip(header, row))
+        if src.timed_out:
+            return
+    if src.timed_out and not src.stopped:
+        src.stopped = "the time limit ended the read"
 
 
 def sniff(path):
@@ -1253,7 +1792,7 @@ def first_of(item, keys, *names):
 
 
 TOOL = "signin_analyse"
-PARSER = "signin_analyse/3"
+PARSER = "signin_analyse/4"
 VALUES_NAME = "signin-values.jsonl"
 ENVELOPE_KEYS = ("value", "items", "Records")
 SINGLE = "singlefactorauthentication"
@@ -1270,20 +1809,35 @@ CODES = {
 }
 SUCCESS_WORDS = ("success", "succeeded", "login_success", "login_successful")
 FAILURE_WORDS = ("failure", "failed", "login_failure")
-
-
 import itertools
 import math
 
 TIME_KEYS = ("createdDateTime", "Date (UTC)", "time", "Timestamp", "date")
 UTC_NAMED = ("date(utc)",)
+UPN_NAMES = ("userPrincipalName", "Username", "User principal name", "Sign-in identifier", "email", "actor_email", "user")
+DISPLAY_NAMES = ("userDisplayName", "User display name", "User")
+SP_NAMES = ("servicePrincipalName", "Service principal name", "servicePrincipalId", "Service principal ID")
+ARGS = frozenset(("path", "user", "max_speed_kmh", "burst_window_seconds", "burst_min_failures", "prompt_min_count", "assume_utc", "date_order", "format",
+                  "delimiter", "out_file", "limit", "max_expanded_bytes", "max_record_bytes", "time_limit_seconds", "write_values"))
+# Codes the tool lists as a prompt inside a sign-in flow (a multi-factor challenge, a registration, a keep-me-signed-in
+# question): the flow goes on in a later event of its own. A heuristic list; failure_reason is the provider's own word.
+INTERRUPT_CODES = frozenset(("50074", "50076", "50079", "50125", "50140", "50158"))
+
+
+class Fields(dict):
+    """A flat record whose field names are looked up without case or spaces; the index is built once per record."""
+    _index = None
+
+    def find(self, name):
+        if self._index is None:
+            self._index = {k.replace(" ", "").lower(): k for k in self if isinstance(k, str)}
+        return self._index.get(name.replace(" ", "").lower())
 
 
 def get(row, *names):
     """The first non-empty value among the named fields, names compared without case or spaces. Returns (value, name)."""
-    flat = {k.replace(" ", "").lower(): k for k in row if isinstance(k, str)}
     for name in names:
-        k = flat.get(name.replace(" ", "").lower())
+        k = row.find(name)
         if k is not None and row[k] not in (None, ""):
             return row[k], k
     return None, None
@@ -1297,7 +1851,7 @@ def maybe_json(value):
     """A CSV cell that holds JSON text (an export writes arrays this way) as the structure it holds; anything else as it is."""
     if isinstance(value, str) and value.strip()[:1] in ("[", "{"):
         try:
-            return json.loads(value)
+            return loads_strict(value)
         except (ValueError, RecursionError):
             return value
     return value
@@ -1312,7 +1866,7 @@ def distance(a, b):
 
 
 def flatten(row):
-    out = dict(row)
+    out = Fields(row)
     actor = row.get("actor")
     if isinstance(actor, dict):
         out["actor_email"] = actor.get("email")
@@ -1339,6 +1893,21 @@ def flatten(row):
         out["operatingsystem"] = device.get("operatingSystem")
         out["browser"] = device.get("browser")
     return out
+
+
+def place_of(flat):
+    """(city, country) of a record. A Graph location names its parts; the portal's CSV writes one string, `City, State, Country`,
+    and a string with no comma is taken as a country. A city is never compared as a country."""
+    city, country = val(flat, "city"), val(flat, "country")
+    if country is None:
+        text = val(flat, "Location", "location")
+        if isinstance(text, str):
+            parts = [p.strip() for p in text.split(",") if p.strip()]
+            if len(parts) >= 2:
+                city, country = city or parts[0], parts[-1]
+            elif parts:
+                country = parts[0]
+    return city, country
 
 
 def events_of(item):
@@ -1370,27 +1939,43 @@ def time_of(flat):
 
 
 def outcome(flat):
-    """(code, success, basis): true for a success, false for an error code or a failure word, null for anything else."""
-    raw, key = get(flat, "errorcode", "Sign-in error code")
-    if raw is None:
-        raw, key = get(flat, "Status", "resultType")
-    if raw is not None:
-        code = str(raw).strip()
-        if code in ("0", "Success", "success"):
-            return code, True, "the %s is a success value" % key
+    """(code, success, basis, class): the result of a sign-in.
+
+    A `Status` the portal writes in words decides first (Success is true, Failure false, Interrupted null whatever the code beside it
+    says: an interrupted sign-in is one step of a flow whose end is a later event). Without a word, the error code decides: zero is
+    true; a code the tool lists as a prompt is null with the class `interrupt`; any other number is false. A word this tool does not
+    know is null. Nothing is a failure by default."""
+    word = val(flat, "Status", "resultType")
+    code_raw, code_key = get(flat, "errorcode", "Sign-in error code")
+    code = str(code_raw).strip() if code_raw is not None else None
+    if isinstance(word, str) and word.strip():
+        w = word.strip().lower()
+        if w == "interrupted":
+            return (code if code is not None else word.strip()), None, "the Status says Interrupted: one step of a flow, whatever its code (kept as written)", "interrupt"
+        if w in SUCCESS_WORDS:
+            return (code if code is not None else word.strip()), True, "the Status is a success word", None
+        if w in FAILURE_WORDS:
+            return (code if code is not None else word.strip()), False, "the Status is a failure word", None
+        if code is None:
+            return word.strip(), None, "the Status value is neither a success nor a failure value this tool knows (kept as written)", None
+    if code is not None:
+        if code == "0":
+            return code, True, "the %s is 0" % code_key, None
+        if code in INTERRUPT_CODES:
+            return code, None, "the %s is a code this tool lists as a prompt in a sign-in flow, not an end of it" % code_key, "interrupt"
         if re.fullmatch(r"-?\d+", code):
-            return code, False, "a non-zero error code in %s" % key
+            return code, False, "a non-zero error code in %s" % code_key, None
         if code.lower() in SUCCESS_WORDS:
-            return code, True, "the %s is a success word" % key
+            return code, True, "the %s is a success word" % code_key, None
         if code.lower() in FAILURE_WORDS:
-            return code, False, "the %s is a failure word" % key
-        return code, None, "the %s value is neither a success nor a failure value this tool knows (kept as written)" % key
-    name = str(val(flat, "event_name", "Event Name") or "").lower()
-    if name in SUCCESS_WORDS:
-        return name, True, "the event name is a success name"
-    if "failure" in name:
-        return name, False, "the event name says failure"
-    return (name or None), None, "no outcome field in the record" if not name else "an event name that says neither success nor failure"
+            return code, False, "the %s is a failure word" % code_key, None
+        return code, None, "the %s value is neither a success nor a failure value this tool knows (kept as written)" % code_key, None
+    name = re.sub(r"[\s_-]+", "_", str(val(flat, "event_name", "Event Name") or "").strip().lower())
+    if name in SUCCESS_WORDS or name.endswith("_success"):
+        return name, True, "the event name is a success name", None
+    if "failure" in name or name.endswith("_failed"):
+        return name, False, "the event name says failure", None
+    return (name or None), None, ("no outcome field in the record" if not name else "an event name that says neither success nor failure"), None
 
 
 class FileState:
@@ -1398,12 +1983,12 @@ class FileState:
         self.statuses = {}
         self.first_bad = {}
         self.order = {"dmy": 0, "mdy": 0}
-        self.named_utc = 0
 
 
 def survey(path, fmt_arg, delimiter, max_expanded, field_limit, record_cap):
-    """A first pass over the times only: how many records carry a time with no zone, how many are day/month ambiguous, and
-    what the unambiguous day/month/year strings prove about the date order. Nothing is kept."""
+    """A first pass over the times only: how many records carry a time with no zone, how many are day/month ambiguous (a column
+    named Date (UTC) is UTC on its own say-so, but a day/month/year string in it is as ambiguous as in any other), and what the
+    unambiguous day/month/year strings prove about the date order. Nothing is kept."""
     state = FileState()
     src, rows, fmt, _ = open_rows(path, fmt_arg, delimiter, max_expanded, field_limit, record_cap)
     try:
@@ -1416,14 +2001,11 @@ def survey(path, fmt_arg, delimiter, max_expanded, field_limit, record_cap):
                 if flat is None:
                     continue
                 raw, _key, named_utc = time_of(flat)
-                if named_utc:
-                    state.named_utc += 1
-                    continue
-                st = parse_stamp(raw, None, False)
+                st = parse_stamp(raw, None, named_utc)
                 state.statuses[st["status"]] = state.statuses.get(st["status"], 0) + 1
                 if st["status"] in ("no_zone", "ambiguous_date_order"):
                     state.first_bad.setdefault(st["status"], (info["record"], info["line"], raw))
-                got = slash_order(raw) if isinstance(raw, str) else None
+                got = proven_order(raw) if isinstance(raw, str) else None
                 if got in state.order:
                     state.order[got] += 1
     finally:
@@ -1432,18 +2014,23 @@ def survey(path, fmt_arg, delimiter, max_expanded, field_limit, record_cap):
 
 
 def open_rows(path, fmt_arg, delimiter, max_expanded, field_limit, record_cap):
-    """(source, row iterator, format, basis) for the file; the format comes from its content."""
+    """(source, row iterator, format, basis) for the file; the format comes from its content, and one the caller names that the
+    content contradicts is refused."""
     seen = sniff(path)
-    fmt = seen if fmt_arg == "auto" else ("json" if fmt_arg in ("json", "jsonl") else "csv")
-    basis = "the content" if fmt_arg == "auto" else "the format argument"
+    wanted = {"auto": seen, "csv": "csv", "json": "json", "jsonl": "json"}[fmt_arg]
+    if wanted != seen:
+        fail("format %s was asked for, and the content of %s reads as %s" % (fmt_arg, shown_path(path), seen), path=shown_path(path))
     src = Source(path, max_expanded)
-    if fmt == "json":
-        return src, read_units(src, ENVELOPE_KEYS, record_cap, max(MAX_DOCUMENT_BYTES, record_cap)), fmt, basis
-    return src, csv_rows(src, delimiter, field_limit), fmt, basis
+    basis = "the content" if fmt_arg == "auto" else "the format argument, and the content agrees"
+    if seen == "json":
+        return src, read_units(src, ENVELOPE_KEYS, record_cap, MAX_DOCUMENT_BYTES), seen, basis
+    return src, csv_rows(src, delimiter, field_limit), seen, basis
 
 
 def main():
+    install_signal_handlers()
     args = read_args()
+    refuse_unknown(args, ARGS)
     path = want_str(args, "path", "path is required: a sign-in log export")
     if not os.path.exists(path):
         fail("no such file", path=shown_path(path))
@@ -1459,6 +2046,7 @@ def main():
     if isinstance(window, bool) or not isinstance(window, (int, float)) or window <= 0:
         fail("burst_window_seconds must be a positive number")
     min_failures = want_int(args, "burst_min_failures", 3, 2)
+    min_prompts = want_int(args, "prompt_min_count", 5, 2)
     assume_utc = want_bool(args, "assume_utc")
     date_order = want_str(args, "date_order")
     if date_order is not None and date_order not in ("mdy", "dmy"):
@@ -1499,57 +2087,80 @@ def main():
              record=r[0], line=r[1], ambiguous_records=state.statuses["ambiguous_date_order"])
 
     census_files = LosslessPage("file_census", limit)
-    rejected = LosslessPage("rejected_records", limit)
+    rejected = RejectLog(LosslessPage("rejected_records", limit))
     withheld = Withheld(vault, limit)
     events_page = LosslessPage(TOOL, limit, dest=out_file or None)
     db, db_dir, db_where = open_temp_db(".signin-events-")
-    db.execute("CREATE TABLE ev(ord INTEGER PRIMARY KEY, user TEXT, app TEXT, ns INTEGER, time TEXT, success INTEGER, address TEXT, country TEXT, "
-               "city TEXT, lat REAL, lon REAL, client TEXT, auth TEXT, ca TEXT, code TEXT, result TEXT, event_id TEXT, corr TEXT, record INTEGER, "
-               "line INTEGER, eidx INTEGER)")
+    db.execute("CREATE TABLE ev(ord INTEGER PRIMARY KEY, ukey TEXT, ushown TEXT, app TEXT, ns INTEGER, time TEXT, success INTEGER, iclass TEXT, address TEXT, "
+               "country TEXT, city TEXT, lat REAL, lon REAL, client TEXT, auth TEXT, ca TEXT, code TEXT, result TEXT, event_id TEXT, corr TEXT, "
+               "record INTEGER, line INTEGER, eidx INTEGER)")
     row = {"file": shown_path(path), "status": "read", "format": None, "compressed": False, "records": 0, "rejected": 0, "bytes_read": 0}
-    counts = {"records_read": 0, "events": 0, "records_rejected": 0, "events_without_user": 0, "successes": 0, "failures": 0, "unknown_outcome": 0}
+    counts = {"records_read": 0, "events": 0, "records_rejected": 0, "events_without_user": 0, "events_filtered_out": 0, "successes": 0, "failures": 0,
+              "unknown_outcome": 0, "interrupts": 0, "events_without_a_decoded_time": 0}
     time_statuses = {}
     assumed = {"assume_utc_applied_to": 0, "column_named_utc": 0}
-    problems, pagination, stopped_early = [], [], False
+    problems, pagination = [], []
     first_reject = None
+    stopped_all_rejected = False
     ordinal = 0
     batch = []
     try:
         src, rows, fmt, basis = open_rows(path, fmt_arg, delimiter, max_expanded, field_limit, record_cap)
+        rejected.start_file()
         try:
             for kind, info, item in rows:
                 if out_of_time():
-                    stopped_early = True
+                    src.timed_out = True
                     break
                 locator = {"file": path, "record": info["record"], "line": info["line"]}
-                if kind == "reject":
+                if kind == "reject" or not isinstance(item, dict):
+                    reason = item if kind == "reject" else "a JSON %s, not a record" % type(item).__name__
                     counts["records_rejected"] += 1
-                    first_reject = first_reject or (info["record"], info["line"], item)
-                    rejected.add({"file": row["file"], "record": info["record"], "line": info["line"], "reason": scrub(item)})
+                    first_reject = first_reject or (info["record"], info["line"], reason)
+                    if rejected.reject({"file": row["file"], "record": info["record"], "line": info["line"], "reason": scrub(reason)}):
+                        stopped_all_rejected = True
+                        break
                     continue
-                if not isinstance(item, dict):
+                app_name = item.get("id", {}).get("applicationName") if isinstance(item.get("id"), dict) else None
+                if app_name is not None and str(app_name) != "login":
+                    reason = "a Workspace activity of the application %s, not a login activity" % scrub(str(app_name))
                     counts["records_rejected"] += 1
-                    first_reject = first_reject or (info["record"], info["line"], "a JSON %s, not a record" % type(item).__name__)
-                    rejected.add({"file": row["file"], "record": info["record"], "line": info["line"], "reason": "a JSON %s, not a record" % type(item).__name__})
+                    first_reject = first_reject or (info["record"], info["line"], reason)
+                    if rejected.reject({"file": row["file"], "record": info["record"], "line": info["line"], "reason": reason}):
+                        stopped_all_rejected = True
+                        break
                     continue
                 counts["records_read"] += 1
                 for idx, flat, params in events_of(item):
                     if flat is None:
                         counts["records_rejected"] += 1
-                        rejected.add({"file": row["file"], "record": info["record"], "line": info["line"], "event_index": idx, "reason": params})
+                        rejected.reject({"file": row["file"], "record": info["record"], "line": info["line"], "event_index": idx, "reason": params})
                         first_reject = first_reject or (info["record"], info["line"], params)
                         continue
-                    account = val(flat, "userPrincipalName", "user", "User", "userDisplayName", "Username", "email", "actor_email")
+                    upn = val(flat, *UPN_NAMES)
+                    display = val(flat, *DISPLAY_NAMES)
+                    uid = val(flat, "userId", "User ID")
+                    sp = val(flat, *SP_NAMES)
+                    account = upn or display or (("service principal " + str(sp)) if sp else None)
                     raw_time, time_key, named_utc = time_of(flat)
-                    code, success, success_basis = outcome(flat)
+                    code, success, success_basis, klass = outcome(flat)
                     address = val(flat, "ipAddress", "IP address", "ip", "sourceIP", "ip_address")
-                    if account is None and raw_time is None and address is None and code is None:
+                    if account is None and uid is None and raw_time is None and address is None and code is None:
                         counts["records_rejected"] += 1
                         reason = "not a sign-in record: none of a user, a time, an address or a result"
                         first_reject = first_reject or (info["record"], info["line"], reason)
-                        rejected.add({"file": row["file"], "record": info["record"], "line": info["line"], "event_index": idx, "reason": reason})
+                        if rejected.reject({"file": row["file"], "record": info["record"], "line": info["line"], "event_index": idx, "reason": reason}):
+                            stopped_all_rejected = True
+                            break
                         continue
-                    if pattern and not pattern.search(str(account or "")):
+                    rejected.accept()
+                    # the analysis key: the account's object id, else its user name folded to lower case; never a display name
+                    shown_account = scrub(str(account)) if account is not None else None
+                    shown_display = scrub(str(display)) if display is not None else None
+                    key = ("id:" + str(uid).lower()) if uid else (("upn:" + str(upn).lower()) if upn else (("name:" + str(display).lower()) if display else
+                                                                                                          (("sp:" + str(sp).lower()) if sp else None)))
+                    if pattern and not ((shown_account and hits(pattern, shown_account)) or (shown_display and hits(pattern, shown_display))):
+                        counts["events_filtered_out"] += 1
                         continue
                     st = parse_stamp(raw_time, order, assume_utc or named_utc)
                     basis_note = st["basis"]
@@ -1559,6 +2170,8 @@ def main():
                     elif st["status"] == "assumed_utc":
                         assumed["assume_utc_applied_to"] += 1
                     time_statuses[st["status"]] = time_statuses.get(st["status"], 0) + 1
+                    if st["ns"] is None:
+                        counts["events_without_a_decoded_time"] += 1
                     loc = {**locator, "event_index": idx}
                     lat, lon = val(flat, "latitude"), val(flat, "longitude")
                     try:
@@ -1568,14 +2181,17 @@ def main():
                     authentication = val(flat, "authenticationRequirement", "Authentication requirement")
                     ca_status = val(flat, "conditionalAccessStatus", "Conditional Access")
                     app = val(flat, "appDisplayName", "Application", "resourceDisplayName", "application_name")
-                    country, city = val(flat, "country", "Location", "location"), val(flat, "city")
+                    city, country = place_of(flat)
                     client = val(flat, "clientAppUsed", "Client app", "userAgent", "User agent", "browser", "login_type") or params.get("login_type")
                     event_id = val(flat, "id", "Request ID", "requestId")
+                    corr_id = val(flat, "correlationId", "Correlation ID")
                     event = {
                         "time": raw_time, "time_utc": st["utc"], "time_status": st["status"], "time_basis": basis_note,
-                        "user": account, "user_id": val(flat, "userId", "User ID"), "application": app, "application_id": val(flat, "appId", "Application ID"),
+                        "user": account, "user_display_name": display if display != account else None, "user_id": uid, "analysis_account": key,
+                        "application": app, "application_id": val(flat, "appId", "Application ID"),
                         "resource": val(flat, "resourceDisplayName", "Resource"), "resource_id": val(flat, "resourceId", "Resource ID"),
-                        "address": address, "country": country, "city": city, "latitude": lat, "longitude": lon,
+                        "address": address, "country": country, "city": city, "location_as_written": val(flat, "Location", "location") if isinstance(val(flat, "Location", "location"), str) else None,
+                        "latitude": lat, "longitude": lon,
                         "client": client, "user_agent": val(flat, "userAgent", "User agent"), "device": val(flat, "device", "deviceDetail"),
                         "device_detail": item.get("deviceDetail") if isinstance(item.get("deviceDetail"), dict) else None,
                         "is_interactive": val(flat, "isInteractive", "Interactive"),
@@ -1586,33 +2202,35 @@ def main():
                         "risk_level": val(flat, "riskLevelAggregated"), "risk_state": val(flat, "riskState"), "risk_detail": val(flat, "riskDetail"),
                         "result_code": code, "result": CODES.get(code, "code %s" % code) if code is not None else "outcome not present",
                         "failure_reason": val(flat, "failure_reason", "Failure reason"), "additional_details": val(flat, "additional_details", "Additional Details"),
-                        "success": success, "outcome_basis": success_basis,
-                        "event_id": event_id, "correlation_id": val(flat, "correlationId", "Correlation ID"),
+                        "success": success, "outcome_class": klass, "outcome_basis": success_basis,
+                        "event_id": event_id, "correlation_id": corr_id,
                         "activity_id": flat.get("activity_id"), "event_parameters": params or None,
                         "source_file": row["file"], "record": info["record"], "line": info["line"], "event_index": idx, "parser": PARSER,
                     }
-                    event = {k: withheld.clean(v, loc, "/" + k) for k, v in event.items()}
-                    event["raw_record"] = withheld.clean(item, loc, "")
+                    event = withheld.clean(event, loc, "")
+                    event["raw_record"] = withheld.clean(item, loc, "/raw_record")
                     counts["events"] += 1
-                    counts["successes" if success is True else "failures" if success is False else "unknown_outcome"] += 1
-                    if not account:
+                    counts["successes" if success is True else "failures" if success is False else "interrupts" if klass == "interrupt" else "unknown_outcome"] += 1
+                    if key is None:
                         counts["events_without_user"] += 1
                     events_page.add(compact(event))
                     ordinal += 1
+                    shown = lambda v: scrub(str(v)) if v not in (None, "") else None
                     batch.append(tuple(dbtext(v) for v in (
-                        ordinal, scrub(str(account)) if account else None, scrub(str(app)) if app else None, st["ns"], st["utc"],
-                        None if success is None else int(success), scrub(str(address)) if address else None, scrub(str(country)) if country else None,
-                        scrub(str(city)) if city else None, flat_lat, flat_lon, scrub(str(client)) if client else None,
-                        scrub(str(authentication)) if authentication else None, scrub(str(ca_status)) if ca_status else None, code, event["result"],
-                        event_id if isinstance(event_id, (str, int)) else None, event["correlation_id"] if isinstance(event["correlation_id"], (str, int)) else None,
+                        ordinal, key, shown_account, shown(app), st["ns"], st["utc"], None if success is None else int(success), klass, shown(address), shown(country),
+                        shown(city), flat_lat, flat_lon, shown(client), shown(authentication), shown(ca_status), shown(code), event["result"],
+                        shown(event_id) if isinstance(event_id, (str, int)) else None, shown(corr_id) if isinstance(corr_id, (str, int)) else None,
                         info["record"], info["line"], idx)))
                     if len(batch) >= 5000:
-                        db.executemany("INSERT INTO ev VALUES (%s)" % ",".join("?" * 21), batch)
+                        db.executemany("INSERT INTO ev VALUES (%s)" % ",".join("?" * 23), batch)
                         batch = []
+                if stopped_all_rejected:
+                    break
         finally:
             src.close()
+        stopped_early = src.timed_out
         if batch:
-            db.executemany("INSERT INTO ev VALUES (%s)" % ",".join("?" * 21), batch)
+            db.executemany("INSERT INTO ev VALUES (%s)" % ",".join("?" * 23), batch)
         db.commit()
         envelope_markers = [k for k in getattr(src, "extra_keys", []) if pagination_key(k)]
         if envelope_markers:
@@ -1623,17 +2241,26 @@ def main():
             problems.append("the expansion reached max_expanded_bytes (%d): the rest of the file was not read" % max_expanded)
         if getattr(src, "stopped", None):
             problems.append(src.stopped)
-        if stopped_early:
-            problems.append("the time limit ended the read inside this file")
+        if stopped_all_rejected:
+            problems.append("the first %d records were all rejected: this is not an export this tool reads, and the rest of the file was not examined" % FIRST_REJECTS)
         if counts["records_rejected"]:
-            problems.append("%d record(s) were not read (the first, record %d at line %s: %s); every one is in rejected_records" % (
-                counts["records_rejected"], first_reject[0], first_reject[1], first_reject[2]))
+            problems.append("%d record(s) were not read (the first, record %d at line %s: %s); %s" % (
+                counts["records_rejected"], first_reject[0], first_reject[1], first_reject[2],
+                "every one is in rejected_records" if not rejected.total_unlisted else "the first %d are in rejected_records" % LIST_REJECTS))
+        if src.replaced:
+            problems.append("%d byte(s) were not valid %s and were replaced; the records they sit in are not exact" % (src.replaced, src.encoding.upper()))
+        if counts["events_without_a_decoded_time"]:
+            problems.append("%d event(s) have a time that could not be decoded (see time_statuses); they are kept, and left out of the bursts and the travel pairs" % counts["events_without_a_decoded_time"])
+        read_cut = bool(src.error or src.capped or getattr(src, "stopped", None) or stopped_early or stopped_all_rejected)
         row.update({"format": fmt, "format_basis": basis, "compressed": src.compressed, "encoding": src.encoding, "records": counts["records_read"],
                     "rejected": counts["records_rejected"], "bytes_read": src.bytes_read, "shape": getattr(src, "mode", None)})
         if src.replaced:
             row["replacement_characters"] = src.replaced
         if stopped_early:
             row["status"] = "partial"
+        elif src.archive:
+            row["status"] = "unsupported"
+            row["archive"] = src.archive
         elif src.bytes_read == 0 and not src.error:
             row["status"] = "empty"
         elif counts["events"] == 0 and src.error:
@@ -1648,38 +2275,41 @@ def main():
             row["problems"] = [scrub(p) for p in problems]
         census_files.add(row)
 
-        analysis = analyse(db, limit, ceiling, window, min_failures, withheld)
+        analysis = analyse(db, limit, ceiling, window, min_failures, min_prompts)
     finally:
         vault.close()
         remove_temp_db(db, db_dir)
 
-    pages = {"events": events_page.finish(), "file_census": census_files.finish(), "rejected_records": rejected.finish(), **analysis["pages"]}
+    pages = {"events": events_page.finish(partial=read_cut), "file_census": census_files.finish(), "rejected_records": rejected.page.finish(), **analysis["pages"]}
     withheld_summary = withheld.summary()
     replaced = row.get("replacement_characters", 0)
     complete = (row["status"] == "read" and not pagination and replaced == 0)
     status = status_of(row["status"] in ("failed", "unsupported", "empty") and counts["events"] == 0, complete,
                        "every record of the supplied file was read and nothing was left out; that says nothing about whether the export holds every sign-in the tenant logged",
-                       "part of the file was not read as sign-in records, or the export names a next page that was not supplied (see coverage, file_problems, rejected_records and pagination_markers)",
+                       "part of the file was not read as sign-in records, or the export names a next page that was not supplied, or events have a time that could not be decoded "
+                       "(see coverage, file_problems, rejected_records and pagination_markers)",
                        "no sign-in record could be read from the file (see file_problems)")
     answer = {
         "parser": PARSER, **status, "path": shown_path(path),
         "coverage": {**counts, "files_found": 1, "time_limit_seconds": seconds, "stopped_by_time_limit": stopped_early, "max_expanded_bytes": max_expanded,
                      "time_statuses": time_statuses, "bytes_read": row["bytes_read"], "replacement_characters": replaced,
                      "analysis_kept_in": db_where, "users_analysed": analysis["users"], "users_not_analysed_over_cap": analysis["over_cap"],
-                     "users_not_analysed_named": analysis["over_named"]},
+                     "users_not_analysed_named": analysis["over_named"], "rejected_records_not_listed": rejected.total_unlisted},
         "assumptions": [a for a in (
             ("times with no zone were read as UTC because assume_utc was set: %d event(s)" % assumed["assume_utc_applied_to"]) if assumed["assume_utc_applied_to"] else None,
             ("times in a column named Date (UTC) were read as UTC on the column's own say-so: %d event(s)" % assumed["column_named_utc"]) if assumed["column_named_utc"] else None,
             ("day/month/year strings were read as %s (%s)" % (order, order_basis)) if order and (state.order["dmy"] or state.order["mdy"] or date_order) else None) if a],
-        "file_census": census_files.page, "rejected_records": rejected.page,
+        "file_census": census_files.page, "rejected_records": rejected.page.page,
         "file_problems": [scrub(p) for p in problems],
         "pagination_markers": pagination,
         "events": events_page.page, "event_count": counts["events"], "events_inline": len(events_page.page),
         "complete_events": pages["events"].get("all_results"),
+        "events_file_status": ("partial: the read ended early or part of the input was not read (see status)" if read_cut else "holds every event that was read"),
         "inline_limited": pages["events"]["truncated"],
         "accounts": analysis["users"],
-        "successes": counts["successes"], "failures": counts["failures"], "unknown_outcome": counts["unknown_outcome"],
+        "successes": counts["successes"], "failures": counts["failures"], "interrupts": counts["interrupts"], "unknown_outcome": counts["unknown_outcome"],
         "single_factor_successes": analysis["single_factor"], "failure_bursts_before_success": analysis["bursts"],
+        "prompts_before_success": analysis["prompts"], "burst_members": analysis["members"],
         "addresses_seen_once": analysis["seen_once"], "impossible_travel": analysis["travel"],
         "values_withheld": {"count": withheld_summary["count"], "by_reason": withheld_summary["by_reason"], "locators": withheld_summary["locators"],
                             "page": withheld_summary["page"], "text_withheld_from_paths_and_messages": withheld_summary["text_withheld_from_paths_and_messages"]},
@@ -1691,35 +2321,40 @@ def main():
         "truncated": any(p["truncated"] for p in pages.values()),
         "note": "Every list above is a lead, not a detection, and an empty list excludes nothing: the export may be a slice of the account's activity. Impossible travel is a "
                 "hypothesis: a VPN, a carrier's routing and a cloud-hosted client all produce it, and a location is the provider's estimate for an address. A burst needs three or "
-                "more consecutive failures within burst_window_seconds of a success for the same account and application; password failures and multi-factor prompts have the "
-                "same shape, so the result codes are listed. An address seen once says only that it occurs once in these events. A success recorded as single-factor is a lead: "
-                "read the applied policies, the authentication details and the client before calling it a bypass. result is this tool's gloss for a code; failure_reason is the provider's.",
+                "more consecutive failures within burst_window_seconds of a success for the same account and application; an interrupted sign-in is a prompt, not a failure, and is "
+                "counted apart (prompts_before_success). Accounts are told apart by their object id, else their user name folded to lower case, never by a display name. An address seen "
+                "once says only that it occurs once in these events (and the account needs more than two addresses). Events with equal times are ordered by their place in the file. "
+                "A success recorded as single-factor is a lead: read the applied policies, the authentication details and the client before calling it a bypass. result is this tool's "
+                "gloss for a code; failure_reason is the provider's. Service-principal sign-ins are analysed under their own name. A filter looks at the text as it is printed.",
     }
     if status["status"] == "failed":
         answer["error"] = "no sign-in record could be read from the file"
-    print(json.dumps(answer, indent=2, default=str))
+    print(json.dumps(answer, indent=2, default=str, allow_nan=False))
     if status["status"] == "failed":
         raise SystemExit(1)
 
 
-def analyse(db, limit, ceiling, window, min_failures, withheld):
+def analyse(db, limit, ceiling, window, min_failures, min_prompts):
     """The leads, one account at a time in time order, read back from the database: memory follows one account's events."""
     single = LosslessPage("single_factor_successes", limit)
     bursts = LosslessPage("failure_bursts_before_success", limit)
+    members = LosslessPage("burst_members", limit)
+    prompts = LosslessPage("prompts_before_success", limit)
     seen_once = LosslessPage("addresses_seen_once", limit)
     travel = LosslessPage("impossible_travel", limit)
-    cur = db.execute("SELECT user, app, ns, time, success, address, country, city, lat, lon, client, auth, ca, code, result, event_id, corr, record, line, eidx "
-                     "FROM ev WHERE user IS NOT NULL ORDER BY user, ns IS NULL, ns, ord")
-    users = over_cap = 0
+    cur = db.execute("SELECT ukey, ushown, app, ns, time, success, address, country, city, lat, lon, client, auth, ca, code, result, event_id, corr, record, line, eidx, iclass "
+                     "FROM ev WHERE ukey IS NOT NULL ORDER BY ukey, ns IS NULL, ns, ord")
+    users = over_cap = burst_no = 0
     over_named = []
     window_ns = int(window * 1000000000)
 
     def ref(r):
-        return {k: v for k, v in (("event_id", r[15]), ("correlation_id", r[16]), ("record", r[17]), ("line", r[18]), ("event_index", r[19]), ("time", r[3])) if v is not None}
+        return {k: v for k, v in (("event_id", r[16]), ("correlation_id", r[17]), ("record", r[18]), ("line", r[19]), ("event_index", r[20]), ("time", r[4])) if v is not None}
 
-    for user, group in itertools.groupby(cur, key=lambda r: r[0]):
+    for ukey, group in itertools.groupby(cur, key=lambda r: r[0]):
         series = list(itertools.islice(group, SERIES_CAP + 1))
         users += 1
+        user = series[0][1] or ukey
         if len(series) > SERIES_CAP:
             over_cap += 1
             if len(over_named) < FIRST_PROBLEMS:
@@ -1729,64 +2364,88 @@ def analyse(db, limit, ceiling, window, min_failures, withheld):
             continue
         # single factor
         for r in series:
-            if r[4] == 1 and str(r[11] or "").replace(" ", "").lower() == SINGLE:
-                single.add({"user": user, "application": r[1], "address": r[5], "client": r[10], "authentication": r[11], "conditional_access": r[12],
-                            "time": r[3], **ref(r)})
-        # bursts: per account and application, consecutive failures within the window before a success
-        runs = {}
+            if r[5] == 1 and str(r[12] or "").replace(" ", "").lower() == SINGLE:
+                single.add({"user": user, "application": r[2], "address": r[6], "client": r[11], "authentication": r[12], "conditional_access": r[13],
+                            "time": r[4], **ref(r)})
+        # bursts and prompts: per account and application, within the window before a success
+        runs, ints = {}, {}
         for r in series:
-            if r[2] is None:
+            if r[3] is None:
                 continue
-            if r[4] == 0:
-                runs.setdefault(r[1], []).append(r)
-            elif r[4] == 1:
-                fails = [f for f in runs.get(r[1], []) if r[2] - f[2] <= window_ns]
+            if r[5] == 0:
+                runs.setdefault(r[2], []).append(r)
+            elif r[21] == "interrupt":
+                ints.setdefault(r[2], []).append(r)
+            elif r[5] == 1:
+                fails = [f for f in runs.get(r[2], []) if r[3] - f[3] <= window_ns]
                 if len(fails) >= min_failures:
                     codes, addrs = {}, {}
                     for f in fails:
-                        codes[f[13]] = codes.get(f[13], 0) + 1
-                        addrs[f[5]] = addrs.get(f[5], 0) + 1
-                    bursts.add({"user": user, "application": r[1], "failures_before": len(fails), "first_failure_at": fails[0][3], "last_failure_at": fails[-1][3],
-                                "succeeded_at": r[3], "success_address": r[5], "success_result": r[14],
-                                "failure_addresses": addrs, "success_address_among_failure_addresses": r[5] in addrs, "failure_result_codes": codes,
-                                "window_seconds": window, "success": ref(r), "failure_events": [ref(f) for f in fails[:10]]})
-                runs[r[1]] = []
+                        codes[f[14]] = codes.get(f[14], 0) + 1
+                        addrs[f[6]] = addrs.get(f[6], 0) + 1
+                    burst_no += 1
+                    for f in fails:
+                        members.add({"burst": burst_no, "role": "failure", **ref(f)})
+                    members.add({"burst": burst_no, "role": "success", **ref(r)})
+                    bursts.add({"burst": burst_no, "user": user, "application": r[2], "failures_before": len(fails), "first_failure_at": fails[0][4],
+                                "last_failure_at": fails[-1][4], "succeeded_at": r[4], "success_address": r[6], "success_result": r[15],
+                                "failure_addresses": addrs, "success_address_among_failure_addresses": r[6] in addrs, "failure_result_codes": codes,
+                                "window_seconds": window, "success": ref(r), "failure_events": [ref(f) for f in fails[:10]], "failure_events_total": len(fails),
+                                "failure_events_listed_in": "pages.burst_members (burst %d)" % burst_no if len(fails) > 10 else "all listed here"})
+                waiting = [p for p in ints.get(r[2], []) if r[3] - p[3] <= window_ns]
+                if len(waiting) >= min_prompts:
+                    codes, addrs = {}, {}
+                    for p in waiting:
+                        codes[p[14]] = codes.get(p[14], 0) + 1
+                        addrs[p[6]] = addrs.get(p[6], 0) + 1
+                    prompts.add({"user": user, "application": r[2], "prompts_before": len(waiting), "first_prompt_at": waiting[0][4], "succeeded_at": r[4],
+                                 "prompt_codes": codes, "prompt_addresses": addrs, "success_address": r[6], "window_seconds": window,
+                                 "why": "interrupted sign-ins are the prompts of a normal multi-factor flow; this many in a row before a success is a lead (many prompts, "
+                                        "then an acceptance, is what the multi-factor-fatigue hypothesis looks like), not a conclusion", "success": ref(r)})
+                runs[r[2]] = []
+                ints[r[2]] = []
             else:
-                runs[r[1]] = []
+                runs[r[2]] = []
+                ints[r[2]] = []
         # addresses seen once among this account's events in this export
         seen = {}
         for r in series:
-            if r[5]:
-                seen[r[5]] = seen.get(r[5], 0) + 1
+            if r[6]:
+                seen[r[6]] = seen.get(r[6], 0) + 1
         for r in series:
-            if r[4] == 1 and r[5] and seen.get(r[5]) == 1 and len(seen) > 2:
-                seen_once.add({"user": user, "time": r[3], "address": r[5], "country": r[6], "client": r[10], "distinct_addresses_for_account": len(seen),
+            if r[5] == 1 and r[6] and seen.get(r[6]) == 1 and len(seen) > 2:
+                seen_once.add({"user": user, "time": r[4], "address": r[6], "country": r[7], "client": r[11], "distinct_addresses_for_account": len(seen),
                                "why": "this address occurs once among this account's events in this export; the export may not hold the account's earlier history",
                                **ref(r)})
-        # travel: adjacent successes
+        # travel: adjacent successes (equal times included: two places at one second)
         previous = None
         for r in series:
-            if r[4] != 1 or r[2] is None:
+            if r[5] != 1 or r[3] is None:
                 continue
             if previous is not None:
-                seconds = (r[2] - previous[2]) / 1e9
-                if 0 < seconds < 86400:
+                seconds = (r[3] - previous[3]) / 1e9
+                if 0 <= seconds < 86400:
                     pair = None
-                    if None not in (previous[8], previous[9], r[8], r[9]):
-                        km = distance((previous[8], previous[9]), (r[8], r[9]))
-                        speed = km / (seconds / 3600)
-                        if speed > ceiling and km > 100:
-                            pair = {"kilometres": round(km, 1), "implied_speed_kmh": round(speed, 1), "coarse": False, "basis": "coordinates"}
-                    elif previous[6] and r[6] and previous[6] != r[6] and seconds < 3600:
+                    if None not in (previous[9], previous[10], r[9], r[10]):
+                        km = distance((previous[9], previous[10]), (r[9], r[10]))
+                        if seconds == 0:
+                            if km > 100:
+                                pair = {"kilometres": round(km, 1), "implied_speed_kmh": None, "coarse": False, "basis": "coordinates, the same second",
+                                        "why": "two successes at the same recorded second %.0f km apart: no speed can be computed" % km}
+                        else:
+                            speed = km / (seconds / 3600)
+                            if speed > ceiling and km > 100:
+                                pair = {"kilometres": round(km, 1), "implied_speed_kmh": round(speed, 1), "coarse": False, "basis": "coordinates"}
+                    elif previous[7] and r[7] and str(previous[7]).lower() != str(r[7]).lower() and seconds < 3600:
                         pair = {"coarse": True, "basis": "country change only", "why": "the export carries a country but no coordinates"}
                     if pair:
-                        travel.add({"user": user, "from": {"time": previous[3], "address": previous[5], "country": previous[6], "city": previous[7], **ref(previous)},
-                                    "to": {"time": r[3], "address": r[5], "country": r[6], "city": r[7], **ref(r)}, "seconds_apart": round(seconds, 1), **pair})
+                        travel.add({"user": user, "from": {"time": previous[4], "address": previous[6], "country": previous[7], "city": previous[8], **ref(previous)},
+                                    "to": {"time": r[4], "address": r[6], "country": r[7], "city": r[8], **ref(r)}, "seconds_apart": round(seconds, 1), **pair})
             previous = r
-    pages = {"single_factor_successes": single.finish(), "failure_bursts_before_success": bursts.finish(),
-             "addresses_seen_once": seen_once.finish(), "impossible_travel": travel.finish()}
-    return {"pages": pages, "users": users, "over_cap": over_cap, "over_named": over_named, "single_factor": single.page, "bursts": bursts.page, "seen_once": seen_once.page,
-            "travel": travel.page}
+    pages = {"single_factor_successes": single.finish(), "failure_bursts_before_success": bursts.finish(), "burst_members": members.finish(),
+             "prompts_before_success": prompts.finish(), "addresses_seen_once": seen_once.finish(), "impossible_travel": travel.finish()}
+    return {"pages": pages, "users": users, "over_cap": over_cap, "over_named": over_named, "single_factor": single.page, "bursts": bursts.page,
+            "members": members.page, "prompts": prompts.page, "seen_once": seen_once.page, "travel": travel.page}
 
 
 if __name__ == "__main__":

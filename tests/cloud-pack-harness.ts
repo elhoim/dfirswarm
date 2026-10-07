@@ -9,16 +9,19 @@ import { mkdir, mkdtemp, readFile, readdir, stat, writeFile, rm } from "node:fs/
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
-import { ROOT, runPy } from "./tool-library-harness.ts";
+import { spawn } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
+import { ROOT } from "./tool-library-harness.ts";
 
 const CLOUD = join(ROOT, "packs", "cloud-forensics");
-export const TOOLS = join(CLOUD, "tools");
+/** CLOUD_PACK_TOOLS runs a suite against another copy of the tools (an earlier head, to show that a regression test fails there). */
+export const TOOLS = process.env.CLOUD_PACK_TOOLS ?? join(CLOUD, "tools");
 export const TRAIL = join(TOOLS, "cloudtrail_parse", "run.py");
 export const SIGNIN = join(TOOLS, "signin_analyse", "run.py");
 export const UAL = join(TOOLS, "ual_parse", "run.py");
 export const AGENT = { AGENT_ID: "s1" };
 
-export type Run = { code: number | null; stdout: string; stderr: string };
+export type Run = { code: number | null; stdout: string; stderr: string; signal?: string | null };
 export type Page = { matched: number; returned: number; truncated: boolean; all_results?: string };
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type Json = any;
@@ -34,8 +37,39 @@ export async function withDir(fn: (cwd: string) => Promise<void>): Promise<void>
   }
 }
 
+/** A tool's process is killed after this long, so a tool that hangs fails the test and not the suite. */
+export const DEADLINE_MS = 120_000;
+
+/** Start a tool and return its process and the promise of its result; the process is killed (SIGKILL) at the deadline. */
+export function spawnTool(script: string, cwd: string, args: unknown, env: Record<string, string> = {}, deadlineMs = DEADLINE_MS): { child: ChildProcess; done: Promise<Run> } {
+  const child = spawn("python3", [script], { cwd, env: { ...process.env, ...AGENT, ...env } });
+  const out: Buffer[] = [];
+  const err: Buffer[] = [];
+  child.stdout?.on("data", (c: Buffer) => out.push(c));
+  child.stderr?.on("data", (c: Buffer) => err.push(c));
+  let killed = false;
+  const timer = setTimeout(() => {
+    killed = true;
+    child.kill("SIGKILL");
+  }, deadlineMs);
+  const done = new Promise<Run>((resolve, reject) => {
+    child.on("error", (e) => {
+      clearTimeout(timer);
+      reject(e);
+    });
+    child.on("close", (code, signal) => {
+      clearTimeout(timer);
+      const stderr = Buffer.concat(err).toString("utf8") + (killed ? `\n[harness] killed after ${deadlineMs} ms` : "");
+      resolve({ code, stdout: Buffer.concat(out).toString("utf8"), stderr, signal });
+    });
+  });
+  child.stdin?.on("error", () => undefined);
+  child.stdin?.end(JSON.stringify(args));
+  return { child, done };
+}
+
 export async function tool(script: string, cwd: string, args: unknown, env: Record<string, string> = {}): Promise<Run> {
-  return runPy(script, cwd, args, undefined, { ...AGENT, ...env });
+  return spawnTool(script, cwd, args, env).done;
 }
 
 let jobs = 0;

@@ -1,6 +1,6 @@
 {
   "name": "ual_parse",
-  "description": "Read a Microsoft 365 unified audit log export offline (portal or PowerShell CSV with an AuditData column, JSON with that wrapper, native audit events as an array, JSON Lines or a value envelope, a Graph audit log record) and open the payload: `audit_data` is the whole AuditData as written (Name/Value, NewValue/OldValue and duplicate parameter names kept), beside the lifted fields (operation, user, address, workload, record type, result, record id, MailAccessType, OperationCount, items listed) and each record's file, record and line. `status` and `status_basis` say whether every row was read; a row that is not an audit record, a payload that is not JSON (kept with its outer columns), a file that is not an audit export, a CSV line past the field limit, a next-page marker and files not reached before the time limit are counted separately, located and listed. Time: AuditData's CreationTime, else the outer column; no zone is not UTC unless assume_utc says so, a day/month/year string needs a date_order or unambiguous rows that prove one (reported); raw and decoded times are kept; since/until exclude rows whose time could not be read and count them. Summary tables describe the matched records; operations_all_rows is every row. `notable` names an operation, not its meaning: MailItemsAccessed is not a statement that content was read. NOT measured: whether the audit configuration or licence captured every operation (aggregation and duplicate suppression can apply: check the schema the export carries), or who a record's user is. SENSITIVE: parameters and properties can hold secrets; a field named or shaped like a credential is withheld and its original written only with write_values, in a job, to a mode 0600 file under $OUT; run as a job with secret_output: true. An out_file is never replaced by a smaller result.",
+  "description": "Read a Microsoft 365 unified audit log export offline (portal or PowerShell CSV with an AuditData column, JSON with that wrapper, native audit events as an array, JSON Lines or a value envelope, a Graph audit log record) and open the payload: `audit_data` is the whole AuditData as written (Name/Value, NewValue/OldValue and duplicate parameter names kept), beside the lifted fields (operation, user, address, workload, record type, result, record id, MailAccessType, OperationCount, items listed) and each record's file, record and line. `status` and `status_basis` say whether every row was read; a row that is not an audit record, a payload that is not JSON (kept with its outer columns), a file that is not an audit export, a CSV line past the field limit, an archive (.zip, tar: named, not read), a next-page marker, an export whose own ResultCount says more records matched than it holds, and files not reached before the time limit are counted separately, located and listed. Time: AuditData's CreationTime, else the outer column; no zone is not UTC unless assume_utc says so (a native CreationTime with no zone included, and a row left undated says so in time_zone), a day/month/year string needs a date_order or unambiguous rows that prove one (reported), and a declared date_order that a row contradicts leaves that row undecoded, named; raw and decoded times are kept; since/until exclude rows whose time could not be read and count them (status is then partial). record_type matches the payload's RecordType and the outer column, by number or by name as the export wrote them (the export's own pairing is shown in record_types_all_rows; no number-to-name table is built in), and a filter value that matched no row is reported. Summary tables describe the matched records; operations_all_rows and record_types_all_rows are every row, withheld the same way. `user` is a regex (at most 200 characters) matched against the user as printed, never against a withheld original; a pattern that can take exponential time is refused, and one test that takes more than a quarter of a second fails the call, named. An argument the tool does not have is refused. `notable` names an operation, not its meaning: MailItemsAccessed is not a statement that content was read. NOT measured: whether the audit configuration or licence captured every operation (aggregation and duplicate suppression can apply: check the schema the export carries), or who a record's user is. SENSITIVE: parameters and properties can hold secrets; a field named or shaped like a credential is withheld and its original written only with write_values, in a job, to a mode 0600 file under $OUT; run as a job with secret_output: true. An out_file is never replaced by a smaller result; a read that ended early publishes it as <name>.partial<ext>, and SIGTERM leaves no temporary file.",
   "params": {
     "path": {
       "type": "string",
@@ -9,11 +9,11 @@
     },
     "operations": {
       "type": "array",
-      "description": "Keep only these operations (exact)"
+      "description": "Keep only these operations (exact, as printed; a value that matched nothing is reported)"
     },
     "user": {
       "type": "string",
-      "description": "Case-insensitive regex over the user"
+      "description": "Case-insensitive regex (at most 200 characters) over the user as printed; a pattern that can take exponential time is refused"
     },
     "since": {
       "type": "string",
@@ -25,7 +25,7 @@
     },
     "record_type": {
       "type": "array",
-      "description": "Keep only these record types (the number or the name, as the export gives it)"
+      "description": "Keep only these record types: the number or the name, matched against the payload's RecordType and the outer column as the export wrote them (no built-in table pairs a number with a name; a value that matched nothing is reported)"
     },
     "notable_only": {
       "type": "boolean",
@@ -82,8 +82,8 @@
   "example": "{\"path\": \"inputs/ual.csv\", \"notable_only\": true}",
   "by": "maintainer",
   "at": "2026-10-07T12:00:00.000Z",
-  "version": 3,
-  "sha256": "508121afe908dae17923926c1eb0675df0ad88de152799a6b0f6cd4ac5482d8c",
+  "version": 4,
+  "sha256": "95a0efefffd7dc0e81b28fe7be58937ae4c21c4ffbb26c7f03c7ddaf3b5a8559",
   "use": {
     "names": [
       "AuditLog*.csv",

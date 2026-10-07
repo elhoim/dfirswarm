@@ -16,9 +16,9 @@ Microsoft 365 unified audit log export and opens the `AuditData` payload, keepin
 lifts out. `cloudtrail_parse` reads CloudTrail records and links each assumed-role session to the successful
 AssumeRole calls in the records that could have issued it, as a candidate with its basis and never as attribution to a
 person. `signin_analyse` reads an Entra or Google Workspace login export, keeps each record's ids, authentication
-details and applied policies, and lists leads (a success that recorded one factor, failures shortly before a success, an
-address seen once in the export, two successes whose coordinates imply a high speed), each a hypothesis bounded by what
-the export holds. Each says what it did not read, keeps every record with its file, record and line, withholds a value
+details and applied policies, and lists leads (a success that recorded one factor, failures shortly before a success, a
+run of interrupted sign-ins before a success, an address seen once in the export, two successes whose coordinates imply a
+high speed), each a hypothesis bounded by what the export holds; an interrupted sign-in is a prompt, not a failure. Each says what it did not read, keeps every record with its file, record and line, withholds a value
 named or shaped like a credential, and writes a whole result only under the run's output place.
 
 **One goal template**: `tenant-compromise.md`.
