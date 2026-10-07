@@ -417,7 +417,7 @@ test("jumplist refuses a DestList version it does not read, with a problem and n
 test("jumplist reports a file it could not read as a failure with a count, and exits non-zero when none could be read", async () => {
   await withCwd(async (cwd) => {
     await writeFile(join(cwd, "work", "x.automaticDestinations-ms"), "not a compound file");
-    // No olefile on this PYTHONPATH: every automaticDestinations file fails, loudly.
+    // An olefile that says this is not a compound file: every automaticDestinations file fails, loudly.
     const env = await stubModule(cwd, { "olefile.py": "def isOleFile(p):\n    return False\n" });
     const out = await tool("jumplist", cwd, { path: "work/x.automaticDestinations-ms" }, env);
     assert.notEqual(out.code, 0);

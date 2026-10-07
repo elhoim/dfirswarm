@@ -38,7 +38,6 @@ not opened, and is counted under `not_attempted`.
 import binascii
 import datetime
 import json
-import mmap
 import os
 import re
 import stat
@@ -241,17 +240,36 @@ def parse_destlist(data):
     return out
 
 
-def split_lnks(view):
-    """Find every link structure by its own header, wherever it sits: the starts, in file order. `view` is a bytes-like
-    object (a memory map: nothing is copied) and a structure runs to the next header or to the end."""
-    found, at = [], 0
+def lnk_starts(fh, size, window=1 << 20):
+    """The offset of every link header in the file `fh` (`size` bytes), read a window at a time with the header's length
+    carried over, so a header that straddles two windows is found once. Nothing but the offsets is kept."""
+    starts, carry, base = [], b"", 0          # base: the file offset of carry[0]
+    keep = len(LNK_MAGIC) - 1
+    fh.seek(0)
     while True:
-        hit = view.find(LNK_MAGIC, at)
-        if hit < 0:
+        block = fh.read(window)
+        if not block:
             break
-        found.append(hit)
-        at = hit + 4
-    return [(start, (found[i + 1] if i + 1 < len(found) else len(view)) - start) for i, start in enumerate(found)]
+        data = carry + block
+        at = 0
+        while True:
+            hit = data.find(LNK_MAGIC, at)
+            if hit < 0:
+                break
+            starts.append(base + hit)
+            at = hit + 4
+        tail = min(keep, len(data))
+        base += len(data) - tail
+        carry = data[len(data) - tail:]
+    return starts
+
+
+def split_lnks(data):
+    """The link structures in `data` (bytes) as (start, length): each by its own header, running to the next header or
+    to the end. The same search `lnk_starts` makes on a file, for bytes already in hand."""
+    import io
+    starts = lnk_starts(io.BytesIO(data), len(data))
+    return [(start, (starts[i + 1] if i + 1 < len(starts) else len(data)) - start) for i, start in enumerate(starts)]
 
 
 def own_places():
@@ -421,23 +439,24 @@ def read_custom(path, out_dir, limit):
     links = LosslessPage("jumplist", [path, "links", out_dir], limit)
     with open(path, "rb") as fh:
         size = os.fstat(fh.fileno()).st_size
-        if size:
-            # Searched in place: a memory map copies nothing, and each structure is written from its own range.
-            view = mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ)
-        else:
-            view = b""
-        try:
-            for i, (offset, length) in enumerate(split_lnks(view)):
-                entry = {"offset": offset, "bytes": length, "is_link": True, "carved": True}
-                if out_dir:
-                    def pieces(offset=offset, length=length):
-                        for at in range(offset, offset + length, 1 << 20):
-                            yield view[at:min(at + (1 << 20), offset + length)]
-                    entry["written_to"] = shown_path(write_stream(out_dir, "%s-%04d" % (os.path.basename(path), i), pieces, length))
-                links.add(entry)
-        finally:
-            if size:
-                view.close()
+        # Only the offsets are kept; the file is read a window at a time, and each structure is written from its own
+        # range in pieces, so a very large file costs time, not memory.
+        starts = lnk_starts(fh, size)
+        for i, offset in enumerate(starts):
+            length = (starts[i + 1] if i + 1 < len(starts) else size) - offset
+            entry = {"offset": offset, "bytes": length, "is_link": True, "carved": True}
+            if out_dir:
+                def pieces(offset=offset, length=length):
+                    fh.seek(offset)
+                    left = length
+                    while left:
+                        piece = fh.read(min(left, 1 << 20))
+                        if not piece:
+                            return
+                        left -= len(piece)
+                        yield piece
+                entry["written_to"] = shown_path(write_stream(out_dir, "%s-%04d" % (os.path.basename(path), i), pieces, length))
+            links.add(entry)
     page_links(result, links)
     if not result["links"]:
         result["problems"] = ["no link structure header found in this file"]
