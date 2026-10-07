@@ -3110,21 +3110,22 @@ test("extract_stream never overwrites a file, never writes under inputs/ or outs
   await withCwd(async (cwd, bin) => {
     await stub(bin, "icat", ICAT_STUB(`printf 'x'`));
     await writeFile(join(cwd, "work", "disk.raw"), Buffer.alloc(1024));
+    await mkdir(join(cwd, "work", "s1"), { recursive: true });
     const env = { ICAT_ARGS: join(cwd, "icat-args") };
-    await writeFile(join(cwd, "work", "taken.bin"), "evidence");
-    assert.match(failed(await tool("extract_stream", cwd, { image: "work/disk.raw", inode: "5", output: "work/taken.bin" }, env, bin)).error, /already exists/);
-    assert.equal(await readFile(join(cwd, "work", "taken.bin"), "utf8"), "evidence");
+    await writeFile(join(cwd, "work", "s1", "taken.bin"), "evidence");
+    assert.match(failed(await tool("extract_stream", cwd, { image: "work/disk.raw", inode: "5", output: "work/s1/taken.bin" }, env, bin)).error, /already exists/);
+    assert.equal(await readFile(join(cwd, "work", "s1", "taken.bin"), "utf8"), "evidence");
     assert.match(failed(await tool("extract_stream", cwd, { image: "work/disk.raw", inode: "5", output: "inputs/x.bin" }, env, bin)).error, /cannot be under inputs/);
     assert.match(failed(await tool("extract_stream", cwd, { image: "work/disk.raw", inode: "5", output: "work/../inputs/y.bin" }, env, bin)).error, /cannot be under inputs/);
     assert.match(failed(await tool("extract_stream", cwd, { image: "work/disk.raw", inode: "5", output: "/tmp/outside-the-run.bin" }, env, bin)).error, /inside the run directory/);
     // A link in the run that points out of it is resolved first, and refused as the place it leads to.
-    await symlink("../../elsewhere/planted", join(cwd, "work", "link.bin"));
-    assert.match(failed(await tool("extract_stream", cwd, { image: "work/disk.raw", inode: "5", output: "work/link.bin" }, env, bin)).error, /inside the run directory/);
-    await symlink("taken.bin", join(cwd, "work", "samedir.bin"));
-    assert.match(failed(await tool("extract_stream", cwd, { image: "work/disk.raw", inode: "5", output: "work/samedir.bin" }, env, bin)).error, /already exists/);
-    assert.equal(await readFile(join(cwd, "work", "taken.bin"), "utf8"), "evidence", "nothing was written through the link");
+    await symlink("../../../elsewhere/planted", join(cwd, "work", "s1", "link.bin"));
+    assert.match(failed(await tool("extract_stream", cwd, { image: "work/disk.raw", inode: "5", output: "work/s1/link.bin" }, env, bin)).error, /inside the run directory/);
+    await symlink("taken.bin", join(cwd, "work", "s1", "samedir.bin"));
+    assert.match(failed(await tool("extract_stream", cwd, { image: "work/disk.raw", inode: "5", output: "work/s1/samedir.bin" }, env, bin)).error, /already exists/);
+    assert.equal(await readFile(join(cwd, "work", "s1", "taken.bin"), "utf8"), "evidence", "nothing was written through the link");
     for (const inode of ["5; rm -rf /", "1-2-3-4", "abc", "-5", ""]) {
-      assert.match(failed(await tool("extract_stream", cwd, { image: "work/disk.raw", inode, output: "work/z.bin" }, env, bin)).error, /inode must be an address/, inode);
+      assert.match(failed(await tool("extract_stream", cwd, { image: "work/disk.raw", inode, output: "work/s1/z.bin" }, env, bin)).error, /inode must be an address/, inode);
     }
     assert.equal(await exists(join(cwd, "icat-args")), false, "a refused call never reaches icat");
   });

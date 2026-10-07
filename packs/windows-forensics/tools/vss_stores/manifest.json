@@ -1,6 +1,6 @@
 {
   "name": "vss_stores",
-  "description": "List the volume shadow copies of a raw volume or disk image through vshadowinfo: one store per snapshot with the identifier, creation time and volume size vshadowinfo prints, and, for each, the argv of the vshadowmount command that would expose it under your own work/<your id>/ directory. It LISTS and suggests; it mounts nothing, and a listed store is not an examined one. vshadowinfo reads raw data (an E01 has to be exposed raw first). The answer is judged: vshadowinfo's exit status and time limit, its whole stdout and stderr (kept in files), and the stores it claims against the stores that could be read; a failed or unrecognised run is status failed (exit 1) and never an answer that there are no stores, a mismatch is partial, and zero stores is said only when vshadowinfo exited 0 and itself reported zero, worded as what this reader found at this offset and not as proof that none existed. A FUSE mount may be unavailable in a worker.",
+  "description": "List the volume shadow copies of a raw volume or disk image through vshadowinfo: one store per snapshot with the identifier, creation time and volume size vshadowinfo prints, and, for each, the argv of the vshadowmount command that would expose it under your own work/<your id>/ directory. It LISTS and suggests; it mounts nothing, and a listed store is not an examined one. vshadowinfo reads raw data (an E01 has to be exposed raw first). The answer is judged: vshadowinfo's exit status and time limit, its whole stdout and stderr (kept in files), and the stores it claims against the stores that could be read; a failed or unrecognised run is status failed (exit 1) and never an answer that there are no stores, a mismatch is partial, and zero stores is said only when vshadowinfo exited 0 and itself reported zero, worded as what this reader found at this offset and not as proof that none existed. A FUSE mount may be unavailable in a worker. Its output files are never replaced: a run with the same arguments keeps its own pair under the next free number and earlier_output_files names the ones already there.",
   "params": {
     "image": {
       "type": "string",
@@ -21,8 +21,8 @@
   "example": "{\"image\": \"inputs/disk.raw\", \"offset\": 1048576}",
   "by": "maintainer",
   "at": "2026-10-07T12:00:00.000Z",
-  "version": 2,
-  "sha256": "a4fbf5455b91d7223948b5e2036d32ebd5507b42706e8c648af3da7234a502cf",
+  "version": 3,
+  "sha256": "448383ce53daeb3968fe022324ce016ef424f6ac474b7ebd272421033d84f216",
   "requires": [
     "vshadowinfo"
   ],

@@ -32,6 +32,7 @@ import os
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -211,8 +212,9 @@ class SecretValues:
         }
 
 
-PARSER = "yara_scan/2"
+PARSER = "yara_scan/3"
 # `0x6:20:$a: data` with -s -L; `0x6:$a: data` with -s alone (an older yara has no -L).
+SCAN_ERROR = re.compile(r"^error scanning (.+)$")
 STRING_LINE = re.compile(r"^0x([0-9a-fA-F]+):(?:(\d+):)?(\$[A-Za-z0-9_]*): ?")
 
 
@@ -268,10 +270,26 @@ def main():
     if shutil.which("yara") is None:
         fail("yara is not on PATH", hint="brew install yara; scripts/toolbox.sh reports it with the dfir set")
 
-    try:
-        values = SecretValues(write_matches, "yara_scan", "write_matches", "yara-matched-strings.jsonl")
-    except SecretValuesRefused as exc:
-        fail(str(exc))
+    values = None
+    for number in range(1, 1000):
+        name = "yara-matched-strings.jsonl" if number == 1 else "yara-matched-strings-%d.jsonl" % number
+        try:
+            values = SecretValues(write_matches, "yara_scan", "write_matches", name)
+            break
+        except SecretValuesRefused as exc:
+            # A values file of an earlier run in this job is never replaced and never a reason not to scan: the
+            # next free number is this run's file, and the answer names it.
+            if write_matches and "already exists" in str(exc):
+                continue
+            fail(str(exc))
+    if values is None:
+        fail("no free name for the values file after 999 tries")
+
+    # A target that is not a regular file or a directory (a FIFO, a socket, a device) is not opened: yara would wait
+    # on it until the time limit. In a directory yara skips such entries itself; they are looked for here and said.
+    if not (os.path.isdir(target) or os.path.isfile(target)):
+        values.close()
+        fail("target is not a regular file or a directory (a FIFO, a socket or a device is not scanned)", target=target, not_attempted=1)
 
     try:
         version = subprocess.run(["yara", "--version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10).stdout.decode("utf-8", "replace").strip()
@@ -290,6 +308,26 @@ def main():
         if "--no-follow-symlinks" in help_text:
             argv.append("-N")
     argv += [rules, target]
+
+    # What yara will not scan, said before it runs: special files in a directory (it skips them without a word) and,
+    # when it does not follow links (-N), the links it passes over.
+    not_attempted = LosslessPage("yara_scan", [rules, target, "not_attempted"], limit)
+    skipped_links = "-N" in argv
+    if os.path.isdir(target):
+        for root, dirs, names in os.walk(target, followlinks=False):
+            for entry in sorted(dirs + names):
+                full = os.path.join(root, entry)
+                try:
+                    mode = os.lstat(full).st_mode
+                except OSError as exc:
+                    not_attempted.add({"file": full, "reason": "could not be examined: %s" % describe(exc)})
+                    continue
+                if stat.S_ISLNK(mode):
+                    if skipped_links:
+                        not_attempted.add({"file": full, "reason": "a symbolic link, not followed (yara -N)"})
+                elif not (stat.S_ISREG(mode) or stat.S_ISDIR(mode)):
+                    kind = "a FIFO" if stat.S_ISFIFO(mode) else "a socket" if stat.S_ISSOCK(mode) else "a device" if (stat.S_ISCHR(mode) or stat.S_ISBLK(mode)) else "a special file"
+                    not_attempted.add({"file": full, "reason": "%s: yara does not scan it" % kind})
 
     outdir, outshown = tool_output_dir()
     key = [rules, target, timeout, argv]
@@ -358,18 +396,40 @@ def main():
     stderr_file = None
     stderr_lines = [l for l in stderr_bytes.decode("utf-8", "replace").splitlines() if l.strip()]
     if stderr_lines:
-        final = outdir / ("yara_scan-%s.stderr.txt" % digest)
-        os.replace(errname, final)
+        # Never over an earlier run's file: the next free number names this one.
+        for number in range(1, 1000):
+            final = outdir / ("yara_scan-%s.stderr.txt" % digest if number == 1 else "yara_scan-%s.stderr.%d.txt" % (digest, number))
+            try:
+                os.link(errname, final)
+                os.unlink(errname)
+                break
+            except FileExistsError:
+                continue
+            except OSError:
+                if not os.path.lexists(final):
+                    os.rename(errname, final)
+                    break
+        else:
+            fail("no free name for the standard error file after 999 tries")
         stderr_file = "%s/%s" % (outshown, final.name)
     else:
         os.unlink(errname)
 
+    # `error scanning <file>: <reason>` is yara's own word that it could not scan a file; it exits 0 all the same.
+    scan_errors = LosslessPage("yara_scan", [rules, target, "scan_errors"], limit)
+    for line in stderr_lines:
+        m = SCAN_ERROR.match(line)
+        if m:
+            path, _, reason = m.group(1).rpartition(": ")
+            scan_errors.add({"file": path if path else m.group(1), "reason": reason if path else None, "line": line})
+
     rule_page, string_page = rule_rows.finish(), string_rows.finish()
-    complete = rc == 0 and not timed_out[0]
+    error_page, skipped_page = scan_errors.finish(), not_attempted.finish()
+    complete = rc == 0 and not timed_out[0] and error_page["matched"] == 0 and skipped_page["matched"] == 0
     errors = [l for l in stderr_lines if "error" in l.lower()]
     if complete:
         status = "complete"
-    elif timed_out[0] or rule_page["matched"] or string_page["matched"]:
+    elif (rc == 0 and not timed_out[0]) or timed_out[0] or rule_page["matched"] or string_page["matched"]:
         status = "partial"
     else:
         status = "failed"
@@ -393,6 +453,12 @@ def main():
         "string_matches_page": string_page,
         "files_with_matches": len(files_with_matches),
         "unparsed_string_lines": unparsed,
+        "scan_errors": scan_errors.page,
+        "scan_error_count": error_page["matched"],
+        "scan_errors_page": error_page,
+        "not_attempted": not_attempted.page,
+        "not_attempted_count": skipped_page["matched"],
+        "not_attempted_page": skipped_page,
         "stderr_file": stderr_file,
         "stderr_line_count": len(stderr_lines),
         "warnings": stderr_lines[:20],
@@ -413,4 +479,7 @@ def _ensure(path):
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except OSError as exc:
+        fail("a file operation failed: %s" % describe(exc), reason=type(exc).__name__)
