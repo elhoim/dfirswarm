@@ -11,14 +11,27 @@ introduces the problem. This pack is the work.
 **Five skills**: `identify/collector`, `normalise/layout`,
 `gaps/what-is-missing`, `verify/manifests`, `plan/what-to-collect`.
 
-**Two tools.** `collection_id` recognises KAPE, UAC, Velociraptor and CyLR from
-the shape of the tree, reads that collector's own log, and lists **the targets
-that failed together with the recorded reasons**. A failure is a collection
-fact, not proof that the target was in use or suspicious. `collection_index` builds the index
-everything else needs: every file with its hash, the path it has now and the
-path it had on the machine, plus two losses that are otherwise silent — a named
-stream whose colon was rewritten, and a tree whose files all share one
-modification date because an intermediate copy dropped the originals.
+**Two tools.** `collection_id` surveys a delivered directory. It classifies every
+object in it (copied files, disk containers, memory captures, archives) from its first
+bytes and its name and says which of the two the class rests on, so a memory capture
+beside copied files makes the delivery `mixed` instead of a "physical image". It names
+the collectors that left records by the paths of those records (KAPE, UAC,
+Velociraptor; a top-level `C` directory is only a layout clue, and nothing names CyLR)
+and reads each recognised log whole: the columns and rows of a KAPE copy and skip log,
+the date-and-level lines of a UAC log, the rows of a Velociraptor `uploads.json`. The
+failures it lists are the collectors' own recorded skips and errors in their own words,
+which are collection facts and not proof that a target was in use or suspicious. It is a
+hypothesis from names and limited log parsing and not an audit of the collection: a log
+whose columns or lines it does not recognise is `partial` or `unsupported`, and then
+there is no failure count at all, never a zero. `collection_index` builds the census
+everything else needs: every object with its size, its modified time to the nanosecond
+and the SHA-256 of the whole file; a labelled hypothesis for the path each file had on
+the machine (`source_path_hypothesis`, with its method, confidence and alternatives),
+and the path a KAPE copy log itself records where one row says it
+(`source_path_observed`); links, special files and every object it could not read as
+rows of their own; and a distribution of modification times that puts most files on one
+date, reported with its counts and no cause, because a copy that reset times and real
+activity look alike. Both write the whole of a long result to a file and name it.
 
 **One goal template**: `collection-intake.md`.
 
