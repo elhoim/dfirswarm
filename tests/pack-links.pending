@@ -65,9 +65,6 @@ linux-forensics unused skills/triage/system-profile.md fls
 linux-forensics unused skills/triage/system-profile.md icat
 linux-forensics unused skills/triage/system-profile.md target-query
 linux-forensics unused skills/triage/system-profile.md timestamp_decode
-macos-forensics unlisted skills/logs/unified.md log
-macos-forensics unused skills/artifacts/knowledgec.md timestamp_decode
-macos-forensics unused skills/filesystem/apfs.md timestamp_decode
 memory-forensics closure skills/triage/no-framework.md evtx_carve
 memory-forensics closure skills/triage/no-framework.md mam_scan
 memory-forensics closure skills/triage/no-framework.md regkv
