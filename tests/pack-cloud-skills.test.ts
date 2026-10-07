@@ -1,7 +1,7 @@
 /**
  * The cloud pack's skills: what each says it shows and does not, the credential boundary, the leaf budget, and the claims the review
  * removed (an operation read as an effect, a retention figure, a window of attacker access computed from two times). A claim that
- * returns fails by its wording; a fixture here is the skill's own text, never a tool's output.
+ * returns fails by its words; a fixture here is the skill's own text, never a tool's output.
  */
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
@@ -99,7 +99,7 @@ test("the claims the review removed do not come back", () => {
     [/first hour of an intrusion|shape of enumeration/i, "denials as the start of an intrusion"],
     [/the exfiltration (route|question)/i, "sharing or access as exfiltration"],
     [/every sign-in attempt|only on the business tiers/i, "an unsourced coverage rule"],
-    [/enumerate/i, "live-access wording in an offline pack"],
+    [/enumerate/i, "live-access phrasing in an offline pack"],
     [/one log for every workload|a row per operation/i, "the unified audit log as complete and one row per action"],
     [/\b(30|thirty) minutes\b|\b180 days\b|\b90 days\b|seven days on Free/i, "a retention or delay figure no one supplied"],
     [/two-minute|one-hour intervals/i, "a fixed aggregation window stated as fact"],
