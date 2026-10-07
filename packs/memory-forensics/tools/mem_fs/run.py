@@ -241,15 +241,29 @@ def writable_mount(path):
     return dest
 
 
+class OutsideMount(Exception):
+    """A virtual path that is not, or does not resolve to, a place inside the mount."""
+
+    def __init__(self, label, virtual, reason):
+        super().__init__("%s %s: %s" % (label, json.dumps(virtual), reason))
+        self.label, self.virtual, self.reason = label, virtual, reason
+
+
 def inside_mount(mount, virtual, label):
-    """A virtual path as a path in the mount, held inside it (a `..`, an absolute path and a link out are refused)."""
+    """A virtual path as a path in the mount, held inside it.
+
+    Raises OutsideMount for an empty or absolute path, a `..`, and a link that resolves
+    outside the mount; a link loop raises the OSError or RuntimeError of the resolution.
+    It never ends the program: it is called from the worker thread, where an exit would
+    stop that thread alone and leave the answer to be printed after an error document.
+    """
     if not isinstance(virtual, str) or not virtual:
-        fail("%s must be a non-empty path inside the mount" % label)
+        raise OutsideMount(label, virtual, "must be a non-empty path inside the mount")
     if virtual.startswith("/") or any(part == ".." for part in virtual.split("/")):
-        fail("%s must stay inside the mount: a relative path with no ..", **{label: virtual})
+        raise OutsideMount(label, virtual, "must stay inside the mount: a relative path with no ..")
     target = (mount / virtual).resolve()
     if target != mount and mount not in target.parents:
-        fail("%s must stay inside the mount" % label, **{label: virtual})
+        raise OutsideMount(label, virtual, "resolves outside the mount (a link)")
     return target
 
 
@@ -340,12 +354,17 @@ def main():
         fail("mount exists and is not a directory", mount=str(mount))
     # Every path is checked against the mount before MemProcFS is started.
     targets = []
-    if mode == "export":
-        for virtual in paths:
-            inside_mount(mount, virtual, "paths")
-            targets.append(virtual)
-    elif requested:
-        inside_mount(mount, requested, "list")
+    try:
+        if mode == "export":
+            for virtual in paths:
+                inside_mount(mount, virtual, "paths")
+                targets.append(virtual)
+        elif requested:
+            inside_mount(mount, requested, "list")
+    except OutsideMount as exc:
+        fail(str(exc), **{exc.label: exc.virtual})
+    except (OSError, RuntimeError) as exc:
+        fail("a path could not be resolved inside the mount: %s" % exc)
     mount.mkdir(parents=True, exist_ok=True)
     if any(mount.iterdir()):
         fail("mount directory must be empty; refusing stale files or an existing mount",
@@ -384,44 +403,47 @@ def main():
     # --- the work: runs in a thread, so one deadline holds over a read that blocks ---
 
     def copy_out(source, virtual, item):
-        """Copy one virtual file to $OUT/mem_fs/<name>, whole, and say what happened in item['status']."""
+        """Copy one virtual file to $OUT/mem_fs/<name>, whole; item['status'] says what happened, and the
+        return value is the count it belongs to (exported, failed, refused, not_exported, partial)."""
         rel = output_name(virtual)
         try:
             st = os.lstat(source)
         except FileNotFoundError:
             item["status"] = "failed: not found in the mount"
-            counts["failed"] += 1
-            return
+            return "failed"
         except OSError as exc:
             item["status"] = "failed: %s" % describe(exc)
-            counts["failed"] += 1
-            return
+            return "failed"
         if stat.S_ISDIR(st.st_mode):
             item["status"] = "not exported: a directory (export names files; list shows what a directory holds)"
-            counts["not_exported"] += 1
-            return
+            return "not_exported"
         if not stat.S_ISREG(st.st_mode):
             item["status"] = "not exported: not a regular file"
-            counts["not_exported"] += 1
-            return
+            return "not_exported"
         if st.st_size > max_bytes:
             item["status"] = "not exported: %d bytes exceeds max_bytes_per_path (%d); raise it to export this file" % (st.st_size, max_bytes)
             item["bytes"] = st.st_size
-            counts["not_exported"] += 1
-            return
+            return "not_exported"
+        try:
+            # Never through a link: the path was resolved just now, and a link planted since
+            # is refused by the open rather than followed.
+            source_fd = os.open(str(source), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        except OSError as exc:
+            item["status"] = "failed: %s could not be opened: %s" % (virtual, describe(exc))
+            return "failed"
         try:
             fd = secret.open_value(rel)
         except FileExistsError:
+            os.close(source_fd)
             item["status"] = "refused: the output name %s already exists (another virtual path maps to it, or an earlier call wrote it); nothing was overwritten" % rel
-            counts["refused"] += 1
-            return
+            return "refused"
         except OSError as exc:
+            os.close(source_fd)
             item["status"] = "failed: the output file could not be created: %s" % describe(exc)
-            counts["failed"] += 1
-            return
-        digest, size, partial = hashlib.sha256(), 0, None
+            return "failed"
+        digest, size, partial, error = hashlib.sha256(), 0, None, None
         try:
-            with os.fdopen(fd, "wb") as out, open(source, "rb") as src:
+            with os.fdopen(fd, "wb") as out, os.fdopen(source_fd, "rb") as src:
                 while True:
                     if state["abandon"]:
                         partial = "the deadline was reached"
@@ -438,25 +460,22 @@ def main():
                 out.flush()
                 os.fsync(out.fileno())
         except OSError as exc:
-            item["status"] = "failed: reading %s: %s; %d bytes were written and are kept" % (virtual, describe(exc), size)
-            item["bytes"] = size
-            counts["failed"] += 1
-            secret.note({"item_id": item["item_id"], "virtual_path": virtual, "output": rel, "bytes": size,
-                         "sha256": digest.hexdigest(), "status": item["status"]})
-            secret.wrote()
-            item["output"] = secret.shown_path(rel)
-            return
+            error = exc
         item["bytes"] = size
         item["output"] = secret.shown_path(rel)
-        if partial:
+        if error is not None:
+            item["status"] = "failed: reading %s: %s; %d bytes were written and are kept" % (virtual, describe(error), size)
+            category = "failed"
+        elif partial:
             item["status"] = "partial: %s; %d bytes were written and are kept" % (partial, size)
-            counts["partial"] += 1
+            category = "partial"
         else:
             item["status"] = "exported"
-            counts["exported"] += 1
+            category = "exported"
         secret.note({"item_id": item["item_id"], "virtual_path": virtual, "output": rel, "bytes": size,
                      "sha256": digest.hexdigest(), "status": item["status"]})
         secret.wrote()
+        return category
 
     def work_export():
         state["phase"] = "export"
@@ -464,9 +483,18 @@ def main():
             item = {"item_id": "X%06d" % number, "virtual_path": virtual}
             if state["abandon"]:
                 item["status"] = "not attempted: the deadline was reached"
-                counts["not_attempted"] += 1
+                category = "not_attempted"
             else:
-                copy_out(inside_mount(mount, virtual, "paths"), virtual, item)
+                # One item's trouble is that item's status and count, and the next item goes on.
+                try:
+                    category = copy_out(inside_mount(mount, virtual, "paths"), virtual, item)
+                except OutsideMount as exc:
+                    item["status"] = "refused: %s" % exc.reason
+                    category = "refused"
+                except (RuntimeError, OSError) as exc:
+                    item["status"] = "failed: %s" % (describe(exc) if isinstance(exc, OSError) else "%s: %s" % (type(exc).__name__, exc))
+                    category = "failed"
+            counts[category] += 1
             page.add(item)
 
     def work_text():
@@ -571,7 +599,7 @@ def main():
             timings["work_seconds"] = round(time.monotonic() - work_started, 2)
             if "error" in result and not problem:
                 exc = result["error"]
-                problem = (state["phase"], "%s" % (exc if isinstance(exc, FileNotFoundError) else describe(exc) if isinstance(exc, OSError) else "%s: %s" % (type(exc).__name__, exc)))
+                problem = (state["phase"], "%s" % (exc if isinstance(exc, (FileNotFoundError, OutsideMount)) else describe(exc) if isinstance(exc, OSError) else "%s: %s" % (type(exc).__name__, exc)))
     finally:
         cleanup_started = time.monotonic()
         # Stop the engine, then release a FUSE mount: a successful return must not leave

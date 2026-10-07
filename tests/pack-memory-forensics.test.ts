@@ -498,7 +498,7 @@ function regionBytes(): Buffer {
 const PROC_TEXT = "  PID  PPID  Name\n    4     0  System\n 1234   600  notepad.exe\n";
 const ENV_TEXT = `COMPUTERNAME=HOST1\nAPI_TOKEN=${SECRET_TOKEN}\n`;
 
-async function memfsStub(cwd: string, bin: string, mode = ""): Promise<Record<string, string>> {
+async function memfsStub(cwd: string, bin: string, mode = "", links: [string, string][] = []): Promise<Record<string, string>> {
   const tree = join(cwd, "stubtree");
   await mkdir(join(tree, "sys", "proc"), { recursive: true });
   await mkdir(join(tree, "name", "1234-notepad.exe", "minidump"), { recursive: true });
@@ -511,7 +511,7 @@ async function memfsStub(cwd: string, bin: string, mode = ""): Promise<Record<st
   await writeFile(
     join(bin, "memprocfs"),
     `#!/usr/bin/env python3
-import os, shutil, signal, sys, time
+import json, os, shutil, signal, sys, time
 args = sys.argv[1:]
 mount = args[args.index("-mount") + 1]
 with open(os.environ["STUB_LOG"], "a") as f:
@@ -533,6 +533,10 @@ signal.signal(signal.SIGTERM, bye)
 if os.environ.get("STUB_MODE") != "never":
     tree = os.environ["STUB_TREE"]
     for name in sorted(os.listdir(tree), key=lambda n: n == "sys"):  # sys/ last: a mount shows it when it is up
+        if name == "sys":
+            # Links planted after MemProcFS started, so after any check made before it did.
+            for link, target in json.loads(os.environ.get("STUB_LINKS", "[]")):
+                os.symlink(target.replace("{mount}", mount), os.path.join(mount, link))
         src, dst = os.path.join(tree, name), os.path.join(mount, name)
         shutil.copytree(src, dst) if os.path.isdir(src) else shutil.copy(src, dst)
 while True:
@@ -544,7 +548,7 @@ while True:
   const shim = join(cwd, "mountshim");
   await mkdir(shim, { recursive: true });
   await writeFile(join(shim, "sitecustomize.py"), "import os, os.path\nos.path.ismount = lambda p: os.path.isdir(os.path.join(p, 'sys'))\n");
-  return { PYTHONPATH: shim, STUB_TREE: tree, STUB_LOG: log, STUB_MODE: mode };
+  return { PYTHONPATH: shim, STUB_TREE: tree, STUB_LOG: log, STUB_MODE: mode, STUB_LINKS: JSON.stringify(links) };
 }
 
 async function jobDir(cwd: string, id = "j000042"): Promise<{ out: string; job: Record<string, string> }> {
@@ -733,5 +737,47 @@ test("mem_fs does not export a file larger than max_bytes_per_path, and counts i
     assert.match(answer.items?.[0].status as string, /^not exported: .*exceeds max_bytes_per_path/);
     assert.equal(await exists(join(out, "mem_fs", "name", "1234-notepad.exe", "minidump", "memory.dmp")), false);
     assert.equal(answer.complete, false);
+  });
+});
+
+test("mem_fs answers once, per item, for a link that leaves the mount or loops, and its counts add up", async () => {
+  // A link in the tree is resolved after the engine started, past the check made before. That
+  // check's failure printed an error document from the worker thread and went on to print an
+  // answer, two documents on stdout, with the items after it uncounted.
+  await withCwd(async (cwd, bin) => {
+    const victim = join(cwd, "victim.txt");
+    await writeFile(victim, "outside the mount: do not touch");
+    const env = await memfsStub(cwd, bin, "", [
+      ["evil", victim],
+      ["loop", "{mount}/loop"],
+      ["inlink", "{mount}/sys/proc/proc.txt"],
+    ]);
+    await writeFile(join(cwd, "inputs", "memory.raw"), Buffer.alloc(4096));
+    const { out, job } = await jobDir(cwd);
+    const base = { path: "inputs/memory.raw", write_values: true, timeout_seconds: 30 };
+
+    const run = await tool(FS, cwd, { ...base, mount: join(out, "mem"), mode: "export", paths: ["evil", "loop", "inlink", "sys/proc/proc.txt"] }, { ...env, ...job }, bin);
+    const answer = body<FsAnswer>(run); // JSON.parse: one document, or it throws
+    const counts = answer.counts as Record<string, number>;
+    assert.equal(counts.requested, 4);
+    assert.equal(Object.entries(counts).filter(([k]) => k !== "requested").reduce((n, [, v]) => n + v, 0), 4, JSON.stringify(counts));
+    assert.deepEqual(answer.items?.map((i) => i.virtual_path), ["evil", "loop", "inlink", "sys/proc/proc.txt"], "every item is in the answer, in order");
+    assert.match(answer.items?.[0].status as string, /^refused: resolves outside the mount/);
+    assert.match(answer.items?.[1].status as string, /^(failed|not exported): /, "a link loop is named, not exported");
+    assert.equal(answer.items?.[2].status, "exported", "a link that stays inside the mount reads its target");
+    assert.equal(answer.items?.[3].status, "exported", "the item after the bad ones is still done");
+    assert.equal(answer.complete, false);
+    assert.equal(await readFile(victim, "utf8"), "outside the mount: do not touch");
+    assert.equal(await exists(join(out, "mem_fs", "evil")), false, "the file a link pointed at outside the mount was copied");
+    assert.equal(await readFile(join(out, "mem_fs", "inlink"), "utf8"), PROC_TEXT);
+
+    // text and list report the same, in one document, through the error path.
+    const text = refused(await tool(FS, cwd, { ...base, mount: join(out, "mem2"), mode: "text", list: "evil" }, { ...env, ...job }, bin));
+    assert.match(text.error, /outside the mount/);
+    assert.equal(text.phase, "read");
+    assert.equal(await exists(join(out, "mem_fs", "evil")), false);
+    const list = refused(await tool(FS, cwd, { path: "inputs/memory.raw", mount: join(out, "mem3"), mode: "list", list: "evil", timeout_seconds: 30 }, { ...env, ...job }, bin));
+    assert.match(list.error, /outside the mount/);
+    assert.equal(list.phase, "read");
   });
 });
