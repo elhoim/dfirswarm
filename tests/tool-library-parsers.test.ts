@@ -87,7 +87,7 @@ test("usn_journal skips the sparse front and decodes the reason bits", async () 
     assert.equal(r.usn, 4471);
     assert.deepEqual(r.reason.sort(), ["DATA_EXTEND", "FILE_CREATE"]);
     assert.deepEqual(r.attributes, ["ARCHIVE"]);
-    assert.equal(r.timestamp, "2026-02-11T02:57:52Z");
+    assert.equal(r.timestamp, "2026-02-11T02:57:52.0000000Z");
     assert.equal(r.file_reference, 33194);
     assert.equal(r.file_sequence, 1);
 
@@ -169,7 +169,7 @@ test("usn_journal reads v2, v3 and v4 records behind megabytes of zeros, and a f
     await writeFile(join(cwd, "work", "UsnJrnl_J"), journal);
 
     type Row = { version: number; name: string | null; usn: number; file_reference: number | null; file_sequence: number | null; file_id?: string; reason: string[]; extents?: Array<{ offset: number; length: number }>; offset: number };
-    type Body = { first_record_offset: number; zero_bytes_skipped: number; records_read: number; records_by_version: Record<string, number>; record_count: number; malformed_skipped: number; records: Row[]; note?: string; error?: string };
+    type Body = { first_record_offset: number; zero_bytes_skipped: number; records_read: number; records_by_version: Record<string, number>; record_count: number; unrecognised_bytes: number; unrecognised_ranges: Array<{ offset: number; bytes: number }>; records: Row[]; note?: string; error?: string };
     for (const script of [pack, join(LIB, "usn_journal", "run.py")]) {
       const all = await runPy(script, cwd, { path: "work/UsnJrnl_J" });
       assert.equal(all.code, 0, all.stderr + all.stdout);
@@ -178,7 +178,8 @@ test("usn_journal reads v2, v3 and v4 records behind megabytes of zeros, and a f
       assert.ok(body.zero_bytes_skipped >= zeros, "and how many zero bytes it passed");
       assert.equal(body.records_read, 3);
       assert.deepEqual(body.records_by_version, { "2": 1, "3": 1, "4": 1 });
-      assert.equal(body.malformed_skipped, 2, "the 16 bytes that are not a record are stepped over 8 at a time and counted");
+      assert.equal(body.unrecognised_bytes, 16, "the 16 bytes that are not a record are counted as bytes, not as 8-byte steps");
+      assert.deepEqual(body.unrecognised_ranges, [{ offset: zeros + page, bytes: 16 }], "and kept as a range");
       const [a, b, c] = body.records;
       assert.deepEqual([a.version, a.name, a.usn, a.file_reference, a.file_sequence], [2, "report.docx", 9000, 33194, 3]);
       assert.deepEqual(a.reason, ["FILE_CREATE"]);

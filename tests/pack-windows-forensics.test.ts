@@ -2617,3 +2617,118 @@ test("evtx_carve refuses a negative or empty range and a start past the file, an
     assert.deepEqual(part.range_examined, { start: 1000, end: 3000 });
   });
 });
+
+// --- usn_journal ----------------------------------------------------------------
+
+/**
+ * USN records by the layouts of the tool's own documentation (USN_RECORD_V2: length, version, 8-byte file and parent
+ * references (entry in the low 48 bits, sequence in the high 16), Usn at 0x18, FILETIME at 0x20, reason, source, security
+ * id and attributes from 0x28, name length and offset at 0x38; V3 has 16-byte references and everything after them 0x10
+ * later; V4 has no name or time).
+ */
+function usn(version: 2 | 3 | 4, o: { name?: string; usn: bigint; entry: bigint; seq: bigint; parent: bigint; parentSeq: bigint; reason: number; source?: number; security?: number; attrs?: number; filetime?: bigint }): Buffer {
+  const name = Buffer.from(o.name ?? "", "utf16le");
+  const head = version === 2 ? 0x3c : version === 3 ? 0x4c : 0x40 + 32;
+  let length = head + name.length;
+  length += (8 - (length % 8)) % 8;
+  const r = Buffer.alloc(length);
+  r.writeUInt32LE(length, 0);
+  r.writeUInt16LE(version, 4);
+  if (version === 2) {
+    r.writeBigUInt64LE(o.entry | (o.seq << 48n), 0x08);
+    r.writeBigUInt64LE(o.parent | (o.parentSeq << 48n), 0x10);
+    r.writeBigUInt64LE(o.usn, 0x18);
+    r.writeBigInt64LE(o.filetime ?? 0n, 0x20);
+    r.writeUInt32LE(o.reason, 0x28);
+    r.writeUInt32LE(o.source ?? 0, 0x2c);
+    r.writeUInt32LE(o.security ?? 0, 0x30);
+    r.writeUInt32LE(o.attrs ?? 0, 0x34);
+    r.writeUInt16LE(name.length, 0x38);
+    r.writeUInt16LE(0x3c, 0x3a);
+    name.copy(r, 0x3c);
+  } else if (version === 3) {
+    r.writeBigUInt64LE(o.entry | (o.seq << 48n), 0x08);
+    r.writeBigUInt64LE(o.parent | (o.parentSeq << 48n), 0x18);
+    r.writeBigUInt64LE(o.usn, 0x28);
+    r.writeBigInt64LE(o.filetime ?? 0n, 0x30);
+    r.writeUInt32LE(o.reason, 0x38);
+    r.writeUInt32LE(o.source ?? 0, 0x3c);
+    r.writeUInt32LE(o.security ?? 0, 0x40);
+    r.writeUInt32LE(o.attrs ?? 0, 0x44);
+    r.writeUInt16LE(name.length, 0x48);
+    r.writeUInt16LE(0x4c, 0x4a);
+    name.copy(r, 0x4c);
+  } else {
+    r.writeBigUInt64LE(o.entry | (o.seq << 48n), 0x08);
+    r.writeBigUInt64LE(o.parent | (o.parentSeq << 48n), 0x18);
+    r.writeBigUInt64LE(o.usn, 0x28);
+    r.writeUInt32LE(o.reason, 0x30);
+    r.writeUInt32LE(o.source ?? 0, 0x34);
+    r.writeUInt32LE(0, 0x38);
+    r.writeUInt16LE(1, 0x3c);
+    r.writeUInt16LE(16, 0x3e);
+    r.writeBigInt64LE(0n, 0x40);
+    r.writeBigInt64LE(4096n, 0x48);
+  }
+  return r;
+}
+
+type UsnRow = { version: number; name: string | null; usn: number; timestamp?: string | null; timestamp_filetime?: string; file_reference: number | null; file_sequence: number | null; parent_reference: number | null; parent_sequence: number | null; source_info?: number; security_id?: number; attributes_raw?: number; reason_raw: number; offset: number };
+type UsnOut = {
+  records_read: number;
+  record_count: number;
+  records: UsnRow[];
+  unrecognised_bytes: number;
+  unrecognised_ranges: Array<{ offset: number; bytes: number }>;
+  prefix_unrecognised_bytes: number;
+  nameless_excluded_by_filter: number;
+  malformed_skipped?: unknown;
+};
+
+test("usn_journal keeps the parent's sequence number, the source info, the security id and the raw attributes of v2 and v3 records, with the FILETIME exact", async () => {
+  // A v2 row kept the parent reference but not its sequence, and neither version kept source, security id or the raw
+  // attributes word, so a record could not be joined to a reused MFT entry.
+  await withCwd(async (cwd) => {
+    const v2 = usn(2, { name: "report.docx", usn: 4096n, entry: 33194n, seq: 3n, parent: 5n, parentSeq: 7n, reason: 0x100, source: 2, security: 0x55, attrs: 0x20, filetime: FILETIME_BASE });
+    const v3 = usn(3, { name: "upload.aspx", usn: 4200n, entry: 40000n, seq: 2n, parent: 5n, parentSeq: 9n, reason: 0x80000200, source: 4, security: 0x66, attrs: 0x2020, filetime: FILETIME_BASE + 10_000_000n });
+    await writeFile(join(cwd, "work", "J"), Buffer.concat([v2, v3, Buffer.alloc(4096)]));
+    const out = body<UsnOut>(await tool("usn_journal", cwd, { path: "work/J" }));
+    const [a, b] = out.records;
+    assert.equal(a.parent_sequence, 7);
+    assert.equal(a.parent_reference, 5);
+    assert.deepEqual([a.source_info, a.security_id, a.attributes_raw], [2, 0x55, 0x20]);
+    assert.equal(a.timestamp_filetime, String(FILETIME_BASE));
+    assert.equal(a.timestamp, "2023-11-13T00:53:20.1234567Z");
+    assert.equal(b.parent_sequence, 9);
+    assert.deepEqual([b.source_info, b.security_id, b.attributes_raw], [4, 0x66, 0x2020]);
+    assert.equal(b.timestamp, "2023-11-13T00:53:21.1234567Z");
+  });
+});
+
+test("usn_journal counts bytes it could not read as a record, in ranges and apart from the zeros of the sparse front, and calls a V4 record excluded by a name filter what it is", async () => {
+  // `skipped` counted 8-byte steps after the first record, and a name filter silently left out every V4 record,
+  // which has no name.
+  await withCwd(async (cwd) => {
+    const page = 4096;
+    const a = usn(2, { name: "a.txt", usn: 1000n, entry: 10n, seq: 1n, parent: 5n, parentSeq: 5n, reason: 0x100 });
+    const v4 = usn(4, { usn: 2000n, entry: 10n, seq: 1n, parent: 5n, parentSeq: 5n, reason: 0x1 });
+    const b = usn(2, { name: "b.txt", usn: 3000n, entry: 11n, seq: 1n, parent: 5n, parentSeq: 5n, reason: 0x100 });
+    const junk = Buffer.alloc(24, 0xff);
+    const prefixJunk = Buffer.alloc(16, 0xee);
+    const journal = Buffer.concat([Buffer.alloc(page), prefixJunk, a, junk, v4, b, Buffer.alloc(page)]);
+    await writeFile(join(cwd, "work", "J"), journal);
+    const all = body<UsnOut>(await tool("usn_journal", cwd, { path: "work/J" }));
+    assert.equal(all.records_read, 3);
+    assert.equal(all.prefix_unrecognised_bytes, 16);
+    assert.equal(all.unrecognised_bytes, 24);
+    assert.deepEqual(all.unrecognised_ranges, [{ offset: page + 16 + a.length, bytes: 24 }]);
+    assert.equal(all.malformed_skipped, undefined, "the old count of steps is gone");
+    const filtered = body<UsnOut>(await tool("usn_journal", cwd, { path: "work/J", name: "\\.txt$" }));
+    assert.equal(filtered.records_read, 3);
+    assert.deepEqual(filtered.records.map((r) => r.name), ["a.txt", "b.txt"]);
+    assert.equal(filtered.nameless_excluded_by_filter, 1, "the V4 record the filter could not match is counted");
+    const withNameless = body<UsnOut>(await tool("usn_journal", cwd, { path: "work/J", name: "\\.txt$", include_nameless: true }));
+    assert.deepEqual(withNameless.records.map((r) => r.version), [2, 4, 2]);
+    assert.equal(withNameless.nameless_excluded_by_filter, 0);
+  });
+});
