@@ -428,3 +428,253 @@ test("plist_read pages a directory sweep losslessly when no out_file is named", 
   });
 });
 
+// --- fsevents_parse ---------------------------------------------------------------
+
+const FS = join(MAC, "fsevents_parse", "run.py");
+const CREATED = 0x01000000;
+const REMOVED = 0x02000000;
+const RENAMED = 0x08000000;
+const FILE_EVENT = 0x00008000;
+
+function fsRecord(path: string, id: bigint, flags: number, node?: bigint): Buffer {
+  const fixed = Buffer.alloc(node === undefined ? 12 : 20);
+  fixed.writeBigUInt64LE(id, 0);
+  fixed.writeUInt32LE(flags >>> 0, 8);
+  if (node !== undefined) fixed.writeBigUInt64LE(node, 12);
+  return Buffer.concat([Buffer.from(path, "utf8"), Buffer.from([0]), fixed]);
+}
+
+/** A page: the 12-byte header, then the records. `length` overrides the declared page length. */
+function fsPage(magic: string, records: Buffer[], length?: number): Buffer {
+  const body = Buffer.concat(records);
+  const header = Buffer.alloc(12);
+  header.write(magic, 0, "latin1");
+  header.writeUInt32LE(length ?? 12 + body.length, 8);
+  return Buffer.concat([header, body]);
+}
+
+type FsAnswer = {
+  status: string;
+  files: number;
+  gzip_files: number;
+  records: { path: string; event_id: number; flags: string[]; flags_raw: number; flags_undecoded?: number; node_id: number | null; version: number; file: string; member: number | null; page_offset: number; record_offset: number; parser: string }[];
+  record_count: number;
+  records_before_filter: number;
+  event_id_range: [number, number] | null;
+  complete_records: string | null;
+  files_by_state: { parsed: number; partial: number; empty: number; unsupported: number; failed: number };
+  per_file: { file: string; state: string; magic_seen?: string; members?: { complete: number; truncated: number; failed: number }; expanded_bytes?: number; records?: number }[];
+  log_identity: { file: string; bytes: number; uuid?: string; raw_hex?: string } | null;
+  coverage: {
+    members: { complete: number; truncated: number; failed: number };
+    pages: { parsed: number; unsupported: number; invalid_length: number; truncated: number };
+    records: { decoded: number; empty_path: number; incomplete: number };
+    bytes_skipped: number;
+  };
+  problems: { file: string; kind: string; why: string; offset?: number; compressed_offset?: number; member?: number; magic?: string; bytes?: number }[];
+  problems_total: number;
+  filters: { flags_unknown?: string[] };
+  note: string;
+};
+
+/** The answer whatever the exit code: a failed run still prints its whole answer. */
+function fsAnswer(out: Run): FsAnswer {
+  assert.doesNotMatch(out.stderr, /Traceback/);
+  return JSON.parse(out.stdout) as FsAnswer;
+}
+
+async function fsDir(cwd: string, name: string, files: Record<string, Buffer>): Promise<string> {
+  const dir = join(cwd, "work", name);
+  await mkdir(dir, { recursive: true });
+  for (const [file, bytes] of Object.entries(files)) await writeFile(join(dir, file), bytes);
+  return `work/${name}`;
+}
+
+test("fsevents_parse reads version 1 and 2 pages across two gzip members and counts both", async () => {
+  await withCwd(async (cwd) => {
+    const m1 = gzipSync(fsPage("2SLD", [fsRecord("Users/a/payroll.xlsx", 1001n, CREATED | FILE_EVENT, 12n), fsRecord("Users/a/payroll.xlsx", 1042n, REMOVED | FILE_EVENT, 12n)]));
+    const m2 = gzipSync(fsPage("1SLD", [fsRecord("tmp/x", 1100n, CREATED | FILE_EVENT)]));
+    const dir = await fsDir(cwd, "ev", { "0000000000000fff": Buffer.concat([m1, m2]) });
+    const answer = fsAnswer(await tool(FS, cwd, { path: dir }));
+    assert.equal(answer.status, "complete");
+    assert.equal(answer.record_count, 3);
+    assert.deepEqual(answer.records.map((r) => [r.path, r.event_id, r.version, r.node_id]), [
+      ["Users/a/payroll.xlsx", 1001, 2, 12], ["Users/a/payroll.xlsx", 1042, 2, 12], ["tmp/x", 1100, 1, null],
+    ]);
+    assert.deepEqual(answer.coverage.members, { complete: 2, truncated: 0, failed: 0 });
+    assert.equal(answer.coverage.pages.parsed, 2);
+    assert.deepEqual(answer.files_by_state, { parsed: 1, partial: 0, empty: 0, unsupported: 0, failed: 0 });
+    assert.deepEqual(answer.records[0].member, 0);
+    assert.equal(answer.records[2].member, 1);
+    assert.equal(answer.records[0].page_offset, 0);
+    assert.equal(answer.records[0].record_offset, 12);
+    assert.equal(answer.records[0].parser, "fsevents_parse/3");
+  });
+});
+
+test("fsevents_parse says a page of a version it does not read is unsupported, with the magic seen, and not an empty success", async () => {
+  // A 3SLD file came back as no records and no problems.
+  await withCwd(async (cwd) => {
+    const dir = await fsDir(cwd, "ev3", { "0000000000000aaa": gzipSync(fsPage("3SLD", [fsRecord("a/b", 5n, CREATED, 1n)])) });
+    const run = await tool(FS, cwd, { path: dir });
+    const answer = fsAnswer(run);
+    assert.equal(run.code, 1, "nothing was decoded, and the exit says so");
+    assert.equal(answer.status, "unsupported");
+    assert.deepEqual(answer.files_by_state, { parsed: 0, partial: 0, empty: 0, unsupported: 1, failed: 0 });
+    assert.equal(answer.per_file[0].state, "unsupported");
+    assert.equal(answer.per_file[0].magic_seen, "3SLD");
+    assert.equal(answer.coverage.pages.unsupported, 1);
+    assert.ok(answer.problems.some((p) => p.kind === "unsupported page magic" && p.magic === "3SLD"));
+    assert.equal(answer.record_count, 0);
+    // Mixed with a readable file the run is partial, and the readable file's records are there.
+    const mixed = await fsDir(cwd, "evmixed", {
+      "0000000000000aaa": gzipSync(fsPage("3SLD", [fsRecord("a/b", 5n, CREATED, 1n)])),
+      "0000000000000bbb": gzipSync(fsPage("2SLD", [fsRecord("c/d", 9n, REMOVED, 2n)])),
+    });
+    const both = fsAnswer(await tool(FS, cwd, { path: mixed }));
+    assert.equal(both.status, "partial");
+    assert.equal(both.record_count, 1);
+    assert.deepEqual(both.files_by_state, { parsed: 1, partial: 0, empty: 0, unsupported: 1, failed: 0 });
+  });
+});
+
+test("fsevents_parse names a gzip member cut short, with its offset, and keeps the records before the cut", async () => {
+  await withCwd(async (cwd) => {
+    const records = Array.from({ length: 200 }, (_, i) => fsRecord(`Users/a/file-${i}`, BigInt(1000 + i), CREATED | FILE_EVENT, BigInt(i)));
+    const whole = gzipSync(fsPage("2SLD", records));
+    const cut = whole.subarray(0, whole.length - 40); // loses the end of the deflate stream and the gzip trailer
+    const dir = await fsDir(cwd, "evcut", { "0000000000000ccc": cut });
+    const answer = fsAnswer(await tool(FS, cwd, { path: dir }));
+    assert.equal(answer.status, "partial");
+    assert.deepEqual(answer.coverage.members, { complete: 0, truncated: 1, failed: 0 });
+    const problem = answer.problems.find((p) => p.kind === "gzip member truncated");
+    assert.ok(problem, JSON.stringify(answer.problems));
+    assert.equal(problem.member, 0);
+    assert.equal(problem.compressed_offset, 0);
+    assert.ok(answer.record_count > 0 && answer.record_count < 200, `records kept before the cut: ${answer.record_count}`);
+    assert.equal(answer.per_file[0].state, "partial");
+    assert.ok(answer.problems.some((p) => p.kind === "page truncated"), "the page the cut ended was named");
+  });
+});
+
+test("fsevents_parse names a deflate stream that does not decode, and reads the members before it", async () => {
+  await withCwd(async (cwd) => {
+    const good = gzipSync(fsPage("2SLD", [fsRecord("ok/one", 1n, CREATED, 1n)]));
+    const second = Buffer.from(gzipSync(fsPage("2SLD", Array.from({ length: 300 }, (_, i) => fsRecord(`bad/${i}`, BigInt(10 + i), CREATED, 2n)))));
+    for (let i = 20; i < 40; i++) second[i] = 0xff; // damage inside the deflate data, past the 10-byte gzip header
+    const dir = await fsDir(cwd, "evbad", { "0000000000000ddd": Buffer.concat([good, second]) });
+    const answer = fsAnswer(await tool(FS, cwd, { path: dir }));
+    assert.equal(answer.status, "partial");
+    assert.equal(answer.coverage.members.complete, 1);
+    assert.equal(answer.coverage.members.failed, 1);
+    const problem = answer.problems.find((p) => p.kind === "gzip member failed");
+    assert.ok(problem, JSON.stringify(answer.problems));
+    assert.equal(problem.member, 1);
+    assert.equal(problem.compressed_offset, good.length);
+    assert.ok(answer.records.some((r) => r.path === "ok/one"));
+  });
+});
+
+test("fsevents_parse reports an invalid page length, bytes it could not place and an incomplete record, and reads on", async () => {
+  // It clamped a bad page length to the rest of the data, skipped to the next magic without counting the bytes, and dropped an incomplete record.
+  await withCwd(async (cwd) => {
+    const bad = fsPage("2SLD", [fsRecord("lost/in/bad/page", 7n, CREATED, 1n)], 4); // a declared length below the header
+    const junk = Buffer.from("not a page, forty-odd bytes of something else");
+    const incomplete = Buffer.concat([Buffer.from("half/a/record"), Buffer.from([0]), Buffer.from([1, 2, 3, 4, 5])]);
+    const good = fsPage("2SLD", [fsRecord("after/all/that", 99n, REMOVED, 9n), incomplete]);
+    const dir = await fsDir(cwd, "evpages", { "0000000000000eee": gzipSync(Buffer.concat([bad, junk, good])) });
+    const answer = fsAnswer(await tool(FS, cwd, { path: dir }));
+    assert.equal(answer.status, "partial");
+    assert.ok(answer.records.some((r) => r.path === "after/all/that" && r.event_id === 99));
+    assert.equal(answer.coverage.pages.invalid_length, 1);
+    assert.ok(answer.problems.some((p) => p.kind === "invalid page length" && p.offset === 0), JSON.stringify(answer.problems));
+    assert.ok(answer.problems.some((p) => p.kind === "bytes not placed in a page" && (p.bytes ?? 0) > 0));
+    assert.ok(answer.coverage.bytes_skipped > 0);
+    assert.equal(answer.coverage.records.incomplete, 1);
+    assert.ok(answer.problems.some((p) => p.kind === "incomplete record"));
+  });
+});
+
+test("fsevents_parse names a file that is neither gzip nor a page, and a gzip file that decodes to nothing", async () => {
+  await withCwd(async (cwd) => {
+    const dir = await fsDir(cwd, "evodd", {
+      "0000000000000111": Buffer.from("plain text, no magic anywhere\n"),
+      "0000000000000222": gzipSync(Buffer.alloc(0)),
+      "0000000000000333": Buffer.alloc(0),
+    });
+    const answer = fsAnswer(await tool(FS, cwd, { path: dir }));
+    const byFile = Object.fromEntries(answer.per_file.map((f) => [f.file.split("/").pop(), f.state]));
+    assert.equal(byFile["0000000000000111"], "unsupported");
+    assert.equal(byFile["0000000000000222"], "empty");
+    assert.equal(byFile["0000000000000333"], "empty");
+    assert.equal(answer.record_count, 0);
+    assert.notEqual(answer.status, "complete", "an unsupported file is not a complete examination");
+  });
+});
+
+test("fsevents_parse bounds expansion, says so, and names where the whole is", async () => {
+  await withCwd(async (cwd) => {
+    // 64 MiB of zeros is 64 KiB of gzip. With a 1 MiB cap the tool stops and says what it left.
+    const bomb = gzipSync(Buffer.concat([fsPage("2SLD", [fsRecord("a", 1n, CREATED, 1n)]), Buffer.alloc(64 << 20)]));
+    const dir = await fsDir(cwd, "evbomb", { "0000000000000444": bomb });
+    const answer = fsAnswer(await tool(FS, cwd, { path: dir, max_expanded_bytes: 1 << 20 }));
+    assert.equal(answer.status, "partial");
+    const problem = answer.problems.find((p) => p.kind === "expansion cap reached");
+    assert.ok(problem, JSON.stringify(answer.problems));
+    assert.match(problem.why, /1048576/);
+    assert.match(problem.why, /0000000000000444/);
+    assert.ok(answer.record_count >= 1);
+  });
+});
+
+test("fsevents_parse records the log's identity from fseventsd-uuid, and a flag bit it has no name for", async () => {
+  await withCwd(async (cwd) => {
+    const uuid = "6F2D1C77-4B6E-4E0A-9C1E-0A1B2C3D4E5F";
+    const dir = await fsDir(cwd, "evuuid", {
+      "fseventsd-uuid": Buffer.from(uuid + "\n"),
+      "0000000000000555": gzipSync(fsPage("2SLD", [fsRecord("p", 3n, CREATED | 0x00000100, 1n), fsRecord("q", 4n, RENAMED | FILE_EVENT, 2n)])),
+    });
+    const answer = fsAnswer(await tool(FS, cwd, { path: dir }));
+    assert.equal(answer.files, 1, "the identity file is not a record file");
+    assert.equal(answer.log_identity?.uuid, uuid);
+    assert.match(answer.log_identity?.file ?? "", /fseventsd-uuid$/);
+    const p = answer.records.find((r) => r.path === "p");
+    assert.deepEqual(p?.flags, ["Created"]);
+    assert.equal(p?.flags_undecoded, 0x100, "a bit with no name is reported, not dropped");
+    assert.equal(answer.records.find((r) => r.path === "q")?.flags_undecoded, undefined);
+    // The note says a renamed path took part in a rename; it no longer says it is a move.
+    assert.doesNotMatch(answer.note, /is a move/);
+    assert.match(answer.note, /rename/i);
+    assert.match(answer.note, /pair/i);
+  });
+});
+
+test("fsevents_parse names a flag filter it has no name for, and does not overwrite an out_file", async () => {
+  await withCwd(async (cwd) => {
+    const dir = await fsDir(cwd, "evflt", { "0000000000000666": gzipSync(fsPage("2SLD", [fsRecord("p", 3n, REMOVED, 1n)])) });
+    const answer = fsAnswer(await tool(FS, cwd, { path: dir, flags: ["Removed", "Deleted"] }));
+    assert.equal(answer.record_count, 1);
+    assert.deepEqual(answer.filters.flags_unknown, ["Deleted"]);
+    await writeFile(join(cwd, "work", "keep.jsonl"), "precious\n");
+    const clash = refused(await tool(FS, cwd, { path: dir, out_file: "work/keep.jsonl" }));
+    assert.match(clash.error, /already exists/);
+    assert.equal(await readFile(join(cwd, "work", "keep.jsonl"), "utf8"), "precious\n");
+  });
+});
+
+test("fsevents_parse pages records losslessly and writes each to out_file", async () => {
+  await withCwd(async (cwd) => {
+    const records = Array.from({ length: 25 }, (_, i) => fsRecord(`d/f${i}`, BigInt(100 + i), CREATED, BigInt(i)));
+    const dir = await fsDir(cwd, "evpage", { "0000000000000777": gzipSync(fsPage("2SLD", records)) });
+    const answer = fsAnswer(await tool(FS, cwd, { path: dir, limit: 10 }));
+    assert.equal(answer.records.length, 10);
+    assert.equal(answer.record_count, 25);
+    assert.match(answer.complete_records ?? "", /^work\/s1\/tool-output\/.+\.jsonl$/);
+    const rows = (await readFile(join(cwd, answer.complete_records as string), "utf8")).trimEnd().split("\n");
+    assert.equal(rows.length, 25);
+    const withFile = fsAnswer(await tool(FS, cwd, { path: dir, limit: 10, out_file: "work/fs.jsonl" }));
+    assert.equal(withFile.complete_records, "work/fs.jsonl");
+    assert.equal((await readFile(join(cwd, "work", "fs.jsonl"), "utf8")).trimEnd().split("\n").length, 25);
+  });
+});
+
