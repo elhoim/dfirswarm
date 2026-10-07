@@ -13,7 +13,15 @@ MAM framing is checked before anything is inflated: the `MAM` magic, the method 
 Huffman; any other, a checksum-bearing variant included, is refused by name) and a declared
 uncompressed size no larger than the cap. The decompressor, dissect.util's, has no output bound of
 its own, so it is run with one: the declared size plus a small slack, past which the run fails and
-says so. A stream that inflates to less than its declared size fails too.
+says so. It is also given four zero bytes after the stream, because its bit reader takes 32 bits
+ahead of its read position and a stream that ends without padding would otherwise lose its last
+symbols (a file a few bytes short of its declared size is not a short stream). A stream that still
+inflates to less than its declared size fails.
+
+The run count is read where the file's layout puts it: the file information size (the file metrics
+array offset at 0x54 less 0x50) is 224 or 216 in the versions with eight last-run slots, with the
+run count at 0xD0 or 0xC8, and `file_information_size` is returned; any other size is a layout this
+does not read, and no run count or last-run time is interpreted from it.
 
 A compressed Prefetch file is unpacked by the same decoder mam_scan uses: agreement between the two
 tools says nothing about the decoder. A Prefetch file does not say who ran the program, from where
@@ -48,18 +56,32 @@ MAM_HEADER = 8
 # past the declared size (an end-of-stream symbol and padding), so the output cap is the declared
 # size plus this slack, never the declared size alone.
 OUTPUT_SLACK = 64 * 1024
+# dissect.util's loop stops when the read position reaches the end of the input, but its bit reader
+# has already taken up to 32 bits ahead of that position: the symbols still in that lookahead are
+# never decoded, and a stream that ends without padding comes out a few bytes short of its declared
+# size. Four zero bytes after the payload let the decoder reach them; what it decodes from the zeros
+# lies past the declared size and is cut. A stream that is genuinely short is still short.
+LOOKAHEAD_PAD = b"\x00\x00\x00\x00"
 # A Prefetch file is a few hundred kilobytes at most; a declared size past this is refused.
 MAX_DECLARED = 64 * 1024 * 1024
 SCCA = b"SCCA"
 # Layouts by SCCA version: the last-run FILETIMEs (where they start, how many) and the run count.
 # These are the versions the layout notes for Prefetch (libscca) describe; version 31 is treated as
 # version 30's layout, which is an assumption and is reported as one. Any other version is not read.
+# In the versions with eight last-run slots the run count does not sit at one place: the file
+# information that holds it is followed by the file metrics array, whose offset is its first word
+# (at 0x54), and Windows 10 files carry two sizes of it. The last-run FILETIMEs start at 0x80 in both;
+# the run count is at 0xD0 when the metrics array offset is 0x130 (a file information size, that
+# offset minus 0x50, of 224) and at 0xC8 when it is 0x128 (216). Any other size is a layout this
+# does not read: no run count and no time is interpreted from it, and the answer says so.
+INFO_SIZE_BASE = 0x50
+RUN_COUNT_AT_BY_INFO_SIZE = {224: 0xD0, 216: 0xC8}
 SCCA_VERSIONS = {
     17: {"last_run_at": 0x78, "last_runs": 1, "run_count_at": 0x90},
     23: {"last_run_at": 0x80, "last_runs": 1, "run_count_at": 0x98},
-    26: {"last_run_at": 0x80, "last_runs": 8, "run_count_at": 0xD0},
-    30: {"last_run_at": 0x80, "last_runs": 8, "run_count_at": 0xD0},
-    31: {"last_run_at": 0x80, "last_runs": 8, "run_count_at": 0xD0},
+    26: {"last_run_at": 0x80, "last_runs": 8, "run_count_by_info_size": True},
+    30: {"last_run_at": 0x80, "last_runs": 8, "run_count_by_info_size": True},
+    31: {"last_run_at": 0x80, "last_runs": 8, "run_count_by_info_size": True},
 }
 
 
@@ -117,7 +139,7 @@ def bounded_decompress(payload, cap, soft=False):
     output buffer that stops it. Strict mode raises OutputCapExceeded past `cap`. Soft mode (a payload
     cut from a dump, longer than the real stream) returns the first `cap` bytes once the decoder has
     produced them. The decoder is dissect.util's, so a tool using this does not check it against an
-    independent one."""
+    independent one. LOOKAHEAD_PAD is appended to the payload (see there)."""
     from dissect.util.compression import lzxpress_huffman
     import inspect
     if "dst = bytearray()" not in inspect.getsource(lzxpress_huffman.decompress):
@@ -126,7 +148,7 @@ def bounded_decompress(payload, cap, soft=False):
     _CappedBytes.soft = soft
     lzxpress_huffman.bytearray = _CappedBytes
     try:
-        return lzxpress_huffman.decompress(payload)
+        return lzxpress_huffman.decompress(bytes(payload) + LOOKAHEAD_PAD)
     except EnoughOutput as done:
         return done.data
     finally:
@@ -180,19 +202,35 @@ def parse_scca(data):
         out["problems"].append("version 31 is read with version 30's layout, which is an assumption")
     if not out["file_size_matches"]:
         out["problems"].append("the file size field (%d) is not the length of the data (%d)" % (out["file_size_field"], len(data)))
-    count_at = layout["run_count_at"]
-    out["run_count"] = struct.unpack_from("<I", data, count_at)[0] if count_at + 4 <= len(data) else None
-    runs = []
-    for slot in range(layout["last_runs"]):
-        at = layout["last_run_at"] + slot * 8
-        if at + 8 > len(data):
-            out["problems"].append("last-run slot %d is past the end of the data" % slot)
-            break
-        raw = struct.unpack_from("<Q", data, at)[0]
-        if raw:
-            runs.append({"slot": slot, "filetime": str(raw), "utc": filetime_iso(raw)})
-    out["last_runs"] = [r["utc"] for r in runs]
-    out["last_runs_detail"] = runs
+    # The first word of the file information is the offset of the file metrics array: the file
+    # information size is that offset less INFO_SIZE_BASE, and it tells which layout the run count has.
+    info_size = None
+    if len(data) >= 0x58:
+        info_size = struct.unpack_from("<I", data, 0x54)[0] - INFO_SIZE_BASE
+        out["file_information_size"] = info_size
+    if layout.get("run_count_by_info_size"):
+        count_at = RUN_COUNT_AT_BY_INFO_SIZE.get(info_size)
+        if count_at is None:
+            out["run_count"] = None
+            out["problems"].append(
+                "the file information size is %s (the file metrics array offset at 0x54 less 0x50), and the layouts read have 224 "
+                "(run count at 0xD0) and 216 (run count at 0xC8): the run count and the last-run times are not interpreted"
+                % ("not readable" if info_size is None else info_size))
+    else:
+        count_at = layout["run_count_at"]
+    if count_at is not None:
+        out["run_count"] = struct.unpack_from("<I", data, count_at)[0] if count_at + 4 <= len(data) else None
+        runs = []
+        for slot in range(layout["last_runs"]):
+            at = layout["last_run_at"] + slot * 8
+            if at + 8 > len(data):
+                out["problems"].append("last-run slot %d is past the end of the data" % slot)
+                break
+            raw = struct.unpack_from("<Q", data, at)[0]
+            if raw:
+                runs.append({"slot": slot, "filetime": str(raw), "utc": filetime_iso(raw)})
+        out["last_runs"] = [r["utc"] for r in runs]
+        out["last_runs_detail"] = runs
     # File information fields common to these versions: the metrics array, the trace chains, the
     # filename strings and the volume information, each an offset and a size or count from byte 0x54.
     metrics_at, metrics_n, chains_at, chains_n, names_at, names_size, vols_at, vols_n, vols_size = struct.unpack_from("<9I", data, 0x54) \
@@ -256,10 +294,16 @@ def main():
         fail("path is required: a Prefetch file, compressed (MAM) or plain SCCA")
     if not os.path.isfile(path):
         fail("no such file", path=path)
-    size = os.path.getsize(path)
+    try:
+        size = os.path.getsize(path)
+    except OSError as exc:
+        fail("the file cannot be read: %s" % exc, path=path)
     if size > MAX_FILE:
         fail("the file is %d bytes, over the %d this tool reads whole; a Prefetch file is far smaller" % (size, MAX_FILE), path=path, bytes=size)
-    data = Path(path).read_bytes()
+    try:
+        data = Path(path).read_bytes()
+    except OSError as exc:
+        fail("the file cannot be read: %s" % exc, path=path)
 
     out = {"parser": PARSER, "source": path, "file_bytes": len(data)}
     kind, info = mam_header(data)

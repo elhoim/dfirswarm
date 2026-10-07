@@ -10,7 +10,10 @@ Failures are counted BEFORE the name filter, so a record that could not be read 
 
 Decompression is bounded: each candidate is read from the file at its own offset, up to the declared
 size plus a margin for the worst case of the format, and decoded until it holds the declared size.
-The stream's own end is not found by guessing cut sizes. The decoder is dissect.util's, shared with
+The stream's own end is not found by guessing cut sizes; four zero bytes follow the bytes read (see
+LOOKAHEAD_PAD), so a stream that ends at the end of the dump without padding is decoded to its last
+byte. A window of the scan is read into one buffer and released before the next, and a source that
+cannot be read is a JSON failure that says how far the scan got. The decoder is dissect.util's, shared with
 prefetch_mam (same text, so the two do not check each other). Fields are read by the layout of the
 SCCA version, as prefetch_mam does; a version that is not read is reported as such and no
 version-dependent field is interpreted. A hit in a dump is a fragment of memory or unallocated space:
@@ -142,18 +145,32 @@ MAM_HEADER = 8
 # past the declared size (an end-of-stream symbol and padding), so the output cap is the declared
 # size plus this slack, never the declared size alone.
 OUTPUT_SLACK = 64 * 1024
+# dissect.util's loop stops when the read position reaches the end of the input, but its bit reader
+# has already taken up to 32 bits ahead of that position: the symbols still in that lookahead are
+# never decoded, and a stream that ends without padding comes out a few bytes short of its declared
+# size. Four zero bytes after the payload let the decoder reach them; what it decodes from the zeros
+# lies past the declared size and is cut. A stream that is genuinely short is still short.
+LOOKAHEAD_PAD = b"\x00\x00\x00\x00"
 # A Prefetch file is a few hundred kilobytes at most; a declared size past this is refused.
 MAX_DECLARED = 64 * 1024 * 1024
 SCCA = b"SCCA"
 # Layouts by SCCA version: the last-run FILETIMEs (where they start, how many) and the run count.
 # These are the versions the layout notes for Prefetch (libscca) describe; version 31 is treated as
 # version 30's layout, which is an assumption and is reported as one. Any other version is not read.
+# In the versions with eight last-run slots the run count does not sit at one place: the file
+# information that holds it is followed by the file metrics array, whose offset is its first word
+# (at 0x54), and Windows 10 files carry two sizes of it. The last-run FILETIMEs start at 0x80 in both;
+# the run count is at 0xD0 when the metrics array offset is 0x130 (a file information size, that
+# offset minus 0x50, of 224) and at 0xC8 when it is 0x128 (216). Any other size is a layout this
+# does not read: no run count and no time is interpreted from it, and the answer says so.
+INFO_SIZE_BASE = 0x50
+RUN_COUNT_AT_BY_INFO_SIZE = {224: 0xD0, 216: 0xC8}
 SCCA_VERSIONS = {
     17: {"last_run_at": 0x78, "last_runs": 1, "run_count_at": 0x90},
     23: {"last_run_at": 0x80, "last_runs": 1, "run_count_at": 0x98},
-    26: {"last_run_at": 0x80, "last_runs": 8, "run_count_at": 0xD0},
-    30: {"last_run_at": 0x80, "last_runs": 8, "run_count_at": 0xD0},
-    31: {"last_run_at": 0x80, "last_runs": 8, "run_count_at": 0xD0},
+    26: {"last_run_at": 0x80, "last_runs": 8, "run_count_by_info_size": True},
+    30: {"last_run_at": 0x80, "last_runs": 8, "run_count_by_info_size": True},
+    31: {"last_run_at": 0x80, "last_runs": 8, "run_count_by_info_size": True},
 }
 
 
@@ -211,7 +228,7 @@ def bounded_decompress(payload, cap, soft=False):
     output buffer that stops it. Strict mode raises OutputCapExceeded past `cap`. Soft mode (a payload
     cut from a dump, longer than the real stream) returns the first `cap` bytes once the decoder has
     produced them. The decoder is dissect.util's, so a tool using this does not check it against an
-    independent one."""
+    independent one. LOOKAHEAD_PAD is appended to the payload (see there)."""
     from dissect.util.compression import lzxpress_huffman
     import inspect
     if "dst = bytearray()" not in inspect.getsource(lzxpress_huffman.decompress):
@@ -220,7 +237,7 @@ def bounded_decompress(payload, cap, soft=False):
     _CappedBytes.soft = soft
     lzxpress_huffman.bytearray = _CappedBytes
     try:
-        return lzxpress_huffman.decompress(payload)
+        return lzxpress_huffman.decompress(bytes(payload) + LOOKAHEAD_PAD)
     except EnoughOutput as done:
         return done.data
     finally:
@@ -274,19 +291,35 @@ def parse_scca(data):
         out["problems"].append("version 31 is read with version 30's layout, which is an assumption")
     if not out["file_size_matches"]:
         out["problems"].append("the file size field (%d) is not the length of the data (%d)" % (out["file_size_field"], len(data)))
-    count_at = layout["run_count_at"]
-    out["run_count"] = struct.unpack_from("<I", data, count_at)[0] if count_at + 4 <= len(data) else None
-    runs = []
-    for slot in range(layout["last_runs"]):
-        at = layout["last_run_at"] + slot * 8
-        if at + 8 > len(data):
-            out["problems"].append("last-run slot %d is past the end of the data" % slot)
-            break
-        raw = struct.unpack_from("<Q", data, at)[0]
-        if raw:
-            runs.append({"slot": slot, "filetime": str(raw), "utc": filetime_iso(raw)})
-    out["last_runs"] = [r["utc"] for r in runs]
-    out["last_runs_detail"] = runs
+    # The first word of the file information is the offset of the file metrics array: the file
+    # information size is that offset less INFO_SIZE_BASE, and it tells which layout the run count has.
+    info_size = None
+    if len(data) >= 0x58:
+        info_size = struct.unpack_from("<I", data, 0x54)[0] - INFO_SIZE_BASE
+        out["file_information_size"] = info_size
+    if layout.get("run_count_by_info_size"):
+        count_at = RUN_COUNT_AT_BY_INFO_SIZE.get(info_size)
+        if count_at is None:
+            out["run_count"] = None
+            out["problems"].append(
+                "the file information size is %s (the file metrics array offset at 0x54 less 0x50), and the layouts read have 224 "
+                "(run count at 0xD0) and 216 (run count at 0xC8): the run count and the last-run times are not interpreted"
+                % ("not readable" if info_size is None else info_size))
+    else:
+        count_at = layout["run_count_at"]
+    if count_at is not None:
+        out["run_count"] = struct.unpack_from("<I", data, count_at)[0] if count_at + 4 <= len(data) else None
+        runs = []
+        for slot in range(layout["last_runs"]):
+            at = layout["last_run_at"] + slot * 8
+            if at + 8 > len(data):
+                out["problems"].append("last-run slot %d is past the end of the data" % slot)
+                break
+            raw = struct.unpack_from("<Q", data, at)[0]
+            if raw:
+                runs.append({"slot": slot, "filetime": str(raw), "utc": filetime_iso(raw)})
+        out["last_runs"] = [r["utc"] for r in runs]
+        out["last_runs_detail"] = runs
     # File information fields common to these versions: the metrics array, the trace chains, the
     # filename strings and the volume information, each an offset and a size or count from byte 0x54.
     metrics_at, metrics_n, chains_at, chains_n, names_at, names_size, vols_at, vols_n, vols_size = struct.unpack_from("<9I", data, 0x54) \
@@ -356,9 +389,12 @@ def whole(args, name, default, low, high=None):
 def read_candidate(path, offset, declared):
     """Inflate the record at `offset`: the payload is read from the file itself, up to the declared size plus
     the worst-case expansion of the format, and decoding stops once the declared size is reached."""
-    with open(path, "rb") as fh:
-        fh.seek(offset + MAM_HEADER)
-        payload = fh.read(declared + declared // 4 + 4096)
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(offset + MAM_HEADER)
+            payload = fh.read(declared + declared // 4 + 4096)
+    except OSError as exc:
+        return None, "read_failed: %s" % type(exc).__name__, [offset + MAM_HEADER, offset + MAM_HEADER]
     attempted = [offset + MAM_HEADER, offset + MAM_HEADER + len(payload)]
     try:
         dec = bounded_decompress(payload, declared, soft=True)
@@ -376,6 +412,8 @@ def main():
         args = json.loads(sys.stdin.read() or "{}")
     except ValueError as exc:
         fail("arguments are not valid JSON", reason=str(exc))
+    if not isinstance(args, dict):
+        fail("arguments must be a JSON object")
     path = args.get("path")
     if not path:
         print(json.dumps({"ok": False, "error": "path is required: the raw dump or image to scan"}))
@@ -397,58 +435,71 @@ def main():
     failures = LosslessPage("mam_scan-failures", key, 40)
     counts = {"candidates": 0, "size_out_of_range": 0, "parsed": 0, "filtered_by_name": 0, "unsupported_variant_signatures": 0}
     failed_by_reason = {}
-    with open(path, "rb") as f:
-        f.seek(start)
-        remaining = length
-        pos = start
-        carry = b""
-        while remaining is None or remaining > 0:
-            toread = chunk if remaining is None else min(chunk, remaining)
-            data = f.read(toread)
-            if not data:
-                break
-            buf = carry + data
-            abs_base = pos - len(carry)
-            counts["unsupported_variant_signatures"] += _count84(buf, len(carry))
-            i = 0
-            while True:
-                j = buf.find(SIG4, i)
-                if j < 0:
+    pos = start
+    try:
+        with open(path, "rb") as f:
+            f.seek(start)
+            file_size = os.fstat(f.fileno()).st_size
+            remaining = length
+            carry = b""
+            while remaining is None or remaining > 0:
+                toread = chunk if remaining is None else min(chunk, remaining)
+                toread = min(toread, max(file_size - pos, 0))          # never a buffer for bytes the file does not have
+                if not toread:
                     break
-                i = j + 4
-                if j + MAM_HEADER > len(buf):
-                    continue                                   # its size field is in the next window: found there, once
-                declared = struct.unpack_from("<I", buf, j + 4)[0]
-                off = abs_base + j
-                if not min_uncomp <= declared <= max_uncomp:
-                    counts["size_out_of_range"] += 1
-                    continue
-                counts["candidates"] += 1
-                rec = {"offset": off, "uncomp": declared}
-                if parse:
-                    dec, why, attempted = read_candidate(path, off, declared)
-                    if dec is None:
-                        failed_by_reason[why] = failed_by_reason.get(why, 0) + 1
-                        failures.add({"offset": off, "uncomp": declared, "reason": why, "attempted_range": attempted})
+                # One buffer for the carried bytes and the window: the window is read into it in place, so a
+                # window of 256 MiB costs 256 MiB and not a copy of it besides the read and the join.
+                buf = bytearray(len(carry) + toread)
+                buf[:len(carry)] = carry
+                got = f.readinto(memoryview(buf)[len(carry):])
+                if not got:
+                    break
+                del buf[len(carry) + got:]
+                abs_base = pos - len(carry)
+                counts["unsupported_variant_signatures"] += _count84(buf, len(carry))
+                i = 0
+                while True:
+                    j = buf.find(SIG4, i)
+                    if j < 0:
+                        break
+                    i = j + 4
+                    if j + MAM_HEADER > len(buf):
+                        continue                                   # its size field is in the next window: found there, once
+                    declared = struct.unpack_from("<I", buf, j + 4)[0]
+                    off = abs_base + j
+                    if not min_uncomp <= declared <= max_uncomp:
+                        counts["size_out_of_range"] += 1
                         continue
-                    scca = parse_scca(dec)
-                    scca.pop("scca", None)
-                    rec.update(scca)
-                    rec["name"] = rec.get("exe_name")
-                    rec["dec_len"] = len(dec)
-                    rec["attempted_range"] = attempted
-                    counts["parsed"] += 1
-                    if needle and needle not in (rec.get("exe_name") or "").upper() and \
-                            needle not in " ".join(rec.get("filename_strings") or []).upper():
-                        counts["filtered_by_name"] += 1
-                        continue
-                hits.add(rec)
-            pos += len(data)
-            if remaining is not None:
-                remaining -= len(data)
-            carry = buf[-OVERLAP:] if len(buf) >= OVERLAP else buf
-            if len(data) < toread:
-                break
+                    counts["candidates"] += 1
+                    rec = {"offset": off, "uncomp": declared}
+                    if parse:
+                        dec, why, attempted = read_candidate(path, off, declared)
+                        if dec is None:
+                            failed_by_reason[why] = failed_by_reason.get(why, 0) + 1
+                            failures.add({"offset": off, "uncomp": declared, "reason": why, "attempted_range": attempted})
+                            continue
+                        scca = parse_scca(dec)
+                        scca.pop("scca", None)
+                        rec.update(scca)
+                        rec["name"] = rec.get("exe_name")
+                        rec["dec_len"] = len(dec)
+                        rec["attempted_range"] = attempted
+                        counts["parsed"] += 1
+                        if needle and needle not in (rec.get("exe_name") or "").upper() and \
+                                needle not in " ".join(rec.get("filename_strings") or []).upper():
+                            counts["filtered_by_name"] += 1
+                            continue
+                    hits.add(rec)
+                pos += got
+                if remaining is not None:
+                    remaining -= got
+                carry = bytes(buf[-OVERLAP:]) if len(buf) >= OVERLAP else bytes(buf)
+                del buf                                                # the window is gone before the next is allocated
+                if got < toread:
+                    break
+    except OSError as exc:
+        fail("the source could not be read: %s" % exc, path=path, scanned_from=start, scanned_to=pos, candidates=counts["candidates"],
+             parsed=counts["parsed"], failed=sum(failed_by_reason.values()))
     page = hits.finish()
     failure_page = failures.finish()
     failed_total = sum(failed_by_reason.values())
