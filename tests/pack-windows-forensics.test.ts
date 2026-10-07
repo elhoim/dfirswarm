@@ -30,60 +30,12 @@ import { createHash } from "node:crypto";
 import { chmod, mkdir, readFile, readdir, stat, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
-import { ROOT, runPy, withCwd } from "./tool-library-harness.ts";
+import { ROOT, withCwd } from "./tool-library-harness.ts";
+import {
+  AGENT, DISSECT, REGIPY, WIN, asciiz, body, everyFileUnder, exists, failed, py, pythonCanImport, stub, stubModule, tool, u16, u16z,
+  type Run,
+} from "./windows-pack-harness.ts";
 import { hive } from "./windows-hive.ts";
-
-/**
- * These tests run the tools against the real libraries they import. A host that does not have a library (CI installs only
- * the apt packages, the images install the pip ones) skips them with the reason; everything else in this file uses stand-ins.
- */
-const pythonCanImport = (module: string): boolean => spawnSync("python3", ["-c", "import " + module], { stdio: "ignore" }).status === 0;
-const REGIPY = pythonCanImport("regipy.registry") ? false : "regipy is not installed on this host";
-const DISSECT = pythonCanImport("dissect.util.compression.lzxpress_huffman") ? false : "dissect.util is not installed on this host";
-
-const WIN = process.env.WINDOWS_PACK_TOOLS ?? join(ROOT, "packs", "windows-forensics", "tools");
-const AGENT = { AGENT_ID: "s1" };
-
-type Run = { code: number | null; stdout: string; stderr: string };
-
-async function tool(name: string, cwd: string, args: unknown, env: Record<string, string> = {}, bin?: string): Promise<Run> {
-  return runPy(join(WIN, name, "run.py"), cwd, args, bin, { ...AGENT, ...env });
-}
-
-function body<T>(out: Run): T {
-  assert.equal(out.code, 0, out.stderr + out.stdout);
-  assert.doesNotMatch(out.stderr, /Traceback/);
-  return JSON.parse(out.stdout) as T;
-}
-
-/** A refusal or a failure: a non-zero exit and a JSON answer with an `error`. */
-function failed(out: Run): { error: string; [key: string]: unknown } {
-  assert.notEqual(out.code, 0, out.stdout);
-  assert.doesNotMatch(out.stderr, /Traceback/);
-  return JSON.parse(out.stdout) as { error: string };
-}
-
-async function exists(path: string): Promise<boolean> {
-  return stat(path).then(() => true, () => false);
-}
-
-async function stub(bin: string, name: string, script: string): Promise<void> {
-  await mkdir(bin, { recursive: true });
-  const path = join(bin, name);
-  await writeFile(path, `#!/bin/sh\n${script}\n`, "utf8");
-  await chmod(path, 0o755);
-}
-
-/** Run python3 with code, for fixtures a Buffer is awkward for. */
-function py(code: string, ...args: string[]): string {
-  const out = spawnSync("python3", ["-c", code, ...args], { encoding: "utf8" });
-  assert.equal(out.status, 0, out.stderr);
-  return out.stdout;
-}
-
-const u16 = (text: string): Buffer => Buffer.from(text, "utf16le");
-const asciiz = (text: string): Buffer => Buffer.concat([Buffer.from(text, "latin1"), Buffer.from([0])]);
-const u16z = (text: string): Buffer => Buffer.concat([u16(text), Buffer.from([0, 0])]);
 
 // --- lnk_parse ------------------------------------------------------------------
 
@@ -347,15 +299,6 @@ class OleFileIO:
     def close(self):
         pass
 `;
-
-async function stubModule(cwd: string, files: Record<string, string>): Promise<Record<string, string>> {
-  const dir = join(cwd, "pystub");
-  for (const [name, text] of Object.entries(files)) {
-    await mkdir(join(dir, name, ".."), { recursive: true });
-    await writeFile(join(dir, name), text, "utf8");
-  }
-  return { PYTHONPATH: dir };
-}
 
 type DestEntry = { number: number; host: string; filetime: bigint; pin: number; path: string };
 
@@ -851,15 +794,6 @@ const LOGIN_FIXTURE = [
   "c.commit()",
 ].join("\n");
 
-async function everyFileUnder(dir: string): Promise<string[]> {
-  const out: string[] = [];
-  for (const entry of await readdir(dir, { withFileTypes: true })) {
-    const full = join(dir, entry.name);
-    if (entry.isDirectory()) out.push(...(await everyFileUnder(full)));
-    else out.push(full);
-  }
-  return out;
-}
 
 test("browser_history never echoes a password, a cookie value or an encrypted blob from Login Data or Cookies, in any query, and says which columns it withheld", async () => {
   // A SELECT * over `logins` and `cookies` printed password_value and the cookie values whole,
