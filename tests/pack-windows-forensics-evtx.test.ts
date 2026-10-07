@@ -196,7 +196,7 @@ test("evtx_query reads a time argument as ISO 8601 and converts it to UTC: a Z s
     const offset = body<EvtxQueryOut>(await evtxCase(cwd, DAY, { start_time: "2026-09-01T13:00:00+03:00", end_time: "2026-09-01T13:00:00+03:00" }));
     assert.deepEqual(offset.events.map((e) => e.record_id), [2], "13:00 at +03:00 is 10:00 UTC");
     const minus = body<EvtxQueryOut>(await evtxCase(cwd, DAY, { start_time: "2026-09-01T05:00-05:00", end_time: "2026-09-01T05:00-05:00" }));
-    assert.deepEqual(minus.events.map((e) => e.record_id), [2, 3].slice(0, 2), "a minute at -05:00");
+    assert.deepEqual(minus.events.map((e) => e.record_id), [2], "05:00 at -05:00 is 10:00 UTC, and a minute is a span of a minute");
     const fraction = body<EvtxQueryOut>(await evtxCase(cwd, DAY, { start_time: "2026-09-01T10:00:00.5", end_time: "2026-09-01T10:00:00.5" }));
     assert.deepEqual(fraction.events.map((e) => e.record_id), [2], "a tenth of a second is a span of a tenth");
     const open = body<EvtxQueryOut>(await evtxCase(cwd, DAY, { start_time: "2026-09-01T10:00:00.6" }));
@@ -273,7 +273,9 @@ test("evtx_query answers an output it cannot write with JSON that says where res
     await writeFile(join(cwd, "work", "blocker"), "a file where a directory should be");
     assert.match(failed(await evtxCase(cwd, DAY, { out_file: "work/blocker/result.jsonl" })).error, /the whole result cannot be written to work\/blocker\/result\.jsonl/);
     await mkdir(join(cwd, "work", "isadir"));
-    assert.match(failed(await evtxCase(cwd, DAY, { out_file: "work/isadir" })).error, /out_file is a directory|cannot be written/);
+    const beside = body<EvtxQueryOut>(await evtxCase(cwd, DAY, { out_file: "work/isadir" }));
+    assert.equal(beside.result_file, "work/isadir-2", "a directory at the name is a name taken: the result is made beside it");
+    assert.equal(beside.result_file_requested, "work/isadir");
     await chmod(join(cwd, "work"), 0o555);
     try {
       const out = failed(await evtxCase(cwd, DAY));
@@ -556,7 +558,8 @@ test("sigma_hunt streams what is left of a document that stops making sense to i
         "assert len(values) == 1 and values[0]['RuleTitle'] == 'Before', values",
         "assert m.count == 1",
         "kept = open(sys.argv[3], encoding='utf-8').read()",
-        "assert kept.count('x') == 2_000_000 and kept.startswith('from the value at the start of this text\\t@@ not json @@'), kept[:80]",
+        "assert kept.startswith('from the value at the start of this text\\t@@ not json @@\\\\n'), kept[:80]",
+        "assert kept.split('\\t', 1)[1].count('x') == 2_000_000, kept.count('x')",
         "print('peak', peak)",
       ].join("\n"),
       join(WIN, "sigma_hunt", "run.py"),

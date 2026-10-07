@@ -251,8 +251,10 @@ def main():
     out_file = args.get('out_file')
     if out_file is not None and (not isinstance(out_file, str) or not out_file):
         fail('out_file must be a path', out_file=out_file)
-    result_path = Path(out_file or default_path)
-    result_path = (root_dir / result_path).resolve() if not result_path.is_absolute() else result_path.resolve()
+    # The directory is resolved (a link in it is followed to where it lands, and judged there); the name is not: a link
+    # left at the name itself is never written through, the exclusive create below refuses it.
+    wanted = Path(os.path.normpath(root_dir / Path(out_file or default_path)))
+    result_path = wanted.parent.resolve() / wanted.name
     allowed = [root_dir]
     if in_job:
         allowed.append(Path(os.environ['OUT']).resolve())
