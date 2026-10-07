@@ -307,3 +307,106 @@ test("a UTF-16 export, as PowerShell writes it with a byte order mark, is read, 
     assert.equal(out.coverage.replacement_characters, 0);
   });
 });
+
+
+// ---- review of #111 -----------------------------------------------------------------------------------------------------------------------
+
+test("record_type matches by number and by name, in the shape the portal writes (a name in the column, a number in the payload), and a value that matched nothing is said", async () => {
+  await withDir(async (cwd) => {
+    const payload = audit({ Id: "rec-1", Operation: "Set-Mailbox", RecordType: 1, CreationTime: "2026-02-14T09:00:00Z" });
+    const csv = portalCsv([{ id: "rec-1", date: "2026-02-14T09:00:00.0000000Z", type: "ExchangeAdmin", op: "Set-Mailbox", user: "alice@example.org", data: JSON.stringify(payload) }]);
+    for (const wanted of [["ExchangeAdmin"], ["exchangeadmin"], [1], ["1"], ["ExchangeAdmin", 7]]) {
+      const out = await run(cwd, { "p.csv": csv }, { record_type: wanted });
+      assert.equal(out.record_count, 1, `record_type ${JSON.stringify(wanted)}`);
+    }
+    const none = await run(cwd, { "p.csv": csv }, { record_type: [2, "ExchangeAdmin"], operations: ["Set-Mailbox", "Remove-Mailbox"] });
+    assert.deepEqual(none.filter_values_that_matched_no_row, { operations: ["Remove-Mailbox"], record_type: ["2"] });
+    const typo = await run(cwd, { "p.csv": csv }, { record_type: ["ExchangeAdmn"] });
+    assert.equal(typo.record_count, 0);
+    assert.deepEqual(typo.filter_values_that_matched_no_row, { record_type: ["exchangeadmn"] });
+    const pairs = await rowsOf(cwd, typo, "record_types_all_rows");
+    assert.deepEqual(pairs.map((r: Json) => [r.audit_data, r.outer_column]), [["1", "ExchangeAdmin"]], "the export's own pairing of number and name is shown");
+  });
+});
+
+test("a native time with no zone is said to have none, a filter that needs it excludes the rows and says how many, and the read is then partial", async () => {
+  await withDir(async (cwd) => {
+    const file = { "n.json": JSON.stringify([audit({ CreationTime: "2026-02-14T09:00:00" })]) };
+    const plain = await run(cwd, file);
+    assert.equal(plain.records[0].time_status, "no_zone");
+    assert.equal(plain.records[0].time_utc ?? null, null);
+    assert.equal(plain.time_zone.rows_without_a_zone, 1);
+    assert.match(plain.time_zone.note, /assume_utc: true/);
+    const filtered = await run(cwd, file, { since: "2026-01-01T00:00:00Z" });
+    assert.equal(filtered.record_count, 0);
+    assert.equal(filtered.coverage.excluded_for_unreadable_time, 1);
+    assert.equal(filtered.status, "partial");
+    const assumed = await run(cwd, file, { since: "2026-01-01T00:00:00Z", assume_utc: true });
+    assert.deepEqual([assumed.record_count, assumed.status, assumed.records[0].time_status], [1, "complete", "assumed_utc"]);
+  });
+});
+
+test("a declared date_order that a row contradicts leaves the row undecoded and says so, instead of reading it the other way round", async () => {
+  await withDir(async (cwd) => {
+    const file = { "n.json": JSON.stringify([audit({ CreationTime: "13/02/2026 09:00:00" })]) };
+    const wrong = await run(cwd, file, { date_order: "mdy" });
+    assert.equal(wrong.status, "partial");
+    assert.equal(wrong.records[0].time_status, "unparseable");
+    assert.match(wrong.file_problems.join(" "), /date_order mdy was declared and 1 row\(s\) of this file can only be read the other way round/);
+    assert.equal(wrong.date_convention, "declared: mdy");
+    const right = await run(cwd, file, { date_order: "dmy", assume_utc: true });
+    assert.deepEqual([right.status, right.records[0].time_utc], ["complete", "2026-02-13T09:00:00Z"]);
+  });
+});
+
+test("an export whose own ResultCount is larger than the rows it holds was not exported whole, and the read is partial", async () => {
+  await withDir(async (cwd) => {
+    const head = "RecordId,CreationDate,RecordType,Operation,UserId,AuditData,ResultCount,ResultIndex";
+    const rows = [0, 1, 2].map((i) => [`r${i}`, `2026-02-14T09:0${i}:00Z`, "ExchangeAdmin", "Send", "a@b.c", csvCell(JSON.stringify(audit({ Id: `r${i}`, CreationTime: `2026-02-14T09:0${i}:00Z` }))), "5000", String(i + 1)].join(","));
+    const out = await run(cwd, { "rc.csv": [head, ...rows].join("\r\n") + "\r\n" });
+    assert.equal(out.status, "partial");
+    assert.deepEqual(out.pagination_markers.map((m: Json) => [m.keys, m.result_count, m.rows]), [[["ResultCount"], 5000, 3]]);
+    assert.match(out.file_problems.join(" "), /ResultCount says 5000 records matched the search; this file holds 3/);
+    const whole = await run(cwd, { "rc.csv": [head, ...[0, 1, 2].map((i) => rows[i].replace(",5000,", ",3,"))].join("\r\n") + "\r\n" });
+    assert.equal(whole.status, "complete");
+  });
+});
+
+test("the operation census of every row and a time printed raw are withheld like everything else", async () => {
+  await withDir(async (cwd) => {
+    const out = await run(cwd, { "n.json": JSON.stringify([audit({ Operation: JWT, CreationTime: "password=Hunter2xyz" })]) });
+    const text = JSON.stringify(out);
+    assert.ok(!text.includes(JWT.slice(10, 40)), "the operation is not printed whole by the all-rows census");
+    assert.ok(!text.includes("Hunter2xyz"), "the raw time is not printed whole");
+    assert.match(JSON.stringify(out.operations_all_rows), /withheld: a JSON Web Token/);
+    assert.match(out.records[0].time, /password=\[withheld/);
+  });
+});
+
+test("an archive is named and not read, JSON that is not JSON (NaN) is rejected, and neither is a complete read", async () => {
+  await withDir(async (cwd) => {
+    await put(cwd, "work/ev/logs.zip", Buffer.concat([Buffer.from("PK\x03\x04", "latin1"), Buffer.alloc(60, 0)]));
+    const alone = refused(await tool(UAL, cwd, { path: "work/ev/logs.zip" }));
+    assert.equal(alone.status, "failed");
+    assert.match(JSON.stringify(alone), /ZIP|zip/);
+    const dir = await run(cwd, { "a.json": JSON.stringify([audit()]) }, { assume_utc: true });
+    assert.equal(dir.status, "partial", "a skipped archive is not a complete read");
+    assert.ok(dir.skipped.some((x: Json) => /archive/.test(x.reason)), JSON.stringify(dir.skipped));
+    await put(cwd, "work/ev/nan.json", '[{"Id":"1","Operation":"Send","UserId":NaN,"CreationTime":"2026-02-14T09:00:00Z"}]');
+    const nan = refused(await tool(UAL, cwd, { path: "work/ev/nan.json" }));
+    assert.match(nan.file_problems.join(" "), /NaN is not JSON/);
+  });
+});
+
+test("a pretty-printed export whose records follow another member is streamed, and a hundred thousand rejected rows are listed in part and counted in full", async () => {
+  await withDir(async (cwd) => {
+    await put(cwd, "work/ev/doc.json", JSON.stringify({ meta: { pages: [1, 2] }, value: [audit({ CreationTime: "2026-02-14T09:00:00Z" })] }, null, 2));
+    const doc = body(await tool(UAL, cwd, { path: "work/ev/doc.json" }));
+    const census = await rowsOf(cwd, doc, "file_census");
+    assert.deepEqual([doc.status, doc.record_count, census[0].shape], ["complete", 1, "envelope"]);
+    await put(cwd, "work/ev/many.jsonl", JSON.stringify(audit({ CreationTime: "2026-02-14T09:00:00Z" })) + "\n" + "1\n".repeat(100_500));
+    const many = body(await tool(UAL, cwd, { path: "work/ev/many.jsonl" }));
+    assert.equal(many.coverage.rows_rejected, 100_500);
+    assert.equal(many.coverage.rejected_records_not_listed, 500);
+  });
+});

@@ -429,18 +429,20 @@ test("a name that is not UTF-8 and a lone surrogate in a record are written as e
   });
 });
 
-test("a read-only run directory is not needed: the answer to a path that cannot be written is a JSON error", async () => {
+test("a path that cannot be written is a JSON error, not a traceback", async (t) => {
+  if (process.getuid?.() === 0) return t.skip("running as root: a read-only directory does not stop a write");
   await withDir(async (cwd) => {
     await put(cwd, "work/ev/a.json", trail(ct({ eventID: "r-1" })));
     await mkdir(join(cwd, "work", "locked"), { recursive: true });
     await chmod(join(cwd, "work", "locked"), 0o500);
-    const out = await tool(TRAIL, cwd, { path: "work/ev/a.json", out_file: "work/locked/records.jsonl" });
-    if (process.getuid?.() !== 0) {
+    try {
+      const out = await tool(TRAIL, cwd, { path: "work/ev/a.json", out_file: "work/locked/records.jsonl" });
       assert.notEqual(out.code, 0);
       assert.doesNotMatch(out.stderr, /Traceback/);
       assert.match(JSON.parse(out.stdout).error, /could not be written|cannot be created/);
+    } finally {
+      await chmod(join(cwd, "work", "locked"), 0o700);
     }
-    await chmod(join(cwd, "work", "locked"), 0o700);
   });
 });
 

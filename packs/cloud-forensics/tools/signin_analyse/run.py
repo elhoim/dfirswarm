@@ -2184,6 +2184,7 @@ def main():
                     city, country = place_of(flat)
                     client = val(flat, "clientAppUsed", "Client app", "userAgent", "User agent", "browser", "login_type") or params.get("login_type")
                     event_id = val(flat, "id", "Request ID", "requestId")
+                    corr_id = val(flat, "correlationId", "Correlation ID")
                     event = {
                         "time": raw_time, "time_utc": st["utc"], "time_status": st["status"], "time_basis": basis_note,
                         "user": account, "user_display_name": display if display != account else None, "user_id": uid, "analysis_account": key,
@@ -2202,7 +2203,7 @@ def main():
                         "result_code": code, "result": CODES.get(code, "code %s" % code) if code is not None else "outcome not present",
                         "failure_reason": val(flat, "failure_reason", "Failure reason"), "additional_details": val(flat, "additional_details", "Additional Details"),
                         "success": success, "outcome_class": klass, "outcome_basis": success_basis,
-                        "event_id": event_id, "correlation_id": val(flat, "correlationId", "Correlation ID"),
+                        "event_id": event_id, "correlation_id": corr_id,
                         "activity_id": flat.get("activity_id"), "event_parameters": params or None,
                         "source_file": row["file"], "record": info["record"], "line": info["line"], "event_index": idx, "parser": PARSER,
                     }
@@ -2218,7 +2219,7 @@ def main():
                     batch.append(tuple(dbtext(v) for v in (
                         ordinal, key, shown_account, shown(app), st["ns"], st["utc"], None if success is None else int(success), klass, shown(address), shown(country),
                         shown(city), flat_lat, flat_lon, shown(client), shown(authentication), shown(ca_status), shown(code), event["result"],
-                        shown(event_id) if isinstance(event_id, (str, int)) else None, shown(event["correlation_id"]) if isinstance(event["correlation_id"], (str, int)) else None,
+                        shown(event_id) if isinstance(event_id, (str, int)) else None, shown(corr_id) if isinstance(corr_id, (str, int)) else None,
                         info["record"], info["line"], idx)))
                     if len(batch) >= 5000:
                         db.executemany("INSERT INTO ev VALUES (%s)" % ",".join("?" * 23), batch)
@@ -2308,7 +2309,7 @@ def main():
         "accounts": analysis["users"],
         "successes": counts["successes"], "failures": counts["failures"], "interrupts": counts["interrupts"], "unknown_outcome": counts["unknown_outcome"],
         "single_factor_successes": analysis["single_factor"], "failure_bursts_before_success": analysis["bursts"],
-        "prompts_before_success": analysis["prompts"],
+        "prompts_before_success": analysis["prompts"], "burst_members": analysis["members"],
         "addresses_seen_once": analysis["seen_once"], "impossible_travel": analysis["travel"],
         "values_withheld": {"count": withheld_summary["count"], "by_reason": withheld_summary["by_reason"], "locators": withheld_summary["locators"],
                             "page": withheld_summary["page"], "text_withheld_from_paths_and_messages": withheld_summary["text_withheld_from_paths_and_messages"]},
@@ -2444,7 +2445,7 @@ def analyse(db, limit, ceiling, window, min_failures, min_prompts):
     pages = {"single_factor_successes": single.finish(), "failure_bursts_before_success": bursts.finish(), "burst_members": members.finish(),
              "prompts_before_success": prompts.finish(), "addresses_seen_once": seen_once.finish(), "impossible_travel": travel.finish()}
     return {"pages": pages, "users": users, "over_cap": over_cap, "over_named": over_named, "single_factor": single.page, "bursts": bursts.page,
-            "prompts": prompts.page, "seen_once": seen_once.page, "travel": travel.page}
+            "members": members.page, "prompts": prompts.page, "seen_once": seen_once.page, "travel": travel.page}
 
 
 if __name__ == "__main__":

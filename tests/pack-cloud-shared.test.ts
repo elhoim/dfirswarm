@@ -5,6 +5,7 @@
  */
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { gzipSync } from "node:zlib";
 import { execFileSync } from "node:child_process";
 import { chmod, readFile, readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
@@ -142,12 +143,14 @@ test("an answer is ASCII: a non-ASCII or non-UTF-8 name is escaped, so a lone su
   });
 });
 
-test("a named pipe is never opened: as the path it is refused, and in a directory it is named and skipped", async () => {
+test("a named pipe is never opened: as the path it is refused, and in a directory it is named and skipped", async (t) => {
+  let fifo = true;
   await withDir(async (cwd) => {
     try {
       execFileSync("mkfifo", [join(cwd, "work", "pipe.json")]);
     } catch {
-      return; // no mkfifo on this platform
+      fifo = false;
+      return;
     }
     for (const script of Object.values(SCRIPTS)) {
       const out = refused(await tool(script, cwd, { path: "work/pipe.json" }));
@@ -165,6 +168,7 @@ test("a named pipe is never opened: as the path it is refused, and in a director
     const trail: Json = body(await tool(TRAIL, cwd, { path: "work/ev" }));
     assert.equal(trail.status, "partial", "a file that was not read is not a complete read");
   });
+  if (!fifo) t.skip("no mkfifo on this platform");
 });
 
 test("the tables say how many distinct values they could not count, and the sign-in analysis names the accounts it left out", async () => {
@@ -409,5 +413,30 @@ test("a source file holds no invisible or direction-changing character, and no n
     // eslint-disable-next-line no-control-regex
     const bad = [...text.matchAll(/[^\x09\x0a\x20-\x7e]/g)].map((m) => `U+${m[0].codePointAt(0)!.toString(16).padStart(4, "0")} at ${m.index}`);
     assert.deepEqual(bad.slice(0, 5), [], `${name} has characters a reviewer cannot see`);
+  }
+});
+
+
+test("a read that ended early publishes out_file as <name>.partial in all three tools", async () => {
+  const bigs: Array<[string, string, string]> = [
+    ["cloudtrail_parse", TRAIL, JSON.stringify({ Records: Array.from({ length: 3000 }, (_, i) => ct({ eventID: `p-${i}`, eventSource: "s3.amazonaws.com", eventName: "GetObject", requestParameters: { k: `v-${i}-${"y".repeat(30)}` } })) })],
+    ["ual_parse", UAL, JSON.stringify(Array.from({ length: 3000 }, (_, i) => ({ Id: `u-${i}`, Operation: "Send", UserId: "a@b.c", CreationTime: "2026-02-14T09:00:00Z", Pad: `v-${i}-${"y".repeat(30)}` })))],
+    ["signin_analyse", SIGNIN, JSON.stringify({ value: Array.from({ length: 3000 }, (_, i) => ({ id: `g-${i}`, createdDateTime: "2026-02-14T09:00:00Z", userPrincipalName: `u${i % 7}@example.org`, userId: `id-${i % 7}`, ipAddress: "198.51.100.1", status: { errorCode: 0 }, pad: `v-${i}-${"y".repeat(30)}` })) })],
+  ];
+  for (const [name, script, text] of bigs) {
+    await withDir(async (cwd) => {
+      const whole = gzipSync(Buffer.from(text));
+      await put(cwd, "work/ev/cut.json.gz", whole.subarray(0, Math.floor(whole.length * 0.7)));
+      const cut = body(await tool(script, cwd, { path: "work/ev/cut.json.gz", out_file: "work/s1/all.jsonl", limit: 5 }));
+      assert.equal(cut.status, "partial", name);
+      const where = cut.complete_records ?? cut.complete_events;
+      assert.match(where, /all\.partial\.jsonl$/, name);
+      assert.equal(await exists(join(cwd, "work/s1/all.jsonl")), false, `${name}: the requested name holds only a finished result`);
+      assert.equal(await exists(join(cwd, "work/s1/all.partial.jsonl")), true, name);
+      await put(cwd, "work/ev/whole.json.gz", whole);
+      const full = body(await tool(script, cwd, { path: "work/ev/whole.json.gz", out_file: "work/s1/full.jsonl", limit: 5 }));
+      assert.equal(full.status, "complete", name);
+      assert.match(full.complete_records ?? full.complete_events, /full\.jsonl$/, name);
+    });
   }
 });
