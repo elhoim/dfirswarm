@@ -1700,7 +1700,7 @@ def main():
         "truncated": any(p["truncated"] for p in pages.values()),
         "note": "The flagged operations are names this tool lists for a second look, not detections: each is also what an administrator does on an ordinary day. "
                 "A record is not a human act; MailItemsAccessed is not a statement that anyone read the content (audit_data keeps MailAccessType, "
-                "OperationCount and Folders as the export wrote them). The record Id is what lets someone find the row again; a record without one is said, not given one. "
+                "OperationCount and Folders as the export wrote them). The record Id is what lets someone find the row again; a record without one has no record_id field and is cited by its file, record and line. "
                 "Aggregation and duplicate suppression can apply to some operations: check the documentation for the schema the export carries before treating a quiet "
                 "period as absence.",
     }
