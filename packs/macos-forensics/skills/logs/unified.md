@@ -40,8 +40,9 @@ refused if it holds a link or a member present in both trees with different byte
 `predicate`, `start` and `end` are refused there: search the whole JSONL afterwards and
 keep the query. On macOS the tool runs Apple's `log` with `--archive`, which wants a
 valid `.logarchive`; the staging is Linux's, so a copied `diagnostics` tree is not the
-same input. Do not use the archived Python UnifiedLogReader on a modern image: its
-upstream documents a limit to macOS 10.15 and iOS 12 era data.
+same input. Use the declared reader. Any other (the archived Python UnifiedLogReader
+among them) has its own supported versions: check them against the version the evidence
+carries before you rely on its output.
 
 `--info --debug` includes the entries retained at those levels. It does not bring back
 an entry that was never persisted, was removed by retention or was redacted:

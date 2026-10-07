@@ -23,7 +23,8 @@ Record the System volume's observed integrity and what the acquisition covered; 
 assume an intact seal. Keep `Label`, `Program`, `ProgramArguments`, `BundleProgram`,
 `UserName`, `GroupName`, `RunAtLoad`, `KeepAlive`, `StartInterval`,
 `StartCalendarInterval`, `WatchPaths`, `QueueDirectories`, `MachServices`, `Sockets`, the
-working directory and the environment. A system-domain daemon can name a non-root user
+working directory and the names of the environment variables (their values are sensitive,
+below). A system-domain daemon can name a non-root user
 and can start on demand; an agent loaded at login has not shown its program ran then.
 
 Resolve the program and what it references inside the acquired filesystem. Do not run
@@ -62,6 +63,12 @@ one does not by itself create a privacy-permission record. Privacy permissions a
 TCC databases (system and per user, with their sidecars), which this pack has no skill for
 yet: do not read an Accessibility permission as root or SYSTEM, or a TCC row's modified
 time as the time of a grant.
+
+**Sensitive output.** `ProgramArguments` and `EnvironmentVariables` can carry credentials: a
+token on a command line, or a variable named for a service and not for a secret (`GITHUB_PAT`
+is one), which no key-name pattern in `plist_read` catches, so it prints the value. Read a
+launch sweep as a job with `secret_output: true`, treat every argument and environment value
+as sensitive, and cite the file and key, never the value.
 
 **Does not show.** Execution, intent or compromise. Report persistence, privacy
 authorization and observed execution as three findings, each with what corroborates it

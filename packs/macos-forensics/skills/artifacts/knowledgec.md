@@ -14,9 +14,12 @@ are records of what the machine's features saw, not a log of what a person did.
     /private/var/db/CoreDuet/Knowledge/knowledgeC.db          system-wide
 
 Inventory the user and system stores separately, and take each database with its
-`-wal` and `-shm` as one set: a write-ahead log holds committed rows the main file
-lacks. `knowledgec_query` applies a WAL it finds in a private copy and counts the frames
-applied (`source_used`); a log left behind at collection is rows you do not have.
+`-wal`, `-shm` and `-journal` as one set. A write-ahead log holds committed rows the main
+file lacks: `knowledgec_query` applies one it finds in a private copy and counts the
+frames applied (`source_used`); a log left behind at collection is rows you do not have.
+A rollback journal holds the old pages of a transaction that did not commit and no rows
+the main file lacks: the tool rolls a hot one back in the copy and says so in `problems`,
+because the copy is then not the main file as acquired.
 
 **Enumerate before you query.** The answer lists every stream in the file with its
 count and its first and last start. Candidates to look for, not a guaranteed set:
@@ -28,8 +31,11 @@ count and its first and last start. Candidates to look for, not a guaranteed set
 the integer, so confirm the encoding for the build before reading 0 or 1); the raw and
 converted start, end and creation times; the `metadata` (ZSTRUCTUREDMETADATA columns
 that are set) and the `source` (ZSOURCE: bundle id, device id, and so on) joined from the
-file's own schema. `schema.joins` false means the file lacks that table and the rows
-have no such data. Check `status` and `filters_unapplied`. For another table or a
+file's own schema. `schema.joins` false means the file lacks that table (or its schema could not
+be read, which `problems` says) and the rows have no such data. A TEXT or BLOB cell
+longer than 4096 characters or bytes is returned cut, with its whole length and where the
+whole is (`_truncated`, `_where`); `export_oversize` writes the whole values to files.
+Check `status`, `problems` and `filters_unapplied`. For another table or a
 query the tool does not make, use `sqlite_query` on a copy, and read what it says about
 the write-ahead log before you rely on a negative.
 
