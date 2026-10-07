@@ -1,6 +1,6 @@
 {
   "name": "image_layout",
-  "description": "One probe of an image through the Sleuth Kit as installed: the container named from its signature (E01, VHD fixed or dynamic, VHDX, VMDK, QCOW, else 'raw' with the basis said), the E01 acquisition record, the partition table in sectors (the same sector size, passed as -b, goes to mmls, to fsstat and to the example commands), and each volume's file system, cluster size and serial. Returns the -o offset every other command needs. A table is true (mmls read one), false (mmls ran and recognised none, which does not show there is none) or 'unknown' (mmls was missing, timed out or was refused). Reads one path: a split raw set is not assembled, and the first segment is said to be one segment. It does not verify the image, read snapshots or backing files, or show a volume is intact or unencrypted. mmls, fsstat and ewfinfo's whole output is kept in files named in raw_outputs.",
+  "description": "One probe of an image through the Sleuth Kit as installed: the container named from its signature (E01, VHD fixed or dynamic, VHDX, VMDK, QCOW, else 'raw' with the basis said), the E01 acquisition record, the partition table in sectors (the same sector size, passed as -b, goes to mmls, to fsstat and to the example commands), and each volume's file system, cluster size and serial. Returns the -o offset every other command needs. A table is true (mmls read one), false (mmls ran and recognised none, which does not show there is none) or 'unknown' (mmls was missing, timed out, was refused, or failed without saying why and img_stat does not open the image). Reads one path: a split raw set is not assembled, and the first segment is said to be one segment. It does not verify the image, read snapshots or backing files, or show a volume is intact or unencrypted. mmls, fsstat and ewfinfo's whole output is kept in files named in raw_outputs.",
   "params": {
     "image": {
       "type": "string",
@@ -19,7 +19,8 @@
   "requires": [
     "mmls",
     "fsstat",
-    "ewfinfo"
+    "ewfinfo",
+    "img_stat"
   ],
   "use": {
     "extensions": [
@@ -60,5 +61,5 @@
   "by": "maintainer",
   "at": "2026-09-22T09:00:00.000Z",
   "version": 2,
-  "sha256": "6f3922f3f68befa720274fd22188f46814d6d77861a469ef9b6da8f79f5254eb"
+  "sha256": "16b47125181f4282372d818f2dc6e3aec7ec1882aadd5b0f909a6f4b91a5f86e"
 }

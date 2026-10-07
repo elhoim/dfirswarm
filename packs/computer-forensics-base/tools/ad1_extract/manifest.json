@@ -25,7 +25,7 @@
     },
     "max_seconds": {
       "type": "integer",
-      "description": "Wall-clock budget in seconds (default 1500, at most 7200); past it the call stops, keeping the file it was in as a .partial"
+      "description": "Wall-clock budget in seconds (default 1500, at most 1700); past it the call stops, keeping the file it was in as a .partial"
     }
   },
   "runtime": "python3",
@@ -46,5 +46,5 @@
   "by": "maintainer",
   "at": "2026-10-01T12:00:00.000Z",
   "version": 2,
-  "sha256": "15f291065b57e8b165c47b4004f75064341f1a9c8dd37b3785f745b481d063e3"
+  "sha256": "4f1725071bdc7e8bcfa9cf7cde4a522c474bfe77ada8d6ae7990e7d10f71de38"
 }

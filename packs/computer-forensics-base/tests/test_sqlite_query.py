@@ -9,9 +9,11 @@ import hashlib
 import json
 import os
 import sqlite3
+import subprocess
+import sys
 import unittest
 
-from support import Case, run_tool
+from support import Case, run_tool, tool_path
 
 
 class SqliteQuery(Case):
@@ -143,6 +145,81 @@ class SqliteQuery(Case):
         self.assertIs(r.json["ok"], False)
         self.assertIs(r.json["timed_out"], True)
         self.assertIs(r.json["complete"], False)
+        # Rows that were being returned when the clock ran out are kept, in a file that is whole, and named.
+        r = self.query(db, "with recursive c(n) as (select 1 union all select n+1 from c) select n from c", max_seconds=1, limit=5)
+        self.assertIs(r.json["timed_out"], True)
+        kept = r.json["rows_read_before_the_stop"]
+        self.assertGreater(kept["row_count"], 5)
+        lines = self.read(kept["rows_file"]).splitlines()
+        self.assertEqual(len(lines), kept["row_count"] + 1)
+        self.assertEqual(json.loads(lines[-1]), {"n": kept["row_count"], "values": [kept["row_count"]]})
+        self.assertEqual([x["values"][0] for x in kept["rows"]], [1, 2, 3, 4, 5])
+        self.assertFalse([n for n in os.listdir(os.path.dirname(self.path(kept["rows_file"]))) if n.startswith(".sqlite_query-")], "no half-written file is left")
+
+    def test_the_last_statement_needs_no_semicolon_and_is_never_dropped(self):
+        db = self.db()
+        r = self.query(db, "select count(*) from a -- how many")
+        self.assertEqual((r.code, r.json["rows"][0]["values"][0]), (0, 3))
+        r = self.query(db, "select 1; select 2 /* the end */")
+        self.assertEqual([x["rows"][0]["values"][0] for x in r.json["results"]], [1, 2])
+        r = self.query(db, "select 1; select 'never closed")
+        self.assertEqual(r.code, 1)
+        self.assertIs(r.json["ok"], False)
+        self.assertIn("error", r.json)
+        self.assertEqual([x["rows"][0]["values"][0] for x in r.json["completed_statements"]], [1])
+
+    def test_values_that_are_not_what_they_say_are_refused_not_tracebacks(self):
+        db = self.db()
+        for bad in ({"sql": "select 1\u0000"}, {"sql": "select '\ud800'"}, {"csv": "false"}, {"csv": 1}, {"readonly": "no"}, {"readonly": 0}):
+            args = dict({"db_path": db, "sql": "select 1"}, **bad)
+            r = run_tool("sqlite_query", args, self.dir)
+            self.assertEqual(r.code, 1, bad)
+            self.assertNotIn("Traceback", r.stderr, bad)
+            self.assertIs(r.json["ok"], False, bad)
+        self.assertEqual(self.query(db, "select 1", readonly=True, csv=False).code, 0)
+        r = self.query(db, "select 1 " + " " * (64 * 1024))
+        self.assertEqual(r.code, 1)
+        self.assertIn("longer than 65536 bytes", r.json["error"])
+
+    def test_a_result_of_large_blobs_is_read_a_row_at_a_time(self):
+        db = self.path("big.db")
+        conn = sqlite3.connect(db)
+        conn.execute("create table t(d)")
+        for _ in range(12):
+            conn.execute("insert into t values(zeroblob(?))", (8 * 1024 * 1024,))
+        conn.commit()
+        conn.close()
+        wrapper = ("import json, resource, subprocess, sys\n"
+                   "p = subprocess.run([sys.executable, sys.argv[1]], input=sys.argv[2], capture_output=True, text=True)\n"
+                   "print(json.dumps({'out': p.stdout, 'peak': resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss}))\n")
+        env = {k: v for k, v in os.environ.items() if k not in ("JOB_ID", "OUT", "AGENT_ID")}
+        proc = subprocess.run([sys.executable, "-c", wrapper, tool_path("sqlite_query"), json.dumps({"db_path": db, "sql": "select d from t", "limit": 12})],
+                              capture_output=True, text=True, cwd=self.dir, env=env)
+        got = json.loads(proc.stdout)
+        result = json.loads(got["out"])
+        self.assertEqual((result["ok"], result["row_count"]), (True, 12))
+        lines = self.read(result["rows_file"]).splitlines()
+        self.assertEqual(len(lines), 13)
+        first = json.loads(lines[1])["values"][0]
+        self.assertEqual((first["length"], first["sha256"]), (8 * 1024 * 1024, hashlib.sha256(bytes(8 * 1024 * 1024)).hexdigest()))
+        peak = got["peak"] * (1 if sys.platform == "darwin" else 1024)
+        self.assertLess(peak, 140 * 1024 * 1024, "the peak was %d bytes for 96 MiB of blobs" % peak)
+
+    def test_a_journal_that_is_not_hot_is_not_called_one_and_a_link_finds_its_targets_sidecars(self):
+        db = self.db()
+        self.write("a.db-journal", b"\0" * 512)
+        r = self.query(db, "select 1")
+        journal = [s for s in r.json["sidecars"] if s["name"].endswith("-journal")][0]
+        self.assertIn("not a hot journal", journal["state"])
+        self.assertNotIn("not been rolled back", r.json["snapshot_status"])
+        self.assertNotIn("interrupted write", r.json["snapshot_status"])
+        self.write("a.db-journal", bytes([0xd9, 0xd5, 0x05, 0xf9, 0x20, 0xa1, 0x63, 0xd7]) + b"\0" * 504)
+        r = self.query(db, "select 1")
+        self.assertIn("interrupted write", r.json["snapshot_status"])
+        # A link to the database: the files beside the file it points at are the ones SQLite looks for.
+        os.symlink(db, self.path("link.db"))
+        r = self.query(self.path("link.db"), "select 1")
+        self.assertTrue([s for s in r.json["sidecars"] if s["name"] == "a.db-journal"][0]["present"])
 
 
 if __name__ == "__main__":

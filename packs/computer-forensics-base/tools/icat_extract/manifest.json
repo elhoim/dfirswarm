@@ -30,7 +30,7 @@
     },
     "max_seconds": {
       "type": "integer",
-      "description": "Time budget in seconds (default 1500, at most 7200); past it the run stops and keeps a .partial"
+      "description": "Time budget in seconds (default 1500, at most 1700); past it the run stops and keeps a .partial"
     }
   },
   "runtime": "python3",
@@ -78,5 +78,5 @@
   "by": "s864a08",
   "at": "2026-09-18T16:09:29.146Z",
   "version": 8,
-  "sha256": "3f45b750e63b03dffc9b543ce4d524bce91448d0d98f7912d0b01c4f8ffd9bf4"
+  "sha256": "a8ec2f41215c941f660366fe08b004311d54c84ee60cb0f2462f3276a692b097"
 }

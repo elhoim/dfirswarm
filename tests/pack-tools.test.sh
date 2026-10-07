@@ -365,7 +365,8 @@ printf 'not an image' > "$WORK/plain"
 mkdir -p "$WORK/tsk-none"
 printf '#!/bin/sh\nexit 1\n' > "$WORK/tsk-none/mmls"
 printf '#!/bin/sh\necho "Cannot determine file system type" >&2\nexit 1\n' > "$WORK/tsk-none/fsstat"
-chmod +x "$WORK/tsk-none/mmls" "$WORK/tsk-none/fsstat"
+printf '#!/bin/sh\necho "IMAGE FILE INFORMATION"\n' > "$WORK/tsk-none/img_stat"      # a silent mmls failure counts as "no table" only when img_stat opens the image
+chmod +x "$WORK/tsk-none/mmls" "$WORK/tsk-none/fsstat" "$WORK/tsk-none/img_stat"
 (cd "$WORK" && echo "{\"image\":\"$WORK/plain\"}" | PATH="$WORK/tsk-none:$PATH" run_tool "$BASE/tools/image_layout") | "$PY" -c '
 import json, sys
 d = json.load(sys.stdin)

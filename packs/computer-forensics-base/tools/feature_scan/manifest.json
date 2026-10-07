@@ -30,7 +30,7 @@
     },
     "timeout_seconds": {
       "type": "integer",
-      "description": "Give up after this long (default 900); what was written is then listed as partial"
+      "description": "Give up after this long (default 900, from 10 to 1000); what was written is then listed as partial"
     }
   },
   "runtime": "python3",
@@ -43,5 +43,5 @@
   "by": "maintainer",
   "at": "2026-09-22T14:00:00.000Z",
   "version": 3,
-  "sha256": "6994cd25fd9df0cff4502536b3bc82943f621cfa09fc3a0921aed894de54c254"
+  "sha256": "724d04358a17e5bf4b3a38dfbc61381af7ec7fb6cd33ac9a369cacd2af4643ae"
 }

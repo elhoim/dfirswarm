@@ -44,15 +44,31 @@ import signal
 import subprocess
 import sys
 import time
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
 TOOL = {"name": "timeline_super", "version": 4}
 DEFAULT_TIMEOUT = 1800
+TIMEOUT_MAX = 3300                # the manifest's own limit is 3600: the rest is for the version calls and the counting
+TOOL_SECONDS = 3500               # the whole call, counting included, ends before the manifest's limit
+SAMPLE_MAX = 1000
 VERSION_TIMEOUT = 20
 LINE_MAX = 8 * 1024 * 1024        # a line past this is counted invalid, its tail skipped; the file keeps it whole
 MESSAGE_PREVIEW = 2000
 INVALID_LISTED = 1000
+ZONE = re.compile(r"^[A-Za-z0-9_+\-/]{1,64}$")
+CHILD = [None]                    # the program running now: a SIGTERM to this tool ends it too, not only the tool
+
+
+def _terminated(signum, _frame):
+    proc = CHILD[0]
+    if proc is not None:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except OSError:
+            pass
+    raise SystemExit(128 + signum)
 
 
 def emit(obj, code=0):
@@ -119,6 +135,7 @@ class Stage:
             return self
         with open(self.stdout_file, "wb") as so, open(self.stderr_file, "wb") as se:
             proc = subprocess.Popen(self.argv, stdout=so, stderr=se, cwd=self.out_dir, start_new_session=True)
+            CHILD[0] = proc
             try:
                 self.exit = proc.wait(timeout=budget)
             except subprocess.TimeoutExpired:
@@ -129,6 +146,8 @@ class Stage:
                     proc.kill()
                 proc.wait()
                 self.exit = None
+            finally:
+                CHILD[0] = None
         self.seconds = round(time.monotonic() - started, 1)
         return self
 
@@ -149,13 +168,33 @@ def version_of(program, out_dir):
     return text[0][:200] if text else None
 
 
-def summarise(output, sample, out_dir):
+def stamp_value(row):
+    """The event's time as an aware datetime, or None: what a number or an ISO 8601 text can be said to be."""
+    raw = row.get("datetime") or row.get("timestamp")
+    try:
+        if isinstance(raw, bool) or raw is None:
+            return None, raw
+        if isinstance(raw, (int, float)):
+            return datetime.fromtimestamp(int(raw) // 1_000_000, timezone.utc).replace(microsecond=int(raw) % 1_000_000), raw
+        text = str(raw)
+        when = datetime.fromisoformat(text[:-1] + "+00:00" if text.endswith("Z") else text)
+        return (when if when.tzinfo else when.replace(tzinfo=timezone.utc)), raw
+    except (ValueError, OverflowError, OSError):
+        return None, raw
+
+
+def summarise(output, sample, out_dir, stop_at):
     """Valid and invalid lines of psort's JSON Lines, read line by line with a cap on
-    a line's size, so a hostile line cannot fill memory and a bad one is not a count."""
-    events = invalid = oversized = 0
-    first_event = last_event = None
+    a line's size, so a hostile line cannot fill memory and a bad one is not a count.
+
+    first_event and last_event are the earliest and latest time among the events (the file's order is
+    not trusted to be time order); an event with no time a reader can place is counted apart. The
+    counting stops at `stop_at` (a monotonic time): what was counted is then a lower bound, and says so."""
+    events = invalid = oversized = untimed = 0
+    earliest = latest = None
     parsers_seen, head, bad = {}, [], []
     invalid_path = os.path.join(out_dir, "timeline.invalid_lines.txt")
+    stopped_at_line = None
     with open(output, "rb") as fh:
         number, offset = 0, 0
         while True:
@@ -164,6 +203,9 @@ def summarise(output, sample, out_dir):
                 break
             start = offset
             number += 1
+            if number % 20000 == 0 and time.monotonic() > stop_at:
+                stopped_at_line = number
+                break
             if len(line) > LINE_MAX and not line.endswith(b"\n"):
                 rest = 0
                 while True:
@@ -182,20 +224,24 @@ def summarise(output, sample, out_dir):
             if not text:
                 continue
             try:
-                row = json.loads(text.decode("utf-8", "replace"))
+                row = json.loads(text.decode("utf-8"))             # strict: a byte that is not UTF-8 is not quietly replaced
                 if not isinstance(row, dict):
                     raise ValueError("not a JSON object")
-            except ValueError as exc:
+            except ValueError as exc:                               # UnicodeDecodeError is one
                 invalid += 1
                 if len(bad) < INVALID_LISTED:
                     bad.append((number, start, len(line), str(exc), text[:200]))
                 continue
             events += 1
-            stamp = readable(row.get("datetime") or row.get("timestamp"))
-            if stamp is not None:
-                if first_event is None:
-                    first_event = stamp
-                last_event = stamp
+            when, raw = stamp_value(row)
+            stamp = readable(raw)
+            if when is None:
+                untimed += 1
+            else:
+                if earliest is None or when < earliest[0]:
+                    earliest = (when, raw)
+                if latest is None or when > latest[0]:
+                    latest = (when, raw)
             name = row.get("parser") or row.get("data_type") or "unknown"
             parsers_seen[name] = parsers_seen.get(name, 0) + 1
             if len(head) < sample:
@@ -213,10 +259,12 @@ def summarise(output, sample, out_dir):
             for n, off, size, why, snippet in bad:
                 fh.write("%d\t%d\t%d\t%s\t%s\n" % (n, off, size, why.replace("\t", " ").replace("\n", " "),
                                                    snippet.decode("utf-8", "replace").replace("\t", " ").replace("\n", " ")))
-    return {"events": events, "invalid_lines": invalid, "oversized_lines": oversized, "first_event": first_event,
-            "last_event": last_event, "parsers_seen": parsers_seen, "head": head,
+    return {"events": events, "invalid_lines": invalid, "oversized_lines": oversized, "events_without_a_time": untimed,
+            "first_event": readable(earliest[1]) if earliest else None, "last_event": readable(latest[1]) if latest else None,
+            "parsers_seen": parsers_seen, "head": head,
             "invalid_lines_file": invalid_path if bad else None,
-            "invalid_lines_listed": len(bad), "invalid_lines_listing_complete": len(bad) == invalid}
+            "invalid_lines_listed": len(bad), "invalid_lines_listing_complete": len(bad) == invalid,
+            "stopped_at_line": stopped_at_line}
 
 
 def main():
@@ -227,8 +275,17 @@ def main():
     if not isinstance(args, dict):
         fail("arguments are a JSON object")
 
+    for name in ("parsers", "timezone", "psort_filter"):
+        value = args.get(name)
+        if value is not None and (not isinstance(value, str) or not value or "\0" in value):
+            fail("%s is a non-empty string (no NUL)" % name, **{name: value})
+    for name in ("parsers", "psort_filter"):
+        if isinstance(args.get(name), str) and args[name].startswith("-"):
+            fail("%s does not begin with '-': it would be read as an option of the program" % name, **{name: args[name]})
+    if args.get("timezone") is not None and not ZONE.match(args["timezone"]):
+        fail("timezone is a zone name such as Europe/Istanbul", timezone=args["timezone"])
     mode = args.get("mode", "full")
-    if mode not in ("full", "export"):
+    if not isinstance(mode, str) or mode not in ("full", "export"):
         fail("mode is full (log2timeline then psort) or export (psort over an existing storage file)", mode=mode)
     resume = args.get("resume", False)
     if not isinstance(resume, bool):
@@ -262,12 +319,15 @@ def main():
              install="python3 -m pip install plaso, or apt-get install -y plaso-tools")
 
     timeout = args.get("timeout_seconds", DEFAULT_TIMEOUT)
-    if not isinstance(timeout, int) or isinstance(timeout, bool) or timeout < 30:
-        fail("timeout_seconds must be an integer of at least 30")
+    if not isinstance(timeout, int) or isinstance(timeout, bool) or not 30 <= timeout <= TIMEOUT_MAX:
+        fail("timeout_seconds must be an integer from 30 to %d (the tool's own limit is 3600 seconds, and the counting needs the rest)" % TIMEOUT_MAX)
     sample = args.get("sample", 20)
-    if not isinstance(sample, int) or isinstance(sample, bool) or sample < 0:
-        fail("sample must be a non-negative integer")
+    if not isinstance(sample, int) or isinstance(sample, bool) or not 0 <= sample <= SAMPLE_MAX:
+        fail("sample must be a whole number from 0 to %d" % SAMPLE_MAX)
+    for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+        signal.signal(sig, _terminated)
 
+    call_started = time.monotonic()
     began = time.time()
     deadline = time.monotonic() + timeout            # one budget for every stage
     preexisting = []
@@ -283,7 +343,10 @@ def main():
     out_abs = str(dest)
     store = os.path.join(out_abs, "timeline.plaso") if mode == "full" else os.path.abspath(storage_arg)
     output = os.path.join(out_abs, "timeline.jsonl")
-    for path in (output, os.path.join(out_abs, "timeline.plaso"), os.path.join(out_abs, "log2timeline.log.gz"), os.path.join(out_abs, "psort.log.gz")):
+    written = [output, os.path.join(out_abs, "timeline.plaso"), os.path.join(out_abs, "timeline.invalid_lines.txt")]
+    for logname in ("log2timeline", "psort"):
+        written += [os.path.join(out_abs, logname + ext) for ext in (".log.gz", ".stdout", ".stderr")]
+    for path in written:
         if os.path.islink(path):
             fail("a link stands where this tool writes; it will not write through it", path=path)
 
@@ -346,8 +409,9 @@ def main():
     elif storage_ok:
         result["problems"].append("the time budget was used before psort could run")
 
-    result["logs"] = [p for p in (os.path.join(out_abs, "log2timeline.log.gz"), export_log) if os.path.isfile(p)]
-    result["captured_output"] = [str(p) for p in sorted(Path(out_abs).glob("*.std*"))]
+    # Only what this run wrote: a log or a captured output left in a resumed directory is an earlier run's, and is listed under preexisting.
+    result["logs"] = [p for p in (os.path.join(out_abs, "log2timeline.log.gz"), export_log) if fresh(p)]
+    result["captured_output"] = [str(p) for p in sorted(Path(out_abs).glob("*.std*")) if fresh(str(p))]
     result["parsers_filter"] = args.get("parsers") or ("all (the default, and usually the wrong choice)" if mode == "full" else "as in the storage file given")
     result["timezone_given"] = args.get("timezone") or None
     result["timezone_note"] = ("the zone given to log2timeline for the formats that store local time" if args.get("timezone")
@@ -357,7 +421,7 @@ def main():
 
     if output_ok:
         try:
-            summary = summarise(output, sample, out_abs)
+            summary = summarise(output, sample, out_abs, call_started + TOOL_SECONDS)
         except OSError as exc:
             summary = None
             result["problems"].append("psort's output could not be read: %s" % (exc.strerror or exc))
@@ -368,7 +432,13 @@ def main():
             if summary["invalid_lines_file"]:
                 result["invalid_lines_file"] = summary["invalid_lines_file"]
                 result["invalid_lines_listing_complete"] = summary["invalid_lines_listing_complete"]
+            result["events_without_a_time"] = summary["events_without_a_time"]
             result["first_event"], result["last_event"] = summary["first_event"], summary["last_event"]
+            result["first_last_note"] = "the earliest and the latest time among the events, whatever their order in the file"
+            result["summary_complete"] = summary["stopped_at_line"] is None
+            if summary["stopped_at_line"] is not None:
+                result["problems"].append("counting psort's output stopped at the tool's time limit, at line %d: events, by_parser, first_event and "
+                                          "last_event cover the lines before it only (the timeline file itself is whole)" % summary["stopped_at_line"])
             top = sorted(summary["parsers_seen"].items(), key=lambda kv: -kv[1])[:15]
             result["by_parser"] = [{"parser": n, "events": c} for n, c in top]
             result["sample"] = summary["head"]

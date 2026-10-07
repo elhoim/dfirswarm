@@ -46,16 +46,17 @@ def vhd_footer():
 
 
 class ImageLayout(Case):
-    def stubs(self, mmls="", fsstat=""):
+    def stubs(self, mmls="", fsstat="", img_stat="echo 'IMAGE FILE INFORMATION'\n"):
         d = self.path("bin")
         os.makedirs(d, exist_ok=True)
         log = self.path("calls.log")
         stand_in(d, "mmls", 'echo "mmls $*" >> "%s"\n%s' % (log, mmls or "exit 1\n"))
         stand_in(d, "fsstat", 'echo "fsstat $*" >> "%s"\n%s' % (log, fsstat or "echo 'Cannot determine file system type' >&2; exit 1\n"))
+        stand_in(d, "img_stat", 'echo "img_stat $*" >> "%s"\n%s' % (log, img_stat))
         return d, log
 
     def calls(self, log):
-        return open(log).read().splitlines() if os.path.exists(log) else []
+        return self.read(log).splitlines() if os.path.exists(log) else []
 
     def image(self, name="disk.img", data=b"\0" * 4096):
         return self.write(name, data)
@@ -138,7 +139,81 @@ class ImageLayout(Case):
         bin_dir, _ = self.stubs("cat <<'EOF'\n%sEOF\n" % MMLS_4K, "cat <<'EOF'\n%sEOF\n" % FSSTAT_NTFS)
         r = run_tool("image_layout", {"image": self.image()}, self.dir, [bin_dir])
         kept = self.path(r.json["raw_outputs"]["mmls"])
-        self.assertIn("Basic data partition", open(kept).read())
+        self.assertIn("Basic data partition", self.read(kept))
+
+    def test_a_silent_mmls_failure_is_no_table_only_when_img_stat_opens_the_image(self):
+        image = self.image()
+        bin_dir, log = self.stubs("exit 1\n")
+        r = run_tool("image_layout", {"image": image}, self.dir, [bin_dir])
+        self.assertIs(r.json["partition_table"], False)
+        self.assertIn("img_stat opens the image", r.json["partition_table_basis"])
+        self.assertIn("img_stat %s" % image, self.calls(log))
+        bin_dir, _ = self.stubs("exit 1\n", img_stat="echo 'Cannot determine image type' >&2; exit 1\n")
+        r = run_tool("image_layout", {"image": image}, self.dir, [bin_dir])
+        self.assertEqual(r.json["partition_table"], "unknown")
+        self.assertIn("img_stat did not open the image", r.json["partition_table_basis"])
+        # mmls saying it itself needs no second opinion.
+        bin_dir, log = self.stubs("echo 'Cannot determine partition type' >&2; exit 1\n")
+        os.unlink(log)
+        r = run_tool("image_layout", {"image": image}, self.dir, [bin_dir])
+        self.assertIs(r.json["partition_table"], False)
+        self.assertFalse([c for c in self.calls(log) if c.startswith("img_stat")])
+
+    def test_arguments_that_are_not_an_object_are_an_answer(self):
+        for raw in ("[]", "\"x\"", "7", "null"):
+            r = run_tool("image_layout", None, self.dir, raw_input=raw)
+            self.assertEqual(r.code, 1, raw)
+            self.assertNotIn("Traceback", r.stderr)
+            self.assertIn("JSON object", r.json["error"])
+
+    def test_fat_and_empty_fields_are_read_as_what_they_are(self):
+        fat = ("File System Type: FAT32\nOEM Name: MSDOS5.0\nVolume ID: 0xa1b2c3d4\n"
+               "Volume Label (Boot Sector): TESTVOL\nVolume Label (Root Directory): \nSector Size: 512\nCluster Size: 4096\n")
+        bin_dir, _ = self.stubs("echo 'Cannot determine partition type' >&2; exit 1\n", "cat <<'EOF'\n%sEOF\n" % fat)
+        r = run_tool("image_layout", {"image": self.image()}, self.dir, [bin_dir])
+        fs = r.json["partitions"][0]["filesystem"]
+        self.assertEqual((fs["fs_type"], fs["volume_serial"], fs["volume_label"], fs["cluster_size"]), ("FAT32", "0xa1b2c3d4", "TESTVOL", 4096))
+        # A field with no value must not take the next line for its value.
+        ntfs = "File System Type: NTFS\nVolume Name: \nVolume Serial Number: 0123456789ABCDEF\nSector Size: 512\n"
+        bin_dir, _ = self.stubs("echo 'Cannot determine partition type' >&2; exit 1\n", "cat <<'EOF'\n%sEOF\n" % ntfs)
+        r = run_tool("image_layout", {"image": self.image()}, self.dir, [bin_dir])
+        fs = r.json["partitions"][0]["filesystem"]
+        self.assertNotIn("volume_label", fs)
+        self.assertEqual(fs["volume_serial"], "0123456789ABCDEF")
+
+    def test_a_partition_named_unallocated_is_still_a_partition(self):
+        mmls = """GUID Partition Table (EFI)
+Offset Sector: 0
+Units are in 512-byte sectors
+
+      Slot      Start        End          Length       Description
+000:  Meta      0000000000   0000000000   0000000001   Safety Table
+001:  -------   0000000000   0000002047   0000002048   Unallocated
+002:  000       0000002048   0001050623   0001048576   Unallocated space (a name the owner gave it)
+"""
+        bin_dir, log = self.stubs("cat <<'EOF'\n%sEOF\n" % mmls, "cat <<'EOF'\n%sEOF\n" % FSSTAT_NTFS)
+        r = run_tool("image_layout", {"image": self.image()}, self.dir, [bin_dir])
+        self.assertEqual([p["allocated"] for p in r.json["partitions"]], [False, False, True])
+        self.assertTrue([c for c in self.calls(log) if c.startswith("fsstat") and "-o 2048" in c])
+
+    def test_one_image_at_two_sector_sizes_keeps_both_outputs(self):
+        bin_dir, _ = self.stubs("cat <<'EOF'\n%sEOF\n" % MMLS_4K, "cat <<'EOF'\n%sEOF\n" % FSSTAT_NTFS)
+        image = self.image()
+        first = run_tool("image_layout", {"image": image, "sector_size": 4096}, self.dir, [bin_dir]).json["raw_outputs"]
+        second = run_tool("image_layout", {"image": image, "sector_size": 512}, self.dir, [bin_dir]).json["raw_outputs"]
+        self.assertNotEqual(first["mmls"], second["mmls"])
+        self.assertIn("mmls -b 4096", self.read(self.path(first["mmls"])))
+        self.assertIn("mmls -b 512", self.read(self.path(second["mmls"])))
+
+    def test_an_image_named_with_a_leading_dash_is_a_path_not_an_option(self):
+        bin_dir, log = self.stubs("cat <<'EOF'\n%sEOF\n" % MMLS_4K, "cat <<'EOF'\n%sEOF\n" % FSSTAT_NTFS)
+        self.write("-rf.img", b"\0" * 4096)
+        r = run_tool("image_layout", {"image": "-rf.img"}, self.dir, [bin_dir])
+        self.assertEqual(r.code, 0, r.stdout)
+        calls = self.calls(log)
+        self.assertIn("mmls ./-rf.img", calls)
+        self.assertTrue([c for c in calls if c.startswith("fsstat") and c.endswith(" ./-rf.img")], calls)
+        self.assertIn("./-rf.img", r.json["use"][0]["example"])
 
     @unittest.skipUnless(have("mmls"), "mmls is not on this host")
     def test_the_real_mmls_agrees_on_a_hand_built_mbr(self):

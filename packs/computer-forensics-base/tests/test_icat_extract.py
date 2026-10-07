@@ -117,6 +117,52 @@ class IcatExtract(Case):
             self.assertEqual(self.extract(bin_dir, inode=bad, output="work/%s.bin" % abs(hash(str(bad)))).code, 1, bad)
         self.assertFalse(os.path.exists(self.argv_file))
 
+    def test_a_leading_zero_is_the_same_address_and_the_arguments_must_be_json(self):
+        bin_dir = self.icat('printf data\n')
+        self.assertEqual(self.extract(bin_dir, inode="084284").code, 0)
+        self.assertEqual(self.read(self.argv_file).split()[-1], "84284")
+        self.assertEqual(self.extract(bin_dir, inode="084284-128-004", output="work/two.bin").code, 0)
+        self.assertEqual(self.read(self.argv_file).split()[-1], "84284-128-4")
+        r = run_tool("icat_extract", None, self.dir, [bin_dir], raw_input="{not json")
+        self.assertEqual(r.code, 1)
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertIn("not valid JSON", r.json["error"])
+
+    def test_an_icat_that_stalls_is_stopped_at_the_time_budget_and_its_bytes_are_kept(self):
+        bin_dir = self.icat('printf data\nexec sleep 60\n')
+        r = run_tool("icat_extract", {"inode": "168-128-4", "output": "work/out.bin", "image": "inputs/disk.E01", "offset": 2048, "max_seconds": 1}, self.dir, [bin_dir], timeout=30)
+        self.assertEqual(r.code, 1, r.stdout + r.stderr)
+        self.assertEqual((r.json["status"], r.json["size"]), ("partial", 4))
+        self.assertIn("time budget", r.json["problem"])
+        self.assertEqual(self.read(self.path("work/out.bin.partial")), "data")
+        self.assertFalse(os.path.exists(self.path("work/out.bin")))
+
+    def test_a_file_that_appears_at_the_name_while_icat_runs_is_not_replaced(self):
+        bin_dir = self.icat('mkdir -p work\necho planted > work/out.bin\nprintf data\n')
+        r = self.extract(bin_dir)
+        self.assertEqual(r.code, 1, r.stdout)
+        self.assertEqual(self.read(self.path("work/out.bin")), "planted\n")
+        self.assertIn("appeared while icat was running", r.json["problem"])
+        self.assertEqual(self.read(self.path("work/out.bin.partial")), "data")
+        self.assertIn("whole stream was written", r.json["note"])
+        self.assertEqual((r.json["size"], r.json["path"]), (4, "work/out.bin.partial"))
+
+    def test_icats_stderr_goes_to_a_file_of_its_own_and_never_over_another(self):
+        bin_dir = self.icat('echo "icat complains" >&2\nprintf data\n')
+        victim = self.write("victim.txt", "keep me")
+        os.makedirs(self.path("work"), exist_ok=True)
+        os.symlink(victim, self.path("work/out.bin.icat.stderr"))
+        r = self.extract(bin_dir)
+        self.assertEqual(r.code, 0, r.stdout)
+        self.assertEqual(self.read(victim), "keep me")
+        self.assertIn("icat complains", self.read(self.path(r.json["stderr_file"])))
+
+    def test_a_time_budget_beyond_the_tools_own_limit_is_refused(self):
+        bin_dir = self.icat('printf data\n')
+        r = self.extract(bin_dir, max_seconds=1701)
+        self.assertEqual(r.code, 1)
+        self.assertIn("from 1 to 1700", r.json["error"])
+
 
 if __name__ == "__main__":
     unittest.main()

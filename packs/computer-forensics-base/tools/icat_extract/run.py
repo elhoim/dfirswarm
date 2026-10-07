@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import re
+import select
 import shutil
 import subprocess
 import sys
@@ -24,7 +25,7 @@ BLOCK = 1 << 20
 MAX_BYTES_DEFAULT = 32 * 1024 ** 3
 MAX_BYTES_CEILING = 1024 ** 4
 MAX_SECONDS_DEFAULT = 1500
-MAX_SECONDS_CEILING = 7200
+MAX_SECONDS_CEILING = 1700        # inside the manifest's own 1800-second limit: a longer budget would be killed, not reported
 SECTOR_MAX = 65536
 INODE = re.compile(r"^\d+(-\d+(-\d+)?)?$")
 
@@ -164,7 +165,10 @@ def resolve_output(out):
     return dest
 
 
-d = json.load(sys.stdin)
+try:
+    d = json.load(sys.stdin)
+except ValueError as exc:
+    fail("arguments are not valid JSON", reason=str(exc))
 if not isinstance(d, dict):
     fail("arguments are a JSON object")
 inode = d.get("inode")
@@ -174,6 +178,8 @@ if inode is None or not isinstance(output, str) or not output:
     fail("need inode and output")
 if isinstance(inode, bool) or not (isinstance(inode, int) and inode >= 0 or isinstance(inode, str) and INODE.match(inode)):
     fail("inode is a Sleuth Kit address: a number, or number-type-id for an NTFS stream (168-128-4)", inode=inode)
+# 084284 is address 84284: icat would read a leading zero as octal. The address is held as its numbers.
+inode = "-".join(str(int(part)) for part in str(inode).split("-"))
 sector_size = d.get("sector_size")
 if sector_size is not None and (not isinstance(sector_size, int) or isinstance(sector_size, bool)
                                 or sector_size < 512 or sector_size > SECTOR_MAX or sector_size % 512):
@@ -213,9 +219,17 @@ n = 1
 while part.exists() or part.is_symlink():
     n += 1
     part = dest.with_name("%s.partial.%d" % (dest.name, n))
-err_path = dest.with_name(dest.name + ".icat.stderr")
-if err_path.exists() or err_path.is_symlink():
-    err_path = dest.with_name("%s.icat.stderr.%d" % (dest.name, int(time.time())))
+# icat's stderr goes to a file made new, whatever else is there (O_EXCL: no other file is opened over or through).
+err_path, err_fd, k = None, None, 0
+while err_fd is None:
+    k += 1
+    err_path = dest.with_name(dest.name + ".icat.stderr" + ("" if k == 1 else ".%d" % k))
+    try:
+        err_fd = os.open(str(err_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+    except FileExistsError:
+        continue
+    except OSError as exc:
+        fail("icat's stderr file could not be created: %s" % (exc.strerror or exc), output=output)
 digest = hashlib.sha256()
 size = 0
 status, why = "complete", None
@@ -223,12 +237,23 @@ started = time.monotonic()
 try:
     out_fd = os.open(str(part), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
 except OSError as exc:
+    os.close(err_fd)
+    os.unlink(err_path)
     fail("the output could not be created: %s" % (exc.strerror or exc), output=output)
-with os.fdopen(out_fd, "wb") as out, open(err_path, "wb") as errf:
+with os.fdopen(out_fd, "wb") as out, os.fdopen(err_fd, "wb") as errf:
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=errf)
+    pipe = proc.stdout.fileno()
     try:
         while True:
-            block = proc.stdout.read(BLOCK)
+            # Waited for with the clock running: an icat that stalls (a damaged image, a stuck read) is stopped at the
+            # budget, not waited on for ever behind a read that returns nothing.
+            left = max_seconds - (time.monotonic() - started)
+            if left <= 0 or not select.select([pipe], [], [], min(left, 5))[0]:
+                if time.monotonic() - started > max_seconds:
+                    status, why = "partial", "the time budget of %d seconds was reached; icat was stopped" % max_seconds
+                    break
+                continue
+            block = os.read(pipe, BLOCK)
             if not block:
                 break
             room = max_bytes - size
@@ -261,9 +286,21 @@ err = ""
 if err_path:
     with open(err_path, "r", encoding="utf-8", errors="replace") as fh:
         err = fh.read(4000).strip()
+stream_whole = status == "complete"
 if status == "complete":
-    os.rename(part, dest)       # whole: it takes its own name (the old name was free when this began)
-    shown = output
+    # Whole: it takes its own name, and never over a file that appeared there while icat ran (a link fails where the name
+    # is taken; a file system with no links gets a rename after a look).
+    try:
+        os.link(part, dest)
+        os.unlink(part)
+    except FileExistsError:
+        status, why = "partial", "%s appeared while icat was running, and an extract never replaces a file; the whole stream is kept as %s" % (output, os.path.basename(part))
+    except OSError:
+        if os.path.lexists(dest):
+            status, why = "partial", "%s appeared while icat was running, and an extract never replaces a file; the whole stream is kept as %s" % (output, os.path.basename(part))
+        else:
+            os.rename(part, dest)
+    shown = output if status == "complete" else output + part.name[len(dest.name):]
 else:
     if size == 0:
         os.unlink(part)
@@ -275,7 +312,10 @@ catalogued = (next((e for e in files if not e["deleted"]), None) or (files or [N
 result = {"tool": TOOL, "path": shown, "size": size, "sha256": digest.hexdigest(), "image": image, "offset": offset,
           "sector_size": sector_size, "inode": str(inode), "status": status, "icat_exit": rc, "command": " ".join(cmd),
           "catalog_path": catalogued, "catalog_paths": [{"address": e["address"], "path": e["path"], "deleted": e["deleted"]} for e in files]}
-if why:
+if why and stream_whole:
+    result["problem"] = why
+    result["note"] = "the whole stream was written, and is kept as %s: size and sha256 are of it" % shown
+elif why:
     result["problem"] = why
     result["note"] = "what was written is kept as %s and is not the whole stream: size and sha256 are of those bytes alone" % shown
 if err_path:

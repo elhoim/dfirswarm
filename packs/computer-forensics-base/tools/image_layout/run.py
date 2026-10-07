@@ -24,6 +24,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -122,20 +123,24 @@ def parse_mmls(text):
             "start_sector": int(m.group("start")),
             "length_sectors": int(m.group("len")),
             "description": desc,
-            "allocated": not desc.lower().startswith("unallocated")
-            and "meta" not in m.group("table").lower(),
+            # The table column says what a row is ("-------" a gap, "Meta" a table area, anything else an entry);
+            # the description is a partition's own name in a GPT and says nothing of the sort.
+            "allocated": m.group("table") != "-------" and m.group("table").lower() != "meta",
         })
     return sector, slots
 
 
+# [ \t]* after the colon, never \s*: a field with no value must not take the next line for its value.
 FSSTAT_FIELDS = (
-    ("fs_type", re.compile(r"^File System Type:\s*(.+?)\s*$", re.M)),
-    ("volume_serial", re.compile(r"^Volume Serial Number:\s*(.+?)\s*$", re.M)),
-    ("volume_label", re.compile(r"^Volume (?:Label|Name)(?: \(from \S+\))?:\s*(.+?)\s*$", re.M)),
-    ("cluster_size", re.compile(r"^Cluster Size:\s*(\d+)", re.M)),
-    ("sector_size", re.compile(r"^Sector Size:\s*(\d+)", re.M)),
-    ("total_range", re.compile(r"^Total (?:Cluster|Sector|Inode) Range:\s*(.+?)\s*$", re.M)),
-    ("last_mounted", re.compile(r"^Last Mounted (?:at|on):\s*(.+?)\s*$", re.M)),
+    ("fs_type", re.compile(r"^File System Type:[ \t]*(\S.*?)[ \t]*$", re.M)),
+    # NTFS and exFAT print a serial number, FAT a volume ID.
+    ("volume_serial", re.compile(r"^Volume (?:Serial Number|ID):[ \t]*(\S.*?)[ \t]*$", re.M)),
+    # FAT names the label's source in brackets (Boot Sector, Root Directory); ext and NTFS call it a name.
+    ("volume_label", re.compile(r"^Volume (?:Label|Name)(?: \([^)\n]*\))?:[ \t]*(\S.*?)[ \t]*$", re.M)),
+    ("cluster_size", re.compile(r"^Cluster Size:[ \t]*(\d+)", re.M)),
+    ("sector_size", re.compile(r"^Sector Size:[ \t]*(\d+)", re.M)),
+    ("total_range", re.compile(r"^Total (?:Cluster|Sector|Inode) Range:[ \t]*(\S.*?)[ \t]*$", re.M)),
+    ("last_mounted", re.compile(r"^Last Mounted (?:at|on):[ \t]*(\S.*?)[ \t]*$", re.M)),
 )
 
 
@@ -161,8 +166,10 @@ class Keep:
             self.shown = str(self.dir) + "/"
         self.files, self.error = {}, None
 
-    def save(self, label, text):
-        name = "image_layout-%s-%s.txt" % (self.digest, label)
+    def save(self, label, text, argv=None):
+        # Keyed by the command as well as the image: the same program run with another sector size is another file.
+        key = hashlib.sha256(" ".join(argv or [label]).encode("utf-8", "replace")).hexdigest()[:8]
+        name = "image_layout-%s-%s-%s.txt" % (self.digest, label, key)
         try:
             self.dir.mkdir(parents=True, exist_ok=True)
             fd, tmp = tempfile.mkstemp(dir=self.dir, prefix=".image_layout-")
@@ -178,12 +185,12 @@ def describe_fs(image, offset, unit, forced, deadline, keep, label):
     argv = ["fsstat"] + sector_args(unit, forced) + (["-o", str(offset)] if offset is not None else []) + [image]
     res = run(argv, deadline)
     if res["stdout"] or res["stderr"]:
-        keep.save("fsstat-" + label, "$ %s\n%s%s" % (" ".join(argv), res["stdout"], ("\n[stderr]\n" + res["stderr"]) if res["stderr"] else ""))
+        keep.save("fsstat-" + label, "$ %s\n%s%s" % (shlex.join(argv), res["stdout"], ("\n[stderr]\n" + res["stderr"]) if res["stderr"] else ""), argv)
     if res["kind"] != "ok":
         why = res["stderr"].splitlines()[-1] if res["stderr"] else "fsstat returned nothing"
         return {"readable": None if res["kind"] in ("missing", "timeout", "skipped", "error") else False,
-                "outcome": res["kind"], "why": why, "command": " ".join(argv)}
-    found = {"readable": True, "outcome": "read", "command": " ".join(argv)}
+                "outcome": res["kind"], "why": why, "command": shlex.join(argv)}
+    found = {"readable": True, "outcome": "read", "command": shlex.join(argv)}
     for key, pattern in FSSTAT_FIELDS:
         m = pattern.search(res["stdout"])
         if m:
@@ -192,24 +199,24 @@ def describe_fs(image, offset, unit, forced, deadline, keep, label):
 
 
 ACQUISITION = (
-    ("acquired_by", re.compile(r"^\s*Examiner name:\s*(.+?)\s*$", re.M)),
-    ("case_number", re.compile(r"^\s*Case number:\s*(.+?)\s*$", re.M)),
-    ("description", re.compile(r"^\s*Description:\s*(.+?)\s*$", re.M)),
-    ("acquired_at", re.compile(r"^\s*Acquisition date:\s*(.+?)\s*$", re.M)),
-    ("system_date", re.compile(r"^\s*System date:\s*(.+?)\s*$", re.M)),
-    ("imager", re.compile(r"^\s*Acquisition software:\s*(.+?)\s*$", re.M)),
-    ("media_size", re.compile(r"^\s*Media size:\s*(.+?)\s*$", re.M)),
-    ("bytes_per_sector", re.compile(r"^\s*Bytes per sector:\s*(\d+)", re.M)),
-    ("md5", re.compile(r"^\s*MD5:\s*([0-9a-fA-F]+)", re.M)),
-    ("sha1", re.compile(r"^\s*SHA1:\s*([0-9a-fA-F]+)", re.M)),
-    ("sha256", re.compile(r"^\s*SHA256:\s*([0-9a-fA-F]+)", re.M)),
+    ("acquired_by", re.compile(r"^[ \t]*Examiner name:[ \t]*(\S.*?)[ \t]*$", re.M)),
+    ("case_number", re.compile(r"^[ \t]*Case number:[ \t]*(\S.*?)[ \t]*$", re.M)),
+    ("description", re.compile(r"^[ \t]*Description:[ \t]*(\S.*?)[ \t]*$", re.M)),
+    ("acquired_at", re.compile(r"^[ \t]*Acquisition date:[ \t]*(\S.*?)[ \t]*$", re.M)),
+    ("system_date", re.compile(r"^[ \t]*System date:[ \t]*(\S.*?)[ \t]*$", re.M)),
+    ("imager", re.compile(r"^[ \t]*Acquisition software:[ \t]*(\S.*?)[ \t]*$", re.M)),
+    ("media_size", re.compile(r"^[ \t]*Media size:[ \t]*(\S.*?)[ \t]*$", re.M)),
+    ("bytes_per_sector", re.compile(r"^[ \t]*Bytes per sector:[ \t]*(\d+)", re.M)),
+    ("md5", re.compile(r"^[ \t]*MD5:[ \t]*([0-9a-fA-F]+)", re.M)),
+    ("sha1", re.compile(r"^[ \t]*SHA1:[ \t]*([0-9a-fA-F]+)", re.M)),
+    ("sha256", re.compile(r"^[ \t]*SHA256:[ \t]*([0-9a-fA-F]+)", re.M)),
 )
 
 
 def acquisition_record(image, deadline, keep):
     res = run(["ewfinfo", image], deadline)
     if res["stdout"] or res["stderr"]:
-        keep.save("ewfinfo", "$ ewfinfo %s\n%s%s" % (image, res["stdout"], ("\n[stderr]\n" + res["stderr"]) if res["stderr"] else ""))
+        keep.save("ewfinfo", "$ ewfinfo %s\n%s%s" % (shlex.quote(image), res["stdout"], ("\n[stderr]\n" + res["stderr"]) if res["stderr"] else ""), ["ewfinfo", image])
     if res["kind"] != "ok":
         return {"read": False, "outcome": res["kind"], "why": res["stderr"].splitlines()[-1] if res["stderr"] else "ewfinfo returned nothing"}
     rec = {"read": True}
@@ -237,6 +244,8 @@ def main():
         args = json.load(sys.stdin)
     except ValueError as exc:
         fail("arguments are not valid JSON", reason=str(exc))
+    if not isinstance(args, dict):
+        fail("arguments are a JSON object")
 
     image = args.get("image")
     if not isinstance(image, str) or not image:
@@ -249,6 +258,8 @@ def main():
                                or forced < 512 or forced > SECTOR_MAX or forced % 512):
         fail("sector_size must be a multiple of 512 from 512 to %d (the Sleuth Kit's -b takes no other)" % SECTOR_MAX, sector_size=forced)
 
+    # A name that begins with "-" would be read by every Sleuth Kit program as an option: "./" makes it a path.
+    arg = "./" + image if image.startswith("-") else image
     deadline = Deadline(TOTAL_BUDGET)
     keep = Keep(image)
     container, basis = container_of(image)
@@ -264,7 +275,7 @@ def main():
     if split:
         out["notes"].append(split)
     if out["container"] == "ewf":
-        out["acquisition"] = acquisition_record(image, deadline, keep)
+        out["acquisition"] = acquisition_record(arg, deadline, keep)
         if out["acquisition"].get("read"):
             out["notes"].append(
                 "The digests under 'acquisition' are the imager's, over what it acquired (a disk, a volume or "
@@ -272,10 +283,10 @@ def main():
                 "container, and not of the volume inside it."
             )
 
-    probe = ["mmls"] + (["-b", str(forced)] if forced else []) + [image]
+    probe = ["mmls"] + (["-b", str(forced)] if forced else []) + [arg]
     res = run(probe, deadline)
-    keep.save("mmls", "$ %s\n%s%s" % (" ".join(probe), res["stdout"], ("\n[stderr]\n" + res["stderr"]) if res["stderr"] else ""))
-    out["mmls_command"] = " ".join(probe)
+    keep.save("mmls", "$ %s\n%s%s" % (shlex.join(probe), res["stdout"], ("\n[stderr]\n" + res["stderr"]) if res["stderr"] else ""), probe)
+    out["mmls_command"] = shlex.join(probe)
     if res["kind"] == "ok":
         if out["container"] in VIRTUAL_DISKS:
             out["notes"].append(
@@ -298,7 +309,7 @@ def main():
             entry["offset_bytes"] = slot["start_sector"] * unit
             entry["length_bytes"] = slot["length_sectors"] * unit
             if slot["allocated"]:
-                entry["filesystem"] = describe_fs(image, slot["start_sector"], unit, forced, deadline, keep, "p%d" % slot["start_sector"])
+                entry["filesystem"] = describe_fs(arg, slot["start_sector"], unit, forced, deadline, keep, "p%d" % slot["start_sector"])
             parts.append(entry)
         out["partitions"] = parts
         fs = [p["filesystem"] for p in parts if "filesystem" in p]
@@ -333,8 +344,20 @@ def main():
         # mmls ran and found no table it recognises (exit 1, no complaint of its own):
         # that is a result about the bytes at that sector size. Anything else (a missing
         # program, a timeout, an error opening the image) says nothing about the image.
-        recognised_none = res["kind"] == "refused" and (
-            not res["stderr"] or re.search(r"cannot determine partition type|unknown partition", res["stderr"], re.I))
+        # Only mmls saying so counts. An exit 1 with nothing said is not the same: the image may not have opened
+        # at all, so img_stat is asked whether the Sleuth Kit opens it, and only then is silence taken for "no table".
+        recognised_none = res["kind"] == "refused" and bool(
+            re.search(r"cannot determine partition type|unknown partition", res["stderr"], re.I))
+        silent_basis = None
+        if res["kind"] == "refused" and not res["stderr"]:
+            opened = run(["img_stat"] + (["-b", str(forced)] if forced else []) + [arg], deadline)
+            if opened["stdout"] or opened["stderr"]:
+                keep.save("img_stat", "$ img_stat %s\n%s%s" % (shlex.quote(arg), opened["stdout"], ("\n[stderr]\n" + opened["stderr"]) if opened["stderr"] else ""), ["img_stat", arg])
+            if opened["kind"] == "ok":
+                recognised_none = True
+                silent_basis = "mmls exited %s with nothing to say, and img_stat opens the image" % res["code"]
+            else:
+                silent_basis = "mmls exited %s with nothing to say, and img_stat did not open the image (%s)" % (res["code"], opened["kind"])
         out["sector_size"] = forced or 512
         out["sector_size_source"] = "given by the caller (-b)" if forced else "the default: mmls printed no units"
         if recognised_none:
@@ -342,13 +365,15 @@ def main():
             out["partition_table_basis"] = ("mmls found no partition table it recognises%s. That does not show the image has none: "
                                             "a table type the Sleuth Kit does not read, a damaged one and a wrong sector size look the same."
                                             % (" at sector size %d" % forced if forced else ""))
+            if silent_basis:
+                out["partition_table_basis"] += " (%s)" % silent_basis
         else:
             out["partition_table"] = "unknown"
-            out["partition_table_basis"] = "mmls could not tell (%s)" % res["kind"]
+            out["partition_table_basis"] = "mmls could not tell (%s)" % (silent_basis or res["kind"])
             out["mmls_error"] = res["stderr"].splitlines()[-1] if res["stderr"] else "mmls returned nothing"
             out["notes"].append("mmls did not run to a result (%s: %s); nothing here shows whether the image has a "
                                 "partition table." % (res["kind"], out["mmls_error"]))
-        whole = describe_fs(image, None, forced, forced, deadline, keep, "whole")
+        whole = describe_fs(arg, None, forced, forced, deadline, keep, "whole")
         out["partitions"] = [{
             "slot": "—",
             "description": "the whole image, probed with no partition table"
@@ -380,8 +405,8 @@ def main():
         {
             "offset_sectors": p["offset_sectors"],
             "fs_type": p["filesystem"].get("fs_type"),
-            "example": "fls -r %s-o %d %s" % (flag, p["offset_sectors"], image)
-            if out["partition_table"] is True else "fls -r %s%s" % (flag, image),
+            "example": "fls -r %s-o %d %s" % (flag, p["offset_sectors"], shlex.quote(arg))
+            if out["partition_table"] is True else "fls -r %s%s" % (flag, shlex.quote(arg)),
         }
         for p in ready
     ]

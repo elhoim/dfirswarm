@@ -1,6 +1,6 @@
 {
   "name": "timeline_super",
-  "description": "Build a machine timeline with Plaso: log2timeline over an image, a partition, a directory or a collection, then psort to JSON lines (mode full), or psort alone over a storage file that already exists (mode export, for a new filter without collecting again). What the enabled parsers produced from the sources they could read, not every timestamp on the volume: a parser not enabled, a source not opened and a record not read add no row. Returns the storage file, each stage's exit code, a status (complete: both programs exited 0, wrote their files and every line parsed; partial; failed), the versions the programs print, valid and invalid line counts, first and last event, a preview sample and the log and captured-output files. complete is not coverage: the storage file's own processing report (Plaso's pinfo) says what each parser did. Slow by design; give it a narrow parser list when you know what you are after. Refuses an out_dir that already holds files unless resume is true.",
+  "description": "Build a machine timeline with Plaso: log2timeline over an image, a partition, a directory or a collection, then psort to JSON lines (mode full), or psort alone over a storage file that already exists (mode export, for a new filter without collecting again). What the enabled parsers produced from the sources they could read, not every timestamp on the volume: a parser not enabled, a source not opened and a record not read add no row. Returns the storage file, each stage's exit code, a status (complete: both programs exited 0, wrote their files and every line parsed; partial; failed), the versions the programs print, valid and invalid line counts (a line that is not UTF-8 is invalid, not repaired), the earliest and latest event time, a preview sample and the log and captured-output files. complete is not coverage: the storage file's own processing report (Plaso's pinfo) says what each parser did. Slow by design; give it a narrow parser list when you know what you are after. Refuses an out_dir that already holds files unless resume is true.",
   "params": {
     "out_dir": {
       "type": "string",
@@ -33,11 +33,11 @@
     },
     "sample": {
       "type": "integer",
-      "description": "How many events to return inline as a preview (default 20)"
+      "description": "How many events to return inline as a preview (default 20, at most 1000)"
     },
     "timeout_seconds": {
       "type": "integer",
-      "description": "One budget for every stage together, at least 30 (default 1800)"
+      "description": "One budget for every stage together, from 30 to 3300 (default 1800); the counting of the output has the rest of the tool's own 3600 seconds"
     },
     "resume": {
       "type": "boolean",
@@ -55,5 +55,5 @@
   "by": "maintainer",
   "at": "2026-09-22T14:00:00.000Z",
   "version": 4,
-  "sha256": "2bc142407cadd69ef271926bf0044b7e0a3843070ab496387e352beac9dbe855"
+  "sha256": "c5038173c4f4c9dd0723b1495f1b00fac961fe7137951ca2db069417b068a035"
 }

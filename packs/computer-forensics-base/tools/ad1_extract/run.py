@@ -71,7 +71,7 @@ ERRORS = "ad1_extract.errors.txt"
 COVERAGE = "ad1_extract.coverage.json"
 ITEMS_DEFAULT, ITEMS_CEILING = 5_000_000, 100_000_000
 BYTES_DEFAULT, BYTES_CEILING = 256 * 1024 ** 3, 1024 ** 4
-SECONDS_DEFAULT, SECONDS_CEILING = 1500, 7200
+SECONDS_DEFAULT, SECONDS_CEILING = 1500, 1700          # the ceiling is inside the manifest's own 1800-second limit
 
 
 # --- AD1 reader ---------------------------------------------------------------

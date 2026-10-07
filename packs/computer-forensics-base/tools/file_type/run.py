@@ -40,6 +40,7 @@ TOOL = {"name": "file_type", "version": 3}
 BUDGET_SECONDS = 100          # under the manifest's 120
 LIBMAGIC_TIMEOUT = 10
 ERRORS_SHOWN = 50
+LIMIT_MAX = 5000                # files shown inline; every file looked at is in the whole-result file
 
 class _AdSegments:
     """.ad1, .ad2, ... .ad10 and on: FTK Imager numbers an AD1 image's segments without end."""
@@ -52,6 +53,32 @@ class _AdSegments:
 
 
 AD_SEGMENTS = _AdSegments()
+
+
+class _EwfSegments:
+    """.E01 to .E99 and .EAA on (EnCase), .S01 (SMART) and .Ex01 on (EWF2): every segment opens with the file header."""
+
+    def __init__(self, pattern):
+        self.pattern = re.compile(pattern)
+
+    def __contains__(self, ext):
+        return bool(self.pattern.fullmatch(ext))
+
+    def __bool__(self):
+        return True
+
+
+EWF1_SEGMENTS = _EwfSegments(r"[es]\d\d|e[a-z]{2}")
+EWF2_SEGMENTS = _EwfSegments(r"ex\d\d|ex[a-z]{2}")
+EWF_LOGICAL_SEGMENTS = _EwfSegments(r"l\d\d|l[a-z]{2}|lx\d\d")
+# What a plain text file is not named: the extensions of formats that are not text. A text file given one of these
+# is worth a sentence; a text file named .ps1, .vbs, .js, .reg or .conf is not, and an extension no table lists is no mismatch.
+BINARY_EXTENSIONS = {
+    "exe", "dll", "sys", "scr", "ocx", "cpl", "efi", "mui", "msi", "zip", "docx", "xlsx", "pptx", "docm", "xlsm", "pptm", "jar", "apk",
+    "odt", "ods", "epub", "whl", "ipa", "aff4", "rar", "7z", "gz", "tgz", "bz2", "xz", "doc", "xls", "ppt", "msg", "pdf", "png", "jpg",
+    "jpeg", "gif", "wav", "avi", "webp", "sqlite", "sqlite3", "evtx", "lnk", "pf", "ad1", "lime", "dmp", "tar", "hve", "hiv", "class",
+    "dylib", "bundle", "so", "elf", "mp3", "mp4", "mov", "iso", "vhd", "vhdx", "vmdk", "qcow2",
+}
 
 MAGIC = [
     (0, b"MZ", "PE or DOS executable", {"exe", "dll", "sys", "scr", "ocx", "cpl", "efi", "mui", "msi"}),
@@ -83,7 +110,10 @@ MAGIC = [
     (0, b"\x4c\x00\x00\x00\x01\x14\x02\x00", "Windows shortcut", {"lnk"}),
     (0, b"MAM\x04", "compressed prefetch record", {"pf"}),
     (4, b"SCCA", "prefetch record", {"pf"}),
-    (0, b"EVF\x09", "EnCase E01 image", {"e01", "ex01"}),
+    (0, b"EVF\x09\x0d\x0a\xff\x00", "EnCase E01 image (EWF, a segment)", EWF1_SEGMENTS),
+    (0, b"EVF2\x0d\x0a\x81\x00", "EnCase Ex01 image (EWF2, a segment)", EWF2_SEGMENTS),
+    (0, b"LVF\x09\x0d\x0a\xff\x00", "EnCase L01 logical evidence file (EWF, a segment)", EWF_LOGICAL_SEGMENTS),
+    (0, b"EVF\x09", "an EWF header that is not a whole E01 file header", set()),
     (0, b"ADSEGMENTEDFILE\x00", "AccessData AD1 logical image (a segment)", AD_SEGMENTS),
     (0, b"ADCRYPT", "AccessData AD1 logical image, encrypted", {"ad1"}),
     (0, b"AVML", "AVML memory capture", {"lime", "raw", "mem"}),
@@ -122,7 +152,7 @@ def identify(head):
         lowered = sample.lstrip().lower()
         if lowered.startswith(b"<!doctype html") or lowered.startswith(b"<html"):
             return "HTML", {"html", "htm"}
-        return "text", {"txt", "log", "csv", "json", "md", "ini", "conf", "cfg", "yml", "yaml", ""}
+        return "text", None                # any extension that is not a binary format's is consistent with text
     return "unrecognised", set()
 
 
@@ -144,8 +174,9 @@ def libmagic(path):
     return text[:200] if p.returncode == 0 and text else None
 
 
-def look(path):
-    """One entry for one directory entry. Links and non-regular files are named and not opened."""
+def look(path, deadline=None):
+    """One entry for one directory entry. Links and non-regular files are named and not opened.
+    The hash is of the whole file unless the time budget runs out in it: the entry then says so, with how far it got."""
     try:
         st = os.lstat(path)
     except OSError as exc:
@@ -161,15 +192,21 @@ def look(path):
     if not stat.S_ISREG(st.st_mode):
         return {"file": path, "kind": "not a regular file", "mode": stat.filemode(st.st_mode), "type": "not opened",
                 "extension": claimed or None, "extension_matches": None}
+    hashed_to = None
     try:
         with open(path, "rb") as fh:
             head = fh.read(4096)
             digest = hashlib.sha256()
             digest.update(head)
+            read = len(head)
             while True:
+                if deadline is not None and time.monotonic() > deadline:
+                    hashed_to = read
+                    break
                 block = fh.read(1 << 20)
                 if not block:
                     break
+                read += len(block)
                 digest.update(block)
     except OSError as exc:
         return {"file": path, "error": exc.strerror or str(exc)}
@@ -185,25 +222,39 @@ def look(path):
         else:
             entry["type_source"] = "none: neither the table nor libmagic names it" if _libmagic["state"] else "none: the table does not name it and `file` is not installed"
     # An extension can only be compared with a type whose extensions are known; an unknown type is neither a match nor a mismatch.
-    known = bool(extensions)
     entry["extension"] = claimed or None
-    entry["extension_matches"] = (claimed in extensions) if known else None
-    entry["sha256"] = digest.hexdigest()
+    if extensions is None:                       # plain text
+        entry["extension_matches"] = claimed not in BINARY_EXTENSIONS
+    else:
+        entry["extension_matches"] = (claimed in extensions) if extensions else None
+    if hashed_to is None:
+        entry["sha256"] = digest.hexdigest()
+    else:
+        entry["sha256"] = None
+        entry["hashing"] = "stopped at the time budget after %d of %d bytes: no digest for this file" % (hashed_to, st.st_size)
     entry["head_hex"] = head[:16].hex()
     return entry
 
 
 def walk(path):
-    """Every entry under `path`, in sorted order, directories sorted too; a link to a directory is an entry, not a place to go."""
+    """Every entry under `path`, in sorted order, directories sorted too; a link to a directory is an entry, not a place to go.
+    Yields (path, None), or (path, error text) for a directory that could not be listed: that is said, not skipped."""
     if not os.path.isdir(path) or os.path.islink(path):
-        yield path
+        yield path, None
         return
-    for dirpath, dirs, names in os.walk(path, followlinks=False):
+    problems = []
+    for dirpath, dirs, names in os.walk(path, followlinks=False, onerror=problems.append):
         dirs.sort()
         linked = [d for d in dirs if os.path.islink(os.path.join(dirpath, d))]
         for name in sorted(names + linked):
-            yield os.path.join(dirpath, name)
+            yield os.path.join(dirpath, name), None
         dirs[:] = [d for d in dirs if d not in linked]
+        while problems:
+            exc = problems.pop(0)
+            yield os.fsdecode(exc.filename or dirpath), "the directory could not be listed: %s" % (exc.strerror or exc)
+    while problems:                          # the last directory walked may be the one that failed
+        exc = problems.pop(0)
+        yield os.fsdecode(exc.filename or path), "the directory could not be listed: %s" % (exc.strerror or exc)
 
 
 class Results:
@@ -230,7 +281,7 @@ class Results:
 
     def add(self, entry):
         if self.fh:
-            self.fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            self.fh.write(json.dumps(entry) + "\n")          # ASCII escapes: a name that is not UTF-8 is written, never lost
 
     def finish(self, keep):
         """Publish the file when the inline page is not the whole result; drop it when it is."""
@@ -259,8 +310,8 @@ def main():
     if not os.path.lexists(path):
         fail("no such file or directory", path=path)
     limit = args.get("limit", 500)
-    if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
-        fail("limit must be a positive integer")
+    if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= LIMIT_MAX:
+        fail("limit is a whole number from 1 to %d (every file looked at is kept in a file when the page is not all of them)" % LIMIT_MAX)
     mismatch_only = args.get("mismatch_only", False)
     if not isinstance(mismatch_only, bool):
         fail("mismatch_only is true or false")
@@ -268,16 +319,22 @@ def main():
     deadline = time.monotonic() + BUDGET_SECONDS
     results = Results([path, mismatch_only, limit])
     page, errors = [], []
-    counts = {"discovered": 0, "examined": 0, "mismatches": 0, "unrecognised": 0, "links": 0, "not_regular": 0, "errors": 0, "not_attempted": 0}
+    counts = {"discovered": 0, "examined": 0, "mismatches": 0, "unrecognised": 0, "links": 0, "not_regular": 0, "errors": 0, "not_attempted": 0, "not_hashed": 0}
     inline_total = 0
     stopped = None
-    for target in walk(path):
+    for target, problem in walk(path):
         counts["discovered"] += 1
-        if time.monotonic() > deadline:
+        if problem:
+            entry = {"file": target, "error": problem}
+        elif time.monotonic() > deadline:
             stopped = stopped or "the %d-second time budget was used" % BUDGET_SECONDS
             counts["not_attempted"] += 1
             continue
-        entry = look(target)
+        else:
+            entry = look(target, deadline)
+            if entry.get("hashing"):
+                stopped = stopped or "the %d-second time budget was used while hashing %s" % (BUDGET_SECONDS, target)
+                counts["not_hashed"] += 1
         results.add(entry)
         if "error" in entry:
             counts["errors"] += 1
@@ -295,7 +352,7 @@ def main():
         inline_total += 1
         if len(page) < limit:
             page.append(entry)
-    whole = results.finish(keep=inline_total > len(page) or (mismatch_only and counts["discovered"] > inline_total))
+    whole = results.finish(keep=inline_total > len(page) or (mismatch_only and counts["discovered"] > inline_total) or counts["errors"] > ERRORS_SHOWN)
     out = {
         "tool": TOOL,
         "path": path,
@@ -305,6 +362,7 @@ def main():
         "discovered": counts["discovered"],
         "examined": counts["examined"],
         "not_attempted": counts["not_attempted"],
+        "not_hashed": counts["not_hashed"],
         "extension_mismatches": counts["mismatches"],
         "unrecognised": counts["unrecognised"],
         "links_listed": counts["links"],

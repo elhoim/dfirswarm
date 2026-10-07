@@ -146,6 +146,12 @@ class FeatureScan(Case):
         self.assertEqual(r.code, 1)
         self.assertIn("under $OUT", r.json["error"])
 
+    def test_a_time_budget_outside_its_bounds_is_refused(self):
+        for bad in (5, 1001, True, "900"):
+            r = self.scan(timeout_seconds=bad)
+            self.assertEqual(r.code, 1, bad)
+            self.assertIn("from 10 to 1000", r.json["error"])
+
 
 if __name__ == "__main__":
     unittest.main()

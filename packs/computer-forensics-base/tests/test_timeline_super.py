@@ -7,6 +7,9 @@ line, with the datetime in microseconds as Plaso's json_line writer has it).
 import importlib.util
 import json
 import os
+import signal
+import subprocess
+import sys
 import time
 import unittest
 
@@ -146,6 +149,92 @@ class TimelineSuper(Case):
         self.assertLess(time.monotonic() - started, 10)
         spent = mod.Stage("late", ["sleep", "30"], self.path("o")).run(time.monotonic() - 1)
         self.assertTrue(spent.timed_out and spent.exit is None)
+
+    def test_a_link_at_any_output_name_is_refused(self):
+        for name in ("psort.stdout", "log2timeline.stderr", "timeline.invalid_lines.txt", "timeline.plaso", "psort.log.gz"):
+            self.write("elsewhere.txt", b"x")
+            os.makedirs(self.path("work/tl"), exist_ok=True)
+            link = self.path("work/tl/" + name)
+            if os.path.lexists(link):
+                os.unlink(link)
+            os.symlink(self.path("elsewhere.txt"), link)
+            r = self.go(self.plaso(), resume=True)
+            self.assertEqual(r.code, 1, name)
+            self.assertIn("link", r.json["error"], name)
+            self.assertEqual(self.read(self.path("elsewhere.txt")), "x", name)
+            os.unlink(link)
+
+    def test_logs_and_captured_output_of_an_earlier_run_are_not_this_runs(self):
+        bin_dir = self.plaso()
+        for name in ("log2timeline.log.gz", "log2timeline.stdout", "log2timeline.stderr"):
+            self.write("work/tl/" + name, b"from last week")
+            old = time.time() - 7 * 86400
+            os.utime(self.path("work/tl/" + name), (old, old))
+        storage = self.write("old.plaso", b"storage")
+        r = self.go(bin_dir, resume=True, mode="export", storage_file=storage)
+        self.assertEqual(r.json["status"], "complete", r.stdout)
+        self.assertEqual([os.path.basename(x) for x in r.json["logs"]], ["psort.log.gz"])
+        self.assertEqual(sorted(os.path.basename(x) for x in r.json["captured_output"]), ["psort.stderr", "psort.stdout"])
+        self.assertIn("log2timeline.log.gz", r.json["preexisting"])
+
+    def test_first_and_last_event_are_the_earliest_and_the_latest_whatever_the_file_order(self):
+        rows = [{"datetime": "2024-05-05T00:00:00.000000+00:00", "parser": "a", "message": "late"},
+                {"timestamp": 1500000000000000, "parser": "b", "message": "early"},
+                {"datetime": "2023-01-01T00:00:00+00:00", "parser": "c", "message": "middle"},
+                {"parser": "d", "message": "no time at all"}]
+        r = self.go(self.plaso(lines=[json.dumps(x) for x in rows]))
+        self.assertEqual((r.json["first_event"], r.json["last_event"]), ("2017-07-14T02:40:00Z", "2024-05-05T00:00:00.000000+00:00"))
+        self.assertEqual((r.json["events"], r.json["events_without_a_time"]), (4, 1))
+
+    def test_a_line_that_is_not_utf8_is_invalid_not_quietly_repaired(self):
+        good = json.dumps(GOOD[0]).encode()
+        bad = b'{"datetime": "2023-11-14T22:13:20+00:00", "message": "caf\xe9"}'
+        data = self.write("canned2.jsonl", good + b"\n" + bad + b"\n")
+        bin_dir = self.plaso()
+        stand_in(bin_dir, "psort.py", 'case "$1" in --version) echo v; exit 0;; esac\nwhile [ $# -gt 0 ]; do case "$1" in -w) cp "%s" "$2"; shift;; --logfile) echo log > "$2"; shift;; esac; shift; done\n' % data)
+        r = self.go(bin_dir)
+        self.assertEqual((r.json["events"], r.json["invalid_lines"], r.json["status"]), (1, 1, "partial"))
+        self.assertIn("utf-8", self.read(r.json["invalid_lines_file"]).lower())
+
+    def test_values_that_would_be_options_or_are_not_strings_are_refused_and_bounds_hold(self):
+        bin_dir = self.plaso()
+        for key, bad in (("parsers", ["winreg"]), ("parsers", "a\0b"), ("parsers", "-x"), ("psort_filter", "-w"), ("timezone", "Europe/Istanbul; rm"), ("timezone", 7),
+                         ("timeout_seconds", 3301), ("sample", 1001), ("sample", -1), ("mode", ["full"])):
+            r = self.go(bin_dir, **{key: bad})
+            self.assertEqual(r.code, 1, (key, bad))
+            self.assertNotIn("Traceback", r.stderr)
+            self.assertIn("error", r.json)
+        self.assertEqual(self.calls_made(), [])
+
+    def test_a_sigterm_to_the_tool_ends_the_program_it_started(self):
+        bin_dir = self.path("bin")
+        os.makedirs(bin_dir, exist_ok=True)
+        pidfile = self.path("l2t.pid")
+        stand_in(bin_dir, "log2timeline.py", 'case "$1" in --version) echo v; exit 0;; esac\necho $$ > "%s"\nexec sleep 60\n' % pidfile)
+        stand_in(bin_dir, "psort.py", 'case "$1" in --version) echo v; exit 0;; esac\nexit 0\n')
+        src = self.write("inputs/disk.dd", b"\0" * 64)
+        env = dict(os.environ, PATH=bin_dir + os.pathsep + os.environ["PATH"])
+        proc = subprocess.Popen([sys.executable, tool_path("timeline_super")], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=self.dir, env=env)
+        proc.stdin.write(json.dumps({"out_dir": "work/tl", "source": src}).encode())
+        proc.stdin.close()
+        for _ in range(100):
+            if os.path.exists(pidfile) and self.read(pidfile).strip():
+                break
+            time.sleep(0.1)
+        child = int(self.read(pidfile).strip())
+        proc.send_signal(signal.SIGTERM)
+        proc.wait(timeout=20)
+        proc.stdout.close()
+        proc.stderr.close()
+        for _ in range(50):
+            try:
+                os.kill(child, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.1)
+        else:
+            os.kill(child, signal.SIGKILL)
+            self.fail("log2timeline was left running after the tool was terminated")
 
 
 if __name__ == "__main__":

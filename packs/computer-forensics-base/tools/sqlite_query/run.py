@@ -38,11 +38,12 @@ from pathlib import Path
 TOOL = {"name": "sqlite_query", "version": 4}
 DEFAULT_LIMIT = 100
 LIMIT_MAX = 10000
-INLINE_BYTES = 64 * 1024
+INLINE_BYTES = 64 * 1024          # the inline page's JSON and its text form, each, as they are sent (ASCII-escaped, counted in bytes)
+RAW_BUFFER_MAX = 8 * 1024 * 1024  # the raw values of the inline page held in memory; past it the rest goes to the file only
 FILE_BYTES = 2 * 1024 ** 3        # the whole-result file stops here, and says so
 BUDGET_SECONDS = 25
 BUDGET_MAX = 110
-SQL_MAX = 1 << 20
+SQL_MAX = 64 * 1024               # bytes of UTF-8
 HASH_MAX = 256 * 1024 * 1024
 BLOB_INLINE = 256                 # a BLOB longer than this shows its head inline; the file holds all of it
 
@@ -83,15 +84,15 @@ def authorizer(action, p1, p2, dbname, source):
 
 def statements(sql):
     """The statements of `sql`, split where sqlite says one is complete (a ';' inside
-    a string or a trigger body does not end it); a trailing fragment without ';' is one."""
+    a string or a trigger body does not end it). What follows the last ';' is a statement too,
+    complete or not: a line comment at its end does not hide it, and an incomplete one (an
+    unterminated string, a trigger with no END) is handed to sqlite to refuse, never dropped."""
     out, start = [], 0
     for i, ch in enumerate(sql):
         if ch == ";" and sqlite3.complete_statement(sql[start:i + 1]):
             out.append(sql[start:i + 1])
             start = i + 1
-    rest = sql[start:]
-    if rest.strip() and sqlite3.complete_statement(rest.strip() + ";"):
-        out.append(rest)
+    out.append(sql[start:])
     return [s.strip() for s in out if re.sub(r"(--[^\n]*\n?|/\*.*?\*/|\s|;)+", "", s, flags=re.S)]
 
 
@@ -150,16 +151,36 @@ def wal_inventory(path):
     return info
 
 
+JOURNAL_MAGIC = bytes([0xD9, 0xD5, 0x05, 0xF9, 0x20, 0xA1, 0x63, 0xD7])
+
+
+def journal_inventory(path):
+    """A rollback journal is hot only when its header is the journal's: a header of zeros (what journal_mode
+    TRUNCATE and PERSIST leave) means there is nothing to roll back."""
+    with open(path, "rb") as fh:
+        head = fh.read(28)
+    if head[:8] == JOURNAL_MAGIC:
+        return {"state": "header present: a journal that was not rolled back"}
+    if not head.strip(b"\0"):
+        return {"state": "empty or zeroed header: not a hot journal (a persistent or truncated one left behind)"}
+    return {"state": "a header that is not a rollback journal's; not applied, not understood"}
+
+
 def sidecars(db):
+    """The files beside the database, named from its real path: SQLite looks for a -wal and a -journal next to the
+    file a link points at, not next to the link."""
+    real = os.path.realpath(db)
     out = []
     for suffix in ("-wal", "-shm", "-journal"):
-        path = db + suffix
+        path = real + suffix
         entry = {"name": os.path.basename(path), "present": os.path.isfile(path)}
         if entry["present"]:
             try:
                 entry["bytes"] = os.path.getsize(path)
                 if suffix == "-wal":
                     entry.update(wal_inventory(path))
+                if suffix == "-journal" and entry["bytes"]:
+                    entry.update(journal_inventory(path))
                 if entry["bytes"] <= HASH_MAX:
                     entry["sha256"] = sha256_file(path)
             except OSError as exc:
@@ -179,8 +200,10 @@ def snapshot_status(side):
                      "writable directory ($OUT) and open the copy." % (wal["frames_valid"], wal.get("frames_committed", 0), wal["name"]))
     elif wal and wal.get("bytes"):
         notes.append("%s is present (%d bytes) and holds no valid frame; the main file is the whole database state this tool can read." % (wal["name"], wal["bytes"]))
-    if jrn and jrn.get("bytes"):
+    if jrn and jrn.get("bytes") and jrn.get("state", "").startswith("header present"):
         notes.append("%s is present (%d bytes): a rollback journal that was not rolled back; the main file may hold an interrupted write. Not applied." % (jrn["name"], jrn["bytes"]))
+    elif jrn and jrn.get("bytes"):
+        notes.append("%s is present (%d bytes): %s." % (jrn["name"], jrn["bytes"], jrn.get("state", "its header was not read")))
     if not notes:
         return "main file only; no WAL frames or hot journal beside it"
     return " ".join(notes)
@@ -232,12 +255,19 @@ def text_cell(value, csv_mode):
     return str(value)
 
 
+def raw_size(row):
+    return sum(len(v) if isinstance(v, (bytes, str)) else 8 for v in row)
+
+
 class Rows:
-    """One statement's rows: an inline page, and the whole result in a file once it is more than that."""
+    """One statement's rows: an inline page, and the whole result in a file once it is more than that.
+
+    The inline page is bounded by what is sent (its JSON and its text form, as bytes), by `limit`, and by
+    the raw values held to make it (RAW_BUFFER_MAX): a row too large to hold goes to the file only."""
 
     def __init__(self, stmt_index, key, columns, limit):
         self.limit, self.columns = limit, columns
-        self.page, self.raw_page, self.inline_bytes = [], [], 0
+        self.page, self.raw_page, self.inline_bytes, self.raw_bytes = [], [], 0, 0
         self.total, self.fh, self.tmp, self.written = 0, None, None, 0
         self.file_stopped = None
         digest = hashlib.sha256(json.dumps(key, sort_keys=True, default=str).encode()).hexdigest()[:16]
@@ -271,35 +301,61 @@ class Rows:
         self.fh.write(line)
         self.written += len(line)
 
+    def _drop_file(self, exc):
+        """The whole-result file cannot be written (a full disk, a read-only directory): said, and no half file left."""
+        self.error = "the whole result could not be written (%s): %s" % (self.path.parent, getattr(exc, "strerror", None) or exc)
+        try:
+            if self.fh:
+                self.fh.close()
+        except (OSError, ValueError):
+            pass
+        self.fh = False
+        if self.tmp:
+            try:
+                self.tmp.unlink()
+            except OSError:
+                pass
+            self.tmp = None
+
     def add(self, row):
         self.total += 1
         if self.fh is None:
-            inline = json.dumps({"n": self.total, "values": [inline_cell(v) for v in row]}, ensure_ascii=False)
-            if len(self.page) < self.limit and self.inline_bytes + len(inline) <= INLINE_BYTES:
-                self.page.append(json.loads(inline))
-                self.raw_page.append(row)
-                self.inline_bytes += len(inline)
-                return
+            size = raw_size(row)
+            if len(self.page) < self.limit and size <= INLINE_BYTES and self.raw_bytes + size <= RAW_BUFFER_MAX:
+                inline = [inline_cell(v) for v in row]
+                sent = len(json.dumps({"n": self.total, "values": inline}).encode("utf-8"))
+                text = len(json.dumps("|".join(text_cell(v, False) for v in row)).encode("utf-8"))
+                if self.inline_bytes + sent + text <= 2 * INLINE_BYTES:
+                    self.page.append({"n": self.total, "values": inline})
+                    self.raw_page.append(row)
+                    self.inline_bytes += sent + text
+                    self.raw_bytes += size
+                    return
             try:
                 self._open()
-            except OSError as exc:
-                self.error = "the whole result could not be written (%s): %s" % (self.path.parent, exc.strerror or exc)
-                self.fh = False
+            except (OSError, UnicodeError) as exc:
+                self._drop_file(exc)
         if self.fh:
-            self._write(self.total, row)
+            try:
+                self._write(self.total, row)
+            except (OSError, UnicodeError) as exc:
+                self._drop_file(exc)
 
     def finish(self):
         info = {"row_count": self.total, "returned": len(self.page), "truncated": self.total > len(self.page)}
         if self.fh:
-            self.fh.flush()
-            os.fsync(self.fh.fileno())
-            self.fh.close()
-            os.replace(self.tmp, self.path)
-            info["rows_file"] = self.shown
-            info["rows_file_format"] = "JSON Lines: a header line {columns}, then one {n, values} per row; NULL is null, a BLOB is {blob_b64, length, sha256}"
-            if self.file_stopped:
-                info["rows_file_stopped_at_row"] = self.file_stopped
-                info["rows_file_cap_bytes"] = FILE_BYTES
+            try:
+                self.fh.flush()
+                os.fsync(self.fh.fileno())
+                self.fh.close()
+                os.replace(self.tmp, self.path)
+                info["rows_file"] = self.shown
+                info["rows_file_format"] = "JSON Lines: a header line {columns}, then one {n, values} per row; NULL is null, a BLOB is {blob_b64, length, sha256}"
+                if self.file_stopped:
+                    info["rows_file_stopped_at_row"] = self.file_stopped
+                    info["rows_file_cap_bytes"] = FILE_BYTES
+            except OSError as exc:
+                self._drop_file(exc)
         if self.error:
             info["rows_file_error"] = self.error
         return info
@@ -331,17 +387,28 @@ def main():
     if missing:
         say({"ok": False, "error": "need " + " and ".join(missing), "params": ["db_path", "sql", "csv", "limit"]}, 1)
     db, sql = obj["db_path"], obj["sql"]
-    csv_mode = bool(obj.get("csv", False))
-    if obj.get("readonly") is False:
-        say({"ok": False, "error": "readonly=false is not supported: this tool never opens a database for writing. "
-                                   "Stage a copy under $OUT and use the sqlite3 module on the copy.", "db_path": db}, 1)
+    for name, text in (("db_path", db), ("sql", sql)):
+        if "\0" in text:
+            say({"ok": False, "error": "%s holds a NUL character" % name}, 1)
+        try:
+            text.encode("utf-8")
+        except UnicodeEncodeError:
+            say({"ok": False, "error": "%s is not text that can be written as UTF-8 (it holds a lone surrogate)" % name}, 1)
+    csv_mode = obj.get("csv", False)
+    if not isinstance(csv_mode, bool):
+        say({"ok": False, "error": "csv is true or false (a text such as \"false\" is not false)", "csv": csv_mode}, 1)
+    if "readonly" in obj and obj["readonly"] is not True:
+        if obj["readonly"] is False:
+            say({"ok": False, "error": "readonly=false is not supported: this tool never opens a database for writing. "
+                                       "Stage a copy under $OUT and use the sqlite3 module on the copy.", "db_path": db}, 1)
+        say({"ok": False, "error": "readonly is true (the only mode this tool has) or left out", "readonly": obj["readonly"]}, 1)
     limit = obj.get("limit", DEFAULT_LIMIT)
     if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= LIMIT_MAX:
         say({"ok": False, "error": "limit is a whole number from 1 to %d" % LIMIT_MAX, "limit": limit}, 1)
     budget = obj.get("max_seconds", BUDGET_SECONDS)
     if not isinstance(budget, int) or isinstance(budget, bool) or not 1 <= budget <= BUDGET_MAX:
         say({"ok": False, "error": "max_seconds is a whole number from 1 to %d" % BUDGET_MAX, "max_seconds": budget}, 1)
-    if len(sql) > SQL_MAX:
+    if len(sql.encode("utf-8")) > SQL_MAX:
         say({"ok": False, "error": "sql is longer than %d bytes" % SQL_MAX}, 1)
     if not os.path.exists(db):
         say({"ok": False, "error": "database not found", "db_path": db}, 1)
@@ -393,25 +460,29 @@ def main():
         if word not in LEADING:
             failure = {"error": "statement refused: this tool reads; a %s statement is not allowed" % (word.upper() or "?"), "statement": stmt}
             break
+        rows = None
         try:
             cur = conn.execute(stmt)
             columns = [d[0] for d in (cur.description or [])]
             rows = Rows(i, [db, size, stmt, limit], columns, limit)
-            while True:
-                batch = cur.fetchmany(500)
-                if not batch:
-                    break
-                for r in batch:
-                    rows.add(r)
-        except sqlite3.DatabaseError as exc:
+            for r in cur:                    # a row at a time: a fetch of many would hold many large values at once
+                rows.add(r)
+        except (sqlite3.Error, ValueError, UnicodeError, OverflowError, MemoryError) as exc:
             msg = str(exc)
             if "not authorized" in msg:
                 msg = "statement refused: it is not a plain read (%s)" % msg
             elif "interrupted" in msg:
                 msg = "stopped at the %d-second time budget; the rows before it are in rows_file when there is one" % budget
+            elif isinstance(exc, MemoryError):
+                msg = "out of memory reading a row"
             failure = {"error": msg, "statement": stmt}
             if "interrupted" in str(exc):
                 failure["timed_out"] = True
+            if rows is not None and rows.total:
+                # What was read before the stop is kept and named, not dropped with the file half written.
+                failure["rows_read_before_the_stop"] = rows.finish()
+                failure["rows_read_before_the_stop"]["note"] = "the rows up to the stop, not the result of the statement"
+                failure["rows_read_before_the_stop"]["rows"] = rows.page
             break
         info = rows.finish()
         part = {"statement": stmt, "columns": columns, **info, "rows": rows.page,

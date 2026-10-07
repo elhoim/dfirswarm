@@ -36,6 +36,7 @@ from pathlib import Path
 
 TOOL = {"name": "feature_scan", "version": 3}
 DEFAULT_TIMEOUT = 900
+TIMEOUT_MAX = 1000                # the tool's own limit is 1200 seconds: the counting of what bulk_extractor wrote needs the rest
 DISTINCT_CAP = 200_000            # distinct values remembered per feature file; past it the count is a lower bound
 INVENTORY_SHOWN = 200
 # Written by bulk_extractor beside the features; they describe the run, not the evidence.
@@ -229,8 +230,8 @@ def main():
     if not isinstance(top, int) or isinstance(top, bool) or top < 1:
         fail("top must be a positive integer")
     timeout = args.get("timeout_seconds", DEFAULT_TIMEOUT)
-    if not isinstance(timeout, int) or isinstance(timeout, bool) or timeout < 10:
-        fail("timeout_seconds must be an integer of at least 10")
+    if not isinstance(timeout, int) or isinstance(timeout, bool) or not 10 <= timeout <= TIMEOUT_MAX:
+        fail("timeout_seconds is a whole number from 10 to %d (the tool's own limit is 1200 seconds, and counting what bulk_extractor wrote needs the rest)" % TIMEOUT_MAX)
     write_values = args.get("write_values", False)
     if not isinstance(write_values, bool):
         fail("write_values is true or false")

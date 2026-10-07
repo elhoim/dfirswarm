@@ -95,6 +95,98 @@ class FileType(Case):
         self.assertEqual(r.json["examined"], 2)
         self.assertIn("all_results", r.json)                     # what the filter hid is kept
 
+    @unittest.skipIf(os.geteuid() == 0, "root lists every directory")
+    def test_a_directory_that_cannot_be_listed_is_an_error_not_a_clean_walk(self):
+        self.write("d/ok.txt", "x")
+        locked = self.path("d/locked")
+        os.makedirs(locked)
+        os.chmod(locked, 0)
+        try:
+            r = self.look()
+        finally:
+            os.chmod(locked, 0o755)
+        self.assertIs(r.json["complete"], False)
+        self.assertEqual([(os.path.basename(e["file"]), "could not be listed" in e["error"]) for e in r.json["errors"]], [("locked", True)])
+        self.assertEqual(r.json["error_count"], 1)
+
+    def test_errors_past_the_shown_ones_are_in_a_kept_file_that_the_note_names(self):
+        if os.geteuid() == 0:
+            self.skipTest("root reads every file")
+        for i in range(60):
+            path = self.write("d/f%02d.dat" % i, "x")
+            os.chmod(path, 0)
+        try:
+            r = self.look()
+        finally:
+            for i in range(60):
+                os.chmod(self.path("d/f%02d.dat" % i), 0o644)
+        self.assertEqual((r.json["error_count"], len(r.json["errors"])), (60, 50))
+        self.assertIn("all_results", r.json["errors_note"])
+        self.assertEqual(len(self.read(r.json["all_results"]).splitlines()), 60)
+
+    def test_a_name_that_is_not_utf8_does_not_end_the_walk(self):
+        os.makedirs(self.path("d"), exist_ok=True)
+        try:
+            with open(os.path.join(self.dir.encode(), b"d", b"caf\xe9.txt"), "wb") as fh:
+                fh.write(b"latin1 name")
+        except OSError:
+            self.skipTest("this file system will not hold a name that is not UTF-8")
+        self.write("d/ok.txt", "x")
+        r = self.look(limit=1)
+        self.assertEqual(r.code, 0, r.stdout + r.stderr)
+        self.assertEqual(len(self.read(r.json["all_results"]).splitlines()), 2)
+
+    def test_text_in_a_script_or_data_extension_is_no_mismatch_and_text_named_like_a_binary_is(self):
+        for name in ("a.ps1", "b.vbs", "c.js", "d.reg", "e.tsv", "f.bat", "g"):
+            self.write("d/" + name, "echo hello\n")
+        self.write("d/h.exe", "echo hello\n")
+        by = {os.path.basename(f["file"]): f for f in self.look().json["files"]}
+        self.assertEqual({n: by[n]["extension_matches"] for n in by}, {"a.ps1": True, "b.vbs": True, "c.js": True, "d.reg": True, "e.tsv": True, "f.bat": True, "g": True, "h.exe": False})
+
+    def test_ewf_files_are_named_whole_ex01_included_and_every_segment_matches_its_name(self):
+        e01 = b"EVF\x09\x0d\x0a\xff\x00" + b"\0" * 64
+        ex01 = b"EVF2\x0d\x0a\x81\x00" + b"\0" * 64
+        for name, data in (("a.E01", e01), ("a.E02", e01), ("a.EAA", e01), ("b.Ex01", ex01), ("b.Ex02", ex01), ("c.L01", b"LVF\x09\x0d\x0a\xff\x00" + b"\0" * 64), ("d.jpg", e01)):
+            self.write("d/" + name, data)
+        by = {os.path.basename(f["file"]): f for f in self.look().json["files"]}
+        for name in ("a.E01", "a.E02", "a.EAA", "b.Ex01", "b.Ex02", "c.L01"):
+            self.assertIs(by[name]["extension_matches"], True, name)
+        self.assertIn("EWF2", by["b.Ex01"]["type"])
+        self.assertIs(by["d.jpg"]["extension_matches"], False)
+
+    def test_a_hash_that_outruns_the_budget_says_how_far_it_got(self):
+        import importlib.util, time
+        from support import tool_path
+        spec = importlib.util.spec_from_file_location("ft", tool_path("file_type"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        path = self.write("big.bin", b"\0" * (8 * 1024 * 1024))
+        entry = mod.look(path, time.monotonic() - 1)
+        self.assertIsNone(entry["sha256"])
+        self.assertIn("no digest for this file", entry["hashing"])
+        self.assertEqual(mod.look(path, time.monotonic() + 60)["sha256"], __import__("hashlib").sha256(b"\0" * (8 * 1024 * 1024)).hexdigest())
+
+    def test_a_limit_beyond_its_bound_is_refused(self):
+        self.write("d/a.txt", "x")
+        for bad in (0, -1, 5001):
+            self.assertEqual(self.look(limit=bad).code, 1, bad)
+
+    def test_a_name_with_a_lone_surrogate_is_written_to_the_results_file_not_lost(self):
+        import importlib.util
+        from support import tool_path
+        spec = importlib.util.spec_from_file_location("ft2", tool_path("file_type"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        here = os.getcwd()
+        os.chdir(self.dir)
+        try:
+            results = mod.Results(["surrogate"])
+            results.add({"file": "d/caf\udce9.txt", "type": "text"})
+            shown = results.finish(keep=True)
+        finally:
+            os.chdir(here)
+        self.assertEqual(json.loads(self.read(shown).splitlines()[0])["file"], "d/caf\udce9.txt")
+
 
 if __name__ == "__main__":
     unittest.main()
