@@ -18,7 +18,9 @@ and, for anything else, falls back to pulling the readable strings out of the
 item and says it did. A name recovered by fallback is a candidate, found by
 search, and is labelled as one (`decoded: strings`, `long_name_from: strings`); a
 name read from a layout is labelled `layout`, and only where the layout is one this
-reader applies: a shell item extension block of version 3 or 7. Every BagMRU root the
+reader applies (a shell item extension block of version 3, 7, 8 or 9, read at the offset the
+libfwsi notes give for its version and only when the block's own name offset, the 2-byte field
+at 0x10, agrees). Every BagMRU root the
 hive has is walked and named (a hive can hold the Shell and the ShellNoRoam trees at
 once), each entry says which, and a numbered value with no key under it is listed, not
 dropped. A folder in a bag is a folder some shell opened on this account; the artefact
@@ -42,6 +44,7 @@ import datetime
 import json
 import os
 import re
+import stat
 import struct
 import sys
 
@@ -200,22 +203,40 @@ def wide_strings(data):
     return [w.decode("utf-16-le", "replace") for w in re.findall(rb"(?:[^\x00][\x00]){2,}", data)]
 
 
-# Where the long name begins in a 0xBEEF0004 (file entry) extension block, by its version: after the 2-byte
-# version-dependent field at 0x10 from version 3, and, from version 7, after a file reference and the string size.
-# These two are the layouts this reader applies. Other versions (8 and 9 among them) add fields before the
-# name, whose offsets are not applied here: their long name is the longest string found in the block, and the
-# answer says it was found by search.
-LONG_NAME_AT = {3: 0x12, 7: 0x26}
+# Where the long name begins in a 0xBEEF0004 (file entry) extension block, by its version, as the libfwsi notes
+# lay the block out: size (2), version (2), the signature (4), the FAT creation and access times (4 each), then
+# the 2-byte field at 0x10 (the offset of the long name, which is how a block says where its name is), and the
+# fields that differ by version before the NUL-terminated UTF-16LE long name: version 3 has a 2-byte long-string
+# size and the name at 0x14, version 7 a file reference and the name at 0x26, version 8 four more bytes and the
+# name at 0x2A, version 9 four more again and the name at 0x2E. The name is followed, from version 7 on, by the
+# localised name when the item has one (`@shell32.dll,-21813`), and the block ends with the 2-byte offset of its
+# own start in the item. Windows 10 writes version 9: every block of one real Windows 10 UsrClass.dat read here
+# had 0x2E in the 0x10 field and its name there.
+LONG_NAME_AT = {3: 0x14, 7: 0x26, 8: 0x2A, 9: 0x2E}
+LOCALISED_FROM = 7
+
+
+def utf16_string(block, at):
+    """The NUL-terminated UTF-16LE string at `at` in `block`, with the offset after its terminator; None when it
+    is not terminated inside the block."""
+    end = at
+    while end + 1 < len(block) and (block[end] or block[end + 1]):
+        end += 2
+    if end + 1 >= len(block):
+        return None
+    return block[at:end].decode("utf-16-le", "replace"), end + 2
 
 
 def extension_block(data):
     """The beef0004 block: two more DOS timestamps, and the long name.
 
-    The timestamps sit at fixed offsets in every version. The long name is read from its documented offset
-    only for the versions in LONG_NAME_AT, and the answer is checked (printable, terminated). For any other
-    version, or when the check fails, the longest wide string in the block is offered instead and the output
-    says it was found by search (`long_name_from: strings`): a candidate, not a decode. A name read from a
-    layout guessed for a version this reader does not know would be worse than a candidate.
+    The timestamps sit at fixed offsets in every version. The block is bounded by the size it declares. The long
+    name is read from its documented offset only for the versions in LONG_NAME_AT, only when the block's own name
+    offset (the 2-byte field at 0x10) says the same offset, and only when what is there is a printable string that
+    ends inside the block. For any other version, or when a check fails, the longest wide string in the block is
+    offered instead and the output says it was found by search (`long_name_from: strings`): a candidate, not a
+    decode, and `extension_layout` says why the layout was not applied. A name read from a layout guessed for a
+    version this reader does not know would be worse than a candidate.
     """
     at = data.find(struct.pack("<I", BEEF0004))
     if at < 4:
@@ -223,23 +244,35 @@ def extension_block(data):
     start = at - 4
     if start + 0x12 > len(data):
         return {}
-    version = struct.unpack_from("<H", data, start + 2)[0]
+    size, version = struct.unpack_from("<HH", data, start)
     created, accessed = struct.unpack_from("<II", data, start + 8)
+    fits = 0x12 <= size <= len(data) - start
+    block = data[start:start + size] if fits else data[start:]
     out = {"created": dos_datetime(created), "accessed": dos_datetime(accessed),
-           "extension_version": version, "extension_layout": "decoded" if version in LONG_NAME_AT else "not decoded for this version"}
-    block = data[start:]
-    candidate = ""
-    cursor = LONG_NAME_AT.get(version)
-    if cursor is not None and cursor + 2 <= len(block):
-        end = block.find(b"\x00\x00", cursor)
-        if end > cursor:
-            if (end - cursor) % 2:
-                end += 1
-            candidate = block[cursor:end].decode("utf-16-le", "replace").strip("\x00")
-    if candidate and candidate.isprintable():
-        out["long_name"] = candidate
-        out["long_name_from"] = "layout"
+           "extension_version": version, "extension_block_size": size}
+    if not fits:
+        out["extension_block_size_fits"] = False
+    expected = LONG_NAME_AT.get(version)
+    own = struct.unpack_from("<H", block, 0x10)[0] if len(block) >= 0x12 else None
+    why = None
+    if expected is None:
+        why = "not decoded for this version"
+    elif own != expected:
+        why = "not decoded: the block's own name offset (0x10) is 0x%x and this reader expects 0x%x for version %d" % (own or 0, expected, version)
     else:
+        got = utf16_string(block, expected)
+        if got is None or not got[0] or not got[0].isprintable():
+            why = "not decoded: what sits at 0x%x is not a printable string that ends inside the block" % expected
+        else:
+            out["long_name"], out["long_name_from"], out["extension_layout"] = got[0], "layout", "decoded"
+            if version >= LOCALISED_FROM:
+                # The localised name, when the item has one, follows the long name and ends before the block's last two bytes.
+                more = utf16_string(block, got[1]) if got[1] + 2 <= len(block) - 2 else None
+                if more is not None and more[0] and more[0].isprintable() and more[1] <= len(block) - 2:
+                    out["localized_name"] = more[0]
+                    out["localized_name_from"] = "the string after the long name"
+    if why is not None:
+        out["extension_layout"] = why
         found = [w for w in wide_strings(block) if w.isprintable()]
         if found:
             out["long_name"] = max(found, key=len)
@@ -354,17 +387,32 @@ def nearest_key(hive, path):
     return {"deepest_found": "\\" + "\\".join(found), "missing": None, "subkeys_there": []}
 
 
+def safe_nearest_key(hive, path):
+    """nearest_key, which walks a hive that may be the damaged one: a failure of its own is said, not raised."""
+    try:
+        return nearest_key(hive, path)
+    except Exception as exc:
+        return {"deepest_found": None, "missing": None, "subkeys_there": [], "nearest_key_failed": "%s: %s" % (type(exc).__name__, exc)}
+
+
 def main():
     try:
         args = json.load(sys.stdin)
     except ValueError as exc:
         fail("arguments are not valid JSON", reason=str(exc))
+    if not isinstance(args, dict):
+        fail("the arguments are one JSON object")
 
     hive_path = args.get("hive")
     if not isinstance(hive_path, str) or not hive_path:
         fail("hive is required: an extracted UsrClass.dat or NTUSER.DAT")
-    if not os.path.isfile(hive_path):
+    try:
+        hive_mode = os.stat(hive_path).st_mode
+    except OSError:
         fail("no such hive", hive=hive_path)
+    if not stat.S_ISREG(hive_mode):
+        # A named pipe or a device would be opened and waited on: it is not read.
+        fail("the hive is not a regular file, so it was not opened", hive=hive_path, not_attempted=1)
 
     limit = args.get("limit", 500)
     if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
@@ -391,7 +439,7 @@ def main():
         try:
             found_roots.append((rooted_key(hive, candidate), candidate))
         except Exception as exc:
-            tried.append({"key": candidate, "why": str(exc), **nearest_key(hive, candidate)})
+            tried.append({"key": candidate, "why": str(exc), **safe_nearest_key(hive, candidate)})
     if not found_roots:
         fail("no BagMRU root in this hive", hive=hive_path, tried=tried)
 
@@ -403,8 +451,12 @@ def main():
     counts = {"strings": 0, "orphans": 0, "other_values": 0, "walked": 0}
 
     def item_entry(raw, slot_name, key_path, parent_path, depth, order, root_path, header=None, orphan=False):
-        item = decode_item(bytes(raw)) if isinstance(raw, (bytes, bytearray)) else \
-            {"type": "no shell item on the parent", "name": slot_name, "decoded": "none"}
+        try:
+            item = decode_item(bytes(raw)) if isinstance(raw, (bytes, bytearray)) else \
+                {"type": "no shell item on the parent", "name": slot_name, "decoded": "none"}
+        except Exception as exc:                              # a shell item that defeats the reader is listed as such
+            item = {"type": "undecodable", "name": "", "decoded": "none", "error": "%s: %s" % (type(exc).__name__, exc)}
+            problems.add({"key": key_path + "\\" + slot_name, "why": "the shell item could not be decoded: %s: %s" % (type(exc).__name__, exc)})
         name = item.get("name") or ""
         path = (parent_path + "\\" + name).strip("\\") if name else parent_path
         entry = {
@@ -426,8 +478,17 @@ def main():
             entry["key_last_written_filetime"] = str(header.last_modified)
         return entry, path
 
+    visited = set()
+
     def walk(key, key_path, parent_path, depth, root_path):
         counts["walked"] += 1
+        # A key whose subkey list was already reached is a cycle (or a list two keys share): it is said, not walked again.
+        lid = getattr(getattr(key, "header", None), "subkeys_list_offset", None)
+        if lid is not None and getattr(key, "subkey_count", 0):
+            if lid in visited:
+                problems.add({"key": key_path, "why": "its subkey list (offset %s) was already walked: a cycle, or a list two keys share; not walked again" % lid})
+                return
+            visited.add(lid)
         if depth > max_depth:
             # Name the key where the walk stopped, and how much lies under it.
             try:
@@ -516,4 +577,10 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except SystemExit:
+        raise
+    except Exception as exc:                                  # whatever hostile input does, the answer is JSON
+        print(json.dumps({"error": "the read failed", "reason": "%s: %s" % (type(exc).__name__, exc)}))
+        sys.exit(1)

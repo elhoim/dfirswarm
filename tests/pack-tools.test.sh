@@ -342,17 +342,20 @@ def dir_item(short, long_name, version):
     b += short.encode("ascii") + b"\x00"
     if len(b) % 2:
         b += b"\x00"
+    # The 0xBEEF0004 block as the libfwsi notes lay it out: size, version, signature, the FAT creation and access
+    # times, the 2-byte offset of the long name at 0x10, the fields of the version up to the name (0x14 in version 3,
+    # 0x26 in 7, 0x2A in 8, 0x2E in 9), the NUL-terminated UTF-16 long name, and the 2-byte offset of the block in the item.
+    name_at = {3: 0x14, 7: 0x26, 8: 0x2A, 9: 0x2E}[version]
     ext = bytearray(struct.pack("<HH", 0, version) + struct.pack("<I", 0xBEEF0004))
     ext += struct.pack("<I", dos(2026, 1, 3, 8, 0, 0)) + struct.pack("<I", dos(2026, 2, 14, 9, 31, 0))
-    ext += struct.pack("<H", version)
-    if version >= 7:
-        ext += struct.pack("<H", 0) + struct.pack("<Q", 42) + struct.pack("<Q", 0) + struct.pack("<H", len(long_name))
+    ext += struct.pack("<H", name_at)
+    ext += b"\x00" * (name_at - len(ext))
     ext += long_name.encode("utf-16-le") + b"\x00\x00" + struct.pack("<H", 0x14)
     struct.pack_into("<H", ext, 0, len(ext))
     b += ext
     struct.pack_into("<H", b, 0, len(b))
     return bytes(b)
-for version in (3, 7):
+for version in (3, 7, 8, 9):
     got = sb.decode_item(dir_item("HOLIDA~1", "holiday photos 2026", version))
     assert got["type"] == "directory", (version, got)
     assert got["name"] == "holiday photos 2026", (version, got)
