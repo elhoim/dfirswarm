@@ -1565,7 +1565,7 @@ def read_units(src, envelope_keys, record_cap=MAX_RECORD_BYTES, document_cap=MAX
                 while True:
                     while src.pos >= len(src.buf):
                         if not src.fill():
-                            src.stopped = src.stopped or "the array was not closed: the file ends inside it"
+                            src.stopped = src.stopped or ("the time limit ended the read" if src.timed_out else "the array was not closed: the file ends inside it")
                             return
                     here = src.buf[src.pos]
                     if here == "]":
@@ -1592,6 +1592,10 @@ def read_units(src, envelope_keys, record_cap=MAX_RECORD_BYTES, document_cap=MAX
                         yield "reject", info(start_line, start_off, None, key), "a record larger than max_record_bytes (%d)" % record_cap
                         return
                     except json.JSONDecodeError as exc:
+                        if src.timed_out:       # the deadline cut the record, the JSON is not damaged
+                            src.stopped = "the time limit ended the read"
+                            yield "reject", info(start_line, start_off, None, key), "the last record is cut off where the read ended (the time limit)"
+                            return
                         src.stopped = "the JSON stopped being valid at line %d (%s): the rest was not read" % (start_line, exc.msg)
                         yield "reject", info(start_line, start_off, None, key), "malformed JSON: %s" % exc.msg
                         return
@@ -1609,7 +1613,7 @@ def read_units(src, envelope_keys, record_cap=MAX_RECORD_BYTES, document_cap=MAX
                     try:
                         obj, end = _decode_at(src, record_cap, lead="{")
                     except (TooLong, json.JSONDecodeError):
-                        src.stopped = "the object around the records does not end validly: its other keys were not read"
+                        src.stopped = "the time limit ended the read" if src.timed_out else "the object around the records does not end validly: its other keys were not read"
                         return
                     src.advance(end)
                     extra.update(str(k) for k in obj)
@@ -1621,6 +1625,9 @@ def read_units(src, envelope_keys, record_cap=MAX_RECORD_BYTES, document_cap=MAX
                 try:
                     value, end = _DEC.raw_decode(src.buf, src.pos)
                 except (json.JSONDecodeError, RecursionError) as exc:
+                    if src.timed_out:
+                        src.stopped = "the time limit ended the read"
+                        return
                     src.stopped = "the JSON stopped being valid near line %d (%s): the rest was not read" % (start_line, getattr(exc, "msg", "nested too deeply"))
                     yield "reject", info(start_line, start_off, None, None), "malformed JSON: %s" % getattr(exc, "msg", "nested too deeply")
                     return

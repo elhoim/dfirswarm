@@ -59,7 +59,7 @@
   "by": "maintainer",
   "at": "2026-10-07T12:00:00.000Z",
   "version": 4,
-  "sha256": "e52bce17c120c6a2bdad6bca102e2b9d28be466c4e25c59058621e770d13ab2d",
+  "sha256": "d64bfa548ec8a5ea2881cb6bade08d9b60ededa67a5b90224cfd314f45729ffb",
   "use": {
     "names": [
       "*cloudtrail*",
