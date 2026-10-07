@@ -15,9 +15,9 @@ import assert from "node:assert/strict";
 import { chmod, mkdir, readFile, readdir, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
-import { WIN, body, exists, failed, py, stub, stubModule, tool, type Run } from "./windows-pack-harness.ts";
+import { WIN, body, exists, failed, py, pythonCanImport, stub, stubModule, tool, type Run } from "./windows-pack-harness.ts";
 import { withCwd } from "./tool-library-harness.ts";
-import { CHUNK_BYTES, EVTX_CARVE_STUB, EVTX_QUERY_STUB, eventXml, evtxChunk } from "./windows-stub-evtx.ts";
+import { CHUNK_BYTES, EVTX_CARVE_STUB, EVTX_QUERY_STUB, eventXml, evtxChunk, evtxFileHeader } from "./windows-stub-evtx.ts";
 
 const root = process.getuid ? process.getuid() === 0 : false;
 
@@ -448,6 +448,67 @@ test("evtx_carve answers a file it cannot read, and a result it cannot write, wi
     } finally {
       await chmod(join(cwd, "work"), 0o755);
     }
+  });
+});
+
+// --- the real python-evtx ---------------------------------------------------------
+
+// What the stand-ins above claim of the library is held to the library itself where it is installed (CI installs no pip
+// packages, so these are skipped there): the file header's accessors, the chunk walk that stops at the end of the file
+// without raising, and a ChunkHeader that accepts garbage. Records are not built here: BinXML is the library's business.
+const REAL_EVTX = pythonCanImport("Evtx.Evtx") ? false : "python-evtx is not installed on this host";
+
+test("the real python-evtx accepts a forged chunk without complaint, walks only the chunks the file holds, and gives the file header's counts", { skip: REAL_EVTX }, async () => {
+  await withCwd(async (cwd) => {
+    await writeFile(join(cwd, "work", "cut.evtx"), Buffer.concat([evtxFileHeader(3, 40), evtxChunk([]), Buffer.alloc(1000)]));
+    const out = py(
+      [
+        "import sys",
+        "from Evtx.Evtx import ChunkHeader, FileHeader",
+        "garbage = b'ElfChnk\\x00' + b'\\xff' * 0x10000",
+        "c = ChunkHeader(garbage, 0)",
+        "assert c.verify() is False and c.header_size() == 0xFFFFFFFF",
+        "buf = open(sys.argv[1], 'rb').read()",
+        "h = FileHeader(buf, 0)",
+        "assert (h.header_chunk_size(), h.chunk_count(), h.next_record_number()) == (4096, 3, 40), (h.header_chunk_size(), h.chunk_count(), h.next_record_number())",
+        "assert len(list(h.chunks())) == 1",
+        "print('ok')",
+      ].join("\n"),
+      join(cwd, "work", "cut.evtx"),
+    );
+    assert.equal(out.trim(), "ok");
+  });
+});
+
+test("evtx_query accounts for a log against its header with the real library: complete when every declared chunk is read, partial when the file ends first", { skip: REAL_EVTX }, async () => {
+  await withCwd(async (cwd) => {
+    await writeFile(join(cwd, "work", "whole.evtx"), Buffer.concat([evtxFileHeader(2, 1), evtxChunk([]), evtxChunk([])]));
+    const whole = body<EvtxQueryOut>(await tool("evtx_query", cwd, { path: "work/whole.evtx" }));
+    assert.equal(whole.status, "complete");
+    assert.deepEqual([whole.chunks_declared, whole.chunks_read, whole.bytes_expected, whole.file_bytes], [2, 2, 4096 + 2 * CHUNK_BYTES, 4096 + 2 * CHUNK_BYTES]);
+    assert.equal(whole.records_examined, 0);
+    await writeFile(join(cwd, "work", "cut.evtx"), Buffer.concat([evtxFileHeader(3, 40), evtxChunk([]), Buffer.alloc(1000)]));
+    const cut = body<EvtxQueryOut>(await tool("evtx_query", cwd, { path: "work/cut.evtx" }));
+    assert.equal(cut.status, "partial");
+    assert.deepEqual([cut.chunks_declared, cut.chunks_read, cut.bytes_expected], [3, 1, 4096 + 3 * CHUNK_BYTES]);
+    assert.equal(cut.next_record_number_declared, 40);
+    assert.ok(cut.problems.some((p) => /the log is cut short/.test(p)));
+    assert.ok(cut.problems.some((p) => /gave 1 of the 3 chunks/.test(p)));
+  });
+});
+
+test("evtx_carve with the real python-evtx: forged signatures are rejected before the library sees them, and a real chunk is built and its checksums verified by the library", { skip: REAL_EVTX }, async () => {
+  await withCwd(async (cwd) => {
+    const noise = Buffer.alloc(3000 * 64);
+    for (let i = 0; i < 3000; i++) noise.write("ElfChnk\u0000", i * 64, "latin1");
+    await writeFile(join(cwd, "work", "mixed.bin"), Buffer.concat([noise, evtxChunk([])]));
+    const out = body<CarveOut>(await tool("evtx_carve", cwd, { path: "work/mixed.bin" }));
+    assert.equal(out.candidates, 3001);
+    assert.equal(out.signatures_rejected, 3000);
+    assert.equal(out.chunks_found, 1);
+    assert.equal(out.chunks_parsed, 1);
+    assert.equal(out.chunks_checksum_ok, 1, "the library's own verify() agrees with the checksums the fixture wrote");
+    assert.equal(out.problem_count, 3000);
   });
 });
 

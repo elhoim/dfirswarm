@@ -219,3 +219,19 @@ export function eventXml(o: { eid: number; rec: number; time?: string; channel?:
   const time = o.time ? `<TimeCreated SystemTime="${o.time}"></TimeCreated>` : "";
   return `<?xml version="1.0" encoding="utf-8" standalone="yes"?><Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event"><System><Provider Name="Microsoft-Windows-Security-Auditing"></Provider><EventID>${o.eid}</EventID>${time}<EventRecordID>${o.rec}</EventRecordID><Channel>${o.channel ?? "Security"}</Channel><Computer>WS01</Computer></System><EventData>${data}</EventData></Event>`;
 }
+
+/** The 4096-byte file header (libevtx): "ElfFile\0", the oldest and current chunk numbers, the next record number, header size 128, version 3.1, header chunk size 4096, the chunk count at 0x2A, the CRC-32 of the first 0x78 bytes at 0x7C. */
+export function evtxFileHeader(chunkCount: number, nextRecordNumber = 1): Buffer {
+  const h = Buffer.alloc(4096);
+  h.write("ElfFile\u0000", 0, "latin1");
+  h.writeBigUInt64LE(0n, 0x08);
+  h.writeBigUInt64LE(BigInt(Math.max(0, chunkCount - 1)), 0x10);
+  h.writeBigUInt64LE(BigInt(nextRecordNumber), 0x18);
+  h.writeUInt32LE(128, 0x20);
+  h.writeUInt16LE(1, 0x24);
+  h.writeUInt16LE(3, 0x26);
+  h.writeUInt16LE(4096, 0x28);
+  h.writeUInt16LE(chunkCount, 0x2a);
+  h.writeUInt32LE(crc32(h.subarray(0, 0x78)), 0x7c);
+  return h;
+}
