@@ -1,6 +1,6 @@
 {
   "name": "utf16_urls",
-  "description": "String candidates for URLs, file: and Visited: entries and 192.168.x.x addresses in a file; not a browser parser. ascii: http:// or https:// and at least six URL characters, to the first byte that is not one, with no length cut off. utf16le: a run of at least eight printable-ASCII characters (each in two bytes) that contains http, file:, visited: or 192.168; a character outside printable ASCII ends the run, so a URL with one is found only up to it. Every occurrence is kept with its byte offset and encoding (the same text twice is two candidates); a groups view lists each distinct text once with its count and first offset (bounded by max_distinct, and says when it stopped growing). The file is read in windows with a carry, never whole, so a match that straddles a window is found once; a run longer than the carry is returned in adjacent pieces (continued: true on all but the last) so no character is lost. A string does not say it was visited, typed, downloaded or opened, or by whom. SENSITIVE: a URL can carry a session token or a password in its query string or user-info; run it as a job with secret_output: true when the file may.",
+  "description": "String candidates for URLs, file: and Visited: entries and 192.168.x.x addresses in a file; not a browser parser. ascii: http:// or https:// and at least six URL characters, to the first byte that is not one, with no length cut off. utf16le: a run of at least eight UTF-16LE characters that contains http, file:, visited: or 192.168; a run begins at a printable ASCII character and goes on through printable ASCII, Latin-1 and the letters of Latin Extended, Greek, Cyrillic, Hebrew, Arabic, Indic and Thai (so https://örnek.test/ is one candidate; CJK is not read, its code units are ASCII letter pairs); a NUL, a control character or a surrogate ends it. Every occurrence is kept with its byte offset and encoding (the same text twice is two candidates); a groups view lists each distinct text once with its count and first offset (bounded by max_distinct, and says when it stopped growing). The file is read in windows with a carry, never whole, so a match that straddles a window is found once; a run longer than the carry is returned in adjacent pieces (continued: true on all but the last) so no character is lost. A string does not say it was visited, typed, downloaded or opened, or by whom. SENSITIVE: a URL can carry a session token or a password in its query string, fragment or user-info; the text of every candidate is returned with those values replaced by a marker holding only their length, url_secrets_withheld says how many, of what kind and at which offset, and contains is matched against the text as returned. write_url_secrets: true writes the whole text to a 0600 file under $OUT, in a job run with secret_output: true only. A secret in a path or in free text is not found. An unreadable file is a JSON failure.",
   "params": {
     "path": {
       "type": "string",
@@ -22,6 +22,10 @@
     "max_distinct": {
       "type": "integer",
       "description": "Distinct texts the groups view tracks (default 100000); past it the view stops growing and groups_complete is false, while every occurrence is still a candidate"
+    },
+    "write_url_secrets": {
+      "type": "boolean",
+      "description": "Write the whole text of every URL whose secrets were withheld, with the secret value, to a file under $OUT (mode 0600, created first, never replaced): only in a job run with secret_output: true, refused anywhere else; default false"
     }
   },
   "runtime": "python3",
@@ -30,8 +34,8 @@
   "example": "{\"path\": \"work/s5d1006/WebCacheV01.dat\", \"contains\": \"192.168\"}",
   "by": "s5d1003",
   "at": "2026-10-07T12:00:00.000Z",
-  "version": 2,
-  "sha256": "15b54262f4b7c2fe9935c51ee15ec787f0b8b78574eb2d34b3eb06973ba28b5f",
+  "version": 3,
+  "sha256": "42470ab987c2640393682ff845a4d3c5031ae6715186149f8888de74f73a6545",
   "requires": [],
   "use": {
     "extensions": [

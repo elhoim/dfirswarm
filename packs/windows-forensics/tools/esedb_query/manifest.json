@@ -1,6 +1,6 @@
 {
   "name": "esedb_query",
-  "description": "Read an ESE database (WebCacheV01.dat, SRUDB.dat, spartan.edb) as TABLES through esedbexport: list the tables, or return the rows of one, each row numbered by its position in the exported file. It exports tables as text and decodes nothing: a SRUM table is not joined to the application or user it names, a WebCache container is not resolved, and an ESE log is not read. The export is made once per database into esedb-export/<db sha256, first 16 hex>/ under the job's $OUT (or the agent's work directory), with the exporter's whole stdout and stderr in files beside it and an export-manifest.json (database digest, exporter version, argv, exit status, every table file); a complete export is reused by later calls. An exporter that exits non-zero or is stopped by export_timeout_seconds leaves a PARTIAL export: status partial, complete false, the tables listed only as tables_in_partial_export, never as the database's tables. A table name that matches more than one export file is refused with the candidates. A column name that repeats is numbered, and a cell of any size is kept whole. SENSITIVE: the tables of a WebCache or SRUM database name URLs and applications; a URL can carry a token, so run it as a job with secret_output: true when the case may.",
+  "description": "Read an ESE database (WebCacheV01.dat, SRUDB.dat, spartan.edb) as TABLES through esedbexport: list the tables, or return the rows of one, each row numbered by its position in the exported file. It exports tables as text and decodes nothing: a SRUM table is not joined to the application or user it names, a WebCache container is not resolved, and an ESE log is not read. The export is made once per database into esedb-export/<db sha256, first 16 hex>/ under the job's $OUT (or the agent's work directory), with the exporter's whole stdout and stderr in files beside it and an export-manifest.json (database digest, exporter version, argv, exit status, every table file); a complete export is reused by later calls only when its manifest was written by this version, its exit status was 0, and every table file it lists is on disk with its recorded size and nothing else is there (otherwise it is exported again). An exporter that exits non-zero or is stopped by export_timeout_seconds leaves a PARTIAL export: status partial, complete false, the tables listed only as tables_in_partial_export, never as the database's tables. A table name that matches more than one export file is refused with the candidates. A column name that repeats is numbered, and a cell of any size is kept whole. SENSITIVE: the export directory holds every table whole, so whatever the database holds (a WebCache URL with a token, SRUM users, the password material of an Active Directory database, which NTDS.dit is): it is made mode 0700 with files 0600, is a sensitive output of the job that made it, and is cited by file and table, never by value; run it as a job with secret_output: true when the case may. The rows returned withhold, with a marker holding only the length, the cells of a column whose name says password, secret, token, encrypted, credential, a card, an IBAN or an SSN, and of the datatable attributes that carry password hashes, their history, supplemental credentials and the password encryption keys (columns_withheld lists them); the secrets of every URL in a cell are withheld the same way (url_secrets_withheld; write_url_secrets: true writes their whole text to a 0600 file under $OUT, in a job only). Binary cells are exported as hex text and are not inspected, so a WebCache header column can still hold a cookie: cite, do not copy.",
   "params": {
     "path": {
       "type": "string",
@@ -17,6 +17,10 @@
     "export_timeout_seconds": {
       "type": "integer",
       "description": "How long to let esedbexport run (default 240); a run that is stopped keeps what it wrote and the answer says partial"
+    },
+    "write_url_secrets": {
+      "type": "boolean",
+      "description": "Write the whole text of every URL whose secrets were withheld, with the secret value, to a file under $OUT (mode 0600, created first, never replaced): only in a job run with secret_output: true, refused anywhere else; default false"
     }
   },
   "runtime": "python3",
@@ -25,8 +29,8 @@
   "example": "{\"path\": \"work/extracted/WebCacheV01.dat\", \"table\": \"Containers\", \"limit\": 50}",
   "by": "maintainer",
   "at": "2026-10-07T12:00:00.000Z",
-  "version": 4,
-  "sha256": "017f6cae1158cb168465e5e6811023dbeb22bdfa5828469089ff299bcd062740",
+  "version": 5,
+  "sha256": "a4e5e46bc7d0b1908fd6cccc391f49dfbe478ca48be4f7d29be6925209f016c7",
   "use": {
     "extensions": [
       ".edb"
