@@ -21,7 +21,7 @@
       "README.md": "2d5733aff874a3877e0097ed180d806ab2697c9dd66ba7faf1bb4726c37fc551",
       "tools/ransom_note_scan/manifest.json": "f3ffcccad545a95b38da28df5ffeb45b7454165573f80e17884b845dfbee926b",
       "tools/ransom_note_scan/run.py": "aab2fdf783658b7f9a8591c94535d5935efc8fd2bc12bf9b6544158943a059d2",
-      "tools/encrypted_survey/manifest.json": "38e9a2e9488c4a1b1e6f5b5613daf60a0f518dce6ed7d773c0b68b27a8dd58f9",
+      "tools/encrypted_survey/manifest.json": "a0569521f595400a1f304b2dc5ad1beaca105aba5739bad916ee3aeaaba59480",
       "tools/encrypted_survey/run.py": "a8ef1d9ced45b74776fec2ade8d5a37505ec91240d8425a3a15b5aac08ce19f7",
       "goals/ransomware-case.md": "ba768dac4d662c50cc9409feb9555a06176ce79d0a600f937911f46e5ebbe899",
       "skills/identify/family.md": "ced4d413faddbc8dffe5611d63be4cb968c6535a97cb15b06a7e5e3d44947192",

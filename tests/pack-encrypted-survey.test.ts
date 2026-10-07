@@ -320,7 +320,7 @@ test("encrypted_survey keeps its mtime histograms apart, labelled as file-system
 spec = importlib.util.spec_from_file_location("survey", sys.argv[1])
 m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
 print(json.dumps([m.iso_utc(10**21), m.iso_utc(-10**20), m.iso_utc(1776046200 * 10**9 + 123456789)]))`,
-      [SURVEY],
+      [SURVEY, cwd],
       null,
     );
     assert.equal(probe.code, 0, probe.stderr);
@@ -387,6 +387,7 @@ test("encrypted_survey's census and pager take a path with a lone surrogate, as 
       `import importlib.util, json, os, sys
 spec = importlib.util.spec_from_file_location("survey", sys.argv[1])
 m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+os.chdir(sys.argv[2])
 os.environ["AGENT_ID"] = "s1"
 census = m.Census(["k", "census"])
 census.add({"record": "file", "file": "dir/budget_\udcff\udcfe.xlsx.locked"})
@@ -397,7 +398,7 @@ for i in range(2):
     page.add({"file": "dir/b_\udcff_%d" % i})
 done = page.finish()
 print(json.dumps([len(rows), rows[0]["file"] == "dir/budget_\udcff\udcfe.xlsx.locked", rows[1]["record"], done["matched"]]))`,
-      [SURVEY],
+      [SURVEY, cwd],
       null,
     );
     assert.equal(probe.code, 0, probe.stderr);

@@ -525,6 +525,7 @@ test("ransom_note_scan's pager and values file take a path with a lone surrogate
       `import importlib.util, json, os, sys
 spec = importlib.util.spec_from_file_location("scan", sys.argv[1])
 m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+os.chdir(sys.argv[2])
 os.environ["AGENT_ID"] = "s1"
 page = m.LosslessPage("t", ["k"], 1)
 for i in range(3):
@@ -532,7 +533,7 @@ for i in range(3):
 done = page.finish()
 rows = [json.loads(l) for l in open(done["all_results"], encoding="utf-8")]
 print(json.dumps([done["matched"], len(rows), rows[2]["path"] == "dir/readme_\udcff\udcfe_2.txt"]))`,
-      [NOTES],
+      [NOTES, cwd],
       null,
     );
     assert.equal(probe.code, 0, probe.stderr);
