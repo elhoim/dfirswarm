@@ -168,9 +168,11 @@ target=""
 probe_out=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --target) target="${2:-}"; shift 2 ;;
-    --out) out="${2:-}"; shift 2 ;;
-    --probe-out) probe_out="${2:-}"; shift 2 ;;
+    --target|--out|--probe-out)
+      # A flag with no value is an error, not a loop: `shift 2` with one word left shifts nothing.
+      [[ $# -ge 2 ]] || { echo "{\"ok\": false, \"error\": \"$1 needs a value\"}"; exit 2; }
+      case "$1" in --target) target="$2" ;; --out) out="$2" ;; --probe-out) probe_out="$2" ;; esac
+      shift 2 ;;
     *) echo '{"ok": false, "error": "unknown argument"}'; exit 2 ;;
   esac
 done
@@ -240,15 +242,20 @@ case "$cmd" in
         python3 -c 'import json,sys; c=json.load(open(sys.argv[1])); print(json.dumps({"ok": True, "status": c["status"], "missing": c["missing"]}))' "$out/coverage.json"
         exit 0
       fi
-      notes+=("vol windows.info on $shown: ${r/ok/ran but named no Windows image}")
+      if [[ "$r" == ok ]]; then why="ran but named no Windows image"; else why="$r"; fi
+      notes+=("vol windows.info on $shown: $why")
       coverage failed "nothing"
       echo '{"ok": false, "status": "failed"}'
       exit 2
     fi
+    finished=0
+    coverage partial "windows.info finished; no plugin has yet (this file is rewritten after each step, so a run stopped part way says how far it got)"
     for plugin in pslist psscan pstree cmdline netscan malfind vadinfo handles modules svcscan dlllist; do
       r="$(run_step "$STEP_TIMEOUT" "$out/$plugin.txt" vol ${VOLNET[@]+"${VOLNET[@]}"} -q -f "$img" "windows.$plugin")"
       [[ "$r" == ok ]] || notes+=("vol windows.$plugin on $shown: $r")
       index_row "$plugin.txt" "vol windows.$plugin over $shown"
+      finished=$((finished + 1))
+      coverage partial "windows.info and $finished of eleven plugins have finished; the run did not reach its end (this file is rewritten after each step)"
     done
     while IFS= read -r f; do
       rel="${f#"$out/"}"; [[ "$rel" == windows.info.txt.stderr ]] || index_row "$rel" "what the step writing ${rel%.stderr} said on stderr"

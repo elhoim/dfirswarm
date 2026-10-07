@@ -206,9 +206,10 @@ CALLS_L2T="$T/l2t-args2.txt" PATH="$T/bin2:$PATH" python3 "$DT" run --target "{\
 jq -e '.timezone == "not given" and (.timezone_note | test("none given"))' "$T/dt-nozone/coverage.json" >/dev/null || fail "no zone given is said, not assumed to be UTC: $(cat "$T/dt-nozone/coverage.json")"
 grep -q -- '--timezone' "$T/l2t-args2.txt" && fail "a zone nobody gave was passed to log2timeline"
 # A timeline already in the output directory is not this run's.
-mkdir -p "$T/dt-stale" && printf 'old storage' > "$T/dt-stale/timeline.plaso"
+mkdir -p "$T/dt-stale" && printf 'old storage' > "$T/dt-stale/timeline.plaso" && printf '{"status": "complete", "earlier": true}' > "$T/dt-stale/coverage.json"
 CALLS_L2T="$T/l2t-args3.txt" PATH="$T/bin2:$PATH" python3 "$DT" run --target "{\"paths\": [\"$T/x.E01\"]}" --out "$T/dt-stale" >/dev/null && fail "disk-timeline should refuse an output directory that holds an earlier timeline"
-jq -e '.status == "failed" and (.errors[0] | test("already in the output directory"))' "$T/dt-stale/coverage.json" >/dev/null || fail "a stale output directory is refused and said: $(cat "$T/dt-stale/coverage.json")"
+jq -e '.status == "failed" and (.errors[0] | test("already in the output directory"))' "$T/dt-stale/coverage.refused.json" >/dev/null || fail "a stale output directory is refused and said: $(cat "$T/dt-stale/coverage.refused.json")"
+jq -e '.earlier == true' "$T/dt-stale/coverage.json" >/dev/null || fail "the earlier run's coverage.json was overwritten by the refusal: $(cat "$T/dt-stale/coverage.json")"
 [[ ! -e "$T/l2t-args3.txt" ]] || fail "log2timeline ran over a stale output directory"
 [[ "$(cat "$T/dt-stale/timeline.plaso")" == "old storage" ]] || fail "the earlier storage file was touched"
 # A log2timeline that exits 0 and writes no storage file leaves no timeline to be taken for the run's.
@@ -433,7 +434,7 @@ jq -e '.status == "partial" and ([.inventory[] | {(.description): .outcome}] | a
   || fail "every allocated entry is in the inventory with what became of it, an unlisted description is tried (and fails here), and what holds no file system is structural: $(cat "$H/out-gpt/coverage.json")"
 jq -e '[.errors[] | select(test("1083392"))] | length == 1' "$H/out-gpt/coverage.json" >/dev/null || fail "the entry that could not be read is named once in the errors: $(cat "$H/out-gpt/coverage.json")"
 [[ "$(grep -c '^fsstat -o 1083392 ' "$H/tsk-calls.log")" -ge 1 ]] || fail "an unlisted description is tried with fsstat, not skipped: $(cat "$H/tsk-calls.log")"
-grep -q -- '-o 1050624 \|-o 1100001 ' "$H/tsk-calls.log" && fail "a structural entry was read as a file system"
+[[ ! -d "$H/out-gpt/p1050624" && ! -d "$H/out-gpt/p1100001" ]] || fail "a structural entry was catalogued as a file system"
 jq -e '.status == "partial" and (.covered | test("started"))' "$H/first-coverage.json" >/dev/null || fail "coverage says partial before the first step finishes: $(cat "$H/first-coverage.json")"
 grep -q 'mactime TZ=UTC .* -z UTC' "$H/tsk-calls.log" || fail "mactime is given the zone its timeline says: $(cat "$H/tsk-calls.log")"
 # With nothing left unread the same table is complete, and a missing mactime is said, not skipped.
@@ -448,6 +449,81 @@ if ! PATH="$H/mt-shim:/usr/bin:/bin" command -v mactime >/dev/null; then
   jq -e '.status == "partial" and ([.errors[] | select(test("mactime missing"))] | length == 1)' "$H/out-gpt3/coverage.json" >/dev/null || fail "a missing mactime is said: $(cat "$H/out-gpt3/coverage.json")"
 fi
 pass "disk-volumes inventories every allocated entry, tries what no list names, names what holds no file system, sets the zone its timeline says, and writes coverage before its first step"
+
+# A description is the table's word, not what is in the partition: an entry the table calls swap, a reserved
+# area, LVM or RAID is first asked of fsstat, and is classed by its name only when fsstat reads nothing there.
+mkdir -p "$H/tsk-shim3"
+cat > "$H/tsk-shim3/mmls" <<'SH'
+#!/bin/sh
+cat <<'T'
+DOS Partition Table
+Offset Sector: 0
+Units are in 512-byte sectors
+
+      Slot      Start        End          Length       Description
+000:  Meta      0000000000   0000000000   0000000001   Primary Table (#0)
+001:  000:000   0000002048   0001050623   0001048576   Linux Swap / Solaris x86 (0x82)
+002:  000:001   0001050624   0002099199   0001048576   Linux Logical Volume Manager (0x8e)
+003:  000:002   0002099200   0003147775   0001048576   Linux Logical Volume Manager (0x8e)
+T
+SH
+cat > "$H/tsk-shim3/fsstat" <<'SH'
+#!/bin/sh
+case "$2" in 2048|1050624) echo "File System Type: Ext4" ;; *) echo "Cannot determine file system type" >&2; exit 1 ;; esac
+SH
+cp "$H/tsk-shim/fls" "$H/tsk-shim3/fls"
+chmod +x "$H/tsk-shim3/"*
+: > "$H/mislabel.img"
+PATH="$H/tsk-shim3:$PATH" bash "$DVR" run --target "{\"paths\": [\"$H/mislabel.img\"], \"name\": \"mislabel.img\"}" --out "$H/out-mislabel" > "$H/out-mislabel.json" || true
+jq -e '.volumes == 2' "$H/out-mislabel.json" >/dev/null || fail "a swap-labelled and an LVM-labelled entry that fsstat reads are volumes: $(cat "$H/out-mislabel.json")"
+jq -e '([.inventory[] | {(.description): .outcome}] | add) as $o | ($o["Linux Swap / Solaris x86 (0x82)"] == "read") and (.inventory | map(select(.start_sector == 2099200))[0].outcome == "unsupported")' "$H/out-mislabel/coverage.json" >/dev/null \
+  || fail "the name decides only where fsstat read nothing: $(cat "$H/out-mislabel/coverage.json")"
+pass "disk-volumes asks fsstat before it believes a partition's description"
+
+# Without its value a flag ends the run with an error; it used to loop for ever (`shift 2` shifts nothing with one word left).
+for rc in disk-volumes memory-windows; do
+  R="$ROOT/packs/computer-forensics-base/recipes/$rc/run.sh"
+  for flag in --target --out --probe-out; do
+    code=0; perl -e 'alarm 20; exec @ARGV' bash "$R" run "$flag" > "$H/noval.json" 2>&1 || code=$?
+    [[ "$code" -eq 2 ]] || fail "$rc $flag with no value should exit 2, not $code (142 is the loop): $(cat "$H/noval.json")"
+    jq -e '.ok == false and (.error | test("needs a value"))' "$H/noval.json" >/dev/null || fail "$rc $flag says it needs a value: $(cat "$H/noval.json")"
+  done
+done
+pass "disk-volumes and memory-windows end with an error when a flag has no value"
+
+# With no partition table, the fsstat tries are time-boxed like every other step, a mmls that does not finish is said,
+# and what mmls said on stderr is kept.
+mkdir -p "$H/tsk-hang" "$H/tsk-notable"
+cat > "$H/tsk-hang/mmls" <<'SH'
+#!/bin/sh
+exec sleep 30
+SH
+cat > "$H/tsk-hang/fsstat" <<'SH'
+#!/bin/sh
+exec sleep 30
+SH
+cat > "$H/tsk-notable/mmls" <<'SH'
+#!/bin/sh
+echo "Cannot determine partition type" >&2
+exit 1
+SH
+cat > "$H/tsk-notable/fsstat" <<'SH'
+#!/bin/sh
+[ "$1" = "-o" ] && [ "$2" != 0 ] && { echo "Cannot determine file system type" >&2; exit 1; }
+echo "File System Type: Ext4"
+SH
+cp "$H/tsk-shim/fls" "$H/tsk-hang/fls"; cp "$H/tsk-shim/fls" "$H/tsk-notable/fls"
+chmod +x "$H/tsk-hang/"* "$H/tsk-notable/"*
+: > "$H/hang.img"
+began=$SECONDS
+RECIPE_STEP_SECONDS=1 PATH="$H/tsk-hang:$PATH" perl -e 'alarm 60; exec @ARGV' bash "$DVR" run --target "{\"paths\": [\"$H/hang.img\"], \"name\": \"hang.img\"}" --out "$H/out-hang" > "$H/out-hang.json" 2>&1 || true
+[[ $((SECONDS - began)) -lt 30 ]] || fail "a fsstat that does not answer was not time-boxed in the no-table branch ($((SECONDS - began)) seconds)"
+jq -e '.status == "unsupported" and ([.errors[] | select(test("mmls did not finish"))] | length == 1)' "$H/out-hang/coverage.json" >/dev/null || fail "a mmls that did not finish is said: $(cat "$H/out-hang/coverage.json")"
+PATH="$H/tsk-notable:$PATH" bash "$DVR" run --target "{\"paths\": [\"$H/hang.img\"], \"name\": \"notable.img\"}" --out "$H/out-notable" > "$H/out-notable.json" || fail "a raw volume with no table should run: $(cat "$H/out-notable.json")"
+grep -q "Cannot determine partition type" "$H/out-notable/mmls.stderr" || fail "what mmls said is kept: $(ls "$H/out-notable")"
+grep -q "^mmls.stderr" "$H/out-notable/index.tsv" || fail "and is in the index: $(cat "$H/out-notable/index.tsv")"
+[[ "$(jq -r .status "$H/out-notable/coverage.json")" == complete ]] || fail "no table is not a failure for a volume that is one: $(cat "$H/out-notable/coverage.json")"
+pass "disk-volumes time-boxes the no-table fsstat tries, says a mmls that did not finish, and keeps what mmls said"
 
 # A 7z that exits nonzero is an error whether or not it said anything on stderr (it was recorded only when it had),
 # and the recipe no longer advertises .tar.zst, which it cannot read. A stub 7z, so this runs on any host.
@@ -483,6 +559,8 @@ if [ "$offline" = 1 ] && [ -n "$VOL_STUB_NO_SYMBOLS" ]; then
   echo "WARNING  volatility3.framework.plugins: Automagic exception occurred: volatility3.framework.exceptions.OfflineException: Volatility 3 is offline: unable to access http://msdl.microsoft.com/download/symbols/ntkrnlmp.pdb/0123456789ABCDEF0123456789ABCDEFA/ntkrnlmp.pdb" >&2
   echo "Unsatisfied requirement plugins.Info.kernel.symbol_table_name" >&2; exit 1
 fi
+[ -n "$VOL_STUB_FAIL_INFO" ] && [ "$last" = windows.info ] && { echo "the token was not ok, look" >&2; exit 1; }
+[ -n "$VOL_STUB_SNAPSHOT" ] && [ "$last" = windows.cmdline ] && cp "$VOL_STUB_SNAPSHOT/coverage.json" "$VOL_STUB_SNAPSHOT/at-cmdline.json"
 case "$last" in windows.info) printf 'Variable\tValue\nKernel Base\t0xf80000000000\n' ;; *) printf 'PID\tImageFileName\n4\tSystem\n' ;; esac
 SH
 chmod +x "$H/vol-shim/vol"
@@ -499,6 +577,13 @@ jq -e '.status == "partial" and (.covered | test("no symbol table for this kerne
 jq -e '.ok == true and .status == "partial" and .missing[0].identity.pdb == "ntkrnlmp.pdb"' "$H/out-mw2.json" >/dev/null || fail "the run says partial and names what is missing: $(cat "$H/out-mw2.json")"
 grep -q symbol_table_name "$H/out-mw2/windows.info.txt.stderr" && grep -q '^windows.info.txt.stderr' "$H/out-mw2/index.tsv" || fail "the offline attempt is kept and indexed"
 [[ ! -e "$H/out-mw2/pslist.txt" && ! -e "$H/out-mw2/offline.windows.info.txt.stderr" ]] || fail "no plugin ran and nothing was fetched into the output"
+# What windows.info said when it failed is in the note whole (a substring replace once mangled any "ok" in it), and a run stopped
+# part way leaves a coverage file that says how far it got, not that nothing had finished.
+VOL_STUB_FAIL_INFO=1 PATH="$H/vol-shim:$PATH" bash "$MW" run --target "{\"paths\": [\"$H/win.mem\"], \"name\": \"win.mem\"}" --out "$H/out-mw3" > "$H/out-mw3.json" || true
+jq -e '.status == "failed" and ([.errors[] | select(test("the token was not ok, look"))] | length == 1)' "$H/out-mw3/coverage.json" >/dev/null || fail "the failure's words come back whole: $(cat "$H/out-mw3/coverage.json")"
+mkdir -p "$H/out-mw4"
+VOL_STUB_SNAPSHOT="$H/out-mw4" PATH="$H/vol-shim:$PATH" bash "$MW" run --target "{\"paths\": [\"$H/win.mem\"], \"name\": \"win.mem\"}" --out "$H/out-mw4" >/dev/null || fail "memory-windows with a snapshot stub should run"
+jq -e '.status == "partial" and (.covered | test("windows.info and 3 of eleven plugins have finished")) and (.steps | length == 4)' "$H/out-mw4/at-cmdline.json" >/dev/null || fail "coverage is rewritten after each step: $(cat "$H/out-mw4/at-cmdline.json")"
 pass "memory-windows reads the image's symbol tables offline at every step, never retries online, ends partial with the kernel named as missing when the image has none, and keeps one record per step"
 
 # 7z, read as its listing streams, with the member limit applied as it goes.

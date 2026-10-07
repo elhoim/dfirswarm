@@ -15,7 +15,10 @@ declines it with why.
 
 Detect reads signatures only (an EWF, VMDK, VHD(X) or QCOW container, a
 partition table, a filesystem's boot sector), so it answers the same on any
-host. A run stopped before its end leaves coverage.json saying partial.
+host. A run stopped before its end leaves coverage.json saying partial. An --out
+that already holds a timeline.plaso or timeline.csv is refused, and said in
+coverage.refused.json: the earlier run's coverage.json, which describes the
+files that are still there, is left as it was.
 
 Plaso writes its log to the working directory unless told otherwise
 (log2timeline-<timestamp>.log.gz, psort-<timestamp>.log.gz), and a job starts
@@ -116,8 +119,8 @@ def program(*names):
     return None
 
 
-def write_coverage(out, status, covered, errors, extra=None):
-    with open(os.path.join(out, "coverage.json"), "w", encoding="utf-8") as handle:
+def write_coverage(out, status, covered, errors, extra=None, name="coverage.json"):
+    with open(os.path.join(out, name), "w", encoding="utf-8") as handle:
         json.dump({"recipe": "disk-timeline", "status": status, "covered": covered, "not_covered": NOT_COVERED,
                    "limits_hit": [], "errors": list(errors), "coverage_note": PIPELINE_NOTE, **(extra or {})}, handle, indent=2, sort_keys=True)
         handle.write("\n")
@@ -141,9 +144,12 @@ def run(image, out, zone=None):
     # A timeline left by an earlier run would be mistaken for this one's.
     stale = [n for n in ("timeline.plaso", "timeline.csv") if os.path.lexists(os.path.join(out, n))]
     if stale:
+        # The earlier run's coverage.json describes the files that are still there: it is left as it is, and the
+        # refusal is said beside it, so neither record is lost or mistaken for the other.
         write_coverage(out, "failed", "nothing: the output directory already holds %s from an earlier run" % " and ".join(stale),
-                       ["%s was already in the output directory; this run will not take it for its own" % " and ".join(stale)], extra)
-        return 1
+                       ["%s was already in the output directory; this run will not take it for its own" % " and ".join(stale)], extra,
+                       name="coverage.refused.json")
+        return 1, "coverage.refused.json"
     began = time.time()
     write_coverage(out, "partial", "started; log2timeline or psort did not finish (stopped before its end)", ["the run ended before Plaso did"], extra)
     l2t = program("log2timeline", "log2timeline.py")
@@ -151,7 +157,7 @@ def run(image, out, zone=None):
     if not l2t or not psort:
         missing = [n for n, p in (("log2timeline", l2t), ("psort", psort)) if not p]
         write_coverage(out, "failed", "nothing: Plaso is not in this image", ["%s not on PATH in this job image" % " and ".join(missing)], extra)
-        return 1
+        return 1, "coverage.json"
     storage = os.path.join(out, "timeline.plaso")
     collect = [l2t, "--unattended", "--logfile", os.path.join(out, "log2timeline.log.gz"), "--partitions", "all", "--volumes", "all", "--vss_stores", "none"]
     if zone:
@@ -189,12 +195,12 @@ def run(image, out, zone=None):
     names = [r for r, _ in rows if r in ("timeline.plaso", "timeline.csv")]
     if not errors and len(names) == 2:
         write_coverage(out, "complete", "log2timeline over every partition and volume of the image, and psort's timeline of it (the pipeline finished: see coverage_note)", [], extra)
-        return 0
+        return 0, "coverage.json"
     if rows:
         write_coverage(out, "partial", "Plaso wrote %s before it ended" % " and ".join(names or ["nothing usable"]), errors, extra)
     else:
         write_coverage(out, "failed", "nothing parsed", errors or ["log2timeline wrote no storage file"], extra)
-    return 1
+    return 1, "coverage.json"
 
 
 def main():
@@ -225,9 +231,12 @@ def main():
     if zone is not None and not (isinstance(zone, str) and ZONE.match(zone)):
         print(json.dumps({"ok": False, "error": "timezone is a zone name such as Europe/Istanbul"}))
         return 2
-    rc = run(image, args.out, zone)
-    status = json.load(open(os.path.join(args.out, "coverage.json"), encoding="utf-8")).get("status")
-    print(json.dumps({"ok": rc == 0, "status": status}))
+    rc, coverage_file = run(image, args.out, zone)
+    status = json.load(open(os.path.join(args.out, coverage_file), encoding="utf-8")).get("status")
+    result = {"ok": rc == 0, "status": status}
+    if coverage_file != "coverage.json":
+        result["coverage"] = coverage_file
+    print(json.dumps(result))
     return rc
 
 

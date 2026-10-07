@@ -79,5 +79,5 @@
     "pinfo.stderr"
   ],
   "covers": "What log2timeline's parsers read from every partition and volume of the image, written by psort as one CSV timeline; the storage file is kept for psort and pinfo. A parser that finds nothing adds no row, which does not show the artefact never existed. The run refuses an output directory that already holds a timeline from an earlier run. The status says the pipeline finished, not what the parsers covered.",
-  "sha256": "c3389bc48e46db5bb8fb766c0e17e211e22498af3c98fffc1babde12d504de5b"
+  "sha256": "c28252a08c13179346349ff50638c82cf471d13ac57d1626622040f807119f8a"
 }
