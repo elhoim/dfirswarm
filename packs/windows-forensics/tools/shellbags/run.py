@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Walk BagMRU and say which folders a user opened in Explorer.
 
-Shell bags are the artefact that proves someone navigated to a directory that
-no longer exists: a folder on a stick that was taken away, a share that has been
-decommissioned, a directory that was deleted after it was emptied. Nothing else
-in Windows keeps that.
+Shell bags record that a shell component opened a folder on an account, including
+folders that no longer exist (a volume that was taken away, a share that has been
+decommissioned). They do not say who opened it, that a file in it was opened, or
+when it was first or last viewed.
 
 Two roots, depending on the Windows version and the hive:
 

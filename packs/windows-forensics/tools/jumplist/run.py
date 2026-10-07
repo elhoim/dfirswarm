@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Read a jump list, and hand the link structures inside it to lnk_parse.
 
-A jump list outlives the Recent folder and outlives the file it points at, which
-is why it answers "what did this user open, and from where" when nothing else
-does. Two formats:
+A jump list can outlive the Recent folder and the file it points at, so it can
+still name a target that is gone. It records that an application or the shell listed
+an item, which is not by itself an opening event and does not say who. Two formats:
 
   *.automaticDestinations-ms  an OLE compound file. Each numbered stream is a
                               link structure; the DestList stream is the index,

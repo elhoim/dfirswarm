@@ -1,6 +1,6 @@
 {
   "name": "sigma_hunt",
-  "description": "Run a Sigma ruleset over event logs with one engine the host has (Zircolite or Hayabusa; either is enough) and return normalised detections: rule, level, time, event id, channel, record id and the matching record. A detection is a hypothesis; the record it points at is the evidence. Each invocation writes to a directory of its own under out_dir (hunt-<UTC time>-<id>), so an earlier run's result is never read as this one's. The engine's exit status is judged: a non-zero status, a stop by timeout_seconds, or a line of its result that cannot be read makes the run PARTIAL (status, complete, exit_code, malformed_lines with the lines kept whole in a file). The result is read as a stream and normalised into detections.jsonl, sorted by level and time with a bounded-memory merge. The level words each engine writes are ranked (Hayabusa's crit, med and info among them); a detection whose level is not known is kept, shown first and counted under unknown_levels, never dropped by min_level. The ruleset you name is recorded by digest and the engine's version is recorded where it prints one; without a ruleset the engine's bundled rules are used and not recorded. The engine's whole stdout, stderr and logs are kept in files it names.",
+  "description": "Run a Sigma ruleset over event logs with one engine the host has (Zircolite or Hayabusa; either is enough) and return normalised detections: rule, level, time, event id, channel, record id and the matching record. A detection is a hypothesis; the record it points at is the evidence. Each invocation writes to a directory of its own under out_dir (hunt-<UTC time>-<id>), so an earlier run's result is never read as this one's. The engine's exit status is judged: a non-zero status, a stop by timeout_seconds, or a line of its result that cannot be read makes the run PARTIAL (status, complete, exit_code, malformed_lines with the lines kept whole in a file). The result is read as a stream and normalised into detections.jsonl, sorted by level and time with a bounded-memory merge. The level words each engine writes are ranked (Hayabusa's crit, med and info among them); a detection whose level is not known is kept, shown first and counted under unknown_levels, never dropped by min_level. The ruleset you name is recorded by digest and the engine's version is recorded where it prints one; without a ruleset the engine's bundled rules are used and not recorded. The engine's whole stdout, stderr and logs are kept in files it names. SENSITIVE: every detection carries the whole record it matched, which can hold command lines, script text or other secrets; run it as a job with secret_output: true when the logs may.",
   "params": {
     "path": {
       "type": "string",
@@ -38,7 +38,7 @@
   "by": "maintainer",
   "at": "2026-10-07T12:00:00.000Z",
   "version": 4,
-  "sha256": "c3e098338c5942170813a0cb42ba4bb5c24c6f85ffdca45222f3019d926deaaa",
+  "sha256": "d529118013a329a52ab217378578a4fc2af07dd10b536707a8cdf98d7da67709",
   "use": {
     "extensions": [
       ".evtx"

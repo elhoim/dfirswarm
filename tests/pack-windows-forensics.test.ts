@@ -3047,6 +3047,28 @@ test("mft_records checks every nested range against its own attribute: a $FILE_N
   });
 });
 
+test("mft_records counts a record whose update sequence fixup failed and a slot with no signature, instead of leaving them to a flag on one record and a silent skip", async () => {
+  // The fixup failure was a flag on the record only, and a zeroed or damaged slot was skipped with nothing but the
+  // difference between two counters to show it.
+  await withCwd(async (cwd) => {
+    const good = mftRecord(60, [mftAttr(0x10, mftStandardInfo(MFT_TIME)), mftAttr(0x30, mftFileName(5n, 5n, "fine.txt", MFT_TIME))]);
+    const torn = mftRecord(61, [mftAttr(0x10, mftStandardInfo(MFT_TIME)), mftAttr(0x30, mftFileName(5n, 5n, "torn.txt", MFT_TIME))]);
+    torn[510] = 0x99; // the last two bytes of the first sector no longer match the update sequence number
+    const blank = Buffer.alloc(1024);
+    const junk = Buffer.alloc(1024, 0x41);
+    await writeFile(join(cwd, "work", "MFT"), Buffer.concat([good, torn, blank, junk]));
+    const out = body<MftOut & { records_scanned: number; records_parsed: number; records_fixup_failed: number; slots_without_signature: number }>(
+      await tool("mft_records", cwd, { path: "work/MFT" }));
+    assert.equal(out.records_scanned, 4);
+    assert.equal(out.records_parsed, 2);
+    assert.equal(out.records_fixup_failed, 1);
+    assert.equal(out.slots_without_signature, 2);
+    const torn_entry = out.entries.find((e) => e.entry === 61);
+    assert.ok(torn_entry && torn_entry.flags.includes("fixup_failed") && torn_entry.unreliable === true);
+    assert.match(out.note, /records_fixup_failed/);
+  });
+});
+
 test("mft_records says when an attribute chain does not end with its marker, gives every name and stream its instance id, and keeps the base record's sequence", async () => {
   await withCwd(async (cwd) => {
     const ads = mftRecord(50, [

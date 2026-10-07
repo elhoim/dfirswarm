@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Carve Windows event records out of a blob that is not an event log.
 
-Clearing a log does not destroy the records. An .evtx file is a 4096-byte file
-header followed by 64 KiB chunks, each one self-contained: its own magic
-ElfChnk\\x00, its own string and template tables, its own checksums, and its
-records inside it. When the log is cleared the file is rewritten, but the old
-chunks stay in unallocated space, in the pagefile, in hiberfil.sys, and in any
-shadow copy of the volume. A chunk needs no file header to be read.
+Clearing a log rewrites or replaces the file; it does not by itself destroy every
+record. An .evtx file is a 4096-byte file header followed by 64 KiB chunks, each one
+self-contained: its own magic ElfChnk\\x00, its own string and template tables, its own
+checksums, and its records inside it. Whether old chunks survive in unallocated
+space, a pagefile, a memory image or another copy of the file depends on allocation,
+overwrite, discard and what was acquired; this tool reads the bytes it is given as
+stored (a hibernation file is compressed and is not decompressed here). A chunk needs
+no file header to be read.
 
 So the sweep is: find every ElfChnk\\x00, hand the 64 KiB that follows to the
 chunk parser, check its checksums, and read the records. A record carries its
@@ -14,8 +16,8 @@ own Channel, so a carved record can be attributed without knowing which file it
 came from — and that is the thing to quote in the report, because the file it
 was carved from is usually not a log file at all.
 
-Anti-forensics note worth keeping in view: an examiner who reports "the log was
-cleared, so there is nothing" has stopped one command early.
+A cleared log is where the search starts: "no records recovered" is bounded by the
+sources and ranges that were swept, and is not a statement about the log.
 
 Nothing found is dropped. Every matching record is kept, with its whole XML, in
 a file the output names (always written when anything was found); the page

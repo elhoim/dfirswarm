@@ -22,8 +22,11 @@ Layout, all little-endian (Microsoft's own on-disk format):
 The update sequence array is not decoration: the last two bytes of every sector
 in the record are held in it, and a parser that skips the fixup reads two bytes
 of checksum in the middle of a timestamp. That is the classic silent corruption
-in hand-rolled MFT code, so it is applied here first and a record whose fixup
-does not match is reported as unreliable rather than parsed.
+in hand-rolled MFT code, so it is applied here first. A record whose fixup does not
+match is still parsed, flagged `fixup_failed` and `unreliable`, and counted under
+`records_fixup_failed`; it does not make the run partial, so read that count. A slot
+that holds neither FILE nor BAAD (zeroed or damaged) is not a record and is not
+listed: it is counted under `slots_without_signature`.
 
 Every record is read. The page returned inline is `limit` long, and when more
 records match the whole list is written to a file the output names. A record
@@ -437,6 +440,8 @@ def main():
         entries = LosslessPage("mft_records", key, limit)
         problems = LosslessPage("mft_records-problems", key, 40)
         structural = 0
+        fixup_failed = 0
+        unsigned = 0
         scanned, parsed = 0, 0
         trailing = 0
         fh.seek(0)
@@ -456,8 +461,11 @@ def main():
                               "why": "the record did not parse: %s" % exc})
                 continue
             if entry is None:
+                unsigned += 1
                 continue
             parsed += 1
+            if "fixup_failed" in entry["flags"]:
+                fixup_failed += 1
             if entry.get("structural_errors"):
                 structural += 1
                 problems.add({"record": index, "offset": index * record_size,
@@ -487,6 +495,8 @@ def main():
         "records_scanned": scanned,
         "records_parsed": parsed,
         "records_with_structural_errors": structural,
+        "records_fixup_failed": fixup_failed,
+        "slots_without_signature": unsigned,
         "entries": entries.page,
         "entry_count": page["matched"],
         **page,
@@ -495,7 +505,9 @@ def main():
         "note": "A flag beginning si_ is an indicator, not proof: $SI and $FN times can each be changed by software, and a "
                 "disagreement between them has more than one cause. Corroborate with the USN journal and other sources; the pack does "
                 "not read $LogFile. $ATTRIBUTE_LIST is not resolved and no parent path is rebuilt (each name carries its parent entry "
-                "and sequence). A record with structural_errors kept what was sound and is unreliable.",
+                "and sequence). A record with structural_errors kept what was sound and is unreliable. A record whose update sequence "
+                "fixup failed is parsed, flagged fixup_failed and unreliable and counted in records_fixup_failed, and does not make the "
+                "run partial; a slot with neither a FILE nor a BAAD signature is not listed and is counted in slots_without_signature.",
     }
     if problem_page.get("all_results"):
         out["all_problems"] = problem_page["all_results"]

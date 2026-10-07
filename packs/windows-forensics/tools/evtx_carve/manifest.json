@@ -1,6 +1,6 @@
 {
   "name": "evtx_carve",
-  "description": "Recover event records from a blob that is not an event log: sweeps for ElfChnk chunk headers in unallocated space, a pagefile, a memory image or a truncated .evtx, verifies each chunk's own checksums and parses the records inside it. Every matching record is kept with its whole XML in a file the answer names (written whenever anything was found); the inline records are the summary, without the XML unless with_xml is true. A repeated EventData name is kept as a list, not overwritten. chunk_limit (chunks parsed) and candidate_limit (places where the magic was found, built into a chunk or not) bound the work of one call, not the result: the sweep stops before the next one and resume_start is the offset to pass as start. The answer says the range asked for and the range examined, and sweep_complete means that range was swept, not that every record that ever existed was recovered. Problems are a page with the whole list in a file. A chunk whose checksums do not verify may still hold sound records, and is marked chunk_verified false. A carved record belongs to the channel it names, not to the file it was found in.",
+  "description": "Recover event records from a blob that is not an event log: sweeps for ElfChnk chunk headers in unallocated space, a pagefile, a memory image or a truncated .evtx, verifies each chunk's own checksums and parses the records inside it. Every matching record is kept with its whole XML in a file the answer names (written whenever anything was found); the inline records are the summary, without the XML unless with_xml is true. A repeated EventData name is kept as a list, not overwritten. chunk_limit (chunks parsed) and candidate_limit (places where the magic was found, built into a chunk or not) bound the work of one call, not the result: the sweep stops before the next one and resume_start is the offset to pass as start. The answer says the range asked for and the range examined, and sweep_complete means that range was swept, not that every record that ever existed was recovered. Problems are a page with the whole list in a file. A chunk whose checksums do not verify may still hold sound records, and is marked chunk_verified false. A carved record belongs to the channel it names, not to the file it was found in. SENSITIVE: carved records hold command lines, script text and arguments that can include a secret, and a pagefile or memory image can hold records of any process; run it as a job with secret_output: true when they may.",
   "params": {
     "path": {
       "type": "string",
@@ -46,7 +46,7 @@
   "by": "maintainer",
   "at": "2026-10-07T12:00:00.000Z",
   "version": 2,
-  "sha256": "79019f5b05fae5be644150d1697ed13ac7c81b1f8a69bec2fa8bc0f99e37f300",
+  "sha256": "ef850ba5eef9cd44559642ec96eef1296888484853f3369a3c619b4ffc9c952e",
   "requires": [],
   "use": {
     "extensions": [

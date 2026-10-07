@@ -2,10 +2,11 @@
 """Run a Sigma ruleset over event logs, with whichever engine the host carries.
 
 Querying by event id answers a question you already knew to ask. A ruleset
-answers the ones you did not: several thousand community rules, each one a
-pattern somebody saw in a real intrusion, run over every record in the channel.
-On a case where the first pass found nothing, this is the cheapest way to find
-the thing you were not looking for.
+tests patterns you did not think of: each rule is a pattern somebody described,
+run over the records the engine reads. How many rules there are, how many the
+engine loaded and how many it skipped depend on the ruleset you name and on the
+engine, and the tool does not count them: the engine's own output says. A result
+shows what these rules, in this engine, found in these records.
 
 Two engines do the same job and neither is shipped here:
 
