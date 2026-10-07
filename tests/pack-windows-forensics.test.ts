@@ -33,6 +33,14 @@ import { test } from "node:test";
 import { ROOT, runPy, withCwd } from "./tool-library-harness.ts";
 import { hive } from "./windows-hive.ts";
 
+/**
+ * These tests run the tools against the real libraries they import. A host that does not have a library (CI installs only
+ * the apt packages, the images install the pip ones) skips them with the reason; everything else in this file uses stand-ins.
+ */
+const pythonCanImport = (module: string): boolean => spawnSync("python3", ["-c", "import " + module], { stdio: "ignore" }).status === 0;
+const REGIPY = pythonCanImport("regipy.registry") ? false : "regipy is not installed on this host";
+const DISSECT = pythonCanImport("dissect.util.compression.lzxpress_huffman") ? false : "dissect.util is not installed on this host";
+
 const WIN = process.env.WINDOWS_PACK_TOOLS ?? join(ROOT, "packs", "windows-forensics", "tools");
 const AGENT = { AGENT_ID: "s1" };
 
@@ -488,7 +496,7 @@ test("jumplist calls a customDestinations-ms split a carve, and marks each link 
 
 // --- registry hives -------------------------------------------------------------
 
-test("the hive fixture is a hive regipy opens, with the keys and typed values written into it", async () => {
+test("the hive fixture is a hive regipy opens, with the keys and typed values written into it", { skip: REGIPY }, async () => {
   await withCwd(async (cwd) => {
     const bytes = hive({
       name: "ROOT",
@@ -535,7 +543,7 @@ type AmcacheOut = {
 
 const SHA1 = "da39a3ee5e6b4b0d3255bfef95601890afd80709";
 
-test("amcache_apps names the numbered values as regipy's Amcache plugin does, and reads the linker time as a Unix-epoch value, not a FILETIME", async () => {
+test("amcache_apps names the numbered values as regipy's Amcache plugin does, and reads the linker time as a Unix-epoch value, not a FILETIME", { skip: REGIPY }, async () => {
   // `c` was labelled file_version (it is the file description; the version is `5`), and the linker
   // timestamp, a 32-bit Unix-epoch value from the PE header, was converted as a FILETIME: 1700000000
   // came out as 1601-01-01T00:02:50Z.
@@ -579,7 +587,7 @@ test("amcache_apps names the numbered values as regipy's Amcache plugin does, an
     assert.equal(row.layout, "File");
     assert.equal(row.file_version, "1.2.3.4", "value 5 is the file version");
     assert.equal(row.file_description, "The fixture application", "value c is the file description");
-    assert.equal(row.file_version === row.file_description, false);
+    assert.notEqual(row.file_version, row.file_description);
     assert.equal(row.linker_compile_time, 1700000000);
     assert.equal(row.linker_compile_time_utc, "2023-11-14T22:13:20Z", "a Unix-epoch value: 1700000000 is 2023, not 1601");
     assert.equal(row.last_modified_timestamp_filetime, "133443104001234567");
@@ -591,7 +599,7 @@ test("amcache_apps names the numbered values as regipy's Amcache plugin does, an
   });
 });
 
-test("amcache_apps reads both layouts when a hive has both, each row naming its own", async () => {
+test("amcache_apps reads both layouts when a hive has both, each row naming its own", { skip: REGIPY }, async () => {
   // The older layout was read only when the Windows 10 tree was absent, so a hive that carried both
   // listed one tree and said nothing of the other.
   await withCwd(async (cwd) => {
@@ -637,7 +645,7 @@ test("amcache_apps reads both layouts when a hive has both, each row naming its 
   });
 });
 
-test("amcache_apps returns a path past 256 characters whole: regipy's default cut is not taken", async () => {
+test("amcache_apps returns a path past 256 characters whole: regipy's default cut is not taken", { skip: REGIPY }, async () => {
   await withCwd(async (cwd) => {
     const long = "c:\\users\\someone\\" + "nested\\".repeat(60) + "tool.exe";
     await writeFile(join(cwd, "work", "Amcache.hve"), hive({ name: "{r}", children: [{ name: "Root", children: [
@@ -652,7 +660,7 @@ test("amcache_apps returns a path past 256 characters whole: regipy's default cu
   });
 });
 
-test("amcache_apps says a hive is dirty, names the transaction logs beside it, and does not claim to have replayed them", async () => {
+test("amcache_apps says a hive is dirty, names the transaction logs beside it, and does not claim to have replayed them", { skip: REGIPY }, async () => {
   await withCwd(async (cwd) => {
     const bytes = hive(
       { name: "{r}", children: [{ name: "Root", children: [{ name: "InventoryApplicationFile", children: [{ name: "a.exe|1", values: [{ name: "Name", type: "sz", value: "a.exe" }] }] }] }] },
@@ -667,7 +675,7 @@ test("amcache_apps says a hive is dirty, names the transaction logs beside it, a
   });
 });
 
-test("amcache_apps fails with the layouts it looked for when the hive holds neither", async () => {
+test("amcache_apps fails with the layouts it looked for when the hive holds neither", { skip: REGIPY }, async () => {
   await withCwd(async (cwd) => {
     await writeFile(join(cwd, "work", "Other.hve"), hive({ name: "r", children: [{ name: "Root", children: [{ name: "Elsewhere" }] }] }));
     const err = failed(await tool("amcache_apps", cwd, { hive: "work/Other.hve" }));
@@ -1793,7 +1801,7 @@ test("prefetch_mam returns unsupported for a version it does not read, and inter
   });
 });
 
-test("prefetch_mam inflates a MAM-compressed file to the same reading as the plain one, and says what the container held", async () => {
+test("prefetch_mam inflates a MAM-compressed file to the same reading as the plain one, and says what the container held", { skip: DISSECT }, async () => {
   await withCwd(async (cwd) => {
     const plain = sample(30);
     await writeFile(join(cwd, "work", "c.pf"), mamOf(plain));
@@ -1826,7 +1834,7 @@ test("prefetch_mam refuses a MAM method it does not read, by name, and inflates 
   });
 });
 
-test("prefetch_mam stops a stream that inflates past its declared size at the cap, and does not hold the whole output", async () => {
+test("prefetch_mam stops a stream that inflates past its declared size at the cap, and does not hold the whole output", { skip: DISSECT }, async () => {
   // The whole payload was decompressed before its size was looked at: a stream declared as 1 MiB could grow
   // to any size, since the decoder runs until its input ends. This one is declared 1 MiB and would inflate to
   // about 100 MiB: seven thousand matches of 17 bytes, repeated.
@@ -1843,7 +1851,7 @@ test("prefetch_mam stops a stream that inflates past its declared size at the ca
   });
 });
 
-test("prefetch_mam fails on a stream shorter than its declared size, and on a declared size past the cap", async () => {
+test("prefetch_mam fails on a stream shorter than its declared size, and on a declared size past the cap", { skip: DISSECT }, async () => {
   await withCwd(async (cwd) => {
     await writeFile(join(cwd, "work", "short.pf"), mam(5000, xpressHuffman([...Buffer.alloc(100, 0x41)])));
     assert.match(failed(await tool("prefetch_mam", cwd, { path: "work/short.pf" })).error, /ended before its declared uncompressed size/);
@@ -1868,7 +1876,7 @@ type ScanOut = {
   unsupported_variant_signatures: number;
 };
 
-test("mam_scan finds a record that straddles a scan window once, with the right offset, and reads it by its layout", async () => {
+test("mam_scan finds a record that straddles a scan window once, with the right offset, and reads it by its layout", { skip: DISSECT }, async () => {
   await withCwd(async (cwd) => {
     const record = mamOf(sample(30));
     const junk = Buffer.alloc(4090, 0x2e);
@@ -1887,7 +1895,7 @@ test("mam_scan finds a record that straddles a scan window once, with the right 
   });
 });
 
-test("mam_scan counts an unsupported version as parsed and unsupported, and every failure before the name filter drops anything", async () => {
+test("mam_scan counts an unsupported version as parsed and unsupported, and every failure before the name filter drops anything", { skip: DISSECT }, async () => {
   // A candidate that failed to decompress had no name, so a name filter dropped it without a trace; the
   // fixed 0x80 and 0xD0 offsets were applied to every version.
   await withCwd(async (cwd) => {
@@ -1921,7 +1929,7 @@ test("mam_scan counts an unsupported version as parsed and unsupported, and ever
   });
 });
 
-test("mam_scan stops a candidate whose payload inflates past its declared size at that size", async () => {
+test("mam_scan stops a candidate whose payload inflates past its declared size at that size", { skip: DISSECT }, async () => {
   await withCwd(async (cwd) => {
     const ops: Array<number | { match: number }> = [0x41];
     for (let i = 0; i < 2_000_000; i++) ops.push({ match: 17 });
@@ -2173,7 +2181,7 @@ type RegkvOut = {
   hive_type: string | null;
 };
 
-test("regkv returns a value whole with its type and length: a binary value past 128 bytes, a string past 256 characters, a multi-string and a qword", async () => {
+test("regkv returns a value whole with its type and length: a binary value past 128 bytes, a string past 256 characters, a multi-string and a qword", { skip: REGIPY }, async () => {
   // regipy trims a value to 256 characters by default, so a binary value came back cut at 128 bytes and a long
   // string at 256 characters, without a word; types were dropped.
   await withCwd(async (cwd) => {
@@ -2210,7 +2218,7 @@ test("regkv returns a value whole with its type and length: a binary value past 
   });
 });
 
-test("regkv says a hive is dirty and names the logs beside it, and does not claim to have replayed them", async () => {
+test("regkv says a hive is dirty and names the logs beside it, and does not claim to have replayed them", { skip: REGIPY }, async () => {
   await withCwd(async (cwd) => {
     await writeFile(join(cwd, "work", "SYSTEM"), hive({ name: "ROOT", children: [{ name: "Select", values: [{ name: "Current", type: "dword", value: 1 }] }] }, { primarySeq: 12, secondarySeq: 11 }));
     await writeFile(join(cwd, "work", "SYSTEM.LOG1"), Buffer.alloc(512));
@@ -2223,7 +2231,7 @@ test("regkv says a hive is dirty and names the logs beside it, and does not clai
   });
 });
 
-test("regkv lists every node of a recursive walk, names the branches it did not enter and why, and keeps the whole listing in a file past the inline page", async () => {
+test("regkv lists every node of a recursive walk, names the branches it did not enter and why, and keeps the whole listing in a file past the inline page", { skip: REGIPY }, async () => {
   // `walk()` returned [] for any key it could not open, and nothing said a branch had been left out.
   await withCwd(async (cwd) => {
     const wide = Array.from({ length: 30 }, (_, i) => ({ name: `Leaf${String(i).padStart(2, "0")}`, children: [{ name: "Deep", children: [{ name: "Deeper" }] }] }));
@@ -2242,7 +2250,7 @@ test("regkv lists every node of a recursive walk, names the branches it did not 
   });
 });
 
-test("regkv withholds the values that can be secrets, by name and by place, and says what it withheld", async () => {
+test("regkv withholds the values that can be secrets, by name and by place, and says what it withheld", { skip: REGIPY }, async () => {
   await withCwd(async (cwd) => {
     const pw = "Summer2024!hunter2";
     await writeFile(join(cwd, "work", "SOFTWARE"), hive({
@@ -2271,7 +2279,7 @@ test("regkv withholds the values that can be secrets, by name and by place, and 
   });
 });
 
-test("regkv withholds the V value of a SAM user and the secrets of a SECURITY hive, whatever their names", async () => {
+test("regkv withholds the V value of a SAM user and the secrets of a SECURITY hive, whatever their names", { skip: REGIPY }, async () => {
   await withCwd(async (cwd) => {
     const verifier = Buffer.from("planted-verifier-material-0123456789abcdef");
     await writeFile(join(cwd, "work", "SAM"), hive({
@@ -2304,7 +2312,7 @@ test("regkv withholds the V value of a SAM user and the secrets of a SECURITY hi
   });
 });
 
-test("regkv reports a file that is not a hive as an error with a non-zero exit, not a traceback", async () => {
+test("regkv reports a file that is not a hive as an error with a non-zero exit, not a traceback", { skip: REGIPY }, async () => {
   await withCwd(async (cwd) => {
     await writeFile(join(cwd, "work", "junk"), Buffer.alloc(8192, 0x41));
     const err = failed(await tool("regkv", cwd, { hive: "work/junk", key: "x" }));
@@ -2809,7 +2817,7 @@ function nest(path: string[], leaf: Parameters<typeof hive>[0]): Parameters<type
   return path.reduceRight((child, name) => ({ name, children: [child] }), leaf);
 }
 
-test("shellbags names a long name from its layout only for the extension versions it applies (3 and 7), and offers a string candidate, labelled, for the rest", async () => {
+test("shellbags names a long name from its layout only for the extension versions it applies (3 and 7), and offers a string candidate, labelled, for the rest", { skip: REGIPY }, async () => {
   // One name offset (0x26) was applied to every version from 7, so a version 9 block yielded whatever printable text
   // sat there and the answer called it a decoded layout.
   await withCwd(async (cwd) => {
@@ -2847,7 +2855,7 @@ test("shellbags names a long name from its layout only for the extension version
   });
 });
 
-test("shellbags walks every BagMRU root the hive has, names them, and lists a numbered value that has no key under it", async () => {
+test("shellbags walks every BagMRU root the hive has, names them, and lists a numbered value that has no key under it", { skip: REGIPY }, async () => {
   // It stopped at the first root that opened, so a hive with the Shell and the ShellNoRoam trees both populated
   // answered for one; a value with no child key was never looked at.
   await withCwd(async (cwd) => {
@@ -2887,7 +2895,7 @@ test("shellbags walks every BagMRU root the hive has, names them, and lists a nu
   });
 });
 
-test("shellbags reads a shell item longer than 128 bytes whole, and refuses a max_depth that would exhaust the stack", async () => {
+test("shellbags reads a shell item longer than 128 bytes whole, and refuses a max_depth that would exhaust the stack", { skip: REGIPY }, async () => {
   // regipy's default read cut a binary value to 128 bytes, so a long item was decoded from its first 128.
   await withCwd(async (cwd) => {
     const long = "a-very-long-folder-name-".repeat(14) + "end";
