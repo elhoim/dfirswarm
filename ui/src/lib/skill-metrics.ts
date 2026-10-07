@@ -25,7 +25,7 @@ export type SkillLoadUse = {
   sha256: string | null;
   /** Named, or one of its tools called, by a later row of the same seat. */
   referenced: boolean;
-  /** A compaction of the seat came after the load: the body was summarised out of its context. */
+  /** A compaction of the seat took the body out of its context (the kept tail is not counted as lost). */
   lost_at_compaction: boolean;
   /** The seat loaded it again after that compaction. */
   refetched: boolean;
@@ -35,8 +35,16 @@ export type SkillLoadUse = {
 
 export type SeatSkills = {
   agent: string;
-  /** The seat's prompt carried the Skills section (a `skills_index` row said so). */
+  /**
+   * The seat's prompt carried this run's index whole, in Pi's own prompt (the
+   * kickoff's file), which every run of the seat keeps: a `skills_index` row
+   * says `source: prompt` and that it matches the packs. An index the
+   * extension had to add (`extension`) lasts for the first run only, a stale
+   * one is a different index, and neither counts.
+   */
   index_in_prompt: boolean;
+  /** Where the index came from, as the row says: prompt, extension, stale or none. */
+  index_source: string | null;
   index_tokens: number | null;
   /** `skill()` with no id. */
   index_reads: number;
@@ -55,6 +63,15 @@ export type SeatSkills = {
   lost_at_compaction: number;
   refetched: number;
   compactions: number;
+  /**
+   * What `lost_at_compaction` rests on: `skills_compacted` rows (the harness
+   * says which bodies each compaction took out and which it kept), the
+   * seat's `compact_done` rows (an approximation: every compaction counts as
+   * taking every body loaded before it), or nothing.
+   */
+  lost_basis: "skills_compacted" | "compact_done" | "none";
+  /** Loads whose row carries no `tools` (a trace from before the harness wrote them): only a mention of the id can show their use. */
+  loads_without_tools: number;
   detail: SkillLoadUse[];
 };
 
@@ -84,6 +101,7 @@ export type RunSkills = {
     unused: number;
     lost_at_compaction: number;
     refetched: number;
+    loads_without_tools: number;
     already_loaded: number;
     failed: number;
     index_reads: number;
@@ -113,14 +131,15 @@ function escapeRegExp(s: string): string {
 }
 
 /** Rows that only describe the skill machinery or the gauge: a mention there is not use. */
-const NOT_USE = new Set(["skill", "skill_done", "skills_index", "context"]);
+const NOT_USE = new Set(["skill", "skill_done", "skills_index", "skills_compacted", "context"]);
 
-type Load = SkillLoadUse & { at: number; tools: string[]; reload: boolean };
+type Load = SkillLoadUse & { at: number; tools: string[]; toolsKnown: boolean; turn: number | null; reload: boolean };
 
 export function emptySeat(agent: string): SeatSkills {
   return {
     agent,
     index_in_prompt: false,
+    index_source: null,
     index_tokens: null,
     index_reads: 0,
     loads: 0,
@@ -134,6 +153,8 @@ export function emptySeat(agent: string): SeatSkills {
     lost_at_compaction: 0,
     refetched: 0,
     compactions: 0,
+    lost_basis: "none",
+    loads_without_tools: 0,
     detail: [],
   };
 }
@@ -163,12 +184,16 @@ export function skillUse(rows: readonly SkillTraceRow[], seatIds?: readonly stri
     const mine = perAgent.get(agent) ?? [];
     const loads: Load[] = [];
     const compactionAts: number[] = [];
+    // The harness's own account of each compaction: which bodies it took out (`pack:id|turn`).
+    const compacted: { at: number; lost: Set<string> }[] = [];
 
     for (const { at, row } of mine) {
       const a = obj(row.args);
       const r = obj(row.result);
       if (row.tool === "skills_index") {
-        seat.index_in_prompt = r.ok !== false;
+        seat.index_source = str(r.source);
+        // A row without a source predates the field and says only whether the section was built.
+        seat.index_in_prompt = r.ok !== false && (r.source === undefined || (r.source === "prompt" && r.matches_packs !== false));
         seat.index_tokens = num(r.section_tokens) ?? num(r.shown_tokens);
       } else if (row.tool === "skill") {
         const id = str(a.id);
@@ -192,6 +217,8 @@ export function skillUse(rows: readonly SkillTraceRow[], seatIds?: readonly stri
             done: false,
             at,
             tools: strings(r.tools),
+            toolsKnown: Array.isArray(r.tools),
+            turn: num(r.turn),
             reload: r.reload_after_compaction === true,
           });
         }
@@ -204,16 +231,21 @@ export function skillUse(rows: readonly SkillTraceRow[], seatIds?: readonly stri
         }
       } else if (row.tool === "compact_done") {
         compactionAts.push(at);
+      } else if (row.tool === "skills_compacted") {
+        const lost = Array.isArray(r.lost) ? (r.lost as unknown[]).map((x) => obj(x)).filter((x) => typeof x.key === "string") : [];
+        compacted.push({ at, lost: new Set(lost.map((x) => `${String(x.key)}|${String(num(x.turn) ?? "")}`)) });
       }
     }
 
     // Compactions: what each one took out, and whether the seat loaded it again.
     const keyOf = (l: Load) => `${l.pack ?? ""}:${l.id}`;
+    const tookOut = (l: Load) => compacted.find((c) => c.at > l.at && c.lost.has(`${keyOf(l)}|${l.turn ?? ""}`));
+    const exact = compacted.length > 0;
     for (const l of loads) {
-      const next = compactionAts.find((c) => c > l.at);
-      if (next === undefined) continue;
+      const when = exact ? tookOut(l)?.at : compactionAts.find((c) => c > l.at);
+      if (when === undefined) continue;
       l.lost_at_compaction = true;
-      l.refetched = loads.some((o) => keyOf(o) === keyOf(l) && o.at > next);
+      l.refetched = loads.some((o) => keyOf(o) === keyOf(l) && o.at > when);
     }
 
     // The proxy: later rows of this seat that name the skill or call one of its tools.
@@ -253,9 +285,11 @@ export function skillUse(rows: readonly SkillTraceRow[], seatIds?: readonly stri
     seat.lost_at_compaction = loads.filter((l) => l.lost_at_compaction).length;
     // A load that came after a compaction took the same note out: the harness says so on the row
     // (`reload_after_compaction`), and the order of the rows says it for a trace that predates the flag.
-    seat.refetched = loads.filter((l, i) => l.reload || loads.slice(0, i).some((o) => keyOf(o) === keyOf(l) && compactionAts.some((c) => c > o.at && c < l.at))).length;
+    seat.refetched = loads.filter((l, i) => l.reload || loads.slice(0, i).some((o) => keyOf(o) === keyOf(l) && (exact ? compacted.some((c) => c.at > o.at && c.at < l.at && c.lost.has(`${keyOf(o)}|${o.turn ?? ""}`)) : compactionAts.some((c) => c > o.at && c < l.at)))).length;
     seat.compactions = compactionAts.length;
-    seat.detail = loads.map(({ at: _at, tools: _tools, reload: _reload, ...rest }) => rest);
+    seat.lost_basis = exact ? "skills_compacted" : compactionAts.length ? "compact_done" : "none";
+    seat.loads_without_tools = loads.filter((l) => !l.toolsKnown).length;
+    seat.detail = loads.map(({ at: _at, tools: _tools, toolsKnown: _known, turn: _turn, reload: _reload, ...rest }) => rest);
     seats.push(seat);
 
     for (const l of loads) {
@@ -288,6 +322,7 @@ export function skillUse(rows: readonly SkillTraceRow[], seatIds?: readonly stri
       unused: sum((s) => s.unused),
       lost_at_compaction: sum((s) => s.lost_at_compaction),
       refetched: sum((s) => s.refetched),
+      loads_without_tools: sum((s) => s.loads_without_tools),
       already_loaded: sum((s) => s.already_loaded),
       failed: sum((s) => s.failed),
       index_reads: sum((s) => s.index_reads),

@@ -51,8 +51,10 @@ const RUNAWAY_CHUNK = "- the same line again, as a looping summarizer writes it\
 const TRACE = process.env.SC_FAKE_TRACE;
 const PROMPTS = env("SC_FAKE_PROMPTS", "") === "1";
 type ScriptedCall = { name: string; arguments: Record<string, unknown> };
-const PRE_STEPS: ScriptedCall[] = JSON.parse(env("SC_FAKE_PRE_STEPS", "[]"));
-const AFTER_STEPS: ScriptedCall[] = JSON.parse(env("SC_FAKE_AFTER_STEPS", "[]"));
+/** A step is one tool call, or an array of them: one assistant message with several calls, which Pi runs at the same time. */
+type ScriptedStep = ScriptedCall | ScriptedCall[];
+const PRE_STEPS: ScriptedStep[] = JSON.parse(env("SC_FAKE_PRE_STEPS", "[]"));
+const AFTER_STEPS: ScriptedStep[] = JSON.parse(env("SC_FAKE_AFTER_STEPS", "[]"));
 const NOTE = env(
   "SC_FAKE_NOTE",
   [
@@ -75,6 +77,7 @@ let afterIndex = 0;
 type Plan = {
   text?: string;
   toolCall?: { name: string; arguments: Record<string, unknown> };
+  toolCalls?: Array<{ name: string; arguments: Record<string, unknown> }>;
   usageTotal: number;
   stopReason: "stop" | "toolUse";
 };
@@ -113,8 +116,9 @@ function fillerStep(usageTotal: number): Plan {
   };
 }
 
-function scripted(list: ScriptedCall[], index: number, usageTotal: number): Plan {
-  return { toolCall: list[index]!, usageTotal, stopReason: "toolUse" };
+function scripted(list: ScriptedStep[], index: number, usageTotal: number): Plan {
+  const step = list[index]!;
+  return Array.isArray(step) ? { toolCalls: step, usageTotal, stopReason: "toolUse" } : { toolCall: step, usageTotal, stopReason: "toolUse" };
 }
 
 function handoffPlan(usageTotal: number): Plan {
@@ -363,13 +367,14 @@ function streamScripted(model: { api: string; provider: string; id: string }, ra
           stream.push({ type: "text_end", contentIndex: index, content: plan.text, partial: output });
           index += 1;
         }
-        if (plan.toolCall) {
+        for (const call of plan.toolCalls ?? (plan.toolCall ? [plan.toolCall] : [])) {
           const id = `call_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
-          const toolCall = { type: "toolCall", id, name: plan.toolCall.name, arguments: plan.toolCall.arguments };
+          const toolCall = { type: "toolCall", id, name: call.name, arguments: call.arguments };
           output.content.push(toolCall);
           stream.push({ type: "toolcall_start", contentIndex: index, partial: output });
-          stream.push({ type: "toolcall_delta", contentIndex: index, delta: JSON.stringify(plan.toolCall.arguments), partial: output });
+          stream.push({ type: "toolcall_delta", contentIndex: index, delta: JSON.stringify(call.arguments), partial: output });
           stream.push({ type: "toolcall_end", contentIndex: index, toolCall, partial: output });
+          index += 1;
         }
         output.usage = usage(plan.usageTotal);
         output.stopReason = plan.stopReason;

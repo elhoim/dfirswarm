@@ -23,7 +23,7 @@
  */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { copyFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -62,8 +62,8 @@ async function makeSandbox(name: string): Promise<Dir> {
   return { root, sessionDir, logFile: join(root, "rpc.log"), traceFile: join(root, "fake-trace.jsonl") };
 }
 
-function args(d: Dir, { noSkills = true } = {}): string[] {
-  return ["--no-extensions", ...(noSkills ? ["--no-skills"] : []), "--no-prompt-templates", "--no-context-files", "-a", "-e", EXTENSION, "-e", FAKE, "--model", "fake/scripted", "--session-dir", d.sessionDir, "--tools", TOOLS];
+function args(d: Dir, { noSkills = true, extra = [] as string[] } = {}): string[] {
+  return ["--no-extensions", ...(noSkills ? ["--no-skills"] : []), "--no-prompt-templates", "--no-context-files", "-a", "-e", EXTENSION, "-e", FAKE, "--model", "fake/scripted", "--session-dir", d.sessionDir, "--tools", TOOLS, ...extra];
 }
 
 const ENV = {
@@ -180,7 +180,7 @@ test("the kickoff's index is in the first prompt and in every prompt after a com
     assert.match(results[3]!, /^Skill `evidence\/one` \(pack pack-a 1\.2\.0/, "after the compaction the same call delivers the body again");
 
     // 3. The hand-off message names what the compaction took out.
-    assert.match(messageText(handoff.message), /Skill bodies you had loaded, now out of your context: pack-a:evidence\/one, pack-b:shared\/dup\. Load again \(skill\(id\)\) the ones you still need\./);
+    assert.match(messageText(handoff.message), /Skill bodies a compaction took out of your context: pack-a:evidence\/one, pack-b:shared\/dup\. Load again \(skill\(id\)\) the ones you still need\./);
 
     // 4. The record: one index row that says where the section came from, the loads with their hashes, the re-load flagged.
     const index = rows.filter((r) => r.tool === "skills_index");
@@ -190,6 +190,91 @@ test("the kickoff's index is in the first prompt and in every prompt after a com
     assert.deepEqual(skillRows.map((r) => [r.result.ok, r.result.already_loaded ?? false, r.result.reload_after_compaction ?? false]), [[true, false, false], [true, true, false], [true, false, false], [true, false, true]]);
     assert.ok(skillRows.filter((r) => !r.result.already_loaded).every((r) => /^[0-9a-f]{64}$/.test(String(r.result.sha256)) && Number(r.result.tokens) > 0));
     assert.deepEqual(skillRows.map((r) => r.result.pack), ["pack-a", "pack-a", "pack-b", "pack-a"]);
+    // The compaction says which bodies it took out and which it kept (here the kept tail is too short to hold either).
+    const compacted = rows.filter((r) => r.tool === "skills_compacted");
+    assert.equal(compacted.length, 1);
+    assert.deepEqual(compacted[0]!.result.kept, []);
+    assert.deepEqual((compacted[0]!.result.lost as Array<{ key: string }>).map((x) => x.key), ["pack-a:evidence/one", "pack-b:shared/dup"]);
+  } finally {
+    await cleanup(d);
+    await rm(packsRoot, { recursive: true, force: true });
+  }
+});
+
+/** Waits until the seat has made `n` `skill` results (or fails after `ms`). */
+async function skillResultsAfter(client: RpcClient, n: number, ms = 60_000): Promise<string[]> {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    const got = skillResults(client.events);
+    if (got.length >= n) return got;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  return skillResults(client.events);
+}
+
+test("two skill calls in one assistant message: Pi runs them at the same time, and the second is told the body is already loaded", async (t) => {
+  if (!haveCli()) {
+    t.skip("pi is not on PATH");
+    return;
+  }
+  const d = await makeSandbox("parallel");
+  const packsRoot = await mkdtemp(join(tmpdir(), "skills-e2e-packs-"));
+  const { a, b } = await twoPacks(packsRoot);
+  const batch = [[{ name: "skill", arguments: { id: "evidence/one" } }, { name: "skill", arguments: { id: "evidence/one" } }, { name: "skill", arguments: { id: "evidence/two" } }]];
+  const client = new RpcClient({ args: args(d), cwd: d.root, env: { ...ENV, SWARM_PACK_DIRS: `${a}:${b}`, SC_FAKE_TRACE: d.traceFile, SC_FAKE_PRE_STEPS: JSON.stringify(batch) }, logFile: d.logFile });
+  try {
+    kickoffFiles(d, [a, b]);
+    await client.request({ type: "prompt", message: "Start the scripted work." });
+    const results = await skillResultsAfter(client, 3);
+    assert.equal(results.length, 3, results.join("\n---\n"));
+    assert.match(results[0]!, /^Skill `evidence\/one`/);
+    assert.match(results[1]!, /^`evidence\/one` \(pack-a\) is already in your context, loaded at turn 1; not sent again\.$/, "the second call of the same message found the first's body");
+    assert.match(results[2]!, /^Skill `evidence\/two`/);
+    const rows = trace(d).filter((r) => r.tool === "skill");
+    assert.deepEqual(rows.map((r) => [r.args.id, r.result.already_loaded ?? false]), [["evidence/one", false], ["evidence/one", true], ["evidence/two", false]]);
+  } finally {
+    await client.close();
+    await cleanup(d);
+    await rm(packsRoot, { recursive: true, force: true });
+  }
+});
+
+test("a restart on the same session knows the body the session holds, and counts its turns on", async (t) => {
+  if (!haveCli()) {
+    t.skip("pi is not on PATH");
+    return;
+  }
+  const d = await makeSandbox("restart");
+  const packsRoot = await mkdtemp(join(tmpdir(), "skills-e2e-packs-"));
+  const { a, b } = await twoPacks(packsRoot);
+  const steps = [{ name: "skill", arguments: { id: "evidence/one" } }];
+  const env = { ...ENV, SWARM_PACK_DIRS: `${a}:${b}`, SC_FAKE_TRACE: d.traceFile, SC_FAKE_PRE_STEPS: JSON.stringify(steps) };
+  kickoffFiles(d, [a, b]);
+  try {
+    const first = new RpcClient({ args: args(d), cwd: d.root, env, logFile: d.logFile });
+    try {
+      await first.request({ type: "prompt", message: "Start the scripted work." });
+      const got = await skillResultsAfter(first, 1);
+      assert.match(got[0]!, /^Skill `evidence\/one`/);
+      // The next request is made: the call, its result and the assistant message after it are in the session file.
+      await first.waitFor((e) => e.type === "turn_end" && eventsOfType(first.events, "turn_end").length >= 1, 30_000);
+    } finally {
+      await first.close();
+    }
+    // The turns the session already had: its assistant messages, as the file holds them when the first process is gone.
+    const sessionFile = readdirSync(d.sessionDir).filter((f) => f.endsWith(".jsonl")).map((f) => join(d.sessionDir, f))[0]!;
+    const had = readFileSync(sessionFile, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as { type?: string; message?: { role?: string } }).filter((e) => e.type === "message" && e.message?.role === "assistant").length;
+    assert.ok(had >= 1, "the first process left at least one assistant message in the session");
+    const second = new RpcClient({ args: args(d, { extra: ["--continue"] }), cwd: d.root, env, logFile: d.logFile });
+    try {
+      await second.request({ type: "prompt", message: "Go on." });
+      const got = await skillResultsAfter(second, 1);
+      assert.match(got[0]!, /^`evidence\/one` \(pack-a\) is already in your context, loaded at turn 1; not sent again\.$/, "the restarted process read the body off the session it resumed");
+      const rows = trace(d).filter((r) => r.tool === "skill");
+      assert.deepEqual(rows.map((r) => [r.result.already_loaded ?? false, r.result.turn]), [[false, 1], [true, had + 1]], "and counted its turn after the ones the session already had");
+    } finally {
+      await second.close();
+    }
   } finally {
     await cleanup(d);
     await rm(packsRoot, { recursive: true, force: true });

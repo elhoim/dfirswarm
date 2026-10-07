@@ -223,12 +223,16 @@ type Tool = { definition: { execute: (...args: unknown[]) => Promise<{ content: 
 type Handler = (event: unknown, ctx: unknown) => Promise<unknown>;
 type Loaded = { tools: Map<string, Tool>; handlers: Map<string, Handler[]> };
 
+/** What the session says: the entries in the model's context (a compaction's kept tail included) and the whole branch. */
+type FakeSession = { context: unknown[]; branch: unknown[] };
+
 type Seat = {
   root: string;
-  ctx: { cwd: string; hasUI: false; ui: Record<string, never>; sessionManager: { getEntries: () => unknown[] } };
+  ctx: { cwd: string; hasUI: false; ui: Record<string, never>; sessionManager: { getEntries: () => unknown[]; buildContextEntries: () => unknown[]; getBranch: () => unknown[] } };
   loaded: Loaded;
-  skill: (id?: string) => Promise<{ text: string; details: Record<string, unknown> }>;
-  done: (id: string, note?: string) => Promise<{ text: string; details: Record<string, unknown> }>;
+  session: FakeSession;
+  skill: (id?: string, callId?: string) => Promise<{ text: string; details: Record<string, unknown> }>;
+  done: (id: string, note?: string, callId?: string) => Promise<{ text: string; details: Record<string, unknown> }>;
   trace: () => Promise<Array<{ tool: string; agent: string; args: Record<string, unknown>; result: Record<string, unknown> }>>;
   fire: (event: string, payload?: Record<string, unknown>) => Promise<unknown[]>;
   prompt: (base?: string) => Promise<string>;
@@ -252,11 +256,12 @@ async function withSeat(t: { skip: (m: string) => void }, packDirs: string[], ru
     const result = await loadExtensions([join(REPO, "extensions", "agent-swarm.ts")], root);
     assert.deepEqual(result.errors, []);
     const loaded = result.extensions[0]!;
-    const ctx = { cwd: root, hasUI: false as const, ui: {}, sessionManager: { getEntries: () => [] as unknown[] } };
-    const call = async (name: string, params: Record<string, unknown>) => {
+    const session: FakeSession = { context: [], branch: [] };
+    const ctx = { cwd: root, hasUI: false as const, ui: {}, sessionManager: { getEntries: () => session.branch, buildContextEntries: () => session.context, getBranch: () => session.branch } };
+    const call = async (name: string, params: Record<string, unknown>, callId?: string) => {
       const tool = loaded.tools.get(name);
       assert.ok(tool, `${name} is registered`);
-      const out = await tool.definition.execute(`call-${Math.random().toString(36).slice(2)}`, params, undefined, undefined, ctx);
+      const out = await tool.definition.execute(callId ?? `call-${Math.random().toString(36).slice(2)}`, params, undefined, undefined, ctx);
       return { text: out.content.map((c) => c.text).join(""), details: out.details };
     };
     const fire = async (event: string, payload: Record<string, unknown> = {}) => {
@@ -268,8 +273,9 @@ async function withSeat(t: { skip: (m: string) => void }, packDirs: string[], ru
       root,
       ctx,
       loaded,
-      skill: (id) => call("skill", id === undefined ? {} : { id }),
-      done: (id, note) => call("skill_done", note === undefined ? { id } : { id, note }),
+      session,
+      skill: (id, callId) => call("skill", id === undefined ? {} : { id }, callId),
+      done: (id, note, callId) => call("skill_done", note === undefined ? { id } : { id, note }, callId),
       trace: async () => (await readFile(join(root, EVENTS_REL), "utf8").catch(() => "")).trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)),
       fire,
       prompt: async (base = "BASE PROMPT") => {
@@ -441,6 +447,15 @@ test("a wrong id is told the shapes that exist, not the whole list; the index ca
       const bad = await seat.skill("Evidence/One");
       assert.match(bad.text, /lower case and slash separated/);
       assert.equal((await lastRow(seat, "skill")).result.error, "bad id");
+      // Before any prompt is built nothing says the index is in one: the call answers with the index.
+      const early = await seat.skill();
+      assert.ok(early.text.includes("- `evidence/one`") && early.text.includes("pack-b 0.4.1"), "the whole index");
+      assert.equal((await lastRow(seat, "skill")).result.in_prompt, false);
+    });
+    await withSeat(t, [a, b], async (seat) => {
+      // With the kickoff's section in Pi's own prompt the call points there and sends nothing.
+      const section = renderSkillsSection(await Promise.all([a, b].map((d) => readPackIndex(d)))).text;
+      await seat.prompt(`PREAMBLE\n\n<addendum>\n${section}\n</addendum>`);
       const index = await seat.skill();
       assert.match(index.text, new RegExp(`whole index of this run's packs is in your instructions, under "${SKILLS_SECTION_TITLE}"`));
       const irow = await lastRow(seat, "skill");
@@ -550,11 +565,23 @@ test("a prompt that already carries the section (the kickoff's APPEND_SYSTEM.md)
       assert.deepEqual([row.result.ok, row.result.source, row.result.matches_packs], [true, "prompt", true]);
     });
     await withSeat(t, [a, b], async (seat) => {
-      // A section written for other packs: present, and said not to match.
+      // A heading with no index under it (a one-line heading in a custom prompt, no kickoff file): the title is not the index.
       const out = await seat.prompt(`PREAMBLE\n\n${SKILLS_SECTION_TITLE}\n\nsomething else entirely`);
-      assert.equal(out.split(SKILLS_SECTION_TITLE).length - 1, 1);
+      assert.ok(out.includes("- `evidence/one` The first note") && out.includes("- `other/x`"), "the run's index is added, whole");
+      assert.ok(out.includes("does not list this run's packs"), "and the old heading is said to be wrong");
       const row = (await seat.trace()).find((r) => r.tool === "skills_index")!;
-      assert.deepEqual([row.result.source, row.result.matches_packs], ["prompt", false]);
+      assert.deepEqual([row.result.ok, row.result.source, row.result.matches_packs], [false, "stale", false]);
+      const board = await readdir(join(seat.root, "threads", "main")).catch(() => [] as string[]);
+      const posts = await Promise.all(board.map((f) => readFile(join(seat.root, "threads", "main", f), "utf8")));
+      assert.ok(posts.some((p) => /HARNESS FAULT: agent00's prompt carries a Skills section that is not the index of this run's packs/.test(p)), posts.join("\n---\n"));
+    });
+    await withSeat(t, [a, b], async (seat) => {
+      // A file written for pack-a alone, the run carries both: the index of one pack passes for the index of two.
+      const one = renderSkillsSection([await readPackIndex(a)]).text;
+      const out = await seat.prompt(`PREAMBLE\n\n<addendum>\n${one}\n</addendum>`);
+      assert.ok(out.includes("pack-b 0.4.1 (2 skills)") && out.includes("- `other/x`"), "pack-b's entries are added");
+      const row = (await seat.trace()).find((r) => r.tool === "skills_index")!;
+      assert.deepEqual([row.result.ok, row.result.source], [false, "stale"]);
     });
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -665,8 +692,8 @@ test("the hand-off header lists the skill bodies the seat held before its contex
   const facts = { claims: [], unread: {}, ledgerTotal: 0, ledgerMine: 0, sentinel: false, spentUsd: 0 };
   const without = handoffHeader("agent00", 1, facts, true, "threshold");
   assert.ok(!without.includes("Skill bodies"));
-  const withSkills = handoffHeader("agent00", 1, { ...facts, skills: "Skill bodies you had loaded, now out of your context: pack-a:evidence/one, pack-b:shared/dup. Load again (skill(id)) the ones you still need." }, true, "threshold");
-  assert.match(withSkills, /Skill bodies you had loaded, now out of your context: pack-a:evidence\/one, pack-b:shared\/dup\./);
+  const withSkills = handoffHeader("agent00", 1, { ...facts, skills: "Skill bodies a compaction took out of your context: pack-a:evidence/one, pack-b:shared/dup. Load again (skill(id)) the ones you still need." }, true, "threshold");
+  assert.match(withSkills, /Skill bodies a compaction took out of your context: pack-a:evidence\/one, pack-b:shared\/dup\./);
 });
 
 test("the seat's hand-off line names what a compaction took, until the seat loads it again", async (t) => {
@@ -674,10 +701,10 @@ test("the seat's hand-off line names what a compaction took, until the seat load
   try {
     const { a, b } = await twoPacks(root);
     const { registerSkills } = await import("../extensions/skills.ts");
-    const handlers = new Map<string, Array<() => Promise<void>>>();
+    const handlers = new Map<string, Array<(event: unknown, ctx: unknown) => Promise<void>>>();
     const tools = new Map<string, { execute: (...a: unknown[]) => Promise<{ content: Array<{ text: string }> }> }>();
     const fake = {
-      on: (event: string, h: () => Promise<void>) => handlers.set(event, [...(handlers.get(event) ?? []), h]),
+      on: (event: string, h: (event: unknown, ctx: unknown) => Promise<void>) => handlers.set(event, [...(handlers.get(event) ?? []), h]),
       registerTool: (def: { name: string; execute: (...a: unknown[]) => Promise<{ content: Array<{ text: string }> }> }) => tools.set(def.name, def),
     };
     const sandbox = await mkdtemp(join(tmpdir(), "skills-fake-"));
@@ -687,8 +714,10 @@ test("the seat's hand-off line names what a compaction took, until the seat load
     assert.equal(handle.handoffLine(), "", "nothing loaded, nothing to list");
     await tools.get("skill")!.execute("c1", { id: "evidence/one" }, undefined, undefined, { cwd: sandbox });
     await tools.get("skill")!.execute("c2", { id: "pack-b:shared/dup" }, undefined, undefined, { cwd: sandbox });
-    for (const h of handlers.get("session_compact") ?? []) await h();
-    assert.match(handle.handoffLine(), /now out of your context: pack-a:evidence\/one, pack-b:shared\/dup\. Load again/);
+    // The session says nothing of either body is left in the context.
+    const emptyContext = { cwd: sandbox, sessionManager: { buildContextEntries: () => [], getBranch: () => [] } };
+    for (const h of handlers.get("session_compact") ?? []) await h({ type: "session_compact" }, emptyContext);
+    assert.match(handle.handoffLine(), /a compaction took out of your context: pack-a:evidence\/one, pack-b:shared\/dup\. Load again/);
     await tools.get("skill")!.execute("c3", { id: "evidence/one" }, undefined, undefined, { cwd: sandbox });
     assert.match(handle.handoffLine(), /pack-b:shared\/dup/);
     // The seam for an unloader: the done ones are releasable, and releasing one frees its slot.
@@ -702,6 +731,203 @@ test("the seat's hand-off line names what a compaction took, until the seat load
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+/** A session entry holding a tool result, as Pi writes one. */
+const resultEntry = (callId: string, toolName: string, details: Record<string, unknown>) => ({ type: "message", id: `e-${callId}`, message: { role: "toolResult", toolName, toolCallId: callId, details } });
+const assistantEntry = (n: number) => ({ type: "message", id: `a-${n}`, message: { role: "assistant", content: [] } });
+
+test("two calls in one assistant message take turns: Pi runs them at the same time, and the second finds the first's body loaded", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "skills-packs-"));
+  try {
+    const { a, b } = await twoPacks(root);
+    await withSeat(t, [a, b], async (seat) => {
+      const [first, second] = await Promise.all([seat.skill("evidence/one"), seat.skill("evidence/one")]);
+      assert.match(first.text, /^Skill `evidence\/one`/);
+      assert.ok(first.text.includes("A prefetch file proves a run"));
+      assert.match(second.text, /^`evidence\/one` \(pack-a\) is already in your context, loaded at turn 1; not sent again\.$/);
+      const rows = (await seat.trace()).filter((r) => r.tool === "skill");
+      assert.deepEqual(rows.map((r) => [r.result.ok, r.result.already_loaded ?? false]), [[true, false], [true, true]], "one load row, one answer that it is loaded");
+
+    });
+    await withSeat(t, [a, b], async (seat) => {
+      // Four different notes in one message: the reminder is on the fourth, the one that makes four.
+      const ids = ["evidence/two", "evidence/three", "evidence/four", "shared/dup"];
+      const out = await Promise.all(ids.map((id) => seat.skill(id)));
+      assert.deepEqual(out.map((o) => /You hold \d+ notes/.test(o.text)), [false, false, false, true], out.map((o) => o.text.slice(-120)).join("\n---\n"));
+    });
+    await withSeat(t, [a, b], async (seat) => {
+      // A load and its skill_done in one message: the load comes first, so there is a note to mark.
+      const [loaded, done] = await Promise.all([seat.skill("evidence/two"), seat.done("evidence/two", "taken")]);
+      assert.match(loaded.text, /^Skill `evidence\/two`/);
+      assert.match(done.text, /^Recorded: `evidence\/two` is done\./);
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a compaction keeps what the session says is still in the context: the newest bodies stay, the rest are taken out and said", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "skills-packs-"));
+  try {
+    const { a, b } = await twoPacks(root);
+    await withSeat(t, [a, b], async (seat) => {
+      const one = await seat.skill("evidence/one", "c1");
+      const two = await seat.skill("evidence/two", "c2");
+      const three = await seat.skill("evidence/three", "c3");
+      await seat.done("evidence/three", "taken", "c4");
+      const done = (await seat.trace()).find((r) => r.tool === "skill_done")!;
+      assert.ok(one && two && done);
+      // The compaction kept the newest part of the history: the third body and its done, not the first two.
+      seat.session.context = [{ type: "compaction", id: "k", firstKeptEntryId: "e-c3" }, resultEntry("c3", "skill", three.details), resultEntry("c4", "skill_done", { ok: true, id: "evidence/three", pack: "pack-a", turn: 1, note: "taken" })];
+      await seat.fire("session_compact", { compactionEntry: { id: "k", firstKeptEntryId: "e-c3" } });
+      const kept = await seat.skill("evidence/three");
+      assert.match(kept.text, /^`evidence\/three` \(pack-a\) is already in your context, loaded at turn 1 and marked done; not sent again\.$/, "still there, and still done");
+      const again = await seat.skill("evidence/one");
+      assert.match(again.text, /^Skill `evidence\/one`/, "a body the compaction took out is delivered again");
+      assert.equal((await lastRow(seat, "skill")).result.reload_after_compaction, true);
+      const row = await lastRow(seat, "skills_compacted");
+      assert.deepEqual(row.result.kept, [{ key: "pack-a:evidence/three", turn: 1 }]);
+      assert.deepEqual(row.result.lost, [{ key: "pack-a:evidence/one", turn: 1 }, { key: "pack-a:evidence/two", turn: 1 }]);
+      // A second compaction that keeps nothing of it.
+      seat.session.context = [{ type: "compaction", id: "k2", firstKeptEntryId: null }];
+      await seat.fire("session_compact", {});
+      assert.match((await seat.skill("evidence/three")).text, /^Skill `evidence\/three`/);
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a process that starts on a session that already holds a body knows it, and counts its turns on from the session's", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "skills-packs-"));
+  try {
+    const { a, b } = await twoPacks(root);
+    // What the first process delivered, from its own tool result.
+    let delivered: Record<string, unknown> = {};
+    await withSeat(t, [a, b], async (first) => {
+      delivered = (await first.skill("evidence/one", "c1")).details;
+      await first.done("evidence/one", "taken", "c2");
+    });
+    await withSeat(t, [a, b], async (seat) => {
+      seat.session.context = [resultEntry("c1", "skill", delivered), resultEntry("c2", "skill_done", { ok: true, id: "evidence/one", pack: "pack-a", turn: 1, note: "taken" })];
+      seat.session.branch = [assistantEntry(1), assistantEntry(2), assistantEntry(3), ...seat.session.context];
+      await seat.fire("session_start", { reason: "startup" });
+      const again = await seat.skill("evidence/one");
+      assert.match(again.text, /^`evidence\/one` \(pack-a\) is already in your context, loaded at turn 1 and marked done; not sent again\.$/);
+      assert.equal((await lastRow(seat, "skill")).result.turn, 4, "three turns were had before this process: this is the fourth");
+      assert.match((await seat.done("evidence/one", "again")).text, /^`evidence\/one` was already marked done/);
+      await seat.skill("evidence/two");
+      assert.equal((await lastRow(seat, "skill")).result.turn, 4);
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("the ids a seat guesses under a pack's name are not answered with a note about something else", async (t) => {
+  // The failures of the runs: pack-prefixed ids, tool names, ids of method no pack carries.
+  const packs = [
+    fakePack("windows-forensics", [["execution/prefetch", "P: x"], ["registry/devices", "R: x"], ["registry/overview", "R: y"], ["antiforensics/traces", "A: x"], ["filesystem/mft", "F: x"], ["logs/security", "L: x"]]),
+    fakePack("memory-forensics", [["memory/windows", "W: x"], ["triage/volatility", "V: x"]]),
+    fakePack("computer-forensics-base", [["evidence/catalog", "C: x"]]),
+  ];
+  assert.deepEqual(suggestIds(packs, "windows/execution/prefetch"), ["execution/prefetch"]);
+  assert.deepEqual(suggestIds(packs, "windows-forensics:execution/prefetch"), ["execution/prefetch"]);
+  assert.deepEqual(suggestIds(packs, "windows/anti-forensics"), ["antiforensics/traces"], "dashes do not count, and a directory of that name is named");
+  assert.deepEqual(suggestIds(packs, "windows/registry"), ["registry/devices", "registry/overview"]);
+  for (const guess of ["windows/ntfs", "windows/ntfs/logfile", "windows/secrets/dpapi", "windows", "catalog_search", "computer-forensics-base", "mobile/ios/biome"]) assert.deepEqual(suggestIds(packs, guess), [], `${guess}: nothing close, so nothing named`);
+  // The tool says so, and sends the seat to the index rather than to a wrong note.
+  const root = await mkdtemp(join(tmpdir(), "skills-packs-"));
+  try {
+    const win = await writePack(root, "windows-forensics", "1.0.0", { "memory/windows": { title: "Windows memory", when: "A Windows image.", body: "m" }, "execution/prefetch": { title: "Prefetch", when: "Runs.", body: "p" } });
+    await withSeat(t, [win], async (seat) => {
+      const miss = await seat.skill("windows/ntfs");
+      assert.match(miss.text, /^No skill "windows\/ntfs" in this run's packs\. No close match; read the index in your instructions \("Skills carried by this run"\)/);
+      assert.ok(!miss.text.includes("memory/windows"));
+      assert.deepEqual((await lastRow(seat, "skill")).result.suggested, undefined);
+      assert.match((await seat.skill("windows/execution/prefetch")).text, /Did you mean: execution\/prefetch\?/);
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a prompt the extension had to give the index to loses it with the run a hand-off starts: the index and the skill() answer follow the source", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "skills-packs-"));
+  try {
+    const { a, b } = await twoPacks(root);
+    await withSeat(t, [a, b], async (seat) => {
+      await seat.prompt("BASE PROMPT");
+      assert.equal((await seat.trace()).find((r) => r.tool === "skills_index")!.result.source, "extension");
+      const index = await seat.skill();
+      assert.ok(index.text.includes("- `evidence/one`"), "the call answers with the index, not with a pointer to a prompt that may not carry it");
+      assert.equal((await lastRow(seat, "skill")).result.in_prompt, false);
+    });
+    // The hand-off header: the index comes back there.
+    const { registerSkills } = await import("../extensions/skills.ts");
+    const handlers = new Map<string, Array<(event: unknown, ctx: unknown) => Promise<void>>>();
+    const fake = { on: (e: string, h: (event: unknown, ctx: unknown) => Promise<void>) => handlers.set(e, [...(handlers.get(e) ?? []), h]), registerTool: () => undefined };
+    const rows: string[] = [];
+    const handle = registerSkills(fake as never, { packDirs: [a, b], agentId: () => "agent00", trace: async (_c, tool) => void rows.push(tool), turns: () => 0, fault: async () => undefined });
+    await handle.promptSection(root, "BASE PROMPT");
+    assert.match(handle.handoffLine(), /^The index of this run's packs \(your prompt no longer carries it\):\nSkills carried by this run/);
+    assert.ok(handle.handoffLine().includes("- `other/x`"));
+    const withFile = registerSkills(fake as never, { packDirs: [a, b], agentId: () => "agent00", trace: async () => undefined, turns: () => 0, fault: async () => undefined });
+    await withFile.promptSection(root, `x ${renderSkillsSection(await Promise.all([a, b].map((d) => readPackIndex(d)))).text} y`);
+    assert.equal(withFile.handoffLine(), "", "a prompt that carries the index keeps it: the header does not repeat it");
+    void t;
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("front matter with CRLF line ends is stripped; an index that lists nothing for a pack that counts skills is a fault; the tool's examples name no pack", async (t) => {
+  const crlf = "---\r\nid: a/b\r\ntitle: T\r\nneeds: [x/y]\r\ntools: [t1]\r\n---\r\n\r\nThe body.\r\n";
+  const parsed = splitSkill(crlf);
+  assert.equal(parsed.body, "The body.");
+  assert.deepEqual([parsed.meta.title, parsed.meta.needs, parsed.meta.tools], ["T", ["x/y"], ["t1"]]);
+  const root = await mkdtemp(join(tmpdir(), "skills-packs-"));
+  try {
+    const broken = join(root, "broken-index");
+    await mkdir(join(broken, "skills"), { recursive: true });
+    await writeFile(join(broken, "pack.json"), JSON.stringify({ id: "broken-index", version: "1.0.0", skills: 3 }));
+    await writeFile(join(broken, "skills", "INDEX.md"), "# Skills in this pack\n\nA list nobody can parse:\n\n* alpha/one: first\n");
+    const index = await readPackIndex(broken);
+    assert.match(index.error ?? "", /lists no skill although pack\.json counts 3/);
+    const empty = join(root, "no-skills");
+    await mkdir(join(empty, "skills"), { recursive: true });
+    await writeFile(join(empty, "pack.json"), JSON.stringify({ id: "no-skills", version: "1.0.0", skills: 0 }));
+    await writeFile(join(empty, "skills", "INDEX.md"), "# Skills in this pack\n");
+    assert.equal((await readPackIndex(empty)).error, undefined, "a pack that counts none lists none");
+    const { a } = await twoPacks(root);
+    await withSeat(t, [a, broken], async (seat) => {
+      await seat.prompt("BASE");
+      const row = (await seat.trace()).find((r) => r.tool === "skills_index")!;
+      assert.equal(row.result.ok, false);
+      assert.deepEqual(row.result.unreadable, [{ pack: "broken-index", reason: "skills/INDEX.md lists no skill although pack.json counts 3" }]);
+      for (const name of ["skill", "skill_done"]) {
+        const def = seat.loaded.tools.get(name)!.definition as unknown as { description: string; parameters: unknown };
+        assert.ok(!/windows|prefetch/i.test(def.description + JSON.stringify(def.parameters)), `${name}'s description names a pack's note`);
+      }
+      assert.match((await seat.skill("NOT AN ID")).text, /"evidence\/four"\), optionally with its pack in front \("pack-a:evidence\/four"\)|"evidence\/(one|two|three|four)"/);
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("the worker prompt's Skills section sends no method to the ledger, counts notes not marked done, and does not promise a listing it cannot give", async () => {
+  const prompt = await readFile(join(REPO, "prompts", "worker-system.md"), "utf8");
+  const section = prompt.slice(prompt.indexOf("Skills (only when `skill` is in your tool list)"), prompt.indexOf("Context (only when `self_compact`"));
+  assert.ok(section.length > 500);
+  const flat = section.replace(/\s+/g, " ");
+  assert.match(flat, /Never put the method in the ledger/);
+  assert.ok(!/in the post, record or note/.test(flat), "no recital in a ledger record");
+  assert.match(flat, /Hold at most three notes you have not marked done/);
+  assert.match(flat, /takes the bodies it summarises out of your context \(the newest part of the history stays\)/);
+  assert.match(flat, /When the index shows routers only, `skill\(\)` with no id lists every skill/);
+  assert.ok(!/takes every body out/.test(flat));
 });
 
 test("the harness's own skill events are reserved against forged tools", () => {

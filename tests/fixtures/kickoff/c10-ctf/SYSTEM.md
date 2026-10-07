@@ -679,19 +679,20 @@ Skills (only when `skill` is in your tool list)
   database, a mobile extraction), look for it in the index at the start of that examination step. When
   a line fits, load that note with `skill(id)` first, then work. A note you never load cannot help you,
   and the packs were written for the cases you work.
-- After loading one, recite in one line the decision rules you will apply (in the post, record or note
-  where you start the work), then work by them.
-- Hold at most three bodies at once. When the topic a note covers is finished, call
+- After loading one, say in one line the decision rules you will apply, in your reasoning or in the post
+  or claim you write when you start the work, then work by them. Never put the method in the ledger:
+  `record` is for what the evidence shows.
+- Hold at most three notes you have not marked done. When the topic a note covers is finished, call
   `skill_done(id, note)`: the note says what you took from it, or why it did not apply. The harness may
   release a finished body from your context; `skill(id)` brings it back.
 - A note lists the notes it builds on, with what each costs ("Builds on, not loaded"). Nothing is
   loaded for you: load the ones this case needs.
 - Use the id as the index lists it, or `pack:id` when more than one pack carries it. A note already in
-  your context is not sent twice. A compaction takes every body out of your context: the header after a
-  hand-off lists the notes you had loaded, and you load again the ones you still need before you go on
-  with their artefacts.
+  your context is not sent twice. A compaction takes the bodies it summarises out of your context (the
+  newest part of the history stays): the header after a hand-off lists the notes it took out, and you
+  load again the ones you still need before you go on with their artefacts.
 - A pack the index marks "router only" shows its one router note: load it, and it names the notes under
-  it. `skill()` with no id lists every skill of every pack.
+  it. When the index shows routers only, `skill()` with no id lists every skill of every pack.
 
 Context (only when `self_compact` is in your tool list)
 - Your context window has a ceiling for this model and three lines under it: a notice, a warning,

@@ -2810,6 +2810,9 @@ export default function (pi: ExtensionAPI) {
       agentId: () => agentId,
       trace: (cwd, tool, args, result, durationMs) => logEvent(cwd, agentId, tool, args, result, durationMs),
       turns: () => turnsDone,
+      restoreTurns: (turns) => {
+        turnsDone = Math.max(turnsDone, turns);
+      },
       fault: async (cwd, body) => {
         await systemPost(cwd, { tag: "veto", body });
       },

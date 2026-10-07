@@ -220,9 +220,21 @@ export function PacksPanel({ view }: { view: SwarmView }) {
         <PhaseHead title="By agent" />
         <p className="text-xs text-muted-foreground">
           &ldquo;Used after load&rdquo; is a proxy: a later row of the same agent names the skill, or calls a tool the skill names. An agent can apply a note
-          without naming it, so &ldquo;no trace of use&rdquo; is not proof it was not used. A compaction summarises every loaded body out of an agent&rsquo;s context;
-          &ldquo;loaded again&rdquo; counts the ones it asked for afterwards.
+          without naming it, so &ldquo;no trace of use&rdquo; is not proof it was not used. A compaction takes the bodies it summarises out of an agent&rsquo;s context
+          (the newest part of the history stays); &ldquo;loaded again&rdquo; counts the ones it asked for afterwards. &ldquo;Index in prompt&rdquo; means Pi&rsquo;s own
+          prompt carried this run&rsquo;s index, which every run of the agent keeps; an index the extension had to add lasts for the first run only.
         </p>
+        {use.totals.loads_without_tools > 0 ? (
+          <p className="text-xs text-saffron-ink">
+            {use.totals.loads_without_tools} of the loads come from rows written before the harness recorded each skill&rsquo;s tools: for those only a mention of the id
+            can show use, so &ldquo;no trace of use&rdquo; counts them as unused (an upper bound).
+          </p>
+        ) : null}
+        {use.seats.some((x) => x.loads > 0 && x.lost_basis === "compact_done") ? (
+          <p className="text-xs text-saffron-ink">
+            For some agents the trace has no row saying which bodies a compaction took out, so every compaction is counted as taking every body loaded before it: an upper bound.
+          </p>
+        ) : null}
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
@@ -234,7 +246,7 @@ export function PacksPanel({ view }: { view: SwarmView }) {
                 <th className="py-1 pr-3 font-normal">Used after load</th>
                 <th className="py-1 pr-3 font-normal">No trace of use</th>
                 <th className="py-1 pr-3 font-normal">Done</th>
-                <th className="py-1 pr-3 font-normal">Lost at a compaction</th>
+                <th className="py-1 pr-3 font-normal">Taken out by a compaction</th>
                 <th className="py-1 pr-3 font-normal">Loaded again</th>
                 <th className="py-1 font-normal">Skills</th>
               </tr>
@@ -245,7 +257,17 @@ export function PacksPanel({ view }: { view: SwarmView }) {
                   <td className="py-1.5 pr-3">
                     <span className={cn("rounded px-1.5 py-0.5 text-[11px] font-mono", colour(seat.agent))} title={seat.agent}>{names(seat.agent)}</span>
                   </td>
-                  <td className="py-1.5 pr-3 text-xs">{seat.index_in_prompt ? `yes${seat.index_tokens !== null ? ` · ${seat.index_tokens.toLocaleString("en-US")} tokens` : ""}` : "no"}</td>
+                  <td className="py-1.5 pr-3 text-xs">
+                    {seat.index_in_prompt
+                      ? `yes${seat.index_tokens !== null ? ` · ${seat.index_tokens.toLocaleString("en-US")} tokens` : ""}`
+                      : seat.index_source === "extension"
+                        ? "first run only (the extension added it)"
+                        : seat.index_source === "stale"
+                          ? "another pack set's"
+                          : seat.index_source === "none"
+                            ? "the packs list no skill"
+                            : "no row"}
+                  </td>
                   <td className="py-1.5 pr-3 tabular-nums">{seat.loads}</td>
                   <td className="py-1.5 pr-3 tabular-nums">{seat.tokens_loaded.toLocaleString("en-US")}</td>
                   <td className="py-1.5 pr-3 tabular-nums">{seat.referenced}</td>

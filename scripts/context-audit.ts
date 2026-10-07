@@ -360,15 +360,20 @@ export function findings(agents: AgentAudit[], totals: RunAudit["totals"], skill
 export function skillFindings(skills: RunSkills): string[] {
   const t = skills.totals;
   const out: string[] = [];
-  const touched = t.seats_with_index > 0 || t.loads > 0 || t.index_reads > 0 || t.failed > 0;
+  const touched = skills.seats.some((s) => s.index_source !== null) || t.loads > 0 || t.index_reads > 0 || t.failed > 0;
   if (!touched) return out;
-  if (t.seats_with_index > 0) {
-    const missing = skills.seats.filter((s) => !s.index_in_prompt).map((s) => s.agent);
-    out.push(
-      missing.length
-        ? `${t.seats_with_index} of ${t.seats} seats had the Skills section in their prompt; ${missing.join(", ")} did not (no \`skills_index\` row), so the packs' index never reached ${missing.length === 1 ? "that seat" : "those seats"}.`
-        : `All ${t.seats} seats had the Skills section in their prompt.`,
-    );
+  if (touched) {
+    const missing = skills.seats.filter((s) => !s.index_in_prompt);
+    const bySource = (source: string) => missing.filter((s) => s.index_source === source).map((s) => s.agent);
+    const none = missing.filter((s) => s.index_source === null).map((s) => s.agent);
+    if (!missing.length) out.push(`All ${t.seats} seats had the run's index in the prompt Pi keeps for every run.`);
+    else {
+      out.push(`${t.seats_with_index} of ${t.seats} seats had the run's index in the prompt Pi keeps for every run (the kickoff's .pi/APPEND_SYSTEM.md).`);
+      if (none.length) out.push(`${none.join(", ")}: no \`skills_index\` row, so nothing says the packs' index reached ${none.length === 1 ? "that seat" : "those seats"}.`);
+      if (bySource("extension").length) out.push(`${bySource("extension").join(", ")}: the prompt had no index, the extension added it to the first run's prompt, and a run a hand-off starts does not keep that.`);
+      if (bySource("stale").length) out.push(`${bySource("stale").join(", ")}: the prompt carried an index written for other packs.`);
+      if (bySource("none").length) out.push(`${bySource("none").join(", ")}: the packs listed no skill.`);
+    }
   }
   out.push(
     `Skills: ${t.loads} bod${t.loads === 1 ? "y" : "ies"} loaded by ${t.seats_that_loaded} of ${t.seats} seats (${fmt(t.tokens_loaded)} tokens); ${t.seats - t.seats_that_loaded} seat${t.seats - t.seats_that_loaded === 1 ? "" : "s"} never loaded one.`,
@@ -377,9 +382,13 @@ export function skillFindings(skills: RunSkills): string[] {
     out.push(
       `Of those loads, ${t.referenced} show a later use (the skill named, or one of its tools called) and ${t.unused} show none (a proxy: a seat can apply a note without naming it); ${t.done} ${t.done === 1 ? "was" : "were"} marked done with skill_done.`,
     );
+    const approximate = skills.seats.some((s) => s.loads > 0 && s.lost_basis === "compact_done");
     out.push(
-      `${t.lost_at_compaction} loaded bod${t.lost_at_compaction === 1 ? "y" : "ies"} ${t.lost_at_compaction === 1 ? "was" : "were"} followed by a compaction, which summarised ${t.lost_at_compaction === 1 ? "it" : "them"} out of the seat's context; ${t.refetched} ${t.refetched === 1 ? "was" : "were"} loaded again.`,
+      `${t.lost_at_compaction} loaded bod${t.lost_at_compaction === 1 ? "y" : "ies"} ${t.lost_at_compaction === 1 ? "was" : "were"} taken out of the seat's context by a compaction (the newest part of the history a compaction keeps is not counted); ${t.refetched} ${t.refetched === 1 ? "was" : "were"} loaded again.${approximate ? " For some seats the trace has no skills_compacted row, so every compaction is counted as taking every body loaded before it: an upper bound." : ""}`,
     );
+    if (t.loads_without_tools > 0) {
+      out.push(`${t.loads_without_tools} of the loads come from rows that carry no tools list (a trace from before the harness wrote it): only a mention of the skill's id can show their use, so "no trace of use" is an upper bound there.`);
+    }
   }
   if (t.already_loaded > 0) out.push(`${t.already_loaded} call${t.already_loaded === 1 ? "" : "s"} asked for a body the seat already held and was told so instead of being sent it again.`);
   if (t.failed > 0) out.push(`${t.failed} skill call${t.failed === 1 ? "" : "s"} named no skill the packs carry.`);
@@ -421,14 +430,15 @@ export function renderMarkdown(run: RunAudit): string {
     );
   }
   lines.push("");
-  const skillSeats = run.skills.seats.filter((s) => s.index_in_prompt || s.loads > 0 || s.index_reads > 0 || s.failed > 0);
+  const skillSeats = run.skills.seats.filter((s) => s.index_source !== null || s.loads > 0 || s.index_reads > 0 || s.failed > 0);
   if (skillSeats.length) {
     lines.push("## Skills");
     lines.push("");
-    lines.push("| Agent | Index in prompt | Loads | Distinct | Tokens loaded | Used after load (proxy) | No trace of use | Done | Lost at a compaction | Loaded again | Missed |");
+    lines.push("| Agent | Index in prompt | Loads | Distinct | Tokens loaded | Used after load (proxy) | No trace of use | Done | Taken out by a compaction | Loaded again | Missed |");
     lines.push("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |");
     for (const s of skillSeats) {
-      lines.push(`| ${s.agent} | ${s.index_in_prompt ? `yes${s.index_tokens !== null ? ` (${fmt(s.index_tokens)} tokens)` : ""}` : "no"} | ${s.loads} | ${s.distinct} | ${fmt(s.tokens_loaded)} | ${s.referenced} | ${s.unused} | ${s.done} | ${s.lost_at_compaction} | ${s.refetched} | ${s.failed} |`);
+      const index = s.index_in_prompt ? `yes${s.index_tokens !== null ? ` (${fmt(s.index_tokens)} tokens)` : ""}` : s.index_source === "extension" ? "first run only (extension)" : s.index_source === "stale" ? "another pack set's" : s.index_source === "none" ? "no skills" : "no row";
+      lines.push(`| ${s.agent} | ${index} | ${s.loads} | ${s.distinct} | ${fmt(s.tokens_loaded)} | ${s.referenced} | ${s.unused} | ${s.done} | ${s.lost_at_compaction} | ${s.refetched} | ${s.failed} |`);
     }
     lines.push("");
   }

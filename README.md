@@ -112,8 +112,8 @@ every agent's prompt (within a budget of 2,500 tokens for the whole run, and a
 pack's router alone above it), and the agent loads a body, as plain Markdown,
 only when it reaches that artefact family, so a pack the size of a textbook
 costs a few hundred tokens until it is used. A body already in an agent's
-context is not sent twice, and after a compaction the agent is told which it
-had loaded. Every load is an event on the trace with the file's checksum and
+context is not sent twice, and after a compaction the agent is told which
+bodies the compaction took out. Every load is an event on the trace with the file's checksum and
 its token cost, and the console's **Packs** tab says which skills a run read,
 which it carried and never opened, what each agent loaded and whether anything
 shows it was used, which tools came from which pack, and which agent did each.

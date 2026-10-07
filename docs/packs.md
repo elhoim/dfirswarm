@@ -46,16 +46,21 @@ So a pack's skills are small files, and an agent loads one when it needs it:
   after a compaction what is still needed.
 - A body arrives only when an agent calls `skill("<id>")`, as plain Markdown:
   the front matter is left off and there is no JSON around it. The id is as the
-  index lists it (`execution/prefetch`), or `pack:id` (`windows-forensics:execution/prefetch`)
+  index lists it (`area/topic`), or `pack:id` (`pack-name:area/topic`)
   when more than one pack carries the same id; the index then lists it as
   `pack:id`, and a bare id that more than one pack carries is served by the first
   pack of the run and says which others have it. A body the agent already holds
-  is not sent again ("already in your context, loaded at turn N"); a
-  compaction takes every body out of the context, so after one the same call
-  delivers it again, and the hand-off header lists the ones the agent had loaded.
-  `skill()` with no id lists every skill of every pack when the prompt shows
-  routers only (the one way to see a pack's leaves), and points at the prompt
-  when the prompt carries the whole index.
+  is not sent again ("already in your context, loaded at turn N"). The seat's
+  ledger of what it holds is read off the session itself (`buildContextEntries()`),
+  at a compaction and when a process starts on a session that already has some, so
+  it is exact: a compaction keeps the newest part of the history (`keepRecentTokens`)
+  and the bodies in it stay held, the others are taken out, and the next call
+  delivers them again (the row says `reload_after_compaction`). The hand-off header
+  lists the bodies the compaction took out. A message's tool calls run at the same
+  time in Pi; the two tools take turns, in the order the message lists them, so
+  a second `skill(id)` of the same message is answered "already in your context".
+  `skill()` with no id lists every skill of every pack unless the kickoff's file put
+  the whole index in the prompt, in which case it points there.
 - A body may name other skills under `needs`. The result lists them with what
   each costs in tokens, and loads none: the agent loads the ones the case needs.
 - `skill_done(id, note)` says the agent is finished with a body: the event is on
@@ -68,9 +73,10 @@ So a pack's skills are small files, and an agent loads one when it needs it:
   Packs tab count, per agent, the bodies loaded and what they cost, how many a
   later row names or uses (a proxy), how many a compaction took out of the
   context, and how many were loaded again.
-- The kickoff passes Pi `--no-skills`, so an operator's own Pi skills
-  (`~/.pi/agent/skills`, `~/.agents/skills`, a project's `.pi/skills`) never
-  enter an agent's prompt; the packs' skills are the only ones a seat has.
+- The kickoff passes Pi `--no-skills`, which keeps Pi's skill directories
+  (`~/.pi/agent/skills`, `~/.agents/skills`, a project's `.pi/skills`, a `skills`
+  setting) out of an agent's prompt. It does not keep out everything an operator
+  can add; `docs/usage.md` says what still enters.
 
 A skill is written for an agent in the middle of a case: what to look at, in
 what order, what the answer looks like, what would disprove it, which tool to

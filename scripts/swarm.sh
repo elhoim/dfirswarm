@@ -6424,9 +6424,11 @@ EOF
   if [[ "$forging" -eq 1 ]]; then
     tool_args=()
   fi
-  # --no-skills: Pi's own skill discovery (~/.pi/agent/skills, ~/.agents/skills,
-  # .pi/skills) stays off in every seat, so an operator's personal skills never
-  # enter a seat's prompt. The packs' skills are the harness's `skill` tool.
+  # --no-skills: Pi's own skill directories (~/.pi/agent/skills, ~/.agents/skills,
+  # .pi/skills, the `skills` setting) stay out of every seat's prompt. It does not
+  # reach a skill path an operator's extension adds, context files (AGENTS.md) or,
+  # in a run with no pack, ~/.pi/agent/APPEND_SYSTEM.md (docs/usage.md says what).
+  # The packs' skills are the harness's `skill` tool.
   for ((idx = 0; idx < n; idx++)); do
     start_agent_when_shell_ready "${agent_ids[$idx]}" "${panes[$idx]}" \
       --approve --no-skills --name "${agent_ids[$idx]}" \
