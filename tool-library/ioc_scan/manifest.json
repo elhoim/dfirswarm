@@ -1,6 +1,6 @@
 {
   "name": "ioc_scan",
-  "description": "Stream a large binary for ASCII and UTF-16LE needles and return locators: for every occurrence an id, its start offset, the needle, the encoding and how many bytes of context surround it. Context bytes are NOT returned by default (they are where passwords, tokens and card numbers sit): write_values: true, only in a job run with secret_output: true, writes them to a 0600 file under $OUT, and the answer names that file and says it holds secret values. Every occurrence is kept, overlapping ones included, so counts do not depend on chunk; matching is case-sensitive; scanned_start, scanned_end and bytes_scanned are what was actually read. unique_only (default true) only hides repeats of an identical context from the inline page; all_results has every occurrence. Needles are recorded in the trace: never put a secret in one. The file is read as given (an E01 is its container bytes).",
+  "description": "Stream a large binary for ASCII and UTF-16LE needles and return locators: for every occurrence an id, its start offset, the needle, the encoding and how many bytes of context surround it. Context bytes are NOT returned by default (they are where passwords, tokens and card numbers sit): write_values: true, only in a job run with secret_output: true, writes them to a 0600 file under $OUT, and the answer names that file and says it holds secret values. Every occurrence is kept, overlapping ones included, so counts do not depend on chunk; matching is case-sensitive; scanned_start, scanned_end and bytes_scanned are what was actually read. unique_only (default true) only hides repeats of an identical context from the inline page; all_results has every occurrence. Needles are recorded in the trace: never put a secret in one. The file is read as given (an E01 is its container bytes). earlier_answers says how many other files answer the same question.",
   "params": {
     "path": {
       "type": "string",
@@ -50,5 +50,5 @@
   "by": "s183900",
   "at": "2026-09-18T22:16:43.028Z",
   "version": 4,
-  "sha256": "bbc80a8fb71cbd521f79017346467043f6db5df0f2cbb332bdd315dac10dd735"
+  "sha256": "a1c9eae213529f5d0bc9fd8fd5d345ebdd4dc434bf16f1ca0ad6a2bb08c8f680"
 }

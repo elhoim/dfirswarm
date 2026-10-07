@@ -553,7 +553,7 @@ test("a digest mismatch is an integrity finding of its own: ok is false, the ext
 test("the item budget and the byte budget stop ad1_extract, keep what it wrote, and say so", async () => {
   const cwd = runDir();
   const byItems = await runPy(TOOL, cwd, { image: "inputs/case.ad1", max_items: 3 }, undefined, { AGENT_ID: "s1" });
-  assert.equal(byItems.code, 1);
+  assert.equal(byItems.code, 0, "a stop at a budget is a valid answer for what was examined: the tool ran");
   const a = JSON.parse(byItems.stdout);
   assert.equal(a.processing_status, "partial");
   assert.match(a.stopped_by_budget, /item budget of 3 items/);
@@ -561,7 +561,8 @@ test("the item budget and the byte budget stop ad1_extract, keep what it wrote, 
   assert.match(a.errors.join("\n"), /every item after it in the image's order were not written or listed/);
   writeFileSync(join(cwd, "inputs", "two.ad1"), ad1Image([{ name: "a.bin", content: randomBytes(5000) }, { name: "b.bin", content: B("never reached") }], { chunkSize: 512 }));
   const byBytes = await runPy(TOOL, cwd, { image: "inputs/two.ad1", max_bytes: 1000 }, undefined, { AGENT_ID: "s1" });
-  assert.equal(byBytes.code, 1);
+  assert.equal(byBytes.code, 0, "the file the byte budget cut is kept as a partial and says so; the call itself ran");
+  assert.equal(JSON.parse(byBytes.stdout).processing_status, "partial");
   const b = JSON.parse(byBytes.stdout);
   assert.match(b.stopped_by_budget, /output budget of 1000 bytes/);
   const base = join(cwd, "work", "s1", "ad1", "two");
@@ -576,7 +577,7 @@ test("the item budget and the byte budget stop ad1_extract, keep what it wrote, 
 test("an item the walk did not reach before a budget stop is not claimed absent", async () => {
   const cwd = runDir();
   const r = await runPy(TOOL, cwd, { image: "inputs/case.ad1", members: [3, 5, 11], max_items: 1 }, undefined, { AGENT_ID: "s1" });
-  assert.equal(r.code, 1);
+  assert.equal(r.code, 0);
   const res = JSON.parse(r.stdout);
   assert.match(res.stopped_by_budget, /item budget of 1 items/);
   const text = res.errors.join("\n");
@@ -587,7 +588,7 @@ test("an item the walk did not reach before a budget stop is not claimed absent"
 test("the walk budget stops ad1_extract, and a wanted item it never reached is not called absent", async () => {
   const cwd = runDir();
   const r = await runPy(TOOL, cwd, { image: "inputs/case.ad1", max_walk: 5 }, undefined, { AGENT_ID: "s1" });
-  assert.equal(r.code, 1);
+  assert.equal(r.code, 0);
   const res = JSON.parse(r.stdout);
   assert.equal(res.processing_status, "partial");
   assert.match(res.stopped_by_budget, /walk budget of 5 items/);

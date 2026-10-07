@@ -219,6 +219,18 @@ def _same_bytes(a, b):
         return False
 
 
+def earlier_answers(path):
+    """How many other files answer this same question in the folder (name.ext, name.2.ext, ...): one more for every different
+    answer, and none is deleted, so the count is said."""
+    stem, ext = os.path.splitext(os.path.basename(str(path)))
+    base = re.sub(r"\.\d+$", "", stem)
+    rx = re.compile(r"^%s(\.\d+)?%s$" % (re.escape(base), re.escape(ext)))
+    try:
+        return max(0, sum(1 for n in os.listdir(os.path.dirname(str(path)) or ".") if rx.match(n)) - 1)
+    except OSError:
+        return 0
+
+
 PAGES = []                         # the pages being written: a SIGTERM removes their half files before the scan ends
 
 
@@ -349,6 +361,8 @@ def main():
         page = pages[name].finish()
         entry = {"count": totals[name], "hits": pages[name].page, **page, "matched": totals[name], "note": chosen[name][2]}
         entry["truncated"] = totals[name] > len(pages[name].page)
+        if "all_results" in entry:
+            entry["earlier_answers"] = earlier_answers(pages[name].path)
         if name in capped:
             entry["rows_file_stopped_at_offset"] = capped[name]
             entry["rows_file_cap"] = ROWS_PER_SIGNATURE
@@ -369,7 +383,9 @@ def main():
         "note": "A hit is where a header's bytes occur, not a file: cut it with file_carver or read it in place and check it with a parser of that format. "
                 "A signature that is not listed here, an encrypted or compressed region and a file split across the scan's source are not found by this scan.",
     }, indent=2))
-    sys.exit(0 if complete else 1)
+    # Exit 0 means the engine ran: a stop at the time budget is a valid answer for [start, end) with the position to go on from
+    # (scanned.complete is false and scanned.stopped says where). A read error is a failure.
+    sys.exit(1 if read_error else 0)
 
 
 if __name__ == "__main__":

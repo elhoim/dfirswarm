@@ -1,6 +1,6 @@
 {
   "name": "sig_carve",
-  "description": "A signature scan: find where known file headers (magic bytes) occur in a binary file, in one pass over it, and count every offset: the first max_hits of each signature come back with a preview (up to 32 bytes in hex and 64 as ASCII, none when context is 0), and every hit is in all_results when there are more. It carves nothing and estimates no size: a hit is where the bytes occur, not a file, so cut a decisive hit with file_carver (or read it in place) and check it with a parser of that format. Each header is found once, at its true offset, whatever the read size; an unknown signature name is an error, not an empty result. SCCA hits name candidate_start (the hit minus 4). The answer says which file and what range were scanned; a scan that reaches its time budget (about 100 seconds) or a read error says complete: false, exits 1 and names where to go on (start). The file is read as given: an E01 or other container is its container bytes, not the disk inside.",
+  "description": "A signature scan: find where known file headers (magic bytes) occur in a binary file, in one pass over it, and count every offset: the first max_hits of each signature come back with a preview (up to 32 bytes in hex and 64 as ASCII, none when context is 0), and every hit is in all_results when there are more. It carves nothing and estimates no size: a hit is where the bytes occur, not a file, so cut a decisive hit with file_carver (or read it in place) and check it with a parser of that format. Each header is found once, at its true offset, whatever the read size; an unknown signature name is an error, not an empty result. SCCA hits name candidate_start (the hit minus 4). The answer says which file and what range were scanned; a scan that reaches its time budget (about 100 seconds) answers for the range it covered, says scanned.complete: false and scanned.stopped, and names where to go on (start), with exit 0 (the engine ran); a read error exits 1. The file is read as given: an E01 or other container is its container bytes, not the disk inside. earlier_answers says how many other files answer the same scan.",
   "params": {
     "path": {
       "type": "string",
@@ -35,5 +35,5 @@
   "by": "s183906",
   "at": "2026-09-18T22:13:29.602Z",
   "version": 2,
-  "sha256": "9d30db4d7460f7b50e4d6661318e3ef037f1748771cdbd576dba9bdf85612158"
+  "sha256": "413725448328b5afcf76b18f2a8ac10ae32d2ca9accc7517dc92e16301fcd06c"
 }

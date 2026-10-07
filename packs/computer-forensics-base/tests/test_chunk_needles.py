@@ -157,10 +157,14 @@ class ChunkNeedles(Case):
     def test_a_results_file_is_never_replaced_by_a_later_scan_of_the_same_question(self):
         data = b"\0" * 10 + b"needle" * 40
         other = b"needle" * 40 + b"\0" * 10
-        first = self.file_run(data, "needle", max_hits=2).json["hits"]["needle"]["all_results"]
+        one = self.file_run(data, "needle", max_hits=2).json["hits"]["needle"]
+        first = one["all_results"]
+        self.assertEqual(one["earlier_answers"], 0)
         kept = self.read(first)
         self.assertEqual(self.file_run(data, "needle", max_hits=2).json["hits"]["needle"]["all_results"], first)
-        second = self.file_run(other, "needle", max_hits=2).json["hits"]["needle"]["all_results"]
+        two = self.file_run(other, "needle", max_hits=2).json["hits"]["needle"]
+        second = two["all_results"]
+        self.assertEqual(two["earlier_answers"], 1)
         self.assertNotEqual(first, second)
         self.assertTrue(second.endswith(".2.jsonl"), second)
         self.assertEqual(self.read(first), kept)

@@ -234,6 +234,7 @@ class SqliteQuery(Case):
         self.assertLess(kept["row_count"], 1000000)
         self.assertTrue(kept["rows_file"].endswith("-0.2.jsonl"), kept["rows_file"])
         self.assertEqual(os.path.getsize(whole), size, "the complete answer was replaced by the partial one")
+        self.assertEqual((first.json["earlier_answers"], kept["earlier_answers"]), (0, 1))
         self.assertEqual(len(self.read(whole).splitlines()), 1000001)
         self.assertEqual(len(self.read(self.path(kept["rows_file"])).splitlines()), kept["row_count"] + 1)
         # The same complete answer again is the file that is there, not a copy of it.

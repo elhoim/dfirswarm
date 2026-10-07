@@ -143,10 +143,15 @@ class IocScan(Case):
         # Same question, same size, other bytes: the key (file, needles, range, size) is the same and the answer is not.
         data = b"\0" * 10 + b"needle" * 40
         other = b"needle" * 40 + b"\0" * 10
-        first = self.scan(data, "needle", max_hits=2, unique_only=False).json["all_results"]
+        one = self.scan(data, "needle", max_hits=2, unique_only=False).json
+        first = one["all_results"]
+        self.assertEqual(one["earlier_answers"], 0)
         kept = self.read(first)
-        self.assertEqual(self.scan(data, "needle", max_hits=2, unique_only=False).json["all_results"], first, "the same answer again is the file that is there")
-        second = self.scan(other, "needle", max_hits=2, unique_only=False).json["all_results"]
+        again = self.scan(data, "needle", max_hits=2, unique_only=False).json
+        self.assertEqual((again["all_results"], again["earlier_answers"]), (first, 0), "the same answer again is the file that is there")
+        two = self.scan(other, "needle", max_hits=2, unique_only=False).json
+        second = two["all_results"]
+        self.assertEqual(two["earlier_answers"], 1, "the agent sees the files of this question grow")
         self.assertNotEqual(first, second)
         self.assertTrue(second.endswith(".2.jsonl"), second)
         self.assertEqual(self.read(first), kept, "the first answer was replaced")

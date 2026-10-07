@@ -1,6 +1,6 @@
 {
   "name": "chunk_needles",
-  "description": "Scan a local file, or one inode streamed from an image through icat, for ASCII and UTF-16LE needles; return per needle the counts and locators (id, offset in the scanned stream, encoding, context length) and a source that names the image, volume offset, inode and sector size. Every occurrence is found, overlapping ones included, whatever chunk is. Context bytes are NOT returned (they are where secrets sit): write_values: true, in a job run with secret_output: true, writes them to a 0600 file under $OUT. Needles are recorded in the trace: never put a secret in one.",
+  "description": "Scan a local file, or one inode streamed from an image through icat, for ASCII and UTF-16LE needles; return per needle the counts and locators (id, offset in the scanned stream, encoding, context length) and a source that names the image, volume offset, inode and sector size. Every occurrence is found, overlapping ones included, whatever chunk is. Context bytes are NOT returned (they are where secrets sit): write_values: true, in a job run with secret_output: true, writes them to a 0600 file under $OUT. Needles are recorded in the trace: never put a secret in one. earlier_answers says how many other files answer the same question.",
   "params": {
     "needles": {
       "type": "string",
@@ -59,5 +59,5 @@
   "by": "sd1d102",
   "at": "2026-09-18T14:26:18.665Z",
   "version": 6,
-  "sha256": "f35a9dcbcdbe818cb52f098d3846034606c67003258c492bdc485dc7004f6619"
+  "sha256": "da92d8947b7ec8426e076a3cf0ab298b354dfaa6933de1062de384f23cee010b"
 }

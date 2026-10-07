@@ -222,6 +222,18 @@ except re.error as e:
     sys.exit(1)
 
 
+def earlier_answers(path):
+    """How many other files answer this same question in the folder (name.ext, name.2.ext, ...): one more for every different
+    answer, and none is deleted, so the count is said."""
+    stem, ext = os.path.splitext(os.path.basename(str(path)))
+    base = re.sub(r"\.\d+$", "", stem)
+    rx = re.compile(r"^%s(\.\d+)?%s$" % (re.escape(base), re.escape(ext)))
+    try:
+        return max(0, sum(1 for n in os.listdir(os.path.dirname(str(path)) or ".") if rx.match(n)) - 1)
+    except OSError:
+        return 0
+
+
 def _same_bytes(a, b):
     """Two files with the same bytes (compared in blocks, never whole)."""
     try:
@@ -432,6 +444,7 @@ if all_out:
                 os.unlink(tmp)
             break
         result["all_matches"] = shown_stem + suffix + keep_ext
+        result["earlier_answers"] = earlier_answers(held)
         result["all_matches_format"] = "one match per line: the line number in the catalogue file, a tab, the line"
     else:
         os.unlink(tmp)

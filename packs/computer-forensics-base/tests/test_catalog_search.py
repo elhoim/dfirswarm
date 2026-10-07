@@ -148,12 +148,16 @@ class CatalogSearch(Case):
 
     def test_a_matches_file_is_never_replaced_by_a_later_answer_to_the_same_search(self):
         self.catalogue(300)
-        first = run_tool("catalog_search", {"pattern": "file", "limit": 5}, self.dir).json["all_matches"]
+        one = run_tool("catalog_search", {"pattern": "file", "limit": 5}, self.dir).json
+        first = one["all_matches"]
+        self.assertEqual(one["earlier_answers"], 0)
         kept = self.read(first)
         self.assertEqual(run_tool("catalog_search", {"pattern": "file", "limit": 5, "offset": 5}, self.dir).json["all_matches"], first,
                          "a page of the same search is the file that is there")
         self.write("catalog/Disk.E01/p2048/filelist.txt", "".join("r/r %d-128-1:\tUsers/b/file%04d.log\n" % (i, i) for i in range(300)))   # the same search, a different answer
-        second = run_tool("catalog_search", {"pattern": "file", "limit": 5}, self.dir).json["all_matches"]
+        two = run_tool("catalog_search", {"pattern": "file", "limit": 5}, self.dir).json
+        second = two["all_matches"]
+        self.assertEqual(two["earlier_answers"], 1)
         self.assertNotEqual(first, second)
         self.assertTrue(second.endswith(".2.txt"), second)
         self.assertEqual(self.read(first), kept)

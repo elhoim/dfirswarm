@@ -202,6 +202,18 @@ class SecretValues:
         }
 
 
+def earlier_answers(path):
+    """How many other files answer this same question in the folder (name.ext, name.2.ext, ...): one more for every different
+    answer, and none is deleted, so the count is said."""
+    stem, ext = os.path.splitext(os.path.basename(str(path)))
+    base = re.sub(r"\.\d+$", "", stem)
+    rx = re.compile(r"^%s(\.\d+)?%s$" % (re.escape(base), re.escape(ext)))
+    try:
+        return max(0, sum(1 for n in os.listdir(os.path.dirname(str(path)) or ".") if rx.match(n)) - 1)
+    except OSError:
+        return 0
+
+
 def same_bytes(a, b):
     """Two files with the same bytes (compared in blocks, never whole)."""
     try:
@@ -316,6 +328,7 @@ class Locators:
             self.path, self.shown = publish(self.tmp, self.path, self.shown)
             self.tmp = None
             info["all_results"] = self.shown
+            info["earlier_answers"] = earlier_answers(self.path)
             info["all_results_format"] = "JSON Lines, one locator per occurrence: finding_id, off, enc, context_length"
             if self.stopped_at is not None:
                 info["all_results_stopped_at_offset"] = self.stopped_at

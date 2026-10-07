@@ -1,6 +1,6 @@
 {
   "name": "file_type",
-  "description": "Say what a file is from its first bytes, and whether that agrees with its extension, for a file or a directory walked in sorted order. Identifies with a table of forensic signatures (PE, ELF, Mach-O universal vs Java class by their own fields, archives, registry hives, event logs, prefetch at offset 4 and compressed MAM, shortcuts, AD1 and E01, memory captures) and, for what the table does not know, the installed `file` (libmagic) when present. An identification is a reading of the first bytes, not a validation. A type nothing knows is unrecognised and its extension_matches is null, neither match nor mismatch. Hashes every regular file it opens (SHA-256; a file the time budget ends in has no digest, and its entry says how far it got); plain text is consistent with any extension that is not a binary format's; a directory that cannot be listed is an error entry; symbolic links and non-regular files are listed, never opened or followed. examined counts files actually opened; the first bytes are returned only with head_hex: true; every result is kept in all_results when the inline page (limit, mismatch_only) is not the whole, and unreadable files are reported as errors whatever mismatch_only says.",
+  "description": "Say what a file is from its first bytes, and whether that agrees with its extension, for a file or a directory walked in sorted order. Identifies with a table of forensic signatures (PE, ELF, Mach-O universal vs Java class by their own fields, archives, registry hives, event logs, prefetch at offset 4 and compressed MAM, shortcuts, AD1 and E01, memory captures) and, for what the table does not know, the installed `file` (libmagic) when present. An identification is a reading of the first bytes, not a validation. A type nothing knows is unrecognised and its extension_matches is null, neither match nor mismatch. Hashes every regular file it opens (SHA-256; a file the time budget ends in has no digest, and its entry says how far it got); plain text is consistent with any extension that is not a binary format's; a directory that cannot be listed is an error entry; symbolic links and non-regular files are listed, never opened or followed. examined counts files actually opened; the first bytes are returned only with head_hex: true; every result is kept in all_results when the inline page (limit, mismatch_only) is not the whole, and unreadable files are reported as errors whatever mismatch_only says. earlier_answers says how many other files answer the same question.",
   "params": {
     "path": {
       "type": "string",
@@ -30,5 +30,5 @@
   "by": "maintainer",
   "at": "2026-10-01T12:00:00.000Z",
   "version": 3,
-  "sha256": "0a5a741bcbaf6325420b2c0bd3069bb29eaf643785eafa611540f30bf5b4b3e2"
+  "sha256": "36afa1e29bc7b369189f546b6a165ee31a950f9037afe1fbfb2cb56bf1d37525"
 }

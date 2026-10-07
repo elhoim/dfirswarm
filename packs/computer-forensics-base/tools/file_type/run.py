@@ -260,6 +260,18 @@ def walk(path):
         yield os.fsdecode(exc.filename or path), "the directory could not be listed: %s" % (exc.strerror or exc)
 
 
+def earlier_answers(path):
+    """How many other files answer this same question in the folder (name.ext, name.2.ext, ...): one more for every different
+    answer, and none is deleted, so the count is said."""
+    stem, ext = os.path.splitext(os.path.basename(str(path)))
+    base = re.sub(r"\.\d+$", "", stem)
+    rx = re.compile(r"^%s(\.\d+)?%s$" % (re.escape(base), re.escape(ext)))
+    try:
+        return max(0, sum(1 for n in os.listdir(os.path.dirname(str(path)) or ".") if rx.match(n)) - 1)
+    except OSError:
+        return 0
+
+
 def same_bytes(a, b):
     """Two files with the same bytes (compared in blocks, never whole)."""
     try:
@@ -461,6 +473,7 @@ def main():
     }
     if whole:
         out["all_results"] = whole
+        out["earlier_answers"] = earlier_answers(results.path)
         out["all_results_format"] = "JSON Lines, one complete entry per file looked at, whatever limit and mismatch_only show"
     if results.error:
         out["all_results_error"] = results.error

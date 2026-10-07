@@ -52,9 +52,13 @@ broke) or nothing was (failed). `integrity_status` says whether what was
 written matches the digests the image records: verified (every file had a
 stored digest and matched), mismatch (at least one did not), or unverified
 (some had no stored digest or were not read); `ok` is true only for a complete
-processing with no mismatch. The exit code is 0 when processing is complete,
-a mismatch included: the files were written, and the mismatch is a finding
-about the image's content, not a failure of this tool. ad1_extract.coverage.json
+processing with no mismatch. The exit code is 0 when the tool ran and what it
+examined is whole or said not to be: processing complete (a mismatch included: the
+files were written, and the mismatch is a finding about the image's content, not a
+failure of this tool), or partial only because a budget stopped it between items
+(`stopped_by_budget` says which). An item that broke or could not be written, a
+segment that is not there or a manifest that could not be written is exit 1.
+ad1_extract.coverage.json
 is written as incomplete before the first item and again at the end.
 """
 import base64
@@ -563,6 +567,7 @@ def main():
     except OSError as e:
         fail("cannot read %s: %s" % (image, e.strerror or e))
     errors = list(img.errors)
+    soft = [0]         # errors that are only a budget's stop: the answer is valid for what was examined, and says where it stopped
     if img.missing:
         names = img.missing if len(img.missing) <= 5 else img.missing[:2] + ["...", img.missing[-1]]
         errors.append("the image has %d segments and %d of them (%s) %s not there, beside the first or in this job's view (declare every segment in inputs): what lies in them is not read"
@@ -615,11 +620,13 @@ def main():
                 if reached[0]:
                     # Checked for every item, wanted or not: a long walk past the last wanted item is not free either.
                     errors.append("stopped: %s; item %d (%s) and every item after it in the image's order were not examined" % (reached[0], n, esc(item["path"])))
+                    soft[0] += 1
                     break
                 walked += 1
                 if walked > budgets["max_walk"]:
                     reached[0] = "the walk budget of %d items was reached" % budgets["max_walk"]
                     errors.append("stopped: %s; item %d (%s) and every item after it in the image's order were not examined" % (reached[0], n, esc(item["path"])))
+                    soft[0] += 1
                     break
                 if want_n is not None and n in want_n:
                     seen_n.add(n)
@@ -654,6 +661,7 @@ def main():
                     reached[0] = reached[0] or "the time budget of %d seconds was reached" % budgets["max_seconds"]
                 if reached[0]:
                     errors.append("stopped: %s; item %d (%s) and every item after it in the image's order were not written or listed" % (reached[0], n, esc(item["path"])))
+                    soft[0] += 1
                     break
                 raw_path = item["path"]
                 locator = "ad1:item=%d" % item["addr"]
@@ -685,6 +693,8 @@ def main():
                 size, hs, check, why, kept, kept_hash = write_file(img, item, dest, notes, used, stop)
                 if hs is None:
                     errors.append("item %d (%s, %s): %s" % (n, esc(raw_path), locator, why))
+                    if reached[0] and why == reached[0]:
+                        soft[0] += 1                          # the item was cut by the budget: the budget's stop is said once more below
                     written = esc(os.path.join(os.path.dirname(rel), kept).encode()) if kept else ""
                     # The sha256 of a partial row is of the bytes kept, not of the item.
                     man.write(head + "%s\t%d\t%s\t%s\t%s\n" % (written, size, kept_hash, check, ",".join(notes)))
@@ -693,6 +703,7 @@ def main():
                     tally["not_read"] += 1
                     if reached[0]:
                         errors.append("stopped: %s; item %d is kept as a partial, and every item after it in the image's order was not written or listed" % (reached[0], n))
+                        soft[0] += 1
                         break
                     continue
                 if not md5 and not sha1:
@@ -719,9 +730,11 @@ def main():
     # seen is not an item that is not there, and is not claimed to be absent.
     walked_all = not (reached[0] or stopped)
     if absent:
+        soft[0] += 0 if walked_all else 1
         errors.append(("no item %s in this read of the image (it listed %d items)" if walked_all else
                        "item %s was not reached before the call stopped (it had looked at %d items): it is not claimed absent") % (", ".join(map(str, absent)), walked))
     if gone:
+        soft[0] += 0 if walked_all else 1
         errors.append(("no item at %s in this read of the image" if walked_all else
                        "the item at %s was not reached before the call stopped: it is not claimed absent") % ", ".join("ad1:item=%d" % a for a in gone))
     if stopped:
@@ -759,7 +772,10 @@ def main():
     if not in_job:
         result["note"] = "written where you called it, not sealed: run it as a job (job_run tool=ad1_extract) to have the files sealed into the store, citable as job:<id>/<path>, and catalogued by the derived catalogue"
     print(json.dumps(result))
-    return 0 if not errors else 1
+    # Exit 0 means the tool ran and what it examined is whole or said not to be: complete, or partial only because a budget stopped it
+    # between items (processing_status says partial and stopped_by_budget says which). An item that broke or could not be written, a
+    # manifest that could not be written, a segment that is not there: 1.
+    return 0 if len(errors) == soft[0] else 1
 
 
 if __name__ == "__main__":

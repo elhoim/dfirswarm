@@ -271,6 +271,18 @@ def blob_json(fh, value):
     fh.write('", "length": %d, "sha256": "%s"}' % (len(value), digest.hexdigest()))
 
 
+def earlier_answers(path):
+    """How many other files answer this same question in the folder (name.ext, name.2.ext, ...): one more for every different
+    answer, and none is deleted, so the count is said."""
+    stem, ext = os.path.splitext(os.path.basename(str(path)))
+    base = re.sub(r"\.\d+$", "", stem)
+    rx = re.compile(r"^%s(\.\d+)?%s$" % (re.escape(base), re.escape(ext)))
+    try:
+        return max(0, sum(1 for n in os.listdir(os.path.dirname(str(path)) or ".") if rx.match(n)) - 1)
+    except OSError:
+        return 0
+
+
 def same_bytes(a, b):
     """Two files with the same bytes (compared in blocks, never whole)."""
     try:
@@ -432,6 +444,7 @@ class Rows:
                 self.path, self.shown = publish(self.tmp, self.path, self.shown)
                 self.tmp = None
                 info["rows_file"] = self.shown
+                info["earlier_answers"] = earlier_answers(self.path)
                 info["rows_file_format"] = "JSON Lines: a header line {columns}, then one {n, values} per row; NULL is null, a BLOB is {blob_b64, length, sha256}"
                 if self.file_stopped:
                     info["rows_file_stopped_at_row"] = self.file_stopped

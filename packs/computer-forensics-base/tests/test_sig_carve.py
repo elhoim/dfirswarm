@@ -169,7 +169,7 @@ class SigCarve(Case):
         want = [h["offset"] for h in whole["signatures"]["PNG"]["hits"]]
         self.assertEqual(want, [10, 60, 125, 140, 190, 255, 300])
         code, first = scan(stop_after=3)                      # the clock runs out after the second window: 128 bytes
-        self.assertEqual(code, 1)
+        self.assertEqual(code, 0, "a stop at the budget is a valid answer for what it covered, not a failed run")
         self.assertIs(first["scanned"]["complete"], False)
         self.assertEqual(first["scanned"]["end"], 128)
         self.assertIn("start=128", first["scanned"]["stopped"])
@@ -182,10 +182,14 @@ class SigCarve(Case):
     def test_a_results_file_is_never_replaced_by_a_later_scan_of_the_same_question(self):
         data = b"".join(b"\0" * 30 + PNG for _ in range(20))
         other = b"".join(PNG + b"\0" * 30 for _ in range(20))            # the same size, the headers elsewhere
-        first = self.scan(data, 64, "PNG", max_hits=2).json["signatures"]["PNG"]["all_results"]
+        one = self.scan(data, 64, "PNG", max_hits=2).json["signatures"]["PNG"]
+        first = one["all_results"]
+        self.assertEqual(one["earlier_answers"], 0)
         kept = self.read(first)
         self.assertEqual(self.scan(data, 64, "PNG", max_hits=2).json["signatures"]["PNG"]["all_results"], first)
-        second = self.scan(other, 64, "PNG", max_hits=2).json["signatures"]["PNG"]["all_results"]
+        two = self.scan(other, 64, "PNG", max_hits=2).json["signatures"]["PNG"]
+        second = two["all_results"]
+        self.assertEqual(two["earlier_answers"], 1)
         self.assertNotEqual(first, second)
         self.assertTrue(second.endswith(".2.jsonl"), second)
         self.assertEqual(self.read(first), kept)

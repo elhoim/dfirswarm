@@ -16,7 +16,10 @@ not rediscover it. It names the container from its signature, reads an E01's
 acquisition record (`ewfinfo`), runs `mmls` and `fsstat`, and returns each volume's offset in
 sectors and bytes. Treat it as a probe. `partition_table` is true (mmls read
 one), false (mmls ran and recognised none: that does not show there is none) or
-`unknown` (mmls was missing, timed out or was refused). The programs' whole
+`unknown` (mmls was missing, timed out or was refused, mmls failed without saying
+why and `img_stat` does not open the image, or `img_stat` says the Sleuth Kit opened
+a VHD, QCOW2 or other container as raw, so its offsets belong to the container's
+bytes: convert or attach it first). The programs' whole
 output is kept in files (`raw_outputs`). Preserve it for any layout you rely on.
 
 **Know the container.** `file_type` reads the first bytes and says whether they

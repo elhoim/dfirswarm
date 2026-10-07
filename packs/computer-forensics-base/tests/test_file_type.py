@@ -192,11 +192,15 @@ class FileType(Case):
     def test_a_results_file_is_never_replaced_by_a_later_walk_of_the_same_directory(self):
         for i in range(8):
             self.write("d/f%d.txt" % i, "text %d\n" % i)
-        first = self.look(limit=2).json["all_results"]
+        one = self.look(limit=2).json
+        first = one["all_results"]
+        self.assertEqual(one["earlier_answers"], 0)
         kept = self.read(first)
         self.assertEqual(self.look(limit=2).json["all_results"], first, "the same answer again is the file that is there")
         self.write("d/f3.txt", "other bytes\n")                      # the same walk, a different answer
-        second = self.look(limit=2).json["all_results"]
+        two = self.look(limit=2).json
+        second = two["all_results"]
+        self.assertEqual(two["earlier_answers"], 1)
         self.assertNotEqual(first, second)
         self.assertTrue(second.endswith(".2.jsonl"), second)
         self.assertEqual(self.read(first), kept)
