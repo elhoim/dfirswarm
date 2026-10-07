@@ -31,5 +31,22 @@
   "by": "s5d1003",
   "at": "2026-10-07T12:00:00.000Z",
   "version": 2,
-  "sha256": "15b54262f4b7c2fe9935c51ee15ec787f0b8b78574eb2d34b3eb06973ba28b5f"
+  "sha256": "15b54262f4b7c2fe9935c51ee15ec787f0b8b78574eb2d34b3eb06973ba28b5f",
+  "requires": [],
+  "use": {
+    "extensions": [
+      ".dmp",
+      ".mem",
+      ".raw",
+      ".vmem",
+      ".lime",
+      ".dat"
+    ],
+    "names": [
+      "WebCacheV01.dat",
+      "index.dat",
+      "pagefile.sys",
+      "hiberfil.sys"
+    ]
+  }
 }

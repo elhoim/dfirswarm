@@ -31,8 +31,22 @@
   "by": "sfcc303",
   "at": "2026-10-07T12:00:00.000Z",
   "version": 3,
-  "sha256": "6c9512ed76bc068c457680b4c5eba5a73fdf438a637ada0eb1a4c08a65bf945b",
+  "sha256": "4588b2fd85ff6f948e8935f95f2ef6f7e60b52b083993c6d7d8bc9c640fefe16",
   "requires": [
     "icat"
-  ]
+  ],
+  "use": {
+    "extensions": [
+      ".e01",
+      ".raw",
+      ".dd",
+      ".img"
+    ],
+    "magic": [
+      {
+        "offset": 0,
+        "hex": "455646090d0aff00"
+      }
+    ]
+  }
 }

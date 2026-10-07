@@ -3092,7 +3092,7 @@ type StreamOut = {
   icat_exit_status: number;
   stderr_file: string | null;
   stderr_bytes: number;
-  partial_output?: string;
+  partial_file?: string;
   partial_bytes?: number;
   error?: string;
 };
@@ -3134,7 +3134,7 @@ test("extract_stream calls a failed icat a failure: what it wrote is kept as .pa
     const out = failed(failure) as unknown as StreamOut;
     assert.equal(out.status, "failed");
     assert.equal(out.icat_exit_status, 1);
-    assert.equal(out.partial_output, "work/s1/x.bin.partial");
+    assert.equal(out.partial_file, "work/s1/x.bin.partial");
     assert.equal(out.partial_bytes, 13);
     assert.equal(await exists(join(cwd, "work", "s1", "x.bin")), false, "no file passes for an extraction");
     assert.equal(await readFile(join(cwd, "work", "s1", "x.bin.partial"), "utf8"), "partial bytes");
@@ -3164,4 +3164,25 @@ test("extract_stream never overwrites a file, never writes under inputs/ or outs
     }
     assert.equal(await exists(join(cwd, "icat-args")), false, "a refused call never reaches icat");
   });
+});
+
+// --- manifests ------------------------------------------------------------------
+
+test("every windows-forensics tool manifest declares the programs its script runs, and says what it needs the engine for", async () => {
+  // None of the twenty manifests had `requires`, so an image chosen from the manifests could lack the program a tool calls
+  // (tests/recipe.test.sh scans only tool-library/). sigma_hunt needs ONE of two engines and declares neither: its description says so.
+  const programs = ["fls", "icat", "istat", "img_stat", "mmls", "esedbexport", "yara", "vshadowinfo", "ewfexport", "sqlite3", "vol"];
+  const dirs = await readdir(WIN);
+  assert.equal(dirs.length, 20);
+  for (const name of dirs.sort()) {
+    const manifest = JSON.parse(await readFile(join(WIN, name, "manifest.json"), "utf8")) as { entry: string; requires?: string[]; description: string; use?: unknown };
+    const script = await readFile(join(WIN, name, manifest.entry), "utf8");
+    assert.ok(Array.isArray(manifest.requires), `${name}: requires is declared (an empty list says none)`);
+    const used = programs.filter((p) => new RegExp(`["']${p}["']\\s*[,\\]]`).test(script) || new RegExp(`which\\(["']${p}["']\\)`).test(script));
+    for (const p of used) assert.ok(manifest.requires?.includes(p), `${name} runs ${p} and does not declare it`);
+    for (const p of manifest.requires ?? []) assert.ok(programs.includes(p), `${name}: ${p} is declared but is not a program this check knows`);
+  }
+  const sigma = JSON.parse(await readFile(join(WIN, "sigma_hunt", "manifest.json"), "utf8")) as { requires: string[]; description: string };
+  assert.deepEqual(sigma.requires, []);
+  assert.match(sigma.description, /Zircolite or Hayabusa; either is enough/);
 });

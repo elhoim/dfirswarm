@@ -25,5 +25,13 @@
   "sha256": "a4fbf5455b91d7223948b5e2036d32ebd5507b42706e8c648af3da7234a502cf",
   "requires": [
     "vshadowinfo"
-  ]
+  ],
+  "use": {
+    "extensions": [
+      ".raw",
+      ".dd",
+      ".img",
+      ".vol"
+    ]
+  }
 }

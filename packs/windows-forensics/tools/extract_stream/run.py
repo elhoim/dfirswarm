@@ -130,8 +130,8 @@ def main():
         partial = Path(str(dest) + ".partial")
         os.replace(dest, partial)
         answer.update({"status": "failed", "error": "icat failed" if not timed_out else "icat did not finish in time",
-                       "partial_output": os.path.relpath(partial, Path.cwd().resolve()), "partial_bytes": size,
-                       "note": "What icat wrote before it stopped is kept as partial_output; it is not an extraction."})
+                       "partial_file": os.path.relpath(partial, Path.cwd().resolve()), "partial_bytes": size,
+                       "note": "What icat wrote before it stopped is kept as partial_file; it is not an extraction."})
         print(json.dumps(answer, indent=2))
         raise SystemExit(1)
     answer.update({"status": "complete", "output": output, "size": size, "sha256": h.hexdigest()})

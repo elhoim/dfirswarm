@@ -47,5 +47,18 @@
   "at": "2026-10-07T12:00:00.000Z",
   "version": 2,
   "sha256": "79019f5b05fae5be644150d1697ed13ac7c81b1f8a69bec2fa8bc0f99e37f300",
-  "requires": []
+  "requires": [],
+  "use": {
+    "extensions": [
+      ".dmp",
+      ".mem",
+      ".raw",
+      ".vmem",
+      ".evtx"
+    ],
+    "names": [
+      "pagefile.sys",
+      "hiberfil.sys"
+    ]
+  }
 }
