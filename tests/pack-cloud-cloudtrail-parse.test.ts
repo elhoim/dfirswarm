@@ -748,7 +748,7 @@ test("a read that ended early publishes out_file as <name>.partial and never und
     const cut = body(await tool(TRAIL, cwd, { path: "work/ev/cut.json.gz", link_sessions: false, out_file: "work/s1/all.jsonl", limit: 5 }));
     assert.equal(cut.status, "partial");
     assert.match(cut.records_file_status, /^partial/);
-    assert.match(cut.complete_records, /all\.partial\.jsonl$/);
+    assert.match(cut.partial_records, /all\.partial\.jsonl$/);
     assert.equal(await exists(join(cwd, "work/s1/all.jsonl")), false);
     assert.equal(await exists(join(cwd, "work/s1/all.partial.jsonl")), true);
     await put(cwd, "work/ev/whole.json.gz", whole);
@@ -793,5 +793,49 @@ test("the note says the number of calls, not that it names every candidate", asy
     const out = await run(cwd, { "a.json": trail(goodAssume(), action()) });
     assert.doesNotMatch(out.note, /names every candidate/);
     assert.match(out.note, /lists the matching calls up to a cap, with their count/);
+  });
+});
+
+
+// ---- delta review of #111 -------------------------------------------------------------------------------------------------------------
+
+test("copies of one call that disagree on the caller or the returned key are not merged in silence: the session is unresolved and says why, whatever the order of the files", async () => {
+  await withDir(async (cwd) => {
+    const mine = goodAssume({ eventID: "d-1", sharedEventID: "shared-d" });
+    const theirs = goodAssume({ eventID: "d-2", sharedEventID: "shared-d", userIdentity: MALLORY });
+    for (const files of [{ "a.json": trail(mine, theirs, action()) }, { "a.json": trail(theirs, mine, action()) }]) {
+      const out = await run(cwd, files);
+      const link = origin(out, "act-1");
+      assert.equal(link.label, "unresolved", JSON.stringify(link).slice(0, 300));
+      assert.match(link.reason, /disagree on the caller or the returned access key id/);
+      assert.equal(link.candidates[0].copies.some((c: Json) => c.differs_from_the_first), true);
+      assert.equal("caller" in link, false, "no caller is chosen");
+    }
+  });
+});
+
+test("linking twenty thousand uses to five thousand calls of one session ARN takes seconds: the lookups are by index and counted once", async () => {
+  await withDir(async (cwd) => {
+    const records: Ev[] = [];
+    for (let i = 0; i < 5000; i++) records.push(goodAssume({ eventID: `c-${i}`, eventTime: `2026-02-14T09:${String(Math.floor(i / 60) % 60).padStart(2, "0")}:${String(i % 60).padStart(2, "0")}Z`, responseElements: assumedResponse(`ASIAEXAMPLEKEY${String(i).padStart(4, "0")}`, SESSION_ARN) }));
+    for (let j = 0; j < 20000; j++) {
+      records.push(action({ eventID: `u-${j}`, eventTime: `2026-02-14T11:${String(Math.floor(j / 60) % 60).padStart(2, "0")}:${String(j % 60).padStart(2, "0")}Z`, userIdentity: session(SESSION_ARN, `ASIAOTHER${String(j).padStart(8, "0")}`, `2026-02-14T08:${String(Math.floor(j / 60) % 60).padStart(2, "0")}:${String(j % 60).padStart(2, "0")}Z`) }));
+    }
+    await put(cwd, "work/ev/many.json", trail(...records));
+    const started = Date.now();
+    const out = body(await tool(TRAIL, cwd, { path: "work/ev/many.json", limit: 5 }));
+    assert.ok(Date.now() - started < 45_000, `the linking took ${Date.now() - started} ms`);
+    assert.equal(out.record_count, 25000);
+    assert.equal(out.session_links.assume_calls_indexed, 5000);
+  });
+});
+
+test("a session from GetSessionToken has no AssumeRole call and the answer says that is not a gap; a not_found that names a different key says it once", async () => {
+  await withDir(async (cwd) => {
+    const derived = goodAssume({ responseElements: assumedResponse("ASIAEXAMPLEOTHER00", SESSION_ARN) });
+    const out = await run(cwd, { "a.json": trail(derived, action()) });
+    const reason: string = origin(out, "act-1").reason;
+    assert.equal(reason.split("returned a different access key id").length - 1, 1, reason);
+    assert.match(out.note, /GetSessionToken or GetFederationToken/);
   });
 });

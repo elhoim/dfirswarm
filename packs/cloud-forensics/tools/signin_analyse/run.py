@@ -427,6 +427,8 @@ def _drop_unpublished():
 
 
 def _on_signal(signum, _frame):
+    if hasattr(signal, "setitimer"):
+        signal.setitimer(signal.ITIMER_REAL, 0)       # a pattern timer must not fire inside the cleanup
     _drop_unpublished()
     os._exit(128 + signum)
 
@@ -561,6 +563,7 @@ class SecretValues:
         except OSError as exc:
             raise SecretValuesRefused("the values file could not be created: %s (%s)" % (self.shown, describe(exc)))
         self._fh = os.fdopen(fd, "w", encoding="utf-8", errors="backslashreplace")
+        CLEANUP.append(self.close)          # a signal flushes what was written, so the originals the answer never named are not lost unannounced
 
     def add(self, finding_id, locator, value):
         if not self.enabled:
@@ -594,6 +597,8 @@ class SecretValues:
 # A filter a caller gives (identity, user, events, operations) is matched against the text as it is printed, never
 # against a withheld original: a count of matches would tell the caller one bit of it per call.
 
+# a value under such a name is a digest of something, not a key: the length rules do not apply to it (x-amz-checksum-sha256)
+CHECKSUM_NAME = re.compile(r"(?i)checksum|digest|sha[0-9]|md5|etag|crc[0-9]")
 REDACTED = re.compile(r"^\W*(?:hidden_due_to_security_reasons|redacted|masked|removed|\*+|x{3,}|\[\])\W*$", re.I)
 NOT_A_VALUE = frozenset(("true", "false", "null", "none", "nil", "undefined", "required", "optional", "enabled", "disabled"))
 SENSITIVE_EXACT = {
@@ -648,28 +653,34 @@ _STRONG = (r"password|passwd|passphrase|secret|api[_-]?key|access[_-]?token|refr
            r"lm[_-]?hash|client[_-]?secret|secret[_-]?access[_-]?key|secret[_-]?key|secret[_-]?text|secret[_-]?value|token|signature|plaintext")
 _SHORT = r"(?<![A-Za-z0-9])(?:pwd|pass|sig|pin|otp|sas)"
 _SEP = r"""(?:\\*["']|["'])?\s*(?:[:=]|%3[dD]|%3[aA])\s*"""
-_NAME = r"(?:%s|%s)" % (_STRONG, _SHORT)
+# a short name is a name only as `pwd=value` or `pass:value`: "pass: 3 attempts" is prose
+_SEPS = r"""(?:\\*["']|["'])?(?:\s*(?:=|%3[dD])\s*|:(?=\S))"""
+_NAME = r"(?:(?:%s)%s|%s%s)" % (_STRONG, _SEP, _SHORT, _SEPS)
 ARN_TAIL = re.compile(r"arn:[A-Za-z0-9-]+:[A-Za-z0-9-]+:[A-Za-z0-9-]*:[0-9]*:$")
 SCHEMES = ("bearer", "basic", "digest", "negotiate", "ntlm")
 TOKEN_RULES = [
-    ("a JSON Web Token", re.compile(r"eyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{2,}(?:\.[A-Za-z0-9_-]*)?"), 0),
+    # anchored at the start of a run and possessive, so that a megabyte of `eyJ` is read once, not once per `eyJ`
+    ("a JSON Web Token", re.compile(r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{6,}+\.[A-Za-z0-9_-]{2,}+(?:\.[A-Za-z0-9_-]*+)?"), 0),
+    ("a JSON Web Encryption token", re.compile(r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{6,}+(?:\.[A-Za-z0-9_-]*+){4}"), 0),
+    ("a password in a URL", re.compile(r"(?i)(?<![A-Za-z0-9+.-])[a-z][a-z0-9+.-]{1,20}://[^\s:/@\"'<>\\]{0,256}:([^\s/\"'<>\\]{1,1024})@(?=[^\s/@\"'<>]{1,255})"), 1),
+    ("an Azure Functions key", re.compile(r"""(?i)(?:x-functions-key["']?\s*[:=]\s*(?:\\*["'])?|[?&;]code=)([A-Za-z0-9_/+=-]{16,512})"""), 1),
     ("a private key block", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----(?:[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----|[\s\S]*)"), 0),
     ("a base64 block of key lines", re.compile(r"(?:[A-Za-z0-9+/]{60,80}={0,2}\r?\n){2,}[A-Za-z0-9+/]{2,80}={0,2}"), 0),
     ("an authorization header value", re.compile(
         r"""(?i)authorization["']?\s*[:=]\s*(?:\\*["'])?(?:(?:bearer|basic|digest|negotiate|ntlm|token)\s+)?([^\s"'&,;\\]{1,4096})"""), 1),
     ("a cookie header value", re.compile(r"""(?i)cookie["']?\s*[:=]\s*(?:\\*["'])?([^\r\n"'\\]{1,4096})"""), 1),
-    ("a scheme and its credential", re.compile(r"(?i)\b(?:bearer|basic|digest|negotiate|ntlm)\s+([A-Za-z0-9._~+/=-]{3,4096})"), 1),
+    ("a scheme and its credential", re.compile(r"(?i)\b(?:bearer|basic)\s+([A-Za-z0-9._~+/=-]{3,4096})|\b(?:negotiate|ntlm|digest)\s+([A-Za-z0-9._~+/=-]{24,4096})"), -2),
     ("a value assigned to a credential name (quoted)", re.compile(
-        r"""(?i)%s%s\\*(["'])(.{1,4096}?)(?=\\*\1)""" % (_NAME, _SEP)), 2),
+        r"""(?i)%s\\*(["'])(.{1,4096}?)(?=\\*\1)""" % _NAME), 2),
     ("a value assigned to a credential name", re.compile(
-        r"""(?i)%s%s((?:(?!%%26)[^\s"'&<>\\]){1,4096})""" % (_NAME, _SEP)), 1),
+        r"""(?i)%s((?:(?!%%26)[^\s"'&<>\\]){1,4096})""" % _NAME), 1),
     ("a value given to a credential switch", re.compile(
         r"""(?i)(?<![A-Za-z0-9_])-(?:password|pass|pwd|passphrase|secret|clientsecret|apikey|accesstoken|token)\s+(?:\\*(["'])(.{1,4096}?)(?=\\*\1)|([^\s"'-][^\s"']{0,4095}))"""), -1),
     ("a secret given to ConvertTo-SecureString", re.compile(
         r"""(?i)ConvertTo-SecureString\s+(?:\\*(["'])(.{1,4096}?)(?=\\*\1)|([^\s"'-][^\s"']{0,4095}))"""), -1),
     ("a hash pair of an account database", re.compile(r"(?<![0-9a-fA-F])[0-9a-fA-F]{32}:([0-9a-fA-F]{32})(?![0-9a-fA-F])"), 1),
     ("a token of a known family", re.compile(
-        r"(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{50,}|xox[abprs]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z_-])|"
+        r"(?:GOCSPX-[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{50,}|xox[abprs]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z_-])|"
         r"ya29\.[0-9A-Za-z_-]{20,}|1//0[0-9A-Za-z_-]{30,}|(?:IQoJb3JpZ2lu|FQoGZXIvYXdz|FwoGZXIvYXdz)[A-Za-z0-9+/=]{40,}|"
         r"[A-Za-z0-9_.~-]{3}[0-9]Q~[A-Za-z0-9_.~-]{30,}|[01]\.A[A-Za-z0-9_-]{50,}|[sr]k_(?:live|test)_[A-Za-z0-9]{16,})"), 0),
 ]
@@ -696,37 +707,51 @@ def _random_like(run):
 # alternative is a necessary condition of at least one rule; tests/pack-cloud-shared.test.ts holds the two paths equal.
 _QUICK = re.compile(r"eyJ|-----BEGIN|\n|authorization|cookie|bearer|basic|digest|negotiate|ntlm|pass|pwd|secret|token|key|signature|sig|"
                     r"plaintext|hash|pin|otp|sas|securestring|gh[pousr]_|github_pat_|xox|AIza|ya29\.|1//0|IQoJb|FQoG|FwoG|Q~|[01]\.A|[sr]k_|"
+                    r"://|gocspx|functions|code=|"
                     r"[A-Za-z0-9+/]{32}|[A-Za-z0-9+/_-]{128}", re.I)
 
 
 _CLEAN = set()                    # short texts already judged to hold nothing (names, addresses and ids repeat across a log)
+LONG_TEXT = 1 << 16               # a text this long is scanned with the deadline in view
 
 
-def token_spans(text):
-    """(start, end, why) of each stretch of `text` shaped like a credential, in order and not overlapping."""
-    if text in _CLEAN:
+def token_spans(text, shapes=True):
+    """(start, end, why) of each stretch of `text` shaped like a credential, in order and not overlapping. `shapes` False leaves
+    out the rules that recognise a key by its length alone (a value that is named a checksum or a digest is not scanned for them)."""
+    if shapes and text in _CLEAN:
         return []
-    spans = _spans(text) if _QUICK.search(text) else []
-    if not spans and len(text) <= 256 and len(_CLEAN) < 100000:
+    spans = _spans(text, shapes) if _QUICK.search(text) else []
+    if shapes and not spans and len(text) <= 256 and len(_CLEAN) < 100000:
         _CLEAN.add(text)
     return spans
 
 
-def _spans(text):
+def _name_before(text, start, at):
+    """The letters and digits of the name an assigned value follows (`nextToken=` gives `nexttoken`)."""
+    return re.sub(r"[^a-z0-9]", "", text[max(0, at - 64):at].lower())
+
+
+def _spans(text, shapes=True):
     spans = []
+    big = len(text) > LONG_TEXT
     for why, rx, group in TOKEN_RULES:
+        if big and out_of_time():
+            return [(0, len(text), "text not scanned: the time limit ended the scan")]      # fail closed
         for m in rx.finditer(text):
-            if "assigned to a credential name" in why and ARN_TAIL.search(text[max(0, m.start() - 120):m.start()]):
-                continue                                  # arn:aws:secretsmanager:...:secret:NAME is a name, not a value
-            groups = (1, 2, 3) if group == -1 else (group,)
+            if "assigned to a credential name" in why:
+                if ARN_TAIL.search(text[max(0, m.start() - 120):m.start()]):
+                    continue                              # arn:aws:secretsmanager:...:secret:NAME is a name, not a value
+                if _name_before(text, m.start(), m.start(m.lastindex or 0)).endswith(NOT_SECRET_TOKEN):
+                    continue                              # nextToken=, pageToken=, clientToken=: a position or an idempotency key
+            groups = (1, 2, 3) if group == -1 else ((1, 2) if group == -2 else (group,))
             for g in groups:
                 if g and m.group(g) is None:
                     continue
                 start, end = m.span(g)
                 value = text[start:end]
-                if g and (REDACTED.match(value) or value.lower() in NOT_A_VALUE):
+                if g and (REDACTED.match(value) or value.lower() in NOT_A_VALUE or value.startswith(("${", "{{"))):
                     continue
-                if why == "a scheme and its credential" and not (re.search(r"[0-9+/=_.~-]", value) or len(value) >= 16):
+                if why == "a scheme and its credential" and g == 1 and not (re.search(r"[0-9+/=_.~-]", value) or len(value) >= 16):
                     continue                              # "basic authentication" is prose, "Basic dXNlcjpwYXNz" is not
                 if g == 1 and group == -1 and len(m.groups()) >= 2 and m.group(1) in ("'", '"'):
                     continue                              # group 1 of the switch rules is the quote
@@ -734,10 +759,11 @@ def _spans(text):
     for m in _B64_RUN.finditer(text):
         if _random_like(m.group(0)):
             spans.append((m.start(), m.end(), "a long unbroken base64-like run"))
-    for why, rx, check in SHAPES:
-        for m in rx.finditer(text):
-            if not check or _random_like(m.group(0)):
-                spans.append((m.start(), m.end(), why))
+    if shapes:
+        for why, rx, check in SHAPES:
+            for m in rx.finditer(text):
+                if not check or _random_like(m.group(0)):
+                    spans.append((m.start(), m.end(), why))
     spans.sort()
     merged = []
     for s in spans:
@@ -818,9 +844,9 @@ class Withheld:
             return "list of %d items" % len(value)
         return "a number"
 
-    def clean(self, value, locator, pointer="", depth=0):
+    def clean(self, value, locator, pointer="", depth=0, shapes=True):
         if isinstance(value, str):
-            return self.clean_text(value, locator, pointer)
+            return self.clean_text(value, locator, pointer, shapes)
         if depth > MAX_DEPTH and isinstance(value, (dict, list)):
             self.note(locator, pointer, "nested deeper than %d levels" % MAX_DEPTH, len(json.dumps(value, default=str)), value)
             return "[withheld: nested deeper than %d levels, %s]" % (MAX_DEPTH, self.size_of(value))
@@ -845,19 +871,19 @@ class Withheld:
                     self.note(locator, point, "credential-named field", len(v) if isinstance(v, str) else len(json.dumps(v, default=str)), v)
                     out[safe_key] = "[withheld: credential-named field, %s]" % self.size_of(v)
                 else:
-                    out[safe_key] = self.clean(v, locator, point, depth + 1)
+                    out[safe_key] = self.clean(v, locator, point, depth + 1, shapes and not CHECKSUM_NAME.search(ks))
             return out
         if isinstance(value, list):
-            return [self.clean(v, locator, "%s/%d" % (pointer, i), depth + 1) for i, v in enumerate(value)]
+            return [self.clean(v, locator, "%s/%d" % (pointer, i), depth + 1, shapes) for i, v in enumerate(value)]
         return value
 
-    def clean_text(self, text, locator, pointer):
+    def clean_text(self, text, locator, pointer, shapes=True):
         if len(text) < 5:
             return text
         if len(text) > MAX_SCAN_CHARS:
             self.note(locator, pointer, "text longer than 1 MiB", len(text), text)
             return WITHHELD_TEXT % ("text longer than 1 MiB", len(text))
-        spans = token_spans(text)
+        spans = token_spans(text, shapes)
         if not spans:
             return text
         out, at = [], 0
@@ -1258,6 +1284,10 @@ class Source:
         out = []
         got = 0
         while got < want and not self._ended:
+            if out_of_time():                 # millions of empty members are many steps and no output: the deadline is checked here too
+                self.timed_out = True
+                self._ended = True
+                break
             if not self._pending:
                 raw = self._raw.read(1 << 18)
                 if not raw:
@@ -2149,6 +2179,8 @@ def main():
                     upn = val(flat, *UPN_NAMES)
                     display = val(flat, *DISPLAY_NAMES)
                     uid = val(flat, "userId", "User ID")
+                    if isinstance(uid, str) and not uid.strip("0-{} "):
+                        uid = None            # the nil id is "no id", not an account that every such record shares
                     sp = val(flat, *SP_NAMES)
                     account = upn or display or (("service principal " + str(sp)) if sp else None)
                     raw_time, time_key, named_utc = time_of(flat)
@@ -2314,7 +2346,7 @@ def main():
         "file_problems": [scrub(p) for p in problems],
         "pagination_markers": pagination,
         "events": events_page.page, "event_count": counts["events"], "events_inline": len(events_page.page),
-        "complete_events": pages["events"].get("all_results"),
+        ("partial_events" if read_cut else "complete_events"): pages["events"].get("all_results"),
         "events_file_status": ("partial: the read ended early or part of the input was not read (see status)" if read_cut else "holds every event that was read"),
         "inline_limited": pages["events"]["truncated"],
         "accounts": analysis["users"],
@@ -2333,7 +2365,7 @@ def main():
         "note": "Every list above is a lead, not a detection, and an empty list excludes nothing: the export may be a slice of the account's activity. Impossible travel is a "
                 "hypothesis: a VPN, a carrier's routing and a cloud-hosted client all produce it, and a location is the provider's estimate for an address. A burst needs three or "
                 "more consecutive failures within burst_window_seconds of a success for the same account and application; an interrupted sign-in is a prompt, not a failure, and is "
-                "counted apart (prompts_before_success). Accounts are told apart by their object id, else their user name folded to lower case, never by a display name. An address seen "
+                "counted apart (prompts_before_success). Accounts are told apart by their object id, else their user name folded to lower case; a display name is the key only when a record carries nothing else. An address seen "
                 "once says only that it occurs once in these events (and the account needs more than two addresses). Events with equal times are ordered by their place in the file. "
                 "A success recorded as single-factor is a lead: read the applied policies, the authentication details and the client before calling it a bypass. result is this tool's "
                 "gloss for a code; failure_reason is the provider's. Service-principal sign-ins are analysed under their own name. A filter looks at the text as it is printed.",

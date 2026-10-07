@@ -429,7 +429,8 @@ test("a read that ended early publishes out_file as <name>.partial in all three 
       await put(cwd, "work/ev/cut.json.gz", whole.subarray(0, Math.floor(whole.length * 0.7)));
       const cut = body(await tool(script, cwd, { path: "work/ev/cut.json.gz", out_file: "work/s1/all.jsonl", limit: 5 }));
       assert.equal(cut.status, "partial", name);
-      const where = cut.complete_records ?? cut.complete_events;
+      const where = cut.partial_records ?? cut.partial_events;
+      assert.equal(cut.complete_records ?? cut.complete_events, undefined, `${name}: a partial result is not named complete`);
       assert.match(where, /all\.partial\.jsonl$/, name);
       assert.equal(await exists(join(cwd, "work/s1/all.jsonl")), false, `${name}: the requested name holds only a finished result`);
       assert.equal(await exists(join(cwd, "work/s1/all.partial.jsonl")), true, name);
@@ -466,4 +467,64 @@ test("a file of nothing but white space is empty and not a complete read of noth
       assert.ok(!JSON.stringify(out).includes("example.invalid"), "a next-page link is never printed");
     }
   });
+});
+
+
+test("a value named a checksum or a digest is not taken for a key by its length: a base64 SHA-256 and SHA-512 stay, the same text in a field of another name is withheld", async () => {
+  const sha256 = Buffer.from(createHash("sha256").update("a").digest()).toString("base64");
+  const sha512 = Buffer.from(createHash("sha512").update("a").digest()).toString("base64");
+  await withDir(async (cwd) => {
+    await put(cwd, "work/ev/t.json", trail(ct({ eventID: "c-1", eventSource: "s3.amazonaws.com", eventName: "PutObject", userIdentity: ALICE, requestParameters: { "x-amz-checksum-sha256": sha256, ChecksumSHA512: sha512, contentMD5: "1B2M2Y8AsgTpgAmY7PhCfg==", other: sha256 } })));
+    const out = body(await tool(TRAIL, cwd, { path: "work/ev/t.json", link_sessions: false }));
+    const request = out.records[0].request;
+    assert.equal(request["x-amz-checksum-sha256"], sha256);
+    assert.equal(request.ChecksumSHA512, sha512);
+    assert.match(request.other, /withheld/);
+  });
+});
+
+test("a long string of the shape of a token costs time in proportion to its length, and a scan that meets the deadline withholds what it did not scan", async () => {
+  await withDir(async (cwd) => {
+    const blob = "eyJ".repeat(333_333);
+    const records = [1, 2, 3].map((i) => ct({ eventID: `big-${i}`, eventSource: "s3.amazonaws.com", eventName: "PutObject", userIdentity: ALICE, requestParameters: { blob } }));
+    await put(cwd, "work/ev/t.json", trail(...records));
+    const started = Date.now();
+    const out = body(await tool(TRAIL, cwd, { path: "work/ev/t.json", link_sessions: false, time_limit_seconds: 5 }));
+    assert.ok(Date.now() - started < 40_000, `three 1 MB records took ${Date.now() - started} ms`);
+    assert.equal(out.coverage.records_read, 3);
+    // Behind a long deadline-less scan the other tools take the same text through the same rules.
+    await put(cwd, "work/ev/u.json", JSON.stringify([{ Id: "1", Operation: "Send", UserId: "a@b.c", CreationTime: "2026-02-14T09:00:00Z", Pad: blob }]));
+    const started2 = Date.now();
+    body(await tool(UAL, cwd, { path: "work/ev/u.json" }));
+    assert.ok(Date.now() - started2 < 40_000, `ual_parse took ${Date.now() - started2} ms`);
+  });
+});
+
+test("SIGTERM flushes the values file: what the run withheld before the signal is in the file the job seals", async () => {
+  const secret = "Hunter2-correct-horse-9";
+  for (const [name, script, make] of [
+    ["cloudtrail_parse", TRAIL, (n: number) => JSON.stringify({ Records: Array.from({ length: n }, (_, i) => ct({ eventID: `g-${i}`, eventSource: "s3.amazonaws.com", eventName: "GetObject", userIdentity: ALICE, requestParameters: i === 0 ? { password: secret } : {} })) })],
+    ["ual_parse", UAL, (n: number) => JSON.stringify(Array.from({ length: n }, (_, i) => ({ Id: `u-${i}`, Operation: "Send", UserId: "a@b.c", CreationTime: "2026-02-14T09:00:00Z", ...(i === 0 ? { Password: secret } : {}) })))],
+    ["signin_analyse", SIGNIN, (n: number) => JSON.stringify({ value: Array.from({ length: n }, (_, i) => ({ id: `g-${i}`, createdDateTime: "2026-02-14T09:00:00Z", userPrincipalName: `u${i % 50}@example.org`, userId: `id-${i % 50}`, status: { errorCode: 0 }, ...(i === 0 ? { password: secret } : {}) })) })],
+  ] as Array<[string, string, (n: number) => string]>) {
+    await withDir(async (cwd) => {
+      await put(cwd, "work/ev/big.json", make(300_000));
+      await asJob(script, cwd, { path: "work/ev/missing" });
+      const { child, done } = spawnTool(script, cwd, { path: "work/ev/big.json", write_values: true, time_limit_seconds: 300, ...(name === "cloudtrail_parse" ? { link_sessions: false } : {}) }, { JOB_ID: "jflush", OUT: join(cwd, "out") });
+      // The paged result is opened at the 501st row, so once a file is there the first record, which holds the secret, was withheld.
+      let started = false;
+      for (let i = 0; i < 1200 && !started; i++) {
+        await new Promise((r) => setTimeout(r, 25));
+        started = (await readdir(join(cwd, "out", "tool-output")).catch(() => [])).length > 0;
+      }
+      assert.ok(started, `${name}: the run reached its 501st row`);
+      child.kill("SIGTERM");
+      const run = await done;
+      if (run.code === 0) return; // the run finished before the signal: nothing to show
+      assert.equal(run.code, 143, name);
+      const file = (await readdir(join(cwd, "out"))).find((f) => f.endsWith("-values.jsonl"));
+      assert.ok(file, `${name}: the values file is kept`);
+      assert.ok((await readFile(join(cwd, "out", file!), "utf8")).includes(secret), `${name}: the withheld original reached the file before the process ended`);
+    });
+  }
 });
