@@ -7,7 +7,7 @@ tools: [signin_analyse, cloudtrail_parse]
 requires_host: []
 ---
 
-Use when you hold Google Workspace exports (login, admin, OAuth and token, Drive, Groups, mobile, Gmail) and must say what they show about access or activity. Not for Google Cloud audit logs (Workspace and Google Cloud keep different audit sources: say that no Google Cloud reader was available), and not for grants, delegation, sharing or forwarding detail (`google/workspace-access`).
+Use when you hold Google Workspace exports (login, admin, OAuth and token, Drive, Groups, mobile, Gmail) and must say what they show about access or activity. Not for Google Cloud audit logs (Workspace and Google Cloud keep different audit sources: say that no Google Cloud reader was available), and not for grants, delegation, sharing or forwarding detail (`google/workspace-access`). Offline: supplied exports only; never authenticate to the tenant.
 
 **Inventory each source on its own** (`logs/what-exists`, `logs/sources`): edition and privileges, filters, collection interval, pages, excluded or unsupported events, failures. Missing coverage limits a particular question; look at the other supplied sources before answering not determinable.
 
