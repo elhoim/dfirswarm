@@ -661,7 +661,7 @@ inp, out = arg("--input"), arg("--output")
 layout = sorted(os.path.relpath(os.path.join(d, f), inp) for d, _, fs in os.walk(inp) for f in fs)
 with open(out, "w") as fh:
     for i in range(3):
-        fh.write(json.dumps({"n": i, "input": inp, "layout": layout, "argv": a}) + "\n")
+        fh.write(json.dumps({"timestamp": "2026-02-14T09:30:0%d+0000" % i, "message": "m%d" % i, "n": i, "input": inp, "layout": layout, "argv": a}) + "\n")
 if os.environ.get("ULI_FAIL"):
     sys.stderr.write("thread panicked: " + "x" * 5000 + "\n")
     sys.exit(101)

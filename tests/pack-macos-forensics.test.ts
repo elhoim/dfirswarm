@@ -968,3 +968,273 @@ test("knowledgec_query refuses a file that is not a knowledgeC database, and say
   });
 });
 
+// --- unified_log ------------------------------------------------------------------
+
+const UL = join(MAC, "unified_log", "run.py");
+const PYTHON = spawnSync("python3", ["-c", "import sys; print(sys.executable)"], { encoding: "utf8" }).stdout.trim();
+
+type UlAnswer = {
+  status: string;
+  engine: string;
+  exit_code: number | null;
+  timed_out?: boolean;
+  command: string;
+  output: string | null;
+  output_sha256: string | null;
+  entry_count: number;
+  entries: Record<string, unknown>[];
+  entries_inline: number;
+  unparsed_lines: number;
+  records_without_entry_fields?: number;
+  decoded_coverage: {
+    lines: number;
+    json_records: number;
+    entry_records: number;
+    unparsed_lines: number;
+    records_without_entry_fields: number;
+    support_files?: unknown;
+  };
+  stderr: string | null;
+  stderr_bytes: number;
+  reader: { path?: string; version?: string | null; platform?: string };
+  staging?: { staged: boolean; files: number; bytes: number; sources: string[] } | null;
+  timeout_seconds_used: number;
+  timeout_clamped?: boolean;
+  problems: string[];
+};
+
+/** A stand-in for unifiedlog_iterator that writes what ULI_MODE says, on a PATH that holds nothing else (a Mac's own /usr/bin/log would be chosen first). */
+async function ulBin(cwd: string, apple = false): Promise<string> {
+  const bin = join(cwd, "ulbin");
+  await mkdir(bin, { recursive: true });
+  await symlink(PYTHON, join(bin, "python3")).catch(() => undefined);
+  const reader = `#!${PYTHON}
+import json, os, sys, time
+a = sys.argv[1:]
+mode = os.environ.get("ULI_MODE", "rows")
+if "--version" in a:
+    print("unifiedlog_iterator 9.9.9-test")
+    sys.exit(0)
+def arg(flag):
+    return a[a.index(flag) + 1]
+def row(i):
+    return json.dumps({"timestamp": "2026-02-14T09:30:%02d.000000+0000" % (i % 60), "eventMessage": "message %d" % i, "process": "sudo", "subsystem": "com.apple.test"})
+if %s:
+    # Apple's log: the stream goes to stdout.
+    out = sys.stdout
+else:
+    if mode == "nofile":
+        sys.exit(0)
+    out = open(arg("--output"), "w")
+if mode == "rows":
+    for i in range(3):
+        out.write(row(i) + "\\n")
+elif mode == "big":
+    for i in range(1000):
+        out.write(("{not json " + str(i) if i in (600, 700, 800, 900, 999) else row(i)) + "\\n")
+elif mode == "trailer":
+    for i in range(3):
+        out.write(row(i) + "\\n")
+    out.write(json.dumps({"finished": 1, "count": 3}) + "\\n")
+elif mode == "hang":
+    for i in range(3):
+        out.write(row(i) + "\\n")
+    out.flush()
+    time.sleep(60)
+elif mode == "empty":
+    pass
+out.flush()
+`;
+  const target = join(bin, apple ? "log" : "unifiedlog_iterator");
+  await writeFile(target, reader.replace("%s", apple ? "True" : "False"));
+  await chmod(target, 0o755);
+  return bin;
+}
+
+async function ul(cwd: string, bin: string, args: Record<string, unknown>, mode = "rows"): Promise<Run> {
+  // Only the stand-in's bin on PATH.
+  return runPy(UL, cwd, args, undefined, { ...AGENT, PATH: bin, ULI_MODE: mode });
+}
+
+async function logarchive(cwd: string, name = "x.logarchive"): Promise<string> {
+  const dir = join(cwd, "work", name);
+  await mkdir(join(dir, "timesync"), { recursive: true });
+  await writeFile(join(dir, "timesync", "0000.timesync"), "");
+  return `work/${name}`;
+}
+
+/** A copy of /private/var/db: diagnostics and uuidtext side by side. */
+async function dbCopy(cwd: string, files: Record<string, string> = {}): Promise<string> {
+  const root = join(cwd, "work", "vardb");
+  await mkdir(join(root, "diagnostics", "timesync"), { recursive: true });
+  await mkdir(join(root, "uuidtext", "0A"), { recursive: true });
+  await writeFile(join(root, "diagnostics", "timesync", "0000.timesync"), "t");
+  await writeFile(join(root, "uuidtext", "0A", "B"), "u");
+  for (const [rel, content] of Object.entries(files)) {
+    await mkdir(join(root, rel, ".."), { recursive: true });
+    await writeFile(join(root, rel), content);
+  }
+  return "work/vardb";
+}
+
+test("unified_log is not complete when the reader exits 0 and wrote no output file", async () => {
+  // It said status complete, entry_count 0, exit 0.
+  await withCwd(async (cwd) => {
+    const bin = await ulBin(cwd);
+    const out = await ul(cwd, bin, { path: await logarchive(cwd), out_dir: "work/u1" }, "nofile");
+    assert.equal(out.code, 1);
+    const answer = JSON.parse(out.stdout) as UlAnswer;
+    assert.equal(answer.status, "failed");
+    assert.equal(answer.exit_code, 0, "the reader's own exit code is still said");
+    assert.equal(answer.output_sha256, null);
+    assert.ok(answer.problems.some((p) => /wrote no output file/.test(p)), JSON.stringify(answer.problems));
+  });
+});
+
+test("unified_log counts the whole stream, not the preview: malformed lines after the inline page are counted", async () => {
+  // The Apple branch stopped parsing once its inline preview was full, and the Linux branch never parsed.
+  await withCwd(async (cwd) => {
+    const bin = await ulBin(cwd);
+    const out = await ul(cwd, bin, { path: await logarchive(cwd), out_dir: "work/u2", limit: 50 }, "big");
+    const answer = JSON.parse(out.stdout) as UlAnswer;
+    assert.equal(answer.unparsed_lines, 5);
+    assert.equal(answer.entry_count, 995);
+    assert.equal(answer.entries.length, 50);
+    assert.equal(answer.decoded_coverage.lines, 1000);
+    assert.equal(answer.decoded_coverage.entry_records, 995);
+    assert.equal(answer.status, "partial", "malformed lines make the coverage partial though the reader exited 0");
+    assert.equal(answer.exit_code, 0);
+    assert.ok(answer.problems.some((p) => /5 line\(s\)/.test(p)));
+    assert.equal(answer.entries[0].process, "sudo");
+  });
+});
+
+test("unified_log keeps a record with none of an entry's fields apart from the entries, and says so", async () => {
+  await withCwd(async (cwd) => {
+    const bin = await ulBin(cwd);
+    const answer = JSON.parse((await ul(cwd, bin, { path: await logarchive(cwd), out_dir: "work/u3" }, "trailer")).stdout) as UlAnswer;
+    assert.equal(answer.entry_count, 3);
+    assert.equal(answer.decoded_coverage.json_records, 4);
+    assert.equal(answer.decoded_coverage.records_without_entry_fields, 1);
+    assert.equal(answer.status, "complete");
+    assert.ok(answer.problems.length === 0 || answer.problems.every((p) => !/failed/.test(p)));
+  });
+});
+
+test("unified_log says an output with no entries is empty, not complete", async () => {
+  await withCwd(async (cwd) => {
+    const bin = await ulBin(cwd);
+    const out = await ul(cwd, bin, { path: await logarchive(cwd), out_dir: "work/u4" }, "empty");
+    const answer = JSON.parse(out.stdout) as UlAnswer;
+    assert.equal(answer.status, "empty");
+    assert.equal(answer.entry_count, 0);
+    assert.ok(answer.problems.some((p) => /no entries/.test(p)));
+  });
+});
+
+test("unified_log refuses a link in the tree it would stage, and names it", async () => {
+  // copytree(symlinks=True) copied the link as it was and handed the reader a tree with a way out.
+  await withCwd(async (cwd) => {
+    const bin = await ulBin(cwd);
+    const path = await dbCopy(cwd);
+    await symlink("/etc", join(cwd, "work", "vardb", "uuidtext", "escape"));
+    const out = await ul(cwd, bin, { path, out_dir: "work/u5" });
+    assert.equal(out.code, 1);
+    const err = JSON.parse(out.stdout) as { error: string; link?: string };
+    assert.match(err.error, /link/);
+    assert.match(String(err.link), /uuidtext\/escape$/);
+    assert.equal(await exists(join(cwd, "work", "u5", ".logarchive-input")), false, "the staging was removed");
+    assert.equal(await exists(join(cwd, "work", "u5", "unifiedlogs.jsonl")), false, "the reader did not run");
+  });
+});
+
+test("unified_log refuses a member present in both trees with different bytes, and stages one that is identical", async () => {
+  await withCwd(async (cwd) => {
+    const bin = await ulBin(cwd);
+    const path = await dbCopy(cwd);
+    await mkdir(join(cwd, "work", "vardb", "diagnostics", "dup"), { recursive: true });
+    await mkdir(join(cwd, "work", "vardb", "uuidtext", "dup"), { recursive: true });
+    await writeFile(join(cwd, "work", "vardb", "diagnostics", "dup", "same"), "same");
+    await writeFile(join(cwd, "work", "vardb", "uuidtext", "dup", "same"), "same");
+    const ok = JSON.parse((await ul(cwd, bin, { path, out_dir: "work/u6a" })).stdout) as UlAnswer;
+    assert.equal(ok.status, "complete");
+    assert.equal(ok.staging?.staged, true);
+    await writeFile(join(cwd, "work", "vardb", "uuidtext", "dup", "same"), "different");
+    const out = await ul(cwd, bin, { path, out_dir: "work/u6b" });
+    assert.equal(out.code, 1);
+    const err = JSON.parse(out.stdout) as { error: string; conflicts?: string[] };
+    assert.match(err.error, /both/);
+    assert.deepEqual(err.conflicts, ["dup/same"]);
+  });
+});
+
+test("unified_log bounds what it stages, refuses over the bound, and says how much it counted", async () => {
+  await withCwd(async (cwd) => {
+    const bin = await ulBin(cwd);
+    const path = await dbCopy(cwd);
+    const out = await ul(cwd, bin, { path, out_dir: "work/u7", max_stage_files: 1 });
+    assert.equal(out.code, 1);
+    const err = JSON.parse(out.stdout) as { error: string; files?: number; max_stage_files?: number };
+    assert.match(err.error, /max_stage_files/);
+    assert.equal(err.max_stage_files, 1);
+    assert.ok((err.files ?? 0) >= 2);
+    assert.equal(await exists(join(cwd, "work", "u7", ".logarchive-input")), false);
+    const ok = JSON.parse((await ul(cwd, bin, { path, out_dir: "work/u7b" })).stdout) as UlAnswer;
+    assert.equal(ok.staging?.files, 2);
+    assert.equal(ok.staging?.bytes, 2);
+  });
+});
+
+test("unified_log does not overwrite an earlier run's output: a directory that holds one is refused", async () => {
+  await withCwd(async (cwd) => {
+    const bin = await ulBin(cwd);
+    const first = await ul(cwd, bin, { path: await logarchive(cwd), out_dir: "work/u8" });
+    const kept = await readFile(join(cwd, "work", "u8", "unifiedlogs.jsonl"), "utf8");
+    assert.equal(first.code, 0);
+    const again = await ul(cwd, bin, { path: await logarchive(cwd), out_dir: "work/u8" }, "big");
+    assert.equal(again.code, 1);
+    assert.match((JSON.parse(again.stdout) as { error: string }).error, /already holds/);
+    assert.equal(await readFile(join(cwd, "work", "u8", "unifiedlogs.jsonl"), "utf8"), kept);
+  });
+});
+
+test("unified_log clamps the timeout to what the tool's own limit allows, and a reader that overruns it leaves a partial receipt", async () => {
+  await withCwd(async (cwd) => {
+    const bin = await ulBin(cwd);
+    const clamped = JSON.parse((await ul(cwd, bin, { path: await logarchive(cwd), out_dir: "work/u9", timeout_seconds: 99999 })).stdout) as UlAnswer;
+    assert.equal(clamped.timeout_clamped, true);
+    assert.ok(clamped.timeout_seconds_used <= 1100, String(clamped.timeout_seconds_used));
+    const out = await ul(cwd, bin, { path: await logarchive(cwd), out_dir: "work/u10", timeout_seconds: 2 }, "hang");
+    assert.equal(out.code, 1);
+    const answer = JSON.parse(out.stdout) as UlAnswer;
+    assert.equal(answer.timed_out, true);
+    assert.equal(answer.status, "partial");
+    assert.equal(answer.entry_count, 3, "what the reader wrote before it was stopped is kept and counted");
+    assert.ok(answer.output && (await exists(join(cwd, answer.output))));
+  });
+});
+
+test("unified_log records the reader's version, and declares the reader it needs", async () => {
+  await withCwd(async (cwd) => {
+    const bin = await ulBin(cwd);
+    const answer = JSON.parse((await ul(cwd, bin, { path: await logarchive(cwd), out_dir: "work/u11" })).stdout) as UlAnswer;
+    assert.equal(answer.reader.version, "unifiedlog_iterator 9.9.9-test");
+    assert.match(answer.reader.path ?? "", /unifiedlog_iterator$/);
+    const manifest = JSON.parse(await readFile(join(MAC, "unified_log", "manifest.json"), "utf8")) as { requires?: string[]; use?: { extensions?: string[] } };
+    assert.deepEqual(manifest.requires, ["unifiedlog_iterator"]);
+    assert.ok(manifest.use?.extensions?.includes(".tracev3"));
+  });
+});
+
+test("unified_log with Apple's log counts the whole stream, not the preview (macOS only: the tool picks log only there)", { skip: process.platform !== "darwin" }, async () => {
+  await withCwd(async (cwd) => {
+    const bin = await ulBin(cwd, true);
+    const out = await ul(cwd, bin, { path: await logarchive(cwd), out_dir: "work/ua", limit: 20 }, "big");
+    const answer = JSON.parse(out.stdout) as UlAnswer;
+    assert.equal(answer.engine, "log");
+    assert.equal(answer.unparsed_lines, 5);
+    assert.equal(answer.entry_count, 995);
+    assert.equal(answer.entries.length, 20);
+    assert.equal(answer.status, "partial");
+  });
+});
