@@ -116,7 +116,7 @@ exit 8
 SH
 cat >"$TMP/fake-bin/zeek" <<'SH'
 #!/bin/sh
-printf '%s\n' '#separator \x09' '#fields\tts\tuid' '#types\ttime\tstring' '1.0\tC1' >conn.log
+printf '#separator \\x09\n#set_separator\t,\n#empty_field\t(empty)\n#unset_field\t-\n#path\tconn\n#fields\tts\tuid\n#types\ttime\tstring\n1.0\tC1\n#close\t2023-11-14-22-14-00\n' >conn.log
 awk 'BEGIN { for (i = 0; i < 3000; i++) printf "Z" }'
 awk 'BEGIN { for (i = 0; i < 3500; i++) printf "E" > "/dev/stderr" }'
 exit 9
