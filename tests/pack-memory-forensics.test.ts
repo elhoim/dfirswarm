@@ -83,6 +83,7 @@ type Carve = {
   preview_limited: boolean;
   truncated?: boolean;
   complete_results?: string;
+  complete_results_sha256?: string;
   coverage: { start: number; end: number; bytes_read: number; file_bytes: number; ended: string; address_space: string };
   problems: { offset: number; kind: string; problem: string }[];
 };
@@ -133,7 +134,13 @@ test("mem_carve cuts a plain Prefetch record from its version field, which prefe
     const cut = await readFile(hit.extracted_to as string);
     assert.deepEqual(cut.subarray(0, 8), pf.subarray(0, 8), "the extract begins with the version field and the signature");
     assert.deepEqual(cut.subarray(0, pf.length), pf);
-    assert.equal(hit.sha256, sha256(cut));
+    // The digest is in the extract manifest beside the extract, not in the answer.
+    assert.equal(hit.sha256, undefined);
+    const manifestRows = (await readFile(join(cwd, "work", "s1", "carved", "extract-manifest.jsonl"), "utf8")).trimEnd().split("\n").map((l) => JSON.parse(l) as Record<string, unknown>);
+    assert.equal(manifestRows.length, 1);
+    assert.equal(manifestRows[0].sha256, sha256(cut));
+    assert.equal(manifestRows[0].bytes, cut.length);
+    assert.equal(manifestRows[0].object_offset, 0x3000);
 
     // The Windows pack's own Prefetch parser accepts it. (Its decompression
     // library is a stub: a plain record is never decompressed.)
@@ -150,6 +157,34 @@ test("mem_carve cuts a plain Prefetch record from its version field, which prefe
     assert.equal(parsed.exe_name, "CALC.EXE");
     assert.equal(parsed.run_count, 7);
     assert.equal(parsed.compressed, false);
+  });
+});
+
+test("mem_carve writes private extracts and keeps their digests in a manifest beside them, not in its answer", async () => {
+  await withCwd(async (cwd) => {
+    const blob = Buffer.alloc(0x3000);
+    hiveBaseBlock(5).copy(blob, 0x1000);
+    blob.write("%PDF-1.7", 0x2000, "latin1");
+    await writeFile(join(cwd, "work", "memory.raw"), blob);
+    const run = await tool(CARVE, cwd, { path: "work/memory.raw", extract_to: "work/s1/carved", results_to: "work/s1/hits.jsonl" });
+    const out = body<Carve & { extraction: { manifest?: string } }>(run);
+    assert.equal(out.extracted, 2);
+    assert.doesNotMatch(run.stdout, /[0-9a-f]{64}/i, "a digest is in the answer");
+    assert.equal(out.complete_results_sha256, undefined);
+    for (const hit of out.hits) assert.equal((await stat(hit.extracted_to as string)).mode & 0o777, 0o600);
+    const manifest = join(cwd, "work", "s1", "carved", "extract-manifest.jsonl");
+    assert.equal((await stat(manifest)).mode & 0o777, 0o600);
+    assert.match(out.extraction.manifest as string, /extract-manifest\.jsonl$/);
+    const rows = (await readFile(manifest, "utf8")).trimEnd().split("\n").map((l) => JSON.parse(l) as Record<string, unknown>);
+    const extracts = rows.filter((r) => r.row === "extract");
+    assert.deepEqual(extracts.map((r) => r.signature_offset), [0x1000, 0x2000]);
+    for (const row of extracts) {
+      assert.equal(row.sha256, sha256(await readFile(join(cwd, "work", "s1", "carved", row.file as string))));
+    }
+    // The digest of the whole hit list is there too, for the file the answer names.
+    const results = rows.find((r) => r.row === "results");
+    assert.equal(results?.sha256, sha256(await readFile(join(cwd, "work", "s1", "hits.jsonl"))));
+    assert.equal(results?.hits, 2);
   });
 });
 
@@ -182,7 +217,9 @@ test("mem_carve extracts the earliest candidates when max_extract is smaller tha
     assert.equal(out.hits[0].extracted_bytes, 0x4000 - 0x200);
     assert.equal(out.hits[1].extracted_to, undefined);
     assert.equal(out.extracted, 1);
-    assert.deepEqual(out.extraction, { max_extract: 1, extracted: 1, not_extracted: 1, refused: 0, failed: 0 });
+    const { manifest, ...rest } = out.extraction as Record<string, unknown>;
+    assert.deepEqual(rest, { max_extract: 1, extracted: 1, not_extracted: 1, refused: 0, failed: 0 });
+    assert.match(manifest as string, /extract-manifest\.jsonl$/);
   });
 });
 

@@ -146,6 +146,44 @@ class LosslessPage:
                 pass
 
 
+class ExtractManifest:
+    """extract-manifest.jsonl in the extract directory: one row per extract with its size and sha256.
+
+    The digests live here, in a private file beside the extracts, and not in the answer: an
+    extract can be a credential store, and the answer is what an agent pastes from. A name
+    taken by an earlier run is not reused (extract-manifest.1.jsonl, and so on).
+    """
+
+    def __init__(self, directory):
+        self.directory = directory
+        self.path = None
+        self._fh = None
+
+    def add(self, row):
+        if self._fh is None:
+            for n in range(1000):
+                name = "extract-manifest.jsonl" if n == 0 else "extract-manifest.%d.jsonl" % n
+                try:
+                    fd = os.open(str(self.directory / name),
+                                 os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+                except FileExistsError:
+                    continue
+                self.path = self.directory / name
+                self._fh = os.fdopen(fd, "w", encoding="utf-8")
+                break
+            else:
+                raise OSError(errno.EEXIST, "no free extract-manifest name in the extract directory")
+        self._fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+        self._fh.flush()
+
+    def close(self):
+        if self._fh is not None:
+            self._fh.flush()
+            os.fsync(self._fh.fileno())
+            self._fh.close()
+            self._fh = None
+
+
 def fail(message, **extra):
     print(json.dumps({"error": message, **extra}))
     raise SystemExit(1)
@@ -377,6 +415,7 @@ def main():
     overlap = max(len(s) for s, _n, _z in signatures) - 1
     preview_hits, hit_count, counts, validations = [], 0, {}, {}
     extraction = {"max_extract": max_extract, "extracted": 0, "not_extracted": 0, "refused": 0, "failed": 0}
+    manifest = ExtractManifest(extract_to) if extract_to else None
     problems, problem_count = [], 0
     bytes_read, ended = 0, "end of range"
 
@@ -476,7 +515,7 @@ def main():
                             try:
                                 # Exclusive, and never through a link: a name that already exists
                                 # (a file, or a link anywhere) is refused, not written over.
-                                out_fd = os.open(str(target), os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o644)
+                                out_fd = os.open(str(target), os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
                             except FileExistsError:
                                 entry["extract_status"] = "refused: %s already exists in the extract directory (a file or a link); use an empty directory" % safe
                                 extraction["refused"] += 1
@@ -491,7 +530,9 @@ def main():
                                     out.write(piece)
                                 entry["extracted_to"] = str(target)
                                 entry["extracted_bytes"] = len(piece)
-                                entry["sha256"] = hashlib.sha256(piece).hexdigest()
+                                manifest.add({"row": "extract", "kind": name, "signature_offset": absolute,
+                                              "object_offset": object_offset, "file": safe, "bytes": len(piece),
+                                              "sha256": hashlib.sha256(piece).hexdigest()})
                                 extraction["extracted"] += 1
                         else:
                             extraction["not_extracted"] += 1
@@ -567,17 +608,22 @@ def main():
                 "length where it declares one). Hand each extract to the tool that reads that format when the "
                 "pack that carries it is loaded, and keep the offsets in the report beside what it says. An "
                 "extract can hold credential material (a SAM or SECURITY hive, a browser database): cite it "
-                "by job or path, never by content.",
+                "by job or path, never by content. The extracts are private (0600), and their sizes and sha256 are in the "
+                "extract manifest the answer names (extraction.manifest), not in this answer.",
     }
-    if extract_to:
-        result["extraction"] = extraction
-    if results_to:
+    if results_to and manifest is not None:
+        # The digest of the whole hit list goes where the extracts' digests go, not into the answer.
         digest = hashlib.sha256()
         with open(results_to, "rb") as complete:
             for block in iter(lambda: complete.read(1 << 20), b""):
                 digest.update(block)
+        manifest.add({"row": "results", "file": str(results_to), "hits": hit_count, "sha256": digest.hexdigest()})
+    if manifest is not None:
+        manifest.close()
+        extraction["manifest"] = str(manifest.path) if manifest.path else None
+        result["extraction"] = extraction
+    if results_to:
         result["complete_results"] = str(results_to)
-        result["complete_results_sha256"] = digest.hexdigest()
         result["complete_results_format"] = "JSON Lines, one complete hit per line, in offset order"
     elif paged.get("all_results"):
         result["complete_results"] = paged["all_results"]
