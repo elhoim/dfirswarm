@@ -4,8 +4,8 @@ icat is a stand-in that records its arguments and writes a stream: from a file, 
 generated (dd from /dev/zero) when the stream is too big to keep.
 """
 import hashlib
+import json
 import os
-import resource
 import subprocess
 import sys
 import unittest
@@ -43,19 +43,27 @@ class IcatExtract(Case):
     def test_a_large_extract_is_streamed_and_hashed_without_holding_it(self):
         total = 256
         bin_dir = self.icat('dd if=/dev/zero bs=1048576 count=%d 2>/dev/null\n' % total)
-        before = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
-        r = self.extract(bin_dir)
-        after = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
-        self.assertEqual(r.code, 0, r.stdout)
+        # The tool and its icat run under a wrapper that reports the peak memory of its own children, so what
+        # earlier tests ran in this process cannot count towards it (ru_maxrss is bytes on macOS, kilobytes on Linux).
+        wrapper = ("import json, os, resource, subprocess, sys\n"
+                   "p = subprocess.run([sys.executable, sys.argv[1]], input=sys.argv[2], capture_output=True, text=True)\n"
+                   "print(json.dumps({'out': p.stdout, 'code': p.returncode, 'peak': resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss}))\n")
+        args = json.dumps({"inode": "168-128-4", "output": "work/out.bin", "image": "inputs/disk.E01", "offset": 2048})
+        env = dict(os.environ, PATH=bin_dir + os.pathsep + os.environ["PATH"])
+        for k in ("JOB_ID", "OUT", "AGENT_ID"):
+            env.pop(k, None)
+        proc = subprocess.run([sys.executable, "-c", wrapper, tool_path("icat_extract"), args], capture_output=True, text=True, cwd=self.dir, env=env)
+        got = json.loads(proc.stdout)
+        result = json.loads(got["out"])
+        self.assertEqual(got["code"], 0, got["out"])
         h = hashlib.sha256()
         zero = bytes(MIB)
         for _ in range(total):
             h.update(zero)
-        self.assertEqual((r.json["size"], r.json["sha256"]), (total * MIB, h.hexdigest()))
+        self.assertEqual((result["size"], result["sha256"]), (total * MIB, h.hexdigest()))
         self.assertEqual(os.path.getsize(self.path("work/out.bin")), total * MIB)
-        # ru_maxrss is bytes on macOS and kilobytes on Linux; the children's peak, the tool and its dd, is far below the stream's size.
-        peak = (after if after > before else after) * (1 if sys.platform == "darwin" else 1024)
-        self.assertLess(peak, 120 * MIB, "the children's peak was %d bytes for a %d MiB stream" % (peak, total))
+        peak = got["peak"] * (1 if sys.platform == "darwin" else 1024)
+        self.assertLess(peak, 120 * MIB, "the tool's and icat's peak was %d bytes for a %d MiB stream" % (peak, total))
 
     def test_the_output_budget_keeps_a_partial_and_says_so(self):
         bin_dir = self.icat('dd if=/dev/zero bs=1048576 count=64 2>/dev/null\n')

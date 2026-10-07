@@ -54,7 +54,7 @@
       "tests/test_feature_scan.py": "707e2e1e53e3c2a05636af3e348d79a13788c8f2ba93c49c675b88d110f307d4",
       "tests/test_file_carver.py": "41b734c9b6442c25a07c755d6e7bd39ded432c3c39d050e1025890ebe3d3feb7",
       "tests/test_file_type.py": "2ac7265f3752f6041bf051d8c85cc8808b9fd0b8f0f49cfe0c7aa793c69dfaed",
-      "tests/test_icat_extract.py": "2f599c6f12a423df874e23bfc6d9cdc91f48f440a68a2d65eb52f3a2a9d61fb0",
+      "tests/test_icat_extract.py": "cd0da73c0ec87bbf0f2487352c4a009d7fb54184447ed516d2d4baeaa5074f5f",
       "tests/test_image_layout.py": "68214cfd2144e0730b0fdb8e6d75d66909a23587a81e29c703985e817d5e0ec7",
       "tests/test_ioc_scan.py": "c581b5b05693e00557a61d7d56b2d6c14e6db76857c85a6ee12daedc4b3cabb3",
       "tests/test_manifests.py": "3d1b4dbdacdc8a11553320ca621c6f9b859570f03f2292f49a368c326a04a50f",
