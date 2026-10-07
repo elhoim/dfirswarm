@@ -1691,6 +1691,8 @@ def main():
         "by_operation": tables["by_operation"], "by_user": tables["by_user"], "by_address": tables["by_address"],
         "operations_all_rows": tables["operations_all_rows"],
         "inline_limited": pages["records"]["truncated"],
+        "tables_uncounted": {"by_operation": by_operation.uncounted, "by_user": by_user.uncounted, "by_address": by_address.uncounted, "operations_all_rows": by_operation_all.uncounted,
+                             "note": "distinct values past %d are counted here and not in the tables; every record is in the whole-result file" % MAX_DISTINCT},
         "values_withheld": {"count": withheld_summary["count"], "by_reason": withheld_summary["by_reason"], "locators": withheld_summary["locators"],
                             "page": withheld_summary["page"], "text_withheld_from_paths_and_messages": withheld_summary["text_withheld_from_paths_and_messages"]},
         "secret_values": vault.summary(),

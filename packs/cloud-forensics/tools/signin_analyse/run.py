@@ -1660,7 +1660,8 @@ def main():
         "parser": PARSER, **status, "path": shown_path(path),
         "coverage": {**counts, "files_found": 1, "time_limit_seconds": seconds, "stopped_by_time_limit": stopped_early, "max_expanded_bytes": max_expanded,
                      "time_statuses": time_statuses, "bytes_read": row["bytes_read"], "replacement_characters": replaced,
-                     "analysis_kept_in": db_where, "users_analysed": analysis["users"], "users_not_analysed_over_cap": analysis["over_cap"]},
+                     "analysis_kept_in": db_where, "users_analysed": analysis["users"], "users_not_analysed_over_cap": analysis["over_cap"],
+                     "users_not_analysed_named": analysis["over_named"]},
         "assumptions": [a for a in (
             ("times with no zone were read as UTC because assume_utc was set: %d event(s)" % assumed["assume_utc_applied_to"]) if assumed["assume_utc_applied_to"] else None,
             ("times in a column named Date (UTC) were read as UTC on the column's own say-so: %d event(s)" % assumed["column_named_utc"]) if assumed["column_named_utc"] else None,
@@ -1705,6 +1706,7 @@ def analyse(db, limit, ceiling, window, min_failures, withheld):
     cur = db.execute("SELECT user, app, ns, time, success, address, country, city, lat, lon, client, auth, ca, code, result, event_id, corr, record, line, eidx "
                      "FROM ev WHERE user IS NOT NULL ORDER BY user, ns IS NULL, ns, ord")
     users = over_cap = 0
+    over_named = []
     window_ns = int(window * 1000000000)
 
     def ref(r):
@@ -1715,6 +1717,8 @@ def analyse(db, limit, ceiling, window, min_failures, withheld):
         users += 1
         if len(series) > SERIES_CAP:
             over_cap += 1
+            if len(over_named) < FIRST_PROBLEMS:
+                over_named.append(user)
             for _ in group:
                 pass
             continue
@@ -1776,7 +1780,7 @@ def analyse(db, limit, ceiling, window, min_failures, withheld):
             previous = r
     pages = {"single_factor_successes": single.finish(), "failure_bursts_before_success": bursts.finish(),
              "addresses_seen_once": seen_once.finish(), "impossible_travel": travel.finish()}
-    return {"pages": pages, "users": users, "over_cap": over_cap, "single_factor": single.page, "bursts": bursts.page, "seen_once": seen_once.page,
+    return {"pages": pages, "users": users, "over_cap": over_cap, "over_named": over_named, "single_factor": single.page, "bursts": bursts.page, "seen_once": seen_once.page,
             "travel": travel.page}
 
 

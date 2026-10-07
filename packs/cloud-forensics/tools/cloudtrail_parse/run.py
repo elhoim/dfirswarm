@@ -1768,6 +1768,8 @@ def main():
         "errors_by_identity": err_page.page, "refusals_by_identity": ref_page.page,
         "error_classes": error_classes,
         "inline_limited": pages["records"]["truncated"],
+        "tables_uncounted": {"by_event": by_event.uncounted, "by_identity": by_identity.uncounted, "by_address": by_address.uncounted, "errors": errors.uncounted,
+                             "note": "distinct values past %d are counted here and not in the tables; every record is in the whole-result file" % MAX_DISTINCT},
         "session_links": link_totals if link_sessions else {"performed": False, "why": "link_sessions was false"},
         "values_withheld": {"count": withheld_summary["count"], "by_reason": withheld_summary["by_reason"], "locators": withheld_summary["locators"],
                             "page": withheld_summary["page"], "text_withheld_from_paths_and_messages": withheld_summary["text_withheld_from_paths_and_messages"]},

@@ -5,6 +5,7 @@
  */
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -137,5 +138,44 @@ test("an answer is ASCII: a non-ASCII or non-UTF-8 name is escaped, so a lone su
     // eslint-disable-next-line no-control-regex
     assert.match(run.stdout, /^[\x00-\x7f]*$/, "json.dumps escapes everything outside ASCII");
     assert.match(out.records[0].source_file, /n\u00ef|ünï/);
+  });
+});
+
+test("a named pipe is never opened: as the path it is refused, and in a directory it is named and skipped", async () => {
+  await withDir(async (cwd) => {
+    try {
+      execFileSync("mkfifo", [join(cwd, "work", "pipe.json")]);
+    } catch {
+      return; // no mkfifo on this platform
+    }
+    for (const script of Object.values(SCRIPTS)) {
+      const out = refused(await tool(script, cwd, { path: "work/pipe.json" }));
+      assert.equal(out.status, "failed");
+      assert.match(out.error, /neither a regular file|regular file/);
+    }
+    await put(cwd, "work/ev/ok.json", JSON.stringify({ Records: [{ eventName: "X", eventSource: "s3.amazonaws.com", eventTime: "2026-02-14T09:00:00Z", eventID: "p" }] }));
+    execFileSync("mkfifo", [join(cwd, "work", "ev", "pipe.json")]);
+    await put(cwd, "work/ev/audit.json", JSON.stringify([{ Operation: "Send", Id: "1", UserId: "a@b.c", CreationTime: "2026-02-14T09:00:00Z" }]));
+    for (const script of [TRAIL, UAL]) {
+      const out: Json = JSON.parse((await tool(script, cwd, { path: "work/ev" })).stdout);
+      assert.ok(out.skipped.some((s: Json) => /not a regular file: it is not opened/.test(s.reason)), `${script}: the pipe is named`);
+      assert.equal(out.skipped_count, 1);
+    }
+    const trail: Json = body(await tool(TRAIL, cwd, { path: "work/ev" }));
+    assert.equal(trail.status, "partial", "a file that was not read is not a complete read");
+  });
+});
+
+test("the tables say how many distinct values they could not count, and the sign-in analysis names the accounts it left out", async () => {
+  await withDir(async (cwd) => {
+    await put(cwd, "work/ev/ok.json", JSON.stringify({ Records: [{ eventName: "X", eventSource: "s3.amazonaws.com", eventTime: "2026-02-14T09:00:00Z", eventID: "p" }] }));
+    const ct: Json = body(await tool(TRAIL, cwd, { path: "work/ev/ok.json" }));
+    assert.deepEqual([ct.tables_uncounted.by_event, ct.tables_uncounted.by_identity, ct.tables_uncounted.by_address, ct.tables_uncounted.errors], [0, 0, 0, 0]);
+    await put(cwd, "work/ev/ual.json", JSON.stringify([{ Operation: "Send", Id: "1", UserId: "a@b.c", CreationTime: "2026-02-14T09:00:00Z" }]));
+    const ual: Json = body(await tool(UAL, cwd, { path: "work/ev/ual.json" }));
+    assert.equal(ual.tables_uncounted.by_operation, 0);
+    await put(cwd, "work/ev/s.json", JSON.stringify({ value: [{ id: "x", createdDateTime: "2026-02-14T09:00:00Z", userPrincipalName: "a@b.c", ipAddress: "1.2.3.4", status: { errorCode: 0 } }] }));
+    const si: Json = body(await tool(SIGNIN, cwd, { path: "work/ev/s.json" }));
+    assert.deepEqual([si.coverage.users_not_analysed_over_cap, si.coverage.users_not_analysed_named], [0, []]);
   });
 });
