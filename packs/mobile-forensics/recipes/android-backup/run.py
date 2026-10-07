@@ -53,8 +53,10 @@ DEFAULT_BUDGET = 32 << 30
 PIECE = 1 << 20
 EXTENDED_HEADER_LIMIT = 1 << 20
 SCHEME_WORD = re.compile(r"[A-Za-z0-9._-]{1,16}\Z")
-# Typeflags of a header whose size is followed by that many bytes of data (others' size is not data).
-DATA_TYPES = set(b"0\x007LKxgXS") | set(range(ord("A"), ord("Z") + 1))
+# Typeflags whose size is not followed by data: hard link, symbolic link, character and block device,
+# directory, fifo. Every other flag (a regular file, a long name, a pax header, a vendor type) is followed
+# by its size in bytes, as the tar library reads it.
+NO_DATA_TYPES = set(b"123456")
 
 
 class TarWatch:
@@ -105,7 +107,7 @@ class TarWatch:
         if flag in b"LKxgX" and size > EXTENDED_HEADER_LIMIT:
             self.violation = size
             return
-        if flag in DATA_TYPES:
+        if flag not in NO_DATA_TYPES:
             self.skip = -(-size // 512) * 512
 
 

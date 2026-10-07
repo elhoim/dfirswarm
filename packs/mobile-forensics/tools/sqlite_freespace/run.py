@@ -633,7 +633,7 @@ def main():
             problems.add("partial last page", "the file ends %d bytes into page %d" % (file_bytes % page_size, in_file), False, page=in_file)
         if h["payload_fractions"] != [64, 32, 32]:
             problems.add("unusual header field", "the payload fractions are %s, not 64, 32, 32" % h["payload_fractions"], True)
-        if h["text_encoding"] not in TEXT_ENCODINGS:
+        if h["text_encoding"] not in TEXT_ENCODINGS and h["text_encoding"] != 0:    # 0: no schema has been written yet
             problems.add("unusual header field", "the text encoding field is %d (1 UTF-8, 2 UTF-16LE, 3 UTF-16BE)" % h["text_encoding"], True)
 
         # A companion that is not read is a part of the database that is not examined.
