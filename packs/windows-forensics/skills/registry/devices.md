@@ -3,7 +3,7 @@ id: registry/devices
 title: Removable-device identity and mounts
 when: A storage device is in the story and you must separate attachment from transfer.
 needs: []
-tools: [regkv, icat_extract, lnk_parse, jumplist, shellbags]
+tools: [regkv, lnk_parse, jumplist, shellbags]
 requires_host: []
 ---
 
