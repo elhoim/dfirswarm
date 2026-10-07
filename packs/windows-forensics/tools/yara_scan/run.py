@@ -212,7 +212,113 @@ class SecretValues:
         }
 
 
-PARSER = "yara_scan/3"
+PARSER = "yara_scan/4"
+
+
+# BEGIN SHARED PROCESS
+# The same text is in esedb_query, extract_stream, sigma_hunt, vss_stores and yara_scan; tests/pack-windows-forensics-process.test.ts
+# holds the copies equal. A program a tool runs is started in THIS tool's process group, never in a session of its own: the
+# harness ends a tool that runs too long, or is aborted, by killing the tool's group (process.kill(-pid, SIGKILL)), and a
+# program in a group of its own goes on writing after the tool is gone. On Linux the kernel is also asked to kill it if the
+# tool dies. The tool's own deadline kills the program and what it started by walking the process tree, and SIGTERM, SIGINT
+# and SIGHUP do the same and then give the tool a last word.
+try:
+    import ctypes
+except ImportError:  # pragma: no cover
+    ctypes = None
+
+STATE = {"last_word": None}    # what to do, with the signal number, when the tool is stopped by a signal
+ACTIVE = []                    # the programs running now
+
+
+def _die_with_parent():  # runs in the child between fork and exec
+    try:
+        ctypes.CDLL(None).prctl(1, signal.SIGKILL)   # PR_SET_PDEATHSIG
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def spawn(argv, **kwargs):
+    kwargs.setdefault("stdin", subprocess.DEVNULL)
+    if sys.platform.startswith("linux") and ctypes is not None:
+        kwargs["preexec_fn"] = _die_with_parent
+    return subprocess.Popen(argv, **kwargs)
+
+
+def descendants(pid):
+    """Every process below `pid`, from /proc where there is one, else from ps."""
+    kids = {}
+    try:
+        if os.path.isdir("/proc/self"):
+            for entry in os.listdir("/proc"):
+                if entry.isdigit():
+                    try:
+                        with open("/proc/%s/stat" % entry, "rb") as fh:
+                            fields = fh.read().rsplit(b")", 1)[1].split()
+                        kids.setdefault(int(fields[1]), []).append(int(entry))
+                    except (OSError, IndexError, ValueError):
+                        continue
+        else:
+            out = subprocess.run(["ps", "-A", "-o", "pid=,ppid="], capture_output=True, text=True, timeout=10).stdout
+            for line in out.splitlines():
+                parts = line.split()
+                if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+                    kids.setdefault(int(parts[1]), []).append(int(parts[0]))
+    except (OSError, subprocess.SubprocessError):
+        return []
+    found, stack = [], [pid]
+    while stack:
+        for child in kids.get(stack.pop(), []):
+            found.append(child)
+            stack.append(child)
+    return found
+
+
+def kill_tree(proc):
+    """Kill the program and everything it started. The children are listed first: once the parent is gone they are
+    adopted by init and can no longer be found below it."""
+    victims = descendants(proc.pid)
+    try:
+        proc.kill()
+    except OSError:
+        pass
+    for pid in victims:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+
+
+def wait_for(proc, seconds):
+    """(exit code, timed out): wait for the program for at most `seconds`; at the deadline it and what it started are killed."""
+    ACTIVE.append(proc)
+    try:
+        try:
+            return proc.wait(timeout=seconds), False
+        except subprocess.TimeoutExpired:
+            kill_tree(proc)
+            return proc.wait(), True
+    finally:
+        if proc in ACTIVE:
+            ACTIVE.remove(proc)
+
+
+def _on_signal(signum, _frame):
+    for proc in list(ACTIVE):
+        kill_tree(proc)
+    last_word = STATE.get("last_word")
+    if last_word:
+        try:
+            last_word(signum)
+        except Exception:  # noqa: BLE001 - a last word is best effort
+            pass
+    os._exit(128 + signum)
+
+
+def install_signal_handlers():
+    for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(signum, _on_signal)
+# END SHARED PROCESS
 # `0x6:20:$a: data` with -s -L; `0x6:$a: data` with -s alone (an older yara has no -L).
 SCAN_ERROR = re.compile(r"^error scanning (.+)$")
 STRING_LINE = re.compile(r"^0x([0-9a-fA-F]+):(?:(\d+):)?(\$[A-Za-z0-9_]*): ?")
@@ -240,6 +346,7 @@ def tool_output_dir():
 
 
 def main():
+    install_signal_handlers()
     try:
         args = json.load(sys.stdin)
     except ValueError as exc:
@@ -338,19 +445,27 @@ def main():
     errfd, errname = tempfile.mkstemp(prefix=".yara-stderr-", dir=_ensure(outdir))
     timed_out = [False]
     try:
-        proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=errfd, stdin=subprocess.DEVNULL, start_new_session=True)
+        proc = spawn(argv, stdout=subprocess.PIPE, stderr=errfd)
     except OSError as exc:
         os.close(errfd)
         values.close()
         fail("yara could not be started", reason=str(exc))
     os.close(errfd)
+    ACTIVE.append(proc)
+
+    def interrupted(signum):
+        try:
+            values.close()
+        except OSError:
+            pass
+        print(json.dumps({"error": "stopped by signal %d before yara finished" % signum, "status": "interrupted", "signal": signum,
+                          "note": "No statement about matches follows from an interrupted run; what was written to the values file, if one was asked for, is partial."}), flush=True)
+
+    STATE["last_word"] = interrupted
 
     def stop():
         timed_out[0] = True
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except (OSError, ProcessLookupError):
-            pass
+        kill_tree(proc)
 
     timer = threading.Timer(timeout, stop)
     timer.start()
@@ -390,6 +505,8 @@ def main():
     finally:
         timer.cancel()
         rc = proc.wait()
+        if proc in ACTIVE:
+            ACTIVE.remove(proc)
         values.close()
 
     stderr_bytes = Path(errname).read_bytes()

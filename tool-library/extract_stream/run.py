@@ -27,7 +27,114 @@ import subprocess
 import sys
 from pathlib import Path
 
-PARSER = "extract_stream/4"
+PARSER = "extract_stream/5"
+MAX_TIMEOUT = 270
+
+
+# BEGIN SHARED PROCESS
+# The same text is in esedb_query, extract_stream, sigma_hunt, vss_stores and yara_scan; tests/pack-windows-forensics-process.test.ts
+# holds the copies equal. A program a tool runs is started in THIS tool's process group, never in a session of its own: the
+# harness ends a tool that runs too long, or is aborted, by killing the tool's group (process.kill(-pid, SIGKILL)), and a
+# program in a group of its own goes on writing after the tool is gone. On Linux the kernel is also asked to kill it if the
+# tool dies. The tool's own deadline kills the program and what it started by walking the process tree, and SIGTERM, SIGINT
+# and SIGHUP do the same and then give the tool a last word.
+try:
+    import ctypes
+except ImportError:  # pragma: no cover
+    ctypes = None
+
+STATE = {"last_word": None}    # what to do, with the signal number, when the tool is stopped by a signal
+ACTIVE = []                    # the programs running now
+
+
+def _die_with_parent():  # runs in the child between fork and exec
+    try:
+        ctypes.CDLL(None).prctl(1, signal.SIGKILL)   # PR_SET_PDEATHSIG
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def spawn(argv, **kwargs):
+    kwargs.setdefault("stdin", subprocess.DEVNULL)
+    if sys.platform.startswith("linux") and ctypes is not None:
+        kwargs["preexec_fn"] = _die_with_parent
+    return subprocess.Popen(argv, **kwargs)
+
+
+def descendants(pid):
+    """Every process below `pid`, from /proc where there is one, else from ps."""
+    kids = {}
+    try:
+        if os.path.isdir("/proc/self"):
+            for entry in os.listdir("/proc"):
+                if entry.isdigit():
+                    try:
+                        with open("/proc/%s/stat" % entry, "rb") as fh:
+                            fields = fh.read().rsplit(b")", 1)[1].split()
+                        kids.setdefault(int(fields[1]), []).append(int(entry))
+                    except (OSError, IndexError, ValueError):
+                        continue
+        else:
+            out = subprocess.run(["ps", "-A", "-o", "pid=,ppid="], capture_output=True, text=True, timeout=10).stdout
+            for line in out.splitlines():
+                parts = line.split()
+                if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+                    kids.setdefault(int(parts[1]), []).append(int(parts[0]))
+    except (OSError, subprocess.SubprocessError):
+        return []
+    found, stack = [], [pid]
+    while stack:
+        for child in kids.get(stack.pop(), []):
+            found.append(child)
+            stack.append(child)
+    return found
+
+
+def kill_tree(proc):
+    """Kill the program and everything it started. The children are listed first: once the parent is gone they are
+    adopted by init and can no longer be found below it."""
+    victims = descendants(proc.pid)
+    try:
+        proc.kill()
+    except OSError:
+        pass
+    for pid in victims:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+
+
+def wait_for(proc, seconds):
+    """(exit code, timed out): wait for the program for at most `seconds`; at the deadline it and what it started are killed."""
+    ACTIVE.append(proc)
+    try:
+        try:
+            return proc.wait(timeout=seconds), False
+        except subprocess.TimeoutExpired:
+            kill_tree(proc)
+            return proc.wait(), True
+    finally:
+        if proc in ACTIVE:
+            ACTIVE.remove(proc)
+
+
+def _on_signal(signum, _frame):
+    for proc in list(ACTIVE):
+        kill_tree(proc)
+    last_word = STATE.get("last_word")
+    if last_word:
+        try:
+            last_word(signum)
+        except Exception:  # noqa: BLE001 - a last word is best effort
+            pass
+    os._exit(128 + signum)
+
+
+def install_signal_handlers():
+    for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(signum, _on_signal)
+# END SHARED PROCESS
 INODE = re.compile(r"^(\d+)(?:-(\d+)(?:-(\d+))?)?$")
 
 
@@ -96,6 +203,7 @@ def keep_as(src, base, suffix):
 
 
 def main():
+    install_signal_handlers()
     try:
         d = json.load(sys.stdin)
     except ValueError as exc:
@@ -117,9 +225,10 @@ def main():
     output = d.get("output")
     if not isinstance(output, str) or not output:
         fail("output is required: the file to write the stream to, under the run directory")
-    timeout = d.get("timeout_seconds", 280)
+    timeout = d.get("timeout_seconds", 240)
     if isinstance(timeout, bool) or not isinstance(timeout, int) or timeout < 1:
         fail("timeout_seconds must be a positive integer", timeout_seconds=d.get("timeout_seconds"))
+    timeout = min(timeout, MAX_TIMEOUT)         # the tool's own limit is 300 s: icat stops before it, and the digest follows
     if not os.path.isfile(image):
         fail("no such image", image=image)
     if shutil.which("icat") is None:
@@ -144,18 +253,24 @@ def main():
         os.close(fd)
         os.unlink(dest)
         fail("the standard error file could not be created", output=output, reason=str(exc))
-    timed_out = False
-    with os.fdopen(fd, "wb") as out, os.fdopen(errfd, "wb") as err:
-        proc = subprocess.Popen(argv, stdout=out, stderr=err, stdin=subprocess.DEVNULL, start_new_session=True)
+    def interrupted(signum):
+        """The last word of a tool stopped by a signal: what icat wrote is kept as a .partial file and is not an extraction."""
+        said = {"error": "stopped by signal %d before icat finished" % signum, "status": "interrupted", "signal": signum,
+                "output": output, "stderr_file": os.path.relpath(stderr_path, Path.cwd().resolve())}
         try:
-            rc = proc.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except (OSError, ProcessLookupError):
-                pass
-            rc = proc.wait()
+            said["partial_file"] = os.path.relpath(keep_as(dest, dest, ".partial"), Path.cwd().resolve())
+            said["note"] = "What icat wrote before it stopped is kept as partial_file; it is not an extraction."
+        except (OSError, SystemExit):
+            pass
+        print(json.dumps(said), flush=True)
+
+    STATE["last_word"] = interrupted
+    with os.fdopen(fd, "wb") as out, os.fdopen(errfd, "wb") as err:
+        try:
+            proc = spawn(argv, stdout=out, stderr=err)
+        except OSError as exc:
+            fail("icat could not be started: %s" % exc, reason=type(exc).__name__)
+        rc, timed_out = wait_for(proc, timeout)
     stderr_bytes = stderr_path.stat().st_size
     if not stderr_bytes:
         stderr_path.unlink()
