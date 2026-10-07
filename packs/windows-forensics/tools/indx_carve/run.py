@@ -30,6 +30,15 @@ back with two bytes of rubbish in the middle of it.
 Every block is read. The page returned inline is `limit` long, and when more
 entries match the whole list is written to a file the output names; the same
 holds for the problems.
+
+Integrity travels with every entry. A block is `fixup_ok` when every 512-byte unit
+carries its update sequence number and the array covers the whole block, and `node_ok`
+when the node header and each live entry's length, alignment and key length fit inside
+the live region. An entry carries its `block_offset` and `salvaged` (true when either
+check failed). A salvaged block's entries are left out of the answer unless
+`include_unreliable` is true, and the answer counts the blocks and entries it left out.
+A name that parses is structurally plausible (a sane parent, a decodable name, a known
+namespace, a valid time), not verified.
 """
 import datetime
 import json
@@ -126,18 +135,26 @@ def fail(message, **extra):
 
 
 def filetime(value):
+    """ISO 8601 UTC with seven fractional digits, by integer arithmetic; None for 0 or a date past 9999."""
     if not value:
         return None
     try:
-        return (FILETIME_EPOCH + datetime.timedelta(microseconds=value // 10)).isoformat().replace("+00:00", "Z")
-    except (OverflowError, OSError):
+        whole, ticks = divmod(value, 10_000_000)
+        return (FILETIME_EPOCH + datetime.timedelta(seconds=whole)).strftime("%Y-%m-%dT%H:%M:%S") + ".%07dZ" % ticks
+    except (OverflowError, ValueError, OSError):
         return None
 
 
 def apply_fixup(block):
+    """Undo the update sequence fixup of a 512-byte-unit record: the last two bytes of each unit hold the
+    sequence number, and the real bytes are in the array. Returns the fixed block and a problem or None.
+    The array must cover the whole block."""
     usa_offset, usa_count = struct.unpack_from("<HH", block, 0x04)
     if usa_count == 0 or usa_offset + usa_count * 2 > len(block):
         return block, "the update sequence array is outside the block"
+    units = len(block) // 512
+    if usa_count - 1 != units:
+        return block, "the update sequence array holds %d fixup value(s) and the block has %d 512-byte unit(s)" % (usa_count - 1, units)
     signature = block[usa_offset:usa_offset + 2]
     out = bytearray(block)
     for i in range(1, usa_count):
@@ -186,6 +203,10 @@ def read_filename(buf, at):
         "modified": filetime(modified),
         "mft_modified": filetime(mft_modified),
         "accessed": filetime(accessed),
+        "created_filetime": str(created),
+        "modified_filetime": str(modified),
+        "mft_modified_filetime": str(mft_modified),
+        "accessed_filetime": str(accessed),
         "allocated_size": alloc,
         "real_size": real,
         "is_directory": bool(flags & 0x10000000),
@@ -193,11 +214,25 @@ def read_filename(buf, at):
     }
 
 
-def live_entries(block, base_offset):
-    """Walk the node's live entries, the ones the directory still lists."""
-    out = []
+def node_problems(block):
+    """The node header's own consistency: the first entry, the live total and the allocated size must
+    be ordered, 8-byte aligned and inside the block. Returns a problem or None."""
     if len(block) < 0x28:
-        return out, 0, 0
+        return "the block is shorter than a node header"
+    first, total, allocated = struct.unpack_from("<III", block, 0x18)
+    if first < 0x10 or first % 8 or total < first or allocated < total or 0x18 + allocated > len(block) or total % 8:
+        return ("the node header is inconsistent (first entry %d, live size %d, allocated size %d, block %d bytes)"
+                % (first, total, allocated, len(block)))
+    return None
+
+
+def live_entries(block, base_offset):
+    """Walk the node's live entries, the ones the directory still lists. Every length is checked against
+    the live region and the key length against the entry: the first entry that does not fit is a problem,
+    named, and the walk of this node's live entries ends there."""
+    out, problems = [], []
+    if len(block) < 0x28:
+        return out, 0, 0, problems
     first, total, allocated = struct.unpack_from("<III", block, 0x18)
     start = 0x18 + first
     end = min(0x18 + total, len(block))
@@ -205,7 +240,9 @@ def live_entries(block, base_offset):
     while at + 0x10 <= end:
         reference, length, key_length = struct.unpack_from("<QHH", block, at)
         entry_flags, = struct.unpack_from("<H", block, at + 0x0C)
-        if length < 0x10 or at + length > len(block):
+        if length < 0x10 or length % 8 or at + length > end or key_length > length - 0x10:
+            problems.append("the live entry at block offset %d has a length (%d) or key length (%d) that does not fit the live region"
+                            % (at, length, key_length))
             break
         if entry_flags & 0x02:                     # the end-of-node marker
             break
@@ -215,7 +252,7 @@ def live_entries(block, base_offset):
                           "mft_sequence": reference >> 48, "offset": base_offset + at})
             out.append(found)
         at += length
-    return out, 0x18 + total, 0x18 + allocated
+    return out, 0x18 + total, 0x18 + allocated, problems
 
 
 def carve_slack(block, slack_start, slack_end, base_offset):
@@ -267,10 +304,15 @@ def main():
         except re.error as exc:
             fail("name is not a valid regex", reason=str(exc))
 
-    key = [path, block_size, bool(args.get("slack_only")), args.get("name")]
+    include_unreliable = args.get("include_unreliable", False)
+    if not isinstance(include_unreliable, bool):
+        fail("include_unreliable must be true or false")
+
+    key = [path, block_size, bool(args.get("slack_only")), args.get("name"), include_unreliable]
     entries = LosslessPage("indx_carve", key, limit)
     problems = LosslessPage("indx_carve-problems", key, 40)
     blocks, from_slack = 0, 0
+    blocks_fixup_failed = blocks_salvaged = excluded = 0
 
     with open(path, "rb") as fh:
         size = os.fstat(fh.fileno()).st_size
@@ -291,13 +333,27 @@ def main():
                 fixed, problem = apply_fixup(block)
                 if problem:
                     problems.add({"offset": start_of_block, "why": problem})
+                    blocks_fixup_failed += 1
                 blocks += 1
-                live, slack_start, slack_end = live_entries(fixed, start_of_block)
+                node_problem = node_problems(fixed) if not problem else None
+                if node_problem:
+                    problems.add({"offset": start_of_block, "why": node_problem})
+                live, slack_start, slack_end, live_problems = live_entries(fixed, start_of_block)
+                for why in live_problems:
+                    problems.add({"offset": start_of_block, "why": why})
+                salvaged = bool(problem or node_problem or live_problems)
+                if salvaged:
+                    blocks_salvaged += 1
                 found = live + carve_slack(fixed, slack_start, slack_end, start_of_block)
                 for entry in found:
                     if args.get("slack_only") and entry["source"] != "slack":
                         continue
                     if pattern and not pattern.search(entry["name"]):
+                        continue
+                    entry.update({"block_offset": start_of_block, "fixup_ok": problem is None,
+                                  "node_ok": not (node_problem or live_problems), "salvaged": salvaged})
+                    if salvaged and not include_unreliable:
+                        excluded += 1
                         continue
                     entries.add(entry)
                     if entry["source"] == "slack":
@@ -314,9 +370,15 @@ def main():
     page = entries.finish()
     problem_page = problems.finish()
     out = {
+        "parser": "indx_carve/2",
+        "status": "partial" if blocks_salvaged else "complete",
         "path": path,
         "block_size": block_size,
         "blocks": blocks,
+        "blocks_fixup_failed": blocks_fixup_failed,
+        "blocks_salvaged": blocks_salvaged,
+        "include_unreliable": include_unreliable,
+        "entries_excluded_unreliable": excluded,
         "entries": entries.page,
         "entry_count": page["matched"],
         "from_slack": from_slack,
@@ -324,11 +386,15 @@ def main():
         **page,
         "problems": problems.page,
         "problem_count": problem_page["matched"],
-        "note": "A slack entry is a name the directory no longer lists. Its times are $FILE_NAME "
-                "times, written by the kernel on create, rename and move, so they are the set a "
-                "timestomper does not reach. It does not say the file was deleted: a rename or a "
-                "move out of the directory leaves the same trace, and the USN journal tells you "
-                "which. See filesystem/journals.",
+        "note": "A slack entry is stale index material: a $FILE_NAME as the directory's index held it when the entry "
+                "was removed or the node rewritten. Its times are that structure's historical metadata, not the file's "
+                "current times and not evidence that they were left unaltered, and a name that parses is structurally "
+                "plausible, not verified. It does not say the file was deleted: a rename or a move out of the directory "
+                "leaves the same trace; the USN journal and the $MFT record, where one survives, can corroborate. "
+                + ("%d block(s) failed an integrity check (see problems): their entries are %s. " % (
+                    blocks_salvaged, "included and marked salvaged" if include_unreliable else
+                    "left out (%d), unless include_unreliable is true" % excluded) if blocks_salvaged else "")
+                + "See filesystem/journals.",
     }
     if problem_page.get("all_results"):
         out["all_problems"] = problem_page["all_results"]

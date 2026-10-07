@@ -1,6 +1,6 @@
 {
   "name": "indx_carve",
-  "description": "Recover file names a directory no longer lists. Parses INDX blocks ($INDEX_ALLOCATION, the $I30 stream) and, past the end of the live entries, carves the slack where entries for deleted files survive with their $FILE_NAME times and sizes. Also sweeps a raw blob for INDX blocks.",
+  "description": "Recover file names a directory no longer lists. Parses INDX blocks ($INDEX_ALLOCATION, the $I30 stream) and carves the slack past the end of the live entries, where stale $FILE_NAME structures survive; also sweeps a raw blob for INDX blocks. A slack entry is stale index material: its times are the historical metadata of that structure, not the file's current times and not evidence that they were left unaltered, a name that parses is structurally plausible and not verified, and it does not say the file was deleted. Integrity travels with every entry: block_offset, fixup_ok (every 512-byte unit carries its update sequence number and the array covers the block), node_ok (the node header and each live entry's length, alignment and key length fit the live region) and salvaged. A salvaged block's entries are left out unless include_unreliable is true, and the answer counts the blocks and entries it left out (status partial when any block was salvaged). FILETIMEs are given as ISO 8601 UTC with seven fractional digits and as raw decimal strings.",
   "params": {
     "path": {
       "type": "string",
@@ -20,7 +20,11 @@
     },
     "limit": {
       "type": "integer",
-      "description": "Entries shown inline (default 500); every block is read, and when more entries match the whole list is written as JSON Lines and named in all_results"
+      "description": "Entries shown inline (default 500, an inline page size); every block is read, and when more entries match the whole list is written as JSON Lines and named in all_results"
+    },
+    "include_unreliable": {
+      "type": "boolean",
+      "description": "Include the entries of blocks that failed an integrity check, marked salvaged (default false: they are left out and counted)"
     }
   },
   "runtime": "python3",
@@ -28,7 +32,20 @@
   "timeout_seconds": 300,
   "example": "{\"path\": \"work/extracted/I30-64\", \"slack_only\": true}",
   "by": "maintainer",
-  "at": "2026-09-22T14:00:00.000Z",
-  "version": 1,
-  "sha256": "74467796e0f2a5e011374c3c705d14df55023c9caa29ccd0202c7de58c3ab5e7"
+  "at": "2026-10-07T12:00:00.000Z",
+  "version": 2,
+  "sha256": "a46a77fb8ba88a5ad238f9996c48eb60daa698b40982613ad8dca0d381e57589",
+  "use": {
+    "names": [
+      "$I30",
+      "$INDEX_ALLOCATION*",
+      "I30*"
+    ],
+    "magic": [
+      {
+        "offset": 0,
+        "hex": "494e4458"
+      }
+    ]
+  }
 }

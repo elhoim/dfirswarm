@@ -1,10 +1,10 @@
 {
   "name": "vss_stores",
-  "description": "List the volume shadow copies on an image with vshadowinfo: one store per snapshot, with its identifier, creation time and size, and the vshadowmount command that exposes it as a volume under your own work/<your id>/ directory, to list and extract from.",
+  "description": "List the volume shadow copies of a raw volume or disk image through vshadowinfo: one store per snapshot with the identifier, creation time and volume size vshadowinfo prints, and, for each, the argv of the vshadowmount command that would expose it under your own work/<your id>/ directory. It LISTS and suggests; it mounts nothing, and a listed store is not an examined one. vshadowinfo reads raw data (an E01 has to be exposed raw first). The answer is judged: vshadowinfo's exit status and time limit, its whole stdout and stderr (kept in files), and the stores it claims against the stores that could be read; a failed or unrecognised run is status failed (exit 1) and never an answer that there are no stores, a mismatch is partial, and zero stores is said only when vshadowinfo exited 0 and itself reported zero, worded as what this reader found at this offset and not as proof that none existed. A FUSE mount may be unavailable in a worker.",
   "params": {
     "image": {
       "type": "string",
-      "description": "The image, or a single volume from it"
+      "description": "A raw volume or disk image (not an E01; expose it raw first)"
     },
     "offset": {
       "type": "integer",
@@ -12,15 +12,18 @@
     },
     "mount_dir": {
       "type": "string",
-      "description": "Where the vshadowmount command it suggests mounts the stores (default work/<your id>/vss: your own directory, the part of work/ a VM can write)"
+      "description": "Where the suggested vshadowmount command would mount the stores (default work/<your id>/vss: your own directory, the part of work/ a VM can write); nothing is mounted by this tool"
     }
   },
   "runtime": "python3",
   "entry": "run.py",
   "timeout_seconds": 300,
-  "example": "{\"image\": \"inputs/disk.E01\", \"offset\": 1048576}",
+  "example": "{\"image\": \"inputs/disk.raw\", \"offset\": 1048576}",
   "by": "maintainer",
-  "at": "2026-09-22T09:00:00.000Z",
-  "version": 1,
-  "sha256": "9db2d6efbbbe718eb7d1360c7624098c1b7423eb028d8ebf1fdf8a1931444559"
+  "at": "2026-10-07T12:00:00.000Z",
+  "version": 2,
+  "sha256": "a4fbf5455b91d7223948b5e2036d32ebd5507b42706e8c648af3da7234a502cf",
+  "requires": [
+    "vshadowinfo"
+  ]
 }

@@ -1332,3 +1332,246 @@ test("sigma_hunt's merge sort orders detections by level and time across runs of
     assert.equal(out.trim(), "ok");
   });
 });
+
+// --- vss_stores -----------------------------------------------------------------
+
+type VssOut = {
+  status: string;
+  stores: Array<{ store: number; identifier?: string; creation_time?: string; mount_argv: string[][]; mount_with: string }>;
+  store_count: number;
+  stores_claimed: number | null;
+  problems: string[];
+  exit_code: number;
+  note?: string;
+  error?: string;
+  stderr_file: string;
+  stdout_file: string;
+};
+
+/** vshadowinfo's report as libvshadow prints it: a header, `Number of stores`, then a `Store: n` block of tab-indented fields per snapshot. */
+const SHADOW_REPORT = (claimed: number | null, shown: number): string => {
+  const lines = ["vshadowinfo 20240504", "", "Volume Shadow Snapshot information:"];
+  if (claimed !== null) lines.push(`\tNumber of stores:\t${claimed}`);
+  for (let i = 1; i <= shown; i++) {
+    lines.push("", `Store: ${i}`, `\tIdentifier\t\t: 0b3cd1ec-aaaa-bbbb-cccc-00000000000${i}`, `\tCreation time\t\t: Oct 14, 2023 16:14:3${i}.000000000 UTC`, "\tVolume size\t\t: 53 GiB (57982058496 bytes)");
+  }
+  return lines.join("\n");
+};
+
+const vshadowinfoStub = (report: string, stderr = "", exit = 0): string => `cat <<'REPORT'\n${report}\nREPORT\n${stderr ? `echo '${stderr}' >&2\n` : ""}exit ${exit}`;
+
+test("vss_stores says failed, never 'no stores', when vshadowinfo fails, and keeps its whole stderr in a file", async () => {
+  // A failing vshadowinfo left `stores` empty, and the tool printed "No shadow-copy stores were observed on this
+  // volume": an absence-shaped answer for a failure.
+  await withCwd(async (cwd, bin) => {
+    await stub(bin, "vshadowinfo", vshadowinfoStub("", "vshadowinfo: unable to open volume.\nlibvshadow: unsupported format version 9", 1));
+    await writeFile(join(cwd, "work", "disk.raw"), Buffer.alloc(4096));
+    const run = await tool("vss_stores", cwd, { image: "work/disk.raw", offset: 1048576 }, {}, bin);
+    const out = failed(run) as unknown as VssOut;
+    assert.equal(out.status, "failed");
+    assert.equal(out.exit_code, 1);
+    assert.doesNotMatch(run.stdout, /No shadow-copy stores were observed/);
+    assert.match(out.note ?? "", /not a finding/);
+    assert.match(await readFile(join(cwd, out.stderr_file), "utf8"), /unsupported format version 9/);
+  });
+});
+
+test("vss_stores reports a count mismatch between the stores vshadowinfo claims and the stores it could read as partial", async () => {
+  await withCwd(async (cwd, bin) => {
+    await stub(bin, "vshadowinfo", vshadowinfoStub(SHADOW_REPORT(2, 1)));
+    await writeFile(join(cwd, "work", "disk.raw"), Buffer.alloc(4096));
+    const out = body<VssOut>(await tool("vss_stores", cwd, { image: "work/disk.raw" }, {}, bin));
+    assert.equal(out.status, "partial");
+    assert.equal(out.stores_claimed, 2);
+    assert.equal(out.store_count, 1);
+    assert.ok(out.problems.some((p) => /reports 2 store\(s\) and 1 could be read/.test(p)));
+    assert.match(out.note ?? "", /incomplete/);
+  });
+});
+
+test("vss_stores reads a complete report, and quotes every operand of the mount command it suggests", async () => {
+  // The suggested command interpolated the image path into a shell string without quoting.
+  await withCwd(async (cwd, bin) => {
+    await stub(bin, "vshadowinfo", vshadowinfoStub(SHADOW_REPORT(2, 2)));
+    await writeFile(join(cwd, "work", "my disk;touch pwned.raw"), Buffer.alloc(4096));
+    const out = body<VssOut>(await tool("vss_stores", cwd, { image: "work/my disk;touch pwned.raw", offset: 4096 }, {}, bin));
+    assert.equal(out.status, "complete");
+    assert.equal(out.store_count, 2);
+    assert.equal(out.stores[0].identifier, "0b3cd1ec-aaaa-bbbb-cccc-000000000001");
+    assert.equal(out.stores[1].creation_time, "Oct 14, 2023 16:14:32.000000000 UTC");
+    assert.deepEqual(out.stores[0].mount_argv[1], ["vshadowmount", "-o", "4096", "work/my disk;touch pwned.raw", "work/s1/vss/"]);
+    assert.match(out.stores[0].mount_with, /'work\/my disk;touch pwned\.raw'/);
+    assert.equal(out.problems.length, 0);
+  });
+});
+
+test("vss_stores says zero stores only when vshadowinfo ran, exited 0 and reported zero itself, and words it as a bounded negative", async () => {
+  await withCwd(async (cwd, bin) => {
+    await writeFile(join(cwd, "work", "disk.raw"), Buffer.alloc(4096));
+    await stub(bin, "vshadowinfo", vshadowinfoStub(SHADOW_REPORT(0, 0)));
+    const none = body<VssOut>(await tool("vss_stores", cwd, { image: "work/disk.raw" }, {}, bin));
+    assert.equal(none.status, "complete");
+    assert.equal(none.store_count, 0);
+    assert.match(none.note ?? "", /reported 0 stores/);
+    assert.match(none.note ?? "", /does not establish that none was ever made/);
+    // An output it does not recognise is a failure, not zero stores.
+    await stub(bin, "vshadowinfo", vshadowinfoStub("something else entirely"));
+    const odd = failed(await tool("vss_stores", cwd, { image: "work/disk.raw" }, {}, bin)) as unknown as VssOut;
+    assert.equal(odd.status, "failed");
+    assert.ok(odd.problems.some((p) => /does not recognise its format/.test(p)));
+  });
+});
+
+test("vss_stores says an EWF image has to be exposed raw first", async () => {
+  await withCwd(async (cwd, bin) => {
+    await stub(bin, "vshadowinfo", vshadowinfoStub("", "unable to open volume", 1));
+    await writeFile(join(cwd, "work", "disk.E01"), Buffer.concat([Buffer.from([0x45, 0x56, 0x46, 0x09, 0x0d, 0x0a, 0xff, 0x00]), Buffer.alloc(100)]));
+    const out = failed(await tool("vss_stores", cwd, { image: "work/disk.E01" }, {}, bin)) as unknown as VssOut;
+    assert.ok(out.problems.some((p) => /EWF \(E01\) signature/.test(p)));
+  });
+});
+
+// --- indx_carve -----------------------------------------------------------------
+
+/**
+ * An INDX record as MS-NTFS-style documentation lays it out (little-endian): "INDX", the update
+ * sequence array offset (0x04) and count (0x06), the node header at 0x18 (offset of the first entry
+ * from 0x18, live size, allocated size, flags), index entries (the MFT reference, entry length, key
+ * length, flags, then the $FILE_NAME key at 0x10), and, in each 512-byte unit, the last two bytes
+ * replaced by the update sequence number with the real bytes in the array.
+ */
+const INDX_TIME = 133_500_000_000_000_001n;
+
+function indxFileName(parent: bigint, name: string): Buffer {
+  const b = Buffer.alloc(0x42 + 2 * name.length);
+  b.writeBigUInt64LE(parent | (1n << 48n), 0);
+  for (let i = 0; i < 4; i++) b.writeBigUInt64LE(INDX_TIME + BigInt(i) * 10_000_000n, 8 + i * 8);
+  b.writeBigUInt64LE(4096n, 0x28);
+  b.writeUInt32LE(0x20, 0x38);
+  b[0x40] = name.length;
+  b[0x41] = 1;
+  Buffer.from(name, "utf16le").copy(b, 0x42);
+  return b;
+}
+
+function indxEntry(ref: bigint, content: Buffer, flags = 0, lengthOverride?: number): Buffer {
+  let length = 0x10 + content.length;
+  length += (8 - (length % 8)) % 8;
+  const b = Buffer.alloc(length);
+  b.writeBigUInt64LE(ref, 0);
+  b.writeUInt16LE(lengthOverride ?? length, 8);
+  b.writeUInt16LE(content.length, 10);
+  b.writeUInt16LE(flags, 12);
+  content.copy(b, 0x10);
+  return b;
+}
+
+function indxBlock(vcn: number, live: Buffer[], slack: Buffer[], o: { usaCount?: number; breakUnit?: number } = {}): Buffer {
+  const b = Buffer.alloc(4096);
+  b.write("INDX", 0, "latin1");
+  const usaOffset = 0x28;
+  const usaCount = o.usaCount ?? 9;
+  b.writeUInt16LE(usaOffset, 4);
+  b.writeUInt16LE(usaCount, 6);
+  b.writeBigUInt64LE(BigInt(vcn), 0x10);
+  let at = 0x40;
+  for (const e of [...live, indxEntry(0n, Buffer.alloc(0), 0x02)]) {
+    e.copy(b, at);
+    at += e.length;
+  }
+  const total = at - 0x18;
+  for (const e of slack) {
+    e.copy(b, at);
+    at += e.length;
+  }
+  b.writeUInt32LE(0x40 - 0x18, 0x18);
+  b.writeUInt32LE(total, 0x1c);
+  b.writeUInt32LE(4096 - 0x18, 0x20);
+  const sequence = Buffer.from([0x07, 0x00]);
+  sequence.copy(b, usaOffset);
+  for (let i = 1; i < 9; i++) {
+    const end = i * 512 - 2;
+    if (i < usaCount) b.copy(b, usaOffset + i * 2, end, end + 2);
+    // A unit whose last two bytes do not carry the sequence number is a block torn between writes.
+    (o.breakUnit === i ? Buffer.from([0xee, 0xee]) : sequence).copy(b, end);
+  }
+  return b;
+}
+
+type IndxOut = {
+  status: string;
+  blocks: number;
+  blocks_fixup_failed: number;
+  blocks_salvaged: number;
+  entries_excluded_unreliable: number;
+  entry_count: number;
+  entries: Array<{ name: string; source: string; block_offset: number; fixup_ok: boolean; node_ok: boolean; salvaged: boolean; created: string | null; created_filetime: string }>;
+  problems: Array<{ offset: number; why: string }>;
+  note: string;
+};
+
+const indxSet = (n: number, tag: string): { live: Buffer[]; slack: Buffer[] } => ({
+  live: [indxEntry(100n + BigInt(n), indxFileName(64n, `live-${tag}.txt`))],
+  slack: [indxEntry(200n + BigInt(n), indxFileName(64n, `old-${tag}.txt`))],
+});
+
+test("indx_carve leaves out the entries of a block whose update sequence check failed, and marks them when asked for", async () => {
+  // A block whose fixup failed was recorded under `problems`, but every entry carved from it was
+  // emitted as if sound: a row looked as reliable as one from a good block.
+  await withCwd(async (cwd) => {
+    const good = indxSet(1, "good");
+    const torn = indxSet(2, "torn");
+    await writeFile(join(cwd, "work", "I30"), Buffer.concat([indxBlock(0, good.live, good.slack), indxBlock(1, torn.live, torn.slack, { breakUnit: 3 })]));
+    const out = body<IndxOut>(await tool("indx_carve", cwd, { path: "work/I30" }));
+    assert.deepEqual(out.entries.map((e) => e.name).sort(), ["live-good.txt", "old-good.txt"]);
+    assert.ok(out.entries.every((e) => e.fixup_ok === true && e.node_ok === true && e.salvaged === false && e.block_offset === 0));
+    assert.equal(out.blocks, 2);
+    assert.equal(out.blocks_fixup_failed, 1);
+    assert.equal(out.blocks_salvaged, 1);
+    assert.equal(out.entries_excluded_unreliable, 2, "what was left out is counted");
+    assert.equal(out.status, "partial");
+    assert.deepEqual(out.problems.map((p) => [p.offset, p.why]), [[4096, "sector 3 does not carry the update sequence number"]]);
+    assert.match(out.note, /left out \(2\), unless include_unreliable is true/);
+
+    const all = body<IndxOut>(await tool("indx_carve", cwd, { path: "work/I30", include_unreliable: true }));
+    assert.equal(all.entry_count, 4);
+    const torned = all.entries.filter((e) => e.block_offset === 4096);
+    assert.equal(torned.length, 2);
+    assert.ok(torned.every((e) => e.fixup_ok === false && e.salvaged === true), "every entry from the torn block carries the flag");
+    assert.equal(all.entries_excluded_unreliable, 0);
+  });
+});
+
+test("indx_carve checks the update sequence array covers the block, and a live entry's length against the live region, and names each failure", async () => {
+  await withCwd(async (cwd) => {
+    const a = indxSet(1, "short-usa");
+    const b = indxSet(2, "bad-length");
+    // The array claims 5 values for a block that has 8 units; and an entry whose length runs past the live region.
+    const shortUsa = indxBlock(0, a.live, a.slack, { usaCount: 5 });
+    const badLength = indxBlock(1, [indxEntry(300n, indxFileName(64n, "overlong.txt"), 0, 0x400)], b.slack);
+    await writeFile(join(cwd, "work", "I30"), Buffer.concat([shortUsa, badLength]));
+    const out = body<IndxOut>(await tool("indx_carve", cwd, { path: "work/I30", include_unreliable: true }));
+    assert.equal(out.blocks_salvaged, 2);
+    assert.ok(out.problems.some((p) => p.offset === 0 && /holds 4 fixup value\(s\) and the block has 8 512-byte unit\(s\)/.test(p.why)), JSON.stringify(out.problems));
+    assert.ok(out.problems.some((p) => p.offset === 4096 && /live entry at block offset \d+ has a length \(1024\)/.test(p.why)), JSON.stringify(out.problems));
+    assert.ok(out.entries.every((e) => e.salvaged));
+    const byDefault = body<IndxOut>(await tool("indx_carve", cwd, { path: "work/I30" }));
+    assert.equal(byDefault.entry_count, 0);
+    assert.equal(byDefault.entries_excluded_unreliable > 0, true);
+  });
+});
+
+test("indx_carve returns the raw FILETIMEs beside the dates and no longer says slack times are the set a timestomper does not reach", async () => {
+  await withCwd(async (cwd) => {
+    const s = indxSet(1, "x");
+    await writeFile(join(cwd, "work", "I30"), indxBlock(0, s.live, s.slack));
+    const out = body<IndxOut>(await tool("indx_carve", cwd, { path: "work/I30", slack_only: true }));
+    assert.equal(out.entries.length, 1);
+    assert.equal(out.entries[0].source, "slack");
+    assert.equal(out.entries[0].created_filetime, "133500000000000001");
+    assert.equal(out.entries[0].created, "2024-01-17T21:20:00.0000001Z");
+    assert.doesNotMatch(out.note, /timestomper/);
+    assert.match(out.note, /stale index material/);
+    assert.match(out.note, /not evidence that they were left unaltered/);
+  });
+});
