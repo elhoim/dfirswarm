@@ -847,6 +847,10 @@ test("knowledgec_query reads a record that is only in the write-ahead log, from 
     // No staged copy is left behind in work/.
     const left = await readdir(join(cwd, "work", "s1")).catch(() => [] as string[]);
     assert.deepEqual(left.filter((n) => n.startsWith("knowledgec-")), []);
+    // As a job it stages under $OUT, and leaves nothing of it there: a sealed output holds no empty staging directory.
+    const job = body<KcAnswer>(await asJob(KC, cwd, { db: "work/walcase/knowledgeC.db" }));
+    assert.equal(job.entry_count, 7);
+    assert.deepEqual(await readdir(join(cwd, "out")), []);
   });
 });
 

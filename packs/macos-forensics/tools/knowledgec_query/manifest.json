@@ -38,7 +38,7 @@
   "by": "maintainer",
   "at": "2026-09-22T16:00:00.000Z",
   "version": 3,
-  "sha256": "72be9440b2292bd5ff0509b31efa506b3906453f8a8f04c76ea83f25622ba64c",
+  "sha256": "6c9d27442281cc6a3abcec2d041dd0161b965a17587e250641471e1c3e570aee",
   "use": {
     "names": [
       "knowledgeC.db"

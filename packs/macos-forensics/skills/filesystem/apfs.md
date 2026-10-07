@@ -54,8 +54,8 @@ volume or a FileVault preference does not show the key state, and hardware-bound
 encryption can leave a raw acquisition unreadable even with some credentials in hand.
 `fvdeinfo` is for Core Storage; it is not assumed to read APFS. Use an acquisition and
 parser documented for the hardware, filesystem and encryption state; if the
-encrypted-containers pack is loaded, its `volumes/luks-filevault` skill carries the
-encryption route. Any step that handles credentials is a `secret_output` job inside the
+encrypted-containers pack is loaded, its skill index says which skill carries the
+FileVault route. Any step that handles credentials is a `secret_output` job inside the
 case's authority and offline.
 
 **Does not show.** A logical extraction cannot show what survives in unacquired

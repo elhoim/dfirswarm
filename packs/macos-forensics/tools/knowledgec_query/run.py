@@ -413,6 +413,11 @@ def main():
     finally:
         if stage:
             shutil.rmtree(stage, ignore_errors=True)
+            if os.environ.get("JOB_ID") and os.environ.get("OUT"):
+                try:
+                    os.rmdir(str(stage_parent()))      # an empty directory is not a sealed output
+                except OSError:
+                    pass
     if source["staged"]:
         source["staged_copy"] = "removed"
 

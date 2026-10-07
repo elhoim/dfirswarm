@@ -19,8 +19,8 @@ authenticated.
 Keep the whole structure as acquired and record what is missing. A trace record can
 carry its own payload as well as references, so a missing `uuidtext` does not make every
 record unusable; it can leave some messages unrendered, so say which. The answer's
-`support_files` is a census by name of what the input holds, not a verdict that it is
-enough.
+`decoded_coverage.support_files` is a census by name of what the input holds, not a
+verdict that it is enough.
 
 **Time and boots.** Keep the boot identity and the timesync data that relate continuous
 time to wall time, keep source timestamps and offsets, and write down how you converted
