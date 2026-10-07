@@ -943,7 +943,7 @@ test("yara_scan writes the matched bytes only on write_matches, only in a job, o
     assert.equal(out.secret_values.written, 3);
     assert.equal(out.secret_values.values_file, "store/jobs/j000007/out/yara-matched-strings.jsonl");
     assert.equal(out.secret_values.contains_secret_values, true);
-    assert.equal(run.stdout.includes("Summer2024"), false, "even then the answer itself has no value");
+    for (const piece of yaraPieces()) assert.equal((run.stdout + run.stderr).includes(piece), false, `even then the answer itself has no ${piece}`);
     const file = join(outDir, "yara-matched-strings.jsonl");
     assert.equal((await stat(file)).mode & 0o777, 0o600);
     const rows = (await readFile(file, "utf8")).trimEnd().split("\n").map((l) => JSON.parse(l) as { finding_id: string; value: string; offset: number; length: number; identifier: string });
@@ -951,11 +951,29 @@ test("yara_scan writes the matched bytes only on write_matches, only in a job, o
     assert.equal(rows[0].value, PLANTED);
     assert.equal(rows[0].offset, 6);
     assert.equal(rows[0].length, 20);
-    // A values file already there is refused by name before anything is scanned.
-    const again = failed(await tool("yara_scan", cwd, { rules: "work/rules.yar", target: "work/sample.bin", write_matches: true }, { JOB_ID: "j000008", OUT: outDir }, bin));
-    assert.match(again.error, /already exists/);
+    // Nothing else the tool wrote holds the value, in any form: only the sealed values file does.
+    for (const other of (await everyFileUnder(cwd)).filter((f) => f !== file && !f.endsWith("sample.bin") && !f.endsWith("rules.yar") && !f.includes("/bin/"))) {
+      const text = (await readFile(other)).toString("latin1");
+      for (const piece of yaraPieces()) assert.equal(text.includes(piece), false, `${other} holds ${piece}`);
+    }
+    // A second run in the same job, the values file already there: it scans all the same, writes the next
+    // numbered file, names it, and the first file is as it was (it was refused without scanning).
+    const before = await readFile(file);
+    const again = body<YaraOut>(await tool("yara_scan", cwd, { rules: "work/rules.yar", target: "work/sample.bin", write_matches: true }, { JOB_ID: "j000007", OUT: outDir }, bin));
+    assert.equal(again.status, "complete");
+    assert.equal(again.string_match_count, 3);
+    assert.equal(again.secret_values.values_file, "store/jobs/j000007/out/yara-matched-strings-2.jsonl");
+    assert.equal(again.secret_values.written, 3);
+    assert.deepEqual(await readFile(file), before);
+    assert.equal((await stat(join(outDir, "yara-matched-strings-2.jsonl"))).mode & 0o777, 0o600);
   });
 });
+
+/** The planted value in every form an answer could carry it: whole, its words, its fragments, hex and base64 of each. */
+function yaraPieces(): string[] {
+  const raw = ["Summer2024!", "Summer2024", "password=Summer2024!", "password=", "Summer", "2024!"];
+  return [...raw, ...raw.map((r) => Buffer.from(r).toString("hex")), ...raw.map((r) => Buffer.from(r).toString("base64").replace(/=+$/, "")), "4D 5A 90 00"].filter((x) => x.length >= 5 || x === "2024!");
+}
 
 test("yara_scan keeps the whole of a run it had to stop: status partial, complete false, the matches read before the time limit and the stderr file", async () => {
   // A timeout threw away everything yara had printed, and the answer was "did not finish".
