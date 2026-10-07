@@ -22,7 +22,7 @@
   "by": "maintainer",
   "at": "2026-10-07T12:00:00.000Z",
   "version": 4,
-  "sha256": "1f6f9260aa0b2801e1d8a296519aad84a8aed01c9cf9d3dad8ea2cda86c87ca1",
+  "sha256": "0377cf283c9be09f8884517e056fa8f97a33e91e9328b5c8127560104cc080f7",
   "use": {
     "extensions": [
       ".automaticdestinations-ms",
