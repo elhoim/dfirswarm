@@ -55,7 +55,7 @@
       "tools/usn_journal/run.py": "ae41655adf9c5806c1b3c1fcf6ddae823f02bf44ee36b79bab858c4726add146",
       "tools/browser_history/manifest.json": "246aee94825956cfd16c9ac74cafa9dd2b22edcd0d1bc6d19fa68d3c81e179a4",
       "tools/browser_history/run.py": "92ee464756e9620a270a76acb15a71a15b0f3b0b43a88cd0cd5b6c1d33478602",
-      "tools/jumplist/manifest.json": "51216163cf7f5acd6c1594e962732c5e971677755981e8c334bbbf3ebf41665c",
+      "tools/jumplist/manifest.json": "3b283a4abb4969e63503873de03203d376dae8efa7c214a9fc16a5e79ff30788",
       "tools/jumplist/run.py": "9110e0c1adf054ac7e37a966fe54d400d29b73883c6519271635d1146399af1b",
       "tools/mam_scan/manifest.json": "418a044e4950b7d2171b7e11e0e01b30728c74d84a4f5e55aaf1694ad86cb16c",
       "tools/mam_scan/run.py": "e63b649024fcf17d5fb36173d08ff222339e6ec7136050333bc42aba5db4f377",
