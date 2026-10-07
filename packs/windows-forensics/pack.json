@@ -1,7 +1,7 @@
 {
   "id": "windows-forensics",
   "name": "Windows Forensics Pack",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "description": "Artefact-by-artefact method and tooling for a Windows examination: the file system and its journals, the hives, execution evidence, the event logs and the records inside a cleared one, accounts and remote access, persistence, PowerShell, browsers, shadow copies, memory, and the traces anti-forensics leaves.",
   "licence": "AGPL-3.0-or-later",
   "authors": [
@@ -15,6 +15,20 @@
     "python": "requires/python.txt"
   },
   "secrets": [],
+  "unreferenced_ok": [
+    {
+      "name": "pffexport",
+      "why": "declared for mailbox containers (PST/OST) met in a Windows examination; no skill of this pack covers mail, and the skill that would name it is planned for a later change to this pack"
+    },
+    {
+      "name": "impacket",
+      "why": "declared before this review for credential-store work; no skill may name it while the owner has not decided whether the pack keeps it (credential tooling is out of scope of this change, and the entry is left exactly as it was)"
+    },
+    {
+      "name": "dpapick3",
+      "why": "declared before this review for credential-store work; no skill may name it while the owner has not decided whether the pack keeps it (credential tooling is out of scope of this change, and the entry is left exactly as it was)"
+    }
+  ],
   "checksums": {
     "sha256": {
       "LICENCE": "617dec43b30845a8c7d062db3f6d892400d96796b91f363586beacfbdffd1721",
@@ -59,36 +73,36 @@
       "tools/jumplist/run.py": "9110e0c1adf054ac7e37a966fe54d400d29b73883c6519271635d1146399af1b",
       "tools/mam_scan/manifest.json": "418a044e4950b7d2171b7e11e0e01b30728c74d84a4f5e55aaf1694ad86cb16c",
       "tools/mam_scan/run.py": "e63b649024fcf17d5fb36173d08ff222339e6ec7136050333bc42aba5db4f377",
-      "goals/data-left-the-building.md": "241efe0047e5c0df4e8414eb4080c307714085885e7ba5e19b6d6f978404fcd3",
+      "goals/data-left-the-building.md": "755c30341017f6f9392b2434237e1359bbdc5a5155275dd98ca5040f3b934480",
       "goals/hidden-data.md": "1d9c0354de41e4141a9c0f971b42da447b423fc0e3e6d91d5910e215ca4b1e09",
-      "goals/intrusion-triage.md": "e51941f6287163de334f24023431b1ec6b9ce216a545876b6fa04b1edc51e1cb",
-      "skills/artifacts/shell.md": "b9cf8070a18484a37132d2c1ddc745bef01ac56a9a18ce9db69fc4a0eb60ba9b",
-      "skills/memory/windows.md": "c9f9d9d598d861b035448afa99cb907b0fed3c47ece2e944a09fbd387a8c0393",
-      "skills/filesystem/ads.md": "6f486730c5524adb0187e07190c55a3b48a74893c99f1e4dbd5e2b249ebb9b8d",
-      "skills/filesystem/deleted.md": "2a5266ba92789ed4e047375dd0ab0f14ad9c53850503503bf585b2a257a840ce",
-      "skills/filesystem/journals.md": "4a9fa56ed4237e80033b23ead414fb49aba73cfcc434155d413ad1219ac4d4b4",
-      "skills/filesystem/mft.md": "289510b580aa279ea02825345a2a9dddb68360362430ce6a121baf28cb45c6b2",
-      "skills/filesystem/shadowcopies.md": "db8b443ada30da811ca54445be00277ffaf1f2149c795089c1c153d5ee749b51",
-      "skills/browser/artefacts.md": "5411e49d88ccddf204477679a05a80bca007889b36b3d25a3dc9766094e1b53b",
-      "skills/logs/hunting.md": "cc9aa015c15c8ae7c4fe1911c0ea6c935e932c43d1bf826a80edd347c5e17da7",
-      "skills/logs/powershell.md": "95ed058a6ba25cd9e414a3ad781dc442724bd1e0562e8dccf0661dd119c2a382",
-      "skills/logs/recovery.md": "ea20e5a36dd92a14d59a4a5c3f6999e19e0a8c844e05f4c33eaedc459ea1355e",
-      "skills/logs/remote-access.md": "9ad92e25eff44da9810a6f25bd329906c37c49155499a7480814e9e3151d582b",
-      "skills/logs/security.md": "77165b68f611fa178f59f9800cb95210f30340589bf762d4461b603a6c4c5c1c",
-      "skills/accounts/logons.md": "e66eb064154b61cd6a5dc843d5ed67be2afbbbe3358d483988f626ab568b65e4",
-      "skills/execution/amcache.md": "5ad3f9b3dd51e81750e6a5b935a3e84654cd5c41832e289f2e68ee1952055e14",
-      "skills/execution/overview.md": "07a87d67a4343ae0d6e39712a6fc96b77efb40e3156330a2db6a4d338b25ff65",
-      "skills/execution/prefetch.md": "96aa90b8941dec90dd2357a3b9e4e750319edae6c4f5c4ab156a482aa5085f0e",
-      "skills/execution/srum.md": "89a365d4d82ca69d70890bcf6d3b86f80085dd6e1f918e18ec4e8c25359243ec",
-      "skills/execution/userassist.md": "bcd68637506253f1e90832ffcac0c066e2d54db63f0f01f17421495dac4eb676",
-      "skills/persistence/mechanisms.md": "40a40b73c800a9cc59b9e43a7438bccdb278a6d04af67f5c74c230296cb605f5",
-      "skills/registry/devices.md": "46977bfd8607c1679f59595427060254eb4e6afd942473d1dc46af6b55f4883e",
-      "skills/registry/overview.md": "a645987cbbbe4c610e7701e41788e067f880d3d5729a31d2ae4569a8fdee625a",
-      "skills/registry/system-profile.md": "931b25341d637782c5f21c34cdfbe6bda8709486a16280ce29a0b54b0f7b75b0",
-      "skills/antiforensics/traces.md": "c87467f49a555613b42c980c1ef084d98fd6f8e3e7ac438243084e7443cf2748",
+      "goals/intrusion-triage.md": "7644e21e0965eb78bd6bf91a694a46d863ed2a0aa25561b7a5183cbe990798f2",
+      "skills/artifacts/shell.md": "ee68f9cfbcf2bca31c175893b848b6b2215e1f333e7839930780a5e079d51a1e",
+      "skills/memory/windows.md": "4aba6dd23e8ac9adebabcfd555818c50be40054319fcf45336a12c5be3ac51d1",
+      "skills/filesystem/ads.md": "82959b1c965fa057761f384c7c32f2dbb2ec05bb6ff20de3c29114fc29f8e74b",
+      "skills/filesystem/deleted.md": "32d42750f5f9c496e47b2d379399e4e630dbbd7813f5ee571088e74c2e92f988",
+      "skills/filesystem/journals.md": "d2d435dd90e2b86676afcc905ae73aa278f25a994a9fef53859d6748dd28df15",
+      "skills/filesystem/mft.md": "70abef894353b4b53a3f2166fc2a6e1a862d49819339e42d658529d6de108c39",
+      "skills/filesystem/shadowcopies.md": "1afdc82747f139ddeece5dc9219c06fc27c538163df70e531fbf1f3058b1ed34",
+      "skills/browser/artefacts.md": "149a4071c749f167836e5644b75a9cb30d721912ce522dd9c96236c183731eba",
+      "skills/logs/hunting.md": "faaf1f778e9d049b6564944a1d37744c15248267834ac3cc9a0735b48f6ab65d",
+      "skills/logs/powershell.md": "460c47cfa55c4a4c43c3b572d9a59db548604a8acad32de11d5f1840fbbfda44",
+      "skills/logs/recovery.md": "55853692df60626bdb7e7784f3669b88157bf4baa96199b56f4c188abb20ce96",
+      "skills/logs/remote-access.md": "a583fa6c564352fb2fba2caf43f2628acb689ec9941109d7512beddb0674cf1c",
+      "skills/logs/security.md": "4e9f6f78560024ee798d63f0dd8cdb8ad586d20e651d06f73219fc88c63d6d37",
+      "skills/accounts/logons.md": "6e42a7682db76117591978752989f9c9dd88d0c059c1d37172c7405ec6aba825",
+      "skills/execution/amcache.md": "3479eedef575e8c56eeee72ad00b09e1198c00e6e8f640f77bc01c553d0acc9e",
+      "skills/execution/overview.md": "580a82be07dbf08b24127672b632479cc9efaf81e17f6548222c7f1f58b45775",
+      "skills/execution/prefetch.md": "1b99d0ad7f9d6022659665d913448a9138e52f8bf23d4c33df66b419cb8c6b02",
+      "skills/execution/srum.md": "1722496e06d373b1d0d926dac572defc7875a94ecc0a64f69954d87ee452560c",
+      "skills/execution/userassist.md": "5bbefa7d5f2ed85f4e8f8d01d0c8be547c181dd6e8a672a3d54cfa2032cd43a2",
+      "skills/persistence/mechanisms.md": "29d8879e5d070f20a4dd94c44734e03a96e5712455c4b12d4de96c2f468a9675",
+      "skills/registry/devices.md": "050353e733c4688ccfc92098fe87f7895a99b607dfa0032900adab248fb43dfa",
+      "skills/registry/overview.md": "df8c01c4840c2cd03c44dbdee6dfb18c4bf37c204c86a7b88e77d0edbd65714b",
+      "skills/registry/system-profile.md": "63316dc72a58896a35fa65df46f2455ceb36ca50e1072e1be6e784222c79994c",
+      "skills/antiforensics/traces.md": "3ad870647cdd1fa7c1b13aee52c7f77de1bdaf2932b67867b26a97f75d1b91de",
       "requires/host.json": "e88f58d2c6f683bc5a2e76ba96091d7b4973ccc4ccd9c9dad5f6c135a8c3ff09",
       "requires/python.txt": "3b1bc0f370d4929716719e6fd402a58c34c506ad39d465abf0d416834419011f",
-      "skills/INDEX.md": "8c386266c502dc85a1c46b2896421ab3bc4f82c5a28a72b2518bd5ffeebe45c7"
+      "skills/INDEX.md": "180fde2c19ba288a68faffb617fef4c276f3adac83a3df95abb40d4276c2be64"
     }
   },
   "tools": [
