@@ -1,26 +1,46 @@
 {
   "name": "plist_read",
-  "description": "Read an XML or binary property list and return it as JSON, with Apple date values converted to ISO 8601 UTC and binary blobs represented with size, hash and a bounded preview. Reads one file or every plist under a directory.",
+  "description": "Read XML and binary property lists (plistlib) and return them as JSON: dates converted from the Apple epoch to ISO 8601 UTC, UID references kept as {_uid}, a binary value as its length and kind only. A structural reading, not an interpretation: an NSKeyedArchiver object graph is not resolved, a .btm file is shown as the structure it has, not as a list of login items, and a date is plistlib's conversion (microsecond resolution, the raw float not kept). SENSITIVE: a plist can hold a password verifier (an account plist: ShadowHashData, Kerberos keys, a hint), a token or a password. No binary value is printed, hashed or previewed (no digest, no base64, no head), and a value under a key whose name marks it secret-bearing (verifier, Kerberos keys, password, passphrase, secret, token, credential, private key, hint) is withheld at any depth and when `key` selects it: the answer carries a locator (finding_id, key path, kind, length). A value under any other key is printed as it is, so read an account plist as a job with secret_output: true, or select the keys the question needs. write_values: true (refused outside a job) creates $OUT/plist-values.jsonl, mode 0600, before it reads anything (a file or link already there is refused) and writes the withheld and binary values there and nowhere else, a binary value as base64 up to max_blob bytes with its whole length beside it. Reads one file, or every .plist and .btm file under a directory in sorted order (links are not followed). One file at a time: each file's row is written as it is read, a file that does not parse, is over max_file_bytes or max_nodes, or nests deeper than max_depth is that file's failed or skipped row with the reason, and files not reached before max_seconds are counted and named, so status is complete only when every matched file was read. `extracted_file_mtime` is the mtime of the file as read, a working copy's, not the original's.",
   "params": {
     "path": {
       "type": "string",
-      "description": "A .plist file, or a directory to walk"
+      "description": "A .plist or .btm file, or a directory to walk (links inside it are not followed)"
     },
     "key": {
       "type": "string",
-      "description": "Return only this top-level key, or a dotted path into the structure"
+      "description": "Return only this top-level key, or a dotted path into the structure (array items by index). A path through a secret-bearing key name is withheld too"
     },
     "max_blob": {
       "type": "integer",
-      "description": "Bytes of a binary value to include, base64 (default 64)"
+      "description": "Bytes of a binary value written to the values file, base64 (default 4096). It never affects the answer: no binary value is printed"
     },
     "limit": {
       "type": "integer",
-      "description": "Maximum files returned inline when out_file is set (default 200); every parsed file is written to out_file"
+      "description": "Files shown inline (default 200). All are counted; the whole result is in out_file, or, when that is omitted, in a file under work/<your id>/tool-output/ (in a job, $OUT/tool-output/) that the answer names"
     },
     "out_file": {
       "type": "string",
-      "description": "Optional JSONL path for every parsed plist; when absent every parsed file is returned inline"
+      "description": "JSONL path for every file's row, one per line as each file is read. The tool does not overwrite: an existing file or link at that name is refused"
+    },
+    "write_values": {
+      "type": "boolean",
+      "description": "Write each binary and withheld value to $OUT/plist-values.jsonl (default false). Refused unless the tool runs as a job, which must be run with secret_output: true; the file is created first and an existing file or link is refused; the answer never carries a value"
+    },
+    "max_file_bytes": {
+      "type": "integer",
+      "description": "A file larger than this is skipped, named, and not read (default 33554432)"
+    },
+    "max_nodes": {
+      "type": "integer",
+      "description": "A file (or the part `key` selects) with more values than this is skipped, named, and not converted (default 200000)"
+    },
+    "max_depth": {
+      "type": "integer",
+      "description": "A tree nested deeper than this is skipped, named, and not converted (default 100)"
+    },
+    "max_seconds": {
+      "type": "number",
+      "description": "Stop starting new files after this many seconds (default 90); the files not reached are counted and the first are named"
     }
   },
   "runtime": "python3",
@@ -29,6 +49,18 @@
   "example": "{\"path\": \"work/extracted/Library/LaunchDaemons\", \"out_file\": \"work/plists.jsonl\"}",
   "by": "maintainer",
   "at": "2026-09-22T16:00:00.000Z",
-  "version": 2,
-  "sha256": "8b481aabef0d92e539e4fbd5b0e8a779ed02b26104c1d0d91ffc4d20f7673690"
+  "version": 3,
+  "sha256": "b00b59104b8ce99ead41cecbb341ccbf924c700a5b05f55e6504f485e64b5b2d",
+  "use": {
+    "extensions": [
+      ".plist",
+      ".btm"
+    ],
+    "magic": [
+      {
+        "offset": 0,
+        "hex": "62706c6973743030"
+      }
+    ]
+  }
 }

@@ -1,7 +1,7 @@
 {
   "id": "macos-forensics",
   "name": "macOS Forensics Pack",
-  "version": "1.1.2",
+  "version": "1.2.0",
   "description": "Artefact-by-artefact method and tooling for a macOS host: the system profile, property lists, the unified log, FSEvents, the KnowledgeC and biome activity databases, launch items and other persistence, accounts and TCC, and what APFS keeps that HFS+ did not.",
   "licence": "AGPL-3.0-or-later",
   "authors": [
@@ -19,8 +19,8 @@
     "sha256": {
       "LICENCE": "5b94f18424dbef1e77eda33a465e946c2c8eb715fa5236afe2c6ec6763af80d3",
       "README.md": "9832ce95e32ee8e1ef9ba5b9eb0b2d310fce4752b4902b0953671c7fe2f28933",
-      "tools/plist_read/manifest.json": "e7b8d2a562fdf84e5881d687c162911d382cfbdeaf34c0c8ba7a18de0021171d",
-      "tools/plist_read/run.py": "8b481aabef0d92e539e4fbd5b0e8a779ed02b26104c1d0d91ffc4d20f7673690",
+      "tools/plist_read/manifest.json": "17da85224f02c042c0666b216c94d12fc408dc876eea7d6630183c7ca948a748",
+      "tools/plist_read/run.py": "b00b59104b8ce99ead41cecbb341ccbf924c700a5b05f55e6504f485e64b5b2d",
       "tools/knowledgec_query/manifest.json": "e70978890e603b17edf751d7767df1d9ab0cfe2374138315c966749b70d8a6e4",
       "tools/knowledgec_query/run.py": "e666132e5fccd9f8c885c1e045eae929ed7cb4aa49502d95f62d0bb319283af7",
       "tools/fsevents_parse/manifest.json": "1e4c2bee8a4014ef2c1cdc9e4d6ebef8472ca52b4d67a7190e36fe4ed3516e03",
