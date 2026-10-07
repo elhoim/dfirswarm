@@ -1462,7 +1462,7 @@ class Census:
         self.rejected = LosslessPage("rejected_records", limit)
         self.problems = []
         self.counts = {"files_found": 0, "files_read": 0, "files_partial": 0, "files_failed": 0, "files_unsupported": 0,
-                       "files_empty": 0, "files_skipped": 0, "files_not_attempted": 0, "records_read": 0,
+                       "files_empty": 0, "files_digest": 0, "files_skipped": 0, "files_not_attempted": 0, "records_read": 0,
                        "records_rejected": 0, "replacement_characters": 0, "bytes_read": 0}
         self.digest_files = []
         self.pagination = []
@@ -1478,9 +1478,8 @@ def scan_file(path, census, record_problems, per_record, max_expanded, record_ca
     src = Source(path, max_expanded)
     shown = shown_path(path)
     row = {"file": shown, "status": "read", "mode": None, "compressed": False, "records": 0, "rejected": 0, "bytes_read": 0}
-    events = rejected = 0
+    events = rejected = digests = 0
     first_reject = None
-    digest = False
     stopped_early = False
     try:
         for kind, info, value in read_units(src, ENVELOPE_KEYS, record_cap, max(MAX_DOCUMENT_BYTES, record_cap)):
@@ -1495,10 +1494,12 @@ def scan_file(path, census, record_problems, per_record, max_expanded, record_ca
                     census.rejected.add({"file": shown, "record": info["record"], "line": info["line"], "chars": info["chars"], "reason": scrub(value)})
                 continue
             event, reason = event_of(value)
+            if event is None and is_digest(value):
+                digests += 1
+                continue
             if event is None:
                 rejected += 1
                 first_reject = first_reject or (info["record"], info["line"], reason)
-                digest = digest or (is_digest(value))
                 if record_problems:
                     census.rejected.add({"file": shown, "record": info["record"], "line": info["line"], "reason": reason})
                 continue
@@ -1530,6 +1531,8 @@ def scan_file(path, census, record_problems, per_record, max_expanded, record_ca
         row["status"] = "empty"
     elif events == 0 and src.error:
         row["status"] = "failed"
+    elif events == 0 and digests and not rejected and not problems:
+        row["status"] = "digest"
     elif events == 0 and (rejected or problems):
         row["status"] = "unsupported"
     elif events == 0 and src.mode == "empty":
@@ -1540,20 +1543,21 @@ def scan_file(path, census, record_problems, per_record, max_expanded, record_ca
         row["problems"] = [scrub(p) for p in problems]
     if src.replaced:
         row["replacement_characters"] = src.replaced
-    if digest:
-        row["digest_file"] = True
+    if digests:
+        row["digest_entries"] = digests
     if record_problems:
         census.counts["replacement_characters"] += src.replaced
         census.counts["bytes_read"] += src.bytes_read
         census.counts["records_rejected"] += rejected
         census.counts["records_read"] += events
-        c = {"read": "files_read", "partial": "files_partial", "failed": "files_failed", "unsupported": "files_unsupported", "empty": "files_empty"}[row["status"]]
+        c = {"read": "files_read", "partial": "files_partial", "failed": "files_failed", "unsupported": "files_unsupported", "empty": "files_empty",
+             "digest": "files_digest"}[row["status"]]
         census.counts[c] += 1
-        if digest:
+        if digests:
             census.digest_files.append(shown)
         if markers:
             census.pagination.append({"file": shown, "keys": markers})
-        if row["status"] != "read":
+        if row["status"] not in ("read", "digest"):
             census.problem("%s: %s" % (shown, "; ".join(row.get("problems", [])) or row["status"]))
         census.files.add(row)
     return row, stopped_early
@@ -1745,12 +1749,12 @@ def main():
     c = census.counts
     time_stopped = bool(stop_all)
     complete = (not time_stopped and c["files_partial"] == c["files_failed"] == c["files_unsupported"] == c["files_empty"] == 0
-                and c["records_rejected"] == 0 and not skipped.unreadable and not census.pagination and not census.digest_files
+                and c["records_rejected"] == 0 and not skipped.unreadable and not census.pagination
                 and c["files_not_attempted"] == 0 and c["replacement_characters"] == 0)
     nothing_read = c["records_read"] == 0
     status = status_of(nothing_read and (c["files_failed"] or c["files_unsupported"] or c["files_empty"] or c["files_not_attempted"]), complete,
                        "every record of every supplied file was read and nothing was left out; that says nothing about whether the export holds everything the account logged",
-                       "some of what was supplied was not read as events or not read at all (see coverage, file_census, rejected_records, file_problems, skipped, pagination_markers and digest_files)",
+                       "some of what was supplied was not read as events or not read at all (see coverage, file_census, rejected_records, file_problems, skipped and pagination_markers)",
                        "no CloudTrail event could be read from what was supplied (see file_problems)")
     answer = {
         "parser": PARSER, **status, "path": shown_path(path),
@@ -1763,8 +1767,8 @@ def main():
         "skipped": named(skipped.items), "skipped_count": skipped.total, "skipped_by_name_count": skipped.by_name,
         "pagination_markers": named(census.pagination), "pagination_marker_count": len(census.pagination),
         "digest_files": named(census.digest_files), "digest_file_count": len(census.digest_files),
-        "integrity": {"digest_chain_validated": False, "performed": False,
-                      "note": "No integrity validation of the log files or of a digest chain was performed; a file hash from the case's own custody record is byte identity from when it was taken, not CloudTrail's validation."},
+        "integrity": {"digest_chain_validated": False, "performed": False, "digest_files_seen": len(census.digest_files),
+                      "note": "No integrity validation of the log files or of a digest chain was performed (digest files are named in digest_files, read as no events, and do not make the read partial); a file hash from the case's own custody record is byte identity from when it was taken, not CloudTrail's validation."},
         "records": complete_target.page, "record_count": matched, "records_inline": len(complete_target.page),
         "complete_records": pages["records"].get("all_results"),
         "first_event": ns_to_utc(first_ns), "last_event": ns_to_utc(last_ns),

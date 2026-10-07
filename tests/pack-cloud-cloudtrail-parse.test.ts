@@ -136,13 +136,23 @@ test("a record that is not an event, a file that is not CloudTrail, an empty fil
     assert.equal(out.status, "partial");
     assert.equal(out.coverage.files_found, 4);
     assert.equal(out.coverage.files_read, 0, "no file is complete: each has something left over");
-    assert.deepEqual([out.coverage.files_partial, out.coverage.files_unsupported, out.coverage.files_empty], [1, 2, 1]);
+    assert.deepEqual([out.coverage.files_partial, out.coverage.files_unsupported, out.coverage.files_empty, out.coverage.files_digest], [1, 1, 1, 1]);
     assert.equal(out.coverage.records_read, 1);
     assert.deepEqual(out.digest_files.map((f: string) => f.split("/").pop()), ["d_Digest.json"]);
     assert.equal(out.integrity.digest_chain_validated, false);
     assert.match(out.integrity.note, /No integrity validation/);
     const census = await rowsOf(cwd, out, "file_census");
-    assert.deepEqual(census.map((c: Json) => c.status).sort(), ["empty", "partial", "unsupported", "unsupported"]);
+    assert.deepEqual(census.map((c: Json) => c.status).sort(), ["digest", "empty", "partial", "unsupported"]);
+  });
+});
+
+test("a digest file next to complete logs is named and not validated, and does not make the read partial", async () => {
+  await withDir(async (cwd) => {
+    const digest = { awsAccountId: "111122223333", digestStartTime: "2026-02-14T08:00:00Z", digestEndTime: "2026-02-14T09:00:00Z", digestPublicKeyFingerprint: "abcdef", logFiles: [] };
+    const out = await run(cwd, { "a.json": trail(ct({ eventID: "g-1" })), "z_Digest.json": JSON.stringify(digest) });
+    assert.equal(out.status, "complete");
+    assert.deepEqual(out.digest_files.map((f: string) => f.split("/").pop()), ["z_Digest.json"]);
+    assert.deepEqual([out.integrity.digest_chain_validated, out.integrity.performed, out.integrity.digest_files_seen], [false, false, 1]);
   });
 });
 
