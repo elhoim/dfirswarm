@@ -77,3 +77,9 @@ Check the worker image's inventory, and when Plaso is missing say so in the repo
 rather than implying a timeline was built and found nothing. `catalog_search` can
 tell you whether a catalogue generation already holds a timeline (`which=timeline`
 reads a partition's own timeline, not a Plaso output).
+
+**Sensitive output.** The timeline, the storage file and the `sample` in the answer
+are text the parsers read from the evidence: command lines, URLs with their
+parameters, names. When the source may hold credentials or tokens, run the job with
+`secret_output: true`, ask for `sample: 0`, and cite rows by their locator, never by
+their text.

@@ -481,6 +481,10 @@ def main():
             result["by_parser"] = [{"parser": n, "events": c} for n, c in top]
             result["sample"] = summary["head"]
             result["sample_note"] = "a preview; the whole timeline is the output file, one JSON object per line"
+            result["contains_evidence_text"] = True
+            result["sensitive_output_note"] = ("the timeline, the storage file and the sample are text the parsers read from the evidence (command lines, "
+                                               "addresses, names, URLs with their parameters): when the source may hold credentials, run the job with "
+                                               "secret_output: true and ask for sample: 0")
             if summary["invalid_lines"]:
                 result["problems"].append("%d line(s) of the output are not valid JSON events and are not in the count; see %s"
                                           % (summary["invalid_lines"], summary["invalid_lines_file"] or "the output file"))

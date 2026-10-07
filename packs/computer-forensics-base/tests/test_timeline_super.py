@@ -288,6 +288,13 @@ class TimelineSuper(Case):
         self.assertTrue(r.json["storage_file"].endswith("timeline.2.plaso"))
         self.assertEqual(self.read(r.json["output"]).count("\n"), 2)
 
+    def test_the_answer_says_the_timeline_and_its_sample_are_evidence_text(self):
+        r = self.go(self.plaso())
+        self.assertIs(r.json["contains_evidence_text"], True)
+        self.assertIn("secret_output", r.json["sensitive_output_note"])
+        none = self.go(self.plaso(), out_dir="work/tl2", sample=0)
+        self.assertEqual(none.json["sample"], [])
+
 
 if __name__ == "__main__":
     unittest.main()
