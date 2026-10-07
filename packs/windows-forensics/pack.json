@@ -32,7 +32,7 @@
   "checksums": {
     "sha256": {
       "LICENCE": "617dec43b30845a8c7d062db3f6d892400d96796b91f363586beacfbdffd1721",
-      "README.md": "77fb73c11429e9a689388076708e537e83ddfac8b8bf53b05ad0b57df4530610",
+      "README.md": "0ca94aee7225b4e30963a1f7c9e3d4c3b1695f5d6f2543c38cb55303e71ab316",
       "tools/sigma_hunt/manifest.json": "ea719c251f67a0a90e75b703c0c8fce5370d1d07f11ce06cb50c54a76e3df6ba",
       "tools/sigma_hunt/run.py": "4f870ff020df5eddb7bec86762d0ac3dbe7dc56f2d2fa8a09d6267fe93e704a7",
       "tools/lnk_parse/manifest.json": "b371a21727a5566a531938432aa5072be850529c60296223acb267d2760e9ab4",
