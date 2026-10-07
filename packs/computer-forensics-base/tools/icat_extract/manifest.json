@@ -9,7 +9,7 @@
     },
     "output": {
       "type": "string",
-      "description": "New output file path (relative to the sandbox); refused if it exists",
+      "description": "New output file path (relative to the sandbox); refused if it exists. In a job it must lie under $OUT: give {OUT}/<name>, or work/extracted/<your id>/<name>, which the harness maps there",
       "required": true
     },
     "image": {
@@ -78,5 +78,5 @@
   "by": "s864a08",
   "at": "2026-09-18T16:09:29.146Z",
   "version": 8,
-  "sha256": "a8ec2f41215c941f660366fe08b004311d54c84ee60cb0f2462f3276a692b097"
+  "sha256": "08e8a39dc180ee4e6b439a57266186e59171465e0da85336a404d7b8f69d2ef0"
 }

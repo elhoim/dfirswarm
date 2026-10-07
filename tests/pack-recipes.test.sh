@@ -219,7 +219,36 @@ exit 0
 L2T
 PATH="$T/bin2:$PATH" python3 "$DT" run --target "{\"paths\": [\"$T/x.E01\"]}" --out "$T/dt-nostore" >/dev/null && fail "disk-timeline with no storage file should not be complete"
 jq -e '.status == "failed"' "$T/dt-nostore/coverage.json" >/dev/null || fail "no storage file is failed: $(cat "$T/dt-nostore/coverage.json")"
-pass "disk-timeline passes the evidence's timezone, says when none was given, keeps Plaso's processing report, refuses a stale output directory and says complete only for a finished pipeline"
+# Two zero exits and two files are not a finished job: a worker Plaso reported killed, an error line in what a step printed or logged,
+# and a timeline of no events each make it partial, whatever the exit codes say.
+mkdir -p "$T/bin3"
+cat > "$T/bin3/log2timeline" <<'L2T'
+#!/usr/bin/env bash
+while [[ $# -gt 0 ]]; do case "$1" in --storage-file) s="$2"; shift 2;; --logfile) log="$2"; shift 2;; *) shift;; esac; done
+if [[ -n "$L2T_LOG_LINE" ]]; then printf '%s\n' "$L2T_LOG_LINE" | gzip > "$log"; else echo log > "$log"; fi
+echo plaso > "$s"
+L2T
+cat > "$T/bin3/psort" <<'PSORT'
+#!/usr/bin/env bash
+while [[ $# -gt 1 ]]; do case "$1" in -w) w="$2"; shift 2;; --logfile) log="$2"; shift 2;; *) shift;; esac; done
+echo log > "$log"
+[[ -n "$PSORT_STDERR" ]] && printf '%s\n' "$PSORT_STDERR" >&2
+[[ -n "$PSORT_STDOUT" ]] && printf '%s\n' "$PSORT_STDOUT"
+if [[ -n "$PSORT_EMPTY" ]]; then printf "datetime,message\n" > "$w"; else printf "datetime,message\n2024-04-01T00:00:00,x\n" > "$w"; fi
+PSORT
+chmod +x "$T/bin3/log2timeline" "$T/bin3/psort"
+dt3() { # dt3 <out> : run with the bin3 stubs and whatever environment is set
+  PATH="$T/bin3:$PATH" python3 "$DT" run --target "{\"paths\": [\"$T/x.E01\"]}" --out "$1" >/dev/null
+}
+dt3 "$T/dt-clean" || fail "disk-timeline with Plaso saying nothing wrong should be complete: $(cat "$T/dt-clean/coverage.json")"
+jq -e '.status == "complete" and (has("plaso_signals") | not)' "$T/dt-clean/coverage.json" >/dev/null || fail "a clean run is complete: $(cat "$T/dt-clean/coverage.json")"
+PSORT_STDERR="[ERROR] Worker killed" dt3 "$T/dt-killed" && fail "a worker Plaso reported killed should not be complete"
+jq -e '.status == "partial" and ([.errors[] | select(test("psort.stderr: 1 line.*error.*Worker killed"))] | length == 1) and .plaso_signals[0].file == "psort.stderr"' "$T/dt-killed/coverage.json" >/dev/null || fail "the killed worker is named, with where it was said: $(cat "$T/dt-killed/coverage.json")"
+PSORT_STDOUT="Events extracted: 0" PSORT_EMPTY=1 dt3 "$T/dt-zero" && fail "a timeline of no events should not be complete"
+jq -e '.status == "partial" and ([.errors[] | select(test("no events were extracted"))] | length == 1) and ([.errors[] | select(test("holds no event"))] | length == 1)' "$T/dt-zero/coverage.json" >/dev/null || fail "zero events is said twice over, by Plaso and by the file: $(cat "$T/dt-zero/coverage.json")"
+L2T_LOG_LINE="2024-04-01 [ERROR] Worker 3 killed by the kernel" dt3 "$T/dt-logged" && fail "an error line in the log2timeline log should not be complete"
+jq -e '.status == "partial" and .plaso_signals[0].file == "log2timeline.log.gz"' "$T/dt-logged/coverage.json" >/dev/null || fail "an error in the gzip log is found: $(cat "$T/dt-logged/coverage.json")"
+pass "disk-timeline passes the evidence's timezone, says when none was given, keeps Plaso's processing report, refuses a stale output directory, and says complete only for a pipeline that finished and said nothing wrong"
 
 # Every recipe of every pack answers detect the two ways the harness asks: the
 # kickoff's census gives the target as JSON with a --probe-out directory

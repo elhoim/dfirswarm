@@ -109,9 +109,15 @@ def _resolve_catalog(explicit=None):
         return os.path.join(root, disks[0])
     raise SystemExit('{"ok": false, "error": "several catalogues; pass catalog=", "candidates": %s}' % json.dumps(subs))
 
+import errno
 import hashlib
 import tempfile
 from pathlib import Path
+
+
+def describe(exc):
+    code = errno.errorcode.get(exc.errno, "") if getattr(exc, "errno", None) else ""
+    return "%s%s: %s" % (type(exc).__name__, " " + code if code else "", getattr(exc, "strerror", None) or str(exc))
 
 
 class SecretValuesRefused(Exception):
@@ -121,10 +127,10 @@ class SecretValuesRefused(Exception):
 class SecretValues:
     """Where a value goes when, and only when, the caller asked for it.
 
-    The reference implementation of the secret-safe output pattern (docs/packs.md, "Writing a
-    pack that holds up"), copied as a standalone tool copies LosslessPage: call `add` once per
-    finding with the finding's id, its locator and the value. With `enabled` false it writes
-    nothing and `summary()` says so.
+    The reference implementation of the secret-safe output pattern: copy this
+    class unchanged into a tool that has to produce a secret, and call `add`
+    once per finding with the finding's id, its locator and the value. With
+    `enabled` false it writes nothing and `summary()` says so.
     """
 
     NAME = "chunk-needles-values.jsonl"
@@ -135,23 +141,34 @@ class SecretValues:
         self._fh = None
         self.job = os.environ.get("JOB_ID") or ""
         self.out = os.environ.get("OUT") or ""
-        if enabled and not (self.job and self.out):
+        self.path = None
+        self.shown = None
+        if not enabled:
+            return
+        if not (self.job and self.out):
             raise SecretValuesRefused(
                 "write_values is refused outside a job: a value written here would be an ordinary "
                 "file, not a sealed secret output. Run this as job_run tool=chunk_needles with "
                 "secret_output: true, and ask again there. Nothing was written."
             )
-        self.path = Path(self.out) / self.NAME if enabled else None
-        self.shown = ("store/jobs/%s/out/%s" % (re.sub(r"[^A-Za-z0-9_.-]", "_", self.job), self.NAME)) if enabled else None
+        self.path = Path(self.out) / self.NAME
+        self.shown = "store/jobs/%s/out/%s" % (re.sub(r"[^A-Za-z0-9_.-]", "_", self.job), self.NAME)
+        # Created now, before anything is scanned: a file or a link already at that name is
+        # refused by name at once (O_EXCL does not follow a link, a dangling one included),
+        # instead of failing, or writing through it, after the scan. With nothing found it
+        # stays as an empty file, mode 0600, and the answer says written: 0.
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(str(self.path), os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        except FileExistsError:
+            raise SecretValuesRefused("the values file already exists: %s" % self.path)
+        except OSError as exc:
+            raise SecretValuesRefused("the values file could not be created: %s (%s)" % (self.path, describe(exc)))
+        self._fh = os.fdopen(fd, "w", encoding="utf-8")
 
     def add(self, finding_id: str, locator: dict, value: str) -> None:
         if not self.enabled:
             return
-        if self._fh is None:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            # Exclusively and private: a second run never overwrites a first's file.
-            fd = os.open(str(self.path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            self._fh = os.fdopen(fd, "w", encoding="utf-8")
         self._fh.write(json.dumps({"finding_id": finding_id, **locator, "value": value}, ensure_ascii=False))
         self._fh.write("\n")
         self.written += 1
@@ -167,9 +184,9 @@ class SecretValues:
         return {
             "requested": self.enabled,
             "written": self.written,
-            "values_file": self.shown if self.written else None,
+            "values_file": self.shown if self.enabled else None,
             "contains_secret_values": self.written > 0,
-            "format": "JSON Lines, mode 0600: finding_id, source, offset, needle, encoding, value (the printable context around the match)" if self.written else None,
+            "format": "JSON Lines, mode 0600: finding_id, source, offset, needle, encoding, value (the printable context around the match)" if self.enabled else None,
         }
 
 
@@ -216,6 +233,19 @@ class Locators:
                 self.written += 1
             elif self.stopped_at is None:
                 self.stopped_at = row["off"]
+
+    def discard(self):
+        """Close and remove the file being written, if it is still there: a run that did not finish keeps no half file."""
+        try:
+            if self.fh and not self.fh.closed:
+                self.fh.close()
+        except OSError:
+            pass
+        if self.tmp is not None:
+            try:
+                os.unlink(self.tmp)
+            except OSError:
+                pass
 
     def finish(self):
         info = {"matched": self.total, "returned": len(self.page), "truncated": self.total > len(self.page)}
@@ -315,40 +345,44 @@ def scan_fh(fh, source):
 
     # buf holds the stream's bytes [base, base + len(buf)); positions below `done` are searched. A
     # position is searched once its context is in buf (or the stream has ended), so no match is cut.
-    buf, base, done, scanned = b"", 0, 0, 0
-    while True:
-        data = fh.read(chunk)
-        at_end = not data
-        buf += data
-        scanned += len(data)
-        have = base + len(buf)
-        process_end = have if at_end else have - (longest + context)
-        if process_end > done:
-            lo, hi = done - base, process_end - base
-            a = lo
-            while a < hi:
-                b = min(hi, a + SLICE)
-                found = []
-                for vi, (name, enc, nb) in enumerate(variants):
-                    stop = min(len(buf), b + len(nb) - 1)
-                    j = buf.find(nb, a, stop)
-                    while j >= 0:
-                        found.append((j, vi))
-                        j = buf.find(nb, j + 1, stop)
-                found.sort()                          # by offset, then by needle order: the same list for any chunk
-                for j, vi in found:
-                    name, enc, nb = variants[vi]
-                    emit(base + j, name, enc, nb, buf, base)
-                a = b
-            done = process_end
-        if at_end:
-            break
-        keep_from = max(0, (done - context) - base)
-        buf, base = buf[keep_from:], base + keep_from
-    hits = {}
-    for n in need_list:
-        page = pages[n].finish()
-        hits[n] = {**counts[n], "locations": pages[n].page, **page}
+    try:
+        buf, base, done, scanned = b"", 0, 0, 0
+        while True:
+            data = fh.read(chunk)
+            at_end = not data
+            buf += data
+            scanned += len(data)
+            have = base + len(buf)
+            process_end = have if at_end else have - (longest + context)
+            if process_end > done:
+                lo, hi = done - base, process_end - base
+                a = lo
+                while a < hi:
+                    b = min(hi, a + SLICE)
+                    found = []
+                    for vi, (name, enc, nb) in enumerate(variants):
+                        stop = min(len(buf), b + len(nb) - 1)
+                        j = buf.find(nb, a, stop)
+                        while j >= 0:
+                            found.append((j, vi))
+                            j = buf.find(nb, j + 1, stop)
+                    found.sort()                          # by offset, then by needle order: the same list for any chunk
+                    for j, vi in found:
+                        name, enc, nb = variants[vi]
+                        emit(base + j, name, enc, nb, buf, base)
+                    a = b
+                done = process_end
+            if at_end:
+                break
+            keep_from = max(0, (done - context) - base)
+            buf, base = buf[keep_from:], base + keep_from
+        hits = {}
+        for n in need_list:
+            page = pages[n].finish()
+            hits[n] = {**counts[n], "locations": pages[n].page, **page}
+    finally:
+        for n in need_list:
+            pages[n].discard()                  # no half-written file is left when the run did not finish
     return hits, scanned
 
 

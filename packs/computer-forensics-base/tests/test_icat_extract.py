@@ -163,6 +163,20 @@ class IcatExtract(Case):
         self.assertEqual(r.code, 1)
         self.assertIn("from 1 to 1700", r.json["error"])
 
+    def test_in_a_job_an_output_outside_out_is_refused_and_one_under_it_is_written(self):
+        bin_dir = self.icat('printf data\n')
+        out = self.path("job-out")
+        os.makedirs(out)
+        env = {"JOB_ID": "j000011", "OUT": out}
+        r = run_tool("icat_extract", {"inode": "168-128-4", "output": "work/out.bin", "image": "inputs/disk.E01", "offset": 2048}, self.dir, [bin_dir], env=env)
+        self.assertEqual(r.code, 1, r.stdout)
+        self.assertIn("under $OUT", r.json["error"])
+        self.assertIn("{OUT}", r.json["hint"])
+        self.assertFalse(os.path.exists(self.path("work")))
+        r = run_tool("icat_extract", {"inode": "168-128-4", "output": os.path.join(out, "x.bin"), "image": "inputs/disk.E01", "offset": 2048}, self.dir, [bin_dir], env=env)
+        self.assertEqual((r.code, r.json["status"]), (0, "complete"))
+        self.assertEqual(self.read(os.path.join(out, "x.bin")), "data")
+
 
 if __name__ == "__main__":
     unittest.main()

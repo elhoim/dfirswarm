@@ -23,7 +23,7 @@
     },
     "output": {
       "type": "string",
-      "description": "Optional new output file under the run directory; refused if it exists. If omitted, returns metadata only."
+      "description": "Optional new output file under the run directory; refused if it exists. In a job it must lie under $OUT: give {OUT}/<name>, or work/extracted/<your id>/<name>, which the harness maps there. If omitted, returns metadata only."
     }
   },
   "runtime": "python3",
@@ -33,5 +33,5 @@
   "by": "s183904",
   "at": "2026-09-18T22:20:17.004Z",
   "version": 3,
-  "sha256": "12ffb0872fd0414fbbc7b8e3fcfe4c860fe0b1f4cdf4eaa77da4c563a8686dab"
+  "sha256": "bba240d7d39404f4f32fb422898d37b50534eb7b338a852c01296be43a618118"
 }

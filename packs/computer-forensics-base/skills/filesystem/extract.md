@@ -25,10 +25,11 @@ same offset, and the same `-b <sector size>` when the sector size is not 512
 
 The extraction itself is job work: it reads the image and writes bytes that
 must be sealed and cited. Declare the image (every segment of a split set) as
-inputs; a job writes only `$OUT`, and the harness gives an `output` under your
-`work/extracted/<you>/` as a place under `$OUT`:
+inputs. A job writes only `$OUT` and the tool refuses an output outside it; `{OUT}`
+in an argument stands for that directory, and a path under your own
+`work/<you>/` or `work/extracted/<you>/` is rewritten to it by the harness:
 
-    job_run tool=icat_extract args={"inode": "168-128-4", "output": "work/extracted/<you>/<name>", "image": "inputs/image.E01", "offset": <sectors>} inputs=["input:image.E01"]
+    job_run tool=icat_extract args={"inode": "168-128-4", "output": "{OUT}/<name>", "image": "inputs/image.E01", "offset": <sectors>} inputs=["input:image.E01"]
 
 `icat_extract` streams the record to the output, hashes it as it goes, and
 returns the byte count, sha256, image, offset and sector size, and the path the
@@ -50,9 +51,6 @@ parsing end to end). A wrong header can mean overwritten, fragmented,
 compressed, encrypted, truncated or the wrong record; a matching header is one
 check, not all of them. Report the result as complete, partial, structurally
 inconsistent or unidentified, and keep the bytes.
-
-Claim the destination path before you write into it; a write into a path a peer
-holds is reported as a collision against your name.
 
 **Never run what you extract**, by any route: not an executable, and not an
 interpreter, shell, browser, `import` or `eval` given the file. A no-exec mount

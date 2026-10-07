@@ -1,11 +1,10 @@
 {
   "name": "timeline_super",
-  "description": "Build a machine timeline with Plaso: log2timeline over an image, a partition, a directory or a collection, then psort to JSON lines (mode full), or psort alone over a storage file that already exists (mode export, for a new filter without collecting again). What the enabled parsers produced from the sources they could read, not every timestamp on the volume: a parser not enabled, a source not opened and a record not read add no row. Returns the storage file, each stage's exit code, a status (complete: both programs exited 0, wrote their files and every line parsed; partial; failed), the versions the programs print, valid and invalid line counts (a line that is not UTF-8 is invalid, not repaired), the earliest and latest event time, a preview sample and the log and captured-output files. complete is not coverage: the storage file's own processing report (Plaso's pinfo) says what each parser did. Slow by design; give it a narrow parser list when you know what you are after. Refuses an out_dir that already holds files unless resume is true.",
+  "description": "Build a machine timeline with Plaso: log2timeline over an image, a partition, a directory or a collection, then psort to JSON lines (mode full), or psort alone over a storage file that already exists (mode export, for a new filter without collecting again). What the enabled parsers produced from the sources they could read, not every timestamp on the volume: a parser not enabled, a source not opened and a record not read add no row. Returns the storage file, each stage's exit code, a status (complete: both programs exited 0, wrote their files and every line parsed; partial; failed), the versions the programs print, valid and invalid line counts (a line that is not UTF-8 is invalid, not repaired), the earliest and latest event time, a preview sample and the log and captured-output files. complete is not coverage: the storage file's own processing report (Plaso's pinfo) says what each parser did. Slow by design; give it a narrow parser list when you know what you are after. Refuses an out_dir that already holds files unless resume is true, and then never overwrites what is there.",
   "params": {
     "out_dir": {
       "type": "string",
-      "description": "Where the storage file, the output, the logs and the captured output land, under work/. New or empty unless resume is true.",
-      "required": true
+      "description": "Where the storage file, the output, the logs and the captured output land: a directory under work/<your id>/ (in a job under $OUT, and the default there). New or empty unless resume is true; on resume this run's files are named beside an earlier run's (timeline.2.jsonl), never over them."
     },
     "source": {
       "type": "string",
@@ -55,5 +54,5 @@
   "by": "maintainer",
   "at": "2026-09-22T14:00:00.000Z",
   "version": 4,
-  "sha256": "c5038173c4f4c9dd0723b1495f1b00fac961fe7137951ca2db069417b068a035"
+  "sha256": "cdbfda8726171265d09900ac4a945ed02c730cf5525f24ec2b1658035d79c64b"
 }

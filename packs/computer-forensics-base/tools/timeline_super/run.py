@@ -98,7 +98,32 @@ def resolve_output(out):
     inputs = root / "inputs"
     if dest == inputs or inputs in dest.parents:
         fail("output cannot be under inputs/", output=str(out))
+    bound = job_out()
+    if bound is not None and dest != bound and bound not in dest.parents:
+        fail("in a job an output is a directory under $OUT, the one place a job writes (the rest of the run is read-only there)",
+             output=str(out), out=str(bound), hint="leave out_dir out, or give {OUT}/timeline, or work/<your id>/timeline, which the harness maps there")
     return dest
+
+
+def job_out():
+    """$OUT when this runs as a job, else None."""
+    job, out = os.environ.get("JOB_ID"), os.environ.get("OUT")
+    return Path(out).resolve() if job and out else None
+
+
+def unused(path):
+    """`path`, or the first name beside it that nothing holds (timeline.2.jsonl): a resumed directory keeps an
+    earlier run's files as they were, and this run's are named apart."""
+    if not os.path.lexists(path):
+        return path
+    folder, name = os.path.split(path)
+    stem, dot, ext = name.partition(".")
+    k = 2
+    while True:
+        candidate = os.path.join(folder, "%s.%d%s%s" % (stem, k, dot, ext))
+        if not os.path.lexists(candidate):
+            return candidate
+        k += 1
 
 
 def readable(stamp):
@@ -124,8 +149,8 @@ class Stage:
         self.exit = None
         self.timed_out = False
         self.seconds = None
-        self.stdout_file = os.path.join(out_dir, name + ".stdout")
-        self.stderr_file = os.path.join(out_dir, name + ".stderr")
+        self.stdout_file = unused(os.path.join(out_dir, name + ".stdout"))
+        self.stderr_file = unused(os.path.join(out_dir, name + ".stderr"))
 
     def run(self, deadline):
         started = time.monotonic()
@@ -133,7 +158,7 @@ class Stage:
         if budget <= 0:
             self.exit, self.timed_out, self.seconds = None, True, 0
             return self
-        with open(self.stdout_file, "wb") as so, open(self.stderr_file, "wb") as se:
+        with open(self.stdout_file, "xb") as so, open(self.stderr_file, "xb") as se:        # new files: never over an earlier run's
             proc = subprocess.Popen(self.argv, stdout=so, stderr=se, cwd=self.out_dir, start_new_session=True)
             CHILD[0] = proc
             try:
@@ -183,7 +208,7 @@ def stamp_value(row):
         return None, raw
 
 
-def summarise(output, sample, out_dir, stop_at):
+def summarise(output, sample, out_dir, stop_at, invalid_path):
     """Valid and invalid lines of psort's JSON Lines, read line by line with a cap on
     a line's size, so a hostile line cannot fill memory and a bad one is not a count.
 
@@ -193,7 +218,6 @@ def summarise(output, sample, out_dir, stop_at):
     events = invalid = oversized = untimed = 0
     earliest = latest = None
     parsers_seen, head, bad = {}, [], []
-    invalid_path = os.path.join(out_dir, "timeline.invalid_lines.txt")
     stopped_at_line = None
     with open(output, "rb") as fh:
         number, offset = 0, 0
@@ -254,7 +278,7 @@ def summarise(output, sample, out_dir, stop_at):
                     entry["message_note"] = "a preview: the whole line is line %d of the output file" % number
                 head.append(entry)
     if bad:
-        with open(invalid_path, "w", encoding="utf-8") as fh:
+        with open(invalid_path, "x", encoding="utf-8") as fh:
             fh.write("line\tbyte_offset\tbytes\treason\tfirst 200 bytes (the whole line stays in the output file)\n")
             for n, off, size, why, snippet in bad:
                 fh.write("%d\t%d\t%d\t%s\t%s\n" % (n, off, size, why.replace("\t", " ").replace("\n", " "),
@@ -292,8 +316,10 @@ def main():
         fail("resume is true or false")
 
     out_dir = args.get("out_dir")
-    if not isinstance(out_dir, str) or not out_dir:
-        fail("out_dir is required: a directory under work/ for the storage file and the output")
+    if out_dir is None and job_out() is not None:
+        out_dir = str(job_out() / "timeline")         # in a job the one place that can be written
+    if not isinstance(out_dir, str) or not out_dir or "\0" in out_dir:
+        fail("out_dir is required: a directory under work/<your id>/ for the storage file and the output (in a job, under $OUT, and the default there)")
     dest = resolve_output(out_dir)
 
     source = args.get("source")
@@ -339,16 +365,22 @@ def main():
             fail("out_dir already holds files, and a file left by an earlier run would be taken for this one's: "
                  "give a new directory, or resume: true to write beside them (only files written after this run began count)",
                  out_dir=out_dir, holds=preexisting[:20])
-    os.makedirs(dest, exist_ok=True)
+    try:
+        os.makedirs(dest, exist_ok=True)
+    except OSError as exc:
+        fail("out_dir cannot be made: %s" % (exc.strerror or exc), out_dir=out_dir,
+             hint="in a job only $OUT is writable; elsewhere only work/<your id>/ is")
     out_abs = str(dest)
-    store = os.path.join(out_abs, "timeline.plaso") if mode == "full" else os.path.abspath(storage_arg)
-    output = os.path.join(out_abs, "timeline.jsonl")
-    written = [output, os.path.join(out_abs, "timeline.plaso"), os.path.join(out_abs, "timeline.invalid_lines.txt")]
+    names = [os.path.join(out_abs, n) for n in ("timeline.jsonl", "timeline.plaso", "timeline.invalid_lines.txt")]
     for logname in ("log2timeline", "psort"):
-        written += [os.path.join(out_abs, logname + ext) for ext in (".log.gz", ".stdout", ".stderr")]
-    for path in written:
+        names += [os.path.join(out_abs, logname + ext) for ext in (".log.gz", ".stdout", ".stderr")]
+    for path in names:
         if os.path.islink(path):
             fail("a link stands where this tool writes; it will not write through it", path=path)
+    # A resumed directory keeps an earlier run's files as they were: this run's are named beside them (timeline.2.jsonl).
+    store = unused(os.path.join(out_abs, "timeline.plaso")) if mode == "full" else os.path.abspath(storage_arg)
+    output = unused(os.path.join(out_abs, "timeline.jsonl"))
+    invalid_path = unused(os.path.join(out_abs, "timeline.invalid_lines.txt"))
 
     def fresh(path):
         try:
@@ -364,14 +396,17 @@ def main():
     if mode == "full":
         result["source"] = source
         result["versions"]["log2timeline"] = version_of(l2t, out_abs)
-        collect_log = os.path.join(out_abs, "log2timeline.log.gz")
+        collect_log = unused(os.path.join(out_abs, "log2timeline.log.gz"))
         collect = [l2t, "--status_view", "none", "--logfile", collect_log, "--partitions", "all", "--volumes", "all", "--unattended", "--quiet"]
         if args.get("parsers"):
             collect += ["--parsers", str(args["parsers"])]
         if args.get("timezone"):
             collect += ["--timezone", str(args["timezone"])]
         collect += ["--storage_file", store, os.path.abspath(source)]
-        stage = Stage("log2timeline", collect, out_abs).run(deadline)
+        try:
+            stage = Stage("log2timeline", collect, out_abs).run(deadline)
+        except OSError as exc:
+            fail("out_dir cannot be written: %s" % (exc.strerror or exc), out_dir=out_dir)
         result["stages"]["collect"] = stage.record()
         result["collect_exit"] = stage.exit
         if stage.timed_out:
@@ -386,7 +421,7 @@ def main():
         result["collect_exit"] = None
         result["stages"]["collect"] = {"skipped": "mode export: log2timeline was not run; the storage file is the one given"}
 
-    export_log = os.path.join(out_abs, "psort.log.gz")
+    export_log = unused(os.path.join(out_abs, "psort.log.gz"))
     export = [psort, "--status_view", "none", "--logfile", export_log, "-o", "json_line", "-w", output]
     if args.get("psort_filter"):
         export += ["--filter", str(args["psort_filter"])]
@@ -396,7 +431,10 @@ def main():
     # psort reads a storage file, so it is run when there is one even after a nonzero collect (a partial
     # storage can still be read), and its status then says what each stage did.
     if storage_ok and time.monotonic() < deadline:
-        stage = Stage("psort", export, out_abs).run(deadline)
+        try:
+            stage = Stage("psort", export, out_abs).run(deadline)
+        except OSError as exc:
+            fail("out_dir cannot be written: %s" % (exc.strerror or exc), out_dir=out_dir)
         result["stages"]["export"] = stage.record()
         result["export_exit"] = stage.exit
         if stage.timed_out:
@@ -410,7 +448,7 @@ def main():
         result["problems"].append("the time budget was used before psort could run")
 
     # Only what this run wrote: a log or a captured output left in a resumed directory is an earlier run's, and is listed under preexisting.
-    result["logs"] = [p for p in (os.path.join(out_abs, "log2timeline.log.gz"), export_log) if fresh(p)]
+    result["logs"] = [p for p in ((collect_log if mode == "full" else None), export_log) if p and fresh(p)]
     result["captured_output"] = [str(p) for p in sorted(Path(out_abs).glob("*.std*")) if fresh(str(p))]
     result["parsers_filter"] = args.get("parsers") or ("all (the default, and usually the wrong choice)" if mode == "full" else "as in the storage file given")
     result["timezone_given"] = args.get("timezone") or None
@@ -421,7 +459,7 @@ def main():
 
     if output_ok:
         try:
-            summary = summarise(output, sample, out_abs, call_started + TOOL_SECONDS)
+            summary = summarise(output, sample, out_abs, call_started + TOOL_SECONDS, invalid_path)
         except OSError as exc:
             summary = None
             result["problems"].append("psort's output could not be read: %s" % (exc.strerror or exc))

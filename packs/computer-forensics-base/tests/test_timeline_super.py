@@ -236,6 +236,58 @@ class TimelineSuper(Case):
             os.kill(child, signal.SIGKILL)
             self.fail("log2timeline was left running after the tool was terminated")
 
+    def test_in_a_job_out_dir_is_bounded_by_out_and_defaults_to_it(self):
+        bin_dir = self.plaso()
+        out = self.path("job-out")
+        os.makedirs(out)
+        env = {"JOB_ID": "j000013", "OUT": out}
+        src = self.write("inputs/disk.dd", b"\0" * 64)
+        r = run_tool("timeline_super", {"source": src, "out_dir": "work/timeline"}, self.dir, [bin_dir], env=env)
+        self.assertEqual(r.code, 1, r.stdout)
+        self.assertIn("under $OUT", r.json["error"])
+        self.assertFalse(os.path.exists(self.path("work")))
+        r = run_tool("timeline_super", {"source": src}, self.dir, [bin_dir], env=env)
+        self.assertEqual((r.code, r.json["status"]), (0, "complete"), r.stdout)
+        self.assertEqual(r.json["out_dir"], os.path.join(os.path.realpath(out), "timeline"))
+        self.assertTrue(os.path.isfile(os.path.join(out, "timeline", "timeline.jsonl")))
+
+    def test_a_directory_that_cannot_be_written_is_an_answer_not_a_traceback(self):
+        if os.geteuid() == 0:
+            self.skipTest("root writes everywhere")
+        bin_dir = self.plaso()
+        locked = self.path("work/ro")
+        os.makedirs(self.path("work/ro/exists"))
+        os.chmod(self.path("work/ro/exists"), 0o555)               # exists, empty, cannot be written
+        os.chmod(locked, 0o555)                                     # cannot be made into
+        try:
+            r = self.go(bin_dir, out_dir="work/ro/tl")                 # cannot be made
+            self.assertEqual(r.code, 1)
+            self.assertNotIn("Traceback", r.stderr)
+            self.assertIn("cannot be made", r.json["error"])
+            r = self.go(bin_dir, out_dir="work/ro/exists")
+            self.assertEqual(r.code, 1)
+            self.assertNotIn("Traceback", r.stderr)
+            self.assertIn("cannot be written", r.json["error"])
+        finally:
+            os.chmod(locked, 0o755)
+            os.chmod(self.path("work/ro/exists"), 0o755)
+
+    def test_resume_never_overwrites_what_an_earlier_run_left(self):
+        bin_dir = self.plaso()
+        kept = {"log2timeline.stdout": b"first run, collect words", "psort.stdout": b"first run, export words", "timeline.jsonl": b'{"datetime": "1999-01-01T00:00:00Z"}\n',
+                "timeline.invalid_lines.txt": b"first run's list", "timeline.plaso": b"first storage", "psort.log.gz": b"first log"}
+        for name, data in kept.items():
+            self.write("work/tl/" + name, data)
+            old = time.time() - 86400
+            os.utime(self.path("work/tl/" + name), (old, old))
+        r = self.go(bin_dir, resume=True, lines=None)
+        for name, data in kept.items():
+            self.assertEqual(self.read(self.path("work/tl/" + name), "rb"), data, name + " was overwritten")
+        self.assertEqual(r.json["status"], "complete", r.stdout)
+        self.assertTrue(r.json["output"].endswith("timeline.2.jsonl"))
+        self.assertTrue(r.json["storage_file"].endswith("timeline.2.plaso"))
+        self.assertEqual(self.read(r.json["output"]).count("\n"), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

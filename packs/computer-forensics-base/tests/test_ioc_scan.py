@@ -87,7 +87,13 @@ class IocScan(Case):
         self.assertIn(SECRET.decode(), row["value"])
         # A second run in the same job's output does not overwrite the first's file.
         again = self.scan(data, "password=", write_values=True, env={"JOB_ID": "j000007", "OUT": out})
-        self.assertNotEqual(again.code, 0)
+        self.assertEqual(again.code, 1)
+        self.assertEqual(again.stderr, "", "a refusal is a JSON answer, not a traceback")
+        self.assertIn("values file already exists", again.json["error"])
+        self.assertEqual(again.json["write_values"], "refused")
+        self.assertIn(SECRET.decode(), json.loads(self.read(values_path).splitlines()[0])["value"], "the first run's file is as it was")
+        tool_output = os.path.join(out, "tool-output")
+        self.assertEqual([n for n in (os.listdir(tool_output) if os.path.isdir(tool_output) else []) if n.startswith(".")], [], "no half-written file is left")
 
     def test_the_range_is_what_was_read_and_bad_numbers_are_refused(self):
         data = b"x" * 100 + b"needle" + b"y" * 100
@@ -114,6 +120,24 @@ class IocScan(Case):
             self.assertEqual(r.json["matched"], 4, chunk)
         self.assertEqual(len({str(v) for v in pages.values()}), 1, pages)
         self.assertEqual(pages[16], [("F000001", 10, "AAA"), ("F000002", 53, "BBB"), ("F000003", 96, "AAA")])
+
+    def test_a_link_at_the_values_file_is_refused_by_name_and_an_empty_file_is_reported_with_nothing_written(self):
+        out = self.path("job-out")
+        os.makedirs(out)
+        victim = self.write("victim.txt", "keep me")
+        os.symlink(victim, os.path.join(out, "ioc-scan-values.jsonl"))
+        env = {"JOB_ID": "j000008", "OUT": out}
+        r = self.scan(b"\0" * 20 + b"password=" + SECRET, "password=", write_values=True, env=env)
+        self.assertEqual(r.code, 1)
+        self.assertIn("values file already exists", r.json["error"])
+        self.assertEqual(self.read(victim), "keep me")
+        os.unlink(os.path.join(out, "ioc-scan-values.jsonl"))
+        r = self.scan(b"\0" * 64, "password=", write_values=True, env=env)
+        self.assertEqual(r.code, 0, r.stdout)
+        self.assertEqual((r.json["secret_values"]["written"], r.json["secret_values"]["values_file"], r.json["secret_values"]["contains_secret_values"]),
+                         (0, "store/jobs/j000008/out/ioc-scan-values.jsonl", False))
+        path = os.path.join(out, "ioc-scan-values.jsonl")
+        self.assertEqual((os.path.getsize(path), stat.S_IMODE(os.stat(path).st_mode)), (0, 0o600))
 
 
 if __name__ == "__main__":

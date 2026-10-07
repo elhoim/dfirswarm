@@ -496,6 +496,16 @@ test("the library's catalog searches read the case in front of them, not the one
   assert.deepEqual(JSON.parse(await readFile(join(lib, "manifest.json"), "utf8")), JSON.parse(await readFile(join(pack, "manifest.json"), "utf8")));
 });
 
+test("the tool-library copies of file_carver, catalog_search, sig_carve, ioc_scan and sqlite_query are the pack's, run.py and manifest", async () => {
+  // The copies are what scripts/swarm.sh install_tools_from offers a run: one that drifts offers the old tool.
+  for (const name of ["file_carver", "catalog_search", "sig_carve", "ioc_scan", "sqlite_query"]) {
+    const lib = join(LIB, name);
+    const pack = join(LIB, "..", "packs", "computer-forensics-base", "tools", name);
+    assert.equal(await readFile(join(lib, "run.py"), "utf8"), await readFile(join(pack, "run.py"), "utf8"), `the library's ${name} is the pack's`);
+    assert.deepEqual(JSON.parse(await readFile(join(lib, "manifest.json"), "utf8")), JSON.parse(await readFile(join(pack, "manifest.json"), "utf8")), `${name}'s manifest`);
+  }
+});
+
 // A broad search returned up to 70K characters a call, and an agent that
 // wanted the rest searched again with a bigger limit: the lines past the
 // limit were counted and dropped. Every match is kept now, and paged.
@@ -984,8 +994,7 @@ test("sqlite_query opens a database read-only by URI, on a read-only directory, 
     return;
   }
   for (const script of [
-    join(LIB, "..", "packs", "computer-forensics-base", "tools", "sqlite_query", "run.py"),
-    join(LIB, "sqlite_query", "run.py"),
+    join(LIB, "sqlite_query", "run.py"),      // the pack's own, held equal by the copies test below
   ]) {
     await withCwd(async (cwd) => {
       const dir = join(cwd, "work", "agent 03 #1");
@@ -1100,8 +1109,7 @@ test("sqlite_query says a file is not SQLite, and whether it looks encrypted, in
   // "file is not a database", twice, to two agents.
   const { randomBytes } = await import("node:crypto");
   for (const script of [
-    join(LIB, "..", "packs", "computer-forensics-base", "tools", "sqlite_query", "run.py"),
-    join(LIB, "sqlite_query", "run.py"),
+    join(LIB, "sqlite_query", "run.py"),      // the pack's own, held equal by the copies test below
   ]) {
     await withCwd(async (cwd) => {
       await mkdir(join(cwd, "work"), { recursive: true });
@@ -1159,8 +1167,7 @@ test("sqlite_query gives back bytes that are not UTF-8 as escapes instead of dyi
     return;
   }
   for (const script of [
-    join(LIB, "..", "packs", "computer-forensics-base", "tools", "sqlite_query", "run.py"),
-    join(LIB, "sqlite_query", "run.py"),
+    join(LIB, "sqlite_query", "run.py"),      // the pack's own, held equal by the copies test below
   ]) {
     await withCwd(async (cwd) => {
       await mkdir(join(cwd, "work"), { recursive: true });

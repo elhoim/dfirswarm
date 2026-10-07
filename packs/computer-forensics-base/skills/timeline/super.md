@@ -4,7 +4,7 @@ title: Build and validate a scoped machine timeline
 when: Broad parser output can identify relevant events or improve source coverage.
 needs: [timeline/build]
 tools: [timeline_super, catalog_search]
-requires_host: [log2timeline, psort]
+requires_host: [log2timeline, psort, pinfo]
 ---
 
 Two timelines, two jobs. The ledger is yours: facts you decided were worth
@@ -14,9 +14,12 @@ every timestamp on the volume. Which parsers ran, which sources could not be rea
 and what failed decide what is in it, so keep the scope, the parser selection, the
 inaccessible sources and the errors with it, and never present it as the first.
 
-Run `timeline_super` as a job with the source objects declared and a new directory:
+Run `timeline_super` as a job with the source objects declared and a new directory.
+A job writes only `$OUT`, so `out_dir` is a directory under `{OUT}` (the default
+there); a path under your own `work/<you>/` is rewritten to it by the harness, and
+`work/timeline` is not a place you or a job can write:
 
-    timeline_super  source=inputs/disk.E01  out_dir=work/timeline  parsers="<names>"
+    timeline_super  source=inputs/disk.E01  out_dir={OUT}/timeline  parsers="<names>"
 
 **Name the parsers.** A default run over a large image takes hours and returns
 tens of millions of events, mostly file metadata. Read the installed Plaso's help
@@ -42,7 +45,8 @@ the pipeline finished, not that every parser read every source: Plaso's own
 processing report of the storage file (`pinfo`) says what each parser did, and a
 negative should not rest on the timeline before you have read it. Partial output
 can support a qualified observation and never an unqualified absence. An existing
-output directory is refused, so each run has its own.
+output directory is refused unless `resume` is true, and then this run's files are
+named beside the earlier ones (`timeline.2.jsonl`), never over them.
 
 **Then narrow before you read.** The storage file stays. To make another export
 without collecting the evidence again, call `timeline_super` with `mode: export`,
@@ -64,7 +68,7 @@ Three habits that separate a useful timeline from a wall of rows:
    result returns and the exit codes belong beside the timeline, because a second
    examiner cannot reproduce it otherwise.
 
-This pack declares `log2timeline` and `psort`; a declaration does not install them.
+This pack declares `log2timeline`, `psort` and `pinfo`; a declaration does not install them.
 Check the worker image's inventory, and when Plaso is missing say so in the report
 rather than implying a timeline was built and found nothing. `catalog_search` can
 tell you whether a catalogue generation already holds a timeline (`which=timeline`

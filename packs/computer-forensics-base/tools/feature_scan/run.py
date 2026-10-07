@@ -15,7 +15,10 @@ feature file holds addresses, card numbers, account names and passwords the
 evidence held. The values are in the feature files bulk_extractor wrote, which
 are sealed with the job, so run the job with `secret_output: true`. With
 `write_values: true`, in a job, the most frequent values of each feature file are
-also written to a 0600 file under $OUT, and the answer names it.
+also written to a 0600 file under $OUT, and the answer names it. That file is not the only
+place values are: bulk_extractor's own files in out_dir are unfiltered (alerts.txt can hold a whole
+recovery key), so out_dir is made 0700 and its files 0600 once the child ends, and the answer says
+`out_dir_contains_secret_values` and which kinds hold them.
 
 A feature file is offset, feature, context, tab-separated; the offset is the
 whole provenance, there is no path. A histogram file (`*_histogram.txt`, whose lines
@@ -24,6 +27,7 @@ exit code, stdout and stderr are returned and kept in files: a run that exited
 nonzero is partial or failed, not clean.
 """
 import collections
+import errno
 import hashlib
 import json
 import os
@@ -52,6 +56,11 @@ SCANNERS = ["accts", "aes", "base16", "base64", "elf", "email", "evtx", "exif", 
 NAME = re.compile(r"^[A-Za-z0-9_]{1,64}$")
 
 
+def describe(exc):
+    code = errno.errorcode.get(exc.errno, "") if getattr(exc, "errno", None) else ""
+    return "%s%s: %s" % (type(exc).__name__, " " + code if code else "", getattr(exc, "strerror", None) or str(exc))
+
+
 class SecretValuesRefused(Exception):
     pass
 
@@ -59,10 +68,10 @@ class SecretValuesRefused(Exception):
 class SecretValues:
     """Where a value goes when, and only when, the caller asked for it.
 
-    The reference implementation of the secret-safe output pattern (docs/packs.md, "Writing a
-    pack that holds up"), copied as a standalone tool copies LosslessPage: call `add` once per
-    finding with the finding's id, its locator and the value. With `enabled` false it writes
-    nothing and `summary()` says so.
+    The reference implementation of the secret-safe output pattern: copy this
+    class unchanged into a tool that has to produce a secret, and call `add`
+    once per finding with the finding's id, its locator and the value. With
+    `enabled` false it writes nothing and `summary()` says so.
     """
 
     NAME = "feature-scan-values.jsonl"
@@ -73,23 +82,34 @@ class SecretValues:
         self._fh = None
         self.job = os.environ.get("JOB_ID") or ""
         self.out = os.environ.get("OUT") or ""
-        if enabled and not (self.job and self.out):
+        self.path = None
+        self.shown = None
+        if not enabled:
+            return
+        if not (self.job and self.out):
             raise SecretValuesRefused(
                 "write_values is refused outside a job: a value written here would be an ordinary "
                 "file, not a sealed secret output. Run this as job_run tool=feature_scan with "
                 "secret_output: true, and ask again there. Nothing was written."
             )
-        self.path = Path(self.out) / self.NAME if enabled else None
-        self.shown = ("store/jobs/%s/out/%s" % (re.sub(r"[^A-Za-z0-9_.-]", "_", self.job), self.NAME)) if enabled else None
+        self.path = Path(self.out) / self.NAME
+        self.shown = "store/jobs/%s/out/%s" % (re.sub(r"[^A-Za-z0-9_.-]", "_", self.job), self.NAME)
+        # Created now, before anything is scanned: a file or a link already at that name is
+        # refused by name at once (O_EXCL does not follow a link, a dangling one included),
+        # instead of failing, or writing through it, after the scan. With nothing found it
+        # stays as an empty file, mode 0600, and the answer says written: 0.
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(str(self.path), os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        except FileExistsError:
+            raise SecretValuesRefused("the values file already exists: %s" % self.path)
+        except OSError as exc:
+            raise SecretValuesRefused("the values file could not be created: %s (%s)" % (self.path, describe(exc)))
+        self._fh = os.fdopen(fd, "w", encoding="utf-8")
 
     def add(self, finding_id: str, locator: dict, value: str) -> None:
         if not self.enabled:
             return
-        if self._fh is None:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            # Exclusively and private: a second run never overwrites a first's file.
-            fd = os.open(str(self.path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            self._fh = os.fdopen(fd, "w", encoding="utf-8")
         self._fh.write(json.dumps({"finding_id": finding_id, **locator, "value": value}, ensure_ascii=False))
         self._fh.write("\n")
         self.written += 1
@@ -105,9 +125,9 @@ class SecretValues:
         return {
             "requested": self.enabled,
             "written": self.written,
-            "values_file": self.shown if self.written else None,
+            "values_file": self.shown if self.enabled else None,
             "contains_secret_values": self.written > 0,
-            "format": "JSON Lines, mode 0600: finding_id, feature_file, count (occurrences), value (a feature value as bulk_extractor wrote it)" if self.written else None,
+            "format": "JSON Lines, mode 0600: finding_id, feature_file, count (occurrences), value (a feature value as bulk_extractor wrote it)" if self.enabled else None,
         }
 
 
@@ -135,6 +155,27 @@ def resolve_output(out, what="output"):
     if dest == inputs or inputs in dest.parents:
         fail("%s cannot be under inputs/" % what, **{what: str(out)})
     return str(dest.relative_to(root))
+
+
+def lock_down(root):
+    """bulk_extractor writes what it found, unfiltered, with the umask's modes: a feature file, a histogram and
+    alerts.txt hold the values themselves (addresses, card numbers, a whole recovery key). Once the child has ended the
+    directory is the owner's alone (0700) and its files are 0600. Returns what could not be changed."""
+    failed = []
+    for dirpath, dirs, names in os.walk(root):
+        try:
+            os.chmod(dirpath, 0o700)
+        except OSError as exc:
+            failed.append("%s: %s" % (dirpath, exc.strerror or exc))
+        for name in names:
+            full = os.path.join(dirpath, name)
+            if os.path.islink(full):
+                continue
+            try:
+                os.chmod(full, 0o600)
+            except OSError as exc:
+                failed.append("%s: %s" % (full, exc.strerror or exc))
+    return failed
 
 
 def classify(name, first_line):
@@ -296,6 +337,7 @@ def main():
     stdout_file, stderr_file = os.path.join(out_dir, "feature_scan.stdout"), os.path.join(out_dir, "feature_scan.stderr")
     os.replace(tmp_out.name, stdout_file)
     os.replace(tmp_err.name, stderr_file)
+    locked_failed = lock_down(out_dir)
 
     files, features, histograms = [], [], []
     counter = 0
@@ -330,6 +372,7 @@ def main():
                 histograms.append(entry)
             files.append(entry)
     secret.close()
+    holding = sorted({f["kind"] for f in files if f.get("bytes") and f["kind"] != "run report" and f["file"] not in (stdout_file, stderr_file)})
     features.sort(key=lambda f: -(f.get("lines") or 0))
     exit_ok = code == 0 and not timed_out
     written = [f for f in files if f["file"] not in (stdout_file, stderr_file)]        # the child's own words are not what it wrote
@@ -351,6 +394,11 @@ def main():
         "histograms": histograms,
         "values_inline": False,
         "secret_values": secret.summary(),
+        "out_dir_contains_secret_values": bool(holding),
+        "kinds_holding_values": holding,
+        "out_dir_note": "secret_values is about the values file this tool writes. out_dir holds what bulk_extractor wrote, unfiltered: the kinds listed "
+                        "in kinds_holding_values (features, histogram and alerts files among them) carry the values themselves. It is mode 0700 with its "
+                        "files 0600; in a job it is sealed with the rest of $OUT, so run the job with secret_output: true.",
         "files": files[:INVENTORY_SHOWN],
         "file_count": len(files),
         "files_written_by_bulk_extractor": len(written),
@@ -363,6 +411,8 @@ def main():
     }
     if len(files) > INVENTORY_SHOWN:
         result["files_note"] = "the first %d of %d files are listed; the directory holds the rest" % (INVENTORY_SHOWN, len(files))
+    if locked_failed:
+        result["out_dir_mode_problem"] = "the modes of %d path(s) could not be restricted, so those may be readable by others: %s" % (len(locked_failed), "; ".join(locked_failed[:5]))
     if timed_out:
         result["problem"] = "bulk_extractor did not finish within %d seconds; what it had written is listed and is partial" % timeout
     elif code != 0:

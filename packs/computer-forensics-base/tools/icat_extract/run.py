@@ -162,6 +162,12 @@ def resolve_output(out):
     inputs = root / "inputs"
     if dest == inputs or inputs in dest.parents:
         fail("output cannot be under inputs/", output=str(out))
+    job, bound = os.environ.get("JOB_ID"), os.environ.get("OUT")
+    if job and bound:
+        bound = Path(bound).resolve()
+        if bound not in dest.parents:
+            fail("in a job an output is a path under $OUT, the one place a job writes (the rest of the run is read-only there)",
+                 output=str(out), out=str(bound), hint="give {OUT}/<name>, or work/extracted/<your id>/<name>, which the harness maps there")
     return dest
 
 

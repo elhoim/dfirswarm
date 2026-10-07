@@ -360,6 +360,19 @@ class FileCarver(Case):
         self.assertEqual(got["size"], os.path.getsize(bigpng))
         self.assertLess(peak, 20 * 1024 * 1024, "peak %d bytes while carving a 40 MiB PNG" % peak)
 
+    def test_in_a_job_an_output_outside_out_is_refused_and_one_under_it_is_written(self):
+        src = self.write("pic.png", png())
+        out = self.path("job-out")
+        os.makedirs(out)
+        env = {"JOB_ID": "j000012", "OUT": out}
+        r = run_tool("file_carver", {"path": src, "offset": 0, "sig_type": "PNG", "output": "work/pic.png"}, self.dir, env=env)
+        self.assertEqual(r.code, 1, r.stdout)
+        self.assertIn("under $OUT", r.json["error"])
+        self.assertFalse(os.path.exists(self.path("work")))
+        r = run_tool("file_carver", {"path": src, "offset": 0, "sig_type": "PNG", "output": os.path.join(out, "pic.png")}, self.dir, env=env)
+        self.assertEqual(r.code, 0, r.stdout)
+        self.assertEqual(self.read(os.path.join(out, "pic.png"), "rb"), png())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -44,7 +44,9 @@ class FileType(Case):
         self.assertEqual(types["compressed.pf"], "compressed prefetch record")
 
     def test_an_unknown_type_does_not_match_its_extension(self):
-        self.write("d/random.bin", os.urandom(512))
+        # Zeros, not random bytes: libmagic names a random block something about one time in twenty, and `file -b` says
+        # "data" (its word for no type) for zeros every time.
+        self.write("d/random.bin", b"\0" * 512)
         f = self.look().json["files"][0]
         self.assertIsNone(f["extension_matches"])
         self.assertEqual(f["type"], "unrecognised")

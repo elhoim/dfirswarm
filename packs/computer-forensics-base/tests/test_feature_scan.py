@@ -25,6 +25,7 @@ def stub_body(exit_code=0, extra=""):
             'printf "8192\\t%(c)s\\tctx\\n" > "$OUTDIR/ccn.txt"\n'
             'printf "<report/>" > "$OUTDIR/report.xml"\n'
             'printf "pcapbytes" > "$OUTDIR/packets.pcap"\n'
+            'printf "ALERT possible recovery key %(c)s\\n" > "$OUTDIR/alerts.txt"\n'
             'echo scanning\n'
             + extra +
             'exit %(code)d\n') % {"a": SECRET_ADDRESS, "c": CARD, "code": exit_code}
@@ -151,6 +152,40 @@ class FeatureScan(Case):
             r = self.scan(timeout_seconds=bad)
             self.assertEqual(r.code, 1, bad)
             self.assertIn("from 10 to 1000", r.json["error"])
+
+    def test_what_bulk_extractor_wrote_is_private_and_the_answer_says_it_holds_values(self):
+        r = self.scan()
+        self.assertEqual(r.code, 0, r.stdout)
+        out_dir = self.path("work/features")
+        self.assertEqual(stat.S_IMODE(os.stat(out_dir).st_mode), 0o700)
+        modes = {n: stat.S_IMODE(os.stat(os.path.join(out_dir, n)).st_mode) for n in os.listdir(out_dir)}
+        self.assertEqual(set(modes.values()), {0o600}, modes)
+        self.assertIs(r.json["out_dir_contains_secret_values"], True)
+        self.assertEqual(r.json["kinds_holding_values"], ["alerts", "features", "histogram", "pcap"])
+        self.assertIn("alerts", r.json["out_dir_note"])
+        self.assertIs(r.json["secret_values"]["contains_secret_values"], False, "that field is about the values file only")
+
+    def test_a_second_values_run_in_one_job_is_a_json_refusal_and_an_empty_values_file_says_written_zero(self):
+        out = self.path("job-out")
+        os.makedirs(out)
+        env = {"JOB_ID": "j000014", "OUT": out}
+        first = self.scan(write_values=True, env=env, out_dir=self.path("job-out/f1"))
+        self.assertEqual(first.code, 0, first.stdout)
+        again = self.scan(write_values=True, env=env, out_dir=self.path("job-out/f2"))
+        self.assertEqual((again.code, again.stderr), (1, ""))
+        self.assertIn("values file already exists", again.json["error"])
+        os.unlink(os.path.join(out, "feature-scan-values.jsonl"))
+        victim = self.write("victim.txt", "keep me")
+        os.symlink(victim, os.path.join(out, "feature-scan-values.jsonl"))
+        r = self.scan(write_values=True, env=env, out_dir=self.path("job-out/f3"))
+        self.assertEqual((r.code, self.read(victim)), (1, "keep me"))
+        os.unlink(os.path.join(out, "feature-scan-values.jsonl"))
+        nothing = self.scan('while [ $# -gt 0 ]; do case "$1" in -o) mkdir -p "$2";; esac; shift; done\nprintf "<report/>" > "$2/report.xml" 2>/dev/null; exit 0\n',
+                            write_values=True, env=env, out_dir=self.path("job-out/f4"))
+        self.assertEqual(nothing.json["secret_values"]["written"], 0)
+        self.assertEqual(nothing.json["secret_values"]["values_file"], "store/jobs/j000014/out/feature-scan-values.jsonl")
+        path = os.path.join(out, "feature-scan-values.jsonl")
+        self.assertEqual((os.path.getsize(path), stat.S_IMODE(os.stat(path).st_mode)), (0, 0o600))
 
 
 if __name__ == "__main__":

@@ -30,6 +30,7 @@ install 20260720), and each runs with --out as its working directory, so
 nothing either writes lands beside the run.
 """
 import argparse
+import gzip
 import json
 import os
 import re
@@ -40,12 +41,13 @@ import sys
 import time
 
 # What `complete` says: the pipeline finished. Plaso's own processing report says what each parser did.
-PIPELINE_NOTE = ("complete means log2timeline and psort both exited 0 and wrote their files; it does not say every parser read every "
+PIPELINE_NOTE = ("complete means log2timeline and psort both exited 0, wrote their files, said no error and no zero event count in what they "
+                 "printed, in their logs or in pinfo's report, and the timeline holds an event; it does not say every parser read every "
                  "source or that no record was skipped. pinfo.txt, when it was written, is Plaso's own processing report of the storage "
                  "file: read it before a negative rests on this timeline")
 ZONE = re.compile(r"^[A-Za-z0-9_+\-/]{1,64}$")
 NOT_COVERED = ("volume shadow copies (run with --vss_stores none); encrypted volumes without their key; unallocated space and "
-               "deleted file contents (nothing is carved); formats no parser of the pinned Plaso handles, and the text inside documents")
+               "deleted file contents (nothing is carved); formats no parser of the installed Plaso handles, and the text inside documents")
 
 
 def target_of(value):
@@ -109,6 +111,43 @@ def detect(path):
     if head[510:512] == b"\x55\xaa" and mbr_partitions(head):
         return True, "an MBR partition table with at least one partition"
     return False, "no disk image, partition table or filesystem signature"
+
+
+# What Plaso's own words say when a step finished its job and not its work: an error line, a traceback, a worker that was
+# killed, a count of events that is zero. Matched in what each step printed, in its log and in pinfo's report; the exit codes
+# alone do not say this.
+PLASO_ERROR = re.compile(r"\[(?:ERROR|CRITICAL)\]|Traceback \(most recent call last\)|\bworkers?\b.{0,40}\b(?:killed|died|crashed|terminated|not responding)\b", re.I)
+PLASO_ZERO = re.compile(r"\bevents?\s+(?:extracted|written|exported|processed)\s*:?\s*0\b", re.I)
+SCAN_BYTES = 32 * 1024 * 1024
+
+
+def plaso_signals(out, names):
+    """The lines in these files of `out` that say Plaso failed or found nothing: [(file, kind, count, first line)].
+    A file is read to SCAN_BYTES, and a .gz that is not gzip is read as it is."""
+    found = []
+    for name in names:
+        path = os.path.join(out, name)
+        if not os.path.isfile(path):
+            continue
+        counts, first = {"error": 0, "zero events": 0}, {}
+        try:
+            try:
+                with gzip.open(path, "rt", encoding="utf-8", errors="replace") as handle:
+                    lines = iter(handle.read(SCAN_BYTES).splitlines())
+            except (OSError, EOFError):
+                with open(path, "r", encoding="utf-8", errors="replace") as handle:
+                    lines = iter(handle.read(SCAN_BYTES).splitlines())
+            for line in lines:
+                for kind, rx in (("error", PLASO_ERROR), ("zero events", PLASO_ZERO)):
+                    if rx.search(line):
+                        counts[kind] += 1
+                        first.setdefault(kind, line.strip()[:200])
+        except OSError:
+            continue
+        for kind in ("error", "zero events"):
+            if counts[kind]:
+                found.append((name, kind, counts[kind], first[kind]))
+    return found
 
 
 def program(*names):
@@ -189,6 +228,23 @@ def run(image, out, zone=None):
                 rows.append(("pinfo.txt", "Plaso's own processing report of the storage file (pinfo): what its parsers did, warnings included"))
             if prc != 0:
                 errors.append("pinfo exited %d; the processing report may be incomplete (pinfo.stderr)" % prc)
+    # The programs exited, and said what they did: a worker that was killed or an error line makes it partial, and so does a timeline of no events.
+    signals = plaso_signals(out, ["log2timeline.stdout", "log2timeline.stderr", "log2timeline.log.gz", "psort.stdout", "psort.stderr", "psort.log.gz",
+                                  "pinfo.txt", "pinfo.stderr"])
+    for name, kind, count, first in signals:
+        errors.append("%s: %d line(s) say %s, the first: %s" % (name, count, "an error" if kind == "error" else "no events were extracted or written", first))
+    csv_path = os.path.join(out, "timeline.csv")
+    if fresh(csv_path):
+        try:
+            with open(csv_path, "rb") as handle:
+                data_rows = sum(1 for _ in handle) - 1
+            if data_rows < 1:
+                errors.append("timeline.csv holds no event (only its header, or nothing): psort wrote a timeline of no events; whether the image holds none "
+                              "or a parser failed is not established (read pinfo.txt)")
+        except OSError:
+            pass
+    if signals:
+        extra["plaso_signals"] = [{"file": f, "kind": k, "lines": c, "first": first} for f, k, c, first in signals]
     with open(os.path.join(out, "index.tsv"), "w", encoding="utf-8", newline="\n") as handle:
         for rel, what in rows:
             handle.write("%s\t%s\n" % (rel, what))

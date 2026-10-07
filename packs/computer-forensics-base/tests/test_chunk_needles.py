@@ -132,6 +132,28 @@ class ChunkNeedles(Case):
         self.assertEqual(r.code, 1)
         self.assertIn("icat is not on PATH", r.json["error"])
 
+    def test_a_second_values_run_in_one_job_is_a_json_refusal_and_a_link_at_the_name_is_refused(self):
+        data = b"\0" * 40 + b"token=" + SECRET + b"\0" * 40
+        out = self.path("job-out")
+        os.makedirs(out)
+        env = {"JOB_ID": "j000012", "OUT": out}
+        first = self.file_run(data, "token=", write_values=True, env=env)
+        self.assertEqual(first.code, 0, first.stdout)
+        again = self.file_run(data, "token=", write_values=True, env=env)
+        self.assertEqual(again.code, 1)
+        self.assertEqual(again.stderr, "")
+        self.assertIn("values file already exists", again.json["error"])
+        self.assertIn(SECRET.decode(), json.loads(self.read(os.path.join(out, "chunk-needles-values.jsonl")).splitlines()[0])["value"])
+        os.unlink(os.path.join(out, "chunk-needles-values.jsonl"))
+        victim = self.write("victim.txt", "keep me")
+        os.symlink(victim, os.path.join(out, "chunk-needles-values.jsonl"))
+        r = self.file_run(data, "token=", write_values=True, env=env)
+        self.assertEqual((r.code, self.read(victim)), (1, "keep me"))
+        os.unlink(os.path.join(out, "chunk-needles-values.jsonl"))
+        r = self.file_run(b"\0" * 64, "token=", write_values=True, env=env)
+        self.assertEqual((r.code, r.json["secret_values"]["written"], r.json["secret_values"]["values_file"]), (0, 0, "store/jobs/j000012/out/chunk-needles-values.jsonl"))
+        self.assertEqual(os.path.getsize(os.path.join(out, "chunk-needles-values.jsonl")), 0)
+
 
 if __name__ == "__main__":
     unittest.main()
