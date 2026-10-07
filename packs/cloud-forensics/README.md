@@ -1,14 +1,15 @@
 # Cloud and SaaS Forensics Pack
 
-Logs that belong to somebody else's computer: what each provider keeps, for how
-long, and what the absence of a log actually means.
+Logs that belong to somebody else's computer, examined as supplied exports: what
+an export covers, and what the absence of a log actually means.
 
 Depends on the Computer Forensics Base Pack.
 
 ## What it carries
 
-**Six skills**: `logs/what-exists`, `m365/unified-audit-log`, `entra/signins`,
-`aws/cloudtrail`, `google/workspace`, `identity/tokens`.
+**Nine skills**: `logs/what-exists` and `logs/sources` (what an export covers and which sources to
+inventory), `m365/unified-audit-log`, `entra/signins`, `aws/cloudtrail`, `google/workspace` and
+`google/workspace-access`, `identity/tokens` and `identity/grants`.
 
 **Three tools**, all readers of exports that were supplied (nothing here connects to a tenant). `ual_parse` reads a
 Microsoft 365 unified audit log export and opens the `AuditData` payload, keeping the whole of it beside the fields it
@@ -24,19 +25,19 @@ named or shaped like a credential, and writes a whole result only under the run'
 
 ## What this pack exists to stop
 
-**Reporting that access stopped without proving it.** Refresh-token behaviour
-depends on the identity provider, token type, and revocation action. OAuth
-consent is a separate grant and must be reviewed and revoked explicitly; a
-mailbox rule can keep acting with no interactive session. `identity/tokens` is
-the skill, and the goal template will not pass its checks without evidence of
-the relevant revocation action.
+**Reporting that access stopped without proving it.** What a password reset, a session revocation or a removed
+grant ends depends on the identity provider, the token type and the action taken. A consent is a separate grant and
+a mailbox rule can keep acting with no interactive session. `identity/tokens` is the skill, and the goal template
+asks for what the evidence shows about each containment action, or says it does not establish it.
 
-**Reporting a retention gap as a finding.** Defaults vary by service, licence,
-event date, and tenant policy. For example, current Purview Audit (Standard)
-defaults to 180 days for records generated since 17 October 2023, Entra keeps
-sign-ins for 7 days on Free and 30 days on P1/P2, and CloudTrail Event History
-keeps 90 days of regional management events. Record the tenant's effective
-settings and export time before interpreting a quiet period.
+**Reporting a quiet period as a finding.** Retention, licence, audit configuration and delivery delay vary by
+service, tenant and event date, and a default you remember is not the tenant's setting. `logs/what-exists` makes
+the examiner record what each export covers (the interval requested against the interval returned, who exported it,
+with which query and permission, what failed) before any negative, and bounds every negative by it.
+
+**Examining a tenant instead of its exports.** Everything here works from exports that were supplied. Nothing
+authenticates to a tenant, replays a recovered token, or changes a configuration; a missing export is an
+acquisition ask through the case workflow.
 
 ## Install and use
 

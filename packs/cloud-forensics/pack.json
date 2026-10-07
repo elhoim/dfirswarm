@@ -1,8 +1,8 @@
 {
   "id": "cloud-forensics",
   "name": "Cloud and SaaS Forensics Pack",
-  "version": "1.2.0",
-  "description": "Method and tooling for logs that belong to somebody else's computer: what each provider keeps and for how long, the Microsoft 365 unified audit log, Entra sign-ins and the tokens behind them, AWS CloudTrail, Google Workspace, and the mailbox rules and application consents that are how a cloud account is actually kept.",
+  "version": "1.3.0",
+  "description": "Method and tooling for logs that belong to somebody else's computer, examined as supplied exports: what a cloud or SaaS export covers and what its silence can show, the Microsoft 365 unified audit log, Entra sign-ins, AWS CloudTrail, Google Workspace, and the tokens, grants and mailbox rules behind a cloud account.",
   "licence": "AGPL-3.0-or-later",
   "authors": [
     "DFIR Swarm"
@@ -14,27 +14,36 @@
     "host": "requires/host.json",
     "python": "requires/python.txt"
   },
+  "unreferenced_ok": [
+    {
+      "name": "pwsh",
+      "why": "an operator's acquisition runtime for Microsoft 365 collection; no skill or tool of this pack runs it, and the agent examines supplied exports offline and never connects to a tenant"
+    }
+  ],
   "secrets": [],
   "checksums": {
     "sha256": {
       "LICENCE": "5b94f18424dbef1e77eda33a465e946c2c8eb715fa5236afe2c6ec6763af80d3",
-      "README.md": "81dc48734ae5f548c3d41b3afdd234f2f859913ca57b4379b9b668a115207d4f",
+      "README.md": "37df048bd8c74fa1a0ab9587142421e79feae73a61d08859bc874c7fe7f4079c",
       "tools/ual_parse/manifest.json": "2326248eb88e5aa8f7a03a03e2c5949d405c97a21e38454032c9ad45dd7fcdad",
       "tools/ual_parse/run.py": "508121afe908dae17923926c1eb0675df0ad88de152799a6b0f6cd4ac5482d8c",
       "tools/signin_analyse/manifest.json": "c01286745ad1d0bd33944d7e4fb8fb2b28d84f35a79a82cdf42e32237681feb2",
       "tools/signin_analyse/run.py": "44031f37342e214d1f896c56b662999fbafb2948a1dc84dd3e3366546304d1b8",
       "tools/cloudtrail_parse/manifest.json": "8a009af3888d4d06f3815cb28ba22306dd7f485d045d089ba0bc6b3a1be9d1b3",
       "tools/cloudtrail_parse/run.py": "0814a6c7a391ea1003157a8924afaac8645f8498985feb02eca29b47cd7d2ea7",
-      "goals/tenant-compromise.md": "9e9adba92be465070162a80b30903a98d5180f67442ce8dbbbdb9a6e39dfd2c8",
-      "skills/identity/tokens.md": "1f71322a7ae9fabadf32c3a960baf56227dfa09a4a983db07ea76bfadc8cff44",
-      "skills/google/workspace.md": "4cc30e2b317775edb0f3f58ee403b511228aa4920e55a1cfa35e76c6c59e0b89",
-      "skills/logs/what-exists.md": "5bbef08114941169ca62ecc7d5f7e0b6c6489b6e23ce982ee31da9658aca572e",
-      "skills/m365/unified-audit-log.md": "94fb0f52ca96f63efeda389136fbf6f0374c0ab17dcae2e50f216d8c599ce091",
-      "skills/aws/cloudtrail.md": "bd7d5af94110bb7525064f3399b4f3bcf827cceccffb9d8b99d45b851a037deb",
-      "skills/entra/signins.md": "5da2f6d567dddbc4443cb4f29041eb35b7cc5ebab6c0f98d71ce538148541951",
-      "requires/host.json": "d087cbbf9d215fe8adc5b6f4d4e344c3ce33f27d96116a8c67b14918aa2bb485",
+      "goals/tenant-compromise.md": "232cbc1931834fd4fd8283f1ea4a50b3ac9082b3310efa6e40cdfec9154c821f",
+      "skills/identity/grants.md": "141ab5e4e74a7d6f72a4f027c37534347a94ffae4ad896a6dbf7cedd674383b1",
+      "skills/identity/tokens.md": "0ec6e9cf57c09d86fd6d70b5fd00330ce40b8f8d09ed965bf9f8f9d763a56f73",
+      "skills/google/workspace-access.md": "bd4278a285849c3cd27cd8b70ae5c19da460020aae8d31a6dfb02728484f635e",
+      "skills/google/workspace.md": "9f76883013f4b65d1b78bb4593fbfc6f7d937fc7d9e8c7ad619a60cac136e0c5",
+      "skills/logs/sources.md": "ab125a1bc92a33256c529b7a852dd78805381d79ba5ce47aa957808ec7b6c485",
+      "skills/logs/what-exists.md": "17dcedf52ae81933bc7a14ae4d437bf63aa98bb9ba59838ac43df13678bf2ed5",
+      "skills/m365/unified-audit-log.md": "8908e6160a7fa69b679aa066e79a393d21856079d14f315496961008c6365dbe",
+      "skills/aws/cloudtrail.md": "52f35dd5a66502b82ca505c6686075eda9671d8d4a5386db1c3b30d6600c1aff",
+      "skills/entra/signins.md": "cc97f1e73343205542869c763020da8f2ec206c405f4b00340a511a821b10d41",
+      "requires/host.json": "fa29166ae2652d2a487c863b8e2e4cf4b52dc41750356fb424f0a4e42e261a2e",
       "requires/python.txt": "eb9148a62031d80af4795335b759dbe15552ed2df3b5b97648fbcda6b32b64de",
-      "skills/INDEX.md": "fe953eb77754f23b01157513c95d322c7830162cc0224ea2729b6361163a3a21"
+      "skills/INDEX.md": "98a8a8925b861435b70fe02947fe4dea009ffb03e9f810bca63a2aa4de17853e"
     }
   },
   "tools": [
@@ -42,5 +51,5 @@
     "signin_analyse",
     "ual_parse"
   ],
-  "skills": 6
+  "skills": 9
 }
