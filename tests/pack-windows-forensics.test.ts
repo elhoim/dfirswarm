@@ -2732,3 +2732,174 @@ test("usn_journal counts bytes it could not read as a record, in ranges and apar
     assert.equal(withNameless.nameless_excluded_by_filter, 0);
   });
 });
+
+// --- shellbags ------------------------------------------------------------------
+
+/**
+ * Shell items as the libfwsi notes lay them out: every item starts with its size (2 bytes) and a class byte. A root
+ * folder item (0x1F) has a GUID at 4 (Data1-3 little-endian, Data4 as stored); a volume item (0x2F) a NUL-terminated
+ * ASCII name at 3; a file entry (0x30 | 0x01 folder, 0x32 file) a file size at 4, a FAT modification time at 8, attributes
+ * at 12 and the ASCII short name at 14, then, after padding to an even offset, extension blocks. The 0xBEEF0004 block is
+ * its size (2), version (2), the signature (4), the FAT creation and access times (4 each) and then fields by version:
+ * version 3 has the UTF-16 long name at 0x12; version 7 a file reference and the name at 0x26 after a 2-byte string size;
+ * versions 8 and 9 add fields before the name.
+ */
+const fat = (y: number, mo: number, d: number, h: number, mi: number, s: number): number => (((y - 1980) << 9) | (mo << 5) | d) | (((h << 11) | (mi << 5) | (s >> 1)) << 16);
+
+function shellItem(parts: Buffer[]): Buffer {
+  const body = Buffer.concat(parts);
+  const size = Buffer.alloc(2);
+  size.writeUInt16LE(body.length + 2);
+  return Buffer.concat([size, body]);
+}
+
+// My Computer's GUID {20D04FE0-3AEA-1069-A2D8-08002B30309D}: Data1, Data2 and Data3 little-endian, Data4 as written.
+const rootFolderItem = (): Buffer => shellItem([Buffer.from([0x1f, 0x50]), Buffer.from("e04fd0203aea6910a2d808002b30309d", "hex")]);
+const volumeItem = (name: string): Buffer => shellItem([Buffer.from([0x2f]), Buffer.from(name + "\0", "latin1"), Buffer.alloc(18)]);
+
+function extensionBlock(version: number, longName: string, wrongAt26?: string): Buffer {
+  const head = Buffer.alloc(0x12);
+  head.writeUInt16LE(version, 2);
+  head.writeUInt32LE(0xbeef0004, 4);
+  head.writeUInt32LE(fat(2024, 3, 5, 9, 30, 0), 8);
+  head.writeUInt32LE(fat(2024, 3, 6, 10, 0, 2), 12);
+  head.writeUInt16LE(0x14, 0x10);
+  let rest: Buffer;
+  if (version === 3) rest = u16z(longName);
+  else if (version === 7) rest = Buffer.concat([Buffer.alloc(0x26 - 0x12 - 2), (() => { const b = Buffer.alloc(2); b.writeUInt16LE(longName.length + 1); return b; })(), u16z(longName)]);
+  else {
+    // versions 8 and later: more fields before the name; 0x26 holds something printable that is not the name.
+    const decoy = u16z(wrongAt26 ?? "WRONG");
+    rest = Buffer.concat([Buffer.alloc(0x26 - 0x12), decoy, Buffer.alloc(8), u16z(longName)]);
+  }
+  const block = Buffer.concat([head, rest]);
+  block.writeUInt16LE(block.length, 0);
+  return block;
+}
+
+function folderItem(shortName: string, ext: Buffer): Buffer {
+  // After the size and the class (0x31, a folder) and a sort byte: file size (4, at 4), FAT modification time (4, at 8),
+  // attributes (2, at 12), then the ASCII short name from 14, padded so the extension block starts on an even offset.
+  const fixed = Buffer.alloc(10);
+  fixed.writeUInt32LE(fat(2024, 3, 4, 12, 0, 0), 4);
+  fixed.writeUInt16LE(0x10, 8);
+  const primary = Buffer.from(shortName + "\0", "latin1");
+  return shellItem([Buffer.from([0x31, 0x00]), fixed, primary, Buffer.alloc((14 + primary.length) % 2), ext]);
+}
+
+const mruList = (...order: number[]): Buffer => {
+  const b = Buffer.alloc((order.length + 1) * 4);
+  order.forEach((v, i) => b.writeInt32LE(v, i * 4));
+  b.writeInt32LE(-1, order.length * 4);
+  return b;
+};
+
+type BagOut = {
+  status: string;
+  roots_walked: string[];
+  entry_count: number;
+  entries: Array<{ root: string; path: string; name: string; slot: string; depth: number; mru_position: number | null; item_bytes?: number; no_subkey?: boolean; item: { type: string; decoded: string; name: string; long_name?: string; long_name_from?: string; extension_version?: number; extension_layout?: string; created?: string | null; accessed?: string | null; guid?: string } }>;
+  values_without_subkey: Array<{ slot: string; no_subkey: boolean; item: { name: string } }>;
+  values_without_subkey_count: number;
+};
+
+const BAG_PATH = ["Local Settings", "Software", "Microsoft", "Windows", "Shell", "BagMRU"];
+function nest(path: string[], leaf: Parameters<typeof hive>[0]): Parameters<typeof hive>[0] {
+  return path.reduceRight((child, name) => ({ name, children: [child] }), leaf);
+}
+
+test("shellbags names a long name from its layout only for the extension versions it applies (3 and 7), and offers a string candidate, labelled, for the rest", async () => {
+  // One name offset (0x26) was applied to every version from 7, so a version 9 block yielded whatever printable text
+  // sat there and the answer called it a decoded layout.
+  await withCwd(async (cwd) => {
+    const long = "Quarterly Reports 2024 ÖZET";
+    const bag: Parameters<typeof hive>[0] = {
+      name: "BagMRU",
+      values: [{ name: "0", type: "binary", value: rootFolderItem() }, { name: "MRUListEx", type: "binary", value: mruList(0) }],
+      children: [{ name: "0", values: [
+        { name: "0", type: "binary", value: volumeItem("C:\\") },
+        { name: "1", type: "binary", value: folderItem("QUARTE~1", extensionBlock(7, long)) },
+        { name: "2", type: "binary", value: folderItem("PROJEC~1", extensionBlock(9, "Project Files and Archive Material", "WRONG")) },
+        { name: "3", type: "binary", value: folderItem("OLDVER~1", extensionBlock(3, "Old Version Three Folder")) },
+        { name: "MRUListEx", type: "binary", value: mruList(2, 1, 0, 3) },
+      ], children: [{ name: "0" }, { name: "1" }, { name: "2" }, { name: "3" }] }],
+    };
+    await writeFile(join(cwd, "work", "UsrClass.dat"), hive({ name: "ROOT", children: [nest(BAG_PATH.slice(0, -1), bag)] }));
+    const out = body<BagOut>(await tool("shellbags", cwd, { hive: "work/UsrClass.dat" }));
+    const by = Object.fromEntries(out.entries.map((e) => [e.slot + "@" + e.depth, e]));
+    const v7 = by["1@2"];
+    assert.equal(v7.item.long_name, long);
+    assert.equal(v7.item.long_name_from, "layout");
+    assert.equal(v7.item.extension_version, 7);
+    assert.equal(v7.item.created, "2024-03-05T09:30:00 (local)");
+    assert.equal(v7.item.accessed, "2024-03-06T10:00:02 (local)");
+    const v3 = by["3@2"];
+    assert.equal(v3.item.long_name, "Old Version Three Folder");
+    assert.equal(v3.item.long_name_from, "layout");
+    const v9 = by["2@2"];
+    assert.equal(v9.item.extension_version, 9);
+    assert.equal(v9.item.extension_layout, "not decoded for this version");
+    assert.equal(v9.item.long_name_from, "strings", "a version this reader does not apply is a candidate found by search");
+    assert.equal(v9.item.long_name, "Project Files and Archive Material", "the longest string in the block, not what sat at 0x26");
+    assert.equal(out.status, "complete");
+    assert.equal(v7.mru_position, 1);
+  });
+});
+
+test("shellbags walks every BagMRU root the hive has, names them, and lists a numbered value that has no key under it", async () => {
+  // It stopped at the first root that opened, so a hive with the Shell and the ShellNoRoam trees both populated
+  // answered for one; a value with no child key was never looked at.
+  await withCwd(async (cwd) => {
+    const classes: Parameters<typeof hive>[0] = {
+      name: "BagMRU",
+      values: [{ name: "0", type: "binary", value: volumeItem("E:\\") }, { name: "MRUListEx", type: "binary", value: mruList(0) }],
+      children: [{ name: "0" }],
+    };
+    const older: Parameters<typeof hive>[0] = {
+      name: "BagMRU",
+      values: [
+        { name: "0", type: "binary", value: volumeItem("F:\\") },
+        { name: "5", type: "binary", value: folderItem("GHOST~1", extensionBlock(7, "A Folder With No Bag")) },
+        { name: "NodeSlot", type: "dword", value: 9 },
+      ],
+      children: [{ name: "0" }],
+    };
+    await writeFile(join(cwd, "work", "NTUSER.DAT"), hive({
+      name: "ROOT",
+      children: [
+        nest(["Local Settings", "Software", "Microsoft", "Windows", "Shell"], classes),
+        nest(["Software", "Microsoft", "Windows", "ShellNoRoam"], older),
+      ],
+    }));
+    const out = body<BagOut>(await tool("shellbags", cwd, { hive: "work/NTUSER.DAT" }));
+    assert.deepEqual(out.roots_walked, [
+      "Local Settings\\Software\\Microsoft\\Windows\\Shell\\BagMRU",
+      "Software\\Microsoft\\Windows\\ShellNoRoam\\BagMRU",
+    ]);
+    const roots = new Set(out.entries.map((e) => e.root));
+    assert.equal(roots.size, 2, "entries come from both roots");
+    assert.deepEqual(out.entries.filter((e) => e.root.startsWith("Software")).map((e) => e.name).sort(), ["A Folder With No Bag", "F:\\"]);
+    assert.equal(out.values_without_subkey_count, 1);
+    assert.equal(out.values_without_subkey[0].slot, "5");
+    assert.equal(out.values_without_subkey[0].no_subkey, true);
+    assert.equal(out.values_without_subkey[0].item.name, "A Folder With No Bag");
+  });
+});
+
+test("shellbags reads a shell item longer than 128 bytes whole, and refuses a max_depth that would exhaust the stack", async () => {
+  // regipy's default read cut a binary value to 128 bytes, so a long item was decoded from its first 128.
+  await withCwd(async (cwd) => {
+    const long = "a-very-long-folder-name-".repeat(14) + "end";
+    const bag: Parameters<typeof hive>[0] = {
+      name: "BagMRU",
+      values: [{ name: "0", type: "binary", value: folderItem("LONGFO~1", extensionBlock(7, long)) }, { name: "MRUListEx", type: "binary", value: mruList(0) }],
+      children: [{ name: "0" }],
+    };
+    await writeFile(join(cwd, "work", "UsrClass.dat"), hive({ name: "ROOT", children: [nest(BAG_PATH.slice(0, -1), bag)] }));
+    const out = body<BagOut>(await tool("shellbags", cwd, { hive: "work/UsrClass.dat" }));
+    assert.ok((out.entries[0].item_bytes ?? 0) > 128);
+    assert.equal(out.entries[0].item.long_name, long);
+    assert.equal(out.entries[0].item.long_name_from, "layout");
+    assert.match(failed(await tool("shellbags", cwd, { hive: "work/UsrClass.dat", max_depth: 100000 })).error, /max_depth must be a whole number from 1 to 128/);
+  });
+});

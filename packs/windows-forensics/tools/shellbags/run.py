@@ -15,9 +15,14 @@ Two roots, depending on the Windows version and the hive:
 Each key holds one numbered value per child, and that value is a shell item.
 Shell items are a family of formats, so this decodes the ones that carry a name
 and, for anything else, falls back to pulling the readable strings out of the
-item and says it did. A name recovered by fallback is still evidence; a name
-invented by a parser that guessed at the layout is not, which is why the two are
-labelled differently in the output.
+item and says it did. A name recovered by fallback is a candidate, found by
+search, and is labelled as one (`decoded: strings`, `long_name_from: strings`); a
+name read from a layout is labelled `layout`, and only where the layout is one this
+reader applies: a shell item extension block of version 3 or 7. Every BagMRU root the
+hive has is walked and named (a hive can hold the Shell and the ShellNoRoam trees at
+once), each entry says which, and a numbered value with no key under it is listed, not
+dropped. A folder in a bag is a folder some shell opened on this account; the artefact
+does not say by whom, and its times are two clocks (see the note in the answer).
 
 Two traps the output is shaped around:
 
@@ -117,6 +122,8 @@ class LosslessPage:
 
 FILETIME_EPOCH = datetime.datetime(1601, 1, 1, tzinfo=datetime.timezone.utc)
 BEEF0004 = 0xBEEF0004
+PARSER = "shellbags/3"
+MAX_DEPTH = 128
 DEFAULT_ROOTS = [
     r"Local Settings\Software\Microsoft\Windows\Shell\BagMRU",
     r"Software\Microsoft\Windows\Shell\BagMRU",
@@ -131,8 +138,13 @@ def fail(message, **extra):
 
 
 def filetime(value):
+    """ISO 8601 UTC with seven fractional digits, by integer arithmetic; None for 0 or an unreadable value."""
     try:
-        return (FILETIME_EPOCH + datetime.timedelta(microseconds=int(value) // 10)).isoformat().replace("+00:00", "Z")
+        value = int(value)
+        if value <= 0:
+            return None
+        whole, ticks = divmod(value, 10_000_000)
+        return (FILETIME_EPOCH + datetime.timedelta(seconds=whole)).strftime("%Y-%m-%dT%H:%M:%S") + ".%07dZ" % ticks
     except (OverflowError, OSError, TypeError, ValueError):
         return None
 
@@ -163,16 +175,22 @@ def wide_strings(data):
     return [w.decode("utf-16-le", "replace") for w in re.findall(rb"(?:[^\x00][\x00]){2,}", data)]
 
 
+# Where the long name begins in a 0xBEEF0004 (file entry) extension block, by its version: after the 2-byte
+# version-dependent field at 0x10 from version 3, and, from version 7, after a file reference and the string size.
+# These two are the layouts this reader applies. Other versions (8 and 9 among them) add fields before the
+# name, whose offsets are not applied here: their long name is the longest string found in the block, and the
+# answer says it was found by search.
+LONG_NAME_AT = {3: 0x12, 7: 0x26}
+
+
 def extension_block(data):
     """The beef0004 block: two more DOS timestamps, and the long name.
 
-    The timestamps sit at fixed offsets in every version. The long name does not:
-    it begins at 0x12 up to version 6 and after a file reference from version 7,
-    and later versions have added fields between. So the offset is tried first
-    and the answer is checked; when it does not hold, the longest wide string in
-    the block is used instead and the output says which of the two it was. A name
-    found by search is still evidence. A name produced by a parser guessing at a
-    layout it does not know is not.
+    The timestamps sit at fixed offsets in every version. The long name is read from its documented offset
+    only for the versions in LONG_NAME_AT, and the answer is checked (printable, terminated). For any other
+    version, or when the check fails, the longest wide string in the block is offered instead and the output
+    says it was found by search (`long_name_from: strings`): a candidate, not a decode. A name read from a
+    layout guessed for a version this reader does not know would be worse than a candidate.
     """
     at = data.find(struct.pack("<I", BEEF0004))
     if at < 4:
@@ -183,13 +201,11 @@ def extension_block(data):
     version = struct.unpack_from("<H", data, start + 2)[0]
     created, accessed = struct.unpack_from("<II", data, start + 8)
     out = {"created": dos_datetime(created), "accessed": dos_datetime(accessed),
-           "extension_version": version}
+           "extension_version": version, "extension_layout": "decoded" if version in LONG_NAME_AT else "not decoded for this version"}
     block = data[start:]
-    cursor = 0x12
-    if version >= 7:
-        cursor = 0x26                      # unknown, file reference, unknown, string size
     candidate = ""
-    if cursor + 2 <= len(block):
+    cursor = LONG_NAME_AT.get(version)
+    if cursor is not None and cursor + 2 <= len(block):
         end = block.find(b"\x00\x00", cursor)
         if end > cursor:
             if (end - cursor) % 2:
@@ -258,6 +274,15 @@ def binary(value):
     return None
 
 
+def values_of(key):
+    """The values of a key whole: regipy's iter_values cuts a binary value to 128 bytes unless told not to, and a
+    shell item is often longer. (A reader stub that does not take the argument is called without it.)"""
+    try:
+        return key.iter_values(trim_values=False)
+    except TypeError:
+        return key.iter_values()
+
+
 def mru_order(values):
     raw = values.get("MRUListEx")
     if not isinstance(raw, (bytes, bytearray)):
@@ -320,8 +345,8 @@ def main():
     if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
         fail("limit must be a positive integer", limit=args.get("limit"))
     max_depth = args.get("max_depth", 24)
-    if not isinstance(max_depth, int) or isinstance(max_depth, bool) or max_depth < 1:
-        fail("max_depth must be a positive integer", max_depth=args.get("max_depth"))
+    if not isinstance(max_depth, int) or isinstance(max_depth, bool) or not 1 <= max_depth <= MAX_DEPTH:
+        fail("max_depth must be a whole number from 1 to %d" % MAX_DEPTH, max_depth=args.get("max_depth"))
     contains = (args.get("contains") or "").lower()
 
     try:
@@ -335,25 +360,49 @@ def main():
         fail("regipy cannot open this hive", hive=hive_path, reason="%s: %s" % (type(exc).__name__, exc))
 
     roots = [args["key"]] if args.get("key") else DEFAULT_ROOTS
-    root_key, root_path = None, None
+    found_roots = []
     tried = []
     for candidate in roots:
         try:
-            root_key = rooted_key(hive, candidate)
-            root_path = candidate
-            break
+            found_roots.append((rooted_key(hive, candidate), candidate))
         except Exception as exc:
             tried.append({"key": candidate, "why": str(exc), **nearest_key(hive, candidate)})
-    if root_key is None:
+    if not found_roots:
         fail("no BagMRU root in this hive", hive=hive_path, tried=tried)
 
-    key = [hive_path, root_path, contains, max_depth]
+    key = [hive_path, [r[1] for r in found_roots], contains, max_depth]
     entries = LosslessPage("shellbags", key, limit)
     problems = LosslessPage("shellbags-problems", key, 40)
-    not_walked = []
-    counts = {"strings": 0}
+    stopped = LosslessPage("shellbags-not-walked", key, 40)
+    orphans = LosslessPage("shellbags-orphan-values", key, 40)
+    counts = {"strings": 0, "orphans": 0, "other_values": 0, "walked": 0}
 
-    def walk(key, key_path, parent_path, depth):
+    def item_entry(raw, slot_name, key_path, parent_path, depth, order, root_path, header=None, orphan=False):
+        item = decode_item(bytes(raw)) if isinstance(raw, (bytes, bytearray)) else \
+            {"type": "no shell item on the parent", "name": slot_name, "decoded": "none"}
+        name = item.get("name") or ""
+        path = (parent_path + "\\" + name).strip("\\") if name else parent_path
+        entry = {
+            "root": root_path,
+            "path": path,
+            "name": name,
+            "registry_key": key_path + "\\" + slot_name,
+            "slot": slot_name,
+            "depth": depth,
+            "mru_position": order.index(int(slot_name)) if slot_name.isdigit() and int(slot_name) in order else None,
+            "item": item,
+        }
+        if isinstance(raw, (bytes, bytearray)):
+            entry["item_bytes"] = len(raw)
+        if orphan:
+            entry["no_subkey"] = True
+        if header is not None:
+            entry["key_last_written"] = filetime(header.last_modified)
+            entry["key_last_written_filetime"] = str(header.last_modified)
+        return entry, path
+
+    def walk(key, key_path, parent_path, depth, root_path):
+        counts["walked"] += 1
         if depth > max_depth:
             # Name the key where the walk stopped, and how much lies under it.
             try:
@@ -362,11 +411,11 @@ def main():
                 problems.add({"key": key_path, "why": "subkeys unreadable: %s" % exc})
                 return
             if below:
-                not_walked.append({"key": key_path, "depth": depth, "subkeys": below})
+                stopped.add({"key": key_path, "depth": depth, "subkeys": below})
             return
         values = {}
         try:
-            for value in key.iter_values():
+            for value in values_of(key):
                 raw = binary(value.value)
                 values[value.name] = raw if raw is not None else value.value
         except Exception as exc:
@@ -377,51 +426,67 @@ def main():
         except Exception as exc:
             problems.add({"key": key_path, "why": "subkeys unreadable: %s" % exc})
             return
+        names = {s.name for s in subkeys}
         for sub in subkeys:
-            raw = values.get(sub.name)
-            item = decode_item(bytes(raw)) if isinstance(raw, (bytes, bytearray)) else \
-                {"type": "no shell item on the parent", "name": sub.name, "decoded": "none"}
-            name = item.get("name") or ""
-            path = (parent_path + "\\" + name).strip("\\") if name else parent_path
-            header = getattr(sub, "header", None)
-            entry = {
-                "path": path,
-                "name": name,
-                "registry_key": key_path + "\\" + sub.name,
-                "slot": sub.name,
-                "depth": depth,
-                "mru_position": order.index(int(sub.name)) if sub.name.isdigit() and int(sub.name) in order else None,
-                "item": item,
-            }
-            if header is not None:
-                entry["key_last_written"] = filetime(header.last_modified)
+            entry, path = item_entry(values.get(sub.name), sub.name, key_path, parent_path, depth, order, root_path, getattr(sub, "header", None))
             if not contains or contains in path.lower():
                 entries.add(entry)
-                if item.get("decoded") == "strings":
+                if entry["item"].get("decoded") == "strings":
                     counts["strings"] += 1
-            walk(sub, key_path + "\\" + sub.name, path, depth + 1)
+            walk(sub, key_path + "\\" + sub.name, path, depth + 1, root_path)
+        # A numbered value with no key under it is a shell item with no bag of its own: decoded and listed, not dropped.
+        for vname, raw in values.items():
+            if vname in names:
+                continue
+            if vname.isdigit():
+                entry, path = item_entry(raw, vname, key_path, parent_path, depth, order, root_path, orphan=True)
+                counts["orphans"] += 1
+                orphans.add(entry)
+                if not contains or contains in path.lower():
+                    entries.add(entry)
+                    if entry["item"].get("decoded") == "strings":
+                        counts["strings"] += 1
+            else:
+                counts["other_values"] += 1
 
-    walk(root_key, root_path, "", 1)
+    for root_key, root_path in found_roots:
+        walk(root_key, root_path, "", 1, root_path)
 
     page = entries.finish()
     problem_page = problems.finish()
+    stopped_page = stopped.finish()
+    orphan_page = orphans.finish()
     out = {
+        "parser": PARSER,
+        "status": "partial" if problem_page["matched"] or stopped_page["matched"] else "complete",
         "hive": hive_path,
-        "root": root_path,
+        "root": found_roots[0][1],
+        "roots_walked": [r[1] for r in found_roots],
+        "roots_not_found": [t["key"] for t in tried],
+        "keys_walked": counts["walked"],
         "entries": entries.page,
         "entry_count": page["matched"],
         "recovered_by_strings": counts["strings"],
         **page,
-        "not_walked_below_max_depth": not_walked,
+        "not_walked_below_max_depth": stopped.page,
+        "not_walked_count": stopped_page["matched"],
+        "values_without_subkey": orphans.page,
+        "values_without_subkey_count": orphan_page["matched"],
+        "other_values_ignored": counts["other_values"],
         "problems": problems.page,
         "problem_count": problem_page["matched"],
         "note": "key_last_written is a kernel FILETIME in UTC. The item's own created, "
                 "modified and accessed values are DOS timestamps in the machine's local "
                 "time, to two seconds; convert them with the timezone from "
-                "SYSTEM\\\\ControlSet00n\\\\Control\\\\TimeZoneInformation and say so.",
+                "SYSTEM\\ControlSet00n\\Control\\TimeZoneInformation and say so. A name from "
+                "`decoded: strings` or `long_name_from: strings` is a candidate found by search, not a decode.",
     }
     if problem_page.get("all_results"):
         out["all_problems"] = problem_page["all_results"]
+    if stopped_page.get("all_results"):
+        out["all_not_walked"] = stopped_page["all_results"]
+    if orphan_page.get("all_results"):
+        out["all_values_without_subkey"] = orphan_page["all_results"]
     print(json.dumps(out, indent=2, default=str))
 
 
