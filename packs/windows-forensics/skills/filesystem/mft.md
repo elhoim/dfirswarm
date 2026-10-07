@@ -26,14 +26,14 @@ or taken from `record_size`, and `record_size_from` says which.
 **Check a record's state before its content.** The update sequence fixup puts back
 the last two bytes of each 512-byte unit, which belong to whichever field spans
 them. A record that fails it is still parsed, marked `fixup_failed` (with
-`fixup_problem`) and `unreliable`; that is shown on the record only, and does
-not change `status` or `problems`. A signature of `BAAD` is flagged
+`fixup_problem`) and `unreliable`, and counted in `records_fixup_failed`; it does
+not make `status` partial, so read the count. A signature of `BAAD` is flagged
 `record_marked_bad`. A range that does not fit inside its attribute gives
 `structural_errors`, keeps what was sound, marks the record `unreliable`, and
 lists it in `problems` with its offset (`status` is then `partial`). Slots with
-neither signature (zeroed or damaged) are not listed: `records_scanned` minus
-`records_parsed` counts them. Fields of an `unreliable` record are provisional:
-confirm them with `istat` or a second parser before they carry a conclusion.
+neither signature (zeroed or damaged) are not listed: `slots_without_signature`
+counts them. Fields of an `unreliable` record are provisional: confirm them with
+`istat` or a second parser before they carry a conclusion.
 
 **Names, extensions and paths.** A file can have a base record, extension records
 and several `$FILE_NAME` attributes (a long name, a DOS short name, one per hard
