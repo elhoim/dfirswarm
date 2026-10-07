@@ -1,10 +1,11 @@
 {
   "name": "cloudtrail_parse",
-  "description": "Read AWS CloudTrail records — a file, a directory, or gzipped batches — and normalise them: who, what, from where, and whether it was refused. Resolves an assumed role back to the session that issued it, and counts the denials that are the shape of enumeration.",
+  "description": "Read AWS CloudTrail records offline (a file, a directory, gzip batches: Records files, arrays, single events, JSON Lines, lookup-events pages) one record at a time, and normalise each event with its identity, request, response and additional event data (access key id, source identity, shared event id, MFAUsed kept). `status` and `status_basis` say whether every record of every supplied file was read: a malformed line, a record that is not an event, a file that is not CloudTrail, a gzip that ends early, a next-page marker, a digest file and files not reached before the time limit are counted, located (file, record, line) and listed; complete says nothing about what the account logged. `session_origin` links an AssumedRole session to the successful AssumeRole-family calls in the records that could have issued it (the returned access key id, else the returned or request-derived session ARN, narrowed by creationDate): a candidate with its basis, unresolved when several match, not_found when none does; never attribution to a person, and a failed call is never a source. Error codes are classified by name (a heuristic); only authorisation denials are refusals. NOT measured: what a trail recorded (a missing data event is not evidence nothing was read), digest-chain or log-file integrity (no validation is performed), whether a call took effect. SENSITIVE: a field named or shaped like a credential is withheld from every channel and its original written only with write_values, in a job, to a mode 0600 file under $OUT; other secrets are not recognised, so run it as a job with secret_output: true when requests may hold secrets. An out_file is never replaced by a smaller result: the earlier file is kept, the new one named beside it.",
   "params": {
     "path": {
       "type": "string",
-      "description": "A CloudTrail .json or .json.gz file, or a directory of them"
+      "description": "A CloudTrail file or a directory of them (.json, .json.gz, .gz, .jsonl, .ndjson; the shape is read from the content)",
+      "required": true
     },
     "events": {
       "type": "array",
@@ -16,27 +17,54 @@
     },
     "errors_only": {
       "type": "boolean",
-      "description": "Only records that were refused"
+      "description": "Only records that carry an error (an errorCode or errorMessage, or a failed ConsoleLogin response)"
     },
     "notable_only": {
       "type": "boolean",
-      "description": "Only the API calls this tool flags"
+      "description": "Only the API calls this tool lists for a second look"
     },
-    "limit": {
-      "type": "integer",
-      "description": "Maximum records returned inline when out_file is set (default 500); the complete match set is written to out_file"
+    "link_sessions": {
+      "type": "boolean",
+      "description": "Index the successful AssumeRole-family calls first (a second pass over the files, with a disk-backed index) and link each AssumedRole event to its candidate sources; default true"
     },
     "out_file": {
       "type": "string",
-      "description": "Optional JSONL path for every matching normalised record; when absent every match is returned inline"
+      "description": "Optional JSONL path for every matching record, under the run directory (in a job, under $OUT: name it work/<your agent id>/..., which becomes $OUT). Never replaces a file already there: that one is kept and this one is named beside it"
+    },
+    "limit": {
+      "type": "integer",
+      "description": "Rows of each list returned inline (default 500, an inline page size); past it the whole list is in a file the answer names (under $OUT/tool-output in a job, work/<agent>/tool-output otherwise)"
+    },
+    "max_expanded_bytes": {
+      "type": "integer",
+      "description": "Most bytes read from one file after decompression (default 4 GiB); a file that reaches it is partial and says so"
+    },
+    "max_record_bytes": {
+      "type": "integer",
+      "description": "Most text held while one record is read (default 16 MiB); a larger record is rejected, located and listed, never cut"
+    },
+    "time_limit_seconds": {
+      "type": "number",
+      "description": "Stop reading after this many seconds (default 540, at most 580); what was read is kept, the answer is partial and names the files not read"
+    },
+    "write_values": {
+      "type": "boolean",
+      "description": "Write the originals of the values withheld from the answer to a mode 0600 file under $OUT. Honoured only when the tool runs as a job (run it with secret_output: true); outside a job it is refused and nothing is written"
     }
   },
   "runtime": "python3",
   "entry": "run.py",
   "timeout_seconds": 600,
-  "example": "{\"path\": \"inputs/cloudtrail\", \"notable_only\": true, \"out_file\": \"work/cloudtrail.jsonl\"}",
+  "example": "{\"path\": \"inputs/cloudtrail\", \"notable_only\": true}",
   "by": "maintainer",
-  "at": "2026-09-22T22:00:00.000Z",
-  "version": 2,
-  "sha256": "939448a626eb8656fe9ea4f949a0bd0af6623e3ceecdaa04b8e0a4ebf38fd1f5"
+  "at": "2026-10-07T12:00:00.000Z",
+  "version": 3,
+  "sha256": "9c5037eb3fbf2a03baa9d6bb4e5fb232d3a90c6ca743ae25d6dff6602cb52f4e",
+  "use": {
+    "names": [
+      "*cloudtrail*",
+      "*lookup-events*",
+      "*lookupevents*"
+    ]
+  }
 }
