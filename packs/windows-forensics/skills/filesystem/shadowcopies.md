@@ -16,7 +16,7 @@ Use when you ask which volume shadow copies exist. Not for reading files out of 
 - `failed` (exit 1): no usable answer (bad offset or unit, non-raw image, timeout, unrecognised output). No statement about shadow copies follows; fix the cause and ask again.
 - `partial`: a problem was recorded, for example the stores read differ from the number claimed. Read `problems`; do not count stores from that list.
 - `complete` with zero stores: "`vshadowinfo`, at this offset, reported 0 stores". It does not show that none was made or that one was deleted: never created, deleted, aged out of a size limit and not part of the acquired data all give it. A command that removes shadow copies, a System 7036 for the service and low free space are context; attribute a deletion only where evidence establishes the operation and its outcome (`logs/security`, `logs/powershell`). Otherwise: "no stores were found at this offset and the reason is not established".
-- `complete` with stores: list each identifier and creation time.
+- `interrupted` (a stop by signal) is no answer either. `complete` with stores: list each identifier and creation time.
 
 Shows: what `vshadowinfo` found in this volume's metadata at this offset. Does not show: that none ever existed, that any was deleted, or what a store contains. Record: image, offset in bytes and the sector arithmetic, `status`, both store counts, `problems`, the output files.
 
