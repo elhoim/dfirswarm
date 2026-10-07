@@ -152,3 +152,18 @@ test("shell_history flags a bash entry that ends in a backslash and a file whose
     assert.equal(out.files[0].looks_like_other_format, "zsh extended history");
   });
 });
+
+test("shell_history continues a record past its size cap in the next one, flagged, and drops no line", async () => {
+  await withCwd(async (cwd) => {
+    const root = join(cwd, "work", "ev");
+    const line = "x".repeat(50_000) + "\\";
+    await put(root, "home/alice/.zsh_history", `: 1700000000:0;${Array.from({ length: 200 }, () => line).join("\n")}\nend\n`);
+    const out = body(await asJob(SHELL, cwd, { root: "work/ev", write_commands: true }));
+    const rows = await rowsOf(cwd, out);
+    assert.ok(rows.length >= 2, "a 10 MB entry is more than one record");
+    assert.ok(rows.slice(1).every((r) => r.split_at_cap === true), "the continuation is flagged");
+    assert.equal(rows[0].split_at_cap, undefined);
+    const text = (await readFile(join(cwd, "out", "shell-history-commands.jsonl"), "utf8")).trimEnd().split("\n").map((l) => JSON.parse(l));
+    assert.equal(text.reduce((n: number, t: Json) => n + t.record_lines.length, 0), 201, "every physical line is in exactly one record");
+  });
+});

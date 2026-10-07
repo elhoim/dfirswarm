@@ -351,6 +351,11 @@ def zsh_records(path, counters):
             counters["blank"] += 1
             continue
         if rec is not None and rec.lines[-1].endswith(b"\\"):
+            if rec.size() >= MAX_RECORD:
+                yield rec
+                nxt = Record(number, offset, rec.basis)
+                nxt.continues_previous, nxt.split = True, True
+                rec = nxt
             rec.lines.append(data)
             rec.end = number
             continue
@@ -387,6 +392,11 @@ def fish_records(path, counters):
         if rec is None:
             counters["other_lines"] += 1
             continue
+        if rec.size() >= MAX_RECORD:
+            yield rec
+            nxt = Record(number, offset, "fish entry")
+            nxt.continues_previous, nxt.split = True, True
+            rec = nxt
         rec.lines.append(data)
         rec.end = number
         when_line = FISH_WHEN.match(data)
