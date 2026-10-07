@@ -217,7 +217,8 @@ class _Record:
 
 class ChunkHeader:
     def __init__(self, buf, offset):
-        self._first, self._count = struct.unpack_from("<II", buf, offset + 8)
+        self._first, = struct.unpack_from("<I", buf, offset + 8)
+        self._count, = struct.unpack_from("<I", buf, offset + 0x34)
 
     def verify(self):
         return True
@@ -241,9 +242,16 @@ async function carveBlob(path: string): Promise<number[]> {
     [size - 1000, 13, 2],
   ];
   for (const [at, first, count] of chunks) {
+    // The chunk header as the format has it: the first and last record numbers (u64 at 0x08 and 0x10), the header size
+    // 0x80 at 0x28, the offsets of the last record and of the free space at 0x2C and 0x30. The count the stub reads sits
+    // at 0x34, where the format keeps a checksum the stub's verify() does not look at.
     blob.write("ElfChnk\u0000", at, "latin1");
-    blob.writeUInt32LE(first, at + 8);
-    blob.writeUInt32LE(count, at + 12);
+    blob.writeBigUInt64LE(BigInt(first), at + 8);
+    blob.writeBigUInt64LE(BigInt(first + count - 1), at + 0x10);
+    blob.writeUInt32LE(0x80, at + 0x28);
+    blob.writeUInt32LE(0x200, at + 0x2c);
+    blob.writeUInt32LE(0x400, at + 0x30);
+    blob.writeUInt32LE(count, at + 0x34);
   }
   await writeFile(path, blob);
   return chunks.map(([at]) => at);
