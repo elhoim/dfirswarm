@@ -58,17 +58,95 @@ LINE_MAX = 8 * 1024 * 1024        # a line past this is counted invalid, its tai
 MESSAGE_PREVIEW = 2000
 INVALID_LISTED = 1000
 ZONE = re.compile(r"^[A-Za-z0-9_+\-/]{1,64}$")
-CHILD = [None]                    # the program running now: a SIGTERM to this tool ends it too, not only the tool
+# BEGIN SHARED PROCESS
+# The same shape as the network-forensics pack's engine tools. A program this tool runs is started in THIS tool's process
+# group, never in a session of its own: the harness ends a tool that runs too long, or is aborted, by killing the tool's
+# group (process.kill(-pid, SIGKILL)), and an engine in a group of its own goes on writing into the output directory after
+# the tool is gone. On Linux the kernel is also asked to kill it if the tool dies. A deadline kills the program and what it
+# started by walking the process tree, and SIGTERM, SIGINT and SIGHUP do the same and then give the tool a last word.
+try:
+    import ctypes
+except ImportError:  # pragma: no cover
+    ctypes = None
+
+STATE = {"last_word": None}    # what to do, with the signal number, when the tool is stopped by a signal
+ACTIVE = []                    # the programs running now
 
 
-def _terminated(signum, _frame):
-    proc = CHILD[0]
-    if proc is not None:
+def _die_with_parent():  # runs in the child between fork and exec
+    try:
+        ctypes.CDLL(None).prctl(1, signal.SIGKILL)   # PR_SET_PDEATHSIG
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def spawn(argv, **kwargs):
+    kwargs.setdefault("stdin", subprocess.DEVNULL)
+    if sys.platform.startswith("linux") and ctypes is not None:
+        kwargs["preexec_fn"] = _die_with_parent
+    return subprocess.Popen(argv, **kwargs)
+
+
+def descendants(pid):
+    """Every process below `pid`, from /proc where there is one, else from ps."""
+    kids = {}
+    try:
+        if os.path.isdir("/proc/self"):
+            for entry in os.listdir("/proc"):
+                if entry.isdigit():
+                    try:
+                        with open("/proc/%s/stat" % entry, "rb") as fh:
+                            fields = fh.read().rsplit(b")", 1)[1].split()
+                        kids.setdefault(int(fields[1]), []).append(int(entry))
+                    except (OSError, IndexError, ValueError):
+                        continue
+        else:
+            out = subprocess.run(["ps", "-A", "-o", "pid=,ppid="], capture_output=True, text=True, timeout=10).stdout
+            for line in out.splitlines():
+                parts = line.split()
+                if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+                    kids.setdefault(int(parts[1]), []).append(int(parts[0]))
+    except (OSError, subprocess.SubprocessError):
+        return []
+    found, stack = [], [pid]
+    while stack:
+        for child in kids.get(stack.pop(), []):
+            found.append(child)
+            stack.append(child)
+    return found
+
+
+def kill_tree(proc):
+    """Kill the program and everything it started. The children are listed first: once the parent is gone they are
+    adopted by init and can no longer be found below it."""
+    victims = descendants(proc.pid)
+    try:
+        proc.kill()
+    except OSError:
+        pass
+    for pid in victims:
         try:
-            os.killpg(proc.pid, signal.SIGKILL)
+            os.kill(pid, signal.SIGKILL)
         except OSError:
             pass
-    raise SystemExit(128 + signum)
+
+
+def _on_signal(signum, _frame):
+    for proc in list(ACTIVE):
+        kill_tree(proc)
+    last_word = STATE.get("last_word")
+    if last_word:
+        try:
+            last_word(signum)
+        except Exception:  # noqa: BLE001 - a last word is best effort
+            pass
+    os._exit(128 + signum)
+
+
+def install_signal_handlers():
+    for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(signum, _on_signal)
+# END SHARED PROCESS
 
 
 def emit(obj, code=0):
@@ -159,20 +237,17 @@ class Stage:
             self.exit, self.timed_out, self.seconds = None, True, 0
             return self
         with open(self.stdout_file, "xb") as so, open(self.stderr_file, "xb") as se:        # new files: never over an earlier run's
-            proc = subprocess.Popen(self.argv, stdout=so, stderr=se, cwd=self.out_dir, start_new_session=True)
-            CHILD[0] = proc
+            proc = spawn(self.argv, stdout=so, stderr=se, cwd=self.out_dir)
+            ACTIVE.append(proc)
             try:
                 self.exit = proc.wait(timeout=budget)
             except subprocess.TimeoutExpired:
                 self.timed_out = True
-                try:
-                    os.killpg(proc.pid, signal.SIGKILL)
-                except OSError:
-                    proc.kill()
+                kill_tree(proc)
                 proc.wait()
                 self.exit = None
             finally:
-                CHILD[0] = None
+                ACTIVE.remove(proc)
         self.seconds = round(time.monotonic() - started, 1)
         return self
 
@@ -350,8 +425,7 @@ def main():
     sample = args.get("sample", 20)
     if not isinstance(sample, int) or isinstance(sample, bool) or not 0 <= sample <= SAMPLE_MAX:
         fail("sample must be a whole number from 0 to %d" % SAMPLE_MAX)
-    for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
-        signal.signal(sig, _terminated)
+    install_signal_handlers()
 
     call_started = time.monotonic()
     began = time.time()
@@ -392,6 +466,15 @@ def main():
               "versions": {}, "stages": {}, "problems": []}
     if preexisting:
         result["preexisting"] = preexisting
+
+    def last_word(signum):
+        """Said when a signal ends the tool: what had run, and that the programs were ended with it."""
+        name = signal.Signals(signum).name
+        word = dict(result, status="failed", stopped_by_signal=name,
+                    error="stopped by %s before it finished: log2timeline and psort were ended with it; what they had written is in out_dir and may be partial" % name)
+        sys.stdout.write(json.dumps(word) + "\n")
+        sys.stdout.flush()
+    STATE["last_word"] = last_word
     result["versions"]["psort"] = version_of(psort, out_abs)
     if mode == "full":
         result["source"] = source

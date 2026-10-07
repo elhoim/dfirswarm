@@ -13,7 +13,7 @@ import sys
 import time
 import unittest
 
-from support import Case, run_tool, stand_in, tool_path
+from support import PACK_DIR, Case, run_tool, stand_in, tool_path
 
 GOOD = [{"datetime": "2023-11-14T22:13:20.000000+00:00", "parser": "filestat", "data_type": "fs:stat", "message": "m1", "timestamp_desc": "Modification Time"},
         {"timestamp": 1700000100000000, "parser": "winreg", "data_type": "windows:registry:key_value", "message": "m2"}]
@@ -206,35 +206,75 @@ class TimelineSuper(Case):
             self.assertIn("error", r.json)
         self.assertEqual(self.calls_made(), [])
 
-    def test_a_sigterm_to_the_tool_ends_the_program_it_started(self):
-        bin_dir = self.path("bin")
-        os.makedirs(bin_dir, exist_ok=True)
-        pidfile = self.path("l2t.pid")
-        stand_in(bin_dir, "log2timeline.py", 'case "$1" in --version) echo v; exit 0;; esac\necho $$ > "%s"\nexec sleep 60\n' % pidfile)
-        stand_in(bin_dir, "psort.py", 'case "$1" in --version) echo v; exit 0;; esac\nexit 0\n')
-        src = self.write("inputs/disk.dd", b"\0" * 64)
-        env = dict(os.environ, PATH=bin_dir + os.pathsep + os.environ["PATH"])
-        proc = subprocess.Popen([sys.executable, tool_path("timeline_super")], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=self.dir, env=env)
-        proc.stdin.write(json.dumps({"out_dir": "work/tl", "source": src}).encode())
-        proc.stdin.close()
-        for _ in range(100):
-            if os.path.exists(pidfile) and self.read(pidfile).strip():
-                break
-            time.sleep(0.1)
-        child = int(self.read(pidfile).strip())
-        proc.send_signal(signal.SIGTERM)
-        proc.wait(timeout=20)
-        proc.stdout.close()
-        proc.stderr.close()
-        for _ in range(50):
+    def test_the_harness_ends_a_tool_by_killing_its_process_group_and_that_ends_the_engine_and_what_it_started(self):
+        # The harness starts a tool in a process group of its own (node's `detached: true`, a setsid) and ends it on its deadline or an abort
+        # with process.kill(-pid, SIGKILL). A program the tool put in a session of its own is not in that group and goes on writing; one in
+        # the tool's group dies with it. SIGTERM, SIGINT and SIGHUP end the programs too and leave a last word.
+        for how in ("group", "SIGTERM", "SIGINT", "SIGHUP"):
+            work = self.path("run-" + how)
+            os.makedirs(work)
+            bin_dir = os.path.join(work, "bin")
+            os.makedirs(bin_dir)
+            engine_pid, child_pid = os.path.join(work, "engine.pid"), os.path.join(work, "child.pid")
+            stand_in(bin_dir, "log2timeline.py", 'case "$1" in --version) echo v; exit 0;; esac\necho $$ > "%s"\nsleep 300 &\necho $! > "%s"\nwait\n' % (engine_pid, child_pid))
+            stand_in(bin_dir, "psort.py", 'case "$1" in --version) echo v; exit 0;; esac\nexit 0\n')
+            src = self.write("inputs/disk.dd", b"\0" * 64)
+            env = dict(os.environ, PATH=bin_dir + os.pathsep + os.environ["PATH"])
+            for k in ("JOB_ID", "OUT"):
+                env.pop(k, None)
+            proc = subprocess.Popen([sys.executable, tool_path("timeline_super")], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                    cwd=work, env=env, start_new_session=True)
+            proc.stdin.write(json.dumps({"out_dir": "work/tl", "source": src}).encode())
+            proc.stdin.close()
+            engine = child = 0
             try:
-                os.kill(child, 0)
-            except ProcessLookupError:
-                break
-            time.sleep(0.1)
-        else:
-            os.kill(child, signal.SIGKILL)
-            self.fail("log2timeline was left running after the tool was terminated")
+                for _ in range(200):
+                    if os.path.exists(child_pid) and self.read(child_pid).strip():
+                        break
+                    time.sleep(0.05)
+                engine, child = int(self.read(engine_pid).strip()), int(self.read(child_pid).strip())
+                if how == "group":
+                    os.killpg(proc.pid, signal.SIGKILL)
+                else:
+                    proc.send_signal(getattr(signal, how))
+                out = proc.stdout.read()
+                proc.wait(timeout=30)
+                for pid, what in ((engine, "the engine"), (child, "what the engine started")):
+                    for _ in range(100):
+                        try:
+                            os.kill(pid, 0)
+                        except ProcessLookupError:
+                            break
+                        time.sleep(0.05)
+                    else:
+                        self.fail("%s: %s survived" % (how, what))
+                if how != "group":
+                    word = json.loads(out.decode().strip().splitlines()[-1])
+                    self.assertEqual((word["stopped_by_signal"], word["status"]), (how, "failed"))
+                    self.assertIn("log2timeline and psort were ended with it", word["error"])
+                    self.assertEqual(proc.returncode, 128 + getattr(signal, how))
+            finally:
+                for pid in (engine, child):
+                    if pid:
+                        try:
+                            os.kill(pid, signal.SIGKILL)
+                        except OSError:
+                            pass
+                if proc.poll() is None:
+                    proc.kill()
+                    proc.wait()
+                proc.stdout.close()
+                proc.stderr.close()
+
+    def test_no_tool_or_recipe_of_the_pack_starts_a_program_outside_its_own_process_group(self):
+        import re
+        import glob
+        bad = re.compile(r"start_new_session|setsid|preexec_fn=os\.setsid|process_group")
+        files = glob.glob(os.path.join(PACK_DIR, "tools", "*", "run.py")) + glob.glob(os.path.join(PACK_DIR, "recipes", "*", "run.*"))
+        self.assertGreaterEqual(len(files), 17)
+        for path in files:
+            text = re.sub(r"(?m)^\s*#.*$", "", self.read(path))
+            self.assertIsNone(bad.search(text), "%s starts a program outside the tool's process group" % path)
 
     def test_in_a_job_out_dir_is_bounded_by_out_and_defaults_to_it(self):
         bin_dir = self.plaso()
