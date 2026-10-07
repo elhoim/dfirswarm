@@ -428,6 +428,43 @@ test("mem_profile refuses an empty file and a scan size beyond its bound", async
   });
 });
 
+test("mem_profile gives the crash dump's SystemTime raw, with its 100 ns fraction, and names a value it cannot convert", async () => {
+  // SystemTime is a FILETIME: 100 ns ticks since 1601-01-01 UTC, at 0xFA8 of a DUMP_HEADER64.
+  await withCwd(async (cwd) => {
+    const EPOCH_DELTA = 11_644_473_600; // seconds from 1601-01-01 to 1970-01-01
+    const dump = (filetime: bigint): Buffer => {
+      const buf = crashDump64([[1n, 0x10n]], null, null);
+      buf.writeBigUInt64LE(filetime, 0xfa8);
+      return buf;
+    };
+    // 13,300,000,000 s and 7 ticks: a time with a seventh fractional digit.
+    await writeFile(join(cwd, "work", "frac.dmp"), dump(133_000_000_000_000_007n));
+    const frac = await tool(PROFILE, cwd, { path: "work/frac.dmp" });
+    const fracOut = body<Profile & { container: { system_time_utc: string | null; problems?: string[] } }>(frac);
+    const whole = new Date((13_300_000_000 - EPOCH_DELTA) * 1000).toISOString().replace(".000Z", "");
+    assert.equal(fracOut.container.system_time_utc, `${whole}.0000007Z`);
+    assert.match(frac.stdout, /"system_time_filetime": 133000000000000007[,\n]/, "the raw integer, exactly");
+    assert.equal(fracOut.container.problems, undefined);
+
+    // The largest FILETIME is past year 9999: not a time, said with its raw value, never a silent null.
+    await writeFile(join(cwd, "work", "max.dmp"), dump(0xffffffffffffffffn));
+    const maxRun = await tool(PROFILE, cwd, { path: "work/max.dmp" });
+    const maxOut = body<{ container: { system_time_utc: string | null; problems?: string[] } }>(maxRun);
+    assert.equal(maxOut.container.system_time_utc, null);
+    assert.match(maxRun.stdout, /"system_time_filetime": 18446744073709551615[,\n]/);
+    assert.match((maxOut.container.problems ?? []).join(" "), /18446744073709551615.*out of range|out of range.*18446744073709551615/);
+
+    // Zero is the epoch itself, converted as it is; the header may simply not have been filled in, and says so.
+    await writeFile(join(cwd, "work", "zero.dmp"), dump(0n));
+    const zeroRun = await tool(PROFILE, cwd, { path: "work/zero.dmp" });
+    const zeroOut = body<{ container: { system_time_utc: string | null; system_time_note?: string; problems?: string[] } }>(zeroRun);
+    assert.equal(zeroOut.container.system_time_utc, "1601-01-01T00:00:00.0000000Z");
+    assert.match(zeroRun.stdout, /"system_time_filetime": 0[,\n]/);
+    assert.match(zeroOut.container.system_time_note ?? "", /not been filled in|no time/);
+    assert.equal(zeroOut.container.problems, undefined);
+  });
+});
+
 test("mem_profile reads an ELF core's byte order from e_ident, and a short ELF header without crashing", async () => {
   // EI_DATA (byte 5): 1 little-endian, 2 big-endian; e_type (offset 16) is in that
   // byte order, so a big-endian core reads 0x0004 as 1024 if read little-endian.

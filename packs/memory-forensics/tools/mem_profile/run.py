@@ -131,12 +131,17 @@ def fail(message, **extra):
 
 
 def filetime(value):
-    """Render a Windows FILETIME without letting an invalid header abort triage."""
+    """A Windows FILETIME (100 ns ticks since 1601-01-01 UTC) as ISO 8601 with its seven fractional digits.
+
+    Returns (text, None) or (None, why): a value that is not a time this tool can write is
+    said with its raw value, never turned into a silent null.
+    """
     try:
-        return (datetime(1601, 1, 1, tzinfo=timezone.utc) +
-                timedelta(microseconds=value // 10)).isoformat().replace("+00:00", "Z")
+        seconds, ticks = divmod(value, 10_000_000)
+        moment = datetime(1601, 1, 1, tzinfo=timezone.utc) + timedelta(seconds=seconds)
     except (OverflowError, ValueError):
-        return None
+        return None, "the FILETIME %d is out of range: it is past the year 9999, so it is not a time" % value
+    return moment.strftime("%Y-%m-%dT%H:%M:%S") + ".%07dZ" % ticks, None
 
 
 def crash_dump(fh, wide, size):
@@ -182,7 +187,14 @@ def crash_dump(fh, wide, size):
             out["version_user"] = version_raw.decode("ascii", "replace")
         out["dump_type"] = struct.unpack_from("<I", head, dump_type_at)[0]
         system_time = struct.unpack_from("<Q", head, system_time_at)[0]
-        out["system_time_utc"] = filetime(system_time)
+        # The raw FILETIME beside the decoded time (epoch 1601-01-01, UTC, 100 ns ticks).
+        out["system_time_filetime"] = system_time
+        out["system_time_utc"], why = filetime(system_time)
+        if why:
+            problems.append("SystemTime: " + why)
+        elif system_time == 0:
+            out["system_time_note"] = ("FILETIME 0 is 1601-01-01T00:00:00Z itself: the header may simply not have been "
+                                       "filled in, so it records no time")
         out["system_uptime_100ns"] = struct.unpack_from("<Q", head, uptime_at)[0]
 
         # Only a complete dump (type 1) describes memory as a run array here.
