@@ -1,6 +1,6 @@
 {
   "name": "fsevents_parse",
-  "description": "Read /.fseventsd record files: the per-volume change log, gzip (one or more members) holding pages of 1SLD or 2SLD records. Returns each path with its event id, raw and decoded flags, node id (2SLD only) and where in the file it was (gzip member, page and record offsets in the decompressed stream), and the log's own identity from fseventsd-uuid. A change-notification history, not an audit: records are coalesced and logs roll off; there is no timestamp in the format, so event ids give order within one log, not time; a Renamed flag means the path took part in a rename and pairs no old and new name. Only 1SLD and 2SLD pages are read: another page magic (3SLD, say) is reported unsupported with the magic seen and the rest of that file is not decoded. Nothing is guessed or dropped silently: per file the state is parsed, partial, empty, unsupported or failed; per gzip member complete, truncated or failed with its compressed offset; per page parsed, unsupported, invalid length or truncated; per record decoded, empty path or incomplete; bytes that could not be placed in a page are counted and located, and a flag bit with no name is reported as flags_undecoded. status is complete only when every file is parsed or empty. Decoding is streamed and expansion is capped (max_expanded_bytes per file; a file that hits it is partial and says so). Records are written to out_file as they are decoded (an existing file or link there is refused); otherwise the page is `limit` records and the whole is in a file under tool-output that the answer names.",
+  "description": "Read /.fseventsd record files: the per-volume change log, gzip (one or more members) holding pages of 1SLD or 2SLD records. Returns each path with its event id, raw and decoded flags, node id (2SLD only) and where in the file it was (gzip member, page and record offsets in the decompressed stream), and the log's own identity from fseventsd-uuid. A change-notification history, not an audit: records are coalesced and logs roll off; there is no timestamp in the format, so event ids give order within one log, not time; a Renamed flag means the path took part in a rename and pairs no old and new name. Only 1SLD and 2SLD pages are read: another page magic (3SLD, say) is reported unsupported with the magic seen and the rest of that file is not decoded. Nothing is guessed or dropped silently: per file the state is parsed, partial, empty, unsupported or failed; per gzip member complete, truncated or failed with its compressed offset; per page parsed, unsupported, invalid length or truncated; per record decoded, empty path or incomplete; bytes that could not be placed in a page are counted and located, and a flag bit with no name is reported as flags_undecoded. status is complete only when every file is parsed or empty. Decoding is streamed and expansion is capped (max_expanded_bytes per file; a file that hits it is partial and says so). Records are written to out_file as they are decoded (an existing file or link there is refused); otherwise the page is `limit` records and the whole is in a file under tool-output that the answer names. The inline answer is bounded by bytes (max_inline_bytes) as well as by count, and says so (inline_bounded_by_bytes). Trailing NUL bytes of a page are padding_bytes in the coverage, not records: a record that is all zero is padding, not an empty-path record. A rerun that finds fewer records does not replace a larger earlier page file: it writes a new name and says which it kept.",
   "params": {
     "path": {
       "type": "string",
@@ -28,17 +28,21 @@
     },
     "max_page_bytes": {
       "type": "integer",
-      "description": "A page declaring more than this is reported as an invalid page length and not read (default 67108864)"
+      "description": "A page declaring more than this is reported as an invalid page length and not read (default 67108864). A page is held whole while its records are decoded, so memory is several times the largest page read"
+    },
+    "max_inline_bytes": {
+      "type": "integer",
+      "description": "The inline records are cut at this many bytes as well as at `limit` records (default 1048576): the page is the records before the first that does not fit (one path can be megabytes); the whole is in out_file or the file the answer names"
     }
   },
   "runtime": "python3",
   "entry": "run.py",
   "timeout_seconds": 300,
-  "example": "{\"path\": \"work/extracted/.fseventsd\", \"flags\": [\"Removed\"], \"out_file\": \"work/fsevents.jsonl\"}",
+  "example": "{\"path\": \"work/extracted/.fseventsd\", \"flags\": [\"Removed\"], \"out_file\": \"work/<your id>/fsevents.jsonl\"}",
   "by": "maintainer",
   "at": "2026-09-22T16:00:00.000Z",
   "version": 3,
-  "sha256": "1fd7734b539d8d33c953451cf3d8511466f698ad7ca0596764bcc341e8dbfa23",
+  "sha256": "d8580027b5913e4095aee43c6885aa78f885557bb96b112ec4fe159c0989d824",
   "use": {
     "magic": [
       {

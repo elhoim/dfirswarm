@@ -50,6 +50,8 @@ SHAPE = re.compile(rb"[0-9A-Za-z]SLD")
 CHUNK = 1 << 20
 DEFAULT_MAX_EXPANDED = 256 << 20
 DEFAULT_MAX_PAGE = 64 << 20
+DEFAULT_INLINE_BYTES = 1 << 20
+FIRST_BYTES = 256 << 10
 FIRST_PROBLEMS = 100
 FLAGS = [
     (0x00000001, "FolderEvent"), (0x00000002, "Mount"), (0x00000004, "Unmount"),
@@ -95,16 +97,25 @@ def resolve_output(out, what="output"):
 
 
 # Lossless paging (the same in every library tool that pages): the page an
-# agent reads stays small, and when there are more rows the whole result is
-# written as JSON Lines under work/<agent>/tool-output (in a job, $OUT/tool-output)
-# and named. The file name is a digest of the page's key (a path), never of a value.
+# agent reads stays small, bounded by rows and by bytes, and when there are more
+# rows the whole result is written as JSON Lines under work/<agent>/tool-output
+# (in a job, $OUT/tool-output) and named. The file name is a digest of the page's
+# key (a path), never of a value. Rows are written with ensure_ascii on: a path
+# the filesystem gave as bytes that are not UTF-8 reaches Python as lone
+# surrogates, which a UTF-8 file cannot hold and an escape can. A rerun that
+# would replace a larger earlier file of the same name writes a new name and says
+# which earlier file it kept.
 class LosslessPage:
-    def __init__(self, tool, key, limit):
+    def __init__(self, tool, key, limit, byte_limit=None):
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
             raise ValueError("limit must be a positive integer")
         self.tool = re.sub(r"[^A-Za-z0-9_.-]", "_", tool)
         self.limit = limit
+        self.byte_limit = byte_limit
         self.page = []
+        self.page_bytes = 0
+        self.full = False
+        self.bytes_bound_hit = False
         self.total = 0
         self._out = None
         self._tmp = None
@@ -122,14 +133,20 @@ class LosslessPage:
             self.shown = str(self.path)
 
     def _write(self, row):
-        self._out.write(json.dumps(row, ensure_ascii=False, default=str))
+        self._out.write(json.dumps(row, default=str))
         self._out.write("\n")
 
     def add(self, row):
         self.total += 1
-        if len(self.page) < self.limit:
-            self.page.append(row)
-            return
+        if not self.full and len(self.page) < self.limit:
+            size = len(json.dumps(row, default=str)) if self.byte_limit is not None else 0
+            if self.byte_limit is None or self.page_bytes + size <= self.byte_limit:
+                self.page.append(row)
+                self.page_bytes += size
+                return
+            self.bytes_bound_hit = True
+        # From the first row that does not fit, every later row goes to the file only: the page is a prefix.
+        self.full = True
         if self._out is None:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             fd, name = tempfile.mkstemp(dir=self.path.parent, prefix=".%s-" % self.path.name)
@@ -141,12 +158,24 @@ class LosslessPage:
 
     def finish(self):
         result = {"matched": self.total, "returned": len(self.page), "truncated": self.total > len(self.page)}
+        if self.byte_limit is not None:
+            result["inline_byte_limit"] = self.byte_limit
+            if self.bytes_bound_hit:
+                result["inline_bounded_by_bytes"] = True
         if self._out is not None:
             self._out.flush()
             os.fsync(self._out.fileno())
             self._out.close()
-            os.replace(self._tmp, self.path)
-            result["all_results"] = self.shown
+            target, shown = self.path, self.shown
+            if target.exists() and target.stat().st_size > os.path.getsize(self._tmp):
+                n = 2
+                while target.with_name("%s-%d%s" % (target.stem, n, target.suffix)).exists():
+                    n += 1
+                target = target.with_name("%s-%d%s" % (target.stem, n, target.suffix))
+                shown = self.shown.rsplit("/", 1)[0] + "/" + target.name
+                result["kept_earlier_larger_result"] = self.shown
+            os.replace(self._tmp, target)
+            result["all_results"] = shown
             result["all_results_format"] = "JSON Lines, one complete result per line"
         return result
 
@@ -342,41 +371,53 @@ class Source:
             total += len(got)
 
 
-def parse_records(body, base, version, scan, emit, member):
-    """The records of one page's body; `base` is the decompressed offset of body[0]."""
+def last_nonzero(page, start):
+    """The offset just past the last byte of `page` (from `start` on) that is not NUL, found from the end in
+    blocks, so a page is not copied whole to strip its padding."""
+    end = len(page)
+    while end > start:
+        lo = max(start, end - 65536)
+        kept = page[lo:end].rstrip(b"\x00")
+        if kept:
+            return lo + len(kept)
+        end = lo
+    return start
+
+
+def parse_records(page, at, version, scan, emit, member):
+    """The records of one page, which began at decompressed offset `at`; its 12-byte header is skipped."""
     fixed = 12 + (8 if version == 2 else 0)
-    cursor = 0
-    used = len(body.rstrip(b"\x00"))      # what follows is NUL padding, counted and not read as records
-    while cursor < len(body):
+    cursor = 12
+    used = last_nonzero(page, cursor)      # what follows is NUL padding, counted and not read as records
+    while cursor < len(page):
         if cursor >= used:
-            scan.padding_bytes += len(body) - cursor
+            scan.padding_bytes += len(page) - cursor
             return
-        end = body.find(b"\x00", cursor)
-        if end < 0 or end + 1 + fixed > len(body):
+        end = page.find(b"\x00", cursor)
+        if end < 0 or end + 1 + fixed > len(page):
             scan.records["incomplete"] += 1
-            scan.bytes_skipped += len(body) - cursor
+            scan.bytes_skipped += len(page) - cursor
             scan.problem("incomplete record",
                          "a record at decompressed offset %d is cut off by the end of its page (%d byte(s) left, %s)"
-                         % (base + cursor, len(body) - cursor, "no path terminator" if end < 0 else "fixed fields short"),
-                         offset=base + cursor, bytes=len(body) - cursor)
+                         % (at + cursor, len(page) - cursor, "no path terminator" if end < 0 else "fixed fields short"),
+                         offset=at + cursor, bytes=len(page) - cursor)
             return
-        raw_path = body[cursor:end]
-        event_id, flags = struct.unpack_from("<QI", body, end + 1)
-        node = struct.unpack_from("<Q", body, end + 1 + 12)[0] if version == 2 else None
-        at = base + cursor
-        cursor = end + 1 + fixed
-        if not raw_path:
+        event_id, flags = struct.unpack_from("<QI", page, end + 1)
+        node = struct.unpack_from("<Q", page, end + 1 + 12)[0] if version == 2 else None
+        start, cursor = cursor, end + 1 + fixed
+        if end == start:
             scan.records["empty_path"] += 1
             continue
+        raw_path = page[start:end]
         scan.records["decoded"] += 1
         text = raw_path.decode("utf-8", "replace")
         record = {"path": text, "event_id": event_id, "flags": decode_flags(flags), "flags_raw": flags,
                   "node_id": node, "version": version, "file": scan.path, "member": member,
-                  "page_offset": base - 12, "record_offset": at, "parser": PARSER}
+                  "page_offset": at, "record_offset": at + start, "parser": PARSER}
         undecoded = flags & ~KNOWN_BITS
         if undecoded:
             record["flags_undecoded"] = undecoded
-        if "�" in text:
+        if "\ufffd" in text:
             record["path_invalid_utf8"] = True
             record["path_raw_hex"] = raw_path.hex()
         emit(record)
@@ -431,7 +472,7 @@ def parse_pages(src, scan, emit, max_page):
                          offset=at, declared=length, available=len(page))
         else:
             scan.pages["parsed"] += 1
-        parse_records(page[12:], at + 12, version, scan, emit, scan.member_at(at))
+        parse_records(page, at, version, scan, emit, scan.member_at(at))
 
 
 def scan_file(path, emit, max_expanded, max_page):
@@ -518,6 +559,9 @@ def main():
     for name, value in (("max_expanded_bytes", max_expanded), ("max_page_bytes", max_page)):
         if not isinstance(value, int) or isinstance(value, bool) or value < 1:
             fail("%s must be a positive integer" % name, **{name: value})
+    inline_bytes = args.get("max_inline_bytes", DEFAULT_INLINE_BYTES)
+    if not isinstance(inline_bytes, int) or isinstance(inline_bytes, bool) or inline_bytes < 1:
+        fail("max_inline_bytes must be a positive integer", max_inline_bytes=inline_bytes)
     out_name = args.get("out_file")
     if out_name is not None and (not isinstance(out_name, str) or not out_name):
         fail("out_file must be a non-empty string")
@@ -564,8 +608,9 @@ def main():
         except OSError as exc:
             fail("out_file could not be created", out_file=out_name, reason="%s: %s" % (type(exc).__name__, exc))
         sink = os.fdopen(fd, "w", encoding="utf-8", newline="\n")
-    paging = None if sink else LosslessPage("fsevents_parse", [path, args.get("contains"), sorted(wanted)], limit)
+    paging = None if sink else LosslessPage("fsevents_parse", [path, args.get("contains"), sorted(wanted)], limit, inline_bytes)
     inline = []
+    inline_state = {"bytes": 0, "full": False, "bounded_by_bytes": False}
     totals = {"before_filter": 0, "kept": 0}
     ids = [None, None]
 
@@ -580,9 +625,17 @@ def main():
             ids[0] = record["event_id"] if ids[0] is None else min(ids[0], record["event_id"])
             ids[1] = record["event_id"] if ids[1] is None else max(ids[1], record["event_id"])
         if sink:
-            sink.write(json.dumps(record, sort_keys=True) + "\n")
-            if len(inline) < limit:
-                inline.append(record)
+            line = json.dumps(record, sort_keys=True)
+            sink.write(line + "\n")
+            if not inline_state["full"] and len(inline) < limit:
+                if inline_state["bytes"] + len(line) <= inline_bytes:
+                    inline.append(record)
+                    inline_state["bytes"] += len(line)
+                else:
+                    inline_state["bounded_by_bytes"] = True
+                    inline_state["full"] = True
+            else:
+                inline_state["full"] = True
         else:
             paging.add(record)
 
@@ -592,8 +645,8 @@ def main():
                 "pages": {"parsed": 0, "unsupported": 0, "invalid_length": 0, "truncated": 0},
                 "records": {"decoded": 0, "empty_path": 0, "incomplete": 0},
                 "bytes_skipped": 0, "padding_bytes": 0, "bytes_not_decoded": 0}
-    per_file = LosslessPage("fsevents_parse_files", [path], 200)
-    problems = LosslessPage("fsevents_parse_problems", [path], FIRST_PROBLEMS)
+    per_file = LosslessPage("fsevents_parse_files", [path], 200, FIRST_BYTES)
+    problems = LosslessPage("fsevents_parse_problems", [path], FIRST_PROBLEMS, FIRST_BYTES)
     gzip_files = 0
     for target in targets:
         scan = scan_file(target, emit, max_expanded, max_page)
@@ -624,6 +677,7 @@ def main():
         sink.close()
         shown, complete = inline, out_name
         limited = totals["kept"] > len(inline)
+        page = {"inline_bounded_by_bytes": inline_state["bounded_by_bytes"]}
     else:
         page = paging.finish()
         shown, complete, limited = paging.page, page.get("all_results"), page["truncated"]
@@ -653,12 +707,15 @@ def main():
         "records_before_filter": totals["before_filter"],
         "event_id_range": ids_range,
         "inline_limited": bool(limited),
+        "inline_bounded_by_bytes": bool(page.get("inline_bounded_by_bytes")),
+        "inline_byte_limit": inline_bytes,
+        **({"kept_earlier_larger_result": page["kept_earlier_larger_result"]} if page.get("kept_earlier_larger_result") else {}),
         "coverage": coverage,
         "problems": problems.page,
         "problems_total": problems_page["matched"],
         "problems_pages": problems_page,
         "filters": {"contains": args.get("contains"), "flags": sorted(wanted), **({"flags_unknown": unknown_flags} if unknown_flags else {})},
-        "limits": {"max_expanded_bytes": max_expanded, "max_page_bytes": max_page},
+        "limits": {"max_expanded_bytes": max_expanded, "max_page_bytes": max_page, "max_inline_bytes": inline_bytes},
         "directory": notes,
         "note": "There is no timestamp in this format. Event ids are a counter within one volume's log, so this gives order within "
                 "that log and not time. A record carrying Renamed means the path took part in a rename; the old and the new name "

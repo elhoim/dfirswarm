@@ -65,6 +65,7 @@ DEFAULT_MAX_FILE_BYTES = 32 << 20
 DEFAULT_MAX_NODES = 200000
 DEFAULT_MAX_DEPTH = 100
 DEFAULT_MAX_SECONDS = 90.0
+DEFAULT_INLINE_BYTES = 1 << 20
 FIRST_FAILURES = 20
 
 # A key whose name marks what it holds as secret-bearing. Matched as a pattern on
@@ -108,16 +109,25 @@ def describe(exc):
 
 
 # Lossless paging (the same in every library tool that pages): the page an
-# agent reads stays small, and when there are more rows the whole result is
-# written as JSON Lines under work/<agent>/tool-output (in a job, $OUT/tool-output)
-# and named. The file name is a digest of the page's key (a path), never of a value.
+# agent reads stays small, bounded by rows and by bytes, and when there are more
+# rows the whole result is written as JSON Lines under work/<agent>/tool-output
+# (in a job, $OUT/tool-output) and named. The file name is a digest of the page's
+# key (a path), never of a value. Rows are written with ensure_ascii on: a path
+# the filesystem gave as bytes that are not UTF-8 reaches Python as lone
+# surrogates, which a UTF-8 file cannot hold and an escape can. A rerun that
+# would replace a larger earlier file of the same name writes a new name and says
+# which earlier file it kept.
 class LosslessPage:
-    def __init__(self, tool, key, limit):
+    def __init__(self, tool, key, limit, byte_limit=None):
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
             raise ValueError("limit must be a positive integer")
         self.tool = re.sub(r"[^A-Za-z0-9_.-]", "_", tool)
         self.limit = limit
+        self.byte_limit = byte_limit
         self.page = []
+        self.page_bytes = 0
+        self.full = False
+        self.bytes_bound_hit = False
         self.total = 0
         self._out = None
         self._tmp = None
@@ -135,14 +145,20 @@ class LosslessPage:
             self.shown = str(self.path)
 
     def _write(self, row):
-        self._out.write(json.dumps(row, ensure_ascii=False, default=str))
+        self._out.write(json.dumps(row, default=str))
         self._out.write("\n")
 
     def add(self, row):
         self.total += 1
-        if len(self.page) < self.limit:
-            self.page.append(row)
-            return
+        if not self.full and len(self.page) < self.limit:
+            size = len(json.dumps(row, default=str)) if self.byte_limit is not None else 0
+            if self.byte_limit is None or self.page_bytes + size <= self.byte_limit:
+                self.page.append(row)
+                self.page_bytes += size
+                return
+            self.bytes_bound_hit = True
+        # From the first row that does not fit, every later row goes to the file only: the page is a prefix.
+        self.full = True
         if self._out is None:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             fd, name = tempfile.mkstemp(dir=self.path.parent, prefix=".%s-" % self.path.name)
@@ -154,12 +170,24 @@ class LosslessPage:
 
     def finish(self):
         result = {"matched": self.total, "returned": len(self.page), "truncated": self.total > len(self.page)}
+        if self.byte_limit is not None:
+            result["inline_byte_limit"] = self.byte_limit
+            if self.bytes_bound_hit:
+                result["inline_bounded_by_bytes"] = True
         if self._out is not None:
             self._out.flush()
             os.fsync(self._out.fileno())
             self._out.close()
-            os.replace(self._tmp, self.path)
-            result["all_results"] = self.shown
+            target, shown = self.path, self.shown
+            if target.exists() and target.stat().st_size > os.path.getsize(self._tmp):
+                n = 2
+                while target.with_name("%s-%d%s" % (target.stem, n, target.suffix)).exists():
+                    n += 1
+                target = target.with_name("%s-%d%s" % (target.stem, n, target.suffix))
+                shown = self.shown.rsplit("/", 1)[0] + "/" + target.name
+                result["kept_earlier_larger_result"] = self.shown
+            os.replace(self._tmp, target)
+            result["all_results"] = shown
             result["all_results_format"] = "JSON Lines, one complete result per line"
         return result
 
@@ -210,7 +238,8 @@ class SecretValues:
     def add(self, finding_id, locator, value):
         if not self.enabled:
             return
-        self._fh.write(json.dumps({"finding_id": finding_id, **locator, "value": value}, ensure_ascii=False))
+        # ensure_ascii: a file name that is not UTF-8 is a lone surrogate to Python; an escape reads back, a raw write cannot.
+        self._fh.write(json.dumps({"finding_id": finding_id, **locator, "value": value}))
         self._fh.write("\n")
         self.written += 1
 
@@ -445,6 +474,7 @@ def main():
     if not isinstance(max_blob, int) or isinstance(max_blob, bool) or max_blob < 0:
         fail("max_blob must be a non-negative integer")
     limit = bound(args, "limit", 200)
+    inline_bytes = bound(args, "max_inline_bytes", DEFAULT_INLINE_BYTES)
     limits = {
         "max_blob": max_blob,
         "max_file_bytes": bound(args, "max_file_bytes", DEFAULT_MAX_FILE_BYTES),
@@ -489,7 +519,7 @@ def main():
             values.close()
             fail("out_file could not be created", out_file=named, reason=describe(exc))
         sink = os.fdopen(fd, "w", encoding="utf-8", newline="\n")
-    paging = None if sink else LosslessPage("plist_read", [path, key], limit)
+    paging = None if sink else LosslessPage("plist_read", [path, key], limit, inline_bytes)
 
     counter = [0]
 
@@ -498,6 +528,7 @@ def main():
         return "F%06d" % counter[0]
 
     inline = []
+    inline_state = {"bytes": 0, "full": False, "bounded_by_bytes": False}
     totals = {"parsed": 0, "failed": 0, "skipped": 0, "not_attempted": 0, "binary_plist_files": 0,
               "files_with_withheld_values": 0, "binary_values": 0, "withheld_values": 0}
     first = {"failed": [], "skipped": [], "not_attempted": []}
@@ -521,10 +552,18 @@ def main():
         for fid, locator, value in found:
             values.add(fid, {"file": row["file"], **locator}, value)
         if sink:
-            sink.write(json.dumps(row, default=str, sort_keys=True) + "\n")
+            line = json.dumps(row, default=str, sort_keys=True)
+            sink.write(line + "\n")
             sink.flush()
-            if len(inline) < limit:
-                inline.append(row)
+            if not inline_state["full"] and len(inline) < limit:
+                if inline_state["bytes"] + len(line) <= inline_bytes:
+                    inline.append(row)
+                    inline_state["bytes"] += len(line)
+                else:
+                    inline_state["bounded_by_bytes"] = True
+                    inline_state["full"] = True
+            else:
+                inline_state["full"] = True
         else:
             paging.add(row)
 
@@ -573,7 +612,10 @@ def main():
         sink.flush()
         os.fsync(sink.fileno())
         sink.close()
-        page = {"matched": rows_total[0], "returned": len(inline), "truncated": rows_total[0] > len(inline)}
+        page = {"matched": rows_total[0], "returned": len(inline), "truncated": rows_total[0] > len(inline),
+                "inline_byte_limit": inline_bytes}
+        if inline_state["bounded_by_bytes"]:
+            page["inline_bounded_by_bytes"] = True
         complete = named
     else:
         page = paging.finish()
@@ -591,6 +633,9 @@ def main():
         "found": matched,
         "complete_files": complete,
         "inline_limited": bool(page["truncated"]),
+        "inline_bounded_by_bytes": bool(page.get("inline_bounded_by_bytes")),
+        "inline_byte_limit": inline_bytes,
+        **({"kept_earlier_larger_result": page["kept_earlier_larger_result"]} if page.get("kept_earlier_larger_result") else {}),
         "binary_files": totals["binary_plist_files"],
         "counts": {"matched": matched, "parsed": totals["parsed"], "failed": totals["failed"],
                    "skipped_over_a_bound": totals["skipped"], "not_attempted": totals["not_attempted"]},

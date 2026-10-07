@@ -31,11 +31,23 @@ not from a fixed column list, and the answer says which tables joined and a
 fingerprint of the three tables' columns.
 
 The database is never opened where it lies unless it has no sidecars. A write-ahead
-log (or a hot rollback journal) beside it holds committed rows the main file does
-not, so with one the database and its sidecars are copied into a private directory,
-SQLite applies them there, the frames applied are counted, and the copy is removed;
-the evidence directory is not written to (a read-only open of a WAL database creates
-a -shm file beside it). With no sidecar the file is opened read-only and immutable.
+log (-wal) beside it holds committed rows the main file does not. A rollback journal
+(-journal) holds the old page images of a transaction that did not commit: it holds no
+rows the main file lacks, and opening a copy that has one rolls that transaction back,
+which changes the copy and not the main file as acquired. With either sidecar the
+database and its sidecars are copied into a private directory, SQLite works on the copy
+(the frames applied are counted; a rollback is reported in `source_used.journal` and in
+`problems`), and the copy is removed; the evidence directory is not written to (a
+read-only open of a WAL database creates a -shm file beside it). With no sidecar the file
+is opened read-only and immutable.
+
+Values are bounded when they are read, not after: a TEXT or BLOB cell is fetched as its
+first 4096 characters or bytes and its whole byte length (SQLite is asked for
+`substr`/`length`, never for the whole cell, and a large BLOB is not read at all except
+its head, through a blob handle), so one 300 MB cell does not become 300 MB of Python.
+A cut cell says `_truncated`, its whole length and where the whole is (`_where`: table,
+column, rowid in the database as acquired); `export_oversize: true` streams each one to a
+file under tool-output/ and names it.
 """
 import base64
 import datetime
@@ -55,7 +67,10 @@ from pathlib import Path
 PARSER = "knowledgec_query/3"
 APPLE_EPOCH = 978307200
 DEFAULT_MAX_STAGE = 2 << 30
-BLOB_MAX = 4096
+VALUE_CAP = 4096
+DEFAULT_INLINE_BYTES = 1 << 20
+DEFAULT_MAX_EXPORT = 1 << 30
+SELECT_COLUMNS_MAX = 1900
 STANDARD = {"Z_PK", "ZSTREAMNAME", "ZVALUESTRING", "ZVALUEINTEGER", "ZVALUEDOUBLE", "ZVALUETYPECODE", "ZSTARTDATE",
             "ZENDDATE", "ZCREATIONDATE", "ZSECONDSFROMGMT", "ZUUID"}
 
@@ -87,16 +102,25 @@ def resolve_output(out, what="output"):
 
 
 # Lossless paging (the same in every library tool that pages): the page an
-# agent reads stays small, and when there are more rows the whole result is
-# written as JSON Lines under work/<agent>/tool-output (in a job, $OUT/tool-output)
-# and named. The file name is a digest of the page's key (a path), never of a value.
+# agent reads stays small, bounded by rows and by bytes, and when there are more
+# rows the whole result is written as JSON Lines under work/<agent>/tool-output
+# (in a job, $OUT/tool-output) and named. The file name is a digest of the page's
+# key (a path), never of a value. Rows are written with ensure_ascii on: a path
+# the filesystem gave as bytes that are not UTF-8 reaches Python as lone
+# surrogates, which a UTF-8 file cannot hold and an escape can. A rerun that
+# would replace a larger earlier file of the same name writes a new name and says
+# which earlier file it kept.
 class LosslessPage:
-    def __init__(self, tool, key, limit):
+    def __init__(self, tool, key, limit, byte_limit=None):
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
             raise ValueError("limit must be a positive integer")
         self.tool = re.sub(r"[^A-Za-z0-9_.-]", "_", tool)
         self.limit = limit
+        self.byte_limit = byte_limit
         self.page = []
+        self.page_bytes = 0
+        self.full = False
+        self.bytes_bound_hit = False
         self.total = 0
         self._out = None
         self._tmp = None
@@ -114,14 +138,20 @@ class LosslessPage:
             self.shown = str(self.path)
 
     def _write(self, row):
-        self._out.write(json.dumps(row, ensure_ascii=False, default=str))
+        self._out.write(json.dumps(row, default=str))
         self._out.write("\n")
 
     def add(self, row):
         self.total += 1
-        if len(self.page) < self.limit:
-            self.page.append(row)
-            return
+        if not self.full and len(self.page) < self.limit:
+            size = len(json.dumps(row, default=str)) if self.byte_limit is not None else 0
+            if self.byte_limit is None or self.page_bytes + size <= self.byte_limit:
+                self.page.append(row)
+                self.page_bytes += size
+                return
+            self.bytes_bound_hit = True
+        # From the first row that does not fit, every later row goes to the file only: the page is a prefix.
+        self.full = True
         if self._out is None:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             fd, name = tempfile.mkstemp(dir=self.path.parent, prefix=".%s-" % self.path.name)
@@ -133,12 +163,24 @@ class LosslessPage:
 
     def finish(self):
         result = {"matched": self.total, "returned": len(self.page), "truncated": self.total > len(self.page)}
+        if self.byte_limit is not None:
+            result["inline_byte_limit"] = self.byte_limit
+            if self.bytes_bound_hit:
+                result["inline_bounded_by_bytes"] = True
         if self._out is not None:
             self._out.flush()
             os.fsync(self._out.fileno())
             self._out.close()
-            os.replace(self._tmp, self.path)
-            result["all_results"] = self.shown
+            target, shown = self.path, self.shown
+            if target.exists() and target.stat().st_size > os.path.getsize(self._tmp):
+                n = 2
+                while target.with_name("%s-%d%s" % (target.stem, n, target.suffix)).exists():
+                    n += 1
+                target = target.with_name("%s-%d%s" % (target.stem, n, target.suffix))
+                shown = self.shown.rsplit("/", 1)[0] + "/" + target.name
+                result["kept_earlier_larger_result"] = self.shown
+            os.replace(self._tmp, target)
+            result["all_results"] = shown
             result["all_results_format"] = "JSON Lines, one complete result per line"
         return result
 
@@ -167,15 +209,124 @@ def quote(name):
     return '"%s"' % name.replace('"', '""')
 
 
-def cell(value):
-    """A SQLite value as JSON: a BLOB as base64 (up to BLOB_MAX bytes, with its whole length), an infinite
-    REAL as its name (JSON has none), text as it is."""
-    if isinstance(value, (bytes, bytearray)):
-        head = bytes(value[:BLOB_MAX])
-        return {"_blob_bytes": len(value), "_base64": base64.b64encode(head).decode("ascii"), "_truncated": len(value) > len(head)}
+def plain(value):
+    """A non-text, non-BLOB SQLite value as JSON: an infinite REAL as its name (JSON has none)."""
     if isinstance(value, float) and not math.isfinite(value):
         return {"_float": repr(value)}
     return value
+
+
+def safe_name(text):
+    return re.sub(r"[^A-Za-z0-9_.-]", "_", str(text))[:80]
+
+
+class Shaper:
+    """Turns the bounded columns of a row into JSON cells, fetches the head of a large BLOB through a blob
+    handle, and streams an oversize value to a file when asked. Nothing here reads a whole cell into memory."""
+
+    def __init__(self, connection, export, max_export):
+        self.connection = connection
+        self.export = export
+        self.max_export = max_export
+        self.exported_bytes = 0
+        self.truncated = 0
+        self.exported = 0
+        self.export_refused = 0
+        self.head_unavailable = 0
+        self.dir = None
+        self.shown = None
+
+    def head(self, table, column, rowid):
+        """The first VALUE_CAP bytes of one stored value, without loading the rest when a blob handle can be had."""
+        try:
+            with self.connection.blobopen(table, column, rowid, readonly=True) as blob:
+                return blob.read(VALUE_CAP)
+        except (AttributeError, sqlite3.Error):
+            pass
+        try:
+            row = self.connection.execute("SELECT substr(%s,1,%d) FROM %s WHERE rowid = ?" % (quote(column), VALUE_CAP, quote(table)),
+                                          (rowid,)).fetchone()
+            value = row[0] if row else None
+            return value.encode("utf-8", "backslashreplace") if isinstance(value, str) else value
+        except sqlite3.Error:
+            self.head_unavailable += 1
+            return None
+
+    def write_whole(self, table, column, rowid, kind):
+        """Stream one stored value to a new file (1 MiB at a time); its name, or why it was not written."""
+        if not hasattr(self.connection, "blobopen"):
+            return {"_export": "not written: this Python has no blob handles (3.11 or later is needed)"}
+        try:
+            with self.connection.blobopen(table, column, rowid, readonly=True) as blob:
+                size = len(blob)
+                if self.exported_bytes + size > self.max_export:
+                    self.export_refused += 1
+                    return {"_export": "not written: it would pass max_export_bytes (%d)" % self.max_export}
+                if self.dir is None:
+                    job, out = os.environ.get("JOB_ID"), os.environ.get("OUT")
+                    if job and out:
+                        self.dir = Path(out) / "tool-output" / "knowledgec-values"
+                        self.shown = "store/jobs/%s/out/tool-output/knowledgec-values" % safe_name(job)
+                    else:
+                        self.dir = Path("work") / safe_name(os.environ.get("AGENT_ID") or "tool") / "tool-output" / "knowledgec-values"
+                        self.shown = str(self.dir)
+                    self.dir.mkdir(parents=True, exist_ok=True)
+                base = "%s.%s.%s" % (safe_name(table), safe_name(column), rowid)
+                n = 0
+                while True:
+                    name = "%s%s.%s" % (base, "" if n == 0 else "-%d" % n, "txt" if kind == "text" else "bin")
+                    try:
+                        fd = os.open(str(self.dir / name), os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+                        break
+                    except FileExistsError:
+                        n += 1
+                with os.fdopen(fd, "wb") as out:
+                    done = 0
+                    while done < size:
+                        block = blob.read(min(1 << 20, size - done))
+                        if not block:
+                            break
+                        out.write(block)
+                        done += len(block)
+                self.exported_bytes += done
+                self.exported += 1
+                return {"_whole_value_file": "%s/%s" % (self.shown, name), "_whole_value_bytes_written": done}
+        except (OSError, sqlite3.Error) as exc:
+            return {"_export": "not written: %s: %s" % (type(exc).__name__, exc)}
+
+    def cell(self, value, length, table, column, rowid):
+        if isinstance(value, str):
+            if len(value) <= VALUE_CAP:
+                return value
+            return self.oversize("text", value[:VALUE_CAP], length, table, column, rowid)
+        if value is None and length is not None and length > VALUE_CAP:
+            head = self.head(table, column, rowid)
+            return self.oversize("blob", head if head is not None else b"", length, table, column, rowid)
+        if isinstance(value, (bytes, bytearray)):
+            return {"_blob_bytes": len(value), "_base64": base64.b64encode(bytes(value)).decode("ascii"), "_truncated": False}
+        return plain(value)
+
+    def oversize(self, kind, head, length, table, column, rowid):
+        self.truncated += 1
+        if kind == "text":
+            out = {"_text_head": head, "_text_bytes": length, "_truncated": True}
+        else:
+            out = {"_blob_bytes": length, "_base64": base64.b64encode(bytes(head)).decode("ascii"), "_truncated": True}
+        out["_where"] = {"table": table, "column": column, "rowid": rowid}
+        if self.export and rowid is not None:
+            out.update(self.write_whole(table, column, rowid, kind))
+        return out
+
+
+def bounded_select(alias, prefix, column):
+    """Two select terms for one column: its value cut at VALUE_CAP (a large BLOB is not read at all; typeof()
+    and length() are answered from the record header), and its byte length where it is TEXT or BLOB and long."""
+    c = "%s.%s" % (alias, quote(column))
+    value = ("CASE typeof(%s) WHEN 'text' THEN substr(%s,1,%d) WHEN 'blob' THEN "
+             "CASE WHEN length(%s) > %d THEN NULL ELSE %s END ELSE %s END" % (c, c, VALUE_CAP + 1, c, VALUE_CAP, c, c))
+    length = ("CASE typeof(%s) WHEN 'blob' THEN length(%s) WHEN 'text' THEN "
+              "CASE WHEN length(substr(%s,1,%d)) > %d THEN length(CAST(%s AS BLOB)) END END" % (c, c, c, VALUE_CAP + 1, VALUE_CAP, c))
+    return ["%s AS %s" % (value, quote(prefix + "|" + column)), "%s AS %s" % (length, quote(prefix + "#" + column))]
 
 
 def sha256_copy(src, dst):
@@ -184,6 +335,14 @@ def sha256_copy(src, dst):
         for block in iter(lambda: read.read(1 << 20), b""):
             digest.update(block)
             write.write(block)
+    return digest.hexdigest()
+
+
+def sha256_file(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for block in iter(lambda: fh.read(1 << 20), b""):
+            digest.update(block)
     return digest.hexdigest()
 
 
@@ -238,12 +397,20 @@ def main():
         fail("db is required: a knowledgeC.db")
     if not os.path.isfile(db):
         fail("no such database", db=db)
-    limit = args.get("limit", 500)
-    if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
-        fail("limit must be a positive integer")
-    max_stage = args.get("max_stage_bytes", DEFAULT_MAX_STAGE)
-    if not isinstance(max_stage, int) or isinstance(max_stage, bool) or max_stage < 1:
-        fail("max_stage_bytes must be a positive integer")
+
+    def positive(name, default):
+        value = args.get(name, default)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+            fail("%s must be a positive integer" % name, **{name: value})
+        return value
+
+    limit = positive("limit", 500)
+    max_stage = positive("max_stage_bytes", DEFAULT_MAX_STAGE)
+    inline_bytes = positive("max_inline_bytes", DEFAULT_INLINE_BYTES)
+    max_export = positive("max_export_bytes", DEFAULT_MAX_EXPORT)
+    export = args.get("export_oversize", False)
+    if not isinstance(export, bool):
+        fail("export_oversize must be true or false")
     out_name = args.get("out_file")
     if out_name is not None and (not isinstance(out_name, str) or not out_name):
         fail("out_file must be a non-empty string")
@@ -252,7 +419,9 @@ def main():
     since = to_apple(args["since"], "since") if args.get("since") else None
     until = to_apple(args["until"], "until") if args.get("until") else None
 
-    # The sidecars decide how the file is opened. A WAL or a hot journal holds committed work the main file lacks.
+    problems = []
+    # The sidecars decide how the file is opened. A WAL holds committed rows the main file lacks; a hot rollback
+    # journal holds the old pages of a transaction that did not commit and is rolled back when the copy is opened.
     sidecars = {}
     for suffix in ("-wal", "-shm", "-journal"):
         beside = db + suffix
@@ -261,37 +430,53 @@ def main():
     stage = None
     source = {"database": db, "staged": False, "sidecars": sidecars}
     try:
-        if "-wal" in sidecars or "-journal" in sidecars:
-            total = os.path.getsize(db) + sum(v["bytes"] for v in sidecars.values())
-            if total > max_stage:
-                fail("the database and its sidecars (%d bytes) are over max_stage_bytes (%d): nothing was read; raise it, or query the "
-                     "files with a tool that applies the WAL" % (total, max_stage), db=db, sidecars=sidecars)
-            parent = stage_parent()
-            parent.mkdir(parents=True, exist_ok=True)
-            stage = tempfile.mkdtemp(prefix="knowledgec-", dir=str(parent))
-            name = os.path.basename(db)
-            staged_db = os.path.join(stage, name)
-            source["database_sha256"] = sha256_copy(db, staged_db)
-            source["database_bytes"] = os.path.getsize(db)
-            for suffix in sidecars:
-                sidecars[suffix]["sha256"] = sha256_copy(db + suffix, staged_db + suffix)
-            if "-wal" in sidecars:
-                source["wal"] = wal_inventory(db + "-wal")
-            source["staged"] = True
-            source["open_mode"] = "a private copy of the database and its sidecars, read-write so SQLite applies them, removed at the end"
-            connection = sqlite3.connect(staged_db)
-        else:
-            source["open_mode"] = "read-only and immutable, in place (no WAL or journal beside it)"
-            connection = sqlite3.connect("file:%s?mode=ro&immutable=1" % urllib.parse.quote(os.path.abspath(db)), uri=True)
+        try:
+            if "-wal" in sidecars or "-journal" in sidecars:
+                total = os.path.getsize(db) + sum(v["bytes"] for v in sidecars.values())
+                if total > max_stage:
+                    fail("the database and its sidecars (%d bytes) are over max_stage_bytes (%d): nothing was read; raise it, or query the "
+                         "files with a tool that applies the WAL" % (total, max_stage), db=db, sidecars=sidecars)
+                parent = stage_parent()
+                parent.mkdir(parents=True, exist_ok=True)
+                stage = tempfile.mkdtemp(prefix="knowledgec-", dir=str(parent))
+                staged_db = os.path.join(stage, os.path.basename(db))
+                source["database_sha256"] = sha256_copy(db, staged_db)
+                source["database_bytes"] = os.path.getsize(db)
+                for suffix in sidecars:
+                    sidecars[suffix]["sha256"] = sha256_copy(db + suffix, staged_db + suffix)
+                if "-wal" in sidecars:
+                    source["wal"] = wal_inventory(db + "-wal")
+                source["staged"] = True
+                source["open_mode"] = "a private copy of the database and its sidecars, read-write so SQLite works on them, removed at the end"
+                connection = sqlite3.connect(staged_db)
+            else:
+                source["open_mode"] = "read-only and immutable, in place (no WAL or journal beside it)"
+                connection = sqlite3.connect("file:%s?mode=ro&immutable=1" % urllib.parse.quote(os.path.abspath(db)), uri=True)
+        except (OSError, sqlite3.Error) as exc:
+            fail("the database could not be opened or staged", db=db, reason="%s: %s" % (type(exc).__name__, exc))
         connection.row_factory = sqlite3.Row
         # Text that is not UTF-8 comes back with its bytes escaped, every byte still said.
         connection.text_factory = lambda b: b.decode("utf-8", "backslashreplace")
         try:
             tables = [r[0] for r in connection.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")]
-        except sqlite3.DatabaseError as exc:
+        except sqlite3.Error as exc:
             fail("this file is not a SQLite database", db=db, reason=str(exc))
         if "ZOBJECT" not in tables:
             fail("this is not a knowledgeC database: there is no ZOBJECT table", db=db, tables=tables)
+        if source["staged"] and "-journal" in sidecars:
+            after = sha256_file(staged_db)
+            present = os.path.exists(staged_db + "-journal")
+            rolled = (after != source["database_sha256"]) or not present
+            source["journal"] = {"bytes": sidecars["-journal"]["bytes"], "sha256": sidecars["-journal"]["sha256"],
+                                 "rollback_applied": rolled, "journal_present_after_open": present,
+                                 "database_sha256_as_acquired": source["database_sha256"], "database_sha256_after_open": after}
+            if rolled:
+                problems.append("a rollback journal was beside the database and SQLite rolled back the uncommitted transaction it held in the "
+                                "private copy: the rows below are the database as it stands after that rollback, which is not the main file "
+                                "as acquired (its state changed in the copy)")
+            else:
+                problems.append("a rollback journal was beside the database and SQLite did not roll it back (it is not a hot journal): "
+                                "it adds nothing to the rows below")
         if source["staged"] and "-wal" in sidecars:
             try:
                 busy, log, done = connection.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
@@ -303,34 +488,48 @@ def main():
         except sqlite3.Error:
             pass
 
-        def info(table):
-            return [(r["name"], r["type"]) for r in connection.execute("PRAGMA table_info(%s)" % quote(table))]
+        def info(table, required):
+            try:
+                return [(r["name"], r["type"]) for r in connection.execute("PRAGMA table_info(%s)" % quote(table))]
+            except sqlite3.Error as exc:
+                if required:
+                    fail("the schema of %s could not be read" % table, db=db, table=table, reason=str(exc))
+                problems.append("the schema of %s could not be read (%s): its rows are not joined" % (table, exc))
+                return []
 
-        zobject = info("ZOBJECT")
+        zobject = info("ZOBJECT", True)
         columns = {n for n, _t in zobject}
-        meta_cols = info("ZSTRUCTUREDMETADATA") if "ZSTRUCTUREDMETADATA" in tables else []
-        src_cols = info("ZSOURCE") if "ZSOURCE" in tables else []
+        meta_cols = info("ZSTRUCTUREDMETADATA", False) if "ZSTRUCTUREDMETADATA" in tables else []
+        src_cols = info("ZSOURCE", False) if "ZSOURCE" in tables else []
         joins = {"ZSTRUCTUREDMETADATA": bool(meta_cols) and "ZSTRUCTUREDMETADATA" in columns and any(n == "Z_PK" for n, _ in meta_cols),
                  "ZSOURCE": bool(src_cols) and "ZSOURCE" in columns and any(n == "Z_PK" for n, _ in src_cols)}
         fingerprint = hashlib.sha256("\n".join(
             "%s|%s|%s" % (t, n, ty) for t, cols in (("ZOBJECT", zobject), ("ZSOURCE", src_cols), ("ZSTRUCTUREDMETADATA", meta_cols))
             for n, ty in sorted(cols)).encode("utf-8")).hexdigest()
 
-        select = ["o.%s AS %s" % (quote(n), quote("o|" + n)) for n, _t in zobject]
+        select = [t for n, _t in zobject for t in bounded_select("o", "o", n)] + ['o.rowid AS "o!rowid"']
         if joins["ZSTRUCTUREDMETADATA"]:
-            select += ["m.%s AS %s" % (quote(n), quote("m|" + n)) for n, _t in meta_cols]
+            select += [t for n, _t in meta_cols for t in bounded_select("m", "m", n)] + ['m.rowid AS "m!rowid"']
         if joins["ZSOURCE"]:
-            select += ["s.%s AS %s" % (quote(n), quote("s|" + n)) for n, _t in src_cols]
+            select += [t for n, _t in src_cols for t in bounded_select("s", "s", n)] + ['s.rowid AS "s!rowid"']
+        if len(select) > SELECT_COLUMNS_MAX:
+            fail("this schema has %d columns to read (two terms each) and SQLite will not select more than %d: nothing was read; "
+                 "query the part you need with sqlite_query" % (len(select), SELECT_COLUMNS_MAX), db=db, columns=len(select))
         sql = "SELECT %s FROM ZOBJECT AS o" % ", ".join(select)
         if joins["ZSTRUCTUREDMETADATA"]:
             sql += " LEFT JOIN ZSTRUCTUREDMETADATA AS m ON o.ZSTRUCTUREDMETADATA = m.Z_PK"
         if joins["ZSOURCE"]:
             sql += " LEFT JOIN ZSOURCE AS s ON o.ZSOURCE = s.Z_PK"
         where, params = [], []
-        applied, unapplied = [], []
+        applied, unapplied, reasons = [], [], []
         if args.get("stream"):
-            where.append("o.ZSTREAMNAME LIKE ?")
-            params.append(args["stream"])
+            if "ZSTREAMNAME" in columns:
+                where.append("o.ZSTREAMNAME LIKE ?")
+                params.append(args["stream"])
+                applied.append("stream")
+            else:
+                unapplied.append("stream")
+                reasons.append("stream could not be applied: this database has no ZSTREAMNAME column, so the rows are not filtered by stream")
         for name, value, op in (("since", since, ">="), ("until", until, "<=")):
             if value is None:
                 continue
@@ -340,6 +539,7 @@ def main():
                 applied.append(name)
             else:
                 unapplied.append(name)
+                reasons.append("%s could not be applied: this database has no ZSTARTDATE column, so the rows are not filtered by time" % name)
         if where:
             sql += " WHERE " + " AND ".join(where)
         order = "o.ZSTARTDATE, o.Z_PK" if "ZSTARTDATE" in columns and "Z_PK" in columns else (
@@ -357,18 +557,29 @@ def main():
             except OSError as exc:
                 fail("out_file could not be created", out_file=out_name, reason="%s: %s" % (type(exc).__name__, exc))
             sink = os.fdopen(fd, "w", encoding="utf-8", newline="\n")
-        paging = None if sink else LosslessPage("knowledgec_query", [db, args.get("stream"), args.get("since"), args.get("until")], limit)
+        paging = None if sink else LosslessPage("knowledgec_query", [db, args.get("stream"), args.get("since"), args.get("until")],
+                                                limit, inline_bytes)
         inline = []
+        inline_state = {"bytes": 0, "full": False, "bounded_by_bytes": False}
         count = 0
         unconverted = 0
+        shaper = Shaper(connection, export, max_export)
         try:
             cursor = connection.execute(sql, params)
         except sqlite3.Error as exc:
             fail("the query failed", reason=str(exc), sql=" ".join(sql.split())[:2000])
         names = [d[0] for d in cursor.description]
+        groups = {"o": ("ZOBJECT", [n for n, _t in zobject]), "m": ("ZSTRUCTUREDMETADATA", [n for n, _t in meta_cols]),
+                  "s": ("ZSOURCE", [n for n, _t in src_cols])}
         for raw in cursor:
             row = dict(zip(names, raw))
-            o = {n[2:]: v for n, v in row.items() if n.startswith("o|")}
+            shaped = {}
+            for prefix, (table, cols) in groups.items():
+                if prefix + "!rowid" not in row:
+                    continue
+                rowid = row[prefix + "!rowid"]
+                shaped[prefix] = {c: (row[prefix + "|" + c], row[prefix + "#" + c], rowid) for c in cols}
+            o = {c: v for c, (v, _n, _r) in shaped["o"].items()}
             start_raw, end_raw, created_raw = o.get("ZSTARTDATE"), o.get("ZENDDATE"), o.get("ZCREATIONDATE")
             duration = None
             if (isinstance(start_raw, (int, float)) and isinstance(end_raw, (int, float))
@@ -377,37 +588,62 @@ def main():
             for r in (start_raw, end_raw, created_raw):
                 if r is not None and when(r) is None:
                     unconverted += 1
+
+            def cell(prefix, c):
+                v, n, rowid = shaped[prefix][c]
+                return shaper.cell(v, n, groups[prefix][0], c, rowid)
+
             uuid = o.get("ZUUID")
             entry = {
-                "parser": PARSER, "source_table": "ZOBJECT", "z_pk": o.get("Z_PK"), "stream": o.get("ZSTREAMNAME"),
-                "value_string": cell(o.get("ZVALUESTRING")), "value_integer": cell(o.get("ZVALUEINTEGER")),
-                "value_double": cell(o.get("ZVALUEDOUBLE")), "value_type_code": cell(o.get("ZVALUETYPECODE")),
-                "start_raw": cell(start_raw), "end_raw": cell(end_raw), "created_raw": cell(created_raw),
+                "parser": PARSER, "source_table": "ZOBJECT", "z_pk": o.get("Z_PK"), "stream": cell("o", "ZSTREAMNAME") if "ZSTREAMNAME" in o else None,
+                "value_string": cell("o", "ZVALUESTRING") if "ZVALUESTRING" in o else None,
+                "value_integer": plain(o.get("ZVALUEINTEGER")), "value_double": plain(o.get("ZVALUEDOUBLE")),
+                "value_type_code": plain(o.get("ZVALUETYPECODE")),
+                "start_raw": plain(start_raw), "end_raw": plain(end_raw), "created_raw": plain(created_raw),
                 "start": when(start_raw), "end": when(end_raw), "created": when(created_raw),
                 "duration_seconds": duration, "utc_offset_seconds": o.get("ZSECONDSFROMGMT"),
-                "uuid": uuid.hex() if isinstance(uuid, (bytes, bytearray)) else uuid,
+                "uuid": None,
             }
-            other = {n: cell(v) for n, v in o.items() if n not in STANDARD and v is not None}
+            if isinstance(uuid, (bytes, bytearray)):
+                entry["uuid"] = bytes(uuid).hex()
+            elif uuid is not None:
+                entry["uuid"] = cell("o", "ZUUID")
+            other = {c: cell("o", c) for c, (v, n, _r) in shaped["o"].items() if c not in STANDARD and (v is not None or n is not None)}
             if other:
                 entry["zobject_other"] = other
-            for key, prefix in (("metadata", "m|"), ("source", "s|")):
-                got = {n[2:]: cell(v) for n, v in row.items() if n.startswith(prefix) and v is not None}
-                if got:
-                    entry[key] = got
+            for key, prefix in (("metadata", "m"), ("source", "s")):
+                if prefix in shaped:
+                    got = {c: cell(prefix, c) for c, (v, n, _r) in shaped[prefix].items() if v is not None or n is not None}
+                    if got:
+                        entry[key] = got
             count += 1
             if sink:
-                sink.write(json.dumps(entry, default=str, sort_keys=True) + "\n")
-                if len(inline) < limit:
-                    inline.append(entry)
+                line = json.dumps(entry, default=str, sort_keys=True)
+                sink.write(line + "\n")
+                if not inline_state["full"] and len(inline) < limit:
+                    if inline_state["bytes"] + len(line) <= inline_bytes:
+                        inline.append(entry)
+                        inline_state["bytes"] += len(line)
+                    else:
+                        inline_state["bounded_by_bytes"] = True
+                        inline_state["full"] = True
+                else:
+                    inline_state["full"] = True
             else:
                 paging.add(entry)
 
-        streams = LosslessPage("knowledgec_streams", [db], 200)
-        start_col = "ZSTARTDATE" if "ZSTARTDATE" in columns else "NULL"
-        for name, n, first, last in connection.execute(
-                "SELECT ZSTREAMNAME, COUNT(*), MIN(%s), MAX(%s) FROM ZOBJECT GROUP BY 1 ORDER BY 2 DESC, 1" % (start_col, start_col)):
-            streams.add({"stream": name, "count": n, "first_start_raw": cell(first), "last_start_raw": cell(last),
-                         "first_start": when(first), "last_start": when(last)})
+        streams = LosslessPage("knowledgec_streams", [db], 200, 256 << 10)
+        if "ZSTREAMNAME" in columns:
+            start_col = "ZSTARTDATE" if "ZSTARTDATE" in columns else "NULL"
+            try:
+                for name, n, first, last in connection.execute(
+                        "SELECT ZSTREAMNAME, COUNT(*), MIN(%s), MAX(%s) FROM ZOBJECT GROUP BY 1 ORDER BY 2 DESC, 1" % (start_col, start_col)):
+                    streams.add({"stream": name, "count": n, "first_start_raw": plain(first), "last_start_raw": plain(last),
+                                 "first_start": when(first), "last_start": when(last)})
+            except sqlite3.Error as exc:
+                problems.append("the stream inventory could not be made (%s): the entries are complete, the list of streams is not" % exc)
+        else:
+            problems.append("this database has no ZSTREAMNAME column, so there is no stream inventory and no entry has a stream")
         streams_page = streams.finish()
         connection.close()
     finally:
@@ -426,13 +662,12 @@ def main():
         os.fsync(sink.fileno())
         sink.close()
         shown, complete, limited = inline, out_name, count > len(inline)
+        page = {"inline_bounded_by_bytes": inline_state["bounded_by_bytes"]}
     else:
         page = paging.finish()
         shown, complete, limited = paging.page, page.get("all_results"), page["truncated"]
 
-    problems = []
-    if unapplied:
-        problems.append("%s could not be applied: this database has no ZSTARTDATE column, so the rows are not filtered by time" % " and ".join(unapplied))
+    problems = reasons + problems
     wal = source.get("wal")
     if wal and not wal.get("frames_valid"):
         problems.append("a -wal file is beside the database and holds no frame of its current generation (%s): it added nothing" % wal.get("state"))
@@ -442,6 +677,10 @@ def main():
                         "in the WAL are not in this result" % json.dumps(cp))
     if unconverted:
         problems.append("%d time value(s) could not be converted from the Apple epoch; their raw values are in the entries" % unconverted)
+    if shaper.head_unavailable:
+        problems.append("%d large value(s) could not be read even for their first bytes; their length is given" % shaper.head_unavailable)
+    if shaper.export_refused:
+        problems.append("%d oversize value(s) were not written to a file: they would pass max_export_bytes (%d)" % (shaper.export_refused, max_export))
     print(json.dumps({
         "db": db,
         "parser": PARSER,
@@ -452,6 +691,13 @@ def main():
         "entries_inline": len(shown),
         "complete_entries": complete,
         "inline_limited": bool(limited),
+        "inline_bounded_by_bytes": bool(page.get("inline_bounded_by_bytes")),
+        "inline_byte_limit": inline_bytes,
+        **({"kept_earlier_larger_result": page["kept_earlier_larger_result"]} if page.get("kept_earlier_larger_result") else {}),
+        "values": {"cap": VALUE_CAP, "truncated": shaper.truncated, "exported": shaper.exported, "exported_bytes": shaper.exported_bytes,
+                   "export_requested": export,
+                   "note": "A TEXT or BLOB cell longer than the cap shows its first %d characters or bytes, its whole byte length and "
+                           "where the whole is in the database (_where); export_oversize: true writes each whole value to a file and names it." % VALUE_CAP},
         "filters_applied": applied,
         **({"filters_unapplied": unapplied} if unapplied else {}),
         "schema": {"tables": tables, "joins": joins, "fingerprint": fingerprint,
@@ -463,7 +709,8 @@ def main():
         "note": "Times are converted from the Apple epoch (2001-01-01 UTC) and returned as UTC, with the raw value beside each. "
                 "The streams list is every stream in the database, whatever the filters. since and until select rows by start time, "
                 "so a record that began before the window and overlapped it is not in it. A write-ahead log beside the database is "
-                "applied in a private copy and counted in source_used; a -shm file is a derived index and adds nothing. These are "
+                "applied in a private copy and counted in source_used; a rollback journal is rolled back in the copy and reported; a "
+                "-shm file is a derived index and adds nothing. These are "
                 "records of application and device state the machine kept for its own features: foreground application and screen "
                 "or lock state do not show a person at the keyboard, and retention varies by OS version and device, so scope an "
                 "absence to the earliest and latest rows of the stream in this database.",

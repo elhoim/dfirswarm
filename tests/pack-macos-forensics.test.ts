@@ -23,7 +23,7 @@
  * every file the answer names.
  */
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmod, mkdir, readFile, readdir, stat, symlink, writeFile } from "node:fs/promises";
 import { gzipSync } from "node:zlib";
@@ -744,6 +744,7 @@ type KcEntry = {
   uuid: string | null;
   metadata?: Record<string, unknown>;
   source?: Record<string, unknown>;
+  zobject_other?: Record<string, unknown>;
   value?: unknown;
 };
 type KcAnswer = {
@@ -752,6 +753,7 @@ type KcAnswer = {
   entry_count: number;
   complete_entries: string | null;
   inline_limited: boolean;
+  problems: string[];
   filters_applied?: string[];
   filters_unapplied?: string[];
   schema: { tables: string[]; fingerprint: string; joins: { ZSTRUCTUREDMETADATA: boolean; ZSOURCE: boolean } };
@@ -981,6 +983,199 @@ c.commit()
     assert.equal(answer.entries[0].duration_seconds, null);
     assert.equal(answer.entries[0].end, null);
     assert.equal(answer.status, "partial", "a time that could not be converted is said");
+  });
+});
+
+/** Peak resident memory of a tool run in a process of its own, in MB (Linux reports KB, macOS bytes). */
+async function peakRssMb(script: string, cwd: string, args: unknown): Promise<{ mb: number; stdout: string; code: number | null }> {
+  const code = `
+import resource, runpy, sys
+sys.argv = [sys.argv[1]]
+try:
+    runpy.run_path(sys.argv[0], run_name="__main__")
+finally:
+    r = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    sys.stderr.write("RSS_MB=%f\\n" % ((r / 1e6) if sys.platform == "darwin" else (r / 1e3)))
+`;
+  const out = await new Promise<Run>((resolve, reject) => {
+    const child = spawn("python3", ["-c", code, script], { cwd, env: { ...process.env, ...AGENT } });
+    const so: Buffer[] = [];
+    const se: Buffer[] = [];
+    child.stdout.on("data", (c: Buffer) => so.push(c));
+    child.stderr.on("data", (c: Buffer) => se.push(c));
+    child.on("error", reject);
+    child.on("close", (c) => resolve({ code: c, stdout: Buffer.concat(so).toString("utf8"), stderr: Buffer.concat(se).toString("utf8") }));
+    child.stdin.end(JSON.stringify(args));
+  });
+  const m = /RSS_MB=([0-9.]+)/.exec(out.stderr);
+  assert.ok(m, out.stderr);
+  return { mb: Number(m[1]), stdout: out.stdout, code: out.code };
+}
+
+test("knowledgec_query reads a large cell as its head and its length, not whole, and writes the whole only when asked", async () => {
+  // A 300 MB zeroblob took 2.1 GB of memory, and a 50 MB TEXT value was printed inline.
+  await withCwd(async (cwd) => {
+    const db = join(cwd, "work", "big.db");
+    await build(
+      `
+import sqlite3, sys
+c = sqlite3.connect(sys.argv[1])
+c.execute("CREATE TABLE ZOBJECT (Z_PK INTEGER PRIMARY KEY, ZSTREAMNAME VARCHAR, ZVALUESTRING VARCHAR, ZPAYLOAD BLOB, ZSTARTDATE TIMESTAMP)")
+c.execute("INSERT INTO ZOBJECT VALUES (1, '/s', 'short', zeroblob(%s), 700)" % sys.argv[2])
+c.execute("INSERT INTO ZOBJECT VALUES (2, '/s', ?, x'0102030405', 701)", ("t" * int(sys.argv[3]),))
+c.commit()
+`,
+      db,
+      "150000000",
+      "20000000",
+    );
+    const run = await peakRssMb(KC, cwd, { db: "work/big.db" });
+    assert.equal(run.code, 0);
+    assert.ok(run.mb < 120, `peak memory ${run.mb} MB for a 150 MB cell and a 20 MB TEXT value`);
+    assert.ok(run.stdout.length < 200_000, `the answer is ${run.stdout.length} bytes`);
+    const answer = JSON.parse(run.stdout) as KcAnswer & { values: { truncated: number; exported: number } };
+    const big = answer.entries[0].zobject_other as Record<string, { _blob_bytes: number; _base64: string; _truncated: boolean; _where: { table: string; column: string; rowid: number } }>;
+    assert.equal(big.ZPAYLOAD._blob_bytes, 150_000_000);
+    assert.equal(big.ZPAYLOAD._truncated, true);
+    assert.equal(Buffer.from(big.ZPAYLOAD._base64, "base64").length, 4096);
+    assert.deepEqual(big.ZPAYLOAD._where, { table: "ZOBJECT", column: "ZPAYLOAD", rowid: 1 });
+    const text = answer.entries[1].value_string as unknown as { _text_head: string; _text_bytes: number; _truncated: boolean };
+    assert.equal(text._text_bytes, 20_000_000);
+    assert.equal(text._text_head.length, 4096);
+    assert.equal(answer.values.truncated, 2);
+    assert.equal(answer.values.exported, 0);
+    assert.equal(answer.entries[1].zobject_other?.ZPAYLOAD !== undefined, true, "a small BLOB is whole");
+    // Asked, the whole value is streamed to a file that the answer names, and nothing is cut.
+    const exported = body<KcAnswer & { values: { exported: number; exported_bytes: number } }>(
+      await tool(KC, cwd, { db: "work/big.db", stream: "/s", export_oversize: true, max_export_bytes: 200_000_000 }),
+    );
+    assert.equal(exported.values.exported, 2);
+    const e1 = exported.entries[1].value_string as unknown as { _whole_value_file: string; _whole_value_bytes_written: number };
+    assert.match(e1._whole_value_file, /^work\/s1\/tool-output\/knowledgec-values\/ZOBJECT\.ZVALUESTRING\.2\.txt$/);
+    assert.equal(e1._whole_value_bytes_written, 20_000_000);
+    assert.equal((await stat(join(cwd, e1._whole_value_file))).size, 20_000_000);
+    assert.equal((await stat(join(cwd, e1._whole_value_file))).mode & 0o777, 0o600);
+    // Over the export budget the value is not written, and the answer says so.
+    const refusedExport = body<KcAnswer & { values: { exported: number } }>(
+      await tool(KC, cwd, { db: "work/big.db", stream: "/s", export_oversize: true, max_export_bytes: 1000 }),
+    );
+    assert.equal(refusedExport.values.exported, 0);
+    assert.equal(refusedExport.status, "partial");
+    assert.ok(refusedExport.problems.some((p) => /max_export_bytes/.test(p)));
+  });
+});
+
+test("knowledgec_query answers when a joined table's schema cannot be read or ZOBJECT has no stream column, and says what is missing", async () => {
+  // PRAGMA table_info on a virtual table with a module that is not here, and a GROUP BY on a column that is not there, were tracebacks.
+  await withCwd(async (cwd) => {
+    const virt = join(cwd, "work", "virtual.db");
+    await build(
+      `
+import sqlite3, sys
+c = sqlite3.connect(sys.argv[1])
+c.execute("CREATE TABLE ZOBJECT (Z_PK INTEGER PRIMARY KEY, ZSOURCE INTEGER, ZSTREAMNAME VARCHAR, ZVALUESTRING VARCHAR, ZSTARTDATE TIMESTAMP)")
+c.execute("INSERT INTO ZOBJECT VALUES (1, 1, '/s', 'v', 700)")
+c.commit()
+c.execute("PRAGMA writable_schema=ON")
+c.execute("INSERT INTO sqlite_master (type, name, tbl_name, rootpage, sql) VALUES ('table', 'ZSOURCE', 'ZSOURCE', 0, 'CREATE VIRTUAL TABLE ZSOURCE USING nosuchmodule(a)')")
+c.execute("PRAGMA writable_schema=OFF")
+c.commit()
+`,
+      virt,
+    );
+    const out = await tool(KC, cwd, { db: "work/virtual.db" });
+    const answer = body<KcAnswer>(out);
+    assert.equal(answer.status, "partial");
+    assert.equal(answer.entry_count, 1);
+    assert.equal(answer.schema.joins.ZSOURCE, false);
+    assert.ok(answer.problems.some((p) => /schema of ZSOURCE could not be read/.test(p)), JSON.stringify(answer.problems));
+    assert.ok(answer.problems.some((p) => /no such module/.test(p)));
+
+    const nostream = join(cwd, "work", "nostream.db");
+    await build(
+      `
+import sqlite3, sys
+c = sqlite3.connect(sys.argv[1])
+c.execute("CREATE TABLE ZOBJECT (Z_PK INTEGER PRIMARY KEY, ZVALUESTRING VARCHAR, ZSTARTDATE TIMESTAMP)")
+c.execute("INSERT INTO ZOBJECT VALUES (1, 'v', 700)")
+c.commit()
+`,
+      nostream,
+    );
+    const plainRun = body<KcAnswer>(await tool(KC, cwd, { db: "work/nostream.db" }));
+    assert.equal(plainRun.status, "partial");
+    assert.equal(plainRun.entry_count, 1);
+    assert.equal(plainRun.streams_total, 0);
+    assert.ok(plainRun.problems.some((p) => /no ZSTREAMNAME column/.test(p)));
+    const filtered = body<KcAnswer>(await tool(KC, cwd, { db: "work/nostream.db", stream: "/app/%" }));
+    assert.deepEqual(filtered.filters_unapplied, ["stream"]);
+    assert.equal(filtered.entry_count, 1, "rows are returned, and the answer says they are not filtered by stream");
+  });
+});
+
+test("knowledgec_query rolls back a hot journal in the private copy and says the main file's state changed there", async () => {
+  // A rollback journal holds the old pages of a transaction that did not commit, not committed rows the main file lacks.
+  await withCwd(async (cwd) => {
+    const live = join(cwd, "work", "jlive.db");
+    await build(KC_BUILD, live, "plain", join(cwd, "work", "unused"));
+    const dir = join(cwd, "work", "jcase");
+    await build(
+      `
+import os, shutil, sqlite3, sys
+live, dest = sys.argv[1], sys.argv[2]
+os.makedirs(dest)
+c = sqlite3.connect(live, isolation_level=None)
+c.execute("PRAGMA cache_size=10")
+c.execute("BEGIN")
+c.executemany("INSERT INTO ZOBJECT (Z_PK, Z_ENT, Z_OPT, ZSTREAMNAME, ZVALUESTRING, ZSTARTDATE) VALUES (?,3,1,'/x',?,760001000)",
+              [(1000 + i, "uncommitted-%05d-" % i + "z" * 120) for i in range(20000)])
+# The transaction is open: its pages have spilled into the database file, and the journal holds the originals.
+shutil.copy(live, os.path.join(dest, "knowledgeC.db"))
+shutil.copy(live + "-journal", os.path.join(dest, "knowledgeC.db-journal"))
+c.execute("ROLLBACK")
+c.close()
+`,
+      live,
+      dir,
+    );
+    const before = await Promise.all((await readdir(dir)).map(async (n) => [n, sha256(await readFile(join(dir, n)))]));
+    const answer = body<KcAnswer & { problems: string[] }>(await tool(KC, cwd, { db: "work/jcase/knowledgeC.db" }));
+    assert.equal(answer.entry_count, 6, "the uncommitted rows are not in the result");
+    const journal = (answer.source_used as unknown as { journal: { bytes: number; sha256: string; rollback_applied: boolean; journal_present_after_open: boolean; database_sha256_as_acquired: string; database_sha256_after_open: string } }).journal;
+    assert.ok(journal.bytes > 0);
+    assert.match(journal.sha256, /^[0-9a-f]{64}$/);
+    assert.equal(journal.rollback_applied, true);
+    assert.equal(journal.journal_present_after_open, false);
+    assert.notEqual(journal.database_sha256_after_open, journal.database_sha256_as_acquired);
+    assert.equal(answer.status, "partial");
+    assert.ok(answer.problems.some((p) => /rolled back the uncommitted transaction/.test(p) && /changed in the copy/.test(p)), JSON.stringify(answer.problems));
+    assert.doesNotMatch(answer.note, /journal.*committed rows/i);
+    const after = await Promise.all((await readdir(dir)).map(async (n) => [n, sha256(await readFile(join(dir, n)))]));
+    assert.deepEqual(after, before, "the evidence directory is as it was");
+  });
+});
+
+test("knowledgec_query keeps a larger earlier result when a rerun of the same query finds fewer rows", async () => {
+  await withCwd(async (cwd) => {
+    const db = join(cwd, "work", "rerun.db");
+    const make = `
+import sqlite3, sys
+c = sqlite3.connect(sys.argv[1])
+c.execute("CREATE TABLE ZOBJECT (Z_PK INTEGER PRIMARY KEY, ZSTREAMNAME VARCHAR, ZVALUESTRING VARCHAR, ZSTARTDATE TIMESTAMP)")
+c.executemany("INSERT INTO ZOBJECT VALUES (?,?,?,?)", [(i, "/s", "v%d" % i, 700 + i) for i in range(1, int(sys.argv[2]) + 1)])
+c.commit()
+`;
+    await build(make, db, "10");
+    const first = body<KcAnswer & { kept_earlier_larger_result?: string }>(await tool(KC, cwd, { db: "work/rerun.db", limit: 2 }));
+    const firstFile = first.complete_entries as string;
+    assert.equal((await readFile(join(cwd, firstFile), "utf8")).trimEnd().split("\n").length, 10);
+    await build(`import os, sys\nos.unlink(sys.argv[1])`, db);
+    await build(make, db, "4");
+    const second = body<KcAnswer & { kept_earlier_larger_result?: string }>(await tool(KC, cwd, { db: "work/rerun.db", limit: 2 }));
+    assert.notEqual(second.complete_entries, firstFile);
+    assert.equal(second.kept_earlier_larger_result, firstFile);
+    assert.equal((await readFile(join(cwd, firstFile), "utf8")).trimEnd().split("\n").length, 10, "the earlier, larger result is intact");
+    assert.equal((await readFile(join(cwd, second.complete_entries as string), "utf8")).trimEnd().split("\n").length, 4);
   });
 });
 
@@ -1262,6 +1457,106 @@ test("unified_log records the reader's version, and declares the reader it needs
   });
 });
 
+const NOT_ROOT = process.getuid?.() !== 0;
+
+test("unified_log as a job writes only under $OUT: an out_dir outside it is refused with a reason, a read-only parent is a JSON error", async () => {
+  // The manifest's own example, out_dir work/ulog, ended in a traceback in a job: work/ is read-only there, and the harness maps only work/<id>/ to $OUT.
+  await withCwd(async (cwd) => {
+    const bin = await ulBin(cwd);
+    const archive = await logarchive(cwd);
+    await mkdir(join(cwd, "out"), { recursive: true });
+    const job = { JOB_ID: "j-1", OUT: join(cwd, "out") };
+    const outside = await runPy(UL, cwd, { path: archive, out_dir: "work/ulog" }, undefined, { ...AGENT, ...job, PATH: bin, ULI_MODE: "rows" });
+    assert.equal(outside.code, 1);
+    assert.doesNotMatch(outside.stderr, /Traceback/);
+    const refusal = JSON.parse(outside.stdout) as { error: string; out_dir: string; out: string };
+    assert.match(refusal.error, /only under \$OUT/);
+    assert.equal(refusal.out_dir, "work/ulog");
+    assert.equal(await exists(join(cwd, "work", "ulog")), false);
+    const inside = await runPy(UL, cwd, { path: archive, out_dir: "out/ulog" }, undefined, { ...AGENT, ...job, PATH: bin, ULI_MODE: "rows" });
+    assert.equal(JSON.parse(inside.stdout).status, "complete");
+    assert.ok(await exists(join(cwd, "out", "ulog", "unifiedlogs.jsonl")));
+  });
+});
+
+test("unified_log says an out_dir it cannot create is a JSON error, not a traceback", { skip: !NOT_ROOT }, async () => {
+  await withCwd(async (cwd) => {
+    const bin = await ulBin(cwd);
+    const archive = await logarchive(cwd);
+    await mkdir(join(cwd, "work", "ro"));
+    await chmod(join(cwd, "work", "ro"), 0o555);
+    try {
+      const out = await ul(cwd, bin, { path: archive, out_dir: "work/ro/u" });
+      assert.equal(out.code, 1);
+      assert.doesNotMatch(out.stderr, /Traceback/);
+      const err = JSON.parse(out.stdout) as { error: string; out_dir: string; reason: string };
+      assert.match(err.error, /out_dir could not be created/);
+      assert.match(err.reason, /Permission/);
+    } finally {
+      await chmod(join(cwd, "work", "ro"), 0o755);
+    }
+  });
+});
+
+test("unified_log does not stage a tree with a directory it cannot read, and counts one it cannot read in the census", { skip: !NOT_ROOT }, async () => {
+  // An unreadable uuidtext/0B was left out of the staging without a word, and the run was complete.
+  await withCwd(async (cwd) => {
+    const bin = await ulBin(cwd);
+    const path = await dbCopy(cwd);
+    const hidden = join(cwd, "work", "vardb", "uuidtext", "0B");
+    await mkdir(hidden);
+    await writeFile(join(hidden, "C"), "u2");
+    await chmod(hidden, 0o000);
+    try {
+      const out = await ul(cwd, bin, { path, out_dir: "work/u12" });
+      assert.equal(out.code, 1);
+      assert.doesNotMatch(out.stderr, /Traceback/);
+      const err = JSON.parse(out.stdout) as { error: string; directory: string; reason: string };
+      assert.match(err.error, /could not be read/);
+      assert.match(err.directory, /uuidtext\/0B$/);
+      assert.match(err.reason, /Permission/);
+      assert.equal(await exists(join(cwd, "work", "u12", ".logarchive-input")), false, "the staging was removed");
+      assert.equal(await exists(join(cwd, "work", "u12", "unifiedlogs.jsonl")), false, "the reader did not run");
+      // A .logarchive is not staged, so the census says what it could not read.
+      const archive = await logarchive(cwd, "y.logarchive");
+      const sub = join(cwd, archive, "0F");
+      await mkdir(sub);
+      await chmod(sub, 0o000);
+      try {
+        const census = JSON.parse((await ul(cwd, bin, { path: archive, out_dir: "work/u13" })).stdout) as UlAnswer & { warnings: string[] };
+        const files = census.decoded_coverage.support_files as { directories_unreadable: number; first_directories_unreadable: { directory: string }[] };
+        assert.equal(files.directories_unreadable, 1);
+        assert.match(files.first_directories_unreadable[0].directory, /0F$/);
+        assert.ok(census.warnings.some((w) => /could not be read/.test(w)), JSON.stringify(census.warnings));
+      } finally {
+        await chmod(sub, 0o755);
+      }
+    } finally {
+      await chmod(hidden, 0o755);
+    }
+  });
+});
+
+test("unified_log does not stage a tree with a file it cannot read", { skip: !NOT_ROOT }, async () => {
+  await withCwd(async (cwd) => {
+    const bin = await ulBin(cwd);
+    const path = await dbCopy(cwd, { "uuidtext/0A/locked": "secret-ish" });
+    const locked = join(cwd, "work", "vardb", "uuidtext", "0A", "locked");
+    await chmod(locked, 0o000);
+    try {
+      const out = await ul(cwd, bin, { path, out_dir: "work/u14" });
+      assert.equal(out.code, 1);
+      assert.doesNotMatch(out.stderr, /Traceback/);
+      const err = JSON.parse(out.stdout) as { error: string; path: string };
+      assert.match(err.error, /could not be copied/);
+      assert.match(err.path, /locked$/);
+      assert.equal(await exists(join(cwd, "work", "u14", ".logarchive-input")), false);
+    } finally {
+      await chmod(locked, 0o644);
+    }
+  });
+});
+
 test("unified_log with Apple's log counts the whole stream, not the preview (macOS only: the tool picks log only there)", { skip: process.platform !== "darwin" }, async () => {
   await withCwd(async (cwd) => {
     const bin = await ulBin(cwd, true);
@@ -1272,5 +1567,155 @@ test("unified_log with Apple's log counts the whole stream, not the preview (mac
     assert.equal(answer.entry_count, 995);
     assert.equal(answer.entries.length, 20);
     assert.equal(answer.status, "partial");
+  });
+});
+
+// --- paging: names that are not UTF-8, reruns, and the byte bound ----------------------------
+
+/** Load a tool's run.py as a module (its main() is guarded) and run Python against its classes. */
+const LOAD = `
+import importlib.util, json, os, sys
+def load(path):
+    spec = importlib.util.spec_from_file_location("tool", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+`;
+
+test("the tools' paging and values writers hold a file name that is not UTF-8", async () => {
+  // A name the filesystem gave as bytes that are not UTF-8 reaches Python as a lone surrogate; json.dumps(ensure_ascii=False)
+  // then failed writing a UTF-8 file, in the middle of a run (a values file already created, 0600, was left half written).
+  await withCwd(async (cwd) => {
+    for (const name of ["plist_read", "fsevents_parse", "knowledgec_query"]) {
+      const out = await runPySnippet(
+        `${LOAD}
+m = load(sys.argv[1])
+os.chdir(sys.argv[2])
+os.environ["AGENT_ID"] = "s1"
+page = m.LosslessPage("t", ["k"], 1)
+for i in range(3):
+    page.add({"file": "bad\\udcff-%d.plist" % i, "n": i})
+result = page.finish()
+rows = [json.loads(line) for line in open(result["all_results"], encoding="utf-8")]
+print(json.dumps({"n": len(rows), "back": rows[1]["file"] == "bad\\udcff-1.plist"}))
+`,
+        [join(MAC, name, "run.py"), cwd],
+        null,
+      );
+      assert.equal(out.code, 0, `${name}: ${out.stderr}`);
+      assert.deepEqual(JSON.parse(out.stdout), { n: 3, back: true }, name);
+    }
+    const values = await runPySnippet(
+      `${LOAD}
+m = load(sys.argv[1])
+os.chdir(sys.argv[2])
+os.environ["JOB_ID"] = "j-9"
+os.environ["OUT"] = os.path.join(sys.argv[2], "out9")
+v = m.SecretValues(True)
+v.add("F000001", {"file": "dir/bad\\udcff.plist", "key_path": "k"}, "value")
+v.close()
+row = json.loads(open(os.path.join(sys.argv[2], "out9", "plist-values.jsonl"), encoding="utf-8").readline())
+print(json.dumps({"file_back": row["file"] == "dir/bad\\udcff.plist", "value": row["value"]}))
+`,
+      [join(MAC, "plist_read", "run.py"), cwd],
+      null,
+    );
+    assert.equal(values.code, 0, values.stderr);
+    assert.deepEqual(JSON.parse(values.stdout), { file_back: true, value: "value" });
+  });
+});
+
+test("plist_read reads a directory whose file name is not UTF-8 end to end", { skip: process.platform === "darwin" }, async () => {
+  // APFS refuses such a name, so this runs where the filesystem takes bytes (Linux).
+  await withCwd(async (cwd) => {
+    const dir = join(cwd, "work", "badnames");
+    await mkdir(dir, { recursive: true });
+    const bad = Buffer.concat([Buffer.from(dir + "/"), Buffer.from([0x62, 0x61, 0x64, 0xff]), Buffer.from(".plist")]);
+    await writeFile(bad, bplist({ name: "x", ShadowHashData: [VERIFIER] }));
+    await mkdir(join(cwd, "out"), { recursive: true });
+    const run = await tool(PLIST, cwd, { path: "work/badnames", write_values: true, limit: 1 }, { JOB_ID: "j-1", OUT: join(cwd, "out") });
+    assert.equal(run.code, 0, run.stderr);
+    assert.doesNotMatch(run.stderr, /Traceback/);
+    const rows = (await readFile(join(cwd, "out", "plist-values.jsonl"), "utf8")).trimEnd().split("\n");
+    assert.equal(rows.length, 1);
+  });
+});
+
+test("plist_read keeps a larger earlier result when a rerun of the same sweep finds fewer files", async () => {
+  // A rerun with a smaller max_seconds (or fewer files) replaced a complete page file with a partial one of the same name.
+  await withCwd(async (cwd) => {
+    const dir = join(cwd, "work", "p");
+    await mkdir(dir, { recursive: true });
+    for (let i = 0; i < 8; i++) await writeFile(join(dir, `f${i}.plist`), bplist({ n: i }));
+    const first = body<PlistAnswer & { kept_earlier_larger_result?: string }>(await tool(PLIST, cwd, { path: "work/p", limit: 2 }));
+    const firstFile = first.complete_files as string;
+    assert.equal((await readFile(join(cwd, firstFile), "utf8")).trimEnd().split("\n").length, 8);
+    const { rm } = await import("node:fs/promises");
+    for (let i = 3; i < 8; i++) await rm(join(dir, `f${i}.plist`));
+    const second = body<PlistAnswer & { kept_earlier_larger_result?: string }>(await tool(PLIST, cwd, { path: "work/p", limit: 2 }));
+    assert.notEqual(second.complete_files, firstFile);
+    assert.equal(second.kept_earlier_larger_result, firstFile);
+    assert.equal((await readFile(join(cwd, firstFile), "utf8")).trimEnd().split("\n").length, 8, "the earlier, larger result is intact");
+    assert.equal((await readFile(join(cwd, second.complete_files as string), "utf8")).trimEnd().split("\n").length, 3);
+  });
+});
+
+test("plist_read bounds its inline answer by bytes and keeps the whole in a file it names", async () => {
+  await withCwd(async (cwd) => {
+    await mkdir(join(cwd, "work", "p"), { recursive: true });
+    for (let i = 0; i < 4; i++) {
+      await writeFile(join(cwd, "work", "p", `f${i}.plist`), bplist({ name: i === 1 ? "x".repeat(40000) : `n${i}` }));
+    }
+    const run = await tool(PLIST, cwd, { path: "work/p", max_inline_bytes: 20000 });
+    const answer = body<PlistAnswer & { inline_bounded_by_bytes: boolean; inline_byte_limit: number }>(run);
+    assert.equal(answer.inline_bounded_by_bytes, true);
+    assert.equal(answer.inline_byte_limit, 20000);
+    assert.deepEqual(answer.files.map((f) => f.file.split("/").pop()), ["f0.plist"], "the page is a prefix: the rows before the one that does not fit");
+    assert.ok(run.stdout.length < 20000 + 6000, `the answer is ${run.stdout.length} bytes`);
+    const rows = (await readFile(join(cwd, answer.complete_files as string), "utf8")).trimEnd().split("\n").map((l) => JSON.parse(l) as PlistRow);
+    assert.equal(rows.length, 4);
+    assert.equal(((rows[1].value as { name: string }).name).length, 40000);
+  });
+});
+
+test("fsevents_parse bounds its inline answer by bytes, keeps the whole, and counts a zero tail as padding", async () => {
+  // A 59 MB path record made a 62 MB answer: the page was bounded by a count of records, not by bytes.
+  await withCwd(async (cwd) => {
+    const giant = "g".repeat(3_000_000);
+    const tail = Buffer.alloc(30);
+    const dir = await fsDir(cwd, "evbytes", {
+      "0000000000000aaa": gzipSync(Buffer.concat([fsPage("2SLD", [fsRecord("small/one", 1n, CREATED, 1n), fsRecord(giant, 2n, CREATED, 2n), fsRecord("small/two", 3n, CREATED, 3n), tail])])),
+    });
+    const run = await tool(FS, cwd, { path: dir });
+    const answer = body<FsAnswer & { inline_bounded_by_bytes: boolean; inline_byte_limit: number }>(run);
+    assert.ok(run.stdout.length < 400_000, `the answer is ${run.stdout.length} bytes`);
+    assert.equal(answer.inline_bounded_by_bytes, true);
+    assert.deepEqual(answer.records.map((r) => r.path), ["small/one"], "a prefix of the records: up to the one that does not fit");
+    assert.equal(answer.record_count, 3);
+    assert.equal(answer.coverage.records.decoded, 3);
+    assert.equal(answer.coverage.records.empty_path, 0);
+    assert.equal((answer.coverage as unknown as { padding_bytes: number }).padding_bytes, 30);
+    const rows = (await readFile(join(cwd, answer.complete_records as string), "utf8")).trimEnd().split("\n").map((l) => JSON.parse(l) as { path: string });
+    assert.deepEqual(rows.map((r) => r.path.length), [9, 3_000_000, 9]);
+    // With an out_file the inline page is bounded the same way and the file holds every record.
+    const withFile = body<FsAnswer & { inline_bounded_by_bytes: boolean }>(await tool(FS, cwd, { path: dir, out_file: "work/fsb.jsonl" }));
+    assert.equal(withFile.inline_bounded_by_bytes, true);
+    assert.equal(withFile.records.length, 1);
+    assert.equal((await readFile(join(cwd, "work", "fsb.jsonl"), "utf8")).trimEnd().split("\n").length, 3);
+  });
+});
+
+test("fsevents_parse keeps a larger earlier result when a rerun of the same directory finds fewer records", async () => {
+  await withCwd(async (cwd) => {
+    const many = Array.from({ length: 6 }, (_, i) => fsRecord(`d/f${i}`, BigInt(10 + i), CREATED, BigInt(i)));
+    const dir = await fsDir(cwd, "evrerun", { "0000000000000abc": gzipSync(fsPage("2SLD", many)) });
+    const first = body<FsAnswer & { kept_earlier_larger_result?: string }>(await tool(FS, cwd, { path: dir, limit: 2 }));
+    const firstFile = first.complete_records as string;
+    await writeFile(join(cwd, dir, "0000000000000abc"), gzipSync(fsPage("2SLD", many.slice(0, 3))));
+    const second = body<FsAnswer & { kept_earlier_larger_result?: string }>(await tool(FS, cwd, { path: dir, limit: 2 }));
+    assert.notEqual(second.complete_records, firstFile);
+    assert.equal(second.kept_earlier_larger_result, firstFile);
+    assert.equal((await readFile(join(cwd, firstFile), "utf8")).trimEnd().split("\n").length, 6);
+    assert.equal((await readFile(join(cwd, second.complete_records as string), "utf8")).trimEnd().split("\n").length, 3);
   });
 });

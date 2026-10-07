@@ -26,6 +26,7 @@ import json
 import os
 import platform
 import shutil
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -92,28 +93,46 @@ def same_bytes(a, b):
 
 
 def walk_tree(root, rel_to, on_file):
-    """Every entry under `root`, not followed through links: a link or a special file is refused by name."""
-    for dirpath, dirs, names in os.walk(root, followlinks=False):
+    """Every entry under `root`, not followed through links: a link, a special file, or a directory or file
+    that cannot be read is refused by name, and nothing is staged (a directory left out would be a silent gap)."""
+    def unreadable(exc):
+        fail("a directory in the tree to be staged could not be read, so nothing was staged: a tree with a part left out is not the evidence",
+             directory=getattr(exc, "filename", None), reason="%s: %s" % (type(exc).__name__, exc))
+
+    for dirpath, dirs, names in os.walk(root, followlinks=False, onerror=unreadable):
         dirs.sort()
         for name in sorted(dirs) + sorted(names):
             full = os.path.join(dirpath, name)
-            mode = os.lstat(full).st_mode
             rel = os.path.relpath(full, rel_to)
-            if os.path.islink(full):
+            try:
+                st = os.lstat(full)
+            except OSError as exc:
+                fail("an entry in the tree to be staged could not be examined, so nothing was staged",
+                     path=full, reason="%s: %s" % (type(exc).__name__, exc))
+            if stat.S_ISLNK(st.st_mode):
                 fail("a link in the tree to be staged: the reader would be handed a way out of it, so nothing was staged",
                      link=full, found_as=rel)
-            if os.path.isdir(full):
+            if stat.S_ISDIR(st.st_mode):
                 continue
-            if not os.path.isfile(full) or not (mode & 0o100000):
+            if not stat.S_ISREG(st.st_mode):
                 fail("a file that is not a regular file in the tree to be staged; nothing was staged", file=full)
-            on_file(full, rel, os.path.getsize(full))
+            on_file(full, rel, st.st_size)
 
 
 def inventory(path, budget):
-    """What the input holds, by name: a census, not a verdict on whether it is complete."""
-    census = {"tracev3_files": 0, "timesync_files": 0, "uuidtext_files": 0, "dsc_files": 0, "other_files": 0}
+    """What the input holds, by name: a census, not a verdict on whether it is complete. A directory that
+    cannot be read is counted and named, never left out silently."""
+    census = {"tracev3_files": 0, "timesync_files": 0, "uuidtext_files": 0, "dsc_files": 0, "other_files": 0,
+              "directories_unreadable": 0, "first_directories_unreadable": []}
+
+    def unreadable(exc):
+        census["directories_unreadable"] += 1
+        if len(census["first_directories_unreadable"]) < FIRST:
+            census["first_directories_unreadable"].append({"directory": getattr(exc, "filename", None),
+                                                           "reason": "%s: %s" % (type(exc).__name__, exc)})
+
     seen = 0
-    for dirpath, _dirs, names in os.walk(path, followlinks=False):
+    for dirpath, _dirs, names in os.walk(path, followlinks=False, onerror=unreadable):
         parts = os.path.relpath(dirpath, path).split(os.sep)
         for name in names:
             seen += 1
@@ -166,14 +185,21 @@ def stage(path, scratch, max_files, max_bytes):
     conflicts, duplicates = [], set()
     for tree, full, rel in plan[first:]:
         if rel in held:
-            if same_bytes(held[rel], full):
+            try:
+                same = same_bytes(held[rel], full)
+            except OSError as exc:
+                fail("a member in both trees could not be compared, so nothing was staged", path=full, reason="%s: %s" % (type(exc).__name__, exc))
+            if same:
                 duplicates.add(full)
             else:
                 conflicts.append(rel)
     if conflicts:
         fail("a member is in both diagnostics and uuidtext with different bytes; nothing was staged: which one the reader should see is "
              "not for this tool to choose", conflicts=sorted(conflicts)[:FIRST], conflict_count=len(conflicts))
-    os.makedirs(scratch, exist_ok=False)
+    try:
+        os.makedirs(scratch, exist_ok=False)
+    except OSError as exc:
+        fail("the staging directory could not be created, so nothing was staged", path=scratch, reason="%s: %s" % (type(exc).__name__, exc))
     copied, size = 0, 0
     try:
         for tree, full, rel in plan:
@@ -184,7 +210,11 @@ def stage(path, scratch, max_files, max_bytes):
             shutil.copyfile(full, target)
             copied += 1
             size += os.path.getsize(full)
-    except Exception:
+    except OSError as exc:
+        shutil.rmtree(scratch, ignore_errors=True)
+        fail("a file could not be copied into the staging directory, so nothing was staged and the reader did not run",
+             path=getattr(exc, "filename", None), reason="%s: %s" % (type(exc).__name__, exc))
+    except BaseException:
         shutil.rmtree(scratch, ignore_errors=True)
         raise
     return {"staged": True, "files": copied, "bytes": size, "duplicates_identical": len(duplicates),
@@ -276,7 +306,18 @@ def main():
     # Where every file this run writes would land, checked before the directory is touched; a name that
     # already exists (a file, or a link) is an earlier run's output and is not overwritten.
     names = {n: resolve_output(os.path.join(out_dir, n), "out_dir") for n in OUTPUT_NAMES}
-    os.makedirs(out_dir, exist_ok=True)
+    job, job_out = os.environ.get("JOB_ID"), os.environ.get("OUT")
+    if job and job_out:
+        # A job writes only $OUT; the rest of the run directory is read-only to it. The harness gives a
+        # path under work/<your id>/ as a place under $OUT, so one that is not there is a mistake worth a reason.
+        dest, root = (Path.cwd() / out_dir).resolve(), Path(job_out).resolve()
+        if dest != root and root not in dest.parents:
+            fail("as a job this tool writes only under $OUT, and out_dir is not there: give it as work/<your id>/<name>, which the job "
+                 "maps to $OUT/<name>", out_dir=out_dir, out=str(root))
+    try:
+        os.makedirs(out_dir, exist_ok=True)
+    except OSError as exc:
+        fail("out_dir could not be created", out_dir=out_dir, reason="%s: %s" % (type(exc).__name__, exc))
     held = [n for n in OUTPUT_NAMES if os.path.lexists(os.path.join(out_dir, n))]
     if held:
         fail("out_dir already holds %s from an earlier run; the tool does not overwrite it: use a new directory" % ", ".join(held),
@@ -312,6 +353,10 @@ def main():
 
     census = inventory(input_seen, max_files) if os.path.isdir(input_seen) else None
     if census is not None:
+        if census["directories_unreadable"]:
+            warnings.append("%d director%s under the input could not be read by this tool, so they are not in the census "
+                            "(the reader may not have read them either; the first: %s)" % (census["directories_unreadable"], "y" if census["directories_unreadable"] == 1 else "ies",
+                                                 census["first_directories_unreadable"][0]["directory"]))
         if not census["tracev3_files"]:
             warnings.append("no .tracev3 file was found under the input: the reader had no log to decode")
         if not census["timesync_files"]:
@@ -330,6 +375,9 @@ def main():
             returncode = proc.returncode
         except subprocess.TimeoutExpired:
             timed_out = True
+        except OSError as exc:
+            fail("the reader's output could not be created or started, and it did not run", out_dir=out_dir,
+                 reason="%s: %s" % (type(exc).__name__, exc))
     finally:
         if staging:
             shutil.rmtree(scratch, ignore_errors=True)
