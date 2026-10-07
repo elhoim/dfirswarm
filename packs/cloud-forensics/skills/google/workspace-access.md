@@ -19,4 +19,4 @@ Use when Workspace evidence must answer who holds delegated access, what was sha
 
 **Does not show:** that a grant, share or forward was used; the state of any setting after the last supplied record.
 
-**Sensitive output:** grant, client and token values are secrets: location, type and what they grant go in the ledger, never the value or a hash.
+**Sensitive output:** client secrets and tokens are secrets: place, type and what they grant go in the ledger, never the value or a hash; client and grant ids are identifiers, cited in full. A job that prints raw token events runs with `secret_output: true`.

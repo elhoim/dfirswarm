@@ -17,16 +17,18 @@ itself an answer.
    evidence supports as not the account owner's, with the address, the client,
    the application, how many factors it satisfied and the evidence for that
    reading; or that the supplied logs do not establish one.
-3. What was done: every notable operation in the window, with its record id.
+3. What was done: every notable operation in the window, with its record id (or
+   its file, record and line where the export has none).
 4. Persistence in the account: mailbox rules, forwarding, delegations, OAuth
    consents and their scopes, and application identities added.
-5. Data: what was read, downloaded, shared or sent, and whether the logs can
-   answer that at all on this tenant's licensing.
+5. Data: what the records show was accessed, downloaded, shared or sent, and
+   whether the logs can answer that at all on this tenant's licensing.
 6. Containment: when the password was reset, when sessions and refresh tokens
    were revoked, when consents were removed, each as the evidence shows it or
    stated as not established — and the interval between them as a potential
    exposure interval, not as proven access.
-7. What was not enabled, and therefore what cannot be established.
+7. What was not enabled, or cannot be shown to have been, and therefore what
+   cannot be established.
 
 ## How to divide the work
 
@@ -49,7 +51,8 @@ own. The sign-off is these acts, not a post. Nothing else is assigned.
 through `## 7.`. Answer 6 states the revocation times the evidence supports, not
 only the reset time, or says they are not established from the supplied
 evidence. Answer 7 names at least one thing the tenant's configuration made unanswerable,
-or says explicitly that everything needed was enabled. The ledger holds one
+or says that everything needed was enabled, or that the supplied evidence does
+not establish the configuration. The ledger holds one
 `answer` entry per question (`question:1` to `question:7`) and one each for
 `summary` and `narrative`, with every defect the answers check names fixed or
 named by a limitation, and the critic, who wrote none of them, has recorded
@@ -60,9 +63,10 @@ unchanged.
 
 - `test -f work/report.md`
 - `for n in 1 2 3 4 5 6 7; do grep -q "^## $n\." work/report.md || exit 1; done`
-- `grep -qiE 'retention|revok' work/report.md`
-- `awk '/^## 6\./{f=1;next} /^## [0-9]+\./{f=0} f' work/report.md | grep -qiE 'revok|not established'`
-  (answer 6 itself says what the evidence shows about revocation, or that it does not establish it)
+- `grep -qiE 'retention|revo[kc]' work/report.md`
+- `awk '/^## 6\./{f=1;next} /^## [0-9]+\./{f=0} f && tolower($0) ~ /revo[kc]/ {r=1} END{exit !r}' work/report.md`
+  (answer 6 itself says what the evidence shows about revocation or revoking, or that it is not established; a
+  single awk, so that no pipe can be closed early under `set -o pipefail`)
 - `test "$(grep -c '"kind":"event"' ledger/entries.jsonl)" -ge 5`
 - `node --experimental-strip-types --no-warnings "$SWARM_HARNESS/scripts/check-answers.ts" --sections 1,2,3,4,5,6,7,summary,narrative`
 - `grep '"tool":"inputs_check"' traces/events.jsonl | tail -1 | grep -q '"content_ok":true'`

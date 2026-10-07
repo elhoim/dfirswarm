@@ -4,6 +4,7 @@
  * returns fails by its words; a fixture here is the skill's own text, never a tool's output.
  */
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -48,12 +49,12 @@ test("the pack carries these nine skills and no others", () => {
   assert.deepEqual(found.sort(), [...IDS].sort());
 });
 
-test("every skill is a leaf: at most 800 tokens (bytes / 4.245) and 300 lines, and its first line says when to use it and when not to", () => {
+test("every skill is a leaf: at most 800 tokens (bytes / 4.245) and 300 lines (the program's bound; these files are under 30), and its first line says when to use it and when not to", () => {
   for (const id of IDS) {
     const { text, body } = read(id);
     const tokens = Math.round(Buffer.byteLength(text) / 4.245);
     assert.ok(tokens <= 800, `${id} is ${tokens} tokens`);
-    assert.ok(text.split("\n").length <= 300);
+    assert.ok(text.split("\n").length <= 300, `${id} is over 300 lines`);
     assert.match(body.trimStart().split("\n")[0], /^Use when .*\bNot for\b/, `${id}: first line`);
   }
 });
@@ -73,21 +74,32 @@ test("each skill names the tools its front matter lists, and says what it does n
   for (const id of IDS) {
     const { front, body } = read(id);
     for (const tool of list(front.tools ?? "[]")) assert.ok(body.includes(tool), `${id} lists ${tool} and does not name it`);
-    for (const tool of ["cloudtrail_parse", "signin_analyse", "ual_parse"]) if (body.includes(tool)) assert.ok(list(front.tools).includes(tool), `${id} names ${tool} and does not list it`);
+    for (const tool of ["cloudtrail_parse", "signin_analyse", "ual_parse"]) {
+      if (body.includes(tool)) assert.ok(list(front.tools ?? "[]").includes(tool) || list(front.mentions ?? "[]").includes(tool), `${id} names ${tool} and lists it in neither tools nor mentions`);
+    }
+    for (const tool of list(front.mentions ?? "[]")) assert.ok(!list(front.tools ?? "[]").includes(tool), `${id} both uses and mentions ${tool}`);
     assert.match(body, /\*\*Does not show:\*\*/, `${id} says what it does not show`);
   }
 });
 
 test("a skill whose tool can reach a secret says how it is run and what is never written", () => {
-  for (const id of ["aws/cloudtrail", "entra/signins", "m365/unified-audit-log", "google/workspace", "identity/tokens"]) {
+  // Every skill that lists a pack tool, and the two that send an agent to an export of tokens or grants without listing one.
+  const reaching = IDS.filter((id) => list(read(id).front.tools ?? "[]").length > 0).concat(["google/workspace-access"]);
+  assert.ok(reaching.length >= 8, `${reaching.length} skills reach a tool`);
+  for (const id of reaching) {
     const { body } = read(id);
     assert.match(body, /\*\*Sensitive output:\*\*/, id);
     assert.match(body, /secret_output: true/, `${id} says to run the job with secret_output: true`);
+    assert.doesNotMatch(body, /print (the|a) (client )?secret|write (the|a) (secret|token) (value|in full)/i, `${id} must not tell an agent to write a secret`);
   }
   const tokens = read("identity/tokens").body;
   assert.match(tokens, /Do not authenticate with, replay, refresh or submit a recovered token/, "tokens: no replay of a recovered token");
-  assert.match(tokens, /never its value, a fragment or a hash of a secret/);
+  assert.match(tokens, /never its value or a hash of a secret/);
   assert.match(tokens, /decoding does not validate a signature/);
+  // A client or grant id is an identifier, cited in full; a client secret and a token are not.
+  assert.match(read("google/workspace-access").body, /client and grant ids are identifiers, cited in full/);
+  // The tool withholds by name and by shape, and says so: the skill does not claim more.
+  assert.match(read("google/workspace").body, /other secrets are not recognised/);
 });
 
 test("the claims the review removed do not come back", () => {
@@ -106,10 +118,41 @@ test("the claims the review removed do not come back", () => {
     [/the tenant is (Google|Microsoft|AWS)\b/i, "a tenant label as a routing rule"],
     [/\brole_assumed_by\b/, "the old attribution field"],
     [/\bpwsh\b|\baws\b (CLI|configure|sts)/, "a host program this pack does not run"],
+    // Reworded overclaims the review put back by hand, 22 of 23 of which the first version of this suite let through.
+    [/\b\d+(\.\d+)?[- ]?(days?|hours?|minutes?|seconds?|weeks?|months?|years?)\b/i, "a retention, delay or window figure (no one supplied it)"],
+    [/\b(one|two|three|four|five|six|seven|ten|twelve|twenty|thirty|sixty|ninety)[- ](days?|hours?|minutes?|weeks?|months?|years?)\b/i, "a retention, delay or window figure in words"],
+    [/bound the period|(period|window|interval) (in which |during which )?(the )?(intruder|attacker) (kept|held|had)\b/i, "an attacker's window of access computed from two times"],
+    [/(erase|wipe|clear)s? (the |that )?(trail|log)/i, "StopLogging as erasing the trail"],
+    [/denials?[^.]{0,40}\b(marks?|is|are)\b[^.]{0,20}(reconnaissance|the start|the first)/i, "denials as a phase of an intrusion"],
+    [/how the data left|data left the tenant/i, "sharing as exfiltration"],
+    [/MailItemsAccessed[^.]{0,40}shows? (which|that|the)/i, "MailItemsAccessed read as a statement of what was read"],
+    [/SharingSet[^.]{0,60}anonymous/i, "SharingSet as anonymous sharing"],
+    [/Add service principal\.?`?[^.]{0,40}records? the consent/i, "a service principal's creation read as a consent"],
+    [/records each sign-in|each sign-in attempt/i, "sign-ins as complete"],
+    [/only (on|in|for) (the )?(Business|Enterprise|E3|E5|P1|P2|premium)/i, "an edition rule stated as fact"],
+    [/(proves?|shows?)\b[^.]{0,40}\b(authentic|complete|correct)\b/i, "a hash or an export read as proof of authenticity or completeness"],
+    [/(earliest|oldest) and (latest|newest)[^.]{0,50}(show|prove|period)/i, "the first and last record read as the period an export covers"],
+    [/session_origin[^.]{0,40}names? the (person|human|user)/i, "a session link read as a person"],
+    [/(50126|50158|50074)[^.]{0,30}\bmeans\b/i, "a result code read as one narrow cause"],
+    [/forwarding rule[^.]{0,40}shows?[^.]{0,20}(delivered|was received)/i, "a configured forward read as a delivery"],
+    [/every workload'?s? (activity|operation)|one row per (action|operation)/i, "the unified audit log as complete"],
+    [/\blist every (grant|consent|permission)\b|record each revocation you make/i, "a task that presumes the tenant can be queried or changed"],
+    [/(say|state) (that )?none was read|say that no [A-Za-z ]+ reader was available/i, "a boundary worded as 'do not examine it'"],
+    [/names every candidate/i, "an unresolved link that lists every candidate (it lists to a cap, with the count)"],
+    [/first sign-in that was not (the )?(account owner|user)/i, "initial access presumed"],
   ];
   for (const { id, text } of all) for (const [rx, what] of gone) assert.doesNotMatch(text, rx, `${id}: ${what}`);
   const signins = all.find((s) => s.id === "entra/signins")!.text;
   assert.doesNotMatch(signins, /50126[^.]*wrong password|50158[^.]*conditional access failure/i, "result codes are the provider's words, not a narrowed gloss");
+  // What the review put right stays right: Interrupted is null even with a code, and the tool's cap and counts are stated.
+  assert.match(signins, /portal `Status` of Interrupted[\s\S]{0,160}are null/);
+  assert.doesNotMatch(signins, /`Interrupted` and other unlisted statuses are null/);
+  const trail = all.find((s) => s.id === "aws/cloudtrail")!.text;
+  assert.match(trail, /count distinct `event_id`/, "overlapping exports repeat events");
+  assert.match(all.find((s) => s.id === "m365/unified-audit-log")!.text, /count distinct `Id`/, "overlapping searches repeat records");
+  assert.match(all.find((s) => s.id === "identity/grants")!.text, /registered authentication method, a role assignment or a created account/, "account-side persistence");
+  assert.match(all.find((s) => s.id === "logs/sources")!.text, /Offline:/, "the offline boundary is in every skill");
+  for (const { id, body } of all) assert.match(body, /\b(Offline|Boundary)\b|never (query|authenticate)/, `${id} states the offline boundary`);
 });
 
 test("the retention and delay figures are not in the README either, and the goal does not presume what it asks", () => {
@@ -117,11 +160,30 @@ test("the retention and delay figures are not in the README either, and the goal
   assert.doesNotMatch(readme, /\b(180|90) days\b|seven days on Free|17 October 2023/i);
   const goal = readFileSync(join(ROOT, "packs", "cloud-forensics", "goals", "tenant-compromise.md"), "utf8");
   assert.doesNotMatch(goal, /the first sign-in that was not the user|what the\s+attacker still holds/i);
+  assert.doesNotMatch(goal, /what was read, downloaded/, "Q5 asks what the records show was accessed, not what was read");
   assert.match(goal, /not established/);
-  // The acceptance checks are not weakened: the five-event minimum and the revocation grep stay, and a check binds answer 6.
-  assert.match(goal, /-ge 5/);
-  assert.match(goal, /grep -qiE 'retention\|revok' work\/report\.md/);
-  assert.match(goal, /awk '\/\^## 6\\\.\//);
+  assert.match(goal, /the supplied evidence does\s+not establish the configuration/, "the definition of done lets answer 7 say the configuration is not established");
+});
+
+test("the goal's check on answer 6 is one awk, so that no pipe can be closed early under pipefail: it passes a long correct report and fails one that never says revoked", () => {
+  const goal = readFileSync(join(ROOT, "packs", "cloud-forensics", "goals", "tenant-compromise.md"), "utf8");
+  const line = /^- `(awk '\/\^## 6\\\..*work\/report\.md)`$/m.exec(goal);
+  assert.ok(line, "the check on answer 6 is an awk over work/report.md");
+  const check = line[1];
+  assert.doesNotMatch(check, /\|/, "no pipe: awk | grep -q fails a correct report with 141 when grep leaves first");
+  assert.match(check, /revo\[kc\]/, "revoked, revoking and revocation all count");
+  const filler = `${"a line of filler text that is not about sessions at all\n".repeat(4000)}`;
+  const report = (six: string, eight = ""): string => `## 1.\nx\n## 6.\n${six}\n${filler}## 7.\nx\n${eight}`;
+  const run = (text: string): number => {
+    const dir = spawnSync("mktemp", ["-d"], { encoding: "utf8" }).stdout.trim();
+    spawnSync("bash", ["-c", `cat > ${dir}/report.md`], { input: text });
+    const res = spawnSync("bash", ["-c", `set -euo pipefail; mkdir -p ${dir}/work; cp ${dir}/report.md ${dir}/work/report.md; cd ${dir}; ${check}`]);
+    spawnSync("rm", ["-rf", dir]);
+    return res.status ?? -1;
+  };
+  assert.equal(run(report("Sessions were revoked at 14:00 (E-4).")), 0);
+  assert.equal(run(report("Revocation of sessions is not established.")), 0);
+  assert.equal(run(report("Only the reset time is evidenced."), "## 8.\nSessions were revoked.\n"), 1, "a word in another section does not count");
 });
 
 test("pwsh and aws are said to be an operator's acquisition tools, in requires and not in a skill", () => {
