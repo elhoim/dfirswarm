@@ -192,34 +192,44 @@ def apply_fixup(block):
     return bytes(out), None
 
 
-def read_filename(buf, at):
-    """The $FILE_NAME attribute content. Returns None when it is not plausibly one."""
-    if at + FN_FIXED > len(buf):
-        return None
+def read_filename(buf, at, key_end=None, strict=True):
+    """The $FILE_NAME attribute content at `at`, as (found, why). `found` is None when it is not plausibly one, and
+    `why` says what failed. `key_end` bounds the name to the index entry's own key; `strict` adds the plausibility rules
+    a search of slack needs (a parent that is a real entry, a believable time) and a live entry, which the node walk
+    has already placed, does not: its odd values are kept and flagged `unreliable` with the reasons."""
+    limit = len(buf) if key_end is None else min(key_end, len(buf))
+    if at + FN_FIXED > limit:
+        return None, "the key holds %d bytes, fewer than the %d a $FILE_NAME header needs" % (max(limit - at, 0), FN_FIXED)
     parent, = struct.unpack_from("<Q", buf, at)
     parent_entry = parent & 0xFFFFFFFFFFFF
-    if parent_entry == 0 or parent_entry > 0xFFFFFFFF:
-        return None
     created, modified, mft_modified, accessed = struct.unpack_from("<QQQQ", buf, at + 8)
     alloc, real = struct.unpack_from("<QQ", buf, at + 0x28)
     flags, = struct.unpack_from("<I", buf, at + 0x38)
     name_chars = buf[at + 0x40]
     namespace = buf[at + 0x41]
-    if not 1 <= name_chars <= 255 or namespace not in NAMESPACE:
-        return None
+    if not 1 <= name_chars <= 255:
+        return None, "the name length is %d characters" % name_chars
+    if namespace not in NAMESPACE:
+        return None, "the namespace byte is %d" % namespace
     end = at + FN_FIXED + name_chars * 2
-    if end > len(buf):
-        return None
+    if end > limit:
+        return None, "the name is %d characters (%d bytes from the start of the key) and the key holds %d" % (
+            name_chars, FN_FIXED + name_chars * 2, max(limit - at, 0))
     raw = buf[at + FN_FIXED:end]
     try:
         name = raw.decode("utf-16-le")
     except UnicodeDecodeError:
-        return None
+        return None, "the name is not valid UTF-16"
     if not name or any(ord(c) < 0x20 for c in name):
-        return None
+        return None, "the name holds a control character"
+    reasons = []
+    if parent_entry == 0 or parent_entry > 0xFFFFFFFF:
+        reasons.append("the parent reference (entry %d) is not a believable directory" % parent_entry)
     if not any(filetime(v) for v in (created, modified)):
-        return None
-    return {
+        reasons.append("the created and modified times are both 0, all ones or past the year 9999")
+    if strict and reasons:
+        return None, "; ".join(reasons)
+    found = {
         "name": name,
         "namespace": NAMESPACE[namespace],
         "parent_entry": parent_entry,
@@ -237,6 +247,10 @@ def read_filename(buf, at):
         "is_directory": bool(flags & 0x10000000),
         "length": FN_FIXED + name_chars * 2,
     }
+    if reasons:
+        found["unreliable"] = True
+        found["unreliable_reasons"] = reasons
+    return found, None
 
 
 def node_problems(block):
@@ -255,9 +269,9 @@ def live_entries(block, base_offset):
     """Walk the node's live entries, the ones the directory still lists. Every length is checked against
     the live region and the key length against the entry: the first entry that does not fit is a problem,
     named, and the walk of this node's live entries ends there."""
-    out, problems = [], []
+    out, problems, unreadable = [], [], []
     if len(block) < 0x28:
-        return out, 0, 0, problems
+        return out, 0, 0, problems, unreadable
     first, total, allocated = struct.unpack_from("<III", block, 0x18)
     start = 0x18 + first
     end = min(0x18 + total, len(block))
@@ -271,13 +285,19 @@ def live_entries(block, base_offset):
             break
         if entry_flags & 0x02:                     # the end-of-node marker
             break
-        found = read_filename(block, at + 0x10) if key_length else None
+        if key_length:
+            found, why = read_filename(block, at + 0x10, key_end=at + 0x10 + key_length, strict=False)
+        else:
+            found, why = None, "the entry has no key"
         if found:
             found.update({"source": "live", "mft_entry": reference & 0xFFFFFFFFFFFF,
                           "mft_sequence": reference >> 48, "offset": base_offset + at})
             out.append(found)
+        else:
+            unreadable.append({"offset": base_offset + at, "mft_entry": reference & 0xFFFFFFFFFFFF,
+                               "mft_sequence": reference >> 48, "why": why})
         at += length
-    return out, 0x18 + total, 0x18 + allocated, problems
+    return out, 0x18 + total, 0x18 + allocated, problems, unreadable
 
 
 def carve_slack(block, slack_start, slack_end, base_offset):
@@ -293,7 +313,7 @@ def carve_slack(block, slack_start, slack_end, base_offset):
     at += (-at) % 8
     limit = min(slack_end, len(block))
     while at + FN_FIXED <= limit:
-        found = read_filename(block, at)
+        found, _ = read_filename(block, at)
         if found:
             found.update({"source": "slack", "offset": base_offset + at})
             out.append(found)
@@ -304,16 +324,13 @@ def carve_slack(block, slack_start, slack_end, base_offset):
     return out
 
 
-def main():
-    try:
-        args = json.load(sys.stdin)
-    except ValueError as exc:
-        fail("arguments are not valid JSON", reason=str(exc))
-
+def run(args):
     path = args.get("path")
     if not isinstance(path, str) or not path:
         fail("path is required: an extracted $I30 stream or a blob to sweep")
     if not os.path.isfile(path):
+        if os.path.exists(path):
+            fail("not a regular file: it is not opened", path=path, not_attempted=1)
         fail("no such file", path=path)
 
     block_size = args.get("block_size", 4096)
@@ -338,11 +355,16 @@ def main():
     problems = LosslessPage("indx_carve-problems", key, 40)
     blocks, from_slack = 0, 0
     blocks_fixup_failed = blocks_salvaged = excluded = 0
+    live_unreadable_count = live_flagged = 0
 
-    with open(path, "rb") as fh:
+    try:
+        fh = open(path, "rb")
         size = os.fstat(fh.fileno()).st_size
         # Mapped rather than read: a raw blob to sweep can be larger than memory.
         data = mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ) if size else b""
+    except (OSError, ValueError) as exc:
+        fail("could not read the file", path=path, reason=str(exc))
+    with fh:
         try:
             at = 0
             while True:
@@ -363,9 +385,15 @@ def main():
                 node_problem = node_problems(fixed) if not problem else None
                 if node_problem:
                     problems.add({"offset": start_of_block, "why": node_problem})
-                live, slack_start, slack_end, live_problems = live_entries(fixed, start_of_block)
+                live, slack_start, slack_end, live_problems, live_unreadable = live_entries(fixed, start_of_block)
                 for why in live_problems:
                     problems.add({"offset": start_of_block, "why": why})
+                for lost in live_unreadable:
+                    live_unreadable_count += 1
+                    problems.add({"offset": lost["offset"], "block_offset": start_of_block,
+                                  "why": "a live entry (MFT entry %d, sequence %d) was not read as a name: %s"
+                                         % (lost["mft_entry"], lost["mft_sequence"], lost["why"])})
+                live_flagged += sum(1 for e in live if e.get("unreliable"))
                 salvaged = bool(problem or node_problem or live_problems)
                 if salvaged:
                     blocks_salvaged += 1
@@ -395,8 +423,8 @@ def main():
     page = entries.finish()
     problem_page = problems.finish()
     out = {
-        "parser": "indx_carve/2",
-        "status": "partial" if blocks_salvaged else "complete",
+        "parser": "indx_carve/3",
+        "status": "partial" if (blocks_salvaged or live_unreadable_count) else "complete",
         "path": path,
         "block_size": block_size,
         "blocks": blocks,
@@ -404,6 +432,8 @@ def main():
         "blocks_salvaged": blocks_salvaged,
         "include_unreliable": include_unreliable,
         "entries_excluded_unreliable": excluded,
+        "live_entries_unreadable": live_unreadable_count,
+        "live_entries_flagged_unreliable": live_flagged,
         "entries": entries.page,
         "entry_count": page["matched"],
         "from_slack": from_slack,
@@ -419,11 +449,28 @@ def main():
                 + ("%d block(s) failed an integrity check (see problems): their entries are %s. " % (
                     blocks_salvaged, "included and marked salvaged" if include_unreliable else
                     "left out (%d), unless include_unreliable is true" % excluded) if blocks_salvaged else "")
+                + ("%d live entry(ies) were walked but could not be read as a name (see problems: each says why, with its MFT "
+                   "reference), and none is dropped silently. " % live_unreadable_count if live_unreadable_count else "")
+                + ("%d live entry(ies) carry values that are odd (a parent that is not a believable directory, no believable time): "
+                   "they are returned, flagged unreliable with the reasons. " % live_flagged if live_flagged else "")
                 + "See filesystem/journals.",
     }
     if problem_page.get("all_results"):
         out["all_problems"] = problem_page["all_results"]
     print(json.dumps(out, indent=2))
+
+
+def main():
+    try:
+        args = json.load(sys.stdin)
+    except ValueError as exc:
+        fail("arguments are not valid JSON", reason=str(exc))
+    if not isinstance(args, dict):
+        fail("arguments must be a JSON object")
+    try:
+        run(args)
+    except OSError as exc:
+        fail("the file could not be read", reason=str(exc))
 
 
 if __name__ == "__main__":

@@ -20,6 +20,11 @@ never as a complete record; one longer than its layout says carries `trailing_by
 read (a $I is a few hundred bytes; one over 1 MiB is not a $I and is reported as such). An unknown
 header is not guessed at.
 
+Only a regular file is opened, and without blocking and without following a link: a name that is a
+link, a FIFO, a device, a socket or a directory is not read, is named with the reason and is counted
+under `not_attempted`, and a directory that cannot be listed or a link to a directory is named the same
+way. A path that is itself a link to a directory is refused, not followed.
+
 The directory a $I sits in is a per-user bin named by a SID (`bin_directory_sid`): the account whose
 bin received the item. The record does not say who deleted the file, or from where the deletion was
 asked, and a $R file of the same name (reported as `r_file`) holds the content only while it lasts.
@@ -28,6 +33,7 @@ import datetime
 import json
 import os
 import re
+import stat
 import struct
 import sys
 from pathlib import Path
@@ -136,7 +142,9 @@ FILETIME_EPOCH = datetime.datetime(1601, 1, 1, tzinfo=datetime.timezone.utc)
 V1_SIZE = 0x18 + 520
 MAX_I_BYTES = 1024 * 1024
 SID = re.compile(r"^S-\d+(?:-\d+)+$", re.I)
-PARSER = "recyclebin_i/2"
+PARSER = "recyclebin_i/3"
+KINDS = [(stat.S_ISFIFO, "a FIFO"), (stat.S_ISDIR, "a directory"), (stat.S_ISCHR, "a character device"),
+         (stat.S_ISBLK, "a block device"), (stat.S_ISSOCK, "a socket")]
 
 
 def fail(message, **extra):
@@ -205,29 +213,50 @@ def parse(data, name, file_bytes):
     return entry
 
 
+def kind_of(mode):
+    for test, name in KINDS:
+        if test(mode):
+            return name
+    return "not a regular file"
+
+
 def main():
     try:
         args = json.load(sys.stdin)
     except ValueError as exc:
         fail("arguments are not valid JSON", reason=str(exc))
+    if not isinstance(args, dict):
+        fail("arguments must be a JSON object")
 
     path = args.get("path")
     if not isinstance(path, str) or not path:
         fail("path is required: a $I file, or a directory holding them")
 
     targets = []
+    not_listed = []        # directories and links that were not entered, and why
+    if os.path.islink(path) and os.path.isdir(path):
+        fail("the path is a symbolic link to a directory: it is not followed (name the directory itself)", path=path, not_attempted=1)
     if os.path.isdir(path):
-        for root, dirs, names in os.walk(path):
+        def unreadable_directory(exc):
+            not_listed.append({"file": getattr(exc, "filename", None) or path,
+                               "error": "the directory could not be listed: %s" % exc.strerror, "not_attempted": True})
+        for root, dirs, names in os.walk(path, onerror=unreadable_directory):
             dirs.sort()
+            for d in dirs:
+                if os.path.islink(os.path.join(root, d)):
+                    not_listed.append({"file": os.path.join(root, d), "error": "a link to a directory, not followed",
+                                       "not_attempted": True})
             for name in sorted(names):
                 if name.upper().startswith("$I"):
                     targets.append(os.path.join(root, name))
     elif os.path.isfile(path):
         targets = [path]
+    elif os.path.lexists(path):
+        fail("not a regular file or a directory: it is not opened", path=path, not_attempted=1)
     else:
         fail("no such file or directory", path=path)
 
-    if not targets:
+    if not targets and not not_listed:
         fail("no $I files under that directory", path=path)
 
     limit = args.get("limit", 500)
@@ -235,22 +264,34 @@ def main():
         fail("limit must be a positive integer", limit=args.get("limit"))
 
     entries = LosslessPage("recyclebin_i", [path], limit)
-    counts = {"parsed": 0, "truncated": 0, "unknown_header": 0, "unreadable": 0}
+    counts = {"parsed": 0, "truncated": 0, "unknown_header": 0, "unreadable": 0, "not_attempted": 0}
+    for skipped in not_listed:
+        counts["not_attempted"] += 1
+        entries.add(skipped)
     for target in targets:
         base = os.path.basename(target)
         directory = os.path.dirname(os.path.abspath(target))
         entry = None
         try:
-            if os.path.islink(target):
-                entry = {"file": target, "error": "a link, not followed"}
+            mode = os.lstat(target).st_mode
+            if stat.S_ISLNK(mode):
+                entry = {"file": target, "error": "a link, not followed", "not_attempted": True}
+            elif not stat.S_ISREG(mode):
+                # A FIFO named $I... would block the read until the time limit and lose the whole bin.
+                entry = {"file": target, "error": "%s, not a regular file: it is not opened" % kind_of(mode), "not_attempted": True}
             else:
-                size = os.path.getsize(target)
-                if size > MAX_I_BYTES:
-                    entry = {"file": target, "file_bytes": size, "error": "%d bytes: a $I file is a few hundred bytes, and this one is not read" % size}
-                else:
-                    with open(target, "rb") as fh:
+                # Opened without blocking and without following a link, and looked at again once open: a name
+                # swapped for a FIFO between the check and the open is still not read.
+                fd = os.open(target, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0))
+                with os.fdopen(fd, "rb") as fh:
+                    opened = os.fstat(fh.fileno())
+                    if not stat.S_ISREG(opened.st_mode):
+                        entry = {"file": target, "error": "%s, not a regular file: it is not opened" % kind_of(opened.st_mode), "not_attempted": True}
+                    elif opened.st_size > MAX_I_BYTES:
+                        entry = {"file": target, "file_bytes": opened.st_size, "error": "%d bytes: a $I file is a few hundred bytes, and this one is not read" % opened.st_size}
+                    else:
                         data = fh.read(MAX_I_BYTES + 1)
-                    entry = parse(data, target, size)
+                        entry = parse(data, target, opened.st_size)
         except OSError as exc:
             entry = {"file": target, "error": str(exc)}
         # The $R file of the same name holds the content while it lasts; the bin directory is named for a SID.
@@ -259,7 +300,9 @@ def main():
         sid = os.path.basename(directory)
         if SID.match(sid):
             entry["bin_directory_sid"] = sid
-        if entry.get("error") and "unknown header" in str(entry["error"]):
+        if entry.get("not_attempted"):
+            counts["not_attempted"] += 1
+        elif entry.get("error") and "unknown header" in str(entry["error"]):
             counts["unknown_header"] += 1
         elif entry.get("error"):
             counts["unreadable"] += 1
@@ -270,17 +313,18 @@ def main():
         entries.add(entry)
 
     page = entries.finish()
-    problems = counts["truncated"] + counts["unknown_header"] + counts["unreadable"]
+    problems = counts["truncated"] + counts["unknown_header"] + counts["unreadable"] + counts["not_attempted"]
     print(json.dumps({
         "parser": PARSER,
         "status": "partial" if problems else "complete",
         "entries": entries.page,
         "entry_count": page["matched"],
-        "found": len(targets),
+        "found": len(targets) + len(not_listed),
         "parsed": counts["parsed"],
         "records_truncated": counts["truncated"],
         "unknown_header": counts["unknown_header"],
         "unreadable": counts["unreadable"],
+        "not_attempted": counts["not_attempted"],
         "note": "A $I record names the original path, size and deletion time of an item the Recycle Bin took. "
                 "The directory SID is the account whose bin received it; it does not say who deleted the file or from where.",
         **page,
