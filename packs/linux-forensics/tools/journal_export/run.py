@@ -36,7 +36,9 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -49,6 +51,7 @@ DEFAULT_LIMIT = 200
 DEFAULT_SECONDS = 240.0
 FIRST_FAILURES = 20
 MAX_BOOTS = 5000
+MAX_LINE = 32 << 20       # an entry longer than this is counted and located, not parsed
 MAX_FIELD_NAMES = 500
 TEXT_NAME = "journal-native.jsonl"
 VERIFY_NAME = "journal-verify.txt"
@@ -75,6 +78,46 @@ def in_job():
     return bool(os.environ.get("JOB_ID") and os.environ.get("OUT"))
 
 
+def read_args():
+    try:
+        args = json.load(sys.stdin)
+    except ValueError as exc:
+        fail("arguments are not valid JSON", reason=str(exc))
+    if not isinstance(args, dict):
+        fail("arguments must be a JSON object")
+    return args
+
+
+def want_str(args, key, required=None):
+    value = args.get(key)
+    if value is None:
+        if required:
+            fail(required)
+        return None
+    if not isinstance(value, str):
+        fail("%s must be a string" % key)
+    if required and not value:
+        fail(required)
+    return value
+
+
+def want_str_list(args, key):
+    value = args.get(key)
+    if value is None:
+        return []
+    if not isinstance(value, list) or not all(isinstance(x, str) for x in value):
+        fail("%s must be a list of strings" % key)
+    return value
+
+
+def bound(value, limit=1024):
+    """(shown, bytes or None): a string longer than `limit` characters is shown cut, with its whole length. The
+    whole is kept where the record's text is kept (the text file, the evidence at the record's locator)."""
+    if isinstance(value, str) and len(value) > limit:
+        return value[:limit], len(value.encode("utf-8", "replace"))
+    return value, None
+
+
 def want_flag(args, key):
     value = args.get(key, False)
     if not isinstance(value, bool):
@@ -91,7 +134,7 @@ def want_limit(args):
 
 # Lossless paging (the same in every library tool that pages): the page an agent reads stays small, and when
 # there are more rows the whole result is written as JSON Lines under work/<agent>/tool-output (in a job,
-# $OUT/tool-output) and named. The file name is a digest of the page's key (a path), never of a value.
+# $OUT/tool-output) and named. The file name is random: it is never a digest of anything asked for.
 class LosslessPage:
     def __init__(self, tool, key, limit):
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
@@ -102,8 +145,9 @@ class LosslessPage:
         self.total = 0
         self._out = None
         self._tmp = None
-        digest = hashlib.sha256(json.dumps(key, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16]
-        name = "%s-%s.jsonl" % (self.tool, digest)
+        # A random token, not a digest of the request: two requests never share a file, and a search term (which can
+        # be a secret someone is looking for) is never hashed into a name.
+        name = "%s-%s.jsonl" % (self.tool, secrets.token_hex(8))
         job, out = os.environ.get("JOB_ID"), os.environ.get("OUT")
         if job and out:
             # In a job only $OUT is written, and it is sealed as the job's output: the whole result is cited from there.
@@ -127,7 +171,7 @@ class LosslessPage:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             fd, name = tempfile.mkstemp(dir=self.path.parent, prefix=".%s-" % self.path.name)
             self._tmp = Path(name)
-            self._out = os.fdopen(fd, "w", encoding="utf-8")
+            self._out = os.fdopen(fd, "w", encoding="utf-8", errors="backslashreplace")
             for kept in self.page:
                 self._write(kept)
         self._write(row)
@@ -195,8 +239,17 @@ class TextFile:
     def add(self, row):
         if self._fh is None:
             return
-        self._fh.write(json.dumps(row, ensure_ascii=False, default=str).encode("utf-8", "replace") + b"\n")
+        self._fh.write(json.dumps(row, ensure_ascii=False, default=str).encode("utf-8", "backslashreplace") + b"\n")
         self.written += 1
+
+    def add_bytes_raw(self, data):
+        """A piece of a source's own bytes, written as it came; the record it belongs to is counted by count_record."""
+        if self._fh is not None:
+            self._fh.write(data)
+
+    def count_record(self):
+        if self._fh is not None:
+            self.written += 1
 
     def add_bytes(self, data):
         """One record exactly as its source wrote it (a native export's line, newline included)."""
@@ -212,14 +265,16 @@ class TextFile:
             self._fh.close()
             self._fh = None
 
-    def summary(self):
+    def summary(self, preview=False):
+        """What the answer says about text. `preview` is true when the answer itself carries it (preview_text)."""
+        shown = {"answer_contains_text_that_may_hold_secrets": bool(preview)}
         if not self.enabled:
-            return {"requested": False, "written": 0, "file": None, "contains_text_that_may_hold_secrets": False,
-                    "hint": "No text of any record is in this answer or in a file. write_text: true, in a job run with "
-                            "secret_output: true, keeps the whole of each record in a private file under $OUT."}
+            hint = ("No text of any record is in a file." if not preview else
+                    "The answer's records carry their text (preview_text); no file of it was written, and the paging file, if there is one, holds none.")
+            return {"requested": False, "written": 0, "file": None, "contains_text_that_may_hold_secrets": False, **shown,
+                    "hint": hint + " write_text: true, in a job run with secret_output: true, keeps the whole of each record in a private file under $OUT."}
         return {"requested": True, "written": self.written, "file": self.shown,
-                "contains_text_that_may_hold_secrets": self.written > 0,
-                "format": self.what}
+                "contains_text_that_may_hold_secrets": self.written > 0, **shown, "format": self.what}
 
 
 def decoded_time(micro):
@@ -258,13 +313,22 @@ def project(entry, number, seq):
            "boot_id": entry.get("_BOOT_ID")}
     if error:
         row["time_error"] = error
+    cut = {}
+
+    def put(name, value):
+        shown, whole = bound(value, 1024)
+        row[name] = shown
+        if whole is not None:
+            cut[name] = whole
     for field, name in (("_SOURCE_REALTIME_TIMESTAMP", "source_realtime_us"), ("_SOURCE_MONOTONIC_TIMESTAMP", "source_monotonic_us"),
                         ("__SEQNUM", "seqnum"), ("__SEQNUM_ID", "seqnum_id")):
         if field in entry:
-            row[name] = entry[field]
+            put(name, entry[field])
     for field, name in IDENTITY:
         if field in entry:
-            row[name] = entry[field]
+            put(name, entry[field])
+    if cut:
+        row["truncated_fields"] = cut
     row.update({"message_bytes": msg_bytes, "message_encoding": msg_enc})
     if "_CMDLINE" in entry:
         row.update({"cmdline_bytes": cmd_bytes, "cmdline_encoding": cmd_enc})
@@ -278,29 +342,53 @@ def output_file(name, key):
         Path(out).mkdir(parents=True, exist_ok=True)
         return Path(out) / name, "store/jobs/%s/out/%s" % (re.sub(r"[^A-Za-z0-9_.-]", "_", job), name)
     agent = re.sub(r"[^A-Za-z0-9_.-]", "_", os.environ.get("AGENT_ID") or "tool")
-    digest = hashlib.sha256(json.dumps(key, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16]
-    path = Path("work") / agent / "tool-output" / ("%s-%s-%s" % (TOOL, digest, name))
+    path = Path("work") / agent / "tool-output" / ("%s-%s-%s" % (TOOL, secrets.token_hex(8), name))
     path.parent.mkdir(parents=True, exist_ok=True)
     return path, str(path)
 
 
-def run_journalctl(argv, stdout_sink, stderr_path, seconds):
-    """Run journalctl, feeding each stdout line to `stdout_sink`, stderr to a file, with a deadline."""
+def run_journalctl(argv, raw_sink, line_sink, oversized_sink, stderr_path, seconds):
+    """Run journalctl in a process group of its own, with a deadline that ends the whole group. Every byte of stdout
+    goes to `raw_sink` in order; each line within MAX_LINE goes whole to `line_sink`, and a longer one is counted by
+    `oversized_sink` and not held, so one huge entry costs no more memory than the cap."""
     state = {"timed_out": False}
     with open(stderr_path, "wb") as err:
-        proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=err)
+        proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=err, start_new_session=True)
 
         def kill():
             state["timed_out"] = True
             try:
-                proc.kill()
-            except OSError:
-                pass
+                os.killpg(proc.pid, signal.SIGKILL)
+            except (OSError, ProcessLookupError):
+                try:
+                    proc.kill()
+                except OSError:
+                    pass
         timer = threading.Timer(seconds, kill)
         timer.start()
         try:
-            for raw in proc.stdout:
-                stdout_sink(raw)
+            pending, size = [], 0
+            while True:
+                piece = proc.stdout.readline(1 << 20)
+                if not piece:
+                    break
+                raw_sink(piece)
+                size += len(piece)
+                if pending is not None and size <= MAX_LINE:
+                    pending.append(piece)
+                else:
+                    pending = None
+                if piece.endswith(b"\n"):
+                    if pending is None:
+                        oversized_sink(size)
+                    else:
+                        line_sink(b"".join(pending))
+                    pending, size = [], 0
+            if size:
+                if pending is None:
+                    oversized_sink(size)
+                else:
+                    line_sink(b"".join(pending))
         finally:
             timer.cancel()
             proc.stdout.close()
@@ -317,13 +405,8 @@ def first_lines(path, count=20):
 
 
 def main():
-    try:
-        args = json.load(sys.stdin)
-    except ValueError as exc:
-        fail("arguments are not valid JSON", reason=str(exc))
-    path = args.get("path")
-    if not isinstance(path, str) or not path:
-        fail("path is required: journalctl with no path reads this machine's own journal, which is never the evidence")
+    args = read_args()
+    path = want_str(args, "path", "path is required: journalctl with no path reads this machine's own journal, which is never the evidence")
     if not os.path.exists(path):
         fail("no such file or directory", path=path)
     if os.path.islink(path):
@@ -338,10 +421,12 @@ def main():
     seconds = args.get("max_seconds", DEFAULT_SECONDS)
     if isinstance(seconds, bool) or not isinstance(seconds, (int, float)) or seconds <= 0:
         fail("max_seconds must be a positive number")
+    for name in ("unit", "grep", "priority", "since", "until"):
+        want_str(args, name)
     bounds = {}
     for key in ("since", "until"):
         if args.get(key):
-            if not isinstance(args[key], str) or not BOUND.match(args[key].strip()):
+            if not BOUND.match(args[key].strip()):
                 fail("%s must carry its own zone: journalctl reads a bare time in the zone of the machine it runs on, which is "
                      "not the evidence's. Write it as 'YYYY-MM-DD HH:MM:SS UTC' or as seconds since the epoch, '@1771100000'." % key,
                      given=args[key])
@@ -351,6 +436,15 @@ def main():
         fail("journalctl is not on PATH",
              install="apt-get install -y systemd; the journal is a binary format that journalctl reads",
              note="On macOS there is no journalctl at all: copy the journal to a Linux host.")
+    if os.path.isdir(path):
+        links = []
+        for root_, dirs_, names_ in os.walk(path):
+            for entry_ in dirs_ + names_:
+                if os.path.islink(os.path.join(root_, entry_)):
+                    links.append(os.path.join(root_, entry_))
+        if links:
+            fail("refusing a journal directory that holds links: journalctl --directory may follow them out of the evidence. "
+                 "Pass each real journal file as path instead.", links=links[:FIRST_FAILURES], link_count=len(links))
     where = ["--directory" if os.path.isdir(path) else "--file", path]
     key = [path, mode, sorted(bounds.items()), args.get("unit"), args.get("grep"), args.get("priority")]
 
@@ -359,7 +453,7 @@ def main():
         out_path, out_shown = output_file(VERIFY_NAME, key)
         err_path, err_shown = output_file(STDERR_NAME, key)
         with open(out_path, "wb") as sink:
-            code, timed_out = run_journalctl(argv, sink.write, err_path, seconds)
+            code, timed_out = run_journalctl(argv, sink.write, lambda raw: None, lambda size: None, err_path, seconds)
         print(json.dumps({
             "parser": PARSER, "mode": "verify", "path": path, "argv": argv, "exit_code": code, "timed_out": timed_out,
             "verify": {"output_file": out_shown, "output_bytes": os.path.getsize(out_path), "stderr_file": err_shown,
@@ -383,14 +477,25 @@ def main():
         if value:
             argv += [flag, str(value)]
     err_path, err_shown = output_file(STDERR_NAME, key)
-    page = LosslessPage(TOOL, ["records"] + key + [preview_text], limit)
+    page = LosslessPage(TOOL, "records", limit)
+    preview_rows = []
     census, boots = {}, {}
-    st = {"lines": 0, "entries": 0, "bad": [], "bad_count": 0, "census_truncated": False, "boots_truncated": False}
+    st = {"lines": 0, "entries": 0, "bad": [], "bad_count": 0, "census_truncated": False, "boots_truncated": False,
+          "oversized": 0, "boot_not_text": 0}
+
+    def oversized(size):
+        text.count_record()
+        st["lines"] += 1
+        st["oversized"] += 1
+        st["bad_count"] += 1
+        if len(st["bad"]) < FIRST_FAILURES:
+            st["bad"].append({"native_line": st["lines"], "bytes": size,
+                              "error": "a line over %d bytes: counted and located, not parsed (its bytes are in the native file when write_text was asked)" % MAX_LINE})
 
     def sink(raw):
+        text.count_record()
         st["lines"] += 1
         number = st["lines"]
-        text.add_bytes(raw)
         try:
             entry = json.loads(raw)
             if not isinstance(entry, dict):
@@ -408,6 +513,9 @@ def main():
                 st["census_truncated"] = True
         row = project(entry, number, st["entries"])
         boot = row.get("boot_id")
+        if boot is not None and not isinstance(boot, str):
+            st["boot_not_text"] += 1     # a repeated _BOOT_ID comes as a list: it is not one boot, and is not grouped
+            boot = None
         if boot is not None:
             b = boots.get(boot)
             if b is None and len(boots) < MAX_BOOTS:
@@ -418,12 +526,11 @@ def main():
             if b is not None:
                 b["entries"] += 1
                 b["last_realtime_us"], b["last_monotonic_us"], b["last_cursor"] = row["realtime_us"], row["monotonic_us"], row["cursor"]
-        shown = row
-        if preview_text:
-            shown = {**row, "message": entry.get("MESSAGE"), "cmdline": entry.get("_CMDLINE")}
-        page.add(shown)
+        page.add(row)
+        if preview_text and len(preview_rows) < limit:
+            preview_rows.append({**row, "message": entry.get("MESSAGE"), "cmdline": entry.get("_CMDLINE")})
 
-    code, timed_out = run_journalctl(argv, sink, err_path, seconds)
+    code, timed_out = run_journalctl(argv, text.add_bytes_raw, sink, oversized, err_path, seconds)
     text.close()
     stderr_bytes = os.path.getsize(err_path)
     if code != 0 and not timed_out and st["entries"] == 0:
@@ -448,12 +555,13 @@ def main():
         "boots_truncated": st["boots_truncated"],
         "field_census": census,
         "field_census_truncated": st["census_truncated"],
-        "parse_errors": {"count": st["bad_count"], "first": st["bad"]},
+        "parse_errors": {"count": st["bad_count"], "first": st["bad"], "oversized_lines": st["oversized"]},
+        "entries_with_a_boot_id_that_is_not_text": st["boot_not_text"],
         "stderr": {"file": err_shown, "bytes": stderr_bytes, "first_lines": first_lines(err_path)},
-        "records": page.page,
+        "records": preview_rows if preview_text else page.page,
         "record_count": pages["records"]["matched"],
         "pages": pages,
-        "text": text.summary(),
+        "text": text.summary(preview_text),
         "truncated": pages["records"]["truncated"],
         "note": "Within a boot, order entries by monotonic_us: the wall clock (realtime_us) can step inside a boot, and neither a boot "
                 "id nor the order journalctl printed removes that. A boot id names a boot and does not order it; across boots, anchor "

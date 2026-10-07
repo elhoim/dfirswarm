@@ -11,10 +11,11 @@
  * and the files it names hold is checked here for a planted secret.
  */
 import assert from "node:assert/strict";
-import { chmod, readFile, stat } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
+import { chmod, mkdir, readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
-import { IS_ROOT, SHELL, asJob, body, everythingBut, lines, put, refused, rowsOf, tool, withCwd } from "./linux-pack-harness.ts";
+import { IS_ROOT, SHELL, asJob, body, everythingBut, filesUnder, lines, put, refused, rowsOf, tool, withCwd } from "./linux-pack-harness.ts";
 import type { Json } from "./linux-pack-harness.ts";
 
 const HIST_SECRET = "HistoryPw12345";
@@ -165,5 +166,68 @@ test("shell_history continues a record past its size cap in the next one, flagge
     assert.equal(rows[0].split_at_cap, undefined);
     const text = (await readFile(join(cwd, "out", "shell-history-commands.jsonl"), "utf8")).trimEnd().split("\n").map((l) => JSON.parse(l));
     assert.equal(text.reduce((n: number, t: Json) => n + t.record_lines.length, 0), 201, "every physical line is in exactly one record");
+  });
+});
+
+test("shell_history ends a zsh entry only at a line that does not continue it, and takes a huge elapsed field for no duration", async () => {
+  await withCwd(async (cwd) => {
+    const root = join(cwd, "work", "ev");
+    await put(root, "home/alice/.zsh_history", lines(": 1700000000:0;echo a\\", "", ": 1700000100:0;echo b", `: 1700000200:${"9".repeat(5000)};ls`));
+    const rows = await rowsOf(cwd, body(await asJob(SHELL, cwd, { root: "work/ev" })));
+    assert.equal(rows.length, 3, "an empty line after a backslash is inside the command, and the next header starts the next entry");
+    assert.deepEqual([rows[0].line_start, rows[0].line_end, rows[0].command_lines], [1, 2, 2]);
+    assert.equal(rows[1].time_raw, "1700000100");
+    assert.equal(rows[2].elapsed_seconds, undefined);
+    assert.match(String(rows[2].time_error), /elapsed/);
+  });
+});
+
+test("shell_history keeps trailing blank lines out of a stamped entry, and reads a line longer than a piece as one line in pieces", async () => {
+  await withCwd(async (cwd) => {
+    const root = join(cwd, "work", "ev");
+    await put(root, "home/alice/.bash_history", lines("#1700000000", "id", "", "", "#1700000001", "pwd", ""));
+    await put(root, "home/alice/.python_history", `${"x".repeat(9 * 1024 * 1024)}\nshort\n`);
+    const out = body(await asJob(SHELL, cwd, { root: "work/ev", write_commands: true }));
+    const text = (await readFile(join(cwd, "out", "shell-history-commands.jsonl"), "utf8")).trimEnd().split("\n").map((l) => JSON.parse(l));
+    const bash = text.filter((t: Json) => t.format === "bash");
+    assert.deepEqual(bash.map((t: Json) => t.command), ["id", "pwd"]);
+    assert.deepEqual([bash[0].line_start, bash[0].line_end], [1, 2]);
+    const python = text.filter((t: Json) => t.format === "plain");
+    assert.ok(python.length >= 3, "the long line is more than one record, then the short one");
+    assert.ok(python.slice(0, 2).every((t: Json) => t.split_at_cap === true), "every piece of it is flagged");
+    assert.equal(out.files.find((f: Json) => f.format === "plain").physical_lines, 2, "a line read in pieces is still one physical line");
+  });
+});
+
+test("shell_history reads a very long stamped entry in time that follows its length, and stops at its deadline inside a file", async () => {
+  await withCwd(async (cwd) => {
+    const root = join(cwd, "work", "ev");
+    await put(root, "home/alice/.bash_history", `#1700000000\n${"ls\n".repeat(120_000)}`);
+    const started = Date.now();
+    const out = body(await asJob(SHELL, cwd, { root: "work/ev" }));
+    assert.ok(Date.now() - started < 8000, `took ${Date.now() - started} ms`);
+    assert.equal(out.files[0].records, 1);
+    assert.equal(out.records[0].command_lines, 120_000);
+  });
+});
+
+test("shell_history never opens a pipe named like a history file, and its paging file holds no preview text", async () => {
+  await withCwd(async (cwd) => {
+    const root = join(cwd, "work", "ev");
+    await put(root, "home/alice/.bash_history", lines("echo PREVIEWSECRETONE", "echo PREVIEWSECRETTWO"));
+    assert.equal(spawnSync("mkfifo", [join(root, "home", "alice", ".zsh_history")]).status, 0);
+    const out = body(await asJob(SHELL, cwd, { root: "work/ev", preview_commands: true, limit: 1 }));
+    assert.equal(out.skipped_special.length, 1);
+    assert.equal(out.all_files_read, false);
+    assert.ok(out.records[0].command.includes("PREVIEWSECRETONE"));
+    for (const f of await filesUnder(join(cwd, "out"))) assert.ok(!(await readFile(join(cwd, "out", f), "utf8")).includes("PREVIEWSECRET"), f);
+  });
+});
+
+test("shell_history rejects arguments that are not an object and a field of the wrong type", async () => {
+  await withCwd(async (cwd) => {
+    for (const bad of [null, [], "x"]) assert.match(refused(await tool(SHELL, cwd, bad)).error, /JSON object/);
+    await mkdir(join(cwd, "work", "ev"), { recursive: true });
+    for (const args of [{ root: "work/ev", contains: 5 }, { root: "work/ev", user: 5 }, { root: "work/ev", passwd: 5 }, { root: 5 }]) refused(await tool(SHELL, cwd, args));
   });
 });

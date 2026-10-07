@@ -10,13 +10,15 @@ The status is what was observed, never a promise about the evidence:
 
     parsed         the function exited 0 and produced records (every line JSON)
     empty          it exited 0, produced nothing and wrote nothing to stderr
-    unsupported    it exited 0, produced nothing, and its stderr says the plugin or function is not available
-                   for this target (the patterns are in UNSUPPORTED_STDERR; which messages dissect.target
-                   writes for which causes is not validated here, so a message not matched is `unknown`)
+    unsupported    it exited 0, produced nothing, and a line of its stderr naming this function says it is not
+                   available for this target (the patterns are in UNSUPPORTED_STDERR; which messages
+                   dissect.target writes for which causes is not validated here, so a message that does not
+                   name the function, or does not match, leaves it `unknown`)
     failed         a non-zero exit, or it ran past its deadline
     not_attempted  the total deadline had passed or was too near to start it
     unknown        it exited 0 and the output or the stderr cannot be read as one of the above (a line that is
-                   not JSON, or a stderr that names no cause for an empty result): read the files
+                   not JSON, a stderr that names no cause for an empty result, or a traceback beside records):
+                   read the files
 
 `execution_complete` says that every function was started and exited 0 within its deadline. It is not
 artefact coverage: an exit code does not say which artefacts the target had, which of them the function reads,
@@ -34,6 +36,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -146,16 +149,43 @@ def count_region(path, start, end, as_json):
     return records, invalid, first
 
 
-def classify(function, exit_code, timed_out, records, invalid, stderr_text):
+def scan_stderr(path, function):
+    """What a function's stderr says, read in pieces: whether it wrote anything, whether a line names this function and says
+    it is not available, whether any line says the plugin or function is unavailable without naming one, and whether a
+    traceback is in it. Only a sample of it is kept in memory."""
+    seen = {"bytes": 0, "text": False, "unsupported_named": False, "unsupported_unattributed": False, "traceback": False, "sample": ""}
+    names = {function, function.split(".")[-1]} if "." in function else {function}
+    with path.open("rb") as fh:
+        while True:
+            piece = fh.readline(1 << 16)
+            if not piece:
+                break
+            seen["bytes"] += len(piece)
+            line = piece.decode("utf-8", "replace")
+            if line.strip():
+                seen["text"] = True
+            if len(seen["sample"]) < 4096:
+                seen["sample"] += line[: 4096 - len(seen["sample"])]
+            if "Traceback (most recent call last)" in line:
+                seen["traceback"] = True
+            if UNSUPPORTED_STDERR.search(line):
+                if any(n in line for n in names):
+                    seen["unsupported_named"] = True
+                else:
+                    seen["unsupported_unattributed"] = True
+    return seen
+
+
+def classify(exit_code, timed_out, records, invalid, scan):
     if timed_out or exit_code != 0:
         return "failed"
     if invalid:
         return "unknown"
-    if records == 0 and stderr_text and UNSUPPORTED_STDERR.search(stderr_text):
+    if records == 0 and scan["unsupported_named"]:
         return "unsupported"
     if records > 0:
-        return "parsed"
-    return "unknown" if stderr_text.strip() else "empty"
+        return "unknown" if scan["traceback"] else "parsed"
+    return "unknown" if scan["text"] else "empty"
 
 
 def group_status(functions):
@@ -193,11 +223,38 @@ def write_summary(out, state):
     os.replace(tmp, out / "summary.json")
 
 
+CURRENT = {"proc": None, "entry": None, "out": None, "state": None}
+
+
+def on_term(signum, _frame):
+    """Told to stop from outside: end the function that is running, say so in the summary, and leave."""
+    proc, entry = CURRENT["proc"], CURRENT["entry"]
+    if proc is not None and proc.poll() is None:
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            try:
+                os.killpg(proc.pid, sig)
+            except (OSError, ProcessLookupError):
+                pass
+            try:
+                proc.wait(timeout=3)
+                break
+            except subprocess.TimeoutExpired:
+                continue
+    if entry is not None and entry.get("status") == "running":
+        entry.update({"status": "failed", "exit_code": 128 + signum, "timed_out": False, "reason": "this process was told to stop (signal %d) while the function ran" % signum})
+    if CURRENT["state"] is not None:
+        state = CURRENT["state"]("terminated")
+        write_summary(CURRENT["out"], state)
+    raise SystemExit(128 + signum)
+
+
 def main():
     try:
         args = json.load(sys.stdin)
     except ValueError as exc:
         fail("arguments are not valid JSON", reason=str(exc))
+    if not isinstance(args, dict):
+        fail("arguments must be a JSON object")
     source = args.get("source")
     out_arg = args.get("out_dir")
     if not isinstance(source, str) or not source or not os.path.exists(source):
@@ -240,6 +297,8 @@ def main():
         return {"state": kind, "parser": PARSER, "source": source, "out_dir": str(out), "started": started_at, "updated": time.time(),
                 "total_timeout_seconds": total, "timeout_seconds": per_function, "groups": groups, "coverage": coverage_of(groups)}
 
+    CURRENT["out"], CURRENT["state"] = out, state
+    signal.signal(signal.SIGTERM, on_term)
     write_summary(out, state("running"))
     stop = False
     for group in groups:
@@ -264,29 +323,52 @@ def main():
                 began = time.monotonic()
                 timed_out = False
                 with err_path.open("wb") as stderr:
+                    proc = subprocess.Popen(argv, stdout=stdout, stderr=stderr, start_new_session=True)
+                    CURRENT["proc"], CURRENT["entry"] = proc, entry
                     try:
-                        proc = subprocess.run(argv, stdout=stdout, stderr=stderr, timeout=limit)
-                        code = proc.returncode
+                        code = proc.wait(timeout=limit)
                     except subprocess.TimeoutExpired:
                         timed_out, code = True, 124
+                        try:
+                            os.killpg(proc.pid, signal.SIGKILL)
+                        except (OSError, ProcessLookupError):
+                            proc.kill()
+                        proc.wait()
+                    CURRENT["proc"] = None
                 stdout.flush()
                 end = stdout.tell()
-                err_text = err_path.read_text(errors="replace") if err_path.exists() else ""
+                # A function that stopped in the middle of a line leaves it unterminated; the line is ended so that the next
+                # function's first record is not glued to it, and the entry says so (the byte count is the function's own).
+                unterminated = False
+                if end > begin:
+                    with result_path.open("rb") as fh:
+                        fh.seek(end - 1)
+                        unterminated = fh.read(1) != b"\n"
+                    if unterminated:
+                        stdout.write(b"\n")
+                        stdout.flush()
+                scan = scan_stderr(err_path, name)
                 records, invalid, first_bad = count_region(result_path, begin, end, not spec.get("strings"))
                 entry.update({"exit_code": code, "timed_out": timed_out, "seconds": round(time.monotonic() - began, 3),
                               "bytes": end - begin, "byte_offset": begin, "records": records, "invalid_lines": invalid,
                               "argv": argv[1:]})
+                if unterminated:
+                    entry["last_line_unterminated"] = True
                 if timed_out:
                     entry["deadline"] = "total" if limit < per_function else "function"
                     if entry["deadline"] == "total":
                         stop = True
                 if first_bad:
-                    entry["first_invalid_lines"] = first_bad
+                    entry["first_invalid_line_numbers"] = first_bad      # lines of this function's own output
+                if scan["unsupported_unattributed"] and not scan["unsupported_named"]:
+                    entry["stderr_says_unavailable_without_naming_this_function"] = True
                 if err_path.stat().st_size:
                     entry.update({"stderr": str(err_path), "stderr_bytes": err_path.stat().st_size, "stderr_sha256": digest(err_path)})
                 else:
                     err_path.unlink()
-                entry["status"] = classify(name, code, timed_out, records, invalid, err_text)
+                entry["status"] = classify(code, timed_out, records, invalid, scan)
+                if scan["traceback"]:
+                    entry["stderr_has_a_traceback"] = True
                 write_summary(out, state("running"))
         group["status"] = group_status(group["functions"])
         if result_path.exists():

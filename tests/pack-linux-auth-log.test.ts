@@ -9,11 +9,12 @@
  * and the files it names hold is checked here for a planted secret.
  */
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { mkdir, readFile, stat, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
 import { gzipSync } from "node:zlib";
-import { AUTH, asJob, body, everythingBut, exists, lines, refused, rowsOf, tool, withCwd } from "./linux-pack-harness.ts";
+import { AUTH, asJob, body, everythingBut, exists, filesUnder, lines, refused, rowsOf, tool, withCwd } from "./linux-pack-harness.ts";
 import type { Json } from "./linux-pack-harness.ts";
 
 const FP_ED = "SHA256:nThbg6kXUpJWGl7E1IGOCspRomTxdCARLviKw6E5SY8";
@@ -279,7 +280,9 @@ test("auth_log keeps the stamp as written, the zone it carries, and the fraction
     });
     const rows = await rowsOf(cwd, body(await tool(AUTH, cwd, { path })));
     assert.equal(rows[0].time_raw, "2026-02-14T09:30:00.123456+02:00");
+    assert.equal(rows[0].time, "2026-02-14T09:30:00.123456", "time is the clock reading as written, whatever the zone");
     assert.equal(rows[0].time_utc, "2026-02-14T07:30:00.123456Z");
+    assert.equal(rows[1].time, "2026-02-14T09:31:00");
     assert.equal(rows[0].time_zone, "+02:00");
     assert.equal(rows[1].time_utc, "2026-02-14T09:31:00Z");
     assert.equal(rows[1].time_zone, "Z");
@@ -350,5 +353,164 @@ test("auth_log follows rotated and dated names in an order it states, and refuse
     assert.equal(out.skipped_symlinks.length, 1);
     assert.equal(out.cross_file_order, "consistent");
     assert.match(refused(await tool(AUTH, cwd, { path: join(path, "auth.log.3") })).error, /symlink/);
+  });
+});
+
+test("auth_log reads a PAM line's own key=value text as text: no key but its own seven can set a field or overwrite a locator", async () => {
+  // A user name typed at a login prompt reaches the log, so `user=zed file=/etc/shadow line=99 id=A000777 kind=ssh_accepted raw=...`
+  // is attacker-controlled text inside a pam_unix line, not a set of fields.
+  await withCwd(async (cwd) => {
+    const path = await authDir(cwd, "kv", {
+      "auth.log": lines("Feb 14 09:30:02 web01 sshd[2201]: pam_unix(sshd:auth): authentication failure; uid=0 rhost=192.0.2.5  user=zed file=/etc/shadow line=99 byte_offset=0 id=A000777 kind=ssh_accepted raw=TYPEDSECRETWORD pid=7 host=evil time=1999"),
+    });
+    const run = await tool(AUTH, cwd, { path });
+    const [row] = await rowsOf(cwd, body(run));
+    assert.equal(row.kind, "auth_failure");
+    assert.equal(row.user, "zed");
+    assert.equal(row.source, "192.0.2.5");
+    assert.equal(row.file, path + "/auth.log");
+    assert.equal(row.line, 1);
+    assert.equal(row.id, "A000001");
+    assert.equal(row.host, "web01");
+    assert.equal(row.pid, 2201);
+    assert.ok(!run.stdout.includes("TYPEDSECRETWORD"), "no raw text in the default answer");
+  });
+});
+
+test("auth_log survives a pid of five thousand digits, a stamp at the end of the calendar, an offset that is no offset, and a log of other compressions", async () => {
+  await withCwd(async (cwd) => {
+    const path = await authDir(cwd, "odd", {
+      "auth.log": lines(
+        `Feb 14 09:30:00 web01 sshd[${"9".repeat(5000)}]: Failed password for root from 192.0.2.1 port 1 ssh2`,
+        "9999-12-31T23:59:59-05:00 web01 sshd[1]: Failed password for root from 192.0.2.1 port 1 ssh2",
+        "0001-01-01T00:00:00+05:00 web01 sshd[1]: Failed password for root from 192.0.2.1 port 1 ssh2",
+        "2026-02-14T09:30:00+99:99 web01 sshd[1]: Failed password for root from 192.0.2.1 port 1 ssh2",
+      ),
+      "auth.log.2.bz2": Buffer.concat([Buffer.from("BZh9"), Buffer.alloc(64)]),
+    });
+    const out = body(await tool(AUTH, cwd, { path }));
+    const rows = await rowsOf(cwd, out);
+    assert.equal(rows.filter((r) => r.kind === "ssh_failed").length, 3, "the first line is not placed by a pid it cannot hold");
+    assert.ok(rows.some((r) => /range of a date/.test(String(r.time_error))), "an instant outside the calendar is a time_error");
+    assert.ok(rows.some((r) => /not a valid offset/.test(String(r.time_error))));
+    assert.ok(out.read_errors.some((e: Json) => /bzip2-compressed/.test(e.error)), JSON.stringify(out.read_errors));
+    assert.equal(out.all_lines_parsed, false);
+  });
+});
+
+test("auth_log does not spend quadratic time on a line of whitespace, and shows a long field cut with its whole length", async () => {
+  await withCwd(async (cwd) => {
+    const pad = " ".repeat(10_000);
+    const reason = "r".repeat(40_000);
+    const path = await authDir(cwd, "wide", {
+      "auth.log": lines(
+        `Feb 14 09:30:00 web01 sshd[1]: Accepted publickey for u from 192.0.2.1 port 22 ssh2: ED25519-CERT SHA256:x ID${pad}${pad}`,
+        `Feb 14 09:30:01 web01 sshd[2]: Received disconnect from 192.0.2.1 port 22:11: ${reason}${pad}`,
+      ),
+    });
+    const started = Date.now();
+    const run = await asJob(AUTH, cwd, { path, write_text: true });
+    assert.ok(Date.now() - started < 4000, `took ${Date.now() - started} ms`);
+    const out = body(run);
+    const disconnect = (await rowsOf(cwd, out)).find((r) => r.kind === "ssh_disconnect");
+    assert.ok(String(disconnect.reason).length <= 256);
+    assert.equal(disconnect.truncated_fields.reason, 40_000 + 10_000);
+    const text = (await readFile(join(cwd, "out", "auth-text.jsonl"), "utf8")).trimEnd().split("\n").map((l) => JSON.parse(l));
+    assert.equal(String(text.find((t: Json) => t.kind === "ssh_disconnect").reason).length, 40_000 + 10_000, "the whole is in the text file");
+  });
+});
+
+test("auth_log keeps a gzip expansion cap through a line longer than a line may be", async () => {
+  await withCwd(async (cwd) => {
+    const path = await authDir(cwd, "longbomb", { "auth.log.1.gz": gzipSync(Buffer.alloc(8 * 1024 * 1024, 0x41)) });
+    const started = Date.now();
+    const out = body(await tool(AUTH, cwd, { path, max_expanded_bytes: 1_000_000 }));
+    assert.ok(Date.now() - started < 4000);
+    assert.match(out.read_errors[0].error, /max_expanded_bytes/);
+    assert.equal(out.files[0].partial, true);
+  });
+});
+
+test("auth_log does not let an invalid date move the months, and orders a dotted date suffix as a date", async () => {
+  await withCwd(async (cwd) => {
+    const mtime = new Date(Date.UTC(2026, 0, 10, 12, 0, 0));
+    const path = await authDir(
+      cwd,
+      "invalid",
+      {
+        "auth.log": lines(
+          "Jan  2 10:00:00 h sshd[1]: Failed password for root from 192.0.2.1 port 1 ssh2",
+          "Feb 30 10:00:00 h sshd[2]: Failed password for root from 192.0.2.1 port 2 ssh2",
+          "Jan  3 10:00:00 h sshd[3]: Failed password for root from 192.0.2.1 port 3 ssh2",
+          "Jan  4 10:00:00 h sshd[4]: Failed password for root from 192.0.2.1 port 4 ssh2",
+        ),
+        "auth.log.20260101": lines("Jan  1 10:00:00 h sshd[5]: Failed password for root from 192.0.2.1 port 5 ssh2"),
+        "auth.log.20251201": lines("Dec  1 10:00:00 h sshd[6]: Failed password for root from 192.0.2.1 port 6 ssh2"),
+      },
+      { "auth.log": mtime, "auth.log.20260101": mtime, "auth.log.20251201": mtime },
+    );
+    const out = body(await tool(AUTH, cwd, { path }));
+    assert.deepEqual(out.files.map((f: Json) => f.path.split("/").pop()), ["auth.log.20251201", "auth.log.20260101", "auth.log"]);
+    assert.deepEqual(out.files.map((f: Json) => f.order_basis), ["date suffix", "date suffix", "current file"]);
+    const live = out.files[2];
+    assert.equal(live.reordered_lines, 0, "a Feb 30 line does not turn the January lines after it into reordered ones");
+    assert.equal(live.last_time, "2026-01-04T10:00:00");
+  });
+});
+
+test("auth_log reads a line with a dated zone-bearing stamp as a time range for file order", async () => {
+  await withCwd(async (cwd) => {
+    const path = await authDir(cwd, "isorange", {
+      "auth.log.1": lines("2026-03-05T10:00:00Z h sshd[1]: Failed password for root from 192.0.2.1 port 1 ssh2"),
+      "auth.log": lines("2026-01-05T10:00:00Z h sshd[1]: Failed password for root from 192.0.2.1 port 1 ssh2"),
+    });
+    const out = body(await tool(AUTH, cwd, { path }));
+    assert.equal(out.cross_file_order, "overlap", "the live file is older than the rotated one it should follow");
+  });
+});
+
+test("auth_log tells su's account from its target, in both of the forms su writes", async () => {
+  await withCwd(async (cwd) => {
+    const path = await authDir(cwd, "su", {
+      "auth.log": lines(
+        "Feb 14 09:30:00 h su[1]: Successful su for root by alice",
+        "Feb 14 09:30:01 h su[2]: (to root) alice on pts/0",
+        "Feb 14 09:30:02 h su[3]: FAILED su for root by bob",
+      ),
+    });
+    const rows = await rowsOf(cwd, body(await tool(AUTH, cwd, { path })));
+    assert.deepEqual(rows.map((r) => [r.kind, r.user, r.target]), [["su", "alice", "root"], ["su", "alice", "root"], ["su_failed", "bob", "root"]]);
+    assert.equal(rows[1].tty, "pts/0");
+  });
+});
+
+test("auth_log never opens a pipe it finds where a log should be, and the paging file of a preview holds no text", async () => {
+  await withCwd(async (cwd) => {
+    const path = await authDir(cwd, "pipe", {
+      "auth.log": lines(
+        "Feb 14 09:30:00 web01 sudo:   a : TTY=pts/0 ; PWD=/ ; USER=root ; COMMAND=/bin/echo PREVIEWSECRETONE",
+        "Feb 14 09:30:01 web01 sudo:   a : TTY=pts/0 ; PWD=/ ; USER=root ; COMMAND=/bin/echo PREVIEWSECRETTWO",
+      ),
+    });
+    assert.equal(spawnSync("mkfifo", [join(cwd, path, "auth.log.1")]).status, 0);
+    const out = body(await asJob(AUTH, cwd, { path, preview_text: true, limit: 1 }));
+    assert.equal(out.skipped_special.length, 1);
+    assert.equal(out.all_lines_parsed, false);
+    assert.ok(out.records[0].command.includes("PREVIEWSECRETONE"), "the preview carries the text");
+    assert.equal(out.text.answer_contains_text_that_may_hold_secrets, true);
+    assert.equal(out.text.requested, false);
+    for (const f of await filesUnder(join(cwd, "out"))) {
+      assert.ok(!(await readFile(join(cwd, "out", f), "utf8")).includes("PREVIEWSECRET"), `${f} holds the text of a preview`);
+    }
+    assert.ok(out.pages.records.all_results, "the whole result is paged to a file that holds none of it");
+  });
+});
+
+test("auth_log rejects arguments that are not an object, and a field of the wrong type, with an error and no traceback", async () => {
+  await withCwd(async (cwd) => {
+    for (const bad of [null, [], "x", 5]) assert.match(refused(await tool(AUTH, cwd, bad)).error, /JSON object/);
+    await mkdir(join(cwd, "work", "a"), { recursive: true });
+    await writeFile(join(cwd, "work", "a", "auth.log"), "x\n");
+    for (const args of [{ path: "work/a", contains: 5 }, { path: "work/a", kinds: "sudo" }, { path: 5 }]) refused(await tool(AUTH, cwd, args));
   });
 });

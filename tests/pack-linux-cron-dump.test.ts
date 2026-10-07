@@ -8,10 +8,11 @@
  * and the files it names hold is checked here for a planted secret.
  */
 import assert from "node:assert/strict";
-import { readFile, stat, truncate } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
+import { mkdir, readFile, stat, truncate } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
-import { CRON, IS_ROOT, SHELL, asJob, body, everythingBut, lines, put, refused, rowsOf, tool, withCwd } from "./linux-pack-harness.ts";
+import { CRON, IS_ROOT, SHELL, asJob, body, everythingBut, filesUnder, lines, put, refused, rowsOf, tool, withCwd } from "./linux-pack-harness.ts";
 import type { Json } from "./linux-pack-harness.ts";
 
 const CRON_SECRET = "s3cretCronValue99";
@@ -78,7 +79,7 @@ test("cron_dump looks in the user's own systemd directories and says what it did
     }
     const sync = (await rowsOf(cwd, out, "entries")).find((e) => String(e.file).endsWith("sync.timer"));
     assert.equal(sync.manager, "user");
-    assert.equal(out.home_source, "etc/passwd");
+    assert.match(out.home_source, /^etc\/passwd and directory listing/);
     assert.ok(out.unmerged_dropins.some((d: Json) => String(d.file).endsWith("x.timer.d/override.conf")), "a drop-in is listed, not merged");
     assert.ok(out.unsupported.length >= 3, "what is not read is named");
     assert.ok(out.unsupported.some((u: string) => /at/.test(u)));
@@ -131,5 +132,90 @@ test("cron_dump says a file's mtime contrast is a lead and not a conclusion, and
     assert.equal(out.unparsed_lines, 1);
     assert.equal((await rowsOf(cwd, out, "unparsed"))[0].line, 1);
     assert.match(String(out.coverage_note), /candidate|not the effective/i);
+  });
+});
+
+test("cron_dump derives a schedule, a unit and a persistence flag only from the sections it shows", async () => {
+  await withCwd(async (cwd) => {
+    const root = join(cwd, "work", "root");
+    await put(root, "etc/systemd/system/x.timer", "[Service]\nOnCalendar=SECRETSCHEDULE\nUnit=SECRETUNIT\nPersistent=SECRETPERSIST\n[Timer]\nOnBootSec=5min\n");
+    const run = await tool(CRON, cwd, { root: "work/root" });
+    const [timer] = (await rowsOf(cwd, body(run), "entries")).filter((e) => e.source === "systemd");
+    assert.deepEqual(timer.schedules, ["5min"]);
+    assert.equal(timer.unit, "x.service");
+    assert.equal(timer.persistent, null);
+    assert.ok(timer.assignments.filter((a: Json) => a.section === "Service").every((a: Json) => a.value_withheld === true));
+    assert.ok(!run.stdout.includes("SECRET"));
+  });
+});
+
+test("cron_dump reads a comment that ends in a backslash as one line, so the assignment after it is kept", async () => {
+  await withCwd(async (cwd) => {
+    const root = join(cwd, "work", "root");
+    await put(root, "etc/systemd/system/c.timer", "[Timer]\n# a comment that ends with a backslash \\\nOnCalendar=daily\n");
+    const [timer] = (await rowsOf(cwd, body(await tool(CRON, cwd, { root: "work/root" })), "entries")).filter((e) => e.source === "systemd");
+    assert.deepEqual(timer.assignments.map((a: Json) => [a.line, a.key, a.value]), [[3, "OnCalendar", "daily"]]);
+  });
+});
+
+test("cron_dump looks in the home of an account the passwd file no longer lists", async () => {
+  await withCwd(async (cwd) => {
+    const root = join(cwd, "work", "root");
+    await put(root, "etc/passwd", "root:x:0:0:root:/root:/bin/bash\nalice:x:1000:1000::/home/alice:/bin/bash\n");
+    await put(root, "home/ghost/.config/systemd/user/evil.timer", "[Timer]\nOnBootSec=1min\n");
+    const out = body(await tool(CRON, cwd, { root: "work/root" }));
+    assert.ok((await rowsOf(cwd, out, "entries")).some((e) => String(e.file).endsWith("home/ghost/.config/systemd/user/evil.timer")));
+    assert.ok(out.homes_beyond_passwd >= 1, "the homes the account database does not account for are counted");
+  });
+});
+
+test("cron_dump keeps an answer short where a table sets thousands of variables and runs thousands of jobs", async () => {
+  await withCwd(async (cwd) => {
+    const root = join(cwd, "work", "root");
+    const body_ = Array.from({ length: 1500 }, (_, i) => `VAR${i}=v${i}\n* * * * * root /bin/job${i}\n`).join("");
+    await put(root, "etc/crontab", body_);
+    const started = Date.now();
+    const run = await asJob(CRON, cwd, { root: "work/root", write_text: true });
+    assert.ok(Date.now() - started < 10_000);
+    assert.ok(run.stdout.length < 400_000, `the answer is ${run.stdout.length} bytes`);
+    const out = JSON.parse(run.stdout);
+    assert.equal(out.entries_total, 1500);
+    const text = (await readFile(join(cwd, "out", "cron-text.jsonl"), "utf8")).trimEnd().split("\n").map((l) => JSON.parse(l));
+    assert.equal(text.filter((t: Json) => t.record_type === "environment").length, 1500, "every assignment is in the file once");
+    const last = text.filter((t: Json) => t.source === "cron").at(-1);
+    assert.equal(last.environment, undefined, "past 100 variables the entry points at the environment rows");
+    assert.equal(last.environment_in_rows, true);
+  });
+});
+
+test("cron_dump never opens a pipe it finds in a scheduling directory", async () => {
+  await withCwd(async (cwd) => {
+    const root = join(cwd, "work", "root");
+    await put(root, "etc/cron.d/keep", "*/5 * * * * root /usr/bin/true\n");
+    await mkdir(join(root, "etc", "systemd", "system"), { recursive: true });
+    assert.equal(spawnSync("mkfifo", [join(root, "etc", "systemd", "system", "p.timer")]).status, 0);
+    assert.equal(spawnSync("mkfifo", [join(root, "etc", "cron.d", "pipe")]).status, 0);
+    const out = body(await tool(CRON, cwd, { root: "work/root" }));
+    assert.equal(out.skipped_special.length, 2);
+    assert.equal(out.all_checked_locations_read, false);
+  });
+});
+
+test("cron_dump's preview carries the text in the answer and its paging file carries none", async () => {
+  await withCwd(async (cwd) => {
+    const root = join(cwd, "work", "root");
+    await put(root, "etc/crontab", "*/5 * * * * root /bin/a PREVIEWSECRETONE\n*/6 * * * * root /bin/b PREVIEWSECRETTWO\n");
+    const out = body(await asJob(CRON, cwd, { root: "work/root", preview_text: true, limit: 1 }));
+    assert.ok(out.entries[0].command.includes("PREVIEWSECRETONE"));
+    assert.equal(out.text.answer_contains_text_that_may_hold_secrets, true);
+    for (const f of await filesUnder(join(cwd, "out"))) assert.ok(!(await readFile(join(cwd, "out", f), "utf8")).includes("PREVIEWSECRET"), f);
+  });
+});
+
+test("cron_dump rejects arguments that are not an object and a field of the wrong type", async () => {
+  await withCwd(async (cwd) => {
+    for (const bad of [null, [], "x"]) assert.match(refused(await tool(CRON, cwd, bad)).error, /JSON object/);
+    await mkdir(join(cwd, "work", "root"), { recursive: true });
+    refused(await tool(CRON, cwd, { root: "work/root", contains: 5 }));
   });
 });

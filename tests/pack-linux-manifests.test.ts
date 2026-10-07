@@ -30,3 +30,15 @@ test("every manifest says what its tool reads, the sha256 of its script, and a v
     assert.ok(manifest.version >= 4 || name === "linux_triage" || name === "cron_dump", `${name} version raised`);
   }
 });
+
+test("shell_history's manifest names exactly the file names its script reads", async () => {
+  // `use.names` is the hint the hub matches an input against: it must not promise a name the script skips, or skip one it reads.
+  const script = await readFile(join(TOOLS, "shell_history", "run.py"), "utf8");
+  const block = script.slice(script.indexOf("NAMES = {"), script.indexOf("# Known files that are not command histories"));
+  const read = [...block.matchAll(/"([^"]+)": \("/g)].map((m) => m[1]).sort();
+  const manifest = JSON.parse(await readFile(join(TOOLS, "shell_history", "manifest.json"), "utf8"));
+  assert.ok(read.length >= 10);
+  assert.deepEqual([...manifest.use.names].sort(), read);
+  const skipped = [...script.slice(script.indexOf("NOT_PARSED = {")).matchAll(/"(\.[a-z]+)": "/g)].map((m) => m[1]);
+  for (const name of skipped) assert.ok(!manifest.use.names.includes(name), `${name} is named, not read`);
+});

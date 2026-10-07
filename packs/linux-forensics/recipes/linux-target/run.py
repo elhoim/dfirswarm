@@ -23,6 +23,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 DETECT_SECONDS = int(os.environ.get("LINUX_TARGET_DETECT_SECONDS", "300"))
@@ -41,20 +42,32 @@ def target_value(raw):
         value = json.load(open(raw, encoding="utf-8")) if os.path.isfile(raw) else json.loads(raw)
     except (OSError, ValueError) as exc:
         answer({"ok": False, "error": f"target is not readable JSON: {exc}"}, 2)
-    paths = value.get("paths") or []
-    if not paths or not isinstance(paths[0], str):
+    paths = value.get("paths") if isinstance(value, dict) else None
+    if not isinstance(paths, list) or not paths or not isinstance(paths[0], str):
         answer({"ok": False, "error": "target has no paths"}, 2)
-    return paths[0], value.get("name") or paths[0]
+    name = value.get("name")
+    return paths[0], name if isinstance(name, str) and name else paths[0]
 
 
 def detect(image):
+    """Any failure to read the OS is exit 2 and `applies: unknown`: only a typed answer naming another system closes the route."""
+    try:
+        detect_os(image)
+    except SystemExit:
+        raise
+    except Exception as exc:    # an unreadable reader, an answer that is not text: not a negative
+        answer({"applies": "unknown", "why": f"the OS probe failed ({type(exc).__name__}: {exc}): the OS was not identified, "
+                                             "so this route is not closed"}, 2)
+
+
+def detect_os(image):
     binary = shutil.which("target-query")
     if not binary:
         answer({"applies": "unknown", "why": "target-query is not in this image: the OS of the target was not identified, "
                                              "so this route is not closed"}, 2)
     try:
         proc = subprocess.run([binary, "--no-cache", "-s", "-f", "os", image],
-                              capture_output=True, text=True, timeout=DETECT_SECONDS)
+                              capture_output=True, text=True, errors="replace", timeout=DETECT_SECONDS)
     except subprocess.TimeoutExpired:
         answer({"applies": "unknown", "why": f"target-query did not identify the OS within {DETECT_SECONDS} seconds: "
                                              "not known to be Linux or not, so this route is not closed"}, 2)
@@ -118,11 +131,16 @@ def coverage_from(summary, proc_code, shown, state):
     }
 
 
-def read_summary(out):
+def read_summary(out, since):
+    """The wrapper's summary, if it is this run's: one that started before this process did is an earlier run's."""
     try:
-        return json.loads((out / "artefacts" / "summary.json").read_text())
+        summary = json.loads((out / "artefacts" / "summary.json").read_text())
     except (OSError, ValueError):
         return None
+    started = summary.get("started") if isinstance(summary, dict) else None
+    if not isinstance(started, (int, float)) or started < since:
+        return None
+    return summary
 
 
 def write_index(out):
@@ -147,9 +165,10 @@ def run(image, shown, out):
     tool = Path(__file__).resolve().parents[2] / "tools" / "linux_triage" / "run.py"
     request = {"source": image, "out_dir": str(out / "artefacts")}
     state = {"proc": None}
+    began = time.time()
 
     def receipt(proc_code, written):
-        summary = read_summary(out)
+        summary = read_summary(out, began)
         coverage = coverage_from(summary, proc_code, shown, written)
         (out / "coverage.json").write_text(json.dumps(coverage, indent=2) + "\n")
         write_index(out)
@@ -164,16 +183,24 @@ def run(image, shown, out):
     def terminated(signum, _frame):
         child = state["proc"]
         if child is not None and child.poll() is None:
-            child.terminate()
+            # The wrapper runs in a session of its own, with the dissect.target it started: end the whole group.
             try:
-                child.wait(timeout=5)
+                os.killpg(child.pid, signal.SIGTERM)
+            except (OSError, ProcessLookupError):
+                child.terminate()
+            try:
+                child.wait(timeout=8)
             except subprocess.TimeoutExpired:
-                child.kill()
+                try:
+                    os.killpg(child.pid, signal.SIGKILL)
+                except (OSError, ProcessLookupError):
+                    child.kill()
         receipt(None, "after this process was terminated")
         raise SystemExit(128 + signum)
 
     signal.signal(signal.SIGTERM, terminated)
-    proc = subprocess.Popen([sys.executable, str(tool)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    proc = subprocess.Popen([sys.executable, str(tool)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                            start_new_session=True)
     state["proc"] = proc
     stdout, stderr = proc.communicate(json.dumps(request))
     (out / "summary.json").write_text(stdout or json.dumps({"error": "linux_triage wrote no result"}) + "\n")

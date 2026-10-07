@@ -38,6 +38,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import socket
 import struct
 import sys
@@ -76,6 +77,46 @@ def in_job():
     return bool(os.environ.get("JOB_ID") and os.environ.get("OUT"))
 
 
+def read_args():
+    try:
+        args = json.load(sys.stdin)
+    except ValueError as exc:
+        fail("arguments are not valid JSON", reason=str(exc))
+    if not isinstance(args, dict):
+        fail("arguments must be a JSON object")
+    return args
+
+
+def want_str(args, key, required=None):
+    value = args.get(key)
+    if value is None:
+        if required:
+            fail(required)
+        return None
+    if not isinstance(value, str):
+        fail("%s must be a string" % key)
+    if required and not value:
+        fail(required)
+    return value
+
+
+def want_str_list(args, key):
+    value = args.get(key)
+    if value is None:
+        return []
+    if not isinstance(value, list) or not all(isinstance(x, str) for x in value):
+        fail("%s must be a list of strings" % key)
+    return value
+
+
+def bound(value, limit=1024):
+    """(shown, bytes or None): a string longer than `limit` characters is shown cut, with its whole length. The
+    whole is kept where the record's text is kept (the text file, the evidence at the record's locator)."""
+    if isinstance(value, str) and len(value) > limit:
+        return value[:limit], len(value.encode("utf-8", "replace"))
+    return value, None
+
+
 def want_flag(args, key):
     value = args.get(key, False)
     if not isinstance(value, bool):
@@ -92,7 +133,7 @@ def want_limit(args):
 
 # Lossless paging (the same in every library tool that pages): the page an agent reads stays small, and when
 # there are more rows the whole result is written as JSON Lines under work/<agent>/tool-output (in a job,
-# $OUT/tool-output) and named. The file name is a digest of the page's key (a path), never of a value.
+# $OUT/tool-output) and named. The file name is random: it is never a digest of anything asked for.
 class LosslessPage:
     def __init__(self, tool, key, limit):
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
@@ -103,8 +144,9 @@ class LosslessPage:
         self.total = 0
         self._out = None
         self._tmp = None
-        digest = hashlib.sha256(json.dumps(key, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16]
-        name = "%s-%s.jsonl" % (self.tool, digest)
+        # A random token, not a digest of the request: two requests never share a file, and a search term (which can
+        # be a secret someone is looking for) is never hashed into a name.
+        name = "%s-%s.jsonl" % (self.tool, secrets.token_hex(8))
         job, out = os.environ.get("JOB_ID"), os.environ.get("OUT")
         if job and out:
             # In a job only $OUT is written, and it is sealed as the job's output: the whole result is cited from there.
@@ -128,7 +170,7 @@ class LosslessPage:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             fd, name = tempfile.mkstemp(dir=self.path.parent, prefix=".%s-" % self.path.name)
             self._tmp = Path(name)
-            self._out = os.fdopen(fd, "w", encoding="utf-8")
+            self._out = os.fdopen(fd, "w", encoding="utf-8", errors="backslashreplace")
             for kept in self.page:
                 self._write(kept)
         self._write(row)
@@ -389,6 +431,8 @@ def parse_lastlog(path, size, layout, order, args, pattern, wanted, page, stats,
                     continue
                 slot = os.pread(fd, width, uid * width)
                 stats["slots_read"] += 1
+                if slot.count(0) != len(slot):
+                    stats["nonempty"] += 1
                 emit_slot(uid, uid * width, slot, width, fmt, time_bytes, text_at, users, pattern, wanted, page, stats, layout)
         finally:
             os.close(fd)
@@ -400,6 +444,8 @@ def parse_lastlog(path, size, layout, order, args, pattern, wanted, page, stats,
         fail("start_uid must be a whole number")
     if cap is not None and (isinstance(cap, bool) or not isinstance(cap, int) or cap < 1):
         fail("max_slots must be a positive whole number")
+    if start > total:
+        fail("start_uid is past the last slot of the file (%d slots)" % total, slots_total=total)
     end = total if cap is None else min(total, start + cap)
     stats["scope"] = "whole file" if start == 0 and end == total else "uid %d to %d" % (start, end - 1)
     for uid, offset, slot in nonempty_slots(path, size, width, start, end, state, deadline):
@@ -437,13 +483,8 @@ def emit_slot(uid, offset, slot, width, fmt, time_bytes, text_at, users, pattern
 
 
 def main():
-    try:
-        args = json.load(sys.stdin)
-    except ValueError as exc:
-        fail("arguments are not valid JSON", reason=str(exc))
-    path = args.get("path")
-    if not isinstance(path, str) or not path:
-        fail("path is required: a wtmp, btmp, utmp or lastlog file")
+    args = read_args()
+    path = want_str(args, "path", "path is required: a wtmp, btmp, utmp or lastlog file")
     if os.path.islink(path):
         fail("refusing a symlink: pass the binary log inside the evidence", path=path, target=os.readlink(path))
     if not os.path.isfile(path):
@@ -456,13 +497,14 @@ def main():
              "it. Copy it with its -wal and -shm files and open the copy read-only with sqlite_query from the "
              "computer-forensics-base pack.", path=path, format="sqlite", bytes=size)
     limit = want_limit(args)
-    wanted = {str(t).upper() for t in (args.get("types") or [])}
+    wanted = {t.upper() for t in want_str_list(args, "types")}
     pattern = None
-    if args.get("user"):
+    if want_str(args, "user"):
         try:
             pattern = re.compile(args["user"], re.I)
         except re.error as exc:
             fail("user is not a valid regex", reason=str(exc))
+    want_str(args, "passwd")
     requested_format = args.get("format")
     if requested_format not in (None, "utmp", "lastlog"):
         fail("format must be utmp or lastlog")
@@ -479,7 +521,7 @@ def main():
                   or (requested_format is None and layout_arg == "auto" and os.path.basename(path).lower() == "lastlog"))
     if requested_format == "utmp" and layout_arg.startswith("lastlog") or requested_format == "lastlog" and layout_arg == "utmp-384":
         fail("format and layout disagree", format=requested_format, layout=layout_arg)
-    page = LosslessPage(TOOL, [path, sorted(wanted), str(pattern.pattern if pattern else ""), layout_arg, order_arg, args.get("uids"), args.get("start_uid")], limit)
+    page = LosslessPage(TOOL, "records", limit)
     stats = {"records": 0, "empty": 0, "matched": 0, "boots": 0, "by_type": {}, "slots_read": 0, "nonempty": 0,
              "scope": "whole file", "next_uid": None, "uids_beyond_file": []}
     deadline = time.monotonic() + seconds
@@ -502,7 +544,7 @@ def main():
         out.update({
             "slots_total": size // width,
             "slots_read": stats["slots_read"],
-            "nonempty_slots": stats["nonempty"] if args.get("uids") is None else stats["matched"],
+            "nonempty_slots": stats["nonempty"],
             "scope": stats["scope"],
             "next_uid": stats["next_uid"],
             "stopped": stats.get("stopped"),

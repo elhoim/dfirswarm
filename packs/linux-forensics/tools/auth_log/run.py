@@ -40,6 +40,8 @@ import ipaddress
 import json
 import os
 import re
+import secrets
+import stat
 import sys
 import tempfile
 import zlib
@@ -49,7 +51,7 @@ TOOL = "auth_log"
 PARSER = "auth_log/4"
 DEFAULT_LIMIT = 200
 FIRST_FAILURES = 20
-MAX_LINE = 1 << 20          # a physical line longer than this is located, not parsed
+MAX_LINE = 64 << 10         # a physical line longer than this is located, not parsed
 DEFAULT_EXPANDED = 1 << 30  # a gzip stream is read to at most this many decompressed bytes
 ZONE_SLACK = datetime.timedelta(hours=26)   # the log's zone is unknown: UTC-12 to UTC+14 is 26 hours
 TEXT_NAME = "auth-text.jsonl"
@@ -74,6 +76,46 @@ def in_job():
     return bool(os.environ.get("JOB_ID") and os.environ.get("OUT"))
 
 
+def read_args():
+    try:
+        args = json.load(sys.stdin)
+    except ValueError as exc:
+        fail("arguments are not valid JSON", reason=str(exc))
+    if not isinstance(args, dict):
+        fail("arguments must be a JSON object")
+    return args
+
+
+def want_str(args, key, required=None):
+    value = args.get(key)
+    if value is None:
+        if required:
+            fail(required)
+        return None
+    if not isinstance(value, str):
+        fail("%s must be a string" % key)
+    if required and not value:
+        fail(required)
+    return value
+
+
+def want_str_list(args, key):
+    value = args.get(key)
+    if value is None:
+        return []
+    if not isinstance(value, list) or not all(isinstance(x, str) for x in value):
+        fail("%s must be a list of strings" % key)
+    return value
+
+
+def bound(value, limit=1024):
+    """(shown, bytes or None): a string longer than `limit` characters is shown cut, with its whole length. The
+    whole is kept where the record's text is kept (the text file, the evidence at the record's locator)."""
+    if isinstance(value, str) and len(value) > limit:
+        return value[:limit], len(value.encode("utf-8", "replace"))
+    return value, None
+
+
 def want_flag(args, key):
     value = args.get(key, False)
     if not isinstance(value, bool):
@@ -90,7 +132,7 @@ def want_limit(args):
 
 # Lossless paging (the same in every library tool that pages): the page an agent reads stays small, and when
 # there are more rows the whole result is written as JSON Lines under work/<agent>/tool-output (in a job,
-# $OUT/tool-output) and named. The file name is a digest of the page's key (a path), never of a value.
+# $OUT/tool-output) and named. The file name is random: it is never a digest of anything asked for.
 class LosslessPage:
     def __init__(self, tool, key, limit):
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
@@ -101,8 +143,9 @@ class LosslessPage:
         self.total = 0
         self._out = None
         self._tmp = None
-        digest = hashlib.sha256(json.dumps(key, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16]
-        name = "%s-%s.jsonl" % (self.tool, digest)
+        # A random token, not a digest of the request: two requests never share a file, and a search term (which can
+        # be a secret someone is looking for) is never hashed into a name.
+        name = "%s-%s.jsonl" % (self.tool, secrets.token_hex(8))
         job, out = os.environ.get("JOB_ID"), os.environ.get("OUT")
         if job and out:
             # In a job only $OUT is written, and it is sealed as the job's output: the whole result is cited from there.
@@ -126,7 +169,7 @@ class LosslessPage:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             fd, name = tempfile.mkstemp(dir=self.path.parent, prefix=".%s-" % self.path.name)
             self._tmp = Path(name)
-            self._out = os.fdopen(fd, "w", encoding="utf-8")
+            self._out = os.fdopen(fd, "w", encoding="utf-8", errors="backslashreplace")
             for kept in self.page:
                 self._write(kept)
         self._write(row)
@@ -194,8 +237,17 @@ class TextFile:
     def add(self, row):
         if self._fh is None:
             return
-        self._fh.write(json.dumps(row, ensure_ascii=False, default=str).encode("utf-8", "replace") + b"\n")
+        self._fh.write(json.dumps(row, ensure_ascii=False, default=str).encode("utf-8", "backslashreplace") + b"\n")
         self.written += 1
+
+    def add_bytes_raw(self, data):
+        """A piece of a source's own bytes, written as it came; the record it belongs to is counted by count_record."""
+        if self._fh is not None:
+            self._fh.write(data)
+
+    def count_record(self):
+        if self._fh is not None:
+            self.written += 1
 
     def add_bytes(self, data):
         """One record exactly as its source wrote it (a native export's line, newline included)."""
@@ -211,30 +263,32 @@ class TextFile:
             self._fh.close()
             self._fh = None
 
-    def summary(self):
+    def summary(self, preview=False):
+        """What the answer says about text. `preview` is true when the answer itself carries it (preview_text)."""
+        shown = {"answer_contains_text_that_may_hold_secrets": bool(preview)}
         if not self.enabled:
-            return {"requested": False, "written": 0, "file": None, "contains_text_that_may_hold_secrets": False,
-                    "hint": "No text of any record is in this answer or in a file. write_text: true, in a job run with "
-                            "secret_output: true, keeps the whole of each record in a private file under $OUT."}
+            hint = ("No text of any record is in a file." if not preview else
+                    "The answer's records carry their text (preview_text); no file of it was written, and the paging file, if there is one, holds none.")
+            return {"requested": False, "written": 0, "file": None, "contains_text_that_may_hold_secrets": False, **shown,
+                    "hint": hint + " write_text: true, in a job run with secret_output: true, keeps the whole of each record in a private file under $OUT."}
         return {"requested": True, "written": self.written, "file": self.shown,
-                "contains_text_that_may_hold_secrets": self.written > 0,
-                "format": self.what}
+                "contains_text_that_may_hold_secrets": self.written > 0, **shown, "format": self.what}
 
 
 TRADITIONAL = re.compile(
     r"^(?P<mon>[A-Z][a-z]{2})\s+(?P<day>\d{1,2})\s+(?P<time>\d{2}:\d{2}:\d{2})\s+"
-    r"(?P<host>\S+)\s+(?P<proc>[^\s:\[]+)(?:\[(?P<pid>\d+)\])?:\s*(?P<msg>.*)$")
+    r"(?P<host>\S+)\s+(?P<proc>[^\s:\[]+)(?:\[(?P<pid>\d{1,10})\])?:\s*(?P<msg>.*)$")
 ISO = re.compile(
     r"^(?P<stamp>\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[+-]\d{2}:?\d{2}|Z)?)\s+"
-    r"(?P<host>\S+)\s+(?P<proc>[^\s:\[]+)(?:\[(?P<pid>\d+)\])?:\s*(?P<msg>.*)$")
+    r"(?P<host>\S+)\s+(?P<proc>[^\s:\[]+)(?:\[(?P<pid>\d{1,10})\])?:\s*(?P<msg>.*)$")
 ISO_PARTS = re.compile(
     r"^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?(Z|[+-]\d{2}:?\d{2})?$")
 
 # The ssh key that follows "ssh2:" in an acceptance: "TYPE FINGERPRINT", or for a certificate
 # "TYPE-CERT FINGERPRINT ID <key id> (serial N) CA TYPE FINGERPRINT".
 KEY_CERT = re.compile(
-    r"^(?P<keytype>\S+)\s+(?P<fingerprint>\S+)\s+ID\s+(?P<cert_id>.*?)\s+\(serial\s+(?P<cert_serial>\d+)\)\s+"
-    r"CA\s+(?P<ca_keytype>\S+)\s+(?P<ca_fingerprint>\S+)\s*$")
+    r"^(?P<keytype>\S+)\s+(?P<fingerprint>\S+)\s+ID\s(?P<cert_id>.*)\s\(serial\s(?P<cert_serial>\d{1,20})\)\s"
+    r"CA\s(?P<ca_keytype>\S+)\s(?P<ca_fingerprint>\S+)\s*$")
 KEY_PLAIN = re.compile(r"^(?P<keytype>\S+)\s+(?P<fingerprint>\S+)\s*$")
 PAM_PAIR = re.compile(r"(\w+)=(\S*)")
 
@@ -249,7 +303,7 @@ RULES = [
         r"port (?P<port>\d+)(?: ssh2)?")),
     ("ssh_invalid_user", re.compile(r"^Invalid user (?P<user>.*?) from (?P<source>\S+)(?: port (?P<port>\d+))?")),
     ("ssh_disconnect", re.compile(
-        r"^Received disconnect from (?P<source>\S+) port (?P<port>\d+):(?P<disconnect_code>\d+):\s*(?P<reason>.*?)\s*$")),
+        r"^Received disconnect from (?P<source>\S+) port (?P<port>\d+):(?P<disconnect_code>\d{1,6}):\s*(?P<reason>.*)$")),
     ("ssh_disconnect", re.compile(
         r"^Disconnected from (?:(?P<role>authenticating user|invalid user|user) (?P<user>.+?) )?"
         r"(?P<source>\S+)(?: port (?P<port>\d+))?(?P<stage>.*)$")),
@@ -260,7 +314,9 @@ RULES = [
         r"^\s*(?P<user>\S+)\s*:\s*TTY=(?P<tty>\S*)\s*;\s*PWD=(?P<pwd>\S*)\s*;\s*USER=(?P<target>\S+)\s*;\s*COMMAND=(?P<command>.*)$")),
     ("sudo_failed", re.compile(
         r"^\s*(?P<user>\S+)\s*:\s*(?:\d+ incorrect password attempts?|user NOT in sudoers|command not allowed)")),
-    ("su", re.compile(r"^(?:\(to (?P<target>\S+)\)|Successful su for) (?P<user>\S+)")),
+    ("su", re.compile(r"^(?:\(to (?P<target>\S+)\) (?P<user>\S+)(?: on (?P<tty>\S+))?|"
+                      r"Successful su for (?P<target2>\S+) by (?P<user2>\S+))")),
+    ("su_failed", re.compile(r"^FAILED su for (?P<target>\S+) by (?P<user>\S+)")),
     ("session_opened", re.compile(
         r"^pam_unix\((?P<pam_service>[^:)]*):session\): session opened for user (?P<user>[^\s(]+)"
         r"(?:\(uid=(?P<uid>-?\d+)\))?(?: by (?P<by>[^\s(]*)(?:\(uid=(?P<by_uid>-?\d+)\))?)?")),
@@ -275,6 +331,12 @@ RULES = [
 ]
 KINDS = sorted({k for k, _ in RULES} | {"other"})
 INT_FIELDS = ("port", "uid", "by_uid", "gid", "cert_serial", "authorized_keys_line", "disconnect_code")
+# The key=value pairs of a pam_unix authentication failure that become fields. Any other key in the line is the
+# line's own text (a typed user name can contain "key=value"), and a key can never overwrite a locator field.
+PAM_KEYS = ("logname", "uid", "euid", "tty", "ruser", "rhost", "user")
+# Fields a line's text can never set: they are the tool's own.
+RESERVED = {"id", "parser", "file", "line", "byte_offset", "time", "time_raw", "time_zone", "time_utc", "year", "host",
+            "process", "pid", "kind", "reordered", "time_error", "text_bytes", "command_bytes", "raw", "line_text"}
 # What is the text of a line and not a field of it: held back from the answer, kept in the text file.
 TEXT_FIELDS = ("raw", "command")
 
@@ -308,9 +370,13 @@ def finish(kind, fields):
             fields["stage"] = stage
     if kind == "auth_failure":
         for key, value in PAM_PAIR.findall(fields.pop("kv", "") or ""):
-            if value == "":
+            if value == "" or key not in PAM_KEYS:
                 continue
             fields["source" if key == "rhost" else key] = value
+    if kind == "su":
+        for plain in ("target", "user"):
+            if plain + "2" in fields:
+                fields[plain] = fields.pop(plain + "2")
     if "source" in fields and not address_ok(fields["source"]):
         fields["source_unvalidated"] = fields.pop("source")
     for key in INT_FIELDS:
@@ -319,7 +385,7 @@ def finish(kind, fields):
                 fields[key] = int(fields[key])
             except ValueError:
                 fields.pop(key)
-    return fields
+    return {k: v for k, v in fields.items() if k not in RESERVED}
 
 
 def classify(message):
@@ -337,12 +403,12 @@ def rotation_basis(path):
     """(rank, key, basis): oldest first. A number is a rotation count (a higher one is older), a date is
     that day, and the live file is the newest. Anything else is ordered by name, and said so."""
     name = os.path.basename(path)
-    found = re.search(r"\.(\d+)(?:\.gz)?$", name)
-    if found:
-        return 1, -int(found.group(1)), "numeric rotation suffix"
-    found = re.search(r"-(\d{8})(?:\.gz)?$", name)
+    found = re.search(r"[-.]((?:19|20)\d\d(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01]))(?:\.gz)?$", name)
     if found:
         return 1, int(found.group(1)), "date suffix"
+    found = re.search(r"\.(\d{1,6})(?:\.gz)?$", name)
+    if found:
+        return 1, -int(found.group(1)), "numeric rotation suffix"
     if re.fullmatch(r"(?:auth\.log|secure)", name):
         return 2, 0, "current file"
     return 0, 0, "name only"
@@ -363,6 +429,13 @@ def open_binary(path, state):
     if magic == b"\x1f\x8b":
         state.compression = "gzip"
         return gzip.GzipFile(fileobj=raw)
+    raw.seek(0)
+    head = raw.read(6)
+    raw.seek(0)
+    for name, signature in (("bzip2", b"BZh"), ("xz", b"\xfd7zXZ\x00"), ("zstd", b"\x28\xb5\x2f\xfd")):
+        if head.startswith(signature):
+            raw.close()
+            raise OSError("this file is %s-compressed: only gzip is read here; decompress a copy with the tool that made it and read that" % name)
     return raw
 
 
@@ -395,6 +468,10 @@ def physical_lines(path, state, expanded_cap=None):
                     while True:
                         more = handle.readline(MAX_LINE + 1)
                         length += len(more)
+                        if expanded_cap is not None and state.compression == "gzip" and offset + length > expanded_cap:
+                            state.errors.append({"file": path, "error": "the decompressed stream passed max_expanded_bytes (%d): not read past it" % expanded_cap,
+                                                 "line": number + 1, "byte_offset": offset})
+                            return
                         if not more or more.endswith(b"\n"):
                             break
                     number += 1
@@ -414,8 +491,10 @@ class MonthTracker:
     """Which way the months of a traditional stamp move from one line to the next.
 
     A forward step of up to six months is the log advancing, and it is a year end when the number goes
-    down (Dec to Jan). Anything else is a step back in time: the line is out of order, and it does not
-    move the place the next line is compared with. A month going down is therefore not, by itself, a
+    down (Dec to Jan). Anything else, including a gap of more than six months, is read as a step back in
+    time: the line is out of order, and it does not move the place the next line is compared with. (A log
+    that really skips more than half a year between two lines is therefore read wrongly, and the line is
+    flagged `reordered`, which says so.) Only lines whose date and clock exist are fed to it. A month going down is therefore not, by itself, a
     year end: January, December, January is one year with one late line in it."""
 
     def __init__(self):
@@ -472,7 +551,9 @@ def traditional_time(year, month, day, clock):
 
 
 def iso_time(stamp):
-    """(time, time_utc, time_zone, error) for an RFC 3339 stamp, its fraction kept."""
+    """(time, time_utc, time_zone, error) for an RFC 3339 stamp, its fraction kept. `time` is the clock reading as
+    written, with no zone designator; `time_utc` is the same instant in UTC and exists only where the stamp carries
+    its zone."""
     found = ISO_PARTS.match(stamp)
     if not found:
         return None, None, "unknown", "stamp does not match RFC 3339"
@@ -486,26 +567,41 @@ def iso_time(stamp):
     if zone is None:
         return shown, None, "unknown", None
     if zone == "Z":
-        offset = datetime.timedelta(0)
+        offset, kept = datetime.timedelta(0), "Z"
     else:
         digits = zone[1:].replace(":", "")
-        offset = datetime.timedelta(hours=int(digits[:2]), minutes=int(digits[2:]))
+        hours, minutes = int(digits[:2]), int(digits[2:])
+        if hours > 23 or minutes > 59:
+            return shown, None, zone, "the zone offset %s is not a valid offset" % zone
+        offset = datetime.timedelta(hours=hours, minutes=minutes)
         offset = offset if zone[0] == "+" else -offset
-    utc = (naive - offset).isoformat() + "Z"
-    kept = zone if zone == "Z" else zone[0] + zone[1:].replace(":", "")[:2] + ":" + zone[1:].replace(":", "")[2:]
-    return utc, utc, kept, None
+        kept = "%s%02d:%02d" % (zone[0], hours, minutes)
+    try:
+        utc = (naive - offset).isoformat() + "Z"
+    except OverflowError:
+        return shown, None, kept, "the stamp in UTC is outside the range of a date"
+    return shown, utc, kept, None
 
 
 # --- the run -----------------------------------------------------------------------------------------
 
+def short_fields(fields):
+    """The fields as the answer shows them: a long free-text value is cut at 256 characters and its whole length said.
+    The whole is in the text file (write_text) and in the evidence at the record's locator."""
+    shown, cut = {}, {}
+    for key, value in fields.items():
+        value, whole = bound(value, 256)
+        shown[key] = value
+        if whole is not None:
+            cut[key] = whole
+    if cut:
+        shown["truncated_fields"] = cut
+    return shown
+
+
 def main():
-    try:
-        args = json.load(sys.stdin)
-    except ValueError as exc:
-        fail("arguments are not valid JSON", reason=str(exc))
-    path = args.get("path")
-    if not isinstance(path, str) or not path:
-        fail("path is required: an auth.log or secure file, or a directory holding them")
+    args = read_args()
+    path = want_str(args, "path", "path is required: an auth.log or secure file, or a directory holding them")
     if os.path.islink(path):
         fail("refusing a symlink: pass the log file or directory inside the evidence", path=path,
              target=os.readlink(path))
@@ -516,22 +612,29 @@ def main():
     year_arg = args.get("year")
     if year_arg is not None and (isinstance(year_arg, bool) or not isinstance(year_arg, int) or not 1970 <= year_arg <= 2200):
         fail("year must be a whole year between 1970 and 2200")
-    kinds = args.get("kinds") or []
-    if not isinstance(kinds, list):
-        fail("kinds must be a list of kinds", known=KINDS)
-    wanted = {str(k) for k in kinds}
+    wanted = set(want_str_list(args, "kinds"))
     if "key_added" in wanted:
         fail("key_added was renamed key_observed_authentication: an `Accepted key` line is sshd matching a "
              "login against an authorized_keys entry, not a key being installed", known=KINDS)
     unknown = sorted(wanted - set(KINDS))
     if unknown:
         fail("unknown kinds: %s" % ", ".join(unknown), known=KINDS)
-    needle = (args.get("contains") or "").lower()
+    needle = (want_str(args, "contains") or "").lower()
     expand_cap = args.get("max_expanded_bytes", DEFAULT_EXPANDED)
     if isinstance(expand_cap, bool) or not isinstance(expand_cap, int) or expand_cap < 1:
         fail("max_expanded_bytes must be a positive integer")
 
-    walk_errors, skipped_symlinks, targets = [], [], []
+    walk_errors, skipped_symlinks, skipped_special, targets = [], [], [], []
+
+    def regular(candidate):
+        if os.path.islink(candidate):
+            skipped_symlinks.append({"file": candidate, "target": os.readlink(candidate)})
+            return False
+        if not stat.S_ISREG(os.lstat(candidate).st_mode):
+            skipped_special.append({"file": candidate, "reason": "not a regular file (a pipe, a socket or a device): never opened"})
+            return False
+        return True
+
     if os.path.isdir(path):
         def on_error(exc):
             walk_errors.append({"path": getattr(exc, "filename", None), "error": describe(exc)})
@@ -543,16 +646,17 @@ def main():
             for name in names:
                 if re.match(r"^(auth\.log|secure)", name):
                     candidate = os.path.join(root, name)
-                    if os.path.islink(candidate):
-                        skipped_symlinks.append({"file": candidate, "target": os.readlink(candidate)})
-                    else:
+                    if regular(candidate):
                         targets.append(candidate)
-    elif os.path.isfile(path):
+    elif os.path.lexists(path):
+        if not stat.S_ISREG(os.lstat(path).st_mode):
+            fail("not a regular file or a directory: a pipe, a socket or a device is never opened", path=path)
         targets = [path]
     else:
         fail("no such file or directory", path=path)
     if not targets:
-        fail("no auth.log or secure file found there", path=path, skipped_symlinks=skipped_symlinks, walk_errors=walk_errors)
+        fail("no auth.log or secure file found there", path=path, skipped_symlinks=skipped_symlinks,
+             skipped_special=skipped_special, walk_errors=walk_errors)
     ranked = sorted(((rotation_basis(t), t) for t in targets), key=lambda row: (row[0][0], row[0][1], row[1]))
     schemes = {basis for (rank, _k, basis), _t in ranked if rank == 1}
 
@@ -561,8 +665,9 @@ def main():
                         "with `raw` (the message), `command` (a sudo command line) and `line_text` (the physical line)")
     except TextRefused as exc:
         fail(str(exc))
-    page = LosslessPage(TOOL, ["records", path, sorted(wanted), needle, year_arg, preview_text], limit)
-    unparsed_page = LosslessPage(TOOL, ["unparsed", path], limit)
+    page = LosslessPage(TOOL, "records", limit)
+    unparsed_page = LosslessPage(TOOL, "unparsed", limit)
+    preview_rows = []
 
     files, read_errors, by_kind = [], [], {}
     counts = {"physical": 0, "blank": 0, "read": 0, "unparsed": 0, "time_errors": 0, "invalid_utf8": 0}
@@ -577,7 +682,7 @@ def main():
             info["size"] = os.path.getsize(target)
             mtime = datetime.datetime.fromtimestamp(os.path.getmtime(target), datetime.timezone.utc).replace(tzinfo=None)
             info["modified"] = mtime.isoformat() + "Z"
-        except OSError:
+        except (OSError, ValueError, OverflowError):
             mtime = None
         # Pass one: how the months run, so the year of the first line can be worked back from the last.
         tracker, last_valid = MonthTracker(), None
@@ -587,15 +692,15 @@ def main():
             found = TRADITIONAL.match(chunk.decode("utf-8", "replace").rstrip("\r\n"))
             if not found or found.group("mon") not in MONTHS:
                 continue
-            month = MONTHS[found.group("mon")]
-            kind = tracker.feed(month)
-            day = int(found.group("day"))
+            month, day = MONTHS[found.group("mon")], int(found.group("day"))
             try:
                 datetime.datetime(2000, month, day)
                 valid = valid_clock(found.group("time"))
             except ValueError:
                 valid = False
-            if valid and kind != "reordered":
+            if not valid:
+                continue            # a date that does not exist says nothing about which way the months run
+            if tracker.feed(month) != "reordered":
                 h, m, s = (int(x) for x in found.group("time").split(":"))
                 last_valid = (month, day, h, m, min(s, 59))
         info["rollovers"], info["reordered_lines"] = tracker.rollovers, tracker.reordered
@@ -622,7 +727,7 @@ def main():
                 text.add({"record_type": "unparsed", **row, "line_text": None})
                 continue
             decoded = chunk.decode("utf-8", "replace")
-            if "\ufffd" in decoded:
+            if "�" in decoded:
                 try:
                     chunk.decode("utf-8")
                 except UnicodeDecodeError:
@@ -647,11 +752,16 @@ def main():
                 text.add({"record_type": "unparsed", **row, "line_text": line})
                 continue
             parts = (found or iso).groupdict()
-            time_fields = {}
+            time_fields, range_key = {}, None
             if found:
                 info["formats"]["traditional"] = info["formats"].get("traditional", 0) + 1
                 month, day = MONTHS[parts["mon"]], int(parts["day"])
-                step = tracker.feed(month)
+                try:
+                    datetime.datetime(2000, month, day)
+                    exists = valid_clock(parts["time"])
+                except ValueError:
+                    exists = False
+                step = tracker.feed(month) if exists else "invalid"
                 reordered = step == "reordered"
                 when, error, use = None, None, None
                 if year_arg is not None:
@@ -662,6 +772,9 @@ def main():
                         year += 1
                     if year is None:
                         error = "no year could be applied (%s)" % info["year_basis"]
+                    elif not exists:
+                        use = year
+                        when, error = traditional_time(use, month, day, parts["time"])
                     elif reordered and cursor is not None:
                         # Out of order by months: the year that puts it nearest the lines around it.
                         best = None
@@ -678,8 +791,7 @@ def main():
                         when, error = traditional_time(use, month, day, parts["time"])
                 if when is not None and not reordered:
                     cursor = when
-                    info["first_time"] = info["first_time"] or when.isoformat()
-                    info["last_time"] = when.isoformat()
+                    range_key = when.isoformat()
                     info["first_year"] = info["first_year"] or when.year
                     info["last_year"] = when.year
                 time_fields = {"time": when.isoformat() if when else None,
@@ -687,6 +799,8 @@ def main():
                                "time_zone": "unknown", "time_utc": None, "year": use if when else None}
                 if error:
                     time_fields["time_error"] = error
+                if parts["time"].endswith(":60") and when is not None:
+                    time_fields["time_note"] = "second 60 (a leap second) is shown as 59"
                 if reordered:
                     time_fields["reordered"] = True
             else:
@@ -695,6 +809,10 @@ def main():
                 time_fields = {"time": shown, "time_raw": parts["stamp"], "time_zone": zone, "time_utc": utc}
                 if error:
                     time_fields["time_error"] = error
+                range_key = utc.rstrip("Z") if utc else shown
+            if range_key:
+                info["first_time"] = info["first_time"] or range_key
+                info["last_time"] = range_key
             if time_fields.get("time_error"):
                 counts["time_errors"] += 1
             kind, fields = classify(parts["msg"])
@@ -711,12 +829,14 @@ def main():
                 texts["command"] = fields.pop("command")
             row = {"id": record_id, "parser": PARSER, "file": target, "line": number, "byte_offset": offset,
                    **time_fields, "host": parts.get("host"), "process": parts.get("proc"),
-                   "pid": int(parts["pid"]) if parts.get("pid") else None, "kind": kind, **fields,
+                   "pid": int(parts["pid"]) if parts.get("pid") else None, "kind": kind, **short_fields(fields),
                    "text_bytes": len(parts["msg"].encode("utf-8", "replace"))}
             if "command" in texts:
                 row["command_bytes"] = len(texts["command"].encode("utf-8", "replace"))
-            text.add({**row, **texts, "line_text": line})
-            page.add({**row, **texts} if preview_text else row)
+            text.add({**row, **fields, **texts, "line_text": line})
+            page.add(row)
+            if preview_text and len(preview_rows) < limit:
+                preview_rows.append({**row, **texts})
         info["compression"] = state.compression
         for err in state.errors:
             read_errors.append(err)
@@ -730,7 +850,7 @@ def main():
         if earlier["last_time"] and later["first_time"] and later["first_time"] < earlier["last_time"]:
             overlaps.append({"earlier": earlier["path"], "later": later["path"], "earlier_last": earlier["last_time"], "later_first": later["first_time"]})
     pages = {"records": page.finish(), "unparsed": unparsed_page.finish()}
-    all_parsed = counts["unparsed"] == 0 and not read_errors and not walk_errors
+    all_parsed = counts["unparsed"] == 0 and not read_errors and not walk_errors and not skipped_special
     print(json.dumps({
         "parser": PARSER,
         "path": path,
@@ -747,25 +867,28 @@ def main():
         "lines_with_invalid_utf8": counts["invalid_utf8"],
         "by_kind": by_kind,
         "record_count": pages["records"]["matched"],
-        "records": page.page,
+        "records": preview_rows if preview_text else page.page,
         "unparsed": unparsed_page.page,
         "pages": pages,
-        "text": text.summary(),
+        "text": text.summary(preview_text),
         "all_lines_parsed": all_parsed,
         "read_errors": read_errors,
         "walk_errors": walk_errors,
         "skipped_symlinks": skipped_symlinks,
+        "skipped_special": skipped_special,
         "truncated": any(p["truncated"] for p in pages.values()),
         "note": "A traditional syslog stamp carries no year and no zone: each file says the year basis applied "
                 "(its modification time, which on a copied tree is the time of the copy, or your `year`) and each "
-                "record keeps its stamp as written in time_raw. A line out of order by months is flagged reordered "
-                "and placed by nearness, and is not a year end. all_lines_parsed says that every line matched a "
-                "syslog shape and every file was read through; it is not coverage of the host's authentication "
-                "events. An ssh_accepted line says sshd accepted an authentication: its fingerprint names a key, not "
-                "a person, and not when the key was installed. A PAM session is the named service's, not necessarily "
-                "a login. Text files are editable by root: compare the sessions that matter with wtmp (utmp_parse) "
-                "and the journal, and treat a disagreement as a question to explain (rotation, forwarding, filtering, "
-                "a damaged file and an edit all produce one), not as an answer.",
+                "record keeps its stamp as written in time_raw, with `time` the clock reading as written and "
+                "`time_utc` set only where the stamp carries its zone. A line out of order by months is flagged "
+                "reordered and placed by nearness, and is not a year end. all_lines_parsed says that every line "
+                "matched a syslog shape and every file was read through; it is not coverage of the host's "
+                "authentication events. An ssh_accepted line says sshd accepted an authentication: its fingerprint "
+                "names a key, not a person, and not when the key was installed. A PAM session is the named "
+                "service's, not necessarily a login. A user name typed at a prompt can be a password. Text files are "
+                "editable by root: compare the sessions that matter with wtmp (utmp_parse) and the journal, and treat "
+                "a disagreement as a question to explain (rotation, forwarding, filtering, a damaged file and an edit "
+                "all produce one), not as an answer.",
     }, indent=2))
 
 

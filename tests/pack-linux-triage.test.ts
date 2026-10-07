@@ -110,7 +110,7 @@ test("linux_triage stops at its total deadline, names the functions it never sta
 
 test("linux_triage leaves a durable summary after each function, so a run killed in the middle still says what it had done", async () => {
   await withCwd(async (cwd, bin) => {
-    const env = await triageFixture(cwd, bin, { users: { sleep: 0 }, bashhistory: { sleep: 60 } });
+    const env = await triageFixture(cwd, bin, { users: { sleep: 0 }, bashhistory: { sleep: 8 } });
     const child = spawn("python3", [TRIAGE], { cwd, env: { ...process.env, ...env, ...AGENT, PATH: `${bin}:${process.env.PATH ?? ""}` }, detached: true, stdio: ["pipe", "pipe", "pipe"] });
     child.stdin.end(JSON.stringify({ source: "inputs/server.E01", out_dir: "work/triage", groups: ["users", "history"] }));
     const summaryPath = join(cwd, "work", "triage", "summary.json");
@@ -209,7 +209,7 @@ test("the linux-target recipe's coverage follows what each function produced, no
 
 test("the linux-target recipe leaves a receipt before the wrapper starts and rewrites it from the wrapper's summary when it is terminated", async () => {
   await withCwd(async (cwd, bin) => {
-    const env = await triageFixture(cwd, bin, { os: { records: 1 }, hostname: { sleep: 60 } });
+    const env = await triageFixture(cwd, bin, { os: { records: 1 }, hostname: { sleep: 8 } });
     await writeFile(join(cwd, "target.json"), JSON.stringify({ paths: [join(cwd, "inputs", "server.E01")], name: "server" }));
     const child = spawn("python3", [RECIPE, "run", "--target", join(cwd, "target.json"), "--out", join(cwd, "recipe-out")], {
       cwd, env: { ...process.env, ...env, PATH: `${bin}:${process.env.PATH ?? ""}` }, detached: true, stdio: ["ignore", "pipe", "pipe"],
@@ -232,5 +232,103 @@ test("the linux-target recipe leaves a receipt before the wrapper starts and rew
     assert.ok(after.functions.parsed >= 1);
     assert.ok(after.errors.some((e: string) => /hostname/.test(e)), JSON.stringify(after.errors));
     assert.match(after.receipt_written, /terminated/);
+  });
+});
+
+test("linux_triage ends a function's unterminated last line so the next function's record is not glued to it, and says so", async () => {
+  await withCwd(async (cwd, bin) => {
+    const env = await triageFixture(cwd, bin, { journal: { records: 1, junk: "", exit: 1 }, syslog: { records: 2 } });
+    // The stand-in prints `{"j":2` with no newline for the journal function, then fails.
+    await writeFile(join(bin, "target-query"), `#!/usr/bin/env python3
+import json, os, sys
+args = sys.argv[1:]
+fn = args[args.index("-f") + 1]
+if fn == "journal":
+    sys.stdout.write('{"j":1}\\n{"j":2'); sys.stdout.flush(); sys.exit(1)
+print(json.dumps({"fn": fn}))
+`);
+    await chmod(join(bin, "target-query"), 0o755);
+    const out = body(await tool(TRIAGE, cwd, { source: "inputs/server.E01", out_dir: "work/triage", groups: ["logs"] }, env, bin));
+    const [journal, syslog] = out.groups[0].functions;
+    assert.equal(journal.last_line_unterminated, true);
+    assert.equal(journal.status, "failed");
+    assert.equal(syslog.status, "parsed");
+    const textOut = await readFile(join(cwd, out.groups[0].file), "utf8");
+    assert.deepEqual(textOut.split("\n").filter(Boolean).map((l) => { try { JSON.parse(l); return "ok"; } catch { return "bad"; } }), ["ok", "bad", "ok"]);
+    assert.equal(journal.bytes, Buffer.byteLength('{"j":1}\n{"j":2'), "its byte count is its own, not the repair");
+  });
+});
+
+test("linux_triage reads a stderr by lines: an unrelated 'unsupported' is not this function's, and a traceback beside records is unknown", async () => {
+  await withCwd(async (cwd, bin) => {
+    const env = await triageFixture(cwd, bin, {
+      users: { records: 0, stderr: "WARNING: unsupported filesystem btrfs on partition 3, skipped" },
+      "webserver.logs": { records: 2, stderr: "Traceback (most recent call last):\n  File x\nValueError" },
+      bashhistory: { records: 0, stderr: `${"noise ".repeat(100_000)}\nWARNING | bashhistory: plugin not available for this target` },
+    });
+    const out = body(await tool(TRIAGE, cwd, { source: "inputs/server.E01", out_dir: "work/triage", groups: ["users", "web", "history"] }, env, bin));
+    const st = (name: string): Json => out.groups.flatMap((g: Json) => g.functions).find((f: Json) => f.name === name);
+    assert.equal(st("users").status, "unknown");
+    assert.equal(st("users").stderr_says_unavailable_without_naming_this_function, true);
+    assert.equal(st("webserver.logs").status, "unknown");
+    assert.equal(st("webserver.logs").stderr_has_a_traceback, true);
+    assert.equal(st("bashhistory").status, "unsupported", "a long stderr is read through to the line that names the function");
+  });
+});
+
+test("linux_triage and the recipe end what dissect.target they started when they are told to stop", async () => {
+  await withCwd(async (cwd, bin) => {
+    const env = await triageFixture(cwd, bin, {});
+    await writeFile(join(bin, "target-query"), `#!/usr/bin/env python3
+import os, time
+open(os.environ["STUB_PID"], "w").write(str(os.getpid()))
+time.sleep(60)
+`);
+    await chmod(join(bin, "target-query"), 0o755);
+    const pidFile = join(cwd, "stub.pid");
+    const child = spawn("python3", [TRIAGE], { cwd, env: { ...process.env, ...env, ...AGENT, STUB_PID: pidFile, PATH: `${bin}:${process.env.PATH ?? ""}` }, stdio: ["pipe", "pipe", "pipe"] });
+    child.stdin.end(JSON.stringify({ source: "inputs/server.E01", out_dir: "work/triage", groups: ["users"] }));
+    const exited = new Promise<number | null>((resolve) => child.on("close", (code) => resolve(code)));
+    let pid = 0;
+    for (let i = 0; i < 100 && !pid; i++) {
+      await new Promise((r) => setTimeout(r, 100));
+      pid = Number(await readFile(pidFile, "utf8").catch(() => "0"));
+    }
+    assert.ok(pid > 0, "dissect.target's stand-in is running");
+    child.kill("SIGTERM");
+    assert.equal(await exited, 143);
+    await new Promise((r) => setTimeout(r, 300));
+    assert.throws(() => process.kill(pid, 0), "the function it was running did not outlive it");
+    const summary = JSON.parse(await readFile(join(cwd, "work", "triage", "summary.json"), "utf8"));
+    assert.equal(summary.state, "terminated");
+    assert.equal(summary.groups[0].functions[0].status, "failed");
+  });
+});
+
+test("the linux-target recipe says could-not-tell for a target or an answer it cannot read, and ignores an earlier run's summary", async () => {
+  await withCwd(async (cwd, bin) => {
+    const env = await triageFixture(cwd, bin, Object.fromEntries(ALL_FUNCTIONS.map((f) => [f, { records: 1 }])));
+    await writeFile(join(cwd, "target.json"), JSON.stringify({ paths: [join(cwd, "inputs", "server.E01")], name: "server" }));
+    const answer = (r: ReturnType<typeof spawnSync>): Json => JSON.parse(String(r.stdout).trim().split("\n").pop() ?? "{}");
+    for (const target of ['{"paths":{"0":"x"}}', "[]", "null"]) assert.equal(recipe(cwd, bin, {}, "detect", "--target", target).status, 2);
+    // A reader that prints bytes that are not text, and one that cannot be started.
+    await writeFile(join(bin, "target-query"), "#!/usr/bin/env python3\nimport sys\nsys.stdout.buffer.write(b'\\xff\\xfe\\x00')\n");
+    await chmod(join(bin, "target-query"), 0o755);
+    let r = recipe(cwd, bin, {}, "detect", "--target", join(cwd, "target.json"));
+    assert.equal(r.status, 2);
+    assert.equal(answer(r).applies, "unknown");
+    await writeFile(join(bin, "target-query"), "#!/nonexistent/interpreter\n");
+    r = recipe(cwd, bin, {}, "detect", "--target", join(cwd, "target.json"));
+    assert.equal(r.status, 2);
+    assert.equal(answer(r).applies, "unknown");
+    // A second run into the same --out: the wrapper refuses, and the receipt does not borrow the first run's summary.
+    await targetQueryStub(bin);
+    const out = join(cwd, "recipe-out");
+    assert.equal(recipe(cwd, bin, env, "run", "--target", join(cwd, "target.json"), "--out", out).status, 0);
+    const again = recipe(cwd, bin, env, "run", "--target", join(cwd, "target.json"), "--out", out);
+    assert.notEqual(again.status, 0);
+    const coverage = JSON.parse(await readFile(join(out, "coverage.json"), "utf8"));
+    assert.equal(coverage.status, "unknown", "no summary of this run exists");
+    assert.ok(coverage.errors.some((e: string) => /linux_triage exited/.test(e)));
   });
 });

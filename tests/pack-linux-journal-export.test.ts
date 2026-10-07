@@ -10,10 +10,10 @@
  * and the files it names hold is checked here for a planted secret.
  */
 import assert from "node:assert/strict";
-import { chmod, mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, readdir, stat, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
-import { JOURNAL, asJob, body, everythingBut, exists, lines, refused, rowsOf, tool, withCwd } from "./linux-pack-harness.ts";
+import { JOURNAL, asJob, body, everythingBut, exists, filesUnder, lines, refused, rowsOf, tool, withCwd } from "./linux-pack-harness.ts";
 import type { Json } from "./linux-pack-harness.ts";
 
 const BOOT_A = "9d6a4f4b7a7e4b2d9b2f0a1e3f4c5d6e";
@@ -206,5 +206,62 @@ test("journal_export verifies in a mode of its own and claims nothing about comp
     assert.equal("complete" in out, false);
     const argv: string[] = JSON.parse((await readFile(env.STUB_ARGV, "utf8")).trim().split("\n")[0]);
     assert.ok(argv.includes("--verify"));
+  });
+});
+
+test("journal_export does not stop at a boot id that is a list, and counts the line that is longer than an entry may be", async () => {
+  await withCwd(async (cwd, bin) => {
+    const huge = JSON.stringify({ __CURSOR: "s=1;i=1;b=1;m=1;t=1;x=1", __REALTIME_TIMESTAMP: "1771061400000000", __MONOTONIC_TIMESTAMP: "1", _BOOT_ID: BOOT_A, MESSAGE: "m".repeat(33 * 1024 * 1024) });
+    const native = [entry(1, {}), entry(2, { _BOOT_ID: [BOOT_A, BOOT_B] as unknown as string }), huge, entry(4, {})].join("\n") + "\n";
+    const env = await journalFixture(cwd, bin, native);
+    const out = body(await asJob(JOURNAL, cwd, { path: "work/journal", write_text: true }, bin, env));
+    assert.equal(out.entry_count, 3, "the oversized line is not an entry");
+    assert.equal(out.parse_errors.oversized_lines, 1);
+    assert.equal(out.parse_errors.first[0].native_line, 3);
+    assert.equal(out.entries_with_a_boot_id_that_is_not_text, 1);
+    assert.equal(out.export_status, "partial");
+    assert.equal(out.text.written, 4, "every line is in the native file, the long one included");
+    assert.equal((await stat(join(cwd, "out", "journal-native.jsonl"))).size, Buffer.byteLength(native));
+  });
+});
+
+test("journal_export ends journalctl and what it started at its deadline, and refuses a directory with links in it", async () => {
+  await withCwd(async (cwd, bin) => {
+    const env = await journalFixture(cwd, bin, nativeJournal());
+    // The stand-in leaves a child holding the pipe open: killing only journalctl would not end the read.
+    await writeFile(join(bin, "journalctl"), `#!/usr/bin/env python3
+import os, subprocess, sys, time
+open(os.environ["STUB_ARGV"], "a").write("run\\n")
+sys.stdout.write(open(os.environ["STUB_LINES"]).read()); sys.stdout.flush()
+subprocess.Popen(["sleep", "30"])
+time.sleep(30)
+`);
+    await chmod(join(bin, "journalctl"), 0o755);
+    const started = Date.now();
+    const out = body(await asJob(JOURNAL, cwd, { path: "work/journal", max_seconds: 1 }, bin, env));
+    assert.equal(out.timed_out, true);
+    assert.ok(Date.now() - started < 6000, `took ${Date.now() - started} ms`);
+    await symlink("/etc", join(cwd, "work", "journal", "elsewhere"));
+    const refusedLinks = refused(await asJob(JOURNAL, cwd, { path: "work/journal" }, bin, env, "out-links"));
+    assert.match(refusedLinks.error, /links/);
+    assert.equal(refusedLinks.link_count, 1);
+  });
+});
+
+test("journal_export's preview carries message and cmdline in the answer and its paging file carries none", async () => {
+  await withCwd(async (cwd, bin) => {
+    const env = await journalFixture(cwd, bin, nativeJournal());
+    const out = body(await asJob(JOURNAL, cwd, { path: "work/journal", preview_text: true, limit: 2 }, bin, env));
+    assert.ok(out.records[1].message.includes(JOURNAL_SECRET));
+    assert.equal(out.text.answer_contains_text_that_may_hold_secrets, true);
+    for (const f of await filesUnder(join(cwd, "out"))) assert.ok(!(await readFile(join(cwd, "out", f), "utf8")).includes(JOURNAL_SECRET), f);
+  });
+});
+
+test("journal_export rejects arguments that are not an object and a field of the wrong type", async () => {
+  await withCwd(async (cwd, bin) => {
+    const env = await journalFixture(cwd, bin, nativeJournal());
+    for (const bad of [null, [], "x"]) assert.match(refused(await tool(JOURNAL, cwd, bad, env, bin)).error, /JSON object/);
+    for (const args of [{ path: "work/journal", unit: 5 }, { path: "work/journal", grep: [] }, { path: "work/journal", since: 5 }]) refused(await tool(JOURNAL, cwd, args, env, bin));
   });
 });

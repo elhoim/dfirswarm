@@ -41,6 +41,8 @@ import hashlib
 import json
 import os
 import re
+import secrets
+import stat
 import sys
 import tempfile
 from pathlib import Path
@@ -83,8 +85,8 @@ UNSUPPORTED = [
     "no time zone or daylight-saving rule is applied to a calendar expression, and an expression is not expanded to a time",
 ]
 
-CRON_NUM = r"[*0-9][*0-9/,\-]*"
-CRON_NAMED = r"[*0-9A-Za-z][*0-9A-Za-z/,\-]*"
+CRON_NUM = r"[*0-9][*0-9/,\-]{0,63}"
+CRON_NAMED = r"[*0-9A-Za-z][*0-9A-Za-z/,\-]{0,63}"
 FIVE = re.compile(r"^(\s*)((?:%s)\s+(?:%s)\s+(?:%s)\s+(?:%s)\s+(?:%s))(\s+)(.*)$" % (CRON_NUM, CRON_NUM, CRON_NUM, CRON_NAMED, CRON_NAMED), re.S)
 SPECIAL = re.compile(r"^(\s*)(@[A-Za-z]+)(\s+)(.*)$", re.S)
 USER_COMMAND = re.compile(r"^(\S+)(\s+)(.*)$", re.S)
@@ -107,6 +109,46 @@ def in_job():
     return bool(os.environ.get("JOB_ID") and os.environ.get("OUT"))
 
 
+def read_args():
+    try:
+        args = json.load(sys.stdin)
+    except ValueError as exc:
+        fail("arguments are not valid JSON", reason=str(exc))
+    if not isinstance(args, dict):
+        fail("arguments must be a JSON object")
+    return args
+
+
+def want_str(args, key, required=None):
+    value = args.get(key)
+    if value is None:
+        if required:
+            fail(required)
+        return None
+    if not isinstance(value, str):
+        fail("%s must be a string" % key)
+    if required and not value:
+        fail(required)
+    return value
+
+
+def want_str_list(args, key):
+    value = args.get(key)
+    if value is None:
+        return []
+    if not isinstance(value, list) or not all(isinstance(x, str) for x in value):
+        fail("%s must be a list of strings" % key)
+    return value
+
+
+def bound(value, limit=1024):
+    """(shown, bytes or None): a string longer than `limit` characters is shown cut, with its whole length. The
+    whole is kept where the record's text is kept (the text file, the evidence at the record's locator)."""
+    if isinstance(value, str) and len(value) > limit:
+        return value[:limit], len(value.encode("utf-8", "replace"))
+    return value, None
+
+
 def want_flag(args, key):
     value = args.get(key, False)
     if not isinstance(value, bool):
@@ -123,7 +165,7 @@ def want_limit(args):
 
 # Lossless paging (the same in every library tool that pages): the page an agent reads stays small, and when
 # there are more rows the whole result is written as JSON Lines under work/<agent>/tool-output (in a job,
-# $OUT/tool-output) and named. The file name is a digest of the page's key (a path), never of a value.
+# $OUT/tool-output) and named. The file name is random: it is never a digest of anything asked for.
 class LosslessPage:
     def __init__(self, tool, key, limit):
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
@@ -134,8 +176,9 @@ class LosslessPage:
         self.total = 0
         self._out = None
         self._tmp = None
-        digest = hashlib.sha256(json.dumps(key, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16]
-        name = "%s-%s.jsonl" % (self.tool, digest)
+        # A random token, not a digest of the request: two requests never share a file, and a search term (which can
+        # be a secret someone is looking for) is never hashed into a name.
+        name = "%s-%s.jsonl" % (self.tool, secrets.token_hex(8))
         job, out = os.environ.get("JOB_ID"), os.environ.get("OUT")
         if job and out:
             # In a job only $OUT is written, and it is sealed as the job's output: the whole result is cited from there.
@@ -159,7 +202,7 @@ class LosslessPage:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             fd, name = tempfile.mkstemp(dir=self.path.parent, prefix=".%s-" % self.path.name)
             self._tmp = Path(name)
-            self._out = os.fdopen(fd, "w", encoding="utf-8")
+            self._out = os.fdopen(fd, "w", encoding="utf-8", errors="backslashreplace")
             for kept in self.page:
                 self._write(kept)
         self._write(row)
@@ -227,8 +270,17 @@ class TextFile:
     def add(self, row):
         if self._fh is None:
             return
-        self._fh.write(json.dumps(row, ensure_ascii=False, default=str).encode("utf-8", "replace") + b"\n")
+        self._fh.write(json.dumps(row, ensure_ascii=False, default=str).encode("utf-8", "backslashreplace") + b"\n")
         self.written += 1
+
+    def add_bytes_raw(self, data):
+        """A piece of a source's own bytes, written as it came; the record it belongs to is counted by count_record."""
+        if self._fh is not None:
+            self._fh.write(data)
+
+    def count_record(self):
+        if self._fh is not None:
+            self.written += 1
 
     def add_bytes(self, data):
         """One record exactly as its source wrote it (a native export's line, newline included)."""
@@ -244,20 +296,22 @@ class TextFile:
             self._fh.close()
             self._fh = None
 
-    def summary(self):
+    def summary(self, preview=False):
+        """What the answer says about text. `preview` is true when the answer itself carries it (preview_text)."""
+        shown = {"answer_contains_text_that_may_hold_secrets": bool(preview)}
         if not self.enabled:
-            return {"requested": False, "written": 0, "file": None, "contains_text_that_may_hold_secrets": False,
-                    "hint": "No text of any record is in this answer or in a file. write_text: true, in a job run with "
-                            "secret_output: true, keeps the whole of each record in a private file under $OUT."}
+            hint = ("No text of any record is in a file." if not preview else
+                    "The answer's records carry their text (preview_text); no file of it was written, and the paging file, if there is one, holds none.")
+            return {"requested": False, "written": 0, "file": None, "contains_text_that_may_hold_secrets": False, **shown,
+                    "hint": hint + " write_text: true, in a job run with secret_output: true, keeps the whole of each record in a private file under $OUT."}
         return {"requested": True, "written": self.written, "file": self.shown,
-                "contains_text_that_may_hold_secrets": self.written > 0,
-                "format": self.what}
+                "contains_text_that_may_hold_secrets": self.written > 0, **shown, "format": self.what}
 
 
 def mtime_of(path):
     try:
         return datetime.datetime.fromtimestamp(os.path.getmtime(path), datetime.timezone.utc).isoformat().replace("+00:00", "Z")
-    except OSError:
+    except (OSError, ValueError, OverflowError):
         return None
 
 
@@ -279,8 +333,11 @@ def inside(root, path):
 class Run:
     """What was looked at, so coverage is known before any filter."""
 
-    def __init__(self, root):
+    def __init__(self, root, keep_env=False):
         self.root = root
+        self.keep_env = keep_env
+        self.env_rows = []         # every environment assignment of every table, once, for the text file
+        self.special = []
         self.entries = []          # every row (inline fields) with its text fields beside it: (row, texts)
         self.unparsed = []
         self.locations = []
@@ -299,6 +356,9 @@ class Run:
 
 def read_text(run, path):
     try:
+        if not stat.S_ISREG(os.lstat(path).st_mode):
+            run.special.append({"file": path, "reason": "not a regular file (a pipe, a socket or a device): never opened"})
+            return None
         size = os.path.getsize(path)
         if size > MAX_FILE_BYTES:
             raise OSError("a scheduling file of %d bytes is larger than the %d this tool reads whole: read it with another tool" % (size, MAX_FILE_BYTES))
@@ -325,6 +385,9 @@ def cron_entries(run, path, has_user, owner):
             if assignment.group(1) not in environment:
                 ordered_names.append(assignment.group(1))
             environment[assignment.group(1)] = assignment.group(2).strip()
+            if run.keep_env:
+                run.env_rows.append({"record_type": "environment", "file": path, "line": number, "name": assignment.group(1),
+                                     "value": assignment.group(2).strip()})
             continue
         found = SPECIAL.match(line)
         if found:
@@ -347,11 +410,23 @@ def cron_entries(run, path, has_user, owner):
                 continue
             user, command, user_basis = split.group(1), split.group(3), "user field"
         run.seq += 1
+        user_shown, user_whole = bound(user, 256)
         row = {"id": "C%06d" % run.seq, "parser": PARSER, "source": "cron", "file": path, "line": number,
-               "file_modified": stamp, "mode": mode, "schedule": schedule, "user": user, "user_basis": user_basis,
+               "file_modified": stamp, "mode": mode, "schedule": schedule, "user": user_shown, "user_basis": user_basis,
                "at_reboot": schedule.lower() == "@reboot", "command_bytes": len(command.encode("utf-8", "replace")),
-               "environment_keys": list(ordered_names)}
-        run.entries.append((row, {"raw_line": line, "command": command, "environment": dict(environment)}))
+               "environment_count": len(ordered_names), "environment_keys": ordered_names[:50]}
+        if user_whole is not None:
+            row["user_bytes"] = user_whole
+        if len(ordered_names) > 50:
+            row["environment_keys_truncated"] = True
+        # The environment in force is kept with the entry up to 100 variables; past that every assignment is in the
+        # file's environment rows (the text file), and the entry says so.
+        texts = {"raw_line": line, "command": command}
+        if len(environment) <= 100:
+            texts["environment"] = dict(environment)
+        else:
+            texts["environment_in_rows"] = True
+        run.entries.append((row, texts))
 
 
 def unit_assignments(text):
@@ -362,7 +437,10 @@ def unit_assignments(text):
         start = i + 1
         parts = [lines[i].rstrip("\r")]
         size = len(parts[0])
-        while parts[-1].endswith("\\") and i + 1 < len(lines) and size < MAX_CONTINUED:
+        # A comment line is one line: a backslash at its end is not read as a continuation here (whether systemd
+        # continues a comment was not checked, and reading it as one would hide the assignment that follows).
+        while (parts[-1].endswith("\\") and not parts[0].lstrip().startswith(("#", ";"))
+               and i + 1 < len(lines) and size < MAX_CONTINUED):
             parts[-1] = parts[-1][:-1]
             i += 1
             parts.append(lines[i].rstrip("\r"))
@@ -385,20 +463,32 @@ def timer_entry(run, path, manager):
     if data is None:
         return
     assignments = unit_assignments(data)
-    nonempty = [a for a in assignments if a["value"]]
+    # Only what is in the shown sections feeds the derived fields: a value under any other section is withheld.
+    nonempty = [a for a in assignments if a["value"] and (a["section"] or "").lower() in SHOWN_SECTIONS]
     calendars = [a["value"] for a in nonempty if a["key"] in TIMER_KEYS]
     units = [a["value"] for a in nonempty if a["key"] == "Unit"]
     persistent = [a["value"] for a in nonempty if a["key"] == "Persistent"]
-    shown = [a if (a["section"] or "").lower() in SHOWN_SECTIONS else
-             {"line": a["line"], "section": a["section"], "key": a["key"], "value_bytes": len(a["value"].encode("utf-8", "replace")), "value_withheld": True}
-             for a in assignments]
+    shown = []
+    for a in assignments:
+        if (a["section"] or "").lower() in SHOWN_SECTIONS:
+            value, whole = bound(a["value"], 1024)
+            item = {"line": a["line"], "section": a["section"], "key": a["key"], "value": value}
+            if whole is not None:
+                item["value_bytes"] = whole
+            shown.append(item)
+        else:
+            shown.append({"line": a["line"], "section": a["section"], "key": a["key"],
+                          "value_bytes": len(a["value"].encode("utf-8", "replace")), "value_withheld": True})
+    def one(value):
+        return bound(value, 1024)[0]
     run.seq += 1
     row = {"id": "C%06d" % run.seq, "parser": PARSER, "source": "systemd", "manager": manager, "file": path,
            "file_modified": mtime_of(path), "mode": mode_of(path), "assignments": shown,
-           "assignment_count": len(assignments), "schedule": calendars[0] if calendars else None, "schedules": calendars,
-           "unit": units[-1] if units else os.path.basename(path)[: -len(".timer")] + ".service",
+           "assignment_count": len(assignments), "schedule": one(calendars[0]) if calendars else None,
+           "schedules": [one(c) for c in calendars],
+           "unit": one(units[-1]) if units else os.path.basename(path)[: -len(".timer")] + ".service",
            "unit_basis": "last non-empty Unit=" if units else "no Unit=: the service of the same name",
-           "persistent": persistent[-1] if persistent else None,
+           "persistent": one(persistent[-1]) if persistent else None,
            "at_reboot": any(a["key"] in STARTUP_KEYS for a in nonempty),
            "derived_basis": "schedule, schedules, unit and persistent are read naively from the assignments in file order: "
                             "an empty assignment that resets a list, drop-ins and other overrides are not applied"}
@@ -448,40 +538,38 @@ def handle_timer_dir(run, manager):
 
 
 def homes_of(run):
-    """(homes relative to the root, where the list came from)."""
-    homes, source = [], "directory listing (home/*, root)"
+    """(homes relative to the root, where the list came from): the accounts' homes from the evidence's etc/passwd,
+    and every directory under home/ and root, because an account that was deleted leaves its home behind."""
+    homes, source, from_passwd = [], [], 0
     passwd = os.path.join(run.root, "etc", "passwd")
     if os.path.isfile(passwd) and not os.path.islink(passwd) and inside(run.root, passwd):
         data = read_text(run, passwd)
         if data is not None:
-            source = "etc/passwd"
             for line in data.split("\n"):
                 fields = line.split(":")
                 if len(fields) >= 6 and fields[5].startswith("/") and fields[5] not in ("/", "/nonexistent"):
                     homes.append(fields[5].strip("/"))
-    else:
-        home_dir = os.path.join(run.root, "home")
-        try:
-            homes = ["home/" + n for n in sorted(os.listdir(home_dir))] if os.path.isdir(home_dir) and not os.path.islink(home_dir) else []
-        except OSError as exc:
-            run.error(home_dir, exc)
-        homes.append("root")
+            from_passwd = len(homes)
+            source.append("etc/passwd")
+    home_dir = os.path.join(run.root, "home")
+    try:
+        if os.path.isdir(home_dir) and not os.path.islink(home_dir):
+            homes += ["home/" + n for n in sorted(os.listdir(home_dir))]
+    except OSError as exc:
+        run.error(home_dir, exc)
+    homes.append("root")
+    source.append("directory listing (home/*, root)")
     seen, unique = set(), []
     for h in homes:
         if h and h not in seen:
             seen.add(h)
             unique.append(h)
-    return unique, source
+    return unique, " and ".join(source), max(0, len(unique) - from_passwd) if from_passwd else None
 
 
 def main():
-    try:
-        args = json.load(sys.stdin)
-    except ValueError as exc:
-        fail("arguments are not valid JSON", reason=str(exc))
-    root = args.get("root")
-    if not isinstance(root, str) or not root:
-        fail("root is required: an extracted file system root")
+    args = read_args()
+    root = want_str(args, "root", "root is required: an extracted file system root")
     if os.path.islink(root):
         fail("refusing a symlink root: pass the extracted evidence directory", root=root, target=os.readlink(root))
     if not os.path.isdir(root):
@@ -491,7 +579,7 @@ def main():
     if preview_text:
         require_job("preview_text")
     pattern = None
-    if args.get("contains"):
+    if want_str(args, "contains"):
         try:
             pattern = re.compile(args["contains"], re.I)
         except re.error as exc:
@@ -502,7 +590,7 @@ def main():
     except TextRefused as exc:
         fail(str(exc))
 
-    run = Run(root)
+    run = Run(root, write_text)
     for rel in SYSTEM_TABLES:
         full = os.path.join(root, rel)
         if not os.path.lexists(full):
@@ -524,6 +612,8 @@ def main():
                 run.skipped_symlinks.append({"file": target, "target": os.readlink(target)})
             elif os.path.isfile(target):
                 cron_entries(run, target, has_user, name if owner_from_name else None)
+            elif os.path.lexists(target):
+                run.special.append({"file": target, "reason": "not a regular file (a pipe, a socket or a device): never opened"})
         return handle
 
     for rel in SYSTEM_DIRS:
@@ -533,6 +623,8 @@ def main():
             target = os.path.join(dirpath, name)
             if os.path.islink(target):
                 run.skipped_symlinks.append({"file": target, "target": os.readlink(target)})
+            elif os.path.lexists(target) and not os.path.isfile(target):
+                run.special.append({"file": target, "reason": "not a regular file (a pipe, a socket or a device): never opened"})
             elif os.path.isfile(target) and dirpath == os.path.join(root, rel):
                 run.seq += 1
                 mode = mode_of(target)
@@ -552,7 +644,7 @@ def main():
         scan_dir(run, rel, handle_timer_dir(run, "system"))
     for rel in USER_UNIT_DIRS:
         scan_dir(run, rel, handle_timer_dir(run, "user"))
-    homes, home_source = homes_of(run)
+    homes, home_source, homes_beyond_passwd = homes_of(run)
     for home in homes:
         for sub in HOME_UNIT_DIRS:
             scan_dir(run, "%s/%s" % (home, sub), handle_timer_dir(run, "user"))
@@ -567,9 +659,10 @@ def main():
 
     # Coverage is what was looked at, before anything is filtered out.
     total = len(run.entries)
-    all_read = not run.read_errors and not run.walk_errors and not run.skipped_symlinks
-    page = LosslessPage(TOOL, ["entries", root, str(pattern.pattern if pattern else ""), preview_text], limit)
-    unparsed_page = LosslessPage(TOOL, ["unparsed", root], limit)
+    all_read = not run.read_errors and not run.walk_errors and not run.skipped_symlinks and not run.special
+    page = LosslessPage(TOOL, "entries", limit)
+    unparsed_page = LosslessPage(TOOL, "unparsed", limit)
+    preview_rows = []
     matched, at_reboot = 0, 0
     for row, texts in run.entries:
         haystack = "%s %s %s" % (texts.get("command") or "", row.get("unit") or "", row.get("script") or "")
@@ -578,11 +671,14 @@ def main():
         matched += 1
         at_reboot += 1 if row.get("at_reboot") else 0
         text.add({**row, **({"assignments": texts["assignments"]} if "assignments" in texts else {k: v for k, v in texts.items()})})
-        shown = {**row, **{k: v for k, v in texts.items() if k != "assignments"}} if preview_text and row["source"] == "cron" else row
-        page.add(shown)
+        page.add(row)
+        if preview_text and len(preview_rows) < limit:
+            preview_rows.append({**row, **{k: v for k, v in texts.items() if k != "assignments"}} if row["source"] == "cron" else row)
     for u in run.unparsed:
         unparsed_page.add({k: v for k, v in u.items() if k != "text"})
         text.add({"record_type": "unparsed", **u})
+    for e in run.env_rows:
+        text.add(e)
     text.close()
     pages = {"entries": page.finish(), "unparsed": unparsed_page.finish()}
     print(json.dumps({
@@ -590,18 +686,20 @@ def main():
         "root": root,
         "locations": run.locations,
         "home_source": home_source,
-        "entries": page.page,
+        "homes_beyond_passwd": homes_beyond_passwd,
+        "entries": preview_rows if preview_text else page.page,
         "pages": pages,
         "entries_total": total,
         "entries_matched": matched,
         "at_reboot": at_reboot,
         "unparsed_lines": len(run.unparsed),
         "unparsed": unparsed_page.page,
-        "text": text.summary(),
+        "text": text.summary(preview_text),
         "all_checked_locations_read": all_read,
         "read_errors": run.read_errors,
         "walk_errors": run.walk_errors,
         "skipped_symlinks": run.skipped_symlinks,
+        "skipped_special": run.special,
         "unmerged_dropins": run.dropins,
         "unsupported": UNSUPPORTED,
         "truncated": any(p["truncated"] for p in pages.values()),

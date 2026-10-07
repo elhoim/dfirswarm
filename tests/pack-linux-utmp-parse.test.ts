@@ -9,7 +9,7 @@ import assert from "node:assert/strict";
 import { mkdir, truncate, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
-import { UTMP, body, refused, rowsOf, tool, withCwd } from "./linux-pack-harness.ts";
+import { UTMP, asJob, body, refused, rowsOf, tool, withCwd } from "./linux-pack-harness.ts";
 
 type Utmp = { type: number; pid?: number; line?: string; id?: string; user?: string; host?: string; session?: number; sec?: number; usec?: number; addr?: number[] };
 
@@ -194,5 +194,36 @@ test("utmp_parse finds one UID in a lastlog of three million slots, by seeking, 
     assert.equal(partial.all_records_read, false);
     assert.equal(partial.next_uid, 2000);
     assert.equal(partial.slots_read, 1000);
+  });
+});
+
+test("utmp_parse refuses a types or a user of the wrong type, and a start_uid past the file", async () => {
+  await withCwd(async (cwd) => {
+    await writeFile(join(cwd, "work", "wtmp"), utmp({ type: 7, user: "alice", sec: T0 }));
+    refused(await tool(UTMP, cwd, { path: "work/wtmp", types: "USER_PROCESS" }));
+    refused(await tool(UTMP, cwd, { path: "work/wtmp", user: 5 }));
+    refused(await tool(UTMP, cwd, { path: "work/wtmp", passwd: 5 }));
+    for (const bad of [null, []]) assert.match(refused(await tool(UTMP, cwd, bad)).error, /JSON object/);
+    await writeFile(join(cwd, "work", "lastlog"), Buffer.concat([lastlog(292, T0, "pts/0", "h"), lastlog(292, T0, "pts/1", "h")]));
+    const past = refused(await tool(UTMP, cwd, { path: "work/lastlog", layout: "lastlog-292", start_uid: 5 }));
+    assert.match(past.error, /past the last slot/);
+  });
+});
+
+test("utmp_parse counts the non-empty slots it read whatever the user filter keeps, and two requests keep their own paging files", async () => {
+  await withCwd(async (cwd) => {
+    const slots = Array.from({ length: 6000 }, (_, i) => (i === 10 || i === 4000 || i === 5000 ? lastlog(292, T0, "pts/0", "198.51.100.5") : Buffer.alloc(292)));
+    await writeFile(join(cwd, "work", "lastlog"), Buffer.concat(slots));
+    await writeFile(join(cwd, "work", "passwd"), "a:x:10:10::/h:/bin/sh\n");
+    const one = body(await tool(UTMP, cwd, { path: "work/lastlog", layout: "lastlog-292", uids: [10, 4000], user: "^a$", passwd: "work/passwd" }));
+    assert.equal(one.nonempty_slots, 2);
+    assert.equal(one.record_count, 1);
+    const first = body(await tool(UTMP, cwd, { path: "work/lastlog", layout: "lastlog-292", limit: 1, max_slots: 4500 }));
+    const second = body(await tool(UTMP, cwd, { path: "work/lastlog", layout: "lastlog-292", limit: 1, max_slots: 6000 }));
+    assert.equal(first.pages.records.matched, 2);
+    assert.equal(second.pages.records.matched, 3);
+    assert.notEqual(first.pages.records.all_results, second.pages.records.all_results);
+    assert.equal((await rowsOf(cwd, first)).length, 2, "the first answer's file still holds the first answer");
+    assert.equal((await rowsOf(cwd, second)).length, 3);
   });
 });
