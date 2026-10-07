@@ -163,7 +163,8 @@ check("crypto_id reads a LUKS1 key slot table with no key",
 
 # --- ransomware-response/encrypted_survey: the bytes every sampled tail ends with ---
 # An observation pending a reference match (basis "observation"), not a family marker;
-# tests/pack-ransomware-response.test.ts holds the rest of the tool's contract.
+# tests/pack-encrypted-survey.test.ts and tests/pack-ransom-note-scan.test.ts hold the rest of the
+# pack's tools' contract.
 random.seed(11)
 share = os.path.join(WORK, "share"); os.makedirs(share, exist_ok=True)
 for i in range(6):

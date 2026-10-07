@@ -26,9 +26,12 @@ byte offset without printing them: it is a candidate inventory, a name match is 
 a confirmed note, and its values go only to a sealed job file
 (`write_values: true` in a job run with `secret_output: true`).
 
-**One goal template**: `ransomware-case.md`, whose checks will not pass without an
-answer about exfiltration (what the evidence supports, with its coverage) and a
-position on whether the adversary may still have access.
+**One goal template**: `ransomware-case.md`. Its checks require every question to
+be answered under its heading, a timeline in UTC, an `Exfiltration conclusion:` line
+in answer 2 (established, partial, bounded negative or not determinable) and the
+harness's answer checks. Whether a conclusion is supported, and whether the position
+on adversary access has reasons, is for the critic's `attest` or `dispute`, not for
+a pattern match.
 
 ## How the work goes
 

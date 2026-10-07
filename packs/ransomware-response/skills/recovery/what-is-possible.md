@@ -23,8 +23,8 @@ what was lost.
 extension and entropy; a file in `noncandidate` was not shown to be unaffected, one in
 `unmeasured` was not measured (4096 bytes or less, or the read budget ran out) and one
 in `read_failed` was not read. Compressed, packed and already-encrypted files are false
-positives; small files, unchanged names and encryption outside the sampled windows are
-misses. Validate representative files with format-aware parsing and, where there is
+positives; small files, names that are unchanged or that lose the original extension, and
+encryption outside the sampled windows are misses. Validate representative files with format-aware parsing and, where there is
 one, a trusted pre-incident copy; `file_type` says what the first bytes show. A readable
 header is not an intact file, and an intact file is not a consistent application
 dataset. Report the population tested and the denominator, and do not extrapolate an

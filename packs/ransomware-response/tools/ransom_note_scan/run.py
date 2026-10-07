@@ -30,7 +30,9 @@ the same as recovery_key_scan's, whose SecretValues class is copied below.
      validation result. It carries no identifier, wallet, onion address, URL, e-mail
      address, no character of one and no digest of one, and none of the note's text.
      A finding's `finding_id` is a sequence number and is derived from nothing. A note's
-     own sha256 is a digest of the whole file, for integrity and for grouping copies.
+     own sha256 is a digest of the whole file, for integrity and for grouping copies; it
+     is withheld (sha256 null, and why) for a note shorter than 128 bytes and for one that
+     is a single token or a single indicator value, where it would be a digest of the value.
   2. A value is written only when the caller asks (`write_values: true`), only when
      the tool runs as a job (JOB_ID and OUT are set) and only to a file under $OUT.
      The skill says the job runs with `secret_output: true`. Outside a job the
@@ -39,12 +41,16 @@ the same as recovery_key_scan's, whose SecretValues class is copied below.
      scanned; each row names the answer's finding id, the note's real path and the
      byte offset. A preview of each note's first lines goes there too, and nowhere else.
   4. A secret is never on a command line. This tool takes a directory and flags only.
-  5. A path is printed with a name component withheld when it carries a value the note
-     held, or, for the note's own file name, when it holds a token shaped like an
-     identifier (eight or more letters and digits with both kinds present). Some
-     families put the victim's identifier in the note's name. The shape is a guess, so
-     a harmless name can be withheld, and an identifier of another shape in a
-     directory name is printed as it is. The values file keeps the real path.
+  5. Every path this tool prints (notes, rejected name matches, directories it could not
+     list, exclusions, the root) has any component withheld that holds a token shaped like
+     an identifier (eight or more letters and digits, both kinds present) or a value the
+     note held. Some families put the victim's identifier in a name. The shape is a guess,
+     so a harmless name can be withheld, and an identifier of another shape is printed as
+     it is; list the directory for a name that was withheld. The values file keeps the
+     real path.
+
+What it does not locate: a long token with no label and no known shape (a 64-digit hex
+string after the word "Token") is neither located nor counted.
 """
 import datetime
 import errno
@@ -68,6 +74,8 @@ DUPLICATE_CAP = 50000
 DUPLICATE_VALUE_CAP = 1024
 # The values of one note that are kept to withhold a path that carries one.
 NAME_VALUES_CAP = 5000
+# A note shorter than this is not digested: a digest of it is a digest of what it holds.
+SHORT_NOTE = 128
 
 
 # Lossless paging (the same in every library tool that pages): the page an
@@ -403,6 +411,29 @@ class Offsets:
         return self.base + self.acc
 
 
+def whole_file_digest(blob, text=None, values=()):
+    """(sha256 hex, None) of a note, or (None, why) where the digest would be a digest of a secret.
+
+    A note shorter than SHORT_NOTE bytes, or one that is a single token or a single indicator value, is
+    not digested: nothing in it hides the value. A longer note's digest is for integrity and for grouping
+    copies, and no identifier is digested on its own.
+    """
+    if len(blob) < SHORT_NOTE:
+        return None, "the note is shorter than %d bytes: a digest of it would be a digest of what it holds" % SHORT_NOTE
+    if text is not None:
+        stripped = text.strip()
+        if stripped and (len(stripped.split()) == 1 or stripped in values):
+            return None, "the note is a single token or indicator value: a digest of it would be a digest of that value"
+    return hashlib.sha256(blob).hexdigest(), None
+
+
+def count_content(contents, sha, blob, note_id):
+    """Group identical notes without printing a digest of one that is withheld: by digest, or in memory."""
+    key = sha if sha else (("small", blob) if len(blob) <= 4096 else ("note", note_id))
+    entry = contents.setdefault(key, [0, note_id, sha])
+    entry[0] += 1
+
+
 # --- paths --------------------------------------------------------------------------
 
 WITHHELD = "<identifier-shaped name withheld>"
@@ -419,22 +450,22 @@ def shaped(name):
     return False
 
 
-def shown(path, values=(), name_shape=True):
-    """A path as it may be printed.
+def shown(path, values=()):
+    """A path as it may be printed: every component that could carry an identifier is withheld.
 
-    A component is withheld when it contains a value this note held (case-insensitive, eight
-    characters or more), and the last component, the note's own name, also when it holds a token
-    shaped like an identifier. The real path is in the values file.
+    A component is withheld when it holds a token shaped like an identifier, or contains a value this
+    note held (case-insensitive, eight characters or more). The same rule applies to every path this
+    tool prints, so a name is never hidden on one line and printed on the next; a harmless directory
+    name can be withheld with it, and the directory can be listed. The real path is in the values file.
     """
     if not isinstance(path, str):
         return path
     parts = path.split("/")
     for i, part in enumerate(parts):
+        if not part:
+            continue
         low = part.lower()
-        hit = any(len(v) >= 8 and v.lower() in low for v in values)
-        if not hit and name_shape and i == len(parts) - 1 and part:
-            hit = shaped(part)
-        if hit:
+        if shaped(part) or any(len(v) >= 8 and v.lower() in low for v in values):
             parts[i] = WITHHELD
             PATHS_WITHHELD[0] += 1
     return "/".join(parts)
@@ -466,7 +497,7 @@ def walk(top, exclude_top, exceptions, exclusions, rejected, counters):
                 entries = sorted(it, key=lambda e: e.name)
         except OSError as exc:
             counters["directories_failed"] += 1
-            exceptions.add({"path": shown(directory, name_shape=False), "status": "failed", "what": "directory",
+            exceptions.add({"path": shown(directory), "status": "failed", "what": "directory",
                             "reason": "the directory could not be listed", "error": describe(exc)})
             continue
         counters["directories_visited"] += 1
@@ -484,9 +515,9 @@ def walk(top, exclude_top, exceptions, exclusions, rejected, counters):
                 if entry.is_dir(follow_symlinks=False):
                     if is_top and entry.name in exclude_top:
                         counters["directories_excluded"] += 1
-                        exclusions.append({"path": shown(entry.path, name_shape=False),
+                        exclusions.append({"path": shown(entry.path),
                                            "reason": "named in exclude_top_level_dirs: a top-level %s directory of a Linux root; "
-                                                     "its contents were not read. Name it as the root to read it" % entry.name})
+                                                     "its contents were not read. Name it as the root to read it" % shown(entry.name)})
                         continue
                     subdirs.append(entry.path)
                     continue
@@ -498,7 +529,7 @@ def walk(top, exclude_top, exceptions, exclusions, rejected, counters):
                     rejected.add({"path": shown(entry.path), "status": "rejected",
                                   "reason": "the entry could not be examined", "error": describe(exc)})
                 else:
-                    exceptions.add({"path": shown(entry.path, name_shape=False), "status": "failed",
+                    exceptions.add({"path": shown(entry.path), "status": "failed",
                                     "reason": "the entry could not be examined", "error": describe(exc)})
                 continue
             if not stat.S_ISREG(st.st_mode):
@@ -643,11 +674,8 @@ def main():
             bytes_read += len(blob)
             note_serial += 1
             note_id = "N%06d" % note_serial
-            sha = hashlib.sha256(blob).hexdigest()
-            entry = contents.setdefault(sha, [0, note_id])
-            entry[0] += 1
             modified = iso_utc(mtime_ns)
-            row = {"note_id": note_id, "bytes": len(blob), "sha256": sha, "mtime_ns": mtime_ns, "modified_utc": modified,
+            row = {"note_id": note_id, "bytes": len(blob), "mtime_ns": mtime_ns, "modified_utc": modified,
                    "parser": PARSER}
             if modified is None:
                 row["mtime_error"] = "the modification time is outside what a datetime holds"
@@ -656,6 +684,9 @@ def main():
 
             decoded = decode_note(blob)
             if decoded.get("binary"):
+                sha, why = whole_file_digest(blob)
+                count_content(contents, sha, blob, note_id)
+                row.update({"sha256": sha, **({"sha256_withheld": why} if why else {})})
                 row.update({"file": shown(path), "class": "binary_not_scanned", "class_basis": [],
                             "encoding": None, "encoding_basis": decoded["basis"], "decode_errors": None,
                             "format_hint": "binary", "indicator_counts": {}})
@@ -665,7 +696,7 @@ def main():
 
             text = decoded["text"]
             offsets = Offsets(decoded)
-            counts, name_values = {}, []
+            counts, note_values = {}, []
             for kind, pattern, group in KINDS:
                 offsets.reset()
                 for m in pattern.finditer(text):
@@ -696,8 +727,8 @@ def main():
                     occurrences.add(occ)
                     values.add(finding_id, {"note_id": note_id, "file": path, "offset": offset, "kind": kind,
                                             "encoding": decoded["name"], "validation": validation}, value)
-                    if kind != "url" and len(name_values) < NAME_VALUES_CAP:
-                        name_values.append(value)
+                    if len(note_values) < NAME_VALUES_CAP:
+                        note_values.append(value)
 
             lowered = text.lower()
             language = [w for w in LANGUAGE if w in lowered]
@@ -718,7 +749,10 @@ def main():
                 lines = [line.strip() for line in text.splitlines() if line.strip()][:4]
                 values.add(note_id, {"note_id": note_id, "file": path, "offset": 0, "kind": "note_preview",
                                      "encoding": decoded["name"], "validation": None}, "\n".join(lines))
-            row.update({"file": shown(path, name_values), "class": cls, "class_basis": basis,
+            sha, why = whole_file_digest(blob, text, set(note_values))
+            count_content(contents, sha, blob, note_id)
+            row.update({"sha256": sha, **({"sha256_withheld": why} if why else {})})
+            row.update({"file": shown(path, note_values), "class": cls, "class_basis": basis,
                         "encoding": decoded["name"], "encoding_basis": decoded["basis"],
                         "decode_errors": decoded["decode_errors"], "format_hint": format_hint(text),
                         "indicator_counts": counts})
@@ -729,8 +763,9 @@ def main():
         values.close()
 
     variants = LosslessPage("ransom_note_scan", [real, "distinct note contents"], limit)
-    for sha, (copies, first) in sorted(contents.items(), key=lambda kv: (-kv[1][0], kv[0])):
-        variants.add({"sha256": sha, "copies": copies, "first_note_id": first})
+    for copies, first, sha in sorted(contents.values(), key=lambda e: (-e[0], e[1])):
+        variants.add({"sha256": sha, "copies": copies, "first_note_id": first,
+                      **({} if sha else {"digest_withheld": True})})
     for kind, n in distinct.items():
         totals[kind]["distinct_values"] = n
 
@@ -748,7 +783,7 @@ def main():
         reasons.append("%d name matches were not read (larger than max_size, unreadable, a link or a special file)" % lost)
     candidate_count = sum(by_class.values())
     print(json.dumps({
-        "root": root,
+        "root": shown(root),
         "parser": PARSER,
         "complete": "partial" if reasons else "complete",
         "partial_reasons": reasons,
@@ -773,9 +808,10 @@ def main():
         "pages": pages,
         "secret_values": values.summary(),
         "paths_withheld": PATHS_WITHHELD[0],
-        **({"paths_note": "A name component that carries a value the note held, or a note's file name with a token shaped like "
-                          "an identifier, is withheld from every path in this answer and in the files it names. The real path "
-                          "is in the values file when write_values was asked for; otherwise list the directory."}
+        **({"paths_note": "A name component that holds a token shaped like an identifier, or a value the note held, is withheld "
+                          "from every path in this answer and in the files it names, in notes, rejected name matches, directories "
+                          "not listed and exclusions alike; a harmless name can go with it. The real path is in the values file "
+                          "when write_values was asked for; otherwise list the directory."}
            if PATHS_WITHHELD[0] else {}),
         "truncated": any(p["truncated"] for p in pages.values()),
         **({"unrecognised_parameters": unknown} if unknown else {}),

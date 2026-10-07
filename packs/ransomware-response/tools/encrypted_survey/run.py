@@ -22,7 +22,10 @@ survives whole, who the family is, or when anything ran. What it does:
   * counts modification times by hour twice, for every regular file and for the
     candidates. The clock is the filesystem's mtime as collected, which an extraction
     or a copy can change; it is not an execution time of anything;
-  * reports what the sampled tails share as an observation pending a reference match.
+  * reports what the sampled tails share as an observation pending a reference match;
+  * withholds the name of a file that is named like a note (ransom_note_scan's pattern) and
+    holds an identifier-shaped token, since some families put the victim's identifier there,
+    and counts those (`paths_withheld`); other names are printed as they are.
 
 Nothing is cut: the whole census, every candidate and every table longer than `limit`
 are written as JSON Lines (under $OUT/tool-output in a job, else work/<agent>/tool-output)
@@ -54,14 +57,28 @@ DEFAULT_EXCLUDE_TOP = ["proc", "sys", "dev"]
 EXT_CAP = 50000              # distinct appended extensions held in memory; the census holds every one
 HOUR_CAP = 100000            # distinct hour buckets held in memory per histogram
 
-KNOWN = {"jpg", "png", "gif", "pdf", "docx", "xlsx", "pptx", "zip", "txt", "csv", "xml",
-         "json", "html", "mp4", "mp3", "exe", "dll", "sql", "bak", "vhd", "vmdk", "db",
-         "doc", "xls", "ppt", "rtf", "log", "ini", "sys", "dat"}
+# Extensions that name what a file was before something was appended to its name. A name that
+# keeps one of them and ends in another is a candidate: "report.docx.locked", "report.docx.id[AB12].locked".
+KNOWN = {"jpg", "jpeg", "png", "gif", "bmp", "tif", "tiff", "webp", "heic", "heif", "psd",
+         "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "rtf", "odt", "ods", "odp", "epub", "msg", "eml",
+         "pst", "ost", "txt", "csv", "xml", "json", "html", "md", "log", "ini", "cfg", "conf", "yml", "yaml",
+         "zip", "gz", "tgz", "bz2", "xz", "zst", "7z", "rar", "tar", "jar", "apk",
+         "mp4", "mp3", "mkv", "avi", "mov", "wmv", "flac", "ogg", "wav", "m4a", "aac",
+         "exe", "dll", "sys", "dat", "sql", "bak", "db", "mdb", "accdb",
+         "vhd", "vhdx", "vmdk", "iso", "img", "py", "js", "c", "cpp", "h", "java", "php"}
 # Formats that are normally compressed or packed: a high-entropy head is what they look like
 # whole, so entropy alone is the weakest reason to call one of them a candidate.
-COMPRESSED_FORMATS = {"jpg", "png", "gif", "pdf", "docx", "xlsx", "pptx", "zip", "mp4", "mp3"}
-NOTE_HINTS = ("readme", "decrypt", "restore", "how_to", "howto", "recover", "unlock",
-              "ransom", "help_", "_note", "instruction")
+COMPRESSED_FORMATS = {"jpg", "jpeg", "png", "gif", "webp", "heic", "heif", "pdf", "docx", "xlsx", "pptx",
+                      "odt", "ods", "odp", "epub", "zip", "gz", "tgz", "bz2", "xz", "zst", "7z", "rar", "jar", "apk",
+                      "mp4", "mp3", "mkv", "avi", "mov", "wmv", "flac", "ogg", "m4a", "aac"}
+# The pattern ransom_note_scan uses to take a file for a note by its name, so that the two tools
+# agree on which names are note names.
+NAME_HINTS = re.compile(
+    r"(readme|read_me|decrypt|restore|recover|unlock|how[\W_]*to|ransom|help[\W_]*|"
+    r"your[\W_]*files|instruction|_note|!!!)", re.I)
+WITHHELD = "<identifier-shaped name withheld>"
+TOKEN = re.compile(r"[A-Za-z0-9]{8,}")
+WITHHELD_FILES = set()
 
 
 # Lossless paging (the same in every library tool that pages): the page an
@@ -235,13 +252,38 @@ def overlap(windows):
 
 
 def name_reasons(name):
-    """(reasons, appended extension): an extension after a known one is the only name rule."""
-    parts = name.lower().rsplit(".", 2)
+    """(reasons, appended extension): a known extension followed by another one is the only name rule.
+
+    Whatever sits between the known extension and the last one (an identifier, an address) is part of
+    the pattern: "report.docx.id[AB12CD34].locked" matches. A name that loses its extension, or keeps
+    its own, does not.
+    """
+    parts = name.lower().split(".")
     last = parts[-1] if len(parts) > 1 else ""
-    penultimate = parts[-2] if len(parts) > 2 else ""
-    if last and last not in KNOWN and penultimate in KNOWN:
+    if last and last not in KNOWN and any(p in KNOWN for p in parts[1:-1]):
         return ["appended_extension_after_known_extension"], "." + last
     return [], None
+
+
+def shaped(name):
+    """A token of eight or more letters and digits with both kinds present: the shape of many identifiers."""
+    for m in TOKEN.finditer(name):
+        token = m.group(0)
+        if any(c.isdigit() for c in token) and any(c.isalpha() for c in token):
+            return True
+    return False
+
+
+def display(path):
+    """The path as it may be printed: the name of a file that is named like a note and carries an
+    identifier-shaped token is withheld, the same name ransom_note_scan withholds. A file that is not
+    named like a note is an encrypted file or an ordinary one, and its name is evidence. Counted once
+    per file in WITHHELD_FILES."""
+    base = os.path.basename(path)
+    if NAME_HINTS.search(base) and shaped(base):
+        WITHHELD_FILES.add(path)
+        return os.path.join(os.path.dirname(path), WITHHELD)
+    return path
 
 
 def kind_of(mode):
@@ -291,7 +333,7 @@ def walk(top, exclude_top, counters, exceptions, skipped, exclusions, census):
             try:
                 if entry.is_symlink():
                     counters["links_not_followed"] += 1
-                    row = {"path": entry.path, "status": "skipped", "reason": "a symbolic link: not followed, so neither it nor its target was read"}
+                    row = {"path": display(entry.path), "status": "skipped", "reason": "a symbolic link: not followed, so neither it nor its target was read"}
                     skipped.add(row)
                     census.add({"record": "skipped", **row})
                     continue
@@ -308,13 +350,13 @@ def walk(top, exclude_top, counters, exceptions, skipped, exclusions, census):
                 st = entry.stat(follow_symlinks=False)
             except OSError as exc:
                 counters["entries_failed"] += 1
-                row = {"path": entry.path, "status": "failed", "reason": "the entry could not be examined", "error": describe(exc)}
+                row = {"path": display(entry.path), "status": "failed", "reason": "the entry could not be examined", "error": describe(exc)}
                 exceptions.add(row)
                 census.add({"record": "failed_entry", **row})
                 continue
             if not stat.S_ISREG(st.st_mode):
                 counters["special_files_skipped"] += 1
-                row = {"path": entry.path, "status": "skipped", "reason": "not a regular file (%s): not opened" % kind_of(st.st_mode)}
+                row = {"path": display(entry.path), "status": "skipped", "reason": "not a regular file (%s): not opened" % kind_of(st.st_mode)}
                 skipped.add(row)
                 census.add({"record": "skipped", **row})
                 continue
@@ -411,7 +453,7 @@ def main():
     appended = collections.Counter()
     appended_over = [0]
     all_hours, cand_hours = collections.Counter(), collections.Counter()
-    hours_over = [0, 0]
+    all_over, cand_over = [0], [0]
     tails = collections.Counter()
     shared = None
     sampled = 0
@@ -421,15 +463,16 @@ def main():
         counters["regular_files_visited"] += 1
         size = st.st_size
         modified = iso_utc(st.st_mtime_ns)
-        row = {"record": "file", "file": path, "bytes": size, "mtime_ns": st.st_mtime_ns, "modified_utc": modified}
+        shown_path = display(path)
+        row = {"record": "file", "file": shown_path, "bytes": size, "mtime_ns": st.st_mtime_ns, "modified_utc": modified}
         if modified is None:
             counters["mtime_unconvertible"] += 1
             row["mtime_error"] = "the modification time is outside what a datetime holds"
         else:
-            bump(all_hours, hour_bucket(modified), HOUR_CAP, hours_over)
+            bump(all_hours, hour_bucket(modified), HOUR_CAP, all_over)
         base = os.path.basename(path)
-        if any(h in base.lower() for h in NOTE_HINTS) and size < 100000:
-            note_names.add({"file": path, "bytes": size})
+        if NAME_HINTS.search(base) and size < 100000:
+            note_names.add({"file": shown_path, "bytes": size})
         reasons, ext = name_reasons(base)
         row["appended_extension"] = ext
         head = None
@@ -477,7 +520,7 @@ def main():
             if ext:
                 bump(appended, ext, EXT_CAP, appended_over)
             if modified is not None:
-                bump(cand_hours, hour_bucket(modified), HOUR_CAP, hours_over)
+                bump(cand_hours, hour_bucket(modified), HOUR_CAP, cand_over)
             if head is None:
                 row["entropy_unmeasured"] = unmeasured
             # Profile: the first `sample` candidates that have a head window, while the budget lasts.
@@ -514,7 +557,7 @@ def main():
                                 tails[tail.hex()] += 1
                                 shared = tail if shared is None else common_suffix(shared, tail)
                             if windows[2]["entropy"] < END_LOW:
-                                low_tail.add({"file": path, "bytes": size, "end_entropy": windows[2]["entropy"],
+                                low_tail.add({"file": shown_path, "bytes": size, "end_entropy": windows[2]["entropy"],
                                               "head_entropy": head, "windows": windows,
                                               "basis": "candidate: the end window reads below 6.5 bits per byte. That can be "
                                                        "padding, zero fill, a trailer or an unencrypted region; it does not show "
@@ -594,7 +637,7 @@ def main():
         reasons.append(census_problem)
     complete = "partial" if reasons else "complete"
     receipt = {"parser": PARSER, "complete": complete, "partial_reasons": reasons,
-               "coverage": {**counters, "bytes_read": budget.read}, "bytes": sizes,
+               "coverage": {**counters, "bytes_read": budget.read, "paths_withheld": len(WITHHELD_FILES)}, "bytes": sizes,
                "parameters": {"root": root, "sample": sample_size, "tail_bytes": tail_bytes, "read_budget_bytes": budget.total,
                               "exclude_top_level_dirs": exclude_top, "census": full_census}}
     census.finish(receipt)
@@ -622,13 +665,21 @@ def main():
         "candidate_mtime_hourly": cand_page.page,
         "clock": "filesystem mtime as collected (the extraction or copy that made this tree can change it), UTC, hourly buckets; "
                  "not an execution time of any program, and not the time any file was encrypted",
-        "histogram_table": "capped: %d distinct hours held per histogram, %d files not counted here (the census has every one)" % (HOUR_CAP, hours_over[0]) if hours_over[0] else "complete",
+        "histogram_tables": {
+            name: ("capped: %d distinct hours held, %d files not counted here (the census has every one)" % (HOUR_CAP, over[0]) if over[0] else "complete")
+            for name, over in (("all_files", all_over), ("candidates", cand_over))},
         "repeated_tails": tail_page.page,
         "shared_tail_suffix": shared_out,
         "note_name_candidates": note_names.page,
         "exclusions": exclusions,
         "skipped": skipped.page,
         "exceptions": exceptions.page,
+        "paths_withheld": len(WITHHELD_FILES),
+        **({"paths_note": "The name of a file that is named like a note (the pattern ransom_note_scan uses) and holds a token shaped "
+                          "like an identifier (eight or more letters and digits, both kinds) is withheld from every row of this "
+                          "answer and of the files it names, once per file counted here: some families put the victim's "
+                          "identifier in the note's name. Any other file name, an encrypted file's included, is printed as it is. "
+                          "List the directory for a name that was withheld."} if WITHHELD_FILES else {}),
         "sampling": {"method": "first %d profile-eligible candidates in traversal order (directories and names sorted, depth first); "
                                "not random and not stratified; a candidate of 4096 bytes or less has no profile" % sample_size,
                      "sample": sample_size, "profiled": sampled, "candidates_not_profiled": dict(not_profiled),

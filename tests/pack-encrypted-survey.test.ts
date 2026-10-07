@@ -11,10 +11,10 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { chmod, mkdir, symlink, truncate, utimes, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, symlink, truncate, utimes, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
-import { runPySnippet, withCwd } from "./tool-library-harness.ts";
+import { ROOT, runPySnippet, withCwd } from "./tool-library-harness.ts";
 import { EIO_SITE, SURVEY, allRows, body, refused, tool } from "./ransomware-pack-harness.ts";
 import type { Page } from "./ransomware-pack-harness.ts";
 
@@ -403,6 +403,99 @@ print(json.dumps([len(rows), rows[0]["file"] == "dir/budget_\udcff\udcfe.xlsx.lo
     );
     assert.equal(probe.code, 0, probe.stderr);
     assert.deepEqual(JSON.parse(probe.stdout), [2, true, "receipt", 2]);
+  });
+});
+
+test("encrypted_survey withholds a note-named file's identifier-shaped name everywhere it would print it, and counts it", async () => {
+  // ransom_note_scan hides the name of a note that carries the victim's identifier; the survey printed it in
+  // note_name_candidates and in the census, and the two tools are named together on one tree.
+  await withCwd(async (cwd) => {
+    const ev = join(cwd, "work", "ev");
+    await mkdir(ev, { recursive: true });
+    const idA = "Zq7Rk2Vx9LmT4pWn8Hc3";
+    const idB = "Bd5Fn8Qs2KhW7yTa4Lc9";
+    const idC = "Mx3Jp6Vc9RgN2uEb5Sk8";
+    await writeFile(join(ev, `README-${idA}.txt`), "x");
+    await writeFile(join(ev, `README-${idB}.txt.locked`), randomBytes(10_000));
+    await writeFile(join(ev, `report-${idC}.docx.locked`), randomBytes(10_000));
+    await writeFile(join(ev, "README.txt"), "x");
+    const out = await tool(SURVEY, cwd, { root: "work/ev", limit: 1 });
+    const survey = body<Survey & { paths_withheld: number }>(out);
+    const census = JSON.stringify(await allRows<SurveyRow>(cwd, { all_results: survey.census?.file } as Page));
+    const pages = JSON.stringify(await Promise.all(["candidates", "note_name_candidates"].map((k) => allRows<unknown>(cwd, survey.pages[k]).catch(() => []))));
+    const printed = out.stdout + census + pages;
+    for (const id of [idA, idB]) assert.ok(!printed.includes(id), `a note-named file's identifier-shaped name is printed (${id})`);
+    // A file that is not named like a note is listed by its name: it is an encrypted file, and its name is evidence.
+    assert.ok(printed.includes(idC));
+    assert.equal(survey.paths_withheld, 2, "counted once per file whose name was withheld: the two note-named files");
+    const noteRows = await allRows<{ file: string }>(cwd, survey.pages.note_name_candidates);
+    assert.deepEqual(noteRows.map((n) => n.file).sort(), ["work/ev/<identifier-shaped name withheld>", "work/ev/<identifier-shaped name withheld>", "work/ev/README.txt"]);
+    const manifest = JSON.parse(await readFile(join(ROOT, "packs", "ransomware-response", "tools", "encrypted_survey", "manifest.json"), "utf8")) as { description: string };
+    assert.match(manifest.description, /withh[eo]ld/);
+  });
+});
+
+test("encrypted_survey catches an identifier between the known extension and the new one, and explains the entropy of a .gz", async () => {
+  // The rule looked at the penultimate extension only: report.docx.id[AB12CD34].locked was a miss. And a real
+  // compressed file of an extension the tool did not know had no alternative explanation.
+  await withCwd(async (cwd) => {
+    const ev = join(cwd, "work", "ev");
+    await mkdir(ev, { recursive: true });
+    await writeFile(join(ev, "report.docx.id[AB12CD34].locked"), PLAIN.subarray(0, 8000));
+    await writeFile(join(ev, "data.gz"), randomBytes(10_000));
+    await writeFile(join(ev, "images.tar.gz"), PLAIN.subarray(0, 8000));
+    await writeFile(join(ev, "notes.v2.final"), PLAIN.subarray(0, 8000));
+    await writeFile(join(ev, "clip.mkv"), randomBytes(10_000));
+    const survey = body<Survey>(await tool(SURVEY, cwd, { root: "work/ev" }));
+    const rows = Object.fromEntries((await allRows<SurveyRow & { alternative_explanation?: string }>(cwd, { all_results: survey.census?.file } as Page)).filter((r) => r.record === "file").map((r) => [r.file.split("/").pop() ?? "", r]));
+    assert.equal(rows["report.docx.id[AB12CD34].locked"].status, "candidate");
+    assert.deepEqual(rows["report.docx.id[AB12CD34].locked"].reasons, ["appended_extension_after_known_extension"]);
+    assert.equal(rows["report.docx.id[AB12CD34].locked"].appended_extension, ".locked");
+    assert.equal(rows["data.gz"].status, "candidate");
+    assert.match(rows["data.gz"].alternative_explanation ?? "", /gz/);
+    assert.match(rows["clip.mkv"].alternative_explanation ?? "", /mkv/);
+    assert.equal(rows["images.tar.gz"].status, "noncandidate", "a .tar.gz is a known pair, not an appended extension");
+    assert.equal(rows["notes.v2.final"].status, "noncandidate");
+  });
+});
+
+test("encrypted_survey counts the overflow of each histogram on its own", async () => {
+  // Both histograms incremented index 0 of one list, and one line added the two together.
+  await withCwd(async (cwd) => {
+    const ev = join(cwd, "work", "ev");
+    await mkdir(ev, { recursive: true });
+    const t0 = Date.UTC(2026, 3, 12, 0, 10, 0) / 1000;
+    const files: [string, Buffer, number][] = [
+      ["a1.doc.locked", randomBytes(8000), 0],
+      ["a2.doc.locked", randomBytes(8000), 1],
+      ["a3.doc.locked", randomBytes(8000), 2],
+      ["b1.txt", PLAIN.subarray(0, 8000), 3],
+      ["b2.txt", PLAIN.subarray(0, 8000), 4],
+    ];
+    for (const [name, data, hour] of files) {
+      await writeFile(join(ev, name), data);
+      await utimes(join(ev, name), t0 + hour * 3600, t0 + hour * 3600);
+    }
+    const probe = await runPySnippet(
+      `import contextlib, importlib.util, io, json, os, sys
+spec = importlib.util.spec_from_file_location("survey", sys.argv[1])
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+m.HOUR_CAP = 2
+os.chdir(sys.argv[2]); os.environ["AGENT_ID"] = "s1"
+sys.stdin = io.StringIO(json.dumps({"root": "work/ev"}))
+buf = io.StringIO()
+with contextlib.redirect_stdout(buf):
+    m.main()
+print(buf.getvalue())`,
+      [SURVEY, cwd],
+      null,
+    );
+    assert.equal(probe.code, 0, probe.stderr);
+    const survey = JSON.parse(probe.stdout) as { histogram_tables: { all_files: string; candidates: string }; all_files_mtime_hourly: unknown[]; candidate_mtime_hourly: unknown[] };
+    assert.equal(survey.all_files_mtime_hourly.length, 2);
+    assert.equal(survey.candidate_mtime_hourly.length, 2);
+    assert.match(survey.histogram_tables.all_files, /capped: 2 distinct hours held.* 3 files not counted/);
+    assert.match(survey.histogram_tables.candidates, /capped: 2 distinct hours held.* 1 files not counted/);
   });
 });
 

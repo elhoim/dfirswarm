@@ -53,9 +53,13 @@ own. The sign-off is these acts, not a post. Nothing else is assigned.
 ## Definition of done
 
 `work/report.md` exists and answers questions 1 to 9 under the headings `## 1.`
-through `## 9.`. Answer 2 states which of the three exfiltration positions
-applies. Answer 8 is a position, not a shrug. No credential, wallet address or
-victim identifier appears in the body; identifiers go in an appendix. The
+through `## 9.`. Answer 2 gives its conclusion on a line of its own, in the form
+`Exfiltration conclusion: <outcome>`, the outcome one of established, partial,
+bounded negative or not determinable, and states the coverage and the detection
+limits it rests on. Answer 8 is a position, not a shrug. No credential, key,
+wallet address, victim identifier or hash of a secret appears in the report: it
+cites where each is (the note id and offset, and the sealed job output that holds
+it), and quotes a value only where a question asks for that value by name. The
 ledger holds one `answer` entry per question (`question:1` to `question:9`) and
 one each for `summary` and `narrative`, with every defect the answers check
 names fixed or named by a limitation, and the critic, who wrote none of them,
@@ -67,7 +71,7 @@ has recorded `attest` or `dispute` on each answer, saying what they verified.
 - `test -f work/report.md`
 - `for n in 1 2 3 4 5 6 7 8 9; do grep -q "^## $n\." work/report.md || exit 1; done`
 - `grep -qiE 'UTC' work/report.md`
-- `grep -qiE 'established|partial|bounded.negative|not.determinable' work/report.md`
+- `awk '/^## 2\./,/^## 3\./' work/report.md | grep -qiE 'exfiltration conclusion:[*_ ]*(established|partial|bounded[ -]negative|not[ -]determinable)'`
 - `test "$(grep -c '"kind":"event"' ledger/entries.jsonl)" -ge 8`
 - `node --experimental-strip-types --no-warnings "$SWARM_HARNESS/scripts/check-answers.ts" --sections 1,2,3,4,5,6,7,8,9,summary,narrative`
 - `grep '"tool":"inputs_check"' traces/events.jsonl | tail -1 | grep -q '"content_ok":true'`

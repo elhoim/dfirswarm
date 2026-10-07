@@ -16,7 +16,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { chmod, mkdir, readFile, readdir, stat, symlink, utimes, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
-import { runPySnippet, withCwd } from "./tool-library-harness.ts";
+import { ROOT, runPySnippet, withCwd } from "./tool-library-harness.ts";
 import { EIO_SITE, NOTES, allRows, body, exists, filesUnder, refused, tool } from "./ransomware-pack-harness.ts";
 import type { Page } from "./ransomware-pack-harness.ts";
 
@@ -119,7 +119,7 @@ type NoteRow = {
   note_id: string;
   file: string;
   bytes: number;
-  sha256: string;
+  sha256: string | null;
   modified_utc: string | null;
   mtime_ns: number;
   class: string;
@@ -145,7 +145,7 @@ type NoteScan = {
   indicator_counts: Record<string, Record<string, number>>;
   occurrences: Occurrence[];
   earliest_observed_note_mtime: { note_id: string; modified_utc: string; clock: string; caveat: string } | null;
-  distinct_note_contents: { sha256: string; copies: number }[];
+  distinct_note_contents: { sha256: string | null; copies: number }[];
   coverage: Record<string, number>;
   exclusions: { path: string; reason: string }[];
   pages: Record<string, Page>;
@@ -538,6 +538,100 @@ print(json.dumps([done["matched"], len(rows), rows[2]["path"] == "dir/readme_\ud
     );
     assert.equal(probe.code, 0, probe.stderr);
     assert.deepEqual(JSON.parse(probe.stdout), [3, 3, true]);
+  });
+});
+
+// A directory whose name carries "-unlistable" cannot be listed, wherever the suite runs (root lists a mode-000 one).
+const LIST_SITE = String.raw`
+import errno, os
+_real_scandir = os.scandir
+def _scandir(path="."):
+    if "-unlistable" in os.fsdecode(path):
+        raise OSError(errno.EIO, "Input/output error", os.fsdecode(path))
+    return _real_scandir(path)
+os.scandir = _scandir
+`;
+
+test("ransom_note_scan prints an identifier-shaped directory name nowhere: not in exceptions, rejected rows or exclusions either", async () => {
+  // The shape check applied to the note's own name, and only in the notes rows: a directory named for the
+  // victim was printed in the rows for what it could not list, what it rejected and what it excluded.
+  await withCwd(async (cwd) => {
+    const ev = join(cwd, "work", "ev");
+    const id = VICTIM_ID;
+    await mkdir(join(ev, `${id}-unlistable`), { recursive: true });
+    await mkdir(join(ev, id), { recursive: true });
+    await writeFile(join(ev, id, "HOW_TO_DECRYPT.txt"), Buffer.alloc(5000, 0x41));
+    await mkdir(join(ev, `${id}-links`), { recursive: true });
+    await mkdir(join(cwd, "outside"), { recursive: true });
+    await writeFile(join(cwd, "outside", "target.txt"), "x");
+    await symlink(join(cwd, "outside", "target.txt"), join(ev, `${id}-links`, "HOW_TO_DECRYPT.txt"));
+    await mkdir(join(ev, `${id}-eio`), { recursive: true });
+    await writeFile(join(ev, `${id}-eio`, "readme_unreadable.txt"), "text");
+    await mkdir(join(ev, `${id}-skip`), { recursive: true });
+    await mkdir(join(ev, `${id}-ok`), { recursive: true });
+    await writeFile(join(ev, `${id}-ok`, "readme_ok.txt"), "decrypt your files, your files are encrypted\n");
+    await mkdir(join(cwd, "pystub"), { recursive: true });
+    await writeFile(join(cwd, "pystub", "sitecustomize.py"), EIO_SITE + LIST_SITE);
+    const site = { PYTHONPATH: join(cwd, "pystub") };
+    const args = { root: "work/ev", max_size: 1000, exclude_top_level_dirs: [`${id}-skip`] };
+    // With a page of one row, the rest is in the files the answer names: they are held to the same rule.
+    const narrow = await tool(NOTES, cwd, { ...args, limit: 1 }, site);
+    assert.equal(body<NoteScan>(narrow).truncated, true);
+    assertNoValue(await everythingPrinted(cwd, narrow.stdout));
+    const out = await tool(NOTES, cwd, args, site);
+    const scan = body<NoteScan & { exceptions: { path: string }[] }>(out);
+    // Every kind of row is there, so that the absence below is of printed rows and not of missing ones.
+    assert.equal(scan.rejected_count, 3, "oversized, linked and unreadable");
+    assert.equal(scan.pages.exceptions.matched, 1, "the directory that could not be listed");
+    assert.equal(scan.exclusions.length, 1);
+    assert.equal(scan.candidate_count, 1);
+    assert.ok(scan.paths_withheld >= 6, `paths_withheld is ${scan.paths_withheld}`);
+    assertNoValue(await everythingPrinted(cwd, out.stdout));
+    assert.ok(!out.stdout.includes(`${id}-skip`) && !out.stdout.includes("-unlistable"), "an id-shaped directory name is printed");
+    const printedPaths = [...scan.rejected, ...scan.exceptions, ...scan.exclusions].map((r) => r.path).concat(scan.notes.map((n) => n.file));
+    assert.equal(printedPaths.length, 6);
+    for (const p of printedPaths) assert.match(p, /^work\/ev\/<identifier-shaped name withheld>(\/|$)/, p);
+  });
+});
+
+test("ransom_note_scan prints no digest of a note that is only an identifier, or only one indicator value, or is too short to hide one", async () => {
+  // sha256 of a note that is nothing but a 20-character identifier is a digest of the identifier.
+  await withCwd(async (cwd) => {
+    const ev = join(cwd, "work", "ev");
+    await mkdir(ev, { recursive: true });
+    const long = `http://${ONION_V3}/chat?access-key=${ACCESS_KEY}&pad=${"x".repeat(150)}`;
+    const files: Record<string, string> = {
+      "README.txt": VICTIM_ID,
+      "README_short.txt": `Your personal ID: ${VICTIM_ID}\n`,
+      "README_url.txt": `${long}\n`,
+      "README_full.txt": NOTE_TEXT,
+    };
+    for (const [n, t] of Object.entries(files)) await writeFile(join(ev, n), t);
+    const out = await tool(NOTES, cwd, { root: "work/ev" });
+    const scan = body<NoteScan>(out);
+    const printed = await everythingPrinted(cwd, out.stdout);
+    for (const t of [VICTIM_ID, `${VICTIM_ID}\n`, files["README_short.txt"], files["README_url.txt"], long]) {
+      assert.ok(!printed.includes(createHash("sha256").update(t).digest("hex")), `the digest of ${JSON.stringify(t.slice(0, 24))} is printed`);
+    }
+    const by = Object.fromEntries(scan.notes.map((n) => [n.file.split("/").pop() ?? "", n]));
+    for (const n of ["README.txt", "README_short.txt", "README_url.txt"]) {
+      assert.equal(by[n].sha256, null, `${n}: the whole-file digest is withheld`);
+      assert.match((by[n] as NoteRow & { sha256_withheld?: string }).sha256_withheld ?? "", /shorter than 128 bytes|single token or indicator value/);
+    }
+    assert.match(String(by["README_full.txt"].sha256), /^[0-9a-f]{64}$/, "an ordinary note keeps its digest");
+    assert.equal(scan.distinct_note_contents.filter((d) => d.sha256 === null).length, 3);
+  });
+});
+
+test("ransom_note_scan's manifest says what it does not locate: an unlabelled token, and a digest it withholds", async () => {
+  const manifest = JSON.parse(await readFile(join(ROOT, "packs", "ransomware-response", "tools", "ransom_note_scan", "manifest.json"), "utf8")) as { description: string };
+  assert.match(manifest.description, /unlabelled/);
+  assert.match(manifest.description, /shorter than 128 bytes/);
+  await withCwd(async (cwd) => {
+    await mkdir(join(cwd, "work", "ev"), { recursive: true });
+    await writeFile(join(cwd, "work", "ev", "README.txt"), `decrypt your files; Token ${createHash("sha256").update("t").digest("hex")}\n`);
+    const scan = body<NoteScan>(await tool(NOTES, cwd, { root: "work/ev" }));
+    assert.deepEqual(scan.notes[0].indicator_counts, {}, "a long hex token with no label is neither located nor counted");
   });
 });
 

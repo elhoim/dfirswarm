@@ -14,9 +14,10 @@ neither privilege nor confidentiality: the legal owner decides what goes to whom
 
 **Assess every harm, not only exfiltration.** Describe confidentiality, integrity
 and availability effects separately, with the affected services, the categories
-of personal data, the populations and the business consequences. Under GDPR and
-similar laws a personal-data breach includes a loss of availability or integrity,
-so ransomware can be reportable with no evidence that anything left. Uncertainty
+of personal data, the populations and the business consequences. As GDPR's definition of a
+personal-data breach reads, and as similar laws may read, a loss of availability or
+integrity can qualify, so ransomware can be reportable with no evidence that
+anything left; check the definition against the current text. Uncertainty
 about exfiltration does not justify postponing the notification assessment: it
 goes into the report as a stated unknown.
 
