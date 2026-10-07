@@ -22,6 +22,8 @@ report is not the detection anyway. A rule firing is a hypothesis with a name.
 The evidence is the record it matched, which you then read with evtx_query and
 cite by its record id and channel.
 
+out_dir is a place the run can write: work/<your id>/hunt (or work/extracted/<id>/..., work/quarantine/<id>/...,
+tool-output/<id>/...) in an agent's VM, $OUT in a job; any other is refused with the places that work named.
 Every run gets a directory of its own under out_dir (hunt-<UTC time>-<id>), so a
 result left by an earlier invocation can never be taken for this one's. The engine's
 exit status is judged: a non-zero status with a result file is a PARTIAL run, not a
@@ -52,6 +54,7 @@ import hashlib
 import heapq
 import json
 import os
+import re
 import secrets
 import shutil
 import signal
@@ -60,7 +63,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-PARSER = "sigma_hunt/4"
+PARSER = "sigma_hunt/5"
 DEFAULT_TIMEOUT = 900
 LEVELS = ["informational", "low", "medium", "high", "critical"]
 # The level words the engines write: Zircolite the full ones, Hayabusa the short ones.
@@ -69,9 +72,42 @@ SORT_RUN_BYTES = 64 * 1024 * 1024
 JSON_VALUE_CAP = 256 * 1024 * 1024
 
 
+# Where the run directory is once it exists, so a failure after the engine ran can name it.
+STATE = {"run_dir": None}
+
+
 def fail(message, **extra):
+    if STATE["run_dir"] and "run_dir" not in extra:
+        extra["run_dir"] = STATE["run_dir"]
     print(json.dumps({"error": message, **extra}))
     raise SystemExit(1)
+
+
+def writable_place(out_dir):
+    """Refuse an out_dir that this run cannot write, naming the places that work. In a job only $OUT is writable; in an
+    agent's VM the harness maps the agent's own work/<id>/, work/extracted/<id>/, work/quarantine/<id>/ and
+    tool-output/<id>/ and nothing else under them (work/hunt, a bare work/ or another agent's directory fail
+    with a permission error after the engine has been looked for). With neither a job nor an agent id there is
+    no map to hold the path to."""
+    root = Path.cwd().resolve()
+    dest = (root / out_dir).resolve()
+    if os.environ.get("JOB_ID") and os.environ.get("OUT"):
+        base = Path(os.environ["OUT"]).resolve()
+        if dest == base or base in dest.parents:
+            return
+        fail("out_dir must be under $OUT in a job: the run directory is read-only there", out_dir=out_dir,
+             writable=[os.path.relpath(base, root) if root in base.parents else str(base)])
+    agent = os.environ.get("AGENT_ID")
+    if not agent:
+        return
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", agent)
+    places = [root / "work" / safe, root / "work" / "extracted" / safe, root / "work" / "quarantine" / safe,
+              root / "tool-output" / safe]
+    if any(dest == p or p in dest.parents for p in places):
+        return
+    fail("out_dir is not a place this run can write: use a directory under your own work/%s/" % safe, out_dir=out_dir,
+         writable=["work/%s/..." % safe, "work/extracted/%s/..." % safe, "work/quarantine/%s/..." % safe,
+                   "tool-output/%s/..." % safe])
 
 
 def resolve_output(out, what="output"):
@@ -143,6 +179,23 @@ class Malformed:
         self._fh.write(data)
         self.bytes += len(data.encode("utf-8", "surrogateescape"))
 
+    def add_stream(self, first, fh, where):
+        """Keep `first` and everything still to be read from `fh` as one unreadable item, copied across in chunks:
+        the rest of a document that stopped making sense can be as large as the file."""
+        if self._fh is None:
+            self._fh = open(self.path, "w", encoding="utf-8", errors="surrogateescape")
+        self.count += 1
+
+        def put(text):
+            self._fh.write(text)
+            self.bytes += len(text.encode("utf-8", "surrogateescape"))
+
+        put("%s\t" % where)
+        put(first.replace("\n", "\\n"))
+        for chunk in iter(lambda: fh.read(1 << 20), ""):
+            put(chunk.replace("\n", "\\n"))
+        put("\n")
+
     def close(self):
         if self._fh is not None:
             self._fh.close()
@@ -153,7 +206,12 @@ def json_values(path, malformed):
     """Yield the JSON values of an engine's result file, as a stream: the elements of a top-level
     array, objects written one after another (pretty-printed or one to a line). A line of a
     line-delimited file that is not JSON is counted and kept in `malformed`, and the next line is read;
-    a document that stops making sense is kept whole from that point and ends the read."""
+    a document that stops making sense is kept whole from that point, copied to the file in chunks (it is
+    never held in memory), and ends the read.
+
+    Which of the two it is comes from the first line alone: a line that begins an object and says more than the
+    brace (`{"RuleTitle": ...`) is the first of a line-delimited file whether or not it is whole, so a damaged
+    first line costs one line; a lone `{`, a `[` and anything else is a document."""
     decoder = json.JSONDecoder()
     with open(path, "r", encoding="utf-8", errors="replace") as fh:
         first = ""
@@ -163,14 +221,7 @@ def json_values(path, malformed):
                 first = line.strip()
                 break
         fh.seek(pos)
-        jsonl = False
-        if first.startswith("{"):
-            try:
-                json.loads(first)
-                jsonl = True
-            except ValueError:
-                jsonl = False
-        if jsonl:
+        if first.startswith("{") and first != "{":
             for number, line in enumerate(fh, 1):
                 text = line.strip()
                 if not text:
@@ -199,19 +250,20 @@ def json_values(path, malformed):
             buf = buf[i:]
             try:
                 value, end = decoder.raw_decode(buf)
-            except ValueError:
-                if not eof and len(buf) < JSON_VALUE_CAP:
+            except ValueError as exc:
+                # More of the file can finish a value only when the error is where the text ends (a cut value,
+                # a string not yet closed); an error in the middle of what is held is the document's.
+                near_end = isinstance(exc, json.JSONDecodeError) and (
+                    exc.pos >= len(buf) - 12 or exc.msg.startswith("Unterminated string"))
+                if not eof and near_end and len(buf) < JSON_VALUE_CAP:
                     chunk = fh.read(1 << 20)
                     if chunk:
                         buf += chunk
                         continue
                     eof = True
                     continue
-                # What is left does not parse: it is kept whole, and the read ends here.
-                rest = buf
-                for chunk in iter(lambda: fh.read(1 << 20), ""):
-                    rest += chunk
-                malformed.add(rest, "from the value at the start of this text")
+                # What is left does not parse: it is kept whole, streamed to the file, and the read ends here.
+                malformed.add_stream(buf, fh, "from the value at the start of this text")
                 return
             yield value
             buf = buf[end:]
@@ -377,6 +429,7 @@ def main():
     if not isinstance(out_dir, str) or not out_dir:
         fail("out_dir is required: a directory under work/ for the engine's own output")
     out_dir = resolve_output(out_dir, "out_dir")
+    writable_place(out_dir)
 
     min_level = str(args.get("min_level") or "medium").lower()
     if min_level not in LEVELS:
@@ -406,11 +459,15 @@ def main():
                       "hayabusa": "https://github.com/Yamato-Security/hayabusa/releases"},
              note="Either engine is enough. Both are invoked as executables.")
 
-    os.makedirs(out_dir, exist_ok=True)
     # A directory of this run's own: whatever an earlier invocation left in out_dir is never read as this one's.
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     run_dir = resolve_output(os.path.join(out_dir, "hunt-%s-%s" % (stamp, secrets.token_hex(3))), "out_dir")
-    os.makedirs(run_dir, exist_ok=False)
+    try:
+        os.makedirs(out_dir, exist_ok=True)
+        os.makedirs(run_dir, exist_ok=False)
+    except OSError as exc:
+        fail("the run directory cannot be made under out_dir: %s" % exc, out_dir=out_dir, status="failed")
+    STATE["run_dir"] = run_dir
     result = resolve_output(os.path.join(run_dir, "%s.json" % engine), "out_dir")
     zircolite_log = resolve_output(os.path.join(run_dir, "zircolite.log"), "out_dir")
 
@@ -445,7 +502,10 @@ def main():
     stderr_path = resolve_output(os.path.join(run_dir, "%s.stderr" % engine), "out_dir")
     timed_out = False
     with open(stdout_path, "wb") as so, open(stderr_path, "wb") as se:
-        proc = subprocess.Popen(argv, stdout=so, stderr=se, stdin=subprocess.DEVNULL, cwd=cwd, start_new_session=True)
+        try:
+            proc = subprocess.Popen(argv, stdout=so, stderr=se, stdin=subprocess.DEVNULL, cwd=cwd, start_new_session=True)
+        except OSError as exc:
+            fail("%s could not be started: %s" % (engine, exc), command=" ".join(argv), status="failed")
         try:
             rc = proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
@@ -539,4 +599,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except OSError as exc:
+        fail("a file could not be read or written: %s" % exc, status="failed")
