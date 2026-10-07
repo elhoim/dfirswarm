@@ -1,6 +1,6 @@
 {
   "name": "linux_triage",
-  "description": "Parse a Linux disk image or extracted root with dissect.target, including E01 images whose root is inside LVM. The complete JSONL from every artefact family is kept under out_dir; the inline result only names and hashes those files, so nothing is truncated.",
+  "description": "Parse a Linux disk image or extracted root with dissect.target, one function at a time, including E01 images whose root is inside LVM. The complete output of each family's functions is kept under out_dir (JSON Lines, or text for the identity family) with each function's stderr in a file of its own; the inline answer is a manifest with no evidence text in it. The family files are bulk extracts of evidence text (histories, authentication lines, journal entries, container logs) and can hold secrets: they are not sealed as sensitive unless the job ran with secret_output. Each function gets the status it earned and the evidence for it: parsed (exit 0, records), empty (exit 0, nothing, no stderr), unsupported (exit 0, nothing, stderr saying the plugin is not available: the message patterns are not validated against dissect.target, so an unmatched message is `unknown`), failed (non-zero exit or a deadline), not_attempted (the total deadline), unknown (a line that is not JSON, or a stderr that names no cause for an empty result). execution_complete says every function was started and exited 0 within its deadline; it is not artefact coverage, and neither is `parsed`: the counts under coverage are what each function produced, not what the host held. Each family names its functions and what they do not cover (sessions: classic wtmp/btmp/lastlog only; history: bash only; packages: dpkg.status and package-manager logs, no RPM; containers: container.logs only; there is no audit family). Empty output is a parser's result, not proof the artefact is absent. timeout_seconds is per function (default 1800) and total_timeout_seconds covers the run (default 13800, under this manifest's 14400); summary.json in out_dir is rewritten after every function, so a run killed from outside leaves what it had done. groups omitted runs every family; an empty list, an unknown name or a repeated one is refused. Accepts an image (extensions and magic in `use`) or a directory holding an extracted root; whether a given function reads an extracted root is shown by its status, not assumed.",
   "params": {
     "source": {
       "type": "string",
@@ -9,16 +9,20 @@
     },
     "out_dir": {
       "type": "string",
-      "description": "A new directory under work/ or the job output for the complete JSONL results",
+      "description": "A new directory under work/ or the job output for the complete results; refused if it exists",
       "required": true
     },
     "groups": {
       "type": "array",
-      "description": "Optional families: identity, users, sessions, authentication, history, persistence, packages, ssh, logs, web, containers"
+      "description": "Families to run: identity, users, sessions, authentication, history, persistence, packages, ssh, logs, web, containers. Omit it to run all of them; an empty list, an unknown family or a repeated one is refused"
     },
     "timeout_seconds": {
       "type": "integer",
-      "description": "Deadline for each family (default 1800)"
+      "description": "Deadline for each function (default 1800)"
+    },
+    "total_timeout_seconds": {
+      "type": "integer",
+      "description": "Deadline for the whole run (default 13800). A function is not started with less than a second left, and one that runs into it is failed with deadline: total; the rest are not_attempted"
     }
   },
   "requires": [
@@ -29,7 +33,46 @@
   "timeout_seconds": 14400,
   "example": "{\"source\":\"inputs/server.E01\",\"out_dir\":\"work/linux-triage\"}",
   "by": "maintainer",
-  "at": "2026-09-26T00:00:00.000Z",
-  "version": 2,
-  "sha256": "f6765c25462ef59550a455f423aedcadc3f297877672c97a34a744c9df188e1f"
+  "at": "2026-10-07T12:00:00.000Z",
+  "version": 3,
+  "sha256": "31fbf10a83aef786e56a7612c2c67ab687543873dbe3ae090753042e4f676f48",
+  "use": {
+    "extensions": [
+      ".e01",
+      ".ex01",
+      ".dd",
+      ".img",
+      ".raw",
+      ".vhd",
+      ".vhdx",
+      ".vmdk",
+      ".qcow2"
+    ],
+    "magic": [
+      {
+        "offset": 0,
+        "hex": "455646090d0aff00"
+      },
+      {
+        "offset": 0,
+        "hex": "455646320d0a8100"
+      },
+      {
+        "offset": 510,
+        "hex": "55aa"
+      },
+      {
+        "offset": 0,
+        "hex": "7668647866696c65"
+      },
+      {
+        "offset": 0,
+        "hex": "4b444d56"
+      },
+      {
+        "offset": 0,
+        "hex": "514649fb"
+      }
+    ]
+  }
 }
