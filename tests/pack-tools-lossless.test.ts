@@ -623,6 +623,8 @@ type JumpFile = Page & {
   link_count: number;
   links_truncated?: boolean;
   entries?: unknown[];
+  entry_count?: number;
+  entries_page?: Page;
   application_id?: string;
 };
 
@@ -739,18 +741,22 @@ class OleFileIO:
         pass
 `;
 
+// A version 3 DestList as the jump list format notes lay it out: a 32-byte header, then
+// per entry a 130-byte fixed part (the NetBIOS name at 0x48, the entry number at 0x58,
+// the last-access FILETIME at 0x64, the pin state at 0x6C, the path length in
+// characters at 0x80), the UTF-16LE path from 0x82 and a 4-byte trailer.
 function destList(paths: string[]): Buffer {
   const header = Buffer.alloc(32);
   header.writeUInt32LE(3, 0);
   header.writeUInt32LE(paths.length, 4);
   const entries = paths.map((p, i) => {
-    const b = Buffer.alloc(118 + p.length * 2 + 4);
+    const b = Buffer.alloc(130 + p.length * 2 + 4);
     b.write("WIN-HOST", 0x48, "latin1");
     b.writeUInt32LE(i + 1, 0x58);
-    b.writeUInt32LE(1, 0x64);
-    b.writeInt32LE(-1, 0x70);
-    b.writeUInt16LE(p.length, 0x74);
-    b.write(p, 118, "utf16le");
+    b.writeBigUInt64LE(133_443_104_000_000_000n + BigInt(i) * 10_000_000n, 0x64);
+    b.writeInt32LE(-1, 0x6c);
+    b.writeUInt16LE(p.length, 0x80);
+    b.write(p, 0x82, "utf16le");
     return b;
   });
   return Buffer.concat([header, ...entries]);
@@ -772,7 +778,12 @@ test("jumplist keeps every stream of an automaticDestinations-ms past the page",
     assert.equal(one.application_id, "1b4dd67f29cb1962");
     assert.equal(one.links.length, 2);
     assert.equal(one.link_count, 6);
-    assert.equal((one.entries as unknown[]).length, 6);
+    // The DestList entries are paged like the links: a page inline, every entry in the file.
+    assert.equal((one.entries as unknown[]).length, 2);
+    assert.equal(one.entry_count, 6);
+    const entryRows = await allRows<{ path: string; hostname: string; entry_number: number }>(cwd, one.entries_page as Page);
+    assert.deepEqual(entryRows.map((r) => r.path), paths);
+    assert.deepEqual(entryRows.map((r) => r.hostname), Array(6).fill("WIN-HOST"));
     const rows = await allRows<{ stream: string; path: string; written_to: string }>(cwd, one);
     assert.deepEqual(rows.map((r) => r.path), paths);
     assert.equal((await readdir(join(cwd, "work", "s1", "auto"))).length, 6);

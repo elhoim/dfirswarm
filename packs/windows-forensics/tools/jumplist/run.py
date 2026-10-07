@@ -7,28 +7,27 @@ does. Two formats:
 
   *.automaticDestinations-ms  an OLE compound file. Each numbered stream is a
                               link structure; the DestList stream is the index,
-                              holding the entry number, the host the file was
-                              on, an access count and the last access time.
+                              holding for each entry the entry number, the
+                              NetBIOS name of the host, the last access time, the
+                              pin state and the target path.
   *.customDestinations-ms     no container at all: link structures one after
-                              another, found by their own 20-byte header.
+                              another. They are CARVED by their own 20-byte
+                              header; the container's own structure is not parsed,
+                              so a header-shaped run of bytes inside a link is cut
+                              as if it began another one.
 
-The design here is deliberate. The DestList's fixed fields have moved between
-Windows versions and a parser that guesses at them quietly returns wrong times,
-so this reads the fields that are stable, validates each entry before trusting
-it, and stops and says so when the layout stops making sense. The substance —
-target path, volume serial, the three target timestamps — comes from the link
-structures themselves, which are written out for `lnk_parse`, a parser that
-already handles them properly.
+The DestList layout depends on its version (the first word of the stream). Version 1
+has a 114-byte fixed part per entry, with the path length, in characters, at 0x70 and
+the path from 0x72. Versions 3 and 4 have a 130-byte fixed part, with the path length
+at 0x80, the path from 0x82 and a 4-byte trailer after it. In all of them the NetBIOS
+name is at 0x48 (16 bytes), the entry number at 0x58, the last-access FILETIME at
+0x64 and the pin state at 0x6C (-1 is not pinned). Any other version is refused, with
+a problem and no entries: a layout is not guessed. The counters between those fields
+differ by version, and their meaning is not established here, so they are returned
+as raw hex under `undecoded_*` and no access count is claimed.
 
-The file name's leading hex is the application id. It identifies the
-application, and published lists map the common ones; quote the id and the
-source you resolved it with rather than asserting the application from memory.
-
-Every link structure is read and, with out_dir, written out. The page of links
-returned inline for each file is `limit` long, and when there are more the whole
-list is written to a file the output names. A link file already in out_dir is
-never overwritten with different bytes: two jump lists with the same name in
-different folders both keep their links.
+The target path, the volume serial and the three target timestamps are the link
+structures', so they are written out for `lnk_parse`, which reads them.
 """
 import binascii
 import datetime
@@ -117,6 +116,18 @@ class LosslessPage:
 FILETIME_EPOCH = datetime.datetime(1601, 1, 1, tzinfo=datetime.timezone.utc)
 LNK_MAGIC = bytes([0x4C, 0x00, 0x00, 0x00]) + binascii.unhexlify("0114020000000000c000000000000046")
 DESTLIST_HEADER = 32
+PARSER = "jumplist/3"
+MAX_PATH_CHARS = 32767
+# A DestList stream is read whole before it is parsed; a real one is a few hundred
+# kilobytes at most, so a stream past this is refused by name instead of held in memory.
+MAX_DESTLIST_BYTES = 64 * 1024 * 1024
+# The fixed part of an entry, the offset of its path length (a 16-bit count of UTF-16
+# characters) and the bytes after the path, by DestList version.
+LAYOUTS = {
+    1: {"fixed": 114, "chars_at": 0x70, "trailer": 0},
+    3: {"fixed": 130, "chars_at": 0x80, "trailer": 4},
+    4: {"fixed": 130, "chars_at": 0x80, "trailer": 4},
+}
 
 
 def fail(message, **extra):
@@ -125,56 +136,73 @@ def fail(message, **extra):
 
 
 def filetime(value):
+    """ISO 8601 UTC with all seven fractional digits, from integer arithmetic; None for 0
+    or a date past year 9999. The caller keeps the raw value beside it."""
     if not value:
         return None
     try:
-        return (FILETIME_EPOCH + datetime.timedelta(microseconds=value // 10)).isoformat().replace("+00:00", "Z")
-    except (OverflowError, OSError):
+        whole, ticks = divmod(value, 10_000_000)
+        moment = FILETIME_EPOCH + datetime.timedelta(seconds=whole)
+        return moment.strftime("%Y-%m-%dT%H:%M:%S") + ".%07dZ" % ticks
+    except (OverflowError, ValueError):
         return None
 
 
 def parse_destlist(data):
-    """Entry layout per Joachim Metz's jump list documentation; version aware."""
+    """The DestList stream, by the layout of its version (see the module note)."""
     out = {"entries": [], "problems": []}
     if len(data) < DESTLIST_HEADER:
-        out["problems"].append("the DestList stream is shorter than its header")
+        out["problems"].append("the DestList stream is %d bytes, shorter than its 32-byte header" % len(data))
         return out
     version, count, pinned = struct.unpack_from("<III", data, 0)
     out["destlist_version"] = version
     out["entries_claimed"] = count
     out["pinned_claimed"] = pinned
-    if version not in (1, 3, 4):
-        out["problems"].append("DestList version %d is not one this parser knows; entries are not read" % version)
+    layout = LAYOUTS.get(version)
+    if layout is None:
+        out["problems"].append(
+            "DestList version %d is not one this parser reads (1, 3 and 4 are); no entry is read, and none is guessed" % version)
         return out
-    trailer = 0 if version == 1 else 4
+    fixed, chars_at, trailer = layout["fixed"], layout["chars_at"], layout["trailer"]
     offset = DESTLIST_HEADER
-    while offset + 118 <= len(data):
-        chars = struct.unpack_from("<H", data, 0x74 + offset)[0]
-        end = offset + 118 + chars * 2 + trailer
-        if chars > 2048 or end > len(data):
+    while offset + fixed <= len(data):
+        chars = struct.unpack_from("<H", data, offset + chars_at)[0]
+        end = offset + fixed + chars * 2
+        if chars > MAX_PATH_CHARS or end + trailer > len(data):
             out["problems"].append(
-                "entry %d claims a %d-character path, which does not fit; stopped here"
-                % (len(out["entries"]) + 1, chars))
+                "entry %d at stream offset %d claims a %d-character path, which does not fit in the stream; stopped here"
+                % (len(out["entries"]) + 1, offset, chars))
             break
         host = data[offset + 0x48:offset + 0x58].split(b"\x00", 1)[0].decode("ascii", "replace")
         number, = struct.unpack_from("<I", data, offset + 0x58)
-        access_count, = struct.unpack_from("<I", data, offset + 0x64)
-        modified, = struct.unpack_from("<Q", data, offset + 0x68)
-        pin, = struct.unpack_from("<i", data, offset + 0x70)
-        path = data[offset + 118:offset + 118 + chars * 2].decode("utf-16-le", "replace")
-        out["entries"].append({
+        modified, = struct.unpack_from("<Q", data, offset + 0x64)
+        pin, = struct.unpack_from("<i", data, offset + 0x6C)
+        path = data[offset + fixed:end].decode("utf-16-le", "replace")
+        entry = {
+            "stream_offset": offset,
             "entry_number": number,
+            "entry_field_hex": data[offset + 0x58:offset + 0x60].hex(),
             "stream": "%x" % number,
             "path": path,
+            "path_chars": chars,
             "hostname": host,
-            "access_count": access_count,
             "last_access": filetime(modified),
+            "last_access_filetime": str(modified),
+            "pin_status": pin,
             "pinned": pin != -1,
-        })
-        offset = end
+            "undecoded_0x5c_0x64_hex": data[offset + 0x5C:offset + 0x64].hex(),
+        }
+        if version >= 3:
+            entry["undecoded_0x70_0x80_hex"] = data[offset + 0x70:offset + 0x80].hex()
+        out["entries"].append(entry)
+        offset = end + trailer
     if count and len(out["entries"]) != count:
         out["problems"].append(
             "the header claims %d entries and %d were read" % (count, len(out["entries"])))
+    if offset < len(data) and not out["problems"]:
+        out["problems"].append("%d byte(s) after the last entry were not read" % (len(data) - offset))
+    out["not_decoded"] = ["access or interaction counters (their position and encoding differ by version and are not decoded)",
+                          "the droid identifiers and the checksum at the start of each entry"]
     return out
 
 
@@ -270,21 +298,37 @@ def read_automatic(path, out_dir, limit):
     try:
         names = ["/".join(p) for p in ole.listdir()]
         result["stream_names"] = names
+        by_stream = {}
         if "DestList" in names:
-            result.update(parse_destlist(ole.openstream("DestList").read()))
+            size = ole.get_size("DestList") if hasattr(ole, "get_size") else None
+            if size is not None and size > MAX_DESTLIST_BYTES:
+                result["problems"] = ["the DestList stream is %d bytes, over the %d this tool reads whole; it was not parsed" % (size, MAX_DESTLIST_BYTES)]
+            else:
+                parsed = parse_destlist(ole.openstream("DestList").read())
+                entries = LosslessPage("jumplist", [path, "entries", out_dir], limit)
+                everything = parsed.pop("entries")
+                for entry in everything:
+                    entries.add(entry)
+                by_stream = {e["stream"]: e for e in everything}
+                result.update(parsed)
+                kept = entries.finish()
+                result["entries"] = entries.page
+                result["entry_count"] = kept["matched"]
+                result["entries_page"] = kept
         else:
             result["problems"] = ["there is no DestList stream in this file"]
-        by_stream = {e["stream"]: e for e in result.get("entries", [])}
         links = LosslessPage("jumplist", [path, "links", out_dir], limit)
         for name in names:
             if name == "DestList":
                 continue
             payload = ole.openstream(name).read()
-            entry = {"stream": name, "bytes": len(payload), "is_link": payload[:4] == LNK_MAGIC[:4]}
+            # The whole 20-byte header: the 4-byte size and the shell link CLSID.
+            entry = {"stream": name, "bytes": len(payload), "is_link": payload[:20] == LNK_MAGIC}
             known = by_stream.get(name.lower())
             if known:
                 entry["path"] = known["path"]
                 entry["last_access"] = known["last_access"]
+                entry["last_access_filetime"] = known["last_access_filetime"]
             if out_dir and entry["is_link"]:
                 entry["written_to"] = write_stream(out_dir, os.path.basename(path) + "-" + name, payload)
             links.add(entry)
@@ -297,10 +341,11 @@ def read_automatic(path, out_dir, limit):
 def read_custom(path, out_dir, limit):
     with open(path, "rb") as fh:
         data = fh.read()
-    result = {"file": path, "format": "customDestinations-ms", "links": []}
+    result = {"file": path, "format": "customDestinations-ms", "links": [],
+              "method": "carved: the file is split at every 20-byte link header; its own container structure is not parsed"}
     links = LosslessPage("jumplist", [path, "links", out_dir], limit)
     for i, (offset, payload) in enumerate(split_lnks(data)):
-        entry = {"offset": offset, "bytes": len(payload), "is_link": True}
+        entry = {"offset": offset, "bytes": len(payload), "is_link": True, "carved": True}
         if out_dir:
             entry["written_to"] = write_stream(out_dir, "%s-%04d" % (os.path.basename(path), i), payload)
         links.add(entry)
@@ -357,13 +402,28 @@ def main():
         if re.fullmatch(r"[0-9a-f]{16}", app_id):
             files[-1]["application_id"] = app_id
 
+    failed = [f for f in files if f.get("error")]
+    with_problems = [f for f in files if f.get("problems")]
+    page = LosslessPage("jumplist", [path, "files", out_dir], limit)
+    for f in files:
+        page.add(f)
+    kept = page.finish()
+    status = "failed" if len(failed) == len(files) else "partial" if failed or with_problems else "complete"
     print(json.dumps({
-        "files": files,
+        "parser": PARSER,
+        "status": status,
+        "files": page.page,
         "file_count": len(files),
-        "note": "The DestList gives the index and the access counts; the target path, the volume "
-                "serial and the three target timestamps come from the link structures, so run "
-                "lnk_parse over what was written to out_dir before citing any of them.",
+        "files_failed": len(failed),
+        "files_with_problems": len(with_problems),
+        "first_failures": [{"file": f["file"], "error": f["error"]} for f in failed[:5]],
+        "files_page": kept,
+        "note": "The DestList gives the index: entry number, host, last access, pin state and path. The target path, the volume "
+                "serial and the three target timestamps come from the link structures, so run lnk_parse over what was written "
+                "to out_dir before citing any of them. Access counters are not decoded. A customDestinations-ms is carved, not parsed.",
     }, indent=2))
+    if status == "failed":
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

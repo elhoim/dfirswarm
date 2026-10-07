@@ -1,17 +1,30 @@
 #!/usr/bin/env python3
-"""Program execution from an Amcache.hve registry hive.
+"""The application and file inventory of an Amcache.hve registry hive.
 
-Amcache answers "what ran on this box, and what was its SHA-1" better than
-anything else on a Windows image, and every measured case that wanted it did
-it by hand through a generic registry dumper. The key layout differs between
-Windows versions, so this reads whichever of the two is present and says
-which one it found rather than silently returning nothing.
+What this is: an inventory of binaries the system recorded, with their path, the
+hash the inventory holds, the publisher and the dates it keeps. Presence in it is
+not proof that a program ran, and absence from it is not proof that one did not:
+which entries exist, and when, depends on the Windows build, the inventory task
+and the hive's state. The key layout differs between Windows versions and BOTH are
+read when both are present, each row naming its layout:
 
-  Root\\File\\<volume>\\<id>                  Windows 7/8
-  Root\\InventoryApplicationFile\\<id>        Windows 10 and later
+  Root\\File\\<volume>\\<id>                  the older layout; values are numbered
+  Root\\InventoryApplicationFile\\<id>        the Windows 10 and later layout; values are named
+
+The numbered values are named by the published research regipy's own Amcache plugin
+follows (`5` file version, `c` file description, `f` the PE linker timestamp, `11`,
+`12` and `17` FILETIMEs, `15` the full path, `100` the program id, `101` the SHA-1);
+that mapping is not Microsoft documentation. The linker timestamp is a 32-bit Unix-epoch
+value copied from the PE header, not a FILETIME, and is converted as one; the raw value is
+kept beside it. A hash is returned as stored (`sha1_raw`, with the four leading zeros the
+value carries) and stripped only where it has that shape. What range of the file the
+inventory hashed is not established here. The hive is read as it is on disk: a hive
+whose sequence numbers differ is reported dirty, and its transaction logs are not replayed.
 """
 import datetime
 import json
+import os
+import re
 import sys
 from pathlib import Path
 
@@ -99,24 +112,32 @@ except ImportError:
     }))
     raise SystemExit(1)
 
+PARSER = "amcache_apps/2"
 FILETIME_EPOCH = datetime.datetime(1601, 1, 1, tzinfo=datetime.timezone.utc)
+UNIX_EPOCH = datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
 
-# The numbered values of Root\File on Windows 7/8. Named ones are used as-is.
-WIN7_VALUES = {
+# The numbered values of Root\File, by the published research regipy's Amcache plugin follows.
+LEGACY_VALUES = {
     "0": "product_name",
     "1": "company_name",
+    "2": "file_version_number",
+    "3": "language_code",
+    "4": "switchback_context",
+    "5": "file_version",
     "6": "file_size",
-    "c": "file_version",
-    "f": "link_date",
+    "7": "pe_header_hash",
+    "9": "pe_header_checksum",
+    "c": "file_description",
+    "f": "linker_compile_time",
+    "11": "last_modified_timestamp",
+    "12": "created_timestamp",
     "15": "full_path",
+    "17": "last_modified_timestamp_2",
     "100": "program_id",
     "101": "sha1",
 }
-
-WIN10_KEEP = (
-    "Name", "LowerCaseLongPath", "Size", "ProductName", "Publisher",
-    "Version", "BinFileVersion", "FileId", "LinkDate", "ProgramId",
-)
+LEGACY_FILETIMES = ("last_modified_timestamp", "created_timestamp", "last_modified_timestamp_2")
+HASH_SHAPE = re.compile(r"^0000([0-9a-fA-F]{40})$")
 
 
 def fail(message, **extra):
@@ -125,6 +146,7 @@ def fail(message, **extra):
 
 
 def filetime(value):
+    """ISO 8601 UTC with seven fractional digits, by integer arithmetic; None for 0 or a date past 9999."""
     try:
         value = int(value)
     except (TypeError, ValueError):
@@ -132,8 +154,23 @@ def filetime(value):
     if value <= 0:
         return None
     try:
-        return (FILETIME_EPOCH + datetime.timedelta(microseconds=value // 10)).isoformat().replace("+00:00", "Z")
-    except OverflowError:
+        whole, ticks = divmod(value, 10_000_000)
+        return (FILETIME_EPOCH + datetime.timedelta(seconds=whole)).strftime("%Y-%m-%dT%H:%M:%S") + ".%07dZ" % ticks
+    except (OverflowError, ValueError):
+        return None
+
+
+def unix_seconds(value):
+    """ISO 8601 UTC for a 32-bit Unix-epoch value (the PE linker timestamp); None for 0 or an unreadable one."""
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        return None
+    if value <= 0:
+        return None
+    try:
+        return (UNIX_EPOCH + datetime.timedelta(seconds=value)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except (OverflowError, ValueError):
         return None
 
 
@@ -141,6 +178,42 @@ def render(value):
     if isinstance(value, (bytes, bytearray)):
         return bytes(value).hex()
     return value
+
+
+def stripped_hash(raw):
+    """The 40 hex digits behind the four leading zeros an inventory hash is stored with; None for any other shape."""
+    if isinstance(raw, str):
+        m = HASH_SHAPE.match(raw)
+        if m:
+            return m.group(1).lower()
+    return None
+
+
+def legacy_row(volume_name, sub):
+    row = {"layout": "File", "volume": volume_name}
+    for v in sub.iter_values():
+        name = LEGACY_VALUES.get(str(v.name).lower(), str(v.name))
+        row[name] = render(v.value)
+    if "linker_compile_time" in row:
+        # A Unix-epoch 32-bit value from the PE header; not a FILETIME. The raw value stays in the row.
+        row["linker_compile_time_utc"] = unix_seconds(row["linker_compile_time"])
+    for name in LEGACY_FILETIMES:
+        if name in row:
+            row[name + "_utc"] = filetime(row[name])
+            row[name + "_filetime"] = str(row[name])
+    if "sha1" in row:
+        row["sha1_raw"] = row["sha1"]
+        row["sha1"] = stripped_hash(row["sha1_raw"])
+    return row
+
+
+def modern_row(sub):
+    row = {"layout": "InventoryApplicationFile"}
+    for v in sub.iter_values():
+        row[str(v.name)] = render(v.value)
+    if "FileId" in row:
+        row["file_id_sha1"] = stripped_hash(row["FileId"])
+    return row
 
 
 def main():
@@ -162,12 +235,27 @@ def main():
         fail("could not open the hive", hive=hive, reason=str(exc))
 
     entries = LosslessPage("amcache_apps", [hive], limit)
-    layout = None
+    counts = {}
+    problems = []
+    failed = [0]
 
-    def add(values, key_name, last_modified):
-        row = {"key": key_name, "key_last_modified": filetime(last_modified)}
-        row.update(values)
+    def add(row, sub):
+        last = getattr(getattr(sub, "header", None), "last_modified", 0)
+        row["key"] = sub.name
+        row["key_last_modified"] = filetime(last)
+        row["key_last_modified_filetime"] = str(last)
+        counts[row["layout"]] = counts.get(row["layout"], 0) + 1
         entries.add(row)
+
+    def guarded(label, fn):
+        try:
+            fn()
+        except Exception as exc:
+            failed[0] += 1
+            if len(problems) < 20:
+                problems.append("%s: %s: %s" % (label, type(exc).__name__, exc))
+
+    layouts = []
 
     # Windows 10 and later.
     try:
@@ -175,47 +263,51 @@ def main():
     except Exception:
         inventory = None
     if inventory is not None:
-        layout = "InventoryApplicationFile"
+        layouts.append("InventoryApplicationFile")
         for sub in inventory.iter_subkeys():
-            values = {}
-            for v in sub.iter_values():
-                if v.name in WIN10_KEEP:
-                    values[v.name] = render(v.value)
-            add(values, sub.name, getattr(getattr(sub, "header", None), "last_modified", 0))
+            guarded("InventoryApplicationFile\\%s" % getattr(sub, "name", "?"), lambda sub=sub: add(modern_row(sub), sub))
 
-    # Windows 7 and 8.
-    if layout is None:
-        try:
-            files = h.get_key("\\Root\\File")
-        except Exception:
-            files = None
-        if files is not None:
-            layout = "File"
-            for volume in files.iter_subkeys():
-                for sub in volume.iter_subkeys():
-                    values = {"volume": volume.name}
-                    for v in sub.iter_values():
-                        name = WIN7_VALUES.get(str(v.name).lower(), str(v.name))
-                        values[name] = render(v.value)
-                    if "link_date" in values:
-                        values["link_date_utc"] = filetime(values["link_date"])
-                    add(values, sub.name, getattr(getattr(sub, "header", None), "last_modified", 0))
+    # Windows 7 and 8: read as well when it is there, never instead.
+    try:
+        files = h.get_key("\\Root\\File")
+    except Exception:
+        files = None
+    if files is not None:
+        layouts.append("File")
+        for volume in files.iter_subkeys():
+            for sub in volume.iter_subkeys():
+                guarded("File\\%s\\%s" % (volume.name, getattr(sub, "name", "?")), lambda volume=volume, sub=sub: add(legacy_row(volume.name, sub), sub))
 
-    if layout is None:
+    if not layouts:
         fail(
             "neither Amcache layout is present in this hive",
             hive=hive,
             looked_for=["\\Root\\InventoryApplicationFile", "\\Root\\File"],
         )
 
+    header = h.header
+    dirty = header.primary_sequence_num != header.secondary_sequence_num
+    logs = [hive + suffix for suffix in (".LOG1", ".LOG2", ".LOG") if os.path.isfile(hive + suffix)]
     page = entries.finish()
-    print(json.dumps({
+    out = {
+        "parser": PARSER,
+        "status": "partial" if failed[0] else "complete",
         "hive": hive,
-        "layout": layout,
+        "layouts_found": layouts,
+        "rows_by_layout": counts,
         "entries": entries.page,
         "entry_count": page["matched"],
+        "rows_failed": failed[0],
+        "problems": problems,
+        "hive_dirty": dirty,
+        "hive_sequence_numbers": [header.primary_sequence_num, header.secondary_sequence_num],
+        "transaction_logs_beside_hive": logs,
+        "transaction_logs_replayed": False,
+        "note": "An inventory of recorded binaries, not proof that any of them ran. Transaction logs are not replayed: "
+                + ("this hive is dirty, so its newest state may be in the logs." if dirty else "the hive's sequence numbers agree."),
         **page,
-    }, indent=2))
+    }
+    print(json.dumps(out, indent=2))
 
 
 if __name__ == "__main__":

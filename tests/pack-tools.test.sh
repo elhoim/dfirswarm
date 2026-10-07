@@ -260,39 +260,70 @@ assert r["chunk_verified"] is True, r
   pass "evtx_carve recovers records from a lone chunk in unallocated space, checksums verified"
 fi
 
-# --- jumplist: the DestList layout, both versions ---------------------------
+# --- jumplist: the DestList layout, by version -------------------------------
+# The fixtures are written from the jump list format notes, not from the parser:
+# a 32-byte header; an entry's fixed part is 114 bytes in version 1 (path length at
+# 0x70, path from 0x72) and 130 bytes in versions 3 and 4 (path length at 0x80, path
+# from 0x82, then a 4-byte trailer); in all of them the NetBIOS name is at 0x48, the
+# entry number at 0x58, the last-access FILETIME at 0x64 and the pin state at 0x6C
+# (-1 is not pinned). The same fixtures once shared the parser's single 118-byte
+# layout, which put the path length at 0x74 for every version.
 "$PY" - "$WIN/tools/jumplist/run.py" <<'EOF' || fail "jumplist did not read a DestList"
 import struct, datetime, importlib.util, sys
 spec = importlib.util.spec_from_file_location("jl", sys.argv[1])
 jl = importlib.util.module_from_spec(spec); spec.loader.exec_module(jl)
 EPOCH = datetime.datetime(1601, 1, 1, tzinfo=datetime.timezone.utc)
-def ft(iso):
+def ft(iso, extra_ticks=0):
     dt = datetime.datetime.fromisoformat(iso).replace(tzinfo=datetime.timezone.utc)
-    return int((dt - EPOCH).total_seconds()) * 10_000_000
-def entry(number, host, count, when, path, trailer):
-    b = bytearray(118 + len(path) * 2 + trailer)
-    b[0x48:0x48+len(host)] = host.encode("ascii")
+    return int((dt - EPOCH).total_seconds()) * 10_000_000 + extra_ticks
+def entry(version, number, host, when, path, pin):
+    fixed, chars_at, trailer = (114, 0x70, 0) if version == 1 else (130, 0x80, 4)
+    b = bytearray(fixed + len(path) * 2 + trailer)
+    b[0x48:0x48 + len(host)] = host.encode("ascii")
     struct.pack_into("<I", b, 0x58, number)
-    struct.pack_into("<I", b, 0x64, count)
-    struct.pack_into("<Q", b, 0x68, ft(when))
-    struct.pack_into("<i", b, 0x70, -1)
-    struct.pack_into("<H", b, 0x74, len(path))
-    b[118:118+len(path)*2] = path.encode("utf-16-le")
+    struct.pack_into("<I", b, 0x5C, 0x11223344)            # counters the tool must not call an access count
+    struct.pack_into("<I", b, 0x60, 0x55667788)
+    struct.pack_into("<Q", b, 0x64, when)
+    struct.pack_into("<i", b, 0x6C, pin)
+    if version != 1:
+        struct.pack_into("<IIII", b, 0x70, 0xA1, 0xA2, 0xA3, 0xA4)
+    struct.pack_into("<H", b, chars_at, len(path))
+    b[fixed:fixed + len(path) * 2] = path.encode("utf-16-le")
     return bytes(b)
-for version, trailer in ((1, 0), (3, 4)):
-    e = [entry(1, "WIN-DC01", 7, "2026-02-03T08:15:00", r"\\fileserver\finance\Q4.xlsx", trailer)]
-    data = struct.pack("<IIIIIIII", version, len(e), 0, 0, 1, 0, 0, 0) + b"".join(e)
+UNC = r"\\fileserver\finance\Q4.xlsx"
+LOCAL = r"C:\case\report.txt"
+when = ft("2026-02-03T08:15:00", 1234567)
+for version in (1, 3, 4):
+    e = [entry(version, 1, "WIN-DC01", when, UNC, -1), entry(version, 10, "WIN-DC01", when + 10_000_000, LOCAL, 2)]
+    data = struct.pack("<IIIIIIII", version, len(e), 1, 0, 2, 0, 0, 0) + b"".join(e)
     got = jl.parse_destlist(data)
     assert not got["problems"], (version, got["problems"])
-    one = got["entries"][0]
-    assert one["path"].endswith("Q4.xlsx"), one
-    assert one["hostname"] == "WIN-DC01" and one["access_count"] == 7, one
-    assert one["last_access"] == "2026-02-03T08:15:00Z", one
+    assert got["destlist_version"] == version and len(got["entries"]) == 2, got
+    one, two = got["entries"]
+    assert one["path"] == UNC, (version, one)
+    assert one["hostname"] == "WIN-DC01" and one["entry_number"] == 1 and one["stream"] == "1", one
+    assert one["last_access"] == "2026-02-03T08:15:00.1234567Z", (version, one)
+    assert one["last_access_filetime"] == str(when), one
+    assert one["pinned"] is False and one["pin_status"] == -1, one
+    assert two["path"] == LOCAL and two["stream"] == "a" and two["pinned"] is True and two["pin_status"] == 2, (version, two)
+    assert two["last_access"] == "2026-02-03T08:15:01.1234567Z", two
+    assert "access_count" not in one, "no access count is claimed: its position is not established"
+    assert one["undecoded_0x5c_0x64_hex"] == "4433221188776655", one
+    if version != 1:
+        assert one["undecoded_0x70_0x80_hex"] == "a1000000a2000000a3000000a4000000", one
+# a version this parser does not read is a problem and no entries, never a guess
+odd = struct.pack("<IIIIIIII", 2, 1, 0, 0, 0, 0, 0, 0) + entry(3, 1, "H", when, LOCAL, -1)
+got = jl.parse_destlist(odd)
+assert got["entries"] == [] and got["problems"] and "version 2" in got["problems"][0], got
+# an entry whose path length runs past the stream stops the read and says so
+cut = struct.pack("<IIIIIIII", 3, 1, 0, 0, 0, 0, 0, 0) + entry(3, 1, "H", when, LOCAL, -1)[:-20]
+got = jl.parse_destlist(cut)
+assert got["entries"] == [] and any("does not fit" in p for p in got["problems"]), got
 # and the link structures inside a customDestinations-ms are found by their own header
 blob = b"\x02\x00\x00\x00" + jl.LNK_MAGIC + b"A" * 40 + jl.LNK_MAGIC + b"B" * 30
 assert [o for o, _ in jl.split_lnks(blob)] == [4, 64], jl.split_lnks(blob)
 EOF
-pass "jumplist reads a DestList in both layouts and splits a customDestinations by link header"
+pass "jumplist reads a DestList by its version's layout (1, 3 and 4), refuses another version, and splits a customDestinations by link header"
 
 # --- shellbags: shell items, and the honest fallback ------------------------
 "$PY" - "$WIN/tools/shellbags/run.py" <<'EOF' || fail "shellbags did not decode a shell item"
