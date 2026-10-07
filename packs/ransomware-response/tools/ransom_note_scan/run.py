@@ -64,6 +64,8 @@ DEFAULT_EXCLUDE_TOP = ["proc", "sys", "dev"]
 # Values seen are compared with each other to say "the same value as F000001" without
 # saying the value; the comparison is held in memory, and capped.
 DUPLICATE_CAP = 50000
+# A value longer than this is not held for the comparison: a note can be 16 MiB of one URL.
+DUPLICATE_VALUE_CAP = 1024
 # The values of one note that are kept to withhold a path that carries one.
 NAME_VALUES_CAP = 5000
 
@@ -239,7 +241,7 @@ KINDS = [
     ("monero", MONERO, 0),
     ("ethereum", ETHEREUM, 0),
     ("tox", TOX, 0),
-    ("labelled_identifier", IDENTIFIER, 1),
+    ("identifier_candidate", IDENTIFIER, 1),
 ]
 WALLET_KINDS = ("bitcoin", "monero", "ethereum")
 # Words that make a text read like a note. A list of words, not of values: nothing here is
@@ -686,7 +688,7 @@ def main():
                     earlier = seen.get((kind, value))
                     if earlier:
                         occ["duplicate_of"] = earlier
-                    elif len(seen) < DUPLICATE_CAP:
+                    elif len(seen) < DUPLICATE_CAP and len(value) <= DUPLICATE_VALUE_CAP:
                         seen[(kind, value)] = finding_id
                         distinct[kind] = distinct.get(kind, 0) + 1
                     else:
@@ -706,8 +708,8 @@ def main():
                 basis.append("wallet")
             if counts.get("tox"):
                 basis.append("tox")
-            if counts.get("labelled_identifier"):
-                basis.append("labelled_identifier")
+            if counts.get("identifier_candidate"):
+                basis.append("identifier_candidate")
             if len(language) >= 2:
                 basis.append("language")
             cls = "content_resembles_note" if len(basis) >= 2 else "filename_only"
@@ -755,7 +757,7 @@ def main():
         "rejected_count": unread,
         "notes": notes.page,
         "indicator_counts": {k: totals[k] for k in sorted(totals)},
-        "duplicate_check": "capped: %d distinct values compared, later ones not" % DUPLICATE_CAP if capped else "complete",
+        "duplicate_check": "capped: at most %d distinct values of %d characters or fewer are compared, others are not" % (DUPLICATE_CAP, DUPLICATE_VALUE_CAP) if capped else "complete",
         "occurrences": occurrences.page,
         "rejected": rejected.page,
         "distinct_note_contents": variants.page,

@@ -192,6 +192,19 @@ test("encrypted_survey calls a shared trailer an observation pending a reference
   });
 });
 
+test("encrypted_survey reports the trailer of two files that share eight bytes as an observation", async () => {
+  await withCwd(async (cwd) => {
+    const ev = join(cwd, "work", "ev");
+    await mkdir(ev, { recursive: true });
+    const trailer = Buffer.from("0badc0de0badf00d", "hex");
+    await writeFile(join(ev, "a.pdf.crypt"), Buffer.concat([randomBytes(60_000), trailer]));
+    await writeFile(join(ev, "b.pdf.crypt"), Buffer.concat([randomBytes(70_000), trailer]));
+    const survey = body<Survey>(await tool(SURVEY, cwd, { root: "work/ev" }));
+    assert.deepEqual(survey.shared_tail_suffix && [survey.shared_tail_suffix.suffix_hex, survey.shared_tail_suffix.bytes, survey.shared_tail_suffix.across_files, survey.shared_tail_suffix.basis],
+      [trailer.toString("hex"), 8, 2, "observation"]);
+  });
+});
+
 test("encrypted_survey lists a top-level dev directory it left unread, with the reason, and reads one deeper down", async () => {
   // It pruned every directory named proc, sys or dev wherever it stood, silently.
   await withCwd(async (cwd) => {

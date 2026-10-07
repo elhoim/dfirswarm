@@ -210,7 +210,7 @@ test("ransom_note_scan prints no identifier, wallet, onion address, URL, address
       ethereum: 1,
       monero: 1,
       tox: 1,
-      labelled_identifier: 1,
+      identifier_candidate: 1,
     });
     assert.match(note.parser, /^ransom_note_scan\//);
     assert.equal(scan.secret_values.requested, false);
@@ -232,7 +232,7 @@ test("ransom_note_scan says a project readme is a name match and a note with not
     assert.equal(real.length, 2);
     for (const n of real) {
       assert.equal(n.class, "content_resembles_note");
-      assert.ok(n.class_basis.includes("onion") && n.class_basis.includes("wallet") && n.class_basis.includes("labelled_identifier"), n.class_basis.join());
+      assert.ok(n.class_basis.includes("onion") && n.class_basis.includes("wallet") && n.class_basis.includes("identifier_candidate"), n.class_basis.join());
     }
     assert.deepEqual(scan.candidates_by_class, { content_resembles_note: 2, filename_only: 1 });
     // Two copies of one note are one content, said by count, and its digest is the whole file's.
@@ -320,7 +320,7 @@ test("ransom_note_scan reads a UTF-16 note with or without a byte-order mark, an
       "readme_le_plain.txt": ["UTF-16LE", "NUL byte pattern", 0],
     });
     const rows = (await readFile(join(outDir, "ransom-note-values.jsonl"), "utf8")).trimEnd().split("\n").map((l) => JSON.parse(l) as { kind: string; file: string; offset: number; encoding: string; value: string });
-    const ids = rows.filter((r) => r.kind === "labelled_identifier");
+    const ids = rows.filter((r) => r.kind === "identifier_candidate");
     assert.equal(ids.length, 4);
     for (const r of ids) {
       assert.equal(r.value, VICTIM_ID);

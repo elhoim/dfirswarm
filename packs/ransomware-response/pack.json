@@ -19,8 +19,8 @@
     "sha256": {
       "LICENCE": "5b94f18424dbef1e77eda33a465e946c2c8eb715fa5236afe2c6ec6763af80d3",
       "README.md": "2d5733aff874a3877e0097ed180d806ab2697c9dd66ba7faf1bb4726c37fc551",
-      "tools/ransom_note_scan/manifest.json": "a593b041746eaec74236516d2c7653837799cb73ec9822878c08e5f38705a135",
-      "tools/ransom_note_scan/run.py": "fe9f8ebacabb156e395b128e19a0e33cfb5fa07145dad3a0e0422125d4959d20",
+      "tools/ransom_note_scan/manifest.json": "f3ffcccad545a95b38da28df5ffeb45b7454165573f80e17884b845dfbee926b",
+      "tools/ransom_note_scan/run.py": "aab2fdf783658b7f9a8591c94535d5935efc8fd2bc12bf9b6544158943a059d2",
       "tools/encrypted_survey/manifest.json": "38e9a2e9488c4a1b1e6f5b5613daf60a0f518dce6ed7d773c0b68b27a8dd58f9",
       "tools/encrypted_survey/run.py": "a8ef1d9ced45b74776fec2ade8d5a37505ec91240d8425a3a15b5aac08ce19f7",
       "goals/ransomware-case.md": "ba768dac4d662c50cc9409feb9555a06176ce79d0a600f937911f46e5ebbe899",
