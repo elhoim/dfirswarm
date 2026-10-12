@@ -25,15 +25,195 @@ It is also the wrong one. A Windows pack's method runs to tens of thousands of
 tokens. Pasting it into every agent spends the context window on material most
 of them never need, and spends it again on every turn for the whole run.
 
-So a pack's skills are small files, and an agent fetches one when it needs it:
+So a pack's skills are small files, and an agent loads one when it needs it:
 
-- The index is small and goes in front of the agent once: skill ids, each with a
-  title and one line saying when to reach for it.
-- A body arrives only when an agent calls `skill("<id>")`.
-- A body may name other skills. The agent fetches those the same way, so one
-  skill builds on another without either repeating it.
-- Every fetch is an event on the trace. Which method a swarm consulted, and
-  when, becomes part of the record the report can cite.
+- The index is small and sits in every agent's system prompt, in a section the
+  kickoff renders from the loaded packs' `skills/INDEX.md` (`scripts/seat-prompt.ts`)
+  into `.pi/APPEND_SYSTEM.md`, which Pi appends to its own prompt sections:
+  one line per skill, its id, a title and one line saying when to reach for it.
+  Pi keeps those sections across a compaction, and for the run a hand-off starts,
+  so the index is still there when the context is not. (The prompt the extension
+  forces in `before_agent_start` lasts only for the run a user prompt starts,
+  so it is not what carries the index; the extension adds the section to a
+  prompt that lacks it, and says so on the trace.) Its budget, in estimated
+  tokens (bytes / 4.245): an entry at most 40, a pack's index at most 1,000, the
+  whole run's index at most 2,500. Above the pack or the run budget the section
+  shows each pack's router only (see "Routers" below); a pack that names no
+  router is shown whole, and the trace says so. The prompt's `worker-system.md`
+  carries the protocol: look in the index before working an artefact class,
+  load the matching note, say in one line what rules you will apply, hold at
+  most three at once, `skill_done` when the topic is finished, and load again
+  after a compaction (or a release) what is still needed.
+- A body arrives only when an agent calls `skill("<id>")`, as plain Markdown:
+  the front matter is left off and there is no JSON around it. The id is as the
+  index lists it (`area/topic`), or `pack:id` (`pack-name:area/topic`)
+  when more than one pack carries the same id; the index then lists it as
+  `pack:id`, and a bare id that more than one pack carries is served by the first
+  pack of the run and says which others have it. A body the agent already holds
+  is not sent again ("already in your context, loaded at turn N"). The seat's
+  ledger of what it holds is read off the session itself (`buildContextEntries()`),
+  at a compaction and when a process starts on a session that already has some, so
+  it is exact: a compaction keeps the newest part of the history (`keepRecentTokens`)
+  and the bodies in it stay held, the others are taken out, and the next call
+  delivers them again (the row says `reload_after_compaction`). The hand-off header
+  lists the bodies the compaction took out. A message's tool calls run at the same
+  time in Pi; the two tools take turns, in the order the message lists them, so
+  a second `skill(id)` of the same message is answered "already in your context".
+  `skill()` with no id lists every skill of every pack unless the kickoff's file put
+  the whole index in the prompt, in which case it points there.
+- A body may name other skills under `needs`. The result lists them with what
+  each costs in tokens, and loads none: the agent loads the ones the case needs.
+- `skill_done(id, note)` says the agent is finished with a body: the event is on
+  the trace, and the body is marked releasable (a seat that holds three bodies
+  it has not finished is reminded to finish one before it loads a fourth). What
+  releasing does is the next bullet.
+- A body the agent has finished with leaves its context, and a one-line stub
+  stays: `<id> released (N tokens). Re-load with skill('<id>').` The harness does
+  it with a `context_edit` draft that the swarm extension returns from Pi's
+  `turn_end` (Pi 0.87.1, `dist/core/agent-session.js`: the drafts of a turn
+  boundary are appended to the session before the next request is built from
+  its projection), so the very next model call is sent the stub. The session
+  keeps the raw tool result and the edit beside it, as an append-only line: what
+  custody hashes, what the replay and cost readers parse and what the console
+  shows are the entries they always saw; only what the model is sent changes.
+  `skill(id)` after a release delivers the body again, the trace row says
+  `reload_after_release`, and `skill_done` on a released note says that it was.
+  `--skill-release compaction|auto|off` (`SWARM_SKILL_RELEASE` in the seat) says
+  when, and **`compaction` is the default**: a mid-run release does not pay back
+  its cache write before a context is cut (the cost is below), and the summary is
+  written from ids and sizes in this mode too, which is the part that is a clear
+  gain. `auto` is the experiment arm until a run has measured what a mid-run
+  release buys in attention. An unknown value runs as `compaction`, and the policy
+  row says so.
+
+  | Mode | What leaves, and when |
+  | --- | --- |
+  | `compaction` (default) | a body marked done leaves in the turn the seat's `self_compact` came back, just before the compaction rewrites the prefix anyway, on every model |
+  | `auto` | that, and also at the next turn boundary after `skill_done` on a model of class **open**, while no signed thinking block comes after the body |
+  | `off` | nothing, and the summary input is not shaped (the behaviour before the unloader) |
+
+  The class is read from Pi's catalogue entry for the seat's model (`api`,
+  `reasoning`), never from its name or the thinking level (`releaseClassOf`):
+
+  | Class | The entry | `auto` releases at a boundary |
+  | --- | --- | --- |
+  | **open** | `api` on the allow-list (`openai-responses`, `openai-codex-responses`, `azure-openai-responses`), or `reasoning: false` | yes |
+  | **signed-thinking** | `reasoning: true` on `anthropic-messages` or `bedrock-converse-stream` (Fable 5.1, Opus 5.5, Sonnet 5 and every other reasoning Claude entry there) | no |
+  | **unproven** | `reasoning: true` on any other api: OpenRouter's and the radius gateway's Claude entries (`openai-completions`, `pi-messages`), Gemini, a local reasoning model | no |
+  | **unknown** | the session names no model | no |
+
+  An allow-list, because the question is whether anything that comes after the
+  edited result is bound to it, and that has been looked at for one family only.
+  What was verified, offline, through Pi's real request builders stopped at
+  `onPayload` (`tests/skill-unload.test.ts`; the same on Anthropic with an API key
+  and with OAuth, Bedrock, OpenRouter, OpenAI Responses and Codex): an edit changes
+  the edited result alone, and every reasoning item and signed thinking block is
+  sent unchanged, in place, with the cache marker where it was. What the service
+  does with it is another matter. For Anthropic's managed-effort models (Fable
+  5.1, Opus 5, Opus 5.5) Pi tells the service to drop any thinking block whose
+  prefix no longer matches (`anthropic-messages.js`, `block_binding.prefix_mismatch_behavior:
+  "drop_block"`, beta `thinking-binding-controls`), and records the drops it is
+  told of as `thinking_dropped` diagnostics: so an edit before a thinking block
+  plausibly makes the service drop it, silently, and Anthropic's guide says the
+  same of client-side edits of earlier turns on Fable 5.1, Opus 5.5 and Sonnet
+  5.5. On other Claude thinking models a mismatch may be an error (Pi's own comment:
+  "instead of surfacing as persistent 400 responses"). Not verified against a real
+  Claude session; so those seats release at a compaction, where the history is
+  replaced anyway. The harness reads the answer off the first reply after a
+  release or a compaction (`skill_release_effect`, in the bullet on the trace below). For OpenAI and Codex,
+  nothing documents a binding of reasoning items to an earlier tool output, and
+  nobody has checked the Codex rate-limit accounting of a re-sent suffix.
+
+  What is released, and what is not:
+
+  - Only a body the agent marked done. A body it has not finished with is never
+    touched, however many it holds: the notes it is working from stay. (The harness
+    reminds at a fourth, it does not take one away.)
+  - Not a body the model has not had a turn with: one loaded and marked done in the
+    same assistant message waits for the next boundary.
+  - Not a body with a signed thinking block after it in the context, whatever model
+    or thinking level the seat has now. A signed block is sent back whatever the
+    current level is, and for the model that wrote it: a seat switched from a Claude
+    model to an open one with `/model`, or the thinking level turned off and on, would
+    otherwise be edited behind blocks that stand after the edit. A thinking block that
+    is a Responses reasoning item is not signed over the history and does not count.
+  - All the finished bodies of a boundary go in one return, so the history is
+    rewritten once, not once per body.
+  - Never toggle: a body released once between two compactions is not released
+    again at a turn boundary when the agent loads it again and marks it done; it
+    stays until the compaction.
+  - "At a compaction" is the turn in which the seat's `self_compact` came back
+    successfully (the tool ends the run, and the compaction follows). A hand-off
+    that was refused ("nothing to compact yet"), or that failed and was given up
+    (the note is kept, the lock is released, the seat works on), is not that: such a
+    seat is released from only by the rules above, never by the leftover "hand-off".
+    Pi's own threshold and overflow compactions have no boundary before them and
+    release nothing (they still get the summary input below).
+  - A model change or a thinking-level change is picked up at the next boundary; the
+    trace says what the policy came to (`skill_release_policy`).
+
+  The cost, so nobody has to find it out on a bill. Editing an earlier tool
+  result makes a provider's prompt cache write everything after it again once
+  (about 1.25 times the input price; on Anthropic, with one trailing breakpoint
+  and a 20-block look-back, an edit deeper than that plausibly rewrites the whole
+  message part, not only what follows) and then saves the read price on the body
+  at every later request. Break-even is about 1.15 x S / (r x N) requests, with S the tokens
+  after the body, N the body and r the cached-read price as a share of the input
+  price: 11.5 x S/N at r = 0.1, 24 x S/N at 0.05 (Opus 5.5, GPT-6.1 Sol), 49 x S/N at
+  0.025 (Fable 5.1). A 500-token body with 5,000 tokens after it pays back after
+  roughly 115 requests at 0.1; with 30,000 after it, 690. A context epoch is tens to
+  low hundreds of requests, so on a cache-priced provider a mid-run release is a net
+  cost, not a saving; it is bought for the model's attention, which nobody has
+  measured. The waste it is aimed at is large (in 67 recorded runs, 71 % of 82
+  fetched bodies were never named or used again; 114 of the 120 fetches a
+  compaction followed were summarised away, and none of the 120 was loaded again).
+  The `skill_unload` row carries `suffix_tokens` (an estimate of what followed that
+  body, the reasoning items' encrypted content included) and `batch_suffix_tokens`
+  (the largest suffix of the boundary: the cache writes once from the earliest
+  edit, so a D8 run takes that number once per boundary, not the rows' sum).
+  After an edit Pi estimates the whole context at characters over four until the
+  next reply (`compaction.js` `estimateProjectedContextTokens`); on 10,853 recorded
+  replies that estimate is up to 17 % above what the provider counted (7 to 12 % at
+  p95), enough to push a seat 10 % under its compact line over it and lock it. The
+  `context` rows are written at the end of a turn from the reply's count and stay
+  the provider's; the harness's levels and lock now keep the last count the provider
+  gave until the next reply, and do not move on that estimate.
+- A compaction is written from ids and sizes. Pi cuts each tool result to 2,000
+  characters when it serialises the history for the summary, so a note was
+  summarised from its opening lines. The summary call is now given every skill
+  body as one line that names the note and its size (a released one is already a
+  stub), and a `<skills-read>` block: the notes read, their sizes, which the agent
+  marked done, and which were not (probably still needed). The summary prompt
+  asks for those under Critical Context. The hand-off header carries the same
+  account in one place, each note named once and without its text: what the
+  compaction took out, what was released earlier, what stayed in the newest part of
+  the history, each with its size and whether the seat marked it done, and which
+  notes are probably still needed (a note read in the summarised part and marked done
+  in the kept tail is done). The session keeps the whole results; only the summary's
+  input is shaped. `--skill-release off` leaves it as Pi serialises it, and the
+  header as it was. Pi's own summariser, which takes over when ours fails twice, still
+  serialises what Pi gives it: the stubs already in the session help there, the
+  shaping does not.
+- Every load is an event on the trace, with the sha256 of the file as the pack
+  shipped it (the value `pack.json`'s checksums carry) and its token count. Which
+  method a swarm consulted, which version of it, and when, becomes part of the
+  record the report can cite. Every release is an event too (`skill_unload`: the
+  note, its sha256 and tokens, the tool call whose result was replaced, the
+  reason, the turn; a later `ok:false` row naming the same call takes it back
+  when Pi did not commit the edit), and so is the policy a seat ran under
+  (`skill_release_policy`) and, for the first Anthropic reply after a release or a
+  compaction, how many thinking blocks the service said it dropped
+  (`skill_release_effect`: Pi already records that on the message). One Claude run
+  with the `auto` arm answers the question the Claude rule rests on.
+  `scripts/swarm.sh context <id>` and the console's Packs tab
+  count, per agent, the bodies loaded and what they cost, how many a later row
+  names or uses (a proxy), how many a compaction took out of the context, how many
+  were loaded again, how many the harness released and the tokens that took out,
+  and how many of those the agent loaded again (the wasted-release rate).
+- The kickoff passes Pi `--no-skills`, which keeps Pi's skill directories
+  (`~/.pi/agent/skills`, `~/.agents/skills`, a project's `.pi/skills`, a `skills`
+  setting) out of an agent's prompt. It does not keep out everything an operator
+  can add; `docs/usage.md` says what still enters.
 
 A skill is written for an agent in the middle of a case: what to look at, in
 what order, what the answer looks like, what would disprove it, which tool to
@@ -44,21 +224,46 @@ use. It does not explain what a registry is.
 Front matter, then a short imperative body.
 
     ---
-    id: windows/execution/prefetch
+    id: execution/prefetch
     title: Prefetch, and what it proves
     when: An executable's run count, its first and last run, or the files it touched.
-    needs: [windows/execution/overview]
+    needs: [execution/overview]
     tools: [prefetch_mam, mam_scan]
     requires_host: []
     ---
 
-`needs` names skills this one assumes. `tools` names tools that should already
-be loaded. `requires_host` names binaries the body's commands call. Install
-validates all three against the pack and warns about anything it does not carry:
-a warning rather than a refusal, because a Windows skill is expected to call the
-base pack's `icat_extract` and the set is resolved across the dependency chain
-at kickoff. A reference that no pack in the resolved set carries is a bug, and
-`tests/pack-tools.test.sh` fails the build on one.
+The `id` is the path under the pack's `skills/` without `.md`, as the index lists
+it; it carries no pack name (`pack:id` is how a caller names one pack's copy).
+
+`needs` names skills this one assumes. `tools` lists the tools the body names,
+and `requires_host` the host programs it names (the binaries its commands call):
+a name the body uses is in the list, and a name in the list is in the body.
+`mentions` lists names the body discusses and cannot depend on, such as a tool
+that exists only when another pack is loaded; it is in neither of the other two
+lists (section 8, "Links"). Install validates `needs`, `tools` and `requires_host`
+against the pack and warns about anything it does not carry: a warning rather
+than a refusal, because a Windows skill is expected to call the base pack's
+`icat_extract` and the set is resolved across the dependency chain at kickoff.
+A reference that no pack in the resolved set carries is a bug, and
+`tests/pack-tools.test.sh` fails the build on one; `tests/pack-links.test.sh`
+holds the lists against the body, and `mentions` too.
+
+### Routers
+
+A pack may name one skill as its router, the note that says which of the pack's
+other notes answers which question. It is declared in the skill's own front
+matter, optional and at most one a pack:
+
+    router: true
+
+`pack.sh seal` refuses a value that is not `true` or `false`, and a second
+router. When there is one, the generated `skills/INDEX.md` carries a line
+``Router: `<id>` `` above the entries; a pack with no router has no such line and
+its index is byte for byte what it was. The harness reads only that line: a run
+whose index is over budget shows the router's own entry for each pack in the
+prompt, and the router names the notes under it. This is the mechanism; which
+packs have routers, and how long a router may be, are the pack standard's and
+the pack lint's to say.
 
 ### Tool help stays out of the context window
 
@@ -116,6 +321,9 @@ directory named for the pack id is refused.
           "path": "vendor/python-evtx" }
       ],
       "requires": { "host": "requires/host.json", "python": "requires/python.txt" },
+      "unreferenced_ok": [
+        { "name": "olefile", "why": "imported by a tool of the pack; no skill runs it" }
+      ],
       "secrets": [
         { "name": "VT_API_KEY", "title": "VirusTotal API key", "required": false,
           "why": "Reputation lookups on hashes the case finds.",
@@ -125,7 +333,9 @@ directory named for the pack id is refused.
     }
 
 `depends` is resolved at install. A pack whose dependency is missing is refused,
-named, with the version it wanted.
+named, with the version it wanted. `unreferenced_ok` is optional: a program or
+Python package the pack requires and no skill names, with the reason (section 8,
+"Requires and images").
 
 ### Versions
 
@@ -302,7 +512,7 @@ At kickoff:
 The last one is a run with no pack at all, exactly as before.
 
 `--pack` seeds the pack's tools into the run the way `--tools-from` does, puts
-the skill index in front of every agent, and lets `skill` fetch any body.
+the skill index into every agent's system prompt (`.pi/APPEND_SYSTEM.md`), and lets `skill` load any body.
 Under `--isolation microvm` it also picks the job images (the agents' own
 image with `--brains-with-packs`) and adds the pack's host requirements to the
 toolbox check and, where the agents boot the packs' image, to the VM's probe (§5). The run record names every pack,
@@ -326,10 +536,10 @@ checksummed, and installs and verifies in the test suite.
 | `mobile-forensics` | 7 | 3 | 1 | iOS and Android extractions, app databases, protobuf |
 | `memory-forensics` | 9 | 3 | 1 | containers, what works with no framework, injection, credentials |
 | `network-forensics` | 8 | 6 | 1 | captures, sessions, DNS and TLS metadata, beacons, exfiltration |
-| `reverse-engineering` | 7 | 4 | 1 | static triage of a binary or a document, under quarantine |
+| `reverse-engineering` | 12 | 4 | 1 | static triage of a binary or a document, under quarantine |
 | `encrypted-containers` | 5 | 3 | 1 | which scheme, which protectors, and where the key already is |
-| `cloud-forensics` | 6 | 3 | 1 | Microsoft 365, Entra, AWS, Workspace, and the tokens behind them |
-| `ransomware-response` | 7 | 2 | 1 | the order the case has to be worked in |
+| `cloud-forensics` | 9 | 3 | 1 | Microsoft 365, Entra, AWS, Workspace, and the tokens behind them |
+| `ransomware-response` | 7 | 2 | 1 | scoping, recovery impairment, family candidates and recovery validation, each with its limits |
 | `triage-collection` | 5 | 2 | 1 | a collector's output, which is how most cases arrive |
 
     scripts/pack.sh install packs/computer-forensics-base
@@ -404,3 +614,196 @@ temp files to its working directory by default is given a path under the
 output (Plaso's and Zircolite's `--logfile`) or run there (Hayabusa, Zeek, the
 disk-timeline recipe's Plaso steps), and its test runs it from a read-only
 directory with a stand-in that writes where the real program does.
+
+---
+
+## 8. Writing a pack that holds up
+
+A pack is read by an agent in the middle of a case, with nothing to go on but
+what a skill says and what a tool prints. What follows is what every skill,
+tool and requirements file in a pack is held to, so that a result built on a
+pack's word is one a reader can check. `tests/pack-tools.test.sh`,
+`tests/pack-links.test.sh`, `tests/packs.test.sh` and `tests/recipe.test.sh`
+hold the parts a test can hold; the rest is for the author.
+
+### Voice and method in skills
+
+1. **Observation, inference and conclusion stay apart.** A skill says what an
+   artefact shows, what it does not show, and what else has to corroborate it.
+   Every skill about an artefact has a short "Does not show" part.
+2. **A system artefact does not name a person, an intent, a copy, a tampering
+   or an exfiltration by itself.** Attribution, intent and "the logs were
+   cleared" are conclusions, not readings. A skill says which corroboration
+   each of them needs.
+3. **A negative is bounded.** It says what was searched, in which source, over
+   which period. The absence of an artefact is not the absence of the event.
+   A skill never writes "cannot be recovered" after one failed route: it names
+   the routes tried.
+4. **Time says which clock, which zone, which epoch and what resolution.** A
+   current zone offset is not applied to a past date without checking the
+   zone's daylight-saving history. Grouping by clock change or by boot does
+   not remove drift.
+5. **A version fact is dated** ("as of March 2026") and names the system or
+   tool versions it holds for. A version fact the author cannot source stays
+   out of the skill.
+6. **Examination wording is the defender's.** For credential, malware and
+   encryption topics a skill says how to identify, preserve and use what the
+   case lawfully supplies, and on what basis. It gives no attack or evasion
+   walkthrough, and no recovery by guessing beyond naming the authorised
+   route.
+7. **Density.** A skill is for an agent in the middle of a case: decision rules
+   (if X, then Y), what to record, what would disprove the reading. No padding,
+   and no list of a tool's options: it names the command that prints them
+   (see "Tool help stays out of the context window"). The front matter keeps
+   the format in "Skill file format".
+
+### Secrets and sensitive output
+
+1. **The hash of a secret is never written**, in a post, the ledger, a report
+   or a tool's output: an unsalted hash of a weak secret is reversed in
+   seconds. Nor are characters of a password, a PIN or any short secret. Of a
+   random secret of 16 characters or more, at most the first four and the last
+   four. A "shape" of a secret, such as the first two digits of each group of a
+   recovery key, counts as characters of it.
+2. **A tool that can reach secret material reports presence, kind, location,
+   length and offsets, not values, fragments or digests.** That covers
+   credential stores, keys, tokens, cookies, password verifiers, recovery keys,
+   browser stores, property lists that hold a verifier, command lines and
+   environments that may hold a secret, the bytes a YARA or `strings` match
+   prints, and decrypted content. Where a value has to be produced, the skill
+   says the job runs with `secret_output: true` (a `job_run` parameter; see
+   `docs/protocol.md`), and the tool writes the value only to a file output,
+   never to standard output and never into a field an agent might paste.
+3. **A secret never goes on a command line**, because the argument list is
+   recorded in the trace. A bundled tool takes a reference to a file, and that
+   file is a sealed secret output. Where a skill sends the agent to a program
+   that can take its passphrase only on the command line, the skill says so and
+   tells the agent to say it in the report, so that the trace can be redacted
+   before it is shared.
+4. **A skill that names such a tool says so**, in a "Sensitive output" line.
+
+**The pattern, concretely.** `recovery_key_scan` (encrypted-containers) is the
+reference implementation. A tool that can reach secret material copies its
+`SecretValues` class as it copies `LosslessPage` (standalone tools do not
+import each other), and holds to this:
+
+- *The answer is a locator.* Per finding: a `finding_id` (a sequence number,
+  derived from nothing), the source `file` and `offset`, the `kind`, the
+  `length` and a structure result. No value, no character of one, no masked
+  "shape", no hash, digest or fingerprint, however short or salted. "The same
+  value as F000001" (`duplicate_of`) is said by comparing in memory, not by a
+  digest.
+- *A value is produced only on an explicit flag, in a job, in a file.* The flag
+  is `write_values: true` (default false). The tool honours it only when it
+  runs as a job (`JOB_ID` and `OUT` are set) and writes only under `$OUT`:
+  JSON Lines, mode 0600, each row carrying the answer's `finding_id`, file and
+  offset beside the `value`. The file is created exclusively at the start of
+  the run, before anything is scanned: a file or link already at that name is
+  refused by name, and with nothing found it stays an empty file and the answer
+  says `written: 0`. Outside a job the request is refused, with exit 1 and
+  nothing written, because a file in `work/` is not a sealed output.
+- *A name shaped like the secret is withheld.* A path component that matches the
+  secret's own pattern (a file named after the key) is replaced in every printed
+  path, in the files the answer names and in the digest that names a paging file;
+  only the values file keeps the real path.
+- *The answer says where the values are, not what they are:*
+  `secret_values.values_file` and `contains_secret_values: true`. The skill
+  that names the tool has its "Sensitive output" line say the job runs with
+  `secret_output: true`, and that the ledger cites the finding's file and
+  offset, never the value.
+- *The manifest says SENSITIVE* and names the flag. The harness reads no
+  manifest-level flag yet, and a tool cannot see whether its job was run with
+  `secret_output`, so what keeps a value out of an ordinary run is the refusal
+  above and the skill's line; a flag the harness enforces is a follow-up.
+- *The tests assert absence:* no group of the value, no run of its digits, no
+  64-hex string and no masked shape in the answer or in any file it names, with
+  the value planted in every encoding the tool reads.
+
+### The tool contract
+
+Every tool a pack bundles holds to this.
+
+1. **Fail loudly.** A tool never turns an error, a skipped block, a malformed
+   line, a failed export or an unsupported version into a clean or empty
+   result. It reports counts (parsed, empty, unsupported, failed, not attempted)
+   and names the first failures. Exit code 0 means the engine ran, not that the
+   examination is complete: completeness is judged from artefact coverage.
+   Every answer also carries `status` (`complete`, `partial` or `failed`) and
+   `status_basis` (one sentence on what the status rests on), the pair a recipe's
+   coverage.json carries; a tool's own booleans (`all_lines_parsed`,
+   `all_files_read`) stay beside them.
+2. **Bound resources, and say so.** Stream. Cap what expands (archives,
+   containers, compressed streams, recursion, regular-expression time). A
+   result that is cut says `truncated: true`, the cap, and where the whole is
+   kept: nothing is cut without the whole being kept. A tool never holds a
+   whole image or a whole output in memory.
+3. **Detect the format version**, and refuse or flag the ones the tool does not
+   handle. A layout is not guessed from a sample.
+4. **Every record carries its provenance:** the source object (a path or an
+   id), the offset or record number, and the parser's name and version. A
+   timestamp carries the raw value beside the decoded one, says its epoch and
+   zone, is written as ISO 8601 in UTC and keeps its fractions of a second.
+5. **Evidence is hostile input.** A tool executes none of it, follows no path
+   out of the directory it was given, writes only to its output directory,
+   uses no network and bounds decompression. A program a tool runs stays in
+   the tool's own process group (never `start_new_session`): the harness ends
+   a tool by killing its group, and a program outside it goes on writing after
+   the tool is gone.
+6. **The manifest's description says exactly what is and is not measured.** A
+   survey is described as a survey and a heuristic as a heuristic. A candidate
+   is named a candidate; a score is not a verdict.
+7. **Each fix has a regression test**, with a fixture built independently of
+   the parser, from the format's specification or a known-good sample, never
+   from the parser's own output. A test that shares the parser's wrong
+   assumption proves nothing.
+
+### Requires and images
+
+1. **Every dependency is pinned.** A pip requirement with `==`; a host binary
+   with its version; a download with its sha256. The licence label is read from
+   the package's own metadata, not remembered. Each entry says whether it is
+   redistributable, and whether it is available for arm64, amd64 or both.
+2. **A program a skill tells the agent to run is in the pack's `requires`, or
+   in a dependency's.** A program or Python package in `requires` that no skill
+   names needs either a skill that names it, or a reason in `pack.json`:
+
+       "unreferenced_ok": [
+         { "name": "somelib", "why": "imported by a tool of the pack; no skill runs it" }
+       ]
+
+   The field is optional and written by hand; `name` is one of the pack's own
+   `requires/host.json` binaries or `requires/python.txt` packages, and `why`
+   says why no skill names it. Sealing keeps it, and, being part of the
+   manifest, changing it raises the pack's version like any other change.
+3. **A new program goes in through `images/recipe.py`**, and
+   `tests/recipe.test.sh` passes. Rebuilding an image is not part of a change
+   to a pack: images are rebuilt once the packs' changes have settled.
+
+### Links
+
+Skills, tools and programs refer to one another by name, and the names have to
+agree in both directions. `tests/pack-links.test.sh` holds these rules; its
+header says how it matches a name and where that is wrong.
+
+1. **What a skill names is what its front matter lists, and it resolves.**
+   Every tool named in a skill's body is in its `tools:`, and every program in
+   its `requires_host:`. Each resolves in the pack's dependency closure (the
+   pack, its `depends` and theirs): a tool of a pack outside it is not named,
+   and an entry of `requires_host:` is a program some pack of the closure
+   requires. A front matter entry the body never names is wrong the other way
+   round.
+2. **A name the skill discusses and cannot depend on is a `mentions:` entry.**
+   A base skill that says what a tool of the Windows pack reads, where that
+   tool exists only when the Windows pack is loaded, lists the tool under
+   `mentions:` and in no other list. Each entry is a tool, a program or a Python
+   package some pack of the repository carries or requires, and none is also in
+   `tools:` or `requires_host:`. A mention is no use: it is exempt from the rules
+   above, and it satisfies none of the next.
+3. **Everything a pack ships is reached.** Every bundled tool is named by at
+   least one skill of its pack, or of a pack that depends on it. Every skill
+   that depends on a capability names the tool that provides it. A capability
+   a skill needs and no tool provides is either added as a tool or taken out
+   of the skill.
+4. **The pack that owns a tool ships it.** Another pack names the tool and
+   lists the owner in `depends`; it does not carry a copy (see "Two rules the
+   set holds to").
