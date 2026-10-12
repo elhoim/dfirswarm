@@ -26,16 +26,6 @@ linux-forensics unused skills/triage/system-profile.md fls
 linux-forensics unused skills/triage/system-profile.md icat
 linux-forensics unused skills/triage/system-profile.md target-query
 linux-forensics unused skills/triage/system-profile.md timestamp_decode
-network-forensics unused skills/beacons/periodicity.md pcap_summary
-network-forensics unused skills/capture/carve-from-images.md bulk_extractor
-network-forensics unused skills/correlate/host.md beacon_score
-network-forensics unused skills/correlate/host.md timestamp_decode
-network-forensics unused skills/logs/web-proxy-firewall.md timestamp_decode
-network-forensics unused skills/metadata/dns-tls.md pcap_summary
-network-forensics unused skills/metadata/dns-tls.md zeek
-network-forensics unused skills/metadata/dns-tls.md zeek_run
-network-forensics unused skills/sessions/reconstruct.md pcap_summary
-network-forensics unused skills/sessions/reconstruct.md zeek_run
 triage-collection unlisted skills/gaps/what-is-missing.md fsstat
 triage-collection unlisted skills/identify/collector.md CyLR
 triage-collection unused skills/identify/collector.md file_type
