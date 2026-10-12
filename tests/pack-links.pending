@@ -7,8 +7,3 @@
 # and makes PACK_LINKS_STRICT=1 the default. PACK_LINKS_VERBOSE=1 prints each
 # finding with its reason.
 encrypted-containers unlisted skills/archives/protected.md 7z
-triage-collection unlisted skills/gaps/what-is-missing.md fsstat
-triage-collection unlisted skills/identify/collector.md CyLR
-triage-collection unused skills/identify/collector.md file_type
-triage-collection unused skills/plan/what-to-collect.md uac
-triage-collection unused skills/plan/what-to-collect.md velociraptor
