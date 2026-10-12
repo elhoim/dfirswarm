@@ -1,0 +1,3 @@
+### Fixed: the mobile pack's memory tests no longer depend on the machine that runs them
+
+The `protobuf_peek` memory tests compared the child's peak resident memory with a fixed number, which an interpreter, an allocator or a loaded runner can move by hundreds of megabytes (one run measured 376 MB for a case that takes 90 MB locally). They now compare with a run of the same wrapper on a few bytes, and assert on the peak of what Python itself allocated (`tracemalloc`), which does not depend on the machine. The 32-level case also runs against a copy of the tool that keeps a copy of every level's payload, and the test fails on it, so the bound still proves what it was written to prove.
