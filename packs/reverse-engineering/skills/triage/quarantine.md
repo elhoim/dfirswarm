@@ -2,7 +2,7 @@
 id: triage/quarantine
 title: Handling a recovered sample for static examination
 when: Before you parse anything an examined system produced: a binary, script, document or archive.
-needs: [evidence/verify]
+needs: []
 tools: [file_type, entropy_map, pe_info]
 requires_host: []
 ---
@@ -11,7 +11,7 @@ Use when you are about to look inside a recovered sample. Not for judging whethe
 
 **Isolation is yours to keep, not the mount's.** Treat every sample and derived object as hostile data. A no-exec mount reduces accidental execution of a binary; it does not stop an interpreter from running a script or an application from evaluating a macro. Never run evidence, never load a recovered script, macro, module or project as code, and never build source the evidence supplied. Cite the isolation this run recorded (VM, mounts, whether the network is open); do not assume it.
 
-1. Source first: where the object came from, under what authority; for an extracted object its parent and member path or byte range. Verify the inputs, then record SHA-256 and size before any transformation.
+1. Source first: where the object came from, under what authority; for an extracted object its parent and member path or byte range. Verify the inputs (read `evidence/verify` for how), then record SHA-256 and size before any transformation.
 2. Identify from bytes with `file_type`. Extension disagreement, ambiguous signatures and parser disagreement are observations; none shows deliberate renaming.
 3. Measure entropy with `entropy_map` as a feature: record window, threshold and the profile file. High entropy fits compression, encryption, media and packing; no threshold proves any of them, or malice.
 4. Route by format and runtime, not extension: PE, ELF, Mach-O, documents, scripts, .NET, Go, Rust and packaged Python each need their own reading, and this pack has leaves only for `pe/structure`, `elf/structure` and `documents/macros` (`pe_info` reads Mach-O slices and lists their load commands in `commands`, but no leaf explains them). Say which routes you could not take.
