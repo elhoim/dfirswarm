@@ -1,0 +1,50 @@
+{
+  "name": "aes_schedule_scan",
+  "description": "Find AES-128 and AES-256 key schedules in a file or memory image, at every byte alignment, as the standard lays them out or with each 32-bit word's bytes reversed. A key goes to a private file in out_dir, never to the answer: it gives offset, size, byte order, the key's sha256. A hit is a lead. Not AES-192, decayed keys or the decryption layout (aes_inverse_scan). Windows: start, length.",
+  "use": {
+    "extensions": [
+      ".mem",
+      ".vmem",
+      ".lime",
+      ".dmp"
+    ]
+  },
+  "params": {
+    "path": {
+      "type": "string",
+      "description": "The file or memory image to scan (read only)",
+      "required": true
+    },
+    "out_dir": {
+      "type": "string",
+      "description": "Where the key files and the whole result go, inside the run directory and not under inputs/ (default work/quarantine/<agent>/aes_schedule_scan, which a handover package leaves in the sandbox; anywhere else, and a job's other outputs, travel with it unless the hit is a sensitive ledger entry citing key_file, or the job ran with secret_output)"
+    },
+    "start": {
+      "type": "integer",
+      "description": "First byte to test (default 0). A schedule is reported by where it starts, so successive windows never lose or double one"
+    },
+    "length": {
+      "type": "integer",
+      "description": "How many bytes to test from start (default: to the end of the file)"
+    },
+    "chunk_bytes": {
+      "type": "integer",
+      "description": "Read size in bytes (default 16 MiB)"
+    },
+    "budget_seconds": {
+      "type": "number",
+      "description": "Stop at a chunk boundary after this long (at most 110) and say complete=false with next_start; call again with start=next_start (default 90)"
+    }
+  },
+  "runtime": "node",
+  "entry": "run.mjs",
+  "timeout_seconds": 120,
+  "example": "{\"path\": \"inputs/memory.raw\"}",
+  "requires": [
+    "node"
+  ],
+  "by": "s3472f0",
+  "at": "2026-10-01T08:59:03.079Z",
+  "version": 1,
+  "sha256": "2740081aeabdce3eef26c23325786d769047fa827505947a19b1215f890574eb"
+}
