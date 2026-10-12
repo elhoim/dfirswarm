@@ -524,18 +524,18 @@ result.
 ## 7. The packs in this repository
 
 Twelve, all under the same AGPL-3.0-or-later as the harness, in `packs/`:
-116 skills, 70 tools and 14 goal templates. Every one of them is sealed,
+159 skills, 70 tools and 14 goal templates. Every one of them is sealed,
 checksummed, and installs and verifies in the test suite.
 
 | Pack | Skills | Tools | Goals | What it is for |
 | --- | --- | --- | --- | --- |
 | `computer-forensics-base` | 11 | 14 | — | the method true of any platform; everything else depends on it |
-| `windows-forensics` | 24 | 20 | 3 | ten artefact families, from `$MFT` to what anti-forensics leaves behind |
+| `windows-forensics` | 52 | 20 | 3 | ten artefact families, from `$MFT` to what anti-forensics leaves behind |
 | `linux-forensics` | 10 | 6 | 2 | auth logs, the journal, accounts, systemd and cron, ext4, containers |
 | `macos-forensics` | 8 | 4 | 1 | property lists, the unified log, FSEvents, KnowledgeC, APFS |
-| `mobile-forensics` | 7 | 3 | 1 | iOS and Android extractions, app databases, protobuf |
+| `mobile-forensics` | 10 | 3 | 1 | iOS and Android extractions, app databases, protobuf |
 | `memory-forensics` | 9 | 3 | 1 | containers, what works with no framework, injection, credentials |
-| `network-forensics` | 8 | 6 | 1 | captures, sessions, DNS and TLS metadata, beacons, exfiltration |
+| `network-forensics` | 12 | 6 | 1 | captures, sessions, DNS and TLS metadata, beacons, exfiltration |
 | `reverse-engineering` | 12 | 4 | 1 | static triage of a binary or a document, under quarantine |
 | `encrypted-containers` | 5 | 3 | 1 | which scheme, which protectors, and where the key already is |
 | `cloud-forensics` | 9 | 3 | 1 | Microsoft 365, Entra, AWS, Workspace, and the tokens behind them |
