@@ -1,7 +1,7 @@
 {
   "id": "reverse-engineering",
   "name": "Reverse Engineering Pack",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "description": "Static triage of a binary or a document under quarantine: what the file actually is, PE and ELF structure, entropy and packing, obfuscated strings, capability mapping, macros and embedded objects, and rules. Nothing from the evidence is ever executed.",
   "licence": "AGPL-3.0-or-later",
   "authors": [
@@ -45,7 +45,7 @@
       "skills/strings/decoding-and-similarity.md": "8eb3df8b3a24f349e6c4a2bfa0921b501ab0522db12bcdc824c1030c70c0df5d",
       "skills/strings/obfuscated.md": "69d7730629ba95f64099df0fa0ed8236b25ed17536a460ff95829ef26a13987d",
       "skills/capabilities/mapping.md": "c0697ec3f253464e521dc807b4ef0bbdabf280f4e695c779b749ca9607f7392b",
-      "skills/triage/quarantine.md": "7f118f4d6a09db588b9b6ca3a8273cae35e76f471362f30bcc424c1d076036d6",
+      "skills/triage/quarantine.md": "f60c3323618dd240a062f3aff057f996b9f460d604656016a50bf795f20cf494",
       "skills/rules/authoring.md": "69f5cc20f032ed367ef83cab58b64de51c135c217fc6aa9f4f224db71ceb2cb1",
       "skills/rules/yara.md": "8eadb83d84456b726ba99dff1c6e0d0547ace586aff7b47d4af58c8e2f16c3c9",
       "skills/documents/external-and-active-content.md": "c2a53dd3c1cec4299e1b698741b2c19282dc0f8713d470b84acaf012987fcf77",
