@@ -394,7 +394,14 @@ EOF
 pass "image_layout reads an mmls table in sectors and marks the meta row and the gap"
 
 printf 'not an image' > "$WORK/plain"
-echo "{\"image\":\"$WORK/plain\"}" | run_tool "$BASE/tools/image_layout" | "$PY" -c '
+# mmls and fsstat as they answer a file that is no image: exit 1, and fsstat says it
+# cannot determine the type. Stand-ins, so the answer does not depend on the host's Sleuth Kit.
+mkdir -p "$WORK/tsk-none"
+printf '#!/bin/sh\nexit 1\n' > "$WORK/tsk-none/mmls"
+printf '#!/bin/sh\necho "Cannot determine file system type" >&2\nexit 1\n' > "$WORK/tsk-none/fsstat"
+printf '#!/bin/sh\necho "IMAGE FILE INFORMATION"\n' > "$WORK/tsk-none/img_stat"      # a silent mmls failure counts as "no table" only when img_stat opens the image
+chmod +x "$WORK/tsk-none/mmls" "$WORK/tsk-none/fsstat" "$WORK/tsk-none/img_stat"
+(cd "$WORK" && echo "{\"image\":\"$WORK/plain\"}" | PATH="$WORK/tsk-none:$PATH" run_tool "$BASE/tools/image_layout") | "$PY" -c '
 import json, sys
 d = json.load(sys.stdin)
 assert d["partition_table"] is False, d
@@ -510,7 +517,7 @@ with zipfile.ZipFile(sys.argv[1], "w") as z:
 EOF
 docp() { (cd "$OUT/run" && printf '{"path":"work/macro.docm","extract_to":"%s"}' "$1" | "$PY" "$ROOT/packs/reverse-engineering/tools/doc_probe/run.py"); }
 docp work/doc > "$OUT/doc.json" || fail "doc_probe did not extract into work/: $(cat "$OUT/doc.json")"
-[[ "$(jq -r '.parts[] | select(.carries_code) | .extracted_to' "$OUT/doc.json")" == work/doc/000001-word_vbaProject.bin && -s "$OUT/run/work/doc/000001-word_vbaProject.bin" ]] \
+[[ "$(jq -r '.parts[] | select(.name_matches_code_part) | .extracted_to' "$OUT/doc.json")" == work/doc/000001-word_vbaProject.bin && -s "$OUT/run/work/doc/000001-word_vbaProject.bin" ]] \
   || fail "doc_probe should extract the macro project under extract_to: $(cat "$OUT/doc.json")"
 mkdir -p "$OUT/run/work/doc2"; ln -s ../../inputs/planted-part "$OUT/run/work/doc2/000001-word_vbaProject.bin"
 docp work/doc2 > "$OUT/doc2.json" 2>&1 && fail "doc_probe wrote through a link in extract_to: $(cat "$OUT/doc2.json")"
