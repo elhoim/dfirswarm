@@ -37,6 +37,7 @@ import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext, SessionBeforeCompactEvent, SessionEntry } from "@earendil-works/pi-coding-agent";
 import { convertToLlm, findCutPoint, serializeConversation, sessionEntryToContextMessages, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { SELF_COMPACT_PROMPT_LINE } from "./seat-prompt.ts";
 import {
   KEEP_RECENT_TOKENS,
   LEVEL_ORDER,
@@ -148,6 +149,24 @@ export type HandoffFacts = {
    * awaiting an interpretation. The note is prose; this is the record.
    */
   leads?: string;
+  /**
+   * The pack skills this seat had loaded before the compaction (extensions/
+   * skills.ts): a compaction summarises their bodies away, so the seat is told
+   * which to load again if it still needs them.
+   */
+  skills?: string;
+  /**
+   * The rules that change during a run and that only the forced prompt used to
+   * carry, so that the run a hand-off starts has them: the instruction that
+   * follows a cap that was hit, and the tools forged so far.
+   */
+  capHit?: string;
+  forged?: string;
+  /**
+   * The lines above order the seat to stop (the sentinel stands, or a cap-stop run's cap was hit), so the
+   * header's last paragraph must not tell it to work on until the definition of done is met.
+   */
+  stopping?: boolean;
 };
 
 export type SelfCompactDeps = {
@@ -177,6 +196,14 @@ export type SelfCompactDeps = {
   keepText?: (cwd: string, text: string) => Promise<KeptText>;
   /** The bounds, when the operator changed them (SWARM_COMPACT_SUMMARY_SEC, SWARM_COMPACT_TIMEOUT_SEC); the constants above otherwise. */
   bounds?: { summaryAttemptMs?: number; summaryMaxChars?: number; compactionMs?: number };
+  /**
+   * Shapes the conversation the summary call is given (extensions/skills.ts):
+   * every pack skill body in it becomes one line naming the note and its size,
+   * and `block` lists the notes the seat read, so the summary says what method
+   * is still needed without being written from the first 2,000 characters of a
+   * note. The session keeps the whole results. Absent when the run has no pack.
+   */
+  summaryInput?: (history: readonly unknown[], turnPrefix: readonly unknown[]) => { history: unknown[]; turnPrefix: unknown[]; block: string };
   /**
    * The run's pause, when it is paused (the stop policy): a compaction calls
    * the provider itself, so while it stands no summary attempt, retry or
@@ -222,6 +249,8 @@ export type SelfCompactHandle = {
   budgetFields(ctx: ExtensionContext): { context_ceiling: number; context_level: UsageLevel; context_locked: boolean; handoffs: number };
   /** True while a hand-off's compaction runs: Pi refuses every prompt until it ends. */
   compacting(): boolean;
+  /** True from the moment the seat saved its hand-off note until the compaction landed or failed: one is about to run, or is running. A failed one is not pending. */
+  handoffPending(): boolean;
 };
 
 /** A minimal view of the session entries the recovery reducer reads (a subset of Pi's SessionEntry). */
@@ -287,6 +316,32 @@ export function latestAssistantUsage(entries: EntryLike[]): UsageLike | undefine
     if (total > 0) return usage;
   }
   return undefined;
+}
+
+/**
+ * True when the branch holds a `context_edit` after the last assistant reply
+ * that carries a usable count: Pi then distrusts that count and estimates the
+ * whole projection at characters over four (compaction.js
+ * `estimateProjectedContextTokens`), which on 10,853 recorded replies is up to
+ * 17 % above what the provider counted (7 to 12 % at p95). The gauge is then an
+ * estimate that a skill release (or Pi's own overflow recovery) caused, and the
+ * levels and the lock must not be moved by it.
+ */
+export function editAfterLastUsage(entries: EntryLike[]): boolean {
+  let usageAt = -1;
+  let editAt = -1;
+  for (let i = entries.length - 1; i >= 0 && (usageAt < 0 || editAt < 0); i--) {
+    const entry = entries[i]!;
+    if (entry.type === "compaction") break;
+    if (editAt < 0 && entry.type === "context_edit") editAt = i;
+    if (usageAt < 0 && entry.type === "message" && entry.message?.role === "assistant") {
+      const stop = entry.message.stopReason;
+      const usage = entry.message.usage as UsageLike | undefined;
+      const total = usage ? usage.totalTokens || (usage.input ?? 0) + (usage.output ?? 0) + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0) : 0;
+      if (stop !== "aborted" && stop !== "error" && total > 0) usageAt = i;
+    }
+  }
+  return editAt > usageAt && usageAt >= 0;
 }
 
 /**
@@ -385,12 +440,20 @@ export function handoffHeader(agentId: string, cycle: number, facts: HandoffFact
     `Unread posts: ${unread}`,
     `Ledger: ${facts.ledgerTotal} entries, ${facts.ledgerMine} yours. Sentinel: ${sentinel}. Spend: ${spend}.`,
     ...(facts.leads ? [`The lead register now (your leads are yours: go on with them, or release them):\n${facts.leads}`] : []),
+    ...(facts.skills ? [facts.skills] : []),
+    ...(facts.capHit ? [facts.capHit] : []),
+    ...(facts.forged ? [facts.forged] : []),
   ];
   // On run 6 all four agents answered this message, a few tool calls later,
   // with a status update to "the user" and ended their turns; three sat idle
   // for ten minutes until the watchdog spoke. The message has to say what
   // it is not.
-  lines.push("This message is the harness, not a person: do not answer it with a status or a summary, and do not end your turn. Work on until SWARM.md's definition of done is met; when you are waiting on a peer, call wait and keep it open, because a turn that ends is not waiting and nothing prompts you again.");
+  // Not when the lines above order the seat to stop: "work on until done is met" would contradict "call done now".
+  lines.push(
+    facts.stopping
+      ? "This message is the harness, not a person: do not answer it with a status or a summary. The swarm is ending, as the lines above say: do what they say and start nothing new."
+      : "This message is the harness, not a person: do not answer it with a status or a summary, and do not end your turn. Work on until SWARM.md's definition of done is met; when you are waiting on a peer, call wait and keep it open, because a turn that ends is not waiting and nothing prompts you again.",
+  );
   lines.push(hadNote ? "Your note follows verbatim; continue from its NEXT ACTION and never restart work it marks as done:\n---" : "No note was saved before this compaction (it was Pi's own recovery, not a hand-off). Read the summary above, call inbox, then continue.");
   return lines.join("\n");
 }
@@ -575,6 +638,18 @@ export function registerSelfCompact(pi: ExtensionAPI, deps: SelfCompactDeps): Se
       usage = undefined;
     }
     const window = usage?.contextWindow ?? ctx.model?.contextWindow ?? 0;
+    // After an edit Pi's count is its estimate. Until the next reply the last count the provider gave stands.
+    let distrusted = false;
+    try {
+      distrusted = R.usage.tokens !== null && editAfterLastUsage(ctx.sessionManager.getBranch() as unknown as EntryLike[]);
+    } catch {
+      distrusted = false;
+    }
+    if (distrusted) {
+      R.usage = { ...R.usage, window };
+      R.level = R.thresholds ? levelFor(R.usage.tokens, R.thresholds) : "unknown";
+      return;
+    }
     const tokens = usage?.tokens ?? null;
     const ceiling = R.thresholds?.ceiling ?? window;
     const percent = tokens !== null && ceiling > 0 ? (tokens / ceiling) * 100 : null;
@@ -974,8 +1049,12 @@ export function registerSelfCompact(pi: ExtensionAPI, deps: SelfCompactDeps): Se
     const model = chosen.model;
     if (!model) throw new Error("no model available for the compaction summary");
     const { messagesToSummarize, turnPrefixMessages, previousSummary } = event.preparation;
-    const history = messagesToSummarize.length ? serializeConversation(convertToLlm(messagesToSummarize)) : "";
-    const prefix = turnPrefixMessages.length ? serializeConversation(convertToLlm(turnPrefixMessages)) : "";
+    // Method notes the seat read are named and sized in the input, not quoted: Pi would cut each to 2,000 characters.
+    const shaped = deps.summaryInput?.(messagesToSummarize, turnPrefixMessages);
+    const historyMessages = (shaped?.history ?? messagesToSummarize) as typeof messagesToSummarize;
+    const prefixMessages = (shaped?.turnPrefix ?? turnPrefixMessages) as typeof turnPrefixMessages;
+    const history = historyMessages.length ? serializeConversation(convertToLlm(historyMessages)) : "";
+    const prefix = prefixMessages.length ? serializeConversation(convertToLlm(prefixMessages)) : "";
     const maxTokens = Math.min(SUMMARY_MAX_TOKENS, model.maxTokens || SUMMARY_MAX_TOKENS);
     const budgetChars = Math.max(8_000, ((model.contextWindow || 128_000) - maxTokens - 4_000) * 4 - prompt.text.length - 2_000);
     let truncated = false;
@@ -989,6 +1068,7 @@ export function registerSelfCompact(pi: ExtensionAPI, deps: SelfCompactDeps): Se
       "Summarize the supplied historical data. Do not continue the task, simulate tools, or claim actions without tool-result evidence. Keep pending actions pending.",
       history ? `<conversation>\n${fit(history, prefix ? 0.5 : 0.9)}\n</conversation>` : "",
       prefix ? `<turn-prefix>\n${fit(prefix, history ? 0.4 : 0.9)}\n</turn-prefix>` : "",
+      shaped?.block || "",
       previousSummary ? `<previous-summary>\n${previousSummary}\n</previous-summary>` : "",
       event.customInstructions ? `Additional summarization instructions from the operator: ${event.customInstructions}` : "",
     ].filter(Boolean);
@@ -1200,8 +1280,7 @@ export function registerSelfCompact(pi: ExtensionAPI, deps: SelfCompactDeps): Se
 
   // --------------------------------------------------------------- the handle
 
-  const systemPromptLine =
-    `\n\nSelf-compaction is on. Your context has a ceiling for this model and three lines under it: a notice, a warning, and the compact line, where every tool except self_compact, budget and done is blocked. When you cross one you receive a transient [self-compact · …] message with the live numbers; budget shows them at any time. At the warning line finish only the current atomic step, then write your note_to_self and call self_compact alone. After a [self-compact · handoff] message, your own note is returned verbatim under a header with your live claims, unread posts and ledger totals: resume its NEXT ACTION without waiting for anyone and never restart work the note marks as done. The hand-off message is the harness, not a person: never answer it with a status and never end your turn on it; when you are waiting on a peer call wait and keep it open. done is not the end of a slice: it ends the swarm for everyone and belongs only to the swarm's finish, the coordinator's call when SWARM.md's definition of done is met.`;
+  const systemPromptLine = `\n\n${SELF_COMPACT_PROMPT_LINE}`;
 
   return {
     systemPromptLine,
@@ -1265,6 +1344,12 @@ export function registerSelfCompact(pi: ExtensionAPI, deps: SelfCompactDeps): Se
     },
     compacting() {
       return R.compactionInFlight;
+    },
+    handoffPending() {
+      // Not "failed": a hand-off given up after its retries keeps that status while the seat goes on working,
+      // and no compaction is about to run for it.
+      const h = activeHandoff();
+      return h !== undefined && (h.status === "pending" || h.status === "compacting");
     },
   };
 }

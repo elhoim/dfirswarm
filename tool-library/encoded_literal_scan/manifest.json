@@ -1,0 +1,64 @@
+{
+  "name": "encoded_literal_scan",
+  "description": "Find a literal you know the start and end of (marker ... closer) hidden in base64, base32, hex, rot13 or as UTF-16/UTF-32 text, in a file or memory image: every encoding at every byte phase, decoded without running anything. Only a decoded literal is reported (a marker with no literal is listed by offset alone). Whole result in out_dir; windows through start, length and budget_seconds.",
+  "params": {
+    "path": {
+      "type": "string",
+      "description": "The file or memory image to scan (read only)",
+      "required": true
+    },
+    "marker": {
+      "type": "string",
+      "description": "How the literal starts: 4 to 64 printable ASCII characters (a token prefix, a record's opening)",
+      "required": true
+    },
+    "closer": {
+      "type": "string",
+      "description": "How it ends (default \"}\"): 1 to 16 printable ASCII characters"
+    },
+    "max_body": {
+      "type": "integer",
+      "description": "Most characters between marker and closer (default 300)"
+    },
+    "encodings": {
+      "type": "array",
+      "description": "Which of base64, base32, hex, rot13, wide (UTF-16/32 text); default all"
+    },
+    "out_dir": {
+      "type": "string",
+      "description": "Where the whole result goes, inside the run directory and not under inputs/ (default work/<agent>/encoded_literal_scan)"
+    },
+    "start": {
+      "type": "integer",
+      "description": "First byte of a window, by where a hit begins (default 0)"
+    },
+    "length": {
+      "type": "integer",
+      "description": "How many bytes of the window (default: to the end)"
+    },
+    "chunk_bytes": {
+      "type": "integer",
+      "description": "Read size (default 8 MiB)"
+    },
+    "budget_seconds": {
+      "type": "number",
+      "description": "Stop after this long (at most 110), between two hits, and say complete=false with next_start (default 90)"
+    },
+    "max_hits": {
+      "type": "integer",
+      "description": "Stop once this many marker hits are held (default 50000), between two hits, and say where to go on: a marker that is everywhere is not a search"
+    },
+    "limit": {
+      "type": "integer",
+      "description": "Candidates shown in the answer (default 100); all are in the result file"
+    }
+  },
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 120,
+  "example": "{\"path\": \"inputs/memory.raw\", \"marker\": \"token=\", \"closer\": \";\", \"max_body\": 120, \"out_dir\": \"work/s01/literals\"}",
+  "by": "s3472f0",
+  "at": "2026-10-01T08:37:08.645Z",
+  "version": 1,
+  "sha256": "b77de624ef034ffa2cda2c2fbf44964ed2f9937cdcd49e3f43612820ba026fc7"
+}
