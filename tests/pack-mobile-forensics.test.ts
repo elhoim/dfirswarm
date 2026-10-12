@@ -81,19 +81,28 @@ async function build(code: string, ...args: string[]): Promise<void> {
   assert.equal(out.code, 0, out.stderr);
 }
 
-/** The tool run under a wrapper that reports the process's peak resident memory (bytes), after the answer on stdout. */
+/**
+ * The tool run under a wrapper that reports, after the answer on stderr, the process's peak resident memory (bytes) and the peak
+ * of what Python allocated (tracemalloc). The resident peak depends on the machine: a runner's interpreter, its allocator and, on
+ * Linux, a peak a child can inherit from a large parent are in it, so a test compares it with a run of the same wrapper on a tiny
+ * input (`baseline()`). The Python allocation peak does not depend on any of that: it is what the tool's own buffers need.
+ */
 const MEASURE = String.raw`
-import resource, runpy, sys
+import resource, runpy, sys, tracemalloc
+tracemalloc.start()
 sys.argv = [sys.argv[1]]
 try:
     runpy.run_path(sys.argv[0], run_name="__main__")
 except SystemExit:
     pass
+traced = tracemalloc.get_traced_memory()[1]
 usage = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-sys.stderr.write("MAXRSS %d\n" % (usage if sys.platform == "darwin" else usage * 1024))
+sys.stderr.write("MAXRSS %d\nTRACED %d\n" % (usage if sys.platform == "darwin" else usage * 1024, traced))
 `;
 
-async function measured(script: string, cwd: string, args: unknown, env: Record<string, string> = {}): Promise<{ run: Run; maxrss: number }> {
+type Measured = { run: Run; maxrss: number; traced: number };
+
+async function measured(script: string, cwd: string, args: unknown, env: Record<string, string> = {}): Promise<Measured> {
   return new Promise((resolve, reject) => {
     const child = spawn("python3", ["-c", MEASURE, script], { cwd, env: { ...process.env, ...AGENT, ...env } });
     const out: Buffer[] = [], err: Buffer[] = [];
@@ -102,12 +111,19 @@ async function measured(script: string, cwd: string, args: unknown, env: Record<
     child.on("error", reject);
     child.on("close", (code) => {
       const stderr = Buffer.concat(err).toString("utf8");
-      const m = /MAXRSS (\d+)/.exec(stderr);
+      const m = /MAXRSS (\d+)\nTRACED (\d+)\n/.exec(stderr);
       assert.ok(m, stderr);
-      resolve({ run: { code, stdout: Buffer.concat(out).toString("utf8"), stderr: stderr.replace(/MAXRSS \d+\n/, "") }, maxrss: Number(m[1]) });
+      resolve({ run: { code, stdout: Buffer.concat(out).toString("utf8"), stderr: stderr.replace(m[0], "") }, maxrss: Number(m[1]), traced: Number(m[2]) });
     });
     child.stdin.end(JSON.stringify(args));
   });
+}
+
+/** The same wrapper on a message of a few bytes: what the interpreter and this machine cost before the tool has anything to hold. */
+async function baseline(script: string, cwd: string): Promise<Measured> {
+  const tiny = await measured(script, cwd, { hex: "0801" });
+  assert.equal(tiny.run.code, 0, tiny.run.stderr);
+  return tiny;
 }
 
 /** The tool with the text of its standard input as given (JSON.stringify cannot write NaN or Infinity). */
@@ -1356,13 +1372,18 @@ test("protobuf_peek reads a bounded window of a large file, and says what lies a
     assert.equal(answer.window.file_bytes, 200 * 1024 * 1024);
     assert.equal(answer.window.bytes_after_window, 200 * 1024 * 1024 - 100 - message.length);
     assert.equal(answer.window.next_offset, 100 + message.length);
-    assert.ok(one.maxrss < 64 * 1024 * 1024, `the tool took ${one.maxrss} bytes to read ${message.length} bytes of a 200 MiB file`);
+    // Compared with the same wrapper on a few bytes, so that the interpreter and the machine are not counted; a tool that reads the
+    // file whole takes 200 MiB more.
+    const base = await baseline(PROTOBUF, cwd);
+    assert.ok(one.traced - base.traced < 8 * 1024 * 1024, `the tool allocated ${one.traced - base.traced} bytes more than a few bytes cost, to read ${message.length} bytes of a 200 MiB file`);
+    assert.ok(one.maxrss - base.maxrss < 96 * 1024 * 1024, `the tool's resident peak grew by ${one.maxrss - base.maxrss} bytes to read ${message.length} bytes of a 200 MiB file`);
     // Without a length the window is bounded too (8 MiB), never the whole file.
     const two = await measured(PROTOBUF, cwd, { path: "work/big.bin", offset: 100 });
     const dflt = body<Pb>(two.run);
     assert.equal(dflt.window.bytes, 8 * 1024 * 1024);
     assert.ok(dflt.window.next_offset);
-    assert.ok(two.maxrss < 64 * 1024 * 1024, `the default window took ${two.maxrss} bytes`);
+    assert.ok(two.traced - base.traced < 3 * 8 * 1024 * 1024, `the default window took ${two.traced - base.traced} allocated bytes`);
+    assert.ok(two.maxrss - base.maxrss < 128 * 1024 * 1024, `the default window grew the resident peak by ${two.maxrss - base.maxrss} bytes`);
     assert.match(refused(await tool(PROTOBUF, cwd, { path: "work/big.bin", length: 65 * 1024 * 1024 })).error, /at most/);
     assert.match(refused(await tool(PROTOBUF, cwd, { path: "work/big.bin", offset: 300 * 1024 * 1024 })).error, /past the end/);
   });
@@ -1378,7 +1399,20 @@ test("protobuf_peek takes memory that follows the window, not the window times t
     const run = await measured(PROTOBUF, cwd, { path: "work/chain.bin", length: inner.length, max_depth: 32 });
     const answer = body<Pb>(run.run);
     assert.equal(answer.window.bytes, inner.length);
-    assert.ok(run.maxrss < 200 * 1024 * 1024, `32 levels around ${inner.length} bytes took ${run.maxrss} bytes`);
+    const base = await baseline(PROTOBUF, cwd);
+    // What the tool itself allocates for the window and its nested readings (about 4 times the window here), and the resident peak over
+    // the baseline run: a margin of 2 and 5 over what is measured, where a copy of the payload per level is 30 times the window.
+    const bounded = (m: Measured): boolean => m.traced - base.traced < 8 * inner.length && m.maxrss - base.maxrss < 24 * inner.length;
+    assert.ok(bounded(run), `32 levels around ${inner.length} bytes: ${run.traced - base.traced} bytes allocated, resident peak ${run.maxrss - base.maxrss} over the baseline ${base.maxrss}`);
+    // The same test fails on a tool that copies the payload of every level and keeps the copy while it parses the next.
+    const source = await readFile(PROTOBUF, "utf8");
+    const copy = "payload = ctx.view[at:at + length]";
+    assert.equal(source.split(copy).length, 2, "the line the mutant changes is in the tool");
+    const mutant = join(cwd, "work", "protobuf_peek_mutant.py");
+    await writeFile(mutant, source.replace(copy, "payload = bytes(ctx.view[at:at + length])"));
+    const copied = await measured(mutant, cwd, { path: "work/chain.bin", length: inner.length, max_depth: 32 });
+    assert.equal(copied.run.code, 0, copied.run.stderr);
+    assert.equal(bounded(copied), false, `a tool that copies each level took ${copied.traced - base.traced} allocated bytes, ${copied.maxrss - base.maxrss} resident over the baseline`);
   });
 });
 
