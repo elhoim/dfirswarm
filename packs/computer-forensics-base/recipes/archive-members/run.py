@@ -12,9 +12,9 @@ the archive is paths[0]. Every member is one row of members.tsv:
 `path` and `link` are shown with control characters, tabs, newlines and
 backslashes escaped; `path_b64` is the name's exact bytes. `n` counts from 0
 in archive order, so two members with the same name are still two rows, and
-is the number a member extractor takes: the base pack ships none yet (an
-archive_extract tool is planned), so a member is read until then with the
-archive's own program (tar, unzip, 7z) run as a job. A tar's times are UTC; a zip's DOS times carry
+is the number the archive_extract tool takes (its from_index) and gives back
+in its own manifest: a member is extracted with that tool, never with the
+archive's own program run on the whole archive. A tar's times are UTC; a zip's DOS times carry
 no zone (`tz` is `unknown`) unless the member has an extended timestamp.
 `flags` names what an examiner should know before extracting: escapes-root,
 encrypted, ratio>1000, and name-not-utf8 (macOS refuses such a name, so an

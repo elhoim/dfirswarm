@@ -3,7 +3,7 @@ id: evidence/collections
 title: Establish what a logical collection actually contains
 when: Evidence arrives as copied files, an archive or an AD1 logical image.
 needs: [evidence/imaging]
-tools: [catalog_search, check_inputs, file_type, ad1_extract]
+tools: [catalog_search, check_inputs, file_type, ad1_extract, archive_extract]
 requires_host: [target-query, 7z]
 mentions: [mft_records, evtx_query, regkv, CyLR, mac_apt.py]
 ---
@@ -40,8 +40,15 @@ is optional here: check the job image's inventory before choosing either, since 
 tool existing elsewhere in the repository does not make it available in this run.
 
 The `archive-members` recipe lists a tar, zip or 7z without extracting it (it runs
-`7z` for a 7z), and a member is read afterwards with the archive's own program as a
-job: the base pack ships no member extractor yet.
+`7z` for a 7z). A member is written out afterwards as a job with `archive_extract`,
+which takes the member number `n` of that list (`from_index`) and bounds bytes, ratio,
+members, depth and time. It never recreates a link, device or FIFO, keeps every
+original name in its `members.jsonl` (`name_b64`), keeps two members of one name as two
+files, counts an encrypted member without opening it, names a nested archive without
+opening it (one call extracts one level), and keeps a cut or CRC-failed member as
+`.partial` with the reason. Run it with `secret_output: true`: the members are evidence
+content. A zstd archive is read only where the image has a zstd reader; the answer says
+when it has none.
 
 A live collection is not one instant. Record the collection's interval and each
 object's acquisition details, and keep companion files (database journals,
