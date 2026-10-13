@@ -1,8 +1,0 @@
-# The findings of tests/pack-links.test.sh's bug checks that the shipped packs
-# already have, one per line: pack, kind, the skill's path, the name.
-# A finding not listed here fails the run. A listed one that no longer happens
-# fails it too: delete its line when the skill is fixed. The list is sorted as
-# `LC_ALL=C sort` sorts it and holds no line twice. A change that brings a pack
-# up to the standard empties that pack's lines; the last one deletes this file
-# and makes PACK_LINKS_STRICT=1 the default. PACK_LINKS_VERBOSE=1 prints each
-# finding with its reason.

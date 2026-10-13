@@ -835,6 +835,10 @@ header says how it matches a name and where that is wrong.
    lists the owner in `depends`; it does not carry a copy (see "Two rules the
    set holds to").
 
+The suite fails on every rule above, the "reached" ones (3 and 4) included.
+`PACK_LINKS_STRICT=0 bash tests/pack-links.test.sh` prints those two as reports and
+does not fail on them, for trying something locally; CI runs the default.
+
 ### Skill size
 
 A skill is read whole, in the middle of a case, and stays in the agent's context
