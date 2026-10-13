@@ -1,7 +1,7 @@
 {
   "id": "mobile-forensics",
   "name": "Mobile Forensics Pack",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "description": "Method and tooling for a phone: what kind of extraction you were handed and what it cannot contain, iOS backups and their manifest, Android package and user data, the app databases that carry messages and location, protobuf blobs, and what deleted means inside SQLite.",
   "licence": "AGPL-3.0-or-later",
   "authors": [
@@ -80,6 +80,12 @@
     {
       "name": "pillow-heif",
       "why": "opens HEIC in a script (the tool library's contact_sheet imports it); no skill of this pack names it yet"
+    }
+  ],
+  "method_only": [
+    {
+      "path": "skills/ios/unified-logs.md",
+      "why": "it runs `unified_log` and `unifiedlog_iterator`, which the macos-forensics pack (a dependency) carries; this pack has no tool or program of its own for iOS diagnostic logs"
     }
   ]
 }

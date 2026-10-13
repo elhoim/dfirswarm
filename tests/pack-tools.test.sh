@@ -140,6 +140,8 @@ cp -R "$ROOT/packs" "$WORK/sealed"
 for d in "$WORK/sealed"/*/; do
   id="$(basename "$d")"
   said="$(bash "$ROOT/scripts/pack.sh" seal "$d" 2>&1 >/dev/null)" || fail "packs/$id does not seal: $said"
+  # The size budgets are advice at the seal (`budget:` lines, tests/skill-budgets.test.sh holds them).
+  said="$(grep -v '^  budget: ' <<<"$said")"
   [[ -z "$said" ]] || fail "packs/$id seals with a warning: $said"
   [[ "$(jq -S . "$d/pack.json")" == "$(jq -S . "$ROOT/packs/$id/pack.json")" ]] || fail "packs/$id is not checked in as sealed: seal it"
 done
