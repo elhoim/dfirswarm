@@ -528,7 +528,7 @@ result.
 ## 7. The packs in this repository
 
 Twelve, all under the same AGPL-3.0-or-later as the harness, in `packs/`:
-159 skills, 70 tools and 14 goal templates. Every one of them is sealed,
+161 skills, 71 tools and 14 goal templates. Every one of them is sealed,
 checksummed, and installs and verifies in the test suite.
 
 | Pack | Skills | Tools | Goals | What it is for |

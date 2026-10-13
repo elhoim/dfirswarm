@@ -11,7 +11,7 @@ Platform-specific artefact knowledge lives in the packs that depend on this one.
 
 ## What it carries
 
-**Eleven skills**, fetched one at a time by the agents that need them:
+**Thirteen skills**, fetched one at a time by the agents that need them:
 
 | | |
 | --- | --- |
@@ -19,6 +19,8 @@ Platform-specific artefact knowledge lives in the packs that depend on this one.
 | `evidence/imaging` | the container, the storage layers, the address space and the offset every command needs |
 | `evidence/catalog` | read the catalogue with its coverage and revision before you spend a token |
 | `evidence/collections` | the evidence is a zip, a directory tree or an AD1, not a disk: what it contains and what it cannot show |
+| `evidence/archives` | a zip, tar, 7z or compressed file: list it, extract it under budgets, never recreate a link, keep every name |
+| `evidence/ad1` | an FTK Imager logical image: list, extract and corroborate it |
 | `filesystem/extract` | get a file out of an image, and say which record it came from |
 | `filesystem/carving` | recover candidate structures where there is no file system, and say how far to trust them |
 | `filesystem/encrypted` | a volume the toolkit cannot read: encryption is one explanation among several |
