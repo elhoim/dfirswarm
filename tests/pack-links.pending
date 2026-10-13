@@ -6,4 +6,3 @@
 # up to the standard empties that pack's lines; the last one deletes this file
 # and makes PACK_LINKS_STRICT=1 the default. PACK_LINKS_VERBOSE=1 prints each
 # finding with its reason.
-encrypted-containers unlisted skills/archives/protected.md 7z
