@@ -8,7 +8,8 @@ bound. What it does, exactly:
   * Format is read from the bytes (zip, tar, gzip, bzip2, xz, zstd, 7z), never from the file name. A compressed stream
     is looked into: a tar inside it is a tar, anything else is ONE member (a gzip's own file name, else the archive's
     name without its suffix). RAR, CAB, ISO and the rest are named and refused (unsupported), never guessed. zstd is read
-    through Python's compression.zstd (3.14), the zstandard module, or the zstd program of the base image, in that order;
+    through Python's compression.zstd (3.14) or the zstd program of the base image, in that order (the zstandard module is not used: its streaming reader
+    ends a truncated frame without an error);
     if none is there a zstd archive is reported unsupported with that reason.
   * Every member is one row of members.jsonl, in archive order, numbered `n` from 0 (the same number the archive-members
     recipe gives it), with its original name kept exactly (`name_b64`, the bytes) beside a display form, its type, declared
@@ -516,14 +517,9 @@ def zstd_module():
         return "compression.zstd", zmod
     except ImportError:
         pass
-    try:
-        import zstandard                              # the zstandard package, when installed
-        return "zstandard", zstandard
-    except ImportError:
-        pass
     if shutil.which("zstd"):
         return "zstd program", None
-    return None, "no zstd decompressor: this Python has no compression.zstd (3.14) or zstandard module and there is no zstd program on PATH"
+    return None, "no zstd decompressor: this Python has no compression.zstd (3.14) and there is no zstd program on PATH"
 
 
 class Decomp:
@@ -657,8 +653,6 @@ class Decomp:
             return
         if which == "compression.zstd":
             self.reader = mod.ZstdFile(self.fh)
-        elif which == "zstandard":
-            self.reader = mod.ZstdDecompressor().stream_reader(self.fh, read_across_frames=True)
         else:
             raise Unsupported(mod)
         while True:
