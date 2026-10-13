@@ -433,6 +433,23 @@ def install_signal_handlers():
         signal.signal(signal.SIGALRM, _filter_alarm)
 
 
+class signals_held:
+    """The termination signals wait, pending, while a temporary file or directory is made and registered for removal: a signal that
+    arrives between the two would run the cleanup before it knew of the file, and the process would exit with the file behind. Where
+    the platform cannot hold signals the registration comes first, so only the file's own creation is unprotected."""
+
+    def __enter__(self):
+        self.before = None
+        if hasattr(signal, "pthread_sigmask"):
+            self.before = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM, signal.SIGINT, signal.SIGHUP})
+        return self
+
+    def __exit__(self, *_exc):
+        if self.before is not None:
+            signal.pthread_sigmask(signal.SIG_SETMASK, self.before)
+        return False
+
+
 atexit.register(_drop_unpublished)
 
 
@@ -465,9 +482,10 @@ class LosslessPage:
     def _open_tmp(self, directory):
         try:
             directory.mkdir(parents=True, exist_ok=True)
-            fd, name = tempfile.mkstemp(dir=directory, prefix=".%s-" % self.tool)
-            self._tmp = Path(name)
-            _TEMPS.add(name)
+            with signals_held():
+                fd, name = tempfile.mkstemp(dir=directory, prefix=".%s-" % self.tool)
+                self._tmp = Path(name)
+                _TEMPS.add(name)
             self._out = os.fdopen(fd, "w", encoding="utf-8", errors="backslashreplace")
         except OSError as exc:
             fail("the whole result could not be written: %s cannot be created (%s)" % (shown_output(directory), describe(exc)))
@@ -1081,20 +1099,28 @@ def named(items, limit=FIRST_PROBLEMS):
 
 def open_temp_db(prefix):
     """A SQLite database on disk (in $OUT in a job, where only $OUT is writable; the temporary directory otherwise), so a
-    large export does not have to fit in memory. Returns (db, directory, where); in memory only if no directory can be made."""
+    large export does not have to fit in memory. Returns (db, directory, where); in memory only if no directory can be made.
+    The directory is registered for removal before the file in it exists, with the termination signals held meanwhile, so a
+    SIGTERM at any point of this function leaves neither the directory nor the file."""
+    directory, opened = None, []
     try:
-        directory = tempfile.mkdtemp(prefix=prefix, dir=os.environ["OUT"] if in_job() else None)
-        db = sqlite3.connect(os.path.join(directory, "work.sqlite"))
+        with signals_held():
+            directory = tempfile.mkdtemp(prefix=prefix, dir=os.environ["OUT"] if in_job() else None)
+            where = directory
+            CLEANUP.append(lambda: remove_temp_db(opened[0] if opened else None, where))
+            opened.append(sqlite3.connect(os.path.join(directory, "work.sqlite")))
         os.chmod(os.path.join(directory, "work.sqlite"), 0o600)
-        CLEANUP.append(lambda: remove_temp_db(db, directory))
-        return db, directory, "a temporary file"
+        return opened[0], directory, "a temporary file"
     except (OSError, sqlite3.Error):
+        if directory:
+            remove_temp_db(opened[0] if opened else None, directory)
         return sqlite3.connect(":memory:"), None, "memory (no temporary directory could be created)"
 
 
 def remove_temp_db(db, directory):
     try:
-        db.close()
+        if db is not None:
+            db.close()
     except sqlite3.Error:
         pass
     if directory:

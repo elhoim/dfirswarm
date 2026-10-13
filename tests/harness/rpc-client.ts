@@ -136,8 +136,9 @@ export class RpcClient {
     }
     await new Promise<void>((resolve) => {
       const timer = setTimeout(() => {
+        // Not done until it has exited: a process still writing is what a test that reads its files next would read torn.
         this.proc.kill("SIGKILL");
-        resolve();
+        setTimeout(resolve, 2000).unref();
       }, 5000);
       this.proc.once("exit", () => {
         clearTimeout(timer);

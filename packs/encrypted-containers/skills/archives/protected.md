@@ -4,7 +4,7 @@ title: Examining encrypted archives and protected documents
 when: An archive or document may require a password.
 needs: [identify/headers]
 tools: [archive_probe, file_type]
-requires_host: []
+requires_host: [7z]
 ---
 
 Identify the container with `file_type`, keep every supplied part, and record the
