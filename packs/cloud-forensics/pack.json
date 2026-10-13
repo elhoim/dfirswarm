@@ -1,7 +1,7 @@
 {
   "id": "cloud-forensics",
   "name": "Cloud and SaaS Forensics Pack",
-  "version": "1.3.1",
+  "version": "1.3.2",
   "description": "Method and tooling for logs that belong to somebody else's computer, examined as supplied exports: what a cloud or SaaS export covers and what its silence can show, the Microsoft 365 unified audit log, Entra sign-ins, AWS CloudTrail, Google Workspace, and the tokens, grants and mailbox rules behind a cloud account.",
   "licence": "AGPL-3.0-or-later",
   "authors": [
@@ -18,6 +18,20 @@
     {
       "name": "pwsh",
       "why": "an operator's acquisition runtime for Microsoft 365 collection; no skill or tool of this pack runs it, and the agent examines supplied exports offline and never connects to a tenant"
+    },
+    {
+      "name": "aws",
+      "why": "an operator's acquisition capability for CloudTrail, Config and GuardDuty records; no skill or tool of this pack runs it (`aws/cloudtrail` only reads supplied exports, and its id spells the program), and an agent never connects to an account with it"
+    }
+  ],
+  "method_only": [
+    {
+      "path": "skills/google/workspace-access.md",
+      "why": "a method leaf for Workspace evidence: the pack has no reader for token, Drive or admin events, so it reads the export as supplied and names no tool or program"
+    },
+    {
+      "path": "skills/logs/what-exists.md",
+      "why": "a method leaf about what a supplied export covers and what its silence can say; it applies to every provider and sends the agent to the provider's own skill for any tool"
     }
   ],
   "secrets": [],

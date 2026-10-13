@@ -1,7 +1,7 @@
 {
   "id": "computer-forensics-base",
   "name": "Computer Forensics Base Pack",
-  "version": "1.7.0",
+  "version": "1.7.1",
   "description": "Method and tooling every examination needs, whatever the platform: read the container and find the volume, verify the evidence, read the catalogue, extract and carve, tell an encrypted volume from an unreadable one, keep a timeline, cite what you claim.",
   "licence": "AGPL-3.0-or-later",
   "authors": [
@@ -129,6 +129,16 @@
     {
       "name": "ccl_indexeddb_dump",
       "why": "declared for the browser structured-storage wrapper and skill planned for a later change; no skill of this pack names it yet"
+    }
+  ],
+  "method_only": [
+    {
+      "path": "skills/reporting/citations.md",
+      "why": "a method skill about recording and citing a claim; the ledger, the job references and the review acts it describes are the harness's, not a tool or program of this pack"
+    },
+    {
+      "path": "skills/reporting/disagreement.md",
+      "why": "a method skill about disputing and correcting an entry; `dispute`, `record`, `veto` and `finish` are the harness's acts, not a tool or program of this pack"
     }
   ]
 }

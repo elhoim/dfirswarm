@@ -25,25 +25,20 @@
 # Also always failing: a `depends` id that is no pack of packs/, and a `needs:`,
 # `tools:`, `requires_host:` or `mentions:` that is not a [list].
 #
-# The golden list, tests/pack-links.pending. The bug checks already find things in
-# the shipped packs, so the default run holds them to a list: one line per known
-# finding, `pack kind path name` (kind as above, path the skill's, name the tool,
-# program or package), sorted as `LC_ALL=C sort` sorts, no line twice; `#` lines and
-# blank lines are skipped. A finding that is not on the list fails; a listed one
-# that no longer happens fails (remove the line); a missing file, a malformed line,
-# an unsorted or repeated one fails. The list only shrinks, and a pack's own fixes
-# take their lines out. PACK_LINKS_STRICT=1 does not read it.
-#
-# Report rules, which print and do not fail by default (PACK_LINKS_STRICT=1 fails
-# them; the change that brings the last pack up to the standard makes 1 the
-# default below and deletes the list):
+# Report rules, which fail like the bug checks. PACK_LINKS_STRICT=0 turns them into
+# reports that print and do not fail (for a local experiment; CI runs the default, 1):
 #   - every bundled tool is named by a skill of its pack or of a pack that loads
 #     it (one that has the pack in its closure);
 #   - every program (requires/host.json) and Python package (requires/python.txt)
 #     is named by such a skill, or is listed in pack.json's optional
 #     `unreferenced_ok: [{"name": ..., "why": ...}]` with the reason no skill
 #     names it (a library only a tool imports);
-#   - every skill names at least one tool, program or package of its own pack.
+#   - every skill names at least one tool, program or package of its own pack, or
+#     is listed in pack.json's optional `method_only: [{"path": "skills/x/y.md",
+#     "why": ...}]` (a method leaf that names none on purpose). The two keys are
+#     symmetric: a path that is no skill of the pack, an entry with no why, a path
+#     twice, and a listed skill that does name something of its pack are findings,
+#     the last as the report "method_only entries ... after all".
 #
 # How a name is matched, and where that is wrong. A name is found by a whole-word,
 # case-sensitive match on the skill's text. Letters, digits, `_` and `-` are part
@@ -73,9 +68,11 @@
 #     name requires/ gives it, so such a package is usually listed in
 #     `unreferenced_ok`;
 #   - the report rules read a skill's whole file, front matter included (without
-#     `mentions:`), since a `tools:` list is a naming too, and the `unused` check
-#     makes sure the body agrees; but a plain-word program in a front matter list
-#     is no command in code, so a `requires_host: [make]` names nothing;
+#     `mentions:`, `id:` and `needs:`: an id is a path and `id: aws/cloudtrail` does
+#     not name the program `aws`), since a `tools:` list is a naming too, and the
+#     `unused` check makes sure the body agrees; but a plain-word program in a
+#     front matter list is no command in code, so a `requires_host: [make]` names
+#     nothing;
 #   - the closure follows `depends`; a version range is not read.
 # Recipes and goal templates are not read: only a skill names a tool here.
 set -uo pipefail
@@ -83,10 +80,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 fail() { echo "FAIL: $*" >&2; exit 1; }
 pass() { echo "ok - $*"; }
 
-# The change that brings the last pack up to the standard changes the 0 to a 1.
-STRICT="${PACK_LINKS_STRICT:-0}"
+# The report rules fail by default; PACK_LINKS_STRICT=0 only prints them.
+STRICT="${PACK_LINKS_STRICT:-1}"
 case "$STRICT" in 0|1) ;; *) fail "PACK_LINKS_STRICT is 0 or 1, not '$STRICT'" ;; esac
-PENDING="$ROOT/tests/pack-links.pending"
 
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
 PY="${PYTHON:-python3}"
@@ -96,16 +92,17 @@ command -v jq >/dev/null || fail "jq is required"
 cat > "$WORK/links.py" <<'EOF'
 import json, os, re, sys
 
-root, strict, pending_path = sys.argv[1], sys.argv[2] == "1", sys.argv[3]
-verbose = os.environ.get("PACK_LINKS_VERBOSE") == "1"
+root, strict = sys.argv[1], sys.argv[2] == "1"
 
 # A program whose name is also an ordinary word counts only as a command in code.
 PLAIN_WORDS = {"log", "make", "strings"}
 # A fenced block is a command block when its language is none or one of these.
 SHELL_FENCES = {"", "sh", "bash", "zsh", "shell", "console", "powershell", "pwsh", "ps1", "cmd", "bat"}
-KINDS = ("closure", "unused", "unlisted", "mentions")
 LISTS = ("needs", "tools", "requires_host", "mentions")
 FM = re.compile(r"\A---\n(.*?)\n---\n", re.S)
+# The front matter keys that hold no naming: `mentions:` is a discussion, and `id:` and
+# `needs:` hold skill ids, which are paths and may spell a program (`aws/cloudtrail`).
+NOT_NAMING = ("mentions:", "id:", "needs:")
 
 # A name's characters are letters, digits, `_` and `-`, and a `.` between two of
 # them; `.exe`, `.py` and the like after a program are its file name.
@@ -203,8 +200,10 @@ for pid in sorted(os.listdir(root)):
                 if key in fm and not isinstance(fm[key], list):
                     structural.append("%s: %s: %s: is not a [list]" % (pid, rel, key))
                     fm[key] = []
-            # A mention is no naming: the report rules read the file without it.
-            kept = "\n".join(l for l in m.group(1).splitlines() if not l.startswith("mentions:"))
+            # A mention is no naming, and neither is an id: the report rules read
+            # the file without `mentions:`, `id:` and `needs:` (`id: aws/cloudtrail`
+            # does not name the program `aws`).
+            kept = "\n".join(l for l in m.group(1).splitlines() if not l.startswith(NOT_NAMING))
             skills[rel] = {"fm": fm, "all": Text("---\n" + kept + "\n---\n" + text[m.end():]), "body": Text(text[m.end():])}
     packs[pid] = {"meta": meta, "tools": tools, "bins": bins, "pys": pys, "skills": skills,
                   "depends": [re.split(r"[<>=!~ ]", d)[0].strip() for d in meta.get("depends") or []]}
@@ -278,39 +277,8 @@ for pid, P in packs.items():
 
 errors = list(structural)
 
-# --- the golden list --------------------------------------------------------
-golden = {}   # line -> its number in the file
-if not strict:
-    if not os.path.isfile(pending_path):
-        errors.append("tests/pack-links.pending is missing: the default run holds the known findings to it")
-    else:
-        prev = None
-        for n, raw in enumerate(open(pending_path, encoding="utf-8"), 1):
-            line = raw.rstrip("\n")
-            if not line.strip() or line.startswith("#"):
-                continue
-            fields = line.split(" ")
-            if len(fields) != 4 or not all(fields) or fields[1] not in KINDS:
-                errors.append("tests/pack-links.pending line %d is not `pack kind path name` (kind one of %s)" % (n, ", ".join(KINDS)))
-            elif line in golden:
-                errors.append("tests/pack-links.pending line %d repeats line %d" % (n, golden[line]))
-            elif prev is not None and line < prev:
-                errors.append("tests/pack-links.pending line %d is out of order (sort the file as LC_ALL=C sort does)" % n)
-            else:
-                golden[line] = n
-                prev = line
-
-held = {}   # pack -> {kind: count}, of what the list holds
 for line, text in sorted(found.items()):
-    if not strict and line in golden:
-        pid, kind = line.split(" ")[:2]
-        held.setdefault(pid, {}).setdefault(kind, 0)
-        held[pid][kind] += 1
-    else:
-        errors.append(text if strict else "%s (it is not on the pending list: fix it)" % text)
-for line, n in sorted(golden.items(), key=lambda kv: kv[1]):
-    if line not in found:
-        errors.append("tests/pack-links.pending line %d, `%s`, no longer happens: remove the line" % (n, line))
+    errors.append(text)
 
 # --- the report rules -------------------------------------------------------
 excused = {}
@@ -334,10 +302,31 @@ for pid, P in packs.items():
         else:
             excused.setdefault(pid, {})[e["name"]] = e["why"]
 
+# method_only: skills that name nothing of their own pack on purpose.
+exempt = {}   # pack -> {path: why}
+for pid, P in packs.items():
+    raw = P["meta"].get("method_only")
+    if raw is None:
+        continue
+    if not isinstance(raw, list):
+        errors.append("%s: method_only is a list of {path, why}" % pid)
+        continue
+    for e in raw:
+        ok = isinstance(e, dict) and isinstance(e.get("path"), str) and e["path"] \
+            and isinstance(e.get("why"), str) and e["why"].strip()
+        if not ok:
+            errors.append("%s: a method_only entry needs a path and a why" % pid)
+        elif e["path"] not in P["skills"]:
+            errors.append("%s: method_only names %r, which is no skill of the pack (a path like skills/reporting/x.md)" % (pid, e["path"]))
+        elif e["path"] in exempt.get(pid, {}):
+            errors.append("%s: method_only names %r twice" % (pid, e["path"]))
+        else:
+            exempt.setdefault(pid, {})[e["path"]] = e["why"]
+
 def named_by_users(pid, name, program):
     return any(s["all"].names(name, program) for q in users[pid] for s in packs[q]["skills"].values())
 
-no_tool, no_prog, stale, no_names = [], [], [], []
+no_tool, no_prog, stale, no_names, stale_method = [], [], [], [], []
 n_tools = n_progs = 0
 for pid, P in sorted(packs.items()):
     for t in P["tools"]:
@@ -352,9 +341,12 @@ for pid, P in sorted(packs.items()):
         if named and n in excused.get(pid, {}):
             stale.append((pid, n))
     for rel, s in sorted(P["skills"].items()):
-        if not any(s["all"].names(t) for t in P["tools"]) \
-                and not any(s["all"].names(n, True) for n in P["bins"] + P["pys"]):
+        names = any(s["all"].names(t) for t in P["tools"]) \
+            or any(s["all"].names(n, True) for n in P["bins"] + P["pys"])
+        if not names and rel not in exempt.get(pid, {}):
             no_names.append((pid, rel))
+        if names and rel in exempt.get(pid, {}):
+            stale_method.append((pid, rel))
 
 def by_pack(pairs):
     out = {}
@@ -363,18 +355,14 @@ def by_pack(pairs):
     return ["    %s: %s" % (pid, ", ".join(xs)) for pid, xs in sorted(out.items())]
 
 n_skills = sum(len(P["skills"]) for P in packs.values())
-n_held = sum(sum(k.values()) for k in held.values())
 print("checked %d packs: %d skills, %d tools, %d programs and packages" % (len(packs), n_skills, n_tools, n_progs))
-print("bug checks: %d finding(s), %d of them on the pending list" % (len(found), n_held))
-for pid, kinds in sorted(held.items()):
-    print("pending - %s: %d finding(s) (%s)" % (pid, sum(kinds.values()), ", ".join("%s %d" % kv for kv in sorted(kinds.items()))))
-    if verbose:
-        print("\n".join("    " + t for line, t in sorted(found.items()) if line.startswith(pid + " ")))
+print("bug checks: %d finding(s)" % len(found))
 reports = [
     ("tools no skill of their pack or a dependant names", no_tool),
     ("programs and packages no such skill names, with no unreferenced_ok", no_prog),
     ("unreferenced_ok entries a skill names after all", stale),
-    ("skills that name nothing of their own pack", no_names),
+    ("skills that name nothing of their own pack, with no method_only", no_names),
+    ("method_only entries whose skill names a tool or program of its pack after all", stale_method),
 ]
 for title, items in reports:
     print("report - %d %s" % (len(items), title))
@@ -388,7 +376,7 @@ raise SystemExit(1 if errors else 0)
 EOF
 
 # --- the shipped packs ------------------------------------------------------
-"$PY" "$WORK/links.py" "$ROOT/packs" "$STRICT" "$PENDING" > "$WORK/shipped.out" 2>&1
+"$PY" "$WORK/links.py" "$ROOT/packs" "$STRICT" > "$WORK/shipped.out" 2>&1
 rc=$?
 cat "$WORK/shipped.out"
 [[ $rc -eq 0 ]] || fail "a skill's text and its front matter disagree, or a pack ships what no skill reaches (above)"
@@ -414,8 +402,8 @@ def pack(depends=(), tools=(), bins=(), pys=(), skills=None, **extra):
     return dict(depends=list(depends), tools=list(tools), bins=list(bins), pys=list(pys),
                 skills=skills or {}, extra=extra)
 
-def skill(tools=(), host=(), body="", mentions=None, tools_raw=None):
-    return dict(tools=list(tools), host=list(host), body=body, mentions=mentions, tools_raw=tools_raw)
+def skill(tools=(), host=(), body="", mentions=None, tools_raw=None, needs=()):
+    return dict(tools=list(tools), host=list(host), body=body, mentions=mentions, tools_raw=tools_raw, needs=list(needs))
 
 packs = {
     "base": pack(tools=["alpha", "alpha_tool"], bins=["fls", "make", "log"], pys=["somepkg"], skills={
@@ -470,6 +458,23 @@ M = {
     "excuse-no-why": lambda: packs["base"]["extra"].update(unreferenced_ok=[{"name": "lonely_bin"}]),
     "excuse-named": lambda: packs["base"]["extra"].update(unreferenced_ok=[{"name": "fls", "why": "x"}]),
     "bare-skill": lambda: packs["child"]["skills"].update({"c/bare": skill([], [], "Nothing here names a thing.\n")}),
+    # method_only: a skill that names nothing of its pack on purpose
+    "method": lambda: (packs["child"]["skills"].update({"c/bare": skill([], [], "Nothing here names a thing.\n")}),
+                       packs["child"]["extra"].update(method_only=[{"path": "skills/c/bare.md", "why": "a method leaf"}])),
+    "method-stale": lambda: packs["child"]["extra"].update(method_only=[{"path": "skills/c/one.md", "why": "said once"}]),
+    "method-unknown": lambda: packs["child"]["extra"].update(method_only=[{"path": "skills/c/nowhere.md", "why": "x"}]),
+    "method-no-why": lambda: (packs["child"]["skills"].update({"c/bare": skill([], [], "Nothing here names a thing.\n")}),
+                              packs["child"]["extra"].update(method_only=[{"path": "skills/c/bare.md", "why": " "}])),
+    "method-twice": lambda: (packs["child"]["skills"].update({"c/bare": skill([], [], "Nothing here names a thing.\n")}),
+                             packs["child"]["extra"].update(method_only=[{"path": "skills/c/bare.md", "why": "x"}, {"path": "skills/c/bare.md", "why": "y"}])),
+    "method-bare": lambda: packs["child"]["extra"].update(method_only="skills/c/bare.md"),
+    "method-closure-tool": lambda: (packs["child"]["skills"].update({"c/dep": skill(["alpha_tool"], [], "Call alpha_tool.\n")}),
+                                    packs["child"]["extra"].update(method_only=[{"path": "skills/c/dep.md", "why": "reads a dependency's tool"}])),
+    # an id or a needs entry is no naming of a program
+    "id-spells-program": lambda: (packs["base"]["bins"].append("idbin"),
+                                  packs["base"]["skills"].update({"idbin/x": skill([], [], "Nothing here.\n")})),
+    "needs-spells-program": lambda: (packs["base"]["bins"].append("needsbin"),
+                                     packs["child"]["skills"].update({"c/two": skill(["child_tool"], [], "Call child_tool.\n", needs=["needsbin"])})),
     # a finding in a pack of its own
     "other-unused": lambda: edit("other", "o/one", lambda s: s.update(body="Nothing.\n")),
     # mentions
@@ -512,90 +517,84 @@ for pid, p in packs.items():
         tools_line = s["tools_raw"] if s["tools_raw"] is not None else "[%s]" % ", ".join(s["tools"])
         mentions_line = "" if s["mentions"] is None else "mentions: %s\n" % (
             s["mentions"] if isinstance(s["mentions"], str) else "[%s]" % ", ".join(s["mentions"]))
-        open(path, "w").write("---\nid: %s\ntitle: t\nwhen: w\nneeds: []\ntools: %s\nrequires_host: [%s]\n%s---\n\n%s"
-                              % (sid, tools_line, ", ".join(s["host"]), mentions_line, s["body"]))
+        open(path, "w").write("---\nid: %s\ntitle: t\nwhen: w\nneeds: [%s]\ntools: %s\nrequires_host: [%s]\n%s---\n\n%s"
+                              % (sid, ", ".join(s["needs"]), tools_line, ", ".join(s["host"]), mentions_line, s["body"]))
 EOF
 
 case_n=0
-# links_case <label> <default rc> <strict rc> <pattern the output has> <pending list> <mutations...>
-# The pending list: `-` for none, `@missing` for no file, else its lines, `;` between them.
+# links_case <label> <rc with PACK_LINKS_STRICT=0> <rc by default> <pattern the output has> <mutations...>
 links_case() {
-  local label="$1" want="$2" want_strict="$3" pattern="$4" pending="$5"; shift 5
+  local label="$1" want_report="$2" want="$3" pattern="$4"; shift 4
   case_n=$((case_n + 1))
   local dir="$WORK/fx$case_n" got rc
   mkdir "$dir" && "$PY" "$WORK/fx.py" "$dir" "$@" || fail "could not build the packs for: $label"
-  case "$pending" in
-    @missing) ;;
-    -) : > "$dir.pending" ;;
-    *) printf '%s\n' "$pending" | tr ';' '\n' > "$dir.pending" ;;
-  esac
-  got="$("$PY" "$WORK/links.py" "$dir" 0 "$dir.pending" 2>&1)"; rc=$?
-  [[ $rc -eq $want ]] || fail "$label: expected exit $want, got $rc:
+  got="$("$PY" "$WORK/links.py" "$dir" 0 2>&1)"; rc=$?
+  [[ $rc -eq $want_report ]] || fail "$label (reports only): expected exit $want_report, got $rc:
 $got"
   [[ -z "$pattern" ]] || grep -qE -- "$pattern" <<<"$got" || fail "$label: the output lacks /$pattern/:
 $got"
-  got="$("$PY" "$WORK/links.py" "$dir" 1 "$dir.pending" 2>&1)"; rc=$?
-  [[ $rc -eq $want_strict ]] || fail "$label (strict): expected exit $want_strict, got $rc:
+  got="$("$PY" "$WORK/links.py" "$dir" 1 2>&1)"; rc=$?
+  [[ $rc -eq $want ]] || fail "$label (default): expected exit $want, got $rc:
 $got"
 }
 
-CLOSURE_LINE="child closure skills/c/one.md other_tool"
-links_case "a clean set of packs" 0 0 "checked 3 packs: 3 skills, 4 tools, 4 programs and packages" -
-links_case "a tool of a pack outside the closure" 1 1 "child: skills/c/one.md names the tool other_tool, which only other carries" - closure
-links_case "a name inside a longer name is no mention" 0 0 "" - longer
-links_case "a tool listed and not named (alpha is not alpha_tool)" 1 1 "lists the tool alpha in tools:, and the body never names it" - unused
-links_case "a program listed and not named" 1 1 "lists make in requires_host:, and the body never names it" - unused-host
-links_case "a tool named and not listed" 1 1 "names the tool alpha_tool, which tools: does not list" - unlisted-tool
-links_case "a program named and not listed" 1 1 "names the program fls, which requires_host: does not list" - unlisted-host
-links_case "a requires_host entry no pack of the closure requires" 1 1 "lists ghostbin in requires_host:, which no pack of its closure requires" - ghostbin
-links_case "a plain word in prose, a path, a file name or an output block is not the program" 0 0 "" - plain-prose
-links_case "a plain word in code is the program" 1 1 "names the program make, which requires_host: does not list" - plain-code
-links_case "a plain word after a pipe is the program" 1 1 "names the program make, which requires_host: does not list" - plain-pipe
-links_case "a plain word after time is the program" 1 1 "names the program make, which requires_host: does not list" - plain-prefix
-links_case "a plain word by an absolute path is the program" 1 1 "names the program make, which requires_host: does not list" - plain-abs
-links_case "a plain word in a shell block is the program" 1 1 "names the program make, which requires_host: does not list" - plain-fence
-links_case "a plain word in a block with no language is the program" 1 1 "names the program make, which requires_host: does not list" - plain-fence-bare
-links_case "dissect.target is not target" 0 0 "" - dotted
-links_case "vol.py is vol" 1 1 "names the program vol, which requires_host: does not list" - ext
-links_case "a tool no skill names is a report" 0 1 "report - 1 tools no skill of their pack or a dependant names" - lonely-tool
-links_case "a pack that depends on the pack names its tool" 0 0 "report - 0 tools no skill" - shared-tool
-links_case "a program no skill names is a report" 0 1 "base: lonely_bin" - lonely-bin
-links_case "a package no skill names is a report" 0 1 "base: lonelypkg" - lonely-pkg
-links_case "unreferenced_ok answers a program" 0 0 "report - 0 programs and packages" - lonely-bin excuse
-links_case "unreferenced_ok for what the pack does not require" 1 1 "unreferenced_ok names 'nothing_here', which requires/ does not list" - excuse-unknown
-links_case "unreferenced_ok without a why" 1 1 "an unreferenced_ok entry needs a name and a why" - lonely-bin excuse-no-why
-links_case "unreferenced_ok for a program a skill names" 0 1 "report - 1 unreferenced_ok entries a skill names after all" - excuse-named
-links_case "a skill that names nothing of its pack is a report" 0 1 "child: skills/c/bare.md" - bare-skill
+links_case "a clean set of packs" 0 0 "checked 3 packs: 3 skills, 4 tools, 4 programs and packages" 
+links_case "a tool of a pack outside the closure" 1 1 "child: skills/c/one.md names the tool other_tool, which only other carries" closure
+links_case "a name inside a longer name is no mention" 0 0 "" longer
+links_case "a tool listed and not named (alpha is not alpha_tool)" 1 1 "lists the tool alpha in tools:, and the body never names it" unused
+links_case "a program listed and not named" 1 1 "lists make in requires_host:, and the body never names it" unused-host
+links_case "a tool named and not listed" 1 1 "names the tool alpha_tool, which tools: does not list" unlisted-tool
+links_case "a program named and not listed" 1 1 "names the program fls, which requires_host: does not list" unlisted-host
+links_case "a requires_host entry no pack of the closure requires" 1 1 "lists ghostbin in requires_host:, which no pack of its closure requires" ghostbin
+links_case "a plain word in prose, a path, a file name or an output block is not the program" 0 0 "" plain-prose
+links_case "a plain word in code is the program" 1 1 "names the program make, which requires_host: does not list" plain-code
+links_case "a plain word after a pipe is the program" 1 1 "names the program make, which requires_host: does not list" plain-pipe
+links_case "a plain word after time is the program" 1 1 "names the program make, which requires_host: does not list" plain-prefix
+links_case "a plain word by an absolute path is the program" 1 1 "names the program make, which requires_host: does not list" plain-abs
+links_case "a plain word in a shell block is the program" 1 1 "names the program make, which requires_host: does not list" plain-fence
+links_case "a plain word in a block with no language is the program" 1 1 "names the program make, which requires_host: does not list" plain-fence-bare
+links_case "dissect.target is not target" 0 0 "" dotted
+links_case "vol.py is vol" 1 1 "names the program vol, which requires_host: does not list" ext
+links_case "a tool no skill names is a report" 0 1 "report - 1 tools no skill of their pack or a dependant names" lonely-tool
+links_case "a pack that depends on the pack names its tool" 0 0 "report - 0 tools no skill" shared-tool
+links_case "a program no skill names is a report" 0 1 "base: lonely_bin" lonely-bin
+links_case "a package no skill names is a report" 0 1 "base: lonelypkg" lonely-pkg
+links_case "unreferenced_ok answers a program" 0 0 "report - 0 programs and packages" lonely-bin excuse
+links_case "unreferenced_ok for what the pack does not require" 1 1 "unreferenced_ok names 'nothing_here', which requires/ does not list" excuse-unknown
+links_case "unreferenced_ok without a why" 1 1 "an unreferenced_ok entry needs a name and a why" lonely-bin excuse-no-why
+links_case "unreferenced_ok for a program a skill names" 0 1 "report - 1 unreferenced_ok entries a skill names after all" excuse-named
+links_case "a skill that names nothing of its pack is a report" 0 1 "child: skills/c/bare.md" bare-skill
+
+# method_only: a skill that names nothing of its own pack, on purpose
+links_case "method_only answers a skill that names nothing of its pack" 0 0 "report - 0 skills that name nothing" method
+links_case "method_only for a skill that names its pack's tool" 0 1 "report - 1 method_only entries whose skill names a tool or program of its pack after all" method-stale
+links_case "method_only for a skill that names only a dependency's tool" 0 0 "report - 0 method_only entries" method-closure-tool
+links_case "method_only for a skill the pack does not have" 1 1 "method_only names 'skills/c/nowhere.md', which is no skill of the pack" method-unknown
+links_case "method_only without a why" 1 1 "a method_only entry needs a path and a why" method-no-why
+links_case "method_only naming a skill twice" 1 1 "method_only names 'skills/c/bare.md' twice" method-twice
+links_case "method_only that is no list" 1 1 "child: method_only is a list of" method-bare
+# an id or a needs entry is no naming (`id: aws/cloudtrail` does not name the program aws)
+links_case "a skill id that spells a program names nothing" 0 1 "base: idbin" id-spells-program
+links_case "a needs entry that spells a program names nothing" 0 1 "base: needsbin" needs-spells-program
 
 # mentions: what a skill discusses and cannot depend on
-links_case "a mention is exempt from the closure" 0 0 "" - mention
-links_case "a mention need not be in the body" 0 0 "" - mention-unread
-links_case "a mention is exempt from the list" 0 0 "" - mention-unlisted
-links_case "a mentioned program is exempt too" 0 0 "" - mention-bin
-links_case "a mention no pack knows" 1 1 "mentions nowhere_tool, which no pack carries or requires" - mention-nowhere
-links_case "a mention that is also listed" 1 1 "lists alpha_tool in mentions: and in tools: or requires_host:" - mention-and-tool
-links_case "a mention is no naming for the report rules" 0 1 "base: front_tool" - mention-only-front
-links_case "mentions that is no list" 1 1 "child: skills/c/one.md: mentions: is not a .list." - mention-bare
+links_case "a mention is exempt from the closure" 0 0 "" mention
+links_case "a mention need not be in the body" 0 0 "" mention-unread
+links_case "a mention is exempt from the list" 0 0 "" mention-unlisted
+links_case "a mentioned program is exempt too" 0 0 "" mention-bin
+links_case "a mention no pack knows" 1 1 "mentions nowhere_tool, which no pack carries or requires" mention-nowhere
+links_case "a mention that is also listed" 1 1 "lists alpha_tool in mentions: and in tools: or requires_host:" mention-and-tool
+links_case "a mention is no naming for the report rules" 0 1 "base: front_tool" mention-only-front
+links_case "mentions that is no list" 1 1 "child: skills/c/one.md: mentions: is not a .list." mention-bare
 
 # structural
-links_case "a depends id that is no pack" 1 1 "child depends on 'ghost', which is not in packs/" - ghostdep
-links_case "tools without brackets" 1 1 "child: skills/c/one.md: tools: is not a .list." - bare-tools
+links_case "a depends id that is no pack" 1 1 "child depends on 'ghost', which is not in packs/" ghostdep
+links_case "tools without brackets" 1 1 "child: skills/c/one.md: tools: is not a .list." bare-tools
 
-# the golden list
-links_case "a listed finding does not fail the default run" 0 1 "pending - child: 1 finding.s. .closure 1." "$CLOSURE_LINE" closure
-links_case "a new finding in a listed pack fails" 1 1 "lists the tool alpha in tools:, and the body never names it \(it is not on the pending list" "$CLOSURE_LINE" closure unused
-links_case "a new finding in a pack with none listed fails" 1 1 "other: skills/o/one.md lists the tool other_tool in tools:, and the body never names it \(it is not on" "$CLOSURE_LINE" closure other-unused
-links_case "a listed finding that no longer happens fails" 1 0 "pending line 1, .child closure skills/c/one.md other_tool., no longer happens: remove the line" "$CLOSURE_LINE"
-links_case "a line that is not four fields fails" 1 0 "pack-links.pending line 1 is not .pack kind path name." "child closure skills/c/one.md"
-links_case "a line with a kind that is none fails" 1 0 "pack-links.pending line 1 is not .pack kind path name." "child sideways skills/c/one.md other_tool"
-links_case "a line listed twice fails" 1 1 "pack-links.pending line 2 repeats line 1" "$CLOSURE_LINE;$CLOSURE_LINE" closure
-links_case "an unsorted list fails" 1 1 "pack-links.pending line 2 is out of order" "$CLOSURE_LINE;base unused skills/s/one.md alpha" closure
-links_case "a missing list fails" 1 0 "tests/pack-links.pending is missing" @missing
-links_case "comments and blank lines are skipped" 0 1 "pending - child" "# why;;$CLOSURE_LINE" closure
-pass "the checks catch a closure break, an unused, an unlisted or a mentioned name, a bad list, and report the unreachable; the pending list, mentions and unreferenced_ok behave"
+pass "the checks catch a closure break, an unused, an unlisted or a mentioned name, and report the unreachable; mentions, method_only and unreferenced_ok behave"
 
-# --- a pack carrying unreferenced_ok and mentions seals, installs and verifies -
-# The two keys are the pack's own: seal keeps them and says nothing, the index
+# --- a pack carrying unreferenced_ok, method_only and mentions seals, installs and verifies -
+# The three keys are the pack's own: seal keeps them and says nothing, the index
 # comes out, and install and verify take the pack as sealed. The packs are the
 # fixtures' (a base, and a child that depends on it and mentions a program of a
 # pack it does not load), not a shipped pack.
@@ -605,11 +604,13 @@ said="$(bash "$ROOT/scripts/pack.sh" seal "$WORK/seal/base" 2>&1 >/dev/null)" ||
 [[ -z "$said" ]] || fail "a pack with unreferenced_ok seals with a warning: $said"
 [[ "$(jq -c '.unreferenced_ok' "$WORK/seal/base/pack.json")" == '[{"name":"somepkg","why":"a test of the field"}]' ]] || fail "seal dropped unreferenced_ok"
 grep -q '^mentions: \[otherbin\]' "$WORK/seal/child/skills/c/one.md" || fail "the pack to seal carries no mentions"
+jq '.method_only = [{"path": "skills/c/one.md", "why": "a test of the field"}]' "$WORK/seal/child/pack.json" > "$WORK/pj" && mv "$WORK/pj" "$WORK/seal/child/pack.json"
 said="$(bash "$ROOT/scripts/pack.sh" seal "$WORK/seal/child" 2>&1 >/dev/null)" || fail "a pack with a mentions key does not seal: $said"
 [[ -z "$said" ]] || fail "a pack with a mentions key seals with a warning: $said"
+[[ "$(jq -c '.method_only' "$WORK/seal/child/pack.json")" == '[{"path":"skills/c/one.md","why":"a test of the field"}]' ]] || fail "seal dropped method_only"
 grep -q 'c/one' "$WORK/seal/child/skills/INDEX.md" || fail "the index lacks the skill that carries mentions"
 export DFIRSWARM_HOME="$WORK/home"
 said="$(bash "$ROOT/scripts/pack.sh" install "$WORK/seal/base" 2>&1)" || fail "the sealed base does not install: $said"
 said="$(bash "$ROOT/scripts/pack.sh" install "$WORK/seal/child" 2>&1)" || fail "a pack with a mentions key does not install: $said"
 said="$(bash "$ROOT/scripts/pack.sh" verify child 2>&1)" || fail "an installed pack with a mentions key does not verify: $said"
-pass "a pack with unreferenced_ok and a skill with mentions seals without a warning, keeps both, and installs and verifies"
+pass "a pack with unreferenced_ok and method_only and a skill with mentions seals without a warning, keeps them, and installs and verifies"
