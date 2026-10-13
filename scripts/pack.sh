@@ -622,7 +622,9 @@ PYEOF
 check_budgets() { # <pack dir>
   local dir="$1" golden=() out
   [[ -f "$SELF/skill-budgets.py" ]] || return 0
-  [[ -f "$SELF/../tests/skill-budgets.golden" ]] && golden=(--golden "$SELF/../tests/skill-budgets.golden")
+  # PACK_BUDGETS_GOLDEN names another list (tests/skill-budgets.test.sh uses it).
+  local list="${PACK_BUDGETS_GOLDEN:-$SELF/../tests/skill-budgets.golden}"
+  [[ -f "$list" ]] && golden=(--golden "$list")
   out="$("$PY" "$SELF/skill-budgets.py" seal "$dir" --also "$PACKS" ${golden[@]+"${golden[@]}"})" \
     || die "the skill budgets could not be checked: $out"
   "$PY" - "$out" <<'PYEOF'

@@ -92,6 +92,7 @@ M = {
     "leaf-1001": lambda: put("cp", "c/lone", tokens=1002),
     "leaf-1100": lambda: put("cp", "c/lone", tokens=1100),
     "leaf-1200": lambda: put("cp", "c/lone", tokens=1200),
+    "leaf-1300": lambda: put("cp", "c/lone", tokens=1300),
     "router-390": lambda: put("cp", "c/lone", tokens=390, router=True),
     "router-450": lambda: put("cp", "c/lone", tokens=450, router=True),
     # a router is held to 400, not to the leaf's 1,000
@@ -272,3 +273,23 @@ printf '%s\n' "cp leaf c/lone 1050" > "$dir.golden"
 "$PY" "$BUDGETS" seal "$dir/cp" --golden "$dir.golden" > "$WORK/grown.seal" || fail "seal check failed"
 [[ "$(jq '.errors | length' "$WORK/grown.seal")" == 1 ]] || fail "a listed leaf past its ceiling is not refused: $(cat "$WORK/grown.seal")"
 pass "the seal reads the golden list: a listed leaf seals, one past its ceiling is refused, and without the list a leaf over 1,000 tokens is refused"
+
+# A pack written before the rule is resealed for unrelated changes: a leaf over 1,000
+# tokens that the golden list covers seals with a note (the list's), the same leaf grown
+# past its ceiling is refused, and a new leaf over 1,000 tokens is refused.
+case_n=$((case_n + 1)); dir="$WORK/sl$case_n"; mkdir "$dir" && "$PY" "$WORK/fx.py" "$dir" leaf-1200 || fail "could not build the packs"
+printf '%s\n' "cp leaf c/lone 1250" > "$dir.golden"
+got="$(PACK_BUDGETS_GOLDEN="$dir.golden" DFIRSWARM_HOME="$WORK/home" bash "$ROOT/scripts/pack.sh" seal "$dir/cp" 2>&1)" || fail "a golden-covered leaf of 1,200 tokens is refused at the seal: $got"
+grep -q 'budget: cp: 1 known finding.s. are on tests/skill-budgets.golden (leaf 1)' <<<"$got" || fail "the seal did not say the leaf is a known finding: $got"
+grep -q 'budget: cp: c/lone: 1200 tokens, over the 1000 a skill may have; it is on tests/skill-budgets.golden with a ceiling of 1250' <<<"$got" || fail "the seal did not say the ceiling: $got"
+grep -q '^sealed: cp' <<<"$got" || fail "the golden-covered leaf was not sealed: $got"
+case_n=$((case_n + 1)); dir="$WORK/sl$case_n"; mkdir "$dir" && "$PY" "$WORK/fx.py" "$dir" leaf-1300 || fail "could not build the packs"
+printf '%s\n' "cp leaf c/lone 1250" > "$dir.golden"
+got="$(PACK_BUDGETS_GOLDEN="$dir.golden" DFIRSWARM_HOME="$WORK/home" bash "$ROOT/scripts/pack.sh" seal "$dir/cp" 2>&1)" && fail "the leaf grown to 1,300 tokens past its ceiling of 1,250 was sealed: $got"
+grep -q 'refused: cp: c/lone: 1300 tokens.*past the ceiling of 1250 on its golden line 1' <<<"$got" || fail "the refusal does not name the ceiling: $got"
+[[ "$(jq 'has("checksums")' "$dir/cp/pack.json")" == false ]] || fail "a refused seal wrote the checksums"
+case_n=$((case_n + 1)); dir="$WORK/sl$case_n"; mkdir "$dir" && "$PY" "$WORK/fx.py" "$dir" leaf-1100 || fail "could not build the packs"
+printf '%s\n' "bp leaf b/one 1250" > "$dir.golden"
+got="$(PACK_BUDGETS_GOLDEN="$dir.golden" DFIRSWARM_HOME="$WORK/home" bash "$ROOT/scripts/pack.sh" seal "$dir/cp" 2>&1)" && fail "a new leaf of 1,100 tokens (not on the list) was sealed: $got"
+grep -q 'refused: cp: c/lone: 1100 tokens.*not on the golden list' <<<"$got" || fail "the refusal of a new leaf does not say it is not listed: $got"
+pass "a golden-covered leaf over 1,000 tokens seals with a note, the same leaf past its ceiling and a new leaf over 1,000 are refused"

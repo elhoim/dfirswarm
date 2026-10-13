@@ -368,6 +368,10 @@ def cmd_seal(args):
             continue
         warnings.append(e["text"] + " (tests/skill-budgets.test.sh fails on it)")
     listed = [e for e in errors if (e["pack"], e["kind"], e["id"]) in golden and e["value"] <= golden[(e["pack"], e["kind"], e["id"])][0]]
+    for e in listed:
+        if e["kind"] in ("leaf", "router"):
+            warnings.append("%s: %s: %.0f tokens, over the %d a skill may have; it is on tests/skill-budgets.golden with a ceiling of %d, which it may not pass"
+                            % (e["pack"], e["id"], e["value"], LEAF_REFUSE if e["kind"] == "leaf" else ROUTER_MAX, golden[(e["pack"], e["kind"], e["id"])][0]))
     if listed:
         kinds = {}
         for e in listed:
