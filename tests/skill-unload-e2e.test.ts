@@ -115,8 +115,9 @@ async function runSeat(name: string, options: { model: string; release?: string;
     },
     logFile: d.logFile,
   });
-  const readRows = () => (existsSync(join(d.root, EVENTS_REL)) ? readFileSync(join(d.root, EVENTS_REL), "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l) as Row) : []);
-  const requests = () => fakeRecords(d).filter((r) => r.kind === "turn").length;
+  // These two are read while the seat is still running and appending: only a whole line is read (a torn tail is the next poll's).
+  const readRows = () => (existsSync(join(d.root, EVENTS_REL)) ? wholeLines(readFileSync(join(d.root, EVENTS_REL), "utf8")).map((l) => JSON.parse(l) as Row) : []);
+  const requests = () => fakeRecords(d, true).filter((r) => r.kind === "turn").length;
   const until = async (ok: () => boolean, what: string, ms = 60_000) => {
     for (let waited = 0; !ok() && waited < ms; waited += 25) await new Promise((r) => setTimeout(r, 25));
     assert.ok(ok(), `timed out waiting for ${what}`);
@@ -159,9 +160,32 @@ async function runSeat(name: string, options: { model: string; release?: string;
   return run;
 }
 
-function fakeRecords(d: Dir): Array<Turn | Summary> {
-  return existsSync(d.fakeTrace) ? readFileSync(d.fakeTrace, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l) as Turn | Summary) : [];
+/**
+ * The complete lines of a file that a running process appends to. A read can land between the first byte of a line and its newline: the
+ * text after the last newline is a line still being written, and parsing it throws. Once the writer has exited the whole file is read,
+ * strictly: a torn last line there is a real failure.
+ */
+function wholeLines(text: string): string[] {
+  const lines = text.split("\n");
+  lines.pop(); // what follows the last newline: empty when the file ends whole, else a line in the making
+  return lines.filter((l) => l.trim());
 }
+
+function fakeRecords(d: Dir, live = false): Array<Turn | Summary> {
+  if (!existsSync(d.fakeTrace)) return [];
+  const text = readFileSync(d.fakeTrace, "utf8");
+  return (live ? wholeLines(text) : text.trim().split("\n").filter(Boolean)).map((l) => JSON.parse(l) as Turn | Summary);
+}
+
+test("a read of a file that is still being appended to takes the whole lines and leaves the torn one", () => {
+  const whole = `${JSON.stringify({ a: 1 })}\n${JSON.stringify({ b: "two" })}\n`;
+  const torn = `${whole}{"c":"thr`;
+  assert.deepEqual(wholeLines(whole).map((l) => JSON.parse(l)), [{ a: 1 }, { b: "two" }]);
+  assert.deepEqual(wholeLines(torn).map((l) => JSON.parse(l)), [{ a: 1 }, { b: "two" }], "the line in the making is not parsed");
+  assert.deepEqual(wholeLines(""), []);
+  assert.deepEqual(wholeLines("\n\n"), [], "blank lines are nothing");
+  assert.throws(() => torn.trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)), SyntaxError, "the strict read of the same text fails: what the polling reads used to do");
+});
 
 const rowsOf = (run: Run, tool: string) => run.rows.filter((r) => r.tool === tool);
 const skillResultsIn = (turn: Turn) => turn.messages.filter((m) => m.role === "toolResult" && m.toolName === "skill").map((m) => m.text);
