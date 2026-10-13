@@ -44,7 +44,8 @@ says so: a carve is a candidate with `boundary: validated` or `heuristic`, a
 scan returns locators and not the bytes around a hit (those go to a sealed
 file only when a job asks, with `secret_output`), a run that ended part way is
 `partial` with the exit codes of its stages, and a count never depends on how
-the file was read. A tool with a time budget of its own keeps that budget
+the file was read (`ioc_scan`, `chunk_needles` and `sig_carve` find their matches with one shared engine,
+held equal in the three by a test and to a brute-force search over every way of cutting a stream into reads). A tool with a time budget of its own keeps that budget
 inside the manifest's limit, so reaching it is reported (`partial`, `not_checked`,
 `interrupted`) and is not a kill with nothing said. `sqlite_query` reads the main
 database file and reports a write-ahead log beside it without applying it;
