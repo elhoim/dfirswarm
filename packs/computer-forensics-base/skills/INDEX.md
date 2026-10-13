@@ -2,6 +2,9 @@
 
 Fetch a body with `skill("<id>")`. A body may name others; fetch those the same way.
 
+- `data/sqlite` A SQLite database is a set of files: A SQLite database to read, with or without a -wal, -shm or -journal beside it.
+- `evidence/ad1` An AD1 image is a collection in a container: Evidence is an FTK Imager logical image (.ad1).
+- `evidence/archives` Archives and extraction fidelity: A zip, tar, 7z or compressed file whose members you need as files.
 - `evidence/catalog` Use the catalogue with its coverage and revision: At the start, before repeating preparation, interpreting a listing, or reporting a catalogue search.
 - `evidence/collections` Establish what a logical collection actually contains: Evidence arrives as copied files, an archive or an AD1 logical image.
 - `evidence/imaging` Identify the container, storage layers and address space: Before listing a disk or volume, converting a container, or diagnosing an unreadable source.

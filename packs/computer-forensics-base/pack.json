@@ -16,7 +16,7 @@
   "checksums": {
     "sha256": {
       "LICENCE": "1df0d6665bd036fc44a288726c699f4955ce7e17e3248a88a58dc38819203250",
-      "README.md": "c98ddccd7ea2d471bbe904fcb04f5803d0831a252b2a2ba57b43e479bb86c43a",
+      "README.md": "e4df47e67a8194e4ef33885ed1e5b34fdf8cd457ca25a0fa0353a9cff52ef3d5",
       "tools/image_layout/manifest.json": "a14059c9b70056357766492b45e54b6ecb60bca0252fd00a2f4463df948ee589",
       "tools/image_layout/run.py": "f697a814e00af50644da5d071f4f8f749249631a6e1077d4e20272aaedf44482",
       "tools/file_carver/manifest.json": "8a694bf0247bb8dbddcaaee988dc3c90ccbeae387133a982a010d1f27c193248",
@@ -82,18 +82,21 @@
       "recipes/archive-members/run.py": "26e88b58f7051e257c494a6f4655df9d77de22fcd9413f5c687225dae89a0a0e",
       "skills/reporting/citations.md": "49c1f131b6354dfe89acc03aa9b9882e66e504de0cd586b82a562ea4f0876ef7",
       "skills/reporting/disagreement.md": "de30b9cbb6bfd9763f01974f5deccb41e154556e9b96e3be91d67dd07309ad38",
+      "skills/evidence/ad1.md": "058097c0ea451441f18df6e3183c0e672a0d7e65e9f71aae827846eb411adbe8",
+      "skills/evidence/archives.md": "b01dbad7cc5461e4b824e16ff2886d285d7fb1f7193766ffb73de61e43317b9b",
       "skills/evidence/catalog.md": "96437aa93389248a9b4db142a20be7dbbb9df8610084bf580a8e4a7d6f123e48",
-      "skills/evidence/collections.md": "11948a60ad1e952c569e762b4d6c78b93ca16c750ce45e96258770ab773d2961",
+      "skills/evidence/collections.md": "6f11064ae8bada51a86806e1b8543cbbe66d9d5ef5206885f59b9e76ce8a9000",
       "skills/evidence/imaging.md": "5b6eb0952cdd502843966c90be7fdfb3bd0ad89371f8b2dc28fa5ca07965f090",
       "skills/evidence/verify.md": "40f355a05dbf2e93d8fa91031fafec84d519ccfd0dcc7516d17a2e884caf68fe",
       "skills/filesystem/carving.md": "0d39b2c462bf9fa3aaec9b44d0ba94d9d9725ff3b258f05338685ebea2e7464a",
       "skills/filesystem/encrypted.md": "11bf85f38d8c5ab201c534074c5441ed039cc8b79020f7cd1eff83f5fe0bda8f",
-      "skills/filesystem/extract.md": "171ba2523c9779cfd23ee519b73416a0d923d4109a64db8cd8c2df588835b5df",
+      "skills/filesystem/extract.md": "8a05c94d3fb9577e27457383d655523baa1bb5e573462e101ab17be832d29f31",
+      "skills/data/sqlite.md": "2401040bf45219294a6401d5146091142289d68114de55dedd784df51fa2ea1d",
       "skills/timeline/build.md": "183f4672ad13c22acaf64c85fa9fa7422cdc87b84c0175dc3b07bb99cf7a3223",
       "skills/timeline/super.md": "f2134d6d0a7851c83a7d9cacec933b90eae610e24f9b8419d6f03c933192abf7",
       "requires/host.json": "9c93c8306c96e4259aa50ca874e8a210c5a2b9b5d6e6fd4f3db3fd2e2f7421e1",
       "requires/python.txt": "e045dd44c9347ec21afa34ac093ea33e15085d64744758eb3d5b6b970884ab24",
-      "skills/INDEX.md": "e34958f6e8a9fa33139d0a8ea362ea86cbe7e1f517dc633158594d1c50720984"
+      "skills/INDEX.md": "6bb4fe0391a91c74e353bbd3bb095e07273ca20f127249a6e58c3ee70e8d0b3d"
     }
   },
   "tools": [
@@ -114,7 +117,7 @@
     "timeline_super",
     "timestamp_decode"
   ],
-  "skills": 11,
+  "skills": 14,
   "recipes": [
     "computer-forensics-base/ad1-items",
     "computer-forensics-base/archive-members",
@@ -138,6 +141,16 @@
     {
       "name": "ccl_indexeddb_dump",
       "why": "declared for the browser structured-storage wrapper and skill planned for a later change; no skill of this pack names it yet"
+    }
+  ],
+  "method_only": [
+    {
+      "path": "skills/reporting/citations.md",
+      "why": "a method skill about recording and citing a claim; the ledger, the job references and the review acts it describes are the harness's, not a tool or program of this pack"
+    },
+    {
+      "path": "skills/reporting/disagreement.md",
+      "why": "a method skill about disputing and correcting an entry; `dispute`, `record`, `veto` and `finish` are the harness's acts, not a tool or program of this pack"
     }
   ]
 }

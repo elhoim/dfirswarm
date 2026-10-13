@@ -324,6 +324,9 @@ directory named for the pack id is refused.
       "unreferenced_ok": [
         { "name": "olefile", "why": "imported by a tool of the pack; no skill runs it" }
       ],
+      "method_only": [
+        { "path": "skills/execution/overview.md", "why": "weighs the execution sources against each other; names no tool" }
+      ],
       "secrets": [
         { "name": "VT_API_KEY", "title": "VirusTotal API key", "required": false,
           "why": "Reputation lookups on hashes the case finds.",
@@ -335,7 +338,8 @@ directory named for the pack id is refused.
 `depends` is resolved at install. A pack whose dependency is missing is refused,
 named, with the version it wanted. `unreferenced_ok` is optional: a program or
 Python package the pack requires and no skill names, with the reason (section 8,
-"Requires and images").
+"Requires and images"). `method_only` is optional too: a skill that names nothing
+of its own pack on purpose, with the reason (section 8, "Links").
 
 ### Versions
 
@@ -524,7 +528,7 @@ result.
 ## 7. The packs in this repository
 
 Twelve, all under the same AGPL-3.0-or-later as the harness, in `packs/`:
-159 skills, 70 tools and 14 goal templates. Every one of them is sealed,
+162 skills, 72 tools and 14 goal templates. Every one of them is sealed,
 checksummed, and installs and verifies in the test suite.
 
 | Pack | Skills | Tools | Goals | What it is for |
@@ -623,8 +627,9 @@ A pack is read by an agent in the middle of a case, with nothing to go on but
 what a skill says and what a tool prints. What follows is what every skill,
 tool and requirements file in a pack is held to, so that a result built on a
 pack's word is one a reader can check. `tests/pack-tools.test.sh`,
-`tests/pack-links.test.sh`, `tests/packs.test.sh` and `tests/recipe.test.sh`
-hold the parts a test can hold; the rest is for the author.
+`tests/pack-links.test.sh`, `tests/skill-budgets.test.sh`, `tests/packs.test.sh`
+and `tests/recipe.test.sh` hold the parts a test can hold; the rest is for the
+author.
 
 ### Voice and method in skills
 
@@ -800,10 +805,91 @@ header says how it matches a name and where that is wrong.
    `tools:` or `requires_host:`. A mention is no use: it is exempt from the rules
    above, and it satisfies none of the next.
 3. **Everything a pack ships is reached.** Every bundled tool is named by at
-   least one skill of its pack, or of a pack that depends on it. Every skill
-   that depends on a capability names the tool that provides it. A capability
-   a skill needs and no tool provides is either added as a tool or taken out
-   of the skill.
-4. **The pack that owns a tool ships it.** Another pack names the tool and
+   least one skill of its pack, or of a pack that depends on it. Every program
+   and Python package in `requires` is named by such a skill, or is listed in
+   `unreferenced_ok` with the reason no skill names it. Every skill that depends
+   on a capability names the tool that provides it. A capability a skill needs
+   and no tool provides is either added as a tool or taken out of the skill.
+   What counts as a naming is the skill's text, front matter included, without
+   `mentions:`, `id:` and `needs:`: an id is a path (`id: aws/cloudtrail`) and
+   does not name the program `aws`.
+4. **A skill names something of its own pack, or says why it does not.** Every
+   skill names at least one tool, program or package of the pack that ships it.
+   A skill that legitimately names none (a method leaf about citing a claim,
+   weighing sources or notifying a regulator, whose acts are the harness's or
+   whose readers are in other leaves) is listed in `pack.json`'s `method_only`:
+
+       "method_only": [
+         { "path": "skills/reporting/for-regulators.md", "why": "a reporting method leaf; it names no tool or program" }
+       ]
+
+   The field is optional and written by hand; `path` is a skill of the pack as
+   `skills/<id>.md`, and `why` says why the skill names nothing. It is the
+   counterpart of `unreferenced_ok`: a skill that names a tool or program of its
+   own pack after all is a finding (the exemption is stale, take it out). A
+   skill that names only a tool of a pack it depends on is still a method leaf of
+   its own pack, and is listed. Do not add a reference to a tool the skill does
+   not use to quiet the check; list the skill. Sealing keeps the field, and
+   changing it raises the pack's version like any other change.
+5. **The pack that owns a tool ships it.** Another pack names the tool and
    lists the owner in `depends`; it does not carry a copy (see "Two rules the
    set holds to").
+
+The suite fails on every rule above, the "reached" ones (3 and 4) included.
+`PACK_LINKS_STRICT=0 bash tests/pack-links.test.sh` prints those two as reports and
+does not fail on them, for trying something locally; CI runs the default.
+
+### Skill size
+
+A skill is read whole, in the middle of a case, and stays in the agent's context
+until it is released or compacted away; a pack whose skills grow makes every
+seat that loads it slower and dearer. So the size is held, in one program,
+`scripts/skill-budgets.py`, which `pack.sh seal` runs before it writes anything
+and `tests/skill-budgets.test.sh` runs over every pack. A token is estimated as
+bytes over 4.245 of the whole file, front matter included (the program has no
+tokenizer; the estimate is the one the harness's index budget uses).
+
+| Budget | Limit | What happens past it |
+|---|---|---|
+| a leaf (a skill) | 800 tokens | a warning from 800; **seal refuses** above 1,000 |
+| a router (`router: true`) | 400 tokens | a finding |
+| a skill file | 300 lines | a finding |
+| an index entry (its line in `skills/INDEX.md`) | 40 tokens | a finding: shorten `title` or `when` |
+| `needs` depth | 2 | a finding (a loop in `needs` is one too) |
+| the needs chain | 1,900 tokens | a finding; a warning within 150 of it |
+
+At the seal only a skill over 1,000 tokens (or a router over 400) is refused;
+every other finding and warning is printed as a `budget:` line, and it is
+`tests/skill-budgets.test.sh` that fails on a finding.
+
+The chain of a skill is the skill and every skill its `needs` reach, counted once
+each, across the pack's `depends` (a `needs` id is looked up in the pack, then in
+the packs it depends on; `pack:id` names one). It is 100 under the 2,000 the
+pack tests allowed, so that a base skill can grow a little. A chain within 150
+tokens of 1,900 is a warning that lists the skills it is made of and says by how
+much growing any of them pushes it over; and for a skill of another pack in the
+chain (a base skill) it says which dependants that growth would push over, so
+whoever edits the base pack sees them when sealing it. Packs have broken that
+way before: a base skill grew, and the chain tests of other packs failed.
+
+How to write to the budget: one decision-rule leaf per artefact question; the
+reference material (field tables, version notes, long examples) goes to a
+second-level leaf the first one points to ("only if X"), not into it. A leaf
+starts with "Use when ... Not for ..." (the index line is derived from it), then
+the decision rules, then what it shows, what it does not show, what to record
+and what is sensitive, in the shortest form that keeps the content. The content
+survives; it is spread over leaves, not cut. A router is the one note of a pack
+that says which other note answers which question; it is what a run shows in the
+prompt when the pack's index is over budget.
+
+**Findings that already exist.** Some shipped skills are over a budget. They are
+listed in `tests/skill-budgets.golden`, one line per finding: `pack kind skill
+ceiling`, the kinds `leaf`, `router`, `lines`, `entry`, `depth` and `chain`. The
+ceiling is the most that value may be, so a listed skill cannot get worse: past
+its ceiling it fails, and a skill that is brought within the budget no longer
+happens, so its line has to go (the check fails a stale line). The list only
+shrinks. `python3 scripts/skill-budgets.py golden` prints it for the packs as
+they are. `pack.sh seal` reads it by pack id and refuses a listed leaf only once it has
+grown past its ceiling; a pack of another id has no listed findings, and a leaf
+over 1,000 tokens in it is refused. New and changed skills
+are written to the budget; a finding is not added to the list to get a change in.

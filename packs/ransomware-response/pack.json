@@ -1,7 +1,7 @@
 {
   "id": "ransomware-response",
   "name": "Ransomware Response Pack",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Evidence-led ransomware examination: preserve and scope the incident, reconstruct its phases, assess possible exfiltration and recovery impairment, identify supported family candidates, validate recovery options, and prepare qualified findings for notification and response decisions.",
   "licence": "AGPL-3.0-or-later",
   "authors": [
@@ -14,6 +14,20 @@
     "host": "requires/host.json",
     "python": "requires/python.txt"
   },
+  "method_only": [
+    {
+      "path": "skills/encryptor/destroyed-backups.md",
+      "why": "a method leaf about recovery impairment; the pack's tools survey encrypted files and ransom notes, and the shadow-copy reader it points to (`vss_stores`) belongs to the windows-forensics pack and is only mentioned"
+    },
+    {
+      "path": "skills/exfil/before-encryption.md",
+      "why": "a method leaf about whether data left; none of the pack's tools reads a transfer, and the readers it points to (`esedb_query` of windows-forensics, the skills of network-forensics) belong to other packs and are only mentioned"
+    },
+    {
+      "path": "skills/reporting/for-regulators.md",
+      "why": "a notification and reporting method leaf for legal, regulatory and insurance review; it works from the ledger and names no tool or program"
+    }
+  ],
   "secrets": [],
   "checksums": {
     "sha256": {
