@@ -36,8 +36,9 @@ skill's value (tokens, lines, depth) may be: a skill that grows past it fails,
 one that shrinks and is still over keeps its line, and one that is within the
 budget no longer happens, so its line has to go. `golden` writes the ceiling a
 little above the value (a multiple of 25 tokens or 10 lines, with at least half
-that much room) so that a typo fix is not a failure. `seal` reads the list only for a pack that lives in this checkout's
-packs/ (pack.sh passes --golden then); a pack of anyone else's has no list.
+that much room) so that a typo fix is not a failure. `seal` reads the list by pack id
+(pack.sh passes --golden), so a copy of a shipped pack seals as the pack does and
+a pack of another id has no listed findings.
 
 Stdlib only, Python 3.8 or later.
 """

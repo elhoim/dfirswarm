@@ -234,31 +234,31 @@ $got"
   LAST="$got"; LAST_DIR="$dir"
 }
 seal_case "a pack within every budget seals" 0 "^sealed: cp 1.0.0, 2 skills"
-absent "a clean seal" "warning"
+absent "a clean seal" "budget:|warning"
 jq -e '.checksums.sha256["skills/INDEX.md"]' "$LAST_DIR/cp/pack.json" >/dev/null || fail "the clean pack was not sealed"
-seal_case "800 to 1,000 tokens seals, with a warning" 0 "warning: cp: c/lone: 900 tokens, over the leaf budget of 800" leaf-900
+seal_case "800 to 1,000 tokens seals, with a warning" 0 "budget: cp: c/lone: 900 tokens, over the leaf budget of 800" leaf-900
 seal_case "over 1,000 tokens is refused" 1 "refused: cp: c/lone: 1100 tokens, over the 1000 a skill may have" leaf-1100
 grep -q 'BLOCKER: a skill is over its size budget' <<<"$LAST" || fail "the refusal does not say why: $LAST"
 [[ "$(jq 'has("checksums")' "$LAST_DIR/cp/pack.json")" == false ]] || fail "a refused seal wrote the checksums"
 [[ ! -e "$LAST_DIR/cp/skills/INDEX.md" ]] || fail "a refused seal wrote the index"
 seal_case "a router over 400 tokens is refused" 1 "refused: cp: c/lone: the router is 450 tokens" router-450
-seal_case "the other budgets are warnings at the seal" 0 "warning: cp: c/a: .needs. reaches 3 deep, over 2 .tests/skill-budgets.test.sh fails on it." depth-3
-seal_case "a chain over the limit is a warning at the seal" 0 "warning: cp: c/one: its needs chain is [0-9]+ tokens, over 1900" chain-over
-seal_case "a chain near the limit warns, naming the skills" 0 "warning: cp: c/one: its needs chain is .*made of c/one \(650\), bp:b/two \(600\), bp:b/one \(600\)" chain-near
+seal_case "the other budgets are warnings at the seal" 0 "budget: cp: c/a: .needs. reaches 3 deep, over 2 .tests/skill-budgets.test.sh fails on it." depth-3
+seal_case "a chain over the limit is a warning at the seal" 0 "budget: cp: c/one: its needs chain is [0-9]+ tokens, over 1900" chain-over
+seal_case "a chain near the limit warns, naming the skills" 0 "budget: cp: c/one: its needs chain is .*made of c/one \(650\), bp:b/two \(600\), bp:b/one \(600\)" chain-near
 
 # The base pack's seal says what its growth did to the packs that depend on it.
 case_n=$((case_n + 1)); dir="$WORK/sl$case_n"; mkdir "$dir" && "$PY" "$WORK/fx.py" "$dir" chain-grown || fail "could not build the packs"
 got="$(DFIRSWARM_HOME="$WORK/home" bash "$ROOT/scripts/pack.sh" seal "$dir/bp" 2>&1)" || fail "the base pack does not seal: $got"
-grep -qE "warning: cp: c/one: its needs chain is [0-9]+ tokens, over 1900, and it reaches skills of this pack \(b/two, b/one\)" <<<"$got" || fail "sealing the base said nothing of the dependant its growth put over the limit:
+grep -qE "budget: cp: c/one: its needs chain is [0-9]+ tokens, over 1900, and it reaches skills of this pack \(b/two, b/one\)" <<<"$got" || fail "sealing the base said nothing of the dependant its growth put over the limit:
 $got"
 case_n=$((case_n + 1)); dir="$WORK/sl$case_n"; mkdir "$dir" && "$PY" "$WORK/fx.py" "$dir" chain-near || fail "could not build the packs"
 got="$(DFIRSWARM_HOME="$WORK/home" bash "$ROOT/scripts/pack.sh" seal "$dir/bp" 2>&1)" || fail "the base pack does not seal: $got"
-grep -qE "warning: bp: b/two \([0-9]+ tokens\) is in the needs chain of 1 skill.s. of other packs within 150 tokens of the 1900 limit: growing it by more than [0-9]+ tokens pushes it over - cp c/one" <<<"$got" || fail "sealing the base did not name the skill whose growth would push the dependant over:
+grep -qE "budget: bp: b/two \([0-9]+ tokens\) is in the needs chain of 1 skill.s. of other packs within 150 tokens of the 1900 limit: growing it by more than [0-9]+ tokens pushes it over - cp c/one" <<<"$got" || fail "sealing the base did not name the skill whose growth would push the dependant over:
 $got"
 pass "sealing refuses a skill over 1,000 tokens (and a router over 400) before it writes anything, says every other budget as a warning, and tells the base pack what its growth does to a dependant"
 
-# A pack of this checkout seals under its golden list: one with a listed leaf over
-# 1,000 tokens seals, and the same skill outside the checkout is refused.
+# A shipped pack seals under its golden list: one with a listed leaf over 1,000
+# tokens seals, and the same skill with no list is refused.
 "$PY" "$BUDGETS" seal "$ROOT/packs/computer-forensics-base" --golden "$ROOT/tests/skill-budgets.golden" > "$WORK/base.seal" || fail "the seal check failed on the base pack"
 [[ "$(jq '.errors | length' "$WORK/base.seal")" == 0 ]] || fail "the base pack's listed findings are refused at the seal: $(cat "$WORK/base.seal")"
 jq -e '.warnings | map(select(test("known finding.s. are on tests/skill-budgets.golden"))) | length == 1' "$WORK/base.seal" >/dev/null || fail "the seal did not say that the base pack has known findings: $(cat "$WORK/base.seal")"
@@ -271,4 +271,4 @@ printf '%s\n' "cp leaf c/lone 1125" > "$dir.golden"
 printf '%s\n' "cp leaf c/lone 1050" > "$dir.golden"
 "$PY" "$BUDGETS" seal "$dir/cp" --golden "$dir.golden" > "$WORK/grown.seal" || fail "seal check failed"
 [[ "$(jq '.errors | length' "$WORK/grown.seal")" == 1 ]] || fail "a listed leaf past its ceiling is not refused: $(cat "$WORK/grown.seal")"
-pass "the seal reads the golden list for a pack of this checkout: a listed leaf seals, one past its ceiling is refused, and without the list a leaf over 1,000 tokens is refused"
+pass "the seal reads the golden list: a listed leaf seals, one past its ceiling is refused, and without the list a leaf over 1,000 tokens is refused"

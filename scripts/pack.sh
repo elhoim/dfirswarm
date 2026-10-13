@@ -615,22 +615,21 @@ PYEOF
 
 # The size budgets of a pack's skills (scripts/skill-budgets.py, docs/packs.md,
 # "Skill size"). Sealing refuses a skill over 1,000 tokens and says the rest as
-# warnings; it runs before the seal writes anything, so a refusal leaves the pack
-# as it was. The known findings of the packs of this checkout are the golden
-# list's; a pack anywhere else has none.
+# `budget:` lines, advice unlike the validator's warnings. It runs before the
+# seal writes anything, so a refusal leaves the pack as it was. The known findings
+# of the shipped packs are the golden list's, read by pack id wherever the pack's
+# copy is; a pack of another id has none.
 check_budgets() { # <pack dir>
-  local dir="$1" golden=() out here parent
+  local dir="$1" golden=() out
   [[ -f "$SELF/skill-budgets.py" ]] || return 0
-  parent="$(cd "$dir/.." && pwd -P)"; here="$(cd "$SELF/../packs" 2>/dev/null && pwd -P || true)"
-  [[ -n "$here" && "$parent" == "$here" && -f "$SELF/../tests/skill-budgets.golden" ]] \
-    && golden=(--golden "$SELF/../tests/skill-budgets.golden")
+  [[ -f "$SELF/../tests/skill-budgets.golden" ]] && golden=(--golden "$SELF/../tests/skill-budgets.golden")
   out="$("$PY" "$SELF/skill-budgets.py" seal "$dir" --also "$PACKS" ${golden[@]+"${golden[@]}"})" \
     || die "the skill budgets could not be checked: $out"
   "$PY" - "$out" <<'PYEOF'
 import json, sys
 d = json.loads(sys.argv[1])
 for w in d["warnings"]:
-    print("  warning: %s" % w, file=sys.stderr)
+    print("  budget: %s" % w, file=sys.stderr)
 for e in d["errors"]:
     print("  refused: %s" % e, file=sys.stderr)
 sys.exit(1 if d["errors"] else 0)

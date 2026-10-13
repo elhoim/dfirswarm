@@ -854,6 +854,10 @@ tokenizer; the estimate is the one the harness's index budget uses).
 | `needs` depth | 2 | a finding (a loop in `needs` is one too) |
 | the needs chain | 1,900 tokens | a finding; a warning within 150 of it |
 
+At the seal only a skill over 1,000 tokens (or a router over 400) is refused;
+every other finding and warning is printed as a `budget:` line, and it is
+`tests/skill-budgets.test.sh` that fails on a finding.
+
 The chain of a skill is the skill and every skill its `needs` reach, counted once
 each, across the pack's `depends` (a `needs` id is looked up in the pack, then in
 the packs it depends on; `pack:id` names one). It is 100 under the 2,000 the
@@ -881,7 +885,7 @@ ceiling is the most that value may be, so a listed skill cannot get worse: past
 its ceiling it fails, and a skill that is brought within the budget no longer
 happens, so its line has to go (the check fails a stale line). The list only
 shrinks. `python3 scripts/skill-budgets.py golden` prints it for the packs as
-they are. `pack.sh seal` reads it for the packs of this checkout and refuses a
-listed leaf only once it has grown past its ceiling; for a pack anywhere else
-there is no list, and a leaf over 1,000 tokens is refused. New and changed skills
+they are. `pack.sh seal` reads it by pack id and refuses a listed leaf only once it has
+grown past its ceiling; a pack of another id has no listed findings, and a leaf
+over 1,000 tokens in it is refused. New and changed skills
 are written to the budget; a finding is not added to the list to get a change in.
