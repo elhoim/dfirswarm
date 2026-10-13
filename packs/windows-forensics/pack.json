@@ -1,7 +1,7 @@
 {
   "id": "windows-forensics",
   "name": "Windows Forensics Pack",
-  "version": "1.5.0",
+  "version": "1.5.1",
   "description": "Artefact-by-artefact method and tooling for a Windows examination: the file system and its journals, the hives, execution evidence, the event logs and the records inside a cleared one, accounts and remote access, persistence, PowerShell, browsers, shadow copies, memory, and the traces anti-forensics leaves.",
   "licence": "AGPL-3.0-or-later",
   "authors": [
@@ -27,6 +27,12 @@
     {
       "name": "dpapick3",
       "why": "declared before this review for credential-store work; no skill may name it while the owner has not decided whether the pack keeps it (credential tooling is out of scope of this change, and the entry is left exactly as it was)"
+    }
+  ],
+  "method_only": [
+    {
+      "path": "skills/execution/overview.md",
+      "why": "a method leaf that weighs the execution sources against each other; the readers are in the leaves it points to, and it names no tool or program"
     }
   ],
   "checksums": {

@@ -613,9 +613,34 @@ for e in d.get("errors", []):
 PYEOF
 }
 
+# The size budgets of a pack's skills (scripts/skill-budgets.py, docs/packs.md,
+# "Skill size"). Sealing refuses a skill over 1,000 tokens and says the rest as
+# warnings; it runs before the seal writes anything, so a refusal leaves the pack
+# as it was. The known findings of the packs of this checkout are the golden
+# list's; a pack anywhere else has none.
+check_budgets() { # <pack dir>
+  local dir="$1" golden=() out here parent
+  [[ -f "$SELF/skill-budgets.py" ]] || return 0
+  parent="$(cd "$dir/.." && pwd -P)"; here="$(cd "$SELF/../packs" 2>/dev/null && pwd -P || true)"
+  [[ -n "$here" && "$parent" == "$here" && -f "$SELF/../tests/skill-budgets.golden" ]] \
+    && golden=(--golden "$SELF/../tests/skill-budgets.golden")
+  out="$("$PY" "$SELF/skill-budgets.py" seal "$dir" --also "$PACKS" ${golden[@]+"${golden[@]}"})" \
+    || die "the skill budgets could not be checked: $out"
+  "$PY" - "$out" <<'PYEOF'
+import json, sys
+d = json.loads(sys.argv[1])
+for w in d["warnings"]:
+    print("  warning: %s" % w, file=sys.stderr)
+for e in d["errors"]:
+    print("  refused: %s" % e, file=sys.stderr)
+sys.exit(1 if d["errors"] else 0)
+PYEOF
+}
+
 cmd_seal() {
   local dir="${1:?pack directory}"
   [[ -d "$dir" ]] || die "$dir is not a directory"
+  check_budgets "$dir" || die "a skill is over its size budget"
   local out; out="$(validate "$dir" seal)" || { show_problems "$out"; die "the pack does not validate"; }
   show_problems "$out"
   echo "sealed: $("$PY" -c 'import json,sys;d=json.loads(sys.argv[1]);print("%s %s, %d skills, %d tools" % (d["id"], d["version"], d["skills"], len(d["tools"])))' "$out")"
