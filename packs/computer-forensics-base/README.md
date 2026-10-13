@@ -11,7 +11,7 @@ Platform-specific artefact knowledge lives in the packs that depend on this one.
 
 ## What it carries
 
-**Eleven skills**, fetched one at a time by the agents that need them:
+**Thirteen skills**, fetched one at a time by the agents that need them:
 
 | | |
 | --- | --- |
@@ -19,6 +19,8 @@ Platform-specific artefact knowledge lives in the packs that depend on this one.
 | `evidence/imaging` | the container, the storage layers, the address space and the offset every command needs |
 | `evidence/catalog` | read the catalogue with its coverage and revision before you spend a token |
 | `evidence/collections` | the evidence is a zip, a directory tree or an AD1, not a disk: what it contains and what it cannot show |
+| `evidence/archives` | a zip, tar, 7z or compressed file: list it, extract it under budgets, never recreate a link, keep every name |
+| `evidence/ad1` | an FTK Imager logical image: list, extract and corroborate it |
 | `filesystem/extract` | get a file out of an image, and say which record it came from |
 | `filesystem/carving` | recover candidate structures where there is no file system, and say how far to trust them |
 | `filesystem/encrypted` | a volume the toolkit cannot read: encryption is one explanation among several |
@@ -27,14 +29,17 @@ Platform-specific artefact knowledge lives in the packs that depend on this one.
 | `reporting/citations` | every claim resolves to an inspectable observation, and a negative is bounded |
 | `reporting/disagreement` | disputing, correcting and republishing, through the ledger's own acts |
 
-**Fourteen tools**: `image_layout`, `check_inputs`, `catalog_search`,
+**Fifteen tools**: `image_layout`, `check_inputs`, `catalog_search`,
 `icat_extract`, `sig_carve`, `file_carver`, `ioc_scan`, `chunk_needles`,
 `file_type`, `sqlite_query`, `feature_scan`, `timeline_super`,
-`timestamp_decode`, `ad1_extract`. `file_type` to `timestamp_decode` arrived
+`timestamp_decode`, `ad1_extract`, `archive_extract`. `file_type` to `timestamp_decode` arrived
 with the packs that depend on this one: a tool every pack would have carried
 belongs here once, not in each of them. `ad1_extract` writes an AccessData
 AD1 logical image's files out, checked against the digests the image
-records; run as a job, what it writes is catalogued in turn.
+records; run as a job, what it writes is catalogued in turn. `archive_extract`
+writes the members of a zip, tar (gzip, bzip2, xz, zstd), 7z or single compressed
+file into a private directory under byte, ratio, member, depth and time budgets, and never
+recreates a link or a device.
 Every one takes JSON on stdin and returns JSON, and every call lands on the
 run's trace under the calling agent's name. What they return is bounded and
 says so: a carve is a candidate with `boundary: validated` or `heuristic`, a

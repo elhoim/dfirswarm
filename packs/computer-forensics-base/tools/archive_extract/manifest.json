@@ -1,0 +1,110 @@
+{
+  "name": "archive_extract",
+  "description": "Extract the members of a zip, tar (plain, gzip, bzip2, xz or zstd), 7z (through the 7z program) or single-file gzip/bzip2/xz/zstd archive into a NEW private directory, bounded and safe against hostile input. Format is read from the bytes. Only member CONTENT is written: a symlink, hard link, device node or FIFO is recorded with its target and never created, nothing lands outside the output directory (files are created exclusively through directory descriptors; an absolute path, a drive letter or '..' is rendered harmless and flagged), and nothing is executed. Every member is one row of members.jsonl in archive order (n is the number the archive-members recipe gives it) with its exact name bytes (name_b64), type, declared and written sizes, the times as stored with their zone said, flags, status and the path it was written to; two members with one name are two files; an encrypted member is counted, never skipped silently and never opened; a compression method this build cannot read is 'unsupported'. A name shaped like a token is withheld from every output channel and kept in withheld-names.jsonl (0600). A member is written as <path>.partial and takes its name only when its size and CRC match what the archive declared; a member that stops, fails or mismatches stays .partial and its row says why. A digest or CRC of a member shorter than 128 bytes is not written. Budgets: max_total_bytes, max_member_bytes, max_members, max_ratio (default 1000), max_depth and max_seconds; a member-level budget skips or cuts that member and goes on, a global one stops the run, names it and gives next_index (run again with from_index and resume true to go on in the same out_dir, which writes a second manifest beside the first). A nested archive is named (looks_like), not opened; one call extracts one level. zstd needs Python 3.14 or the zstd program, else it is reported unsupported. RAR, CAB and ISO are refused by name. A 7z archive with encrypted headers cannot be listed and is refused. Not measured: the content of any member, the archive's authenticity, and whether the archive is the whole of what was acquired. Extracted bytes are evidence content and can hold credentials: run it as a job with secret_output true.",
+  "params": {
+    "path": {
+      "type": "string",
+      "description": "The archive to extract (a file). Its format is read from its bytes, not its name.",
+      "required": true
+    },
+    "out_dir": {
+      "type": "string",
+      "description": "Directory to extract into (default: a new archive_extract-<id> directory beside the tool's other output). Must not already hold files unless resume is true. In a job it must lie under $OUT: give {OUT}/<name>."
+    },
+    "resume": {
+      "type": "boolean",
+      "description": "Go on in an out_dir an earlier run made (with from_index). Nothing already there is replaced; a second members.2.jsonl and receipt.2.json are written."
+    },
+    "from_index": {
+      "type": "integer",
+      "description": "Start at this member number (default 0): the number a stopped run gave as next_index, and the n of the archive-members recipe."
+    },
+    "max_total_bytes": {
+      "type": "integer",
+      "description": "Bytes written in all (default 8 GiB, at most 1 TiB); past it the run stops and names where to resume."
+    },
+    "max_member_bytes": {
+      "type": "integer",
+      "description": "Bytes in one member (default 4 GiB); a longer member is cut, kept as .partial, and the run goes on."
+    },
+    "max_members": {
+      "type": "integer",
+      "description": "Members handled in this run (default 200000, at most 5000000)."
+    },
+    "max_ratio": {
+      "type": "integer",
+      "description": "Expanded over packed (default 1000): per member where the archive gives the packed size, else over the whole compressed stream. A sparse disk image compressed with xz or zstd can pass it; raise it for such an archive on purpose."
+    },
+    "max_depth": {
+      "type": "integer",
+      "description": "Path components in a member name (default 64); a deeper member is skipped and recorded."
+    },
+    "max_seconds": {
+      "type": "integer",
+      "description": "Time budget in seconds (default 1500, at most 1700); past it the run stops, and any running 7z is killed."
+    },
+    "limit": {
+      "type": "integer",
+      "description": "Member rows in the inline page (default 50, at most 1000); members_file has every member."
+    }
+  },
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 1800,
+  "requires": [
+    "7z"
+  ],
+  "example": "{\"path\":\"inputs/collection.zip\",\"out_dir\":\"{OUT}/collection\",\"max_total_bytes\":2147483648}",
+  "use": {
+    "extensions": [
+      ".zip",
+      ".tar",
+      ".tgz",
+      ".tar.gz",
+      ".tbz2",
+      ".tar.bz2",
+      ".txz",
+      ".tar.xz",
+      ".tar.zst",
+      ".gz",
+      ".bz2",
+      ".xz",
+      ".zst",
+      ".7z"
+    ],
+    "magic": [
+      {
+        "offset": 0,
+        "hex": "504b0304"
+      },
+      {
+        "offset": 0,
+        "hex": "377abcaf271c"
+      },
+      {
+        "offset": 0,
+        "hex": "1f8b08"
+      },
+      {
+        "offset": 0,
+        "hex": "425a68"
+      },
+      {
+        "offset": 0,
+        "hex": "fd377a585a00"
+      },
+      {
+        "offset": 0,
+        "hex": "28b52ffd"
+      },
+      {
+        "offset": 257,
+        "hex": "7573746172"
+      }
+    ]
+  },
+  "by": "maintainer",
+  "at": "2026-10-13T12:00:00.000Z",
+  "version": 1,
+  "sha256": "cab7ea5281288f4350c215185b05a1be3fcd647cfe47a15300f5dbc1681fe2d9"
+}

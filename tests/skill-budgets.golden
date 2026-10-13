@@ -21,7 +21,7 @@ cloud-forensics chain m365/unified-audit-log 2325
 cloud-forensics entry google/workspace-access 45
 cloud-forensics entry identity/grants 50
 cloud-forensics entry logs/what-exists 45
-computer-forensics-base chain evidence/collections 3725
+computer-forensics-base chain evidence/collections 3275
 computer-forensics-base chain evidence/imaging 2325
 computer-forensics-base chain filesystem/carving 3875
 computer-forensics-base chain filesystem/encrypted 3800
@@ -33,7 +33,6 @@ computer-forensics-base depth filesystem/carving 3
 computer-forensics-base depth reporting/disagreement 3
 computer-forensics-base entry evidence/catalog 45
 computer-forensics-base entry evidence/imaging 45
-computer-forensics-base leaf evidence/collections 1425
 computer-forensics-base leaf evidence/imaging 1500
 computer-forensics-base leaf filesystem/carving 1275
 computer-forensics-base leaf filesystem/encrypted 1475

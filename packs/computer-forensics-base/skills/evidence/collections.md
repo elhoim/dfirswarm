@@ -3,8 +3,8 @@ id: evidence/collections
 title: Establish what a logical collection actually contains
 when: Evidence arrives as copied files, an archive or an AD1 logical image.
 needs: [evidence/imaging]
-tools: [catalog_search, check_inputs, file_type, ad1_extract]
-requires_host: [target-query, 7z]
+tools: [check_inputs, file_type]
+requires_host: [target-query]
 mentions: [mft_records, evtx_query, regkv, CyLR, mac_apt.py]
 ---
 
@@ -39,9 +39,8 @@ macOS pack and has image and architecture restrictions. `target-query` (dissect)
 is optional here: check the job image's inventory before choosing either, since a
 tool existing elsewhere in the repository does not make it available in this run.
 
-The `archive-members` recipe lists a tar, zip or 7z without extracting it (it runs
-`7z` for a 7z), and a member is read afterwards with the archive's own program as a
-job: the base pack ships no member extractor yet.
+An archive is listed and written out as files by the steps in skill
+`evidence/archives`.
 
 A live collection is not one instant. Record the collection's interval and each
 object's acquisition details, and keep companion files (database journals,
@@ -65,30 +64,5 @@ safe on the examiner's file system: a colon becomes something else, and a named
 stream becomes a separate file with an invented name. Before you claim a file
 lived at `C:\Users\x\y`, check the collector's manifest for the mapping.
 
-**An AD1 image is a collection in a container.** FTK Imager's logical image
-(`.ad1`, further segments `.ad2` and on) holds the files and folders the examiner
-chose, with their times and the MD5 and SHA-1 the imager computed. The supplied
-reader takes unencrypted version 4 images: an encrypted one (`ADCRYPT`), or another
-version, needs a separately validated reader. The catalogue lists every item
-(`members.tsv` of the `ad1-items` generation: `n`, its `locator`, the path under
-the data source name, size, the image's own times with no zone recorded, the
-recorded digests, the SHA-256 of the content and `check`). Find what you need with
-`catalog_search which=members`, then write it out as a job:
-
-    job_run tool=ad1_extract args={"image": "inputs/case.ad1", "members": ["ad1:item=<address>"]} inputs=["input:case.ad1"]
-
-`members` takes the locator or `n`; a folder takes its subtree; none takes
-everything. Use the locator when the listing was partial (a segment missing, an
-item that could not be read): after a break the numbers are not a whole read's, the
-locators are. Declare every segment in the job's `inputs`. The files land in the
-store, cited as `job:<id>/<path>`, and the derived catalogue takes an archive or
-a disk image inside in turn. Keep `image.json`, `attributes.tsv`, the generation's
-coverage and the extraction manifest. A completed job is not proof the digests
-matched: read each item's `check`, the call's `integrity_status` and every error.
-`check` mismatch means the content is not what the imager hashed: say so before you
-rely on the file. The extracted file's own times are the host's, not the item's;
-use the recorded times, whose zone is unknown. The recipe and the extractor share
-one reader, so their agreement is not independent corroboration. `target-query -f
-walkfs inputs/case.ad1`, run as a job, is a second reader if the installed build
-opens an AD1: check, and say so if it does not. Everything above about a logical
-acquisition holds for an AD1.
+An AD1 image (FTK Imager's logical image, `.ad1`) is a collection in a container:
+skill `evidence/ad1` says how to list, extract and corroborate it.
