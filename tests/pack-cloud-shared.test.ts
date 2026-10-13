@@ -368,6 +368,58 @@ test("SIGTERM, which is what a job's timeout sends first, leaves no temporary re
   }
 });
 
+// The termination signal can arrive at any point of a tool's start-up, and the poll above finds a temporary the moment it is created. These
+// send it to the tool itself at the exact points that matter, so no run depends on a timer: right after the page's temporary file is
+// made, right after the index's directory is made, and right after the index's file is made. A hook in the interpreter's start-up
+// (sitecustomize, found through PYTHONPATH) wraps the three calls and sends SIGTERM to its own process once, when each returns.
+const TERM_HOOK = `
+import os, signal, sqlite3, tempfile
+POINT = os.environ["TERM_POINT"]
+fired = []
+def term(label):
+    if label == POINT and not fired:
+        fired.append(label)
+        os.kill(os.getpid(), signal.SIGTERM)
+_mkstemp, _mkdtemp, _connect = tempfile.mkstemp, tempfile.mkdtemp, sqlite3.connect
+def mkstemp(*a, **k):
+    r = _mkstemp(*a, **k)
+    term("page-temp")
+    return r
+def mkdtemp(*a, **k):
+    r = _mkdtemp(*a, **k)
+    term("index-dir")
+    return r
+def connect(*a, **k):
+    r = _connect(*a, **k)
+    if a and str(a[0]).endswith("work.sqlite"):
+        term("index-file")
+    return r
+tempfile.mkstemp, tempfile.mkdtemp, sqlite3.connect = mkstemp, mkdtemp, connect
+`;
+
+test("SIGTERM at each step of a tool's start-up, when its temporary page, index directory and index file are made, leaves nothing behind", async () => {
+  const withIndex = ["page-temp", "index-dir", "index-file"];
+  const inputs: Array<[string, string, string, string[]]> = [
+    ["cloudtrail_parse", TRAIL, trail(ct({ eventID: "t-1", eventSource: "s3.amazonaws.com", eventName: "GetObject", userIdentity: ALICE })), withIndex],
+    ["ual_parse", UAL, JSON.stringify([{ Id: "u-1", Operation: "Send", UserId: "a@b.c", CreationTime: "2026-02-14T09:00:00Z" }]), ["page-temp"]], // it keeps no index
+    ["signin_analyse", SIGNIN, JSON.stringify({ value: [{ id: "g-1", createdDateTime: "2026-02-14T09:00:00Z", userPrincipalName: "a@b.c", status: { errorCode: 0 } }] }), withIndex],
+  ];
+  for (const [name, script, text, points] of inputs) {
+    for (const point of points) {
+      await withDir(async (cwd) => {
+        await put(cwd, "work/ev/e.json", text);
+        await put(cwd, "hook/sitecustomize.py", TERM_HOOK);
+        await asJob(script, cwd, { path: "work/ev/missing" }); // makes the job output directory
+        const run = await spawnTool(script, cwd, { path: "work/ev/e.json", out_file: "out/all.jsonl" }, { JOB_ID: "jhook", OUT: join(cwd, "out"), PYTHONPATH: join(cwd, "hook"), TERM_POINT: point }).done;
+        assert.equal(run.code, 143, `${name} at ${point}: exit code after SIGTERM: ${run.stderr}`);
+        const left = (await filesUnder(join(cwd, "out"))).concat(await filesUnder(join(cwd, "work", "s1")));
+        assert.deepEqual(left, [], `${name} left files behind when signalled after the ${point}`);
+        assert.equal(await exists(join(cwd, "out", "all.jsonl")), false, "the requested name only ever holds a finished result");
+      });
+    }
+  }
+});
+
 test("a job writes only under $OUT: with the run directory read-only, each tool still answers and leaves its files in $OUT", async (t) => {
   if (process.getuid?.() === 0) return t.skip("running as root: a read-only directory does not stop a write");
   const trees: Array<[string, string, string]> = [
