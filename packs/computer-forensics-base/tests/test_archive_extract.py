@@ -341,14 +341,17 @@ class Extract(Case):
     def test_an_existing_link_in_the_output_directory_is_not_followed(self):
         outside = self.path("outside")
         os.makedirs(outside)
-        os.makedirs(self.path("work/out/extracted"))
-        os.symlink(outside, self.path("work/out/extracted/trap"))
-        make_zip(self.path("inputs/t.zip"), [("trap/pwned.txt", b"x" * 200), ("fine.txt", b"y" * 200)])
-        r = self.extract("inputs/t.zip", "work/out", resume=True)
+        make_zip(self.path("inputs/t.zip"), [("fine.txt", b"y" * 200), ("trap/pwned.txt", b"x" * 200)])
+        first = self.extract("inputs/t.zip", "work/out", max_members=1)      # stops after fine.txt: trap/ is not made yet
+        self.assertEqual(first.json["next_index"], 1)
+        os.symlink(outside, self.path("work/out/extracted/trap"))             # something plants a link where the next member goes
+        r = self.extract("inputs/t.zip", "work/out", resume=True, from_index=1)
+        self.assertEqual(r.code, 0, r.stdout)
         self.assertEqual(os.listdir(outside), [], "a file was written through a link")
-        rows = self.rows("work/out")
+        rows = [json.loads(l) for l in self.read("work/out/members.2.jsonl").splitlines()]
         self.assertEqual(rows[0]["status"], "extracted")
         self.assertIn("flat-path", rows[0]["flags"])
+        self.assertTrue(rows[0]["path"].startswith("extracted/_flat/"), rows[0]["path"])
 
     # ---- compressed tars and single streams ----
 
@@ -493,6 +496,24 @@ class Extract(Case):
         done = {x["n"]: x for x in first[:2] + second}
         for i, blob in enumerate(blobs):
             self.assertEqual(self.read("work/out/" + done[i]["path"], "rb"), blob, i)
+
+    def test_a_resume_with_another_archive_is_refused_and_writes_nothing(self):
+        make_zip(self.path("inputs/five.zip"), [("f%d.txt" % i, b"%d" % i * 200) for i in range(5)])
+        make_zip(self.path("inputs/other.zip"), [("g%d.txt" % i, b"g%d" % i * 200) for i in range(5)])
+        first = self.extract("inputs/five.zip", "work/out", max_members=2)
+        self.assertEqual(first.json["next_index"], 2)
+        before = self.files_under(self.path("work/out"))
+        r = self.extract("inputs/other.zip", "work/out", resume=True, from_index=2)
+        self.assertEqual(r.code, 1, r.stdout)
+        self.assertIn("not the archive the earlier run", r.json["error"])
+        self.assertEqual(self.files_under(self.path("work/out")), before)
+        r = self.extract("inputs/five.zip", "work/out", resume=True, from_index=2)
+        self.assertEqual((r.code, r.json["status"]), (0, "complete"))
+        self.write("work/empty/extracted/x", b"")
+        os.remove(self.path("work/empty/extracted/x"))
+        r = self.extract("inputs/five.zip", "work/empty", resume=True)
+        self.assertEqual(r.code, 1)
+        self.assertIn("receipt", r.json["error"])
 
     def test_the_member_budget_stops_after_that_many_members_and_resume_goes_on(self):
         make_zip(self.path("inputs/five.zip"), [("f%d.txt" % i, b"%d" % i * 200) for i in range(5)])

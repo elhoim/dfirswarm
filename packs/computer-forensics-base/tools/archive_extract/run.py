@@ -1876,6 +1876,17 @@ def main():
     if info["sha256"] is None:
         info["sha256_skipped"] = "the archive is larger than %d bytes; the run's own record of the input has its sha256" % HASH_ARCHIVE_MAX
     info["python"] = sys.version.split()[0]
+    if resume:
+        # A resume goes on in the directory of an earlier run of THIS archive: another archive's members would be mixed into it.
+        try:
+            with open(dest / "receipt.json", encoding="utf-8") as fh:
+                earlier = json.load(fh)["archive"]
+        except (OSError, ValueError, KeyError, TypeError):
+            fail("resume: true needs the receipt of the earlier run (receipt.json) in out_dir, and it is not readable", out_dir=scrub(str(dest)))
+        if earlier.get("bytes") != size or (earlier.get("sha256") and info["sha256"] and earlier["sha256"] != info["sha256"]):
+            fail("this is not the archive the earlier run in out_dir extracted (its size or sha256 differs): a resume goes on with the same archive, "
+                 "and an extraction of another archive takes a directory of its own", out_dir=scrub(str(dest)), earlier_bytes=earlier.get("bytes"),
+                 earlier_sha256=earlier.get("sha256"), this_bytes=size, this_sha256=info["sha256"])
 
     try:
         eng = Engine(a, dest, run_no, info)
