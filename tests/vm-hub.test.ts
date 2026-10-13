@@ -1852,18 +1852,36 @@ test("without the model gateway a seat's smaller spend report is still refused",
 // in parts, one acknowledged at a time; no line either end writes is past
 // WIRE_LINE_MAX, and a link that stops carrying data is replaced.
 
-/** Every line a client socket in this process writes, while `fn` runs. */
-async function linesWritten<T>(fn: () => Promise<T>): Promise<{ value: T; lines: string[] }> {
+/**
+ * Every line written on a connection to one of the seat sockets `paths`, while
+ * `fn` runs. Only those: this process also holds the hub's own sockets to the
+ * collector and those of hubs earlier tests stopped, and a stopped hub still
+ * answers the lines it had read before (a 500 KB line forwarded to its collector
+ * seconds late, on a slow runner, in the middle of this window). The held
+ * connections are closed first, so every connection measured is one `fn` opens.
+ */
+async function linesWritten<T>(paths: string[], fn: () => Promise<T>): Promise<{ value: T; lines: string[] }> {
   const lines: string[] = [];
-  const original = Socket.prototype.write;
-  Socket.prototype.write = function (this: Socket, chunk: unknown, ...rest: unknown[]) {
-    if (typeof chunk === "string") lines.push(chunk);
-    return (original as (...a: unknown[]) => boolean).call(this, chunk, ...rest);
-  } as typeof original;
+  const tagged = new WeakSet<Socket>();
+  const proto = Socket.prototype as unknown as Record<"connect" | "write", (...args: unknown[]) => unknown>;
+  const { connect: connect0, write: write0 } = proto;
+  board.closeBoardClients();
+  proto.connect = function (this: Socket, ...args: unknown[]) {
+    const first = args[0];
+    const options = Array.isArray(first) ? first[0] : first;
+    const path = typeof options === "string" ? options : (options as { path?: unknown } | null)?.path;
+    if (typeof path === "string" && paths.includes(path)) tagged.add(this);
+    return connect0.apply(this, args);
+  };
+  proto.write = function (this: Socket, chunk: unknown, ...rest: unknown[]) {
+    if (typeof chunk === "string" && tagged.has(this)) lines.push(chunk);
+    return write0.call(this, chunk, ...rest);
+  };
   try {
     return { value: await fn(), lines };
   } finally {
-    Socket.prototype.write = original;
+    proto.connect = connect0;
+    proto.write = write0;
   }
 }
 
@@ -1943,16 +1961,49 @@ test("a seat's 12 MiB file travels to the hub in parts, published and recorded a
   const big = randomBytes(12 * 1024 * 1024);
   await writeFile(join(sandbox, "work", "a0", "big.bin"), big);
   const ctx = { sandboxRoot: sandbox, agentId: "a0" };
-  const { value: pub, lines } = await linesWritten(() => asVm(hub.socketFor("a0"), () => board.publishFile(ctx, "work/a0/big.bin", "work/big.bin")));
+  const { value: pub, lines } = await linesWritten([hub.socketFor("a0")], () => asVm(hub.socketFor("a0"), () => board.publishFile(ctx, "work/a0/big.bin", "work/big.bin")));
   assert.equal((pub as { ok: boolean }).ok, true, JSON.stringify(pub));
   assert.ok((await readFile(join(sandbox, "work", "big.bin"))).equals(big), "the published copy is the seat's file, byte for byte");
   const longest = Math.max(...lines.map((l) => Buffer.byteLength(l)));
   assert.ok(longest <= WIRE_LINE_MAX, `no line past a part (base64 and its envelope): the longest was ${longest}`);
   assert.ok(lines.filter((l) => l.startsWith('{"t":"up"')).length >= Math.floor(big.length / TRANSFER_PART_BYTES), "the file went up in parts");
-  const { value: rec } = await linesWritten(() => asVm(hub.socketFor("a0"), () => board.recordFileVersion(sandbox, "work/a0/big.bin", "a0")));
+  const { value: rec } = await linesWritten([hub.socketFor("a0")], () => asVm(hub.socketFor("a0"), () => board.recordFileVersion(sandbox, "work/a0/big.bin", "a0")));
   const recorded = rec as { rev: number; sha256: string; stored?: boolean };
   assert.equal(recorded.sha256, createHash("sha256").update(big).digest("hex"), "the hub recorded the bytes the seat sent, not a torn copy");
   assert.notEqual(recorded.stored, false, "12 MiB is under the history store's limit: the bytes are kept");
+});
+
+test("the measure of a seat's link counts the lines on that link only: a big write on any other socket in the process, a hub's late forward to its collector included, is not in it", async () => {
+  const { hub } = await setup();
+  const seat = hub.socketFor("a0");
+  const dir = await mkdtemp(join(tmpdir(), "dfs-other-"));
+  cleanups.push(() => rm(dir, { recursive: true, force: true }));
+  const other = join(dir, "o.sock");
+  const sink: Server = createServer((c) => c.on("data", () => undefined).on("error", () => undefined));
+  await new Promise<void>((r) => sink.listen(other, () => r()));
+  cleanups.push(async () => sink.close());
+  const huge = `${"x".repeat(500_000)}\n`;
+  const small = `{"t":"hello","id":"seat-line"}\n`;
+  const { lines } = await linesWritten([seat], async () => {
+    const stranger = connect(other);
+    await new Promise((r) => stranger.once("connect", r));
+    stranger.write(huge);
+    stranger.destroy();
+    const own = connect(seat);
+    await new Promise((r) => own.once("connect", r));
+    own.write(small);
+    own.destroy();
+  });
+  assert.deepEqual(lines, [small], "the seat's own line is measured, the stranger's 500 KB line is not");
+  // The same measure still sees a line that is too big on the seat's own link: it is not blind.
+  const { lines: own } = await linesWritten([seat], async () => {
+    const s = connect(seat);
+    await new Promise((r) => s.once("connect", r));
+    s.write(huge);
+    s.destroy();
+  });
+  assert.equal(own.length, 1);
+  assert.ok(Buffer.byteLength(own[0]) > WIRE_LINE_MAX, "a line past the limit on the seat's link is in the measure");
 });
 
 test("an answer past a part's size is kept by the hub and fetched in parts, whole", async () => {
@@ -1964,7 +2015,7 @@ test("an answer past a part's size is kept by the hub and fetched in parts, whol
   await board.callBoard(hub.socketFor("a0"), "recordFileVersion", [sandbox, "work/shared.txt", "a0"]);
   await writeFile(join(sandbox, "work", "shared.txt"), lines2);
   await board.callBoard(hub.socketFor("a0"), "recordFileVersion", [sandbox, "work/shared.txt", "a0"]);
-  const { value: diff, lines } = await linesWritten(() => board.callBoard(hub.socketFor("a0"), "fileDiff", [sandbox, "work/shared.txt", 1, 2]));
+  const { value: diff, lines } = await linesWritten([hub.socketFor("a0")], () => board.callBoard(hub.socketFor("a0"), "fileDiff", [sandbox, "work/shared.txt", 1, 2]));
   const text = JSON.stringify(diff);
   assert.ok(Buffer.byteLength(text) > TRANSFER_PART_BYTES, `the answer is larger than a part (${Buffer.byteLength(text)})`);
   assert.ok(text.includes("second 199") && text.includes("first 0"), "the whole diff arrived");
