@@ -34,17 +34,20 @@ def sha(data):
 
 
 def zstd_available():
+    """What the tool can read zstd with: Python 3.14's compression.zstd, or the zstd program."""
     try:
         from compression import zstd  # noqa: F401
         return True
     except ImportError:
-        pass
+        return shutil.which("zstd") is not None
+
+
+def zstd_compress(data):
     try:
-        import zstandard  # noqa: F401
-        return True
+        from compression import zstd
+        return zstd.compress(data)
     except ImportError:
-        pass
-    return shutil.which("zstd") is not None
+        return subprocess.run(["zstd", "-q", "-c"], input=data, capture_output=True, check=True).stdout
 
 
 def make_zip(path, members, compress=zipfile.ZIP_DEFLATED):
@@ -373,21 +376,31 @@ class Extract(Case):
             info = tarfile.TarInfo("z.txt")
             info.size = 300
             tf.addfile(info, io.BytesIO(b"z" * 300))
-        # a zstd frame written by the program (or the module) that is also the reader's fallback
-        data = None
-        try:
-            from compression import zstd
-            data = zstd.compress(plain.getvalue())
-        except ImportError:
-            try:
-                import zstandard
-                data = zstandard.ZstdCompressor().compress(plain.getvalue())
-            except ImportError:
-                data = subprocess.run(["zstd", "-q", "-c"], input=plain.getvalue(), capture_output=True, check=True).stdout
+        data = zstd_compress(plain.getvalue())
         self.write("inputs/t.tar.zst", data)
         r = self.extract("inputs/t.tar.zst", "work/out")
         self.assertEqual(r.code, 0, r.stdout)
         self.assertEqual(self.read("work/out/" + self.rows("work/out")[0]["path"], "rb"), b"z" * 300)
+
+    @unittest.skipUnless(zstd_available(), "no zstd decompressor in this Python and no zstd program")
+    def test_a_truncated_zstd_stream_is_never_called_complete(self):
+        plain = io.BytesIO()
+        with tarfile.open(fileobj=plain, mode="w") as tf:
+            for i in range(4):
+                info = tarfile.TarInfo("m%d.bin" % i)
+                info.size = 40000
+                tf.addfile(info, io.BytesIO(os.urandom(40000)))
+        data = zstd_compress(plain.getvalue())
+        self.write("inputs/cut.tar.zst", data[:len(data) * 6 // 10])
+        r = self.extract("inputs/cut.tar.zst", "work/out")
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertIsNotNone(r.json, r.stdout)
+        if r.code == 0:
+            self.assertEqual(r.json["status"], "partial", r.json)
+            self.assertTrue(r.json["counts"].get("partial") or r.json["stopped_by"], r.json)
+        else:
+            self.assertIs(r.json["ok"], False)
+        self.assertNotEqual(r.json.get("counts"), {"extracted": 4})
 
     def test_zstd_without_a_decompressor_is_said_not_guessed(self):
         # the frame magic and nothing a decoder could use; where this Python or the PATH has a decoder the tool says the frame is damaged
