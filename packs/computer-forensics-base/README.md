@@ -27,10 +27,10 @@ Platform-specific artefact knowledge lives in the packs that depend on this one.
 | `reporting/citations` | every claim resolves to an inspectable observation, and a negative is bounded |
 | `reporting/disagreement` | disputing, correcting and republishing, through the ledger's own acts |
 
-**Fifteen tools**: `image_layout`, `check_inputs`, `catalog_search`,
+**Sixteen tools**: `image_layout`, `check_inputs`, `catalog_search`,
 `icat_extract`, `sig_carve`, `file_carver`, `ioc_scan`, `chunk_needles`,
 `file_type`, `sqlite_query`, `feature_scan`, `timeline_super`,
-`timestamp_decode`, `ad1_extract`, `archive_extract`. `file_type` to `timestamp_decode` arrived
+`timestamp_decode`, `ad1_extract`, `archive_extract`, `sqlite_snapshot`. `file_type` to `timestamp_decode` arrived
 with the packs that depend on this one: a tool every pack would have carried
 belongs here once, not in each of them. `ad1_extract` writes an AccessData
 AD1 logical image's files out, checked against the digests the image
@@ -47,7 +47,9 @@ file only when a job asks, with `secret_output`), a run that ended part way is
 the file was read. A tool with a time budget of its own keeps that budget
 inside the manifest's limit, so reaching it is reported (`partial`, `not_checked`,
 `interrupted`) and is not a kill with nothing said. `sqlite_query` reads the main
-database file and reports a write-ahead log beside it without applying it.
+database file and reports a write-ahead log beside it without applying it;
+`sqlite_snapshot` copies the database with its `-wal`, `-shm` and `-journal` (hashed), reads the
+WAL against the format and has SQLite apply it in a copy, and `sqlite_query` takes that copy.
 
 **Five recipes**, each saying what it prepares (`purpose` in its
 `recipe.json`). `disk-volumes` (the partition table, and per filesystem a body

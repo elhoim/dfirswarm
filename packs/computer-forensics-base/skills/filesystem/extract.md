@@ -3,7 +3,7 @@ id: filesystem/extract
 title: Get a file out of an image, and say which record it came from
 when: You need the bytes of something the listing names.
 needs: [evidence/catalog]
-tools: [icat_extract, catalog_search]
+tools: [icat_extract, catalog_search, sqlite_snapshot, sqlite_query]
 requires_host: [icat, fls, istat, tsk_recover]
 ---
 
@@ -40,6 +40,14 @@ status and the size you received. To take a whole file system, `tsk_recover`
 writes files to a directory under `$OUT`; its names come from directory entries,
 not from record identity, so keep the mapping from each output name to its
 record.
+
+**A SQLite database is a set.** A `-wal`, `-shm` or `-journal` record beside the database (the
+catalogue lists it by name) is part of it: a committed row can live only in the `-wal`. Extract the
+database and each of those records, put them in one directory under the main file's name plus the
+suffix, and run `sqlite_snapshot` on the main file as a job. It copies the set with hashes, reads the
+`-wal` against the format (frames valid, committed, left over, damaged) and has SQLite apply it in a
+copy, never beside the evidence; give `sqlite_query` its `database`. A `sqlite_query` on the main file
+alone reads that file only and says a `-wal` is not applied. Neither recovers deleted records.
 
 **What came out is not proof of what was there.** A deleted entry's clusters may
 have been reused: `icat` returns whatever the record's data runs point to now.
