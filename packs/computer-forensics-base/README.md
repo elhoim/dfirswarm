@@ -11,7 +11,7 @@ Platform-specific artefact knowledge lives in the packs that depend on this one.
 
 ## What it carries
 
-**Thirteen skills**, fetched one at a time by the agents that need them:
+**Fourteen skills**, fetched one at a time by the agents that need them:
 
 | | |
 | --- | --- |
@@ -21,6 +21,7 @@ Platform-specific artefact knowledge lives in the packs that depend on this one.
 | `evidence/collections` | the evidence is a zip, a directory tree or an AD1, not a disk: what it contains and what it cannot show |
 | `evidence/archives` | a zip, tar, 7z or compressed file: list it, extract it under budgets, never recreate a link, keep every name |
 | `evidence/ad1` | an FTK Imager logical image: list, extract and corroborate it |
+| `data/sqlite` | a SQLite database is a set of files: snapshot it, apply its WAL in a copy, query the state you name |
 | `filesystem/extract` | get a file out of an image, and say which record it came from |
 | `filesystem/carving` | recover candidate structures where there is no file system, and say how far to trust them |
 | `filesystem/encrypted` | a volume the toolkit cannot read: encryption is one explanation among several |
@@ -29,10 +30,10 @@ Platform-specific artefact knowledge lives in the packs that depend on this one.
 | `reporting/citations` | every claim resolves to an inspectable observation, and a negative is bounded |
 | `reporting/disagreement` | disputing, correcting and republishing, through the ledger's own acts |
 
-**Fifteen tools**: `image_layout`, `check_inputs`, `catalog_search`,
+**Sixteen tools**: `image_layout`, `check_inputs`, `catalog_search`,
 `icat_extract`, `sig_carve`, `file_carver`, `ioc_scan`, `chunk_needles`,
 `file_type`, `sqlite_query`, `feature_scan`, `timeline_super`,
-`timestamp_decode`, `ad1_extract`, `archive_extract`. `file_type` to `timestamp_decode` arrived
+`timestamp_decode`, `ad1_extract`, `archive_extract`, `sqlite_snapshot`. `file_type` to `timestamp_decode` arrived
 with the packs that depend on this one: a tool every pack would have carried
 belongs here once, not in each of them. `ad1_extract` writes an AccessData
 AD1 logical image's files out, checked against the digests the image
@@ -46,10 +47,13 @@ says so: a carve is a candidate with `boundary: validated` or `heuristic`, a
 scan returns locators and not the bytes around a hit (those go to a sealed
 file only when a job asks, with `secret_output`), a run that ended part way is
 `partial` with the exit codes of its stages, and a count never depends on how
-the file was read. A tool with a time budget of its own keeps that budget
+the file was read (`ioc_scan`, `chunk_needles` and `sig_carve` find their matches with one shared engine,
+held equal in the three by a test and to a brute-force search over every way of cutting a stream into reads). A tool with a time budget of its own keeps that budget
 inside the manifest's limit, so reaching it is reported (`partial`, `not_checked`,
 `interrupted`) and is not a kill with nothing said. `sqlite_query` reads the main
-database file and reports a write-ahead log beside it without applying it.
+database file and reports a write-ahead log beside it without applying it;
+`sqlite_snapshot` copies the database with its `-wal`, `-shm` and `-journal` (hashed), reads the
+WAL against the format and has SQLite apply it in a copy, and `sqlite_query` takes that copy.
 
 **Five recipes**, each saying what it prepares (`purpose` in its
 `recipe.json`). `disk-volumes` (the partition table, and per filesystem a body

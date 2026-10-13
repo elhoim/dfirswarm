@@ -49,6 +49,6 @@
   "example": "{\"path\": \"inputs/[UNALLOCATED]\", \"needles\": \"sysinternals|psexec|http://|https://|IEUser\", \"max_hits\": 30, \"length\": 50000000}",
   "by": "s183900",
   "at": "2026-09-18T22:16:43.028Z",
-  "version": 4,
-  "sha256": "a1c9eae213529f5d0bc9fd8fd5d345ebdd4dc434bf16f1ca0ad6a2bb08c8f680"
+  "version": 5,
+  "sha256": "d29a37ce8bc90a60dd84f5dc73d2d2dbbf4fa81cfd8126ca825df0399d729117"
 }

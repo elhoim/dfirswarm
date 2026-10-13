@@ -28,7 +28,7 @@ import tempfile
 from collections import defaultdict
 from pathlib import Path
 
-TOOL = {"name": "ioc_scan", "version": 4}
+TOOL = {"name": "ioc_scan", "version": 5}
 CHUNK_DEFAULT = 8 * 1024 * 1024
 CHUNK_MIN, CHUNK_MAX = 16, 256 * 1024 * 1024
 CONTEXT_MAX = 65536
@@ -38,7 +38,67 @@ NEEDLES_MAX = 1000
 NEEDLE_BYTES_MAX = 4096
 SEEN_CAP = 100_000                 # distinct contexts remembered for the inline view
 ROW_CAP = 20_000_000               # rows in the whole-result file; counting goes on past it
-SLICE = 256 * 1024                 # positions searched, sorted and emitted together: hits come out in offset order, whatever chunk is
+
+
+# BEGIN SHARED SCAN
+# The same text is in ioc_scan, chunk_needles and sig_carve (tests/test_scan_core.py holds the copies equal and holds the
+# engine to a brute-force search over every way of cutting a stream into reads). One engine finds literal byte strings in a
+# stream read in blocks: every occurrence once, at its true offset, overlapping ones included, in (offset, needle) order,
+# whatever the block size. A match is held back until `after` bytes of context follow it (or the stream has ended), and
+# `before` bytes of context are kept behind the searched position, so a match, or its context, cut by a read boundary is
+# neither lost nor counted twice. Each tool keeps its own answer: what it reports for a match, its pages and its budgets.
+SCAN_SLICE = 256 * 1024            # positions searched, sorted and handed out together
+
+
+class StreamScan:
+    """feed() each block as it is read; every call returns (offset, needle index, buffer, buffer's offset) for the matches that can
+    be decided now, in order. The buffer holds the match and its context. Exhaust the generator before the next feed: the
+    buffer is trimmed when it ends.
+
+    needles   the byte strings (a needle's index is its position in this list)
+    before    bytes of context behind a match that stay in the buffer
+    after     bytes of context after a match a match waits for
+    start     the stream offset of the first byte fed
+    prefix    the bytes that precede `start` in the stream, when a match may begin in them and end after `start` (a resumed scan)
+    final     the last block (it may be empty): everything fully inside the buffer is handed out. Also what a scan stopped before its end
+              calls: the matches that end inside what was read are all reported, and one that crosses the end is the next scan's.
+    """
+
+    def __init__(self, needles, before=0, after=0, start=0, prefix=b""):
+        self.needles = list(needles)
+        self.longest = max(len(n) for n in self.needles)
+        self.before, self.after = before, after
+        self.buf = prefix
+        self.base = start - len(prefix)
+        self.done = self.base
+        # a match is this scan's when it ends after `start`: the first start position of a needle is start - len + 1
+        self.first = [start - len(n) + 1 if prefix else start for n in self.needles]
+
+    def feed(self, data, final=False):
+        self.buf += data
+        have = self.base + len(self.buf)
+        process_end = have if final else have - (self.longest + self.after)
+        if process_end > self.done:
+            lo, hi = self.done - self.base, process_end - self.base
+            a = lo
+            while a < hi:
+                b = min(hi, a + SCAN_SLICE)
+                found = []
+                for vi, nb in enumerate(self.needles):
+                    stop = min(len(self.buf), b + len(nb) - 1)
+                    j = self.buf.find(nb, max(a, self.first[vi] - self.base), stop)
+                    while j >= 0:
+                        found.append((j, vi))
+                        j = self.buf.find(nb, j + 1, stop)
+                found.sort()                      # by offset, then by needle order: the same list for any block size
+                for j, vi in found:
+                    yield self.base + j, vi, self.buf, self.base
+                a = b
+            self.done = process_end
+        if not final:
+            keep_from = max(0, (self.done - self.before) - self.base)
+            self.buf, self.base = self.buf[keep_from:], self.base + keep_from
+# END SHARED SCAN
 
 
 def describe(exc):
@@ -373,42 +433,21 @@ def main():
             text = "".join(chr(c) if 32 <= c < 127 else "." for c in raw)
             secret.add(fid, {"file": path, "offset": at, "needle": name, "encoding": kind}, text)
 
-    # buf holds bytes [base, base + len(buf)); positions below `done` have been searched.
-    # A position is searched once the context after a match there is in buf (or the range ended).
+    # The shared engine finds every occurrence once, in offset order, whatever chunk is (see StreamScan above).
+    scanner = StreamScan([v[2] for v in variants], before=BEFORE, after=context, start=start)
     scanned = start
     try:
         with open(path, "rb") as fh:
             fh.seek(start)
-            buf, base, done = b"", start, start
             while True:
                 data = fh.read(min(chunk, end - scanned)) if scanned < end else b""
                 at_end = not data
-                buf += data
                 scanned += len(data)
-                have = base + len(buf)
-                process_end = have if at_end else have - (longest + context)
-                if process_end > done:
-                    lo, hi = done - base, process_end - base
-                    a = lo
-                    while a < hi:
-                        b = min(hi, a + SLICE)
-                        found = []
-                        for vi, (kind, name, nb) in enumerate(variants):
-                            stop = min(len(buf), b + len(nb) - 1)
-                            j = buf.find(nb, a, stop)
-                            while j >= 0:
-                                found.append((j, vi))
-                                j = buf.find(nb, j + 1, stop)
-                        found.sort()                      # by offset, then by needle order: the same list for any chunk
-                        for j, vi in found:
-                            kind, name, nb = variants[vi]
-                            emit(base + j, kind, name, nb, buf, base)
-                        a = b
-                    done = process_end
+                for at, vi, buf, base in scanner.feed(data, final=at_end):
+                    kind, name, nb = variants[vi]
+                    emit(at, kind, name, nb, buf, base)
                 if at_end:
                     break
-                keep_from = max(0, (done - BEFORE) - base)
-                buf, base = buf[keep_from:], base + keep_from
         secret.close()
         page = locators.finish()
     except OSError as exc:

@@ -208,7 +208,7 @@ test("chunk_needles fails closed when the E01 is missing", async () => {
     }, bin);
     assert.notEqual(out.code, 0);
     const body = JSON.parse(out.stdout) as { error: string };
-    assert.match(body.error, /not found/);
+    assert.match(body.error, /not found|no disk image|several images/);
   });
 });
 
@@ -496,9 +496,9 @@ test("the library's catalog searches read the case in front of them, not the one
   assert.deepEqual(JSON.parse(await readFile(join(lib, "manifest.json"), "utf8")), JSON.parse(await readFile(join(pack, "manifest.json"), "utf8")));
 });
 
-test("the tool-library copies of file_carver, catalog_search, sig_carve, ioc_scan and sqlite_query are the pack's, run.py and manifest", async () => {
+test("the tool-library copies of file_carver, catalog_search, sig_carve, ioc_scan, chunk_needles and sqlite_query are the pack's, run.py and manifest", async () => {
   // The copies are what scripts/swarm.sh install_tools_from offers a run: one that drifts offers the old tool.
-  for (const name of ["file_carver", "catalog_search", "sig_carve", "ioc_scan", "sqlite_query"]) {
+  for (const name of ["file_carver", "catalog_search", "sig_carve", "ioc_scan", "chunk_needles", "sqlite_query"]) {
     const lib = join(LIB, name);
     const pack = join(LIB, "..", "packs", "computer-forensics-base", "tools", name);
     assert.equal(await readFile(join(lib, "run.py"), "utf8"), await readFile(join(pack, "run.py"), "utf8"), `the library's ${name} is the pack's`);

@@ -4,11 +4,17 @@
 What this reads: the main database file, opened read-only and immutable, through
 Python's sqlite3 module (never the sqlite3 shell). An authorizer lets a statement
 read and nothing else: no write, no ATTACH, no extension, no PRAGMA that sets.
-What it does not read: the write-ahead log. An immutable open ignores a -wal and
+What it does not read: the write-ahead log of the file it is given. An immutable open ignores a -wal and
 a -shm beside the database, so rows committed only in the WAL are not in the
 result; the tool inventories the sidecars (name, size, WAL frames) and says so
 in `snapshot_status`, loudly, instead of leaving it to be found. Applying a WAL
-needs a staged copy of the database set, which this tool does not make.
+needs a staged copy of the database set, which this tool does not make: the
+sqlite_snapshot tool does (it copies the set with hashes and has SQLite apply the
+WAL in the copy, never beside the evidence), and `db_path` may be that snapshot's
+directory or the database inside it. The answer then carries `snapshot` (what the
+snapshot says it holds, and whether the file queried is still the one it recorded)
+and `snapshot_status` says which state the rows are. `apply_wal` is not a
+parameter here: asking for it is an error that names sqlite_snapshot.
 
 The answer is bounded: an inline page of rows (`limit`, and a byte ceiling), and
 when the result is more than that the whole of it in a JSON Lines file, named in
@@ -35,7 +41,7 @@ import time
 import urllib.parse
 from pathlib import Path
 
-TOOL = {"name": "sqlite_query", "version": 4}
+TOOL = {"name": "sqlite_query", "version": 5}
 DEFAULT_LIMIT = 100
 LIMIT_MAX = 10000
 INLINE_BYTES = 64 * 1024          # the inline page's JSON and its text form, each, as they are sent (ASCII-escaped, counted in bytes)
@@ -192,6 +198,71 @@ def sidecars(db):
     return out
 
 
+RECEIPT_MAX = 16 * 1024 * 1024
+
+
+def read_receipt(path):
+    try:
+        if os.path.getsize(path) > RECEIPT_MAX:
+            return None
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    tool = data.get("tool") if isinstance(data, dict) else None
+    return data if isinstance(tool, dict) and tool.get("name") == "sqlite_snapshot" else None
+
+
+def find_snapshot(db):
+    """(path of the database to open, snapshot facts or None). `db` may be a sqlite_snapshot directory, or the database inside one
+    (<snapshot>/original/database.sqlite or <snapshot>/applied/database.sqlite); anything else is an ordinary file."""
+    if os.path.isdir(db):
+        receipt = read_receipt(os.path.join(db, "snapshot.json"))
+        if receipt is None:
+            return db, None
+        root = db
+        target = os.path.join(root, receipt.get("database") or "")
+    else:
+        parent = os.path.dirname(os.path.abspath(db))
+        root = os.path.dirname(parent)
+        receipt = read_receipt(os.path.join(root, "snapshot.json")) if os.path.basename(parent) in ("original", "applied") else None
+        if receipt is None:
+            return db, None
+        target = db
+    rel = os.path.relpath(os.path.abspath(target), os.path.abspath(root))
+    applied = receipt.get("applied") or {}
+    wal = receipt.get("wal") or {}
+    which = rel.split(os.sep)[0]
+    recorded = applied.get("sha256") if which == "applied" else (receipt.get("source") or {}).get("sha256")
+    facts = {
+        "receipt": os.path.join(root, "snapshot.json"), "queried": rel, "queried_is": ("the copy with the WAL applied" if which == "applied" else "the copy of the main file as it was"),
+        "source": (receipt.get("source") or {}).get("db_path"), "source_sha256": (receipt.get("source") or {}).get("sha256"),
+        "wal_applied": bool(receipt.get("wal_applied")), "wal_frames_committed": wal.get("frames_committed"), "wal_frames_valid": wal.get("frames_valid"),
+        "wal_frames_uncommitted_valid": wal.get("frames_uncommitted_valid"), "snapshot_status": receipt.get("status"),
+        "snapshot_problems": receipt.get("problems") or [], "snapshot_notes": receipt.get("notes") or [], "recorded_sha256": recorded,
+        "rollback_journal": (receipt.get("rollback_journal") or {}).get("state"),
+    }
+    return target, facts
+
+
+def snapshot_note(facts, side):
+    """What state of the source this snapshot's database is, in words; the plain sidecar report would be wrong inside a snapshot."""
+    notes = []
+    if facts["queried"].startswith("applied"):
+        notes.append("SNAPSHOT: this is the copy of %s with its WAL applied by SQLite (%s committed frame(s)); the originals were not touched." % (
+            facts["source"] or "the source", facts["wal_frames_committed"]))
+        if facts["wal_frames_uncommitted_valid"]:
+            notes.append("%d valid WAL frame(s) after the last commit were not applied." % facts["wal_frames_uncommitted_valid"])
+    else:
+        notes.append("SNAPSHOT: this is the snapshot's copy of the main file as it was%s." % (
+            "; its WAL is NOT applied here (the applied copy is applied/database.sqlite)" if facts["wal_frames_committed"] else ""))
+    if facts["rollback_journal"] and facts["rollback_journal"].startswith("header present"):
+        notes.append("A hot rollback journal was beside the source and was not rolled back: the main file may hold an interrupted write.")
+    if facts["snapshot_status"] != "complete":
+        notes.append("The snapshot itself is %s: %s" % (facts["snapshot_status"], "; ".join(facts["snapshot_problems"][:3]) or "see its receipt"))
+    return " ".join(notes)
+
+
 def snapshot_status(side):
     """Said plainly: what state of the database this result is."""
     notes = []
@@ -199,8 +270,8 @@ def snapshot_status(side):
     jrn = next((s for s in side if s["name"].endswith("-journal") and s.get("present")), None)
     if wal and wal.get("frames_valid"):
         notes.append("WAL NOT APPLIED: the main file was read immutable, so the %d frame(s) (%d committed) in %s are not in this result; "
-                     "a row committed only there is missing. To read that state, stage the database with its -wal and -shm into a "
-                     "writable directory ($OUT) and open the copy." % (wal["frames_valid"], wal.get("frames_committed", 0), wal["name"]))
+                     "a row committed only there is missing. To read that state, run sqlite_snapshot on the database (it copies the set, hashed, and "
+                     "has SQLite apply the WAL in the copy) and query the `database` it names." % (wal["frames_valid"], wal.get("frames_committed", 0), wal["name"]))
     elif wal and wal.get("bytes"):
         notes.append("%s is present (%d bytes) and holds no valid frame; the main file is the whole database state this tool can read." % (wal["name"], wal["bytes"]))
     if jrn and jrn.get("bytes") and jrn.get("state", "").startswith("header present"):
@@ -505,10 +576,16 @@ def main():
         say({"ok": False, "error": "max_seconds is a whole number from 1 to %d" % BUDGET_MAX, "max_seconds": budget}, 1)
     if len(sql.encode("utf-8")) > SQL_MAX:
         say({"ok": False, "error": "sql is longer than %d bytes" % SQL_MAX}, 1)
+    if "apply_wal" in obj:
+        say({"ok": False, "error": "apply_wal is not a parameter of sqlite_query, which opens the file it is given read-only and immutable and never applies a WAL. "
+                                   "Run sqlite_snapshot on the database: it copies the set (database, -wal, -shm, -journal) with hashes and has SQLite apply the WAL "
+                                   "in the copy, and then give this tool the snapshot's directory or its `database` as db_path.", "db_path": db}, 1)
     if not os.path.exists(db):
         say({"ok": False, "error": "database not found", "db_path": db}, 1)
+    given = db
+    db, snap = find_snapshot(given)
     if not os.path.isfile(db):
-        say({"ok": False, "error": "db_path is not a regular file", "db_path": db}, 1)
+        say({"ok": False, "error": "db_path is not a regular file", "db_path": given}, 1)
     size = os.path.getsize(db)
     if size == 0:
         say({"ok": False, "error": "the file is empty (0 bytes): it holds no database", "db_path": db}, 1)
@@ -528,6 +605,9 @@ def main():
 
     side = sidecars(db)
     status = snapshot_status(side)
+    if snap:
+        note = snapshot_note(snap, side)
+        status = note if snap["queried"].startswith("applied") else note + " " + status
     # immutable=1 opens a database on a read-only mount, where mode=ro alone cannot create a -shm; the path is
     # percent-encoded because a "#" or "?" in it would end the name early.
     uri = "file:%s?mode=ro&immutable=1" % urllib.parse.quote(db)
@@ -547,13 +627,20 @@ def main():
         value_limit = "not enforced (Python before 3.11 has no setlimit)"
     conn.set_authorizer(authorizer)
     conn.set_progress_handler(lambda: 1 if time.monotonic() - started > budget else 0, 20000)
-    base = {"tool": TOOL, "db_path": db, "database_bytes": size, "sidecars": side, "snapshot_status": status,
+    base = {"tool": TOOL, "db_path": given, "database_bytes": size, "sidecars": side, "snapshot_status": status,
             "sqlite_library": sqlite3.sqlite_version, "opened": "read-only, immutable, through an authorizer that allows reading only", "value_limit": value_limit}
     if size <= HASH_MAX:
         base["database_sha256"] = sha256_file(db)
     else:
         base["database_sha256"] = None
         base["hashing"] = "skipped: the file is larger than %d bytes; the run's own record has its sha256" % HASH_MAX
+    if db != given:
+        base["database_opened"] = db
+    if snap:
+        snap["file_matches_recorded_sha256"] = (base["database_sha256"] == snap["recorded_sha256"]) if base["database_sha256"] and snap["recorded_sha256"] else None
+        if snap["file_matches_recorded_sha256"] is False:
+            base["snapshot_status"] = "THE FILE QUERIED IS NOT THE ONE THE SNAPSHOT RECORDED (its sha256 differs from the receipt's): it was changed after the snapshot, or the receipt belongs to another file. " + base["snapshot_status"]
+        base["snapshot"] = snap
     failure = None
     for i, stmt in enumerate(stmts):
         word = first_word(stmt)
