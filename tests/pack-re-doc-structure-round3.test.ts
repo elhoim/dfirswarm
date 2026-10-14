@@ -9,7 +9,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { deflateSync } from "node:zlib";
 import { test } from "node:test";
-import { DOC_STRUCTURE, body, put, tool, u16, withCwd } from "./pack-re-harness.ts";
+import { DOC_STRUCTURE, body, buildZip, put, tool, u16, withCwd } from "./pack-re-harness.ts";
 import type { Json, Run } from "./pack-re-harness.ts";
 import { buildCfb, buildPdf, ovbaCompress, vbaDirStream } from "./pack-re-doc-fixtures.ts";
 import type { PdfObj } from "./pack-re-doc-fixtures.ts";
@@ -289,4 +289,101 @@ test("P2 a file with no startxref and a 16 MB tail of 'trailer' keywords: the ce
     assert.ok(a.limits_hit.some((l: string) => /^\d+ 'trailer' keyword\(s\) found by the scan begin a dictionary of more than 1 MiB/.test(l)), JSON.stringify(a.limits_hit));
     assert.ok(a.limits_hit.some((l: string) => /the scan for trailers spent its share of the parser's budget/.test(l)), JSON.stringify(a.limits_hit));
   });
+});
+
+// --- P3: smaller items ----------------------------------------------------------------------------------------------------------
+
+test("P3 a ZIP member whose local header names another part, or another method, than the central directory: each row says so, and it is a problem", async () => {
+  await withCwd(async (cwd) => {
+    const zip = buildZip([{ name: "[Content_Types].xml", data: Buffer.from("<Types/>"), method: 0 }, { name: "word/document.xml", data: Buffer.from("<a/>"), method: 0 },
+      { name: "word/other.xml", data: Buffer.from("<b/>"), method: 0 }]);
+    const doc = zip.indexOf(Buffer.from("word/document.xml"));
+    zip.write("word/documenX.xml", doc, "latin1");            // the first occurrence is the local header's name
+    const other = zip.indexOf(Buffer.from("PK\x03\x04", "latin1"), zip.indexOf(Buffer.from("word/other.xml")) - 30);
+    zip.writeUInt16LE(8, other + 8);                          // the local header says deflated, the central directory stored
+    await put(cwd, "work/l.docx", zip);
+    const a = body(await tool(DOC_STRUCTURE, cwd, { path: "work/l.docx" }));
+    assert.equal(a.status, "partial");
+    assert.equal(a.local_headers_that_differ, 2);
+    const rows = a.tables.parts.rows as Json[];
+    assert.deepEqual(rows.find((r) => r.name === "word/document.xml").local_header_differs, ["name"]);
+    assert.deepEqual(rows.find((r) => r.name === "word/other.xml").local_header_differs, ["method"]);
+    assert.ok(a.problems.some((p: string) => /^2 member\(s\) have a local header that disagrees with the central directory/.test(p)), JSON.stringify(a.problems));
+    await put(cwd, "work/ok.docx", buildZip([{ name: "[Content_Types].xml", data: Buffer.from("<Types/>") }, { name: "word/document.xml", data: Buffer.from("<a/>") }]));
+    const ok = body(await tool(DOC_STRUCTURE, cwd, { path: "work/ok.docx" }));
+    assert.equal(ok.local_headers_that_differ, undefined);
+  });
+});
+
+test("P3 compound file entries: a type [MS-CFB] does not define, an unallocated entry a tree reaches, a name without its NUL, and a root entry size the mini stream does not match are each said", async () => {
+  await withCwd(async (cwd) => {
+    const base = buildCfb([{ name: "Alpha", data: Buffer.from("a".repeat(100)) }, { name: "Beta", data: Buffer.from("b".repeat(100)) }]);
+    const dirAt = (sid: number): number => 512 + 512 * base.readUInt32LE(48) + sid * 128;
+    const entry = (b: Buffer, name: string): number => {
+      for (let sid = 1; sid < 4; sid++) if (b.subarray(dirAt(sid), dirAt(sid) + 64).toString("utf16le").startsWith(name)) return dirAt(sid);
+      throw new Error(name);
+    };
+    const t3 = Buffer.from(base);
+    t3[entry(t3, "Alpha") + 66] = 3;                          // type 3: not a type [MS-CFB] 2.6.1 defines
+    const t0 = Buffer.from(base);
+    t0[entry(t0, "Beta") + 66] = 0;                           // unallocated, and still linked from the root's tree
+    const nul = Buffer.from(base);
+    const at = entry(nul, "Alpha");
+    nul.writeUInt16LE(Buffer.from("Alpha", "utf16le").length, at + 64);   // the length leaves out the terminator ...
+    const root = Buffer.from(base);
+    root.writeUInt32LE(64, dirAt(0) + 120);                   // the mini stream holds 256 bytes; the root entry says 64
+    const cases: [string, Buffer, RegExp][] = [
+      ["t3", t3, /1 directory entry is of a type \[MS-CFB\] 2\.6\.1 does not define \(0x03\)/],
+      ["t0", t0, /1 unallocated directory entry is reached from a storage's tree/],
+      ["nul", nul, /1 directory entry has a name length that does not fit the name field/],
+      ["root", root, /a mini sector lies beyond the mini stream \(the root entry declares 64 bytes\)/],
+    ];
+    for (const [name, data, re] of cases) {
+      await put(cwd, `work/${name}.doc`, data);
+      const a = body(await tool(DOC_STRUCTURE, cwd, { path: `work/${name}.doc` }));
+      assert.equal(a.status, "partial", name);
+      assert.ok(a.problems.some((p: string) => re.test(p)), `${name}: ${JSON.stringify(a.problems)}`);
+    }
+    await put(cwd, "work/ok.doc", base);
+    assert.equal(body(await tool(DOC_STRUCTURE, cwd, { path: "work/ok.doc" })).status, "complete");
+  });
+});
+
+test("P3 a tool-output directory that is a symbolic link is refused: nothing is written through it, in a job or not, and the answer says so", async () => {
+  await withCwd(async (cwd) => {
+    const { mkdir, readdir, symlink } = await import("node:fs/promises");
+    const { join } = await import("node:path");
+    const zip = buildZip([{ name: "[Content_Types].xml", data: Buffer.from("<Types/>") }, ...Array.from({ length: 5 }, (_x, i) => ({ name: `word/AKIAIOSFODNN7EXAMPL${i}.xml`, data: Buffer.from("<a/>") }))]);
+    await put(cwd, "work/in/z.docx", zip);
+    await mkdir(join(cwd, "elsewhere"), { recursive: true });
+    await mkdir(join(cwd, "work", "s1"), { recursive: true });
+    await symlink(join(cwd, "elsewhere"), join(cwd, "work", "s1", "tool-output"));
+    const a = body(await tool(DOC_STRUCTURE, cwd, { path: "work/in/z.docx", limit: 1 }));
+    assert.deepEqual(await readdir(join(cwd, "elsewhere")), []);
+    assert.equal(a.status, "partial");
+    assert.ok(a.problems.some((p: string) => /is a symbolic link: refused, nothing written through it/.test(p)), JSON.stringify(a.problems));
+    assert.equal(a.withheld_names_file, undefined);
+    await mkdir(join(cwd, "out"), { recursive: true });
+    await symlink(join(cwd, "elsewhere"), join(cwd, "out", "tool-output"));
+    const { asJob } = await import("./pack-re-harness.ts");
+    const j = body(await asJob(DOC_STRUCTURE, cwd, { path: "work/in/z.docx", limit: 1 }));
+    assert.deepEqual(await readdir(join(cwd, "elsewhere")), []);
+    assert.ok(j.problems.some((p: string) => /is a symbolic link: refused/.test(p)), JSON.stringify(j.problems));
+  });
+});
+
+test("P3 under a Python older than 3.11 (no possessive quantifiers) the call is refused as JSON, by name, without a traceback", (t) => {
+  const old = ["/usr/bin/python3", "python3.10", "python3.9", "python3.8"].find((bin) => {
+    const v = spawnSync(bin, ["-c", "import sys; print(sys.version_info[0] * 100 + sys.version_info[1])"], { encoding: "utf8" });
+    return v.status === 0 && Number(v.stdout.trim()) < 311;
+  });
+  if (!old) {
+    t.skip("no Python older than 3.11 on this machine");
+    return;
+  }
+  const r = spawnSync(old, ["-I", DOC_STRUCTURE], { input: JSON.stringify({ path: "nothing.pdf" }), encoding: "utf8" });
+  assert.doesNotMatch(r.stderr, /Traceback/);
+  const a = JSON.parse(r.stdout);
+  assert.equal(a.status, "failed");
+  assert.match(a.error, /^doc_structure needs Python 3\.11 or later .*: this is Python 3\.\d+; nothing was read$/);
 });

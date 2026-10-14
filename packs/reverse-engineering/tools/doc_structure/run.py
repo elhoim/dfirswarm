@@ -614,6 +614,21 @@ def resolve_output(out, what="output"):
 
 # --- lossless paging ------------------------------------------------------------------------------------------------
 
+def own_dir(path):
+    """Create the tool-output directory and return None, or say why it is not used: a symbolic link anywhere on the way (the directory itself,
+    or work/ or the agent's directory under it) would send the tables and the private names file somewhere else, and O_NOFOLLOW guards only
+    the last name of a file. In a job only the part under $OUT is checked ($OUT is the job service's)."""
+    path = Path(path)
+    out = os.environ.get("OUT")
+    start = len(Path(out).parts) if out and path.parts[:len(Path(out).parts)] == Path(out).parts else 0
+    for i in range(max(start, 1), len(path.parts) + 1):
+        step = Path(*path.parts[:i])
+        if os.path.islink(step):
+            return "%s is a symbolic link: refused, nothing written through it" % step
+    path.mkdir(parents=True, exist_ok=True)
+    return None
+
+
 class LosslessPage:
     """The first `limit` rows of a table in the answer; when there are more, the whole table as JSON Lines in a
     file that is created exclusively (under a new name when the name is taken) and named in the answer. A table
@@ -641,7 +656,10 @@ class LosslessPage:
 
     def _open(self):
         try:
-            self.dir.mkdir(parents=True, exist_ok=True)
+            refused = own_dir(self.dir)
+            if refused:
+                self.not_written = refused
+                return
             flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
             for n in range(1, 100):
                 name = "%s.jsonl" % self.stem if n == 1 else "%s-%d.jsonl" % (self.stem, n)
@@ -795,7 +813,9 @@ class Names:
         self.values.add(finding_id, {"kind": kind}, real)
         if self._fh is None and self.error is None:
             try:
-                self.dir.mkdir(parents=True, exist_ok=True)
+                refused = own_dir(self.dir)
+                if refused:
+                    raise OSError(refused)
                 for n in range(1, 100):
                     name = "%s.jsonl" % self.NAME if n == 1 else "%s-%d.jsonl" % (self.NAME, n)
                     try:
@@ -914,6 +934,35 @@ class Window(io.RawIOBase):
         buffer[:len(data)] = data
         self._pos += len(data)
         return len(data)
+
+
+def local_header_differs(fh, info, size):
+    """The fields of a member's local header (PKWARE APPNOTE 4.3.7) that disagree with its central directory entry: the signature, the name,
+    the method, the flags' encryption bit, and the CRC and sizes when the local header carries them (no data descriptor, flag bit 3, and
+    no zip64 sentinel). An empty list when they agree."""
+    at = info.header_offset
+    if at < 0 or at + 30 > size:
+        return ["the local header lies outside the file"]
+    fh.seek(at)
+    head = fh.read(30)
+    sig, _ver, flags, method, _t, _d, crc, csize, usize, nlen, _xlen = struct.unpack("<IHHHHHIIIHH", head)
+    if sig != 0x04034B50:
+        return ["no local header signature at its offset"]
+    raw = fh.read(nlen)
+    name = raw.decode("utf-8", "surrogateescape") if flags & 0x800 else raw.decode("cp437")
+    out = []
+    if name != info.filename and name.replace("\\", "/") != info.filename:
+        out.append("name")
+    if method != info.compress_type:
+        out.append("method")
+    if (flags ^ info.flag_bits) & 0x1:
+        out.append("encryption flag")
+    if not flags & 0x8 and 0xFFFFFFFF not in (csize, usize):
+        if crc != info.CRC:
+            out.append("crc")
+        if csize != info.compress_size or usize != info.file_size:
+            out.append("sizes")
+    return out
 
 
 def stream_member(archive, info, budget):
@@ -1062,11 +1111,12 @@ class Ctx:
         return True
 
     def problem(self, text):
-        text = scrub(text)
-        if text in self.problems:
-            return
+        # the cap is tested before the text is withheld: a file that raises a problem a million times pays for a hundred
         if len(self.problems) >= MAX_PROBLEMS:
             self.problems_dropped += 1
+            return
+        text = scrub(text)
+        if text in self.problems:
             return
         self.problems.append(text)
 
@@ -1468,7 +1518,8 @@ class Cfb:
             e = Entry()
             e.sid, e.reachable, e.parts, e.parent, e.duplicate = i, False, None, None, False
             namelen = struct.unpack_from("<H", row, 64)[0]
-            e.name_bad = namelen > 64 or namelen % 2 == 1 or (namelen == 0 and row[66] != 0)
+            # [MS-CFB] 2.6.1: the length counts the terminating NUL, which is there: a name without one is broken too
+            e.name_bad = namelen > 64 or namelen % 2 == 1 or (namelen == 0 and row[66] != 0) or (2 <= namelen <= 64 and row[namelen - 2:namelen] != b"\0\0")
             # The length counts bytes of UTF-16 with its terminator; an odd one (or one past 64) is a broken entry, read as far
             # as whole code units go and said, never a decoding error that ends the call.
             take = (max(0, min(namelen, 64) - 2) if namelen >= 2 else 0) & ~1
@@ -1561,6 +1612,12 @@ class Cfb:
             self.mini_chain, why = self.chain(root.start) if root.size else (array.array("I"), "end")
             if why != "end":
                 self.warn("the mini stream's chain ends with %s" % why)
+            # [MS-CFB] 2.6.3: the root entry's size is the mini stream's size; its chain holds that many bytes, rounded up to a sector
+            need = (root.size + self.ss - 1) // self.ss
+            if len(self.mini_chain) < need:
+                self.warn("the root entry declares a mini stream of %d bytes and its chain holds %d sector(s)" % (root.size, len(self.mini_chain)))
+            elif len(self.mini_chain) > need:
+                self.warn("the mini stream's chain holds %d sectors and the root entry's size (%d bytes) needs %d" % (len(self.mini_chain), root.size, need))
         return self.mini_chain
 
     def chunks(self, e, limit=None, take=None):
@@ -1603,8 +1660,8 @@ class Cfb:
         for m in chain[:need]:
             off = m * 64
             holder = off // self.ss
-            if holder >= len(base):
-                raise Unreadable("failed", "mini sector %d lies beyond the mini stream" % m)
+            if holder >= len(base) or off >= self.entries[0].size:
+                raise Unreadable("failed", "mini sector %d lies beyond the mini stream (the root entry declares %d bytes)" % (m, self.entries[0].size))
             raw = self.sector(base[holder])
             if raw is None:
                 raise Unreadable("failed", "the sector holding mini sector %d lies outside the file" % m)
@@ -1647,8 +1704,8 @@ class Cfb:
             if len(chain) < need:
                 return "its mini chain ends after %d of %d mini sectors (%s)" % (len(chain), need, why), notes
             base = self.mini_sectors()
-            if (max(chain[:need]) * 64 + 63) // self.ss >= len(base):
-                return "a mini sector lies beyond the mini stream", notes
+            if (max(chain[:need]) * 64 + 63) // self.ss >= len(base) or max(chain[:need]) * 64 >= self.entries[0].size:
+                return "a mini sector lies beyond the mini stream (the root entry declares %d bytes)" % self.entries[0].size, notes
             return None, notes
         if len(chain) < need:
             return "its chain ends after %d of %d sectors (%s)" % (len(chain), need, why), notes
@@ -1673,7 +1730,7 @@ def ole_entry_rows(cfb, ctx, page, extractor, extra=None):
     for e in cfb.entries:
         name = ENTRY_TYPES.get(e.kind, "other")
         kinds[name] += 1
-        if e.kind == 0:
+        if e.kind == 0 and not e.reachable:
             continue
         path = "/".join(e.parts) if e.parts is not None else e.name
         shown = shown_name(path)
@@ -1714,6 +1771,14 @@ def ole_entry_rows(cfb, ctx, page, extractor, extra=None):
                 row["chain"] = "broken: " + why
                 ctx.problem("stream %s: %s" % (cell(shown), why))
         page.add(row)
+    odd = sorted({e.kind for e in cfb.entries if e.kind not in ENTRY_TYPES})
+    if odd:
+        ctx.problem("%s%d directory entr%s of a type [MS-CFB] 2.6.1 does not define (%s): listed as other, not read" % (
+            "%s: " % cfb.label if cfb.label else "", kinds["other"], "y is" if kinds["other"] == 1 else "ies are", ", ".join("0x%02X" % k for k in odd)))
+    reached_free = sum(1 for e in cfb.entries if e.kind == 0 and e.reachable)
+    if reached_free:
+        ctx.problem("%s%d unallocated directory entr%s reached from a storage's tree: listed, and read as nothing" % (
+            "%s: " % cfb.label if cfb.label else "", reached_free, "y is" if reached_free == 1 else "ies are"))
     bad_names = sum(1 for e in cfb.entries if e.kind != 0 and e.name_bad)
     if bad_names:
         ctx.problem("%s%d directory entr%s a name length that does not fit the name field (odd, over 64 bytes, or zero with a name): each name is read as far as whole UTF-16 code units go, and the row says name_length_inconsistent"
@@ -2433,7 +2498,7 @@ def _probe_zip(path, size, ctx, extractor, out):
             raise Stop("the archive will not open (%s: %s)" % (type(exc).__name__, scrub(str(exc))), out)
         # Part names compare case-insensitively (ECMA-376-2 9.1.1.1.2): every member is kept under its lower-case name, so that two
         # spellings of one part are a duplicate, and every copy of a part this tool reads is read.
-        by_name, by_lower = {}, {}
+        by_name, by_lower, local_mismatch = {}, {}, []
         with archive:
             infos = archive.infolist()
             if len(infos) != total:
@@ -2458,7 +2523,17 @@ def _probe_zip(path, size, ctx, extractor, out):
                 if info.flag_bits & 0x1:
                     row["encrypted"] = True
                     members["flagged_encrypted"] += 1
+                differs = local_header_differs(fh, info, size)
+                if differs:
+                    row["local_header_differs"] = differs
+                    local_mismatch.append((shown, differs))
                 parts.add(row)
+            if local_mismatch:
+                out["local_headers_that_differ"] = len(local_mismatch)
+                ctx.problem("%d member(s) have a local header that disagrees with the central directory (%s): a reader that walks the local headers (a "
+                            "streaming reader) sees other names, methods or sizes; this tool lists and reads by the central directory, and each row says "
+                            "local_header_differs" % (len(local_mismatch), "; ".join("%s: %s" % (n, ", ".join(d)) for n, d in local_mismatch[:5])
+                                                      + ("; and %d more" % (len(local_mismatch) - 5) if len(local_mismatch) > 5 else "")))
             duplicates = []
             for low, copies in by_lower.items():
                 if len(copies) > 1:
@@ -2668,7 +2743,11 @@ def unescape_name(raw):
     return HEX_NAME.sub(lambda m: bytes([int(m.group(1), 16)]), raw).decode("utf-8", "surrogateescape")
 
 
-SKIP_RE = re.compile(rb"(?:[\x00\t\n\x0c\r ]+|%[^\r\n]*)*+")    # possessive (Python 3.11 and later): no backtracking record per repetition
+try:
+    SKIP_RE = re.compile(rb"(?:[\x00\t\n\x0c\r ]+|%[^\r\n]*)*+")    # possessive (Python 3.11 and later): no backtracking record per repetition
+except re.error:                    # an older Python has no possessive quantifier: main() refuses the call by name, before reading anything
+    SKIP_RE = None
+MIN_PYTHON = (3, 11)
 OBJECT_SCAN = 64 << 20              # bytes one object may take to scan, over every window it is read in
 SCAN_FACTOR = 8                     # bytes all PDF parses of one call may scan: this many times the file, plus SCAN_FLOOR
 SCAN_FLOOR = 64 << 20
@@ -5004,6 +5083,9 @@ def file_problem(path):
 
 
 def main():
+    if sys.version_info[:2] < MIN_PYTHON:
+        fail("doc_structure needs Python %d.%d or later (its PDF lexer uses possessive quantifiers, which Python has from 3.11): this is Python %d.%d; "
+             "nothing was read" % (MIN_PYTHON + tuple(sys.version_info[:2])), python="%d.%d.%d" % tuple(sys.version_info[:3]))
     try:
         args = json.load(sys.stdin)
     except ValueError as exc:

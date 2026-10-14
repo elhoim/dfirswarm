@@ -588,6 +588,21 @@ def resolve_output(out, what="output"):
 
 # --- lossless paging ------------------------------------------------------------------------------------------------
 
+def own_dir(path):
+    """Create the tool-output directory and return None, or say why it is not used: a symbolic link anywhere on the way (the directory itself,
+    or work/ or the agent's directory under it) would send the tables and the private names file somewhere else, and O_NOFOLLOW guards only
+    the last name of a file. In a job only the part under $OUT is checked ($OUT is the job service's)."""
+    path = Path(path)
+    out = os.environ.get("OUT")
+    start = len(Path(out).parts) if out and path.parts[:len(Path(out).parts)] == Path(out).parts else 0
+    for i in range(max(start, 1), len(path.parts) + 1):
+        step = Path(*path.parts[:i])
+        if os.path.islink(step):
+            return "%s is a symbolic link: refused, nothing written through it" % step
+    path.mkdir(parents=True, exist_ok=True)
+    return None
+
+
 class LosslessPage:
     """The first `limit` rows of a table in the answer; when there are more, the whole table as JSON Lines in a
     file that is created exclusively (under a new name when the name is taken) and named in the answer. A table
@@ -615,7 +630,10 @@ class LosslessPage:
 
     def _open(self):
         try:
-            self.dir.mkdir(parents=True, exist_ok=True)
+            refused = own_dir(self.dir)
+            if refused:
+                self.not_written = refused
+                return
             flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
             for n in range(1, 100):
                 name = "%s.jsonl" % self.stem if n == 1 else "%s-%d.jsonl" % (self.stem, n)
@@ -766,7 +784,9 @@ class Names:
         self.values.add(finding_id, {"kind": kind}, real)
         if self._fh is None and self.error is None:
             try:
-                self.dir.mkdir(parents=True, exist_ok=True)
+                refused = own_dir(self.dir)
+                if refused:
+                    raise OSError(refused)
                 for n in range(1, 100):
                     name = "%s.jsonl" % self.NAME if n == 1 else "%s-%d.jsonl" % (self.NAME, n)
                     try:
@@ -854,11 +874,12 @@ class Ctx:
         return True
 
     def problem(self, text):
-        text = scrub(text)
-        if text in self.problems:
-            return
+        # the cap is tested before the text is withheld: a file that raises a problem a million times pays for a hundred
         if len(self.problems) >= MAX_PROBLEMS:
             self.problems_dropped += 1
+            return
+        text = scrub(text)
+        if text in self.problems:
             return
         self.problems.append(text)
 
@@ -1125,6 +1146,14 @@ def parse_headers(img, ctx):
     maps = []
     sections = []
     unaligned = []
+    misaligned = []
+    # PE/COFF: FileAlignment "should be a power of 2 between 512 and 64 K, inclusive", and when SectionAlignment is less than the page
+    # size the two must be equal (the low-alignment case). Either breach is said; the sections are read as the rule below says.
+    power = file_alignment and not file_alignment & (file_alignment - 1)
+    alignment_breach = not (power and (0x200 <= file_alignment <= 0x10000 or (file_alignment == section_alignment and section_alignment < 0x1000)))
+    if alignment_breach:
+        ctx.problem("FileAlignment is 0x%X with SectionAlignment 0x%X: PE/COFF wants a power of 2 from 512 to 64K, or one equal to a SectionAlignment below the "
+                    "page size (4096); the section offsets are read as the rule in sections_note says" % (file_alignment, section_alignment))
     for i in range(min(nsec, MAX_SECTIONS)):
         at = table_at + i * 40
         if at + 40 > img.size:
@@ -1132,6 +1161,9 @@ def parse_headers(img, ctx):
             break
         name = bytes(img.mm[at:at + 8]).rstrip(b"\x00").decode("utf-8", "replace")
         vsize, vaddr, rawsize, rawptr, _a, _b, _c, _d, flags = struct.unpack_from("<IIIIIIHHI", img.mm, at + 8)
+        if rawsize and file_alignment and rawptr % file_alignment:
+            misaligned.append({"section": text_of(name), "pointer_to_raw_data": rawptr, "file_alignment": file_alignment,
+                               "read_from": rawptr & ~0x1FF if rawptr & 0x1FF and file_alignment >= 0x200 else rawptr})
         if rawptr & 0x1FF and file_alignment >= 0x200:
             # PE/COFF: PointerToRawData is a multiple of FileAlignment, and FileAlignment is 512 or more unless SectionAlignment is below
             # the page size (then the two are equal and may be less than 512). With FileAlignment of 512 or more, a value that is not a
@@ -1144,8 +1176,15 @@ def parse_headers(img, ctx):
             maps.append((vaddr, min(vsize or rawsize, rawsize), rawptr, min(img.size, rawptr + rawsize), len(maps)))
     if unaligned:
         out["sections_read_from_rounded_offsets"] = unaligned
-        out["sections_note"] = ("a section's PointerToRawData is not a multiple of FileAlignment (512 or more here), which PE/COFF requires: its bytes are read from the value "
-                                "rounded down to 512, the header's value is kept beside it, and a reader that uses the value as written reads other bytes")
+    if misaligned:
+        out["sections_not_a_multiple_of_file_alignment"] = misaligned
+        ctx.problem("%d section(s) have a PointerToRawData that is not a multiple of FileAlignment (0x%X), which PE/COFF requires of an executable image: "
+                    "see sections_not_a_multiple_of_file_alignment and sections_note" % (len(misaligned), file_alignment))
+    if misaligned or unaligned or alignment_breach:
+        out["sections_note"] = ("the rule this tool reads sections by: with FileAlignment of 512 or more, a PointerToRawData that is not a multiple of 512 is read from the value "
+                                "rounded down to 512 (sections_read_from_rounded_offsets); any other value, a multiple of 512 that is not one of FileAlignment included, "
+                                "and every value when FileAlignment is below 512, is read as written. PE/COFF says the value is a multiple of FileAlignment and says nothing "
+                                "of rounding: readers differ, and one that reads the other offset reads other bytes. Both values are in the answer")
     if size_of_headers:
         maps.append((0, size_of_headers, 0, min(size_of_headers, img.size), len(maps)))
     by_start = sorted(maps)
