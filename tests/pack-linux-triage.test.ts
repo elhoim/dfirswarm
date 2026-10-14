@@ -118,19 +118,27 @@ test("linux_triage starts a function only if the time left covers its own timeou
 
 test("linux_triage leaves a durable summary after each function, so a run killed in the middle still says what it had done", async () => {
   await withCwd(async (cwd, bin) => {
-    const env = await triageFixture(cwd, bin, { users: { sleep: 0 }, bashhistory: { sleep: 8 } });
+    const env = await triageFixture(cwd, bin, { users: { sleep: 0 }, bashhistory: { sleep: 60 } });
     const child = spawn("python3", [TRIAGE], { cwd, env: { ...process.env, ...env, ...AGENT, PATH: `${bin}:${process.env.PATH ?? ""}` }, detached: true, stdio: ["pipe", "pipe", "pipe"] });
     child.stdin.end(JSON.stringify({ source: "inputs/server.E01", out_dir: "work/triage", groups: ["users", "history"] }));
     const summaryPath = join(cwd, "work", "triage", "summary.json");
+    // The summary is rewritten twice between the functions: first with the one that ended as `parsed` (the next still
+    // `pending`), then with the next marked `running`. Wait for the second, which has the first one's outcome in it
+    // too, so the test reads the state it is about whatever the scheduler does between the two writes. The poll is
+    // bounded to 30 seconds; the second function sleeps for 60, so the state holds for longer than the poll lasts, and
+    // the run is killed as soon as it is seen.
+    const functionOf = (s: Json, group: string, name: string): Json =>
+      s?.groups?.find((g: Json) => g.group === group)?.functions?.find((f: Json) => f.name === name);
     let summary: Json = null;
-    for (let i = 0; i < 100 && !summary; i++) {
+    for (let i = 0; i < 300 && !summary; i++) {
       await new Promise((r) => setTimeout(r, 100));
-      summary = await readFile(summaryPath, "utf8").then((t) => JSON.parse(t), () => null);
-      if (summary && !summary.groups?.some((g: Json) => g.functions.some((f: Json) => f.name === "users" && f.status === "parsed"))) summary = null;
+      const seen: Json = await readFile(summaryPath, "utf8").then((text) => JSON.parse(text), () => null);
+      if (functionOf(seen, "users", "users")?.status === "parsed" && functionOf(seen, "history", "bashhistory")?.status === "running") summary = seen;
     }
     process.kill(-(child.pid as number), "SIGKILL");
     assert.ok(summary, "a summary with the first function done exists while the second runs");
     assert.equal(summary.state, "running");
+    assert.equal(functionOf(summary, "users", "users").status, "parsed", "the function that ended has its outcome in the summary");
     const history = summary.groups.find((g: Json) => g.group === "history");
     assert.ok(history, "the family being run is in it, as running");
     assert.equal(history.functions[0].status, "running");
