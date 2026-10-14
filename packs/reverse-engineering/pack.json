@@ -1,7 +1,7 @@
 {
   "id": "reverse-engineering",
   "name": "Reverse Engineering Pack",
-  "version": "1.4.1",
+  "version": "1.5.0",
   "description": "Static triage of a binary or a document under quarantine: what the file actually is, PE and ELF structure, entropy and packing, obfuscated strings, capability mapping, macros and embedded objects, and rules. Nothing from the evidence is ever executed.",
   "licence": "AGPL-3.0-or-later",
   "authors": [
@@ -31,6 +31,8 @@
       "README.md": "f5752af6af383f05b7e58929dde93d513dbe8cf6a96bb6d906041fe0b8e8dd7f",
       "tools/fuzzy_hash/manifest.json": "95ad584cb810bbd17112545b2faf314fe30bca784e444d9257c421b7d8cd6f60",
       "tools/fuzzy_hash/run.py": "2819935381da66752157455de3e7bc7d02f99dd4387ef2d967ae85a073fcf93b",
+      "tools/doc_structure/manifest.json": "95ae53347b3de29260b818b5d43a91770e16a90ca9f08c15f79e4c6c5ae72cea",
+      "tools/doc_structure/run.py": "da3b34bff9f791b29e7275f329d4d99ccacde0e79e6d04f655d77ce9f2f90c25",
       "tools/pe_info/manifest.json": "73b34759f1c7e89407348094d9e05a5722ae0c1a8698bc8300aafb9844765607",
       "tools/pe_info/run.py": "fd4f51f5bfe7701c3f085b5dd941b732688a93cdcc83836299cbd77e8430ae96",
       "tools/doc_probe/manifest.json": "e254867c4845ad782dc731deaed96e210be44e260f193205bd8ad2c01ef92ed1",
@@ -48,8 +50,8 @@
       "skills/triage/quarantine.md": "f60c3323618dd240a062f3aff057f996b9f460d604656016a50bf795f20cf494",
       "skills/rules/authoring.md": "69f5cc20f032ed367ef83cab58b64de51c135c217fc6aa9f4f224db71ceb2cb1",
       "skills/rules/yara.md": "8eadb83d84456b726ba99dff1c6e0d0547ace586aff7b47d4af58c8e2f16c3c9",
-      "skills/documents/external-and-active-content.md": "c2a53dd3c1cec4299e1b698741b2c19282dc0f8713d470b84acaf012987fcf77",
-      "skills/documents/macros.md": "78f5bd9c6ea5383afeff491f2c4ec98566d7e2360d5ee78eeb8c9ddf1913f0e9",
+      "skills/documents/external-and-active-content.md": "3219a4d058fa21b77ca43857eda1c393d77139a43f670080773ce26c55a9f2dd",
+      "skills/documents/macros.md": "8998f0b95a0d8acc19026e4a040332b128dc9ded7323d127146df9e891aae01f",
       "skills/elf/packing-and-identity.md": "a4cfdebf3efb071edca2da1560ff2e7b015ed89d366777645b995aeb2336176a",
       "skills/elf/structure.md": "913d82302d83dc52d253971d7436811be92be563b1d47bb164abef96eda4f7aa",
       "requires/host.json": "c9cef9f2e1f8f4970524077eb18d2f6807ca00c51a552da1faf6c69bf953ee92",
@@ -59,6 +61,7 @@
   },
   "tools": [
     "doc_probe",
+    "doc_structure",
     "entropy_map",
     "fuzzy_hash",
     "pe_info"

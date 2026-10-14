@@ -25,6 +25,7 @@ export const RE = join(ROOT, "packs", "reverse-engineering");
 export const TOOLS = join(RE, "tools");
 export const PE_INFO = join(TOOLS, "pe_info", "run.py");
 export const DOC_PROBE = join(TOOLS, "doc_probe", "run.py");
+export const DOC_STRUCTURE = join(TOOLS, "doc_structure", "run.py");
 export const ENTROPY = join(TOOLS, "entropy_map", "run.py");
 export const FUZZY = join(TOOLS, "fuzzy_hash", "run.py");
 export const RECIPE = join(RE, "recipes", "static-binary", "run.py");

@@ -1,0 +1,108 @@
+{
+  "name": "doc_structure",
+  "description": "Read a document's structure from its bytes, without opening it in the application that made it and without running anything in it. OLE compound file (binary Word, Excel, PowerPoint, vbaProject.bin, an encrypted OOXML package): the header, FAT, mini FAT and the whole directory (every entry with size, start sector, class id and FILETIME times as raw value and UTC, and the entries no storage reaches); the VBA project (the dir stream is decompressed; each module's stream and the size of its compressed source are listed; source is written out only when extract asks for it); the encryption structures the Office formats record (EncryptionInfo, the Word FIB flags and table-stream header, the Excel FILEPASS record, the PowerPoint Current User token), reported as scheme, algorithm and key size and never as salts, verifiers or keys; Excel sheet kinds and visibility from the BOUNDSHEET records. OOXML/ZIP: the central directory, [Content_Types].xml, the document, workbook and presentation protection elements (hash, salt and password attributes by length only), and each vbaProject.bin read as a compound file. PDF: the cross-reference chain (tables, streams, hybrid files, every revision), every object's dictionary and stream filters, object streams, the encryption dictionary named by the current trailer (verifiers by length only), the catalog's actions and the way each is reached (OpenAction, additional-actions, annotations, form fields, outlines, the JavaScript name tree), embedded files, and the page tree's declared and traversed counts. RTF: group structure and nesting, control words, object groups with class name, hex data length, the OLE 1.0 object header and a nested compound file read as one, fields and templates by length. Every stream is read under budgets (per stream, in total, expansion ratio, entries, objects, depth, clock) and a budget that is reached is a limit in the answer, never a clean result. Not read: text, cells, slides, images, fonts, compiled VBA (p-code), property sets, JavaScript or embedded-file content (unless extract names it), the plaintext of anything encrypted (no key, not even an empty password, is tried), filters other than Flate, ASCIIHex, ASCII85 and RunLength. A structure shows what the file holds, not what an application would do: an action, macro, field or external target does not show that anything ran or was fetched, and a structure not found is not an absence of the thing.",
+  "use": {
+    "magic": [
+      {
+        "offset": 0,
+        "hex": "d0cf11e0a1b11ae1"
+      },
+      {
+        "offset": 0,
+        "hex": "504b0304"
+      },
+      {
+        "offset": 0,
+        "hex": "504b0506"
+      },
+      {
+        "offset": 0,
+        "hex": "255044462d"
+      },
+      {
+        "offset": 0,
+        "hex": "7b5c727466"
+      }
+    ],
+    "extensions": [
+      ".docx",
+      ".docm",
+      ".dotx",
+      ".dotm",
+      ".xlsx",
+      ".xlsm",
+      ".xltx",
+      ".xltm",
+      ".pptx",
+      ".pptm",
+      ".potx",
+      ".potm",
+      ".doc",
+      ".dot",
+      ".xls",
+      ".xlt",
+      ".ppt",
+      ".pot",
+      ".pdf",
+      ".rtf"
+    ]
+  },
+  "params": {
+    "path": {
+      "type": "string",
+      "description": "An OLE compound file, an Office Open XML package, a PDF or an RTF file"
+    },
+    "extract_to": {
+      "type": "string",
+      "description": "Where objects named in extract are written: a directory under work/<your agent id>/ (in a job, under $OUT). Files are created exclusively, mode 0600, named extract-NNNN.bin, and can contain secrets"
+    },
+    "extract": {
+      "type": "array",
+      "description": "Objects to write byte for byte (at most 64): vba (every VBA module's decompressed source), javascript (every PDF script), ole:<stream path>, zip:<member name>, pdf:<object number> (stream, filters undone), pdf-raw:<object number> (stream, still encoded), rtf:<object number> (the hex-decoded object data). Needs extract_to; run in a job with secret_output: true"
+    },
+    "write_values": {
+      "type": "boolean",
+      "description": "Write each PDF URI/launch target, RTF field instruction and template whole to doc-structure-values.jsonl under $OUT, and the real name behind every withheld name (default false; refused outside a job; run the job with secret_output: true)"
+    },
+    "max_stream_bytes": {
+      "type": "integer",
+      "description": "Most bytes one stream may be read or expand to (default 16777216)"
+    },
+    "max_total_bytes": {
+      "type": "integer",
+      "description": "Most bytes all streams may be read or expand to together (default 134217728)"
+    },
+    "max_entries": {
+      "type": "integer",
+      "description": "Most OLE directory entries and ZIP members read (default 10000, at most 100000)"
+    },
+    "max_objects": {
+      "type": "integer",
+      "description": "Most PDF objects indexed and traversed (default 200000, at most 2000000)"
+    },
+    "max_depth": {
+      "type": "integer",
+      "description": "Deepest nesting followed: RTF groups, OLE storages, PDF structures (default 256, at most 10000)"
+    },
+    "max_ratio": {
+      "type": "integer",
+      "description": "Most expanded bytes per compressed byte (default 1000)"
+    },
+    "limit": {
+      "type": "integer",
+      "description": "Rows of one table kept in the answer (default 1000); the whole of a longer table is written to a file and named"
+    },
+    "max_seconds": {
+      "type": "integer",
+      "description": "The tool's own time limit in seconds, from 1 to 110 (default 100); a read that reaches it stops, reports what it read and says so"
+    }
+  },
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 120,
+  "example": "{\"path\": \"work/extracted/invoice.doc\"}",
+  "by": "maintainer",
+  "at": "2026-10-14T09:00:00.000Z",
+  "version": 1,
+  "sha256": "da3b34bff9f791b29e7275f329d4d99ccacde0e79e6d04f655d77ce9f2f90c25"
+}

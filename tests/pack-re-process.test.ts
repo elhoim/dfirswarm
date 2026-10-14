@@ -11,7 +11,7 @@ import { createHash } from "node:crypto";
 import { readFile, readdir, truncate } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
-import { DOC_PROBE, FUZZY, PE_INFO, RE, RECIPE, TOOLS, buildPe, childrenOf, gone, pidFile, put, startDetached, stub, tool, withCwd } from "./pack-re-harness.ts";
+import { DOC_PROBE, DOC_STRUCTURE, FUZZY, PE_INFO, RE, RECIPE, TOOLS, buildPe, childrenOf, gone, pidFile, put, startDetached, stub, tool, withCwd } from "./pack-re-harness.ts";
 import type { Json } from "./pack-re-harness.ts";
 
 const TLSH_DIGEST = "T1" + "A1B2C3D4E5".repeat(7);
@@ -200,8 +200,8 @@ test("the tool and the recipe that start programs carry one process block, the n
   }
 });
 
-test("the withholding blocks of doc_probe and pe_info are the network pack's text", async () => {
-  for (const path of [DOC_PROBE, PE_INFO]) assert.equal(sha(await block(path, "WITHHOLDING")), NETWORK_WITHHOLDING_SHA, path);
+test("the withholding blocks of doc_probe, doc_structure and pe_info are the network pack's text", async () => {
+  for (const path of [DOC_PROBE, DOC_STRUCTURE, PE_INFO]) assert.equal(sha(await block(path, "WITHHOLDING")), NETWORK_WITHHOLDING_SHA, path);
 });
 
 test("the timeouts the pack sets itself are below the manifest's and the recipe's own limits", async () => {
@@ -209,7 +209,7 @@ test("the timeouts the pack sets itself are below the manifest's and the recipe'
   const total = Number(/^TOTAL_BUDGET = (\d+)/m.exec(fuzzy)![1]);
   const manifest = JSON.parse(await readFile(join(TOOLS, "fuzzy_hash", "manifest.json"), "utf8")) as Json;
   assert.ok(total < manifest.timeout_seconds, `fuzzy_hash budgets ${total} s of ${manifest.timeout_seconds}`);
-  for (const [tool, name] of [["doc_probe", "DEFAULT_SECONDS"], ["pe_info", "DEFAULT_SECONDS"], ["entropy_map", "DEFAULT_SECONDS"]] as const) {
+  for (const [tool, name] of [["doc_probe", "DEFAULT_SECONDS"], ["doc_structure", "DEFAULT_SECONDS"], ["pe_info", "DEFAULT_SECONDS"], ["entropy_map", "DEFAULT_SECONDS"]] as const) {
     const text = await readFile(join(TOOLS, tool, "run.py"), "utf8");
     const own = Number(new RegExp(`^MAX_SECONDS = (\\d+)`, "m").exec(text)![1]);
     const dflt = Number(new RegExp(`^${name} = (\\d+)`, "m").exec(text)![1]);
