@@ -39,6 +39,7 @@ import time
 import xml.parsers.expat
 import zipfile
 import zlib
+from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -2519,7 +2520,19 @@ HEX_NAME = re.compile(rb"#([0-9A-Fa-f]{2})")
 ENDSTREAM_AFTER = re.compile(rb"[\x00\t\n\x0c\r ]*endstream")
 DIRECT_LENGTH = re.compile(rb"/Length[\x00\t\n\x0c\r ]+([0-9]+)(?![0-9]|[\x00\t\n\x0c\r ]+[0-9]+[\x00\t\n\x0c\r ]+R)")
 MAX_OBJECT_WINDOW = 32 << 20
-MAX_ITEMS = 1_000_000
+MAX_ITEMS = 250_000                 # values one parse may read (a PDF object and all it holds): past it, a bound of the parser, named
+# What the PDF reader keeps of what it parsed, by an estimate of the memory it takes: ITEM_BYTES for each value (a name, a number, an empty
+# array costs 50 to 70 bytes of heap; the input costs 2 or 3), plus the bytes of every string and name. A parsed value costs 20 to 30
+# times its input, so the scan budgets, which count input, do not bound it: these do, and none of them loses anything (an object that
+# is not kept is read again when it is needed, under the same clock and budgets).
+ITEM_BYTES = 80
+CACHE_BYTES = 96 << 20              # the parsed objects the reader keeps for the next lookup, oldest out first
+CACHE_OBJECT_BYTES = 8 << 20        # an object larger than this is not kept in that cache at all
+CACHE_OBJECTS = 4000
+KEEP_BYTES = 32 << 20               # the objects the census keeps for the structure trace (catalog, actions, object streams, file specs)
+KEEP_OBJECT_BYTES = 1 << 20
+OBJSTM_CACHE_BYTES = 48 << 20       # decoded object streams kept, with their header pairs
+FAILED_AT_MAX = 100_000             # offsets remembered as unreadable (never parsed twice)
 ACTION_SUBTYPES = {"JavaScript", "Launch", "URI", "SubmitForm", "GoToR", "GoToE", "ImportData", "Named", "Rendition", "Movie", "Sound", "GoTo", "Thread",
                    "ResetForm", "Hide", "SetOCGState", "Trans", "GoTo3DView", "RichMediaExecute", "SetState", "NoOp"}
 SUPPORTED_FILTERS = {"FlateDecode": "FlateDecode", "Fl": "FlateDecode", "ASCIIHexDecode": "ASCIIHexDecode", "AHx": "ASCIIHexDecode",
@@ -2635,7 +2648,11 @@ class Lexer:
 
     def __init__(self, buf, pos, end, final, max_depth, meter, max_string, max_items=MAX_ITEMS):
         self.buf, self.pos, self.end, self.final, self.max_depth = buf, pos, end, final, max_depth
-        self.meter, self.max_string, self.max_items, self.items = meter, max_string, max_items, 0
+        self.meter, self.max_string, self.max_items, self.items, self.held = meter, max_string, max_items, 0, 0
+
+    def cost(self):
+        """What the values this parse read take in memory, estimated: ITEM_BYTES each, and the bytes of their strings and names."""
+        return self.items * ITEM_BYTES + self.held
 
     def count(self):
         self.items += 1
@@ -2686,6 +2703,7 @@ class Lexer:
                 name = LongName("<a name of %d bytes at offset %d>" % (length, self.pos))
             else:
                 name = Name(unescape_name(buf[self.pos + 1:end]))
+            self.held += len(name)
             self.pos = end
             return name
         if c == 0x3C:
@@ -2779,6 +2797,7 @@ class Lexer:
         if len(digits) % 2:
             digits.append(0x30)
         self.pos = close + 1
+        self.held += len(digits) // 2
         return PStr(bytes.fromhex(digits.decode("ascii")))
 
     def literal(self):
@@ -2815,6 +2834,7 @@ class Lexer:
                     if len(out) > self.max_string:
                         raise ParseBound("a string longer than max_stream_bytes (%d), at offset %d" % (self.max_string, opened))
                     self.pos = pos
+                    self.held += len(out)
                     return PStr(bytes(out))
                 out.append(c)
             else:
@@ -2892,7 +2912,7 @@ def png_unpredict(data, columns, colors, bpc, ctx=None):
 
 
 class Obj:
-    __slots__ = ("num", "gen", "value", "offset", "stream", "header_offset")
+    __slots__ = ("num", "gen", "value", "offset", "stream", "header_offset", "cost")
 
 
 class Pdf:
@@ -2900,8 +2920,12 @@ class Pdf:
         self.blob, self.size, self.ctx = blob, len(blob), ctx
         self.cfg = ctx.cfg
         self.entries = {}
-        self.cache = {}
-        self.objstm_cache = {}
+        self.cache = OrderedDict()      # object number -> Obj or None, oldest first, held to CACHE_BYTES
+        self.cache_bytes = 0
+        self.kept_bytes = 0
+        self.objstm_cache = OrderedDict()
+        self.objstm_bytes = 0
+        self.objstm_charged = set()     # object streams whose decoded size was counted against max_total_bytes: counted once
         self.trailers = []
         self.revisions = []
         self.base = 0
@@ -2961,7 +2985,7 @@ class Pdf:
                     window *= 4
         except PdfError as exc:
             # The class and the message only: the exception itself holds its traceback, and through it the data it was read from.
-            if len(self.failed_at) < 1_000_000:
+            if len(self.failed_at) < FAILED_AT_MAX:
                 self.failed_at[(off, kind)] = (type(exc), str(exc))
             raise
 
@@ -2994,17 +3018,17 @@ class Pdf:
                         elif lx.buf[p:p + 1] in (b"\n", b"\r"):
                             p += 1
                         stream_at = p
-                return int(m.group(1)), int(m.group(2)), value, stream_at
+                return int(m.group(1)), int(m.group(2)), value, stream_at, lx.cost()
 
             try:
-                (num, gen, value, stream_at), _ = self.parse_at(at, fn)
+                (num, gen, value, stream_at, cost), _ = self.parse_at(at, fn)
             except PdfError as exc:
                 last = last or exc
                 continue
             if expect is not None and num != expect:
                 self.problem("the cross-reference entry for object %d points at the header of object %d (offset %d)" % (expect, num, at))
             o = Obj()
-            o.num, o.gen, o.value, o.offset, o.stream, o.header_offset = num, gen, value, at, None, shift
+            o.num, o.gen, o.value, o.offset, o.stream, o.header_offset, o.cost = num, gen, value, at, None, shift, cost
             if stream_at is not None:
                 o.stream = self.locate_stream(value, stream_at)
             return o
@@ -3076,10 +3100,25 @@ class Pdf:
                 self.ctx.limit_hit(str(exc))
                 self.over_objects += 1
                 self.not_read_at_limit.add(num)
-        if len(self.cache) > 4000:
-            self.cache.clear()
-        self.cache[num] = o
+        cost = o.cost if o is not None else 0
+        if cost <= CACHE_OBJECT_BYTES:
+            # oldest out first, until this one fits: what the cache holds is bounded by its estimated size, not by a count alone
+            while self.cache and (self.cache_bytes + cost > CACHE_BYTES or len(self.cache) >= CACHE_OBJECTS):
+                _n, old = self.cache.popitem(last=False)
+                self.cache_bytes -= old.cost if old is not None else 0
+            self.cache[num] = o
+            self.cache_bytes += cost
         return o
+
+    def keep(self, o):
+        """o, when what the census keeps for the trace stays under KEEP_BYTES; else None, and the trace reads the object again (again())."""
+        if o is not None and o.cost <= KEEP_OBJECT_BYTES and self.kept_bytes + o.cost <= KEEP_BYTES:
+            self.kept_bytes += o.cost
+            return o
+        return None
+
+    def again(self, num, kept):
+        return kept if kept is not None else self.get(num)
 
     def deref(self, x, hops=8):
         num, first = None, x
@@ -3108,7 +3147,7 @@ class Pdf:
             out.append((str(name) if isinstance(name, Name) else "?", p))
         return out
 
-    def decode(self, o, cap=None):
+    def decode(self, o, cap=None, charge=True):
         """The decoded bytes of a stream object under the budgets. Raises PdfError (a filter this tool does not decode, a corrupt stream)
         or Over. A stream is never returned cut.
 
@@ -3127,6 +3166,8 @@ class Pdf:
                   (max(RATIO_FLOOR, budget.ratio * encoded), "a stream expanded past max_ratio (%d) of its encoded size (%d bytes)" % (budget.ratio, encoded)),
                   (max(0, budget.total - budget.used), "a stream would pass max_total_bytes (%d): the streams read before it used %d; the rest of this call reads no more stream content"
                    % (budget.total, budget.used))]
+        if not charge:
+            bounds = bounds[:2]         # a stream counted once already is held to the stream and ratio bounds, not to the total again
         limit, why = min(bounds, key=lambda b: b[0])
         chain = self.filters_of(o.value)
         if len(chain) > MAX_FILTERS:
@@ -3167,7 +3208,8 @@ class Pdf:
             data = bytes(src[s:e])
         if len(data) > limit:
             raise Over(why)
-        self.ctx.spend(len(data), "a stream")
+        if charge:
+            self.ctx.spend(len(data), "a stream")
         return data
 
     def _clock(self):
@@ -3283,6 +3325,7 @@ class Pdf:
 
     def objstm(self, num):
         if num in self.objstm_cache:
+            self.objstm_cache.move_to_end(num)
             return self.objstm_cache[num]
         if num in self.objstm_failed:
             raise PdfError(self.objstm_failed[num])
@@ -3313,7 +3356,10 @@ class Pdf:
         n, first = o.value.get("N"), o.value.get("First")
         if not (isinstance(n, int) and isinstance(first, int)) or n < 0 or first < 0 or n > MAX_HEADER_PAIRS:
             raise PdfError("object stream %d has no usable /N and /First" % num)
-        data = self.decode(o)
+        # A stream read again after it left the cache is decoded again, and counted against max_total_bytes once: the budget is of
+        # the content the call reads, and reading one stream twice is not reading more of the file.
+        data = self.decode(o, charge=num not in self.objstm_charged)
+        self.objstm_charged.add(num)
         found = re.findall(rb"[0-9]+", data[:first])[:2 * n]
         if any(len(x) > 20 for x in found):
             raise PdfError("object stream %d's header holds a number of more than 20 digits" % num)
@@ -3321,9 +3367,13 @@ class Pdf:
         if len(nums) < 2 * n:
             raise PdfError("object stream %d lists %d of the %d objects it declares" % (num, len(nums) // 2, n))
         res = (data, first, [(nums[2 * i], nums[2 * i + 1]) for i in range(n)])
-        if len(self.objstm_cache) >= 6:
-            self.objstm_cache.pop(next(iter(self.objstm_cache)))
-        self.objstm_cache[num] = res
+        cost = len(data) + n * ITEM_BYTES
+        if cost <= OBJSTM_CACHE_BYTES:
+            while self.objstm_cache and self.objstm_bytes + cost > OBJSTM_CACHE_BYTES:
+                _n, old = self.objstm_cache.popitem(last=False)
+                self.objstm_bytes -= len(old[0]) + len(old[2]) * ITEM_BYTES
+            self.objstm_cache[num] = res
+            self.objstm_bytes += cost
         return res
 
     def from_objstm(self, stm, index, num):
@@ -3340,9 +3390,10 @@ class Pdf:
         at = first + pairs[index][1]
         if at >= len(data):
             raise PdfError("object %d's offset is outside object stream %d" % (num, stm))
-        value = Lexer(data, at, len(data), True, self.nesting, Meter(self), self.cfg["max_stream_bytes"]).parse()
+        lx = Lexer(data, at, len(data), True, self.nesting, Meter(self), self.cfg["max_stream_bytes"])
+        value = lx.parse()
         o = Obj()
-        o.num, o.gen, o.value, o.offset, o.stream, o.header_offset = num, 0, value, None, None, 0
+        o.num, o.gen, o.value, o.offset, o.stream, o.header_offset, o.cost = num, 0, value, None, None, 0, lx.cost()
         return o
 
     # cross-reference chain --------------------------------------------------------------------------------------------
@@ -3445,7 +3496,7 @@ class Pdf:
         trailer, _ = self.parse_at(tpos, lambda lx: lx.parse(), "dictionary")
         if not isinstance(trailer, dict):
             raise PdfError("the trailer is not a dictionary")
-        self.trailers.append(trailer)
+        self.trailers.append(trailer_view(trailer))
         rev = {"index": len(self.revisions), "kind": "table", "startxref": off, "entries": count_entries, "size": trailer.get("Size") if isinstance(trailer.get("Size"), int) else None,
                "prev": trailer.get("Prev") if isinstance(trailer.get("Prev"), int) else None, "encrypt_in_trailer": "Encrypt" in trailer}
         self.revisions.append(rev)
@@ -3499,11 +3550,24 @@ class Pdf:
                     self.add_entry(first + i, 0, 0, f3)
                 if entries % 8192 == 0 and self.ctx.expired("a cross-reference stream"):
                     raise PdfError("the clock ran out inside a cross-reference stream")
-        self.trailers.append(v)
+        self.trailers.append(trailer_view(v))
         rev = {"index": len(self.revisions), "kind": "stream", "startxref": off, "entries": entries, "size": size,
                "prev": v.get("Prev") if isinstance(v.get("Prev"), int) else None, "encrypt_in_trailer": "Encrypt" in v}
         self.revisions.append(rev)
         return [("Prev", v["Prev"], None)] if isinstance(v.get("Prev"), int) else []
+
+
+TRAILER_KEPT = ("Size", "Prev", "Root", "Encrypt", "XRefStm", "Type")
+
+
+def trailer_view(d):
+    """What the reader keeps of a trailer (or of a cross-reference stream's dictionary) for later: the entries it reads, and whether /Info
+    and /ID are there. A trailer can hold anything else, up to MAX_ITEMS values, and a file can hold a thousand revisions of them."""
+    view = {k: d[k] for k in TRAILER_KEPT if k in d}
+    for k in ("Info", "ID"):
+        if k in d:
+            view[k] = True
+    return view
 
 
 def is_action(d):
@@ -3664,7 +3728,7 @@ def _probe_pdf(blob, ctx, extractor, out):
     # A scan of the whole file for 'N G obj' headers: the objects a reader that ignores the table would find.
     # The scan goes a piece at a time, so that the clock is checked between pieces even when a piece holds no header at all (a regular
     # expression over the whole file is one call that cannot be stopped); a header that starts in a piece is read past its end.
-    scanned, scan_total, numbers, truncated_scan = {}, 0, {}, False
+    scanned, scan_total, dups, truncated_scan = {}, 0, {}, False   # number -> the offset of its last header; number -> headers past the first
     piece = 1 << 20
     for chunk_at in range(0, size, piece):
         if ctx.expired("the object scan"):
@@ -3675,7 +3739,8 @@ def _probe_pdf(blob, ctx, extractor, out):
                 break
             scan_total += 1
             n = int(hit.group(1))
-            numbers[n] = numbers.get(n, 0) + 1
+            if n in scanned:
+                dups[n] = dups.get(n, 0) + 1
             scanned[n] = hit.start()
             if scan_total >= cfg["max_objects"] * 4:
                 break
@@ -3707,7 +3772,7 @@ def _probe_pdf(blob, ctx, extractor, out):
                 except PdfError:
                     continue
                 if isinstance(d, dict):
-                    pdf.trailers.insert(0, d)
+                    pdf.trailers.insert(0, trailer_view(d))
             if ignored["in_stream_data"] or ignored["in_a_comment"]:
                 out["trailer_keywords_ignored"] = ignored
                 anomalies.append("%d 'trailer' keyword(s) inside stream data and %d in a comment were not taken for trailers" % (ignored["in_stream_data"], ignored["in_a_comment"]))
@@ -3715,16 +3780,16 @@ def _probe_pdf(blob, ctx, extractor, out):
     out["structure_source"] = "cross-reference chain" if structure == "xref" else "scan of the file for object headers"
     revisions = pdf.revisions
     out["revisions"] = revisions
-    out["objects_scan"] = {"object_headers_found": scan_total, "distinct_numbers": len(numbers), "complete": not truncated_scan,
-                           "numbers_defined_more_than_once": sum(1 for c in numbers.values() if c > 1)}
+    out["objects_scan"] = {"object_headers_found": scan_total, "distinct_numbers": len(scanned), "complete": not truncated_scan,
+                           "numbers_defined_more_than_once": len(dups)}
     outside = {}                    # object number -> (how the newest chain leaves it out, the offset of its header)
     if structure == "xref":
         # A header the newest chain does not use: no entry at all, or an entry that the newest section to name the number marks free (a
         # deleted object whose bytes are still in the file). A reader that follows the chain does not see either; one that rebuilds the
         # file by scanning does. Each is counted apart, and the action dictionaries among them are read and listed (trace_catalog).
-        absent = [n for n in numbers if n not in pdf.entries]
-        freed = [n for n in numbers if n in pdf.entries and pdf.entries[n][0] == 0]
-        packed = [n for n in numbers if n in pdf.entries and pdf.entries[n][0] == 2]
+        absent = [n for n in scanned if n not in pdf.entries]
+        freed = [n for n in scanned if n in pdf.entries and pdf.entries[n][0] == 0]
+        packed = [n for n in scanned if n in pdf.entries and pdf.entries[n][0] == 2]
         out["objects_scan"]["headers_not_in_the_cross_reference_chain"] = len(absent)
         out["objects_scan"]["headers_freed_in_newest_chain"] = len(freed)
         out["objects_scan"]["headers_the_chain_places_in_object_streams"] = len(packed)
@@ -3787,7 +3852,7 @@ def _probe_pdf(blob, ctx, extractor, out):
                 if isinstance(st, Name):
                     row["subtype"] = text_of(str(st), None, "names")
                 if t in ("Catalog", "ObjStm", "XRef", "EmbeddedFile", "Filespec") or "JS" in v or is_action(v) or "EF" in v:
-                    interesting[num] = o
+                    interesting[num] = pdf.keep(o)
             if o.stream is not None:
                 info = o.stream
                 streams["count"] += 1
@@ -3811,10 +3876,11 @@ def _probe_pdf(blob, ctx, extractor, out):
     census(sorted(pdf.entries))
     if structure == "scan":
         # Objects inside object streams are not listed by any table here: read each object stream found and index what it holds.
-        for onum, oo in list(interesting.items()):
+        for onum, kept in list(interesting.items()):
             if stop_census:
                 break
-            if isinstance(oo.value, dict) and oo.value.get("Type") == "ObjStm" and oo.stream is not None:
+            oo = pdf.again(onum, kept)
+            if oo is not None and isinstance(oo.value, dict) and oo.value.get("Type") == "ObjStm" and oo.stream is not None:
                 try:
                     _data, _first, pairs = pdf.objstm(onum)
                 except (PdfError, Over) as exc:
@@ -3828,7 +3894,10 @@ def _probe_pdf(blob, ctx, extractor, out):
                             new.append(n)
                 census(new)
         if not pdf.trailers:
-            pdf.trailers.extend(oo.value for oo in interesting.values() if isinstance(oo.value, dict) and oo.value.get("Type") == "XRef")
+            for onum, kept in interesting.items():
+                oo = pdf.again(onum, kept)
+                if oo is not None and isinstance(oo.value, dict) and oo.value.get("Type") == "XRef":
+                    pdf.trailers.append(trailer_view(oo.value))
     compressed_total = sum(1 for e in pdf.entries.values() if e[0] == 2)
     out["census"] = {"objects_listed": census_done, "objects_in_table_of_kind_free": sum(1 for e in pdf.entries.values() if e[0] == 0), "compressed_objects_indexed": compressed_total,
                      "objects_unreadable": unreadable, "objects_not_read_at_a_limit": len(pdf.not_read_at_limit), "complete": not stop_census and not pdf.not_read_at_limit}
@@ -3854,7 +3923,7 @@ def _probe_pdf(blob, ctx, extractor, out):
     # Catalog
     catalog, cnum = (pdf.deref(trailer.get("Root")) if trailer else (None, None))
     if not isinstance(catalog, dict):
-        cat = next(((n, o) for n, o in interesting.items() if isinstance(o.value, dict) and o.value.get("Type") == "Catalog"), None)
+        cat = next(((n, o) for n, o in ((n, pdf.again(n, kept)) for n, kept in interesting.items()) if o is not None and isinstance(o.value, dict) and o.value.get("Type") == "Catalog"), None)
         if cat:
             catalog, cnum = cat[1].value, cat[0]
             anomalies.append("the trailer's /Root does not lead to a catalog; the catalog found is object %d" % cnum)
@@ -4274,9 +4343,12 @@ def trace_catalog(pdf, ctx, catalog, cnum, interesting, extractor, outside=None)
                     % (outside_counts["freed"] + outside_counts["absent"], "y is" if outside_counts["freed"] + outside_counts["absent"] == 1 else "ies are",
                        outside_counts["freed"], outside_counts["absent"]))
     try:
-        for k, (num, o) in enumerate(interesting.items()):
+        for k, (num, kept) in enumerate(interesting.items()):
             if not (k + 1) & 1023 and ctx.expired("the objects no key reaches"):
                 break
+            o = pdf.again(num, kept)
+            if o is None:
+                continue
             if isinstance(o.value, dict) and is_action(o.value) and num not in reached_nums:
                 unreached += 1
                 describe_action(o.value, num, None, reached=False)
@@ -4286,10 +4358,11 @@ def trace_catalog(pdf, ctx, catalog, cnum, interesting, extractor, outside=None)
                     embedded_row({"source": "an EmbeddedFile stream no file specification reached", "stream_object": num, "stream_bytes": o.stream["length"] if o.stream else None,
                                   "filters": [text_of(n, None, "names") for n, _p in pdf.filters_of(o.value)]})
         # File specifications that name an embedded stream but sit outside the name tree.
-        for k, (num, o) in enumerate(interesting.items()):
+        for k, (num, kept) in enumerate(interesting.items()):
             if not (k + 1) & 1023 and ctx.expired("the file specifications no key reaches"):
                 break
-            if isinstance(o.value, dict) and "EF" in o.value:
+            o = pdf.again(num, kept)
+            if o is not None and isinstance(o.value, dict) and "EF" in o.value:
                 fs = filespec_info(pdf, ctx, Ref(num, 0))
                 if "stream_object" in fs and fs["stream_object"] not in listed:
                     emb = {"source": "a file specification (object %d)" % num, "stream_object": fs["stream_object"]}
