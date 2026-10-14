@@ -258,17 +258,29 @@ grep -qE "budget: bp: b/two \([0-9]+ tokens\) is in the needs chain of 1 skill.s
 $got"
 pass "sealing refuses a skill over 1,000 tokens (and a router over 400) before it writes anything, says every other budget as a warning, and tells the base pack what its growth does to a dependant"
 
-# A shipped pack seals under its golden list: one with a listed leaf over 1,000
-# tokens seals, and the same skill with no list is refused. The pack is the first one
-# the list names for a leaf: the base pack was the subject while it had such findings,
-# and the list is meant to shrink, so a pack that is fixed hands the case to the next.
+# A pack seals under its golden list: one with a listed leaf over 1,000 tokens seals,
+# and the same pack with no list is refused. The assertions run on a pack built here
+# (a leaf of 1,100 tokens and a list that names it), so they never depend on what the
+# shipped list still holds: the list is meant to shrink, and a seal case that took "the
+# first shipped pack the list names for a leaf" passed without checking anything once
+# no such line was left. When the shipped list does name a leaf, the same assertions
+# also run on that pack.
+golden_seal_case() { # <label> <pack dir> <golden file>
+  local label="$1" pack="$2" golden="$3"
+  "$PY" "$BUDGETS" seal "$pack" --golden "$golden" > "$WORK/gs.seal" || fail "$label: the seal check failed"
+  [[ "$(jq '.errors | length' "$WORK/gs.seal")" == 0 ]] || fail "$label: its listed findings are refused at the seal: $(cat "$WORK/gs.seal")"
+  jq -e '.warnings | map(select(test("known finding.s. are on tests/skill-budgets.golden"))) | length == 1' "$WORK/gs.seal" >/dev/null || fail "$label: the seal did not say that the pack has known findings: $(cat "$WORK/gs.seal")"
+  "$PY" "$BUDGETS" seal "$pack" > "$WORK/gs.nogolden" || fail "$label: the seal check failed without the list"
+  [[ "$(jq '.errors | length' "$WORK/gs.nogolden")" -gt 0 ]] || fail "$label: a listed leaf over 1,000 tokens is not refused without the list"
+}
+case_n=$((case_n + 1)); dir="$WORK/sl$case_n"; mkdir "$dir" && "$PY" "$WORK/fx.py" "$dir" leaf-1100 || fail "could not build the packs"
+printf '%s\n' "cp leaf c/lone 1125" > "$dir.golden"
+golden_seal_case "the built pack" "$dir/cp" "$dir.golden"
 shipped="$(awk '$2 == "leaf" { print $1; exit }' "$ROOT/tests/skill-budgets.golden")"
 if [[ -n "$shipped" ]]; then
-  "$PY" "$BUDGETS" seal "$ROOT/packs/$shipped" --golden "$ROOT/tests/skill-budgets.golden" > "$WORK/shipped.seal" || fail "the seal check failed on $shipped"
-  [[ "$(jq '.errors | length' "$WORK/shipped.seal")" == 0 ]] || fail "$shipped's listed findings are refused at the seal: $(cat "$WORK/shipped.seal")"
-  jq -e '.warnings | map(select(test("known finding.s. are on tests/skill-budgets.golden"))) | length == 1' "$WORK/shipped.seal" >/dev/null || fail "the seal did not say that $shipped has known findings: $(cat "$WORK/shipped.seal")"
-  "$PY" "$BUDGETS" seal "$ROOT/packs/$shipped" > "$WORK/shipped.nogolden" || fail "the seal check failed without the list"
-  [[ "$(jq '.errors | length' "$WORK/shipped.nogolden")" -gt 0 ]] || fail "a listed leaf over 1,000 tokens is not refused without the list"
+  golden_seal_case "the shipped pack $shipped" "$ROOT/packs/$shipped" "$ROOT/tests/skill-budgets.golden"
+else
+  echo "note - tests/skill-budgets.golden names no leaf: the seal assertions ran on the built pack only"
 fi
 case_n=$((case_n + 1)); dir="$WORK/sl$case_n"; mkdir "$dir" && "$PY" "$WORK/fx.py" "$dir" leaf-1100 || fail "could not build the packs"
 printf '%s\n' "cp leaf c/lone 1125" > "$dir.golden"
