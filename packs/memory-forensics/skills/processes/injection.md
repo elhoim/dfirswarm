@@ -1,15 +1,17 @@
 ---
 id: processes/injection
 title: Process anomalies and candidate code modification
-when: You need what was running, or you are asked whether code was injected into a process.
-needs: [triage/what-you-have, triage/volatility]
+when: You need what was running, or are asked whether code was injected into a process.
+needs: []
 tools: [mem_fs]
-requires_host: [memprocfs, vol]
+requires_host: []
 ---
 
-With a framework the process tree is one command. What it shows is a set of
-observations to explain, not verdicts. For each, say what the memory shows, what
-else could produce it, and what would tell them apart.
+Use when you need what was running, or must say whether code was injected. Not for a dump.
+
+With a framework the process tree is one command (`triage/volatility`). What it
+shows is a set of observations to explain, not verdicts. For each, say what the
+memory shows, what else could produce it, and what would tell them apart.
 
 **Parentage that makes no sense.** `winword.exe` with a child `cmd.exe`,
 `services.exe` with a child that is not a service, an `svchost.exe` whose parent is
@@ -46,39 +48,11 @@ with read rights, or a named pipe the process did not create, shows a capability
 and a lead; it does not show that anything was read, injected or malicious
 (`credentials/material` separates the stages).
 
-**With MemProcFS** the tree is files: processes, memory maps, handles and modules.
-`mem_fs` starts `memprocfs` for one call, does one thing with the tree and stops it,
-so the mount is gone when the call returns and nothing later can read it. Use its
-list mode to see the virtual paths the image and the MemProcFS version actually
-expose, and its export mode to copy chosen files byte for byte into the job's
-`$OUT/mem_fs`:
-
-    job_run(tool: "mem_fs", secret_output: true, args: {"path": "inputs/memory.raw",
-      "mount": "{OUT}/mem", "mode": "export", "write_values": true,
-      "paths": ["<a virtual path from the listing>"]})
-
-The answer names each file and its status, never its content or digest; the sizes
-and digests are in `export-manifest.jsonl` beside the files. With Volatility
-(`vol`) the same questions are plugins (`triage/volatility`, which also gives the
-dump option of each OS); record the version and the plugin name beside every
-result, since plugin output changes between versions.
-
-**Preserve before you rely.** Take the bytes you will argue from into a sealed job
-output before you call anything injected: `mem_fs` export, or a plugin's dump, run
-with `secret_output: true`, because a process's memory can hold secrets. Record the
-image, the process (id, creation time, object address), the virtual interval, its
-protection, the method (plugin and options, or virtual path and MemProcFS
-version), any pages that were unavailable or zero-filled, and the output
-(`job:<id>/<path>`). The store holds the digest of the saved bytes. That shows what
-was saved, not that the region was complete or that injection happened; cite the job
-reference, and do not copy a digest of a sensitive output into a post. Recovered
-code is read, parsed and disassembled, never run. If the extraction fails, report
-the observations you do have and the limitation.
+Only if you argue from a process's memory or read MemProcFS: `processes/preserve-regions`.
 
 **Sensitive output.** `mem_fs` export and text, and any dump, run as jobs with
-`secret_output: true`; the answer names files, never their content. Read
-`credentials/material` before you cite anything taken from a process.
+`secret_output: true` (`credentials/material` before you cite anything taken from a process).
 
 **Does not show.** From a process list, a region or a handle alone: intent, a
 person, that code ran, that a technique was used, or that the machine was
-compromised. A sealed copy of a region is a copy of what the capture held.
+compromised.
