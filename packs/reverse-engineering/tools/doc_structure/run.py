@@ -1299,7 +1299,17 @@ class CfbError(Exception):
 
 
 class Entry:
-    __slots__ = ("sid", "name", "kind", "left", "right", "child", "clsid", "start", "size", "created", "modified", "reachable", "parts", "name_bad")
+    __slots__ = ("sid", "name", "kind", "left", "right", "child", "clsid", "start", "size", "created", "modified", "reachable", "parts", "name_bad", "parent", "duplicate")
+
+
+def cfb_key(name):
+    """A directory entry name as [MS-CFB] 2.6.4 compares names: each UTF-16 code unit upper-cased by its simple (one to one) mapping, so
+    that `dir` and `DIR` are one name, and a character whose upper case is longer (as `ß`) is compared as it is."""
+    out = []
+    for c in name:
+        u = c.upper()
+        out.append(u if len(u) == 1 else c)
+    return "".join(out)
 
 
 class Cfb:
@@ -1311,7 +1321,9 @@ class Cfb:
         self.src, self.ctx, self.label = src, ctx, label
         self.size = len(src)
         self.entries = []
-        self.by_path = {}
+        self.by_path = {}               # the path of names as [MS-CFB] compares them -> every reachable entry at that path
+        self.kids = {}                  # the sid of a storage -> name as compared -> the entries of that name in it
+        self.duplicates = 0             # names that a storage holds more than once
         self.orphans = 0
         head = src[:512]
         if len(head) < 512:
@@ -1454,7 +1466,7 @@ class Cfb:
         for i in range(min(len(data) // 128, max_entries)):
             row = data[i * 128:(i + 1) * 128]
             e = Entry()
-            e.sid, e.reachable, e.parts = i, False, None
+            e.sid, e.reachable, e.parts, e.parent, e.duplicate = i, False, None, None, False
             namelen = struct.unpack_from("<H", row, 64)[0]
             e.name_bad = namelen > 64 or namelen % 2 == 1 or (namelen == 0 and row[66] != 0)
             # The length counts bytes of UTF-16 with its terminator; an odd one (or one past 64) is a broken entry, read as far
@@ -1479,10 +1491,10 @@ class Cfb:
         problems, and an allocated entry no tree reaches is an orphan."""
         root = self.entries[0]
         root.reachable, root.parts = True, ()
-        stack = [(root.child, (), 1)]
+        stack = [(root.child, (), 1, 0)]
         n = len(self.entries)
         while stack:
-            sid, parent, depth = stack.pop()
+            sid, parent, depth, holder = stack.pop()
             if sid == NOSTREAM:
                 continue
             if sid >= n:
@@ -1494,20 +1506,43 @@ class Cfb:
                 continue
             e.reachable = True
             e.parts = parent + (e.name,)
-            stack.append((e.left, parent, depth))
-            stack.append((e.right, parent, depth))
+            e.parent = holder
+            stack.append((e.left, parent, depth, holder))
+            stack.append((e.right, parent, depth, holder))
             if e.kind in (1, 5):
                 if depth >= max_depth:
                     self.ctx.limit_hit("%sstorages nest past max_depth (%d): the entries below %s are listed without a path" % ("%s: " % self.label if self.label else "", max_depth, shown_path("/".join(e.parts))))
                 else:
-                    stack.append((e.child, e.parts, depth + 1))
+                    stack.append((e.child, e.parts, depth + 1, e.sid))
         self.orphans = sum(1 for e in self.entries if e.kind != 0 and not e.reachable)
         for e in self.entries:
             if e.reachable and e.parts is not None and e.kind in (1, 2):
-                self.by_path.setdefault(tuple(p.lower() for p in e.parts), e)
+                self.by_path.setdefault(tuple(cfb_key(p) for p in e.parts), []).append(e)
+                self.kids.setdefault(e.parent, {}).setdefault(cfb_key(e.name), []).append(e)
+        # [MS-CFB] 2.6.4: the names of the entries of one storage are unique, compared in upper case. Two entries of one name are two
+        # readings of the file (a reader takes the one its tree search meets first): each is listed and read, and the file is partial.
+        for holder, names in self.kids.items():
+            for same in names.values():
+                if len(same) > 1:
+                    self.duplicates += 1
+                    for e in same:
+                        e.duplicate = True
+                    self.warn("directory entries %s share the name %s in one storage ([MS-CFB] 2.6.4: names in a storage are unique, compared in upper "
+                              "case): readers differ on which one they take; each is listed, every copy of a VBA storage's dir and module streams is read, and of any "
+                              "other the first is read"
+                              % (", ".join(str(e.sid) for e in same), cell(shown_path("/".join(same[0].parts)))))
 
     def find(self, *parts):
-        return self.by_path.get(tuple(p.lower() for p in parts))
+        found = self.by_path.get(tuple(cfb_key(p) for p in parts))
+        return found[0] if found else None
+
+    def find_all(self, *parts):
+        return list(self.by_path.get(tuple(cfb_key(p) for p in parts), ()))
+
+    def in_storage(self, storage, name, kind=None):
+        """The entries named `name` (as [MS-CFB] compares names) in one storage entry, every copy, of `kind` when given."""
+        found = self.kids.get(storage.sid, {}).get(cfb_key(name), [])
+        return [e for e in found if kind is None or e.kind == kind]
 
     def find_stream(self, *parts):
         """The stream at this path, or None: a storage of that name is not a stream and is never read as one."""
@@ -1515,8 +1550,8 @@ class Cfb:
         return e if e is not None and e.kind == 2 else None
 
     def children(self, parts):
-        low = tuple(p.lower() for p in parts)
-        return [e for e in self.entries if e.reachable and e.parts is not None and len(e.parts) == len(low) + 1 and tuple(p.lower() for p in e.parts[:-1]) == low]
+        low = tuple(cfb_key(p) for p in parts)
+        return [e for e in self.entries if e.reachable and e.parts is not None and len(e.parts) == len(low) + 1 and tuple(cfb_key(p) for p in e.parts[:-1]) == low]
 
     # streams --------------------------------------------------------------------------------------------------------
 
@@ -1659,6 +1694,8 @@ def ole_entry_rows(cfb, ctx, page, extractor, extra=None):
             row["note"] = known[1]
         if e.name_bad:
             row["name_length_inconsistent"] = True
+        if e.duplicate:
+            row["duplicate_name_in_storage"] = True
         if e.kind == 2:
             ctx.tick()
             why, notes = cfb.verify_stream(e, owners)
@@ -1814,10 +1851,11 @@ def decode_text(raw, encoding):
 
 
 def vba_projects(cfb, ctx, extractor, where):
-    """Every storage named VBA that holds a `dir` stream, read as a VBA project."""
+    """Every storage named VBA that holds a `dir` stream, read as a VBA project: every copy of the dir stream a storage holds is a project
+    of its own (two entries of one name are two readings, [MS-CFB] 2.6.4), and every copy of a module's stream is read."""
     found, projects = [], []
     for e in cfb.entries:
-        if not (e.reachable and e.parts and e.parts[-1].lower() == "vba"):
+        if not (e.reachable and e.parts and cfb_key(e.parts[-1]) == "VBA"):
             continue
         label = shown_path("/".join(e.parts))
         # An entry named VBA that is not a storage, or a VBA storage whose dir is missing or is not a stream, is a VBA project
@@ -1826,22 +1864,29 @@ def vba_projects(cfb, ctx, extractor, where):
             projects.append({"storage": cell(label), "modules": [], "status": "not_a_storage", "entry_type": ENTRY_TYPES.get(e.kind, "type %d" % e.kind)})
             ctx.problem("%s: an entry named VBA is of type %s, not a storage: no VBA project was read from it" % (label, ENTRY_TYPES.get(e.kind, "type %d" % e.kind)))
             continue
-        d = cfb.find(*e.parts, "dir")
-        if d is None or d.kind != 2:
-            why = "has no dir stream" if d is None else "holds a dir entry of type %s, not a stream" % ENTRY_TYPES.get(d.kind, "type %d" % d.kind)
-            projects.append({"storage": cell(label), "modules": [], "status": "dir_missing" if d is None else "dir_not_a_stream"})
+        dirs = cfb.in_storage(e, "dir")
+        streams = [d for d in dirs if d.kind == 2]
+        if not streams:
+            why = "has no dir stream" if not dirs else "holds a dir entry of type %s, not a stream" % ENTRY_TYPES.get(dirs[0].kind, "type %d" % dirs[0].kind)
+            projects.append({"storage": cell(label), "modules": [], "status": "dir_missing" if not dirs else "dir_not_a_stream"})
             ctx.problem("%s: a VBA storage that %s: its project was not read" % (label, why))
             continue
-        found.append(e)
-    for store in found:
+        for k, d in enumerate(streams):
+            found.append((e, d, k, len(streams)))
+    named = {}                          # VBA storage sid -> the stream names its dir streams give their modules (as compared)
+    for store, dir_entry, copy, copies in found:
         base = store.parts
         label = shown_path("/".join(base))
         project = {"storage": cell(label), "modules": [], "status": "read"}
+        if copies > 1:
+            project["dir_copy"] = {"copy": copy + 1, "of": copies, "dir_entry": dir_entry.sid,
+                                   "note": "the storage holds %d entries named dir: each is read as a project of its own" % copies}
         if label != "/".join(base):
             ctx.names.add("/".join(base), label)
         projects.append(project)
+        mine = named.setdefault(store.sid, set())
         try:
-            raw = cfb.read(cfb.find_stream(*base, "dir"), ctx.budget.member)
+            raw = cfb.read(dir_entry, ctx.budget.member)
         except (Unreadable, Over) as exc:
             project["status"] = "dir_unreadable"
             ctx.problem("%s: the dir stream could not be read: %s" % (label, getattr(exc, "reason", None) or exc))
@@ -1864,7 +1909,8 @@ def vba_projects(cfb, ctx, extractor, where):
         project["modules_declared"] = info["module_count_declared"]
         if info["module_count_declared"] is not None and info["module_count_declared"] != len(info["modules"]):
             ctx.problem("%s: the dir stream declares %d module(s) and lists %d" % (label, info["module_count_declared"], len(info["modules"])))
-        vp = cfb.find_stream(*base, "_VBA_PROJECT")
+        vps = cfb.in_storage(store, "_VBA_PROJECT", 2)
+        vp = vps[0] if vps else None
         if vp is not None:
             project["performance_cache_stream"] = {"bytes": vp.size, "note": "the _VBA_PROJECT stream: a header and the compiled (p-code) cache; this tool does not read it"}
             try:
@@ -1876,7 +1922,9 @@ def vba_projects(cfb, ctx, extractor, where):
                 project["performance_cache_stream"]["version_field"] = struct.unpack_from("<H", head, 2)[0]
         else:
             ctx.problem("%s: no _VBA_PROJECT stream beside the dir stream" % label)
-        proj_stream = cfb.find_stream(*base[:-1], "PROJECT") if len(base) > 1 else cfb.find_stream("PROJECT")
+        holder = cfb.entries[store.parent] if store.parent is not None and store.parent < len(cfb.entries) else None
+        projs = cfb.in_storage(holder, "PROJECT", 2) if holder is not None else []
+        proj_stream = projs[0] if projs else None
         if proj_stream is not None and proj_stream.size > 1 << 20:
             ctx.limit_hit("%s: the PROJECT stream is %d bytes, over the 1 MiB read limit: its keys were not read" % (label, proj_stream.size))
         if proj_stream is not None and proj_stream.size <= 1 << 20:
@@ -1902,12 +1950,18 @@ def vba_projects(cfb, ctx, extractor, where):
             shown = shown_path(name_raw)
             if shown != name_raw:
                 ctx.names.add(name_raw, shown, "vba_module_name")
-            row = {"name": cell(shown), "type": mod["type"], "read_only": mod["read_only"], "private": mod["private"], "text_offset": mod["text_offset"]}
-            stream = cfb.find_stream(*base, stream_name) if stream_name else None
-            if stream is None:
-                row["stream"] = "missing"
-                ctx.problem("%s: module %s names a stream that the directory does not hold" % (label, cell(shown)))
-            else:
+            copies_of = cfb.in_storage(store, stream_name, 2) if stream_name else []
+            if stream_name:
+                mine.add(cfb_key(stream_name))
+            for k, stream in enumerate(copies_of or [None]):
+                row = {"name": cell(shown), "type": mod["type"], "read_only": mod["read_only"], "private": mod["private"], "text_offset": mod["text_offset"]}
+                if len(copies_of) > 1:
+                    row["stream_copy"] = {"copy": k + 1, "of": len(copies_of), "entry": stream.sid}
+                if stream is None:
+                    row["stream"] = "missing"
+                    ctx.problem("%s: module %s names a stream that the directory does not hold" % (label, cell(shown)))
+                    project["modules"].append(row)
+                    continue
                 row["stream_bytes"] = stream.size
                 off = mod["text_offset"]
                 if off is None or off > stream.size:
@@ -1931,7 +1985,20 @@ def vba_projects(cfb, ctx, extractor, where):
                         if extractor is not None and extractor.wants("vba"):
                             r = extractor.write("vba", "", "%s%s/%s" % (where, "/".join(base), name_raw), source, "decompressed VBA module source")
                             row["extracted"] = r.get("file") or r.get("status")
-            project["modules"].append(row)
+                project["modules"].append(row)
+    # A stream of a VBA storage that no dir stream read names as a module's (beside dir, _VBA_PROJECT and the __SRP_ caches) is code no
+    # project lists: it is said, by name.
+    for store, _d, copy, _n in found:
+        if copy:
+            continue
+        mine = named.get(store.sid, set())
+        for key, entries in cfb.kids.get(store.sid, {}).items():
+            if key in mine or key in ("DIR", "_VBA_PROJECT") or re.fullmatch(r"__SRP_[0-9]+", key):
+                continue
+            for e in entries:
+                if e.kind == 2:
+                    ctx.problem("%s: the stream %s in the VBA storage is named by no module of the dir stream%s read" % (
+                        shown_path("/".join(store.parts)), cell(shown_path(e.name)), "s" if sum(1 for f in found if f[0] is store) > 1 else ""))
     return projects
 
 
@@ -2203,10 +2270,10 @@ def _probe_ole_body(cfb, ctx, extractor, label, source, out, page, extra):
     at_root = {}
     for e in cfb.entries:
         if e.reachable and e.parts is not None and len(e.parts) == 1:
-            at_root.setdefault(e.name.lower(), []).append(e)
+            at_root.setdefault(cfb_key(e.name), []).append(e)
 
     def root_stream(low):
-        found = at_root.get(low, [])
+        found = at_root.get(cfb_key(low), [])
         for e in found:
             if e.kind != 2:
                 ctx.problem("%sthe root entry %s is of type %s, not a stream: it is not read as one" % (prefix, cell(shown_path(e.name)), ENTRY_TYPES.get(e.kind, "type %d" % e.kind)))

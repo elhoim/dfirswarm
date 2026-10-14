@@ -9,9 +9,9 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { deflateSync } from "node:zlib";
 import { test } from "node:test";
-import { DOC_STRUCTURE, body, put, tool, withCwd } from "./pack-re-harness.ts";
+import { DOC_STRUCTURE, body, put, tool, u16, withCwd } from "./pack-re-harness.ts";
 import type { Json, Run } from "./pack-re-harness.ts";
-import { buildPdf } from "./pack-re-doc-fixtures.ts";
+import { buildCfb, buildPdf, ovbaCompress, vbaDirStream } from "./pack-re-doc-fixtures.ts";
 import type { PdfObj } from "./pack-re-doc-fixtures.ts";
 
 /** The tool with a hard wall limit and the child's peak RSS (and, with `rlimitMb`, an address-space limit it cannot pass). */
@@ -205,5 +205,66 @@ test("P3 more than 100 distinct filter chains: the first 100 are counted by chai
     assert.equal(Object.values(a.streams.by_filter_chain as Record<string, number>).reduce((x, y) => x + y, 0), 100);
     assert.equal(a.streams.in_chains_past_the_first_100, 20);
     assert.ok(a.limits_hit.some((l: string) => /more than 100 distinct filter chains/.test(l)), JSON.stringify(a.limits_hit));
+  });
+});
+
+// --- P1-4: two entries of one name in a compound file's storage -------------------------------------------------------------------
+
+function twoDirs(secondDirName: string): Buffer {
+  const a = { name: "ThisDocument", source: "Sub Document_Open()\r\nEnd Sub\r\n" };
+  const evil = { name: "Evil", source: "Sub AutoOpen()\r\nShell \"x\"\r\nEnd Sub\r\n" };
+  const cache = Buffer.alloc(24, 0xab);
+  const vba = {
+    name: "VBA",
+    children: [
+      { name: "dir", data: ovbaCompress(vbaDirStream([a], [24])) },
+      { name: secondDirName, data: ovbaCompress(vbaDirStream([evil], [24])) },
+      { name: "_VBA_PROJECT", data: Buffer.concat([u16(0x61cc), u16(0xffff), Buffer.from([0]), u16(0), Buffer.alloc(40, 0x11)]) },
+      { name: "ThisDocument", data: Buffer.concat([cache, ovbaCompress(Buffer.from(a.source, "latin1"))]) },
+      { name: "Evil", data: Buffer.concat([cache, ovbaCompress(Buffer.from(evil.source, "latin1"))]) },
+    ],
+  };
+  return buildCfb([{ name: "Macros", children: [vba, { name: "PROJECT", data: Buffer.from('ID="{00000000-0000-0000-0000-000000000000}"\r\nModule=ThisDocument\r\n', "latin1") }] },
+    { name: "WordDocument", data: Buffer.alloc(4200) }]);
+}
+
+for (const [label, second] of [["the same name", "dir"], ["names that differ only in case ([MS-CFB] 2.6.4 compares in upper case)", "DIR"]] as const) {
+  test(`P1-4 a VBA storage with two dir streams of ${label}: both are listed and read, the module only the second names is in vba_projects, partial`, async () => {
+    await withCwd(async (cwd) => {
+      await put(cwd, "work/dup.doc", twoDirs(second));
+      const a = body(await tool(DOC_STRUCTURE, cwd, { path: "work/dup.doc" }));
+      assert.equal(a.status, "partial");
+      assert.ok(a.problems.some((p: string) => /share the name Macros\/VBA\/dir in one storage \(\[MS-CFB\] 2\.6\.4/i.test(p)), JSON.stringify(a.problems));
+      const projects = a.vba_projects as Json[];
+      assert.equal(projects.length, 2, JSON.stringify(projects));
+      const modules = projects.flatMap((p) => p.modules.map((m: Json) => m.name)).sort();
+      assert.deepEqual(modules, ["Evil", "ThisDocument"]);
+      assert.ok(projects.every((p) => p.dir_copy && p.dir_copy.of === 2));
+      const evil = projects.flatMap((p) => p.modules).find((m: Json) => m.name === "Evil");
+      assert.equal(evil.source, "decompressed");
+      const rows = (a.tables.ole_directory.rows as Json[]).filter((r) => /^Macros\/VBA\/dir$/i.test(r.path));
+      assert.equal(rows.length, 2);
+      assert.ok(rows.every((r) => r.duplicate_name_in_storage === true));
+    });
+  });
+}
+
+test("P1-4 a stream in a VBA storage that no dir names is said; a project with every stream named is complete", async () => {
+  await withCwd(async (cwd) => {
+    const a0 = { name: "Module1", source: "Sub A()\r\nEnd Sub\r\n" };
+    const cache = Buffer.alloc(24, 0xab);
+    const vba = (extra: { name: string; data: Buffer }[]) => ({
+      name: "VBA",
+      children: [{ name: "dir", data: ovbaCompress(vbaDirStream([a0], [24])) }, { name: "_VBA_PROJECT", data: Buffer.concat([u16(0x61cc), u16(0xffff), Buffer.from([0]), u16(0), Buffer.alloc(40, 0x11)]) },
+        { name: "__SRP_0", data: Buffer.from("cache") }, { name: "Module1", data: Buffer.concat([cache, ovbaCompress(Buffer.from(a0.source, "latin1"))]) }, ...extra],
+    });
+    const project = { name: "PROJECT", data: Buffer.from('ID="{00000000-0000-0000-0000-000000000000}"\r\nModule=Module1\r\n', "latin1") };
+    await put(cwd, "work/ok.bin", buildCfb([vba([]), project]));
+    const ok = body(await tool(DOC_STRUCTURE, cwd, { path: "work/ok.bin" }));
+    assert.equal(ok.status, "complete", JSON.stringify(ok.problems));
+    await put(cwd, "work/hidden.bin", buildCfb([vba([{ name: "Hidden", data: Buffer.concat([cache, ovbaCompress(Buffer.from("Sub AutoOpen()\r\nEnd Sub\r\n"))]) }]), project]));
+    const h = body(await tool(DOC_STRUCTURE, cwd, { path: "work/hidden.bin" }));
+    assert.equal(h.status, "partial");
+    assert.ok(h.problems.some((p: string) => /VBA: the stream Hidden in the VBA storage is named by no module of the dir stream read/.test(p)), JSON.stringify(h.problems));
   });
 });
