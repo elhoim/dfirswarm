@@ -10,7 +10,7 @@ Fetch a body with `skill("<id>")`. A body may name others; fetch those the same 
 - `elf/packing-and-identity` ELF packing, linking and build identity: You must say whether an ELF is packed, how it links or which build it is.
 - `elf/structure` An ELF file and the loader's view: The sample is a Linux or BSD executable, shared object or core file.
 - `macho/structure` Mach-O files and universal binaries: The sample is a Mach-O executable, library, bundle or universal binary.
-- `managed/dotnet` Managed .NET assemblies and application bundles: A PE declares a CLR header, or a native PE looks like a .NET launcher.
+- `managed/clr` Managed .NET assemblies and application bundles: A PE declares a CLR header, or a native PE looks like a .NET launcher.
 - `packing/static-recovery` Identifying packing from structure, and where static recovery stops: Packing, compression or encryption of an executable is in question.
 - `pe/signature-and-resources` PE exports, certificate table and resources: You need export names, signing state or version information.
 - `pe/structure` A PE file and what its structure shows: The sample is a Windows-format executable, DLL or driver.

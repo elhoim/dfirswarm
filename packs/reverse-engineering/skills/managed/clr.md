@@ -1,5 +1,5 @@
 ---
-id: managed/dotnet
+id: managed/clr
 title: Managed .NET assemblies and application bundles
 when: A PE declares a CLR header, or a native PE looks like a .NET launcher.
 needs: [triage/quarantine]
@@ -9,7 +9,7 @@ requires_host: [strings, floss]
 
 Use when `pe_info` shows `declares_clr_runtime_header`, or a native PE carries a large overlay and a runtime-loader import set. Not for reading native code (`code/static-inspection`), and not for a conclusion from decompiled C#.
 
-1. **Read the CLR header.** `pe_directories` gives `clr`: `flags`, `runtime_version`, `entry_point`, `metadata.version_string` and the metadata streams. `ILONLY` set with no native entry point fits an IL-only assembly. A native entry point (`is_native_rva` true), native imports or a `managed_native_header` mean native code sits beside the IL: read that part as native, and say the IL may not be the code that runs.
+1. **Read the CLR header.** `pe_directories` gives `clr`: `flags`, `runtime_version`, `entry_point`, `metadata.version_string` and the metadata streams. `runtime_version` is the header's own format version (2.5 in assemblies of every current runtime), not the .NET release the assembly targets; `metadata.version_string` (such as `v4.0.30319`) names the runtime the metadata was built against, a claim of the build and not the release that would load it. `ILONLY` set with no native entry point fits an IL-only assembly. A native entry point (`is_native_rva` true), native imports or a `managed_native_header` mean native code sits beside the IL: read that part as native, and say the IL may not be the code that runs.
 2. **A managed file's import table is the loader stub, not its capabilities.** Do not map `pe_info` imports to behaviour here; the calls are IL references, which this pack does not read.
 3. **This pack has no metadata-table reader.** The assembly name and version, type and method names, IL, resources and P/Invoke declarations are not available from it: write "not read". The entry point is a token (`token_table`, `token_row`), not a name. A .NET decompiler or metadata reader would have to be supplied by the operator; none is declared.
 4. **Decompiled C# is a reconstruction.** Names can be obfuscated or generated; the IL and the metadata are the evidence. Anything you read from a reconstruction is a lead until you can cite IL.

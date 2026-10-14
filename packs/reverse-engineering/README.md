@@ -19,7 +19,7 @@ opened only when the leaf above points to them.
 | Triage | `triage/quarantine` |
 | Executables | `pe/structure`, `pe/signature-and-resources`, `elf/structure`, `elf/packing-and-identity`, `macho/structure` |
 | Code | `code/static-inspection` |
-| Runtimes | `managed/dotnet`, `runtimes/go-rust`, `runtimes/python-packaged` |
+| Runtimes | `managed/clr`, `runtimes/go-rust`, `runtimes/python-packaged` |
 | Packing | `packing/static-recovery` |
 | Strings | `strings/obfuscated`, `strings/decoding-and-similarity` |
 | Capabilities | `capabilities/mapping` |

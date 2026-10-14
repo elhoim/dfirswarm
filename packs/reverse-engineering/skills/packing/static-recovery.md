@@ -15,7 +15,7 @@ Use when an executable may be compressed, packaged or encrypted and you must say
 4. **Decompress only a derived copy, in a job, with an output name**: `upx -d -o "$OUT/<name>.upx-d" COPY` (never without `-o`: UPX rewrites its input). Record the UPX version, the diagnostics, the SHA-256 of the original, the copy and the result, and the relation between them. Read both forms.
 5. **Stopping rule.** Stop static recovery when the next step needs the loader or entry code to run, a debugger, a patched file, a key you were not supplied, or a format no reader here supports. Then: keep the original untouched, state exactly what stayed inaccessible, and say that a separate, authorised dynamic examination would be needed. This pack has no such mode and this leaf gives no steps for one.
 6. **A negative is bounded.** "No packing found" names the routes tried (entropy, UPX test, structure, resources, overlay) and the versions; a failed route does not make the file clean.
-7. Installers and self-extracting archives are archives: list and extract them with `archive_extract` and `evidence/archives`, not with unpackers.
+7. An installer or a self-extracting archive is an archive, not packing. `archive_extract` reads a ZIP with a stub in front of it (a ZIP self-extractor); it does not read MSI, CAB, NSIS, Inno Setup, RAR or 7-Zip self-extractors: record the format as identified and its content as not read (`evidence/archives`), and never run the installer to unpack it.
 
 Sensitive output: a recovered or derived file can hold credentials; keep it under `$OUT` and cite file, offset and length.
 
