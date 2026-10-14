@@ -403,3 +403,26 @@ test("a member name the directory marks UTF-8 that is not UTF-8 is read as CP437
     assert.ok(!a.problems.some((p: string) => /local header that disagrees/.test(p)), JSON.stringify(a.problems));
   });
 });
+
+// --- P1-1: the reviewers' spill case --------------------------------------------------------------------------------------------
+
+test("P1-1 three hundred case spellings of word/<AWS secret>.xml (part names compare without case): every spelling is withheld, in the answer, the spill file and the parts table", async () => {
+  await withCwd(async (cwd) => {
+    const { readFile } = await import("node:fs/promises");
+    const { join } = await import("node:path");
+    const { filesUnder } = await import("./pack-re-harness.ts");
+    const secret = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
+    const base = `word/${secret}.xml`;
+    const seen = new Set<string>();
+    for (let i = 0; i < 300; i++) seen.add([...base].map((ch, k) => ((i >> (k % 9)) & 1 && /[a-z]/i.test(ch) ? ch.toUpperCase() : ch)).join(""));
+    await put(cwd, "work/s.docx", buildZip([{ name: "[Content_Types].xml", data: Buffer.from("<Types/>") }, ...[...seen].map((n) => ({ name: n, data: Buffer.from("x") }))]));
+    for (const limit of [1, 1000]) {
+      const r = await tool(DOC_STRUCTURE, cwd, { path: "work/s.docx", limit });
+      const windows = Array.from({ length: secret.length - 8 }, (_x, i) => secret.slice(i, i + 9));
+      const texts = [r.stdout];
+      for (const f of await filesUnder(join(cwd, "work"))) if (!/withheld-names|s\.docx$/.test(f)) texts.push(await readFile(join(cwd, "work", f), "latin1"));
+      for (const t of texts) for (const w of windows) assert.ok(!t.includes(w), `limit ${limit}: '${w}'`);
+      assert.equal(JSON.parse(r.stdout).withheld_by_final_check, undefined);
+    }
+  });
+});

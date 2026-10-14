@@ -387,8 +387,9 @@ KEYVALUE_SECRET = re.compile(r"((?:password|passwd|pwd|secret|client[_-]?secret|
 # The head of a token whose own prefix says what it is, too short for the shared block's patterns (a name cut by a declared length, a
 # string read from the middle of a field): the prefix and four characters more are a piece of a token, wherever it stands (a letter
 # before it does not make it a word: `XAKIA...` is a key id with a letter in front). `sk-` alone is common inside hyphenated words
-# (`desk-`, `risk-`, `task-`), so its head needs a capital or a digit in its first twelve characters, as a random key has.
-TOKEN_HEAD = re.compile(r"(?:AKIA|ASIA)[0-9A-Z]{4,}|gh[pousr]_[A-Za-z0-9]{4,}|github_pat_[A-Za-z0-9_]{4,}|xox[abeprs]-[A-Za-z0-9-]{4,}"
+# (`desk-`, `risk-`, `task-`), so its head needs a capital or a digit in its first twelve characters, as a random key has. The GitHub and
+# Slack prefixes are matched in any case: a resource compiler upper-cases a string resource name, and `XOXB-<digits>-...` keeps the digits.
+TOKEN_HEAD = re.compile(r"(?:AKIA|ASIA)[0-9A-Z]{4,}|(?i:gh[pousr]_)[A-Za-z0-9]{4,}|(?i:github_pat_)[A-Za-z0-9_]{4,}|(?i:xox[abeprs]-)[A-Za-z0-9-]{4,}"
                         r"|sk-(?=[A-Za-z0-9_-]{0,11}[0-9A-Z])[A-Za-z0-9_-]{12,}|eyJ[A-Za-z0-9_-]{6,}")
 # The body of a PEM block after its header (RFC 7468), up to the next '-' (its END line): withheld whole whatever its letters look like,
 # as the dashes of a header glued to it join the two into one run that no shape rule of the shared block reads as a token.
@@ -2533,6 +2534,21 @@ def _probe_zip(path, size, ctx, extractor, out):
         by_name, by_lower, local_mismatch = {}, {}, []
         with archive:
             infos = archive.infolist()
+            # Part names compare without case (ECMA-376-2 9.1.1.1.2): every spelling of a name is that name, so when one spelling is withheld
+            # every spelling is (a case variant of a token shows its characters but its case).
+            spelled = {}
+            for info in infos[:cfg["max_entries"]]:
+                spelled.setdefault(info.filename.lower(), set()).add(info.filename)
+            withheld_names = {low for low, names in spelled.items() if any(shown_name(n) != n for n in names)}
+
+            def zname(name, record=True):
+                if name.lower() in withheld_names and shown_name(name) == name:
+                    shown = "<withheld %d characters: a spelling of a part name that is withheld>" % len(name)
+                    COUNTS["names"] += 1
+                    if record:
+                        ctx.names.add(name, shown, "part_name")
+                    return shown
+                return member_name(name, ctx) if record else shown_name(name)
             if len(infos) != total:
                 ctx.problem("the end record declares %d member%s and the central directory holds %d" % (total, "" if total == 1 else "s", len(infos)))
             for index, info in enumerate(infos):
@@ -2547,7 +2563,7 @@ def _probe_zip(path, size, ctx, extractor, out):
                 name = info.filename
                 by_name.setdefault(name.lower(), info)
                 by_lower.setdefault(name.lower(), []).append(info)
-                shown = member_name(name, ctx)
+                shown = zname(name)
                 row = {"name": shown, "bytes": info.file_size, "compressed": info.compress_size, "method": info.compress_type,
                        "modified": "%04d-%02d-%02dT%02d:%02d:%02d" % info.date_time}
                 if shown != name:
@@ -2570,10 +2586,10 @@ def _probe_zip(path, size, ctx, extractor, out):
             for low, copies in by_lower.items():
                 if len(copies) > 1:
                     spellings = sorted({i.filename for i in copies})
-                    duplicates.append({"name": shown_name(copies[0].filename), "copies": len(copies), "spellings": [shown_name(x) for x in spellings]})
+                    duplicates.append({"name": zname(copies[0].filename, False), "copies": len(copies), "spellings": [zname(x, False) for x in spellings]})
                     ctx.problem("the part name %s appears %d times%s: part names compare case-insensitively (ECMA-376-2 9.1.1.1.2), so an OPC package has one "
                                 "part of each name, and readers resolve a repeated one differently; every copy of a part this tool reads is read"
-                                % (shown_name(copies[0].filename), len(copies), " (spelled %d ways)" % len(spellings) if len(spellings) > 1 else ""))
+                                % (zname(copies[0].filename, False), len(copies), " (spelled %d ways)" % len(spellings) if len(spellings) > 1 else ""))
             if duplicates:
                 out["duplicate_part_names"] = duplicates
             if members["flagged_encrypted"]:
@@ -2596,7 +2612,9 @@ def _probe_zip(path, size, ctx, extractor, out):
                         row = {"extension": text_of(attrs.get("Extension", ""), None, "names"), "content_type": text_of(kind, None, "names")}
                     elif local == "Override":
                         kind = attrs.get("ContentType", "")
-                        row = {"part": shown_path(attrs.get("PartName", "")), "content_type": text_of(kind, None, "names")}
+                        part = attrs.get("PartName", "")
+                        row = {"part": zname(part[1:], False) if part.startswith("/") and part[1:].lower() in withheld_names else shown_path(part),
+                               "content_type": text_of(kind, None, "names")}
                     else:
                         return
                     overrides.add(row)
@@ -2645,7 +2663,7 @@ def _probe_zip(path, size, ctx, extractor, out):
                 if ctx.expired("the vbaProject.bin parts"):
                     members["not_attempted"] += len(vba_parts) - k
                     break
-                shown = member_name(info.filename, ctx)
+                shown = zname(info.filename)
                 try:
                     blob = read_member(archive, info, ctx)
                 except Unreadable as exc:

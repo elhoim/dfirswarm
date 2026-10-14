@@ -83,6 +83,13 @@ const VP = (): Buffer => buildVbaProject([{ name: "Module1", source: "Sub A()\r\
 each(200, DOC_STRUCTURE, ".docm", {
   "zip-member-name": (c) => zip([["[Content_Types].xml", CT()], [`word/${c.plant}.xml`, "<a/>"], ["word/document.xml", "<a/>"]]),
   "zip-member-name-spilled": (c) => zip([["[Content_Types].xml", CT()], ...Array.from({ length: 150 }, (_x, i): [string, string] => [`word/media/p${i}.xml`, "<a/>"]), [`word/${c.plant}.xml`, "<a/>"]]),
+  // part names compare without case: the canary's own spelling and forty case variants of it, every one a spelling of one name
+  "zip-member-case-variants": (c) => {
+    const name = `word/${c.plant}.xml`;
+    const variants = new Set<string>([name]);
+    for (let i = 1; variants.size < 41 && i < 400; i++) variants.add([...name].map((ch, k) => ((i >> (k % 9)) & 1 ? ch.toUpperCase() : ch.toLowerCase())).join(""));
+    return zip([["[Content_Types].xml", CT()], ...[...variants].map((v): [string, string] => [v, "<a/>"])]);
+  },
   "content-types-part-name": (c) => zip([["[Content_Types].xml", CT(`<Override PartName="/word/${xml(c.plant)}" ContentType="application/xml"/>`)], ["word/document.xml", "<a/>"]]),
   "content-types-type": (c) => zip([["[Content_Types].xml", CT(`<Override PartName="/word/a.xml" ContentType="${xml(c.plant)}"/>`)], ["word/document.xml", "<a/>"]]),
   "content-types-default-extension": (c) => zip([["[Content_Types].xml", CT(`<Default Extension="${xml(c.plant)}" ContentType="application/x"/>`)], ["word/document.xml", "<a/>"]]),
