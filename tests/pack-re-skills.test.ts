@@ -192,7 +192,8 @@ async function observed(): Promise<Record<string, Set<string>>> {
     await run("doc_structure", DOC_STRUCTURE, "work/s.rtf", rtf);
     await run("doc_structure", DOC_STRUCTURE, "work/s.bin", buildVbaProject([{ name: "Module1", source: "Sub AutoOpen()\r\nEnd Sub\r\n" }]));
     // An encrypted PDF (a target string is ciphertext), an extracted script (its row names the file), an RTF with a field and a template.
-    const enc = `<< /Filter /Standard /V 2 /R 3 /Length 128 /P -4 /O <${"11".repeat(32)}> /U <${"22".repeat(32)}> >>`;
+    // V 4 with named crypt filters (ISO 32000-1 7.6.5): StrF and StmF name StdCF, so strings are ciphertext and str_f / stm_f are written.
+    const enc = `<< /Filter /Standard /V 4 /R 4 /Length 128 /P -4 /CF << /StdCF << /CFM /AESV2 /Length 16 >> >> /StrF /StdCF /StmF /StdCF /O <${"11".repeat(32)}> /U <${"22".repeat(32)}> >>`;
     const encrypted = buildPdf([{ num: 1, body: "<< /Type /Catalog /Pages 2 0 R /OpenAction 4 0 R >>" }, { num: 2, body: "<< /Type /Pages /Kids [ 3 0 R ] /Count 1 >>" }, { num: 3, body: "<< /Type /Page /Parent 2 0 R >>" }, { num: 4, body: "<< /S /URI /URI <a1b2c3> >>" }, { num: 9, body: enc }], "/Root 1 0 R /Encrypt 9 0 R");
     await run("doc_structure", DOC_STRUCTURE, "work/e.pdf", encrypted.file);
     await run("doc_structure", DOC_STRUCTURE, "work/s3.pdf", withScript.file, { extract: ["javascript"], extract_to: "out/x" }, true);
