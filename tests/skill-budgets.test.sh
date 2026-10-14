@@ -259,12 +259,17 @@ $got"
 pass "sealing refuses a skill over 1,000 tokens (and a router over 400) before it writes anything, says every other budget as a warning, and tells the base pack what its growth does to a dependant"
 
 # A shipped pack seals under its golden list: one with a listed leaf over 1,000
-# tokens seals, and the same skill with no list is refused.
-"$PY" "$BUDGETS" seal "$ROOT/packs/computer-forensics-base" --golden "$ROOT/tests/skill-budgets.golden" > "$WORK/base.seal" || fail "the seal check failed on the base pack"
-[[ "$(jq '.errors | length' "$WORK/base.seal")" == 0 ]] || fail "the base pack's listed findings are refused at the seal: $(cat "$WORK/base.seal")"
-jq -e '.warnings | map(select(test("known finding.s. are on tests/skill-budgets.golden"))) | length == 1' "$WORK/base.seal" >/dev/null || fail "the seal did not say that the base pack has known findings: $(cat "$WORK/base.seal")"
-"$PY" "$BUDGETS" seal "$ROOT/packs/computer-forensics-base" > "$WORK/base.nogolden" || fail "the seal check failed without the list"
-[[ "$(jq '.errors | length' "$WORK/base.nogolden")" -gt 0 ]] || fail "a listed leaf over 1,000 tokens is not refused without the list"
+# tokens seals, and the same skill with no list is refused. The pack is the first one
+# the list names for a leaf: the base pack was the subject while it had such findings,
+# and the list is meant to shrink, so a pack that is fixed hands the case to the next.
+shipped="$(awk '$2 == "leaf" { print $1; exit }' "$ROOT/tests/skill-budgets.golden")"
+if [[ -n "$shipped" ]]; then
+  "$PY" "$BUDGETS" seal "$ROOT/packs/$shipped" --golden "$ROOT/tests/skill-budgets.golden" > "$WORK/shipped.seal" || fail "the seal check failed on $shipped"
+  [[ "$(jq '.errors | length' "$WORK/shipped.seal")" == 0 ]] || fail "$shipped's listed findings are refused at the seal: $(cat "$WORK/shipped.seal")"
+  jq -e '.warnings | map(select(test("known finding.s. are on tests/skill-budgets.golden"))) | length == 1' "$WORK/shipped.seal" >/dev/null || fail "the seal did not say that $shipped has known findings: $(cat "$WORK/shipped.seal")"
+  "$PY" "$BUDGETS" seal "$ROOT/packs/$shipped" > "$WORK/shipped.nogolden" || fail "the seal check failed without the list"
+  [[ "$(jq '.errors | length' "$WORK/shipped.nogolden")" -gt 0 ]] || fail "a listed leaf over 1,000 tokens is not refused without the list"
+fi
 case_n=$((case_n + 1)); dir="$WORK/sl$case_n"; mkdir "$dir" && "$PY" "$WORK/fx.py" "$dir" leaf-1100 || fail "could not build the packs"
 printf '%s\n' "cp leaf c/lone 1125" > "$dir.golden"
 "$PY" "$BUDGETS" seal "$dir/cp" --golden "$dir.golden" > "$WORK/listed.seal" || fail "seal check failed"

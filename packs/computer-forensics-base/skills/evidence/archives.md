@@ -20,6 +20,8 @@ It reads the format from the bytes, creates files only under `extracted/` and ne
 
 **Names.** A name shaped like a token or carrying user-info is withheld: `name_withheld` in every answer, the file under `extracted/_withheld/withheld-NNNNNN`, the real name only in `withheld-names.jsonl` (0600). Cite the member by `n`. There is no name filter. Do not paste a withheld name into the ledger.
 
-**Nested archives** are named (`looks_like`), not opened: extract the inner one in a call of its own with its own budgets. zstd is read only where the image has a zstd reader; the answer says when it has none. A 7z with encrypted headers cannot be listed; no password is used or guessed.
+**Nested archives** are named (`looks_like`), not opened: extract the inner one in a call of its own with its own budgets. A document or image inside is another layer (`data/documents-media`). zstd is read only where the image has a zstd reader; the answer says when it has none. A 7z with encrypted headers cannot be listed; no password is used or guessed.
+
+**Sensitive output.** Members are evidence content and may hold credentials: the job runs with `secret_output: true`, and the ledger cites a member by `n` and its place, not by its text.
 
 **Does not show.** An extraction shows what the archive held and that each written member matches the archive's size and CRC. It does not show that the archive is authentic, complete as acquired, or that a member's stored times are real. A `.partial` or missing member is not an absent file.
