@@ -1,22 +1,22 @@
 ---
 id: documents/macros
-title: Document inventory: Office, PDF and RTF
-when: The sample is an Office document, PDF, RTF or other package.
+title: Office document inventory: OLE, OOXML and VBA
+when: The sample is an Office document, OLE file or OOXML package.
 needs: [triage/quarantine]
 tools: [file_type, doc_probe, doc_structure]
 requires_host: [olevba]
 ---
 
-Use when the sample is an Office document, PDF, RTF or other package. Not for opening it in an application, or for judging whether anything ran.
+Use when the sample is an Office document, OLE file or OOXML package. Not for opening it in an application, for a PDF or RTF (`documents/pdf-rtf`), or for judging whether anything ran.
 
 Never open a sample in Office, a browser or a PDF reader. Parse it in a job with time, memory, output and nesting limits, and keep the original and the complete inventory.
 
-1. `file_type` first, then `doc_probe` for the container (OOXML or ZIP, OLE, RTF, PDF). Read its `status` and `members` counts (encrypted, failed, over budget): an unread member is a gap, not an absence. An extension describes expected content, not validated contents. Code-related parts in a `.docx`, `.xlsx` or `.pptx` are a format and content discrepancy (`extension_content_disagreement`): not proof of renaming, and not proof an application would run them. `parts[].modified` is the ZIP DOS date and time: the writer's local time, no zone, two-second resolution; it is not UTC and not an editing history.
-2. `doc_probe` is a preliminary inventory: byte markers for OLE, PDF and RTF, relationships from `*.rels` parts only; with `extract_to` (in a job, a path under `$OUT`) it writes only members whose names match a code-related pattern. `doc_structure` reads structure within budgets: the OLE directory (with entries no storage reaches), VBA modules and encryption records, and PDF and RTF structure; read its `status`, `problems` and `coverage`. A part name that looks like a credential is withheld; `withheld_names_file` names the private file with the real name. A `vbaProject.bin` in an OOXML package is an OLE compound file: `doc_structure` lists its modules; extract it for `olevba`.
+1. `file_type` first, then `doc_probe` for the container. Read its `status` and `members` counts (encrypted, failed, over budget): an unread member is a gap, not an absence. An extension describes expected content, not validated contents. Code-related parts in a `.docx`, `.xlsx` or `.pptx` are a format and content discrepancy (`extension_content_disagreement`): not proof of renaming, and not proof an application would run them. `parts[].modified` is the ZIP DOS date and time: the writer's local time, no zone, two-second resolution; it is not UTC and not an editing history.
+2. `doc_probe` is a preliminary inventory: byte markers, relationships from `*.rels` parts only; with `extract_to` (in a job, a path under `$OUT`) it writes only members whose names match a code-related pattern. `doc_structure` reads structure within budgets: the OLE directory (with entries no storage reaches), VBA modules and encryption records; read its `status`, `problems` and `coverage`. A part name that looks like a credential is withheld; `withheld_names_file` names the private file with the real name. A `vbaProject.bin` in an OOXML package is an OLE compound file: `doc_structure` lists its modules; extract it for `olevba`.
 3. For VBA, `olevba` extracts source and names auto-execution entry points (`olevba -h`). Auto-execution names such as `AutoOpen`, `Document_Open` and `Workbook_Open` are what `olevba` reports. An entry-point name does not show execution, and its absence does not show a click was needed: callbacks can invoke procedures. If source looks absent or inconsistent, comparing it with compiled VBA needs a version-aware p-code reader, which this pack does not provide: record the comparison as not made. `doc_structure` names Excel 4.0 macro sheets and hidden sheets; their formulas, embedded packages (an OLE package object can hold an executable, a shortcut or a script), ActiveX and nested documents stay unread.
 4. Encrypted or unsupported content stays unexamined until an authorised offline reader can parse it; `doc_structure` reports scheme, algorithm and key size from the structure, tries no key, and its negative is bounded to the structures it names. A clean marker scan is not proof that active content is absent.
 
-Only if the question is external references, PDF actions or RTF objects, read `documents/external-and-active-content`.
+Only if the question is external references in an OOXML package, read `documents/external-and-active-content`.
 
 Sensitive output: macro source, targets and extracted parts can hold credentials. Run these jobs with `secret_output: true`.
 

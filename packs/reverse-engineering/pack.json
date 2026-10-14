@@ -1,7 +1,7 @@
 {
   "id": "reverse-engineering",
   "name": "Reverse Engineering Pack",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "description": "Static triage of a binary or a document under quarantine: what the file actually is, PE and ELF structure, entropy and packing, obfuscated strings, capability mapping, macros and embedded objects, and rules. Nothing from the evidence is ever executed.",
   "licence": "AGPL-3.0-or-later",
   "authors": [
@@ -28,7 +28,7 @@
   "checksums": {
     "sha256": {
       "LICENCE": "5b94f18424dbef1e77eda33a465e946c2c8eb715fa5236afe2c6ec6763af80d3",
-      "README.md": "663f3579be620464ae523966778b3c54266920db17f1fddae6f4e87e8683357b",
+      "README.md": "1b3041c47d34bbe2f947cb2f0bf70dd635061ba26c67998f47525d8e4704a188",
       "tools/fuzzy_hash/manifest.json": "95ad584cb810bbd17112545b2faf314fe30bca784e444d9257c421b7d8cd6f60",
       "tools/fuzzy_hash/run.py": "2819935381da66752157455de3e7bc7d02f99dd4387ef2d967ae85a073fcf93b",
       "tools/pe_directories/manifest.json": "e3a3ca55f287484d0afc9dbaab55a219a544b2a26739df669753725f1c633553",
@@ -46,21 +46,29 @@
       "recipes/static-binary/run.py": "ae07a82fe4ba1a47be3b83b1b611c4f66503984f8120954eb37d472a9db6a898",
       "recipes/capa-floss/recipe.json": "40ad841b2f2d7b786860edf579c6958ce3f445994b2706f40314ce7596b4d127",
       "recipes/capa-floss/run.py": "90a4e146c71a41ae4aa5f9df5a8c7a4e7234c146fa295dc71f37fb91adfdab73",
+      "skills/managed/dotnet.md": "ec31200fc484dbe95d189b50a37de6fbc4178c9b093c01f84cee1084309a0f57",
       "skills/pe/signature-and-resources.md": "19bb646c0ca752bc85dba4836fe12308416f7ba70aba7f4eebab736315e09e07",
       "skills/pe/structure.md": "555340ce97d7f18ddf8de1eeeb1b1ce345c2498f4ff219004812cc98f8eafb0a",
       "skills/strings/decoding-and-similarity.md": "8eb3df8b3a24f349e6c4a2bfa0921b501ab0522db12bcdc824c1030c70c0df5d",
-      "skills/strings/obfuscated.md": "69d7730629ba95f64099df0fa0ed8236b25ed17536a460ff95829ef26a13987d",
-      "skills/capabilities/mapping.md": "c0697ec3f253464e521dc807b4ef0bbdabf280f4e695c779b749ca9607f7392b",
-      "skills/triage/quarantine.md": "f60c3323618dd240a062f3aff057f996b9f460d604656016a50bf795f20cf494",
+      "skills/strings/obfuscated.md": "10797972c5d722d4a902a2c729c0a905be0b193fc45959e947c5ce4872d76ef2",
+      "skills/capabilities/mapping.md": "b568574dffe48e3acd7e284c0d921e01f20e1f81ee53e907538ccff005e271a7",
+      "skills/macho/structure.md": "4dd7f17772ef3e7a481b8386153d5228baf9c4f3dc7020128ca4c24015437990",
+      "skills/runtimes/go-rust.md": "0b1b4a61eaeadeb1b71786143aa7cd5f167e6d4faac3dbb6757191a94c5f4194",
+      "skills/runtimes/python-packaged.md": "67f1e24fc3ad2969644defee7fa559ec1b92cc4880340e50b3b38329515b73d4",
+      "skills/code/static-inspection.md": "3cb5c5a53c11bb6c9983cf8c5355874f210d42b5b51ff83d8217b74ba6b75878",
+      "skills/triage/quarantine.md": "6e158033c4b5343ec1bb709b7000c38fe8807b012fae9ca139751d3350050147",
+      "skills/scripts/static-analysis.md": "96216449ddc8a90cad0d33378dc5d0118bb13f4065a993e1246887c1ab55ba82",
       "skills/rules/authoring.md": "69f5cc20f032ed367ef83cab58b64de51c135c217fc6aa9f4f224db71ceb2cb1",
       "skills/rules/yara.md": "8eadb83d84456b726ba99dff1c6e0d0547ace586aff7b47d4af58c8e2f16c3c9",
-      "skills/documents/external-and-active-content.md": "3219a4d058fa21b77ca43857eda1c393d77139a43f670080773ce26c55a9f2dd",
-      "skills/documents/macros.md": "8998f0b95a0d8acc19026e4a040332b128dc9ded7323d127146df9e891aae01f",
+      "skills/documents/external-and-active-content.md": "7eaed7e8e8f3b29bed7d58942c27774e551709615abc46f7e89d43491199b250",
+      "skills/documents/macros.md": "2c3938bdf3ccb94546fe41f01f1585752b1095ae37e64d970ef790609bc0ae91",
+      "skills/documents/pdf-rtf.md": "28313326acfb9032de364be31ccbebb4850d389721127b9e30ee83bc52bbd34e",
       "skills/elf/packing-and-identity.md": "a4cfdebf3efb071edca2da1560ff2e7b015ed89d366777645b995aeb2336176a",
       "skills/elf/structure.md": "913d82302d83dc52d253971d7436811be92be563b1d47bb164abef96eda4f7aa",
+      "skills/packing/static-recovery.md": "6093ec26b2b630905d580e2a9e1309006a9874d68364267e212f1c971de0c78c",
       "requires/host.json": "35d6940ebf96fe7342b6be31f503561267f756ec91203661c0940860b0dd0171",
       "requires/python.txt": "f0f18bd3e9e860703a9a7599d84f281b999764d16f1619aeef6b89a670c5566b",
-      "skills/INDEX.md": "26be19ea2e8056cc5cf05d12742ccf056ce61b6e953efd750fd547c33c3a63b5"
+      "skills/INDEX.md": "b420f9bfc2bc43f75f1c2c4f6837ae19a31ebd23d56de324bdaa6041359aed11"
     }
   },
   "tools": [
@@ -75,5 +83,5 @@
     "reverse-engineering/capa-floss",
     "reverse-engineering/static-binary"
   ],
-  "skills": 12
+  "skills": 20
 }
