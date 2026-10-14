@@ -89,7 +89,7 @@ test("the new skills say what to record, and the skills whose tools can surface 
     assert.match(s.body, /\*\*Record\.\*\*/, `${id} says what to record`);
   }
   for (const id of SENSITIVE) assert.match(skills.get(id)!.body, /\*\*Sensitive output\.\*\*/, `${id} has Sensitive output`);
-  // The wording is the worker prompt's: a job that may read a secret runs with secret_output: true.
+  // The phrase is the worker prompt's: a job that may read a secret runs with secret_output: true.
   const prompt = await readFile(join(ROOT, "prompts", "worker-system.md"), "utf8");
   assert.match(prompt, /runs with `secret_output: true`/);
   for (const id of ["data/sqlite", "data/documents-media", "filesystem/scanners", "filesystem/encrypted-metadata", "filesystem/extract", "filesystem/semantics"]) {
