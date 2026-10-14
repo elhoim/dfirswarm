@@ -1,0 +1,667 @@
+#!/usr/bin/env python3
+"""Run capa and FLOSS over one PE or ELF file, if they are installed, and say exactly what each of them said.
+
+Two programs, each started in this recipe's own process group with its output going straight to a file of the recipe's
+directory: `capa -j` (capability rule matches) and `floss -j` (recovered strings). The programs are not shipped by the pack
+(it declares them as optional), and this recipe does not assume either is present:
+
+    complete      every engine ran, exited 0 and wrote JSON of the shape this recipe reads
+    partial       at least one engine produced a usable result and something is missing: an engine that is not installed, that failed,
+                  that was stopped at its time limit, or whose JSON had no rules mapping (coverage.json says which and why)
+    unsupported   the file is not a PE or an ELF
+    failed        no engine produced a usable result
+
+The recipe judges an engine by its exit status and the shape of its output, never by the output file being non-empty. It records each
+program's argv and what `--version` printed, copies no string and no matched feature into coverage.json, index.tsv or matches.tsv (the
+whole output files hold them, and they can hold credentials), and does not know or claim which release has which capability: a
+program that rejects an argument fails visibly, with its stderr kept. Nothing here executes the sample; capa and FLOSS analyse it, and
+FLOSS emulates parts of its code inside its own process, which is the program's behaviour and not this recipe's.
+"""
+import errno
+import json
+import os
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import time
+
+# BEGIN SHARED WITHHOLDING
+# The same text is in pcap_extract, zeek_run, suricata_run and network_log_summary, so that the four tools withhold
+# the same strings; tests/pack-network-withholding.test.ts holds the copies equal. An identifier-shaped string is
+# withheld wherever the tool would print one: a name, a path component, a URL, a message that quotes either.
+COUNTS = {"names": 0, "urls": 0, "text": 0}
+# A run of name characters long enough to be a token. `=` is only a padding at the end (so a key= prefix stays);
+# `/` joins pieces of a base64 token and is handled apart, below.
+_RUN = re.compile(r"[A-Za-z0-9_+%-]{20,}={0,2}|[A-Za-z0-9_+%-]{14,}={2}")
+_SLASHED = re.compile(r"[A-Za-z0-9_+/%-]{30,}={0,2}")
+_HEX = re.compile(r"[0-9a-fA-F]{32,}")
+_PREFIXED = re.compile(r"(?:AKIA|ASIA)[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}"
+                       r"|xox[abeprs]-[A-Za-z0-9-]{10,}|sk-[A-Za-z0-9_-]{20,}"
+                       r"|eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*"
+                       r"|(?i:basic|bearer)\s+[A-Za-z0-9+/=._~-]{8,}")
+# User-info: after `//` (a URL, or a scheme-relative one), or bare as name:password@host. A mailto: address is not one.
+_USERINFO = re.compile(r"(?<=//)[^/?#\s@]+(?=@)")
+_BARE_USERINFO = re.compile(r"(?<![\w.%+:/-])(?!mailto:)[\w.%+-]{1,64}:[^\s/@:]{1,128}(?=@[\w\[])")
+
+
+def _withheld(what, length, kind):
+    COUNTS[kind] = COUNTS.get(kind, 0) + 1
+    return ("<%s withheld %d characters>" % (what, length)) if what else ("<withheld %d characters>" % length)
+
+
+def _token_run(run):
+    """Is this run of name characters shaped like a token, and not like words, dates or versions?"""
+    if _HEX.search(run):
+        return True
+    chunks = [(m.group()[0].isdigit(), m.start(), m.end()) for m in re.finditer(r"[A-Za-z]+|[0-9]+", run)]
+    # digits packed between letters ("a9b2c7"), which words, dates and versions do not do
+    packed = 0
+    for i, (is_digit, start, end) in enumerate(chunks):
+        if not is_digit or end - start > 3:
+            continue
+        before = i > 0 and not chunks[i - 1][0] and chunks[i - 1][2] == start
+        after = i + 1 < len(chunks) and not chunks[i + 1][0] and chunks[i + 1][1] == end
+        packed += 1 if before or after else 0
+    if packed >= 3:
+        return True
+    letters = [c for c in run if c.isalpha()]
+    case_flips = sum(1 for a, b in zip(letters, letters[1:]) if a.islower() != b.islower())
+    if len(letters) >= 20 and case_flips >= max(8, 0.4 * len(letters)):
+        return True
+    if run.endswith("==") and len(run) >= 16:
+        return True
+    if run.endswith("=") and len(run) >= 24:
+        return True
+    return len(run) >= 40 and run.isalnum() and any(c.isdigit() for c in run) and any(c.isalpha() for c in run)
+
+
+def _randomish(piece):
+    """A piece of a path that is not a plain word: digits among letters, or capitals inside a word."""
+    if len(piece) < 4 or "." in piece or re.fullmatch(r"[A-Z][a-z]+", piece):
+        return False
+    letters = [c for c in piece if c.isalpha()]
+    mixed = any(c.islower() for c in letters) and any(c.isupper() for c in letters)
+    return (any(c.isdigit() for c in piece) and bool(letters)) or mixed
+
+
+def token_spans(text):
+    spans = [m.span() for m in _PREFIXED.finditer(text)]
+    for m in _RUN.finditer(text):
+        if _token_run(m.group()):
+            spans.append(m.span())
+    # A base64 token holds `/`: pieces too short to be one alone (an AWS-style secret has two) are caught as a whole.
+    for m in _SLASHED.finditer(text):
+        run = m.group()
+        if "/" in run and sum(1 for p in run.split("/") if _randomish(p)) >= 3 and re.search(r"[0-9+]", run):
+            spans.append(m.span())
+    # A flagged piece takes the random-looking pieces next to it across a `/`: the head of a token is not printed.
+    grown = []
+    for start, end in spans:
+        while start > 1 and text[start - 1] == "/":
+            m = re.search(r"[A-Za-z0-9_+%-]+$", text[:start - 1])
+            if not m or not _randomish(m.group()):
+                break
+            start = m.start()
+        while end < len(text) - 1 and text[end] == "/":
+            m = re.match(r"[A-Za-z0-9_+%-]+={0,2}", text[end + 1:])
+            if not m or not _randomish(m.group()):
+                break
+            end = end + 1 + m.end()
+        grown.append((start, end))
+    grown.sort()
+    merged = []
+    for start, end in grown:
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def token_shaped(text):
+    return bool(token_spans(text))
+
+
+def scrub(text, kind="text"):
+    """The text with every token-shaped run and every user-info withheld."""
+    text = _USERINFO.sub(lambda m: _withheld("userinfo", len(m.group()), kind), text)
+    text = _BARE_USERINFO.sub(lambda m: _withheld("userinfo", len(m.group()), kind), text)
+    out, last = [], 0
+    for start, end in token_spans(text):
+        out.append(text[last:start])
+        out.append(_withheld("token-shaped text", end - start, kind))
+        last = end
+    out.append(text[last:])
+    return "".join(out)
+
+
+def redact_url(url):
+    """A URL or request target without its user-info, its token-shaped path text, its query values or its fragment."""
+    rest, fragment = (url.split("#", 1) + [None])[:2]
+    rest, query = (rest.split("?", 1) + [None])[:2]
+    scheme = authority = ""
+    m = re.match(r"^((?:[A-Za-z][A-Za-z0-9+.-]*:)?//)([^/]*)(.*)$", rest, re.S)
+    if m:
+        scheme, authority, rest = m.group(1), m.group(2), m.group(3)
+        if "@" in authority:
+            userinfo, authority = authority.rsplit("@", 1)
+            authority = _withheld("userinfo", len(userinfo), "urls") + "@" + authority
+    out = scheme + authority + scrub(rest, "urls")
+    if query is not None:
+        pairs = []
+        for pair in query.split("&"):
+            name, eq, value = pair.partition("=")
+            pairs.append(scrub(name, "urls") + (eq + _withheld("", len(value), "urls") if eq else ""))
+        out += "?" + "&".join(pairs)
+    if fragment is not None:
+        out += "#" + _withheld("", len(fragment), "urls")
+    return out
+
+
+def cell(value):
+    """Text for one tab-separated cell or one printed path: no tab or line break, and a byte that was not UTF-8
+    (a lone surrogate) written as \\xNN, so that no writer raises on it."""
+    text = value if isinstance(value, str) else str(value)
+    out = []
+    for ch in text:
+        o = ord(ch)
+        if ch == "\\":
+            out.append("\\\\")
+        elif ch == "\t":
+            out.append("\\t")
+        elif ch == "\r":
+            out.append("\\r")
+        elif ch == "\n":
+            out.append("\\n")
+        elif 0xDC80 <= o <= 0xDCFF:
+            out.append("\\x%02x" % (o - 0xDC00))
+        elif 0xD800 <= o <= 0xDFFF:
+            out.append("\\u%04x" % o)
+        elif o < 0x20 or o == 0x7F:
+            out.append("\\x%02x" % o)
+        else:
+            out.append(ch)
+    return "".join(out)
+# END SHARED WITHHOLDING
+
+
+# BEGIN SHARED PROCESS
+# The same text is in pcap_extract, zeek_run, suricata_run and the network-capture recipe; tests/pack-network-process.test.ts
+# holds the copies equal. A program an engine tool runs is started in THIS tool's process group, never in a session of
+# its own: the harness ends a tool that runs too long, or is aborted, by killing the tool's group (process.kill(-pid,
+# SIGKILL)), and an engine in a group of its own goes on writing into the output directory after the tool is gone. On
+# Linux the kernel is also asked to kill it if the tool dies. A deadline kills the program and what it started by
+# walking the process tree, and SIGTERM, SIGINT and SIGHUP do the same and then give the tool a last word.
+try:
+    import ctypes
+except ImportError:  # pragma: no cover
+    ctypes = None
+
+STATE = {"last_word": None}    # what to do, with the signal number, when the tool is stopped by a signal
+ACTIVE = []                    # the programs running now
+
+def _die_with_parent():  # runs in the child between fork and exec
+    try:
+        ctypes.CDLL(None).prctl(1, signal.SIGKILL)   # PR_SET_PDEATHSIG
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def spawn(argv, **kwargs):
+    kwargs.setdefault("stdin", subprocess.DEVNULL)
+    if sys.platform.startswith("linux") and ctypes is not None:
+        kwargs["preexec_fn"] = _die_with_parent
+    return subprocess.Popen(argv, **kwargs)
+
+
+def descendants(pid):
+    """Every process below `pid`, from /proc where there is one, else from ps."""
+    kids = {}
+    try:
+        if os.path.isdir("/proc/self"):
+            for entry in os.listdir("/proc"):
+                if entry.isdigit():
+                    try:
+                        with open("/proc/%s/stat" % entry, "rb") as fh:
+                            fields = fh.read().rsplit(b")", 1)[1].split()
+                        kids.setdefault(int(fields[1]), []).append(int(entry))
+                    except (OSError, IndexError, ValueError):
+                        continue
+        else:
+            out = subprocess.run(["ps", "-A", "-o", "pid=,ppid="], capture_output=True, text=True, timeout=10).stdout
+            for line in out.splitlines():
+                parts = line.split()
+                if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+                    kids.setdefault(int(parts[1]), []).append(int(parts[0]))
+    except (OSError, subprocess.SubprocessError):
+        return []
+    found, stack = [], [pid]
+    while stack:
+        for child in kids.get(stack.pop(), []):
+            found.append(child)
+            stack.append(child)
+    return found
+
+
+def kill_tree(proc):
+    """Kill the program and everything it started. The children are listed first: once the parent is gone they are
+    adopted by init and can no longer be found below it."""
+    victims = descendants(proc.pid)
+    try:
+        proc.kill()
+    except OSError:
+        pass
+    for pid in victims:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+
+
+def _on_signal(signum, _frame):
+    for proc in list(ACTIVE):
+        kill_tree(proc)
+    last_word = STATE.get("last_word")
+    if last_word:
+        try:
+            last_word(signum)
+        except Exception:  # noqa: BLE001 - a last word is best effort
+            pass
+    os._exit(128 + signum)
+
+
+def preflight(argv, seconds):
+    """Run a short program, bounded; (exit code or None, stdout bytes, stderr bytes, timed out)."""
+    try:
+        proc = spawn(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except OSError as exc:
+        return None, b"", describe(exc).encode("utf-8", "replace"), False
+    ACTIVE.append(proc)
+    try:
+        out, err = proc.communicate(timeout=max(1.0, seconds))
+        return proc.returncode, out, err, False
+    except subprocess.TimeoutExpired:
+        kill_tree(proc)
+        out, err = proc.communicate()
+        return None, out, err, True
+    finally:
+        ACTIVE.remove(proc)
+
+
+def run_to_files(argv, stdout_path, stderr_path, seconds, cwd=None):
+    """One program with its output in files, killed with what it started at `seconds`. (exit code, timed out)."""
+    with open(stdout_path, "wb") as stdout, open(stderr_path, "wb") as stderr:
+        proc = spawn(argv, stdout=stdout, stderr=stderr, cwd=cwd)
+        ACTIVE.append(proc)
+        try:
+            return proc.wait(timeout=max(0.1, seconds)), False
+        except subprocess.TimeoutExpired:
+            kill_tree(proc)
+            proc.wait()
+            return None, True
+        finally:
+            ACTIVE.remove(proc)
+
+
+def install_signal_handlers():
+    for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(signum, _on_signal)
+# END SHARED PROCESS
+
+
+# -- new code of the capa-floss recipe --
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def shown_path(text):
+    """A path as it may be printed: each component with anything token-shaped, or with user-info, withheld."""
+    return "/".join(scrub(part, "names") for part in text.split("/"))
+
+BUDGET_SECONDS = 3500                     # recipe.json gives this recipe 3600
+GRACE_SECONDS = 10                        # a program that outlives its own clock by this much is ended
+VERSION_SECONDS = 20
+MAX_JSON = 512 << 20
+TSV_ROWS = 1_000_000
+EARLIER = re.compile(r"^(capa|floss)(-\d+)?\.(json|stderr)$|^matches(-\d+)?\.tsv$")
+# The engines are programs the pack declares and does not ship; this recipe runs them if they are on PATH and says what they said.
+ENGINES = [
+    {"id": "capa", "program": "capa", "argv": ["-j"], "seconds": 1500,
+     "what": "capability rule matches over features the program extracts from the file; each match is a hypothesis about what code could do"},
+    {"id": "floss", "program": "floss", "argv": ["-j"], "seconds": 1900,
+     "what": "strings recovered by analysis and emulation, in the program's own modes; recovered strings are derived, not literals at a file offset"},
+]
+NOT_COVERED = "execution of the sample, reachability or intent of any matched capability, strings or capabilities the engines do not recover, any engine that is not installed"
+
+
+def describe(exc):
+    return "%s: %s" % (type(exc).__name__, getattr(exc, "strerror", None) or str(exc))
+
+
+def target_of(arg):
+    text = open(arg, encoding="utf-8").read() if os.path.isfile(arg) else arg
+    target = json.loads(text)
+    paths = target.get("paths") or []
+    if not paths or not isinstance(paths[0], str):
+        raise ValueError("the target names no path")
+    return target, paths[0]
+
+
+def detect(path):
+    """(format or None, why): a PE with its signature where the DOS header points, or an ELF with a class, a byte order and a whole header."""
+    try:
+        size = os.path.getsize(path)
+        with open(path, "rb") as fh:
+            head = fh.read(64)
+            if head[:2] == b"MZ":
+                if len(head) < 0x40:
+                    return None, "MZ header is too short to name a PE signature"
+                fh.seek(int.from_bytes(head[0x3C:0x40], "little"))
+                if fh.read(4) == b"PE\x00\x00":
+                    return "PE", "DOS header points to a PE signature"
+                return None, "MZ header does not point to a PE signature"
+            if head[:4] == b"\x7fELF":
+                if len(head) < 6 or head[4] not in (1, 2) or head[5] not in (1, 2):
+                    return None, "ELF signature with an unusable class or byte order"
+                need = 64 if head[4] == 2 else 52
+                if size < need:
+                    return None, "ELF signature, and the file is shorter than its header (%d bytes)" % need
+                return "ELF", "ELF signature and a whole ELF header"
+    except OSError as exc:
+        return None, "unreadable: %s" % (exc.strerror or exc)
+    return None, "no PE or ELF signature (the engines are run on those; Mach-O and raw shellcode are not offered)"
+
+
+def new_name(out_dir, stem, ext):
+    """A name in `out_dir` that nothing has: `stem.ext`, or `stem-2.ext`, ... The file is created at once, exclusively, so that a result an
+    earlier run left in this directory is never opened for writing, let alone replaced."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    for n in range(1, 1000):
+        name = "%s%s" % (stem if n == 1 else "%s-%d" % (stem, n), ext)
+        try:
+            os.close(os.open(os.path.join(out_dir, name), flags, 0o644))
+        except FileExistsError:
+            continue
+        return name
+    raise OSError(errno.EEXIST, "a thousand files of this name already exist in %s" % out_dir)
+
+
+def version_of(exe, out_dir):
+    """(exit code, stdout head, stderr head, timed out) of `exe --version`: its output goes to two files of the recipe's directory and
+    is read back 4 KiB at a time, so a program that never stops printing fills a file, not this process's memory."""
+    import tempfile
+    paths = []
+    try:
+        for kind in ("out", "err"):
+            fd, name = tempfile.mkstemp(prefix=".version-", suffix="." + kind, dir=out_dir)
+            os.close(fd)
+            paths.append(name)
+        rc, timed = run_to_files([exe, "--version"], paths[0], paths[1], VERSION_SECONDS)
+        heads = []
+        for name in paths:
+            with open(name, "rb") as fh:
+                heads.append(fh.read(4096))
+        return rc, heads[0], heads[1], timed
+    except OSError as exc:
+        return None, b"", describe(exc).encode("utf-8", "replace"), False
+    finally:
+        for name in paths:
+            try:
+                os.unlink(name)
+            except OSError:
+                pass
+
+
+def first_line(raw):
+    for line in raw.decode("utf-8", "replace").splitlines():
+        if line.strip():
+            return scrub(cell(line.strip()[:200]), "text")
+    return None
+
+
+def read_json(path):
+    try:
+        if os.path.getsize(path) > MAX_JSON:
+            return None, "the output is larger than %d bytes: kept whole, not read here" % MAX_JSON
+        with open(path, encoding="utf-8") as fh:
+            value = json.load(fh)
+    except (OSError, ValueError, RecursionError) as exc:
+        return None, "not JSON (%s)" % type(exc).__name__
+    return (value, None) if isinstance(value, dict) else (None, "JSON, but not an object")
+
+
+def judge(engine, rc, timed_out, doc, why):
+    """(status, reason, details) from what the program said. Never from the output file being non-empty."""
+    if timed_out:
+        return "failed", "%s was stopped at its time limit; what it had written is kept" % engine["program"], {}
+    if rc is None:
+        return "failed", "%s could not be started" % engine["program"], {}
+    if rc != 0:
+        return "failed", "%s exited with status %d; its stderr is kept" % (engine["program"], rc), {}
+    if doc is None:
+        return "failed", "%s exited 0 and its output is not a readable JSON object: %s" % (engine["program"], why), {}
+    if engine["id"] == "capa":
+        rules = doc.get("rules")
+        if not isinstance(rules, dict):
+            return "partial", "capa's JSON has no `rules` mapping, so no match was listed; the whole output is kept", {"keys": sorted(str(k) for k in doc)[:20]}
+        meta = doc.get("meta") if isinstance(doc.get("meta"), dict) else {}
+        details = {"rules_matched": len(rules), "meta_keys": sorted(str(k) for k in meta)[:20]}
+        for key in ("version",):
+            if isinstance(meta.get(key), str):
+                details["reported_version"] = scrub(cell(meta[key][:60]), "text")
+        return "complete", "capa exited 0 and wrote a JSON object with a rules mapping", details
+    strings = doc.get("strings")
+    details = {"keys": sorted(str(k) for k in doc)[:20]}
+    if isinstance(strings, dict):
+        details["string_kinds"] = {str(k): (len(v) if isinstance(v, list) else None) for k, v in list(strings.items())[:20]}
+    return "complete", "floss exited 0 and wrote a JSON object", details
+
+
+def write_matches(doc, path):
+    """matches.tsv from capa's `rules` mapping: rule name, namespace, ATT&CK ids, match count. No matched feature or string is copied."""
+    rows = 0
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write("rule\tnamespace\tattack_ids\tmatches\n")
+        for name, rule in doc["rules"].items():
+            if rows >= TSV_ROWS:
+                return rows, True
+            meta = rule.get("meta") if isinstance(rule, dict) and isinstance(rule.get("meta"), dict) else {}
+            attack = meta.get("attack") if isinstance(meta.get("attack"), list) else []
+            ids = [str(a.get("id")) for a in attack if isinstance(a, dict) and a.get("id")]
+            matches = rule.get("matches") if isinstance(rule, dict) else None
+            fh.write("%s\t%s\t%s\t%s\n" % (cell(scrub(str(name), "names")), cell(scrub(str(meta.get("namespace", "")), "names")), ",".join(cell(scrub(i, "names")) for i in ids),
+                                           len(matches) if isinstance(matches, (list, dict)) else ""))
+            rows += 1
+    return rows, False
+
+
+def assemble(state):
+    out_dir = state["out_dir"]
+    engines = state["engines"]
+    errors = list(state["errors"])
+    notes, limits = [], []
+    for e in engines.values():
+        if e["status"] in ("failed", "unavailable"):
+            errors.append("%s %s: %s" % (e["id"], e["status"], e["reason"]))
+        elif e["status"] == "partial":
+            notes.append("%s partial: %s" % (e["id"], e["reason"]))
+        if e.get("timed_out"):
+            limits.append("%s was stopped at its time limit (%d s)" % (e["id"], e["seconds"]))
+    statuses = [e["status"] for e in engines.values()]
+    usable = [s for s in statuses if s in ("complete", "partial")]
+    if statuses and all(s == "complete" for s in statuses) and not state["errors"]:
+        status = "complete"
+    elif usable:
+        status = "partial"
+    else:
+        status = "failed"
+    coverage = {
+        "recipe": "capa-floss",
+        "target": state["shown"],
+        "format": state["fmt"],
+        "status": status,
+        "covered": "what each engine that is installed wrote about the file, as the engine said it (see engines); a match is a hypothesis, a recovered string is derived",
+        "not_covered": NOT_COVERED,
+        "engines": {k: {kk: vv for kk, vv in v.items() if kk not in ("seconds",)} for k, v in engines.items()},
+        "limits_hit": limits,
+        "warnings": notes,
+        "errors": errors,
+        "sensitive_outputs": [e["file"] for e in engines.values() if e.get("file")],
+        "sensitive_note": "capa's explanations and floss's recovered strings can hold credentials: read them by rule, offset and length. coverage.json, index.tsv and matches.tsv copy no string and no matched feature",
+    }
+    lines = []
+    for e in engines.values():
+        for key, what in (("file", "%s output, whole, exactly as the program wrote it (status %s)" % (e["id"], e["status"])), ("stderr_file", "what %s said on stderr" % e["id"])):
+            name = e.get(key)
+            if name and os.path.isfile(os.path.join(out_dir, name)) and os.path.getsize(os.path.join(out_dir, name)):
+                lines.append("%s\t%s" % (name, what))
+    if state.get("matches") and os.path.isfile(os.path.join(out_dir, state["matches"])):
+        lines.append("%s\tcapa rules that matched: name, namespace, ATT&CK ids, match count (no feature or string)" % state["matches"])
+    listed = {l.split("\t", 1)[0] for l in lines}
+    try:
+        present = sorted(os.listdir(out_dir))
+    except OSError:
+        present = []
+    for name in present:
+        if name in listed or not EARLIER.match(name) or not os.path.isfile(os.path.join(out_dir, name)) or os.path.getsize(os.path.join(out_dir, name)) == 0:
+            continue
+        lines.append("%s\tleft by an earlier run in this directory; kept, and not part of this result" % name)
+    coverage["outputs"] = {k: v for k, v in {"matches": state.get("matches"), **{e["id"]: e.get("file") for e in engines.values()}}.items() if v}
+    return status, coverage, lines
+
+
+def write_results(state):
+    status, coverage, lines = assemble(state)
+    out_dir = state["out_dir"]
+    for name in ("coverage.json", "index.tsv"):
+        tmp = os.path.join(out_dir, name + ".new")
+        with open(tmp, "w", encoding="utf-8") as fh:
+            if name == "coverage.json":
+                json.dump(coverage, fh, indent=2)
+                fh.write("\n")
+            else:
+                fh.write("".join(l + "\n" for l in lines))
+        os.replace(tmp, os.path.join(out_dir, name))
+    return status
+
+
+def run(path, out_dir, fmt, budget):
+    os.makedirs(out_dir, exist_ok=True)
+    started = time.monotonic()
+    sample = os.path.abspath(path)
+    state = {"out_dir": out_dir, "fmt": fmt, "shown": shown_path(path), "errors": [], "engines": {}, "matches": None}
+
+    def last_word(signum):
+        state["errors"].append("the recipe was stopped by signal %d; the program that was running was ended" % signum)
+        try:
+            write_results(state)
+        except OSError:
+            pass
+
+    STATE["last_word"] = last_word
+    install_signal_handlers()
+    for engine in ENGINES:
+        state["engines"][engine["id"]] = {"id": engine["id"], "program": engine["program"], "status": "failed", "reason": "%s has not run" % engine["program"],
+                                          "argv": [engine["program"]] + engine["argv"] + ["<sample>"], "seconds": engine["seconds"], "file": None, "stderr_file": None,
+                                          "what": engine["what"]}
+
+    def unfinished():
+        state["errors"].append("the recipe was started and has not finished")
+        write_results(state)
+        state["errors"].pop()
+
+    unfinished()
+    for engine in ENGINES:
+        e = state["engines"][engine["id"]]
+        exe = shutil.which(engine["program"])
+        if exe is None:
+            e.update({"status": "unavailable", "reason": "%s is not on PATH in this image (the pack declares it as optional)" % engine["program"], "installed": False})
+            unfinished()
+            continue
+        e["installed"] = True
+        rc, out, err, timed = version_of(exe, out_dir)
+        e["version_command"] = {"argv": [engine["program"], "--version"], "exit_code": rc, "first_line": first_line(out) or first_line(err), "timed_out": timed,
+                                "note": "what the program printed, not a statement of what this recipe knows about that release"}
+        left = budget - (time.monotonic() - started)
+        seconds = max(1, min(engine["seconds"], int(left)))
+        if left < 1:
+            e.update({"status": "failed", "reason": "the recipe's time budget was spent before %s could start" % engine["program"], "timed_out": True})
+            unfinished()
+            continue
+        e["file"] = new_name(out_dir, engine["id"], ".json")
+        e["stderr_file"] = new_name(out_dir, engine["id"], ".stderr")
+        e["seconds"] = seconds
+        rc, timed_out = run_to_files([exe] + engine["argv"] + [sample], os.path.join(out_dir, e["file"]), os.path.join(out_dir, e["stderr_file"]), seconds)
+        e["exit_code"], e["timed_out"] = rc, timed_out
+        doc, why = read_json(os.path.join(out_dir, e["file"]))
+        status, reason, details = judge(engine, rc, timed_out, doc, why)
+        e.update({"status": status, "reason": reason, "bytes": os.path.getsize(os.path.join(out_dir, e["file"])), **details})
+        if engine["id"] == "capa" and status == "complete" and isinstance(doc.get("rules"), dict):
+            state["matches"] = new_name(out_dir, "matches", ".tsv")
+            rows, capped = write_matches(doc, os.path.join(out_dir, state["matches"]))
+            e["matches_listed"] = rows
+            if capped:
+                e["status"], e["reason"] = "partial", "capa matched more than %d rules: matches.tsv lists the first %d; capa.json holds them all" % (TSV_ROWS, TSV_ROWS)
+        if drop_if_empty(os.path.join(out_dir, e["stderr_file"])):
+            e["stderr_file"] = None
+        unfinished()
+    final = write_results(state)
+    print(json.dumps({"ok": final == "complete", "status": final, "format": fmt}))
+    return 0 if final in ("complete", "partial") else 2
+
+
+def drop_if_empty(path):
+    try:
+        if os.path.isfile(path) and os.path.getsize(path) == 0:
+            os.unlink(path)
+            return True
+    except OSError:
+        pass
+    return False
+
+
+def main(argv):
+    if len(argv) < 2 or argv[1] not in ("detect", "run"):
+        print(json.dumps({"ok": False, "error": "usage: run.py detect --target T | run --target T --out DIR [--seconds N]"}))
+        return 2
+    args = dict(zip(argv[2::2], argv[3::2]))
+    if "--target" not in args:
+        print(json.dumps({"ok": False, "error": "--target is required"}))
+        return 2
+    try:
+        _target, path = target_of(args["--target"])
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        print(json.dumps({"ok": False, "error": scrub(str(exc))}))
+        return 2
+    if not os.path.isfile(path):
+        print(json.dumps({"ok": False, "error": "the target is not a readable file"}))
+        return 2
+    fmt, why = detect(path)
+    if argv[1] == "detect":
+        print(json.dumps({"applies": fmt is not None, "format": fmt, "why": why}))
+        return 0 if fmt else 1
+    if "--out" not in args:
+        print(json.dumps({"ok": False, "error": "run needs --out DIR"}))
+        return 2
+    if fmt is None:
+        os.makedirs(args["--out"], exist_ok=True)
+        with open(os.path.join(args["--out"], "coverage.json"), "w", encoding="utf-8") as fh:
+            json.dump({"recipe": "capa-floss", "status": "unsupported", "why": why, "limits_hit": [], "errors": []}, fh, indent=2)
+        print(json.dumps({"ok": False, "status": "unsupported", "why": why}))
+        return 2
+    budget = BUDGET_SECONDS
+    if "--seconds" in args:
+        try:
+            budget = int(args["--seconds"])
+        except ValueError:
+            budget = 0
+        if not 1 <= budget <= BUDGET_SECONDS:
+            print(json.dumps({"ok": False, "error": "--seconds is a whole number from 1 to %d" % BUDGET_SECONDS}))
+            return 2
+    return run(path, args["--out"], fmt, budget)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

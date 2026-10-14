@@ -14,6 +14,7 @@ import { test } from "node:test";
 import { DOC_PROBE, DOC_STRUCTURE, FUZZY, PE_DIRECTORIES, PE_INFO, RE, RECIPE, TOOLS, buildPe, childrenOf, gone, pidFile, put, startDetached, stub, tool, withCwd } from "./pack-re-harness.ts";
 import type { Json } from "./pack-re-harness.ts";
 
+const CAPA_FLOSS = join(RE, "recipes", "capa-floss", "run.py");
 const TLSH_DIGEST = "T1" + "A1B2C3D4E5".repeat(7);
 
 /** Engines that start a child of their own and then wait: the pids they write say who must die. */
@@ -178,10 +179,10 @@ const sha = (text: string): string => createHash("sha256").update(text).digest("
 const NETWORK_PROCESS_SHA = "072a9f28f521a9bc039e717811ef0a2b4e9118169fca908bfd4467969cefddac";
 const NETWORK_WITHHOLDING_SHA = "e90959c1c374a2ce465fdd85e1c8a5e9c9f5fe1d6088192a3291baa9da0c23c2";
 
-test("the tool and the recipe that start programs carry one process block, the network pack's text, and nothing in the pack starts a program in a session or a group of its own", async () => {
-  const files = [join(TOOLS, "fuzzy_hash", "run.py"), RECIPE];
+test("the tool and the recipes that start programs carry one process block, the network pack's text, and nothing in the pack starts a program in a session or a group of its own", async () => {
+  const files = [join(TOOLS, "fuzzy_hash", "run.py"), RECIPE, CAPA_FLOSS];
   const blocks = await Promise.all(files.map(processBlock));
-  assert.equal(blocks[1], blocks[0]);
+  for (const other of blocks.slice(1)) assert.equal(other, blocks[0]);
   assert.equal(sha(blocks[0]!), NETWORK_PROCESS_SHA);
   const all: string[] = [];
   const walk = async (dir: string): Promise<void> => {
@@ -200,8 +201,8 @@ test("the tool and the recipe that start programs carry one process block, the n
   }
 });
 
-test("the withholding blocks of doc_probe, doc_structure, pe_directories and pe_info are the network pack's text", async () => {
-  for (const path of [DOC_PROBE, DOC_STRUCTURE, PE_DIRECTORIES, PE_INFO]) assert.equal(sha(await block(path, "WITHHOLDING")), NETWORK_WITHHOLDING_SHA, path);
+test("the withholding blocks of doc_probe, doc_structure, pe_directories, pe_info and the capa-floss recipe are the network pack's text", async () => {
+  for (const path of [DOC_PROBE, DOC_STRUCTURE, PE_DIRECTORIES, PE_INFO, CAPA_FLOSS]) assert.equal(sha(await block(path, "WITHHOLDING")), NETWORK_WITHHOLDING_SHA, path);
 });
 
 test("the timeouts the pack sets itself are below the manifest's and the recipe's own limits", async () => {
@@ -221,4 +222,10 @@ test("the timeouts the pack sets itself are below the manifest's and the recipe'
   const budget = Number(/^BUDGET_SECONDS = (\d+)/m.exec(recipe)![1]);
   const rj = JSON.parse(await readFile(join(RE, "recipes", "static-binary", "recipe.json"), "utf8")) as Json;
   assert.ok(budget < rj.limits.seconds, `the recipe budgets ${budget} s of ${rj.limits.seconds}`);
+  const cf = await readFile(CAPA_FLOSS, "utf8");
+  const cfBudget = Number(/^BUDGET_SECONDS = (\d+)/m.exec(cf)![1]);
+  const cfj = JSON.parse(await readFile(join(RE, "recipes", "capa-floss", "recipe.json"), "utf8")) as Json;
+  assert.ok(cfBudget < cfj.limits.seconds, `capa-floss budgets ${cfBudget} s of ${cfj.limits.seconds}`);
+  const engineSeconds = [...cf.matchAll(/"seconds": (\d+)/g)].map((m) => Number(m[1]));
+  assert.ok(engineSeconds.length === 2 && engineSeconds.every((n) => n < cfBudget), "each engine's share is below the recipe's budget");
 });

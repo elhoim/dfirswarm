@@ -1,0 +1,263 @@
+/**
+ * The capa-floss recipe, against STAND-INS. capa and FLOSS are not installed in this checkout's test environment, and
+ * these tests do not pretend otherwise: each "engine" below is a shell script that prints a small JSON object of the shape the
+ * recipe reads (a `rules` mapping for capa; any object for FLOSS) or fails in one specific way. They say nothing about what the
+ * real programs print, and no case here claims they do. What the cases hold is the recipe's own contract:
+ *   - an engine that is not installed, exits non-zero, is stopped at its time limit, or prints something that is not JSON is
+ *     a named status of that engine and the recipe is partial or failed, never complete;
+ *   - the recipe's status comes from exit codes and the shape of the output, not from a non-empty file;
+ *   - no string and no matched feature is copied into coverage.json, index.tsv or matches.tsv;
+ *   - every program runs in the recipe's own process group, and a group kill or a signal ends it with what it started;
+ *   - a result an earlier run left in the directory is kept and named, never replaced.
+ */
+import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { readFile, readdir } from "node:fs/promises";
+import { join } from "node:path";
+import { test } from "node:test";
+import { RE, childrenOf, gone, pidFile, put, startDetached, stub, withCwd } from "./pack-re-harness.ts";
+import type { Json } from "./pack-re-harness.ts";
+import { buildPe } from "./pack-re-harness.ts";
+
+const RECIPE_DIR = join(RE, "recipes", "capa-floss");
+const CAPA_FLOSS = join(RECIPE_DIR, "run.py");
+const PYTHON = spawnSync("python3", ["-c", "import sys; print(sys.executable)"], { encoding: "utf8" }).stdout.trim();
+const PLANTED = "PLANTED-STRING-never-in-an-index";
+
+const CAPA_JSON = JSON.stringify({
+  meta: { version: "stand-in", analysis: { format: "pe" } },
+  rules: {
+    "create mutex": { meta: { namespace: "host-interaction/mutex", attack: [{ id: "T1000", technique: "x" }] }, matches: [[4096, { feature: PLANTED }], [4200, {}]] },
+    "other thing": { meta: { namespace: "data-manipulation/x" }, matches: { "8192": {} } },
+  },
+});
+const FLOSS_JSON = JSON.stringify({ analysis: { enable_static_strings: true }, strings: { static_strings: [PLANTED, "second"], stack_strings: [], decoded_strings: [PLANTED] } });
+
+async function engines(bin: string, o: { capa?: string | null; floss?: string | null } = {}): Promise<void> {
+  const body = (json: string): string => `if [ "$1" = "--version" ]; then echo "stand-in 0.0 (not the real program)"; exit 0; fi\ncat <<'JSON'\n${json}\nJSON\n`;
+  if (o.capa !== null) await stub(bin, "capa", o.capa ?? body(CAPA_JSON));
+  if (o.floss !== null) await stub(bin, "floss", o.floss ?? body(FLOSS_JSON));
+}
+
+function recipe(cwd: string, bin: string | null, args: string[], sample = "inputs/s.exe", extraEnv: Record<string, string> = {}): { status: number | null; stdout: string; stderr: string } {
+  const PATH = bin ? `${bin}:/usr/bin:/bin` : "/usr/bin:/bin";
+  const r = spawnSync(PYTHON, [CAPA_FLOSS, ...args.map((a) => (a === "TARGET" ? JSON.stringify({ paths: [sample] }) : a))], { cwd, encoding: "utf8", env: { ...process.env, PATH, ...extraEnv } });
+  return { status: r.status, stdout: r.stdout, stderr: r.stderr };
+}
+
+async function sample(cwd: string): Promise<void> {
+  await put(cwd, "inputs/s.exe", buildPe({}).file);
+}
+
+const coverage = async (out: string): Promise<Json> => JSON.parse(await readFile(join(out, "coverage.json"), "utf8"));
+
+test("detect: a PE and an ELF are offered; Mach-O, a Java class, a coincident MZ and a short ELF are not", async () => {
+  await withCwd(async (cwd) => {
+    const cases: Array<[string, Buffer, boolean]> = [
+      ["pe.exe", buildPe({}).file, true],
+      ["elf", Buffer.concat([Buffer.from("7f454c46020101", "hex"), Buffer.alloc(100)]), true],
+      ["macho", Buffer.concat([Buffer.from("cffaedfe", "hex"), Buffer.alloc(100)]), false],
+      ["java.class", Buffer.concat([Buffer.from("cafebabe00000034", "hex"), Buffer.alloc(100)]), false],
+      ["mz.bin", Buffer.concat([Buffer.from("MZ"), Buffer.alloc(200)]), false],
+      ["short.elf", Buffer.from("7f454c46020101", "hex"), false],
+    ];
+    for (const [name, data, applies] of cases) {
+      await put(cwd, `inputs/${name}`, data);
+      const r = recipe(cwd, null, ["detect", "--target", "TARGET"], `inputs/${name}`);
+      assert.equal(JSON.parse(r.stdout).applies, applies, name);
+      assert.equal(r.status, applies ? 0 : 1, name);
+    }
+  });
+});
+
+test("both engines ran and exited 0: complete, with each engine's argv, version output, exit code and size, and matches.tsv from the rules mapping", async () => {
+  await withCwd(async (cwd, bin) => {
+    await engines(bin);
+    await sample(cwd);
+    const out = join(cwd, "catalog");
+    const r = recipe(cwd, bin, ["run", "--target", "TARGET", "--out", out]);
+    assert.equal(r.status, 0, r.stderr + r.stdout);
+    const c = await coverage(out);
+    assert.equal(c.status, "complete", JSON.stringify(c));
+    assert.equal(c.format, "PE");
+    assert.deepEqual(c.engines.capa.argv, ["capa", "-j", "<sample>"]);
+    assert.equal(c.engines.capa.version_command.first_line, "stand-in 0.0 (not the real program)");
+    assert.equal(c.engines.capa.exit_code, 0);
+    assert.equal(c.engines.capa.rules_matched, 2);
+    assert.equal(c.engines.capa.reported_version, "stand-in");
+    assert.deepEqual(c.engines.floss.string_kinds, { static_strings: 2, stack_strings: 0, decoded_strings: 1 });
+    assert.deepEqual(c.errors, []);
+    const matches = (await readFile(join(out, "matches.tsv"), "utf8")).trim().split("\n");
+    assert.deepEqual(matches, ["rule\tnamespace\tattack_ids\tmatches", "create mutex\thost-interaction/mutex\tT1000\t2", "other thing\tdata-manipulation/x\t\t1"]);
+    // The whole output of each engine is a file exactly as the program wrote it; the indexes and the receipt copy no string.
+    assert.ok((await readFile(join(out, "capa.json"), "utf8")).includes(PLANTED));
+    assert.ok((await readFile(join(out, "floss.json"), "utf8")).includes(PLANTED));
+    for (const f of ["coverage.json", "index.tsv", "matches.tsv"]) assert.ok(!(await readFile(join(out, f), "utf8")).includes(PLANTED), `${f} copies a string`);
+    assert.deepEqual(c.sensitive_outputs, ["capa.json", "floss.json"]);
+    const index = await readFile(join(out, "index.tsv"), "utf8");
+    assert.match(index, /^capa\.json\tcapa output, whole, exactly as the program wrote it \(status complete\)$/m);
+    assert.deepEqual(JSON.parse(r.stdout), { ok: true, status: "complete", format: "PE" });
+  });
+});
+
+test("an engine that is not installed is 'unavailable', not skipped: the recipe is partial with the other engine, failed with neither", async () => {
+  await withCwd(async (cwd, bin) => {
+    await sample(cwd);
+    await engines(bin, { capa: null });
+    const out = join(cwd, "catalog");
+    const r = recipe(cwd, bin, ["run", "--target", "TARGET", "--out", out]);
+    assert.equal(r.status, 0, r.stderr + r.stdout);
+    const c = await coverage(out);
+    assert.equal(c.status, "partial");
+    assert.equal(c.engines.capa.status, "unavailable");
+    assert.equal(c.engines.capa.installed, false);
+    assert.match(c.errors.join(" "), /capa unavailable: capa is not on PATH/);
+    assert.equal(c.engines.floss.status, "complete");
+    // Neither installed.
+    const empty = join(cwd, "bin2");
+    await put(cwd, "bin2/.keep", "");
+    const out2 = join(cwd, "catalog2");
+    const r2 = recipe(cwd, empty, ["run", "--target", "TARGET", "--out", out2]);
+    assert.equal(r2.status, 2);
+    const c2 = await coverage(out2);
+    assert.equal(c2.status, "failed");
+    assert.deepEqual([c2.engines.capa.status, c2.engines.floss.status], ["unavailable", "unavailable"]);
+  });
+});
+
+test("an engine that exits non-zero, prints something that is not JSON, or prints JSON the recipe does not read, is judged by that, and its output is kept whole", async () => {
+  await withCwd(async (cwd, bin) => {
+    await sample(cwd);
+    const out = join(cwd, "c1");
+    // capa fails with stderr; floss prints text.
+    await engines(bin, { capa: 'if [ "$1" = "--version" ]; then echo v; exit 0; fi\necho "usage: capa [options]" >&2\necho \'{"rules": {}}\'\nexit 2', floss: 'if [ "$1" = "--version" ]; then echo v; exit 0; fi\necho "not json at all"' });
+    const r = recipe(cwd, bin, ["run", "--target", "TARGET", "--out", out]);
+    assert.equal(r.status, 2, "no engine gave a usable result");
+    const c = await coverage(out);
+    assert.equal(c.status, "failed");
+    assert.equal(c.engines.capa.status, "failed");
+    assert.match(c.engines.capa.reason, /exited with status 2; its stderr is kept/, "exit status wins over a JSON body");
+    assert.match(c.engines.floss.reason, /exited 0 and its output is not a readable JSON object: not JSON/);
+    assert.equal(await readFile(join(out, "capa.stderr"), "utf8"), "usage: capa [options]\n");
+    assert.equal(await readFile(join(out, "floss.json"), "utf8"), "not json at all\n");
+    assert.equal((await readdir(out)).includes("matches.tsv"), false, "no matches table from a failed engine");
+    // capa prints JSON with no rules mapping: partial, kept, and the keys it did print are named.
+    const out2 = join(cwd, "c2");
+    await engines(bin, { capa: 'if [ "$1" = "--version" ]; then echo v; exit 0; fi\necho \'{"meta": {}, "signatures": []}\'' });
+    recipe(cwd, bin, ["run", "--target", "TARGET", "--out", out2]);
+    const c2 = await coverage(out2);
+    assert.equal(c2.engines.capa.status, "partial");
+    assert.deepEqual(c2.engines.capa.keys, ["meta", "signatures"]);
+    assert.equal(c2.status, "partial");
+    assert.ok(c2.warnings.some((w: string) => /capa partial: capa's JSON has no `rules` mapping/.test(w)));
+  });
+});
+
+test("a zero exit code with an empty output is a failure, not a clean file", async () => {
+  await withCwd(async (cwd, bin) => {
+    await sample(cwd);
+    await engines(bin, { capa: 'if [ "$1" = "--version" ]; then echo v; exit 0; fi\nexit 0', floss: 'if [ "$1" = "--version" ]; then echo v; exit 0; fi\nexit 0' });
+    const out = join(cwd, "catalog");
+    recipe(cwd, bin, ["run", "--target", "TARGET", "--out", out]);
+    const c = await coverage(out);
+    assert.equal(c.status, "failed");
+    assert.match(c.engines.capa.reason, /output is not a readable JSON object/);
+  });
+});
+
+test("an engine stopped at its time limit is a failure of that engine, named, and the program and what it started are gone", async () => {
+  await withCwd(async (cwd, bin) => {
+    await sample(cwd);
+    await put(cwd, "pids/.keep", "");
+    await engines(bin, { capa: `if [ "$1" = "--version" ]; then echo v; exit 0; fi\necho $$ > "$PIDS/capa.pid"\nsleep 60 &\necho $! > "$PIDS/child.pid"\nwait`, floss: null });
+    const out = join(cwd, "catalog");
+    const r = recipe(cwd, bin, ["run", "--target", "TARGET", "--out", out, "--seconds", "3"], "inputs/s.exe", { PIDS: join(cwd, "pids") });
+    assert.equal(r.status, 2);
+    const c = await coverage(out);
+    assert.equal(c.engines.capa.status, "failed");
+    assert.equal(c.engines.capa.timed_out, true);
+    assert.match(c.engines.capa.reason, /was stopped at its time limit/);
+    assert.ok(c.limits_hit.some((l: string) => /capa was stopped at its time limit/.test(l)));
+    for (const f of ["capa.pid", "child.pid"]) assert.equal(await gone(await pidFile(join(cwd, "pids", f))), true, `${f} outlived the deadline`);
+  });
+});
+
+test("the harness kills the recipe's process group: the engine and what it started end with it; SIGTERM ends them and leaves a receipt that says the recipe was stopped", async () => {
+  await withCwd(async (cwd, bin) => {
+    await sample(cwd);
+    await put(cwd, "pids/.keep", "");
+    await engines(bin, { capa: `if [ "$1" = "--version" ]; then echo v; exit 0; fi\necho $$ > "$PIDS/capa.pid"\nsleep 60 &\necho $! > "$PIDS/child.pid"\nwait`, floss: null });
+    const out = join(cwd, "catalog");
+    const argv = ["run", "--target", JSON.stringify({ paths: [join(cwd, "inputs/s.exe")] }), "--out", out];
+    const run = startDetached(CAPA_FLOSS, cwd, {}, { PIDS: join(cwd, "pids") }, bin, argv);
+    const capa = await pidFile(join(cwd, "pids", "capa.pid"));
+    const child = await pidFile(join(cwd, "pids", "child.pid"));
+    assert.ok(childrenOf(run.pid).includes(capa), "the engine is a child of the recipe, in its group");
+    run.killGroup();
+    await run.closed;
+    assert.equal(await gone(capa), true, "the engine survived the group kill");
+    assert.equal(await gone(child), true, "what the engine started survived");
+    assert.notEqual((await coverage(out)).status, "complete", "a receipt from the first moment says the recipe did not finish");
+    // SIGTERM
+    const out2 = join(cwd, "catalog2");
+    await put(cwd, "pids/.keep", "");
+    const run2 = startDetached(CAPA_FLOSS, cwd, {}, { PIDS: join(cwd, "pids") }, bin, ["run", "--target", JSON.stringify({ paths: [join(cwd, "inputs/s.exe")] }), "--out", out2]);
+    const capa2 = await pidFile(join(cwd, "pids", "capa.pid"));
+    await new Promise((r) => setTimeout(r, 300));
+    run2.signal("SIGTERM");
+    const code = await run2.closed;
+    assert.ok(code !== 0 && code !== null);
+    assert.equal(await gone(capa2), true);
+    const c = await coverage(out2);
+    assert.ok(c.errors.some((e: string) => /stopped by signal 15/.test(e)), JSON.stringify(c.errors));
+  });
+});
+
+test("a result an earlier run left in the directory is kept and named, and the new one is written under new names", async () => {
+  await withCwd(async (cwd, bin) => {
+    await engines(bin);
+    await sample(cwd);
+    const out = join(cwd, "catalog");
+    recipe(cwd, bin, ["run", "--target", "TARGET", "--out", out]);
+    const first = await readFile(join(out, "capa.json"), "utf8");
+    recipe(cwd, bin, ["run", "--target", "TARGET", "--out", out]);
+    assert.equal(await readFile(join(out, "capa.json"), "utf8"), first, "the earlier file is untouched");
+    const files = await readdir(out);
+    assert.ok(files.includes("capa-2.json") && files.includes("floss-2.json") && files.includes("matches-2.tsv"), files.join(","));
+    const c = await coverage(out);
+    assert.equal(c.engines.capa.file, "capa-2.json");
+    assert.match(await readFile(join(out, "index.tsv"), "utf8"), /^capa\.json\tleft by an earlier run in this directory; kept, and not part of this result$/m);
+  });
+});
+
+test("a target that is not a PE or an ELF is 'unsupported' with a receipt, and no engine is run", async () => {
+  await withCwd(async (cwd, bin) => {
+    await engines(bin);
+    await put(cwd, "inputs/x.bin", Buffer.alloc(200, 7));
+    const out = join(cwd, "catalog");
+    const r = recipe(cwd, bin, ["run", "--target", "TARGET", "--out", out], "inputs/x.bin");
+    assert.equal(r.status, 2);
+    const c = await coverage(out);
+    assert.equal(c.status, "unsupported");
+    assert.deepEqual((await readdir(out)).sort(), ["coverage.json"]);
+    // bad arguments are JSON, not a trace
+    for (const args of [[], ["run"], ["run", "--target", "{}"], ["run", "--target", "TARGET", "--out", out, "--seconds", "0"], ["nonsense"]]) {
+      const bad = recipe(cwd, bin, args);
+      assert.doesNotMatch(bad.stderr, /Traceback/);
+      assert.equal(JSON.parse(bad.stdout).ok, false);
+    }
+  });
+});
+
+test("a path with a token-shaped component is withheld in the receipt", async () => {
+  await withCwd(async (cwd, bin) => {
+    await engines(bin);
+    const dir = "Zk9mQ2xW7vB3nL8pR4tY6wD1sFgHjK";
+    await put(cwd, `inputs/${dir}/s.exe`, buildPe({}).file);
+    const out = join(cwd, "catalog");
+    recipe(cwd, bin, ["run", "--target", "TARGET", "--out", out], `inputs/${dir}/s.exe`);
+    const text = await readFile(join(out, "coverage.json"), "utf8");
+    assert.ok(!text.includes(dir));
+    assert.match(JSON.parse(text).target, /^inputs\/<token-shaped text withheld 30 characters>\/s\.exe$/);
+  });
+});

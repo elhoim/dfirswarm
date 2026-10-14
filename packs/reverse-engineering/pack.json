@@ -28,7 +28,7 @@
   "checksums": {
     "sha256": {
       "LICENCE": "5b94f18424dbef1e77eda33a465e946c2c8eb715fa5236afe2c6ec6763af80d3",
-      "README.md": "f5752af6af383f05b7e58929dde93d513dbe8cf6a96bb6d906041fe0b8e8dd7f",
+      "README.md": "663f3579be620464ae523966778b3c54266920db17f1fddae6f4e87e8683357b",
       "tools/fuzzy_hash/manifest.json": "95ad584cb810bbd17112545b2faf314fe30bca784e444d9257c421b7d8cd6f60",
       "tools/fuzzy_hash/run.py": "2819935381da66752157455de3e7bc7d02f99dd4387ef2d967ae85a073fcf93b",
       "tools/pe_directories/manifest.json": "e3a3ca55f287484d0afc9dbaab55a219a544b2a26739df669753725f1c633553",
@@ -44,6 +44,8 @@
       "goals/sample-triage.md": "1ba24dbe4bdb228eef2c2740a5d187408a019c96891badf9d68ee807c8868c47",
       "recipes/static-binary/recipe.json": "f28dbe26e06cd63d5b006d3c512842381fd2b0af5f504632fb48b3efc1e077f1",
       "recipes/static-binary/run.py": "ae07a82fe4ba1a47be3b83b1b611c4f66503984f8120954eb37d472a9db6a898",
+      "recipes/capa-floss/recipe.json": "40ad841b2f2d7b786860edf579c6958ce3f445994b2706f40314ce7596b4d127",
+      "recipes/capa-floss/run.py": "90a4e146c71a41ae4aa5f9df5a8c7a4e7234c146fa295dc71f37fb91adfdab73",
       "skills/pe/signature-and-resources.md": "19bb646c0ca752bc85dba4836fe12308416f7ba70aba7f4eebab736315e09e07",
       "skills/pe/structure.md": "555340ce97d7f18ddf8de1eeeb1b1ce345c2498f4ff219004812cc98f8eafb0a",
       "skills/strings/decoding-and-similarity.md": "8eb3df8b3a24f349e6c4a2bfa0921b501ab0522db12bcdc824c1030c70c0df5d",
@@ -56,7 +58,7 @@
       "skills/documents/macros.md": "8998f0b95a0d8acc19026e4a040332b128dc9ded7323d127146df9e891aae01f",
       "skills/elf/packing-and-identity.md": "a4cfdebf3efb071edca2da1560ff2e7b015ed89d366777645b995aeb2336176a",
       "skills/elf/structure.md": "913d82302d83dc52d253971d7436811be92be563b1d47bb164abef96eda4f7aa",
-      "requires/host.json": "c9cef9f2e1f8f4970524077eb18d2f6807ca00c51a552da1faf6c69bf953ee92",
+      "requires/host.json": "35d6940ebf96fe7342b6be31f503561267f756ec91203661c0940860b0dd0171",
       "requires/python.txt": "f0f18bd3e9e860703a9a7599d84f281b999764d16f1619aeef6b89a670c5566b",
       "skills/INDEX.md": "26be19ea2e8056cc5cf05d12742ccf056ce61b6e953efd750fd547c33c3a63b5"
     }
@@ -70,6 +72,7 @@
     "pe_info"
   ],
   "recipes": [
+    "reverse-engineering/capa-floss",
     "reverse-engineering/static-binary"
   ],
   "skills": 12
