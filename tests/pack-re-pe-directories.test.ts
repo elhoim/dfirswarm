@@ -262,7 +262,10 @@ test("the debug directory: the entry types and times, the CodeView GUID, age and
     const { a, text } = await run(cwd, "g.exe", pe.file);
     assert.equal(a.status, "complete", JSON.stringify(a.problems));
     const [cv, repro, cv2] = a.debug.entries;
-    assert.deepEqual({ type: cv.type, raw: cv.time_date_stamp_raw, utc: cv.time_date_stamp_utc }, { type: "CODEVIEW", raw: 0x65000000, utc: new Date(0x65000000 * 1000).toISOString().replace(".000Z", "Z") });
+    // A REPRO entry is present: every stamp is a hash of the build, and none is rendered as a time.
+    assert.deepEqual({ type: cv.type, raw: cv.time_date_stamp_raw, utc: cv.time_date_stamp_utc }, { type: "CODEVIEW", raw: 0x65000000, utc: null });
+    assert.match(cv.time_date_stamp_note, /REPRO entry is present/);
+    assert.equal(a.debug.repro, true);
     assert.deepEqual({ sig: cv.codeview.signature, guid: cv.codeview.guid, age: cv.codeview.age, path: cv.codeview.pdb_path, len: cv.codeview.pdb_path_length }, { sig: "RSDS", guid: "12345678-9ABC-DEF0-0123-456789ABCDEF", age: 7, path: "C:\\src\\app\\release\\app.pdb".replace(/\\/g, "\\\\"), len: 26 });
     assert.equal(repro.type, "REPRO");
     assert.ok(!text.includes(TOKEN));

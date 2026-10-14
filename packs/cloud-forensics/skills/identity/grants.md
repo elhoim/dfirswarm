@@ -1,7 +1,7 @@
 ---
 id: identity/grants
-title: Consents, application credentials and mailbox rules as durable state
-when: Evidence holds application consents, delegations, mailbox rules or account changes that can outlive a session.
+title: Consents, app credentials and mailbox rules as durable state
+when: Consents, delegations, mailbox rules or account changes that can outlive a session.
 needs: [logs/what-exists]
 tools: [ual_parse, signin_analyse]
 requires_host: []

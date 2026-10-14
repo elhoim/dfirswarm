@@ -325,7 +325,8 @@ GRACE_SECONDS = 10                        # a program that outlives its own cloc
 VERSION_SECONDS = 20
 MAX_JSON = 512 << 20
 TSV_ROWS = 1_000_000
-EARLIER = re.compile(r"^(capa|floss)(-\d+)?\.(json|stderr)$|^matches(-\d+)?\.tsv$")
+EARLIER = re.compile(r"^(capa|floss|coverage)(-\d+)?\.(json|stderr)$|^(matches|index)(-\d+)?\.tsv$")
+FLOSS_KINDS = ("static_strings", "stack_strings", "tight_strings", "decoded_strings")
 # The engines are programs the pack declares and does not ship; this recipe runs them if they are on PATH and says what they said.
 ENGINES = [
     {"id": "capa", "program": "capa", "argv": ["-j"], "seconds": 1500,
@@ -451,12 +452,30 @@ def judge(engine, rc, timed_out, doc, why):
         for key in ("version",):
             if isinstance(meta.get(key), str):
                 details["reported_version"] = scrub(cell(meta[key][:60]), "text")
+        # Which rule set matched is part of the result: capa names it (meta.analysis.rules, the rule paths it loaded).
+        analysis = meta.get("analysis") if isinstance(meta.get("analysis"), dict) else {}
+        rule_sets = analysis.get("rules")
+        if isinstance(rule_sets, list):
+            details["rule_sets"] = [shown_path(cell(str(r))) for r in rule_sets[:20]]
+            if len(rule_sets) > 20:
+                details["rule_sets_total"] = len(rule_sets)
+        else:
+            details["rule_sets"] = None
+            details["rule_sets_note"] = "capa's JSON does not name the rule set it loaded (meta.analysis.rules)"
         return "complete", "capa exited 0 and wrote a JSON object with a rules mapping", details
     strings = doc.get("strings")
     details = {"keys": sorted(str(k) for k in doc)[:20]}
-    if isinstance(strings, dict):
-        details["string_kinds"] = {str(k): (len(v) if isinstance(v, list) else None) for k, v in list(strings.items())[:20]}
-    return "complete", "floss exited 0 and wrote a JSON object", details
+    analysis = doc.get("analysis") if isinstance(doc.get("analysis"), dict) else {}
+    flags = {str(k): v for k, v in analysis.items() if str(k).startswith("enable_") and isinstance(v, bool)}
+    if flags:
+        details["analysis_enabled"] = dict(sorted(flags.items()))
+    if not isinstance(strings, dict):
+        return "partial", "floss's JSON has no `strings` mapping, so no string kind was counted; the whole output is kept", details
+    details["string_kinds"] = {str(k): (len(v) if isinstance(v, list) else None) for k, v in list(strings.items())[:20]}
+    known = [k for k in FLOSS_KINDS if isinstance(strings.get(k), list)]
+    if not known:
+        return "partial", "floss's `strings` mapping holds none of the string kinds this recipe reads (%s) as a list; the whole output is kept" % ", ".join(FLOSS_KINDS), details
+    return "complete", "floss exited 0 and wrote a JSON object whose `strings` mapping holds %s" % ", ".join(known), details
 
 
 def write_matches(doc, path):
@@ -532,18 +551,36 @@ def assemble(state):
     return status, coverage, lines
 
 
+def receipt_names(out_dir):
+    """coverage.json and index.tsv, or, when an earlier run left either in this directory, new names for this run's: the earlier run's
+    receipt describes the files it wrote, which are still there, and is never replaced."""
+    if not any(os.path.lexists(os.path.join(out_dir, n)) for n in ("coverage.json", "index.tsv")):
+        return "coverage.json", "index.tsv"
+    return new_name(out_dir, "coverage", ".json"), new_name(out_dir, "index", ".tsv")
+
+
+def write_receipt(out_dir, name, text):
+    """`text` into this run's own receipt file, whole or not at all: a temporary file beside it, then a rename over it."""
+    import tempfile
+    fd, tmp = tempfile.mkstemp(prefix=".receipt-", suffix=".tmp", dir=out_dir)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, os.path.join(out_dir, name))
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def write_results(state):
     status, coverage, lines = assemble(state)
     out_dir = state["out_dir"]
-    for name in ("coverage.json", "index.tsv"):
-        tmp = os.path.join(out_dir, name + ".new")
-        with open(tmp, "w", encoding="utf-8") as fh:
-            if name == "coverage.json":
-                json.dump(coverage, fh, indent=2)
-                fh.write("\n")
-            else:
-                fh.write("".join(l + "\n" for l in lines))
-        os.replace(tmp, os.path.join(out_dir, name))
+    write_receipt(out_dir, state["coverage_name"], json.dumps(coverage, indent=2) + "\n")
+    write_receipt(out_dir, state["index_name"], "".join(l + "\n" for l in lines))
     return status
 
 
@@ -552,6 +589,7 @@ def run(path, out_dir, fmt, budget):
     started = time.monotonic()
     sample = os.path.abspath(path)
     state = {"out_dir": out_dir, "fmt": fmt, "shown": shown_path(path), "errors": [], "engines": {}, "matches": None}
+    state["coverage_name"], state["index_name"] = receipt_names(out_dir)
 
     def last_word(signum):
         state["errors"].append("the recipe was stopped by signal %d; the program that was running was ended" % signum)
@@ -573,6 +611,17 @@ def run(path, out_dir, fmt, budget):
         state["errors"].pop()
 
     unfinished()
+    try:
+        run_engines(state, sample, budget, started, unfinished)
+    except Exception as exc:  # noqa: BLE001 - the receipt says what stopped the recipe, never "started and has not finished"
+        state["errors"].append("the recipe stopped on an unexpected error (%s): the engines' statuses are as far as it got" % scrub(describe(exc), "text"))
+    final = write_results(state)
+    print(json.dumps({"ok": final == "complete", "status": final, "format": fmt, "coverage": state["coverage_name"], "index": state["index_name"]}))
+    return 0 if final in ("complete", "partial") else 2
+
+
+def run_engines(state, sample, budget, started, unfinished):
+    out_dir = state["out_dir"]
     for engine in ENGINES:
         e = state["engines"][engine["id"]]
         exe = shutil.which(engine["program"])
@@ -593,7 +642,19 @@ def run(path, out_dir, fmt, budget):
         e["file"] = new_name(out_dir, engine["id"], ".json")
         e["stderr_file"] = new_name(out_dir, engine["id"], ".stderr")
         e["seconds"] = seconds
-        rc, timed_out = run_to_files([exe] + engine["argv"] + [sample], os.path.join(out_dir, e["file"]), os.path.join(out_dir, e["stderr_file"]), seconds)
+        try:
+            rc, timed_out = run_to_files([exe] + engine["argv"] + [sample], os.path.join(out_dir, e["file"]), os.path.join(out_dir, e["stderr_file"]), seconds)
+        except OSError as exc:
+            # A program on PATH that cannot be executed (not a program, a missing interpreter, no permission: ENOEXEC, ENOENT, EACCES)
+            # is a named failure of that engine; the recipe goes on and its receipt says so.
+            e.update({"status": "failed", "reason": "%s could not be started: %s" % (engine["program"], scrub(describe(exc), "text")), "exit_code": None, "timed_out": False,
+                      "start_error": errno.errorcode.get(exc.errno, "") if exc.errno else type(exc).__name__})
+            if drop_if_empty(os.path.join(out_dir, e["stderr_file"])):
+                e["stderr_file"] = None
+            if drop_if_empty(os.path.join(out_dir, e["file"])):
+                e["file"] = None
+            unfinished()
+            continue
         e["exit_code"], e["timed_out"] = rc, timed_out
         doc, why = read_json(os.path.join(out_dir, e["file"]))
         status, reason, details = judge(engine, rc, timed_out, doc, why)
@@ -607,9 +668,6 @@ def run(path, out_dir, fmt, budget):
         if drop_if_empty(os.path.join(out_dir, e["stderr_file"])):
             e["stderr_file"] = None
         unfinished()
-    final = write_results(state)
-    print(json.dumps({"ok": final == "complete", "status": final, "format": fmt}))
-    return 0 if final in ("complete", "partial") else 2
 
 
 def drop_if_empty(path):
@@ -647,9 +705,11 @@ def main(argv):
         return 2
     if fmt is None:
         os.makedirs(args["--out"], exist_ok=True)
-        with open(os.path.join(args["--out"], "coverage.json"), "w", encoding="utf-8") as fh:
-            json.dump({"recipe": "capa-floss", "status": "unsupported", "why": why, "limits_hit": [], "errors": []}, fh, indent=2)
-        print(json.dumps({"ok": False, "status": "unsupported", "why": why}))
+        name, index = receipt_names(args["--out"])
+        if index != "index.tsv":
+            os.unlink(os.path.join(args["--out"], index))
+        write_receipt(args["--out"], name, json.dumps({"recipe": "capa-floss", "status": "unsupported", "why": why, "limits_hit": [], "errors": []}, indent=2))
+        print(json.dumps({"ok": False, "status": "unsupported", "why": why, "coverage": name}))
         return 2
     budget = BUDGET_SECONDS
     if "--seconds" in args:

@@ -53,13 +53,14 @@ MAX_SECONDS = 110
 MAX_SECTIONS = 65535
 MAX_EXPORTS = 1_000_000
 MAX_DELAY_DESCRIPTORS = 4096
-MAX_DELAY_FUNCTIONS = 1_000_000
+MAX_DELAY_FUNCTIONS = 1_000_000          # names and ordinals listed over all the delay-load descriptors together
 MAX_RESOURCES = 200000
 MAX_TLS_CALLBACKS = 1024
 MAX_DEBUG_ENTRIES = 1024
 MAX_PROBLEMS = 100
 NAME_CAP = 4096
 MAX_STREAM_HEADERS = 4096
+MAX_VERSION_STRINGS = 4096
 OVERLAP_LOOK_BACK = 64
 MAX_EXTRACT = 64
 HEAD_BYTES = 1024
@@ -335,7 +336,8 @@ class LosslessPage:
             self.not_written = "the file could not be created in %s (%s)" % (self.dir, describe(exc))
 
     def _write(self, row):
-        self._out.write(json.dumps(row, default=str))
+        # A row in the file is withheld exactly as the same row is in the answer: the file is read by the same agent.
+        self._out.write(json.dumps(shown_answer(row), default=str))
         self._out.write("\n")
 
     def add(self, row):
@@ -659,6 +661,7 @@ class Extractor:
         try:
             with os.fdopen(fd, "wb") as fh:
                 fh.write(data)
+            out["sha256"] = hashlib.sha256(data).hexdigest()
         except OSError as exc:
             self.ctx.problem("resource row %d: writing failed (%s)" % (row, describe(exc)))
             out["status"] = "failed"
@@ -777,6 +780,7 @@ def parse_headers(img, ctx):
     table_at = opt_at + opt_size
     maps = []
     sections = []
+    unaligned = []
     for i in range(min(nsec, MAX_SECTIONS)):
         at = table_at + i * 40
         if at + 40 > img.size:
@@ -784,9 +788,17 @@ def parse_headers(img, ctx):
             break
         name = bytes(img.mm[at:at + 8]).rstrip(b"\x00").decode("utf-8", "replace")
         vsize, vaddr, rawsize, rawptr, _a, _b, _c, _d, flags = struct.unpack_from("<IIIIIIHHI", img.mm, at + 8)
+        if rawptr & 0x1FF:
+            # The loader reads a section from PointerToRawData rounded down to 512 bytes, whatever the file alignment says: the
+            # bytes mapped here are the ones it maps, and the header's own value is kept in the answer.
+            unaligned.append({"section": text_of(name), "pointer_to_raw_data": rawptr, "read_from": rawptr & ~0x1FF})
+            rawptr &= ~0x1FF
         sections.append((name, vaddr, vsize, rawsize, rawptr, flags))
         if rawsize and rawptr < img.size:
             maps.append((vaddr, min(vsize or rawsize, rawsize), rawptr, min(img.size, rawptr + rawsize), len(maps)))
+    if unaligned:
+        out["sections_read_from_rounded_offsets"] = unaligned
+        out["sections_note"] = "a section's PointerToRawData is rounded down to 512 bytes, as the Windows loader does: an RVA is read from the bytes the loader maps"
     if size_of_headers:
         maps.append((0, size_of_headers, 0, min(size_of_headers, img.size), len(maps)))
     by_start = sorted(maps)
@@ -895,6 +907,10 @@ def read_exports(img, pe, ctx, out):
 # --- delay imports ------------------------------------------------------------------------------------------------------------
 
 def read_delay_imports(img, pe, ctx, out):
+    """Every delay-load descriptor and its name table. The tables are read once each: a descriptor whose table starts inside one
+    already read (two descriptors sharing a table, or overlapping ones) is said and not listed again, a table stops where the next
+    one already read begins, and all the descriptors together list at most MAX_DELAY_FUNCTIONS rows, so the table file is bounded
+    by the bytes of the file and not by descriptors times entries."""
     rva, size = pe["dirs"]["delay_import"]
     start = pe["to_range"](rva)
     if start is None:
@@ -904,7 +920,9 @@ def read_delay_imports(img, pe, ctx, out):
     wide, base = pe["wide"], pe["image_base"]
     table = ctx.page("delay_imports")
     libs, functions, ordinal_only = [], 0, 0
-    for d in range(MAX_DELAY_DESCRIPTORS):
+    walked = []                     # (first file offset, end file offset, descriptor) of each name table read, sorted
+    capped = False
+    for d in range(MAX_DELAY_DESCRIPTORS + 1):
         at = start[0] + d * 32
         if at + 32 > start[1] or ctx.expired("the delay-load descriptors"):
             if at + 32 > start[1]:
@@ -912,6 +930,9 @@ def read_delay_imports(img, pe, ctx, out):
             break
         attrs, name_rva, _mod, _iat, int_rva, _bound, _unload, _stamp = struct.unpack_from("<IIIIIIII", img.mm, at)
         if attrs == 0 and name_rva == 0 and int_rva == 0:
+            break
+        if d == MAX_DELAY_DESCRIPTORS:
+            ctx.limit_hit("the delay-load directory holds more than %d descriptors: the first %d are listed" % (MAX_DELAY_DESCRIPTORS, MAX_DELAY_DESCRIPTORS))
             break
         # Attribute bit 0: the fields are RVAs. Without it they are virtual addresses (an old layout).
         va_form = not (attrs & 1)
@@ -925,12 +946,30 @@ def read_delay_imports(img, pe, ctx, out):
         if int_rva and thunks is None:
             ctx.problem("delay-load descriptor %d: its name table (0x%x) is not backed by file bytes" % (d, int_rva))
         elif thunks:
-            for k in range(MAX_DELAY_FUNCTIONS):
-                p = thunks[0] + k * step
+            starts = [w[0] for w in walked]
+            i = bisect.bisect_right(starts, thunks[0]) - 1
+            if i >= 0 and walked[i][0] <= thunks[0] < walked[i][1]:
+                lib["name_table_shared_with"] = walked[i][2]
+                ctx.problem("delay-load descriptor %d: its name table starts inside the one descriptor %d uses: it is not listed again" % (d, walked[i][2]))
+                libs.append(lib)
+                continue
+            stop_at = starts[i + 1] if i + 1 < len(starts) else thunks[1]
+            p = thunks[0]
+            k = 0
+            while True:
                 if p + step > thunks[1]:
                     ctx.problem("delay-load descriptor %d: the name table runs off its section without a terminating zero" % d)
                     break
+                if p >= stop_at:
+                    lib["name_table_runs_into"] = next(w[2] for w in walked if w[0] == stop_at)
+                    ctx.problem("delay-load descriptor %d: its name table runs into the one descriptor %d uses: the rest is not listed again" % (d, lib["name_table_runs_into"]))
+                    break
+                if functions >= MAX_DELAY_FUNCTIONS:
+                    capped = True
+                    break
                 (entry,) = struct.unpack_from("<Q" if wide else "<I", img.mm, p)
+                p += step
+                k += 1
                 if entry == 0:
                     break
                 ordinal_flag = 1 << (63 if wide else 31)
@@ -949,7 +988,12 @@ def read_delay_imports(img, pe, ctx, out):
                 lib["functions"] += 1
                 if k % 4096 == 0 and ctx.expired("the delay-load names"):
                     break
+            bisect.insort(walked, (thunks[0], max(p, thunks[0] + 1), d))
         libs.append(lib)
+        if capped:
+            break
+    if capped:
+        ctx.limit_hit("the delay-load name tables list more than %d functions together: the first %d are listed" % (MAX_DELAY_FUNCTIONS, MAX_DELAY_FUNCTIONS))
     out["delay_imports"] = {"libraries": libs, "functions_listed": functions, "ordinal_only": ordinal_only, "table": "delay_imports",
                             "note": "a delay-load import names what the loader is asked to resolve on first use, not a call that was made"}
 
@@ -1108,6 +1152,13 @@ def read_version(img, row, ctx):
     size = min(row["size"], ctx.cfg["max_stream_bytes"])
     data = bytes(img.mm[row["file_offset"]:row["file_offset"] + size])
     info = {"status": "read"}
+    if row["size"] > size:
+        info["status"] = "partial"
+        ctx.limit_hit("resource row %d: the version resource is %d bytes, over max_stream_bytes (%d): its first %d bytes were read" % (row["row"], row["size"], size, size))
+
+    def broken(where, at):
+        info["status"] = "partial"
+        ctx.problem("resource row %d: a version block in %s at offset %d has a length that does not fit (under 6 bytes, or past its parent): the rest of it was not read" % (row["row"], where, at))
 
     def block(pos, end):
         """(key, value_length, type, value_start, children_start, next_pos) of the block at pos."""
@@ -1142,10 +1193,16 @@ def read_version(img, row, ctx):
     strings, other = {}, []
     pos = val
     guard = 0
-    while pos < end and guard < 64:
+    while pos < end:
+        if guard >= 64:
+            info["status"] = "partial"
+            ctx.limit_hit("resource row %d: the version information holds more than 64 top-level blocks: the first 64 were read" % row["row"])
+            break
         guard += 1
         b = block(pos, end)
         if b is None:
+            if end - pos >= 6 and any(data[pos:end]):
+                broken("VS_VERSION_INFO", pos)
             break
         bkey, _bv, _bt, bval, bend = b
         if bkey == "StringFileInfo":
@@ -1153,13 +1210,22 @@ def read_version(img, row, ctx):
             while tpos < bend:
                 t = block(tpos, bend)
                 if t is None:
+                    if bend - tpos >= 6 and any(data[tpos:bend]):
+                        broken("StringFileInfo", tpos)
                     break
                 tkey, _tv, _tt, tval, tend = t
                 table = {}
-                spos = tval
-                while spos < tend and len(table) < 256:
+                spos, count = tval, 0
+                while spos < tend:
+                    if count >= MAX_VERSION_STRINGS:
+                        info["status"] = "partial"
+                        ctx.limit_hit("resource row %d: a version string table holds more than %d strings: the first %d were read" % (row["row"], MAX_VERSION_STRINGS, MAX_VERSION_STRINGS))
+                        break
+                    count += 1
                     s = block(spos, tend)
                     if s is None:
+                        if tend - spos >= 6 and any(data[spos:tend]):
+                            broken("a StringTable", spos)
                         break
                     skey, svlen, _st, sval, send = s
                     raw = data[sval:min(send, sval + 2 * svlen)] if svlen else b""
@@ -1177,6 +1243,9 @@ def read_version(img, row, ctx):
         pos = (bend + 3) & ~3
     info["string_tables"] = strings
     info["other_keys"] = other[:50]
+    if len(other) > 50:
+        info["other_keys_total"] = len(other)
+        ctx.limit_hit("resource row %d: the version string tables hold %d keys beyond the well-known ones: the first 50 are named" % (row["row"], len(other)))
     info["note"] = "version strings are claims the file makes about itself: an editable company name, original file name and version are not evidence of origin"
     return info
 
@@ -1203,6 +1272,9 @@ def read_manifest(img, row, ctx):
     except xml.parsers.expat.ExpatError as exc:
         info["status"] = "not_well_formed"
         ctx.problem("resource row %d: the manifest is not well-formed XML (%s)" % (row["row"], xml.parsers.expat.ErrorString(exc.code)))
+    except (LookupError, ValueError) as exc:
+        info["status"] = "encoding_not_readable"
+        ctx.problem("resource row %d: the manifest declares an encoding the XML reader cannot decode (%s): it was not parsed" % (row["row"], type(exc).__name__))
     return info
 
 
@@ -1261,6 +1333,8 @@ def read_clr(img, pe, ctx, out):
     _flags, nstreams = struct.unpack_from("<HH", img.mm, p)
     p += 4
     streams = []
+    if nstreams > MAX_STREAM_HEADERS:
+        ctx.limit_hit("the CLR metadata declares %d stream headers: the first %d are read" % (nstreams, MAX_STREAM_HEADERS))
     for i in range(min(nstreams, MAX_STREAM_HEADERS)):
         if p + 9 > end:
             ctx.problem("the CLR metadata declares %d stream headers and the root holds %d" % (nstreams, i))
@@ -1290,6 +1364,8 @@ def read_debug(img, pe, ctx, out):
         out["debug"] = {"status": "unreadable"}
         return
     count = min(size // 28, MAX_DEBUG_ENTRIES)
+    if size // 28 > MAX_DEBUG_ENTRIES:
+        ctx.limit_hit("the debug directory declares %d entries: the first %d are read" % (size // 28, MAX_DEBUG_ENTRIES))
     if size % 28:
         ctx.problem("the debug directory size (%d) is not a whole number of 28-byte entries" % size)
     entries = []
@@ -1320,6 +1396,17 @@ def read_debug(img, pe, ctx, out):
                 row["codeview"] = {"signature": sig.hex(), "note": "a CodeView record this tool does not read (it reads RSDS)"}
         entries.append(row)
     out["debug"] = {"entries": entries}
+    if any(e["type_raw"] == 16 for e in entries):
+        # A REPRO entry says the build is reproducible: the linker writes a hash of the build into the time stamps, so none of
+        # them is a time (the COFF header's, the export directory's, each debug entry's).
+        for e in entries:
+            e["time_date_stamp_utc"] = None
+            e["time_date_stamp_note"] = "not a time: a REPRO entry is present, and the stamp is a hash of the build"
+        out["debug"]["repro"] = True
+        out["debug"]["note"] = "a REPRO debug entry is present: the time stamps of this file are build hashes, not times"
+        if isinstance(out.get("exports"), dict) and "time_date_stamp_utc" in out["exports"]:
+            out["exports"]["time_date_stamp_utc"] = None
+            out["exports"]["time_date_stamp_note"] = "not a time: a REPRO entry is present, and the stamp is a hash of the build"
 
 
 # --- Rich header --------------------------------------------------------------------------------------------------------------
@@ -1347,7 +1434,10 @@ def read_rich(img, pe, ctx, out):
     if len(body) % 2:
         ctx.problem("the Rich header holds an odd number of words after its padding")
         body = body[:-1]
-    entries = [{"product_id": body[i] >> 16, "build": body[i] & 0xFFFF, "count": body[i + 1]} for i in range(0, len(body), 2)][:512]
+    entries = [{"product_id": body[i] >> 16, "build": body[i] & 0xFFFF, "count": body[i + 1]} for i in range(0, len(body), 2)]
+    if len(entries) > 512:
+        ctx.limit_hit("the Rich header holds %d entries: the first 512 are listed" % len(entries))
+        entries = entries[:512]
     out["rich_header"] = {"status": "decoded", "key": hex(key), "offset": 0x80 + start * 4, "entries": entries,
                           "note": "raw numbers from the header, decoded with the stored key; not validated, and not mapped to a product or a compiler here. A toolchain lead, not a clock"}
 
@@ -1375,7 +1465,7 @@ def file_problem(path):
     return "not a regular file (%s)" % next((n for t, n in kinds if t(mode)), "a special file")
 
 
-SAFE_KEYS = {"head_hex", "tool", "guid", "all_results", "withheld_names_file", "first_four_bytes", "signature"}
+SAFE_KEYS = {"head_hex", "tool", "guid", "all_results", "withheld_names_file", "first_four_bytes", "signature", "sha256"}
 
 
 def shown_answer(value, key=""):
@@ -1459,7 +1549,7 @@ def main():
                 img = Image(mm)
                 if img.mm[:2] != b"MZ":
                     values.close()
-                    fail("this is not a PE file (no MZ header)", status="unsupported", path=path, head_hex=bytes(img.mm[:8]).hex())
+                    fail("this is not a PE file (no MZ header)", status="unsupported", path=path, head_hex=bytes(img.mm[:4]).hex())
                 try:
                     body, pe = parse_headers(img, ctx)
                 except Stop as exc:

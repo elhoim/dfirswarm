@@ -96,7 +96,7 @@ test("both engines ran and exited 0: complete, with each engine's argv, version 
     assert.deepEqual(c.sensitive_outputs, ["capa.json", "floss.json"]);
     const index = await readFile(join(out, "index.tsv"), "utf8");
     assert.match(index, /^capa\.json\tcapa output, whole, exactly as the program wrote it \(status complete\)$/m);
-    assert.deepEqual(JSON.parse(r.stdout), { ok: true, status: "complete", format: "PE" });
+    assert.deepEqual(JSON.parse(r.stdout), { ok: true, status: "complete", format: "PE", coverage: "coverage.json", index: "index.tsv" });
   });
 });
 
@@ -213,20 +213,68 @@ test("the harness kills the recipe's process group: the engine and what it start
   });
 });
 
-test("a result an earlier run left in the directory is kept and named, and the new one is written under new names", async () => {
+test("a result an earlier run left in the directory is kept and named, and the new one is written under new names: its receipt too (lesson 5)", async () => {
   await withCwd(async (cwd, bin) => {
     await engines(bin);
     await sample(cwd);
     const out = join(cwd, "catalog");
     recipe(cwd, bin, ["run", "--target", "TARGET", "--out", out]);
     const first = await readFile(join(out, "capa.json"), "utf8");
-    recipe(cwd, bin, ["run", "--target", "TARGET", "--out", out]);
+    const receipt = await readFile(join(out, "coverage.json"), "utf8");
+    const index = await readFile(join(out, "index.tsv"), "utf8");
+    const again = recipe(cwd, bin, ["run", "--target", "TARGET", "--out", out]);
     assert.equal(await readFile(join(out, "capa.json"), "utf8"), first, "the earlier file is untouched");
+    assert.equal(await readFile(join(out, "coverage.json"), "utf8"), receipt, "the earlier receipt is untouched");
+    assert.equal(await readFile(join(out, "index.tsv"), "utf8"), index, "the earlier index is untouched");
     const files = await readdir(out);
-    assert.ok(files.includes("capa-2.json") && files.includes("floss-2.json") && files.includes("matches-2.tsv"), files.join(","));
-    const c = await coverage(out);
+    assert.ok(files.includes("capa-2.json") && files.includes("floss-2.json") && files.includes("matches-2.tsv") && files.includes("coverage-2.json") && files.includes("index-2.tsv"), files.join(","));
+    assert.deepEqual({ coverage: JSON.parse(again.stdout).coverage, index: JSON.parse(again.stdout).index }, { coverage: "coverage-2.json", index: "index-2.tsv" });
+    const c = JSON.parse(await readFile(join(out, "coverage-2.json"), "utf8"));
     assert.equal(c.engines.capa.file, "capa-2.json");
-    assert.match(await readFile(join(out, "index.tsv"), "utf8"), /^capa\.json\tleft by an earlier run in this directory; kept, and not part of this result$/m);
+    const index2 = await readFile(join(out, "index-2.tsv"), "utf8");
+    for (const name of ["capa.json", "coverage.json", "index.tsv"]) assert.match(index2, new RegExp(`^${name.replace(".", "\\.")}\tleft by an earlier run in this directory; kept, and not part of this result$`, "m"));
+  });
+});
+
+test("an engine on PATH that cannot be executed (ENOEXEC) is a named failure of that engine, and the receipt is final, never 'started and has not finished'", async () => {
+  await withCwd(async (cwd, bin) => {
+    await sample(cwd);
+    await engines(bin);
+    // Not a program: no #! line and no executable format, so execve answers ENOEXEC.
+    await put(cwd, "bin/capa", Buffer.from([0x00, 0x01, 0x02, 0x03, 0x7f, 0x45, 0x00]), 0o755);
+    const out = join(cwd, "catalog");
+    const r = recipe(cwd, bin, ["run", "--target", "TARGET", "--out", out]);
+    assert.doesNotMatch(r.stderr, /Traceback/);
+    assert.equal(r.status, 0, "floss gave a usable result: partial");
+    const c = await coverage(out);
+    assert.equal(c.status, "partial");
+    assert.equal(c.engines.capa.status, "failed");
+    assert.match(c.engines.capa.reason, /capa could not be started: (OSError|PermissionError).*(Exec format error|ENOEXEC|Permission denied)/);
+    assert.equal(c.engines.floss.status, "complete");
+    assert.ok(!c.errors.some((e: string) => /has not finished/.test(e)), JSON.stringify(c.errors));
+  });
+});
+
+test("floss JSON with no strings mapping of the kinds the recipe reads is partial, not complete; the rule set and floss's analysis flags are recorded", async () => {
+  await withCwd(async (cwd, bin) => {
+    await sample(cwd);
+    const capa = JSON.stringify({ meta: { version: "stand-in", analysis: { rules: ["/opt/capa-rules"] } }, rules: {} });
+    const say = (json: string): string => `if [ "$1" = "--version" ]; then echo v; exit 0; fi\ncat <<'JSON'\n${json}\nJSON\n`;
+    await engines(bin, { capa: say(capa), floss: say('{"error": "x"}') });
+    const out = join(cwd, "catalog");
+    recipe(cwd, bin, ["run", "--target", "TARGET", "--out", out]);
+    const c = await coverage(out);
+    assert.equal(c.engines.floss.status, "partial");
+    assert.match(c.engines.floss.reason, /no `strings` mapping/);
+    assert.equal(c.status, "partial");
+    assert.deepEqual(c.engines.capa.rule_sets, ["/opt/capa-rules"]);
+    const out2 = join(cwd, "catalog2");
+    await engines(bin, { floss: say(JSON.stringify({ analysis: { enable_static_strings: true, enable_stack_strings: false }, strings: { other: [] } })) });
+    recipe(cwd, bin, ["run", "--target", "TARGET", "--out", out2]);
+    const c2 = await coverage(out2);
+    assert.equal(c2.engines.floss.status, "partial");
+    assert.match(c2.engines.floss.reason, /holds none of the string kinds this recipe reads/);
+    assert.deepEqual(c2.engines.floss.analysis_enabled, { enable_stack_strings: false, enable_static_strings: true });
   });
 });
 

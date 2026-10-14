@@ -210,3 +210,16 @@ test("the goal's extraction-kind check is one awk, not a pipe: a long answer 1 c
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test("the split pass: apps/fragments is a second-level leaf reached by a pointer, not by needs, so no chain of the pack passes 1,900 tokens", async () => {
+  const skills = await load(SKILLS);
+  assert.deepEqual(skills.get("apps/fragments")!.meta.needs, []);
+  const all = new Map([...(await load(BASE_SKILLS)), ...(await load(MACOS_SKILLS)), ...skills]);
+  for (const id of skills.keys()) {
+    const seen = new Set<string>();
+    const walk = (x: string): void => { if (seen.has(x)) return; seen.add(x); for (const n of ((all.get(x)?.meta.needs as string[]) ?? [])) walk(n); };
+    walk(id);
+    const total = [...seen].reduce((n, i) => n + TOKENS(all.get(i)?.text ?? ""), 0);
+    assert.ok(total <= 1900, `${id} chain is ${Math.round(total)} tokens`);
+  }
+});
