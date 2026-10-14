@@ -1,12 +1,14 @@
 ---
 id: triage/no-framework
-title: What a memory image gives you when no framework can read it
-when: The selected job image lacks a usable framework, its symbols or dependencies, or does not support the capture; or you want an answer before you configure one.
-needs: [triage/what-you-have, credentials/material]
-tools: [mem_carve, ioc_scan, sig_carve, chunk_needles]
+title: A memory image no framework can read
+when: The job image lacks a usable framework, symbols or dependencies; or you want an answer first.
+needs: []
+tools: [ioc_scan, chunk_needles, mem_carve]
 requires_host: [strings, yara]
 mentions: [regkv, evtx_carve, mam_scan, prefetch_mam]
 ---
+
+Use when the framework, its translation layer, its symbols or a plugin dependency is missing and you must examine the bytes that can be read without it. Not for an image Volatility reads (`triage/volatility`).
 
 When the framework, its translation layer, its symbols or a plugin dependency is
 missing, examine the bytes that can be read without it, and record the specific
@@ -17,22 +19,8 @@ conclusions are limited to the representation actually searched.
 Start here, in this order:
 
 1. **`mem_carve`** finds configured byte signatures in the file and can save a
-   fixed-size slice at each: registry hives (`regf`), event log chunks and files,
-   Prefetch records (plain `SCCA`, and compressed `MAM\x04`), PE headers, SQLite
-   databases, MFT and index records, zip, PDF and property lists. It does not
-   rebuild a fragmented file, decompress hibernation data or parse paging structures.
-   Each hit has a `signature_offset`, an `object_offset` where the structure starts
-   (a plain Prefetch record starts four bytes before `SCCA`; null when that is not
-   established) and a `validation` (header plausible, implausible, truncated or only
-   a signature). Offsets are offsets in the file, and the offsets are the whole
-   provenance: there is no path. Record the signatures selected, the interval
-   searched, the hit count, the extraction limit (default 25, earliest hits first)
-   and how many hits were not extracted. A slice can start inside a structure, end
-   before it finishes or run into unrelated adjacent pages: check its start, its
-   declared length and its internal consistency before you choose a parser, and
-   treat a successful parse as evidence about the records it validated.
-   `sig_carve` reports a signature the same way: for a plain Prefetch record, where
-   `SCCA` is, not where the structure begins.
+   fixed-size slice at each. Only if you run it: `triage/carve-signatures` says what
+   each hit carries and what to record.
 2. **Hand each slice to its own parser, if the pack that has it is loaded.** The
    Windows Forensics pack's `regkv` reads a hive, `evtx_carve` an event log chunk,
    `mam_scan` and `prefetch_mam` a Prefetch record (a plain one must begin at its
@@ -53,13 +41,7 @@ anything that needs the page tables walked. Do not approximate those by pattern
 matching and present the result as a process list: say that no framework was
 available, and name what you did instead.
 
-**The page file and the hibernation file are memory too, and different.** Inventory
-`pagefile.sys`, swap and `hiberfil.sys` separately, with their collection times and
-the system they came from. Literal scanning finds bytes stored directly in a paging
-file; it cannot assign them to a process, a virtual address or a time. A hibernation
-file may need a supported decoder before its saved memory can be searched. Record the
-areas that were unsupported, compressed, encrypted, missing or not processed, and
-remember that what these hold can describe a different time from the RAM capture.
+Only if the evidence includes `pagefile.sys`, swap or `hiberfil.sys`: `triage/paging-files`.
 
 **Sensitive output.** An extracted slice can be a credential store (a SAM or
 SECURITY hive, a browser database), and the bytes around a match can be a secret: run
