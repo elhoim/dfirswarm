@@ -390,3 +390,16 @@ test("P3 under a Python older than 3.11 (no possessive quantifiers) the call is 
   assert.equal(a.status, "failed");
   assert.match(a.error, /^doc_structure needs Python 3\.11 or later .*: this is Python 3\.\d+; nothing was read$/);
 });
+
+test("a member name the directory marks UTF-8 that is not UTF-8 is read as CP437 and said: the other members are listed, the archive is not lost", async () => {
+  await withCwd(async (cwd) => {
+    const zip = buildZip([{ name: "[Content_Types].xml", data: Buffer.from("<Types/>") }, { name: "Xord/document.xml", data: Buffer.from("<a/>") }, { name: "word/b.xml", data: Buffer.from("<b/>") }]);
+    for (let at = zip.indexOf(Buffer.from("Xord/")); at >= 0; at = zip.indexOf(Buffer.from("Xord/"), at + 1)) zip[at] = 0xa0;   // local and central name
+    await put(cwd, "work/u.docx", zip);
+    const a = body(await tool(DOC_STRUCTURE, cwd, { path: "work/u.docx" }));
+    assert.equal(a.status, "partial");
+    assert.equal(a.members.listed, 3);
+    assert.ok(a.problems.some((p: string) => /^1 member name marked UTF-8 \(general purpose flag bit 11\) is not UTF-8: read as CP437/.test(p)), JSON.stringify(a.problems));
+    assert.ok(!a.problems.some((p: string) => /local header that disagrees/.test(p)), JSON.stringify(a.problems));
+  });
+});

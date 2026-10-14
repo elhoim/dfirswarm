@@ -910,8 +910,9 @@ class Window(io.RawIOBase):
     """The first `limit` bytes of a file, with the end record's comment length read as 0: the ZIP reader sees the archive up to
     the end record the tool chose, so that it lists the directory the tool counted and not one hidden in a comment."""
 
-    def __init__(self, fh, limit, zero_at):
+    def __init__(self, fh, limit, zero_at, patches=None):
         self._fh, self._limit, self._zero_at, self._pos = fh, limit, zero_at, 0
+        self._patches = patches or {}     # file offset -> the byte the reader sees there instead
 
     def readable(self):
         return True
@@ -936,6 +937,9 @@ class Window(io.RawIOBase):
         for at in (self._zero_at, self._zero_at + 1):
             if self._pos <= at < self._pos + len(data):
                 data[at - self._pos] = 0
+        for at, value in self._patches.items():
+            if self._pos <= at < self._pos + len(data):
+                data[at - self._pos] = value
         buffer[:len(data)] = data
         self._pos += len(data)
         return len(data)
@@ -954,7 +958,9 @@ def local_header_differs(fh, info, size):
     if sig != 0x04034B50:
         return ["no local header signature at its offset"]
     raw = fh.read(nlen)
-    name = raw.decode("utf-8", "surrogateescape") if flags & 0x800 else raw.decode("cp437")
+    # decoded as the central entry's name was (a UTF-8 flag on a name that is not UTF-8 is read as CP437 there), so that one spelling of
+    # the bytes is one name
+    name = raw.decode("utf-8", "surrogateescape") if info.flag_bits & 0x800 else raw.decode("cp437")
     out = []
     if name != info.filename and name.replace("\\", "/") != info.filename:
         out.append("name")
@@ -2498,7 +2504,26 @@ def _probe_zip(path, size, ctx, extractor, out):
             members["not_attempted"] = total
             out["coverage"] = {"structures_read": ["the end of central directory record"], "structures_not_read": ZIP_READ + ZIP_NOT_READ}
             return out
-        window = Window(fh, end["eocd_at"] + 22, end["eocd_at"] + 20)
+        # A name the directory marks UTF-8 (flag bit 11) that is not UTF-8 would stop the standard library's reader for the whole archive:
+        # that member's flag is shown to the reader without the bit, so its name is read as CP437, every other member is listed, and it is said.
+        patches, not_utf8 = {}, 0
+        fh.seek(end["cd_off"])
+        cd = fh.read(min(end["cd_size"], MAX_DIRECTORY_BYTES))
+        at = 0
+        while at + 46 <= len(cd) and cd[at:at + 4] == b"PK\x01\x02":
+            flags = struct.unpack_from("<H", cd, at + 8)[0]
+            nlen, xlen, clen = struct.unpack_from("<HHH", cd, at + 28)
+            if flags & 0x800:
+                try:
+                    cd[at + 46:at + 46 + nlen].decode("utf-8")
+                except UnicodeDecodeError:
+                    patches[end["cd_off"] + at + 9] = (flags & ~0x800) >> 8
+                    not_utf8 += 1
+            at += 46 + nlen + xlen + clen
+        if not_utf8:
+            ctx.problem("%d member name%s marked UTF-8 (general purpose flag bit 11) %s not UTF-8: read as CP437, so the name shown is not the one a "
+                        "UTF-8 reader shows" % (not_utf8, "" if not_utf8 == 1 else "s", "is" if not_utf8 == 1 else "are"))
+        window = Window(fh, end["eocd_at"] + 22, end["eocd_at"] + 20, patches)
         try:
             archive = zipfile.ZipFile(io.BufferedReader(window))
         except Exception as exc:
