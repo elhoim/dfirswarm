@@ -139,7 +139,7 @@ test("the rules the pack is held to are in the skills that carry them", async ()
   assert.match(body("triage/volatility"), /vol --offline -vv -f IMAGE windows\.info/);
   assert.match(body("triage/volatility"), /Do not switch off `--offline`, and fetch nothing/);
   assert.match(body("triage/volatility"), /Never copy a symbol\s+table into a job's output/);
-  assert.match(body("triage/volatility-catalogue"), /you do not run that fallback/);
+  assert.match(body("triage/volatility-catalogue"), /you do not run a fallback that fetches/);
   // Version facts are dated and name the version they hold for.
   for (const id of ["triage/volatility-plugins", "triage/volatility-symbols", "patterns/yara", "processes/injection", "triage/container-details"]) {
     assert.match(body(id), /as of October\s+2026/, `${id} dates its version facts`);

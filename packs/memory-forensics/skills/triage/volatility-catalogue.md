@@ -12,13 +12,13 @@ Use only if the kickoff's catalogue is on and the base pack's `memory-windows` r
 **The kickoff's catalogue.** When it is on, the base pack's `memory-windows` recipe
 has run `windows.info` and a baseline of plugins: read its receipts, and
 `catalog/missing.json`, which names the kernel when the image lacks its table. Its
-detection is a bounded Windows probe, not a check of every platform or plugin. The
-recipe is being changed in the base pack's own change: its run path currently
-retries without `--offline` when the image lacks the table, which only a job whose
-network allows it can reach, and its coverage then says the symbols were fetched.
-This skill's rule stands either way: you do not run that fallback. Inspect the
-executed command and the coverage text before you describe any recipe output as
-offline, and say when it was not.
+detection is a bounded Windows probe, not a check of every platform or plugin. As of
+this revision the recipe runs Volatility with `--offline` at every step and, when the
+image lacks the table, stops after `windows.info` with coverage partial; it fetches
+nothing (its `run.sh` and `recipe.json` say so). This skill's rule stands either way:
+you do not run a fallback that fetches. Inspect the executed command (`steps.jsonl`)
+and the coverage text before you describe any recipe output as offline, and say when
+it was not.
 
 **Does not show.** That a baseline of plugins is the whole examination; that a recipe's output was offline without its executed command and coverage text saying so; that a Windows probe checked another platform.
 
