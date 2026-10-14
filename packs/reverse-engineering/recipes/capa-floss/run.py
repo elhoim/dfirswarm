@@ -187,6 +187,103 @@ def cell(value):
 # END SHARED WITHHOLDING
 
 
+# BEGIN SHARED LINEAR SPANS
+# The same text is in doc_structure, pe_directories and the capa-floss recipe (tests/pack-re-process.test.ts holds the copies
+# equal). The shared block's token_spans grows each flagged span across `/` by searching the whole text before it again for
+# every piece it takes, which costs about the cube of the text's length: a name of 13 KB of `/`-joined tokens took 44 s. The
+# block is not edited (its copies are held equal to the network pack's), so this tool binds the same function, computed in
+# linear time: the same spans for every text, which tests/pack-re-canary-harness.test.ts holds against the block's own
+# token_spans on generated text. Making the block itself linear, for every tool that carries it, is a follow-up.
+_NAME_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_+%-")
+_shared_token_spans = token_spans
+
+
+def _linear_token_spans(text):
+    spans = [m.span() for m in _PREFIXED.finditer(text)]
+    for m in _RUN.finditer(text):
+        if _token_run(m.group()):
+            spans.append(m.span())
+    for m in _SLASHED.finditer(text):
+        run = m.group()
+        if "/" in run and sum(1 for p in run.split("/") if _randomish(p)) >= 3 and re.search(r"[0-9+]", run):
+            spans.append(m.span())
+    if not spans:
+        return []
+    n = len(text)
+    run_start, run_end = [0] * n, [0] * n
+    i = 0
+    while i < n:
+        if text[i] in _NAME_CHARS:
+            j = i
+            while j < n and text[j] in _NAME_CHARS:
+                j += 1
+            for k in range(i, j):
+                run_start[k], run_end[k] = i, j
+            i = j
+        else:
+            i += 1
+    left, right = {}, {}
+
+    def piece_left(start):
+        # what re.search(r"[A-Za-z0-9_+%-]+$", text[:start - 1]) finds: `$` also matches before a final line break
+        last = start - 2
+        if text[last] in _NAME_CHARS:
+            return run_start[last], last + 1
+        if text[last] == "\n" and last >= 1 and text[last - 1] in _NAME_CHARS:
+            return run_start[last - 1], last
+        return None
+
+    def grow_left(start):
+        path = []
+        while True:
+            if start in left:
+                start = left[start]
+                break
+            if not (start > 1 and text[start - 1] == "/"):
+                break
+            found = piece_left(start)
+            if found is None or not _randomish(text[found[0]:found[1]]):
+                break
+            path.append(start)
+            start = found[0]
+        for p in path:
+            left[p] = start
+        return start
+
+    def grow_right(end):
+        path = []
+        while True:
+            if end in right:
+                end = right[end]
+                break
+            if not (end < n - 1 and text[end] == "/") or text[end + 1] not in _NAME_CHARS:
+                break
+            stop = run_end[end + 1]
+            pads = 0
+            while pads < 2 and stop + pads < n and text[stop + pads] == "=":
+                pads += 1
+            if not _randomish(text[end + 1:stop + pads]):
+                break
+            path.append(end)
+            end = stop + pads
+        for p in path:
+            right[p] = end
+        return end
+
+    grown = sorted((grow_left(start), grow_right(end)) for start, end in spans)
+    merged = []
+    for start, end in grown:
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+token_spans = _linear_token_spans
+# END SHARED LINEAR SPANS
+
+
 # BEGIN SHARED PROCESS
 # The same text is in pcap_extract, zeek_run, suricata_run and the network-capture recipe; tests/pack-network-process.test.ts
 # holds the copies equal. A program an engine tool runs is started in THIS tool's process group, never in a session of
@@ -415,10 +512,20 @@ def version_of(exe, out_dir):
                 pass
 
 
+def shown_text(text, keep):
+    """A string an engine printed, withheld whole and then cut to `keep` characters: a cut before the withholding could leave the head of
+    a token too short to be recognised as one."""
+    return scrub(cell(text), "text")[:keep]
+
+
+def shown_key(key):
+    return scrub(cell(str(key)), "names")
+
+
 def first_line(raw):
     for line in raw.decode("utf-8", "replace").splitlines():
         if line.strip():
-            return scrub(cell(line.strip()[:200]), "text")
+            return shown_text(line.strip(), 200)
     return None
 
 
@@ -446,12 +553,12 @@ def judge(engine, rc, timed_out, doc, why):
     if engine["id"] == "capa":
         rules = doc.get("rules")
         if not isinstance(rules, dict):
-            return "partial", "capa's JSON has no `rules` mapping, so no match was listed; the whole output is kept", {"keys": sorted(str(k) for k in doc)[:20]}
+            return "partial", "capa's JSON has no `rules` mapping, so no match was listed; the whole output is kept", {"keys": sorted(shown_key(k) for k in doc)[:20]}
         meta = doc.get("meta") if isinstance(doc.get("meta"), dict) else {}
-        details = {"rules_matched": len(rules), "meta_keys": sorted(str(k) for k in meta)[:20]}
+        details = {"rules_matched": len(rules), "meta_keys": sorted(shown_key(k) for k in meta)[:20]}
         for key in ("version",):
             if isinstance(meta.get(key), str):
-                details["reported_version"] = scrub(cell(meta[key][:60]), "text")
+                details["reported_version"] = shown_text(meta[key], 60)
         # Which rule set matched is part of the result: capa names it (meta.analysis.rules, the rule paths it loaded).
         analysis = meta.get("analysis") if isinstance(meta.get("analysis"), dict) else {}
         rule_sets = analysis.get("rules")
@@ -464,14 +571,14 @@ def judge(engine, rc, timed_out, doc, why):
             details["rule_sets_note"] = "capa's JSON does not name the rule set it loaded (meta.analysis.rules)"
         return "complete", "capa exited 0 and wrote a JSON object with a rules mapping", details
     strings = doc.get("strings")
-    details = {"keys": sorted(str(k) for k in doc)[:20]}
+    details = {"keys": sorted(shown_key(k) for k in doc)[:20]}
     analysis = doc.get("analysis") if isinstance(doc.get("analysis"), dict) else {}
-    flags = {str(k): v for k, v in analysis.items() if str(k).startswith("enable_") and isinstance(v, bool)}
+    flags = {shown_key(k): v for k, v in analysis.items() if str(k).startswith("enable_") and isinstance(v, bool)}
     if flags:
         details["analysis_enabled"] = dict(sorted(flags.items()))
     if not isinstance(strings, dict):
         return "partial", "floss's JSON has no `strings` mapping, so no string kind was counted; the whole output is kept", details
-    details["string_kinds"] = {str(k): (len(v) if isinstance(v, list) else None) for k, v in list(strings.items())[:20]}
+    details["string_kinds"] = {shown_key(k): (len(v) if isinstance(v, list) else None) for k, v in list(strings.items())[:20]}
     known = [k for k in FLOSS_KINDS if isinstance(strings.get(k), list)]
     if not known:
         return "partial", "floss's `strings` mapping holds none of the string kinds this recipe reads (%s) as a list; the whole output is kept" % ", ".join(FLOSS_KINDS), details
@@ -538,6 +645,9 @@ def assemble(state):
                 lines.append("%s\t%s" % (name, what))
     if state.get("matches") and os.path.isfile(os.path.join(out_dir, state["matches"])):
         lines.append("%s\tcapa rules that matched: name, namespace, ATT&CK ids, match count (no feature or string)" % state["matches"])
+    # This run's own receipt is this run's: it is named as such and never as a file an earlier run left.
+    lines.append("%s\tthis run's receipt: the status of each engine, what was and was not covered, and the files of this run" % state["coverage_name"])
+    lines.append("%s\tthis run's index of its files (this file)" % state["index_name"])
     listed = {l.split("\t", 1)[0] for l in lines}
     try:
         present = sorted(os.listdir(out_dir))
