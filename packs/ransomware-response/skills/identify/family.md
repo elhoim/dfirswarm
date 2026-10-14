@@ -2,10 +2,12 @@
 id: identify/family
 title: Identifying a ransomware family without overstating attribution
 when: Artefacts may support a family classification or a public recovery option.
-needs: [scope/first-hour]
+needs: []
 tools: [ransom_note_scan, encrypted_survey, file_type]
-requires_host: [yara]
+requires_host: []
 ---
+
+Use when artefacts may support a family classification. Not for samples.
 
 Keep family, variant, campaign, affiliate and real-world actor apart: evidence that
 supports one label may not support the next. A family name is not needed to preserve
@@ -41,29 +43,7 @@ it did not select. Repeated tail bytes can be padding, an ordinary format traile
 duplicated content: its `shared_tail_suffix` is an observation until validated
 references and independent files show it discriminates.
 
-**Examine a surviving sample statically.** Keep its source and hash. With `yara`
-and a ruleset the case supplies, record the engine version, the ruleset's source,
-revision and hash, the rules that matched and where. A generic packer or shared-library
-rule does not identify a ransomware family. Do not execute recovered code. If the
-reverse-engineering pack is loaded (it shares the `re` image profile; that is not a
-dependency), its skills take the sample from there; otherwise record the limit.
-
-**Keep behavioural attribution qualified.** Deployment tools, exclusions and the order
-of operations can support a campaign hypothesis; they are shared across actors and
-change. Do not name an affiliate from generic behaviour. State what would separate the
-strongest alternative.
-
-**Check public recovery resources through the operator.** Ask for dated material from
-the original law-enforcement or vendor publisher and from public catalogues such as
-No More Ransom. Browsing a catalogue is not uploading a note or an encrypted sample to
-an identification service: do not upload evidence or victim identifiers without
-explicit case authority. Identification needs no payment and no contact with the
-adversary. For a candidate decryptor record the publisher, exact version, where and
-when it was obtained, the integrity and authenticity checks, the variants it supports,
-the key it needs and its known limits. A matching family name does not show
-compatibility; `recovery/what-is-possible` covers testing on copies. If current
-references cannot be reached, write "public decryptor availability not verified as of
-this date", not "no decryptor exists".
+Only if a sample survives, behaviour is attributed or you check public decryptors: `identify/samples-and-decryptors`.
 
 **Sensitive output.** `ransom_note_scan` reaches values that can carry access: run it
 as a job with `secret_output: true`, cite a value by note id and offset, and never

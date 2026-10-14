@@ -528,22 +528,22 @@ result.
 ## 7. The packs in this repository
 
 Twelve, all under the same AGPL-3.0-or-later as the harness, in `packs/`:
-162 skills, 72 tools and 14 goal templates. Every one of them is sealed,
+199 skills, 72 tools and 14 goal templates. Every one of them is sealed,
 checksummed, and installs and verifies in the test suite.
 
 | Pack | Skills | Tools | Goals | What it is for |
 | --- | --- | --- | --- | --- |
-| `computer-forensics-base` | 11 | 14 | — | the method true of any platform; everything else depends on it |
+| `computer-forensics-base` | 25 | 14 | — | the method true of any platform; everything else depends on it |
 | `windows-forensics` | 52 | 20 | 3 | ten artefact families, from `$MFT` to what anti-forensics leaves behind |
 | `linux-forensics` | 10 | 6 | 2 | auth logs, the journal, accounts, systemd and cron, ext4, containers |
 | `macos-forensics` | 8 | 4 | 1 | property lists, the unified log, FSEvents, KnowledgeC, APFS |
 | `mobile-forensics` | 10 | 3 | 1 | iOS and Android extractions, app databases, protobuf |
-| `memory-forensics` | 9 | 3 | 1 | containers, what works with no framework, injection, credentials |
+| `memory-forensics` | 19 | 3 | 1 | containers, what works with no framework, injection, credentials |
 | `network-forensics` | 12 | 6 | 1 | captures, sessions, DNS and TLS metadata, beacons, exfiltration |
 | `reverse-engineering` | 12 | 6 | 1 | static triage of a binary or a document, under quarantine |
-| `encrypted-containers` | 5 | 3 | 1 | which scheme, which protectors, and where the key already is |
+| `encrypted-containers` | 11 | 3 | 1 | which scheme, which protectors, and where the key already is |
 | `cloud-forensics` | 9 | 3 | 1 | Microsoft 365, Entra, AWS, Workspace, and the tokens behind them |
-| `ransomware-response` | 7 | 2 | 1 | scoping, recovery impairment, family candidates and recovery validation, each with its limits |
+| `ransomware-response` | 17 | 2 | 1 | scoping, recovery impairment, family candidates and recovery validation, each with its limits |
 | `triage-collection` | 14 | 2 | 1 | a collector's output, which is how most cases arrive |
 
     scripts/pack.sh install packs/computer-forensics-base

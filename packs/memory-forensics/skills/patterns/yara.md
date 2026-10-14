@@ -1,11 +1,13 @@
 ---
 id: patterns/yara
-title: YARA over files and reconstructed memory regions
-when: You have case rules or a precise byte pattern to test against a memory image or a dumped process region.
-needs: [strings/discipline, triage/volatility, credentials/material]
+title: YARA over an image or a dumped region
+when: You have case rules or a precise byte pattern to test against an image or a dumped process region.
+needs: []
 tools: []
 requires_host: [yara, vol]
 ---
+
+Use when you hold case rules or a byte pattern to test against an image or a dumped region. Not for a verdict.
 
 Run scans as jobs, with their outputs under `$OUT`, and keep the whole result and
 stderr in the job. Record the rule file's source, version, licence and sha256 (a rule

@@ -1,0 +1,39 @@
+---
+id: keys/other-sources
+title: Password stores, memory, escrow and shell history
+when: Key material may sit in a store, keychain, memory image, escrow record or shell history.
+needs: []
+tools: []
+requires_host: []
+---
+
+Use only if the key may sit in a password store, a memory image, an escrow record or shell history. Not for the order of search or the authority (`keys/where-they-hide`).
+
+Browser password stores, password managers and keychains are protected by the
+account's own material, and this pack provides no reader for them. Record that the
+store exists, where, and that it was not examined; use one only where the case
+supplies the material and the authority. A credential found there is an indicator,
+not a credential to try: never test it against a live service, and do not read its
+presence as reuse on the encrypted object.
+
+A memory image, page file or hibernation file may hold material for a volume that
+was mounted at capture. Say when and how it was captured and what it covers: a
+mounted volume at one time does not put a key in a later capture. If the
+memory-forensics pack is loaded, its `acquire/images` skill covers capture;
+otherwise state the limit.
+
+Escrow (a directory service, a cloud identity, a fleet manager) is requested as a
+scoped export through its authorised custodian. Match the device, volume and
+protector identifiers the record gives against the volume's metadata; record the
+retrieval time, the source and any rotation history. Do not use found credentials
+to sign in to any of these.
+
+Shell history and configuration may hold a password given on a command line.
+Retention, shell settings, session length and redaction decide what survives, so
+"no match" is a search result (which file, which period), not proof that none was
+used.
+
+**Does not show.** That a credential found in a store is reusable on the encrypted object; that a volume mounted at one time puts a key in a later capture; that "no match" in shell history means no password was used.
+
+Record: for a store, where it is and that it was not examined; for a capture, when and how it was taken and what it covers; for escrow, the custodian, the retrieval time, the source and any rotation history.
+Sensitive output: a credential found in any of these is an indicator, never a credential to try; cite its locator, never its value (`keys/where-they-hide`).

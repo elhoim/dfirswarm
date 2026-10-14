@@ -2,10 +2,12 @@
 id: volumes/luks-filevault
 title: Choosing the LUKS or FileVault examination route
 when: A Linux or Apple volume appears encrypted.
-needs: [identify/headers]
+needs: []
 tools: [crypto_id]
-requires_host: [cryptsetup, fvdeinfo, fsapfsinfo]
+requires_host: [cryptsetup]
 ---
+
+Use when a Linux or Apple volume appears encrypted and you choose the route. Not for the detail of an Apple volume (`volumes/filevault-apfs`).
 
 LUKS and FileVault are different routes with different limits. Identify the format
 before choosing a reader (`crypto_id` gives a lead, with its next reader), and keep
@@ -29,21 +31,7 @@ can preserve an older unlock path. A region with no signature and high entropy d
 not tell detached-header LUKS, plain dm-crypt, VeraCrypt, other ciphertext,
 compressed or random data apart.
 
-**FileVault and APFS.** Say which layout you have. Use `fvdeinfo` (libfvde) for the
-Core Storage layout that legacy FileVault 2 used; this pack does not establish that
-the build in the image reads an APFS volume, so test it on the object, and where it
-fails on one, call that a tool limit, not a finding about the volume. For an APFS container `fsapfsinfo` (libfsapfs) lists the volumes under the
-limits its build documents (the macOS pack's `filesystem/apfs` states them, if that
-pack is loaded). Which volume is encrypted, and how, is read by a reader validated
-for that layout, or on an authorised macOS examination host: record the Mac model,
-the processor and security hardware, the OS build and how the data was acquired.
-
-Do not assume a user password or a recovery key makes a raw image readable away from
-the original hardware. A personal recovery key, an institutional recovery mechanism,
-an authorised management-system escrow record and account-assisted recovery are
-different routes; which applies depends on hardware and configuration. The login
-keychain and the volume are separate protected objects: opening the volume does not
-show that every keychain item can be decrypted.
+Only for an Apple volume (Core Storage or APFS): `volumes/filevault-apfs`.
 
 **Does not show.** Who added a slot or when; that a slot opens the data; that no usable
 key exists; anything about an APFS volume's encryption from a reader that does not
