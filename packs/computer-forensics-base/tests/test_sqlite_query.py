@@ -5,6 +5,7 @@ output), the WAL's expected frame count is worked out from the file's size and t
 documented frame layout, and the BLOB's digest from hashlib.
 """
 import base64
+import collections
 import hashlib
 import json
 import os
@@ -358,7 +359,8 @@ class SqliteQueryValues(Case):
         self.assertEqual(stat.S_IMODE(os.stat(values_path).st_mode), 0o600)
         lines, end = self.values_lines(out)
         self.assertEqual(len(lines), 3 + 2 + 2)
-        self.assertEqual(end, {"end": True, "complete": True, "rows_read": 3, "cells_written": 7, "stopped": None, "sqlite_message": None})
+        self.assertEqual(end, {"end": True, "complete": True, "rows_read": 3, "cells_written": 7, "cells_with_a_value": 7,
+                               "cells_not_exported": {}, "stopped": None, "error_class": None, "sqlite_message": None})
         by = {(l["rowid"], l["column"]): l for l in lines}
         self.assertEqual(by[(1, "note")]["value"], TEXT_CANARY)
         self.assertEqual(base64.b64decode(by[(1, "secret")]["value"]["blob_b64"]), BLOB_CANARY)
@@ -637,9 +639,11 @@ class SqliteQueryValuesReview(Case):
         proc = self.run_limited({"db_path": db, "table": "cookies", "write_values": True}, env, 4096)
         self.assertNotIn("Traceback", proc.stderr)
         self.assertEqual(proc.stderr, "")
-        self.assertEqual(proc.returncode, 0, proc.stdout[-500:])
+        self.assertEqual(proc.returncode, 1, proc.stdout[-500:])
         j = json.loads(proc.stdout)
         self.assertIs(j["complete"], False)
+        self.assertIs(j["ok"], False, "an export that stopped before its end is not ok")
+        self.assertEqual(j["reason"], "values_file_error")
         self.assertIn("EFBIG", j["values_file_error"])
         self.assertIn("no end line", j["values_file_error"])
         self.assertIn("partial", j["values_file_state"])
@@ -671,12 +675,13 @@ class SqliteQueryValuesReview(Case):
         self.assertEqual(r.code, 0, r.stdout)
         self.assertEqual([x["cells"] for x in r.json["rows"]], [["text:%d" % len(secret), "unreadable"], ["text:5", "unreadable"]])
         self.assertEqual(r.json["cells_not_exported"]["cells"], {"unreadable": 2})
-        self.assertRegex(r.json["cells_not_exported"]["first"][0]["error"], r"^OperationalError")
+        self.assertNotIn("error", r.json["cells_not_exported"]["first"][0], "the class can depend on the message: values file only")
         self.assertIs(r.json["complete"], False)
         lines, end = self.values_lines(out)
         by = {(l["n"], l["column"]): l for l in lines}
         self.assertEqual(by[(1, "secret")]["value"], secret)
         self.assertIn(secret, by[(1, "j")]["sqlite_message"], "the message is kept in the sealed file")
+        self.assertRegex(by[(1, "j")]["error_class"], r"^OperationalError")
         self.assertEqual(by[(1, "j")]["not_exported"], "unreadable")
         self.assertIs(end["complete"], False)
         # A table none of whose cells can be computed stops the export: the message is still not printed.
@@ -785,6 +790,438 @@ class SqliteQueryValuesReview(Case):
             # Some SQLite builds cannot start the module under the read-only authorizer (fts5 on Debian's 3.40): a named state.
             self.assertEqual(r.json["reason"], "virtual_table_unsupported", r.stdout)
             self.assertEqual(r.stderr, "")
+
+
+def load_tool():
+    """run.py as a module, for the parts of it a test reads directly (the statement it runs, how it reads an error)."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("sqlite_query_tool", tool_path("sqlite_query"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def in_process(snippet_body, args, env, cwd):
+    """The tool run as a module with `snippet_body` applied first (m is the module), the way the harness runs it otherwise."""
+    snippet = ("import importlib.util, sys, os, errno; spec = importlib.util.spec_from_file_location('sq', sys.argv[1]); "
+               "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)\n" + snippet_body + "\nm.main()")
+    e = dict(os.environ)
+    for k in ("JOB_ID", "OUT", "AGENT_ID"):
+        e.pop(k, None)
+    e.update(env)
+    return subprocess.run([sys.executable, "-c", snippet, tool_path("sqlite_query")], cwd=cwd, env=e, capture_output=True, text=True,
+                          input=json.dumps(args), timeout=120)
+
+
+# Values whose orders all differ: by pin, by card (binary and without regard to case), by note, and as inserted.
+MATRIX_ROWS = [(771203, "card-B", "n-q"), (482915, "card-a", "n-z"), (905517, "CARD-c", "n-a"), (613377, "card-D", "n-m")]
+# table name -> (CREATE, expected table_kind, expected n_ranks)
+MATRIX_TABLES = {
+    "rowid": ("create table t(pin INTEGER, card TEXT, note TEXT)", "rowid", []),
+    "alias": ("create table t(pin INTEGER PRIMARY KEY, card TEXT, note TEXT)", "alias", ["pin"]),
+    "alias_tcons": ("create table t(pin integer, card TEXT, note TEXT, primary key(pin))", "alias", ["pin"]),
+    "alias_strict": ("create table t(pin INTEGER PRIMARY KEY, card TEXT, note TEXT) strict", "alias", ["pin"]),
+    "ipk_desc": ("create table t(pin INTEGER PRIMARY KEY DESC, card TEXT, note TEXT)", "rowid", []),
+    "int_pk": ("create table t(pin INT PRIMARY KEY, card TEXT, note TEXT)", "rowid", []),
+    "wr_text": ("create table t(pin INTEGER, card TEXT PRIMARY KEY, note TEXT) without rowid", "without_rowid", ["card"]),
+    "wr_int": ("create table t(pin INTEGER PRIMARY KEY, card TEXT, note TEXT) without rowid", "without_rowid", ["pin"]),
+    "wr_desc": ("create table t(pin INTEGER, card TEXT, note TEXT, primary key(card desc)) without rowid", "without_rowid", ["card"]),
+    "wr_nocase": ("create table t(pin INTEGER, card TEXT COLLATE NOCASE PRIMARY KEY, note TEXT) without rowid", "without_rowid", ["card"]),
+    "wr_composite": ("create table t(pin INTEGER, card TEXT, note TEXT, primary key(note, pin)) without rowid", "without_rowid", ["note", "pin"]),
+    "wr_strict": ("create table t(pin INTEGER, card TEXT PRIMARY KEY, note TEXT) strict, without rowid", "without_rowid", ["card"]),
+    "wr_shadowed": ("create table t(rowid TEXT, oid TEXT, _rowid_ TEXT, pin INTEGER, card TEXT PRIMARY KEY, note TEXT) without rowid",
+                    "without_rowid", ["card"]),
+    "shadowed": ("create table t(rowid TEXT, oid TEXT, _rowid_ TEXT, pin INTEGER, card TEXT, note TEXT)", "shadowed", []),
+    "shadowed_alias": ("create table t(rowid INTEGER PRIMARY KEY, oid TEXT, _rowid_ TEXT, pin INTEGER, card TEXT, note TEXT)", "shadowed", ["rowid"]),
+}
+MATRIX_INDEXES = {
+    "none": [],
+    "pin": ["create index ixp on t(pin)"],
+    "card_pin": ["create index ixc on t(card, pin)"],
+    "pin_card": ["create index ixpc on t(pin, card)"],
+    "card_desc": ["create index ixd on t(card desc, pin)"],
+    "note_unique": ["create unique index ixn on t(note)"],
+    "expression": ["create index ixe on t(length(card), pin)"],
+    "partial": ["create index ixw on t(pin) where pin > 0"],
+}
+
+
+class SqliteQueryValuesDelta(Case):
+    """The delta review of #144 (findings A, B, C and the P3s): each test fails on the tool as it was at 5acefe58 (PACK_DIR pointed
+    at a copy of it). Truth comes from SQLite itself: a table scanned before any index exists, rowid = key, exception codes."""
+
+    def job(self, name, job_id):
+        out = self.path(name)
+        os.makedirs(out, exist_ok=True)
+        return out, {"JOB_ID": job_id, "OUT": out}
+
+    def export(self, db, table, env, **kw):
+        return run_tool("sqlite_query", dict({"db_path": db, "table": table, "write_values": True}, **kw), self.dir, env=env)
+
+    def make(self, name, statements, rows=()):
+        path = self.path("inputs", name)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        if os.path.exists(path):
+            os.unlink(path)
+        conn = sqlite3.connect(path)
+        for st in statements:
+            conn.execute(st)
+        for st, params in rows:
+            conn.execute(st, params)
+        conn.commit()
+        conn.close()
+        return path
+
+    def values_lines(self, out):
+        lines = [json.loads(l) for l in self.read(os.path.join(out, "sqlite-query-values.jsonl")).splitlines()]
+        end = lines[-1] if lines and lines[-1].get("end") is True else None
+        return (lines[:-1] if end else lines), end
+
+    def locator_rows(self, out, answer):
+        return [json.loads(l) for l in self.read(os.path.join(out, "tool-output", os.path.basename(answer["locators_file"]))).splitlines()[1:]]
+
+    def with_generated(self, db, expr, name="h"):
+        conn = sqlite3.connect(db)
+        conn.execute("ALTER TABLE t ADD COLUMN %s TEXT GENERATED ALWAYS AS (%s) VIRTUAL" % (name, expr))
+        conn.commit()
+        conn.close()
+        return db
+
+    # --- A: the order of the rows, and the cells of one row --------------------------------------------------------------
+
+    def test_a_without_rowid_table_is_ordered_by_its_key_whatever_its_columns_are_named(self):
+        # Columns named rowid, oid and _rowid_ made the old tool call a WITHOUT ROWID table `shadowed` and read it with no ORDER BY:
+        # SQLite then reads it through the covering index on pin, and n ranked the secret pins.
+        db = self.make("wrs.db", ["create table t(rowid TEXT, oid TEXT, _rowid_ TEXT, pin INTEGER, card TEXT PRIMARY KEY) WITHOUT ROWID",
+                                  "create index ixp on t(pin)"],
+                       [("insert into t values(?, ?, ?, ?, ?)", ("r%d" % i, "o%d" % i, "u%d" % i, pin, card))
+                        for i, (pin, card, _note) in enumerate(MATRIX_ROWS)])
+        out, env = self.job("o", "j000300")
+        r = self.export(db, "t", env, columns=["pin"])
+        self.assertEqual(r.code, 0, r.stdout)
+        self.assertEqual((r.json["table_kind"], r.json["n_ranks"]), ("without_rowid", ["card"]))
+        lines, _end = self.values_lines(out)
+        by_card = [pin for pin, _card, _n in sorted(MATRIX_ROWS, key=lambda x: x[1])]   # binary order of the key
+        self.assertEqual([l["value"] for l in lines], by_card, "the rows come in primary-key order, never the index's (the pins')")
+        self.assertNotEqual(by_card, sorted(by_card))
+
+    def test_the_cells_of_a_row_read_in_parts_are_always_one_rows(self):
+        # The old tool read a failing row a column at a time, each query free to take its own covering index: one exported row
+        # held cells of three rows, and k2's values were never exported.
+        db = self.make("stitch.db", ["create table t(rowid TEXT, oid TEXT, _rowid_ TEXT, k TEXT PRIMARY KEY, a TEXT, b TEXT, s TEXT) WITHOUT ROWID",
+                                     "create index ia on t(a)", "create index ib on t(b)"],
+                       [("insert into t values('r', 'o', 'u', ?, ?, ?, ?)", row) for row in
+                        (("k1", "a-zulu", "b-mike", '{"x": 1}'), ("k2", "a-alfa", "b-zulu", "not json"), ("k3", "a-mike", "b-alfa", '{"x": 3}'))])
+        self.with_generated(db, "json_extract(s, '$.x')", "g")
+        out, env = self.job("o", "j000301")
+        r = self.export(db, "t", env, columns=["k", "a", "b", "g"])
+        self.assertEqual(r.code, 0, r.stdout)
+        lines, _end = self.values_lines(out)
+        rows = {}
+        for l in lines:
+            rows.setdefault(l["n"], {})[l["column"]] = l.get("value", l.get("not_exported"))
+        self.assertEqual(rows, {1: {"k": "k1", "a": "a-zulu", "b": "b-mike", "g": "1"},
+                                2: {"k": "k2", "a": "a-alfa", "b": "b-zulu", "g": "unreadable"},
+                                3: {"k": "k3", "a": "a-mike", "b": "b-alfa", "g": "3"}})
+
+    def test_rows_come_in_the_tables_own_order_for_every_kind_and_index_set(self):
+        m = load_tool()
+        k = 0
+        for tname, (ddl, kind, ranks) in MATRIX_TABLES.items():
+            for iname, indexes in MATRIX_INDEXES.items():
+                k += 1
+                label = "%s / %s" % (tname, iname)
+                path = self.path("m", "%s-%s.db" % (tname, iname))
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                conn = sqlite3.connect(path)
+                conn.execute(ddl)
+                names = [r[1] for r in conn.execute("pragma table_info(t)")]
+                for i in (2, 0, 3, 1):
+                    pin, card, note = MATRIX_ROWS[i]
+                    v = {"rowid": pin if tname == "shadowed_alias" else "r%d" % i, "oid": "o%d" % i, "_rowid_": "u%d" % i,
+                         "pin": pin, "card": card, "note": note}
+                    conn.execute("insert into t(%s) values(%s)" % (", ".join('"%s"' % n for n in names), ", ".join("?" * len(names))),
+                                 [v[n] for n in names])
+                conn.commit()
+                # Truth from SQLite: a rowid table's order is its rowids'; a table with no index of its own (WITHOUT ROWID, a
+                # shadowed one) scanned before any index is made is its own order; an alias is rowid = key in every row.
+                if kind in ("rowid", "alias"):
+                    truth = [r[0] for r in conn.execute("select pin from t order by rowid")]
+                else:
+                    self.assertEqual([r[3] for r in conn.execute("explain query plan select pin from t")], ["SCAN t"], label)
+                    truth = [r[0] for r in conn.execute("select pin from t")]
+                if kind in ("rowid", "alias"):
+                    is_alias = conn.execute("select count(*) = sum(rowid = pin) from t").fetchone()[0] == 1
+                    self.assertEqual(kind == "alias", is_alias, label)
+                for st in indexes:
+                    conn.execute(st)
+                conn.commit()
+                conn.close()
+                # The statement the tool runs: no sort, and an index only where its leading keys are the primary key's.
+                ro = sqlite3.connect("file:%s?mode=ro" % path, uri=True)
+                ro.set_authorizer(m.authorizer)
+                table, cols, got_kind, order = m.table_layout(ro, "t", None)
+                self.assertEqual((got_kind, order["ranks"]), (kind, ranks), label)
+                for what in ('"pin"', ", ".join(m.q_ident(c) for c, _t in cols)):
+                    stmt, params = m.export_statement(table, got_kind, order, what)
+                    plan = " / ".join(str(r[3]) for r in ro.execute("EXPLAIN QUERY PLAN " + stmt, params))
+                    self.assertNotIn("TEMP B-TREE", plan, "%s: %s" % (label, stmt))
+                    used = [w.split()[-1] for w in plan.split(" / ") if "INDEX" in w]
+                    if kind != "without_rowid":
+                        self.assertEqual(used, [], "%s: NOT INDEXED reads the table itself: %s" % (label, plan))
+                    for ix in used:
+                        # An index of a WITHOUT ROWID table carries the key's columns after its own (key 0): the whole sequence orders it.
+                        keys = [(x[2], str(x[4]).lower(), x[3]) for x in ro.execute("pragma index_xinfo(%s)" % m.q_ident(ix)) if x[2] is not None]
+                        pk = [(x[2], str(x[4]).lower(), x[3]) for il in ro.execute("pragma index_list(t)") if il[3] == "pk"
+                              for x in ro.execute("pragma index_xinfo(%s)" % m.q_ident(il[1])) if x[5]]
+                        lead = keys[:len(pk)]
+                        same = [(n, c) for n, c, _d in lead] == [(n, c) for n, c, _d in pk]
+                        dirs = {d == pd for (_n, _c, d), (_pn, _pc, pd) in zip(lead, pk)}
+                        self.assertTrue(same and len(dirs) == 1, "%s: index %s is not in the key's order: %s" % (label, ix, plan))
+                ro.close()
+                out, env = self.job("mo-%d" % k, "j%06d" % (400000 + k))
+                r = self.export(path, "t", env, columns=["pin"])
+                self.assertEqual(r.code, 0, "%s: %s" % (label, r.stdout[-400:]))
+                self.assertEqual((r.json["table_kind"], r.json["n_ranks"]), (kind, ranks), label)
+                lines, _end = self.values_lines(out)
+                self.assertEqual([l["value"] for l in lines], truth, "%s: n follows the table's own order" % label)
+                if kind == "rowid":
+                    self.assertEqual(r.json["locator"], "rowid", label)
+                else:
+                    self.assertEqual([x["rowid"] for x in r.json["rows"]], [None] * 4, "%s: no rowid printed" % label)
+                    for pin, _c, _n in MATRIX_ROWS:
+                        self.assertNotIn(str(pin), r.stdout, label)
+
+    def test_without_rowid_is_read_from_sqlite_or_from_the_statements_own_words(self):
+        m = load_tool()
+        for sql, want in (("CREATE TABLE t(a TEXT PRIMARY KEY, b) WITHOUT ROWID", True),
+                          ("CREATE TABLE t(a TEXT PRIMARY KEY, b) STRICT, without\n  rowid", True),
+                          ("CREATE TABLE t(a TEXT PRIMARY KEY, b DEFAULT 'x) WITHOUT ROWID')", False),
+                          ('CREATE TABLE "without rowid)"(a TEXT PRIMARY KEY, b)', False),
+                          ("CREATE TABLE t(a TEXT PRIMARY KEY, b /* ) WITHOUT ROWID */)", False),
+                          ("CREATE TABLE t(a TEXT PRIMARY KEY, b) -- WITHOUT ROWID", False),
+                          ("CREATE TABLE t(a TEXT PRIMARY KEY, [b) without rowid])", False)):
+            self.assertEqual(m.declared_without_rowid(sql), want, sql)
+
+        class NoTableList:
+            def __init__(self, conn):
+                self.conn = conn
+
+            def execute(self, q, *a):
+                if q.startswith("PRAGMA table_list"):
+                    raise sqlite3.OperationalError("no such pragma")
+                return self.conn.execute(q, *a)
+        conn = sqlite3.connect(":memory:")
+        conn.execute("create table w(rowid TEXT, oid TEXT, _rowid_ TEXT, k TEXT PRIMARY KEY) without rowid")
+        conn.execute("create table r(rowid TEXT, oid TEXT, _rowid_ TEXT, k TEXT PRIMARY KEY)")
+        sql = dict(conn.execute("select name, sql from sqlite_master where type = 'table'"))
+        for wrap in (lambda c: c, NoTableList):
+            self.assertIs(m.is_without_rowid(wrap(conn), "w", sql["w"]), True)
+            self.assertIs(m.is_without_rowid(wrap(conn), "r", sql["r"]), False)
+        conn.close()
+
+    # --- B: a message that is not UTF-8 ------------------------------------------------------------------------------------
+
+    def test_a_message_quoting_bytes_that_are_not_utf8_is_an_unreadable_cell_like_any_other(self):
+        # Python cannot decode sqlite's message when it quotes such bytes and raises UnicodeDecodeError: the old tool stopped the
+        # export there (row_count 1, exit 1), so where it stopped told which row held such bytes.
+        answers = {}
+        for label, second in (("plain", b"plain-two"), ("not_utf8", b"plain\xfftwo")):
+            self.assertEqual(len(second), 9)
+            db = self.make("%s.db" % label, ["create table t(s blob)"],
+                           [("insert into t values(?)", (v,)) for v in (b"plain-one", second, b"plain-three")])
+            self.with_generated(db, "json_extract('{}', s)")
+            out, env = self.job("o-" + label, "j000310")
+            r = self.export(db, "t", env)
+            self.assertEqual(r.stderr, "")
+            answers[label] = (r, out)
+        plain, odd = answers["plain"][0], answers["not_utf8"][0]
+        self.assertEqual((odd.code, odd.json["row_count"]), (plain.code, plain.json["row_count"]))
+        self.assertEqual((odd.code, odd.json["row_count"]), (0, 3))
+        for key in ("ok", "complete", "rows", "columns", "cells_not_exported", "cells_with_a_value", "secret_values", "stdout", "n_ranks"):
+            self.assertEqual(odd.json.get(key), plain.json.get(key), key)
+        lines, _end = self.values_lines(answers["not_utf8"][1])
+        second = [l for l in lines if l["n"] == 2 and l["column"] == "h"][0]
+        self.assertEqual(second["not_exported"], "unreadable")
+        self.assertIn("UnicodeDecodeError", second["error_class"])
+        self.assertIn("plain\\xfftwo", second["sqlite_message"], "the message is kept, its bytes escaped, in the values file only")
+
+    # --- C: decisions on the code, never on the message -------------------------------------------------------------------
+
+    def test_a_value_quoted_in_a_message_decides_nothing(self):
+        # json_extract('{}', s) quotes s: the old tool read "interrupted", "not authorized" and "too big" in the message and
+        # stopped the export as a time-out, as a refusal, or called the cell too large.
+        for k, second in enumerate(("it was interrupted", "not authorized here", "authorization denied", "far too big a word",
+                                    "string or blob too big")):
+            db = self.make("c%d.db" % k, ["create table t(s text)"],
+                           [("insert into t values(?)", (v,)) for v in ("plain value one", second, "plain value three")])
+            self.with_generated(db, "json_extract('{}', s)")
+            out, env = self.job("o%d" % k, "j00032%d" % k)
+            r = self.export(db, "t", env)
+            self.assertEqual(r.code, 0, "%r: %s" % (second, r.stdout[-300:]))
+            self.assertEqual(r.json["row_count"], 3, second)
+            self.assertNotIn("timed_out", r.json, second)
+            self.assertEqual([x["cells"][1] for x in r.json["rows"]], ["unreadable"] * 3, second)
+            self.assertEqual(r.json["cells_not_exported"]["cells"], {"unreadable": 3}, second)
+
+    def test_the_code_decides_and_without_one_only_a_whole_fixed_message_does(self):
+        m = load_tool()
+        conn = sqlite3.connect(":memory:")
+        self.addCleanup(conn.close)
+        conn.execute("create table t(s text)")
+        conn.execute("insert into t values('x')")
+        conn.set_progress_handler(lambda: 1, 1)
+        try:
+            conn.execute("select count(*) from t, t as u").fetchall()
+            self.fail("not interrupted")
+        except sqlite3.Error as exc:
+            if getattr(exc, "sqlite_errorcode", None) is not None:
+                self.assertEqual(m.sqlite_code(exc), m.SQLITE_INTERRUPT)
+            self.assertTrue(m.stops_the_export(exc))
+        conn.set_progress_handler(None, 1)
+        # A Python that gives no code (before 3.11): the exceptions below carry none, as such a Python's would.
+        for text, code in (("interrupted", 9), ("string or blob too big", 18), ("not authorized", 23), ("authorization denied", 23),
+                           ("bad JSON path: 'interrupted'", None), ("JSON path error near 'not authorized'", None),
+                           ("malformed JSON", None), ("it was interrupted", None), ("interrupted 'x'", 9)):
+            exc = sqlite3.OperationalError(text)
+            self.assertIsNone(getattr(exc, "sqlite_errorcode", None))
+            self.assertEqual(m.sqlite_code(exc), code, text)
+            self.assertEqual(m.stops_the_export(exc), code in (9, 23), text)
+            self.assertEqual(m.too_big(exc), code == 18, text)
+        bad = UnicodeDecodeError("utf-8", b"bad JSON path: 'interrupted\xff'", 27, 28, "invalid start byte")
+        self.assertIsNone(m.sqlite_code(bad))
+        self.assertFalse(m.stops_the_export(bad))
+        self.assertIn("interrupted\\xff", m.sqlite_text(bad))
+        # A real code beats the text: an error whose message quotes "interrupted" is SQLITE_ERROR.
+        conn.execute("ALTER TABLE t ADD COLUMN h TEXT GENERATED ALWAYS AS (json_extract('{}', s)) VIRTUAL")
+        try:
+            conn.execute("select h from t").fetchall()
+        except sqlite3.Error as exc:
+            self.assertFalse(m.stops_the_export(exc))
+            self.assertFalse(m.too_big(exc))
+
+    # --- P3: counts after a failure, the cell counts, the parts limit, what is left --------------------------------------
+
+    def test_after_a_failed_write_every_count_is_what_the_file_holds(self):
+        import resource
+        db = self.make("many.db", ["create table t(s text, n integer)"],
+                       [("insert into t values(?, ?)", ("value-%05d" % i if i % 3 else "not json %05d" % i, i)) for i in range(600)])
+        self.with_generated(db, "json_extract(s, '$.a')", "g")
+        out, env = self.job("o", "j000330")
+        e = dict(os.environ)
+        for key in ("JOB_ID", "OUT", "AGENT_ID"):
+            e.pop(key, None)
+        e.update(env)
+        proc = subprocess.run([sys.executable, tool_path("sqlite_query")], input=json.dumps({"db_path": db, "table": "t", "write_values": True}),
+                              capture_output=True, text=True, cwd=self.dir, env=e, timeout=120,
+                              preexec_fn=lambda: resource.setrlimit(resource.RLIMIT_FSIZE, (20000, 20000)))
+        self.assertEqual(proc.stderr, "")
+        j = json.loads(proc.stdout)
+        self.assertEqual((proc.returncode, j["ok"], j["reason"], j["complete"]), (1, False, "values_file_error", False))
+        data = self.read(os.path.join(out, "sqlite-query-values.jsonl"), "rb")
+        whole = [json.loads(l) for l in data.split(b"\n")[:-1]]
+        valued = sum(1 for l in whole if "value" in l)
+        missing = collections.Counter(l["not_exported"] for l in whole if "not_exported" in l)
+        holds = j["values_file_holds"]
+        self.assertEqual((holds["cell_lines"], holds["values"], holds["not_exported"]), (len(whole), valued, dict(missing)))
+        self.assertEqual(holds["last_row_with_a_whole_line"], whole[-1]["n"])
+        self.assertEqual(holds["part_of_a_line_after"], not data.endswith(b"\n"))
+        self.assertIs(holds["end_line"], False)
+        self.assertEqual((j["cells_with_a_value"], j["secret_values"]["written"], j["secret_values"]["values"],
+                          j["secret_values"]["not_exported"]), (valued, len(whole), valued, sum(missing.values())))
+        self.assertTrue(j["values_file_state"].startswith("partial: "))
+        self.assertIn("no end line", j["values_file_error"])
+        self.assertIn("%d whole cell line(s)" % len(whole), j["values_file_state"])
+        # row_count N: rows 1..N are in the locators file, and the stop is at N+1.
+        located = self.locator_rows(out, j)
+        self.assertEqual([x["n"] for x in located], list(range(1, j["row_count"] + 1)))
+        self.assertEqual(j["rows_read_before_the_stop"], j["row_count"])
+
+    def test_a_values_file_that_reads_whole_after_a_failed_sync_is_said_whole(self):
+        db = self.make("t.db", ["create table t(v text)"], [("insert into t values(?)", ("value-%d" % i,)) for i in range(5)])
+        out, env = self.job("o", "j000331")
+        body = ("real = os.fsync\ncalls = []\n"
+                "def fsync(fd):\n    calls.append(fd)\n    if len(calls) == 1:\n        raise OSError(errno.EIO, 'Input/output error')\n    return real(fd)\n"
+                "m.os.fsync = fsync")
+        proc = in_process(body, {"db_path": db, "table": "t", "write_values": True}, env, self.dir)
+        j = json.loads(proc.stdout)
+        self.assertEqual((proc.returncode, j["ok"], j["reason"]), (1, False, "values_file_error"))
+        self.assertIn("EIO", j["values_file_error"])
+        self.assertTrue(j["values_file_state"].startswith("whole: "), j["values_file_state"])
+        self.assertNotIn("no end line", j["values_file_state"] + j["values_file_error"])
+        self.assertIs(j["values_file_holds"]["end_line"], True)
+        self.assertIs(j["secret_values"]["end_line_written"], True)
+        lines, end = self.values_lines(out)
+        self.assertEqual((len(lines), end["rows_read"]), (5, 5))
+
+    def test_cells_with_a_value_count_only_cells_that_hold_one(self):
+        db = self.make("gen.db", ["create table t(s text)"], [("insert into t values(?)", (v,)) for v in ("plain one", None, "plain three")])
+        self.with_generated(db, "json_extract(s, '$.a')", "j")
+        out, env = self.job("o", "j000332")
+        r = self.export(db, "t", env)
+        self.assertEqual(r.code, 0, r.stdout)
+        # Row 2: s is NULL and j is NULL (json_extract of NULL); rows 1 and 3: s has a value, j cannot be computed.
+        self.assertEqual([x["cells"] for x in r.json["rows"]], [["text:9", "unreadable"], ["null", "null"], ["text:11", "unreadable"]])
+        self.assertEqual(r.json["cells_with_a_value"], 2)
+        sv = r.json["secret_values"]
+        self.assertEqual((sv["written"], sv["values"], sv["not_exported"], sv["contains_secret_values"]), (4, 2, 2, True))
+        _lines, end = self.values_lines(out)
+        self.assertEqual((end["cells_written"], end["cells_with_a_value"], end["cells_not_exported"]), (4, 2, {"unreadable": 2}))
+        # Only cells that could not be computed: no value in the file, but sqlite's messages are, so it is secret all the same.
+        out2, env2 = self.job("o2", "j000333")
+        only = self.export(db, "t", env2, columns=["j", "s"], limit=1)
+        self.assertEqual(only.json["cells_with_a_value"], 2)
+        db2 = self.make("gen2.db", ["create table t(s text, k integer)"], [("insert into t values(?, ?)", ("plain", 1))])
+        self.with_generated(db2, "json_extract(s, '$.a')", "j")
+        out3, env3 = self.job("o3", "j000334")
+        just = self.export(db2, "t", env3, columns=["j", "k"])
+        self.assertEqual(just.code, 0, just.stdout)
+        out4, env4 = self.job("o4", "j000335")
+        db3 = self.make("gen3.db", ["create table t(s text)"], [("insert into t values(?)", ("plain",))])
+        self.with_generated(db3, "json_extract(s, '$.a')", "j")
+        conn = sqlite3.connect(db3)
+        conn.execute("alter table t add column z text")
+        conn.commit()
+        conn.close()
+        nothing = self.export(db3, "t", env4, columns=["j", "z"])
+        self.assertEqual(nothing.code, 0, nothing.stdout)
+        sv = nothing.json["secret_values"]
+        self.assertEqual((nothing.json["cells_with_a_value"], sv["values"], sv["not_exported"], sv["contains_secret_values"]), (0, 0, 1, True))
+
+    def test_a_row_is_charged_once_against_the_parts_limit(self):
+        # Python's cursor steps to the next row before it hands over the current one, so a failing row made the old tool read
+        # the row before it in parts too: the limit was spent twice per failing row.
+        db = self.make("alt.db", ["create table t(s text)"], [("insert into t values(?)", ('{"a": %d}' % i if i % 2 == 0 else "plain %d" % i,)) for i in range(1200)])
+        self.with_generated(db, "json_extract(s, '$.a')", "g")
+        out, env = self.job("o", "j000336")
+        r = self.export(db, "t", env)
+        self.assertEqual(r.code, 0, r.stdout[-400:])
+        self.assertEqual(r.json["row_count"], 1200)
+        self.assertEqual(r.json["cells_not_exported"]["cells"], {"unreadable": 600})
+        # With the limit made 5: five failing rows are read in parts, the sixth stops the export, and the sentence is true.
+        out2, env2 = self.job("o2", "j000337")
+        proc = in_process("m.PARTS_MAX = 5", {"db_path": db, "table": "t", "write_values": True}, env2, self.dir)
+        j = json.loads(proc.stdout)
+        self.assertEqual(j["reason"], "too_many_rows_read_in_parts")
+        self.assertEqual(j["cells_not_exported"]["cells"], {"unreadable": 5})
+        self.assertEqual(j["row_count"], 11, "rows 1..11 hold five failing rows (2, 4, ..., 10); row 12 is the sixth")
+        self.assertIn("5 rows had a cell", j["error"])
+
+    def test_a_temporary_locators_file_that_cannot_be_removed_is_said(self):
+        db = self.make("t.db", ["create table t(v text)"], [("insert into t values(?)", ("value-%d" % i,)) for i in range(3)])
+        out, env = self.job("o", "j000338")
+        body = ("real = os.unlink\n"
+                "def unlink(p, *a, **k):\n    if os.path.basename(str(p)).startswith('.sqlite_query-'):\n        raise OSError(errno.EPERM, 'Operation not permitted')\n"
+                "    return real(p, *a, **k)\n"
+                "m.os.unlink = unlink\nm.Path.unlink = lambda self, *a, **k: unlink(str(self))")
+        proc = in_process(body, {"db_path": db, "table": "t", "write_values": True}, env, self.dir)
+        j = json.loads(proc.stdout)
+        left = [n for n in os.listdir(os.path.join(out, "tool-output")) if n.startswith(".sqlite_query-")]
+        self.assertEqual(len(left), 1)
+        self.assertIn(left[0], j.get("locators_file_left", ""), "what remains is named")
+        self.assertNotIn("none is left", j.get("locators_file_error", ""))
+        self.assertEqual(len(self.locator_rows(out, j)), 3, "the locators file itself is published")
+
 
 if __name__ == "__main__":
     unittest.main()

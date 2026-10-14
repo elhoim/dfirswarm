@@ -730,10 +730,15 @@ import each other), and holds to this:
   KEY` column, so `sqlite_query` refuses a rowid range on such a table, never
   prints its rowid and locates its rows by their position. The order rows are
   read in can rank values: an index's order is the indexed column's, so the
-  tool reads the table itself, and a WITHOUT ROWID table (or an INTEGER PRIMARY
-  KEY table) comes in the order of its key, which the answer says. And an error
-  message can quote a value (a generated column's `json_extract` does): the
-  answer gives the error's class and the row, never the message.
+  tool reads the table itself, and a WITHOUT ROWID table (whatever its columns
+  are named) or an INTEGER PRIMARY KEY table comes in the order of its key,
+  which the answer names (`n_ranks`); SQLite reads a WITHOUT ROWID table
+  through a covering index unless the ORDER BY is its whole key. And an error
+  message can quote a value (a generated column's `json_extract` does), and so
+  can what Python makes of one (a message that quotes bytes that are not UTF-8
+  is a `UnicodeDecodeError`): the answer says the row and what the error's code
+  decides (the time budget, the authorizer, a value over the length limit),
+  never the message or the class, and no decision reads the message.
 - *The manifest says SENSITIVE* and names the flag. The harness reads no
   manifest-level flag yet, and a tool cannot see whether its job was run with
   `secret_output`, so what keeps a value out of an ordinary run is the refusal

@@ -132,7 +132,9 @@ test("the new skills say what to record, and the skills whose tools can surface 
   // The skill about hashes writes the secret-digest exception, and the SQLite one keeps a short BLOB's digest out of the ledger.
   assert.match(skills.get("evidence/provenance")!.body, /A digest of a secret is not/);
   assert.match(skills.get("data/sqlite-secrets")!.body, /never the value, a fragment of it, or the `sha256` and base64 of a short BLOB/);
-  assert.match(skills.get("data/sqlite")!.body, /run the query as a job with `secret_output: true` and cite table, `rowid` and column, never the value/);
+  // The parent cites the row's locator, not `rowid`: on an INTEGER PRIMARY KEY table the rowid is the value (review of #144).
+  assert.match(skills.get("data/sqlite")!.body, /run the query as a job with `secret_output: true` and cite table, row locator and column, never the value/);
+  assert.doesNotMatch(skills.get("data/sqlite")!.body, /cite table, `rowid` and column/);
 });
 
 test("needs is at most two deep and its chain is at most 1,900 tokens; every id another pack needs is still here", async () => {
@@ -224,7 +226,8 @@ const TAUGHT: Array<[string, string, string[]]> = [
   ["tools/feature_scan/run.py", "filesystem/scanners", ["out_dir_contains_secret_values", "report.xml"]],
   ["tools/archive_extract/run.py", "evidence/provenance", ["SHORT_MEMBER"]],
   ["tools/sqlite_query/run.py", "data/sqlite-secrets", ["write_values", "rowid_from", "rowid_to", "locators_file", "sqlite-query-values.jsonl", "table_kind",
-    "rowid_is_a_value", "virtual_table_unsupported", "cells_not_exported", "value_too_large", "unreadable", "values_file_error", "locator"]],
+    "rowid_is_a_value", "virtual_table_unsupported", "cells_not_exported", "value_too_large", "unreadable", "values_file_error", "locator",
+    "n_ranks", "shadowed", "row_unreadable", "values_file_holds"]],
 ];
 
 test("the tool fields a skill names are fields the tools write", async () => {
