@@ -3,9 +3,10 @@
 A focused sweep rather than a full investigation: establish everything that is
 arranged to run on this host, and which of it does not belong.
 
-Read the skill index with `skill()` first. `persistence/mechanisms` is the map;
-`packages/integrity` compares packaged files with a package database and says what
-that baseline is and what it covers.
+Read the skill index with `skill()` first. `persistence/mechanisms` is the map
+(`persistence/cron-timers` and `persistence/quieter-routes` hold the rest);
+`packages/integrity` compares packaged files with a package database, and
+`packages/baseline` says what that baseline is and what it covers.
 
 ## Questions
 

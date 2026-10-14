@@ -2,7 +2,7 @@
 id: apps/fragments
 title: Reading a sqlite_freespace answer
 when: You ran sqlite_freespace and must report what its fragments are.
-needs: [apps/databases]
+needs: []
 tools: [sqlite_freespace]
 requires_host: []
 ---
