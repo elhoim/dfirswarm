@@ -3077,15 +3077,23 @@ def _probe_pdf(blob, ctx, extractor, out):
         if not ok or not pdf.entries:
             structure = "scan"
     # A scan of the whole file for 'N G obj' headers: the objects a reader that ignores the table would find.
+    # The scan goes a piece at a time, so that the clock is checked between pieces even when a piece holds no header at all (a regular
+    # expression over the whole file is one call that cannot be stopped); a header that starts in a piece is read past its end.
     scanned, scan_total, numbers, truncated_scan = {}, 0, {}, False
-    for hit in SCAN_OBJ.finditer(blob):
-        scan_total += 1
-        n = int(hit.group(1))
-        numbers[n] = numbers.get(n, 0) + 1
-        scanned[n] = hit.start()
-        if scan_total % 8192 == 0 and ctx.expired("the object scan"):
+    piece = 1 << 20
+    for chunk_at in range(0, size, piece):
+        if ctx.expired("the object scan"):
             truncated_scan = True
             break
+        for hit in SCAN_OBJ.finditer(blob, chunk_at, min(size, chunk_at + piece + 64)):
+            if hit.start() >= chunk_at + piece:
+                break
+            scan_total += 1
+            n = int(hit.group(1))
+            numbers[n] = numbers.get(n, 0) + 1
+            scanned[n] = hit.start()
+            if scan_total >= cfg["max_objects"] * 4:
+                break
         if scan_total >= cfg["max_objects"] * 4:
             ctx.limit_hit("the object scan stopped after %d headers (max_objects x 4)" % scan_total)
             truncated_scan = True
