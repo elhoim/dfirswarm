@@ -364,10 +364,15 @@ KEYVALUE_SECRET = re.compile(r"((?:password|passwd|pwd|secret|client[_-]?secret|
 # (`desk-`, `risk-`, `task-`), so its head needs a capital or a digit in its first twelve characters, as a random key has.
 TOKEN_HEAD = re.compile(r"(?:AKIA|ASIA)[0-9A-Z]{4,}|gh[pousr]_[A-Za-z0-9]{4,}|github_pat_[A-Za-z0-9_]{4,}|xox[abeprs]-[A-Za-z0-9-]{4,}"
                         r"|sk-(?=[A-Za-z0-9_-]{0,11}[0-9A-Z])[A-Za-z0-9_-]{12,}|eyJ[A-Za-z0-9_-]{6,}")
+# The body of a PEM block after its header (RFC 7468), up to the next '-' (its END line): withheld whole whatever its letters look like,
+# as the dashes of a header glued to it join the two into one run that no shape rule of the shared block reads as a token.
+PEM_BODY = re.compile(r"(-----BEGIN [^\r\n-]{1,64}-----)(?!<withheld)([^-]{8,})")
 LONG_NUMBER = 10 ** 31              # a number of 32 digits or more is printed as its size: the same digits as a string are withheld (32 hex)
 
 
 def _shown_pass(out):
+    if "-----BEGIN " in out:
+        out = PEM_BODY.sub(lambda m: m.group(1) + _withheld("", len(m.group(2)), "text"), out)
     if ":" in out:
         out = MAILTO_SECRET.sub(lambda m: m.group(1) + ":" + _withheld("userinfo", len(m.group(2)), "urls"), out)
     if "@" in out:

@@ -332,7 +332,10 @@ test("P3 compound file entries: a type [MS-CFB] does not define, an unallocated 
     nul.writeUInt16LE(Buffer.from("Alpha", "utf16le").length, at + 64);   // the length leaves out the terminator ...
     const root = Buffer.from(base);
     root.writeUInt32LE(64, dirAt(0) + 120);                   // the mini stream holds 256 bytes; the root entry says 64
+    const short = Buffer.from(base);
+    short.writeUInt32LE(227, dirAt(0) + 120);                  // Beta's last byte is the mini stream's 228th: one byte past the size declared
     const cases: [string, Buffer, RegExp][] = [
+      ["root-1", short, /stream Beta: a mini sector lies beyond the mini stream \(the root entry declares 227 bytes\)/],
       ["t3", t3, /1 directory entry is of a type \[MS-CFB\] 2\.6\.1 does not define \(0x03\)/],
       ["t0", t0, /1 unallocated directory entry is reached from a storage's tree/],
       ["nul", nul, /1 directory entry has a name length that does not fit the name field/],

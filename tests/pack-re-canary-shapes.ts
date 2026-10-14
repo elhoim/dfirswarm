@@ -62,6 +62,8 @@ export const SHAPES: Record<string, Shape> = {
   aws_secret: (m, r) => { if (m < 40) return null; const s = piece(r, 13) + "/" + piece(r, 7) + "/" + piece(r, 18); return { plant: s, check: [s] }; },
   aws_secret_30: (m, r) => { if (m < 30) return null; const s = piece(r, 9) + "/" + piece(r, 9) + "/" + piece(r, 10); return { plant: s, check: [s] }; },
   pem_body: (m, r) => { if (m < 80) return null; const b = piece(r, 48); return { plant: "-----BEGIN PRIVATE KEY-----" + b, check: [b] }; },
+  // a body glued to its header with few case changes and few digits: the header's dashes join the two into one run no shape rule reads
+  pem_body_plain: (m, r) => { if (m < 80) return null; const b = pick(r, CAP, 24) + pick(r, LOW, 22) + pick(r, DIG, 2); return { plant: "-----BEGIN PRIVATE KEY-----" + b, check: [b] }; },
   url_userinfo: (m, r) => { const pw = password(r); const s = "https://usr:" + pw + "@host.example/p"; return s.length <= m ? { plant: s, check: [], pw } : null; },
   userinfo_cut: (m, r) => { const pw = password(r); const s = "u:" + pw + "@"; return s.length <= m ? { plant: s, check: [], pw } : null; },
   mailto: (m, r) => { const pw = password(r); const s = "mailto:usr:" + pw + "@host.example"; return s.length <= m ? { plant: s, check: [], pw } : null; },
