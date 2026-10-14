@@ -604,3 +604,14 @@ test("an unsupported file's head_hex is its first four bytes only", async () => 
     assert.equal(a.head_hex, Buffer.from(GHP.slice(0, 4)).toString("hex"));
   });
 });
+
+test("fuzz: in scan mode an object stream's objects past max_objects are not indexed, a limit says so, and the call answers", async () => {
+  await withCwd(async (cwd) => {
+    const pdf = xrefStreamPdf([CATALOG(), PAGES, PAGE()], { objstm: { num: 5, items: [[4, "<< /S /JavaScript /JS (x) >>"], [6, "(y)"]] } });
+    // A startxref that points nowhere: the index is rebuilt by scanning, and the object stream is read for what it holds.
+    const broken = Buffer.from(pdf.toString("latin1").replace(/startxref\n(\d+)/, (_m, n) => `startxref\n${Number(n) + 3}`), "latin1");
+    const { a } = await run(cwd, "scan.pdf", broken, { max_objects: 5 });
+    assert.equal(a.structure_source, "scan of the file for object headers");
+    assert.ok(a.limits_hit.some((l: string) => /more than max_objects \(5\) objects/.test(l)), JSON.stringify(a.limits_hit));
+  });
+});

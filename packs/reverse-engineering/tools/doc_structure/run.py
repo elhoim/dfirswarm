@@ -3208,7 +3208,8 @@ def _probe_pdf(blob, ctx, extractor, out):
                 for i, (n, _off) in enumerate(pairs):
                     if n not in pdf.entries:
                         pdf.add_entry(n, 2, onum, i)
-                        new.append(n)
+                        if n in pdf.entries:        # not indexed when max_objects is reached: that is a limit, said by add_entry
+                            new.append(n)
                 census(new)
         if not pdf.trailers:
             pdf.trailers.extend(oo.value for oo in interesting.values() if isinstance(oo.value, dict) and oo.value.get("Type") == "XRef")
