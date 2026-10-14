@@ -2,10 +2,12 @@
 id: archives/protected
 title: Examining encrypted archives and protected documents
 when: An archive or document may require a password.
-needs: [identify/headers]
+needs: []
 tools: [archive_probe, file_type]
 requires_host: [7z]
 ---
+
+Use when an archive or document may require a password. Not for the format rules of ZIP, Office and PDF.
 
 Identify the container with `file_type`, keep every supplied part, and record the
 source object, the reader and its version, the members examined, missing volumes,
@@ -26,37 +28,11 @@ damage, unsupported features, and nested containers left unopened.
 Check any consequential finding with a reader that supports the format and the
 version. Do not treat an unknown or false as the same thing: they differ.
 
-**ZIP.** Read each member's protection from its own flags and fields: ZipCrypto,
-WinZip AES (strength and AE version come from the extra field) and other variants
-differ, and one archive can mix encrypted and plain members. The directory being
-readable is a separate finding from any member being encrypted.
-
-**7-Zip and RAR.** Separate data encryption from header encryption. Printable strings
-in a header are not a member list: confirm names, sizes and encryption with a reader
-that opens the format. A missing volume or an unsupported method can stop a listing
-without any password failure.
+Only if you read a ZIP, 7-Zip, RAR, Office or PDF structure for its protection or its times: `archives/formats`.
 
 **Names are not an exfiltration finding.** A member list shows the names the
 container records. It does not show what the contents are, that they were copied, or
 where they went: corroborate with independent evidence.
-
-**Time.** A ZIP member's `modified` is an MS-DOS local time with no zone and a
-two-second resolution (`timezone_unknown`); do not append UTC to it. A recorded
-extended or NTFS time is a separate field (`modified_utc`) with its source. Keep the
-raw fields, note conflicts, and remember that archive times are member metadata, not
-the time of collection or transfer.
-
-**Office.** Separate encryption needed to open a document from editing restrictions,
-a write-reservation password and rights management. OOXML encryption sits in
-`EncryptionInfo` and `EncryptedPackage` streams inside a compound file; binary Word,
-Excel and PowerPoint record theirs inside the document stream, so a missing
-`EncryptionInfo` does not show a file is plain.
-
-**PDF.** Resolve the effective encryption dictionary through the current trailer
-before saying anything. A file can be encrypted and still open with an empty user
-password: say "encrypted, opens without a supplied password", and record permission
-restrictions apart. An `/Encrypt` string, or any `/V` or `/R`, is a marker, not a
-parse.
 
 Use passwords the case supplies, where the examination is authorised, and write
 decrypted derivatives only under the job's output, validated by the format's own

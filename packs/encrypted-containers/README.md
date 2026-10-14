@@ -10,8 +10,12 @@ know it is the encrypted one.
 
 ## What it carries
 
-**Five skills**: `identify/headers`, `volumes/bitlocker`,
-`volumes/luks-filevault`, `archives/protected`, `keys/where-they-hide`.
+**Eleven skills**: five decision leaves and six second-level leaves they point to
+("only if X"); every leaf is at most 800 tokens. `identify/headers`
+(`identify/by-format`), `volumes/bitlocker` (`volumes/bitlocker-opening`),
+`volumes/luks-filevault` (`volumes/filevault-apfs`), `archives/protected`
+(`archives/formats`), `keys/where-they-hide` (`keys/recovery-key-scan`,
+`keys/other-sources`).
 
 **Three tools.**
 `crypto_id` names the scheme from the first bytes of a volume or file and reads
