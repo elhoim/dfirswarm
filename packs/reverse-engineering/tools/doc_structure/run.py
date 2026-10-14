@@ -3082,12 +3082,15 @@ class Pdf:
         return o
 
     def deref(self, x, hops=8):
-        num = None
+        num, first = None, x
         while isinstance(x, Ref) and hops > 0:
             o = self.get(x.num)
             if o is None:
                 return None, x.num
             num, x, hops = x.num, o.value, hops - 1
+        if isinstance(x, Ref):
+            # an object whose value is a reference to another, eight times in a row: what the last one names is not read, and said
+            self.problem("object %d leads through more than 8 references in a row (an object whose value is a reference to another): what the last names was not read" % first.num)
         if isinstance(x, (Ref, _Null)):
             return None, num
         return x, num
@@ -4024,14 +4027,17 @@ def trace_catalog(pdf, ctx, catalog, cnum, interesting, extractor, outside=None)
         actions.append(row)
         return row
 
-    def act(x, trigger):
+    def act(x, trigger, where):
         """x is an action dictionary, a reference to one, or a destination (an array / a name / a string); /Next actions follow,
-        iteratively, to max_depth. One chain visits each action object once: an action the chain returns to is a cycle, said once and
-        not followed again, so a self-loop is one row and the chain is bounded by its distinct objects."""
-        stack = [(x, 0)]
+        iteratively, to max_depth. `where` is the place x sits: the number of the object that holds it (or, for one inside direct
+        structures, their path) and the key. An action object is known by its number and a direct action by that place, never by the
+        identity of a Python object (the object cache is cleared and reused, and a freed dictionary's identity is given to the next).
+        One chain visits each action once: an action a /Next link leads back to (one of the actions before it in the chain) is a
+        cycle, one that two /Next links reach is reached twice; each is said once and followed once, so a self-loop is one row."""
+        stack = [(x, 0, where, None)]
         chain_seen = set()
         while stack:
-            x, depth = stack.pop()
+            x, depth, where, parent = stack.pop()
             # the key that reaches the chain, and how many /Next links in it this action is: a trigger is never a growing path
             trig = trigger if not depth else trigger + "/Next" if depth == 1 else "%s/Next[%d]" % (trigger, depth)
             if depth > max_depth:
@@ -4042,9 +4048,14 @@ def trace_catalog(pdf, ctx, catalog, cnum, interesting, extractor, outside=None)
             d, n2 = pdf.deref(x)
             if isinstance(d, dict) and (is_action(d) or "S" in d or "JS" in d):
                 ident = num if num is not None else n2
-                mark = ident if ident is not None else ("direct", id(d))
+                mark = ident if ident is not None else ("direct",) + where
                 if mark in chain_seen:
-                    ctx.problem("the /Next chain reached from %s returns to %s: a cycle, followed once" % (trigger, "object %d" % ident if ident is not None else "a direct action"))
+                    up, back = parent, False
+                    while up is not None and not back:
+                        back, up = up[0] == mark, up[1]
+                    what = "object %d" % ident if ident is not None else "a direct action"
+                    ctx.problem(("the /Next chain reached from %s returns to %s: a cycle, followed once" if back else
+                                 "the /Next chain reached from %s reaches %s by two /Next links: it is listed once") % (trigger, what))
                     continue
                 chain_seen.add(mark)
                 key = (mark, trig)
@@ -4052,29 +4063,33 @@ def trace_catalog(pdf, ctx, catalog, cnum, interesting, extractor, outside=None)
                     continue
                 seen_actions.add(key)
                 describe_action(d, ident, trig)
+                here = ident if ident is not None else where
+                link = (mark, parent)
                 nxt, _ = pdf.deref(d.get("Next")) if isinstance(d.get("Next"), Ref) else (d.get("Next"), None)
                 if isinstance(nxt, list):
-                    for item in reversed(nxt):
-                        stack.append((item, depth + 1))
+                    for i in range(len(nxt) - 1, -1, -1):
+                        stack.append((nxt[i], depth + 1, (here, "Next", i), link))
                 elif nxt is not None:
-                    stack.append((d.get("Next"), depth + 1))
+                    stack.append((d.get("Next"), depth + 1, (here, "Next"), link))
             elif isinstance(d, (list, Name, PStr)):
                 out.setdefault("destinations_seen", 0)
                 out["destinations_seen"] += 1
 
-    def aa(x, trigger):
-        d, _ = pdf.deref(x)
+    def aa(x, trigger, where):
+        d, n = pdf.deref(x)
         if isinstance(d, dict):
+            here = n if n is not None else where
             for k, v in list(d.items()):
-                act(v, "%s/AA/%s" % (trigger, text_of(k, None, "names")))
+                act(v, "%s/AA/%s" % (trigger, text_of(k, None, "names")), (here, "AA", k))
 
-    def walk_name_tree(root, label, visit_leaf):
+    def walk_name_tree(root, label, visit_leaf, where):
         seen = set()
-        stack = [(root, 0)]
+        stack = [(root, 0, where)]
         while stack:
-            node, dp = stack.pop()
+            node, dp, where = stack.pop()
             tick()
             d, n = pdf.deref(node)
+            here = n if n is not None else where
             if not isinstance(d, dict) or (n is not None and n in seen):
                 continue
             if dp > max_depth:
@@ -4089,11 +4104,11 @@ def trace_catalog(pdf, ctx, catalog, cnum, interesting, extractor, outside=None)
                 for i in range(0, len(names) - 1, 2):
                     tick()
                     key, _k = pdf.deref(names[i])
-                    visit_leaf(key if isinstance(key, PStr) else None, names[i + 1])
+                    visit_leaf(key if isinstance(key, PStr) else None, names[i + 1], (here, "Names", i + 1))
             kids, _ = pdf.deref(d.get("Kids"))
             if isinstance(kids, list):
-                for kid in reversed(kids):
-                    stack.append((kid, dp + 1))
+                for i in range(len(kids) - 1, -1, -1):
+                    stack.append((kids[i], dp + 1, (here, "Kids", i)))
 
     def leaf_label(key):
         if key is None:
@@ -4109,15 +4124,16 @@ def trace_catalog(pdf, ctx, catalog, cnum, interesting, extractor, outside=None)
     try:
         # Catalog level: OpenAction, AA, names, form.
         if "OpenAction" in catalog:
-            act(catalog["OpenAction"], "Catalog/OpenAction")
+            act(catalog["OpenAction"], "Catalog/OpenAction", (cnum, "OpenAction"))
         if "AA" in catalog:
-            aa(catalog["AA"], "Catalog")
+            aa(catalog["AA"], "Catalog", (cnum, "AA"))
         names, _ = pdf.deref(catalog.get("Names"))
         if isinstance(names, dict):
             if "JavaScript" in names:
-                walk_name_tree(names["JavaScript"], "JavaScript", lambda key, val: act(val, "Catalog/Names/JavaScript[%s]" % leaf_label(key)))
+                walk_name_tree(names["JavaScript"], "JavaScript", lambda key, val, where: act(val, "Catalog/Names/JavaScript[%s]" % leaf_label(key), where),
+                               (cnum, "Names", "JavaScript"))
             if "EmbeddedFiles" in names:
-                def leaf(key, val):
+                def leaf(key, val, _where):
                     fs = filespec_info(pdf, ctx, val)
                     row = {"source": "Catalog/Names/EmbeddedFiles"}
                     if "name" in fs:
@@ -4132,17 +4148,19 @@ def trace_catalog(pdf, ctx, catalog, cnum, interesting, extractor, outside=None)
                             row["stream_bytes"] = o.stream["length"]
                             row["filters"] = [text_of(n, None, "names") for n, _p in pdf.filters_of(o.value)]
                     embedded_row(row)
-                walk_name_tree(names["EmbeddedFiles"], "EmbeddedFiles", leaf)
+                walk_name_tree(names["EmbeddedFiles"], "EmbeddedFiles", leaf, (cnum, "Names", "EmbeddedFiles"))
         form, _ = pdf.deref(catalog.get("AcroForm"))
         if isinstance(form, dict):
             out["acroform"] = {"fields_root": isinstance(form.get("Fields"), (Ref, list)), "xfa_present": "XFA" in form, "need_appearances": form.get("NeedAppearances") if isinstance(form.get("NeedAppearances"), bool) else None}
             fields, _ = pdf.deref(form.get("Fields"))
-            stack = [(f, 0) for f in reversed(fields if isinstance(fields, list) else [])]
+            fields = fields if isinstance(fields, list) else []
+            stack = [(fields[i], 0, (cnum, "AcroForm", "Fields", i)) for i in range(len(fields) - 1, -1, -1)]
             fseen, nfields = set(), 0
             while stack:
-                f, dp = stack.pop()
+                f, dp, where = stack.pop()
                 tick()
                 d, n = pdf.deref(f)
+                here = n if n is not None else where
                 if not isinstance(d, dict) or (n is not None and n in fseen):
                     continue
                 if dp > max_depth:
@@ -4152,21 +4170,22 @@ def trace_catalog(pdf, ctx, catalog, cnum, interesting, extractor, outside=None)
                     fseen.add(n)
                 nfields += 1
                 if "A" in d:
-                    act(d["A"], "AcroForm/Field/A")
+                    act(d["A"], "AcroForm/Field/A", (here, "A"))
                 if "AA" in d:
-                    aa(d["AA"], "AcroForm/Field")
+                    aa(d["AA"], "AcroForm/Field", (here, "AA"))
                 kids, _ = pdf.deref(d.get("Kids"))
                 if isinstance(kids, list):
-                    stack.extend((k, dp + 1) for k in reversed(kids))
+                    stack.extend((kids[i], dp + 1, (here, "Kids", i)) for i in range(len(kids) - 1, -1, -1))
             out["acroform"]["fields_traversed"] = nfields
         # Outlines
         outl, _ = pdf.deref(catalog.get("Outlines"))
         if isinstance(outl, dict):
-            stack, oseen, n_items = [outl.get("First")], set(), 0
+            stack, oseen, n_items = [(outl.get("First"), ("outline", "First"))], set(), 0
             while stack:
-                item = stack.pop()
+                item, where = stack.pop()
                 tick()
                 d, n = pdf.deref(item)
+                here = n if n is not None else where
                 if isinstance(d, dict) and n is not None and n in oseen:
                     ctx.problem("the outline returns to object %d: a cycle, followed once" % n)
                     continue
@@ -4176,9 +4195,9 @@ def trace_catalog(pdf, ctx, catalog, cnum, interesting, extractor, outside=None)
                     oseen.add(n)
                 n_items += 1
                 if "A" in d:
-                    act(d["A"], "Outlines/Item/A")
-                stack.append(d.get("Next"))
-                stack.append(d.get("First"))
+                    act(d["A"], "Outlines/Item/A", (here, "A"))
+                stack.append((d.get("Next"), (here, "Next")))
+                stack.append((d.get("First"), (here, "First")))
             out["outline_items"] = n_items
         # Pages
         pages, _ = pdf.deref(catalog.get("Pages"))
@@ -4186,11 +4205,12 @@ def trace_catalog(pdf, ctx, catalog, cnum, interesting, extractor, outside=None)
         annot_types = KeyedCounts()
         if isinstance(pages, dict):
             declared = pages.get("Count") if isinstance(pages.get("Count"), int) else None
-            stack = [(catalog.get("Pages"), 0)]
+            stack = [(catalog.get("Pages"), 0, (cnum, "Pages"))]
             while stack:
-                node, dp = stack.pop()
+                node, dp, where = stack.pop()
                 tick()
                 d, n = pdf.deref(node)
+                here = n if n is not None else where
                 if not isinstance(d, dict) or (n is not None and n in pseen):
                     if isinstance(d, dict) and n in pseen:
                         ctx.problem("the page tree returns to object %d: a cycle" % n)
@@ -4202,25 +4222,26 @@ def trace_catalog(pdf, ctx, catalog, cnum, interesting, extractor, outside=None)
                     pseen.add(n)
                 kids, _ = pdf.deref(d.get("Kids"))
                 if isinstance(kids, list) and d.get("Type") != "Page":
-                    stack.extend((k, dp + 1) for k in reversed(kids))
+                    stack.extend((kids[i], dp + 1, (here, "Kids", i)) for i in range(len(kids) - 1, -1, -1))
                     continue
                 leaves += 1
                 if "AA" in d:
-                    aa(d["AA"], "Page")
+                    aa(d["AA"], "Page", (here, "AA"))
                 an, _ = pdf.deref(d.get("Annots"))
                 if isinstance(an, list):
-                    for a in an:
+                    for i, a in enumerate(an):
                         tick()
                         ad, anum = pdf.deref(a)
+                        ahere = anum if anum is not None else (here, "Annots", i)
                         if not isinstance(ad, dict):
                             continue
                         st = ad.get("Subtype")
                         key = text_of(str(st), None, "names") if isinstance(st, Name) else "?"
                         annot_types.add(st if isinstance(st, Name) else LongName("?"))
                         if "A" in ad:
-                            act(ad["A"], "Page/Annot[%s]/A" % key)
+                            act(ad["A"], "Page/Annot[%s]/A" % key, (ahere, "A"))
                         if "AA" in ad:
-                            aa(ad["AA"], "Page/Annot[%s]" % key)
+                            aa(ad["AA"], "Page/Annot[%s]" % key, (ahere, "AA"))
         out["pages"] = {"declared_count_in_root_pages_node": declared, "leaf_nodes_traversed": leaves,
                         "note": "the declared count is what the root node says; the traversed count is the leaves reached from it. Neither is a verified page count"}
         out["annotation_subtypes"] = annot_types.counts
