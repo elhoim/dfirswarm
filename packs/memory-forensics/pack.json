@@ -1,7 +1,7 @@
 {
   "id": "memory-forensics",
   "name": "Memory Forensics Pack",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "description": "Method and tooling for a memory image: what the container is before anything else, what can be read with no framework at all, processes and injection, network state, credential material, and the discipline that keeps a string in memory from becoming a claim about behaviour.",
   "licence": "AGPL-3.0-or-later",
   "authors": [
@@ -28,7 +28,7 @@
   "checksums": {
     "sha256": {
       "LICENCE": "5b94f18424dbef1e77eda33a465e946c2c8eb715fa5236afe2c6ec6763af80d3",
-      "README.md": "9cca892c0d08da6cecca8761fec79c27e087ba2575baaa8a94e5e3aad4614d7a",
+      "README.md": "1942dba3075bef70bcbec3b441e69d8a3762c4343815935c7640f1192e5bf2e7",
       "tools/mem_carve/manifest.json": "0bc4efee2fbbfe236512724b66b888f2f5325d0928fd31a3c3ef542ac096cd2e",
       "tools/mem_carve/run.py": "6d664d29366a7ef104b782ede7eaba5ed2103b514542a3a9e60317563b204613",
       "tools/mem_profile/manifest.json": "c8f39b38447139404d34577a63dd22203272fd323ab57bdbfef4d60af2febc08",
@@ -36,19 +36,29 @@
       "tools/mem_fs/manifest.json": "251c80868cb7887b4ed0d36a7e4e445f6426c60d2ccd72e20fa4cca0adc577f8",
       "tools/mem_fs/run.py": "583be63985ec5711001e50a7754b147b6312d4385df6bce9397aadb900657e76",
       "goals/memory-triage.md": "2e27e156c48a7e5279d257e33aeefd2b4189cee0986e9580dddae75ac9c4c5f5",
-      "skills/strings/discipline.md": "b213d0fcb1f9c8dfa084bba6cfce87d454ded6998495cf498b49e682a46c15a8",
-      "skills/patterns/yara.md": "acf495b73251982f1c8f3b43f536dc1d6d385943bd8d9a1adaf06f05fd651ef9",
-      "skills/processes/injection.md": "b25441e4e3a1161cb365b0b162e4c2b0d686041c49916fd16fa30dc6b82a891f",
-      "skills/network/state.md": "e00c4476fe36133f85ad5f8fe08ee8bcfa7809d7bf7af4af13ec31b1225a73b8",
-      "skills/triage/no-framework.md": "49446e55b27718815a56e756234f19ac1af6c20616a6de1f6289ab5f1cae8bb4",
-      "skills/triage/volatility.md": "d1aa5c68c3ddb4f4447b89533debf19dbbd5fea284178220f491422b412d9729",
-      "skills/triage/what-you-have.md": "cda4f338c865760ccebf5ce81e2e774ac3f306e1daebe69e9e2a8e831e7d99f2",
-      "skills/acquire/images.md": "cc8a2ae5b61854e1ad0be0de631078bc655ad96ac1c42dc7a4b157b6138db247",
-      "skills/credentials/material.md": "70c996fc926d5719864ed276dbbbe0cf64ed9e28aadb6f8f4007a78774f4b16f",
+      "skills/strings/discipline.md": "c33bacce4c1586a72a3894f674ef5622ce67bc1ffe9685b1c21bf24bb6bb29a6",
+      "skills/patterns/yara.md": "0cea61e4a0bc111f696fec70ed47de888637cd241779f389c5915e8837d0945c",
+      "skills/processes/injection.md": "1ebcee919230e1df158728c4360fb9f1f52d32952c69a0c709a6b52da1fbd93a",
+      "skills/processes/preserve-regions.md": "1000d646187047d52e70da792293639e05805ddd2c20280cec8ebfe8a347a53e",
+      "skills/network/state.md": "b8c5f5fc2e0a08b4fa739cbc3705b2b7a1a0a9ecaa48add5d09158ff273faa74",
+      "skills/network/timestamps-dns.md": "1d5165f0064af6389bdf76d218c38a63374259b7f2f74712d50bdb5fa39760b6",
+      "skills/triage/carve-signatures.md": "6c012764b688645b0262dcbe881f625e77be4fb469b78904e93d5ab1fd588e96",
+      "skills/triage/container-details.md": "b9ad136df6925bc15ca0c6525b8cd4fea02e2b904c6c37b2f225c588c5b767cc",
+      "skills/triage/no-framework.md": "c5105e0ed3b949c7c4d501a323a27ebdc075b8692af36066fb7938936aac80ca",
+      "skills/triage/paging-files.md": "817769f8e71c453e04f02b120c43ec58f15a8039881c42e0e33dfcc45e936d06",
+      "skills/triage/volatility-catalogue.md": "dbbe0140769636f8f39dd2497dca58e369e62222089206dc10c5f9d3fe310c75",
+      "skills/triage/volatility-plugins.md": "8d05f22a29bc0f4801bef06a4545df9b22ce458a28642eefce2f2cbc2ed43540",
+      "skills/triage/volatility-symbols.md": "09d32c3953d3f1a890313b14703ef90551e4e5b3e2ef8bc27bb87906c7a18d91",
+      "skills/triage/volatility.md": "ddc48cdfca050d23bb5a9c01a450a4db9dd902bbbc735c3ef5e5f6a6ffac3bf1",
+      "skills/triage/what-you-have.md": "e53aaa1e9821336ea998eabbd5404885ade95eaf390aa0c85216b59cf3c35154",
+      "skills/acquire/avml-and-preserve.md": "d40ce2e11177261201ee6d3dd120caac30c4aae432b089cf5510d253515200cd",
+      "skills/acquire/images.md": "a85d6f80e4bd8d7ea635d01c3147f480700882fe7b8d80232df4d0942abadd3a",
+      "skills/credentials/key-schedules.md": "a842b6792e48368313b7a4937f5c360901a4adafbe119e6b65c9369190c71c1d",
+      "skills/credentials/material.md": "99908d5b8ab136743cdc72d5ac785faf0a2e6dfacd2acbca2ed37a39542a75d2",
       "requires/host.json": "30964776820986c3bd16bd5a99f16545dfd9ea2984d43e680e7a97d8aba1de40",
       "requires/python.txt": "a0587a37c3cf6bfaf2947f4b8c6f56ba6f79a2e83f7141cfb1de950bb23a2fd0",
       "requires/symbols.windows.json": "d94b7dfa6ef6014bdf0f82952488e774a0f590500a872b87149f75256bddb105",
-      "skills/INDEX.md": "b4ef916f32550b5912b9f6cc741374b4756f6e2547e7ac58c16c3957c5547e84"
+      "skills/INDEX.md": "dd27febf64c0c6bcf13ca6154cd88ee37ec42eb3e185fce6566a5c3fbc598358"
     }
   },
   "tools": [
@@ -56,5 +66,23 @@
     "mem_fs",
     "mem_profile"
   ],
-  "skills": 9
+  "skills": 19,
+  "method_only": [
+    {
+      "path": "skills/acquire/images.md",
+      "why": "a method leaf about judging how a capture was made; it names no tool or program of this pack (AVML is in acquire/avml-and-preserve)"
+    },
+    {
+      "path": "skills/network/timestamps-dns.md",
+      "why": "a method leaf about what a network timestamp and a DNS cache entry show; it names no tool or program"
+    },
+    {
+      "path": "skills/triage/paging-files.md",
+      "why": "a method leaf about the page file and the hibernation file as memory; it names no tool or program of this pack, and the scan it points to is a base tool"
+    },
+    {
+      "path": "skills/triage/volatility-catalogue.md",
+      "why": "a method leaf about reading the kickoff catalogue's receipts; it names no tool or program of this pack (the recipe belongs to the base pack)"
+    }
+  ]
 }

@@ -10,9 +10,16 @@ says "if that pack is loaded" and asks you to check the run's tool inventory.
 
 ## What it carries
 
-**Seven skills**: `scope/first-hour`, `exfil/before-encryption`,
-`encryptor/traces`, `encryptor/destroyed-backups`, `identify/family`,
-`recovery/what-is-possible`, `reporting/for-regulators`.
+**Seventeen skills**: seven decision leaves, each a question of a case, and ten
+second-level leaves they point to ("only if X"); every leaf is at most 800 tokens.
+`scope/first-hour` (`scope/triage-tools`, `scope/phase-timeline`),
+`exfil/before-encryption` (`exfil/measure-and-claims`),
+`encryptor/traces` (`encryptor/windows-evidence`, `encryptor/samples-and-notes`),
+`encryptor/destroyed-backups` (`encryptor/backup-infrastructure`),
+`identify/family` (`identify/samples-and-decryptors`),
+`recovery/what-is-possible` (`recovery/routes-and-decryptors`),
+`reporting/for-regulators` (`reporting/notification-register`,
+`reporting/conclusions-and-controls`).
 
 **Two tools.** `encrypted_survey` identifies candidate files using extension and
 entropy heuristics, samples selected windows and tails of the first candidates,

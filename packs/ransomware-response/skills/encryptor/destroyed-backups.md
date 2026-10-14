@@ -1,12 +1,14 @@
 ---
 id: encryptor/destroyed-backups
-title: Establishing recovery impairment and surviving recovery paths
+title: Recovery impairment and surviving recovery paths
 when: Backups, snapshots, catalogues or recovery services may have been altered.
-needs: [encryptor/traces]
+needs: []
 tools: []
 requires_host: []
 mentions: [vss_stores]
 ---
+
+Use when backups, snapshots, catalogues or recovery services may have been altered. Not for the backup server or hypervisor detail.
 
 Treat recovery impairment as its own sequence. Do not assume it came just before
 the encryption, or that every destructive-looking action succeeded.
@@ -34,41 +36,14 @@ pressure removed them, the acquisition did not include them, the parser failed o
 the wrong volume was searched. State the volumes and snapshots covered, and check
 for surviving copies, before concluding that a path was lost.
 
-**Backup infrastructure.** Preserve the backup server's audit and job records, the
-repository metadata, catalogue and configuration, identity events, deletion
-requests and their outcomes, and any logs kept elsewhere. A stopped agent, a
-deleted catalogue or a compromised administrator account does not show that all
-backup data was destroyed. Check whether the catalogue can be rebuilt and whether
-an offline, separate-account or immutable copy survives.
-
-For immutable or versioned storage check the objects themselves: retention mode,
-expiry, legal holds, lifecycle changes and the administrative rights that can
-bypass them. Do not infer protection from a product label. Establish that the
-keys and the whole backup chain are still available.
-
-**Hypervisors and network storage.** Preserve the management-plane audit records,
-the storage and snapshot inventories, the replication history and task outcomes.
-Separate a guest's compromise from the host's or the storage's. A virtual-machine
-snapshot is not an independent backup, and the loss of a base or dependent disk can
-invalidate a chain. A share that became unavailable does not show that its data or
-snapshots were destroyed.
-
-**Boot recovery and stopped services.** Record changes to the recovery
-configuration (the boot manager's recovery and boot-status settings, the recovery
-environment) and what each did. They neither show that backups were destroyed nor
-identify a family. A database or virtual-machine service stop may have made files
-available to encrypt, but its time does not mark the encryption to the second:
-correlate it with later file and application evidence, and consider routine
-maintenance and response actions.
+Only if a backup server, an immutable store, a hypervisor, network storage or a boot-recovery setting was affected: `encryptor/backup-infrastructure`.
 
 **Preserve before repair.** Record the state before any catalogue rebuild,
 snapshot consolidation, repository repair or retention change. Where urgent
 restoration has to go first, record who authorised it, which sources it touched and
 the evidence it cost.
 
-**Does not show.** Missing stores do not show deletion; a backup server's
-compromise does not show that every copy is lost; a stopped service does not show
-intent or timing of the encryption; a recovery-setting change is not a signature.
+**Does not show.** Missing stores do not show deletion; a recovery-setting change is not a signature.
 
 **Deliver** one row per recovery object or chain: the expected state, the observed
 action, the account where supported, time and clock, outcome, surviving copies,

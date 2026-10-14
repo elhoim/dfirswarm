@@ -1,12 +1,13 @@
 ---
 id: exfil/before-encryption
-title: Establishing whether data left, by which route and within what limits
+title: Whether data left, by which route and within what limits
 when: Ransomware or data extortion raises a question about unauthorised disclosure.
-needs: [scope/first-hour]
+needs: []
 tools: []
 requires_host: []
-mentions: [esedb_query]
 ---
+
+Use when ransomware or data extortion raises the question whether data left. Not for what a byte counter measures or for an adversary's claim.
 
 Ask the question before, during and after the encryption, and in an incident with
 no encryption at all. Do not assume that data left, that it needed local staging,
@@ -39,39 +40,14 @@ is run, installed or demonstrated here. Their presence, or their legitimate use,
 does not show a malicious transfer. Consider direct streaming, SaaS exports,
 object downloads and transfers from systems outside the collected set.
 
-**Measure the right thing.** Identify what each counter counts: captured bytes,
-transport payload, application payload, an application's aggregate usage, the
-compressed size of a staged object or its logical size. Record the direction, the
-units, the endpoints, the interval, capture loss, how retransmissions were
-treated, sampling, and NAT or proxy attribution; do not count one transfer twice
-across sensors. Network usage in SRUM ties an application and an account to bytes;
-it does not name the files or the remote recipient. If the windows-forensics pack
-is loaded (check the run's tool inventory), its `esedb_query` reads the SRUM
-database; otherwise record that limit. A Zeek originator is the side that opened
-the connection, not necessarily the internal source, and a TLS connection's volume
-says nothing of its content. If the network-forensics pack is loaded, its
-`exfil/volume` skill gives its own counter definitions; read its limits too.
-
-A finding about particular content needs a supported link between that content and
-the transfer: application audit evidence, transfer records, reconstructed content
-or a corroborated object identity. Distinguish an attempted, a failed, a partial
-and a completed transfer.
-
-**Treat the adversary's claims as claims.** A listing, a screenshot or a sample
-supplied to the case alleges possession; it does not prove it. Record who supplied
-it, when, from where and with what integrity information. Check any sample against
-authorised internal evidence, and consider an older breach, public material and
-fabrication. Do not visit the adversary's infrastructure, contact the adversary or
-upload case material from this examination.
+Only if you quote a byte count, tie content to a transfer or weigh an adversary's claim: `exfil/measure-and-claims`.
 
 **Report a bounded conclusion**: established, partial, bounded negative or not
 determinable. For a negative, name the systems, sources, interval, queries,
 failures and unexamined routes, and say whether the suspected transfer would have
 been visible in them. "Logging was present" is not a detection opportunity.
 
-**Does not show.** A staged archive does not show a transfer or its volume; a byte
-counter does not show content; SRUM does not show the recipient; a leak-site listing
-does not show what was taken; a negative does not show that nothing left through a
+**Does not show.** A staged archive does not show a transfer or its volume; a negative does not show that nothing left through a
 route that was not examined.
 
 **Deliver:** a transfer-evidence table: the source data, the account or process

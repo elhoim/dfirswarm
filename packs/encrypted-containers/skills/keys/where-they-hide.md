@@ -2,10 +2,12 @@
 id: keys/where-they-hide
 title: Locating and safeguarding authorised key material
 when: A case question requires access to encrypted evidence.
-needs: [identify/headers]
+needs: []
 tools: [recovery_key_scan, ioc_scan]
 requires_host: []
 ---
+
+Use when a case question needs access to encrypted evidence and you look for key material the case supplies. Not for how `recovery_key_scan` reads.
 
 Record first: the question, the encrypted object, and the authority for locating
 and using key material. Holding a device, an account name or a candidate secret
@@ -23,47 +25,15 @@ valid-looking recovery password or a conventional file name is a lead. It does n
 show that the material opens this container: it may belong to another volume or
 to a protector that was later replaced.
 
-**recovery_key_scan.** Shows where text in the BitLocker recovery-password format
-sits (file, offset, length, ASCII or UTF-16LE, and whether its eight groups pass
-the divisible-by-11 check), where a PEM private-key header sits (type and offset),
-and which file names are conventional for key files and credential stores. Does
-not show: that a value opens anything, what is in a key store, or anything in an
-image, an archive or a container (no OCR, no unpacking). It reads the first 8 MiB
-of each file unless `max_bytes_per_file` is raised, and lists every file it could
-not read, skipped or read only in part: a clean result is bounded by that coverage.
-A value is found unless it is glued to more digits (`key_<value>` is found,
-`<value>7` is not). A file or directory named after a recovery password has that
-name withheld from the paths it prints.
-It returns no value, fragment, shape or digest; `write_values: true` is for the one
-case that needs the value (below).
+**recovery_key_scan** locates BitLocker recovery-password text, PEM private-key
+headers and conventional key-file names. Only if you report what it found:
+`keys/recovery-key-scan` says what it shows and does not.
 
 **ioc_scan** finds a literal you name, in ASCII and UTF-16LE, in a file or an image;
 use it for a known identifier or a phrase such as the name of a key file. Its hits
 carry context snippets that can themselves be the secret.
 
-Browser password stores, password managers and keychains are protected by the
-account's own material, and this pack provides no reader for them. Record that the
-store exists, where, and that it was not examined; use one only where the case
-supplies the material and the authority. A credential found there is an indicator,
-not a credential to try: never test it against a live service, and do not read its
-presence as reuse on the encrypted object.
-
-A memory image, page file or hibernation file may hold material for a volume that
-was mounted at capture. Say when and how it was captured and what it covers: a
-mounted volume at one time does not put a key in a later capture. If the
-memory-forensics pack is loaded, its `acquire/images` skill covers capture;
-otherwise state the limit.
-
-Escrow (a directory service, a cloud identity, a fleet manager) is requested as a
-scoped export through its authorised custodian. Match the device, volume and
-protector identifiers the record gives against the volume's metadata; record the
-retrieval time, the source and any rotation history. Do not use found credentials
-to sign in to any of these.
-
-Shell history and configuration may hold a password given on a command line.
-Retention, shell settings, session length and redaction decide what survives, so
-"no match" is a search result (which file, which period), not proof that none was
-used.
+Only if the key may sit in a password store, a memory image, an escrow record or shell history: `keys/other-sources`.
 
 **Sensitive output.** `recovery_key_scan` and `ioc_scan` reach secret material:
 run them as jobs with `secret_output: true`. `recovery_key_scan` answers with
