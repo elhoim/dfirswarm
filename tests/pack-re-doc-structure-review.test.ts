@@ -435,11 +435,21 @@ test("OVBA: an uncompressed chunk is read from its own bytes only; one that does
   });
 });
 
-test("extracted objects carry the sha256 of the bytes written", async () => {
+test("an extracted object's digest is in no answer (a hash of a planted token confirms it); with write_values, in a job, it is in the values file only", async () => {
   await withCwd(async (cwd) => {
-    const { a } = await run(cwd, "v.bin", buildVbaProject([{ name: "Module1", source: "Sub A()\r\nEnd Sub\r\n" }]), { extract_to: "work/s1/v", extract: ["vba"] });
+    const { a, text } = await run(cwd, "v.bin", buildVbaProject([{ name: "Module1", source: "Sub A()\r\nEnd Sub\r\n" }]), { extract_to: "work/s1/v", extract: ["vba"] });
     const row = a.extracted[0];
-    assert.equal(row.sha256, createHash("sha256").update(await readFile(join(cwd, row.file))).digest("hex"));
+    const digest = createHash("sha256").update(await readFile(join(cwd, row.file))).digest("hex");
+    assert.equal("sha256" in row, false);
+    assert.ok(!text.includes(digest), "the digest is in the answer");
+    await put(cwd, "work/v2.bin", buildVbaProject([{ name: "Module1", source: "Sub A()\r\nEnd Sub\r\n" }]));
+    const r = await asJob(DOC_STRUCTURE, cwd, { path: "work/v2.bin", extract_to: "out/v", extract: ["vba"], write_values: true });
+    const job = body(r);
+    assert.ok(!r.stdout.includes(digest), "the digest is in the job's answer");
+    const values = (await readFile(join(cwd, "out", "doc-structure-values.jsonl"), "utf8")).trim().split("\n").map((l) => JSON.parse(l));
+    const v = values.find((x: Json) => x.kind === "extracted_object_sha256");
+    assert.equal(v.value, digest);
+    assert.equal(v.finding_id, job.extracted[0].sha256_in_values_file);
   });
 });
 
@@ -514,7 +524,9 @@ test("hybrid: an object a newer revision deleted is not brought back by an older
     const t2 = at;
     add(101, `xref\n7 1\n0000000000 00002 f \ntrailer\n<< /Size 9 /Root 1 0 R /Prev ${t1} >>\nstartxref\n${t2}\n%%EOF\n`);
     const { a } = await run(cwd, "hyb.pdf", Buffer.concat(parts));
-    assert.equal(a.actions.count, 0, JSON.stringify(a.tables.pdf_actions.rows));
+    // Not brought back: no entry of the chain uses it and it is not in the census. Its bytes are still in the file, so it is the one
+    // action listed, as outside the chain (freed), never as reached.
+    assert.deepEqual(a.tables.pdf_actions.rows.map((r: Json) => [r.object, r.reached_from_catalog, r.outside_chain]), [[7, false, "freed"]]);
     assert.equal(a.tables.objects.rows.some((r: Json) => r.object === 7), false, "a deleted object is listed");
   });
 });

@@ -62,7 +62,9 @@ NAME_CAP = 4096
 MAX_STREAM_HEADERS = 4096
 MAX_VERSION_STRINGS = 4096
 OVERLAP_LOOK_BACK = 64
+GUID_TEXT = re.compile(rb"[A-Za-z0-9_+/=-]{9,}")
 MAX_EXTRACT = 64
+SPILL_FLOOR = 100                   # no list in the answer is longer than the larger of `limit` and this: a longer one is in a file, whole
 HEAD_BYTES = 1024
 PAGE = 1 << 16
 
@@ -226,6 +228,106 @@ def cell(value):
 # END SHARED WITHHOLDING
 
 
+# BEGIN SHARED LINEAR SPANS
+# The same text is in doc_structure, pe_directories and the capa-floss recipe (tests/pack-re-process.test.ts holds the copies
+# equal). The shared block's token_spans grows each flagged span across `/` by searching the whole text before it again for
+# every piece it takes, which costs about the cube of the text's length: a name of 13 KB of `/`-joined tokens took 44 s. The
+# block is not edited (its copies are held equal to the network pack's), so this tool binds the same function, computed in
+# linear time: the same spans for every text, which tests/pack-re-canary-harness.test.ts holds against the block's own
+# token_spans on generated text. Making the block itself linear, for every tool that carries it, is a follow-up.
+_NAME_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_+%-")
+_shared_token_spans = token_spans
+
+
+def _linear_token_spans(text):
+    spans = [m.span() for m in _PREFIXED.finditer(text)]
+    for m in _RUN.finditer(text):
+        if _token_run(m.group()):
+            spans.append(m.span())
+    for m in _SLASHED.finditer(text):
+        run = m.group()
+        if "/" in run and sum(1 for p in run.split("/") if _randomish(p)) >= 3 and re.search(r"[0-9+]", run):
+            spans.append(m.span())
+    if not spans:
+        return []
+    n = len(text)
+    run_start, run_end = [0] * n, [0] * n
+    i = 0
+    while i < n:
+        if text[i] in _NAME_CHARS:
+            j = i
+            while j < n and text[j] in _NAME_CHARS:
+                j += 1
+            for k in range(i, j):
+                run_start[k], run_end[k] = i, j
+            i = j
+        else:
+            i += 1
+    left, right = {}, {}
+
+    def piece_left(start):
+        # what re.search(r"[A-Za-z0-9_+%-]+$", text[:start - 1]) finds: `$` also matches before a final line break
+        last = start - 2
+        if text[last] in _NAME_CHARS:
+            return run_start[last], last + 1
+        if text[last] == "\n" and last >= 1 and text[last - 1] in _NAME_CHARS:
+            return run_start[last - 1], last
+        return None
+
+    def grow_left(start):
+        path = []
+        while True:
+            if start in left:
+                start = left[start]
+                break
+            if not (start > 1 and text[start - 1] == "/"):
+                break
+            found = piece_left(start)
+            if found is None or not _randomish(text[found[0]:found[1]]):
+                break
+            path.append(start)
+            start = found[0]
+        for p in path:
+            left[p] = start
+        return start
+
+    def grow_right(end):
+        path = []
+        while True:
+            if end in right:
+                end = right[end]
+                break
+            if not (end < n - 1 and text[end] == "/") or text[end + 1] not in _NAME_CHARS:
+                break
+            stop = run_end[end + 1]
+            pads = 0
+            while pads < 2 and stop + pads < n and text[stop + pads] == "=":
+                pads += 1
+            if not _randomish(text[end + 1:stop + pads]):
+                break
+            path.append(end)
+            end = stop + pads
+        for p in path:
+            right[p] = end
+        return end
+
+    grown = sorted((grow_left(start), grow_right(end)) for start, end in spans)
+    merged = []
+    for start, end in grown:
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+token_spans = _linear_token_spans
+# END SHARED LINEAR SPANS
+
+
+SHOWN_TARGET = 2048                 # characters of a string out of the file the answer shows; a longer one is given by its length
+
+
 def describe(exc):
     code = errno.errorcode.get(exc.errno, "") if getattr(exc, "errno", None) else ""
     return scrub("%s%s: %s" % (type(exc).__name__, " " + code if code else "", getattr(exc, "strerror", None) or str(exc)), "text")
@@ -238,32 +340,120 @@ def in_job():
 VALUES = [None]    # the values file of this call, once it exists: an answer that fails after it was created names it
 
 
+_CLEAN = set()                      # short strings known to hold nothing to withhold: tested once (a table repeats its keys and kinds)
+# A mailto: address has no user-info (RFC 6068: an address is local-part@domain), so the shared block keeps `mailto:name:secret@host`
+# as an address; a ':' in the local part is a name:password pair placed there, and what follows the ':' is withheld here.
+MAILTO_SECRET = re.compile(r"(mailto:[^:@?/\s]*):([^@?\s]*)(?=@)", re.I)
+# The head of a token whose own prefix says what it is, too short for the shared block's patterns (a name cut by a declared length, a
+# string read from the middle of a field): the prefix and four characters more are a piece of a token, and are withheld.
+TOKEN_HEAD = re.compile(r"(?<![A-Za-z0-9])(?:(?:AKIA|ASIA)[0-9A-Z]{4,}|gh[pousr]_[A-Za-z0-9]{4,}|github_pat_[A-Za-z0-9_]{4,}|xox[abeprs]-[A-Za-z0-9-]{4,}|sk-[A-Za-z0-9_-]{12,})")
+
+
 def shown_path(text):
     """A path as it may be printed: each component with anything token-shaped, or with user-info, withheld. A path is
     tested component by component, as an OPC part name or a file name is a path and not one token."""
     if not isinstance(text, str):
         return text
-    return "/".join(scrub(part, "names") for part in text.split("/"))
+    if text in _CLEAN:
+        return text
+    if "ailto:" in text or "AILTO:" in text:
+        text = MAILTO_SECRET.sub(lambda m: m.group(1) + ":" + _withheld("userinfo", len(m.group(2)), "urls"), text)
+    out = "/".join(TOKEN_HEAD.sub(lambda m: _withheld("token-shaped text", len(m.group()), "names"), scrub(part, "names")) for part in text.split("/"))
+    if out == text and len(text) <= 256 and len(_CLEAN) < 200000:
+        _CLEAN.add(text)
+    return out
 
 
-def shown_deep(value, key=""):
-    if key in ("head_hex", "tool"):
-        return value
+def long_text(text, what="text"):
+    return "<%s of %d characters: longer than the %d shown, so not shown>" % (what, len(text), SHOWN_TARGET)
+
+
+def shown_name(text):
+    """A name or a path out of the file as it may be printed: one longer than SHOWN_TARGET by its length only (a cut could leave the head
+    of a token too short to be recognised as one), any other through shown_path."""
+    if not isinstance(text, str):
+        return text
+    if len(text) > SHOWN_TARGET:
+        return long_text(text, "a name")
+    return shown_path(text)
+
+
+# --- the one way out: every key and every value the tool prints or writes passes through shown_answer ------------------------------
+
+# Strings the tool made itself and registered (a page file's path, the names file's path, a CodeView GUID that is not text): only these, and
+# only under one of these keys, leave unchanged. Anything else, under any key, is withheld like any string out of the file: a key here
+# is never a way round the withholding for a string built from the file's bytes.
+SAFE_KEYS = {"guid", "all_results", "withheld_names_file"}
+MADE = set()
+
+
+def made(text):
+    MADE.add(text)
+    return text
+
+
+class Spill:
+    """Where a list of the answer that is longer than `at` goes whole: a file of the paging directory, one row per item; the answer keeps
+    the first `at` items and names the file beside the list (`<key>_not_shown`)."""
+
+    def __init__(self, ctx, at):
+        self.ctx, self.at, self.n = ctx, at, 0
+
+    def write(self, key, items):
+        self.n += 1
+        page = LosslessPage("pe_directories-list", [self.ctx.key, "list", self.n], 0)
+        for item in items:
+            page.add(item if isinstance(item, dict) else {"item": item})
+        done = page.finish()
+        return {"items": len(items), "shown": self.at, "all_results": made(done["all_results"]) if done.get("all_results") else None,
+                "not_written": done.get("not_written"), "note": "the whole list is in the file, one item per line"}
+
+
+def shown_key(key):
+    key = key if isinstance(key, str) else str(key)
+    if len(key) > SHOWN_TARGET:
+        return long_text(key, "a key")
+    return shown_path(key)
+
+
+def shown_answer(value, key="", spill=None):
+    """Every key and every value, at the boundary: what any writer of this tool (the answer, a table file, a list file, a failure) puts
+    out. A string is withheld component by component, a key the same way and given by its length past SHOWN_TARGET; two keys that are
+    withheld to the same text are both kept (the second gets ' #2'); bytes are never printed; and in the answer (`spill` given) no list is
+    longer than the larger of `limit` and 100 items: a longer one is written whole to a file named beside it."""
     if isinstance(value, str):
+        if key in SAFE_KEYS and value in MADE:
+            return value
         return shown_path(value)
-    if isinstance(value, list):
-        return [shown_deep(v) for v in value]
+    if isinstance(value, bool) or value is None or isinstance(value, (int, float)):
+        return value
     if isinstance(value, dict):
-        return {k: shown_deep(v, k) for k, v in value.items()}
-    return value
+        out = {}
+        for k, v in value.items():
+            name = base = shown_key(k)
+            n = 1
+            while name in out:
+                n += 1
+                name = "%s #%d" % (base, n)
+            if spill is not None and isinstance(v, (list, tuple)) and len(v) > spill.at:
+                out[name] = [shown_answer(x, "", spill) for x in v[:spill.at]]
+                out[name + "_not_shown"] = spill.write(name, list(v))
+            else:
+                out[name] = shown_answer(v, k if isinstance(k, str) else "", spill)
+        return out
+    if isinstance(value, (list, tuple)):
+        return [shown_answer(v, "", spill) for v in value]
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return "<%d bytes, not shown>" % len(value)
+    return shown_path(str(value))
 
 
 def fail(message, **extra):
     status = extra.pop("status", "failed")
-    answer = {"error": scrub(message), "status": status, "tool": TOOL, **shown_deep(extra)}
+    answer = {"error": message, "status": status, "tool": TOOL, **extra}
     if VALUES[0] is not None:
         answer["secret_values"] = VALUES[0].summary()
-    print(json.dumps(answer))
+    print(json.dumps(shown_answer(answer)))
     raise SystemExit(1)
 
 
@@ -297,7 +487,8 @@ class LosslessPage:
     file that is created exclusively (under a new name when the name is taken) and named in the answer. A table
     that cannot be written whole says so."""
 
-    def __init__(self, tool, key, limit):
+    def __init__(self, tool, key, limit, tick=None):
+        self.tick = tick
         self.tool = re.sub(r"[^A-Za-z0-9_.-]", "_", tool)
         self.limit = limit
         self.page = []
@@ -326,7 +517,7 @@ class LosslessPage:
                     fd = os.open(str(self.dir / name), flags, 0o600)
                 except FileExistsError:
                     continue
-                self.shown = self.prefix + name
+                self.shown = made(self.prefix + name)
                 self._out = os.fdopen(fd, "w", encoding="utf-8")
                 for kept in self.page:
                     self._write(kept)
@@ -477,7 +668,7 @@ class Names:
                     except FileExistsError:
                         continue
                     self._fh = os.fdopen(fd, "w", encoding="utf-8")
-                    self.shown = self.prefix + name
+                    self.shown = made(self.prefix + name)
                     break
                 else:
                     self.error = "ninety-nine files of this name already exist"
@@ -524,8 +715,12 @@ class Short(Exception):
 
 
 def text_of(value, kind="text"):
-    """A string out of a file, as it may be printed: control characters escaped, anything token-shaped withheld."""
-    return scrub(cell(value), kind)
+    """A string out of a file, as it may be printed: control characters escaped, anything token-shaped withheld, and one longer than
+    SHOWN_TARGET given by its length only."""
+    text = value if isinstance(value, str) else str(value)
+    if len(text) > SHOWN_TARGET:
+        return long_text(text, "a string")
+    return scrub(cell(text), kind)
 
 
 class Ctx:
@@ -581,9 +776,44 @@ class Ctx:
             raise Over("%s: the structures read together passed max_total_bytes (%d); the rest of this call reads no more of them" % (what, self.cfg["max_total_bytes"]))
 
 
+TOKEN_BYTES = frozenset(b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_+%-")
+LEADING_RUN = re.compile(r"[A-Za-z0-9_+%-]+")
+
+
+def run_before(img, at, utf16=False):
+    """The token characters of the file just before offset `at` (UTF-16 code units when `utf16`), at most 256 of them."""
+    out, p = [], at
+    while len(out) < 256:
+        if utf16:
+            if p < 2 or img.mm[p - 1] != 0 or img.mm[p - 2] not in TOKEN_BYTES:
+                break
+            out.append(chr(img.mm[p - 2]))
+            p -= 2
+        else:
+            if p < 1 or img.mm[p - 1] not in TOKEN_BYTES:
+                break
+            out.append(chr(img.mm[p - 1]))
+            p -= 1
+    return "".join(reversed(out))
+
+
+def shown_at(ctx, text, at, utf16=False, kind="names"):
+    """A string the file holds at offset `at`, as it may be printed. A string whose address points into the middle of a run of token
+    characters (a name read a byte or a field late) is the tail of that run: the run is tested whole, and the string's leading run is
+    withheld when the whole is shaped like a token."""
+    shown = text_of(text, kind)
+    img = getattr(ctx, "img", None)
+    lead = LEADING_RUN.match(text) if text else None
+    if img is not None and lead and at is not None and 0 < at <= img.size:
+        before = run_before(img, at, utf16)
+        if before and (token_shaped(before + lead.group()) or TOKEN_HEAD.search(before + lead.group())):
+            shown = _withheld("token-shaped text", len(lead.group()), kind) + text_of(text[lead.end():], kind)
+    return shown
+
+
 def show(ctx, what, text, at, finding=None):
-    """A string out of the file as it may be printed; the whole goes to the values file when it was asked for."""
-    shown = text_of(text)
+    """A string out of the file as it may be printed (shown_at); the whole goes to the values file when it was asked for."""
+    shown = shown_at(ctx, text, at)
     if shown != cell(text):
         ctx.names.add(text, shown, what)
     if finding is not None:
@@ -625,7 +855,7 @@ class Extractor:
         for text in selectors:
             kind, _sep, rest = text.partition(":")
             if kind != "resource" or not rest.isdigit():
-                fail("extract: %r is not a selector (resource:<row number in the resources table>)" % text[:80])
+                fail("extract: a selector of %d characters is not a selector this tool reads (resource:<row number in the resources table>)" % len(text))
             self.selectors.append({"row": int(rest), "matched": False, "text": text})
 
     def wants(self, row):
@@ -661,7 +891,6 @@ class Extractor:
         try:
             with os.fdopen(fd, "wb") as fh:
                 fh.write(data)
-            out["sha256"] = hashlib.sha256(data).hexdigest()
         except OSError as exc:
             self.ctx.problem("resource row %d: writing failed (%s)" % (row, describe(exc)))
             out["status"] = "failed"
@@ -673,6 +902,12 @@ class Extractor:
             out["status"] = "written"
             out["file"] = shown_path(target)
             out["bytes"] = len(data)
+            # No digest of an extracted resource is in the answer: a resource can be a secret, and a hash of a secret confirms it
+            # (docs/packs.md section 8). With write_values, in a job, the digest goes to the values file.
+            if self.ctx.values.enabled:
+                finding = self.ctx.next_finding("E")
+                self.ctx.values.add(finding, {"field": "extracted_resource_sha256", "file": out["file"], "bytes": len(data)}, hashlib.sha256(data).hexdigest())
+                out["sha256_in_values_file"] = finding
         self.ctx.extracted.append(out)
         return out
 
@@ -765,7 +1000,10 @@ def parse_headers(img, ctx):
     if avail < need + 8:
         raise Stop("failed", "the optional header holds %d bytes, too few for its fields and a data directory table" % avail, out)
     image_base = struct.unpack_from("<Q" if wide else "<I", img.mm, opt_at + (24 if wide else 28))[0]
+    section_alignment, file_alignment = struct.unpack_from("<II", img.mm, opt_at + 32)
     size_of_headers = struct.unpack_from("<I", img.mm, opt_at + 60)[0]
+    out["file_alignment"] = file_alignment
+    out["section_alignment"] = section_alignment
     count = struct.unpack_from("<I", img.mm, opt_at + (108 if wide else 92))[0]
     fit = max(0, (avail - need) // 8)
     if min(count, 16) > fit:
@@ -788,9 +1026,11 @@ def parse_headers(img, ctx):
             break
         name = bytes(img.mm[at:at + 8]).rstrip(b"\x00").decode("utf-8", "replace")
         vsize, vaddr, rawsize, rawptr, _a, _b, _c, _d, flags = struct.unpack_from("<IIIIIIHHI", img.mm, at + 8)
-        if rawptr & 0x1FF:
-            # The loader reads a section from PointerToRawData rounded down to 512 bytes, whatever the file alignment says: the
-            # bytes mapped here are the ones it maps, and the header's own value is kept in the answer.
+        if rawptr & 0x1FF and file_alignment >= 0x200:
+            # PE/COFF: PointerToRawData is a multiple of FileAlignment, and FileAlignment is 512 or more unless SectionAlignment is below
+            # the page size (then the two are equal and may be less than 512). With FileAlignment of 512 or more, a value that is not a
+            # multiple of 512 breaks that rule: the section is read from the value rounded down to 512, and the header's own value is kept
+            # beside it, because readers differ on which of the two they use. With FileAlignment below 512 the value is read as it is.
             unaligned.append({"section": text_of(name), "pointer_to_raw_data": rawptr, "read_from": rawptr & ~0x1FF})
             rawptr &= ~0x1FF
         sections.append((name, vaddr, vsize, rawsize, rawptr, flags))
@@ -798,7 +1038,8 @@ def parse_headers(img, ctx):
             maps.append((vaddr, min(vsize or rawsize, rawsize), rawptr, min(img.size, rawptr + rawsize), len(maps)))
     if unaligned:
         out["sections_read_from_rounded_offsets"] = unaligned
-        out["sections_note"] = "a section's PointerToRawData is rounded down to 512 bytes, as the Windows loader does: an RVA is read from the bytes the loader maps"
+        out["sections_note"] = ("a section's PointerToRawData is not a multiple of FileAlignment (512 or more here), which PE/COFF requires: its bytes are read from the value "
+                                "rounded down to 512, the header's value is kept beside it, and a reader that uses the value as written reads other bytes")
     if size_of_headers:
         maps.append((0, size_of_headers, 0, min(size_of_headers, img.size), len(maps)))
     by_start = sorted(maps)
@@ -1086,7 +1327,7 @@ def read_resources(img, pe, ctx, out, extractor):
             name_or_id, target = struct.unpack_from("<II", img.mm, at + 16 + 8 * k)
             if name_or_id & 0x80000000:
                 nm = utf16_name(img, root_off, name_or_id & 0x7FFFFFFF, limit)
-                label = text_of(nm, "names") if nm is not None else None
+                label = shown_at(ctx, nm, root_off + (name_or_id & 0x7FFFFFFF) + 2, True) if nm is not None else None
                 label = label if label is not None else "?"
             else:
                 label = name_or_id
@@ -1156,6 +1397,8 @@ def read_version(img, row, ctx):
         info["status"] = "partial"
         ctx.limit_hit("resource row %d: the version resource is %d bytes, over max_stream_bytes (%d): its first %d bytes were read" % (row["row"], row["size"], size, size))
 
+    keys_at = {}                    # a key's file offset, for shown_at
+
     def broken(where, at):
         info["status"] = "partial"
         ctx.problem("resource row %d: a version block in %s at offset %d has a length that does not fit (under 6 bytes, or past its parent): the rest of it was not read" % (row["row"], where, at))
@@ -1173,6 +1416,7 @@ def read_version(img, row, ctx):
             key_end += 2
         key = data[k:key_end].decode("utf-16-le", "replace")
         val = (key_end + 2 + 3) & ~3
+        keys_at[key] = row["file_offset"] + k
         return key, vlen, typ, val, pos + length
 
     top = block(0, len(data))
@@ -1233,12 +1477,22 @@ def read_version(img, row, ctx):
                     if skey in VERSION_KEYS:
                         finding = ctx.next_finding("V")
                         ctx.values.add(finding, {"field": "version_string", "key": skey}, value)
-                        table[skey] = {"value": text_of(value, "names") if len(value) <= 256 else None, "length": len(value), "finding_id": finding}
+                        name, n = skey, 1
+                        while name in table:
+                            n += 1
+                            name = "%s #%d" % (skey, n)
+                        table[name] = {"value": text_of(value, "names") if len(value) <= 256 else None, "length": len(value), "finding_id": finding}
                     else:
-                        other.append(text_of(skey, "names"))
+                        other.append(shown_at(ctx, skey, keys_at.get(skey), True))
                     spos = send if send > spos else spos + 6
                     spos = (spos + 3) & ~3
-                strings[text_of(tkey, "names")] = table
+                # The key is the file's own text: it is withheld as a string at its offset is (shown_at), and two tables of one key are both kept.
+                shown_key_text = shown_at(ctx, tkey, keys_at.get(tkey), True)
+                name, n = shown_key_text, 1
+                while name in strings:
+                    n += 1
+                    name = "%s #%d" % (shown_key_text, n)
+                strings[name] = table
                 tpos = (tend + 3) & ~3
         pos = (bend + 3) & ~3
     info["string_tables"] = strings
@@ -1328,7 +1582,7 @@ def read_clr(img, pe, ctx, out):
         out["clr"] = info
         return
     ver = bytes(img.mm[md[0] + 16:md[0] + 16 + vlen]).split(b"\x00")[0].decode("utf-8", "replace")
-    meta["version_string"] = text_of(ver, "names")
+    meta["version_string"] = shown_at(ctx, ver, md[0] + 16)
     p = md[0] + 16 + vlen
     _flags, nstreams = struct.unpack_from("<HH", img.mm, p)
     p += 4
@@ -1346,7 +1600,7 @@ def read_clr(img, pe, ctx, out):
             ctx.problem("a CLR metadata stream name has no terminator")
             break
         name = bytes(img.mm[q:nul]).decode("ascii", "replace")
-        streams.append({"name": text_of(name, "names"), "offset": off, "size": ssize, "within_root": off + ssize <= (md_size or end - md[0])})
+        streams.append({"name": shown_at(ctx, name, q), "offset": off, "size": ssize, "within_root": off + ssize <= (md_size or end - md[0])})
         p = q + ((nul - q + 1 + 3) & ~3)
     meta["streams"] = streams
     meta["streams_declared"] = nstreams
@@ -1384,7 +1638,11 @@ def read_debug(img, pe, ctx, out):
                 age, = struct.unpack_from("<I", img.mm, ptr + 20)
                 raw, complete = img.cstr(ptr + 24, min(img.size, ptr + dsize), NAME_CAP)
                 d1, d2, d3 = struct.unpack_from("<IHH", g)
-                row["codeview"] = {"signature": "RSDS", "guid": "%08X-%04X-%04X-%s-%s" % (d1, d2, d3, g[8:10].hex().upper(), g[10:16].hex().upper()), "age": age}
+                # Sixteen bytes that hold a run of nine or more token characters are text placed where the GUID goes, and their hex would print
+                # the text: such a field is given as withheld (for random bytes, about one in twenty-five thousand).
+                shown_guid = ("<16 bytes that read as text, withheld>" if GUID_TEXT.search(g) else
+                              made("%08X-%04X-%04X-%s-%s" % (d1, d2, d3, g[8:10].hex().upper(), g[10:16].hex().upper())))
+                row["codeview"] = {"signature": "RSDS", "guid": shown_guid, "age": age}
                 if raw is not None:
                     finding = ctx.next_finding("D")
                     path_text = raw.decode("utf-8", "replace")
@@ -1465,21 +1723,6 @@ def file_problem(path):
     return "not a regular file (%s)" % next((n for t, n in kinds if t(mode)), "a special file")
 
 
-SAFE_KEYS = {"head_hex", "tool", "guid", "all_results", "withheld_names_file", "first_four_bytes", "signature", "sha256"}
-
-
-def shown_answer(value, key=""):
-    if key in SAFE_KEYS:
-        return value
-    if isinstance(value, str):
-        return shown_path(value)
-    if isinstance(value, list):
-        return [shown_answer(v) for v in value]
-    if isinstance(value, dict):
-        return {k: shown_answer(v, k) for k, v in value.items()}
-    return value
-
-
 def guarded(ctx, label, fn, *args):
     """Run one reader. A read that runs off the file, a budget, or a structure that is not what it claims is a problem of that reader and
     never ends the call."""
@@ -1533,8 +1776,10 @@ def main():
     VALUES[0] = values
 
     size = os.path.getsize(path)
-    ctx = Ctx(os.path.realpath(path), cfg, values, seconds)
-    shown = shown_path(path)
+    # The key that names this call's paging files is the path as it may be printed: a digest of a path that holds a token would be a
+    # digest of the token (docs/packs.md section 8).
+    ctx = Ctx(shown_path(os.path.realpath(path)), cfg, values, seconds)
+    shown = shown_name(path)
     if shown != path:
         ctx.names.add(path, shown, "input_path")
     if size == 0:
@@ -1547,6 +1792,7 @@ def main():
             mm = mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ)
             try:
                 img = Image(mm)
+                ctx.img = img
                 if img.mm[:2] != b"MZ":
                     values.close()
                     fail("this is not a PE file (no MZ header)", status="unsupported", path=path, head_hex=bytes(img.mm[:4]).hex())
@@ -1576,6 +1822,7 @@ def main():
                     guarded(ctx, "Rich header", read_rich, img, pe, ctx, body)
                     body["coverage"] = {"structures_read": READ, "structures_not_read": NOT_READ}
             finally:
+                ctx.img = None
                 mm.close()
     finally:
         values.close()
@@ -1594,9 +1841,10 @@ def main():
         ctx.problem("the real names behind the withheld ones could not be kept: %s" % ctx.names.error)
     truncated = any(p["truncated"] for p in tables.values())
     head_out = {"tool": TOOL, "parser": PARSER, "path": shown, "bytes": size}
+    spill = Spill(ctx, max(cfg["limit"], SPILL_FLOOR))
     if stop is not None:
         print(json.dumps(shown_answer({**head_out, **body, "status": stop.status, "status_basis": stop.message, "error": stop.message, "problems": ctx.problems,
-                                       "limits_hit": ctx.limits, "withheld": COUNTS, "secret_values": values.summary(), "note": NOTE}), indent=2))
+                                       "limits_hit": ctx.limits, "withheld": COUNTS, "secret_values": values.summary(), "note": NOTE}, "", spill), indent=2))
         raise SystemExit(1)
     status = "partial" if (ctx.problems or ctx.limits) else "complete"
     basis = ("every directory this tool reads and the file declares was read in full" if status == "complete" else
@@ -1615,7 +1863,7 @@ def main():
     if values.enabled or COUNTS["urls"] or COUNTS["names"] or COUNTS["text"]:
         result["withheld_note"] = ("Token-shaped text in a name, a path or a string is withheld from this answer; its length is kept. "
                                    "The whole string is in the values file when write_values was asked for in a secret_output job.")
-    print(json.dumps(shown_answer(result), indent=2))
+    print(json.dumps(shown_answer(result, "", spill), indent=2))
 
 
 if __name__ == "__main__":
