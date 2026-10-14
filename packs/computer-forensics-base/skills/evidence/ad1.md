@@ -35,3 +35,5 @@ one reader, so their agreement is not independent corroboration. `target-query -
 walkfs inputs/case.ad1`, run as a job, is a second reader if the installed build
 opens an AD1: check, and say so if it does not. Everything `evidence/collections` says about a
 logical acquisition holds for an AD1.
+
+**Does not show.** An AD1 shows the files the imager was told to take and the digests it recorded. It does not show that the source held nothing else, that the digests were right when made, or the zone of the recorded times.

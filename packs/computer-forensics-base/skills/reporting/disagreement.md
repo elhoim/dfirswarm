@@ -7,6 +7,8 @@ tools: []
 requires_host: []
 ---
 
+Use when a finding is disputed or new evidence changes a reviewed result. Not for recording a first claim (`reporting/citations`).
+
 Disagreement is how a case gets better, and it has to leave a record that outlives
 the conversation. This is a method skill and names no tool: the acts below are the
 harness's.
