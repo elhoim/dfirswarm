@@ -7,18 +7,19 @@ Depends on the Computer Forensics Base Pack, which carries the method that is tr
 
 ## What it carries
 
-**Ten skills**, in eight families.
+**Ten skills and fifteen second-level leaves**, in eight families. Each skill opens with a decision-rule note; a
+second-level leaf (listed after it, opened only when its question arises) holds the reference material the first points to.
 
 | Family | Skills |
 | --- | --- |
-| Triage | `triage/system-profile` |
-| Logs | `logs/auth`, `logs/journal` |
-| Accounts | `accounts/users` |
-| Persistence | `persistence/mechanisms` |
-| File system | `filesystem/ext`, `filesystem/storage` |
-| Containers | `containers/docker` |
-| Packages | `packages/integrity` |
-| Timeline | `timeline/linux` |
+| Triage | `triage/system-profile`; then `triage/identity-files`, `triage/clocks-boots` |
+| Logs | `logs/auth`, `logs/journal`; then `logs/auth-lines`, `logs/auth-time`, `logs/journal-clocks-verify` |
+| Accounts | `accounts/users`; then `accounts/sessions-histories` |
+| Persistence | `persistence/mechanisms`; then `persistence/cron-timers`, `persistence/quieter-routes` |
+| File system | `filesystem/ext`, `filesystem/storage`; then `filesystem/ext-deleted`, `filesystem/storage-lvm-luks`, `filesystem/storage-xfs-btrfs-virtual` |
+| Containers | `containers/docker`; then `containers/layers-times`, `containers/removed-logs` |
+| Packages | `packages/integrity`; then `packages/baseline` |
+| Timeline | `timeline/linux`; then `timeline/linux-normalise` |
 
 **Six tools.** Each answers with fields and locators (file, line or record, byte offset), says what it did not
 read, and keeps the whole result in a file when the answer is a page of it.
