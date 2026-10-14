@@ -263,7 +263,9 @@ its index is byte for byte what it was. The harness reads only that line: a run
 whose index is over budget shows the router's own entry for each pack in the
 prompt, and the router names the notes under it. This is the mechanism; which
 packs have routers, and how long a router may be, are the pack standard's and
-the pack lint's to say.
+the pack lint's to say. `computer-forensics-base` names one, `base/router`: its
+disk profile (base, encrypted-containers, windows) does not fit the run's index
+budget without it.
 
 ### Tool help stays out of the context window
 
@@ -533,7 +535,7 @@ checksummed, and installs and verifies in the test suite.
 
 | Pack | Skills | Tools | Goals | What it is for |
 | --- | --- | --- | --- | --- |
-| `computer-forensics-base` | 25 | 14 | — | the method true of any platform; everything else depends on it |
+| `computer-forensics-base` | 29 | 16 | — | the method true of any platform; everything else depends on it |
 | `windows-forensics` | 52 | 20 | 3 | ten artefact families, from `$MFT` to what anti-forensics leaves behind |
 | `linux-forensics` | 10 | 6 | 2 | auth logs, the journal, accounts, systemd and cron, ext4, containers |
 | `macos-forensics` | 8 | 4 | 1 | property lists, the unified log, FSEvents, KnowledgeC, APFS |
@@ -716,6 +718,14 @@ import each other), and holds to this:
   that names the tool has its "Sensitive output" line say the job runs with
   `secret_output: true`, and that the ledger cites the finding's file and
   offset, never the value.
+- *No filter over a withheld value.* A tool that takes a query or an expression
+  (a SQL statement, a regular expression, a name filter) must not offer it
+  while the values are withheld: with text you cannot see, each call is one bit
+  of every row, and a few hundred calls confirm a guess. The values-to-file
+  mode takes the table (and a position range such as a rowid range), not the
+  query (`sqlite_query` with `write_values`), or lets the expression narrow
+  only what goes into the sealed file and never what the answer counts
+  (`sqlite_freespace`'s `contains`).
 - *The manifest says SENSITIVE* and names the flag. The harness reads no
   manifest-level flag yet, and a tool cannot see whether its job was run with
   `secret_output`, so what keeps a value out of an ordinary run is the refusal

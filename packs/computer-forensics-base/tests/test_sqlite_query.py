@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 import sqlite3
+import stat
 import subprocess
 import sys
 import unittest
@@ -273,6 +274,241 @@ class SqliteQuery(Case):
         huge, peak = go("select zeroblob(999999999)")
         self.assertEqual(huge["reason"], "value_too_long")
         self.assertLess(peak, 120 * 1024 * 1024)
+
+
+TEXT_CANARY = "canary-text-3f9a1c77d2e4"
+BLOB_CANARY = b"canary-blob-b81e5d02a6c9"
+
+
+class SqliteQueryValues(Case):
+    """write_values: the values of one table go to a sealed file and nowhere else. Databases are made with the sqlite3 module;
+    the canaries are strings the tests plant, so a value that reaches the answer or any other file is found by a plain search."""
+
+    def secret_db(self, name="inputs/logins.db", rows=3):
+        path = self.path(name)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        conn = sqlite3.connect(path)
+        conn.execute("create table logins(id integer primary key, origin text, secret blob, note text)")
+        conn.execute("insert into logins(origin, secret, note) values('site-one', ?, ?)", (BLOB_CANARY, TEXT_CANARY))
+        for n in range(rows - 1):
+            conn.execute("insert into logins(origin, secret, note) values(?, NULL, ?)", ("site-%d" % (n + 2), "plain %d" % n))
+        conn.commit()
+        conn.close()
+        return path
+
+    def job(self, name="job-out", job_id="j000031"):
+        out = self.path(name)
+        os.makedirs(out, exist_ok=True)
+        return out, {"JOB_ID": job_id, "OUT": out}
+
+    def export(self, db, env=None, **kw):
+        return run_tool("sqlite_query", dict({"db_path": db, "table": "logins", "write_values": True}, **kw), self.dir, env=env)
+
+    def files_outside(self, *skip):
+        """Every file under the scratch directory except the evidence and the skipped ones."""
+        found = []
+        for base, _dirs, files in os.walk(self.dir):
+            for f in files:
+                full = os.path.join(base, f)
+                if full not in skip and not full.startswith(self.path("inputs") + os.sep):
+                    found.append(full)
+        return found
+
+    def test_the_values_are_refused_outside_a_job_and_nothing_is_written(self):
+        db = self.secret_db()
+        r = self.export(db)
+        self.assertEqual(r.code, 1)
+        self.assertEqual(r.stderr, "", "a refusal is a JSON answer, not a traceback")
+        self.assertIn("refused outside a job", r.json["error"])
+        self.assertEqual(r.json["write_values"], "refused")
+        self.assertNotIn(TEXT_CANARY, r.stdout)
+        self.assertEqual(self.files_outside(), [])
+
+    def test_a_value_is_in_the_sealed_file_only_not_in_the_answer_nor_in_any_other_file(self):
+        db = self.secret_db()
+        out, env = self.job()
+        r = self.export(db, env, limit=2)
+        self.assertEqual(r.code, 0, r.stdout + r.stderr)
+        self.assertIs(r.json["ok"], True)
+        # Not in stdout (the whole answer, its text form included), in neither encoding.
+        b64 = base64.b64encode(BLOB_CANARY).decode()
+        for needle in (TEXT_CANARY, BLOB_CANARY.decode(), b64, hashlib.sha256(BLOB_CANARY).hexdigest(), hashlib.sha256(TEXT_CANARY.encode()).hexdigest()):
+            self.assertNotIn(needle, r.stdout)
+            self.assertNotIn(needle, r.stderr)
+        # The locators are there: table, rowid, column, type, length, and the counts.
+        self.assertEqual((r.json["table"], r.json["locator"], r.json["row_count"]), ("logins", "rowid", 3))
+        first = r.json["rows"][0]
+        self.assertEqual((first["n"], first["rowid"]), (1, 1))
+        cols = [c["name"] for c in r.json["columns"]]
+        self.assertEqual(cols, ["id", "origin", "secret", "note"])
+        self.assertEqual(first["cells"][cols.index("secret")], "blob:%d" % len(BLOB_CANARY))
+        self.assertEqual(first["cells"][cols.index("note")], "text:%d" % len(TEXT_CANARY))
+        self.assertEqual(r.json["cells_null"], 2)
+        self.assertEqual(r.json["secret_values"]["written"], r.json["cells_with_a_value"])
+        # The values file is the one place: mode 0600, named, with both canaries, one line per cell that is not NULL.
+        values_path = os.path.join(out, "sqlite-query-values.jsonl")
+        self.assertEqual(r.json["secret_values"]["values_file"], "store/jobs/j000031/out/sqlite-query-values.jsonl")
+        self.assertEqual(stat.S_IMODE(os.stat(values_path).st_mode), 0o600)
+        lines = [json.loads(l) for l in self.read(values_path).splitlines()]
+        self.assertEqual(len(lines), 3 * 3 + 1)
+        by = {(l["rowid"], l["column"]): l for l in lines}
+        self.assertEqual(by[(1, "note")]["value"], TEXT_CANARY)
+        self.assertEqual(base64.b64decode(by[(1, "secret")]["value"]["blob_b64"]), BLOB_CANARY)
+        self.assertEqual((by[(1, "secret")]["table"], by[(1, "secret")]["n"], by[(1, "secret")]["length"]), ("logins", 1, len(BLOB_CANARY)))
+        self.assertNotIn("sha256", self.read(values_path), "no digest of a value, not even in the sealed file")
+        self.assertNotIn((2, "secret"), by)
+        # No other file holds a value: the locators file (3 rows, limit 2) is made, and has none.
+        self.assertTrue(r.json["truncated"])
+        locators = os.path.join(out, "tool-output", os.path.basename(r.json["locators_file"]))
+        extra = self.files_outside(values_path)
+        self.assertEqual(extra, [locators], "the locators file is the only other file")
+        for f in extra:
+            data = self.read(f, "rb")
+            for needle in (TEXT_CANARY.encode(), BLOB_CANARY, b64.encode()):
+                self.assertNotIn(needle, data, f)
+        located = [json.loads(l) for l in self.read(locators).splitlines()]
+        self.assertEqual([x["rowid"] for x in located[1:]], [1, 2, 3])
+        self.assertEqual(len(located[1]["cells"]), 4)
+
+    def test_a_second_run_in_the_same_jobs_output_is_refused_as_json_and_keeps_the_first_file(self):
+        db = self.secret_db()
+        out, env = self.job(job_id="j000032")
+        self.assertEqual(self.export(db, env).code, 0)
+        values_path = os.path.join(out, "sqlite-query-values.jsonl")
+        before = self.read(values_path)
+        again = self.export(db, env)
+        self.assertEqual(again.code, 1)
+        self.assertEqual(again.stderr, "", "a refusal is a JSON answer, not a traceback")
+        self.assertIn("values file already exists", again.json["error"])
+        self.assertEqual(again.json["write_values"], "refused")
+        self.assertEqual(self.read(values_path), before, "the first run's file is as it was")
+        self.assertEqual([n for n in os.listdir(os.path.join(out, "tool-output")) if n.startswith(".")] if os.path.isdir(os.path.join(out, "tool-output")) else [], [], "no half-written file is left")
+
+    def test_a_link_at_the_values_file_is_refused_by_name_and_not_followed(self):
+        db = self.secret_db()
+        out, env = self.job(job_id="j000033")
+        victim = self.write("victim.txt", "keep me")
+        os.symlink(victim, os.path.join(out, "sqlite-query-values.jsonl"))
+        r = self.export(db, env)
+        self.assertEqual(r.code, 1)
+        self.assertIn("values file already exists", r.json["error"])
+        self.assertEqual(self.read(victim), "keep me")
+
+    def test_there_is_no_sql_in_the_mode_so_no_filter_confirms_a_guess(self):
+        db = self.secret_db()
+        out, env = self.job(job_id="j000034")
+        # The oracle would be: select rowid from logins where note like 'canary-text-3f%' -> a row means the guess is right.
+        r = run_tool("sqlite_query", {"db_path": db, "write_values": True, "table": "logins",
+                                      "sql": "select rowid from logins where note like 'canary-text-3f%'"}, self.dir, env=env)
+        self.assertEqual(r.code, 1)
+        self.assertEqual(r.json["write_values"], "refused")
+        self.assertIn("not sql", r.json["error"])
+        self.assertFalse(os.path.exists(os.path.join(out, "sqlite-query-values.jsonl")), "refused before anything was created")
+        # The parameters of the mode do not leak into an ordinary query either.
+        plain = run_tool("sqlite_query", {"db_path": db, "sql": "select 1", "table": "logins"}, self.dir)
+        self.assertEqual(plain.code, 1)
+        self.assertIn("belong to write_values", plain.json["error"])
+        # A rowid range selects by position, and the counts are the same whatever the values are.
+        ranged = self.export(db, env, rowid_from=2, rowid_to=3)
+        self.assertEqual(ranged.code, 0, ranged.stdout)
+        self.assertEqual([x["rowid"] for x in ranged.json["rows"]], [2, 3])
+        self.assertEqual(ranged.json["row_count"], 2)
+        self.assertNotIn(TEXT_CANARY, ranged.stdout)
+
+    def test_columns_choose_what_is_written_and_a_wrong_name_or_a_view_is_refused(self):
+        db = self.secret_db()
+        out, env = self.job(job_id="j000035")
+        r = self.export(db, env, columns=["note"])
+        self.assertEqual(r.code, 0, r.stdout)
+        self.assertEqual([c["name"] for c in r.json["columns"]], ["note"])
+        lines = [json.loads(l) for l in self.read(os.path.join(out, "sqlite-query-values.jsonl")).splitlines()]
+        self.assertEqual({l["column"] for l in lines}, {"note"})
+        for kw, word in (({"columns": ["nope"]}, "no column"), ({"columns": []}, "columns is a list"), ({"table": "nope"}, "no table")):
+            out2, env2 = self.job(name="o-%d" % len(word), job_id="j000036")
+            bad = self.export(db, env2, **kw)
+            self.assertEqual(bad.code, 1, kw)
+            self.assertIn(word, bad.json["error"], kw)
+            self.assertIsNone(bad.json and bad.json.get("secret_values"))
+        conn = sqlite3.connect(db)
+        conn.execute("create view v as select * from logins")
+        conn.commit()
+        conn.close()
+        out3, env3 = self.job(name="o-view", job_id="j000037")
+        view = self.export(db, env3, table="v")
+        self.assertEqual(view.code, 1)
+        self.assertIn("no table", view.json["error"])
+
+    def test_a_table_without_rowid_is_located_by_position_and_a_rowid_range_is_refused(self):
+        path = self.path("inputs/w.db")
+        os.makedirs(os.path.dirname(path))
+        conn = sqlite3.connect(path)
+        conn.execute("create table kv(k text primary key, v text) without rowid")
+        conn.executemany("insert into kv values(?, ?)", [("a", TEXT_CANARY), ("b", "plain")])
+        conn.commit()
+        conn.close()
+        out, env = self.job(job_id="j000038")
+        r = run_tool("sqlite_query", {"db_path": path, "table": "kv", "write_values": True, "columns": ["v"]}, self.dir, env=env)
+        self.assertEqual(r.code, 0, r.stdout)
+        self.assertIn("this table has no rowid", r.json["locator"])
+        self.assertEqual([(x["n"], x["rowid"]) for x in r.json["rows"]], [(1, None), (2, None)])
+        self.assertNotIn(TEXT_CANARY, r.stdout)
+        out2, env2 = self.job(name="o2", job_id="j000039")
+        ranged = run_tool("sqlite_query", {"db_path": path, "table": "kv", "write_values": True, "rowid_from": 1}, self.dir, env=env2)
+        self.assertEqual(ranged.code, 1)
+        self.assertIn("WITHOUT ROWID", ranged.json["error"])
+
+    def test_a_name_shaped_like_a_token_is_not_printed_and_text_that_is_not_utf8_is_kept_in_the_file_only(self):
+        token = "Zq8Xv3Lm9Rt2Hw5Bn7Cd4Fg6Js1Kp0"
+        path = self.path("inputs/%s.db" % token)
+        os.makedirs(os.path.dirname(path))
+        conn = sqlite3.connect(path)
+        conn.text_factory = bytes
+        conn.execute('create table "%s"(v)' % token)
+        conn.execute('insert into "%s" values(CAST(? AS TEXT))' % token, (b"\xff\xfe" + TEXT_CANARY.encode(),))
+        conn.commit()
+        conn.close()
+        out, env = self.job(job_id="j000040")
+        r = run_tool("sqlite_query", {"db_path": path, "table": token, "write_values": True}, self.dir, env=env)
+        self.assertEqual(r.code, 0, r.stdout + r.stderr)
+        self.assertNotIn(token, r.stdout, "a file or table name shaped like a token is withheld on every channel")
+        self.assertIn("withheld", r.stdout)
+        self.assertNotIn(TEXT_CANARY, r.stdout)
+        line = json.loads(self.read(os.path.join(out, "sqlite-query-values.jsonl")).splitlines()[0])
+        self.assertEqual(line["table"], token, "the sealed file keeps the real name")
+        self.assertEqual(base64.b64decode(line["value"]["bytes_b64"]), b"\xff\xfe" + TEXT_CANARY.encode())
+        self.assertEqual(r.json["rows"][0]["cells"], ["text_not_utf8:%d" % (2 + len(TEXT_CANARY))])
+        # An error that quotes the name withholds it too.
+        out2, env2 = self.job(name="o2", job_id="j000041")
+        bad = run_tool("sqlite_query", {"db_path": path, "table": token + "x", "write_values": True}, self.dir, env=env2)
+        self.assertEqual(bad.code, 1)
+        self.assertNotIn(token, bad.stdout)
+
+    def test_a_large_blob_is_written_in_slices_and_whole_and_the_ordinary_mode_is_as_it_was(self):
+        path = self.path("inputs/big.db")
+        os.makedirs(os.path.dirname(path))
+        blob = os.urandom(2 * 1024 * 1024 + 17)
+        conn = sqlite3.connect(path)
+        conn.execute("create table t(d blob)")
+        conn.execute("insert into t values(?)", (blob,))
+        conn.commit()
+        conn.close()
+        out, env = self.job(job_id="j000042")
+        r = run_tool("sqlite_query", {"db_path": path, "table": "t", "write_values": True}, self.dir, env=env)
+        self.assertEqual(r.code, 0, r.stdout[:300])
+        line = json.loads(self.read(os.path.join(out, "sqlite-query-values.jsonl")))
+        self.assertEqual(base64.b64decode(line["value"]["blob_b64"]), blob)
+        self.assertEqual(line["length"], len(blob))
+        self.assertNotIn(base64.b64encode(blob[:60]).decode(), r.stdout)
+        # Outside write_values the tool returns what it always did: the value is in the answer.
+        plain = run_tool("sqlite_query", {"db_path": self.secret_db(), "sql": "select note, secret from logins limit 1"}, self.dir)
+        self.assertEqual(plain.code, 0, plain.stdout)
+        self.assertIn(TEXT_CANARY, plain.stdout)
+        self.assertEqual(plain.json["rows"][0]["values"][1]["sha256"], hashlib.sha256(BLOB_CANARY).hexdigest())
+        # Inside a job the ordinary mode is unchanged too: no values file is made.
+        out2, env2 = self.job(name="o3", job_id="j000043")
+        injob = run_tool("sqlite_query", {"db_path": self.secret_db("inputs/b.db"), "sql": "select note from logins limit 1"}, self.dir, env=env2)
+        self.assertEqual(injob.code, 0, injob.stdout)
+        self.assertFalse(os.path.exists(os.path.join(out2, "sqlite-query-values.jsonl")))
 
 
 if __name__ == "__main__":

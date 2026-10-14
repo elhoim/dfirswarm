@@ -23,4 +23,4 @@ Use when a `.db`, `.sqlite` or an app store is the evidence. Not for another dat
 
 **Does not show.** A snapshot and a query show the rows SQLite holds. They do not recover deleted records, the freelist or unallocated pages (a non-zero `freelist_count` says free pages exist, not what they held), and a row's absence is not the event's absence. Of a database encrypted by an extension (SQLCipher) the tool shows only the first bytes and their entropy, which identify nothing.
 
-**Sensitive output.** Rows of cookie, login, token, key and message tables hold secrets and private text: run the query as a job with `secret_output: true`, and cite table, `rowid` and column, never the value, a fragment of it, or the `sha256` and base64 of a short BLOB. `limit` is 1 or more, so the inline page always carries at least one row of values: on such a table select only locators (`rowid`, `length(col)`, `typeof(col)`).
+**Sensitive output.** Rows of cookie, login, token, key and message tables hold secrets and private text: run the query as a job with `secret_output: true` and cite table, `rowid` and column, never the value. Only if you need the rows: `data/sqlite-secrets`.
