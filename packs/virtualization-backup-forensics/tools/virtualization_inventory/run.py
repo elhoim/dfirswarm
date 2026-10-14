@@ -9,7 +9,8 @@ file this tool recognises and does not read is listed as unsupported, never gues
     libvirt   a domain XML (<domain>: devices, disks with their backing stores), a domain snapshot XML (<domainsnapshot>)
               and a storage pool XML (<pool>)
     Proxmox   a VM or container configuration (/etc/pve/qemu-server/<id>.conf, /etc/pve/lxc/<id>.conf, with its snapshot
-              sections) and storage.cfg
+              sections; a [special:...] section such as the cloud-init settings is listed as special, not as a snapshot)
+              and storage.cfg
 
 What it is and is not. It lists what the files say exist, with the file and the line or element each statement came from.
 A configuration that names a VM does not show the VM ran, exists on a host now, or was not deleted; a disk it names is
@@ -22,7 +23,10 @@ SENSITIVE OUTPUT. A configuration can hold a console password, a cloud-init pass
 under a key this tool does not show. Names, paths and values it does show pass the shape check of the shared block
 (a token-shaped run or user-info is withheld; a long text is shown cut with its whole length); the original goes to one
 private file only when write_text is asked for, in a job. XML files are read with entity declarations refused and the
-element count and depth bounded.
+element count and depth bounded. A credential-like key is named in every section it sits in (a snapshot keeps its own
+copy of the settings), and credential-like attributes are named to a cap and counted past it. Every key and value of the
+answer and of its paging files passes the one way out (SHARED BOUNDARY), which withholds by shape again and checks what it
+wrote; a piece of a path (a datastore, a node, a storage name) is taken from the path after the whole was withheld.
 """
 import collections
 import datetime

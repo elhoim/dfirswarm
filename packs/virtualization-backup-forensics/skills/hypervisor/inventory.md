@@ -18,5 +18,5 @@ Use when you hold configuration files or inventory exports and need the VMs, the
 7. **Snapshots from configuration** carry the time only where the file states an epoch (Proxmox `snaptime`, libvirt `creationTime`). A VMware `.vmsd` keeps two raw fields that this tool does not decode; do not date a snapshot from them without a source that does.
 
 **Shows.** What the files say was configured, with file and line or element. **Does not show.** That a VM, disk or snapshot exists, ran or was removed.
-**Record.** Source ids, counts per kind, unsupported files, disks not in the set, credential-like keys (the answer lists their names and lines, never values).
+**Record.** Source ids, counts per kind, unsupported files, disks not in the set, credential-like keys (names, lines and sections, never values; a Proxmox snapshot or `special_sections` entry keeps its own copy of the settings).
 **Sensitive output.** A console password, a cloud-init secret or a key may sit in a configuration: run it as a job with `secret_output: true`, report where the secret is and what it grants, and never use it.

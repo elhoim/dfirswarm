@@ -5,7 +5,9 @@ was not understood.
 The products and layouts read, and no others:
 
     Proxmox VE and Proxmox Backup Server   the task index (UPID lines: node, pid, start, type, id, user, then the end time
-                                           and status) and a task log (vzdump / backup log lines and the TASK result line)
+                                           and status; a Backup Server UPID carries one more field, the task counter, and
+                                           escapes its worker id) and a Proxmox VE task log (vzdump log lines and the
+                                           TASK result line; a Backup Server task log is not read)
     declared_csv, declared_jsonl,          an export of ANY product, read through a mapping the CALLER declares (which
     declared_xml                           column or field is the time, the action, the result, the actor and the object, how
                                            the time is written, and what each action means). The tool does not know the
@@ -25,10 +27,16 @@ Time is read exactly as declared: epoch seconds are UTC by definition; an ISO 86
 with no zone is NOT assumed UTC, it stays raw (`time_utc` is null and `time_basis` says why) unless the caller declares a fixed
 offset, which does not account for daylight saving.
 
+A declared field a record does not have is counted per field (the CSV header check's twin for JSON Lines and XML), and a
+time or action absent makes the answer partial. A declared XML record is held in memory one at a time and is bounded in
+bytes: a record over the budget is counted and located, never read in part.
+
 SENSITIVE OUTPUT. A log message, an error text and an object path can hold a path, a user name, a token or a repository string
 with user-info. The answer carries the structured fields after the shape check of the shared block (a token-shaped run or
 user-info is withheld; a long text is shown cut with its whole length) and the length of the free-text message; the message
-itself and the original of anything withheld go to one private file only when write_text is asked for, in a job.
+itself and the original of anything withheld go to one private file only when write_text is asked for, in a job. Every key
+and value of the answer and of its paging files passes the one way out (SHARED BOUNDARY), which withholds by shape again and
+checks what it wrote; a time basis is a fixed phrase, never an exception's text.
 """
 import collections
 import csv
