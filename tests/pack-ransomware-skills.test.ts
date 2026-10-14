@@ -16,6 +16,7 @@ const PACK = join(ROOT, "packs", "ransomware-response");
 const SKILLS = join(PACK, "skills");
 const BASE_SKILLS = join(ROOT, "packs", "computer-forensics-base", "skills");
 const TOKENS = (text: string): number => Buffer.byteLength(text) / 4.245;
+const flat = (s: string): string => s.replace(/\s+/g, " ");
 const norm = (s: string): string => s.replace(/[`*]/g, "").replace(/\s+/g, " ").toLowerCase().trim();
 
 type Skill = { id: string; meta: Record<string, string | string[]>; body: string; text: string };
@@ -72,7 +73,7 @@ test("every skill is a leaf within the budget, opens with Use when ... Not for .
     assert.match(first, /\bNot for\b/, `${s.id} says what it is not for`);
     const entry = `- \`${s.id}\` ${s.meta.title}: ${s.meta.when}`;
     assert.ok(TOKENS(entry) <= 40, `${s.id} index entry is ${Math.round(TOKENS(entry))} tokens`);
-    assert.match(s.body, /Does not show/i, `${s.id} says what it does not show`);
+    assert.match(flat(s.body), /Does not show/i, `${s.id} says what it does not show`);
   }
   const index = await readFile(join(SKILLS, "INDEX.md"), "utf8");
   for (const id of skills.keys()) assert.ok(index.includes(`\`${id}\``), `${id} is in the index`);
