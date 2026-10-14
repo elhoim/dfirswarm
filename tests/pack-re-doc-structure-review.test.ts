@@ -636,3 +636,19 @@ test("fuzz: thousands of trailer dictionaries that never close, read by scanning
     assert.ok(rssMb < 300, `the call peaked at ${rssMb.toFixed(0)} MB of memory`);
   });
 });
+
+test("fuzz: a target of hundreds of thousands of characters is not shown, by length only, and the call ends in time", async () => {
+  await withCwd(async (cwd) => {
+    // A URI whose path is 10,000 tokens between slashes, the shape a mutation of a template made: withholding each token looks back
+    // across its slash, so the work is not linear in the length.
+    const uri = "https://h.example/" + "x/ghp_Ab3dEf5hIj7lMn9pQr1tUv/".repeat(10_000);
+    const pdf = buildPdf([CATALOG("/OpenAction 4 0 R"), PAGES, PAGE(), { num: 4, body: `<< /S /URI /URI (${uri}) >>` }], "/Root 1 0 R");
+    await put(cwd, "work/long.pdf", pdf.file);
+    const { run: r, seconds } = bounded(cwd, { path: "work/long.pdf", max_seconds: 5 }, 60_000);
+    const a = body(r);
+    assert.ok(seconds < 5 + 5, `the call took ${seconds.toFixed(1)} s`);
+    const row = a.tables.pdf_actions.rows[0];
+    assert.equal(row.target_length, uri.length);
+    assert.match(row.target, /^<a target of \d+ characters: longer than the 2048 shown, so not shown/);
+  });
+});

@@ -230,6 +230,19 @@ def cell(value):
 # END SHARED WITHHOLDING
 
 
+SHOWN_TARGET = 2048                 # characters of a target the answer shows; the whole is in the values file with write_values
+
+
+def shown_target(text):
+    """A target (a URL, a path) as the answer shows it. One longer than SHOWN_TARGET is not shown at all: a cut could leave the head of a
+    token too short to be recognised as one, and withholding a long text is not linear in its length."""
+    if len(text) > SHOWN_TARGET:
+        return "<a target of %d characters: longer than the %d shown, so not shown; the whole is in the values file with write_values>" % (len(text), SHOWN_TARGET)
+    if re.match(r"[A-Za-z][A-Za-z0-9+.-]*://", text):
+        return redact_target(text)
+    return cell(shown_path(text))
+
+
 def redact_target(url):
     """redact_url, and the host too: the shared block keeps the authority as it is, and a host name can carry a token (a bucket
     or a tenant named after a key). Everything token-shaped in the host is withheld; a plain host name stays."""
@@ -3384,7 +3397,7 @@ def trace_catalog(pdf, ctx, catalog, cnum, interesting, extractor):
             if isinstance(u, PStr):
                 text = string_target(u, row)
                 if text is not None:
-                    row["target"] = redact_target(text)
+                    row["target"] = shown_target(text)
                     row["target_length"] = len(text)
                     target_value = text
         elif subtype in ("Launch", "GoToR", "GoToE", "SubmitForm", "ImportData"):
@@ -3392,8 +3405,7 @@ def trace_catalog(pdf, ctx, catalog, cnum, interesting, extractor):
             if "name" in fs:
                 text = string_target(fs["name"], row)
                 if text is not None:
-                    shown = redact_target(text) if re.match(r"[A-Za-z][A-Za-z0-9+.-]*://", text) else shown_path(text)
-                    row["target"] = cell(shown)
+                    row["target"] = shown_target(text)
                     row["target_length"] = len(text)
                     target_value = text
             win, _ = pdf.deref(value.get("Win"))
@@ -4055,7 +4067,7 @@ def probe_rtf(blob, ctx, extractor):
     for text, off, seen, cut in templates:
         clean = text.decode("latin-1").strip()
         finding = ctx.next_finding("T")
-        row = {"finding_id": finding, "offset": off, "target": redact_target(clean) if re.match(r"[A-Za-z][A-Za-z0-9+.-]*://", clean) else cell(shown_path(clean)), "target_length": len(clean)}
+        row = {"finding_id": finding, "offset": off, "target": shown_target(clean), "target_length": len(clean)}
         if cut:
             row.update({"target_cut": True, "target_bytes_in_file": seen})
         tmpl_page.add(row)
