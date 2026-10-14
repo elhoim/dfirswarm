@@ -41,10 +41,11 @@ function clean(where: string, data: string | Buffer, list: ReturnType<typeof nee
   for (const n of list) assert.ok(!buf.includes(n.bytes), `${where}: holds ${n.label}`);
 }
 
-test("the sanitiser in each copy of the shared block withholds every shape, alone, inside a path, after a `/`, with a letter in front and cut after an `@`", () => {
+test("the sanitiser in each copy of the shared block withholds every shape, 300 canaries of each, alone, inside a path, after a `/`, with a letter in front and cut after an `@`", () => {
   const texts: { text: string; c: ReturnType<typeof canaries>[number][1] }[] = [];
-  for (const max of [31, 200, 2000]) {
-    for (const [, c] of canaries(max, max)) {
+  for (let seed = 0; seed < 300; seed++) {
+    const max = [31, 200, 2000][seed % 3]!;
+    for (const [, c] of canaries(max, 10_000 + seed)) {
       for (const wrap of [(s: string) => s, (s: string) => `word/${s}.xml`, (s: string) => `C:/Users/x/${s}`, (s: string) => `a b ${s} c`, (s: string) => `x${s}`, (s: string) => `Macros/VBA/${s}/dir`]) {
         texts.push({ text: wrap(c.plant), c });
       }
