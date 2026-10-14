@@ -14,7 +14,11 @@ and `qemu-img` and Dissect are the base pack's.
 
 ## What it carries
 
-**Three skills,** one for each tool, as decision-rule leaves: `hypervisor/inventory`, `snapshots/chain-integrity`, `backup/catalogues-and-retention`. The router, the method leaves and the recovery skills follow in the next change.
+**Ten skills**, a router, a method leaf and eight decision-rule leaves:
+`router/start`, `evidence/boundaries`, `control-plane/chronology`,
+`hypervisor/activity`, `hypervisor/inventory`, `snapshots/chain-integrity`,
+`snapshots/markers`, `backup/catalogues-and-retention`, `backup/deletion-vs-loss`,
+`recovery/survivability`.
 
 **Three tools,** each with the standard library only and each saying what it did
 not read:
@@ -32,6 +36,8 @@ not read:
   index and task logs, or an export of any product read through a mapping the
   caller declares, into canonical events. Any other product is `unsupported`
   until fixtures for it exist.
+
+**One goal template**: `what-recovery-survives.md`.
 
 ## Two things the skills keep repeating
 

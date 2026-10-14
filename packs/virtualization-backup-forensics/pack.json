@@ -1,7 +1,7 @@
 {
   "id": "virtualization-backup-forensics",
   "name": "Virtualization and Backup Forensics Pack",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Method and tooling for the control plane of virtualization and backup: what hypervisor management records and VM configuration files say, whether a snapshot or disk chain is complete and which markers a consolidation or an unclean close may leave, what a backup catalogue, job record and retention setting show, and which recovery points survive. It reads exports and configuration files offline; it never runs hypervisor or backup software, reads no guest content, and supports only the products its tools list.",
   "licence": "AGPL-3.0-or-later",
   "authors": [
@@ -18,20 +18,28 @@
   "checksums": {
     "sha256": {
       "LICENCE": "5b94f18424dbef1e77eda33a465e946c2c8eb715fa5236afe2c6ec6763af80d3",
-      "README.md": "99ddcab9f73fcf13bce16ac2942b78a496bc30e1303fecfcda51d961d90f9196",
+      "README.md": "12ebc9559ec8741911b251193c5808e5287c7f9161780c53f4d896102a0a084a",
       "tools/backup_audit_normalise/manifest.json": "44b92bd750bef5fd046d758ba2a03fc3b8904f2562c5ce917e69c84650f3c9bd",
       "tools/backup_audit_normalise/run.py": "4bb95776309e78d0e1685b342c95446083a4ebebc23f088c38fa05824b847660",
       "tools/snapshot_chain_check/manifest.json": "83cc06ea5659800ea01321f97107a198f2e7be9e5729abdad4a892115468ce02",
       "tools/snapshot_chain_check/run.py": "1fea07fd1d3afc6857aae60941cf749d4ef459ccfc56a3eb30a09bff39a56c86",
       "tools/virtualization_inventory/manifest.json": "28d54a6826756f1c80814a6072419802200842af3a9574ac6de53c91d4eb81a4",
       "tools/virtualization_inventory/run.py": "4f7ce35769127468dd88bbdd18234feccd9aa515dfc5f4ccbc17162bded96155",
+      "goals/what-recovery-survives.md": "72d6c12fd34ab2220eebc3587e46804d3f16f48d0568d7bb219fdf9c96829b2e",
       "tests/pack.test.sh": "35f4ae3f6e7e8ad51e0bc57a3904852dc550a7b23756951a21285a3497c213f4",
-      "skills/snapshots/chain-integrity.md": "11e2baf0853c59660ff5cb586a7f8004dafd00b22a67d4c88db0de56bfae3d9b",
-      "skills/backup/catalogues-and-retention.md": "f9dba65bbc3397b14ca17a8d92248251d1863bfdbdb422a1c107e0c7d9c0bbe2",
+      "skills/evidence/boundaries.md": "404896a8de74eaec8998282ffd2e4038c4451bb88e59d3a071a07a7f597fee9d",
+      "skills/snapshots/chain-integrity.md": "4874622e25472372d799b4c257e54921236a2100b667295dc74a46e51f5fc289",
+      "skills/snapshots/markers.md": "45c637bc5fe7bc0701cbc185552477b6e2a6f06fd632ab12f58091476050582c",
+      "skills/recovery/survivability.md": "b01a27b624ab667e7a6e21a0d3268f808494458d21b38b10a251136d56ba9518",
+      "skills/backup/catalogues-and-retention.md": "12224bb04547c9fe82f7f3fb20b64c81e83e2b4359a5403bcd970cae131f5d6b",
+      "skills/backup/deletion-vs-loss.md": "3c761d2733cb9016521a3535b628c688f1c3f61515ce73c4b6c8fd3b1743928d",
+      "skills/hypervisor/activity.md": "11c50dfd38628d89f5e1a7e543cdd4194a280cca7959b0b3f7c86fad68824d18",
       "skills/hypervisor/inventory.md": "8d676675f43fa0a5eec3a61de30f7d1a2bfab24ee69ea99182b5aa2cde35beef",
+      "skills/control-plane/chronology.md": "a5c16a12c85044edefe1de16fc6402073200a96660bbe3be0aa1e55bd986369f",
+      "skills/router/start.md": "69ce04261165563a53dd339fd72d70ead0aee639e8960134e185c7b9cb3af62e",
       "requires/host.json": "064c01d7d1d7182f054ad3b8b4682b7f588d74d0baf9177aabf86fa9716b7ebe",
       "requires/python.txt": "fa9a8f44dea09e8f1cdc03b90e14051ddf8ab2526fd075e952166541f7ec5bb3",
-      "skills/INDEX.md": "a3dde378b84c5b1e21b75f97f70f54bb513614e9c287bae0901ed649333f282d"
+      "skills/INDEX.md": "615d1525d79b24f2920db6911a24792ce504231cbc150070511500dbf59f4b75"
     }
   },
   "tools": [
@@ -39,5 +47,15 @@
     "snapshot_chain_check",
     "virtualization_inventory"
   ],
-  "skills": 3
+  "skills": 10,
+  "method_only": [
+    {
+      "path": "skills/router/start.md",
+      "why": "the pack's router: it says which note answers which question and names no tool or program"
+    },
+    {
+      "path": "skills/evidence/boundaries.md",
+      "why": "a method leaf about the planes of virtualization evidence and how to handle them; the only tool it names, check_inputs, belongs to the base pack"
+    }
+  ]
 }
