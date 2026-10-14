@@ -1,0 +1,64 @@
+{
+  "name": "pe_directories",
+  "description": "Read the PE data directories that pe_info declares and does not read, through checked ranges (an RVA becomes a file offset only through a section that holds file bytes there; a table that runs off its section is a problem, never an empty list). Exports: every function with ordinal (base plus index), RVA, section, name (attached through the ordinal table) and forwarder string. Delay-load imports: libraries and function names or ordinals, in the RVA form and the old virtual-address form. TLS: the directory and the callback array, each callback with the section that holds it (a declaration: nothing says what a callback does). Resources: the type/name/language tree with each leaf's RVA, file offset and size; the version information (the fixed file version, file flags and a few well-known string keys by value, the others by name: claims the file makes about itself) and the manifest's requested execution level; extract resource:<row> writes a resource byte for byte. CLR header: runtime version, flags, entry point token, strong-name and managed-native fields as declarations, and the metadata root's version string and stream names and sizes (the metadata tables are not read, so there is no assembly name). Debug directory: entry types and times (raw and UTC) and the CodeView GUID, age and PDB path (a claim about the build machine). Rich header: raw decoded entries, not validated. A string out of the file shaped like a token is withheld from the answer and its table files (the whole only with write_values in a job). Not read: import and base-relocation contents, exception tables, load configuration contents, resource contents beyond the version information and the manifest, CLR metadata tables and method bodies, Authenticode (nothing is parsed or verified), and anything about what code does. Every answer carries status, problems, limits_hit and coverage; a budget that is reached is a limit.",
+  "use": {
+    "magic": [
+      {
+        "offset": 0,
+        "hex": "4d5a"
+      }
+    ],
+    "extensions": [
+      ".exe",
+      ".dll",
+      ".sys",
+      ".scr",
+      ".cpl",
+      ".efi",
+      ".ocx",
+      ".drv"
+    ]
+  },
+  "params": {
+    "path": {
+      "type": "string",
+      "description": "A PE file (EXE, DLL, driver)"
+    },
+    "extract_to": {
+      "type": "string",
+      "description": "Where resources named in extract are written: a directory under work/<your agent id>/ (in a job, under $OUT). Files are created exclusively, mode 0600, named extract-NNNN.bin, and can contain secrets"
+    },
+    "extract": {
+      "type": "array",
+      "description": "Resources to write byte for byte (at most 64): resource:<row number in the resources table>. Needs extract_to; run in a job with secret_output: true"
+    },
+    "write_values": {
+      "type": "boolean",
+      "description": "Write each export forwarder, version string and PDB path whole to pe-directories-values.jsonl under $OUT, and the real name behind every withheld name (default false; refused outside a job; run the job with secret_output: true)"
+    },
+    "max_stream_bytes": {
+      "type": "integer",
+      "description": "Most bytes one resource may be read as (default 16777216)"
+    },
+    "max_total_bytes": {
+      "type": "integer",
+      "description": "Most bytes all extracted resources may total (default 134217728)"
+    },
+    "limit": {
+      "type": "integer",
+      "description": "Rows of one table kept in the answer (default 1000); the whole of a longer table is written to a file and named"
+    },
+    "max_seconds": {
+      "type": "integer",
+      "description": "The tool's own time limit in seconds, from 1 to 110 (default 100); a read that reaches it stops, reports what it read and says so"
+    }
+  },
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 120,
+  "example": "{\"path\": \"work/extracted/sample.dll\"}",
+  "by": "maintainer",
+  "at": "2026-10-14T09:00:00.000Z",
+  "version": 1,
+  "sha256": "62d6d8664c637df0cb20e1b2adbacb56e694b9ac5652873d279c7e0e219df882"
+}

@@ -458,3 +458,345 @@ export const hex = (b: Buffer, wrap = 0): string => {
 };
 
 export { u16, u32, u64 };
+
+// --- PE data directories (Microsoft PE/COFF specification) -----------------------------------------------------------------
+
+export type PeDirOptions = {
+  plus?: boolean;
+  imageBase?: number;
+  exports?: { imageName?: string; base?: number; stamp?: number; functions: { name?: string; rva?: number; forward?: string }[] };
+  delayImports?: { dll: string; functions: (string | number)[]; vaForm?: boolean }[];
+  tlsCallbacks?: number[];                 // RVAs inside .text
+  resources?: { type: number | string; name: number | string; lang: number; data: Buffer; declaredSize?: number }[];
+  clr?: { flags?: number; entryToken?: number; version?: string; streams?: { name: string; size: number }[]; strongName?: boolean; managedNative?: Buffer; noMetadata?: boolean; badSignature?: boolean };
+  debug?: { type: number; stamp?: number; guid?: Buffer; age?: number; pdb?: string }[];
+  rich?: { key: number; entries: [number, number][]; breakPadding?: boolean };
+  exportDirSizeOverride?: number;
+};
+
+export type BuiltPeDirs = { file: Buffer; rdataRva: number; rsrcRva: number; textRva: number; rvas: Record<string, number>; rawOf: (rva: number) => number };
+
+const utf16z = (s: string): Buffer => Buffer.from(s + "\0", "utf16le");
+const align = (n: number, a: number): number => Math.ceil(n / a) * a;
+const padTo = (b: Buffer, a: number): Buffer => (b.length % a ? Buffer.concat([b, Buffer.alloc(a - (b.length % a))]) : b);
+
+/** [VS_VERSIONINFO] a block: wLength, wValueLength, wType, the key, padding, the value, padding, the children. */
+export function vsBlock(key: string, value: Buffer, children: Buffer[], o: { text?: boolean; valueLength?: number } = {}): Buffer {
+  const head = padTo(Buffer.concat([Buffer.alloc(6), utf16z(key)]), 4);
+  const body = padTo(Buffer.concat([head, value]), 4);
+  const kids = Buffer.concat(children.map((c) => padTo(c, 4)));
+  const all = Buffer.concat([body, kids]);
+  all.writeUInt16LE(all.length, 0);
+  all.writeUInt16LE(o.valueLength ?? value.length, 2);
+  all.writeUInt16LE(o.text ? 1 : 0, 4);
+  return all;
+}
+
+export function versionResource(o: { fileVersion?: [number, number, number, number]; productVersion?: [number, number, number, number]; strings?: Record<string, string>; flags?: number } = {}): Buffer {
+  const fv = o.fileVersion ?? [1, 2, 3, 4], pv = o.productVersion ?? [5, 6, 7, 8];
+  const fixed = Buffer.alloc(52);
+  fixed.writeUInt32LE(0xfeef04bd, 0);
+  fixed.writeUInt32LE(0x00010000, 4);
+  fixed.writeUInt32LE(((fv[0] << 16) | fv[1]) >>> 0, 8);
+  fixed.writeUInt32LE(((fv[2] << 16) | fv[3]) >>> 0, 12);
+  fixed.writeUInt32LE(((pv[0] << 16) | pv[1]) >>> 0, 16);
+  fixed.writeUInt32LE(((pv[2] << 16) | pv[3]) >>> 0, 20);
+  fixed.writeUInt32LE(0x3f, 24);
+  fixed.writeUInt32LE(o.flags ?? 0, 28);
+  fixed.writeUInt32LE(0x00040004, 32);
+  fixed.writeUInt32LE(1, 36);
+  const strings = Object.entries(o.strings ?? { CompanyName: "Example Corp", OriginalFilename: "tool.exe", FileDescription: "A tool" }).map(([k, v]) => vsBlock(k, utf16z(v), [], { text: true, valueLength: v.length + 1 }));
+  const table = vsBlock("040904b0", Buffer.alloc(0), strings, { text: true });
+  const sfi = vsBlock("StringFileInfo", Buffer.alloc(0), [table], { text: true });
+  const vfi = vsBlock("VarFileInfo", Buffer.alloc(0), [vsBlock("Translation", Buffer.from([9, 4, 0xb0, 4]), [])], { text: true });
+  return vsBlock("VS_VERSION_INFO", fixed, [sfi, vfi]);
+}
+
+export function buildPeDirs(o: PeDirOptions = {}): BuiltPeDirs {
+  const plus = o.plus ?? true;
+  const base = o.imageBase ?? (plus ? 0x140000000 : 0x400000);
+  const ptr = plus ? 8 : 4;
+  const TEXT_RVA = 0x1000, RDATA_RVA = 0x2000, RSRC_RVA = 0x5000;
+  const FILE_ALIGN = 0x200;
+  const rvas: Record<string, number> = {};
+  // .rdata: a growing blob; alloc returns the RVA of what is appended.
+  const rdata: Buffer[] = [];
+  let rlen = 0;
+  const alloc = (b: Buffer, a = 4): number => {
+    const pad = align(rlen, a) - rlen;
+    if (pad) { rdata.push(Buffer.alloc(pad)); rlen += pad; }
+    const rva = RDATA_RVA + rlen;
+    rdata.push(b);
+    rlen += b.length;
+    return rva;
+  };
+  const dirs: Array<[number, number]> = Array.from({ length: 16 }, () => [0, 0]);
+
+  // exports: one blob so that a forwarder string lies inside the directory's range
+  if (o.exports) {
+    const fns = o.exports.functions;
+    const named = fns.map((f, i) => ({ f, i })).filter((x) => x.f.name !== undefined).sort((a, b) => (a.f.name! < b.f.name! ? -1 : 1));
+    const dirLen = 40, eatLen = 4 * fns.length, namesLen = 4 * named.length, ordLen = 2 * named.length;
+    let strOff = dirLen + eatLen + namesLen + ordLen;
+    const blob: Buffer[] = [];
+    const strings: Buffer[] = [];
+    const putString = (s: string): number => { const off = strOff; const b = Buffer.from(s + "\0", "utf8"); strings.push(b); strOff += b.length; return off; };
+    const imageNameOff = putString(o.exports.imageName ?? "sample.dll");
+    const nameOffs = named.map((x) => putString(x.f.name!));
+    const fwdOffs = fns.map((f) => (f.forward !== undefined ? putString(f.forward) : -1));
+    const start = align(rlen, 4);
+    const exportRva = RDATA_RVA + start;
+    const dir = Buffer.alloc(40);
+    dir.writeUInt32LE(o.exports.stamp ?? 0, 4);
+    dir.writeUInt32LE(exportRva + imageNameOff, 12);
+    dir.writeUInt32LE(o.exports.base ?? 1, 16);
+    dir.writeUInt32LE(fns.length, 20);
+    dir.writeUInt32LE(named.length, 24);
+    dir.writeUInt32LE(exportRva + dirLen, 28);
+    dir.writeUInt32LE(exportRva + dirLen + eatLen, 32);
+    dir.writeUInt32LE(exportRva + dirLen + eatLen + namesLen, 36);
+    const eat = Buffer.alloc(eatLen);
+    fns.forEach((f, i) => eat.writeUInt32LE(f.forward !== undefined ? exportRva + fwdOffs[i]! : (f.rva ?? TEXT_RVA), i * 4));
+    const names = Buffer.alloc(namesLen);
+    named.forEach((_x, j) => names.writeUInt32LE(exportRva + nameOffs[j]!, j * 4));
+    const ords = Buffer.alloc(ordLen);
+    named.forEach((x, j) => ords.writeUInt16LE(x.i, j * 2));
+    blob.push(dir, eat, names, ords, ...strings);
+    const all = Buffer.concat(blob);
+    alloc(all, 4);
+    rvas.exports = exportRva;
+    dirs[0] = [exportRva, o.exportDirSizeOverride ?? all.length];
+  }
+
+  // delay imports
+  if (o.delayImports) {
+    const descs = Buffer.alloc(32 * (o.delayImports.length + 1));
+    const pieces = o.delayImports.map((d) => {
+      const nameRva = alloc(Buffer.from(d.dll + "\0"));
+      const hintRvas = d.functions.map((fn) => (typeof fn === "string" ? alloc(Buffer.concat([u16(0), Buffer.from(fn + "\0")]), 2) : 0));
+      const thunks = Buffer.alloc(ptr * (d.functions.length + 1));
+      d.functions.forEach((fn, k) => {
+        const v = typeof fn === "string" ? BigInt(d.vaForm ? hintRvas[k]! + base : hintRvas[k]!) : (1n << BigInt(ptr * 8 - 1)) | BigInt(fn);
+        if (plus) thunks.writeBigUInt64LE(v, k * 8);
+        else thunks.writeUInt32LE(Number(v), k * 4);
+      });
+      return { nameRva, intRva: alloc(thunks) };
+    });
+    const at = alloc(descs, 4);
+    o.delayImports.forEach((d, i) => {
+      const f = (rva: number): number => (d.vaForm ? rva + base : rva);
+      descs.writeUInt32LE(d.vaForm ? 0 : 1, i * 32);
+      descs.writeUInt32LE(f(pieces[i]!.nameRva), i * 32 + 4);
+      descs.writeUInt32LE(f(pieces[i]!.intRva), i * 32 + 16);
+    });
+    rvas.delayImports = at;
+    dirs[13] = [at, descs.length];
+  }
+
+  // TLS
+  if (o.tlsCallbacks) {
+    const arr = Buffer.alloc(ptr * (o.tlsCallbacks.length + 1));
+    o.tlsCallbacks.forEach((rva, k) => (plus ? arr.writeBigUInt64LE(BigInt(base + rva), k * 8) : arr.writeUInt32LE(base + rva, k * 4)));
+    const arrRva = alloc(arr, 8);
+    const dir = Buffer.alloc(plus ? 40 : 24);
+    if (plus) { dir.writeBigUInt64LE(BigInt(base + RDATA_RVA), 0); dir.writeBigUInt64LE(BigInt(base + RDATA_RVA + 16), 8); dir.writeBigUInt64LE(BigInt(base + RDATA_RVA + 32), 16); dir.writeBigUInt64LE(BigInt(base + arrRva), 24); }
+    else { dir.writeUInt32LE(base + RDATA_RVA, 0); dir.writeUInt32LE(base + RDATA_RVA + 16, 4); dir.writeUInt32LE(base + RDATA_RVA + 32, 8); dir.writeUInt32LE(base + arrRva, 12); }
+    const at = alloc(dir, 8);
+    rvas.tls = at;
+    dirs[9] = [at, dir.length];
+  }
+
+  // CLR
+  if (o.clr) {
+    const c = o.clr;
+    const ver = Buffer.from((c.version ?? "v4.0.30319") + "\0");
+    const verPadded = padTo(ver, 4);
+    const streams = c.streams ?? [{ name: "#~", size: 0x100 }, { name: "#Strings", size: 0x80 }, { name: "#US", size: 8 }, { name: "#GUID", size: 16 }, { name: "#Blob", size: 0x40 }];
+    const headers = Buffer.concat(streams.map((s) => Buffer.concat([u32(0x200), u32(s.size), padTo(Buffer.from(s.name + "\0"), 4)])));
+    const root = Buffer.concat([u32(c.badSignature ? 0x11111111 : 0x424a5342), u16(1), u16(1), u32(0), u32(verPadded.length), verPadded, u16(0), u16(streams.length), headers]);
+    const mdBlob = Buffer.concat([root, Buffer.alloc(0x400)]);
+    const mdRva = c.noMetadata ? 0 : alloc(mdBlob, 4);
+    const hdr = Buffer.alloc(72);
+    hdr.writeUInt32LE(72, 0);
+    hdr.writeUInt16LE(2, 4);
+    hdr.writeUInt16LE(5, 6);
+    hdr.writeUInt32LE(c.noMetadata ? 0x9fffff0 : mdRva, 8);
+    hdr.writeUInt32LE(mdBlob.length, 12);
+    hdr.writeUInt32LE(c.flags ?? 1, 16);
+    hdr.writeUInt32LE(c.entryToken ?? 0x06000001, 20);
+    if (c.strongName) { hdr.writeUInt32LE(RDATA_RVA, 32); hdr.writeUInt32LE(128, 36); }
+    if (c.managedNative) { hdr.writeUInt32LE(alloc(c.managedNative, 4), 64); hdr.writeUInt32LE(c.managedNative.length, 68); }
+    const at = alloc(hdr, 4);
+    rvas.clr = at;
+    dirs[14] = [at, 72];
+  }
+
+  // The resource section: [Microsoft PE/COFF] 5.9. Three directory levels (type, name, language), each a 16-byte header and 8-byte entries
+  // (named entries first, then id entries, each group sorted), then the name strings, the data entries and the data.
+  let rsrc = Buffer.alloc(0);
+  if (o.resources && o.resources.length) {
+    type Leaf = NonNullable<PeDirOptions["resources"]>[number];
+    type Id = number | string;
+    const byType = new Map<Id, Map<Id, Leaf[]>>();
+    for (const r of o.resources) {
+      const names = byType.get(r.type) ?? new Map<Id, Leaf[]>();
+      byType.set(r.type, names);
+      names.set(r.name, [...(names.get(r.name) ?? []), r]);
+    }
+    const ordered = <T>(m: Map<Id, T>): Array<[Id, T]> => {
+      const all = [...m.entries()];
+      return [...all.filter(([k]) => typeof k === "string").sort((x, y) => (x[0] < y[0] ? -1 : 1)), ...all.filter(([k]) => typeof k === "number").sort((x, y) => (x[0] as number) - (y[0] as number))];
+    };
+    const types = ordered(byType);
+    // sizes of the three levels, in layout order: the root, then for each type its name directory followed by its language directories
+    let tree = 16 + 8 * types.length;
+    const nameDirAt = new Map<Id, number>();
+    const langDirAt = new Map<string, number>();
+    for (const [t, names] of types) {
+      nameDirAt.set(t, tree);
+      tree += 16 + 8 * names.size;
+      for (const [n, langs] of ordered(names)) {
+        langDirAt.set(`${String(t)}|${String(n)}`, tree);
+        tree += 16 + 8 * langs.length;
+      }
+    }
+    const strings = new Map<string, number>();
+    let cursor = tree;
+    const stringBufs: Buffer[] = [];
+    for (const [t, names] of types) {
+      for (const id of [t, ...names.keys()]) {
+        if (typeof id === "string" && !strings.has(id)) {
+          const b = padTo(Buffer.concat([u16(id.length), Buffer.from(id, "utf16le")]), 4);
+          strings.set(id, cursor);
+          stringBufs.push(b);
+          cursor += b.length;
+        }
+      }
+    }
+    const leafEntryAt = new Map<Leaf, number>();
+    for (const r of o.resources) { leafEntryAt.set(r, cursor); cursor += 16; }
+    const leafDataAt = new Map<Leaf, number>();
+    for (const r of o.resources) { leafDataAt.set(r, cursor); cursor += align(r.data.length, 4); }
+    const dir = (entries: Array<[Id, number, boolean]>): Buffer => {
+      const named = entries.filter(([id]) => typeof id === "string").length;
+      const b = Buffer.alloc(16 + 8 * entries.length);
+      b.writeUInt16LE(named, 12);
+      b.writeUInt16LE(entries.length - named, 14);
+      entries.forEach(([id, target, sub], i) => {
+        b.writeUInt32LE(typeof id === "string" ? (strings.get(id)! | 0x80000000) >>> 0 : id, 16 + 8 * i);
+        b.writeUInt32LE(((sub ? 0x80000000 : 0) | target) >>> 0, 20 + 8 * i);
+      });
+      return b;
+    };
+    const dirs3: Buffer[] = [dir(types.map(([t]) => [t, nameDirAt.get(t)!, true]))];
+    for (const [t, names] of types) {
+      dirs3.push(dir(ordered(names).map(([n]) => [n, langDirAt.get(`${String(t)}|${String(n)}`)!, true] as [Id, number, boolean])));
+      for (const [, langs] of ordered(names)) dirs3.push(dir(langs.map((r) => [r.lang, leafEntryAt.get(r)!, false] as [Id, number, boolean])));
+    }
+    const dataEntries = o.resources.map((r) => {
+      const b = Buffer.alloc(16);
+      b.writeUInt32LE(RSRC_RVA + leafDataAt.get(r)!, 0);
+      b.writeUInt32LE(r.declaredSize ?? r.data.length, 4);
+      b.writeUInt32LE(1252, 8);
+      return b;
+    });
+    rsrc = Buffer.concat([...dirs3, ...stringBufs, ...dataEntries, ...o.resources.map((r) => padTo(r.data, 4))]);
+    dirs[2] = [RSRC_RVA, rsrc.length];
+    rvas.resources = RSRC_RVA;
+  }
+
+  // debug: the entries, then each CodeView record (its file offset is the raw pointer)
+  if (o.debug) {
+    const records = o.debug.map((d) => {
+      if (d.type !== 2) return Buffer.alloc(8, 0x11);
+      return Buffer.concat([Buffer.from("RSDS"), d.guid ?? Buffer.alloc(16, 0x22), u32(d.age ?? 1), Buffer.from((d.pdb ?? "C:\\build\\sample.pdb") + "\0", "utf8")]);
+    });
+    const recRvas = records.map((r) => alloc(r, 4));
+    const table = Buffer.alloc(28 * o.debug.length);
+    o.debug.forEach((d, i) => {
+      table.writeUInt32LE(d.stamp ?? 0x65000000, i * 28 + 4);
+      table.writeUInt32LE(d.type, i * 28 + 12);
+      table.writeUInt32LE(records[i]!.length, i * 28 + 16);
+      table.writeUInt32LE(recRvas[i]!, i * 28 + 20);
+      table.writeUInt32LE(0, i * 28 + 24); // patched below, when the raw offsets are known
+    });
+    const at = alloc(table, 4);
+    rvas.debug = at;
+    dirs[6] = [at, table.length];
+    (rvas as Record<string, number>)._debugTable = at - RDATA_RVA;
+    (rvas as Record<string, number>)._debugCount = o.debug.length;
+  }
+
+  const rdataBuf = Buffer.concat(rdata);
+  const text = Buffer.alloc(0x200, 0x90);
+  // headers
+  const rich = o.rich
+    ? (() => {
+        const words = [0x536e6144, 0, 0, 0, ...o.rich.entries.flat()].map((w, i) => ((i < 4 ? (i === 0 ? w : o.rich!.breakPadding && i === 1 ? 0x1234 : 0) : w) ^ o.rich!.key) >>> 0);
+        const b = Buffer.alloc(words.length * 4 + 8);
+        words.forEach((w, i) => b.writeUInt32LE(w, i * 4));
+        b.write("Rich", words.length * 4, "latin1");
+        b.writeUInt32LE(o.rich!.key >>> 0, words.length * 4 + 4);
+        return b;
+      })()
+    : Buffer.alloc(0);
+  const peAt = align(0x80 + rich.length, 8);
+  const optSize = plus ? 240 : 224;
+  const nSections = 2 + (rsrc.length ? 1 : 0);
+  const headersEnd = peAt + 24 + optSize + 40 * nSections;
+  const sizeOfHeaders = align(headersEnd, FILE_ALIGN);
+  const textRaw = sizeOfHeaders;
+  const rdataRaw = textRaw + align(text.length, FILE_ALIGN);
+  const rsrcRaw = rdataRaw + align(rdataBuf.length, FILE_ALIGN);
+  const rawOf = (rva: number): number => {
+    if (rva >= RSRC_RVA && rsrc.length) return rsrcRaw + (rva - RSRC_RVA);
+    if (rva >= RDATA_RVA) return rdataRaw + (rva - RDATA_RVA);
+    return textRaw + (rva - TEXT_RVA);
+  };
+  if (o.debug) {
+    const tableOff = rvas._debugTable!;
+    o.debug.forEach((_d, i) => rdataBuf.writeUInt32LE(rdataRaw + (rdataBuf.readUInt32LE(tableOff + i * 28 + 20) - RDATA_RVA), tableOff + i * 28 + 24));
+    delete rvas._debugTable;
+    delete rvas._debugCount;
+  }
+  const file = Buffer.alloc((o.resources && rsrc.length ? rsrcRaw + align(rsrc.length, FILE_ALIGN) : rdataRaw + align(rdataBuf.length, FILE_ALIGN)));
+  file.write("MZ", 0, "latin1");
+  file.writeUInt32LE(peAt, 0x3c);
+  rich.copy(file, 0x80);
+  file.write("PE\0\0", peAt, "latin1");
+  const coff = peAt + 4;
+  file.writeUInt16LE(plus ? 0x8664 : 0x14c, coff);
+  file.writeUInt16LE(nSections, coff + 2);
+  file.writeUInt32LE(0x65000000, coff + 4);
+  file.writeUInt16LE(optSize, coff + 16);
+  file.writeUInt16LE(0x0022, coff + 18);
+  const opt = coff + 20;
+  file.writeUInt16LE(plus ? 0x20b : 0x10b, opt);
+  file.writeUInt32LE(TEXT_RVA, opt + 16);
+  if (plus) file.writeBigUInt64LE(BigInt(base), opt + 24);
+  else file.writeUInt32LE(base, opt + 28);
+  file.writeUInt32LE(0x1000, opt + 32);
+  file.writeUInt32LE(FILE_ALIGN, opt + 36);
+  file.writeUInt32LE(RSRC_RVA + align(Math.max(rsrc.length, 0x1000), 0x1000), opt + 56);
+  file.writeUInt32LE(sizeOfHeaders, opt + 60);
+  file.writeUInt16LE(3, opt + 68);
+  file.writeUInt32LE(16, opt + (plus ? 108 : 92));
+  dirs.forEach(([rva, size], i) => { file.writeUInt32LE(rva, opt + (plus ? 112 : 96) + i * 8); file.writeUInt32LE(size, opt + (plus ? 112 : 96) + i * 8 + 4); });
+  const sec = opt + optSize;
+  const section = (i: number, name: string, vaddr: number, vsize: number, raw: number, rawsize: number, flags: number): void => {
+    const at = sec + 40 * i;
+    file.write(name, at, "latin1");
+    file.writeUInt32LE(vsize, at + 8);
+    file.writeUInt32LE(vaddr, at + 12);
+    file.writeUInt32LE(rawsize, at + 16);
+    file.writeUInt32LE(raw, at + 20);
+    file.writeUInt32LE(flags, at + 36);
+  };
+  section(0, ".text", TEXT_RVA, text.length, textRaw, align(text.length, FILE_ALIGN), 0x60000020);
+  section(1, ".rdata", RDATA_RVA, rdataBuf.length, rdataRaw, align(rdataBuf.length, FILE_ALIGN), 0x40000040);
+  if (rsrc.length) section(2, ".rsrc", RSRC_RVA, rsrc.length, rsrcRaw, align(rsrc.length, FILE_ALIGN), 0x40000040);
+  text.copy(file, textRaw);
+  rdataBuf.copy(file, rdataRaw);
+  if (rsrc.length) rsrc.copy(file, rsrcRaw);
+  return { file, rdataRva: RDATA_RVA, rsrcRva: RSRC_RVA, textRva: TEXT_RVA, rvas, rawOf };
+}

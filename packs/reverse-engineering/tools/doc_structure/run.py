@@ -45,7 +45,7 @@ TOOL = {"name": "doc_structure", "version": 1}
 PARSER = "doc_structure/1"
 NOTE = ("Static structure only. A structure shows what the file holds, not what an application would do with it: an action, a macro, "
         "a field or an external target does not show that anything ran or was fetched. Record what was read and what was not before "
-        "drawing an absence conclusion.")
+        "drawing an absence conclusion. A string out of the file is shown with each backslash written twice and each control character as \\xNN.")
 
 DEFAULT_STREAM = 16 << 20           # bytes one stream may be read or expand to
 DEFAULT_TOTAL = 128 << 20           # bytes all streams may be read or expand to, together
