@@ -1,0 +1,63 @@
+{
+  "name": "virtualization_inventory",
+  "description": "List the VMs, the disk files they name, the snapshots and the datastores that configuration files and inventory exports say exist, from a directory or a list of files. It reads, from their public descriptions and no others: VMware .vmx and .vmsd and ESXi's vmInventory.xml; a libvirt domain XML (devices, disks, backing stores), domain snapshot XML and storage pool XML; a Proxmox VM or container configuration (/etc/pve/qemu-server/<id>.conf, with its snapshot sections) and storage.cfg. A Hyper-V (.vmcx, .vmrs), VirtualBox (.vbox), OVF or VMware template or state file is recognised and listed as unsupported, never guessed at, and a file of no recognised kind is counted by extension. Every record carries its source file id and the line or XML element it came from; versions are the strings the files carry (hardware version, machine type), and what they mean for a release is not stated. A disk a configuration names is looked up only among the files given: `in_set` no is a statement about the set, a hypervisor storage volume is listed and not looked up, and a configuration entry does not show that a VM ran, still exists or was not deleted. A time is derived only where the file states an epoch (Proxmox snaptime, libvirt creationTime, UTC by definition); the two raw fields of a .vmsd are kept raw and not decoded. XML is read with every DOCTYPE and entity declaration refused and the element count and depth bounded; text is read a line at a time with a line cap; a file over max_file_bytes is named and not read; a file with more than 100000 records is partial and says so. Every answer carries `status` (complete, partial or failed) and `status_basis`, the pair the recipes' coverage.json carries; exit 0 means the engine ran, not that the examination is complete. SENSITIVE: a configuration can hold a console password, a cloud-init password, an SSH key or a user-data blob under a key this tool does not show: only a fixed list of keys is shown, every other key is counted, and the names (not values) of those that look like credentials are listed with their line and the length of the value. SENSITIVE: names, paths and values the answer shows pass a shape check (a token-shaped run and user-info in a URL are withheld, a text over 512 characters is shown cut with its whole length); a secret that does not look like a token is not recognised, so run it as a job with secret_output: true. write_text: true (refused outside a job) creates $OUT/inventory-values.jsonl, mode 0600, created before anything is read, holding the originals; a file already there is refused by name. ",
+  "params": {
+    "root": {
+      "type": "string",
+      "description": "A directory of the evidence files (a link is refused; links inside it are listed and never followed). Give root, paths, or both"
+    },
+    "paths": {
+      "type": "array",
+      "description": "Files named one by one (a link or a special file is named and never opened)"
+    },
+    "limit": {
+      "type": "integer",
+      "description": "Rows shown inline per list (default 200); every row is counted and, when there are more, the whole list is written as JSON Lines and named in pages.<list>.all_results"
+    },
+    "max_files": {
+      "type": "integer",
+      "description": "The most files taken into the set (default 20000, at most 200000); past it the answer is partial and says where the walk stopped"
+    },
+    "max_entries": {
+      "type": "integer",
+      "description": "The most directory entries listed (default 200000, at most 2000000)"
+    },
+    "max_depth": {
+      "type": "integer",
+      "description": "How deep the walk goes (default 16, at most 64); a deeper directory is named"
+    },
+    "max_seconds": {
+      "type": "number",
+      "description": "The time to spend (default 50, at most 50); what is left is named and the answer is partial"
+    },
+    "write_text": {
+      "type": "boolean",
+      "description": "Write the original of every name or value the answer shows withheld or shortened to one 0600 file under $OUT (default false). Refused unless the tool runs as a job, which must be run with secret_output: true"
+    },
+    "max_file_bytes": {
+      "type": "integer",
+      "description": "A file over this many bytes is named and not read (default 16777216, at most 268435456); nothing is cut"
+    }
+  },
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 60,
+  "example": "{\"root\": \"work/extracted/config\"}",
+  "by": "maintainer",
+  "at": "2026-10-14T09:00:00.000Z",
+  "version": 1,
+  "use": {
+    "extensions": [
+      ".vmx",
+      ".vmsd",
+      ".vmtx",
+      ".vmcx",
+      ".vbox"
+    ],
+    "names": [
+      "vmInventory.xml",
+      "storage.cfg"
+    ]
+  },
+  "sha256": "4f7ce35769127468dd88bbdd18234feccd9aa515dfc5f4ccbc17162bded96155"
+}

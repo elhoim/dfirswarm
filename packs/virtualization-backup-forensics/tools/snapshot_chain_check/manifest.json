@@ -1,0 +1,93 @@
+{
+  "name": "snapshot_chain_check",
+  "description": "Read the descriptors and headers of virtual-disk files and say how they chain: which file names which as its parent, whether the parent is in the set, whether the identity the child recorded is the identity the parent carries, which extents a descriptor needs and which are missing or short, and which markers a consolidation or an unclean close may leave. It reads, from their public descriptions and no others: VMware VMDK (a text descriptor, or the descriptor embedded in a sparse extent, versions 1 to 3; CID, parentCID, parentFileNameHint, createType, extents; a COWD extent is recognised and not read), .vmx and .vmsd (only the disk file names and the snapshot database), VHD (footer, dynamic header, parent unique id, name and locators, with the checksums), VHDX (both headers with CRC-32C and sequence, region table, metadata, file parameters, virtual disk id, parent locator) and QCOW2 versions 2 and 3 (header, backing file and format, feature bits, header extensions, the internal snapshot table, streamed). A name inside a file is looked up among the files given and never opened; a parent outside the set is reported missing. It reads headers and descriptors, not disk content: a chain it calls complete has every named parent in the set and agreeing identities where the format records one (QCOW2 records none of its backing file, so only its name links it), and it is not a disk that boots or a statement about what the parent held when the child was made. A marker (an unclean-shutdown flag, a QCOW2 dirty bit, a VHDX log GUID, a delta no snapshot or configuration names, a running disk that is a delta while the snapshot database lists none, a lock artefact, an identity mismatch) is a candidate with its observation beside it, never a verdict. The layouts are implemented from the format descriptions and are checked here against synthetic files; they have not been checked against files made by every product or version, and a version the tool does not know is reported and not read. Nothing is mounted, converted, repaired, merged or executed. Chains are found without recursion, with a depth cap and cycle detection; a descriptor is read to 1 MiB, a .vmx or .vmsd to 16 MiB, and a .vmsd lists at most 20000 snapshot indexes (the rest are counted). Every answer carries `status` (complete, partial or failed) and `status_basis`, the pair the recipes' coverage.json carries; exit 0 means the engine ran, not that the examination is complete. SENSITIVE: names, paths and values the answer shows pass a shape check (a token-shaped run and user-info in a URL are withheld, a text over 512 characters is shown cut with its whole length); a secret that does not look like a token is not recognised, so run it as a job with secret_output: true. write_text: true (refused outside a job) creates $OUT/chain-values.jsonl, mode 0600, created before anything is read, holding the originals; a file already there is refused by name. ",
+  "params": {
+    "root": {
+      "type": "string",
+      "description": "A directory of the evidence files (a link is refused; links inside it are listed and never followed). Give root, paths, or both"
+    },
+    "paths": {
+      "type": "array",
+      "description": "Files named one by one (a link or a special file is named and never opened)"
+    },
+    "limit": {
+      "type": "integer",
+      "description": "Rows shown inline per list (default 200); every row is counted and, when there are more, the whole list is written as JSON Lines and named in pages.<list>.all_results"
+    },
+    "max_files": {
+      "type": "integer",
+      "description": "The most files taken into the set (default 20000, at most 200000); past it the answer is partial and says where the walk stopped"
+    },
+    "max_entries": {
+      "type": "integer",
+      "description": "The most directory entries listed (default 200000, at most 2000000)"
+    },
+    "max_depth": {
+      "type": "integer",
+      "description": "How deep the walk goes (default 16, at most 64); a deeper directory is named"
+    },
+    "max_seconds": {
+      "type": "number",
+      "description": "The time to spend (default 50, at most 50); what is left is named and the answer is partial"
+    },
+    "write_text": {
+      "type": "boolean",
+      "description": "Write the original of every name or value the answer shows withheld or shortened to one 0600 file under $OUT (default false). Refused unless the tool runs as a job, which must be run with secret_output: true"
+    },
+    "max_snapshots": {
+      "type": "integer",
+      "description": "The most internal QCOW2 snapshots read from one image (default 100000); the declared count is kept beside the number read"
+    },
+    "max_chain_depth": {
+      "type": "integer",
+      "description": "The longest chain followed (default 10000); a longer one is reported as too deep"
+    },
+    "qemu_img": {
+      "type": "string",
+      "description": "off (default), auto or require. auto runs `qemu-img info --output=json -f <format> <image>` once per parsed image (never --backing-chain), when qemu-img is on PATH; require fails when it is not. Its answer sits beside the native reading and replaces nothing"
+    },
+    "qemu_img_max_images": {
+      "type": "integer",
+      "description": "The most images qemu-img is run on (default 50)"
+    }
+  },
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 60,
+  "example": "{\"root\": \"work/extracted/vm\"}",
+  "by": "maintainer",
+  "at": "2026-10-14T09:00:00.000Z",
+  "version": 1,
+  "use": {
+    "extensions": [
+      ".vmdk",
+      ".vhd",
+      ".vhdx",
+      ".avhd",
+      ".avhdx",
+      ".qcow2",
+      ".qcow",
+      ".vmsd",
+      ".vmx"
+    ],
+    "magic": [
+      {
+        "offset": 0,
+        "hex": "4b444d56"
+      },
+      {
+        "offset": 0,
+        "hex": "514649fb"
+      },
+      {
+        "offset": 0,
+        "hex": "7668647866696c65"
+      },
+      {
+        "offset": 0,
+        "hex": "636f6e6563746978"
+      }
+    ]
+  },
+  "sha256": "1fea07fd1d3afc6857aae60941cf749d4ef459ccfc56a3eb30a09bff39a56c86"
+}

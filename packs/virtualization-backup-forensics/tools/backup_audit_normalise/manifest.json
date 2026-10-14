@@ -1,0 +1,95 @@
+{
+  "name": "backup_audit_normalise",
+  "description": "Turn a backup or hypervisor job record into canonical events and say what was not understood. It reads two things and no more: the Proxmox VE and Proxmox Backup Server task index (UPID lines: node, pid, start time, worker type, id, user, then end time and status) with a task log (vzdump and backup log lines and the TASK result line), and an export of ANY product (CSV, JSON Lines or XML) through a mapping the CALLER declares: which field is the time, the action, the result, the actor, the object, how the time is written and what each action means (category_map). The tool does not know a declared product and says so on every event. A product with no fixtures here (Veeam, Commvault, Rubrik, Cohesity, Acronis, NetBackup, vCenter and others) is `unsupported`: with format auto it is refused by name, and no vendor layout is ever guessed from a sample. Each event carries its file, line or record and byte offset, a category (from this tool's worker-type table, which is as the tool's author knows it and is to be checked against the product version, or from the caller's category_map; the raw action stays beside it), a result (ok, warning, error or unknown, with the reason) and a time read exactly as declared: epoch seconds are UTC by definition, an ISO 8601 time with an offset is converted, a time with no zone is NOT assumed UTC and stays raw unless a fixed offset is declared. An event says what a record says happened; it is not proof the operation took place as described, that a reported success was a usable restore point, or who did it. Lines are read a line at a time with a line cap; a CSV field is capped; XML is streamed record by record with every DOCTYPE and entity declaration refused; aggregates hold at most 10000 distinct values; every line is an event, a blank line or a counted unparsed line (the first 200 are located by line and byte offset). Every answer carries `status` (complete, partial or failed) and `status_basis`, the pair the recipes' coverage.json carries; exit 0 means the engine ran, not that the examination is complete. SENSITIVE: a log message or an error text can hold a path, a user name, a token or a repository string with user-info. The answer carries structured fields after the shape check (a token-shaped run and user-info are withheld, a long text is shown cut with its whole length) and the LENGTH of the free-text message; the message itself and the originals go to $OUT/audit-values.jsonl, mode 0600, only with write_text: true in a job run with secret_output: true.",
+  "params": {
+    "path": {
+      "type": "string",
+      "description": "One export or log file (use paths for several)"
+    },
+    "paths": {
+      "type": "array",
+      "description": "Up to 100 files, all read as the same format; a link or special file is named and never opened"
+    },
+    "format": {
+      "type": "string",
+      "description": "auto (default: recognises only the Proxmox layouts), pve_task_index, pve_vzdump_log, declared_csv, declared_jsonl or declared_xml. Any other product is unsupported until fixtures for it exist"
+    },
+    "product": {
+      "type": "string",
+      "description": "The product's name. With format auto, a product this tool has no fixtures for is refused by name; with a declared format it is echoed as the caller's label and not verified"
+    },
+    "mapping": {
+      "type": "object",
+      "description": "For declared formats: which field is the time and the action (both required) and, optionally, the result, actor, object, host, job and message. CSV: column names. JSON Lines: dotted paths. XML: child paths such as a/b, @attr or tag@attr"
+    },
+    "category_map": {
+      "type": "object",
+      "description": "For declared formats: the raw action (case-insensitive) to a category: backup_job, backup_start, backup_end, backup_error, archive_created, restore, snapshot_create, snapshot_delete, snapshot_rollback, retention_prune, retention_gc, retention_remove, verification, sync, vm_create, vm_delete, vm_power, vm_start, clone, migrate, disk_delete, config_change, repository_change, login, task_end, other. An action not listed stays other, with its raw name"
+    },
+    "result_map": {
+      "type": "object",
+      "description": "For declared formats: the raw result text (case-insensitive) to ok, warning, error or unknown"
+    },
+    "time_format": {
+      "type": "string",
+      "description": "How the declared time is written: iso8601 (default), epoch_seconds, epoch_milliseconds or strptime:<format>"
+    },
+    "time_zone_offset_minutes": {
+      "type": "integer",
+      "description": "A fixed offset from UTC, in minutes, for times that carry no zone (also for the Proxmox vzdump log's 'Backup started at' line). Daylight saving is not accounted for. Without it such a time stays raw and time_utc is null"
+    },
+    "delimiter": {
+      "type": "string",
+      "description": "declared_csv: one character (default a comma)"
+    },
+    "has_header": {
+      "type": "boolean",
+      "description": "declared_csv: the first row names the columns (default true)"
+    },
+    "columns": {
+      "type": "array",
+      "description": "declared_csv: the column names when the file has no header row"
+    },
+    "record_tag": {
+      "type": "string",
+      "description": "declared_xml: the element name of one record"
+    },
+    "limit": {
+      "type": "integer",
+      "description": "Rows shown inline per list (default 200); every row is counted and, when there are more, the whole list is written as JSON Lines and named in pages.<list>.all_results"
+    },
+    "max_line_bytes": {
+      "type": "integer",
+      "description": "A line over this is located and not read (default 1048576, at least 4096)"
+    },
+    "max_file_bytes": {
+      "type": "integer",
+      "description": "A file over this is named and not read (default 8 GiB)"
+    },
+    "max_seconds": {
+      "type": "number",
+      "description": "The time to spend (default 50, at most 50); what is left is named and the answer is partial"
+    },
+    "write_text": {
+      "type": "boolean",
+      "description": "Write each event's free-text message, and the original of every name or value the answer shows withheld or shortened, to one 0600 file under $OUT (default false). Refused unless the tool runs as a job, which must be run with secret_output: true"
+    }
+  },
+  "runtime": "python3",
+  "entry": "run.py",
+  "timeout_seconds": 60,
+  "example": "{\"path\": \"work/extracted/pve/tasks/index\", \"format\": \"pve_task_index\"}",
+  "by": "maintainer",
+  "at": "2026-10-14T09:00:00.000Z",
+  "version": 1,
+  "use": {
+    "names": [
+      "UPID:*",
+      "vzdump*.log",
+      "*backup*.csv",
+      "*audit*.csv",
+      "*jobs*.csv"
+    ]
+  },
+  "sha256": "4bb95776309e78d0e1685b342c95446083a4ebebc23f088c38fa05824b847660"
+}
