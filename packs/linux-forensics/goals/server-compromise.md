@@ -4,8 +4,8 @@ This host is believed to have been compromised. Establish what happened on it,
 in order, with a citation for every step.
 
 Read the skill index with `skill()` before you start. `triage/system-profile` is
-the first ten minutes and everything later depends on the timezone it
-establishes.
+the first ten minutes, and everything later depends on the timezone that
+`triage/clocks-boots` establishes.
 
 ## Questions
 

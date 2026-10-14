@@ -1,8 +1,8 @@
 ---
 id: logs/what-exists
-title: What a cloud export covers, and what silence can say
-when: Supplied cloud or SaaS logs are the evidence, and an answer or a negative depends on what they hold.
-needs: [evidence/verify]
+title: What a cloud export covers, and what silence says
+when: Cloud or SaaS logs are the evidence and an answer or a negative depends on their coverage.
+needs: []
 tools: []
 requires_host: []
 ---
@@ -15,7 +15,7 @@ Use when the evidence is cloud or SaaS log exports examined offline and you must
 
 **Three times.** An event has a time it happened, a time the provider ingested it and a time it was exported. Delivery delay varies; an event's `clock` says which of the three its time is; do not read the last returned row as the moment activity stopped. If a later overlapping export was supplied, compare it for late arrivals; otherwise name the unsettled end as a limitation.
 
-**Hashes.** A file hash shows the bytes are those recorded when it was taken. It does not show the provider made them, or that every relevant event was exported. Keep hashes of the originals apart from hashes of parsed outputs, and cite both.
+**Hashes.** A file hash shows the bytes are those recorded when it was taken. It does not show the provider made them, or that every relevant event was exported. Keep hashes of the originals apart from hashes of parsed outputs, and cite both (base pack `evidence/verify`, only if you must check a digest against a manifest).
 
 **Configuration.** A snapshot shows state at its collection time; what changed needs an earlier state, a history or a change record. A product default is not this tenant's setting, and a retention figure from memory is not evidence: take retention from the supplied settings or the collection record, or say it is unknown.
 

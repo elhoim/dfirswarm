@@ -1,7 +1,7 @@
 {
   "id": "linux-forensics",
   "name": "Linux Forensics Pack",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "Artefact-by-artefact method and tooling for a Linux host: the system profile and its clocks, authentication and journal records, accounts and authorization, scheduling and systemd candidates, ext metadata and storage layers, container evidence locations, and package verification against local and independently trusted baselines. Each tool says what it read, what it did not, and where the whole result is kept.",
   "licence": "AGPL-3.0-or-later",
   "authors": [
@@ -21,10 +21,32 @@
       "why": "declared for reading the kernel audit log; the skill that names it (logs/auditd) is planned for a later change to this pack"
     }
   ],
+  "method_only": [
+    {
+      "path": "skills/accounts/users.md",
+      "why": "a method leaf on configured identities and privileges; it reads files the examiner opens and names no tool or program (the session and history tools are in accounts/sessions-histories)"
+    },
+    {
+      "path": "skills/containers/layers-times.md",
+      "why": "a method leaf on overlay layers and runtime metadata; it names only the base pack's timestamp_decode"
+    },
+    {
+      "path": "skills/packages/baseline.md",
+      "why": "a method leaf on what a package comparison covers and on an independent baseline; it names no tool or program"
+    },
+    {
+      "path": "skills/persistence/quieter-routes.md",
+      "why": "a method leaf for routes read as plain files (startup files, PAM, preload, SUID files, modules); it names no tool or program"
+    },
+    {
+      "path": "skills/timeline/linux-normalise.md",
+      "why": "a method leaf on normalising and correlating timestamps; it names only the base pack's timestamp_decode"
+    }
+  ],
   "checksums": {
     "sha256": {
       "LICENCE": "5b94f18424dbef1e77eda33a465e946c2c8eb715fa5236afe2c6ec6763af80d3",
-      "README.md": "e32c07e4c0936fa407d9dcd6cf766d798d864054e62388ee82db4456ce833555",
+      "README.md": "0fd6ad822f6db4e8bcc8bab99d0e7a8eea5fd108c922b0f9ba93b2825fb08ddc",
       "tools/linux_triage/manifest.json": "c7b44707b0d80bb4663d35656e27485ad53aa6f34fcaa6e41b261d60a4c36f04",
       "tools/linux_triage/run.py": "50ef413f07050a584a0aa3294bcca5416b20165b46fea9627f393fdd75d2483c",
       "tools/auth_log/manifest.json": "192547013d9d5cde8e3b927b4b1bda3bac1e42c43ded737d433ce89090374aeb",
@@ -37,23 +59,38 @@
       "tools/shell_history/run.py": "ed5b93d0bb8b1be1531dcd970aacada01a9670d9fa0579b94ea9e315bed7ea6a",
       "tools/cron_dump/manifest.json": "a1991e17fa8860cf4ff35266dc949ebc1757b9850e608ff8a99c5e808ec6fc43",
       "tools/cron_dump/run.py": "c4abcbc56cca52bd9a9e0eb7db8fa7ee71ad998337c8185ac270588d73081569",
-      "goals/server-compromise.md": "ac807f0216f04172abdc78ff484ac00bc7bd897a7b98b5a97bf1c055933a5d07",
-      "goals/what-was-scheduled.md": "641daac4089056c209b493700820b13fdbe2894fc1b3f8fe2c54f0dfb7a820dc",
+      "goals/server-compromise.md": "63611133bf41ab727e79d39b8e7e283e809d79c715745f9e554e161876dc4ae4",
+      "goals/what-was-scheduled.md": "d4e52bcfe618262ed7e4026861ea70a8eb1bba2696396f6bb866be1592ae4b06",
       "recipes/linux-target/recipe.json": "e1a1073c86a46eeef4ad9d6b6f3d9f7ce4b575beb8e5168a331e51fe12a88e92",
       "recipes/linux-target/run.py": "f7b041d8ac4f9213325c8627c88eab8b12563187a6e14f38ab63b66863f47e68",
-      "skills/triage/system-profile.md": "1de8e491e296afc0dc32efe6ad043b0d55d40867f478e946458edd0be79c7136",
-      "skills/filesystem/ext.md": "6bfe7ff1dfcc296b0f855dbbde1df82c5e3a66929d8a4b2128b842e4efafbabc",
-      "skills/filesystem/storage.md": "9ebac5f75ebed0ab5f276703efc75d09d2f96f27c1f255cd8ef204890b1c757d",
-      "skills/logs/auth.md": "f069159fa820bedb4778333726f42b732826fb2ad98322fe9aea2ccb9113d67c",
-      "skills/logs/journal.md": "e5a128f4e6cdf5dd680ea61a2f110d9468b6e53419c8ed05ac8ef883c2d9bd0a",
-      "skills/accounts/users.md": "96aa0a78b87db8c8a50432ab8f7eab647e38e00972e7c14725f5c6218f3be413",
-      "skills/persistence/mechanisms.md": "0e8cdf7da4258f6356034541d75ca1ab1c741ce85583884dce73d4e18acb74a8",
-      "skills/packages/integrity.md": "4b61f09c010d76c0343f4aace2407e9ca4f327d6fc594959188d17fec31bd443",
-      "skills/containers/docker.md": "a8c6dc82e4f3c9fff542b6603fcceff4aabe9db7e6d801461839d4b3e119bbe0",
-      "skills/timeline/linux.md": "941460d59e63e8b87d108cef2610874c3916cafdd65c9f5e208f4445bd86b894",
+      "skills/triage/clocks-boots.md": "11fca9cdd28bd835cead6cf16f25a1bad4f9ea941309184d84adf1d2d408d2b3",
+      "skills/triage/identity-files.md": "0f543b9c5d39f7564db06be8a03ec459691a65d26ec3ff5b8a6436fed644a0a1",
+      "skills/triage/system-profile.md": "0444e92d03a6d9933fb6d416d65fab11ff58ee2b0bccec409ca4b3c3c7748307",
+      "skills/filesystem/ext-deleted.md": "7c68012a210d6f67fae4d0c3483b42fee57f0f2d45181913e45039034cc75ae4",
+      "skills/filesystem/ext.md": "92eee28206383e2b50732ab538953eabe5228834487c89033783fe3eee86eacb",
+      "skills/filesystem/storage-lvm-luks.md": "e8b643c7f7ff01657e33c7f946210999aff7f6bf96a44054d1f43fac1a415893",
+      "skills/filesystem/storage-xfs-btrfs-virtual.md": "16a41d0e53282305b2468043b91d12d8acc5a4686703253b2ca27d1c4b108b74",
+      "skills/filesystem/storage.md": "f83bdfc85857c9e444120cd04a5bc12954c40968feebfd56e51f9c35022fbe0f",
+      "skills/logs/auth-lines.md": "9d74453326b4564e4c7255f3744d8d6c73dc188bbee04fe24cdb96347f5dc58b",
+      "skills/logs/auth-time.md": "6ba5db0ff000e78f26a7a38b3b19afd38f83a967756ae4edaab9356c9bc883fd",
+      "skills/logs/auth.md": "13779ab155531bd64d6859c1ae4d7568492c7fcbbdad6033ef63d61f84cb1f0f",
+      "skills/logs/journal-clocks-verify.md": "26f3611f7f1d6e2dbcc493aa330acdc9e039cdebb7d1b94f24396afada21f8a9",
+      "skills/logs/journal.md": "6d1d3b316838f9e9ff84633486291ec40aed012f9b9b0d5f4a2abad3cbedda8c",
+      "skills/accounts/sessions-histories.md": "122d2995e77ebf567bf4ab6ba573bddc38a92df0bed36c62acc3771f259d768c",
+      "skills/accounts/users.md": "c56120ad6af68cbf704fa1a4d9d0e4c4b9960e3cd661d036b97bb47376748b59",
+      "skills/persistence/cron-timers.md": "7ce7bd2e5d378e653bbc00f5877e4a8bdda3252aad67275b413f5fb80ed52139",
+      "skills/persistence/mechanisms.md": "05264ec5dffa15f9ed16eeb75fb79a8af73b3f6361f9edfb41c0ede05b637d08",
+      "skills/persistence/quieter-routes.md": "212b50516460730da046661321781e0ea860e27c12df196258880a10d2c0bafd",
+      "skills/packages/baseline.md": "9251e2ef0b6ee968aa46654f7afa5847dce00cc236cd60e3add3ed62d6c7c61c",
+      "skills/packages/integrity.md": "d334fd193932d1c02b972f43660397f5d67baf1dce829f91e4f33eb54dcee80d",
+      "skills/containers/docker.md": "dfe02c14f3ce2d5dd7263f848be5fe3d0ac9a22d0203aea7ed7ad77fd14550c3",
+      "skills/containers/layers-times.md": "8da7dfbc7c3b17b092611b3209e9d5cff00d90fe6560d759f29276249ad51293",
+      "skills/containers/removed-logs.md": "768cc0eb88fe9dc30b7a6785b5d531fc7db0d00e8cadcdff452f6e4e15a8f954",
+      "skills/timeline/linux-normalise.md": "49bdfa300db05ae5529a3c0f22d91c3c8051fb3d9029247660a7fb9d654dfc02",
+      "skills/timeline/linux.md": "2d86ff17648e1bb0bc1ef3fc5e93bac762a83b91264a3174e87cfa1fa6801c7e",
       "requires/host.json": "905748b5a76dba334bbe03c671286fbf5a892911195517557a1327780eaf5674",
       "requires/python.txt": "2a8f433b1779c884ea3307bd9d0dbf04fa2d9f909e19d0ab32c4b81a14ddb22f",
-      "skills/INDEX.md": "e18276c36cc843a85dafb1c0c687967a347aeb29400609fbd6010da83360a387"
+      "skills/INDEX.md": "9088158ce5b45cc6ce4534e42d6bd0f717117de1ef9d1c1f37e5255e4725206b"
     }
   },
   "tools": [
@@ -64,7 +101,7 @@
     "shell_history",
     "utmp_parse"
   ],
-  "skills": 10,
+  "skills": 25,
   "recipes": [
     "linux-forensics/linux-target"
   ]
