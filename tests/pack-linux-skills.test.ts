@@ -4,7 +4,7 @@
  * "Use only if ... Not for ..."; `needs` is at most two deep and its chain at most 1,900 tokens counting the base
  * skills it reaches; an index entry is at most 40 tokens), they say what an artefact shows, what it does not and what
  * to record, and the tool fields they name are fields those tools really write. The split of a long skill into a
- * decision-rule leaf and second-level leaves keeps every rule: the key rules are asserted here by their wording.
+ * decision-rule leaf and second-level leaves keeps every rule: the key rules are asserted here by their text.
  */
 import assert from "node:assert/strict";
 import { readFile, readdir } from "node:fs/promises";
@@ -159,7 +159,7 @@ test("the front matter lists the tools of the pack that the body names, and only
   }
 });
 
-test("the rules the split keeps: observation against verdict, bounded negatives, the tools' status wording", async () => {
+test("the rules the split keeps: observation against verdict, bounded negatives, how the tools' status field is described", async () => {
   const skills = await load(SKILLS);
   const has = (id: string, re: RegExp): void => assert.match(skills.get(id)!.body.replace(/\s+/g, " "), re, `${id}: ${re}`);
   has("triage/system-profile", /`execution_complete` says the processes exited 0, which is not coverage/);

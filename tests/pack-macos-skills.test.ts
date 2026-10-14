@@ -4,7 +4,7 @@
  * "Use only if ... Not for ..."; `needs` is at most two deep and its chain at most 1,900 tokens counting the base
  * skills it reaches; an index entry is at most 40 tokens). They say what an artefact shows, what it does not and what
  * to record, and the tool fields they name are fields those tools really write. The split of a long skill into a
- * decision-rule leaf and second-level leaves keeps every rule: the key rules are asserted here by their wording.
+ * decision-rule leaf and second-level leaves keeps every rule: the key rules are asserted here by their text.
  */
 import assert from "node:assert/strict";
 import { readFile, readdir } from "node:fs/promises";
