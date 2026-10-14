@@ -8,7 +8,7 @@ requires_host: []
 mentions: [evtx_query]
 ---
 
-Use when the question is what was done to a VM, a snapshot or a datastore through the management plane. Not for the ransomware incident sequence (the ransomware pack, if loaded) or for what ran inside the guest.
+Use when the question is what was done to a VM, a snapshot or a datastore through the management plane. Not for the incident sequence of a ransomware case (that pack's `encryptor/backup-infrastructure`, if loaded, covers what a compromised hypervisor means there) or for what ran inside the guest.
 
 1. **Ask five things of every record:** which operation, on which object, under which account or token, from which source address or session, and the outcome, each with the record's own time. A task record shows that an operation was requested and ran under that account; it does not name the person behind it.
 2. **List the planes that could have recorded it.** A management server's task and event records; the host's own logs; the host's shell and authentication logs; the hypervisor's local API log. An operation made directly on a host through its shell or API may be absent from the management server's records, and one made through the server is usually recorded at both ends; check what each export keeps. A gap in one is not a gap in the event.

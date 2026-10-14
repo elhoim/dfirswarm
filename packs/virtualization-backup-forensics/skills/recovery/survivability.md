@@ -7,7 +7,7 @@ tools: [snapshot_chain_check, backup_audit_normalise, virtualization_inventory]
 requires_host: []
 ---
 
-Use when you must say which recovery points stand and whether any can be restored. Not for decryptor evaluation or the order of recovery steps (the ransomware pack, if loaded).
+Use when you must say which recovery points stand and whether any can be restored. Not for decryptor evaluation or the order of recovery steps (the ransomware pack's `recovery/what-is-possible`, if loaded).
 
 1. **List the protected objects** from the inventory (`virtualization_inventory`: VMs, disks, and the disks a configuration leaves out of snapshots or backups). A disk that was never protected has no recovery point to survive.
 2. **List every candidate copy per object:** hypervisor snapshots, backup restore points, replicas, copies on other storage, offline or immutable copies, and exports. A snapshot on the same storage as the disk is not independent of it.

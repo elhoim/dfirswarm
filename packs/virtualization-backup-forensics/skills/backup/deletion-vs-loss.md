@@ -5,9 +5,10 @@ when: A backup, snapshot or restore point may have been deleted, pruned, expired
 needs: [evidence/coverage]
 tools: [backup_audit_normalise]
 requires_host: []
+mentions: [vss_stores]
 ---
 
-Use when the claim is that recovery data was destroyed, or that it was not. Not for the catalogue/repository/retention comparison itself (`backup/catalogues-and-retention`) or for shadow copies on Windows (the Windows pack).
+Use when the claim is that recovery data was destroyed, or that it was not. Not for the catalogue/repository/retention comparison itself (`backup/catalogues-and-retention`) or for shadow copies on Windows (the Windows pack's `vss_stores`, if loaded).
 
 Four states, each needing its own evidence. Do not let one stand in for the next.
 

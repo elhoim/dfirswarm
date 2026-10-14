@@ -7,7 +7,7 @@ tools: [backup_audit_normalise]
 requires_host: []
 ---
 
-Use when you read what a backup system believes it holds, what its storage holds, and what its settings say should be kept. Not for the incident sequence (the ransomware pack, if loaded) or for a product the tool does not list.
+Use when you read what a backup system believes it holds, what its storage holds, and what its settings say should be kept. Not for the incident sequence (the ransomware pack's `encryptor/backup-infrastructure` and `encryptor/destroyed-backups`, if loaded, which end where the records are read) or for a product the tool does not list.
 
 1. **Keep three accounts apart.** The *catalogue* (the product's database of restore points and jobs) says what the product believes exists. The *repository* (files or objects on storage) holds what bytes exist. The *settings* (retention, schedules, repository and immutability configuration) say what should have been kept and removed. Each can be changed, lost or collected separately.
 2. **Say which products you can read.** `backup_audit_normalise` reads Proxmox VE and Proxmox Backup Server task indexes and logs, and any CSV, JSON Lines or XML export through a mapping you declare. For another product there is no reader here: ask for an export, declare the mapping from the export's own header or schema, and label every event as declared. Do not infer a vendor's layout from a sample, and never start the product against the evidence.

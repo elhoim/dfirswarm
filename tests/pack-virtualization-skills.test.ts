@@ -148,6 +148,25 @@ test("the skills state no product release as a fact, give no verdict from a mark
   assert.match(skills.get("backup/catalogues-and-retention")!.body, /never start the product against the evidence/);
 });
 
+test("every skill id a skill names exists: in this pack, in the base pack, or in another pack of the repository (a rename elsewhere breaks this)", async () => {
+  const mine = await load(SKILLS);
+  const known = new Set<string>();
+  for (const pack of await readdir(join(VIRT, ".."))) {
+    const dir = join(VIRT, "..", pack, "skills");
+    for (const id of (await load(dir).catch(() => new Map<string, Skill>())).keys()) known.add(id);
+  }
+  const named = new Set<string>();
+  for (const s of mine.values()) for (const m of s.body.matchAll(/`([a-z][a-z-]*\/[a-z][a-z-]*)`/g)) named.add(m[1]);
+  assert.ok(named.size >= 12, "the skills point to each other and to other packs");
+  for (const id of named) assert.ok(known.has(id), `${id} is named and no pack carries it`);
+  // the places where this pack's reading ends and another pack's begins are named
+  const bodies = (id: string): string => mine.get(id)!.body;
+  assert.match(bodies("hypervisor/activity"), /`encryptor\/backup-infrastructure`/);
+  assert.match(bodies("backup/catalogues-and-retention"), /`encryptor\/destroyed-backups`/);
+  assert.match(bodies("recovery/survivability"), /`recovery\/what-is-possible`/);
+  assert.deepEqual(mine.get("backup/deletion-vs-loss")!.meta.mentions, ["vss_stores"]);
+});
+
 test("the skills name every tool of the pack, and the pack's method-only leaves are the ones that name none of its tools", async () => {
   const skills = await load(SKILLS);
   const all = [...skills.values()].map((s) => s.body).join("\n");
