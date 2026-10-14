@@ -56,6 +56,8 @@ MAX_LINE = 1 << 20
 MAX_FIELD = 1 << 20
 MAX_DISTINCT = 10000
 MAX_XML_RECORD_ELEMENTS = 10000
+MAX_XML_RECORD_BYTES = 4 << 20   # text and attributes one declared XML record may hold; a record over it is counted, not read
+MAX_XML_TOKEN = 16 << 20         # bytes the XML reader may take in without one element or text callback (a giant tag or comment)
 MAX_XML_DEPTH = 64
 MAX_PATHS = 100
 CATEGORIES = ("backup_job", "backup_start", "backup_end", "backup_error", "archive_created", "restore", "snapshot_create", "snapshot_delete",
@@ -71,6 +73,8 @@ PVE_TYPES = {"vzdump": "backup_job", "backup": "backup_job", "qmsnapshot": "snap
              "verificationjob": "verification", "syncjob": "sync", "sync": "sync"}
 KNOWN_UNSUPPORTED = ("veeam", "commvault", "rubrik", "cohesity", "acronis", "veritas", "netbackup", "networker", "nakivo", "altaro", "hycu", "druva",
                      "backup_exec", "arcserve", "vcenter", "vsphere", "hyper-v", "hyperv", "nutanix", "ovirt", "xen", "azure_backup", "aws_backup")
+
+VOCABULARY = frozenset()     # words the way out shows as they are (see SHARED BOUNDARY): none here
 
 # BEGIN SHARED WITHHOLDING
 # The same text is in pcap_extract, zeek_run, suricata_run and network_log_summary, so that the four tools withhold
@@ -241,15 +245,14 @@ def in_job():
 
 
 def describe(exc):
+    """An exception as text for an answer: its type and errno name, and its message withheld by shape, never cut."""
     code = errno.errorcode.get(exc.errno, "") if getattr(exc, "errno", None) else ""
     return scrub("%s%s: %s" % (type(exc).__name__, " " + code if code else "", getattr(exc, "strerror", None) or str(exc)))
 
 
 def fail(message, **extra):
-    """An error answer: JSON, exit 1, the same `status` every answer of this pack carries, nothing identifier-shaped."""
-    safe = {k: (scrub(v) if isinstance(v, str) else v) for k, v in extra.items()}
-    print(json.dumps({"error": scrub(message), "tool": TOOL, "status": "failed",
-                      "status_basis": "the tool stopped with an error (see error)", **safe}))
+    """An error answer: JSON, exit 1, the same `status` every answer of this pack carries, through the one way out."""
+    print(answer_text({"error": message, "tool": TOOL, "status": "failed", "status_basis": "the tool stopped with an error (see error)", **extra}))
     raise SystemExit(1)
 
 
@@ -260,7 +263,7 @@ def read_args():
             fail("arguments are larger than 8 MiB: pass a list of files, not their contents")
         args = json.loads(raw.decode("utf-8") or "{}")
     except (ValueError, UnicodeDecodeError) as exc:
-        fail("arguments are not valid JSON", reason=str(exc))
+        fail("arguments are not valid JSON", reason=describe(exc))
     if not isinstance(args, dict):
         fail("arguments must be a JSON object")
     return args
@@ -357,7 +360,9 @@ def decode(data):
 
 # Lossless paging: the page an agent reads stays small, and when there are more rows the whole result is written as JSON
 # Lines under work/<agent>/tool-output (in a job, $OUT/tool-output) and named. The file name is random: it is never a
-# digest of anything asked for. A write that fails is an error answer naming the file, never a loss that goes unsaid.
+# digest of anything asked for (sixteen decimal digits, a shape the withholding rules leave alone). Every row is sealed
+# (the one way out, below) as it is written. A write that fails is an error answer naming the file, never a loss that
+# goes unsaid.
 class LosslessPage:
     def __init__(self, tool, key, limit):
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
@@ -369,7 +374,7 @@ class LosslessPage:
         self.total = 0
         self._out = None
         self._tmp = None
-        name = "%s-%s-%s.jsonl" % (self.tool, self.key, secrets.token_hex(8))
+        name = "%s-%s-%016d.jsonl" % (self.tool, self.key, secrets.randbelow(10 ** 16))
         job, out = os.environ.get("JOB_ID"), os.environ.get("OUT")
         if job and out:
             self.path = Path(out) / "tool-output" / name
@@ -380,8 +385,9 @@ class LosslessPage:
             self.shown = str(self.path)
 
     def _write(self, row):
+        line = row_text(row, "pages/%s/all_results" % self.key)
         try:
-            self._out.write(json.dumps(row, default=str))
+            self._out.write(line)
             self._out.write("\n")
         except OSError as exc:
             fail("the whole result could not be written: %s" % describe(exc), paging_file=str(self.path))
@@ -490,18 +496,37 @@ class Shown(str):
 
 
 # An open-ended authority or name:secret run at the point where a long text was cut might have its user-info separator beyond
-# the cut: it is withheld whole.
+# the cut, and a run of name characters the cut ends might be the head of a token: each is withheld whole.
 _OPEN_AUTHORITY = re.compile(r"(?<=//)[^/?#\s]*$")
-_OPEN_BARE = re.compile(r"(?<![\w.%+:/-])[\w.%+-]{1,64}:[^\s/@:]*$")
+_OPEN_BARE = re.compile(r"[^\s/@:<>]{1,64}:[^\s/@<>]*$")
+_OPEN_RUN = re.compile(r"[A-Za-z0-9_+%/=.:@-]+$")
+
+
+def cut_safely(text, limit):
+    """`text` cut to at most `limit` characters (plus a marker), never leaving the head of a run the cut split: a text
+    is withheld by shape BEFORE it is cut, and what the cut leaves open is withheld whole, not shown in part."""
+    if len(text) <= limit:
+        return text
+    head = text[:limit]
+    if _OPEN_RUN.match(text, limit):          # the cut fell inside a run
+        head = _OPEN_RUN.sub(lambda m: _withheld("open run at a cut", len(m.group()), "cut"), head)
+    head = _OPEN_AUTHORITY.sub(lambda m: _withheld("userinfo", len(m.group()), "text"), head)
+    return _OPEN_BARE.sub(lambda m: _withheld("userinfo", len(m.group()), "text"), head)
+
+
+def brief(text, limit=300):
+    """A message from a library or a program, withheld by shape whole and then cut safely: never cut first."""
+    return cut_safely(scrub(text if isinstance(text, str) else str(text)), limit)
 
 
 class Shower:
     """Every string the answer shows a name, a path or a value of passes through here: token-shaped runs and user-info are
     withheld, a text over `limit` characters is shown cut with its whole length, and the original of what was changed goes
     to the values file when one was asked for (never anywhere else). Only the first EXAMINED characters of a long text are
-    checked (the check is not linear in the length of an adversary's text); the last 20 of them are dropped so that no
-    fragment of a token the cut split can be shown, and a run that is still open at the cut and might be user-info is
-    withheld whole."""
+    checked (the check is not linear in the length of an adversary's text): a run of name characters, an authority or a
+    name:secret run that the EXAMINED cut leaves open is withheld whole before the shape check, so that no fragment of a
+    token the cut split can be shown; the check runs on the whole examined text, and the shorter cut to `limit` comes
+    after it and leaves no run open either."""
 
     EXAMINED = 4096
 
@@ -519,13 +544,11 @@ class Shower:
         total = len(text)
         head = text
         if total > self.EXAMINED:
-            head = text[:self.EXAMINED - 20]
-            head = _OPEN_AUTHORITY.sub(lambda m: _withheld("userinfo", len(m.group()), "text"), head)
-            head = _OPEN_BARE.sub(lambda m: _withheld("userinfo", len(m.group()), "text"), head)
-        shown = scrub(head)
+            head = cut_safely(text, self.EXAMINED)
+        shown = seal_text(head, "text")
         was_cut = total > self.EXAMINED
         if len(shown) > self.limit:
-            shown = shown[:self.limit]
+            shown = cut_safely(shown, self.limit)
             was_cut = True
         if was_cut:
             shown += "...(whole text: %d characters)" % total
@@ -543,6 +566,179 @@ def withheld_summary(shower):
                      "are withheld, and a string over %d characters is shown cut with its whole length. A secret that does not look "
                      "like a token (a short password in a name) is not recognised, so run the tool as a job with secret_output: true.") % shower.limit}
 # END SHARED COMMON
+# BEGIN SHARED BOUNDARY
+# The same text is in virtualization_inventory, snapshot_chain_check and backup_audit_normalise; tests/pack-virtualization-
+# shared.test.ts holds the copies equal. The one way out. Every key and every value of an answer, of an error answer and of
+# every row a paging file holds is sealed when it is serialised, whatever code made it: the whole string is withheld by
+# shape (the rules of the shared withholding block, plus the shapes below that block does not catch) before anything cuts
+# or folds it, and the rules are applied until they change nothing more. A GUID that stands alone is shown as it is: it
+# is an identifier the formats carry, and the shape check would take it for a token. Then the serialised text is read back
+# and checked with the same rules: a string they would still change is replaced by <withheld: N bytes> and the answer is
+# partial and says how many. That check is a backstop: it fires only when a string bypassed the seal.
+#
+# The shapes added here: user-info after `:` or `/` (a Proxmox storage:user:password@host, a path with user:password@host
+# in it), which the shared block's lookbehind leaves alone; a base64 key with its padding that holds `/` or `+` (a 16-byte
+# key is 24 characters, under the shared block's 30-character slashed rule); and the head of a prefixed token (AKIA..., ghp_...,
+# github_pat_..., xoxb-..., eyJ...) too short for the shared rule, as a cut or a damaged file can leave it; and a base64 run
+# with a `/` in it whose letters change case as random text does (an AWS-style secret key with one `/`, which the shared
+# block's three-piece rule misses). A word of the tool's own closed vocabulary (VOCABULARY, set by each tool: VMDK create
+# types) is shown as it is, as a GUID is.
+BOUNDARY = {"withheld": 0, "replaced": 0, "where": []}
+_GUID_ALONE = re.compile(r"(?<![A-Za-z0-9_+%/=-])\{?[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}\}?(?![A-Za-z0-9_+%/=-])")
+_ANY_USERINFO = re.compile(r"(?<![A-Za-z0-9._%+-])(?!mailto:)[^\s/@:<>\"'`]{1,64}:[^\s/@<>\"'`]{1,128}(?=@(?:[\w\[]|$))")
+_SLASHED_RANDOM = re.compile(r"(?<![A-Za-z0-9+/=])[A-Za-z0-9+/]{24,}={0,2}(?![A-Za-z0-9+=])")
+_BASE64_KEY = re.compile(r"(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{16,}={1,2}(?![A-Za-z0-9+=])")
+_TOKEN_HEAD = re.compile(r"(?:AKIA|ASIA)[0-9A-Z]{4,}|gh[pousr]_[A-Za-z0-9]{4,}|github_pat_[A-Za-z0-9_]{4,}|xox[abeprs]-[A-Za-z0-9-]{6,}|eyJ[A-Za-z0-9_-]{10,}")
+# A string none of whose rules can match is passed without the slow path: every rule needs one of these.
+_QUICK = re.compile(r"[A-Za-z0-9_+%/=-]{14,}|@|AKIA|ASIA|gh[pousr]_|github_pat_|xox[abeprs]-|sk-|eyJ|(?i:basic|bearer)\s")
+# The tool's own file names, made from the job's or agent's id and random digits: shown as they are.
+_OWN_PATH = re.compile(r"(?:work/[A-Za-z0-9_.-]{1,64}|store/jobs/[A-Za-z0-9_.-]{1,64}/out)/(?:tool-output/[a-z_]{1,40}-[a-z_]{1,40}-[0-9]{16}\.jsonl|[a-z]{1,20}-values\.jsonl)")
+_SEALED = {}
+
+
+def _random_slashed(run):
+    """A base64 run holding `/`: random when its letters change case as random text does, or digits sit among them."""
+    if "/" not in run:
+        return False
+    flat = run.replace("/", "").rstrip("=")
+    letters = [c for c in flat if c.isalpha()]
+    if not (any(c.isdigit() for c in flat) and any(c.islower() for c in letters) and any(c.isupper() for c in letters)):
+        return False
+    flips = sum(1 for a, b in zip(letters, letters[1:]) if a.islower() != b.islower())
+    packed = len(re.findall(r"(?<=[A-Za-z])[0-9]{1,3}(?=[A-Za-z])", flat))
+    return len(letters) >= 16 and (flips >= 0.33 * len(letters) or (packed and flips >= 0.25 * len(letters))) or _token_run(flat)
+
+
+def _rules_once(text, kind="boundary"):
+    """One application of every withholding rule to a whole string; a GUID standing alone and a word of VOCABULARY are kept."""
+    if not _QUICK.search(text) or _OWN_PATH.fullmatch(text) or text in VOCABULARY:
+        return text
+    out, last = [], 0
+    for m in _GUID_ALONE.finditer(text):
+        out.append(_rules_piece(text[last:m.start()], kind))
+        out.append(m.group())
+        last = m.end()
+    out.append(_rules_piece(text[last:], kind))
+    if kind == "boundary":
+        COUNTS.pop("boundary", None)
+    return "".join(out)
+
+
+def _rules_piece(piece, kind):
+    if not piece or not _QUICK.search(piece):
+        return piece
+    if not piece.startswith("UPID:"):          # a Proxmox task id is fields joined by `:` ending in user@realm, not user-info
+        piece = _ANY_USERINFO.sub(lambda m: _withheld("userinfo", len(m.group()), kind), piece)
+    piece = _SLASHED_RANDOM.sub(lambda m: _withheld("token-shaped text", len(m.group()), kind) if _random_slashed(m.group()) else m.group(), piece)
+    piece = _BASE64_KEY.sub(lambda m: _withheld("token-shaped text", len(m.group()), kind) if re.search(r"[/+]", m.group()) else m.group(), piece)
+    piece = scrub(piece, kind)
+    return _TOKEN_HEAD.sub(lambda m: _withheld("token-shaped text", len(m.group()), kind), piece)
+
+
+def seal_text(text, kind="boundary"):
+    """The rules applied to a whole string until they change nothing (a string that keeps changing is withheld whole), so
+    that the backstop's one application finds nothing to change. The Shower uses this too, so that what it shows and what
+    the way out lets through are judged by the same rules."""
+    if not isinstance(text, str):
+        text = str(text)
+    hit = _SEALED.get(text)
+    if hit is None:
+        hit = text
+        for _ in range(6):
+            before, hit = hit, _rules_once(hit, kind)
+            if hit == before:
+                break
+        else:
+            hit = "<withheld: %d bytes>" % blen(text)
+        if len(text) <= 2048:
+            if len(_SEALED) >= 50000:
+                _SEALED.clear()
+            _SEALED[text] = hit
+    return hit
+
+
+def boundary_text(text):
+    """The seal of one string at the way out, counted when it changed something."""
+    hit = seal_text(text)
+    if hit != text:
+        BOUNDARY["withheld"] += 1
+    return hit
+
+
+def seal(value, depth=0):
+    """Every key and every value of a structure, as JSON will write it, through boundary_text; a key two keys seal to is
+    numbered (`<key> #2`), never merged."""
+    if isinstance(value, str):
+        return boundary_text(value)
+    if value is None or isinstance(value, (bool, int)):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else boundary_text(repr(value))
+    if depth > 64:
+        return boundary_text(json.dumps(value, default=str))
+    if isinstance(value, dict):
+        out, taken = {}, {}
+        for k, v in value.items():
+            key = boundary_text(k if isinstance(k, str) else json.dumps(k) if isinstance(k, (bool, type(None))) else str(k))
+            if key in out:
+                n = taken.get(key, 1) + 1
+                while "%s #%d" % (key, n) in out:
+                    n += 1
+                taken[key] = n
+                key = "%s #%d" % (key, n)
+            out[key] = seal(v, depth + 1)
+        return out
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [seal(v, depth + 1) for v in value]
+    return boundary_text(str(value))
+
+
+def backstop(value, where=""):
+    """The serialised answer read back and checked with the same rules: a string they would still change (a key or a
+    value) is replaced by <withheld: N bytes>, counted, and its place named."""
+    if isinstance(value, str):
+        if _rules_once(value) == value:
+            return value
+        BOUNDARY["replaced"] += 1
+        if len(BOUNDARY["where"]) < 20:
+            BOUNDARY["where"].append(where or "/")
+        return "<withheld: %d bytes>" % blen(value)
+    if isinstance(value, dict):
+        out = {}
+        for k, v in value.items():
+            key = backstop(k, where + "/(key)")
+            while key in out:
+                key += " #"
+            out[key] = backstop(v, where + "/" + key)
+        return out
+    if isinstance(value, list):
+        return [backstop(v, "%s/%d" % (where, i)) for i, v in enumerate(value)]
+    return value
+
+
+def row_text(row, where):
+    """One row of a paging file: sealed, serialised, read back and checked."""
+    text = json.dumps(seal(row))
+    before = BOUNDARY["replaced"]
+    checked = backstop(json.loads(text), where)
+    return text if BOUNDARY["replaced"] == before else json.dumps(checked)
+
+
+def answer_text(doc):
+    """The answer (or an error answer): sealed, serialised, read back and checked; a string the check had to replace,
+    here or in a paging file, makes a complete answer partial, and the answer says so."""
+    text = json.dumps(seal(doc), indent=2)
+    checked = backstop(json.loads(text), "")
+    checked["boundary"] = {"strings_withheld_at_the_way_out": BOUNDARY["withheld"], "strings_replaced_by_the_check": BOUNDARY["replaced"],
+                           "replaced_at": list(BOUNDARY["where"]),
+                           "note": "every key and value of this answer and of its paging files was withheld by shape as it was written, then read back "
+                                   "and checked with the same rules; a string the check replaced is <withheld: N bytes>"}
+    if BOUNDARY["replaced"] and checked.get("status") == "complete":
+        checked["status"] = "partial"
+        checked["status_basis"] = "%s; %d string(s) still held a token-shaped text when the answer was checked on its way out and were replaced by <withheld: N bytes> (see boundary)" % (
+            checked.get("status_basis") or "", BOUNDARY["replaced"])
+    return json.dumps(checked, indent=2)
+# END SHARED BOUNDARY
 
 
 def iso_from_epoch(value):
@@ -596,15 +792,19 @@ class TimeReader:
                 utc = local.astimezone(datetime.timezone.utc)
                 return utc.strftime("%Y-%m-%dT%H:%M:%S") + ("." + frac if frac else "") + "Z", basis
             if self.fmt.startswith("strptime:"):
-                parsed = datetime.datetime.strptime(str(text), self.fmt[9:])
+                try:
+                    parsed = datetime.datetime.strptime(str(text), self.fmt[9:])
+                except ValueError:
+                    return None, "the value does not match the declared format (strptime)"
                 if parsed.tzinfo is not None:
                     return parsed.astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "the zone written in the value (%z)"
                 if self.offset is not None:
                     local = parsed.replace(tzinfo=datetime.timezone(datetime.timedelta(minutes=self.offset)))
                     return local.astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "a fixed offset of %d minutes declared by the caller; daylight saving is not accounted for" % self.offset
                 return None, "no zone in the value and none declared: naive local time, not assumed to be UTC"
-        except (ValueError, OverflowError, OSError, TypeError) as exc:
-            return None, "the value does not match the declared format (%s)" % str(exc)[:80]
+        except (ValueError, OverflowError, OSError, TypeError):
+            # a fixed phrase: the exception's text quotes the value, and a basis is a dictionary key of the answer too
+            return None, "the value does not match the declared format (not a number, or a date or time out of range)"
         return None, "unknown time format"
 
 
@@ -690,7 +890,25 @@ def decode_line(raw):
 
 # ---- Proxmox ---------------------------------------------------------------------------------------------------------
 
+# Proxmox VE: UPID:node:pid:pstart:starttime:type:id:user:   (pid, starttime 8 hexadecimal digits; pstart 8 or more)
+# Proxmox Backup Server: UPID:node:pid:pstart:task_id:starttime:worker_type:worker_id:auth_id:   (one more field, the task
+# counter; the worker id is escaped as a systemd unit name, \xNN, `-` for `/`). Either is followed, in the task index, by
+# the end time (8 hexadecimal digits) and the status when the task ended.
 UPID = re.compile(r"^UPID:([^:]*):([0-9A-Fa-f]{8}):([0-9A-Fa-f]{8,16}):([0-9A-Fa-f]{8}):([^:]*):([^:]*):([^:]*):(?:\s+([0-9A-Fa-f]{8})\s*(.*))?$")
+UPID_PBS = re.compile(r"^UPID:([^:]*):([0-9A-Fa-f]{8}):([0-9A-Fa-f]{8,16}):([0-9A-Fa-f]{8}):([0-9A-Fa-f]{8}):([^:]*):([^:]*):([^:]*):(?:\s+([0-9A-Fa-f]{8})\s*(.*))?$")
+
+
+def systemd_unescape(text):
+    """A PBS worker id as written (systemd unit-name escaping: `-` stands for `/`, \\xNN for a byte) back to its text."""
+    out, i = [], 0
+    while i < len(text):
+        if text.startswith("\\x", i) and re.fullmatch(r"[0-9a-fA-F]{2}", text[i + 2:i + 4]):
+            out.append(chr(int(text[i + 2:i + 4], 16)))
+            i += 4
+        else:
+            out.append("/" if text[i] == "-" else text[i])
+            i += 1
+    return "".join(out)
 
 
 def pve_category(task_type):
@@ -714,13 +932,21 @@ def parse_task_index(fh, source, events, clock, max_line, stats):
         if not line.strip():
             stats["blank"] += 1
             continue
-        m = UPID.match(line.strip())
+        m = UPID_PBS.match(line.strip())
+        product = "proxmox_backup_server"
+        if m:
+            node, pid, pstart, task_no, starttime, ttype, wid, user, endtime, status = m.groups()
+            tid = systemd_unescape(wid) if wid else wid
+        else:
+            m = UPID.match(line.strip())
+            product, task_no, wid = "proxmox_ve", None, None
+            if m:
+                node, pid, pstart, starttime, ttype, tid, user, endtime, status = m.groups()
         if not m:
             stats["unparsed"] += 1
             if len(stats["problem_lines"]) < 200:
                 stats["problem_lines"].append({"source_id": source["id"], "line": n, "byte_offset": off, "reason": "not a UPID task line"})
             continue
-        node, pid, pstart, starttime, ttype, tid, user, endtime, status = m.groups()
         start_utc = iso_from_epoch(int(starttime, 16))
         end_utc = iso_from_epoch(int(endtime, 16)) if endtime else None
         status = (status or "").strip()
@@ -734,9 +960,13 @@ def parse_task_index(fh, source, events, clock, max_line, stats):
         else:
             result, result_basis = "error", "status other than OK"
         stats["parsed"] += 1
+        task = {"pid": int(pid, 16), "pstart": pstart, "upid_layout": product}
+        if product == "proxmox_backup_server":
+            task.update(task_counter=int(task_no, 16), worker_id_as_written=wid or None,
+                        worker_id_note="Proxmox Backup Server writes the worker id escaped as a systemd unit name; object is it unescaped")
         events.add(source, {"line": n, "byte_offset": off, "byte_length": length}, "pve_task_index", time_utc=start_utc, time_raw=starttime, time_basis="start time, epoch seconds in hexadecimal, UTC by definition",
                    end_time_utc=end_utc, end_time_raw=endtime, category=category, category_basis=basis, action_raw=ttype, object=tid or None, actor=user or None, host=node or None,
-                   result=result, result_basis=result_basis, result_raw=status or None, task={"pid": int(pid, 16), "pstart": pstart})
+                   result=result, result_basis=result_basis, result_raw=status or None, task=task)
 
 
 LOG_PREFIX = re.compile(r"^(INFO|WARN|ERROR|TASK OK|TASK ERROR|TASK WARNINGS)(?::\s?|$)(.*)$")
@@ -812,14 +1042,17 @@ def parse_vzdump_log(fh, source, events, clock, max_line, stats, times):
 
 # ---- declared mappings -----------------------------------------------------------------------------------------------
 
+MISSING = object()   # a declared field the record does not have (a field that is there and null or empty is not missing)
+
+
 def get_path(obj, path):
-    """A value of a nested JSON object by dotted path; None when absent."""
+    """A value of a nested JSON object by dotted path; MISSING when the path is not in the object."""
     cur = obj
     for part in path.split("."):
         if isinstance(cur, dict) and part in cur:
             cur = cur[part]
         else:
-            return None
+            return MISSING
     return cur
 
 
@@ -832,24 +1065,38 @@ def scalar(value):
 
 
 def declared_event(events, source, loc, fmt, record_get, mapping, times, category_map, result_map, stats):
-    raw_time = scalar(record_get(mapping["time"])) if mapping.get("time") else None
+    stats["records_declared"] += 1
+
+    def field(name):
+        """The declared field's value; a field the record does not have is counted per field (the CSV header check's twin)."""
+        if not mapping.get(name):
+            return None
+        value = record_get(mapping[name])
+        if value is MISSING:
+            stats["fields_absent"][name] += 1
+            return None
+        return scalar(value)
+    raw_time = field("time")
     utc, basis = times.read(raw_time)
-    action = scalar(record_get(mapping["action"])) if mapping.get("action") else None
-    result_raw = scalar(record_get(mapping["result"])) if mapping.get("result") else None
+    action = field("action")
+    result_raw = field("result")
     if action is not None and action.lower() in category_map:
         category, category_basis = category_map[action.lower()], "declared in category_map"
     else:
         category, category_basis = "other", "not in the caller's category_map" if category_map else "no category_map declared: the action is kept raw"
-        if action is not None and (action[:200] in stats["unmapped_actions"] or len(stats["unmapped_actions"]) < 500):
-            stats["unmapped_actions"][action[:200]] += 1
+        if action is not None:
+            key = events.shown(action, "actions", "action")      # withheld by shape whole, then cut: never cut first
+            if key in stats["unmapped_actions"] or len(stats["unmapped_actions"]) < 500:
+                stats["unmapped_actions"][key] += 1
+            else:
+                stats["unmapped_actions_over"] += 1
     if result_raw is not None and result_raw.lower() in result_map:
         result, result_basis = result_map[result_raw.lower()], "declared in result_map"
     else:
         result, result_basis = "unknown", ("not in the caller's result_map" if result_map else "no result_map declared") if result_raw is not None else "no result field in the record"
     events.add(source, loc, fmt, time_utc=utc, time_raw=raw_time, time_basis=basis, category=category, category_basis=category_basis, action_raw=action,
-               object=scalar(record_get(mapping["object"])) if mapping.get("object") else None, actor=scalar(record_get(mapping["actor"])) if mapping.get("actor") else None,
-               host=scalar(record_get(mapping["host"])) if mapping.get("host") else None, job=scalar(record_get(mapping["job"])) if mapping.get("job") else None,
-               result=result, result_basis=result_basis, result_raw=result_raw, message=scalar(record_get(mapping["message"])) if mapping.get("message") else None,
+               object=field("object"), actor=field("actor"), host=field("host"), job=field("job"),
+               result=result, result_basis=result_basis, result_raw=result_raw, message=field("message"),
                mapping_declared_by="the caller; the tool does not know the product")
     stats["parsed"] += 1
 
@@ -885,7 +1132,7 @@ def parse_csv(fh, source, events, clock, max_line, stats, mapping, times, catego
             declared_event(events, source, {"record": record, "line": reader.line_num}, "declared_csv", fields.get, mapping, times, category_map, result_map, stats)
     except csv.Error as exc:
         stats["unparsed"] += 1
-        stats["read_errors"].append("the CSV reader stopped at record %d, line %d: %s" % (record + 1, reader.line_num, str(exc)[:100]))
+        stats["read_errors"].append("the CSV reader stopped at record %d, line %d: %s" % (record + 1, reader.line_num, brief(exc, 100)))
 
 
 def shown_names(names):
@@ -925,15 +1172,19 @@ class Node:
         self.tag, self.attrib, self.text, self.kids = tag, attrib, None, []
 
 
-def xml_stream(fh, record_tag, on_record, max_bytes, clock):
+def xml_stream(fh, record_tag, on_record, max_bytes, clock, on_over):
     """Feed expat in chunks; every <record_tag> element is built, handed over and dropped, so memory follows one record."""
     import xml.parsers.expat as expat
 
     def refuse(*_a):
         raise ValueError("a DOCTYPE or ENTITY declaration is refused: no entity is expanded")
-    state = {"stack": [], "rec": None, "elements": 0, "records": 0, "depth": 0, "last_line": 1}
+    # Memory follows one record, and one record is bounded: its text and attributes together (MAX_XML_RECORD_BYTES), any one
+    # field (MAX_FIELD); a record over either is counted and located, never read in part (on_over). What the reader takes in
+    # without a callback (a giant tag, attribute list or comment, which expat holds whole) is bounded by MAX_XML_TOKEN.
+    state = {"stack": [], "rec": None, "elements": 0, "records": 0, "depth": 0, "last_line": 1, "bytes": 0, "over": None, "calls": 0}
 
     def start(tag, attrs):
+        state["calls"] += 1
         state["depth"] += 1
         if state["depth"] > MAX_XML_DEPTH:
             raise ValueError("nested deeper than %d" % MAX_XML_DEPTH)
@@ -943,50 +1194,78 @@ def xml_stream(fh, record_tag, on_record, max_bytes, clock):
                 state["rec"] = Node(name, attrs)
                 state["stack"] = [state["rec"]]
                 state["elements"] = 1
+                state["bytes"] = sum(len(k) + len(v) for k, v in attrs.items())
+                state["over"] = None
+                if state["bytes"] > MAX_XML_RECORD_BYTES:
+                    state["over"] = "its attributes hold more than %d bytes" % MAX_XML_RECORD_BYTES
+                    state["rec"].attrib = {}
             return
         state["elements"] += 1
         if state["elements"] > MAX_XML_RECORD_ELEMENTS:
             raise ValueError("a record has more than %d elements" % MAX_XML_RECORD_ELEMENTS)
-        node = Node(name, attrs)
+        size = sum(len(k) + len(v) for k, v in attrs.items())
+        if state["over"] is None and state["bytes"] + size > MAX_XML_RECORD_BYTES:
+            state["over"] = "it holds more than %d bytes of text and attributes" % MAX_XML_RECORD_BYTES
+        node = Node(name, {} if state["over"] else attrs)
+        state["bytes"] += 0 if state["over"] else size
         state["stack"][-1].kids.append(node)
         state["stack"].append(node)
 
     def end(tag):
+        state["calls"] += 1
         state["depth"] -= 1
         if state["rec"] is None:
             return
         node = state["stack"].pop()
         if not state["stack"]:
             state["records"] += 1
-            on_record(state["rec"], state["records"], parser.CurrentLineNumber)
+            if state["over"]:
+                on_over(state["records"], parser.CurrentLineNumber, state["over"])
+            else:
+                on_record(state["rec"], state["records"], parser.CurrentLineNumber)
             state["rec"] = None
 
     def chars(text):
-        if state["rec"] is not None and state["stack"]:
+        state["calls"] += 1
+        if state["rec"] is not None and state["stack"] and state["over"] is None:
             node = state["stack"][-1]
-            if node.text is None or len(node.text) < MAX_FIELD:
+            if (len(node.text) if node.text else 0) + len(text) > MAX_FIELD:
+                state["over"] = "one of its fields is over %d bytes" % MAX_FIELD
+            elif state["bytes"] + len(text) > MAX_XML_RECORD_BYTES:
+                state["over"] = "it holds more than %d bytes of text and attributes" % MAX_XML_RECORD_BYTES
+            else:
                 node.text = (node.text or "") + text
+                state["bytes"] += len(text)
+            if state["over"]:
+                for kept in state["stack"]:
+                    kept.text = None
+                state["rec"].kids = []
 
     parser = expat.ParserCreate()
     parser.buffer_text = True
     parser.StartElementHandler, parser.EndElementHandler, parser.CharacterDataHandler = start, end, chars
     parser.StartDoctypeDeclHandler = refuse
     parser.EntityDeclHandler = refuse
-    total = 0
+    total, quiet = 0, 0
     while True:
         chunk = fh.read(65536)
         total += len(chunk)
         if total > max_bytes:
             raise ValueError("the file is over max_file_bytes (%d)" % max_bytes)
         clock.check()
+        calls = state["calls"]
         parser.Parse(chunk, not chunk)
+        quiet = quiet + len(chunk) if state["calls"] == calls else 0
+        if quiet > MAX_XML_TOKEN:
+            raise ValueError("more than %d bytes were read at byte %d without one element or text ending (a tag, an attribute list or a comment that large is not read)" % (MAX_XML_TOKEN, total))
         if not chunk:
             break
     return state["records"]
 
 
 def xml_get(rec, path):
-    """A value of an XML record: 'tag/sub' (text of the first match), '@attr' (an attribute of the record), 'tag@attr'."""
+    """A value of an XML record: 'tag/sub' (text of the first match), '@attr' (an attribute of the record), 'tag@attr';
+    MISSING when the element or the attribute is not in the record."""
     node, _, attr = path.partition("@")
     cur = rec
     for part in [p for p in node.split("/") if p]:
@@ -996,21 +1275,26 @@ def xml_get(rec, path):
                 nxt = k
                 break
         if nxt is None:
-            return None
+            return MISSING
         cur = nxt
     if attr:
-        return cur.attrib.get(attr)
+        return cur.attrib.get(attr, MISSING)
     return (cur.text or "").strip() if (cur is not rec or not node) else (rec.text or "").strip() or None
 
 
 def parse_xml(fh, source, events, clock, stats, mapping, times, category_map, result_map, record_tag, max_bytes):
     def on_record(rec, number, line):
         declared_event(events, source, {"record": number, "line": line}, "declared_xml", lambda p: xml_get(rec, p), mapping, times, category_map, result_map, stats)
+
+    def on_over(number, line, why):
+        stats["over_limit"] += 1
+        if len(stats["problem_lines"]) < 200:
+            stats["problem_lines"].append({"source_id": source["id"], "record": number, "line": line, "reason": "a record over the reader's budget (%s): located, not read" % why})
     import xml.parsers.expat as expat
     try:
-        count = xml_stream(fh, record_tag, on_record, max_bytes, clock)
+        count = xml_stream(fh, record_tag, on_record, max_bytes, clock, on_over)
     except (expat.ExpatError, ValueError, RecursionError) as exc:
-        stats["read_errors"].append("the XML stopped being readable (%s)" % str(exc)[:120])
+        stats["read_errors"].append("the XML stopped being readable (%s)" % brief(exc, 160))
         return
     if count == 0:
         stats["read_errors"].append("no <%s> element in the file" % scrub(record_tag))
@@ -1102,7 +1386,8 @@ def main():
     events = Events(limit, shown, values)
     clock = Clock(seconds)
     sources, problems = [], []
-    stats = {"parsed": 0, "unparsed": 0, "blank": 0, "over_limit": 0, "problem_lines": [], "mapping_errors": [], "read_errors": [], "unmapped_actions": collections.Counter()}
+    stats = {"parsed": 0, "unparsed": 0, "blank": 0, "over_limit": 0, "problem_lines": [], "mapping_errors": [], "read_errors": [], "unmapped_actions": collections.Counter(), "unmapped_actions_over": 0,
+             "fields_absent": collections.Counter(), "records_declared": 0}
     unrecognised = []
     partial = []
     for number, p in enumerate(paths, 1):
@@ -1161,7 +1446,7 @@ def main():
                 partial.append("the read stopped at max_seconds (%s) in %s: the lines after the last event of that file were not read" % (seconds, rec["id"]))
             except ValueError as exc:
                 state = "failed"
-                problems.append({"source_id": rec["id"], "file": shown(p, rec["id"], "file"), "reason": str(exc)})
+                problems.append({"source_id": rec["id"], "file": shown(p, rec["id"], "file"), "reason": brief(exc, 300)})
             except OSError as exc:
                 state = "failed"
                 problems.append({"source_id": rec["id"], "file": shown(p, rec["id"], "file"), "reason": "a read failed (%s)" % describe(exc)})
@@ -1171,6 +1456,11 @@ def main():
         if clock.left() <= 0:
             partial.append("max_seconds (%s) was reached: the files after %s were not read" % (seconds, rec["id"]))
             break
+    if mapping and stats["records_declared"]:
+        for name in ("time", "action"):
+            if stats["fields_absent"].get(name):
+                partial.append("the declared %s field (%s) is absent from %d of %d record(s): those events carry no %s" % (
+                    name, shown(mapping[name], "mapping", name), stats["fields_absent"][name], stats["records_declared"], name))
     values.close()
     page = events.page.finish()
     unmapped = sorted(stats["unmapped_actions"].items(), key=lambda kv: -kv[1])[:50]
@@ -1182,7 +1472,7 @@ def main():
                         "%d unparsed line(s) or record(s), %d over the line limit, %d file(s) not read whole, %d file(s) unrecognised%s: the answer names them" % (
                             stats["unparsed"], stats["over_limit"], len(not_whole), len(unrecognised), ("; " + "; ".join(partial)) if partial else ""),
                         "no event could be read")
-    print(json.dumps({
+    print(answer_text({
         "parser": PARSER, **outcome,
         "format_requested": fmt, "product_label": scrub(product) if product else None,
         "product_label_note": "the caller's label for a declared format; not verified" if product and fmt.startswith("declared_") else None,
@@ -1190,19 +1480,23 @@ def main():
         "events": events.page.page, "pages": {"events": page},
         "counts": {"events": events.n, "parsed": stats["parsed"], "unparsed": stats["unparsed"], "blank": stats["blank"], "over_line_limit": stats["over_limit"]},
         "problem_lines": stats["problem_lines"][:200], "mapping_errors": stats["mapping_errors"], "read_errors": stats["read_errors"],
+        "declared_fields_absent": ({"records": stats["records_declared"], "absent_by_field": dict(stats["fields_absent"]),
+                                    "note": "a declared field the record does not have at all (present and empty is not absent); time or action absent makes the answer partial"}
+                                   if mapping else None),
         "by_category": dict(events.by_category), "by_result": dict(events.by_result),
         "time": {"derived": events.time_derived, "not_derived": events.time_not_derived, "first_utc": events.first, "last_utc": events.last,
                  "not_derived_reasons": dict(events.time_reasons.most_common(10)), "time_format": time_format, "declared_offset_minutes": offset,
                  "note": "events are in source order, not time order; sort on time_utc where it is set. A time with no zone is not assumed to be UTC."},
         "distinct": {k: {"listed": len(v), "over_cap": events.distinct_over[k], "top": [{"value": a, "count": b} for a, b in v.most_common(20)]} for k, v in events.distinct.items()},
-        "unmapped_actions_top": [{"action": shown(a, "actions", "action"), "count": c} for a, c in unmapped] if fmt.startswith("declared_") else None,
+        "unmapped_actions_top": [{"action": a, "count": c} for a, c in unmapped] if fmt.startswith("declared_") else None,
+        "unmapped_actions_distinct_over_cap": stats["unmapped_actions_over"] if fmt.startswith("declared_") else None,
         "partial_reasons": partial, "text": values.summary(), "withheld": withheld_summary(shown),
         "truncated": page["truncated"],
         "limits": {"max_line_bytes": max_line, "max_file_bytes": max_file, "max_distinct_per_aggregate": MAX_DISTINCT, "xml_record_elements": MAX_XML_RECORD_ELEMENTS},
         "note": "Each event says what a line or record says happened, where it was read and how its time was read. It is not proof the operation took place as described, that a reported success "
                 "was a usable restore point, or who did it: an actor is the account the product wrote. A category is a label from a table (this tool's, or the caller's category_map) for the action's name; "
                 "the raw action stays beside it. A job that ended OK is not a restore that worked.",
-    }, indent=2))
+    }))
     return 0 if outcome["status"] != "failed" else 1
 
 

@@ -8,6 +8,7 @@
  * reported.
  */
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -406,5 +407,104 @@ test("names the answer shows are shape-checked: an actor, an object, a host, a r
     for (const needle of [C.github, C.aws, C.hex, "S3cr3tPassw0rd"]) assert.equal(all.includes(needle), false, needle.slice(0, 6));
     assert.ok(out.withheld.strings_changed >= 4);
     assert.match(out.events[0].actor, /<token-shaped text withheld \d+ characters>/);
+  });
+});
+
+// ---- review fixes: each test below fails on the tool as first proposed ---------------------------------------------------
+
+function noPiece(all: string, secret: string, from = 4): void {
+  const low = all.toLowerCase();
+  for (let k = from; k + 12 <= secret.length; k++) assert.equal(low.includes(secret.slice(k, k + 12).toLowerCase()), false, `a piece of ${secret.slice(0, 6)}... was shown`);
+}
+
+test("a Proxmox Backup Server task index is read: its UPID has one more field (the task counter) and an escaped worker id", async () => {
+  await withCwd(async (cwd) => {
+    // proxmox-backup's UPID display: UPID:{node}:{pid:08X}:{pstart:08X}:{task_id:08X}:{starttime:08X}:{worker_type}:{worker_id}:{auth_id}:
+    // and a task list line is that UPID, then the end time ({:08X}) and the status
+    const pbs = (task: number, start: number, type: string, wid: string, end?: number, status?: string): string =>
+      `UPID:pbs1:${hex(1192)}:${hex(2141)}:${hex(task)}:${hex(start)}:${type}:${wid}:root@pam:` + (end === undefined ? "" : ` ${hex(end)} ${status}`);
+    await put(cwd, "inputs/pbs/archive", [
+      pbs(3, T0, "backup", "store1\\x3avm-100", T0 + 60, "OK"),
+      pbs(4, T0 + 100, "garbage_collection", "store1", T0 + 400, "WARNINGS: 2"),
+      pbs(5, T0 + 500, "prune", "store1\\x3avm-100", T0 + 501, "unable to acquire lock"),
+      pbs(6, T0 + 900, "verify", "store1"),
+    ].join("\n") + "\n");
+    const out = body(await tool(AUDIT, cwd, { path: "inputs/pbs/archive" }));
+    assert.equal(out.status, "complete", out.status_basis);
+    assert.equal(out.counts.events, 4);
+    const ev = out.events;
+    assert.deepEqual(ev.map((e: Json) => [e.category, e.result, e.object, e.actor, e.host]), [
+      ["backup_job", "ok", "store1:vm/100", "root@pam", "pbs1"], ["retention_gc", "warning", "store1", "root@pam", "pbs1"],
+      ["retention_prune", "error", "store1:vm/100", "root@pam", "pbs1"], ["verification", "unknown", "store1", "root@pam", "pbs1"]]);
+    assert.equal(ev[0].time_utc, "2023-11-14T22:13:20Z");
+    assert.equal(ev[0].task.upid_layout, "proxmox_backup_server");
+    assert.equal(ev[0].task.task_counter, 3);
+    assert.equal(ev[0].task.worker_id_as_written, "store1\\x3avm-100");
+  });
+});
+
+test("a declared JSON Lines or XML mapping whose time or action field the records do not have is partial, with the count per field", async () => {
+  await withCwd(async (cwd) => {
+    await put(cwd, "inputs/a.jsonl", `{"time":"2024-01-05T02:00:00Z","op":"x","who":null}\n{"time":"2024-01-05T03:00:00Z","op":"y"}\n`);
+    let out = body(await tool(AUDIT, cwd, { path: "inputs/a.jsonl", format: "declared_jsonl", mapping: { time: "tmie", action: "opp", actor: "who" } }));
+    assert.equal(out.status, "partial");
+    assert.match(out.status_basis, /the declared time field \(tmie\) is absent from 2 of 2 record\(s\)/);
+    assert.match(out.status_basis, /the declared action field \(opp\) is absent from 2 of 2 record\(s\)/);
+    assert.deepEqual(out.declared_fields_absent.absent_by_field, { time: 2, action: 2, actor: 1 }, "null is present; a missing key is absent");
+    out = body(await tool(AUDIT, cwd, { path: "inputs/a.jsonl", format: "declared_jsonl", mapping: { time: "time", action: "op", actor: "who" } }));
+    assert.equal(out.status, "complete", "a field that is there and null is not absent; an optional field absent does not make it partial");
+    await put(cwd, "inputs/a.xml", `<A><R when="2024-01-05T02:00:00Z"><Op>x</Op></R><R><Op>y</Op></R></A>`);
+    out = body(await tool(AUDIT, cwd, { path: "inputs/a.xml", format: "declared_xml", record_tag: "R", mapping: { time: "@when", action: "Op" } }));
+    assert.equal(out.status, "partial");
+    assert.deepEqual(out.declared_fields_absent.absent_by_field, { time: 1 });
+  });
+});
+
+test("a declared XML record is bounded in bytes: one record of many large children is counted and located, not held, and memory stays small", async () => {
+  await withCwd(async (cwd) => {
+    const big = "x".repeat(1 << 20);
+    await put(cwd, "inputs/big.xml", `<A><R when="2024-01-05T02:00:00Z"><Op>a</Op></R><R when="2024-01-05T03:00:00Z">${`<T>${big}</T>`.repeat(60)}<Op>b</Op></R><R when="2024-01-05T04:00:00Z"><Op>c</Op></R></A>`);
+    const wrapper = "import os,sys,resource\npid=os.fork()\nif pid==0:\n os.execvp('python3',['python3',sys.argv[1]])\n_,st,ru=os.wait4(pid,0)\nsys.stderr.write('RSS %d\\n' % ru.ru_maxrss)\nsys.exit(os.waitstatus_to_exitcode(st))\n";
+    const run = await new Promise<{ stdout: string; stderr: string }>((resolve) => {
+      const child = spawn("python3", ["-c", wrapper, AUDIT], { cwd, env: { ...process.env, AGENT_ID: "s1" } });
+      const o: Buffer[] = [], e: Buffer[] = [];
+      child.stdout.on("data", (c: Buffer) => o.push(c));
+      child.stderr.on("data", (c: Buffer) => e.push(c));
+      child.on("close", () => resolve({ stdout: Buffer.concat(o).toString(), stderr: Buffer.concat(e).toString() }));
+      child.stdin.end(JSON.stringify({ path: "inputs/big.xml", format: "declared_xml", record_tag: "R", mapping: { time: "@when", action: "Op" } }));
+    });
+    const out = JSON.parse(run.stdout);
+    assert.equal(out.counts.events, 2);
+    assert.equal(out.counts.over_line_limit, 1);
+    assert.match(out.problem_lines[0].reason, /a record over the reader's budget/);
+    assert.equal(out.problem_lines[0].record, 2);
+    assert.equal(out.status, "partial");
+    const raw = Number(/RSS (\d+)/.exec(run.stderr)?.[1] ?? 0);
+    const mb = process.platform === "darwin" ? raw / (1 << 20) : raw / 1024;
+    assert.ok(mb < 160, `resident size ${mb.toFixed(0)} MB`);
+  });
+});
+
+test("a time that does not match its declared format says so in a fixed phrase: no exception text, so neither time_basis nor not_derived_reasons can carry the value", async () => {
+  await withCwd(async (cwd) => {
+    await put(cwd, "inputs/t.csv", `t,a\n${CANARY.github},x\n${CANARY.aws},y\n`);
+    for (const time_format of ["epoch_seconds", "strptime:%Y-%m-%d", "iso8601"]) {
+      const run = await tool(AUDIT, cwd, { path: "inputs/t.csv", format: "declared_csv", mapping: { time: "t", action: "a" }, time_format, limit: 1 });
+      const out = body(run);
+      for (const reason of Object.keys(out.time.not_derived_reasons)) assert.doesNotMatch(reason, /ghp_|AKIA|could not convert|time data/, reason);
+      const all = await everythingBut(cwd, run.stdout + run.stderr, ["inputs/t.csv"]);
+      noPiece(all, CANARY.github);
+      noPiece(all, CANARY.aws);
+    }
+  });
+});
+
+test("an unmapped action is withheld by shape before it is cut: no piece of a token at the cut is shown", async () => {
+  await withCwd(async (cwd) => {
+    // the old key was the action cut at 200 characters: 19 characters of the token were left, too short for the shape check
+    await put(cwd, "inputs/t.csv", `t,a\n2024-01-05T02:00:00Z,${"x".repeat(180)} ${CANARY.github}\n`);
+    const run = await tool(AUDIT, cwd, { path: "inputs/t.csv", format: "declared_csv", mapping: { time: "t", action: "a" } });
+    body(run);
+    noPiece(run.stdout + run.stderr, CANARY.github);
   });
 });
