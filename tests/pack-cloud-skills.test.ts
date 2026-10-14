@@ -211,3 +211,23 @@ test("pwsh and aws are said to be an operator's acquisition tools, in requires a
   assert.ok(pack.unreferenced_ok.some((e: { name: string; why: string }) => e.name === "pwsh" && /never connects to a tenant/.test(e.why)));
   assert.equal(pack.skills, 9);
 });
+
+test("the split pass: the pack's needs chains stay within the 1,900-token budget without the base pack, and every index entry is within 40 tokens", () => {
+  const tokens = (s: string): number => Buffer.byteLength(s) / 4.245;
+  const needs = (id: string): string[] => list(read(id).front.needs ?? "[]");
+  for (const id of IDS) {
+    const members = new Set<string>([id]);
+    const walk = (x: string): void => needs(x).forEach((n) => { if (!members.has(n)) { members.add(n); walk(n); } });
+    walk(id);
+    assert.ok(![...members].some((m) => !IDS.includes(m)), `${id}: no needs edge reaches the base pack, which a pointer in the body replaces`);
+    const total = [...members].reduce((n, m) => n + tokens(read(m).text), 0);
+    assert.ok(total <= 1900, `${id}: chain is ${Math.round(total)} tokens`);
+    const { front } = read(id);
+    assert.ok(tokens(`- \`${id}\` ${front.title}: ${front.when}`) <= 40, `${id}: index entry`);
+  }
+  // The base pack's evidence/verify is a pointer in the body, opened only when a digest must be checked, not a dependency.
+  const exists = read("logs/what-exists");
+  assert.deepEqual(list(exists.front.needs ?? "[]"), []);
+  assert.match(exists.body, /base pack `evidence\/verify`, only if you must check a digest against a manifest/);
+  assert.match(exists.body, /A file hash shows the bytes are those recorded when it was taken\. It does not show the provider made them/);
+});
