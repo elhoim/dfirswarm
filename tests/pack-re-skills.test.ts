@@ -111,7 +111,7 @@ const TAUGHT: Array<[string, string, string[]]> = [
   ["doc_probe", "documents/macros", ["extension_content_disagreement", "members", "parts", "modified", "extract_to", "status", "withheld_names_file"]],
   ["doc_structure", "documents/external-and-active-content", ["actions", "trigger", "reached_from_catalog", "encryption_summary"]],
   ["doc_structure", "documents/macros", ["coverage", "problems", "status"]],
-  ["doc_structure", "documents/pdf-rtf", ["structure_source", "anomalies", "revisions", "objects_scan", "numbers_defined_more_than_once", "headers_not_in_the_cross_reference_chain", "encryption_summary", "reached_from_catalog", "trigger", "script", "embedded_files", "undecodable_filter", "nested_compound_file", "write_values", "limits_hit", "coverage", "status", "problems", "pdf_actions", "extract", "extract_to", "ciphertext", "objects_unreadable", "sha256", "extracted", "signature", "instruction_word", "rtf_fields", "rtf_templates"]],
+  ["doc_structure", "documents/pdf-rtf", ["structure_source", "anomalies", "revisions", "objects_scan", "numbers_defined_more_than_once", "headers_not_in_the_cross_reference_chain", "encryption_summary", "reached_from_catalog", "trigger", "script", "embedded_files", "undecodable_filter", "nested_compound_file", "write_values", "limits_hit", "coverage", "status", "problems", "pdf_actions", "extract", "extract_to", "ciphertext", "objects_unreadable", "extracted", "objects_in_table_of_kind_free", "headers_freed_in_newest_chain", "outside_chain", "signature", "instruction_word", "rtf_fields", "rtf_templates"]],
   ["pe_directories", "runtimes/python-packaged", ["resources", "extract", "extract_to"]],
   ["pe_directories", "managed/clr", ["flags", "runtime_version", "is_native_rva", "managed_native_header", "token_table", "token_row", "strong_name_signature_field"]],
   ["pe_info", "managed/clr", ["declares_clr_runtime_header", "overlay_offset", "overlay_bytes"]],
@@ -191,7 +191,7 @@ async function observed(): Promise<Record<string, Set<string>>> {
     const rtf = `{\\rtf1{\\object\\objemb{\\*\\objclass Package}{\\*\\objdata ${hex(ole1Object("Package", buildCfb([{ name: "WordDocument", data: wordFib() }])))}}}}`;
     await run("doc_structure", DOC_STRUCTURE, "work/s.rtf", rtf);
     await run("doc_structure", DOC_STRUCTURE, "work/s.bin", buildVbaProject([{ name: "Module1", source: "Sub AutoOpen()\r\nEnd Sub\r\n" }]));
-    // An encrypted PDF (a target string is ciphertext), an extracted script (its row has the sha256), an RTF with a field and a template.
+    // An encrypted PDF (a target string is ciphertext), an extracted script (its row names the file), an RTF with a field and a template.
     const enc = `<< /Filter /Standard /V 2 /R 3 /Length 128 /P -4 /O <${"11".repeat(32)}> /U <${"22".repeat(32)}> >>`;
     const encrypted = buildPdf([{ num: 1, body: "<< /Type /Catalog /Pages 2 0 R /OpenAction 4 0 R >>" }, { num: 2, body: "<< /Type /Pages /Kids [ 3 0 R ] /Count 1 >>" }, { num: 3, body: "<< /Type /Page /Parent 2 0 R >>" }, { num: 4, body: "<< /S /URI /URI <a1b2c3> >>" }, { num: 9, body: enc }], "/Root 1 0 R /Encrypt 9 0 R");
     await run("doc_structure", DOC_STRUCTURE, "work/e.pdf", encrypted.file);

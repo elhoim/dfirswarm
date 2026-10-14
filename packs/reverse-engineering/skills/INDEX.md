@@ -6,7 +6,7 @@ Fetch a body with `skill("<id>")`. A body may name others; fetch those the same 
 - `code/static-inspection` Reading native code with its analysis limits stated: You must read a native binary's code: functions, control flow, references.
 - `documents/external-and-active-content` External targets, PDF actions and RTF objects: A document has an external relationship, a PDF action marker or an RTF object.
 - `documents/macros` Office document inventory: OLE, OOXML and VBA: The sample is an Office document, OLE file or OOXML package.
-- `documents/pdf-rtf` PDF and RTF structure: objects, actions, embedded content: A PDF or RTF must be read for its objects, actions, embedded files or OLE objects.
+- `documents/pdf-rtf` PDF and RTF structure: objects, actions, embedded content: A PDF or RTF must be read for objects, actions or embedded content.
 - `elf/packing-and-identity` ELF packing, linking and build identity: You must say whether an ELF is packed, how it links or which build it is.
 - `elf/structure` An ELF file and the loader's view: The sample is a Linux or BSD executable, shared object or core file.
 - `macho/structure` Mach-O files and universal binaries: The sample is a Mach-O executable, library, bundle or universal binary.
