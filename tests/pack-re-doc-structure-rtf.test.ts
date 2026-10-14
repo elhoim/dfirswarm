@@ -55,7 +55,9 @@ test("an object group is listed with its kind, class, the hex length of its data
     assert.deepEqual(row.flags.sort(), ["objh", "objw"]);
     assert.equal(row.data.hex_digits, obj.length * 2, "white space and line breaks in the hex are not digits");
     assert.equal(row.data.non_hex_bytes, 0);
-    assert.equal(row.data.decoded_start.first_bytes_hex, obj.subarray(0, 16).toString("hex"));
+    // The start of the data is named by its signature; no byte of the data is printed.
+    assert.equal(row.data.decoded_start.signature, "OLE 1.0 ObjectHeader (version 0x00000501)");
+    assert.equal("first_bytes_hex" in row.data.decoded_start, false);
     assert.deepEqual({ v: row.ole1_header.ole_version, f: row.ole1_header.format, c: row.ole1_header.class_name, n: row.ole1_header.native_data_bytes }, { v: "0x00000501", f: "embedded", c: CLASS, n: native.length });
     assert.ok(!text.includes("PLANTED-NATIVE") && !text.includes(Buffer.from("PLANTED-NATIVE").toString("hex")), "the payload is not in the answer");
   });

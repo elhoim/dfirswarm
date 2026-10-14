@@ -16,7 +16,7 @@ its format lets a standard-library reader go, and for each structure the answer 
                         with their stream filters, object streams, the trailer's encryption dictionary read, the
                         catalog's actions and the way they are triggered, embedded files, the page tree
     RTF                 group structure and nesting, control words, the object groups with their class names and
-                        the decoded start of their data, fields and templates
+                        the signature their data begins with, fields and templates
 
 Nothing here executes a document, a macro, a script or an embedded object, and nothing is fetched. A password
 verifier, a salt, a hash or an encrypted value that a structure holds is reported as present and by length, never as
@@ -25,6 +25,7 @@ count of objects and a clock), and a budget that is reached is a limit in the an
 """
 import array
 import base64
+import bisect
 import errno
 import hashlib
 import io
@@ -229,6 +230,17 @@ def cell(value):
 # END SHARED WITHHOLDING
 
 
+def redact_target(url):
+    """redact_url, and the host too: the shared block keeps the authority as it is, and a host name can carry a token (a bucket
+    or a tenant named after a key). Everything token-shaped in the host is withheld; a plain host name stays."""
+    out = redact_url(url)
+    m = re.match(r"^((?:[A-Za-z][A-Za-z0-9+.-]*:)?//)([^/?#]*)(.*)$", out, re.S)
+    if not m:
+        return out
+    userinfo, at, host = m.group(2).rpartition("@")
+    return m.group(1) + userinfo + at + scrub(host, "urls") + m.group(3)
+
+
 def describe(exc):
     code = errno.errorcode.get(exc.errno, "") if getattr(exc, "errno", None) else ""
     return scrub("%s%s: %s" % (type(exc).__name__, " " + code if code else "", getattr(exc, "strerror", None) or str(exc)), "text")
@@ -339,7 +351,8 @@ class LosslessPage:
             self.not_written = "the file could not be created in %s (%s)" % (self.dir, describe(exc))
 
     def _write(self, row):
-        self._out.write(json.dumps(row, default=str))
+        # A row in the file is withheld exactly as the same row is in the answer: the file is read by the same agent.
+        self._out.write(json.dumps(shown_answer(row), default=str))
         self._out.write("\n")
 
     def add(self, row):
@@ -644,6 +657,10 @@ class Over(Exception):
     """A budget was reached. The message says which, in words that go straight into `limits_hit`."""
 
 
+class TimeUp(Over):
+    """The clock ran out inside a structure that has no loop of its own to check it (a PDF object being parsed, a predictor)."""
+
+
 class Stop(Exception):
     def __init__(self, message, partial=None):
         Exception.__init__(self, message)
@@ -797,7 +814,7 @@ class Extractor:
             row["status"] = "failed"
             self.ctx.extracted.append(row)
             return row
-        written, kept = 0, False
+        written, kept, digest = 0, False, hashlib.sha256()
         try:
             with os.fdopen(fd, "wb") as out_fh:
                 fd = None
@@ -805,6 +822,7 @@ class Extractor:
                     chunks = [bytes(chunks)]
                 for chunk in chunks:
                     out_fh.write(chunk)
+                    digest.update(chunk)
                     written += len(chunk)
             kept = True
         except Over as exc:
@@ -828,8 +846,15 @@ class Extractor:
             row["status"] = "written"
             row["file"] = shown_path(target)
             row["bytes"] = written
+            row["sha256"] = digest.hexdigest()
         self.ctx.extracted.append(row)
         return row
+
+    def tried(self, kind, arg=None):
+        """A selector whose object was found and could not be written: the reason is a problem or a limit already, not "matched nothing"."""
+        for sel in self.selectors:
+            if sel["kind"] == kind and (arg is None or not sel["arg"] or sel["arg"] == str(arg)):
+                sel["matched"] += 1
 
     def unmatched(self):
         return [s["text"] for s in self.selectors if not s["matched"]]
@@ -1048,7 +1073,9 @@ class Cfb:
             e.sid, e.reachable, e.parts = i, False, None
             namelen = struct.unpack_from("<H", row, 64)[0]
             e.name_bad = namelen > 64 or namelen % 2 == 1 or (namelen == 0 and row[66] != 0)
-            take = max(0, min(namelen, 64) - 2) if namelen >= 2 else 0
+            # The length counts bytes of UTF-16 with its terminator; an odd one (or one past 64) is a broken entry, read as far
+            # as whole code units go and said, never a decoding error that ends the call.
+            take = (max(0, min(namelen, 64) - 2) if namelen >= 2 else 0) & ~1
             e.name = row[:take].decode("utf-16-le", "surrogatepass")
             e.kind = row[66]
             e.left, e.right, e.child = struct.unpack_from("<III", row, 68)
@@ -1097,6 +1124,11 @@ class Cfb:
 
     def find(self, *parts):
         return self.by_path.get(tuple(p.lower() for p in parts))
+
+    def find_stream(self, *parts):
+        """The stream at this path, or None: a storage of that name is not a stream and is never read as one."""
+        e = self.find(*parts)
+        return e if e is not None and e.kind == 2 else None
 
     def children(self, parts):
         low = tuple(p.lower() for p in parts)
@@ -1237,6 +1269,10 @@ def ole_entry_rows(cfb, ctx, page, extractor):
                 row["chain"] = "broken: " + why
                 ctx.problem("stream %s: %s" % (cell(shown), why))
         page.add(row)
+    bad_names = sum(1 for e in cfb.entries if e.kind != 0 and e.name_bad)
+    if bad_names:
+        ctx.problem("%s%d directory entr%s a name length that does not fit the name field (odd, over 64 bytes, or zero with a name): each name is read as far as whole UTF-16 code units go, and the row says name_length_inconsistent"
+                    % ("%s: " % cfb.label if cfb.label else "", bad_names, "y has" if bad_names == 1 else "ies have"))
     if chains["not_checked"]:
         ctx.limit_hit("%sthe chain-walk budget of this file was spent: %d stream chain(s) were not checked" % ("%s: " % cfb.label if cfb.label else "", chains["not_checked"]))
     kinds["stream_chains"] = chains
@@ -1267,7 +1303,11 @@ def ovba_decompress(data, limit, ctx=None):
             return bytes(out), "a chunk of %d bytes is cut off after %d" % (size, n - pos)
         p = pos + 2
         if not flag:
-            out += data[p:p + 4096]
+            # An uncompressed chunk is its header and exactly 4096 bytes (MS-OVBA 2.4.1.1.8): the bytes are taken from the chunk
+            # itself and never from past its end.
+            if size != 4098:
+                return bytes(out), "an uncompressed chunk declares %d bytes, not 4098 (a header and 4096 bytes)" % size
+            out += data[p:end]
         else:
             while p < end:
                 flags = data[p]
@@ -1367,11 +1407,24 @@ def decode_text(raw, encoding):
 
 def vba_projects(cfb, ctx, extractor, where):
     """Every storage named VBA that holds a `dir` stream, read as a VBA project."""
-    found = []
+    found, projects = [], []
     for e in cfb.entries:
-        if e.reachable and e.kind == 1 and e.parts and e.parts[-1].lower() == "vba" and cfb.find(*e.parts, "dir") is not None:
-            found.append(e)
-    projects = []
+        if not (e.reachable and e.parts and e.parts[-1].lower() == "vba"):
+            continue
+        label = shown_path("/".join(e.parts))
+        # An entry named VBA that is not a storage, or a VBA storage whose dir is missing or is not a stream, is a VBA project
+        # this tool cannot read: it is listed and said, never dropped (a flipped entry type would otherwise hide a project).
+        if e.kind != 1:
+            projects.append({"storage": cell(label), "modules": [], "status": "not_a_storage", "entry_type": ENTRY_TYPES.get(e.kind, "type %d" % e.kind)})
+            ctx.problem("%s: an entry named VBA is of type %s, not a storage: no VBA project was read from it" % (label, ENTRY_TYPES.get(e.kind, "type %d" % e.kind)))
+            continue
+        d = cfb.find(*e.parts, "dir")
+        if d is None or d.kind != 2:
+            why = "has no dir stream" if d is None else "holds a dir entry of type %s, not a stream" % ENTRY_TYPES.get(d.kind, "type %d" % d.kind)
+            projects.append({"storage": cell(label), "modules": [], "status": "dir_missing" if d is None else "dir_not_a_stream"})
+            ctx.problem("%s: a VBA storage that %s: its project was not read" % (label, why))
+            continue
+        found.append(e)
     for store in found:
         base = store.parts
         label = shown_path("/".join(base))
@@ -1380,7 +1433,7 @@ def vba_projects(cfb, ctx, extractor, where):
             ctx.names.add("/".join(base), label)
         projects.append(project)
         try:
-            raw = cfb.read(cfb.find(*base, "dir"), ctx.budget.member)
+            raw = cfb.read(cfb.find_stream(*base, "dir"), ctx.budget.member)
         except (Unreadable, Over) as exc:
             project["status"] = "dir_unreadable"
             ctx.problem("%s: the dir stream could not be read: %s" % (label, getattr(exc, "reason", None) or exc))
@@ -1403,30 +1456,36 @@ def vba_projects(cfb, ctx, extractor, where):
         project["modules_declared"] = info["module_count_declared"]
         if info["module_count_declared"] is not None and info["module_count_declared"] != len(info["modules"]):
             ctx.problem("%s: the dir stream declares %d module(s) and lists %d" % (label, info["module_count_declared"], len(info["modules"])))
-        vp = cfb.find(*base, "_VBA_PROJECT")
+        vp = cfb.find_stream(*base, "_VBA_PROJECT")
         if vp is not None:
             project["performance_cache_stream"] = {"bytes": vp.size, "note": "the _VBA_PROJECT stream: a header and the compiled (p-code) cache; this tool does not read it"}
             try:
                 head = cfb.head(vp, 7)
-            except Unreadable:
+            except (Unreadable, Over) as exc:
                 head = b""
+                ctx.problem("%s: the _VBA_PROJECT stream's header could not be read: %s" % (label, getattr(exc, "reason", None) or exc))
             if len(head) >= 4:
                 project["performance_cache_stream"]["version_field"] = struct.unpack_from("<H", head, 2)[0]
         else:
             ctx.problem("%s: no _VBA_PROJECT stream beside the dir stream" % label)
-        proj_stream = cfb.find(*base[:-1], "PROJECT") if len(base) > 1 else cfb.find("PROJECT")
+        proj_stream = cfb.find_stream(*base[:-1], "PROJECT") if len(base) > 1 else cfb.find_stream("PROJECT")
+        if proj_stream is not None and proj_stream.size > 1 << 20:
+            ctx.limit_hit("%s: the PROJECT stream is %d bytes, over the 1 MiB read limit: its keys were not read" % (label, proj_stream.size))
         if proj_stream is not None and proj_stream.size <= 1 << 20:
             try:
                 text = cfb.read(proj_stream, 1 << 20)
-            except (Unreadable, Over):
+            except (Unreadable, Over) as exc:
                 text = b""
+                ctx.problem("%s: the PROJECT stream could not be read: %s" % (label, getattr(exc, "reason", None) or exc))
             keys = []
             for line in text.split(b"\n"):
                 key = line.split(b"=", 1)[0].strip().decode("latin-1", "replace")
                 if re.fullmatch(r"[A-Za-z]{1,32}", key) and key not in keys:
                     keys.append(key)
             protected = [k for k in ("ID", "CMG", "DPB", "GC") if k in keys]
-            project["project_properties"] = {"keys": keys[:50], "protection_fields_present": [k for k in protected if k != "ID"],
+            if len(keys) > 50:
+                ctx.limit_hit("%s: the PROJECT stream holds %d distinct keys: the first 50 are listed" % (label, len(keys)))
+            project["project_properties"] = {"keys": keys[:50], "keys_total": len(keys), "protection_fields_present": [k for k in protected if k != "ID"],
                                              "note": "CMG, DPB and GC hold the project's protection data (a password verifier among it): their presence is reported, their values never are"}
         for mod in info["modules"]:
             name_raw = mod["unicode_name"].decode("utf-16-le", "replace") if mod["unicode_name"] else decode_text(mod["name"], enc)
@@ -1436,7 +1495,7 @@ def vba_projects(cfb, ctx, extractor, where):
             if shown != name_raw:
                 ctx.names.add(name_raw, shown, "vba_module_name")
             row = {"name": cell(shown), "type": mod["type"], "read_only": mod["read_only"], "private": mod["private"], "text_offset": mod["text_offset"]}
-            stream = cfb.find(*base, stream_name) if stream_name else None
+            stream = cfb.find_stream(*base, stream_name) if stream_name else None
             if stream is None:
                 row["stream"] = "missing"
                 ctx.problem("%s: module %s names a stream that the directory does not hold" % (label, cell(shown)))
@@ -1520,6 +1579,9 @@ def encryption_info(cfb, ctx, entry):
         except xml.parsers.expat.ExpatError as exc:
             ctx.problem("EncryptionInfo: the XML descriptor is not well-formed (%s)" % xml.parsers.expat.ErrorString(exc.code))
             out["descriptor"] = "not_well_formed"
+        except (LookupError, ValueError) as exc:
+            ctx.problem("EncryptionInfo: the XML descriptor declares an encoding the XML reader cannot decode (%s): it was not parsed" % type(exc).__name__)
+            out["descriptor"] = "encoding_not_readable"
         summary.pop("current", None)
         out.update(summary)
         out["not_reported"] = "salts, encrypted verifier values and the encrypted key are present in the descriptor and are not reported"
@@ -1583,6 +1645,16 @@ def excel_findings(cfb, ctx, entry, out):
                             "version": "%d.%d" % (vmaj, vmin)}
             else:
                 filepass = {"scheme": "encryption type %d" % etype}
+        elif rtype == 0x0085 and filepass is not None and len(body) >= 4:
+            # After FILEPASS every record body is encrypted except BoundSheet8's lbPlyPos ([MS-XLS] 2.2.10): the sheet's state, type and
+            # name are ciphertext, so only the count and the stream position are reported, and nothing is derived from the rest.
+            if len(sheets) >= 1000:
+                if len(sheets) == 1000:
+                    ctx.limit_hit("the Excel globals substream lists more than 1000 sheets: the first 1000 are listed")
+                    sheets.append(None)
+                continue
+            sheets.append({"lbPlyPos": struct.unpack_from("<I", body, 0)[0], "name": None, "state": None, "kind": None,
+                           "encrypted": "not readable: the record follows FILEPASS, and its state, type and name are encrypted"})
         elif rtype == 0x0085 and len(body) >= 8:
             state, kind = body[4], body[5]
             if bof_version == 0x0500:
@@ -1602,6 +1674,10 @@ def excel_findings(cfb, ctx, entry, out):
             ended = True
     out["biff_version_field"] = bof_version
     out["sheets"] = [x for x in sheets if x is not None]
+    if filepass is not None:
+        out["sheets_encrypted"] = sum(1 for x in out["sheets"] if x.get("encrypted"))
+        if out["sheets_encrypted"]:
+            out["sheets_note"] = "the workbook is encrypted (FILEPASS): each sheet's name, visibility and type are ciphertext and not read; no key is tried"
     out["globals_substream_ended"] = ended
     if not ended:
         ctx.problem("the Excel globals substream did not end with an EOF record in the bytes read: the sheet list may be incomplete")
@@ -1627,7 +1703,7 @@ def word_findings(cfb, ctx, entry, out):
     out["fib"]["fObfuscated"] = bool(flags & 0x8000)
     out["fib"]["fWhichTblStm"] = bool(flags & 0x0200)
     if flags & 0x0100:
-        table = cfb.find("1Table" if flags & 0x0200 else "0Table")
+        table = cfb.find_stream("1Table" if flags & 0x0200 else "0Table")
         if table is None:
             ctx.problem("the FIB says the document is encrypted and the table stream it names is not in the directory")
         elif flags & 0x8000:
@@ -1643,8 +1719,7 @@ def word_findings(cfb, ctx, entry, out):
                 out["version"] = "%d.%d" % (vmaj, vmin)
 
 
-def powerpoint_findings(cfb, ctx, out):
-    cu = cfb.find("Current User")
+def powerpoint_findings(cfb, ctx, out, cu):
     if cu is None:
         return
     try:
@@ -1680,11 +1755,30 @@ def probe_ole_blob(src, ctx, extractor, label="", nested=0):
         ctx.problem("%s%d allocated directory entr%s no storage reaches: listed with reachable false" % ("%s: " % label if label else "", cfb.orphans, "y is one" if cfb.orphans == 1 else "ies are ones"))
     out["orphan_entries"] = cfb.orphans
     apps, enc, protection = [], {"items": []}, []
-    names = {e.name.lower() for e in cfb.entries if e.reachable and e.parts is not None and len(e.parts) == 1}
+    prefix = "%s: " % label if label else ""
+    # The root's entries by name (lower case). A name the Office formats give a stream is read only from a stream: an entry of that
+    # name with another type is said, and not read (it is not what the format puts there).
+    at_root = {}
+    for e in cfb.entries:
+        if e.reachable and e.parts is not None and len(e.parts) == 1:
+            at_root.setdefault(e.name.lower(), []).append(e)
+
+    def root_stream(low):
+        found = at_root.get(low, [])
+        for e in found:
+            if e.kind != 2:
+                ctx.problem("%sthe root entry %s is of type %s, not a stream: it is not read as one" % (prefix, cell(shown_path(e.name)), ENTRY_TYPES.get(e.kind, "type %d" % e.kind)))
+        streams = [e for e in found if e.kind == 2]
+        if len(streams) > 1:
+            ctx.problem("%sthe root holds %d streams named %s: the first is read" % (prefix, len(streams), cell(shown_path(streams[0].name))))
+        return streams[0] if streams else None
+
+    streams_at_root = {low: root_stream(low) for low in ("worddocument", "workbook", "book", "powerpoint document", "current user", "encryptioninfo", "encryptedpackage")}
+    names = {low for low, e in streams_at_root.items() if e is not None}
     if "worddocument" in names:
         apps.append("Word binary document")
         w = {"container": "Word"}
-        word_findings(cfb, ctx, cfb.find("WordDocument"), w)
+        word_findings(cfb, ctx, streams_at_root["worddocument"], w)
         if w.get("scheme"):
             enc["items"].append({"where": "WordDocument FIB", **{k: w[k] for k in ("scheme", "version", "fib") if k in w}})
         out["word"] = w
@@ -1692,7 +1786,7 @@ def probe_ole_blob(src, ctx, extractor, label="", nested=0):
         if key in names:
             apps.append("Excel workbook (BIFF)")
             x = {"stream": cell(key), "container": "Excel"}
-            excel_findings(cfb, ctx, cfb.find("Workbook" if key == "workbook" else "Book"), x)
+            excel_findings(cfb, ctx, streams_at_root[key], x)
             if x.get("filepass"):
                 enc["items"].append({"where": "Excel FILEPASS record", **x["filepass"]})
             out["excel"] = x
@@ -1703,14 +1797,14 @@ def probe_ole_blob(src, ctx, extractor, label="", nested=0):
     if "powerpoint document" in names:
         apps.append("PowerPoint binary presentation")
         p = {"container": "PowerPoint"}
-        powerpoint_findings(cfb, ctx, p)
+        powerpoint_findings(cfb, ctx, p, streams_at_root["current user"])
         if "encrypted" in p.get("scheme", "") and not p["scheme"].startswith("not"):
             enc["items"].append({"where": "PowerPoint Current User stream", "scheme": p["scheme"], "header_token": p.get("current_user_header_token")})
         out["powerpoint"] = p
     if "encryptioninfo" in names and "encryptedpackage" in names:
         apps.append("encrypted OOXML package in an OLE wrapper")
-        info = encryption_info(cfb, ctx, cfb.find("EncryptionInfo"))
-        pkg = cfb.find("EncryptedPackage")
+        info = encryption_info(cfb, ctx, streams_at_root["encryptioninfo"])
+        pkg = streams_at_root["encryptedpackage"]
         if pkg is not None and pkg.size >= 8:
             try:
                 declared = struct.unpack("<Q", cfb.head(pkg, 8))[0]
@@ -1724,6 +1818,8 @@ def probe_ole_blob(src, ctx, extractor, label="", nested=0):
     ds = [e for e in cfb.entries if e.reachable and e.parts and e.parts[0] == "\x06DataSpaces" and len(e.parts) > 1]
     if ds:
         transforms = sorted({e.parts[-1] for e in ds if len(e.parts) >= 3 and e.parts[1].lower() == "transforminfo" and e.kind == 1})
+        if len(transforms) > 20:
+            ctx.limit_hit("%sthe \\x06DataSpaces storage names %d transforms: the first 20 are listed" % (prefix, len(transforms)))
         protection.append({"kind": "data_spaces", "entries": len(ds), "transforms": [text_of(t, ctx, "names") for t in transforms[:20]],
                            "note": "the \\x06DataSpaces storage records how the package is transformed (strong encryption, rights management); the names are directory entries, not a reading of the transform"})
     vba = vba_projects(cfb, ctx, extractor, label + "/" if label else "")
@@ -1816,7 +1912,9 @@ def probe_zip(path, size, ctx, extractor):
             archive = zipfile.ZipFile(io.BufferedReader(window))
         except Exception as exc:
             raise Stop("the archive will not open (%s: %s)" % (type(exc).__name__, scrub(str(exc))), out)
-        by_name, seen = {}, {}
+        # Part names compare case-insensitively (ECMA-376-2 9.1.1.1.2): every member is kept under its lower-case name, so that two
+        # spellings of one part are a duplicate, and every copy of a part this tool reads is read.
+        by_name, by_lower = {}, {}
         with archive:
             infos = archive.infolist()
             if len(infos) != total:
@@ -1832,7 +1930,7 @@ def probe_zip(path, size, ctx, extractor):
                 members["listed"] += 1
                 name = info.filename
                 by_name.setdefault(name.lower(), info)
-                seen[name] = seen.get(name, 0) + 1
+                by_lower.setdefault(name.lower(), []).append(info)
                 shown = member_name(name, ctx)
                 row = {"name": shown, "bytes": info.file_size, "compressed": info.compress_size, "method": info.compress_type,
                        "modified": "%04d-%02d-%02dT%02d:%02d:%02d" % info.date_time}
@@ -1842,9 +1940,16 @@ def probe_zip(path, size, ctx, extractor):
                     row["encrypted"] = True
                     members["flagged_encrypted"] += 1
                 parts.add(row)
-            for name, count in seen.items():
-                if count > 1:
-                    ctx.problem("the member name %s appears %d times: an OPC package has one part of each name, and readers resolve a repeated one differently" % (shown_path(name), count))
+            duplicates = []
+            for low, copies in by_lower.items():
+                if len(copies) > 1:
+                    spellings = sorted({i.filename for i in copies})
+                    duplicates.append({"name": shown_path(copies[0].filename), "copies": len(copies), "spellings": [shown_path(x) for x in spellings]})
+                    ctx.problem("the part name %s appears %d times%s: part names compare case-insensitively (ECMA-376-2 9.1.1.1.2), so an OPC package has one "
+                                "part of each name, and readers resolve a repeated one differently; every copy of a part this tool reads is read"
+                                % (shown_path(copies[0].filename), len(copies), " (spelled %d ways)" % len(spellings) if len(spellings) > 1 else ""))
+            if duplicates:
+                out["duplicate_part_names"] = duplicates
             if members["flagged_encrypted"]:
                 ctx.problem("%d member%s marked encrypted in the directory: its content is not examined" % (members["flagged_encrypted"], "" if members["flagged_encrypted"] == 1 else "s"))
                 out["encryption_items"].append({"where": "ZIP central directory", "scheme": "member-level ZIP encryption (general purpose flag bit 0 or AES method 99)", "members": members["flagged_encrypted"]})
@@ -1882,13 +1987,12 @@ def probe_zip(path, size, ctx, extractor):
                     ctx.problem("[Content_Types].xml contains a DOCTYPE, which is refused: it was not parsed")
                 except xml.parsers.expat.ExpatError as exc:
                     ctx.problem("[Content_Types].xml is not well-formed XML (%s): the entries before the error are listed" % xml.parsers.expat.ErrorString(exc.code))
+                except (LookupError, ValueError) as exc:
+                    ctx.problem("[Content_Types].xml declares an encoding the XML reader cannot decode (%s): it was not parsed" % type(exc).__name__)
             else:
                 ctx.problem("no [Content_Types].xml member: an OPC package needs one")
             # protection elements
-            for part in ("word/settings.xml", "xl/workbook.xml", "ppt/presentation.xml"):
-                info = by_name.get(part)
-                if info is None:
-                    continue
+            for part, info in [(part, info) for part in ("word/settings.xml", "xl/workbook.xml", "ppt/presentation.xml") for info in by_lower.get(part, [])]:
                 found = []
 
                 def element2(local, _ns, attrs, found=found):
@@ -1904,12 +2008,14 @@ def probe_zip(path, size, ctx, extractor):
                     ctx.problem("%s contains a DOCTYPE, which is refused: it was not parsed" % part)
                 except xml.parsers.expat.ExpatError as exc:
                     ctx.problem("%s is not well-formed XML (%s): the elements before the error are listed" % (part, xml.parsers.expat.ErrorString(exc.code)))
+                except (LookupError, ValueError) as exc:
+                    ctx.problem("%s declares an encoding the XML reader cannot decode (%s): it was not parsed" % (part, type(exc).__name__))
                 for row in found:
                     out["protection_items"].append({"where": part, **row, "note": "an editing restriction, not encryption: the content is readable without a password"})
             # embedded VBA projects
             projects = []
-            for lowered, info in by_name.items():
-                if lowered.endswith("vbaproject.bin"):
+            for info in infos[:members["listed"]]:
+                if info.filename.lower().endswith("vbaproject.bin"):
                     shown = shown_path(info.filename)
                     try:
                         blob = read_member(archive, info, ctx)
@@ -1927,10 +2033,8 @@ def probe_zip(path, size, ctx, extractor):
                 out["vbaproject_parts"] = projects
             if extractor is not None:
                 for want in extractor.wanted_args("zip"):
-                    info = by_name.get(want.lower())
-                    if info is None:
-                        continue
-                    extractor.write("zip", want, info.filename, stream_member(archive, info, ctx.budget), "ZIP member, byte for byte")
+                    for info in by_lower.get(want.lower(), []):
+                        extractor.write("zip", want, info.filename, stream_member(archive, info, ctx.budget), "ZIP member, byte for byte")
     out["coverage"] = {"structures_read": ZIP_READ, "structures_not_read": ZIP_NOT_READ}
     return out
 
@@ -1944,7 +2048,7 @@ PDF_READ = ["the header line, the cross-reference chain (tables, streams, hybrid
             "actions (OpenAction, additional-actions, link and widget annotations, form fields, outlines, the JavaScript name tree) and the way each is reached",
             "embedded files named by file specifications, and the page tree's counts"]
 PDF_NOT_READ = ["page content streams, fonts, images and metadata", "the content of JavaScript, embedded files and object streams unless extract asks for it",
-                "the plaintext of an encrypted file: no key is tried (not even the empty password), so objects inside encrypted object streams are not parsed",
+                "the plaintext of an encrypted file: no key is tried (not even the empty password), so objects inside encrypted object streams are not parsed, and a string of a plain object (an action's target) is ciphertext, marked so and given by length",
                 "filters other than FlateDecode, ASCIIHexDecode, ASCII85Decode and RunLengthDecode (LZW, JBIG2, JPX, DCT and CCITT streams are listed with their filter, not decoded)",
                 "whether an action would run: that depends on the reader, its version and its settings"]
 WS_BYTES = b"\x00\t\n\x0c\r "
@@ -1968,6 +2072,10 @@ PREDICTOR_MAX = 4 << 20
 MAX_FILTERS = 8
 MAX_REVISIONS = 1000
 MAX_HEADER_PAIRS = 1_000_000
+PDF_NESTING = 150                   # PDF objects are parsed recursively: nesting past this is an error whatever max_depth says
+NON_HEX = bytes(sorted(set(range(256)) - set(b"0123456789abcdefABCDEF")))
+A85_WS = b" \t\n\r\x0b\x00\x0c"
+A85_ZRUN = re.compile(rb"(z+)")
 
 
 class PdfError(Exception):
@@ -1976,6 +2084,14 @@ class PdfError(Exception):
 
 class NeedMore(PdfError):
     pass
+
+
+class ParseBound(PdfError):
+    """An object passes a bound of the parser (its values, its window, its nesting): a limit of this tool, not a fault of the file."""
+
+
+class ObjStmUnreadable(PdfError):
+    """An object that lives in an object stream that cannot be read: said once, for the stream, and counted."""
 
 
 class Name(str):
@@ -2007,10 +2123,22 @@ def unescape_name(raw):
 
 class Lexer:
     """PDF syntax over a window of bytes. `final` says that the window ends at the end of the file: running off the end is then
-    an error, and otherwise a request for a longer window (NeedMore)."""
+    an error, and otherwise a request for a longer window (NeedMore).
 
-    def __init__(self, buf, pos, final, max_depth):
+    One parse (a top-level object and everything inside it) reads at most `max_items` values, and with a context it checks the
+    clock every 4096 values: an object of millions of items, or one that keeps a slow window busy, ends as a named error or a
+    time limit, never as a parse that outlives max_seconds."""
+
+    def __init__(self, buf, pos, final, max_depth, ctx=None, max_items=MAX_ITEMS):
         self.buf, self.pos, self.final, self.max_depth = buf, pos, final, max_depth
+        self.ctx, self.max_items, self.items = ctx, max_items, 0
+
+    def count(self):
+        self.items += 1
+        if self.items > self.max_items:
+            raise ParseBound("an object of more than %d values in one parse" % self.max_items)
+        if self.ctx is not None and not self.items & 4095 and time.monotonic() > self.ctx.deadline:
+            raise TimeUp("time: a PDF object was being parsed when max_seconds (%d) was reached; what was read is reported, and the counts are lower bounds" % self.ctx.seconds)
 
     def eof(self):
         if self.final:
@@ -2040,6 +2168,7 @@ class Lexer:
     def parse(self, depth=0):
         if depth > self.max_depth:
             raise PdfError("objects nest deeper than max_depth (%d)" % self.max_depth)
+        self.count()
         self.skip()
         buf = self.buf
         if self.pos >= len(buf):
@@ -2185,14 +2314,16 @@ def text_string(raw):
     return raw.decode("latin-1")
 
 
-def png_unpredict(data, columns, colors, bpc):
+def png_unpredict(data, columns, colors, bpc, ctx=None):
     rowlen = (columns * colors * bpc + 7) // 8
     bpp = max(1, (colors * bpc + 7) // 8)
     if rowlen < 1 or len(data) < rowlen + 1:
         return b""
     prev = bytearray(rowlen)
     out = bytearray()
-    for start in range(0, len(data) - rowlen, rowlen + 1):
+    for n, start in enumerate(range(0, len(data) - rowlen, rowlen + 1)):
+        if ctx is not None and not n & 1023 and time.monotonic() > ctx.deadline:
+            raise TimeUp("time: a predictor was being undone when max_seconds (%d) was reached; what was read is reported, and the counts are lower bounds" % ctx.seconds)
         ft = data[start]
         row = bytearray(data[start + 1:start + 1 + rowlen])
         if ft == 1:
@@ -2239,25 +2370,44 @@ class Pdf:
         self.scan_budget = 4 * self.size + (64 << 20)
         self.unreadable_compressed = 0
         self.encrypted = False
+        self.strings_encrypted = False
+        self.streams_encrypted = False
+        self.encrypt_object = None
         self.length_problems = 0
+        self.nesting = min(self.cfg["max_depth"], PDF_NESTING)
+        self.failed_at = {}             # file offset -> why an object could not be parsed there: read once, never again
+        self.objstm_failed = {}         # object stream number -> why it cannot be read
+        self.free_by_revision = {}      # revision index -> the numbers its table lists as free (a hybrid's stream may define them)
+        self.over_objects = 0           # objects not read because a budget or the clock was reached
 
     def problem(self, text):
         self.ctx.problem(text)
 
     # parsing at an offset, with a window that grows ---------------------------------------------------------------------
 
-    def parse_at(self, off, fn):
+    def parse_at(self, off, fn, kind="object"):
+        """fn(lexer) over a window at `off` that grows (64 KiB, x4, up to 32 MiB) while the object runs past it. A parse that fails
+        at an offset is remembered, so that many references to one bad object do not grow the window again and again."""
+        if (off, kind) in self.failed_at:
+            raise self.failed_at[(off, kind)]
         window = 1 << 16
-        while True:
-            end = min(self.size, off + window)
-            buf = self.blob[off:end]
-            lx = Lexer(buf, 0, end >= self.size, min(self.cfg["max_depth"], 150))
-            try:
-                return fn(lx), off
-            except NeedMore:
-                if end >= self.size or window >= MAX_OBJECT_WINDOW:
-                    raise PdfError("an object longer than the %d-byte window, or cut off by the end of the file" % MAX_OBJECT_WINDOW)
-                window *= 4
+        try:
+            while True:
+                end = min(self.size, off + window)
+                buf = self.blob[off:end]
+                lx = Lexer(buf, 0, end >= self.size, self.nesting, self.ctx)
+                try:
+                    return fn(lx), off
+                except NeedMore:
+                    if end >= self.size or window >= MAX_OBJECT_WINDOW:
+                        if end >= self.size:
+                            raise PdfError("the object is cut off by the end of the file")
+                        raise ParseBound("an object longer than the %d-byte window" % MAX_OBJECT_WINDOW)
+                    window *= 4
+        except PdfError as exc:
+            if len(self.failed_at) < 1_000_000:
+                self.failed_at[(off, kind)] = exc
+            raise
 
     def read_indirect(self, off, expect=None):
         """The object whose 'N G obj' header is at `off` (relative to the file; the header's own offset shift is tried when it is not
@@ -2353,10 +2503,18 @@ class Pdf:
                     o = self.read_indirect(entry[1], num)
                 elif entry[0] == 2:
                     o = self.from_objstm(entry[1], entry[2], num)
-            except (PdfError, Over) as exc:
-                if isinstance(exc, Over):
-                    raise
+            except ObjStmUnreadable:
+                pass                    # said once, for the object stream, and counted
+            except ParseBound as exc:
+                self.ctx.limit_hit("PDF objects that pass a bound of the parser are not read (%s); they are counted in census.objects_not_read_at_a_limit" % exc)
+                self.over_objects += 1
+            except PdfError as exc:
                 self.problem("object %d could not be read: %s" % (num, exc))
+            except Over as exc:
+                # A budget or the clock reached while reading one object is a limit of the call, and that object is unread: the
+                # reader that asked for it goes on with what it has (an Over that ended the whole answer lost everything read).
+                self.ctx.limit_hit(str(exc))
+                self.over_objects += 1
         if len(self.cache) > 4000:
             self.cache.clear()
         self.cache[num] = o
@@ -2388,17 +2546,28 @@ class Pdf:
 
     def decode(self, o, cap=None):
         """The decoded bytes of a stream object under the budgets. Raises PdfError (a filter this tool does not decode, a corrupt stream)
-        or Over. A stream is never returned cut."""
+        or Over. A stream is never returned cut.
+
+        Every filter decodes in pieces, and every step's output is held to one bound that is checked before the bytes are allocated:
+        the stream budget, the expansion ratio against the stream's encoded length, and what is left of the total budget. A step
+        that would pass it raises Over at once, so that a decoder never builds an output it is not allowed to keep."""
         info = o.stream
         if info is None or info["length"] is None:
             raise PdfError("the stream's length cannot be established")
-        cap = self.ctx.budget.member if cap is None else min(cap, self.ctx.budget.member)
-        if info["length"] > 2 * cap:
-            raise Over("a stream of %d bytes is over twice max_stream_bytes (%d): not read" % (info["length"], cap))
-        data = self.blob[info["start"]:info["start"] + info["length"]]
+        member = self.ctx.budget.member if cap is None else min(cap, self.ctx.budget.member)
+        if info["length"] > 2 * member:
+            raise Over("a stream of %d bytes is over twice max_stream_bytes (%d): not read" % (info["length"], member))
+        budget = self.ctx.budget
+        encoded = max(info["length"], 1)
+        bounds = [(member, "a stream expanded past max_stream_bytes (%d)" % member),
+                  (max(RATIO_FLOOR, budget.ratio * encoded), "a stream expanded past max_ratio (%d) of its encoded size (%d bytes)" % (budget.ratio, encoded)),
+                  (max(0, budget.total - budget.used), "a stream would pass max_total_bytes (%d): the streams read before it used %d; the rest of this call reads no more stream content"
+                   % (budget.total, budget.used))]
+        limit, why = min(bounds, key=lambda b: b[0])
         chain = self.filters_of(o.value)
         if len(chain) > MAX_FILTERS:
             raise PdfError("a chain of more than %d filters" % MAX_FILTERS)
+        data = self.blob[info["start"]:info["start"] + info["length"]]
         for name, parms in chain:
             canon = SUPPORTED_FILTERS.get(name)
             if name == "Crypt":
@@ -2408,57 +2577,13 @@ class Pdf:
             if canon is None:
                 raise PdfError("the %s filter is not decoded by this tool" % text_of(name, None, "names"))
             if canon == "FlateDecode":
-                d = zlib.decompressobj()
-                out = bytearray()
-                pos = 0
-                try:
-                    while pos < len(data) and not d.eof:
-                        chunk = data[pos:pos + PAGE]
-                        pos += len(chunk)
-                        piece = d.decompress(chunk, cap + 1 - len(out))
-                        out += piece
-                        while d.unconsumed_tail and len(out) <= cap:
-                            piece = d.decompress(d.unconsumed_tail, cap + 1 - len(out))
-                            out += piece
-                        if len(out) > cap:
-                            raise Over("a stream expanded past max_stream_bytes (%d)" % cap)
-                        if len(out) > RATIO_FLOOR and len(out) > self.ctx.budget.ratio * max(len(data), 1):
-                            raise Over("a stream expanded past max_ratio (%d) of its compressed size" % self.ctx.budget.ratio)
-                except zlib.error as exc:
-                    raise PdfError("the Flate data is corrupt (%s)" % exc)
-                if not d.eof:
-                    raise PdfError("the Flate data ends before its end marker")
-                data = bytes(out)
+                data = self._flate(data, limit, why)
             elif canon == "ASCIIHexDecode":
-                end = data.find(b">")
-                digits = re.sub(rb"[^0-9A-Fa-f]", b"", data if end < 0 else data[:end])
-                data = bytes.fromhex((digits + (b"0" if len(digits) % 2 else b"")).decode("ascii"))
+                data = self._ahx(data, limit, why)
             elif canon == "ASCII85Decode":
-                body = data.strip()
-                if body.startswith(b"<~"):
-                    body = body[2:]
-                end = body.find(b"~>")
-                body = body if end < 0 else body[:end]
-                try:
-                    data = base64.a85decode(body, adobe=False, ignorechars=b" \t\n\r\x0b\x00\x0c")
-                except ValueError as exc:
-                    raise PdfError("the ASCII85 data is corrupt (%s)" % exc)
+                data = self._a85(data, limit, why)
             elif canon == "RunLengthDecode":
-                out, i = bytearray(), 0
-                while i < len(data):
-                    n = data[i]
-                    i += 1
-                    if n == 128:
-                        break
-                    if n < 128:
-                        out += data[i:i + n + 1]
-                        i += n + 1
-                    else:
-                        out += data[i:i + 1] * (257 - n)
-                        i += 1
-                    if len(out) > cap:
-                        raise Over("a stream expanded past max_stream_bytes (%d)" % cap)
-                data = bytes(out)
+                data = self._rl(data, limit, why)
             predictor = parms.get("Predictor", 1) if isinstance(parms, dict) else 1
             if canon == "FlateDecode" and isinstance(predictor, int) and predictor > 1:
                 if predictor == 2:
@@ -2466,15 +2591,144 @@ class Pdf:
                 if len(data) > PREDICTOR_MAX:
                     raise Over("a predictor-coded stream of %d bytes is over the %d-byte limit for undoing a predictor" % (len(data), PREDICTOR_MAX))
                 get = lambda k, d: parms.get(k) if isinstance(parms.get(k), int) and not isinstance(parms.get(k), bool) else d
-                data = png_unpredict(data, get("Columns", 1), get("Colors", 1), get("BitsPerComponent", 8))
+                data = png_unpredict(data, get("Columns", 1), get("Colors", 1), get("BitsPerComponent", 8), self.ctx)
+            if len(data) > limit:
+                raise Over(why)
+        if len(data) > limit:
+            raise Over(why)
         self.ctx.spend(len(data), "a stream")
         return data
+
+    def _clock(self):
+        if time.monotonic() > self.ctx.deadline:
+            raise TimeUp("time: a PDF stream was being decoded when max_seconds (%d) was reached; what was read is reported, and the counts are lower bounds" % self.ctx.seconds)
+
+    def _flate(self, data, limit, why):
+        d = zlib.decompressobj()
+        out = bytearray()
+        pos = 0
+        try:
+            while pos < len(data) and not d.eof:
+                chunk = data[pos:pos + PAGE]
+                pos += len(chunk)
+                out += d.decompress(chunk, limit + 1 - len(out))
+                while d.unconsumed_tail and len(out) <= limit:
+                    out += d.decompress(d.unconsumed_tail, limit + 1 - len(out))
+                if len(out) > limit:
+                    raise Over(why)
+                if not pos & 0xFFFFF:
+                    self._clock()
+        except zlib.error as exc:
+            raise PdfError("the Flate data is corrupt (%s)" % exc)
+        if not d.eof:
+            raise PdfError("the Flate data ends before its end marker")
+        return bytes(out)
+
+    def _ahx(self, data, limit, why):
+        end = data.find(b">")
+        if end >= 0:
+            data = data[:end]
+        out, carry = bytearray(), b""
+        for pos in range(0, len(data), PAGE):
+            piece = carry + data[pos:pos + PAGE].translate(None, NON_HEX)
+            usable = len(piece) // 2 * 2
+            if len(out) + usable // 2 > limit:
+                raise Over(why)
+            out += bytes.fromhex(piece[:usable].decode("ascii"))
+            carry = piece[usable:]
+            if not pos & 0xFFFFF:
+                self._clock()
+        if carry:
+            if len(out) + 1 > limit:
+                raise Over(why)
+            out += bytes.fromhex((carry + b"0").decode("ascii"))
+        return bytes(out)
+
+    def _a85(self, data, limit, why):
+        """ASCII base-85 (ISO 32000-1 7.4.3) in pieces: groups of five characters give four bytes, a 'z' gives four zero bytes (and only
+        between groups), a final group of two to four characters gives one byte fewer, white space is ignored, '~>' ends the data."""
+        body = data.strip(A85_WS)
+        if body.startswith(b"<~"):
+            body = body[2:]
+        end = body.find(b"~>")
+        if end >= 0:
+            body = body[:end]
+        out, rem = bytearray(), b""
+        try:
+            for pos in range(0, len(body), PAGE):
+                parts = A85_ZRUN.split(rem + body[pos:pos + PAGE].translate(None, A85_WS))
+                rem = parts.pop()
+                for i, part in enumerate(parts):
+                    if i % 2:
+                        if len(out) + 4 * len(part) > limit:
+                            raise Over(why)
+                        out += bytes(4 * len(part))
+                    elif part:
+                        if len(part) % 5:
+                            raise PdfError("the ASCII85 data is corrupt (a 'z' inside a group of five)")
+                        if len(out) + len(part) // 5 * 4 > limit:
+                            raise Over(why)
+                        out += base64.a85decode(part, adobe=False)
+                whole = len(rem) // 5 * 5
+                if whole:
+                    if len(out) + whole // 5 * 4 > limit:
+                        raise Over(why)
+                    out += base64.a85decode(rem[:whole], adobe=False)
+                    rem = rem[whole:]
+                if not pos & 0xFFFFF:
+                    self._clock()
+            if rem:
+                if len(rem) == 1:
+                    raise PdfError("the ASCII85 data is corrupt (a final group of one character)")
+                if len(out) + len(rem) - 1 > limit:
+                    raise Over(why)
+                out += base64.a85decode(rem, adobe=False)
+        except ValueError as exc:
+            raise PdfError("the ASCII85 data is corrupt (%s)" % exc)
+        return bytes(out)
+
+    def _rl(self, data, limit, why):
+        out, i, n, runs = bytearray(), 0, len(data), 0
+        while i < n:
+            c = data[i]
+            i += 1
+            if c == 128:
+                break
+            if c < 128:
+                piece = data[i:i + c + 1]
+                i += c + 1
+            else:
+                piece = data[i:i + 1] * (257 - c)
+                i += 1
+            if len(out) + len(piece) > limit:
+                raise Over(why)
+            out += piece
+            runs += 1
+            if not runs & 0xFFFF:
+                self._clock()
+        return bytes(out)
 
     # object streams ---------------------------------------------------------------------------------------------------
 
     def objstm(self, num):
         if num in self.objstm_cache:
             return self.objstm_cache[num]
+        if num in self.objstm_failed:
+            raise PdfError(self.objstm_failed[num])
+        try:
+            return self._objstm(num)
+        except Over as exc:
+            if isinstance(exc, TimeUp):
+                raise
+            self.ctx.limit_hit("object stream %d: %s" % (num, exc))
+            self.objstm_failed[num] = "a budget was reached reading it (%s)" % exc
+            raise PdfError(self.objstm_failed[num])
+        except PdfError as exc:
+            self.objstm_failed[num] = str(exc)
+            self.problem("object stream %d cannot be read: %s; the objects it holds are counted unreadable" % (num, exc))
+            raise
+
+    def _objstm(self, num):
         entry = self.entries.get(num)
         o = self.get(num) if entry is not None and entry[0] == 1 else None
         res = None
@@ -2498,7 +2752,7 @@ class Pdf:
             data, first, pairs = self.objstm(stm)
         except PdfError as exc:
             self.unreadable_compressed += 1
-            raise PdfError("object %d lives in object stream %d, which cannot be read: %s" % (num, stm, exc))
+            raise ObjStmUnreadable("object %d lives in object stream %d, which cannot be read: %s" % (num, stm, exc))
         if not (0 <= index < len(pairs)) or pairs[index][0] != num:
             idx = next((i for i, p in enumerate(pairs) if p[0] == num), None)
             if idx is None:
@@ -2507,7 +2761,7 @@ class Pdf:
         at = first + pairs[index][1]
         if at >= len(data):
             raise PdfError("object %d's offset is outside object stream %d" % (num, stm))
-        lx = Lexer(data, at, True, min(self.cfg["max_depth"], 150))
+        lx = Lexer(data, at, True, self.nesting, self.ctx)
         value = lx.parse()
         o = Obj()
         o.num, o.gen, o.value, o.offset, o.stream, o.header_offset = num, 0, value, None, None, 0
@@ -2525,9 +2779,9 @@ class Pdf:
 
     def read_xref_chain(self, start):
         seen, off = set(), start
-        pending = [("startxref", off)]
+        pending = [("startxref", off, None)]
         while pending and len(self.revisions) < MAX_REVISIONS:
-            how, off = pending.pop(0)
+            how, off, owner = pending.pop(0)
             if off in seen:
                 self.problem("the cross-reference chain returns to offset %d: a /Prev loop" % off)
                 break
@@ -2535,7 +2789,7 @@ class Pdf:
             if self.ctx.expired("the cross-reference chain"):
                 return False
             try:
-                nxt = self.read_xref_section(off, how)
+                nxt = self.read_xref_section(off, how, owner)
             except PdfError as exc:
                 self.problem("the cross-reference section at offset %d cannot be read: %s" % (off, exc))
                 return False
@@ -2544,7 +2798,7 @@ class Pdf:
             self.ctx.limit_hit("the cross-reference chain has more than %d sections: the rest were not followed" % MAX_REVISIONS)
         return True
 
-    def read_xref_section(self, off, how):
+    def read_xref_section(self, off, how, owner=None):
         for shift in ((0, self.base) if self.base else (0,)):
             at = off + shift
             if at < 0 or at >= self.size:
@@ -2553,13 +2807,15 @@ class Pdf:
             if head.startswith(b"xref"):
                 return self.read_xref_table(at, off, how)
             if OBJ_RE.match(self.blob[at:at + 64]):
-                return self.read_xref_stream(at, off, how)
+                return self.read_xref_stream(at, off, how, owner)
         raise PdfError("neither an 'xref' keyword nor an object header is there")
 
-    def add_entry(self, num, kind, a, b, over_free=False):
+    def add_entry(self, num, kind, a, b, over_free=None):
         if num in self.entries:
-            # A hybrid file lists, as free in its table, the objects its cross-reference stream defines: the stream's entry takes the free one's place.
-            if over_free and self.entries[num][0] == 0 and kind != 0:
+            # A hybrid file lists, as free in its table, the objects its cross-reference stream defines: the stream's entry takes the free
+            # one's place, but only for a number the table OF THE SAME REVISION made free. A number a newer revision freed (a deleted
+            # object) stays free: an older revision's stream does not bring it back.
+            if over_free is not None and num in over_free and self.entries[num][0] == 0 and kind != 0:
                 self.entries[num] = (kind, a, b)
             return
         if len(self.entries) >= self.cfg["max_objects"]:
@@ -2572,7 +2828,12 @@ class Pdf:
     def read_xref_table(self, at, off, how):
         pos = at + (len(self.blob[at:at + 64]) - len(self.blob[at:at + 64].lstrip(WS_BYTES))) + 4
         count_entries = 0
+        subsections = 0
+        freed = set()
         while True:
+            subsections += 1
+            if not subsections & 4095 and self.ctx.expired("a cross-reference table"):
+                raise PdfError("the clock ran out inside a cross-reference table, after %d subsections" % subsections)
             window = self.blob[pos:pos + 64]
             m = re.match(rb"[\x00\t\n\x0c\r ]*([0-9]{1,10})[\x00\t\n\x0c\r ]+([0-9]{1,10})", window)
             if not m:
@@ -2592,6 +2853,8 @@ class Pdf:
                 if em.group(3) == b"n":
                     self.add_entry(first + i, 1, int(em.group(1)), int(em.group(2)))
                 else:
+                    if first + i not in self.entries:
+                        freed.add(first + i)
                     self.add_entry(first + i, 0, 0, int(em.group(2)))
                 count_entries += 1
                 if i % 4096 == 0 and self.ctx.expired("a cross-reference table"):
@@ -2601,7 +2864,7 @@ class Pdf:
         if not rest.startswith(b"trailer"):
             raise PdfError("no 'trailer' keyword after the table")
         tpos = pos + (len(self.blob[pos:pos + 16]) - len(rest)) + 7
-        trailer, _ = self.parse_at(tpos, lambda lx: lx.parse())
+        trailer, _ = self.parse_at(tpos, lambda lx: lx.parse(), "dictionary")
         if not isinstance(trailer, dict):
             raise PdfError("the trailer is not a dictionary")
         self.trailers.append(trailer)
@@ -2612,12 +2875,13 @@ class Pdf:
         xs = trailer.get("XRefStm")
         if isinstance(xs, int) and not isinstance(xs, bool):
             rev["hybrid_xrefstm"] = xs
-            nxt.append(("XRefStm", xs))
+            self.free_by_revision[rev["index"]] = freed
+            nxt.append(("XRefStm", xs, rev["index"]))
         if isinstance(trailer.get("Prev"), int):
-            nxt.append(("Prev", trailer["Prev"]))
+            nxt.append(("Prev", trailer["Prev"], None))
         return nxt
 
-    def read_xref_stream(self, at, off, how):
+    def read_xref_stream(self, at, off, how, owner=None):
         o = self.read_indirect(off, None)
         v = o.value
         if not isinstance(v, dict) or v.get("Type") != "XRef" or o.stream is None:
@@ -2646,7 +2910,7 @@ class Pdf:
                 f3 = int.from_bytes(data[pos + w[0] + w[1]:pos + width], "big") if w[2] else 0
                 pos += width
                 entries += 1
-                hybrid = how == "XRefStm"
+                hybrid = self.free_by_revision.get(owner) if how == "XRefStm" else None
                 if f1 == 1:
                     self.add_entry(first + i, 1, f2, f3, hybrid)
                 elif f1 == 2:
@@ -2659,7 +2923,7 @@ class Pdf:
         rev = {"index": len(self.revisions), "kind": "stream", "startxref": off, "entries": entries, "size": size,
                "prev": v.get("Prev") if isinstance(v.get("Prev"), int) else None, "encrypt_in_trailer": "Encrypt" in v}
         self.revisions.append(rev)
-        return [("Prev", v["Prev"])] if isinstance(v.get("Prev"), int) else []
+        return [("Prev", v["Prev"], None)] if isinstance(v.get("Prev"), int) else []
 
 
 def is_action(d):
@@ -2684,10 +2948,17 @@ def pdf_encryption(pdf, ctx):
         entry["note"] = "an earlier revision's trailer names an encryption dictionary and the current one does not: the current trailer is what a reader follows, and the file's objects may still be encrypted"
         return entry
     d, num = pdf.deref(holder["Encrypt"])
+    # Strings and streams of an encrypted file are ciphertext (ISO 32000-1 7.6.1), except where a crypt filter of the identity is
+    # named (V 4 and 5: StrF and StmF, whose default is the identity) and in the encryption dictionary itself.
+    pdf.strings_encrypted = pdf.streams_encrypted = True
+    pdf.encrypt_object = num
     if not isinstance(d, dict):
         ctx.problem("the trailer's /Encrypt does not lead to a dictionary")
         entry["dictionary"] = "unreadable"
         return entry
+    if isinstance(d.get("V"), int) and d.get("V") in (4, 5):
+        pdf.strings_encrypted = str(d.get("StrF", "Identity")) != "Identity"
+        pdf.streams_encrypted = str(d.get("StmF", "Identity")) != "Identity"
     out = {"object": num}
     for key, name in (("Filter", "filter"), ("SubFilter", "sub_filter"), ("StmF", "stm_f"), ("StrF", "str_f"), ("EFF", "eff")):
         if isinstance(d.get(key), Name):
@@ -2704,6 +2975,8 @@ def pdf_encryption(pdf, ctx):
     cf, _ = pdf.deref(d.get("CF"))
     if isinstance(cf, dict):
         filters = {}
+        if len(cf) > 20:
+            ctx.limit_hit("the encryption dictionary's /CF names %d crypt filters: the first 20 are listed" % len(cf))
         for name, f in list(cf.items())[:20]:
             f, _n = pdf.deref(f)
             if isinstance(f, dict):
@@ -2718,11 +2991,51 @@ def pdf_encryption(pdf, ctx):
     return entry
 
 
+def stream_spans(blob, ctx, budget):
+    """(start, end) of the data of every 'stream' ... 'endstream' run in the file, in order, found by scanning: what a scan of the
+    file for keywords must not take for structure (a trailer written inside a stream is data)."""
+    spans, pos, n = [], 0, 0
+    for m in re.finditer(rb">>[\x00\t\n\x0c\r ]*stream(?:\r\n|\n|\r)", blob):
+        if m.start() < pos:
+            continue
+        n += 1
+        if not n & 1023 and ctx.expired("the scan for stream data"):
+            break
+        end = blob.find(b"endstream", m.end())
+        end = len(blob) if end < 0 else end
+        spans.append((m.end(), end))
+        pos = end
+        if len(spans) >= budget:
+            ctx.limit_hit("the scan for stream data stopped after %d streams: a trailer keyword after them is not checked against stream data" % budget)
+            break
+    return spans
+
+
+def in_comment(blob, at):
+    """Whether the keyword at `at` follows a '%' on its own line (a comment, ISO 32000-1 7.2.3). Strings are not followed: a '%' in a
+    string on the same line makes this say comment, which keeps a keyword out rather than in."""
+    line = max(blob.rfind(b"\n", max(0, at - 4096), at), blob.rfind(b"\r", max(0, at - 4096), at))
+    return blob.find(b"%", line + 1, at) >= 0
+
+
 def probe_pdf(blob, ctx, extractor):
+    """The PDF answer. A budget or the clock reached anywhere in it is a limit, and the answer keeps what was read before it."""
     out = {"container": "PDF"}
+    try:
+        _probe_pdf(blob, ctx, extractor, out)
+    except Over as exc:
+        ctx.limit_hit("%s; the PDF answer holds what was read before it" % exc)
+    out.setdefault("coverage", {"structures_read": PDF_READ, "structures_not_read": PDF_NOT_READ})
+    return out
+
+
+def _probe_pdf(blob, ctx, extractor, out):
     cfg = ctx.cfg
     size = len(blob)
     pdf = Pdf(blob, ctx)
+    if cfg["max_depth"] > PDF_NESTING:
+        out["object_nesting"] = {"followed": PDF_NESTING, "max_depth": cfg["max_depth"],
+                                 "note": "PDF objects are parsed to a nesting of %d whatever max_depth says; an object nested deeper is an unreadable object, named in problems" % PDF_NESTING}
     head = blob[:HEAD_BYTES]
     m = re.search(rb"%PDF-(\d\.\d)", head)
     anomalies = []
@@ -2774,14 +3087,30 @@ def probe_pdf(blob, ctx, extractor):
         for n, at in scanned.items():
             pdf.add_entry(n, 1, at, 0)
         if not pdf.trailers:
-            # Trailers by scan: every 'trailer' keyword with a dictionary, and cross-reference stream dictionaries found below.
-            for t in re.finditer(rb"trailer[\x00\t\n\x0c\r ]*<<", blob):
+            # Trailers by scan: every 'trailer' keyword with a dictionary, and cross-reference stream dictionaries found below. A keyword
+            # inside a stream's data or in a comment is not a trailer: taking it for one would let a stream choose the "current" trailer.
+            spans = stream_spans(blob, ctx, cfg["max_objects"] * 4)
+            starts = [a for a, _b in spans]
+            ignored = {"in_stream_data": 0, "in_a_comment": 0}
+            for k, t in enumerate(re.finditer(rb"trailer[\x00\t\n\x0c\r ]*<<", blob)):
+                if not (k + 1) & 255 and ctx.expired("the scan for trailers"):
+                    break
+                i = bisect.bisect_right(starts, t.start()) - 1
+                if i >= 0 and spans[i][0] <= t.start() < spans[i][1]:
+                    ignored["in_stream_data"] += 1
+                    continue
+                if in_comment(blob, t.start()):
+                    ignored["in_a_comment"] += 1
+                    continue
                 try:
-                    d, _ = pdf.parse_at(t.end() - 2, lambda lx: lx.parse())
+                    d, _ = pdf.parse_at(t.end() - 2, lambda lx: lx.parse(), "dictionary")
                 except PdfError:
                     continue
                 if isinstance(d, dict):
                     pdf.trailers.insert(0, d)
+            if ignored["in_stream_data"] or ignored["in_a_comment"]:
+                out["trailer_keywords_ignored"] = ignored
+                anomalies.append("%d 'trailer' keyword(s) inside stream data and %d in a comment were not taken for trailers" % (ignored["in_stream_data"], ignored["in_a_comment"]))
         anomalies.append("the cross-reference chain could not be used; the object index comes from scanning the file for object headers, and the newest definition of a number wins")
     out["structure_source"] = "cross-reference chain" if structure == "xref" else "scan of the file for object headers"
     revisions = pdf.revisions
@@ -2885,11 +3214,14 @@ def probe_pdf(blob, ctx, extractor):
             pdf.trailers.extend(oo.value for oo in interesting.values() if isinstance(oo.value, dict) and oo.value.get("Type") == "XRef")
     compressed_total = sum(1 for e in pdf.entries.values() if e[0] == 2)
     out["census"] = {"objects_listed": census_done, "objects_in_table_of_kind_free": sum(1 for e in pdf.entries.values() if e[0] == 0), "compressed_objects_indexed": compressed_total,
-                     "objects_unreadable": unreadable, "complete": not stop_census}
+                     "objects_unreadable": unreadable, "objects_not_read_at_a_limit": pdf.over_objects, "complete": not stop_census and not pdf.over_objects}
     if stop_census:
         ctx.limit_hit("the object census stopped early: the counts and the actions found are lower bounds")
     out["streams"] = {**streams, "by_filter_chain": filters_seen}
     out["object_types"] = dict(sorted(types.items(), key=lambda kv: -kv[1])[:50])
+    if len(types) > 50:
+        out["object_types_total"] = len(types)
+        ctx.limit_hit("the objects carry %d distinct /Type names: the 50 most frequent are counted in object_types; every object's type is in the objects table" % len(types))
     # Trailer and encryption
     trailer = pdf.trailers[0] if pdf.trailers else {}
     out["trailer"] = {"size": trailer.get("Size") if isinstance(trailer.get("Size"), int) else None, "root": isinstance(trailer.get("Root"), Ref),
@@ -2912,7 +3244,11 @@ def probe_pdf(blob, ctx, extractor):
     if extractor is not None:
         for kind in ("pdf", "pdf-raw"):
             for arg in extractor.wanted_args(kind):
-                o = pdf.get(int(arg))
+                try:
+                    o = pdf.get(int(arg))
+                except Over as exc:
+                    ctx.limit_hit("extract %s:%s: %s" % (kind, arg, exc))
+                    continue
                 if o is None or o.stream is None:
                     ctx.problem("extract %s:%s: the object is not there or is not a stream" % (kind, arg))
                     continue
@@ -2927,6 +3263,7 @@ def probe_pdf(blob, ctx, extractor):
                         data = pdf.decode(o)
                     except (PdfError, Over) as exc:
                         (ctx.limit_hit if isinstance(exc, Over) else ctx.problem)("extract pdf:%s: %s" % (arg, exc))
+                        extractor.tried(kind, arg)
                         continue
                     extractor.write(kind, arg, "object %s" % arg, data, "PDF stream, filters undone")
     out["coverage"] = {"structures_read": PDF_READ, "structures_not_read": PDF_NOT_READ}
@@ -2966,17 +3303,24 @@ def filespec_info(pdf, ctx, spec):
 
 
 def trace_catalog(pdf, ctx, catalog, cnum, interesting, extractor):
+    """Every action reached from the catalog, with the key that reaches it, and every action object nothing reaches. No walker cuts a
+    list: each step is counted against max_objects and the clock (tick), and a depth or a budget reached is a limit, named."""
     out = {"catalog": None}
     actions, embedded, seen_actions, scripts = [], [], set(), []
     values = ctx.values
     page = ctx.page("pdf_actions")
+    files = ctx.page("pdf_embedded_files")
+    max_depth = pdf.cfg["max_depth"]
     if not isinstance(catalog, dict):
         ctx.problem("no catalog could be found: actions, pages and embedded files were not traced")
         out["actions"] = {"count": 0, "table": "pdf_actions", "traced": False}
         return out
-    out["catalog"] = {"object": cnum, "keys": sorted(text_of(k, None, "names") for k in catalog)[:40]}
-    visited = set()
+    keys = sorted(text_of(k, None, "names") for k in catalog)
+    out["catalog"] = {"object": cnum, "keys": keys[:40], "keys_total": len(keys)}
+    if len(keys) > 40:
+        ctx.limit_hit("the catalog holds %d keys: the first 40 (sorted) are listed by name; every key that reaches an action is traced" % len(keys))
     budget = [pdf.cfg["max_objects"]]
+    ciphertext = pdf.strings_encrypted
 
     def tick():
         budget[0] -= 1
@@ -2984,6 +3328,19 @@ def trace_catalog(pdf, ctx, catalog, cnum, interesting, extractor):
             raise Over("the traversal of the document's structures visited max_objects (%d) objects: the rest is not traced" % pdf.cfg["max_objects"])
         if budget[0] % 4096 == 0 and ctx.expired("the structure trace"):
             raise Over("the structure trace stopped at max_seconds")
+
+    def too_deep(what):
+        ctx.limit_hit("%s nests deeper than max_depth (%d): what lies below that depth was not traced" % (what, max_depth))
+
+    def string_target(raw, row):
+        """A target string: shown withheld where token-shaped; in an encrypted file it is ciphertext, so it is marked, given by length,
+        and neither shown nor put in the values file."""
+        if ciphertext:
+            row["target"] = None
+            row["target_length"] = len(raw)
+            row["ciphertext"] = True
+            return None
+        return text_string(raw)
 
     def describe_action(value, num, trigger, reached=True):
         s = value.get("S")
@@ -2995,9 +3352,13 @@ def trace_catalog(pdf, ctx, catalog, cnum, interesting, extractor):
             o = pdf.get(value["JS"].num) if isinstance(value.get("JS"), Ref) else None
             if o is not None and o.stream is not None:
                 row["script"] = {"form": "stream", "object": value["JS"].num, "stream_bytes": o.stream["length"]}
+                if pdf.streams_encrypted:
+                    row["script"]["ciphertext"] = True
                 scripts.append(("stream", o, value["JS"].num))
             elif isinstance(js, PStr):
                 row["script"] = {"form": "string", "bytes": len(js)}
+                if ciphertext:
+                    row["script"]["ciphertext"] = True
                 scripts.append(("string", js, num))
             else:
                 row["script"] = {"form": "not found"}
@@ -3005,18 +3366,20 @@ def trace_catalog(pdf, ctx, catalog, cnum, interesting, extractor):
         if subtype == "URI":
             u, _ = pdf.deref(value.get("URI"))
             if isinstance(u, PStr):
-                text = text_string(u)
-                row["target"] = redact_url(text)
-                row["target_length"] = len(text)
-                target_value = text
+                text = string_target(u, row)
+                if text is not None:
+                    row["target"] = redact_target(text)
+                    row["target_length"] = len(text)
+                    target_value = text
         elif subtype in ("Launch", "GoToR", "GoToE", "SubmitForm", "ImportData"):
             fs = filespec_info(pdf, ctx, value.get("F"))
             if "name" in fs:
-                text = text_string(fs["name"])
-                shown = redact_url(text) if re.match(r"[A-Za-z][A-Za-z0-9+.-]*://", text) else shown_path(text)
-                row["target"] = cell(shown)
-                row["target_length"] = len(text)
-                target_value = text
+                text = string_target(fs["name"], row)
+                if text is not None:
+                    shown = redact_target(text) if re.match(r"[A-Za-z][A-Za-z0-9+.-]*://", text) else shown_path(text)
+                    row["target"] = cell(shown)
+                    row["target_length"] = len(text)
+                    target_value = text
             win, _ = pdf.deref(value.get("Win"))
             if isinstance(win, dict):
                 row["windows_launch"] = {k: (len(win[k]) if isinstance(win.get(k), PStr) else None) for k in ("F", "D", "O", "P") if k in win}
@@ -3034,55 +3397,78 @@ def trace_catalog(pdf, ctx, catalog, cnum, interesting, extractor):
         actions.append(row)
         return row
 
-    def act(x, trigger, depth=0):
-        """x is an action dictionary, a reference to one, or a destination (an array / a name / a string); /Next actions follow."""
-        if depth > 32:
-            return
-        tick()
-        num = x.num if isinstance(x, Ref) else None
-        d, n2 = pdf.deref(x)
-        if isinstance(d, dict) and (is_action(d) or "S" in d or "JS" in d):
-            key = (num or n2, trigger)
-            if key in seen_actions:
-                return
-            seen_actions.add(key)
-            describe_action(d, num or n2, trigger)
-            nxt = d.get("Next")
-            if isinstance(nxt, list):
-                for item in nxt[:32]:
-                    act(item, trigger + "/Next", depth + 1)
-            elif nxt is not None:
-                act(nxt, trigger + "/Next", depth + 1)
-        elif isinstance(d, (list, Name, PStr)):
-            out.setdefault("destinations_seen", 0)
-            out["destinations_seen"] += 1
+    def act(x, trigger):
+        """x is an action dictionary, a reference to one, or a destination (an array / a name / a string); /Next actions follow,
+        iteratively, to max_depth."""
+        stack = [(x, trigger, 0)]
+        while stack:
+            x, trig, depth = stack.pop()
+            if depth > max_depth:
+                too_deep("an action's /Next chain")
+                continue
+            tick()
+            num = x.num if isinstance(x, Ref) else None
+            d, n2 = pdf.deref(x)
+            if isinstance(d, dict) and (is_action(d) or "S" in d or "JS" in d):
+                ident = num or n2
+                key = (ident, trig) if ident is not None else ("direct", id(d), trig)
+                if key in seen_actions:
+                    continue
+                seen_actions.add(key)
+                describe_action(d, ident, trig)
+                nxt, _ = pdf.deref(d.get("Next")) if isinstance(d.get("Next"), Ref) else (d.get("Next"), None)
+                if isinstance(nxt, list):
+                    for item in reversed(nxt):
+                        stack.append((item, trig + "/Next", depth + 1))
+                elif nxt is not None:
+                    stack.append((d.get("Next"), trig + "/Next", depth + 1))
+            elif isinstance(d, (list, Name, PStr)):
+                out.setdefault("destinations_seen", 0)
+                out["destinations_seen"] += 1
 
     def aa(x, trigger):
         d, _ = pdf.deref(x)
         if isinstance(d, dict):
-            for k, v in list(d.items())[:40]:
+            for k, v in list(d.items()):
                 act(v, "%s/AA/%s" % (trigger, text_of(k, None, "names")))
 
-    def walk_name_tree(root, label, visit_leaf, depth=0):
+    def walk_name_tree(root, label, visit_leaf):
         seen = set()
         stack = [(root, 0)]
         while stack:
             node, dp = stack.pop()
             tick()
             d, n = pdf.deref(node)
-            if not isinstance(d, dict) or (n is not None and n in seen) or dp > pdf.cfg["max_depth"]:
+            if not isinstance(d, dict) or (n is not None and n in seen):
+                continue
+            if dp > max_depth:
+                too_deep("the %s name tree" % label)
                 continue
             if n is not None:
                 seen.add(n)
             names, _ = pdf.deref(d.get("Names"))
             if isinstance(names, list):
+                if len(names) % 2:
+                    ctx.problem("a node of the %s name tree holds an odd number of entries (%d): the last has no value" % (label, len(names)))
                 for i in range(0, len(names) - 1, 2):
+                    tick()
                     key, _k = pdf.deref(names[i])
                     visit_leaf(key if isinstance(key, PStr) else None, names[i + 1])
             kids, _ = pdf.deref(d.get("Kids"))
             if isinstance(kids, list):
-                for kid in kids[:10000]:
+                for kid in reversed(kids):
                     stack.append((kid, dp + 1))
+
+    def leaf_label(key):
+        if key is None:
+            return "?"
+        if ciphertext:
+            return "ciphertext, %d bytes" % len(key)
+        return cell(shown_path(text_string(key)))
+
+    def embedded_row(row):
+        embedded.append(row)
+        files.add(row)
 
     try:
         # Catalog level: OpenAction, AA, names, form.
@@ -3093,34 +3479,40 @@ def trace_catalog(pdf, ctx, catalog, cnum, interesting, extractor):
         names, _ = pdf.deref(catalog.get("Names"))
         if isinstance(names, dict):
             if "JavaScript" in names:
-                walk_name_tree(names["JavaScript"], "JavaScript", lambda key, val: act(val, "Catalog/Names/JavaScript[%s]" % (cell(shown_path(text_string(key))) if key is not None else "?")))
+                walk_name_tree(names["JavaScript"], "JavaScript", lambda key, val: act(val, "Catalog/Names/JavaScript[%s]" % leaf_label(key)))
             if "EmbeddedFiles" in names:
                 def leaf(key, val):
                     fs = filespec_info(pdf, ctx, val)
                     row = {"source": "Catalog/Names/EmbeddedFiles"}
                     if "name" in fs:
-                        row["name"] = cell(shown_path(text_string(fs["name"])))
-                        if shown_path(text_string(fs["name"])) != text_string(fs["name"]):
-                            ctx.names.add(text_string(fs["name"]), row["name"])
+                        if ciphertext:
+                            row.update({"name": None, "name_length": len(fs["name"]), "ciphertext": True})
+                        else:
+                            row["name"] = cell(shown_path(text_string(fs["name"])))
+                            if shown_path(text_string(fs["name"])) != text_string(fs["name"]):
+                                ctx.names.add(text_string(fs["name"]), row["name"])
                     if "stream_object" in fs:
                         o = pdf.get(fs["stream_object"])
                         row["stream_object"] = fs["stream_object"]
                         if o is not None and o.stream is not None:
                             row["stream_bytes"] = o.stream["length"]
                             row["filters"] = [text_of(n, None, "names") for n, _p in pdf.filters_of(o.value)]
-                    embedded.append(row)
+                    embedded_row(row)
                 walk_name_tree(names["EmbeddedFiles"], "EmbeddedFiles", leaf)
         form, _ = pdf.deref(catalog.get("AcroForm"))
         if isinstance(form, dict):
             out["acroform"] = {"fields_root": isinstance(form.get("Fields"), (Ref, list)), "xfa_present": "XFA" in form, "need_appearances": form.get("NeedAppearances") if isinstance(form.get("NeedAppearances"), bool) else None}
             fields, _ = pdf.deref(form.get("Fields"))
-            stack = [(f, 0) for f in (fields if isinstance(fields, list) else [])]
+            stack = [(f, 0) for f in reversed(fields if isinstance(fields, list) else [])]
             fseen, nfields = set(), 0
             while stack:
                 f, dp = stack.pop()
                 tick()
                 d, n = pdf.deref(f)
-                if not isinstance(d, dict) or (n is not None and n in fseen) or dp > pdf.cfg["max_depth"]:
+                if not isinstance(d, dict) or (n is not None and n in fseen):
+                    continue
+                if dp > max_depth:
+                    too_deep("the form field tree")
                     continue
                 if n is not None:
                     fseen.add(n)
@@ -3131,7 +3523,7 @@ def trace_catalog(pdf, ctx, catalog, cnum, interesting, extractor):
                     aa(d["AA"], "AcroForm/Field")
                 kids, _ = pdf.deref(d.get("Kids"))
                 if isinstance(kids, list):
-                    stack.extend((k, dp + 1) for k in kids[:10000])
+                    stack.extend((k, dp + 1) for k in reversed(kids))
             out["acroform"]["fields_traversed"] = nfields
         # Outlines
         outl, _ = pdf.deref(catalog.get("Outlines"))
@@ -3162,26 +3554,29 @@ def trace_catalog(pdf, ctx, catalog, cnum, interesting, extractor):
                 node, dp = stack.pop()
                 tick()
                 d, n = pdf.deref(node)
-                if not isinstance(d, dict) or (n is not None and n in pseen) or dp > pdf.cfg["max_depth"]:
+                if not isinstance(d, dict) or (n is not None and n in pseen):
                     if isinstance(d, dict) and n in pseen:
                         ctx.problem("the page tree returns to object %d: a cycle" % n)
+                    continue
+                if dp > max_depth:
+                    too_deep("the page tree")
                     continue
                 if n is not None:
                     pseen.add(n)
                 kids, _ = pdf.deref(d.get("Kids"))
                 if isinstance(kids, list) and d.get("Type") != "Page":
-                    stack.extend((k, dp + 1) for k in kids[:100000])
+                    stack.extend((k, dp + 1) for k in reversed(kids))
                     continue
                 leaves += 1
                 if "AA" in d:
                     aa(d["AA"], "Page")
                 an, _ = pdf.deref(d.get("Annots"))
                 if isinstance(an, list):
-                    for a in an[:10000]:
+                    for a in an:
+                        tick()
                         ad, anum = pdf.deref(a)
                         if not isinstance(ad, dict):
                             continue
-                        tick()
                         st = ad.get("Subtype")
                         key = text_of(str(st), None, "names") if isinstance(st, Name) else "?"
                         annot_types[key] = annot_types.get(key, 0) + 1
@@ -3197,40 +3592,62 @@ def trace_catalog(pdf, ctx, catalog, cnum, interesting, extractor):
     # Objects that are actions or hold scripts and were not reached from the catalog.
     reached_nums = {a["object"] for a in actions}
     unreached = 0
-    for num, o in interesting.items():
-        if isinstance(o.value, dict) and is_action(o.value) and num not in reached_nums:
-            unreached += 1
-            describe_action(o.value, num, None, reached=False)
-        elif isinstance(o.value, dict) and o.value.get("Type") == "EmbeddedFile":
-            if not any(e.get("stream_object") == num for e in embedded):
-                embedded.append({"source": "an EmbeddedFile stream no file specification reached", "stream_object": num, "stream_bytes": o.stream["length"] if o.stream else None,
-                                 "filters": [text_of(n, None, "names") for n, _p in pdf.filters_of(o.value)]})
-    # File specifications that name an embedded stream but sit outside the name tree.
-    for num, o in interesting.items():
-        if isinstance(o.value, dict) and "EF" in o.value:
-            fs = filespec_info(pdf, ctx, Ref(num, 0))
-            if "stream_object" in fs and not any(e.get("stream_object") == fs["stream_object"] for e in embedded):
-                emb = {"source": "a file specification (object %d)" % num, "stream_object": fs["stream_object"]}
-                if "name" in fs:
-                    emb["name"] = cell(shown_path(text_string(fs["name"])))
-                embedded.append(emb)
+    listed = {e.get("stream_object") for e in embedded}
+    try:
+        for k, (num, o) in enumerate(interesting.items()):
+            if not (k + 1) & 1023 and ctx.expired("the objects no key reaches"):
+                break
+            if isinstance(o.value, dict) and is_action(o.value) and num not in reached_nums:
+                unreached += 1
+                describe_action(o.value, num, None, reached=False)
+            elif isinstance(o.value, dict) and o.value.get("Type") == "EmbeddedFile":
+                if num not in listed:
+                    listed.add(num)
+                    embedded_row({"source": "an EmbeddedFile stream no file specification reached", "stream_object": num, "stream_bytes": o.stream["length"] if o.stream else None,
+                                  "filters": [text_of(n, None, "names") for n, _p in pdf.filters_of(o.value)]})
+        # File specifications that name an embedded stream but sit outside the name tree.
+        for k, (num, o) in enumerate(interesting.items()):
+            if not (k + 1) & 1023 and ctx.expired("the file specifications no key reaches"):
+                break
+            if isinstance(o.value, dict) and "EF" in o.value:
+                fs = filespec_info(pdf, ctx, Ref(num, 0))
+                if "stream_object" in fs and fs["stream_object"] not in listed:
+                    emb = {"source": "a file specification (object %d)" % num, "stream_object": fs["stream_object"]}
+                    if "name" in fs:
+                        if ciphertext:
+                            emb.update({"name": None, "name_length": len(fs["name"]), "ciphertext": True})
+                        else:
+                            emb["name"] = cell(shown_path(text_string(fs["name"])))
+                    listed.add(fs["stream_object"])
+                    embedded_row(emb)
+    except Over as exc:
+        ctx.limit_hit(str(exc))
     counts = {}
     for a in actions:
         counts[a["action"] or "?"] = counts.get(a["action"] or "?", 0) + 1
     out["actions"] = {"count": len(actions), "by_type": counts, "unreached_from_catalog": unreached, "table": "pdf_actions",
                       "note": "an action dictionary and the key that reaches it are different facts: a trigger is where the reader is asked to run it, and whether it runs depends on the reader"}
+    if ciphertext:
+        out["actions"]["ciphertext_note"] = ("the file is encrypted and no key is tried: the action dictionaries of objects outside object streams are read, and every target string "
+                                             "they hold is ciphertext, marked ciphertext: true and given by length only")
     out["embedded_files"] = embedded[:200]
+    out["embedded_files_table"] = "pdf_embedded_files"
     if len(embedded) > 200:
-        ctx.limit_hit("%d embedded files were found: the first 200 are listed" % len(embedded))
+        ctx.limit_hit("%d embedded files were found: the first 200 are in the answer's embedded_files, and every one is in the pdf_embedded_files table" % len(embedded))
     if extractor is not None and extractor.wants("javascript"):
         for i, (form, src, ref) in enumerate(scripts, 1):
             if form == "string":
-                extractor.write("javascript", "", "script %d (string, action object %s)" % (i, ref), bytes(src), "PDF JavaScript string")
+                extractor.write("javascript", "", "script %d (string, action object %s)" % (i, ref), bytes(src), "PDF JavaScript string" + (", ciphertext" if ciphertext else ""))
             else:
                 try:
                     data = pdf.decode(src)
-                except (PdfError, Over) as exc:
+                except PdfError as exc:
                     ctx.problem("script %d (stream object %s) was not extracted: %s" % (i, ref, exc))
+                    extractor.tried("javascript")
+                    continue
+                except Over as exc:
+                    ctx.limit_hit("script %d (stream object %s) was not extracted: %s" % (i, ref, exc))
+                    extractor.tried("javascript")
                     continue
                 extractor.write("javascript", "", "script %d (stream object %s)" % (i, ref), data, "PDF JavaScript stream, filters undone")
         if not scripts:
@@ -3243,10 +3660,11 @@ def trace_catalog(pdf, ctx, catalog, cnum, interesting, extractor):
 # --- RTF -------------------------------------------------------------------------------------------------------------------
 
 RTF_READ = ["group structure: nesting depth, brace balance, the bytes after the last group", "control words and destinations, counted",
-            "object groups: the object kind, class name, the length of the hex-encoded data and the decoded start of it (the OLE 1.0 object header)",
-            "fields (the first word of the instruction), templates and data stores, by length; a nested compound file inside object data is read as one"]
+            "object groups: the object kind, class name, the length of the hex-encoded data, the signature its decoded data begins with (named, never printed) and the OLE 1.0 object header",
+            "fields (the field type the instruction begins with, when it is one of the ECMA-376 field types), templates and data stores, by length, each a row of a table; a nested compound file inside object data is read as one"]
 RTF_NOT_READ = ["text, formatting, tables, styles and pictures", "the meaning of an embedded object: its payload is listed, not opened",
-                "fields' instruction text and template paths, beyond their first word and length (the whole is in the values file only when write_values is asked for in a secret_output job)"]
+                "fields' instruction text and template paths, beyond the field type and the length (the whole is in the values file only when write_values is asked for in a secret_output job)",
+                "the bytes of an object's data: the answer names the signature it begins with and prints none of it"]
 RTF_TOKEN = re.compile(rb"\\([A-Za-z]{1,32})(-?[0-9]{1,10})? ?|\\'[0-9A-Fa-f]{2}|\\[^A-Za-z]|[{}]")
 RTF_OBJECT_KINDS = ("objemb", "objlink", "objautlink", "objsub", "objpub", "objicemb", "objhtml", "objocx")
 RTF_WATCH = ("objupdate", "objautlink", "objlink", "objemb", "objhtml", "objocx", "objsetsize", "datastore", "template", "fldinst", "field", "pict", "bin", "objdata", "objclass", "objname",
@@ -3256,7 +3674,34 @@ MAX_RTF_OBJECTS = 20000
 MAX_FIELDS = 20000
 MAX_TEMPLATES = 2000
 HEXDIGITS = b"0123456789abcdefABCDEF"
-CAPTURE_LIMIT = 4096
+CAPTURE_LIMIT = 4096                # bytes of a class or object name kept; a field instruction or a template is kept to max_stream_bytes
+# The field types of ECMA-376 Part 1, 17.16.5, and the older ones Word still reads ([MS-DOC] 2.9.90): the first word of a field
+# instruction is printed only when it is one of these, so that an instruction that begins with something else (a key, a path)
+# never has a slice of it in the answer.
+FIELD_WORDS = frozenset("""ADDIN ADDRESSBLOCK ADVANCE ASK AUTHOR AUTONUM AUTONUMLGL AUTONUMOUT AUTOTEXT AUTOTEXTLIST BARCODE BIBLIOGRAPHY BIDIOUTLINE
+    CITATION COMMENTS COMPARE CONTROL CREATEDATE DATA DATABASE DATE DDE DDEAUTO DISPLAYBARCODE DOCPROPERTY DOCVARIABLE EDITTIME EMBED EQ FILENAME
+    FILESIZE FILLIN FORMCHECKBOX FORMDROPDOWN FORMTEXT GLOSSARY GOTOBUTTON GREETINGLINE HTMLCONTROL HYPERLINK IF IMPORT INCLUDE INCLUDEPICTURE
+    INCLUDETEXT INDEX INFO KEYWORDS LASTSAVEDBY LINK LISTNUM MACROBUTTON MERGEBARCODE MERGEFIELD MERGEREC MERGESEQ NEXT NEXTIF NOTEREF NUMCHARS
+    NUMPAGES NUMWORDS PAGE PAGEREF PRINT PRINTDATE PRIVATE QUOTE RD REF REVNUM SAVEDATE SECTION SECTIONPAGES SEQ SET SHAPE SKIPIF STYLEREF SUBJECT
+    SYMBOL TA TC TEMPLATE TIME TITLE TOA TOC USERADDRESS USERINITIALS USERNAME XE""".split())
+# The signatures an object's decoded data may begin with, by name: the answer names one of these and prints no byte of the data.
+DATA_SIGNATURES = ((b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1", "OLE compound file"), (b"\x01\x05\x00\x00", "OLE 1.0 ObjectHeader (version 0x00000501)"),
+                   (b"PK\x03\x04", "ZIP local file header"), (b"MZ", "MZ executable header"), (b"%PDF-", "PDF header"), (b"{\\rt", "RTF header"),
+                   (b"\x89PNG", "PNG image"), (b"\xff\xd8\xff", "JPEG image"), (b"GIF8", "GIF image"), (b"\x7fELF", "ELF header"))
+
+
+def field_word(clean):
+    """The field type an instruction begins with, upper-cased, when it is one this tool names; '=' for a formula; None otherwise."""
+    m = re.match(r"[\s{}]*([A-Za-z]{1,20})(?![A-Za-z])", clean)
+    if m and m.group(1).upper() in FIELD_WORDS:
+        return m.group(1).upper()
+    if re.match(r"[\s{}]*=", clean):
+        return "="
+    return None
+
+
+def data_signature(raw):
+    return next((name for magic, name in DATA_SIGNATURES if raw.startswith(magic)), None)
 
 
 def hex_decode_range(blob, start, end, limit):
@@ -3321,12 +3766,14 @@ def probe_rtf(blob, ctx, extractor):
     max_depth = cfg["max_depth"]
     size = len(blob)
     head = blob[:HEAD_BYTES]
-    start = head.find(b"{\\rtf")
+    start = head.find(b"{\\rt")
     out["rtf_header_offset"] = start
-    m = re.match(rb"\{\\rtf(-?[0-9]*)", head[start:])
-    out["rtf_version_word"] = ("rtf" + m.group(1).decode("ascii")) if m else None
+    m = re.match(rb"\{\\(rt[A-Za-z]*)(-?[0-9]*)", head[start:])
+    out["rtf_version_word"] = (m.group(1) + m.group(2)).decode("ascii") if m else None
     if start > 0:
         ctx.problem("the {\\rtf header starts at offset %d, after %d byte(s) a reader may skip" % (start, start))
+    if not m or m.group(1) != b"rtf":
+        ctx.problem("the header is {\\%s, not {\\rtf: Word opens a file that begins with {\\rt as RTF, and a strict reader does not" % (m.group(1).decode("ascii") if m else "rt"))
     words, other_words, symbols, destinations = {}, 0, 0, {}
     stack = []                      # (destination name, ignorable, start offset) of each open group
     over = 0
@@ -3335,7 +3782,8 @@ def probe_rtf(blob, ctx, extractor):
     unbalanced_close = 0
     objects, fields, templates, stores = [], [], [], 0
     fields_over = [0, 0]
-    capture = None                  # [kind, buffer bytearray, group depth at start, owner index]
+    capture = None                  # [kind, buffer, group depth at start, owner index, offset, bytes seen, cut]
+    kept = [0, 0]                   # bytes kept in captures, captures cut
     cur_obj_stack = []              # indexes into objects of the open \object groups
     last_end = 0
     pos_after_last_close = None
@@ -3344,22 +3792,42 @@ def probe_rtf(blob, ctx, extractor):
     bin_blocks, bin_bytes = 0, 0
     nonhex_total = 0
 
+    def capture_room():
+        cap = CAPTURE_LIMIT if capture[0] in ("objclass", "objname") else cfg["max_stream_bytes"]
+        return max(0, min(cap - len(capture[1]), cfg["max_total_bytes"] - kept[0]))
+
+    def keep(piece_start, piece_end=None, piece=None):
+        """Add the text between two tokens (or a decoded symbol) to the open capture, as far as its bound goes: what is past it is
+        counted, and the capture is marked cut."""
+        n = (piece_end - piece_start) if piece is None else len(piece)
+        capture[5] += n
+        room = capture_room()
+        if n > room:
+            capture[6] = True
+        take = min(n, room)
+        if take:
+            capture[1] += blob[piece_start:piece_start + take] if piece is None else piece[:take]
+            kept[0] += take
+
     def finish_capture():
         nonlocal capture
-        kind, buf, _d, owner = capture
+        kind, buf, _d, owner, off, seen, cut = capture
         text = bytes(buf)
+        kept[1] += 1 if cut else 0
         if kind == "objclass" and owner is not None:
-            objects[owner]["class_name_raw"] = text.strip().decode("latin-1")[:200]
+            objects[owner]["class_name_raw"] = text.strip().decode("latin-1")
+            objects[owner]["class_name_cut"] = cut
         elif kind == "objname" and owner is not None:
-            objects[owner]["name_raw"] = text.strip().decode("latin-1")[:200]
+            objects[owner]["name_raw"] = text.strip().decode("latin-1")
+            objects[owner]["name_cut"] = cut
         elif kind == "fldinst":
             if len(fields) < MAX_FIELDS:
-                fields.append(text)
+                fields.append((text, off, seen, cut))
             else:
                 fields_over[0] += 1
         elif kind == "template":
             if len(templates) < MAX_TEMPLATES:
-                templates.append(text)
+                templates.append((text, off, seen, cut))
             else:
                 fields_over[1] += 1
         capture = None
@@ -3373,8 +3841,8 @@ def probe_rtf(blob, ctx, extractor):
         if s < skip_until:
             continue
         gap_start, last_end = last_end, tok.end()
-        if capture is not None and capture[0] != "objdata" and s > gap_start and len(capture[1]) < CAPTURE_LIMIT:
-            capture[1] += blob[gap_start:min(s, gap_start + CAPTURE_LIMIT)]
+        if capture is not None and capture[0] != "objdata" and s > gap_start:
+            keep(gap_start, s)
         lead = tok.group()[:1]
         if lead == b"{":
             groups += 1
@@ -3407,12 +3875,12 @@ def probe_rtf(blob, ctx, extractor):
         word = tok.group(1)
         if word is None:
             symbols += 1
-            if capture is not None and capture[0] != "objdata" and len(capture[1]) < CAPTURE_LIMIT:
+            if capture is not None and capture[0] != "objdata":
                 sym = tok.group()
                 if sym in (b"\\\\", b"\\{", b"\\}"):
-                    capture[1] += sym[1:2]
+                    keep(0, piece=sym[1:2])
                 elif sym[:2] == b"\\'":
-                    capture[1] += bytes.fromhex(sym[2:4].decode("ascii"))
+                    keep(0, piece=bytes.fromhex(sym[2:4].decode("ascii")))
             if tok.group()[:2] == b"\\*" and stack:
                 stack[-1][1] = True
             continue
@@ -3433,11 +3901,11 @@ def probe_rtf(blob, ctx, extractor):
                 stores += 1
             elif name in ("objclass", "objname", "fldinst", "template") and capture is None:
                 owner = cur_obj_stack[-1] if cur_obj_stack and name in ("objclass", "objname") else None
-                capture = [name, bytearray(), len(stack), owner]
+                capture = [name, bytearray(), len(stack), owner, s, 0, False]
             elif name == "objdata" and cur_obj_stack and capture is None:
                 o = objects[cur_obj_stack[-1]]
                 o["data_start"] = tok.end()
-                capture = ["objdata", bytearray(), len(stack), cur_obj_stack[-1]]
+                capture = ["objdata", bytearray(), len(stack), cur_obj_stack[-1], s, 0, False]
         if cur_obj_stack:
             o = objects[cur_obj_stack[-1]]
             if name in RTF_OBJECT_KINDS and o["kind"] is None:
@@ -3482,22 +3950,33 @@ def probe_rtf(blob, ctx, extractor):
         row = {"index": o["index"], "offset": o["offset"], "kind": o["kind"], "flags": o["flags"]}
         if "class_name_raw" in o:
             row["class_name"] = text_of(o["class_name_raw"], None, "names")
+            if o.get("class_name_cut"):
+                row["class_name_cut_at_bytes"] = CAPTURE_LIMIT
         if "name_raw" in o:
             row["object_name"] = text_of(o["name_raw"], None, "names")
+            if o.get("name_cut"):
+                row["object_name_cut_at_bytes"] = CAPTURE_LIMIT
         if "data_start" in o and "data_end" in o:
             digits, other = count_hex(blob, o["data_start"], o["data_end"])
             row["data"] = {"offset": o["data_start"], "end_offset": o["data_end"], "hex_digits": digits, "non_hex_bytes": other}
             if other:
                 ctx.problem("RTF object %d: %d byte(s) of its data are not hex digits or white space" % (o["index"], other))
             raw, nonhex, trunc = hex_decode_range(blob, o["data_start"], min(o["data_end"], o["data_start"] + 4096 * 4), 4096)
-            row["data"]["decoded_start"] = {"bytes_read": len(raw), "first_bytes_hex": raw[:16].hex()}
+            # The start of the data is named by its signature, never printed: object data can be anything, a token included.
+            row["data"]["decoded_start"] = {"bytes_read": len(raw), "signature": data_signature(raw)}
             hdr = ole1_header(raw)
             if hdr:
                 row["ole1_header"] = {k: (text_of(v, None, "names") if isinstance(v, str) and k == "class_name" else v) for k, v in hdr.items()}
+                if hdr.get("header_truncated"):
+                    ctx.problem("RTF object %d: its OLE 1.0 ObjectHeader is cut short or declares a name longer than its data: the header is not read whole" % o["index"])
             if digits % 2:
                 ctx.problem("RTF object %d: an odd number of hex digits in its data" % o["index"])
             need = digits // 2
-            if need <= cfg["max_stream_bytes"] and (raw[:8] == CFB_MAGIC or (hdr and hdr.get("native_data_offset") is not None)):
+            nested_kind = raw[:8] == CFB_MAGIC or bool(hdr and hdr.get("native_data_offset") is not None)
+            if nested_kind and need > cfg["max_stream_bytes"]:
+                row["nested_compound_file"] = {"status": "over_budget", "bytes": need}
+                ctx.limit_hit("RTF object %d: its data is %d bytes, over max_stream_bytes (%d): the object it holds was not read" % (o["index"], need, cfg["max_stream_bytes"]))
+            if need <= cfg["max_stream_bytes"] and nested_kind:
                 try:
                     full, nonhex2, trunc2 = hex_decode_range(blob, o["data_start"], o["data_end"], cfg["max_stream_bytes"])
                     ctx.spend(len(full), "an RTF object")
@@ -3536,25 +4015,45 @@ def probe_rtf(blob, ctx, extractor):
     if len(objects) >= MAX_RTF_OBJECTS:
         ctx.limit_hit("the file holds at least %d object groups: the first %d are listed" % (MAX_RTF_OBJECTS, MAX_RTF_OBJECTS))
     out["objects"]["first"] = rows[:20]
-    # Fields and templates: the word that says what a field is; the rest by length, the whole only in the values file.
-    field_rows = []
-    for text in fields[:2000]:
+    # Fields and templates: the field type an instruction begins with when it is one this tool names, the rest by length. Every one is a
+    # row of a table (the whole table is in a file when it is longer than `limit`), and every one's whole text is in the values file
+    # when write_values is asked for in a job; a text longer than its bound is counted whole and said.
+    field_page, field_rows = ctx.page("rtf_fields"), []
+    for text, off, seen, cut in fields:
         clean = text.decode("latin-1").strip()
-        m2 = re.match(r"[\s{\\*a-z]*([A-Za-z]{2,20})", clean)
-        kind = m2.group(1).upper() if m2 else None
         finding = ctx.next_finding("F")
-        field_rows.append({"finding_id": finding, "instruction_word": kind, "instruction_length": len(clean)})
-        ctx.values.add(finding, {"kind": "field_instruction"}, clean)
-    out["fields"] = {"count": len(fields) + fields_over[0], "listed": field_rows[:200]}
+        row = {"finding_id": finding, "offset": off, "instruction_word": field_word(clean), "instruction_length": len(clean)}
+        if row["instruction_word"] is None:
+            row["instruction_word_note"] = "the instruction does not begin with a field type this tool names: its first word is not printed"
+        if cut:
+            row.update({"instruction_cut": True, "instruction_bytes_in_file": seen})
+        field_page.add(row)
+        if len(field_rows) < 200:
+            field_rows.append(row)
+        ctx.values.add(finding, {"kind": "field_instruction", "offset": off, "complete": not cut}, clean)
+    out["fields"] = {"count": len(fields) + fields_over[0], "table": "rtf_fields", "listed": field_rows,
+                     "listed_note": "the first 200 fields; every field read is a row of the rtf_fields table"}
     if fields_over[0] or fields_over[1]:
-        ctx.limit_hit("the file holds more than %d field instructions or %d templates: the rest are counted, not listed" % (MAX_FIELDS, MAX_TEMPLATES))
-    tmpl_rows = []
-    for text in templates[:200]:
+        ctx.limit_hit("the file holds more than %d field instructions or %d templates: the rest are counted, not listed and not in the values file" % (MAX_FIELDS, MAX_TEMPLATES))
+    tmpl_page, tmpl_rows = ctx.page("rtf_templates"), []
+    for text, off, seen, cut in templates:
         clean = text.decode("latin-1").strip()
         finding = ctx.next_finding("T")
-        tmpl_rows.append({"finding_id": finding, "target": redact_url(clean) if re.match(r"[A-Za-z][A-Za-z0-9+.-]*://", clean) else cell(shown_path(clean)), "target_length": len(clean)})
-        ctx.values.add(finding, {"kind": "template"}, clean)
+        row = {"finding_id": finding, "offset": off, "target": redact_target(clean) if re.match(r"[A-Za-z][A-Za-z0-9+.-]*://", clean) else cell(shown_path(clean)), "target_length": len(clean)}
+        if cut:
+            row.update({"target_cut": True, "target_bytes_in_file": seen})
+        tmpl_page.add(row)
+        if len(tmpl_rows) < 200:
+            tmpl_rows.append(row)
+        ctx.values.add(finding, {"kind": "template", "offset": off, "complete": not cut}, clean)
     out["templates"] = tmpl_rows
+    out["templates_table"] = "rtf_templates"
+    if len(templates) > 200:
+        out["templates_note"] = "the first 200 templates; every template read is a row of the rtf_templates table"
+    if kept[1]:
+        ctx.limit_hit("%d class name(s), object name(s), field instruction(s) or template(s) are longer than their bound (%d bytes for a name, max_stream_bytes for an "
+                      "instruction or a template, max_total_bytes for all together): their length in the file is counted whole, and what is kept (and in the values file) is cut"
+                      % (kept[1], CAPTURE_LIMIT))
     out["data_stores"] = stores
     out["coverage"] = {"structures_read": RTF_READ, "structures_not_read": RTF_NOT_READ}
     return out
@@ -3586,7 +4085,7 @@ def file_problem(path):
 
 # Keys whose values the tool made itself: a hex dump of header bytes, a GUID, and the names of the files it wrote (a tool name, a table name
 # and a digest of the call, which a token-shaped-text test would otherwise take for a token).
-SAFE_KEYS = {"head_hex", "tool", "clsid", "root_clsid", "first_bytes_hex", "all_results", "withheld_names_file"}
+SAFE_KEYS = {"head_hex", "tool", "clsid", "root_clsid", "all_results", "withheld_names_file", "sha256"}
 
 
 def shown_answer(value, key=""):
@@ -3670,6 +4169,9 @@ def main():
             except Stop as exc:
                 stop = exc
                 body = exc.partial
+            except Over as exc:
+                ctx.limit_hit("%s; the reading of the package stopped there" % exc)
+                body = {"container": "OOXML or ZIP"}
         else:
             with open(path, "rb") as fh:
                 blob = mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ)
@@ -3682,13 +4184,20 @@ def main():
                         except CfbError as exc:
                             stop = Stop("the compound file cannot be read: %s" % exc, {"container": "OLE compound file"})
                             body = stop.partial
+                        except Over as exc:
+                            ctx.limit_hit("%s; the reading of the compound file stopped there" % exc)
+                            body = {"container": "OLE compound file", "coverage": {"structures_read": OLE_READ, "structures_not_read": OLE_NOT_READ}}
                     elif b"%PDF-" in head:
                         body = probe_pdf(blob, ctx, extractor)
-                    elif b"{\\rtf" in head:
-                        body = probe_rtf(blob, ctx, extractor)
+                    elif b"{\\rt" in head:
+                        try:
+                            body = probe_rtf(blob, ctx, extractor)
+                        except Over as exc:
+                            ctx.limit_hit("%s; the reading of the RTF stopped there" % exc)
+                            body = {"container": "RTF"}
                     else:
                         values.close()
-                        fail("this is not a container this tool reads", status="unsupported", path=path, head_hex=head[:8].hex(),
+                        fail("this is not a container this tool reads", status="unsupported", path=path, head_hex=head[:4].hex(),
                              reads=["OLE compound file", "OOXML or ZIP", "PDF", "RTF"])
                 finally:
                     blob.close()
