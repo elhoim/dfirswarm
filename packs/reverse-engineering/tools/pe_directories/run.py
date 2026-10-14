@@ -340,28 +340,107 @@ def in_job():
 VALUES = [None]    # the values file of this call, once it exists: an answer that fails after it was created names it
 
 
+# BEGIN SHARED ONE WAY OUT
+# The same text is in doc_structure, pe_directories and the capa-floss recipe (tests/pack-re-process.test.ts holds the copies equal).
+# Two steps stand between a string out of a file and any byte the tool writes. shown_path is the sanitiser: it withholds every shape
+# below in the WHOLE text first (a token joined by `/`, such as the AWS secret key shape, and a user-info whose `//` or host a split
+# would remove, are only seen whole), then component by component (a path is not one token). final_check is the backstop: every key
+# and every value of what the tool is about to print or write is tested again with the same rules, and one that the sanitiser would
+# still change (a string that did not pass through it, or a number long enough to be a key) is replaced by its length, counted, and
+# the answer is partial. A field the backstop withholds is a fault of the tool, never of the file: the count says how many.
 _CLEAN = set()                      # short strings known to hold nothing to withhold: tested once (a table repeats its keys and kinds)
 # A mailto: address has no user-info (RFC 6068: an address is local-part@domain), so the shared block keeps `mailto:name:secret@host`
 # as an address; a ':' in the local part is a name:password pair placed there, and what follows the ':' is withheld here.
-MAILTO_SECRET = re.compile(r"(mailto:[^:@?/\s]*):([^@?\s]*)(?=@)", re.I)
+MAILTO_SECRET = re.compile(r"(mailto:[^:@?/\s]*):([^@?\s<>]*)(?=@)", re.I)
+# `name:secret@` wherever it stands, with or without a host after the `@` (a name cut at a declared length ends right there): the
+# shared block's bare rule wants a host, and its URL rule wants the `//` a path split removes.
+CUT_USERINFO = re.compile(r"(?<![\w.%+-])(?!mailto:)[\w.%+-]{1,64}:[^\s/@:<>]{1,128}(?=@)", re.I)
+# The value of a secret-named key of a connection string or a query (`Password=...;`, `AccountKey=...`).
+KEYVALUE_SECRET = re.compile(r"((?:password|passwd|pwd|secret|client[_-]?secret|token|api[_-]?key|access[_-]?key|account[_-]?key|shared[_-]?access[_-]?key)"
+                             r"[ \t]*=[ \t]*\"?)([^;\s&\"'<>,]{1,512})", re.I)
 # The head of a token whose own prefix says what it is, too short for the shared block's patterns (a name cut by a declared length, a
-# string read from the middle of a field): the prefix and four characters more are a piece of a token, and are withheld.
-TOKEN_HEAD = re.compile(r"(?<![A-Za-z0-9])(?:(?:AKIA|ASIA)[0-9A-Z]{4,}|gh[pousr]_[A-Za-z0-9]{4,}|github_pat_[A-Za-z0-9_]{4,}|xox[abeprs]-[A-Za-z0-9-]{4,}|sk-[A-Za-z0-9_-]{12,})")
+# string read from the middle of a field): the prefix and four characters more are a piece of a token, wherever it stands (a letter
+# before it does not make it a word: `XAKIA...` is a key id with a letter in front). `sk-` alone is common inside hyphenated words
+# (`desk-`, `risk-`, `task-`), so its head needs a capital or a digit in its first twelve characters, as a random key has.
+TOKEN_HEAD = re.compile(r"(?:AKIA|ASIA)[0-9A-Z]{4,}|gh[pousr]_[A-Za-z0-9]{4,}|github_pat_[A-Za-z0-9_]{4,}|xox[abeprs]-[A-Za-z0-9-]{4,}"
+                        r"|sk-(?=[A-Za-z0-9_-]{0,11}[0-9A-Z])[A-Za-z0-9_-]{12,}|eyJ[A-Za-z0-9_-]{6,}")
+LONG_NUMBER = 10 ** 31              # a number of 32 digits or more is printed as its size: the same digits as a string are withheld (32 hex)
+
+
+def _shown_pass(out):
+    if ":" in out:
+        out = MAILTO_SECRET.sub(lambda m: m.group(1) + ":" + _withheld("userinfo", len(m.group(2)), "urls"), out)
+    if "@" in out:
+        out = CUT_USERINFO.sub(lambda m: _withheld("userinfo", len(m.group()), "urls"), out)
+    if "=" in out:
+        out = KEYVALUE_SECRET.sub(lambda m: m.group(1) + _withheld("", len(m.group(2)), "text"), out)
+    out = scrub(out, "names")
+    if "/" in out:
+        out = "/".join(scrub(part, "names") for part in out.split("/"))
+    return TOKEN_HEAD.sub(lambda m: _withheld("token-shaped text", len(m.group()), "names"), out)
 
 
 def shown_path(text):
-    """A path as it may be printed: each component with anything token-shaped, or with user-info, withheld. A path is
-    tested component by component, as an OPC part name or a file name is a path and not one token."""
+    """A string as it may be printed: user-info, a secret-named value, every token-shaped run of the whole text, of each `/`
+    component, and every token head, withheld. A pass that withheld something is run again on its own result (a marker it wrote can
+    leave a new edge in front of a user-info), up to four times, so that the result is a fixed point: shown_path of it is itself, which
+    is what final_check tests."""
     if not isinstance(text, str):
         return text
     if text in _CLEAN:
         return text
-    if "ailto:" in text or "AILTO:" in text:
-        text = MAILTO_SECRET.sub(lambda m: m.group(1) + ":" + _withheld("userinfo", len(m.group(2)), "urls"), text)
-    out = "/".join(TOKEN_HEAD.sub(lambda m: _withheld("token-shaped text", len(m.group()), "names"), scrub(part, "names")) for part in text.split("/"))
-    if out == text and len(text) <= 256 and len(_CLEAN) < 200000:
-        _CLEAN.add(text)
+    out = _shown_pass(text)
+    passes = 1
+    while out != text and passes < 4:
+        text, out = out, _shown_pass(out)
+        passes += 1
+    if passes == 1 and len(out) <= 256 and len(_CLEAN) < 200000:
+        _CLEAN.add(out)
     return out
+
+
+def shown_number(value):
+    if isinstance(value, int) and not isinstance(value, bool) and abs(value) >= LONG_NUMBER:
+        return "<a number of %d bits, withheld>" % value.bit_length()
+    return value
+
+
+FINAL = {"fields": 0}
+
+
+def _final_withheld(what):
+    FINAL["fields"] += 1
+    return "<withheld by the final check: %s>" % what
+
+
+def final_check(value, safe=None, key=""):
+    """The backstop. `value` is what is about to be written (after the sanitiser); `safe(key, text)` names the strings the tool made
+    itself and registered (a file's path, a class id). Every other string, key or value, is withheld whole when shown_path would still
+    change it; a number of 32 digits or more and any value of a type JSON does not carry are withheld too. Returns the value to write."""
+    if isinstance(value, str):
+        if (safe is not None and safe(key, value)) or shown_path(value) == value:
+            return value
+        return _final_withheld("%d characters" % len(value))
+    if isinstance(value, bool) or value is None or isinstance(value, float):
+        return value
+    if isinstance(value, int):
+        return value if abs(value) < LONG_NUMBER else _final_withheld("a number of %d bits" % value.bit_length())
+    if isinstance(value, dict):
+        out = {}
+        for k, v in value.items():
+            name = k if isinstance(k, str) else str(k)
+            if shown_path(name) != name:
+                name = _final_withheld("a key of %d characters" % len(name))
+            base, n = name, 1
+            while name in out:
+                n += 1
+                name = "%s #%d" % (base, n)
+            out[name] = final_check(v, safe, k if isinstance(k, str) else "")
+        return out
+    if isinstance(value, (list, tuple)):
+        return [final_check(v, safe) for v in value]
+    return _final_withheld("a value of type %s" % type(value).__name__)
+# END SHARED ONE WAY OUT
 
 
 def long_text(text, what="text"):
@@ -390,6 +469,11 @@ MADE = set()
 def made(text):
     MADE.add(text)
     return text
+
+
+def safe_made(key, text):
+    """What final_check lets through unchanged: a string the tool made and registered, under one of SAFE_KEYS."""
+    return key in SAFE_KEYS and text in MADE
 
 
 class Spill:
@@ -425,19 +509,25 @@ def shown_answer(value, key="", spill=None):
         if key in SAFE_KEYS and value in MADE:
             return value
         return shown_path(value)
-    if isinstance(value, bool) or value is None or isinstance(value, (int, float)):
+    if isinstance(value, bool) or value is None or isinstance(value, float):
         return value
+    if isinstance(value, int):
+        return shown_number(value)
     if isinstance(value, dict):
         out = {}
-        for k, v in value.items():
-            name = base = shown_key(k)
-            n = 1
+
+        def free(base):
+            name, n = base, 1
             while name in out:
                 n += 1
                 name = "%s #%d" % (base, n)
+            return name
+        for k, v in value.items():
+            name = free(shown_key(k))
             if spill is not None and isinstance(v, (list, tuple)) and len(v) > spill.at:
                 out[name] = [shown_answer(x, "", spill) for x in v[:spill.at]]
-                out[name + "_not_shown"] = spill.write(name, list(v))
+                # the file named beside the list takes a key no other key holds: a key of the file spelled `<key>_not_shown` is kept apart
+                out[free(name + "_not_shown")] = spill.write(name, list(v))
             else:
                 out[name] = shown_answer(v, k if isinstance(k, str) else "", spill)
         return out
@@ -448,12 +538,28 @@ def shown_answer(value, key="", spill=None):
     return shown_path(str(value))
 
 
+def emit(result, spill=None, indent=2):
+    """The last step of every call: the answer through the sanitiser (shown_answer), then through the backstop (final_check). A field
+    the backstop withholds, here or in a table or list file written before it, is counted in `withheld_by_final_check`, named in
+    `problems`, and makes a complete answer partial: it is a fault of this tool, never of the file."""
+    answer = final_check(shown_answer(result, "", spill), safe_made)
+    if FINAL["fields"]:
+        note = ("the final check withheld %d field(s) the sanitiser had let through: each is given by its length; a fault of this tool, "
+                "not of the file" % FINAL["fields"])
+        answer["withheld_by_final_check"] = FINAL["fields"]
+        if isinstance(answer.get("problems"), list):
+            answer["problems"].append(note)
+        if answer.get("status") == "complete":
+            answer["status"], answer["status_basis"] = "partial", note
+    print(json.dumps(answer, indent=indent))
+
+
 def fail(message, **extra):
     status = extra.pop("status", "failed")
     answer = {"error": message, "status": status, "tool": TOOL, **extra}
     if VALUES[0] is not None:
         answer["secret_values"] = VALUES[0].summary()
-    print(json.dumps(shown_answer(answer)))
+    emit(answer, None, None)
     raise SystemExit(1)
 
 
@@ -528,7 +634,7 @@ class LosslessPage:
 
     def _write(self, row):
         # A row in the file is withheld exactly as the same row is in the answer: the file is read by the same agent.
-        self._out.write(json.dumps(shown_answer(row), default=str))
+        self._out.write(json.dumps(final_check(shown_answer(row), safe_made)))
         self._out.write("\n")
 
     def add(self, row):
@@ -1843,8 +1949,8 @@ def main():
     head_out = {"tool": TOOL, "parser": PARSER, "path": shown, "bytes": size}
     spill = Spill(ctx, max(cfg["limit"], SPILL_FLOOR))
     if stop is not None:
-        print(json.dumps(shown_answer({**head_out, **body, "status": stop.status, "status_basis": stop.message, "error": stop.message, "problems": ctx.problems,
-                                       "limits_hit": ctx.limits, "withheld": COUNTS, "secret_values": values.summary(), "note": NOTE}, "", spill), indent=2))
+        emit({**head_out, **body, "status": stop.status, "status_basis": stop.message, "error": stop.message, "problems": ctx.problems,
+                                       "limits_hit": ctx.limits, "withheld": COUNTS, "secret_values": values.summary(), "note": NOTE}, spill)
         raise SystemExit(1)
     status = "partial" if (ctx.problems or ctx.limits) else "complete"
     basis = ("every directory this tool reads and the file declares was read in full" if status == "complete" else
@@ -1863,7 +1969,7 @@ def main():
     if values.enabled or COUNTS["urls"] or COUNTS["names"] or COUNTS["text"]:
         result["withheld_note"] = ("Token-shaped text in a name, a path or a string is withheld from this answer; its length is kept. "
                                    "The whole string is in the values file when write_values was asked for in a secret_output job.")
-    print(json.dumps(shown_answer(result, "", spill), indent=2))
+    emit(result, spill)
 
 
 if __name__ == "__main__":

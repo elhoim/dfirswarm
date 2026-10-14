@@ -215,6 +215,20 @@ test("doc_structure, pe_directories and the capa-floss recipe carry one linear-s
   }
 });
 
+test("doc_structure, pe_directories and the capa-floss recipe carry one ONE WAY OUT block (the sanitiser and the backstop), after the linear-spans block", async () => {
+  const blocks = await Promise.all([DOC_STRUCTURE, PE_DIRECTORIES, CAPA_FLOSS].map((p) => block(p, "ONE WAY OUT")));
+  for (const other of blocks.slice(1)) assert.equal(other, blocks[0]);
+  assert.match(blocks[0]!, /^def shown_path\(text\):$/m);
+  assert.match(blocks[0]!, /^def final_check\(value, safe=None, key=""\):$/m);
+  for (const path of [DOC_STRUCTURE, PE_DIRECTORIES, CAPA_FLOSS]) {
+    const text = await readFile(path, "utf8");
+    assert.ok(text.indexOf("# END SHARED LINEAR SPANS") < text.indexOf("# BEGIN SHARED ONE WAY OUT"), `${path}: the one-way-out block follows the linear block`);
+    // one definition of each: no second sanitiser elsewhere in the file
+    assert.equal(text.match(/^def shown_path\(/gm)?.length, 1, `${path}: one shown_path`);
+    assert.equal(text.match(/^def final_check\(/gm)?.length, 1, `${path}: one final_check`);
+  }
+});
+
 test("the timeouts the pack sets itself are below the manifest's and the recipe's own limits", async () => {
   const fuzzy = await readFile(join(TOOLS, "fuzzy_hash", "run.py"), "utf8");
   const total = Number(/^TOTAL_BUDGET = (\d+)/m.exec(fuzzy)![1]);

@@ -365,28 +365,107 @@ def in_job():
 VALUES = [None]    # the values file of this call, once it exists: an answer that fails after it was created names it
 
 
+# BEGIN SHARED ONE WAY OUT
+# The same text is in doc_structure, pe_directories and the capa-floss recipe (tests/pack-re-process.test.ts holds the copies equal).
+# Two steps stand between a string out of a file and any byte the tool writes. shown_path is the sanitiser: it withholds every shape
+# below in the WHOLE text first (a token joined by `/`, such as the AWS secret key shape, and a user-info whose `//` or host a split
+# would remove, are only seen whole), then component by component (a path is not one token). final_check is the backstop: every key
+# and every value of what the tool is about to print or write is tested again with the same rules, and one that the sanitiser would
+# still change (a string that did not pass through it, or a number long enough to be a key) is replaced by its length, counted, and
+# the answer is partial. A field the backstop withholds is a fault of the tool, never of the file: the count says how many.
 _CLEAN = set()                      # short strings known to hold nothing to withhold: tested once (a table repeats its keys and kinds)
 # A mailto: address has no user-info (RFC 6068: an address is local-part@domain), so the shared block keeps `mailto:name:secret@host`
 # as an address; a ':' in the local part is a name:password pair placed there, and what follows the ':' is withheld here.
-MAILTO_SECRET = re.compile(r"(mailto:[^:@?/\s]*):([^@?\s]*)(?=@)", re.I)
+MAILTO_SECRET = re.compile(r"(mailto:[^:@?/\s]*):([^@?\s<>]*)(?=@)", re.I)
+# `name:secret@` wherever it stands, with or without a host after the `@` (a name cut at a declared length ends right there): the
+# shared block's bare rule wants a host, and its URL rule wants the `//` a path split removes.
+CUT_USERINFO = re.compile(r"(?<![\w.%+-])(?!mailto:)[\w.%+-]{1,64}:[^\s/@:<>]{1,128}(?=@)", re.I)
+# The value of a secret-named key of a connection string or a query (`Password=...;`, `AccountKey=...`).
+KEYVALUE_SECRET = re.compile(r"((?:password|passwd|pwd|secret|client[_-]?secret|token|api[_-]?key|access[_-]?key|account[_-]?key|shared[_-]?access[_-]?key)"
+                             r"[ \t]*=[ \t]*\"?)([^;\s&\"'<>,]{1,512})", re.I)
 # The head of a token whose own prefix says what it is, too short for the shared block's patterns (a name cut by a declared length, a
-# string read from the middle of a field): the prefix and four characters more are a piece of a token, and are withheld.
-TOKEN_HEAD = re.compile(r"(?<![A-Za-z0-9])(?:(?:AKIA|ASIA)[0-9A-Z]{4,}|gh[pousr]_[A-Za-z0-9]{4,}|github_pat_[A-Za-z0-9_]{4,}|xox[abeprs]-[A-Za-z0-9-]{4,}|sk-[A-Za-z0-9_-]{12,})")
+# string read from the middle of a field): the prefix and four characters more are a piece of a token, wherever it stands (a letter
+# before it does not make it a word: `XAKIA...` is a key id with a letter in front). `sk-` alone is common inside hyphenated words
+# (`desk-`, `risk-`, `task-`), so its head needs a capital or a digit in its first twelve characters, as a random key has.
+TOKEN_HEAD = re.compile(r"(?:AKIA|ASIA)[0-9A-Z]{4,}|gh[pousr]_[A-Za-z0-9]{4,}|github_pat_[A-Za-z0-9_]{4,}|xox[abeprs]-[A-Za-z0-9-]{4,}"
+                        r"|sk-(?=[A-Za-z0-9_-]{0,11}[0-9A-Z])[A-Za-z0-9_-]{12,}|eyJ[A-Za-z0-9_-]{6,}")
+LONG_NUMBER = 10 ** 31              # a number of 32 digits or more is printed as its size: the same digits as a string are withheld (32 hex)
+
+
+def _shown_pass(out):
+    if ":" in out:
+        out = MAILTO_SECRET.sub(lambda m: m.group(1) + ":" + _withheld("userinfo", len(m.group(2)), "urls"), out)
+    if "@" in out:
+        out = CUT_USERINFO.sub(lambda m: _withheld("userinfo", len(m.group()), "urls"), out)
+    if "=" in out:
+        out = KEYVALUE_SECRET.sub(lambda m: m.group(1) + _withheld("", len(m.group(2)), "text"), out)
+    out = scrub(out, "names")
+    if "/" in out:
+        out = "/".join(scrub(part, "names") for part in out.split("/"))
+    return TOKEN_HEAD.sub(lambda m: _withheld("token-shaped text", len(m.group()), "names"), out)
 
 
 def shown_path(text):
-    """A path as it may be printed: each component with anything token-shaped, or with user-info, withheld. A path is
-    tested component by component, as an OPC part name or a file name is a path and not one token."""
+    """A string as it may be printed: user-info, a secret-named value, every token-shaped run of the whole text, of each `/`
+    component, and every token head, withheld. A pass that withheld something is run again on its own result (a marker it wrote can
+    leave a new edge in front of a user-info), up to four times, so that the result is a fixed point: shown_path of it is itself, which
+    is what final_check tests."""
     if not isinstance(text, str):
         return text
     if text in _CLEAN:
         return text
-    if "ailto:" in text or "AILTO:" in text:
-        text = MAILTO_SECRET.sub(lambda m: m.group(1) + ":" + _withheld("userinfo", len(m.group(2)), "urls"), text)
-    out = "/".join(TOKEN_HEAD.sub(lambda m: _withheld("token-shaped text", len(m.group()), "names"), scrub(part, "names")) for part in text.split("/"))
-    if out == text and len(text) <= 256 and len(_CLEAN) < 200000:
-        _CLEAN.add(text)
+    out = _shown_pass(text)
+    passes = 1
+    while out != text and passes < 4:
+        text, out = out, _shown_pass(out)
+        passes += 1
+    if passes == 1 and len(out) <= 256 and len(_CLEAN) < 200000:
+        _CLEAN.add(out)
     return out
+
+
+def shown_number(value):
+    if isinstance(value, int) and not isinstance(value, bool) and abs(value) >= LONG_NUMBER:
+        return "<a number of %d bits, withheld>" % value.bit_length()
+    return value
+
+
+FINAL = {"fields": 0}
+
+
+def _final_withheld(what):
+    FINAL["fields"] += 1
+    return "<withheld by the final check: %s>" % what
+
+
+def final_check(value, safe=None, key=""):
+    """The backstop. `value` is what is about to be written (after the sanitiser); `safe(key, text)` names the strings the tool made
+    itself and registered (a file's path, a class id). Every other string, key or value, is withheld whole when shown_path would still
+    change it; a number of 32 digits or more and any value of a type JSON does not carry are withheld too. Returns the value to write."""
+    if isinstance(value, str):
+        if (safe is not None and safe(key, value)) or shown_path(value) == value:
+            return value
+        return _final_withheld("%d characters" % len(value))
+    if isinstance(value, bool) or value is None or isinstance(value, float):
+        return value
+    if isinstance(value, int):
+        return value if abs(value) < LONG_NUMBER else _final_withheld("a number of %d bits" % value.bit_length())
+    if isinstance(value, dict):
+        out = {}
+        for k, v in value.items():
+            name = k if isinstance(k, str) else str(k)
+            if shown_path(name) != name:
+                name = _final_withheld("a key of %d characters" % len(name))
+            base, n = name, 1
+            while name in out:
+                n += 1
+                name = "%s #%d" % (base, n)
+            out[name] = final_check(v, safe, k if isinstance(k, str) else "")
+        return out
+    if isinstance(value, (list, tuple)):
+        return [final_check(v, safe) for v in value]
+    return _final_withheld("a value of type %s" % type(value).__name__)
+# END SHARED ONE WAY OUT
 
 
 def long_text(text, what="text"):
@@ -415,6 +494,11 @@ MADE = set()
 def made(text):
     MADE.add(text)
     return text
+
+
+def safe_made(key, text):
+    """What final_check lets through unchanged: a string the tool made and registered, under one of SAFE_KEYS."""
+    return key in SAFE_KEYS and text in MADE
 
 
 class Spill:
@@ -450,19 +534,25 @@ def shown_answer(value, key="", spill=None):
         if key in SAFE_KEYS and value in MADE:
             return value
         return shown_path(value)
-    if isinstance(value, bool) or value is None or isinstance(value, (int, float)):
+    if isinstance(value, bool) or value is None or isinstance(value, float):
         return value
+    if isinstance(value, int):
+        return shown_number(value)
     if isinstance(value, dict):
         out = {}
-        for k, v in value.items():
-            name = base = shown_key(k)
-            n = 1
+
+        def free(base):
+            name, n = base, 1
             while name in out:
                 n += 1
                 name = "%s #%d" % (base, n)
+            return name
+        for k, v in value.items():
+            name = free(shown_key(k))
             if spill is not None and isinstance(v, (list, tuple)) and len(v) > spill.at:
                 out[name] = [shown_answer(x, "", spill) for x in v[:spill.at]]
-                out[name + "_not_shown"] = spill.write(name, list(v))
+                # the file named beside the list takes a key no other key holds: a key of the file spelled `<key>_not_shown` is kept apart
+                out[free(name + "_not_shown")] = spill.write(name, list(v))
             else:
                 out[name] = shown_answer(v, k if isinstance(k, str) else "", spill)
         return out
@@ -473,12 +563,28 @@ def shown_answer(value, key="", spill=None):
     return shown_path(str(value))
 
 
+def emit(result, spill=None, indent=2):
+    """The last step of every call: the answer through the sanitiser (shown_answer), then through the backstop (final_check). A field
+    the backstop withholds, here or in a table or list file written before it, is counted in `withheld_by_final_check`, named in
+    `problems`, and makes a complete answer partial: it is a fault of this tool, never of the file."""
+    answer = final_check(shown_answer(result, "", spill), safe_made)
+    if FINAL["fields"]:
+        note = ("the final check withheld %d field(s) the sanitiser had let through: each is given by its length; a fault of this tool, "
+                "not of the file" % FINAL["fields"])
+        answer["withheld_by_final_check"] = FINAL["fields"]
+        if isinstance(answer.get("problems"), list):
+            answer["problems"].append(note)
+        if answer.get("status") == "complete":
+            answer["status"], answer["status_basis"] = "partial", note
+    print(json.dumps(answer, indent=indent))
+
+
 def fail(message, **extra):
     status = extra.pop("status", "failed")
     answer = {"error": message, "status": status, "tool": TOOL, **extra}
     if VALUES[0] is not None:
         answer["secret_values"] = VALUES[0].summary()
-    print(json.dumps(shown_answer(answer)))
+    emit(answer, None, None)
     raise SystemExit(1)
 
 
@@ -553,7 +659,7 @@ class LosslessPage:
 
     def _write(self, row):
         # A row in the file is withheld exactly as the same row is in the answer: the file is read by the same agent.
-        self._out.write(json.dumps(shown_answer(row), default=str))
+        self._out.write(json.dumps(final_check(shown_answer(row), safe_made)))
         self._out.write("\n")
 
     def add(self, row):
@@ -886,6 +992,47 @@ def text_of(value, ctx=None, kind="text"):
     if len(text) > SHOWN_TARGET:
         return long_text(text, "a string")
     return scrub(cell(text), kind)
+
+
+def key_of(value):
+    """A string out of a document used as a key of the answer (a /Type, a filter chain, a crypt filter or an annotation subtype that
+    is counted): as text_of, and a `<` written \\x3c, so that no text of the file reads as a marker the tool writes (a withheld
+    string, or a key kept apart with ' #2')."""
+    if isinstance(value, LongName):
+        return str(value)
+    text = value if isinstance(value, str) else str(value)
+    if len(text) > SHOWN_TARGET:
+        return long_text(text, "a key")
+    return shown_path(scrub(cell(text).replace("<", "\\x3c"), "names"))
+
+
+class KeyedCounts:
+    """Counts keyed by a string out of the file as the answer shows it (key_of): two different strings that are withheld to one text are
+    two keys, the second with ' #2', so that no count of one name is added to another's."""
+
+    def __init__(self):
+        self.keys, self.counts = {}, {}
+
+    def key(self, raw):
+        k = self.keys.get(raw)
+        if k is None:
+            base = k = key_of(raw)
+            n = 1
+            while k in self.counts:
+                n += 1
+                k = "%s #%d" % (base, n)
+            self.keys[raw] = k
+            self.counts[k] = 0
+        return k
+
+    def add(self, raw):
+        self.counts[self.key(raw)] += 1
+
+    def __contains__(self, raw):
+        return raw in self.keys
+
+    def __len__(self):
+        return len(self.counts)
 
 
 class Ctx:
@@ -2413,6 +2560,11 @@ class Name(str):
     __slots__ = ()
 
 
+class LongName(Name):
+    """A name longer than SHOWN_TARGET, which the lexer keeps as its length and offset: a marker the tool wrote, not text of the file."""
+    __slots__ = ()
+
+
 class PStr(bytes):
     __slots__ = ()
 
@@ -2531,7 +2683,7 @@ class Lexer:
             if length > SHOWN_TARGET:
                 # A name that long is no name a reader defines (ISO 32000-1 Annex C gives 127 bytes as an implementation limit): it is
                 # kept as its length and offset, so that no withholding or comparison ever walks it.
-                name = Name("<a name of %d bytes at offset %d>" % (length, self.pos))
+                name = LongName("<a name of %d bytes at offset %d>" % (length, self.pos))
             else:
                 name = Name(unescape_name(buf[self.pos + 1:end]))
             self.pos = end
@@ -3399,13 +3551,13 @@ def pdf_encryption(pdf, ctx):
         out["encrypt_metadata"] = d["EncryptMetadata"]
     cf, _ = pdf.deref(d.get("CF"))
     if isinstance(cf, dict):
-        filters = {}
+        filters, names = {}, KeyedCounts()
         if len(cf) > 20:
             ctx.limit_hit("the encryption dictionary's /CF names %d crypt filters: the first 20 are listed" % len(cf))
         for name, f in list(cf.items())[:20]:
             f, _n = pdf.deref(f)
             if isinstance(f, dict):
-                filters[name] = {"cfm": text_of(str(f.get("CFM")), None, "names") if isinstance(f.get("CFM"), Name) else None,
+                filters[names.key(name)] = {"cfm": text_of(str(f.get("CFM")), None, "names") if isinstance(f.get("CFM"), Name) else None,
                                                          "length": f.get("Length") if isinstance(f.get("Length"), int) else None,
                                                          "auth_event": text_of(str(f.get("AuthEvent")), None, "names") if isinstance(f.get("AuthEvent"), Name) else None}
         out["crypt_filters"] = filters
@@ -3583,7 +3735,7 @@ def _probe_pdf(blob, ctx, extractor, out):
         outside.update({n: ("freed", scanned[n]) for n in freed})
     # The census: each indexed object's dictionary, never its stream.
     objects = ctx.page("objects")
-    types, filters_seen, streams = {}, {}, {"count": 0, "declared_bytes": 0, "length_inconsistent": 0, "undecodable_filter": 0}
+    types, filters_seen, streams = KeyedCounts(), KeyedCounts(), {"count": 0, "declared_bytes": 0, "length_inconsistent": 0, "undecodable_filter": 0}
     interesting = {}
     embedded = []
     compressed_total = sum(1 for e in pdf.entries.values() if e[0] == 2)
@@ -3627,8 +3779,7 @@ def _probe_pdf(blob, ctx, extractor, out):
                 t = v.get("Type")
                 if isinstance(t, Name):
                     row["type"] = text_of(str(t), None, "names")
-                    # keyed by the name itself: shown_answer withholds a key as it prints it, and keeps two that withhold to one text apart
-                    types[str(t)] = types.get(str(t), 0) + 1
+                    types.add(t)
                 st = v.get("Subtype")
                 if isinstance(st, Name):
                     row["subtype"] = text_of(str(st), None, "names")
@@ -3643,7 +3794,9 @@ def _probe_pdf(blob, ctx, extractor, out):
                 row["stream"] = {"declared_length": info["declared"], "measured_length": info["measured"], "length_consistent": info["consistent"], "filters": names}
                 key = "+".join(chain) if chain else "none"
                 if key in filters_seen or len(filters_seen) < 100:
-                    filters_seen[key] = filters_seen.get(key, 0) + 1
+                    filters_seen.add(key)
+                else:
+                    streams["in_chains_past_the_first_100"] = streams.get("in_chains_past_the_first_100", 0) + 1
                 if not info["consistent"]:
                     streams["length_inconsistent"] += 1
                 if any(SUPPORTED_FILTERS.get(n) is None and n != "Crypt" for n in chain):
@@ -3678,8 +3831,11 @@ def _probe_pdf(blob, ctx, extractor, out):
                      "objects_unreadable": unreadable, "objects_not_read_at_a_limit": len(pdf.not_read_at_limit), "complete": not stop_census and not pdf.not_read_at_limit}
     if stop_census:
         ctx.limit_hit("the object census stopped early: the counts and the actions found are lower bounds")
-    out["streams"] = {**streams, "by_filter_chain": filters_seen}
-    out["object_types"] = dict(sorted(types.items(), key=lambda kv: -kv[1])[:50])
+    out["streams"] = {**streams, "by_filter_chain": filters_seen.counts}
+    if streams.get("in_chains_past_the_first_100"):
+        ctx.limit_hit("the streams use more than 100 distinct filter chains: the first 100 are counted in streams.by_filter_chain, the %d streams of the "
+                      "others in streams.in_chains_past_the_first_100; every stream's filters are in the objects table" % streams["in_chains_past_the_first_100"])
+    out["object_types"] = dict(sorted(types.counts.items(), key=lambda kv: -kv[1])[:50])
     if len(types) > 50:
         out["object_types_total"] = len(types)
         ctx.limit_hit("the objects carry %d distinct /Type names: the 50 most frequent are counted in object_types; every object's type is in the objects table" % len(types))
@@ -4027,7 +4183,7 @@ def trace_catalog(pdf, ctx, catalog, cnum, interesting, extractor, outside=None)
         # Pages
         pages, _ = pdf.deref(catalog.get("Pages"))
         leaves, declared, pseen = 0, None, set()
-        annot_types = {}
+        annot_types = KeyedCounts()
         if isinstance(pages, dict):
             declared = pages.get("Count") if isinstance(pages.get("Count"), int) else None
             stack = [(catalog.get("Pages"), 0)]
@@ -4060,15 +4216,14 @@ def trace_catalog(pdf, ctx, catalog, cnum, interesting, extractor, outside=None)
                             continue
                         st = ad.get("Subtype")
                         key = text_of(str(st), None, "names") if isinstance(st, Name) else "?"
-                        raw_key = str(st) if isinstance(st, Name) else "?"
-                        annot_types[raw_key] = annot_types.get(raw_key, 0) + 1
+                        annot_types.add(st if isinstance(st, Name) else LongName("?"))
                         if "A" in ad:
                             act(ad["A"], "Page/Annot[%s]/A" % key)
                         if "AA" in ad:
                             aa(ad["AA"], "Page/Annot[%s]" % key)
         out["pages"] = {"declared_count_in_root_pages_node": declared, "leaf_nodes_traversed": leaves,
                         "note": "the declared count is what the root node says; the traversed count is the leaves reached from it. Neither is a verified page count"}
-        out["annotation_subtypes"] = annot_types
+        out["annotation_subtypes"] = annot_types.counts
     except Over as exc:
         ctx.limit_hit(str(exc))
     # Objects that are actions or hold scripts and were not reached from the catalog.
@@ -4778,8 +4933,8 @@ def main():
     protection_items = body.pop("protection_items", None)
     spill = Spill(ctx, max(cfg["limit"], SPILL_FLOOR))
     if stop is not None:
-        print(json.dumps(shown_answer({**head_out, **body, "status": "failed", "status_basis": stop.message, "error": stop.message,
-                                       "problems": ctx.problems, "limits_hit": ctx.limits, "withheld": COUNTS, "secret_values": values.summary(), "note": NOTE}, "", spill), indent=2))
+        emit({**head_out, **body, "status": "failed", "status_basis": stop.message, "error": stop.message,
+              "problems": ctx.problems, "limits_hit": ctx.limits, "withheld": COUNTS, "secret_values": values.summary(), "note": NOTE}, spill)
         raise SystemExit(1)
     status = "partial" if (ctx.problems or ctx.limits or unread) else "complete"
     basis = ("every structure this tool reads was read in full" if status == "complete" else
@@ -4821,7 +4976,7 @@ def main():
     if values.enabled or COUNTS["urls"] or COUNTS["names"] or COUNTS["text"]:
         result["withheld_note"] = ("Credentials and token-shaped text in a URL or a name are withheld from this answer; the length is kept. "
                                    "The whole target is in the values file when write_values was asked for in a secret_output job.")
-    print(json.dumps(shown_answer(result, "", spill), indent=2))
+    emit(result, spill)
 
 
 if __name__ == "__main__":
