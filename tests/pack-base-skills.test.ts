@@ -12,7 +12,7 @@ import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { readPackIndex, readPackIndexes, renderSkillsSection, SKILL_BUDGET } from "../extensions/skills.ts";
+import { estimateTokens, readPackIndex, readPackIndexes, renderSkillsSection, SKILL_BUDGET } from "../extensions/skills.ts";
 import { ROOT, runPy, runPySnippet } from "./tool-library-harness.ts";
 
 const PACK = join(ROOT, "packs", "computer-forensics-base");
@@ -99,6 +99,22 @@ test("every skill is a leaf within the budget, opens with Use when ... Not for .
   assert.ok(parsed.tokens <= SKILL_BUDGET.pack, `the pack index is ${Math.round(parsed.tokens)} tokens of entries`);
 });
 
+test("the base pack index is at most 1,000 tokens counted as the harness counts it: the entry lines of INDEX.md, not the whole file", async () => {
+  // Past 1,000 the harness shows the base pack by its router alone in every run, the base pack alone included. The budget is on the
+  // entries (extensions/skills.ts readPackIndex): the file's header lines (the title, the fetch sentence, the Router: line) are not
+  // in it, so the whole file is larger than the count and is not the measure. This test holds the two measures consistent: the
+  // harness's entries are exactly the file's "- `id`" lines, each counted as bytes / 4.245 rounded up, and their sum is the pack's count.
+  const text = await readFile(join(SKILLS, "INDEX.md"), "utf8");
+  const lines = text.split("\n").map((l) => l.trim()).filter((l) => /^- `[^`]+`/.test(l));
+  const parsed = await readPackIndex(PACK);
+  assert.deepEqual(parsed.entries.map((e) => e.line), lines, "the harness reads every entry line of the file, and no other");
+  const sum = lines.reduce((n, l) => n + estimateTokens(l), 0);
+  assert.equal(sum, parsed.tokens, "the entries, counted line by line, are the harness's count");
+  assert.ok(lines.every((l) => estimateTokens(l) === Math.ceil(TOKENS(l))), "each line is its bytes / 4.245, rounded up");
+  assert.ok(parsed.tokens <= SKILL_BUDGET.pack, `the base pack index is ${parsed.tokens} tokens of entries, over ${SKILL_BUDGET.pack}`);
+  assert.ok(TOKENS(text) > parsed.tokens, "the whole file, header included, is more than its entries");
+});
+
 test("the new skills say what to record, and the skills whose tools can surface secrets have a Sensitive output part", async () => {
   const skills = await load(SKILLS);
   for (const id of NEW) {
@@ -172,13 +188,14 @@ test("every second-level leaf is pointed to by a leaf that says when to open it,
     const p = skills.get(parent)!;
     const at = p.body.indexOf(`\`${child}\``);
     assert.ok(at >= 0, `${parent} points to ${child}`);
-    assert.match(p.body.slice(Math.max(0, at - 160), at + 40), /\bNot for\b|[Oo]nly if|\bsays when\b/, `${parent} says when to open ${child}`);
+    assert.match(p.body.slice(Math.max(0, at - 160), at + 40), /\bNot for\b|[Oo]nly if|\bsays when\b|\bBefore you\b/, `${parent} says when to open ${child}`);
   }
   // Pointers: who sends the agent to the new leaves.
   const pointers: Array<[string, string]> = [
     ["evidence/verify", "evidence/provenance"], ["evidence/catalog", "evidence/coverage"], ["filesystem/carving", "evidence/coverage"],
     ["timeline/build", "timeline/clocks"], ["timeline/super-scope", "timeline/clocks"], ["data/sqlite", "timeline/clocks"],
-    ["evidence/imaging", "filesystem/layers"], ["filesystem/carving", "filesystem/layers"], ["filesystem/extract", "filesystem/semantics"],
+    ["evidence/imaging", "filesystem/layers"], ["evidence/imaging", "filesystem/layers-mapping"], ["timeline/build", "timeline/clocks-drift"],
+    ["filesystem/carving", "filesystem/layers"], ["filesystem/extract", "filesystem/semantics"],
     ["filesystem/encrypted-metadata", "evidence/scope"], ["data/documents-media", "evidence/scope"], ["evidence/coverage", "evidence/tool-validation"],
     ["reporting/citations", "evidence/coverage"],
   ];
@@ -206,7 +223,8 @@ const TAUGHT: Array<[string, string, string[]]> = [
   ["tools/ioc_scan/run.py", "filesystem/scanners", ["write_values", "all_results"]],
   ["tools/feature_scan/run.py", "filesystem/scanners", ["out_dir_contains_secret_values", "report.xml"]],
   ["tools/archive_extract/run.py", "evidence/provenance", ["SHORT_MEMBER"]],
-  ["tools/sqlite_query/run.py", "data/sqlite-secrets", ["write_values", "rowid_from", "rowid_to", "locators_file", "sqlite-query-values.jsonl"]],
+  ["tools/sqlite_query/run.py", "data/sqlite-secrets", ["write_values", "rowid_from", "rowid_to", "locators_file", "sqlite-query-values.jsonl", "table_kind",
+    "rowid_is_a_value", "virtual_table_unsupported", "cells_not_exported", "value_too_large", "unreadable", "values_file_error", "locator"]],
 ];
 
 test("the tool fields a skill names are fields the tools write", async () => {
@@ -322,7 +340,23 @@ test("data/sqlite: on a secret table select locators only, because the inline pa
   const fallback = paragraph(secrets, "**Fallback, outside a job or without the mode.**");
   assert.match(fallback, /`limit` is 1 or more, so the inline page always carries at least one row of values/);
   assert.match(fallback, /select only locators \(`rowid`, `length\(col\)`, `typeof\(col\)`\)/);
-  assert.match(paragraph(s, "**Sensitive output.**"), /Only if you need the rows: `data\/sqlite-secrets`/);
+  // The pointer says when to read the leaf: before any query on such a table, since the inline page carries values (the review of
+  // #144 found it inverted: "Only if you need the rows" sent the agent there only when it wanted values in its context).
+  assert.match(paragraph(s, "**Sensitive output.**"), /Before you query one, read `data\/sqlite-secrets`: the inline page always holds values\./);
+  assert.doesNotMatch(s.body, /Only if you need the rows/);
+  // The example is a job with secret_output, written as the other packs write one (a job_run tool=... line has no place for the flag).
+  const example = secrets.body.split("\n").find((l) => l.includes("job_run") && l.includes("sqlite_query"))!;
+  assert.match(example, /^ {4}job_run\(tool: "sqlite_query", secret_output: true, args: \{.*"write_values": true\}\)$/);
+  const memory = await readFile(join(ROOT, "packs", "memory-forensics", "skills", "processes", "preserve-regions.md"), "utf8");
+  assert.match(memory, /job_run\(tool: "mem_fs", secret_output: true, args: \{/, "the form the memory pack uses");
+  // What the tool guarantees about a row's locator, said as the tool says it.
+  const locate = paragraph(secrets, "**What locates a row**");
+  assert.match(locate, /declared `INTEGER`: that column is the rowid, so the rowid is a value: never printed, a range refused \(`rowid_is_a_value`\)/);
+  assert.match(locate, /which ranks the key's values/);
+  assert.match(locate, /WITHOUT ROWID: `n` in primary key order, which ranks those values too/);
+  assert.match(paragraph(secrets, "**Lengths.**"), /a PIN stored as an integer has lost its leading zeros/);
+  assert.match(paragraph(secrets, "**Fallback, outside a job or without the mode.**"), /Where a column is the `INTEGER PRIMARY KEY`, `rowid` is its value: leave it out/);
+  assert.match(paragraph(secrets, "**Record.**"), /the locator \(`rowid`, or `n` where `locator` is `n`\)/);
   assert.match(s.body, /`blob_b64_head`, its first `head_bytes` \(long\)/);
   assert.doesNotMatch(s.body, /a BLOB is `blob_b64` \(its head inline when long\)/);
   assert.match(s.body, /found the same number of committed frames/);

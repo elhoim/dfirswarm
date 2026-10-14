@@ -1,7 +1,7 @@
 ---
 id: data/sqlite
 title: A SQLite database is a set of files
-when: A SQLite database to read, with or without a -wal, -shm or -journal beside it.
+when: A SQLite database, with or without its -wal, -shm or -journal.
 needs: []
 tools: [sqlite_snapshot, sqlite_query]
 requires_host: []
@@ -23,4 +23,4 @@ Use when a `.db`, `.sqlite` or an app store is the evidence. Not for another dat
 
 **Does not show.** A snapshot and a query show the rows SQLite holds. They do not recover deleted records, the freelist or unallocated pages (a non-zero `freelist_count` says free pages exist, not what they held), and a row's absence is not the event's absence. Of a database encrypted by an extension (SQLCipher) the tool shows only the first bytes and their entropy, which identify nothing.
 
-**Sensitive output.** Rows of cookie, login, token, key and message tables hold secrets and private text: run the query as a job with `secret_output: true` and cite table, `rowid` and column, never the value. Only if you need the rows: `data/sqlite-secrets`.
+**Sensitive output.** Rows of cookie, login, token, key and message tables hold secrets and private text: run the query as a job with `secret_output: true` and cite table, `rowid` and column, never the value. Before you query one, read `data/sqlite-secrets`: the inline page always holds values.

@@ -722,10 +722,18 @@ import each other), and holds to this:
   (a SQL statement, a regular expression, a name filter) must not offer it
   while the values are withheld: with text you cannot see, each call is one bit
   of every row, and a few hundred calls confirm a guess. The values-to-file
-  mode takes the table (and a position range such as a rowid range), not the
-  query (`sqlite_query` with `write_values`), or lets the expression narrow
-  only what goes into the sealed file and never what the answer counts
-  (`sqlite_freespace`'s `contains`).
+  mode takes the table, not the query (`sqlite_query` with `write_values`), or
+  lets the expression narrow only what goes into the sealed file and never what
+  the answer counts (`sqlite_freespace`'s `contains`). A position is not free of
+  the values by itself, either. A range over a key is a filter over that key
+  when the key is a value: SQLite's rowid is the value of an `INTEGER PRIMARY
+  KEY` column, so `sqlite_query` refuses a rowid range on such a table, never
+  prints its rowid and locates its rows by their position. The order rows are
+  read in can rank values: an index's order is the indexed column's, so the
+  tool reads the table itself, and a WITHOUT ROWID table (or an INTEGER PRIMARY
+  KEY table) comes in the order of its key, which the answer says. And an error
+  message can quote a value (a generated column's `json_extract` does): the
+  answer gives the error's class and the row, never the message.
 - *The manifest says SENSITIVE* and names the flag. The harness reads no
   manifest-level flag yet, and a tool cannot see whether its job was run with
   `secret_output`, so what keeps a value out of an ordinary run is the refusal
@@ -891,6 +899,14 @@ and what is sensitive, in the shortest form that keeps the content. The content
 survives; it is spread over leaves, not cut. A router is the one note of a pack
 that says which other note answers which question; it is what a run shows in the
 prompt when the pack's index is over budget.
+
+**The base pack's index is near its budget.** `computer-forensics-base` has 986
+of the 1,000 tokens a pack's index entries may have (the harness's count: each
+entry line of `skills/INDEX.md` is its bytes over 4.245, rounded up; the file's
+header lines are not counted), and `tests/pack-base-skills.test.ts` fails past
+1,000. Past it the harness shows the base pack by its router alone in every
+run, the base pack alone included. A new base entry (a dozen tokens at least)
+therefore needs a shorter `title` or `when:` elsewhere in the same change.
 
 **Findings that already exist.** Some shipped skills are over a budget. They are
 listed in `tests/skill-budgets.golden`, one line per finding: `pack kind skill

@@ -6,7 +6,7 @@ Router: `base/router`
 
 - `base/router` Base notes by question: Pick a base note when none is listed, or you cannot choose.
 - `data/documents-media` Document and image content is another evidence layer: A PDF, an Office file, an image or a media file is the evidence, or holds it.
-- `data/sqlite` A SQLite database is a set of files: A SQLite database to read, with or without a -wal, -shm or -journal beside it.
+- `data/sqlite` A SQLite database is a set of files: A SQLite database, with or without its -wal, -shm or -journal.
 - `data/sqlite-secrets` Secret tables without the values: A table holds cookies, logins, tokens or keys.
 - `evidence/ad1` An AD1 image is a collection in a container: Evidence is an FTK Imager logical image (.ad1).
 - `evidence/archives` Archives and extraction fidelity: A zip, tar, 7z or compressed file whose members you need as files.

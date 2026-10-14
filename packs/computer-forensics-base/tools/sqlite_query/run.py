@@ -26,17 +26,46 @@ of the inline page the old tool returned (CSV with a header, or the shell's
 
 VALUES TO A FILE (`write_values: true`). On a table that holds secrets (cookies, saved logins, tokens, keys, messages) an
 inline page puts values in the agent's context. In this mode no value is ever in the answer: the row values of ONE table go to
-a 0600 file under $OUT, and the answer carries locators (table, rowid, column), counts, types and lengths.
+a 0600 file under $OUT, and the answer carries locators (table, a row locator, column), counts, types and lengths.
 
   * It takes `table` (and optionally `columns`, `rowid_from`, `rowid_to`), NOT `sql`. A WHERE, LIKE, JOIN or any expression over
     a column whose values are withheld would be an oracle: one call is one bit of every row, and a few hundred calls confirm a
-    guess. The mode therefore exports whole rows, selected by position (a rowid range) and never by value; the counts it prints
-    are the table's, not a filter's.
+    guess. The mode therefore exports whole rows and takes no filter; the counts it prints are the table's (or the rowid
+    range's), not a filter's. Rows are read from the table itself (NOT INDEXED), never through an index, whose order would be
+    the order of the indexed values (a WITHOUT ROWID table is ordered by its primary key, which is its own order: SQLite reads
+    it through a covering index, NOT INDEXED or not, unless told the order).
+  * What locates a row, and what that guarantees, depends on the table (`table_kind`):
+      - rowid: an ordinary rowid table. The rowid is SQLite's row key and no column's value: SQLite assigns it (one more than the
+        largest, as a rule) unless the application set it in its INSERT, and what an application put there is the
+        application's. The rows come in rowid order, and `rowid_from`/`rowid_to` select by that key and by nothing a column
+        holds.
+      - alias: the table's one primary key column is declared INTEGER, so SQLite makes that column the rowid: the rowid IS a
+        value. It is never printed (answer, text form, locators file), no ORDER BY or WHERE names it, and a rowid range is
+        refused (`rowid_is_a_value`); rows are located by their position `n`. The rows come in the order of that key, so `n`
+        ranks its values (which row holds the smaller one), and that is all it says of them.
+      - without_rowid: no rowid; located by `n`, a rowid range refused. The rows come in primary-key order, so `n` ranks the
+        primary key's values in the same way: for such a table the order is not independent of the values.
+      - virtual: located by `n` in the order the module returns rows; the rowid (whatever the module makes it) is not printed and
+        a range is refused. A module that cannot start under the read-only authorizer (fts5 on some SQLite builds) is the named
+        state `virtual_table_unsupported`, said as JSON.
+      - shadowed: columns named rowid, oid and _rowid_ hide the rowid; located by `n`, in storage order.
+  * A cell is type:length. The length of a number is the characters of its decimal form, so it tells the number's sign and
+    order of magnitude (a PIN stored as an integer loses its leading zeros: 0123 is integer:3).
   * It follows the secret-safe output pattern of recovery_key_scan (docs/packs.md, "Secrets and sensitive output"): refused
-    outside a job (JOB_ID and OUT set) as a JSON answer, the values file created before any row is read with O_EXCL and
-    O_NOFOLLOW and mode 0600 (a second run in one job's $OUT is refused by name, never overwrites), no hash, digest or fragment
-    of a value anywhere, a printed name that is shaped like a token withheld by the shared block below (the network pack's, byte
-    for byte). The skill that sends the agent here says the job runs with `secret_output: true`.
+    outside a job (JOB_ID and OUT set) as a JSON answer before anything is opened; the values file created once the table is
+    found and its layout read, before the first row, with O_EXCL and O_NOFOLLOW and mode 0600 (a wrong table name, or a file
+    that is not SQLite, leaves nothing behind; a second export in one job's $OUT is refused by name, never overwrites); no hash,
+    digest or fragment of a value anywhere; a printed name that is shaped like a token withheld by the shared block below (the
+    network pack's, byte for byte). The skill that sends the agent here says the job runs with `secret_output: true`.
+  * Errors: sqlite's own message is never printed in this mode (a generated column's json_extract quotes the value it failed
+    on); the answer gives a fixed sentence, the error class and the row position, and the message goes to the values file
+    (the cell's line, or the end line when the export stopped). A row that cannot be read whole is read again a cell at a time: a value longer than the length limit is
+    recorded as value_too_large (its row, column, type and, where SQLite gives it without reading the value, its length), a
+    cell sqlite cannot compute as unreadable (its class here, its message in the values file), and the export goes on with
+    the rest (at most PARTS_MAX such rows; a row none of whose cells can be read stops it). A write that fails (a full disk)
+    ends the export with JSON: values_file_error, the whole lines written, complete false, exit 0; the partial file is kept,
+    mode 0600, without the end line that a whole file ends with, so a file cut short (by a kill as well) is recognisable.
+
 """
 import base64
 import collections
@@ -252,7 +281,7 @@ VALUES_MODE = [False]
 # What a values-mode answer prints about the evidence's own names (the file, the table, the columns, a message quoting them)
 # goes through the shared block's scrub, so a name shaped like a token is withheld on every channel. A digest of the file is
 # the file's identity and stays whole.
-SCRUBBED_KEYS = ("error", "stderr", "db_path", "database_opened", "table", "reason", "statement")
+SCRUBBED_KEYS = ("error", "stderr", "db_path", "database_opened", "table", "column", "reason", "statement")
 
 
 def scrub_answer(obj):
@@ -739,11 +768,35 @@ def render(rows, columns, csv_mode):
 # --- values to a file (write_values) ---------------------------------------------------------------------------
 
 VALUES_NAME = "sqlite-query-values.jsonl"
-VALUES_FORMAT = ("JSON Lines, mode 0600, one line per cell that is not NULL: finding_id, table (the real name), rowid (null when the table "
-                 "has no rowid), n (the row's position in this export, from 1), column (the real name), type, length, value "
-                 "(a BLOB is {blob_b64}, text that is not UTF-8 is {text_invalid_utf8, bytes_b64, length}); no digest of any value")
+VALUES_FORMAT = ("JSON Lines, mode 0600: one line per cell that is not NULL (finding_id, table: the real name, rowid: null unless the "
+                 "answer's locator is rowid, n: the row's position in this export from 1, column: the real name, type, length, and value: "
+                 "a BLOB is {blob_b64}, text that is not UTF-8 is {text_invalid_utf8, bytes_b64, length}; a cell that could not be "
+                 "exported has not_exported: value_too_large or unreadable instead of a value, and an unreadable one sqlite's message), "
+                 "then one last line {end: true, complete, rows_read, cells_written, stopped, sqlite_message}. A file without the end "
+                 "line was cut short (the run was killed or the disk was full). No digest of any value")
 VALUES_PARAMS = ("table", "columns", "rowid_from", "rowid_to")
 ROWID_NAMES = ("rowid", "oid", "_rowid_")
+LOCATORS_BYTES = FILE_BYTES       # the locators file stops here, and says so; the values file still has every cell's locator
+PARTS_MAX = 1000                  # rows read again a cell at a time (a value over VALUE_MAX, a cell sqlite cannot compute); past it the export stops, said
+
+# What each kind of table is located by, and in what order its rows come. A rowid range is offered only where the rowid is not the
+# value of a column the table declares.
+LOCATOR_TEXT = {
+    "rowid": "rowid: the table's own row key (it is no column's value), rows in rowid order",
+    "alias": ("n: the row's position in this export. The table's rowid is the value of its INTEGER PRIMARY KEY column, so it is not "
+              "printed; the rows come in the order of that key, so n ranks its values and says nothing more of them"),
+    "without_rowid": ("n: the row's position in this export. A WITHOUT ROWID table has no rowid and its rows come in the order of its "
+                      "primary key, so n ranks the key's values and says nothing more of them"),
+    "virtual": "n: the row's position in this export, in the order the virtual table's module returns rows; its rowid is not printed",
+    "shadowed": "n: the row's position in this export, in rowid order; every name of the rowid (rowid, oid, _rowid_) is a column of this table",
+}
+NO_RANGE = {
+    "alias": ("the table's rowid is the value of its INTEGER PRIMARY KEY column, so a rowid range would select rows by that value: "
+              "export the whole table (rows are located by n)", "rowid_is_a_value"),
+    "without_rowid": ("rowid_from and rowid_to select by rowid, and this table has none (WITHOUT ROWID): export the whole table", "no_rowid"),
+    "virtual": ("a virtual table's rowid is whatever its module makes it, possibly a value: export the whole table", "virtual_table"),
+    "shadowed": ("every name of the rowid (rowid, oid, _rowid_) is a column of this table, so no range can name it: export the whole table", "rowid_shadowed"),
+}
 
 
 def safe_name(text):
@@ -755,6 +808,16 @@ def describe(exc):
     return scrub("%s%s: %s" % (type(exc).__name__, " " + code if code else "", getattr(exc, "strerror", None) or str(exc)))
 
 
+def sqlite_class(exc):
+    """The class of a sqlite error, never its message: a message can quote a value (a generated column's json_extract does)."""
+    name = getattr(exc, "sqlite_errorname", None)
+    return "%s%s" % (type(exc).__name__, " " + name if isinstance(name, str) and re.fullmatch(r"SQLITE_[A-Z_]+", name) else "")
+
+
+def too_big(exc):
+    return getattr(exc, "sqlite_errorname", None) == "SQLITE_TOOBIG" or "too big" in str(exc)
+
+
 class SecretValuesRefused(Exception):
     pass
 
@@ -764,6 +827,8 @@ class SecretValues:
 
     The pattern of recovery_key_scan (encrypted-containers), copied: call `add` once per cell with its id, its locator and the
     value. With `enabled` false it writes nothing and `summary()` says so. `add_blob` is `add` for a BLOB written in slices.
+    A write that fails (a full disk) raises OSError to the caller, which stops the export and says so; `close` never raises: what
+    it could not do is in `error`, and the file stays as far as it was written, without its end line.
     """
 
     def __init__(self, enabled):
@@ -771,6 +836,8 @@ class SecretValues:
         self.written = 0
         self.bytes = 0
         self._fh = None
+        self.error = None
+        self.ended = False
         self.job = os.environ.get("JOB_ID") or ""
         self.out = os.environ.get("OUT") or ""
         self.path = None
@@ -778,16 +845,12 @@ class SecretValues:
         if not enabled:
             return
         if not (self.job and self.out):
-            raise SecretValuesRefused(
-                "write_values is refused outside a job: a value written here would be an ordinary "
-                "file, not a sealed secret output. Run this as job_run tool=sqlite_query with "
-                "secret_output: true, and ask again there. Nothing was written."
-            )
+            raise SecretValuesRefused(REFUSED_OUTSIDE_A_JOB)
         self.path = Path(self.out) / VALUES_NAME
         self.shown = "store/jobs/%s/out/%s" % (safe_name(self.job), VALUES_NAME)
-        # Created now, before anything is read: a file or a link already at that name is refused by name at once (O_EXCL does
-        # not follow a link, a dangling one included), instead of failing, or writing through it, after the export. With nothing
-        # to write it stays an empty file, mode 0600, and the answer says written: 0.
+        # Created once the table is known and before its first row is read: a file or a link already at that name is refused by
+        # name (O_EXCL does not follow a link, a dangling one included), instead of failing, or writing through it, after the
+        # export. With nothing to write it stays an empty file but for its end line, mode 0600, and the answer says written: 0.
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             fd = os.open(str(self.path), os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
@@ -818,12 +881,79 @@ class SecretValues:
         self.bytes += len(head) + 4 * ((len(blob) + 2) // 3) + 4
         self.written += 1
 
+    def add_missing(self, finding_id, locator, why, error=None, message=None):
+        """A cell that is in the table and not in the file, said where its value would be (with sqlite's message, which can quote
+        a value and is therefore written here only)."""
+        if not self.enabled:
+            return
+        extra = {"error_class": error, "sqlite_message": message} if error else {}
+        line = json.dumps({"finding_id": finding_id, **locator, "not_exported": why, **extra}) + "\n"
+        self._fh.write(line)
+        self.bytes += len(line)
+        self.written += 1
+
+    def end(self, record):
+        """The last line: the file is whole up to here. A file without it was cut short."""
+        if not self.enabled or self._fh is None or self.error:
+            return
+        try:
+            self._fh.write(json.dumps({"end": True, **record}) + "\n")
+            self.ended = True
+        except OSError as exc:
+            self.fail(exc)
+
+    def fail(self, exc):
+        if self.error is None:
+            self.error = describe(exc)
+        self.ended = False
+
+    def lines_on_disk(self):
+        """(whole lines in the file, whether the last of them is the end line): what reached the disk, read back after a failed
+        write, since a buffered writer takes more than a full disk keeps."""
+        try:
+            fd = os.open(str(self.path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        except OSError:
+            return None, False
+        with os.fdopen(fd, "rb") as fh:
+            lines, size, last_nl, prev_nl = 0, 0, -1, -1
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                c = chunk.count(b"\n")
+                if c:
+                    lines += c
+                    at = chunk.rfind(b"\n")
+                    prev_nl = size + chunk.rfind(b"\n", 0, at) if c >= 2 else last_nl
+                    last_nl = size + at
+                size += len(chunk)
+            if not lines:
+                return 0, False
+            fh.seek(prev_nl + 1)
+            ended = fh.read(12) == b'{"end": true'
+        return lines - (1 if ended else 0), ended
+
     def close(self):
-        if self._fh is not None:
-            self._fh.flush()
-            os.fsync(self._fh.fileno())
-            self._fh.close()
-            self._fh = None
+        if self._fh is None:
+            return
+        fh, self._fh = self._fh, None
+        try:
+            fh.flush()
+            os.fsync(fh.fileno())
+        except OSError as exc:
+            self.fail(exc)
+        try:
+            fh.close()
+        except OSError as exc:
+            self.fail(exc)
+            try:
+                os.close(fh.fileno())
+            except (OSError, ValueError):
+                pass
+        if self.error:
+            whole, ended = self.lines_on_disk()
+            self.written = whole if whole is not None else self.written
+            self.ended = ended
+            self.error = ("the values file could not be written to the end (%s); it is kept, mode 0600, with the %s whole cell line(s) that "
+                          "reached the disk, may end in a part of a line, and %s" % (
+                              self.error, "?" if whole is None else whole, "has its end line" if ended else "has no end line"))
 
     def summary(self):
         return {
@@ -832,7 +962,13 @@ class SecretValues:
             "values_file": self.shown if self.enabled else None,
             "contains_secret_values": self.written > 0,
             "format": VALUES_FORMAT if self.enabled else None,
+            "end_line_written": self.ended,
         }
+
+
+REFUSED_OUTSIDE_A_JOB = ("write_values is refused outside a job: a value written here would be an ordinary file, not a sealed secret "
+                         "output. Run it as job_run(tool: \"sqlite_query\", secret_output: true, args: {...}) and ask again there. "
+                         "Nothing was written.")
 
 
 def values_fail(message, **extra):
@@ -844,9 +980,11 @@ def q_ident(name):
 
 
 def value_kind(value):
-    """(type, length) of a cell: the length is bytes for a BLOB and for text (as UTF-8), digits for a number."""
+    """(type, length) of a cell: the length is bytes for a BLOB and for text (as UTF-8), characters of its decimal form for a number."""
     if value is None:
         return "null", None
+    if isinstance(value, NotExported):
+        return value.kind, value.length
     if isinstance(value, bytes):
         return "blob", len(value)
     if isinstance(value, _Text):
@@ -866,15 +1004,39 @@ def value_json(value):
     return value
 
 
+class NotExported:
+    """A cell whose value is not in the values file: `value_too_large` (longer than VALUE_MAX: its type, and its length when SQLite
+    gives it without reading the value) or `unreadable` (sqlite could not compute it: a generated column's error)."""
+
+    def __init__(self, why, kind, length=None, error=None, message=None):
+        self.why, self.kind, self.length, self.error, self.message = why, kind, length, error, message
+
+
+def stops_the_export(exc):
+    """An error no row-by-row reading gets past: the time budget, the authorizer."""
+    text = str(exc)
+    return "interrupted" in text or "not authorized" in text
+
+
 def table_layout(conn, wanted, columns):
-    """(table, [(column, declared type)], rowid column name or None) for the table `wanted`, or a refusal as JSON."""
-    names = [str(r[0]) for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")]
+    """(table, [(column, declared type)], kind, extra) for the table `wanted`, or a refusal as JSON. `kind` is how a row is located:
+    rowid (an ordinary rowid table), alias (its rowid is an INTEGER PRIMARY KEY column's value), without_rowid, virtual, or
+    shadowed (columns named rowid, oid and _rowid_ hide the rowid). `extra` is the name that reaches the rowid (rowid), the
+    primary key's columns in key order (without_rowid), or None."""
+    found = [(str(r[0]), r[1] if isinstance(r[1], str) else "") for r in conn.execute("SELECT name, sql FROM sqlite_master WHERE type = 'table' ORDER BY name")]
+    names = [n for n, _s in found]
     hits = [n for n in names if n == wanted] or [n for n in names if n.lower() == wanted.lower()]
     if len(hits) != 1:
         values_fail("the database has no table of that name (the mode reads one table; a view is not one)" if not hits
                     else "more than one table matches that name without regard to case: give it exactly", table=wanted, tables=len(names))
     table = hits[0]
-    info = [r for r in conn.execute("PRAGMA table_xinfo(%s)" % q_ident(table)) if r[6] in (0, 2, 3)]
+    virtual = bool(re.match(r"\s*create\s+virtual\s+table\b", dict(found)[table], re.I))
+    try:
+        info = [r for r in conn.execute("PRAGMA table_xinfo(%s)" % q_ident(table)) if r[6] in (0, 2, 3)]
+    except sqlite3.Error as exc:
+        if virtual:
+            raise VirtualTableUnsupported(exc)
+        raise
     have = {str(r[1]): str(r[2] or "") for r in info}
     chosen = columns if columns is not None else [str(r[1]) for r in info]
     if not chosen:
@@ -882,21 +1044,33 @@ def table_layout(conn, wanted, columns):
     for c in chosen:
         if c not in have:
             values_fail("the table has no column of that name (names are case-sensitive here)", table=table, column=c)
+    if virtual:
+        return table, [(c, have[c]) for c in chosen], "virtual", None
     lowered = {str(r[1]).lower() for r in info}
-    rowid_name = None
-    for cand in ROWID_NAMES:
-        if cand in lowered:
-            continue
-        try:
-            conn.execute("SELECT %s FROM %s LIMIT 0" % (cand, q_ident(table)))
-        except sqlite3.Error:
-            break  # WITHOUT ROWID: none of the names will work
-        rowid_name = cand
-        break
-    return table, [(c, have[c]) for c in chosen], rowid_name
+    rowid_name = next((cand for cand in ROWID_NAMES if cand not in lowered), None)
+    if rowid_name is None:
+        return table, [(c, have[c]) for c in chosen], "shadowed", None
+    try:
+        conn.execute("SELECT %s FROM %s LIMIT 0" % (rowid_name, q_ident(table)))
+    except sqlite3.Error:
+        # The primary key's columns, in key order: the rows are read in that order, the table's own (SQLite reads a WITHOUT
+        # ROWID table through a covering index, whose order is another column's values, even when told NOT INDEXED).
+        key = [str(r[1]) for r in sorted((r for r in info if r[5]), key=lambda r: r[5])]
+        return table, [(c, have[c]) for c in chosen], "without_rowid", key
+    # SQLite makes a column the rowid itself when it is the table's one primary key column and its declared type is exactly
+    # INTEGER (any case). Its value is then the rowid, so the rowid is a value of the table. (`INTEGER PRIMARY KEY DESC` is the
+    # one form that is not an alias; it is treated as one here, which only hides a rowid that could have been shown.)
+    pk = [r for r in info if r[5]]
+    if len(pk) == 1 and str(pk[0][2] or "").strip().upper() == "INTEGER":
+        return table, [(c, have[c]) for c in chosen], "alias", None
+    return table, [(c, have[c]) for c in chosen], "rowid", rowid_name
 
 
-def values_mode(obj, values, given, db, size, side, status, snap, limit, budget, csv_mode):
+class VirtualTableUnsupported(Exception):
+    pass
+
+
+def values_mode(obj, given, db, size, side, status, snap, limit, budget, csv_mode):
     wanted = obj.get("table")
     if not isinstance(wanted, str) or not wanted:
         values_fail("write_values needs table: the one table whose values go to the file")
@@ -909,7 +1083,7 @@ def values_mode(obj, values, given, db, size, side, status, snap, limit, budget,
         if key in obj:
             v = obj[key]
             if not isinstance(v, int) or isinstance(v, bool) or not -2 ** 63 <= v < 2 ** 63:
-                values_fail("%s is a whole number" % key, **{key: v})
+                values_fail("%s is a whole number from -2**63 to 2**63-1" % key)
             bounds[key] = v
     for name, text in [("table", wanted)] + [("columns", c) for c in columns or []]:
         if "\0" in text:
@@ -923,7 +1097,7 @@ def values_mode(obj, values, given, db, size, side, status, snap, limit, budget,
     try:
         conn = sqlite3.connect(uri, uri=True)
     except sqlite3.Error as exc:
-        values_fail("cannot open the database: %s" % exc, db_path=db)
+        values_fail("cannot open the database (%s)" % sqlite_class(exc), db_path=db)
     conn.text_factory = text_factory
     value_limit = "%d bytes" % VALUE_MAX
     if hasattr(conn, "setlimit") and hasattr(sqlite3, "SQLITE_LIMIT_LENGTH"):
@@ -933,15 +1107,30 @@ def values_mode(obj, values, given, db, size, side, status, snap, limit, budget,
     conn.set_authorizer(authorizer)
     conn.set_progress_handler(lambda: 1 if time.monotonic() - started > budget else 0, 20000)
     try:
-        table, cols, rowid_name = table_layout(conn, wanted, columns)
+        table, cols, kind, extra = table_layout(conn, wanted, columns)
+        rowid_name = extra if kind == "rowid" else None
+    except VirtualTableUnsupported as exc:
+        values_fail("the table is a virtual table whose module could not be started under the read-only authorizer (%s): this "
+                    "SQLite cannot export it here; its shadow tables (<name>_content, <name>_data, ...) are ordinary tables that can be"
+                    % sqlite_class(exc.args[0]), table=wanted, reason="virtual_table_unsupported")
     except sqlite3.Error as exc:
-        values_fail("the table's layout cannot be read: %s" % exc, table=wanted)
-    if bounds and rowid_name is None:
-        values_fail("rowid_from and rowid_to select by rowid, and this table has none (WITHOUT ROWID): export the whole table", table=table)
-    sel = ([rowid_name] if rowid_name else []) + [q_ident(c) for c, _t in cols]
-    stmt = "SELECT %s FROM %s" % (", ".join(sel), q_ident(table))
-    params = []
-    if rowid_name:
+        values_fail("the table's layout cannot be read (%s)" % sqlite_class(exc), table=wanted)
+    if bounds and kind != "rowid":
+        why, reason = NO_RANGE[kind]
+        values_fail(why, table=table, reason=reason)
+    # The values file is made now: the table exists and its layout is read, and no row has been. A wrong name or a file that is
+    # not SQLite leaves nothing behind, and the same job can ask again.
+    try:
+        values = SecretValues(True)
+    except SecretValuesRefused as exc:
+        say({"ok": False, "error": str(exc), "tool": TOOL, "write_values": "refused", "written": False}, 1)
+    # NOT INDEXED: the rows are read from the table itself, never through an index, whose order would be the order of the indexed
+    # values. ORDER BY rowid, and a WHERE on it, only where the rowid is no column's value; a WITHOUT ROWID table is ordered by its
+    # primary key, its own order, since SQLite would otherwise read it through a covering index.
+    sel = ([rowid_name] if kind == "rowid" else []) + [q_ident(c) for c, _t in cols]
+    source = "%s%s" % (q_ident(table), "" if kind == "virtual" else " NOT INDEXED")
+    tail, params = "", []
+    if kind == "rowid":
         conds = []
         if "rowid_from" in bounds:
             conds.append("%s >= ?" % rowid_name)
@@ -950,105 +1139,222 @@ def values_mode(obj, values, given, db, size, side, status, snap, limit, budget,
             conds.append("%s <= ?" % rowid_name)
             params.append(bounds["rowid_to"])
         if conds:
-            stmt += " WHERE " + " AND ".join(conds)
-        stmt += " ORDER BY %s" % rowid_name
+            tail += " WHERE " + " AND ".join(conds)
+        tail += " ORDER BY %s" % rowid_name
+    elif kind == "without_rowid" and extra:
+        tail += " ORDER BY " + ", ".join(q_ident(k) for k in extra)
+
+    def query(what, offset=None, one=False):
+        stmt = "SELECT %s FROM %s%s" % (what, source, tail)
+        if one:
+            stmt += " LIMIT 1 OFFSET %d" % offset
+        elif offset:
+            stmt += " LIMIT -1 OFFSET %d" % offset
+        return conn.execute(stmt, params)
+
+    def read_in_parts(offset):
+        """The row at `offset`, read a cell at a time because reading it whole failed: a value over the length limit, or a cell
+        sqlite cannot compute. A row skipped by OFFSET is not decoded, and typeof() and a BLOB's length() do not read the value.
+        A row none of whose cells can be read is not a cell's fault: its first error is raised."""
+        row = []
+        if kind == "rowid":
+            got = query(rowid_name, offset, one=True).fetchone()
+            if got is None:
+                return None
+            row.append(got[0])
+        unreadable, first = 0, None
+        for c, _t in cols:
+            ident = q_ident(c)
+            try:
+                got = query(ident, offset, one=True).fetchone()
+                if got is None:
+                    return None
+                row.append(got[0])
+                continue
+            except sqlite3.Error as exc:
+                if stops_the_export(exc):
+                    raise
+                first = first or exc
+                failed = exc
+            try:
+                kind_of = query("typeof(%s)" % ident, offset, one=True).fetchone()[0]
+            except sqlite3.Error:
+                kind_of = "unknown"
+            if too_big(failed):
+                length = None
+                try:
+                    length = query("%s(%s)" % ("length" if kind_of == "blob" else "octet_length", ident), offset, one=True).fetchone()[0]
+                except sqlite3.Error:
+                    length = None
+                row.append(NotExported("value_too_large", kind_of, length))
+            else:
+                unreadable += 1
+                row.append(NotExported("unreadable", "unreadable", None, sqlite_class(failed), str(failed)))
+        if unreadable == len(cols):
+            raise first
+        return tuple(row)
+
     names = [scrub(cell(c)) for c, _t in cols]
     stats = [{"values": collections.OrderedDict(), "length_min": None, "length_max": None} for _ in cols]
-    page, page_bytes, total, nulls, file_stopped = [], 0, 0, 0, None
-    tmp = fh = None
-    locator_path = locator_shown = None
+    page, page_bytes, total, nulls, file_stopped, file_stopped_rowid = [], 0, 0, 0, None, None
+    missing, missing_count, parts = [], collections.Counter(), 0
     job = os.environ.get("JOB_ID") or ""
-    digest = hashlib.sha256(json.dumps([db, size, stmt, params], sort_keys=True, default=str).encode()).hexdigest()[:16]
+    digest = hashlib.sha256(json.dumps([db, size, table, [c for c, _t in cols], params], sort_keys=True, default=str).encode()).hexdigest()[:16]
     name = "sqlite_query-values-%s.jsonl" % digest
     locator_path = Path(os.environ["OUT"]) / "tool-output" / name
     locator_shown = "store/jobs/%s/out/tool-output/%s" % (safe_name(job), name)
-    locator_error = None
-    failure = None
+    loc = {"fh": None, "tmp": None, "bytes": 0, "error": None, "stopped": None}
+    failure = reason = None
+    sqlite_message = None
     timed_out = False
 
-    def locator_line(n, rid, cells):
-        return json.dumps({"n": n, "rowid": rid, "cells": cells})
-
-    try:
-        cur = conn.execute(stmt, params)
-        for row in cur:
-            total += 1
-            rid = row[0] if rowid_name else None
-            vals = row[1:] if rowid_name else row
-            cells = []
-            for i, ((col, _t), v) in enumerate(zip(cols, vals)):
-                kind, length = value_kind(v)
-                st = stats[i]
-                st["values"][kind] = st["values"].get(kind, 0) + 1
-                if length is not None:
-                    st["length_min"] = length if st["length_min"] is None else min(st["length_min"], length)
-                    st["length_max"] = length if st["length_max"] is None else max(st["length_max"], length)
-                if v is None:
-                    nulls += 1
-                    cells.append("null")
-                    continue
-                cells.append("%s:%d" % (kind, length))
-                if file_stopped:
-                    continue
-                if values.bytes + (4 * ((length + 2) // 3) if isinstance(v, bytes) else length * 6) + 300 > FILE_BYTES:
-                    file_stopped = total
-                    continue
-                finding = "V%07d" % (values.written + 1)
-                locator = {"table": table, "rowid": rid, "n": total, "column": col, "type": kind, "length": length}
-                if isinstance(v, bytes) and len(v) > STREAM_AT:
-                    values.add_blob(finding, locator, v)
-                elif isinstance(v, bytes):
-                    values.add(finding, locator, {"blob_b64": base64.b64encode(v).decode("ascii")})
-                else:
-                    values.add(finding, locator, value_json(v))
-            line = locator_line(total, rid, cells)
-            if fh is None and len(page) < limit and page_bytes + len(line) <= INLINE_BYTES:
-                page.append({"n": total, "rowid": rid, "cells": cells})
-                page_bytes += len(line)
-            else:
-                if fh is None and locator_error is None:
-                    try:
-                        locator_path.parent.mkdir(parents=True, exist_ok=True)
-                        fd, tmp_name = tempfile.mkstemp(dir=str(locator_path.parent), prefix=".sqlite_query-")
-                        tmp = Path(tmp_name)
-                        fh = os.fdopen(fd, "w", encoding="utf-8")
-                        fh.write(json.dumps({"table": scrub(cell(table)), "columns": names, "locator": rowid_name or "n"}) + "\n")
-                        for p in page:
-                            fh.write(locator_line(p["n"], p["rowid"], p["cells"]) + "\n")
-                    except OSError as exc:
-                        locator_error = "the locator file could not be written: %s" % describe(exc)
-                        fh = None
-                if fh is not None:
-                    fh.write(line + "\n")
-    except (sqlite3.Error, ValueError, UnicodeError, OverflowError, MemoryError) as exc:
-        msg = str(exc)
-        if "not authorized" in msg:
-            msg = "statement refused: it is not a plain read (%s)" % msg
-        elif "too big" in msg:
-            msg = ("a value or row in this table is longer than %d bytes, which this tool will not read into memory (sqlite: %s): "
-                   "export the other columns, or read the value in pieces with sqlite_query's ordinary mode on a non-secret" % (VALUE_MAX, msg))
-        elif "interrupted" in msg:
-            msg = "stopped at the %d-second time budget; the rows before it are in the values file" % budget
-        elif isinstance(exc, MemoryError):
-            msg = "out of memory reading a row"
-        failure = msg
-        timed_out = "interrupted" in str(exc)
-    finally:
-        values.close()
-        conn.close()
-    published = None
-    if fh is not None:
+    def loc_drop(exc):
+        loc["error"] = "the locators file could not be written (%s); none is left" % describe(exc)
         try:
-            fh.flush()
-            os.fsync(fh.fileno())
-            fh.close()
-            published = publish(tmp, locator_path, locator_shown)
-        except OSError as exc:
-            locator_error = "the locator file could not be written: %s" % describe(exc)
+            if loc["fh"] is not None:
+                loc["fh"].close()
+        except OSError:
+            pass
+        loc["fh"] = None
+        if loc["tmp"] is not None:
             try:
-                tmp.unlink()
+                loc["tmp"].unlink()
             except OSError:
                 pass
+            loc["tmp"] = None
+
+    def loc_write(text, n):
+        if loc["fh"] is None or loc["stopped"]:
+            return
+        if loc["bytes"] + len(text) > LOCATORS_BYTES:
+            loc["stopped"] = n
+            return
+        try:
+            loc["fh"].write(text)
+            loc["bytes"] += len(text)
+        except OSError as exc:
+            loc_drop(exc)
+
+    # The locators file is written for every export (it has every row; the inline page has the first ones).
+    try:
+        locator_path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_name = tempfile.mkstemp(dir=str(locator_path.parent), prefix=".sqlite_query-")
+        loc["tmp"] = Path(tmp_name)
+        loc["fh"] = os.fdopen(fd, "w", encoding="utf-8")
+    except OSError as exc:
+        loc_drop(exc)
+    loc_write(json.dumps({"table": scrub(cell(table)), "columns": names, "locator": "rowid" if kind == "rowid" else "n"}) + "\n", 0)
+
+    def take(row):
+        """One row: its locators to the answer and the locators file, its values to the values file (OSError: the values file failed)."""
+        nonlocal total, nulls, file_stopped, file_stopped_rowid, page_bytes
+        total += 1
+        rid = row[0] if kind == "rowid" else None
+        vals = row[1:] if kind == "rowid" else row
+        cells = []
+        for i, ((col, _t), v) in enumerate(zip(cols, vals)):
+            kind_of, length = value_kind(v)
+            st = stats[i]
+            st["values"][kind_of] = st["values"].get(kind_of, 0) + 1
+            if length is not None:
+                st["length_min"] = length if st["length_min"] is None else min(st["length_min"], length)
+                st["length_max"] = length if st["length_max"] is None else max(st["length_max"], length)
+            if v is None:
+                nulls += 1
+                cells.append("null")
+                continue
+            if isinstance(v, NotExported):
+                missing_count[v.why] += 1
+                st.setdefault("not_exported", collections.Counter())[v.why] += 1
+                cells.append("too_large:%s:%s" % (kind_of, "?" if length is None else length) if v.why == "value_too_large" else "unreadable")
+                if len(missing) < 100:
+                    missing.append(dict({"n": total, "rowid": rid, "column": names[i], "why": v.why}, **({"error": v.error} if v.error else {})))
+            else:
+                cells.append("%s:%d" % (kind_of, length))
+            if file_stopped:
+                continue
+            if values.bytes + (len(v.message or "") * 6 if isinstance(v, NotExported) else 4 * ((length + 2) // 3) if isinstance(v, bytes) else length * 6) + 300 > FILE_BYTES:
+                file_stopped, file_stopped_rowid = total, rid
+                continue
+            finding = "V%07d" % (values.written + 1)
+            locator = {"table": table, "rowid": rid, "n": total, "column": col, "type": kind_of, "length": length}
+            if isinstance(v, NotExported):
+                values.add_missing(finding, locator, v.why, v.error, v.message)
+            elif isinstance(v, bytes) and len(v) > STREAM_AT:
+                values.add_blob(finding, locator, v)
+            elif isinstance(v, bytes):
+                values.add(finding, locator, {"blob_b64": base64.b64encode(v).decode("ascii")})
+            else:
+                values.add(finding, locator, value_json(v))
+        line = json.dumps({"n": total, "rowid": rid, "cells": cells})
+        if len(page) < limit and page_bytes + len(line) <= INLINE_BYTES:
+            page.append({"n": total, "rowid": rid, "cells": cells})
+            page_bytes += len(line)
+        loc_write(line + "\n", total)
+
+    try:
+        cur = None
+        while True:
+            try:
+                if cur is None:
+                    cur = query(", ".join(sel), total)
+                row = next(cur, None)
+            except sqlite3.Error as exc:
+                if stops_the_export(exc) or kind == "virtual" or parts >= PARTS_MAX:
+                    raise
+                parts += 1
+                row = read_in_parts(total)
+                if row is None:
+                    raise
+                take(row)
+                cur = None
+                continue
+            if row is None:
+                break
+            take(row)
+    except OSError as exc:
+        values.fail(exc)
+    except (sqlite3.Error, ValueError, UnicodeError, OverflowError, MemoryError) as exc:
+        # sqlite's own message is never printed here: it can quote a value (a generated column's json_extract does). It goes to
+        # the values file's end line, the one place a value may be; the answer says the class and the position.
+        sqlite_message = str(exc)
+        where = "row n=%d (the first row not exported)" % (total + 1)
+        if "interrupted" in sqlite_message:
+            failure, reason, timed_out = "stopped at the %d-second time budget; the rows before it are in the values file" % budget, "timed_out", True
+        elif "not authorized" in sqlite_message:
+            failure, reason = "the read-only authorizer refused what reading the table asked for (%s); nothing past %s" % (sqlite_class(exc), where), "not_a_plain_read"
+        elif kind == "virtual":
+            failure, reason = ("the virtual table's module failed (%s) at %s: this SQLite cannot export it here; its shadow tables are ordinary tables that can be"
+                               % (sqlite_class(exc), where)), "virtual_table_unsupported"
+        elif isinstance(exc, MemoryError):
+            failure, reason = "out of memory reading %s" % where, "out_of_memory"
+        elif parts >= PARTS_MAX:
+            failure, reason = ("%d rows had a cell that could not be read with the rest (%s); the export stopped at %s" % (PARTS_MAX, sqlite_class(exc), where)), "too_many_rows_read_in_parts"
+        else:
+            failure, reason = ("%s could not be read (%s). sqlite's message is not printed, since it can quote a value; it is in the values "
+                               "file's end line" % (where, sqlite_class(exc))), "row_unreadable"
+        if isinstance(exc, MemoryError):
+            sqlite_message = "MemoryError"
+    finally:
+        values.end({"complete": failure is None and file_stopped is None and not missing_count, "rows_read": total,
+                    "cells_written": values.written, "stopped": reason or ("values_file_cap" if file_stopped else None),
+                    "sqlite_message": sqlite_message})
+        values.close()
+        try:
+            conn.close()
+        except sqlite3.Error:
+            pass
+    published = None
+    if loc["fh"] is not None:
+        try:
+            loc["fh"].flush()
+            os.fsync(loc["fh"].fileno())
+            loc["fh"].close()
+            loc["fh"] = None
+            published = publish(loc["tmp"], locator_path, locator_shown)
+            loc["tmp"] = None
+        except OSError as exc:
+            loc_drop(exc)
 
     out = {"tool": TOOL, "db_path": given, "database_bytes": size, "sidecars": side, "snapshot_status": status,
            "sqlite_library": sqlite3.sqlite_version, "opened": "read-only, immutable, through an authorizer that allows reading only",
@@ -1065,20 +1371,22 @@ def values_mode(obj, values, given, db, size, side, status, snap, limit, budget,
         if snap["file_matches_recorded_sha256"] is False:
             out["snapshot_status"] = "THE FILE QUERIED IS NOT THE ONE THE SNAPSHOT RECORDED (its sha256 differs from the receipt's): it was changed after the snapshot, or the receipt belongs to another file. " + out["snapshot_status"]
         out["snapshot"] = snap
-    complete = failure is None and file_stopped is None
-    text = "".join("%s|%s\n" % (p["rowid"] if p["rowid"] is not None else p["n"], "|".join("%s=%s" % (nm, c) for nm, c in zip(names, p["cells"]))) for p in page)
+    complete = (failure is None and file_stopped is None and values.error is None and not missing_count
+                and loc["error"] is None and loc["stopped"] is None and published is not None)
+    shown_key = lambda p: p["rowid"] if p["rowid"] is not None else p["n"]
+    text = "".join("%s|%s\n" % (shown_key(p), "|".join("%s=%s" % (nm, c) for nm, c in zip(names, p["cells"]))) for p in page)
     if csv_mode:
         buf = io.StringIO()
         w = csv.writer(buf, lineterminator="\n")
-        w.writerow(["rowid" if rowid_name else "n"] + names)
+        w.writerow(["rowid" if kind == "rowid" else "n"] + names)
         for p in page:
-            w.writerow([p["rowid"] if p["rowid"] is not None else p["n"]] + p["cells"])
+            w.writerow([shown_key(p)] + p["cells"])
         text = buf.getvalue()
     out.update({
         "ok": failure is None, "returncode": 0 if failure is None else 1, "stderr": failure or "", "complete": complete,
-        "mode": "values_to_file", "table": table,
-        "locator": "rowid" if rowid_name else "n: the row's position; this table has no rowid (WITHOUT ROWID)",
-        "columns": [{"name": nm, "declared_type": scrub(cell(t)), "values": st["values"], "length_min": st["length_min"], "length_max": st["length_max"]}
+        "mode": "values_to_file", "table": table, "table_kind": kind, "locator": "rowid" if kind == "rowid" else "n", "locator_note": LOCATOR_TEXT[kind],
+        "columns": [dict({"name": nm, "declared_type": scrub(cell(t)), "values": st["values"], "length_min": st["length_min"], "length_max": st["length_max"]},
+                         **({"not_exported": dict(st["not_exported"])} if st.get("not_exported") else {}))
                     for nm, (_c, t), st in zip(names, cols, stats)],
         "row_count": total, "returned": len(page), "truncated": total > len(page), "rows": page,
         "cells_with_a_value": values.written, "cells_null": nulls,
@@ -1086,25 +1394,40 @@ def values_mode(obj, values, given, db, size, side, status, snap, limit, budget,
     })
     if failure:
         out["error"] = failure
+        out["reason"] = reason
         out["rows_read_before_the_stop"] = total
         if timed_out:
             out["timed_out"] = True
+    if values.error:
+        out["values_file_error"] = values.error
+        out["rows_read_before_the_stop"] = total
+        out["values_file_state"] = "partial: the file is kept (mode 0600) with %d whole line(s) and no end line; it is not the table" % values.written
+    if missing_count:
+        out["cells_not_exported"] = {"cells": dict(missing_count), "first": missing, "value_limit_bytes": VALUE_MAX,
+                                     "note": ("value_too_large: longer than the limit; unreadable: sqlite could not compute the cell (its message, "
+                                              "which can quote a value, is in the values file only). Each such cell has a not_exported line in the "
+                                              "values file; the rest of its row is exported")}
     if published:
         out["locators_file"] = published[1]
-        out["locators_file_format"] = "JSON Lines: a header line {table, columns, locator}, then one {n, rowid, cells} per row; a cell is type:length or null; no value"
+        out["locators_file_format"] = "JSON Lines: a header line {table, columns, locator}, then one {n, rowid, cells} per row; a cell is type:length, too_large:type:length, unreadable or null; no value"
         out["earlier_answers"] = earlier_answers(published[0])
-    if locator_error:
-        out["locators_file_error"] = locator_error
+        if loc["stopped"]:
+            out["locators_file_stopped_at_row"] = loc["stopped"]
+            out["locators_file_cap_bytes"] = LOCATORS_BYTES
+    if loc["error"]:
+        out["locators_file_error"] = loc["error"]
     if file_stopped:
         out["values_file_stopped_at_row"] = file_stopped
         out["values_file_cap_bytes"] = FILE_BYTES
-        if rowid_name and page:
-            out["resume"] = "give rowid_from the first rowid not yet written; it needs a new job, since the values file of this one is kept"
+        if kind == "rowid":
+            out["resume"] = "in a new job (the values file of this one is kept), give rowid_from %d" % file_stopped_rowid
+        else:
+            out["resume"] = "this table has no rowid range (%s): export fewer columns per job" % NO_RANGE[kind][1]
     out["note"] = ("Locator output: no value, fragment, masked shape or digest of one is in this answer or in any file it names except the "
-                   "values file. A cell is type:length (bytes for a BLOB and for text, digits for a number). The mode exports whole "
-                   "rows of one table, never a filter: row_count and the lengths are the table's, so they confirm no guess. Cite "
-                   "table, rowid and column; hand a value on through the channel the operator named. An inline page is not the "
-                   "result: locators_file has every row when truncated is true.")
+                   "values file. A cell is type:length (bytes for a BLOB and for text, characters of the decimal form for a number, so a "
+                   "number's length tells its order of magnitude). The mode exports whole rows of one table and takes no filter: row_count "
+                   "and the lengths are the table's (or the rowid range's). %s. Cite table, the locator and column; hand a value on "
+                   "through the channel the operator named. The inline page is the first rows; locators_file has every row." % LOCATOR_TEXT[kind])
     say(out, 0 if failure is None else 1)
 
 
@@ -1128,8 +1451,8 @@ def main():
         if "sql" in obj:
             say({"ok": False, "error": "write_values takes table (and columns, rowid_from, rowid_to), not sql: a WHERE, LIKE, JOIN or any "
                                        "expression over a column whose values are withheld would confirm a guess, one call at a time. The mode "
-                                       "exports whole rows of one table by position (a rowid range), never by value. For a query over values you "
-                                       "may see, leave write_values out.", "write_values": "refused"}, 1)
+                                       "exports whole rows of one table and takes no filter; a rowid range is offered only where the rowid is no column's "
+                                       "value. For a query over values you may see, leave write_values out.", "write_values": "refused"}, 1)
     else:
         stray = [k for k in VALUES_PARAMS if k in obj]
         if stray:
@@ -1164,12 +1487,8 @@ def main():
         say({"ok": False, "error": "apply_wal is not a parameter of sqlite_query, which opens the file it is given read-only and immutable and never applies a WAL. "
                                    "Run sqlite_snapshot on the database: it copies the set (database, -wal, -shm, -journal) with hashes and has SQLite apply the WAL "
                                    "in the copy, and then give this tool the snapshot's directory or its `database` as db_path.", "db_path": db}, 1)
-    values = None
-    if write_values:
-        try:
-            values = SecretValues(True)
-        except SecretValuesRefused as exc:
-            say({"ok": False, "error": str(exc), "tool": TOOL, "write_values": "refused", "written": False}, 1)
+    if write_values and not (os.environ.get("JOB_ID") and os.environ.get("OUT")):
+        say({"ok": False, "error": REFUSED_OUTSIDE_A_JOB, "tool": TOOL, "write_values": "refused", "written": False}, 1)
     if not os.path.exists(db):
         say({"ok": False, "error": "database not found", "db_path": db}, 1)
     given = db
@@ -1187,8 +1506,10 @@ def main():
         page = fh.read(4096)
     if not page.startswith(b"SQLite format 3\x00"):
         e = entropy(page)
+        # In values mode the caller has said the file holds secrets: its first bytes are not printed.
+        head = {"write_values": "nothing was written"} if write_values else {"header_hex": page[:16].hex()}
         say({"ok": False, "error": "not a SQLite file: its first bytes are not the SQLite magic", "db_path": db,
-             "header_hex": page[:16].hex(), "first_page_entropy_bits_per_byte": round(e, 3),
+             **head, "first_page_entropy_bits_per_byte": round(e, 3),
              "reading": ("random-looking from the first byte (high entropy), and not identified: an encrypted database (SQLCipher "
                          "or an app's own) is one explanation, compressed or otherwise encoded data another; no query runs without "
                          "knowing which" if e > 7.5 else "another format: identify it from its header (file_type)")}, 1)
@@ -1201,7 +1522,7 @@ def main():
     if write_values:
         for s in side:
             s["name"] = scrub(cell(s["name"]))
-        values_mode(obj, values, given, db, size, side, scrub(status), snap, limit, budget, csv_mode)
+        values_mode(obj, given, db, size, side, scrub(status), snap, limit, budget, csv_mode)
     # immutable=1 opens a database on a read-only mount, where mode=ro alone cannot create a -shm; the path is
     # percent-encoded because a "#" or "?" in it would end the name early.
     uri = "file:%s?mode=ro&immutable=1" % urllib.parse.quote(db)

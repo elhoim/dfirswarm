@@ -288,7 +288,8 @@ class SqliteQueryValues(Case):
         path = self.path(name)
         os.makedirs(os.path.dirname(path), exist_ok=True)
         conn = sqlite3.connect(path)
-        conn.execute("create table logins(id integer primary key, origin text, secret blob, note text)")
+        # An ordinary rowid table: no column is its rowid (an INTEGER PRIMARY KEY would be; that table has tests of its own).
+        conn.execute("create table logins(origin text, secret blob, note text)")
         conn.execute("insert into logins(origin, secret, note) values('site-one', ?, ?)", (BLOB_CANARY, TEXT_CANARY))
         for n in range(rows - 1):
             conn.execute("insert into logins(origin, secret, note) values(?, NULL, ?)", ("site-%d" % (n + 2), "plain %d" % n))
@@ -303,6 +304,12 @@ class SqliteQueryValues(Case):
 
     def export(self, db, env=None, **kw):
         return run_tool("sqlite_query", dict({"db_path": db, "table": "logins", "write_values": True}, **kw), self.dir, env=env)
+
+    def values_lines(self, out):
+        """The values file's cell lines and its end line (None when it has none)."""
+        lines = [json.loads(l) for l in self.read(os.path.join(out, "sqlite-query-values.jsonl")).splitlines()]
+        end = lines[-1] if lines and lines[-1].get("end") is True else None
+        return (lines[:-1] if end else lines), end
 
     def files_outside(self, *skip):
         """Every file under the scratch directory except the evidence and the skipped ones."""
@@ -340,7 +347,7 @@ class SqliteQueryValues(Case):
         first = r.json["rows"][0]
         self.assertEqual((first["n"], first["rowid"]), (1, 1))
         cols = [c["name"] for c in r.json["columns"]]
-        self.assertEqual(cols, ["id", "origin", "secret", "note"])
+        self.assertEqual(cols, ["origin", "secret", "note"])
         self.assertEqual(first["cells"][cols.index("secret")], "blob:%d" % len(BLOB_CANARY))
         self.assertEqual(first["cells"][cols.index("note")], "text:%d" % len(TEXT_CANARY))
         self.assertEqual(r.json["cells_null"], 2)
@@ -349,8 +356,9 @@ class SqliteQueryValues(Case):
         values_path = os.path.join(out, "sqlite-query-values.jsonl")
         self.assertEqual(r.json["secret_values"]["values_file"], "store/jobs/j000031/out/sqlite-query-values.jsonl")
         self.assertEqual(stat.S_IMODE(os.stat(values_path).st_mode), 0o600)
-        lines = [json.loads(l) for l in self.read(values_path).splitlines()]
-        self.assertEqual(len(lines), 3 * 3 + 1)
+        lines, end = self.values_lines(out)
+        self.assertEqual(len(lines), 3 + 2 + 2)
+        self.assertEqual(end, {"end": True, "complete": True, "rows_read": 3, "cells_written": 7, "stopped": None, "sqlite_message": None})
         by = {(l["rowid"], l["column"]): l for l in lines}
         self.assertEqual(by[(1, "note")]["value"], TEXT_CANARY)
         self.assertEqual(base64.b64decode(by[(1, "secret")]["value"]["blob_b64"]), BLOB_CANARY)
@@ -368,7 +376,7 @@ class SqliteQueryValues(Case):
                 self.assertNotIn(needle, data, f)
         located = [json.loads(l) for l in self.read(locators).splitlines()]
         self.assertEqual([x["rowid"] for x in located[1:]], [1, 2, 3])
-        self.assertEqual(len(located[1]["cells"]), 4)
+        self.assertEqual(len(located[1]["cells"]), 3)
 
     def test_a_second_run_in_the_same_jobs_output_is_refused_as_json_and_keeps_the_first_file(self):
         db = self.secret_db()
@@ -421,7 +429,7 @@ class SqliteQueryValues(Case):
         r = self.export(db, env, columns=["note"])
         self.assertEqual(r.code, 0, r.stdout)
         self.assertEqual([c["name"] for c in r.json["columns"]], ["note"])
-        lines = [json.loads(l) for l in self.read(os.path.join(out, "sqlite-query-values.jsonl")).splitlines()]
+        lines, _end = self.values_lines(out)
         self.assertEqual({l["column"] for l in lines}, {"note"})
         for kw, word in (({"columns": ["nope"]}, "no column"), ({"columns": []}, "columns is a list"), ({"table": "nope"}, "no table")):
             out2, env2 = self.job(name="o-%d" % len(word), job_id="j000036")
@@ -429,6 +437,7 @@ class SqliteQueryValues(Case):
             self.assertEqual(bad.code, 1, kw)
             self.assertIn(word, bad.json["error"], kw)
             self.assertIsNone(bad.json and bad.json.get("secret_values"))
+            self.assertFalse(os.path.exists(os.path.join(out2, "sqlite-query-values.jsonl")), "a refused name leaves no values file")
         conn = sqlite3.connect(db)
         conn.execute("create view v as select * from logins")
         conn.commit()
@@ -449,7 +458,9 @@ class SqliteQueryValues(Case):
         out, env = self.job(job_id="j000038")
         r = run_tool("sqlite_query", {"db_path": path, "table": "kv", "write_values": True, "columns": ["v"]}, self.dir, env=env)
         self.assertEqual(r.code, 0, r.stdout)
-        self.assertIn("this table has no rowid", r.json["locator"])
+        self.assertEqual(r.json["table_kind"], "without_rowid")
+        self.assertEqual(r.json["locator"], "n")
+        self.assertIn("primary key", r.json["locator_note"])
         self.assertEqual([(x["n"], x["rowid"]) for x in r.json["rows"]], [(1, None), (2, None)])
         self.assertNotIn(TEXT_CANARY, r.stdout)
         out2, env2 = self.job(name="o2", job_id="j000039")
@@ -473,7 +484,7 @@ class SqliteQueryValues(Case):
         self.assertNotIn(token, r.stdout, "a file or table name shaped like a token is withheld on every channel")
         self.assertIn("withheld", r.stdout)
         self.assertNotIn(TEXT_CANARY, r.stdout)
-        line = json.loads(self.read(os.path.join(out, "sqlite-query-values.jsonl")).splitlines()[0])
+        line = self.values_lines(out)[0][0]
         self.assertEqual(line["table"], token, "the sealed file keeps the real name")
         self.assertEqual(base64.b64decode(line["value"]["bytes_b64"]), b"\xff\xfe" + TEXT_CANARY.encode())
         self.assertEqual(r.json["rows"][0]["cells"], ["text_not_utf8:%d" % (2 + len(TEXT_CANARY))])
@@ -495,7 +506,7 @@ class SqliteQueryValues(Case):
         out, env = self.job(job_id="j000042")
         r = run_tool("sqlite_query", {"db_path": path, "table": "t", "write_values": True}, self.dir, env=env)
         self.assertEqual(r.code, 0, r.stdout[:300])
-        line = json.loads(self.read(os.path.join(out, "sqlite-query-values.jsonl")))
+        line = self.values_lines(out)[0][0]
         self.assertEqual(base64.b64decode(line["value"]["blob_b64"]), blob)
         self.assertEqual(line["length"], len(blob))
         self.assertNotIn(base64.b64encode(blob[:60]).decode(), r.stdout)
@@ -510,6 +521,270 @@ class SqliteQueryValues(Case):
         self.assertEqual(injob.code, 0, injob.stdout)
         self.assertFalse(os.path.exists(os.path.join(out2, "sqlite-query-values.jsonl")))
 
+
+
+PINS = (482915, 771203)
+
+
+class SqliteQueryValuesReview(Case):
+    """The review of #144: each test fails on the tool as it was at ea88a910 (PACK_DIR pointed at a copy of it)."""
+
+    def job(self, name, job_id):
+        out = self.path(name)
+        os.makedirs(out, exist_ok=True)
+        return out, {"JOB_ID": job_id, "OUT": out}
+
+    def export(self, db, table, env, **kw):
+        return run_tool("sqlite_query", dict({"db_path": db, "table": table, "write_values": True}, **kw), self.dir, env=env)
+
+    def make(self, name, statements, rows=()):
+        path = self.path("inputs", name)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        conn = sqlite3.connect(path)
+        for st in statements:
+            conn.execute(st)
+        for st, params in rows:
+            conn.execute(st, params)
+        conn.commit()
+        conn.close()
+        return path
+
+    def seen_by_the_agent(self, r, out):
+        """stdout, stderr, and every file under the job's output except the values file, as bytes."""
+        blobs = [r.stdout.encode(), r.stderr.encode()]
+        for base, _dirs, files in os.walk(out):
+            for f in files:
+                blobs.append(f.encode())
+                if f != "sqlite-query-values.jsonl":
+                    blobs.append(self.read(os.path.join(base, f), "rb"))
+        return b"\n".join(blobs)
+
+    def values_lines(self, out):
+        lines = [json.loads(l) for l in self.read(os.path.join(out, "sqlite-query-values.jsonl")).splitlines()]
+        end = lines[-1] if lines and lines[-1].get("end") is True else None
+        return (lines[:-1] if end else lines), end
+
+    def test_an_integer_primary_key_is_the_rowid_so_the_rowid_is_never_printed_nor_ranged_over(self):
+        # SQLite makes a table's one primary key column the rowid when its declared type is exactly INTEGER (any case, in the
+        # column or the table constraint). Its value is then the rowid: printing the rowid prints the value, and a rowid range
+        # is a filter over it (row_count 1 or 0 around a guess recovers it by bisection).
+        db = self.make("pins.db", [
+            "create table pins(pin INTEGER PRIMARY KEY, card TEXT)",
+            "create table pins2(pin integer, card TEXT, primary key(pin))",
+            "create table pins3(pin INT PRIMARY KEY, card TEXT)",       # INT is not INTEGER: no alias, the rowid is its own
+        ], [("insert into %s values(?, ?)" % t, (p, "card-%d" % i)) for t in ("pins", "pins2", "pins3") for i, p in enumerate(PINS)])
+        for k, table in enumerate(("pins", "pins2")):
+            out, env = self.job("o-%s" % table, "j00010%d" % k)
+            r = self.export(db, table, env, limit=1)
+            self.assertEqual(r.code, 0, r.stdout + r.stderr)
+            seen = self.seen_by_the_agent(r, out)
+            for pin in PINS:
+                self.assertNotIn(str(pin).encode(), seen, "%s: the rowid is the pin, and it is printed nowhere" % table)
+            self.assertEqual((r.json["table_kind"], r.json["locator"]), ("alias", "n"))
+            self.assertEqual([(x["n"], x["rowid"]) for x in r.json["rows"]], [(1, None)])
+            located = [json.loads(l) for l in self.read(os.path.join(out, "tool-output", os.path.basename(r.json["locators_file"]))).splitlines()]
+            self.assertEqual([(x["n"], x["rowid"]) for x in located[1:]], [(1, None), (2, None)])
+            lines, end = self.values_lines(out)
+            self.assertEqual(sorted(l["value"] for l in lines if l["column"] == "pin"), list(PINS), "the sealed file has the values")
+            self.assertTrue(end["complete"])
+            # A rowid range would select by the pin: refused by name, before any file is made.
+            out2, env2 = self.job("r-%s" % table, "j00011%d" % k)
+            for bounds in ({"rowid_from": 600000}, {"rowid_to": 771203}, {"rowid_from": 1, "rowid_to": 10 ** 9}):
+                ranged = self.export(db, table, env2, **bounds)
+                self.assertEqual(ranged.code, 1, ranged.stdout)
+                self.assertEqual(ranged.json["reason"], "rowid_is_a_value")
+                self.assertNotIn("row_count", ranged.json)
+                self.assertEqual(os.listdir(out2), [])
+        # INT PRIMARY KEY is an ordinary rowid table: its rowid (1, 2) is printed, its pin is not.
+        out, env = self.job("o-pins3", "j000120")
+        r = self.export(db, "pins3", env)
+        self.assertEqual(r.code, 0, r.stdout)
+        self.assertEqual(r.json["table_kind"], "rowid")
+        self.assertEqual([x["rowid"] for x in r.json["rows"]], [1, 2])
+        for pin in PINS:
+            self.assertNotIn(str(pin).encode(), self.seen_by_the_agent(r, out))
+
+    def test_rows_are_read_from_the_table_never_through_an_index_whose_order_is_the_values(self):
+        # A covering index on the secret column would hand the rows over in the order of the secret values.
+        db = self.make("kv.db", ["create table kv(k text primary key, v text) without rowid", "create index iv on kv(v)",
+                                 "create table c(s text)", "create index ic on c(s)"],
+                       [("insert into kv values(?, ?)", kv) for kv in (("a", "zz-secret"), ("b", "aa-secret"), ("c", "mm-secret"))]
+                       + [("insert into c values(?)", (v,)) for v in ("zz-secret", "aa-secret", "mm-secret")])
+        for table, job in (("kv", "j000130"), ("c", "j000131")):
+            out, env = self.job("o-" + table, job)
+            r = self.export(db, table, env, columns=["v" if table == "kv" else "s"])
+            self.assertEqual(r.code, 0, r.stdout)
+            lines, _end = self.values_lines(out)
+            self.assertEqual([(l["n"], l["value"]) for l in lines], [(1, "zz-secret"), (2, "aa-secret"), (3, "mm-secret")],
+                             "%s: n follows the table's own order (primary key, rowid), not the order of the values" % table)
+        self.assertIn("ranks", self.export(db, "kv", self.job("o-kv2", "j000132")[1]).json["locator_note"], "the skill and the answer say n ranks the key")
+
+    def run_limited(self, args, env, fsize):
+        """The tool with RLIMIT_FSIZE set: a write past `fsize` bytes fails with EFBIG (Python ignores SIGXFSZ), as on a full disk."""
+        import resource
+        e = dict(os.environ)
+        for k in ("JOB_ID", "OUT", "AGENT_ID"):
+            e.pop(k, None)
+        e.update(env)
+        proc = subprocess.run([sys.executable, tool_path("sqlite_query")], input=json.dumps(args), capture_output=True, text=True,
+                              cwd=self.dir, env=e, timeout=120, preexec_fn=lambda: resource.setrlimit(resource.RLIMIT_FSIZE, (fsize, fsize)))
+        return proc
+
+    def test_a_write_that_fails_ends_the_export_as_json_and_says_what_the_kept_file_holds(self):
+        db = self.make("many.db", ["create table cookies(host, value)"],
+                       [("insert into cookies values(?, ?)", ("h%d" % i, "cookie-value-%06d" % i)) for i in range(400)])
+        out, env = self.job("o", "j000140")
+        proc = self.run_limited({"db_path": db, "table": "cookies", "write_values": True}, env, 4096)
+        self.assertNotIn("Traceback", proc.stderr)
+        self.assertEqual(proc.stderr, "")
+        self.assertEqual(proc.returncode, 0, proc.stdout[-500:])
+        j = json.loads(proc.stdout)
+        self.assertIs(j["complete"], False)
+        self.assertIn("EFBIG", j["values_file_error"])
+        self.assertIn("no end line", j["values_file_error"])
+        self.assertIn("partial", j["values_file_state"])
+        path = os.path.join(out, "sqlite-query-values.jsonl")
+        self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
+        data = self.read(path, "rb")
+        whole = data.count(b"\n")
+        self.assertGreater(whole, 0)
+        self.assertEqual(j["secret_values"]["written"], whole, "the count said is the whole lines that reached the file")
+        self.assertIs(j["secret_values"]["end_line_written"], False)
+        self.assertNotIn(b'"end": true', data)
+        self.assertNotIn("cookie-value-", proc.stdout)
+        leftovers = [n for _b, _d, fs in os.walk(out) for n in fs if n.startswith(".sqlite_query-")]
+        self.assertEqual(leftovers, [], "no temporary locators file is left")
+
+    def test_sqlites_message_is_never_printed_since_a_generated_column_quotes_the_value_in_it(self):
+        # json_extract('{}', secret) fails with the secret in its message: "JSON path error near '<secret>'" (SQLite 3.4x) or
+        # "bad JSON path: '<secret>'" (3.50). Whatever the wording, the value stays in the values file.
+        secret = "lemon river otter maple 0417"  # not shaped like a token, so the shared scrub would not hide it
+        db = self.make("gen.db", ["create table h(secret text)"], [("insert into h values(?)", (secret,)), ("insert into h values(?)", ("plain",))])
+        conn = sqlite3.connect(db)
+        conn.execute("ALTER TABLE h ADD COLUMN j TEXT GENERATED ALWAYS AS (json_extract('{}', secret)) VIRTUAL")
+        conn.commit()
+        conn.close()
+        out, env = self.job("o", "j000150")
+        r = self.export(db, "h", env)
+        self.assertEqual(r.stderr, "")
+        self.assertNotIn(secret.encode(), self.seen_by_the_agent(r, out))
+        self.assertEqual(r.code, 0, r.stdout)
+        self.assertEqual([x["cells"] for x in r.json["rows"]], [["text:%d" % len(secret), "unreadable"], ["text:5", "unreadable"]])
+        self.assertEqual(r.json["cells_not_exported"]["cells"], {"unreadable": 2})
+        self.assertRegex(r.json["cells_not_exported"]["first"][0]["error"], r"^OperationalError")
+        self.assertIs(r.json["complete"], False)
+        lines, end = self.values_lines(out)
+        by = {(l["n"], l["column"]): l for l in lines}
+        self.assertEqual(by[(1, "secret")]["value"], secret)
+        self.assertIn(secret, by[(1, "j")]["sqlite_message"], "the message is kept in the sealed file")
+        self.assertEqual(by[(1, "j")]["not_exported"], "unreadable")
+        self.assertIs(end["complete"], False)
+        # A table none of whose cells can be computed stops the export: the message is still not printed.
+        out2, env2 = self.job("o2", "j000151")
+        only = self.export(db, "h", env2, columns=["j"])
+        self.assertEqual(only.code, 1, only.stdout)
+        self.assertEqual(only.json["reason"], "row_unreadable")
+        self.assertNotIn(secret.encode(), self.seen_by_the_agent(only, out2))
+        self.assertIn(secret, self.values_lines(out2)[1]["sqlite_message"])
+
+    def test_a_wrong_name_or_a_file_that_is_not_sqlite_leaves_nothing_and_the_same_job_can_ask_again(self):
+        db = self.make("t.db", ["create table logins(v text)"], [("insert into logins values(?)", ("x",))])
+        out, env = self.job("o", "j000160")
+        typo = self.export(db, "login", env)
+        self.assertEqual(typo.code, 1)
+        self.assertIn("no table", typo.json["error"])
+        self.assertEqual(os.listdir(out), [], "a wrong table name leaves no values file")
+        not_db = self.write("inputs/blob.bin", b"\x8a\x13\xfe\x01SECRETHEAD" + bytes(range(256)) * 8)
+        nd = self.export(not_db, "logins", env)
+        self.assertEqual(nd.code, 1)
+        self.assertIn("not a SQLite file", nd.json["error"])
+        self.assertNotIn("header_hex", nd.json, "the first bytes of a file the caller marked secret are not printed")
+        self.assertNotIn(b"\x8a\x13\xfe\x01".hex(), nd.stdout)
+        self.assertEqual(os.listdir(out), [])
+        again = self.export(db, "logins", env)
+        self.assertEqual(again.code, 0, again.stdout)
+        self.assertEqual(again.json["secret_values"]["written"], 1)
+
+    def test_a_value_over_the_length_limit_is_recorded_and_the_rest_of_the_table_is_exported(self):
+        if not hasattr(sqlite3.connect(":memory:"), "setlimit"):
+            self.skipTest("Python before 3.11 has no setlimit: the tool does not enforce the length limit")
+        limit = 64 * 1024 * 1024
+        db = self.make("big.db", ["create table b(k, v)"], [("insert into b values(?, zeroblob(?))", (1, limit + 1)),
+                                                             ("insert into b values(?, ?)", (2, b"short-blob-value")),
+                                                             ("insert into b values(?, zeroblob(?))", (3, limit + 5))])
+        out, env = self.job("o", "j000170")
+        r = self.export(db, "b", env)
+        self.assertEqual(r.code, 0, r.stdout[:500])
+        self.assertEqual(r.json["row_count"], 3, "the export goes on past the large value")
+        self.assertEqual([x["cells"] for x in r.json["rows"]],
+                         [["integer:1", "too_large:blob:%d" % (limit + 1)], ["integer:1", "blob:16"], ["integer:1", "too_large:blob:%d" % (limit + 5)]])
+        self.assertEqual(r.json["cells_not_exported"]["cells"], {"value_too_large": 2})
+        self.assertEqual([(x["n"], x["rowid"], x["column"]) for x in r.json["cells_not_exported"]["first"]], [(1, 1, "v"), (3, 3, "v")])
+        self.assertNotIn("in pieces", r.stdout, "no advice to read a secret into the context a piece at a time")
+        lines, end = self.values_lines(out)
+        by = {(l["n"], l["column"]): l for l in lines}
+        self.assertEqual(by[(1, "v")]["not_exported"], "value_too_large")
+        self.assertNotIn("value", by[(1, "v")])
+        self.assertEqual(base64.b64decode(by[(2, "v")]["value"]["blob_b64"]), b"short-blob-value")
+        self.assertEqual(by[(3, "k")]["value"], 3)
+        self.assertIs(end["complete"], False)
+
+    def test_the_locators_file_has_every_row_whether_or_not_the_page_is_truncated_and_it_is_bounded(self):
+        db = self.make("t.db", ["create table t(v text)"], [("insert into t values(?)", ("value-%d" % i,)) for i in range(50)])
+        out, env = self.job("o", "j000180")
+        r = self.export(db, "t", env)
+        self.assertEqual(r.code, 0, r.stdout)
+        self.assertIs(r.json["truncated"], False)
+        located = self.read(os.path.join(out, "tool-output", os.path.basename(r.json["locators_file"]))).splitlines()
+        self.assertEqual(len(located), 1 + 50)
+        # The file's byte cap, made small: the file stops at a row and says so; the values file still has every cell.
+        out2, env2 = self.job("o2", "j000181")
+        snippet = ("import importlib.util, sys; spec = importlib.util.spec_from_file_location('sq', sys.argv[1]); "
+                   "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m); m.LOCATORS_BYTES = 400; m.main()")
+        e = dict(os.environ, **env2)
+        proc = subprocess.run([sys.executable, "-c", snippet, tool_path("sqlite_query")], cwd=self.dir, env=e, capture_output=True, text=True,
+                              input=json.dumps({"db_path": db, "table": "t", "write_values": True}), timeout=120)
+        j = json.loads(proc.stdout)
+        self.assertEqual(j["locators_file_cap_bytes"], 400)
+        stopped = j["locators_file_stopped_at_row"]
+        self.assertGreater(stopped, 1)
+        located = self.read(os.path.join(out2, "tool-output", os.path.basename(j["locators_file"])), "rb")
+        self.assertLessEqual(len(located), 400)
+        self.assertIs(j["complete"], False)
+        self.assertEqual(len(self.values_lines(out2)[0]), 50)
+
+    def test_a_column_name_echoed_in_an_error_is_withheld_when_shaped_like_a_token(self):
+        db = self.make("t.db", ["create table t(v text)"], [("insert into t values(?)", ("x",))])
+        token = "Zq8Xv3Lm9Rt2Hw5Bn7Cd4Fg6Js1Kp0"
+        out, env = self.job("o", "j000190")
+        r = self.export(db, "t", env, columns=[token])
+        self.assertEqual(r.code, 1)
+        self.assertIn("no column", r.json["error"])
+        self.assertNotIn(token, r.stdout)
+
+    def test_a_virtual_table_is_located_by_position_or_said_unsupported_by_name(self):
+        conn = sqlite3.connect(":memory:")
+        try:
+            conn.execute("create virtual table x using fts5(b)")
+        except sqlite3.Error:
+            self.skipTest("this SQLite has no fts5")
+        db = self.make("fts.db", ["create virtual table msgs using fts5(body)"],
+                       [("insert into msgs(rowid, body) values(?, ?)", (PINS[0], "canary-fts-body-51c2"))])
+        out, env = self.job("o", "j000200")
+        r = self.export(db, "msgs", env, rowid_from=1)
+        self.assertEqual(r.code, 1)
+        self.assertIn(r.json["reason"], ("virtual_table", "virtual_table_unsupported"))
+        r = self.export(db, "msgs", env)
+        seen = self.seen_by_the_agent(r, out)
+        self.assertNotIn(b"canary-fts-body", seen)
+        self.assertNotIn(str(PINS[0]).encode(), seen, "a virtual table's rowid (an application's id here) is not printed")
+        if r.code == 0:
+            self.assertEqual(r.json["table_kind"], "virtual")
+            self.assertEqual([x["rowid"] for x in r.json["rows"]], [None])
+        else:
+            # Some SQLite builds cannot start the module under the read-only authorizer (fts5 on Debian's 3.40): a named state.
+            self.assertEqual(r.json["reason"], "virtual_table_unsupported", r.stdout)
+            self.assertEqual(r.stderr, "")
 
 if __name__ == "__main__":
     unittest.main()
