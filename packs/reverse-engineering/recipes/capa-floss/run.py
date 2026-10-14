@@ -413,9 +413,113 @@ def install_signal_handlers():
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
+# BEGIN SHARED ONE WAY OUT
+# The same text is in doc_structure, pe_directories and the capa-floss recipe (tests/pack-re-process.test.ts holds the copies equal).
+# Two steps stand between a string out of a file and any byte the tool writes. shown_path is the sanitiser: it withholds every shape
+# below in the WHOLE text first (a token joined by `/`, such as the AWS secret key shape, and a user-info whose `//` or host a split
+# would remove, are only seen whole), then component by component (a path is not one token). final_check is the backstop: every key
+# and every value of what the tool is about to print or write is tested again with the same rules, and one that the sanitiser would
+# still change (a string that did not pass through it, or a number long enough to be a key) is replaced by its length, counted, and
+# the answer is partial. A field the backstop withholds is a fault of the tool, never of the file: the count says how many.
+_CLEAN = set()                      # short strings known to hold nothing to withhold: tested once (a table repeats its keys and kinds)
+# A mailto: address has no user-info (RFC 6068: an address is local-part@domain), so the shared block keeps `mailto:name:secret@host`
+# as an address; a ':' in the local part is a name:password pair placed there, and what follows the ':' is withheld here.
+MAILTO_SECRET = re.compile(r"(mailto:[^:@?/\s]*):([^@?\s<>]*)(?=@)", re.I)
+# `name:secret@` wherever it stands, with or without a host after the `@` (a name cut at a declared length ends right there): the
+# shared block's bare rule wants a host, and its URL rule wants the `//` a path split removes.
+CUT_USERINFO = re.compile(r"(?<![\w.%+-])(?!mailto:)[\w.%+-]{1,64}:[^\s/@:<>]{1,128}(?=@)", re.I)
+# The value of a secret-named key of a connection string or a query (`Password=...;`, `AccountKey=...`).
+KEYVALUE_SECRET = re.compile(r"((?:password|passwd|pwd|secret|client[_-]?secret|token|api[_-]?key|access[_-]?key|account[_-]?key|shared[_-]?access[_-]?key)"
+                             r"[ \t]*=[ \t]*\"?)([^;\s&\"'<>,]{1,512})", re.I)
+# The head of a token whose own prefix says what it is, too short for the shared block's patterns (a name cut by a declared length, a
+# string read from the middle of a field): the prefix and four characters more are a piece of a token, wherever it stands (a letter
+# before it does not make it a word: `XAKIA...` is a key id with a letter in front). `sk-` alone is common inside hyphenated words
+# (`desk-`, `risk-`, `task-`), so its head needs a capital or a digit in its first twelve characters, as a random key has.
+TOKEN_HEAD = re.compile(r"(?:AKIA|ASIA)[0-9A-Z]{4,}|gh[pousr]_[A-Za-z0-9]{4,}|github_pat_[A-Za-z0-9_]{4,}|xox[abeprs]-[A-Za-z0-9-]{4,}"
+                        r"|sk-(?=[A-Za-z0-9_-]{0,11}[0-9A-Z])[A-Za-z0-9_-]{12,}|eyJ[A-Za-z0-9_-]{6,}")
+# The body of a PEM block after its header (RFC 7468), up to the next '-' (its END line): withheld whole whatever its letters look like,
+# as the dashes of a header glued to it join the two into one run that no shape rule of the shared block reads as a token.
+PEM_BODY = re.compile(r"(-----BEGIN [^\r\n-]{1,64}-----)(?!<withheld)([^-]{8,})")
+LONG_NUMBER = 10 ** 31              # a number of 32 digits or more is printed as its size: the same digits as a string are withheld (32 hex)
+
+
+def _shown_pass(out):
+    if "-----BEGIN " in out:
+        out = PEM_BODY.sub(lambda m: m.group(1) + _withheld("", len(m.group(2)), "text"), out)
+    if ":" in out:
+        out = MAILTO_SECRET.sub(lambda m: m.group(1) + ":" + _withheld("userinfo", len(m.group(2)), "urls"), out)
+    if "@" in out:
+        out = CUT_USERINFO.sub(lambda m: _withheld("userinfo", len(m.group()), "urls"), out)
+    if "=" in out:
+        out = KEYVALUE_SECRET.sub(lambda m: m.group(1) + _withheld("", len(m.group(2)), "text"), out)
+    out = scrub(out, "names")
+    if "/" in out:
+        out = "/".join(scrub(part, "names") for part in out.split("/"))
+    return TOKEN_HEAD.sub(lambda m: _withheld("token-shaped text", len(m.group()), "names"), out)
+
+
 def shown_path(text):
-    """A path as it may be printed: each component with anything token-shaped, or with user-info, withheld."""
-    return "/".join(scrub(part, "names") for part in text.split("/"))
+    """A string as it may be printed: user-info, a secret-named value, every token-shaped run of the whole text, of each `/`
+    component, and every token head, withheld. A pass that withheld something is run again on its own result (a marker it wrote can
+    leave a new edge in front of a user-info), up to four times, so that the result is a fixed point: shown_path of it is itself, which
+    is what final_check tests."""
+    if not isinstance(text, str):
+        return text
+    if text in _CLEAN:
+        return text
+    out = _shown_pass(text)
+    passes = 1
+    while out != text and passes < 4:
+        text, out = out, _shown_pass(out)
+        passes += 1
+    if passes == 1 and len(out) <= 256 and len(_CLEAN) < 200000:
+        _CLEAN.add(out)
+    return out
+
+
+def shown_number(value):
+    if isinstance(value, int) and not isinstance(value, bool) and abs(value) >= LONG_NUMBER:
+        return "<a number of %d bits, withheld>" % value.bit_length()
+    return value
+
+
+FINAL = {"fields": 0}
+
+
+def _final_withheld(what):
+    FINAL["fields"] += 1
+    return "<withheld by the final check: %s>" % what
+
+
+def final_check(value, safe=None, key=""):
+    """The backstop. `value` is what is about to be written (after the sanitiser); `safe(key, text)` names the strings the tool made
+    itself and registered (a file's path, a class id). Every other string, key or value, is withheld whole when shown_path would still
+    change it; a number of 32 digits or more and any value of a type JSON does not carry are withheld too. Returns the value to write."""
+    if isinstance(value, str):
+        if (safe is not None and safe(key, value)) or shown_path(value) == value:
+            return value
+        return _final_withheld("%d characters" % len(value))
+    if isinstance(value, bool) or value is None or isinstance(value, float):
+        return value
+    if isinstance(value, int):
+        return value if abs(value) < LONG_NUMBER else _final_withheld("a number of %d bits" % value.bit_length())
+    if isinstance(value, dict):
+        out = {}
+        for k, v in value.items():
+            name = k if isinstance(k, str) else str(k)
+            if shown_path(name) != name:
+                name = _final_withheld("a key of %d characters" % len(name))
+            base, n = name, 1
+            while name in out:
+                n += 1
+                name = "%s #%d" % (base, n)
+            out[name] = final_check(v, safe, k if isinstance(k, str) else "")
+        return out
+    if isinstance(value, (list, tuple)):
+        return [final_check(v, safe) for v in value]
+    return _final_withheld("a value of type %s" % type(value).__name__)
+# END SHARED ONE WAY OUT
+
 
 BUDGET_SECONDS = 3500                     # recipe.json gives this recipe 3600
 GRACE_SECONDS = 10                        # a program that outlives its own clock by this much is ended
@@ -515,11 +619,16 @@ def version_of(exe, out_dir):
 def shown_text(text, keep):
     """A string an engine printed, withheld whole and then cut to `keep` characters: a cut before the withholding could leave the head of
     a token too short to be recognised as one."""
-    return scrub(cell(text), "text")[:keep]
+    return shown_path(scrub(cell(text), "text"))[:keep]
 
 
 def shown_key(key):
-    return scrub(cell(str(key)), "names")
+    return shown_path(scrub(cell(str(key)), "names"))
+
+
+def shown_cell(value):
+    """One cell of matches.tsv: through the sanitiser, then the backstop."""
+    return final_check(shown_path(cell(scrub(str(value), "names"))))
 
 
 def first_line(raw):
@@ -582,6 +691,15 @@ def judge(engine, rc, timed_out, doc, why):
     known = [k for k in FLOSS_KINDS if isinstance(strings.get(k), list)]
     if not known:
         return "partial", "floss's `strings` mapping holds none of the string kinds this recipe reads (%s) as a list; the whole output is kept" % ", ".join(FLOSS_KINDS), details
+    # A kind whose analysis floss's own flags say was off (analysis.enable_<kind> false, as for a .NET file) was not run: its empty list
+    # is not "none found", and only the kinds that ran are counted as read.
+    off = [k for k in FLOSS_KINDS if analysis.get("enable_" + k) is False]
+    ran = [k for k in known if k not in off]
+    if off:
+        details["kinds_not_run"] = off
+        return "partial", ("floss exited 0 and its analysis flags say %s %s not run (analysis.enable_* false): an empty list of %s is not 'none found'; "
+                           "the kinds that ran: %s" % (", ".join(off), "was" if len(off) == 1 else "were", "that kind" if len(off) == 1 else "those kinds",
+                                                         ", ".join(ran) or "none")), details
     return "complete", "floss exited 0 and wrote a JSON object whose `strings` mapping holds %s" % ", ".join(known), details
 
 
@@ -597,7 +715,7 @@ def write_matches(doc, path):
             attack = meta.get("attack") if isinstance(meta.get("attack"), list) else []
             ids = [str(a.get("id")) for a in attack if isinstance(a, dict) and a.get("id")]
             matches = rule.get("matches") if isinstance(rule, dict) else None
-            fh.write("%s\t%s\t%s\t%s\n" % (cell(scrub(str(name), "names")), cell(scrub(str(meta.get("namespace", "")), "names")), ",".join(cell(scrub(i, "names")) for i in ids),
+            fh.write("%s\t%s\t%s\t%s\n" % (shown_cell(name), shown_cell(meta.get("namespace", "")), ",".join(shown_cell(i) for i in ids),
                                            len(matches) if isinstance(matches, (list, dict)) else ""))
             rows += 1
     return rows, False
@@ -687,8 +805,17 @@ def write_receipt(out_dir, name, text):
 
 
 def write_results(state):
+    """The receipt and the index, each through the backstop (final_check) as the last step: a field it withholds here or in matches.tsv
+    is counted in the receipt, named in its errors, and makes a complete result partial (a fault of this recipe, never of the file)."""
     status, coverage, lines = assemble(state)
     out_dir = state["out_dir"]
+    lines = ["\t".join(final_check(part) for part in l.split("\t")) for l in lines]
+    coverage = final_check(coverage)
+    if FINAL["fields"]:
+        coverage["withheld_by_final_check"] = FINAL["fields"]
+        coverage["errors"].append("the final check withheld %d field(s) the sanitiser had let through: each is given by its length; a fault of this recipe, not of the file" % FINAL["fields"])
+        if coverage["status"] == "complete":
+            coverage["status"] = status = "partial"
     write_receipt(out_dir, state["coverage_name"], json.dumps(coverage, indent=2) + "\n")
     write_receipt(out_dir, state["index_name"], "".join(l + "\n" for l in lines))
     return status

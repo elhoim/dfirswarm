@@ -18,6 +18,7 @@ import { test } from "node:test";
 import { RE, childrenOf, gone, pidFile, put, startDetached, stub, withCwd } from "./pack-re-harness.ts";
 import type { Json } from "./pack-re-harness.ts";
 import { buildPe } from "./pack-re-harness.ts";
+import { canaries, needles } from "./pack-re-canary-shapes.ts";
 
 const RECIPE_DIR = join(RE, "recipes", "capa-floss");
 const CAPA_FLOSS = join(RECIPE_DIR, "run.py");
@@ -346,5 +347,49 @@ test("an engine's text is withheld whole and then cut: a token across the cut le
     const c = await coverage(out);
     assert.match(c.engines.capa.version_command.first_line, /^(v )+<tok/);
     assert.ok(Object.keys(c.engines.floss.analysis_enabled).every((k) => /withheld/.test(k)));
+  });
+});
+
+test("every shape the one way out withholds, in capa's rule set paths, rule names and namespaces and in a path of the target: none reaches the receipt, the index or matches.tsv", async () => {
+  await withCwd(async (cwd, bin) => {
+    await sample(cwd);
+    const all = canaries(200, 9).map(([, c]) => c);
+    const capa = JSON.stringify({
+      meta: { version: "stand-in", analysis: { rules: all.map((c) => `/opt/rules/${c.plant}`) } },
+      rules: Object.fromEntries(all.map((c, i) => [`rule ${i} ${c.plant}`, { meta: { namespace: `ns/${c.plant}`, attack: [{ id: c.plant }] }, matches: [[4096, {}]] }])),
+    });
+    const say = (json: string): string => `if [ "$1" = "--version" ]; then echo v; exit 0; fi\ncat <<'JSON'\n${json}\nJSON\n`;
+    await engines(bin, { capa: say(capa) });
+    const out = join(cwd, "catalog");
+    recipe(cwd, bin, ["run", "--target", "TARGET", "--out", out]);
+    const c = await coverage(out);
+    assert.equal(c.withheld_by_final_check, undefined, "the sanitiser withheld every shape: the backstop caught nothing");
+    assert.equal(c.engines.capa.rule_sets.length, all.length);
+    for (const name of ["coverage.json", "index.tsv", "matches.tsv"]) {
+      const text = await readFile(join(out, name));
+      for (const cn of all) for (const n of needles(cn)) assert.ok(!text.includes(n.bytes), `${name}: ${n.label}`);
+    }
+  });
+});
+
+test("floss with a string kind whose analysis its own flags say was off (a .NET-style run) is partial: an empty list of a kind that was not run is not 'none found'", async () => {
+  await withCwd(async (cwd, bin) => {
+    await sample(cwd);
+    const floss = JSON.stringify({ analysis: { enable_static_strings: true, enable_stack_strings: false, enable_tight_strings: false, enable_decoded_strings: false },
+      strings: { static_strings: ["a"], stack_strings: [], tight_strings: [], decoded_strings: [] } });
+    const say = (json: string): string => `if [ "$1" = "--version" ]; then echo v; exit 0; fi\ncat <<'JSON'\n${json}\nJSON\n`;
+    await engines(bin, { floss: say(floss) });
+    const out = join(cwd, "catalog");
+    recipe(cwd, bin, ["run", "--target", "TARGET", "--out", out]);
+    const c = await coverage(out);
+    assert.equal(c.engines.floss.status, "partial", JSON.stringify(c.engines.floss));
+    assert.deepEqual(c.engines.floss.kinds_not_run, ["stack_strings", "tight_strings", "decoded_strings"]);
+    assert.match(c.engines.floss.reason, /were not run .*the kinds that ran: static_strings/);
+    assert.equal(c.status, "partial");
+    // every kind enabled: complete, as before
+    const out2 = join(cwd, "catalog2");
+    await engines(bin, { floss: say(JSON.stringify({ analysis: { enable_static_strings: true, enable_stack_strings: true, enable_tight_strings: true, enable_decoded_strings: true }, strings: { static_strings: [], stack_strings: [], tight_strings: [], decoded_strings: [] } })) });
+    recipe(cwd, bin, ["run", "--target", "TARGET", "--out", out2]);
+    assert.equal((await coverage(out2)).engines.floss.status, "complete");
   });
 });
