@@ -615,3 +615,24 @@ test("fuzz: in scan mode an object stream's objects past max_objects are not ind
     assert.ok(a.limits_hit.some((l: string) => /more than max_objects \(5\) objects/.test(l)), JSON.stringify(a.limits_hit));
   });
 });
+
+test("fuzz: a number of thousands of digits is an unreadable object, not a failure of the call", async () => {
+  await withCwd(async (cwd) => {
+    const pdf = buildPdf([CATALOG(), PAGES, PAGE(), { num: 4, body: `[ ${"9".repeat(6000)} ]` }], "/Root 1 0 R");
+    const { a } = await run(cwd, "digits.pdf", pdf.file);
+    assert.ok(a.problems.some((p: string) => /object 4 could not be read: a number of 6000 characters/.test(p)), JSON.stringify(a.problems));
+  });
+});
+
+test("fuzz: thousands of trailer dictionaries that never close, read by scanning, do not keep their windows in memory", async () => {
+  await withCwd(async (cwd) => {
+    const head = buildPdf([CATALOG(), PAGES, PAGE()], "/Root 1 0 R");
+    const broken = Buffer.from(head.file.toString("latin1").replace(`startxref\n${head.xrefAt}`, `startxref\n${head.xrefAt + 3}`), "latin1");
+    // Each "trailer <<" opens a dictionary that the next line's "trailer" keyword breaks: every one is a failed parse at its own offset.
+    const file = Buffer.concat([broken, Buffer.from("trailer\n<< /Size 9 /Root 1 0000000000 00001 f \n".repeat(6000), "latin1")]);
+    await put(cwd, "work/trailers.pdf", file);
+    const { run: r, rssMb } = bounded(cwd, { path: "work/trailers.pdf" }, 60_000);
+    body(r);
+    assert.ok(rssMb < 300, `the call peaked at ${rssMb.toFixed(0)} MB of memory`);
+  });
+});

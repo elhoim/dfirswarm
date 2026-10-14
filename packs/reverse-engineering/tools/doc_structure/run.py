@@ -2201,6 +2201,8 @@ class Lexer:
                 raise PdfError("a malformed number at %d" % self.pos)
             self.pos = m.end()
             text = m.group()
+            if len(text) > 64:
+                raise PdfError("a number of %d characters at %d" % (len(text), m.start()))
             if b"." in text:
                 try:
                     return float(text)
@@ -2389,7 +2391,8 @@ class Pdf:
         """fn(lexer) over a window at `off` that grows (64 KiB, x4, up to 32 MiB) while the object runs past it. A parse that fails
         at an offset is remembered, so that many references to one bad object do not grow the window again and again."""
         if (off, kind) in self.failed_at:
-            raise self.failed_at[(off, kind)]
+            cls, message = self.failed_at[(off, kind)]
+            raise cls(message)
         window = 1 << 16
         try:
             while True:
@@ -2405,8 +2408,9 @@ class Pdf:
                         raise ParseBound("an object longer than the %d-byte window" % MAX_OBJECT_WINDOW)
                     window *= 4
         except PdfError as exc:
+            # The class and the message only: the exception itself holds its traceback, and through it the window it was read from.
             if len(self.failed_at) < 1_000_000:
-                self.failed_at[(off, kind)] = exc
+                self.failed_at[(off, kind)] = (type(exc), str(exc))
             raise
 
     def read_indirect(self, off, expect=None):
@@ -2738,7 +2742,10 @@ class Pdf:
         if not (isinstance(n, int) and isinstance(first, int)) or n < 0 or first < 0 or n > MAX_HEADER_PAIRS:
             raise PdfError("object stream %d has no usable /N and /First" % num)
         data = self.decode(o)
-        nums = [int(x) for x in re.findall(rb"[0-9]+", data[:first])[:2 * n]]
+        found = re.findall(rb"[0-9]+", data[:first])[:2 * n]
+        if any(len(x) > 20 for x in found):
+            raise PdfError("object stream %d's header holds a number of more than 20 digits" % num)
+        nums = [int(x) for x in found]
         if len(nums) < 2 * n:
             raise PdfError("object stream %d lists %d of the %d objects it declares" % (num, len(nums) // 2, n))
         res = (data, first, [(nums[2 * i], nums[2 * i + 1]) for i in range(n)])
