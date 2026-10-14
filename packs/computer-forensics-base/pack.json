@@ -1,7 +1,7 @@
 {
   "id": "computer-forensics-base",
   "name": "Computer Forensics Base Pack",
-  "version": "1.9.0",
+  "version": "1.10.0",
   "description": "Method and tooling every examination needs, whatever the platform: read the container and find the volume, verify the evidence, read the catalogue, extract and carve, tell an encrypted volume from an unreadable one, keep a timeline, cite what you claim.",
   "licence": "AGPL-3.0-or-later",
   "authors": [
@@ -16,7 +16,7 @@
   "checksums": {
     "sha256": {
       "LICENCE": "1df0d6665bd036fc44a288726c699f4955ce7e17e3248a88a58dc38819203250",
-      "README.md": "e4df47e67a8194e4ef33885ed1e5b34fdf8cd457ca25a0fa0353a9cff52ef3d5",
+      "README.md": "883436ac4bac7d356bb3ff7efb9855b0b12ecaaf753de94663545ebd1c667bc8",
       "tools/image_layout/manifest.json": "a14059c9b70056357766492b45e54b6ecb60bca0252fd00a2f4463df948ee589",
       "tools/image_layout/run.py": "f697a814e00af50644da5d071f4f8f749249631a6e1077d4e20272aaedf44482",
       "tools/file_carver/manifest.json": "8a694bf0247bb8dbddcaaee988dc3c90ccbeae387133a982a010d1f27c193248",
@@ -80,23 +80,34 @@
       "recipes/disk-volumes/run.sh": "4bfe04df31ff1bbea0beb223b464ce15b1eff82e3717b92b3f281d5bc59e97c7",
       "recipes/archive-members/recipe.json": "cdaff01b9a7bbd14cf5fc13ae56f5c435d4f49f8cd2199c9f67957ae8a50b1cd",
       "recipes/archive-members/run.py": "26e88b58f7051e257c494a6f4655df9d77de22fcd9413f5c687225dae89a0a0e",
-      "skills/reporting/citations.md": "49c1f131b6354dfe89acc03aa9b9882e66e504de0cd586b82a562ea4f0876ef7",
-      "skills/reporting/disagreement.md": "de30b9cbb6bfd9763f01974f5deccb41e154556e9b96e3be91d67dd07309ad38",
-      "skills/evidence/ad1.md": "058097c0ea451441f18df6e3183c0e672a0d7e65e9f71aae827846eb411adbe8",
-      "skills/evidence/archives.md": "b01dbad7cc5461e4b824e16ff2886d285d7fb1f7193766ffb73de61e43317b9b",
-      "skills/evidence/catalog.md": "96437aa93389248a9b4db142a20be7dbbb9df8610084bf580a8e4a7d6f123e48",
-      "skills/evidence/collections.md": "6f11064ae8bada51a86806e1b8543cbbe66d9d5ef5206885f59b9e76ce8a9000",
-      "skills/evidence/imaging.md": "5b6eb0952cdd502843966c90be7fdfb3bd0ad89371f8b2dc28fa5ca07965f090",
-      "skills/evidence/verify.md": "40f355a05dbf2e93d8fa91031fafec84d519ccfd0dcc7516d17a2e884caf68fe",
-      "skills/filesystem/carving.md": "0d39b2c462bf9fa3aaec9b44d0ba94d9d9725ff3b258f05338685ebea2e7464a",
-      "skills/filesystem/encrypted.md": "11bf85f38d8c5ab201c534074c5441ed039cc8b79020f7cd1eff83f5fe0bda8f",
-      "skills/filesystem/extract.md": "8a05c94d3fb9577e27457383d655523baa1bb5e573462e101ab17be832d29f31",
-      "skills/data/sqlite.md": "2401040bf45219294a6401d5146091142289d68114de55dedd784df51fa2ea1d",
-      "skills/timeline/build.md": "183f4672ad13c22acaf64c85fa9fa7422cdc87b84c0175dc3b07bb99cf7a3223",
-      "skills/timeline/super.md": "f2134d6d0a7851c83a7d9cacec933b90eae610e24f9b8419d6f03c933192abf7",
+      "skills/reporting/citations.md": "b2bd8e6562e54ff3676f14efdf80a9afad367fa6edcb307881b22b27b7ed9a6a",
+      "skills/reporting/disagreement.md": "38318108c68c645bb075c991b4fc8e01c22f9c7111de5a39fc255009b8884913",
+      "skills/evidence/ad1.md": "a851f41abc3c008238a79ffdb901427c9927662b2c8878a009346560ad719b73",
+      "skills/evidence/archives.md": "e9f7699da7c7c43cbca6416c430e1cc0378c2d973b0eef14bd2446fc75866635",
+      "skills/evidence/catalog.md": "2c3bb4e6cbdb90f52dc4e29334448ce7518b0fe236f660385b6182e2c9431399",
+      "skills/evidence/collections.md": "81b789869278ecd15b3b585ac580984e86b4a53d56631f44e83568a5baf5280e",
+      "skills/evidence/coverage.md": "882867d4d9f9864ff47b1e63c831518fea6935e1fe0eada75ad075330a8da581",
+      "skills/evidence/imaging.md": "239c48fc38a1660abccc6bc53790c9e012f242575bbcd2b5e1be39aaff22a3da",
+      "skills/evidence/provenance.md": "8f1e0e8d03af0aab8f6b874758ad3681d3342688d1dd45fda1912eefff49e888",
+      "skills/evidence/scope.md": "0c9986373d55c41791539c1fe7f2c5702be8e3425b1868a043acf52a1d7e1ee1",
+      "skills/evidence/tool-validation.md": "4aad6fb98c16e8db90fed3bda3e641d1f7610875c6a265b4a1d20827358de119",
+      "skills/evidence/verify.md": "24e5346b06f21718ef5416c48b99aff01c7df3f21560f5831bad859632fea699",
+      "skills/filesystem/carving.md": "13d3145b7c0ef55c16631dca981cb999bbb87e0362a8e46eacc54f82aa4ecce0",
+      "skills/filesystem/encrypted-metadata.md": "a1e7f0b4fe965b6d37deea5290448731ce42a89a59ca70617ab71fc7069fbf4f",
+      "skills/filesystem/encrypted.md": "9bc955d6545f7e1bf48eac4b75ca3c47c5575816f763ae68aaa4631a8fc5bc47",
+      "skills/filesystem/extract.md": "4a4c8eb9e87717e48c5f40836402f64ce9c73463f53b93cc1c1f5087623f20d3",
+      "skills/filesystem/layers.md": "745664840470c653d7ffa8332ac740440965e36da35402bad49e7e6c03a271d8",
+      "skills/filesystem/scanners.md": "e00e7980a9dfa3a8e63c1aea7391d62e9e04616a7b63bc7dd9d11e5f9d7248b3",
+      "skills/filesystem/semantics.md": "d676eedc2aab54b5cb1d8b293273dbe5c408ccef60cda2e42fd64df62a9e7c91",
+      "skills/data/documents-media.md": "4588caeba70b1f3973bba5973625763fe2488ac75893b9acb05cc3c7fea852f2",
+      "skills/data/sqlite.md": "9abee8e5b727b20db6394aa095cfdd50749f571739cb1a833494363b390beced",
+      "skills/timeline/build.md": "74869b41d7b2b440c8b059cdb82189f527211ae78ae1f0dfe1260858fa9ec6fd",
+      "skills/timeline/clocks.md": "06a62c37c33891f434cc5edb04b0d0f49d8caebf5849e30b87cc479e0e5ee2fe",
+      "skills/timeline/super-scope.md": "402ed8b0b1d7e91435a1c172c7aebdea12ab1f812ba81b8303e4a24108b7d798",
+      "skills/timeline/super.md": "e660b2a874ddb61d8678714ac94ba339ec916d9fa55a8b9bd7432da657a8fbf3",
       "requires/host.json": "9c93c8306c96e4259aa50ca874e8a210c5a2b9b5d6e6fd4f3db3fd2e2f7421e1",
       "requires/python.txt": "e045dd44c9347ec21afa34ac093ea33e15085d64744758eb3d5b6b970884ab24",
-      "skills/INDEX.md": "6bb4fe0391a91c74e353bbd3bb095e07273ca20f127249a6e58c3ee70e8d0b3d"
+      "skills/INDEX.md": "05d8abaef9cc5bbe30017f49096229b239d2416806c7a13120696581cbda6320"
     }
   },
   "tools": [
@@ -117,7 +128,7 @@
     "timeline_super",
     "timestamp_decode"
   ],
-  "skills": 14,
+  "skills": 25,
   "recipes": [
     "computer-forensics-base/ad1-items",
     "computer-forensics-base/archive-members",
@@ -127,23 +138,15 @@
   ],
   "unreferenced_ok": [
     {
-      "name": "pdftotext",
-      "why": "declared for the document-content skill planned for the next change; no skill of this pack names it yet"
-    },
-    {
-      "name": "steghide",
-      "why": "declared for the document-content skill planned for the next change; no skill of this pack names it yet"
-    },
-    {
-      "name": "Pillow",
-      "why": "for an agent's own scripts over an image (requires/python.txt); the document-content skill planned for the next change will name it"
-    },
-    {
       "name": "ccl_indexeddb_dump",
       "why": "declared for the browser structured-storage wrapper and skill planned for a later change; no skill of this pack names it yet"
     }
   ],
   "method_only": [
+    {
+      "path": "skills/evidence/scope.md",
+      "why": "a method skill about what the case allows the examination to answer; the question register, the leads and the operator requests it names are the harness's, not a tool or program of this pack"
+    },
     {
       "path": "skills/reporting/citations.md",
       "why": "a method skill about recording and citing a claim; the ledger, the job references and the review acts it describes are the harness's, not a tool or program of this pack"

@@ -11,22 +11,33 @@ Platform-specific artefact knowledge lives in the packs that depend on this one.
 
 ## What it carries
 
-**Fourteen skills**, fetched one at a time by the agents that need them:
+**Twenty-five skills**, fetched one at a time by the agents that need them. Each is a leaf of at most 800 tokens that opens with "Use when ... Not for ..."; a topic that needs more has a second-level leaf the first one points to ("only if"), so `skills/INDEX.md` lists both:
 
 | | |
 | --- | --- |
+| `evidence/scope` | what the case lets the examination answer: the questions, the premises, the exhibits, and when a missing source becomes an acquisition request |
 | `evidence/verify` | establish the evidence's identity, integrity and provenance, and what a hash match does and does not show |
-| `evidence/imaging` | the container, the storage layers, the address space and the offset every command needs |
+| `evidence/provenance` | hash domains (container, decoded stream, volume, extracted object, transformed output) and the chain from the delivered exhibit to a result; the digest of a secret is never written |
+| `evidence/imaging` | the probe, the partition table and the sector offset every command needs |
+| `filesystem/layers` | container, backing chain, split set, mapping layer, encryption and snapshot: the address space each offset belongs to |
 | `evidence/catalog` | read the catalogue with its coverage and revision before you spend a token |
+| `evidence/coverage` | what a search did and did not cover: no hit, not searched, unsupported, failed, no trace expected; the `kind=coverage` record |
 | `evidence/collections` | the evidence is a zip, a directory tree or an AD1, not a disk: what it contains and what it cannot show |
 | `evidence/archives` | a zip, tar, 7z or compressed file: list it, extract it under budgets, never recreate a link, keep every name |
 | `evidence/ad1` | an FTK Imager logical image: list, extract and corroborate it |
+| `evidence/tool-validation` | validate a parser before you trust it: version, status counts, the decisive field against the bytes, independence, a positive control |
 | `data/sqlite` | a SQLite database is a set of files: snapshot it, apply its WAL in a copy, query the state you name |
+| `data/documents-media` | document and image content as layers: bytes, rendering, extracted text, embedded objects, metadata, OCR, concealment |
 | `filesystem/extract` | get a file out of an image, and say which record it came from |
+| `filesystem/semantics` | path against object identity, record reuse, sizes, allocation, deletion, times, snapshots and TRIM: what a recovered file does and does not show |
 | `filesystem/carving` | recover candidate structures where there is no file system, and say how far to trust them |
+| `filesystem/scanners` | needle and feature scans over raw bytes (`ioc_scan`, `chunk_needles`, `feature_scan`) |
 | `filesystem/encrypted` | a volume the toolkit cannot read: encryption is one explanation among several |
-| `timeline/build` | a timeline a second reader can trust: the raw value, the zone's history and clock uncertainty kept |
+| `filesystem/encrypted-metadata` | BitLocker, LUKS and FileVault metadata, protectors, and the rules for a key the case supplies |
+| `timeline/build` | the ledger's dated facts: the raw value kept, the conversion last |
+| `timeline/clocks` | timestamp semantics: epochs, zones and their daylight-saving history, ambiguous local times, drift, monotonic order |
 | `timeline/super` | the window an incident happened in, from evidence too large to read |
+| `timeline/super-scope` | parsers, zone and export for a Plaso timeline |
 | `reporting/citations` | every claim resolves to an inspectable observation, and a negative is bounded |
 | `reporting/disagreement` | disputing, correcting and republishing, through the ledger's own acts |
 
