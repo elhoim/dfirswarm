@@ -243,9 +243,11 @@ test("write_values puts the whole target in the sealed values file, in a job onl
     );
     await put(cwd, "work/v.pdf", pdf.file);
     const job = body(await asJob(DOC_STRUCTURE, cwd, { path: "work/v.pdf", write_values: true, extract_to: "out/js", extract: ["javascript"] }));
-    assert.equal(job.secret_values.written, 1);
+    // the target, and the digest of each of the two scripts written (in the values file, never in the answer)
+    assert.equal(job.secret_values.written, 3);
     const values = (await readFile(join(cwd, "out", "doc-structure-values.jsonl"), "utf8")).trim().split("\n").map((l) => JSON.parse(l));
     assert.equal(values[0].value, url);
+    assert.equal(values.filter((v: Json) => v.kind === "extracted_object_sha256").length, 2);
     assert.equal(values[0].finding_id, job.tables.pdf_actions.rows.find((r: Json) => r.action === "URI").finding_id);
     const scripts = await Promise.all(job.extracted.map(async (r: Json) => (await readFile(join(cwd, r.file))).toString("latin1")));
     assert.deepEqual(scripts.sort(), ["app.alert('streamed')", "inline()"]);

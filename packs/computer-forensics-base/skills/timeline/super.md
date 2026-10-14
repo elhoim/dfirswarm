@@ -9,7 +9,7 @@ requires_host: [log2timeline, psort, pinfo]
 
 Use when broad parser output could find the window an incident happened in or widen source coverage. Not for the facts you cite (`timeline/build`). Parsers, zone and export: `timeline/super-scope`.
 
-Two timelines, two jobs. The ledger is yours: facts you decided were worth recording, each cited and defensible. A super timeline is the machine's: what the enabled parsers produced from the sources they could read. Keep its scope, parser selection, inaccessible sources and errors with it, and never present it as the first.
+Two timelines, two jobs. The ledger is yours: facts you decided were worth recording, each cited and defensible. A super timeline is the machine's: what the enabled parsers produced from the sources they could read, not every timestamp on the volume. Keep its scope, parser selection, inaccessible sources and errors with it, and never present it as the first.
 
 Run `timeline_super` as a job with the source objects declared and a new directory. A job writes only `$OUT`: `out_dir` is a directory under `{OUT}` (the default there), a path under your own `work/<you>/` is rewritten to it, and `work/timeline` is not writable:
 

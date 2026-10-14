@@ -26,4 +26,6 @@ A volume with no recognised header and random-looking content is an unidentified
 
 **Write it as a bounded finding, not an obstacle:** "the second volume's metadata identifies BitLocker with a recovery-password protector and no clear key; no key material was supplied or found in the sources searched (named), so its contents were not read with this reader". That is a limit of this examination, not a statement that no route exists.
 
-**Does not show.** A BitLocker or LUKS header shows the format is present, not that the data is intact, was in use, or is recoverable. A protector list shows which mechanisms were enrolled when the metadata was last written, not who holds them or that they still work.
+**Does not show.** A BitLocker or LUKS header shows the format is present, not that the data is intact, was in use, or is recoverable.
+
+**Sensitive output.** `bdeinfo` prints salts, digests and protector identifiers: run it as a job and keep them out of posts (`filesystem/encrypted-metadata`).

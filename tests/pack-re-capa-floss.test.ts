@@ -309,3 +309,42 @@ test("a path with a token-shaped component is withheld in the receipt", async ()
     assert.match(JSON.parse(text).target, /^inputs\/<token-shaped text withheld 30 characters>\/s\.exe$/);
   });
 });
+
+test("a first run's index.tsv names its own receipt as this run's, and lists nothing as left by an earlier run; a second run's lists the first run's files", async () => {
+  await withCwd(async (cwd, bin) => {
+    await engines(bin);
+    await sample(cwd);
+    const out = join(cwd, "catalog");
+    recipe(cwd, bin, ["run", "--target", "TARGET", "--out", out]);
+    const index = await readFile(join(out, "index.tsv"), "utf8");
+    assert.doesNotMatch(index, /left by an earlier run/, index);
+    assert.match(index, /^coverage\.json\tthis run's receipt/m);
+    assert.match(index, /^index\.tsv\tthis run's index/m);
+    recipe(cwd, bin, ["run", "--target", "TARGET", "--out", out]);
+    const index2 = await readFile(join(out, "index-2.tsv"), "utf8");
+    assert.match(index2, /^coverage-2\.json\tthis run's receipt/m);
+    assert.doesNotMatch(index2, /^(coverage-2\.json|index-2\.tsv)\tleft by an earlier run/m);
+    assert.match(index2, /^coverage\.json\tleft by an earlier run/m);
+  });
+});
+
+test("an engine's text is withheld whole and then cut: a token across the cut leaves no head of it; the keys an engine's JSON names are withheld", async () => {
+  await withCwd(async (cwd, bin) => {
+    await sample(cwd);
+    const token = "ghp_Ab3dEf5hIj7lMn9pQr1tUv3xYz5bCd7fGh9j";
+    const line = "v ".repeat(96) + token;            // the 200-character cut falls inside the token
+    const capa = JSON.stringify({ meta: { version: "w ".repeat(26) + token, [token]: 1, analysis: { rules: ["/r"] } }, rules: {}, [token + "x"]: 2 });
+    const floss = JSON.stringify({ analysis: { ["enable_" + token]: true }, strings: { static_strings: [], [token]: [] }, [token]: 1 });
+    const say = (json: string): string => `if [ "$1" = "--version" ]; then echo '${line}'; exit 0; fi\ncat <<'JSON'\n${json}\nJSON\n`;
+    await engines(bin, { capa: say(capa), floss: say(floss) });
+    const out = join(cwd, "catalog");
+    recipe(cwd, bin, ["run", "--target", "TARGET", "--out", out]);
+    for (const name of ["coverage.json", "index.tsv"]) {
+      const text = await readFile(join(out, name), "utf8");
+      for (let i = 0; i + 9 <= token.length; i++) assert.ok(!text.includes(token.slice(i, i + 9)), `${name}: '${token.slice(i, i + 9)}'`);
+    }
+    const c = await coverage(out);
+    assert.match(c.engines.capa.version_command.first_line, /^(v )+<tok/);
+    assert.ok(Object.keys(c.engines.floss.analysis_enabled).every((k) => /withheld/.test(k)));
+  });
+});

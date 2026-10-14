@@ -58,7 +58,11 @@ test("P2 delay-load: 2,000 descriptors sharing one name table list it once, and 
     const a = body(r);
     assert.ok(seconds < 5 + 5, `the call took ${seconds.toFixed(1)} s`);
     assert.equal(a.tables.delay_imports.matched, 20_000, "the shared table is listed once");
-    assert.equal(a.delay_imports.libraries.filter((l: Json) => l.name_table_shared_with === 0).length, 1999);
+    // 2,000 libraries: the answer lists the first `limit` (1,000) and the whole list is in the file named beside it.
+    assert.equal(a.delay_imports.libraries.length, 1000);
+    assert.equal(a.delay_imports.libraries_not_shown.items, 2000);
+    const all = (await readFile(join(cwd, a.delay_imports.libraries_not_shown.all_results), "utf8")).trim().split("\n").map((l) => JSON.parse(l));
+    assert.equal(all.filter((l: Json) => l.name_table_shared_with === 0).length, 1999);
     assert.ok(a.problems.some((p: string) => /delay-load descriptor 1: its name table starts inside the one descriptor 0 uses/.test(p)), JSON.stringify(a.problems.slice(0, 3)));
     // Overlapping tables: descriptor d's table starts 8 x d bytes into descriptor 0's.
     for (let d = 1; d < 2000; d++) pe.file.writeUInt32LE(int0 + 8 * d, descs + 32 * d + 16);
@@ -119,7 +123,7 @@ test("REPRO: without a REPRO entry a debug stamp is a time; with one, no stamp o
   });
 });
 
-test("a section's PointerToRawData is read rounded down to 512 bytes, as the loader maps it, and the answer says so", async () => {
+test("PointerToRawData off a 512 multiple with FileAlignment 512 (PE/COFF: a multiple of FileAlignment, which is 512 or more here) is read rounded down to 512, and both values are in the answer", async () => {
   await withCwd(async (cwd) => {
     const pe = buildPeDirs({ exports: { functions: [{ name: "Alpha" }, { name: "Beta" }] } });
     const at = sectionHeaderAt(pe.file, ".rdata");
@@ -151,12 +155,21 @@ test("a file that is not a PE gives the first four bytes of its head only", asyn
   });
 });
 
-test("an extracted resource carries the sha256 of the bytes written", async () => {
+test("an extracted resource's digest is in no answer (a hash of a planted token confirms it); with write_values, in a job, it is in the values file only", async () => {
   await withCwd(async (cwd) => {
     const data = Buffer.from("resource bytes, exactly");
+    const digest = createHash("sha256").update(data).digest("hex");
     const pe = buildPeDirs({ resources: [{ type: 10, name: 1, lang: 1033, data }] });
-    const { a } = await run(cwd, "x.exe", pe.file, { extract_to: "work/s1/r", extract: ["resource:0"] });
-    assert.equal(a.extracted[0].sha256, createHash("sha256").update(data).digest("hex"));
+    const { a, text } = await run(cwd, "x.exe", pe.file, { extract_to: "work/s1/r", extract: ["resource:0"] });
+    assert.equal("sha256" in a.extracted[0], false);
+    assert.ok(!text.includes(digest));
+    const r = await asJob(PE_DIRECTORIES, cwd, { path: "work/x.exe", extract_to: "out/r", extract: ["resource:0"], write_values: true });
+    const job = body(r);
+    assert.ok(!r.stdout.includes(digest));
+    const values = (await readFile(join(cwd, "out", "pe-directories-values.jsonl"), "utf8")).trim().split("\n").map((l) => JSON.parse(l));
+    const v = values.find((x: Json) => x.field === "extracted_resource_sha256");
+    assert.equal(v.value, digest);
+    assert.equal(v.finding_id, job.extracted[0].sha256_in_values_file);
   });
 });
 

@@ -9,14 +9,14 @@ requires_host: [pdftotext, exiftool, steghide]
 
 Use when a document or an image carries the answer. Not for a protected or macro-bearing document's structure (check the run's tool inventory for a document-structure reader), for archives (`evidence/archives`) or for a phone's media database (the mobile pack, when loaded).
 
-Five layers, five different claims:
+Five layers, five claims:
 1. **The file's bytes.** Hash it; every other layer is derived from it (`evidence/provenance`).
 2. **What it shows when rendered.** Cite the page or region.
 3. **Extracted text.** `pdftotext` gives the text layer, not the page: reading order can differ (`-layout` keeps columns), text can be hidden or sit under an image, and a scanned page has none. Say which text you used.
 4. **Embedded objects and earlier revisions.** Images, attachments, scripts and fonts inside a file, and the earlier revisions a PDF keeps when it is updated by appending. List them; never open one as code, and treat a recovered revision as a candidate until its structure parses.
 5. **Metadata.** `exiftool` prints EXIF, XMP and PDF or Office properties without changing the file. These are values the creating software or a user wrote and can edit: author, application, device, GPS and times are claims of the file. A time there carries no zone unless the field says so (`timeline/clocks`). Absent metadata is not an absent event: editors and services strip it.
 
-**Images.** Use Pillow in your own script, read-only, to look at pixels, bit planes and a re-saved copy for comparison; write the copy under `$OUT` and never over the original. A re-save rewrites metadata and recompresses, so do not hash or date it as the original. Record the library version.
+**Images.** Use Pillow in your own read-only script to look at pixels, bit planes and a re-saved copy for comparison; in a job write the copy under `{OUT}` (in your shell, `work/<you>/`), never over the original. A re-save rewrites metadata and recompresses, so do not hash or date it as the original. Record the library version.
 
 **OCR.** Text read from an image is a reading with an error rate. Keep the image region beside the text, and check the characters a conclusion rests on (an identifier, an amount, a name) by looking at them.
 

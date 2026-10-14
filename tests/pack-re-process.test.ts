@@ -205,6 +205,16 @@ test("the withholding blocks of doc_probe, doc_structure, pe_directories, pe_inf
   for (const path of [DOC_PROBE, DOC_STRUCTURE, PE_DIRECTORIES, PE_INFO, CAPA_FLOSS]) assert.equal(sha(await block(path, "WITHHOLDING")), NETWORK_WITHHOLDING_SHA, path);
 });
 
+test("doc_structure, pe_directories and the capa-floss recipe carry one linear-spans block, bound after the shared withholding block it stands in for", async () => {
+  const blocks = await Promise.all([DOC_STRUCTURE, PE_DIRECTORIES, CAPA_FLOSS].map((p) => block(p, "LINEAR SPANS")));
+  for (const other of blocks.slice(1)) assert.equal(other, blocks[0]);
+  assert.match(blocks[0]!, /^token_spans = _linear_token_spans$/m);
+  for (const path of [DOC_STRUCTURE, PE_DIRECTORIES, CAPA_FLOSS]) {
+    const text = await readFile(path, "utf8");
+    assert.ok(text.indexOf("# END SHARED WITHHOLDING") < text.indexOf("# BEGIN SHARED LINEAR SPANS"), `${path}: the linear block follows the withholding block`);
+  }
+});
+
 test("the timeouts the pack sets itself are below the manifest's and the recipe's own limits", async () => {
   const fuzzy = await readFile(join(TOOLS, "fuzzy_hash", "run.py"), "utf8");
   const total = Number(/^TOTAL_BUDGET = (\d+)/m.exec(fuzzy)![1]);
