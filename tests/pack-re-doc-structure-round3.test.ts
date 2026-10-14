@@ -268,3 +268,25 @@ test("P1-4 a stream in a VBA storage that no dir names is said; a project with e
     assert.ok(h.problems.some((p: string) => /VBA: the stream Hidden in the VBA storage is named by no module of the dir stream read/.test(p)), JSON.stringify(h.problems));
   });
 });
+
+// --- P2: the scan for trailers has a share of its own ----------------------------------------------------------------------------
+
+test("P2 a file with no startxref and a 16 MB tail of 'trailer' keywords: the census, the catalog and the JavaScript action are still read, and the limit says what it stopped", async () => {
+  await withCwd(async (cwd) => {
+    const head = Buffer.from("%PDF-1.7\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R /OpenAction 3 0 R >>\nendobj\n2 0 obj\n<< /Type /Pages /Kids [] /Count 0 >>\nendobj\n" +
+      "3 0 obj\n<< /S /JavaScript /JS 4 0 R >>\nendobj\n4 0 obj\n<< /Length 11 >>\nstream\napp.alert()\nendstream\nendobj\n", "latin1");
+    const junk: Buffer[] = [];
+    for (let i = 0; i < 40; i++) junk.push(Buffer.from("trailer<</A(", "latin1"), Buffer.alloc(400_000, 0x20));
+    await put(cwd, "work/tail.pdf", Buffer.concat([head, ...junk]));
+    const a = body(await tool(DOC_STRUCTURE, cwd, { path: "work/tail.pdf" }));
+    assert.equal(a.structure_source, "scan of the file for object headers");
+    assert.ok(a.census, JSON.stringify(Object.keys(a)));
+    assert.equal(a.catalog.object, 1);
+    assert.equal(a.actions.count, 1);
+    assert.equal(a.actions.by_type.JavaScript, 1);
+    assert.ok(a.limits_hit.every((l: string) => !/its budget for one call/.test(l)), JSON.stringify(a.limits_hit));
+    // each keyword begins a dictionary longer than 1 MiB, and the search's own share ends it before the last few: both said
+    assert.ok(a.limits_hit.some((l: string) => /^\d+ 'trailer' keyword\(s\) found by the scan begin a dictionary of more than 1 MiB/.test(l)), JSON.stringify(a.limits_hit));
+    assert.ok(a.limits_hit.some((l: string) => /the scan for trailers spent its share of the parser's budget/.test(l)), JSON.stringify(a.limits_hit));
+  });
+});

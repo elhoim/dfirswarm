@@ -2684,23 +2684,40 @@ class Meter:
     walks on, so no loop of the lexer (a string, a hex string, a name, a number, a comment, white space, an array, a dictionary)
     and no window it is retried in outlives max_seconds or the budgets: each ends as a named limit."""
 
-    __slots__ = ("pdf", "left", "calls")
+    __slots__ = ("pdf", "left", "calls", "cap", "pool")
 
-    def __init__(self, pdf, cap=OBJECT_SCAN):
-        self.pdf, self.left, self.calls = pdf, cap, 0
+    def __init__(self, pdf, cap=OBJECT_SCAN, pool=None):
+        self.pdf, self.left, self.calls, self.cap, self.pool = pdf, cap, 0, cap, pool
 
     def charge(self, n):
         self.left -= n
         pdf = self.pdf
-        pdf.scan_left -= n
-        if self.left < 0:
-            raise ParseBound("an object that takes more than %d bytes of scanning over all the windows it is read in" % OBJECT_SCAN)
-        if pdf.scan_left < 0:
-            raise ScanSpent("the PDF parser scanned %d bytes, its budget for one call (%d times the file's size plus %d): the objects not read after that "
-                            "are counted in census.objects_not_read_at_a_limit" % (pdf.scan_total, SCAN_FACTOR, SCAN_FLOOR))
+        if self.pool is not None:
+            self.pool.left -= n
+            if self.left < 0:
+                raise ParseBound("%s of more than %d bytes" % (self.pool.what, self.cap))
+            if self.pool.left < 0:
+                raise ScanSpent(self.pool.spent)
+        else:
+            pdf.scan_left -= n
+            if self.left < 0:
+                raise ParseBound("an object that takes more than %d bytes of scanning over all the windows it is read in" % OBJECT_SCAN)
+            if pdf.scan_left < 0:
+                raise ScanSpent("the PDF parser scanned %d bytes, its budget for one call (%d times the file's size plus %d): the objects not read after that "
+                                "are counted in census.objects_not_read_at_a_limit" % (pdf.scan_total, SCAN_FACTOR, SCAN_FLOOR))
         self.calls += 1
         if (n >= 4096 or not self.calls & 63) and time.monotonic() > pdf.ctx.deadline:
             raise TimeUp("time: a PDF object was being parsed when max_seconds (%d) was reached; what was read is reported, and the counts are lower bounds" % pdf.ctx.seconds)
+
+
+class ScanPool:
+    """A share of scanning set apart from the call's budget for one search (the scan for trailers in a file whose cross-reference chain
+    cannot be used): spending it ends that search, named, and leaves the call's budget to the census and the trace."""
+
+    __slots__ = ("left", "what", "spent")
+
+    def __init__(self, left, what, spent):
+        self.left, self.what, self.spent = left, what, spent
 
 
 class Lexer:
@@ -3022,7 +3039,7 @@ class Pdf:
     def lexer(self, off, end, final, meter):
         return Lexer(self.blob, off, end, final, self.nesting, meter, self.cfg["max_stream_bytes"])
 
-    def parse_at(self, off, fn, kind="object"):
+    def parse_at(self, off, fn, kind="object", cap=OBJECT_SCAN, pool=None):
         """fn(lexer) over a window at `off` that grows (64 KiB, x4, up to 32 MiB) while the object runs past it. Every attempt is
         charged to one meter, so the windows of one object together scan at most OBJECT_SCAN bytes, and the clock is read before
         each attempt. A failure is remembered by (offset, kind) and never read again, and only a failure that a larger window cannot
@@ -3033,9 +3050,11 @@ class Pdf:
         if (off, kind) in self.failed_at:
             cls, message = self.failed_at[(off, kind)]
             raise cls(message)
-        if self.scan_left <= 0:
+        if pool is not None and pool.left <= 0:
+            raise ScanSpent(pool.spent)
+        if pool is None and self.scan_left <= 0:
             raise ScanSpent("the PDF parser's scan budget for this call is spent: the objects not read after that are counted in census.objects_not_read_at_a_limit")
-        meter = Meter(self)
+        meter = Meter(self, cap, pool)
         window = 1 << 16
         try:
             while True:
@@ -3747,7 +3766,7 @@ def probe_pdf(blob, ctx, extractor):
     try:
         _probe_pdf(blob, ctx, extractor, out)
     except Over as exc:
-        ctx.limit_hit("%s; the PDF answer holds what was read before it" % exc)
+        ctx.limit_hit("%s; the PDF answer holds what was read before it%s" % (exc, "" if "census" in out else " (the census was not reached: the answer has none)"))
     out.setdefault("coverage", {"structures_read": PDF_READ, "structures_not_read": PDF_NOT_READ})
     return out
 
@@ -3824,6 +3843,10 @@ def _probe_pdf(blob, ctx, extractor, out):
             spans = stream_spans(blob, ctx, cfg["max_objects"] * 4)
             starts = [a for a, _b in spans]
             ignored = {"in_stream_data": 0, "in_a_comment": 0}
+            # The search has a share of its own (a quarter of the call's scan budget, at most 64 MiB) and a trailer dictionary is read to
+            # 1 MiB at most: a junk tail of 'trailer' keywords ends this search, named, and the census and the trace still run.
+            pool = ScanPool(min(pdf.scan_total // 4, 64 << 20), "a trailer dictionary found by the scan",
+                            "the scan for trailers spent its share of the parser's budget: the 'trailer' keywords after that were not read")
             for k, t in enumerate(re.finditer(rb"trailer[\x00\t\n\x0c\r ]*<<", blob)):
                 if not (k + 1) & 255 and ctx.expired("the scan for trailers"):
                     break
@@ -3835,12 +3858,20 @@ def _probe_pdf(blob, ctx, extractor, out):
                     ignored["in_a_comment"] += 1
                     continue
                 try:
-                    d, _ = pdf.parse_at(t.end() - 2, lambda lx: lx.parse(), "dictionary")
+                    d, _ = pdf.parse_at(t.end() - 2, lambda lx: lx.parse(), "dictionary", 1 << 20, pool)
+                except ParseBound:
+                    ignored["over_1_mib"] = ignored.get("over_1_mib", 0) + 1
+                    continue
                 except PdfError:
                     continue
+                except Over as exc:
+                    ctx.limit_hit(str(exc))
+                    break
                 if isinstance(d, dict):
                     pdf.trailers.insert(0, trailer_view(d))
-            if ignored["in_stream_data"] or ignored["in_a_comment"]:
+            if ignored.get("over_1_mib"):
+                ctx.limit_hit("%d 'trailer' keyword(s) found by the scan begin a dictionary of more than 1 MiB: not read as trailers" % ignored["over_1_mib"])
+            if ignored["in_stream_data"] or ignored["in_a_comment"] or ignored.get("over_1_mib"):
                 out["trailer_keywords_ignored"] = ignored
                 anomalies.append("%d 'trailer' keyword(s) inside stream data and %d in a comment were not taken for trailers" % (ignored["in_stream_data"], ignored["in_a_comment"]))
         anomalies.append("the cross-reference chain could not be used; the object index comes from scanning the file for object headers, and the newest definition of a number wins")
