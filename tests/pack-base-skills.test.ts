@@ -265,12 +265,12 @@ const paragraph = (s: Skill, lead: string): string => {
 
 test("a full search never shows an event did not happen: coverage agrees with citations and the worker prompt", async () => {
   const skills = await load(SKILLS);
-  const wording = paragraph(skills.get("evidence/coverage")!, "**Wording.**");
+  const lead = paragraph(skills.get("evidence/coverage")!, "**Wording.**");
   // The old text allowed the phrase "on a search the harness found complete".
-  assert.doesNotMatch(wording, /"X did not happen" is for a question/);
-  assert.match(wording, /"X did not happen" is never written, even after a search the harness found complete/);
-  assert.match(wording, /answers whether X is in those sources, not whether the event occurred/);
-  // No skill quotes "did not happen" as wording to use: where a skill quotes it, it is the phrase to avoid.
+  assert.doesNotMatch(lead, /"X did not happen" is for a question/);
+  assert.match(lead, /"X did not happen" is never written, even after a search the harness found complete/);
+  assert.match(lead, /answers whether X is in those sources, not whether the event occurred/);
+  // No skill quotes "did not happen" as a phrase to use: where a skill quotes it, it is the phrase to avoid.
   for (const s of skills.values()) {
     for (const line of s.body.split("\n")) {
       if (/"[^"\n]*did not happen"/.test(line)) assert.match(line, /never/, `${s.id} quotes "did not happen" without saying never`);
