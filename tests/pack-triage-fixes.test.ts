@@ -408,3 +408,32 @@ async function readdirSafe(dir: string): Promise<string[]> {
   const { readdir } = await import("node:fs/promises");
   return readdir(dir).catch(() => []);
 }
+
+const LATE_CODE = `
+import json, os, sys, tempfile
+work = tempfile.mkdtemp()
+os.chdir(work)
+os.makedirs("out")
+os.environ.update(JOB_ID="j000001", OUT=os.path.join(work, "out"), SECRET_OUTPUT="1")
+ns = {}
+exec(json.load(sys.stdin)["block"], ns)
+ns["VALUES"][0] = ns["SecretValues"](True, "v.jsonl", "t")
+early = ns["scrub"]("early ghp_" + "Zq7Svb9Kt0" * 4)
+doc = ns["release"]({"status": "complete", "withheld": {"strings_withheld": 1, "values": {}}, "late": "AKIA" + "ZQ7KX3MPL2N4R6TY", "early": early})
+rows = [json.loads(l) for l in open(os.path.join(work, "out", "v.jsonl"))]
+print(json.dumps({"doc": doc, "rows": len(rows), "late_in_file": any("AKIAZQ7KX3MPL2N4R6TY" in r["value"] for r in rows)}))
+`;
+
+test("a string first judged when the answer is serialised is a finding of the values file too, and the file is closed after it", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const { runPySnippet } = await import("./tool-library-harness.ts");
+  const text = await readFile(ID, "utf8");
+  const block = text.slice(text.indexOf("# ---- BEGIN SHARED BLOCK"), text.indexOf("# ---- END SHARED BLOCK"));
+  const run = await runPySnippet(LATE_CODE, [], { block });
+  assert.equal(run.code, 0, run.stderr);
+  const got = JSON.parse(run.stdout);
+  assert.equal(got.rows, 2);
+  assert.equal(got.late_in_file, true);
+  assert.equal(got.doc.withheld.values.written, 2, "the count in the answer is the count in the file");
+  assert.doesNotMatch(JSON.stringify(got.doc), /ZQ7KX3MPL2N4R6TY/);
+});

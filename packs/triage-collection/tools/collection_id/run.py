@@ -432,7 +432,7 @@ class SecretValues:
         self._fh = os.fdopen(fd, "w", encoding="utf-8", errors="backslashreplace")
 
     def add(self, finding_id, locator, value):
-        if not self.enabled:
+        if not self.enabled or self._fh is None:
             return
         self._fh.write(json.dumps({"finding_id": finding_id, **locator, "value": value}, default=str))
         self._fh.write("\n")
@@ -1264,6 +1264,11 @@ def release(doc):
     SCRUB_DEADLINE[0] = time.monotonic() + 120                  # the final answer is judged whatever the run's clock says
     SCRUB_DEADLINE[0] = time.monotonic() + 120                  # the final answer is judged whatever the run's clock says
     doc = backstop(scrub_all(json.loads(json.dumps(doc, default=str))), "")
+    values = VALUES[0]
+    if values is not None:                     # a string first judged here is a finding too: it goes to the values file, then the file is closed
+        if isinstance(doc, dict) and isinstance(doc.get("withheld"), dict):
+            doc["withheld"] = {"strings_withheld": WITHHELD["count"], "values": values.summary()}
+        values.close()
     if BOUNDARY["replaced"] and isinstance(doc, dict):
         note = {"strings_replaced_by_the_check": BOUNDARY["replaced"], "by_check": dict(BOUNDARY["by"]), "replaced_at": list(BOUNDARY["where"]),
                 "replaced_not_listed": BOUNDARY["not_listed"],
@@ -2111,8 +2116,7 @@ def main():
 
     tables = {"failed_targets": failures.finish(), "unrecognised_rows": unrecognised.finish(), "runs": runs.finish(),
               "objects": survey.objects.finish(), "problems": problems.finish()}
-    values = VALUES[0]
-    values.close()
+    values = VALUES[0]                    # closed by release(), after the last string of the answer has been judged
 
     top_archives = survey.counts["archive"]
     walk_complete = not survey.stopped and survey.errors_total == 0
