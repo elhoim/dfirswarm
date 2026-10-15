@@ -198,8 +198,8 @@ jobs:
     # 44 minutes of the 55 (typecheck and node tests 12, shell suites 31, over
     # three pushes to main), and a grown suite had already needed reruns. Now
     # the node tests are one job and the shell suites are two, dealt out by the
-    # time each takes (tests/shell-suites.weights): 13 to 19 minutes each on
-    # the first run. The limit stays at 55; a job is there to stop a hang.
+    # time each takes (tests/shell-suites.weights): 12 to 19 minutes each over
+    # the first three runs. The limit stays at 55; a job is there to stop a hang.
     # tests/ci-shards.test.ts holds the three to cover every node suite and
     # every shell suite exactly once, so a new suite is never in no job.
     timeout-minutes: 55
