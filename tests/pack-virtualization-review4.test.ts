@@ -307,3 +307,13 @@ test("`--password <placeholder>` left by the seal is not replaced again, and the
     assert.equal(got[forms.length + 2].suspect, null, label);
   }
 });
+
+test("a t10. or iqn. device id is shown in an identifier field as it is in a name or a path, and a secret dressed as one is not", async () => {
+  const shown = ["t10.ATA_____Samsung_SSD_870_EVO_1TB_____S5Y2NX0T571161", "iqn.2004-12.com.example:sql-f1f9be4b", "naa.6818b904ce6087413e3b266f850f1578", "eui.0025385b71b0a1d3"];
+  const hidden = ["t10.ATA_____x=pw_____AB12CD34", "ghp_aB3dE5fG7hI9jK1lM3nO5pQ7rS9tU1vW3xY5", "Q7fZx9LmR2kT4vb8nwc1y6pd3shJ0aXe5uQz"];
+  for (const [label, script] of TOOLS) {
+    const got = await host(script, { op: "judge", items: [...shown, ...hidden].map((t): [string, string] => ["uid", t]) });
+    shown.forEach((t, i) => assert.equal(got[i].sealed, t, `${label}: ${t} must be readable`));
+    hidden.forEach((t, i) => assert.match(got[shown.length + i].sealed, /^<withheld: \d+ bytes, field uid>$/, `${label}: ${t}`));
+  }
+});

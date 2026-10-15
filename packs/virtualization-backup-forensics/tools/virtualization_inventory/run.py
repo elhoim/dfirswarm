@@ -1125,7 +1125,7 @@ def _ident(text, kind, field, where):
         _keep_original(orig, field, where)
         return "<withheld: %d bytes, field %s>" % (blen(orig), field if field_kind(field) else "name")
     if kind == "id":
-        if _ID_FORMS.fullmatch(body) and not _DENY_IN_IDENT.search(body):
+        if (_ID_FORMS.fullmatch(body) or _ID_EMBEDDED.fullmatch(body)) and not _DENY_IN_IDENT.search(body):        # the ids a name or a path shows (t10., iqn.) are shown in an id field too
             return text
         return _withhold_field(text, field, where)
     if kind == "path":
