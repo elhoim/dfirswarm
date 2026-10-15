@@ -26,6 +26,7 @@ import signal
 import subprocess
 import sys
 import time
+import unicodedata
 
 # BEGIN SHARED WITHHOLDING
 # The same text is in pcap_extract, zeek_run, suricata_run and network_log_summary, so that the four tools withhold
@@ -416,33 +417,154 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # BEGIN SHARED ONE WAY OUT
 # The same text is in doc_structure, pe_directories and the capa-floss recipe (tests/pack-re-process.test.ts holds the copies equal).
 # Two steps stand between a string out of a file and any byte the tool writes. shown_path is the sanitiser: it withholds every shape
-# below in the WHOLE text first (a token joined by `/`, such as the AWS secret key shape, and a user-info whose `//` or host a split
-# would remove, are only seen whole), then component by component (a path is not one token). final_check is the backstop: every key
-# and every value of what the tool is about to print or write is tested again with the same rules, and one that the sanitiser would
-# still change (a string that did not pass through it, or a number long enough to be a key) is replaced by its length, counted, and
-# the answer is partial. A field the backstop withholds is a fault of the tool, never of the file: the count says how many.
+# below, by shape only: what is printed is what no rule here recognises, and a secret of another shape (a plain password, a token
+# family the rules do not name, a token split across two fields) is printed. It reads the WHOLE text for what only the whole shows (a
+# user-info whose `//` or host a split would remove, a `Basic`/`Bearer` credential, base64 joined by `/`), then each `/` component (a
+# path is not one token), and a copy of the text without the characters that can split a token unseen (NUL, other control characters
+# and their \xNN escapes, zero-width, soft hyphen, bidi and combining marks; NFKD folds full-width forms): a text whose copy holds a
+# token is withheld whole. final_check is the backstop: every key and every value of what the tool is about to print or write is
+# tested again with the same rules, and one that the sanitiser would still change (a string that did not pass through it, or a number
+# long enough to be a key) is replaced by its length, counted, and the answer is partial. A field the backstop withholds is a fault of
+# the tool, never of the file: the count says how many.
 _CLEAN = set()                      # short strings known to hold nothing to withhold: tested once (a table repeats its keys and kinds)
 # A mailto: address has no user-info (RFC 6068: an address is local-part@domain), so the shared block keeps `mailto:name:secret@host`
 # as an address; a ':' in the local part is a name:password pair placed there, and what follows the ':' is withheld here.
 MAILTO_SECRET = re.compile(r"(mailto:[^:@?/\s]*):([^@?\s<>]*)(?=@)", re.I)
 # `name:secret@` wherever it stands, with or without a host after the `@` (a name cut at a declared length ends right there): the
-# shared block's bare rule wants a host, and its URL rule wants the `//` a path split removes.
+# shared block's bare rule wants a host, and its URL rule wants the `//` a path split removes. A format string (`user:%s@%s`) is kept.
 CUT_USERINFO = re.compile(r"(?<![\w.%+-])(?!mailto:)[\w.%+-]{1,64}:[^\s/@:<>]{1,128}(?=@)", re.I)
-# The value of a secret-named key of a connection string or a query (`Password=...;`, `AccountKey=...`).
-KEYVALUE_SECRET = re.compile(r"((?:password|passwd|pwd|secret|client[_-]?secret|token|api[_-]?key|access[_-]?key|account[_-]?key|shared[_-]?access[_-]?key)"
-                             r"[ \t]*=[ \t]*\"?)([^;\s&\"'<>,]{1,512})", re.I)
+# The value of a secret-named key (`Password=...;`, `password: ...`, `Pwd='...'`, `"AccountKey": "..."`): after `=`, or after `:` for
+# the password and key names (`token:`, `secret:` and `credentials:` are common in prose, so only their `=` form counts), quoted (to
+# its closing quote) or not (to `;`, a space, `&`, `,` or a quote). The short names (`pw`, `pass`, `auth`) only where no letter or digit
+# precedes them, so that `bypass:` or `OAuth=` inside a word is not one. A value made only of `%` conversions is a format.
+KEYVALUE_SECRET = re.compile(r"((?:(?:password|passwd|passphrase|pwd|secret|client[_-]?secret|token|api[_-]?key|access[_-]?key|account[_-]?key"
+                             r"|shared[_-]?access[_-]?key|credentials?|(?<![A-Za-z0-9])(?:pw|pass|auth))[\"']?[ \t]*="
+                             r"|(?:password|passwd|passphrase|pwd|client[_-]?secret|api[_-]?key|access[_-]?key|account[_-]?key|shared[_-]?access[_-]?key"
+                             r"|(?<![A-Za-z0-9])(?:pw|pass))[\"']?[ \t]*:)[ \t]*)"
+                             r"(?:([\"'])(?!<withheld )([^\"'\r\n]{1,512})(?=[\"'])|([^;\s&\"'<>,]{1,512}))", re.I)
+FORMAT_ONLY = re.compile(r"(?:%[-+ #0-9.*]*[A-Za-z@])+")
 # The head of a token whose own prefix says what it is, too short for the shared block's patterns (a name cut by a declared length, a
-# string read from the middle of a field): the prefix and four characters more are a piece of a token, wherever it stands (a letter
-# before it does not make it a word: `XAKIA...` is a key id with a letter in front). `sk-` alone is common inside hyphenated words
-# (`desk-`, `risk-`, `task-`), so its head needs a capital or a digit in its first twelve characters, as a random key has, and twelve
-# characters, or four where the string or a path component ends (a name cut by a declared length ends there). The GitHub and
-# Slack prefixes are matched in any case: a resource compiler upper-cases a string resource name, and `XOXB-<digits>-...` keeps the digits.
-TOKEN_HEAD = re.compile(r"(?:AKIA|ASIA)[0-9A-Z]{4,}|(?i:gh[pousr]_)[A-Za-z0-9]{4,}|(?i:github_pat_)[A-Za-z0-9_]{4,}|(?i:xox[abeprs]-)[A-Za-z0-9-]{4,}"
-                        r"|sk-(?=[A-Za-z0-9_-]{0,11}[0-9A-Z])(?:[A-Za-z0-9_-]{12,}|[A-Za-z0-9_-]{4,11}(?=$|[/\\]))|eyJ[A-Za-z0-9_-]{6,}")
+# string read from the middle of a field): the prefix and four characters more are a piece of a token. An AWS key id's head is one
+# wherever it stands (`XAKIA...` is a key id with a letter in front: its capitals and digits are no word). The GitHub, Slack and `sk-`
+# prefixes are also the ends of words (`highs_lows`, `Risk-Assessment`, `Task-Scheduler`), so a short head of those counts only
+# where no letter or digit precedes it, and twenty characters after the prefix count anywhere. `sk-` needs a capital or a digit in its
+# first twelve characters, as a random key has, and twelve characters, or four where the string or a path component ends (a name cut
+# by a declared length ends there). The GitHub and Slack prefixes are matched in any case: a resource compiler upper-cases a string
+# resource name, and `XOXB-<digits>-...` keeps the digits. A JWT's head takes the `.`-joined segments after it (a JWT glued to another
+# token loses its own head to that token's match, and its signature would be left).
+TOKEN_HEAD = re.compile(r"(?:AKIA|ASIA)[0-9A-Z]{4,}"
+                        r"|(?<![A-Za-z0-9])(?i:gh[pousr]_)[A-Za-z0-9]{4,}|(?i:gh[pousr]_)[A-Za-z0-9]{20,}"
+                        r"|(?i:github_pat_)[A-Za-z0-9_]{4,}|(?i:xox[abeprs]-)[A-Za-z0-9-]{4,}"
+                        r"|(?<![A-Za-z0-9])sk-(?=[A-Za-z0-9_-]{0,11}[0-9A-Z])(?:[A-Za-z0-9_-]{12,}|[A-Za-z0-9_-]{4,11}(?=$|[/\\]))"
+                        r"|sk-(?=[A-Za-z0-9_-]{0,11}[0-9A-Z])[A-Za-z0-9_-]{20,}|eyJ[A-Za-z0-9_-]{6,}(?:\.[A-Za-z0-9_-]+){0,2}")
 # The body of a PEM block after its header (RFC 7468), up to the next '-' (its END line): withheld whole whatever its letters look like,
 # as the dashes of a header glued to it join the two into one run that no shape rule of the shared block reads as a token.
 PEM_BODY = re.compile(r"(-----BEGIN [^\r\n-]{1,64}-----)(?!<withheld)([^-]{8,})")
+GLUED = re.compile(r"(?:%s)[A-Za-z0-9_+%%-]*" % _PREFIXED.pattern)
+JWT_TAIL = re.compile(r"(?<![A-Za-z0-9_+/-])eyJ[A-Za-z0-9_-]{6,}(?:\.[A-Za-z0-9_-]+){1,2}")
 LONG_NUMBER = 10 ** 31              # a number of 32 digits or more is printed as its size: the same digits as a string are withheld (32 hex)
+# Base64 joined by `/` (the AWS secret access key shape; a 16-, 20- or 32-byte value encoded): the pieces between two `/` are often too
+# short to look like a token alone (the shared block's `/` rule wants three random-looking pieces), so whole pieces are read together.
+# Random base64 changes character class (capital, small letter, digit) at about 0.64 of its characters; words, CamelCase names,
+# versions and dated folders at 0.15 to 0.3. Every window of two or more whole pieces, 16 to 64 characters with its `/`, that holds a
+# digit and no piece that is a plain word (`Outlook`, `Temp`, `FinalDraftV2`, `scan0042`: a random folder name next to a word is a
+# cache directory, not a key), and that changes class at SLASH_DENSITY of its characters or more, is withheld; so is padded base64
+# across `/` (below). A drive letter, a UNC host and a file name's extension are never in a window (a `.` or `:` ends the run). This
+# is a shape rule with a measured residue, which the changelog states in numbers. The shared block's own `/` rule (three random-looking
+# pieces) is kept, counting no plain word: the published example key, whose `EXAMPLEKEY` tail is not random, is caught by it.
+SLASH_RUN = re.compile(r"[A-Za-z0-9+/]{16,}={0,2}")
+SLASH_DENSITY = 0.45
+PLAIN_PIECE = re.compile(r"[A-Z]?[a-z]{3,}|(?=.{8})(?:[A-Z][a-z]{3,}){2,}(?:[A-Z]?[0-9]{1,4})?|(?=.{8})[A-Z]?[a-z]{3,}[0-9]{1,4}")
+
+
+def _char_class(ch):
+    return 0 if "A" <= ch <= "Z" else 1 if "a" <= ch <= "z" else 2 if "0" <= ch <= "9" else 3
+
+
+def _slash_spans(text):
+    spans = []
+    # the shared block's `/` rule (three random-looking pieces, 30 characters, a digit), read as three such pieces in a row, none a plain word
+    for m in _SLASHED.finditer(text):
+        if "/" not in m.group():
+            continue
+        group, at = [], m.start()
+        for piece in m.group().split("/") + [""]:
+            if piece and _randomish(piece) and not PLAIN_PIECE.fullmatch(piece.rstrip("=")):
+                group.append((at, at + len(piece)))
+            else:
+                if len(group) >= 3 and group[-1][1] - group[0][0] >= 30 and re.search(r"[0-9+]", text[group[0][0]:group[-1][1]]):
+                    spans.append((group[0][0], group[-1][1]))
+                group = []
+            at += len(piece) + 1
+    for m in SLASH_RUN.finditer(text):
+        run = m.group()
+        if "/" not in run.strip("/"):
+            continue
+        pieces, at = [], m.start()
+        for piece in run.split("/"):
+            pieces.append((at, at + len(piece), piece))
+            at += len(piece) + 1
+        if run.endswith("="):
+            # padded base64 (RFC 4648 section 4): the longest window of whole pieces that ends the run, holds a `/` and no plain word,
+            # and is a multiple of four characters long, as an encoding with its padding is: the shared block's own `==` rule, across `/`
+            for i in range(len(pieces) - 1):
+                start = pieces[i][0]
+                if m.end() - start > 64 or any(not p or PLAIN_PIECE.fullmatch(p.rstrip("=")) for _, _, p in pieces[i:]):
+                    continue
+                if m.end() - start >= 16 and (m.end() - start) % 4 == 0:
+                    spans.append((start, m.end()))
+                    break
+        for i in range(len(pieces)):
+            changes = chars = 0
+            prev = None
+            has_digit = False
+            for j in range(i, len(pieces)):
+                start, end, piece = pieces[j]
+                if not piece or PLAIN_PIECE.fullmatch(piece.rstrip("=")):
+                    break
+                if end - pieces[i][0] > 64:
+                    break
+                for ch in piece.rstrip("="):
+                    if ch == "+":
+                        continue
+                    k = _char_class(ch)
+                    if prev is not None and k != prev:
+                        changes += 1
+                    prev, chars = k, chars + 1
+                    has_digit = has_digit or k == 2
+                # a window neither begins nor ends with a piece of one or two characters: a file name `s` after a withheld folder is not
+                # taken into it (such a piece of a key, left out, is two characters at most)
+                if (j > i and end - pieces[i][0] >= 16 and chars >= 14 and has_digit and changes >= SLASH_DENSITY * (chars - 1)
+                        and len(pieces[i][2].rstrip("=")) >= 3 and len(piece.rstrip("=")) >= 3):
+                    spans.append((pieces[i][0], end))
+    spans.sort()
+    merged = []
+    for start, end in spans:
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+# What can split a token without being seen: control characters (NUL between the bytes of UTF-16 read as 8-bit text), their \xNN and
+# \uNNNN escapes as cell() writes them, and the format and combining characters (zero-width, soft hyphen, bidi, variation selectors).
+_HIDDEN_ESCAPE = re.compile(r"\\x[0-9a-fA-F]{2}|\\u[0-9a-fA-F]{4}")
+_MAYBE_HIDDEN = re.compile(r"[^\x20-\x7e]|\\[xu][0-9a-fA-F]{2}")
+
+
+def unhidden(text):
+    """The text without what can split a token unseen (a copy that is tested, never printed)."""
+    if not _MAYBE_HIDDEN.search(text):
+        return text
+    text = _HIDDEN_ESCAPE.sub("", text)
+    # NFKD, so that a mark a composition would fold into its letter (L and U+0301 compose to U+0139) is a mark that is dropped
+    text = unicodedata.normalize("NFKD", text)
+    return "".join(ch for ch in text if not (unicodedata.category(ch) in ("Cc", "Cf", "Mn", "Me", "Cs")))
+
+
+def _whole_withheld(m, kind="names"):
+    return _withheld("token-shaped text", len(m.group()), kind)
 
 
 def _shown_pass(out):
@@ -451,29 +573,84 @@ def _shown_pass(out):
     if ":" in out:
         out = MAILTO_SECRET.sub(lambda m: m.group(1) + ":" + _withheld("userinfo", len(m.group(2)), "urls"), out)
     if "@" in out:
-        out = CUT_USERINFO.sub(lambda m: _withheld("userinfo", len(m.group()), "urls"), out)
-    if "=" in out:
-        out = KEYVALUE_SECRET.sub(lambda m: m.group(1) + _withheld("", len(m.group(2)), "text"), out)
-    out = scrub(out, "names")
+        out = CUT_USERINFO.sub(lambda m: m.group() if FORMAT_ONLY.fullmatch(m.group().partition(":")[2]) else _withheld("userinfo", len(m.group()), "urls"), out)
+    if "=" in out or ":" in out:
+        out = KEYVALUE_SECRET.sub(lambda m: m.group(0) if FORMAT_ONLY.fullmatch(m.group(3) or m.group(4)) else
+                                  m.group(1) + (m.group(2) or "") + _withheld("", len(m.group(3) or m.group(4)), "text"), out)
+    # a prefixed token takes the rest of the run of name characters it ends inside (a token glued to it, whose own prefix it took), and
+    # a JWT's payload and signature after a `.` are one token even when its head was glued to another and taken with it
     if "/" in out:
+        # what only the whole text shows, found in the same text and withheld together (one rule's match never hides another's): base64
+        # joined by `/`, a prefixed token (a JWT, `Basic`/`Bearer` holding `/`) with the run it ends inside, a user-info whose `//` or
+        # host a split would remove; then each component alone
+        found = [(s, e, "token-shaped text") for s, e in _slash_spans(out)]
+        found += [(m.start(), m.end(), "token-shaped text") for rule in (GLUED, JWT_TAIL) for m in rule.finditer(out)]
+        found += [(m.start(), m.end(), "userinfo") for rule in (_USERINFO, _BARE_USERINFO) for m in rule.finditer(out)]
+        if found:
+            found.sort()
+            merged = []
+            for s, e, what in found:
+                if merged and s < merged[-1][1]:
+                    ps, pe, pw = merged[-1]
+                    merged[-1] = (ps, max(pe, e), "token-shaped text" if "token" in pw + what else pw)
+                else:
+                    merged.append((s, e, what))
+            parts, last = [], 0
+            for s, e, what in merged:
+                parts.append(out[last:s])
+                parts.append(_withheld(what, e - s, "urls" if what == "userinfo" else "names"))
+                last = e
+            parts.append(out[last:])
+            out = "".join(parts)
         out = "/".join(scrub(part, "names") for part in out.split("/"))
-    return TOKEN_HEAD.sub(lambda m: _withheld("token-shaped text", len(m.group()), "names"), out)
+    else:
+        if "eyJ" in out:
+            out = JWT_TAIL.sub(_whole_withheld, out)
+        out = scrub(GLUED.sub(_whole_withheld, out), "names")
+    return TOKEN_HEAD.sub(_whole_withheld, out)
 
 
-def shown_path(text):
-    """A string as it may be printed: user-info, a secret-named value, every token-shaped run of the whole text, of each `/`
-    component, and every token head, withheld. A pass that withheld something is run again on its own result (a marker it wrote can
-    leave a new edge in front of a user-info), up to four times, so that the result is a fixed point: shown_path of it is itself, which
-    is what final_check tests."""
-    if not isinstance(text, str):
-        return text
-    if text in _CLEAN:
-        return text
+def _shown_one(text):
     out = _shown_pass(text)
     passes = 1
     while out != text and passes < 4:
         text, out = out, _shown_pass(out)
         passes += 1
+    return out, passes
+
+
+# The escapes cell() writes (a doubled backslash, \xNN, \uNNNN) end a piece of text: `\x06DataSpaces` is a control character and a
+# word, and the `x06` of its escape is not a part of the word (whose digit would make it read as random). What an escape splits is
+# tested joined by unhidden.
+_ESCAPE = re.compile(r"(\\\\|\\x[0-9a-fA-F]{2}|\\u[0-9a-fA-F]{4})")
+
+
+def _shown(text):
+    if "\\" not in text:
+        return _shown_one(text)
+    parts, passes = _ESCAPE.split(text), 1
+    for k in range(0, len(parts), 2):
+        parts[k], n = _shown_one(parts[k])
+        passes = max(passes, n)
+    return "".join(parts), passes
+
+
+def shown_path(text):
+    """A string as it may be printed: user-info, a secret-named value, a token-shaped run of the whole text and of each `/` component,
+    every token head, withheld; and the whole text withheld when its copy without hidden characters (unhidden) holds any of these.
+    A pass that withheld something is run again on its own result (a marker it wrote can leave a new edge in front of a user-info), up
+    to four times, so that the result is a fixed point: shown_path of it is itself, which is what final_check tests."""
+    if not isinstance(text, str):
+        return text
+    if text in _CLEAN:
+        return text
+    bare = unhidden(text)
+    if bare != text and _shown(bare)[0] != bare:
+        return _withheld("token-shaped text", len(text), "names")
+    out, passes = _shown(text)
+    bare = unhidden(out)
+    if bare != out and _shown(bare)[0] != bare:
+        return _withheld("token-shaped text", len(text), "names")
     if passes == 1 and len(out) <= 256 and len(_CLEAN) < 200000:
         _CLEAN.add(out)
     return out
@@ -526,7 +703,7 @@ def final_check(value, safe=None, key=""):
 BUDGET_SECONDS = 3500                     # recipe.json gives this recipe 3600
 GRACE_SECONDS = 10                        # a program that outlives its own clock by this much is ended
 VERSION_SECONDS = 20
-MAX_JSON = 512 << 20
+MAX_JSON = 32 << 20                       # an engine's JSON read here: parsed JSON takes about twelve times its size, so a larger file is kept whole and not read
 TSV_ROWS = 1_000_000
 EARLIER = re.compile(r"^(capa|floss|coverage)(-\d+)?\.(json|stderr)$|^(matches|index)(-\d+)?\.tsv$")
 FLOSS_KINDS = ("static_strings", "stack_strings", "tight_strings", "decoded_strings")
@@ -592,7 +769,7 @@ def new_name(out_dir, stem, ext):
     raise OSError(errno.EEXIST, "a thousand files of this name already exist in %s" % out_dir)
 
 
-def version_of(exe, out_dir):
+def version_of(exe, out_dir, seconds=VERSION_SECONDS):
     """(exit code, stdout head, stderr head, timed out) of `exe --version`: its output goes to two files of the recipe's directory and
     is read back 4 KiB at a time, so a program that never stops printing fills a file, not this process's memory."""
     import tempfile
@@ -602,7 +779,7 @@ def version_of(exe, out_dir):
             fd, name = tempfile.mkstemp(prefix=".version-", suffix="." + kind, dir=out_dir)
             os.close(fd)
             paths.append(name)
-        rc, timed = run_to_files([exe, "--version"], paths[0], paths[1], VERSION_SECONDS)
+        rc, timed = run_to_files([exe, "--version"], paths[0], paths[1], seconds)
         heads = []
         for name in paths:
             with open(name, "rb") as fh:
@@ -621,16 +798,16 @@ def version_of(exe, out_dir):
 def shown_text(text, keep):
     """A string an engine printed, withheld whole and then cut to `keep` characters: a cut before the withholding could leave the head of
     a token too short to be recognised as one."""
-    return shown_path(scrub(cell(text), "text"))[:keep]
+    return shown_path(cell(text))[:keep]
 
 
 def shown_key(key):
-    return shown_path(scrub(cell(str(key)), "names"))
+    return shown_path(cell(str(key)))
 
 
 def shown_cell(value):
     """One cell of matches.tsv: through the sanitiser, then the backstop."""
-    return final_check(shown_path(cell(scrub(str(value), "names"))))
+    return final_check(shown_path(cell(str(value))))
 
 
 def first_line(raw):
@@ -659,6 +836,8 @@ def judge(engine, rc, timed_out, doc, why):
         return "failed", "%s could not be started" % engine["program"], {}
     if rc != 0:
         return "failed", "%s exited with status %d; its stderr is kept" % (engine["program"], rc), {}
+    if doc is None and why and why.startswith("the output is larger"):
+        return "partial", "%s exited 0; %s, so nothing of it is summarised here" % (engine["program"], why), {}
     if doc is None:
         return "failed", "%s exited 0 and its output is not a readable JSON object: %s" % (engine["program"], why), {}
     if engine["id"] == "capa":
@@ -811,6 +990,8 @@ def write_results(state):
     is counted in the receipt, named in its errors, and makes a complete result partial (a fault of this recipe, never of the file)."""
     status, coverage, lines = assemble(state)
     out_dir = state["out_dir"]
+    # this pass's count, with what the backstop withheld in matches.tsv (written once): the receipt is rewritten after every engine
+    FINAL["fields"] = state.get("matches_withheld", 0)
     lines = ["\t".join(final_check(part) for part in l.split("\t")) for l in lines]
     coverage = final_check(coverage)
     if FINAL["fields"]:
@@ -869,7 +1050,7 @@ def run_engines(state, sample, budget, started, unfinished):
             unfinished()
             continue
         e["installed"] = True
-        rc, out, err, timed = version_of(exe, out_dir)
+        rc, out, err, timed = version_of(exe, out_dir, max(1, min(VERSION_SECONDS, int(budget - (time.monotonic() - started)))))
         e["version_command"] = {"argv": [engine["program"], "--version"], "exit_code": rc, "first_line": first_line(out) or first_line(err), "timed_out": timed,
                                 "note": "what the program printed, not a statement of what this recipe knows about that release"}
         left = budget - (time.monotonic() - started)
@@ -900,7 +1081,9 @@ def run_engines(state, sample, budget, started, unfinished):
         e.update({"status": status, "reason": reason, "bytes": os.path.getsize(os.path.join(out_dir, e["file"])), **details})
         if engine["id"] == "capa" and status == "complete" and isinstance(doc.get("rules"), dict):
             state["matches"] = new_name(out_dir, "matches", ".tsv")
+            before = FINAL["fields"]
             rows, capped = write_matches(doc, os.path.join(out_dir, state["matches"]))
+            state["matches_withheld"] = state.get("matches_withheld", 0) + FINAL["fields"] - before
             e["matches_listed"] = rows
             if capped:
                 e["status"], e["reason"] = "partial", "capa matched more than %d rules: matches.tsv lists the first %d; capa.json holds them all" % (TSV_ROWS, TSV_ROWS)
@@ -959,7 +1142,12 @@ def main(argv):
         if not 1 <= budget <= BUDGET_SECONDS:
             print(json.dumps({"ok": False, "error": "--seconds is a whole number from 1 to %d" % BUDGET_SECONDS}))
             return 2
-    return run(path, args["--out"], fmt, budget)
+    try:
+        return run(path, args["--out"], fmt, budget)
+    except OSError as exc:
+        # an --out that cannot be made or written (a hand run; the harness gives a writable $OUT): said as JSON, never a traceback
+        print(json.dumps({"ok": False, "status": "failed", "error": "the output directory cannot be written: %s" % scrub(describe(exc), "text")}))
+        return 2
 
 
 if __name__ == "__main__":

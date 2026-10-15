@@ -19,7 +19,7 @@ import { cpus, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { DOC_STRUCTURE, PE_DIRECTORIES, buildZip, u16, u32 } from "./pack-re-harness.ts";
-import { agileEncryptionInfo, buildCfb, buildPdf, buildPeDirs, buildVbaProject, excelWorkbook, hex, ole1Object, ovbaCompress, vbaDirStream, versionResource } from "./pack-re-doc-fixtures.ts";
+import { afterTokenRun, agileEncryptionInfo, buildCfb, buildPdf, buildPeDirs, buildVbaProject, excelWorkbook, hex, ole1Object, ovbaCompress, vbaDirStream, versionResource } from "./pack-re-doc-fixtures.ts";
 import type { PdfObj } from "./pack-re-doc-fixtures.ts";
 import { canaries, needles } from "./pack-re-canary-shapes.ts";
 import type { Canary } from "./pack-re-canary-shapes.ts";
@@ -171,6 +171,10 @@ each("pe", 200, PE_DIRECTORIES, ".dll", {
   "pe-pdb-slashed-path": (c) => buildPeDirs({ debug: [{ type: 2, pdb: "C:/b/" + c.plant + ".pdb" }] }).file,
   "pe-clr-version": (c) => buildPeDirs({ clr: { version: c.plant, streams: [{ name: "#~", size: 16 }] } }).file,
   "pe-manifest-attribute": (c) => buildPeDirs({ resources: [{ type: 24, name: 1, lang: 1033, data: Buffer.from(`<?xml version="1.0"?><assembly><trustInfo><security><requestedPrivileges><requestedExecutionLevel level="${xml(c.plant)}" uiAccess="false"/></requestedPrivileges></security></trustInfo></assembly>`) }] }).file,
+});
+// a string whose address points right after a run of token characters (a name read a field late): its head is tested with that run
+each("pe", 200, PE_DIRECTORIES, ".dll", {
+  "pe-export-name-after-token-run": (c) => afterTokenRun([c.plant]),
 });
 each("pe", 31, PE_DIRECTORIES, ".dll", {
   "pe-clr-stream-name": (c) => buildPeDirs({ clr: { version: "v4.0.30319", streams: [{ name: c.plant, size: 16 }, { name: "#~", size: 16 }] } }).file,

@@ -212,3 +212,185 @@ test("an sk- head of four to eleven characters that ends a name or a path compon
       "desk-top", "risk-assessment-module", "task-list/a", "sk-ab"], path);
   }
 });
+
+// --- the fourth review: real-shaped secrets at a measured rate, hidden characters, secret-named values, word heads ----------------
+
+const B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+/** Random secrets as they are, not as a rule would like them: an AWS secret access key (40 characters of the base64 alphabet) and the
+ * base64 of 16, 20, 24 and 32 random bytes, each kept only when it holds a `/` (the case the shape rules have to read across). */
+function realistic(seed: number, perShape: number): { shape: string; secret: string }[] {
+  const rnd = prng(seed);
+  const out: { shape: string; secret: string }[] = [];
+  const make: Record<string, () => string> = {
+    aws40: () => Array.from({ length: 40 }, () => B64[Math.floor(rnd() * 64)]).join(""),
+    b64_16: () => Buffer.from(Array.from({ length: 16 }, () => Math.floor(rnd() * 256))).toString("base64"),
+    b64_20: () => Buffer.from(Array.from({ length: 20 }, () => Math.floor(rnd() * 256))).toString("base64"),
+    b64_24: () => Buffer.from(Array.from({ length: 24 }, () => Math.floor(rnd() * 256))).toString("base64"),
+    b64_32: () => Buffer.from(Array.from({ length: 32 }, () => Math.floor(rnd() * 256))).toString("base64"),
+  };
+  for (const [shape, f] of Object.entries(make)) {
+    for (let n = 0; n < perShape;) {
+      const s = f();
+      if (s.includes("/")) { out.push({ shape, secret: s }); n++; }
+    }
+  }
+  return out;
+}
+const WRAPS = [(s: string) => s, (s: string) => `word/${s}.xml`, (s: string) => `https://h.example/${s}`, (s: string) => `../${s}/x.exe`, (s: string) => `Macros/VBA/${s}`, (s: string) => `/C/Users/x/${s}`];
+// The measured residue of the `/` rules (the changelog states the same numbers): the share of secrets printed whole, and the share of
+// which some nine characters are printed, over these shapes. Measured on 7,000 of each (seeded): whole 1.2% (AWS), 2.1% (16 bytes),
+// 1.4% (20), 2.8% (24), 0.1% (32); nine characters 3.1%, 2.2%, 1.7%, 3.8%, 1.8%. The bounds here leave room for the sample's spread.
+const RESIDUE: Record<string, { whole: number; nine: number }> = {
+  aws40: { whole: 0.025, nine: 0.05 }, b64_16: { whole: 0.04, nine: 0.045 }, b64_20: { whole: 0.03, nine: 0.035 }, b64_24: { whole: 0.045, nine: 0.06 }, b64_32: { whole: 0.01, nine: 0.035 },
+};
+
+test("P1-1 random real-shaped secrets holding `/` (AWS secret keys, base64 of 16 to 32 bytes), 400 of each in six places, in every copy: printed at no more than the measured residue", () => {
+  const items = realistic(4242, 400).flatMap((x) => WRAPS.map((w) => ({ ...x, text: w(x.secret) })));
+  for (const path of COPIES) {
+    // a URL goes through shown_target and then, as every string the tool writes, through shown_path (shown_answer)
+    const r = py(path, "texts = json.load(sys.stdin)\nprint(json.dumps([m.shown_path(m.shown_target(t)) if hasattr(m, 'shown_target') and t.startswith('https:') else m.shown_path(t) for t in texts]))", items.map((i) => i.text));
+    assert.equal(r.status, 0, r.stderr);
+    const out = JSON.parse(r.stdout) as string[];
+    const tally: Record<string, { n: number; whole: number; nine: number }> = {};
+    items.forEach((it, k) => {
+      const shown = out[k]!;
+      const t = (tally[it.shape] ??= { n: 0, whole: 0, nine: 0 });
+      t.n++;
+      if (shown.includes(it.secret)) t.whole++;
+      for (let i = 0; i + 9 <= it.secret.length; i++) if (shown.includes(it.secret.slice(i, i + 9))) { t.nine++; break; }
+    });
+    for (const [shape, t] of Object.entries(tally)) {
+      assert.ok(t.whole / t.n <= RESIDUE[shape]!.whole, `${path}: ${shape} printed whole ${t.whole} of ${t.n}`);
+      assert.ok(t.nine / t.n <= RESIDUE[shape]!.nine, `${path}: ${shape} nine characters printed ${t.nine} of ${t.n}`);
+    }
+  }
+});
+
+/** Launch and GoToR targets as files hold them (ISO 32000-1 7.11.2 file specification strings, relative paths, UNC paths, a mail
+ * client's cache folder, /Win /F programs): generated, seeded. */
+function targets(seed: number, n: number): string[] {
+  const rnd = prng(seed);
+  const pick = <T>(a: T[]): T => a[Math.floor(rnd() * a.length)]!;
+  const users = ["JohnSmith", "alice.wong", "svc_backup", "Administrator", "m.mueller", "jdoe", "Public", "kim.lee2"];
+  const dirs = ["Documents", "Downloads", "Desktop", "Invoices2024", "ClientABC", "Q3Report2024", "FinalDraftV2", "Projects", "HR", "Finance", "Scans", "Archive2019", "Temp", "OneDrive - Contoso"];
+  const names = ["Invoice123", "Report_Q3_2024", "setup", "update", "Payment-Advice", "scan0042", "PO-778812", "statement_202409", "Resume_JSmith", "Agreement v2"];
+  const exts = ["pdf", "exe", "docx", "xlsx", "bat", "cmd", "vbs", "js", "hta", "lnk", "scr", "ps1", "zip"];
+  const some = (k: number) => Array.from({ length: 1 + Math.floor(rnd() * k) }, () => pick(dirs)).join("/");
+  const cache = () => Array.from({ length: 8 }, () => "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"[Math.floor(rnd() * 36)]).join("");
+  const out: string[] = [];
+  for (let i = 0; i < n; i++) {
+    const k = rnd();
+    if (k < 0.3) out.push(`/C/Users/${pick(users)}/${some(3)}/${pick(names)}.${pick(exts)}`);
+    else if (k < 0.45) out.push(`${"../".repeat(Math.floor(rnd() * 3))}${some(3)}/${pick(names)}.${pick(exts)}`);
+    else if (k < 0.55) out.push(`//${pick(["fileserver01", "nas", "10.0.0.5", "corp-fs.contoso.local"])}/${pick(["share", "Public", "IT$"])}/${pick(dirs)}/${pick(names)}.${pick(exts)}`);
+    else if (k < 0.8) out.push(`/C/Users/${pick(users)}/AppData/Local/Microsoft/Windows/INetCache/Content.Outlook/${cache()}/${pick(names)}.${pick(exts)}`);
+    else if (k < 0.9) out.push(pick(["cmd.exe", "/C/Windows/System32/WindowsPowerShell/v1.0/powershell.exe", "mshta.exe", "/C/Windows/SysWOW64/rundll32.exe"]));
+    else out.push(`${pick(names)}.${pick(exts)}`);
+  }
+  return out;
+}
+
+test("P2-3 Launch and GoToR targets as files hold them stay readable: 3,000 generated, at most 1% with anything withheld (measured 0.16% on 12,000), the review's examples whole", () => {
+  const fixed = ["/C/Users/JohnSmith/Documents/Invoices2024/ClientABC/Invoice123.pdf", "../Q3Report2024/FinalDraftV2/Invoice2024.exe",
+    "/C/Users/x/AppData/Local/Microsoft/Windows/INetCache/Content.Outlook/8X2Q4ZTL/invoice.pdf", "//fileserver01/share/Finance/PO-778812.xlsx",
+    "/System/Library/CoreServices/ManagedClient.app/Contents/PlugIns/FileVault2.profileDomainPlugin", "\u0006DataSpaces/DataSpaceInfo/StrongEncryptionDataSpace"];
+  const all = [...fixed, ...targets(77, 3000)];
+  for (const path of COPIES) {
+    const r = py(path, "print(json.dumps([m.shown_path(t) for t in json.load(sys.stdin)]))", all);
+    assert.equal(r.status, 0, r.stderr);
+    const out = JSON.parse(r.stdout) as string[];
+    fixed.forEach((t, i) => assert.equal(out[i], t, `${path}: ${t}`));
+    const changed = out.slice(fixed.length).filter((o, i) => o !== all[fixed.length + i]!).length;
+    assert.ok(changed <= 30, `${path}: ${changed} of 3000 targets changed`);
+  }
+});
+
+const HIDE: Record<string, (s: string) => string> = {
+  nul: (s) => s.split("").join("\0"),
+  nul_escaped: (s) => s.split("").join("\\x00"),
+  utf16_as_8bit: (s) => s.split("").map((ch) => ch + "\0").join(""),
+  zero_width: (s) => s.replace(/(...)/g, "$1\u200b"),
+  soft_hyphen: (s) => s.replace(/(....)/g, "$1\u00ad"),
+  bidi: (s) => s.replace(/(.....)/g, "$1\u2066"),
+  combining: (s) => s.replace(/(..)/g, "$1\u0301"),
+  full_width: (s) => s.replace(/[!-~]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) + 0xfee0)),
+};
+
+test("P2-1 a token split by NUL, its \\x00 escape, UTF-16 read as 8-bit text, zero-width, soft hyphen, bidi or combining marks, or in full-width forms, is withheld whole, in every copy and for every shape", () => {
+  const texts: { text: string; c: ReturnType<typeof canaries>[number][1]; how: string }[] = [];
+  for (let seed = 0; seed < 20; seed++) {
+    for (const [, c] of canaries(200, 50_000 + seed)) {
+      for (const [how, hide] of Object.entries(HIDE)) texts.push({ text: `word/${hide(c.plant)}.xml`, c, how });
+    }
+  }
+  const strip = (s: string): string => s.normalize("NFKC").replace(/\\x[0-9a-fA-F]{2}|[\0\u200b\u00ad\u2066\u0300-\u036f]/g, "");
+  for (const path of COPIES) {
+    const r = py(path, "texts = json.load(sys.stdin)\nprint(json.dumps([m.shown_path(t) for t in texts]))", texts.map((t) => t.text));
+    assert.equal(r.status, 0, r.stderr);
+    const out = JSON.parse(r.stdout) as string[];
+    out.forEach((shown, i) => {
+      const bare = strip(shown);
+      for (const s of texts[i]!.c.check) for (let k = 0; k + 9 <= s.length; k++) assert.ok(!bare.includes(s.slice(k, k + 9)), `${path} ${texts[i]!.how}: ${JSON.stringify(shown)}`);
+      const pw = texts[i]!.c.pw;
+      if (pw) for (let k = 0; k + 6 <= pw.length; k++) assert.ok(!bare.includes(pw.slice(k, k + 6)), `${path} ${texts[i]!.how}: ${JSON.stringify(shown)}`);
+    });
+    // a name that only holds such characters, and no token, is printed as it is
+    const plain = py(path, "print(json.dumps([m.shown_path(t) for t in json.load(sys.stdin)]))", ["\u0005SummaryInformation", "\u0001CompObj", "Caf\u00e9/R\u00e9sum\u00e9.docx", "\\x06DataSpaces/DataSpaceMap"]);
+    assert.deepEqual(JSON.parse(plain.stdout), ["\u0005SummaryInformation", "\u0001CompObj", "Caf\u00e9/R\u00e9sum\u00e9.docx", "\\x06DataSpaces/DataSpaceMap"], path);
+  }
+});
+
+test("P2-2 the value of a secret-named key is withheld after `=` or `:`, quoted or not; P3 a format string and a word that ends in a key name are not", () => {
+  const cases: [string, string][] = [
+    ["Provider=SQLOLEDB;Data Source=db1;User ID=sa;Password='Hunter2Secret';", "Provider=SQLOLEDB;Data Source=db1;User ID=sa;Password='<withheld 13 characters>';"],
+    ["password: Hunter2Secret", "password: <withheld 13 characters>"],
+    ['{"AccountKey": "Zm9vYmFyYmF6"}', '{"AccountKey": "<withheld 12 characters>"}'],
+    ['Pwd="Hunter 2 Secret"', 'Pwd="<withheld 15 characters>"'],
+    ["pass=Hunter2Secret&x=1", "pass=<withheld 13 characters>&x=1"],
+    ["passphrase=Hunter2Secret", "passphrase=<withheld 13 characters>"],
+    ["pw=Hunter2Secret", "pw=<withheld 13 characters>"],
+    ["credential=Hunter2Secret", "credential=<withheld 13 characters>"],
+    ["x-api-key: Hunter2Secret", "x-api-key: <withheld 13 characters>"],
+    ["auth=Hunter2Secret", "auth=<withheld 13 characters>"],
+    ["token=%s", "token=%s"], ["user:%s@%s", "user:%s@%s"], ["bypass: true", "bypass: true"], ["OAuth=1", "OAuth=1"],
+  ];
+  for (const path of COPIES) {
+    const r = py(path, "print(json.dumps([m.shown_path(t) for t in json.load(sys.stdin)]))", cases.map((c) => c[0]));
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(JSON.parse(r.stdout), cases.map((c) => c[1]), path);
+  }
+});
+
+test("P3 GitHub and sk- heads in words are not withheld (Risk-Assessment, highs_lows); a head after a non-letter, a long one anywhere and an AWS key id after a letter are", () => {
+  const kept = ["Risk-Assessment", "Task-Scheduler-Helper.exe", "Desk-2022", "Kiosk-Mode-V2", "weighs_count.exe", "highs_lows_v2", "C:\\b\\Risk-Assessment\\RiskTool.pdb"];
+  const gone = ["ghp_Ab3d", "x/ghp_Ab3dEf", "XAKIAIOSFODNN7", "Xghp_Ab3dEf5hIj7lMn9pQr1tUv", "a_sk-Ab3dEf5hIj7lMn9pQr1t"];
+  for (const path of COPIES) {
+    const r = py(path, "print(json.dumps([m.shown_path(t) for t in json.load(sys.stdin)]))", [...kept, ...gone]);
+    assert.equal(r.status, 0, r.stderr);
+    const out = JSON.parse(r.stdout) as string[];
+    kept.forEach((t, i) => assert.equal(out[i], t, path));
+    gone.forEach((t, i) => assert.match(out[kept.length + i]!, /<token-shaped text withheld \d+ characters>/, `${path}: ${t} -> ${out[kept.length + i]}`));
+  }
+});
+
+test("the sanitiser's output is a fixed point also for text with hidden characters and escapes: 10,000 generated strings in each copy", () => {
+  const rnd = prng(91);
+  const alphabet = ["a", "X", "0", "9", "/", "_", "-", "+", "=", ":", "@", ".", "%", " ", "<", ">", "\\x00", "\0", "\u200b", "\u00ad", "\u0301", "\uff21", "\\"];
+  const names = Object.values(SHAPES);
+  const texts: string[] = [];
+  for (let i = 0; i < 10000; i++) {
+    let s = "";
+    for (let k = 1 + Math.floor(rnd() * 5); k > 0; k--) {
+      if (rnd() < 0.3) {
+        const c = names[Math.floor(rnd() * names.length)]!(120, prng(i * 7 + k));
+        if (c) s += c.plant.split("").map((ch) => (rnd() < 0.1 ? ch + alphabet[16 + Math.floor(rnd() * 6)] : ch)).join("");
+      } else for (let j = Math.floor(rnd() * 20); j > 0; j--) s += alphabet[Math.floor(rnd() * alphabet.length)];
+    }
+    texts.push(s);
+  }
+  for (const path of COPIES) {
+    const r = py(path, "texts = json.load(sys.stdin)\nbad = [t for t in texts if m.shown_path(m.shown_path(t)) != m.shown_path(t)]\nprint(json.dumps(bad[:5]))", texts);
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(JSON.parse(r.stdout), [], `${path}: not a fixed point`);
+  }
+});

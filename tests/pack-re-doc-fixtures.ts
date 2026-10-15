@@ -800,3 +800,26 @@ export function buildPeDirs(o: PeDirOptions = {}): BuiltPeDirs {
   if (rsrc.length) rsrc.copy(file, rsrcRaw);
   return { file, rdataRva: RDATA_RVA, rsrcRva: RSRC_RVA, textRva: TEXT_RVA, rvas, rawOf };
 }
+
+/** A 40-character GitHub token shape, the run a string's address points right after in afterTokenRun. */
+export const TOKEN_RUN = "ghp_" + "Q7wErTy9uIoP3aSdF6gHjK2lZxC5vBnM8qW1";
+
+/** Exports named TOKEN_RUN + tail (one each) and as many short names whose pointers are then moved to the first byte after each TOKEN_RUN. */
+export function afterTokenRun(tails: string[]): Buffer {
+  const fns = [...tails.map((t) => ({ name: TOKEN_RUN + t })), ...tails.map((_t, i) => ({ name: `zz${i}` }))];
+  const pe = buildPeDirs({ exports: { imageName: "m.dll", functions: fns } });
+  const dir = pe.rawOf(pe.rvas.exports!);
+  const count = pe.file.readUInt32LE(dir + 24);
+  const names = pe.rawOf(pe.file.readUInt32LE(dir + 32));
+  const at = new Map<string, number>();
+  for (let k = 0; k < count; k++) {
+    const rva = pe.file.readUInt32LE(names + 4 * k);
+    const raw = pe.rawOf(rva);
+    at.set(pe.file.subarray(raw, pe.file.indexOf(0, raw)).toString("latin1"), names + 4 * k);
+  }
+  tails.forEach((t, i) => {
+    const longPtr = at.get(TOKEN_RUN + t)!, shortPtr = at.get(`zz${i}`)!;
+    pe.file.writeUInt32LE(pe.file.readUInt32LE(longPtr) + TOKEN_RUN.length, shortPtr);
+  });
+  return pe.file;
+}

@@ -668,6 +668,8 @@ export type ZipEntry = {
   flags?: number;               // general purpose bit flag (bit 0: encrypted)
   compressed?: Buffer;          // precomputed compressed bytes (overrides compressing `data`)
   declaredSize?: number;        // the uncompressed size the headers say
+  centralExtra?: Buffer;        // the central directory entry's extra field (APPNOTE 4.4.28), e.g. a Unicode Path field (0x7075)
+  rawName?: Buffer;             // the name's bytes as written, in place of `name` in UTF-8, with the UTF-8 flag (bit 11) clear
 };
 
 /** A ZIP archive: local headers and data, the central directory, the end of central directory record. */
@@ -679,8 +681,9 @@ export function buildZip(entries: ZipEntry[], o: { comment?: string; commentByte
     const method = e.method ?? 8;
     const compressed = e.compressed ?? (method === 8 ? deflateRawSync(e.data) : e.data);
     const crc = crc32(e.data);
-    const name = Buffer.from(e.name, "utf8");
-    const flags = (e.flags ?? 0) | 0x0800;
+    const name = e.rawName ?? Buffer.from(e.name, "utf8");
+    const flags = (e.flags ?? 0) | (e.rawName ? 0 : 0x0800);
+    const extra = e.centralExtra ?? Buffer.alloc(0);
     const size = e.declaredSize ?? e.data.length;
     const dosTime = ((12 << 11) | (30 << 5) | 0) & 0xffff;
     const dosDate = (((2024 - 1980) << 9) | (5 << 5) | 17) & 0xffff;
@@ -712,13 +715,14 @@ export function buildZip(entries: ZipEntry[], o: { comment?: string; commentByte
         u32(compressed.length),
         u32(size),
         u16(name.length),
-        u16(0),
+        u16(extra.length),
         u16(0),
         u16(0),
         u16(0),
         u32(0),
         u32(offset),
         name,
+        extra,
       ]),
     );
     locals.push(local);
