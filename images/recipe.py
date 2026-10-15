@@ -474,12 +474,12 @@ def profile_for(search, wanted: list, programs: set = frozenset(), images=PACKS)
 
     1. A profile that HOLDS them: the wanted packs and their dependencies are
        all among the profile's packs (images/profiles.json, each pack's
-       dependencies added). The smallest holder other than `full` wins; of two
-       of a size, the first in profiles.json. `full` holds every pack, so a
-       pack no smaller profile lists gets `full`, never a profile that merely
-       happens to name the same programs: a pack whose tools use nothing
-       beyond the base's (a pack of stdlib Python) is covered by every
-       profile, and covering picks none of them for a reason.
+       dependencies added). The smallest holder other than `full` wins (the
+       tie rule below). `full` holds every pack, so a pack no smaller profile
+       lists gets `full`, never a profile that merely happens to name the
+       same programs: a pack whose tools use nothing beyond the base's (a
+       pack of stdlib Python) is covered by every profile, and covering
+       picks none of them for a reason.
     2. Only for a pack no profile holds, `full` included (an installed pro or
        third-party pack, which images/ does not list): the smallest profile
        that COVERS what the packs use, since a pack's skills and tools come
@@ -488,6 +488,14 @@ def profile_for(search, wanted: list, programs: set = frozenset(), images=PACKS)
        packs name too, and every Python package their tools import is in the
        profile.
     3. Otherwise `full`.
+
+    The tie rule, for the candidates of the step that decides: `full` last,
+    then the fewest packs, then the fewest programs the profile's packs name
+    (the least built, pulled and listed for nothing the run asked for), then
+    the profile's name. The order of images/profiles.json decides nothing.
+    The base pack alone (it names the Sleuth Kit programs, which the `base`
+    image lacks) and a pack of stdlib Python that no profile lists are cases
+    of it.
 
     The wanted packs are read from `search` (where the run's packs are
     installed); a profile's own packs from `images` (what the images are built
@@ -508,7 +516,7 @@ def profile_for(search, wanted: list, programs: set = frozenset(), images=PACKS)
             continue
         members = resolve(images, prof["packs"])
         _, named, python = needs_of(images, members)
-        row = (name, len(members), set(programs) - BASE_PROGRAMS <= named)
+        row = (name, len(members), set(programs) - BASE_PROGRAMS <= named, len(named))
         if need <= set(members):
             holding.append(row)
         elif want_named <= named and want_python <= python:
@@ -520,9 +528,11 @@ def profile_for(search, wanted: list, programs: set = frozenset(), images=PACKS)
         if not candidates:
             continue
         pool = [s for s in candidates if s[2] and s[0] != "full"] or candidates
-        # Fewest packs, full last; between two of a size the first listed
-        # (min keeps the first of equals).
-        return min(pool, key=lambda s: (s[0] == "full", s[1]))[0]
+        # The tie rule: full last, then the fewest packs, then the fewest
+        # programs the profile's packs name (the least that is built, pulled
+        # and listed for nothing the run asked for), then the profile's name.
+        # The order of images/profiles.json decides nothing.
+        return min(pool, key=lambda s: (s[0] == "full", s[1], s[3], s[0]))[0]
     return "full"
 
 
@@ -530,23 +540,30 @@ def job_profiles(search, wanted: list, images=PACKS) -> dict:
     """The profile each of a run's packs runs its jobs in: its own
     (profile_for), unless that profile would serve it alone and a profile
     chosen for another of the run's packs, full aside, holds it too. A
-    dependency every profile holds (computer-forensics-base) is given the
-    smallest of them by profile_for, memory, which a run of disk and mobile
-    packs would then boot for nothing else; it goes with its dependents."""
+    dependency every profile holds (computer-forensics-base) is placed last,
+    once the other packs have moved: profile_for gives it the profile that the
+    tie rule picks, which a run of other packs would then boot for nothing
+    else, so it goes where the run's packs ended up (a run of
+    computer-forensics-base, macos-forensics and mobile-forensics boots one
+    image, mobile)."""
     own = {name: profile_for(search, [name], images=images) for name in wanted}
-    users = {}
-    for prof in own.values():
-        users[prof] = users.get(prof, 0) + 1
     table = profiles()
     members = {name: set(resolve(images, prof["packs"])) for name, prof in table.items() if not prof.get("apt")}
     out = dict(own)
-    for name, prof in own.items():
-        if users[prof] > 1:
-            continue
-        hold = [q for q in set(own.values()) if q not in (prof, "full") and q in members and name in members[q]]
-        if hold:
-            # The profile most of the run's packs run in, then the smallest.
-            out[name] = min(hold, key=lambda q: (-users[q], len(members[q]), q))
+    everywhere = {n for n in own if all(n in m for q, m in members.items() if q != "base")}
+    for names in ([n for n in own if n not in everywhere], [n for n in own if n in everywhere]):
+        # Recounted for each group: a pack that moved has left its profile.
+        users = {}
+        for prof in out.values():
+            users[prof] = users.get(prof, 0) + 1
+        for name in names:
+            prof = out[name]
+            if users[prof] > 1:
+                continue
+            hold = [q for q in set(out.values()) if q not in (prof, "full") and q in members and name in members[q]]
+            if hold:
+                # The profile most of the run's packs run in, then the smallest.
+                out[name] = min(hold, key=lambda q: (-users[q], len(members[q]), q))
     return out
 
 

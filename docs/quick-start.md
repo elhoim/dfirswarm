@@ -52,13 +52,13 @@ docker save dfirswarm-base:dev-arm64 -o /tmp/dfirswarm-base.tar
 ```
 
 The forensic programs are in the job images, one per profile (`disk`,
-`memory`, `mobile`, `macos`, `cloud`, `triage`, `network`, `linux`, `re`, `full`), built the same way
-([images/README.md](../images/README.md)). A run with packs runs its tool
-work in the images that hold them, and each image lists its programs in a
-file the agents read (`images/<profile>/tools.md` in the run). When this
-host lacks the base, or the job image that holds all of the run's packs,
-the kickoff tries to pull it before anything is written, and when it
-cannot, stops and says how to build it. Another job image that is missing
+`memory`, `mobile`, `macos`, `cloud`, `triage`, `network`, `linux`, `re`,
+`full`), built the same way ([images/README.md](../images/README.md)). A run
+with packs runs its tool work in the images that hold them, and each image
+lists its programs in a file the agents read (`images/<profile>/tools.md` in
+the run). When this host lacks the base, or the job image that holds all of
+the run's packs, the kickoff tries to pull it before anything is written, and
+when it cannot, stops and says how to build it. Another job image that is missing
 and cannot be pulled is left out, and its packs' jobs run in the one that
 holds them all.
 With `--no-jobs` or `--brains-with-packs`, the agents' own VMs boot the

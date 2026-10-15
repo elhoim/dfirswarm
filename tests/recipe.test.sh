@@ -43,6 +43,20 @@ jq -e '. == {"computer-forensics-base": "disk", "windows-forensics": "disk", "mo
 jp="$(python3 "$R" job-profiles computer-forensics-base windows-forensics encrypted-containers linux-forensics)"
 [[ "$(jq -r '."computer-forensics-base"' <<<"$jp")" == disk ]] || fail "the base pack goes where most of the run's packs are (disk, two), not linux (one): $jp"
 [[ "$(python3 "$R" job-profiles computer-forensics-base memory-forensics | jq -r '."computer-forensics-base"')" == memory ]] || fail "with memory-forensics alone, the base pack runs in memory"
+# A plain mobile-forensics run boots ONE job image: swarm.sh hands recipe.py the
+# run's packs with their dependencies, the base pack and macos-forensics beside
+# mobile-forensics. macos-forensics has a profile of its own now, and the base
+# pack, which every profile holds, must go where the run's packs ended up and
+# not be given `macos` (or `memory`) for itself.
+jp="$(python3 "$R" job-profiles computer-forensics-base macos-forensics mobile-forensics)"
+jq -e '. == {"computer-forensics-base": "mobile", "macos-forensics": "mobile", "mobile-forensics": "mobile"}' <<<"$jp" >/dev/null \
+  || fail "a mobile-forensics run (with the base pack and macos-forensics) should boot one job image, mobile: $jp"
+jp="$(python3 "$R" job-profiles computer-forensics-base macos-forensics)"
+jq -e '. == {"computer-forensics-base": "macos", "macos-forensics": "macos"}' <<<"$jp" >/dev/null \
+  || fail "a macos-forensics run should boot one job image, macos: $jp"
+jp="$(python3 "$R" job-profiles computer-forensics-base windows-forensics macos-forensics)"
+jq -e '. == {"computer-forensics-base": "macos", "windows-forensics": "disk", "macos-forensics": "macos"}' <<<"$jp" >/dev/null \
+  || fail "the base pack goes to the profile of the fewest packs that holds it (macos, two; disk, three): $jp"
 pass "a pack goes to the smallest profile that holds it, a pack no profile lists to the smallest that covers it, and full only when nothing smaller serves"
 
 # The invariants of images/profiles.json. `full` holds every pack under
@@ -80,6 +94,89 @@ for pack, profile in {"macos-forensics": "macos", "cloud-forensics": "cloud", "t
                       "reverse-engineering": "re", "ransomware-response": "re", "network-forensics": "network",
                       "linux-forensics": "linux", "encrypted-containers": "disk"}.items():
     assert chosen[pack] == profile, f"{pack}: expected {profile}, got {chosen[pack]}"
+# The images a run boots (the default image, which holds every pack, and the
+# job images) against tests/fixtures/job-images-main.json, frozen from the
+# recipe and profiles before the macos, cloud and triage profiles: every pack,
+# every pair and twelve larger runs, each as swarm.sh hands it to recipe.py
+# (the packs with their dependencies). The only differences allowed are the
+# ones this change makes on purpose.
+NEW_PROFILES = {"macos", "cloud", "triage"}
+NEW_PACKS = {"macos-forensics", "cloud-forensics", "triage-collection"}
+BASE_PACK = "computer-forensics-base"
+# Documented in the changelog and images/README.md: no profile but full holds
+# these pairs, which a smaller one used to serve by chance.
+BY_HOLDING = {"encrypted-containers+ransomware-response", "memory-forensics+ransomware-response",
+              "ransomware-response+windows-forensics"}
+
+def booted(run):
+    full = recipe.resolve(recipe.PACKS, run)
+    default = recipe.profile_for(recipe.PACKS, full)
+    return default, sorted(set(recipe.job_profiles(recipe.PACKS, full).values()) | {default})
+
+frozen = json.loads((root / "tests" / "fixtures" / "job-images-main.json").read_text())
+assert len(frozen) >= 90, len(frozen)
+assert BY_HOLDING <= set(frozen) and BASE_PACK in frozen, "the frozen table lacks a documented run"
+differing = set()
+for key, (old_default, old_images) in frozen.items():
+    new_default, new_images = booted(key.split("+"))
+    if (new_default, new_images) == (old_default, old_images):
+        continue
+    differing.add(key)
+    if key in BY_HOLDING:
+        assert new_default == "full" and new_images == sorted(set(old_images) | {"full"}), (key, old_default, old_images, new_default, new_images)
+    elif key == BASE_PACK:
+        assert new_default == new_images[0] and len(new_images) == 1 and new_default not in ("memory",), (key, new_default, new_images)
+    elif NEW_PACKS & set(key.split("+")):
+        assert set(new_images) - set(old_images) <= NEW_PROFILES and new_default in NEW_PROFILES | {old_default}, \
+            (key, "may differ only by a new profile", old_default, old_images, new_default, new_images)
+    else:
+        raise AssertionError(f"{key}: booted {old_default} {old_images} before the new profiles, {new_default} {new_images} now")
+assert BY_HOLDING | {BASE_PACK} <= differing, "a documented difference no longer differs: " + str(sorted((BY_HOLDING | {BASE_PACK}) - differing))
+# What the table cannot say for the runs that name a new profile's pack.
+assert booted(["mobile-forensics"]) == ("mobile", ["mobile"]), booted(["mobile-forensics"])
+assert booted([BASE_PACK, "macos-forensics", "mobile-forensics"]) == ("mobile", ["mobile"])
+assert booted([BASE_PACK, "macos-forensics"]) == ("macos", ["macos"])
+assert booted(["macos-forensics"]) == ("macos", ["macos"])
+assert booted(["cloud-forensics"]) == ("cloud", ["cloud"]) and booted(["triage-collection"]) == ("triage", ["triage"])
+
+# The tie rule: of the profiles that hold what the run needs, full last, then
+# the fewest packs, then the fewest programs those packs name, then the name.
+# The base pack alone is held by nine profiles of two or three packs. Pinned:
+# a change of the result is a decision (change this, images/README.md and the
+# changelog together), not an accident of the order of profiles.json.
+named = lambda n: len(recipe.needs_of(recipe.PACKS, sorted(members[n]))[1])
+holders = sorted(n for n, m in members.items() if n not in ("full", "base") and BASE_PACK in m)
+assert len(holders) == 9, holders
+expected = min(holders, key=lambda n: (len(members[n]), named(n), n))
+assert chosen[BASE_PACK] == expected == "cloud", (chosen[BASE_PACK], expected)
+# An installed pack of stdlib Python that depends on the base pack and names no
+# program is covered by every profile that holds the base pack: the same tie.
+# One that names nothing and depends on nothing is served by the base image.
+import tempfile
+with tempfile.TemporaryDirectory() as unlisted:
+    for name, deps in (("stdlib-on-base", [BASE_PACK]), ("stdlib-alone", [])):
+        (Path(unlisted) / name / "requires").mkdir(parents=True)
+        (Path(unlisted) / name / "pack.json").write_text(json.dumps({"id": name, "depends": deps}))
+        (Path(unlisted) / name / "requires" / "host.json").write_text(json.dumps({"binaries": []}))
+    search = [Path(unlisted), recipe.PACKS]
+    assert recipe.profile_for(search, ["stdlib-on-base"]) == "cloud", recipe.profile_for(search, ["stdlib-on-base"])
+    assert recipe.profile_for(search, ["stdlib-alone"]) == "base", recipe.profile_for(search, ["stdlib-alone"])
+# The order of profiles.json decides nothing: the resolutions of every pack,
+# every pair and the base pack with each, and the jobs of each run, are the same
+# under the file's order reversed, sorted, and five shuffles.
+import random
+real_profiles, table0 = recipe.profiles, recipe.profiles()
+resolutions = [[p] for p in packs] + [[a, b] for i, a in enumerate(packs) for b in packs[i + 1:]]
+def settle():
+    return [(recipe.profile_for(recipe.PACKS, r), recipe.profile_for(recipe.PACKS, recipe.resolve(recipe.PACKS, r)),
+             recipe.job_profiles(recipe.PACKS, recipe.resolve(recipe.PACKS, r))) for r in resolutions]
+baseline = settle()
+rng = random.Random(152)
+names0 = list(table0)
+for order in [names0[::-1], sorted(names0)] + [rng.sample(names0, len(names0)) for _ in range(5)]:
+    recipe.profiles = lambda order=order: {k: table0[k] for k in order}
+    assert settle() == baseline, f"the order of profiles.json changed a resolution: {order}"
+recipe.profiles = real_profiles
 # mobile depends on macos-forensics and still resolves to itself; macos is held by both.
 assert "macos-forensics" in members["mobile"] and "macos-forensics" in members["macos"]
 # Each own profile lists its pack alone, so it holds that pack and the base.
@@ -118,6 +215,21 @@ with tempfile.TemporaryDirectory() as tmp:
     assert got("held-by-disk", "mem") == "full", got("held-by-disk", "mem")
     assert got("unlisted") == "memory", "a pack no profile lists is matched by what it names: " + got("unlisted")
     assert got("unlisted-big") == "full", got("unlisted-big")
+    # Ties: the same number of packs, then the programs they name, then the
+    # name; whatever the order of the table.
+    pack("x", ["b"], ["fls", "a1", "a2"])
+    pack("y", ["b"], ["fls", "c1"])
+    pack("z", ["b"], ["fls", "c1"])
+    pack("lone", [])
+    pack("std", ["b"])
+    for order in (("zz", "yy", "xx"), ("xx", "yy", "zz"), ("yy", "xx", "zz")):
+        spec = {"xx": ["x"], "yy": ["y"], "zz": ["z"]}
+        recipe.profiles = lambda order=order, spec=spec: {
+            "base": {"packs": []}, **{k: {"packs": spec[k]} for k in order}, "full": {"packs": ["x", "y", "z"]}}
+        assert got("b") == "yy", ("fewest programs, then the name", order, got("b"))
+        assert got("std") == "yy", ("an unlisted stdlib pack on the base pack: the same tie", order, got("std"))
+        assert got("lone") == "base", got("lone")
+        assert got("x") == "xx" and got("z") == "zz"
 PYEOF
 [[ "$?" == 0 ]] || fail "the profile invariants do not hold (see above)"
 pass "full holds every pack under packs/, every pack resolves to a profile that holds it, and macos, cloud and triage have images of their own"
@@ -136,6 +248,14 @@ for wf in ("images.yml", "image-boot.yml"):
     assert len(found) == 1, f"{wf}: expected one profile matrix, found {len(found)}"
     listed = sorted(x.strip() for x in found[0].split(","))
     assert listed == want, f"{wf} builds {listed}, profiles.json has {want}"
+    # The arm64 entries (`include:`) name profiles that exist and that the
+    # matrix builds for amd64, once each.
+    extra = re.findall(r"^\s*- \{ profile: ([a-z0-9-]+), arch: ([a-z0-9]+) \}", text, re.M)
+    assert len(extra) == len(set(extra)), f"{wf}: an include entry is listed twice: {extra}"
+    assert len(extra) == len(re.findall(r"^\s*- \{[^}]*arch: arm64", text, re.M)), f"{wf}: an include entry the check does not read"
+    for profile, arch in extra:
+        assert profile in want and profile in listed, f"{wf}: include entry {profile}/{arch} names a profile that is not in the matrix"
+        assert arch == "arm64", f"{wf}: include entry {profile}/{arch}: only arm64 is added to the amd64 matrix"
 PYEOF
 [[ "$?" == 0 ]] || fail "the images workflows do not build exactly the profiles in profiles.json"
 pass "the images and image-boot workflows build every profile in profiles.json and no other"
