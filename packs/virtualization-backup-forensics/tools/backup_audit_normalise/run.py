@@ -1141,12 +1141,17 @@ def parse_task_index(fh, source, events, clock, max_line, stats):
         stats["parsed"] += 1
         task = {"pid": int(pid, 16), "pstart": pstart, "upid_layout": product}
         if product == "proxmox_backup_server":
-            # the escaped form shows what the unescaped one holds (\x41 is A): it is withheld whenever the unescaped id is
+            # Each form shows what the other holds (\x41 is A; unescaping turns `-` into `/`, which can split a token the
+            # written form holds whole): when either is withheld, both are.
             as_written = None
             if wid:
-                obj_shown = events.shown(tid, "%s#%d" % (source["id"], events.n + 1), "worker id")
-                as_written = events.shown(wid, "%s#%d" % (source["id"], events.n + 1), "worker id as written") if obj_shown == tid else (
-                    "<withheld %d characters: the unescaped worker id (object) is withheld>" % len(wid))
+                where = "%s#%d" % (source["id"], events.n + 1)
+                obj_shown, wid_shown = events.shown(tid, where, "worker id"), events.shown(wid, where, "worker id as written")
+                if obj_shown == tid and wid_shown == wid:
+                    as_written = wid
+                else:
+                    as_written = "<withheld %d characters: the worker id is withheld in both its forms>" % len(wid)
+                    tid = "<withheld %d characters: the worker id is withheld in both its forms>" % len(tid)
             task.update(task_counter=int(task_no, 16), worker_id_as_written=as_written,
                         worker_id_note="Proxmox Backup Server writes the worker id escaped as a systemd unit name; object is it unescaped")
         events.add(source, {"line": n, "byte_offset": off, "byte_length": length}, "pve_task_index", time_utc=start_utc, time_raw=starttime, time_basis="start time, epoch seconds in hexadecimal, UTC by definition",

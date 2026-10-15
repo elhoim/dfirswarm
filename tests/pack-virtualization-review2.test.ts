@@ -33,6 +33,7 @@ const UP = "ABCDEFGHIJKLMNOPQRSTUVWXYZ", LO = "abcdefghijklmnopqrstuvwxyz", DIG 
 const mixed = (n: number): string => { let s = ""; while (s.length < n) s += pick(UP, 1) + pick(LO, 1) + pick(DIG, 1) + pick(AL, 2); return s.slice(0, n); };
 const GHP = "ghp_" + mixed(36);
 const AKIA = "AKIA" + pick(UP + DIG, 16);
+const DASHED = mixed(14) + "-" + mixed(14) + "-" + mixed(14);      // a token whose `-` a systemd unescape turns into `/`
 
 /** Every twelve characters of a secret (past a fixed prefix): a leak shows at least one of them. */
 function pieces(secret: string, from = 0): string[] {
@@ -373,19 +374,23 @@ test("a chain the max_chain_depth limit stopped makes the answer partial and nam
   });
 });
 
-test("a Proxmox Backup Server worker id is withheld in its escaped form whenever its unescaped form is, and a task whose status is `unknown` is not called an error", async () => {
+test("a Proxmox Backup Server worker id is withheld in both its forms whenever either form is (also when unescaping `-` to `/` splits a token), and a task whose status is `unknown` is not called an error", async () => {
   await withCwd(async (cwd) => {
     const escaped = AKIA.split("").map((c, i) => (i % 3 === 1 ? `\\x${c.charCodeAt(0).toString(16)}` : c)).join("");
     const hex = (n: number): string => n.toString(16).toUpperCase().padStart(8, "0");
     await put(cwd, "inputs/a/index", [
       `UPID:pbs1:${hex(1)}:${hex(2)}:${hex(3)}:${hex(1700000000)}:verify:store1${escaped}:root@pam: ${hex(1700000060)} OK`,
       `UPID:pbs1:${hex(1)}:${hex(2)}:${hex(4)}:${hex(1700000100)}:garbage_collection:store1:root@pam: ${hex(1700000160)} unknown`,
+      `UPID:pbs1:${hex(1)}:${hex(2)}:${hex(5)}:${hex(1700000200)}:verify:x-${DASHED}:root@pam: ${hex(1700000260)} OK`,
     ].join("\n") + "\n");
     const run = await tool(AUDIT, cwd, { path: "inputs/a/index", format: "pve_task_index" });
     const out: Json = JSON.parse(run.stdout);
     assertNoPiece(run.stdout, AKIA, "PBS worker id", 4);
     for (const piece of escaped.match(/.{1,12}/g) ?? []) if (piece.length === 12) assert.equal(run.stdout.includes(JSON.stringify(piece).slice(1, -1)), false, piece);
-    assert.match(out.events[0].task.worker_id_as_written, /^<withheld \d+ characters: the unescaped worker id \(object\) is withheld>$/);
+    assert.match(out.events[0].task.worker_id_as_written, /^<withheld \d+ characters: the worker id is withheld in both its forms>$/);
+    assert.match(out.events[0].object, /^<withheld \d+ characters: the worker id is withheld in both its forms>$/);
+    for (const piece of DASHED.split("-")) assertNoPiece(run.stdout, piece, "a token split by unescaping");
+    assert.match(out.events[2].object, /^<withheld \d+ characters: the worker id is withheld in both its forms>$/);
     assert.equal(out.events[1].task.worker_id_as_written, "store1");
     assert.equal(out.events[1].result, "unknown");
     assert.match(out.events[1].result_basis, /status unknown/);

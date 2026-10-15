@@ -19,8 +19,8 @@
     "sha256": {
       "LICENCE": "5b94f18424dbef1e77eda33a465e946c2c8eb715fa5236afe2c6ec6763af80d3",
       "README.md": "83def7044243296abc979fcddb1b2750b374da4efdf5910239e71ec9421773d9",
-      "tools/backup_audit_normalise/manifest.json": "a4df277de9fdfef125a2aa64d899d995074a0a22861cdfab289906d059694c03",
-      "tools/backup_audit_normalise/run.py": "5f56a82346802fc88b24c94fe3385bbcdbf7636131fd4f084c68244a9310368a",
+      "tools/backup_audit_normalise/manifest.json": "c9b25cef82528cd7012e611c9aafe889711b00dac22a68cc780cd4c488147e7e",
+      "tools/backup_audit_normalise/run.py": "efdfbacfb758ecf5e0b7f8f0e5cbfea23a39ee5162f6f4586c8c2cf59e5d16c2",
       "tools/snapshot_chain_check/manifest.json": "9a2f477713817e321f9a62d58bfc19ff6553edf878dcddeca174b29a52ac63f1",
       "tools/snapshot_chain_check/run.py": "f6d9e1f1ebb26bbac92e29095757ba949e7d09d1c81d693d2c86eb8fad90df99",
       "tools/virtualization_inventory/manifest.json": "8265d5740dbf6b2f38e90cffd5b1ed528e5083f32c0d17269abf8fdac74a66bd",
