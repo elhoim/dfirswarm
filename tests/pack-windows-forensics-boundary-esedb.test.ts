@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { runPy, withCwd } from "./tool-library-harness.ts";
 import { WIN, body, everyFileUnder, failed, stub, tool } from "./windows-pack-harness.ts";
-import { SHAPES, fragmentLeaked, leaked, plant, type Canary, type Shape } from "./windows-canary.ts";
+import { SHAPES, fragmentLeaked, leaked, plant, prng, type Canary, type Shape } from "./windows-canary.ts";
 
 type Answer = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
 
@@ -175,6 +175,54 @@ test("esedb_query: strings an examiner must be able to read come through a cell 
     assert.deepEqual(out.rows.map((r: Answer) => r.Data), READABLE);
     assert.equal(out.boundary.strings_withheld, 0);
     await chmod(join(cwd, "fixture.tsv"), 0o600);
+  });
+});
+
+/**
+ * Twin trees: the same six table sizes under withheld names, once with the names in the order of their sizes and once in the reverse order. If a
+ * list printed the names as `sorted` gives them (or as the directory lists them), the order of the sizes would be the order of the raw names and
+ * the two trees would give opposite answers every time. They must not: the placeholders are in an order of their own that changes with every run.
+ */
+test("esedb_query: the order of withheld table names is not the order of the names (twin trees), and plain names are listed by their text", async () => {
+  await withCwd(async (cwd, bin) => {
+    const r = prng(41);
+    const alpha = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    const raw = new Set<string>();
+    while (raw.size < 6) raw.add(Array.from({ length: 24 }, () => alpha[Math.floor(r() * alpha.length)]).join(""));
+    const ranked = [...raw].sort(); // the order `sorted` gives
+    const plain = ["Containers", "AppIdTable", "SruDbIdMapTable"];
+    const orders: Record<string, string[]> = {};
+    for (const [tree, names] of [["ascending", ranked], ["descending", [...ranked].reverse()]] as const) {
+      const fixture = join(cwd, tree);
+      await mkdir(fixture, { recursive: true });
+      // table i has 4*(i+1) bytes, so the size says which table it is
+      for (let i = 0; i < 6; i++) await writeFile(join(fixture, `${names[i]}.${i + 3}`), "A\n1\n".repeat(i + 1));
+      for (let i = 0; i < plain.length; i++) await writeFile(join(fixture, `${plain[i]}.${i + 20}`), "A\n1\n");
+      await stub(bin, "esedbexport", `
+if [ "$1" = "-V" ]; then echo "esedbexport 20231020"; exit 0; fi
+root="$2"
+mkdir -p "$root.export"
+cp -R "${fixture}"/. "$root.export"/
+`);
+      await writeFile(join(cwd, "work", `${tree}.edb`), "ESE stand-in " + tree);
+      orders[tree] = [];
+      const seen = new Set<string>();
+      for (let run = 0; run < 12; run++) {
+        const out = body<Answer>(await tool("esedb_query", cwd, { path: `work/${tree}.edb` }, {}, bin));
+        const sizes = Object.entries(out.bytes_per_table as Record<string, number>).filter(([k]) => k.startsWith("<withheld")).map(([, v]) => v);
+        assert.equal(sizes.length, 6, "every withheld table is listed under a key of its own");
+        seen.add(sizes.join(","));
+        const plainOrder = Object.keys(out.bytes_per_table).filter((k) => !k.startsWith("<withheld"));
+        assert.deepEqual(plainOrder, [...plain].sort(), "plain names are listed by their text");
+        assert.deepEqual(out.tables.filter((t: string) => !t.startsWith("<withheld")), [...plain].sort());
+        // tables and files list the same names the same way
+        assert.equal(out.table_count, 9);
+        orders[tree].push(sizes.join(","));
+      }
+      assert.ok(seen.size >= 4, `${tree}: the order of the placeholders changes from run to run (${seen.size} different orders in 12 runs)`);
+      const byRank = (tree === "ascending" ? [4, 8, 12, 16, 20, 24] : [24, 20, 16, 12, 8, 4]).join(",");
+      assert.ok(orders[tree].some((o) => o !== byRank), `${tree}: the raw order of the names is not always the printed order`);
+    }
   });
 });
 
