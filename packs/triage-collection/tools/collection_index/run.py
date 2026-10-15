@@ -728,7 +728,7 @@ def _b_verdict(text):
         return known
     try:
         reason = _b_suspect(text)
-    except BaseException:                          # a check that cannot judge fails closed
+    except Exception:                              # a check that cannot judge fails closed (a signal's SystemExit is not swallowed)
         reason = "a string the check could not judge"
     if len(text) <= 512:
         if _B_CACHE_CHARS[0] > (4 << 20):
