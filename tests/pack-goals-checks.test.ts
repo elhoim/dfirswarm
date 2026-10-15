@@ -5,7 +5,7 @@
  * numeric minimum of `event` entries from them (completion is judged by the answer dispositions that
  * scripts/check-answers.ts reads), so this suite holds three things for every packs/*\/goals/*.md:
  *
- *  - no check counts ledger events against a minimum;
+ *  - no check counts ledger events against a minimum, reads the ledger, or compares a number;
  *  - the other checks are still there (the report exists, one heading per question, the answer check over
  *    exactly the questions the goal asks, the inputs check, the skill index read);
  *  - each check that reads work/report.md is run the way the harness runs it, on reports of about 300 KB per
@@ -48,6 +48,8 @@ test("there are goal templates to hold, and none counts ledger events against a 
     for (const c of g.checks) {
       assert.doesNotMatch(c, /"kind":"event"|kind\\?":\\?"event/, `${g.id}: a check counts event entries: ${c}`);
       assert.doesNotMatch(c, /grep -c\b[^`]*-ge\s+\d+|-ge\s+\d+/, `${g.id}: a check holds a numeric minimum: ${c}`);
+      assert.doesNotMatch(c, /ledger\/|entries\.jsonl/, `${g.id}: a check reads the ledger: ${c}`);
+      assert.doesNotMatch(c, /\s-(?:ge|gt|le|lt|eq|ne)\s|>=|<=|\bNR\s*[<>=]/, `${g.id}: a check compares a number: ${c}`);
     }
     assert.doesNotMatch(g.text, /at least \w+ (dated )?events?\b/i, `${g.id}: the prose asks for an event count`);
   }
@@ -66,9 +68,12 @@ test("the other checks stay: the report, one heading per question, the answers o
   }
 });
 
-/** What a pipe in a check is: a `|` that is neither inside a quote or a regex nor half of `||`. */
+/**
+ * What a pipe in a check is: a `|` that is neither inside a single-quoted string (a regex or a program text)
+ * nor half of `||`. A pipe inside a double-quoted string is still a pipe: `"$(a | b)"` runs one.
+ */
 function pipes(check: string): boolean {
-  const bare = check.replace(/'[^']*'/g, "''").replace(/"[^"]*"/g, '""').replace(/\|\|/g, "");
+  const bare = check.replace(/'[^']*'/g, "''").replace(/\|\|/g, "");
   return bare.includes("|");
 }
 

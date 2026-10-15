@@ -45,7 +45,7 @@ own. The sign-off is these acts, not a post. Nothing else is assigned.
 `work/report.md` exists and answers questions 1 to 7 under the headings `## 1.`
 through `## 7.`. Every memory claim names a process and a region, or an offset.
 The ledger holds one `answer` entry per question (`question:1` to `question:7`)
-and one each for `summary` and `narrative`, with every defect the answers check
+and one each for `summary` and `narrative`, with every defect the answers check names,
 fixed where the evidence allows it, or named by a limitation that says what could
 not be established and why (the run may then end and the defect stays counted; a
 limitation does not fix it), and the critic, who wrote none of them, has recorded

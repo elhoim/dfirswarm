@@ -35,7 +35,7 @@
       "tools/mem_profile/run.py": "7cc77438b15ae40aad6631d593d81d70418cb23f8cc6fad93eeb84736af8a683",
       "tools/mem_fs/manifest.json": "251c80868cb7887b4ed0d36a7e4e445f6426c60d2ccd72e20fa4cca0adc577f8",
       "tools/mem_fs/run.py": "583be63985ec5711001e50a7754b147b6312d4385df6bce9397aadb900657e76",
-      "goals/memory-triage.md": "3a0d0bae06e388891c5884710dc05b7290ff7bce411d7407989ae74110eeec9c",
+      "goals/memory-triage.md": "e5ed9781488b1099248ab353b2ac152cb7be4ab3d6330b6bbe5e71e4832a1c1b",
       "skills/strings/discipline.md": "c33bacce4c1586a72a3894f674ef5622ce67bc1ffe9685b1c21bf24bb6bb29a6",
       "skills/patterns/yara.md": "0cea61e4a0bc111f696fec70ed47de888637cd241779f389c5915e8837d0945c",
       "skills/processes/injection.md": "1ebcee919230e1df158728c4360fb9f1f52d32952c69a0c709a6b52da1fbd93a",
