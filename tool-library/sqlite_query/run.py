@@ -1133,7 +1133,8 @@ REFUSED_OUTSIDE_A_JOB = ("write_values is refused outside a job: a value written
 REFUSED_NOT_SECRET = ("write_values is refused in a job that was not run as secret output: its files would be sealed as ordinary output. "
                       "The harness sets SECRET_OUTPUT=1 for a secret job's process and it is not set here. Run it as "
                       "job_run(tool: \"sqlite_query\", args: {...}), whose manifest makes the job secret output, or give a command job "
-                      "secret_output: true. Nothing was written.")
+                      "secret_output: true; if that is refused the same way, this run's harness does not set the variable and the values "
+                      "mode is not available in it. Nothing was written.")
 
 
 def values_refusal():

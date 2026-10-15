@@ -167,8 +167,9 @@ class SecretValues:
                 "write_values is refused in a job that was not run as secret output: its files would "
                 "be sealed as ordinary output. The harness sets SECRET_OUTPUT=1 for a secret job's "
                 "process and it is not set here. Run this as job_run tool=recovery_key_scan (its "
-                "manifest makes the job secret output), or give a command job secret_output: true. "
-                "Nothing was written."
+                "manifest makes the job secret output), or give a command job secret_output: true; "
+                "if that is refused the same way, this run's harness does not set the variable and the "
+                "values mode is not available in it. Nothing was written."
             )
         self.path = Path(self.out) / self.NAME
         self.shown = "store/jobs/%s/out/%s" % (re.sub(r"[^A-Za-z0-9_.-]", "_", self.job), self.NAME)

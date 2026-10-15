@@ -44,7 +44,7 @@ import { assessJob, HEARTBEAT_LINES, HEARTBEAT_STOP, keepSample, readSamples, sa
 import type { Mount, WorkerSpec } from "./vm.ts";
 import { jobNetworkHosts } from "./net-grants.ts";
 import { indexOutputs, objectsMatch, opMatch, rankSimilar, reuseOf, sameAsOf, sameAsView, type Reuse, type SameAs, type Similar } from "./job-reuse.ts";
-import { declaredSecretOutput, derivedFrom, derivedSensitivity, ownSensitivity, parseSecretDeclaration, sensitiveIndex, snapshotObjects, type SecretDeclaration, type Sensitivity } from "./output-hygiene.ts";
+import { declaredSecretOutput, derivedFrom, derivedSensitivity, ownSensitivity, parseSecretDeclaration, recipeSecretRefusal, sensitiveIndex, snapshotObjects, type SecretDeclaration, type Sensitivity } from "./output-hygiene.ts";
 import { execRefused, execRefusedWords, type ExecRefused } from "./job-exec-refused.ts";
 import { writeRefused, writeRefusedWords, type WriteRefused } from "./job-write-refused.ts";
 
@@ -331,6 +331,8 @@ export type RecipeInfo = {
   capability?: string;
   exclusions?: string[];
   unavailable?: string;
+  /** Why the recipe is never run: it carries a secret_output declaration, which only tool jobs honour (recipeSecretRefusal). */
+  refused?: string;
 };
 
 /** The requester the derived catalogue's work runs as: the lowest lane. */
@@ -740,12 +742,13 @@ export class JobService {
         if (pid !== m[1]) continue;
         const dir = join(pack, "recipes", m[2]);
         try {
-          const r = JSON.parse(await readFile(join(dir, "recipe.json"), "utf8")) as { runtime?: string; entry?: string; sha256?: string; limits?: { seconds?: number }; auto?: string[]; min_bytes?: number; suffixes?: string[]; magic?: Array<{ offset?: number; hex?: string }>; version?: string; description?: string; purpose?: string; capability?: string; exclusions?: unknown[]; unavailable?: string };
+          const r = JSON.parse(await readFile(join(dir, "recipe.json"), "utf8")) as { runtime?: string; entry?: string; sha256?: string; limits?: { seconds?: number }; auto?: string[]; min_bytes?: number; suffixes?: string[]; magic?: Array<{ offset?: number; hex?: string }>; version?: string; description?: string; purpose?: string; capability?: string; exclusions?: unknown[]; unavailable?: string; secret_output?: unknown };
           const entry = join(dir, String(r.entry ?? ""));
           const sha = sha256Hex(await readFile(entry));
           if (r.sha256 && r.sha256 !== sha) return null;
           const broad = r.purpose === "broad_extraction";
           const unavailable = typeof r.unavailable === "string" && r.unavailable.trim() ? r.unavailable.trim() : undefined;
+          const refused = recipeSecretRefusal(id, Object.hasOwn(r, "secret_output"));
           return {
             id,
             dir,
@@ -753,8 +756,9 @@ export class JobService {
             entry,
             sha256: sha,
             seconds: Number(r.limits?.seconds ?? 900),
-            // A recipe the images cannot run is never triggered.
-            auto: unavailable ? [] : (r.auto ?? []),
+            // A recipe the images cannot run, or that carries a declaration it cannot honour, is never triggered.
+            auto: unavailable || refused ? [] : (r.auto ?? []),
+            ...(refused ? { refused } : {}),
             minBytes: Number(r.min_bytes ?? 0) || 0,
             ...(Array.isArray(r.suffixes) ? { suffixes: r.suffixes.map((x) => String(x).toLowerCase()) } : {}),
             ...(Array.isArray(r.magic) ? { magic: r.magic.filter((m) => Number.isInteger(m.offset) && /^([0-9a-f]{2})+$/i.test(m.hex ?? "")).map((m) => ({ offset: Number(m.offset), bytes: Buffer.from(String(m.hex), "hex") })) } : {}),
@@ -775,12 +779,13 @@ export class JobService {
     if (/^tool:[a-z0-9_]+$/.test(id) && this.o.forging) {
       const name = id.slice(5);
       try {
-        const man = JSON.parse(await readFile(join(this.S, "tools", name, "manifest.json"), "utf8")) as { recipe?: boolean; runtime?: string; entry?: string; sha256?: string; timeout_seconds?: number };
+        const man = JSON.parse(await readFile(join(this.S, "tools", name, "manifest.json"), "utf8")) as { recipe?: boolean; runtime?: string; entry?: string; sha256?: string; timeout_seconds?: number; secret_output?: unknown };
         if (man.recipe !== true) return null;
         const entry = join(this.S, "tools", name, String(man.entry ?? ""));
         const sha = sha256Hex(await readFile(entry));
         if (man.sha256 !== sha) return null;
-        return { id, dir: join(this.S, "tools", name), runtime: man.runtime === "python3" ? "python3" : man.runtime === "node" ? "node" : "bash", entry, sha256: sha, seconds: Math.min(Number(man.timeout_seconds ?? 900), TIMEOUT_MAX_SECONDS), auto: [], experimental: true };
+        const refused = recipeSecretRefusal(id, Object.hasOwn(man, "secret_output"));
+        return { id, dir: join(this.S, "tools", name), runtime: man.runtime === "python3" ? "python3" : man.runtime === "node" ? "node" : "bash", entry, sha256: sha, seconds: Math.min(Number(man.timeout_seconds ?? 900), TIMEOUT_MAX_SECONDS), auto: [], experimental: true, ...(refused ? { refused } : {}) };
       } catch {
         return null;
       }
@@ -805,7 +810,7 @@ export class JobService {
       }
       for (const name of names) {
         const r = await this.recipe(`${pid}/${name}`);
-        if (r && (trigger === "request" || r.auto.includes(trigger))) out.push(r);
+        if (r && !r.refused && (trigger === "request" || r.auto.includes(trigger))) out.push(r);
       }
     }
     return out;
@@ -839,7 +844,7 @@ export class JobService {
       if (!ok) return { ok: false, reason: `tool ${name}: ${key} must be ${t === "integer" ? "an integer" : `a ${t}`}` };
       if (p.enum && !p.enum.includes(String(v))) return { ok: false, reason: `tool ${name}: ${key} must be one of ${p.enum.join(", ")}` };
     }
-    for (const key of Object.keys(args)) if (!(key in (man.params ?? {}))) return { ok: false, reason: `tool ${name} takes no ${key}` };
+    for (const key of Object.keys(args)) if (!Object.hasOwn(man.params ?? {}, key)) return { ok: false, reason: `tool ${name} takes no ${key}` };
     // Its manifest's word on secret output (a job of the tool is run as the
     // agent's secret_output would run it): read here, from the manifest this
     // job runs, and refused when it is not understood.
@@ -1075,6 +1080,7 @@ export class JobService {
     if (kind === "recipe") {
       const r = raw.recipe ? await this.recipe(String(raw.recipe)) : null;
       if (!r) return { reason: `no recipe ${raw.recipe ?? "(none named)"} in this run's packs${this.o.forging ? " (a forged tool is named tool:<name> and must declare \"recipe\": true)" : ""}` };
+      if (r.refused) return { reason: r.refused };
       if (r.unavailable) return { reason: `${r.id} is declared by its pack but cannot run in this run's job images: ${r.unavailable}. Its preparation of each source it applies to is recorded declined with that why; read the source with the tools the images hold` };
       const target = raw.target;
       if (!target || !Array.isArray(target.paths) || !target.paths.length) return { reason: "a recipe job needs a target" };
@@ -1343,6 +1349,8 @@ export class JobService {
     if (job.spec.kind === "tool") {
       const checked = await this.toolCheck(job.spec.tool ?? "", job.spec.args ?? {});
       if (!checked.ok) throw new Error(checked.reason);
+      // The manifest now declares what the job's spec, taken at acceptance, does not carry: not run unsealed.
+      if (checked.secret && job.spec.secret_output !== true) throw new Error(`tool ${job.spec.tool}: its manifest declares this job secret output, but the job was accepted without that (the manifest changed since); ask for it again`);
       // A tool that writes files takes an output path: the agent cannot know
       // the job's directory before it is accepted, so {OUT} names it.
       const out = this.outPath(job);
@@ -2732,7 +2740,7 @@ export async function jobView(S: string, job: JobRecord, o: { files?: number } =
     ...(job.program_missing ? { program_missing: { ...job.program_missing, note: "the image of its profile does not hold it: run it in a profile that does, install it if the job may, or tell the operator (the console lists these for the images' upkeep)" } } : {}),
     ...(job.spec.independent ? { independent: true } : {}),
     ...(job.spec.secret_output ? { secret_output: true } : {}),
-    ...(job.spec.secret_output_by ? { secret_output_declared_by: "the tool's manifest" } : {}),
+    ...(job.spec.secret_output_by ? { secret_output_by: job.spec.secret_output_by } : {}),
     ...(job.sensitive ? { sensitive: sensitiveWords(job) } : {}),
   };
   if (job.state !== "committed" || !job.outputs) return view;

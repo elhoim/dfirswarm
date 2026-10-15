@@ -45,8 +45,8 @@
     "sha256": {
       "LICENCE": "5b94f18424dbef1e77eda33a465e946c2c8eb715fa5236afe2c6ec6763af80d3",
       "README.md": "1d5b417b1ff5ed8bd9208d6cdce2ed3e521bdc5a5391e1e40464fbabe6e16c38",
-      "tools/recovery_key_scan/manifest.json": "8f29c9da63b243e8735c2615343b50e3068c911ca1961305052a80591ddf49cc",
-      "tools/recovery_key_scan/run.py": "57fb17949662ab87da8f5a3e6c84a6e4fca575769990ab6999c3977587a5de92",
+      "tools/recovery_key_scan/manifest.json": "82d36f3a5c1c1235b12da55bf5fd3ce51c122ef0e288757d9c9c8422b1db1614",
+      "tools/recovery_key_scan/run.py": "64193da9e4809857b19c0b3deccfeb2dc7432ba82a0bb4bbc417ea8ceeceef8b",
       "tools/archive_probe/manifest.json": "197f96af95035dcffad07f1aef83b06b3a386da3cf340c719231fdddf364b507",
       "tools/archive_probe/run.py": "f146f0dd3f9fb879ee5206ed0f3d8a0c3c79c9b77df651a08d1580a6947c7606",
       "tools/crypto_id/manifest.json": "5817332c72e356f8388e2f7e75363f7563c605bee6ffac75c060cbc3e7257d8c",

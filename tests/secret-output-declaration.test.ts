@@ -19,7 +19,7 @@ import { after, test } from "node:test";
 import * as P from "../extensions/protocol.ts";
 import { argIsSet, declaredSecretOutput, ownSensitivity, parseSecretDeclaration, sensitiveEntries } from "../scripts/output-hygiene.ts";
 import { storePaths } from "../scripts/evidence-store.ts";
-import { describe, JobService } from "../scripts/job-service.ts";
+import { describe, JobService, jobView } from "../scripts/job-service.ts";
 import { redactPackage } from "../scripts/package-tools.ts";
 import { localWorker } from "./job-service-worker.ts";
 import type { WorkerSpec } from "../scripts/vm.ts";
@@ -157,8 +157,9 @@ test("a declaration with when_args applies only when one of the named arguments 
   assert.equal(await outFile(S, on.id, "env.txt"), "1");
   assert.equal(await outFile(S, on.id, "values.txt"), VALUE);
   // A string argument counts when it is not empty.
-  await addTool(S, "text_dump", { secret_output: { when_args: ["note"] } });
-  assert.equal((await submitted(svc, "a1", { tool: "text_dump", args: { note: "x" } })).sensitive?.why, "secret_output");
+  await addTool(S, "text_dump", { secret_output: { when_args: ["deep"] } }, { deep: { type: "boolean", default: false }, note: { type: "string" } });
+  assert.equal((await submitted(svc, "a1", { tool: "text_dump", args: { deep: true } })).sensitive?.why, "secret_output");
+  assert.equal((await submitted(svc, "a1", { tool: "text_dump", args: { note: "x" } })).sensitive, undefined, "a parameter the declaration does not name decides nothing");
   assert.equal((await submitted(svc, "a1", { tool: "text_dump", args: {} })).sensitive, undefined);
   // The worker's own record carries the variable only for the secret jobs.
   const envOf = (id: string) => workers.find((w) => w.job === id)?.env;
@@ -208,9 +209,12 @@ test("a declaration that is not understood refuses the job, naming the manifest 
     ["b_dup", { when_args: ["write_values", "write_values"] }, /twice/],
     ["b_array", ["write_values"], /"required"/],
     ["b_null", null, /"required"/],
+    ["b_string_param", { when_args: ["note"] }, /note.*not declared type "boolean"/],
+    ["b_untyped_param", { when_args: ["bare"] }, /bare.*not declared type "boolean"/],
+    ["b_default_on", { when_args: ["on_by_default"] }, /on_by_default.*default that is on/],
   ];
   for (const [name, decl] of bad) {
-    await addTool(S, name, { secret_output: decl });
+    await addTool(S, name, { secret_output: decl }, { write_values: { type: "boolean" }, note: { type: "string" }, bare: {}, on_by_default: { type: "boolean", default: true } });
     const reason = await refused(svc, { tool: name, args: {} });
     assert.match(reason, /secret_output/, name);
     assert.match(reason, new RegExp(`tool ${name}`), name);
@@ -274,16 +278,16 @@ test("recovery_key_scan declares the same, and writes no value in a job that is 
   await svc.stop("test over");
 });
 
-test("an argument is set when it is true, a number but zero, or a string, list or object with something in it", () => {
+test("an argument is set unless it is absent, null or false: the reading fails closed", () => {
   for (const v of [true, 1, -2, 0.5, "x", " ", [0], [""], { a: 1 }]) assert.equal(argIsSet(v), true, JSON.stringify(v));
-  for (const v of [undefined, null, false, 0, Number.NaN, "", [], {}]) assert.equal(argIsSet(v), false, String(v));
-  const params = { write_values: {}, text: {} };
+  for (const v of [undefined, null, false]) assert.equal(argIsSet(v), false, String(v));
+  const params = { write_values: { type: "boolean" }, text: { type: "boolean", default: false } };
   const parsed = parseSecretDeclaration({ when_args: ["write_values", "text"] }, params, true);
   assert.ok(parsed.ok);
   const declaration = parsed.ok ? parsed.declaration : null;
   assert.equal(declaredSecretOutput(declaration, {}), false);
-  assert.equal(declaredSecretOutput(declaration, { text: "a" }), true);
-  assert.equal(declaredSecretOutput(declaration, { write_values: false, text: "" }), false);
+  assert.equal(declaredSecretOutput(declaration, { text: true }), true);
+  assert.equal(declaredSecretOutput(declaration, { write_values: false, text: null }), false);
   assert.equal(declaredSecretOutput(null, { write_values: true }), false, "no declaration, no effect");
   assert.deepEqual(parseSecretDeclaration(undefined, params, false), { ok: true, declaration: null });
   assert.equal(parseSecretDeclaration(undefined, params, true).ok, false, "a key that is present and undefined (not JSON) is not understood");
@@ -292,4 +296,137 @@ test("an argument is set when it is true, a number but zero, or a string, list o
   assert.equal(ownSensitivity({ secret_output: true, secret_output_by: "tool_manifest" })?.declared, "tool_manifest");
   assert.equal(ownSensitivity({ secret_output: true })?.declared, undefined);
   assert.equal(ownSensitivity({ secret_output_by: "tool_manifest" }), null, "the flag decides, not the note about where it came from");
+});
+
+// --- review fixes ---------------------------------------------------------------------------------------------------
+
+test("what counts as set fails closed: 0, an empty string, [] and {} are set, and a declaration over a parameter that is not a plain boolean is refused", async () => {
+  for (const v of [0, "", [], {}, Number.NaN, "false", "0"]) assert.equal(argIsSet(v), true, JSON.stringify(v));
+  for (const v of [undefined, null, false]) assert.equal(argIsSet(v), false, String(v));
+  const prototypeKey = parseSecretDeclaration({ when_args: ["toString"] }, {}, true);
+  assert.equal(prototypeKey.ok, false);
+  // integer / string / untyped / default-on parameters cannot be named: a falsy-but-meaningful value would have been read as "not set"
+  for (const params of [{ level: { type: "integer" } }, { tag: { type: "string" } }, { opt: {} }, { opt: { type: "boolean", default: true } }, { opt: { type: "boolean", default: "yes" } }, { opt: 7 }, { opt: null }]) {
+    const name = Object.keys(params)[0];
+    assert.equal(parseSecretDeclaration({ when_args: [name] }, params, true).ok, false, JSON.stringify(params));
+  }
+  assert.equal(parseSecretDeclaration({ when_args: ["opt"] }, { opt: { type: "boolean", default: false } }, true).ok, true, "an off default is fine");
+  assert.equal(parseSecretDeclaration({ when_args: ["opt"] }, { opt: { type: "boolean" } }, true).ok, true);
+  // the same through the job service: the integer tool of the reviewer's probe is refused, not run unsealed
+  const { S, svc } = await make();
+  await addTool(S, "int_dump", { secret_output: { when_args: ["level"] } }, { level: { type: "integer" } });
+  const reason = await refused(svc, { tool: "int_dump", args: { level: 0 } });
+  assert.match(reason, /level.*not declared type "boolean"/);
+  await svc.stop("test over");
+});
+
+test("a params that is not a plain object is refused by the runtime reading as the seal lint refuses it (an array's length is not a parameter)", async () => {
+  for (const params of [["length"], ["0"], "length", null, undefined, 5]) {
+    for (const name of ["length", "0"]) assert.equal(parseSecretDeclaration({ when_args: [name] }, params as never, true).ok, false, JSON.stringify(params));
+  }
+  const { S, svc } = await make();
+  await addTool(S, "arr_params", { secret_output: { when_args: ["length"] } }, ["x"] as never);
+  const reason = await refused(svc, { tool: "arr_params", args: {} });
+  assert.match(reason, /secret_output/);
+  await svc.stop("test over");
+});
+
+test("a declaration reaches only tool jobs: a forged tool that declares the recipe protocol and a secret_output is refused as a recipe, a pack recipe.json that carries the key is not run", async () => {
+  const pack = await mkdtemp(join(tmpdir(), "secdecl-pack-"));
+  dirs.push(pack);
+  await writeFile(join(pack, "pack.json"), JSON.stringify({ id: "decl-pack", name: "decl-pack", version: "1.0.0" }));
+  const body = "import sys\nprint('ok')\n";
+  for (const [name, extra] of [["plain", {}], ["declares", { secret_output: "required" }]] as const) {
+    await mkdir(join(pack, "recipes", name), { recursive: true });
+    await writeFile(join(pack, "recipes", name, "run.py"), body);
+    await writeFile(join(pack, "recipes", name, "recipe.json"), JSON.stringify({ id: name, version: "1.0.0", description: "d", runtime: "python3", entry: "run.py", sha256: createHash("sha256").update(body).digest("hex"), auto: ["kickoff"], limits: { seconds: 60 }, outputs: ["x"], covers: ["x"], ...extra }));
+  }
+  const { S, svc } = await make([BASE, pack]);
+  const plain = await svc.recipe("decl-pack/plain");
+  assert.ok(plain && !plain.refused, "a recipe without the key is as before");
+  const declared = await svc.recipe("decl-pack/declares");
+  assert.match(declared?.refused ?? "", /secret_output.*tool jobs only/);
+  assert.deepEqual(declared?.auto, [], "never triggered");
+  assert.ok(!(await svc.allRecipes("request")).some((r) => r.id === "decl-pack/declares"), "a detect pass does not ask it");
+  assert.ok((await svc.allRecipes("request")).some((r) => r.id === "decl-pack/plain"));
+
+  const target = join(S, "inputs", "f.bin");
+  await writeFile(target, "x");
+  const asRecipe = async (recipe: string) => svc.submit("a1", { kind: "recipe", recipe, target: { paths: [target], name: "f.bin" }, inputs: ["all"], timeout_seconds: 60, network: "off" } as never);
+  const r1 = await asRecipe("decl-pack/declares");
+  assert.equal(r1.ok, false);
+  assert.match(r1.ok ? "" : r1.reason, /secret_output.*tool jobs only/);
+
+  // A forged tool that declares the recipe protocol and the key.
+  const rbody = "import sys,os\nopen(os.path.join(sys.argv[sys.argv.index('--out')+1],'v.txt'),'w').write('VAL')\n";
+  await addTool(S, "rec_tool", { secret_output: "required", recipe: true }, {}, rbody);
+  const r2 = await asRecipe("tool:rec_tool");
+  assert.equal(r2.ok, false, "refused, not run unsealed");
+  assert.match(r2.ok ? "" : r2.reason, /secret_output.*tool jobs only/);
+  assert.equal(svc.jobs.size, 0, "nothing was accepted");
+  // The same tool without the key is still a recipe.
+  await addTool(S, "rec_plain", { recipe: true }, {}, rbody);
+  const r3 = await asRecipe("tool:rec_plain");
+  assert.ok(r3.ok, r3.ok ? "" : r3.reason);
+  await svc.stop("test over");
+});
+
+test("a job accepted without the declaration is not run once the manifest declares it: the run script re-checks", async () => {
+  const { S, svc } = await make();
+  await addTool(S, "late", {}, { write_values: { type: "boolean" } });
+  const job = await submitted(svc, "a1", { tool: "late", args: { write_values: true } });
+  assert.equal(job.sensitive, undefined);
+  const man = JSON.parse(await readFile(join(S, "tools", "late", "manifest.json"), "utf8"));
+  await writeFile(join(S, "tools", "late", "manifest.json"), JSON.stringify({ ...man, secret_output: { when_args: ["write_values"] } }));
+  await assert.rejects(svc.workerSpecFor(job, join(S, "..", "rerun-late")), /manifest declares this job secret output/);
+  await svc.stop("test over");
+});
+
+test("an argument named like an inherited property is not a parameter", async () => {
+  const { S, svc } = await make();
+  await addTool(S, "plain_args", {});
+  for (const key of ["constructor", "toString", "__proto__", "hasOwnProperty"]) {
+    const reason = await refused(svc, { tool: "plain_args", args: JSON.parse(`{"${key}": true}`) });
+    assert.match(reason, new RegExp(`takes no ${key}`), key);
+  }
+  await svc.stop("test over");
+});
+
+test("the answer to the agent names where the declaration came from with the spec's enum", async () => {
+  const { S, svc } = await make();
+  await addTool(S, "req", { secret_output: "required" });
+  const job = await submitted(svc, "a1", { tool: "req", args: {} });
+  const view = await jobView(S, job);
+  assert.equal(view.secret_output, true);
+  assert.equal(view.secret_output_by, "tool_manifest");
+  assert.equal((view as Record<string, unknown>).secret_output_declared_by, undefined);
+  assert.equal(job.spec.secret_output_by, "tool_manifest");
+  assert.equal(job.sensitive?.declared, "tool_manifest");
+  const flagged = await submitted(svc, "a1", { kind: "command", command: "true", secret_output: true });
+  assert.equal((await jobView(S, flagged)).secret_output_by, undefined, "the agent's own flag is not the manifest's");
+  await svc.stop("test over");
+});
+
+test("make_tool never rewrites a tool that came from a pack or carries a declaration, even when the manifest names the forger as its author", async () => {
+  const { S, svc } = await make();
+  const forge = (agent: string, name: string) => P.forgeTool({ sandboxRoot: S, agentId: agent } as never, { name, description: "Replaces a tool.", runtime: "python3", script: "print(1)\n", params: {} });
+  // a pack's tool, written by an id equal to the forger's
+  await addTool(S, "pack_tool", { pack: "computer-forensics-base", by: "a1" });
+  const before = await readFile(join(S, "tools", "pack_tool", "manifest.json"), "utf8");
+  const r1 = await forge("a1", "pack_tool");
+  assert.equal(r1.ok, false);
+  assert.match(r1.ok ? "" : r1.reason, /packs or library/);
+  assert.equal(await readFile(join(S, "tools", "pack_tool", "manifest.json"), "utf8"), before, "the manifest is as it was");
+  assert.equal(await readFile(join(S, "tools", "pack_tool", "run.py"), "utf8"), PROBE, "so is the script");
+  // a seeded tool with a declaration but no pack field
+  await addTool(S, "decl_tool", { secret_output: "required", by: "a1" });
+  const r2 = await forge("a1", "decl_tool");
+  assert.equal(r2.ok, false);
+  assert.equal(JSON.parse(await readFile(join(S, "tools", "decl_tool", "manifest.json"), "utf8")).secret_output, "required");
+  // an agent's own tool is still its to update
+  const own = await forge("a1", "own_tool");
+  assert.ok(own.ok);
+  const again = await forge("a1", "own_tool");
+  assert.ok(again.ok);
+  await svc.stop("test over");
 });

@@ -72,11 +72,18 @@ export function ownSensitivity(spec: { secret_output?: unknown; secret_output_by
  *                                   arguments is set (the tool's secret mode,
  *                                   such as a flag that writes values to a file)
  *
- * A name in `when_args` is one of the tool's own `params`. Left out, the tool
- * declares nothing and the agent's flag decides, as before. A declaration that
- * is not one of these is not guessed at: the job is refused with the reason,
- * because ignoring it would drop the protection the author asked for.
- * Pure; it reads one key and knows no tool.
+ * A name in `when_args` is one of the tool's own `params`, declared
+ * `type: "boolean"` with no truthy `default` (the harness applies no defaults,
+ * so a flag that is on unless the caller says otherwise would never be seen as
+ * set; and a boolean is the one type whose "set" nobody can read two ways).
+ * Left out, the tool declares nothing and the agent's flag decides, as before.
+ * A declaration that is not one of these is not guessed at: the job is refused
+ * with the reason, because ignoring it would drop the protection the author
+ * asked for. Pure; it reads one key and knows no tool.
+ *
+ * Applies to `kind: tool` jobs only: a recipe (a pack's, or a forged tool that
+ * declares the recipe protocol) cannot honour it and a recipe that carries the
+ * key is refused (recipeSecretRefusal).
  */
 export type SecretDeclaration = { mode: "required" } | { mode: "when_args"; args: string[] };
 
@@ -93,25 +100,39 @@ export function parseSecretDeclaration(raw: unknown, params: Record<string, unkn
   for (const a of args as string[]) {
     if (seen.has(a)) return bad(`${a} is named twice`);
     seen.add(a);
-    if (!params || !Object.hasOwn(params, a)) return bad(`${a} is not a parameter of the tool`);
+    if (!params || typeof params !== "object" || Array.isArray(params)) return bad("the tool's params is not an object");
+    if (!Object.hasOwn(params, a)) return bad(`${a} is not a parameter of the tool`);
+    const p = (params as Record<string, unknown>)[a];
+    if (typeof p !== "object" || p === null || Array.isArray(p) || (p as { type?: unknown }).type !== "boolean") return bad(`${a} is not declared type "boolean"`);
+    if ((p as { default?: unknown }).default) return bad(`${a} has a default that is on, and the harness applies no defaults`);
   }
   return { ok: true, declaration: { mode: "when_args", args: args as string[] } };
 }
 
-/** Whether an argument is set: true, a number other than zero, or a string, list or object that is not empty (false, null, "", 0, [] and {} are not). */
+/**
+ * Whether an argument is set, read to fail closed: anything but undefined, null
+ * and false counts (0, "", [] and {} too). A declaration over-sealing a job is
+ * harmless; one that under-seals leaks. Declared parameters are booleans, so
+ * the other values do not reach a job today.
+ */
 export function argIsSet(v: unknown): boolean {
-  if (v === undefined || v === null || v === false) return false;
-  if (typeof v === "number") return v !== 0 && !Number.isNaN(v);
-  if (typeof v === "string") return v.length > 0;
-  if (Array.isArray(v)) return v.length > 0;
-  if (typeof v === "object") return Object.keys(v as object).length > 0;
-  return true;
+  return v !== undefined && v !== null && v !== false;
+}
+
+/**
+ * Why a recipe cannot run when its manifest or recipe.json carries a
+ * `secret_output` key, or null. The declaration applies to `kind: tool` jobs;
+ * a recipe job is never run as secret output by it, so the key is refused
+ * rather than ignored (ignoring it would drop the protection its author asked for).
+ */
+export function recipeSecretRefusal(id: string, present: boolean): string | null {
+  return present ? `${id} carries a secret_output declaration, which applies to tool jobs only (job_run kind: tool) and cannot be honoured by a recipe job; the recipe is not run` : null;
 }
 
 /** Whether a tool's declaration makes a job with these arguments secret output. */
 export function declaredSecretOutput(declaration: SecretDeclaration | null, args: Record<string, unknown>): boolean {
   if (!declaration) return false;
-  return declaration.mode === "required" || declaration.args.some((a) => argIsSet(args[a]));
+  return declaration.mode === "required" || declaration.args.some((a) => Object.hasOwn(args, a) && argIsSet(args[a]));
 }
 
 /**

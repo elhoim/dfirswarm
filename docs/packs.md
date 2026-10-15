@@ -752,13 +752,18 @@ import each other), and holds to this:
   says SENSITIVE and names the flag, and the manifest carries the key the job
   service reads, `"secret_output"`: `"required"` (every job of the tool) or
   `{ "when_args": ["write_values"] }` (a job that sets one of the named
-  parameters, each one of the tool's own `params`: true, a number other than
-  zero, or a string, list or object that is not empty). Where the key applies
+  parameters, each one of the tool's own `params`, declared `type: "boolean"`
+  with no default that is on: the harness applies no defaults, and anything but
+  an absent, null or false value counts as set). It applies to `kind: tool` jobs
+  only: a recipe (a pack's `recipe.json`, or a forged tool that declares the
+  recipe protocol) that carries the key is refused, not run, and the seal
+  refuses the key in `recipe.json`. Where the key applies
   the job is run as if the agent had said `secret_output: true`, whether it did
   or not (an agent's `false` does not turn it off): its outputs are sealed
   sensitive, a job reading them is derived, an entry citing them is recorded
   sensitive and a redacted package withholds them. The job's spec says so
-  (`secret_output_by: "tool_manifest"`) and its answer to the agent. A key the
+  (`secret_output_by: "tool_manifest"`) and so does its answer to the agent
+  (the same field). A key the
   service cannot read refuses the job, naming the rule (a declaration is never
   guessed at: ignoring one would drop the protection its author asked for), and
   `pack.sh seal` checks the same. The service also puts `SECRET_OUTPUT=1` in the
@@ -769,7 +774,8 @@ import each other), and holds to this:
   creates anything, and says that nothing was written. That is what holds when
   the manifest is not in the way, a command job that runs the tool's script by
   hand. The variable is a signal to a tool that behaves, not a boundary: a
-  command job is code the harness does not read, and can set it for itself.
+  command job is code the harness does not read, and can set `SECRET_OUTPUT=1`
+  for itself.
   A tool an agent forges (`make_tool`) has no declaration: the agent's flag
   decides. Today `sqlite_query` and `recovery_key_scan` declare
   `{ "when_args": ["write_values"] }` and check the variable; a tool that writes

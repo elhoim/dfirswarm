@@ -171,6 +171,30 @@ declared_bad "an empty list" '{"when_args":[]}' 'when_args is a list of one to s
 declared_bad "a number in the list" '{"when_args":[1]}' 'when_args is a list of one to sixteen'
 declared_bad "twice" '{"when_args":["write_values","write_values"]}' 'names a parameter twice'
 declared_bad "not a parameter" '{"when_args":["nope"]}' 'names nope, which is not a parameter of the tool'
+# The parameters it names are plain booleans that are not on by default, and params is an object (the runtime reads it the same way).
+declared_bad_params() { # <label> <jq filter on the manifest> <expected message>
+  rm -rf "$WORK/decl"; cp -R "$ROOT/packs/computer-forensics-base" "$WORK/decl"
+  local m="$WORK/decl/tools/sqlite_query/manifest.json"
+  jq "$2" "$m" > "$m.new" && mv "$m.new" "$m"
+  local said; said="$(bash "$ROOT/scripts/pack.sh" seal "$WORK/decl" 2>&1)" && fail "$1: the seal should refuse it"
+  grep -q -- "$3" <<<"$said" || fail "$1: the seal should say '$3', not: $said"
+}
+declared_bad_params "an integer parameter" '.params.write_values.type = "integer"' 'which is not declared type "boolean"'
+declared_bad_params "a string parameter" '.params.write_values.type = "string"' 'which is not declared type "boolean"'
+declared_bad_params "an untyped parameter" 'del(.params.write_values.type)' 'which is not declared type "boolean"'
+declared_bad_params "a default that is on" '.params.write_values.default = true' 'whose default is on'
+declared_bad_params "a default that is a truthy string" '.params.write_values.default = "yes"' 'whose default is on'
+declared_bad_params "params as a list" '.params = ["write_values", "length"]' 'needs the tool'"'"'s params to be an object'
+declared_bad_params "a prototype name" '.secret_output = {"when_args": ["__proto__"]}' 'which is not a parameter of the tool'
+rm -rf "$WORK/decl"; cp -R "$ROOT/packs/computer-forensics-base" "$WORK/decl"
+jq '.params.write_values.default = false' "$WORK/decl/tools/sqlite_query/manifest.json" > "$WORK/decl/m.new" && mv "$WORK/decl/m.new" "$WORK/decl/tools/sqlite_query/manifest.json"
+bash "$ROOT/scripts/pack.sh" seal "$WORK/decl" >/dev/null 2>&1 || fail "the seal should accept a boolean parameter whose default is off"
+# A recipe cannot honour the key: the seal refuses it in recipe.json.
+rm -rf "$WORK/decl"; cp -R "$ROOT/packs/computer-forensics-base" "$WORK/decl"
+rec="$(ls "$WORK/decl/recipes" | head -1)"
+jq '.secret_output = "required"' "$WORK/decl/recipes/$rec/recipe.json" > "$WORK/decl/r.new" && mv "$WORK/decl/r.new" "$WORK/decl/recipes/$rec/recipe.json"
+said="$(bash "$ROOT/scripts/pack.sh" seal "$WORK/decl" 2>&1)" && fail "the seal should refuse secret_output in recipe.json"
+grep -q 'secret_output is a tool manifest' <<<"$said" || fail "the seal should say a recipe cannot honour secret_output, not: $said"
 rm -rf "$WORK/decl"; cp -R "$ROOT/packs/computer-forensics-base" "$WORK/decl"
 jq '.secret_output = "required"' "$WORK/decl/tools/sqlite_query/manifest.json" > "$WORK/decl/m.new" && mv "$WORK/decl/m.new" "$WORK/decl/tools/sqlite_query/manifest.json"
 bash "$ROOT/scripts/pack.sh" seal "$WORK/decl" >/dev/null 2>&1 || fail "the seal should accept secret_output \"required\""
