@@ -310,16 +310,45 @@ test("collection_index: a copy-log row cites the line it starts on, also after a
   });
 });
 
-test("collection_index: the time limit ends the loading of a very long copy log and says so", async () => {
-  await withCwd(async (cwd) => {
-    const rows = [KAPE_COPY_HEADER];
-    for (let i = 0; i < 400000; i++) rows.push(kapeCopyRow(`C:\\f${i}.txt`, `D:\\k\\C\\f${i}.txt`));
-    await put(cwd, "inputs/t/1_CopyLog.csv", rows.join("\n") + "\n");
-    await put(cwd, "inputs/t/C/f1.txt", "x");
-    const out = body(await tool(INDEX, cwd, { root: "inputs/t", time_limit_seconds: 1, hash: false }));
-    assert.equal(out.status, "partial");
-    assert.match(JSON.stringify(out.source_paths.observed.logs_unreadable), /the time limit stopped the mapping after row \d+/);
-  });
+const LOAD_CODE = `
+import importlib.util, json, os, sys, tempfile
+spec = importlib.util.spec_from_file_location("ix", sys.argv[1])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+root = tempfile.mkdtemp()
+rows = [sys.stdin.readline().rstrip("\\n")]
+for i in range(3000):
+    rows.append("2026-02-14 09:12:00.123,C:\\\\f%d.txt,D:\\\\k\\\\C\\\\f%d.txt,1,x,False,a,b,c,0.1" % (i, i))
+open(os.path.join(root, "1_CopyLog.csv"), "w").write("\\n".join(rows) + "\\n")
+calls = [0]
+def out_of_time():                                   # the run's time is spent after the log was opened, in the middle of its rows
+    calls[0] += 1
+    return calls[0] > 2
+mod.out_of_time = out_of_time
+mapping = mod.Mapping()
+mapping.load(root, ["1_CopyLog.csv"])
+print(json.dumps({"loaded": mapping.rows, "unreadable": mapping.unreadable}))
+`;
+
+test("collection_index: the time limit is read while a copy log is loaded, and the mapping says it stopped", async () => {
+  const { runPySnippet } = await import("./tool-library-harness.ts");
+  const run = await (async () => {
+    const { spawn } = await import("node:child_process");
+    return new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve) => {
+      const child = spawn("python3", ["-c", LOAD_CODE, INDEX]);
+      let out = "";
+      let err = "";
+      child.stdout.on("data", (c: Buffer) => (out += c.toString()));
+      child.stderr.on("data", (c: Buffer) => (err += c.toString()));
+      child.on("close", (code) => resolve({ code, stdout: out, stderr: err }));
+      child.stdin.end(KAPE_COPY_HEADER + "\n");
+    });
+  })();
+  void runPySnippet;
+  assert.equal(run.code, 0, run.stderr);
+  const got = JSON.parse(run.stdout);
+  assert.ok(got.loaded < 3000, `${got.loaded} rows were loaded after the time was spent`);
+  assert.match(JSON.stringify(got.unreadable), /the time limit stopped the mapping after row \d+/);
 });
 
 test("collection_id: a KAPE console log with a line it does not know is partial, not parsed", async () => {
