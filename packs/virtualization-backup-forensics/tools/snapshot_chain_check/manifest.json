@@ -28,7 +28,7 @@
     },
     "max_seconds": {
       "type": "number",
-      "description": "The time to spend (default 50, at most 50); what is left is named and the answer is partial"
+      "description": "The time to spend (default 50, at most 50); what is left is named and the answer is partial; the reading stops at four fifths of it and the rest is kept for writing the rows and the answer, which stop at max_seconds itself (a stop is named in partial_reasons)"
     },
     "write_text": {
       "type": "boolean",
@@ -89,5 +89,5 @@
       }
     ]
   },
-  "sha256": "d6a76b6e1470baf80f3c8ee953142e84eefbc8056734a51561bf50370f81d69e"
+  "sha256": "415f0ef724458c8303aa1e9947fec9db60ee72a7fe50c823669b830068266871"
 }
