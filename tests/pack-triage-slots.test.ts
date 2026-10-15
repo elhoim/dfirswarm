@@ -258,7 +258,7 @@ async function drive(which: "id" | "index", bare: boolean) {
       const captured: string[] = [];
       for (const [r, root] of roots.entries()) {
         const args: Json = { root, ...(context.limit ? { limit: context.limit } : {}) };
-        const env = context.job ? { JOB_ID: `j00${index}${r}00`, OUT: join(cwd, "out") } : {};
+        const env: Record<string, string> = context.job ? { JOB_ID: `j00${index}${r}00`, OUT: join(cwd, "out") } : {};
         const run = bare ? await runBare(script, cwd, args, env) : await tool(script, cwd, args, env);
         assert.doesNotMatch(run.stderr, /Traceback/, `${which} ${JSON.stringify(context)} ${root}`);
         outcomes.push({ context, root, code: run.code, status: (() => { try { return JSON.parse(run.stdout).status; } catch { return "not JSON"; } })() });
@@ -271,7 +271,7 @@ async function drive(which: "id" | "index", bare: boolean) {
       const names: string[] = Object.values(plants as Record<string, Json[]>).flat().filter((p: Json) => /^[A-Za-z0-9_.-]{12,80}$/.test(p[0])).slice(0, 12).map((p: Json) => p[0]);
       for (const [k, name] of names.entries()) {
         for (const args of [{ root: `inputs/${name}` }, { root: roots[0], [name]: 1, ...(context.limit ? { limit: context.limit } : {}) }]) {
-          const env = context.job ? { JOB_ID: `j00${index}${k}77`, OUT: join(cwd, "out") } : {};
+          const env: Record<string, string> = context.job ? { JOB_ID: `j00${index}${k}77`, OUT: join(cwd, "out") } : {};
           const run = bare ? await runBare(script, cwd, args, env) : await tool(script, cwd, args, env);
           const file = join(cwd, "captured", `arg-${k}-${Object.keys(args).length}.out`);
           await writeFile(file, run.stdout + "\n" + run.stderr);
