@@ -72,14 +72,13 @@ test("P1 the same file at the real clock reads every entry: the check costs noth
 
 // ---- P1: the answer is built after the clock; nothing may take the call past the manifest's limit --------------------------------------
 
-test("P1 the constants leave the answer its time: the reading clock plus a measured 12 s of answer is under 70% of the manifest's limit by default, and the hard limit sits under the limit and over the largest reading clock", async () => {
+test("P1 the constants leave the answer its time: the hard limit sits under the manifest's limit and over the largest reading clock, and the manifest names the clock (what the answer's time is, and what it is worth, is held by tests/pack-re-delta8.test.ts on a slowed clock)", async () => {
   for (const [name, path] of [["doc_structure", DOC_STRUCTURE], ["pe_directories", PE_DIRECTORIES]] as const) {
     const manifest = JSON.parse(await readFile(join(TOOLS, name, "manifest.json"), "utf8")) as { timeout_seconds: number; params: { max_seconds: { description: string } } };
     const r = py(path, "print(json.dumps({'d': m.DEFAULT_SECONDS, 'x': m.MAX_SECONDS, 'h': m.HARD_SECONDS}))");
     assert.equal(r.status, 0, r.stderr);
     const c = JSON.parse(r.stdout) as { d: number; x: number; h: number };
     const limit = manifest.timeout_seconds;
-    assert.ok(c.d + 12 <= 0.7 * limit, `${name}: default ${c.d} s + 12 s is over 70% of ${limit} s`);
     assert.ok(c.x + 15 <= c.h, `${name}: the largest clock ${c.x} s leaves under 15 s before the hard limit ${c.h} s`);
     assert.ok(c.h + 10 <= limit, `${name}: the hard limit ${c.h} s is not 10 s under ${limit} s`);
     const text = manifest.params.max_seconds.description;
@@ -87,13 +86,14 @@ test("P1 the constants leave the answer its time: the reading clock plus a measu
   }
 });
 
-test("P1 an answer that is still being built at the hard limit ends the call with one failed JSON answer and exit 1, before the harness's kill (a slowed answer step, a hard limit of one second)", async () => {
+test("P1 an answer that is still being built at the hard limit, and a partial answer that is not finished either, end the call with one failed JSON answer and exit 1, before the harness's kill (every answer step slowed, a hard limit of one second, a grace of two)", async () => {
   await withCwd(async (cwd) => {
     const pe = await put(cwd, "work/small.dll", buildPeDirs({ debug: [{ type: 2, stamp: 1, guid: Buffer.alloc(16, 7), age: 1, pdb: "C:\\a.pdb" }] }).file);
     const rtf = await put(cwd, "work/small.rtf", "{\\rtf1\\ansi hello}");
     for (const [path, file] of [[PE_DIRECTORIES, pe], [DOC_STRUCTURE, rtf]] as const) {
       const r = py(path, [
         "m.HARD_SECONDS = 1",
+        "m.HARD_GRACE = 2",
         "inner = m.shown_answer",
         "def slow(*a, **k):",
         "    time.sleep(30)",
@@ -174,7 +174,7 @@ const FORMS = [
   "'Pwd = \\t%s;' % p",
 ];
 
-test("P2-2 the escaped forms of a secret-named key withhold a random 12-character password: 300 of each of ten forms, printed whole 0 times, in all three copies, both as the text is and as a cell prints it", () => {
+test("P2-2 the escaped forms of a secret-named key withhold a random 12-character password: 300 of each of ten forms with an alphanumeric password, printed whole 0 times (passwords from all 94 printable characters: tests/pack-re-delta8.test.ts), in all three copies, both as the text is and as a cell prints it", () => {
   for (const path of COPIES) {
     const r = py(path, [
       "alnum = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'",
