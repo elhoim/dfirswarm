@@ -15,8 +15,10 @@ rule every claim here has to survive.
    one, said plainly as that.
 3. Anything injected or hollowed: the process, the region, its protection, and
    the hash of the bytes you dumped.
-4. Network state: connections and listeners with the owning process, and which
-   of them came from freed structures rather than the live table.
+4. Network state: recovered endpoints and listeners, their supported owner
+   associations, the enumeration or scanning method, and whether allocation
+   state (the live table or freed structures) can actually be determined from
+   the output used, and what it shows where it can.
 5. Credential exposure: what a process could have taken, with the artefact that
    shows it. Do not put recovered secrets in the report.
 6. Structures carved out of the image that a disk parser could read, and what
@@ -44,8 +46,11 @@ own. The sign-off is these acts, not a post. Nothing else is assigned.
 through `## 7.`. Every memory claim names a process and a region, or an offset.
 The ledger holds one `answer` entry per question (`question:1` to `question:7`)
 and one each for `summary` and `narrative`, with every defect the answers check
-names fixed or named by a limitation, and the critic, who wrote none of them,
-has recorded `attest` or `dispute` on each answer, saying what they verified.
+fixed (a limitation that names a defect lets the run end and leaves the defect
+counted; it does not fix it), evidence that is not there stated as a supported
+partial, bounded-negative or not-determinable answer, and the critic, who wrote
+none of them, has recorded `attest` or `dispute` on each answer, saying what
+they verified.
 `inputs/` is unchanged.
 
 ## Checks
@@ -53,7 +58,6 @@ has recorded `attest` or `dispute` on each answer, saying what they verified.
 - `test -f work/report.md`
 - `for n in 1 2 3 4 5 6 7; do grep -q "^## $n\." work/report.md || exit 1; done`
 - `grep -qiE '0x[0-9a-f]{4,}|offset' work/report.md`
-- `test "$(grep -c '"kind":"event"' ledger/entries.jsonl)" -ge 4`
 - `node --experimental-strip-types --no-warnings "$SWARM_HARNESS/scripts/check-answers.ts" --sections 1,2,3,4,5,6,7,summary,narrative`
 - `grep '"tool":"inputs_check"' traces/events.jsonl | tail -1 | grep -q '"content_ok":true'`
   (`inputs_check` is an event the harness writes itself when `done` verifies

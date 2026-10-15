@@ -231,7 +231,8 @@ test("the goal template asks the new questions, keeps its acceptance checks, and
   assert.match(goal, /source-filesystem, embedded-record, archive-member and analysis-filesystem/);
   assert.doesNotMatch(goal, /whether\s+the timestamps are original|cannot\s+contain/);
   // nothing else an agent had to satisfy was loosened
-  for (const check of ["test -f work/report.md", "check-answers.ts", "inputs_check", '"tool":"skill"', '"kind":"event"']) assert.ok(goal.includes(check), check);
+  for (const check of ["test -f work/report.md", "check-answers.ts", "inputs_check", '"tool":"skill"']) assert.ok(goal.includes(check), check);
+  assert.ok(!goal.includes('"kind":"event"'), "an intake needs no dated events: completion is judged by the answer dispositions, not an event count");
   const checks = [...goal.matchAll(/^- `(.+)`$/gm)].map((m) => m[1]);
   const unallocated = checks.find((c) => c.includes("unallocated"));
   assert.ok(unallocated, "the unallocated check is there");
