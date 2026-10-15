@@ -256,6 +256,12 @@ matter, optional and at most one a pack:
 
     router: true
 
+The base pack is not the only one: `encrypted-containers`, `triage-collection`,
+`mobile-forensics`, `network-forensics` and `cloud-forensics` each name one too
+(`encrypted/router`, `triage/router`, `mobile/router`, `network/router` and
+`cloud/router`), and a router names no program, tool or rule, only which note
+answers which question.
+
 `pack.sh seal` refuses a value that is not `true` or `false`, and a second
 router. When there is one, the generated `skills/INDEX.md` carries a line
 ``Router: `<id>` `` above the entries; a pack with no router has no such line and
@@ -539,14 +545,14 @@ checksummed, and installs and verifies in the test suite.
 | `windows-forensics` | 52 | 20 | 3 | ten artefact families, from `$MFT` to what anti-forensics leaves behind |
 | `linux-forensics` | 10 | 6 | 2 | auth logs, the journal, accounts, systemd and cron, ext4, containers |
 | `macos-forensics` | 8 | 4 | 1 | property lists, the unified log, FSEvents, KnowledgeC, APFS |
-| `mobile-forensics` | 11 | 3 | 1 | iOS and Android extractions, app databases, protobuf |
+| `mobile-forensics` | 10 | 3 | 1 | iOS and Android extractions, app databases, protobuf |
 | `memory-forensics` | 19 | 3 | 1 | containers, what works with no framework, injection, credentials |
-| `network-forensics` | 13 | 6 | 1 | captures, sessions, DNS and TLS metadata, beacons, exfiltration |
+| `network-forensics` | 12 | 6 | 1 | captures, sessions, DNS and TLS metadata, beacons, exfiltration |
 | `reverse-engineering` | 12 | 4 | 1 | static triage of a binary or a document, under quarantine |
-| `encrypted-containers` | 12 | 3 | 1 | which scheme, which protectors, and where the key already is |
-| `cloud-forensics` | 10 | 3 | 1 | Microsoft 365, Entra, AWS, Workspace, and the tokens behind them |
+| `encrypted-containers` | 11 | 3 | 1 | which scheme, which protectors, and where the key already is |
+| `cloud-forensics` | 9 | 3 | 1 | Microsoft 365, Entra, AWS, Workspace, and the tokens behind them |
 | `ransomware-response` | 17 | 2 | 1 | scoping, recovery impairment, family candidates and recovery validation, each with its limits |
-| `triage-collection` | 15 | 2 | 1 | a collector's output, which is how most cases arrive |
+| `triage-collection` | 14 | 2 | 1 | a collector's output, which is how most cases arrive |
 
     scripts/pack.sh install packs/computer-forensics-base
     scripts/pack.sh install packs/windows-forensics
@@ -841,8 +847,10 @@ header says how it matches a name and where that is wrong.
    and no tool provides is either added as a tool or taken out of the skill.
    What counts as a naming is the skill's text, front matter included, without
    `mentions:`, `id:` and `needs:`: an id is a path (`id: aws/cloudtrail`) and
-   does not name the program `aws`, whether it is the skill's own or another
-   skill of the pack cited by it (a router cites every leaf).
+   does not name the program `aws`; nor does a skill of the same pack cited by
+   its id (a router cites every leaf), but only a whole id with a `/` that is
+   set off by white space, quotes, brackets or punctuation: `aws/cloudtrail.py`,
+   `--src=aws/cloudtrail` and another pack's id still name the program.
 4. **A skill names something of its own pack, or says why it does not.** Every
    skill names at least one tool, program or package of the pack that ships it.
    A skill that legitimately names none (a method leaf about citing a claim,

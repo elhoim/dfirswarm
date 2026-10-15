@@ -70,7 +70,9 @@
 #   - the report rules read a skill's whole file, front matter included (without
 #     `mentions:`, `id:` and `needs:`: an id is a path and `id: aws/cloudtrail` does
 #     not name the program `aws`, and neither does a body that cites a skill of its
-#     own pack by that id: a router cites every leaf), since a `tools:` list is a naming too, and the
+#     own pack by an id with a `/`, set off by white space, quotes, brackets or
+#     punctuation: a router cites every leaf; `aws/cloudtrail.py` and `--src=aws/x`
+#     are not citations), since a `tools:` list is a naming too, and the
 #     `unused` check makes sure the body agrees; but a plain-word program in a
 #     front matter list is no command in code, so a `requires_host: [make]` names
 #     nothing;
