@@ -155,7 +155,8 @@ test("the rules the pack is held to are in the skills that carry them", async ()
     assert.match(body(id), /Sensitive output/, `${id} has a Sensitive output line`);
     assert.match(body(id), /secret_output: true/, `${id} says the job runs with secret_output: true`);
   }
-  assert.match(body("credentials/key-schedules"), /copy neither the key nor that digest/);
+  assert.match(body("credentials/key-schedules"), /record the offset and the key file's name,\s+never the key or a hash of it/);
+  assert.doesNotMatch(body("credentials/key-schedules"), /carries a digest/);
   assert.match(body("credentials/key-schedules"), /take the\s+offsets and the count, not the keys/);
   // Four questions stay four; a negative is bounded.
   assert.match(home, /Four questions, each with its own evidence/);
