@@ -399,7 +399,7 @@ test("names the answer shows are shape-checked: an actor, an object, a host, a r
     const timeRun = await tool(AUDIT, cwd, { path: "inputs/y.csv", format: "declared_csv", mapping: { time: "t", action: "a" } });
     const timeOut = body(timeRun);
     for (const needle of [C.github, C.aws, C.hex]) assert.equal(timeRun.stdout.includes(needle), false, "a raw time that looks like a token is withheld too");
-    assert.match(timeOut.events[0].time_raw, /<token-shaped text withheld \d+ characters>/);
+    assert.match(timeOut.events[0].time_raw, /<(?:token-shaped text withheld \d+ characters|withheld: \d+ bytes, field time_raw)>/);
     await put(cwd, "inputs/x.csv", `t,a,o,u,h,r,j\n2024-01-05T02:00:00Z,run,/srv/${C.aws}/${C.hex},${C.github},host-${C.hex},fail ${C.userinfo}@h,job-${C.aws}\n`);
     const run = await tool(AUDIT, cwd, { path: "inputs/x.csv", format: "declared_csv", mapping: { time: "t", action: "a", object: "o", actor: "u", host: "h", result: "r", job: "j" } });
     const out = body(run);

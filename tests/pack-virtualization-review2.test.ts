@@ -307,7 +307,7 @@ test("a token split by zero-width or NUL characters into pieces too short for th
       for (const piece of [token.slice(0, 13), token.slice(13, 26), token.slice(26)]) assert.equal(run.stdout.includes(piece.slice(0, 12)), false, `${JSON.stringify(sep)}: ${piece}`);
       assert.equal(doc.status, "complete", doc.status_basis);
       assert.equal(doc.boundary.strings_replaced_by_the_check, 0);
-      assert.match(doc.vms[0].name, /^<token-shaped text withheld \d+ characters>$/);
+      assert.match(doc.vms[0].name, /^<(?:token-shaped text withheld \d+ characters|withheld: \d+ bytes, field displayName)>$/);
     });
   }
 });
@@ -387,10 +387,10 @@ test("a Proxmox Backup Server worker id is withheld in both its forms whenever e
     const out: Json = JSON.parse(run.stdout);
     assertNoPiece(run.stdout, AKIA, "PBS worker id", 4);
     for (const piece of escaped.match(/.{1,12}/g) ?? []) if (piece.length === 12) assert.equal(run.stdout.includes(JSON.stringify(piece).slice(1, -1)), false, piece);
-    assert.match(out.events[0].task.worker_id_as_written, /^<withheld \d+ characters: the worker id is withheld in both its forms>$/);
-    assert.match(out.events[0].object, /^<withheld \d+ characters: the worker id is withheld in both its forms>$/);
+    assert.match(out.events[0].task.worker_id_as_written, /^<withheld: \d+ bytes, field worker id>$/);
+    assert.match(out.events[0].object, /^<withheld: \d+ bytes, field worker id>$/);
     for (const piece of DASHED.split("-")) assertNoPiece(run.stdout, piece, "a token split by unescaping");
-    assert.match(out.events[2].object, /^<withheld \d+ characters: the worker id is withheld in both its forms>$/);
+    assert.match(out.events[2].object, /^<withheld: \d+ bytes, field worker id>$/);
     assert.equal(out.events[1].task.worker_id_as_written, "store1");
     assert.equal(out.events[1].result, "unknown");
     assert.match(out.events[1].result_basis, /status unknown/);
