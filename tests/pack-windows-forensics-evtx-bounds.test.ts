@@ -342,9 +342,17 @@ test("evtx_query and evtx_carve refuse a path that is not a regular file, and an
       assert.equal(err.status, "failed");
       assert.ok(String(err.status_basis).length > 10);
     }
-    const bad = failed(await tool("evtx_query", cwd, { path: "work/Security.evtx", out_file: "work/\udcff.jsonl" }, env));
-    assert.match(bad.error, /out_file is not a path|cannot be written/);
-    assert.equal(bad.status, "failed");
+    // A name with a byte that is not UTF-8: a file system that refuses it (macOS) gives a JSON failure, one that takes it (Linux) a result whose name is escaped.
+    const odd = await tool("evtx_query", cwd, { path: "work/Security.evtx", out_file: "work/\udcff.jsonl" }, env);
+    assert.doesNotMatch(odd.stderr, /Traceback/);
+    const oddOut = JSON.parse(odd.stdout) as Answer;
+    assert.ok(typeof oddOut.status_basis === "string");
+    if (odd.code !== 0) {
+      assert.equal(oddOut.status, "failed");
+      assert.match(oddOut.error, /out_file is not a path|cannot be written/);
+    } else {
+      assert.ok(["complete", "partial"].includes(oddOut.status));
+    }
   });
 });
 
