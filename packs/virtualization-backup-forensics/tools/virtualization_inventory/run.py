@@ -843,14 +843,32 @@ def _replace(value, where, check):
     return "<withheld: %d bytes>" % blen(value)
 
 
+_CHECKED = {}
+
+
+def _verdict(text):
+    """None when the string passes both checks, else the check it fails; remembered per string (keys and values repeat
+    across rows)."""
+    hit = _CHECKED.get(text, False)
+    if hit is False:
+        if _rules_once(text) != text:
+            hit = "the same rules"
+        else:
+            check = _suspect(text)
+            hit = "second check: %s" % check if check else None
+        if len(text) <= 2048:
+            if len(_CHECKED) >= 50000:
+                _CHECKED.clear()
+            _CHECKED[text] = hit
+    return hit
+
+
 def backstop(value, where=""):
     """The serialised answer read back and checked by the same rules once and by the second check: a string either would
     still change (a key or a value) is replaced by <withheld: N bytes>, counted, and its place named."""
     if isinstance(value, str):
-        if _rules_once(value) != value:
-            return _replace(value, where, "the same rules")
-        check = _suspect(value)
-        return _replace(value, where, "second check: %s" % check) if check else value
+        check = _verdict(value)
+        return _replace(value, where, check) if check else value
     if big_int(value):
         return _replace(str(value), where, "second check: a long digit run")
     if isinstance(value, dict):
