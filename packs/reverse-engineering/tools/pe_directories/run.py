@@ -47,6 +47,7 @@ NOTE = ("Static structure only. A directory shows what the file declares to its 
         "import, a TLS callback or a resource is a declaration, and a strong-name flag or a PDB path is a claim. Read `status`, `problems` and `coverage` "
         "first: they say what was read and what was not. A string out of the file is shown with each backslash written twice and each control character as \\xNN.")
 
+MAX_LIMIT = 20000                  # the most rows of one table the answer may hold (a longer table is in its file; the rows are withheld as the reading adds them)
 DEFAULT_LIMIT = 1000
 DEFAULT_STREAM = 16 << 20           # bytes one resource or metadata structure may be read as
 DEFAULT_TOTAL = 128 << 20
@@ -364,6 +365,7 @@ VALUES = [None]    # the values file of this call, once it exists: an answer tha
 # the tool, never of the file: the count says how many.
 _CLEAN = set()                      # strings known to hold nothing to withhold: tested once (a table repeats its keys and kinds)
 _CLEAN_CHARS = [0]                  # their total length, bounded
+_CACHE_ALL = [False]                # True while a string is sanitised that the tool keeps for its answer: its settled result is remembered whatever its size
 # A mailto: address has no user-info (RFC 6068: an address is local-part@domain), so the shared block keeps `mailto:name:secret@host`
 # as an address; a ':' in the local part is a name:password pair placed there, and what follows the ':' (to the last `@` within
 # MAILTO_SPAN characters, no `?`, space, `<` or `>` before it) is withheld here. It is found with one pass over the `mailto:name:`
@@ -436,9 +438,9 @@ def plain_userinfo(text):
 _KV_ENTITY = r"&(?:quot|apos|#0{0,6}3[49]|#x2[27]);"
 _KV_QUOTE = r"(?:\\{0,4}[\"']|" + _KV_ENTITY + r")"
 _KV_GAP = r"(?:[ \t]|\\{1,2}(?:x09|t))*"
-_KV_NAMES = (r"password|passwd|passphrase|pwd|pswd|psw|secret[_-]?key|private[_-]?key|secret|client[_-]?secret|token|api[_-]?key"
+_KV_NAMES = (r"pass[_-]?word|pass[_-]?wd|pass[_-]?phrase|pwd|pswd|psw|secret[_-]?key|private[_-]?key|secret|client[_-]?secret|token|api[_-]?key"
              r"|access[_-]?key|account[_-]?key|shared[_-]?access[_-]?key|credentials?|(?<![A-Za-z0-9])(?:pw|pass|auth|sig)")
-_KV_PASSWORD_NAMES = (r"password|passwd|passphrase|pwd|pswd|psw|secret[_-]?key|private[_-]?key|client[_-]?secret|api[_-]?key|access[_-]?key|account[_-]?key"
+_KV_PASSWORD_NAMES = (r"pass[_-]?word|pass[_-]?wd|pass[_-]?phrase|pwd|pswd|psw|secret[_-]?key|private[_-]?key|client[_-]?secret|api[_-]?key|access[_-]?key|account[_-]?key"
                       r"|shared[_-]?access[_-]?key|(?<![A-Za-z0-9])(?:pw|pass)")
 KEYVALUE_SECRET = re.compile(r"((?:(?:" + _KV_NAMES + r")" + _KV_QUOTE + r"?" + _KV_GAP + r"="
                              r"|(?:" + _KV_NAMES + r")" + _KV_QUOTE + r"[ \t]+value[ \t]*="
@@ -449,9 +451,36 @@ KEYVALUE_SECRET = re.compile(r"((?:(?:" + _KV_NAMES + r")" + _KV_QUOTE + r"?" + 
 # The letters any name of the rule above has in it. A text without them is not read by the rule, which would otherwise try every name at every
 # position of it: the test is a few times cheaper than the rule on a text of any other kind.
 KEYVALUE_HINT = re.compile(r"pw|pass|psw|secret|private|token|key|cred|auth|sig", re.I)
-ELEMENT_SECRET = re.compile(r"((?:<|&lt;)(?:password|passwd|passphrase|pwd|pswd|secret[_-]?key|private[_-]?key|client[_-]?secret|api[_-]?key|access[_-]?key"
-                            r"|account[_-]?key|shared[_-]?access[_-]?key|token|secret)(?:>|&gt;))((?:(?!&lt;)[^<>\r\n]){1,512})(?=<|&lt;)", re.I)
+# The name of an element (or of a `name="..."` attribute) that holds a secret. Its text is withheld to the next `<` (or `&lt;`), the end of the
+# line or the end of the text: nothing has to follow it, a `>` or `&gt;` inside the text does not end it and its length is not bounded, so that
+# a value that is not closed, that holds `>` or that is longer than any window is withheld to its end and not printed whole. A text that begins
+# with white space is read only when it is closed (`<token> x` in prose is no value; a padded `<Password> pw </Password>` is).
+_EL_NAMES = (r"pass[_-]?word|pass[_-]?wd|pass[_-]?phrase|pwd|pswd|secret[_-]?key|private[_-]?key|client[_-]?secret|api[_-]?key|access[_-]?key"
+             r"|account[_-]?key|shared[_-]?access[_-]?key|token|secret")
+# attributes of the open tag (`<Password Type="x">`, also with `&quot;`): `name=value` pairs, so that prose such as `<secret key>` is no element
+_EL_ATTRS = (r"(?:[ \t]+[\w:.-]{1,64}[ \t]*=[ \t]*(?:\"[^\"<>\r\n]{0,128}\"|'[^'<>\r\n]{0,128}'|&quot;(?:(?!&quot;)[^<>\r\n]){0,128}&quot;"
+             r"|[^\s\"'<>&]{1,128}))*")
+# the text of an element: any character but `<` and a line break (`&lt;` ends it too); a value that begins with a `<` that is no tag (not a name and an
+# end, a closing tag, a comment or an instruction) is a value that begins with one
+_EL_REST = r"[^<&\r\n]*(?:&(?!lt;)[^<&\r\n]*)*"
+_EL_TEXT = r"(?:[^<&\r\n]|&(?!lt;))" + _EL_REST
+_EL_LEAD = r"(?:<|&lt;)(?!/?[A-Za-z][\w:.-]*(?:[ \t][^<>\r\n]{0,256})?/?(?:>|&gt;)|[!?/])"
+ELEMENT_SECRET = re.compile(r"((?:(?:<|&lt;)(?:" + _EL_NAMES + r")" + _EL_ATTRS + r"(?<!/)(?:>|&gt;)"
+                            r"|<setting[ \t]+name=[\"'](?:" + _EL_NAMES + r")[\"']" + _EL_ATTRS + r"(?<!/)>(?:\s|\\[nrt]){0,256}<value>))"
+                            r"((?:(?=\S)(?:" + _EL_LEAD + _EL_REST + r"|" + _EL_TEXT + r")|" + _EL_TEXT + r"(?=<|&lt;)))", re.I)
 FORMAT_ONLY = re.compile(r"(?:%[-+ #0-9.*]*[A-Za-z@])+")
+# What is no secret in a secret-named key's place: a format (above), a run of `*` (a mask), `${NAME}` and `%NAME%` (a variable a file names). Only
+# those two rules use it; a user-info keeps FORMAT_ONLY. The other rules still read what is kept.
+PLACEHOLDER_ONLY = re.compile(r"(?:%[-+ #0-9.*]*[A-Za-z@])+|\*+|\$\{[A-Za-z_][A-Za-z0-9_]{0,31}\}|%[A-Za-z_][A-Za-z0-9_]{0,31}%")
+
+
+def _ends_element(m):
+    """True when the part the rule read is all of the element's text: a closing tag, a line break or the end of the text follows it. A mask
+    or a variable followed by more text (`*<8r<...`) is the head of a value and not the whole of one."""
+    rest = m.string[m.end():m.end() + 5].lower()
+    return rest == "" or rest[0] in "\r\n" or rest.startswith("</") or rest.startswith("&lt;/")
+
+
 # The head of a token whose own prefix says what it is, too short for the shared block's patterns (a name cut by a declared length, a
 # string read from the middle of a field): the prefix and four characters more are a piece of a token. An AWS key id's head, in capitals, is one
 # wherever it stands (`XAKIA...` is a key id with a letter in front: its capitals and digits are no word). The GitHub, Slack and `sk-`
@@ -652,10 +681,10 @@ def _shown_pass(out):
         out = slash_userinfo(out)
     if ("=" in out or ":" in out) and KEYVALUE_HINT.search(out):
         # the value of a secret-named key before the bare user-info rule, for the same reason (the marker of that rule holds spaces)
-        out = KEYVALUE_SECRET.sub(lambda m: m.group(0) if FORMAT_ONLY.fullmatch(m.group(3) or m.group(4)) else
+        out = KEYVALUE_SECRET.sub(lambda m: m.group(0) if PLACEHOLDER_ONLY.fullmatch(m.group(3) or m.group(4)) else
                                   m.group(1) + (m.group(2) or "") + _withheld("", len(m.group(3) or m.group(4)), "text"), out)
     if ">" in out or "&gt;" in out:
-        out = ELEMENT_SECRET.sub(lambda m: m.group() if FORMAT_ONLY.fullmatch(m.group(2)) else m.group(1) + _withheld("", len(m.group(2)), "text"), out)
+        out = ELEMENT_SECRET.sub(lambda m: m.group() if PLACEHOLDER_ONLY.fullmatch(m.group(2)) and _ends_element(m) else m.group(1) + _withheld("", len(m.group(2)), "text"), out)
     if "@" in out:
         out = CUT_USERINFO.sub(lambda m: m.group() if FORMAT_ONLY.fullmatch(m.group().partition(":")[2]) else _withheld("userinfo", len(m.group()), "urls"), out)
     # a prefixed token takes the rest of the run of name characters it ends inside (a token glued to it, whose own prefix it took), and
@@ -780,7 +809,7 @@ def shown_path(text):
     # A result that settled (the last pass changed nothing, and the hidden-character copies above held nothing more) is known to be a
     # fixed point: the backstop and the next write of the same string do not read it again, so that a file of thousands of hostile names
     # costs the sanitiser one pass over each and not three. (Four passes may not have settled: that result is read again.)
-    if passes < 4 and len(out) <= 8192 and len(_CLEAN) < 200000 and _CLEAN_CHARS[0] + len(out) <= (1 << 25):
+    if passes < 4 and (_CACHE_ALL[0] or (len(out) <= 65536 and len(_CLEAN) < 200000 and _CLEAN_CHARS[0] + len(out) <= (1 << 25))):
         _CLEAN.add(out)
         _CLEAN_CHARS[0] += len(out)
     return out
@@ -880,10 +909,32 @@ class Spill:
                 "not_written": done.get("not_written"), "note": "the whole list is in the file, one item per line"}
 
 
+# The answer has a time of its own. Past ANSWER_DEADLINE a string that is not already known to be clean is given by its length (a
+# marker no rule changes), which costs nothing and withholds more than the rule would: the answer is then partial and says so. The
+# reading's rows are withheld when they are added (LosslessPage), under the reading's clock; this bound is for what is built after it.
+START = time.monotonic()
+ANSWER_BY = 90                      # seconds after the start of the call by which the answer's strings are withheld (HARD_SECONDS less 15)
+ANSWER_MIN = 5                      # the least time the answer has after the reading, however late the reading ended
+ANSWER_LATE_CHARS = 200             # only a string longer than this is given by its length when the time has run out: a short one costs next to nothing, and the keys and words of the answer's own frame stay
+ANSWER_DEADLINE = [None]
+ANSWER_CUT = [0]
+
+
+def _answer_late(text):
+    """True (and counted) when the answer's time has run out and `text` is a long string not known to be clean."""
+    deadline = ANSWER_DEADLINE[0]
+    if deadline is None or len(text) <= ANSWER_LATE_CHARS or time.monotonic() <= deadline or text in _CLEAN:
+        return False
+    ANSWER_CUT[0] += 1
+    return True
+
+
 def shown_key(key):
     key = key if isinstance(key, str) else str(key)
     if len(key) > SHOWN_TARGET:
         return long_text(key, "a key")
+    if _answer_late(key):
+        return "<a key of %d characters: not shown, the answer ran out of time>" % len(key)
     return shown_path(key)
 
 
@@ -895,6 +946,8 @@ def shown_answer(value, key="", spill=None):
     if isinstance(value, str):
         if key in SAFE_KEYS and value in MADE:
             return value
+        if _answer_late(value):
+            return "<%d characters: not shown, the answer ran out of time>" % len(value)
         return shown_path(value)
     if isinstance(value, bool) or value is None or isinstance(value, float):
         return value
@@ -925,11 +978,28 @@ def shown_answer(value, key="", spill=None):
     return shown_path(str(value))
 
 
-def emit(result, spill=None, indent=2):
-    """The last step of every call: the answer through the sanitiser (shown_answer), then through the backstop (final_check). A field
-    the backstop withholds, here or in a table or list file written before it, is counted in `withheld_by_final_check`, named in
-    `problems`, and makes a complete answer partial: it is a fault of this tool, never of the file."""
-    answer = final_check(shown_answer(result, "", spill), safe_made)
+def build_answer(result, spill=None, seconds=None):
+    """The answer through the sanitiser (shown_answer), then through the backstop (final_check). A field the backstop withholds, here
+    or in a table or list file written before it, is counted in `withheld_by_final_check`, named in `problems`, and makes a complete
+    answer partial: it is a fault of this tool, never of the file. The answer has until ANSWER_BY seconds after the start of the call
+    (at least ANSWER_MIN after now, `seconds` after now when given); a string it has no time for is given by its length."""
+    now = time.monotonic()
+    ANSWER_DEADLINE[0] = now + seconds if seconds else min(max(START + ANSWER_BY, now + ANSWER_MIN), max(START + HARD_SECONDS - 6, now + 1))
+    ANSWER_CUT[0] = 0
+    _CACHE_ALL[0] = True
+    try:
+        answer = final_check(shown_answer(result, "", spill), safe_made)
+    finally:
+        _CACHE_ALL[0] = False
+    if ANSWER_CUT[0]:
+        note = ("time: the answer ran out of time (%d s after the call began): %d string(s) are given by their length only; the rows already "
+                "withheld are all in it; read with a smaller limit or max_seconds, or the whole in a job with write_values" % (ANSWER_BY, ANSWER_CUT[0]))
+        if isinstance(answer.get("limits_hit"), list):
+            answer["limits_hit"].append(note)
+        else:
+            answer["limits_hit"] = [note]
+        if answer.get("status") == "complete":
+            answer["status"], answer["status_basis"] = "partial", note
     if FINAL["fields"]:
         note = ("the final check withheld %d field(s) the sanitiser had let through: each is given by its length; a fault of this tool, "
                 "not of the file" % FINAL["fields"])
@@ -938,6 +1008,12 @@ def emit(result, spill=None, indent=2):
             answer["problems"].append(note)
         if answer.get("status") == "complete":
             answer["status"], answer["status_basis"] = "partial", note
+    return answer
+
+
+def emit(result, spill=None, indent=2):
+    """The last step of every call: the answer (build_answer), written."""
+    answer = build_answer(result, spill)
     PRINTING[0] = True
     print(json.dumps(answer, indent=indent))
 
@@ -1043,10 +1119,20 @@ class LosslessPage:
         self._out.write(json.dumps(final_check(shown_answer(row), safe_made)))
         self._out.write("\n")
 
+    @staticmethod
+    def _clean(row):
+        """The row as it will be written (the sanitiser, then the backstop), kept in the form in which the answer will carry it."""
+        _CACHE_ALL[0] = True
+        try:
+            return final_check(shown_answer(row), safe_made)
+        finally:
+            _CACHE_ALL[0] = False
+
     def add(self, row):
         self.total += 1
         if len(self.page) < self.limit:
-            self.page.append(row)
+            # withheld now, while the reading's clock runs, and kept as it will be printed: the answer does not pay for it again
+            self.page.append(self._clean(row))
             return
         if self._out is None and self.not_written is None:
             self._open()
@@ -2316,15 +2402,47 @@ def _stopped_by_signal(signum, frame):
     raise SystemExit(128 + signum)
 
 
+HARD_GRACE = 5                      # seconds the partial answer of the hard limit has, before the failed one
+
+
+def _hard_limit_last(signum, frame):
+    sys.stdout.write(json.dumps({"tool": TOOL, "status": "failed", "error": "the answer was not finished within %d seconds (the manifest's limit is 120) and the partial answer of what "
+                                 "had been read was not finished either; a file the call wrote can be incomplete; read with a smaller limit or max_seconds" % HARD_SECONDS}) + "\n")
+    sys.stdout.flush()
+    os._exit(1)
+
+
+ASSEMBLED = {}                      # what the call holds for the answer, once the reading has begun: the head and the Ctx (set in main)
+
+
 def _hard_limit(signum, frame):
-    """The reading clock (max_seconds) has long run out and the answer is still being built: say so, as the one answer, before the harness's kill."""
+    """The call has not answered within HARD_SECONDS: the answer is the one of what is already assembled (the problems and limits, and the
+    first rows of each table, all of them withheld when they were added), before the harness's kill; nothing else of the structure is in
+    it. A call that had read nothing yet answers that it failed."""
     if PRINTING[0]:
         return
     PRINTING[0] = True
-    sys.stdout.write(json.dumps({"tool": TOOL, "status": "failed", "error": "the answer was not finished within %d seconds (the manifest's limit is 120): the reading was clocked by "
-                                 "max_seconds and the answer is built after it; a file the call wrote can be incomplete; read with a smaller limit or max_seconds" % HARD_SECONDS}) + "\n")
-    sys.stdout.flush()
-    os._exit(1)
+    # should the partial answer itself not be finished in HARD_GRACE seconds, the failed one ends the call
+    signal.signal(signal.SIGALRM, _hard_limit_last)
+    signal.setitimer(signal.ITIMER_REAL, HARD_GRACE)
+    note = ("time: the call had not answered within %d seconds (the manifest's limit is 120): this answer holds what had been read and withheld by then "
+            "(the problems, the limits and the first rows of each table); the rest of the structure is not in it, and a file the call wrote can be incomplete; "
+            "read with a smaller limit or max_seconds" % HARD_SECONDS)
+    try:
+        ctx = ASSEMBLED.get("ctx")
+        if ctx is None:
+            raise LookupError("nothing was read")
+        partial = {**ASSEMBLED["head"], "status": "partial", "status_basis": note, "problems": list(ctx.problems), "limits_hit": list(ctx.limits) + [note],
+                   "tables": {name: {"matched": page.total, "returned": len(page.page), "rows_shown": min(len(page.page), SPILL_FLOOR), "rows": page.page[:SPILL_FLOOR]}
+                              for name, page in list(ctx.pages.items())}, "withheld": COUNTS, "note": NOTE}
+        sys.stdout.write(json.dumps(build_answer(partial, None, 4)) + "\n")
+        sys.stdout.flush()
+        os._exit(0)
+    except Exception:
+        sys.stdout.write(json.dumps({"tool": TOOL, "status": "failed", "error": "the answer was not finished within %d seconds (the manifest's limit is 120) and nothing "
+                                     "had been read yet; a file the call wrote can be incomplete; read with a smaller limit or max_seconds" % HARD_SECONDS}) + "\n")
+        sys.stdout.flush()
+        os._exit(1)
 
 
 def install_signal_handlers():
@@ -2368,7 +2486,7 @@ def main():
     if not isinstance(write_values, bool):
         fail("write_values must be true or false")
     cfg = {"max_stream_bytes": positive_int(args, "max_stream_bytes", DEFAULT_STREAM), "max_total_bytes": positive_int(args, "max_total_bytes", DEFAULT_TOTAL),
-           "limit": positive_int(args, "limit", DEFAULT_LIMIT)}
+           "limit": positive_int(args, "limit", DEFAULT_LIMIT, MAX_LIMIT)}
     seconds = positive_int(args, "max_seconds", DEFAULT_SECONDS, MAX_SECONDS)
     try:
         values = SecretValues(write_values)
@@ -2383,6 +2501,7 @@ def main():
     shown = shown_name(path)
     if shown != path:
         ctx.names.add(path, shown, "input_path")
+    ASSEMBLED.update(ctx=ctx, head={"tool": TOOL, "parser": PARSER, "path": shown, "bytes": size})
     if size == 0:
         values.close()
         fail("the file is empty", path=path)

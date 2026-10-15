@@ -90,11 +90,11 @@
     },
     "limit": {
       "type": "integer",
-      "description": "Rows of one table kept in the answer (default 1000); the whole of a longer table is written to a file and named"
+      "description": "Rows of one table kept in the answer (default 1000, at most 20000: a larger number is refused, as the rows are withheld while the file is read); the whole of a longer table is written to a file and named"
     },
     "max_seconds": {
       "type": "integer",
-      "description": "The tool's own time limit for reading, in seconds, from 1 to 90 (default 70); a read that reaches it stops, reports what it read and says so. The answer is built after it and takes up to some seconds more (a call that has not answered within 105 s ends with a failed answer saying so, before the manifest's 120 s limit)"
+      "description": "The tool's own time limit for reading, in seconds, from 1 to 90 (default 70); a read that reaches it stops, reports what it read and says so. The rows of each table are withheld as they are read, under this limit; the rest of the answer is built after it and has until about 90 s after the call began, at least 5 s after the reading: a string it has no time to check is given by its length and the answer says so (partial). A call that has not answered within 105 s ends with a partial answer of the problems, the limits and the first rows of each table it holds, before the manifest's 120 s limit"
     }
   },
   "runtime": "python3",
@@ -104,5 +104,5 @@
   "by": "maintainer",
   "at": "2026-10-14T09:00:00.000Z",
   "version": 1,
-  "sha256": "e278e45221789443fb95db1b19c18d36d283dec0a863139d9630c2b3e7976f6c"
+  "sha256": "1af87c139a74836efe9266c548a00314db6cec7bf23da8080057ddff63a0d35b"
 }

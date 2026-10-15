@@ -12,7 +12,9 @@
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { DOC_STRUCTURE, PE_DIRECTORIES, RE, body, buildZip, filesUnder, put, tool, withCwd } from "./pack-re-harness.ts";
@@ -24,16 +26,28 @@ const CAPA_FLOSS = join(RE, "recipes", "capa-floss", "run.py");
 const COPIES = [DOC_STRUCTURE, PE_DIRECTORIES, CAPA_FLOSS];
 
 const LOAD = [
-  "import importlib.util, io, json, sys",
+  "import importlib.util, io, json, os, sys",
+  "sys.stdin = open(os.environ['RE_TEST_INPUT'], encoding='utf-8')",
   "spec = importlib.util.spec_from_file_location('tool_under_test', sys.argv[1])",
   "m = importlib.util.module_from_spec(spec)",
   "spec.loader.exec_module(m)",
 ].join("\n");
 
-/** Python code run with the tool's module loaded as `m`; stdin is JSON, stdout is what the code prints. */
+/**
+ * Python code run with the tool's module loaded as `m`; stdin is the JSON of `input`, stdout is what the code prints. The input goes in
+ * a file that the child opens as its stdin, never through a pipe: node's spawnSync with a large `input` has left the child blocked in
+ * its stdin read while the parent idled (2 of 14 loops of this file on macOS, Node 22.23.1).
+ */
 function py(path: string, code: string, input: unknown = null, cwd?: string, env: Record<string, string> = {}): { status: number | null; stdout: string; stderr: string } {
-  const r = spawnSync("python3", ["-I", "-c", `${LOAD}\n${code}`, path], { input: JSON.stringify(input), encoding: "utf8", cwd, env: { ...process.env, AGENT_ID: "s1", ...env }, maxBuffer: 1 << 28 });
-  return { status: r.status, stdout: r.stdout, stderr: r.stderr };
+  const dir = mkdtempSync(join(tmpdir(), "re-input-"));
+  const file = join(dir, "input.json");
+  writeFileSync(file, JSON.stringify(input));
+  try {
+    const r = spawnSync("python3", ["-I", "-c", `${LOAD}\n${code}`, path], { stdio: ["ignore", "pipe", "pipe"], encoding: "utf8", cwd, env: { ...process.env, AGENT_ID: "s1", ...env, RE_TEST_INPUT: file }, maxBuffer: 1 << 28 });
+    return { status: r.status, stdout: r.stdout, stderr: r.stderr };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 function clean(where: string, data: string | Buffer, list: ReturnType<typeof needles>): void {
