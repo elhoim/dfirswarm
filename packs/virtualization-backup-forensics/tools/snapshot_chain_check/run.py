@@ -1701,13 +1701,17 @@ def main():
     except TextRefused as exc:
         fail(str(exc))
     shown = Shower(values)
-    clock = Clock(seconds)
+    # The reading stops at four fifths of max_seconds; the rest is for writing the rows and the answer, which stop at
+    # max_seconds itself, so that the call ends near the time asked for even when a stop leaves many rows to write.
+    clock = Clock(seconds * 0.8)
+    out_clock = Clock(seconds)
+    at_limit = "max_seconds (%s; the reading stops at four fifths of it)" % seconds
     files = FileSet(shown)
     partial = []
     try:
         files.walk(root, paths, max_files, max_entries, max_depth, clock)
     except Overtime:
-        partial.append("the walk stopped at max_seconds (%s): the files after the last one listed were not reached" % seconds)
+        partial.append("the walk stopped at %s: the files after the last one listed were not reached" % at_limit)
     if files.truncated:
         partial.append(files.truncated)
     index = Index(files.files)
@@ -1911,7 +1915,7 @@ def main():
                 build_disk(rec["id"], res)
                 nodes[rec["id"]] = {"rec": rec, "row": {"kind": kind}}
     except Overtime:
-        partial.append("the examination stopped at max_seconds (%s): the files after %s were not read" % (seconds, "the last one listed in sources"))
+        partial.append("the examination stopped at %s: the files after the last one listed in sources were not read" % at_limit)
 
     parent_of, edge_of = {}, {}
     depth, base, state_of, first_issue, cycle_of = {}, {}, {}, {}, {}
@@ -2183,8 +2187,8 @@ def main():
             marker("lock_artefact", [], "an entry named %s is present" % shown(rel, "walk", "lock directory"),
                    "a lock directory or file is made while a program holds the disk or the VM; it can be a copy of a live VM's directory or a left-over after a crash: a candidate")
     except Overtime:
-        partial.append("max_seconds (%s) was reached during %s: the rows after the last one listed were not made, and the chain rows, edges and markers "
-                       "listed are the ones made before it" % (seconds, phase))
+        partial.append("%s was reached during %s: the rows after the last one listed were not made, and the chain rows, edges and markers "
+                       "listed are the ones made before it" % (at_limit, phase))
 
     # ---- qemu-img, when asked ------------------------------------------------------------------------------------------
     qemu_report = {"mode": qemu_mode, "checked": 0, "available": None, "note": "qemu-img was not run (qemu_img: off); the reading above is the tool's own"}
@@ -2210,14 +2214,14 @@ def main():
                 why = "external_data_file"        # qemu-img would open the data file by the name the header holds
             elif count >= qemu_max:
                 why = "over_qemu_img_max_images"
-            elif clock.left() < 2:
+            elif out_clock.left() < 2.5:
                 why = "max_seconds"
             if why:
                 skipped[why] += 1
                 skipped_first.setdefault(why, fid)
                 continue
             rec = nodes[fid]["rec"]
-            result = run_qemu(rec["path"], fmt_kind, min(30.0, max(1.0, clock.left() - 1)))
+            result = run_qemu(rec["path"], fmt_kind, min(30.0, max(1.0, out_clock.left() - 1.5)))
             count += 1
             qemu_report["available"] = result.get("available")
             if result.get("available") is False:
@@ -2256,7 +2260,14 @@ def main():
                 qemu_report["note"] += "; no parsed image was eligible"
 
     # ---- disks page ------------------------------------------------------------------------------------------------
+    listed = 0
     for fid, d in disks.items():
+        try:
+            out_clock.check(256)
+        except Overtime:
+            partial.append("max_seconds (%s) was reached while the disk rows were written: %d of %d are listed (the edges and chains name the rest by id)" % (seconds, listed, len(disks)))
+            break
+        listed += 1
         row = {"source_id": fid, "file": d["file"], "format": d.get("format"), "state": d["state"], "role": d.get("role", "disk"),
                "own_id": d.get("own_id"), "records_a_parent": bool(d.get("has_parent")), "is_extent_of": extent_targets.get(fid),
                "depth": depth.get(fid), "base": base.get(fid), "chain_state": state_of.get(fid), "detail": make_net(shown, fid)(d.get("detail"))}

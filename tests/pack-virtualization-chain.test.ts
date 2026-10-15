@@ -871,7 +871,9 @@ test("the chain phase is bounded by the clock: fifteen thousand trunk disks and 
     const started = Date.now();
     const out = json(await tool(CHAIN, cwd, { root: "inputs/vm", max_files: 200000, max_chain_depth: 1000000, max_seconds: 10, limit: 5 }));
     const took = (Date.now() - started) / 1000;
-    assert.ok(took < 10 + 6, `the call ended in ${took} s; max_seconds was 10`);
+    // the reading stops at four fifths of max_seconds and the writing at max_seconds; the margin is for starting Python
+    // and a loaded machine (the first version took 22 s here on an idle one, and over 70 s on one CPU)
+    assert.ok(took < 10 + 5, `the call ended in ${took} s; max_seconds was 10`);
     assert.ok(out.status === "complete" || out.status === "partial", out.status_basis);
     if (out.status === "partial") assert.match(out.status_basis, /max_seconds/, "a stop at the clock is named");
     else assert.equal(out.chain_summary.complete, n, "every leaf has a whole chain");
