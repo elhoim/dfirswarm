@@ -114,7 +114,9 @@ into the library after they are generalised.
 6. **Sensitive outputs, derived from the executed snapshot.**
    `job_run(secret_output: true)` marks every output the job seals sensitive,
    on its `job_committed` line (the record) and its `job.json`, without
-   reading the bytes. A job's sensitivity is read from the snapshot its scope
+   reading the bytes; a tool's manifest may declare it (`secret_output`, on
+   `kind: tool` jobs), and the job is then run as if the agent had said so,
+   recorded with `secret_output_by: "tool_manifest"`. A job's sensitivity is read from the snapshot its scope
    manifest recorded — every accessible and expanded object's digest, hashed
    at the job's start — so a job is derived when it executed against the bytes
    of a sensitive output wherever they sat: a work copy the agent carved out,
