@@ -194,7 +194,7 @@ class SqliteQuery(Case):
         wrapper = ("import json, resource, subprocess, sys\n"
                    "p = subprocess.run([sys.executable, sys.argv[1]], input=sys.argv[2], capture_output=True, text=True)\n"
                    "print(json.dumps({'out': p.stdout, 'peak': resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss}))\n")
-        env = {k: v for k, v in os.environ.items() if k not in ("JOB_ID", "OUT", "AGENT_ID")}
+        env = {k: v for k, v in os.environ.items() if k not in ("JOB_ID", "OUT", "AGENT_ID", "SECRET_OUTPUT")}
         proc = subprocess.run([sys.executable, "-c", wrapper, tool_path("sqlite_query"), json.dumps({"db_path": db, "sql": "select d from t", "limit": 12})],
                               capture_output=True, text=True, cwd=self.dir, env=env)
         got = json.loads(proc.stdout)
@@ -254,7 +254,7 @@ class SqliteQuery(Case):
         wrapper = ("import json, resource, subprocess, sys\n"
                    "p = subprocess.run([sys.executable, sys.argv[1]], input=sys.argv[2], capture_output=True, text=True)\n"
                    "print(json.dumps({'out': p.stdout, 'peak': resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss}))\n")
-        env = {k: v for k, v in os.environ.items() if k not in ("JOB_ID", "OUT", "AGENT_ID")}
+        env = {k: v for k, v in os.environ.items() if k not in ("JOB_ID", "OUT", "AGENT_ID", "SECRET_OUTPUT")}
 
         def go(sql):
             proc = subprocess.run([sys.executable, "-c", wrapper, tool_path("sqlite_query"), json.dumps({"db_path": db, "sql": sql})], capture_output=True, text=True, cwd=self.dir, env=env)
@@ -301,7 +301,7 @@ class SqliteQueryValues(Case):
     def job(self, name="job-out", job_id="j000031"):
         out = self.path(name)
         os.makedirs(out, exist_ok=True)
-        return out, {"JOB_ID": job_id, "OUT": out}
+        return out, {"JOB_ID": job_id, "OUT": out, "SECRET_OUTPUT": "1"}
 
     def export(self, db, env=None, **kw):
         return run_tool("sqlite_query", dict({"db_path": db, "table": "logins", "write_values": True}, **kw), self.dir, env=env)
@@ -331,6 +331,30 @@ class SqliteQueryValues(Case):
         self.assertEqual(r.json["write_values"], "refused")
         self.assertNotIn(TEXT_CANARY, r.stdout)
         self.assertEqual(self.files_outside(), [])
+
+    def test_the_values_are_refused_in_a_job_the_harness_did_not_run_as_secret_output_and_nothing_is_written(self):
+        db = self.secret_db()
+        out, env = self.job()
+        for value in (None, "", "0", "yes", "true"):
+            env = dict(env)
+            env.pop("SECRET_OUTPUT", None)
+            if value is not None:
+                env["SECRET_OUTPUT"] = value
+            r = self.export(db, env)
+            self.assertEqual(r.code, 1, value)
+            self.assertEqual(r.stderr, "", "a refusal is a JSON answer, not a traceback")
+            self.assertIs(r.json["ok"], False)
+            self.assertEqual((r.json["write_values"], r.json["written"]), ("refused", False))
+            self.assertIn("not run as secret output", r.json["error"])
+            self.assertNotIn(TEXT_CANARY, r.stdout)
+            self.assertEqual(os.listdir(out), [], "nothing was created under OUT")
+            self.assertEqual(self.files_outside(), [])
+        # The same job with the variable the harness sets for a secret job: the export runs.
+        env = dict(env, SECRET_OUTPUT="1")
+        self.assertEqual(self.export(db, env).code, 0)
+        # An ordinary query needs none of it.
+        env.pop("SECRET_OUTPUT")
+        self.assertEqual(run_tool("sqlite_query", {"db_path": db, "sql": "select origin from logins"}, self.dir, env=env).code, 0)
 
     def test_a_value_is_in_the_sealed_file_only_not_in_the_answer_nor_in_any_other_file(self):
         db = self.secret_db()
@@ -536,7 +560,7 @@ class SqliteQueryValuesReview(Case):
     def job(self, name, job_id):
         out = self.path(name)
         os.makedirs(out, exist_ok=True)
-        return out, {"JOB_ID": job_id, "OUT": out}
+        return out, {"JOB_ID": job_id, "OUT": out, "SECRET_OUTPUT": "1"}
 
     def export(self, db, table, env, **kw):
         return run_tool("sqlite_query", dict({"db_path": db, "table": table, "write_values": True}, **kw), self.dir, env=env)
@@ -627,7 +651,7 @@ class SqliteQueryValuesReview(Case):
         """The tool with RLIMIT_FSIZE set: a write past `fsize` bytes fails with EFBIG (Python ignores SIGXFSZ), as on a full disk."""
         import resource
         e = dict(os.environ)
-        for k in ("JOB_ID", "OUT", "AGENT_ID"):
+        for k in ("JOB_ID", "OUT", "AGENT_ID", "SECRET_OUTPUT"):
             e.pop(k, None)
         e.update(env)
         proc = subprocess.run([sys.executable, tool_path("sqlite_query")], input=json.dumps(args), capture_output=True, text=True,
@@ -808,7 +832,7 @@ def in_process(snippet_body, args, env, cwd):
     snippet = ("import importlib.util, sys, os, errno; spec = importlib.util.spec_from_file_location('sq', sys.argv[1]); "
                "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)\n" + snippet_body + "\nm.main()")
     e = dict(os.environ)
-    for k in ("JOB_ID", "OUT", "AGENT_ID"):
+    for k in ("JOB_ID", "OUT", "AGENT_ID", "SECRET_OUTPUT"):
         e.pop(k, None)
     e.update(env)
     return subprocess.run([sys.executable, "-c", snippet, tool_path("sqlite_query")], cwd=cwd, env=e, capture_output=True, text=True,
@@ -855,7 +879,7 @@ class SqliteQueryValuesDelta(Case):
     def job(self, name, job_id):
         out = self.path(name)
         os.makedirs(out, exist_ok=True)
-        return out, {"JOB_ID": job_id, "OUT": out}
+        return out, {"JOB_ID": job_id, "OUT": out, "SECRET_OUTPUT": "1"}
 
     def export(self, db, table, env, **kw):
         return run_tool("sqlite_query", dict({"db_path": db, "table": table, "write_values": True}, **kw), self.dir, env=env)
@@ -1111,7 +1135,7 @@ class SqliteQueryValuesDelta(Case):
         self.with_generated(db, "json_extract(s, '$.a')", "g")
         out, env = self.job("o", "j000330")
         e = dict(os.environ)
-        for key in ("JOB_ID", "OUT", "AGENT_ID"):
+        for key in ("JOB_ID", "OUT", "AGENT_ID", "SECRET_OUTPUT"):
             e.pop(key, None)
         e.update(env)
         proc = subprocess.run([sys.executable, tool_path("sqlite_query")], input=json.dumps({"db_path": db, "table": "t", "write_values": True}),
@@ -1447,7 +1471,7 @@ class SqliteQueryValuesFinal(Case):
         nowhere = self.path("nowhere")
         dangling = self.path("out-dangling")
         os.symlink(nowhere, dangling)
-        r = self.export(db, "t", {"JOB_ID": "j000440", "OUT": dangling})
+        r = self.export(db, "t", {"JOB_ID": "j000440", "OUT": dangling, "SECRET_OUTPUT": "1"})
         self.assertEqual((r.code, r.stderr), (1, ""))
         self.assertIn("OUT is a link to nothing", r.json["error"])
         self.assertNotIn("already exists", r.json["error"])
@@ -1455,7 +1479,7 @@ class SqliteQueryValuesFinal(Case):
         plain = self.path("out-file")
         with open(plain, "w") as fh:
             fh.write("x")
-        r = self.export(db, "t", {"JOB_ID": "j000441", "OUT": plain})
+        r = self.export(db, "t", {"JOB_ID": "j000441", "OUT": plain, "SECRET_OUTPUT": "1"})
         self.assertEqual((r.code, r.stderr), (1, ""))
         self.assertIn("OUT is not a directory", r.json["error"])
         self.assertNotIn("already exists", r.json["error"])

@@ -109,7 +109,7 @@ import time
 import urllib.parse
 from pathlib import Path
 
-TOOL = {"name": "sqlite_query", "version": 6}
+TOOL = {"name": "sqlite_query", "version": 7}
 DEFAULT_LIMIT = 100
 LIMIT_MAX = 10000
 INLINE_BYTES = 64 * 1024          # the inline page's JSON and its text form, each, as they are sent (ASCII-escaped, counted in bytes)
