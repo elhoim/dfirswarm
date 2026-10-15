@@ -182,7 +182,11 @@ def linear():
     for name, make_text in (("words", lambda n: ("web-server-prod-db-" * n)[:n]), ("a_a", lambda n: ("a_" * n)[:n]), ("b64", lambda n: rs(random.Random(1), n, B64)),
                             ("colons", lambda n: ("~:" * n)[:n]), ("dashes", lambda n: ("a-" * n)[:n]), ("slashes", lambda n: ("Ab1/" * n)[:n]), ("ghp", lambda n: ("ghp_" * n)[:n]),
                             ("equals", lambda n: ("a=" * n)[:n]), ("at", lambda n: ("u:p@" * n)[:n]), ("invisible", lambda n: ("a\u2066" * n)[:n]), ("pass", lambda n: ("password=" * n)[:n]),
-                            ("backslashes", lambda n: "\\" * n), ("eyj", lambda n: ("eyJ" * n)[:n]), ("escape_halves", lambda n: ("\\u20" * n)[:n])):
+                            ("backslashes", lambda n: "\\" * n), ("eyj", lambda n: ("eyJ" * n)[:n]), ("escape_halves", lambda n: ("\\u20" * n)[:n]),
+                            ("t10_underscores", lambda n: ("t10.AB" + "_" * n)[:n]), ("t10_runs", lambda n: ("t10.AB_" * n)[:n]), ("t10_words", lambda n: ("t10.ATA_x_" * n)[:n]),
+                            ("iqn_dots", lambda n: ("iqn.2020-01.a." * n)[:n]), ("iqn_tail", lambda n: ("iqn.2020-01.a:" + "a" * n)[:n]), ("naa", lambda n: ("naa." + "a" * n)[:n]),
+                            ("eui_wwn_vml", lambda n: ("eui.wwn-0xvml." * n)[:n]), ("win", lambda n: ("WIN-" + "A" * n)[:n]), ("password_brackets", lambda n: ("password=<" * n)[:n]),
+                            ("flag_brackets", lambda n: ("-password <" * n)[:n])):
         row = {}
         for n in req["sizes"]:
             text = make_text(n)
@@ -358,9 +362,9 @@ test("a secret name glued to a letter or written in CamelCase (adminPassword=, v
 
 // ---- time and size: every layer is linear ---------------------------------------------------------------------------------
 
-test("the layers take time proportional to the length of a string: 5,000, 20,000 and 100,000 characters of each pathological shape (`a-a-a-...`, `a_a_a_...`, `~:~:`, `Ab1/Ab1/`, `u:p@u:p@`, `password=password=`, a run of backslashes, `eyJeyJ`, `\\u20\\u20`), in CPU seconds", async () => {
+test("the layers take time proportional to the length of a string: 5,000, 20,000 and 100,000 characters of each pathological shape (`a-a-a-...`, `a_a_a_...`, `~:~:`, `Ab1/Ab1/`, `u:p@u:p@`, `password=password=`, a run of backslashes, `eyJeyJ`, `\\u20\\u20`, `t10.AB` and a run of underscores, `iqn.`, `naa.`, `eui.`, `WIN-` runs, `password=<` runs), in CPU seconds", async () => {
   for (const [label, script] of TOOLS) {
-    for (const field of [null, "name", "file"]) {
+    for (const field of [null, "name", "file", "uid"]) {
       const t = await host(script, { op: "linear", sizes: [5000, 20000, 100000], field });
       for (const [shape, row] of Object.entries(t as Record<string, Record<string, number>>)) {
         assert.ok(row["100000"] < 3, `${label} ${field} ${shape}: 100 KB took ${row["100000"]} s`);
