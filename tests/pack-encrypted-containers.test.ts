@@ -182,7 +182,7 @@ test("recovery_key_scan writes values only on request, only in a job, only under
     await mkdir(outDir);
     // In a job the harness did not run as secret output (no SECRET_OUTPUT=1: a command job started by hand, or a harness that
     // does not set it): the request is refused as JSON and nothing is created, not even the empty values file.
-    for (const flag of [{}, { SECRET_OUTPUT: "" }, { SECRET_OUTPUT: "0" }, { SECRET_OUTPUT: "true" }]) {
+    for (const flag of [{}, { SECRET_OUTPUT: "" }, { SECRET_OUTPUT: "0" }, { SECRET_OUTPUT: "true" }] as Array<Record<string, string>>) {
       const plain = refused(await tool(SCAN, cwd, { path: "work/ev", write_values: true }, { JOB_ID: "j000001", OUT: outDir, ...flag })) as { error: string; write_values?: string; written?: boolean };
       assert.match(plain.error, /not run as secret output/);
       assert.match(plain.error, /SECRET_OUTPUT=1/);
