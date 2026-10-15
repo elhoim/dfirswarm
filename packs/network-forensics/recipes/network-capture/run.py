@@ -13,7 +13,8 @@ build does not decode (coverage.json counts the truncated ones).
 
 The receipt, coverage.json, exists from the first moment and is rewritten after every step, so a run that is cut off
 (the outer time limit, a signal, a kill) leaves what was done: status "partial" with finished false until the last
-step, then "complete" (every step ran and exited 0), "partial" (a step failed, timed out or was not attempted) or
+step, then "complete" (every step ran and exited 0 and no listing lacks a field), "partial" (a step failed, timed out or was
+not attempted, or a listing was made without a field the installed tshark does not list: the status_basis names it) or
 "failed". "complete" is an execution result. It does not say what the capture holds. Every step records its
 status, exit code, seconds and rows; the versions of tshark and capinfos are recorded; one deadline
 (NETWORK_CAPTURE_SECONDS, default 3300, under the recipe's 3600) covers every step, a step that uses it up is killed
@@ -89,8 +90,9 @@ def detect(path):
 
 
 # BEGIN SHARED PROCESS
-# The same text is in pcap_extract, zeek_run, suricata_run and the network-capture recipe; tests/pack-network-withholding.test.ts
-# holds the copies equal. A program an engine tool runs is started in THIS tool's process group, never in a session of
+# The same text is in pcap_extract, zeek_run, suricata_run, the network-capture recipe and computer-forensics-base's
+# archive_extract; tests/pack-network-withholding.test.ts holds the four network copies equal and tests/pack-base-shared.test.ts
+# holds archive_extract's to them. A program an engine tool runs is started in THIS tool's process group, never in a session of
 # its own: the harness ends a tool that runs too long, or is aborted, by killing the tool's group (process.kill(-pid,
 # SIGKILL)), and an engine in a group of its own goes on writing into the output directory after the tool is gone. On
 # Linux the kernel is also asked to kill it if the tool dies. A deadline kills the program and what it started by
@@ -118,8 +120,9 @@ def spawn(argv, **kwargs):
 
 
 def _children_libproc(pid):
-    """The direct children of `pid` on macOS and the BSDs, from libproc (a library call: no program is started and
-    nothing can be slow); None when the library is not there."""
+    """The direct children of `pid` on macOS, from libproc (macOS only: proc_listchildpids is not a symbol of the other
+    BSDs; a library call, so no program is started and nothing can be slow); None when the library, the symbol or the
+    call is not there."""
     try:
         import ctypes.util
         lib = ctypes.CDLL(ctypes.util.find_library("proc") or "/usr/lib/libproc.dylib", use_errno=True)
@@ -128,7 +131,8 @@ def _children_libproc(pid):
         size = 256
         while size <= 1 << 16:
             buf = (ctypes.c_int * size)()
-            lib.proc_listchildpids(pid, buf, ctypes.sizeof(buf))
+            if lib.proc_listchildpids(pid, buf, ctypes.sizeof(buf)) < 0:
+                return None
             found = []
             for value in buf:
                 if value <= 0:
@@ -142,8 +146,24 @@ def _children_libproc(pid):
         return None
 
 
+PS_WAIT = 10    # seconds the ps fallback is given: ps is slow on a heavily loaded host, and a tree that is not found is a program left running
+
+
+def _below(kids, pid, limit=4096):
+    found, stack = [], [pid]
+    while stack and len(found) < limit:
+        for child in kids.get(stack.pop(), []):
+            if child not in found and child != pid:
+                found.append(child)
+                stack.append(child)
+    return found
+
+
 def descendants(pid):
-    """Every process below `pid`: from /proc where there is one, else from libproc, else from ps (given three seconds)."""
+    """Every process below `pid` (never one beside it): from /proc where there is one, else from libproc, else from ps
+    (given PS_WAIT seconds). libproc is believed when it lists a child; an empty answer is believed only when libproc has
+    just listed this tool's own child `pid` (a library that answers nothing for a live child is not working, as in a
+    sandbox that denies it), and otherwise ps is asked."""
     kids = {}
     try:
         if os.path.isdir("/proc/self"):
@@ -155,28 +175,26 @@ def descendants(pid):
                         kids.setdefault(int(fields[1]), []).append(int(entry))
                     except (OSError, IndexError, ValueError):
                         continue
-        elif _children_libproc(pid) is not None:
-            found, stack = [], [pid]
-            while stack and len(found) < 4096:
-                for child in _children_libproc(stack.pop()) or []:
-                    if child not in found and child != pid:
-                        found.append(child)
-                        stack.append(child)
-            return found
         else:
-            out = subprocess.run(["ps", "-A", "-o", "pid=,ppid="], capture_output=True, text=True, timeout=3).stdout
+            first = _children_libproc(pid)
+            if first:
+                found, stack = list(first), list(first)
+                while stack and len(found) < 4096:
+                    for child in _children_libproc(stack.pop()) or []:
+                        if child not in found and child != pid:
+                            found.append(child)
+                            stack.append(child)
+                return found
+            if first is not None and pid in (_children_libproc(os.getpid()) or []):
+                return []
+            out = subprocess.run(["ps", "-A", "-o", "pid=,ppid="], capture_output=True, text=True, timeout=PS_WAIT).stdout
             for line in out.splitlines():
                 parts = line.split()
                 if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
                     kids.setdefault(int(parts[1]), []).append(int(parts[0]))
     except (OSError, subprocess.SubprocessError):
         return []
-    found, stack = [], [pid]
-    while stack:
-        for child in kids.get(stack.pop(), []):
-            found.append(child)
-            stack.append(child)
-    return found
+    return _below(kids, pid)
 
 
 def kill_tree(proc):
@@ -528,9 +546,18 @@ def main():
         receipt.write()
     data["limits_on_what_the_listings_show"]["rows_by_listing"] = rows
     unfinished = [s["step"] for s in data["steps"] if s["status"] in ("not_attempted", "running", "failed", "timed_out")]
-    data.update(status="complete" if not data["errors"] and not unfinished else "partial", finished=True, elapsed_seconds=round(time.monotonic() - started, 3))
-    data["status_basis"] = ("every step ran and exited 0 and every listing was written" if data["status"] == "complete" else
-                            "%d error(s) and %d step(s) that did not finish (coverage.json names each)" % (len(data["errors"]), len(unfinished)))
+    # A listing made without a field the installed tshark lacks is a listing with a column fewer than asked for: that is not a complete answer.
+    narrowed = {s["step"]: s["fields_missing"] for s in data["steps"] if s.get("fields_missing") and s["status"] == "ok"}
+    data.update(status="complete" if not data["errors"] and not unfinished and not narrowed else "partial", finished=True, elapsed_seconds=round(time.monotonic() - started, 3))
+    reasons = []
+    if data["errors"] or unfinished:
+        reasons.append("%d error(s) and %d step(s) that did not finish (coverage.json names each)" % (len(data["errors"]), len(unfinished)))
+    if narrowed:
+        reasons.append("%d listing(s) were made without a field the installed tshark does not list (%s): a column of each is missing"
+                       % (len(narrowed), "; ".join("%s: %s" % (name, ", ".join(fields)) for name, fields in sorted(narrowed.items()))))
+    data["status_basis"] = "every step ran and exited 0 and every listing was written" if not reasons else "; ".join(reasons)
+    if narrowed:
+        data["listings_without_fields"] = narrowed
     receipt.write()
     print(json.dumps({"ok": not data["errors"], "status": data["status"], "status_basis": data["status_basis"]}))
     return 0 if not data["errors"] else 2

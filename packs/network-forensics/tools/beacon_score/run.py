@@ -53,7 +53,8 @@ DEFAULT_LIMIT = 40
 MAX_VALUE_CHARS = 4096          # a longer line of a timestamps_file is not a time
 DEFAULT_SECONDS = 40            # the tool's own clock for reading; the manifest's limit is 60 seconds
 MAX_SECONDS = 45
-EXTRA_FOR_LIST = 5              # seconds past that clock the interval list may still take before it stops, leaving the answer room before 60
+TAIL_PER_READ = 1.0             # the ordering and the measurement after the last value take up to about as long as reading did (0.6 sorted, 0.93 shuffled, measured at 3,000,000 events)
+EXTRA_FOR_LIST = 0              # seconds past that clock the interval list may still take: none, reading and measuring have used their share and the answer needs room before 60
 
 
 def describe(exc):
@@ -299,6 +300,8 @@ def median_of(values):
 
 
 def main():
+    for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(signum, _stop)
     try:
         args = json.load(sys.stdin)
     except ValueError as exc:
@@ -326,6 +329,9 @@ def main():
     if isinstance(seconds_allowed, bool) or not isinstance(seconds_allowed, (int, float)) or not 1 <= seconds_allowed <= MAX_SECONDS:
         fail("max_seconds must be a number from 1 to %d: the tool stops reading and answers with what it has before the manifest's 60-second limit" % MAX_SECONDS)
     deadline = time.monotonic() + seconds_allowed
+    # max_seconds is the budget for reading AND measuring: the part after the last value cannot be interrupted and takes about as long as the
+    # reading did, so reading stops when it has used its share. A slow CPU then still ends with a partial answer inside the manifest's limit.
+    read_deadline = time.monotonic() + seconds_allowed / (1 + TAIL_PER_READ)
     out_dir = args.get("out_dir")
     if out_dir is not None:
         if not isinstance(out_dir, str) or not out_dir:
@@ -345,8 +351,6 @@ def main():
         if len(raw) > MAX_EVENTS:
             fail("the series has more than %d events: split it by destination or by window" % MAX_EVENTS)
 
-    for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
-        signal.signal(signum, _stop)
     PROGRESS["stage"] = "reading the series"
     counters = {"long_lines": 0}
     # The series is parsed once, as it is read: seconds in a packed array (8 bytes an event), the position of each in the input
@@ -364,7 +368,7 @@ def main():
             if supplied > MAX_EVENTS:
                 fail("the series has more than %d events: split it by destination or by window" % MAX_EVENTS, **({"timestamps_file": file_arg} if file_arg else {}))
             PROGRESS["values_read"] = supplied
-            if supplied & 4095 == 0 and time.monotonic() > deadline:
+            if supplied & 4095 == 0 and time.monotonic() > read_deadline:
                 timed_out_at = index
                 supplied -= 1
                 break
@@ -498,8 +502,9 @@ def main():
     not_scored = ("%d of the %d values supplied were not scored (%s) and are not in the measurements, which cover the other %d; each is named by "
                   "position in first_rejected and all_rejected" % (rejected_total, supplied, ", ".join("%d %s" % (n, r.replace("_", " ")) for r, n in rejected.items() if n), count))
     if timed_out_at is not None:
-        basis = ("the tool's own clock (max_seconds %s) ran out while the series was being read, at input position %d: the answer measures the %d values "
-                 "read before it, and nothing after them" % (seconds_allowed, timed_out_at, supplied))
+        basis = ("the tool's own clock (max_seconds %s, of which reading takes the first half: the measurement after it takes about as long) ran out "
+                 "while the series was being read, at input position %d: the answer measures the %d values read before it, and nothing after them"
+                 % (seconds_allowed, timed_out_at, supplied))
     elif list_cut:
         basis = ("the series was measured whole, but the interval list stopped at the tool's clock after %d of %d intervals: the list in the files is "
                  "incomplete, the measurements are not" % (listed, len(intervals)))

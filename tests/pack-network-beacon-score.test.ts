@@ -268,7 +268,9 @@ test("every answer carries status and status_basis; the tool's own clock ends th
     assert.equal(cut.series_complete, false);
     assert.ok(cut.stopped_reading_at_input_index > 0 && cut.stopped_reading_at_input_index < 1_600_000);
     assert.equal(cut.values_supplied, cut.events);
-    assert.match(cut.status_basis, /max_seconds 1/);
+    assert.match(cut.status_basis, /max_seconds 1, of which reading takes the first half/);
+    const manifest = JSON.parse(await readFile(join(BEACON, "..", "manifest.json"), "utf8"));
+    assert.match(manifest.params.max_seconds.description, /reading and measuring.*reading stops at half of it/);
     for (const [sig, code] of [["SIGTERM", 143], ["SIGINT", 130], ["SIGHUP", 129]] as const) {
       const run = startDetached(BEACON, cwd, { timestamps_file: "work/big.txt", max_seconds: 40 });
       await new Promise((r) => setTimeout(r, 700));

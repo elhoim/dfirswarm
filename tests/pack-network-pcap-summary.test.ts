@@ -577,3 +577,59 @@ test("every answer carries status and status_basis: a whole capture is complete,
     assert.equal(bad.status, "failed");
   });
 });
+
+// --- the verification of the P1 and P3 pull requests ---------------------------------------------------------------------
+
+test("interfaces, interface statistics and sections are shown fifty at a time: the rest is counted, said, and in a file", async () => {
+  await withCwd(async (cwd) => {
+    const frame = frameTcp4({ src: C, dst: S, sport: 50000, dport: 443, flags: TCP.SYN, seq: 1 });
+    const parts: Buffer[] = [];
+    for (let s = 0; s < 60; s++) parts.push(sectionWith([ngOption(2, Buffer.from(`machine ${s}`))]), ngInterface(), ngStats({ iface: 0, recv: 1n }));
+    parts.push(ngPacket({ ticks: ticks(1_700_000_000, 0, 6), frame }));
+    const out = body(await tool(SUMMARY, cwd, { path: await drop(cwd, "work/many.pcapng", Buffer.concat(parts)) }));
+    for (const name of ["interfaces", "interface_statistics", "section_options"]) {
+      assert.equal(out[name].length, 50, name);
+      assert.equal(out[`${name}_total`], 60, name);
+      assert.equal(out[`${name}_not_listed`], 10, name);
+      const all = (await readFile(join(cwd, out[`${name}_file`]), "utf8")).trimEnd().split("\n");
+      assert.equal(all.length, 60, `${name}: every one is in the file`);
+    }
+    assert.ok(out.notes.some((n: string) => /10 interfaces are not listed inline: the first 50 are, and all 60 are in /.test(n)));
+    assert.equal(out.status, "complete");
+    const few = body(await tool(SUMMARY, cwd, { path: await drop(cwd, "work/few.pcapng", Buffer.concat([ngSection(), ngInterface(), ngPacket({ ticks: ticks(1_700_000_000, 0, 6), frame })])) }));
+    assert.equal(few.interfaces_not_listed, 0);
+    assert.equal(few.interfaces_file, null);
+  });
+});
+
+test("more interface description blocks than the tool keeps (10,000) end the reading there, partial, with the packets before them summarised", async () => {
+  await withCwd(async (cwd) => {
+    const frame = frameTcp4({ src: C, dst: S, sport: 50000, dport: 443, flags: TCP.SYN, seq: 1 });
+    const idb = ngInterface();
+    const parts: Buffer[] = [ngSection(), idb, ngPacket({ ticks: ticks(1_700_000_000, 0, 6), frame })];
+    for (let i = 0; i < 10_000; i++) parts.push(idb);
+    const out = body(await tool(SUMMARY, cwd, { path: await drop(cwd, "work/idbs.pcapng", Buffer.concat(parts)) }));
+    assert.equal(out.status, "partial");
+    assert.match(out.stopped_reading.reason, /more than 10000 pcapng interface description blocks/);
+    assert.equal(out.packets, 1);
+    assert.equal(out.interfaces_total, 10_000);
+    assert.equal(out.interfaces.length, 50);
+  });
+});
+
+test("the summary after the reading has its own end: the rows stop there, the answer is partial, and says how many were written of how many", async () => {
+  await withCwd(async (cwd) => {
+    const packets = Array.from({ length: 1000 }, (_, i) => ({ sec: 1_700_000_000 + i, frame: frameTcp4({ src: C, dst: S, sport: 40000 + i, dport: 443, flags: TCP.SYN, seq: i }) }));
+    const path = await drop(cwd, "work/flows.pcap", pcapClassic(packets));
+    const cut = body(await tool(SUMMARY, cwd, { path, top: 5 }, { PCAP_SUMMARY_FINISH_SECONDS: "0" }));
+    assert.equal(cut.status, "partial");
+    assert.deepEqual(cut.listing_cut_by_its_own_clock.conversations, { written: 255, of: 1000 });
+    assert.match(cut.status_basis, /ordering and writing of the lists after the reading ran out of time \(conversations: 255 written of 1000/);
+    assert.equal(cut.packets, 1000, "the counts are whole");
+    assert.equal(cut.tuple_conversation_count, 255);
+    const whole = body(await tool(SUMMARY, cwd, { path, top: 5 }));
+    assert.equal(whole.status, "complete");
+    assert.equal(whole.tuple_conversation_count, 1000);
+    assert.equal(whole.listing_cut_by_its_own_clock, null);
+  });
+});

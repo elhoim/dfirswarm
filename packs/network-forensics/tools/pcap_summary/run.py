@@ -79,6 +79,12 @@ MAX_OPTION_BLOCK = 1 << 20     # a section header, interface description or inte
 DEFAULT_SECONDS = 540          # the tool's own clock; the manifest's limit is 600
 MAX_SECONDS = 570
 DEFAULT_TOP = 200
+MAX_INTERFACES = 10_000        # interface description blocks kept (one record each, about 3 KB resident); past it the file is unreadable from there
+MAX_SECTIONS = 10_000          # section headers in one capture; past it the same
+MAX_STATS_BLOCKS = 10_000      # interface statistics blocks kept
+LISTED_INLINE = 50             # interfaces, sections and statistics shown in the answer; the rest are in a file it names
+MANIFEST_SECONDS = 600         # the manifest's limit; the summary after the reading is clocked to end FINISH_MARGIN seconds before it
+FINISH_MARGIN = 15
 DEFAULT_MAX_MEMORY_TUPLES = 200_000
 
 # BEGIN SHARED WITHHOLDING
@@ -557,6 +563,8 @@ def read_pcapng(fh, info):
                     info.section_options.append(section)
                 info.blocks["section_header"] += 1
                 info.sections += 1
+                if info.sections > MAX_SECTIONS:
+                    raise ValueError("more than %d pcapng section headers: this tool keeps what each says about its machine, and stops reading here" % MAX_SECTIONS)
                 local = {}
                 continue
             block_type, total = struct.unpack(end + "II", header)
@@ -604,6 +612,8 @@ def read_pcapng(fh, info):
                 if opts.get(11) and opts[11][0]:
                     kind, payload = opts[11][0][0], opts[11][0][1:]
                     row["capture_filter"] = text_of(payload) if kind == 0 else "a compiled filter program (%d bytes)" % len(payload)
+                if len(info.interfaces) >= MAX_INTERFACES:
+                    raise ValueError("more than %d pcapng interface description blocks: this tool keeps one record for each, and stops reading here" % MAX_INTERFACES)
                 local[len(local)] = len(info.interfaces)
                 info.interfaces.append(row)
             elif name == "interface_statistics":
@@ -622,6 +632,8 @@ def read_pcapng(fh, info):
                                     (7, "packets_dropped_by_os"), (8, "packets_delivered_to_user")):
                     if opts.get(code) and len(opts[code][0]) == 8:
                         row[label] = struct.unpack(end + "Q", opts[code][0])[0]
+                if len(info.stats) >= MAX_STATS_BLOCKS:
+                    raise ValueError("more than %d pcapng interface statistics blocks: this tool keeps one record for each, and stops reading here" % MAX_STATS_BLOCKS)
                 info.stats.append(row)
             elif name in ("enhanced_packet", "packet_obsolete"):
                 if len(body) < 20:
@@ -865,6 +877,16 @@ class Table:
         cursor = self.spill.db.execute("SELECT k, v FROM %s ORDER BY sk DESC, k" % self.name)
         for text, value in cursor:
             yield tuple(json.loads(text)), self.decode(json.loads(value))
+
+
+def table_count(table):
+    """How many keys the table holds, whether or not it was spilled."""
+    try:
+        if table.spilled:
+            return table.spill.db.execute("SELECT COUNT(*) FROM %s" % table.name).fetchone()[0]
+    except sqlite3.Error:
+        return None
+    return len(table.mem)
 
 
 # A tuple record: [packets, bytes_original, bytes_captured, a2b_original, b2a_original, a2b_captured, b2a_captured,
@@ -1151,7 +1173,16 @@ def main():
     seconds_allowed = args.get("max_seconds", DEFAULT_SECONDS)
     if isinstance(seconds_allowed, bool) or not isinstance(seconds_allowed, (int, float)) or not 1 <= seconds_allowed <= MAX_SECONDS:
         fail("max_seconds must be a number from 1 to %d: the tool stops reading and answers with what it has before the manifest's 600-second limit" % MAX_SECONDS)
-    deadline = time.monotonic() + seconds_allowed
+    started = time.monotonic()
+    deadline = started + seconds_allowed
+    # The summary after the reading (ordering and writing the rows) has its own end, so a capture with millions of conversations still answers
+    # inside the manifest's limit: it is cut there, said so, and counted. PCAP_SUMMARY_FINISH_SECONDS exists for the tests.
+    try:
+        finish_seconds = float(os.environ.get("PCAP_SUMMARY_FINISH_SECONDS", ""))
+    except ValueError:
+        finish_seconds = None
+    finish_deadline = (time.monotonic() + finish_seconds) if finish_seconds is not None else max(deadline, started + MANIFEST_SECONDS - FINISH_MARGIN)
+    finish_cut = {}
     PROGRESS["stage"] = "reading the capture"
 
     spill_dir = out_dir if out_dir else (os.path.join(os.environ["OUT"], "tool-output") if in_job() else None)
@@ -1303,6 +1334,9 @@ def main():
                 source = (tuple_row(k, r, digits, with_syn_times) for k, r in tuples.rows())
                 spilled_here = lambda: tuples.spilled  # noqa: E731
             for row in source:
+                if rows_page.total & 255 == 255 and time.monotonic() > finish_deadline:
+                    finish_cut["conversations"] = {"written": rows_page.total, "of": None if grouping == "endpoint" else table_count(tuples)}
+                    break
                 if tsv is not None:
                     if columns is None:
                         columns = list(row.keys())
@@ -1319,8 +1353,14 @@ def main():
             if tsv is not None and columns is None:
                 tsv.write("a\tb\tprotocol\n")
             for key, rec in talkers.rows():
+                if talker_page.total & 255 == 255 and time.monotonic() > finish_deadline:
+                    finish_cut["top_talkers"] = {"written": talker_page.total, "of": table_count(talkers)}
+                    break
                 talker_page.add({"address": key[0], "packets": rec[0], "bytes_original": rec[1], "bytes_captured": rec[2]})
             for key, rec in ports.rows():
+                if port_page.total & 255 == 255 and time.monotonic() > finish_deadline:
+                    finish_cut["top_ports"] = {"written": port_page.total, "of": table_count(ports)}
+                    break
                 port_page.add({"port": key[0], "packets": rec[0]})
             spilled = spilled_here() or talkers.spilled or ports.spilled
             pages = {conversations_name: rows_page.finish(), "top_talkers": talker_page.finish(), "top_ports": port_page.finish()}
@@ -1383,7 +1423,29 @@ def main():
     else:
         status = "complete"
         basis = "every packet record of the capture was read; the counts cover the whole file"
-    shown_interfaces = [{k: v for k, v in row.items() if k != "digits"} for row in info.interfaces]
+    if finish_cut:
+        status = "partial"
+        cut_text = "; ".join("%s: %d written of %s" % (name, c["written"], c["of"] if c["of"] is not None else "an unknown number") for name, c in sorted(finish_cut.items()))
+        basis += ("; the ordering and writing of the lists after the reading ran out of time (%s): the lists stop there, the counts above them are whole" % cut_text
+                  if not file_problem else "; and the lists after the reading were cut at the end of their own time (%s)" % cut_text)
+        notes.append("The lists were cut at the end of the time the tool gives to ordering and writing them (%s). The rows are in order of bytes, so what is "
+                     "missing is the smallest. packets, the byte totals, the protocols and the times are whole; run it again with host or port to list the rest."
+                     % cut_text)
+    # Interfaces, statistics and sections are shown in a bounded number; every one is in a file the answer names.
+    lists = {}
+    for name, rows in (("interfaces", [{k: v for k, v in row.items() if k != "digits"} for row in info.interfaces]),
+                       ("interface_statistics", info.stats), ("section_options", info.section_options)):
+        lister = LosslessPage(name, LISTED_INLINE)
+        try:
+            for row in rows:
+                lister.add(row)
+            result = lister.finish()
+        except OSError as exc:
+            fail("the list of %s could not be written (%s)" % (name, describe(exc)), out_dir=out_dir)
+        lists[name] = {"shown": lister.page, "total": len(rows), "not_listed": len(rows) - len(lister.page), "file": result.get("all_results")}
+        if len(rows) > len(lister.page):
+            notes.append("%d %s are not listed inline: the first %d are, and all %d are in %s (JSON Lines)." % (len(rows) - len(lister.page), name.replace("_", " "), len(lister.page), len(rows), result.get("all_results")))
+    shown_interfaces = lists["interfaces"]["shown"]
     agreeing = {(i["link_type_id"], i["snap_length"]) for i in info.interfaces}
     single = shown_interfaces[0] if len(agreeing) == 1 and shown_interfaces else None
 
@@ -1397,7 +1459,10 @@ def main():
         "link_type_id": single["link_type_id"] if single else None,
         "snap_length": single["snap_length"] if single else None,
         "interfaces": shown_interfaces,
-        "interface_statistics": info.stats,
+        "interfaces_total": lists["interfaces"]["total"], "interfaces_not_listed": lists["interfaces"]["not_listed"], "interfaces_file": lists["interfaces"]["file"],
+        "interface_statistics": lists["interface_statistics"]["shown"],
+        "interface_statistics_total": lists["interface_statistics"]["total"], "interface_statistics_not_listed": lists["interface_statistics"]["not_listed"],
+        "interface_statistics_file": lists["interface_statistics"]["file"],
         "blocks": ({"total": sum(info.blocks.values()), "by_type": dict(info.blocks)} if info.format == "pcapng" else None),
         "unsupported_blocks": unsupported_total,
         "unsupported_block_types": dict(unsupported),
@@ -1413,7 +1478,10 @@ def main():
         "last_packet_raw": raw_time(last[1]) if last else None,
         "duration_ns": (last[0] - first[0]) if first and last else None,
         "duration_seconds": ((last[0] - first[0]) / 1e9) if first and last else None,
-        "section_options": info.section_options,
+        "section_options": lists["section_options"]["shown"],
+        "section_options_total": lists["section_options"]["total"], "section_options_not_listed": lists["section_options"]["not_listed"],
+        "section_options_file": lists["section_options"]["file"],
+        "listing_cut_by_its_own_clock": finish_cut or None,
         "bytes_original_total": totals["bo"],
         "bytes_captured_total": totals["bc"],
         "payload_bytes_captured_total": totals["payload"],

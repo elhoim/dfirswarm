@@ -166,7 +166,9 @@ test("HTTP/2 and QUIC are listed only when the installed tshark lists their fiel
     const call = (await readFile(join(cwd, "tshark-calls.txt"), "utf8")).split("\n").find((l) => l.includes("-Y http2 ")) ?? "";
     assert.doesNotMatch(call, /http2\.type|http2\.headers\.status/);
     assert.match(call, /-e http2\.streamid/);
-    assert.equal(b.status, "complete");
+    assert.equal(b.status, "partial", "http2.tsv and quic.tsv were made without the fields the build lacks");
+    assert.match(b.status_basis, /listing\(s\) were made without a field the installed tshark does not list \(.*http2\.tsv: .*http2\.type/);
+    assert.equal(a.listings_without_fields, undefined, "a build that lacks only a whole optional listing's fields drops no column of a listing it made");
   });
 });
 
@@ -346,7 +348,10 @@ test("every field a listing asks for is checked against the build: one the build
     const dns = calls.find((l) => l.includes("-Y dns ")) ?? "";
     assert.doesNotMatch(dns, /-e ip\.dst|-e dns\.id/);
     assert.match(dns, /-e ipv6\.dst/);
-    assert.equal(c.status, "complete");
+    assert.equal(c.status, "partial", "listings made without a field the build lacks are not a complete answer");
+    assert.match(c.status_basis, /4 listing\(s\) were made without a field the installed tshark does not list \(dns\.tsv: .*dns\.id.*; http\.tsv: ip\.dst;/);
+    assert.deepEqual(Object.keys(c.listings_without_fields).sort(), ["dns.tsv", "http.tsv", "packets.tsv", "tls.tsv"]);
+    assert.equal(JSON.parse(result.stdout).status, "partial");
     // _ws.col.Protocol is listed as _ws.col.protocol by the build, and is found
     assert.deepEqual(steps["packets.tsv"].fields_missing, ["ip.dst"], "only the field that really is missing");
   });
@@ -354,7 +359,7 @@ test("every field a listing asks for is checked against the build: one the build
 
 test("the output directory is private (0700), every file the recipe writes is 0600, and all four secret-bearing tables are marked", async () => {
   await withCwd(async (cwd, bin) => {
-    await stage(cwd, bin, { fields: ["http2.streamid", "http2.type"], tables: { packets: PACKETS, dns: TABLE(["frame.number"], 1), http: TABLE(["frame.number"], 1), tls: TABLE(["frame.number"], 1), http2: TABLE(["frame.number"], 2) } });
+    await stage(cwd, bin, { fields: ["http2.streamid", "http2.type", "http2.headers.method", "http2.headers.authority", "http2.headers.path", "http2.headers.status"], tables: { packets: PACKETS, dns: TABLE(["frame.number"], 1), http: TABLE(["frame.number"], 1), tls: TABLE(["frame.number"], 1), http2: TABLE(["frame.number"], 2) } });
     const result = await recipe(cwd, bin, ["run", "--target", target(await capture(cwd)), "--out", "work/cat"]);
     assert.equal(result.code, 0, result.stderr);
     const c = await coverage(cwd, "work/cat");

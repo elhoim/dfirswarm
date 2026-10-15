@@ -366,9 +366,20 @@ test("a line nested 100,000 deep is counted as not read, named with its line, an
     const out = JSON.parse(result.stdout);
     assert.equal(out.alert_count, 2);
     assert.equal(out.invalid_eve_lines, 1);
-    assert.deepEqual(out.eve_line_problems, [{ line: 2, why: "nested deeper than the parser reads" }]);
+    assert.deepEqual(out.eve_line_problems, [{ line: 2, why: "nested deeper than 64 levels: located, not parsed" }]);
     assert.equal(out.ok, false);
     assert.equal(out.status, "partial");
+  });
+});
+
+test("a line is refused for its nesting at 65 levels and read at 64, whatever the interpreter parses (the same answer on every Python)", async () => {
+  await withCwd(async (cwd, bin) => {
+    const nested = (levels: number) => `{"event_type":"alert","a":${"[".repeat(levels - 1)}${"]".repeat(levels - 1)}}`;
+    await stage(cwd, bin, { eve: [ALERT(1), nested(64), nested(65), nested(2_000), ""].join("\n"), loadTest: "<Info> - 2 rules successfully loaded, 0 rules failed\n" });
+    const { path, rules } = await inputs(cwd);
+    const out = body(await tool(SURICATA, cwd, { path, rules, out_dir: "work/s" }, env(cwd), bin));
+    assert.equal(out.alert_count, 2, "the line at 64 levels is an alert");
+    assert.deepEqual(out.eve_line_problems, [{ line: 3, why: "nested deeper than 64 levels: located, not parsed" }, { line: 4, why: "nested deeper than 64 levels: located, not parsed" }]);
   });
 });
 

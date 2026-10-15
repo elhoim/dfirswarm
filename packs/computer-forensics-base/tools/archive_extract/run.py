@@ -256,8 +256,9 @@ def cell(value):
 # END SHARED WITHHOLDING
 
 # BEGIN SHARED PROCESS
-# The same text is in pcap_extract, zeek_run, suricata_run and the network-capture recipe; tests/pack-network-withholding.test.ts
-# holds the copies equal. A program an engine tool runs is started in THIS tool's process group, never in a session of
+# The same text is in pcap_extract, zeek_run, suricata_run, the network-capture recipe and computer-forensics-base's
+# archive_extract; tests/pack-network-withholding.test.ts holds the four network copies equal and tests/pack-base-shared.test.ts
+# holds archive_extract's to them. A program an engine tool runs is started in THIS tool's process group, never in a session of
 # its own: the harness ends a tool that runs too long, or is aborted, by killing the tool's group (process.kill(-pid,
 # SIGKILL)), and an engine in a group of its own goes on writing into the output directory after the tool is gone. On
 # Linux the kernel is also asked to kill it if the tool dies. A deadline kills the program and what it started by
@@ -285,8 +286,9 @@ def spawn(argv, **kwargs):
 
 
 def _children_libproc(pid):
-    """The direct children of `pid` on macOS and the BSDs, from libproc (a library call: no program is started and
-    nothing can be slow); None when the library is not there."""
+    """The direct children of `pid` on macOS, from libproc (macOS only: proc_listchildpids is not a symbol of the other
+    BSDs; a library call, so no program is started and nothing can be slow); None when the library, the symbol or the
+    call is not there."""
     try:
         import ctypes.util
         lib = ctypes.CDLL(ctypes.util.find_library("proc") or "/usr/lib/libproc.dylib", use_errno=True)
@@ -295,7 +297,8 @@ def _children_libproc(pid):
         size = 256
         while size <= 1 << 16:
             buf = (ctypes.c_int * size)()
-            lib.proc_listchildpids(pid, buf, ctypes.sizeof(buf))
+            if lib.proc_listchildpids(pid, buf, ctypes.sizeof(buf)) < 0:
+                return None
             found = []
             for value in buf:
                 if value <= 0:
@@ -309,8 +312,24 @@ def _children_libproc(pid):
         return None
 
 
+PS_WAIT = 10    # seconds the ps fallback is given: ps is slow on a heavily loaded host, and a tree that is not found is a program left running
+
+
+def _below(kids, pid, limit=4096):
+    found, stack = [], [pid]
+    while stack and len(found) < limit:
+        for child in kids.get(stack.pop(), []):
+            if child not in found and child != pid:
+                found.append(child)
+                stack.append(child)
+    return found
+
+
 def descendants(pid):
-    """Every process below `pid`: from /proc where there is one, else from libproc, else from ps (given three seconds)."""
+    """Every process below `pid` (never one beside it): from /proc where there is one, else from libproc, else from ps
+    (given PS_WAIT seconds). libproc is believed when it lists a child; an empty answer is believed only when libproc has
+    just listed this tool's own child `pid` (a library that answers nothing for a live child is not working, as in a
+    sandbox that denies it), and otherwise ps is asked."""
     kids = {}
     try:
         if os.path.isdir("/proc/self"):
@@ -322,28 +341,26 @@ def descendants(pid):
                         kids.setdefault(int(fields[1]), []).append(int(entry))
                     except (OSError, IndexError, ValueError):
                         continue
-        elif _children_libproc(pid) is not None:
-            found, stack = [], [pid]
-            while stack and len(found) < 4096:
-                for child in _children_libproc(stack.pop()) or []:
-                    if child not in found and child != pid:
-                        found.append(child)
-                        stack.append(child)
-            return found
         else:
-            out = subprocess.run(["ps", "-A", "-o", "pid=,ppid="], capture_output=True, text=True, timeout=3).stdout
+            first = _children_libproc(pid)
+            if first:
+                found, stack = list(first), list(first)
+                while stack and len(found) < 4096:
+                    for child in _children_libproc(stack.pop()) or []:
+                        if child not in found and child != pid:
+                            found.append(child)
+                            stack.append(child)
+                return found
+            if first is not None and pid in (_children_libproc(os.getpid()) or []):
+                return []
+            out = subprocess.run(["ps", "-A", "-o", "pid=,ppid="], capture_output=True, text=True, timeout=PS_WAIT).stdout
             for line in out.splitlines():
                 parts = line.split()
                 if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
                     kids.setdefault(int(parts[1]), []).append(int(parts[0]))
     except (OSError, subprocess.SubprocessError):
         return []
-    found, stack = [], [pid]
-    while stack:
-        for child in kids.get(stack.pop(), []):
-            found.append(child)
-            stack.append(child)
-    return found
+    return _below(kids, pid)
 
 
 def kill_tree(proc):
