@@ -1,7 +1,7 @@
 {
   "id": "virtualization-backup-forensics",
   "name": "Virtualization and Backup Forensics Pack",
-  "version": "1.1.0",
+  "version": "1.0.0",
   "description": "Method and tooling for the control plane of virtualization and backup: what hypervisor management records and VM configuration files say, whether a snapshot or disk chain is complete and which markers a consolidation or an unclean close may leave, what a backup catalogue, job record and retention setting show, and which recovery points survive. It reads exports and configuration files offline; it never runs hypervisor or backup software, reads no guest content, and supports only the products its tools list.",
   "licence": "AGPL-3.0-or-later",
   "authors": [
@@ -18,25 +18,25 @@
   "checksums": {
     "sha256": {
       "LICENCE": "5b94f18424dbef1e77eda33a465e946c2c8eb715fa5236afe2c6ec6763af80d3",
-      "README.md": "6d05ee255f0abd83037f5acf6389e6051bfea485569a584d091720a4ec61cc02",
-      "tools/backup_audit_normalise/manifest.json": "c9b25cef82528cd7012e611c9aafe889711b00dac22a68cc780cd4c488147e7e",
-      "tools/backup_audit_normalise/run.py": "efdfbacfb758ecf5e0b7f8f0e5cbfea23a39ee5162f6f4586c8c2cf59e5d16c2",
-      "tools/snapshot_chain_check/manifest.json": "9a2f477713817e321f9a62d58bfc19ff6553edf878dcddeca174b29a52ac63f1",
-      "tools/snapshot_chain_check/run.py": "f6d9e1f1ebb26bbac92e29095757ba949e7d09d1c81d693d2c86eb8fad90df99",
-      "tools/virtualization_inventory/manifest.json": "8265d5740dbf6b2f38e90cffd5b1ed528e5083f32c0d17269abf8fdac74a66bd",
-      "tools/virtualization_inventory/run.py": "729474a0e4d7cc638a5c70255708c81b5f693bf122f0d2885a9ecb1fb16a9ccd",
-      "goals/what-recovery-survives.md": "72d6c12fd34ab2220eebc3587e46804d3f16f48d0568d7bb219fdf9c96829b2e",
+      "README.md": "b2c56258d4adacc68a295cdf0abe596c0906c47b573ede52260f11d03841945d",
+      "tools/backup_audit_normalise/manifest.json": "7c010a4c147cbd2f81260a969dbcb946d892c1805a1862276b2bc2e0619005ee",
+      "tools/backup_audit_normalise/run.py": "5f6c6284d7a1e13306b27db47515275a03a92d5faac82ef945354e64649a707f",
+      "tools/snapshot_chain_check/manifest.json": "cdbbe4135a5893b25d077fef88f17f39590e45f51fee9eb23a2b450fe5e8d6c1",
+      "tools/snapshot_chain_check/run.py": "65b8e98bacc4898da915ce5cb397755bb3cabfcbbd952b95873563fbb562805a",
+      "tools/virtualization_inventory/manifest.json": "dc41f8b4bd084b56bd051014235d6b82bb387cba8da87f50ba7c73bdb616a573",
+      "tools/virtualization_inventory/run.py": "c8555068db3aa55da0b5d4c8c93e64989df7e08157b73a506c41e866eb10e5e9",
+      "goals/what-recovery-survives.md": "f3900b9667ad619f3efa79f0deecdc3c5a654ca5108a06e50a9ce83865c62c5f",
       "tests/pack.test.sh": "35f4ae3f6e7e8ad51e0bc57a3904852dc550a7b23756951a21285a3497c213f4",
-      "skills/evidence/boundaries.md": "404896a8de74eaec8998282ffd2e4038c4451bb88e59d3a071a07a7f597fee9d",
-      "skills/snapshots/chain-integrity.md": "21611918913822733e76b622dcae040f3ad3c50cc28ab9ed963caa066585e1cc",
-      "skills/snapshots/header-markers.md": "068d3145a5a5dd1b1aaa108b9b5f9ea288aa812b7119b2671573f30ae68657dc",
-      "skills/snapshots/markers.md": "ce79f2f6cc8b204932afd68e856e22151ff30352c1c806e2457a42e45c43981f",
-      "skills/recovery/survivability.md": "b01231547ebf0a2be3eb799e42685ed1a8ef8dda221dd4c855d3c3a626968aec",
-      "skills/backup/catalogues-and-retention.md": "50f59c8a6423652129cd7d5c88bb1e9f9af95bed964fb7617f552557e382a080",
-      "skills/backup/deletion-vs-loss.md": "1c3a734e306890746983fe63d857448661bd892b3b52657ec9ad0cc50374af30",
-      "skills/hypervisor/activity.md": "a041f877bbb6ce45a51b19f5a44045cceda398d721887ae86cbb0435a4e897a3",
-      "skills/hypervisor/inventory.md": "f165cc51f3c83ebcbab1f28902004fbbc12e340c9077f4939d67c2f176c32921",
-      "skills/control-plane/chronology.md": "a5c16a12c85044edefe1de16fc6402073200a96660bbe3be0aa1e55bd986369f",
+      "skills/evidence/boundaries.md": "55ae9bbab34dfd27502f9783815023ff16babe1c6a9e335384600d27660137c0",
+      "skills/snapshots/chain-integrity.md": "7d5ba1c6e3b25d59def956e656ca748b681560a7726fc01955d5a23a380dbd84",
+      "skills/snapshots/header-markers.md": "9c171a00547a0bd1e23b216ebe751c44f8c9a7563d2f74682fda1b5da7fe4d22",
+      "skills/snapshots/markers.md": "05513585ae19d7d38f0319518529eb0d88fa036e2a5333aee71b49601b105058",
+      "skills/recovery/survivability.md": "f479b2d4e73e9d850b0bb06e0ec162825ea1c311313416d9ee55e6e469c6e2d7",
+      "skills/backup/catalogues-and-retention.md": "304bf72c8ff3ced600bc27d2ff5f8cdbe9ac44b841408298941a99917f10160c",
+      "skills/backup/deletion-vs-loss.md": "f6e432ffcc4047589608fb045db94d6dba556e92e966c202b03a51b9d1379fdb",
+      "skills/hypervisor/activity.md": "f8f84d820c5acf7ddbfa29b578836f87f8d77ac43258a952375e2de82420c8d0",
+      "skills/hypervisor/inventory.md": "4cb8a7e6d4671866f7042a77a689481aca27796009e10ae9b5c0c360f18e9450",
+      "skills/control-plane/chronology.md": "fcc028602b886c74ce62ef19f2b00df3df165f1c37cf5174d1b7a05a56625c6a",
       "skills/router/start.md": "37550bef28fb1afc12e68c943747a9a4c5ccb95d40aec873025c5aa2f20dfad1",
       "requires/host.json": "064c01d7d1d7182f054ad3b8b4682b7f588d74d0baf9177aabf86fa9716b7ebe",
       "requires/python.txt": "fa9a8f44dea09e8f1cdc03b90e14051ddf8ab2526fd075e952166541f7ec5bb3",
@@ -48,15 +48,5 @@
     "snapshot_chain_check",
     "virtualization_inventory"
   ],
-  "skills": 11,
-  "method_only": [
-    {
-      "path": "skills/router/start.md",
-      "why": "the pack's router: it says which note answers which question and names no tool or program"
-    },
-    {
-      "path": "skills/evidence/boundaries.md",
-      "why": "a method leaf about the planes of virtualization evidence and how to handle them; the only tool it names, check_inputs, belongs to the base pack"
-    }
-  ]
+  "skills": 11
 }

@@ -1,13 +1,13 @@
 ---
 id: data/sqlite
 title: A SQLite database is a set of files
-when: A SQLite database to read, with or without a -wal, -shm or -journal beside it.
+when: A SQLite database, with or without its -wal, -shm or -journal.
 needs: []
 tools: [sqlite_snapshot, sqlite_query]
 requires_host: []
 ---
 
-Use when a `.db`, `.sqlite` or an app store is the evidence. Not for another database kind or for recovering deleted records.
+Use when a `.db`, `.sqlite` or an app store is the evidence. Not for other database kinds or for recovering deleted records.
 
 **The set.** A database is the main file plus a `-wal` (committed changes the main file may not hold yet, older pages, an incomplete transaction), a `-shm` (an index of the WAL) and a `-journal` (a rollback journal, hot when a write was interrupted). From an image, extract each file beside the database (`filesystem/extract`) into one directory under the main file's name plus the suffix. A copy of the main file alone is a different state; a live set copied file by file may not be one state.
 
@@ -23,4 +23,4 @@ Use when a `.db`, `.sqlite` or an app store is the evidence. Not for another dat
 
 **Does not show.** A snapshot and a query show the rows SQLite holds. They do not recover deleted records, the freelist or unallocated pages (a non-zero `freelist_count` says free pages exist, not what they held), and a row's absence is not the event's absence. Of a database encrypted by an extension (SQLCipher) the tool shows only the first bytes and their entropy, which identify nothing.
 
-**Sensitive output.** Rows of cookie, login, token, key and message tables hold secrets and private text: run the query as a job with `secret_output: true`, and cite table, `rowid` and column, never the value, a fragment of it, or the `sha256` and base64 of a short BLOB. `limit` is 1 or more, so the inline page always carries at least one row of values: on such a table select only locators (`rowid`, `length(col)`, `typeof(col)`).
+**Sensitive output.** Rows of cookie, login, token, key and message tables hold secrets and private text: run the query as a job with `secret_output: true` and cite table, row locator and column, never the value. Before you query one, read `data/sqlite-secrets`: the inline page always holds values.

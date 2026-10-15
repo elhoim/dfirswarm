@@ -39,6 +39,21 @@ not read:
 
 **One goal template**: `what-recovery-survives.md`.
 
+## What a tool shows of a name
+
+Evidence names are attacker-controlled text, so the three tools judge every string
+by the field it fills. A VM, datastore, snapshot or key name, a path or file
+name, an identifier of a known kind (GUID, VMFS volume id, `naa.`/`t10.`/`wwn-`
+device id, VMware uuid, MAC, CID) and a simple value (a version, an enum word, a
+time) is shown only when it fits a plain grammar for its kind; anything else is
+`<withheld: N bytes, field F>`, and the original goes to a 0600 file only with
+`write_text` in a job. Free text (a description, an annotation, an audit action or
+actor, a message) has token-shaped runs, user-info and the value after a name that
+says it is a secret withheld, and a second check, written apart from the first
+two, reads the serialised answer back. This is a heuristic, not a guarantee: a
+short password used as a name is not recognised, so the skills say to run the tools
+as jobs with `secret_output: true`.
+
 ## Two things the skills keep repeating
 
 **A record is not the state.** A request to delete, a job that reports success, a

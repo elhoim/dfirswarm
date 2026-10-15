@@ -34,7 +34,8 @@ type Shape = { value: string; secret: string; fileSafe: boolean; nameLike: boole
 function shapes(): Record<string, Shape> {
   const r = prng(20261015);
   const pick = (alphabet: string, n: number): string => Array.from({ length: n }, () => alphabet[Math.floor(r() * alphabet.length)]).join("");
-  const UP = "ABCDEFGHIJKLMNOPQRSTUVWXYZ", LO = "abcdefghijklmnopqrstuvwxyz", DIG = "0123456789", AL = UP + LO + DIG;
+  const UP = "ABCDEFGHIJKLMNOPQRSTUVWXYZ", LO = "abcdefghijklmnopqrstuvwxyz", DIG = "0123456789", AL = UP + LO + DIG, B64 = AL + "+/";
+  const spread = (text: string, ch: string, every: number): string => Array.from(text).reduce((out, c, i) => out + (i > 0 && i % every === 0 ? ch : "") + c, "");
   // mixed random text that always carries digits between letters, as a generated secret does
   const mixed = (n: number): string => { let s = ""; while (s.length < n) s += pick(UP, 1) + pick(LO, 1) + pick(DIG, 1) + pick(AL, 2); return s.slice(0, n); };
   const pw = mixed(18);
@@ -83,6 +84,29 @@ function shapes(): Record<string, Shape> {
     sendgrid: make("SG." + mixed(22) + "." + mixed(43)),
     digits40: make(pick(DIG, 40)),
     zero_width_split: ((k: string): Shape => make(k.slice(0, 13) + "\u200b" + k.slice(13, 26) + "\u200b" + k.slice(26), k))(mixed(39)),
+    // shapes of the third review: a token split by every other invisible or formatting character (bidi isolates, variation
+    // selectors, tag characters, combining marks, fillers), a secret name glued to a letter or written in CamelCase, a key
+    // without padding, and a real-format AWS secret key
+    bidi_isolate_split: ((k: string): Shape => make(spread("ghp_" + k, "\u2066", 9), "ghp_" + k))(mixed(36)),
+    variation_selector_split: ((k: string): Shape => make(spread("AKIA" + k, "\ufe0f", 6), "AKIA" + k))(pick(UP + DIG, 16)),
+    tag_split: ((k: string): Shape => make(spread(k, "\u{e0041}", 8), k))(mixed(40)),
+    combining_split: ((k: string): Shape => make(spread("ghp_" + k, "\u0301", 11), "ghp_" + k))(mixed(36)),
+    filler_split: ((k: string): Shape => make(spread("ghp_" + k, "\u3164", 10), "ghp_" + k))(mixed(36)),
+    escaped_split: ((k: string): Shape => make(spread("ghp_" + k, "\\u2066", 12), "ghp_" + k))(mixed(36)),
+    vnc_password: make(`vncPassword=${pw}`, pw),
+    admin_password: make(`adminPassword=${pw2}`, pw2),
+    access_token: make(`accessToken: ${pw3}`, pw3),
+    secret_access_key: make(`SecretAccessKey: ${s40b}`, s40b),
+    odbc_pwd: make(`Server=db1;UID=sa;PWD=${pw2};`, pw2),
+    pass_eq: make(`pass=${pw3}`, pw3),
+    credential_eq: make(`credential=${pw}`, pw),
+    auth_eq: make(`auth=${pw2}`, pw2),
+    pgpassword: make(`PGPASSWORD=${pw3}`, pw3),
+    mysql_pwd: make(`MYSQL_PWD=${pw}`, pw),
+    sig_eq: make(`sig=${pw2}`, pw2),
+    cipassword: make(`cipassword: ${pw3}`, pw3),
+    base64_key16_nopad: ((k: string): Shape => make(k, k))(mixed(10) + "/" + mixed(5) + "+" + mixed(5)),
+    aws_real: make(pick(B64, 40), undefined),
   };
 }
 
@@ -395,8 +419,9 @@ test("the way out is one block, the same text in the three tools", async () => {
   for (const p of [INVENTORY, AUDIT]) assert.equal(await blockOf(p), first);
   for (const p of [CHAIN, INVENTORY, AUDIT]) {
     const code = (await readFile(p, "utf8")).replace(/^\s*#.*$/gm, "");
-    assert.equal((code.match(/print\(/g) ?? []).length, 2, `${p}: one print for the answer and one for an error answer, both through answer_text`);
+    assert.equal((code.match(/print\(/g) ?? []).length, 3, `${p}: one print for the answer, one for an error answer and one for the last word after a signal, all through answer_text`);
     assert.match(code, /print\(answer_text\(\{"error"/);
+    assert.match(code, /print\(answer_text\(\{"tool": TOOL, "parser": PARSER, "status": "partial"/);
     assert.doesNotMatch(code, /sys\.stdout\.write|sys\.stderr\.write/);
   }
   assert.ok(VIRT);
