@@ -153,7 +153,7 @@ test("the skills state no product release as a fact, give no verdict from a mark
   const boundaries = skills.get("evidence/boundaries")!.body;
   assert.match(boundaries, /Credentials in the evidence are indicators, not logins/);
   assert.match(boundaries, /never run the product/i);
-  assert.match(skills.get("backup/catalogues-and-retention")!.body, /never start the product against the evidence/);
+  assert.match(skills.get("backup/catalogues-and-retention")!.body, /Never infer a vendor.s layout from a sample or start the product against the evidence/);
 });
 
 test("every skill id a skill names exists: in this pack, in the base pack, or in another pack of the repository (a rename elsewhere breaks this)", async () => {
