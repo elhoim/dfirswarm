@@ -8,7 +8,9 @@ Depends on the Computer Forensics Base Pack.
 
 ## What it carries
 
-**Twelve skills**, as eight leaves of decision rules and four second-level
+**Thirteen skills**: the pack's router, `network/router` (at most 400 tokens: it names the other twelve by the
+question each answers, holds no rule, and is the one line a run shows for the pack when its skills index is over
+budget), and, as eight leaves of decision rules and four second-level
 leaves they point to when needed: `capture/what-you-have` (and
 `capture/derivatives`), `capture/carve-from-images`, `sessions/reconstruct` (and
 `sessions/objects`), `metadata/dns-tls` (and `metadata/fingerprints`),
