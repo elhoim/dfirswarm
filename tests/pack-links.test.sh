@@ -69,7 +69,10 @@
 #     `unreferenced_ok`;
 #   - the report rules read a skill's whole file, front matter included (without
 #     `mentions:`, `id:` and `needs:`: an id is a path and `id: aws/cloudtrail` does
-#     not name the program `aws`), since a `tools:` list is a naming too, and the
+#     not name the program `aws`, and neither does a body that cites a skill of its
+#     own pack by an id with a `/`, set off by white space, quotes, brackets or
+#     punctuation: a router cites every leaf; `aws/cloudtrail.py` and `--src=aws/x`
+#     are not citations), since a `tools:` list is a naming too, and the
 #     `unused` check makes sure the body agrees; but a plain-word program in a
 #     front matter list is no command in code, so a `requires_host: [make]` names
 #     nothing;
@@ -204,7 +207,23 @@ for pid in sorted(os.listdir(root)):
             # the file without `mentions:`, `id:` and `needs:` (`id: aws/cloudtrail`
             # does not name the program `aws`).
             kept = "\n".join(l for l in m.group(1).splitlines() if not l.startswith(NOT_NAMING))
-            skills[rel] = {"fm": fm, "all": Text("---\n" + kept + "\n---\n" + text[m.end():]), "body": Text(text[m.end():])}
+            skills[rel] = {"fm": fm, "kept": kept, "text": text, "end": m.end()}
+    # A skill cited by its id names nothing: an id is a path, and `aws/cloudtrail` is not the
+    # program `aws`. Only a pack's own skill ids are blanked (a router cites them all), only ids
+    # with a `/` (an id without one is a word, and `realprog -h` stays a naming), and only as a
+    # citation: the id starts at the start of a line, after white space, a backtick, a quote, a
+    # bracket, a comma or a semicolon, and ends before the same or at the end of a sentence.
+    # `idbin/x.py`, `--src=idbin/x` and `idbin/x:/etc` are not citations of `idbin/x`.
+    own_ids = sorted((r[len("skills/"):-3].replace(os.sep, "/") for r in skills), key=len, reverse=True)
+    slashed = [i for i in own_ids if "/" in i]
+    cited = re.compile(r"(?<![^\s`'\"(\[,;])(?:%s)(?=$|[\s`'\")\],;!?]|\.(?:\s|$|[`'\")\]]))"
+                       % "|".join(re.escape(i) for i in slashed), re.M) if slashed else None
+    for rel, s in skills.items():
+        text, end, kept = s.pop("text"), s.pop("end"), s.pop("kept")
+        whole_file, body = "---\n" + kept + "\n---\n" + text[end:], text[end:]
+        if cited:
+            whole_file, body = cited.sub("<skill>", whole_file), cited.sub("<skill>", body)
+        s["all"], s["body"] = Text(whole_file), Text(body)
     packs[pid] = {"meta": meta, "tools": tools, "bins": bins, "pys": pys, "skills": skills,
                   "depends": [re.split(r"[<>=!~ ]", d)[0].strip() for d in meta.get("depends") or []]}
 
@@ -473,6 +492,37 @@ M = {
     # an id or a needs entry is no naming of a program
     "id-spells-program": lambda: (packs["base"]["bins"].append("idbin"),
                                   packs["base"]["skills"].update({"idbin/x": skill([], [], "Nothing here.\n")})),
+    "id-cited-spells-program": lambda: (packs["base"]["bins"].append("idbin"),
+                                        packs["base"]["skills"].update({"idbin/x": skill([], [], "Nothing here.\n")}),
+                                        edit("base", "s/one", more("See `idbin/x` too.\n"))),
+    "id-cited-sentence-end": lambda: (packs["base"]["bins"].append("idbin"),
+                                      packs["base"]["skills"].update({"idbin/x": skill([], [], "Nothing here.\n")}),
+                                      edit("base", "s/one", more("Read idbin/x. Then (idbin/x), idbin/x; \"idbin/x\" too.\n"))),
+    # what is not a citation of an id still names the program
+    "id-script-path": lambda: (packs["base"]["bins"].append("idbin"),
+                               packs["base"]["skills"].update({"idbin/x": skill([], [], "Nothing here.\n")}),
+                               edit("base", "s/one", more("Run `idbin/x.py` first.\n"))),
+    "id-after-equals": lambda: (packs["base"]["bins"].append("idbin"),
+                                packs["base"]["skills"].update({"idbin/x": skill([], [], "Nothing here.\n")}),
+                                edit("base", "s/one", more("Run `tool --src=idbin/x` first.\n"))),
+    "id-before-colon": lambda: (packs["base"]["bins"].append("idbin"),
+                                packs["base"]["skills"].update({"idbin/x": skill([], [], "Nothing here.\n")}),
+                                edit("base", "s/one", more("Open `idbin/x:/etc`.\n"))),
+    # an id without a `/` is a word: the program it spells is still a naming everywhere
+    "id-no-slash": lambda: (packs["base"]["bins"].append("idbin"),
+                            packs["base"]["skills"].update({"idbin": skill(["alpha"], [], "Call alpha.\n")}),
+                            edit("base", "s/one", more("Run `idbin -h`.\n"))),
+    "id-no-slash-listed": lambda: (packs["base"]["bins"].append("idbin"),
+                                   packs["base"]["skills"].update({"idbin": skill(["alpha"], [], "Call alpha.\n")}),
+                                   edit("base", "s/one", lambda s: s.update(host=s["host"] + ["idbin"], body=s["body"] + "Run `idbin -h`.\n"))),
+    # a cited id and the program named in the same body: the program is still found
+    "id-cited-and-program": lambda: (packs["base"]["bins"].append("idbin"),
+                                     packs["base"]["skills"].update({"idbin/x": skill([], [], "Nothing here.\n")}),
+                                     edit("base", "s/one", more("See `idbin/x`. Then run `idbin -h`.\n"))),
+    # another pack's skill id is no exemption: only a pack's own ids are cited
+    "id-of-another-pack": lambda: (packs["base"]["bins"].append("idbin"),
+                                   packs["other"]["skills"].update({"idbin/x": skill([], [], "Nothing here.\n")}),
+                                   child(more("See `idbin/x`.\n"))),
     "needs-spells-program": lambda: (packs["base"]["bins"].append("needsbin"),
                                      packs["child"]["skills"].update({"c/two": skill(["child_tool"], [], "Call child_tool.\n", needs=["needsbin"])})),
     # a finding in a pack of its own
@@ -575,7 +625,16 @@ links_case "method_only naming a skill twice" 1 1 "method_only names 'skills/c/b
 links_case "method_only that is no list" 1 1 "child: method_only is a list of" method-bare
 # an id or a needs entry is no naming (`id: aws/cloudtrail` does not name the program aws)
 links_case "a skill id that spells a program names nothing" 0 1 "base: idbin" id-spells-program
+links_case "a skill cited at the end of a sentence, in brackets, after a comma and in quotes names nothing" 0 1 "base: idbin" id-cited-sentence-end
+links_case "a script path that starts with a skill id still names the program" 1 1 "names the program idbin, which requires_host: does not list" id-script-path
+links_case "an option value that is a skill id still names the program" 1 1 "names the program idbin, which requires_host: does not list" id-after-equals
+links_case "a skill id followed by a colon still names the program" 1 1 "names the program idbin, which requires_host: does not list" id-before-colon
+links_case "a skill id without a slash is a word, and the program it spells is still named" 1 1 "names the program idbin, which requires_host: does not list" id-no-slash
+links_case "a program listed and named beside a skill whose id has no slash is no false finding" 0 0 "" id-no-slash-listed
+links_case "a cited id and the program named in the same body: the program is still found" 1 1 "names the program idbin, which requires_host: does not list" id-cited-and-program
+links_case "another pack's skill id is not exempt" 1 1 "child: skills/c/one.md names the program idbin, which requires_host: does not list" id-of-another-pack
 links_case "a needs entry that spells a program names nothing" 0 1 "base: needsbin" needs-spells-program
+links_case "a skill cited by its id names nothing, though the id spells a program" 0 1 "base: idbin" id-cited-spells-program
 
 # mentions: what a skill discusses and cannot depend on
 links_case "a mention is exempt from the closure" 0 0 "" mention

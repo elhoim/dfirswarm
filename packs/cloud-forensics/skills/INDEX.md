@@ -2,7 +2,10 @@
 
 Fetch a body with `skill("<id>")`. A body may name others; fetch those the same way.
 
+Router: `cloud/router`
+
 - `aws/cloudtrail` CloudTrail records, coverage and session origin: Supplied AWS CloudTrail exports need event interpretation or identity correlation.
+- `cloud/router` Cloud notes by question: Pick a cloud note when none is listed, or you cannot choose.
 - `entra/signins` Entra sign-ins and their evidential limits: Supplied Entra sign-in exports need authentication, client, policy or account-activity analysis.
 - `google/workspace` Google Workspace exported audit evidence: Supplied Google Workspace logs concern account access, administration, OAuth grants, Drive or Gmail.
 - `google/workspace-access` Workspace grants, delegation, sharing and forwarding: Reconstruct delegated access, Drive sharing or mail forwarding from Workspace evidence.

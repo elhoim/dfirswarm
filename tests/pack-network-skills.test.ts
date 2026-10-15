@@ -9,6 +9,7 @@ import { readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
 import { NET, TOOLS } from "./pack-network-harness.ts";
+import { routerChecks } from "./pack-router-checks.ts";
 
 const SKILLS = join(NET, "skills");
 const BASE_SKILLS = join(NET, "..", "computer-forensics-base", "skills");
@@ -39,18 +40,22 @@ async function load(root: string): Promise<Map<string, Skill>> {
   return out;
 }
 
+// The pack's one router: shown alone when a run's index is over budget, and names every other skill once (routerChecks below).
+const ROUTER = "network/router";
+
 test("every skill is a leaf within the budget, opens with Use when ... Not for ..., and has a short index entry", async () => {
   const skills = await load(SKILLS);
-  assert.equal(skills.size, 12);
+  assert.equal(skills.size, 13);
   for (const s of skills.values()) {
-    assert.ok(TOKENS(s.text) <= 800, `${s.id} is ${Math.round(TOKENS(s.text))} tokens`);
+    assert.ok(TOKENS(s.text) <= (s.id === ROUTER ? 400 : 800), `${s.id} is ${Math.round(TOKENS(s.text))} tokens`);
     assert.ok(s.text.split("\n").length <= 300, `${s.id} lines`);
     const first = s.body.trim().split("\n")[0];
     assert.match(first, /^Use when /, `${s.id} opens with Use when`);
     assert.match(first, /\bNot for\b/, `${s.id} says what it is not for`);
     const entry = `- \`${s.id}\` ${s.meta.title}: ${s.meta.when}`;
     assert.ok(TOKENS(entry) <= 40, `${s.id} index entry is ${Math.round(TOKENS(entry))} tokens`);
-    for (const part of ["Shows", "Does not show", "Record"]) assert.match(s.body, new RegExp(`${part}:`), `${s.id} has ${part}`);
+    // The router reads no artefact: it names notes and holds no rule, so it has none of the three parts.
+    if (s.id !== ROUTER) for (const part of ["Shows", "Does not show", "Record"]) assert.match(s.body, new RegExp(`${part}:`), `${s.id} has ${part}`);
   }
   const index = await readFile(join(SKILLS, "INDEX.md"), "utf8");
   for (const id of skills.keys()) assert.ok(index.includes(`\`${id}\``), `${id} is in the index`);
@@ -166,4 +171,16 @@ test("a Zeek column a skill names is a column Zeek has, and a column Zeek droppe
       assert.ok(real, `${name} is not a column of ${log}`);
     }
   }
+});
+
+// ---- The router: the one entry a run shows for this pack when its index is over the run's budget. ----
+
+routerChecks({
+  pack: "network-forensics",
+  router: ROUTER,
+  before: [
+    "beacons/periodicity", "capture/carve-from-images", "capture/derivatives", "capture/what-you-have", "correlate/host", "exfil/counters",
+    "exfil/volume", "logs/web-proxy-firewall", "metadata/dns-tls", "metadata/fingerprints", "sessions/objects", "sessions/reconstruct",
+  ],
+  profiles: ["network", "full"],
 });

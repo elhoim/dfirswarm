@@ -113,8 +113,8 @@ or `tools/`.
 
 | Tool | Runtime | Written by | v | What it does |
 | --- | --- | --- | --- | --- |
-| `aes_inverse_scan` | node | `s3472f0` | 1 | Find AES-128 and AES-256 key schedules stored as a decryption routine keeps them (InvMixColumns on the middle… |
-| `aes_schedule_scan` | node | `s3472f0` | 1 | Find AES-128 and AES-256 key schedules in a file or memory image, at every byte alignment, as the standard la… |
+| `aes_inverse_scan` | node | `s3472f0` | 2 | Find AES-128 and AES-256 key schedules stored as a decryption routine keeps them (InvMixColumns on the middle… |
+| `aes_schedule_scan` | node | `s3472f0` | 2 | Find AES-128 and AES-256 key schedules in a file or memory image, at every byte alignment, as the standard la… |
 | `aescrypt_v2_decrypt` | python3 | `s864a02` | 3 | Decrypt AES Crypt 3.10 Windows GUI v2 files (KDF: SHA256(IV||zeros16||UTF16LE pw)×8192). Returns plaintext pa… |
 | `amcache_apps` | python3 | `maintainer` | 2 | Application and file inventory from Amcache.hve (presence, not execution): path, hash, publisher, version and… |
 | `browser_history` | python3 | `maintainer` | 3 | Query a browser history database from a copy of it and its -wal, -shm and -journal sidecars, made under the j… |
@@ -221,8 +221,12 @@ run (the first named, where a tool is made from several).
   package leaves in the sandbox; a key file anywhere else travels with the
   package unless the hit is a sensitive ledger entry citing it, or the scan
   ran as a `secret_output` job) and the answer gives the offset, size,
-  layout and the key's sha256 for the ledger. A hit is a lead, and the tools
-  say so.
+  layout and the key file's name: record the finding's offset and key file
+  name, never a digest of the key, which neither tool prints or writes. A key
+  that is found again, in a later window or call on the same `out_dir`, names
+  the file it already has; only a plain file holding exactly the key is reused
+  (and made private), and a directory, a symlink or a file of another key at a
+  name is passed over. A hit is a lead, and the tools say so.
 - `encoded_literal_scan` — three Python scanners made in run `s3472f0`
   (`encoded_flag_scan`, `base32_flag_literals`, seat `s3472f003`, and
   `utf32_flag_literals`, seat `s3472f004`), each with the opening of the
