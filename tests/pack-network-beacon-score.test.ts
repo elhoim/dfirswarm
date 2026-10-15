@@ -80,6 +80,10 @@ test("a value that is not a finite number of seconds is counted and named, never
     assert.equal(out.rejected.unparseable, 1);
     assert.equal(out.rejected.out_of_range, 1);
     assert.ok(out.first_rejected.length >= 3);
+    assert.equal(out.status, "partial", "values that were not scored are not a complete answer");
+    assert.equal(out.all_values_scored, false);
+    assert.match(out.status_basis, /5 of the 13 values supplied were not scored \(1 unparseable, 3 non finite, 1 out of range\)/);
+    assert.doesNotMatch(out.status_basis, /every interval is in the list$/);
     assert.equal(out.median_interval_seconds, 60);
   });
 });
@@ -182,6 +186,8 @@ test("an integer too large for a float is a number that is not epoch seconds: co
     assert.equal(out.events, 8);
     assert.equal(out.rejected.out_of_range, 2);
     assert.equal(out.median_interval_seconds, 60);
+    assert.equal(out.status, "partial");
+    assert.match(out.status_basis, /2 of the 10 values supplied were not scored/);
   });
 });
 
@@ -249,6 +255,7 @@ test("every answer carries status and status_basis; the tool's own clock ends th
     const ok = body(await tool(BEACON, cwd, { timestamps: step(8, 60) }));
     assert.equal(ok.status, "complete");
     assert.match(ok.status_basis, /whole series/);
+    assert.equal(ok.all_values_scored, true);
     assert.equal(refused(await tool(BEACON, cwd, { timestamps: [1] })).status, "failed");
     assert.match(refused(await tool(BEACON, cwd, { timestamps: step(8, 60), max_seconds: 120 })).error, /max_seconds/);
     const lines: string[] = [];

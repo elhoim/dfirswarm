@@ -493,15 +493,24 @@ def main():
     for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         signal.signal(signum, signal.SIG_DFL)
 
-    partial = timed_out_at is not None or list_cut
+    rejected_total = sum(rejected.values())
+    partial = timed_out_at is not None or list_cut or rejected_total > 0
+    not_scored = ("%d of the %d values supplied were not scored (%s) and are not in the measurements, which cover the other %d; each is named by "
+                  "position in first_rejected and all_rejected" % (rejected_total, supplied, ", ".join("%d %s" % (n, r.replace("_", " ")) for r, n in rejected.items() if n), count))
     if timed_out_at is not None:
         basis = ("the tool's own clock (max_seconds %s) ran out while the series was being read, at input position %d: the answer measures the %d values "
                  "read before it, and nothing after them" % (seconds_allowed, timed_out_at, supplied))
     elif list_cut:
         basis = ("the series was measured whole, but the interval list stopped at the tool's clock after %d of %d intervals: the list in the files is "
                  "incomplete, the measurements are not" % (listed, len(intervals)))
+    elif rejected_total:
+        basis = "the whole series was read and every interval of the scored values is in the list, but " + not_scored
     else:
         basis = "the whole series was read and measured; every interval is in the list"
+    if rejected_total and (timed_out_at is not None or list_cut):
+        basis += "; also " + not_scored
+    if assumed and not rejected_total:
+        basis += "; %d times carried no zone and were read as UTC because assume_utc was true" % assumed
     print(json.dumps({
         "tool": TOOL,
         "status": "partial" if partial else "complete", "status_basis": basis,
@@ -513,6 +522,7 @@ def main():
         "distinct_events": len(distinct),
         "duplicate_timestamps": count - len(distinct),
         "values_supplied": supplied,
+        "all_values_scored": rejected_total == 0,
         "rejected": rejected,
         "first_rejected": first_rejected,
         "all_rejected": rejected_pages.get("all_results"),
