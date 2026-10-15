@@ -493,12 +493,25 @@ def plain_userinfo(text):
 # the value) or not (to `;`, a space or the end: a `,` `&` `<` `>` stays in the value, as a password may hold them). The short names
 # (`pw`, `pass`, `auth`) only where no letter or digit precedes them, so that `bypass:` or `OAuth=` inside a word is not one. A value
 # made only of `%` conversions is a format. A password that holds `;` or a space, or a quote of the other kind, is withheld up to it.
-KEYVALUE_SECRET = re.compile(r"((?:(?:password|passwd|passphrase|pwd|pswd|psw|secret[_-]?key|private[_-]?key|secret|client[_-]?secret|token|api[_-]?key"
-                             r"|access[_-]?key|account[_-]?key|shared[_-]?access[_-]?key|credentials?|(?<![A-Za-z0-9])(?:pw|pass|auth|sig))[\"']?[ \t]*="
-                             r"|(?:password|passwd|passphrase|pwd|pswd|psw|secret[_-]?key|private[_-]?key|client[_-]?secret|api[_-]?key|access[_-]?key|account[_-]?key"
-                             r"|shared[_-]?access[_-]?key|(?<![A-Za-z0-9])(?:pw|pass))[\"']?[ \t]*:"
-                             r"|[\"'](?:token|secret|credentials?|auth|sig)[\"'][ \t]*:)[ \t]*)"
-                             r"(?:([\"'])(?!<withheld )([^\"'\r\n]{1,512})(?=[\"'])|[\"']?(?!<[a-z -]{0,40}withheld \d)([^;\s\"']{1,512}))", re.I)
+# The text can show a quote in three ways: as is, with up to four backslashes before it (JSON inside a JSON string, and the backslashes doubled again
+# when the text is printed), and as an entity (`&quot;`, `&apos;`, `&#34;`, `&#39;`, `&#x22;`, `&#x27;`); a gap between a name and its `=` or `:`
+# is a space, a tab, or a tab as it is written (`\t`, `\x09`). The same rule reads `<add key="Password" value="...">` (a name, its quote, then `value=`),
+# and ELEMENT_SECRET reads `<Password>...</Password>` and its escaped form (`&lt;Password&gt;...&lt;/Password&gt;`).
+_KV_ENTITY = r"&(?:quot|apos|#0{0,6}3[49]|#x2[27]);"
+_KV_QUOTE = r"(?:\\{0,4}[\"']|" + _KV_ENTITY + r")"
+_KV_GAP = r"(?:[ \t]|\\{1,2}(?:x09|t))*"
+_KV_NAMES = (r"password|passwd|passphrase|pwd|pswd|psw|secret[_-]?key|private[_-]?key|secret|client[_-]?secret|token|api[_-]?key"
+             r"|access[_-]?key|account[_-]?key|shared[_-]?access[_-]?key|credentials?|(?<![A-Za-z0-9])(?:pw|pass|auth|sig)")
+_KV_PASSWORD_NAMES = (r"password|passwd|passphrase|pwd|pswd|psw|secret[_-]?key|private[_-]?key|client[_-]?secret|api[_-]?key|access[_-]?key|account[_-]?key"
+                      r"|shared[_-]?access[_-]?key|(?<![A-Za-z0-9])(?:pw|pass)")
+KEYVALUE_SECRET = re.compile(r"((?:(?:" + _KV_NAMES + r")" + _KV_QUOTE + r"?" + _KV_GAP + r"="
+                             r"|(?:" + _KV_NAMES + r")" + _KV_QUOTE + r"[ \t]+value[ \t]*="
+                             r"|(?:" + _KV_PASSWORD_NAMES + r")" + _KV_QUOTE + r"?" + _KV_GAP + r":"
+                             r"|" + _KV_QUOTE + r"(?:token|secret|credentials?|auth|sig)" + _KV_QUOTE + _KV_GAP + r":)" + _KV_GAP + r")"
+                             r"(?:(" + _KV_QUOTE + r")(?!<withheld )((?:(?!" + _KV_ENTITY + r")[^\"'\r\n]){1,512})(?=[\"']|" + _KV_ENTITY + r")"
+                             r"|" + _KV_QUOTE + r"?(?!" + _KV_QUOTE + r"|\\{1,2}(?:x09|t))(?!<[a-z -]{0,40}withheld \d)([^;\s\"']{1,512}))", re.I)
+ELEMENT_SECRET = re.compile(r"((?:<|&lt;)(?:password|passwd|passphrase|pwd|pswd|secret[_-]?key|private[_-]?key|client[_-]?secret|api[_-]?key|access[_-]?key"
+                            r"|account[_-]?key|shared[_-]?access[_-]?key|token|secret)(?:>|&gt;))((?:(?!&lt;)[^<>\r\n]){1,512})(?=<|&lt;)", re.I)
 FORMAT_ONLY = re.compile(r"(?:%[-+ #0-9.*]*[A-Za-z@])+")
 # The head of a token whose own prefix says what it is, too short for the shared block's patterns (a name cut by a declared length, a
 # string read from the middle of a field): the prefix and four characters more are a piece of a token. An AWS key id's head, in capitals, is one
@@ -702,6 +715,8 @@ def _shown_pass(out):
         # the value of a secret-named key before the bare user-info rule, for the same reason (the marker of that rule holds spaces)
         out = KEYVALUE_SECRET.sub(lambda m: m.group(0) if FORMAT_ONLY.fullmatch(m.group(3) or m.group(4)) else
                                   m.group(1) + (m.group(2) or "") + _withheld("", len(m.group(3) or m.group(4)), "text"), out)
+    if ">" in out or "&gt;" in out:
+        out = ELEMENT_SECRET.sub(lambda m: m.group() if FORMAT_ONLY.fullmatch(m.group(2)) else m.group(1) + _withheld("", len(m.group(2)), "text"), out)
     if "@" in out:
         out = CUT_USERINFO.sub(lambda m: m.group() if FORMAT_ONLY.fullmatch(m.group().partition(":")[2]) else _withheld("userinfo", len(m.group()), "urls"), out)
     # a prefixed token takes the rest of the run of name characters it ends inside (a token glued to it, whose own prefix it took), and

@@ -31,6 +31,7 @@ import json
 import mmap
 import os
 import re
+import signal
 import stat
 import struct
 import sys
@@ -49,8 +50,8 @@ NOTE = ("Static structure only. A directory shows what the file declares to its 
 DEFAULT_LIMIT = 1000
 DEFAULT_STREAM = 16 << 20           # bytes one resource or metadata structure may be read as
 DEFAULT_TOTAL = 128 << 20
-DEFAULT_SECONDS = 100
-MAX_SECONDS = 110
+DEFAULT_SECONDS = 70                # the reading clock; the answer is built after it (HARD_SECONDS below), inside the manifest's 120 s
+MAX_SECONDS = 90
 MAX_SECTIONS = 65535
 MAX_EXPORTS = 1_000_000
 MAX_DELAY_DESCRIPTORS = 4096
@@ -428,12 +429,25 @@ def plain_userinfo(text):
 # the value) or not (to `;`, a space or the end: a `,` `&` `<` `>` stays in the value, as a password may hold them). The short names
 # (`pw`, `pass`, `auth`) only where no letter or digit precedes them, so that `bypass:` or `OAuth=` inside a word is not one. A value
 # made only of `%` conversions is a format. A password that holds `;` or a space, or a quote of the other kind, is withheld up to it.
-KEYVALUE_SECRET = re.compile(r"((?:(?:password|passwd|passphrase|pwd|pswd|psw|secret[_-]?key|private[_-]?key|secret|client[_-]?secret|token|api[_-]?key"
-                             r"|access[_-]?key|account[_-]?key|shared[_-]?access[_-]?key|credentials?|(?<![A-Za-z0-9])(?:pw|pass|auth|sig))[\"']?[ \t]*="
-                             r"|(?:password|passwd|passphrase|pwd|pswd|psw|secret[_-]?key|private[_-]?key|client[_-]?secret|api[_-]?key|access[_-]?key|account[_-]?key"
-                             r"|shared[_-]?access[_-]?key|(?<![A-Za-z0-9])(?:pw|pass))[\"']?[ \t]*:"
-                             r"|[\"'](?:token|secret|credentials?|auth|sig)[\"'][ \t]*:)[ \t]*)"
-                             r"(?:([\"'])(?!<withheld )([^\"'\r\n]{1,512})(?=[\"'])|[\"']?(?!<[a-z -]{0,40}withheld \d)([^;\s\"']{1,512}))", re.I)
+# The text can show a quote in three ways: as is, with up to four backslashes before it (JSON inside a JSON string, and the backslashes doubled again
+# when the text is printed), and as an entity (`&quot;`, `&apos;`, `&#34;`, `&#39;`, `&#x22;`, `&#x27;`); a gap between a name and its `=` or `:`
+# is a space, a tab, or a tab as it is written (`\t`, `\x09`). The same rule reads `<add key="Password" value="...">` (a name, its quote, then `value=`),
+# and ELEMENT_SECRET reads `<Password>...</Password>` and its escaped form (`&lt;Password&gt;...&lt;/Password&gt;`).
+_KV_ENTITY = r"&(?:quot|apos|#0{0,6}3[49]|#x2[27]);"
+_KV_QUOTE = r"(?:\\{0,4}[\"']|" + _KV_ENTITY + r")"
+_KV_GAP = r"(?:[ \t]|\\{1,2}(?:x09|t))*"
+_KV_NAMES = (r"password|passwd|passphrase|pwd|pswd|psw|secret[_-]?key|private[_-]?key|secret|client[_-]?secret|token|api[_-]?key"
+             r"|access[_-]?key|account[_-]?key|shared[_-]?access[_-]?key|credentials?|(?<![A-Za-z0-9])(?:pw|pass|auth|sig)")
+_KV_PASSWORD_NAMES = (r"password|passwd|passphrase|pwd|pswd|psw|secret[_-]?key|private[_-]?key|client[_-]?secret|api[_-]?key|access[_-]?key|account[_-]?key"
+                      r"|shared[_-]?access[_-]?key|(?<![A-Za-z0-9])(?:pw|pass)")
+KEYVALUE_SECRET = re.compile(r"((?:(?:" + _KV_NAMES + r")" + _KV_QUOTE + r"?" + _KV_GAP + r"="
+                             r"|(?:" + _KV_NAMES + r")" + _KV_QUOTE + r"[ \t]+value[ \t]*="
+                             r"|(?:" + _KV_PASSWORD_NAMES + r")" + _KV_QUOTE + r"?" + _KV_GAP + r":"
+                             r"|" + _KV_QUOTE + r"(?:token|secret|credentials?|auth|sig)" + _KV_QUOTE + _KV_GAP + r":)" + _KV_GAP + r")"
+                             r"(?:(" + _KV_QUOTE + r")(?!<withheld )((?:(?!" + _KV_ENTITY + r")[^\"'\r\n]){1,512})(?=[\"']|" + _KV_ENTITY + r")"
+                             r"|" + _KV_QUOTE + r"?(?!" + _KV_QUOTE + r"|\\{1,2}(?:x09|t))(?!<[a-z -]{0,40}withheld \d)([^;\s\"']{1,512}))", re.I)
+ELEMENT_SECRET = re.compile(r"((?:<|&lt;)(?:password|passwd|passphrase|pwd|pswd|secret[_-]?key|private[_-]?key|client[_-]?secret|api[_-]?key|access[_-]?key"
+                            r"|account[_-]?key|shared[_-]?access[_-]?key|token|secret)(?:>|&gt;))((?:(?!&lt;)[^<>\r\n]){1,512})(?=<|&lt;)", re.I)
 FORMAT_ONLY = re.compile(r"(?:%[-+ #0-9.*]*[A-Za-z@])+")
 # The head of a token whose own prefix says what it is, too short for the shared block's patterns (a name cut by a declared length, a
 # string read from the middle of a field): the prefix and four characters more are a piece of a token. An AWS key id's head, in capitals, is one
@@ -637,6 +651,8 @@ def _shown_pass(out):
         # the value of a secret-named key before the bare user-info rule, for the same reason (the marker of that rule holds spaces)
         out = KEYVALUE_SECRET.sub(lambda m: m.group(0) if FORMAT_ONLY.fullmatch(m.group(3) or m.group(4)) else
                                   m.group(1) + (m.group(2) or "") + _withheld("", len(m.group(3) or m.group(4)), "text"), out)
+    if ">" in out or "&gt;" in out:
+        out = ELEMENT_SECRET.sub(lambda m: m.group() if FORMAT_ONLY.fullmatch(m.group(2)) else m.group(1) + _withheld("", len(m.group(2)), "text"), out)
     if "@" in out:
         out = CUT_USERINFO.sub(lambda m: m.group() if FORMAT_ONLY.fullmatch(m.group().partition(":")[2]) else _withheld("userinfo", len(m.group()), "urls"), out)
     # a prefixed token takes the rest of the run of name characters it ends inside (a token glued to it, whose own prefix it took), and
@@ -919,6 +935,7 @@ def emit(result, spill=None, indent=2):
             answer["problems"].append(note)
         if answer.get("status") == "complete":
             answer["status"], answer["status_basis"] = "partial", note
+    PRINTING[0] = True
     print(json.dumps(answer, indent=indent))
 
 
@@ -1800,6 +1817,8 @@ def read_tls(img, pe, ctx, out):
             ctx.problem("the TLS callback array (VA 0x%x) is not backed by file bytes" % callbacks_va)
         else:
             for k in range(MAX_TLS_CALLBACKS + 1):
+                if ctx.expired("the TLS callbacks"):
+                    break
                 p = r[0] + k * step
                 if p + step > r[1]:
                     ctx.problem("the TLS callback array runs off its section without a terminating zero")
@@ -2167,6 +2186,8 @@ def read_debug(img, pe, ctx, out):
         ctx.problem("the debug directory size (%d) is not a whole number of 28-byte entries" % size)
     entries = []
     for i in range(count):
+        if ctx.expired("the debug directory"):
+            break
         at = start[0] + i * 28
         if at + 28 > start[1]:
             ctx.problem("debug entry %d runs past its section" % i)
@@ -2279,7 +2300,41 @@ def guarded(ctx, label, fn, *args):
         ctx.problem("%s: a field could not be read (%s: %s)" % (label, type(exc).__name__, exc))
 
 
+HARD_SECONDS = 105                  # the manifest's 120 s less 15: the answer is built and printed after the reading clock, and past this the tool answers that it did not finish
+PRINTING = [False]                  # the answer has begun to be written: a signal after that must not write a second one
+
+
+def _stopped_by_signal(signum, frame):
+    """SIGINT, SIGTERM and SIGHUP end the call with one JSON answer and the exit code 128 + the signal, not a traceback and not silence."""
+    if not PRINTING[0]:
+        PRINTING[0] = True
+        sys.stdout.write(json.dumps({"tool": TOOL, "status": "failed", "error": "the tool was stopped by signal %d before it finished; a file it was writing can be incomplete" % signum}) + "\n")
+        sys.stdout.flush()
+    raise SystemExit(128 + signum)
+
+
+def _hard_limit(signum, frame):
+    """The reading clock (max_seconds) has long run out and the answer is still being built: say so, as the one answer, before the harness's kill."""
+    if PRINTING[0]:
+        return
+    PRINTING[0] = True
+    sys.stdout.write(json.dumps({"tool": TOOL, "status": "failed", "error": "the answer was not finished within %d seconds (the manifest's limit is 120): the reading was clocked by "
+                                 "max_seconds and the answer is built after it; a file the call wrote can be incomplete; read with a smaller limit or max_seconds" % HARD_SECONDS}) + "\n")
+    sys.stdout.flush()
+    os._exit(1)
+
+
+def install_signal_handlers():
+    for name in ("SIGINT", "SIGTERM", "SIGHUP"):
+        if hasattr(signal, name):
+            signal.signal(getattr(signal, name), _stopped_by_signal)
+    if hasattr(signal, "setitimer") and hasattr(signal, "SIGALRM"):
+        signal.signal(signal.SIGALRM, _hard_limit)
+        signal.setitimer(signal.ITIMER_REAL, HARD_SECONDS)
+
+
 def main():
+    install_signal_handlers()
     try:
         args = json.load(sys.stdin)
     except ValueError as exc:
